@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+out/
+.next/
+.turbo/
+*.tsbuildinfo
+coverage/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Logs and temp
+*.log
+npm-debug.log*
+pnpm-debug.log*
+tmp/
+.cache/
+
+# AI tooling (personal, never committed)
+CLAUDE.local.md
+.claude/settings.local.json
+.planning/HANDOFF.json
+
+# Mobile / desktop artefacts (future)
+.expo/
+ios/build/
+android/build/
+release/
