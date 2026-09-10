@@ -107,10 +107,13 @@ Explicit non-goals (PRD §106), never in scope without a PRD change:
 
 ## Constraints
 
-- **Tech stack**: TypeScript monorepo, pnpm + Turborepo + Biome + Vitest, Node 22 LTS — ADR-0001
+- **Tech stack**: TypeScript 7 monorepo, pnpm 12 + Turborepo + Biome + Vitest, Node 24 LTS — ADR-0001 (amended 2026-09-10)
 - **Backend**: Fastify modular monolith in `apps/api`, one module per PRD service — ADR-0002
-- **Infrastructure**: PostgreSQL (RLS, only DB), Redis, S3-compatible storage, OpenBao/KMS
-  abstraction, OpenTelemetry; NATS JetStream and Temporal deferred — ADR-0003
+- **Infrastructure**: PostgreSQL (RLS, only DB), Redis, S3-compatible storage, `SecretStore` with
+  env/file provider and optional OpenBao profile, OpenTelemetry with optional Tempo/Grafana profile;
+  NATS JetStream and Temporal deferred — ADR-0003 (amended 2026-09-10)
+- **Daemon**: Local Runtime is a standalone process supervised by the desktop app over a Unix
+  socket / named pipe — ADR-0005
 - **Clients**: Next.js web, Electron desktop + Local Runtime daemon, Expo mobile — PRD
 - **Open source first**: every essential feature must run self-hosted with `docker compose up`;
   AGPL-3.0 for apps, Apache-2.0 for protocol/SDK/plugins — PRD §5.1, §100
@@ -130,7 +133,10 @@ Explicit non-goals (PRD §106), never in scope without a PRD change:
 | AGENTS.md as single source, CLAUDE.md imports it | Several coding agents share the repo; avoid drift (ADR-0004) | — Pending |
 | First milestone = MVP1 + MVP2 | Core value (multiplayer AI sessions) needs both chat and Work Zone to be proven | — Pending |
 | Vertical MVP phasing | Each phase ships an end-to-end user capability | — Pending |
-| Open decisions left to research: ORM (leaning Drizzle), self-hosted auth, realtime transport, AI SDK layer, UI library (leaning Tailwind + shadcn/ui) | Not enough evidence yet; research phase produces STACK.md, then ADRs | — Pending |
+| Drizzle ORM with RLS in schema, better-auth embedded, `@fastify/websocket` + Redis with Postgres seq replay, Vercel AI SDK 7, Next.js 16 + shadcn (Base UI) | Resolved by research 2026-09-10 (`.planning/research/STACK.md`); ADRs written in the implementing phases | — Pending |
+| Node 24 + TypeScript 7; OpenBao and observability as compose profiles; Tempo added | Research amendments accepted 2026-09-10 (ADR-0001, ADR-0003) | — Pending |
+| Shared AI chat context rule: tools run as agent ∩ triggering human; content must be authorised for all participants; no private memory in multi-human chats | Avoids confused deputy and private-context leakage (PITFALLS 3) | — Pending |
+| First-release gaps from FEATURES.md accepted as v1 requirements (122 total) | Users notice search, edit/delete, invites, permission modes in the first hour | — Pending |
 
 ## Evolution
 
@@ -150,4 +156,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-09-09 after initialization*
+*Last updated: 2026-09-10 after research and roadmap creation*

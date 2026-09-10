@@ -244,13 +244,137 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| (filled by roadmap) | | |
+| FOUND-01 | Phase 1 | Pending |
+| FOUND-02 | Phase 1 | Pending |
+| FOUND-03 | Phase 1 | Pending |
+| FOUND-04 | Phase 1 | Pending |
+| FOUND-05 | Phase 1 | Pending |
+| FOUND-06 | Phase 1 | Pending |
+| FOUND-07 | Phase 1 | Pending |
+| AUTH-01 | Phase 2 | Pending |
+| AUTH-02 | Phase 2 | Pending |
+| AUTH-03 | Phase 2 | Pending |
+| AUTH-04 | Phase 2 | Pending |
+| AUTH-05 | Phase 2 | Pending |
+| AUTH-06 | Phase 2 | Pending |
+| ORG-01 | Phase 2 | Pending |
+| ORG-02 | Phase 2 | Pending |
+| ORG-03 | Phase 2 | Pending |
+| ORG-04 | Phase 2 | Pending |
+| ORG-05 | Phase 2 | Pending |
+| ORG-06 | Phase 2 | Pending |
+| RT-01 | Phase 3 | Pending |
+| RT-02 | Phase 3 | Pending |
+| RT-03 | Phase 3 | Pending |
+| RT-04 | Phase 3 | Pending |
+| RT-05 | Phase 3 | Pending |
+| CHAT-01 | Phase 4 | Pending |
+| CHAT-02 | Phase 4 | Pending |
+| CHAT-03 | Phase 4 | Pending |
+| CHAT-04 | Phase 4 | Pending |
+| CHAT-05 | Phase 4 | Pending |
+| CHAT-06 | Phase 4 | Pending |
+| CHAT-07 | Phase 4 | Pending |
+| CHAT-08 | Phase 4 | Pending |
+| CHAT-09 | Phase 4 | Pending |
+| CHAT-10 | Phase 4 | Pending |
+| CHAT-11 | Phase 4 | Pending |
+| CHAT-12 | Phase 4 | Pending |
+| CHAT-13 | Phase 4 | Pending |
+| CHAT-14 | Phase 4 | Pending |
+| AICHAT-01 | Phase 5 | Pending |
+| AICHAT-02 | Phase 5 | Pending |
+| AICHAT-03 | Phase 5 | Pending |
+| AICHAT-04 | Phase 5 | Pending |
+| AICHAT-05 | Phase 5 | Pending |
+| AICHAT-06 | Phase 5 | Pending |
+| AICHAT-07 | Phase 5 | Pending |
+| AICHAT-08 | Phase 5 | Pending |
+| AICHAT-09 | Phase 5 | Pending |
+| MULTI-01 | Phase 6 | Pending |
+| MULTI-02 | Phase 6 | Pending |
+| MULTI-03 | Phase 6 | Pending |
+| MULTI-04 | Phase 6 | Pending |
+| MULTI-05 | Phase 6 | Pending |
+| MULTI-06 | Phase 6 | Pending |
+| MULTI-07 | Phase 6 | Pending |
+| MULTI-08 | Phase 6 | Pending |
+| AGENT-01 | Phase 6 | Pending |
+| AGENT-02 | Phase 6 | Pending |
+| AGENT-03 | Phase 6 | Pending |
+| AGENT-04 | Phase 6 | Pending |
+| SELF-01 | Phase 7 | Pending |
+| SELF-02 | Phase 7 | Pending |
+| SELF-03 | Phase 7 | Pending |
+| SELF-04 | Phase 7 | Pending |
+| SELF-05 | Phase 7 | Pending |
+| SELF-06 | Phase 7 | Pending |
+| SELF-07 | Phase 7 | Pending |
+| DEV-01 | Phase 8 | Pending |
+| DEV-02 | Phase 8 | Pending |
+| DEV-03 | Phase 8 | Pending |
+| DEV-04 | Phase 8 | Pending |
+| DEV-05 | Phase 8 | Pending |
+| DEV-06 | Phase 8 | Pending |
+| DEV-07 | Phase 8 | Pending |
+| RUNTIME-01 | Phase 9 | Pending |
+| RUNTIME-02 | Phase 9 | Pending |
+| RUNTIME-03 | Phase 9 | Pending |
+| RUNTIME-04 | Phase 9 | Pending |
+| RUNTIME-05 | Phase 9 | Pending |
+| RUNTIME-06 | Phase 9 | Pending |
+| RUNTIME-07 | Phase 9 | Pending |
+| RUNTIME-08 | Phase 9 | Pending |
+| RUNTIME-09 | Phase 9 | Pending |
+| RUNTIME-10 | Phase 9 | Pending |
+| DESK-01 | Phase 9 | Pending |
+| DESK-02 | Phase 9 | Pending |
+| DESK-03 | Phase 9 | Pending |
+| DESK-04 | Phase 9 | Pending |
+| DESK-05 | Phase 9 | Pending |
+| DESK-06 | Phase 11 | Pending |
+| DESK-07 | Phase 11 | Pending |
+| WZ-01 | Phase 10 | Pending |
+| WZ-02 | Phase 10 | Pending |
+| WZ-03 | Phase 10 | Pending |
+| WZ-04 | Phase 10 | Pending |
+| WZ-05 | Phase 10 | Pending |
+| WZ-06 | Phase 10 | Pending |
+| WZ-07 | Phase 10 | Pending |
+| WZ-08 | Phase 10 | Pending |
+| WZ-09 | Phase 10 | Pending |
+| WZ-10 | Phase 10 | Pending |
+| WZ-11 | Phase 10 | Pending |
+| WZ-12 | Phase 10 | Pending |
+| WZ-13 | Phase 10 | Pending |
+| WZ-14 | Phase 10 | Pending |
+| WZ-15 | Phase 10 | Pending |
+| WZ-16 | Phase 10 | Pending |
+| WZUI-01 | Phase 11 | Pending |
+| WZUI-02 | Phase 11 | Pending |
+| WZUI-03 | Phase 11 | Pending |
+| WZUI-04 | Phase 11 | Pending |
+| WZUI-05 | Phase 11 | Pending |
+| WZUI-06 | Phase 11 | Pending |
+| WZUI-07 | Phase 11 | Pending |
+| WZUI-08 | Phase 11 | Pending |
+| WZUI-09 | Phase 11 | Pending |
+| WZUI-10 | Phase 11 | Pending |
+| ART-01 | Phase 12 | Pending |
+| ART-02 | Phase 12 | Pending |
+| ART-03 | Phase 12 | Pending |
+| ART-04 | Phase 12 | Pending |
+| ART-05 | Phase 12 | Pending |
+| ART-06 | Phase 12 | Pending |
 
 **Coverage:**
-- v1 requirements: 119 total
-- Mapped to phases: 0
-- Unmapped: 119 ⚠️
+- v1 requirements: 122 total (corrected from 119 on roadmap creation — actual count of v1 IDs; no duplicates)
+- Mapped to phases: 122
+- Unmapped: 0 ✓
+
+Phase assignment follows `.planning/ROADMAP.md`. DESK-06 and DESK-07 live in Phase 11 (Work Zone UI)
+rather than Phase 9 because they require a WorkSession to be observable.
 
 ---
 *Requirements defined: 2026-09-10*
-*Last updated: 2026-09-10 after initial definition*
+*Last updated: 2026-09-10 after roadmap creation (traceability filled)*

@@ -164,3 +164,17 @@ docker compose up       # full self-hosted stack
 - Before claiming anything is done: run the verification commands and show the output.
 - When you learn something a future agent needs every session, add it here (keep < 200 lines).
   Task-specific procedures go to `docs/` or a skill, not here.
+
+<!-- GSD:workflow-start source:GSD defaults -->
+## GSD Workflow Enforcement
+
+Before using Edit, Write, or other file-changing tools, start work through a GSD command so planning artifacts and execution context stay in sync.
+
+Use these entry points:
+
+- `/gsd-quick` for small fixes, doc updates, and ad-hoc tasks
+- `/gsd-debug` for investigation and bug fixing
+- `/gsd-execute-phase` for planned phase work
+
+Do not make direct repo edits outside a GSD workflow unless the user explicitly asks to bypass it.
+<!-- GSD:workflow-end -->
