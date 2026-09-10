@@ -22,11 +22,14 @@ with the "open source first, one-command install" principle.
 - **S3-compatible object storage** (MinIO in self-hosted compose) for artifacts and attachments,
   following the PRD artifact pipeline (containment check → policy → SHA-256 → security checks →
   encrypted upload).
-- **Secrets** go through an abstraction whose first implementation targets **OpenBao**; cloud KMS
-  implementations may follow. Code never holds provider or MCP credentials directly; it holds a
-  `SecretReference`.
-- **OpenTelemetry** instrumentation (traces, metrics, logs) is present from the first service, with
-  Prometheus / Grafana / Loki as the self-hosted backend.
+- **Secrets** go through a `SecretStore` abstraction. Implementations: `env`/`file` provider (default
+  for the minimal compose profile) and **OpenBao** (optional `vault` compose profile); cloud KMS may
+  follow. Secrets are required inputs written by a setup script, never generated silently at boot.
+  Code never holds provider or MCP credentials directly; it holds a `SecretReference`.
+  *(Amended 2026-09-10: OpenBao demoted from hard dependency to profile.)*
+- **OpenTelemetry** instrumentation (traces, metrics, logs) is present from the first service, via
+  `@fastify/otel`, with Prometheus / Grafana / Loki / **Tempo** as the self-hosted backend in an optional
+  `observability` compose profile. *(Amended 2026-09-10: Tempo added so traces have a backend.)*
 - **NATS JetStream** and **Temporal** are **deferred**. Triggers to revisit, each requiring a new ADR:
   - NATS: when session events must be replayed across processes or the Device Relay needs durable,
     multi-consumer streams (expected MVP2 / MVP6).
@@ -35,8 +38,9 @@ with the "open source first, one-command install" principle.
 
 ## Consequences
 
-- Positive: `docker compose up` for MVP1 is API + web + PostgreSQL + Redis + MinIO + OpenBao +
-  observability. Fewer components to secure and document.
+- Positive: the minimal `docker compose up` profile for MVP1 is API + web + migrate + PostgreSQL +
+  Redis + MinIO. OpenBao and observability are opt-in profiles. Fewer components to secure and document.
+- Note: Redis 8 is AGPL-licensed again; Valkey 9 is a drop-in alternative through node-redis 6.
 - Positive: replayable session events are still guaranteed at the data level because every
   `SessionEvent` is persisted in PostgreSQL before broadcast.
 - Negative: when NATS/Temporal are introduced, the outbox / job code written for PostgreSQL must be

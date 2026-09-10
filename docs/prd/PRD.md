@@ -3647,6 +3647,36 @@ All decisions below were taken on 2026-09-09 and are recorded as Architecture De
 
 Also not decided: Rust as the future implementation language for the Local Runtime Daemon (Section 33) remains a recommendation only.
 
+### 113. Amendments of 2026-09-10 (after project research)
+
+Project research (`.planning/research/`) resolved the deferred items and proposed changes that were
+accepted the same day:
+
+- **ADR-0001 amended:** Node 24 LTS (was 22), TypeScript 7 with a `typescript6` alias for tooling, pnpm 12.
+- **ADR-0003 amended:** `SecretStore` abstraction with `env`/`file` provider by default and OpenBao as an
+  optional compose profile; Grafana Tempo added to the observability profile; minimal compose profile is
+  api + web + migrate + PostgreSQL + Redis + MinIO.
+- **ADR-0005 `docs/adr/0005-local-runtime-daemon-process-model.md`:** the Local Runtime daemon is a
+  standalone process supervised by the desktop app, talking over a Unix socket / named pipe.
+- **Resolved from Section 112:** ORM = Drizzle with RLS policies in schema; identity = better-auth embedded
+  in the API with our own OrgUnit hierarchy; realtime = `@fastify/websocket` + Redis with per-stream `seq`
+  persisted in PostgreSQL; AI layer = Vercel AI SDK 7; UI = Next.js 16, Tailwind, shadcn/ui on Base UI.
+  Runtime adapters use the Claude Agent SDK and `codex app-server`, never CLI stdout. Electron renderer is
+  a bundled Vite build. Each becomes an ADR in the phase that implements it.
+- **Shared AI chat context rule (Section 15/16):** tools invoked in a shared conversation run with the
+  intersection of the agent's permissions and the triggering human's permissions; retrieved content must
+  be authorised for every participant or is withheld with an explanation; user-private memory never
+  enters a conversation with more than one human.
+- **First-release gaps accepted as MVP 1 / MVP 2 scope:** auth with invitations and first-run bootstrap,
+  minimal admin console, message search, edit/delete, reactions, read state, notification preferences,
+  attachments, pins/permalinks, organization-level model provider configuration, AI chat basics
+  (streaming, stop, regenerate, titles, list, custom instructions, usage records), multiplayer
+  response-trigger and single-generation policy, hosted agent persona entity; and for MVP 2 permission
+  modes, approval semantics, worktree per session, resume/reattach with explicit host-offline state,
+  runtime detection, device pairing/revocation, adapter capability flags, view modes, open-in-editor,
+  desktop notifications, usage indicator, session lifecycle, host consent. Full list and rationale in
+  `.planning/research/FEATURES.md` §4; requirement IDs in `.planning/REQUIREMENTS.md`.
+
 ---
 
 **End of PRD v1.0.**

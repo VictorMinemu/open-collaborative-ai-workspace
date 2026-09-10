@@ -34,7 +34,7 @@ planning artifacts. Application code will follow the roadmap in `docs/prd/PRD.md
 
 ## Stack (decided)
 
-TypeScript monorepo (pnpm + Turborepo + Biome + Vitest, Node 22 LTS) · Fastify modular monolith ·
+TypeScript monorepo (pnpm + Turborepo + Biome + Vitest, Node 24 LTS) · Fastify modular monolith ·
 Next.js web · Electron desktop with a Local Runtime daemon · Expo mobile · PostgreSQL · Redis ·
 S3-compatible storage · OpenBao/KMS · OpenTelemetry · OpenClaw for server-side agents.
 See the ADRs for rationale and for what is still deliberately undecided.
