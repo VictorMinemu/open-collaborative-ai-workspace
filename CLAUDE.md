@@ -10,3 +10,5 @@ agent. Edit that file, not this one, for anything that is not Claude-specific.
 - Superpowers workflow applies: brainstorm before new subsystems, TDD for implementation, verify
   before claiming completion.
 - GSD commands (`/gsd-*`) are the planning and execution entry points for this repo.
+- The **Developer Profile** section of `AGENTS.md` describes how Víctor works; follow it in every
+  reply. Run `/gsd-dev-preferences` to reload it with full evidence if the session context was reset.

@@ -178,3 +178,39 @@ Use these entry points:
 
 Do not make direct repo edits outside a GSD workflow unless the user explicitly asks to bypass it.
 <!-- GSD:workflow-end -->
+
+<!-- GSD:profile-start -->
+## Developer Profile
+
+Measured from 174 real session messages across 17 projects (2026-09-21). Full profile with
+evidence: `~/.claude/gsd-core/USER-PROFILE.md`; reload in any session with `/gsd-dev-preferences`.
+
+- **Communication (terse-direct, HIGH):** Víctor writes short, often voice-dictated Spanish. Read
+  shorthand generously (APR/APS = PR, emerge = merge, ex-functions = edge functions, Books = bugs,
+  "sigue"/"hazlo" = continue). Answer in short Spanish, outcome first, no preamble. Restate the
+  implied acceptance criteria in one or two lines and proceed; ask a question list only on request.
+- **Decisions (fast-intuitive, HIGH):** Offer a short numbered list with one recommended default and
+  a one-line trade-off each; expect "1", "A" or "hazlo tú". When told "elige la mejor" or "sé
+  sensato", choose and go, honouring the stated constraint (fastest, cheapest, same repo). Never
+  re-open a decision already made. For payments, data model or SEO/categorisation logic, add a
+  one-paragraph comparison against the current behaviour before asking for the go-ahead.
+- **Explanations (concise, MEDIUM):** Lead with what changed, where it is deployed and what remains.
+  Rationale only for non-obvious choices, in 2-4 lines. Show results (screenshots, URLs, test
+  counts, CI status) instead of describing implementation. No code walkthroughs unless asked.
+- **Debugging (diagnostic, HIGH):** Investigate before proposing a fix, using the access provided
+  (SSH, Portainer, browser, Supabase/Postgres MCP) or asking for the exact SQL/log output needed.
+  Report root cause in 2-3 lines, then the fix and its blast radius; wait for a go-ahead on
+  anything touching payments, data or production. Verify end to end before saying "done".
+- **UX (design-conscious, HIGH):** Visual quality is part of done, even for internal screens:
+  responsive first, mobile verified, clear CTAs, no filler copy. Propose a concrete layout rather
+  than asking for specs; show a screenshot before asking for review.
+- **Vendors (opinionated, MEDIUM):** Default to the named stack (this repo's ADRs; elsewhere
+  Supabase, Docker/Portainer on Hetzner, shadcn/ui, GSD). Flag any paid or metered API before
+  adding it and prefer existing subscriptions or self-hostable open source.
+- **Frustration triggers (regression, MEDIUM):** Breaking something that worked, or a fix that does
+  not stick. Sync with main and run existing tests before touching shared systems; never remove
+  existing UI or behaviour as a side effect; report how a fix was verified. Second trigger:
+  unrequested mechanisms and process overhead. Keep solutions proportional.
+- **Learning (guided, MEDIUM):** Do the research yourself (web, docs, papers, the codebase) and
+  report back with a grounded summary and a recommendation. Do not point to docs to read.
+<!-- GSD:profile-end -->
