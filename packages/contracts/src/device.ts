@@ -1,18 +1,17 @@
 import { z } from "zod";
 import { Id, IsoDateTime } from "./common";
+import { RuntimeId } from "./session-events";
 
 export const DevicePlatform = z.enum(["darwin", "linux", "win32"]);
+export type DevicePlatform = z.infer<typeof DevicePlatform>;
 export const DeviceStatus = z.enum(["online", "offline"]);
 export type DeviceStatus = z.infer<typeof DeviceStatus>;
-
-/** Local runtimes; each uses the user's own subscription login on their device (no API keys). */
-export const RuntimeId = z.enum(["claude-code", "codex"]);
-export type RuntimeId = z.infer<typeof RuntimeId>;
 
 export const RuntimeInfo = z.object({
   id: RuntimeId,
   installed: z.boolean(),
   version: z.string().nullable(),
+  /** Logged in with the user's own subscription (Claude Pro/Max, ChatGPT). */
   loggedIn: z.boolean(),
 });
 export type RuntimeInfo = z.infer<typeof RuntimeInfo>;
@@ -20,20 +19,32 @@ export type RuntimeInfo = z.infer<typeof RuntimeInfo>;
 export const Device = z.object({
   id: Id,
   ownerUserId: Id,
+  ownerName: z.string().nullable(),
   name: z.string(),
-  platform: DevicePlatform,
+  platform: z.string(),
   status: DeviceStatus,
+  /** The owner lets other members of the organization start sessions on this device. */
+  shared: z.boolean(),
   lastSeenAt: IsoDateTime.nullable(),
   runtimes: z.array(RuntimeInfo),
+  daemonVersion: z.string().nullable(),
+  projectCount: z.number().int().nonnegative(),
   revokedAt: IsoDateTime.nullable(),
   createdAt: IsoDateTime,
 });
 export type Device = z.infer<typeof Device>;
 
 export const DeviceList = z.object({ devices: z.array(Device) });
+export type DeviceList = z.infer<typeof DeviceList>;
+
+export const UpdateDeviceRequest = z.object({
+  name: z.string().trim().min(1).max(80).optional(),
+  shared: z.boolean().optional(),
+});
+export type UpdateDeviceRequest = z.infer<typeof UpdateDeviceRequest>;
 
 export const CreateEnrollmentResponse = z.object({
-  /** Short human-typeable pairing code, valid 10 minutes, single use. */
+  /** Short human-typeable pairing code (`XXXX-XXXX`), valid 10 minutes, single use. */
   code: z.string(),
   expiresAt: IsoDateTime,
 });
@@ -58,11 +69,16 @@ export type EnrollDeviceResponse = z.infer<typeof EnrollDeviceResponse>;
 export const Project = z.object({
   id: Id,
   deviceId: Id,
+  deviceName: z.string(),
+  deviceOnline: z.boolean(),
   name: z.string(),
   gitRemote: z.string().nullable(),
   defaultBranch: z.string().nullable(),
+  /** False once the device stopped announcing it (removed locally). */
+  available: z.boolean(),
   createdAt: IsoDateTime,
 });
 export type Project = z.infer<typeof Project>;
 
 export const ProjectList = z.object({ projects: z.array(Project) });
+export type ProjectList = z.infer<typeof ProjectList>;

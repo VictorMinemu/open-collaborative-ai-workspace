@@ -1,29 +1,33 @@
 // Local control channel for the desktop shell: newline-delimited JSON over a Unix domain socket
 // (`~/.ocw/runtime.sock`, mode 0600) or a named pipe on Windows. Never a TCP port.
 
-import { chmod, unlink } from 'node:fs/promises';
-import { type Server, type Socket, createConnection, createServer } from 'node:net';
-import { join } from 'node:path';
-import { z } from 'zod';
-import { type Logger, errorMessage, silentLogger } from './logger.js';
+import { chmod, unlink } from "node:fs/promises";
+import { createConnection, createServer, type Server, type Socket } from "node:net";
+import { join } from "node:path";
+import { z } from "zod";
+import { errorMessage, type Logger, silentLogger } from "./logger.js";
 
-export const ControlRequestSchema = z.discriminatedUnion('cmd', [
-  z.object({ id: z.union([z.string(), z.number()]).optional(), cmd: z.literal('status') }),
-  z.object({ id: z.union([z.string(), z.number()]).optional(), cmd: z.literal('listProjects') }),
+export const ControlRequestSchema = z.discriminatedUnion("cmd", [
+  z.object({ id: z.union([z.string(), z.number()]).optional(), cmd: z.literal("status") }),
+  z.object({ id: z.union([z.string(), z.number()]).optional(), cmd: z.literal("listProjects") }),
   z.object({
     id: z.union([z.string(), z.number()]).optional(),
-    cmd: z.literal('addProject'),
+    cmd: z.literal("addProject"),
     path: z.string().min(1),
     name: z.string().optional(),
   }),
-  z.object({ id: z.union([z.string(), z.number()]).optional(), cmd: z.literal('removeProject'), localId: z.string() }),
+  z.object({
+    id: z.union([z.string(), z.number()]).optional(),
+    cmd: z.literal("removeProject"),
+    localId: z.string(),
+  }),
 ]);
 export type ControlRequest = z.infer<typeof ControlRequestSchema>;
 
 export type ControlHandler = (req: ControlRequest) => Promise<unknown>;
 
 export function controlSocketPath(home: string): string {
-  return process.platform === 'win32' ? '\\\\.\\pipe\\ocw-runtime' : join(home, 'runtime.sock');
+  return process.platform === "win32" ? "\\\\.\\pipe\\ocw-runtime" : join(home, "runtime.sock");
 }
 
 export class ControlSocketServer {
@@ -40,16 +44,16 @@ export class ControlSocketServer {
   }
 
   async listen(): Promise<void> {
-    if (process.platform !== 'win32') await unlink(this.path).catch(() => undefined); // stale socket
+    if (process.platform !== "win32") await unlink(this.path).catch(() => undefined); // stale socket
     const server = createServer((socket) => this.onConnection(socket));
     await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
+      server.once("error", reject);
       server.listen(this.path, () => {
-        server.off('error', reject);
+        server.off("error", reject);
         resolve();
       });
     });
-    if (process.platform !== 'win32') await chmod(this.path, 0o600);
+    if (process.platform !== "win32") await chmod(this.path, 0o600);
     this.server = server;
   }
 
@@ -58,29 +62,29 @@ export class ControlSocketServer {
     const server = this.server;
     this.server = null;
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
-    if (process.platform !== 'win32') await unlink(this.path).catch(() => undefined);
+    if (process.platform !== "win32") await unlink(this.path).catch(() => undefined);
   }
 
   private onConnection(socket: Socket): void {
     this.sockets.add(socket);
-    socket.setEncoding('utf8');
-    let buffer = '';
-    socket.on('data', (chunk: string) => {
+    socket.setEncoding("utf8");
+    let buffer = "";
+    socket.on("data", (chunk: string) => {
       buffer += chunk;
       if (buffer.length > 1024 * 1024) {
         socket.destroy();
         return;
       }
-      let idx = buffer.indexOf('\n');
+      let idx = buffer.indexOf("\n");
       while (idx >= 0) {
         const line = buffer.slice(0, idx).trim();
         buffer = buffer.slice(idx + 1);
         if (line) void this.handleLine(socket, line);
-        idx = buffer.indexOf('\n');
+        idx = buffer.indexOf("\n");
       }
     });
-    socket.on('close', () => this.sockets.delete(socket));
-    socket.on('error', () => this.sockets.delete(socket));
+    socket.on("close", () => this.sockets.delete(socket));
+    socket.on("error", () => this.sockets.delete(socket));
   }
 
   private async handleLine(socket: Socket, line: string): Promise<void> {
@@ -88,13 +92,17 @@ export class ControlSocketServer {
     try {
       const raw = JSON.parse(line) as unknown;
       const maybeId = (raw as { id?: unknown } | null)?.id;
-      if (typeof maybeId === 'string' || typeof maybeId === 'number') id = maybeId;
+      if (typeof maybeId === "string" || typeof maybeId === "number") id = maybeId;
       const req = ControlRequestSchema.parse(raw);
       const result = await this.handler(req);
       this.reply(socket, { id, ok: true, result });
     } catch (err) {
-      this.log.debug('control request failed', { error: errorMessage(err) });
-      this.reply(socket, { id, ok: false, error: err instanceof z.ZodError ? 'invalid request' : errorMessage(err) });
+      this.log.debug("control request failed", { error: errorMessage(err) });
+      this.reply(socket, {
+        id,
+        ok: false,
+        error: err instanceof z.ZodError ? "invalid request" : errorMessage(err),
+      });
     }
   }
 
@@ -104,19 +112,23 @@ export class ControlSocketServer {
 }
 
 /** Client helper (used by the CLI and tests): send one request, await one response line. */
-export function controlRequest(path: string, req: ControlRequest, timeoutMs = 10_000): Promise<{ ok: boolean; result?: unknown; error?: string }> {
+export function controlRequest(
+  path: string,
+  req: ControlRequest,
+  timeoutMs = 10_000,
+): Promise<{ ok: boolean; result?: unknown; error?: string }> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(path);
-    let buffer = '';
+    let buffer = "";
     const timer = setTimeout(() => {
       socket.destroy();
-      reject(new Error('control socket timeout'));
+      reject(new Error("control socket timeout"));
     }, timeoutMs);
-    socket.setEncoding('utf8');
-    socket.on('connect', () => socket.write(`${JSON.stringify(req)}\n`));
-    socket.on('data', (chunk: string) => {
+    socket.setEncoding("utf8");
+    socket.on("connect", () => socket.write(`${JSON.stringify(req)}\n`));
+    socket.on("data", (chunk: string) => {
       buffer += chunk;
-      const idx = buffer.indexOf('\n');
+      const idx = buffer.indexOf("\n");
       if (idx < 0) return;
       clearTimeout(timer);
       socket.end();
@@ -126,7 +138,7 @@ export function controlRequest(path: string, req: ControlRequest, timeoutMs = 10
         reject(err);
       }
     });
-    socket.on('error', (err) => {
+    socket.on("error", (err) => {
       clearTimeout(timer);
       reject(err);
     });

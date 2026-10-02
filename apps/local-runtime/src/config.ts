@@ -1,20 +1,20 @@
 // Daemon configuration (~/.ocw/runtime.json), device token and the local project registry
 // (~/.ocw/projects.json). Absolute project paths live ONLY in the registry on this device.
 
-import { randomUUID } from 'node:crypto';
-import { chmod, mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
-import { homedir, hostname } from 'node:os';
-import { basename, join, resolve } from 'node:path';
-import { z } from 'zod';
-import { isGitRepo, repoInfo } from './git.js';
-import type { SyncedProject } from './protocol.js';
+import { randomUUID } from "node:crypto";
+import { chmod, mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { homedir, hostname } from "node:os";
+import { basename, join, resolve } from "node:path";
+import type { DeviceProjectAnnouncement } from "@ocw/contracts";
+import { z } from "zod";
+import { isGitRepo, repoInfo } from "./git.js";
 
 export function ocwHome(env: NodeJS.ProcessEnv = process.env): string {
-  return env.OCW_HOME ? resolve(env.OCW_HOME) : join(homedir(), '.ocw');
+  return env.OCW_HOME ? resolve(env.OCW_HOME) : join(homedir(), ".ocw");
 }
 
 export const RuntimeConfigSchema = z.object({
-  serverUrl: z.string().url().default('http://localhost:4000'),
+  serverUrl: z.string().url().default("http://localhost:4000"),
   /** File holding the device token. Defaults to `<OCW_HOME>/device-token`. */
   deviceTokenPath: z.string().optional(),
   deviceName: z.string().optional(),
@@ -22,17 +22,21 @@ export const RuntimeConfigSchema = z.object({
    * Runtimes run on the user's own CLI logins (Claude Pro/Max, ChatGPT). API keys in the
    * environment are stripped unless `useApiKey` is explicitly true (metered billing).
    */
-  claude: z.object({ path: z.string().optional(), useApiKey: z.boolean().default(false) }).default({ useApiKey: false }),
-  codex: z.object({ path: z.string().optional(), useApiKey: z.boolean().default(false) }).default({ useApiKey: false }),
-  logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  claude: z
+    .object({ path: z.string().optional(), useApiKey: z.boolean().default(false) })
+    .default({ useApiKey: false }),
+  codex: z
+    .object({ path: z.string().optional(), useApiKey: z.boolean().default(false) })
+    .default({ useApiKey: false }),
+  logLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
 });
 export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
 
 async function readJson(path: string): Promise<unknown | undefined> {
   try {
-    return JSON.parse(await readFile(path, 'utf8')) as unknown;
+    return JSON.parse(await readFile(path, "utf8")) as unknown;
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw new Error(`cannot read ${basename(path)}: ${(err as Error).message}`);
   }
 }
@@ -49,7 +53,7 @@ export async function ensureOcwHome(home: string): Promise<void> {
 }
 
 export async function loadConfig(home: string, env: NodeJS.ProcessEnv = process.env): Promise<RuntimeConfig> {
-  const raw = (await readJson(join(home, 'runtime.json'))) ?? {};
+  const raw = (await readJson(join(home, "runtime.json"))) ?? {};
   const merged = { ...(raw as Record<string, unknown>) };
   if (env.OCW_SERVER_URL) merged.serverUrl = env.OCW_SERVER_URL;
   if (env.OCW_LOG_LEVEL) merged.logLevel = env.OCW_LOG_LEVEL;
@@ -70,9 +74,11 @@ export async function loadDeviceToken(
     delete env.OCW_DEVICE_TOKEN;
     return fromEnv;
   }
-  const file = env.OCW_DEVICE_TOKEN_FILE ?? config.deviceTokenPath ?? join(home, 'device-token');
+  const file = env.OCW_DEVICE_TOKEN_FILE ?? config.deviceTokenPath ?? join(home, "device-token");
   try {
-    const token = (await readFile(file.startsWith('~/') ? join(homedir(), file.slice(2)) : file, 'utf8')).trim();
+    const token = (
+      await readFile(file.startsWith("~/") ? join(homedir(), file.slice(2)) : file, "utf8")
+    ).trim();
     return token || null;
   } catch {
     return null;
@@ -80,15 +86,15 @@ export async function loadDeviceToken(
 }
 
 export function deviceName(config: RuntimeConfig): string {
-  return config.deviceName ?? hostname().replace(/\.local$/, '');
+  return config.deviceName ?? hostname().replace(/\.local$/, "");
 }
 
 export function toWebSocketUrl(serverUrl: string): string {
   const u = new URL(serverUrl);
-  u.protocol = u.protocol === 'https:' ? 'wss:' : u.protocol === 'http:' ? 'ws:' : u.protocol;
-  u.pathname = `${u.pathname.replace(/\/$/, '')}/runtime/ws`;
-  u.search = '';
-  u.hash = '';
+  u.protocol = u.protocol === "https:" ? "wss:" : u.protocol === "http:" ? "ws:" : u.protocol;
+  u.pathname = `${u.pathname.replace(/\/$/, "")}/runtime/ws`;
+  u.search = "";
+  u.hash = "";
   return u.toString();
 }
 
@@ -113,7 +119,7 @@ export class ProjectRegistry {
   private readonly file: string;
 
   constructor(home: string) {
-    this.file = join(home, 'projects.json');
+    this.file = join(home, "projects.json");
   }
 
   async load(): Promise<void> {
@@ -130,15 +136,20 @@ export class ProjectRegistry {
   }
 
   /** What the server is allowed to see: no paths. */
-  toSynced(): SyncedProject[] {
-    return this.projects.map(({ localId, name, gitRemote, defaultBranch }) => ({ localId, name, gitRemote, defaultBranch }));
+  toSynced(): DeviceProjectAnnouncement[] {
+    return this.projects.map(({ localId, name, gitRemote, defaultBranch }) => ({
+      localId,
+      name,
+      gitRemote,
+      defaultBranch,
+    }));
   }
 
   async add(path: string, name?: string): Promise<LocalProject> {
     const abs = await realpath(resolve(path)).catch(() => {
-      throw new Error('path does not exist');
+      throw new Error("path does not exist");
     });
-    if (!(await stat(abs)).isDirectory()) throw new Error('path is not a directory');
+    if (!(await stat(abs)).isDirectory()) throw new Error("path is not a directory");
     const existing = this.projects.find((p) => p.path === abs);
     if (existing) return existing;
     const info = (await isGitRepo(abs)) ? await repoInfo(abs) : null;

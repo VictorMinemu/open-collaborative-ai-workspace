@@ -296,6 +296,9 @@ export const devices = appSchema.table(
       .default("offline"),
     lastSeenAt: ts("last_seen_at"),
     runtimeInfo: jsonb("runtime_info").$type<unknown[]>().notNull().default([]),
+    daemonVersion: text("daemon_version"),
+    /** The owner lets other org members start sessions on this device. */
+    shared: boolean("shared").notNull().default(false),
     revokedAt: ts("revoked_at"),
     createdAt: createdAt(),
   },
@@ -330,6 +333,8 @@ export const projects = appSchema.table(
     defaultBranch: text("default_branch"),
     createdBy: uuid("created_by"),
     createdAt: createdAt(),
+    /** Set when the device stops announcing the project; sessions keep their history. */
+    removedAt: ts("removed_at"),
   },
   (t) => [uniqueIndex("projects_device_local_uq").on(t.deviceId, t.localId)],
 );
@@ -374,6 +379,11 @@ export const workSessions = appSchema.table(
     title: text("title").notNull(),
     createdBy: uuid("created_by").notNull(),
     runtimeSessionId: text("runtime_session_id"),
+    worktree: boolean("worktree").notNull().default(false),
+    branch: text("branch"),
+    /** Highest device localSeq stored for this session (Device Link replay de-duplication). */
+    lastLocalSeq: bigint("last_local_seq", { mode: "number" }).notNull().default(0),
+    lastError: text("last_error"),
     createdAt: createdAt(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
   },
@@ -415,10 +425,38 @@ export const workApprovals = appSchema.table(
       .notNull()
       .default("pending"),
     decidedBy: uuid("decided_by"),
-    decision: text("decision", { enum: ["once", "session", "deny"] }),
+    decision: text("decision", { enum: ["once", "session", "deny", "expired"] }),
     comment: text("comment"),
     createdAt: createdAt(),
     decidedAt: ts("decided_at"),
   },
   (t) => [index("work_approvals_session_idx").on(t.organizationId, t.workSessionId)],
+);
+
+/**
+ * Server → device command queue (Device Link). At-least-once: every command not yet acked is redelivered,
+ * in order, when the device reconnects; the daemon treats a repeated id as done.
+ */
+export const deviceCommands = appSchema.table(
+  "device_commands",
+  {
+    id: id(),
+    organizationId: orgId(),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => devices.id, { onDelete: "cascade" }),
+    workSessionId: uuid("work_session_id").references(() => workSessions.id, { onDelete: "cascade" }),
+    kind: text("kind", {
+      enum: ["session.start", "prompt", "interrupt", "approval.resolve", "session.stop", "diff.request"],
+    }).notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    status: text("status", { enum: ["pending", "sent", "acked", "failed"] })
+      .notNull()
+      .default("pending"),
+    error: text("error"),
+    createdAt: createdAt(),
+    sentAt: ts("sent_at"),
+    ackedAt: ts("acked_at"),
+  },
+  (t) => [index("device_commands_device_status_idx").on(t.organizationId, t.deviceId, t.status, t.createdAt)],
 );

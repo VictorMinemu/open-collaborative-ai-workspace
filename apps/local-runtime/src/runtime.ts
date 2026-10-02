@@ -8,7 +8,7 @@ import type {
   RuntimeId,
   RuntimeInfo,
   SessionEvent,
-} from './protocol.js';
+} from "@ocw/contracts";
 
 export interface RuntimeCapabilities {
   /** Adding input to the RUNNING turn (`steer()`). Claude Code: false (prompts queue). Codex: true. */
@@ -51,7 +51,12 @@ export interface AgentRuntime {
   /** Interrupt the running turn (if any). The session stays alive. */
   interrupt(sessionId: string): Promise<void>;
   /** Resolve a pending `approval.requested`. Returns false if the approval is unknown or already resolved. */
-  resolveApproval(sessionId: string, approvalId: string, decision: ApprovalDecision, comment?: string): boolean;
+  resolveApproval(
+    sessionId: string,
+    approvalId: string,
+    decision: ApprovalDecision,
+    comment?: string,
+  ): boolean;
   /** Stop the session and release the runtime process. */
   stop(sessionId: string): Promise<void>;
   /** Stop every session (daemon shutdown). */
@@ -62,13 +67,13 @@ export class RuntimeError extends Error {
   constructor(
     message: string,
     readonly code:
-      | 'unknown_session'
-      | 'session_exists'
-      | 'permission_mode_rejected'
-      | 'runtime_unavailable'
-      | 'invalid_state',
+      | "unknown_session"
+      | "session_exists"
+      | "permission_mode_rejected"
+      | "runtime_unavailable"
+      | "invalid_state",
   ) {
     super(message);
-    this.name = 'RuntimeError';
+    this.name = "RuntimeError";
   }
 }

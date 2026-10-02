@@ -174,6 +174,7 @@ export async function buildApp(
   // ---------------------------------------------------------------- module registry
   // Add a module: implement apps/api/src/modules/<name>/index.ts and add ONE line here.
   // Modules are mounted under /api/v1 unless they set `prefix`.
+  const deviceModule = createDeviceModule(core); // B3: owns the Device Link hub used by work-session
   const modules: ApiModule[] = [
     createIdentityModule({ identity, db, audit, realtime, apiUrl: env.OCW_PUBLIC_API_URL }),
     createOrganizationModule(core),
@@ -182,8 +183,8 @@ export async function buildApp(
     createChatModule(core), // B1
     createAgentModule(core), // B2
     createAgentChannelModule(core), // B2
-    createDeviceModule(core), // B3
-    createWorkSessionModule(core), // B3
+    deviceModule, // B3
+    createWorkSessionModule(core, deviceModule.hub), // B3
   ];
   for (const m of modules) {
     await app.register(async (scope) => m.register(scope as unknown as App), {

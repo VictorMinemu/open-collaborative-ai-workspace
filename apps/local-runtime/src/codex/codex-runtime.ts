@@ -10,45 +10,45 @@
 // Known limit: Codex's sandbox restricts writes and network, not reads; secrets read by a sandboxed
 // command are still caught on the way out by redact().
 
-import { type ChildProcess, spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { existsSync, statSync } from 'node:fs';
-import type { Readable, Writable } from 'node:stream';
-import { commandTouchesSecrets, isSecretPath } from '../claude/tool-policy.js';
-import { filterEnv, findExecutable } from '../exec-path.js';
-import { type Logger, errorMessage, silentLogger } from '../logger.js';
+import { type ChildProcess, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { existsSync, statSync } from "node:fs";
+import type { Readable, Writable } from "node:stream";
 import {
   type ApprovalDecision,
-  PermissionModeSchema,
+  PermissionMode,
   type PromptPayload,
   type RuntimeInfo,
   type SessionEvent,
   type WorkSessionStatus,
-} from '../protocol.js';
+} from "@ocw/contracts";
+import { commandTouchesSecrets, isSecretPath } from "../claude/tool-policy.js";
+import { filterEnv, findExecutable } from "../exec-path.js";
+import { errorMessage, type Logger, silentLogger } from "../logger.js";
 import {
   type AgentRuntime,
   type EventSink,
   type RuntimeCapabilities,
   RuntimeError,
   type StartSessionOptions,
-} from '../runtime.js';
-import { redact } from '../sanitize.js';
-import { detectCodex } from './detect.js';
-import type { ApplyPatchApprovalParams } from './generated/ApplyPatchApprovalParams.js';
-import type { ExecCommandApprovalParams } from './generated/ExecCommandApprovalParams.js';
-import type { InitializeParams } from './generated/InitializeParams.js';
-import type { ReviewDecision } from './generated/ReviewDecision.js';
-import type { CommandExecutionApprovalDecision } from './generated/v2/CommandExecutionApprovalDecision.js';
-import type { CommandExecutionRequestApprovalParams } from './generated/v2/CommandExecutionRequestApprovalParams.js';
-import type { FileChangeRequestApprovalParams } from './generated/v2/FileChangeRequestApprovalParams.js';
-import type { PermissionsRequestApprovalParams } from './generated/v2/PermissionsRequestApprovalParams.js';
-import type { PermissionsRequestApprovalResponse } from './generated/v2/PermissionsRequestApprovalResponse.js';
-import type { ThreadStartParams } from './generated/v2/ThreadStartParams.js';
-import type { ThreadStartResponse } from './generated/v2/ThreadStartResponse.js';
-import type { TurnStartResponse } from './generated/v2/TurnStartResponse.js';
-import type { UserInput } from './generated/v2/UserInput.js';
-import { JsonRpcError, type JsonRpcNotification, JsonRpcPeer, type JsonRpcRequest } from './jsonrpc.js';
-import { CodexEventMapper, summarizeItem } from './mapper.js';
+} from "../runtime.js";
+import { redact } from "../sanitize.js";
+import { detectCodex } from "./detect.js";
+import type { ApplyPatchApprovalParams } from "./generated/ApplyPatchApprovalParams.js";
+import type { ExecCommandApprovalParams } from "./generated/ExecCommandApprovalParams.js";
+import type { InitializeParams } from "./generated/InitializeParams.js";
+import type { ReviewDecision } from "./generated/ReviewDecision.js";
+import type { CommandExecutionApprovalDecision } from "./generated/v2/CommandExecutionApprovalDecision.js";
+import type { CommandExecutionRequestApprovalParams } from "./generated/v2/CommandExecutionRequestApprovalParams.js";
+import type { FileChangeRequestApprovalParams } from "./generated/v2/FileChangeRequestApprovalParams.js";
+import type { PermissionsRequestApprovalParams } from "./generated/v2/PermissionsRequestApprovalParams.js";
+import type { PermissionsRequestApprovalResponse } from "./generated/v2/PermissionsRequestApprovalResponse.js";
+import type { ThreadStartParams } from "./generated/v2/ThreadStartParams.js";
+import type { ThreadStartResponse } from "./generated/v2/ThreadStartResponse.js";
+import type { TurnStartResponse } from "./generated/v2/TurnStartResponse.js";
+import type { UserInput } from "./generated/v2/UserInput.js";
+import { JsonRpcError, type JsonRpcNotification, JsonRpcPeer, type JsonRpcRequest } from "./jsonrpc.js";
+import { CodexEventMapper, summarizeItem } from "./mapper.js";
 
 export const CODEX_APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
 const STOP_GRACE_MS = 3_000;
@@ -58,10 +58,13 @@ export interface AppServerProcess {
   stdout: Readable;
   stderr?: Readable | null;
   kill(signal?: NodeJS.Signals): void;
-  once(event: 'exit', cb: (code: number | null) => void): unknown;
+  once(event: "exit", cb: (code: number | null) => void): unknown;
 }
 
-export type SpawnAppServer = (opts: { cwd: string; env: Record<string, string | undefined> }) => AppServerProcess;
+export type SpawnAppServer = (opts: {
+  cwd: string;
+  env: Record<string, string | undefined>;
+}) => AppServerProcess;
 
 export interface CodexRuntimeOptions {
   codexPath?: string;
@@ -72,20 +75,24 @@ export interface CodexRuntimeOptions {
   spawnAppServer?: SpawnAppServer;
   detect?: () => Promise<RuntimeInfo>;
   /** Observe every JSON-RPC message (fixture recording). */
-  onRpcMessage?: (direction: 'in' | 'out', message: unknown) => void;
+  onRpcMessage?: (direction: "in" | "out", message: unknown) => void;
 }
 
-const CODEX_API_KEY_VARS: readonly string[] = ['OPENAI_API_KEY', 'CODEX_API_KEY'];
+const CODEX_API_KEY_VARS: readonly string[] = ["OPENAI_API_KEY", "CODEX_API_KEY"];
 const PARENT_CODEX_VARS = /^CODEX_(SANDBOX.*|THREAD_ID|SESSION_ID|MANAGED_BY_.*)$/;
 
-export function codexChildEnv(env: NodeJS.ProcessEnv = process.env, useApiKey = false): Record<string, string | undefined> {
+export function codexChildEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  useApiKey = false,
+): Record<string, string | undefined> {
   return filterEnv(
     env,
-    (k) => k.startsWith('OCW_') || PARENT_CODEX_VARS.test(k) || (!useApiKey && CODEX_API_KEY_VARS.includes(k)),
+    (k) =>
+      k.startsWith("OCW_") || PARENT_CODEX_VARS.test(k) || (!useApiKey && CODEX_API_KEY_VARS.includes(k)),
   );
 }
 
-type Outcome = ApprovalDecision | 'expired';
+type Outcome = ApprovalDecision | "expired";
 
 interface Session {
   id: string;
@@ -109,17 +116,18 @@ interface Session {
 
 function toInput(p: PromptPayload): UserInput[] {
   const input: UserInput[] = [];
-  for (const img of p.images ?? []) input.push({ type: 'image', url: `data:${img.mediaType};base64,${img.dataBase64}` });
-  input.push({ type: 'text', text: p.text, text_elements: [] });
+  for (const img of p.images ?? [])
+    input.push({ type: "image", url: `data:${img.mediaType};base64,${img.dataBase64}` });
+  input.push({ type: "text", text: p.text, text_elements: [] });
   return input;
 }
 
 export class CodexRuntime implements AgentRuntime {
-  readonly id = 'codex' as const;
+  readonly id = "codex" as const;
   readonly capabilities: RuntimeCapabilities = {
     supportsSteer: true,
     supportsResume: true,
-    supportsPermissionModes: ['default', 'acceptEdits', 'plan'],
+    supportsPermissionModes: ["default", "acceptEdits", "plan"],
     supportsImages: true,
   };
 
@@ -130,31 +138,41 @@ export class CodexRuntime implements AgentRuntime {
 
   constructor(private readonly opts: CodexRuntimeOptions = {}) {
     this.log = opts.logger ?? silentLogger;
-    this.codexPath = opts.codexPath ?? findExecutable('codex');
+    this.codexPath = opts.codexPath ?? findExecutable("codex");
     this.approvalTimeoutMs = opts.approvalTimeoutMs ?? CODEX_APPROVAL_TIMEOUT_MS;
   }
 
   detect(): Promise<RuntimeInfo> {
     if (this.opts.detect) return this.opts.detect();
-    return detectCodex({ ...(this.codexPath ? { codexPath: this.codexPath } : {}), useApiKey: this.opts.useApiKey ?? false });
+    return detectCodex({
+      ...(this.codexPath ? { codexPath: this.codexPath } : {}),
+      useApiKey: this.opts.useApiKey ?? false,
+    });
   }
 
   async start(options: StartSessionOptions, sink: EventSink): Promise<void> {
     if (this.sessions.has(options.sessionId)) {
-      throw new RuntimeError(`session ${options.sessionId} already running`, 'session_exists');
+      throw new RuntimeError(`session ${options.sessionId} already running`, "session_exists");
     }
-    const mode = PermissionModeSchema.safeParse(options.permissionMode);
+    const mode = PermissionMode.safeParse(options.permissionMode);
     if (!mode.success) {
-      throw new RuntimeError(`permission mode not allowed: ${String(options.permissionMode)}`, 'permission_mode_rejected');
+      throw new RuntimeError(
+        `permission mode not allowed: ${String(options.permissionMode)}`,
+        "permission_mode_rejected",
+      );
     }
     if (!existsSync(options.cwd) || !statSync(options.cwd).isDirectory()) {
-      throw new RuntimeError('project directory not found on this device', 'runtime_unavailable');
+      throw new RuntimeError("project directory not found on this device", "runtime_unavailable");
     }
 
     const env = codexChildEnv(process.env, this.opts.useApiKey ?? false);
-    const proc = this.opts.spawnAppServer ? this.opts.spawnAppServer({ cwd: options.cwd, env }) : this.spawnReal(options.cwd, env);
-    proc.stderr?.setEncoding('utf8');
-    proc.stderr?.on('data', (d: string) => this.log.debug(`[codex ${options.sessionId}] ${redact(d.trimEnd())}`));
+    const proc = this.opts.spawnAppServer
+      ? this.opts.spawnAppServer({ cwd: options.cwd, env })
+      : this.spawnReal(options.cwd, env);
+    proc.stderr?.setEncoding("utf8");
+    proc.stderr?.on("data", (d: string) =>
+      this.log.debug(`[codex ${options.sessionId}] ${redact(d.trimEnd())}`),
+    );
 
     // The session object is completed once the thread exists; handlers only run after that.
     const session = {
@@ -162,7 +180,7 @@ export class CodexRuntime implements AgentRuntime {
       cwd: options.cwd,
       permissionMode: mode.data,
       proc,
-      threadId: '',
+      threadId: "",
       mapper: new CodexEventMapper(),
       sink,
       queue: [],
@@ -173,57 +191,70 @@ export class CodexRuntime implements AgentRuntime {
       status: null,
       stopping: false,
       finished: false,
-    } as Omit<Session, 'peer' | 'exited'> as Session;
+    } as Omit<Session, "peer" | "exited"> as Session;
 
-    session.exited = new Promise<void>((resolve) => proc.once('exit', () => resolve()));
+    session.exited = new Promise<void>((resolve) => proc.once("exit", () => resolve()));
     session.peer = new JsonRpcPeer(proc.stdout, proc.stdin, {
       onNotification: (n) => this.onNotification(session, n),
       onRequest: (r) => this.onServerRequest(session, r),
-      onClose: (err) => this.finish(session, session.stopping ? null : err ? errorMessage(err) : 'Codex app-server exited unexpectedly'),
+      onClose: (err) =>
+        this.finish(
+          session,
+          session.stopping ? null : err ? errorMessage(err) : "Codex app-server exited unexpectedly",
+        ),
       ...(this.opts.onRpcMessage ? { onLine: this.opts.onRpcMessage } : {}),
     });
 
     try {
       const init: InitializeParams = {
-        clientInfo: { name: 'ocw_local_runtime', title: 'Open Collaborative AI Workspace', version: '0.0.0' },
+        clientInfo: { name: "ocw_local_runtime", title: "Open Collaborative AI Workspace", version: "0.0.0" },
         capabilities: { experimentalApi: false, requestAttestation: false },
       };
-      await session.peer.request('initialize', init, 30_000);
-      session.peer.notify('initialized');
+      await session.peer.request("initialize", init, 30_000);
+      session.peer.notify("initialized");
 
       const threadParams: ThreadStartParams = {
         cwd: options.cwd,
-        approvalPolicy: 'on-request',
-        sandbox: mode.data === 'plan' ? 'read-only' : 'workspace-write',
+        approvalPolicy: "on-request",
+        sandbox: mode.data === "plan" ? "read-only" : "workspace-write",
         ...(options.model ? { model: options.model } : {}),
       };
       const resp = options.resumeRuntimeSessionId
-        ? await session.peer.request<ThreadStartResponse>('thread/resume', { ...threadParams, threadId: options.resumeRuntimeSessionId }, 60_000)
-        : await session.peer.request<ThreadStartResponse>('thread/start', threadParams, 60_000);
-      if (resp.sandbox?.type === 'dangerFullAccess' || resp.approvalPolicy === 'never') {
-        throw new RuntimeError('Codex reported an unrestricted sandbox/approval policy; session aborted', 'permission_mode_rejected');
+        ? await session.peer.request<ThreadStartResponse>(
+            "thread/resume",
+            { ...threadParams, threadId: options.resumeRuntimeSessionId },
+            60_000,
+          )
+        : await session.peer.request<ThreadStartResponse>("thread/start", threadParams, 60_000);
+      if (resp.sandbox?.type === "dangerFullAccess" || resp.approvalPolicy === "never") {
+        throw new RuntimeError(
+          "Codex reported an unrestricted sandbox/approval policy; session aborted",
+          "permission_mode_rejected",
+        );
       }
       session.threadId = resp.thread.id;
       this.sessions.set(session.id, session);
       this.emit(session, {
-        type: 'session.started',
-        runtime: 'codex',
+        type: "session.started",
+        runtime: "codex",
         runtimeSessionId: resp.thread.id,
         model: resp.model,
         permissionMode: mode.data,
       });
-      this.emit(session, { type: 'session.state', status: 'idle' });
+      this.emit(session, { type: "session.state", status: "idle" });
     } catch (err) {
       session.stopping = true;
       session.peer.close();
-      proc.kill('SIGTERM');
-      throw err instanceof RuntimeError ? err : new RuntimeError(`codex app-server failed to start: ${errorMessage(err)}`, 'runtime_unavailable');
+      proc.kill("SIGTERM");
+      throw err instanceof RuntimeError
+        ? err
+        : new RuntimeError(`codex app-server failed to start: ${errorMessage(err)}`, "runtime_unavailable");
     }
   }
 
   async prompt(sessionId: string, prompt: PromptPayload): Promise<void> {
     const s = this.get(sessionId);
-    if (s.stopping) throw new RuntimeError('session is stopping', 'invalid_state');
+    if (s.stopping) throw new RuntimeError("session is stopping", "invalid_state");
     if (s.running) {
       s.queue.push(prompt);
       return;
@@ -235,26 +266,35 @@ export class CodexRuntime implements AgentRuntime {
     const s = this.get(sessionId);
     const turnId = s.mapper.currentTurnId;
     if (!s.running || !turnId) return this.prompt(sessionId, prompt);
-    await s.peer.request('turn/steer', { threadId: s.threadId, input: toInput(prompt), expectedTurnId: turnId });
+    await s.peer.request("turn/steer", {
+      threadId: s.threadId,
+      input: toInput(prompt),
+      expectedTurnId: turnId,
+    });
     s.steered.push(prompt.promptId);
-    this.emit(s, { type: 'prompt.started', promptId: prompt.promptId });
+    this.emit(s, { type: "prompt.started", promptId: prompt.promptId });
   }
 
   async interrupt(sessionId: string): Promise<void> {
     const s = this.get(sessionId);
     if (!s.running) return;
     s.interruptRequested = true;
-    this.settleAll(s, 'deny', 'Interrupted');
+    this.settleAll(s, "deny", "Interrupted");
     const turnId = s.mapper.currentTurnId;
     if (!turnId) return;
     try {
-      await s.peer.request('turn/interrupt', { threadId: s.threadId, turnId }, 15_000);
+      await s.peer.request("turn/interrupt", { threadId: s.threadId, turnId }, 15_000);
     } catch (err) {
-      this.log.warn('codex interrupt failed', { sessionId, error: errorMessage(err) });
+      this.log.warn("codex interrupt failed", { sessionId, error: errorMessage(err) });
     }
   }
 
-  resolveApproval(sessionId: string, approvalId: string, decision: ApprovalDecision, comment?: string): boolean {
+  resolveApproval(
+    sessionId: string,
+    approvalId: string,
+    decision: ApprovalDecision,
+    comment?: string,
+  ): boolean {
     const settle = this.sessions.get(sessionId)?.approvals.get(approvalId);
     if (!settle) return false;
     settle(decision, comment);
@@ -267,14 +307,14 @@ export class CodexRuntime implements AgentRuntime {
     s.stopping = true;
     s.queue.length = 0;
     if (s.running) await this.interrupt(sessionId);
-    this.settleAll(s, 'deny', 'Session stopped');
+    this.settleAll(s, "deny", "Session stopped");
     s.proc.stdin.end();
-    s.proc.kill('SIGTERM');
+    s.proc.kill("SIGTERM");
     const exited = await Promise.race([
       s.exited.then(() => true),
       new Promise<boolean>((r) => setTimeout(() => r(false), STOP_GRACE_MS).unref()),
     ]);
-    if (!exited) s.proc.kill('SIGKILL');
+    if (!exited) s.proc.kill("SIGKILL");
     s.peer.close();
     this.finish(s, null);
     this.sessions.delete(sessionId);
@@ -287,26 +327,26 @@ export class CodexRuntime implements AgentRuntime {
   // -------------------------------------------------------------------------------------------
 
   private spawnReal(cwd: string, env: Record<string, string | undefined>): ChildProcess & AppServerProcess {
-    if (!this.codexPath) throw new RuntimeError('codex CLI not found on PATH', 'runtime_unavailable');
-    const child = spawn(this.codexPath, ['app-server'], { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+    if (!this.codexPath) throw new RuntimeError("codex CLI not found on PATH", "runtime_unavailable");
+    const child = spawn(this.codexPath, ["app-server"], { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
     return child as ChildProcess & AppServerProcess;
   }
 
   private get(sessionId: string): Session {
     const s = this.sessions.get(sessionId);
-    if (!s) throw new RuntimeError(`unknown session ${sessionId}`, 'unknown_session');
+    if (!s) throw new RuntimeError(`unknown session ${sessionId}`, "unknown_session");
     return s;
   }
 
   private emit(s: Session, event: SessionEvent): void {
-    if (event.type === 'session.state') {
+    if (event.type === "session.state") {
       if (s.status === event.status) return;
       s.status = event.status;
     }
     try {
       s.sink(event);
     } catch (err) {
-      this.log.error('event sink failed', { sessionId: s.id, error: errorMessage(err) });
+      this.log.error("event sink failed", { sessionId: s.id, error: errorMessage(err) });
     }
   }
 
@@ -314,15 +354,23 @@ export class CodexRuntime implements AgentRuntime {
     s.running = prompt;
     s.interruptRequested = false;
     s.mapper.currentPromptId = prompt.promptId;
-    this.emit(s, { type: 'prompt.started', promptId: prompt.promptId });
-    this.emit(s, { type: 'session.state', status: 'running' });
+    this.emit(s, { type: "prompt.started", promptId: prompt.promptId });
+    this.emit(s, { type: "session.state", status: "running" });
     try {
-      const resp = await s.peer.request<TurnStartResponse>('turn/start', { threadId: s.threadId, input: toInput(prompt) });
+      const resp = await s.peer.request<TurnStartResponse>("turn/start", {
+        threadId: s.threadId,
+        input: toInput(prompt),
+      });
       if (!s.mapper.currentTurnId && resp?.turn?.id) s.mapper.currentTurnId = resp.turn.id;
     } catch (err) {
       if (s.running?.promptId !== prompt.promptId) return;
-      this.emit(s, { type: 'session.error', message: `turn/start failed: ${errorMessage(err)}` });
-      this.emit(s, { type: 'prompt.completed', promptId: prompt.promptId, usage: { inputTokens: 0, outputTokens: 0 }, isError: true });
+      this.emit(s, { type: "session.error", message: `turn/start failed: ${errorMessage(err)}` });
+      this.emit(s, {
+        type: "prompt.completed",
+        promptId: prompt.promptId,
+        usage: { inputTokens: 0, outputTokens: 0 },
+        isError: true,
+      });
       s.mapper.currentPromptId = null;
       this.onTurnComplete(s);
     }
@@ -330,8 +378,8 @@ export class CodexRuntime implements AgentRuntime {
 
   private onNotification(s: Session, n: JsonRpcNotification): void {
     for (const ev of s.mapper.map(n)) {
-      if (ev.type === 'session.error' && s.interruptRequested) continue;
-      if (ev.type === 'prompt.completed') {
+      if (ev.type === "session.error" && s.interruptRequested) continue;
+      if (ev.type === "prompt.completed") {
         this.emit(s, ev);
         for (const promptId of s.steered.splice(0)) {
           this.emit(s, { ...ev, promptId, usage: { inputTokens: 0, outputTokens: 0 } });
@@ -348,17 +396,17 @@ export class CodexRuntime implements AgentRuntime {
     s.interruptRequested = false;
     const next = s.queue.shift();
     if (next && !s.stopping) void this.dispatch(s, next);
-    else this.emit(s, { type: 'session.state', status: 'idle' });
+    else this.emit(s, { type: "session.state", status: "idle" });
   }
 
   private finish(s: Session, error: string | null): void {
     if (s.finished) return;
     s.finished = true;
-    this.settleAll(s, 'deny', 'Session ended');
+    this.settleAll(s, "deny", "Session ended");
     if (!this.sessions.has(s.id)) return; // never got past start(); start() reports the error
     if (s.running) {
       this.emit(s, {
-        type: 'prompt.completed',
+        type: "prompt.completed",
         promptId: s.running.promptId,
         usage: { inputTokens: 0, outputTokens: 0 },
         isError: true,
@@ -367,10 +415,10 @@ export class CodexRuntime implements AgentRuntime {
       s.running = null;
     }
     if (error) {
-      this.emit(s, { type: 'session.error', message: error });
-      this.emit(s, { type: 'session.state', status: 'failed' });
+      this.emit(s, { type: "session.error", message: error });
+      this.emit(s, { type: "session.state", status: "failed" });
     } else {
-      this.emit(s, { type: 'session.state', status: 'completed' });
+      this.emit(s, { type: "session.state", status: "completed" });
     }
     if (!s.stopping) this.sessions.delete(s.id);
   }
@@ -380,11 +428,16 @@ export class CodexRuntime implements AgentRuntime {
   }
 
   /** Emit approval.requested and wait for approval.resolve (or timeout / interrupt). */
-  private ask(s: Session, tool: string, summary: string, paths: string[]): Promise<{ outcome: Outcome; comment?: string }> {
-    if (s.stopping) return Promise.resolve({ outcome: 'deny' });
+  private ask(
+    s: Session,
+    tool: string,
+    summary: string,
+    paths: string[],
+  ): Promise<{ outcome: Outcome; comment?: string }> {
+    if (s.stopping) return Promise.resolve({ outcome: "deny" });
     const approvalId = randomUUID();
     const result = new Promise<{ outcome: Outcome; comment?: string }>((resolve) => {
-      const timer = setTimeout(() => settle('expired'), this.approvalTimeoutMs);
+      const timer = setTimeout(() => settle("expired"), this.approvalTimeoutMs);
       const settle = (outcome: Outcome, comment?: string) => {
         if (!s.approvals.delete(approvalId)) return;
         clearTimeout(timer);
@@ -392,69 +445,89 @@ export class CodexRuntime implements AgentRuntime {
       };
       s.approvals.set(approvalId, settle);
     });
-    this.emit(s, { type: 'approval.requested', approvalId, tool, summary, paths });
-    this.emit(s, { type: 'session.state', status: 'waiting_approval' });
+    this.emit(s, { type: "approval.requested", approvalId, tool, summary, paths });
+    this.emit(s, { type: "session.state", status: "waiting_approval" });
     return result.then((r) => {
-      this.emit(s, { type: 'approval.resolved', approvalId, decision: r.outcome });
-      if (s.approvals.size === 0 && s.running) this.emit(s, { type: 'session.state', status: 'running' });
+      this.emit(s, { type: "approval.resolved", approvalId, decision: r.outcome });
+      if (s.approvals.size === 0 && s.running) this.emit(s, { type: "session.state", status: "running" });
       return r;
     });
   }
 
   private async onServerRequest(s: Session, r: JsonRpcRequest): Promise<unknown> {
     switch (r.method) {
-      case 'item/commandExecution/requestApproval': {
+      case "item/commandExecution/requestApproval": {
         const p = r.params as CommandExecutionRequestApprovalParams;
         const item = s.mapper.items.get(p.itemId);
-        const command = p.command ?? (item?.type === 'commandExecution' ? item.command : '');
-        if (command && commandTouchesSecrets(command)) return { decision: 'decline' satisfies CommandExecutionApprovalDecision };
-        const summary = [p.reason, command ? `$ ${command}` : null, p.networkApprovalContext ? 'Requires network access' : null]
+        const command = p.command ?? (item?.type === "commandExecution" ? item.command : "");
+        if (command && commandTouchesSecrets(command))
+          return { decision: "decline" satisfies CommandExecutionApprovalDecision };
+        const summary = [
+          p.reason,
+          command ? `$ ${command}` : null,
+          p.networkApprovalContext ? "Requires network access" : null,
+        ]
           .filter(Boolean)
-          .join('\n');
-        const { outcome } = await this.ask(s, 'Bash', summary || 'Run a command', p.cwd ? [p.cwd] : []);
+          .join("\n");
+        const { outcome } = await this.ask(s, "Bash", summary || "Run a command", p.cwd ? [p.cwd] : []);
         const decision: CommandExecutionApprovalDecision =
-          outcome === 'once' ? 'accept' : outcome === 'session' ? 'acceptForSession' : 'decline';
+          outcome === "once" ? "accept" : outcome === "session" ? "acceptForSession" : "decline";
         return { decision };
       }
-      case 'item/fileChange/requestApproval': {
+      case "item/fileChange/requestApproval": {
         const p = r.params as FileChangeRequestApprovalParams;
         const item = s.mapper.items.get(p.itemId);
-        const paths = item?.type === 'fileChange' ? item.changes.map((c) => c.path) : [];
-        if (paths.some((x) => isSecretPath(x, s.cwd))) return { decision: 'decline' };
-        const summary = [p.reason, item ? summarizeItem(item) : 'Apply file changes', p.grantRoot ? `Grant write access to ${p.grantRoot}` : null]
+        const paths = item?.type === "fileChange" ? item.changes.map((c) => c.path) : [];
+        if (paths.some((x) => isSecretPath(x, s.cwd))) return { decision: "decline" };
+        const summary = [
+          p.reason,
+          item ? summarizeItem(item) : "Apply file changes",
+          p.grantRoot ? `Grant write access to ${p.grantRoot}` : null,
+        ]
           .filter(Boolean)
-          .join('\n');
-        const { outcome } = await this.ask(s, 'Edit', summary, p.grantRoot ? [...paths, p.grantRoot] : paths);
-        return { decision: outcome === 'once' ? 'accept' : outcome === 'session' ? 'acceptForSession' : 'decline' };
+          .join("\n");
+        const { outcome } = await this.ask(s, "Edit", summary, p.grantRoot ? [...paths, p.grantRoot] : paths);
+        return {
+          decision: outcome === "once" ? "accept" : outcome === "session" ? "acceptForSession" : "decline",
+        };
       }
-      case 'item/permissions/requestApproval': {
+      case "item/permissions/requestApproval": {
         const p = r.params as PermissionsRequestApprovalParams;
-        const summary = `Additional permissions requested${p.reason ? `: ${p.reason}` : ''}\n${JSON.stringify(p.permissions)}`;
-        const { outcome } = await this.ask(s, 'Permissions', summary, []);
+        const summary = `Additional permissions requested${p.reason ? `: ${p.reason}` : ""}\n${JSON.stringify(p.permissions)}`;
+        const { outcome } = await this.ask(s, "Permissions", summary, []);
         const granted: PermissionsRequestApprovalResponse =
-          outcome === 'once' || outcome === 'session'
+          outcome === "once" || outcome === "session"
             ? {
                 permissions: {
                   ...(p.permissions.network ? { network: p.permissions.network } : {}),
                   ...(p.permissions.fileSystem ? { fileSystem: p.permissions.fileSystem } : {}),
                 },
-                scope: outcome === 'session' ? 'session' : 'turn',
+                scope: outcome === "session" ? "session" : "turn",
               }
-            : { permissions: {}, scope: 'turn' };
+            : { permissions: {}, scope: "turn" };
         return granted;
       }
-      case 'execCommandApproval': {
+      case "execCommandApproval": {
         const p = r.params as ExecCommandApprovalParams;
-        const command = p.command.join(' ');
-        if (commandTouchesSecrets(command)) return { decision: { denied: { rejection: 'secret access blocked' } } satisfies ReviewDecision };
-        const { outcome } = await this.ask(s, 'Bash', [p.reason, `$ ${command}`].filter(Boolean).join('\n'), [p.cwd]);
+        const command = p.command.join(" ");
+        if (commandTouchesSecrets(command))
+          return { decision: { denied: { rejection: "secret access blocked" } } satisfies ReviewDecision };
+        const { outcome } = await this.ask(s, "Bash", [p.reason, `$ ${command}`].filter(Boolean).join("\n"), [
+          p.cwd,
+        ]);
         return { decision: this.review(outcome) };
       }
-      case 'applyPatchApproval': {
+      case "applyPatchApproval": {
         const p = r.params as ApplyPatchApprovalParams;
         const paths = Object.keys(p.fileChanges);
-        if (paths.some((x) => isSecretPath(x, s.cwd))) return { decision: { denied: { rejection: 'secret access blocked' } } };
-        const { outcome } = await this.ask(s, 'Edit', [p.reason, `Edit ${paths.join(', ')}`].filter(Boolean).join('\n'), paths);
+        if (paths.some((x) => isSecretPath(x, s.cwd)))
+          return { decision: { denied: { rejection: "secret access blocked" } } };
+        const { outcome } = await this.ask(
+          s,
+          "Edit",
+          [p.reason, `Edit ${paths.join(", ")}`].filter(Boolean).join("\n"),
+          paths,
+        );
         return { decision: this.review(outcome) };
       }
       default:
@@ -463,8 +536,10 @@ export class CodexRuntime implements AgentRuntime {
   }
 
   private review(outcome: Outcome): ReviewDecision {
-    if (outcome === 'once') return 'approved';
-    if (outcome === 'session') return 'approved_for_session';
-    return { denied: { rejection: outcome === 'expired' ? 'approval expired' : 'denied by the workspace user' } };
+    if (outcome === "once") return "approved";
+    if (outcome === "session") return "approved_for_session";
+    return {
+      denied: { rejection: outcome === "expired" ? "approval expired" : "denied by the workspace user" },
+    };
   }
 }

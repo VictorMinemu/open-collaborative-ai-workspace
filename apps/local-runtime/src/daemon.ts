@@ -1,41 +1,42 @@
 // Local Runtime daemon core: config + project registry, outbound Device Link, command handling
 // with acks, event forwarding through sanitizeEvent(), and the local control socket.
 
-import { realpathSync } from 'node:fs';
-import { arch, platform } from 'node:os';
-import { ClaudeCodeRuntime } from './claude/claude-runtime.js';
-import { CodexRuntime } from './codex/codex-runtime.js';
+import { realpathSync } from "node:fs";
+import { arch, platform } from "node:os";
 import {
-  type LocalProject,
-  ProjectRegistry,
-  type RuntimeConfig,
-  deviceName,
-  ensureOcwHome,
-  loadConfig,
-  loadDeviceToken,
-  ocwHome,
-  toWebSocketUrl,
-} from './config.js';
-import { type ControlRequest, ControlSocketServer, controlSocketPath } from './control-socket.js';
-import { DeviceLink, type DeviceLinkOptions } from './device-link.js';
-import { changedFiles, ensureSessionWorktree, repoInfo, unifiedPatch } from './git.js';
-import { type Logger, createLogger, errorMessage } from './logger.js';
-import {
-  ApprovalResolvePayloadSchema,
+  ApprovalResolvePayload,
   type CommandFrame,
   DEVICE_LINK_PROTOCOL_VERSION,
-  type DeviceFrame,
-  DiffRequestPayloadSchema,
-  PromptPayloadSchema,
+  type DeviceToServerFrame,
+  DiffRequestPayload,
+  PromptPayload,
   type RuntimeId,
   type RuntimeInfo,
   type SessionEvent,
-  SessionStartPayloadSchema,
-} from './protocol.js';
-import type { AgentRuntime } from './runtime.js';
-import { sanitizeEvent, sanitizeString, sanitizeValue } from './sanitize.js';
+  SessionStartPayload,
+} from "@ocw/contracts";
+import { ClaudeCodeRuntime } from "./claude/claude-runtime.js";
+import { CodexRuntime } from "./codex/codex-runtime.js";
+import {
+  deviceName,
+  ensureOcwHome,
+  type LocalProject,
+  loadConfig,
+  loadDeviceToken,
+  ocwHome,
+  ProjectRegistry,
+  type RuntimeConfig,
+  toWebSocketUrl,
+} from "./config.js";
+import { type ControlRequest, ControlSocketServer, controlSocketPath } from "./control-socket.js";
+import { DeviceLink, type DeviceLinkOptions } from "./device-link.js";
+import { FakeRuntime } from "./fake/fake-runtime.js";
+import { changedFiles, ensureSessionWorktree, repoInfo, unifiedPatch } from "./git.js";
+import { createLogger, errorMessage, type Logger } from "./logger.js";
+import type { AgentRuntime } from "./runtime.js";
+import { sanitizeEvent, sanitizeString, sanitizeValue } from "./sanitize.js";
 
-export const DAEMON_VERSION = '0.0.0';
+export const DAEMON_VERSION = "0.0.0";
 const DETECT_CACHE_MS = 60_000;
 const MAX_REMEMBERED_COMMANDS = 1000;
 
@@ -48,7 +49,9 @@ export interface DaemonOptions {
   token?: string | null;
   runtimes?: AgentRuntime[];
   logger?: Logger;
-  link?: Partial<Pick<DeviceLinkOptions, 'heartbeatMs' | 'backoffMinMs' | 'backoffMaxMs' | 'maxOfflineFrames'>>;
+  link?: Partial<
+    Pick<DeviceLinkOptions, "heartbeatMs" | "backoffMinMs" | "backoffMaxMs" | "maxOfflineFrames">
+  >;
   /** Socket path override, or false to disable the control socket. */
   controlSocket?: string | false;
 }
@@ -102,18 +105,21 @@ export class Daemon {
     const config = { ...loaded, ...opts.config };
     const log = opts.logger ?? createLogger(config.logLevel);
     const token = opts.token !== undefined ? opts.token : await loadDeviceToken(home, config, env);
-    const runtimes = opts.runtimes ?? [
-      new ClaudeCodeRuntime({
-        logger: log,
-        useApiKey: config.claude.useApiKey,
-        ...(config.claude.path ? { claudePath: config.claude.path } : {}),
-      }),
-      new CodexRuntime({
-        logger: log,
-        useApiKey: config.codex.useApiKey,
-        ...(config.codex.path ? { codexPath: config.codex.path } : {}),
-      }),
-    ];
+    const fake = env.OCW_RUNTIME_FAKE === "1";
+    if (fake) log.warn("OCW_RUNTIME_FAKE=1: using the fake runtime (tests/demos only, no model is called)");
+    const runtimes = opts.runtimes ??
+      (fake ? [new FakeRuntime("claude-code"), new FakeRuntime("codex")] : null) ?? [
+        new ClaudeCodeRuntime({
+          logger: log,
+          useApiKey: config.claude.useApiKey,
+          ...(config.claude.path ? { claudePath: config.claude.path } : {}),
+        }),
+        new CodexRuntime({
+          logger: log,
+          useApiKey: config.codex.useApiKey,
+          ...(config.codex.path ? { codexPath: config.codex.path } : {}),
+        }),
+      ];
     const daemon = new Daemon(home, config, token, runtimes, log, opts);
     await daemon.registry.load();
     return daemon;
@@ -130,10 +136,10 @@ export class Daemon {
       const path = this.opts.controlSocket ?? controlSocketPath(this.home);
       this.control = new ControlSocketServer(path, (req) => this.handleControl(req), this.log);
       await this.control.listen();
-      this.log.info('control socket listening');
+      this.log.info("control socket listening");
     }
     if (!this.token) {
-      this.log.warn('no device token found; pair this device from the desktop app, then restart the runtime');
+      this.log.warn("no device token found; pair this device from the desktop app, then restart the runtime");
       return;
     }
     this.link = new DeviceLink({
@@ -145,7 +151,7 @@ export class Daemon {
       ...this.opts.link,
     });
     this.link.start();
-    this.log.info('connecting to server', { serverUrl: this.config.serverUrl });
+    this.log.info("connecting to server", { serverUrl: this.config.serverUrl });
   }
 
   async stop(): Promise<void> {
@@ -188,26 +194,32 @@ export class Daemon {
     return value;
   }
 
-  private async handshakeFrames(): Promise<DeviceFrame[]> {
+  private async handshakeFrames(): Promise<DeviceToServerFrame[]> {
     return [
       {
-        type: 'hello',
+        type: "hello",
         protocolVersion: DEVICE_LINK_PROTOCOL_VERSION,
-        device: { name: deviceName(this.config), platform: platform(), arch: arch(), daemonVersion: DAEMON_VERSION },
+        device: {
+          name: deviceName(this.config),
+          platform: platform(),
+          arch: arch(),
+          daemonVersion: DAEMON_VERSION,
+        },
         runtimes: await this.detectRuntimes(),
+        sessions: [...this.sessions.keys()],
       },
-      { type: 'projects.sync', projects: this.registry.toSynced() },
+      { type: "projects.sync", projects: this.registry.toSynced() },
     ];
   }
 
-  private send(frame: DeviceFrame): void {
+  private send(frame: DeviceToServerFrame): void {
     this.link?.send(frame);
   }
 
   private syncProjects(): void {
     // Offline changes are covered by the handshake on reconnect; never queue a stale list.
     if (!this.isConnected) return;
-    this.send({ type: 'projects.sync', projects: this.registry.toSynced() });
+    this.send({ type: "projects.sync", projects: this.registry.toSynced() });
   }
 
   private rootsFor(cwd: string, project?: LocalProject): string[] {
@@ -219,14 +231,16 @@ export class Daemon {
   /** The only path by which runtime events leave the device. */
   forwardEvent(sessionId: string, event: SessionEvent): void {
     const roots = this.rootsBySession.get(sessionId) ?? [];
-    const localSeq = (this.seqBySession.get(sessionId) ?? 0) + 1;
+    // Seeded from the clock (µs-scale) so a restarted daemon never reuses a localSeq the server has
+    // already stored for this session; the server drops events whose localSeq is not increasing.
+    const localSeq = (this.seqBySession.get(sessionId) ?? Date.now() * 1000) + 1;
     this.seqBySession.set(sessionId, localSeq);
-    this.send({ type: 'event', sessionId, event: sanitizeEvent(event, roots), localSeq });
+    this.send({ type: "event", sessionId, event: sanitizeEvent(event, roots), localSeq });
   }
 
   private ack(commandId: string, error?: string, roots: string[] = []): void {
-    if (error === undefined) this.send({ type: 'ack', commandId, ok: true });
-    else this.send({ type: 'ack', commandId, ok: false, error: sanitizeString(error, roots) });
+    if (error === undefined) this.send({ type: "ack", commandId, ok: true });
+    else this.send({ type: "ack", commandId, ok: false, error: sanitizeString(error, roots) });
   }
 
   private remember(commandId: string): void {
@@ -246,29 +260,34 @@ export class Daemon {
     const roots = this.rootsBySession.get(cmd.sessionId) ?? [];
     try {
       switch (cmd.kind) {
-        case 'session.start':
+        case "session.start":
           await this.startSession(cmd);
           break;
-        case 'prompt': {
+        case "prompt": {
           const s = this.requireSession(cmd.sessionId);
-          const prompt = PromptPayloadSchema.parse(cmd.payload);
-          if (prompt.delivery === 'steer' && s.runtime.capabilities.supportsSteer && s.runtime.steer) {
+          const prompt = PromptPayload.parse(cmd.payload);
+          if (prompt.delivery === "steer" && s.runtime.capabilities.supportsSteer && s.runtime.steer) {
             await s.runtime.steer(cmd.sessionId, prompt);
           } else {
             await s.runtime.prompt(cmd.sessionId, prompt);
           }
           break;
         }
-        case 'interrupt':
+        case "interrupt":
           await this.requireSession(cmd.sessionId).runtime.interrupt(cmd.sessionId);
           break;
-        case 'approval.resolve': {
-          const p = ApprovalResolvePayloadSchema.parse(cmd.payload);
-          const ok = this.requireSession(cmd.sessionId).runtime.resolveApproval(cmd.sessionId, p.approvalId, p.decision, p.comment);
-          if (!ok) throw new Error('approval not pending (unknown, expired or already resolved)');
+        case "approval.resolve": {
+          const p = ApprovalResolvePayload.parse(cmd.payload);
+          const ok = this.requireSession(cmd.sessionId).runtime.resolveApproval(
+            cmd.sessionId,
+            p.approvalId,
+            p.decision,
+            p.comment,
+          );
+          if (!ok) throw new Error("approval not pending (unknown, expired or already resolved)");
           break;
         }
-        case 'session.stop': {
+        case "session.stop": {
           const s = this.sessions.get(cmd.sessionId);
           if (s) {
             await s.runtime.stop(cmd.sessionId);
@@ -276,37 +295,41 @@ export class Daemon {
           }
           break;
         }
-        case 'diff.request':
+        case "diff.request":
           await this.sendDiff(cmd);
           break;
       }
       this.ack(cmd.id);
     } catch (err) {
       const message = errorMessage(err);
-      this.log.warn('command failed', { kind: cmd.kind, commandId: cmd.id, error: sanitizeString(message, roots) });
+      this.log.warn("command failed", {
+        kind: cmd.kind,
+        commandId: cmd.id,
+        error: sanitizeString(message, roots),
+      });
       this.ack(cmd.id, message, this.rootsBySession.get(cmd.sessionId) ?? roots);
-      if (cmd.kind === 'session.start') {
-        this.forwardEvent(cmd.sessionId, { type: 'session.error', message });
-        this.forwardEvent(cmd.sessionId, { type: 'session.state', status: 'failed' });
+      if (cmd.kind === "session.start") {
+        this.forwardEvent(cmd.sessionId, { type: "session.error", message });
+        this.forwardEvent(cmd.sessionId, { type: "session.state", status: "failed" });
       }
     }
   }
 
   private requireSession(sessionId: string): ActiveSession {
     const s = this.sessions.get(sessionId);
-    if (!s) throw new Error('session is not active on this device');
+    if (!s) throw new Error("session is not active on this device");
     return s;
   }
 
   private async startSession(cmd: CommandFrame): Promise<void> {
     if (this.sessions.has(cmd.sessionId)) return; // idempotent
     const rawMode = (cmd.payload as { permissionMode?: unknown } | undefined)?.permissionMode;
-    if (rawMode === 'bypassPermissions' || rawMode === 'dontAsk' || rawMode === 'auto') {
+    if (rawMode === "bypassPermissions" || rawMode === "dontAsk" || rawMode === "auto") {
       throw new Error(`permission mode '${String(rawMode)}' is not allowed`);
     }
-    const payload = SessionStartPayloadSchema.parse(cmd.payload ?? {});
+    const payload = SessionStartPayload.parse(cmd.payload ?? {});
     const project = this.registry.get(payload.projectLocalId);
-    if (!project) throw new Error('project is not registered on this device');
+    if (!project) throw new Error("project is not registered on this device");
     const runtime = this.runtimes.get(payload.runtime);
     if (!runtime) throw new Error(`runtime ${payload.runtime} is not available on this device`);
 
@@ -326,11 +349,13 @@ export class Daemon {
           cwd,
           permissionMode: payload.permissionMode,
           ...(payload.model ? { model: payload.model } : {}),
-          ...(payload.resumeRuntimeSessionId ? { resumeRuntimeSessionId: payload.resumeRuntimeSessionId } : {}),
+          ...(payload.resumeRuntimeSessionId
+            ? { resumeRuntimeSessionId: payload.resumeRuntimeSessionId }
+            : {}),
         },
         (event) => {
           this.forwardEvent(cmd.sessionId, event);
-          if (event.type === 'session.state' && (event.status === 'failed' || event.status === 'completed')) {
+          if (event.type === "session.state" && (event.status === "failed" || event.status === "completed")) {
             this.sessions.delete(cmd.sessionId);
           }
         },
@@ -342,7 +367,7 @@ export class Daemon {
   }
 
   private async sendDiff(cmd: CommandFrame): Promise<void> {
-    const payload = DiffRequestPayloadSchema.parse(cmd.payload ?? {});
+    const payload = DiffRequestPayload.parse(cmd.payload ?? {});
     const active = this.sessions.get(cmd.sessionId);
     let cwd: string;
     let project: LocalProject | undefined;
@@ -351,14 +376,26 @@ export class Daemon {
       project = active.project;
     } else {
       project = payload.projectLocalId ? this.registry.get(payload.projectLocalId) : undefined;
-      if (!project) throw new Error('no active session or registered project for diff');
+      if (!project) throw new Error("no active session or registered project for diff");
       cwd = project.path;
     }
     const roots = this.rootsFor(cwd, project);
-    const [files, { patch, truncated }, info] = await Promise.all([changedFiles(cwd), unifiedPatch(cwd), repoInfo(cwd)]);
+    const [files, { patch, truncated }, info] = await Promise.all([
+      changedFiles(cwd),
+      unifiedPatch(cwd),
+      repoInfo(cwd),
+    ]);
     this.send(
       sanitizeValue(
-        { type: 'diff.result', requestId: cmd.id, files, patch, truncated, branch: info.branch, headSha: info.headSha },
+        {
+          type: "diff.result",
+          requestId: cmd.id,
+          files,
+          patch,
+          truncated,
+          branch: info.branch,
+          headSha: info.headSha,
+        },
         roots,
       ),
     );
@@ -369,16 +406,16 @@ export class Daemon {
 
   private async handleControl(req: ControlRequest): Promise<unknown> {
     switch (req.cmd) {
-      case 'status':
+      case "status":
         return this.status();
-      case 'listProjects':
+      case "listProjects":
         return this.registry.list();
-      case 'addProject': {
+      case "addProject": {
         const project = await this.registry.add(req.path, req.name);
         this.syncProjects();
         return project;
       }
-      case 'removeProject': {
+      case "removeProject": {
         const removed = await this.registry.remove(req.localId);
         if (removed) this.syncProjects();
         return { removed };

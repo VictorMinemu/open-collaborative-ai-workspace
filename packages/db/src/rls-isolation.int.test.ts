@@ -106,6 +106,10 @@ async function seedOrg(c: pg.Client, org: string) {
     `insert into app.work_approvals (organization_id, work_session_id, request) values ($1, $2, '{"tool":"Edit","summary":"x","paths":["a.ts"]}')`,
     [org, ws],
   );
+  await q(
+    "insert into app.device_commands (organization_id, device_id, work_session_id, kind, payload) values ($1, $2, $3, 'prompt', '{}')",
+    [org, device, ws],
+  );
 }
 
 async function inTenant<T>(org: string, fn: () => Promise<T>): Promise<T> {
