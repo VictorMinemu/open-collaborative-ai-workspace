@@ -137,6 +137,11 @@ const TOOL_ICONS: Array<[RegExp, typeof Wrench]> = [
   [/^(todowrite|task)/i, ListTodo],
 ];
 
+/** Runtimes often prefix the summary with the tool name ("Read README.md"); the card already shows it. */
+function stripToolName(name: string, summary: string): string {
+  return summary.startsWith(`${name} `) ? summary.slice(name.length + 1) : summary;
+}
+
 function toolIcon(name: string) {
   return TOOL_ICONS.find(([re]) => re.test(name))?.[1] ?? Wrench;
 }
@@ -274,7 +279,7 @@ function ToolCard({ item }: { item: Extract<Item, { kind: "tool" }> }) {
         </span>
         <span className="shrink-0 font-medium text-[13px]">{item.name}</span>
         <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-muted-foreground">
-          {item.done && item.done.summary !== item.summary ? item.done.summary : item.summary}
+          {stripToolName(item.name, item.summary || item.done?.summary || "")}
         </span>
         {status}
         <ChevronRight

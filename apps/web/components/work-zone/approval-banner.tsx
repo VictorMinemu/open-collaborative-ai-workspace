@@ -10,6 +10,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { errorMessage } from "@/lib/api";
 import { relativeTime } from "@/lib/utils";
 import { useResolveApproval } from "@/lib/workzone-queries";
+import { Markdown } from "./markdown";
 
 /** Sticky banner for the oldest pending approval: Approve once / Allow for session / Deny with comment. */
 export function ApprovalBanner({
@@ -64,7 +65,13 @@ export function ApprovalBanner({
           </span>
           <div className="min-w-0 flex-1">
             <p className="font-medium text-sm">
-              {agentLabel} wants to use <span className="font-semibold">{tool}</span>
+              {tool === "ExitPlanMode" ? (
+                <>{agentLabel} has a plan and wants to start editing</>
+              ) : (
+                <>
+                  {agentLabel} wants to use <span className="font-semibold">{tool}</span>
+                </>
+              )}
               {pendingCount > 1 ? (
                 <span className="ml-2 font-normal text-muted-foreground text-xs">
                   +{pendingCount - 1} more waiting
@@ -75,9 +82,15 @@ export function ApprovalBanner({
           </div>
         </div>
         <div className="grid gap-2 px-4 py-3">
-          <pre className="scrollbar-thin max-h-32 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/60 px-3 py-2 font-mono text-[12.5px] leading-relaxed">
-            {summary}
-          </pre>
+          {tool === "ExitPlanMode" ? (
+            <div className="scrollbar-thin max-h-56 overflow-auto rounded-md bg-muted/60 px-3 py-2">
+              <Markdown text={summary.replace(/^Proposed plan:\s*/, "")} className="text-[13px]" />
+            </div>
+          ) : (
+            <pre className="scrollbar-thin max-h-32 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/60 px-3 py-2 font-mono text-[12.5px] leading-relaxed">
+              {summary}
+            </pre>
+          )}
           {paths.length > 0 ? (
             <div className="flex flex-wrap gap-1.5">
               {paths.slice(0, 8).map((p) => (
