@@ -68,3 +68,14 @@ describe("pidfile reaping", () => {
     expect(looksLikeDaemon(null)).toBe(false);
   });
 });
+
+describe("removePidfileIfOwner", () => {
+  it("keeps a pidfile that belongs to a newer daemon", async () => {
+    const { removePidfileIfOwner } = await import("./pidfile");
+    await writePidfile(file, 2);
+    await removePidfileIfOwner(file, 1);
+    expect((await readPidfile(file))?.pid).toBe(2);
+    await removePidfileIfOwner(file, 2);
+    expect(await readPidfile(file)).toBeNull();
+  });
+});

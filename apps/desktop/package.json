@@ -11,8 +11,8 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:daemon": "node scripts/build.mjs --daemon",
-    "dev": "node scripts/build.mjs && electron .",
-    "start": "electron .",
+    "dev": "node scripts/dev.mjs",
+    "start": "node scripts/dev.mjs",
     "icons": "node scripts/icons.mjs",
     "package:mac": "node scripts/build.mjs --daemon && electron-builder --mac dir dmg --arm64 --publish never",
     "typecheck": "tsc --noEmit -p tsconfig.json",

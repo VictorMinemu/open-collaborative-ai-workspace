@@ -31,6 +31,12 @@ export async function removePidfile(path: string): Promise<void> {
   await rm(path, { force: true });
 }
 
+/** Remove the pidfile only if it still points at `pid` (a newer daemon may have replaced it). */
+export async function removePidfileIfOwner(path: string, pid: number | undefined): Promise<void> {
+  const file = await readPidfile(path);
+  if (file && pid !== undefined && file.pid === pid) await removePidfile(path);
+}
+
 export interface ReapDeps {
   isAlive: (pid: number) => boolean;
   /** Command line of a process, or null if unknown. */

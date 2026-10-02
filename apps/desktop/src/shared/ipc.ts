@@ -5,18 +5,7 @@
 import { z } from "zod";
 import { redactRemote } from "./urls";
 
-export const Channels = {
-  // window.ocwDesktop (web app, remote origin)
-  status: "ocw:status",
-  addProject: "ocw:add-project",
-  listProjects: "ocw:list-projects",
-  statusChanged: "ocw:status-changed",
-  // window.ocwOnboarding (bundled local page)
-  onboardingDefaults: "ocw-onboarding:defaults",
-  onboardingCheckServer: "ocw-onboarding:check-server",
-  onboardingEnroll: "ocw-onboarding:enroll",
-  onboardingFinish: "ocw-onboarding:finish",
-} as const;
+export { Channels } from "./channels";
 
 // ---- arguments ---------------------------------------------------------------------------------
 
