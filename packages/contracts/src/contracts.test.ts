@@ -3,11 +3,13 @@ import {
   ClientFrame,
   ConversationKind,
   DeviceToServerFrame,
+  extractMentionHandles,
   PostMessageRequest,
   parseTopic,
   RelativePath,
   ServerFrame,
   SessionEvent,
+  userHandle,
 } from "./index";
 
 const id = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
@@ -52,5 +54,19 @@ describe("contracts", () => {
         event: { type: "session.state", status: "running" },
       }).t,
     ).toBe("event");
+  });
+});
+
+describe("chat mention helpers", () => {
+  it("extracts lowercased handles, trimming trailing punctuation", () => {
+    expect(extractMentionHandles("@Archie, what about @alex.kim. and a@b.c?")).toEqual([
+      "archie",
+      "alex.kim",
+    ]);
+  });
+
+  it("derives user handles from email, falling back to the name", () => {
+    expect(userHandle({ displayName: "Víctor Ruiz", email: "Victor.Ruiz@x.com" })).toBe("victor.ruiz");
+    expect(userHandle({ displayName: "Víctor Ruiz", email: null })).toBe("victorruiz");
   });
 });
