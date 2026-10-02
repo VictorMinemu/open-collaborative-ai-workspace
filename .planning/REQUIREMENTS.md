@@ -21,6 +21,16 @@ Requirements for this milestone. Each maps to exactly one roadmap phase.
 - [ ] **FOUND-06**: `docker compose up` minimal profile (postgres, redis, minio, api, web, one-shot `migrate`) starts and fails fast with a clear message when a required secret is missing (PRD §5.1)
 - [ ] **FOUND-07**: `pnpm verify` fails on permission-bypass tokens (Semgrep), skipped policy tests, and license violations; CODEOWNERS covers db policies, auth, adapters and policy paths (PITFALLS 13)
 
+### MVP 0 Slice (SLICE)
+
+Thin requirements that exist so Phase 1 (MVP 0) ships the core value end to end; each names the full requirement or phase that later widens it.
+
+- [ ] **SLICE-01**: The operator configures one model provider (Anthropic by default) and its model through env / `*_FILE` secrets read via the `env`/`file` `SecretStore` provider; no admin UI yet (full admin configuration is AICHAT-01, Phase 5)
+- [ ] **SLICE-02**: User creates a private AI chat and sees the model's response stream in realtime with the single configured model (model choice, stop, regenerate are AICHAT-02/03, Phase 5)
+- [ ] **SLICE-03**: Owner shares an AI chat in place with a specific member of the same organization; sharing is a grant on the same conversation, never a copy (teams/departments/org and the share dialog copy are MULTI-01, Phase 6)
+- [ ] **SLICE-04**: A minimal responsive web UI (Next.js + shadcn/ui) covers setup, invite acceptance, login, AI chat list, live conversation view and share action, verified at mobile and desktop widths
+- [ ] **SLICE-05**: End-to-end tests use a deterministic mock language model so CI never calls a metered provider; the real provider is exercised manually
+
 ### Identity and Authentication (AUTH)
 
 - [ ] **AUTH-01**: First run creates the organization and its first Organization Admin through a one-time setup token; no default credentials exist
@@ -250,10 +260,15 @@ Which phases cover which requirements. Updated during roadmap creation.
 | FOUND-04 | Phase 1 | Pending |
 | FOUND-05 | Phase 1 | Pending |
 | FOUND-06 | Phase 1 | Pending |
-| FOUND-07 | Phase 1 | Pending |
-| AUTH-01 | Phase 2 | Pending |
-| AUTH-02 | Phase 2 | Pending |
-| AUTH-03 | Phase 2 | Pending |
+| FOUND-07 | Phase 7 | Pending |
+| SLICE-01 | Phase 1 | Pending |
+| SLICE-02 | Phase 1 | Pending |
+| SLICE-03 | Phase 1 | Pending |
+| SLICE-04 | Phase 1 | Pending |
+| SLICE-05 | Phase 1 | Pending |
+| AUTH-01 | Phase 1 | Pending |
+| AUTH-02 | Phase 1 | Pending |
+| AUTH-03 | Phase 1 | Pending |
 | AUTH-04 | Phase 2 | Pending |
 | AUTH-05 | Phase 2 | Pending |
 | AUTH-06 | Phase 2 | Pending |
@@ -261,13 +276,13 @@ Which phases cover which requirements. Updated during roadmap creation.
 | ORG-02 | Phase 2 | Pending |
 | ORG-03 | Phase 2 | Pending |
 | ORG-04 | Phase 2 | Pending |
-| ORG-05 | Phase 2 | Pending |
+| ORG-05 | Phase 1 | Pending |
 | ORG-06 | Phase 2 | Pending |
-| RT-01 | Phase 3 | Pending |
-| RT-02 | Phase 3 | Pending |
+| RT-01 | Phase 1 | Pending |
+| RT-02 | Phase 1 | Pending |
 | RT-03 | Phase 3 | Pending |
 | RT-04 | Phase 3 | Pending |
-| RT-05 | Phase 3 | Pending |
+| RT-05 | Phase 1 | Pending |
 | CHAT-01 | Phase 4 | Pending |
 | CHAT-02 | Phase 4 | Pending |
 | CHAT-03 | Phase 4 | Pending |
@@ -292,13 +307,13 @@ Which phases cover which requirements. Updated during roadmap creation.
 | AICHAT-08 | Phase 5 | Pending |
 | AICHAT-09 | Phase 5 | Pending |
 | MULTI-01 | Phase 6 | Pending |
-| MULTI-02 | Phase 6 | Pending |
-| MULTI-03 | Phase 6 | Pending |
-| MULTI-04 | Phase 6 | Pending |
+| MULTI-02 | Phase 1 | Pending |
+| MULTI-03 | Phase 1 | Pending |
+| MULTI-04 | Phase 1 | Pending |
 | MULTI-05 | Phase 6 | Pending |
 | MULTI-06 | Phase 6 | Pending |
 | MULTI-07 | Phase 6 | Pending |
-| MULTI-08 | Phase 6 | Pending |
+| MULTI-08 | Phase 1 | Pending |
 | AGENT-01 | Phase 6 | Pending |
 | AGENT-02 | Phase 6 | Pending |
 | AGENT-03 | Phase 6 | Pending |
@@ -368,13 +383,18 @@ Which phases cover which requirements. Updated during roadmap creation.
 | ART-06 | Phase 12 | Pending |
 
 **Coverage:**
-- v1 requirements: 122 total (corrected from 119 on roadmap creation — actual count of v1 IDs; no duplicates)
-- Mapped to phases: 122
+- v1 requirements: 127 total (122 + 5 SLICE requirements added 2026-10-02 for the MVP 0 restructure)
+- Mapped to phases: 127
 - Unmapped: 0 ✓
 
 Phase assignment follows `.planning/ROADMAP.md`. DESK-06 and DESK-07 live in Phase 11 (Work Zone UI)
 rather than Phase 9 because they require a WorkSession to be observable.
 
+Phase 1 became the MVP 0 slice on 2026-10-02: FOUND-01…06, SLICE-01…05, AUTH-01…03, ORG-05, RT-01,
+RT-02, RT-05 and MULTI-02, MULTI-03, MULTI-04, MULTI-08 map there; FOUND-07 moved to Phase 7. ORG-05 is
+satisfied for the sensitive actions that exist at each point; later phases extend audit coverage to the
+actions they introduce.
+
 ---
 *Requirements defined: 2026-09-10*
-*Last updated: 2026-09-10 after roadmap creation (traceability filled)*
+*Last updated: 2026-10-02 after MVP 0 restructure (Phase 1 slice, SLICE-01…05 added, traceability remapped)*
