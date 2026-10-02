@@ -96,7 +96,9 @@ export function QueuePanel({ sessionId, prompts }: { sessionId: string; prompts:
         </ol>
       )}
       {done > 0 ? (
-        <p className="text-center text-muted-foreground text-xs">{done} earlier prompt{done === 1 ? "" : "s"} in the stream</p>
+        <p className="text-center text-muted-foreground text-xs">
+          {done} earlier prompt{done === 1 ? "" : "s"} in the stream
+        </p>
       ) : null}
     </div>
   );
@@ -140,7 +142,51 @@ function QueuedItem({
         <span className="font-medium text-[11px] text-muted-foreground tabular-nums">#{index + 1}</span>
       </div>
       <div className="min-w-0 flex-1">
-        <PromptMeta p={p} />
+        <div className="flex items-center gap-2">
+          <PromptMeta p={p} />
+          {editing ? null : (
+            <div className="-my-1 ml-auto flex shrink-0 gap-0.5 opacity-100 transition-opacity md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100">
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                aria-label="Move up"
+                disabled={index === 0}
+                onClick={() => onMove(index - 1)}
+              >
+                <ArrowUp />
+              </Button>
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                aria-label="Move down"
+                disabled={last}
+                onClick={() => onMove(index + 1)}
+              >
+                <ArrowDown />
+              </Button>
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                aria-label="Edit"
+                onClick={() => {
+                  setDraft(p.body);
+                  setEditing(true);
+                }}
+              >
+                <Pencil />
+              </Button>
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                aria-label="Remove"
+                onClick={onRemove}
+                className="hover:text-destructive"
+              >
+                <Trash2 />
+              </Button>
+            </div>
+          )}
+        </div>
         {editing ? (
           <form
             className="mt-1.5 grid gap-2"
@@ -170,48 +216,6 @@ function QueuedItem({
           <p className="mt-1 line-clamp-4 whitespace-pre-wrap break-words text-[13px]">{p.body}</p>
         )}
       </div>
-      {editing ? null : (
-        <div className="flex shrink-0 flex-col gap-0.5 opacity-100 transition-opacity md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100">
-          <Button
-            size="icon-xs"
-            variant="ghost"
-            aria-label="Move up"
-            disabled={index === 0}
-            onClick={() => onMove(index - 1)}
-          >
-            <ArrowUp />
-          </Button>
-          <Button
-            size="icon-xs"
-            variant="ghost"
-            aria-label="Move down"
-            disabled={last}
-            onClick={() => onMove(index + 1)}
-          >
-            <ArrowDown />
-          </Button>
-          <Button
-            size="icon-xs"
-            variant="ghost"
-            aria-label="Edit"
-            onClick={() => {
-              setDraft(p.body);
-              setEditing(true);
-            }}
-          >
-            <Pencil />
-          </Button>
-          <Button
-            size="icon-xs"
-            variant="ghost"
-            aria-label="Remove"
-            onClick={onRemove}
-            className="hover:text-destructive"
-          >
-            <Trash2 />
-          </Button>
-        </div>
-      )}
     </div>
   );
 }

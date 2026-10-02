@@ -34,7 +34,7 @@ import { ApprovalBanner } from "./approval-banner";
 import { ChangesPanel } from "./changes-panel";
 import { Composer } from "./composer";
 import { EventStream } from "./event-stream";
-import { OnlineDot, PERMISSION_MODES, RUNTIMES, RuntimeLogo, StatusChip } from "./meta";
+import { OnlineDot, PERMISSION_MODES, RUNTIMES, RuntimeLogo, StatusChip, StatusDot } from "./meta";
 import { QueuePanel } from "./queue-panel";
 
 type PanelTab = "queue" | "changes";
@@ -113,7 +113,7 @@ function LoadedSession({ state }: { state: LiveSession }) {
   }, [contentSize]);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col" data-testid="session-view">
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="session-view" data-status={session.status}>
       <SessionHeader
         session={session}
         state={state}
@@ -133,7 +133,7 @@ function LoadedSession({ state }: { state: LiveSession }) {
           >
             <EventStream state={state} session={session} />
           </div>
-          <div className="grid gap-3 border-t bg-gradient-to-b from-background/0 to-background pt-3">
+          <div className="grid grid-cols-[minmax(0,1fr)] gap-3 border-t pt-3">
             {pending[0] ? (
               <ApprovalBanner
                 sessionId={session.id}
@@ -147,7 +147,7 @@ function LoadedSession({ state }: { state: LiveSession }) {
             <Composer session={session} queued={queued} />
           </div>
         </div>
-        <aside className="hidden w-[400px] shrink-0 flex-col border-l bg-sidebar/30 xl:flex">
+        <aside className="hidden w-[380px] shrink-0 flex-col border-l bg-sidebar/30 xl:flex">
           <PanelTabs tab={tab} onTab={setTab} queued={queued} changesCount={changesCount} />
           <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto p-4">
             {tab === "queue" ? (
@@ -257,10 +257,13 @@ function SessionHeader({
       <RuntimeLogo runtime={session.runtime} className="mt-0.5 hidden size-9 rounded-xl sm:inline-flex" />
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-2">
-          <h1 className="truncate font-semibold text-[15px] tracking-tight" data-testid="session-title">
+          <StatusDot status={session.status} className="sm:hidden" />
+          <h1
+            className="line-clamp-2 font-semibold text-[15px] leading-snug tracking-tight sm:truncate"
+            data-testid="session-title"
+          >
             {session.title}
           </h1>
-          <StatusChip status={session.status} className="sm:hidden" />
         </div>
         <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground text-xs">
           <span className="inline-flex items-center gap-1">

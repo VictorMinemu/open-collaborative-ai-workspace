@@ -148,7 +148,10 @@ export function EventStream({ state, session }: { state: LiveSession; session: W
     items.at(-1)?.kind === "assistant" && (items.at(-1) as { streaming?: boolean }).streaming;
 
   return (
-    <div data-testid="event-stream" className="mx-auto grid w-full max-w-3xl gap-4 px-4 py-6 sm:px-6">
+    <div
+      data-testid="event-stream"
+      className="mx-auto grid w-full max-w-3xl grid-cols-[minmax(0,1fr)] gap-4 px-4 py-6 sm:px-6"
+    >
       {items.length === 0 && !busy ? (
         <div className="rounded-xl border border-dashed px-6 py-10 text-center">
           <Sparkles className="mx-auto mb-3 size-5 text-primary" />

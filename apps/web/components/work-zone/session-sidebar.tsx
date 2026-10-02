@@ -1,9 +1,10 @@
 "use client";
 
 import type { WorkSession } from "@ocw/contracts";
-import { FolderGit2, Hand, Laptop, Plus } from "lucide-react";
+import { ChevronRight, FolderGit2, Hand, Laptop, Plus } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useState } from "react";
 import { SectionSidebar, sectionItemClass } from "@/components/shell/section-sidebar";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -23,9 +24,12 @@ export function SessionSidebar() {
   const { openNewSession } = useWorkZone();
   const list = sessions.data ?? [];
   const attention = list.filter(needsAttention);
+  const ended = list.filter((s) => s.status === "completed" || s.status === "failed");
+  const [showEnded, setShowEnded] = useState(false);
 
   const groups = new Map<string, { name: string; online: boolean; sessions: WorkSession[] }>();
   for (const s of list) {
+    if (s.status === "completed" || s.status === "failed") continue;
     const g = groups.get(s.projectId) ?? { name: s.projectName, online: s.deviceOnline, sessions: [] };
     g.sessions.push(s);
     groups.set(s.projectId, g);
@@ -90,6 +94,24 @@ export function SessionSidebar() {
             ))}
           </div>
         ))}
+
+        {ended.length > 0 ? (
+          <div className="grid gap-0.5">
+            <button
+              type="button"
+              onClick={() => setShowEnded((v) => !v)}
+              aria-expanded={showEnded}
+              className="flex items-center gap-1.5 px-2.5 pb-1 text-left font-medium text-[12px] text-muted-foreground hover:text-foreground"
+            >
+              <ChevronRight className={cn("size-3.5 transition-transform", showEnded && "rotate-90")} />
+              Ended
+              <span className="tabular-nums">{ended.length}</span>
+            </button>
+            {showEnded
+              ? ended.map((s) => <SessionRow key={s.id} s={s} active={pathname === `/work-zone/${s.id}`} />)
+              : null}
+          </div>
+        ) : null}
 
         {!sessions.isLoading && list.length === 0 ? (
           <p className="px-2.5 text-[13px] text-muted-foreground">No sessions yet.</p>
