@@ -5,15 +5,15 @@
 //   ocw-runtime add-project <dir>  register a project with the running daemon
 //   ocw-runtime projects           list registered projects (local only)
 
-import { detectClaudeCode } from './claude/detect.js';
-import { ocwHome } from './config.js';
-import { type ControlRequest, controlRequest, controlSocketPath } from './control-socket.js';
-import { Daemon } from './daemon.js';
-import { errorMessage } from './logger.js';
+import { detectClaudeCode } from "./claude/detect.js";
+import { ocwHome } from "./config.js";
+import { type ControlRequest, controlRequest, controlSocketPath } from "./control-socket.js";
+import { Daemon } from "./daemon.js";
+import { errorMessage } from "./logger.js";
 
 async function viaSocket(req: ControlRequest): Promise<void> {
   const res = await controlRequest(controlSocketPath(ocwHome()), req);
-  if (!res.ok) throw new Error(res.error ?? 'request failed');
+  if (!res.ok) throw new Error(res.error ?? "request failed");
   process.stdout.write(`${JSON.stringify(res.result, null, 2)}\n`);
 }
 
@@ -31,31 +31,31 @@ async function run(): Promise<void> {
       .finally(() => process.exit(0));
     setTimeout(() => process.exit(1), 10_000).unref();
   };
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 
 async function main(argv: string[]): Promise<void> {
-  const [cmd = 'run', ...rest] = argv;
+  const [cmd = "run", ...rest] = argv;
   switch (cmd) {
-    case 'run':
+    case "run":
       return run();
-    case 'detect':
+    case "detect":
       process.stdout.write(`${JSON.stringify(await detectClaudeCode(), null, 2)}\n`);
       return;
-    case 'status':
-      return viaSocket({ cmd: 'status' });
-    case 'projects':
-      return viaSocket({ cmd: 'listProjects' });
-    case 'add-project': {
+    case "status":
+      return viaSocket({ cmd: "status" });
+    case "projects":
+      return viaSocket({ cmd: "listProjects" });
+    case "add-project": {
       const path = rest[0];
-      if (!path) throw new Error('usage: ocw-runtime add-project <dir>');
-      return viaSocket({ cmd: 'addProject', path });
+      if (!path) throw new Error("usage: ocw-runtime add-project <dir>");
+      return viaSocket({ cmd: "addProject", path });
     }
-    case 'remove-project': {
+    case "remove-project": {
       const localId = rest[0];
-      if (!localId) throw new Error('usage: ocw-runtime remove-project <localId>');
-      return viaSocket({ cmd: 'removeProject', localId });
+      if (!localId) throw new Error("usage: ocw-runtime remove-project <localId>");
+      return viaSocket({ cmd: "removeProject", localId });
     }
     default:
       throw new Error(`unknown command: ${cmd}`);

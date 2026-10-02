@@ -9,7 +9,7 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
   }
 
   push(item: T): void {
-    if (this.closed) throw new Error('queue closed');
+    if (this.closed) throw new Error("queue closed");
     const waiter = this.waiters.shift();
     if (waiter) waiter({ value: item, done: false });
     else this.items.push(item);

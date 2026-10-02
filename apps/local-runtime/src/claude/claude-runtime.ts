@@ -9,39 +9,39 @@
 // - billing: runs on the user's local Claude Code login (subscription) through the installed CLI;
 //   ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN are stripped unless `useApiKey` is set.
 
-import { existsSync, statSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { randomUUID } from "node:crypto";
+import { existsSync, statSync } from "node:fs";
 import {
-  query as sdkQuery,
   type CanUseTool,
   type HookCallback,
   type Options,
   type PermissionResult,
   type SDKMessage,
   type SDKUserMessage,
-} from '@anthropic-ai/claude-agent-sdk';
-import { AsyncQueue } from '../async-queue.js';
-import { filterEnv, findExecutable } from '../exec-path.js';
-import { type Logger, errorMessage, silentLogger } from '../logger.js';
+  query as sdkQuery,
+} from "@anthropic-ai/claude-agent-sdk";
 import {
   type ApprovalDecision,
-  PermissionModeSchema,
+  PermissionMode,
   type PromptPayload,
   type RuntimeInfo,
   type SessionEvent,
   type WorkSessionStatus,
-} from '../protocol.js';
+} from "@ocw/contracts";
+import { AsyncQueue } from "../async-queue.js";
+import { filterEnv, findExecutable } from "../exec-path.js";
+import { errorMessage, type Logger, silentLogger } from "../logger.js";
 import {
   type AgentRuntime,
   type EventSink,
   type RuntimeCapabilities,
   RuntimeError,
   type StartSessionOptions,
-} from '../runtime.js';
-import { redact } from '../sanitize.js';
-import { detectClaudeCode } from './detect.js';
-import { ClaudeEventMapper } from './mapper.js';
-import { extractPaths, secretDenyReason, secretDenyRules, summarizeToolInput } from './tool-policy.js';
+} from "../runtime.js";
+import { redact } from "../sanitize.js";
+import { detectClaudeCode } from "./detect.js";
+import { ClaudeEventMapper } from "./mapper.js";
+import { extractPaths, secretDenyReason, secretDenyRules, summarizeToolInput } from "./tool-policy.js";
 
 export const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
 const STOP_GRACE_MS = 5_000;
@@ -68,7 +68,7 @@ export interface ClaudeCodeRuntimeOptions {
   detect?: () => Promise<RuntimeInfo>;
 }
 
-type ApprovalOutcome = ApprovalDecision | 'expired';
+type ApprovalOutcome = ApprovalDecision | "expired";
 
 interface PendingApproval {
   toolName: string;
@@ -97,20 +97,25 @@ interface Session {
  * Variables describing an enclosing Claude Code session (set when the daemon itself is launched
  * from a Claude Code terminal). Inheriting them would make the child think it is nested.
  */
-const PARENT_SESSION_VARS = /^(CLAUDECODE|CLAUDE_PID|CLAUDE_AGENT_SDK_VERSION|CLAUDE_CODE_(ENTRYPOINT|SESSION_ID|SESSION_ATTENDED|CHILD_SESSION|EXECPATH|MESSAGING_.*))$/;
+const PARENT_SESSION_VARS =
+  /^(CLAUDECODE|CLAUDE_PID|CLAUDE_AGENT_SDK_VERSION|CLAUDE_CODE_(ENTRYPOINT|SESSION_ID|SESSION_ATTENDED|CHILD_SESSION|EXECPATH|MESSAGING_.*))$/;
 
 /** API credentials that would silently switch billing from the user's subscription to the API. */
-export const CLAUDE_API_KEY_VARS: readonly string[] = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'];
+export const CLAUDE_API_KEY_VARS: readonly string[] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
 
 /**
  * Environment for the Claude Code child process: never leak daemon credentials (OCW_*), and by
  * default strip Anthropic API keys so the session runs on the local Claude Code login
  * (Pro/Max subscription). `useApiKey` opts back in.
  */
-export function childEnv(env: NodeJS.ProcessEnv = process.env, useApiKey = false): Record<string, string | undefined> {
+export function childEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  useApiKey = false,
+): Record<string, string | undefined> {
   return filterEnv(
     env,
-    (k) => k.startsWith('OCW_') || PARENT_SESSION_VARS.test(k) || (!useApiKey && CLAUDE_API_KEY_VARS.includes(k)),
+    (k) =>
+      k.startsWith("OCW_") || PARENT_SESSION_VARS.test(k) || (!useApiKey && CLAUDE_API_KEY_VARS.includes(k)),
   );
 }
 
@@ -119,21 +124,21 @@ function toUserMessage(prompt: PromptPayload): SDKUserMessage {
     prompt.images && prompt.images.length > 0
       ? [
           ...prompt.images.map((img) => ({
-            type: 'image' as const,
-            source: { type: 'base64' as const, media_type: img.mediaType, data: img.dataBase64 },
+            type: "image" as const,
+            source: { type: "base64" as const, media_type: img.mediaType, data: img.dataBase64 },
           })),
-          { type: 'text' as const, text: prompt.text },
+          { type: "text" as const, text: prompt.text },
         ]
       : prompt.text;
-  return { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null };
+  return { type: "user", message: { role: "user", content }, parent_tool_use_id: null };
 }
 
 export class ClaudeCodeRuntime implements AgentRuntime {
-  readonly id = 'claude-code' as const;
+  readonly id = "claude-code" as const;
   readonly capabilities: RuntimeCapabilities = {
     supportsSteer: false,
     supportsResume: true,
-    supportsPermissionModes: ['default', 'acceptEdits', 'plan'],
+    supportsPermissionModes: ["default", "acceptEdits", "plan"],
     supportsImages: true,
   };
 
@@ -147,7 +152,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     this.queryFn = opts.queryFn ?? ((params) => sdkQuery(params));
     this.approvalTimeoutMs = opts.approvalTimeoutMs ?? APPROVAL_TIMEOUT_MS;
     this.log = opts.logger ?? silentLogger;
-    this.claudePath = opts.claudePath ?? findExecutable('claude');
+    this.claudePath = opts.claudePath ?? findExecutable("claude");
   }
 
   detect(): Promise<RuntimeInfo> {
@@ -164,14 +169,17 @@ export class ClaudeCodeRuntime implements AgentRuntime {
 
   async start(options: StartSessionOptions, sink: EventSink): Promise<void> {
     if (this.sessions.has(options.sessionId)) {
-      throw new RuntimeError(`session ${options.sessionId} already running`, 'session_exists');
+      throw new RuntimeError(`session ${options.sessionId} already running`, "session_exists");
     }
-    const mode = PermissionModeSchema.safeParse(options.permissionMode);
+    const mode = PermissionMode.safeParse(options.permissionMode);
     if (!mode.success) {
-      throw new RuntimeError(`permission mode not allowed: ${String(options.permissionMode)}`, 'permission_mode_rejected');
+      throw new RuntimeError(
+        `permission mode not allowed: ${String(options.permissionMode)}`,
+        "permission_mode_rejected",
+      );
     }
     if (!existsSync(options.cwd) || !statSync(options.cwd).isDirectory()) {
-      throw new RuntimeError('project directory not found on this device', 'runtime_unavailable');
+      throw new RuntimeError("project directory not found on this device", "runtime_unavailable");
     }
 
     const input = new AsyncQueue<SDKUserMessage>();
@@ -202,14 +210,15 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       canUseTool: this.makeCanUseTool(session),
       hooks: { PreToolUse: [{ hooks: [this.makePreToolUseHook(session)] }] },
       // No UI can answer free-form questions yet; the model must ask in its reply instead.
-      disallowedTools: ['AskUserQuestion'],
+      disallowedTools: ["AskUserQuestion"],
       // Project settings + CLAUDE.md only. User/local settings could carry personal allow-rules
       // (or defaultMode) that would bypass the platform approval gate.
-      settingSources: ['project'],
-      settings: { permissions: { deny: secretDenyRules(), disableBypassPermissionsMode: 'disable' } },
+      settingSources: ["project"],
+      settings: { permissions: { deny: secretDenyRules(), disableBypassPermissionsMode: "disable" } },
       env: childEnv(process.env, this.opts.useApiKey ?? false),
       abortController: abort,
-      stderr: (data: string) => this.log.debug(`[claude-code ${options.sessionId}] ${redact(data.trimEnd())}`),
+      stderr: (data: string) =>
+        this.log.debug(`[claude-code ${options.sessionId}] ${redact(data.trimEnd())}`),
     };
     if (options.model) sdkOptions.model = options.model;
     if (options.resumeRuntimeSessionId) sdkOptions.resume = options.resumeRuntimeSessionId;
@@ -218,13 +227,13 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     const q = this.queryFn({ prompt: input, options: sdkOptions });
     session.q = q;
     this.sessions.set(session.id, session);
-    this.emit(session, { type: 'session.state', status: 'idle' });
+    this.emit(session, { type: "session.state", status: "idle" });
     session.done = this.consume(session, q);
   }
 
   async prompt(sessionId: string, prompt: PromptPayload): Promise<void> {
     const s = this.get(sessionId);
-    if (s.stopping) throw new RuntimeError('session is stopping', 'invalid_state');
+    if (s.stopping) throw new RuntimeError("session is stopping", "invalid_state");
     if (s.running) {
       s.queue.push(prompt);
       return;
@@ -236,15 +245,20 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     const s = this.get(sessionId);
     if (!s.running) return;
     s.interruptRequested = true;
-    this.settleAllApprovals(s, 'deny', 'Interrupted');
+    this.settleAllApprovals(s, "deny", "Interrupted");
     try {
       await s.q?.interrupt();
     } catch (err) {
-      this.log.warn('interrupt failed', { sessionId, error: errorMessage(err) });
+      this.log.warn("interrupt failed", { sessionId, error: errorMessage(err) });
     }
   }
 
-  resolveApproval(sessionId: string, approvalId: string, decision: ApprovalDecision, comment?: string): boolean {
+  resolveApproval(
+    sessionId: string,
+    approvalId: string,
+    decision: ApprovalDecision,
+    comment?: string,
+  ): boolean {
     const s = this.sessions.get(sessionId);
     const pending = s?.approvals.get(approvalId);
     if (!s || !pending) return false;
@@ -258,7 +272,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     s.stopping = true;
     s.queue.length = 0;
     if (s.running) await this.interrupt(sessionId);
-    this.settleAllApprovals(s, 'deny', 'Session stopped');
+    this.settleAllApprovals(s, "deny", "Session stopped");
     s.input.close();
     const finished = await Promise.race([
       s.done.then(() => true),
@@ -284,19 +298,19 @@ export class ClaudeCodeRuntime implements AgentRuntime {
 
   private get(sessionId: string): Session {
     const s = this.sessions.get(sessionId);
-    if (!s) throw new RuntimeError(`unknown session ${sessionId}`, 'unknown_session');
+    if (!s) throw new RuntimeError(`unknown session ${sessionId}`, "unknown_session");
     return s;
   }
 
   private emit(s: Session, event: SessionEvent): void {
-    if (event.type === 'session.state') {
+    if (event.type === "session.state") {
       if (s.status === event.status) return;
       s.status = event.status;
     }
     try {
       s.sink(event);
     } catch (err) {
-      this.log.error('event sink failed', { sessionId: s.id, error: errorMessage(err) });
+      this.log.error("event sink failed", { sessionId: s.id, error: errorMessage(err) });
     }
   }
 
@@ -304,17 +318,24 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     s.running = prompt;
     s.interruptRequested = false;
     s.mapper.currentPromptId = prompt.promptId;
-    this.emit(s, { type: 'prompt.started', promptId: prompt.promptId });
-    this.emit(s, { type: 'session.state', status: 'running' });
+    this.emit(s, { type: "prompt.started", promptId: prompt.promptId });
+    this.emit(s, { type: "session.state", status: "running" });
     s.input.push(toUserMessage(prompt));
   }
 
   private async consume(s: Session, q: QueryHandle): Promise<void> {
     try {
       for await (const message of q) {
-        if (message.type === 'system' && message.subtype === 'init' && message.permissionMode === 'bypassPermissions') {
+        if (
+          message.type === "system" &&
+          message.subtype === "init" &&
+          message.permissionMode === "bypassPermissions"
+        ) {
           // Must never happen (we never request it and disable it); fail closed if it does.
-          this.emit(s, { type: 'session.error', message: 'Runtime reported bypassPermissions mode; session aborted.' });
+          this.emit(s, {
+            type: "session.error",
+            message: "Runtime reported bypassPermissions mode; session aborted.",
+          });
           s.stopping = true;
           s.abort.abort();
           q.close();
@@ -322,10 +343,10 @@ export class ClaudeCodeRuntime implements AgentRuntime {
         }
         for (const ev of s.mapper.map(message)) {
           // Session state is owned by the adapter (prompt lifecycle + approvals), not the SDK.
-          if (ev.type === 'session.state') continue;
+          if (ev.type === "session.state") continue;
           // An interrupted turn ends with an error result; that is expected, not a session error.
-          if (ev.type === 'session.error' && s.interruptRequested) continue;
-          if (ev.type === 'prompt.completed') {
+          if (ev.type === "session.error" && s.interruptRequested) continue;
+          if (ev.type === "prompt.completed") {
             if (s.interruptRequested) ev.interrupted = true;
             this.emit(s, ev);
             this.onTurnComplete(s);
@@ -334,7 +355,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
           this.emit(s, ev);
         }
       }
-      this.finish(s, s.stopping ? null : 'Claude Code process exited unexpectedly');
+      this.finish(s, s.stopping ? null : "Claude Code process exited unexpectedly");
     } catch (err) {
       this.finish(s, s.stopping ? null : errorMessage(err));
     }
@@ -345,14 +366,14 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     s.interruptRequested = false;
     const next = s.queue.shift();
     if (next && !s.stopping) this.dispatch(s, next);
-    else this.emit(s, { type: 'session.state', status: 'idle' });
+    else this.emit(s, { type: "session.state", status: "idle" });
   }
 
   private finish(s: Session, error: string | null): void {
-    this.settleAllApprovals(s, 'deny', 'Session ended');
+    this.settleAllApprovals(s, "deny", "Session ended");
     if (s.running) {
       this.emit(s, {
-        type: 'prompt.completed',
+        type: "prompt.completed",
         promptId: s.running.promptId,
         usage: { inputTokens: 0, outputTokens: 0 },
         isError: true,
@@ -361,10 +382,10 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       s.running = null;
     }
     if (error) {
-      this.emit(s, { type: 'session.error', message: error });
-      this.emit(s, { type: 'session.state', status: 'failed' });
+      this.emit(s, { type: "session.error", message: error });
+      this.emit(s, { type: "session.state", status: "failed" });
     } else {
-      this.emit(s, { type: 'session.state', status: 'completed' });
+      this.emit(s, { type: "session.state", status: "completed" });
     }
     if (!s.stopping) this.sessions.delete(s.id);
   }
@@ -375,15 +396,18 @@ export class ClaudeCodeRuntime implements AgentRuntime {
 
   private makePreToolUseHook(s: Session): HookCallback {
     return async (input) => {
-      if (input.hook_event_name !== 'PreToolUse') return {};
-      const toolInput = (input.tool_input && typeof input.tool_input === 'object' ? input.tool_input : {}) as Record<
-        string,
-        unknown
-      >;
+      if (input.hook_event_name !== "PreToolUse") return {};
+      const toolInput = (
+        input.tool_input && typeof input.tool_input === "object" ? input.tool_input : {}
+      ) as Record<string, unknown>;
       const reason = secretDenyReason(input.tool_name, toolInput, s.cwd);
       if (!reason) return {};
       return {
-        hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason },
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: reason,
+        },
       };
     };
   }
@@ -391,9 +415,9 @@ export class ClaudeCodeRuntime implements AgentRuntime {
   private makeCanUseTool(s: Session): CanUseTool {
     return async (toolName, input, { signal, blockedPath, title }): Promise<PermissionResult> => {
       const denied = secretDenyReason(toolName, input, s.cwd);
-      if (denied) return { behavior: 'deny', message: denied };
-      if (s.sessionAllowedTools.has(toolName)) return { behavior: 'allow', updatedInput: input };
-      if (s.stopping) return { behavior: 'deny', message: 'Session is stopping.' };
+      if (denied) return { behavior: "deny", message: denied };
+      if (s.sessionAllowedTools.has(toolName)) return { behavior: "allow", updatedInput: input };
+      if (s.stopping) return { behavior: "deny", message: "Session is stopping." };
 
       const approvalId = randomUUID();
       const paths = extractPaths(toolName, input);
@@ -403,36 +427,36 @@ export class ClaudeCodeRuntime implements AgentRuntime {
 
       const result = new Promise<{ outcome: ApprovalOutcome; comment?: string }>((resolve) => {
         let settled = false;
-        const timer = setTimeout(() => settle('expired'), this.approvalTimeoutMs);
-        const onAbort = () => settle('deny', 'Cancelled');
+        const timer = setTimeout(() => settle("expired"), this.approvalTimeoutMs);
+        const onAbort = () => settle("deny", "Cancelled");
         function settle(outcome: ApprovalOutcome, comment?: string) {
           if (settled) return;
           settled = true;
           clearTimeout(timer);
-          signal.removeEventListener('abort', onAbort);
+          signal.removeEventListener("abort", onAbort);
           s.approvals.delete(approvalId);
           resolve(comment === undefined ? { outcome } : { outcome, comment });
         }
-        signal.addEventListener('abort', onAbort, { once: true });
+        signal.addEventListener("abort", onAbort, { once: true });
         s.approvals.set(approvalId, { toolName, settle });
       });
 
-      this.emit(s, { type: 'approval.requested', approvalId, tool: toolName, summary, paths });
-      this.emit(s, { type: 'session.state', status: 'waiting_approval' });
+      this.emit(s, { type: "approval.requested", approvalId, tool: toolName, summary, paths });
+      this.emit(s, { type: "session.state", status: "waiting_approval" });
 
       const { outcome, comment } = await result;
-      this.emit(s, { type: 'approval.resolved', approvalId, decision: outcome });
-      if (s.approvals.size === 0 && s.running) this.emit(s, { type: 'session.state', status: 'running' });
+      this.emit(s, { type: "approval.resolved", approvalId, decision: outcome });
+      if (s.approvals.size === 0 && s.running) this.emit(s, { type: "session.state", status: "running" });
 
-      if (outcome === 'session') s.sessionAllowedTools.add(toolName);
-      if (outcome === 'once' || outcome === 'session') return { behavior: 'allow', updatedInput: input };
+      if (outcome === "session") s.sessionAllowedTools.add(toolName);
+      if (outcome === "once" || outcome === "session") return { behavior: "allow", updatedInput: input };
       const message =
-        outcome === 'expired'
-          ? 'Approval request expired after 10 minutes without a decision.'
+        outcome === "expired"
+          ? "Approval request expired after 10 minutes without a decision."
           : comment
             ? `Denied by the workspace user: ${comment}`
-            : 'Denied by the workspace user.';
-      return { behavior: 'deny', message };
+            : "Denied by the workspace user.";
+      return { behavior: "deny", message };
     };
   }
 }

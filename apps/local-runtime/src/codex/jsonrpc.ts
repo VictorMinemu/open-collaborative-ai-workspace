@@ -1,7 +1,7 @@
 // Minimal JSON-RPC peer over newline-delimited JSON on a child process's stdio, as spoken by
 // `codex app-server` (JSON-RPC 2.0 semantics, no `jsonrpc` header on the wire).
 
-import type { Readable, Writable } from 'node:stream';
+import type { Readable, Writable } from "node:stream";
 
 export type JsonRpcId = string | number;
 
@@ -22,7 +22,7 @@ export class JsonRpcError extends Error {
     readonly data?: unknown,
   ) {
     super(message);
-    this.name = 'JsonRpcError';
+    this.name = "JsonRpcError";
   }
 }
 
@@ -32,7 +32,7 @@ export interface JsonRpcHandlers {
   onRequest(r: JsonRpcRequest): Promise<unknown>;
   onClose?(err?: Error): void;
   /** Raw line hook (fixture recording). */
-  onLine?(direction: 'in' | 'out', message: unknown): void;
+  onLine?(direction: "in" | "out", message: unknown): void;
 }
 
 interface Pending {
@@ -44,7 +44,7 @@ interface Pending {
 export class JsonRpcPeer {
   private nextId = 1;
   private readonly pending = new Map<JsonRpcId, Pending>();
-  private buffer = '';
+  private buffer = "";
   private closed = false;
 
   constructor(
@@ -52,11 +52,11 @@ export class JsonRpcPeer {
     private readonly output: Writable,
     private readonly handlers: JsonRpcHandlers,
   ) {
-    input.setEncoding('utf8');
-    input.on('data', (chunk: string) => this.onData(chunk));
-    input.on('end', () => this.close());
-    input.on('error', (err) => this.close(err));
-    output.on('error', (err) => this.close(err));
+    input.setEncoding("utf8");
+    input.on("data", (chunk: string) => this.onData(chunk));
+    input.on("end", () => this.close());
+    input.on("error", (err) => this.close(err));
+    output.on("error", (err) => this.close(err));
   }
 
   get isClosed(): boolean {
@@ -64,7 +64,7 @@ export class JsonRpcPeer {
   }
 
   request<T = unknown>(method: string, params?: unknown, timeoutMs = 60_000): Promise<T> {
-    if (this.closed) return Promise.reject(new Error('codex app-server connection closed'));
+    if (this.closed) return Promise.reject(new Error("codex app-server connection closed"));
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
       const timer =
@@ -88,7 +88,7 @@ export class JsonRpcPeer {
     this.closed = true;
     for (const [, p] of this.pending) {
       if (p.timer) clearTimeout(p.timer);
-      p.reject(err ?? new Error('codex app-server connection closed'));
+      p.reject(err ?? new Error("codex app-server connection closed"));
     }
     this.pending.clear();
     this.handlers.onClose?.(err);
@@ -96,18 +96,18 @@ export class JsonRpcPeer {
 
   private write(msg: unknown): void {
     if (this.closed) return;
-    this.handlers.onLine?.('out', msg);
+    this.handlers.onLine?.("out", msg);
     this.output.write(`${JSON.stringify(msg)}\n`);
   }
 
   private onData(chunk: string): void {
     this.buffer += chunk;
-    let idx = this.buffer.indexOf('\n');
+    let idx = this.buffer.indexOf("\n");
     while (idx >= 0) {
       const line = this.buffer.slice(0, idx).trim();
       this.buffer = this.buffer.slice(idx + 1);
       if (line) this.onLine(line);
-      idx = this.buffer.indexOf('\n');
+      idx = this.buffer.indexOf("\n");
     }
   }
 
@@ -118,9 +118,9 @@ export class JsonRpcPeer {
     } catch {
       return; // not protocol output
     }
-    this.handlers.onLine?.('in', msg);
-    const hasId = typeof msg.id === 'string' || typeof msg.id === 'number';
-    const method = typeof msg.method === 'string' ? msg.method : undefined;
+    this.handlers.onLine?.("in", msg);
+    const hasId = typeof msg.id === "string" || typeof msg.id === "number";
+    const method = typeof msg.method === "string" ? msg.method : undefined;
     if (hasId && method) {
       const id = msg.id as JsonRpcId;
       this.handlers
@@ -138,7 +138,7 @@ export class JsonRpcPeer {
       this.pending.delete(msg.id as JsonRpcId);
       if (p.timer) clearTimeout(p.timer);
       const error = msg.error as { code?: number; message?: string; data?: unknown } | undefined;
-      if (error) p.reject(new JsonRpcError(error.message ?? 'codex error', error.code ?? -32000, error.data));
+      if (error) p.reject(new JsonRpcError(error.message ?? "codex error", error.code ?? -32000, error.data));
       else p.resolve(msg.result);
       return;
     }

@@ -2,15 +2,15 @@
 // The daemon never listens on a TCP port. Frames produced while offline go to an in-memory append
 // log and are replayed, in order, after the next successful connect.
 
-import WebSocket from 'ws';
-import { type Logger, errorMessage, silentLogger } from './logger.js';
-import { type CommandFrame, CommandFrameSchema, type DeviceFrame } from './protocol.js';
+import { CommandFrame, type DeviceToServerFrame } from "@ocw/contracts";
+import WebSocket from "ws";
+import { errorMessage, type Logger, silentLogger } from "./logger.js";
 
 export interface DeviceLinkOptions {
   url: string;
   token: string;
   /** Frames sent first on every (re)connect, before the offline log is replayed. */
-  onOpenFrames: () => Promise<DeviceFrame[]> | DeviceFrame[];
+  onOpenFrames: () => Promise<DeviceToServerFrame[]> | DeviceToServerFrame[];
   onCommand: (command: CommandFrame) => void;
   logger?: Logger;
   heartbeatMs?: number;
@@ -23,7 +23,7 @@ export interface DeviceLinkOptions {
 
 export class DeviceLink {
   private ws: WebSocket | null = null;
-  private readonly offline: DeviceFrame[] = [];
+  private readonly offline: DeviceToServerFrame[] = [];
   private attempts = 0;
   private stopped = true;
   private reconnectTimer: NodeJS.Timeout | null = null;
@@ -59,8 +59,8 @@ export class DeviceLink {
     this.ready = false;
     if (ws && ws.readyState !== WebSocket.CLOSED) {
       await new Promise<void>((resolve) => {
-        ws.once('close', () => resolve());
-        ws.close(1000, 'daemon stopping');
+        ws.once("close", () => resolve());
+        ws.close(1000, "daemon stopping");
         setTimeout(() => {
           ws.terminate();
           resolve();
@@ -73,7 +73,7 @@ export class DeviceLink {
    * Send a frame now, or append it to the offline log. Ephemeral frames (heartbeats,
    * `assistant.delta`) are dropped instead of logged.
    */
-  send(frame: DeviceFrame): void {
+  send(frame: DeviceToServerFrame): void {
     if (this.connected && this.trySend(frame)) return;
     if (isEphemeral(frame)) return;
     this.offline.push(frame);
@@ -82,17 +82,17 @@ export class DeviceLink {
       this.offline.shift();
       this.droppedFrames++;
       if (this.droppedFrames === 1 || this.droppedFrames % 1000 === 0) {
-        this.log.warn('offline log full; dropping oldest frames', { dropped: this.droppedFrames });
+        this.log.warn("offline log full; dropping oldest frames", { dropped: this.droppedFrames });
       }
     }
   }
 
-  private trySend(frame: DeviceFrame): boolean {
+  private trySend(frame: DeviceToServerFrame): boolean {
     try {
       this.ws?.send(JSON.stringify(frame));
       return true;
     } catch (err) {
-      this.log.warn('send failed', { error: errorMessage(err) });
+      this.log.warn("send failed", { error: errorMessage(err) });
       return false;
     }
   }
@@ -106,30 +106,30 @@ export class DeviceLink {
         ? this.opts.createSocket(this.opts.url, headers)
         : new WebSocket(this.opts.url, { headers, handshakeTimeout: 10_000, perMessageDeflate: false });
     } catch (err) {
-      this.log.error('cannot create websocket', { error: errorMessage(err) });
+      this.log.error("cannot create websocket", { error: errorMessage(err) });
       this.scheduleReconnect();
       return;
     }
     this.ws = ws;
 
-    ws.on('open', () => {
+    ws.on("open", () => {
       void this.onOpen(ws);
     });
-    ws.on('message', (data) => this.onMessage(data));
-    ws.on('unexpected-response', (_req, res) => {
+    ws.on("message", (data) => this.onMessage(data));
+    ws.on("unexpected-response", (_req, res) => {
       const status = res.statusCode ?? 0;
-      if (status === 401 || status === 403) this.log.error('device token rejected by server', { status });
-      else this.log.warn('unexpected handshake response', { status });
+      if (status === 401 || status === 403) this.log.error("device token rejected by server", { status });
+      else this.log.warn("unexpected handshake response", { status });
       ws.terminate();
     });
-    ws.on('error', (err) => this.log.debug('websocket error', { error: errorMessage(err) }));
-    ws.on('close', (code) => {
+    ws.on("error", (err) => this.log.debug("websocket error", { error: errorMessage(err) }));
+    ws.on("close", (code) => {
       if (this.ws !== ws) return;
       const wasReady = this.ready;
       this.ready = false;
       this.ws = null;
       this.stopHeartbeat();
-      if (wasReady) this.log.info('disconnected from server', { code });
+      if (wasReady) this.log.info("disconnected from server", { code });
       this.scheduleReconnect();
     });
   }
@@ -141,17 +141,17 @@ export class DeviceLink {
       for (const frame of initial) ws.send(JSON.stringify(frame));
       // Replay the offline log in order. Frames that fail stay at the head of the log.
       while (this.offline.length > 0 && ws.readyState === WebSocket.OPEN) {
-        const frame = this.offline[0] as DeviceFrame;
+        const frame = this.offline[0] as DeviceToServerFrame;
         ws.send(JSON.stringify(frame));
         this.offline.shift();
       }
       this.ready = true;
       this.attempts = 0;
       this.startHeartbeat();
-      this.log.info('connected to server');
+      this.log.info("connected to server");
     } catch (err) {
-      this.log.error('handshake failed', { error: errorMessage(err) });
-      ws.close(1011, 'handshake failed');
+      this.log.error("handshake failed", { error: errorMessage(err) });
+      ws.close(1011, "handshake failed");
     }
   }
 
@@ -160,19 +160,20 @@ export class DeviceLink {
     try {
       parsed = JSON.parse(data.toString());
     } catch {
-      this.log.warn('ignoring non-JSON frame');
+      this.log.warn("ignoring non-JSON frame");
       return;
     }
     const type = (parsed as { type?: unknown } | null)?.type;
-    if (type !== 'command') {
-      this.log.debug('ignoring server frame', { type: String(type) });
+    if (type !== "command") {
+      this.log.debug("ignoring server frame", { type: String(type) });
       return;
     }
-    const cmd = CommandFrameSchema.safeParse(parsed);
+    const cmd = CommandFrame.safeParse(parsed);
     if (!cmd.success) {
       const id = (parsed as { id?: unknown }).id;
-      this.log.warn('invalid command frame', { id: typeof id === 'string' ? id : undefined });
-      if (typeof id === 'string') this.send({ type: 'ack', commandId: id, ok: false, error: 'invalid command frame' });
+      this.log.warn("invalid command frame", { id: typeof id === "string" ? id : undefined });
+      if (typeof id === "string")
+        this.send({ type: "ack", commandId: id, ok: false, error: "invalid command frame" });
       return;
     }
     this.opts.onCommand(cmd.data);
@@ -193,7 +194,10 @@ export class DeviceLink {
 
   private startHeartbeat(): void {
     this.stopHeartbeat();
-    this.heartbeatTimer = setInterval(() => this.send({ type: 'heartbeat' }), this.opts.heartbeatMs ?? 15_000);
+    this.heartbeatTimer = setInterval(
+      () => this.send({ type: "heartbeat" }),
+      this.opts.heartbeatMs ?? 15_000,
+    );
     this.heartbeatTimer.unref();
   }
 
@@ -203,7 +207,7 @@ export class DeviceLink {
   }
 }
 
-function isEphemeral(frame: DeviceFrame): boolean {
-  if (frame.type === 'heartbeat') return true;
-  return frame.type === 'event' && frame.event.type === 'assistant.delta';
+function isEphemeral(frame: DeviceToServerFrame): boolean {
+  if (frame.type === "heartbeat") return true;
+  return frame.type === "event" && frame.event.type === "assistant.delta";
 }

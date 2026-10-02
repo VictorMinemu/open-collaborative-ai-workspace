@@ -3,6 +3,7 @@ import {
   ClientFrame,
   ConversationKind,
   DeviceToServerFrame,
+  onlyRelativePaths,
   PostMessageRequest,
   parseTopic,
   RelativePath,
@@ -32,25 +33,29 @@ describe("contracts", () => {
     for (const p of ["/Users/me/repo/a.ts", "C:\\repo\\a.ts", "~/x", "../etc/passwd", "a/../../b"]) {
       expect(RelativePath.safeParse(p).success, p).toBe(false);
     }
-    expect(
-      SessionEvent.safeParse({
-        type: "approval.requested",
-        approvalId: id,
-        tool: "Edit",
-        summary: "x",
-        paths: ["/etc"],
-      }).success,
-    ).toBe(false);
+    expect(onlyRelativePaths(["src/a.ts", "/etc/hosts", "~/x", "../y"])).toEqual(["src/a.ts"]);
   });
 
   it("defaults mentions and validates device frames", () => {
     expect(PostMessageRequest.parse({ body: "hi" }).mentions).toEqual([]);
     expect(
       DeviceToServerFrame.parse({
-        t: "event",
+        type: "event",
         sessionId: id,
+        localSeq: 3,
         event: { type: "session.state", status: "running" },
-      }).t,
+      }).type,
     ).toBe("event");
+    expect(
+      SessionEvent.safeParse({ type: "approval.resolved", approvalId: id, decision: "expired" }).success,
+    ).toBe(true);
+    expect(
+      DeviceToServerFrame.safeParse({
+        type: "command",
+        id: "c1",
+        kind: "session.start",
+        sessionId: id,
+      }).success,
+    ).toBe(false);
   });
 });

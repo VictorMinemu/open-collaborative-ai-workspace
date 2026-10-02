@@ -10,6 +10,8 @@
       "!**/dist",
       "!**/.turbo",
       "!**/drizzle/meta",
+      "!apps/local-runtime/src/codex/generated",
+      "!apps/local-runtime/src/**/__fixtures__",
       "!**/next-env.d.ts",
       "!e2e/test-results",
       "!e2e/playwright-report",
