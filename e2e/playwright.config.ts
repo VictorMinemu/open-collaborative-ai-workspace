@@ -27,13 +27,13 @@ export default defineConfig({
     },
     {
       name: "desktop",
-      testMatch: /smoke\.spec\.ts/,
+      testIgnore: /setup\.spec\.ts/,
       dependencies: ["setup"],
       use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } },
     },
     {
       name: "mobile",
-      testMatch: /smoke\.spec\.ts/,
+      testIgnore: /setup\.spec\.ts/,
       dependencies: ["setup"],
       use: { ...devices["Pixel 7"], viewport: { width: 390, height: 844 } },
     },

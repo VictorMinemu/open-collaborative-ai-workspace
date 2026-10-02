@@ -12,7 +12,7 @@ RUN npx --yes turbo@2.11.4 prune @ocw/api --docker
 FROM base AS installer
 WORKDIR /app
 COPY --from=pruner /repo/out/json/ .
-RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile --prod
 COPY --from=pruner /repo/out/full/ .
 
 FROM base AS runner
