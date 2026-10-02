@@ -1,0 +1,8 @@
+{
+  "extends": "@ocw/config/tsconfig.node.json",
+  "compilerOptions": {
+    "lib": ["es2024", "dom", "dom.iterable"],
+    "types": ["node"]
+  },
+  "include": ["src", "e2e", "vitest.config.ts"]
+}
