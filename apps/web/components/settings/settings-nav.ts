@@ -1,4 +1,4 @@
-import { type LucideIcon, Users } from "lucide-react";
+import { Laptop, type LucideIcon, Users } from "lucide-react";
 
 /** Settings sections. Add ONE entry here and create `app/(app)/settings/<slug>/page.tsx`. */
 export interface SettingsSection {
@@ -10,4 +10,5 @@ export interface SettingsSection {
 
 export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   { id: "members", label: "Members", href: "/settings", icon: Users },
+  { id: "devices", label: "Devices", href: "/settings/devices", icon: Laptop },
 ];
