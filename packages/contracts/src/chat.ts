@@ -109,7 +109,12 @@ export const ChannelSummary = Conversation.extend({
 });
 export type ChannelSummary = z.infer<typeof ChannelSummary>;
 
-export const ChannelList = z.object({ channels: z.array(ChannelSummary) });
+export const ChannelList = z.object({
+  channels: z.array(ChannelSummary),
+  /** Cursors for the sidebar's list-change subscriptions (`org:<id>` and `user:<id>`). */
+  orgSeq: z.number().int().nonnegative().optional(),
+  userSeq: z.number().int().nonnegative().optional(),
+});
 export type ChannelList = z.infer<typeof ChannelList>;
 
 export const AddConversationMemberRequest = z.object({ kind: MemberKind, id: Id });

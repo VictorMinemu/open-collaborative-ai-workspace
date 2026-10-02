@@ -188,8 +188,13 @@ export function createChatModule(core: Core): ApiModule {
         { preHandler: requireUser, schema: { tags, response: { 200: ChannelList } } },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
-            await ensureGeneral(tx, deps, authOf(req).userId);
-            return { channels: await listChannels(tx, authOf(req).userId) };
+            const auth = authOf(req);
+            await ensureGeneral(tx, deps, auth.userId);
+            return {
+              channels: await listChannels(tx, auth.userId),
+              orgSeq: await core.realtime.lastSeq(tx, `org:${auth.organizationId}`),
+              userSeq: await core.realtime.lastSeq(tx, `user:${auth.userId}`),
+            };
           }),
       );
 
