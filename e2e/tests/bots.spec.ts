@@ -58,6 +58,14 @@ test("models → one-click bot → ready via the cell → add to channel", async
     await shot(page, `bots-models-${tag}`);
 
     // ---- One-click bot from a preset, on the never-metered mock model
+    const name = tag === "390" ? "Atlas" : "Nova";
+    // Re-runnable: remove bots left by a previous run of this spec.
+    const existing = (await (await page.request.get(`${API_URL}/api/v1/agents`)).json()) as {
+      agents: Array<{ id: string; name: string }>;
+    };
+    for (const a of existing.agents.filter((x) => x.name === name)) {
+      await page.request.delete(`${API_URL}/api/v1/agents/${a.id}`);
+    }
     await page.goto("/bots");
     await expect(page.getByRole("heading", { name: "Bots", exact: true })).toBeVisible();
     await page.getByTestId("new-bot").click();
@@ -65,7 +73,6 @@ test("models → one-click bot → ready via the cell → add to channel", async
     await expect(sheet.getByTestId("bot-presets")).toBeVisible();
     await shot(page, `bots-new-presets-${tag}`);
     await sheet.getByTestId("preset-product-manager").click();
-    const name = tag === "390" ? "Atlas" : "Nova";
     await sheet.getByTestId("bot-name").fill(name);
     await expect(sheet.getByTestId("bot-username")).toHaveValue(name.toLowerCase());
     await sheet.getByTestId("bot-model").click();
@@ -150,6 +157,13 @@ test("models → one-click bot → ready via the cell → add to channel", async
       expect(posted.ok()).toBe(true);
       await plugin.waitUntil(() => plugin.replies.length > 0, 15_000);
       expect(plugin.replies[0]!.mention.message.author.displayName).toBe(ADMIN.name);
+
+      // The reply is in the thread, attributed to the bot, with the structured identity it received.
+      await page.goto(`/chat/${channel.id}`);
+      await page.getByTestId("thread-summary").first().click();
+      const thread = page.getByTestId("thread-panel");
+      await expect(thread.getByText(`Asked by ${ADMIN.name}`)).toBeVisible();
+      await shot(page, `bots-reply-thread-${tag}`);
     }
   } finally {
     await plugin.stop();
