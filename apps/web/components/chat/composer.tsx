@@ -71,6 +71,8 @@ export function Composer({
   const [query, setQuery] = useState<{ q: string; start: number } | null>(null);
   const [active, setActive] = useState(0);
   const lastTyping = useRef(0);
+  /** Caret to restore right after the next value commit (set synchronously, never in a later frame). */
+  const pendingCaret = useRef<{ pos: number; detect: boolean } | null>(null);
 
   const suggestions = useMemo(() => {
     if (!query) return [];
@@ -93,6 +95,13 @@ export function Composer({
     if (!el) return;
     el.style.height = "0px";
     el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
+    const caret = pendingCaret.current;
+    if (caret) {
+      pendingCaret.current = null;
+      el.focus();
+      el.setSelectionRange(caret.pos, caret.pos);
+      if (caret.detect) detect(el.value, caret.pos);
+    }
   }, [value]);
 
   useEffect(() => {
@@ -112,13 +121,9 @@ export function Composer({
     const after = value.slice(caret);
     const insert = `@${c.handle} `;
     const next = `${before}${insert}${after.startsWith(" ") ? after.slice(1) : after}`;
+    pendingCaret.current = { pos: before.length + insert.length, detect: false };
     setValue(next);
     setQuery(null);
-    requestAnimationFrame(() => {
-      el.focus();
-      const pos = before.length + insert.length;
-      el.setSelectionRange(pos, pos);
-    });
   };
 
   const send = () => {
@@ -164,12 +169,8 @@ export function Composer({
     const needsSpace = caret > 0 && !/\s$/.test(value.slice(0, caret));
     const next = `${value.slice(0, caret)}${needsSpace ? " " : ""}@${value.slice(caret)}`;
     const pos = caret + (needsSpace ? 2 : 1);
+    pendingCaret.current = { pos, detect: true };
     setValue(next);
-    requestAnimationFrame(() => {
-      el.focus();
-      el.setSelectionRange(pos, pos);
-      detect(next, pos);
-    });
   };
 
   if (apiRef) apiRef.current = { insertMention: insertAt };
