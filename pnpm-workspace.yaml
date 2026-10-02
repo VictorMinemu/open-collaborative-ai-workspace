@@ -1,0 +1,23 @@
+packages:
+  - apps/*
+  - packages/*
+
+# Exact versions only; never pull a version younger than 7 days (supply-chain hygiene, see 01-RESEARCH.md).
+saveExact: true
+minimumReleaseAge: 10080
+engineStrict: true
+
+# Lifecycle scripts are blocked by default; allow only what the stack needs.
+allowBuilds:
+  esbuild: true
+  sharp: true
+  "@biomejs/biome": true
+  protobufjs: true
+  cpu-features: false
+  ssh2: false
+  electron: true
+
+# The package manager itself is pinned via packageManager and reviewed separately.
+minimumReleaseAgeExclude:
+  - pnpm
+  - "@pnpm/exe.*"
