@@ -41,7 +41,13 @@ export interface BuiltApp {
   close(): Promise<void>;
 }
 
-export async function buildApp(env: Env, opts: { logger?: boolean } = {}): Promise<BuiltApp> {
+export async function buildApp(
+  env: Env,
+  opts: {
+    logger?: boolean /** Test hook: capture log lines. */;
+    logStream?: { write(msg: string): void };
+  } = {},
+): Promise<BuiltApp> {
   const app = Fastify({
     logger:
       opts.logger === false
@@ -49,6 +55,7 @@ export async function buildApp(env: Env, opts: { logger?: boolean } = {}): Promi
         : {
             level: env.LOG_LEVEL,
             redact: ["req.headers.cookie", "req.headers.authorization", 'res.headers["set-cookie"]'],
+            ...(opts.logStream ? { stream: opts.logStream } : {}),
           },
     trustProxy: true,
     bodyLimit: 2 * 1024 * 1024,
@@ -106,7 +113,14 @@ export async function buildApp(env: Env, opts: { logger?: boolean } = {}): Promi
     openapi: {
       info: { title: "Open Collaborative AI Workspace API", version: API_VERSION },
       components: {
-        securitySchemes: { session: { type: "apiKey", in: "cookie", name: "ocw.session_token" } },
+        securitySchemes: {
+          session: { type: "apiKey", in: "cookie", name: "ocw.session_token" },
+          cellToken: {
+            type: "http",
+            scheme: "bearer",
+            description: "OpenClaw cell token (Agent Channel API)",
+          },
+        },
       },
     },
     transform: jsonSchemaTransform,

@@ -25,6 +25,19 @@ export const EnvSchema = z.object({
     .refine((v) => decodeKey(v) !== null, "must be 32 bytes as base64 or 64 hex chars"),
   OCW_PUBLIC_WEB_URL: Url.default("http://localhost:3000"),
   OCW_PUBLIC_API_URL: Url.default("http://localhost:4000"),
+  /**
+   * Bootstrap bearer token for the OpenClaw cell (Agent Channel API), bound to the instance's organization.
+   * Written by `pnpm setup:env`; shared with the openclaw container so it starts with no manual step.
+   * Admins can also mint a token in Settings › Bots runtime (stored as SHA-256 only).
+   */
+  OCW_CELL_TOKEN: z.string().min(32, "must be at least 32 characters").optional(),
+  /** `mock` offers the deterministic fake model (`fake/mock-1`) for E2E/CI; never metered. */
+  OCW_MODEL_PROVIDER: z
+    .enum(["", "mock"])
+    .default("")
+    .transform((v) => (v === "" ? null : v)),
+  /** Base URL of the fake OpenAI-compatible model server as seen from the OpenClaw container. */
+  OCW_MOCK_MODEL_BASE_URL: Url.default("http://fake-model:18999/v1"),
   /** Extra allowed browser origins (comma-separated), e.g. a LAN URL for the demo. */
   OCW_TRUSTED_ORIGINS: z
     .string()
@@ -45,6 +58,7 @@ const SECRET_VARS = [
   "BETTER_AUTH_SECRET",
   "OCW_SETUP_TOKEN",
   "OCW_ENCRYPTION_KEY",
+  "OCW_CELL_TOKEN",
 ] as const;
 
 export function decodeKey(v: string): Buffer | null {

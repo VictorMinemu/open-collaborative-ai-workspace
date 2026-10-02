@@ -71,6 +71,10 @@ services:
       OCW_PUBLIC_WEB_URL: ${OCW_PUBLIC_WEB_URL:-http://localhost:3000}
       OCW_PUBLIC_API_URL: ${OCW_PUBLIC_API_URL:-http://localhost:4000}
       OCW_TRUSTED_ORIGINS: ${OCW_TRUSTED_ORIGINS:-}
+      # Bots: bearer token shared with the openclaw cell (Agent Channel API scope only).
+      OCW_CELL_TOKEN: ${OCW_CELL_TOKEN:-}
+      OCW_MODEL_PROVIDER: ${OCW_MODEL_PROVIDER:-}
+      OCW_MOCK_MODEL_BASE_URL: ${OCW_MOCK_MODEL_BASE_URL:-http://fake-model:18999/v1}
     ports:
       - "${OCW_API_PORT:-4000}:4000"
     depends_on:

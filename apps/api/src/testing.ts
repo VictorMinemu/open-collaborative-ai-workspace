@@ -17,7 +17,14 @@ export interface TestStack {
 }
 
 /** Real PostgreSQL 18 + Redis 8 (testcontainers) and the full API listening on a random port. */
-export async function startTestStack(): Promise<TestStack> {
+export async function startTestStack(
+  opts: {
+    /** Extra/overridden env vars (e.g. OCW_CELL_TOKEN, OCW_MODEL_PROVIDER). */
+    env?: Record<string, string>;
+    /** Capture API log lines (enables the logger at LOG_LEVEL, default silent). */
+    logStream?: { write(msg: string): void };
+  } = {},
+): Promise<TestStack> {
   const [db, redis] = await Promise.all([startTestDatabase(), new RedisContainer("redis:8").start()]);
   const env = loadEnv({
     NODE_ENV: "test",
@@ -30,8 +37,12 @@ export async function startTestStack(): Promise<TestStack> {
     OCW_ENCRYPTION_KEY: randomBytes(32).toString("base64"),
     OCW_PUBLIC_WEB_URL: WEB_ORIGIN,
     OCW_PUBLIC_API_URL: "http://localhost:4999",
+    ...opts.env,
   });
-  const built = await buildApp(env, { logger: false });
+  const built = await buildApp(
+    env,
+    opts.logStream ? { logger: true, logStream: opts.logStream } : { logger: false },
+  );
   await built.app.listen({ host: "127.0.0.1", port: 0 });
   const addr = built.app.server.address();
   const port = typeof addr === "object" && addr ? addr.port : 0;
