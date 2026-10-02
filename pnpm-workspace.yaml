@@ -16,6 +16,8 @@ allowBuilds:
   cpu-features: false
   ssh2: false
   electron: true
+  # Windows-only installer helper pulled by electron-builder; its postinstall is not needed on macOS/Linux.
+  electron-winstaller: false
 
 # The package manager itself is pinned via packageManager and reviewed separately.
 minimumReleaseAgeExclude:
