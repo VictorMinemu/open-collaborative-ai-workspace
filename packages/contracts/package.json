@@ -1,0 +1,20 @@
+{
+  "name": "@ocw/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "description": "Zod schemas shared by every OCW app: domain entities, REST DTOs, realtime envelope, Unified Session Event Protocol, Device Link protocol and Agent Channel API.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@ocw/config": "workspace:*"
+  }
+}
