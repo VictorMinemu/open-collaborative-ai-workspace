@@ -1,0 +1,577 @@
+import {
+  type ChannelMember,
+  type ChannelSummary,
+  EventTypes,
+  type Mention,
+  type Message,
+  type MessageAuthor,
+  type ThreadUpdatedEvent,
+} from "@ocw/contracts";
+import { conversationMembers, conversations, messages, type Tx, tenantOf } from "@ocw/db";
+import { and, asc, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
+import { badRequest, forbidden, gone, notFound } from "../../lib/errors";
+import type { AuditService } from "../audit";
+import type { RealtimeService } from "../realtime";
+import { authorOf, type Directory } from "./directory";
+
+/**
+ * Chat domain logic. Every function runs inside the caller's `withTenant()` transaction, so RLS scopes all
+ * reads and writes to the tenant; cross-org ids simply do not exist here.
+ */
+
+export const GENERAL_SLUG = "general";
+export const GENERAL_TOPIC = "Company-wide announcements and everything that concerns the whole team";
+export const convTopic = (id: string) => `conv:${id}`;
+
+export type ConversationRow = typeof conversations.$inferSelect;
+export type MessageRow = typeof messages.$inferSelect;
+
+export interface ChatDeps {
+  audit: AuditService;
+  realtime: RealtimeService;
+}
+
+export function iso(v: unknown): string {
+  return new Date(v as string).toISOString();
+}
+const isoOrNull = (v: unknown) => (v == null ? null : iso(v));
+
+// ---------------------------------------------------------------- access
+
+export async function getChannel(tx: Tx, id: string): Promise<ConversationRow | null> {
+  const [row] = await tx
+    .select()
+    .from(conversations)
+    .where(and(eq(conversations.id, id), eq(conversations.kind, "channel")))
+    .limit(1);
+  return row ?? null;
+}
+
+export async function getMembership(
+  tx: Tx,
+  conversationId: string,
+  kind: "user" | "agent",
+  memberId: string,
+) {
+  const [row] = await tx
+    .select()
+    .from(conversationMembers)
+    .where(
+      and(
+        eq(conversationMembers.conversationId, conversationId),
+        eq(conversationMembers.memberKind, kind),
+        eq(conversationMembers.memberId, memberId),
+      ),
+    )
+    .limit(1);
+  return row ?? null;
+}
+
+/** Public channels are readable by every org member; private ones only by their members. */
+export async function canRead(tx: Tx, conv: ConversationRow, userId: string): Promise<boolean> {
+  if (conv.kind === "channel" && conv.visibility === "public") return true;
+  return (await getMembership(tx, conv.id, "user", userId)) !== null;
+}
+
+/** The channel if the user may read it; 404 otherwise (private channels do not reveal their existence). */
+export async function requireReadable(tx: Tx, id: string, userId: string): Promise<ConversationRow> {
+  const conv = await getChannel(tx, id);
+  if (!conv || !(await canRead(tx, conv, userId))) throw notFound("Channel not found");
+  return conv;
+}
+
+/** The channel if the user is a member and it is not archived. */
+export async function requireWritable(tx: Tx, id: string, userId: string): Promise<ConversationRow> {
+  const conv = await requireReadable(tx, id, userId);
+  if (conv.archivedAt) throw gone("This channel is archived", "channel_archived");
+  if (!(await getMembership(tx, conv.id, "user", userId))) {
+    throw forbidden("Join the channel to post in it", "not_a_member");
+  }
+  return conv;
+}
+
+// ---------------------------------------------------------------- channels
+
+/**
+ * Lazily seeds the org-wide `#general` (every org member joins it) and makes sure `userId` is in it.
+ * Idempotent and race-safe (partial unique index on (organization_id, slug) for channels).
+ */
+export async function ensureGeneral(tx: Tx, deps: ChatDeps, userId: string): Promise<void> {
+  const ctx = tenantOf(tx);
+  let general = await tx
+    .select({ id: conversations.id })
+    .from(conversations)
+    .where(and(eq(conversations.kind, "channel"), eq(conversations.slug, GENERAL_SLUG)))
+    .limit(1)
+    .then((r) => r[0]);
+  if (!general) {
+    const res = await tx.execute(sql`
+      insert into app.conversations (organization_id, kind, name, slug, topic, visibility, created_by)
+      values (${ctx.organizationId}, 'channel', ${GENERAL_SLUG}, ${GENERAL_SLUG}, ${GENERAL_TOPIC}, 'public', ${userId})
+      on conflict (organization_id, slug) where kind = 'channel' and slug is not null do nothing
+      returning id`);
+    const created = res.rows[0] as { id: string } | undefined;
+    if (created) {
+      general = created;
+      await tx.execute(sql`
+        insert into app.conversation_members (conversation_id, organization_id, member_kind, member_id, role)
+        select ${created.id}, ${ctx.organizationId}, 'user', m.user_id,
+               case when m.role = 'owner' then 'owner' else 'member' end
+        from app.org_members m
+        on conflict do nothing`);
+      await deps.audit.record(tx, {
+        action: "channel.created",
+        resourceType: "conversation",
+        resourceId: created.id,
+        metadata: { name: GENERAL_SLUG, visibility: "public", seeded: true },
+      });
+      await deps.realtime.appendEvent(tx, `org:${ctx.organizationId}`, EventTypes.conversationCreated, {
+        conversationId: created.id,
+      });
+    } else {
+      general = await tx
+        .select({ id: conversations.id })
+        .from(conversations)
+        .where(and(eq(conversations.kind, "channel"), eq(conversations.slug, GENERAL_SLUG)))
+        .limit(1)
+        .then((r) => r[0]);
+    }
+  }
+  if (general) {
+    await tx
+      .insert(conversationMembers)
+      .values({
+        conversationId: general.id,
+        organizationId: ctx.organizationId,
+        memberKind: "user",
+        memberId: userId,
+      })
+      .onConflictDoNothing();
+  }
+}
+
+/** Channels visible to `userId` (public + private where member), not archived unless `id` is given. */
+export async function listChannels(tx: Tx, userId: string, id?: string): Promise<ChannelSummary[]> {
+  const me = conversationMembers;
+  const rows = await tx
+    .select({
+      c: conversations,
+      memberId: me.memberId,
+      lastReadSeq: me.lastReadSeq,
+      memberCount:
+        sql<number>`(select count(*) from app.conversation_members cm where cm.conversation_id = ${conversations.id})`.mapWith(
+          Number,
+        ),
+      latestMessageSeq:
+        sql<number>`(select coalesce(max(m.seq), 0) from app.messages m where m.conversation_id = ${conversations.id} and m.thread_id is null)`.mapWith(
+          Number,
+        ),
+      lastMessageAt: sql<
+        string | null
+      >`(select max(m.created_at) from app.messages m where m.conversation_id = ${conversations.id} and m.thread_id is null)`,
+      lastSeq:
+        sql<number>`(select coalesce(max(s.last_seq), 0) from app.streams s where s.id = 'conv:' || ${conversations.id}::text)`.mapWith(
+          Number,
+        ),
+    })
+    .from(conversations)
+    .leftJoin(
+      me,
+      and(eq(me.conversationId, conversations.id), eq(me.memberKind, "user"), eq(me.memberId, userId)),
+    )
+    .where(
+      and(
+        eq(conversations.kind, "channel"),
+        id ? eq(conversations.id, id) : isNull(conversations.archivedAt),
+        sql`(${conversations.visibility} = 'public' or ${me.memberId} is not null)`,
+      ),
+    )
+    .orderBy(asc(conversations.name));
+  return rows.map((r) => ({
+    id: r.c.id,
+    organizationId: r.c.organizationId,
+    kind: r.c.kind,
+    name: r.c.name,
+    slug: r.c.slug,
+    topic: r.c.topic,
+    visibility: r.c.visibility,
+    parentConversationId: r.c.parentConversationId,
+    rootMessageId: r.c.rootMessageId,
+    createdBy: r.c.createdBy,
+    archivedAt: isoOrNull(r.c.archivedAt),
+    createdAt: iso(r.c.createdAt),
+    lastSeq: r.lastSeq,
+    isMember: r.memberId !== null,
+    memberCount: r.memberCount,
+    latestMessageSeq: r.latestMessageSeq,
+    lastReadSeq: r.memberId !== null ? Number(r.lastReadSeq ?? 0) : 0,
+    lastMessageAt: isoOrNull(r.lastMessageAt),
+    isDefault: r.c.slug === GENERAL_SLUG,
+  }));
+}
+
+export async function channelSummary(tx: Tx, id: string, userId: string): Promise<ChannelSummary> {
+  const [row] = await listChannels(tx, userId, id);
+  if (!row) throw notFound("Channel not found");
+  return row;
+}
+
+/** Tells sidebars that the channel list changed: org topic for public channels, member user topics for private. */
+export async function notifyListChanged(
+  tx: Tx,
+  deps: ChatDeps,
+  conv: ConversationRow,
+  type: string,
+  extraUserIds: string[] = [],
+): Promise<void> {
+  const payload = { conversationId: conv.id };
+  if (conv.visibility === "public") {
+    await deps.realtime.appendEvent(tx, `org:${conv.organizationId}`, type, payload);
+  } else {
+    const rows = await tx
+      .select({ id: conversationMembers.memberId })
+      .from(conversationMembers)
+      .where(
+        and(eq(conversationMembers.conversationId, conv.id), eq(conversationMembers.memberKind, "user")),
+      );
+    const ids = new Set([...rows.map((r) => r.id), ...extraUserIds]);
+    for (const uid of ids) await deps.realtime.appendEvent(tx, `user:${uid}`, type, payload);
+  }
+}
+
+// ---------------------------------------------------------------- members
+
+export async function listChannelMembers(
+  tx: Tx,
+  conversationId: string,
+  dir: Directory,
+): Promise<ChannelMember[]> {
+  const rows = await tx
+    .select()
+    .from(conversationMembers)
+    .where(eq(conversationMembers.conversationId, conversationId))
+    .orderBy(asc(conversationMembers.joinedAt));
+  const out: ChannelMember[] = [];
+  for (const r of rows) {
+    const e = r.memberKind === "agent" ? dir.agents.get(r.memberId) : dir.users.get(r.memberId);
+    if (!e) continue; // removed from the org / deleted agent
+    out.push({
+      kind: r.memberKind,
+      id: r.memberId,
+      displayName: e.displayName,
+      handle: e.handle,
+      avatarUrl: e.avatarUrl,
+      role: r.role,
+      joinedAt: iso(r.joinedAt),
+    });
+  }
+  // Humans first (alphabetical), then agents.
+  return out.sort((a, b) =>
+    a.kind === b.kind ? a.displayName.localeCompare(b.displayName) : a.kind === "user" ? -1 : 1,
+  );
+}
+
+/**
+ * Adds a user or agent to a channel (idempotent). Returns true when a row was inserted. Emits
+ * `conversation.member_added` on the channel and refreshes the new member's sidebar; audits.
+ */
+export async function addMember(
+  tx: Tx,
+  deps: ChatDeps,
+  conv: ConversationRow,
+  member: { kind: "user" | "agent"; id: string },
+  opts: { role?: "owner" | "member"; reason?: string } = {},
+): Promise<boolean> {
+  const inserted = await tx
+    .insert(conversationMembers)
+    .values({
+      conversationId: conv.id,
+      organizationId: conv.organizationId,
+      memberKind: member.kind,
+      memberId: member.id,
+      role: opts.role ?? "member",
+    })
+    .onConflictDoNothing()
+    .returning({ id: conversationMembers.memberId });
+  if (inserted.length === 0) return false;
+  await deps.audit.record(tx, {
+    action: "channel.member_added",
+    resourceType: "conversation",
+    resourceId: conv.id,
+    agentId: member.kind === "agent" ? member.id : null,
+    metadata: {
+      memberKind: member.kind,
+      memberId: member.id,
+      ...(opts.reason ? { reason: opts.reason } : {}),
+    },
+  });
+  await deps.realtime.appendEvent(tx, convTopic(conv.id), EventTypes.conversationMemberAdded, {
+    conversationId: conv.id,
+    member,
+  });
+  if (member.kind === "user") {
+    await deps.realtime.appendEvent(tx, `user:${member.id}`, EventTypes.conversationMemberAdded, {
+      conversationId: conv.id,
+    });
+  }
+  return true;
+}
+
+export async function removeMember(
+  tx: Tx,
+  deps: ChatDeps,
+  conv: ConversationRow,
+  member: { kind: "user" | "agent"; id: string },
+): Promise<boolean> {
+  const removed = await tx
+    .delete(conversationMembers)
+    .where(
+      and(
+        eq(conversationMembers.conversationId, conv.id),
+        eq(conversationMembers.memberKind, member.kind),
+        eq(conversationMembers.memberId, member.id),
+      ),
+    )
+    .returning({ id: conversationMembers.memberId });
+  if (removed.length === 0) return false;
+  await deps.audit.record(tx, {
+    action: "channel.member_removed",
+    resourceType: "conversation",
+    resourceId: conv.id,
+    agentId: member.kind === "agent" ? member.id : null,
+    metadata: { memberKind: member.kind, memberId: member.id },
+  });
+  await deps.realtime.appendEvent(tx, convTopic(conv.id), EventTypes.conversationMemberRemoved, {
+    conversationId: conv.id,
+    member,
+  });
+  if (member.kind === "user") {
+    await deps.realtime.appendEvent(tx, `user:${member.id}`, EventTypes.conversationMemberRemoved, {
+      conversationId: conv.id,
+    });
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------- messages
+
+export async function replyParticipantsFor(
+  tx: Tx,
+  rootIds: string[],
+  dir: Directory,
+): Promise<Map<string, MessageAuthor[]>> {
+  const out = new Map<string, MessageAuthor[]>();
+  if (rootIds.length === 0) return out;
+  const rows = await tx
+    .select({
+      threadId: messages.threadId,
+      authorKind: messages.authorKind,
+      authorId: messages.authorId,
+      last: sql<string>`max(${messages.createdAt})`,
+    })
+    .from(messages)
+    .where(inArray(messages.threadId, rootIds))
+    .groupBy(messages.threadId, messages.authorKind, messages.authorId);
+  const sorted = rows.sort((a, b) => new Date(b.last).getTime() - new Date(a.last).getTime());
+  for (const r of sorted) {
+    if (!r.threadId) continue;
+    const list = out.get(r.threadId) ?? [];
+    if (list.length < 5) list.push(authorOf(dir, r.authorKind, r.authorId));
+    out.set(r.threadId, list);
+  }
+  return out;
+}
+
+export function toMessage(row: MessageRow, dir: Directory, replyParticipants?: MessageAuthor[]): Message {
+  return {
+    id: row.id,
+    organizationId: row.organizationId,
+    conversationId: row.conversationId,
+    seq: row.seq,
+    authorKind: row.authorKind,
+    authorId: row.authorId,
+    author: authorOf(dir, row.authorKind, row.authorId),
+    body: row.body,
+    mentions: row.mentions,
+    status: row.status,
+    threadId: row.threadId,
+    replyCount: row.replyCount,
+    lastReplyAt: isoOrNull(row.lastReplyAt),
+    clientKind: (row.clientKind as Message["clientKind"]) ?? null,
+    createdAt: iso(row.createdAt),
+    editedAt: isoOrNull(row.editedAt),
+    ...(replyParticipants ? { replyParticipants } : {}),
+  };
+}
+
+/** Top-level messages of a channel, newest page first in the DB, returned oldest → newest. */
+export async function listMessages(
+  tx: Tx,
+  conversationId: string,
+  dir: Directory,
+  page: { before?: number | undefined; limit: number },
+): Promise<{ messages: Message[]; nextBefore: number | null }> {
+  const rows = await tx
+    .select()
+    .from(messages)
+    .where(
+      and(
+        eq(messages.conversationId, conversationId),
+        isNull(messages.threadId),
+        page.before ? lt(messages.seq, page.before) : undefined,
+      ),
+    )
+    .orderBy(desc(messages.seq))
+    .limit(page.limit + 1);
+  const hasMore = rows.length > page.limit;
+  const pageRows = rows.slice(0, page.limit).reverse();
+  const participants = await replyParticipantsFor(
+    tx,
+    pageRows.filter((r) => r.replyCount > 0).map((r) => r.id),
+    dir,
+  );
+  return {
+    messages: pageRows.map((r) => toMessage(r, dir, r.replyCount > 0 ? (participants.get(r.id) ?? []) : [])),
+    nextBefore: hasMore ? (pageRows[0]?.seq ?? null) : null,
+  };
+}
+
+export async function getMessage(tx: Tx, id: string): Promise<MessageRow | null> {
+  const [row] = await tx.select().from(messages).where(eq(messages.id, id)).limit(1);
+  return row ?? null;
+}
+
+/** Root + replies (oldest first) for the thread containing `messageId` (a root or one of its replies). */
+export async function loadThread(tx: Tx, messageId: string) {
+  const msg = await getMessage(tx, messageId);
+  if (!msg) return null;
+  const root = msg.threadId ? await getMessage(tx, msg.threadId) : msg;
+  if (!root) return null;
+  const replies = await tx
+    .select()
+    .from(messages)
+    .where(eq(messages.threadId, root.id))
+    .orderBy(asc(messages.seq));
+  return { root, replies };
+}
+
+/**
+ * Locks the conversation stream row and returns the seq the next `appendEvent` on it will get, so the
+ * message row can carry the seq of its own `message.created` event.
+ */
+async function lockNextSeq(tx: Tx, topic: string): Promise<number> {
+  const ctx = tenantOf(tx);
+  await tx.execute(sql`
+    insert into app.streams (id, organization_id, last_seq) values (${topic}, ${ctx.organizationId}, 0)
+    on conflict (id) do nothing`);
+  const res = await tx.execute(sql`select last_seq from app.streams where id = ${topic} for update`);
+  return Number((res.rows[0] as { last_seq: number | string }).last_seq) + 1;
+}
+
+export interface PostInput {
+  conv: ConversationRow;
+  author: { kind: "user" | "agent"; id: string };
+  body: string;
+  mentions: Mention[];
+  threadRootId?: string | null | undefined;
+  clientMessageId?: string | null | undefined;
+  clientKind: "web" | "desktop" | "mobile" | "agent" | "system";
+  sessionId?: string | null;
+  /** Agents may answer a reply id; it is normalised to its root instead of being refused. */
+  lenientThreadRoot?: boolean;
+}
+
+export interface PostResult {
+  row: MessageRow;
+  message: Message;
+  created: boolean;
+  root: MessageRow | null;
+}
+
+/**
+ * Inserts a message (top-level or thread reply), emits `message.created` (and `thread.updated` for replies)
+ * on `conv:<id>`. Idempotent on (author, clientMessageId): a retry returns the existing row, created=false.
+ */
+export async function postMessage(
+  tx: Tx,
+  deps: ChatDeps,
+  dir: Directory,
+  input: PostInput,
+): Promise<PostResult> {
+  const { conv, author } = input;
+  const topic = convTopic(conv.id);
+  // Serialises writers on this conversation; also makes the idempotency check below race-free.
+  const nextSeq = await lockNextSeq(tx, topic);
+
+  if (input.clientMessageId) {
+    const [existing] = await tx
+      .select()
+      .from(messages)
+      .where(
+        and(
+          eq(messages.authorKind, author.kind),
+          eq(messages.authorId, author.id),
+          eq(messages.clientMessageId, input.clientMessageId),
+        ),
+      )
+      .limit(1);
+    if (existing) {
+      const root = existing.threadId ? await getMessage(tx, existing.threadId) : null;
+      return { row: existing, message: toMessage(existing, dir), created: false, root };
+    }
+  }
+
+  let root: MessageRow | null = null;
+  if (input.threadRootId) {
+    root = await getMessage(tx, input.threadRootId);
+    if (!root || root.conversationId !== conv.id) throw notFound("Thread not found");
+    if (root.threadId) {
+      if (!input.lenientThreadRoot) {
+        throw badRequest("Threads are single-level: reply to the thread root", "thread_nesting");
+      }
+      root = await getMessage(tx, root.threadId);
+      if (!root) throw notFound("Thread not found");
+    }
+  }
+
+  const [row] = await tx
+    .insert(messages)
+    .values({
+      organizationId: conv.organizationId,
+      conversationId: conv.id,
+      seq: nextSeq,
+      authorKind: author.kind,
+      authorId: author.id,
+      body: input.body,
+      mentions: input.mentions,
+      threadId: root?.id ?? null,
+      clientKind: input.clientKind,
+      sessionId: input.sessionId ?? null,
+      clientMessageId: input.clientMessageId ?? null,
+    })
+    .returning();
+  if (!row) throw new Error("message insert returned no row");
+  const message = toMessage(row, dir, root ? undefined : []);
+  const seq = await deps.realtime.appendEvent(tx, topic, EventTypes.messageCreated, { message });
+  if (seq !== nextSeq) throw new Error(`stream seq drift on ${topic}: expected ${nextSeq}, got ${seq}`);
+
+  if (root) {
+    const [updated] = await tx
+      .update(messages)
+      .set({ replyCount: sql`${messages.replyCount} + 1`, lastReplyAt: row.createdAt })
+      .where(eq(messages.id, root.id))
+      .returning();
+    if (updated) {
+      root = updated;
+      const participants = (await replyParticipantsFor(tx, [root.id], dir)).get(root.id) ?? [];
+      const ev: ThreadUpdatedEvent = {
+        rootId: root.id,
+        replyCount: root.replyCount,
+        lastReplyAt: isoOrNull(root.lastReplyAt),
+        replyParticipants: participants,
+      };
+      await deps.realtime.appendEvent(tx, topic, EventTypes.threadUpdated, ev);
+    }
+  }
+  return { row, message, created: true, root };
+}
