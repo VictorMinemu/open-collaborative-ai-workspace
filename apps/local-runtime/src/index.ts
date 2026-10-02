@@ -4,6 +4,9 @@ export { contain, redact, sanitizeEvent, sanitizeString, sanitizeValue, truncate
 export { ClaudeCodeRuntime, APPROVAL_TIMEOUT_MS, type QueryFn, type QueryHandle } from './claude/claude-runtime.js';
 export { ClaudeEventMapper } from './claude/mapper.js';
 export { detectClaudeCode } from './claude/detect.js';
+export { CodexRuntime, type CodexRuntimeOptions } from './codex/codex-runtime.js';
+export { CodexEventMapper } from './codex/mapper.js';
+export { detectCodex } from './codex/detect.js';
 export * from './git.js';
 export { Daemon, type DaemonOptions } from './daemon.js';
 export { DeviceLink } from './device-link.js';
