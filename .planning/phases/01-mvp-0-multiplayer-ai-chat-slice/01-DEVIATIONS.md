@@ -21,3 +21,15 @@ No stack fallback was needed. TypeScript 7.0.2, pnpm 12.8.1 (via `packageManager
 | A-10 | `compose.yaml` does not set a fixed project `name`. | Each worktree gets its own Docker project instead of colliding. | Host ports still collide between parallel stacks. Override `OCW_WEB_PORT`, `OCW_API_PORT`, `OCW_POSTGRES_PORT`, `OCW_REDIS_PORT` in `.env`. |
 | A-11 | `apps/web` commits the `AGENTS.md` / `CLAUDE.md` that Next 16 regenerates on every `next dev`. | Otherwise they show up as untracked files forever. | None. |
 | A-12 | Operational: Docker Desktop ran out of disk during the first image build. Only unused build cache was pruned (`docker builder prune -f`, 14 GB). No images or volumes were touched. | Unblock the build. | None. |
+
+## B2 (bots / Agent Channel API), 2026-10-02
+
+| # | Deviation | Why | Impact |
+|---|-----------|-----|--------|
+| B2-1 | Provider API keys are entered in Settings › Models (encrypted in `app.secrets`) and delivered to the OpenClaw cell by `GET /agent-channel/v1/cell`, decrypted on demand. Addendum A2.6 had the key only in the OpenClaw container env. | Owner wants one-click setup from the UI. | The cell token is as sensitive as the keys. Documented in `01-AGENT-CHANNEL-API.md`; test proves the key never reaches `/api/v1`, logs, audit or stream payloads. |
+| B2-2 | `cellId = organizationId`; no `agent_cells` table. Cell stream topic `cell:<orgId>` added to `TopicPrefix` (browsers have no authorizer for it). | One cell per org in MVP 0. | A multi-cell org later adds the table behind the same contract. |
+| B2-3 | `OCW_CELL_TOKEN` is bound to the instance's first organization (`identity.instanceOrganizationId()`). UI tokens live in `agent_credentials` (sha256). | Compose bootstrap with no manual step. | Multi-org instances must use UI tokens. |
+| B2-4 | `agent.message.posted` is audited by agent-channel in its own transaction right after chat's `postAgentMessage` commits (only when `created`). | `postAgentMessage` owns its transaction (bridge signature). | Tiny window where a crash loses the audit row. Chat must not audit it again. |
+| B2-5 | The mention payload is built inside the chat transaction directly from `conversations`/`conversation_members`/`messages`/`org_members`/`agents` instead of `chatAgent.getThreadContext`. | Atomic with the message, no second pool connection inside a tx. Assumes chat uses `messages.thread_id = root id` for replies (as the contract says); `kind = thread` conversations are also covered. | If chat models threads differently, `threadHistory` must be revisited. |
+| B2-6 | Bots: agents are soft-deleted (`deleted_at`, partial unique index on username). | Old messages keep the author's name; handles become reusable. | — |
+| B2-7 | Local env only: the lockfile on this base lacks `apps/local-runtime`, so installs need `--config.minimum-release-age=0`; turbo calls the global pnpm 12.5.1 (`ERR_PNPM_BAD_PM_VERSION`), and `biome check` fails on pre-existing `apps/local-runtime` formatting. Lockfile change NOT committed. | Base-branch state, not B2 code. | `pnpm verify` needs these fixed on main. |

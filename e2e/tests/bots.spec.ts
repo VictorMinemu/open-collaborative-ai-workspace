@@ -113,6 +113,16 @@ test("models → one-click bot → ready via the cell → add to channel", async
     await expect(page.getByTestId("cell-status")).toHaveAttribute("data-connected", "true");
     await shot(page, `bots-runtime-${tag}`);
 
+    // ---- Dark mode review shots
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.goto("/bots");
+    await expect(card.getByTestId("bot-status")).toHaveAttribute("data-status", "ready");
+    await shot(page, `bots-gallery-dark-${tag}`);
+    await page.goto("/settings/models");
+    await expect(page.getByTestId("provider-anthropic").getByText("Connected")).toBeVisible();
+    await shot(page, `bots-models-dark-${tag}`);
+    await page.emulateMedia({ colorScheme: "light" });
+
     // ---- Mention → reply (only once chat is merged: B1's REST surface)
     if (hasChat) {
       const agents = (await (await page.request.get(`${API_URL}/api/v1/agents`)).json()) as {
