@@ -5,7 +5,8 @@ export const DevicePlatform = z.enum(["darwin", "linux", "win32"]);
 export const DeviceStatus = z.enum(["online", "offline"]);
 export type DeviceStatus = z.infer<typeof DeviceStatus>;
 
-export const RuntimeId = z.enum(["claude-code"]);
+/** Local runtimes; each uses the user's own subscription login on their device (no API keys). */
+export const RuntimeId = z.enum(["claude-code", "codex"]);
 export type RuntimeId = z.infer<typeof RuntimeId>;
 
 export const RuntimeInfo = z.object({

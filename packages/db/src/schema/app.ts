@@ -332,7 +332,7 @@ export const workSessions = appSchema.table(
     deviceId: uuid("device_id")
       .notNull()
       .references(() => devices.id, { onDelete: "cascade" }),
-    runtime: text("runtime", { enum: ["claude-code"] })
+    runtime: text("runtime", { enum: ["claude-code", "codex"] })
       .notNull()
       .default("claude-code"),
     model: text("model"),

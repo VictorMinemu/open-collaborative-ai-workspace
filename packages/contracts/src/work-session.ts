@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { Id, IsoDateTime } from "./common";
+import { RuntimeId } from "./device";
 import { DiffFile } from "./device-link";
 import { ApprovalDecision, WorkSessionStatus } from "./session-events";
 
@@ -11,7 +12,7 @@ export const WorkSession = z.object({
   conversationId: Id,
   projectId: Id,
   deviceId: Id,
-  runtime: z.literal("claude-code"),
+  runtime: RuntimeId,
   model: z.string().nullable(),
   permissionMode: PermissionMode,
   status: WorkSessionStatus,
@@ -27,6 +28,7 @@ export const WorkSessionList = z.object({ sessions: z.array(WorkSession) });
 
 export const CreateWorkSessionRequest = z.object({
   projectId: Id,
+  runtime: RuntimeId.default("claude-code"),
   title: z.string().trim().min(1).max(200).optional(),
   model: z.string().max(200).optional(),
   permissionMode: PermissionMode.default("default"),
