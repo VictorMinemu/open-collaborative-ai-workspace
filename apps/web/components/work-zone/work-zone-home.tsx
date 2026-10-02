@@ -82,7 +82,7 @@ export function WorkZoneHome() {
           </EmptyState>
         ) : (
           <div className="mx-auto grid w-full max-w-4xl gap-6 px-4 py-6 sm:px-6">
-            <div className="grid gap-3 sm:grid-cols-3">
+            <div className="grid gap-2 sm:grid-cols-3 sm:gap-3">
               {[
                 {
                   icon: Laptop,
@@ -100,10 +100,12 @@ export function WorkZoneHome() {
                   text: "Edits and commands wait for an explicit yes.",
                 },
               ].map((f) => (
-                <div key={f.title} className="rounded-xl border bg-card p-4">
-                  <f.icon className="mb-2 size-4 text-primary" />
-                  <p className="font-medium text-sm">{f.title}</p>
-                  <p className="mt-0.5 text-muted-foreground text-xs">{f.text}</p>
+                <div key={f.title} className="flex gap-3 rounded-xl border bg-card p-3 sm:block sm:p-4">
+                  <f.icon className="mt-0.5 size-4 shrink-0 text-primary sm:mt-0 sm:mb-2" />
+                  <div>
+                    <p className="font-medium text-sm">{f.title}</p>
+                    <p className="mt-0.5 text-muted-foreground text-xs">{f.text}</p>
+                  </div>
                 </div>
               ))}
             </div>
