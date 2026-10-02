@@ -3,29 +3,33 @@
 ## Overview
 
 This milestone delivers PRD v1.0 **MVP 1 (Collaborative Workspace)** and **MVP 2 (Multiplayer Work
-Zone)** as twelve vertical phases. Phases 1–3 fix the things that are ruinous to retrofit — the
-tenant boundary (RLS), the permission resolver, the unified `conversations`/`messages` model and the
-per-stream `seq`/replay contract. Phases 4–6 build the chat surface, the direct AI chat and then the
-multiplayer AI chat that proves the core value (AI sessions are multiplayer). Phase 7 turns that into
-a self-hosted release with the MVP 1 acceptance scenario running in CI. Phases 8–12 add the Work
-Zone: device pairing and protocol contracts, the Local Runtime daemon with Claude Code / Codex
-adapters and the desktop shell, the cloud-owned WorkSession control plane, the Work Zone UI, and
-finally artifacts, Chat → Work Zone creation and the full MVP 2 acceptance run.
+Zone)** as twelve vertical phases. Phase 1 is now the **MVP 0 slice** that proves the core value
+first — two people from the same organization share one AI chat in realtime on a `docker compose up`
+instance and the model knows who is speaking — on top of the foundations that are ruinous to
+retrofit (RLS tenant boundary, unified `conversations`/`messages` model, per-stream `seq`/replay,
+same-transaction audit). Phases 2–7 widen it into MVP 1: the permission resolver and org hierarchy,
+presence and latency, the chat surface, admin-configured direct AI chat, team-wide sharing with
+shared-context safety and agents, and the self-hosted release with the MVP 1 acceptance scenario
+running in CI. Phases 8–12 add the Work Zone: device pairing and protocol contracts, the Local
+Runtime daemon with Claude Code / Codex adapters and the desktop shell, the cloud-owned WorkSession
+control plane, the Work Zone UI, and finally artifacts, Chat → Work Zone creation and the full MVP 2
+acceptance run.
 
 Design rules that hold across every phase: one conversation model for every surface (sharing is a
 grant, never a copy); the WorkSession lives in the cloud and the daemon only connects outbound; the
-arbiter built once for AI chats (Phase 6) is reused for Work Zones (Phase 10); no absolute path or
+arbiter built once for AI chats (Phase 1) is reused for Work Zones (Phase 10); no absolute path or
 secret ever leaves a device; every sensitive action is audited in the same transaction.
 
 **Project mode:** mvp (each phase ships an end-to-end user capability)
 **Granularity:** fine (natural boundaries kept; 12 phases)
-**Requirements covered:** 122/122 v1 requirements (see Coverage)
+**Requirements covered:** 127/127 v1 requirements (see Coverage)
 
 ## Milestone Boundary
 
 | Milestone | Phases | Exit condition |
 |-----------|--------|----------------|
-| **MVP 1 — Collaborative Workspace** | 1–7 | Self-hosted release via `docker compose up`; Acceptance Scenario B steps 1–4 (multiplayer AI chat, minus Work Zone creation) pass as a Playwright E2E in CI |
+| **MVP 0 — Multiplayer AI Chat Slice** | 1 | Acceptance Scenario B steps 1–4 pass as a Playwright E2E on `docker compose up`; Autofy's team can use it internally |
+| **MVP 1 — Collaborative Workspace** | 2–7 (on top of MVP 0) | Self-hosted release via `docker compose up`; Acceptance Scenario B steps 1–4 (multiplayer AI chat, minus Work Zone creation) pass as a Playwright E2E in CI |
 | **MVP 2 — Multiplayer Work Zone** | 8–12 | Scenario A (minus mobile approval, replaced by web approval) and full Scenario B pass end to end against the compose stack with a signed desktop build |
 
 **Parallel workstreams:** Phase 8 (Device, Project and Work Zone Contracts) and Phase 9 (Local
@@ -42,15 +46,18 @@ both.
 
 Decimal phases appear between their surrounding integers in numeric order.
 
+**MVP 0 — Multiplayer AI Chat Slice**
+
+- [ ] **Phase 1: MVP 0 — Multiplayer AI Chat Slice** - Strict monorepo with RLS tenant boundary and unified conversation model, setup token / invite / login, one authenticated WebSocket with seq replay, a private streaming AI chat shared in place with a colleague, structural participant identity and Scenario B steps 1–4 as a Playwright E2E with a mock model
+
 **MVP 1 — Collaborative Workspace**
 
-- [ ] **Phase 1: Foundation** - Monorepo, tenant-safe database layer, API skeleton, compose profile and CI guardrails every later phase inherits
-- [ ] **Phase 2: Identity and Organization** - Bootstrap, invites, sessions, org hierarchy with four roles, effective-permission resolver, audit log and admin console
-- [ ] **Phase 3: Realtime Core** - One authenticated WebSocket per client, per-stream seq with replay, presence and typing, shared realtime client under 500 ms
+- [ ] **Phase 2: Identity and Organization** - Password reset, session management, org hierarchy with four roles, one effective-permission resolver adopted by every Phase 1 route, JWT/JWKS auth, admin console and profiles
+- [ ] **Phase 3: Realtime Presence and Latency** - Sub-500 ms propagation test on the compose stack, presence and typing with expiry, subscription loss resolved through the Phase 2 resolver
 - [ ] **Phase 4: Chat** - Channels, threads, DMs, Markdown messages, mentions, badges, notifications, search, attachments, pins and permalinks
-- [ ] **Phase 5: Direct AI Chat** - Org-configured providers and private streaming AI chats with stop, regenerate, titles, instructions, usage metering and attachments
-- [ ] **Phase 6: Multiplayer AI Chat, Sharing and Agents in Conversations** - In-place sharing, live multi-human AI chats with structural participant identity, one generation per conversation, agents as first-class members with Agent Cards
-- [ ] **Phase 7: Self-hosted Release** - `pnpm ocw setup` + `docker compose up`, secrets as inputs, migrate service, backup/upgrade tests, Caddy config, license checks and Scenario B E2E (MVP 1 acceptance)
+- [ ] **Phase 5: Direct AI Chat** - Admin-configured providers replace the env-configured model; private streaming AI chats with model choice, stop, regenerate, titles, instructions, usage metering and attachments
+- [ ] **Phase 6: Sharing, Shared-Context Safety and Agents in Conversations** - Team / department / org sharing with an exact-visibility dialog, intersected tool permissions and withholding, no private memory in multi-human chats, the spoofing eval fixture, agents as first-class members with Agent Cards
+- [ ] **Phase 7: Self-hosted Release** - `pnpm ocw setup` + `docker compose up`, secrets as inputs, migrate service, backup/upgrade tests, Caddy config, license checks and Scenario B E2E (MVP 1 acceptance), CI guardrails (bypass tokens, skipped policy tests, licenses, CODEOWNERS)
 
 **MVP 2 — Multiplayer Work Zone**
 
@@ -62,55 +69,53 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 ## Phase Details
 
-### Phase 1: Foundation
-**Goal**: The monorepo, tenant-safe database layer, Control Plane skeleton, minimal compose profile and CI guardrails exist, so every later phase inherits RLS, shared contracts, observability and bypass detection instead of retrofitting them
+### Phase 1: MVP 0 — Multiplayer AI Chat Slice
+**Goal**: Two people from the same organization share one AI chat in realtime on a `docker compose up` instance and the model correctly distinguishes who is speaking — the core value proven end to end in the first phase, on top of the foundations that are ruinous to retrofit (RLS tenant boundary, unified conversations/messages model, per-stream seq/replay, same-transaction audit)
 **Mode:** mvp
 **Depends on**: Nothing (first phase)
-**Requirements**: FOUND-01, FOUND-02, FOUND-03, FOUND-04, FOUND-05, FOUND-06, FOUND-07
+**Requirements**: FOUND-01, FOUND-02, FOUND-03, FOUND-04, FOUND-05, FOUND-06, SLICE-01, SLICE-02, SLICE-03, SLICE-04, SLICE-05, AUTH-01, AUTH-02, AUTH-03, ORG-05, RT-01, RT-02, RT-05, MULTI-02, MULTI-03, MULTI-04, MULTI-08
 **Success Criteria** (what must be TRUE):
-  1. A developer clones the repo and runs `pnpm install && pnpm verify` on Node 24 LTS and gets green lint, typecheck and tests in a TypeScript-strict pnpm 12 / Turborepo / Biome / Vitest monorepo
-  2. `docker compose up` (minimal profile: postgres, redis, minio, migrate, api, web) starts, the API answers a health check and serves OpenAPI generated from the Zod contracts with OpenTelemetry traces emitted, and a missing required secret makes the stack fail fast with a clear message
-  3. A CI test enumerates every org-scoped table and proves, connected as the `app` role, that cross-tenant reads return zero rows and cross-tenant writes fail; the only way application code reaches the database is the `withTenant()` transaction helper
-  4. `pnpm verify` fails a change that introduces a permission-bypass token, a skipped policy test or a license violation, and CODEOWNERS covers db policies, auth, adapters and policy paths
-  5. `packages/contracts` publishes the unified `conversations` / `messages` model (kinds channel, dm, group, ai_chat, thread, work_session) and every API boundary validates against those Zod schemas
+  1. `pnpm install && pnpm verify` is green on Node 24 in the strict monorepo; `docker compose up` (minimal profile) starts, the API answers health and serves OpenAPI from the Zod contracts, and a missing required secret (including the model API key) fails fast with a clear message
+  2. A CI test proves, as the `app` role, that cross-tenant reads return zero rows and writes fail for every org-scoped table; application code reaches the database only through `withTenant()`; `packages/contracts` publishes the unified `conversations`/`messages` model
+  3. An admin redeems the one-time setup token to create the organization, invites a colleague by copyable link, and the colleague signs up and stays logged in across refresh; setup, invite, signup and sharing write audit events in the same transaction
+  4. A user creates a private AI chat, the response streams in realtime, shares the chat with the colleague, and both write in the same conversation over one authenticated WebSocket with per-stream seq; a client that reconnects replays missed events exactly once (automated test)
+  5. The model receives structural participant identity (roster + server-generated attributed blocks), responds when @mentioned or addressed while idle with at most one generation per conversation, and Acceptance Scenario B steps 1–4 pass as a Playwright E2E against the compose stack with the mock model
 **Plans**: TBD
-**Research:** standard (monorepo, Drizzle RLS, testcontainers, OTel and compose are prescribed concretely in STACK/ARCHITECTURE/PITFALLS; accept or reject the ADR amendments — Node 24, TS 7 alias, Tempo, env/file secret provider — as the first decision of this phase)
-**UI hint**: no
-
-### Phase 2: Identity and Organization
-**Goal**: An Organization Admin can bootstrap the instance, invite people, arrange them into departments, teams and projects with the four PRD roles, and every action is permission-checked through one resolver and audited
-**Mode:** mvp
-**Depends on**: Phase 1
-**Requirements**: AUTH-01, AUTH-02, AUTH-03, AUTH-04, AUTH-05, AUTH-06, ORG-01, ORG-02, ORG-03, ORG-04, ORG-05, ORG-06
-**Success Criteria** (what must be TRUE):
-  1. On first run an admin redeems the one-time setup token to create the organization and its first Organization Admin; no default credentials exist anywhere
-  2. An invited person signs up from a copyable invite link (SMTP optional) with email and password, stays logged in across browser refresh and app restart, can reset their password, and can view and revoke their active sessions, each carrying a device/client identifier; admins and team leads can revoke pending invitations
-  3. Admin creates and rearranges Organization → Department → Team → Project (including moving units), assigns members with one of Standard User / Developer / Team Lead-Manager / Organization Admin, and manages users, roles, units and memberships from CRUD pages in the admin console
-  4. Every route resolves permissions through a single `resolveEffectivePermissions` intersection (Org ∩ Department ∩ Team ∩ Project ∩ User ∩ Agent ∩ Tool ∩ Device) with explicit-deny precedence, and API and WebSocket connections authenticate with short-lived JWTs verifiable against a JWKS endpoint
-  5. Every sensitive action appears in the audit log with actor, agent, user, device, resource, action, result, timestamp, organization and session, written in the same transaction; users can view and edit their own profile (display name, avatar, status) and see other members' profiles
-**Plans**: TBD
-**Research:** needed (better-auth 1.7 schema generation into Drizzle, mapping flat better-auth orgs/teams onto the ltree hierarchy, oauthProvider/JWKS for WS and daemon verification)
+**Research:** standard for foundations; needed for prompt assembly with structural identity on the configured provider (Anthropic default), debounce tuning for addressed-while-idle responses, and the deterministic mock model used by E2E
 **UI hint**: yes
 
-### Phase 3: Realtime Core
-**Goal**: Two connected clients see each other's events in under 500 ms over one authenticated WebSocket, and a client that drops and reconnects replays exactly what it missed — the single delivery path that messages, AI runs and session events will all use
+### Phase 2: Identity and Organization
+**Goal**: Every route — including the Phase 1 setup, invite, AI chat and sharing routes — is permission-checked through one resolver, an Organization Admin arranges members into departments, teams and projects with the four PRD roles, and users manage their passwords, sessions and profiles
+**Mode:** mvp
+**Depends on**: Phase 1
+**Requirements**: AUTH-04, AUTH-05, AUTH-06, ORG-01, ORG-02, ORG-03, ORG-04, ORG-06
+**Success Criteria** (what must be TRUE):
+  1. User resets their password (email when SMTP is configured, admin-issued link otherwise) and views and revokes their active sessions, each carrying a device/client identifier used for message attribution
+  2. Admin creates and rearranges Organization → Department → Team → Project (including moving units), assigns members with one of Standard User / Developer / Team Lead-Manager / Organization Admin, and manages users, roles, units and memberships from CRUD pages in the admin console
+  3. A single `resolveEffectivePermissions` intersection (Org ∩ Department ∩ Team ∩ Project ∩ User ∩ Agent ∩ Tool ∩ Device) with explicit-deny precedence decides every route, and every Phase 1 route (setup, invite, AI chat, sharing, realtime subscription) is migrated to it with no ad-hoc membership check left
+  4. API and WebSocket connections authenticate with short-lived JWTs verifiable against a JWKS endpoint; the Phase 1 WebSocket authentication moves to short-lived JWT/JWKS verification without breaking reconnect and replay
+  5. Users view and edit their own profile (display name, avatar, status) and see other members' profiles; hierarchy, role, membership and session-revocation actions extend the Phase 1 same-transaction audit log
+**Plans**: TBD
+**Research:** needed (mapping flat better-auth orgs/teams onto the ltree hierarchy, oauthProvider/JWKS for WS and daemon verification; better-auth schema generation into Drizzle already happens in Phase 1)
+**UI hint**: yes
+
+### Phase 3: Realtime Presence and Latency
+**Goal**: Collaborative events reach other connected clients in under 500 ms on the compose stack and people see who is online and typing in each conversation, on top of the Phase 1 WebSocket, seq replay and shared realtime client
 **Mode:** mvp
 **Depends on**: Phase 2
-**Requirements**: RT-01, RT-02, RT-03, RT-04, RT-05
+**Requirements**: RT-03, RT-04
 **Success Criteria** (what must be TRUE):
-  1. A client opens one authenticated WebSocket, subscribes only to topics it is authorised for, and loses a subscription automatically when its membership is removed
-  2. Every durable event carries a per-stream monotonic `seq` persisted before publish; a client that disconnects and reconnects with `afterSeq` receives every missed event exactly once, with no gaps or duplicates, proven by an automated test
-  3. An automated test against the compose stack measures typical propagation between two connected clients under 500 ms
-  4. Presence (online/away) and typing indicators for other connected users appear per conversation and expire automatically when a client disappears
-  5. Web (and later desktop) consume one shared realtime client package that reconnects with backoff, resumes from the last seq and exposes stores the UI reads from
+  1. An automated test against the compose stack measures typical propagation of collaborative events between two connected clients under 500 ms
+  2. Presence (online/away) and typing indicators for other connected users appear per conversation and expire automatically when a client disappears
+  3. A client loses a subscription automatically when its membership is removed, with authorisation resolved through the Phase 2 `resolveEffectivePermissions` resolver
 **Plans**: TBD
-**Research:** standard (`@fastify/websocket` + Redis fan-out + Postgres seq is a known pattern; ARCHITECTURE gives the table DDL and reconnect algorithm)
-**UI hint**: no
+**Research:** standard (Redis-backed presence with expiry over the Phase 1 WebSocket is a known pattern)
+**UI hint**: yes
 
 ### Phase 4: Chat
 **Goal**: A team can do its daily conversation in the workspace — channels, threads, DMs, mentions, search and files — with every message attributed, editable under audit and delivered in realtime
 **Mode:** mvp
-**Depends on**: Phase 3
+**Depends on**: Phase 3 (builds on the Phase 1 conversation model and realtime client)
 **Requirements**: CHAT-01, CHAT-02, CHAT-03, CHAT-04, CHAT-05, CHAT-06, CHAT-07, CHAT-08, CHAT-09, CHAT-10, CHAT-11, CHAT-12, CHAT-13, CHAT-14
 **Success Criteria** (what must be TRUE):
   1. User creates, joins, leaves and archives public and private channels shown in a sidebar grouped by department/team with All, Mentions, Threads and AI Chats views; a non-member cannot read a private channel even through the API
@@ -119,11 +124,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. Unread and mention badges per channel/DM update in realtime from read markers with mark-as-read/unread; user can mute a channel, set do-not-disturb or mention-only and toggle desktop/web, and the notification inbox honours those preferences
   5. User finds messages, people and channels through full-text search with channel/author/date filters, attaches files and images by drag-and-drop or paste (preview and download) through the artifact upload pipeline, and history loads with cursor pagination and jump-to-permalink
 **Plans**: TBD
-**Research:** standard (Slack-model chat over the Phase 3 primitives; FEATURES is exhaustive on expectations)
+**Research:** standard (Slack-model chat over the Phase 1 conversation model and realtime client; FEATURES is exhaustive on expectations)
 **UI hint**: yes
 
 ### Phase 5: Direct AI Chat
-**Goal**: A user holds a private, streaming AI conversation using organization-configured models, with every generation metered — the run loop, provider layer and usage records that multiplayer AI chat builds on
+**Goal**: A user holds a private, streaming AI conversation with organization-configured models and every generation metered — extending the Phase 1 run loop so admin-configured providers and an allowed-models list replace the env-configured single model
 **Mode:** mvp
 **Depends on**: Phase 4
 **Requirements**: AICHAT-01, AICHAT-02, AICHAT-03, AICHAT-04, AICHAT-05, AICHAT-06, AICHAT-07, AICHAT-08, AICHAT-09
@@ -137,32 +142,33 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Research:** standard (AI SDK 7 `streamText` and provider packages are documented in STACK; the model integration contract is captured by `/gsd-ai-integration-phase` during planning)
 **UI hint**: yes
 
-### Phase 6: Multiplayer AI Chat, Sharing and Agents in Conversations
-**Goal**: The core value is proven — a private AI chat becomes a live shared conversation where the model knows who each participant is, generation is arbitrated, and agents take part in channels and DMs as first-class members
+### Phase 6: Sharing, Shared-Context Safety and Agents in Conversations
+**Goal**: Shared AI chats widen from one colleague to teams, departments and the whole organization without leaking context — tools run with intersected permissions, private memory stays out of multi-human chats and spoofed authority is refused under evaluation — and agents take part in channels, DMs and AI chats as first-class members
 **Mode:** mvp
 **Depends on**: Phase 5
-**Requirements**: MULTI-01, MULTI-02, MULTI-03, MULTI-04, MULTI-05, MULTI-06, MULTI-07, MULTI-08, AGENT-01, AGENT-02, AGENT-03, AGENT-04
+**Requirements**: MULTI-01, MULTI-05, MULTI-06, MULTI-07, AGENT-01, AGENT-02, AGENT-03, AGENT-04
 **Success Criteria** (what must be TRUE):
-  1. Owner shares an AI chat in place with a person, team, department or organization; the share dialog states exactly what becomes visible, and the recipient sees the same conversation (context, messages, attachments, artifacts, model, tools, permissions, participants) as a grant on the same record, never a copy
-  2. Two or more humans and the model write in one conversation in realtime; every message records author, timestamp, device, context and permissions; the model addresses each participant correctly from structural identity (roster plus server-generated attributed blocks, never spoofable name prefixes), a spoofed authority claim inside a message is refused by the CI three-participant evaluation fixture, and Acceptance Scenario B steps 1–4 pass end to end
-  3. The model responds when @mentioned or when addressed while idle; at most one generation runs per conversation and queued or coalesced follow-ups are visible to all participants
-  4. Tools invoked in a shared chat run with the intersection of the agent's and the triggering human's permissions, content not authorised for every participant is withheld with an explanation, and no user-private context or personal memory is injected once a second human is present
+  1. Owner shares an AI chat in place with a team, department or the whole organization, extending the Phase 1 person-to-person share; the share dialog states exactly what becomes visible (context, messages, attachments, artifacts, model, tools, permissions, participants), and every recipient gets a grant on the same record, never a copy
+  2. Tools invoked in a shared chat run with the intersection of the agent's and the triggering human's permissions, and content not authorised for every participant is withheld with an explanation from the model
+  3. No user-private context or personal memory is injected into a conversation once a second human participant is present
+  4. A three-participant evaluation fixture verifies correct addressing and refusal of a spoofed authority claim; because it calls a metered model it runs in CI on a schedule or behind an explicit PR label, never on every PR
   5. Admin or Team Lead creates an agent persona (name, username, avatar, model, instructions, tools, scope, owner); the agent is a member of channels, DMs and AI chats like a human, replies in-thread when mentioned using the thread's context within its permissions, and posts typed Agent Cards (kind, title, fields, status, Open / Follow / Approve actions) that update in place
 **Plans**: TBD
-**Research:** needed (prompt-assembly behaviour across Anthropic / OpenAI / Google / openai-compatible providers — alternation rules, mid-conversation system messages, prompt caching; debounce tuning; the participant-spoofing eval fixture)
+**Research:** needed (prompt assembly beyond the Phase 1 Anthropic default — OpenAI / Google / openai-compatible alternation rules, mid-conversation system messages, prompt caching; the participant-spoofing eval fixture and its metered-model budget)
 **UI hint**: yes
 
 ### Phase 7: Self-hosted Release
 **Goal**: Any engineering team can install, upgrade, back up and expose an MVP 1 instance with one command each, and the MVP 1 acceptance scenario runs against that exact stack in CI — the milestone gate for Autofy's own engineers as first customer
 **Mode:** mvp
 **Depends on**: Phase 6
-**Requirements**: SELF-01, SELF-02, SELF-03, SELF-04, SELF-05, SELF-06, SELF-07
+**Requirements**: SELF-01, SELF-02, SELF-03, SELF-04, SELF-05, SELF-06, SELF-07, FOUND-07
 **Success Criteria** (what must be TRUE):
   1. `git clone` + `pnpm ocw setup` + `docker compose up` yields a working MVP 1 instance; OpenBao and observability (Prometheus, Grafana, Loki, Tempo) are optional compose profiles that can be enabled later without reinstalling
   2. Secrets are required inputs (env or `*_FILE`) and are never generated silently at boot; the env/file secret provider and the OpenBao client implement the same `SecretStore` interface
   3. Migrations run in a one-shot `migrate` service and the API refuses to start on schema mismatch; an `N-1 → N` upgrade test passes in CI; `pnpm ocw backup` / restore work as the migrator role and data survives `docker compose up --force-recreate`
   4. The documented Caddy reverse-proxy configuration passes a test covering WebSocket upgrade, trusted proxy headers and presigned object-storage URLs reachable from outside the compose network
   5. Every package declares its license (AGPL-3.0 apps/server, Apache-2.0 for `packages/contracts` and `packages/protocol`), CI checks dependency-license compatibility, and Scenario B (minus Work Zone creation) runs as a Playwright E2E against the compose stack in CI
+  6. `pnpm verify` fails a change that introduces a permission-bypass token (Semgrep), a skipped policy test or a license violation, and CODEOWNERS covers db policies, auth, adapters and policy paths
 **Plans**: TBD
 **Research:** needed (MinIO community-edition feature shedding and Garage/SeaweedFS fallback; pnpm 12 lockfile compatibility with Turborepo 2.10)
 **UI hint**: no
@@ -177,7 +183,7 @@ Scenario B without Work Zone creation. Phases 8–12 below are MVP 2 (Multiplaye
 ### Phase 8: Device, Project and Work Zone Contracts
 **Goal**: A member's machine can be paired, seen, revoked and trusted with registered projects, and the protocols and permission grains that the daemon and WorkSession phases build against are fixed in code — with the acceptance targets committed — before either starts
 **Mode:** mvp
-**Depends on**: Phase 7 (MVP 1 released); builds on Phase 2 permissions and Phase 3 streams
+**Depends on**: Phase 7 (MVP 1 released); builds on Phase 2 permissions and Phase 1 streams
 **Parallel with**: Phase 9 (once DEV-01 `packages/protocol` is merged)
 **Requirements**: DEV-01, DEV-02, DEV-03, DEV-04, DEV-05, DEV-06, DEV-07
 **Success Criteria** (what must be TRUE):
@@ -218,7 +224,7 @@ Scenario B without Work Zone creation. Phases 8–12 below are MVP 2 (Multiplaye
   4. Runtime approval requests surface to all participants; only `APPROVE` holders can approve once, allow for session, or deny with comment; unanswered approvals time out to deny and expire on daemon restart; session events stream to participants in realtime with cursor replay (assistant deltas coalesced into checkpointed rows, high-volume tool/command events stream-only) and git state plus changed files/diff are exposed behind `DIFF_VIEW` with only repo-relative paths
   5. Session presence (Controlling / Viewing diff / Typing / Following / Away) is tracked per participant, a user can follow a session without controlling it and receive its notifications, sessions resume after daemon restart, app restart or host sleep by replaying the event log and reattaching the runtime (showing "Host offline since …" while queued prompts wait), and sessions can be renamed, archived (auto-archive after a configurable period) and searched with the event log as transcript
 **Plans**: TBD
-**Research:** standard (state machine, arbiter and approval round-trip are specified step by step in ARCHITECTURE; reuses the Phase 6 arbiter shape — the risk is discipline, not unknowns)
+**Research:** standard (state machine, arbiter and approval round-trip are specified step by step in ARCHITECTURE; reuses the Phase 1 arbiter shape — the risk is discipline, not unknowns)
 **UI hint**: no
 
 ### Phase 11: Work Zone UI
@@ -254,13 +260,19 @@ Scenario B without Work Zone creation. Phases 8–12 below are MVP 2 (Multiplaye
 
 | Category | Requirements | Phase |
 |----------|--------------|-------|
-| FOUND | FOUND-01 … FOUND-07 (7) | 1 |
-| AUTH | AUTH-01 … AUTH-06 (6) | 2 |
-| ORG | ORG-01 … ORG-06 (6) | 2 |
-| RT | RT-01 … RT-05 (5) | 3 |
+| FOUND | FOUND-01 … FOUND-06 (6) | 1 |
+| FOUND | FOUND-07 (1) | 7 |
+| SLICE | SLICE-01 … SLICE-05 (5) | 1 |
+| AUTH | AUTH-01 … AUTH-03 (3) | 1 |
+| AUTH | AUTH-04 … AUTH-06 (3) | 2 |
+| ORG | ORG-05 (1) | 1 |
+| ORG | ORG-01 … ORG-04, ORG-06 (5) | 2 |
+| RT | RT-01, RT-02, RT-05 (3) | 1 |
+| RT | RT-03, RT-04 (2) | 3 |
 | CHAT | CHAT-01 … CHAT-14 (14) | 4 |
 | AICHAT | AICHAT-01 … AICHAT-09 (9) | 5 |
-| MULTI | MULTI-01 … MULTI-08 (8) | 6 |
+| MULTI | MULTI-02, MULTI-03, MULTI-04, MULTI-08 (4) | 1 |
+| MULTI | MULTI-01, MULTI-05, MULTI-06, MULTI-07 (4) | 6 |
 | AGENT | AGENT-01 … AGENT-04 (4) | 6 |
 | SELF | SELF-01 … SELF-07 (7) | 7 |
 | DEV | DEV-01 … DEV-07 (7) | 8 |
@@ -271,13 +283,25 @@ Scenario B without Work Zone creation. Phases 8–12 below are MVP 2 (Multiplaye
 | WZUI | WZUI-01 … WZUI-10 (10) | 11 |
 | ART | ART-01 … ART-06 (6) | 12 |
 
-**Total:** 122 v1 requirements, 122 mapped, 0 orphaned, 0 duplicated.
+**Total:** 127 v1 requirements, 127 mapped, 0 orphaned, 0 duplicated.
 
 **Adjustments to the research suggestion:** DESK-06 (desktop notifications for task completed /
 failed / approval required / mention / device offline) and DESK-07 (open-in-editor for files of the
 current session) are placed in Phase 11 rather than Phase 9 because their observable behaviour needs
 a WorkSession to exist (Phase 10); SUMMARY.md's Phase 11 deliverables already list both. Everything
 else follows the reconciled 12-phase structure in `.planning/research/SUMMARY.md`.
+
+**Restructure 2026-10-02 (MVP 0):** the core value (multiplayer AI chat) was only demonstrable at
+Phase 6, after a near-complete Slack clone, so Phase 1 became a thin vertical slice deliverable in
+1–2 weeks. It keeps the foundations that are ruinous to retrofit (FOUND-01…06) and pulls forward
+AUTH-01…03 (setup token, invite, signup), ORG-05 (same-transaction audit, applied to the sensitive
+actions that exist in each phase; later phases extend it), RT-01, RT-02, RT-05 (one WebSocket, seq
+replay, shared realtime client) and MULTI-02, MULTI-03, MULTI-04, MULTI-08 (live multi-human AI chat,
+structural identity, one generation per conversation, Scenario B steps 1–4), plus five thin SLICE
+requirements (single env-configured model, private streaming chat, person-to-person share, minimal
+responsive web UI, deterministic mock model for E2E). FOUND-07 (CI guardrails) moved to Phase 7;
+Phases 2, 3 and 6 were narrowed to what remains; numbering 1–12 is unchanged and the total grew from
+122 to 127.
 
 ## Progress
 
@@ -287,12 +311,12 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 ‖
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 1. Foundation | MVP 1 | 0/TBD | Not started | - |
+| 1. MVP 0 — Multiplayer AI Chat Slice | MVP 0 | 0/TBD | Not started | - |
 | 2. Identity and Organization | MVP 1 | 0/TBD | Not started | - |
-| 3. Realtime Core | MVP 1 | 0/TBD | Not started | - |
+| 3. Realtime Presence and Latency | MVP 1 | 0/TBD | Not started | - |
 | 4. Chat | MVP 1 | 0/TBD | Not started | - |
 | 5. Direct AI Chat | MVP 1 | 0/TBD | Not started | - |
-| 6. Multiplayer AI Chat, Sharing and Agents in Conversations | MVP 1 | 0/TBD | Not started | - |
+| 6. Sharing, Shared-Context Safety and Agents in Conversations | MVP 1 | 0/TBD | Not started | - |
 | 7. Self-hosted Release | MVP 1 | 0/TBD | Not started | - |
 | 8. Device, Project and Work Zone Contracts | MVP 2 | 0/TBD | Not started | - |
 | 9. Local Runtime Daemon, Adapters and Desktop Shell | MVP 2 | 0/TBD | Not started | - |
@@ -302,4 +326,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 ‖
 
 ---
 *Roadmap created: 2026-09-10*
-*Source: .planning/REQUIREMENTS.md (122 v1 requirements), .planning/research/SUMMARY.md (12-phase suggestion), PRD v1.0 MVP 1 + MVP 2*
+*Restructured: 2026-10-02 (Phase 1 → MVP 0 Multiplayer AI Chat Slice)*
+*Source: .planning/REQUIREMENTS.md (127 v1 requirements), .planning/research/SUMMARY.md (12-phase suggestion), PRD v1.0 MVP 1 + MVP 2*
