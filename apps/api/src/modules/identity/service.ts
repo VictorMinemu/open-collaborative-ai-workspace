@@ -91,6 +91,19 @@ export class IdentityService {
     return m?.organizationId ?? null;
   }
 
+  /**
+   * The instance's organization (MVP 0 runs one org per instance). Used to bind operator-level bearer
+   * credentials such as OCW_CELL_TOKEN before any tenant is known. Null until /setup has run.
+   */
+  async instanceOrganizationId(): Promise<string | null> {
+    const [org] = await this.authDb
+      .select({ id: organization.id })
+      .from(organization)
+      .orderBy(asc(organization.createdAt))
+      .limit(1);
+    return org?.id ?? null;
+  }
+
   /** Fastify preHandler: 401 unless signed in; sets `req.auth`. */
   requireUser = async (req: FastifyRequest, _reply: FastifyReply) => {
     const auth = await this.authenticate(req.headers);

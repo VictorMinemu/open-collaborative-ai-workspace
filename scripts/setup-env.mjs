@@ -23,6 +23,7 @@ const values = {
   BETTER_AUTH_SECRET: hex(32),
   OCW_SETUP_TOKEN: hex(16),
   OCW_ENCRYPTION_KEY: randomBytes(32).toString("base64"),
+  OCW_CELL_TOKEN: `ocw_cell_${randomBytes(32).toString("base64url")}`,
 };
 
 let text = readFileSync(join(root, ".env.example"), "utf8");
