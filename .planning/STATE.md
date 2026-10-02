@@ -23,7 +23,7 @@ See: .planning/PROJECT.md (updated 2026-10-02)
 Phase: 1 of 12 (MVP 0 — Multiplayer AI Chat Slice)
 Plan: 0 of TBD in current phase
 Status: Ready to plan
-Last activity: 2026-09-10 — Roadmap created (12 phases, 122/122 v1 requirements mapped; MVP 1 = Phases 1–7, MVP 2 = Phases 8–12)
+Last activity: 2026-10-02 - Completed quick task 261002-fns: Restructure roadmap: Phase 1 becomes MVP 0 multiplayer AI chat slice
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -70,6 +70,12 @@ None yet.
 - [Phase 8]: Decide in `packages/contracts` whether Work Zone prompts/assistant messages are also `messages` rows in a `work_session` conversation (PITFALLS position, recommended) or stream events only.
 - [Phase 1 / Phase 7]: Drizzle 1.0 is on an RC line (fallback 0.45.2 documented); pnpm 12 lockfile vs Turborepo 2.10 and MinIO community-edition trajectory need verification.
 - [Phase 6]: Multi-provider prompt assembly verified only for Anthropic; OpenAI / Google / openai-compatible need a test matrix.
+
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 261002-fns | Restructure roadmap: Phase 1 becomes MVP 0 multiplayer AI chat slice | 2026-10-02 | 5f2bda9 | [261002-fns-restructure-roadmap-phase-1-becomes-mvp-](./quick/261002-fns-restructure-roadmap-phase-1-becomes-mvp-/) |
 
 ## Deferred Items
 
