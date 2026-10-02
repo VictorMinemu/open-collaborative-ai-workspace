@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type ElectronApplication, _electron as electron, expect, type Page, test } from "@playwright/test";
@@ -62,6 +62,11 @@ function fakeApi(): Promise<{ server: Server; url: string; enrolls: unknown[] }>
         );
       });
       return;
+    }
+    if (req.method === "GET" && req.url === "/") {
+      // Stand-in web app, used only when the real one is not running.
+      res.writeHead(200, { "content-type": "text/html" });
+      return res.end("<!doctype html><title>OCW (fake)</title><h1>fake web</h1>");
     }
     res.writeHead(404).end();
   });
@@ -137,11 +142,11 @@ test("onboarding → pairing → main window, hardened and supervised", async ()
   await page.click("#server-submit");
   await expect(page.locator("#server-error")).toContainText("http");
 
+  // Real web app if it is up (else the fake one) + fake enrollment API (B3's endpoint is not in
+  // this worktree yet).
   const webUp = await webIsUp();
-  test.skip(!webUp, `web app not running at ${WEB}; onboarding render verified only`);
-
-  // Real web app + fake enrollment API (the B3 endpoint may not exist in this worktree yet).
-  await page.fill("#web-url", WEB);
+  const web = webUp ? WEB : api.url;
+  await page.fill("#web-url", web);
   await page.click("summary");
   await page.fill("#api-url", api.url);
   await page.click("#server-submit");
@@ -192,7 +197,7 @@ test("onboarding → pairing → main window, hardened and supervised", async ()
   await page.click("#open-workspace");
   const main = await mainPromise;
   await main.waitForLoadState("domcontentloaded");
-  await expect(main).toHaveURL(new RegExp(`^${WEB}`));
+  await expect(main).toHaveURL(new RegExp(`^${web}`));
   const bridge = await main.evaluate(async () => {
     const d = (window as unknown as { ocwDesktop: Record<string, unknown> }).ocwDesktop;
     const status = await (d.status as () => Promise<{ state: string; paired: boolean }>)();
@@ -211,15 +216,52 @@ test("onboarding → pairing → main window, hardened and supervised", async ()
   expect(["connecting", "online"]).toContain(bridge.state);
   expect(bridge.projects).toEqual([]);
 
+  // Add project: stub only the native folder picker (main process), then go through the real
+  // validation + daemon registration. Web content never sees the absolute path.
+  // (Not under OCW_HOME or the app profile: both are refused as projects.)
+  const repo = join(realpathSync(mkdtempSync(join(tmpdir(), "ocw-repo-"))), "demo-repo");
+  mkdirSync(repo);
+  execFileSync("git", ["init", "-q", repo]);
+  const pick = async (path: string) =>
+    app.evaluate(({ dialog }, p) => {
+      dialog.showOpenDialog = (async () => ({
+        canceled: false,
+        filePaths: [p],
+      })) as typeof dialog.showOpenDialog;
+    }, path);
+  const addProject = () =>
+    main.evaluate(() =>
+      (window as unknown as { ocwDesktop: { addProject: () => Promise<unknown> } }).ocwDesktop.addProject(),
+    );
+  await pick(homedir());
+  expect(await addProject()).toMatchObject({
+    ok: false,
+    canceled: false,
+    error: expect.stringMatching(/home folder/),
+  });
+  await pick(repo);
+  const added = (await addProject()) as { ok: boolean; project: Record<string, unknown> };
+  expect(added).toMatchObject({ ok: true });
+  expect(added.project.name).toBe("demo-repo");
+  expect(JSON.stringify(added)).not.toContain(repo);
+  const listed = await main.evaluate(() =>
+    (
+      window as unknown as { ocwDesktop: { listProjects: () => Promise<unknown[]> } }
+    ).ocwDesktop.listProjects(),
+  );
+  expect(listed).toHaveLength(1);
+  expect(JSON.stringify(listed)).not.toContain(repo);
+
   // Navigation is pinned to the web origin.
   await main.evaluate(() => {
     location.href = "file:///etc/hosts";
   });
   await main.waitForTimeout(500);
-  expect(main.url().startsWith(WEB)).toBe(true);
+  expect(main.url().startsWith(web)).toBe(true);
 
-  // Log in and capture the main window.
-  if (/\/login/.test(main.url()) || (await main.getByTestId("login-form").count()) > 0) {
+  // Log in and capture the main window (real web app only).
+  if (!webUp) test.info().annotations.push({ type: "note", description: `web not running at ${WEB}` });
+  if ((webUp && /\/login/.test(main.url())) || (await main.getByTestId("login-form").count()) > 0) {
     await main.getByLabel("Email").fill(ADMIN.email);
     await main.getByLabel("Password", { exact: true }).fill(ADMIN.password);
     await main
@@ -227,9 +269,11 @@ test("onboarding → pairing → main window, hardened and supervised", async ()
       .getByRole("button", { name: /sign in|log in/i })
       .click();
   }
-  await expect(main.getByTestId("app-shell")).toBeVisible({ timeout: 20_000 });
-  await main.waitForTimeout(1200);
-  await main.screenshot({ path: join(shots, "desktop-main-window.png") });
+  if (webUp) {
+    await expect(main.getByTestId("app-shell")).toBeVisible({ timeout: 20_000 });
+    await main.waitForTimeout(1200);
+    await main.screenshot({ path: join(shots, "desktop-main-window.png") });
+  }
 
   // Quit: the daemon's process group is terminated, nothing is orphaned.
   await app.close();
