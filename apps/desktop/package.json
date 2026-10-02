@@ -14,7 +14,7 @@
     "dev": "node scripts/dev.mjs",
     "start": "node scripts/dev.mjs",
     "icons": "node scripts/icons.mjs",
-    "package:mac": "node scripts/build.mjs --daemon && electron-builder --mac dir dmg --arm64 --publish never",
+    "package:mac": "node scripts/package-mac.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:smoke": "node scripts/build.mjs && playwright test -c e2e/playwright.config.ts"

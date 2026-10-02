@@ -73,16 +73,21 @@ if (withDaemon) {
   // Self-contained copy of apps/local-runtime with production deps, run by Electron-as-Node.
   const out = join(dist, "daemon");
   rmSync(out, { recursive: true, force: true });
-  execFileSync("pnpm", ["--filter", "@ocw/local-runtime", "deploy", "--prod", "--legacy", out], {
-    cwd: root,
-    stdio: "inherit",
-  });
+  // Hoisted (flat, symlink-free) node_modules so electron-builder can copy it as a plain folder.
+  execFileSync(
+    "pnpm",
+    ["--filter", "@ocw/local-runtime", "deploy", "--prod", "--legacy", "--config.node-linker=hoisted", out],
+    {
+      cwd: root,
+      stdio: "inherit",
+    },
+  );
   // The SDK's bundled Claude Code binaries (~200 MB per platform) are not needed: the daemon
   // drives the user's installed `claude` CLI (their subscription login).
-  const scoped = join(out, "node_modules", ".pnpm");
+  const scoped = join(out, "node_modules", "@anthropic-ai");
   if (existsSync(scoped)) {
     for (const entry of readdirSync(scoped)) {
-      if (/^@anthropic-ai\+claude-agent-sdk-(darwin|linux|win32)/.test(entry)) {
+      if (/^claude-agent-sdk-(darwin|linux|win32)/.test(entry)) {
         rmSync(join(scoped, entry), { recursive: true, force: true });
       }
     }
