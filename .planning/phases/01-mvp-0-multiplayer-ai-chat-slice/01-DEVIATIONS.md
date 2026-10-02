@@ -1,0 +1,23 @@
+# Phase 1 — Deviations log
+
+Deviations from `01-BUILD-SPEC.md` / `01-RESEARCH.md`, with the reason for each. Newest at the bottom.
+
+## Stage A (platform core), 2026-10-02
+
+No stack fallback was needed. TypeScript 7.0.2, pnpm 12.8.1 (via `packageManager` + corepack), Drizzle
+1.0.0-rc.4 and turbo 2.11.x all work as the research described.
+
+| # | Deviation | Why | Impact |
+|---|-----------|-----|--------|
+| A-1 | `minimumReleaseAge: 10080` (7 days) picked slightly older patches than the research table: better-auth 1.7.6, @better-auth/core 1.7.6, turbo 2.11.4, biome 2.5.14, vitest 5.0.2, next 16.3.6, redis 6.2.1, @fastify/swagger 9.9.0, @scalar/fastify-api-reference 1.72.1, pg 8.23.0. `pnpm` and `@pnpm/exe.*` are excluded from the age gate (`minimumReleaseAgeExclude`), because the package manager is pinned separately. | Supply-chain policy from the research. | None functionally. Bump deliberately once versions mature. |
+| A-2 | Tenant RLS is applied generically by `packages/db/sql/post-migrate.sql`. It loops over every `app` table with `organization_id` and applies ENABLE + FORCE + the `tenant_isolation` policy with `nullif`. Policies are not declared per table with Drizzle `pgPolicy`. | drizzle-kit never emits FORCE. A generic step also covers new tables automatically, so B1/B2/B3 only add Drizzle tables. | The enumerator test (`packages/db/src/rls-isolation.int.test.ts`) still proves every table. New tables need one fixture row in `seedOrg()`, otherwise the test fails. |
+| A-3 | `ocw_migrator` is `BYPASSRLS`. | It owns three narrow `SECURITY DEFINER` lookup functions used before the tenant is known: `app.lookup_device_token`, `app.lookup_agent_credential`, `app.lookup_device_enrollment`. Each returns only the ids needed to open `withTenant()`. | `ocw_app` stays NOSUPERUSER NOBYPASSRLS (asserted by a test). `ocw_migrator` is used only by the one-shot `migrate` service. |
+| A-4 | `ocw_auth` has an `auth_plane` policy with full access to `app.audit_events` (SELECT/INSERT only, by grant) and `app.org_members`. | better-auth writes the identity-plane audit rows and the members projection in its own transaction, without tenant context. | `ocw_auth` is the trusted identity-plane role and already reads every user/session. |
+| A-5 | `app.org_members` has a surrogate `id` column (uuidv7, unique) next to its (org, user) primary key. `auth.instance_setup` uses a unique `singleton` boolean instead of a text PK. | better-auth's adapter requires a uuid `id` on every model it writes, and it generates or omits ids itself. | None. |
+| A-6 | Same-transaction audit for setup, invitation create/revoke and accept/sign-up: the research spike passed. `runWithTransaction` + `getCurrentAdapter`, with an internal better-auth plugin that exposes `auditEvent` / `orgMember` / `instanceSetup` as adapter models, rolls everything back on an injected failure (`apps/api/src/identity.int.test.ts`, test "SPIKE"). | — | No fallback needed (A3 resolved). |
+| A-7 | `user.signed_in` is audited in a separate `withTenant` transaction after better-auth answers 200. `member.joined` is appended after acceptance commits, also in a separate transaction. | Sign-in has no domain write to share a transaction with (research Pattern 10). `member.joined` is a realtime hint. | Documented. |
+| A-8 | The API runs TypeScript through `tsx` in production (`node --import tsx src/main.ts`). There is no build step and no bundle. | Speed. Workspace packages export raw `.ts`. | Slightly slower cold start. A bundle (tsdown/esbuild) can come later without code changes. |
+| A-9 | The browser calls the API directly at `OCW_PUBLIC_API_URL` (`:4000`) with CORS and credentials. There is no reverse proxy. The web reads the URL at request time, so the Docker image is not tied to one host. | Research Alternative A9. Cookies are host-scoped, so `localhost:3000` and `:4000` share the session. | Hosting on two different hostnames needs a proxy (Caddy, Phase 7). For a LAN demo, set both URLs to the LAN host and add it to `OCW_TRUSTED_ORIGINS`. |
+| A-10 | `compose.yaml` does not set a fixed project `name`. | Each worktree gets its own Docker project instead of colliding. | Host ports still collide between parallel stacks. Override `OCW_WEB_PORT`, `OCW_API_PORT`, `OCW_POSTGRES_PORT`, `OCW_REDIS_PORT` in `.env`. |
+| A-11 | `apps/web` commits the `AGENTS.md` / `CLAUDE.md` that Next 16 regenerates on every `next dev`. | Otherwise they show up as untracked files forever. | None. |
+| A-12 | Operational: Docker Desktop ran out of disk during the first image build. Only unused build cache was pruned (`docker builder prune -f`, 14 GB). No images or volumes were touched. | Unblock the build. | None. |
