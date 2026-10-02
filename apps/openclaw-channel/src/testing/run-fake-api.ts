@@ -1,0 +1,42 @@
+/**
+ * Standalone fake Agent Channel API for smoke runs against a real OpenClaw gateway:
+ *   FAKE_API_PORT=4010 FAKE_API_TOKEN=… FAKE_MODEL_BASE_URL=http://fake-model:18999/v1 node src/testing/run-fake-api.ts
+ * Inject a mention: POST /__test/mention (AgentMentionEvent minus seq/type/org/cell).
+ * Read results: GET /__test/state.
+ */
+import { startFakeAgentChannelApi } from "./fake-agent-channel-api.ts";
+
+const api = await startFakeAgentChannelApi({
+  port: Number(process.env.FAKE_API_PORT ?? 4010),
+  host: process.env.FAKE_API_HOST ?? "0.0.0.0",
+  token: process.env.FAKE_API_TOKEN ?? "dev-cell-token",
+  ...(process.env.FAKE_CELL_ID ? { cellId: process.env.FAKE_CELL_ID } : {}),
+  agents: [
+    {
+      id: process.env.FAKE_BOT_ID ?? "0199a000-0000-7000-8000-00000000a001",
+      handle: "archie",
+      displayName: "Archie",
+      avatarUrl: "🏛️",
+      description: "Architecture reviewer",
+      instructions: "You are a pragmatic software architect. Be brief.",
+      status: "provisioning",
+      modelRef: process.env.FAKE_BOT_MODEL_REF ?? "fake/mock-1",
+      model: { provider: "mock", providerId: "fake", id: "mock-1" },
+      updatedAt: new Date().toISOString(),
+    },
+  ],
+  providers: [
+    {
+      id: "fake",
+      kind: "mock",
+      api: "openai-completions",
+      baseUrl: process.env.FAKE_MODEL_BASE_URL ?? "http://fake-model:18999/v1",
+      apiKey: "mock-key-not-secret",
+      models: ["mock-1"],
+    },
+  ],
+});
+console.log(`fake agent channel api on :${new URL(api.url).port} (${api.topic})`);
+const stop = () => void api.close().then(() => process.exit(0));
+process.on("SIGTERM", stop);
+process.on("SIGINT", stop);

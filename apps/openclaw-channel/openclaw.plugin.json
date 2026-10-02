@@ -1,0 +1,33 @@
+{
+  "id": "ocw",
+  "name": "Open Collaborative AI Workspace",
+  "description": "Agent Channel API bridge: OCW bots as OpenClaw agents (tools disabled).",
+  "categories": ["channels"],
+  "channels": ["ocw"],
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
+  "channelConfigs": {
+    "ocw": {
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "apiUrl": { "type": "string", "format": "uri" },
+          "tokenFile": { "type": "string" },
+          "tokenEnv": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,127}$" }
+        }
+      },
+      "uiHints": {
+        "tokenFile": { "label": "Cell token file", "sensitive": true }
+      }
+    }
+  }
+}
