@@ -7,7 +7,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "generate": "drizzle-kit generate",
-    "migrate": "tsx src/migrate-cli.ts"
+    "migrate": "node --env-file-if-exists=../../.env --import tsx src/migrate-cli.ts"
   },
   "dependencies": {
     "@ocw/contracts": "workspace:*",

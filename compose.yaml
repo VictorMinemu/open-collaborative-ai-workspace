@@ -1,0 +1,100 @@
+# Open Collaborative AI Workspace — self-hosted stack (minimal profile).
+#   pnpm setup:env          # once: writes .env with random secrets
+#   docker compose up -d --build
+# Web: http://localhost:3000   API: http://localhost:4000 (/docs for OpenAPI)
+name: ocw
+
+x-db-urls: &db-urls
+  DATABASE_URL: postgres://ocw_app:${OCW_DB_APP_PASSWORD:?Set OCW_DB_APP_PASSWORD in .env (run pnpm setup:env)}@postgres:5432/ocw
+  AUTH_DATABASE_URL: postgres://ocw_auth:${OCW_DB_AUTH_PASSWORD:?Set OCW_DB_AUTH_PASSWORD in .env (run pnpm setup:env)}@postgres:5432/ocw
+  REDIS_URL: redis://redis:6379
+
+services:
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ocw
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (run pnpm setup:env)}
+    volumes:
+      # postgres:18 keeps PGDATA under /var/lib/postgresql/18/docker; mount the parent (not .../data).
+      - pgdata:/var/lib/postgresql
+    ports:
+      - "127.0.0.1:${OCW_POSTGRES_PORT:-54329}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ocw"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:8
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${OCW_REDIS_PORT:-63799}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # One-shot: bootstrap roles (superuser), run migrations + FORCE RLS step (ocw_migrator), then exit 0.
+  migrate:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    image: ocw-api:local
+    working_dir: /app/packages/db
+    command: ["node", "--import", "tsx", "src/migrate-cli.ts"]
+    restart: "no"
+    environment:
+      MIGRATE_SUPERUSER_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/ocw
+      MIGRATOR_DATABASE_URL: postgres://ocw_migrator:${OCW_DB_MIGRATOR_PASSWORD:?Set OCW_DB_MIGRATOR_PASSWORD in .env (run pnpm setup:env)}@postgres:5432/ocw
+      OCW_DB_MIGRATOR_PASSWORD: ${OCW_DB_MIGRATOR_PASSWORD}
+      OCW_DB_APP_PASSWORD: ${OCW_DB_APP_PASSWORD}
+      OCW_DB_AUTH_PASSWORD: ${OCW_DB_AUTH_PASSWORD}
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    image: ocw-api:local
+    restart: unless-stopped
+    environment:
+      <<: *db-urls
+      NODE_ENV: production
+      PORT: "4000"
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Set BETTER_AUTH_SECRET in .env (run pnpm setup:env)}
+      OCW_SETUP_TOKEN: ${OCW_SETUP_TOKEN:?Set OCW_SETUP_TOKEN in .env (run pnpm setup:env)}
+      OCW_ENCRYPTION_KEY: ${OCW_ENCRYPTION_KEY:?Set OCW_ENCRYPTION_KEY in .env (run pnpm setup:env)}
+      OCW_PUBLIC_WEB_URL: ${OCW_PUBLIC_WEB_URL:-http://localhost:3000}
+      OCW_PUBLIC_API_URL: ${OCW_PUBLIC_API_URL:-http://localhost:4000}
+      OCW_TRUSTED_ORIGINS: ${OCW_TRUSTED_ORIGINS:-}
+    ports:
+      - "${OCW_API_PORT:-4000}:4000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    image: ocw-web:local
+    restart: unless-stopped
+    environment:
+      # Read at request time (not baked into the image).
+      OCW_PUBLIC_API_URL: ${OCW_PUBLIC_API_URL:-http://localhost:4000}
+    ports:
+      - "${OCW_WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:

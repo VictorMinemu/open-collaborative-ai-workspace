@@ -6,8 +6,8 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "dev": "tsx watch --env-file-if-exists=../../.env src/main.ts",
-    "start": "tsx src/main.ts"
+    "dev": "node --env-file-if-exists=../../.env --watch-path=src --watch-path=../../packages --import tsx src/main.ts",
+    "start": "node --import tsx src/main.ts"
   },
   "dependencies": {
     "@better-auth/core": "1.7.6",

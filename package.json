@@ -24,7 +24,8 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
-    "@types/node": "^24.13.6",
+    "@playwright/test": "1.63.0",
+    "@types/node": "24.13.6",
     "tsx": "4.23.15",
     "turbo": "2.11.4",
     "typescript": "7.0.2",

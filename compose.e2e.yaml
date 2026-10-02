@@ -1,0 +1,8 @@
+# E2E override: docker compose -f compose.yaml -f compose.e2e.yaml up -d --build --wait
+# Deterministic, offline-safe settings for Playwright. CI never receives a metered model key.
+services:
+  api:
+    environment:
+      LOG_LEVEL: warn
+      # Model calls in E2E always use the mock provider (B2 wires OCW_MODEL_PROVIDER for bots).
+      OCW_MODEL_PROVIDER: mock
