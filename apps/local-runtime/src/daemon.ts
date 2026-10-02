@@ -202,6 +202,7 @@ export class Daemon {
           daemonVersion: DAEMON_VERSION,
         },
         runtimes: await this.detectRuntimes(),
+        sessions: [...this.sessions.keys()],
       },
       { type: "projects.sync", projects: this.registry.toSynced() },
     ];

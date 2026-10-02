@@ -145,3 +145,13 @@ export type WorkSessionDiff = z.infer<typeof WorkSessionDiff>;
  */
 export const WorkSessionEventPayload = z.object({ at: IsoDateTime, event: SessionEvent });
 export type WorkSessionEventPayload = z.infer<typeof WorkSessionEventPayload>;
+
+/** `work_session.changes`: file summary of the working tree after a turn (patch via GET /diff). */
+export const WorkSessionChanges = z.object({
+  files: z.array(DiffFile),
+  branch: z.string().nullable(),
+  headSha: z.string().nullable(),
+  truncated: z.boolean(),
+  at: IsoDateTime,
+});
+export type WorkSessionChanges = z.infer<typeof WorkSessionChanges>;

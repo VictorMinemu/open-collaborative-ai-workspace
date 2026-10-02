@@ -78,6 +78,7 @@ export const EventTypes = {
   projectUpdated: "project.updated",
   workSessionUpdated: "work_session.updated",
   workSessionEvent: "work_session.event",
+  workSessionChanges: "work_session.changes",
   promptUpdated: "prompt.updated",
   approvalUpdated: "approval.updated",
 } as const;

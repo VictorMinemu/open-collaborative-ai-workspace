@@ -72,6 +72,8 @@ export const HelloFrame = z.object({
   protocolVersion: z.number().int(),
   device: DeviceInfo,
   runtimes: z.array(RuntimeInfo),
+  /** Work session ids currently alive on the device (lets the server re-attach after a daemon restart). */
+  sessions: z.array(z.string().max(128)).max(1000).optional(),
 });
 export type HelloFrame = z.infer<typeof HelloFrame>;
 
