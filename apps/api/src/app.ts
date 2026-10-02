@@ -18,6 +18,7 @@ import {
 import pg from "pg";
 import { decodeKey, type Env } from "./config/env";
 import type { ApiModule, App, Core } from "./core";
+import { createChatAgentBridge } from "./lib/chat-agent-bridge";
 import { HttpError } from "./lib/errors";
 import { RedisBus } from "./lib/redis";
 import { createEnvFileSecretStore } from "./lib/secret-store";
@@ -69,7 +70,19 @@ export async function buildApp(env: Env, opts: { logger?: boolean } = {}): Promi
   const realtime = createRealtimeService({ db, bus });
   const identity = new IdentityService(createAuth(env, authDb), authDb, env);
   const secrets = createSecretsService({ key: encryptionKey, audit });
-  const core: Core = { env, log: app.log, db, bus, secretStore, audit, realtime, identity, secrets };
+  const chatAgent = createChatAgentBridge();
+  const core: Core = {
+    env,
+    log: app.log,
+    db,
+    bus,
+    secretStore,
+    audit,
+    realtime,
+    identity,
+    secrets,
+    chatAgent,
+  };
 
   const allowedOrigins = new Set([
     env.OCW_PUBLIC_WEB_URL,

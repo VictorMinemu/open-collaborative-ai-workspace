@@ -4,6 +4,7 @@ import type { TenantCtx, TenantDb } from "@ocw/db";
 import type { FastifyBaseLogger, FastifyInstance, FastifyRequest, RawServerDefault } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import type { Env } from "./config/env";
+import type { ChatAgentBridge } from "./lib/chat-agent-bridge";
 import type { RedisBus } from "./lib/redis";
 import type { SecretStore } from "./lib/secret-store";
 import type { AuditService } from "./modules/audit";
@@ -50,6 +51,8 @@ export interface Core {
   realtime: RealtimeService;
   identity: IdentityService;
   secrets: SecretsService;
+  /** Seam between chat (B1) and agent-channel (B2); see lib/chat-agent-bridge.ts. */
+  chatAgent: ChatAgentBridge;
 }
 
 export interface ApiModule {
