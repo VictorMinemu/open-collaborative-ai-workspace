@@ -2,8 +2,6 @@
 #   pnpm setup:env          # once: writes .env with random secrets
 #   docker compose up -d --build
 # Web: http://localhost:3000   API: http://localhost:4000 (/docs for OpenAPI)
-name: ocw
-
 x-db-urls: &db-urls
   DATABASE_URL: postgres://ocw_app:${OCW_DB_APP_PASSWORD:?Set OCW_DB_APP_PASSWORD in .env (run pnpm setup:env)}@postgres:5432/ocw
   AUTH_DATABASE_URL: postgres://ocw_auth:${OCW_DB_AUTH_PASSWORD:?Set OCW_DB_AUTH_PASSWORD in .env (run pnpm setup:env)}@postgres:5432/ocw

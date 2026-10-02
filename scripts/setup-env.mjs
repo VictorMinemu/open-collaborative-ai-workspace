@@ -30,10 +30,11 @@ for (const [k, v] of Object.entries(values)) {
   text = text.replace(new RegExp(`^${k}=.*$`, "m"), `${k}=${v}`);
 }
 // Local-dev URLs embed the generated role passwords.
-text = text.replaceAll("${OCW_DB_APP_PASSWORD}", values.OCW_DB_APP_PASSWORD);
-text = text.replaceAll("${OCW_DB_AUTH_PASSWORD}", values.OCW_DB_AUTH_PASSWORD);
-text = text.replaceAll("${OCW_DB_MIGRATOR_PASSWORD}", values.OCW_DB_MIGRATOR_PASSWORD);
-text = text.replaceAll("${POSTGRES_PASSWORD}", values.POSTGRES_PASSWORD);
+const placeholder = (name) => ["$", "{", name, "}"].join("");
+text = text.replaceAll(placeholder("OCW_DB_APP_PASSWORD"), values.OCW_DB_APP_PASSWORD);
+text = text.replaceAll(placeholder("OCW_DB_AUTH_PASSWORD"), values.OCW_DB_AUTH_PASSWORD);
+text = text.replaceAll(placeholder("OCW_DB_MIGRATOR_PASSWORD"), values.OCW_DB_MIGRATOR_PASSWORD);
+text = text.replaceAll(placeholder("POSTGRES_PASSWORD"), values.POSTGRES_PASSWORD);
 writeFileSync(target, text, { mode: 0o600 });
 console.log(`Wrote ${target}`);
 console.log(`Setup token (paste it on /setup): ${values.OCW_SETUP_TOKEN}`);

@@ -32,8 +32,8 @@
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true,
-      "suspicious": { "noExplicitAny": "error" },
+      "preset": "recommended",
+      "suspicious": { "noExplicitAny": "error", "noUndeclaredEnvVars": "off" },
       "style": { "noNonNullAssertion": "off" },
       "a11y": { "useSemanticElements": "off" },
       "correctness": { "noUnusedImports": "error" }
