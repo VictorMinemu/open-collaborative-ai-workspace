@@ -184,6 +184,10 @@ export const messages = appSchema.table(
   (t) => [
     index("messages_conv_seq_idx").on(t.organizationId, t.conversationId, t.seq),
     index("messages_thread_idx").on(t.organizationId, t.threadId),
+    /** Idempotent posts: the same author + client key (agent idempotencyKey, web clientMessageId) never duplicates. */
+    uniqueIndex("messages_author_client_msg_uq")
+      .on(t.organizationId, t.authorKind, t.authorId, t.clientMessageId)
+      .where(sql`client_message_id is not null`),
   ],
 );
 

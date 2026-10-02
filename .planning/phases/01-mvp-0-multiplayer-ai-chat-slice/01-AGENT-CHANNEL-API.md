@@ -155,14 +155,15 @@ then ack each provisioned bot with `POST /agents/:id/status`.
   conversation or its parent channel (403 `not_a_member`), thread root belongs to the conversation (400
   `invalid_thread_root`; a reply id is normalised to its root). 503 `chat_unavailable` if chat is not wired.
 - Stored through `core.chatAgent.postAgentMessage` (chat owns messages): `author_kind = 'agent'`, realtime
-  fan-out on `conv:<id>`. Audit `agent.message.posted` with `actor_kind = 'agent'`, `agent_id`, `user_id` =
-  triggering human, `session_id = cell:<credentialId|env>`.
+  fan-out on `conv:<id>`. Chat audits `agent.message.posted` in the same transaction (`actor_kind = 'agent'`,
+  `agent_id`); agent-channel opens that transaction with the triggering human (author of `inReplyToMessageId`)
+  as tenant user, so the row's `user_id` = who asked.
 
 ### `POST /typing` (`AgentChannelTyping` → `{ ok: true }`)
 
 `{ "agentId", "conversationId", "threadRootMessageId"?: id|null, "typing"?: true }`. `typing: true` calls chat's
-`agentTyping` (ephemeral `agent.typing` on `conv:<id>`); `false` publishes `agent.typing` with `typing: false`.
-Clients also clear the indicator when the agent's message arrives. Same membership checks as `/messages`.
+`agentTyping` (ephemeral `agent.typing` on `conv:<id>`); `false` is accepted and is a no-op: clients clear the
+indicator when the agent's message arrives or after 12 s. Same membership checks as `/messages`.
 
 ### `POST /agents/:id/status` (`AgentChannelStatusReport` → `Agent`)
 
@@ -217,6 +218,7 @@ Bots and providers: `GET/POST /model-providers`, `DELETE /model-providers/:provi
 3. `GET /cell` adds `instructions`, `avatarUrl`, `description`, `model`, `providers` (keys) and `protocolVersion`.
 4. `POST /agents/:id/status` and `POST /typing` added; `POST /acks` not implemented.
 5. Roster entries carry `role` (users) / `handle` (agents) as optional fields.
-6. `agent.message.posted` is audited by agent-channel right after chat commits the message (separate
-   transaction, only when `created: true`), because `postAgentMessage` owns its own transaction. Chat must
-   not audit it again.
+6. `agent.message.posted` is audited by chat inside the message transaction (only when `created`); the triggering
+   human is carried as the tenant user of that transaction.
+7. Chat auto-adds a mentioned bot to the channel (audited by chat) before emitting the mention, so "member of
+   the conversation" holds for every delivered mention.

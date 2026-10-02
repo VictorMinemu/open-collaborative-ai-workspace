@@ -9,7 +9,6 @@ import {
   AgentChannelTyping,
   CellSnapshot,
   cellTopic,
-  EphemeralTypes,
   IdParams,
   Ok,
   RotateCellTokenResponse,
@@ -235,41 +234,23 @@ export function createAgentChannelModule(core: Core): ApiModule {
 
               let result: { messageId: string; created: boolean };
               try {
-                result = await core.chatAgent.postAgentMessage(ctx, {
-                  agentId: body.agentId,
-                  conversationId: body.conversationId,
-                  threadRootId: check.root,
-                  body: body.text,
-                  idempotencyKey: body.idempotencyKey,
-                });
+                // Chat stores the message and audits `agent.message.posted` (actor = agent) in its own tx.
+                // The tenant user is the triggering human, so that audit row carries user_id = who asked.
+                result = await core.chatAgent.postAgentMessage(
+                  { organizationId: cell.organizationId, userId: check.triggeredBy },
+                  {
+                    agentId: body.agentId,
+                    conversationId: body.conversationId,
+                    threadRootId: check.root,
+                    body: body.text,
+                    idempotencyKey: body.idempotencyKey,
+                  },
+                );
               } catch (err) {
                 if (err instanceof Error && err.message.includes("has not provided")) {
                   throw new HttpError(503, "chat_unavailable", "Chat is not available on this server");
                 }
                 throw err;
-              }
-
-              if (result.created) {
-                await core.db.withTenant(ctx, (tx) =>
-                  core.audit.record(tx, {
-                    action: "agent.message.posted",
-                    resourceType: "message",
-                    resourceId: result.messageId,
-                    actorKind: "agent",
-                    actorId: body.agentId,
-                    agentId: body.agentId,
-                    userId: check.triggeredBy,
-                    sessionId: `cell:${cell.credentialId}`,
-                    clientKind: "agent",
-                    metadata: {
-                      conversationId: body.conversationId,
-                      threadRootMessageId: check.root,
-                      inReplyToMessageId: body.inReplyToMessageId ?? null,
-                      triggeredByUserId: check.triggeredBy,
-                      idempotencyKey: body.idempotencyKey,
-                    },
-                  }),
-                );
               }
               return {
                 messageId: result.messageId,
@@ -292,20 +273,9 @@ export function createAgentChannelModule(core: Core): ApiModule {
                 await requireMembership(tx, body.agentId, body.conversationId);
               });
               const root = body.threadRootMessageId ?? null;
-              if (body.typing) {
-                await core.chatAgent.agentTyping(ctx, body.agentId, body.conversationId, root);
-              } else {
-                await core.realtime.publishEphemeral(
-                  `conv:${body.conversationId}`,
-                  EphemeralTypes.agentTyping,
-                  {
-                    agentId: body.agentId,
-                    conversationId: body.conversationId,
-                    threadRootId: root,
-                    typing: false,
-                  },
-                );
-              }
+              // Chat publishes the ephemeral `agent.typing`; clients clear it on the agent's message or
+              // after a timeout, so `typing: false` needs no signal.
+              if (body.typing) await core.chatAgent.agentTyping(ctx, body.agentId, body.conversationId, root);
               return { ok: true as const };
             },
           );

@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Welcome to OCW</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="drag" aria-hidden="true"></div>
+    <main class="shell">
+      <header class="brand">
+        <img class="logo" src="./logo.svg" alt="" width="40" height="40" />
+        <div>
+          <div class="brand-name">OCW Desktop</div>
+          <div class="brand-sub">Open Collaborative AI Workspace</div>
+        </div>
+        <ol class="steps" aria-label="Setup progress">
+          <li data-step-dot="server" class="active"><span class="sr">Server</span></li>
+          <li data-step-dot="pair"><span class="sr">Pair</span></li>
+          <li data-step-dot="done"><span class="sr">Done</span></li>
+        </ol>
+      </header>
+
+      <!-- Step 1: server -->
+      <section class="step" data-step="server">
+        <h1>Connect to your workspace</h1>
+        <p class="lead">Enter the address of your OCW server. This computer will open it and run Work Zone sessions for your team.</p>
+        <form id="server-form" class="card" novalidate>
+          <label class="field">
+            <span class="label">Server address</span>
+            <input id="web-url" class="input mono" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="http://localhost:3000" required />
+          </label>
+          <details class="advanced">
+            <summary>API address</summary>
+            <label class="field">
+              <span class="hint">Derived from the server address. Change it only if your API runs elsewhere.</span>
+              <input id="api-url" class="input mono" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="http://localhost:4000" />
+            </label>
+          </details>
+          <div class="alert" id="server-error" role="alert" hidden></div>
+          <button class="btn primary" type="submit" id="server-submit">
+            <span class="btn-label">Continue</span><span class="spinner" aria-hidden="true"></span>
+          </button>
+        </form>
+      </section>
+
+      <!-- Step 2: pairing -->
+      <section class="step" data-step="pair" hidden>
+        <h1>Pair this computer</h1>
+        <p class="lead">
+          In OCW, open <strong>Work Zone</strong> › <strong>Devices</strong> › <strong>Add device</strong> and type the code shown there.
+        </p>
+        <form id="pair-form" class="card" novalidate>
+          <label class="field">
+            <span class="label">Pairing code</span>
+            <input id="code" class="input code" type="text" autocomplete="one-time-code" spellcheck="false" maxlength="32" placeholder="ABCD-1234" required />
+          </label>
+          <label class="field">
+            <span class="label">Device name</span>
+            <input id="device-name" class="input" type="text" autocomplete="off" spellcheck="false" maxlength="80" required />
+            <span class="hint">How this computer appears to your team.</span>
+          </label>
+          <div class="alert" id="pair-error" role="alert" hidden></div>
+          <button class="btn primary" type="submit" id="pair-submit">
+            <span class="btn-label">Pair computer</span><span class="spinner" aria-hidden="true"></span>
+          </button>
+          <div class="row-between">
+            <button class="btn ghost" type="button" id="pair-back">Back</button>
+            <button class="btn link" type="button" id="pair-skip">Skip for now</button>
+          </div>
+        </form>
+      </section>
+
+      <!-- Step 3: done -->
+      <section class="step" data-step="done" hidden>
+        <div class="success-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M5 12.5l4.2 4.2L19 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <h1 id="done-title">This computer is paired</h1>
+        <p class="lead" id="done-lead">Sessions you start from the web run here, on your own Claude Code and Codex logins.</p>
+        <ul class="card checklist" id="checklist">
+          <li data-check="runtime"><span class="dot"></span><span class="name">Local runtime</span><span class="state">Starting…</span></li>
+          <li data-check="claude-code"><span class="dot"></span><span class="name">Claude Code</span><span class="state">Checking…</span></li>
+          <li data-check="codex"><span class="dot"></span><span class="name">Codex</span><span class="state">Checking…</span></li>
+        </ul>
+        <button class="btn primary" type="button" id="open-workspace">Open workspace</button>
+      </section>
+
+      <footer class="foot">Repositories stay on this computer. The server sees project names, never their paths.</footer>
+    </main>
+    <script src="./onboarding.js"></script>
+  </body>
+</html>
