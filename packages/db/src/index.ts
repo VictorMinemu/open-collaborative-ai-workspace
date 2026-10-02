@@ -8,4 +8,5 @@ export {
   type TenantCtx,
   type TenantDb,
   type Tx,
+  tenantOf,
 } from "./tenant";

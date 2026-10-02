@@ -1,0 +1,21 @@
+import closeWithGrace from "close-with-grace";
+import { buildApp } from "./app";
+import { EnvError, loadEnv } from "./config/env";
+
+let env: ReturnType<typeof loadEnv>;
+try {
+  env = loadEnv();
+} catch (err) {
+  if (err instanceof EnvError) {
+    console.error(err.message);
+    process.exit(1);
+  }
+  throw err;
+}
+
+const built = await buildApp(env);
+closeWithGrace({ delay: 10_000 }, async ({ err }) => {
+  if (err) built.app.log.error({ err }, "shutting down after error");
+  await built.close();
+});
+await built.app.listen({ host: env.HOST, port: env.PORT });

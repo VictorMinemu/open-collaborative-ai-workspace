@@ -35,6 +35,8 @@ const createdAt = () => ts("created_at").notNull().defaultNow();
 export const orgMembers = appSchema.table(
   "org_members",
   {
+    /** Surrogate id (better-auth's adapter requires an `id` on every model it writes). */
+    id: uuid("id").notNull().unique().default(sql`uuidv7()`),
     organizationId: orgId(),
     userId: uuid("user_id")
       .notNull()

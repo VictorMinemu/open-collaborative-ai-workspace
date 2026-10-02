@@ -115,7 +115,9 @@ export const invitation = authSchema.table(
 
 /** Singleton row: the one-time setup token has been redeemed. */
 export const instanceSetup = authSchema.table("instance_setup", {
-  id: text("id").primaryKey().default("singleton"),
+  id: uuid("id").primaryKey().defaultRandom(),
+  /** Unique constant: at most one row can ever exist. */
+  singleton: boolean("singleton").notNull().default(true).unique(),
   organizationId: uuid("organization_id").notNull(),
   redeemedBy: uuid("redeemed_by").notNull(),
   redeemedAt: ts("redeemed_at").notNull().defaultNow(),

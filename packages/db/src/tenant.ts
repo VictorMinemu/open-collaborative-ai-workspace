@@ -14,6 +14,21 @@ export interface TenantCtx {
 
 export type AfterCommit = (cb: () => Promise<void> | void) => void;
 
+interface TxContext extends TenantCtx {
+  afterCommit: AfterCommit;
+}
+const txContexts = new WeakMap<object, TxContext>();
+
+/**
+ * Tenant context + after-commit registrar of a transaction opened by withTenant(). Lets helpers such as
+ * `audit.record(tx, …)` and `realtime.appendEvent(tx, …)` take only `tx`. Throws for foreign transactions.
+ */
+export function tenantOf(tx: Tx): TxContext {
+  const ctx = txContexts.get(tx);
+  if (!ctx) throw new Error("transaction was not opened by withTenant()");
+  return ctx;
+}
+
 export interface TenantDb {
   /**
    * The ONLY entrypoint for domain (schema `app`) queries. Opens a transaction, sets the tenant context with
@@ -53,9 +68,11 @@ export function createTenantDb(connectionString: string, opts: { max?: number } 
       await tx.execute(
         sql`select set_config('app.organization_id', ${ctx.organizationId}, true), set_config('app.user_id', ${ctx.userId ?? ""}, true)`,
       );
-      return fn(tx, (cb) => {
+      const afterCommit: AfterCommit = (cb) => {
         after.push(cb);
-      });
+      };
+      txContexts.set(tx, { organizationId: ctx.organizationId, userId: ctx.userId ?? null, afterCommit });
+      return fn(tx, afterCommit);
     });
     for (const cb of after) {
       try {

@@ -1,7 +1,7 @@
 {
   "version": "8",
   "dialect": "postgres",
-  "id": "55d2f1ee-bf44-4240-ae52-04d369d585d3",
+  "id": "b5f3b1be-4235-4d8f-9d1e-46c846bfa430",
   "prevIds": ["00000000-0000-0000-0000-000000000000"],
   "ddl": [
     {
@@ -1441,6 +1441,19 @@
       "typeSchema": null,
       "notNull": true,
       "dimensions": 0,
+      "default": "uuidv7()",
+      "generated": null,
+      "identity": null,
+      "name": "id",
+      "entityType": "columns",
+      "schema": "app",
+      "table": "org_members"
+    },
+    {
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
       "default": null,
       "generated": null,
       "identity": null,
@@ -2529,14 +2542,27 @@
       "table": "account"
     },
     {
-      "type": "text",
+      "type": "uuid",
       "typeSchema": null,
       "notNull": true,
       "dimensions": 0,
-      "default": "'singleton'",
+      "default": "gen_random_uuid()",
       "generated": null,
       "identity": null,
       "name": "id",
+      "entityType": "columns",
+      "schema": "auth",
+      "table": "instance_setup"
+    },
+    {
+      "type": "boolean",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "true",
+      "generated": null,
+      "identity": null,
+      "name": "singleton",
       "entityType": "columns",
       "schema": "auth",
       "table": "instance_setup"
@@ -4399,6 +4425,24 @@
       "name": "devices_token_hash_key",
       "schema": "app",
       "table": "devices",
+      "entityType": "uniques"
+    },
+    {
+      "nameExplicit": false,
+      "columns": ["id"],
+      "nullsNotDistinct": false,
+      "name": "org_members_id_key",
+      "schema": "app",
+      "table": "org_members",
+      "entityType": "uniques"
+    },
+    {
+      "nameExplicit": false,
+      "columns": ["singleton"],
+      "nullsNotDistinct": false,
+      "name": "instance_setup_singleton_key",
+      "schema": "auth",
+      "table": "instance_setup",
       "entityType": "uniques"
     },
     {

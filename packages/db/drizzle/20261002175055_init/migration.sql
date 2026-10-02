@@ -129,6 +129,7 @@ CREATE TABLE "app"."model_providers" (
 );
 --> statement-breakpoint
 CREATE TABLE "app"."org_members" (
+	"id" uuid DEFAULT uuidv7() NOT NULL UNIQUE,
 	"organization_id" uuid,
 	"user_id" uuid,
 	"display_name" text NOT NULL,
@@ -242,7 +243,8 @@ CREATE TABLE "auth"."account" (
 );
 --> statement-breakpoint
 CREATE TABLE "auth"."instance_setup" (
-	"id" text PRIMARY KEY DEFAULT 'singleton',
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+	"singleton" boolean DEFAULT true NOT NULL UNIQUE,
 	"organization_id" uuid NOT NULL,
 	"redeemed_by" uuid NOT NULL,
 	"redeemed_at" timestamp with time zone DEFAULT now() NOT NULL
