@@ -35,6 +35,11 @@ import {
 import { useTopic } from "@/lib/realtime";
 import { cn, formatDate, relativeTime } from "@/lib/utils";
 
+const INVITE_ROLES = [
+  { value: "member", label: "Member" },
+  { value: "admin", label: "Admin" },
+] as const;
+
 const ROLE_ORDER: Record<OrgRole, number> = { owner: 0, admin: 1, member: 2 };
 
 export function MembersSettings() {
@@ -169,11 +174,14 @@ function InviteSection() {
             ) : null}
           </div>
           <div className="flex gap-2">
-            <Select value={role} onValueChange={(v) => v && setRole(v as "member" | "admin")}>
+            <Select items={INVITE_ROLES} value={role} onValueChange={(v) => v && setRole(v)}>
               <SelectTrigger aria-label="Role" data-testid="invite-role" className="w-28 sm:w-32" />
               <SelectContent>
-                <SelectItem value="member">Member</SelectItem>
-                <SelectItem value="admin">Admin</SelectItem>
+                {INVITE_ROLES.map((r) => (
+                  <SelectItem key={r.value} value={r.value}>
+                    {r.label}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
             <Button type="submit" disabled={create.isPending} className="flex-1 sm:flex-none">

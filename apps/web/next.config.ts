@@ -9,6 +9,8 @@ const nextConfig: NextConfig = {
   transpilePackages: ["@ocw/contracts", "@ocw/realtime-client"],
   poweredByHeader: false,
   reactStrictMode: true,
+  // The floating dev badge sits on top of the user menu in the bottom-left corner.
+  devIndicators: false,
 };
 
 export default nextConfig;

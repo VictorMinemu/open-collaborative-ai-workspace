@@ -35,7 +35,7 @@ export function MobileTopBar({
         >
           <Menu className="size-5" />
         </SheetTrigger>
-        <SheetContent side="left" className="bg-sidebar p-0" aria-describedby={undefined}>
+        <SheetContent side="left" showClose={false} className="bg-sidebar p-0">
           <SheetTitle className="sr-only">Navigation</SheetTitle>
           <RailContent me={me} onNavigate={close}>
             <div

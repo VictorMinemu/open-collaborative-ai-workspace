@@ -11,7 +11,7 @@ export default function AuthLayout({ children }: { children: ReactNode }) {
       />
       <div
         aria-hidden
-        className="pointer-events-none absolute -top-48 left-1/2 h-[28rem] w-[56rem] -translate-x-1/2 rounded-full bg-primary/15 blur-3xl dark:bg-primary/20"
+        className="pointer-events-none absolute -top-48 left-1/2 h-[28rem] w-[56rem] -translate-x-1/2 rounded-full bg-primary/15 blur-3xl dark:bg-primary/10"
       />
 
       <header className="relative z-10 flex items-center justify-between px-5 py-5 sm:px-8">

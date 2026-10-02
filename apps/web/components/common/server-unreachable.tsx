@@ -25,7 +25,7 @@ export function ServerUnreachable({
         <ServerOff className="size-5 text-muted-foreground" />
       </div>
       <h2 className="font-semibold text-base">Can't reach the server</h2>
-      <p className="mt-1.5 max-w-xs text-balance text-muted-foreground text-sm">
+      <p className="mt-1.5 max-w-sm text-balance text-muted-foreground text-sm">
         The workspace API at <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">{apiUrl}</code>{" "}
         is not responding. Make sure it is running, then try again.
       </p>

@@ -1,7 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { connection } from "next/server";
 import type { ReactNode } from "react";
-import { toRuntimeConfig } from "@/lib/config";
+import { toRuntimeConfig } from "@/lib/runtime-config";
 import { Providers } from "./providers";
 import "./globals.css";
 

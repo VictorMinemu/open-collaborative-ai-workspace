@@ -20,7 +20,8 @@ const RealtimeContext = createContext<RealtimeClient | null>(null);
  */
 export function RealtimeProvider({ children }: { children: ReactNode }) {
   const { wsUrl } = useRuntimeConfig();
-  const me = useMe();
+  // Observe only: the (app) guard is the one that fetches /me.
+  const me = useMe({ enabled: false });
   const sessionId = me.data?.sessionId ?? null;
   const [client, setClient] = useState<RealtimeClient | null>(null);
 

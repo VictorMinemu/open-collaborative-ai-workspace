@@ -1,7 +1,7 @@
 "use client";
 
 import type { MeResponse } from "@ocw/contracts";
-import { ChevronsUpDown, Settings, Users } from "lucide-react";
+import { ChevronsUpDown, Users } from "lucide-react";
 import { useRouter } from "next/navigation";
 import {
   DropdownMenu,
@@ -67,9 +67,6 @@ export function WorkspaceSwitcher({ me, collapsed = false }: { me: MeResponse; c
         <DropdownMenuSeparator />
         <DropdownMenuItem onClick={() => router.push("/settings")}>
           <Users /> Members & invitations
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => router.push("/settings")}>
-          <Settings /> Workspace settings
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

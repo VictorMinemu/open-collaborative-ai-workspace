@@ -13,7 +13,7 @@ export function Providers({ config, children }: { config: RuntimeConfig; childre
     () =>
       new QueryClient({
         defaultOptions: {
-          queries: { refetchOnWindowFocus: false, staleTime: 15_000 },
+          queries: { refetchOnWindowFocus: false, staleTime: 15_000, retryDelay: 600 },
           mutations: { retry: false },
         },
       }),

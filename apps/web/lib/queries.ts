@@ -24,16 +24,18 @@ export const queryKeys = {
   publicInvitation: (id: string) => ["public-invitation", id] as const,
 };
 
-/** Do not retry auth / validation failures; retry transient network errors a couple of times. */
+/** Do not retry auth / validation failures; retry transient errors once, quickly, so "can't reach" shows fast. */
 function retryUnlessClientError(failureCount: number, err: unknown): boolean {
   if (isApiError(err) && err.status >= 400 && err.status < 500) return false;
-  return failureCount < 2;
+  return failureCount < 1;
 }
 
 // ---- identity ----
 
-export function useMe() {
+/** Pass `enabled: false` to only observe the cached value (never triggers a request). */
+export function useMe({ enabled = true }: { enabled?: boolean } = {}) {
   return useQuery({
+    enabled,
     queryKey: queryKeys.me,
     queryFn: ({ signal }) => api.get("/api/v1/me", { schema: MeResponse, signal }),
     retry: retryUnlessClientError,
