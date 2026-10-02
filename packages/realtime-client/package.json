@@ -1,0 +1,23 @@
+{
+  "name": "@ocw/realtime-client",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@ocw/contracts": "workspace:*",
+    "zustand": "5.0.15"
+  },
+  "devDependencies": {
+    "@ocw/config": "workspace:*",
+    "@types/ws": "8.18.1",
+    "ws": "8.21.3"
+  },
+  "description": "Framework-agnostic realtime client for OCW: reconnect with backoff, per-topic resume, gap detection, zustand/vanilla stores. Works in browsers and Node.",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}
