@@ -137,6 +137,7 @@ Explicit non-goals (PRD §106), never in scope without a PRD change:
 | Node 24 + TypeScript 7; OpenBao and observability as compose profiles; Tempo added | Research amendments accepted 2026-09-10 (ADR-0001, ADR-0003) | — Pending |
 | Shared AI chat context rule: tools run as agent ∩ triggering human; content must be authorised for all participants; no private memory in multi-human chats | Avoids confused deputy and private-context leakage (PITFALLS 3) | — Pending |
 | First-release gaps from FEATURES.md accepted as v1 requirements (122 total) | Users notice search, edit/delete, invites, permission modes in the first hour | — Pending |
+| MVP 0 thin slice first (Phase 1 = multiplayer AI chat on compose) | Core value was only demonstrable at Phase 6; ship it in 1–2 weeks and widen afterwards; keep RLS, unified conversation model, seq replay and audit since they are ruinous to retrofit | — Pending |
 
 ## Evolution
 
@@ -156,4 +157,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-09-10 after research and roadmap creation*
+*Last updated: 2026-10-02 after MVP 0 roadmap restructure*
