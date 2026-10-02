@@ -66,7 +66,7 @@ None yet.
 
 ### Blockers/Concerns
 
-- [Phase 9]: Vendor terms for driving Claude Code / Codex through a third-party harness on subscription logins are unverified from primary sources; if disallowed, MVP 2 needs API-key mode, pulling the Model Gateway (v2 GATE-01) forward. Confirm before Phase 9 planning.
+- [Work Zone]: Decided 2026-10-02 — each customer runs the Work Zone with their OWN Claude Code / Codex subscription logins on their OWN device (BYO subscription; we never provide, pool or proxy subscriptions). API keys are not required. Residual check: confirm vendor terms allow a self-hosted harness to drive the official CLIs/SDKs with the user's own login.
 - [Phase 8]: Decide in `packages/contracts` whether Work Zone prompts/assistant messages are also `messages` rows in a `work_session` conversation (PITFALLS position, recommended) or stream events only.
 - [Phase 1 / Phase 7]: Drizzle 1.0 is on an RC line (fallback 0.45.2 documented); pnpm 12 lockfile vs Turborepo 2.10 and MinIO community-edition trajectory need verification.
 - [Phase 6]: Multi-provider prompt assembly verified only for Anthropic; OpenAI / Google / openai-compatible need a test matrix.
