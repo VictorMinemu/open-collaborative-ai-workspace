@@ -13,6 +13,8 @@ export { loadConfig, ocwHome, ProjectRegistry, toWebSocketUrl } from "./config.j
 export { ControlSocketServer, controlRequest, controlSocketPath } from "./control-socket.js";
 export { Daemon, type DaemonOptions } from "./daemon.js";
 export { DeviceLink } from "./device-link.js";
+export { type EnrollOptions, type EnrollResult, enroll } from "./enroll.js";
+export { FakeRuntime } from "./fake/fake-runtime.js";
 export * from "./git.js";
 export * from "./runtime.js";
 export { contain, redact, sanitizeEvent, sanitizeString, sanitizeValue, truncateBytes } from "./sanitize.js";

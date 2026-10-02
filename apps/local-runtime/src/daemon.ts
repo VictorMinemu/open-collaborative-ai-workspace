@@ -30,6 +30,7 @@ import {
 } from "./config.js";
 import { type ControlRequest, ControlSocketServer, controlSocketPath } from "./control-socket.js";
 import { DeviceLink, type DeviceLinkOptions } from "./device-link.js";
+import { FakeRuntime } from "./fake/fake-runtime.js";
 import { changedFiles, ensureSessionWorktree, repoInfo, unifiedPatch } from "./git.js";
 import { createLogger, errorMessage, type Logger } from "./logger.js";
 import type { AgentRuntime } from "./runtime.js";
@@ -104,18 +105,21 @@ export class Daemon {
     const config = { ...loaded, ...opts.config };
     const log = opts.logger ?? createLogger(config.logLevel);
     const token = opts.token !== undefined ? opts.token : await loadDeviceToken(home, config, env);
-    const runtimes = opts.runtimes ?? [
-      new ClaudeCodeRuntime({
-        logger: log,
-        useApiKey: config.claude.useApiKey,
-        ...(config.claude.path ? { claudePath: config.claude.path } : {}),
-      }),
-      new CodexRuntime({
-        logger: log,
-        useApiKey: config.codex.useApiKey,
-        ...(config.codex.path ? { codexPath: config.codex.path } : {}),
-      }),
-    ];
+    const fake = env.OCW_RUNTIME_FAKE === "1";
+    if (fake) log.warn("OCW_RUNTIME_FAKE=1: using the fake runtime (tests/demos only, no model is called)");
+    const runtimes = opts.runtimes ??
+      (fake ? [new FakeRuntime("claude-code"), new FakeRuntime("codex")] : null) ?? [
+        new ClaudeCodeRuntime({
+          logger: log,
+          useApiKey: config.claude.useApiKey,
+          ...(config.claude.path ? { claudePath: config.claude.path } : {}),
+        }),
+        new CodexRuntime({
+          logger: log,
+          useApiKey: config.codex.useApiKey,
+          ...(config.codex.path ? { codexPath: config.codex.path } : {}),
+        }),
+      ];
     const daemon = new Daemon(home, config, token, runtimes, log, opts);
     await daemon.registry.load();
     return daemon;
