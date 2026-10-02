@@ -3,14 +3,15 @@ import { z } from "zod";
 /**
  * Realtime envelope for `GET /ws` (browser, cookie auth) — research Pattern 5.
  * Topics: `conv:<id>` (conversation incl. thread/work-session conversations), `user:<id>` (personal),
- * `org:<id>` (org-wide lists: channels, agents, devices, sessions), `ws:<id>` (work session events).
+ * `org:<id>` (org-wide lists: channels, agents, devices, sessions), `ws:<id>` (work session events),
+ * `cell:<orgId>` (OpenClaw cell stream; Agent Channel API only, never authorized for browsers).
  */
 
-export const TopicPrefix = z.enum(["conv", "user", "org", "ws"]);
+export const TopicPrefix = z.enum(["conv", "user", "org", "ws", "cell"]);
 export type TopicPrefix = z.infer<typeof TopicPrefix>;
 
 const UUID_RE = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
-export const Topic = z.string().regex(new RegExp(`^(conv|user|org|ws):${UUID_RE}$`), "invalid topic");
+export const Topic = z.string().regex(new RegExp(`^(conv|user|org|ws|cell):${UUID_RE}$`), "invalid topic");
 export type Topic = z.infer<typeof Topic>;
 
 export function topic(prefix: TopicPrefix, id: string): Topic {
@@ -73,7 +74,10 @@ export const EventTypes = {
   conversationMemberAdded: "conversation.member_added",
   conversationMemberRemoved: "conversation.member_removed",
   memberJoined: "member.joined",
+  agentCreated: "agent.created",
   agentUpdated: "agent.updated",
+  agentDeleted: "agent.deleted",
+  modelProvidersUpdated: "model_providers.updated",
   deviceUpdated: "device.updated",
   projectUpdated: "project.updated",
   workSessionUpdated: "work_session.updated",
@@ -86,5 +90,7 @@ export const EventTypes = {
 export const EphemeralTypes = {
   userTyping: "user.typing",
   agentTyping: "agent.typing",
+  /** On `org:<id>`: the OpenClaw cell connected/disconnected (AgentCellStatus payload). */
+  cellPresence: "cell.presence",
   assistantDelta: "assistant.delta",
 } as const;

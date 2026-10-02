@@ -199,7 +199,9 @@ export const agents = appSchema.table(
     avatarUrl: text("avatar_url"),
     description: text("description"),
     instructions: text("instructions").notNull(),
-    modelProvider: text("model_provider", { enum: ["anthropic", "openai", "openrouter", "mock"] }).notNull(),
+    modelProvider: text("model_provider", {
+      enum: ["anthropic", "openai", "openrouter", "openai-compatible", "mock"],
+    }).notNull(),
     modelId: text("model_id").notNull(),
     runtime: text("runtime", { enum: ["openclaw"] })
       .notNull()
@@ -211,8 +213,13 @@ export const agents = appSchema.table(
     runtimeRef: jsonb("runtime_ref").$type<Record<string, unknown>>().notNull().default({}),
     createdBy: uuid("created_by"),
     createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+    /** Soft delete: authored messages keep resolving the agent's name; the username becomes reusable. */
+    deletedAt: ts("deleted_at"),
   },
-  (t) => [uniqueIndex("agents_org_username_uq").on(t.organizationId, t.username)],
+  (t) => [
+    uniqueIndex("agents_org_username_uq").on(t.organizationId, t.username).where(sql`deleted_at is null`),
+  ],
 );
 
 /** Agent Channel API service tokens (sha256 only). */
@@ -253,11 +260,18 @@ export const modelProviders = appSchema.table(
   {
     id: id(),
     organizationId: orgId(),
-    provider: text("provider", { enum: ["anthropic", "openai", "openrouter", "mock"] }).notNull(),
+    provider: text("provider", {
+      enum: ["anthropic", "openai", "openrouter", "openai-compatible", "mock"],
+    }).notNull(),
     secretId: uuid("secret_id").references(() => secrets.id, { onDelete: "set null" }),
+    /** Last 4 chars of the API key, for display only. */
+    keyHint: text("key_hint"),
+    /** Required for openai-compatible; optional override otherwise. */
+    baseUrl: text("base_url"),
     allowedModels: text("allowed_models").array().notNull().default(sql`'{}'::text[]`),
     enabled: boolean("enabled").notNull().default(true),
     createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
   },
   (t) => [uniqueIndex("model_providers_org_provider_uq").on(t.organizationId, t.provider)],
 );
