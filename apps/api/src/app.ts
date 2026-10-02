@@ -148,7 +148,7 @@ export async function buildApp(env: Env, opts: { logger?: boolean } = {}): Promi
   // Add a module: implement apps/api/src/modules/<name>/index.ts and add ONE line here.
   // Modules are mounted under /api/v1 unless they set `prefix`.
   const modules: ApiModule[] = [
-    createIdentityModule({ identity, db, audit, apiUrl: env.OCW_PUBLIC_API_URL }),
+    createIdentityModule({ identity, db, audit, realtime, apiUrl: env.OCW_PUBLIC_API_URL }),
     createOrganizationModule(core),
     createRealtimeModule({ realtime, identity, allowedOrigins }),
     createSecretsModule(),

@@ -16,6 +16,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import type { App } from "../../core";
 import { authOf } from "../../core";
 import type { AuditService } from "../audit";
+import type { RealtimeService } from "../realtime";
 import type { IdentityService } from "./service";
 
 const SENSITIVE_RATE = { rateLimit: { max: 30, timeWindow: "1 minute" } };
@@ -29,7 +30,13 @@ const BETTER_AUTH_ALLOWLIST: Array<{ method: "GET" | "POST"; path: string }> = [
 
 export function registerIdentityRoutes(
   app: App,
-  deps: { identity: IdentityService; db: TenantDb; audit: AuditService; apiUrl: string },
+  deps: {
+    identity: IdentityService;
+    db: TenantDb;
+    audit: AuditService;
+    realtime: RealtimeService;
+    apiUrl: string;
+  },
 ) {
   const { identity } = deps;
 
@@ -163,6 +170,14 @@ export function registerIdentityRoutes(
     },
     async (req, reply) => {
       const { me, cookies } = await identity.acceptInvitation(req.params.id, req.body);
+      // Durable org-wide event so member lists update live (EventTypes.memberJoined).
+      await deps.db.withTenant({ organizationId: me.organization.id, userId: me.user.id }, (tx) =>
+        deps.realtime.appendEvent(tx, `org:${me.organization.id}`, "member.joined", {
+          userId: me.user.id,
+          displayName: me.user.name,
+          role: me.organization.role,
+        }),
+      );
       setCookies(reply, cookies);
       return me;
     },

@@ -1,6 +1,7 @@
 import type { TenantDb } from "@ocw/db";
 import type { ApiModule } from "../../core";
 import type { AuditService } from "../audit";
+import type { RealtimeService } from "../realtime";
 import { registerIdentityRoutes } from "./routes";
 import type { IdentityService } from "./service";
 
@@ -12,6 +13,7 @@ export function createIdentityModule(deps: {
   identity: IdentityService;
   db: TenantDb;
   audit: AuditService;
+  realtime: RealtimeService;
   apiUrl: string;
 }): ApiModule {
   return { name: "identity", prefix: "", register: (app) => registerIdentityRoutes(app, deps) };
