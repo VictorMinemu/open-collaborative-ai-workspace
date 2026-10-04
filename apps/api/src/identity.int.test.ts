@@ -1,3 +1,4 @@
+import { WS_AUTH_PROTOCOL_PREFIX, WS_PROTOCOL } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
@@ -248,7 +249,7 @@ describe("identity + platform core", () => {
     expect((await admin.request("GET", "/api/v1/me")).status).toBe(401);
   });
 
-  it("WS: rejects foreign origin and anonymous; subscribe + live + replay exactly once", async () => {
+  it("WS: JWT subprotocol required (origin 403, none/cookie/tampered 401); subscribe + live + replay exactly once", async () => {
     const wsUrl = `${stack.baseUrl.replace("http", "ws")}/ws`;
     const c = new TestClient(stack.baseUrl);
     await c.request("POST", "/api/auth/sign-in/email", { email: ADMIN.email, password: ADMIN.password });
@@ -256,18 +257,26 @@ describe("identity + platform core", () => {
       user: { id: string };
       organization: { id: string };
     };
+    const token = await c.token();
+    const offer = (t: string) => [WS_PROTOCOL, `${WS_AUTH_PROTOCOL_PREFIX}${t}`];
 
-    const status = (headers: Record<string, string>) =>
+    const status = (headers: Record<string, string>, protocols?: string[]) =>
       new Promise<number>((resolve) => {
-        const ws = new WebSocket(wsUrl, { headers });
+        const ws = new WebSocket(wsUrl, protocols ?? [], { headers });
         ws.on("unexpected-response", (_req, res) => resolve(res.statusCode ?? 0));
+        ws.on("error", () => resolve(-1));
         ws.on("open", () => {
           ws.close();
           resolve(101);
         });
       });
-    expect(await status({ origin: "https://evil.example", cookie: c.cookieHeader })).toBe(403);
+    expect(await status({ origin: "https://evil.example" }, offer(token))).toBe(403);
     expect(await status({ origin: WEB_ORIGIN })).toBe(401);
+    // The session cookie alone no longer opens the socket (D-01).
+    expect(await status({ origin: WEB_ORIGIN, cookie: c.cookieHeader })).toBe(401);
+    expect(await status({ origin: WEB_ORIGIN, cookie: c.cookieHeader }, [WS_PROTOCOL])).toBe(401);
+    const tampered = `${token.slice(0, -2)}${token.at(-2) === "A" ? "B" : "A"}${token.slice(-1)}`;
+    expect(await status({ origin: WEB_ORIGIN }, offer(tampered))).toBe(401);
 
     const topic = `user:${me.user.id}`;
     const { db, realtime } = stack.built.core;
@@ -278,10 +287,15 @@ describe("identity + platform core", () => {
     await emit(1);
     await emit(2);
 
-    const ws = new WebSocket(wsUrl, { headers: { origin: WEB_ORIGIN, cookie: c.cookieHeader } });
+    const ws = new WebSocket(wsUrl, offer(token), { headers: { origin: WEB_ORIGIN } });
     const frames: Array<{ op: string; seq?: number; type?: string }> = [];
     ws.on("message", (m) => frames.push(JSON.parse(String(m))));
-    await new Promise((r) => ws.on("open", r));
+    await new Promise((resolve, reject) => {
+      ws.on("open", resolve);
+      ws.on("error", reject);
+    });
+    // The server selects the application protocol and never echoes the token entry (A1/A2).
+    expect(ws.protocol).toBe(WS_PROTOCOL);
     ws.send(JSON.stringify({ op: "sub", topic, afterSeq: 1 }));
     ws.send(JSON.stringify({ op: "sub", topic: `user:${"0".repeat(8)}-0000-7000-8000-${"0".repeat(12)}` }));
     const waitFor = async (pred: () => boolean) => {

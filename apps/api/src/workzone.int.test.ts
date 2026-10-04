@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { WS_AUTH_PROTOCOL_PREFIX, WS_PROTOCOL } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
@@ -614,9 +615,11 @@ describe("tenant isolation", () => {
     expect((await admin.request("DELETE", `/api/v1/devices/${devB}`)).status).toBe(404);
 
     // Realtime: the other org's session topic is refused.
-    const ws = new WebSocket(`${stack.baseUrl.replace(/^http/, "ws")}/ws`, {
-      headers: { origin: WEB_ORIGIN, cookie: admin.cookieHeader },
-    });
+    const ws = new WebSocket(
+      `${stack.baseUrl.replace(/^http/, "ws")}/ws`,
+      [WS_PROTOCOL, `${WS_AUTH_PROTOCOL_PREFIX}${await admin.token()}`],
+      { headers: { origin: WEB_ORIGIN } },
+    );
     const got: Array<Record<string, unknown>> = [];
     ws.on("message", (d) => got.push(JSON.parse(d.toString())));
     await new Promise((r) => ws.once("open", r));

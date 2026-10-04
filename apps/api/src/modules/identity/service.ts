@@ -2,9 +2,9 @@
 import type { IncomingHttpHeaders } from "node:http";
 import { getCurrentAdapter, runWithTransaction } from "@better-auth/core/context";
 import type { MeResponse, OrgRole, SetupRequest } from "@ocw/contracts";
-import { instanceSetup, member, organization, user } from "@ocw/db";
+import { instanceSetup, member, organization, orgMembers, user } from "@ocw/db";
 import { fromNodeHeaders } from "better-auth/node";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { Env } from "../../config/env";
@@ -12,9 +12,15 @@ import type { AuthContext } from "../../core";
 import { safeEqual } from "../../lib/crypto";
 import { conflict, HttpError, unauthorized } from "../../lib/errors";
 import type { Auth } from "./auth";
-import { type Authenticator, createAuthenticator } from "./authenticate";
+import { type Authenticator, asRole, createAuthenticator } from "./authenticate";
 import { clientFromRequest } from "./client-kind";
+import { createTokenService, type TokenService } from "./jwt";
 import { createSessionStore, type SessionStore } from "./session-store";
+
+/** The realtime surface identity needs: the revoked-session deny-list (Redis, TTL longer than a JWT). */
+export interface RevocationCheck {
+  isSessionRevoked(sessionId: string): Promise<boolean>;
+}
 
 export { asRole } from "./authenticate";
 
@@ -55,11 +61,16 @@ export class IdentityService {
   /** Legacy preHandler factory: requires one of the org roles (implies requireUser). 02-15 removes it. */
   readonly requireRole: (...roles: OrgRole[]) => (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
 
+  /** jose verifier over the cached JWKS (AUTH-06); also signs device tokens. */
+  readonly tokens: TokenService;
+
   constructor(
     readonly auth: Auth,
     readonly authDb: NodePgDatabase,
     readonly env: Env,
+    private readonly revocations: RevocationCheck,
   ) {
+    this.tokens = createTokenService({ auth, env });
     this.authn = createAuthenticator(auth, authDb);
     this.sessions = createSessionStore(auth);
     this.requireUser = this.authn.requireUser;
@@ -69,6 +80,55 @@ export class IdentityService {
   /** Resolve the session cookie → principal. Returns null when unauthenticated or deactivated. */
   authenticate(headers: IncomingHttpHeaders): Promise<AuthContext | null> {
     return this.authn.authenticate(headers);
+  }
+
+  /**
+   * AUTH-06: a user access JWT → principal. Verifies signature, issuer, audience and expiry against the
+   * cached JWKS, then rejects revoked sessions (Redis deny-list) and missing or deactivated members.
+   * Null on any failure; the token is never logged.
+   */
+  async verifyAccessToken(token: string): Promise<AuthContext | null> {
+    const claims = await this.tokens.verifyUserToken(token);
+    if (!claims) return null;
+    if (await this.revocations.isSessionRevoked(claims.sid)) return null;
+    const m = await this.memberOf(claims.org, claims.sub);
+    if (!m || m.deactivatedAt) return null;
+    return {
+      userId: claims.sub,
+      organizationId: claims.org,
+      sessionId: claims.sid,
+      role: asRole(m.role),
+      name: m.name,
+      email: m.email,
+      clientKind: claims.ck,
+    };
+  }
+
+  /** True while the session row exists and has not expired (the long-lived socket recheck, Pitfall 5). */
+  isSessionActive(sessionId: string): Promise<boolean> {
+    return this.sessions.isActive(sessionId);
+  }
+
+  /** True while the user is a member of the organization and not deactivated. */
+  async isMemberActive(organizationId: string, userId: string): Promise<boolean> {
+    const m = await this.memberOf(organizationId, userId);
+    return !!m && !m.deactivatedAt;
+  }
+
+  private async memberOf(organizationId: string, userId: string) {
+    const [m] = await this.authDb
+      .select({
+        role: orgMembers.role,
+        deactivatedAt: orgMembers.deactivatedAt,
+        // Same source as the cookie path (auth.user), so both credentials yield the same principal.
+        name: user.name,
+        email: user.email,
+      })
+      .from(orgMembers)
+      .innerJoin(user, eq(user.id, orgMembers.userId))
+      .where(and(eq(orgMembers.organizationId, organizationId), eq(orgMembers.userId, userId)))
+      .limit(1);
+    return m ?? null;
   }
 
   /** First organization the user belongs to (one org per instance in MVP 0). */
