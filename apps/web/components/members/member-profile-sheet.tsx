@@ -11,7 +11,7 @@ import { errorMessage } from "@/lib/api";
 import { useMemberProfile } from "@/lib/member-queries";
 import { cn, formatDate, initials } from "@/lib/utils";
 import { DeactivatedPill, RoleBadge } from "./member-badges";
-import { UNIT_KIND_ICON, UNIT_KIND_LABEL, UNIT_ROLE_TAG } from "./unit-chip";
+import { sortUnits, UNIT_KIND_ICON, UNIT_KIND_LABEL, UNIT_ROLE_TAG } from "./unit-chip";
 
 const isHttpsUrl = (s: string) => /^https:\/\//i.test(s);
 
@@ -25,13 +25,16 @@ export function MemberAvatar({
   seed,
   className,
   textClassName = "text-xs",
+  emojiClassName = "text-lg",
 }: {
   name: string;
   avatarUrl: string | null | undefined;
   seed: string;
   className?: string;
-  /** Size of the emoji or initials (scale it with the avatar). */
+  /** Size of the initials (scale it with the avatar). */
   textClassName?: string;
+  /** Size of an emoji avatar (scale it with the avatar). */
+  emojiClassName?: string;
 }) {
   if (avatarUrl && !isHttpsUrl(avatarUrl)) {
     return (
@@ -42,7 +45,7 @@ export function MemberAvatar({
           className,
         )}
       >
-        <span aria-hidden className={cn(textClassName, "leading-none")}>
+        <span aria-hidden className={cn(emojiClassName, "leading-none")}>
           {avatarUrl}
         </span>
       </span>
@@ -112,7 +115,8 @@ function ProfileBody({ member }: { member: MemberDetail }) {
           avatarUrl={member.avatarUrl}
           seed={member.userId}
           className={cn("size-[5.5rem] ring-4 ring-background", deactivated && "grayscale")}
-          textClassName={member.avatarUrl && !isHttpsUrl(member.avatarUrl) ? "text-[2.75rem]" : "text-2xl"}
+          textClassName="text-2xl"
+          emojiClassName="text-[2.75rem]"
         />
       </div>
       <div className="px-6 pt-3">
@@ -172,7 +176,7 @@ function ProfileBody({ member }: { member: MemberDetail }) {
           </p>
         ) : (
           <ul className="mt-2 grid gap-1" data-testid="profile-units">
-            {member.units.map((u) => {
+            {sortUnits(member.units).map((u) => {
               const Icon = UNIT_KIND_ICON[u.kind];
               const tag = UNIT_ROLE_TAG[u.role];
               return (

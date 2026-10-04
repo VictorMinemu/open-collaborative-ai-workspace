@@ -1,12 +1,12 @@
 "use client";
 
-import { type MemberDetail, type OrgRole, ROLE_LABELS } from "@ocw/contracts";
+import { type MemberDetail, type MemberUnitRef, type OrgRole, ROLE_LABELS } from "@ocw/contracts";
 import { History, KeyRound, Lock, LogOut, MoreHorizontal, UserCheck, UserRound, UserX } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { DeactivatedPill, RoleBadge } from "@/components/members/member-badges";
 import { MemberAvatar } from "@/components/members/member-profile-sheet";
-import { UnitChip } from "@/components/members/unit-chip";
+import { sortUnits, UnitChip } from "@/components/members/unit-chip";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -34,6 +34,35 @@ export { DeactivatedPill, RoleBadge };
 
 const ROLE_ITEMS = ROLE_OPTIONS.map((value) => ({ value, label: ROLE_LABELS[value] }));
 const MAX_CHIPS = 2;
+function MoreUnits({
+  units,
+  shown,
+  onClick,
+  className,
+}: {
+  units: readonly MemberUnitRef[];
+  shown: number;
+  onClick: () => void;
+  className?: string;
+}) {
+  const rest = units.slice(shown);
+  if (rest.length === 0) return null;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      data-testid="member-more-units"
+      title={rest.map((u) => u.name).join(", ")}
+      aria-label={`${rest.length} more: ${rest.map((u) => u.name).join(", ")}`}
+      className={cn(
+        "inline-flex h-6 items-center rounded-md px-1 text-[11.5px] text-muted-foreground hover:text-foreground",
+        className,
+      )}
+    >
+      +{rest.length}
+    </button>
+  );
+}
 
 function RoleControl({ member, canManage }: { member: MemberDetail; canManage: boolean }) {
   const change = useChangeRole();
@@ -248,8 +277,7 @@ export function MemberRow({
   onOpenProfile: (userId: string) => void;
 }) {
   const deactivated = member.status === "deactivated";
-  const chips = member.units.slice(0, MAX_CHIPS);
-  const more = member.units.length - chips.length;
+  const units = sortUnits(member.units);
   const open = () => onOpenProfile(member.userId);
 
   return (
@@ -305,31 +333,21 @@ export function MemberRow({
           ) : null}
         </div>
         <div className="truncate text-muted-foreground text-xs">{member.email ?? ""}</div>
-        {member.units.length > 0 ? (
-          <div className="mt-1.5 flex flex-wrap items-center gap-1">
-            {chips.map((u) => (
-              <UnitChip key={u.unitId} unit={u} />
+        {units.length > 0 ? (
+          <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-1">
+            {units.slice(0, MAX_CHIPS).map((u, i) => (
+              // At 390 px one chip fits beside the "+N"; from 640 px two.
+              <UnitChip key={u.unitId} unit={u} className={i > 0 ? "max-sm:hidden" : undefined} />
             ))}
-            {more > 0 ? (
-              <button
-                type="button"
-                onClick={open}
-                className="inline-flex h-6 items-center rounded-md px-1 text-[11.5px] text-muted-foreground hover:text-foreground"
-                title={member.units
-                  .slice(MAX_CHIPS)
-                  .map((u) => u.name)
-                  .join(", ")}
-              >
-                +{more}
-              </button>
-            ) : null}
+            <MoreUnits units={units} shown={1} onClick={open} className="sm:hidden" />
+            <MoreUnits units={units} shown={MAX_CHIPS} onClick={open} className="max-sm:hidden" />
           </div>
         ) : null}
       </div>
       <div className="col-start-2 row-start-2 min-w-0 sm:col-start-3 sm:row-start-1 sm:justify-self-end">
         <RoleControl member={member} canManage={canManage} />
       </div>
-      <div className="col-start-3 row-start-1 flex justify-end sm:col-start-4">
+      <div className="col-start-3 row-start-1 flex justify-end self-start sm:col-start-4 sm:self-center">
         <MemberActions member={member} isYou={isYou} canManage={canManage} onOpenProfile={open} />
       </div>
     </li>

@@ -138,6 +138,16 @@ test("an admin changes a teammate's role and the teammate's UI follows", async (
   const a = await pageAs(browser, admin, project);
   await openMembers(a);
 
+  // ---- empty state (only on a fresh stack, where the admin is still alone)
+  if (await a.getByTestId("members-empty").isVisible()) {
+    await expect(a.getByText("It's just you so far")).toBeVisible();
+    await expect(a.locator("#invite-email")).toBeFocused();
+    await shot(a, `members-empty-${project}`);
+    await a.emulateMedia({ colorScheme: "dark" });
+    await shot(a, `members-empty-${project}-dark`);
+    await a.emulateMedia({ colorScheme: "light" });
+  }
+
   // ---- invite through the form (Developer is the default role)
   await a.locator("#invite-email").fill(teammate.email);
   await expect(a.getByTestId("invite-role")).toHaveText(/Developer/);
@@ -164,13 +174,17 @@ test("an admin changes a teammate's role and the teammate's UI follows", async (
   // ---- unit chips arrive live (units.updated) and link to the Organization page
   const teammateId = (await row.getAttribute("data-user-id")) as string;
   await placeInUnits(teammateId, true);
-  await expect(row.getByTestId("member-unit-chip")).toHaveCount(2);
-  await expect(row.getByText("+1")).toBeVisible();
+  // Two chips at 1440, one at 390; the lead unit comes first.
+  await expect(row.getByTestId("member-unit-chip").filter({ visible: true })).toHaveCount(mobile ? 1 : 2);
+  await expect(row.getByTestId("member-unit-chip").first()).toContainText("Core Platform");
+  await expect(row.getByTestId("member-more-units").filter({ visible: true })).toHaveText(
+    mobile ? "+2" : "+1",
+  );
   await expect(row.getByTestId("member-unit-chip").first()).toHaveAttribute(
     "href",
     /\/settings\/organization\?unit=[0-9a-f-]{36}/,
   );
-  await a.waitForTimeout(600);
+  await a.getByTestId("members-list").evaluate((el) => el.scrollIntoView({ block: "start" }));
   await shot(a, `members-list-${project}`);
   await a.emulateMedia({ colorScheme: "dark" });
   await shot(a, `members-list-${project}-dark`);
@@ -321,6 +335,12 @@ test("admins deactivate, reactivate and issue one-time reset links; never on the
   await a.getByTestId("show-deactivated").click();
   await expect(row).toHaveAttribute("data-status", "deactivated");
   await expect(row.getByTestId("member-deactivated")).toBeVisible();
+  await row.scrollIntoViewIfNeeded();
+  await expect(a.getByText(`${rhea.name} was deactivated`)).toHaveCount(0, { timeout: 10_000 });
+  await shot(a, `members-deactivated-${project}`);
+  await a.emulateMedia({ colorScheme: "dark" });
+  await shot(a, `members-deactivated-${project}-dark`);
+  await a.emulateMedia({ colorScheme: "light" });
 
   // The teammate's session is gone: the next request lands on /login.
   await r.reload();

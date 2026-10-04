@@ -18,6 +18,18 @@ export const UNIT_KIND_LABEL: Record<UnitKind, string> = {
 /** Unit-level role tag (a unit lead, not the organization role). */
 export const UNIT_ROLE_TAG: Record<UnitRole, string | null> = { lead: "Lead", member: null };
 
+const KIND_ORDER: Record<UnitKind, number> = { department: 0, team: 1, project: 2 };
+
+/** Units the member leads first, then departments → teams → projects, then by name. */
+export function sortUnits(units: readonly MemberUnitRef[]): MemberUnitRef[] {
+  return [...units].sort(
+    (a, b) =>
+      Number(UNIT_ROLE_TAG[b.role] !== null) - Number(UNIT_ROLE_TAG[a.role] !== null) ||
+      KIND_ORDER[a.kind] - KIND_ORDER[b.kind] ||
+      a.name.localeCompare(b.name),
+  );
+}
+
 /** Department / team / project a member belongs to; links to the unit on the Organization page. */
 export function UnitChip({ unit, className }: { unit: MemberUnitRef; className?: string }) {
   const Icon = UNIT_KIND_ICON[unit.kind];

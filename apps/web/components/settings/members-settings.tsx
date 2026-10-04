@@ -473,19 +473,23 @@ function JustYou({ onInvite }: { onInvite: () => void }) {
   );
 }
 
+/** Shaped like member rows at both widths (the role control wraps under the name at 390 px). */
 function ListSkeleton({ rows }: { rows: number }) {
   return (
-    <div className="divide-y overflow-hidden rounded-xl border bg-card" aria-busy>
+    <div className="divide-y overflow-hidden rounded-xl border bg-card" aria-busy data-testid="list-skeleton">
       {Array.from({ length: rows }, (_, i) => (
-        // biome-ignore lint/suspicious/noArrayIndexKey: static skeleton rows
-        <div key={i} className="flex h-[61px] items-center gap-3 px-4">
-          <Skeleton className="size-9 rounded-full" />
-          <div className="flex-1 space-y-1.5">
-            <Skeleton className="h-3.5 w-40 max-w-full" />
-            <Skeleton className="h-3 w-56 max-w-full" />
+        <div
+          // biome-ignore lint/suspicious/noArrayIndexKey: static skeleton rows
+          key={i}
+          className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 px-4 py-3 sm:grid-cols-[auto_minmax(0,1fr)_auto_auto]"
+        >
+          <Skeleton className="row-span-2 size-9 self-start rounded-full sm:row-span-1 sm:self-center" />
+          <div className="col-start-2 space-y-1.5 py-0.5">
+            <Skeleton className="h-3.5 w-36 max-w-full" />
+            <Skeleton className="h-3 w-52 max-w-full" />
           </div>
-          <Skeleton className="hidden h-8 w-44 sm:block" />
-          <Skeleton className="size-8" />
+          <Skeleton className="col-start-2 row-start-2 h-10 w-full max-w-56 sm:col-start-3 sm:row-start-1 sm:h-8 sm:w-44" />
+          <Skeleton className="col-start-3 row-start-1 size-10 self-start sm:col-start-4 sm:size-8 sm:self-center" />
         </div>
       ))}
     </div>
