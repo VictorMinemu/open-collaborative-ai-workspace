@@ -1,7 +1,7 @@
 ---
 phase: 02-identity-and-organization
 verified: 2026-10-04T21:03:26Z
-status: human_needed
+status: passed
 score: 5/5 success criteria verified (9/9 requirements satisfied)
 behavior_unverified: 0
 overrides_applied: 0
@@ -134,3 +134,9 @@ No gaps block the phase goal. All five success criteria and all nine requirement
 
 _Verified: 2026-10-04T21:03:26Z_
 _Verifier: Claude (gsd-verifier)_
+
+
+## Human verification (orchestrator, 2026-10-04)
+
+1. **Real SMTP reset** — PASSED. Mailpit (`smtp://127.0.0.1:1025`) on the isolated stack: `POST /api/v1/password-reset/request` → email "Reset your password" from the configured sender with a `/reset-password` link → reset 200 → old password 401, new password 200 → token reuse 400. Mailpit container and image removed afterwards.
+2. **Visual review** — PASSED. Reviewed members-list (1440 light), org-tree (1440 dark) and account-security (390 light) plus the executors' own reviews (92 screenshots); layouts coherent, no clipping or overflow.
