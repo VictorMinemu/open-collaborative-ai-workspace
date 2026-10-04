@@ -480,3 +480,38 @@ describe("archive is decided by the resolver", () => {
     expect(active).toEqual({ allowed: true });
   });
 });
+
+describe("organization: permissions for the caller", () => {
+  it("GET /me/permissions returns the role and the organization-scope set", async () => {
+    const mine = await ok(admin.request("GET", "/api/v1/me/permissions"));
+    expect(mine.role).toBe("admin");
+    for (const p of [
+      "member.manage",
+      "provider.manage",
+      "cell.manage",
+      "channel.archive",
+      "account.manage",
+    ]) {
+      expect(mine.permissions, p).toContain(p);
+    }
+    const dev = await ok(alex.request("GET", "/api/v1/me/permissions"));
+    expect(dev.role).toBe("developer");
+    expect(dev.permissions).toContain("work_session.create");
+    expect(dev.permissions).toContain("channel.post");
+    expect(dev.permissions).toContain("account.manage");
+    expect(dev.permissions).not.toContain("provider.manage");
+    expect((await new TestClient(stack.baseUrl).request("GET", "/api/v1/me/permissions")).status).toBe(401);
+  });
+
+  it("GET /members is decided by member.read and recorded as decided", async () => {
+    const before = stack.built.authz.undecided.length;
+    const list = await ok(alex.request("GET", "/api/v1/members"));
+    expect(list.members.map((m: { userId: string }) => m.userId)).toContain(adminId);
+    expect((await new TestClient(stack.baseUrl).request("GET", "/api/v1/members")).status).toBe(401);
+    expect(stack.built.authz.undecided.slice(before)).toEqual([]);
+    expect(stack.built.authz.routes.get("GET /api/v1/members")).toBe("user");
+    expect(stack.built.authz.routes.get("GET /api/v1/me/permissions")).toBe("user");
+    expect(stack.built.authz.routes.get("POST /api/v1/channels/:id/archive")).toBe("user");
+    expect(stack.built.authz.routes.get("GET /health")).toBe("public");
+  });
+});

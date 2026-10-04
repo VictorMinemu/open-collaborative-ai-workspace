@@ -18,18 +18,17 @@ const NO_UNITS = { memberUnitPaths: [] as const, leadOfUnitIds: new Set<string>(
 export async function loadPrincipalFacts(tx: Tx, ref: PrincipalRef): Promise<PrincipalFacts> {
   switch (ref.kind) {
     case "user": {
-      const [[row], units] = await Promise.all([
-        tx
-          .select({ role: orgMembers.role, deactivatedAt: orgMembers.deactivatedAt })
-          .from(orgMembers)
-          .where(eq(orgMembers.userId, ref.userId))
-          .limit(1),
-        tx
-          .select({ unitId: unitMemberships.unitId, role: unitMemberships.role, path: orgUnits.path })
-          .from(unitMemberships)
-          .innerJoin(orgUnits, eq(orgUnits.id, unitMemberships.unitId))
-          .where(eq(unitMemberships.userId, ref.userId)),
-      ]);
+      // Sequential: one transaction = one connection (pg rejects concurrent queries on a client).
+      const [row] = await tx
+        .select({ role: orgMembers.role, deactivatedAt: orgMembers.deactivatedAt })
+        .from(orgMembers)
+        .where(eq(orgMembers.userId, ref.userId))
+        .limit(1);
+      const units = await tx
+        .select({ unitId: unitMemberships.unitId, role: unitMemberships.role, path: orgUnits.path })
+        .from(unitMemberships)
+        .innerJoin(orgUnits, eq(orgUnits.id, unitMemberships.unitId))
+        .where(eq(unitMemberships.userId, ref.userId));
       return {
         kind: "user",
         id: ref.userId,

@@ -16,6 +16,7 @@ import {
   type ZodTypeProvider,
 } from "fastify-type-provider-zod";
 import pg from "pg";
+import { type AuthzRegistry, installAuthz } from "./authz";
 import { decodeKey, type Env } from "./config/env";
 import type { ApiModule, App, Core } from "./core";
 import { createChatAgentBridge } from "./lib/chat-agent-bridge";
@@ -38,6 +39,8 @@ export const API_VERSION = "0.1.0";
 export interface BuiltApp {
   app: App;
   core: Core;
+  /** Route authz declarations and undecided answers (warn mode; strict for tests from 02-15). */
+  authz: AuthzRegistry;
   close(): Promise<void>;
 }
 
@@ -158,10 +161,17 @@ export async function buildApp(
     },
   );
 
+  // ---------------------------------------------------------------- authorization coverage
+  // Before any route below: records every route's config.authz and every undecided non-public 2xx.
+  const authz = installAuthz(app, { strict: false });
+
   // ---------------------------------------------------------------- health
   app.get(
     "/health",
-    { schema: { tags: ["system"], response: { 200: HealthResponse, 503: HealthResponse } } },
+    {
+      config: { authz: "public" },
+      schema: { tags: ["system"], response: { 200: HealthResponse, 503: HealthResponse } },
+    },
     async (_req, reply) => {
       const [dbOk, redisOk] = await Promise.all([
         db.ping().then(
@@ -204,6 +214,7 @@ export async function buildApp(
   return {
     app,
     core,
+    authz,
     async close() {
       await app.close();
       for (const m of modules) await m.close?.();

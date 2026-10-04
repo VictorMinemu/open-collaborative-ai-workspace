@@ -1,4 +1,4 @@
-import type { AuthzDenial, Permission } from "@ocw/contracts";
+import { type AuthzDenial, type MyPermissions, Permission } from "@ocw/contracts";
 import type { TenantCtx, TenantDb, Tx } from "@ocw/db";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { markDecided } from "../../../authz";
@@ -6,13 +6,14 @@ import { unauthorized } from "../../../lib/errors";
 import type { AuditService } from "../../audit";
 import { AuthzDeniedError } from "./errors";
 import { loadPrincipalFacts, loadRules, type PrincipalRef } from "./facts";
-import { orgResource } from "./policy";
+import { orgResource, userResource } from "./policy";
 import {
   decide as decideFacts,
   type OnBehalfOf,
   type PrincipalFacts,
   type ResourceFacts,
   type RuleFact,
+  resolveEffectivePermissions,
 } from "./resolve";
 
 export type { PrincipalRef } from "./facts";
@@ -50,8 +51,25 @@ export interface PermissionService {
     resource?: ResourceFacts,
     opts?: DecideOptions,
   ): Promise<void>;
+  /** The items the caller may `permission`; facts load once, then one in-memory decision per item. */
+  filter<T>(
+    req: FastifyRequest,
+    tx: Tx,
+    items: readonly T[],
+    permission: Permission,
+    toResource: (item: T) => ResourceFacts,
+  ): Promise<T[]>;
+  /** The subset of `candidates` the caller holds on `resource` (drives per-resource `viewerCan`). */
+  viewerCan(
+    req: FastifyRequest,
+    tx: Tx,
+    resource: ResourceFacts,
+    candidates: readonly Permission[],
+  ): Promise<Permission[]>;
   /** Fastify preHandler: asserts an organization-scope permission in its own short transaction. */
   requirePermission(permission: Permission): (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
+  /** The signed-in user's role and organization-scope effective set (+ `account.manage` on themselves). */
+  myPermissions(req: FastifyRequest, tx: Tx): Promise<MyPermissions>;
 }
 
 export interface PermissionDeps {
@@ -135,6 +153,18 @@ export function createPermissionService(deps: PermissionDeps): PermissionService
     return { principal, resource: onBehalfOfResource ?? resource };
   }
 
+  /** Principal facts, rules and the on-behalf-of human for this request (memoised per request). */
+  async function requestFacts(req: FastifyRequest, tx: Tx, resource: ResourceFacts, opts: DecideOptions) {
+    markDecided(req);
+    const ref = opts.as ?? principalOf(req);
+    const load = (r: PrincipalRef) => principalFacts(req, tx, r);
+    // Sequential on purpose: every load shares the transaction's single connection.
+    const p = await load(ref);
+    const rules = await requestRules(req, tx);
+    const obo = await onBehalfOf(load, ref, resource, opts.onBehalfOfResource);
+    return { p, rules, obo };
+  }
+
   async function decideForRequest(
     req: FastifyRequest,
     tx: Tx,
@@ -142,25 +172,16 @@ export function createPermissionService(deps: PermissionDeps): PermissionService
     resource: ResourceFacts,
     opts: DecideOptions,
   ) {
-    markDecided(req);
-    const ref = opts.as ?? principalOf(req);
-    const load = (r: PrincipalRef) => principalFacts(req, tx, r);
-    const [p, rules, obo] = await Promise.all([
-      load(ref),
-      requestRules(req, tx),
-      onBehalfOf(load, ref, resource, opts.onBehalfOfResource),
-    ]);
+    const { p, rules, obo } = await requestFacts(req, tx, resource, opts);
     return decideFacts(p, resource, rules, permission, obo);
   }
 
   const service: PermissionService = {
     async decide(tx, principal, permission, resource = orgResource(), onBehalfOfResource) {
       const load = (r: PrincipalRef) => loadPrincipalFacts(tx, r);
-      const [p, rules, obo] = await Promise.all([
-        load(principal),
-        loadRules(tx),
-        onBehalfOf(load, principal, resource, onBehalfOfResource),
-      ]);
+      const p = await load(principal);
+      const rules = await loadRules(tx);
+      const obo = await onBehalfOf(load, principal, resource, onBehalfOfResource);
       return decideFacts(p, resource, rules, permission, obo);
     },
 
@@ -178,6 +199,37 @@ export function createPermissionService(deps: PermissionDeps): PermissionService
           },
         );
       }
+    },
+
+    async filter(req, tx, items, permission, toResource) {
+      if (items.length === 0) {
+        markDecided(req);
+        return [];
+      }
+      const ref = principalOf(req);
+      const p = await principalFacts(req, tx, ref);
+      const rules = await requestRules(req, tx);
+      markDecided(req);
+      return items.filter((item) => decideFacts(p, toResource(item), rules, permission).allowed);
+    },
+
+    async viewerCan(req, tx, resource, candidates) {
+      const { p, rules, obo } = await requestFacts(req, tx, resource, {});
+      return candidates.filter((perm) => decideFacts(p, resource, rules, perm, obo).allowed);
+    },
+
+    async myPermissions(req, tx) {
+      const ref = principalOf(req);
+      if (ref.kind !== "user") throw unauthorized();
+      const { p, rules } = await requestFacts(req, tx, orgResource(), {});
+      if (!p.orgRole) {
+        throw new AuthzDeniedError({ permission: "org.read", layer: "user", reason: "not_a_member" });
+      }
+      const held = new Set(resolveEffectivePermissions(p, orgResource(), rules).permissions);
+      if (decideFacts(p, userResource(ref.userId, ref.userId), rules, "account.manage").allowed) {
+        held.add("account.manage");
+      }
+      return { role: p.orgRole, permissions: Permission.options.filter((perm) => held.has(perm)) };
     },
 
     requirePermission(permission) {
