@@ -11,7 +11,7 @@ import {
 } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Archive, AtSign, Hash, LogOut, MoreHorizontal, UserPlus, Users } from "lucide-react";
+import { Archive, AtSign, Hash, Lock, LogOut, MoreHorizontal, UserPlus, Users } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -95,8 +95,13 @@ export function ChannelView({ channelId }: { channelId: string }) {
   // ---------------------------------------------------------------- data
   const channels = useChannels();
   const fromList = channels.data?.channels.find((c) => c.id === channelId);
+  // RT-01: the server dropped this channel's live stream because access was lost (kept per channel id, so it
+  // resets on navigation). `leavingRef` marks our own leave, which must never read as "no access".
+  const [lost, setLost] = useState<{ id: string; name: string } | null>(null);
+  const revoked = lost?.id === channelId ? lost : null;
+  const leavingRef = useRef<string | null>(null);
   const single = useQuery({
-    enabled: channels.isSuccess && !fromList,
+    enabled: channels.isSuccess && !fromList && !revoked,
     queryKey: chatKeys.channel(channelId),
     queryFn: ({ signal }) => api.get(`/api/v1/channels/${channelId}`, { schema: ChannelSummary, signal }),
     retry: false,
@@ -214,14 +219,22 @@ export function ChannelView({ channelId }: { channelId: string }) {
         return;
     }
   };
+  const onRevoked = () => {
+    if (leavingRef.current === channelId) return;
+    setLost({ id: channelId, name: channel?.name ?? "this channel" });
+    void qc.invalidateQueries({ queryKey: chatKeys.channels });
+    void qc.invalidateQueries({ queryKey: chatKeys.channel(channelId) });
+    void qc.invalidateQueries({ queryKey: chatKeys.members(channelId) });
+    qc.removeQueries({ queryKey: chatKeys.messages(channelId) });
+  };
   useTopic(
-    messages.data ? topic : null,
+    messages.data && !revoked ? topic : null,
     onFrame,
     messages.data?.lastSeq,
     () => {
       void qc.invalidateQueries({ queryKey: chatKeys.messages(channelId) });
     },
-    { presence: true },
+    { presence: true, onRevoked },
   );
 
   const sendTyping = useCallback(
@@ -319,6 +332,21 @@ export function ChannelView({ channelId }: { channelId: string }) {
   };
 
   // ---------------------------------------------------------------- render
+  if (revoked) {
+    return (
+      <div className="flex min-w-0 flex-1 flex-col" data-testid="channel-access-lost">
+        <PageHeader title={<span className="text-muted-foreground">{revoked.name}</span>} icon={<Lock />} />
+        <EmptyState
+          icon={Lock}
+          title={`You no longer have access to #${revoked.name}`}
+          description="You were removed from this private channel or your permissions changed. Ask a channel member or an admin to add you back."
+        >
+          <Button render={<Link href="/chat" />}>Back to channels</Button>
+        </EmptyState>
+      </div>
+    );
+  }
+
   if (channels.isPending || (!fromList && single.isPending && channels.isSuccess)) {
     return (
       <div className="flex min-w-0 flex-1 flex-col">
@@ -433,15 +461,20 @@ export function ChannelView({ channelId }: { channelId: string }) {
                     </DropdownMenuItem>
                     {channel.isMember && !channel.isDefault ? (
                       <DropdownMenuItem
-                        onClick={() =>
+                        onClick={() => {
+                          // Our own leave revokes the stream too: that is not "lost access".
+                          leavingRef.current = channel.id;
                           leave.mutate(channel.id, {
                             onSuccess: () => {
                               toast.success(`You left #${channel.name}`);
                               router.push("/chat");
                             },
-                            onError: (e) => toast.error(errorMessage(e)),
-                          })
-                        }
+                            onError: (e) => {
+                              leavingRef.current = null;
+                              toast.error(errorMessage(e));
+                            },
+                          });
+                        }}
                       >
                         <LogOut /> Leave channel
                       </DropdownMenuItem>

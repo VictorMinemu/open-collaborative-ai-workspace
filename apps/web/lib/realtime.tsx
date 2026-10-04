@@ -84,20 +84,24 @@ export function useRealtime(): RealtimeClient | null {
 /**
  * Subscribe to a topic for the lifetime of the component. The listener can change between renders without
  * re-subscribing. Pass `topic = null` to skip (e.g. while ids are loading). `opts.presence` marks the view that
- * shows the conversation: the user counts as "here" and `usePresence(topic)` gets data (RT-04).
+ * shows the conversation: the user counts as "here" and `usePresence(topic)` gets data (RT-04). `opts.onRevoked`
+ * runs when the server drops the topic because access was lost (RT-01); like the listener, it may change between
+ * renders without re-subscribing.
  */
 export function useTopic(
   topic: string | null,
   listener: TopicListener,
   afterSeq?: number,
   onResync?: () => void,
-  opts?: { presence?: boolean },
+  opts?: { presence?: boolean; onRevoked?: () => void },
 ): void {
   const client = useRealtime();
   const listenerRef = useRef(listener);
   const resyncRef = useRef(onResync);
+  const revokedRef = useRef(opts?.onRevoked);
   listenerRef.current = listener;
   resyncRef.current = onResync;
+  revokedRef.current = opts?.onRevoked;
 
   const presence = opts?.presence === true;
   useEffect(() => {
@@ -105,6 +109,7 @@ export function useTopic(
     return client.subscribe(topic, (frame) => listenerRef.current(frame), {
       ...(afterSeq !== undefined ? { afterSeq } : {}),
       onResync: () => resyncRef.current?.(),
+      onRevoked: () => revokedRef.current?.(),
       ...(presence ? { presence } : {}),
     });
   }, [client, topic, afterSeq, presence]);

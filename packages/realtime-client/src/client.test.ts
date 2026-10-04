@@ -441,6 +441,62 @@ describe("RealtimeClient", () => {
     expect(ws.sent.filter((f) => f.op === "presence")).toEqual([{ op: "presence", state: "away" }]);
   });
 
+  it("a revoked frame calls onRevoked once, forgets the topic and its presence, and leaves other topics alone", () => {
+    vi.useFakeTimers();
+    const c = new RealtimeClient({ url: "ws://x/ws", WebSocket: FakeWS, backoffBaseMs: 10 });
+    const T2 = "conv:0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e60";
+    const revoked = vi.fn();
+    const revoked2 = vi.fn();
+    const got: TopicFrame[] = [];
+    const off = c.subscribe(T, (f) => got.push(f), { presence: true, onRevoked: revoked });
+    c.subscribe(T, () => {}); // background watcher on the same topic, no callback
+    c.subscribe(T2, () => {}, { presence: true, onRevoked: revoked2 });
+    c.connect();
+    let ws = FakeWS.last!;
+    ws.open();
+    const entry = {
+      conn: "0190d5e2-7c3a-7cc2-9d2e-0000000000c1",
+      userId: "0190d5e2-7c3a-7cc2-9d2e-000000000001",
+      state: "online",
+    };
+    ws.push({ op: "presence", topic: T, full: true, entries: [entry] });
+    ws.push({ op: "presence", topic: T2, full: true, entries: [entry] });
+    ws.push(ev(1));
+    ws.sent = [];
+
+    ws.push({ op: "revoked", topic: T, reason: "forbidden" });
+    expect(revoked).toHaveBeenCalledTimes(1);
+    expect(revoked2).not.toHaveBeenCalled();
+    expect(c.presence.getState().topics[T]).toBeUndefined();
+    expect(c.presence.getState().topics[T2]).toBeDefined();
+    expect(ws.sent).toEqual([]); // the server already dropped it: no unsub
+    ws.push(ev(2)); // a late frame for the forgotten topic is ignored
+    expect(got).toHaveLength(1);
+    ws.push({ op: "revoked", topic: T, reason: "forbidden" }); // a duplicate is a no-op
+    expect(revoked).toHaveBeenCalledTimes(1);
+
+    // The old unsubscribe is harmless once the topic is gone.
+    off();
+    expect(ws.sent).toEqual([]);
+
+    // After a reconnect only the remaining topic is re-subscribed.
+    ws.drop();
+    vi.advanceTimersByTime(50);
+    ws = FakeWS.last!;
+    ws.open();
+    expect(ws.sent.filter((f) => f.op === "sub").map((f) => f.topic)).toEqual([T2]);
+
+    // A later subscribe to the same topic starts fresh, and a stale unsubscribe never touches it.
+    const fresh = vi.fn();
+    c.subscribe(T, () => {}, { onRevoked: fresh });
+    expect(ws.sent.at(-1)).toEqual({ op: "sub", topic: T, afterSeq: 0 });
+    off();
+    expect(ws.sent.at(-1)).toEqual({ op: "sub", topic: T, afterSeq: 0 });
+    ws.push({ op: "revoked", topic: T, reason: "forbidden" });
+    expect(fresh).toHaveBeenCalledTimes(1);
+    expect(revoked).toHaveBeenCalledTimes(1);
+  });
+
   it("backoff is bounded with full jitter", () => {
     expect(backoffDelay(0, 1000, 30_000, () => 0.999)).toBeLessThan(1000);
     expect(backoffDelay(10, 1000, 30_000, () => 0.999)).toBeLessThan(30_000);

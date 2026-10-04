@@ -38,6 +38,11 @@ interface Connection {
   presenceChanges: number[];
   /** Liveness: set by every pong and client frame, cleared (with a ping) on every heartbeat tick. */
   alive: boolean;
+  /**
+   * Bumped by every invalidation that matches this connection (RT-01, T-03-04-02). A subscribe whose decision
+   * started before a bump is re-decided once it is live, so no subscribe slips past a concurrent removal.
+   */
+  authzEpoch: number;
   send(frame: ServerFrame): void;
   unsub(topic: string): Promise<void>;
 }
@@ -47,6 +52,9 @@ interface Connection {
  * never count. A well-behaved client (500 ms throttle, 1 s input forwarding) stays far below it.
  */
 export const PRESENCE_RATE_LIMIT = { max: 30, windowMs: 10_000 } as const;
+
+/** Re-decisions of live subscriptions running at once per API instance (RT-01, T-03-04-04). */
+export const REAUTH_CONCURRENCY = 4;
 
 /** Backstop for revocations that never reached this instance (Redis down, expiry): Pitfall 5. */
 export const SESSION_RECHECK_MS = 5 * 60_000;
@@ -149,6 +157,89 @@ export function registerGateway(
     });
     return revocations;
   };
+  /**
+   * Live re-authorisation (RT-01, 03-04 D-05): an access change re-decides the matching live subscriptions through
+   * the same topic authorizers (the resolver) that decided them. "denied" drops the subscription (leaving its
+   * presence) and tells the client with `revoked`; "error" keeps it for the next check. At most
+   * REAUTH_CONCURRENCY re-decisions run at once on this instance.
+   */
+  const reauthorize = async (conn: Connection, topic: string) => {
+    const sub = conn.subs.get(topic);
+    if (!sub) return;
+    const verdict = await deps.realtime.reauthorizeTopic(conn.auth, topic);
+    // Replaced (a fresh `sub` was decided on its own) or removed meanwhile: nothing to do.
+    if (conn.subs.get(topic) !== sub) return;
+    if (verdict === "denied") {
+      await conn.unsub(topic);
+      conn.send({ op: "revoked", topic, reason: "forbidden" });
+      app.log.info({ topic, userId: conn.auth.userId }, "live subscription revoked");
+    } else if (verdict === "error") {
+      app.log.warn({ topic, userId: conn.auth.userId }, "subscription re-decision failed; kept");
+    }
+  };
+  // Coalesced per (connection, topic): a waiting job is never queued twice; a running one is marked to run once
+  // more when it finishes (its answer may predate the latest change). Bursts cost at most two decisions.
+  interface ReauthJob {
+    conn: Connection;
+    topic: string;
+    running: boolean;
+    again: boolean;
+  }
+  const reauthJobs = new Map<string, ReauthJob>();
+  const reauthQueue: ReauthJob[] = [];
+  let reauthRunning = 0;
+  const jobKey = (conn: Connection, topic: string) => `${conn.id}|${topic}`;
+  const pumpReauth = () => {
+    while (reauthRunning < REAUTH_CONCURRENCY && reauthQueue.length) {
+      const job = reauthQueue.shift() as ReauthJob;
+      job.running = true;
+      reauthRunning++;
+      reauthorize(job.conn, job.topic)
+        .catch((err: unknown) => app.log.warn({ err, topic: job.topic }, "subscription re-decision failed"))
+        .finally(() => {
+          reauthRunning--;
+          job.running = false;
+          if (job.again && job.conn.subs.has(job.topic)) {
+            job.again = false;
+            reauthQueue.push(job);
+          } else {
+            reauthJobs.delete(jobKey(job.conn, job.topic));
+          }
+          pumpReauth();
+        });
+    }
+  };
+  const scheduleReauth = (conn: Connection, topic: string) => {
+    const key = jobKey(conn, topic);
+    const existing = reauthJobs.get(key);
+    if (existing) {
+      if (existing.running) existing.again = true;
+      return;
+    }
+    const job: ReauthJob = { conn, topic, running: false, again: false };
+    reauthJobs.set(key, job);
+    reauthQueue.push(job);
+    pumpReauth();
+  };
+
+  let invalidations: Promise<() => Promise<void>> | null = null;
+  const watchInvalidations = () => {
+    invalidations ??= deps.realtime.onSubscriptionInvalidation((e) => {
+      for (const conn of open) {
+        if (conn.auth.organizationId !== e.organizationId) continue;
+        if (e.userIds && !e.userIds.includes(conn.auth.userId)) continue;
+        conn.authzEpoch++;
+        for (const topic of conn.subs.keys()) {
+          if (!e.topics || e.topics.includes(topic)) scheduleReauth(conn, topic);
+        }
+      }
+    });
+    invalidations.catch(() => {
+      invalidations = null;
+    });
+    return invalidations;
+  };
+
   app.addHook("onClose", async () => {
     clearInterval(heartbeat);
     // Leave every joined entry so watchers on other instances see this one's people go at once.
@@ -164,6 +255,8 @@ export function registerGateway(
     await Promise.allSettled(leaving);
     const stop = await revocations?.catch(() => null);
     await stop?.();
+    const stopInvalidations = await invalidations?.catch(() => null);
+    await stopInvalidations?.();
   });
 
   app.get(
@@ -186,13 +279,22 @@ export function registerGateway(
         if (!auth)
           return reply.code(401).send({ error: { code: "unauthorized", message: "Sign in required" } });
         // Subscribed before the upgrade completes, so no revocation can slip between accept and register.
-        await watchRevocations();
+        await Promise.all([watchRevocations(), watchInvalidations()]);
         req.auth = auth;
       },
     },
     (socket: WebSocket, req: FastifyRequest) => {
       const auth = req.auth as AuthContext;
       const subs = new Map<string, Subscription>();
+      // Per topic, bumped by every `sub` and `unsub` frame: a decision that finishes after a newer frame for the
+      // same topic is dropped, so the latest frame always wins (the sidebar watcher and the channel view can
+      // send two subs at once; an unsub can arrive while a sub is still being decided).
+      const subGen = new Map<string, number>();
+      const bumpGen = (topic: string) => {
+        const g = (subGen.get(topic) ?? 0) + 1;
+        subGen.set(topic, g);
+        return g;
+      };
       const send = (frame: ServerFrame) => {
         if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(frame));
       };
@@ -220,6 +322,7 @@ export function registerGateway(
         presenceState: "online",
         presenceChanges: [],
         alive: true,
+        authzEpoch: 0,
         send,
         unsub,
       };
@@ -287,8 +390,12 @@ export function registerGateway(
       };
 
       const subscribe = async (topic: string, afterSeq: number, wantsPresence: boolean) => {
+        const gen = bumpGen(topic);
         await unsub(topic);
-        if (!(await deps.realtime.authorizeTopic(auth, topic))) {
+        const epoch = conn.authzEpoch;
+        const allowed = await deps.realtime.authorizeTopic(auth, topic);
+        if (subGen.get(topic) !== gen) return; // superseded by a newer sub/unsub for this topic
+        if (!allowed) {
           send({ op: "err", code: "forbidden", topic, message: "Not allowed to subscribe to this topic" });
           return;
         }
@@ -349,6 +456,8 @@ export function registerGateway(
         send({ op: "subscribed", topic, lastSeq: Math.max(sub.lastSent, replay.lastSeq) });
         // Presence only after the resolver allowed the subscription and `subscribed` was sent (T-03-01-01).
         if (withPresence) await joinPresence(topic, sub);
+        // An invalidation arrived while this was being decided: decide it again now that it is live.
+        if (conn.authzEpoch !== epoch && subs.get(topic) === sub) scheduleReauth(conn, topic);
       };
 
       // Attach synchronously so early frames are never dropped (Pitfall 8).
@@ -372,6 +481,7 @@ export function registerGateway(
             });
             return;
           case "unsub":
+            bumpGen(frame.topic);
             void unsub(frame.topic);
             return;
           case "presence":

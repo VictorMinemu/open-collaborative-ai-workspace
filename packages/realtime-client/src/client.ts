@@ -57,6 +57,8 @@ interface TopicState {
   lastSeq: number;
   subscribed: boolean;
   onResync: Set<() => void>;
+  /** Called once when the server drops the topic because access was lost (`revoked`). */
+  onRevoked: Set<() => void>;
   /** A replay is in flight because we observed a gap. */
   replaying: boolean;
   /** Listeners that show this conversation (RT-04): while > 0 the `sub` carries `presence: true`. */
@@ -136,12 +138,14 @@ export class RealtimeClient {
    * Subscribe to a topic. `afterSeq` is the seq of the snapshot you already hold (from the REST response);
    * events after it are replayed. `presence: true` marks a listener that shows the conversation: the user counts
    * as "here" and `client.presence` tracks the topic while at least one such listener is subscribed (background
-   * watchers leave it out). Returns an unsubscribe function.
+   * watchers leave it out). `onRevoked` runs once if the server drops the topic because access was lost (RT-01):
+   * the topic is then forgotten (no resubscribe on reconnect) and a later `subscribe` starts fresh. Returns an
+   * unsubscribe function.
    */
   subscribe(
     topic: string,
     listener: TopicListener,
-    opts: { afterSeq?: number; onResync?: () => void; presence?: boolean } = {},
+    opts: { afterSeq?: number; onResync?: () => void; presence?: boolean; onRevoked?: () => void } = {},
   ): () => void {
     let state = this.topics.get(topic);
     if (!state) {
@@ -150,6 +154,7 @@ export class RealtimeClient {
         lastSeq: opts.afterSeq ?? 0,
         subscribed: false,
         onResync: new Set(),
+        onRevoked: new Set(),
         replaying: false,
         presence: 0,
       };
@@ -159,15 +164,19 @@ export class RealtimeClient {
     }
     state.listeners.add(listener);
     if (opts.onResync) state.onResync.add(opts.onResync);
+    if (opts.onRevoked) state.onRevoked.add(opts.onRevoked);
     const becamePresent = opts.presence === true && state.presence++ === 0;
     // Not subscribed yet, or already subscribed without presence: (re-)send the sub with the current flag.
     if (!state.subscribed || becamePresent) this.sendSub(topic);
 
+    const own = state;
     return () => {
       const s = this.topics.get(topic);
-      if (!s) return;
+      // Gone (revoked) or replaced by a fresh subscription after a revoke: nothing of ours is left to undo.
+      if (!s || s !== own) return;
       s.listeners.delete(listener);
       if (opts.onResync) s.onResync.delete(opts.onResync);
+      if (opts.onRevoked) s.onRevoked.delete(opts.onRevoked);
       const leftPresence = opts.presence === true && --s.presence === 0;
       if (s.listeners.size === 0) {
         this.topics.delete(topic);
@@ -408,6 +417,15 @@ export class RealtimeClient {
         const prev = this.presence.getState();
         const next = applyPresenceFrame(prev, parsed);
         if (next !== prev) this.presence.setState(next, true);
+        return;
+      }
+      case "revoked": {
+        // The server already dropped the subscription (and our presence): forget the topic, never unsub.
+        const s = this.topics.get(parsed.topic);
+        if (!s) return;
+        this.topics.delete(parsed.topic);
+        this.dropPresence(parsed.topic);
+        for (const cb of s.onRevoked) cb();
         return;
       }
       case "pong":
