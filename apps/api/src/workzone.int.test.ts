@@ -35,8 +35,19 @@ class FakeDevice {
     });
   }
 
-  static async connect(baseUrl: string, token: string, sessions?: string[]): Promise<FakeDevice> {
-    const d = await FakeDevice.open(baseUrl, token);
+  /** Exchange the long-lived device token for a 10-minute device JWT (what the daemon does before connecting). */
+  static async exchange(baseUrl: string, deviceToken: string): Promise<string> {
+    const res = await fetch(`${baseUrl}/api/v1/devices/token`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${deviceToken}` },
+    });
+    if (res.status !== 200) throw new Error(`device token exchange: HTTP ${res.status}`);
+    return ((await res.json()) as { token: string }).token;
+  }
+
+  /** Connect like the daemon: exchange the device token for a device JWT, open the link with it, say hello. */
+  static async connect(baseUrl: string, deviceToken: string, sessions?: string[]): Promise<FakeDevice> {
+    const d = await FakeDevice.open(baseUrl, await FakeDevice.exchange(baseUrl, deviceToken));
     d.send({
       type: "hello",
       protocolVersion: 1,
@@ -355,8 +366,29 @@ describe("device pairing", () => {
     expect(expired.status).toBe(410);
   });
 
+  it("exchanges the device token for a 10-minute device JWT; wrong tokens and JWTs are refused", async () => {
+    const res = await fetch(`${stack.baseUrl}/api/v1/devices/token`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${deviceToken}` },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    const body = (await res.json()) as { token: string; expiresAt: string };
+    expect(body.token.split(".")).toHaveLength(3);
+    const ttl = new Date(body.expiresAt).getTime() - Date.now();
+    expect(ttl).toBeGreaterThan(590_000);
+    expect(ttl).toBeLessThanOrEqual(601_000);
+    await expect(FakeDevice.exchange(stack.baseUrl, "ocwd_not-a-real-token")).rejects.toThrow("HTTP 401");
+    // Only the long-lived device credential mints device JWTs: neither a device JWT nor a user JWT does.
+    await expect(FakeDevice.exchange(stack.baseUrl, body.token)).rejects.toThrow("HTTP 401");
+    await expect(FakeDevice.exchange(stack.baseUrl, await admin.token())).rejects.toThrow("HTTP 401");
+    const noAuth = await fetch(`${stack.baseUrl}/api/v1/devices/token`, { method: "POST" });
+    expect(noAuth.status).toBe(401);
+  });
+
   it("device link: rejects bad tokens, goes online on hello, registers only safe projects", async () => {
     await expect(FakeDevice.open(stack.baseUrl, "ocwd_not-a-real-token")).rejects.toThrow("HTTP 401");
+    await expect(FakeDevice.open(stack.baseUrl, "a.b.c")).rejects.toThrow("HTTP 401");
 
     device = await FakeDevice.connect(stack.baseUrl, deviceToken);
     device.send({
@@ -950,6 +982,7 @@ describe("revocation", () => {
     await eventually(async () => device.closed);
     await eventually(async () => (await status(id)) === "failed");
     await expect(FakeDevice.open(stack.baseUrl, deviceToken)).rejects.toThrow("HTTP 401");
+    await expect(FakeDevice.exchange(stack.baseUrl, deviceToken)).rejects.toThrow("HTTP 401");
     const audit = await su.query(
       "select count(*)::int as n from app.audit_events where action = 'device.revoked' and resource_id = $1",
       [devices[0]!.id],

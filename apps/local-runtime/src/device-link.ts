@@ -1,5 +1,6 @@
-// Device Link client: one OUTBOUND WebSocket to `${serverUrl}/runtime/ws` (Bearer device token).
-// The daemon never listens on a TCP port. Frames produced while offline go to an in-memory append
+// Device Link client: one OUTBOUND WebSocket to `${serverUrl}/runtime/ws`, authenticated with a
+// short-lived device JWT fetched before every connect (`getAccessToken`), or the raw device token when no
+// token source is given. The daemon never listens on a TCP port. Frames produced while offline go to an in-memory append
 // log and are replayed, in order, after the next successful connect.
 
 import { CommandFrame, type DeviceToServerFrame } from "@ocw/contracts";
@@ -8,7 +9,14 @@ import { errorMessage, type Logger, silentLogger } from "./logger.js";
 
 export interface DeviceLinkOptions {
   url: string;
+  /** Raw device token: the Bearer credential when `getAccessToken` is absent. */
   token: string;
+  /**
+   * Bearer credential for the next connect (a device JWT from `POST /api/v1/devices/token`). Awaited before
+   * every connect; a rejection backs off like a failed connect. `refresh` is true after the server refused
+   * the previous handshake (401/403), so a cached token is not offered again.
+   */
+  getAccessToken?: (opts: { refresh: boolean }) => Promise<string>;
   /** Frames sent first on every (re)connect, before the offline log is replayed. */
   onOpenFrames: () => Promise<DeviceToServerFrame[]> | DeviceToServerFrame[];
   onCommand: (command: CommandFrame) => void;
@@ -29,6 +37,10 @@ export class DeviceLink {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private ready = false;
+  /** Bumped by stop(): a token fetch that resolves after a stop (or a stop + start) opens nothing. */
+  private generation = 0;
+  /** The server refused the last handshake's credential. */
+  private rejected = false;
   private readonly log: Logger;
   droppedFrames = 0;
 
@@ -52,6 +64,7 @@ export class DeviceLink {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.generation++;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.stopHeartbeat();
     const ws = this.ws;
@@ -99,7 +112,27 @@ export class DeviceLink {
 
   private connect(): void {
     if (this.stopped) return;
-    const headers = { Authorization: `Bearer ${this.opts.token}` };
+    if (!this.opts.getAccessToken) {
+      this.openSocket(this.opts.token);
+      return;
+    }
+    const generation = this.generation;
+    const refresh = this.rejected;
+    this.rejected = false;
+    this.opts.getAccessToken({ refresh }).then(
+      (token) => {
+        if (generation === this.generation && !this.stopped && !this.ws) this.openSocket(token);
+      },
+      (err) => {
+        if (generation !== this.generation) return;
+        this.log.debug("no access token for the Device Link", { error: errorMessage(err) });
+        this.scheduleReconnect();
+      },
+    );
+  }
+
+  private openSocket(token: string): void {
+    const headers = { Authorization: `Bearer ${token}` };
     let ws: WebSocket;
     try {
       ws = this.opts.createSocket
@@ -118,8 +151,10 @@ export class DeviceLink {
     ws.on("message", (data) => this.onMessage(data));
     ws.on("unexpected-response", (_req, res) => {
       const status = res.statusCode ?? 0;
-      if (status === 401 || status === 403) this.log.error("device token rejected by server", { status });
-      else this.log.warn("unexpected handshake response", { status });
+      if (status === 401 || status === 403) {
+        this.rejected = true;
+        this.log.error("device token rejected by server", { status });
+      } else this.log.warn("unexpected handshake response", { status });
       ws.terminate();
     });
     ws.on("error", (err) => this.log.debug("websocket error", { error: errorMessage(err) }));
