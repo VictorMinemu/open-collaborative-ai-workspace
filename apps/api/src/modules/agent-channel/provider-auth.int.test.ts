@@ -6,7 +6,7 @@ import {
   type FakeDeviceAuthServer,
   startFakeDeviceAuthServer,
 } from "../../../../../e2e/support/fake-device-auth-server";
-import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
+import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack, WEB_ORIGIN } from "../../testing";
 
 /**
  * ChatGPT subscription (Codex) sign-in, end to end against real PostgreSQL/Redis: admin "Connect" → the
@@ -16,6 +16,8 @@ import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "..
 
 const CELL_TOKEN = "ocw-test-cell-token-subscription-0123456789abcdef";
 const ADMIN = { name: "Víctor Ruiz", email: "victor@example.test", password: "correct-horse-battery" };
+const ELECTRON_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) ocw-desktop/0.1.0 Chrome/140.0.7339.80 Electron/38.1.0 Safari/537.36";
 const ACCOUNT = { email: "owner@autofylabs.test", planType: "pro" };
 
 let stack: TestStack;
@@ -75,13 +77,14 @@ function startPlugin(opts: Partial<ConstructorParameters<typeof FakeCellPlugin>[
 const audit = async (action: string) =>
   (
     await su.query(
-      "select user_id, actor_kind, result, metadata from app.audit_events where action = $1 and organization_id = $2 order by occurred_at, id",
+      "select user_id, actor_kind, result, client_kind, metadata from app.audit_events where action = $1 and organization_id = $2 order by occurred_at, id",
       [action, orgId],
     )
   ).rows as Array<{
     user_id: string | null;
     actor_kind: string;
     result: string;
+    client_kind: string | null;
     metadata: Record<string, unknown>;
   }>;
 
@@ -129,9 +132,17 @@ afterAll(async () => {
 });
 
 describe("ChatGPT subscription sign-in (device code in the cell)", () => {
-  it("is admin-only and refuses to start without a connected cell", async () => {
-    expect((await call(member, "GET", "/api/v1/model-providers/openai-codex/auth")).status).toBe(403);
-    expect((await call(member, "POST", "/api/v1/model-providers/openai-codex/auth", {})).status).toBe(403);
+  it("is decided as provider.manage (a developer gets 403) and refuses to start without a connected cell", async () => {
+    for (const method of ["GET", "POST", "DELETE"]) {
+      const denied = await call<{ error: { code: string; details: Record<string, unknown> } }>(
+        member,
+        method,
+        "/api/v1/model-providers/openai-codex/auth",
+        method === "POST" ? {} : undefined,
+      );
+      expect(denied.status, method).toBe(403);
+      expect(denied.body.error.details).toMatchObject({ permission: "provider.manage", layer: "role" });
+    }
     expect((await call(admin, "GET", "/api/v1/model-providers/anthropic/auth")).status).toBe(400);
 
     const idle = await authStatus();
@@ -210,7 +221,12 @@ describe("ChatGPT subscription sign-in (device code in the cell)", () => {
     // Audited in the same transactions, attributed to the admin who started it.
     const startedAudit = await audit("model_provider.connect_started");
     expect(startedAudit).toHaveLength(1);
-    expect(startedAudit[0]).toMatchObject({ user_id: adminId, actor_kind: "user", result: "success" });
+    expect(startedAudit[0]).toMatchObject({
+      user_id: adminId,
+      actor_kind: "user",
+      result: "success",
+      client_kind: "web",
+    });
     const connectedAudit = await audit("model_provider.connected");
     expect(connectedAudit).toHaveLength(1);
     expect(connectedAudit[0]!.user_id).toBe(adminId);
@@ -302,6 +318,35 @@ describe("ChatGPT subscription sign-in (device code in the cell)", () => {
     expect(cancelled.body.userCode).toBeNull();
     await plugin.waitFor((e) => e.type === "provider.auth.cancel");
     expect(await audit("model_provider.connect_cancelled")).toHaveLength(1);
+  });
+
+  it("start and cancel from the desktop app are audited with client kind desktop", async () => {
+    const res = await fetch(`${stack.baseUrl}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { origin: WEB_ORIGIN, "content-type": "application/json", "user-agent": ELECTRON_UA },
+      body: JSON.stringify({ email: ADMIN.email, password: ADMIN.password }),
+    });
+    expect(res.status).toBe(200);
+    const desktop = new TestClient(stack.baseUrl);
+    for (const c of res.headers.getSetCookie()) {
+      const [pair = ""] = c.split(";");
+      const i = pair.indexOf("=");
+      desktop.cookies.set(pair.slice(0, i), pair.slice(i + 1));
+    }
+    const started = await call(desktop, "POST", "/api/v1/model-providers/openai-codex/auth", {
+      restart: true,
+    });
+    expect(started.status).toBe(200);
+    userCodes.push((await waitForState("pending")).userCode!);
+    expect((await call(desktop, "DELETE", "/api/v1/model-providers/openai-codex/auth")).status).toBe(200);
+    expect((await audit("model_provider.connect_started")).at(-1)).toMatchObject({
+      user_id: adminId,
+      client_kind: "desktop",
+    });
+    expect((await audit("model_provider.connect_cancelled")).at(-1)).toMatchObject({
+      user_id: adminId,
+      client_kind: "desktop",
+    });
   });
 
   it("a denied request ends in a clear error and is audited", async () => {

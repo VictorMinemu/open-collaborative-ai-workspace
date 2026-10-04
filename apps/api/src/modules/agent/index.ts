@@ -1,4 +1,3 @@
-// authz-legacy: 02-10 migrates this file to the resolver
 import {
   Agent,
   AgentList,
@@ -19,6 +18,7 @@ import { agents, conversationMembers, modelProviders } from "@ocw/db";
 import { and, asc, eq, isNull, like, or } from "drizzle-orm";
 import { type ApiModule, authOf, type Core, tenant } from "../../core";
 import { badRequest, conflict, notFound } from "../../lib/errors";
+import { createPermissionService } from "../organization";
 import { keyHint, nextFreeUsername, slugifyUsername } from "./providers";
 import {
   allowedModels,
@@ -63,16 +63,26 @@ function isUniqueViolation(err: unknown): boolean {
  * `cell.config.changed` events on `cell:<orgId>`; the cell acks through the Agent Channel API.
  */
 export function createAgentModule(core: Core): ApiModule {
-  const admin = core.identity.requireRole("admin");
-  const member = core.identity.requireUser;
+  const perms = createPermissionService(core);
+  const requireUser = core.identity.requireUser;
+  // Every route is a signed-in user's, decided by the resolver on an organization-scope permission.
+  const user = { authz: "user" as const };
+  const allow = {
+    "provider.manage": {
+      config: user,
+      preHandler: [requireUser, perms.requirePermission("provider.manage")],
+    },
+    "bot.manage": { config: user, preHandler: [requireUser, perms.requirePermission("bot.manage")] },
+    "bot.read": { config: user, preHandler: [requireUser, perms.requirePermission("bot.read")] },
+  };
 
   return {
     name: "agent",
     register(app) {
-      // ---------------------------------------------------------------- model providers (admin)
+      // ---------------------------------------------------------------- model providers (provider.manage)
       app.get(
         "/model-providers",
-        { preHandler: admin, schema: { tags: ["agent"], response: { 200: ModelProviderList } } },
+        { ...allow["provider.manage"], schema: { tags: ["agent"], response: { 200: ModelProviderList } } },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
             const rows = await tx.select().from(modelProviders).orderBy(asc(modelProviders.createdAt));
@@ -86,7 +96,7 @@ export function createAgentModule(core: Core): ApiModule {
       app.post(
         "/model-providers",
         {
-          preHandler: admin,
+          ...allow["provider.manage"],
           schema: { tags: ["agent"], body: UpsertModelProviderRequest, response: { 200: ModelProvider } },
         },
         async (req) =>
@@ -154,7 +164,6 @@ export function createAgentModule(core: Core): ApiModule {
               resourceType: "model_provider",
               resourceId: row.id,
               sessionId: auth.sessionId,
-              clientKind: "web",
               // Never the key itself; only whether it changed.
               metadata: {
                 provider: body.provider,
@@ -178,7 +187,10 @@ export function createAgentModule(core: Core): ApiModule {
 
       app.delete(
         "/model-providers/:provider",
-        { preHandler: admin, schema: { tags: ["agent"], params: ProviderParams, response: { 200: Ok } } },
+        {
+          ...allow["provider.manage"],
+          schema: { tags: ["agent"], params: ProviderParams, response: { 200: Ok } },
+        },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
             const auth = authOf(req);
@@ -194,7 +206,6 @@ export function createAgentModule(core: Core): ApiModule {
               resourceType: "model_provider",
               resourceId: row.id,
               sessionId: auth.sessionId,
-              clientKind: "web",
               metadata: subscription
                 ? { provider: row.provider, accountEmail: row.account?.email ?? null }
                 : { provider: row.provider },
@@ -214,7 +225,7 @@ export function createAgentModule(core: Core): ApiModule {
 
       app.get(
         "/models",
-        { preHandler: member, schema: { tags: ["agent"], response: { 200: AllowedModelList } } },
+        { ...allow["bot.read"], schema: { tags: ["agent"], response: { 200: AllowedModelList } } },
         async (req) => ({
           models: await core.db.withTenant(tenant(req), (tx) => allowedModels(core, tx)),
         }),
@@ -223,13 +234,13 @@ export function createAgentModule(core: Core): ApiModule {
       // ---------------------------------------------------------------- bots
       app.get(
         "/agents",
-        { preHandler: member, schema: { tags: ["agent"], response: { 200: AgentList } } },
+        { ...allow["bot.read"], schema: { tags: ["agent"], response: { 200: AgentList } } },
         async (req) => ({ agents: await core.db.withTenant(tenant(req), listAgents) }),
       );
 
       app.get(
         "/agents/:id",
-        { preHandler: member, schema: { tags: ["agent"], params: IdParams, response: { 200: Agent } } },
+        { ...allow["bot.read"], schema: { tags: ["agent"], params: IdParams, response: { 200: Agent } } },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
             const row = await findAgent(tx, req.params.id);
@@ -241,7 +252,7 @@ export function createAgentModule(core: Core): ApiModule {
       app.post(
         "/agents",
         {
-          preHandler: admin,
+          ...allow["bot.manage"],
           schema: { tags: ["agent"], body: CreateAgentRequest, response: { 200: Agent } },
         },
         async (req) => {
@@ -295,7 +306,6 @@ export function createAgentModule(core: Core): ApiModule {
                 resourceId: row.id,
                 agentId: row.id,
                 sessionId: auth.sessionId,
-                clientKind: "web",
                 metadata: { username, model: `${body.modelProvider}/${body.modelId}`, runtime: "openclaw" },
               });
               await publishAgent(core, tx, EventTypes.agentCreated, dto);
@@ -312,7 +322,7 @@ export function createAgentModule(core: Core): ApiModule {
       app.patch(
         "/agents/:id",
         {
-          preHandler: admin,
+          ...allow["bot.manage"],
           schema: { tags: ["agent"], params: IdParams, body: UpdateAgentRequest, response: { 200: Agent } },
         },
         async (req) => {
@@ -389,7 +399,6 @@ export function createAgentModule(core: Core): ApiModule {
                 resourceId: row.id,
                 agentId: row.id,
                 sessionId: auth.sessionId,
-                clientKind: "web",
                 metadata: { changed, ...(modelChanged ? { model: `${provider}/${modelId}` } : {}) },
               });
               await publishAgent(core, tx, EventTypes.agentUpdated, dto);
@@ -405,7 +414,7 @@ export function createAgentModule(core: Core): ApiModule {
 
       app.delete(
         "/agents/:id",
-        { preHandler: admin, schema: { tags: ["agent"], params: IdParams, response: { 200: Ok } } },
+        { ...allow["bot.manage"], schema: { tags: ["agent"], params: IdParams, response: { 200: Ok } } },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
             const auth = authOf(req);
@@ -428,7 +437,6 @@ export function createAgentModule(core: Core): ApiModule {
               resourceId: row.id,
               agentId: row.id,
               sessionId: auth.sessionId,
-              clientKind: "web",
               metadata: { username: row.username },
             });
             await core.realtime.appendEvent(tx, `org:${auth.organizationId}`, EventTypes.agentDeleted, {

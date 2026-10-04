@@ -1,5 +1,4 @@
 "use client";
-// authz-legacy: 02-10 migrates this file to the resolver
 
 import {
   Agent,
@@ -37,12 +36,6 @@ export const botKeys = {
 function noRetryOn4xx(failureCount: number, err: unknown): boolean {
   if (isApiError(err) && err.status >= 400 && err.status < 500) return false;
   return failureCount < 1;
-}
-
-export function useIsAdmin(): boolean {
-  const me = useMe({ enabled: false });
-  const role = me.data?.organization.role;
-  return role === "admin";
 }
 
 // ---- bots ----

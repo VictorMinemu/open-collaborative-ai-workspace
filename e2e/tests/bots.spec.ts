@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page, request, test } from "@playwright/test";
 import { FakeCellPlugin } from "../support/fake-cell-plugin";
 import { ADMIN, API_URL, shot } from "./env";
 
@@ -168,4 +168,70 @@ test("models → one-click bot → ready via the cell → add to channel", async
   } finally {
     await plugin.stop();
   }
+});
+
+const BASE_URL = process.env.OCW_E2E_BASE_URL ?? "http://localhost:3000";
+const DEV = { name: "Dana Developer", email: "dana@ocw.test", password: "dana-e2e-password-123" };
+
+/** A developer account (invite + accept through the API on the first run). */
+async function ensureDeveloper() {
+  const admin = await request.newContext({ baseURL: API_URL, extraHTTPHeaders: { origin: BASE_URL } });
+  try {
+    const signIn = await admin.post("/api/auth/sign-in/email", {
+      data: { email: ADMIN.email, password: ADMIN.password },
+    });
+    expect(signIn.ok(), "admin sign in").toBe(true);
+    const members = (await (await admin.get("/api/v1/members")).json()).members as Array<{ email: string }>;
+    if (members.some((m) => m.email === DEV.email)) return;
+    const inv = await (
+      await admin.post("/api/v1/invitations", { data: { email: DEV.email, role: "developer" } })
+    ).json();
+    const anon = await request.newContext({ baseURL: API_URL, extraHTTPHeaders: { origin: BASE_URL } });
+    const res = await anon.post(`/api/v1/invitations/${inv.id}/accept`, {
+      data: { name: DEV.name, password: DEV.password },
+    });
+    expect(res.ok(), "accept invitation").toBe(true);
+    await anon.dispose();
+  } finally {
+    await admin.dispose();
+  }
+}
+
+test("a developer sees the bots gallery without management controls", async ({ page }, info) => {
+  const tag = info.project.name === "mobile" ? "390" : "1440";
+  await ensureDeveloper();
+  await page.goto("/bots");
+  await expect(page.getByTestId("login-form")).toBeVisible();
+  await page.getByLabel("Email").fill(DEV.email);
+  await page.getByLabel("Password", { exact: true }).fill(DEV.password);
+  await page
+    .getByTestId("login-form")
+    .getByRole("button", { name: /sign in|log in/i })
+    .click();
+  await expect(page.getByTestId("app-shell")).toBeVisible();
+  await page.goto("/bots");
+  await expect(page.getByRole("heading", { name: "Bots", exact: true })).toBeVisible();
+  // Bot management, the runtime banner and the provider link come from the caller's permissions.
+  await expect(page.getByTestId("new-bot")).toHaveCount(0);
+  await expect(page.getByTestId("new-bot-empty")).toHaveCount(0);
+  await expect(page.getByTestId("runtime-offline")).toHaveCount(0);
+  await shot(page, `bots-gallery-developer-${tag}`);
+  // The detail sheet is read-only (the admin test above leaves at least one bot).
+  const card = page.getByTestId("bot-card").first();
+  if ((await card.count()) > 0) {
+    await card.getByRole("button").first().click();
+    await expect(page.getByTestId("bot-detail-sheet")).toBeVisible();
+    await expect(page.getByTestId("save-bot")).toHaveCount(0);
+    await expect(page.getByTestId("delete-bot")).toHaveCount(0);
+    await expect(page.getByTestId("bot-enabled")).toHaveCount(0);
+    await shot(page, `bots-detail-developer-${tag}`);
+    await page.keyboard.press("Escape");
+  }
+
+  await page.goto("/settings/models");
+  await expect(page.getByText("Only workspace admins can manage model providers.")).toBeVisible();
+  await expect(page.getByTestId("provider-anthropic")).toHaveCount(0);
+  await page.goto("/settings/bots-runtime");
+  await expect(page.getByText("Only workspace admins can manage the bots runtime.")).toBeVisible();
+  await expect(page.getByTestId("cell-status")).toHaveCount(0);
 });
