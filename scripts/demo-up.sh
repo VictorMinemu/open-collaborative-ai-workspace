@@ -41,7 +41,7 @@ docker image inspect ocw-openclaw:local >/dev/null 2>&1 || docker build -q -f in
 if ! docker ps --format '{{.Names}}' | grep -qx ocw-demo-openclaw; then
   docker rm ocw-demo-openclaw >/dev/null 2>&1 || true
   docker run -d --name ocw-demo-openclaw --network ocw-demo-net --restart unless-stopped \
-    --memory 1536m --stop-timeout 30 --add-host host.docker.internal:host-gateway \
+    --memory 2g --stop-timeout 30 --add-host host.docker.internal:host-gateway \
     -v ocw-demo-openclaw-state:/home/node/.openclaw \
     -v "$STATE/cell_token:/run/secrets/ocw_cell_token:ro" \
     -e OCW_API_URL=http://host.docker.internal:4000 \

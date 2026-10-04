@@ -2,6 +2,7 @@ import {
   AGENT_CHANNEL_BASE_PATH,
   type AgentChannelPostMessage,
   AgentChannelPostMessageResponse,
+  type AgentChannelProviderAuthReport,
   type AgentChannelStatusReport,
   type AgentChannelTyping,
   CellSnapshot,
@@ -119,6 +120,13 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
       signal?: AbortSignal,
     ): Promise<void> {
       await request("POST", `/agents/${encodeURIComponent(agentId)}/status`, report, signal, 3);
+    },
+    /**
+     * Subscription sign-in progress. The report may carry the one-time user code: never log it.
+     * Throws AgentChannelHttpError (409 `flow_claimed` / `flow_closed` / `unknown_flow` → stop the flow).
+     */
+    async reportProviderAuth(report: AgentChannelProviderAuthReport, signal?: AbortSignal): Promise<void> {
+      await request("POST", "/provider-auth", report, signal, 3);
     },
     /** `ws(s)://…/agent-channel/v1/ws` */
     wsUrl(): string {

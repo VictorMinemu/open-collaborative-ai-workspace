@@ -4,12 +4,16 @@ import {
   type AgentMentionEvent as AgentMentionEventType,
   type CellAgent,
   type CellSnapshot,
+  ProviderAuthCancelEvent,
+  ProviderAuthRevokeEvent,
+  ProviderAuthStartEvent,
 } from "./agent-channel-protocol.js";
 import type { AgentChannelClient } from "./api-client.js";
 import { sleep } from "./backoff.js";
 import type { DurableFrame, EventStreamLogger } from "./event-stream.js";
 import { type MappedMention, mapMention, replyIdempotencyKey } from "./mention-mapper.js";
 import type { AgentProvisioningResult } from "./reconciler.js";
+import type { SubscriptionAuth } from "./subscription-auth.js";
 
 /**
  * Everything the bridge needs from OpenClaw. The real implementation (openclaw-port.ts) wraps the
@@ -25,8 +29,14 @@ export type OpenClawPort = {
     deliver: (text: string) => Promise<void>,
     signal: AbortSignal,
   ): Promise<void>;
-  /** Reconciles OpenClaw agents + providers with the snapshot; returns per-agent provisioning results. */
-  reconcile(cell: CellSnapshot): Promise<{ changed: boolean; results: AgentProvisioningResult[] }>;
+  /**
+   * Reconciles OpenClaw agents + providers with the snapshot; returns per-agent provisioning results.
+   * `readySubscriptions`: subscription ids signed in inside this cell right now.
+   */
+  reconcile(
+    cell: CellSnapshot,
+    opts?: { readySubscriptions?: ReadonlySet<string> },
+  ): Promise<{ changed: boolean; results: AgentProvisioningResult[] }>;
 };
 
 export type BridgeOptions = {
@@ -40,15 +50,38 @@ export type BridgeOptions = {
   dispatchAttempts?: number;
   /** Base delay between turn attempts (linear backoff, default 1.5 s). */
   retryDelayMs?: number;
+  /** Subscription sign-in (provider.auth.* commands); omitted → those commands are ignored. */
+  subscriptions?: SubscriptionAuth;
 };
 
 export const FAILURE_REPLY = "Sorry, I couldn't generate a reply right now. Please try again in a moment.";
 
+/** Reply when the model provider rejected the cell's credentials (bad key, expired/revoked sign-in). */
+export const AUTH_FAILURE_REPLY =
+  "I couldn't reach my model: the provider rejected my credentials. An admin can reconnect it in Settings › Models.";
+
 /** OpenClaw's own user-facing text for a failed turn; never forward it, treat it as a failure. */
 const OPENCLAW_GENERIC_FAILURE = /^\W*Something went wrong while processing your request/i;
+/** OpenClaw's text when the provider answered 401/403 (e.g. a ChatGPT sign-in that is no longer valid). */
+const OPENCLAW_AUTH_FAILURE = /^\W*Authentication failed \(provider returned HTTP 40[13]\)/i;
 
 export function isOpenClawGenericFailure(text: string): boolean {
   return OPENCLAW_GENERIC_FAILURE.test(text.trim());
+}
+
+export function isOpenClawAuthFailure(text: string): boolean {
+  return OPENCLAW_AUTH_FAILURE.test(text.trim());
+}
+
+/** A turn that failed for a reason retrying cannot fix; `reply` is what the bot posts instead. */
+class TerminalTurnError extends Error {
+  constructor(
+    message: string,
+    readonly reply: string,
+  ) {
+    super(message);
+    this.name = "TerminalTurnError";
+  }
 }
 
 export function chunkText(text: string, max: number): string[] {
@@ -100,7 +133,8 @@ export function createBridge(opts: BridgeOptions) {
     const cell = await opts.client.getCell(opts.signal);
     agents.clear();
     for (const agent of cell.agents) agents.set(agent.id, agent);
-    const { changed, results } = await opts.port.reconcile(cell);
+    const readySubscriptions = opts.subscriptions ? await opts.subscriptions.sync(cell) : new Set<string>();
+    const { changed, results } = await opts.port.reconcile(cell, { readySubscriptions });
     lastSnapshot = cell;
     log.info?.(
       `cell synced: ${cell.agents.length} bot(s), ${cell.providers.length} provider(s)${changed ? ", OpenClaw updated" : ""}`,
@@ -177,6 +211,12 @@ export function createBridge(opts: BridgeOptions) {
           await opts.port.dispatchMention(
             mention,
             async (text) => {
+              if (isOpenClawAuthFailure(text)) {
+                throw new TerminalTurnError(
+                  "the model provider rejected the credentials",
+                  AUTH_FAILURE_REPLY,
+                );
+              }
               if (isOpenClawGenericFailure(text)) throw new Error("OpenClaw reported a failed turn");
               if (text.trim()) await post(text);
             },
@@ -185,6 +225,7 @@ export function createBridge(opts: BridgeOptions) {
           break;
         } catch (error) {
           if (index > 0 || opts.signal.aborted || attempt >= dispatchAttempts) throw error;
+          if (error instanceof TerminalTurnError) throw error;
           log.warn?.(
             `mention ${event.eventId}: turn attempt ${attempt} failed (${error instanceof Error ? error.message : String(error)}); retrying`,
           );
@@ -205,7 +246,7 @@ export function createBridge(opts: BridgeOptions) {
               conversationId: mention.conversationId,
               threadRootMessageId: mention.threadRootId,
               inReplyToMessageId: mention.messageId,
-              text: FAILURE_REPLY,
+              text: error instanceof TerminalTurnError ? error.reply : FAILURE_REPLY,
               idempotencyKey: `evt:${event.eventId}:failed`,
             },
             opts.signal,
@@ -233,6 +274,34 @@ export function createBridge(opts: BridgeOptions) {
       case AgentChannelEventTypes.configChanged:
         await refreshCell();
         return;
+      case AgentChannelEventTypes.providerAuthStart:
+      case AgentChannelEventTypes.providerAuthCancel:
+      case AgentChannelEventTypes.providerAuthRevoke: {
+        const auth = opts.subscriptions;
+        if (!auth) {
+          log.info?.(`seq=${frame.seq}: ${frame.type} ignored (subscription sign-in not available)`);
+          return;
+        }
+        if (frame.type === AgentChannelEventTypes.providerAuthStart) {
+          const parsed = ProviderAuthStartEvent.safeParse(frame.data);
+          // Runs in the background: a sign-in waits minutes for the human; mentions must keep flowing.
+          if (parsed.success) auth.handleStart(parsed.data);
+          else log.warn?.(`seq=${frame.seq}: invalid ${frame.type}; skipped`);
+        } else if (frame.type === AgentChannelEventTypes.providerAuthCancel) {
+          const parsed = ProviderAuthCancelEvent.safeParse(frame.data);
+          if (parsed.success) auth.handleCancel(parsed.data);
+        } else {
+          const parsed = ProviderAuthRevokeEvent.safeParse(frame.data);
+          if (parsed.success) {
+            await auth.handleRevoke(parsed.data).catch((error: unknown) => {
+              log.error?.(
+                `revoking ${parsed.data.provider} failed: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            });
+          }
+        }
+        return;
+      }
       default:
         log.info?.(`seq=${frame.seq}: ignoring unknown event type ${frame.type}`);
     }

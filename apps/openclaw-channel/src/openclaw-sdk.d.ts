@@ -78,3 +78,80 @@ declare module "openclaw/plugin-sdk/channel-core" {
 
   export function defineSetupPluginEntry<ResolvedAccount>(plugin: ChannelPlugin<ResolvedAccount>): unknown;
 }
+
+/**
+ * Provider sign-in flow (JS-only export of openclaw@2026.9.7 `package.json#exports`; the same helper
+ * OpenClaw's own channel `/login` command and Control UI use). Shapes copied from
+ * `dist/provider-auth-login-flow-runtime-*.mjs` + `dist/auth-*.mjs` (runModelsAuthLoginFlow) and verified
+ * against a real 2026.9.7 gateway (device code obtained from auth.openai.com). Re-check on every bump.
+ */
+declare module "openclaw/plugin-sdk/provider-auth-login-flow-runtime" {
+  export type LoginPrompter = {
+    intro(title?: string): Promise<void>;
+    outro(message?: string): Promise<void>;
+    note(message: string, title?: string): Promise<void>;
+    plain(message: string): Promise<void>;
+    deviceCode?(params: {
+      title?: string;
+      code: string;
+      expiresInMinutes: number;
+      message?: string;
+    }): Promise<void>;
+    select(params: { message: string; options: Array<{ value: string; label?: string }> }): Promise<string>;
+    multiselect(params: unknown): Promise<string[]>;
+    text(params: unknown): Promise<string>;
+    confirm(params: unknown): Promise<boolean>;
+    progress(message: string): { update(message: string): void; stop(message?: string): void };
+  };
+
+  export type LoginRuntime = {
+    log(...args: unknown[]): void;
+    error(...args: unknown[]): void;
+    exit(code: number): never;
+  };
+
+  export type ModelsAuthLoginFlowResult = {
+    providerId: string;
+    methodId: string;
+    authRefresh: "refreshed" | "gateway-rejected" | "gateway-unreachable";
+    defaultModel?: string;
+    profiles: Array<{ profileId: string; provider: string; mode: "api_key" | "oauth" | "token" }>;
+  };
+
+  export function runModelsAuthLoginFlow(params: {
+    provider: string;
+    method: string;
+    ownerPluginId: string;
+    /** Save the credential only; never change the default model. */
+    credentialOnly: boolean;
+    /** Agent whose auth store receives the credential (`main` = the shared store). */
+    agent: string;
+    config: Record<string, unknown>;
+    runtime: LoginRuntime;
+    prompter: LoginPrompter;
+    signal: AbortSignal;
+    /** true: the code is shown elsewhere (here: the OCW web UI); `openUrl` receives the verification URL. */
+    isRemote: boolean;
+    openUrl(url: string): Promise<void>;
+    assertCurrent?(): void;
+    beforePersistentEffect?(): void | Promise<void>;
+    onModelAccessRequested?(request: unknown): void;
+    refreshAfterLogin?(agentId: string): Promise<void>;
+  }): Promise<ModelsAuthLoginFlowResult>;
+
+  export function refreshProviderLoginAuthState(params: {
+    agentId: string;
+    readConfig(): Record<string, unknown>;
+    assertCurrent(config: Record<string, unknown>): void;
+  }): Promise<void>;
+}
+
+/** Public, typed `openclaw/plugin-sdk/provider-auth` (subset). */
+declare module "openclaw/plugin-sdk/provider-auth" {
+  export function removeProviderAuthProfilesWithLock(params: {
+    cfg?: Record<string, unknown>;
+    provider: string;
+    agentDir?: string;
+    profileIds?: string[];
+  }): Promise<unknown | null>;
+}
