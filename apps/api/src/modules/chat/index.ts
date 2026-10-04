@@ -23,6 +23,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { type ApiModule, authOf, type Core, tenant } from "../../core";
 import type { AgentMention, ThreadContext } from "../../lib/chat-agent-bridge";
 import { badRequest, conflict, forbidden, gone, notFound } from "../../lib/errors";
+import { channelResource, createPermissionService } from "../organization";
 import { authorOf, type Directory, loadDirectory } from "./directory";
 import { resolveMentions } from "./mentions";
 import {
@@ -56,6 +57,7 @@ export { resolveMentions } from "./mentions";
  */
 export function createChatModule(core: Core): ApiModule {
   const deps: ChatDeps = { audit: core.audit, realtime: core.realtime };
+  const perms = createPermissionService(core);
 
   // ---------------------------------------------------------------- realtime: conv:<id>
   core.realtime.registerTopicAuthorizer("conv", (auth, conversationId) =>
@@ -283,19 +285,27 @@ export function createChatModule(core: Core): ApiModule {
 
       app.post(
         "/channels/:id/archive",
-        { preHandler: requireUser, schema: { tags, params: IdParams, response: { 200: ChannelSummary } } },
+        {
+          config: { authz: "user" },
+          preHandler: requireUser,
+          schema: { tags, params: IdParams, response: { 200: ChannelSummary } },
+        },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
             const auth = authOf(req);
             const conv = await getChannel(tx, req.params.id);
-            if (!conv || !(await canRead(tx, conv, auth.userId))) throw notFound("Channel not found");
+            if (!conv) throw notFound("Channel not found");
+            const membership = await getMembership(tx, conv.id, "user", auth.userId);
+            const res = channelResource({
+              visibility: conv.visibility,
+              archived: conv.archivedAt !== null,
+              viewerRole: membership?.role ?? null,
+            });
+            // 404 when the channel is hidden from the caller; 403 with {permission, layer, reason} otherwise.
+            await perms.assertCan(req, tx, "channel.read", res, { hideAs404: true });
             if (conv.slug === GENERAL_SLUG)
               throw badRequest("#general cannot be archived", "default_channel");
-            const membership = await getMembership(tx, conv.id, "user", auth.userId);
-            const isAdmin = auth.role === "admin";
-            if (!isAdmin && membership?.role !== "owner") {
-              throw forbidden("Only the channel owner or an admin can archive it");
-            }
+            await perms.assertCan(req, tx, "channel.archive", res);
             if (!conv.archivedAt) {
               const [row] = await tx
                 .update(conversations)

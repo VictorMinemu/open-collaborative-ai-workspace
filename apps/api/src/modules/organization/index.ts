@@ -3,6 +3,39 @@ import { orgMembers, type Tx } from "@ocw/db";
 import { asc } from "drizzle-orm";
 import { type ApiModule, type Core, tenant } from "../../core";
 
+export { AuthzDeniedError } from "./permissions/errors";
+export type { PrincipalRef } from "./permissions/facts";
+export {
+  type ChannelFacts,
+  channelMemberResource,
+  channelResource,
+  deviceResource,
+  invitationResource,
+  memberResource,
+  orgResource,
+  unitResource,
+  userResource,
+  workSessionResource,
+} from "./permissions/policy";
+export type {
+  OnBehalfOf,
+  PrincipalFacts,
+  Relation,
+  Resolution,
+  ResourceFacts,
+  ResourceState,
+  ResourceType,
+  RuleFact,
+} from "./permissions/resolve";
+export {
+  createPermissionService,
+  type DecideOptions,
+  type PermissionService,
+  principalOf,
+  principalTenant,
+  recordAuthzDenial,
+} from "./permissions/service";
+
 /** Public interface for other modules: member lookups inside an existing tenant transaction. */
 export async function listMembers(tx: Tx): Promise<Member[]> {
   const rows = await tx.select().from(orgMembers).orderBy(asc(orgMembers.displayName));

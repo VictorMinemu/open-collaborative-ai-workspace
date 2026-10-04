@@ -28,7 +28,7 @@ import { createAuditService } from "./modules/audit";
 import { createChatModule } from "./modules/chat";
 import { createDeviceModule } from "./modules/device";
 import { createAuth, createIdentityModule, IdentityService } from "./modules/identity";
-import { createOrganizationModule } from "./modules/organization";
+import { AuthzDeniedError, createOrganizationModule, recordAuthzDenial } from "./modules/organization";
 import { createRealtimeModule, createRealtimeService } from "./modules/realtime";
 import { createSecretsModule, createSecretsService } from "./modules/secrets";
 import { createWorkSessionModule } from "./modules/work-session";
@@ -130,27 +130,33 @@ export async function buildApp(
   });
   await app.register(scalar, { routePrefix: "/docs" });
 
-  app.setErrorHandler((err: FastifyError & { body?: { code?: string; message?: string } }, req, reply) => {
-    if (err instanceof HttpError) {
-      return reply.status(err.statusCode).send({
-        error: { code: err.code, message: err.message, ...(err.details ? { details: err.details } : {}) },
-      });
-    }
-    if (hasZodFastifySchemaValidationErrors(err)) {
-      return reply.status(400).send({
-        error: { code: "validation_error", message: "Request validation failed", details: err.validation },
-      });
-    }
-    const status = typeof err.statusCode === "number" ? err.statusCode : 500;
-    if (status < 500) {
-      // better-auth APIError and Fastify client errors (rate limit, bad JSON, …)
-      const code = err.body?.code ?? err.code ?? "error";
-      const message = err.body?.message ?? err.message;
-      return reply.status(status).send({ error: { code: String(code).toLowerCase(), message } });
-    }
-    req.log.error({ err }, "unhandled error");
-    return reply.status(500).send({ error: { code: "internal", message: "Something went wrong" } });
-  });
+  app.setErrorHandler(
+    async (err: FastifyError & { body?: { code?: string; message?: string } }, req, reply) => {
+      if (err instanceof AuthzDeniedError && req.method !== "GET" && req.method !== "HEAD") {
+        // The request transaction already rolled back; the denial is audited in its own (Pitfall 4).
+        await recordAuthzDenial({ db, audit }, req, err);
+      }
+      if (err instanceof HttpError) {
+        return reply.status(err.statusCode).send({
+          error: { code: err.code, message: err.message, ...(err.details ? { details: err.details } : {}) },
+        });
+      }
+      if (hasZodFastifySchemaValidationErrors(err)) {
+        return reply.status(400).send({
+          error: { code: "validation_error", message: "Request validation failed", details: err.validation },
+        });
+      }
+      const status = typeof err.statusCode === "number" ? err.statusCode : 500;
+      if (status < 500) {
+        // better-auth APIError and Fastify client errors (rate limit, bad JSON, …)
+        const code = err.body?.code ?? err.code ?? "error";
+        const message = err.body?.message ?? err.message;
+        return reply.status(status).send({ error: { code: String(code).toLowerCase(), message } });
+      }
+      req.log.error({ err }, "unhandled error");
+      return reply.status(500).send({ error: { code: "internal", message: "Something went wrong" } });
+    },
+  );
 
   // ---------------------------------------------------------------- health
   app.get(

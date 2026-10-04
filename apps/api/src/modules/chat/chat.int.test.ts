@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AuthContext } from "../../core";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
+import { createPermissionService } from "../organization";
 import { listChannels } from "./service";
 
 let stack: TestStack;
@@ -386,5 +387,96 @@ describe("chat: channels", () => {
     });
     const leaked = await su.query("select count(*)::int as n from app.messages where body = 'pwned'");
     expect(leaked.rows[0].n).toBe(0);
+  });
+});
+
+describe("archive is decided by the resolver", () => {
+  const denials = async () =>
+    (
+      await su.query(
+        "select * from app.audit_events where action = 'authz.denied' and organization_id = $1 order by occurred_at",
+        [orgId],
+      )
+    ).rows;
+
+  it("an admin archives a channel created by someone else", async () => {
+    const theirs = await ok(alex.request("POST", "/api/v1/channels", { name: "alex-room" }));
+    const archived = await ok(admin.request("POST", `/api/v1/channels/${theirs.id}/archive`));
+    expect(archived.archivedAt).toBeTruthy();
+    const rows = await audit("channel.archived");
+    expect(rows.some((r) => r.resource_id === theirs.id && r.user_id === adminId)).toBe(true);
+  });
+
+  it("a developer archives the channel they own", async () => {
+    const mine = await ok(alex.request("POST", "/api/v1/channels", { name: "alex-own" }));
+    expect((await ok(alex.request("POST", `/api/v1/channels/${mine.id}/archive`))).archivedAt).toBeTruthy();
+  });
+
+  it("anyone else gets 403 with the denial, and the denial is audited after the rollback", async () => {
+    const adminRoom = await ok(admin.request("POST", "/api/v1/channels", { name: "admin-room" }));
+    await ok(alex.request("POST", `/api/v1/channels/${adminRoom.id}/join`));
+    const before = (await denials()).length;
+    const res = await alex.request("POST", `/api/v1/channels/${adminRoom.id}/archive`);
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({
+      error: {
+        code: "forbidden",
+        details: { permission: "channel.archive", layer: "role", reason: "missing_permission" },
+      },
+    });
+    const after = await denials();
+    expect(after).toHaveLength(before + 1);
+    expect(after.at(-1)).toMatchObject({
+      result: "denied",
+      user_id: alexId,
+      resource_type: "route",
+      resource_id: "/api/v1/channels/:id/archive",
+      metadata: {
+        permission: "channel.archive",
+        layer: "role",
+        reason: "missing_permission",
+        method: "POST",
+      },
+    });
+    const still = await su.query("select archived_at from app.conversations where id = $1", [adminRoom.id]);
+    expect(still.rows[0].archived_at).toBeNull();
+  });
+
+  it("a private channel the caller is not a member of is 404, for admins too", async () => {
+    const hidden = await ok(
+      alex.request("POST", "/api/v1/channels", { name: "alex-hidden", visibility: "private" }),
+    );
+    const res = await admin.request("POST", `/api/v1/channels/${hidden.id}/archive`);
+    expect(res.status).toBe(404);
+    expect(res.body).toMatchObject({ error: { code: "not_found" } });
+    expect(JSON.stringify(res.body)).not.toContain("private_channel");
+    const still = await su.query("select archived_at from app.conversations where id = $1", [hidden.id]);
+    expect(still.rows[0].archived_at).toBeNull();
+  });
+
+  it("a deactivated member is denied by the user layer", async () => {
+    const deeId = randomUUID();
+    await su.query("insert into auth.user (id, name, email) values ($1, 'Dee', $2)", [
+      deeId,
+      `${deeId}@example.test`,
+    ]);
+    await su.query(
+      `insert into app.org_members (organization_id, user_id, display_name, role, deactivated_at)
+       values ($1, $2, 'Dee', 'admin', now())`,
+      [orgId, deeId],
+    );
+    const { core } = stack.built;
+    const perms = createPermissionService(core);
+    const res = await core.db.withTenant({ organizationId: orgId, userId: adminId }, (tx) =>
+      perms.decide(tx, { kind: "user", userId: deeId }, "channel.read"),
+    );
+    expect(res).toEqual({
+      allowed: false,
+      denial: { permission: "channel.read", layer: "user", reason: "deactivated" },
+    });
+    const active = await core.db.withTenant({ organizationId: orgId, userId: adminId }, (tx) =>
+      perms.decide(tx, { kind: "user", userId: adminId }, "channel.archive"),
+    );
+    expect(active).toEqual({ allowed: true });
   });
 });
