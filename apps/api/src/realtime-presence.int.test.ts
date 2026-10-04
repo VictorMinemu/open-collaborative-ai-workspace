@@ -6,7 +6,12 @@ import { decodeJwt } from "jose";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import type { App } from "./core";
-import { createPresenceStore, createRealtimeModule, presenceKey } from "./modules/realtime";
+import {
+  createPresenceStore,
+  createRealtimeModule,
+  PRESENCE_RATE_LIMIT,
+  presenceKey,
+} from "./modules/realtime";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack, WEB_ORIGIN } from "./testing";
 
 /**
@@ -281,8 +286,11 @@ describe("away state (RT-04, 03-02 D-04)", () => {
   });
 });
 
-/** A second gateway on the stack's realtime/identity/bus with a fast heartbeat (100 ms) and TTL (300 ms). */
-async function miniGateway() {
+/**
+ * A second gateway on the stack's realtime/identity/bus with a fast heartbeat (100 ms) and TTL (300 ms), and
+ * optionally a shorter presence rate-limit window.
+ */
+async function miniGateway(opts: { rateLimit?: { max: number; windowMs: number } } = {}) {
   const mini = Fastify({ logger: false });
   await mini.register(websocket, {
     options: { handleProtocols: (p: Set<string>) => (p.has(WS_PROTOCOL) ? WS_PROTOCOL : false) },
@@ -293,7 +301,11 @@ async function miniGateway() {
     identity,
     bus,
     allowedOrigins: new Set([WEB_ORIGIN]),
-    presence: { heartbeatMs: HEARTBEAT, ttlMs: TTL },
+    presence: {
+      heartbeatMs: HEARTBEAT,
+      ttlMs: TTL,
+      ...(opts.rateLimit ? { rateLimit: opts.rateLimit } : {}),
+    },
   });
   await mini.register(async (scope) => module.register(scope as unknown as App));
   await mini.listen({ host: "127.0.0.1", port: 0 });
@@ -388,6 +400,76 @@ describe("presence expiry (RT-04, D-02)", () => {
       s.socket.close();
     } finally {
       await gw.close();
+    }
+  });
+});
+
+describe("presence rate limit (RT-04, 03-02 T-03-02-02)", () => {
+  it("31 changes inside the window: the 31st is refused with rate_limited and never fanned out; later changes apply again", async () => {
+    expect(PRESENCE_RATE_LIMIT).toEqual({ max: 30, windowMs: 10_000 });
+    const WINDOW = 1000;
+    const gw = await miniGateway({ rateLimit: { max: PRESENCE_RATE_LIMIT.max, windowMs: WINDOW } });
+    const a = await openSocket(gw.base, await admin.token());
+    const s = await openSocket(gw.base, await sam.token());
+    try {
+      const topic = `conv:${publicId}`;
+      await join(a, topic, adminId);
+      const sConn = await join(s, topic, samId);
+      await waitFor(() => deltaFor(a, topic, sConn, "online"));
+      const changes = () =>
+        presenceFrames(a, topic).filter(
+          (f) => !f.full && f.at >= t0 && f.entries?.some((e) => e.conn === sConn && e.state !== "offline"),
+        );
+
+      // Identical states never count: these 5 are ignored before the limiter.
+      for (let i = 0; i < 5; i++) s.send({ op: "presence", state: "online" });
+      const t0 = Date.now();
+      // 31 real changes in a burst: away, online, away, …, away (the 31st).
+      for (let i = 0; i < 31; i++) s.send({ op: "presence", state: i % 2 === 0 ? "away" : "online" });
+      await waitFor(() => s.frames.find((f) => f.op === "err" && f.code === "rate_limited"));
+      await waitFor(() => changes().length === 30);
+      await new Promise((r) => setTimeout(r, 200));
+      expect(changes()).toHaveLength(30);
+      expect(s.frames.filter((f) => f.op === "err" && f.code === "rate_limited")).toHaveLength(1);
+      // The refused change was not stored: Sam is still online (the 30th change).
+      const stored = await createPresenceStore({ bus: stack.built.core.bus }).snapshot(orgId, topic);
+      expect(stored.find((m) => m.conn === sConn)?.state).toBe("online");
+
+      // After the window, changes apply again.
+      await new Promise((r) => setTimeout(r, WINDOW + 50));
+      s.send({ op: "presence", state: "away" });
+      await waitFor(() => changes().length === 31);
+      expect(changes().at(-1)?.entries).toEqual([{ conn: sConn, userId: samId, state: "away" }]);
+      expect(s.frames.filter((f) => f.op === "err" && f.code === "rate_limited")).toHaveLength(1);
+    } finally {
+      a.socket.close();
+      s.socket.close();
+      await gw.close();
+    }
+  });
+
+  it("a malformed state is answered with bad_frame and changes nothing", async () => {
+    const topic = `conv:${publicId}`;
+    const a = await openSocket(stack.baseUrl, await admin.token());
+    const s = await openSocket(stack.baseUrl, await sam.token());
+    try {
+      await join(a, topic, adminId);
+      const sConn = await join(s, topic, samId);
+      await waitFor(() => deltaFor(a, topic, sConn, "online"));
+      const before = presenceFrames(a, topic).length;
+      for (const bad of [{ state: "busy" }, { state: "offline" }, {}, { state: 1 }]) {
+        s.send({ op: "presence", ...bad });
+      }
+      await waitFor(() => s.frames.filter((f) => f.op === "err" && f.code === "bad_frame").length === 4);
+      await new Promise((r) => setTimeout(r, 200));
+      expect(presenceFrames(a, topic)).toHaveLength(before);
+      const stored = await createPresenceStore({ bus: stack.built.core.bus }).snapshot(orgId, topic);
+      expect(stored.filter((m) => m.conn === sConn)).toEqual([
+        { conn: sConn, userId: samId, state: "online" },
+      ]);
+    } finally {
+      a.socket.close();
+      s.socket.close();
     }
   });
 });

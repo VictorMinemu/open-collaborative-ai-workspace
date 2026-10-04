@@ -4,7 +4,7 @@ import type { IdentityService } from "../identity";
 import { registerGateway } from "./gateway";
 import { createPresenceStore } from "./presence";
 
-export { SESSION_RECHECK_MS } from "./gateway";
+export { PRESENCE_RATE_LIMIT, SESSION_RECHECK_MS } from "./gateway";
 export {
   createPresenceStore,
   PRESENCE_HEARTBEAT_MS,
@@ -37,8 +37,11 @@ export function createRealtimeModule(deps: {
   bus: RedisBus;
   /** Open-socket session recheck interval (default 5 minutes; tests lower it). */
   sessionRecheckMs?: number;
-  /** Presence heartbeat and entry TTL (defaults 15 s / 45 s; tests lower them). */
-  presence?: { heartbeatMs?: number; ttlMs?: number };
+  /**
+   * Presence heartbeat, entry TTL and per-socket change limit (defaults 15 s / 45 s / PRESENCE_RATE_LIMIT; tests
+   * lower them).
+   */
+  presence?: { heartbeatMs?: number; ttlMs?: number; rateLimit?: { max: number; windowMs: number } };
 }): ApiModule {
   const store = createPresenceStore({ bus: deps.bus, ttlMs: deps.presence?.ttlMs });
   return {
@@ -52,6 +55,7 @@ export function createRealtimeModule(deps: {
         presence: store,
         sessionRecheckMs: deps.sessionRecheckMs,
         heartbeatMs: deps.presence?.heartbeatMs,
+        presenceRateLimit: deps.presence?.rateLimit,
       });
     },
   };

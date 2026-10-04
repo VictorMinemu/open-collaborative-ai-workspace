@@ -80,6 +80,32 @@ describe("createActivityMonitor (RT-04 away, D-04)", () => {
     expect(changes).toEqual([]);
   });
 
+  it("idle for 4 min 59 s stays online; at 5 min it is away", () => {
+    vi.useFakeTimers();
+    const { m, changes } = monitor();
+    vi.advanceTimersByTime(4 * 60_000 + 59_000);
+    expect(m.state).toBe("online");
+    expect(changes).toEqual([]);
+    vi.advanceTimersByTime(1000);
+    expect(m.state).toBe("away");
+    expect(changes).toEqual(["away"]);
+  });
+
+  it("hiding a tab that is already idle-away fires nothing; showing it again is online", () => {
+    vi.useFakeTimers();
+    const { m, changes } = monitor();
+    vi.advanceTimersByTime(5 * 60_000);
+    expect(changes).toEqual(["away"]);
+    m.visibility(true);
+    expect(changes).toEqual(["away"]);
+    m.visibility(false);
+    expect(m.state).toBe("online");
+    expect(changes).toEqual(["away", "online"]);
+    // Showing the tab restarted the idle timer.
+    vi.advanceTimersByTime(5 * 60_000);
+    expect(changes).toEqual(["away", "online", "away"]);
+  });
+
   it("timers are injectable", () => {
     const pending: Array<{ fn: () => void; ms: number }> = [];
     const cleared: unknown[] = [];
@@ -97,7 +123,9 @@ describe("createActivityMonitor (RT-04 away, D-04)", () => {
     pending[0]?.fn();
     expect(m.state).toBe("away");
     expect(changes).toEqual(["away"]);
+    m.activity(); // re-arms: timer #2
+    expect(m.state).toBe("online");
     m.dispose();
-    expect(cleared.length).toBeGreaterThanOrEqual(0);
+    expect(cleared).toEqual([2]);
   });
 });

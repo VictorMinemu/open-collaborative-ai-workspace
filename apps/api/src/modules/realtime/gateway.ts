@@ -34,11 +34,19 @@ interface Connection {
   socket: WebSocket;
   subs: Map<string, Subscription>;
   presenceState: "online" | "away";
+  /** Times of the presence changes applied in the current rate-limit window (sliding, oldest first). */
+  presenceChanges: number[];
   /** Liveness: set by every pong and client frame, cleared (with a ping) on every heartbeat tick. */
   alive: boolean;
   send(frame: ServerFrame): void;
   unsub(topic: string): Promise<void>;
 }
+
+/**
+ * At most `max` presence state changes per socket per `windowMs` are applied (D-04, T-03-02-02); identical states
+ * never count. A well-behaved client (500 ms throttle, 1 s input forwarding) stays far below it.
+ */
+export const PRESENCE_RATE_LIMIT = { max: 30, windowMs: 10_000 } as const;
 
 /** Backstop for revocations that never reached this instance (Redis down, expiry): Pitfall 5. */
 export const SESSION_RECHECK_MS = 5 * 60_000;
@@ -67,8 +75,11 @@ export function registerGateway(
     presence: PresenceStore;
     /** Presence refresh interval (default PRESENCE_HEARTBEAT_MS; tests lower it). */
     heartbeatMs?: number;
+    /** Presence change limit per socket (default PRESENCE_RATE_LIMIT; tests shorten the window). */
+    presenceRateLimit?: { max: number; windowMs: number };
   },
 ) {
+  const rateLimit = deps.presenceRateLimit ?? PRESENCE_RATE_LIMIT;
   const recheckMs = deps.sessionRecheckMs ?? SESSION_RECHECK_MS;
   const presence = deps.presence;
   // Open sockets of this API instance, so a revocation (Redis fan-out from any instance) closes them at once.
@@ -207,6 +218,7 @@ export function registerGateway(
         socket,
         subs,
         presenceState: "online",
+        presenceChanges: [],
         alive: true,
         send,
         unsub,
@@ -236,6 +248,14 @@ export function registerGateway(
       const setOwnState = async (to: "online" | "away") => {
         const from = conn.presenceState;
         if (to === from) return;
+        const now = Date.now();
+        const recent = conn.presenceChanges;
+        while (recent.length && (recent[0] as number) <= now - rateLimit.windowMs) recent.shift();
+        if (recent.length >= rateLimit.max) {
+          send({ op: "err", code: "rate_limited", message: "Too many presence changes" });
+          return;
+        }
+        recent.push(now);
         conn.presenceState = to;
         const updates: Promise<void>[] = [];
         for (const [topic, sub] of subs) {
