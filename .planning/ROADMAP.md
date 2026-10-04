@@ -100,7 +100,24 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. A single `resolveEffectivePermissions` intersection (Org ∩ Department ∩ Team ∩ Project ∩ User ∩ Agent ∩ Tool ∩ Device) with explicit-deny precedence decides every route, and every Phase 1 route (setup, invitations, channels, messages, bots, providers, devices, Work Zone, realtime subscription) is migrated to it with no ad-hoc role or membership check left
   4. API and WebSocket connections authenticate with short-lived JWTs verifiable against a JWKS endpoint; the Phase 1 cookie-authenticated WebSocket moves to short-lived JWT/JWKS verification without breaking reconnect and replay
   5. Users view and edit their own profile (display name, avatar, status) and see other members' profiles; hierarchy, role, membership, session-revocation and failed sign-in attempts are audited (same transaction where there is a domain write), closing the gaps left by the Phase 1 audit (SLICE-06); every later phase audits the sensitive actions it introduces
-**Plans**: TBD
+**Plans**: 15 plans in 5 waves (validation strategy: `02-VALIDATION.md`)
+
+Plans:
+- [ ] 02-01-PLAN.md — Wave 1: role switch owner/admin→admin, member→developer with no capability lost; phase schema (org_units, unit_memberships, permission_rules, session client columns, jwks); permission vocabulary contracts
+- [ ] 02-02-PLAN.md — Wave 2: resolveEffectivePermissions tracer (channel archive), every layer proven (matrix + fast-check), authz coverage registry, legacy guard, /me/permissions, web useCan and gated navigation
+- [ ] 02-03-PLAN.md — Wave 2: better-auth jwt plugin + JWKS, session client kind/label, cookie authenticate split, audit rows inherit session/client, revocation fan-out, wave-3 DTO contracts
+- [ ] 02-04-PLAN.md — Wave 3: chat (channels, messages, threads, bot replies, conv topic) on the resolver with viewerCan
+- [ ] 02-05-PLAN.md — Wave 3: devices and Work Zone (approvals with Tool layer, device.use, ws topic) on the resolver with viewerCan
+- [ ] 02-06-PLAN.md — Wave 3: hierarchy API (CRUD + move), unit memberships with leads, deny/allow rules API, org/user topics on the resolver
+- [ ] 02-07-PLAN.md — Wave 3: member directory and profiles, role changes with last-admin guard, deactivate/reactivate, Team-Lead invitations
+- [ ] 02-08-PLAN.md — Wave 3: JWT verification for REST (Bearer) and the browser WebSocket (subprotocol), revocation closes sockets, realtime-client token refresh
+- [ ] 02-09-PLAN.md — Wave 3: sessions list/revoke, password reset (SMTP or admin link), change password, profile API, failed sign-in and sign-out audit
+- [ ] 02-10-PLAN.md — Wave 4: bots, providers and the OpenClaw cell on the resolver (cell and agent principals, agent ∩ human)
+- [ ] 02-11-PLAN.md — Wave 4: Device Link device-JWT exchange in the daemon, legacy device token behind a flag until Phase 8
+- [ ] 02-12-PLAN.md — Wave 4: admin console › Members (roles, invitations, lifecycle, reset links, role matrix, profile sheet)
+- [ ] 02-13-PLAN.md — Wave 4: admin console › Organization (tree, create/rename/move/delete, unit members and leads, read-only rules)
+- [ ] 02-14-PLAN.md — Wave 4: account pages (Profile, Security sessions + change password, reset-password, forgot password)
+- [ ] 02-15-PLAN.md — Wave 5: strict authz coverage, AuthContext without role, clean guard, demo seed + DEMO.md, ADR-0007/0008, phase gate
 **Research:** needed (mapping flat better-auth orgs/teams onto the ltree hierarchy, oauthProvider/JWKS for WS and daemon verification; better-auth schema generation into Drizzle already exists from Phase 1)
 **UI hint**: yes
 
@@ -348,7 +365,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 ‖
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 1. MVP 0 — Collaborative Workspace Demo Slice | MVP 0 | built from 01-BUILD-SPEC.md (no plans) | Executed, demo-verified; formal verification pending | - |
-| 2. Identity and Organization | MVP 1 | 0/TBD | Not started | - |
+| 2. Identity and Organization | MVP 1 | 0/15 | Planned | - |
 | 3. Realtime Presence and Latency | MVP 1 | 0/TBD | Not started | - |
 | 4. Chat | MVP 1 | 0/TBD | Not started | - |
 | 5. Direct AI Chat | MVP 1 | 0/TBD | Not started | - |
