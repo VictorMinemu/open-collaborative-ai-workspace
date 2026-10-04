@@ -39,3 +39,12 @@ text = text.replaceAll(placeholder("POSTGRES_PASSWORD"), values.POSTGRES_PASSWOR
 writeFileSync(target, text, { mode: 0o600 });
 console.log(`Wrote ${target}`);
 console.log(`Setup token (paste it on /setup): ${values.OCW_SETUP_TOKEN}`);
+if (force) {
+  // The JWT signing keys in auth.jwks are encrypted with BETTER_AUTH_SECRET (docs/adr/0008).
+  console.log(
+    "BETTER_AUTH_SECRET was rotated: delete the auth.jwks rows of an existing database and restart",
+  );
+  console.log("the API (outstanding JWTs become invalid; clients fetch new ones).");
+}
+// OCW_ACCEPT_LEGACY_DEVICE_TOKEN (default true, see .env.example) keeps pre-Phase-2 desktop apps connecting
+// with their raw device token; set it to false once every desktop app is rebuilt (docs/DEMO.md).
