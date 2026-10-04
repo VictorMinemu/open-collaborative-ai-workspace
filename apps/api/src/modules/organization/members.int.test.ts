@@ -208,3 +208,169 @@ describe("members: role assignment (ORG-02, D-06)", () => {
     expect(untouched.rows[0].role).toBe("developer");
   });
 });
+
+describe("members: directory, profiles, deactivation (ORG-04, ORG-06)", () => {
+  const signIn = (c: TestClient, m: Joined) =>
+    c.request("POST", "/api/auth/sign-in/email", { email: m.email, password: m.password });
+
+  it("every member reads the directory with roles, units and status, and any member's profile", async () => {
+    const std = await join("standard", "Zed Standard");
+    const unit = randomUUID();
+    await su.query(
+      "insert into app.org_units (id, organization_id, kind, name, path) values ($1, $2, 'team', 'Support', ARRAY[$1]::uuid[])",
+      [unit, orgId],
+    );
+    await su.query(
+      "insert into app.unit_memberships (organization_id, unit_id, user_id, role) values ($1, $2, $3, 'member')",
+      [orgId, unit, std.userId],
+    );
+    const res = await std.client.request("GET", "/api/v1/members");
+    expect(res.status).toBe(200);
+    const members = res.body!.members as Array<Record<string, unknown>>;
+    const names = members.map((m) => m.displayName as string);
+    expect(names).toEqual([...names].sort((a, b) => a.localeCompare(b)));
+    const me = members.find((m) => m.userId === std.userId);
+    expect(me).toMatchObject({
+      role: "standard",
+      status: "active",
+      statusEmoji: null,
+      statusText: null,
+      units: [{ unitId: unit, name: "Support", kind: "team", role: "member" }],
+    });
+    expect(members.find((m) => m.userId === adminId)).toMatchObject({ role: "admin", units: [] });
+
+    const profile = await std.client.request("GET", `/api/v1/members/${adminId}`);
+    expect(profile.status).toBe(200);
+    expect(profile.body).toMatchObject({ userId: adminId, displayName: ADMIN.name, role: "admin" });
+    expect((await std.client.request("GET", `/api/v1/members/${randomUUID()}`)).status).toBe(404);
+    expect((await new TestClient(stack.baseUrl).request("GET", "/api/v1/members")).status).toBe(401);
+  });
+
+  it("deactivation ends sessions and sign-in, keeps the member in the directory; reactivation restores access", async () => {
+    const dev = await join("developer", "Dee Deactivated");
+    const second = new TestClient(stack.baseUrl);
+    expect((await signIn(second, dev)).status).toBe(200);
+    const sid = ((await dev.client.request("GET", "/api/v1/me")).body as { sessionId: string }).sessionId;
+    expect(sid).toBeTruthy();
+    const sessions = async () =>
+      Number(
+        (await su.query("select count(*)::int as n from auth.session where user_id = $1", [dev.userId]))
+          .rows[0].n,
+      );
+    expect(await sessions()).toBe(2);
+
+    const res = await admin.request("POST", `/api/v1/members/${dev.userId}/deactivate`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ userId: dev.userId, status: "deactivated" });
+
+    expect((await dev.client.request("GET", "/api/v1/me")).status).toBe(401);
+    expect((await second.request("GET", "/api/v1/me")).status).toBe(401);
+    expect(await sessions()).toBe(0);
+    expect(await stack.built.core.realtime.isSessionRevoked(sid)).toBe(true);
+    expect((await signIn(new TestClient(stack.baseUrl), dev)).status).toBe(401);
+
+    const audit = (await auditRows("member.deactivated")).filter((r) => r.resource_id === dev.userId);
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ user_id: adminId });
+    const ev = await su.query(
+      "select payload from app.stream_events where stream_id = $1 and type = 'member.updated' order by seq desc limit 1",
+      [`org:${orgId}`],
+    );
+    expect(ev.rows[0].payload).toEqual({ userId: dev.userId, changed: ["status"] });
+
+    const directory = (await admin.request("GET", "/api/v1/members")).body!.members as Array<
+      Record<string, unknown>
+    >;
+    expect(directory.find((m) => m.userId === dev.userId)).toMatchObject({
+      displayName: "Dee Deactivated",
+      status: "deactivated",
+    });
+
+    const again = await admin.request("POST", `/api/v1/members/${dev.userId}/deactivate`);
+    expect(again.status).toBe(409);
+    expect(again.body).toMatchObject({ error: { code: "already_deactivated" } });
+
+    const back = await admin.request("POST", `/api/v1/members/${dev.userId}/reactivate`);
+    expect(back.status).toBe(200);
+    expect(back.body).toMatchObject({ status: "active" });
+    const fresh = new TestClient(stack.baseUrl);
+    expect((await signIn(fresh, dev)).status).toBe(200);
+    expect((await fresh.request("GET", "/api/v1/me")).status).toBe(200);
+    expect((await auditRows("member.reactivated")).some((r) => r.resource_id === dev.userId)).toBe(true);
+    const twice = await admin.request("POST", `/api/v1/members/${dev.userId}/reactivate`);
+    expect(twice.status).toBe(409);
+    expect(twice.body).toMatchObject({ error: { code: "not_deactivated" } });
+  });
+
+  it("refuses self-deactivation and non-admins", async () => {
+    const self = await admin.request("POST", `/api/v1/members/${adminId}/deactivate`);
+    expect(self.status).toBe(400);
+    expect(self.body).toMatchObject({ error: { code: "cannot_deactivate_self" } });
+
+    const lead = await join("lead");
+    const before = (await auditRows("authz.denied")).length;
+    expect((await lead.client.request("POST", `/api/v1/members/${adminId}/deactivate`)).status).toBe(403);
+    expect((await lead.client.request("POST", `/api/v1/members/${lead.userId}/reactivate`)).status).toBe(403);
+    expect((await auditRows("authz.denied")).length).toBe(before + 2);
+    expect((await admin.request("POST", `/api/v1/members/${randomUUID()}/deactivate`)).status).toBe(404);
+  });
+
+  it("two admins deactivating each other at once leave exactly one active admin (409 last_admin under the lock)", async () => {
+    // Leave exactly two active admins: the original and a fresh one.
+    const directory = (await admin.request("GET", "/api/v1/members")).body!.members as Array<{
+      userId: string;
+      role: string;
+      status: string;
+    }>;
+    for (const m of directory.filter((d) => d.role === "admin" && d.userId !== adminId)) {
+      expect(
+        (await admin.request("PATCH", `/api/v1/members/${m.userId}/role`, { role: "developer" })).status,
+      ).toBe(200);
+    }
+    const other = await join("admin");
+
+    // Hold the admin rows so both requests pass authorization and then queue on the last-admin lock.
+    const holder = new pg.Client({ connectionString: stack.db.superuserUrl });
+    await holder.connect();
+    await holder.query("begin");
+    await holder.query(
+      "select user_id from app.org_members where organization_id = $1 and role = 'admin' and deactivated_at is null for update",
+      [orgId],
+    );
+    const pending = Promise.all([
+      admin.request("POST", `/api/v1/members/${other.userId}/deactivate`),
+      other.client.request("POST", `/api/v1/members/${adminId}/deactivate`),
+    ]);
+    const waiting = async () =>
+      Number(
+        (
+          await su.query(
+            "select count(*)::int as n from pg_stat_activity where wait_event_type = 'Lock' and query ilike '%org_members%for update%'",
+          )
+        ).rows[0].n,
+      );
+    for (let i = 0; i < 200 && (await waiting()) < 2; i++) await new Promise((r) => setTimeout(r, 25));
+    expect(await waiting()).toBe(2);
+    await holder.query("commit");
+    await holder.end();
+
+    const [a, b] = await pending;
+    const loser = [a, b].find((r) => r.status !== 200);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    expect(loser!.body).toMatchObject({ error: { code: "last_admin" } });
+    const active = await su.query(
+      "select user_id from app.org_members where organization_id = $1 and role = 'admin' and deactivated_at is null",
+      [orgId],
+    );
+    expect(active.rows).toHaveLength(1);
+
+    // Restore the original admin for later tests.
+    const survivor = active.rows[0].user_id === adminId ? admin : other.client;
+    const loserId = active.rows[0].user_id === adminId ? other.userId : adminId;
+    expect((await survivor.request("POST", `/api/v1/members/${loserId}/reactivate`)).status).toBe(200);
+    if (loserId === adminId) {
+      admin = new TestClient(stack.baseUrl);
+      expect((await signIn(admin, { ...ADMIN, client: admin, userId: adminId })).status).toBe(200);
+    }
+  });
+});

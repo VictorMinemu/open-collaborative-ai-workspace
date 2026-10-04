@@ -2,7 +2,7 @@ import {
   EventTypes,
   type Member,
   MemberDetail,
-  MemberList,
+  MemberDetailList,
   type MemberUnitRef,
   type OrgRole,
   UpdateMemberRoleRequest,
@@ -11,7 +11,7 @@ import {
 import { orgMembers, orgUnits, type Tx, unitMemberships } from "@ocw/db";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { type App, authOf, type Core, tenant } from "../../core";
-import { conflict, notFound } from "../../lib/errors";
+import { badRequest, conflict, notFound } from "../../lib/errors";
 import { memberResource } from "./permissions/policy";
 import type { PermissionService } from "./permissions/service";
 
@@ -112,9 +112,92 @@ export function registerMemberRoutes(app: App, core: Core, perms: PermissionServ
     {
       config: { authz: "user" },
       preHandler: [core.identity.requireUser, perms.requirePermission("member.read")],
-      schema: { tags: ["organization"], response: { 200: MemberList } },
+      // Superset of MemberList: clients that parse MemberList keep working.
+      schema: { tags: ["organization"], response: { 200: MemberDetailList } },
     },
-    async (req) => ({ members: await core.db.withTenant(tenant(req), listMembers) }),
+    async (req) => ({ members: await core.db.withTenant(tenant(req), (tx) => loadMemberDetails(tx)) }),
+  );
+
+  /** ORG-06: any member's profile (role, units, status). */
+  app.get(
+    "/members/:userId",
+    {
+      config: { authz: "user" },
+      preHandler: [core.identity.requireUser, perms.requirePermission("member.read")],
+      schema: { tags: ["organization"], params: UserIdParams, response: { 200: MemberDetail } },
+    },
+    async (req) => core.db.withTenant(tenant(req), (tx) => memberDetail(tx, req.params.userId)),
+  );
+
+  /**
+   * Deactivation keeps the member's history but ends access: authenticate and the resolver reject them from
+   * the commit on; their sessions are deleted and the revocation is fanned out after the commit.
+   */
+  app.post(
+    "/members/:userId/deactivate",
+    {
+      config: { authz: "user" },
+      preHandler: core.identity.requireUser,
+      schema: { tags: ["organization"], params: UserIdParams, response: { 200: MemberDetail } },
+    },
+    async (req) => {
+      const auth = authOf(req);
+      const { userId } = req.params;
+      return core.db.withTenant(tenant(req), async (tx, afterCommit) => {
+        await perms.assertCan(req, tx, "member.manage", memberResource(userId, auth.userId));
+        const target = await memberRow(tx, userId);
+        if (userId === auth.userId)
+          throw badRequest("You cannot deactivate yourself", "cannot_deactivate_self");
+        if (target.deactivatedAt) throw conflict("This member is already deactivated", "already_deactivated");
+        if (target.role === GOVERNING_ROLE) await assertNotLastAdmin(tx, userId);
+        await tx.update(orgMembers).set({ deactivatedAt: sql`now()` }).where(eq(orgMembers.userId, userId));
+        await core.audit.record(tx, {
+          action: "member.deactivated",
+          resourceType: "member",
+          resourceId: userId,
+          metadata: { userId },
+        });
+        await core.realtime.appendEvent(tx, `org:${auth.organizationId}`, EventTypes.memberUpdated, {
+          userId,
+          changed: ["status"],
+        });
+        afterCommit(async () => {
+          const sessionIds = await core.identity.sessions.deleteAllForUser(userId);
+          await core.realtime.publishRevocation({ sessionIds, userId, reason: "deactivated" });
+        });
+        return memberDetail(tx, userId);
+      });
+    },
+  );
+
+  app.post(
+    "/members/:userId/reactivate",
+    {
+      config: { authz: "user" },
+      preHandler: core.identity.requireUser,
+      schema: { tags: ["organization"], params: UserIdParams, response: { 200: MemberDetail } },
+    },
+    async (req) => {
+      const auth = authOf(req);
+      const { userId } = req.params;
+      return core.db.withTenant(tenant(req), async (tx) => {
+        await perms.assertCan(req, tx, "member.manage", memberResource(userId, auth.userId));
+        const target = await memberRow(tx, userId);
+        if (!target.deactivatedAt) throw conflict("This member is active", "not_deactivated");
+        await tx.update(orgMembers).set({ deactivatedAt: null }).where(eq(orgMembers.userId, userId));
+        await core.audit.record(tx, {
+          action: "member.reactivated",
+          resourceType: "member",
+          resourceId: userId,
+          metadata: { userId },
+        });
+        await core.realtime.appendEvent(tx, `org:${auth.organizationId}`, EventTypes.memberUpdated, {
+          userId,
+          changed: ["status"],
+        });
+        return memberDetail(tx, userId);
+      });
+    },
   );
 
   /** ORG-02 / D-06: an admin assigns any of the four PRD roles; effective on the member's next request. */
