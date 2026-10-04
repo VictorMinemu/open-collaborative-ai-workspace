@@ -14,8 +14,20 @@ export type PrincipalKind = z.infer<typeof PrincipalKind>;
 export const MemberKind = z.enum(["user", "agent"]);
 export type MemberKind = z.infer<typeof MemberKind>;
 
-export const OrgRole = z.enum(["owner", "admin", "member"]);
+/**
+ * The four PRD organization roles (PRD §7), cumulative: standard ⊂ developer ⊂ lead ⊂ admin.
+ * Stored in `app.org_members.role` (the single source of truth; better-auth's member role is existence only).
+ */
+export const OrgRole = z.enum(["standard", "developer", "lead", "admin"]);
 export type OrgRole = z.infer<typeof OrgRole>;
+
+/** User-facing names of the organization roles. */
+export const ROLE_LABELS: Record<OrgRole, string> = {
+  standard: "Standard User",
+  developer: "Developer",
+  lead: "Team Lead",
+  admin: "Organization Admin",
+};
 
 export const ClientKind = z.enum(["web", "desktop", "mobile", "agent", "system"]);
 export type ClientKind = z.infer<typeof ClientKind>;

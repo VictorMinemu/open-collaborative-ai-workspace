@@ -1,7 +1,9 @@
 import { sql } from "drizzle-orm";
 import {
+  type AnyPgColumn,
   bigint,
   boolean,
+  check,
   index,
   integer,
   jsonb,
@@ -44,10 +46,98 @@ export const orgMembers = appSchema.table(
     displayName: text("display_name").notNull(),
     email: text("email"),
     avatarUrl: text("avatar_url"),
-    role: text("role", { enum: ["owner", "admin", "member"] }).notNull(),
+    /** The four PRD roles (D-06); the single source of truth for a member's organization role. */
+    role: text("role", { enum: ["standard", "developer", "lead", "admin"] }).notNull(),
+    /** Profile status (ORG-06): optional emoji + short text, clearable. */
+    statusEmoji: text("status_emoji"),
+    statusText: text("status_text"),
+    /** Set when an admin deactivates the member: no sign-in, every permission denied. */
+    deactivatedAt: ts("deactivated_at"),
     joinedAt: createdAt(),
   },
-  (t) => [primaryKey({ columns: [t.organizationId, t.userId] })],
+  (t) => [
+    primaryKey({ columns: [t.organizationId, t.userId] }),
+    check("org_members_role_check", sql`${t.role} in ('standard','developer','lead','admin')`),
+  ],
+);
+
+/**
+ * Organization hierarchy (D-07): departments, teams and hierarchy projects. `app.projects` keeps meaning
+ * "a repository registered on a device"; hierarchy projects are `kind = 'project'` rows here.
+ */
+export const orgUnits = appSchema.table(
+  "org_units",
+  {
+    id: id(),
+    organizationId: orgId(),
+    /** null = top level (child of the organization root). */
+    parentId: uuid("parent_id").references((): AnyPgColumn => orgUnits.id, { onDelete: "restrict" }),
+    kind: text("kind", { enum: ["department", "team", "project"] }).notNull(),
+    name: text("name").notNull(),
+    /** Ancestor ids root→self (self last). Maintained only by organization/units.ts under the org lock. */
+    path: uuid("path").array().notNull(),
+    createdBy: uuid("created_by"),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("org_units_parent_idx").on(t.organizationId, t.parentId),
+    index("org_units_path_gin").using("gin", t.path),
+    // NULLS NOT DISTINCT (top-level siblings collide too) is hand-added in the identity_org migration:
+    // drizzle 1.0.0-rc.4 has no builder for it.
+    uniqueIndex("org_units_sibling_name_uq").on(t.organizationId, t.parentId, sql`lower(${t.name})`),
+    check("org_units_kind_check", sql`${t.kind} in ('department','team','project')`),
+  ],
+);
+
+/** Unit membership (D-06): `lead` grants unit.members.manage on the unit subtree. */
+export const unitMemberships = appSchema.table(
+  "unit_memberships",
+  {
+    organizationId: orgId(),
+    unitId: uuid("unit_id")
+      .notNull()
+      .references(() => orgUnits.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    role: text("role", { enum: ["member", "lead"] })
+      .notNull()
+      .default("member"),
+    addedBy: uuid("added_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.unitId, t.userId] }),
+    index("unit_memberships_user_idx").on(t.organizationId, t.userId),
+    check("unit_memberships_role_check", sql`${t.role} in ('member','lead')`),
+  ],
+);
+
+/** Explicit allow/deny rules (D-02). Deny beats allow; allow never grants a non-delegable permission. */
+export const permissionRules = appSchema.table(
+  "permission_rules",
+  {
+    id: id(),
+    organizationId: orgId(),
+    /** null = the whole organization; otherwise the unit subtree. */
+    scopeUnitId: uuid("scope_unit_id").references(() => orgUnits.id, { onDelete: "cascade" }),
+    subjectKind: text("subject_kind", { enum: ["everyone", "role", "user", "agent"] }).notNull(),
+    /** Role name, user id or agent id; null for `everyone`. */
+    subjectId: text("subject_id"),
+    /** Exact permission or `prefix.*`. */
+    permission: text("permission").notNull(),
+    /** Tool layer: restricts the rule to one tool (e.g. a Work Zone tool name); null = any. */
+    tool: text("tool"),
+    effect: text("effect", { enum: ["allow", "deny"] }).notNull(),
+    createdBy: uuid("created_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("permission_rules_org_idx").on(t.organizationId),
+    check("permission_rules_subject_kind_check", sql`${t.subjectKind} in ('everyone','role','user','agent')`),
+    check("permission_rules_effect_check", sql`${t.effect} in ('allow','deny')`),
+  ],
 );
 
 // ---------------------------------------------------------------- audit

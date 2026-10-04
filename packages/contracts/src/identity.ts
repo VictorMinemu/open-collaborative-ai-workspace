@@ -48,7 +48,7 @@ export type InvitationStatus = z.infer<typeof InvitationStatus>;
 
 export const CreateInvitationRequest = z.object({
   email: Email,
-  role: z.enum(["admin", "member"]).default("member"),
+  role: OrgRole.default("developer"),
 });
 export type CreateInvitationRequest = z.infer<typeof CreateInvitationRequest>;
 

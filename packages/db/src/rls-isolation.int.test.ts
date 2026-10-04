@@ -34,8 +34,22 @@ async function seedOrg(c: pg.Client, org: string) {
   ]);
   await q("insert into auth.user (id, name, email) values ($1, 'U', $2)", [user, `${user}@example.test`]);
   await q(
-    "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'U', 'owner')",
+    "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'U', 'admin')",
     [org, user],
+  );
+  const unit = randomUUID();
+  await q(
+    "insert into app.org_units (id, organization_id, kind, name, path) values ($1, $2, 'department', 'Engineering', ARRAY[$1]::uuid[])",
+    [unit, org],
+  );
+  await q("insert into app.unit_memberships (organization_id, unit_id, user_id) values ($1, $2, $3)", [
+    org,
+    unit,
+    user,
+  ]);
+  await q(
+    "insert into app.permission_rules (organization_id, subject_kind, permission, effect) values ($1, 'everyone', 'channel.create', 'deny')",
+    [org],
   );
   await q(
     "insert into app.audit_events (organization_id, actor_kind, actor_id, resource_type, action, result) values ($1, 'user', $2, 'org', 'test.seed', 'success')",
@@ -171,7 +185,7 @@ describe("tenant isolation (RLS)", () => {
 
   it("cross-tenant reads return 0 rows and writes fail, for every org-scoped table", async () => {
     const tables = await orgScopedTables();
-    expect(tables.length).toBeGreaterThanOrEqual(17);
+    expect(tables.length).toBeGreaterThanOrEqual(20);
     for (const { tbl } of tables) {
       const seeded = await migrator.query(
         `select count(*)::int as n from ${tbl} where organization_id = $1`,

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { Id, IsoDateTime } from "./common";
+import { Permission } from "./permissions";
 import { RuntimeId } from "./session-events";
 
 export const DevicePlatform = z.enum(["darwin", "linux", "win32"]);
@@ -31,8 +32,14 @@ export const Device = z.object({
   projectCount: z.number().int().nonnegative(),
   revokedAt: IsoDateTime.nullable(),
   createdAt: IsoDateTime,
+  /** Permissions the caller holds on this resource, decided by the API resolver (UI gating only). */
+  viewerCan: z.array(Permission).optional(),
 });
 export type Device = z.infer<typeof Device>;
+
+/** `POST /api/v1/devices/token`: a 10-minute device JWT exchanged for the long-lived device token (D-03). */
+export const DeviceAccessToken = z.object({ token: z.string(), expiresAt: IsoDateTime });
+export type DeviceAccessToken = z.infer<typeof DeviceAccessToken>;
 
 export const DeviceList = z.object({ devices: z.array(Device) });
 export type DeviceList = z.infer<typeof DeviceList>;

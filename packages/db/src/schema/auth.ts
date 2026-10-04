@@ -32,6 +32,10 @@ export const session = authSchema.table(
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
     activeOrganizationId: uuid("active_organization_id"),
+    /** AUTH-05: web | desktop | mobile, derived at sign-in; never client-settable. */
+    clientKind: text("client_kind"),
+    /** AUTH-05: human label such as "Chrome on macOS". */
+    clientLabel: text("client_label"),
   },
   (t) => [index("session_user_idx").on(t.userId)],
 );
@@ -112,6 +116,17 @@ export const invitation = authSchema.table(
   },
   (t) => [index("invitation_org_idx").on(t.organizationId)],
 );
+
+/** better-auth `jwt` plugin key store (AUTH-06). Private keys are encrypted with BETTER_AUTH_SECRET. */
+export const jwks = authSchema.table("jwks", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  publicKey: text("public_key").notNull(),
+  privateKey: text("private_key").notNull(),
+  createdAt: ts("created_at").notNull().defaultNow(),
+  expiresAt: ts("expires_at"),
+  alg: text("alg"),
+  crv: text("crv"),
+});
 
 /** Singleton row: the one-time setup token has been redeemed. */
 export const instanceSetup = authSchema.table("instance_setup", {

@@ -1,0 +1,1 @@
+ALTER TABLE "app"."org_members" ADD CONSTRAINT "org_members_role_check" CHECK ("role" in ('standard','developer','lead','admin'));

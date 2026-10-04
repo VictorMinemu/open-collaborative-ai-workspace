@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ClientKind, Id, IsoDateTime, MemberKind, PrincipalKind } from "./common";
+import { Permission } from "./permissions";
 
 /** Unified conversation model. Every conversational surface is a conversation of one of these kinds. */
 export const ConversationKind = z.enum(["channel", "dm", "group", "ai_chat", "thread", "work_session"]);
@@ -106,6 +107,8 @@ export const ChannelSummary = Conversation.extend({
   lastMessageAt: IsoDateTime.nullable(),
   /** The org-wide default channel (`#general`): everyone is a member and nobody can leave it. */
   isDefault: z.boolean(),
+  /** Permissions the caller holds on this resource, decided by the API resolver (UI gating only). */
+  viewerCan: z.array(Permission).optional(),
 });
 export type ChannelSummary = z.infer<typeof ChannelSummary>;
 
