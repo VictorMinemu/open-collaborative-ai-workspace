@@ -1,13 +1,13 @@
 "use client";
 
 import type { OrgUnit, UnitKind } from "@ocw/contracts";
-import { ArrowRight, MousePointerClick, Network, Plus } from "lucide-react";
+import { ArrowRight, MousePointerClick, Network, Plus, X } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EmptyState } from "@/components/common/empty-state";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
 import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import { Sheet, SheetClose, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useUnits, useUnitsLive } from "@/lib/org-queries";
@@ -89,6 +89,8 @@ export function OrgStructure() {
   );
 
   const sheetUnit = selected ?? lastSelected.current;
+  // The sheet focuses its content on open, not the first button (no stray focus ring on the close button).
+  const sheetBody = useRef<HTMLDivElement>(null);
 
   return (
     <UnitDialogsProvider tree={tree} onCreated={onCreated} onMoved={expandPath} onDeleted={onDeleted}>
@@ -114,6 +116,12 @@ export function OrgStructure() {
                   onSelect={select}
                   onToggle={toggle}
                 />
+                {isLg ? null : (
+                  <p className="text-balance px-2 pt-4 text-center text-muted-foreground text-xs">
+                    Tap a department, team or project to see its people
+                    {canCreateTop ? " and manage it" : ""}.
+                  </p>
+                )}
               </div>
             </section>
             {isLg ? (
@@ -128,19 +136,43 @@ export function OrgStructure() {
               </div>
             ) : (
               <Sheet open={selected !== null} onOpenChange={(open) => !open && select(null)}>
-                <SheetContent side="bottom" data-testid="unit-sheet">
+                <SheetContent
+                  side="bottom"
+                  showClose={false}
+                  data-testid="unit-sheet"
+                  initialFocus={sheetBody}
+                  // A dialog opened from inside the sheet (Add people, Remove) is nested: dim the sheet too.
+                  className="after:pointer-events-none after:absolute after:inset-0 after:rounded-t-2xl after:bg-black/40 after:opacity-0 after:transition-opacity after:duration-200 data-nested-dialog-open:after:opacity-100"
+                >
                   <div
                     aria-hidden
                     className="mx-auto mt-2.5 h-1 w-10 shrink-0 rounded-full bg-muted-foreground/25"
                   />
-                  <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-4 pt-4 pb-10 sm:px-6">
+                  <div
+                    ref={sheetBody}
+                    tabIndex={-1}
+                    className="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-4 pt-4 pb-10 outline-none sm:px-6"
+                  >
                     {sheetUnit ? (
                       <UnitDetail
                         unit={sheetUnit}
                         tree={tree}
                         onSelect={select}
                         titleAs={SheetTitle}
-                        inSheet
+                        closeButton={
+                          <SheetClose
+                            render={
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                aria-label="Close"
+                                className="size-10 text-muted-foreground"
+                              />
+                            }
+                          >
+                            <X />
+                          </SheetClose>
+                        }
                       />
                     ) : null}
                   </div>
@@ -179,14 +211,14 @@ function NewDepartmentButton({ size = "sm" }: { size?: "sm" | "default" }) {
 
 function StructureHeader({ tree, canCreate }: { tree: UnitTreeModel; canCreate: boolean }) {
   return (
-    <div className="flex items-center justify-between gap-3 px-4 pt-5 pb-3 sm:px-5 lg:px-4 lg:pt-4">
-      <div className="min-w-0">
+    <div className="px-4 pt-5 pb-3 sm:px-5 lg:px-4 lg:pt-4">
+      <div className="flex min-h-8 items-center justify-between gap-3">
         <h2 className="font-semibold text-[15px] tracking-tight">Structure</h2>
-        <p className="truncate text-muted-foreground text-xs" data-testid="org-summary">
-          {summary(tree)}
-        </p>
+        {canCreate ? <NewDepartmentButton /> : null}
       </div>
-      {canCreate ? <NewDepartmentButton /> : null}
+      <p className="mt-0.5 text-muted-foreground text-xs" data-testid="org-summary">
+        {summary(tree)}
+      </p>
     </div>
   );
 }

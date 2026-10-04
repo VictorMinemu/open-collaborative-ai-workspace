@@ -111,6 +111,20 @@ async function createUnit(page: Page, name: string) {
   await expect(row(page, name)).toBeVisible();
 }
 
+/**
+ * Review capture (D-09) when OCW_E2E_SCREENSHOT_DIR is set: waits until toasts are gone, then saves the view
+ * in light and in dark (`<name>-dark`). A no-op in normal runs.
+ */
+async function review(page: Page, name: string) {
+  if (!process.env.OCW_E2E_SCREENSHOT_DIR) return;
+  await page.mouse.move(1, 1);
+  await expect(page.locator("[data-sonner-toast]")).toHaveCount(0, { timeout: 10_000 });
+  await shot(page, name);
+  await page.emulateMedia({ colorScheme: "dark" });
+  await shot(page, `${name}-dark`);
+  await page.emulateMedia({ colorScheme: "light" });
+}
+
 test.describe.configure({ mode: "serial" });
 
 const names = (project: string) => {
@@ -141,7 +155,7 @@ test("admin builds Department → Team → Project from the empty state; a Devel
   await openOrganization(page, mobile);
   await expect(page.getByText("Mirror how your company is organised")).toBeVisible();
   await expect(page.getByTestId("new-department").filter({ visible: true })).toBeInViewport();
-  await shot(page, `org-empty-${project}`);
+  await review(page, `org-empty-${project}`);
 
   // Department, then a team inside it, then a project inside the team.
   await page.getByTestId("new-department").filter({ visible: true }).first().click();
@@ -166,7 +180,7 @@ test("admin builds Department → Team → Project from the empty state; a Devel
   );
   await page.getByTestId("unit-dialog").getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByTestId("unit-dialog")).toBeHidden();
-  await shot(page, `org-tree-${project}`);
+  await review(page, `org-tree-${project}`);
 
   // A Developer sees the same tree without any create or edit control.
   const dev = await signIn(browser, ALEX, project);
@@ -253,7 +267,7 @@ test("admin renames, moves, deletes and staffs units; a Team Lead staffs only th
   await expect(move.locator(`[data-target="${platform.id}"]`)).toBeEnabled();
   await move.locator(`[data-target="${marketing.id}"]`).click();
   await expect(move.locator(`[data-target="${marketing.id}"]`)).toHaveAttribute("aria-checked", "true");
-  await shot(page, `org-move-${project}`);
+  await review(page, `org-move-${project}`);
   await move.getByTestId("move-submit").click();
   await expect(move).toBeHidden();
   await expect(page.getByTestId("unit-detail").getByRole("navigation")).toContainText(N.marketing);
@@ -284,7 +298,7 @@ test("admin renames, moves, deletes and staffs units; a Team Lead staffs only th
   const addDialog = page.getByTestId("add-people-dialog");
   await expect(addDialog.getByTestId("add-person").filter({ hasText: LENA.name })).toBeVisible();
   await expect(addDialog.getByTestId("add-person").filter({ hasText: ALEX.name })).toBeVisible();
-  await shot(page, `org-add-people-${project}`);
+  await review(page, `org-add-people-${project}`);
   await addDialog.getByTestId("add-people-search").fill("lena");
   await expect(addDialog.getByTestId("add-person")).toHaveCount(1);
   await addDialog.getByTestId("add-person").filter({ hasText: LENA.name }).click();
@@ -308,8 +322,7 @@ test("admin renames, moves, deletes and staffs units; a Team Lead staffs only th
   await expect(rules.getByTestId("unit-rule")).toContainText("channel.archive");
   await expect(rules.getByTestId("unit-rule")).toContainText("Developer");
   await expect(rules.getByTestId("unit-rule")).toHaveAttribute("data-effect", "deny");
-  await page.mouse.move(0, 0);
-  await shot(page, `org-unit-${project}`);
+  await review(page, `org-unit-${project}`);
 
   // ---- the Team Lead (lead of IT) staffs IT and what is inside it, nothing else, and changes no structure
   const lead = await signIn(browser, LENA, project);
@@ -321,8 +334,7 @@ test("admin renames, moves, deletes and staffs units; a Team Lead staffs only th
   await expect(lead.getByTestId("lead-switch")).toHaveCount(0);
   await expect(lead.getByTestId("unit-menu")).toHaveCount(0);
   await expect(lead.getByTestId("unit-rules")).toHaveCount(0);
-  await lead.mouse.move(0, 0);
-  await shot(lead, `org-lead-view-${project}`);
+  await review(lead, `org-lead-view-${project}`);
   await lead.getByTestId("unit-child").filter({ hasText: N.platform }).click();
   await expect(lead.getByTestId("unit-detail-name")).toHaveText(N.platform);
   await expect(lead.getByTestId("unit-detail").getByTestId("add-people").first()).toBeVisible();

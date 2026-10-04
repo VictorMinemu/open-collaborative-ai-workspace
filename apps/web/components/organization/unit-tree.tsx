@@ -163,7 +163,7 @@ export function UnitTree({
                   e.stopPropagation();
                   onToggle(u.id);
                 }}
-                className="relative flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+                className="relative flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground before:absolute before:-inset-2 before:content-[''] hover:bg-accent hover:text-foreground lg:before:-inset-1"
               >
                 <ChevronRight className={cn("size-3.5 transition-transform", !isCollapsed && "rotate-90")} />
               </button>
@@ -189,7 +189,7 @@ export function UnitTree({
               unit={u}
               createKinds={childKinds(u.kind)}
               className={cn(
-                "size-9 lg:size-7",
+                "size-10 lg:size-7",
                 "lg:opacity-0 lg:focus-visible:opacity-100 lg:group-hover:opacity-100 lg:data-popup-open:opacity-100",
                 selected && "lg:opacity-100",
               )}

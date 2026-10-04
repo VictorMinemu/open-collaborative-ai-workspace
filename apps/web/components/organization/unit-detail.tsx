@@ -1,7 +1,7 @@
 "use client";
 
 import { ROLE_LABELS, ROLE_RANK, type UnitMember, UnitRole } from "@ocw/contracts";
-import { ChevronRight, Crown, Plus, UserMinus, UserPlus, Users } from "lucide-react";
+import { ChevronDown, ChevronRight, Crown, Plus, UserMinus, UserPlus, Users } from "lucide-react";
 import { type ElementType, type ReactNode, useState } from "react";
 import { toast } from "sonner";
 import { UserAvatar } from "@/components/ui/avatar";
@@ -15,6 +15,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
@@ -23,7 +29,6 @@ import { errorMessage } from "@/lib/api";
 import { useRemoveUnitMember, useUnitMembers, useUpdateUnitMember } from "@/lib/org-queries";
 import { useCan } from "@/lib/permissions";
 import { useMe } from "@/lib/queries";
-import { cn } from "@/lib/utils";
 import { AddPeopleDialog } from "./add-people-dialog";
 import { UnitActionsMenu, useUnitDialogs } from "./unit-dialogs";
 import {
@@ -54,14 +59,15 @@ export function UnitDetail({
   tree,
   onSelect,
   titleAs: Title = "h2",
-  inSheet = false,
+  closeButton,
 }: {
   unit: UnitNode;
   tree: UnitTreeModel;
   onSelect: (id: string) => void;
   /** The sheet passes its accessible title component. */
   titleAs?: ElementType;
-  inSheet?: boolean;
+  /** The sheet's close button, grouped with the actions menu. */
+  closeButton?: ReactNode;
 }) {
   const me = useMe({ enabled: false });
   const canReadRules = useCan("rule.read");
@@ -71,7 +77,7 @@ export function UnitDetail({
 
   return (
     <div data-testid="unit-detail" data-unit-id={unit.id} className="grid gap-7">
-      <header className={cn("flex items-start gap-4", inSheet && "pr-9")}>
+      <header className="flex items-start gap-4">
         <KindIcon kind={unit.kind} size="lg" />
         <div className="min-w-0 flex-1">
           <nav
@@ -100,7 +106,15 @@ export function UnitDetail({
           </Title>
           <p className="mt-0.5 text-muted-foreground text-sm">{meta.label}</p>
         </div>
-        <UnitActionsMenu unit={unit} createKinds={createKinds} variant="outline" className="shrink-0" />
+        <div className="-mt-1 flex shrink-0 items-center gap-1">
+          <UnitActionsMenu
+            unit={unit}
+            createKinds={createKinds}
+            variant="outline"
+            className="size-10 lg:size-9"
+          />
+          {closeButton}
+        </div>
       </header>
 
       <dl className="grid grid-cols-3 divide-x rounded-xl border bg-card shadow-xs">
@@ -167,7 +181,6 @@ function ChildrenSection({
   createKinds: ReturnType<typeof childKinds>;
   onSelect: (id: string) => void;
 }) {
-  const dialogs = useUnitDialogs();
   const manage = canManageUnit(unit);
   const counts = (["department", "team", "project"] as const)
     .map((k) => [k, unit.children.filter((c) => c.kind === k).length] as const)
@@ -180,20 +193,7 @@ function ChildrenSection({
       <SectionHeader
         title="Inside"
         description={counts || `Nothing inside ${unit.name} yet.`}
-        action={
-          manage
-            ? createKinds.map((k) => (
-                <Button
-                  key={k}
-                  size="sm"
-                  variant="outline"
-                  onClick={() => dialogs.open({ type: "create", kind: k, parent: unit })}
-                >
-                  <Plus /> {KIND_META[k].label}
-                </Button>
-              ))
-            : null
-        }
+        action={manage && createKinds.length > 0 ? <AddChildMenu unit={unit} kinds={createKinds} /> : null}
       />
       {unit.children.length > 0 ? (
         <ul className="divide-y overflow-hidden rounded-xl border bg-card shadow-xs">
@@ -220,6 +220,37 @@ function ChildrenSection({
         </ul>
       ) : null}
     </section>
+  );
+}
+
+function AddChildMenu({ unit, kinds }: { unit: UnitNode; kinds: ReturnType<typeof childKinds> }) {
+  const dialogs = useUnitDialogs();
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={
+          <Button
+            size="sm"
+            variant="outline"
+            data-testid="add-child"
+            aria-label={`Add inside ${unit.name}`}
+          />
+        }
+      >
+        <Plus /> Add
+        <ChevronDown className="text-muted-foreground" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        {kinds.map((k) => {
+          const Icon = KIND_META[k].icon;
+          return (
+            <DropdownMenuItem key={k} onClick={() => dialogs.open({ type: "create", kind: k, parent: unit })}>
+              <Icon /> {KIND_META[k].label}
+            </DropdownMenuItem>
+          );
+        })}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -359,7 +390,7 @@ function MemberRow({ unit, member: m, isMe }: { unit: UnitNode; member: UnitMemb
       </div>
       {manage ? (
         <div className="flex shrink-0 items-center gap-2">
-          <span className="hidden text-muted-foreground text-xs sm:inline">Lead</span>
+          <span className="text-muted-foreground text-xs">Lead</span>
           {eligible ? (
             leadSwitch
           ) : (
