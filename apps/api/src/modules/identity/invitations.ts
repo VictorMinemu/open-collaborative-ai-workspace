@@ -33,6 +33,7 @@ interface InvitationRow {
   status: string;
   expiresAt: Date | string;
   createdAt?: Date | string | null;
+  inviterId?: string | null;
 }
 
 /**
@@ -54,6 +55,7 @@ export function createInvitationService(identity: IdentityService) {
       expiresAt: new Date(row.expiresAt).toISOString(),
       ...(row.createdAt ? { createdAt: new Date(row.createdAt).toISOString() } : {}),
       link: link(row.id),
+      inviterId: row.inviterId ?? null,
     };
   };
 

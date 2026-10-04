@@ -94,6 +94,7 @@ beforeAll(async () => {
     role: "developer",
   });
   expect(inv.status).toBe(200);
+  expect(inv.body.inviterId).toBe(adminId);
   memberEmail = inv.body.email;
   const accepted = await new Client(stack.baseUrl, { "user-agent": CHROME_MAC_UA }).request(
     "POST",
