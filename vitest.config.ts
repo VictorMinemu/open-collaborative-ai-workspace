@@ -9,6 +9,8 @@ export default defineConfig({
           include: ["packages/*/src/**/*.test.ts", "apps/*/src/**/*.test.ts"],
           exclude: ["**/*.int.test.ts", "**/node_modules/**"],
           environment: "node",
+          // Shared CI runners can take seconds for a file's first local HTTP/WebSocket round trip.
+          testTimeout: 15_000,
         },
       },
       {
