@@ -56,7 +56,10 @@ export const PRESENCE_RATE_LIMIT = { max: 30, windowMs: 10_000 } as const;
 /** Re-decisions of live subscriptions running at once per API instance (RT-01, T-03-04-04). */
 export const REAUTH_CONCURRENCY = 4;
 
-/** Backstop for revocations that never reached this instance (Redis down, expiry): Pitfall 5. */
+/**
+ * Backstop for revocations and invalidations that never reached this instance (Redis down, expiry): Pitfall 5. Each
+ * tick checks the session and membership, then re-decides every live subscription of the socket (RT-01).
+ */
 export const SESSION_RECHECK_MS = 5 * 60_000;
 const CLIENT_EPHEMERAL_TYPE = /^user\.[a-z_.]{1,40}$/;
 
@@ -339,7 +342,13 @@ export function registerGateway(
           ([session, member]) => session && member,
           () => true, // a transient lookup failure is not a revocation; the next recheck decides
         );
-        if (!still) socket.close(4401, "session expired");
+        if (!still) {
+          socket.close(4401, "session expired");
+          return;
+        }
+        // Backstop for lost invalidations (Redis pub/sub is at-most-once, T-03-06-03): every live subscription is
+        // re-decided through the same queue, so a missed access change closes within one interval.
+        for (const topic of subs.keys()) scheduleReauth(conn, topic);
       }, recheckMs);
 
       /**
