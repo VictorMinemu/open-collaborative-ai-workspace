@@ -64,7 +64,9 @@ function upsertAgent(qc: QueryClient, agent: Agent) {
     const current = prev.agents.find((a) => a.id === agent.id);
     // Never let an older snapshot (e.g. the create response) overwrite a newer realtime update.
     if (current && Date.parse(current.updatedAt) > Date.parse(agent.updatedAt)) return prev;
-    const agents = current ? prev.agents.map((a) => (a.id === agent.id ? agent : a)) : [...prev.agents, agent];
+    const agents = current
+      ? prev.agents.map((a) => (a.id === agent.id ? agent : a))
+      : [...prev.agents, agent];
     return { agents: agents.sort((a, b) => a.name.localeCompare(b.name)) };
   });
 }
