@@ -1,7 +1,7 @@
 // authz-legacy: 02-15 migrates this file to the resolver (requireRole delegate)
 import type { IncomingHttpHeaders } from "node:http";
 import { getCurrentAdapter, runWithTransaction } from "@better-auth/core/context";
-import type { MeResponse, OrgRole, SetupRequest } from "@ocw/contracts";
+import type { DeviceAccessToken, MeResponse, OrgRole, SetupRequest } from "@ocw/contracts";
 import { instanceSetup, member, organization, orgMembers, user } from "@ocw/db";
 import { fromNodeHeaders } from "better-auth/node";
 import { and, asc, eq } from "drizzle-orm";
@@ -71,7 +71,7 @@ export class IdentityService {
     private readonly revocations: RevocationCheck,
   ) {
     this.tokens = createTokenService({ auth, env });
-    this.authn = createAuthenticator(auth, authDb);
+    this.authn = createAuthenticator(auth, authDb, (token) => this.verifyAccessToken(token));
     this.sessions = createSessionStore(auth);
     this.requireUser = this.authn.requireUser;
     this.requireRole = this.authn.requireRole;
@@ -102,6 +102,16 @@ export class IdentityService {
       email: m.email,
       clientKind: claims.ck,
     };
+  }
+
+  /** A 10-minute device JWT for the Device Link (02-11); a separate credential class from user tokens. */
+  signDeviceAccessToken(input: { deviceId: string; organizationId: string }): Promise<DeviceAccessToken> {
+    return this.tokens.signDeviceToken(input);
+  }
+
+  /** Device JWT → its device and organization; null for user tokens and every invalid token. */
+  verifyDeviceAccessToken(token: string): Promise<{ deviceId: string; organizationId: string } | null> {
+    return this.tokens.verifyDeviceToken(token);
   }
 
   /** True while the session row exists and has not expired (the long-lived socket recheck, Pitfall 5). */
