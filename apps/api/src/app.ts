@@ -78,6 +78,9 @@ export async function buildApp(
   const db = createTenantDb(env.DATABASE_URL, { onIdleError: onIdleError("app") });
   const authPool = new pg.Pool({ connectionString: env.AUTH_DATABASE_URL, max: 5 });
   authPool.on("error", onIdleError("auth"));
+  authPool.on("connect", (client) => {
+    client.on("error", onIdleError("auth"));
+  });
   const authDb = drizzle({ client: authPool });
   const bus = await RedisBus.connect(env.REDIS_URL);
   const encryptionKey = decodeKey(env.OCW_ENCRYPTION_KEY);
