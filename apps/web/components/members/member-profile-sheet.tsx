@@ -40,6 +40,7 @@ export function MemberAvatar({
     return (
       <span
         data-slot="avatar"
+        data-avatar="emoji"
         className={cn(
           "relative flex size-8 shrink-0 select-none items-center justify-center overflow-hidden rounded-full bg-muted leading-none",
           className,
