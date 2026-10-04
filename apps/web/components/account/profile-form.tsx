@@ -4,6 +4,7 @@ import { Select as SelectPrimitive } from "@base-ui/react/select";
 import {
   AvatarRef,
   DisplayName,
+  type OrgRole,
   type Profile,
   ROLE_LABELS,
   StatusEmoji,
@@ -28,6 +29,13 @@ import { AvatarPicker } from "./avatar-picker";
 
 const STATUS_EMOJIS = ["💬", "📅", "🌴", "🤒", "🏠", "🚗", "✈️", "🎧", "🍔", "🎯", "🔕", "🚀"] as const;
 const STATUS_MAX = 80;
+/** Display only (badge colour), never an authorization decision. */
+const ROLE_VARIANT: Record<OrgRole, "brand" | "outline"> = {
+  admin: "brand",
+  lead: "brand",
+  developer: "outline",
+  standard: "outline",
+};
 const AVATAR_ERROR = "Use an https:// image URL or an emoji";
 
 interface Draft {
@@ -228,11 +236,7 @@ function ProfileEditor({ profile }: { profile: Profile }) {
           <ReadOnly label="Email" value={profile.email} />
           <ReadOnly
             label="Role"
-            value={
-              <Badge variant={profile.role === "admin" || profile.role === "lead" ? "brand" : "outline"}>
-                {ROLE_LABELS[profile.role]}
-              </Badge>
-            }
+            value={<Badge variant={ROLE_VARIANT[profile.role]}>{ROLE_LABELS[profile.role]}</Badge>}
           />
         </Card>
       </Section>
