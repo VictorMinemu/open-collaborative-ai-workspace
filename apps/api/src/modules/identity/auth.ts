@@ -5,11 +5,36 @@ import { jwt, organization } from "better-auth/plugins";
 import { asc, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { Env } from "../../config/env";
+import { createMailer, type MailMessage } from "../../lib/mailer";
 import { clientFromRequest } from "./client-kind";
 
 export const INVITATION_TTL_SECONDS = 7 * 24 * 60 * 60;
 /** Access JWT lifetime (AUTH-06). Revoked-session flags in Redis must outlive it (realtime/service.ts). */
 export const ACCESS_TOKEN_TTL_SECONDS = 10 * 60;
+/** Self-service reset e-mails expire after one hour (admin-issued links live 24 h, identity/password.ts). */
+export const RESET_EMAIL_TTL_SECONDS = 60 * 60;
+
+const escapeHtml = (v: string) =>
+  v.replace(
+    /[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] ?? c,
+  );
+
+/** The reset e-mail. The link points at the web app (better-auth's own URL is an unrouted API path). */
+export function resetPasswordEmail(
+  env: Env,
+  to: { email: string; name: string },
+  token: string,
+): MailMessage {
+  const link = `${env.OCW_PUBLIC_WEB_URL}/reset-password?token=${encodeURIComponent(token)}`;
+  const greeting = to.name ? `Hi ${to.name},` : "Hi,";
+  return {
+    to: to.email,
+    subject: "Reset your password",
+    text: `${greeting}\n\nSomeone asked to reset the password of your Open Collaborative AI Workspace account. Open this link within one hour to choose a new password:\n\n${link}\n\nIf it was not you, ignore this e-mail: your password stays the same.\n`,
+    html: `<p>${escapeHtml(greeting)}</p><p>Someone asked to reset the password of your Open Collaborative AI Workspace account. Open this link within one hour to choose a new password:</p><p><a href="${escapeHtml(link)}">Reset your password</a></p><p>If it was not you, ignore this e-mail: your password stays the same.</p>`,
+  };
+}
 
 /** The parts of better-auth's hook context we read: the endpoint context (`headers`) or its `request`. */
 interface HookContext {
@@ -49,6 +74,9 @@ const ocwInternal = () =>
           email: { type: "string", required: false },
           avatarUrl: { type: "string", required: false },
           role: { type: "string", required: true },
+          statusEmoji: { type: "string", required: false },
+          statusText: { type: "string", required: false },
+          deactivatedAt: { type: "date", required: false },
         },
       },
       instanceSetup: {
@@ -61,6 +89,7 @@ const ocwInternal = () =>
   }) as const;
 
 export function createAuth(env: Env, authDb: NodePgDatabase) {
+  const mailer = createMailer(env);
   return betterAuth({
     appName: "Open Collaborative AI Workspace",
     baseURL: env.OCW_PUBLIC_API_URL,
@@ -85,7 +114,26 @@ export function createAuth(env: Env, authDb: NodePgDatabase) {
         jwks: dbSchema.jwks,
       },
     }),
-    emailAndPassword: { enabled: true, minPasswordLength: 12, maxPasswordLength: 256 },
+    emailAndPassword: {
+      enabled: true,
+      minPasswordLength: 12,
+      maxPasswordLength: 256,
+      // AUTH-04: completing a reset ends every session of that user (inside the reset transaction).
+      revokeSessionsOnPasswordReset: true,
+      resetPasswordTokenExpiresIn: RESET_EMAIL_TTL_SECONDS,
+      // Only with SMTP configured; otherwise admins issue reset links (identity/password.ts).
+      ...(mailer
+        ? {
+            sendResetPassword: async ({
+              user,
+              token,
+            }: {
+              user: { email: string; name: string };
+              token: string;
+            }) => mailer.send(resetPasswordEmail(env, user, token)),
+          }
+        : {}),
+    },
     session: {
       expiresIn: 60 * 60 * 24 * 7,
       updateAge: 60 * 60 * 24,

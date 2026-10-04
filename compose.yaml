@@ -75,6 +75,9 @@ services:
       OCW_CELL_TOKEN: ${OCW_CELL_TOKEN:?Set OCW_CELL_TOKEN in .env (run pnpm setup:env)}
       OCW_MODEL_PROVIDER: ${OCW_MODEL_PROVIDER:-}
       OCW_MOCK_MODEL_BASE_URL: ${OCW_MOCK_MODEL_BASE_URL:-http://fake-model:18999/v1}
+      # Optional password reset e-mails; without SMTP admins issue reset links.
+      OCW_SMTP_URL: ${OCW_SMTP_URL:-}
+      OCW_MAIL_FROM: ${OCW_MAIL_FROM:-}
     ports:
       - "${OCW_API_PORT:-4000}:4000"
     depends_on:
