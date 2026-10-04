@@ -102,7 +102,10 @@ function parseRevocation(raw: string): RevocationEvent | null {
   return { ...(sessionIds ? { sessionIds } : {}), ...(userId ? { userId } : {}), reason };
 }
 
-const channelOf = (topic: string) => `ocw:rt:${topic}`;
+/** Redis pub/sub channel of a topic: every frame for `topic` (durable, ephemeral, presence) travels on it. */
+export function topicChannel(topic: string): string {
+  return `ocw:rt:${topic}`;
+}
 
 export function createRealtimeService(deps: { db: TenantDb; bus: RedisBus }): RealtimeService {
   // No built-in authorizers: every prefix is decided by the module that owns it (`org` and `user` by the
@@ -110,7 +113,7 @@ export function createRealtimeService(deps: { db: TenantDb; bus: RedisBus }): Re
   const authorizers = new Map<TopicPrefix, TopicAuthorizer>();
 
   const publish = (topic: string, frame: ServerFrame) =>
-    deps.bus.publish(channelOf(topic), JSON.stringify(frame));
+    deps.bus.publish(topicChannel(topic), JSON.stringify(frame));
 
   return {
     async appendEvent(tx, topic, type, payload, opts) {
@@ -173,7 +176,7 @@ export function createRealtimeService(deps: { db: TenantDb; bus: RedisBus }): Re
     },
 
     async listen(topic, listener) {
-      return deps.bus.subscribe(channelOf(topic), (msg) => {
+      return deps.bus.subscribe(topicChannel(topic), (msg) => {
         try {
           listener(JSON.parse(msg) as ServerFrame);
         } catch {

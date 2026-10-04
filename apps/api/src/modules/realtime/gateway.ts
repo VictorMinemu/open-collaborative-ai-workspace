@@ -1,8 +1,17 @@
-import { ClientFrame, type DurableFrame, type ServerFrame, WS_AUTH_PROTOCOL_PREFIX } from "@ocw/contracts";
+import { randomUUID } from "node:crypto";
+import {
+  ClientFrame,
+  type DurableFrame,
+  isPresenceTopic,
+  type PresenceFrame,
+  type ServerFrame,
+  WS_AUTH_PROTOCOL_PREFIX,
+} from "@ocw/contracts";
 import type { FastifyRequest } from "fastify";
 import type { WebSocket } from "ws";
 import type { App, AuthContext } from "../../core";
 import type { IdentityService } from "../identity";
+import { PRESENCE_HEARTBEAT_MS, type PresenceMember, type PresenceStore } from "./presence";
 import type { RealtimeService } from "./service";
 
 interface Subscription {
@@ -10,6 +19,23 @@ interface Subscription {
   buffer: DurableFrame[];
   lastSent: number;
   stop: () => Promise<void>;
+  /** The presence join was issued (set synchronously before awaiting it, so an unsub always leaves). */
+  presenceJoined: boolean;
+  /** The full snapshot was sent; presence deltas are forwarded from now on. */
+  presenceLive: boolean;
+  /** Presence deltas received between listen() and the snapshot, flushed in order after it (Research note 4). */
+  presenceBuffer: PresenceFrame[];
+}
+
+/** One open socket of this API instance. `id` is the presence `conn`: random, never the session id (D-03). */
+interface Connection {
+  id: string;
+  auth: AuthContext;
+  socket: WebSocket;
+  subs: Map<string, Subscription>;
+  presenceState: "online" | "away";
+  send(frame: ServerFrame): void;
+  unsub(topic: string): Promise<void>;
 }
 
 /** Backstop for revocations that never reached this instance (Redis down, expiry): Pitfall 5. */
@@ -36,17 +62,39 @@ export function registerGateway(
     allowedOrigins: Set<string>;
     /** Session/member recheck interval for open sockets (tests lower it). */
     sessionRecheckMs?: number;
+    presence: PresenceStore;
+    /** Presence refresh interval (default PRESENCE_HEARTBEAT_MS; tests lower it). */
+    heartbeatMs?: number;
   },
 ) {
   const recheckMs = deps.sessionRecheckMs ?? SESSION_RECHECK_MS;
+  const presence = deps.presence;
   // Open sockets of this API instance, so a revocation (Redis fan-out from any instance) closes them at once.
-  const open = new Set<{ sessionId: string; userId: string; socket: WebSocket }>();
+  const open = new Set<Connection>();
+  const memberOf = (conn: Connection): PresenceMember => ({
+    conn: conn.id,
+    userId: conn.auth.userId,
+    state: conn.presenceState,
+  });
+
+  // Heartbeat: re-score every joined entry of this instance so it never expires while the socket lives (D-02).
+  const heartbeat = setInterval(() => {
+    const items: Array<{ orgId: string; topic: string; m: PresenceMember }> = [];
+    for (const conn of open) {
+      for (const [topic, sub] of conn.subs) {
+        if (sub.presenceJoined) items.push({ orgId: conn.auth.organizationId, topic, m: memberOf(conn) });
+      }
+    }
+    presence.refresh(items).catch((err: unknown) => app.log.warn({ err }, "presence heartbeat failed"));
+  }, deps.heartbeatMs ?? PRESENCE_HEARTBEAT_MS);
+  heartbeat.unref();
+
   let revocations: Promise<() => Promise<void>> | null = null;
   const watchRevocations = () => {
     revocations ??= deps.realtime.onRevocation((e) => {
-      for (const entry of open) {
-        if (e.sessionIds?.includes(entry.sessionId) || (e.userId && e.userId === entry.userId)) {
-          entry.socket.close(4401, "session revoked");
+      for (const conn of open) {
+        if (e.sessionIds?.includes(conn.auth.sessionId) || (e.userId && e.userId === conn.auth.userId)) {
+          conn.socket.close(4401, "session revoked");
         }
       }
     });
@@ -57,6 +105,18 @@ export function registerGateway(
     return revocations;
   };
   app.addHook("onClose", async () => {
+    clearInterval(heartbeat);
+    // Leave every joined entry so watchers on other instances see this one's people go at once.
+    const leaving: Promise<void>[] = [];
+    for (const conn of open) {
+      for (const [topic, sub] of conn.subs) {
+        if (sub.presenceJoined) {
+          sub.presenceJoined = false;
+          leaving.push(presence.leave(conn.auth.organizationId, topic, memberOf(conn)));
+        }
+      }
+    }
+    await Promise.allSettled(leaving);
     const stop = await revocations?.catch(() => null);
     await stop?.();
   });
@@ -92,10 +152,31 @@ export function registerGateway(
         if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(frame));
       };
 
+      const unsub = async (topic: string) => {
+        const s = subs.get(topic);
+        subs.delete(topic);
+        if (s?.presenceJoined) {
+          s.presenceJoined = false;
+          // The join was queued first on the same Redis connection, so this leave always lands after it.
+          presence
+            .leave(auth.organizationId, topic, memberOf(conn))
+            .catch((err: unknown) => req.log.warn({ err, topic }, "presence leave failed"));
+        }
+        await s?.stop();
+      };
+
       // The socket outlives its 10-minute JWT by design: it stays tied to the session, which must still
       // exist (not signed out or expired) and belong to an active member.
-      const entry = { sessionId: auth.sessionId, userId: auth.userId, socket };
-      open.add(entry);
+      const conn: Connection = {
+        id: randomUUID(),
+        auth,
+        socket,
+        subs,
+        presenceState: "online",
+        send,
+        unsub,
+      };
+      open.add(conn);
 
       const recheck = setInterval(async () => {
         const still = await Promise.all([
@@ -108,13 +189,24 @@ export function registerGateway(
         if (!still) socket.close(4401, "session expired");
       }, recheckMs);
 
-      const unsub = async (topic: string) => {
-        const s = subs.get(topic);
-        subs.delete(topic);
-        await s?.stop();
+      /** After `subscribed`: join the topic's presence, send the snapshot, then flush buffered deltas. */
+      const joinPresence = async (topic: string, sub: Subscription) => {
+        sub.presenceJoined = true;
+        try {
+          await presence.join(auth.organizationId, topic, memberOf(conn));
+          const entries = await presence.snapshot(auth.organizationId, topic);
+          if (subs.get(topic) !== sub) return;
+          send({ op: "presence", topic, full: true, entries });
+        } catch (err) {
+          req.log.warn({ err, topic }, "presence join failed");
+          if (subs.get(topic) !== sub) return;
+        }
+        for (const f of sub.presenceBuffer) send(f);
+        sub.presenceBuffer = [];
+        sub.presenceLive = true;
       };
 
-      const subscribe = async (topic: string, afterSeq: number) => {
+      const subscribe = async (topic: string, afterSeq: number, wantsPresence: boolean) => {
         await unsub(topic);
         if (!(await deps.realtime.authorizeTopic(auth, topic))) {
           send({ op: "err", code: "forbidden", topic, message: "Not allowed to subscribe to this topic" });
@@ -125,11 +217,23 @@ export function registerGateway(
           buffer: [],
           lastSent: afterSeq,
           stop: async () => {},
+          presenceJoined: false,
+          presenceLive: false,
+          presenceBuffer: [],
         };
         subs.set(topic, sub);
+        // Only a subscriber that shows the conversation joins its presence and receives it (background unread
+        // watchers do not count as "here").
+        const withPresence = wantsPresence && isPresenceTopic(topic);
         sub.stop = await deps.realtime.listen(topic, (frame) => {
           if (subs.get(topic) !== sub) return;
           if (frame.op === "eph") return send(frame);
+          if (frame.op === "presence") {
+            if (!withPresence) return;
+            if (sub.presenceLive) send(frame);
+            else sub.presenceBuffer.push(frame);
+            return;
+          }
           if (frame.op !== "ev") return;
           if (sub.phase === "replaying") sub.buffer.push(frame);
           else if (frame.seq > sub.lastSent) {
@@ -163,6 +267,8 @@ export function registerGateway(
         sub.buffer = [];
         sub.phase = "live";
         send({ op: "subscribed", topic, lastSeq: Math.max(sub.lastSent, replay.lastSeq) });
+        // Presence only after the resolver allowed the subscription and `subscribed` was sent (T-03-01-01).
+        if (withPresence) await joinPresence(topic, sub);
       };
 
       // Attach synchronously so early frames are never dropped (Pitfall 8).
@@ -179,7 +285,7 @@ export function registerGateway(
           case "ping":
             return send({ op: "pong" });
           case "sub":
-            subscribe(frame.topic, frame.afterSeq ?? 0).catch((err: unknown) => {
+            subscribe(frame.topic, frame.afterSeq ?? 0, frame.presence === true).catch((err: unknown) => {
               req.log.error({ err, topic: frame.topic }, "ws subscribe failed");
               send({ op: "err", code: "subscribe_failed", topic: frame.topic });
             });
@@ -199,7 +305,7 @@ export function registerGateway(
       });
 
       socket.on("close", () => {
-        open.delete(entry);
+        open.delete(conn);
         clearInterval(recheck);
         for (const topic of [...subs.keys()]) void unsub(topic);
       });

@@ -11,11 +11,14 @@ import {
   DeviceToServerFrame,
   extractMentionHandles,
   Invitation,
+  isPresenceTopic,
   MemberDetailList,
   MoveUnitRequest,
   onlyRelativePaths,
   PasswordResetLink,
   PostMessageRequest,
+  PRESENCE_SNAPSHOT_LIMIT,
+  PRESENCE_TOPIC_PREFIXES,
   parseTopic,
   RelativePath,
   RenameUnitRequest,
@@ -80,6 +83,52 @@ describe("contracts", () => {
         sessionId: id,
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("realtime presence frames (03-01)", () => {
+  const conn = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e60";
+  const entry = { conn, userId: id, state: "online" };
+
+  it("parses a full snapshot and a delta", () => {
+    const full = ServerFrame.parse({ op: "presence", topic: `conv:${id}`, full: true, entries: [entry] });
+    expect(full).toMatchObject({ op: "presence", full: true, entries: [entry] });
+    const delta = ServerFrame.parse({
+      op: "presence",
+      topic: `ws:${id}`,
+      full: false,
+      entries: [{ ...entry, state: "offline" }],
+    });
+    expect(delta).toMatchObject({ op: "presence", full: false });
+    expect(ServerFrame.parse({ op: "presence", topic: `conv:${id}`, full: true, entries: [] }).op).toBe(
+      "presence",
+    );
+  });
+
+  it("rejects unknown states, non-UUID connections and oversized snapshots", () => {
+    const frame = (entries: unknown[]) => ({ op: "presence", topic: `conv:${id}`, full: true, entries });
+    expect(ServerFrame.safeParse(frame([{ ...entry, state: "busy" }])).success).toBe(false);
+    expect(ServerFrame.safeParse(frame([{ ...entry, conn: "sid-123" }])).success).toBe(false);
+    expect(ServerFrame.safeParse(frame([{ ...entry, userId: "nope" }])).success).toBe(false);
+    expect(PRESENCE_SNAPSHOT_LIMIT).toBe(500);
+    expect(ServerFrame.safeParse(frame(Array.from({ length: 500 }, () => entry))).success).toBe(true);
+    expect(ServerFrame.safeParse(frame(Array.from({ length: 501 }, () => entry))).success).toBe(false);
+  });
+
+  it("a sub may opt into presence", () => {
+    expect(ClientFrame.parse({ op: "sub", topic: `conv:${id}`, presence: true })).toMatchObject({
+      presence: true,
+    });
+    expect(ClientFrame.safeParse({ op: "sub", topic: `conv:${id}`, presence: "yes" }).success).toBe(false);
+  });
+
+  it("presence topics are conversations and work sessions only", () => {
+    expect(PRESENCE_TOPIC_PREFIXES).toEqual(["conv", "ws"]);
+    expect(isPresenceTopic(`conv:${id}`)).toBe(true);
+    expect(isPresenceTopic(`ws:${id}`)).toBe(true);
+    for (const t of [`org:${id}`, `user:${id}`, `cell:${id}`, "conv:nope", ""]) {
+      expect(isPresenceTopic(t), t).toBe(false);
+    }
   });
 });
 

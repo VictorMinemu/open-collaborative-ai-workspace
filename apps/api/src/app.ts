@@ -215,7 +215,7 @@ export async function buildApp(
   const modules: ApiModule[] = [
     createIdentityModule({ identity, db, audit, realtime, apiUrl: env.OCW_PUBLIC_API_URL }),
     createOrganizationModule(core),
-    createRealtimeModule({ realtime, identity, allowedOrigins }),
+    createRealtimeModule({ realtime, identity, allowedOrigins, bus }),
     createSecretsModule(),
     createChatModule(core), // B1
     createAgentModule(core), // B2

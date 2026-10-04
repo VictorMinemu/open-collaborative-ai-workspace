@@ -17,6 +17,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { EmptyState } from "@/components/common/empty-state";
+import { PresenceStack, usePresentPeople } from "@/components/presence/presence-stack";
 import { PageHeader } from "@/components/shell/page-header";
 import { Button } from "@/components/ui/button";
 import {
@@ -159,6 +160,17 @@ export function ChannelView({ channelId }: { channelId: string }) {
 
   // ---------------------------------------------------------------- realtime
   const topic = `conv:${channelId}`;
+  // Same sources as nameOf: channel members first, then the org directory.
+  const resolvePerson = useCallback(
+    (userId: string) => {
+      const m = members.data?.members.find((x) => x.kind === "user" && x.id === userId);
+      if (m) return { name: m.displayName, avatarUrl: m.avatarUrl };
+      const d = directory.byKey.get(dirKey("user", userId));
+      return d ? { name: d.displayName, avatarUrl: d.avatarUrl } : undefined;
+    },
+    [members.data, directory.byKey],
+  );
+  const present = usePresentPeople(topic, { excludeUserId: me.id, resolve: resolvePerson });
   const onFrame = (frame: TopicFrame) => {
     if (frame.op === "eph") {
       if (frame.type === EphemeralTypes.agentTyping) {
@@ -202,9 +214,15 @@ export function ChannelView({ channelId }: { channelId: string }) {
         return;
     }
   };
-  useTopic(messages.data ? topic : null, onFrame, messages.data?.lastSeq, () => {
-    void qc.invalidateQueries({ queryKey: chatKeys.messages(channelId) });
-  });
+  useTopic(
+    messages.data ? topic : null,
+    onFrame,
+    messages.data?.lastSeq,
+    () => {
+      void qc.invalidateQueries({ queryKey: chatKeys.messages(channelId) });
+    },
+    { presence: true },
+  );
 
   const sendTyping = useCallback(
     (threadRootId: string | null) =>
@@ -375,6 +393,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
             description={channel.topic ?? undefined}
             actions={
               <>
+                <PresenceStack people={present} />
                 <button
                   type="button"
                   onClick={() => setMembersOpen(true)}

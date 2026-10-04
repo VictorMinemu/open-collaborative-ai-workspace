@@ -217,6 +217,106 @@ describe("RealtimeClient", () => {
     expect(FakeWS.all).toHaveLength(0);
   });
 
+  it("presence frames of subscribed topics update client.presence; unknown topics are ignored", () => {
+    const c = new RealtimeClient({ url: "ws://x/ws", WebSocket: FakeWS });
+    c.subscribe(T, () => {}, { presence: true });
+    c.connect();
+    const ws = FakeWS.last!;
+    ws.open();
+    const conn = "0190d5e2-7c3a-7cc2-9d2e-0000000000c1";
+    const userId = "0190d5e2-7c3a-7cc2-9d2e-000000000001";
+    ws.push({ op: "presence", topic: T, full: true, entries: [{ conn, userId, state: "online" }] });
+    expect(c.presence.getState().topics[T]).toEqual({ [conn]: { userId, state: "online" } });
+    const other = "conv:0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e60";
+    ws.push({ op: "presence", topic: other, full: true, entries: [{ conn, userId, state: "online" }] });
+    expect(c.presence.getState().topics[other]).toBeUndefined();
+    ws.push({ op: "presence", topic: T, full: false, entries: [{ conn, userId, state: "offline" }] });
+    expect(c.presence.getState().topics[T]).toEqual({});
+  });
+
+  it("a socket close clears every topic's presence; the last unsubscribe deletes the topic's presence", () => {
+    vi.useFakeTimers();
+    const c = new RealtimeClient({ url: "ws://x/ws", WebSocket: FakeWS, backoffBaseMs: 10 });
+    const T2 = "ws:0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e60";
+    c.subscribe(T, () => {}, { presence: true });
+    const off2a = c.subscribe(T2, () => {}, { presence: true });
+    const off2b = c.subscribe(T2, () => {}, { presence: true });
+    c.connect();
+    let ws = FakeWS.last!;
+    ws.open();
+    const entry = {
+      conn: "0190d5e2-7c3a-7cc2-9d2e-0000000000c1",
+      userId: "0190d5e2-7c3a-7cc2-9d2e-000000000001",
+      state: "online",
+    };
+    ws.push({ op: "presence", topic: T, full: true, entries: [entry] });
+    ws.push({ op: "presence", topic: T2, full: true, entries: [entry] });
+    ws.drop();
+    expect(c.presence.getState().topics).toEqual({});
+
+    vi.advanceTimersByTime(50);
+    ws = FakeWS.last!;
+    ws.open();
+    ws.push({ op: "presence", topic: T2, full: true, entries: [entry] });
+    off2a();
+    expect(c.presence.getState().topics[T2]).toBeDefined(); // one listener left
+    off2b();
+    expect(c.presence.getState().topics[T2]).toBeUndefined();
+
+    ws.push({ op: "presence", topic: T, full: true, entries: [entry] });
+    c.close();
+    expect(c.presence.getState().topics).toEqual({});
+  });
+
+  it("presence is opt-in per listener: the sub carries it while any listener wants it, and flips by re-subscribing", () => {
+    const c = new RealtimeClient({ url: "ws://x/ws", WebSocket: FakeWS });
+    c.connect();
+    const ws = FakeWS.last!;
+    ws.open();
+    // A background watcher (unread dot) never counts as "here" and ignores presence frames.
+    const offWatcher = c.subscribe(T, () => {}, { afterSeq: 4 });
+    expect(ws.sent.at(-1)).toEqual({ op: "sub", topic: T, afterSeq: 4 });
+    const entry = {
+      conn: "0190d5e2-7c3a-7cc2-9d2e-0000000000c1",
+      userId: "0190d5e2-7c3a-7cc2-9d2e-000000000001",
+      state: "online",
+    };
+    ws.push({ op: "presence", topic: T, full: true, entries: [entry] });
+    expect(c.presence.getState().topics[T]).toBeUndefined();
+
+    // The view opens: one re-sub with presence, from the topic's cursor.
+    ws.push(ev(5));
+    const offView = c.subscribe(T, () => {}, { presence: true });
+    expect(ws.sent.at(-1)).toEqual({ op: "sub", topic: T, afterSeq: 5, presence: true });
+    const subs = ws.sent.length;
+    const offView2 = c.subscribe(T, () => {}, { presence: true });
+    expect(ws.sent).toHaveLength(subs); // already present: no new frame
+    ws.push({ op: "presence", topic: T, full: true, entries: [entry] });
+    expect(c.presence.getState().topics[T]).toBeDefined();
+
+    // The view closes while the watcher stays: re-sub without presence, local presence dropped.
+    offView2();
+    expect(ws.sent).toHaveLength(subs);
+    offView();
+    expect(ws.sent.at(-1)).toEqual({ op: "sub", topic: T, afterSeq: 5 });
+    expect(c.presence.getState().topics[T]).toBeUndefined();
+    offWatcher();
+    expect(ws.sent.at(-1)).toEqual({ op: "unsub", topic: T });
+  });
+
+  it("reconnect re-subscribes with presence for topics a listener is present in", () => {
+    vi.useFakeTimers();
+    const c = new RealtimeClient({ url: "ws://x/ws", WebSocket: FakeWS, backoffBaseMs: 10 });
+    c.subscribe(T, () => {}, { presence: true });
+    c.connect();
+    FakeWS.last!.open();
+    expect(FakeWS.last!.sent).toContainEqual({ op: "sub", topic: T, afterSeq: 0, presence: true });
+    FakeWS.last!.drop();
+    vi.advanceTimersByTime(50);
+    FakeWS.last!.open();
+    expect(FakeWS.last!.sent).toContainEqual({ op: "sub", topic: T, afterSeq: 0, presence: true });
+  });
+
   it("backoff is bounded with full jitter", () => {
     expect(backoffDelay(0, 1000, 30_000, () => 0.999)).toBeLessThan(1000);
     expect(backoffDelay(10, 1000, 30_000, () => 0.999)).toBeLessThan(30_000);
