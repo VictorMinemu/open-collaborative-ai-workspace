@@ -3,16 +3,18 @@
 import type { OrgUnit, UnitKind } from "@ocw/contracts";
 import { ArrowRight, MousePointerClick, Network, Plus } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EmptyState } from "@/components/common/empty-state";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
 import { Button } from "@/components/ui/button";
+import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useUnits, useUnitsLive } from "@/lib/org-queries";
 import { useCan } from "@/lib/permissions";
+import { UnitDetail } from "./unit-detail";
 import { UnitDialogsProvider, useUnitDialogs } from "./unit-dialogs";
-import { buildTree, KIND_META, KindIcon, kindCount, type UnitTreeModel } from "./unit-meta";
+import { buildTree, KIND_META, KindIcon, kindCount, type UnitNode, type UnitTreeModel } from "./unit-meta";
 import { UnitTree } from "./unit-tree";
 
 /**
@@ -31,11 +33,24 @@ export function OrgStructure() {
 
   const tree = useMemo(() => buildTree(units.data?.units ?? []), [units.data]);
   const selectedId = params.get("unit");
+  const selected = selectedId ? (tree.byId.get(selectedId) ?? null) : null;
+  // The sheet keeps showing the last unit while it slides away.
+  const lastSelected = useRef<UnitNode | null>(null);
+  if (selected) lastSelected.current = selected;
 
   const select = useCallback(
     (id: string | null) => router.replace(id ? `${pathname}?unit=${id}` : pathname, { scroll: false }),
     [router, pathname],
   );
+
+  const expandPath = useCallback((unit: OrgUnit) => {
+    setCollapsed((prev) => {
+      if (!unit.path.slice(0, -1).some((id) => prev.has(id))) return prev;
+      const next = new Set(prev);
+      for (const id of unit.path.slice(0, -1)) next.delete(id);
+      return next;
+    });
+  }, []);
 
   const toggle = useCallback((id: string, expand?: boolean) => {
     setCollapsed((prev) => {
@@ -47,21 +62,36 @@ export function OrgStructure() {
     });
   }, []);
 
+  // A deep link or a selection made from the detail reveals the unit in the tree.
+  useEffect(() => {
+    if (selected) expandPath(selected);
+  }, [selected, expandPath]);
+
+  // The selected unit was deleted (here or by someone else): drop the stale selection.
+  useEffect(() => {
+    if (units.data && selectedId && !tree.byId.has(selectedId)) select(null);
+  }, [units.data, selectedId, tree, select]);
+
   const onCreated = useCallback(
     (unit: OrgUnit) => {
-      setCollapsed((prev) => {
-        const next = new Set(prev);
-        for (const id of unit.path) next.delete(id);
-        return next;
-      });
+      expandPath(unit);
       // On phones the detail is a sheet: do not cover the tree after every create.
       if (isLg) select(unit.id);
     },
-    [isLg, select],
+    [isLg, select, expandPath],
   );
 
+  const onDeleted = useCallback(
+    (unit: OrgUnit) => {
+      if (unit.id === selectedId) select(isLg ? unit.parentId : null);
+    },
+    [isLg, select, selectedId],
+  );
+
+  const sheetUnit = selected ?? lastSelected.current;
+
   return (
-    <UnitDialogsProvider byId={tree.byId} onCreated={onCreated}>
+    <UnitDialogsProvider tree={tree} onCreated={onCreated} onMoved={expandPath} onDeleted={onDeleted}>
       <div data-testid="org-structure" className="flex min-h-0 flex-1 flex-col lg:flex-row">
         {units.isError ? (
           <ServerUnreachable onRetry={() => units.refetch()} retrying={units.isFetching} className="flex-1" />
@@ -88,9 +118,35 @@ export function OrgStructure() {
             </section>
             {isLg ? (
               <div className="scrollbar-thin min-h-0 min-w-0 flex-1 overflow-y-auto">
-                <DetailPlaceholder tree={tree} />
+                {selected ? (
+                  <div className="mx-auto w-full max-w-3xl px-6 py-6 xl:px-8">
+                    <UnitDetail unit={selected} tree={tree} onSelect={select} />
+                  </div>
+                ) : (
+                  <DetailPlaceholder tree={tree} />
+                )}
               </div>
-            ) : null}
+            ) : (
+              <Sheet open={selected !== null} onOpenChange={(open) => !open && select(null)}>
+                <SheetContent side="bottom" data-testid="unit-sheet">
+                  <div
+                    aria-hidden
+                    className="mx-auto mt-2.5 h-1 w-10 shrink-0 rounded-full bg-muted-foreground/25"
+                  />
+                  <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-4 pt-4 pb-10 sm:px-6">
+                    {sheetUnit ? (
+                      <UnitDetail
+                        unit={sheetUnit}
+                        tree={tree}
+                        onSelect={select}
+                        titleAs={SheetTitle}
+                        inSheet
+                      />
+                    ) : null}
+                  </div>
+                </SheetContent>
+              </Sheet>
+            )}
           </>
         )}
       </div>
