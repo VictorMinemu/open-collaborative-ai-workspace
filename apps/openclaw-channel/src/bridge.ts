@@ -222,6 +222,10 @@ export function createBridge(opts: BridgeOptions) {
             },
             opts.signal,
           );
+          // OpenClaw can end a turn without delivering anything and without throwing (e.g. "Embedded
+          // agent failed before reply"): treat silence as a failed attempt so it is retried and, if it
+          // keeps failing, the asker gets a visible notice instead of nothing.
+          if (index === 0) throw new Error("the agent produced no visible reply");
           break;
         } catch (error) {
           if (index > 0 || opts.signal.aborted || attempt >= dispatchAttempts) throw error;
@@ -232,7 +236,6 @@ export function createBridge(opts: BridgeOptions) {
           await sleep(retryDelayMs * attempt, opts.signal);
         }
       }
-      if (index === 0) log.warn?.(`mention ${event.eventId}: agent produced no visible reply`);
     } catch (error) {
       if (opts.signal.aborted) throw error; // stopping: leave the event for the successor to replay
       log.error?.(

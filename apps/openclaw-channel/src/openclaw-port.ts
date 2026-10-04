@@ -5,6 +5,21 @@ import { CHANNEL_ID, type MappedMention } from "./mention-mapper.js";
 import { applyPlanToDraft, type MutableConfig, planReconcile, type ReconcilePlan } from "./reconciler.js";
 
 /**
+ * OpenClaw tracks async work with AsyncLocalStorage scopes. Our account loop inherits the scope it was
+ * started in; when OpenClaw drains that scope (e.g. around a config hot reload) every later turn would
+ * run inside a CLOSED scope and fail with "Async work scope is closed". Run each turn from OpenClaw's
+ * detached root context instead (the context-free root it initialises for exactly this), falling back
+ * to a direct call on hosts that do not expose it.
+ */
+const DETACHED_KEY = Symbol.for("openclaw.detachedAsyncContext");
+export function runDetached<T>(run: () => T): T {
+  const detached = (globalThis as Record<symbol, unknown>)[DETACHED_KEY] as
+    | { runInAsyncScope?: (fn: () => T) => T }
+    | undefined;
+  return typeof detached?.runInAsyncScope === "function" ? detached.runInAsyncScope(run) : run();
+}
+
+/**
  * Structural view of the parts of OpenClaw's `PluginRuntime` (2026.9.7) we use. Typed locally (see
  * openclaw-sdk.d.ts for why there is no `openclaw` devDependency).
  */
@@ -222,32 +237,34 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
         },
       });
 
-      await runtime.channel.inbound.dispatch({
-        cfg,
-        channel: CHANNEL_ID,
-        accountId,
-        route: { agentId: m.openClawAgentId, dmScope: "main", sessionKey },
-        ctxPayload,
-        // Defence in depth: no tools on any turn, regardless of config.
-        toolsAllow: [],
-        replyOptions: { disableTools: true, abortSignal: signal },
-        delivery: {
-          deliver: async (payload: { text?: string; isReasoning?: boolean }) => {
-            if (payload.isReasoning) return;
-            const text = payload.text ?? "";
-            if (text.trim()) await deliver(text);
+      await runDetached(() =>
+        runtime.channel.inbound.dispatch({
+          cfg,
+          channel: CHANNEL_ID,
+          accountId,
+          route: { agentId: m.openClawAgentId, dmScope: "main", sessionKey },
+          ctxPayload,
+          // Defence in depth: no tools on any turn, regardless of config.
+          toolsAllow: [],
+          replyOptions: { disableTools: true, abortSignal: signal },
+          delivery: {
+            deliver: async (payload: { text?: string; isReasoning?: boolean }) => {
+              if (payload.isReasoning) return;
+              const text = payload.text ?? "";
+              if (text.trim()) await deliver(text);
+            },
+            onError: (error: unknown) => {
+              throw error instanceof Error ? error : new Error(`ocw dispatch failed: ${String(error)}`);
+            },
           },
-          onError: (error: unknown) => {
-            throw error instanceof Error ? error : new Error(`ocw dispatch failed: ${String(error)}`);
+          replyPipeline: {},
+          record: {
+            onRecordError: (error: unknown) => {
+              throw error instanceof Error ? error : new Error(`ocw session record failed: ${String(error)}`);
+            },
           },
-        },
-        replyPipeline: {},
-        record: {
-          onRecordError: (error: unknown) => {
-            throw error instanceof Error ? error : new Error(`ocw session record failed: ${String(error)}`);
-          },
-        },
-      });
+        }),
+      );
     },
   };
 }
