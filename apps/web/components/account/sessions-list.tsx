@@ -194,7 +194,7 @@ function SessionRow({ session, onRevoke }: { session: SessionInfo; onRevoke: () 
           data-testid="session-revoke"
           aria-label={`Sign out ${name}`}
           onClick={onRevoke}
-          className="shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+          className="h-10 shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive sm:h-8"
         >
           Revoke
         </Button>

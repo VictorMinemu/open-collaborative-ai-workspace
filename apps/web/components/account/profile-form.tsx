@@ -242,23 +242,25 @@ function ProfileEditor({ profile }: { profile: Profile }) {
       </Section>
 
       {/* Sticky action bar: always reachable on long mobile pages. */}
-      <div className="sticky bottom-0 -mx-4 border-t bg-background/90 px-4 py-3 backdrop-blur-md sm:-mx-6 sm:px-6">
+      <div className="sticky bottom-0 -mx-4 border-t bg-background px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:-mx-6 sm:px-6">
         <div className="flex items-center justify-end gap-2">
           <span className="mr-auto text-muted-foreground text-xs" aria-live="polite">
             {dirty ? "Unsaved changes" : "All changes saved"}
           </span>
-          <Button
-            type="button"
-            variant="ghost"
-            disabled={!dirty || pending}
-            onClick={() => {
-              setDraft(base);
-              setNameTouched(false);
-              setFormError(null);
-            }}
-          >
-            Discard
-          </Button>
+          {dirty ? (
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={pending}
+              onClick={() => {
+                setDraft(base);
+                setNameTouched(false);
+                setFormError(null);
+              }}
+            >
+              Discard
+            </Button>
+          ) : null}
           <Button type="submit" data-testid="profile-save" disabled={!dirty || !valid || pending}>
             {pending ? <Spinner /> : <Check />}
             {pending ? "Saving…" : "Save changes"}

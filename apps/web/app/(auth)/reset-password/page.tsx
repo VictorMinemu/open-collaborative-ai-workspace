@@ -83,7 +83,7 @@ function ResetForm({ token, onInvalid }: { token: string; onInvalid: () => void 
     <AuthCard
       eyebrow={<IconTile />}
       title="Choose a new password"
-      description="Every session of your account will be signed out. Then sign in with the new password."
+      description="You will be signed out on every device, then sign in with your new password."
       footer={
         <Link href="/login" className="font-medium text-foreground underline-offset-4 hover:underline">
           Back to sign in

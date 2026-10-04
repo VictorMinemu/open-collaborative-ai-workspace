@@ -5,6 +5,9 @@ import { ADMIN, API_URL, shot } from "./env";
  * Account (AUTH-04, AUTH-05, ORG-06): Settings › Profile, Settings › Security (sessions + change password),
  * /reset-password and the login page's "Forgot password?". Every test uses a fresh invited member per
  * project, so ADMIN's password and sessions are never touched.
+ *
+ * Sign-ins are rate limited (30/min per IP) and the whole suite shares one IP, so this spec signs in only
+ * where the sign-in itself is under test: browsers reuse the session the invitation acceptance opened.
  */
 
 const BASE_URL = process.env.OCW_E2E_BASE_URL ?? "http://localhost:3000";
@@ -12,11 +15,14 @@ const BASE_URL = process.env.OCW_E2E_BASE_URL ?? "http://localhost:3000";
 const ELECTRON_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) OCW/0.1.0 Chrome/138.0.0.0 Electron/37.2.0 Safari/537.36";
 const INVALID_LINK = "This link is invalid or has expired. Ask an Organization Admin for a new one.";
+
 interface TestUser {
   id: string;
   name: string;
   email: string;
   password: string;
+  /** API context holding the session opened by accepting the invitation. */
+  session: APIRequestContext;
 }
 
 async function apiAs(user: { email: string; password: string }): Promise<APIRequestContext> {
@@ -39,8 +45,26 @@ async function freshUser(admin: APIRequestContext, slug: string, name: string): 
   const res = await anon.post(`/api/v1/invitations/${invitationId}/accept`, { data: { name, password } });
   expect(res.ok(), "accept invitation").toBe(true);
   const me = (await res.json()) as { user: { id: string } };
-  await anon.dispose();
-  return { id: me.user.id, name, email, password };
+  return { id: me.user.id, name, email, password, session: anon };
+}
+
+/** One admin API session per worker (each sign-in counts against the shared rate limit). */
+let adminCtx: Promise<APIRequestContext> | null = null;
+const admin = () => {
+  adminCtx ??= apiAs(ADMIN);
+  return adminCtx;
+};
+test.afterAll(async () => {
+  if (adminCtx) await (await adminCtx).dispose();
+  adminCtx = null;
+});
+
+/** Hands the user's existing session to the browser (no extra sign-in) and opens the app. */
+async function useSession(page: Page, user: TestUser) {
+  const { cookies } = await user.session.storageState();
+  await page.context().addCookies(cookies);
+  await page.goto("/chat");
+  await expect(page.getByTestId("app-shell")).toBeVisible();
 }
 
 async function signIn(page: Page, user: { email: string; password: string }) {
@@ -93,11 +117,9 @@ test("profile: edit name, emoji avatar and status; visible across the app", asyn
   test.setTimeout(90_000);
   const project = info.project.name;
   const mobile = project === "mobile";
-  const admin = await apiAs(ADMIN);
-  const user = await freshUser(admin, `profile-${project}`, "Morgan Blake");
-  await admin.dispose();
-
-  await signIn(page, user);
+  const user = await freshUser(await admin(), `profile-${project}`, "Morgan Blake");
+  await useSession(page, user);
+  await user.session.dispose();
   await openFromUserMenu(page, "profile");
   await expect(page.getByTestId("profile-form")).toBeVisible();
   await expect(page.getByLabel("Display name")).toHaveValue(user.name);
@@ -122,6 +144,7 @@ test("profile: edit name, emoji avatar and status; visible across the app", asyn
   await page.getByLabel("Or use an image URL").fill("http://example.com/me.png");
   await expect(page.getByText("Use an https:// image URL or an emoji")).toBeVisible();
   await expect(save).toBeDisabled();
+  await shots(page, "profile-invalid-avatar", project);
 
   // Pick 🦊 (clears the URL), rename, set a status.
   await page.getByRole("button", { name: "Fox" }).click();
@@ -188,13 +211,10 @@ test("security: sessions with client identity, revoke one, sign out everywhere e
 }, info) => {
   test.setTimeout(120_000);
   const project = info.project.name;
-  const admin = await apiAs(ADMIN);
-  const user = await freshUser(admin, `security-${project}`, "Riley Chen");
-  await admin.dispose();
-
-  await signIn(page, user);
-  // Sessions: this browser, the one invitation acceptance opened, the desktop app (Electron user agent)
-  // and a script.
+  const user = await freshUser(await admin(), `security-${project}`, "Riley Chen");
+  // Sessions: this browser (the one the invitation acceptance opened), the desktop app (Electron user
+  // agent, signed in through the UI) and a script.
+  await useSession(page, user);
   const desktopCtx = await browser.newContext({
     baseURL: BASE_URL,
     userAgent: ELECTRON_UA,
@@ -206,7 +226,7 @@ test("security: sessions with client identity, revoke one, sign out everywhere e
 
   await openFromUserMenu(page, "security");
   const rows = page.getByTestId("session-row");
-  await expect(rows).toHaveCount(4);
+  await expect(rows).toHaveCount(3);
   const current = rows.and(page.locator("[data-current]"));
   await expect(current).toHaveCount(1);
   await expect(current).toHaveAttribute("data-kind", "web");
@@ -223,7 +243,7 @@ test("security: sessions with client identity, revoke one, sign out everywhere e
   await expect(page.getByTestId("confirm-sign-out")).toContainText("Desktop app on macOS");
   await page.getByTestId("confirm-sign-out-submit").click();
   await expect(toast(page, "Signed out Desktop app on macOS")).toBeVisible();
-  await expect(rows).toHaveCount(3);
+  await expect(rows).toHaveCount(2);
   await desktop.goto(`${BASE_URL}/settings`);
   await expect(desktop).toHaveURL(/\/login/);
   await desktopCtx.close();
@@ -270,12 +290,11 @@ test("security: sessions with client identity, revoke one, sign out everywhere e
 test("reset password: admin-issued link, single use, invalid states", async ({ page }, info) => {
   test.setTimeout(90_000);
   const project = info.project.name;
-  const admin = await apiAs(ADMIN);
-  const user = await freshUser(admin, `reset-${project}`, "Sam Ortiz");
-  const res = await admin.post(`/api/v1/members/${user.id}/password-reset-link`);
+  const user = await freshUser(await admin(), `reset-${project}`, "Sam Ortiz");
+  await user.session.dispose();
+  const res = await (await admin()).post(`/api/v1/members/${user.id}/password-reset-link`);
   expect(res.ok(), "issue reset link").toBe(true);
   const { link } = (await res.json()) as { link: string };
-  await admin.dispose();
   const url = new URL(link);
   const resetPath = `${url.pathname}${url.search}`;
   expect(url.pathname).toBe("/reset-password");
