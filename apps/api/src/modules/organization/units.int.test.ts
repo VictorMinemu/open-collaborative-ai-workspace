@@ -198,3 +198,192 @@ describe("units: build and rearrange the hierarchy", () => {
     expect((await su.query("select count(*)::int as n from app.org_units")).rows[0].n).toBe(4);
   });
 });
+
+describe("units: rename, delete, concurrency and memberships with leads", () => {
+  let lead: TestClient;
+  let leadId: string;
+  let samId: string;
+  let eng: string;
+  let core: string;
+  let infra: string;
+  let sales: string;
+
+  const create = async (kind: string, name: string, parentId: string | null) =>
+    (await ok(admin.request("POST", "/api/v1/units", { kind, name, parentId }))).id as string;
+
+  beforeAll(async () => {
+    ({ client: lead, id: leadId } = await invite("lena@example.test", "lead", "Lena Lead"));
+    ({ id: samId } = await invite("sam@example.test", "standard", "Sam Standard"));
+    eng = await create("department", "Engineering", null);
+    core = await create("team", "Core", eng);
+    infra = await create("team", "Infra", eng);
+    sales = await create("department", "Sales", null);
+  });
+
+  it("renames a unit; a case-insensitive sibling clash is 409", async () => {
+    const renamed = await ok(admin.request("PATCH", `/api/v1/units/${core}`, { name: "Core Platform" }));
+    expect(renamed).toMatchObject({ id: core, name: "Core Platform" });
+    expect(
+      (await fails(admin.request("PATCH", `/api/v1/units/${infra}`, { name: "core platform" }), 409)).code,
+    ).toBe("unit_name_taken");
+    const rows = await audit("unit.renamed");
+    expect(rows.at(-1)?.metadata).toMatchObject({ from: "Core", to: "Core Platform" });
+    await fails(dev.request("PATCH", `/api/v1/units/${core}`, { name: "Mine" }), 403);
+  });
+
+  it("deletes only leaves; memberships and scoped rules go with the unit and are listed in the audit", async () => {
+    expect((await fails(admin.request("DELETE", `/api/v1/units/${eng}`), 409)).code).toBe(
+      "unit_has_children",
+    );
+    const tmp = await create("project", "Temp", core);
+    await ok(admin.request("POST", `/api/v1/units/${tmp}/members`, { userId: devId }));
+    const rule = await su.query(
+      `insert into app.permission_rules (organization_id, scope_unit_id, subject_kind, permission, effect)
+       values ($1, $2, 'everyone', 'channel.create', 'deny') returning id`,
+      [orgId, tmp],
+    );
+    const ruleId = rule.rows[0].id as string;
+
+    await fails(dev.request("DELETE", `/api/v1/units/${tmp}`), 403);
+    await ok(admin.request("DELETE", `/api/v1/units/${tmp}`));
+    expect((await su.query("select 1 from app.org_units where id = $1", [tmp])).rowCount).toBe(0);
+    expect((await su.query("select 1 from app.unit_memberships where unit_id = $1", [tmp])).rowCount).toBe(0);
+    expect((await su.query("select 1 from app.permission_rules where id = $1", [ruleId])).rowCount).toBe(0);
+    const [row] = await audit("unit.deleted");
+    expect(row).toMatchObject({ resource_id: tmp, result: "success" });
+    expect(row.metadata).toMatchObject({ name: "Temp", removedMemberIds: [devId], removedRuleIds: [ruleId] });
+    expect((await fails(admin.request("DELETE", `/api/v1/units/${tmp}`), 404)).code).toBe("unit_not_found");
+  });
+
+  it("two opposite concurrent moves: exactly one wins, the other is unit_cycle, the tree has no cycle", async () => {
+    for (let round = 0; round < 5; round += 1) {
+      const a = await create("department", `A${round}`, null);
+      const b = await create("department", `B${round}`, null);
+      const results = await Promise.all([
+        admin.request("POST", `/api/v1/units/${a}/move`, { parentId: b }),
+        admin.request("POST", `/api/v1/units/${b}/move`, { parentId: a }),
+      ]);
+      expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
+      const loser = results.find((r) => r.status === 409)?.body as { error: { code: string } } | undefined;
+      expect(loser?.error.code).toBe("unit_cycle");
+    }
+    const rows = (await su.query("select id, parent_id, path from app.org_units")).rows as Array<{
+      id: string;
+      parent_id: string | null;
+      path: string[];
+    }>;
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    for (const r of rows) {
+      expect(r.path.at(-1)).toBe(r.id);
+      expect(new Set(r.path).size).toBe(r.path.length);
+      expect(r.path.slice(0, -1)).toEqual(r.parent_id ? byId.get(r.parent_id)?.path : []);
+    }
+  });
+
+  it("admin adds members and appoints leads; only lead/admin org roles can lead", async () => {
+    const added = await ok(admin.request("POST", `/api/v1/units/${core}/members`, { userId: devId }));
+    expect(added).toMatchObject({ userId: devId, role: "member", orgRole: "developer", status: "active" });
+    expect(
+      (await fails(admin.request("POST", `/api/v1/units/${core}/members`, { userId: devId }), 409)).code,
+    ).toBe("already_member");
+    expect(
+      (
+        await fails(
+          admin.request("POST", `/api/v1/units/${core}/members`, { userId: samId, role: "lead" }),
+          400,
+        )
+      ).code,
+    ).toBe("lead_requires_role");
+    expect(
+      (
+        await fails(
+          admin.request("POST", `/api/v1/units/${core}/members`, {
+            userId: "01900000-0000-7000-8000-000000000000",
+          }),
+          400,
+        )
+      ).code,
+    ).toBe("unknown_member");
+    await ok(admin.request("POST", `/api/v1/units/${eng}/members`, { userId: leadId, role: "lead" }));
+    expect(
+      (await fails(admin.request("PATCH", `/api/v1/units/${core}/members/${devId}`, { role: "lead" }), 400))
+        .code,
+    ).toBe("lead_requires_role");
+
+    const list = await ok(admin.request("GET", "/api/v1/units"));
+    const byId = new Map(list.units.map((u: { id: string }) => [u.id, u]));
+    expect(byId.get(eng)).toMatchObject({ memberCount: 1, leadCount: 1 });
+    expect(byId.get(core)).toMatchObject({ memberCount: 1, leadCount: 0 });
+  });
+
+  it("a lead manages members of their own subtree only and cannot appoint leads", async () => {
+    const view = await ok(lead.request("GET", "/api/v1/units"));
+    const byId = new Map(view.units.map((u: { id: string; viewerCan: string[] }) => [u.id, u.viewerCan]));
+    expect(byId.get(eng)).toEqual(["unit.members.manage"]);
+    expect(byId.get(core)).toEqual(["unit.members.manage"]);
+    expect(byId.get(sales)).toEqual([]);
+
+    await ok(lead.request("POST", `/api/v1/units/${core}/members`, { userId: samId }));
+    const members = await ok(lead.request("GET", `/api/v1/units/${core}/members`));
+    expect(members.members).toEqual([
+      expect.objectContaining({
+        userId: devId,
+        displayName: "Dana Dev",
+        orgRole: "developer",
+        role: "member",
+      }),
+      expect.objectContaining({
+        userId: samId,
+        displayName: "Sam Standard",
+        avatarUrl: null,
+        orgRole: "standard",
+        role: "member",
+        status: "active",
+      }),
+    ]);
+    await ok(lead.request("DELETE", `/api/v1/units/${core}/members/${samId}`));
+
+    const sibling = await fails(
+      lead.request("POST", `/api/v1/units/${sales}/members`, { userId: samId }),
+      403,
+    );
+    expect(sibling.details).toMatchObject({ permission: "unit.members.manage" });
+    const appoint = await fails(
+      lead.request("POST", `/api/v1/units/${infra}/members`, { userId: leadId, role: "lead" }),
+      403,
+    );
+    expect(appoint.details).toMatchObject({ permission: "unit.manage" });
+    await fails(lead.request("PATCH", `/api/v1/units/${core}/members/${devId}`, { role: "member" }), 403);
+    await fails(lead.request("POST", "/api/v1/units", { kind: "team", name: "Lena's", parentId: eng }), 403);
+    // A lead cannot strip lead authority either (the same decision as appointing).
+    await fails(lead.request("DELETE", `/api/v1/units/${eng}/members/${leadId}`), 403);
+    // A plain member manages nobody.
+    await fails(dev.request("POST", `/api/v1/units/${core}/members`, { userId: samId }), 403);
+  });
+
+  it("role changes and removals are audited in the same transaction and emit units.updated", async () => {
+    await ok(admin.request("POST", `/api/v1/units/${core}/members`, { userId: leadId }));
+    const promoted = await ok(
+      admin.request("PATCH", `/api/v1/units/${core}/members/${leadId}`, { role: "lead" }),
+    );
+    expect(promoted).toMatchObject({ userId: leadId, role: "lead", orgRole: "lead" });
+    await ok(admin.request("DELETE", `/api/v1/units/${core}/members/${leadId}`));
+    expect((await fails(admin.request("DELETE", `/api/v1/units/${core}/members/${leadId}`), 404)).code).toBe(
+      "not_a_unit_member",
+    );
+
+    const changed = await audit("unit_membership.role_changed");
+    expect(changed).toHaveLength(1);
+    expect(changed[0].metadata).toMatchObject({ unitId: core, userId: leadId, from: "member", to: "lead" });
+    const addedRows = await audit("unit_membership.added");
+    expect(addedRows.map((r) => r.metadata.userId)).toEqual(expect.arrayContaining([devId, leadId, samId]));
+    const removed = await audit("unit_membership.removed");
+    expect(removed.map((r) => r.metadata.userId)).toEqual([samId, leadId]);
+    expect(removed[0].user_id).toBe(leadId); // the lead who removed Sam is the actor
+
+    const events = (await orgEvents()).filter(
+      (e) => e.type === "units.updated" && e.payload.action === "members",
+    );
+    expect(events.length).toBe(addedRows.length + changed.length + removed.length);
+  });
+});
