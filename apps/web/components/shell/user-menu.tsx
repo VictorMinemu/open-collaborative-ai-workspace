@@ -1,7 +1,7 @@
 "use client";
 
 import type { MeResponse } from "@ocw/contracts";
-import { LogOut, Monitor, Moon, Settings, Sun } from "lucide-react";
+import { LogOut, Monitor, Moon, Settings, ShieldCheck, Sun, UserRound } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import { UserAvatar } from "@/components/ui/avatar";
@@ -16,6 +16,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useProfile } from "@/lib/account-queries";
 import { useSignOut } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { ConnectionDot, useConnectionMeta } from "./connection-dot";
@@ -72,6 +73,7 @@ export function UserMenu({
             <div className="truncate text-muted-foreground text-xs">{user.email}</div>
           </div>
         </div>
+        <MenuStatus />
         <div className="mx-2 mb-1.5 flex items-center gap-2 rounded-md bg-muted/60 px-2 py-1.5 text-muted-foreground text-xs">
           <span className={cn("size-2 rounded-full", conn.className)} />
           Realtime: {conn.label}
@@ -92,6 +94,12 @@ export function UserMenu({
           </DropdownMenuRadioGroup>
         </DropdownMenuGroup>
         <DropdownMenuSeparator />
+        <DropdownMenuItem data-testid="user-menu-profile" onClick={() => router.push("/settings/profile")}>
+          <UserRound /> Profile
+        </DropdownMenuItem>
+        <DropdownMenuItem data-testid="user-menu-security" onClick={() => router.push("/settings/security")}>
+          <ShieldCheck /> Security
+        </DropdownMenuItem>
         <DropdownMenuItem onClick={() => router.push("/settings")}>
           <Settings /> Settings
         </DropdownMenuItem>
@@ -108,5 +116,21 @@ export function UserMenu({
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+/** The member's status (fetched only while the menu is open: the content mounts on open). */
+function MenuStatus() {
+  const profile = useProfile();
+  const p = profile.data;
+  if (!p || (!p.statusEmoji && !p.statusText)) return null;
+  return (
+    <div
+      data-testid="user-menu-status"
+      className="mx-2 mb-1.5 flex items-center gap-2 rounded-md border px-2 py-1.5 text-xs"
+    >
+      {p.statusEmoji ? <span className="text-sm leading-none">{p.statusEmoji}</span> : null}
+      <span className="truncate text-muted-foreground">{p.statusText ?? ""}</span>
+    </div>
   );
 }
