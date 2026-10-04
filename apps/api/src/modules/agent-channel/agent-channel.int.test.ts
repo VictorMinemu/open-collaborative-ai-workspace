@@ -634,6 +634,10 @@ describe("mention → delivery → reply", () => {
       idempotencyKey: "after-disable",
     });
     expect(res.status).toBe(403);
+    expect(errorOf(res as { body: Record<string, unknown> | null })).toMatchObject({
+      code: "agent_disabled",
+      details: { layer: "agent", reason: "agent_disabled" },
+    });
     // A disabled bot ignores ready acks.
     const ack = await p.request("POST", `/agents/${agentId}/status`, { status: "ready" });
     expect(ack.body).toMatchObject({ status: "disabled" });
@@ -647,10 +651,16 @@ describe("mention → delivery → reply", () => {
     const other = ((await call(admin, "POST", "/api/v1/channels", { name: "random" })).body as { id: string })
       .id;
     const base = { agentId, text: "hi", idempotencyKey: randomUUID() };
-    expect(
-      (await p.request("POST", "/messages", { ...base, conversationId: other, threadRootMessageId: null }))
-        .status,
-    ).toBe(403);
+    const outside = await p.request("POST", "/messages", {
+      ...base,
+      conversationId: other,
+      threadRootMessageId: null,
+    });
+    expect(outside.status).toBe(403);
+    expect(errorOf(outside as { body: Record<string, unknown> | null })).toMatchObject({
+      code: "agent_not_member",
+      details: { permission: "channel.post", layer: "resource", reason: "agent_not_member" },
+    });
     expect(
       (
         await p.request("POST", "/messages", {
@@ -705,6 +715,113 @@ describe("mention → delivery → reply", () => {
     await new Promise((r) => setTimeout(r, 300));
     expect(live.events).toHaveLength(0);
     expect(live.lastSeq).toBe(Number(all.at(-1)!.seq));
+  });
+});
+
+describe("the cell and its bots are principals", () => {
+  const errOf = (r: { body: unknown }) => errorOf(r as { body: Record<string, unknown> | null });
+  const reply = (p: FakeCellPlugin, extra: Record<string, unknown>) =>
+    p.request("POST", "/messages", {
+      agentId,
+      threadRootMessageId: null,
+      text: "bot says hi",
+      idempotencyKey: randomUUID(),
+      ...extra,
+    });
+
+  it("cell administration is cell.manage: a developer gets 403 on the runtime routes", async () => {
+    for (const [method, path] of [
+      ["GET", "/api/v1/agent-cell"],
+      ["POST", "/api/v1/agent-cell/token"],
+    ] as const) {
+      const res = await call(alex, method, path);
+      expect(res.status, path).toBe(403);
+      expect(errorOf(res).details).toMatchObject({ permission: "cell.manage", layer: "role" });
+    }
+  });
+
+  it("a deny rule on one bot refuses its replies on the agent layer", async () => {
+    const p = plugin();
+    const drop = await denyRule("agent", agentId, "channel.post");
+    try {
+      const res = await reply(p, { conversationId: channelId });
+      expect(res.status).toBe(403);
+      expect(errOf(res)).toMatchObject({
+        code: "forbidden",
+        details: { permission: "channel.post", layer: "agent", reason: "denied_by_rule" },
+      });
+      const denied = await su.query(
+        `select actor_kind, metadata from app.audit_events
+         where action = 'authz.denied' and resource_id = '/agent-channel/v1/messages' order by occurred_at desc limit 1`,
+      );
+      expect(denied.rows[0]).toMatchObject({
+        actor_kind: "agent",
+        metadata: { permission: "channel.post", layer: "agent" },
+      });
+    } finally {
+      await drop();
+    }
+    expect((await reply(p, { conversationId: channelId })).status).toBe(200);
+  });
+
+  it("a reply to a human who lost access to the private channel is refused and stores nothing", async () => {
+    const p = plugin();
+    const room = (await call(admin, "POST", "/api/v1/channels", { name: "board", visibility: "private" }))
+      .body as { id: string };
+    for (const member of [
+      { kind: "user", id: alexId },
+      { kind: "agent", id: agentId },
+    ]) {
+      expect((await call(admin, "POST", `/api/v1/channels/${room.id}/members`, member)).status).toBe(200);
+    }
+    const asked = (
+      await call(alex, "POST", `/api/v1/conversations/${room.id}/messages`, { body: "Is the roadmap final?" })
+    ).body as { id: string };
+    expect((await call(admin, "DELETE", `/api/v1/channels/${room.id}/members/user/${alexId}`)).status).toBe(
+      200,
+    );
+
+    const refused = await reply(p, {
+      conversationId: room.id,
+      threadRootMessageId: asked.id,
+      inReplyToMessageId: asked.id,
+    });
+    expect(refused.status).toBe(403);
+    expect(errOf(refused)).toMatchObject({ details: { layer: "resource", reason: "private_channel" } });
+    const stored = await su.query(
+      "select count(*)::int as n from app.messages where conversation_id = $1 and author_kind = 'agent'",
+      [room.id],
+    );
+    expect(stored.rows[0].n).toBe(0);
+
+    // The same bot still answers someone who can read the channel, in the thread.
+    const question = (
+      await call(admin, "POST", `/api/v1/conversations/${room.id}/messages`, { body: "And now?" })
+    ).body as { id: string };
+    const ok = await reply(p, {
+      conversationId: room.id,
+      threadRootMessageId: question.id,
+      inReplyToMessageId: question.id,
+    });
+    expect(ok.status).toBe(200);
+    expect(ok.body).toMatchObject({ created: true, threadRootMessageId: question.id });
+  });
+
+  it("typing is decided for the bot: a non-member is refused, a member is accepted", async () => {
+    const p = plugin();
+    const other = ((await call(admin, "POST", "/api/v1/channels", { name: "lounge" })).body as { id: string })
+      .id;
+    const outside = await p.request("POST", "/typing", { agentId, conversationId: other, typing: true });
+    expect(outside.status).toBe(403);
+    expect(errOf(outside)).toMatchObject({
+      code: "agent_not_member",
+      details: { permission: "channel.read", layer: "resource", reason: "agent_not_member" },
+    });
+    const inside = await p.request("POST", "/typing", { agentId, conversationId: channelId, typing: true });
+    expect(inside.status).toBe(200);
+    expect(
+      (await p.request("POST", "/typing", { agentId: randomUUID(), conversationId: channelId })).status,
+    ).toBe(404);
   });
 });
 
@@ -795,5 +912,24 @@ describe("cell tokens + tenant isolation", () => {
     for (const r of audit.rows) expect(r.m).not.toContain(PROVIDER_KEY);
     const events = await su.query("select payload::text as p from app.stream_events");
     for (const r of events.rows) expect(r.p).not.toContain(PROVIDER_KEY);
+  });
+});
+
+describe("every agent and agent-channel route is decided", () => {
+  it("declares its principal and answered no 2xx without a resolver decision", () => {
+    const { authz } = stack.built;
+    const prefixes = ["/agent-channel/v1", "/api/v1/agent-cell", "/api/v1/model-providers", "/api/v1/agents"];
+    const ours = [...authz.routes].filter(([key]) =>
+      prefixes.some((prefix) => key.split(" ")[1]?.startsWith(prefix)),
+    );
+    for (const [key, mode] of ours) {
+      expect(mode, key).toBe(key.split(" ")[1]!.startsWith("/agent-channel/v1") ? "cell" : "user");
+    }
+    expect(authz.routes.get("GET /agent-channel/v1/ws")).toBe("cell");
+    expect(authz.routes.get("POST /agent-channel/v1/messages")).toBe("cell");
+    expect(authz.routes.get("GET /api/v1/models")).toBe("user");
+    expect(
+      authz.undecided.filter((u) => [...prefixes, "/api/v1/models"].some((p) => u.url.startsWith(p))),
+    ).toEqual([]);
   });
 });

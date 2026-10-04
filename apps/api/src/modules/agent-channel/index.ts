@@ -1,4 +1,3 @@
-// authz-legacy: 02-10 migrates this file to the resolver
 import {
   AGENT_CHANNEL_BASE_PATH,
   AGENT_CHANNEL_PROTOCOL_VERSION,
@@ -22,8 +21,9 @@ import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { z } from "zod";
 import { type ApiModule, type App, authOf, type Core, tenant } from "../../core";
 import { randomToken, sha256Hex } from "../../lib/crypto";
-import { badRequest, forbidden, HttpError, notFound } from "../../lib/errors";
+import { badRequest, HttpError, notFound } from "../../lib/errors";
 import { applyCellStatus, cellAgents, cellProviders, cellSubscriptions, findAgent } from "../agent";
+import { channelResource, createPermissionService, type ResourceFacts } from "../organization";
 import { cellOf, createCellAuth } from "./auth";
 import { registerCellGateway } from "./gateway";
 import { registerMentionHandler } from "./mentions";
@@ -35,31 +35,45 @@ export { buildMentionEvents } from "./mentions";
 const tags = ["agent-channel"];
 const bearer = [{ cellToken: [] as string[] }];
 
-/** Agent row usable by the cell, or the matching HTTP error. */
-async function requireActiveAgent(tx: Tx, agentId: string) {
-  const agent = await findAgent(tx, agentId);
-  if (!agent) throw notFound("Agent not found in this cell", "agent_not_found");
-  if (agent.status === "disabled") throw forbidden("This bot is disabled", "agent_disabled");
-  return agent;
-}
-
-/** The agent must be a member of the conversation or of its parent channel (threads). */
-async function requireMembership(tx: Tx, agentId: string, conversationId: string) {
+async function getConversation(tx: Tx, conversationId: string) {
   const [conv] = await tx.select().from(conversations).where(eq(conversations.id, conversationId));
   if (!conv) throw notFound("Conversation not found", "conversation_not_found");
-  const scope = [conv.id, ...(conv.parentConversationId ? [conv.parentConversationId] : [])];
+  return conv;
+}
+
+/**
+ * The bot's view of a conversation as resolver facts: a thread is judged by its parent channel (visibility,
+ * archived, the bot's membership in it or in the thread). Data only; the decision is the resolver's.
+ */
+async function botChannelResource(
+  tx: Tx,
+  conv: typeof conversations.$inferSelect,
+  agentId: string,
+): Promise<ResourceFacts> {
+  let channel = conv;
+  if (conv.kind === "thread" && conv.parentConversationId) {
+    const [parent] = await tx
+      .select()
+      .from(conversations)
+      .where(eq(conversations.id, conv.parentConversationId));
+    if (parent) channel = parent;
+  }
   const [m] = await tx
-    .select({ id: conversationMembers.memberId })
+    .select({ role: conversationMembers.role })
     .from(conversationMembers)
     .where(
       and(
-        inArray(conversationMembers.conversationId, scope),
+        inArray(conversationMembers.conversationId, [...new Set([conv.id, channel.id])]),
         eq(conversationMembers.memberKind, "agent"),
         eq(conversationMembers.memberId, agentId),
       ),
-    );
-  if (!m) throw forbidden("The bot is not a member of this conversation", "not_a_member");
-  return conv;
+    )
+    .limit(1);
+  return channelResource({
+    visibility: channel.visibility,
+    archived: channel.archivedAt !== null,
+    viewerRole: m?.role ?? null,
+  });
 }
 
 /**
@@ -70,7 +84,16 @@ async function requireMembership(tx: Tx, agentId: string, conversationId: string
 export function createAgentChannelModule(core: Core): ApiModule {
   const auth = createCellAuth(core);
   const presence = createCellPresence(core);
-  const admin = core.identity.requireRole("admin");
+  const perms = createPermissionService(core);
+  const requireUser = core.identity.requireUser;
+  const user = { authz: "user" as const };
+  const cellManage = { config: user, preHandler: [requireUser, perms.requirePermission("cell.manage")] };
+  const providerManage = {
+    config: user,
+    preHandler: [requireUser, perms.requirePermission("provider.manage")],
+  };
+  /** Every Agent Channel route: the authenticated cell principal must hold `cell.sync`. */
+  const cellRoute = { config: { authz: "cell" as const } };
   const providerAuth = createProviderAuth(core, presence);
   registerMentionHandler(core);
 
@@ -94,10 +117,10 @@ export function createAgentChannelModule(core: Core): ApiModule {
     name: "agent-channel",
     prefix: "",
     register(app) {
-      // ================================================================ admin (cookie session, /api/v1)
+      // ================================================================ admin (signed-in user, /api/v1)
       app.get(
         "/api/v1/agent-cell",
-        { preHandler: admin, schema: { tags, response: { 200: AgentCellStatus } } },
+        { ...cellManage, schema: { tags, response: { 200: AgentCellStatus } } },
         async (req) => {
           const created = await core.db.withTenant(tenant(req), uiTokenCreatedAt);
           return presence.status(authOf(req).organizationId, created);
@@ -106,7 +129,7 @@ export function createAgentChannelModule(core: Core): ApiModule {
 
       app.post(
         "/api/v1/agent-cell/token",
-        { preHandler: admin, schema: { tags, response: { 200: RotateCellTokenResponse } } },
+        { ...cellManage, schema: { tags, response: { 200: RotateCellTokenResponse } } },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
             const a = authOf(req);
@@ -137,7 +160,6 @@ export function createAgentChannelModule(core: Core): ApiModule {
               resourceType: "agent_credential",
               resourceId: row.id,
               sessionId: a.sessionId,
-              clientKind: "web",
               metadata: { revoked: revoked.map((r) => r.id) },
             });
             // Shown once; only the SHA-256 is stored.
@@ -145,13 +167,13 @@ export function createAgentChannelModule(core: Core): ApiModule {
           }),
       );
 
-      // ---------------------------------------------------------------- subscription sign-in (admin)
+      // ---------------------------------------------------------------- subscription sign-in (provider.manage)
       // The device-code flow runs inside the cell (ADR-0006); these routes start/cancel it and expose its
-      // state, including the one-time code, to admins only.
+      // state, including the one-time code, to provider managers only.
       app.get(
         "/api/v1/model-providers/:provider/auth",
         {
-          preHandler: admin,
+          ...providerManage,
           schema: { tags, params: SubscriptionProviderParams, response: { 200: ProviderAuthStatus } },
         },
         async (req, reply) => {
@@ -163,7 +185,7 @@ export function createAgentChannelModule(core: Core): ApiModule {
       app.post(
         "/api/v1/model-providers/:provider/auth",
         {
-          preHandler: admin,
+          ...providerManage,
           schema: {
             tags,
             params: SubscriptionProviderParams,
@@ -175,7 +197,12 @@ export function createAgentChannelModule(core: Core): ApiModule {
           const a = authOf(req);
           reply.header("cache-control", "no-store");
           return providerAuth.start(
-            { organizationId: a.organizationId, userId: a.userId, sessionId: a.sessionId },
+            {
+              organizationId: a.organizationId,
+              userId: a.userId,
+              sessionId: a.sessionId,
+              clientKind: a.clientKind,
+            },
             req.params.provider,
             { restart: req.body?.restart },
           );
@@ -185,14 +212,19 @@ export function createAgentChannelModule(core: Core): ApiModule {
       app.delete(
         "/api/v1/model-providers/:provider/auth",
         {
-          preHandler: admin,
+          ...providerManage,
           schema: { tags, params: SubscriptionProviderParams, response: { 200: ProviderAuthStatus } },
         },
         async (req, reply) => {
           const a = authOf(req);
           reply.header("cache-control", "no-store");
           return providerAuth.cancel(
-            { organizationId: a.organizationId, userId: a.userId, sessionId: a.sessionId },
+            {
+              organizationId: a.organizationId,
+              userId: a.userId,
+              sessionId: a.sessionId,
+              clientKind: a.clientKind,
+            },
             req.params.provider,
           );
         },
@@ -204,10 +236,13 @@ export function createAgentChannelModule(core: Core): ApiModule {
           // Child scopes lose the Zod type provider in their inferred type; restore it.
           const scope = raw as unknown as App;
           scope.addHook("onRequest", auth.requireCell);
+          // The cell acts as its own principal: every route is decided as `cell.sync` (bots, when they act,
+          // are decided again as agent principals below and in chat).
+          scope.addHook("preHandler", perms.requirePermission("cell.sync"));
 
           scope.get(
             "/cell",
-            { schema: { tags, security: bearer, response: { 200: CellSnapshot } } },
+            { ...cellRoute, schema: { tags, security: bearer, response: { 200: CellSnapshot } } },
             async (req, reply) => {
               const cell = cellOf(req);
               const snapshot = await core.db.withTenant(
@@ -250,6 +285,7 @@ export function createAgentChannelModule(core: Core): ApiModule {
           scope.post(
             "/messages",
             {
+              ...cellRoute,
               schema: {
                 tags,
                 security: bearer,
@@ -263,8 +299,7 @@ export function createAgentChannelModule(core: Core): ApiModule {
               const body = req.body;
 
               const check = await core.db.withTenant(ctx, async (tx) => {
-                await requireActiveAgent(tx, body.agentId);
-                const conv = await requireMembership(tx, body.agentId, body.conversationId);
+                const conv = await getConversation(tx, body.conversationId);
                 let root: string | null = null;
                 if (body.threadRootMessageId) {
                   const [m] = await tx
@@ -300,8 +335,10 @@ export function createAgentChannelModule(core: Core): ApiModule {
 
               let result: { messageId: string; created: boolean };
               try {
-                // Chat stores the message and audits `agent.message.posted` (actor = agent) in its own tx.
-                // The tenant user is the triggering human, so that audit row carries user_id = who asked.
+                // Chat decides the bot (agent principal: enabled, a member, agent rules) and the human it
+                // answers (agent ∩ human: that person must still read the channel), then stores the message and
+                // audits `agent.message.posted` (actor = agent) in its own tx. The tenant user is the
+                // triggering human, so that audit row carries user_id = who asked.
                 result = await core.chatAgent.postAgentMessage(
                   { organizationId: cell.organizationId, userId: check.triggeredBy },
                   {
@@ -310,6 +347,7 @@ export function createAgentChannelModule(core: Core): ApiModule {
                     threadRootId: check.root,
                     body: body.text,
                     idempotencyKey: body.idempotencyKey,
+                    inReplyToMessageId: body.inReplyToMessageId,
                   },
                 );
               } catch (err) {
@@ -329,14 +367,29 @@ export function createAgentChannelModule(core: Core): ApiModule {
 
           scope.post(
             "/typing",
-            { schema: { tags, security: bearer, body: AgentChannelTyping, response: { 200: Ok } } },
+            {
+              ...cellRoute,
+              schema: { tags, security: bearer, body: AgentChannelTyping, response: { 200: Ok } },
+            },
             async (req) => {
               const cell = cellOf(req);
               const ctx = { organizationId: cell.organizationId, userId: null };
               const body = req.body;
               await core.db.withTenant(ctx, async (tx) => {
-                await requireActiveAgent(tx, body.agentId);
-                await requireMembership(tx, body.agentId, body.conversationId);
+                if (!(await findAgent(tx, body.agentId))) {
+                  throw notFound("Agent not found in this cell", "agent_not_found");
+                }
+                const conv = await getConversation(tx, body.conversationId);
+                // The bot itself must read the conversation: enabled (agent gate), a member, not denied.
+                await perms.assertCan(
+                  req,
+                  tx,
+                  "channel.read",
+                  await botChannelResource(tx, conv, body.agentId),
+                  {
+                    as: { kind: "agent", agentId: body.agentId },
+                  },
+                );
               });
               const root = body.threadRootMessageId ?? null;
               // Chat publishes the ephemeral `agent.typing`; clients clear it on the agent's message or
@@ -350,6 +403,7 @@ export function createAgentChannelModule(core: Core): ApiModule {
           scope.post(
             "/provider-auth",
             {
+              ...cellRoute,
               schema: {
                 tags,
                 security: bearer,
@@ -366,6 +420,7 @@ export function createAgentChannelModule(core: Core): ApiModule {
           scope.post(
             "/agents/:id/status",
             {
+              ...cellRoute,
               schema: {
                 tags,
                 security: bearer,
@@ -388,7 +443,7 @@ export function createAgentChannelModule(core: Core): ApiModule {
         { prefix: AGENT_CHANNEL_BASE_PATH },
       );
 
-      registerCellGateway(app, core, auth, presence);
+      registerCellGateway(app, core, auth, presence, perms);
     },
   };
 }

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { ClientKind } from "@ocw/contracts";
 import {
   AgentChannelEventTypes,
   type AgentChannelProviderAuthReport,
@@ -45,6 +46,14 @@ interface FlowRecord {
   userCode: string | null;
   expiresAt: string | null;
   error: ProviderAuthError | null;
+}
+
+/** The signed-in user starting or cancelling a sign-in; audits record their real client kind. */
+export interface ProviderAuthCaller {
+  organizationId: string;
+  userId: string;
+  sessionId: string | null;
+  clientKind: ClientKind;
 }
 
 const flowKey = (org: string, provider: string) => `ocw:provider-auth:${org}:${provider}`;
@@ -144,7 +153,7 @@ export function createProviderAuth(core: Core, presence: CellPresence) {
 
   /** Admin "Connect": idempotent while a flow is active (unless `restart`). */
   async function start(
-    ctx: { organizationId: string; userId: string; sessionId: string | null },
+    ctx: ProviderAuthCaller,
     provider: SubscriptionProviderKind,
     opts: { restart?: boolean } = {},
   ): Promise<ProviderAuthStatus> {
@@ -176,7 +185,7 @@ export function createProviderAuth(core: Core, presence: CellPresence) {
         resourceType: "model_provider",
         resourceId: null,
         sessionId: ctx.sessionId,
-        clientKind: "web",
+        clientKind: ctx.clientKind,
         metadata: { provider, flowId, method: "device-code", restart: !!opts.restart },
       });
       await core.realtime.appendEvent(tx, cellTopic(org), AgentChannelEventTypes.providerAuthStart, {
@@ -208,7 +217,7 @@ export function createProviderAuth(core: Core, presence: CellPresence) {
 
   /** Admin "Cancel" on a pending flow. */
   async function cancel(
-    ctx: { organizationId: string; userId: string; sessionId: string | null },
+    ctx: ProviderAuthCaller,
     provider: SubscriptionProviderKind,
   ): Promise<ProviderAuthStatus> {
     const org = ctx.organizationId;
@@ -220,7 +229,7 @@ export function createProviderAuth(core: Core, presence: CellPresence) {
         resourceType: "model_provider",
         resourceId: null,
         sessionId: ctx.sessionId,
-        clientKind: "web",
+        clientKind: ctx.clientKind,
         metadata: { provider, flowId: current.flowId },
       });
       await core.realtime.appendEvent(tx, cellTopic(org), AgentChannelEventTypes.providerAuthCancel, {
