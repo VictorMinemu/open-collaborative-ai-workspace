@@ -689,18 +689,20 @@ onRequest: async (req, reply) => {
 | A8 | Logging the attempted email on `user.sign_in_failed` is acceptable (standard IdP practice) | Audit | Low: switch to a hash |
 | A9 | `onPasswordReset` runs inside the ALS transaction opened by our `runWithTransaction` | Pattern 7 | Medium: fallback is to audit in its own tx (no domain write left uncovered, since the password update already committed) |
 
-## Open Questions (each has a recommended default; none blocks planning)
+## Open Questions (RESOLVED)
 
-1. **Web REST: cookie or Bearer?**
+All five were resolved on 2026-10-04 by the orchestrator under the owner's delegation (locked decisions D-01…D-05 in 02-01-PLAN.md); the original analysis is kept below each resolution.
+
+1. **Web REST: cookie or Bearer?** — **RESOLVED (D-01):** the web keeps the cookie for REST; the API accepts cookie OR Bearer JWT; the browser WebSocket uses a short-lived JWT subprotocol verified against the JWKS before the upgrade (02-03, 02-08).
    - Known: SC4 requires that API connections accept short-lived JWTs and that WS moves to JWT. Cookies are HttpOnly and revoke instantly.
    - **Default:** the API accepts both; the web keeps the cookie for REST and uses JWT for WS; the daemon and future mobile use JWT. Tests prove Bearer on every route. Alternative: the web also sends Bearer from the token manager (more change in `apps/web/lib/api.ts`, same server).
-2. **Persisted deny rules (`permission_rules`) without a UI?**
+2. **Persisted deny rules (`permission_rules`) without a UI?** — **RESOLVED (D-02):** include `permission_rules` with explicit deny AND allow (allows never grant non-delegable admin permissions) plus an admin API; UI limited to a read-only listing (02-02, 02-06, 02-13).
    - **Default:** include the table, resolver support and an admin API, so explicit deny is real and testable at every grain. Defer the UI to the effective-permission viewer (PRD §109.3). Alternative: only state-based denies (deactivated, disabled, revoked, archived) in Phase 2; the unit grains would then grant only.
-3. **Legacy device token on `/runtime/ws`.**
+3. **Legacy device token on `/runtime/ws`.** — **RESOLVED (D-03):** accepted behind `OCW_ACCEPT_LEGACY_DEVICE_TOKEN` (default true) until Phase 8, audited at most hourly per device; the daemon exchanges its device token for a 10-minute device JWT before each connect (02-11).
    - **Default:** accept it behind `OCW_ACCEPT_LEGACY_DEVICE_TOKEN=true` until Phase 8, audited once per device per hour, so the installed demo desktop keeps working. Alternative: hard switch and rebuild the desktop app.
-4. **Change password while signed in** (not in AUTH-04, but users will expect it on the Security page).
+4. **Change password while signed in** (not in AUTH-04, but users will expect it on the Security page). — **RESOLVED (D-04):** included as `POST /api/v1/me/password` with an option to sign out other sessions (02-09, 02-14).
    - **Default:** add `POST /api/v1/me/password` (current + new, revokes other sessions), about 30 lines, because admins otherwise cannot reset their own password. Mark it as an extra in the plan.
-5. **Invite directly into a unit.**
+5. **Invite directly into a unit.** — **RESOLVED (D-05):** deferred; invitations target the organization and the person is added to units afterwards (02-07).
    - **Default:** deferred. A lead invites to the org, then adds the person to the unit. No retrofit cost (the invitation row can carry a unit later).
 
 ## Environment Availability

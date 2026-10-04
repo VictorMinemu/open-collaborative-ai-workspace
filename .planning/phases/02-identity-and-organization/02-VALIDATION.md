@@ -22,7 +22,7 @@ created: "2026-10-04"
 | **Config file** | `vitest.config.ts`, `e2e/playwright.config.ts` |
 | **Quick run command** | `pnpm exec vitest run --project unit <path>` / `pnpm exec vitest run --project integration <path>` |
 | **Full suite command** | `pnpm verify && pnpm --filter @ocw/local-runtime test && pnpm --filter @ocw/desktop test` |
-| **E2E command** | `pnpm e2e` (or `pnpm e2e <spec-name>`) on a stack prepared with the E2E protocol below |
+| **E2E command** | `bash scripts/e2e-isolated.sh [spec filters]` — isolated stack (database `ocw_e2e`, API 127.0.0.1:4290, web 127.0.0.1:3290), see below; never `pnpm e2e` against the demo |
 | **Estimated runtime** | unit ≈ 20 s; one integration file ≈ 30–60 s; `pnpm verify` ≈ 6–10 min; `pnpm e2e` ≈ 8–12 min |
 
 ---
@@ -30,29 +30,171 @@ created: "2026-10-04"
 ## Sampling Rate
 
 - **After every task commit:** the task's `<automated>` commands (unit project for the touched package + the one integration file of the touched module), then `pnpm verify` (D-10).
-- **After every plan:** `pnpm verify`, `pnpm --filter @ocw/local-runtime test`, `pnpm --filter @ocw/desktop test`, and the E2E protocol (`pnpm e2e`) when the plan touches API behaviour or web.
-- **After every wave:** full suite + `pnpm e2e`.
-- **Before `/gsd-verify-work 2`:** full suite and `pnpm e2e` green; strict authz coverage on; no legacy marker left (02-15).
+- **After every plan:** `pnpm verify`, `pnpm --filter @ocw/local-runtime test`, `pnpm --filter @ocw/desktop test`, and `bash scripts/e2e-isolated.sh` when the plan touches API behaviour or web.
+- **After every wave:** full suite + `bash scripts/e2e-isolated.sh`.
+- **Before `/gsd-verify-work 2`:** full suite and `bash scripts/e2e-isolated.sh` green; strict authz coverage on; no legacy marker left (02-15).
 - **Max feedback latency:** ≈ 60 s per targeted command.
 
 ---
 
-## E2E protocol (fresh worktree stack — referenced by every plan)
+## Isolated e2e stack (referenced by every plan — replaces any "fresh worktree stack" procedure)
 
-The `setup` project redeems the setup token, so e2e needs a fresh database. Run from the worktree root:
+**Hard rule:** the owner's demo runs from this worktree's compose project (postgres database `ocw`, Redis DB 0, API on :4000, web on :3000, OpenClaw container `ocw-demo-openclaw`). No plan in this phase may stop, recreate, migrate, reset or reseed any of it: never `docker compose down` / `rm` / `stop` / `restart`, never `pnpm db:migrate` with the default `.env`, never `pnpm demo:up` / `pnpm demo:reset`, never bind :4000/:3000, never touch the OpenClaw container. The only databases an executor may create or drop are `ocw_e2e` (this script) and, once in 02-01 Task 1, the scratch restore-check database `ocw_restore_check`; the demo database `ocw` is only ever read by `pg_dump`. The Stage A handoff advice to run `docker compose down -v` does not apply in this phase. CI (`.github/workflows/ci.yml`) keeps its own flow unchanged.
 
-1. **Backup first (never skip).** If this worktree's postgres is running and has data, dump it outside the repo:
-   `mkdir -p "$HOME/.ocw-backups" && docker compose ps --status running -q postgres | grep -q . && docker compose exec -T postgres pg_dump -U postgres -d ocw -Fc > "$HOME/.ocw-backups/$(basename "$PWD")-$(date +%Y%m%d%H%M%S).dump"` — check the file is non-empty. The dump contains password hashes: never commit it.
-2. **Fresh stack (this worktree's compose project only):** `docker compose down -v && docker compose up -d --wait postgres redis && pnpm db:migrate`.
-3. **API and web as CI does** (stop the API/web processes this run started earlier first; record their PIDs):
-   `(cd apps/api && OCW_MODEL_PROVIDER=mock nohup node --env-file-if-exists=../../.env --import tsx src/main.ts > /tmp/ocw-02-api.log 2>&1 & echo $! > /tmp/ocw-02-api.pid)`
-   `(cd apps/web && pnpm build && nohup node --env-file-if-exists=../../.env ./node_modules/next/dist/bin/next start -p 3000 > /tmp/ocw-02-web.log 2>&1 & echo $! > /tmp/ocw-02-web.pid)`
-   `for i in $(seq 1 60); do curl -sf localhost:4000/health && curl -sf -o /dev/null localhost:3000/login && break; sleep 2; done`
-4. **Run:** `pnpm exec playwright install chromium` (once), then `pnpm e2e` (or `pnpm e2e <spec>`); screenshots for UI plans: prefix with `OCW_E2E_SCREENSHOT_DIR=$PWD/.planning/phases/02-identity-and-organization/screenshots`.
-5. Re-running specs on the same stack is fine (`setup` skips when the stack is already set up); specs create unique users and names per project.
-6. On failure: `tail -n 200 /tmp/ocw-02-api.log /tmp/ocw-02-web.log` and the Playwright report in `e2e/playwright-report`.
+All e2e runs go through `scripts/e2e-isolated.sh` (created by 02-01 Task 3 with exactly the body below):
 
-CI (`.github/workflows/ci.yml`) runs the same suite on every PR; the local run is still required by D-10.
+- a separate database **`ocw_e2e`** inside the already-running compose postgres (only that database is dropped and recreated, then migrated with the four migration URLs swapped to `ocw_e2e`);
+- Redis **logical DB 9** of the existing compose Redis (only that DB is flushed; pub/sub channel names carry UUIDs, so they never collide with the demo);
+- the API on **127.0.0.1:4290** and the web on **127.0.0.1:3290** (`next start` from a build in `apps/web/.next-e2e`, rebuilt automatically when web or contracts sources changed — the demo's `.next` is never overwritten);
+- Playwright with `OCW_E2E_BASE_URL` / `OCW_E2E_API_URL` pointing at those ports, `OCW_MODEL_PROVIDER=mock`;
+- one run at a time machine-wide (lock `/tmp/ocw-e2e.lock`: `flock` on Linux, `shlock` on macOS, `mkdir` lock with stale-PID recovery otherwise), so same-wave plans queue instead of colliding;
+- PIDs and logs in a per-run temp dir; on exit it stops only the processes it started and prints the log dir.
+
+Usage:
+
+```bash
+bash scripts/e2e-isolated.sh                         # full suite (setup + every spec at 1440 and 390), fresh ocw_e2e
+bash scripts/e2e-isolated.sh admin-members chat      # Playwright file filters
+OCW_E2E_SCREENSHOT_DIR=$PWD/.planning/phases/02-identity-and-organization/screenshots bash scripts/e2e-isolated.sh account
+bash scripts/e2e-isolated.sh --keep-db admin-org     # reuse the current ocw_e2e (faster iteration while polishing)
+bash scripts/e2e-isolated.sh --rebuild-web           # force a web rebuild into .next-e2e
+DEMO_PASSWORD=Demo-e2e-check bash scripts/e2e-isolated.sh --cmd "node scripts/demo-seed.mjs"   # any command against the stack
+pnpm exec playwright install chromium               # once per machine
+```
+
+Script body (`scripts/e2e-isolated.sh`, bash 3.2 compatible for macOS):
+
+```bash
+#!/usr/bin/env bash
+# Isolated e2e stack for executors. It never touches the owner's running demo: it uses its own database
+# (ocw_e2e) in the existing compose postgres, Redis logical DB 9, API 127.0.0.1:4290, web 127.0.0.1:3290
+# built into apps/web/.next-e2e, and a machine-wide lock so concurrent runs queue. CI does not use it.
+#   bash scripts/e2e-isolated.sh [--keep-db] [--rebuild-web] [playwright args...]
+#   bash scripts/e2e-isolated.sh [--keep-db] --cmd "<shell command run against the stack>"
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+E2E_DB=ocw_e2e          # the ONLY database this script may drop; never parameterised
+E2E_REDIS_DB=9
+API_PORT=4290           # Node fetch blocks some ports (e.g. 4190); 4290/3290 are verified usable
+WEB_PORT=3290
+WEB_DIST=.next-e2e
+LOCK=/tmp/ocw-e2e.lock
+
+keep_db=0; rebuild_web=0; cmd=""; args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --keep-db) keep_db=1 ;;
+    --rebuild-web) rebuild_web=1 ;;
+    --cmd) cmd="${2:?--cmd needs a command}"; shift ;;
+    *) args+=("$1") ;;
+  esac
+  shift
+done
+[ -f .env ] || { echo "e2e-isolated: .env missing (pnpm setup:env)"; exit 1; }
+
+# ---------------------------------------------------------------- lock (portable)
+release_lock() { :; }
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$LOCK"
+  echo "e2e-isolated: waiting for $LOCK"; flock 9
+elif command -v shlock >/dev/null 2>&1; then
+  until shlock -f "$LOCK" -p $$; do echo "e2e-isolated: waiting for $LOCK"; sleep 3; done
+  release_lock() { rm -f "$LOCK"; }
+else
+  until mkdir "$LOCK.d" 2>/dev/null; do
+    holder="$(cat "$LOCK.d/pid" 2>/dev/null || true)"
+    if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then rm -rf "$LOCK.d"; continue; fi
+    echo "e2e-isolated: waiting for $LOCK.d"; sleep 3
+  done
+  echo $$ >"$LOCK.d/pid"
+  release_lock() { rm -rf "$LOCK.d"; }
+fi
+
+RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ocw-e2e.XXXXXX")"
+stop_pid() {
+  [ -f "$1" ] || return 0
+  local pid; pid="$(cat "$1")"
+  pkill -TERM -P "$pid" 2>/dev/null || true
+  kill -TERM "$pid" 2>/dev/null || true
+}
+cleanup() {
+  stop_pid "$RUN_DIR/web.pid"; stop_pid "$RUN_DIR/api.pid"
+  release_lock
+  echo "e2e-isolated: logs in $RUN_DIR"
+}
+trap cleanup EXIT INT TERM
+
+# ---------------------------------------------------------------- environment (demo values → e2e values)
+set -a; . ./.env; set +a
+swap_path() { node -e 'const u=new URL(process.argv[1]); u.pathname="/"+process.argv[2]; process.stdout.write(u.toString())' "$1" "$2"; }
+E2E_DATABASE_URL="$(swap_path "$DATABASE_URL" "$E2E_DB")"
+E2E_AUTH_DATABASE_URL="$(swap_path "$AUTH_DATABASE_URL" "$E2E_DB")"
+E2E_SUPERUSER_URL="$(swap_path "$MIGRATE_SUPERUSER_URL" "$E2E_DB")"
+E2E_MIGRATOR_URL="$(swap_path "$MIGRATOR_DATABASE_URL" "$E2E_DB")"
+E2E_REDIS_URL="$(swap_path "$REDIS_URL" "$E2E_REDIS_DB")"
+for u in "$E2E_DATABASE_URL" "$E2E_AUTH_DATABASE_URL" "$E2E_SUPERUSER_URL" "$E2E_MIGRATOR_URL"; do
+  case "$u" in */"$E2E_DB"|*/"$E2E_DB"\?*) ;; *) echo "e2e-isolated: refusing, URL does not target $E2E_DB"; exit 1 ;; esac
+done
+export DATABASE_URL="$E2E_DATABASE_URL" AUTH_DATABASE_URL="$E2E_AUTH_DATABASE_URL" REDIS_URL="$E2E_REDIS_URL"
+export MIGRATE_SUPERUSER_URL="$E2E_SUPERUSER_URL" MIGRATOR_DATABASE_URL="$E2E_MIGRATOR_URL"
+export OCW_PUBLIC_API_URL="http://127.0.0.1:$API_PORT" OCW_PUBLIC_WEB_URL="http://127.0.0.1:$WEB_PORT"
+export OCW_TRUSTED_ORIGINS="" OCW_MODEL_PROVIDER=mock HOST=127.0.0.1 PORT="$API_PORT"
+export OCW_E2E_BASE_URL="$OCW_PUBLIC_WEB_URL" OCW_E2E_API_URL="$OCW_PUBLIC_API_URL" OCW_API_URL="$OCW_PUBLIC_API_URL"
+
+for p in "$API_PORT" "$WEB_PORT"; do
+  if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
+    echo "e2e-isolated: port $p is busy (not started by this run); stop that process and retry"; exit 1
+  fi
+done
+
+# ---------------------------------------------------------------- database + redis (e2e only)
+if [ -z "$(docker compose ps --status running -q postgres)" ] || [ -z "$(docker compose ps --status running -q redis)" ]; then
+  docker compose up -d --wait postgres redis   # only when they are not running; never stops anything
+fi
+if [ "$keep_db" -eq 0 ]; then
+  docker compose exec -T postgres psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+    -c "DROP DATABASE IF EXISTS $E2E_DB WITH (FORCE)" -c "CREATE DATABASE $E2E_DB" >/dev/null
+  docker compose exec -T redis redis-cli -n "$E2E_REDIS_DB" FLUSHDB >/dev/null
+  pnpm --filter @ocw/db migrate >"$RUN_DIR/migrate.log" 2>&1 || { tail -40 "$RUN_DIR/migrate.log"; exit 1; }
+fi
+
+# ---------------------------------------------------------------- web build (separate distDir)
+need_build=$rebuild_web
+[ -f "apps/web/$WEB_DIST/BUILD_ID" ] || need_build=1
+if [ "$need_build" -eq 0 ] && [ -n "$(find apps/web/app apps/web/components apps/web/lib apps/web/hooks packages/contracts/src packages/realtime-client/src -type f -newer "apps/web/$WEB_DIST/BUILD_ID" -print 2>/dev/null | head -1)" ]; then
+  need_build=1
+fi
+if [ "$need_build" -eq 1 ]; then
+  (cd apps/web && OCW_NEXT_DIST_DIR="$WEB_DIST" pnpm build) >"$RUN_DIR/web-build.log" 2>&1 || { tail -60 "$RUN_DIR/web-build.log"; exit 1; }
+fi
+
+# ---------------------------------------------------------------- API + web
+(cd apps/api && nohup node --env-file-if-exists=../../.env --import tsx src/main.ts >"$RUN_DIR/api.log" 2>&1 & echo $! >"$RUN_DIR/api.pid")
+(cd apps/web && OCW_NEXT_DIST_DIR="$WEB_DIST" nohup node --env-file-if-exists=../../.env ./node_modules/next/dist/bin/next start -p "$WEB_PORT" -H 127.0.0.1 >"$RUN_DIR/web.log" 2>&1 & echo $! >"$RUN_DIR/web.pid")
+ready=0
+for _ in $(seq 1 90); do
+  if curl -sf "$OCW_E2E_API_URL/health" >/dev/null && curl -sf -o /dev/null "$OCW_E2E_BASE_URL/login"; then ready=1; break; fi
+  sleep 2
+done
+[ "$ready" -eq 1 ] || { tail -40 "$RUN_DIR/api.log"; tail -40 "$RUN_DIR/web.log"; exit 1; }
+
+# ---------------------------------------------------------------- run
+status=0
+if [ -n "$cmd" ]; then
+  bash -c "$cmd" || status=$?
+else
+  pnpm e2e ${args[@]+"${args[@]}"} || status=$?
+fi
+exit "$status"
+```
+
+Notes for executors:
+
+- Exported variables override `.env` because Node's `--env-file` never overwrites variables already set; this is how the API, the web server and `pnpm --filter @ocw/db migrate` all target `ocw_e2e`.
+- The role bootstrap that `migrate` runs as superuser is idempotent and only re-applies the same role passwords from `.env`; it does not touch the demo database.
+- `setup.spec.ts` redeems `OCW_SETUP_TOKEN` against the fresh `ocw_e2e`; with `--keep-db` it skips because the stack is already set up.
+- On failure read `api.log`, `web.log`, `migrate.log` in the printed temp dir and the Playwright report in `e2e/playwright-report`.
 
 ---
 
@@ -60,9 +202,9 @@ CI (`.github/workflows/ci.yml`) runs the same suite on every PR; the local run i
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 02-01-01 | 01 | 1 | ORG-02 | T-02-01-01/02/03/05 | owner/admin→admin, member→developer only; CHECK rejects legacy roles; invitations not via plugin | integration | `pnpm exec vitest run --project integration packages/db/src/role-migration.int.test.ts apps/api/src/identity.int.test.ts` | ❌ W0 (role-migration) | ⬜ pending |
-| 02-01-02 | 01 | 1 | ORG-01, ORG-06, AUTH-05, AUTH-06 | T-02-01-04/06, T-02-01-SC | new tables tenant-isolated | integration | `pnpm exec vitest run --project integration packages/db/src/rls-isolation.int.test.ts` | ✅ extend | ⬜ pending |
-| 02-01-03 | 01 | 1 | ORG-03 | — | vocabulary + strict claim schemas | unit | `pnpm exec vitest run --project unit packages/contracts/src/permissions.test.ts` | ❌ W0 | ⬜ pending |
+| 02-01-01 | 01 | 1 | ORG-02, ORG-01, ORG-03, ORG-06, AUTH-05, AUTH-06 | T-02-01-01/04/05/06 | demo DB dumped + restore-checked; owner/admin→admin, member→developer only; CHECK rejects legacy roles; new tables tenant-isolated; isolated commit | integration + unit | `pnpm exec vitest run --project integration packages/db/src/role-migration.int.test.ts packages/db/src/rls-isolation.int.test.ts` · `pnpm exec vitest run --project unit packages/contracts/src/permissions.test.ts packages/contracts/src/contracts.test.ts` | ❌ W0 (role-migration, permissions.test) | ⬜ pending |
+| 02-01-02 | 01 | 1 | ORG-02 | T-02-01-02/03/07 | invitations not via the plugin; admins keep every capability; members become developers | integration | `pnpm exec vitest run --project integration apps/api/src/identity.int.test.ts` · `pnpm verify` | ✅ extend | ⬜ pending |
+| 02-01-03 | 01 | 1 | ORG-03 (tooling) | T-02-01-08, T-02-01-SC | packages pinned; e2e isolated from the demo | e2e | `bash -n scripts/e2e-isolated.sh && pnpm verify` · `bash scripts/e2e-isolated.sh` | ❌ W0 (script) | ⬜ pending |
 | 02-02-01 | 02 | 2 | ORG-03, ORG-05 | T-02-02-04/05 | archive decided by resolver; denial audited after rollback; private → 404 | integration | `pnpm exec vitest run --project integration apps/api/src/modules/chat/chat.int.test.ts` | ✅ extend | ⬜ pending |
 | 02-02-02 | 02 | 2 | ORG-03 | T-02-02-01/02/03/07 | deny precedence, non-delegable allows, agent ∩ human, surfaces | unit (fast-check) + integration | `pnpm exec vitest run --project unit apps/api/src/modules/organization/permissions/resolve.test.ts` · `pnpm exec vitest run --project integration apps/api/src/modules/organization/permissions/facts.int.test.ts` | ❌ W0 | ⬜ pending |
 | 02-02-03 | 02 | 2 | ORG-03 | T-02-02-06 | undecided 2xx recorded; legacy checks fail the guard | unit | `pnpm exec vitest run --project unit apps/api/src/authz.test.ts apps/api/src/modules/organization/permissions/guard.test.ts` | ❌ W0 | ⬜ pending |
@@ -89,17 +231,17 @@ CI (`.github/workflows/ci.yml`) runs the same suite on every PR; the local run i
 | 02-10-02 | 10 | 4 | ORG-03 | T-02-10-02/03/04 | cell/agent principals; agent ∩ human through the plugin route | integration | `pnpm exec vitest run --project integration apps/api/src/modules/agent-channel/agent-channel.int.test.ts apps/api/src/modules/agent-channel/provider-auth.int.test.ts` | ✅ extend | ⬜ pending |
 | 02-11-01 | 11 | 4 | AUTH-06 | T-02-11-04/05 | daemon exchanges token; Device Link verifies device JWT | unit (local-runtime) + integration | `pnpm --filter @ocw/local-runtime test` · `pnpm exec vitest run --project integration apps/api/src/workzone.int.test.ts` | ✅ extend | ⬜ pending |
 | 02-11-02 | 11 | 4 | AUTH-06 | T-02-11-01/02/03 | legacy flag on/off; revoked device and user JWT refused | integration | `pnpm exec vitest run --project integration apps/api/src/device-link-auth.int.test.ts` | ❌ W0 | ⬜ pending |
-| 02-12-01 | 12 | 4 | ORG-04, ORG-02 | T-02-12-01 | role change via UI; lead invite ceiling in UI | e2e | `pnpm e2e admin-members` | ❌ W0 | ⬜ pending |
-| 02-12-02 | 12 | 4 | ORG-04, ORG-06 | T-02-12-02/03 | reset link shown once; profile sheet | e2e | `pnpm e2e admin-members chat` | ❌ W0 | ⬜ pending |
-| 02-12-03 | 12 | 4 | ORG-04 | — | visual review 390/1440 light/dark | e2e + manual | `pnpm e2e admin-members` | ❌ W0 | ⬜ pending |
-| 02-13-01 | 13 | 4 | ORG-04, ORG-01 | T-02-13-01 | build hierarchy from empty state | e2e | `pnpm e2e admin-org` | ❌ W0 | ⬜ pending |
-| 02-13-02 | 13 | 4 | ORG-04, ORG-01, ORG-02 | T-02-13-02/03 | move/delete/staff; rules read-only | e2e | `pnpm e2e admin-org` | ❌ W0 | ⬜ pending |
-| 02-13-03 | 13 | 4 | ORG-04 | — | visual review 390/1440 light/dark | e2e + manual | `pnpm e2e admin-org` | ❌ W0 | ⬜ pending |
-| 02-14-01 | 14 | 4 | ORG-06 | T-02-14-03 | profile edit propagates | e2e | `pnpm e2e account` | ❌ W0 | ⬜ pending |
-| 02-14-02 | 14 | 4 | AUTH-04, AUTH-05 | T-02-14-01/02 | sessions revoke across contexts; reset/forgot flows | e2e | `pnpm e2e account smoke` | ❌ W0 | ⬜ pending |
-| 02-14-03 | 14 | 4 | ORG-06, AUTH-04 | — | visual review 390/1440 light/dark | e2e + manual | `pnpm e2e account` | ❌ W0 | ⬜ pending |
+| 02-12-01 | 12 | 4 | ORG-04, ORG-02 | T-02-12-01 | role change via UI; lead invite ceiling in UI | e2e | `bash scripts/e2e-isolated.sh admin-members` | ❌ W0 | ⬜ pending |
+| 02-12-02 | 12 | 4 | ORG-04, ORG-06 | T-02-12-02/03 | reset link shown once; profile sheet | e2e | `bash scripts/e2e-isolated.sh admin-members chat` | ❌ W0 | ⬜ pending |
+| 02-12-03 | 12 | 4 | ORG-04 | — | visual review 390/1440 light/dark | e2e + manual | `bash scripts/e2e-isolated.sh admin-members` | ❌ W0 | ⬜ pending |
+| 02-13-01 | 13 | 4 | ORG-04, ORG-01 | T-02-13-01 | build hierarchy from empty state | e2e | `bash scripts/e2e-isolated.sh admin-org` | ❌ W0 | ⬜ pending |
+| 02-13-02 | 13 | 4 | ORG-04, ORG-01, ORG-02 | T-02-13-02/03 | move/delete/staff; rules read-only | e2e | `bash scripts/e2e-isolated.sh admin-org` | ❌ W0 | ⬜ pending |
+| 02-13-03 | 13 | 4 | ORG-04 | — | visual review 390/1440 light/dark | e2e + manual | `bash scripts/e2e-isolated.sh admin-org` | ❌ W0 | ⬜ pending |
+| 02-14-01 | 14 | 4 | ORG-06 | T-02-14-03 | profile edit propagates | e2e | `bash scripts/e2e-isolated.sh account` | ❌ W0 | ⬜ pending |
+| 02-14-02 | 14 | 4 | AUTH-04, AUTH-05 | T-02-14-01/02 | sessions revoke across contexts; reset/forgot flows | e2e | `bash scripts/e2e-isolated.sh account smoke` | ❌ W0 | ⬜ pending |
+| 02-14-03 | 14 | 4 | ORG-06, AUTH-04 | — | visual review 390/1440 light/dark | e2e + manual | `bash scripts/e2e-isolated.sh account` | ❌ W0 | ⬜ pending |
 | 02-15-01 | 15 | 5 | ORG-03 | T-02-15-01/02/03 | strict coverage; no role in AuthContext; clean guard | unit + integration | `pnpm exec vitest run --project unit apps/api/src/modules/organization/permissions/guard.test.ts apps/api/src/authz.test.ts` · `pnpm verify` | ❌ W0 (authz.int) | ⬜ pending |
-| 02-15-02 | 15 | 5 | all | — | phase gate | full + e2e | `pnpm verify && pnpm --filter @ocw/local-runtime test && pnpm --filter @ocw/desktop test` · `pnpm e2e` | ✅ | ⬜ pending |
+| 02-15-02 | 15 | 5 | all | — | phase gate | full + e2e | `pnpm verify && pnpm --filter @ocw/local-runtime test && pnpm --filter @ocw/desktop test` · `bash scripts/e2e-isolated.sh` | ✅ | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠ flaky*
 
@@ -134,6 +276,7 @@ Created inside the plans that first need them (each plan's first task writes the
 - [ ] `apps/api/src/device-link-auth.int.test.ts` — 02-11
 - [ ] `e2e/tests/{admin-members,admin-org,account}.spec.ts` — 02-12, 02-13, 02-14
 - [ ] `apps/api/src/authz.int.test.ts` — 02-15
+- [ ] `scripts/e2e-isolated.sh` (isolated e2e stack) — 02-01 Task 3
 
 ---
 
@@ -154,7 +297,8 @@ Created inside the plans that first need them (each plan's first task writes the
 - **API — authorization:** `organization/permissions/{resolve,policy,facts,service,errors}.ts`, `apps/api/src/authz.ts`, guard and coverage tests; `organization/{members,units,rules}.ts`; GET `/api/v1/me/permissions`.
 - **API — identity:** `identity/{authenticate,client-kind,session-store,invitations,jwt,sessions,password,profile}.ts`, `lib/mailer.ts`, revocation fan-out in `realtime/service.ts`, JWT WebSocket gateway, `device/token.ts`, `OCW_SMTP_URL`, `OCW_MAIL_FROM`, `OCW_ACCEPT_LEGACY_DEVICE_TOKEN`.
 - **Clients:** `packages/realtime-client` getToken; `apps/web/lib/{permissions,auth-token,member-queries,org-queries,account-queries}.ts`; Settings › Members (extended), › Organization, › Profile, › Security; `/reset-password`; daemon device-JWT exchange.
-- **Tests/E2E:** `admin-members.spec.ts`, `admin-org.spec.ts`, `account.spec.ts`; screenshots in `.planning/phases/02-identity-and-organization/screenshots/`.
+- **Tests/E2E:** `scripts/e2e-isolated.sh` (isolated, locked e2e stack); `admin-members.spec.ts`, `admin-org.spec.ts`, `account.spec.ts`; screenshots in `.planning/phases/02-identity-and-organization/screenshots/`.
+- **Safety:** restore-checked dump of the demo database in `$HOME/.ocw-backups` (outside the repo), restore command in 02-01-SUMMARY.md.
 - **Docs:** ADR-0007 (roles, hierarchy, resolver), ADR-0008 (JWT transport), `docs/DEMO.md`, `scripts/demo-seed.mjs` hierarchy and roles.
 
 ---

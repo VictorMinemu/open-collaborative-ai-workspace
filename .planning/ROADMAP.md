@@ -103,7 +103,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 15 plans in 5 waves (validation strategy: `02-VALIDATION.md`)
 
 Plans:
-- [ ] 02-01-PLAN.md — Wave 1: role switch owner/admin→admin, member→developer with no capability lost; phase schema (org_units, unit_memberships, permission_rules, session client columns, jwks); permission vocabulary contracts
+- [ ] 02-01-PLAN.md — Wave 1: restore-checked backup of the demo DB; one isolated commit with the role migration (owner/admin→admin, member→developer), phase schema and permission contracts; code follows with no capability lost; approved packages; isolated e2e stack (`scripts/e2e-isolated.sh`)
 - [ ] 02-02-PLAN.md — Wave 2: resolveEffectivePermissions tracer (channel archive), every layer proven (matrix + fast-check), authz coverage registry, legacy guard, /me/permissions, web useCan and gated navigation
 - [ ] 02-03-PLAN.md — Wave 2: better-auth jwt plugin + JWKS, session client kind/label, cookie authenticate split, audit rows inherit session/client, revocation fan-out, wave-3 DTO contracts
 - [ ] 02-04-PLAN.md — Wave 3: chat (channels, messages, threads, bot replies, conv topic) on the resolver with viewerCan
