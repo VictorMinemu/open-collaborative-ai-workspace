@@ -5,15 +5,15 @@ current_phase: 2
 current_phase_name: Realtime Presence and Latency
 status: executing
 stopped_at: "REQUIREMENTS.md and ROADMAP.md re-mapped to the Phase 1 build (Restructure 2026-10-04); next: `/gsd-verify-work 1`, then `/gsd-plan-phase 2`"
-last_updated: "2026-10-04T22:14:01.207Z"
+last_updated: "2026-10-04T22:52:36.474Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 3 execution started
-state_head: 09f9bf93c3e1b15b56c4953ccb761764603e2779
+state_head: 4d867922e090de4aaedcb0e3073a8feab2ff3b79
 progress:
   total_phases: 12
   completed_phases: 1
   total_plans: 21
-  completed_plans: 15
+  completed_plans: 16
 ---
 
 # Project State
@@ -91,6 +91,10 @@ Recent decisions affecting current work:
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 261002-fns | Restructure roadmap: Phase 1 becomes MVP 0 multiplayer AI chat slice | 2026-10-02 | 5f2bda9 | [261002-fns-restructure-roadmap-phase-1-becomes-mvp-](./quick/261002-fns-restructure-roadmap-phase-1-becomes-mvp-/) |
+
+### Roadmap Evolution
+
+- Phase 3.1 inserted after Phase 3: Personal (owner-only) bots with an automatic private chat, and per-bot capability toggles (internet, memory, reply mode, time context, usage limit) capped by org policy — requested by the owner 2026-10-04 (URGENT)
 
 ## Deferred Items
 

@@ -121,6 +121,16 @@ SLICE-06…18 were added on 2026-10-04 after the code audit of the widened demo 
 - [x] **AGENT-03**: When mentioned in a channel or thread, the agent replies in that thread with the thread's context, attributed as the agent, within its permissions
 - [ ] **AGENT-04**: A typed Agent Card message block (kind, title, fields, status, actions such as Open / Follow / Approve) renders in channels and threads and updates in place (PRD §18)
 
+### Personal Bots and Bot Capabilities (BOT) — added 2026-10-04 by the owner
+
+- [ ] **BOT-01**: Any member allowed by policy (new permission `bot.create_personal`, granted to every role by default, deniable by rules) can create a personal bot from the same one-click flow; a personal bot is visible to and usable by its owner only (resolver-enforced); admins see its metadata (name, owner, model, capabilities, usage) for governance but never its conversations
+- [ ] **BOT-02**: Creating a personal bot creates a private direct conversation between the owner and the bot that appears in the owner's chat sidebar (Bots section) and that nobody else can read (RLS + resolver); deleting or disabling the bot archives it
+- [ ] **BOT-03**: In a bot's direct conversation the bot answers every message without an @mention, one generation at a time, using the conversation history as context; members can also open a direct conversation with any team bot they may use (personal history, invisible to others)
+- [ ] **BOT-04**: Per-bot capability toggles, editable by whoever manages the bot: internet access (web search + page fetch, read-only), persistent memory (per bot and per human, user-visible and clearable), current date/time in context, reply mode in channels (mentions only / every message), and a daily usage limit (turns per day)
+- [ ] **BOT-05**: An Organization Admin sets a capability policy (allow/deny each capability org-wide and separately for personal bots); a bot's effective capabilities are its toggles ∩ the policy, the UI shows a disabled toggle with the reason, and dangerous tools (shell/exec, filesystem writes, browser control, gateway admin) are never offered
+- [ ] **BOT-06**: Capabilities are enforced in the OpenClaw cell on every turn (only the effective tools are passed; internet content is treated as untrusted data and cannot trigger other actions); every web search/fetch is audited with bot, human, domain and result, and runs with the intersection of the bot's and the triggering human's permissions
+- [ ] **BOT-07**: Usage per bot is metered per day; when the daily limit is reached the bot replies with a clear notice instead of calling the model; owners and admins see today's usage against the limit
+
 ### Self-hosted Release (SELF)
 
 - [ ] **SELF-01**: `git clone` + `pnpm ocw setup` + `docker compose up` yields a working MVP1 instance; OpenBao and observability (Prometheus, Grafana, Loki, Tempo) are optional compose profiles (ADR-0003 amended)
@@ -317,6 +327,13 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | RT-04 | Phase 3 | Partial | Typing indicators with expiry (people and bots); no presence |
 | RT-05 | Phase 1 | Delivered | `packages/realtime-client` (`client.test.ts`) used by web; desktop renders the web app |
 | CHAT-01 | Phase 1 | Delivered | `chat.int.test.ts` channels suite (public/private, join, archive by owner/admin); leave route; `chat.spec.ts` create + join in UI |
+| BOT-01 | Phase 3.1 | Pending | New (owner request 2026-10-04) |
+| BOT-02 | Phase 3.1 | Pending | New (owner request 2026-10-04) |
+| BOT-03 | Phase 3.1 | Pending | New (owner request 2026-10-04) |
+| BOT-04 | Phase 3.1 | Pending | New (owner request 2026-10-04) |
+| BOT-05 | Phase 3.1 | Pending | New (owner request 2026-10-04) |
+| BOT-06 | Phase 3.1 | Pending | New (owner request 2026-10-04) |
+| BOT-07 | Phase 3.1 | Pending | New (owner request 2026-10-04) |
 | CHAT-02 | Phase 4 | Partial | Flat channel list with unread dot; no department/team grouping or views |
 | CHAT-03 | Phase 1 | Delivered | `chat.int.test.ts` "thread replies update the root and refuse nesting"; `chat.spec.ts` reply count + participants |
 | CHAT-04 | Phase 4 | Pending | No DMs |
