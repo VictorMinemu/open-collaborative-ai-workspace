@@ -123,6 +123,7 @@ let su: pg.Client;
 let admin: TestClient;
 let alex: TestClient;
 let dana: TestClient;
+let stan: TestClient;
 let deviceToken: string;
 let projectId: string;
 let device: FakeDevice;
@@ -157,7 +158,47 @@ beforeAll(async () => {
     ).status,
   ).toBe(200);
   dana = await invite("dana@example.test", "Dana", "admin");
+  stan = await invite("stan@example.test", "Stan", "standard");
 }, 180_000);
+
+const ELECTRON_MAC_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) ocw-desktop/0.1.0 Chrome/140.0.7339.80 Electron/38.1.0 Safari/537.36";
+
+/** Sign in from the desktop app (its session is tagged `desktop` at creation) and reuse the cookie. */
+async function desktopSignIn(email: string, password: string) {
+  const res = await fetch(`${stack.baseUrl}/api/auth/sign-in/email`, {
+    method: "POST",
+    headers: { origin: WEB_ORIGIN, "content-type": "application/json", "user-agent": ELECTRON_MAC_UA },
+    body: JSON.stringify({ email, password }),
+  });
+  expect(res.status).toBe(200);
+  const c = new TestClient(stack.baseUrl);
+  for (const cookie of res.headers.getSetCookie()) {
+    const [pair = ""] = cookie.split(";");
+    const idx = pair.indexOf("=");
+    c.cookies.set(pair.slice(0, idx), pair.slice(idx + 1));
+  }
+  return c;
+}
+
+/** Subscribe to a realtime topic and return the gateway's first answer for it. */
+async function subscribe(client: TestClient, topic: string) {
+  const ws = new WebSocket(`${stack.baseUrl.replace(/^http/, "ws")}/ws`, {
+    headers: { origin: WEB_ORIGIN, cookie: client.cookieHeader },
+  });
+  const got: Array<Record<string, unknown>> = [];
+  ws.on("message", (d) => got.push(JSON.parse(d.toString())));
+  await new Promise((r) => ws.once("open", r));
+  ws.send(JSON.stringify({ op: "sub", topic }));
+  const answer = await eventually(async () =>
+    got.find((f) => f.topic === topic && (f.op === "err" || f.op === "subscribed")),
+  );
+  ws.close();
+  return answer;
+}
+
+const errorCode = (res: { body: Record<string, unknown> | null }) =>
+  (res.body?.error as { code?: string } | undefined)?.code;
 
 /** Invite a member with `role` through the API and sign them in. */
 async function invite(email: string, name: string, role: "standard" | "developer" | "admin") {
@@ -671,6 +712,145 @@ describe("work sessions", () => {
   });
 });
 
+describe("devices and Work Zone on the permission resolver", () => {
+  type DeviceView = { id: string; name: string; ownerUserId: string; viewerCan?: string[] };
+  const listDevices = async (c: TestClient) =>
+    (await c.request("GET", "/api/v1/devices")).body!.devices as DeviceView[];
+  const projectNames = async (c: TestClient) =>
+    ((await c.request("GET", "/api/v1/projects")).body!.projects as Array<{ name: string }>)
+      .map((p) => p.name)
+      .sort();
+
+  it("a standard user cannot pair, list, start or follow sessions", async () => {
+    const enroll = await stan.request("POST", "/api/v1/devices/enrollments");
+    expect(enroll.status).toBe(403);
+    expect((enroll.body!.error as { details: unknown }).details).toMatchObject({
+      permission: "device.pair",
+      layer: "role",
+    });
+    expect((await stan.request("POST", "/api/v1/work-sessions", { projectId })).status).toBe(403);
+    expect((await stan.request("GET", "/api/v1/work-sessions")).status).toBe(403);
+    expect((await stan.request("GET", "/api/v1/projects")).status).toBe(403);
+    expect((await stan.request("GET", "/api/v1/devices")).status).toBe(403);
+
+    const sessions = (await admin.request("GET", "/api/v1/work-sessions")).body!.sessions as Array<{
+      id: string;
+    }>;
+    const topic = `ws:${sessions[0]!.id}`;
+    expect(await subscribe(stan, topic)).toMatchObject({ op: "err", code: "forbidden" });
+    expect(await subscribe(alex, topic)).toMatchObject({ op: "subscribed" });
+  });
+
+  it("devices: a developer pairs; update is owner-only, revoke is owner or admin; viewerCan per device", async () => {
+    // Alex (developer, like an MVP 0 member) pairs a device of their own.
+    const code = await alex.request("POST", "/api/v1/devices/enrollments");
+    expect(code.status).toBe(200);
+    const paired = await new TestClient(stack.baseUrl).request("POST", "/api/v1/devices/enroll", {
+      code: code.body!.code,
+      name: "Alex's Linux",
+      platform: "linux",
+    });
+    expect(paired.status).toBe(200);
+    const alexDeviceId = paired.body!.deviceId as string;
+    const alexDevice = await FakeDevice.connect(stack.baseUrl, paired.body!.deviceToken as string);
+    alexDevice.send({
+      type: "projects.sync",
+      projects: [{ localId: "lp_alex", name: "alex-repo", gitRemote: null, defaultBranch: "main" }],
+    });
+    await alexDevice.next((f) => f.type === "projects.ack");
+
+    const adminDeviceId = (await listDevices(admin)).find((d) => d.id !== alexDeviceId)!.id;
+    const asAdmin = await listDevices(admin);
+    expect(asAdmin.find((d) => d.id === alexDeviceId)!.viewerCan).toEqual(["device.revoke"]);
+    expect(asAdmin.find((d) => d.id !== alexDeviceId)!.viewerCan).toEqual([
+      "device.use",
+      "device.update",
+      "device.revoke",
+    ]);
+    const asAlex = await listDevices(alex);
+    expect(asAlex.find((d) => d.id === alexDeviceId)!.viewerCan).toEqual([
+      "device.use",
+      "device.update",
+      "device.revoke",
+    ]);
+    expect(asAlex.find((d) => d.id === adminDeviceId)!.viewerCan).toEqual([]);
+
+    // Projects: only devices the caller may use (own or shared).
+    expect(await projectNames(alex)).toEqual(["alex-repo"]);
+    expect(await projectNames(admin)).toEqual(["ocw", "scratch"]);
+    expect((await admin.request("PATCH", `/api/v1/devices/${adminDeviceId}`, { shared: true })).status).toBe(
+      200,
+    );
+    expect(await projectNames(alex)).toEqual(["alex-repo", "ocw", "scratch"]);
+    expect((await listDevices(alex)).find((d) => d.id === adminDeviceId)!.viewerCan).toEqual(["device.use"]);
+    expect((await admin.request("PATCH", `/api/v1/devices/${adminDeviceId}`, { shared: false })).status).toBe(
+      200,
+    );
+
+    // Rename/share is owner-only (an admin included); revoke is owner or admin.
+    const byAdmin = await admin.request("PATCH", `/api/v1/devices/${alexDeviceId}`, { name: "x" });
+    expect(byAdmin.status).toBe(403);
+    expect((byAdmin.body!.error as { details: unknown }).details).toMatchObject({
+      permission: "device.update",
+    });
+    expect((await alex.request("PATCH", `/api/v1/devices/${adminDeviceId}`, { shared: true })).status).toBe(
+      403,
+    );
+    expect((await alex.request("DELETE", `/api/v1/devices/${adminDeviceId}`)).status).toBe(403);
+    expect(
+      (await alex.request("PATCH", `/api/v1/devices/${alexDeviceId}`, { name: "Alex's box" })).status,
+    ).toBe(200);
+
+    // Starting a session: not shared → device_not_shared; offline → device_offline; revoked → device_revoked.
+    const adminProject = await alex.request("POST", "/api/v1/work-sessions", { projectId });
+    expect(adminProject.status).toBe(403);
+    expect(errorCode(adminProject)).toBe("device_not_shared");
+    const alexProjectId = (
+      (await alex.request("GET", "/api/v1/projects")).body!.projects as Array<{ id: string; name: string }>
+    ).find((p) => p.name === "alex-repo")!.id;
+    await alexDevice.close();
+    await eventually(async () =>
+      (await listDevices(alex)).some(
+        (d) => d.id === alexDeviceId && (d as { status?: string }).status === "offline",
+      ),
+    );
+    const offline = await alex.request("POST", "/api/v1/work-sessions", { projectId: alexProjectId });
+    expect(offline.status).toBe(409);
+    expect(errorCode(offline)).toBe("device_offline");
+
+    expect((await dana.request("DELETE", `/api/v1/devices/${alexDeviceId}`)).status).toBe(200);
+    const revoked = await alex.request("POST", "/api/v1/work-sessions", { projectId: alexProjectId });
+    expect(revoked.status).toBe(403);
+    expect(errorCode(revoked)).toBe("device_revoked");
+    expect((revoked.body!.error as { details: unknown }).details).toMatchObject({
+      permission: "device.use",
+      layer: "device",
+    });
+  });
+
+  it("sessions and prompts from the desktop app are audited with client kind desktop", async () => {
+    const desktop = await desktopSignIn(ADMIN.email, ADMIN.password);
+    const { id } = await newSession({ title: "From desktop" }, desktop);
+    const queued = await desktop.request("POST", `/api/v1/work-sessions/${id}/prompts`, { body: "hi" });
+    expect(queued.status).toBe(200);
+    const cmd = await device.command("prompt", id);
+    const rows = (
+      await su.query(
+        "select action, client_kind from app.audit_events where session_id = $1 and action in ('work_session.created', 'work_prompt.queued')",
+        [id],
+      )
+    ).rows;
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        { action: "work_session.created", client_kind: "desktop" },
+        { action: "work_prompt.queued", client_kind: "desktop" },
+      ]),
+    );
+    await finishPrompt(id, cmd);
+    await eventually(async () => (await status(id)) === "idle");
+  });
+});
+
 describe("tenant isolation", () => {
   it("another organization's devices, projects and sessions are invisible and untouchable", async () => {
     const orgB = randomUUID();
@@ -766,8 +946,18 @@ describe("revocation", () => {
     await eventually(async () => (await status(id)) === "failed");
     await expect(FakeDevice.open(stack.baseUrl, deviceToken)).rejects.toThrow("HTTP 401");
     const audit = await su.query(
-      "select count(*)::int as n from app.audit_events where action = 'device.revoked'",
+      "select count(*)::int as n from app.audit_events where action = 'device.revoked' and resource_id = $1",
+      [devices[0]!.id],
     );
     expect(audit.rows[0].n).toBe(1);
+  });
+});
+
+describe("authorization coverage", () => {
+  it("every device, project and Work Zone answer went through the resolver", () => {
+    const undecided = stack.built.authz.undecided.filter((u) =>
+      /^\/api\/v1\/(devices|projects|work-sessions)/.test(u.url),
+    );
+    expect(undecided).toEqual([]);
   });
 });

@@ -1,4 +1,3 @@
-// authz-legacy: 02-05 migrates this file to the resolver
 import { randomUUID } from "node:crypto";
 import {
   CreatePromptRequest,
@@ -28,11 +27,18 @@ import {
   workSessions,
 } from "@ocw/db";
 import { and, asc, desc, eq, max, ne, sql } from "drizzle-orm";
+import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { type App, type AuthContext, authOf, type Core, tenant } from "../../core";
-import { conflict, forbidden, HttpError, notFound } from "../../lib/errors";
-import { canUseDevice, type DeviceHub } from "../device";
-import { createPermissionService, type ResourceFacts, workSessionResource } from "../organization";
+import { conflict, HttpError, notFound } from "../../lib/errors";
+import { type DeviceHub, deviceFacts } from "../device";
+import {
+  AuthzDeniedError,
+  createPermissionService,
+  orgResource,
+  type ResourceFacts,
+  workSessionResource,
+} from "../organization";
 import { type SessionRow, type WorkSessionService, wsTopic } from "./service";
 
 const SessionParams = z.object({ id: z.uuid() });
@@ -59,9 +65,22 @@ export function registerWorkSessionRoutes(
   hub: DeviceHub,
   svc: WorkSessionService,
 ): void {
-  const user = { config: { authz: "user" as const }, preHandler: core.identity.requireUser };
+  const requireUser = core.identity.requireUser;
+  const user = { config: { authz: "user" as const }, preHandler: requireUser };
   const tags = ["work-session"];
   const perms = createPermissionService(core);
+
+  /** Lock + load a session and assert `permission` on it (404 when it is not in the caller's org). */
+  async function lockedFor(
+    req: FastifyRequest,
+    tx: Tx,
+    id: string,
+    permission: "work_session.prompt" | "work_session.interrupt",
+  ): Promise<SessionRow> {
+    const s = await locked(tx, id);
+    await perms.assertCan(req, tx, permission, await sessionFacts(tx, authOf(req), s));
+    return s;
+  }
 
   /** Lock + load a session visible in the caller's org (RLS), or 404. */
   async function locked(tx: Tx, id: string): Promise<SessionRow> {
@@ -110,7 +129,11 @@ export function registerWorkSessionRoutes(
 
   app.get(
     "/work-sessions",
-    { ...user, schema: { tags, querystring: ListQuery, response: { 200: WorkSessionList } } },
+    {
+      config: { authz: "user" },
+      preHandler: [requireUser, perms.requirePermission("work_session.read")],
+      schema: { tags, querystring: ListQuery, response: { 200: WorkSessionList } },
+    },
     async (req) => ({
       sessions: await core.db.withTenant(tenant(req), (tx) =>
         svc.sessions(tx, req.query.archived === "1" ? undefined : ne(workSessions.status, "archived")),
@@ -125,6 +148,7 @@ export function registerWorkSessionRoutes(
       core.db.withTenant(tenant(req), async (tx) => {
         const auth = authOf(req);
         const body = req.body;
+        await perms.assertCan(req, tx, "work_session.create", orgResource());
         const [row] = await tx
           .select({ p: projects, d: devices })
           .from(projects)
@@ -133,12 +157,16 @@ export function registerWorkSessionRoutes(
         if (!row || row.p.removedAt) throw notFound("Project not found");
         const { p, d } = row;
         if (body.deviceId && body.deviceId !== d.id) throw conflict("The project belongs to another device");
-        if (!canUseDevice(d, auth.userId)) {
-          throw forbidden(
-            "This device is not shared with you. Ask its owner to share it.",
-            "device_not_shared",
-          );
-        }
+        // Device layer: own or shared (device_not_shared), never revoked (device_revoked).
+        await perms.assertCan(req, tx, "device.use", deviceFacts(d, auth.userId)).catch((err) => {
+          if (!(err instanceof AuthzDeniedError)) throw err;
+          throw new AuthzDeniedError(err.denial, {
+            message:
+              err.denial.reason === "device_revoked"
+                ? `${d.name} was revoked. Pair it again to use it.`
+                : "This device is not shared with you. Ask its owner to share it.",
+          });
+        });
         if (d.status !== "online")
           throw conflict(`${d.name} is offline. Start the desktop app.`, "device_offline");
         const runtime = z
@@ -199,7 +227,7 @@ export function registerWorkSessionRoutes(
           resourceId: s!.id,
           sessionId: s!.id,
           deviceId: d.id,
-          clientKind: "web",
+          clientKind: auth.clientKind,
           metadata: {
             projectId: p.id,
             runtime: s!.runtime,
@@ -235,7 +263,7 @@ export function registerWorkSessionRoutes(
       resourceId: p!.id,
       sessionId: s.id,
       deviceId: s.deviceId,
-      clientKind: "web",
+      clientKind: auth.clientKind,
       metadata: {
         promptId: p!.id,
         authorUserId: auth.userId,
@@ -291,7 +319,7 @@ export function registerWorkSessionRoutes(
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
         const auth = authOf(req);
-        const s = await locked(tx, req.params.id);
+        const s = await lockedFor(req, tx, req.params.id, "work_session.prompt");
         if (s.status === "archived") throw conflict("This session is archived", "session_archived");
         await joinConversation(tx, auth, s);
         const p = await queuePrompt(tx, auth, s, req.body.body);
@@ -304,13 +332,14 @@ export function registerWorkSessionRoutes(
   );
 
   async function updatePrompt(
+    req: FastifyRequest,
     tx: Tx,
-    auth: AuthContext,
     sessionId: string,
     promptId: string,
     change: z.infer<typeof UpdatePromptRequest>,
   ) {
-    const s = await locked(tx, sessionId);
+    const auth = authOf(req);
+    const s = await lockedFor(req, tx, sessionId, "work_session.prompt");
     const [p] = await tx
       .select()
       .from(workPrompts)
@@ -375,7 +404,7 @@ export function registerWorkSessionRoutes(
     { ...user, schema: { tags, params: PromptParams, body: UpdatePromptRequest, response: { 200: Ok } } },
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
-        await updatePrompt(tx, authOf(req), req.params.id, req.params.pid, req.body);
+        await updatePrompt(req, tx, req.params.id, req.params.pid, req.body);
         return { ok: true as const };
       }),
   );
@@ -385,7 +414,7 @@ export function registerWorkSessionRoutes(
     { ...user, schema: { tags, params: PromptParams, response: { 200: Ok } } },
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
-        await updatePrompt(tx, authOf(req), req.params.id, req.params.pid, { status: "cancelled" });
+        await updatePrompt(req, tx, req.params.id, req.params.pid, { status: "cancelled" });
         return { ok: true as const };
       }),
   );
@@ -395,7 +424,7 @@ export function registerWorkSessionRoutes(
     { ...user, schema: { tags, params: SessionParams, response: { 200: Ok } } },
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
-        const s = await locked(tx, req.params.id);
+        const s = await lockedFor(req, tx, req.params.id, "work_session.interrupt");
         if (s.status !== "running" && s.status !== "waiting_approval") {
           throw conflict("Nothing is running", "not_running");
         }
@@ -497,6 +526,20 @@ export function registerWorkSessionRoutes(
             .innerJoin(projects, eq(projects.id, workSessions.projectId))
             .where(eq(workSessions.id, req.params.id));
           if (!row) throw notFound("Work session not found");
+          await perms.assertCan(
+            req,
+            tx,
+            "work_session.read",
+            workSessionResource(
+              {
+                createdBy: row.s.createdBy,
+                deviceOwnerUserId: row.d.ownerUserId,
+                deviceRevoked: row.d.revokedAt !== null,
+              },
+              authOf(req).userId,
+            ),
+            { hideAs404: true },
+          );
           if (row.d.status !== "online" || row.d.revokedAt) {
             throw conflict(`${row.d.name} is offline`, "device_offline");
           }
