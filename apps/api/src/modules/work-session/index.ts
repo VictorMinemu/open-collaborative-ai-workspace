@@ -1,7 +1,8 @@
-import { workSessions } from "@ocw/db";
+import { devices, workSessions } from "@ocw/db";
 import { eq } from "drizzle-orm";
 import type { ApiModule, Core } from "../../core";
 import type { DeviceHub } from "../device";
+import { createPermissionService, workSessionResource } from "../organization";
 import { registerWorkSessionRoutes } from "./routes";
 import { WorkSessionService } from "./service";
 
@@ -22,14 +23,31 @@ export function createWorkSessionModule(core: Core, hub: DeviceHub): ApiModule {
   });
   hub.setSessionHandler(service);
 
-  // Any member of the organization may follow a work session (RLS scopes the lookup to the org).
+  // Following a session's stream is `work_session.read` on that session (RLS scopes the lookup to the org).
+  const perms = createPermissionService(core);
   core.realtime.registerTopicAuthorizer("ws", async (auth, workSessionId) =>
     core.db.withTenant({ organizationId: auth.organizationId, userId: auth.userId }, async (tx) => {
-      const rows = await tx
-        .select({ id: workSessions.id })
+      const [row] = await tx
+        .select({
+          createdBy: workSessions.createdBy,
+          owner: devices.ownerUserId,
+          revokedAt: devices.revokedAt,
+        })
         .from(workSessions)
+        .innerJoin(devices, eq(devices.id, workSessions.deviceId))
         .where(eq(workSessions.id, workSessionId));
-      return rows.length > 0;
+      if (!row) return false;
+      const facts = workSessionResource(
+        { createdBy: row.createdBy, deviceOwnerUserId: row.owner, deviceRevoked: row.revokedAt !== null },
+        auth.userId,
+      );
+      const { allowed } = await perms.decide(
+        tx,
+        { kind: "user", userId: auth.userId },
+        "work_session.read",
+        facts,
+      );
+      return allowed;
     }),
   );
 

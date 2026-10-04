@@ -1,5 +1,4 @@
 "use client";
-// authz-legacy: 02-05 migrates this file to the resolver
 
 import type { Device } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
@@ -151,9 +150,10 @@ export function DevicesSettings() {
 function DeviceCard({ device: d, owned }: { device: Device; owned: boolean }) {
   const update = useUpdateDevice();
   const revoke = useRevokeDevice();
-  const me = useMe({ enabled: false });
   const [confirm, setConfirm] = useState(false);
-  const isAdmin = me.data?.organization.role === "admin";
+  // Decided by the API resolver: revoke = owner or admin; update (rename, share) = owner only.
+  const canRevoke = d.viewerCan?.includes("device.revoke") ?? false;
+  const canUpdate = d.viewerCan?.includes("device.update") ?? false;
   const online = d.status === "online";
 
   return (
@@ -213,7 +213,7 @@ function DeviceCard({ device: d, owned }: { device: Device; owned: boolean }) {
             )}
           </div>
         </div>
-        {owned || isAdmin ? (
+        {canRevoke ? (
           <Button
             size="icon-sm"
             variant="ghost"
@@ -226,7 +226,7 @@ function DeviceCard({ device: d, owned }: { device: Device; owned: boolean }) {
           </Button>
         ) : null}
       </div>
-      {owned ? (
+      {canUpdate ? (
         <div className="flex items-center justify-between gap-3 border-t px-4 py-3">
           <span className="text-sm">
             Let teammates start sessions on this device

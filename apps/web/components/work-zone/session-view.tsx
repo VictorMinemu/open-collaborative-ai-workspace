@@ -1,8 +1,7 @@
 "use client";
-// authz-legacy: 02-05 migrates this file to the resolver
 
 import { Menu } from "@base-ui/react/menu";
-import type { WorkSession } from "@ocw/contracts";
+import type { Permission, WorkSession } from "@ocw/contracts";
 import {
   Archive,
   ArrowLeft,
@@ -27,7 +26,6 @@ import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
 import { errorMessage, isApiError } from "@/lib/api";
-import { useMe } from "@/lib/queries";
 import { type LiveSession, useLiveSession } from "@/lib/use-live-session";
 import { cn } from "@/lib/utils";
 import { useArchiveSession, useDevices } from "@/lib/workzone-queries";
@@ -64,7 +62,7 @@ export function SessionView({ id }: { id: string }) {
     );
   }
   if (!state) return <SessionSkeleton />;
-  return <LoadedSession state={state} />;
+  return <LoadedSession state={state} viewerCan={query.data?.viewerCan ?? []} />;
 }
 
 function SessionSkeleton() {
@@ -82,9 +80,8 @@ function SessionSkeleton() {
   );
 }
 
-function LoadedSession({ state }: { state: LiveSession }) {
+function LoadedSession({ state, viewerCan }: { state: LiveSession; viewerCan: readonly Permission[] }) {
   const session = state.session;
-  const me = useMe({ enabled: false });
   const devices = useDevices();
   const [tab, setTab] = useState<PanelTab>("queue");
   const [sheet, setSheet] = useState<PanelTab | null>(null);
@@ -95,11 +92,9 @@ function LoadedSession({ state }: { state: LiveSession }) {
   const queued = state.prompts.filter((p) => p.status === "queued").length;
   const changesCount = state.changes?.files.length ?? 0;
 
-  const userId = me.data?.user.id;
-  const role = me.data?.organization.role;
   const device = devices.data?.find((d) => d.id === session.deviceId);
-  const canDecide =
-    !!userId && (session.createdBy === userId || device?.ownerUserId === userId || role === "admin");
+  // Decided by the API resolver (creator, device owner or admin, minus Tool and Device layer denials).
+  const canDecide = viewerCan.includes("work_session.approve");
   const deciderHint = `Waiting for ${session.createdByName ?? "the session owner"}${
     device?.ownerName && device.ownerUserId !== session.createdBy ? ` or ${device.ownerName}` : ""
   } to decide.`;
@@ -120,6 +115,7 @@ function LoadedSession({ state }: { state: LiveSession }) {
         onPanel={(t) => setSheet(t)}
         queued={queued}
         changesCount={changesCount}
+        canArchive={viewerCan.includes("work_session.archive")}
       />
       <div className="flex min-h-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col">
@@ -228,12 +224,14 @@ function SessionHeader({
   onPanel,
   queued,
   changesCount,
+  canArchive,
 }: {
   session: WorkSession;
   state: LiveSession;
   onPanel: (t: PanelTab) => void;
   queued: number;
   changesCount: number;
+  canArchive: boolean;
 }) {
   const router = useRouter();
   const archive = useArchiveSession(session.id);
@@ -332,7 +330,7 @@ function SessionHeader({
           </Menu.Trigger>
           <DropdownMenuContent align="end">
             <DropdownMenuItem
-              disabled={session.status === "archived"}
+              disabled={session.status === "archived" || !canArchive}
               onClick={() =>
                 archive.mutate(undefined, {
                   onSuccess: () => {

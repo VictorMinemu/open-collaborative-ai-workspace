@@ -11,7 +11,7 @@ export {
   type EnqueueCommand,
 } from "./hub";
 export { looksAbsolute, sanitizeAnnouncements } from "./link";
-export { canUseDevice, listUsableProjects, normalizePairingCode, toDevice } from "./routes";
+export { deviceFacts, normalizePairingCode, toDevice } from "./routes";
 
 export interface DeviceModule extends ApiModule {
   /** Public interface for the work-session module: command queue, presence, diff relay. */
