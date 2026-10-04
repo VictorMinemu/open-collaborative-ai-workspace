@@ -472,7 +472,7 @@ export function registerUnitRoutes(app: App, core: Core, perms: PermissionServic
         const unit = await requireUnit(tx, req.params.id);
         await perms.assertCan(req, tx, "unit.manage", unitResource(unit));
         const { userId } = req.params;
-        const membership = await requireMembership(tx, unit.id, userId);
+        const membership = await loadUnitMembership(tx, unit.id, userId);
         const { role } = req.body;
         const target = await memberRow(tx, userId);
         if (!target) throw badRequest("Not a member of this organization", "unknown_member");
@@ -514,7 +514,7 @@ export function registerUnitRoutes(app: App, core: Core, perms: PermissionServic
         const unit = await requireUnit(tx, req.params.id);
         await perms.assertCan(req, tx, "unit.members.manage", unitResource(unit));
         const { userId } = req.params;
-        const membership = await requireMembership(tx, unit.id, userId);
+        const membership = await loadUnitMembership(tx, unit.id, userId);
         // Removing a lead takes away lead authority: the same decision as appointing one (T-02-06-03).
         if (isLeadMembership(membership.role)) {
           await perms.assertCan(req, tx, "unit.manage", unitResource(unit));
@@ -559,7 +559,7 @@ async function activeMember(tx: Tx, userId: string) {
   return row;
 }
 
-async function requireMembership(tx: Tx, unitId: string, userId: string) {
+async function loadUnitMembership(tx: Tx, unitId: string, userId: string) {
   const [row] = await tx
     .select()
     .from(unitMemberships)

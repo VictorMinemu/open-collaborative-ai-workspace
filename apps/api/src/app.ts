@@ -175,8 +175,10 @@ export async function buildApp(
   );
 
   // ---------------------------------------------------------------- authorization coverage
-  // Before any route below: records every route's config.authz and every undecided non-public 2xx.
-  const authz = installAuthz(app, { strict: false });
+  // Before any route below: records every route's config.authz and every undecided non-public 2xx. Strict
+  // in tests (an undecided 2xx becomes a 500 and fails the suite); production and dev keep warn-and-record,
+  // so a missed declaration degrades to a log line instead of an outage (T-02-15-03).
+  const authz = installAuthz(app, { strict: env.NODE_ENV === "test" });
 
   // ---------------------------------------------------------------- health
   app.get(

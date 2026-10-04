@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { ClientKind, OrgRole } from "@ocw/contracts";
+import type { ClientKind } from "@ocw/contracts";
 import type { TenantCtx, TenantDb } from "@ocw/db";
 import type { FastifyBaseLogger, FastifyInstance, FastifyRequest, RawServerDefault } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
@@ -17,8 +17,6 @@ export interface AuthContext {
   userId: string;
   organizationId: string;
   sessionId: string;
-  /** Interim role check input; 02-15 removes it once every route is decided by the resolver. */
-  role: OrgRole;
   name: string;
   email: string;
   /** AUTH-05: the client that created the session (web, desktop or mobile), recorded on audit rows. */

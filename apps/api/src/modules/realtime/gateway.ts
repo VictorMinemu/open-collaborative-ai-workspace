@@ -65,6 +65,9 @@ export function registerGateway(
     "/ws",
     {
       websocket: true,
+      // A user socket: the JWT authenticates it here, and every topic subscription is decided by the
+      // resolver's topic authorizers (02-06).
+      config: { authz: "user" },
       schema: { hide: true },
       onRequest: async (req, reply) => {
         const origin = req.headers.origin;

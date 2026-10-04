@@ -4,18 +4,23 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 /**
- * Static guard (research §Pattern 4): no role check may live outside the permission resolver. A file that
- * still holds an interim check carries `authz-legacy: 02-NN` naming the plan that migrates it; each plan
- * deletes its marker, and 02-15 proves none is left.
+ * Static guard (research §Pattern 4): no role check may live outside the permission resolver. During the
+ * Phase 2 migration a file holding an interim check carried a legacy marker naming the plan that migrated
+ * it; 02-15 removed the last one, so a marker anywhere is now a failure, as is any legacy helper name, the
+ * deleted role preHandler, an `isAdmin` identifier or a role compared against an org-role literal.
  */
 
 const ROOT = fileURLToPath(new URL("../../../../../../", import.meta.url));
 
 const ROLE_LITERAL = /\brole\s*[!=]==\s*["'](standard|developer|lead|admin)["']/;
-const API_PATTERNS: readonly RegExp[] = [/\brequireRole\s*\(/, /\bisAdmin\b/, ROLE_LITERAL];
-const WEB_PATTERNS: readonly RegExp[] = [/\buseIsAdmin\b/, /\bisAdmin\b/, ROLE_LITERAL];
-const MARKER = /authz-legacy: 02-\d\d\b/;
-const ANY_MARKER = /authz-legacy/;
+/** Helpers deleted by 02-04, 02-05, 02-07, 02-10 and 02-15; none may come back under the same name. */
+const LEGACY_HELPERS =
+  /\b(canRead|requireReadable|requireWritable|canUseDevice|listUsableProjects|assertCanApprove|requireActiveAgent|requireMembership|requireRole)\b/;
+const API_PATTERNS: readonly RegExp[] = [LEGACY_HELPERS, /\bisAdmin\b/, ROLE_LITERAL];
+const WEB_PATTERNS: readonly RegExp[] = [/\buseIsAdmin\b/, LEGACY_HELPERS, /\bisAdmin\b/, ROLE_LITERAL];
+// Assembled so this file does not match its own marker scan.
+const MARKER = new RegExp(["authz", "legacy"].join("-"));
+const SELF = "apps/api/src/modules/organization/permissions/guard.test.ts";
 
 function walk(dir: string, accept: (file: string) => boolean, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
@@ -42,18 +47,25 @@ function webFiles(): string[] {
   );
 }
 
-/** `file:line  code` for every legacy check in an unmarked file, plus every marker without a plan id. */
+/** Every .ts/.tsx file of both apps, tests included (for the marker scan), except this guard. */
+function allSourceFiles(): string[] {
+  return [
+    ...walk(join(ROOT, "apps/api/src"), (f) => f.endsWith(".ts")),
+    ...["app", "components", "lib"].flatMap((d) =>
+      walk(join(ROOT, "apps/web", d), (f) => /\.(ts|tsx)$/.test(f)),
+    ),
+  ].filter((f) => rel(f) !== SELF);
+}
+
+/** `file:line  code` for every line matching one of the patterns. */
 function scan(files: readonly string[], patterns: readonly RegExp[]): string[] {
   const hits: string[] = [];
   for (const file of files) {
-    const lines = readFileSync(file, "utf8").split("\n");
-    const marked = lines.some((l) => MARKER.test(l));
-    lines.forEach((line, i) => {
-      if (ANY_MARKER.test(line) && !MARKER.test(line))
-        hits.push(`${rel(file)}:${i + 1}  marker without a plan id`);
-      if (marked) return;
-      if (patterns.some((p) => p.test(line))) hits.push(`${rel(file)}:${i + 1}  ${line.trim()}`);
-    });
+    readFileSync(file, "utf8")
+      .split("\n")
+      .forEach((line, i) => {
+        if (patterns.some((p) => p.test(line))) hits.push(`${rel(file)}:${i + 1}  ${line.trim()}`);
+      });
   }
   return hits;
 }
@@ -70,9 +82,23 @@ describe("legacy authorization guard", () => {
         ],
       ],
       [
+        [LEGACY_HELPERS],
+        [
+          "await requireReadable(tx, conversationId);",
+          "if (!canRead(member)) return;",
+          "requireWritable(tx, id)",
+          "await canUseDevice(tx, deviceId)",
+          "const projects = await listUsableProjects(tx);",
+          "assertCanApprove(session, auth)",
+          "await requireActiveAgent(tx, agentId);",
+          "await requireMembership(tx, channelId, userId);",
+        ],
+      ],
+      [
         WEB_PATTERNS,
         [
           "const admin = useIsAdmin();",
+          "const readable = channels.filter(canRead);",
           "{isAdmin ? <Button /> : null}",
           'me.organization.role === "developer"',
         ],
@@ -85,9 +111,12 @@ describe("legacy authorization guard", () => {
           String(p),
         ).toBe(true);
     }
+    // Every legacy helper name is caught on its own.
+    for (const name of LEGACY_HELPERS.source.replace(/^\\b\(|\)\\b$/g, "").split("|"))
+      expect(LEGACY_HELPERS.test(`${name}(`), name).toBe(true);
+    expect(LEGACY_HELPERS.test("loadUnitMembership(tx, unitId, userId)")).toBe(false);
     expect(ROLE_LITERAL.test('role: "admin"')).toBe(false);
-    expect(MARKER.test("// authz-legacy: 02-04 migrates this file to the resolver")).toBe(true);
-    expect(MARKER.test("// authz-legacy: later")).toBe(false);
+    expect(MARKER.test(`// ${["authz", "legacy"].join("-")}: 02-04 migrates this file`)).toBe(true);
   });
 
   it("scans real files (the trees are found)", () => {
@@ -96,11 +125,16 @@ describe("legacy authorization guard", () => {
     expect(apiFiles().some((f) => rel(f) === "apps/api/src/app.ts")).toBe(true);
   });
 
-  it("no unmarked legacy role check in the API", () => {
+  it("no legacy marker is left anywhere in either app (tests included)", () => {
+    expect(allSourceFiles().length).toBeGreaterThan(apiFiles().length);
+    expect(scan(allSourceFiles(), [MARKER])).toEqual([]);
+  });
+
+  it("no legacy role check or legacy helper in the API", () => {
     expect(scan(apiFiles(), API_PATTERNS)).toEqual([]);
   });
 
-  it("no unmarked legacy role check in the web", () => {
+  it("no legacy role check or legacy helper in the web", () => {
     expect(scan(webFiles(), WEB_PATTERNS)).toEqual([]);
   });
 });

@@ -1,7 +1,6 @@
-// authz-legacy: 02-15 migrates this file to the resolver (requireRole delegate)
 import type { IncomingHttpHeaders } from "node:http";
 import { getCurrentAdapter, runWithTransaction } from "@better-auth/core/context";
-import type { DeviceAccessToken, MeResponse, OrgRole, SetupRequest } from "@ocw/contracts";
+import type { DeviceAccessToken, MeResponse, SetupRequest } from "@ocw/contracts";
 import { instanceSetup, member, organization, orgMembers, user } from "@ocw/db";
 import { fromNodeHeaders } from "better-auth/node";
 import { and, asc, eq } from "drizzle-orm";
@@ -58,8 +57,6 @@ export class IdentityService {
   private readonly authn: Authenticator;
   /** Fastify preHandler: 401 unless signed in; sets `req.auth`. */
   readonly requireUser: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
-  /** Legacy preHandler factory: requires one of the org roles (implies requireUser). 02-15 removes it. */
-  readonly requireRole: (...roles: OrgRole[]) => (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
 
   /** jose verifier over the cached JWKS (AUTH-06); also signs device tokens. */
   readonly tokens: TokenService;
@@ -74,7 +71,6 @@ export class IdentityService {
     this.authn = createAuthenticator(auth, authDb, (token) => this.verifyAccessToken(token));
     this.sessions = createSessionStore(auth);
     this.requireUser = this.authn.requireUser;
-    this.requireRole = this.authn.requireRole;
   }
 
   /** Resolve the session cookie → principal. Returns null when unauthenticated or deactivated. */
@@ -97,7 +93,6 @@ export class IdentityService {
       userId: claims.sub,
       organizationId: claims.org,
       sessionId: claims.sid,
-      role: asRole(m.role),
       name: m.name,
       email: m.email,
       clientKind: claims.ck,
@@ -171,10 +166,16 @@ export class IdentityService {
       .from(organization)
       .where(eq(organization.id, auth.organizationId));
     const [u] = await this.authDb.select().from(user).where(eq(user.id, auth.userId));
-    if (!org || !u) throw unauthorized();
+    // The principal carries no role (02-15); the display role is read from the org_members projection.
+    const [m] = await this.authDb
+      .select({ role: orgMembers.role })
+      .from(orgMembers)
+      .where(and(eq(orgMembers.organizationId, auth.organizationId), eq(orgMembers.userId, auth.userId)))
+      .limit(1);
+    if (!org || !u || !m) throw unauthorized();
     return {
       user: { id: u.id, name: u.name, email: u.email, image: u.image ?? null },
-      organization: { id: org.id, name: org.name, slug: org.slug, role: auth.role },
+      organization: { id: org.id, name: org.name, slug: org.slug, role: asRole(m.role) },
       sessionId: auth.sessionId,
     };
   }
