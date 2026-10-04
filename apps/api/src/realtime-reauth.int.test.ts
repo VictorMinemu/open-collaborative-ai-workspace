@@ -332,3 +332,63 @@ describe("re-decisions are race-free and fail safe (RT-01, D-05)", () => {
     }
   });
 });
+
+describe("overlapping subscribes (latest wins)", () => {
+  it("an older sub decided last never overwrites a newer presence sub; an unsub mid-decision wins", async () => {
+    const gw = await controlledGateway();
+    const s = await openSocket(gw.base, await sam.token());
+    const a = await openSocket(gw.base, await admin.token());
+    try {
+      // 1. Background sub (held) then presence sub (immediate): the presence sub must stay the live one.
+      const topic = `conv:${randomUUID()}`;
+      let release!: (v: boolean) => void;
+      const held = new Promise<boolean>((r) => {
+        release = r;
+      });
+      gw.setDecide((auth) => (auth.userId === samId && gw.calls.length === 1 ? held : true));
+      s.send({ op: "sub", topic });
+      await waitFor(() => gw.calls.length === 1);
+      s.send({ op: "sub", topic, presence: true });
+      await waitFor(() => s.frames.find((f) => f.op === "presence" && f.topic === topic && f.full));
+      release(true);
+      await sleep(200);
+      const adminConn = await subscribe(a, topic, adminId);
+      await waitFor(
+        () =>
+          s.frames.find(
+            (f) =>
+              f.op === "presence" &&
+              f.topic === topic &&
+              !f.full &&
+              f.entries?.some((e) => e.conn === adminConn),
+          ),
+        1000,
+      );
+
+      // 2. A sub whose decision is still running when the client unsubscribes never goes live.
+      const other = `conv:${randomUUID()}`;
+      let release2!: (v: boolean) => void;
+      const held2 = new Promise<boolean>((r) => {
+        release2 = r;
+      });
+      const n = gw.calls.length;
+      gw.setDecide((auth) => (auth.userId === samId && gw.calls.length === n + 1 ? held2 : true));
+      s.send({ op: "sub", topic: other, presence: true });
+      await waitFor(() => gw.calls.length === n + 1);
+      s.send({ op: "unsub", topic: other });
+      await sleep(100);
+      release2(true);
+      await sleep(300);
+      expect(subscribedTo(s, other)).toBeUndefined();
+      a.send({ op: "sub", topic: other, presence: true });
+      const snap = await waitFor(() =>
+        a.frames.find((f) => f.op === "presence" && f.topic === other && f.full),
+      );
+      expect(snap.entries?.some((e) => e.userId === samId)).toBe(false);
+    } finally {
+      s.socket.close();
+      a.socket.close();
+      await gw.close();
+    }
+  });
+});

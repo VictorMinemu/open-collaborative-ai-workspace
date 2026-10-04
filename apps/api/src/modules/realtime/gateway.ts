@@ -286,6 +286,15 @@ export function registerGateway(
     (socket: WebSocket, req: FastifyRequest) => {
       const auth = req.auth as AuthContext;
       const subs = new Map<string, Subscription>();
+      // Per topic, bumped by every `sub` and `unsub` frame: a decision that finishes after a newer frame for the
+      // same topic is dropped, so the latest frame always wins (the sidebar watcher and the channel view can
+      // send two subs at once; an unsub can arrive while a sub is still being decided).
+      const subGen = new Map<string, number>();
+      const bumpGen = (topic: string) => {
+        const g = (subGen.get(topic) ?? 0) + 1;
+        subGen.set(topic, g);
+        return g;
+      };
       const send = (frame: ServerFrame) => {
         if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(frame));
       };
@@ -381,9 +390,12 @@ export function registerGateway(
       };
 
       const subscribe = async (topic: string, afterSeq: number, wantsPresence: boolean) => {
+        const gen = bumpGen(topic);
         await unsub(topic);
         const epoch = conn.authzEpoch;
-        if (!(await deps.realtime.authorizeTopic(auth, topic))) {
+        const allowed = await deps.realtime.authorizeTopic(auth, topic);
+        if (subGen.get(topic) !== gen) return; // superseded by a newer sub/unsub for this topic
+        if (!allowed) {
           send({ op: "err", code: "forbidden", topic, message: "Not allowed to subscribe to this topic" });
           return;
         }
@@ -469,6 +481,7 @@ export function registerGateway(
             });
             return;
           case "unsub":
+            bumpGen(frame.topic);
             void unsub(frame.topic);
             return;
           case "presence":
