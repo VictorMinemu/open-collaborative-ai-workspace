@@ -130,7 +130,15 @@ Plans:
   1. An automated test against the compose stack measures typical propagation of collaborative events between two connected clients under 500 ms
   2. Presence (online/away) for other connected users appears per conversation and expires automatically when a client disappears; the Phase 1 typing indicators keep expiring the same way
   3. A client loses a subscription automatically when its membership is removed (leaving or being removed from a channel, losing access to a Work Zone session), with authorisation resolved through the Phase 2 `resolveEffectivePermissions` resolver
-**Plans**: TBD
+**Plans**: 6 plans in 4 waves (validation strategy: `03-VALIDATION.md`; decisions D-01 … D-09 and research notes in `03-01-PLAN.md`)
+
+Plans:
+- [ ] 03-01-PLAN.md — Wave 1: tracer — "here now" presence in the channel header end to end (contract, Redis store, gateway, client store, header, two-browser e2e) and expiry when a client vanishes (heartbeat, sweep, ping liveness)
+- [ ] 03-02-PLAN.md — Wave 2: Away state end to end (activity monitor, `presence` op with throttle and rate cap, provider wiring, two-browser e2e)
+- [ ] 03-03-PLAN.md — Wave 2: presence in the channel member list and the Work Zone session header (desktop and mobile), screenshots
+- [ ] 03-04-PLAN.md — Wave 3: subscriptions follow channel membership — invalidators after commit, re-decision through the resolver, `revoked` frame, access-lost state; race-free and fail-safe
+- [ ] 03-05-PLAN.md — Wave 3: RT-03 latency spec with two real web clients (p50/p95 < 500 ms for message, typing, presence) in the CI e2e job, report artifact
+- [ ] 03-06-PLAN.md — Wave 4: role, rule and unit changes re-decide live subscriptions, periodic backstop, Work Zone access-lost state, ADR-0009, demo notes, phase gate
 **Research:** standard (Redis-backed presence with expiry over the Phase 1 WebSocket is a known pattern)
 **UI hint**: yes
 
@@ -366,7 +374,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 ‖
 |-------|-----------|----------------|--------|-----------|
 | 1. MVP 0 — Collaborative Workspace Demo Slice | MVP 0 | built from 01-BUILD-SPEC.md (no plans) | Executed, demo-verified; formal verification pending | - |
 | 2. Identity and Organization | MVP 1 | 15/15 | Complete | 2026-10-04 |
-| 3. Realtime Presence and Latency | MVP 1 | 0/TBD | Not started | - |
+| 3. Realtime Presence and Latency | MVP 1 | 0/6 | Planned | - |
 | 4. Chat | MVP 1 | 0/TBD | Not started | - |
 | 5. Direct AI Chat | MVP 1 | 0/TBD | Not started | - |
 | 6. Multiplayer AI Chat, Shared-Context Safety and Agents | MVP 1 | 0/TBD | Not started | - |
