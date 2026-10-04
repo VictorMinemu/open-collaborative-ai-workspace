@@ -6,6 +6,8 @@ describe("agent provider helpers", () => {
     expect(modelRef("anthropic", "claude-sonnet-5-5")).toBe("anthropic/claude-sonnet-5-5");
     expect(modelRef("mock", "mock-1")).toBe("fake/mock-1");
     expect(modelRef("openrouter", "openai/gpt-5")).toBe("openrouter/openai/gpt-5");
+    // Subscription refs keep their own prefix; the cell maps them to OpenClaw's `openai` provider.
+    expect(modelRef("openai-codex", "gpt-6-astra")).toBe("openai-codex/gpt-6-astra");
   });
 
   it("resolves base URLs", () => {

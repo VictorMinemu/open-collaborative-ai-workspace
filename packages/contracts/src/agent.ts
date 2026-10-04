@@ -11,9 +11,31 @@ export const AgentRuntime = z.enum(["openclaw"]);
 export const AgentStatus = z.enum(["provisioning", "ready", "error", "disabled"]);
 export type AgentStatus = z.infer<typeof AgentStatus>;
 
-/** `mock` is only offered when the operator sets OCW_MODEL_PROVIDER=mock (E2E / CI, never metered). */
-export const ModelProviderKind = z.enum(["anthropic", "openai", "openrouter", "openai-compatible", "mock"]);
+/**
+ * `mock` is only offered when the operator sets OCW_MODEL_PROVIDER=mock (E2E / CI, never metered).
+ * `openai-codex` is a subscription provider: the customer's own ChatGPT plan, signed in through Codex
+ * device authorization INSIDE their OpenClaw cell (no API key; ADR-0006).
+ */
+export const ModelProviderKind = z.enum([
+  "anthropic",
+  "openai",
+  "openrouter",
+  "openai-compatible",
+  "openai-codex",
+  "mock",
+]);
 export type ModelProviderKind = z.infer<typeof ModelProviderKind>;
+
+/** Providers connected by signing in to an account (no API key). Credentials never leave the cell. */
+export const SubscriptionProviderKind = z.enum(["openai-codex"]);
+export type SubscriptionProviderKind = z.infer<typeof SubscriptionProviderKind>;
+
+export function isSubscriptionProvider(p: string): p is SubscriptionProviderKind {
+  return SubscriptionProviderKind.safeParse(p).success;
+}
+
+export const ProviderAuthMode = z.enum(["api_key", "subscription"]);
+export type ProviderAuthMode = z.infer<typeof ProviderAuthMode>;
 
 export const AgentUsername = z
   .string()
@@ -83,16 +105,35 @@ export type UpdateAgentRequest = z.infer<typeof UpdateAgentRequest>;
 
 // ---------------------------------------------------------------- model providers
 
+/**
+ * The signed-in account of a subscription provider, as reported by the cell. Identity metadata only:
+ * tokens stay in the OpenClaw cell's own auth store and never reach the API.
+ */
+export const ProviderAccount = z.object({
+  /** Account email from the ID token, when the provider exposes it. */
+  email: z.string().nullable(),
+  /** e.g. `plus`, `pro`, `business` (ChatGPT plan type claim), when exposed. */
+  planType: z.string().nullable(),
+  connectedAt: IsoDateTime,
+  /** The cell reported that its credentials are gone (volume reset, revoked): sign in again. */
+  needsReconnect: z.boolean(),
+});
+export type ProviderAccount = z.infer<typeof ProviderAccount>;
+
 /** A configured model provider. The API key is write-only: only `hasKey` and a 4-char hint are returned. */
 export const ModelProvider = z.object({
   id: Id,
   provider: ModelProviderKind,
+  /** `subscription` providers have no key; see `account`. */
+  authMode: ProviderAuthMode,
   baseUrl: z.string().nullable(),
   allowedModels: z.array(z.string()),
   enabled: z.boolean(),
   hasKey: z.boolean(),
   /** Last 4 characters of the key, e.g. "x9Qa" (never more). */
   keyHint: z.string().nullable(),
+  /** Subscription providers only: who is signed in (null for API-key providers). */
+  account: ProviderAccount.nullable(),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -106,6 +147,10 @@ export const ModelProviderList = z.object({
 export type ModelProviderList = z.infer<typeof ModelProviderList>;
 
 export const UpsertModelProviderRequest = z.object({
+  /**
+   * Subscription providers (`openai-codex`) are created by signing in (`POST /model-providers/:p/auth`);
+   * upsert only edits their allowed models / enabled flag and rejects `apiKey`.
+   */
   provider: ModelProviderKind.exclude(["mock"]),
   /** Write-only. Stored encrypted in app.secrets; omit to keep the current key. */
   apiKey: z.string().trim().min(8).max(500).optional(),
@@ -139,7 +184,11 @@ export interface CatalogModel {
 
 export interface ProviderCatalogEntry {
   provider: ModelProviderKind;
+  /** `subscription`: connect by signing in (device code), no key fields apply. */
+  authMode: ProviderAuthMode;
   label: string;
+  /** Short label for model pickers ("via …"). */
+  shortLabel: string;
   description: string;
   defaultBaseUrl: string | null;
   baseUrlRequired: boolean;
@@ -155,7 +204,9 @@ export const DEFAULT_MODEL = { provider: "anthropic", modelId: "claude-sonnet-5-
 export const MODEL_PROVIDER_CATALOG: readonly ProviderCatalogEntry[] = [
   {
     provider: "anthropic",
+    authMode: "api_key",
     label: "Anthropic",
+    shortLabel: "Anthropic",
     description: "Claude models, direct from Anthropic.",
     defaultBaseUrl: "https://api.anthropic.com",
     baseUrlRequired: false,
@@ -174,7 +225,9 @@ export const MODEL_PROVIDER_CATALOG: readonly ProviderCatalogEntry[] = [
   },
   {
     provider: "openai",
+    authMode: "api_key",
     label: "OpenAI",
+    shortLabel: "OpenAI API",
     description: "GPT models through the OpenAI API.",
     defaultBaseUrl: "https://api.openai.com/v1",
     baseUrlRequired: false,
@@ -188,7 +241,9 @@ export const MODEL_PROVIDER_CATALOG: readonly ProviderCatalogEntry[] = [
   },
   {
     provider: "openrouter",
+    authMode: "api_key",
     label: "OpenRouter",
+    shortLabel: "OpenRouter",
     description: "Hundreds of models behind one key.",
     defaultBaseUrl: "https://openrouter.ai/api/v1",
     baseUrlRequired: false,
@@ -206,7 +261,9 @@ export const MODEL_PROVIDER_CATALOG: readonly ProviderCatalogEntry[] = [
   },
   {
     provider: "openai-compatible",
+    authMode: "api_key",
     label: "OpenAI-compatible",
+    shortLabel: "OpenAI-compatible",
     description: "Any server that speaks the OpenAI Chat Completions API (vLLM, Ollama, LiteLLM…).",
     defaultBaseUrl: null,
     baseUrlRequired: true,
@@ -214,13 +271,41 @@ export const MODEL_PROVIDER_CATALOG: readonly ProviderCatalogEntry[] = [
     keyUrl: null,
     models: [],
   },
+  {
+    provider: "openai-codex",
+    authMode: "subscription",
+    label: "ChatGPT subscription (Codex)",
+    shortLabel: "ChatGPT subscription",
+    description:
+      "Your own ChatGPT plan, signed in through Codex. No API key; usage counts against your plan's Codex limits.",
+    defaultBaseUrl: null,
+    baseUrlRequired: false,
+    keyPlaceholder: "",
+    keyUrl: null,
+    // Ids of the OpenAI Codex catalog in OpenClaw 2026.9.7 (`openai/<id>` there). Which ones a given
+    // account may use depends on its plan; admins can add any other id the account exposes.
+    models: [
+      { id: "gpt-6-astra", label: "GPT-6 Astra", hint: "Codex default · recommended", preselected: true },
+      { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", hint: "Balanced", preselected: true },
+      { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", hint: "Fastest", preselected: true },
+      { id: "gpt-5.5", label: "GPT-5.5", hint: "Previous generation", preselected: false },
+    ],
+  },
 ];
+
+/** Default model when a ChatGPT subscription is the only provider. */
+export const DEFAULT_SUBSCRIPTION_MODEL = { provider: "openai-codex", modelId: "gpt-6-astra" } as const;
 
 /** Deterministic, never-metered model used by E2E (served by infra/fake-model). */
 export const MOCK_MODEL = { provider: "mock", modelId: "mock-1", label: "Mock model (E2E)" } as const;
 
 export function catalogEntry(provider: ModelProviderKind): ProviderCatalogEntry | undefined {
   return MODEL_PROVIDER_CATALOG.find((p) => p.provider === provider);
+}
+
+export function providerShortLabel(provider: ModelProviderKind): string {
+  if (provider === "mock") return "Mock";
+  return catalogEntry(provider)?.shortLabel ?? provider;
 }
 
 export function modelLabel(provider: ModelProviderKind, modelId: string): string {
@@ -248,3 +333,55 @@ export type AgentCellStatus = z.infer<typeof AgentCellStatus>;
 /** Returned ONCE by `POST /agent-cell/token`; only its SHA-256 is stored. */
 export const RotateCellTokenResponse = z.object({ token: z.string(), createdAt: IsoDateTime });
 export type RotateCellTokenResponse = z.infer<typeof RotateCellTokenResponse>;
+
+// ---------------------------------------------------------------- subscription sign-in (device code)
+
+/**
+ * Sign-in flow of a subscription provider, run by the org's OpenClaw cell (OpenClaw owns the device
+ * authorization, token storage and refresh). `starting` = asked the cell; `pending` = code ready, waiting
+ * for the admin to approve it in their browser.
+ */
+export const ProviderAuthState = z.enum(["idle", "starting", "pending", "connected", "error"]);
+export type ProviderAuthState = z.infer<typeof ProviderAuthState>;
+
+export const ProviderAuthErrorCode = z.enum([
+  /** The code expired before it was approved. */
+  "expired",
+  /** The account owner denied the request. */
+  "denied",
+  "cancelled",
+  /** No OpenClaw cell is connected, or it stopped answering. */
+  "cell_offline",
+  /** The provider rejected device sign-in for this account/workspace. */
+  "unsupported",
+  "failed",
+]);
+export type ProviderAuthErrorCode = z.infer<typeof ProviderAuthErrorCode>;
+
+export const ProviderAuthError = z.object({
+  code: ProviderAuthErrorCode,
+  /** Human-readable, never contains tokens or codes. */
+  message: z.string().max(300),
+});
+export type ProviderAuthError = z.infer<typeof ProviderAuthError>;
+
+/** `GET/POST/DELETE /api/v1/model-providers/:provider/auth` (admin only). */
+export const ProviderAuthStatus = z.object({
+  provider: SubscriptionProviderKind,
+  state: ProviderAuthState,
+  flowId: Id.nullable(),
+  /** Where the admin approves the code (shown only while `pending`). */
+  verificationUrl: z.string().nullable(),
+  /** One-time code to type on the verification page (short-lived; only while `pending`). */
+  userCode: z.string().nullable(),
+  expiresAt: IsoDateTime.nullable(),
+  startedAt: IsoDateTime.nullable(),
+  error: ProviderAuthError.nullable(),
+  /** Current connection (from the provider row), independent of any flow. */
+  account: ProviderAccount.nullable(),
+  /** Is an OpenClaw cell connected right now (sign-in needs one). */
+  cellConnected: z.boolean(),
+});
+export type ProviderAuthStatus = z.infer<typeof ProviderAuthStatus>;
+
+export const SubscriptionProviderParams = z.object({ provider: SubscriptionProviderKind });

@@ -93,5 +93,10 @@ export const EphemeralTypes = {
   agentTyping: "agent.typing",
   /** On `org:<id>`: the OpenClaw cell connected/disconnected (AgentCellStatus payload). */
   cellPresence: "cell.presence",
+  /**
+   * On `org:<id>`: a subscription sign-in flow changed state. Payload `{provider, state}` only (never the
+   * code): admins refetch `GET /api/v1/model-providers/:provider/auth`.
+   */
+  providerAuth: "provider.auth.updated",
   assistantDelta: "assistant.delta",
 } as const;
