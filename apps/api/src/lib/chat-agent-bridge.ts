@@ -44,6 +44,12 @@ export interface PostAgentMessageInput {
   body: string;
   /** Idempotency key from the plugin; the same key must not create two messages. */
   idempotencyKey: string;
+  /**
+   * The message the bot is answering (AgentChannelPostMessage.inReplyToMessageId). When its author is a
+   * human, the reply is allowed only while that human may still read the channel (agent ∩ human, the
+   * confused-deputy rule). Optional: 02-10 passes it through from the Agent Channel API.
+   */
+  inReplyToMessageId?: string;
 }
 
 export type MentionHandler = (tx: Tx, mention: AgentMention, after: AfterCommit) => Promise<void>;

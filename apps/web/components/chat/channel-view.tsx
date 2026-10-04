@@ -1,5 +1,4 @@
 "use client";
-// authz-legacy: 02-04 migrates this file to the resolver
 
 import {
   type AgentTypingEvent,
@@ -336,8 +335,8 @@ export function ChannelView({ channelId }: { channelId: string }) {
   const memberList = members.data?.members ?? [];
   const bots = memberList.filter((m) => m.kind === "agent");
   const canPost = channel.isMember && !channel.archivedAt;
-  const isAdmin = meQ.data?.organization.role === "admin";
-  const amOwner = memberList.some((m) => m.kind === "user" && m.id === me.id && m.role === "owner");
+  // The server decides per channel (admin, or the channel owner): the menu only mirrors viewerCan.
+  const canArchive = channel.viewerCan?.includes("channel.archive") ?? false;
   const channelTypers = typers;
 
   const intro =
@@ -428,7 +427,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
                         <LogOut /> Leave channel
                       </DropdownMenuItem>
                     ) : null}
-                    {!channel.isDefault && !channel.archivedAt && (isAdmin || amOwner) ? (
+                    {!channel.isDefault && !channel.archivedAt && canArchive ? (
                       <>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem
