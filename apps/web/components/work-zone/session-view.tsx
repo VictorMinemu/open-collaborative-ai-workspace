@@ -9,6 +9,7 @@ import {
   FolderGit2,
   GitBranch,
   ListOrdered,
+  Lock,
   MoreHorizontal,
   SearchX,
   ShieldCheck,
@@ -20,6 +21,7 @@ import { toast } from "sonner";
 import { EmptyState } from "@/components/common/empty-state";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
 import { PresenceStack, usePresentPeople } from "@/components/presence/presence-stack";
+import { PageHeader } from "@/components/shell/page-header";
 import { UserAvatar } from "@/components/ui/avatar";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
@@ -41,7 +43,28 @@ import { QueuePanel } from "./queue-panel";
 type PanelTab = "queue" | "changes";
 
 export function SessionView({ id }: { id: string }) {
-  const { state, query } = useLiveSession(id);
+  const { state, query, revoked, lostTitle } = useLiveSession(id);
+
+  // RT-01: the server dropped the live stream because access was lost (role, rule or device change).
+  if (revoked) {
+    return (
+      <div className="flex min-w-0 flex-1 flex-col" data-testid="session-access-lost">
+        <PageHeader
+          title={<span className="text-muted-foreground">{lostTitle ?? "Session"}</span>}
+          icon={<Lock />}
+        />
+        <EmptyState
+          icon={Lock}
+          title="You no longer have access to this session"
+          description="Your role or permissions changed. Ask an admin if you need it back."
+        >
+          <Link href="/work-zone" className={buttonVariants()}>
+            <ArrowLeft /> Back to Work Zone
+          </Link>
+        </EmptyState>
+      </div>
+    );
+  }
 
   if (query.isError) {
     if (isApiError(query.error, 404)) {
