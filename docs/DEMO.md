@@ -71,6 +71,41 @@ run `pnpm demo:reset` when you want the roles and units above.
    a Standard User chats and uses bots but has no Work Zone and no admin settings. Every decision comes
    from one permission resolver on the server, so the UI only hides what the API would refuse anyway.
 
+## Presence and live access
+
+Use two browsers (or a normal and a private window) side by side. Design: `docs/adr/0009-realtime-presence-and-live-reauthorization.md`.
+
+1. **Here now** — sign in as `victor@` in one and `alex@` in the other, and open `#producto` in both. Each
+   header shows the other person's avatar with a green dot. *Members* lists them first with
+   "1 here now". Close one tab, and the avatar disappears from the other header within a second.
+2. **Away** — switch Alex's window to another tab or minimise it. Víctor sees Alex's dot turn amber and the
+   avatar dim. Come back or move the mouse, and Alex is Active again.
+3. **Losing a private channel** — as Víctor, create a private channel (e.g. `#board`) and add Alex. Alex opens
+   it. The web has no "remove member" action yet, so Víctor removes Alex from the browser console, on the
+   channel page:
+
+   ```js
+   const api = "http://localhost:4000/api/v1", ch = location.pathname.split("/").pop();
+   const { members } = await (await fetch(`${api}/members`, { credentials: "include" })).json();
+   const alex = members.find((m) => m.email === "alex@autofylabs.demo");
+   await fetch(`${api}/channels/${ch}/members/user/${alex.userId}`, { method: "DELETE", credentials: "include" });
+   ```
+
+   Alex's tab immediately says "You no longer have access to #board", and Alex disappears from Víctor's
+   header. Removal from a public channel keeps the read-only preview, which is the same answer the API
+   gives.
+4. **Losing a Work Zone session** — Marta (Developer) opens a running session. Víctor changes her role to
+   *Standard User* in Settings › Members. Her session page immediately says "You no longer have access to
+   this session" and the stream stops. Set her back to *Developer* afterwards.
+
+Deny rules and unit changes take effect the same way. Every API instance also re-checks each open
+subscription every 5 minutes, in case a notification was lost.
+
+**Latency numbers** — every CI run uploads the `realtime-latency` artifact (`realtime-latency.json`: p50,
+p95 and max for messages, typing and presence). The build fails when any p50 or p95 reaches 500 ms.
+Locally: `bash scripts/e2e-isolated.sh realtime-latency --project=desktop`. The report is written to
+`e2e/test-results/`.
+
 ## Account and access
 
 - **Profile and security** — Settings › Profile (name, avatar, status) and Settings › Security (change
