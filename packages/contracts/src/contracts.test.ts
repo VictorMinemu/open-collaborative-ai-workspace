@@ -3,6 +3,7 @@ import {
   AddUnitMemberRequest,
   AuthCapabilities,
   AvatarRef,
+  AWAY_AFTER_IDLE_MS,
   ChangePasswordRequest,
   ClientFrame,
   ConversationKind,
@@ -17,8 +18,10 @@ import {
   onlyRelativePaths,
   PasswordResetLink,
   PostMessageRequest,
+  PRESENCE_CLIENT_THROTTLE_MS,
   PRESENCE_SNAPSHOT_LIMIT,
   PRESENCE_TOPIC_PREFIXES,
+  PresenceState,
   parseTopic,
   RelativePath,
   RenameUnitRequest,
@@ -129,6 +132,36 @@ describe("realtime presence frames (03-01)", () => {
     for (const t of [`org:${id}`, `user:${id}`, `cell:${id}`, "conv:nope", ""]) {
       expect(isPresenceTopic(t), t).toBe(false);
     }
+  });
+});
+
+describe("presence state client op (03-02)", () => {
+  it("a client may report its own state as online or away", () => {
+    expect(ClientFrame.parse({ op: "presence", state: "away" })).toEqual({ op: "presence", state: "away" });
+    expect(ClientFrame.parse({ op: "presence", state: "online" })).toEqual({
+      op: "presence",
+      state: "online",
+    });
+    expect(PresenceState.options).toEqual(["online", "away"]);
+  });
+
+  it("offline, unknown and missing states are rejected; identity fields are stripped, never trusted", () => {
+    expect(ClientFrame.safeParse({ op: "presence", state: "offline" }).success).toBe(false);
+    expect(ClientFrame.safeParse({ op: "presence", state: "busy" }).success).toBe(false);
+    expect(ClientFrame.safeParse({ op: "presence" }).success).toBe(false);
+    const spoofed = ClientFrame.parse({
+      op: "presence",
+      state: "away",
+      userId: id,
+      conn: id,
+      topic: `conv:${id}`,
+    });
+    expect(spoofed).toEqual({ op: "presence", state: "away" });
+  });
+
+  it("idle threshold and client throttle", () => {
+    expect(AWAY_AFTER_IDLE_MS).toBe(5 * 60_000);
+    expect(PRESENCE_CLIENT_THROTTLE_MS).toBe(500);
   });
 });
 

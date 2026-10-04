@@ -45,6 +45,17 @@ export function isPresenceTopic(t: string): boolean {
   return !!parsed && PRESENCE_TOPIC_PREFIXES.includes(parsed.prefix);
 }
 
+/**
+ * The state a client reports for its own connection (RT-04, 03-02 D-04): `away` while its tab is hidden or after
+ * AWAY_AFTER_IDLE_MS without input, `online` otherwise. `offline` is never reported: closing the socket is.
+ */
+export const PresenceState = z.enum(["online", "away"]);
+export type PresenceState = z.infer<typeof PresenceState>;
+/** A visible tab with no input for this long reports `away`. */
+export const AWAY_AFTER_IDLE_MS = 5 * 60_000;
+/** Client-side leading + trailing throttle of `presence` frames. */
+export const PRESENCE_CLIENT_THROTTLE_MS = 500;
+
 // ---- client → server ----
 export const ClientFrame = z.discriminatedUnion("op", [
   /**
@@ -62,6 +73,11 @@ export const ClientFrame = z.discriminatedUnion("op", [
   z.object({ op: z.literal("ping") }),
   /** Client-originated ephemeral signal (e.g. user.typing); the server re-authorizes and relays. */
   z.object({ op: z.literal("eph"), topic: Topic, type: z.string().max(64), data: z.unknown() }),
+  /**
+   * The sender's own state in every conversation it is present in (RT-04). Carries no user, topic or connection:
+   * the server applies it to the sending socket only (unknown fields are stripped).
+   */
+  z.object({ op: z.literal("presence"), state: PresenceState }),
 ]);
 export type ClientFrame = z.infer<typeof ClientFrame>;
 

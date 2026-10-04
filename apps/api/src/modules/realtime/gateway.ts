@@ -34,11 +34,19 @@ interface Connection {
   socket: WebSocket;
   subs: Map<string, Subscription>;
   presenceState: "online" | "away";
+  /** Times of the presence changes applied in the current rate-limit window (sliding, oldest first). */
+  presenceChanges: number[];
   /** Liveness: set by every pong and client frame, cleared (with a ping) on every heartbeat tick. */
   alive: boolean;
   send(frame: ServerFrame): void;
   unsub(topic: string): Promise<void>;
 }
+
+/**
+ * At most `max` presence state changes per socket per `windowMs` are applied (D-04, T-03-02-02); identical states
+ * never count. A well-behaved client (500 ms throttle, 1 s input forwarding) stays far below it.
+ */
+export const PRESENCE_RATE_LIMIT = { max: 30, windowMs: 10_000 } as const;
 
 /** Backstop for revocations that never reached this instance (Redis down, expiry): Pitfall 5. */
 export const SESSION_RECHECK_MS = 5 * 60_000;
@@ -67,8 +75,11 @@ export function registerGateway(
     presence: PresenceStore;
     /** Presence refresh interval (default PRESENCE_HEARTBEAT_MS; tests lower it). */
     heartbeatMs?: number;
+    /** Presence change limit per socket (default PRESENCE_RATE_LIMIT; tests shorten the window). */
+    presenceRateLimit?: { max: number; windowMs: number };
   },
 ) {
+  const rateLimit = deps.presenceRateLimit ?? PRESENCE_RATE_LIMIT;
   const recheckMs = deps.sessionRecheckMs ?? SESSION_RECHECK_MS;
   const presence = deps.presence;
   // Open sockets of this API instance, so a revocation (Redis fan-out from any instance) closes them at once.
@@ -207,6 +218,7 @@ export function registerGateway(
         socket,
         subs,
         presenceState: "online",
+        presenceChanges: [],
         alive: true,
         send,
         unsub,
@@ -226,6 +238,36 @@ export function registerGateway(
         );
         if (!still) socket.close(4401, "session expired");
       }, recheckMs);
+
+      /**
+       * RT-04 away (03-02, T-03-02-01): the frame names no user, topic or connection, so it can only change this
+       * socket's own entries. Every joined presence topic is updated; the commands are queued in order on the one
+       * Redis connection, so a later change or leave always lands after this one. Joins made afterwards already use
+       * `conn.presenceState`.
+       */
+      const setOwnState = async (to: "online" | "away") => {
+        const from = conn.presenceState;
+        if (to === from) return;
+        const now = Date.now();
+        const recent = conn.presenceChanges;
+        while (recent.length && (recent[0] as number) <= now - rateLimit.windowMs) recent.shift();
+        if (recent.length >= rateLimit.max) {
+          send({ op: "err", code: "rate_limited", message: "Too many presence changes" });
+          return;
+        }
+        recent.push(now);
+        conn.presenceState = to;
+        const updates: Promise<void>[] = [];
+        for (const [topic, sub] of subs) {
+          if (!sub.presenceJoined) continue;
+          updates.push(
+            presence
+              .setState(auth.organizationId, topic, conn.id, auth.userId, from, to)
+              .catch((err: unknown) => req.log.warn({ err, topic }, "presence state change failed")),
+          );
+        }
+        await Promise.all(updates);
+      };
 
       /** After `subscribed`: join the topic's presence, send the snapshot, then flush buffered deltas. */
       const joinPresence = async (topic: string, sub: Subscription) => {
@@ -331,6 +373,9 @@ export function registerGateway(
             return;
           case "unsub":
             void unsub(frame.topic);
+            return;
+          case "presence":
+            void setOwnState(frame.state);
             return;
           case "eph": {
             if (!subs.has(frame.topic) || !CLIENT_EPHEMERAL_TYPE.test(frame.type)) {

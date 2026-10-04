@@ -23,6 +23,18 @@ export interface PresenceMember {
 export interface PresenceStore {
   /** Adds (or re-scores) the connection and announces it to the topic's subscribers. */
   join(orgId: string, topic: string, m: PresenceMember): Promise<void>;
+  /**
+   * The connection's own state changed (RT-04 away, 03-02): one MULTI swaps the stored member (`from` → `to`) with a
+   * fresh expiry and announces the new state, so watchers never see the change before it is stored.
+   */
+  setState(
+    orgId: string,
+    topic: string,
+    conn: string,
+    userId: string,
+    from: PresenceMember["state"],
+    to: PresenceMember["state"],
+  ): Promise<void>;
   /** Removes the connection (whatever state it was stored with) and announces it `offline`. */
   leave(orgId: string, topic: string, m: PresenceMember): Promise<void>;
   /** Live (unexpired) entries, newest first, at most PRESENCE_SNAPSHOT_LIMIT. Malformed members are skipped. */
@@ -74,6 +86,17 @@ export function createPresenceStore(deps: {
         .zAdd(key, { score: now() + ttl, value: memberOf(m) })
         .pExpire(key, 2 * ttl)
         .publish(topicChannel(topic), delta(topic, [{ conn: m.conn, userId: m.userId, state: m.state }]))
+        .exec();
+    },
+
+    async setState(orgId, topic, conn, userId, from, to) {
+      const key = presenceKey(orgId, topic);
+      await redis
+        .multi()
+        .zRem(key, memberOf({ conn, userId, state: from }))
+        .zAdd(key, { score: now() + ttl, value: memberOf({ conn, userId, state: to }) })
+        .pExpire(key, 2 * ttl)
+        .publish(topicChannel(topic), delta(topic, [{ conn, userId, state: to }]))
         .exec();
     },
 

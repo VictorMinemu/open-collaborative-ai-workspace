@@ -1,3 +1,4 @@
+import { PRESENCE_CLIENT_THROTTLE_MS } from "@ocw/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { backoffDelay } from "./backoff";
 import { RealtimeClient, type TopicFrame, type WebSocketLike } from "./client";
@@ -315,6 +316,129 @@ describe("RealtimeClient", () => {
     vi.advanceTimersByTime(50);
     FakeWS.last!.open();
     expect(FakeWS.last!.sent).toContainEqual({ op: "sub", topic: T, afterSeq: 0, presence: true });
+  });
+
+  it("setPresence sends one presence frame on change and nothing for an identical state", () => {
+    vi.useFakeTimers();
+    const c = new RealtimeClient({ url: "ws://x/ws", WebSocket: FakeWS });
+    c.connect();
+    const ws = FakeWS.last!;
+    ws.open();
+    c.setPresence("online"); // already online on a fresh connection
+    expect(ws.sent.filter((f) => f.op === "presence")).toEqual([]);
+    c.setPresence("away");
+    expect(ws.sent.filter((f) => f.op === "presence")).toEqual([{ op: "presence", state: "away" }]);
+    vi.advanceTimersByTime(1000);
+    c.setPresence("away");
+    vi.advanceTimersByTime(1000);
+    expect(ws.sent.filter((f) => f.op === "presence")).toEqual([{ op: "presence", state: "away" }]);
+  });
+
+  it("changes inside the throttle window are coalesced into one trailing send of the latest state", () => {
+    vi.useFakeTimers();
+    const c = new RealtimeClient({ url: "ws://x/ws", WebSocket: FakeWS });
+    c.connect();
+    const ws = FakeWS.last!;
+    ws.open();
+    const presence = () => ws.sent.filter((f) => f.op === "presence");
+    c.setPresence("away"); // leading edge
+    vi.advanceTimersByTime(100);
+    c.setPresence("online");
+    vi.advanceTimersByTime(100);
+    c.setPresence("away");
+    vi.advanceTimersByTime(100);
+    c.setPresence("online");
+    expect(presence()).toEqual([{ op: "presence", state: "away" }]);
+    vi.advanceTimersByTime(PRESENCE_CLIENT_THROTTLE_MS);
+    expect(presence()).toEqual([
+      { op: "presence", state: "away" },
+      { op: "presence", state: "online" },
+    ]);
+    // A quick flip after the window: leading away, then one trailing online, so the server ends on the final state.
+    vi.advanceTimersByTime(PRESENCE_CLIENT_THROTTLE_MS);
+    c.setPresence("away");
+    vi.advanceTimersByTime(50);
+    c.setPresence("online");
+    vi.advanceTimersByTime(PRESENCE_CLIENT_THROTTLE_MS);
+    expect(presence()).toHaveLength(4);
+    expect(presence().at(-1)).toEqual({ op: "presence", state: "online" });
+  });
+
+  it("while disconnected nothing is sent; the next open sends away before the subscriptions", () => {
+    vi.useFakeTimers();
+    const c = new RealtimeClient({ url: "ws://x/ws", WebSocket: FakeWS });
+    c.subscribe(T, () => {}, { presence: true });
+    c.setPresence("away");
+    c.connect();
+    const ws = FakeWS.last!;
+    c.setPresence("away");
+    vi.advanceTimersByTime(1000);
+    expect(ws.sent).toEqual([]);
+    ws.open();
+    expect(ws.sent[0]).toEqual({ op: "presence", state: "away" });
+    expect(ws.sent[1]).toMatchObject({ op: "sub", topic: T, presence: true });
+    expect(ws.sent.filter((f) => f.op === "presence")).toHaveLength(1);
+  });
+
+  it("after a dropped socket an away client reports away again before its subscriptions; an online one sends nothing", () => {
+    vi.useFakeTimers();
+    const c = new RealtimeClient({ url: "ws://x/ws", WebSocket: FakeWS, backoffBaseMs: 10 });
+    c.subscribe(T, () => {}, { presence: true });
+    c.connect();
+    FakeWS.last!.open();
+    c.setPresence("away");
+    expect(FakeWS.last!.sent.filter((f) => f.op === "presence")).toEqual([{ op: "presence", state: "away" }]);
+
+    FakeWS.last!.drop();
+    vi.advanceTimersByTime(50);
+    const second = FakeWS.last!;
+    second.open();
+    expect(second.sent[0]).toEqual({ op: "presence", state: "away" });
+    expect(second.sent[1]).toMatchObject({ op: "sub", topic: T, presence: true });
+
+    vi.advanceTimersByTime(PRESENCE_CLIENT_THROTTLE_MS);
+    c.setPresence("online");
+    expect(second.sent.at(-1)).toEqual({ op: "presence", state: "online" });
+    second.drop();
+    vi.advanceTimersByTime(50);
+    const third = FakeWS.last!;
+    third.open();
+    expect(third.sent.filter((f) => f.op === "presence")).toEqual([]);
+    expect(third.sent[0]).toMatchObject({ op: "sub", topic: T });
+  });
+
+  it("a trailing send that fires after a reconnect goes to the new socket, once", () => {
+    vi.useFakeTimers();
+    const c = new RealtimeClient({ url: "ws://x/ws", WebSocket: FakeWS, backoffBaseMs: 10 });
+    c.connect();
+    const first = FakeWS.last!;
+    first.open();
+    c.setPresence("away"); // leading, on the first socket
+    vi.advanceTimersByTime(50);
+    c.setPresence("online"); // trailing, scheduled
+    first.drop();
+    vi.advanceTimersByTime(20);
+    const second = FakeWS.last!;
+    second.open(); // a new connection starts online: nothing to report
+    expect(second.sent.filter((f) => f.op === "presence")).toEqual([]);
+    c.setPresence("away"); // still inside the window: rides on the pending trailing send
+    vi.advanceTimersByTime(PRESENCE_CLIENT_THROTTLE_MS);
+    expect(first.sent.filter((f) => f.op === "presence")).toEqual([{ op: "presence", state: "away" }]);
+    expect(second.sent.filter((f) => f.op === "presence")).toEqual([{ op: "presence", state: "away" }]);
+  });
+
+  it("close() cancels a pending trailing presence send", () => {
+    vi.useFakeTimers();
+    const c = new RealtimeClient({ url: "ws://x/ws", WebSocket: FakeWS });
+    c.connect();
+    const ws = FakeWS.last!;
+    ws.open();
+    c.setPresence("away");
+    c.setPresence("online");
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    c.close();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(ws.sent.filter((f) => f.op === "presence")).toEqual([{ op: "presence", state: "away" }]);
   });
 
   it("backoff is bounded with full jitter", () => {
