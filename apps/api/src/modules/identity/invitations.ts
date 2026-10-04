@@ -1,4 +1,3 @@
-// authz-legacy: 02-07 migrates this file to the resolver
 import type { IncomingHttpHeaders } from "node:http";
 import { getCurrentAdapter, runWithTransaction } from "@better-auth/core/context";
 import {
@@ -16,8 +15,10 @@ import { fromNodeHeaders } from "better-auth/node";
 import { and, asc, eq } from "drizzle-orm";
 import type { FastifyReply } from "fastify";
 import type { App, AuthContext } from "../../core";
-import { authOf } from "../../core";
+import { authOf, tenant } from "../../core";
 import { conflict, gone, notFound } from "../../lib/errors";
+import type { AuditService } from "../audit";
+import { createPermissionService, invitationResource } from "../organization";
 import type { RealtimeService } from "../realtime";
 import { INVITATION_TTL_SECONDS } from "./auth";
 import { clientFromRequest } from "./client-kind";
@@ -60,6 +61,33 @@ export function createInvitationService(identity: IdentityService) {
   };
 
   return {
+    /** The pending invitation of the caller's organization for an e-mail, if any (authorization input). */
+    async findPending(auth: AuthContext, rawEmail: string): Promise<Invitation | null> {
+      const [row] = await identity.authDb
+        .select()
+        .from(invitation)
+        .where(
+          and(
+            eq(invitation.organizationId, auth.organizationId),
+            eq(invitation.email, rawEmail.trim().toLowerCase()),
+            eq(invitation.status, "pending"),
+          ),
+        )
+        .limit(1);
+      return row ? toInvitation(row) : null;
+    },
+
+    /** An invitation of the caller's organization (404 otherwise); authorization input for revoke. */
+    async getInvitation(auth: AuthContext, id: string): Promise<Invitation> {
+      const [row] = await identity.authDb
+        .select()
+        .from(invitation)
+        .where(and(eq(invitation.id, id), eq(invitation.organizationId, auth.organizationId)))
+        .limit(1);
+      if (!row) throw notFound("Invitation not found");
+      return toInvitation(row);
+    },
+
     /** Creates (or refreshes the pending) invitation for an e-mail; returns a copyable link (SMTP optional). */
     async createInvitation(auth: AuthContext, input: CreateInvitationRequest): Promise<Invitation> {
       const ctx = await identity.auth.$context;
@@ -94,8 +122,9 @@ export function createInvitationService(identity: IdentityService) {
           row = (await adapter.update<InvitationRow>({
             model: "invitation",
             where: [{ field: "id", value: pending.id }],
-            update: { role: input.role, expiresAt },
-          })) ?? { ...pending, role: input.role, expiresAt };
+            // Whoever refreshes it chose the role, so they become its inviter (and may revoke it).
+            update: { role: input.role, expiresAt, inviterId: auth.userId },
+          })) ?? { ...pending, role: input.role, expiresAt, inviterId: auth.userId };
         } else {
           row = await adapter.create<Record<string, unknown>, InvitationRow>({
             model: "invitation",
@@ -288,61 +317,112 @@ export function createInvitationService(identity: IdentityService) {
 
 export type InvitationService = ReturnType<typeof createInvitationService>;
 
-/** GET/POST /api/v1/invitations, DELETE /api/v1/invitations/:id, public lookup and accept. */
+/**
+ * GET/POST /api/v1/invitations, DELETE /api/v1/invitations/:id, public lookup and accept.
+ *
+ * Every authenticated route is decided by the permission resolver. The auth plane cannot open withTenant, so
+ * each decision runs first in a short `db.withTenant`, then the auth-plane transaction writes the rows.
+ * Invitations target the organization only (D-05): units are assigned after the person joins.
+ */
 export function registerInvitationRoutes(
   app: App,
   deps: {
     identity: IdentityService;
     invitations: InvitationService;
     db: TenantDb;
+    audit: AuditService;
     realtime: RealtimeService;
   },
 ) {
-  const { identity, invitations } = deps;
+  const { identity, invitations, db } = deps;
+  const perms = createPermissionService({ db, audit: deps.audit });
   const setCookies = (reply: FastifyReply, cookies: string[]) => {
     if (cookies.length) reply.header("set-cookie", cookies);
   };
+  const resourceOf = (inv: Pick<Invitation, "inviterId" | "role">, viewerId: string) =>
+    invitationResource({ inviterId: inv.inviterId, role: inv.role }, viewerId);
 
   app.get(
     "/api/v1/invitations",
     {
-      preHandler: identity.requireRole("admin"),
+      config: { authz: "user" },
+      preHandler: [identity.requireUser, perms.requirePermission("invitation.read")],
       schema: { tags: ["identity"], response: { 200: InvitationList } },
     },
-    async (req) => ({ invitations: await invitations.listInvitations(authOf(req)) }),
+    async (req) => {
+      const auth = authOf(req);
+      const list = await invitations.listInvitations(auth);
+      // One transaction for the whole list; facts load once and each item is decided in memory.
+      const withViewerCan = await db.withTenant(tenant(req), async (tx) => {
+        const out: Invitation[] = [];
+        for (const inv of list) {
+          const viewerCan = await perms.viewerCan(req, tx, resourceOf(inv, auth.userId), [
+            "invitation.revoke",
+          ]);
+          out.push({ ...inv, viewerCan });
+        }
+        return out;
+      });
+      return { invitations: withViewerCan };
+    },
   );
 
   app.post(
     "/api/v1/invitations",
     {
-      preHandler: identity.requireRole("admin"),
+      config: { authz: "user" },
+      preHandler: identity.requireUser,
       schema: { tags: ["identity"], body: CreateInvitationRequest, response: { 200: Invitation } },
     },
-    (req) => invitations.createInvitation(authOf(req), req.body),
+    async (req) => {
+      const auth = authOf(req);
+      const pending = await invitations.findPending(auth, req.body.email);
+      await db.withTenant(tenant(req), async (tx) => {
+        // Role ceiling (INVITABLE_ROLES) is the invitation.create precondition in policy.ts.
+        await perms.assertCan(
+          req,
+          tx,
+          "invitation.create",
+          invitationResource({ inviterId: auth.userId, role: req.body.role }, auth.userId),
+        );
+        // Refreshing someone else's pending invitation replaces it: that needs revoke rights on it too.
+        if (pending) await perms.assertCan(req, tx, "invitation.revoke", resourceOf(pending, auth.userId));
+      });
+      return invitations.createInvitation(auth, req.body);
+    },
   );
 
   app.delete(
     "/api/v1/invitations/:id",
     {
-      preHandler: identity.requireRole("admin"),
+      config: { authz: "user" },
+      preHandler: identity.requireUser,
       schema: { tags: ["identity"], params: IdParams, response: { 200: Ok } },
     },
     async (req) => {
-      await invitations.revokeInvitation(authOf(req), req.params.id);
+      const auth = authOf(req);
+      const inv = await invitations.getInvitation(auth, req.params.id);
+      await db.withTenant(tenant(req), (tx) =>
+        perms.assertCan(req, tx, "invitation.revoke", resourceOf(inv, auth.userId)),
+      );
+      await invitations.revokeInvitation(auth, req.params.id);
       return { ok: true as const };
     },
   );
 
   app.get(
     "/api/v1/invitations/:id",
-    { schema: { tags: ["identity"], params: IdParams, response: { 200: PublicInvitation } } },
+    {
+      config: { authz: "public" },
+      schema: { tags: ["identity"], params: IdParams, response: { 200: PublicInvitation } },
+    },
     (req) => invitations.getPublicInvitation(req.params.id),
   );
 
   app.post(
     "/api/v1/invitations/:id/accept",
     {
-      config: SENSITIVE_RATE,
+      config: { ...SENSITIVE_RATE, authz: "public" },
       schema: {
         tags: ["identity"],
         params: IdParams,
