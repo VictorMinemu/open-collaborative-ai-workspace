@@ -32,6 +32,7 @@ import { z } from "zod";
 import { type App, type AuthContext, authOf, type Core, tenant } from "../../core";
 import { conflict, forbidden, HttpError, notFound } from "../../lib/errors";
 import { canUseDevice, type DeviceHub } from "../device";
+import { createPermissionService, type ResourceFacts, workSessionResource } from "../organization";
 import { type SessionRow, type WorkSessionService, wsTopic } from "./service";
 
 const SessionParams = z.object({ id: z.uuid() });
@@ -44,9 +45,13 @@ const DIFF_TIMEOUT_MS = 20_000;
 
 const RUNTIME_LABEL = { "claude-code": "Claude Code", codex: "Codex" } as const;
 
-function isAdmin(auth: AuthContext) {
-  return auth.role === "admin";
-}
+/** Permissions a session view renders controls for (`WorkSessionDetail.viewerCan`). */
+const SESSION_VIEWER_CAN = [
+  "work_session.prompt",
+  "work_session.interrupt",
+  "work_session.approve",
+  "work_session.archive",
+] as const;
 
 export function registerWorkSessionRoutes(
   app: App,
@@ -54,8 +59,9 @@ export function registerWorkSessionRoutes(
   hub: DeviceHub,
   svc: WorkSessionService,
 ): void {
-  const user = { preHandler: core.identity.requireUser };
+  const user = { config: { authz: "user" as const }, preHandler: core.identity.requireUser };
   const tags = ["work-session"];
+  const perms = createPermissionService(core);
 
   /** Lock + load a session visible in the caller's org (RLS), or 404. */
   async function locked(tx: Tx, id: string): Promise<SessionRow> {
@@ -64,15 +70,29 @@ export function registerWorkSessionRoutes(
     return s;
   }
 
-  /** Approvals authorize tools on someone's machine: session creator, device owner or an org admin. */
-  async function assertCanApprove(tx: Tx, auth: AuthContext, s: SessionRow) {
-    if (s.createdBy === auth.userId || isAdmin(auth)) return;
+  /**
+   * Resolver facts for a session: the caller's relations (creator, device owner), the Device layer
+   * (revoked device) and, for approvals, the tool the request would run (Tool layer).
+   */
+  async function sessionFacts(
+    tx: Tx,
+    auth: AuthContext,
+    s: Pick<SessionRow, "createdBy" | "deviceId">,
+    tool?: string,
+  ): Promise<ResourceFacts> {
     const [d] = await tx
-      .select({ owner: devices.ownerUserId })
+      .select({ owner: devices.ownerUserId, revokedAt: devices.revokedAt })
       .from(devices)
       .where(eq(devices.id, s.deviceId));
-    if (d?.owner === auth.userId) return;
-    throw forbidden("Only the session owner, the device owner or an admin can decide approvals");
+    return workSessionResource(
+      {
+        createdBy: s.createdBy,
+        deviceOwnerUserId: d?.owner ?? null,
+        deviceRevoked: !d || d.revokedAt !== null,
+        tool: tool ?? null,
+      },
+      auth.userId,
+    );
   }
 
   async function joinConversation(tx: Tx, auth: AuthContext, s: SessionRow) {
@@ -236,6 +256,9 @@ export function registerWorkSessionRoutes(
       core.db.withTenant(tenant(req), async (tx) => {
         const session = await svc.session(tx, req.params.id);
         if (!session) throw notFound("Work session not found");
+        const facts = await sessionFacts(tx, authOf(req), session);
+        await perms.assertCan(req, tx, "work_session.read", facts, { hideAs404: true });
+        const viewerCan = await perms.viewerCan(req, tx, facts, SESSION_VIEWER_CAN);
         const topic = wsTopic(session.id);
         const [prompts, approvals, lastSeq, rows] = await Promise.all([
           svc.prompts(tx, session.id),
@@ -255,7 +278,7 @@ export function registerWorkSessionRoutes(
             return parsed.success ? { seq: r.seq, at: parsed.data.at, event: parsed.data.event } : null;
           })
           .filter((e) => e !== null);
-        return { session, prompts, approvals, events, lastSeq };
+        return { session, prompts, approvals, events, lastSeq, viewerCan };
       }),
   );
 
@@ -398,7 +421,18 @@ export function registerWorkSessionRoutes(
       core.db.withTenant(tenant(req), async (tx) => {
         const auth = authOf(req);
         const s = await locked(tx, req.params.id);
-        await assertCanApprove(tx, auth, s);
+        const [approval] = await tx
+          .select({ request: workApprovals.request })
+          .from(workApprovals)
+          .where(and(eq(workApprovals.id, req.params.aid), eq(workApprovals.workSessionId, s.id)));
+        if (!approval) throw notFound("Approval not found");
+        // Creator, device owner or admin; a Tool-layer rule on the requested tool still wins.
+        await perms.assertCan(
+          req,
+          tx,
+          "work_session.approve",
+          await sessionFacts(tx, auth, s, approval.request.tool),
+        );
         const { decision, comment } = req.body;
         // Decided exactly once: the conditional update is the arbiter between concurrent deciders.
         const [row] = await tx
@@ -498,8 +532,8 @@ export function registerWorkSessionRoutes(
       core.db.withTenant(tenant(req), async (tx) => {
         const auth = authOf(req);
         const s = await locked(tx, req.params.id);
+        await perms.assertCan(req, tx, "work_session.archive", await sessionFacts(tx, auth, s));
         if (s.status === "archived") return { ok: true as const };
-        await assertCanApprove(tx, auth, s);
         const cancelled = await tx
           .update(workPrompts)
           .set({ status: "cancelled", completedAt: sql`now()` })

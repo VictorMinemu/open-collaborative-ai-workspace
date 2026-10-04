@@ -122,6 +122,7 @@ let stack: TestStack;
 let su: pg.Client;
 let admin: TestClient;
 let alex: TestClient;
+let dana: TestClient;
 let deviceToken: string;
 let projectId: string;
 let device: FakeDevice;
@@ -155,7 +156,21 @@ beforeAll(async () => {
       })
     ).status,
   ).toBe(200);
+  dana = await invite("dana@example.test", "Dana", "admin");
 }, 180_000);
+
+/** Invite a member with `role` through the API and sign them in. */
+async function invite(email: string, name: string, role: "standard" | "developer" | "admin") {
+  const inv = await admin.request("POST", "/api/v1/invitations", { email, role });
+  expect(inv.status, JSON.stringify(inv.body)).toBe(200);
+  const c = new TestClient(stack.baseUrl);
+  const res = await c.request("POST", `/api/v1/invitations/${inv.body!.id as string}/accept`, {
+    name,
+    password: "yet-another-long-password",
+  });
+  expect(res.status, JSON.stringify(res.body)).toBe(200);
+  return c;
+}
 
 afterAll(async () => {
   await device?.close().catch(() => {});
@@ -164,8 +179,8 @@ afterAll(async () => {
   delete process.env.OCW_DEVICE_OFFLINE_GRACE_MS;
 });
 
-async function newSession(body: Record<string, unknown> = {}) {
-  const res = await admin.request("POST", "/api/v1/work-sessions", { projectId, ...body });
+async function newSession(body: Record<string, unknown> = {}, as: TestClient = admin) {
+  const res = await as.request("POST", "/api/v1/work-sessions", { projectId, ...body });
   expect(res.status, JSON.stringify(res.body)).toBe(200);
   const id = res.body!.id as string;
   const start = await device.command("session.start", id);
@@ -181,14 +196,48 @@ async function status(id: string) {
   return (res.body!.session as { status: string }).status;
 }
 
-async function detail(id: string) {
-  return (await admin.request("GET", `/api/v1/work-sessions/${id}`)).body as {
+async function detail(id: string, as: TestClient = admin) {
+  return (await as.request("GET", `/api/v1/work-sessions/${id}`)).body as {
     session: { status: string; pendingApprovals: number };
     prompts: Array<{ id: string; body: string; status: string; authorName: string }>;
     approvals: Array<{ id: string; status: string; decision: string | null }>;
     events: Array<{ event: { type: string; text?: string } }>;
+    viewerCan?: string[];
   };
 }
+
+/** Ask the fake device to request approvals for `tools` inside a running prompt. */
+async function requestApprovals(sessionId: string, tools: string[]) {
+  await admin.request("POST", `/api/v1/work-sessions/${sessionId}/prompts`, { body: "needs tools" });
+  const cmd = await device.command("prompt", sessionId);
+  device.ack(cmd.id);
+  device.event(sessionId, { type: "prompt.started", promptId: cmd.payload.promptId });
+  const ids = tools.map((tool) => {
+    const approvalId = randomUUID();
+    device.event(sessionId, {
+      type: "approval.requested",
+      approvalId,
+      tool,
+      summary: `${tool} something`,
+      paths: [],
+    });
+    return approvalId;
+  });
+  device.event(sessionId, { type: "session.state", status: "waiting_approval" });
+  await eventually(async () => (await detail(sessionId)).approvals.length >= ids.length);
+  return { cmd, ids };
+}
+
+const decideApproval = (as: TestClient, sessionId: string, approvalId: string) =>
+  as.request("POST", `/api/v1/work-sessions/${sessionId}/approvals/${approvalId}`, { decision: "once" });
+
+const denialsFor = async (permission: string) =>
+  (
+    await su.query(
+      "select metadata from app.audit_events where action = 'authz.denied' and metadata->>'permission' = $1",
+      [permission],
+    )
+  ).rows.map((r) => r.metadata as Record<string, unknown>);
 
 /** Complete the running prompt on the fake device. */
 async function finishPrompt(sessionId: string, cmd: { id: string; payload: Record<string, unknown> }) {
@@ -421,14 +470,29 @@ describe("work sessions", () => {
     expect(d.approvals[0]).toMatchObject({ id: approvalId, status: "pending" });
     expect(JSON.stringify(d)).not.toContain("/etc/hosts");
 
-    // A plain member who neither created the session nor owns the device cannot decide.
-    expect(
-      (
-        await alex.request("POST", `/api/v1/work-sessions/${id}/approvals/${approvalId}`, {
-          decision: "once",
-        })
-      ).status,
-    ).toBe(403);
+    // A developer who neither created the session nor owns the device cannot decide (resolver, role layer).
+    const before = (await denialsFor("work_session.approve")).length;
+    const denied = await alex.request("POST", `/api/v1/work-sessions/${id}/approvals/${approvalId}`, {
+      decision: "once",
+    });
+    expect(denied.status).toBe(403);
+    expect((denied.body!.error as { details: unknown }).details).toEqual({
+      permission: "work_session.approve",
+      layer: "role",
+      reason: "missing_permission",
+    });
+    const audited = await denialsFor("work_session.approve");
+    expect(audited).toHaveLength(before + 1);
+    expect(audited.at(-1)).toMatchObject({ layer: "role", reason: "missing_permission", method: "POST" });
+
+    // viewerCan drives the web's Approve/Deny and Archive controls.
+    expect(d.viewerCan).toEqual(
+      expect.arrayContaining(["work_session.approve", "work_session.archive", "work_session.prompt"]),
+    );
+    const alexView = await detail(id, alex);
+    expect(alexView.viewerCan).toEqual(expect.arrayContaining(["work_session.prompt"]));
+    expect(alexView.viewerCan).not.toContain("work_session.approve");
+    expect(alexView.viewerCan).not.toContain("work_session.archive");
 
     const [r1, r2] = await Promise.all([
       admin.request("POST", `/api/v1/work-sessions/${id}/approvals/${approvalId}`, { decision: "once" }),
@@ -457,6 +521,57 @@ describe("work sessions", () => {
     ).toBe(409);
     await finishPrompt(id, cmd);
     await eventually(async () => (await status(id)) === "idle");
+  });
+
+  it("approvals: the creator, the device owner and an admin decide; a Tool-layer deny rule blocks one tool", async () => {
+    const devices = (await admin.request("GET", "/api/v1/devices")).body!.devices as Array<{ id: string }>;
+    const deviceId = devices[0]!.id;
+    expect((await admin.request("PATCH", `/api/v1/devices/${deviceId}`, { shared: true })).status).toBe(200);
+    try {
+      // Alex creates the session on the admin's shared device: Alex = creator, admin = device owner,
+      // Dana = an admin with neither relation.
+      const { id } = await newSession({ title: "Relations" }, alex);
+      const { cmd, ids } = await requestApprovals(id, ["Edit", "Edit", "Edit", "Bash", "Read"]);
+      const [byCreator, byOwner, byAdmin, bash, read] = ids as [string, string, string, string, string];
+
+      for (const who of [alex, dana]) {
+        expect((await detail(id, who)).viewerCan).toEqual(
+          expect.arrayContaining(["work_session.approve", "work_session.archive"]),
+        );
+      }
+      expect((await decideApproval(alex, id, byCreator)).status).toBe(200);
+      expect((await decideApproval(admin, id, byOwner)).status).toBe(200);
+      expect((await decideApproval(dana, id, byAdmin)).status).toBe(200);
+
+      // Tool layer: deny approving Bash for everyone, organization-wide.
+      const orgId = (await su.query("select organization_id from app.work_sessions where id = $1", [id]))
+        .rows[0].organization_id as string;
+      const ruleId = randomUUID();
+      await su.query(
+        "insert into app.permission_rules (id, organization_id, subject_kind, permission, tool, effect) values ($1, $2, 'everyone', 'work_session.approve', 'Bash', 'deny')",
+        [ruleId, orgId],
+      );
+      try {
+        const blocked = await decideApproval(admin, id, bash);
+        expect(blocked.status).toBe(403);
+        expect((blocked.body!.error as { details: unknown }).details).toMatchObject({
+          permission: "work_session.approve",
+          layer: "tool",
+          ruleId,
+        });
+        expect((await decideApproval(alex, id, read)).status).toBe(200);
+      } finally {
+        await su.query("delete from app.permission_rules where id = $1", [ruleId]);
+      }
+      expect((await decideApproval(admin, id, bash)).status).toBe(200);
+
+      for (let i = 0; i < 5; i++) device.ack((await device.command("approval.resolve", id)).id);
+      device.event(id, { type: "session.state", status: "running" });
+      await finishPrompt(id, cmd);
+      await eventually(async () => (await status(id)) === "idle");
+    } finally {
+      await admin.request("PATCH", `/api/v1/devices/${deviceId}`, { shared: false });
+    }
   });
 
   it("de-duplicates replayed events by (sessionId, localSeq)", async () => {
