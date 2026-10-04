@@ -10,6 +10,7 @@
  *   POST /agent-channel/v1/messages      idempotent on agentId + idempotencyKey
  *   POST /agent-channel/v1/typing
  *   POST /agent-channel/v1/agents/:id/status
+ *   POST /agent-channel/v1/provider-auth  (status per report: `authResponder`, default 200)
  * Test-only controls under /__test/* (never part of the real API).
  */
 import { randomUUID } from "node:crypto";
@@ -18,12 +19,14 @@ import type { AddressInfo } from "node:net";
 import { type WebSocket, WebSocketServer } from "ws";
 import type {
   AgentChannelPostMessage,
+  AgentChannelProviderAuthReport,
   AgentChannelStatusReport,
   AgentChannelTyping,
   AgentMentionEvent,
   CellAgent,
   CellProvider,
   CellSnapshot,
+  CellSubscription,
 } from "../agent-channel-protocol.js";
 
 export type StoredEvent = { seq: number; type: string; data: Record<string, unknown> };
@@ -39,7 +42,12 @@ export type FakeAgentChannelApi = {
   topic: string;
   agents: CellAgent[];
   providers: CellProvider[];
+  /** Snapshot `subscriptions`; `undefined` = an older API that does not send the field. */
+  cellSubscriptions: CellSubscription[] | undefined;
   events: StoredEvent[];
+  authReports: AgentChannelProviderAuthReport[];
+  /** HTTP status for each POST /provider-auth (default 200). */
+  authResponder: (report: AgentChannelProviderAuthReport) => number;
   messages: StoredMessage[];
   /** Every POST /messages attempt, including retries and failures. */
   messageAttempts: AgentChannelPostMessage[];
@@ -51,7 +59,10 @@ export type FakeAgentChannelApi = {
   publish(type: string, data: Record<string, unknown>): StoredEvent;
   publishMention(input: MentionInput): StoredEvent;
   /** Replace agents/providers and emit `cell.config.changed`. */
-  updateCell(next: { agents?: CellAgent[]; providers?: CellProvider[] }, reason?: string): StoredEvent;
+  updateCell(
+    next: { agents?: CellAgent[]; providers?: CellProvider[]; subscriptions?: CellSubscription[] },
+    reason?: string,
+  ): StoredEvent;
   /** Next `n` POST /messages respond with `status` (before idempotency handling). */
   failNextPosts(n: number, status?: number): void;
   /** Close every open plugin socket (simulates an API restart / network blip). */
@@ -82,6 +93,7 @@ export async function startFakeAgentChannelApi(
     cellId?: string;
     agents?: CellAgent[];
     providers?: CellProvider[];
+    subscriptions?: CellSubscription[];
     port?: number;
     host?: string;
   } = {},
@@ -97,6 +109,9 @@ export async function startFakeAgentChannelApi(
   const state = {
     agents: opts.agents ?? [],
     providers: opts.providers ?? [],
+    cellSubscriptions: opts.subscriptions as CellSubscription[] | undefined,
+    authReports: [] as AgentChannelProviderAuthReport[],
+    authResponder: (() => 200) as (report: AgentChannelProviderAuthReport) => number,
     events: [] as StoredEvent[],
     messages: [] as StoredMessage[],
     messageAttempts: [] as AgentChannelPostMessage[],
@@ -114,6 +129,7 @@ export async function startFakeAgentChannelApi(
     lastSeq: state.events.at(-1)?.seq ?? 0,
     agents: state.agents,
     providers: state.providers,
+    ...(state.cellSubscriptions ? { subscriptions: state.cellSubscriptions } : {}),
   });
   const frameFor = (ev: StoredEvent) =>
     JSON.stringify({ op: "ev", topic, seq: ev.seq, type: ev.type, data: ev.data });
@@ -133,12 +149,17 @@ export async function startFakeAgentChannelApi(
             api.updateCell((await readJson(req)) as { agents?: CellAgent[]; providers?: CellProvider[] }),
           );
         }
+        if (req.method === "POST" && url.pathname === "/__test/event") {
+          const { type, data } = (await readJson(req)) as { type: string; data: Record<string, unknown> };
+          return json(res, 200, api.publish(type, data));
+        }
         if (req.method === "GET" && url.pathname === "/__test/state") {
           return json(res, 200, {
             messages: state.messages,
             typing: state.typing,
             statusReports: state.statusReports,
             subscriptions: state.subscriptions,
+            authReports: state.authReports,
             events: state.events.length,
           });
         }
@@ -182,6 +203,14 @@ export async function startFakeAgentChannelApi(
         byKey.set(key, stored);
         state.messages.push(stored);
         return json(res, 200, reply(stored, true));
+      }
+      if (req.method === "POST" && route === "/provider-auth") {
+        const report = (await readJson(req)) as AgentChannelProviderAuthReport;
+        state.authReports.push(report);
+        const status = state.authResponder(report);
+        return status === 200
+          ? json(res, 200, { ok: true })
+          : json(res, status, { error: { code: status === 409 ? "flow_claimed" : "error" } });
       }
       if (req.method === "POST" && route === "/typing") {
         state.typing.push((await readJson(req)) as AgentChannelTyping);
@@ -273,6 +302,21 @@ export async function startFakeAgentChannelApi(
     set providers(value: CellProvider[]) {
       state.providers = value;
     },
+    get cellSubscriptions() {
+      return state.cellSubscriptions;
+    },
+    set cellSubscriptions(value: CellSubscription[] | undefined) {
+      state.cellSubscriptions = value;
+    },
+    get authReports() {
+      return state.authReports;
+    },
+    get authResponder() {
+      return state.authResponder;
+    },
+    set authResponder(fn: (report: AgentChannelProviderAuthReport) => number) {
+      state.authResponder = fn;
+    },
     get events() {
       return state.events;
     },
@@ -307,6 +351,7 @@ export async function startFakeAgentChannelApi(
     updateCell(next, reason = "agent.updated") {
       if (next.agents) state.agents = next.agents;
       if (next.providers) state.providers = next.providers;
+      if (next.subscriptions) state.cellSubscriptions = next.subscriptions;
       return api.publish("cell.config.changed", { reason, agentId: null });
     },
     failNextPosts(n, status = 503) {

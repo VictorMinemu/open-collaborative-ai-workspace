@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { CellAgent, CellProvider } from "./agent-channel-protocol.js";
+import type { CellAgent, CellProvider, CellSubscription } from "./agent-channel-protocol.js";
 import {
   applyPlanToDraft,
   DENIED_TOOLS,
@@ -9,6 +9,8 @@ import {
   type MutableConfig,
   planReconcile,
   providerKeyEnvName,
+  RENAMED_OPENAI_PROVIDER,
+  SUBSCRIPTION_NOT_SIGNED_IN,
 } from "./reconciler.js";
 
 const agent = (id: string, over: Partial<CellAgent> = {}): CellAgent => ({
@@ -109,6 +111,118 @@ describe("planReconcile", () => {
 
   it("names env vars safely", () => {
     expect(providerKeyEnvName("openai-compatible")).toBe("OCW_PROVIDER_KEY_OPENAI_COMPATIBLE");
+  });
+});
+
+const CODEX: CellSubscription = {
+  id: "openai-codex",
+  kind: "openai-codex",
+  runtimeProvider: "openai",
+  models: ["gpt-6-astra"],
+  account: { email: "owner@example.test" },
+};
+const OPENAI_KEY: CellProvider = {
+  id: "openai",
+  kind: "openai",
+  api: "openai-completions",
+  baseUrl: "https://api.openai.com/v1",
+  apiKey: "sk-openai-SECRET",
+  models: ["gpt-5"],
+};
+const codexBot = (id: string) =>
+  agent(id, {
+    modelRef: "openai-codex/gpt-6-astra",
+    model: { provider: "openai-codex", providerId: "openai-codex", id: "gpt-6-astra" },
+  });
+const openaiBot = (id: string) =>
+  agent(id, { modelRef: "openai/gpt-5", model: { provider: "openai", providerId: "openai", id: "gpt-5" } });
+
+describe("planReconcile: ChatGPT subscription", () => {
+  it("maps subscription bots to OpenClaw's openai provider, pinned to the embedded runtime, no provider entry", () => {
+    const plan = planReconcile(
+      {},
+      { agents: [codexBot("c")], providers: [], subscriptions: [CODEX] },
+      { readySubscriptions: new Set(["openai-codex"]) },
+    );
+    expect(plan.upsertAgents["ocw-c"]?.model).toEqual({ primary: "openai/gpt-6-astra", fallbacks: [] });
+    expect(plan.upsertAgents["ocw-c"]?.models).toEqual({
+      "openai/gpt-6-astra": { agentRuntime: { id: "openclaw" } },
+    });
+    expect(plan.upsertAgents["ocw-c"]?.tools).toEqual({ profile: "minimal", deny: [...DENIED_TOOLS] });
+    expect(plan.upsertProviders).toEqual({});
+    expect(plan.env).toEqual({});
+    expect(plan.results).toEqual([{ agentId: "c", status: "ready" }]);
+  });
+
+  it("reports bots on a subscription the cell is not signed in to as error", () => {
+    const plan = planReconcile({}, { agents: [codexBot("c")], providers: [], subscriptions: [CODEX] });
+    expect(plan.upsertAgents).toEqual({});
+    expect(plan.results).toEqual([{ agentId: "c", status: "error", detail: SUBSCRIPTION_NOT_SIGNED_IN }]);
+    // A bot on a subscription that is not connected at all: provider not configured.
+    const none = planReconcile({}, { agents: [codexBot("c")], providers: [] });
+    expect(none.results[0]?.detail).toContain('"openai-codex"');
+  });
+
+  it("moves the API-key OpenAI provider to its own id while a subscription is connected, and back", () => {
+    const withBoth = planReconcile(
+      { providers: { openai: desiredProviderEntry(OPENAI_KEY) } },
+      { agents: [openaiBot("k"), codexBot("c")], providers: [OPENAI_KEY], subscriptions: [CODEX] },
+      { readySubscriptions: new Set(["openai-codex"]) },
+    );
+    expect(withBoth.upsertAgents["ocw-k"]?.model).toEqual({
+      primary: `${RENAMED_OPENAI_PROVIDER}/gpt-5`,
+      fallbacks: [],
+    });
+    expect(withBoth.upsertAgents["ocw-c"]?.model).toEqual({ primary: "openai/gpt-6-astra", fallbacks: [] });
+    expect(Object.keys(withBoth.upsertProviders)).toEqual([RENAMED_OPENAI_PROVIDER]);
+    expect(withBoth.upsertProviders[RENAMED_OPENAI_PROVIDER]?.apiKey).toBe(
+      envRef("OCW_PROVIDER_KEY_OCW_OPENAI"),
+    );
+    expect(withBoth.env).toEqual({ OCW_PROVIDER_KEY_OCW_OPENAI: "sk-openai-SECRET" });
+    expect(withBoth.removeProviders).toEqual(["openai"]);
+
+    const draft: MutableConfig = { models: { providers: { openai: desiredProviderEntry(OPENAI_KEY) } } };
+    applyPlanToDraft(draft, withBoth);
+    expect(Object.keys(draft.models?.providers ?? {})).toEqual([RENAMED_OPENAI_PROVIDER]);
+
+    const keyOnly = planReconcile(
+      { providers: draft.models?.providers },
+      { agents: [openaiBot("k")], providers: [OPENAI_KEY], subscriptions: [] },
+    );
+    expect(keyOnly.upsertAgents["ocw-k"]?.model).toEqual({ primary: "openai/gpt-5", fallbacks: [] });
+    expect(keyOnly.removeProviders).toEqual([RENAMED_OPENAI_PROVIDER]);
+  });
+
+  it("a bot moved off the subscription loses its runtime pin; API-key bots never get one", () => {
+    const draft: MutableConfig = { agents: { entries: {} } };
+    applyPlanToDraft(
+      draft,
+      planReconcile(
+        {},
+        { agents: [codexBot("c")], providers: [], subscriptions: [CODEX] },
+        {
+          readySubscriptions: new Set(["openai-codex"]),
+        },
+      ),
+    );
+    expect(draft.agents?.entries?.["ocw-c"]?.models).toBeDefined();
+    const moved = planReconcile(
+      { agents: draft.agents?.entries },
+      { agents: [agent("c")], providers: [ANTHROPIC], subscriptions: [CODEX] },
+    );
+    applyPlanToDraft(draft, moved);
+    expect("models" in (draft.agents?.entries?.["ocw-c"] ?? {})).toBe(false);
+    expect(draft.agents?.entries?.["ocw-c"]?.model).toEqual({
+      primary: "anthropic/claude-sonnet-5-5",
+      fallbacks: [],
+    });
+    // Steady state: nothing to do.
+    expect(
+      planReconcile(
+        { agents: draft.agents?.entries, providers: draft.models?.providers },
+        { agents: [agent("c")], providers: [ANTHROPIC], subscriptions: [CODEX] },
+      ).changed,
+    ).toBe(false);
   });
 });
 

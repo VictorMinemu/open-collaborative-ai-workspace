@@ -523,6 +523,34 @@ describe("mention → delivery → reply", () => {
     ).toBe(400);
   });
 
+  it("a deleted bot frees its @handle: mentions reach the new bot that reuses it", async () => {
+    const body = {
+      name: "Echo",
+      instructions: "Repeat politely.",
+      modelProvider: "mock",
+      modelId: "mock-1",
+    };
+    const first = (await call(admin, "POST", "/api/v1/agents", body)).body as {
+      id: string;
+      username: string;
+    };
+    expect((await call(admin, "DELETE", `/api/v1/agents/${first.id}`)).status).toBe(200);
+    const second = (await call(admin, "POST", "/api/v1/agents", body)).body as {
+      id: string;
+      username: string;
+    };
+    expect(second.username).toBe(first.username);
+    // Touch the deleted row so it is read after the live one (heap order is what exposed the bug).
+    await su.query("update app.agents set updated_at = now() where id = $1", [first.id]);
+    const posted = await call(admin, "POST", `/api/v1/conversations/${channelId}/messages`, {
+      body: `@${second.username} hello again`,
+      mentions: [{ kind: "agent", id: second.id }],
+    });
+    expect(posted.status).toBe(200);
+    const mentioned = (await cellEvents()).filter((e) => e.type === "agent.mention.v1").at(-1);
+    expect(mentioned?.payload.agent).toMatchObject({ id: second.id });
+  });
+
   it("replays from a cursor exactly once; no cursor starts live", async () => {
     const all = await cellEvents();
     const resume = plugin();

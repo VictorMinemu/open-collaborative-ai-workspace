@@ -1,16 +1,29 @@
-import { catalogEntry, type ModelProviderKind } from "@ocw/contracts";
+import { catalogEntry, type ModelProviderKind, type SubscriptionProviderKind } from "@ocw/contracts";
 
-/** OpenClaw provider id per provider kind (`models.providers.<id>` and the `<id>/<model>` model ref). */
+/**
+ * Cell provider id per provider kind: prefix of the `<id>/<model>` model ref sent to the cell (and, for
+ * API-key providers, the OpenClaw `models.providers.<id>` entry). Subscription providers keep their own id
+ * (`openai-codex`); the plugin maps them to the OpenClaw provider that owns the sign-in (`openai`).
+ */
 export const OPENCLAW_PROVIDER_ID: Record<ModelProviderKind, string> = {
   anthropic: "anthropic",
   openai: "openai",
   openrouter: "openrouter",
   "openai-compatible": "openai-compatible",
+  "openai-codex": "openai-codex",
   mock: "fake",
 };
 
-/** Wire API OpenClaw must use for each provider kind. */
-export const PROVIDER_API: Record<ModelProviderKind, "anthropic-messages" | "openai-completions"> = {
+/** OpenClaw provider that owns a subscription's credentials and model catalog. */
+export const SUBSCRIPTION_RUNTIME_PROVIDER: Record<SubscriptionProviderKind, string> = {
+  "openai-codex": "openai",
+};
+
+/** Wire API OpenClaw must use for each API-key provider kind. */
+export const PROVIDER_API: Record<
+  Exclude<ModelProviderKind, SubscriptionProviderKind>,
+  "anthropic-messages" | "openai-completions"
+> = {
   anthropic: "anthropic-messages",
   openai: "openai-completions",
   openrouter: "openai-completions",

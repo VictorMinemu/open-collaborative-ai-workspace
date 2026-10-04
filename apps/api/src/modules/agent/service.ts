@@ -5,9 +5,12 @@ import {
   type CellAgent,
   type CellConfigChangedEvent,
   type CellProvider,
+  type CellSubscription,
   cellTopic,
   DEFAULT_MODEL,
+  DEFAULT_SUBSCRIPTION_MODEL,
   EventTypes,
+  isSubscriptionProvider,
   MOCK_MODEL,
   type ModelProvider,
   type ModelProviderKind,
@@ -16,7 +19,13 @@ import {
 import { agents, modelProviders, type Tx, tenantOf } from "@ocw/db";
 import { and, asc, eq, inArray, isNull } from "drizzle-orm";
 import type { Core } from "../../core";
-import { modelRef, OPENCLAW_PROVIDER_ID, PROVIDER_API, resolveBaseUrl } from "./providers";
+import {
+  modelRef,
+  OPENCLAW_PROVIDER_ID,
+  PROVIDER_API,
+  resolveBaseUrl,
+  SUBSCRIPTION_RUNTIME_PROVIDER,
+} from "./providers";
 
 type AgentRow = typeof agents.$inferSelect;
 type ProviderRow = typeof modelProviders.$inferSelect;
@@ -42,14 +51,25 @@ export function toAgentDto(r: AgentRow): Agent {
 }
 
 export function toProviderDto(r: ProviderRow): ModelProvider {
+  const subscription = isSubscriptionProvider(r.provider);
   return {
     id: r.id,
     provider: r.provider,
+    authMode: subscription ? "subscription" : "api_key",
     baseUrl: r.baseUrl,
     allowedModels: r.allowedModels,
     enabled: r.enabled,
     hasKey: r.secretId !== null,
     keyHint: r.secretId ? r.keyHint : null,
+    account:
+      subscription && r.account
+        ? {
+            email: r.account.email ?? null,
+            planType: r.account.planType ?? null,
+            connectedAt: new Date(r.account.connectedAt).toISOString(),
+            needsReconnect: !!r.account.needsReconnect,
+          }
+        : null,
     createdAt: new Date(r.createdAt).toISOString(),
     updatedAt: new Date(r.updatedAt).toISOString(),
   };
@@ -85,9 +105,15 @@ export async function agentDirectory(
   return new Map(rows.map((r) => [r.id, r]));
 }
 
-/** Providers usable right now: enabled and with a key (the mock provider needs neither). */
+/**
+ * Providers usable right now: enabled and with a key, or (subscriptions) signed in through the cell. A
+ * subscription whose cell lost its credentials stays usable here (bots keep their model) and the cell
+ * reports those bots as `error` until an admin reconnects.
+ */
 function usable(p: ProviderRow) {
-  return p.enabled && p.secretId !== null && (p.provider !== "openai-compatible" || !!p.baseUrl);
+  if (!p.enabled) return false;
+  if (isSubscriptionProvider(p.provider)) return p.account !== null;
+  return p.secretId !== null && (p.provider !== "openai-compatible" || !!p.baseUrl);
 }
 
 /** Models a bot may use: enabled providers with a key, plus the mock model when the operator enabled it. */
@@ -100,15 +126,21 @@ export async function allowedModels(core: Core, tx: Tx): Promise<AllowedModel[]>
         provider: p.provider,
         modelId,
         label: modelLabel(p.provider, modelId),
-        isDefault: p.provider === DEFAULT_MODEL.provider && modelId === DEFAULT_MODEL.modelId,
+        isDefault:
+          (p.provider === DEFAULT_MODEL.provider && modelId === DEFAULT_MODEL.modelId) ||
+          (p.provider === DEFAULT_SUBSCRIPTION_MODEL.provider &&
+            modelId === DEFAULT_SUBSCRIPTION_MODEL.modelId),
       });
     }
   }
   if (core.env.OCW_MODEL_PROVIDER === "mock") {
     out.push({ provider: "mock", modelId: MOCK_MODEL.modelId, label: MOCK_MODEL.label, isDefault: false });
   }
+  // Exactly one default: the org's Anthropic default wins over the subscription one, else the first.
+  const defaults = out.filter((m) => m.isDefault);
+  for (const extra of defaults.slice(1)) extra.isDefault = false;
   const first = out[0];
-  if (first && !out.some((m) => m.isDefault)) first.isDefault = true;
+  if (first && defaults.length === 0) first.isDefault = true;
   return out;
 }
 
@@ -168,6 +200,8 @@ export async function cellProviders(core: Core, tx: Tx): Promise<CellProvider[]>
   const rows = await tx.select().from(modelProviders).orderBy(asc(modelProviders.createdAt));
   const out: CellProvider[] = [];
   for (const p of rows.filter(usable)) {
+    // Subscriptions have no key to deliver: see cellSubscriptions().
+    if (isSubscriptionProvider(p.provider)) continue;
     const baseUrl = resolveBaseUrl(p.provider, p.baseUrl, core.env.OCW_MOCK_MODEL_BASE_URL);
     if (!baseUrl || !p.secretId) continue;
     out.push({
@@ -187,6 +221,23 @@ export async function cellProviders(core: Core, tx: Tx): Promise<CellProvider[]>
       baseUrl: core.env.OCW_MOCK_MODEL_BASE_URL,
       apiKey: "mock-key-not-secret",
       models: [MOCK_MODEL.modelId],
+    });
+  }
+  return out;
+}
+
+/** Connected subscription providers for the cell. No secret: the cell holds the credentials itself. */
+export async function cellSubscriptions(tx: Tx): Promise<CellSubscription[]> {
+  const rows = await tx.select().from(modelProviders).orderBy(asc(modelProviders.createdAt));
+  const out: CellSubscription[] = [];
+  for (const p of rows.filter(usable)) {
+    if (!isSubscriptionProvider(p.provider)) continue;
+    out.push({
+      id: p.provider,
+      kind: p.provider,
+      runtimeProvider: SUBSCRIPTION_RUNTIME_PROVIDER[p.provider],
+      models: p.allowedModels,
+      account: { email: p.account?.email ?? null },
     });
   }
   return out;

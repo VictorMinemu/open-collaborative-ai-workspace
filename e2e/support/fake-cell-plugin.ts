@@ -40,6 +40,7 @@ export interface FakeCellSnapshot {
     apiKey: string | null;
     models: string[];
   }>;
+  subscriptions?: Array<{ id: string; kind: string; runtimeProvider: string; models: string[] }>;
 }
 
 export interface MentionPayload {
@@ -57,6 +58,16 @@ export interface MentionPayload {
   roster: Array<{ kind: string; id: string; displayName: string }>;
 }
 
+/** Subscription sign-in emulation (provider.auth.* commands), against a fake device-auth server. */
+export interface FakeDeviceAuthOptions {
+  /** Base URL of e2e/support/fake-device-auth-server.ts (stands in for https://auth.openai.com). */
+  serverUrl: string;
+  /** Plugin instance id sent as `reporterId` (default: random). */
+  reporterId?: string;
+  /** Poll interval of the token endpoint (default 200 ms). */
+  pollMs?: number;
+}
+
 export interface FakeCellOptions {
   apiUrl: string;
   token: string;
@@ -67,6 +78,8 @@ export interface FakeCellOptions {
   replyText?: (m: MentionPayload) => string;
   /** Resume cursor; omit to start live. */
   afterSeq?: number;
+  /** Handle `provider.auth.start|cancel|revoke` like apps/openclaw-channel does (device-code sign-in). */
+  deviceAuth?: FakeDeviceAuthOptions;
 }
 
 /** Deterministic, identity-aware reply (mirrors infra/fake-model): proves structured attribution travelled. */
@@ -86,6 +99,13 @@ export class FakeCellPlugin {
   readonly replies: Array<{ messageId: string; created: boolean; mention: MentionPayload }> = [];
   snapshot: FakeCellSnapshot | null = null;
   lastSeq = 0;
+  /** Subscription credentials this fake cell "holds" (provider → account), like OpenClaw's auth store. */
+  readonly credentials = new Map<string, { email: string | null; planType: string | null }>();
+  /** Every `POST /provider-auth` report sent, with the HTTP status it got. */
+  readonly authReports: Array<{ status: number; body: Record<string, unknown> }> = [];
+  readonly revoked: string[] = [];
+  private readonly flows = new Map<string, AbortController>();
+  private readonly reporterId = `fake-${Math.random().toString(36).slice(2, 12)}`;
   private ws: WebSocket | null = null;
   private waiters: Array<() => void> = [];
 
@@ -196,8 +216,115 @@ export class FakeCellPlugin {
         const m = data as unknown as MentionPayload;
         await this.reply(m, (this.opts.replyText ?? identityReply)(m));
       }
+      if (this.opts.deviceAuth) {
+        if (type === "provider.auth.start") void this.runDeviceFlow(data);
+        if (type === "provider.auth.cancel") this.flows.get(String(data.flowId))?.abort();
+        if (type === "provider.auth.revoke") {
+          this.credentials.delete(String(data.provider));
+          this.revoked.push(String(data.provider));
+        }
+      }
     } catch (err) {
       console.error("fake cell plugin handler failed", err);
+    }
+  }
+
+  async reportAuth(body: Record<string, unknown>) {
+    const res = await this.request("POST", "/provider-auth", {
+      reporterId: this.opts.deviceAuth?.reporterId ?? this.reporterId,
+      ...body,
+    });
+    this.authReports.push({ status: res.status, body });
+    this.notify();
+    return res;
+  }
+
+  /**
+   * Mirrors apps/openclaw-channel/src/provider-auth.ts: request a code, report it, poll until the owner
+   * approves (or denies / it expires / the admin cancels), exchange, report the account. Never logs codes.
+   */
+  private async runDeviceFlow(data: FakeCellEvent["data"]) {
+    const da = this.opts.deviceAuth;
+    if (!da) return;
+    const flowId = String(data.flowId);
+    const provider = String(data.provider);
+    if (Date.parse(String(data.startBefore)) < Date.now()) return; // stale replay
+    const abort = new AbortController();
+    this.flows.set(flowId, abort);
+    const post = async (path: string, body: Record<string, string>, form = false) => {
+      const res = await fetch(`${da.serverUrl}${path}`, {
+        method: "POST",
+        headers: { "content-type": form ? "application/x-www-form-urlencoded" : "application/json" },
+        body: form ? new URLSearchParams(body).toString() : JSON.stringify(body),
+        signal: abort.signal,
+      });
+      return { status: res.status, json: (await res.json()) as Record<string, string> };
+    };
+    try {
+      const code = await post("/api/accounts/deviceauth/usercode", { client_id: "fake" });
+      const pending = await this.reportAuth({
+        provider,
+        flowId,
+        state: "pending",
+        verificationUrl: `${da.serverUrl}/codex/device`,
+        userCode: code.json.user_code,
+        expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+      });
+      if (pending.status !== 200) return; // claimed by another instance / closed
+      for (;;) {
+        await new Promise((r) => setTimeout(r, da.pollMs ?? 200));
+        if (abort.signal.aborted) return;
+        const poll = await post("/api/accounts/deviceauth/token", {
+          device_auth_id: code.json.device_auth_id ?? "",
+          user_code: code.json.user_code ?? "",
+        });
+        if (poll.status === 403) continue;
+        if (poll.status !== 200) {
+          const err =
+            poll.json.error === "access_denied"
+              ? "denied"
+              : poll.json.error === "expired_token"
+                ? "expired"
+                : "failed";
+          await this.reportAuth({
+            provider,
+            flowId,
+            state: "error",
+            error: { code: err, message: "device authorization failed" },
+          });
+          return;
+        }
+        const tokens = await post(
+          "/oauth/token",
+          {
+            grant_type: "authorization_code",
+            code: poll.json.authorization_code ?? "",
+            code_verifier: poll.json.code_verifier ?? "",
+          },
+          true,
+        );
+        const claims = JSON.parse(
+          Buffer.from((tokens.json.id_token ?? "").split(".")[1] ?? "", "base64url").toString("utf8") || "{}",
+        ) as { email?: string; "https://api.openai.com/auth"?: { chatgpt_plan_type?: string } };
+        const account = {
+          email: claims.email ?? null,
+          planType: claims["https://api.openai.com/auth"]?.chatgpt_plan_type ?? null,
+        };
+        this.credentials.set(provider, account);
+        await this.reportAuth({ provider, flowId, state: "connected", account });
+        return;
+      }
+    } catch (err) {
+      if (!abort.signal.aborted) {
+        await this.reportAuth({
+          provider,
+          flowId,
+          state: "error",
+          error: { code: "failed", message: String(err).slice(0, 200) },
+        });
+      }
+    } finally {
+      this.flows.delete(flowId);
     }
   }
 
@@ -232,7 +359,17 @@ export class FakeCellPlugin {
     }
   }
 
+  /** Debug snapshot for failing specs: socket state and the durable events seen so far. */
+  debugState(): { readyState: number | null; lastSeq: number; events: string[] } {
+    return {
+      readyState: this.ws?.readyState ?? null,
+      lastSeq: this.lastSeq,
+      events: this.events.map((e) => `${e.seq}:${e.type}`),
+    };
+  }
+
   async stop(): Promise<void> {
+    for (const f of this.flows.values()) f.abort();
     const ws = this.ws;
     this.ws = null;
     if (!ws || ws.readyState === WebSocket.CLOSED) return;

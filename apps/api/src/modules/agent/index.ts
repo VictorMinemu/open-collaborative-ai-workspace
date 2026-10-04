@@ -6,6 +6,7 @@ import {
   catalogEntry,
   EventTypes,
   IdParams,
+  isSubscriptionProvider,
   ModelProvider,
   ModelProviderList,
   Ok,
@@ -28,6 +29,7 @@ import {
   toAgentDto,
   toProviderDto,
 } from "./service";
+import { revokeSubscriptionInCell } from "./subscription";
 
 export {
   agentDirectory,
@@ -35,10 +37,16 @@ export {
   applyCellStatus,
   cellAgents,
   cellProviders,
+  cellSubscriptions,
   findAgent,
   listAgents,
   toAgentDto,
 } from "./service";
+export {
+  applySubscriptionConnected,
+  markSubscriptionNeedsReconnect,
+  subscriptionAccount,
+} from "./subscription";
 
 /** Fields the OpenClaw cell provisions from; changing one re-provisions the bot. */
 const CELL_FIELDS = ["name", "username", "instructions", "modelProvider", "modelId", "description"] as const;
@@ -88,7 +96,18 @@ export function createAgentModule(core: Core): ApiModule {
               .select()
               .from(modelProviders)
               .where(eq(modelProviders.provider, body.provider));
-            if (!existing && !body.apiKey) throw badRequest("An API key is required", "api_key_required");
+            if (isSubscriptionProvider(body.provider)) {
+              // Subscriptions are created by signing in through the cell; here only models/enabled change.
+              if (body.apiKey || body.baseUrl) {
+                throw badRequest(
+                  "This provider connects by signing in, not with a key",
+                  "subscription_provider",
+                );
+              }
+              if (!existing) throw conflict("Connect the subscription first", "not_connected");
+            } else if (!existing && !body.apiKey) {
+              throw badRequest("An API key is required", "api_key_required");
+            }
             const baseUrl = body.baseUrl === undefined ? (existing?.baseUrl ?? null) : body.baseUrl;
             if (catalogEntry(body.provider)?.baseUrlRequired && !baseUrl) {
               throw badRequest("A base URL is required for this provider", "base_url_required");
@@ -168,14 +187,19 @@ export function createAgentModule(core: Core): ApiModule {
               .returning();
             if (!row) throw notFound("Provider not configured");
             if (row.secretId) await core.secrets.remove(tx, row.secretId);
+            const subscription = isSubscriptionProvider(row.provider);
             await core.audit.record(tx, {
-              action: "model_provider.deleted",
+              action: subscription ? "model_provider.disconnected" : "model_provider.deleted",
               resourceType: "model_provider",
               resourceId: row.id,
               sessionId: auth.sessionId,
               clientKind: "web",
-              metadata: { provider: row.provider },
+              metadata: subscription
+                ? { provider: row.provider, accountEmail: row.account?.email ?? null }
+                : { provider: row.provider },
             });
+            // The cell deletes its stored sign-in for this subscription (same transaction as the row).
+            if (isSubscriptionProvider(row.provider)) await revokeSubscriptionInCell(core, tx, row.provider);
             await core.realtime.appendEvent(
               tx,
               `org:${auth.organizationId}`,

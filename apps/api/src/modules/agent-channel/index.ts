@@ -5,24 +5,29 @@ import {
   AgentCellStatus,
   AgentChannelPostMessage,
   AgentChannelPostMessageResponse,
+  AgentChannelProviderAuthReport,
   AgentChannelStatusReport,
   AgentChannelTyping,
   CellSnapshot,
   cellTopic,
   IdParams,
   Ok,
+  ProviderAuthStatus,
   RotateCellTokenResponse,
+  SubscriptionProviderParams,
 } from "@ocw/contracts";
 import { agentCredentials, conversationMembers, conversations, messages, type Tx } from "@ocw/db";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import { z } from "zod";
 import { type ApiModule, type App, authOf, type Core, tenant } from "../../core";
 import { randomToken, sha256Hex } from "../../lib/crypto";
 import { badRequest, forbidden, HttpError, notFound } from "../../lib/errors";
-import { applyCellStatus, cellAgents, cellProviders, findAgent } from "../agent";
+import { applyCellStatus, cellAgents, cellProviders, cellSubscriptions, findAgent } from "../agent";
 import { cellOf, createCellAuth } from "./auth";
 import { registerCellGateway } from "./gateway";
 import { registerMentionHandler } from "./mentions";
 import { createCellPresence } from "./presence";
+import { createProviderAuth } from "./provider-auth";
 
 export { buildMentionEvents } from "./mentions";
 
@@ -65,6 +70,7 @@ export function createAgentChannelModule(core: Core): ApiModule {
   const auth = createCellAuth(core);
   const presence = createCellPresence(core);
   const admin = core.identity.requireRole("owner", "admin");
+  const providerAuth = createProviderAuth(core, presence);
   registerMentionHandler(core);
 
   async function uiTokenCreatedAt(tx: Tx): Promise<string | null> {
@@ -138,6 +144,59 @@ export function createAgentChannelModule(core: Core): ApiModule {
           }),
       );
 
+      // ---------------------------------------------------------------- subscription sign-in (admin)
+      // The device-code flow runs inside the cell (ADR-0006); these routes start/cancel it and expose its
+      // state, including the one-time code, to admins only.
+      app.get(
+        "/api/v1/model-providers/:provider/auth",
+        {
+          preHandler: admin,
+          schema: { tags, params: SubscriptionProviderParams, response: { 200: ProviderAuthStatus } },
+        },
+        async (req, reply) => {
+          reply.header("cache-control", "no-store");
+          return providerAuth.status(authOf(req).organizationId, req.params.provider);
+        },
+      );
+
+      app.post(
+        "/api/v1/model-providers/:provider/auth",
+        {
+          preHandler: admin,
+          schema: {
+            tags,
+            params: SubscriptionProviderParams,
+            body: z.object({ restart: z.boolean().optional() }).optional(),
+            response: { 200: ProviderAuthStatus },
+          },
+        },
+        async (req, reply) => {
+          const a = authOf(req);
+          reply.header("cache-control", "no-store");
+          return providerAuth.start(
+            { organizationId: a.organizationId, userId: a.userId, sessionId: a.sessionId },
+            req.params.provider,
+            { restart: req.body?.restart },
+          );
+        },
+      );
+
+      app.delete(
+        "/api/v1/model-providers/:provider/auth",
+        {
+          preHandler: admin,
+          schema: { tags, params: SubscriptionProviderParams, response: { 200: ProviderAuthStatus } },
+        },
+        async (req, reply) => {
+          const a = authOf(req);
+          reply.header("cache-control", "no-store");
+          return providerAuth.cancel(
+            { organizationId: a.organizationId, userId: a.userId, sessionId: a.sessionId },
+            req.params.provider,
+          );
+        },
+      );
+
       // ================================================================ Agent Channel API v1 (bearer)
       app.register(
         async (raw) => {
@@ -155,6 +214,7 @@ export function createAgentChannelModule(core: Core): ApiModule {
                 async (tx) => {
                   const topic = cellTopic(cell.cellId);
                   const providers = await cellProviders(core, tx);
+                  const subscriptions = await cellSubscriptions(tx);
                   await core.audit.record(tx, {
                     action: "agent_cell.config_read",
                     resourceType: "agent_cell",
@@ -163,7 +223,11 @@ export function createAgentChannelModule(core: Core): ApiModule {
                     clientKind: "agent",
                     sessionId: `cell:${cell.credentialId}`,
                     // Which provider credentials were delivered; never the keys.
-                    metadata: { providers: providers.map((p) => p.id), credential: cell.source },
+                    metadata: {
+                      providers: providers.map((p) => p.id),
+                      subscriptions: subscriptions.map((p) => p.id),
+                      credential: cell.source,
+                    },
                   });
                   return {
                     protocolVersion: AGENT_CHANNEL_PROTOCOL_VERSION,
@@ -173,6 +237,7 @@ export function createAgentChannelModule(core: Core): ApiModule {
                     lastSeq: await core.realtime.lastSeq(tx, topic),
                     agents: await cellAgents(tx),
                     providers,
+                    subscriptions,
                   } as const;
                 },
               );
@@ -276,6 +341,23 @@ export function createAgentChannelModule(core: Core): ApiModule {
               // Chat publishes the ephemeral `agent.typing`; clients clear it on the agent's message or
               // after a timeout, so `typing: false` needs no signal.
               if (body.typing) await core.chatAgent.agentTyping(ctx, body.agentId, body.conversationId, root);
+              return { ok: true as const };
+            },
+          );
+
+          // Progress / outcome of a subscription sign-in running in the cell (never tokens).
+          scope.post(
+            "/provider-auth",
+            {
+              schema: {
+                tags,
+                security: bearer,
+                body: AgentChannelProviderAuthReport,
+                response: { 200: Ok },
+              },
+            },
+            async (req) => {
+              await providerAuth.report(cellOf(req).organizationId, req.body);
               return { ok: true as const };
             },
           );

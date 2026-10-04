@@ -55,9 +55,16 @@ export function renderConfig(env) {
     discovery: { mdns: { mode: "off" } },
     update: { checkOnStart: false },
     plugins: {
-      // Only our channel. Model providers are plain config entries (anthropic-messages /
-      // openai-completions), so no provider plugin needs to load.
-      allow: ["ocw"],
+      // Our channel, plus OpenClaw's bundled `openai` provider plugin: it owns the ChatGPT/Codex
+      // device-code sign-in, the `openai` OAuth profile refresh and the Codex model catalog that the
+      // "ChatGPT subscription" provider uses (ADR-0006). It must be loaded at boot: enabling it later
+      // swaps plugin instances, which would abort a sign-in in progress. API-key providers stay plain
+      // config entries (anthropic-messages / openai-completions).
+      allow: ["ocw", "openai"],
+      entries: {
+        // No OpenAI "friendly personality" layer on top of each bot's own instructions.
+        openai: { enabled: true, config: { personality: "off" } },
+      },
       // With no providers at boot, the implicit default model routes to the Codex runtime and
       // `doctor --fix` would add `codex` to the allowlist; an explicit deny blocks that repair.
       deny: ["codex"],

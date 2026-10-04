@@ -204,7 +204,7 @@ export const agents = appSchema.table(
     description: text("description"),
     instructions: text("instructions").notNull(),
     modelProvider: text("model_provider", {
-      enum: ["anthropic", "openai", "openrouter", "openai-compatible", "mock"],
+      enum: ["anthropic", "openai", "openrouter", "openai-compatible", "openai-codex", "mock"],
     }).notNull(),
     modelId: text("model_id").notNull(),
     runtime: text("runtime", { enum: ["openclaw"] })
@@ -265,7 +265,7 @@ export const modelProviders = appSchema.table(
     id: id(),
     organizationId: orgId(),
     provider: text("provider", {
-      enum: ["anthropic", "openai", "openrouter", "openai-compatible", "mock"],
+      enum: ["anthropic", "openai", "openrouter", "openai-compatible", "openai-codex", "mock"],
     }).notNull(),
     secretId: uuid("secret_id").references(() => secrets.id, { onDelete: "set null" }),
     /** Last 4 chars of the API key, for display only. */
@@ -274,6 +274,16 @@ export const modelProviders = appSchema.table(
     baseUrl: text("base_url"),
     allowedModels: text("allowed_models").array().notNull().default(sql`'{}'::text[]`),
     enabled: boolean("enabled").notNull().default(true),
+    /**
+     * Subscription providers (`openai-codex`) only: who is signed in, as reported by the OpenClaw cell.
+     * Identity metadata, never tokens (those stay in the cell's own auth store). Null for API-key rows.
+     */
+    account: jsonb("account").$type<{
+      email: string | null;
+      planType: string | null;
+      connectedAt: string;
+      needsReconnect: boolean;
+    }>(),
     createdAt: createdAt(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
   },

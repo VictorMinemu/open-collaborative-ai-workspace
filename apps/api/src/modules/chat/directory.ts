@@ -40,6 +40,7 @@ export async function loadDirectory(tx: Tx): Promise<Directory> {
         username: agents.username,
         avatarUrl: agents.avatarUrl,
         status: agents.status,
+        deletedAt: agents.deletedAt,
       })
       .from(agents),
   ]);
@@ -68,7 +69,8 @@ export async function loadDirectory(tx: Tx): Promise<Directory> {
       status: a.status,
     };
     agentMap.set(e.id, e);
-    byHandle.set(e.handle, e);
+    // Deleted bots keep resolving as authors but free their handle: a new bot may reuse it (B2-6).
+    if (!a.deletedAt) byHandle.set(e.handle, e);
   }
   return { users, agents: agentMap, byHandle };
 }

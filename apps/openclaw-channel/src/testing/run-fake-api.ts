@@ -2,7 +2,9 @@
  * Standalone fake Agent Channel API for smoke runs against a real OpenClaw gateway:
  *   FAKE_API_PORT=4010 FAKE_API_TOKEN=… FAKE_MODEL_BASE_URL=http://fake-model:18999/v1 node src/testing/run-fake-api.ts
  * Inject a mention: POST /__test/mention (AgentMentionEvent minus seq/type/org/cell).
+ * Publish any cell event (e.g. provider.auth.start): POST /__test/event {type, data}.
  * Read results: GET /__test/state.
+ * FAKE_SUBSCRIPTION=1 adds a connected "ChatGPT subscription" (openai-codex) and a bot on it.
  */
 import { startFakeAgentChannelApi } from "./fake-agent-channel-api.ts";
 
@@ -36,6 +38,32 @@ const api = await startFakeAgentChannelApi({
     },
   ],
 });
+if (process.env.FAKE_SUBSCRIPTION === "1") {
+  api.cellSubscriptions = [
+    {
+      id: "openai-codex",
+      kind: "openai-codex",
+      runtimeProvider: "openai",
+      models: ["gpt-6-astra"],
+      account: { email: null },
+    },
+  ];
+  api.agents = [
+    ...api.agents,
+    {
+      id: process.env.FAKE_CODEX_BOT_ID ?? "0199a000-0000-7000-8000-00000000a002",
+      handle: "codex",
+      displayName: "Codex PM",
+      avatarUrl: "🧭",
+      description: "Product manager on a ChatGPT subscription",
+      instructions: "You are a pragmatic product manager. Be brief.",
+      status: "provisioning",
+      modelRef: "openai-codex/gpt-6-astra",
+      model: { provider: "openai-codex", providerId: "openai-codex", id: "gpt-6-astra" },
+      updatedAt: new Date().toISOString(),
+    },
+  ];
+}
 console.log(`fake agent channel api on :${new URL(api.url).port} (${api.topic})`);
 const stop = () => void api.close().then(() => process.exit(0));
 process.on("SIGTERM", stop);

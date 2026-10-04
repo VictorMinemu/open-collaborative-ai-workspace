@@ -14,7 +14,8 @@ describe("renderConfig", () => {
     assert.equal(config.discovery.mdns.mode, "off");
     assert.equal(config.update.checkOnStart, false);
     assert.equal(config.plugins.slots.memory, "none");
-    assert.deepEqual(config.plugins.allow, ["ocw"]);
+    assert.deepEqual(config.plugins.allow, ["ocw", "openai"]);
+    assert.deepEqual(config.plugins.entries.openai, { enabled: true, config: { personality: "off" } });
     assert.deepEqual(config.plugins.deny, ["codex"]);
     assert.equal(config.tools.profile, "minimal");
     assert.equal(config.tools.toolSearch, false);

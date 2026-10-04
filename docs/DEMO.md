@@ -34,9 +34,13 @@ with a short history. The password for every demo user is printed at the end of 
 ## Script (≈ 5 minutes)
 
 1. **Sign in** at http://localhost:3000 as `victor@autofylabs.demo`. Open `#producto`.
-2. **Model** — Settings › Models → Anthropic → paste the API key (stored encrypted, never shown again).
-   Skip if you seeded with `ANTHROPIC_API_KEY`.
-3. **Bot in one click** — Bots › New bot → pick the *Product Manager* preset → Create. The card goes
+2. **Model** — Settings › Models, either:
+   - **ChatGPT subscription (Codex)** → *Connect* → open the link, sign in with your ChatGPT account and
+     enter the code shown (see [ChatGPT subscription](#chatgpt-subscription-codex) below), or
+   - **Anthropic** → paste the API key (stored encrypted, never shown again). Skip if you seeded with
+     `ANTHROPIC_API_KEY`.
+3. **Bot in one click** — Bots › New bot → pick the *Product Manager* preset → (on a subscription, pick
+   the model *GPT-6 Astra · ChatGPT subscription*) → Create. The card goes
    *Provisioning → Ready* live (the OpenClaw cell provisions it). *Add to channel* → `#producto`.
 4. **Mention** — in `#producto`, reply in a thread: `@archie resume las entrevistas en 3 puntos`. The
    typing indicator appears and the answer lands in the thread, attributed to the bot. Open a second
@@ -50,6 +54,30 @@ with a short history. The password for every demo user is printed at the end of 
    *"Propose one small UX improvement for the chat composer"*. Show the live stream, tool cards, the
    shared queue (add a second prompt as Alex), the approval banner, and the Changes panel.
 
+## ChatGPT subscription (Codex)
+
+Bots can run on **your own ChatGPT plan** (Plus, Pro, Business…) instead of an API key. The sign-in runs
+inside your OpenClaw cell with OpenClaw's own Codex device-code login: the tokens stay in the cell's state
+volume (`ocw-demo-openclaw-state`) and OpenClaw renews them. This app only stores which account is
+connected. Design: `docs/adr/0006-subscription-sign-in-inside-the-cell.md`.
+
+**Morning steps (first time, about 2 minutes):**
+
+1. `pnpm demo:up` (the bots line must say `subscribed to cell`; Settings › Bots runtime shows *Connected*).
+2. Sign in as `victor@autofylabs.demo` → **Settings › Models** → **ChatGPT subscription (Codex)** →
+   **Connect**. Within a few seconds the card shows a link (`auth.openai.com/codex/device`) and a one-time
+   code such as `E18P-OYM9T`, with a 15-minute countdown. (A code started during the night has expired; a
+   fresh *Connect* gets a new one.)
+3. Open the link in your browser, sign in with the ChatGPT account whose plan the bots should use, type the
+   code and approve. The card turns **Connected as <your email> · ChatGPT <plan>** by itself.
+4. Keep the models your plan includes (GPT-6 Astra, GPT-5.6 Terra and GPT-5.6 Luna are on by default; add
+   any other id your plan exposes, e.g. `gpt-5.4`).
+5. **Bots › New bot** → preset → model **GPT-6 Astra · ChatGPT subscription** → Create → *Ready* → add it
+   to a channel and mention it.
+
+**Disconnect** (card › Disconnect, confirm) deletes the sign-in from the cell; bots on ChatGPT models then
+report an error until you connect again. **Switch account** starts a new sign-in.
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -57,6 +85,11 @@ with a short history. The password for every demo user is printed at the end of 
 | Bot stays *Provisioning* | `docker logs ocw-demo-openclaw` — the cell must show `subscribed to cell`; run `pnpm demo:up` again |
 | Bot answers "Sorry, I couldn't generate a reply" | provider key missing/invalid in Settings › Models |
 | Device offline | the desktop app must be running (menu-bar icon); Claude Code / Codex must be logged in (`claude`, `codex login`) |
+| ChatGPT card: *Connect* disabled, "Your bot runtime is offline" | the cell is not connected: `pnpm demo:up`, then check Settings › Bots runtime |
+| ChatGPT card: "The code expired…" / "denied" | press *Try again* for a new code and approve it within 15 minutes, in the same ChatGPT account |
+| The OpenAI page rejects the code or says device sign-in is not allowed | your ChatGPT security or workspace settings may need device-code authorization for Codex enabled; enable it and connect again |
+| Bot is *Error*: "not signed in on the bot runtime" | the cell lost the sign-in (state volume reset): Settings › Models → *Reconnect* |
+| Bot answers "the provider rejected my credentials" | the sign-in was revoked or the plan does not include that model: reconnect, or pick another model for the bot |
 | Cell crash-loops with "Another Gateway owner lease" | it was killed hard: `docker rm -f ocw-demo-openclaw && docker volume rm ocw-demo-openclaw-state && pnpm demo:up` |
 
 ## Known limits (MVP 0)

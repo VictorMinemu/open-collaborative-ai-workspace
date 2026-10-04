@@ -6,7 +6,9 @@ import { createBridge } from "./bridge.js";
 import { createFileCursorStore } from "./cursor-store.js";
 import { runEventStream } from "./event-stream.js";
 import { CHANNEL_ID, parseTarget } from "./mention-mapper.js";
+import { createOpenClawAuthDriver } from "./openclaw-auth.js";
 import { createOpenClawPort, type PluginRuntimeLike } from "./openclaw-port.js";
+import { createSubscriptionAuth } from "./subscription-auth.js";
 
 let pluginRuntime: PluginRuntimeLike | undefined;
 
@@ -75,7 +77,14 @@ async function startOcwAccount(ctx: ChannelGatewayContext<ResolvedOcwAccount>): 
   };
   const client = createAgentChannelClient({ apiUrl: account.apiUrl, token: account.readToken });
   const port = createOpenClawPort({ runtime, accountId: account.accountId, cfg: ctx.cfg, log });
-  const bridge = createBridge({ client, port, signal, log });
+  // Subscription sign-in (ChatGPT via Codex device code) runs here, inside OpenClaw (ADR-0006).
+  const subscriptions = createSubscriptionAuth({
+    client,
+    driver: createOpenClawAuthDriver({ runtime, log }),
+    signal,
+    log,
+  });
+  const bridge = createBridge({ client, port, signal, log, subscriptions });
   const cursorFile = path.join(resolveStateDir(runtime), "ocw-channel", `cursor-${account.accountId}.json`);
 
   ctx.setStatus({

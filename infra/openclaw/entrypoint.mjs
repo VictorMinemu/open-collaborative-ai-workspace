@@ -8,7 +8,7 @@
 //   OCW_CELL_TOKEN_FILE            file with the cell bearer token (or OCW_CELL_TOKEN)    (required)
 //   OPENCLAW_GATEWAY_TOKEN[_FILE]  operator token (random per boot when unset; port is loopback-only)
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { renderConfig } from "./render-config.mjs";
 
@@ -46,6 +46,12 @@ const { config, errors } = renderConfig(process.env);
 if (errors.length > 0) fail(`invalid configuration:\n  - ${errors.join("\n  - ")}`);
 
 mkdirSync(path.dirname(configPath), { recursive: true });
+// The rendered config is authoritative on every boot. OpenClaw otherwise sees it as a suspicious
+// "size drop" versus its last known good config (which also holds the previous run's provisioned
+// bots) and auto-restores `openclaw.json.bak`, silently undoing base-config changes such as the
+// plugin allowlist. Without a `.bak` there is nothing to restore (OpenClaw 2026.9.7
+// planSuspiciousConfigRead); bots and providers are re-provisioned by the plugin in about a second.
+for (const stale of [`${configPath}.bak`, `${configPath}.last-good`]) rmSync(stale, { force: true });
 writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 console.log(
   `[ocw-cell] base config rendered (plugins.allow=${config.plugins.allow.join(",")}); bots + providers come from the Agent Channel API`,

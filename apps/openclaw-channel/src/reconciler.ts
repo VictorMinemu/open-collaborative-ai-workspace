@@ -1,4 +1,4 @@
-import type { CellAgent, CellProvider, CellSnapshot } from "./agent-channel-protocol.js";
+import type { CellAgent, CellProvider, CellSnapshot, CellSubscription } from "./agent-channel-protocol.js";
 import { openClawAgentIdFor, sanitizeName } from "./mention-mapper.js";
 
 /** Prefix that marks agent entries owned by this plugin. Entries without it are never touched. */
@@ -45,11 +45,29 @@ export type AgentEntries = Record<string, AgentEntry>;
 export type ProviderEntry = Record<string, unknown>;
 export type ProviderEntries = Record<string, ProviderEntry>;
 
-export function desiredAgentEntry(agent: CellAgent): AgentEntry {
+/**
+ * OpenClaw id for the API-key OpenAI provider while a ChatGPT subscription is connected: OpenClaw keeps
+ * ChatGPT sign-ins and OpenAI API keys under ONE provider id (`openai`), so the key-based provider moves to
+ * a plain custom id and both work side by side without auth-order games.
+ */
+export const RENAMED_OPENAI_PROVIDER = "ocw-openai";
+
+/**
+ * @param modelRef OpenClaw model ref (defaults to the cell's ref).
+ * @param pinEmbeddedRuntime subscription models: force OpenClaw's embedded runtime (never the native Codex
+ *   harness, which has its own tools) for this agent's model.
+ */
+export function desiredAgentEntry(
+  agent: CellAgent,
+  modelRef: string = agent.modelRef,
+  pinEmbeddedRuntime = false,
+): AgentEntry {
   const name = sanitizeName(agent.displayName);
   return {
     name,
-    model: { primary: agent.modelRef, fallbacks: [] },
+    model: { primary: modelRef, fallbacks: [] },
+    // Explicitly unset for API-key bots so a bot moved off a subscription loses the old pin.
+    models: pinEmbeddedRuntime ? { [modelRef]: { agentRuntime: { id: "openclaw" } } } : undefined,
     skills: [],
     identity: { name },
     tools: { profile: "minimal", deny: [...DENIED_TOOLS] },
@@ -119,6 +137,8 @@ export type ReconcilePlan = {
   upsertAgents: Record<string, AgentEntry>;
   removeAgents: string[];
   upsertProviders: Record<string, ProviderEntry>;
+  /** Plugin-written provider entries that must go (the API-key OpenAI entry moving to/from its renamed id). */
+  removeProviders: string[];
   /** env var → secret value; applied to process.env, never written to the config file. */
   env: Record<string, string>;
   /** What to report via POST /agents/:id/status once the write succeeded. */
@@ -126,14 +146,28 @@ export type ReconcilePlan = {
   changed: boolean;
 };
 
-/** Pure diff between OpenClaw's current config and what the cell snapshot asks for. */
+export const SUBSCRIPTION_NOT_SIGNED_IN =
+  "The ChatGPT subscription is not signed in on the bot runtime. Reconnect it in Settings › Models.";
+
+/**
+ * Pure diff between OpenClaw's current config and what the cell snapshot asks for.
+ * `readySubscriptions`: subscription ids whose credentials OpenClaw holds right now (see
+ * subscription-auth.ts); bots on any other listed subscription are reported as `error`.
+ */
 export function planReconcile(
   current: { agents?: AgentEntries; providers?: ProviderEntries },
-  cell: Pick<CellSnapshot, "agents" | "providers">,
+  cell: Pick<CellSnapshot, "agents" | "providers" | "subscriptions">,
+  opts: { readySubscriptions?: ReadonlySet<string> } = {},
 ): ReconcilePlan {
   const existingAgents = current.agents ?? {};
   const existingProviders = current.providers ?? {};
   const providersById = new Map(cell.providers.map((p) => [p.id, p]));
+  const subscriptions = new Map<string, CellSubscription>((cell.subscriptions ?? []).map((s) => [s.id, s]));
+  const ready = opts.readySubscriptions ?? new Set<string>();
+  const renameOpenAI =
+    providersById.has("openai") && [...subscriptions.values()].some((s) => s.runtimeProvider === "openai");
+  /** OpenClaw provider id for an API-key provider of the cell. */
+  const openClawProviderId = (id: string) => (renameOpenAI && id === "openai" ? RENAMED_OPENAI_PROVIDER : id);
 
   const results: AgentProvisioningResult[] = [];
   const desiredAgents = new Map<string, AgentEntry>();
@@ -143,6 +177,18 @@ export function planReconcile(
     const slash = agent.modelRef.indexOf("/");
     const providerId = slash > 0 ? agent.modelRef.slice(0, slash) : agent.model.providerId;
     const modelId = slash > 0 ? agent.modelRef.slice(slash + 1) : agent.model.id;
+    const subscription = subscriptions.get(providerId);
+    if (subscription) {
+      if (!ready.has(providerId)) {
+        results.push({ agentId: agent.id, status: "error", detail: SUBSCRIPTION_NOT_SIGNED_IN });
+        continue;
+      }
+      // The subscription's credential and catalog belong to OpenClaw's own provider (`openai/<model>`).
+      const ref = `${subscription.runtimeProvider}/${modelId}`;
+      desiredAgents.set(openClawAgentIdFor(agent.id), desiredAgentEntry(agent, ref, true));
+      results.push({ agentId: agent.id, status: "ready" });
+      continue;
+    }
     if (!providersById.has(providerId)) {
       results.push({
         agentId: agent.id,
@@ -154,7 +200,8 @@ export function planReconcile(
     const list = extraModels.get(providerId) ?? [];
     list.push(modelId);
     extraModels.set(providerId, list);
-    desiredAgents.set(openClawAgentIdFor(agent.id), desiredAgentEntry(agent));
+    const ref = `${openClawProviderId(providerId)}/${modelId}`;
+    desiredAgents.set(openClawAgentIdFor(agent.id), desiredAgentEntry(agent, ref));
     results.push({ agentId: agent.id, status: "ready" });
   }
 
@@ -170,22 +217,27 @@ export function planReconcile(
   const upsertProviders: Record<string, ProviderEntry> = {};
   const env: Record<string, string> = {};
   for (const provider of cell.providers) {
-    const entry = desiredProviderEntry(provider, extraModels.get(provider.id));
-    if (!sameProvider(existingProviders[provider.id], entry, provider.apiKey))
-      upsertProviders[provider.id] = entry;
-    if (provider.apiKey) env[providerKeyEnvName(provider.id)] = provider.apiKey;
+    const id = openClawProviderId(provider.id);
+    const entry = desiredProviderEntry({ ...provider, id }, extraModels.get(provider.id));
+    if (!sameProvider(existingProviders[id], entry, provider.apiKey)) upsertProviders[id] = entry;
+    if (provider.apiKey) env[providerKeyEnvName(id)] = provider.apiKey;
   }
+  // The API-key OpenAI entry lives under exactly one id; drop the other one if we wrote it before.
+  const staleOpenAIId = renameOpenAI ? "openai" : RENAMED_OPENAI_PROVIDER;
+  const removeProviders = staleOpenAIId in existingProviders ? [staleOpenAIId] : [];
 
   return {
     upsertAgents,
     removeAgents,
     upsertProviders,
+    removeProviders,
     env,
     results,
     changed:
       Object.keys(upsertAgents).length > 0 ||
       removeAgents.length > 0 ||
-      Object.keys(upsertProviders).length > 0,
+      Object.keys(upsertProviders).length > 0 ||
+      removeProviders.length > 0,
   };
 }
 
@@ -204,12 +256,16 @@ export function applyPlanToDraft(draft: MutableConfig, plan: ReconcilePlan): voi
       draft.models.providers[id] = { ...(draft.models.providers[id] ?? {}), ...entry };
     }
   }
+  for (const id of plan.removeProviders ?? []) delete draft.models?.providers?.[id];
   if (Object.keys(plan.upsertAgents).length > 0 || plan.removeAgents.length > 0) {
     draft.agents ??= {};
     draft.agents.entries ??= {};
     const entries = draft.agents.entries;
-    for (const [id, entry] of Object.entries(plan.upsertAgents))
-      entries[id] = { ...(entries[id] ?? {}), ...entry };
+    for (const [id, entry] of Object.entries(plan.upsertAgents)) {
+      const next: AgentEntry = { ...(entries[id] ?? {}), ...entry };
+      for (const [k, v] of Object.entries(next)) if (v === undefined) delete next[k];
+      entries[id] = next;
+    }
     for (const id of plan.removeAgents) delete entries[id];
   }
 }

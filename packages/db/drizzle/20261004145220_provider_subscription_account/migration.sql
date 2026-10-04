@@ -1,0 +1,1 @@
+ALTER TABLE "app"."model_providers" ADD COLUMN "account" jsonb;

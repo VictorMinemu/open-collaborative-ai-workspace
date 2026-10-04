@@ -54,12 +54,37 @@ is in the workspace.
    - Typing: `POST /typing {typing:true}` every 4 s, then `{typing:false}`.
 5. **`cell.config.changed`:** re-read `/cell`, reconcile, then send the status acks again.
 
+6. **Subscription sign-in (`provider.auth.*`, ADR-0006).** On `provider.auth.start` the plugin runs
+   OpenClaw's own ChatGPT/Codex device-code login (`runModelsAuthLoginFlow` from
+   `openclaw/plugin-sdk/provider-auth-login-flow-runtime`, provider `openai`, method `device-code`, agent
+   `main` = the shared auth store every `ocw-*` agent reads through). Its prompter forwards the
+   verification URL and one-time code to `POST /provider-auth` and nothing else; OpenClaw's own console
+   output is swallowed so the code is never logged.
+   - Approved → OpenClaw stores the OAuth profile (`openai:<email>`) and refreshes it from then on; the
+     plugin reports `connected` with email + plan. Errors are classified (`expired`, `denied`,
+     `unsupported`, `failed`). `provider.auth.cancel` aborts; a 409 from the API (another instance owns
+     the flow) stops the attempt silently. Sign-ins run in the background; mentions keep flowing.
+   - `provider.auth.revoke` removes the provider's profiles (`removeProviderAuthProfilesWithLock`).
+   - Every cell sync checks the stored sign-in: missing → reports `disconnected` once and acks those bots
+     `error`; present but not listed (disconnected while offline) → removed.
+   - `openai-codex/<model>` bots become `openai/<model>` pinned to the embedded runtime; with an OpenAI
+     API key configured as well, the key-based provider is written as `ocw-openai`.
+   - A provider 401/403 during a turn is answered once with "the provider rejected my credentials… reconnect
+     in Settings › Models" instead of OpenClaw's own text.
+
 ## Notes from running against the real gateway
+
+- The ChatGPT sign-in was verified on a real 2026.9.7 gateway: the plugin obtained a device code from
+  auth.openai.com through OpenClaw's login flow, and a turn on `openai/gpt-6-astra` with a stored profile
+  reached the ChatGPT Codex backend (`401: Could not parse your authentication token` for a fake token).
+- `runModelsAuthLoginFlow` is a JS-only ("production-private") SDK export. It is declared narrowly in
+  `src/openclaw-sdk.d.ts`; re-run `infra/openclaw/test/run-container-smoke.sh` on every OpenClaw bump.
 
 - If a provider's id matches a bundled provider plugin (for example `anthropic`), OpenClaw
   auto-enables that plugin as a runtime overlay. The persisted config keeps `plugins.allow: ["ocw"]`.
   OpenClaw then swaps our plugin instance once; the cursor and replay rules above make that safe.
-- Memory: the gateway uses about 1.1–1.2 GB RSS during a turn with the anthropic provider loaded.
+- Memory: the gateway uses about 1.1–1.2 GB RSS during a turn with the anthropic provider loaded, about
+  0.6–0.8 GB idle and up to about 1.35 GB during a ChatGPT-subscription turn with the `openai` plugin.
   Use a 512 MB V8 heap; 256 MB caused a V8 OOM.
 
 ## Env

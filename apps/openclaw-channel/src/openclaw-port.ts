@@ -18,6 +18,13 @@ export type PluginRuntimeLike = {
     }): Promise<unknown>;
   };
   state?: { resolveStateDir?: (env: NodeJS.ProcessEnv) => string };
+  /** Read-only auth profile inspection (subscription sign-in status). */
+  modelAuth?: {
+    ensureAuthProfileStore(
+      agentDir?: string,
+      opts?: { readOnly?: boolean; allowKeychainPrompt?: boolean },
+    ): { profiles?: Record<string, Record<string, unknown>> } | undefined;
+  };
   channel: {
     routing: {
       buildAgentSessionKey(params: {
@@ -63,11 +70,12 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
   const { runtime, accountId } = opts;
 
   return {
-    async reconcile(cell: CellSnapshot) {
+    async reconcile(cell: CellSnapshot, reconcileOpts = {}) {
       const current = runtime.config.current() as MutableConfig;
       const plan = planReconcile(
         { agents: current.agents?.entries, providers: current.models?.providers },
         cell,
+        reconcileOpts,
       );
       // Secrets reach OpenClaw only through the gateway process env; the config holds ${ENV} refs.
       for (const [name, value] of Object.entries(plan.env)) process.env[name] = value;
@@ -98,7 +106,7 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
         removed = 0;
       }
       opts.log?.info?.(
-        `reconciled OpenClaw: agents upsert=${Object.keys(plan.upsertAgents).length} remove=${removed}, providers upsert=${Object.keys(plan.upsertProviders).length}`,
+        `reconciled OpenClaw: agents upsert=${Object.keys(plan.upsertAgents).length} remove=${removed}, providers upsert=${Object.keys(plan.upsertProviders).length} remove=${plan.removeProviders.length}`,
       );
       return { changed: true, results: plan.results };
     },

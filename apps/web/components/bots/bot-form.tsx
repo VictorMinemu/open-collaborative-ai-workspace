@@ -1,6 +1,6 @@
 "use client";
 
-import { type AllowedModel, catalogEntry, type ModelProviderKind } from "@ocw/contracts";
+import { type AllowedModel, type ModelProviderKind, providerShortLabel } from "@ocw/contracts";
 import { type ReactNode, useState } from "react";
 import { describedBy, FormField } from "@/components/ui/form-field";
 import { Input } from "@/components/ui/input";
@@ -42,8 +42,7 @@ export function suggestUsername(name: string): string {
 }
 
 function providerLabel(p: ModelProviderKind): string {
-  if (p === "mock") return "Mock";
-  return catalogEntry(p)?.label ?? p;
+  return providerShortLabel(p);
 }
 
 export function BotForm({

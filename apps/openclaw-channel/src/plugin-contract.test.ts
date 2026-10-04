@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { CellAgent, CellProvider, CellSnapshot } from "./agent-channel-protocol.js";
 import { AgentChannelHttpError, createAgentChannelClient } from "./api-client.js";
-import { createBridge, FAILURE_REPLY, type OpenClawPort } from "./bridge.js";
+import { AUTH_FAILURE_REPLY, createBridge, FAILURE_REPLY, type OpenClawPort } from "./bridge.js";
 import { createMemoryCursorStore } from "./cursor-store.js";
 import { CommitTracker, runEventStream } from "./event-stream.js";
 import type { MappedMention } from "./mention-mapper.js";
@@ -251,6 +251,22 @@ describe("mention → dispatch → reply", () => {
       idempotencyKey: "evt:evt-5:failed",
       threadRootMessageId: "root-1",
     });
+  });
+
+  it("a provider auth failure (401, e.g. an expired ChatGPT sign-in) is not retried and says how to fix it", async () => {
+    let calls = 0;
+    port.reply = () => {
+      calls++;
+      return [
+        "⚠️ Authentication failed (provider returned HTTP 401). Your provider token may have expired — try the request again in a moment.",
+      ];
+    };
+    startPlugin();
+    await api.waitFor(() => api.openSockets() === 1);
+    api.publishMention(mention(11));
+    await api.waitFor(() => api.messages.length === 1);
+    expect(calls).toBe(1);
+    expect(api.messages[0]).toMatchObject({ text: AUTH_FAILURE_REPLY, idempotencyKey: "evt:evt-11:failed" });
   });
 
   it("skips mentions for unknown (after refresh) or disabled agents", async () => {

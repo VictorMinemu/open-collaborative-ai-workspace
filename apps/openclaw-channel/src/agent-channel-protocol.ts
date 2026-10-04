@@ -10,6 +10,7 @@
  *   POST /messages             ← AgentChannelPostMessage → AgentChannelPostMessageResponse
  *   POST /typing               ← AgentChannelTyping → {ok:true}
  *   POST /agents/:id/status    ← AgentChannelStatusReport (ready | error) after provisioning
+ *   POST /provider-auth        ← AgentChannelProviderAuthReport (subscription sign-in progress)
  *
  * Parsing is deliberately lenient on ids (any non-empty string) and ignores unknown fields, so the
  * API can add fields without breaking deployed cells; required fields are enforced.
@@ -21,6 +22,9 @@ export const AGENT_CHANNEL_BASE_PATH = "/agent-channel/v1";
 export const AgentChannelEventTypes = {
   mention: "agent.mention.v1",
   configChanged: "cell.config.changed",
+  providerAuthStart: "provider.auth.start",
+  providerAuthCancel: "provider.auth.cancel",
+  providerAuthRevoke: "provider.auth.revoke",
 } as const;
 export const cellTopic = (cellId: string) => `cell:${cellId}`;
 
@@ -83,6 +87,59 @@ export const CellConfigChangedEvent = z.object({
 });
 export type CellConfigChangedEvent = z.infer<typeof CellConfigChangedEvent>;
 
+/** Subscription providers whose sign-in runs in this cell (ChatGPT via Codex device code). */
+export const SubscriptionProviderId = z.enum(["openai-codex"]);
+export type SubscriptionProviderId = z.infer<typeof SubscriptionProviderId>;
+
+/** Admin clicked Connect: run the provider's device-code sign-in here. */
+export const ProviderAuthStartEvent = z.object({
+  type: z.literal(AgentChannelEventTypes.providerAuthStart),
+  seq: z.number().int().positive(),
+  flowId: Id,
+  provider: SubscriptionProviderId,
+  method: z.literal("device-code"),
+  /** Ignore the event when seen after this instant (replay after downtime). */
+  startBefore: z.string(),
+});
+export type ProviderAuthStartEvent = z.infer<typeof ProviderAuthStartEvent>;
+
+export const ProviderAuthCancelEvent = z.object({
+  type: z.literal(AgentChannelEventTypes.providerAuthCancel),
+  seq: z.number().int().positive(),
+  flowId: Id,
+  provider: SubscriptionProviderId,
+});
+export type ProviderAuthCancelEvent = z.infer<typeof ProviderAuthCancelEvent>;
+
+export const ProviderAuthRevokeEvent = z.object({
+  type: z.literal(AgentChannelEventTypes.providerAuthRevoke),
+  seq: z.number().int().positive(),
+  provider: SubscriptionProviderId,
+});
+export type ProviderAuthRevokeEvent = z.infer<typeof ProviderAuthRevokeEvent>;
+
+export type ProviderAuthErrorCode =
+  | "expired"
+  | "denied"
+  | "cancelled"
+  | "cell_offline"
+  | "unsupported"
+  | "failed";
+
+/** POST /provider-auth. Never tokens: only the one-time code the admin types, and identity. */
+export type AgentChannelProviderAuthReport = {
+  provider: SubscriptionProviderId;
+  flowId: string | null;
+  /** This plugin instance; the first reporter of a flow owns it (others get 409 flow_claimed). */
+  reporterId: string;
+  state: "pending" | "connected" | "error" | "disconnected";
+  verificationUrl?: string;
+  userCode?: string;
+  expiresAt?: string;
+  account?: { email: string | null; planType: string | null };
+  error?: { code: ProviderAuthErrorCode; message: string };
+};
+
 /** Plugin → server. `sub` without afterSeq starts LIVE (no replay). */
 export type AgentChannelClientFrame = { op: "sub"; topic: string; afterSeq?: number } | { op: "ping" };
 
@@ -139,6 +196,18 @@ export const CellAgent = z.object({
 });
 export type CellAgent = z.infer<typeof CellAgent>;
 
+/** A connected subscription: credentials live in OpenClaw's auth store (signed in here), not in the snapshot. */
+export const CellSubscription = z.object({
+  /** Prefix of `modelRef`, e.g. `openai-codex/gpt-6-astra`. */
+  id: z.string().min(1),
+  kind: z.string(),
+  /** OpenClaw provider that owns the sign-in and the catalog (`openai`). */
+  runtimeProvider: z.string().min(1),
+  models: z.array(z.string()),
+  account: z.object({ email: z.string().nullable() }).optional(),
+});
+export type CellSubscription = z.infer<typeof CellSubscription>;
+
 export const CellSnapshot = z.object({
   protocolVersion: z.number().int(),
   cellId: Id,
@@ -147,6 +216,8 @@ export const CellSnapshot = z.object({
   lastSeq: z.number().int().nonnegative(),
   agents: z.array(CellAgent),
   providers: z.array(CellProvider),
+  /** Additive: absent on older APIs (then the plugin leaves stored sign-ins alone). */
+  subscriptions: z.array(CellSubscription).optional(),
 });
 export type CellSnapshot = z.infer<typeof CellSnapshot>;
 
