@@ -1,5 +1,4 @@
 "use client";
-// authz-legacy: 02-10 migrates this file to the resolver
 
 import {
   catalogEntry,
@@ -29,29 +28,29 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { errorMessage } from "@/lib/api";
-import {
-  useBotsRealtime,
-  useDeleteProvider,
-  useIsAdmin,
-  useModelProviders,
-  useUpsertProvider,
-} from "@/lib/bots-queries";
+import { useBotsRealtime, useDeleteProvider, useModelProviders, useUpsertProvider } from "@/lib/bots-queries";
+import { useCan, usePermissions } from "@/lib/permissions";
 import { cn, relativeTime } from "@/lib/utils";
 import { AllowedModels, ProviderMark } from "./provider-bits";
 import { SubscriptionCard } from "./subscription-card";
 
 export function ModelsSettings() {
   useBotsRealtime();
-  const isAdmin = useIsAdmin();
-  const providers = useModelProviders(isAdmin);
+  const permissions = usePermissions();
+  const canManage = useCan("provider.manage");
+  const providers = useModelProviders(canManage);
   const [connecting, setConnecting] = useState<ProviderCatalogEntry | null>(null);
 
-  if (!isAdmin) {
+  if (!canManage) {
     return (
       <Shell>
-        <div className="rounded-xl border border-dashed px-4 py-10 text-center text-muted-foreground text-sm">
-          Only workspace admins can manage model providers.
-        </div>
+        {permissions.isPending ? (
+          <Skeleton className="h-24 rounded-2xl" />
+        ) : (
+          <div className="rounded-xl border border-dashed px-4 py-10 text-center text-muted-foreground text-sm">
+            Only workspace admins can manage model providers.
+          </div>
+        )}
       </Shell>
     );
   }
