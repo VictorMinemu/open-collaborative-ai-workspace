@@ -1,3 +1,4 @@
+import type { Permission } from "@ocw/contracts";
 import { Bot, type LucideIcon, MessagesSquare, Settings, SquareTerminal } from "lucide-react";
 
 /**
@@ -12,12 +13,20 @@ export interface NavItem {
   icon: LucideIcon;
   /** Pinned to the bottom group of the rail (e.g. Settings). */
   secondary?: boolean;
+  /** Shown only to callers holding this organization-scope permission (decided by the API). */
+  permission?: Permission;
 }
 
 export const NAV_ITEMS: readonly NavItem[] = [
   { id: "chat", label: "Chat", href: "/chat", icon: MessagesSquare },
-  { id: "bots", label: "Bots", href: "/bots", icon: Bot },
-  { id: "work-zone", label: "Work Zone", href: "/work-zone", icon: SquareTerminal },
+  { id: "bots", label: "Bots", href: "/bots", icon: Bot, permission: "bot.read" },
+  {
+    id: "work-zone",
+    label: "Work Zone",
+    href: "/work-zone",
+    icon: SquareTerminal,
+    permission: "work_session.read",
+  },
   { id: "settings", label: "Settings", href: "/settings", icon: Settings, secondary: true },
 ];
 

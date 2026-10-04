@@ -16,6 +16,7 @@ import {
   type ZodTypeProvider,
 } from "fastify-type-provider-zod";
 import pg from "pg";
+import { type AuthzRegistry, installAuthz } from "./authz";
 import { decodeKey, type Env } from "./config/env";
 import type { ApiModule, App, Core } from "./core";
 import { createChatAgentBridge } from "./lib/chat-agent-bridge";
@@ -28,7 +29,7 @@ import { createAuditService } from "./modules/audit";
 import { createChatModule } from "./modules/chat";
 import { createDeviceModule } from "./modules/device";
 import { createAuth, createIdentityModule, IdentityService } from "./modules/identity";
-import { createOrganizationModule } from "./modules/organization";
+import { AuthzDeniedError, createOrganizationModule, recordAuthzDenial } from "./modules/organization";
 import { createRealtimeModule, createRealtimeService } from "./modules/realtime";
 import { createSecretsModule, createSecretsService } from "./modules/secrets";
 import { createWorkSessionModule } from "./modules/work-session";
@@ -38,6 +39,8 @@ export const API_VERSION = "0.1.0";
 export interface BuiltApp {
   app: App;
   core: Core;
+  /** Route authz declarations and undecided answers (warn mode; strict for tests from 02-15). */
+  authz: AuthzRegistry;
   close(): Promise<void>;
 }
 
@@ -130,32 +133,45 @@ export async function buildApp(
   });
   await app.register(scalar, { routePrefix: "/docs" });
 
-  app.setErrorHandler((err: FastifyError & { body?: { code?: string; message?: string } }, req, reply) => {
-    if (err instanceof HttpError) {
-      return reply.status(err.statusCode).send({
-        error: { code: err.code, message: err.message, ...(err.details ? { details: err.details } : {}) },
-      });
-    }
-    if (hasZodFastifySchemaValidationErrors(err)) {
-      return reply.status(400).send({
-        error: { code: "validation_error", message: "Request validation failed", details: err.validation },
-      });
-    }
-    const status = typeof err.statusCode === "number" ? err.statusCode : 500;
-    if (status < 500) {
-      // better-auth APIError and Fastify client errors (rate limit, bad JSON, …)
-      const code = err.body?.code ?? err.code ?? "error";
-      const message = err.body?.message ?? err.message;
-      return reply.status(status).send({ error: { code: String(code).toLowerCase(), message } });
-    }
-    req.log.error({ err }, "unhandled error");
-    return reply.status(500).send({ error: { code: "internal", message: "Something went wrong" } });
-  });
+  app.setErrorHandler(
+    async (err: FastifyError & { body?: { code?: string; message?: string } }, req, reply) => {
+      if (err instanceof AuthzDeniedError && req.method !== "GET" && req.method !== "HEAD") {
+        // The request transaction already rolled back; the denial is audited in its own (Pitfall 4).
+        await recordAuthzDenial({ db, audit }, req, err);
+      }
+      if (err instanceof HttpError) {
+        return reply.status(err.statusCode).send({
+          error: { code: err.code, message: err.message, ...(err.details ? { details: err.details } : {}) },
+        });
+      }
+      if (hasZodFastifySchemaValidationErrors(err)) {
+        return reply.status(400).send({
+          error: { code: "validation_error", message: "Request validation failed", details: err.validation },
+        });
+      }
+      const status = typeof err.statusCode === "number" ? err.statusCode : 500;
+      if (status < 500) {
+        // better-auth APIError and Fastify client errors (rate limit, bad JSON, …)
+        const code = err.body?.code ?? err.code ?? "error";
+        const message = err.body?.message ?? err.message;
+        return reply.status(status).send({ error: { code: String(code).toLowerCase(), message } });
+      }
+      req.log.error({ err }, "unhandled error");
+      return reply.status(500).send({ error: { code: "internal", message: "Something went wrong" } });
+    },
+  );
+
+  // ---------------------------------------------------------------- authorization coverage
+  // Before any route below: records every route's config.authz and every undecided non-public 2xx.
+  const authz = installAuthz(app, { strict: false });
 
   // ---------------------------------------------------------------- health
   app.get(
     "/health",
-    { schema: { tags: ["system"], response: { 200: HealthResponse, 503: HealthResponse } } },
+    {
+      config: { authz: "public" },
+      schema: { tags: ["system"], response: { 200: HealthResponse, 503: HealthResponse } },
+    },
     async (_req, reply) => {
       const [dbOk, redisOk] = await Promise.all([
         db.ping().then(
@@ -198,6 +214,7 @@ export async function buildApp(
   return {
     app,
     core,
+    authz,
     async close() {
       await app.close();
       for (const m of modules) await m.close?.();

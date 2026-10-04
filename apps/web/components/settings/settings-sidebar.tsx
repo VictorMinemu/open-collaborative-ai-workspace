@@ -3,14 +3,17 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { SectionSidebar, sectionItemClass } from "@/components/shell/section-sidebar";
+import { usePermissionCheck } from "@/lib/permissions";
 import { SETTINGS_SECTIONS } from "./settings-nav";
 
 export function SettingsSidebar() {
   const pathname = usePathname();
+  const can = usePermissionCheck();
+  const sections = SETTINGS_SECTIONS.filter((s) => !s.permission || can(s.permission));
   return (
     <SectionSidebar title="Settings">
       <nav aria-label="Settings" className="grid gap-0.5">
-        {SETTINGS_SECTIONS.map((s) => {
+        {sections.map((s) => {
           const active = pathname === s.href;
           const Icon = s.icon;
           return (
