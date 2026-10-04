@@ -5,7 +5,11 @@ This is the official `ghcr.io/openclaw/openclaw:2026.9.7-slim` image (pinned by 
 with `render-config.mjs`, then hands over to the image's own entrypoint (`doctor --fix`, then the
 gateway).
 
-Bots and model providers, keys included, are **not** in this config. At start, and on every
+Bots and model providers, keys included, are **not** in this config. The rendered config is authoritative
+on every boot: the entrypoint deletes `openclaw.json.bak` (and `.last-good`) first, otherwise OpenClaw sees
+the much smaller base config as a suspicious "size drop" and restores last run's backup, undoing base-config
+changes such as the plugin allowlist. ChatGPT-subscription sign-ins live in OpenClaw's auth store
+(`state/openclaw.sqlite` on the state volume), not in the config, so they survive restarts. At start, and on every
 `cell.config.changed`, the plugin provisions them from `GET /agent-channel/v1/cell`:
 
 - Provider keys stay in the gateway process env (`OCW_PROVIDER_KEY_<ID>`). The config holds only
@@ -16,8 +20,12 @@ Bots and model providers, keys included, are **not** in this config. At start, a
 
 - **Gateway:** `bind: loopback` inside the container, Control UI off, no published ports. The
   operator token is random per boot unless `OPENCLAW_GATEWAY_TOKEN[_FILE]` is set.
-- **Plugins:** `allow: ["ocw"]` and `deny: ["codex"]`, memory slot `none`, mDNS off. Boot log:
-  `1 plugin: ocw`.
+- **Plugins:** `allow: ["ocw", "openai"]` and `deny: ["codex"]`, memory slot `none`, mDNS off. Boot log:
+  `2 plugins: ocw, openai`.
+  - Why `openai`: OpenClaw's bundled OpenAI plugin owns the ChatGPT/Codex device-code sign-in, the OAuth
+    refresh and the Codex model catalog behind the "ChatGPT subscription" provider (ADR-0006). It is
+    loaded at boot because enabling it later swaps plugin instances and would abort a sign-in. Its GPT-5
+    "friendly personality" layer is off (`plugins.entries.openai.config.personality: "off"`).
   - Why the `codex` deny: with no providers at boot, `doctor --fix` would otherwise add `codex` to
     the allowlist.
   - A provider id that matches a bundled provider plugin (for example `anthropic`) is enabled by
@@ -44,7 +52,7 @@ During a turn the gateway uses about 1.1–1.2 GB RSS; at idle it uses about 0.8
 |---|---|
 | No cap | VM-OOM-killed on a Docker host with about 1.3 GB headroom |
 | 256 MB | Enough for the fake provider; V8 heap OOM once the anthropic provider plugin loaded |
-| 512 MB | Works |
+| 512 MB | Works (also with the `openai` plugin: idle about 0.6–0.8 GB RSS, a ChatGPT turn up to about 1.35 GB) |
 
 ## Test
 
