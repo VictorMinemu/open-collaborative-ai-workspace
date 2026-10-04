@@ -5,12 +5,13 @@ import type { RealtimeService } from "../realtime";
 import { createInvitationService, registerInvitationRoutes } from "./invitations";
 import { registerIdentityRoutes } from "./routes";
 import type { IdentityService } from "./service";
+import { registerSessionRoutes } from "./sessions";
 
 export { type Auth, createAuth } from "./auth";
 export type { InvitationService } from "./invitations";
 export { auditVia, type IdentityResult, IdentityService } from "./service";
 
-/** Mounts /api/v1/{setup,me,invitations} and the better-auth allowlist under /api/auth. */
+/** Mounts /api/v1/{setup,me,me/sessions,invitations} and the better-auth allowlist under /api/auth. */
 export function createIdentityModule(deps: {
   identity: IdentityService;
   db: TenantDb;
@@ -24,6 +25,7 @@ export function createIdentityModule(deps: {
     prefix: "",
     register: (app) => {
       registerIdentityRoutes(app, deps);
+      registerSessionRoutes(app, deps);
       registerInvitationRoutes(app, { ...deps, invitations });
     },
   };
