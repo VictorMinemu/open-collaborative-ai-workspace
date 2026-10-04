@@ -51,14 +51,20 @@ export function useAgents() {
     queryKey: botKeys.agents,
     queryFn: ({ signal }) => api.get("/api/v1/agents", { schema: AgentList, signal }),
     retry: noRetryOn4xx,
+    // Realtime pushes status changes; this is only a safety net for an ack that lands before the page
+    // subscribed (seen on fast CI runners): while any bot is provisioning, re-read every 3 s.
+    refetchInterval: (query) =>
+      query.state.data?.agents.some((a) => a.status === "provisioning") ? 3_000 : false,
   });
 }
 
 function upsertAgent(qc: QueryClient, agent: Agent) {
   qc.setQueryData<AgentList>(botKeys.agents, (prev) => {
     if (!prev) return prev;
-    const exists = prev.agents.some((a) => a.id === agent.id);
-    const agents = exists ? prev.agents.map((a) => (a.id === agent.id ? agent : a)) : [...prev.agents, agent];
+    const current = prev.agents.find((a) => a.id === agent.id);
+    // Never let an older snapshot (e.g. the create response) overwrite a newer realtime update.
+    if (current && Date.parse(current.updatedAt) > Date.parse(agent.updatedAt)) return prev;
+    const agents = current ? prev.agents.map((a) => (a.id === agent.id ? agent : a)) : [...prev.agents, agent];
     return { agents: agents.sort((a, b) => a.name.localeCompare(b.name)) };
   });
 }
