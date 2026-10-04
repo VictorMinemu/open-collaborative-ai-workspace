@@ -22,6 +22,8 @@ export interface IdentityRouteDeps {
   audit: AuditService;
   realtime: RealtimeService;
   apiUrl: string;
+  /** Sign-in attempts per IP per minute (env OCW_SIGNIN_RATE_LIMIT_PER_MINUTE, default 30). */
+  signInRatePerMinute?: number;
 }
 
 /**
@@ -38,6 +40,7 @@ const BETTER_AUTH_ALLOWLIST: Array<{ method: "GET" | "POST"; path: string }> = [
 ];
 
 export function registerIdentityRoutes(app: App, deps: IdentityRouteDeps) {
+  const signInRate = { rateLimit: { max: deps.signInRatePerMinute ?? 30, timeWindow: "1 minute" } };
   const { identity } = deps;
   const perms = createPermissionService({ db: deps.db, audit: deps.audit });
 
@@ -99,7 +102,7 @@ export function registerIdentityRoutes(app: App, deps: IdentityRouteDeps) {
       method: route.method,
       url: route.path,
       schema: { tags: ["auth"], hide: false },
-      config: { authz: "public", ...(route.path.includes("sign-in") ? SENSITIVE_RATE : {}) },
+      config: { authz: "public", ...(route.path.includes("sign-in") ? signInRate : {}) },
       handler: async (req: FastifyRequest, reply: FastifyReply) => {
         const isSignIn = route.path.endsWith("/sign-in/email");
         const isSignOut = route.path.endsWith("/sign-out");

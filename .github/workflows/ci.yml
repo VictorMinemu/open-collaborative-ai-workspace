@@ -40,6 +40,8 @@ jobs:
     env:
       # Bots use the deterministic mock model; CI never receives a metered model key.
       OCW_MODEL_PROVIDER: mock
+      # Specs sign many browsers in from one IP; production keeps the default 30/min.
+      OCW_SIGNIN_RATE_LIMIT_PER_MINUTE: "600"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

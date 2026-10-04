@@ -54,6 +54,11 @@ export const EnvSchema = z
      * Optional SMTP server for password reset e-mails (smtp:// or smtps://, credentials in the URL, so it is a
      * secret). Without it admins issue reset links instead. `memory:` is a test-only outbox.
      */
+    /**
+     * Sign-in attempts per IP per minute (credential-stuffing brake). Keep the default in production;
+     * only test harnesses that sign many browsers in from one IP raise it.
+     */
+    OCW_SIGNIN_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(1).max(10_000).default(30),
     OCW_SMTP_URL: z
       .string()
       .regex(/^(smtps?:\/\/\S+|memory:)$/, "must be an smtp:// or smtps:// URL")

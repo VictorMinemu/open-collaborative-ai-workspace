@@ -213,7 +213,14 @@ export async function buildApp(
   // Modules are mounted under /api/v1 unless they set `prefix`.
   const deviceModule = createDeviceModule(core); // B3: owns the Device Link hub used by work-session
   const modules: ApiModule[] = [
-    createIdentityModule({ identity, db, audit, realtime, apiUrl: env.OCW_PUBLIC_API_URL }),
+    createIdentityModule({
+      identity,
+      db,
+      audit,
+      realtime,
+      apiUrl: env.OCW_PUBLIC_API_URL,
+      signInRatePerMinute: env.OCW_SIGNIN_RATE_LIMIT_PER_MINUTE,
+    }),
     createOrganizationModule(core),
     createRealtimeModule({ realtime, identity, allowedOrigins, bus }),
     createSecretsModule(),

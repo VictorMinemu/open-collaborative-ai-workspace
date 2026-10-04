@@ -20,6 +20,7 @@ export function createIdentityModule(deps: {
   audit: AuditService;
   realtime: RealtimeService;
   apiUrl: string;
+  signInRatePerMinute?: number;
 }): ApiModule {
   const invitations = createInvitationService(deps.identity);
   return {
