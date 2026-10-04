@@ -7,7 +7,9 @@ import {
 } from "@ocw/contracts";
 import type { FastifyRequest } from "fastify";
 import type { WebSocket } from "ws";
+import { markDecided } from "../../authz";
 import type { App, Core } from "../../core";
+import type { PermissionService } from "../organization";
 import type { CellAuth, CellPrincipal } from "./auth";
 import type { CellPresence } from "./presence";
 
@@ -23,13 +25,21 @@ function withSeq(frame: DurableFrame): DurableFrame {
  * `GET /agent-channel/v1/ws` — one outbound WebSocket per OpenClaw cell (A2.1). Bearer cell token checked
  * BEFORE the upgrade; requests carrying a browser `Origin` are refused (no cross-site use). Frames reuse the
  * browser envelope: `sub{topic:'cell:<cellId>', afterSeq?}` → replay from PostgreSQL then live, exactly once
- * per seq; `ping` → `pong`. `sub` WITHOUT afterSeq starts live (no replay).
+ * per seq; `ping` → `pong`. `sub` WITHOUT afterSeq starts live (no replay). The authenticated cell is then
+ * decided as a principal (`cell.sync`) before the upgrade.
  */
-export function registerCellGateway(app: App, core: Core, auth: CellAuth, presence: CellPresence) {
+export function registerCellGateway(
+  app: App,
+  core: Core,
+  auth: CellAuth,
+  presence: CellPresence,
+  perms: PermissionService,
+) {
   app.get(
     `${AGENT_CHANNEL_BASE_PATH}/ws`,
     {
       websocket: true,
+      config: { authz: "cell" },
       schema: { hide: true },
       onRequest: async (req, reply) => {
         if (req.headers.origin) {
@@ -46,6 +56,16 @@ export function registerCellGateway(app: App, core: Core, auth: CellAuth, presen
               .send({ error: { code: "invalid_cell_token", message: "A valid cell token is required" } });
           }
           req.cell = cell;
+          const decision = await core.db.withTenant(
+            { organizationId: cell.organizationId, userId: null },
+            (tx) => perms.decide(tx, { kind: "cell", cellId: cell.cellId }, "cell.sync"),
+          );
+          markDecided(req);
+          if (!decision.allowed) {
+            return reply.code(403).send({
+              error: { code: "forbidden", message: "This cell may not sync", details: decision.denial },
+            });
+          }
         } catch (err) {
           const status = (err as { statusCode?: number }).statusCode ?? 500;
           return reply.code(status).send({ error: { code: "unavailable", message: (err as Error).message } });

@@ -25,11 +25,23 @@ pnpm demo:reset                               # wipes the LOCAL database and see
 ANTHROPIC_API_KEY=sk-ant-… pnpm demo:reset    # same, plus the Anthropic provider and three bots
 ```
 
-Seeded workspace: organization **Autofy Labs**; people Víctor Ruiz (owner), Alex Kim, Marta López,
-Sam Patel (`<name>@autofylabs.demo`); channels `#general`, `#producto`, `#ingenieria`, `#lanzamiento`
-with a short history. The password for every demo user is printed at the end of the seed and stored in
-`.env.demo` (git-ignored). With a key, bots **@archie** (product), **@nova** (code review) and
-**@iris** (research) are created on Claude Sonnet 5.5 and added to their channels.
+Seeded workspace: organization **Autofy Labs** with one person per PRD role (`<name>@autofylabs.demo`):
+
+| Person | Role | Units |
+|---|---|---|
+| Víctor Ruiz (`victor@`) | Organization Admin | member of IT |
+| Alex Kim (`alex@`) | Team Lead | lead of Backend |
+| Marta López (`marta@`) | Developer | member of Team Alpha |
+| Sam Patel (`sam@`) | Standard User | member of Content |
+
+Hierarchy: **IT › Backend › Team Alpha › Workspace App** (project) and **Marketing › Content**. Channels
+`#general`, `#producto`, `#ingenieria`, `#lanzamiento` with a short history. The password for every demo
+user is printed at the end of the seed and stored in `.env.demo` (git-ignored). With a key, bots
+**@archie** (product), **@nova** (code review) and **@iris** (research) are created on Claude Sonnet 5.5
+and added to their channels.
+
+A workspace seeded before Phase 2 keeps its people but has no hierarchy and shows everyone as Developer:
+run `pnpm demo:reset` when you want the roles and units above.
 
 ## Script (≈ 5 minutes)
 
@@ -53,6 +65,29 @@ with a short history. The password for every demo user is printed at the end of 
    **Codex**), permission mode *Plan* (safe) or *Default* (asks before editing). Prompt, e.g.
    *"Propose one small UX improvement for the chat composer"*. Show the live stream, tool cards, the
    shared queue (add a second prompt as Alex), the approval banner, and the Changes panel.
+7. **Roles and organization** — Settings › Members: each person's role, the role select (admins only)
+   and **What can each role do?**, the matrix of what each role is allowed. Settings › Organization: the
+   tree, Alex as lead of Backend, a unit's members. Then sign in (private window) as `sam@autofylabs.demo`:
+   a Standard User chats and uses bots but has no Work Zone and no admin settings. Every decision comes
+   from one permission resolver on the server, so the UI only hides what the API would refuse anyway.
+
+## Account and access
+
+- **Profile and security** — Settings › Profile (name, avatar, status) and Settings › Security (change
+  password, active sessions with a device label such as *Chrome on macOS* or *OCW desktop*, sign out a
+  session or every other session).
+- **Password reset** — without SMTP an admin creates a one-time reset link from Settings › Members (row
+  menu › *Create password reset link*) and hands it over. Set `OCW_SMTP_URL` (e.g.
+  `smtp://user:pass@smtp.example.com:587`) and optionally `OCW_MAIL_FROM` in `.env` to e-mail reset links
+  from the "Forgot password?" page instead.
+- **Older desktop builds** — `OCW_ACCEPT_LEGACY_DEVICE_TOKEN` (default `true`) lets a desktop app built
+  before Phase 2 keep connecting with its raw device token; new builds exchange it for a 10-minute device
+  JWT. Set it to `false` once every desktop app has been rebuilt. It is removed in Phase 8.
+- **Rotating `BETTER_AUTH_SECRET`** — it signs the session cookies and encrypts the JWT signing keys in
+  `auth.jwks`. After a rotation, delete the `auth.jwks` rows (`DELETE FROM auth.jwks;`) and restart the
+  API: new keys are generated, every outstanding JWT becomes invalid, everyone signs in again and the
+  clients fetch fresh tokens. Without the delete, issuing tokens fails with "Failed to decrypt private
+  key". `pnpm setup:env --force` rotates the secret too.
 
 ## ChatGPT subscription (Codex)
 
@@ -90,6 +125,8 @@ report an error until you connect again. **Switch account** starts a new sign-in
 | The OpenAI page rejects the code or says device sign-in is not allowed | your ChatGPT security or workspace settings may need device-code authorization for Codex enabled; enable it and connect again |
 | Bot is *Error*: "not signed in on the bot runtime" | the cell lost the sign-in (state volume reset): Settings › Models → *Reconnect* |
 | Bot answers "the provider rejected my credentials" | the sign-in was revoked or the plan does not include that model: reconnect, or pick another model for the bot |
+| Settings › Members shows no role select or no Organization page | you are not signed in as an Organization Admin (only `victor@` is one) |
+| After changing `BETTER_AUTH_SECRET` the web stays offline or the API logs "Failed to decrypt private key" | delete the `auth.jwks` rows and restart the API (see [Account and access](#account-and-access)) |
 | Cell crash-loops with "Another Gateway owner lease" | it was killed hard: `docker rm -f ocw-demo-openclaw && docker volume rm ocw-demo-openclaw-state && pnpm demo:up` |
 
 ## Known limits (MVP 0)

@@ -46,7 +46,7 @@ export const AgentChannelRosterEntry = z.object({
   kind: MemberKind,
   id: Id,
   displayName: z.string(),
-  /** Org role for users (`owner` | `admin` | `member`). */
+  /** Org role for users (`standard` | `developer` | `lead` | `admin`). */
   role: z.string().optional(),
   /** @handle for agents. */
   handle: z.string().optional(),

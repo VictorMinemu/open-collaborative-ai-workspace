@@ -152,8 +152,11 @@ then ack each provisioned bot with `POST /agents/:id/status`.
 - **Idempotent** on `(agentId, idempotencyKey)`: a retry returns the original `messageId` with `created: false`
   (at-least-once delivery is safe). Recommended key: `evt:<eventId>`.
 - Checks: bot exists in this cell (404 `agent_not_found`), not disabled (403 `agent_disabled`), member of the
-  conversation or its parent channel (403 `not_a_member`), thread root belongs to the conversation (400
+  conversation or its parent channel (403 `agent_not_member`), thread root belongs to the conversation (400
   `invalid_thread_root`; a reply id is normalised to its root). 503 `chat_unavailable` if chat is not wired.
+  Since Phase 2 (02-10) the permission resolver decides: the cell as a `cell.sync` principal on every route,
+  the bot as an agent principal (its own deny rules → 403 `forbidden`, layer `agent`), and, with
+  `inReplyToMessageId`, the human it answers must still read the channel (403, e.g. `private_channel`).
 - Stored through `core.chatAgent.postAgentMessage` (chat owns messages): `author_kind = 'agent'`, realtime
   fan-out on `conv:<id>`. Chat audits `agent.message.posted` in the same transaction (`actor_kind = 'agent'`,
   `agent_id`); agent-channel opens that transaction with the triggering human (author of `inReplyToMessageId`)

@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 /**
  * Seeds a fresh instance with a believable demo workspace through the public API only (no DB access):
- * organization + admin (setup token), three invited teammates, channels with history, and three
- * OpenClaw bots added to their channels.
+ * organization + admin (setup token), three invited teammates with the other three PRD roles (Team Lead,
+ * Developer, Standard User), the organization hierarchy (IT › Backend › Team Alpha › Workspace App and
+ * Marketing › Content) with unit memberships, channels with history, and three OpenClaw bots added to
+ * their channels.
  *
  * Usage (fresh database, API running):
  *   node scripts/demo-seed.mjs
@@ -61,12 +63,31 @@ function client() {
   };
 }
 
+/** Víctor sets the organization up, so he is its Organization Admin; the others are invited with a role. */
 const people = {
-  victor: { name: "Víctor Ruiz", email: "victor@autofylabs.demo" },
-  alex: { name: "Alex Kim", email: "alex@autofylabs.demo" },
-  marta: { name: "Marta López", email: "marta@autofylabs.demo" },
-  sam: { name: "Sam Patel", email: "sam@autofylabs.demo" },
+  victor: { name: "Víctor Ruiz", email: "victor@autofylabs.demo", label: "Organization Admin" },
+  alex: { name: "Alex Kim", email: "alex@autofylabs.demo", role: "lead", label: "Team Lead" },
+  marta: { name: "Marta López", email: "marta@autofylabs.demo", role: "developer", label: "Developer" },
+  sam: { name: "Sam Patel", email: "sam@autofylabs.demo", role: "standard", label: "Standard User" },
 };
+
+/** The organization tree, parents first: [key, kind, name, parent key]. */
+const units = [
+  ["it", "department", "IT", null],
+  ["backend", "department", "Backend", "it"],
+  ["alpha", "team", "Team Alpha", "backend"],
+  ["app", "project", "Workspace App", "alpha"],
+  ["marketing", "department", "Marketing", null],
+  ["content", "team", "Content", "marketing"],
+];
+
+/** Unit memberships: [unit key, person, unit role]. */
+const unitMembers = [
+  ["it", "victor", "member"],
+  ["backend", "alex", "lead"],
+  ["alpha", "marta", "member"],
+  ["content", "sam", "member"],
+];
 
 const bots = [
   {
@@ -150,14 +171,17 @@ async function main() {
   });
   await as.victor("POST", "/api/auth/sign-in/email", { email: people.victor.email, password: PASSWORD });
 
+  const userIds = { victor: (await as.victor("GET", "/api/v1/me")).user.id };
   for (const key of ["alex", "marta", "sam"]) {
     const p = people[key];
-    const inv = await as.victor("POST", "/api/v1/invitations", { email: p.email, role: "member" });
+    const inv = await as.victor("POST", "/api/v1/invitations", { email: p.email, role: p.role });
     const id = (inv.invitation ?? inv).id;
     as[key] = client();
     await as[key]("POST", `/api/v1/invitations/${id}/accept`, { name: p.name, password: PASSWORD });
     await as[key]("POST", "/api/auth/sign-in/email", { email: p.email, password: PASSWORD });
-    console.log(`• invited and joined: ${p.name}`);
+    const me = await as[key]("GET", "/api/v1/me");
+    userIds[key] = me.user.id;
+    console.log(`• invited and joined: ${p.name} (${p.label}, role ${me.organization.role})`);
   }
 
   // #general is created lazily on the first list.
@@ -173,6 +197,25 @@ async function main() {
     for (const c of mine.channels ?? mine) {
       if (!c.isMember) await as[key]("POST", `/api/v1/channels/${c.id}/join`);
     }
+  }
+
+  // Organization hierarchy (D-10): departments, teams and a project, created by the admin through the API.
+  const unitIds = {};
+  const unitPaths = {};
+  for (const [key, kind, name, parent] of units) {
+    const created = await as.victor("POST", "/api/v1/units", {
+      kind,
+      name,
+      parentId: parent ? unitIds[parent] : null,
+    });
+    unitIds[key] = created.id;
+    unitPaths[key] = parent ? `${unitPaths[parent]} › ${name}` : name;
+    console.log(`• ${kind} ${unitPaths[key]}`);
+  }
+  for (const [unit, who, role] of unitMembers) {
+    await as.victor("POST", `/api/v1/units/${unitIds[unit]}/members`, { userId: userIds[who], role });
+    const unitName = units.find((u) => u[0] === unit)[2];
+    console.log(`• ${people[who].name} → ${unitName} (${role})`);
   }
 
   const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
@@ -216,7 +259,8 @@ async function main() {
 
   console.log("\nDemo workspace ready.");
   console.log(`  Web:      ${WEB}`);
-  for (const p of Object.values(people)) console.log(`  ${p.name.padEnd(12)} ${p.email}`);
+  for (const p of Object.values(people))
+    console.log(`  ${p.name.padEnd(12)} ${p.email.padEnd(24)} ${p.label}`);
   console.log(`  Password (all demo users): ${PASSWORD}`);
 }
 

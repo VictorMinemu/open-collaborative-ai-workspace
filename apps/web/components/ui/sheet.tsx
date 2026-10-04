@@ -13,6 +13,8 @@ const sideClass = {
   left: "inset-y-0 left-0 h-dvh w-[19rem] max-w-[85vw] border-r data-ending-style:-translate-x-full data-starting-style:-translate-x-full",
   right:
     "inset-y-0 right-0 h-dvh w-[24rem] max-w-[92vw] border-l data-ending-style:translate-x-full data-starting-style:translate-x-full",
+  bottom:
+    "inset-x-0 bottom-0 h-[85dvh] w-full rounded-t-2xl border-t data-ending-style:translate-y-full data-starting-style:translate-y-full",
 } as const;
 
 export function SheetContent({

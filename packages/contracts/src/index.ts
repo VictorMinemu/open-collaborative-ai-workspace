@@ -7,6 +7,7 @@ export * from "./device-link";
 export * from "./health";
 export * from "./identity";
 export * from "./organization";
+export * from "./permissions";
 export * from "./realtime";
 export * from "./session-events";
 export * from "./work-session";

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { Id, IsoDateTime } from "./common";
 import { DiffFile } from "./device-link";
+import { Permission } from "./permissions";
 import {
   ApprovalOutcome,
   PermissionMode,
@@ -122,6 +123,8 @@ export const WorkSessionDetail = z.object({
   /** Durable session events in order (latest window). Subscribe to `ws:<id>` with `afterSeq = lastSeq`. */
   events: z.array(WorkSessionEventRecord),
   lastSeq: z.number().int().nonnegative(),
+  /** Permissions the caller holds on this resource, decided by the API resolver (UI gating only). */
+  viewerCan: z.array(Permission).optional(),
 });
 export type WorkSessionDetail = z.infer<typeof WorkSessionDetail>;
 

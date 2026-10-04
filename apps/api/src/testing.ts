@@ -68,24 +68,45 @@ export class TestClient {
     return [...this.cookies].map(([k, v]) => `${k}=${v}`).join("; ");
   }
 
-  async request(method: string, path: string, body?: unknown) {
+  /**
+   * Extra `opts.headers` are merged last (e.g. `authorization: Bearer <jwt>`); `noCookies` sends the request
+   * without the cookie jar and leaves the jar untouched.
+   */
+  async request(
+    method: string,
+    path: string,
+    body?: unknown,
+    opts: { headers?: Record<string, string>; noCookies?: boolean } = {},
+  ) {
     const headers: Record<string, string> = { origin: WEB_ORIGIN };
     if (body !== undefined) headers["content-type"] = "application/json";
-    if (this.cookies.size) headers.cookie = this.cookieHeader;
+    if (this.cookies.size && !opts.noCookies) headers.cookie = this.cookieHeader;
+    Object.assign(headers, opts.headers);
     const res = await fetch(`${this.baseUrl}${path}`, {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-    for (const c of res.headers.getSetCookie()) {
-      const [pair] = c.split(";");
-      const idx = pair!.indexOf("=");
-      const k = pair!.slice(0, idx);
-      const v = pair!.slice(idx + 1);
-      if (v === "" || /max-age=0/i.test(c)) this.cookies.delete(k);
-      else this.cookies.set(k, v);
+    if (!opts.noCookies) {
+      for (const c of res.headers.getSetCookie()) {
+        const [pair] = c.split(";");
+        const idx = pair!.indexOf("=");
+        const k = pair!.slice(0, idx);
+        const v = pair!.slice(idx + 1);
+        if (v === "" || /max-age=0/i.test(c)) this.cookies.delete(k);
+        else this.cookies.set(k, v);
+      }
     }
     const text = await res.text();
     return { status: res.status, body: text ? (JSON.parse(text) as Record<string, unknown>) : null };
+  }
+
+  /** A fresh 10-minute access JWT for the signed-in session (GET /api/auth/token with the cookie jar). */
+  async token(): Promise<string> {
+    const res = await this.request("GET", "/api/auth/token");
+    const token = res.body?.token;
+    if (res.status !== 200 || typeof token !== "string")
+      throw new Error(`token request failed: ${res.status}`);
+    return token;
   }
 }

@@ -10,6 +10,10 @@ export interface TenantCtx {
   organizationId: string;
   /** Acting user (for policies/audit context); null for system/agent/device actions. */
   userId?: string | null;
+  /** Session of the acting user's request; audit rows default to it (ORG-05, AUTH-05). */
+  sessionId?: string | null;
+  /** Client kind of that session (web, desktop, mobile); audit rows default to it. */
+  clientKind?: string | null;
 }
 
 export type AfterCommit = (cb: () => Promise<void> | void) => void;
@@ -77,7 +81,13 @@ export function createTenantDb(
       const afterCommit: AfterCommit = (cb) => {
         after.push(cb);
       };
-      txContexts.set(tx, { organizationId: ctx.organizationId, userId: ctx.userId ?? null, afterCommit });
+      txContexts.set(tx, {
+        organizationId: ctx.organizationId,
+        userId: ctx.userId ?? null,
+        sessionId: ctx.sessionId ?? null,
+        clientKind: ctx.clientKind ?? null,
+        afterCommit,
+      });
       return fn(tx, afterCommit);
     });
     for (const cb of after) {

@@ -38,12 +38,6 @@ function noRetryOn4xx(failureCount: number, err: unknown): boolean {
   return failureCount < 1;
 }
 
-export function useIsAdmin(): boolean {
-  const me = useMe({ enabled: false });
-  const role = me.data?.organization.role;
-  return role === "owner" || role === "admin";
-}
-
 // ---- bots ----
 
 export function useAgents() {

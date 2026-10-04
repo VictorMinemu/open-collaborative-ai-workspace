@@ -53,18 +53,18 @@ SLICE-06…18 were added on 2026-10-04 after the code audit of the widened demo 
 - [x] **AUTH-01**: First run creates the organization and its first Organization Admin through a one-time setup token; no default credentials exist
 - [x] **AUTH-02**: User can sign up with email and password from an invitation link and stays logged in across browser refresh and app restarts
 - [x] **AUTH-03**: Admin or Team Lead can invite people by copyable link (SMTP optional) and revoke pending invitations
-- [ ] **AUTH-04**: User can reset their password (email when SMTP configured, admin-issued link otherwise)
-- [ ] **AUTH-05**: User can view and revoke their active sessions; every session carries a device/client identifier used for message attribution (PRD §15)
-- [ ] **AUTH-06**: API, WebSocket and daemon connections are authenticated with short-lived JWTs verified against a JWKS endpoint; identity is provided by better-auth embedded in the API (STACK decision)
+- [x] **AUTH-04**: User can reset their password (email when SMTP configured, admin-issued link otherwise)
+- [x] **AUTH-05**: User can view and revoke their active sessions; every session carries a device/client identifier used for message attribution (PRD §15)
+- [x] **AUTH-06**: API, WebSocket and daemon connections are authenticated with short-lived JWTs verified against a JWKS endpoint; identity is provided by better-auth embedded in the API (STACK decision)
 
 ### Organization and Permissions (ORG)
 
-- [ ] **ORG-01**: Admin can create and manage the hierarchy Organization → Department → Team → Project, including moving units (PRD §7)
-- [ ] **ORG-02**: Admin can assign users to units with one of the four roles: Standard User, Developer, Team Lead/Manager, Organization Admin (PRD §6)
-- [ ] **ORG-03**: A single `resolveEffectivePermissions` function computes permissions as the intersection Org ∩ Department ∩ Team ∩ Project ∩ User ∩ Agent ∩ Tool ∩ Device with explicit-deny precedence, and every route uses it (PRD §61, §82)
-- [ ] **ORG-04**: Admin console provides CRUD pages for users, roles, departments, teams, projects and memberships (PRD §81 minimal)
-- [ ] **ORG-05**: Every sensitive action (auth, membership, permission change, sharing, message edit/delete, session control, approval, artifact access) writes an audit event in the same transaction with actor, agent, user, device, resource, action, result, timestamp, organization and session (PRD §84)
-- [ ] **ORG-06**: User can view and edit their profile (display name, avatar, status) and see other members' profiles
+- [x] **ORG-01**: Admin can create and manage the hierarchy Organization → Department → Team → Project, including moving units (PRD §7)
+- [x] **ORG-02**: Admin can assign users to units with one of the four roles: Standard User, Developer, Team Lead/Manager, Organization Admin (PRD §6)
+- [x] **ORG-03**: A single `resolveEffectivePermissions` function computes permissions as the intersection Org ∩ Department ∩ Team ∩ Project ∩ User ∩ Agent ∩ Tool ∩ Device with explicit-deny precedence, and every route uses it (PRD §61, §82)
+- [x] **ORG-04**: Admin console provides CRUD pages for users, roles, departments, teams, projects and memberships (PRD §81 minimal)
+- [x] **ORG-05**: Every sensitive action (auth, membership, permission change, sharing, message edit/delete, session control, approval, artifact access) writes an audit event in the same transaction with actor, agent, user, device, resource, action, result, timestamp, organization and session (PRD §84)
+- [x] **ORG-06**: User can view and edit their profile (display name, avatar, status) and see other members' profiles
 
 ### Realtime (RT)
 
@@ -302,15 +302,15 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | AUTH-01 | Phase 1 | Delivered | `identity.int.test.ts` "setup: bad token 401, success sets session, second redemption 409"; `setup.spec.ts` |
 | AUTH-02 | Phase 1 | Delivered | `identity.int.test.ts` "invite → public lookup → accept → member…"; `smoke.spec.ts` session survives reload (invite page has no E2E) |
 | AUTH-03 | Phase 1 | Delivered | `identity.int.test.ts` (non-admin cannot invite; revoke); Settings › Members copy link. Team Lead invites follow ORG-02 (Phase 2) |
-| AUTH-04 | Phase 2 | Pending | No password reset |
-| AUTH-05 | Phase 2 | Partial | Messages and audit rows carry client kind + session id; no session list or revoke |
-| AUTH-06 | Phase 2 | Pending | Cookie sessions and hashed bearer tokens; no JWT/JWKS |
-| ORG-01 | Phase 2 | Pending | No hierarchy |
-| ORG-02 | Phase 2 | Partial | Org roles owner/admin/member set at invite; not the four PRD roles, no unit assignment |
-| ORG-03 | Phase 2 | Pending | Ad-hoc role and membership checks per route |
-| ORG-04 | Phase 2 | Partial | Settings › Members lists members and manages invitations; no roles/units/memberships CRUD |
-| ORG-05 | Phase 2 | Partial | Same-transaction audit for every MVP 0 action (SLICE-06); failed sign-in not audited; later phases audit what they add |
-| ORG-06 | Phase 2 | Pending | No profile editing |
+| AUTH-04 | Phase 2 | Delivered | identity/password.int.test.ts (admin link + SMTP memory), Mailpit manual check, e2e account.spec |
+| AUTH-05 | Phase 2 | Delivered | identity/sessions.int.test.ts (list/revoke/others, client kind+label), e2e account.spec |
+| AUTH-06 | Phase 2 | Delivered | identity/jwt.int.test.ts, tokens.int.test.ts, device-link-auth.int.test.ts (device JWT; legacy token behind flag until Phase 8), ADR-0008 |
+| ORG-01 | Phase 2 | Delivered | organization/units.int.test.ts + units.test.ts (fast-check moves, advisory lock), e2e admin-org.spec |
+| ORG-02 | Phase 2 | Delivered | organization/members.int.test.ts (4 roles, last-admin guard), invitations.int.test.ts (lead ceiling), unit leads in units.int.test.ts |
+| ORG-03 | Phase 2 | Delivered | permissions/resolve.test.ts (role matrix + 8 fast-check properties), authz.int.test.ts (98 routes, strict mode), guard.test.ts, ADR-0007 |
+| ORG-04 | Phase 2 | Delivered | e2e admin-members.spec + admin-org.spec (Settings › Members / Organization CRUD) |
+| ORG-05 | Phase 2 | Delivered | same-tx audit across identity/org/units/rules/members; failed sign-in + sign-out audited (sessions.int.test.ts); denials audited |
+| ORG-06 | Phase 2 | Delivered | identity/profile.int.test.ts (member.updated emitted), e2e account.spec (name, emoji avatar, status visible across the app) |
 | RT-01 | Phase 3 | Partial | One WS with deny-by-default topic authorizers (SLICE-07); not re-evaluated on membership change |
 | RT-02 | Phase 1 | Delivered | `identity.int.test.ts` WS replay exactly once; realtime-client "requests replay on gap and resumes after reconnect" |
 | RT-03 | Phase 3 | Pending | No latency test |

@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import type { IncomingMessage } from "node:http";
+import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,7 +16,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type WebSocket, WebSocketServer } from "ws";
 import { controlRequest } from "./control-socket.js";
 import { Daemon } from "./daemon.js";
-import { silentLogger } from "./logger.js";
+import { type Logger, silentLogger } from "./logger.js";
 import type { AgentRuntime, EventSink, RuntimeCapabilities, StartSessionOptions } from "./runtime.js";
 
 // Fake credential assembled at runtime so secret scanners do not flag the test.
@@ -72,13 +72,36 @@ class FakeRuntime implements AgentRuntime {
   }
 }
 
+type TokenAnswer = { status: number; body?: unknown };
+
+/**
+ * The API as the daemon sees it: `POST /api/v1/devices/token` (device token → device JWT) and the Device
+ * Link WebSocket on the same HTTP server.
+ */
 class FakeServer {
+  readonly http: Server;
   readonly wss: WebSocketServer;
   readonly connections: Array<{ ws: WebSocket; req: IncomingMessage; frames: DeviceToServerFrame[] }> = [];
+  /** Headers of every token exchange request, in order. */
+  readonly exchanges: IncomingHttpHeaders[] = [];
+  /** Every device JWT handed out, in order. */
+  readonly issued: string[] = [];
+  /** How the exchange answers; default: a fresh 10-minute JWT-shaped token. */
+  tokenAnswer: () => TokenAnswer = () => this.issue(600_000);
   private listeners: Array<() => void> = [];
 
   constructor() {
-    this.wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+    this.http = createServer((req, res) => {
+      if (req.method !== "POST" || req.url !== "/api/v1/devices/token") {
+        res.writeHead(404).end();
+        return;
+      }
+      this.exchanges.push(req.headers);
+      const answer = this.tokenAnswer();
+      res.writeHead(answer.status, { "content-type": "application/json" });
+      res.end(answer.body === undefined ? "" : JSON.stringify(answer.body));
+    });
+    this.wss = new WebSocketServer({ server: this.http });
     this.wss.on("connection", (ws, req) => {
       const conn = { ws, req, frames: [] as DeviceToServerFrame[] };
       this.connections.push(conn);
@@ -89,8 +112,17 @@ class FakeServer {
       for (const l of this.listeners) l();
     });
   }
+  listen(): Promise<void> {
+    return new Promise((resolve) => this.http.listen(0, "127.0.0.1", () => resolve()));
+  }
   get url(): string {
-    return `http://127.0.0.1:${(this.wss.address() as AddressInfo).port}`;
+    return `http://127.0.0.1:${(this.http.address() as AddressInfo).port}`;
+  }
+  /** A JWT-shaped device token valid for `ttlMs`. */
+  issue(ttlMs: number): TokenAnswer {
+    const token = `eyJhbGciOiJFZERTQSJ9.device-${this.issued.length + 1}.signature`;
+    this.issued.push(token);
+    return { status: 200, body: { token, expiresAt: new Date(Date.now() + ttlMs).toISOString() } };
   }
   get last() {
     const c = this.connections.at(-1);
@@ -131,9 +163,11 @@ class FakeServer {
   send(cmd: Omit<CommandFrame, "type">): void {
     this.last.ws.send(JSON.stringify({ type: "command", ...cmd }));
   }
-  close(): Promise<void> {
+  async close(): Promise<void> {
     for (const c of this.connections) c.ws.terminate();
-    return new Promise((r) => this.wss.close(() => r()));
+    await new Promise<void>((r) => this.wss.close(() => r()));
+    this.http.closeAllConnections();
+    await new Promise<void>((r) => this.http.close(() => r()));
   }
 }
 
@@ -151,7 +185,7 @@ beforeEach(async () => {
   execFileSync("git", ["init", "-q", "-b", "main"], { cwd: project });
   writeFileSync(join(project, "README.md"), "hello\n");
   server = new FakeServer();
-  await new Promise<void>((r) => server.wss.once("listening", () => r()));
+  await server.listen();
   runtime = new FakeRuntime();
   daemon = await Daemon.create({
     home,
@@ -180,11 +214,12 @@ async function addProject(): Promise<string> {
 }
 
 describe("Daemon <-> Device Link", () => {
-  it("handshakes with Bearer token, hello and projects.sync (no absolute paths)", async () => {
+  it("handshakes with a device JWT exchanged for the device token, hello and projects.sync (no absolute paths)", async () => {
     await daemon.start();
     const localId = await addProject();
     await server.frame("hello");
-    expect(server.last.req.headers.authorization).toBe("Bearer device-token-123");
+    expect(server.exchanges.map((h) => h.authorization)).toEqual(["Bearer device-token-123"]);
+    expect(server.last.req.headers.authorization).toBe(`Bearer ${server.issued[0]}`);
     const hello = await server.frame("hello");
     expect(hello).toMatchObject({
       protocolVersion: 1,
@@ -324,6 +359,106 @@ describe("Daemon <-> Device Link", () => {
     );
     const types = server.last.frames.map((f) => (f.type === "event" ? f.event.type : f.type));
     expect(types.slice(0, 4)).toEqual(["hello", "projects.sync", "tool.started", "tool.completed"]);
+  });
+});
+
+/** A logger that keeps every line (message + meta) for assertions. */
+function captureLogger(): Logger & { lines: string[] } {
+  const lines: string[] = [];
+  const log = (level: string) => (msg: string, meta?: Record<string, unknown>) =>
+    lines.push(`${level} ${msg} ${meta ? JSON.stringify(meta) : ""}`);
+  return { lines, debug: log("debug"), info: log("info"), warn: log("warn"), error: log("error") };
+}
+
+/** Replace the default daemon with one that logs into `logger` (no control socket). */
+async function daemonWith(logger: Logger): Promise<Daemon> {
+  await daemon.stop();
+  daemon = await Daemon.create({
+    home,
+    env: {},
+    token: "device-token-123",
+    config: { serverUrl: server.url },
+    runtimes: [runtime],
+    logger,
+    controlSocket: false,
+    link: { backoffMinMs: 20, backoffMaxMs: 50, heartbeatMs: 60_000 },
+  });
+  return daemon;
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+describe("Device JWT exchange", () => {
+  it("reuses a cached device JWT on reconnect while more than 60 s remain", async () => {
+    await daemon.start();
+    await server.frame("hello");
+    server.last.ws.terminate();
+    await server.waitFor(() => (server.connections.length === 2 ? true : undefined));
+    await server.waitFor(() => (server.last.frames.some((f) => f.type === "hello") ? true : undefined));
+    expect(server.exchanges).toHaveLength(1);
+    expect(server.connections.map((c) => c.req.headers.authorization)).toEqual([
+      `Bearer ${server.issued[0]}`,
+      `Bearer ${server.issued[0]}`,
+    ]);
+  });
+
+  it("fetches a fresh device JWT on reconnect when the cached one has less than 60 s left", async () => {
+    server.tokenAnswer = () => server.issue(30_000);
+    await daemon.start();
+    await server.frame("hello");
+    server.last.ws.terminate();
+    await server.waitFor(() => (server.connections.length === 2 ? true : undefined));
+    expect(server.exchanges).toHaveLength(2);
+    expect(server.last.req.headers.authorization).toBe(`Bearer ${server.issued[1]}`);
+  });
+
+  it("falls back to the raw device token when the server has no exchange (404, older server)", async () => {
+    const logger = captureLogger();
+    await daemonWith(logger);
+    server.tokenAnswer = () => ({ status: 404 });
+    await daemon.start();
+    await server.frame("hello");
+    expect(server.last.req.headers.authorization).toBe("Bearer device-token-123");
+    expect(logger.lines.join("\n")).toContain("server has no device token exchange");
+  });
+
+  it("a refused device token is logged and retried with backoff, never in a tight loop", async () => {
+    const logger = captureLogger();
+    await daemonWith(logger);
+    server.tokenAnswer = () => ({ status: 401, body: { error: { code: "invalid_device_token" } } });
+    await daemon.start();
+    await sleep(400);
+    expect(server.connections).toHaveLength(0);
+    // Backoff 20–50 ms in this test: a handful of attempts in 400 ms, not hundreds.
+    expect(server.exchanges.length).toBeGreaterThanOrEqual(2);
+    expect(server.exchanges.length).toBeLessThanOrEqual(25);
+    const text = logger.lines.join("\n");
+    expect(text).toContain("device token rejected by server");
+    expect(text).not.toContain("device-token-123");
+    expect(daemon.isConnected).toBe(false);
+  });
+
+  it("asks for a fresh JWT after the Device Link refused the cached one", async () => {
+    let refuse = true;
+    server.wss.options.verifyClient = (_info: unknown, done: (ok: boolean, code?: number) => void) => {
+      const ok = !refuse;
+      refuse = false;
+      done(ok, 401);
+    };
+    await daemon.start();
+    await server.frame("hello");
+    expect(server.exchanges).toHaveLength(2);
+    expect(server.last.req.headers.authorization).toBe(`Bearer ${server.issued[1]}`);
+  });
+
+  it("never logs a token", async () => {
+    const logger = captureLogger();
+    await daemonWith(logger);
+    await daemon.start();
+    await server.frame("hello");
+    const text = logger.lines.join("\n");
+    expect(text).not.toContain("device-token-123");
+    expect(text).not.toContain(server.issued[0]);
   });
 });
 

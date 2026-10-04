@@ -1,4 +1,11 @@
-import { ClientFrame, type DurableFrame, type EphemeralFrame, ServerFrame } from "@ocw/contracts";
+import {
+  ClientFrame,
+  type DurableFrame,
+  type EphemeralFrame,
+  ServerFrame,
+  WS_AUTH_PROTOCOL_PREFIX,
+  WS_PROTOCOL,
+} from "@ocw/contracts";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import { backoffDelay } from "./backoff";
 
@@ -23,7 +30,7 @@ export interface WebSocketLike {
   onerror: ((ev: unknown) => void) | null;
   onmessage: ((ev: { data: unknown }) => void) | null;
 }
-export type WebSocketCtor = new (url: string) => WebSocketLike;
+export type WebSocketCtor = new (url: string, protocols?: string | string[]) => WebSocketLike;
 
 export interface RealtimeClientOptions {
   url: string;
@@ -34,6 +41,12 @@ export interface RealtimeClientOptions {
   backoffMaxMs?: number;
   /** Called for `err` frames (e.g. forbidden topic). */
   onError?: (code: string, topic?: string, message?: string) => void;
+  /**
+   * Short-lived access JWT source, awaited before every (re)connect. The token travels as the
+   * `ocw.auth.<jwt>` Sec-WebSocket-Protocol entry (never in the URL). A rejection carrying `status: 401`
+   * means signed out and stops the client; any other rejection counts as a failed attempt (backoff).
+   */
+  getToken?: (opts: { force: boolean }) => Promise<string>;
 }
 
 interface TopicState {
@@ -54,14 +67,18 @@ const OPEN = 1;
  */
 export class RealtimeClient {
   readonly status: StoreApi<ConnectionState>;
-  private readonly opts: Required<Omit<RealtimeClientOptions, "onError" | "WebSocket">> &
-    Pick<RealtimeClientOptions, "onError">;
+  private readonly opts: Required<Omit<RealtimeClientOptions, "onError" | "WebSocket" | "getToken">> &
+    Pick<RealtimeClientOptions, "onError" | "getToken">;
   private readonly Ctor: WebSocketCtor;
   private ws: WebSocketLike | null = null;
   private topics = new Map<string, TopicState>();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private stopped = true;
+  /** Bumped on every open() and close(): a token that resolves for an older attempt is ignored. */
+  private generation = 0;
+  /** One forced token refresh per 4401; re-armed by a successful subscribe. */
+  private authRetried = false;
 
   constructor(options: RealtimeClientOptions) {
     const Ctor = options.WebSocket ?? (globalThis as { WebSocket?: WebSocketCtor }).WebSocket;
@@ -73,6 +90,7 @@ export class RealtimeClient {
       backoffBaseMs: options.backoffBaseMs ?? 1000,
       backoffMaxMs: options.backoffMaxMs ?? 30_000,
       onError: options.onError,
+      getToken: options.getToken,
     };
     this.status = createStore<ConnectionState>(() => ({ status: "idle", attempt: 0, lastError: null }));
   }
@@ -85,6 +103,7 @@ export class RealtimeClient {
 
   close(): void {
     this.stopped = true;
+    this.generation++;
     this.clearTimers();
     const ws = this.ws;
     this.ws = null;
@@ -149,12 +168,39 @@ export class RealtimeClient {
 
   // ---- internals ----
 
-  private open(): void {
+  /** `force` bypasses the token cache (after the server closed the socket with 4401). */
+  private open({ force }: { force: boolean } = { force: false }): void {
     const prev = this.status.getState();
     this.status.setState({ status: prev.attempt > 0 ? "reconnecting" : "connecting" });
+    const generation = ++this.generation;
+    const getToken = this.opts.getToken;
+    if (!getToken) {
+      this.construct();
+      return;
+    }
+    getToken({ force }).then(
+      (token) => {
+        if (this.stopped || generation !== this.generation) return;
+        this.construct([WS_PROTOCOL, `${WS_AUTH_PROTOCOL_PREFIX}${token}`]);
+      },
+      (err: unknown) => {
+        if (this.stopped || generation !== this.generation) return;
+        if ((err as { status?: unknown } | null)?.status === 401) {
+          // Signed out: there is no session to fetch a token for.
+          this.stopped = true;
+          this.status.setState({ status: "closed", lastError: "unauthorized" });
+          return;
+        }
+        this.status.setState({ lastError: "token unavailable" });
+        this.scheduleReconnect();
+      },
+    );
+  }
+
+  private construct(protocols?: string[]): void {
     let ws: WebSocketLike;
     try {
-      ws = new this.Ctor(this.opts.url);
+      ws = protocols ? new this.Ctor(this.opts.url, protocols) : new this.Ctor(this.opts.url);
     } catch (err) {
       this.status.setState({ lastError: String(err) });
       this.scheduleReconnect();
@@ -179,7 +225,14 @@ export class RealtimeClient {
         t.replaying = false;
       }
       if (this.stopped) return;
-      // 4401 = session revoked/unauthenticated: stop and let the app re-authenticate.
+      // 4401 = session revoked or token rejected. With a token source, refresh it once and reconnect: a
+      // revoked session then fails the refresh with 401 and stops; a second 4401 before any successful
+      // subscribe stops too. Without one, stop and let the app re-authenticate.
+      if (ev.code === 4401 && this.opts.getToken && !this.authRetried) {
+        this.authRetried = true;
+        this.open({ force: true });
+        return;
+      }
       if (ev.code === 4401 || ev.code === 1008) {
         this.stopped = true;
         this.status.setState({ status: "closed", lastError: ev.reason ?? "unauthorized" });
@@ -253,6 +306,7 @@ export class RealtimeClient {
         return;
       }
       case "subscribed": {
+        this.authRetried = false;
         const s = this.topics.get(parsed.topic);
         if (s) {
           s.subscribed = true;

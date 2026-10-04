@@ -1,11 +1,46 @@
 import * as dbSchema from "@ocw/db";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { organization } from "better-auth/plugins";
+import { jwt, organization } from "better-auth/plugins";
+import { asc, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { Env } from "../../config/env";
+import { createMailer, type MailMessage } from "../../lib/mailer";
+import { clientFromRequest } from "./client-kind";
 
-const INVITATION_TTL_SECONDS = 7 * 24 * 60 * 60;
+export const INVITATION_TTL_SECONDS = 7 * 24 * 60 * 60;
+/** Access JWT lifetime (AUTH-06). Revoked-session flags in Redis must outlive it (realtime/service.ts). */
+export const ACCESS_TOKEN_TTL_SECONDS = 10 * 60;
+/** Self-service reset e-mails expire after one hour (admin-issued links live 24 h, identity/password.ts). */
+export const RESET_EMAIL_TTL_SECONDS = 60 * 60;
+
+const escapeHtml = (v: string) =>
+  v.replace(
+    /[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] ?? c,
+  );
+
+/** The reset e-mail. The link points at the web app (better-auth's own URL is an unrouted API path). */
+export function resetPasswordEmail(
+  env: Env,
+  to: { email: string; name: string },
+  token: string,
+): MailMessage {
+  const link = `${env.OCW_PUBLIC_WEB_URL}/reset-password?token=${encodeURIComponent(token)}`;
+  const greeting = to.name ? `Hi ${to.name},` : "Hi,";
+  return {
+    to: to.email,
+    subject: "Reset your password",
+    text: `${greeting}\n\nSomeone asked to reset the password of your Open Collaborative AI Workspace account. Open this link within one hour to choose a new password:\n\n${link}\n\nIf it was not you, ignore this e-mail: your password stays the same.\n`,
+    html: `<p>${escapeHtml(greeting)}</p><p>Someone asked to reset the password of your Open Collaborative AI Workspace account. Open this link within one hour to choose a new password:</p><p><a href="${escapeHtml(link)}">Reset your password</a></p><p>If it was not you, ignore this e-mail: your password stays the same.</p>`,
+  };
+}
+
+/** The parts of better-auth's hook context we read: the endpoint context (`headers`) or its `request`. */
+interface HookContext {
+  headers?: Headers | null;
+  request?: { headers?: Headers | null } | null;
+}
 
 /**
  * Internal better-auth plugin: exposes our audit table, the org_members projection and the setup singleton
@@ -39,6 +74,9 @@ const ocwInternal = () =>
           email: { type: "string", required: false },
           avatarUrl: { type: "string", required: false },
           role: { type: "string", required: true },
+          statusEmoji: { type: "string", required: false },
+          statusText: { type: "string", required: false },
+          deactivatedAt: { type: "date", required: false },
         },
       },
       instanceSetup: {
@@ -51,6 +89,7 @@ const ocwInternal = () =>
   }) as const;
 
 export function createAuth(env: Env, authDb: NodePgDatabase) {
+  const mailer = createMailer(env);
   return betterAuth({
     appName: "Open Collaborative AI Workspace",
     baseURL: env.OCW_PUBLIC_API_URL,
@@ -72,18 +111,102 @@ export function createAuth(env: Env, authDb: NodePgDatabase) {
         auditEvent: dbSchema.auditEvents,
         orgMember: dbSchema.orgMembers,
         instanceSetup: dbSchema.instanceSetup,
+        jwks: dbSchema.jwks,
       },
     }),
-    emailAndPassword: { enabled: true, minPasswordLength: 12, maxPasswordLength: 256 },
-    session: { expiresIn: 60 * 60 * 24 * 7, updateAge: 60 * 60 * 24 },
+    emailAndPassword: {
+      enabled: true,
+      minPasswordLength: 12,
+      maxPasswordLength: 256,
+      // AUTH-04: completing a reset ends every session of that user (inside the reset transaction).
+      revokeSessionsOnPasswordReset: true,
+      resetPasswordTokenExpiresIn: RESET_EMAIL_TTL_SECONDS,
+      // Only with SMTP configured; otherwise admins issue reset links (identity/password.ts).
+      ...(mailer
+        ? {
+            sendResetPassword: async ({
+              user,
+              token,
+            }: {
+              user: { email: string; name: string };
+              token: string;
+            }) => mailer.send(resetPasswordEmail(env, user, token)),
+          }
+        : {}),
+    },
+    session: {
+      expiresIn: 60 * 60 * 24 * 7,
+      updateAge: 60 * 60 * 24,
+      // AUTH-05: which client created the session; derived server-side at creation, never client input.
+      additionalFields: {
+        clientKind: { type: "string", required: false, input: false },
+        clientLabel: { type: "string", required: false, input: false },
+      },
+    },
+    databaseHooks: {
+      session: {
+        create: {
+          before: async (session, context) => {
+            const ctx = context as HookContext | null;
+            const headers = ctx?.request?.headers ?? ctx?.headers ?? null;
+            const client = clientFromRequest(headers ?? { "user-agent": session.userAgent ?? undefined });
+            const [membership] = await authDb
+              .select({
+                organizationId: dbSchema.orgMembers.organizationId,
+                deactivatedAt: dbSchema.orgMembers.deactivatedAt,
+              })
+              .from(dbSchema.orgMembers)
+              .where(eq(dbSchema.orgMembers.userId, session.userId))
+              .orderBy(asc(dbSchema.orgMembers.joinedAt))
+              .limit(1);
+            // A deactivated member cannot sign in (T-02-03-04): better-auth answers 401.
+            if (membership?.deactivatedAt) return false;
+            // During setup and invitation acceptance the membership row does not exist yet (and lives in an
+            // uncommitted transaction); those flows set activeOrganizationId themselves.
+            return {
+              data: {
+                ...session,
+                clientKind: client.kind,
+                clientLabel: client.label,
+                ...(membership ? { activeOrganizationId: membership.organizationId } : {}),
+              },
+            };
+          },
+        },
+      },
+    },
     advanced: {
       cookiePrefix: "ocw",
       database: { generateId: "uuid" },
     },
     rateLimit: { enabled: false }, // rate limiting is done by @fastify/rate-limit on the mounted routes
     plugins: [
-      organization({ invitationExpiresIn: INVITATION_TTL_SECONDS, creatorRole: "owner" }),
+      // The plugin stores organizations, members (existence only, role "member") and invitation rows; it is
+      // NOT an authorization authority: roles live in app.org_members and invitations are written by
+      // identity/invitations.ts through the adapter (Phase 2, research R12).
+      organization({ invitationExpiresIn: INVITATION_TTL_SECONDS, creatorRole: "member" }),
       ocwInternal(),
+      // AUTH-06: short-lived EdDSA access JWTs (GET /api/auth/token) verifiable against GET /api/auth/jwks.
+      jwt({
+        jwks: {
+          keyPairConfig: { alg: "EdDSA", crv: "Ed25519" },
+          rotationInterval: 60 * 60 * 24 * 30,
+          gracePeriod: 60 * 60 * 24 * 7,
+        },
+        jwt: {
+          issuer: env.OCW_PUBLIC_API_URL,
+          audience: env.OCW_PUBLIC_API_URL,
+          expirationTime: "10m",
+          // The default payload is the whole user object (Pitfall 3): keep the claims minimal.
+          definePayload: ({ session }) => ({
+            sid: session.id,
+            org: session.activeOrganizationId,
+            ck: session.clientKind ?? "web",
+          }),
+        },
+        // Otherwise every get-session signs a JWT and exposes it in `set-auth-jwt` (T-02-03-03).
+        disableSettingJwtHeader: true,
+      }),
     ],
   });
 }

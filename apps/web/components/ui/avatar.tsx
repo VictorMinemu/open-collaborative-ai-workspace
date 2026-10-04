@@ -48,6 +48,15 @@ export function toneFor(seed: string): string {
   return TONES[h % TONES.length] ?? TONES[0]!;
 }
 
+/** Avatar values are an image URL or an emoji (ORG-06); anything that is not a URL renders as text. */
+export function isImageSrc(src: string): boolean {
+  return /^(https?:)?\/\//.test(src) || src.startsWith("/") || src.startsWith("data:");
+}
+
+/**
+ * A person: their photo (fetched without a referrer, so third-party hosts cannot track who views it), their
+ * emoji avatar, or coloured initials.
+ */
 export function UserAvatar({
   name,
   src,
@@ -55,13 +64,25 @@ export function UserAvatar({
   className,
 }: {
   name: string;
-  src?: string | null;
-  seed?: string;
+  src?: string | null | undefined;
+  seed?: string | null | undefined;
   className?: string;
 }) {
+  if (src && !isImageSrc(src)) {
+    return (
+      <Avatar
+        className={cn("@container items-center justify-center bg-muted", className)}
+        data-avatar="emoji"
+      >
+        <span aria-hidden className="text-[60cqw] leading-none">
+          {src}
+        </span>
+      </Avatar>
+    );
+  }
   return (
     <Avatar className={className}>
-      {src ? <AvatarImage src={src} alt="" /> : null}
+      {src ? <AvatarImage src={src} alt="" referrerPolicy="no-referrer" /> : null}
       <AvatarFallback className={toneFor(seed ?? name)}>{initials(name)}</AvatarFallback>
     </Avatar>
   );

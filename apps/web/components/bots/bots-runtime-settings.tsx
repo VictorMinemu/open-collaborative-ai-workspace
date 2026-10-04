@@ -20,31 +20,31 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { useCopy } from "@/hooks/use-copy";
 import { errorMessage } from "@/lib/api";
-import {
-  useAgents,
-  useBotsRealtime,
-  useCellStatus,
-  useIsAdmin,
-  useRotateCellToken,
-} from "@/lib/bots-queries";
+import { useAgents, useBotsRealtime, useCellStatus, useRotateCellToken } from "@/lib/bots-queries";
+import { useCan, usePermissions } from "@/lib/permissions";
 import { cn, formatDate, relativeTime } from "@/lib/utils";
 
 export function BotsRuntimeSettings() {
   useBotsRealtime();
-  const isAdmin = useIsAdmin();
-  const cell = useCellStatus(isAdmin);
+  const permissions = usePermissions();
+  const canManage = useCan("cell.manage");
+  const cell = useCellStatus(canManage);
   const agents = useAgents();
   const rotate = useRotateCellToken();
   const [confirming, setConfirming] = useState(false);
   const [token, setToken] = useState<string | null>(null);
   const { copy, copied } = useCopy();
 
-  if (!isAdmin) {
+  if (!canManage) {
     return (
       <Shell>
-        <div className="rounded-xl border border-dashed px-4 py-10 text-center text-muted-foreground text-sm">
-          Only workspace admins can manage the bots runtime.
-        </div>
+        {permissions.isPending ? (
+          <Skeleton className="h-36 rounded-2xl" />
+        ) : (
+          <div className="rounded-xl border border-dashed px-4 py-10 text-center text-muted-foreground text-sm">
+            Only workspace admins can manage the bots runtime.
+          </div>
+        )}
       </Shell>
     );
   }

@@ -1,6 +1,12 @@
+import websocket from "@fastify/websocket";
+import { WS_AUTH_PROTOCOL_PREFIX, WS_PROTOCOL } from "@ocw/contracts";
+import Fastify from "fastify";
+import { decodeJwt } from "jose";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
+import type { App } from "./core";
+import { createRealtimeModule } from "./modules/realtime";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack, WEB_ORIGIN } from "./testing";
 
 let stack: TestStack;
@@ -15,6 +21,27 @@ afterAll(async () => {
   await su?.end();
   await stack?.stop();
 });
+
+/** Open an authenticated /ws socket; `closed` resolves with the close code (rejects after 3 s). */
+async function openSocket(baseUrl: string, token: string) {
+  const socket = new WebSocket(
+    `${baseUrl.replace("http", "ws")}/ws`,
+    [WS_PROTOCOL, `${WS_AUTH_PROTOCOL_PREFIX}${token}`],
+    {
+      headers: { origin: WEB_ORIGIN },
+    },
+  );
+  const closed = new Promise<{ code: number }>((resolve, reject) => {
+    socket.on("close", (code) => resolve({ code }));
+    setTimeout(() => reject(new Error("socket did not close within 3 s")), 3000).unref();
+  });
+  closed.catch(() => {});
+  await new Promise((resolve, reject) => {
+    socket.once("open", resolve);
+    socket.once("error", reject);
+  });
+  return { socket, closed };
+}
 
 const count = async (table: string) =>
   Number((await su.query(`select count(*)::int as n from ${table}`)).rows[0].n);
@@ -70,7 +97,7 @@ describe("identity + platform core", () => {
     expect(ok.status).toBe(200);
     expect(ok.body).toMatchObject({
       user: { email: ADMIN.email },
-      organization: { name: "Autofy Labs", role: "owner" },
+      organization: { name: "Autofy Labs", role: "admin" },
     });
     const me = await c.request("GET", "/api/v1/me");
     expect(me.status).toBe(200);
@@ -99,7 +126,7 @@ describe("identity + platform core", () => {
     );
   });
 
-  it("invite → public lookup → accept → member; members list; non-admin cannot invite; revoke", async () => {
+  it("invite → public lookup → accept → developer; members list; non-admin cannot invite; revoke", async () => {
     const admin = new TestClient(stack.baseUrl);
     expect(
       (
@@ -109,13 +136,25 @@ describe("identity + platform core", () => {
         })
       ).status,
     ).toBe(200);
-    expect((await admin.request("GET", "/api/v1/me")).status).toBe(200);
+    const adminMe = await admin.request("GET", "/api/v1/me");
+    expect(adminMe.status).toBe(200);
+    expect(adminMe.body).toMatchObject({ organization: { role: "admin" } });
+
+    // Legacy role names are rejected by the contract.
+    const LEGACY_MVP0_ROLE = "member";
+    const legacy = await admin.request("POST", "/api/v1/invitations", {
+      email: "legacy@example.test",
+      role: LEGACY_MVP0_ROLE,
+    });
+    expect(legacy.status).toBe(400);
+    expect(legacy.body).toMatchObject({ error: { code: "validation_error" } });
 
     const inv = await admin.request("POST", "/api/v1/invitations", {
-      email: "alex@example.test",
-      role: "member",
+      email: "Alex@Example.test",
+      role: "developer",
     });
     expect(inv.status).toBe(200);
+    expect(inv.body).toMatchObject({ email: "alex@example.test", role: "developer", status: "pending" });
     const id = inv.body!.id as string;
     expect(inv.body!.link).toBe(`${WEB_ORIGIN}/invite/${id}`);
 
@@ -124,6 +163,7 @@ describe("identity + platform core", () => {
     expect(pub.body).toMatchObject({
       email: "alex@example.test",
       organizationName: "Autofy Labs",
+      role: "developer",
       status: "pending",
     });
 
@@ -134,8 +174,14 @@ describe("identity + platform core", () => {
     expect(accepted.status).toBe(200);
     expect(accepted.body).toMatchObject({
       user: { email: "alex@example.test" },
-      organization: { role: "member" },
+      organization: { role: "developer" },
     });
+    expect((await anon.request("GET", "/api/v1/me")).body).toMatchObject({
+      organization: { role: "developer" },
+    });
+    // better-auth's member row is existence-only; the role lives in app.org_members.
+    const authRoles = (await su.query("select distinct role from auth.member")).rows.map((r) => r.role);
+    expect(authRoles).toEqual(["member"]);
     expect(
       (
         await anon.request("POST", `/api/v1/invitations/${id}/accept`, {
@@ -146,25 +192,69 @@ describe("identity + platform core", () => {
     ).toBe(409);
 
     const members = await anon.request("GET", "/api/v1/members");
-    expect((members.body!.members as unknown[]).length).toBe(2);
-    expect((await anon.request("POST", "/api/v1/invitations", { email: "eve@example.test" })).status).toBe(
-      403,
-    );
+    const list = members.body!.members as Array<Record<string, unknown>>;
+    expect(list).toHaveLength(2);
+    for (const m of list) {
+      expect(m).toMatchObject({ status: "active", statusEmoji: null, statusText: null });
+    }
+    expect(list.map((m) => m.role).sort()).toEqual(["admin", "developer"]);
 
-    const inv2 = await admin.request("POST", "/api/v1/invitations", {
-      email: "sam@example.test",
-      role: "member",
+    // A developer cannot invite.
+    expect(
+      (await anon.request("POST", "/api/v1/invitations", { email: "eve@example.test", role: "standard" }))
+        .status,
+    ).toBe(403);
+
+    // Inviting an existing member's e-mail → 409 already_member.
+    const dup = await admin.request("POST", "/api/v1/invitations", {
+      email: "alex@example.test",
+      role: "lead",
     });
-    expect((await admin.request("GET", "/api/v1/invitations")).body!.invitations).toHaveLength(1);
-    expect((await admin.request("DELETE", `/api/v1/invitations/${inv2.body!.id}`)).status).toBe(200);
+    expect(dup.status).toBe(409);
+    expect(dup.body).toMatchObject({ error: { code: "already_member" } });
+
+    // Admins can invite with every role; re-inviting a pending e-mail refreshes that invitation.
+    const lead = await admin.request("POST", "/api/v1/invitations", {
+      email: "lee@example.test",
+      role: "lead",
+    });
+    expect(lead.body).toMatchObject({ role: "lead" });
+    const std = await admin.request("POST", "/api/v1/invitations", {
+      email: "sam@example.test",
+      role: "standard",
+    });
+    expect(std.status).toBe(200);
+    expect(std.body).toMatchObject({ role: "standard" });
+    const again = await admin.request("POST", "/api/v1/invitations", {
+      email: "sam@example.test",
+      role: "developer",
+    });
+    expect(again.status).toBe(200);
+    expect(again.body).toMatchObject({ id: std.body!.id, role: "developer" });
+    expect(new Date(again.body!.expiresAt as string).getTime()).toBeGreaterThanOrEqual(
+      new Date(std.body!.expiresAt as string).getTime(),
+    );
+    const pending = (await admin.request("GET", "/api/v1/invitations")).body!.invitations as Array<{
+      email: string;
+    }>;
+    expect(pending.map((p) => p.email).sort()).toEqual(["lee@example.test", "sam@example.test"]);
+
+    // Revoke → canceled; accept then answers 409; revoking twice → 409 invitation_not_pending.
+    expect((await admin.request("DELETE", `/api/v1/invitations/${std.body!.id}`)).status).toBe(200);
+    const row = await su.query("select status from auth.invitation where id = $1", [std.body!.id]);
+    expect(row.rows[0].status).toBe("canceled");
     expect(
       (
-        await anon.request("POST", `/api/v1/invitations/${inv2.body!.id}/accept`, {
+        await anon.request("POST", `/api/v1/invitations/${std.body!.id}/accept`, {
           name: "Sam",
           password: "sams-long-password",
         })
       ).status,
     ).toBe(409);
+    const twice = await admin.request("DELETE", `/api/v1/invitations/${std.body!.id}`);
+    expect(twice.status).toBe(409);
+    expect(twice.body).toMatchObject({ error: { code: "invitation_not_pending" } });
+    expect((await anon.request("DELETE", `/api/v1/invitations/${lead.body!.id}`)).status).toBe(403);
 
     const actions = (await su.query("select action from app.audit_events")).rows.map((r) => r.action);
     expect(actions).toEqual(
@@ -176,11 +266,16 @@ describe("identity + platform core", () => {
         "user.signed_in",
       ]),
     );
+    const created = await su.query(
+      "select metadata from app.audit_events where action = 'invitation.created' and resource_id = $1 order by occurred_at",
+      [std.body!.id],
+    );
+    expect(created.rows.map((r) => r.metadata.role)).toEqual(["standard", "developer"]);
     expect((await admin.request("POST", "/api/auth/sign-out", {})).status).toBe(200);
     expect((await admin.request("GET", "/api/v1/me")).status).toBe(401);
   });
 
-  it("WS: rejects foreign origin and anonymous; subscribe + live + replay exactly once", async () => {
+  it("WS: JWT subprotocol required (origin 403, none/cookie/tampered 401); subscribe + live + replay exactly once", async () => {
     const wsUrl = `${stack.baseUrl.replace("http", "ws")}/ws`;
     const c = new TestClient(stack.baseUrl);
     await c.request("POST", "/api/auth/sign-in/email", { email: ADMIN.email, password: ADMIN.password });
@@ -188,18 +283,26 @@ describe("identity + platform core", () => {
       user: { id: string };
       organization: { id: string };
     };
+    const token = await c.token();
+    const offer = (t: string) => [WS_PROTOCOL, `${WS_AUTH_PROTOCOL_PREFIX}${t}`];
 
-    const status = (headers: Record<string, string>) =>
+    const status = (headers: Record<string, string>, protocols?: string[]) =>
       new Promise<number>((resolve) => {
-        const ws = new WebSocket(wsUrl, { headers });
+        const ws = new WebSocket(wsUrl, protocols ?? [], { headers });
         ws.on("unexpected-response", (_req, res) => resolve(res.statusCode ?? 0));
+        ws.on("error", () => resolve(-1));
         ws.on("open", () => {
           ws.close();
           resolve(101);
         });
       });
-    expect(await status({ origin: "https://evil.example", cookie: c.cookieHeader })).toBe(403);
+    expect(await status({ origin: "https://evil.example" }, offer(token))).toBe(403);
     expect(await status({ origin: WEB_ORIGIN })).toBe(401);
+    // The session cookie alone no longer opens the socket (D-01).
+    expect(await status({ origin: WEB_ORIGIN, cookie: c.cookieHeader })).toBe(401);
+    expect(await status({ origin: WEB_ORIGIN, cookie: c.cookieHeader }, [WS_PROTOCOL])).toBe(401);
+    const tampered = `${token.slice(0, -2)}${token.at(-2) === "A" ? "B" : "A"}${token.slice(-1)}`;
+    expect(await status({ origin: WEB_ORIGIN }, offer(tampered))).toBe(401);
 
     const topic = `user:${me.user.id}`;
     const { db, realtime } = stack.built.core;
@@ -210,10 +313,15 @@ describe("identity + platform core", () => {
     await emit(1);
     await emit(2);
 
-    const ws = new WebSocket(wsUrl, { headers: { origin: WEB_ORIGIN, cookie: c.cookieHeader } });
+    const ws = new WebSocket(wsUrl, offer(token), { headers: { origin: WEB_ORIGIN } });
     const frames: Array<{ op: string; seq?: number; type?: string }> = [];
     ws.on("message", (m) => frames.push(JSON.parse(String(m))));
-    await new Promise((r) => ws.on("open", r));
+    await new Promise((resolve, reject) => {
+      ws.on("open", resolve);
+      ws.on("error", reject);
+    });
+    // The server selects the application protocol and never echoes the token entry (A1/A2).
+    expect(ws.protocol).toBe(WS_PROTOCOL);
     ws.send(JSON.stringify({ op: "sub", topic, afterSeq: 1 }));
     ws.send(JSON.stringify({ op: "sub", topic: `user:${"0".repeat(8)}-0000-7000-8000-${"0".repeat(12)}` }));
     const waitFor = async (pred: () => boolean) => {
@@ -229,5 +337,92 @@ describe("identity + platform core", () => {
     await realtime.publishEphemeral(topic, "user.typing", { x: 1 });
     await waitFor(() => frames.some((f) => f.op === "eph"));
     ws.close();
+  });
+
+  it("WS: revocation closes the session's open sockets with 4401 within a second; other sessions stay open", async () => {
+    const { realtime } = stack.built.core;
+    const signIn = async (email: string, password: string) => {
+      const c = new TestClient(stack.baseUrl);
+      expect((await c.request("POST", "/api/auth/sign-in/email", { email, password })).status).toBe(200);
+      const token = await c.token();
+      return { token, sid: (decodeJwt(token) as { sid: string }).sid };
+    };
+    const a = await signIn(ADMIN.email, ADMIN.password);
+    const b = await signIn(ADMIN.email, ADMIN.password);
+    const alex = await signIn("alex@example.test", "another-long-password");
+    const adminId = (decodeJwt(a.token) as { sub: string }).sub;
+    const [wsA, wsB, wsAlex] = await Promise.all([
+      openSocket(stack.baseUrl, a.token),
+      openSocket(stack.baseUrl, b.token),
+      openSocket(stack.baseUrl, alex.token),
+    ]);
+
+    const t0 = Date.now();
+    await realtime.publishRevocation({ sessionIds: [a.sid], reason: "session_revoked" });
+    expect(await wsA.closed).toMatchObject({ code: 4401 });
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(wsB.socket.readyState).toBe(WebSocket.OPEN);
+
+    const t1 = Date.now();
+    await realtime.publishRevocation({ userId: adminId, sessionIds: [], reason: "deactivated" });
+    expect(await wsB.closed).toMatchObject({ code: 4401 });
+    expect(Date.now() - t1).toBeLessThan(1000);
+    expect(wsAlex.socket.readyState).toBe(WebSocket.OPEN);
+    wsAlex.socket.close();
+  });
+
+  it("WS: the periodic recheck closes sockets whose session is gone or whose member was deactivated", async () => {
+    const mini = Fastify({ logger: false });
+    await mini.register(websocket, {
+      options: { handleProtocols: (p: Set<string>) => (p.has(WS_PROTOCOL) ? WS_PROTOCOL : false) },
+    });
+    const { realtime, identity } = stack.built.core;
+    const module = createRealtimeModule({
+      realtime,
+      identity,
+      allowedOrigins: new Set([WEB_ORIGIN]),
+      sessionRecheckMs: 100,
+    });
+    await mini.register(async (scope) => module.register(scope as unknown as App));
+    await mini.listen({ host: "127.0.0.1", port: 0 });
+    const addr = mini.server.address();
+    const base = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
+    try {
+      const admin = new TestClient(stack.baseUrl);
+      await admin.request("POST", "/api/auth/sign-in/email", {
+        email: ADMIN.email,
+        password: ADMIN.password,
+      });
+      const adminToken = await admin.token();
+      const alex = new TestClient(stack.baseUrl);
+      await alex.request("POST", "/api/auth/sign-in/email", {
+        email: "alex@example.test",
+        password: "another-long-password",
+      });
+      const alexToken = await alex.token();
+      const alexId = (decodeJwt(alexToken) as { sub: string }).sub;
+      const [wsAdmin, wsAlex] = await Promise.all([
+        openSocket(base, adminToken),
+        openSocket(base, alexToken),
+      ]);
+      await new Promise((r) => setTimeout(r, 250));
+      expect(wsAdmin.socket.readyState).toBe(WebSocket.OPEN);
+
+      // Session row deleted (signed out elsewhere, expired): the socket closes on the next recheck.
+      await su.query("delete from auth.session where id = $1", [
+        (decodeJwt(adminToken) as { sid: string }).sid,
+      ]);
+      expect(await wsAdmin.closed).toMatchObject({ code: 4401 });
+      expect(wsAlex.socket.readyState).toBe(WebSocket.OPEN);
+
+      await su.query("update app.org_members set deactivated_at = now() where user_id = $1", [alexId]);
+      try {
+        expect(await wsAlex.closed).toMatchObject({ code: 4401 });
+      } finally {
+        await su.query("update app.org_members set deactivated_at = null where user_id = $1", [alexId]);
+      }
+    } finally {
+      await mini.close();
+    }
   });
 });

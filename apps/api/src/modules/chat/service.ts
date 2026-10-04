@@ -9,8 +9,9 @@ import {
 } from "@ocw/contracts";
 import { conversationMembers, conversations, messages, type Tx, tenantOf } from "@ocw/db";
 import { and, asc, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
-import { badRequest, forbidden, gone, notFound } from "../../lib/errors";
+import { badRequest, notFound } from "../../lib/errors";
 import type { AuditService } from "../audit";
+import type { ChannelFacts } from "../organization";
 import type { RealtimeService } from "../realtime";
 import { authorOf, type Directory } from "./directory";
 
@@ -67,29 +68,6 @@ export async function getMembership(
   return row ?? null;
 }
 
-/** Public channels are readable by every org member; private ones only by their members. */
-export async function canRead(tx: Tx, conv: ConversationRow, userId: string): Promise<boolean> {
-  if (conv.kind === "channel" && conv.visibility === "public") return true;
-  return (await getMembership(tx, conv.id, "user", userId)) !== null;
-}
-
-/** The channel if the user may read it; 404 otherwise (private channels do not reveal their existence). */
-export async function requireReadable(tx: Tx, id: string, userId: string): Promise<ConversationRow> {
-  const conv = await getChannel(tx, id);
-  if (!conv || !(await canRead(tx, conv, userId))) throw notFound("Channel not found");
-  return conv;
-}
-
-/** The channel if the user is a member and it is not archived. */
-export async function requireWritable(tx: Tx, id: string, userId: string): Promise<ConversationRow> {
-  const conv = await requireReadable(tx, id, userId);
-  if (conv.archivedAt) throw gone("This channel is archived", "channel_archived");
-  if (!(await getMembership(tx, conv.id, "user", userId))) {
-    throw forbidden("Join the channel to post in it", "not_a_member");
-  }
-  return conv;
-}
-
 // ---------------------------------------------------------------- channels
 
 /**
@@ -116,7 +94,7 @@ export async function ensureGeneral(tx: Tx, deps: ChatDeps, userId: string): Pro
       await tx.execute(sql`
         insert into app.conversation_members (conversation_id, organization_id, member_kind, member_id, role)
         select ${created.id}, ${ctx.organizationId}, 'user', m.user_id,
-               case when m.role = 'owner' then 'owner' else 'member' end
+               case when m.role = 'admin' then 'owner' else 'member' end
         from app.org_members m
         on conflict do nothing`);
       await deps.audit.record(tx, {
@@ -150,13 +128,23 @@ export async function ensureGeneral(tx: Tx, deps: ChatDeps, userId: string): Pro
   }
 }
 
-/** Channels visible to `userId` (public + private where member), not archived unless `id` is given. */
-export async function listChannels(tx: Tx, userId: string, id?: string): Promise<ChannelSummary[]> {
+/** Channel row plus the caller's facts, so routes ask the permission service whether it is visible. */
+export interface ChannelRow {
+  summary: ChannelSummary;
+  facts: ChannelFacts;
+}
+
+/**
+ * Every channel of the tenant with `userId`'s membership (no visibility filtering here: callers keep the
+ * rows the resolver allows with `perms.filter(…, "channel.read", …)`); archived ones only when `id` is given.
+ */
+export async function listChannels(tx: Tx, userId: string, id?: string): Promise<ChannelRow[]> {
   const me = conversationMembers;
   const rows = await tx
     .select({
       c: conversations,
       memberId: me.memberId,
+      memberRole: me.role,
       lastReadSeq: me.lastReadSeq,
       memberCount:
         sql<number>`(select count(*) from app.conversation_members cm where cm.conversation_id = ${conversations.id})`.mapWith(
@@ -183,37 +171,70 @@ export async function listChannels(tx: Tx, userId: string, id?: string): Promise
       and(
         eq(conversations.kind, "channel"),
         id ? eq(conversations.id, id) : isNull(conversations.archivedAt),
-        sql`(${conversations.visibility} = 'public' or ${me.memberId} is not null)`,
       ),
     )
     .orderBy(asc(conversations.name));
   return rows.map((r) => ({
-    id: r.c.id,
-    organizationId: r.c.organizationId,
-    kind: r.c.kind,
-    name: r.c.name,
-    slug: r.c.slug,
-    topic: r.c.topic,
-    visibility: r.c.visibility,
-    parentConversationId: r.c.parentConversationId,
-    rootMessageId: r.c.rootMessageId,
-    createdBy: r.c.createdBy,
-    archivedAt: isoOrNull(r.c.archivedAt),
-    createdAt: iso(r.c.createdAt),
-    lastSeq: r.lastSeq,
-    isMember: r.memberId !== null,
-    memberCount: r.memberCount,
-    latestMessageSeq: r.latestMessageSeq,
-    lastReadSeq: r.memberId !== null ? Number(r.lastReadSeq ?? 0) : 0,
-    lastMessageAt: isoOrNull(r.lastMessageAt),
-    isDefault: r.c.slug === GENERAL_SLUG,
+    summary: {
+      id: r.c.id,
+      organizationId: r.c.organizationId,
+      kind: r.c.kind,
+      name: r.c.name,
+      slug: r.c.slug,
+      topic: r.c.topic,
+      visibility: r.c.visibility,
+      parentConversationId: r.c.parentConversationId,
+      rootMessageId: r.c.rootMessageId,
+      createdBy: r.c.createdBy,
+      archivedAt: isoOrNull(r.c.archivedAt),
+      createdAt: iso(r.c.createdAt),
+      lastSeq: r.lastSeq,
+      isMember: r.memberId !== null,
+      memberCount: r.memberCount,
+      latestMessageSeq: r.latestMessageSeq,
+      lastReadSeq: r.memberId !== null ? Number(r.lastReadSeq ?? 0) : 0,
+      lastMessageAt: isoOrNull(r.lastMessageAt),
+      isDefault: r.c.slug === GENERAL_SLUG,
+    },
+    facts: {
+      visibility: r.c.visibility,
+      archived: r.c.archivedAt !== null,
+      viewerRole: r.memberId !== null ? r.memberRole : null,
+    },
   }));
 }
 
-export async function channelSummary(tx: Tx, id: string, userId: string): Promise<ChannelSummary> {
+/** One channel row (archived included); 404 when it does not exist in the tenant. */
+export async function channelRow(tx: Tx, id: string, userId: string): Promise<ChannelRow> {
   const [row] = await listChannels(tx, userId, id);
   if (!row) throw notFound("Channel not found");
   return row;
+}
+
+/**
+ * The input of `channelResource` for one member (user or agent) of `conv`: visibility, archived state and
+ * the member's role. A thread conversation is judged on its parent channel.
+ */
+export async function channelFacts(
+  tx: Tx,
+  conv: ConversationRow,
+  member: { kind: "user" | "agent"; id: string },
+): Promise<ChannelFacts> {
+  let channel = conv;
+  if (conv.kind === "thread" && conv.parentConversationId) {
+    const [parent] = await tx
+      .select()
+      .from(conversations)
+      .where(eq(conversations.id, conv.parentConversationId))
+      .limit(1);
+    if (parent) channel = parent;
+  }
+  const membership = await getMembership(tx, channel.id, member.kind, member.id);
+  return {
+    visibility: channel.visibility,
+    archived: channel.archivedAt !== null,
+    viewerRole: membership?.role ?? null,
+  };
 }
 
 /** Tells sidebars that the channel list changed: org topic for public channels, member user topics for private. */

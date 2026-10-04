@@ -74,6 +74,12 @@ export const EventTypes = {
   conversationMemberAdded: "conversation.member_added",
   conversationMemberRemoved: "conversation.member_removed",
   memberJoined: "member.joined",
+  /** On `org:<id>`: a member's role, status or profile changed. Payload MemberUpdatedPayload. */
+  memberUpdated: "member.updated",
+  /** On `org:<id>`: the unit hierarchy or a unit's memberships changed. Payload UnitsUpdatedPayload. */
+  unitsUpdated: "units.updated",
+  /** On `org:<id>`: an explicit allow/deny rule changed. Payload PermissionRulesUpdatedPayload. */
+  permissionRulesUpdated: "permission_rules.updated",
   agentCreated: "agent.created",
   agentUpdated: "agent.updated",
   agentDeleted: "agent.deleted",
@@ -86,6 +92,15 @@ export const EventTypes = {
   promptUpdated: "prompt.updated",
   approvalUpdated: "approval.updated",
 } as const;
+
+export const MemberUpdatedPayload = z.object({ userId: z.uuid(), changed: z.array(z.string()) });
+export type MemberUpdatedPayload = z.infer<typeof MemberUpdatedPayload>;
+
+export const UnitsUpdatedPayload = z.object({ unitId: z.uuid(), action: z.string() });
+export type UnitsUpdatedPayload = z.infer<typeof UnitsUpdatedPayload>;
+
+export const PermissionRulesUpdatedPayload = z.object({ ruleId: z.uuid(), action: z.string() });
+export type PermissionRulesUpdatedPayload = z.infer<typeof PermissionRulesUpdatedPayload>;
 
 /** Well-known ephemeral event types. */
 export const EphemeralTypes = {

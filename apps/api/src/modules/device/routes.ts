@@ -14,12 +14,18 @@ import {
   UpdateDeviceRequest,
 } from "@ocw/contracts";
 import { deviceEnrollments, devices, projects, type Tx } from "@ocw/db";
-import { and, asc, count, eq, isNull, or, sql } from "drizzle-orm";
+import { and, asc, count, eq, isNull, sql } from "drizzle-orm";
+import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { type App, authOf, type Core, tenant } from "../../core";
 import { randomToken, sha256Hex } from "../../lib/crypto";
-import { badRequest, conflict, forbidden, gone, notFound } from "../../lib/errors";
-import { memberDirectory } from "../organization";
+import { badRequest, conflict, gone, notFound } from "../../lib/errors";
+import {
+  createPermissionService,
+  deviceResource,
+  memberDirectory,
+  type PermissionService,
+} from "../organization";
 import type { DeviceHub } from "./hub";
 
 export const ENROLLMENT_TTL_MS = 10 * 60_000;
@@ -41,12 +47,23 @@ const runtimesOf = (value: unknown) => z.array(RuntimeInfo).catch([]).parse(valu
 
 type DeviceRow = typeof devices.$inferSelect;
 
-/** Devices a user may start sessions on: their own, or shared by their owner. */
-export function canUseDevice(row: Pick<DeviceRow, "ownerUserId" | "shared" | "revokedAt">, userId: string) {
-  return row.revokedAt === null && (row.ownerUserId === userId || row.shared);
+/** Resolver facts for a device row: owner / grantee (shared) relations and the revoked state. */
+export function deviceFacts(row: Pick<DeviceRow, "ownerUserId" | "shared" | "revokedAt">, userId: string) {
+  return deviceResource(
+    { ownerUserId: row.ownerUserId, shared: row.shared, revoked: row.revokedAt !== null },
+    userId,
+  );
 }
 
-export async function listDevices(tx: Tx): Promise<Device[]> {
+/** Permissions a device card renders controls for (`Device.viewerCan`). */
+const DEVICE_VIEWER_CAN = ["device.use", "device.update", "device.revoke"] as const;
+
+async function listDevices(
+  req: FastifyRequest,
+  tx: Tx,
+  perms: PermissionService,
+  userId: string,
+): Promise<Device[]> {
   const [rows, dir, counts] = await Promise.all([
     tx.select().from(devices).where(isNull(devices.revokedAt)).orderBy(asc(devices.createdAt)),
     memberDirectory(tx),
@@ -57,7 +74,14 @@ export async function listDevices(tx: Tx): Promise<Device[]> {
       .groupBy(projects.deviceId),
   ]);
   const byDevice = new Map(counts.map((c) => [c.deviceId, Number(c.n)]));
-  return rows.map((r) => toDevice(r, dir.get(r.ownerUserId)?.displayName ?? null, byDevice.get(r.id) ?? 0));
+  const out: Device[] = [];
+  for (const r of rows) {
+    out.push({
+      ...toDevice(r, dir.get(r.ownerUserId)?.displayName ?? null, byDevice.get(r.id) ?? 0),
+      viewerCan: await perms.viewerCan(req, tx, deviceFacts(r, userId), DEVICE_VIEWER_CAN),
+    });
+  }
+  return out;
 }
 
 export function toDevice(r: DeviceRow, ownerName: string | null, projectCount: number): Device {
@@ -78,15 +102,8 @@ export function toDevice(r: DeviceRow, ownerName: string | null, projectCount: n
   };
 }
 
-/** Projects on devices the user may use (own or shared), newest device first. */
-export async function listUsableProjects(tx: Tx, userId: string): Promise<Project[]> {
-  const rows = await tx
-    .select({ p: projects, d: devices })
-    .from(projects)
-    .innerJoin(devices, eq(devices.id, projects.deviceId))
-    .where(and(isNull(devices.revokedAt), or(eq(devices.ownerUserId, userId), eq(devices.shared, true))))
-    .orderBy(asc(projects.name));
-  return rows.map(({ p, d }) => ({
+function toProject({ p, d }: { p: typeof projects.$inferSelect; d: DeviceRow }): Project {
+  return {
     id: p.id,
     deviceId: d.id,
     deviceName: d.name,
@@ -96,15 +113,21 @@ export async function listUsableProjects(tx: Tx, userId: string): Promise<Projec
     defaultBranch: p.defaultBranch,
     available: p.removedAt === null,
     createdAt: new Date(p.createdAt).toISOString(),
-  }));
+  };
 }
 
 export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void {
-  const user = { preHandler: core.identity.requireUser };
+  const perms = createPermissionService(core);
+  const requireUser = core.identity.requireUser;
+  const user = { config: { authz: "user" as const }, preHandler: requireUser };
 
   app.post(
     "/devices/enrollments",
-    { ...user, schema: { tags: ["device"], response: { 200: CreateEnrollmentResponse } } },
+    {
+      config: { authz: "user" },
+      preHandler: [requireUser, perms.requirePermission("device.pair")],
+      schema: { tags: ["device"], response: { 200: CreateEnrollmentResponse } },
+    },
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
         const auth = authOf(req);
@@ -128,7 +151,8 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
   app.post(
     "/devices/enroll",
     {
-      config: { rateLimit: { max: 20, timeWindow: "1 minute" } },
+      // Authenticated by the one-time pairing code itself (no session yet).
+      config: { authz: "public", rateLimit: { max: 20, timeWindow: "1 minute" } },
       schema: { tags: ["device"], body: EnrollDeviceRequest, response: { 200: EnrollDeviceResponse } },
     },
     async (req) => {
@@ -180,9 +204,13 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
 
   app.get(
     "/devices",
-    { ...user, schema: { tags: ["device"], response: { 200: DeviceList } } },
+    {
+      config: { authz: "user" },
+      preHandler: [requireUser, perms.requirePermission("device.read")],
+      schema: { tags: ["device"], response: { 200: DeviceList } },
+    },
     async (req) => ({
-      devices: await core.db.withTenant(tenant(req), listDevices),
+      devices: await core.db.withTenant(tenant(req), (tx) => listDevices(req, tx, perms, authOf(req).userId)),
     }),
   );
 
@@ -197,7 +225,7 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
         const auth = authOf(req);
         const [row] = await tx.select().from(devices).where(eq(devices.id, req.params.id));
         if (!row || row.revokedAt) throw notFound("Device not found");
-        if (row.ownerUserId !== auth.userId) throw forbidden("Only the device owner can change it");
+        await perms.assertCan(req, tx, "device.update", deviceFacts(row, auth.userId));
         await tx
           .update(devices)
           .set({
@@ -230,9 +258,8 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
         const [row] = await tx.select().from(devices).where(eq(devices.id, req.params.id));
         if (!row) throw notFound("Device not found");
         if (row.revokedAt) throw conflict("Device already revoked");
-        const isAdmin = auth.role === "owner" || auth.role === "admin";
-        if (row.ownerUserId !== auth.userId && !isAdmin)
-          throw forbidden("Only the owner or an admin can revoke");
+        // The owner (relation) or an admin (role).
+        await perms.assertCan(req, tx, "device.revoke", deviceFacts(row, auth.userId));
         await tx
           .update(devices)
           .set({ revokedAt: sql`now()`, status: "offline" })
@@ -259,9 +286,24 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
 
   app.get(
     "/projects",
-    { ...user, schema: { tags: ["device"], response: { 200: ProjectList } } },
+    {
+      config: { authz: "user" },
+      preHandler: [requireUser, perms.requirePermission("work_session.read")],
+      schema: { tags: ["device"], response: { 200: ProjectList } },
+    },
     async (req) => ({
-      projects: await core.db.withTenant(tenant(req), (tx) => listUsableProjects(tx, authOf(req).userId)),
+      projects: await core.db.withTenant(tenant(req), async (tx) => {
+        const userId = authOf(req).userId;
+        const rows = await tx
+          .select({ p: projects, d: devices })
+          .from(projects)
+          .innerJoin(devices, eq(devices.id, projects.deviceId))
+          .where(isNull(devices.revokedAt))
+          .orderBy(asc(projects.name));
+        // Projects on devices the caller may use: their own, or shared by the owner (device.use).
+        const usable = await perms.filter(req, tx, rows, "device.use", ({ d }) => deviceFacts(d, userId));
+        return usable.map(toProject);
+      }),
     }),
   );
 }

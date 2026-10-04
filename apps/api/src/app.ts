@@ -3,7 +3,7 @@ import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import swagger from "@fastify/swagger";
 import websocket from "@fastify/websocket";
-import { HealthResponse } from "@ocw/contracts";
+import { HealthResponse, WS_PROTOCOL } from "@ocw/contracts";
 import { createTenantDb } from "@ocw/db";
 import scalar from "@scalar/fastify-api-reference";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -16,6 +16,7 @@ import {
   type ZodTypeProvider,
 } from "fastify-type-provider-zod";
 import pg from "pg";
+import { type AuthzRegistry, installAuthz } from "./authz";
 import { decodeKey, type Env } from "./config/env";
 import type { ApiModule, App, Core } from "./core";
 import { createChatAgentBridge } from "./lib/chat-agent-bridge";
@@ -28,7 +29,7 @@ import { createAuditService } from "./modules/audit";
 import { createChatModule } from "./modules/chat";
 import { createDeviceModule } from "./modules/device";
 import { createAuth, createIdentityModule, IdentityService } from "./modules/identity";
-import { createOrganizationModule } from "./modules/organization";
+import { AuthzDeniedError, createOrganizationModule, recordAuthzDenial } from "./modules/organization";
 import { createRealtimeModule, createRealtimeService } from "./modules/realtime";
 import { createSecretsModule, createSecretsService } from "./modules/secrets";
 import { createWorkSessionModule } from "./modules/work-session";
@@ -38,6 +39,8 @@ export const API_VERSION = "0.1.0";
 export interface BuiltApp {
   app: App;
   core: Core;
+  /** Route authz declarations and undecided answers (warn mode; strict for tests from 02-15). */
+  authz: AuthzRegistry;
   close(): Promise<void>;
 }
 
@@ -54,7 +57,13 @@ export async function buildApp(
         ? false
         : {
             level: env.LOG_LEVEL,
-            redact: ["req.headers.cookie", "req.headers.authorization", 'res.headers["set-cookie"]'],
+            redact: [
+              "req.headers.cookie",
+              "req.headers.authorization",
+              // The browser WebSocket carries its access JWT here (ocw.auth.<jwt>), T-02-08-04.
+              'req.headers["sec-websocket-protocol"]',
+              'res.headers["set-cookie"]',
+            ],
             ...(opts.logStream ? { stream: opts.logStream } : {}),
           },
     trustProxy: true,
@@ -78,7 +87,7 @@ export async function buildApp(
   const secretStore = createEnvFileSecretStore();
   const audit = createAuditService();
   const realtime = createRealtimeService({ db, bus });
-  const identity = new IdentityService(createAuth(env, authDb), authDb, env);
+  const identity = new IdentityService(createAuth(env, authDb), authDb, env, realtime);
   const secrets = createSecretsService({ key: encryptionKey, audit });
   const chatAgent = createChatAgentBridge();
   const core: Core = {
@@ -111,7 +120,14 @@ export async function buildApp(
     methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
   });
   await app.register(rateLimit, { global: false });
-  await app.register(websocket, { options: { maxPayload: 256 * 1024 } });
+  await app.register(websocket, {
+    options: {
+      maxPayload: 256 * 1024,
+      // Select the application protocol, never the `ocw.auth.<jwt>` entry: browsers fail a handshake that
+      // offered subprotocols and got none back (Pitfall 2), and the token must not be echoed (T-02-08-04).
+      handleProtocols: (protocols: Set<string>) => (protocols.has(WS_PROTOCOL) ? WS_PROTOCOL : false),
+    },
+  });
   await app.register(swagger, {
     openapi: {
       info: { title: "Open Collaborative AI Workspace API", version: API_VERSION },
@@ -130,32 +146,47 @@ export async function buildApp(
   });
   await app.register(scalar, { routePrefix: "/docs" });
 
-  app.setErrorHandler((err: FastifyError & { body?: { code?: string; message?: string } }, req, reply) => {
-    if (err instanceof HttpError) {
-      return reply.status(err.statusCode).send({
-        error: { code: err.code, message: err.message, ...(err.details ? { details: err.details } : {}) },
-      });
-    }
-    if (hasZodFastifySchemaValidationErrors(err)) {
-      return reply.status(400).send({
-        error: { code: "validation_error", message: "Request validation failed", details: err.validation },
-      });
-    }
-    const status = typeof err.statusCode === "number" ? err.statusCode : 500;
-    if (status < 500) {
-      // better-auth APIError and Fastify client errors (rate limit, bad JSON, …)
-      const code = err.body?.code ?? err.code ?? "error";
-      const message = err.body?.message ?? err.message;
-      return reply.status(status).send({ error: { code: String(code).toLowerCase(), message } });
-    }
-    req.log.error({ err }, "unhandled error");
-    return reply.status(500).send({ error: { code: "internal", message: "Something went wrong" } });
-  });
+  app.setErrorHandler(
+    async (err: FastifyError & { body?: { code?: string; message?: string } }, req, reply) => {
+      if (err instanceof AuthzDeniedError && req.method !== "GET" && req.method !== "HEAD") {
+        // The request transaction already rolled back; the denial is audited in its own (Pitfall 4).
+        await recordAuthzDenial({ db, audit }, req, err);
+      }
+      if (err instanceof HttpError) {
+        return reply.status(err.statusCode).send({
+          error: { code: err.code, message: err.message, ...(err.details ? { details: err.details } : {}) },
+        });
+      }
+      if (hasZodFastifySchemaValidationErrors(err)) {
+        return reply.status(400).send({
+          error: { code: "validation_error", message: "Request validation failed", details: err.validation },
+        });
+      }
+      const status = typeof err.statusCode === "number" ? err.statusCode : 500;
+      if (status < 500) {
+        // better-auth APIError and Fastify client errors (rate limit, bad JSON, …)
+        const code = err.body?.code ?? err.code ?? "error";
+        const message = err.body?.message ?? err.message;
+        return reply.status(status).send({ error: { code: String(code).toLowerCase(), message } });
+      }
+      req.log.error({ err }, "unhandled error");
+      return reply.status(500).send({ error: { code: "internal", message: "Something went wrong" } });
+    },
+  );
+
+  // ---------------------------------------------------------------- authorization coverage
+  // Before any route below: records every route's config.authz and every undecided non-public 2xx. Strict
+  // in tests (an undecided 2xx becomes a 500 and fails the suite); production and dev keep warn-and-record,
+  // so a missed declaration degrades to a log line instead of an outage (T-02-15-03).
+  const authz = installAuthz(app, { strict: env.NODE_ENV === "test" });
 
   // ---------------------------------------------------------------- health
   app.get(
     "/health",
-    { schema: { tags: ["system"], response: { 200: HealthResponse, 503: HealthResponse } } },
+    {
+      config: { authz: "public" },
+      schema: { tags: ["system"], response: { 200: HealthResponse, 503: HealthResponse } },
+    },
     async (_req, reply) => {
       const [dbOk, redisOk] = await Promise.all([
         db.ping().then(
@@ -198,6 +229,7 @@ export async function buildApp(
   return {
     app,
     core,
+    authz,
     async close() {
       await app.close();
       for (const m of modules) await m.close?.();

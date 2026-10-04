@@ -23,7 +23,7 @@ async function ensureAlex(admin: APIRequestContext) {
   const members = (await (await admin.get("/api/v1/members")).json()).members as Array<{ email: string }>;
   if (members.some((m) => m.email === ALEX.email)) return;
   const inv = await (
-    await admin.post("/api/v1/invitations", { data: { email: ALEX.email, role: "member" } })
+    await admin.post("/api/v1/invitations", { data: { email: ALEX.email, role: "developer" } })
   ).json();
   const anon = await request.newContext({ baseURL: API_URL, extraHTTPHeaders: { origin: BASE_URL } });
   const res = await anon.post(`/api/v1/invitations/${inv.id}/accept`, {

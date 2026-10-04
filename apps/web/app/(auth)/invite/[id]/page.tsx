@@ -1,6 +1,6 @@
 "use client";
 
-import { AcceptInvitationRequest } from "@ocw/contracts";
+import { AcceptInvitationRequest, type OrgRole, ROLE_LABELS } from "@ocw/contracts";
 import { Clock, MailX, UserCheck } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
@@ -18,6 +18,13 @@ import { errorMessage, isApiError } from "@/lib/api";
 import { type FieldErrors, validate } from "@/lib/form";
 import { useAcceptInvitation, usePublicInvitation } from "@/lib/queries";
 import { initials } from "@/lib/utils";
+
+const ROLE_VARIANT: Record<OrgRole, "brand" | "outline"> = {
+  admin: "brand",
+  lead: "brand",
+  developer: "outline",
+  standard: "outline",
+};
 
 type Field = "name" | "password";
 
@@ -132,11 +139,8 @@ export default function InvitePage() {
             "You've been invited"
           )}{" "}
           as <span className="text-foreground">{inv.email}</span>{" "}
-          <Badge
-            variant={inv.role === "member" ? "outline" : "brand"}
-            className="ml-0.5 align-middle capitalize"
-          >
-            {inv.role}
+          <Badge variant={ROLE_VARIANT[inv.role]} className="ml-0.5 whitespace-nowrap align-middle">
+            {ROLE_LABELS[inv.role]}
           </Badge>
         </>
       }

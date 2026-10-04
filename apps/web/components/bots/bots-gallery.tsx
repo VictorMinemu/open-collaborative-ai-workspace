@@ -9,7 +9,8 @@ import { ServerUnreachable } from "@/components/common/server-unreachable";
 import { PageHeader } from "@/components/shell/page-header";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useAgents, useBotsRealtime, useCellStatus, useIsAdmin, useModels } from "@/lib/bots-queries";
+import { useAgents, useBotsRealtime, useCellStatus, useModels } from "@/lib/bots-queries";
+import { useCan } from "@/lib/permissions";
 import { AddToChannelDialog } from "./add-to-channel-dialog";
 import { BotCard } from "./bot-card";
 import { BotDetailSheet } from "./bot-detail-sheet";
@@ -17,10 +18,12 @@ import { NewBotSheet, NoModels } from "./new-bot-sheet";
 
 export function BotsGallery() {
   useBotsRealtime();
-  const isAdmin = useIsAdmin();
+  const canManage = useCan("bot.manage");
+  const canManageCell = useCan("cell.manage");
+  const canManageProviders = useCan("provider.manage");
   const agents = useAgents();
   const models = useModels();
-  const cell = useCellStatus(isAdmin);
+  const cell = useCellStatus(canManageCell);
   const [creating, setCreating] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
   const [channelFor, setChannelFor] = useState<Agent | null>(null);
@@ -44,7 +47,7 @@ export function BotsGallery() {
         description="Teammates with their own identity. Mention them in any channel."
         icon={<Bot />}
         actions={
-          isAdmin ? (
+          canManage ? (
             <Button size="sm" onClick={() => setCreating(true)} data-testid="new-bot">
               <Plus /> New bot
             </Button>
@@ -52,7 +55,7 @@ export function BotsGallery() {
         }
       />
       <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
-        {isAdmin && cell.data && !cell.data.connected && list.length > 0 ? (
+        {canManageCell && cell.data && !cell.data.connected && list.length > 0 ? (
           <div
             data-testid="runtime-offline"
             className="mx-4 mt-4 flex items-center gap-3 rounded-xl border border-warning/30 bg-warning/8 px-4 py-3 text-sm sm:mx-6"
@@ -94,7 +97,7 @@ export function BotsGallery() {
         ) : list.length === 0 ? (
           noModels ? (
             <div className="mx-auto flex max-w-md flex-1 px-4 py-16">
-              <NoModels isAdmin={isAdmin} className="w-full" />
+              <NoModels canManage={canManageProviders} className="w-full" />
             </div>
           ) : (
             <EmptyState
@@ -102,7 +105,7 @@ export function BotsGallery() {
               title="Create your first bot"
               description="Bots are teammates with their own identity and permissions. Add them to channels and mention them like anyone else."
             >
-              {isAdmin ? (
+              {canManage ? (
                 <Button onClick={() => setCreating(true)} data-testid="new-bot-empty">
                   <Plus /> New bot
                 </Button>
@@ -122,7 +125,7 @@ export function BotsGallery() {
                 onAddToChannel={() => setChannelFor(a)}
               />
             ))}
-            {isAdmin ? (
+            {canManage ? (
               <button
                 type="button"
                 onClick={() => setCreating(true)}

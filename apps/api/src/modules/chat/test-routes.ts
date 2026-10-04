@@ -4,6 +4,7 @@ import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { type App, authOf, type Core, tenant } from "../../core";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
+import { createPermissionService } from "../organization";
 
 /**
  * TEST-ONLY routes (registered only when NODE_ENV=test): let E2E specs exercise the chat side of the bridge
@@ -18,11 +19,15 @@ export function registerChatTestRoutes(app: App, core: Core): void {
   });
 
   const hide = { hide: true, tags: ["test"] };
+  // Test-only, but still decided: any signed-in member of the organization (org.read).
+  const perms = createPermissionService(core);
+  const preHandler = [core.identity.requireUser, perms.requirePermission("org.read")];
 
   app.post(
     "/test/chat/agents",
     {
-      preHandler: core.identity.requireUser,
+      config: { authz: "user" },
+      preHandler,
       schema: {
         ...hide,
         body: z.object({
@@ -62,7 +67,8 @@ export function registerChatTestRoutes(app: App, core: Core): void {
   app.post(
     "/test/chat/agent-reply",
     {
-      preHandler: core.identity.requireUser,
+      config: { authz: "user" },
+      preHandler,
       schema: {
         ...hide,
         body: z.object({
@@ -84,7 +90,8 @@ export function registerChatTestRoutes(app: App, core: Core): void {
   app.post(
     "/test/chat/agent-typing",
     {
-      preHandler: core.identity.requireUser,
+      config: { authz: "user" },
+      preHandler,
       schema: {
         ...hide,
         body: z.object({ agentId: Id, conversationId: Id, threadRootId: Id.nullable().optional() }),
@@ -101,7 +108,7 @@ export function registerChatTestRoutes(app: App, core: Core): void {
     },
   );
 
-  app.get("/test/chat/mentions", { preHandler: core.identity.requireUser, schema: hide }, async (req) => ({
+  app.get("/test/chat/mentions", { config: { authz: "user" }, preHandler, schema: hide }, async (req) => ({
     mentions: captured.filter((m) => m.organizationId === authOf(req).organizationId),
   }));
 }

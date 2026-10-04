@@ -9,8 +9,9 @@ import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { errorMessage, isApiError } from "@/lib/api";
-import { useDeleteAgent, useIsAdmin, useModels, useUpdateAgent } from "@/lib/bots-queries";
+import { useDeleteAgent, useModels, useUpdateAgent } from "@/lib/bots-queries";
 import { validate } from "@/lib/form";
+import { useCan } from "@/lib/permissions";
 import { formatDate } from "@/lib/utils";
 import { BotAvatar, ModelChip, StatusChip } from "./bot-bits";
 import {
@@ -42,7 +43,7 @@ export function BotDetailSheet({
   onOpenChange: (open: boolean) => void;
   onAddToChannel: (agent: Agent) => void;
 }) {
-  const isAdmin = useIsAdmin();
+  const canManage = useCan("bot.manage");
   const models = useModels();
   const update = useUpdateAgent();
   const remove = useDeleteAgent();
@@ -171,7 +172,7 @@ export function BotDetailSheet({
             </div>
           ) : null}
 
-          {isAdmin ? (
+          {canManage ? (
             <SheetSection title="Profile & behaviour">
               <BotForm
                 idPrefix={`bot-${agent.id}`}
@@ -195,7 +196,7 @@ export function BotDetailSheet({
             </SheetSection>
           )}
 
-          {isAdmin ? (
+          {canManage ? (
             <SheetSection title="Availability">
               <div className="flex items-center justify-between gap-4 rounded-lg border p-3">
                 <span>
@@ -219,7 +220,7 @@ export function BotDetailSheet({
             Created {formatDate(agent.createdAt)} · runtime OpenClaw · tools disabled
           </p>
 
-          {isAdmin ? (
+          {canManage ? (
             <SheetSection title="Danger zone">
               <div className="flex items-center justify-between gap-4 rounded-lg border border-destructive/25 p-3">
                 <span className="text-sm">
@@ -252,7 +253,7 @@ export function BotDetailSheet({
           >
             <Hash /> Add to channel
           </Button>
-          {isAdmin ? (
+          {canManage ? (
             <Button
               onClick={save}
               disabled={!dirty || update.isPending}

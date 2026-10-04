@@ -9,8 +9,9 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { Spinner } from "@/components/ui/spinner";
 import { errorMessage, isApiError } from "@/lib/api";
-import { useCreateAgent, useIsAdmin, useModels } from "@/lib/bots-queries";
+import { useCreateAgent, useModels } from "@/lib/bots-queries";
 import { validate } from "@/lib/form";
+import { useCan } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 import { BotAvatar } from "./bot-bits";
 import { BotForm, type BotFormErrors, type BotFormValues, modelKey, splitModelKey } from "./bot-form";
@@ -36,7 +37,7 @@ export function NewBotSheet({
 }) {
   const models = useModels();
   const create = useCreateAgent();
-  const isAdmin = useIsAdmin();
+  const canManageProviders = useCan("provider.manage");
   const [step, setStep] = useState<"template" | "details">("template");
   const [values, setValues] = useState<BotFormValues>(EMPTY);
   const [errors, setErrors] = useState<BotFormErrors>({});
@@ -141,7 +142,7 @@ export function NewBotSheet({
 
         <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-5 py-5">
           {models.isSuccess && available.length === 0 ? (
-            <NoModels isAdmin={isAdmin} />
+            <NoModels canManage={canManageProviders} />
           ) : step === "template" ? (
             <div className="grid grid-cols-1 gap-2.5 min-[420px]:grid-cols-2" data-testid="bot-presets">
               {BOT_PRESETS.map((p) => (
@@ -232,7 +233,8 @@ export function NewBotSheet({
   );
 }
 
-export function NoModels({ isAdmin, className }: { isAdmin: boolean; className?: string }) {
+/** `canManage`: the caller holds `provider.manage` (the link opens Settings › Models). */
+export function NoModels({ canManage, className }: { canManage: boolean; className?: string }) {
   return (
     <div
       className={cn(
@@ -245,11 +247,11 @@ export function NoModels({ isAdmin, className }: { isAdmin: boolean; className?:
       </span>
       <h3 className="font-semibold">Configure a model provider first</h3>
       <p className="mt-1 max-w-xs text-balance text-muted-foreground text-sm">
-        {isAdmin
+        {canManage
           ? "Bots need a model. Connect your ChatGPT subscription or add an API key for Anthropic, OpenAI or another provider."
           : "Bots need a model. Ask a workspace admin to add a model provider."}
       </p>
-      {isAdmin ? (
+      {canManage ? (
         <Link href="/settings/models" className={cn(buttonVariants({ size: "sm" }), "mt-4")}>
           Open Settings › Models
         </Link>

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Tooltip } from "@/components/ui/tooltip";
+import { usePermissionCheck } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 import { isActive, NAV_ITEMS, type NavItem } from "./nav";
 
@@ -70,7 +71,8 @@ export function NavList({
   secondary?: boolean;
   onNavigate?: () => void;
 }) {
-  const items = NAV_ITEMS.filter((i) => !!i.secondary === secondary);
+  const can = usePermissionCheck();
+  const items = NAV_ITEMS.filter((i) => !!i.secondary === secondary && (!i.permission || can(i.permission)));
   return (
     <nav aria-label={secondary ? "Secondary" : "Main"} className="grid gap-0.5">
       {items.map((item) => (

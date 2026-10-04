@@ -95,6 +95,35 @@ async function postHuman(opts: {
   });
 }
 
+/** Invite through the API and accept: a signed-in client of `role`. */
+async function joinAs(email: string, role: "lead" | "developer" | "standard"): Promise<[TestClient, string]> {
+  const inv = await call(admin, "POST", "/api/v1/invitations", { email, role });
+  expect(inv.status).toBe(200);
+  const c = new TestClient(stack.baseUrl);
+  const acc = await call(c, "POST", `/api/v1/invitations/${inv.body!.id}/accept`, {
+    name: email.split("@")[0],
+    password: "another-long-password",
+  });
+  expect(acc.status).toBe(200);
+  return [c, (acc.body as { user: { id: string } }).user.id];
+}
+
+/** Superuser-inserted deny rule; returns its removal. */
+async function denyRule(subjectKind: "role" | "agent", subjectId: string, permission: string) {
+  const id = randomUUID();
+  await su.query(
+    `insert into app.permission_rules (id, organization_id, subject_kind, subject_id, permission, effect)
+     values ($1, $2, $3, $4, $5, 'deny')`,
+    [id, orgId, subjectKind, subjectId, permission],
+  );
+  return async () => {
+    await su.query("delete from app.permission_rules where id = $1", [id]);
+  };
+}
+
+const errorOf = (r: { body: Record<string, unknown> | null }) =>
+  (r.body as { error: { code: string; details?: Record<string, unknown> } }).error;
+
 const cellEvents = async () =>
   (
     await su.query("select seq, type, payload from app.stream_events where stream_id = $1 order by seq", [
@@ -123,7 +152,7 @@ beforeAll(async () => {
 
   const inv = await call(admin, "POST", "/api/v1/invitations", {
     email: "alex@example.test",
-    role: "member",
+    role: "developer",
   });
   alex = new TestClient(stack.baseUrl);
   const acc = await call(alex, "POST", `/api/v1/invitations/${inv.body!.id}/accept`, {
@@ -307,6 +336,116 @@ describe("model providers + bots", () => {
   });
 });
 
+describe("providers and bots are decided by the resolver", () => {
+  const ELECTRON_UA =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) ocw-desktop/0.1.0 Chrome/140.0.7339.80 Electron/38.1.0 Safari/537.36";
+  let lead: TestClient;
+  let leadId: string;
+  let stan: TestClient;
+
+  beforeAll(async () => {
+    [lead, leadId] = await joinAs("lead@example.test", "lead");
+    [stan] = await joinAs("stan@example.test", "standard");
+  });
+
+  it("lead and developer get 403 on provider.manage and bot.manage, audited as authz.denied", async () => {
+    const provider = { provider: "anthropic", allowedModels: ["claude-sonnet-5-5"] };
+    const bot = { name: "Nope", instructions: "x", modelProvider: "mock", modelId: "mock-1" };
+    for (const [c, id] of [
+      [lead, leadId],
+      [alex, alexId],
+    ] as const) {
+      const p = await call(c, "POST", "/api/v1/model-providers", provider);
+      expect(p.status).toBe(403);
+      expect(errorOf(p)).toMatchObject({
+        code: "forbidden",
+        details: { permission: "provider.manage", layer: "role", reason: "missing_permission" },
+      });
+      expect((await call(c, "GET", "/api/v1/model-providers")).status).toBe(403);
+      expect((await call(c, "DELETE", "/api/v1/model-providers/anthropic")).status).toBe(403);
+      const b = await call(c, "POST", "/api/v1/agents", bot);
+      expect(b.status).toBe(403);
+      expect(errorOf(b).details).toMatchObject({ permission: "bot.manage", layer: "role" });
+      expect((await call(c, "PATCH", `/api/v1/agents/${agentId}`, { name: "Hijacked" })).status).toBe(403);
+      expect((await call(c, "DELETE", `/api/v1/agents/${agentId}`)).status).toBe(403);
+      const denied = await su.query(
+        "select metadata->>'permission' as p from app.audit_events where action = 'authz.denied' and user_id = $1",
+        [id],
+      );
+      expect(denied.rows.map((r) => r.p)).toEqual(expect.arrayContaining(["provider.manage", "bot.manage"]));
+    }
+    expect((await call(admin, "GET", `/api/v1/agents/${agentId}`)).body).toMatchObject({ name: "Archie" });
+  });
+
+  it("every role reads bots and models (bot.read)", async () => {
+    for (const c of [admin, lead, alex, stan]) {
+      expect((await call(c, "GET", "/api/v1/agents")).status).toBe(200);
+      expect((await call(c, "GET", `/api/v1/agents/${agentId}`)).status).toBe(200);
+      expect((await call(c, "GET", "/api/v1/models")).status).toBe(200);
+    }
+    expect((await new TestClient(stack.baseUrl).request("GET", "/api/v1/agents")).status).toBe(401);
+  });
+
+  it("an explicit deny on provider.manage for the admin role beats the role (layer org)", async () => {
+    const drop = await denyRule("role", "admin", "provider.manage");
+    try {
+      const res = await call(admin, "POST", "/api/v1/model-providers", {
+        provider: "anthropic",
+        allowedModels: ["claude-sonnet-5-5"],
+      });
+      expect(res.status).toBe(403);
+      expect(errorOf(res)).toMatchObject({
+        code: "forbidden",
+        details: { permission: "provider.manage", layer: "org", reason: "denied_by_rule" },
+      });
+      // Bots stay manageable: the rule names one permission only.
+      expect((await call(admin, "GET", `/api/v1/agents/${agentId}`)).status).toBe(200);
+    } finally {
+      await drop();
+    }
+    expect((await call(admin, "GET", "/api/v1/model-providers")).status).toBe(200);
+  });
+
+  it("provider and bot audit rows carry the caller's client kind (desktop)", async () => {
+    const res = await fetch(`${stack.baseUrl}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { origin: WEB_ORIGIN, "content-type": "application/json", "user-agent": ELECTRON_UA },
+      body: JSON.stringify({ email: ADMIN.email, password: ADMIN.password }),
+    });
+    expect(res.status).toBe(200);
+    const desktop = new TestClient(stack.baseUrl);
+    for (const c of res.headers.getSetCookie()) {
+      const [pair = ""] = c.split(";");
+      const i = pair.indexOf("=");
+      desktop.cookies.set(pair.slice(0, i), pair.slice(i + 1));
+    }
+    const provider = await call(desktop, "POST", "/api/v1/model-providers", {
+      provider: "anthropic",
+      allowedModels: ["claude-sonnet-5-5", "claude-haiku-4-5"],
+    });
+    expect(provider.status).toBe(200);
+    // avatarUrl is not a cell field: no re-provisioning.
+    const bot = await call(desktop, "PATCH", `/api/v1/agents/${agentId}`, { avatarUrl: "🏗️" });
+    expect(bot.status).toBe(200);
+    const rows = await su.query(
+      `select action, client_kind from app.audit_events
+       where action in ('model_provider.updated', 'agent.updated') order by occurred_at desc limit 2`,
+    );
+    expect(rows.rows).toEqual(
+      expect.arrayContaining([
+        { action: "model_provider.updated", client_kind: "desktop" },
+        { action: "agent.updated", client_kind: "desktop" },
+      ]),
+    );
+    // The web session still records web.
+    await call(admin, "PATCH", `/api/v1/agents/${agentId}`, { avatarUrl: "🏛️" });
+    const web = await su.query(
+      "select client_kind from app.audit_events where action = 'agent.updated' order by occurred_at desc limit 1",
+    );
+    expect(web.rows[0].client_kind).toBe("web");
+  });
+});
+
 describe("cell sync + presence", () => {
   it("GET /cell delivers bots + decrypted provider credentials; ack flips provisioning → ready", async () => {
     const p = plugin({ autoAck: true });
@@ -405,8 +544,8 @@ describe("mention → delivery → reply", () => {
     expect(m.threadHistory.some((h) => h.id === mentionId)).toBe(false);
     expect(m.roster).toEqual(
       expect.arrayContaining([
-        { kind: "user", id: adminId, displayName: ADMIN.name, role: "owner" },
-        { kind: "user", id: alexId, displayName: "Alex", role: "member" },
+        { kind: "user", id: adminId, displayName: ADMIN.name, role: "admin" },
+        { kind: "user", id: alexId, displayName: "Alex", role: "developer" },
         { kind: "agent", id: agentId, displayName: "Archie", handle: "archie" },
       ]),
     );
@@ -495,6 +634,10 @@ describe("mention → delivery → reply", () => {
       idempotencyKey: "after-disable",
     });
     expect(res.status).toBe(403);
+    expect(errorOf(res as { body: Record<string, unknown> | null })).toMatchObject({
+      code: "agent_disabled",
+      details: { layer: "agent", reason: "agent_disabled" },
+    });
     // A disabled bot ignores ready acks.
     const ack = await p.request("POST", `/agents/${agentId}/status`, { status: "ready" });
     expect(ack.body).toMatchObject({ status: "disabled" });
@@ -508,10 +651,16 @@ describe("mention → delivery → reply", () => {
     const other = ((await call(admin, "POST", "/api/v1/channels", { name: "random" })).body as { id: string })
       .id;
     const base = { agentId, text: "hi", idempotencyKey: randomUUID() };
-    expect(
-      (await p.request("POST", "/messages", { ...base, conversationId: other, threadRootMessageId: null }))
-        .status,
-    ).toBe(403);
+    const outside = await p.request("POST", "/messages", {
+      ...base,
+      conversationId: other,
+      threadRootMessageId: null,
+    });
+    expect(outside.status).toBe(403);
+    expect(errorOf(outside as { body: Record<string, unknown> | null })).toMatchObject({
+      code: "agent_not_member",
+      details: { permission: "channel.post", layer: "resource", reason: "agent_not_member" },
+    });
     expect(
       (
         await p.request("POST", "/messages", {
@@ -566,6 +715,113 @@ describe("mention → delivery → reply", () => {
     await new Promise((r) => setTimeout(r, 300));
     expect(live.events).toHaveLength(0);
     expect(live.lastSeq).toBe(Number(all.at(-1)!.seq));
+  });
+});
+
+describe("the cell and its bots are principals", () => {
+  const errOf = (r: { body: unknown }) => errorOf(r as { body: Record<string, unknown> | null });
+  const reply = (p: FakeCellPlugin, extra: Record<string, unknown>) =>
+    p.request("POST", "/messages", {
+      agentId,
+      threadRootMessageId: null,
+      text: "bot says hi",
+      idempotencyKey: randomUUID(),
+      ...extra,
+    });
+
+  it("cell administration is cell.manage: a developer gets 403 on the runtime routes", async () => {
+    for (const [method, path] of [
+      ["GET", "/api/v1/agent-cell"],
+      ["POST", "/api/v1/agent-cell/token"],
+    ] as const) {
+      const res = await call(alex, method, path);
+      expect(res.status, path).toBe(403);
+      expect(errorOf(res).details).toMatchObject({ permission: "cell.manage", layer: "role" });
+    }
+  });
+
+  it("a deny rule on one bot refuses its replies on the agent layer", async () => {
+    const p = plugin();
+    const drop = await denyRule("agent", agentId, "channel.post");
+    try {
+      const res = await reply(p, { conversationId: channelId });
+      expect(res.status).toBe(403);
+      expect(errOf(res)).toMatchObject({
+        code: "forbidden",
+        details: { permission: "channel.post", layer: "agent", reason: "denied_by_rule" },
+      });
+      const denied = await su.query(
+        `select actor_kind, metadata from app.audit_events
+         where action = 'authz.denied' and resource_id = '/agent-channel/v1/messages' order by occurred_at desc limit 1`,
+      );
+      expect(denied.rows[0]).toMatchObject({
+        actor_kind: "agent",
+        metadata: { permission: "channel.post", layer: "agent" },
+      });
+    } finally {
+      await drop();
+    }
+    expect((await reply(p, { conversationId: channelId })).status).toBe(200);
+  });
+
+  it("a reply to a human who lost access to the private channel is refused and stores nothing", async () => {
+    const p = plugin();
+    const room = (await call(admin, "POST", "/api/v1/channels", { name: "board", visibility: "private" }))
+      .body as { id: string };
+    for (const member of [
+      { kind: "user", id: alexId },
+      { kind: "agent", id: agentId },
+    ]) {
+      expect((await call(admin, "POST", `/api/v1/channels/${room.id}/members`, member)).status).toBe(200);
+    }
+    const asked = (
+      await call(alex, "POST", `/api/v1/conversations/${room.id}/messages`, { body: "Is the roadmap final?" })
+    ).body as { id: string };
+    expect((await call(admin, "DELETE", `/api/v1/channels/${room.id}/members/user/${alexId}`)).status).toBe(
+      200,
+    );
+
+    const refused = await reply(p, {
+      conversationId: room.id,
+      threadRootMessageId: asked.id,
+      inReplyToMessageId: asked.id,
+    });
+    expect(refused.status).toBe(403);
+    expect(errOf(refused)).toMatchObject({ details: { layer: "resource", reason: "private_channel" } });
+    const stored = await su.query(
+      "select count(*)::int as n from app.messages where conversation_id = $1 and author_kind = 'agent'",
+      [room.id],
+    );
+    expect(stored.rows[0].n).toBe(0);
+
+    // The same bot still answers someone who can read the channel, in the thread.
+    const question = (
+      await call(admin, "POST", `/api/v1/conversations/${room.id}/messages`, { body: "And now?" })
+    ).body as { id: string };
+    const ok = await reply(p, {
+      conversationId: room.id,
+      threadRootMessageId: question.id,
+      inReplyToMessageId: question.id,
+    });
+    expect(ok.status).toBe(200);
+    expect(ok.body).toMatchObject({ created: true, threadRootMessageId: question.id });
+  });
+
+  it("typing is decided for the bot: a non-member is refused, a member is accepted", async () => {
+    const p = plugin();
+    const other = ((await call(admin, "POST", "/api/v1/channels", { name: "lounge" })).body as { id: string })
+      .id;
+    const outside = await p.request("POST", "/typing", { agentId, conversationId: other, typing: true });
+    expect(outside.status).toBe(403);
+    expect(errOf(outside)).toMatchObject({
+      code: "agent_not_member",
+      details: { permission: "channel.read", layer: "resource", reason: "agent_not_member" },
+    });
+    const inside = await p.request("POST", "/typing", { agentId, conversationId: channelId, typing: true });
+    expect(inside.status).toBe(200);
+    expect(
+      (await p.request("POST", "/typing", { agentId: randomUUID(), conversationId: channelId })).status,
+    ).toBe(404);
   });
 });
 
@@ -656,5 +912,24 @@ describe("cell tokens + tenant isolation", () => {
     for (const r of audit.rows) expect(r.m).not.toContain(PROVIDER_KEY);
     const events = await su.query("select payload::text as p from app.stream_events");
     for (const r of events.rows) expect(r.p).not.toContain(PROVIDER_KEY);
+  });
+});
+
+describe("every agent and agent-channel route is decided", () => {
+  it("declares its principal and answered no 2xx without a resolver decision", () => {
+    const { authz } = stack.built;
+    const prefixes = ["/agent-channel/v1", "/api/v1/agent-cell", "/api/v1/model-providers", "/api/v1/agents"];
+    const ours = [...authz.routes].filter(([key]) =>
+      prefixes.some((prefix) => key.split(" ")[1]?.startsWith(prefix)),
+    );
+    for (const [key, mode] of ours) {
+      expect(mode, key).toBe(key.split(" ")[1]!.startsWith("/agent-channel/v1") ? "cell" : "user");
+    }
+    expect(authz.routes.get("GET /agent-channel/v1/ws")).toBe("cell");
+    expect(authz.routes.get("POST /agent-channel/v1/messages")).toBe("cell");
+    expect(authz.routes.get("GET /api/v1/models")).toBe("user");
+    expect(
+      authz.undecided.filter((u) => [...prefixes, "/api/v1/models"].some((p) => u.url.startsWith(p))),
+    ).toEqual([]);
   });
 });

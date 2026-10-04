@@ -1,4 +1,4 @@
-import { ClientFrame, type DurableFrame, type ServerFrame } from "@ocw/contracts";
+import { ClientFrame, type DurableFrame, type ServerFrame, WS_AUTH_PROTOCOL_PREFIX } from "@ocw/contracts";
 import type { FastifyRequest } from "fastify";
 import type { WebSocket } from "ws";
 import type { App, AuthContext } from "../../core";
@@ -12,31 +12,76 @@ interface Subscription {
   stop: () => Promise<void>;
 }
 
-const SESSION_RECHECK_MS = 5 * 60_000;
+/** Backstop for revocations that never reached this instance (Redis down, expiry): Pitfall 5. */
+export const SESSION_RECHECK_MS = 5 * 60_000;
 const CLIENT_EPHEMERAL_TYPE = /^user\.[a-z_.]{1,40}$/;
 
+/** The `ocw.auth.<jwt>` entry of a `Sec-WebSocket-Protocol` header, without its prefix. */
+function offeredToken(header: string | string[] | undefined): string | null {
+  const offered = (Array.isArray(header) ? header.join(",") : (header ?? "")).split(",").map((p) => p.trim());
+  const entry = offered.find((p) => p.startsWith(WS_AUTH_PROTOCOL_PREFIX));
+  return entry ? entry.slice(WS_AUTH_PROTOCOL_PREFIX.length) || null : null;
+}
+
 /**
- * Browser realtime gateway `GET /ws` (research Pattern 5): Origin allowlist + cookie session BEFORE the
- * upgrade, then `sub`/`unsub`/`ping`/`eph` frames. Subscribe = authorize → listen (buffer) → replay from
+ * Browser realtime gateway `GET /ws` (research Pattern 5): Origin allowlist + access JWT (subprotocol
+ * `ocw.auth.<jwt>`) BEFORE the upgrade, then `sub`/`unsub`/`ping`/`eph` frames. Subscribe = authorize → listen (buffer) → replay from
  * PostgreSQL → flush buffer → live. Exactly-once per (topic, seq) for the client.
  */
 export function registerGateway(
   app: App,
-  deps: { realtime: RealtimeService; identity: IdentityService; allowedOrigins: Set<string> },
+  deps: {
+    realtime: RealtimeService;
+    identity: IdentityService;
+    allowedOrigins: Set<string>;
+    /** Session/member recheck interval for open sockets (tests lower it). */
+    sessionRecheckMs?: number;
+  },
 ) {
+  const recheckMs = deps.sessionRecheckMs ?? SESSION_RECHECK_MS;
+  // Open sockets of this API instance, so a revocation (Redis fan-out from any instance) closes them at once.
+  const open = new Set<{ sessionId: string; userId: string; socket: WebSocket }>();
+  let revocations: Promise<() => Promise<void>> | null = null;
+  const watchRevocations = () => {
+    revocations ??= deps.realtime.onRevocation((e) => {
+      for (const entry of open) {
+        if (e.sessionIds?.includes(entry.sessionId) || (e.userId && e.userId === entry.userId)) {
+          entry.socket.close(4401, "session revoked");
+        }
+      }
+    });
+    // A failed subscription is retried by the next connection.
+    revocations.catch(() => {
+      revocations = null;
+    });
+    return revocations;
+  };
+  app.addHook("onClose", async () => {
+    const stop = await revocations?.catch(() => null);
+    await stop?.();
+  });
+
   app.get(
     "/ws",
     {
       websocket: true,
+      // A user socket: the JWT authenticates it here, and every topic subscription is decided by the
+      // resolver's topic authorizers (02-06).
+      config: { authz: "user" },
       schema: { hide: true },
       onRequest: async (req, reply) => {
         const origin = req.headers.origin;
         if (!origin || !deps.allowedOrigins.has(origin)) {
           return reply.code(403).send({ error: { code: "forbidden_origin", message: "Origin not allowed" } });
         }
-        const auth = await deps.identity.authenticate(req.headers);
+        // AUTH-06: the access JWT arrives as a Sec-WebSocket-Protocol entry and is verified BEFORE the
+        // upgrade. Cookies no longer open the socket (D-01, T-02-08-05).
+        const token = offeredToken(req.headers["sec-websocket-protocol"]);
+        const auth = token ? await deps.identity.verifyAccessToken(token) : null;
         if (!auth)
           return reply.code(401).send({ error: { code: "unauthorized", message: "Sign in required" } });
+        // Subscribed before the upgrade completes, so no revocation can slip between accept and register.
+        await watchRevocations();
         req.auth = auth;
       },
     },
@@ -47,10 +92,21 @@ export function registerGateway(
         if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(frame));
       };
 
+      // The socket outlives its 10-minute JWT by design: it stays tied to the session, which must still
+      // exist (not signed out or expired) and belong to an active member.
+      const entry = { sessionId: auth.sessionId, userId: auth.userId, socket };
+      open.add(entry);
+
       const recheck = setInterval(async () => {
-        const still = await deps.identity.authenticate(req.headers).catch(() => null);
+        const still = await Promise.all([
+          deps.identity.isSessionActive(auth.sessionId),
+          deps.identity.isMemberActive(auth.organizationId, auth.userId),
+        ]).then(
+          ([session, member]) => session && member,
+          () => true, // a transient lookup failure is not a revocation; the next recheck decides
+        );
         if (!still) socket.close(4401, "session expired");
-      }, SESSION_RECHECK_MS);
+      }, recheckMs);
 
       const unsub = async (topic: string) => {
         const s = subs.get(topic);
@@ -143,6 +199,7 @@ export function registerGateway(
       });
 
       socket.on("close", () => {
+        open.delete(entry);
         clearInterval(recheck);
         for (const topic of [...subs.keys()]) void unsub(topic);
       });
