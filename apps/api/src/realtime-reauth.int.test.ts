@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import websocket from "@fastify/websocket";
 import { WS_AUTH_PROTOCOL_PREFIX, WS_PROTOCOL } from "@ocw/contracts";
 import Fastify from "fastify";
+import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import type { App, AuthContext } from "./core";
@@ -389,6 +390,179 @@ describe("overlapping subscribes (latest wins)", () => {
       s.socket.close();
       a.socket.close();
       await gw.close();
+    }
+  });
+});
+
+/** Records every live re-decision the stack's gateway makes (the gateway calls the service method per job). */
+function watchReauth() {
+  const rt = stack.built.core.realtime;
+  const original = rt.reauthorizeTopic;
+  const calls: Array<{ userId: string; topic: string; verdict: string }> = [];
+  rt.reauthorizeTopic = async (auth, topic) => {
+    const verdict = await original(auth, topic);
+    calls.push({ userId: auth.userId, topic, verdict });
+    return verdict;
+  };
+  return {
+    calls,
+    restore: () => {
+      rt.reauthorizeTopic = original;
+    },
+  };
+}
+
+const messageOn = (s: Sock, topic: string, from: number) =>
+  s.frames.slice(from).find((f) => f.op === "ev" && f.topic === topic && f.type === "message.created");
+
+describe("organization access changes re-decide live subscriptions (RT-01, D-05)", () => {
+  it("an explicit deny rule on channel.read revokes within a second; deleting it revokes nothing else", async () => {
+    const publicId = await channel("rules-watch", "public");
+    await ok(sam.request("POST", `/api/v1/channels/${publicId}/join`, {}));
+    const pub = `conv:${publicId}`;
+    const a = await openSocket(stack.baseUrl, await admin.token());
+    const s = await openSocket(stack.baseUrl, await sam.token());
+    let ruleId: string | null = null;
+    try {
+      await subscribe(a, pub, adminId);
+      await subscribe(s, pub, samId);
+      const t0 = Date.now();
+      const rule = await ok(
+        admin.request("POST", "/api/v1/permission-rules", {
+          subjectKind: "user",
+          subjectId: samId,
+          permission: "channel.read",
+          effect: "deny",
+        }),
+      );
+      ruleId = rule.id as string;
+      const revoked = await waitFor(() => revokedFor(s, pub), 1000);
+      console.info(`revocation latency (ms): deny rule=${revoked.at - t0}`);
+
+      await ok(admin.request("DELETE", `/api/v1/permission-rules/${ruleId}`));
+      ruleId = null;
+      await sleep(500);
+      expect(a.frames.some((f) => f.op === "revoked")).toBe(false);
+      expect(s.frames.filter((f) => f.op === "revoked").length).toBe(1);
+      // Access is back: Sam subscribes again and both keep streaming.
+      const from = s.frames.length;
+      await subscribe(s, pub, samId);
+      const aFrom = a.frames.length;
+      await ok(admin.request("POST", `/api/v1/conversations/${publicId}/messages`, { body: "rule gone" }));
+      await waitFor(() => messageOn(s, pub, from), 1000);
+      await waitFor(() => messageOn(a, pub, aFrom), 1000);
+    } finally {
+      if (ruleId) await admin.request("DELETE", `/api/v1/permission-rules/${ruleId}`);
+      a.socket.close();
+      s.socket.close();
+    }
+  });
+
+  it("a unit membership change re-decides Sam's subscriptions and keeps the ones still allowed", async () => {
+    const publicId = await channel("units-watch", "public");
+    const privateId = await channel("units-private", "private");
+    await ok(sam.request("POST", `/api/v1/channels/${publicId}/join`, {}));
+    await addSam(privateId);
+    const pub = `conv:${publicId}`;
+    const priv = `conv:${privateId}`;
+    const s = await openSocket(stack.baseUrl, await sam.token());
+    const spy = watchReauth();
+    try {
+      await subscribe(s, pub, samId);
+      await subscribe(s, priv, samId);
+      const unit = await ok(
+        admin.request("POST", "/api/v1/units", { kind: "department", name: "Ops", parentId: null }),
+      );
+      await ok(admin.request("POST", `/api/v1/units/${unit.id as string}/members`, { userId: samId }));
+      await waitFor(() => {
+        const mine = spy.calls.filter((c) => c.userId === samId);
+        return mine.some((c) => c.topic === pub) && mine.some((c) => c.topic === priv);
+      }, 1000);
+      expect(spy.calls.every((c) => c.verdict === "allowed")).toBe(true);
+      expect(revokedFor(s, pub)).toBeUndefined();
+      expect(revokedFor(s, priv)).toBeUndefined();
+      const from = s.frames.length;
+      await ok(admin.request("POST", `/api/v1/conversations/${publicId}/messages`, { body: "still here" }));
+      await ok(admin.request("POST", `/api/v1/conversations/${privateId}/messages`, { body: "still here" }));
+      await waitFor(() => messageOn(s, pub, from) && messageOn(s, priv, from), 1000);
+    } finally {
+      spy.restore();
+      s.socket.close();
+    }
+  });
+
+  it("a profile-only member update re-decides nothing", async () => {
+    const publicId = await channel("profile-watch", "public");
+    await ok(sam.request("POST", `/api/v1/channels/${publicId}/join`, {}));
+    const s = await openSocket(stack.baseUrl, await sam.token());
+    const spy = watchReauth();
+    try {
+      await subscribe(s, `conv:${publicId}`, samId);
+      s.send({ op: "sub", topic: `org:${orgId}` });
+      await waitFor(() => subscribedTo(s, `org:${orgId}`));
+      const from = s.frames.length;
+      await ok(sam.request("PATCH", "/api/v1/me/profile", { statusText: "heads down" }));
+      // The member.updated event itself arrives; no re-decision follows it.
+      await waitFor(() =>
+        s.frames
+          .slice(from)
+          .find((f) => f.op === "ev" && f.topic === `org:${orgId}` && f.type === "member.updated"),
+      );
+      await sleep(500);
+      expect(spy.calls).toEqual([]);
+    } finally {
+      spy.restore();
+      s.socket.close();
+    }
+  });
+});
+
+describe("periodic backstop (RT-01, T-03-06-03)", () => {
+  it("a lost invalidation is caught by the recheck: a silently removed member is revoked within a second", async () => {
+    const { realtime, identity, bus } = stack.built.core;
+    const mini = Fastify({ logger: false });
+    await mini.register(websocket, {
+      options: { handleProtocols: (p: Set<string>) => (p.has(WS_PROTOCOL) ? WS_PROTOCOL : false) },
+    });
+    const module = createRealtimeModule({
+      realtime,
+      identity,
+      bus,
+      allowedOrigins: new Set([WEB_ORIGIN]),
+      sessionRecheckMs: 200,
+    });
+    await mini.register(async (scope) => module.register(scope as unknown as App));
+    await mini.listen({ host: "127.0.0.1", port: 0 });
+    const addr = mini.server.address();
+    const base = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
+    const su = new pg.Client({ connectionString: stack.db.superuserUrl });
+    await su.connect();
+    const privateId = await channel("backstop", "private");
+    const publicId = await channel("backstop-open", "public");
+    await addSam(privateId);
+    await ok(sam.request("POST", `/api/v1/channels/${publicId}/join`, {}));
+    const priv = `conv:${privateId}`;
+    const pub = `conv:${publicId}`;
+    const s = await openSocket(base, await sam.token());
+    try {
+      await subscribe(s, priv, samId);
+      await subscribe(s, pub, samId);
+      await sleep(500); // a few recheck ticks: still allowed, nothing revoked
+      expect(revokedFor(s, priv)).toBeUndefined();
+      // No event, no invalidation: as if the message had been lost.
+      const t0 = Date.now();
+      await su.query(
+        "delete from app.conversation_members where conversation_id = $1 and member_kind = 'user' and member_id = $2",
+        [privateId, samId],
+      );
+      const revoked = await waitFor(() => revokedFor(s, priv), 1000);
+      console.info(`backstop revoked after ${revoked.at - t0} ms`);
+      await sleep(300);
+      expect(revokedFor(s, pub)).toBeUndefined();
+    } finally {
+      s.socket.close();
+      await su.end();
+      await mini.close();
     }
   });
 });

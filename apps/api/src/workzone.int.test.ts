@@ -776,6 +776,42 @@ describe("devices and Work Zone on the permission resolver", () => {
     expect(await subscribe(alex, topic)).toMatchObject({ op: "subscribed" });
   });
 
+  it("a role downgrade revokes a live Work Zone stream within a second (RT-01, D-05)", async () => {
+    const { id } = await newSession({ title: "Live access" });
+    const topic = `ws:${id}`;
+    const members = (await admin.request("GET", "/api/v1/members")).body!.members as Array<{
+      userId: string;
+      email: string | null;
+    }>;
+    const alexId = members.find((m) => m.email === "alex@example.test")!.userId;
+    const ws = new WebSocket(
+      `${stack.baseUrl.replace(/^http/, "ws")}/ws`,
+      [WS_PROTOCOL, `${WS_AUTH_PROTOCOL_PREFIX}${await alex.token()}`],
+      { headers: { origin: WEB_ORIGIN } },
+    );
+    const got: Array<Record<string, unknown> & { at: number }> = [];
+    ws.on("message", (d) => got.push({ ...JSON.parse(d.toString()), at: Date.now() }));
+    await new Promise((r) => ws.once("open", r));
+    try {
+      ws.send(JSON.stringify({ op: "sub", topic }));
+      await eventually(async () => got.find((f) => f.op === "subscribed" && f.topic === topic));
+      const t0 = Date.now();
+      const res = await admin.request("PATCH", `/api/v1/members/${alexId}/role`, { role: "standard" });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      const revoked = await eventually(
+        async () => got.find((f) => f.op === "revoked" && f.topic === topic),
+        1000,
+      );
+      expect(revoked).toMatchObject({ reason: "forbidden" });
+      console.info(`work zone revocation after role change: ${revoked.at - t0} ms`);
+    } finally {
+      ws.close();
+      const restored = await admin.request("PATCH", `/api/v1/members/${alexId}/role`, { role: "developer" });
+      expect(restored.status, JSON.stringify(restored.body)).toBe(200);
+    }
+    expect(await subscribe(alex, topic)).toMatchObject({ op: "subscribed" });
+  });
+
   it("devices: a developer pairs; update is owner-only, revoke is owner or admin; viewerCan per device", async () => {
     // Alex (developer, like an MVP 0 member) pairs a device of their own.
     const code = await alex.request("POST", "/api/v1/devices/enrollments");
