@@ -93,7 +93,62 @@ describe("RealtimeClient", () => {
     expect(c.status.getState().status).toBe("open");
   });
 
-  it("stops on 4401", () => {
+  it("on 4401 with getToken forces one token refresh and reconnects; a second 4401 before subscribing stops", async () => {
+    let n = 0;
+    const getToken = vi.fn(async (_o: { force: boolean }) => `tok${++n}`);
+    const c = new RealtimeClient({ url: "ws://x/ws", WebSocket: FakeWS, getToken });
+    c.subscribe(T, () => {});
+    c.connect();
+    await flush();
+    FakeWS.last!.open();
+    FakeWS.last!.drop(4401);
+    await flush();
+    expect(getToken).toHaveBeenLastCalledWith({ force: true });
+    expect(FakeWS.all).toHaveLength(2);
+    expect(FakeWS.last!.protocols).toEqual(["ocw.v1", "ocw.auth.tok2"]);
+    expect(c.status.getState().status).not.toBe("closed");
+
+    FakeWS.last!.open();
+    FakeWS.last!.drop(4401); // still refused: give up and let the app re-authenticate
+    await flush();
+    expect(c.status.getState().status).toBe("closed");
+    expect(FakeWS.all).toHaveLength(2);
+    expect(getToken).toHaveBeenCalledTimes(2);
+  });
+
+  it("a successful subscribe re-arms the one-shot 4401 refresh", async () => {
+    const getToken = vi.fn(async (_o: { force: boolean }) => "tok");
+    const c = new RealtimeClient({ url: "ws://x/ws", WebSocket: FakeWS, getToken });
+    c.subscribe(T, () => {});
+    c.connect();
+    await flush();
+    for (let i = 0; i < 3; i++) {
+      FakeWS.last!.open();
+      FakeWS.last!.push({ op: "subscribed", topic: T, lastSeq: 0 });
+      FakeWS.last!.drop(4401);
+      await flush();
+    }
+    expect(FakeWS.all).toHaveLength(4);
+    expect(c.status.getState().status).not.toBe("closed");
+  });
+
+  it("on 4401 a forced refresh rejected with 401 (signed out) stops the client", async () => {
+    const getToken = vi
+      .fn<(o: { force: boolean }) => Promise<string>>()
+      .mockResolvedValueOnce("tok")
+      .mockRejectedValueOnce(Object.assign(new Error("signed out"), { status: 401 }));
+    const c = new RealtimeClient({ url: "ws://x/ws", WebSocket: FakeWS, getToken });
+    c.connect();
+    await flush();
+    FakeWS.last!.open();
+    FakeWS.last!.drop(4401);
+    await flush();
+    expect(getToken).toHaveBeenLastCalledWith({ force: true });
+    expect(c.status.getState().status).toBe("closed");
+    expect(FakeWS.all).toHaveLength(1);
+  });
+
+  it("stops on 4401 (client without getToken)", () => {
     const c = new RealtimeClient({ url: "ws://x/ws", WebSocket: FakeWS });
     c.connect();
     FakeWS.last!.open();

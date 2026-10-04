@@ -1,7 +1,12 @@
+import websocket from "@fastify/websocket";
 import { WS_AUTH_PROTOCOL_PREFIX, WS_PROTOCOL } from "@ocw/contracts";
+import Fastify from "fastify";
+import { decodeJwt } from "jose";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
+import type { App } from "./core";
+import { createRealtimeModule } from "./modules/realtime";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack, WEB_ORIGIN } from "./testing";
 
 let stack: TestStack;
@@ -16,6 +21,27 @@ afterAll(async () => {
   await su?.end();
   await stack?.stop();
 });
+
+/** Open an authenticated /ws socket; `closed` resolves with the close code (rejects after 3 s). */
+async function openSocket(baseUrl: string, token: string) {
+  const socket = new WebSocket(
+    `${baseUrl.replace("http", "ws")}/ws`,
+    [WS_PROTOCOL, `${WS_AUTH_PROTOCOL_PREFIX}${token}`],
+    {
+      headers: { origin: WEB_ORIGIN },
+    },
+  );
+  const closed = new Promise<{ code: number }>((resolve, reject) => {
+    socket.on("close", (code) => resolve({ code }));
+    setTimeout(() => reject(new Error("socket did not close within 3 s")), 3000).unref();
+  });
+  closed.catch(() => {});
+  await new Promise((resolve, reject) => {
+    socket.once("open", resolve);
+    socket.once("error", reject);
+  });
+  return { socket, closed };
+}
 
 const count = async (table: string) =>
   Number((await su.query(`select count(*)::int as n from ${table}`)).rows[0].n);
@@ -311,5 +337,92 @@ describe("identity + platform core", () => {
     await realtime.publishEphemeral(topic, "user.typing", { x: 1 });
     await waitFor(() => frames.some((f) => f.op === "eph"));
     ws.close();
+  });
+
+  it("WS: revocation closes the session's open sockets with 4401 within a second; other sessions stay open", async () => {
+    const { realtime } = stack.built.core;
+    const signIn = async (email: string, password: string) => {
+      const c = new TestClient(stack.baseUrl);
+      expect((await c.request("POST", "/api/auth/sign-in/email", { email, password })).status).toBe(200);
+      const token = await c.token();
+      return { token, sid: (decodeJwt(token) as { sid: string }).sid };
+    };
+    const a = await signIn(ADMIN.email, ADMIN.password);
+    const b = await signIn(ADMIN.email, ADMIN.password);
+    const alex = await signIn("alex@example.test", "another-long-password");
+    const adminId = (decodeJwt(a.token) as { sub: string }).sub;
+    const [wsA, wsB, wsAlex] = await Promise.all([
+      openSocket(stack.baseUrl, a.token),
+      openSocket(stack.baseUrl, b.token),
+      openSocket(stack.baseUrl, alex.token),
+    ]);
+
+    const t0 = Date.now();
+    await realtime.publishRevocation({ sessionIds: [a.sid], reason: "session_revoked" });
+    expect(await wsA.closed).toMatchObject({ code: 4401 });
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(wsB.socket.readyState).toBe(WebSocket.OPEN);
+
+    const t1 = Date.now();
+    await realtime.publishRevocation({ userId: adminId, sessionIds: [], reason: "deactivated" });
+    expect(await wsB.closed).toMatchObject({ code: 4401 });
+    expect(Date.now() - t1).toBeLessThan(1000);
+    expect(wsAlex.socket.readyState).toBe(WebSocket.OPEN);
+    wsAlex.socket.close();
+  });
+
+  it("WS: the periodic recheck closes sockets whose session is gone or whose member was deactivated", async () => {
+    const mini = Fastify({ logger: false });
+    await mini.register(websocket, {
+      options: { handleProtocols: (p: Set<string>) => (p.has(WS_PROTOCOL) ? WS_PROTOCOL : false) },
+    });
+    const { realtime, identity } = stack.built.core;
+    const module = createRealtimeModule({
+      realtime,
+      identity,
+      allowedOrigins: new Set([WEB_ORIGIN]),
+      sessionRecheckMs: 100,
+    });
+    await mini.register(async (scope) => module.register(scope as unknown as App));
+    await mini.listen({ host: "127.0.0.1", port: 0 });
+    const addr = mini.server.address();
+    const base = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
+    try {
+      const admin = new TestClient(stack.baseUrl);
+      await admin.request("POST", "/api/auth/sign-in/email", {
+        email: ADMIN.email,
+        password: ADMIN.password,
+      });
+      const adminToken = await admin.token();
+      const alex = new TestClient(stack.baseUrl);
+      await alex.request("POST", "/api/auth/sign-in/email", {
+        email: "alex@example.test",
+        password: "another-long-password",
+      });
+      const alexToken = await alex.token();
+      const alexId = (decodeJwt(alexToken) as { sub: string }).sub;
+      const [wsAdmin, wsAlex] = await Promise.all([
+        openSocket(base, adminToken),
+        openSocket(base, alexToken),
+      ]);
+      await new Promise((r) => setTimeout(r, 250));
+      expect(wsAdmin.socket.readyState).toBe(WebSocket.OPEN);
+
+      // Session row deleted (signed out elsewhere, expired): the socket closes on the next recheck.
+      await su.query("delete from auth.session where id = $1", [
+        (decodeJwt(adminToken) as { sid: string }).sid,
+      ]);
+      expect(await wsAdmin.closed).toMatchObject({ code: 4401 });
+      expect(wsAlex.socket.readyState).toBe(WebSocket.OPEN);
+
+      await su.query("update app.org_members set deactivated_at = now() where user_id = $1", [alexId]);
+      try {
+        expect(await wsAlex.closed).toMatchObject({ code: 4401 });
+      } finally {
+        await su.query("update app.org_members set deactivated_at = null where user_id = $1", [alexId]);
+      }
+    } finally {
+      await mini.close();
+    }
   });
 });

@@ -12,7 +12,8 @@ interface Subscription {
   stop: () => Promise<void>;
 }
 
-const SESSION_RECHECK_MS = 5 * 60_000;
+/** Backstop for revocations that never reached this instance (Redis down, expiry): Pitfall 5. */
+export const SESSION_RECHECK_MS = 5 * 60_000;
 const CLIENT_EPHEMERAL_TYPE = /^user\.[a-z_.]{1,40}$/;
 
 /** The `ocw.auth.<jwt>` entry of a `Sec-WebSocket-Protocol` header, without its prefix. */
@@ -29,8 +30,37 @@ function offeredToken(header: string | string[] | undefined): string | null {
  */
 export function registerGateway(
   app: App,
-  deps: { realtime: RealtimeService; identity: IdentityService; allowedOrigins: Set<string> },
+  deps: {
+    realtime: RealtimeService;
+    identity: IdentityService;
+    allowedOrigins: Set<string>;
+    /** Session/member recheck interval for open sockets (tests lower it). */
+    sessionRecheckMs?: number;
+  },
 ) {
+  const recheckMs = deps.sessionRecheckMs ?? SESSION_RECHECK_MS;
+  // Open sockets of this API instance, so a revocation (Redis fan-out from any instance) closes them at once.
+  const open = new Set<{ sessionId: string; userId: string; socket: WebSocket }>();
+  let revocations: Promise<() => Promise<void>> | null = null;
+  const watchRevocations = () => {
+    revocations ??= deps.realtime.onRevocation((e) => {
+      for (const entry of open) {
+        if (e.sessionIds?.includes(entry.sessionId) || (e.userId && e.userId === entry.userId)) {
+          entry.socket.close(4401, "session revoked");
+        }
+      }
+    });
+    // A failed subscription is retried by the next connection.
+    revocations.catch(() => {
+      revocations = null;
+    });
+    return revocations;
+  };
+  app.addHook("onClose", async () => {
+    const stop = await revocations?.catch(() => null);
+    await stop?.();
+  });
+
   app.get(
     "/ws",
     {
@@ -47,6 +77,8 @@ export function registerGateway(
         const auth = token ? await deps.identity.verifyAccessToken(token) : null;
         if (!auth)
           return reply.code(401).send({ error: { code: "unauthorized", message: "Sign in required" } });
+        // Subscribed before the upgrade completes, so no revocation can slip between accept and register.
+        await watchRevocations();
         req.auth = auth;
       },
     },
@@ -59,6 +91,9 @@ export function registerGateway(
 
       // The socket outlives its 10-minute JWT by design: it stays tied to the session, which must still
       // exist (not signed out or expired) and belong to an active member.
+      const entry = { sessionId: auth.sessionId, userId: auth.userId, socket };
+      open.add(entry);
+
       const recheck = setInterval(async () => {
         const still = await Promise.all([
           deps.identity.isSessionActive(auth.sessionId),
@@ -68,7 +103,7 @@ export function registerGateway(
           () => true, // a transient lookup failure is not a revocation; the next recheck decides
         );
         if (!still) socket.close(4401, "session expired");
-      }, SESSION_RECHECK_MS);
+      }, recheckMs);
 
       const unsub = async (topic: string) => {
         const s = subs.get(topic);
@@ -161,6 +196,7 @@ export function registerGateway(
       });
 
       socket.on("close", () => {
+        open.delete(entry);
         clearInterval(recheck);
         for (const topic of [...subs.keys()]) void unsub(topic);
       });

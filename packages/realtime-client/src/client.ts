@@ -77,8 +77,8 @@ export class RealtimeClient {
   private stopped = true;
   /** Bumped on every open() and close(): a token that resolves for an older attempt is ignored. */
   private generation = 0;
-  /** The next getToken call must bypass the token cache (set after a 4401 close). */
-  private forceToken = false;
+  /** One forced token refresh per 4401; re-armed by a successful subscribe. */
+  private authRetried = false;
 
   constructor(options: RealtimeClientOptions) {
     const Ctor = options.WebSocket ?? (globalThis as { WebSocket?: WebSocketCtor }).WebSocket;
@@ -168,7 +168,8 @@ export class RealtimeClient {
 
   // ---- internals ----
 
-  private open(): void {
+  /** `force` bypasses the token cache (after the server closed the socket with 4401). */
+  private open({ force }: { force: boolean } = { force: false }): void {
     const prev = this.status.getState();
     this.status.setState({ status: prev.attempt > 0 ? "reconnecting" : "connecting" });
     const generation = ++this.generation;
@@ -177,8 +178,6 @@ export class RealtimeClient {
       this.construct();
       return;
     }
-    const force = this.forceToken;
-    this.forceToken = false;
     getToken({ force }).then(
       (token) => {
         if (this.stopped || generation !== this.generation) return;
@@ -226,7 +225,14 @@ export class RealtimeClient {
         t.replaying = false;
       }
       if (this.stopped) return;
-      // 4401 = session revoked/unauthenticated: stop and let the app re-authenticate.
+      // 4401 = session revoked or token rejected. With a token source, refresh it once and reconnect: a
+      // revoked session then fails the refresh with 401 and stops; a second 4401 before any successful
+      // subscribe stops too. Without one, stop and let the app re-authenticate.
+      if (ev.code === 4401 && this.opts.getToken && !this.authRetried) {
+        this.authRetried = true;
+        this.open({ force: true });
+        return;
+      }
       if (ev.code === 4401 || ev.code === 1008) {
         this.stopped = true;
         this.status.setState({ status: "closed", lastError: ev.reason ?? "unauthorized" });
@@ -300,6 +306,7 @@ export class RealtimeClient {
         return;
       }
       case "subscribed": {
+        this.authRetried = false;
         const s = this.topics.get(parsed.topic);
         if (s) {
           s.subscribed = true;
