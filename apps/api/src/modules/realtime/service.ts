@@ -105,10 +105,9 @@ function parseRevocation(raw: string): RevocationEvent | null {
 const channelOf = (topic: string) => `ocw:rt:${topic}`;
 
 export function createRealtimeService(deps: { db: TenantDb; bus: RedisBus }): RealtimeService {
+  // No built-in authorizers: every prefix is decided by the module that owns it (`org` and `user` by the
+  // organization module's resolver); a prefix nobody registered stays denied.
   const authorizers = new Map<TopicPrefix, TopicAuthorizer>();
-  // Defaults: personal and org-wide topics.
-  authorizers.set("user", (auth, id) => auth.userId === id);
-  authorizers.set("org", (auth, id) => auth.organizationId === id);
 
   const publish = (topic: string, frame: ServerFrame) =>
     deps.bus.publish(channelOf(topic), JSON.stringify(frame));
