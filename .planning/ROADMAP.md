@@ -311,7 +311,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 ‖
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 1. MVP 0 — Multiplayer AI Chat Slice | MVP 0 | 0/TBD | Not started | - |
+| 1. MVP 0 — Multiplayer AI Chat Slice | MVP 0 | demo build | In progress (scope widened 2026-10-02, see STATE) | - |
 | 2. Identity and Organization | MVP 1 | 0/TBD | Not started | - |
 | 3. Realtime Presence and Latency | MVP 1 | 0/TBD | Not started | - |
 | 4. Chat | MVP 1 | 0/TBD | Not started | - |

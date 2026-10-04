@@ -1,6 +1,6 @@
 ---
 gsd_state_version: '1.0'
-status: planning
+status: executing
 progress:
   total_phases: 12
   completed_phases: 0
@@ -21,9 +21,9 @@ See: .planning/PROJECT.md (updated 2026-10-02)
 ## Current Position
 
 Phase: 1 of 12 (MVP 0 — Multiplayer AI Chat Slice)
-Plan: 0 of TBD in current phase
-Status: Ready to plan
-Last activity: 2026-10-02 - Completed quick task 261002-fns: Restructure roadmap: Phase 1 becomes MVP 0 multiplayer AI chat slice
+Plan: built from 01-BUILD-SPEC.md (investor demo); formal PLAN.md files not produced
+Status: Demo build complete and verified locally; requirements re-mapping pending
+Last activity: 2026-10-04 - MVP 0 demo build integrated: chat (channels/threads/mentions), one-click OpenClaw bots, Work Zone (Claude Code + Codex on BYO subscriptions), Electron desktop; runbook docs/DEMO.md
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -64,7 +64,12 @@ Recent decisions affecting current work:
 
 None yet.
 
+- [Scope 2026-10-02]: Owner widened Phase 1 for the investor demo: Slack-style channels + threads + @mentions, OpenClaw bots from MVP 0 (one-click, model fixed per bot), Work Zone with desktop app and Claude Code/Codex on the user's own subscriptions. Built per 01-BUILD-SPEC.md by parallel agents, bypassing the formal plan-phase/execute-phase flow (owner delegated full control). REQUIREMENTS/ROADMAP still describe the earlier shared-AI-chat slice — re-map with /gsd-phase before Phase 2 planning.
+
 ### Blockers/Concerns
+
+- [Demo]: Bots need the owner's Anthropic (or other) API key in Settings › Models; none is configured on this machine.
+- [Infra]: Docker VM disk is ~100% full (other projects' data); full `docker compose up` with API/web images not re-verified after integration — demo runs API/web natively (`pnpm demo:up`).
 
 - [Work Zone]: Decided 2026-10-02 — each customer runs the Work Zone with their OWN Claude Code / Codex subscription logins on their OWN device (BYO subscription; we never provide, pool or proxy subscriptions). API keys are not required. Residual check: confirm vendor terms allow a self-hosted harness to drive the official CLIs/SDKs with the user's own login.
 - [Phase 8]: Decide in `packages/contracts` whether Work Zone prompts/assistant messages are also `messages` rows in a `work_session` conversation (PITFALLS position, recommended) or stream events only.

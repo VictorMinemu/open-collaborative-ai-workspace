@@ -1,0 +1,68 @@
+# MVP 0 demo runbook
+
+What the demo shows, end to end, on one Mac:
+
+1. **Chat** — Slack-style channels and single-level threads, live for every member, with `@mentions`.
+2. **Bots in one click** — create an OpenClaw-backed bot from a preset, add it to a channel, mention it
+   and it answers in the thread, knowing who asked and who else is in the conversation.
+3. **Work Zone** — pair your computer with the desktop app, run Claude Code or Codex on a registered
+   repository with **your own subscription**, while the session (prompts, queue, approvals, diff) lives
+   in the platform and can be followed and steered from the web.
+
+## Start
+
+```bash
+pnpm demo:up            # postgres + redis (compose), API :4000, web :3000, OpenClaw cell (container)
+pnpm demo:up --rebuild  # same, rebuilding the web app first (after pulling changes)
+```
+
+Logs: `~/.ocw-demo/logs/`. The OpenClaw cell logs: `docker logs ocw-demo-openclaw`.
+
+## Demo data
+
+```bash
+pnpm demo:reset                               # wipes the LOCAL database and seeds the demo workspace
+ANTHROPIC_API_KEY=sk-ant-… pnpm demo:reset    # same, plus the Anthropic provider and three bots
+```
+
+Seeded workspace: organization **Autofy Labs**; people Víctor Ruiz (owner), Alex Kim, Marta López,
+Sam Patel (`<name>@autofylabs.demo`); channels `#general`, `#producto`, `#ingenieria`, `#lanzamiento`
+with a short history. The password for every demo user is printed at the end of the seed and stored in
+`.env.demo` (git-ignored). With a key, bots **@archie** (product), **@nova** (code review) and
+**@iris** (research) are created on Claude Sonnet 5.5 and added to their channels.
+
+## Script (≈ 5 minutes)
+
+1. **Sign in** at http://localhost:3000 as `victor@autofylabs.demo`. Open `#producto`.
+2. **Model** — Settings › Models → Anthropic → paste the API key (stored encrypted, never shown again).
+   Skip if you seeded with `ANTHROPIC_API_KEY`.
+3. **Bot in one click** — Bots › New bot → pick the *Product Manager* preset → Create. The card goes
+   *Provisioning → Ready* live (the OpenClaw cell provisions it). *Add to channel* → `#producto`.
+4. **Mention** — in `#producto`, reply in a thread: `@archie resume las entrevistas en 3 puntos`. The
+   typing indicator appears and the answer lands in the thread, attributed to the bot. Open a second
+   browser (or a private window) as `alex@autofylabs.demo` to show it live for two people.
+5. **Desktop + Work Zone** — open `apps/desktop/release/mac-arm64/OCW.app` (first time: right-click ›
+   Open, it is ad-hoc signed). Server `http://localhost:3000`. In the web: Settings › Devices › Add
+   device → copy the code → paste it in the app. In the app: *Add project…* → pick a git repository
+   (for "the product improves itself", a clone of this repository).
+6. **Work Zone session** — Work Zone › New session → your Mac, the project, **Claude Code** (or
+   **Codex**), permission mode *Plan* (safe) or *Default* (asks before editing). Prompt, e.g.
+   *"Propose one small UX improvement for the chat composer"*. Show the live stream, tool cards, the
+   shared queue (add a second prompt as Alex), the approval banner, and the Changes panel.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| Bot stays *Provisioning* | `docker logs ocw-demo-openclaw` — the cell must show `subscribed to cell`; run `pnpm demo:up` again |
+| Bot answers "Sorry, I couldn't generate a reply" | provider key missing/invalid in Settings › Models |
+| Device offline | the desktop app must be running (menu-bar icon); Claude Code / Codex must be logged in (`claude`, `codex login`) |
+| Cell crash-loops with "Another Gateway owner lease" | it was killed hard: `docker rm -f ocw-demo-openclaw && docker volume rm ocw-demo-openclaw-state && pnpm demo:up` |
+
+## Known limits (MVP 0)
+
+Desktop app is ad-hoc signed (no notarization); its main window loads the web app URL. Bots have no
+tools (by design for MVP 0). No DMs, reactions, message edit/delete, search or attachments yet. Full
+`docker compose up` (with API/web images) is defined but was not re-run on this machine because the
+Docker disk is full; the demo runs API/web natively. See
+`.planning/phases/01-mvp-0-multiplayer-ai-chat-slice/01-DEVIATIONS.md`.
