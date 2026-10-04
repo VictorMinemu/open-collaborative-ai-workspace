@@ -254,13 +254,46 @@ describe("tenant isolation (RLS)", () => {
       } finally {
         await su.end();
       }
-      await expect.poll(() => errors.length).toBe(1);
+      await expect.poll(() => errors.length).toBeGreaterThan(0);
       const n = await db.withTenant({ organizationId: A }, async (tx) => {
         const r = await tx.execute("select count(*)::int as n from app.conversations");
         return (r.rows[0] as { n: number }).n;
       });
       expect(n).toBe(2);
     } finally {
+      await db.close();
+    }
+  });
+
+  it("survives Postgres killing a connection that is checked out mid-transaction (no crash)", async () => {
+    const errors: Error[] = [];
+    const uncaught: unknown[] = [];
+    const onUncaught = (e: unknown) => uncaught.push(e);
+    process.on("uncaughtException", onUncaught);
+    const db: TenantDb = createTenantDb(tdb.appUrl, { max: 1, onIdleError: (e) => errors.push(e) });
+    try {
+      const attempt = db.withTenant({ organizationId: A }, async (tx) => {
+        const pid = ((await tx.execute("select pg_backend_pid() as pid")).rows[0] as { pid: number }).pid;
+        const su = new pg.Client({ connectionString: tdb.superuserUrl });
+        await su.connect();
+        try {
+          await su.query("select pg_terminate_backend($1)", [pid]);
+        } finally {
+          await su.end();
+        }
+        await new Promise((r) => setTimeout(r, 200));
+        await tx.execute("select 1");
+      });
+      await expect(attempt).rejects.toThrow();
+      await expect.poll(() => errors.length).toBeGreaterThan(0);
+      expect(uncaught).toEqual([]);
+      const n = await db.withTenant({ organizationId: A }, async (tx) => {
+        const r = await tx.execute("select count(*)::int as n from app.conversations");
+        return (r.rows[0] as { n: number }).n;
+      });
+      expect(n).toBe(2);
+    } finally {
+      process.off("uncaughtException", onUncaught);
       await db.close();
     }
   });

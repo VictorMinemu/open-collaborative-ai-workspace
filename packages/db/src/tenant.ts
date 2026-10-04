@@ -69,6 +69,12 @@ export function createTenantDb(
   // An idle client whose connection drops (Postgres restart, admin termination) emits `error` on the
   // pool; unhandled, that crashes the process. The client is discarded and the next query reconnects.
   pool.on("error", (error) => opts.onIdleError?.(error));
+  // A checked-out client whose connection drops (e.g. mid-transaction during a Postgres restart) emits
+  // `error` on the client itself, where the pool's idle listener is not attached: without this listener
+  // the process crashes. The in-flight query still rejects normally; the pool discards the dead client.
+  pool.on("connect", (client) => {
+    client.on("error", (error) => opts.onIdleError?.(error));
+  });
   const db = drizzle({ client: pool });
 
   async function withTenant<T>(ctx: TenantCtx, fn: (tx: Tx, afterCommit: AfterCommit) => Promise<T>) {
