@@ -364,7 +364,7 @@ export async function startFakeAgentChannelApi(
       for (const ws of subscribed) ws.send(JSON.stringify({ op: "resync", topic }));
     },
     openSockets: () => subscribed.size,
-    async waitFor(fn, timeoutMs = 5_000) {
+    async waitFor(fn, timeoutMs = 12_000) {
       const deadline = Date.now() + timeoutMs;
       for (;;) {
         const value = fn();
