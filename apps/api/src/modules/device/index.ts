@@ -2,6 +2,7 @@ import type { ApiModule, Core } from "../../core";
 import { DeviceHub } from "./hub";
 import { registerDeviceLink } from "./link";
 import { registerDeviceRoutes } from "./routes";
+import { registerDeviceTokenRoute } from "./token";
 
 export {
   type DeviceCommandRow,
@@ -19,8 +20,9 @@ export interface DeviceModule extends ApiModule {
 }
 
 /**
- * device module: pairing (enrollment codes → device tokens), devices list/rename/share/revoke, projects
- * announced by devices, and the Device Link `GET /runtime/ws` (mounted at the root).
+ * device module: pairing (enrollment codes → device tokens), the device-token → device-JWT exchange,
+ * devices list/rename/share/revoke, projects announced by devices, and the Device Link `GET /runtime/ws`
+ * (mounted at the root).
  */
 export function createDeviceModule(core: Core): DeviceModule {
   const graceEnv = Number(process.env.OCW_DEVICE_OFFLINE_GRACE_MS);
@@ -37,9 +39,13 @@ export function createDeviceModule(core: Core): DeviceModule {
     hub,
     register(app) {
       registerDeviceLink(app, core, hub);
-      app.register(async (scope) => registerDeviceRoutes(scope as typeof app, core, hub), {
-        prefix: "/api/v1",
-      });
+      app.register(
+        async (scope) => {
+          registerDeviceRoutes(scope as typeof app, core, hub);
+          registerDeviceTokenRoute(scope as typeof app, core);
+        },
+        { prefix: "/api/v1" },
+      );
     },
     async close() {
       await hub.closeAll();

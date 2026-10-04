@@ -63,6 +63,16 @@ export const EnvSchema = z
       .string()
       .default("")
       .transform((v) => v.trim() || DEFAULT_MAIL_FROM),
+    /**
+     * Accept the raw device token on the Device Link (`/runtime/ws`) from desktop apps built before Phase 2,
+     * which do not exchange it for a device JWT first (D-03). Every use is warned and audited
+     * (`device.legacy_token_used`, at most once per device per hour). Removed in Phase 8 together with the
+     * raw device token (RFC 8628 device grant).
+     */
+    OCW_ACCEPT_LEGACY_DEVICE_TOKEN: z
+      .enum(["true", "false"])
+      .default("true")
+      .transform((v) => v === "true"),
   })
   .superRefine((v, ctx) => {
     if (v.OCW_SMTP_URL === "memory:" && v.NODE_ENV !== "test") {

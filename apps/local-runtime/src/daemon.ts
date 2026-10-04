@@ -7,6 +7,7 @@ import {
   ApprovalResolvePayload,
   type CommandFrame,
   DEVICE_LINK_PROTOCOL_VERSION,
+  DeviceAccessToken,
   type DeviceToServerFrame,
   DiffRequestPayload,
   PromptPayload,
@@ -39,6 +40,25 @@ import { sanitizeEvent, sanitizeString, sanitizeValue } from "./sanitize.js";
 export const DAEMON_VERSION = "0.0.0";
 const DETECT_CACHE_MS = 60_000;
 const MAX_REMEMBERED_COMMANDS = 1000;
+/** A cached device JWT is replaced once fewer than this many milliseconds of validity remain. */
+export const ACCESS_TOKEN_REFRESH_MARGIN_MS = 60_000;
+const TOKEN_EXCHANGE_TIMEOUT_MS = 10_000;
+
+/** `POST {serverUrl}/api/v1/devices/token`: device token → 10-minute device JWT (keeps any path prefix). */
+export function toDeviceTokenUrl(serverUrl: string): string {
+  const u = new URL(serverUrl);
+  u.pathname = `${u.pathname.replace(/\/$/, "")}/api/v1/devices/token`;
+  u.search = "";
+  u.hash = "";
+  return u.toString();
+}
+
+/** The server refused the device token (revoked or unknown device); retried with the link's backoff. */
+export class DeviceTokenRejectedError extends Error {
+  constructor(readonly status: number) {
+    super(`device token rejected by server (HTTP ${status})`);
+  }
+}
 
 export interface DaemonOptions {
   /** Defaults to OCW_HOME or ~/.ocw */
@@ -84,6 +104,9 @@ export class Daemon {
   private readonly processedCommands = new Set<string>();
   private detectCache: { at: number; value: RuntimeInfo[] } | null = null;
   private started = false;
+  /** The current device JWT (never logged). */
+  private accessToken: { token: string; expiresAtMs: number } | null = null;
+  private legacyServerWarned = false;
 
   private constructor(
     readonly home: string,
@@ -145,6 +168,7 @@ export class Daemon {
     this.link = new DeviceLink({
       url: toWebSocketUrl(this.config.serverUrl),
       token: this.token,
+      getAccessToken: ({ refresh }) => this.getAccessToken(refresh),
       onOpenFrames: () => this.handshakeFrames(),
       onCommand: (cmd) => void this.handleCommand(cmd),
       logger: this.log,
@@ -182,6 +206,48 @@ export class Daemon {
 
   // -------------------------------------------------------------------------------------------
   // Device Link
+
+  /**
+   * Bearer credential for the next Device Link connect: a 10-minute device JWT exchanged for the device
+   * token, cached until fewer than 60 s remain. A server without the exchange (404, built before Phase 2)
+   * gets the raw device token. A refused device token (401/403) is logged and rethrown so the link backs
+   * off. Neither token is ever logged.
+   */
+  private async getAccessToken(refresh = false): Promise<string> {
+    const deviceToken = this.token;
+    if (!deviceToken) throw new Error("device is not paired");
+    const cached = this.accessToken;
+    if (!refresh && cached && cached.expiresAtMs - Date.now() > ACCESS_TOKEN_REFRESH_MARGIN_MS) {
+      return cached.token;
+    }
+    this.accessToken = null;
+    const res = await fetch(toDeviceTokenUrl(this.config.serverUrl), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${deviceToken}` },
+      signal: AbortSignal.timeout(TOKEN_EXCHANGE_TIMEOUT_MS),
+    });
+    if (res.status === 404) {
+      await res.body?.cancel();
+      if (!this.legacyServerWarned) {
+        this.legacyServerWarned = true;
+        this.log.warn("server has no device token exchange; connecting with the device token");
+      }
+      return deviceToken;
+    }
+    if (res.status === 401 || res.status === 403) {
+      await res.body?.cancel();
+      this.log.error("device token rejected by server", { status: res.status });
+      throw new DeviceTokenRejectedError(res.status);
+    }
+    if (!res.ok) {
+      await res.body?.cancel();
+      throw new Error(`device token exchange failed (HTTP ${res.status})`);
+    }
+    const parsed = DeviceAccessToken.safeParse(await res.json().catch(() => null));
+    if (!parsed.success) throw new Error("device token exchange returned an invalid answer");
+    this.accessToken = { token: parsed.data.token, expiresAtMs: Date.parse(parsed.data.expiresAt) };
+    return parsed.data.token;
+  }
 
   private async detectRuntimes(): Promise<RuntimeInfo[]> {
     if (this.detectCache && Date.now() - this.detectCache.at < DETECT_CACHE_MS) return this.detectCache.value;
