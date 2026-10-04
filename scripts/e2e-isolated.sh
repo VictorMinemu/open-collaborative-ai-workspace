@@ -82,6 +82,20 @@ for p in "$API_PORT" "$WEB_PORT"; do
 done
 
 # ---------------------------------------------------------------- database + redis (e2e only)
+# Reuse the already-running postgres/redis even when this script runs from another git worktree
+# (each worktree would otherwise get its own empty compose project): adopt the compose project of the
+# postgres container that publishes OCW_POSTGRES_PORT.
+if [ -z "${COMPOSE_PROJECT_NAME:-}" ]; then
+  pg_port="$(grep -E '^OCW_POSTGRES_PORT=' .env 2>/dev/null | cut -d= -f2)"
+  pg_port="${pg_port:-54329}"
+  for c in $(docker ps -q --filter label=com.docker.compose.service=postgres); do
+    if docker port "$c" 5432 2>/dev/null | grep -q ":${pg_port}\$"; then
+      COMPOSE_PROJECT_NAME="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$c")"
+      export COMPOSE_PROJECT_NAME
+      break
+    fi
+  done
+fi
 if [ -z "$(docker compose ps --status running -q postgres)" ] || [ -z "$(docker compose ps --status running -q redis)" ]; then
   docker compose up -d --wait postgres redis   # only when they are not running; never stops anything
 fi
