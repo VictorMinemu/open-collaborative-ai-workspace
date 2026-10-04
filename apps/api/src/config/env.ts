@@ -6,6 +6,8 @@ import { z } from "zod";
  * message naming the missing/invalid variable. Nothing is generated at boot.
  */
 const Url = z.url();
+/** Sign-in attempts per IP per minute; production default 30 (credential-stuffing brake). */
+export const SignInRatePerMinute = z.coerce.number().int().min(1).max(10_000).default(30);
 const DEFAULT_MAIL_FROM = "Open Collaborative AI Workspace <no-reply@localhost>";
 
 export const EnvSchema = z
@@ -58,7 +60,7 @@ export const EnvSchema = z
      * Sign-in attempts per IP per minute (credential-stuffing brake). Keep the default in production;
      * only test harnesses that sign many browsers in from one IP raise it.
      */
-    OCW_SIGNIN_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(1).max(10_000).default(30),
+    OCW_SIGNIN_RATE_LIMIT_PER_MINUTE: SignInRatePerMinute,
     OCW_SMTP_URL: z
       .string()
       .regex(/^(smtps?:\/\/\S+|memory:)$/, "must be an smtp:// or smtps:// URL")
