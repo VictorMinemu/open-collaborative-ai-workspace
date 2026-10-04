@@ -1,8 +1,37 @@
 # E2E override: docker compose -f compose.yaml -f compose.e2e.yaml up -d --build --wait
 # Deterministic, offline-safe settings for Playwright. CI never receives a metered model key.
 services:
+  fake-model:
+    build:
+      context: .
+      dockerfile: infra/fake-model/Dockerfile
+    image: ocw-fake-model:local
+    environment:
+      FAKE_MODEL_IDS: mock-1,mock-2
+    networks:
+      - ocw-internal
+
+  openclaw:
+    networks: !override
+      - ocw-internal
+    depends_on:
+      fake-model:
+        condition: service_healthy
+
+  # The API must also be reachable on the internal network (it keeps its default network too).
   api:
     environment:
       LOG_LEVEL: warn
-      # Model calls in E2E always use the mock provider (B2 wires OCW_MODEL_PROVIDER for bots).
       OCW_MODEL_PROVIDER: mock
+      OCW_MOCK_MODEL_BASE_URL: http://fake-model:18999/v1
+    networks:
+      - default
+      - ocw-internal
+
+networks:
+  ocw-internal:
+    internal: true
+    # Hosts with many compose projects can exhaust Docker's default pools; pin a subnet if needed:
+    # ipam:
+    #   config:
+    #     - subnet: 10.231.79.0/24

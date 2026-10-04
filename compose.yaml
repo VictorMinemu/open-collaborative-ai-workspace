@@ -72,7 +72,7 @@ services:
       OCW_PUBLIC_API_URL: ${OCW_PUBLIC_API_URL:-http://localhost:4000}
       OCW_TRUSTED_ORIGINS: ${OCW_TRUSTED_ORIGINS:-}
       # Bots: bearer token shared with the openclaw cell (Agent Channel API scope only).
-      OCW_CELL_TOKEN: ${OCW_CELL_TOKEN:-}
+      OCW_CELL_TOKEN: ${OCW_CELL_TOKEN:?Set OCW_CELL_TOKEN in .env (run pnpm setup:env)}
       OCW_MODEL_PROVIDER: ${OCW_MODEL_PROVIDER:-}
       OCW_MOCK_MODEL_BASE_URL: ${OCW_MOCK_MODEL_BASE_URL:-http://fake-model:18999/v1}
     ports:
@@ -98,5 +98,40 @@ services:
       api:
         condition: service_healthy
 
+  # OpenClaw cell (one per organization): bots run here and talk ONLY to the Agent Channel API.
+  # The gateway/admin port binds loopback inside the container and is never published. Model provider
+  # keys are not configured here: admins add them in Settings › Models and the cell receives them over
+  # the authenticated Agent Channel. See infra/openclaw/README.md.
+  openclaw:
+    build:
+      context: .
+      dockerfile: infra/openclaw/Dockerfile
+    image: ocw-openclaw:local
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      OCW_API_URL: http://api:4000
+      OCW_CELL_TOKEN_FILE: /run/secrets/ocw_cell_token
+      # The gateway peaks around 1.1-1.2 GB RSS during a turn; cap the V8 heap.
+      NODE_OPTIONS: ${OCW_CELL_NODE_OPTIONS:---max-old-space-size=512}
+    secrets:
+      - ocw_cell_token
+    volumes:
+      - openclaw-state:/home/node/.openclaw
+    healthcheck:
+      test: ["CMD", "node", "dist/docker-healthcheck.js"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 6
+    depends_on:
+      api:
+        condition: service_healthy
+
+secrets:
+  ocw_cell_token:
+    environment: OCW_CELL_TOKEN
+
 volumes:
   pgdata:
+  openclaw-state:
