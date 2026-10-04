@@ -4,6 +4,7 @@ import {
   aggregatePresence,
   type ConnectionState,
   type ConnectionStatus,
+  createActivityMonitor,
   type PresenceSnapshot,
   type PresentUser,
   RealtimeClient,
@@ -17,6 +18,34 @@ import { useRuntimeConfig } from "./config";
 import { useMe } from "./queries";
 
 const RealtimeContext = createContext<RealtimeClient | null>(null);
+
+/** Input events that count as activity (RT-04 away); forwarded at most once per second. */
+const ACTIVITY_EVENTS = ["pointerdown", "pointermove", "keydown", "wheel", "touchstart", "focus"] as const;
+const ACTIVITY_FORWARD_MS = 1000;
+
+/**
+ * Reports this tab's Away/Active state to the client (RT-04, 03-02 D-04): hidden tab → away at once; 5 minutes
+ * without input in a visible tab → away; input or showing the tab again → online. Returns the cleanup.
+ */
+function reportActivity(client: RealtimeClient): () => void {
+  const monitor = createActivityMonitor({ onChange: (s) => client.setPresence(s) });
+  const onVisibility = () => monitor.visibility(document.visibilityState === "hidden");
+  let lastForward = 0;
+  const onActivity = () => {
+    const now = Date.now();
+    if (now - lastForward < ACTIVITY_FORWARD_MS) return;
+    lastForward = now;
+    monitor.activity();
+  };
+  onVisibility();
+  document.addEventListener("visibilitychange", onVisibility);
+  for (const type of ACTIVITY_EVENTS) window.addEventListener(type, onActivity, { passive: true });
+  return () => {
+    document.removeEventListener("visibilitychange", onVisibility);
+    for (const type of ACTIVITY_EVENTS) window.removeEventListener(type, onActivity);
+    monitor.dispose();
+  };
+}
 
 /**
  * One RealtimeClient (one WebSocket) per signed-in browser tab. Created when `/me` resolves, closed on
@@ -33,9 +62,11 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!sessionId) return;
     const c = new RealtimeClient({ url: wsUrl, getToken: (o) => getAccessToken(o) });
+    const stopReporting = reportActivity(c);
     c.connect();
     setClient(c);
     return () => {
+      stopReporting();
       c.close();
       clearAccessToken();
       setClient(null);

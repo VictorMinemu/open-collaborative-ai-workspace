@@ -227,6 +227,28 @@ export function registerGateway(
         if (!still) socket.close(4401, "session expired");
       }, recheckMs);
 
+      /**
+       * RT-04 away (03-02, T-03-02-01): the frame names no user, topic or connection, so it can only change this
+       * socket's own entries. Every joined presence topic is updated; the commands are queued in order on the one
+       * Redis connection, so a later change or leave always lands after this one. Joins made afterwards already use
+       * `conn.presenceState`.
+       */
+      const setOwnState = async (to: "online" | "away") => {
+        const from = conn.presenceState;
+        if (to === from) return;
+        conn.presenceState = to;
+        const updates: Promise<void>[] = [];
+        for (const [topic, sub] of subs) {
+          if (!sub.presenceJoined) continue;
+          updates.push(
+            presence
+              .setState(auth.organizationId, topic, conn.id, auth.userId, from, to)
+              .catch((err: unknown) => req.log.warn({ err, topic }, "presence state change failed")),
+          );
+        }
+        await Promise.all(updates);
+      };
+
       /** After `subscribed`: join the topic's presence, send the snapshot, then flush buffered deltas. */
       const joinPresence = async (topic: string, sub: Subscription) => {
         sub.presenceJoined = true;
@@ -331,6 +353,9 @@ export function registerGateway(
             return;
           case "unsub":
             void unsub(frame.topic);
+            return;
+          case "presence":
+            void setOwnState(frame.state);
             return;
           case "eph": {
             if (!subs.has(frame.topic) || !CLIENT_EPHEMERAL_TYPE.test(frame.type)) {

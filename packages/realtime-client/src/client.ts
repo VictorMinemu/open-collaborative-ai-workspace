@@ -2,6 +2,8 @@ import {
   ClientFrame,
   type DurableFrame,
   type EphemeralFrame,
+  PRESENCE_CLIENT_THROTTLE_MS,
+  type PresenceState,
   ServerFrame,
   WS_AUTH_PROTOCOL_PREFIX,
   WS_PROTOCOL,
@@ -84,6 +86,11 @@ export class RealtimeClient {
   private generation = 0;
   /** One forced token refresh per 4401; re-armed by a successful subscribe. */
   private authRetried = false;
+  /** RT-04 away: the state this tab wants to show, and the last one the current socket was told. */
+  private desiredPresence: PresenceState = "online";
+  private sentPresence: PresenceState = "online";
+  private presenceSentAt = Number.NEGATIVE_INFINITY;
+  private presenceTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: RealtimeClientOptions) {
     const Ctor = options.WebSocket ?? (globalThis as { WebSocket?: WebSocketCtor }).WebSocket;
@@ -111,6 +118,8 @@ export class RealtimeClient {
     this.stopped = true;
     this.generation++;
     this.clearTimers();
+    if (this.presenceTimer) clearTimeout(this.presenceTimer);
+    this.presenceTimer = null;
     const ws = this.ws;
     this.ws = null;
     ws?.close(1000, "client closed");
@@ -184,6 +193,27 @@ export class RealtimeClient {
     this.send({ op: "eph", topic, type, data });
   }
 
+  /**
+   * This tab's own state in every conversation it shows (RT-04, D-04). Sent on the leading edge when it differs
+   * from what the socket was last told; changes inside PRESENCE_CLIENT_THROTTLE_MS collapse into one trailing send
+   * of the latest state. While disconnected it is only remembered: the next connection reports `away` before
+   * re-subscribing (a new server connection starts online).
+   */
+  setPresence(state: PresenceState): void {
+    this.desiredPresence = state;
+    if (this.presenceTimer) return; // the trailing send picks up the latest state
+    const wait = this.presenceSentAt + PRESENCE_CLIENT_THROTTLE_MS - Date.now();
+    if (wait <= 0) {
+      this.flushPresence();
+      return;
+    }
+    if (state === this.sentPresence) return;
+    this.presenceTimer = setTimeout(() => {
+      this.presenceTimer = null;
+      this.flushPresence();
+    }, wait);
+  }
+
   // ---- internals ----
 
   /** `force` bypasses the token cache (after the server closed the socket with 4401). */
@@ -227,6 +257,9 @@ export class RealtimeClient {
     this.ws = ws;
     ws.onopen = () => {
       this.status.setState({ status: "open", attempt: 0, lastError: null });
+      // A new server connection starts online: report away first, so every join below is stored as away.
+      this.sentPresence = "online";
+      if (this.desiredPresence === "away") this.flushPresence();
       for (const topic of this.topics.keys()) this.sendSub(topic);
       this.pingTimer = setInterval(() => this.send({ op: "ping" }), this.opts.pingIntervalMs);
     };
@@ -277,6 +310,15 @@ export class RealtimeClient {
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.reconnectTimer = null;
     this.pingTimer = null;
+  }
+
+  /** Sends the desired state when the current socket was told something else (no-op while disconnected). */
+  private flushPresence(): void {
+    const state = this.desiredPresence;
+    if (state === this.sentPresence) return;
+    if (!this.send({ op: "presence", state })) return;
+    this.sentPresence = state;
+    this.presenceSentAt = Date.now();
   }
 
   private dropPresence(topic: string): void {

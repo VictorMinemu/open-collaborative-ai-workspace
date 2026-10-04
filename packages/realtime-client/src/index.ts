@@ -1,3 +1,4 @@
+export { type ActivityMonitor, createActivityMonitor } from "./activity";
 export { backoffDelay } from "./backoff";
 export {
   type ConnectionState,

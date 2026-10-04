@@ -225,6 +225,62 @@ describe("realtime presence (RT-04)", () => {
   });
 });
 
+describe("away state (RT-04, 03-02 D-04)", () => {
+  it("a presence op turns the sender away for everyone watching, follows it into later subscriptions, and online reverses it", async () => {
+    const topic = `conv:${publicId}`;
+    const a = await openSocket(stack.baseUrl, await admin.token());
+    const s = await openSocket(stack.baseUrl, await sam.token());
+    try {
+      await join(a, topic, adminId);
+      const sConn = await join(s, topic, samId);
+      await waitFor(() => deltaFor(a, topic, sConn, "online"));
+
+      // Identity fields in the frame are stripped by Zod: the state applies to the sender's own connection only.
+      const t0 = Date.now();
+      s.send({ op: "presence", state: "away", userId: adminId, conn: randomUUID() });
+      const away = await waitFor(() => deltaFor(a, topic, sConn, "away"));
+      const awayMs = away.at - t0;
+      expect(awayMs).toBeLessThan(1000);
+      expect(away.entries).toEqual([{ conn: sConn, userId: samId, state: "away" }]);
+      expect(
+        presenceFrames(a, topic)
+          .flatMap((f) => f.entries ?? [])
+          .some((e) => e.userId === adminId && e.state === "away"),
+      ).toBe(false);
+      // Stored once, under the new state.
+      const live = await createPresenceStore({ bus: stack.built.core.bus }).snapshot(orgId, topic);
+      expect(live.filter((m) => m.conn === sConn)).toEqual([{ conn: sConn, userId: samId, state: "away" }]);
+
+      // A conversation Sam opens afterwards lists Sam as away from the start.
+      const other = (
+        await ok(admin.request("POST", "/api/v1/channels", { name: "away-later", visibility: "public" }))
+      ).id as string;
+      const otherTopic = `conv:${other}`;
+      s.send({ op: "sub", topic: otherTopic, presence: true });
+      const snap = await waitFor(() => snapshotOf(s, otherTopic));
+      expect(snap.entries).toContainEqual({ conn: sConn, userId: samId, state: "away" });
+
+      const t1 = Date.now();
+      s.send({ op: "presence", state: "online" });
+      const back = await waitFor(() =>
+        presenceFrames(a, topic).find(
+          (f) => !f.full && f.at >= t1 && f.entries?.some((e) => e.conn === sConn && e.state === "online"),
+        ),
+      );
+      const onlineMs = back.at - t1;
+      expect(onlineMs).toBeLessThan(1000);
+      const after = await createPresenceStore({ bus: stack.built.core.bus }).snapshot(orgId, otherTopic);
+      expect(after.filter((m) => m.conn === sConn)).toEqual([
+        { conn: sConn, userId: samId, state: "online" },
+      ]);
+      console.info(`away latencies (ms): away=${awayMs} online=${onlineMs}`);
+    } finally {
+      a.socket.close();
+      s.socket.close();
+    }
+  });
+});
+
 /** A second gateway on the stack's realtime/identity/bus with a fast heartbeat (100 ms) and TTL (300 ms). */
 async function miniGateway() {
   const mini = Fastify({ logger: false });
