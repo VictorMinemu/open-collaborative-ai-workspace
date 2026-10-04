@@ -44,6 +44,13 @@ export type BridgeOptions = {
 
 export const FAILURE_REPLY = "Sorry, I couldn't generate a reply right now. Please try again in a moment.";
 
+/** OpenClaw's own user-facing text for a failed turn; never forward it, treat it as a failure. */
+const OPENCLAW_GENERIC_FAILURE = /^\W*Something went wrong while processing your request/i;
+
+export function isOpenClawGenericFailure(text: string): boolean {
+  return OPENCLAW_GENERIC_FAILURE.test(text.trim());
+}
+
 export function chunkText(text: string, max: number): string[] {
   if (text.length <= max) return [text];
   const chunks: string[] = [];
@@ -170,6 +177,7 @@ export function createBridge(opts: BridgeOptions) {
           await opts.port.dispatchMention(
             mention,
             async (text) => {
+              if (isOpenClawGenericFailure(text)) throw new Error("OpenClaw reported a failed turn");
               if (text.trim()) await post(text);
             },
             opts.signal,

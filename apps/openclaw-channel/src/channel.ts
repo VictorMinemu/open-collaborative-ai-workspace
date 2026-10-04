@@ -21,6 +21,37 @@ function requireRuntime(): PluginRuntimeLike {
   return pluginRuntime;
 }
 
+/**
+ * Latest host runtime, resolved on every access: after a hot reload OpenClaw hands the plugin a new
+ * runtime and closes the old one's async work scope, so nothing may keep a reference to a stale one.
+ */
+const liveRuntime = new Proxy({} as PluginRuntimeLike, {
+  get: (_target, prop) => Reflect.get(requireRuntime(), prop),
+});
+
+/**
+ * Exactly one account loop per process. OpenClaw can start a fresh plugin instance (possibly a new
+ * module instance) before the previous one has stopped; two live loops would both answer every
+ * mention and the stale one fails with "Async work scope is closed". A new start aborts the old one.
+ */
+const ACTIVE_KEY = Symbol.for("ocw.openclaw-channel.active-account");
+type ActiveRegistry = { [ACTIVE_KEY]?: AbortController };
+
+function claimActiveAccount(hostSignal: AbortSignal): AbortController {
+  const registry = globalThis as ActiveRegistry;
+  registry[ACTIVE_KEY]?.abort();
+  const local = new AbortController();
+  if (hostSignal.aborted) local.abort();
+  else hostSignal.addEventListener("abort", () => local.abort(), { once: true });
+  registry[ACTIVE_KEY] = local;
+  return local;
+}
+
+function releaseActiveAccount(local: AbortController): void {
+  const registry = globalThis as ActiveRegistry;
+  if (registry[ACTIVE_KEY] === local) delete registry[ACTIVE_KEY];
+}
+
 function resolveStateDir(runtime: PluginRuntimeLike): string {
   const fromRuntime = runtime.state?.resolveStateDir?.(process.env);
   return fromRuntime || process.env.OPENCLAW_STATE_DIR || path.join(process.env.HOME ?? "/tmp", ".openclaw");
@@ -33,7 +64,10 @@ async function startOcwAccount(ctx: ChannelGatewayContext<ResolvedOcwAccount>): 
       "ocw channel is not configured: set OCW_API_URL and OCW_CELL_TOKEN_FILE (or OCW_CELL_TOKEN)",
     );
   }
-  const runtime = requireRuntime();
+  const runtime = liveRuntime;
+  requireRuntime();
+  const active = claimActiveAccount(ctx.abortSignal);
+  const signal = active.signal;
   const log = {
     info: (m: string) => ctx.log?.info(`[ocw] ${m}`),
     warn: (m: string) => ctx.log?.warn(`[ocw] ${m}`),
@@ -41,7 +75,7 @@ async function startOcwAccount(ctx: ChannelGatewayContext<ResolvedOcwAccount>): 
   };
   const client = createAgentChannelClient({ apiUrl: account.apiUrl, token: account.readToken });
   const port = createOpenClawPort({ runtime, accountId: account.accountId, cfg: ctx.cfg, log });
-  const bridge = createBridge({ client, port, signal: ctx.abortSignal, log });
+  const bridge = createBridge({ client, port, signal, log });
   const cursorFile = path.join(resolveStateDir(runtime), "ocw-channel", `cursor-${account.accountId}.json`);
 
   ctx.setStatus({
@@ -54,7 +88,7 @@ async function startOcwAccount(ctx: ChannelGatewayContext<ResolvedOcwAccount>): 
 
   // Config sync before accepting events: every bot must exist as an OpenClaw agent with its model.
   let startup: { topic: string; lastSeq: number } | undefined;
-  for (let attempt = 0; !ctx.abortSignal.aborted && !startup; attempt++) {
+  for (let attempt = 0; !signal.aborted && !startup; attempt++) {
     try {
       startup = await bridge.refreshCell();
     } catch (error) {
@@ -64,7 +98,10 @@ async function startOcwAccount(ctx: ChannelGatewayContext<ResolvedOcwAccount>): 
       await new Promise((r) => setTimeout(r, Math.min(30_000, 1_000 * 2 ** attempt)));
     }
   }
-  if (!startup) return;
+  if (!startup) {
+    releaseActiveAccount(active);
+    return;
+  }
   const { topic } = startup;
   let startupBaseline: number | undefined = startup.lastSeq;
 
@@ -84,7 +121,7 @@ async function startOcwAccount(ctx: ChannelGatewayContext<ResolvedOcwAccount>): 
         return (await bridge.refreshCell()).lastSeq;
       },
       onEvent: (frame) => bridge.handleFrame(frame),
-      signal: ctx.abortSignal,
+      signal,
       log,
       onStatus: (s) =>
         ctx.setStatus({
@@ -96,6 +133,9 @@ async function startOcwAccount(ctx: ChannelGatewayContext<ResolvedOcwAccount>): 
         }),
     });
   } finally {
+    releaseActiveAccount(active);
+    if (signal.aborted && !ctx.abortSignal.aborted)
+      log.info("superseded by a newer plugin instance; stopped");
     ctx.setStatus({ accountId: account.accountId, running: false, connected: false, lifecycle: "stopped" });
   }
 }
