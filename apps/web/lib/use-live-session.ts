@@ -101,7 +101,10 @@ function reduce(state: LiveSession | null, action: Action): LiveSession | null {
   }
 }
 
-/** REST snapshot + `ws:<id>` stream (durable events with seq replay, ephemeral deltas) → live session state. */
+/**
+ * REST snapshot + `ws:<id>` stream (durable events with seq replay, ephemeral deltas) → live session state. The
+ * subscription opts into presence: whoever has the session open is shown as watching it.
+ */
 export function useLiveSession(id: string) {
   const query = useWorkSession(id);
   const [state, dispatch] = useReducer(reduce, null);
@@ -112,7 +115,10 @@ export function useLiveSession(id: string) {
 
   const onFrame = useCallback((frame: TopicFrame) => dispatch({ kind: "frame", frame }), []);
   const ready = state !== null && state.session.id === id;
-  useTopic(ready ? `ws:${id}` : null, onFrame, query.data?.lastSeq, () => void query.refetch());
+  // This is the view that shows the session, so the viewer counts as watching it (presence opt-in, RT-04).
+  useTopic(ready ? `ws:${id}` : null, onFrame, query.data?.lastSeq, () => void query.refetch(), {
+    presence: true,
+  });
 
   return { state: ready ? state : null, query };
 }
