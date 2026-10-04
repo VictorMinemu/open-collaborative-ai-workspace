@@ -1,4 +1,5 @@
 // authz-legacy: 02-07 migrates this file to the resolver
+import type { IncomingHttpHeaders } from "node:http";
 import { getCurrentAdapter, runWithTransaction } from "@better-auth/core/context";
 import {
   AcceptInvitationRequest,
@@ -11,6 +12,7 @@ import {
   PublicInvitation,
 } from "@ocw/contracts";
 import { invitation, organization, type TenantDb, user } from "@ocw/db";
+import { fromNodeHeaders } from "better-auth/node";
 import { and, asc, eq } from "drizzle-orm";
 import type { FastifyReply } from "fastify";
 import type { App, AuthContext } from "../../core";
@@ -18,6 +20,7 @@ import { authOf } from "../../core";
 import { conflict, gone, notFound } from "../../lib/errors";
 import type { RealtimeService } from "../realtime";
 import { INVITATION_TTL_SECONDS } from "./auth";
+import { clientFromRequest } from "./client-kind";
 import { asRole, auditVia, type IdentityResult, type IdentityService } from "./service";
 
 const SENSITIVE_RATE = { rateLimit: { max: 30, timeWindow: "1 minute" } };
@@ -109,6 +112,7 @@ export function createInvitationService(identity: IdentityService) {
           organizationId: auth.organizationId,
           userId: auth.userId,
           sessionId: auth.sessionId,
+          clientKind: auth.clientKind,
           action: "invitation.created",
           resourceType: "invitation",
           resourceId: row.id,
@@ -147,6 +151,7 @@ export function createInvitationService(identity: IdentityService) {
           organizationId: auth.organizationId,
           userId: auth.userId,
           sessionId: auth.sessionId,
+          clientKind: auth.clientKind,
           action: "invitation.revoked",
           resourceType: "invitation",
           resourceId: id,
@@ -184,7 +189,11 @@ export function createInvitationService(identity: IdentityService) {
     },
 
     /** AUTH-02: accept an invitation by signing up with the INVITATION's email (never client-supplied). */
-    async acceptInvitation(id: string, input: AcceptInvitationRequest): Promise<IdentityResult> {
+    async acceptInvitation(
+      id: string,
+      input: AcceptInvitationRequest,
+      headers?: IncomingHttpHeaders,
+    ): Promise<IdentityResult> {
       const ctx = await identity.auth.$context;
       const out = await runWithTransaction(ctx.adapter, async () => {
         const adapter = await getCurrentAdapter(ctx.adapter);
@@ -204,11 +213,13 @@ export function createInvitationService(identity: IdentityService) {
         if (existing)
           throw conflict("An account with this email already exists; sign in instead", "account_exists");
 
-        const { headers, response } = await identity.auth.api.signUpEmail({
+        // The request headers reach the session.create hook, which records the client kind and label.
+        const signUp = await identity.auth.api.signUpEmail({
           body: { name: input.name, email: inv.email, password: input.password },
           returnHeaders: true,
+          ...(headers ? { headers: fromNodeHeaders(headers) } : {}),
         });
-        const userId = response.user.id;
+        const userId = signUp.response.user.id;
         const role = asRole(inv.role);
         // auth.member is existence-only; the organization role lives in app.org_members.
         await adapter.create({
@@ -230,9 +241,17 @@ export function createInvitationService(identity: IdentityService) {
             role,
           },
         });
+        // The session predates the membership, so the hook could not set the org; the first JWT needs it.
+        await adapter.update({
+          model: "session",
+          where: [{ field: "userId", value: userId }],
+          update: { activeOrganizationId: inv.organizationId },
+        });
+        const clientKind = clientFromRequest(headers).kind;
         await auditVia(adapter, {
           organizationId: inv.organizationId,
           userId,
+          clientKind,
           action: "user.signed_up",
           resourceType: "user",
           resourceId: userId,
@@ -240,6 +259,7 @@ export function createInvitationService(identity: IdentityService) {
         await auditVia(adapter, {
           organizationId: inv.organizationId,
           userId,
+          clientKind,
           action: "invitation.accepted",
           resourceType: "invitation",
           resourceId: id,
@@ -249,7 +269,7 @@ export function createInvitationService(identity: IdentityService) {
           model: "organization",
           where: [{ field: "id", value: inv.organizationId }],
         });
-        return { headers, userId, role, org, email: inv.email };
+        return { headers: signUp.headers, userId, role, org, email: inv.email };
       });
       if (!out.org) throw new Error("organization missing");
       return {
@@ -329,7 +349,7 @@ export function registerInvitationRoutes(
       },
     },
     async (req, reply) => {
-      const { me, cookies } = await invitations.acceptInvitation(req.params.id, req.body);
+      const { me, cookies } = await invitations.acceptInvitation(req.params.id, req.body, req.headers);
       // Durable org-wide event so member lists update live (EventTypes.memberJoined).
       await deps.db.withTenant({ organizationId: me.organization.id, userId: me.user.id }, (tx) =>
         deps.realtime.appendEvent(tx, `org:${me.organization.id}`, "member.joined", {

@@ -1,8 +1,10 @@
+import { getCurrentAdapter, runWithTransaction } from "@better-auth/core/context";
 import { AccessTokenClaims } from "@ocw/contracts";
-import { createLocalJWKSet, type JSONWebKeySet, jwtVerify } from "jose";
+import { createLocalJWKSet, decodeJwt, type JSONWebKeySet, jwtVerify } from "jose";
 import pg from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, type TestStack, WEB_ORIGIN } from "../../testing";
+import type { RevocationEvent } from "../realtime/service";
 
 const ELECTRON_MAC_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) ocw-desktop/0.1.0 Chrome/140.0.7339.80 Electron/38.1.0 Safari/537.36";
@@ -200,5 +202,176 @@ describe("session client identity and access JWTs (AUTH-05, AUTH-06)", () => {
     } finally {
       await su.query("update app.org_members set deactivated_at = null where user_id = $1", [memberId]);
     }
+  });
+});
+
+describe("request context, deactivation, revocation and the session store (AUTH-05, ORG-05)", () => {
+  const signIn = async (email: string, password: string, ua = ELECTRON_MAC_UA) => {
+    const c = new Client(stack.baseUrl, { "user-agent": ua });
+    expect((await c.request("POST", "/api/auth/sign-in/email", { email, password })).status).toBe(200);
+    const sid = (await c.request("GET", "/api/v1/me")).body.sessionId as string;
+    return { c, sid };
+  };
+
+  it("setup and invitation acceptance create sessions that already carry the organization", async () => {
+    for (const userId of [adminId, memberId]) {
+      const [first] = await sessionsOf(userId);
+      expect(first?.active_organization_id).toBe(orgId);
+      expect(first?.client_label).toBe("Chrome on macOS");
+    }
+    // The setup/accept audit rows carry the browser's client kind.
+    const rows = (
+      await su.query(
+        "select action, client_kind from app.audit_events where action in ('setup.redeemed', 'invitation.accepted')",
+      )
+    ).rows;
+    expect(rows).toHaveLength(2);
+    for (const r of rows) expect(r.client_kind).toBe("web");
+  });
+
+  it("an access JWT from a freshly accepted invitation already has the org claim", async () => {
+    const admin = (await signIn(ADMIN.email, ADMIN.password, CHROME_MAC_UA)).c;
+    const inv = await admin.request("POST", "/api/v1/invitations", {
+      email: "sam@example.test",
+      role: "standard",
+    });
+    expect(inv.status).toBe(200);
+    const sam = new Client(stack.baseUrl, { "user-agent": ELECTRON_MAC_UA });
+    const accepted = await sam.request("POST", `/api/v1/invitations/${inv.body.id}/accept`, {
+      name: "Sam",
+      password: "sams-long-password",
+    });
+    expect(accepted.status).toBe(200);
+    const token = (await sam.request("GET", "/api/auth/token")).body.token as string;
+    expect(decodeJwt(token)).toMatchObject({ org: orgId, ck: "desktop", sub: accepted.body.user.id });
+  });
+
+  it("audit rows written in a desktop request inherit its session id and client kind", async () => {
+    const { c, sid } = await signIn(ADMIN.email, ADMIN.password);
+    const created = await c.request("POST", "/api/v1/channels", {
+      name: "from-desktop",
+      visibility: "public",
+    });
+    expect(created.status).toBe(200);
+    const rows = (
+      await su.query(
+        "select session_id, client_kind from app.audit_events where action = 'channel.created' and resource_id = $1",
+        [created.body.id],
+      )
+    ).rows;
+    expect(rows).toEqual([{ session_id: sid, client_kind: "desktop" }]);
+    // The invitation audit (auth plane) carries the session's client too.
+    const inv = await c.request("POST", "/api/v1/invitations", {
+      email: "kim@example.test",
+      role: "standard",
+    });
+    expect(inv.status).toBe(200);
+    const invRow = (
+      await su.query(
+        "select session_id, client_kind from app.audit_events where action = 'invitation.created' and resource_id = $1",
+        [inv.body.id],
+      )
+    ).rows;
+    expect(invRow).toEqual([{ session_id: sid, client_kind: "desktop" }]);
+  });
+
+  it("a member deactivated while signed in no longer authenticates", async () => {
+    const { c } = await signIn(memberEmail, MEMBER.password);
+    expect((await c.request("GET", "/api/v1/me")).status).toBe(200);
+    await su.query("update app.org_members set deactivated_at = now() where user_id = $1", [memberId]);
+    try {
+      expect((await c.request("GET", "/api/v1/me")).status).toBe(401);
+    } finally {
+      await su.query("update app.org_members set deactivated_at = null where user_id = $1", [memberId]);
+    }
+    expect((await c.request("GET", "/api/v1/me")).status).toBe(200);
+  });
+
+  it("revocations are flagged longer than a JWT lives and fan out to listeners", async () => {
+    const { realtime, bus } = stack.built.core;
+    const received: RevocationEvent[] = [];
+    const stop = await realtime.onRevocation((e) => received.push(e));
+    const sid = "0199a0c4-1111-7000-8000-000000000001";
+    expect(await realtime.isSessionRevoked(sid)).toBe(false);
+    await realtime.publishRevocation({ sessionIds: [sid], userId: adminId, reason: "session_revoked" });
+    expect(await realtime.isSessionRevoked(sid)).toBe(true);
+    const ttl = await bus.pub.ttl(`ocw:auth:revoked-sid:${sid}`);
+    expect(ttl).toBeGreaterThanOrEqual(850);
+    expect(ttl).toBeLessThanOrEqual(900);
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    expect(received[0]).toEqual({ sessionIds: [sid], userId: adminId, reason: "session_revoked" });
+    // Malformed messages on the channel are ignored.
+    await bus.publish("ocw:auth:revoked", "not json");
+    await bus.publish("ocw:auth:revoked", JSON.stringify({ reason: "nope" }));
+    await realtime.publishRevocation({ userId: memberId, reason: "deactivated" });
+    await vi.waitFor(() => expect(received).toHaveLength(2));
+    expect(received[1]).toEqual({ userId: memberId, reason: "deactivated" });
+    await stop();
+  });
+
+  it("the session store lists without secrets, deletes, and joins an outer transaction", async () => {
+    const { identity } = stack.built.core;
+    const a = await signIn(memberEmail, MEMBER.password);
+    const b = await signIn(memberEmail, MEMBER.password, CHROME_MAC_UA);
+
+    const list = await identity.sessions.list(memberId);
+    expect(list.length).toBeGreaterThanOrEqual(2);
+    for (const s of list) {
+      expect(Object.keys(s).sort()).toEqual([
+        "clientKind",
+        "clientLabel",
+        "createdAt",
+        "expiresAt",
+        "id",
+        "ipAddress",
+        "updatedAt",
+        "userId",
+      ]);
+      expect(s.userId).toBe(memberId);
+    }
+    expect(list.find((s) => s.id === a.sid)).toMatchObject({
+      clientKind: "desktop",
+      clientLabel: "Desktop app on macOS",
+    });
+    expect(await identity.sessions.isActive(a.sid)).toBe(true);
+    // A session id that belongs to someone else is not deleted.
+    expect(await identity.sessions.delete(adminId, a.sid)).toBe(false);
+    expect(await identity.sessions.isActive(a.sid)).toBe(true);
+
+    // A4: inside runWithTransaction, a thrown error rolls the deletes back.
+    const ctx = await identity.auth.$context;
+    await expect(
+      runWithTransaction(ctx.adapter, async () => {
+        const deleted = await identity.sessions.deleteAllForUser(memberId);
+        expect(deleted.length).toBe(list.length);
+        throw new Error("injected rollback");
+      }),
+    ).rejects.toThrow("injected rollback");
+    expect((await identity.sessions.list(memberId)).length).toBe(list.length);
+    // The same holds for better-auth's own internalAdapter.deleteUserSessions.
+    await expect(
+      runWithTransaction(ctx.adapter, async () => {
+        await ctx.internalAdapter.deleteUserSessions(memberId);
+        const inside = await (await getCurrentAdapter(ctx.adapter)).count({
+          model: "session",
+          where: [{ field: "userId", value: memberId }],
+        });
+        expect(inside).toBe(0);
+        throw new Error("injected rollback");
+      }),
+    ).rejects.toThrow("injected rollback");
+    expect((await identity.sessions.list(memberId)).length).toBe(list.length);
+
+    const deleted = await identity.sessions.deleteAllForUser(memberId, { exceptSessionId: b.sid });
+    expect(deleted).toHaveLength(list.length - 1);
+    expect(deleted).not.toContain(b.sid);
+    expect(deleted).toContain(a.sid);
+    expect((await identity.sessions.list(memberId)).map((s) => s.id)).toEqual([b.sid]);
+    expect((await a.c.request("GET", "/api/v1/me")).status).toBe(401);
+    expect((await b.c.request("GET", "/api/v1/me")).status).toBe(200);
+
+    expect(await identity.sessions.delete(memberId, b.sid)).toBe(true);
+    expect(await identity.sessions.isActive(b.sid)).toBe(false);
+    expect(await identity.sessions.delete(memberId, b.sid)).toBe(false);
   });
 });

@@ -6,6 +6,7 @@ import type { App } from "../../core";
 import { authOf } from "../../core";
 import type { AuditService } from "../audit";
 import type { RealtimeService } from "../realtime";
+import { clientFromRequest } from "./client-kind";
 import type { IdentityService } from "./service";
 
 const SENSITIVE_RATE = { rateLimit: { max: 30, timeWindow: "1 minute" } };
@@ -78,7 +79,7 @@ export function registerIdentityRoutes(
                 action: "user.signed_in",
                 resourceType: "user",
                 resourceId: userId,
-                clientKind: "web",
+                clientKind: clientFromRequest(req.headers).kind,
               }),
             );
           }
@@ -102,7 +103,7 @@ export function registerIdentityRoutes(
       schema: { tags: ["identity"], body: SetupRequest, response: { 200: MeResponse } },
     },
     async (req, reply) => {
-      const { me, cookies } = await identity.setup(req.body);
+      const { me, cookies } = await identity.setup(req.body, {}, req.headers);
       setCookies(reply, cookies);
       return me;
     },
