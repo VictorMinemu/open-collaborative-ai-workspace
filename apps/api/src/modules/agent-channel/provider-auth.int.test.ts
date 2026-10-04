@@ -112,7 +112,7 @@ beforeAll(async () => {
   adminId = setup.body.user.id;
   const inv = await call<{ id: string }>(admin, "POST", "/api/v1/invitations", {
     email: "alex@example.test",
-    role: "member",
+    role: "developer",
   });
   member = new TestClient(stack.baseUrl);
   await call(member, "POST", `/api/v1/invitations/${inv.body.id}/accept`, {

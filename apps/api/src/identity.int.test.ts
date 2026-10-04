@@ -70,7 +70,7 @@ describe("identity + platform core", () => {
     expect(ok.status).toBe(200);
     expect(ok.body).toMatchObject({
       user: { email: ADMIN.email },
-      organization: { name: "Autofy Labs", role: "owner" },
+      organization: { name: "Autofy Labs", role: "admin" },
     });
     const me = await c.request("GET", "/api/v1/me");
     expect(me.status).toBe(200);
@@ -99,7 +99,7 @@ describe("identity + platform core", () => {
     );
   });
 
-  it("invite → public lookup → accept → member; members list; non-admin cannot invite; revoke", async () => {
+  it("invite → public lookup → accept → developer; members list; non-admin cannot invite; revoke", async () => {
     const admin = new TestClient(stack.baseUrl);
     expect(
       (
@@ -109,13 +109,25 @@ describe("identity + platform core", () => {
         })
       ).status,
     ).toBe(200);
-    expect((await admin.request("GET", "/api/v1/me")).status).toBe(200);
+    const adminMe = await admin.request("GET", "/api/v1/me");
+    expect(adminMe.status).toBe(200);
+    expect(adminMe.body).toMatchObject({ organization: { role: "admin" } });
+
+    // Legacy role names are rejected by the contract.
+    const LEGACY_MVP0_ROLE = "member";
+    const legacy = await admin.request("POST", "/api/v1/invitations", {
+      email: "legacy@example.test",
+      role: LEGACY_MVP0_ROLE,
+    });
+    expect(legacy.status).toBe(400);
+    expect(legacy.body).toMatchObject({ error: { code: "validation_error" } });
 
     const inv = await admin.request("POST", "/api/v1/invitations", {
-      email: "alex@example.test",
-      role: "member",
+      email: "Alex@Example.test",
+      role: "developer",
     });
     expect(inv.status).toBe(200);
+    expect(inv.body).toMatchObject({ email: "alex@example.test", role: "developer", status: "pending" });
     const id = inv.body!.id as string;
     expect(inv.body!.link).toBe(`${WEB_ORIGIN}/invite/${id}`);
 
@@ -124,6 +136,7 @@ describe("identity + platform core", () => {
     expect(pub.body).toMatchObject({
       email: "alex@example.test",
       organizationName: "Autofy Labs",
+      role: "developer",
       status: "pending",
     });
 
@@ -134,8 +147,14 @@ describe("identity + platform core", () => {
     expect(accepted.status).toBe(200);
     expect(accepted.body).toMatchObject({
       user: { email: "alex@example.test" },
-      organization: { role: "member" },
+      organization: { role: "developer" },
     });
+    expect((await anon.request("GET", "/api/v1/me")).body).toMatchObject({
+      organization: { role: "developer" },
+    });
+    // better-auth's member row is existence-only; the role lives in app.org_members.
+    const authRoles = (await su.query("select distinct role from auth.member")).rows.map((r) => r.role);
+    expect(authRoles).toEqual(["member"]);
     expect(
       (
         await anon.request("POST", `/api/v1/invitations/${id}/accept`, {
@@ -146,25 +165,69 @@ describe("identity + platform core", () => {
     ).toBe(409);
 
     const members = await anon.request("GET", "/api/v1/members");
-    expect((members.body!.members as unknown[]).length).toBe(2);
-    expect((await anon.request("POST", "/api/v1/invitations", { email: "eve@example.test" })).status).toBe(
-      403,
-    );
+    const list = members.body!.members as Array<Record<string, unknown>>;
+    expect(list).toHaveLength(2);
+    for (const m of list) {
+      expect(m).toMatchObject({ status: "active", statusEmoji: null, statusText: null });
+    }
+    expect(list.map((m) => m.role).sort()).toEqual(["admin", "developer"]);
 
-    const inv2 = await admin.request("POST", "/api/v1/invitations", {
-      email: "sam@example.test",
-      role: "member",
+    // A developer cannot invite.
+    expect(
+      (await anon.request("POST", "/api/v1/invitations", { email: "eve@example.test", role: "standard" }))
+        .status,
+    ).toBe(403);
+
+    // Inviting an existing member's e-mail → 409 already_member.
+    const dup = await admin.request("POST", "/api/v1/invitations", {
+      email: "alex@example.test",
+      role: "lead",
     });
-    expect((await admin.request("GET", "/api/v1/invitations")).body!.invitations).toHaveLength(1);
-    expect((await admin.request("DELETE", `/api/v1/invitations/${inv2.body!.id}`)).status).toBe(200);
+    expect(dup.status).toBe(409);
+    expect(dup.body).toMatchObject({ error: { code: "already_member" } });
+
+    // Admins can invite with every role; re-inviting a pending e-mail refreshes that invitation.
+    const lead = await admin.request("POST", "/api/v1/invitations", {
+      email: "lee@example.test",
+      role: "lead",
+    });
+    expect(lead.body).toMatchObject({ role: "lead" });
+    const std = await admin.request("POST", "/api/v1/invitations", {
+      email: "sam@example.test",
+      role: "standard",
+    });
+    expect(std.status).toBe(200);
+    expect(std.body).toMatchObject({ role: "standard" });
+    const again = await admin.request("POST", "/api/v1/invitations", {
+      email: "sam@example.test",
+      role: "developer",
+    });
+    expect(again.status).toBe(200);
+    expect(again.body).toMatchObject({ id: std.body!.id, role: "developer" });
+    expect(new Date(again.body!.expiresAt as string).getTime()).toBeGreaterThanOrEqual(
+      new Date(std.body!.expiresAt as string).getTime(),
+    );
+    const pending = (await admin.request("GET", "/api/v1/invitations")).body!.invitations as Array<{
+      email: string;
+    }>;
+    expect(pending.map((p) => p.email).sort()).toEqual(["lee@example.test", "sam@example.test"]);
+
+    // Revoke → canceled; accept then answers 409; revoking twice → 409 invitation_not_pending.
+    expect((await admin.request("DELETE", `/api/v1/invitations/${std.body!.id}`)).status).toBe(200);
+    const row = await su.query("select status from auth.invitation where id = $1", [std.body!.id]);
+    expect(row.rows[0].status).toBe("canceled");
     expect(
       (
-        await anon.request("POST", `/api/v1/invitations/${inv2.body!.id}/accept`, {
+        await anon.request("POST", `/api/v1/invitations/${std.body!.id}/accept`, {
           name: "Sam",
           password: "sams-long-password",
         })
       ).status,
     ).toBe(409);
+    const twice = await admin.request("DELETE", `/api/v1/invitations/${std.body!.id}`);
+    expect(twice.status).toBe(409);
+    expect(twice.body).toMatchObject({ error: { code: "invitation_not_pending" } });
+    expect((await anon.request("DELETE", `/api/v1/invitations/${lead.body!.id}`)).status).toBe(403);
 
     const actions = (await su.query("select action from app.audit_events")).rows.map((r) => r.action);
     expect(actions).toEqual(
@@ -176,6 +239,11 @@ describe("identity + platform core", () => {
         "user.signed_in",
       ]),
     );
+    const created = await su.query(
+      "select metadata from app.audit_events where action = 'invitation.created' and resource_id = $1 order by occurred_at",
+      [std.body!.id],
+    );
+    expect(created.rows.map((r) => r.metadata.role)).toEqual(["standard", "developer"]);
     expect((await admin.request("POST", "/api/auth/sign-out", {})).status).toBe(200);
     expect((await admin.request("GET", "/api/v1/me")).status).toBe(401);
   });

@@ -1,15 +1,4 @@
-import {
-  AcceptInvitationRequest,
-  CreateInvitationRequest,
-  IdParams,
-  Invitation,
-  InvitationList,
-  MeResponse,
-  Ok,
-  PublicInvitation,
-  SetupRequest,
-  SetupStatusResponse,
-} from "@ocw/contracts";
+import { MeResponse, SetupRequest, SetupStatusResponse } from "@ocw/contracts";
 import type { TenantDb } from "@ocw/db";
 import { fromNodeHeaders } from "better-auth/node";
 import type { FastifyReply, FastifyRequest } from "fastify";
@@ -118,68 +107,5 @@ export function registerIdentityRoutes(
     "/api/v1/me",
     { preHandler: identity.requireUser, schema: { tags: ["identity"], response: { 200: MeResponse } } },
     (req) => identity.me(authOf(req)),
-  );
-
-  // ---- invitations ----
-  app.get(
-    "/api/v1/invitations",
-    {
-      preHandler: identity.requireRole("owner", "admin"),
-      schema: { tags: ["identity"], response: { 200: InvitationList } },
-    },
-    async (req) => ({ invitations: await identity.listInvitations(authOf(req)) }),
-  );
-
-  app.post(
-    "/api/v1/invitations",
-    {
-      preHandler: identity.requireRole("owner", "admin"),
-      schema: { tags: ["identity"], body: CreateInvitationRequest, response: { 200: Invitation } },
-    },
-    (req) => identity.createInvitation(authOf(req), req.headers, req.body),
-  );
-
-  app.delete(
-    "/api/v1/invitations/:id",
-    {
-      preHandler: identity.requireRole("owner", "admin"),
-      schema: { tags: ["identity"], params: IdParams, response: { 200: Ok } },
-    },
-    async (req) => {
-      await identity.revokeInvitation(authOf(req), req.headers, req.params.id);
-      return { ok: true as const };
-    },
-  );
-
-  app.get(
-    "/api/v1/invitations/:id",
-    { schema: { tags: ["identity"], params: IdParams, response: { 200: PublicInvitation } } },
-    (req) => identity.getPublicInvitation(req.params.id),
-  );
-
-  app.post(
-    "/api/v1/invitations/:id/accept",
-    {
-      config: SENSITIVE_RATE,
-      schema: {
-        tags: ["identity"],
-        params: IdParams,
-        body: AcceptInvitationRequest,
-        response: { 200: MeResponse },
-      },
-    },
-    async (req, reply) => {
-      const { me, cookies } = await identity.acceptInvitation(req.params.id, req.body);
-      // Durable org-wide event so member lists update live (EventTypes.memberJoined).
-      await deps.db.withTenant({ organizationId: me.organization.id, userId: me.user.id }, (tx) =>
-        deps.realtime.appendEvent(tx, `org:${me.organization.id}`, "member.joined", {
-          userId: me.user.id,
-          displayName: me.user.name,
-          role: me.organization.role,
-        }),
-      );
-      setCookies(reply, cookies);
-      return me;
-    },
   );
 }

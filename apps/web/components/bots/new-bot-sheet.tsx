@@ -1,4 +1,5 @@
 "use client";
+// authz-legacy: 02-10 migrates this file to the resolver
 
 import { type Agent, CreateAgentRequest } from "@ocw/contracts";
 import { ArrowLeft, ArrowRight, Settings2, Sparkles } from "lucide-react";

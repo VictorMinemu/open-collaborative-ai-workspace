@@ -1,4 +1,5 @@
 "use client";
+// authz-legacy: 02-05 migrates this file to the resolver
 
 import type { Device } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
@@ -152,7 +153,7 @@ function DeviceCard({ device: d, owned }: { device: Device; owned: boolean }) {
   const revoke = useRevokeDevice();
   const me = useMe({ enabled: false });
   const [confirm, setConfirm] = useState(false);
-  const isAdmin = me.data?.organization.role === "owner" || me.data?.organization.role === "admin";
+  const isAdmin = me.data?.organization.role === "admin";
   const online = d.status === "online";
 
   return (

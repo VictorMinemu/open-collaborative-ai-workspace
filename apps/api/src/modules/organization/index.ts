@@ -12,6 +12,9 @@ export async function listMembers(tx: Tx): Promise<Member[]> {
     email: r.email,
     avatarUrl: r.avatarUrl,
     role: r.role,
+    status: r.deactivatedAt ? ("deactivated" as const) : ("active" as const),
+    statusEmoji: r.statusEmoji ?? null,
+    statusText: r.statusText ?? null,
     joinedAt: new Date(r.joinedAt).toISOString(),
   }));
 }

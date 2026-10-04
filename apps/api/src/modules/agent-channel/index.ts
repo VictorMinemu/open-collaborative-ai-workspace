@@ -1,3 +1,4 @@
+// authz-legacy: 02-10 migrates this file to the resolver
 import {
   AGENT_CHANNEL_BASE_PATH,
   AGENT_CHANNEL_PROTOCOL_VERSION,
@@ -69,7 +70,7 @@ async function requireMembership(tx: Tx, agentId: string, conversationId: string
 export function createAgentChannelModule(core: Core): ApiModule {
   const auth = createCellAuth(core);
   const presence = createCellPresence(core);
-  const admin = core.identity.requireRole("owner", "admin");
+  const admin = core.identity.requireRole("admin");
   const providerAuth = createProviderAuth(core, presence);
   registerMentionHandler(core);
 

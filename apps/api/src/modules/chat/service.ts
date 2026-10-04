@@ -116,7 +116,7 @@ export async function ensureGeneral(tx: Tx, deps: ChatDeps, userId: string): Pro
       await tx.execute(sql`
         insert into app.conversation_members (conversation_id, organization_id, member_kind, member_id, role)
         select ${created.id}, ${ctx.organizationId}, 'user', m.user_id,
-               case when m.role = 'owner' then 'owner' else 'member' end
+               case when m.role = 'admin' then 'owner' else 'member' end
         from app.org_members m
         on conflict do nothing`);
       await deps.audit.record(tx, {

@@ -144,7 +144,7 @@ beforeAll(async () => {
   ).toBe(200);
   const inv = await admin.request("POST", "/api/v1/invitations", {
     email: "alex@example.test",
-    role: "member",
+    role: "developer",
   });
   alex = new TestClient(stack.baseUrl);
   expect(

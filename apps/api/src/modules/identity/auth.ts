@@ -5,7 +5,7 @@ import { organization } from "better-auth/plugins";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { Env } from "../../config/env";
 
-const INVITATION_TTL_SECONDS = 7 * 24 * 60 * 60;
+export const INVITATION_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 /**
  * Internal better-auth plugin: exposes our audit table, the org_members projection and the setup singleton
@@ -82,7 +82,10 @@ export function createAuth(env: Env, authDb: NodePgDatabase) {
     },
     rateLimit: { enabled: false }, // rate limiting is done by @fastify/rate-limit on the mounted routes
     plugins: [
-      organization({ invitationExpiresIn: INVITATION_TTL_SECONDS, creatorRole: "owner" }),
+      // The plugin stores organizations, members (existence only, role "member") and invitation rows; it is
+      // NOT an authorization authority: roles live in app.org_members and invitations are written by
+      // identity/invitations.ts through the adapter (Phase 2, research R12).
+      organization({ invitationExpiresIn: INVITATION_TTL_SECONDS, creatorRole: "member" }),
       ocwInternal(),
     ],
   });

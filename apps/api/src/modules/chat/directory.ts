@@ -1,4 +1,4 @@
-import { type MessageAuthor, userHandle } from "@ocw/contracts";
+import { type MessageAuthor, type OrgRole, userHandle } from "@ocw/contracts";
 import { agents, orgMembers, type Tx } from "@ocw/db";
 
 /** Display info for every principal of the org (humans from org_members, agents from agents). */
@@ -11,7 +11,7 @@ export interface DirectoryEntry {
   /** Agents only. */
   status?: "provisioning" | "ready" | "error" | "disabled";
   /** Users only. */
-  role?: "owner" | "admin" | "member";
+  role?: OrgRole;
 }
 
 export interface Directory {

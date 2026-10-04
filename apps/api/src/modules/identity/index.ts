@@ -2,11 +2,13 @@ import type { TenantDb } from "@ocw/db";
 import type { ApiModule } from "../../core";
 import type { AuditService } from "../audit";
 import type { RealtimeService } from "../realtime";
+import { createInvitationService, registerInvitationRoutes } from "./invitations";
 import { registerIdentityRoutes } from "./routes";
 import type { IdentityService } from "./service";
 
 export { type Auth, createAuth } from "./auth";
-export { type IdentityResult, IdentityService } from "./service";
+export type { InvitationService } from "./invitations";
+export { auditVia, type IdentityResult, IdentityService } from "./service";
 
 /** Mounts /api/v1/{setup,me,invitations} and the better-auth allowlist under /api/auth. */
 export function createIdentityModule(deps: {
@@ -16,5 +18,13 @@ export function createIdentityModule(deps: {
   realtime: RealtimeService;
   apiUrl: string;
 }): ApiModule {
-  return { name: "identity", prefix: "", register: (app) => registerIdentityRoutes(app, deps) };
+  const invitations = createInvitationService(deps.identity);
+  return {
+    name: "identity",
+    prefix: "",
+    register: (app) => {
+      registerIdentityRoutes(app, deps);
+      registerInvitationRoutes(app, { ...deps, invitations });
+    },
+  };
 }

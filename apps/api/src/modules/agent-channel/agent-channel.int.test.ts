@@ -123,7 +123,7 @@ beforeAll(async () => {
 
   const inv = await call(admin, "POST", "/api/v1/invitations", {
     email: "alex@example.test",
-    role: "member",
+    role: "developer",
   });
   alex = new TestClient(stack.baseUrl);
   const acc = await call(alex, "POST", `/api/v1/invitations/${inv.body!.id}/accept`, {
@@ -405,8 +405,8 @@ describe("mention → delivery → reply", () => {
     expect(m.threadHistory.some((h) => h.id === mentionId)).toBe(false);
     expect(m.roster).toEqual(
       expect.arrayContaining([
-        { kind: "user", id: adminId, displayName: ADMIN.name, role: "owner" },
-        { kind: "user", id: alexId, displayName: "Alex", role: "member" },
+        { kind: "user", id: adminId, displayName: ADMIN.name, role: "admin" },
+        { kind: "user", id: alexId, displayName: "Alex", role: "developer" },
         { kind: "agent", id: agentId, displayName: "Archie", handle: "archie" },
       ]),
     );

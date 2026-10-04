@@ -1,4 +1,5 @@
 "use client";
+// authz-legacy: 02-10 migrates this file to the resolver
 
 import type { Agent } from "@ocw/contracts";
 import { Bot, Plus, Sparkles, WifiOff } from "lucide-react";

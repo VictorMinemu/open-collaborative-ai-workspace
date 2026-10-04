@@ -1,4 +1,5 @@
 "use client";
+// authz-legacy: 02-04 migrates this file to the resolver
 
 import {
   type AgentTypingEvent,
@@ -335,7 +336,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
   const memberList = members.data?.members ?? [];
   const bots = memberList.filter((m) => m.kind === "agent");
   const canPost = channel.isMember && !channel.archivedAt;
-  const isAdmin = meQ.data?.organization.role === "owner" || meQ.data?.organization.role === "admin";
+  const isAdmin = meQ.data?.organization.role === "admin";
   const amOwner = memberList.some((m) => m.kind === "user" && m.id === me.id && m.role === "owner");
   const channelTypers = typers;
 

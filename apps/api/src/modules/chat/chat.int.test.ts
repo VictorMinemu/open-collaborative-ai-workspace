@@ -48,7 +48,7 @@ beforeAll(async () => {
   adminId = setup.user.id;
 
   const inv = await ok(
-    admin.request("POST", "/api/v1/invitations", { email: "alex@example.test", role: "member" }),
+    admin.request("POST", "/api/v1/invitations", { email: "alex@example.test", role: "developer" }),
   );
   alex = new TestClient(stack.baseUrl);
   const accepted = await ok(
@@ -363,7 +363,7 @@ describe("chat: channels", () => {
       `${userB}@evil.test`,
     ]);
     await su.query(
-      "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Eve', 'owner')",
+      "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Eve', 'admin')",
       [orgB, userB],
     );
     const { db, realtime, chatAgent } = stack.built.core;

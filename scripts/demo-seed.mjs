@@ -152,7 +152,7 @@ async function main() {
 
   for (const key of ["alex", "marta", "sam"]) {
     const p = people[key];
-    const inv = await as.victor("POST", "/api/v1/invitations", { email: p.email, role: "member" });
+    const inv = await as.victor("POST", "/api/v1/invitations", { email: p.email, role: "developer" });
     const id = (inv.invitation ?? inv).id;
     as[key] = client();
     await as[key]("POST", `/api/v1/invitations/${id}/accept`, { name: p.name, password: PASSWORD });

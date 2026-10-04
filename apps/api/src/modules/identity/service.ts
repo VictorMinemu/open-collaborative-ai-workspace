@@ -1,15 +1,8 @@
+// authz-legacy: 02-15 migrates this file to the resolver
 import type { IncomingHttpHeaders } from "node:http";
 import { getCurrentAdapter, runWithTransaction } from "@better-auth/core/context";
-import type {
-  AcceptInvitationRequest,
-  CreateInvitationRequest,
-  Invitation,
-  MeResponse,
-  OrgRole,
-  PublicInvitation,
-  SetupRequest,
-} from "@ocw/contracts";
-import { instanceSetup, invitation, member, organization, user } from "@ocw/db";
+import type { MeResponse, OrgRole, SetupRequest } from "@ocw/contracts";
+import { instanceSetup, member, organization, orgMembers, user } from "@ocw/db";
 import { fromNodeHeaders } from "better-auth/node";
 import { and, asc, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
@@ -17,7 +10,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import type { Env } from "../../config/env";
 import type { AuthContext } from "../../core";
 import { safeEqual } from "../../lib/crypto";
-import { conflict, forbidden, gone, HttpError, notFound, unauthorized } from "../../lib/errors";
+import { conflict, forbidden, HttpError, unauthorized } from "../../lib/errors";
 import type { Auth } from "./auth";
 
 export interface IdentityResult {
@@ -26,7 +19,7 @@ export interface IdentityResult {
   cookies: string[];
 }
 
-interface AuditInput {
+export interface AuditInput {
   organizationId: string;
   userId: string | null;
   sessionId?: string | null;
@@ -36,9 +29,10 @@ interface AuditInput {
   metadata?: Record<string, unknown>;
 }
 
-const ROLES: readonly OrgRole[] = ["owner", "admin", "member"];
-const asRole = (r: string | null | undefined): OrgRole =>
-  ROLES.includes(r as OrgRole) ? (r as OrgRole) : "member";
+const ROLES: readonly OrgRole[] = ["standard", "developer", "lead", "admin"];
+/** Unknown or missing roles fall back to the least privileged role. */
+export const asRole = (r: string | null | undefined): OrgRole =>
+  ROLES.includes(r as OrgRole) ? (r as OrgRole) : "standard";
 
 function slugify(name: string): string {
   const base = name
@@ -53,16 +47,18 @@ function slugify(name: string): string {
 export class IdentityService {
   constructor(
     readonly auth: Auth,
-    private readonly authDb: NodePgDatabase,
-    private readonly env: Env,
+    readonly authDb: NodePgDatabase,
+    readonly env: Env,
   ) {}
 
   /** Resolve the session cookie → principal. Returns null when unauthenticated. */
   async authenticate(headers: IncomingHttpHeaders): Promise<AuthContext | null> {
     const result = await this.auth.api.getSession({ headers: fromNodeHeaders(headers) }).catch(() => null);
     if (!result) return null;
+    // auth.member says which organizations the user belongs to (existence only); the organization role
+    // comes from the app.org_members projection, the single source of truth (D-06, research R12/R13).
     const rows = await this.authDb
-      .select({ organizationId: member.organizationId, role: member.role })
+      .select({ organizationId: member.organizationId })
       .from(member)
       .where(eq(member.userId, result.user.id))
       .orderBy(asc(member.createdAt))
@@ -70,11 +66,16 @@ export class IdentityService {
     const active = result.session.activeOrganizationId;
     const m = rows.find((r) => r.organizationId === active) ?? rows[0];
     if (!m) return null;
+    const [projection] = await this.authDb
+      .select({ role: orgMembers.role })
+      .from(orgMembers)
+      .where(and(eq(orgMembers.organizationId, m.organizationId), eq(orgMembers.userId, result.user.id)))
+      .limit(1);
     return {
       userId: result.user.id,
       organizationId: m.organizationId,
       sessionId: result.session.id,
-      role: asRole(m.role),
+      role: asRole(projection?.role),
       name: result.user.name,
       email: result.user.email,
     };
@@ -139,7 +140,7 @@ export class IdentityService {
   }
 
   /**
-   * AUTH-01: redeem the one-time setup token → first user (owner) + organization. All writes (user, account,
+   * AUTH-01: redeem the one-time setup token → first user (Organization Admin) + organization. All writes (user, account,
    * session, organization, member, setup flag, org_members projection, audit) commit atomically.
    */
   async setup(
@@ -167,15 +168,15 @@ export class IdentityService {
       await adapter.create({ model: "instanceSetup", data: { organizationId: org.id, redeemedBy: userId } });
       await adapter.create({
         model: "orgMember",
-        data: { organizationId: org.id, userId, displayName: input.name, email: input.email, role: "owner" },
+        data: { organizationId: org.id, userId, displayName: input.name, email: input.email, role: "admin" },
       });
-      await this.auditVia(adapter, {
+      await auditVia(adapter, {
         organizationId: org.id,
         userId,
         action: "setup.redeemed",
         resourceType: "instance",
       });
-      await this.auditVia(adapter, {
+      await auditVia(adapter, {
         organizationId: org.id,
         userId,
         action: "organization.created",
@@ -191,217 +192,41 @@ export class IdentityService {
       cookies: out.headers.getSetCookie(),
       me: {
         user: { id: out.userId, name: input.name, email: input.email, image: null },
-        organization: { id: out.org.id, name: out.org.name, slug: out.org.slug, role: "owner" },
+        organization: { id: out.org.id, name: out.org.name, slug: out.org.slug, role: "admin" },
         sessionId: sessionId ?? "",
       },
     };
   }
 
-  private link(id: string) {
-    return `${this.env.OCW_PUBLIC_WEB_URL.replace(/\/$/, "")}/invite/${id}`;
-  }
-
-  private toInvitation(row: {
-    id: string;
-    email: string;
-    role: string | null;
-    status: string;
-    expiresAt: Date | string;
-    createdAt?: Date | string | null;
-  }): Invitation {
-    const status =
-      (["pending", "accepted", "rejected", "canceled"] as const).find((s) => s === row.status) ?? "pending";
-    return {
-      id: row.id,
-      email: row.email,
-      role: asRole(row.role),
-      status,
-      expiresAt: new Date(row.expiresAt).toISOString(),
-      ...(row.createdAt ? { createdAt: new Date(row.createdAt).toISOString() } : {}),
-      link: this.link(row.id),
-    };
-  }
-
-  /** AUTH-03: owner/admin creates an invitation; returns a copyable link (SMTP optional). */
-  async createInvitation(auth: AuthContext, headers: IncomingHttpHeaders, input: CreateInvitationRequest) {
-    const ctx = await this.auth.$context;
-    return runWithTransaction(ctx.adapter, async () => {
-      const adapter = await getCurrentAdapter(ctx.adapter);
-      const created = await this.auth.api.createInvitation({
-        headers: fromNodeHeaders(headers),
-        body: { email: input.email, role: input.role, organizationId: auth.organizationId, resend: true },
-      });
-      await this.auditVia(adapter, {
-        organizationId: auth.organizationId,
-        userId: auth.userId,
-        sessionId: auth.sessionId,
-        action: "invitation.created",
-        resourceType: "invitation",
-        resourceId: created.id,
-        metadata: { email: input.email, role: input.role },
-      });
-      return this.toInvitation(created);
-    });
-  }
-
-  async listInvitations(auth: AuthContext): Promise<Invitation[]> {
-    const rows = await this.authDb
-      .select()
-      .from(invitation)
-      .where(and(eq(invitation.organizationId, auth.organizationId), eq(invitation.status, "pending")))
-      .orderBy(asc(invitation.createdAt));
-    return rows.map((r) => this.toInvitation(r));
-  }
-
-  async revokeInvitation(auth: AuthContext, headers: IncomingHttpHeaders, id: string) {
-    const ctx = await this.auth.$context;
-    await runWithTransaction(ctx.adapter, async () => {
-      const adapter = await getCurrentAdapter(ctx.adapter);
-      const inv = await adapter.findOne<{ organizationId: string; status: string }>({
-        model: "invitation",
-        where: [{ field: "id", value: id }],
-      });
-      if (!inv || inv.organizationId !== auth.organizationId) throw notFound("Invitation not found");
-      await this.auth.api.cancelInvitation({ headers: fromNodeHeaders(headers), body: { invitationId: id } });
-      await this.auditVia(adapter, {
-        organizationId: auth.organizationId,
-        userId: auth.userId,
-        sessionId: auth.sessionId,
-        action: "invitation.revoked",
-        resourceType: "invitation",
-        resourceId: id,
-      });
-    });
-  }
-
-  async getPublicInvitation(id: string): Promise<PublicInvitation> {
-    const [row] = await this.authDb
-      .select({
-        id: invitation.id,
-        email: invitation.email,
-        role: invitation.role,
-        status: invitation.status,
-        expiresAt: invitation.expiresAt,
-        organizationName: organization.name,
-        inviterName: user.name,
-      })
-      .from(invitation)
-      .innerJoin(organization, eq(organization.id, invitation.organizationId))
-      .leftJoin(user, eq(user.id, invitation.inviterId))
-      .where(eq(invitation.id, id));
-    if (!row) throw notFound("Invitation not found");
-    const inv = this.toInvitation(row);
-    return {
-      id: row.id,
-      email: row.email,
-      organizationName: row.organizationName,
-      inviterName: row.inviterName ?? null,
-      role: inv.role,
-      status: inv.status,
-      expired: new Date(row.expiresAt).getTime() < Date.now(),
-    };
-  }
-
-  /** AUTH-02: accept an invitation by signing up with the INVITATION's email (never client-supplied). */
-  async acceptInvitation(id: string, input: AcceptInvitationRequest): Promise<IdentityResult> {
-    const ctx = await this.auth.$context;
-    const out = await runWithTransaction(ctx.adapter, async () => {
-      const adapter = await getCurrentAdapter(ctx.adapter);
-      const inv = await adapter.findOne<{
-        id: string;
-        organizationId: string;
-        email: string;
-        role: string | null;
-        status: string;
-        expiresAt: Date;
-      }>({ model: "invitation", where: [{ field: "id", value: id }] });
-      if (!inv) throw notFound("Invitation not found");
-      if (inv.status !== "pending")
-        throw conflict("This invitation is no longer valid", "invitation_not_pending");
-      if (new Date(inv.expiresAt).getTime() < Date.now())
-        throw gone("This invitation has expired", "invitation_expired");
-      const existing = await adapter.findOne({
-        model: "user",
-        where: [{ field: "email", value: inv.email.toLowerCase() }],
-      });
-      if (existing)
-        throw conflict("An account with this email already exists; sign in instead", "account_exists");
-
-      const { headers, response } = await this.auth.api.signUpEmail({
-        body: { name: input.name, email: inv.email, password: input.password },
-        returnHeaders: true,
-      });
-      const userId = response.user.id;
-      const role = asRole(inv.role);
-      await adapter.create({
-        model: "member",
-        data: { organizationId: inv.organizationId, userId, role, createdAt: new Date() },
-      });
-      await adapter.update({
-        model: "invitation",
-        where: [{ field: "id", value: id }],
-        update: { status: "accepted" },
-      });
-      await adapter.create({
-        model: "orgMember",
-        data: { organizationId: inv.organizationId, userId, displayName: input.name, email: inv.email, role },
-      });
-      await this.auditVia(adapter, {
-        organizationId: inv.organizationId,
-        userId,
-        action: "user.signed_up",
-        resourceType: "user",
-        resourceId: userId,
-      });
-      await this.auditVia(adapter, {
-        organizationId: inv.organizationId,
-        userId,
-        action: "invitation.accepted",
-        resourceType: "invitation",
-        resourceId: id,
-      });
-      const org = await adapter.findOne<{ id: string; name: string; slug: string }>({
-        model: "organization",
-        where: [{ field: "id", value: inv.organizationId }],
-      });
-      return { headers, userId, role, org, email: inv.email };
-    });
-    if (!out.org) throw new Error("organization missing");
-    return {
-      cookies: out.headers.getSetCookie(),
-      me: {
-        user: { id: out.userId, name: input.name, email: out.email, image: null },
-        organization: { id: out.org.id, name: out.org.name, slug: out.org.slug, role: out.role },
-        sessionId: (await this.sessionIdFromCookies(out.headers.getSetCookie())) ?? "",
-      },
-    };
-  }
-
-  private async sessionIdFromCookies(cookies: string[]): Promise<string | null> {
+  async sessionIdFromCookies(cookies: string[]): Promise<string | null> {
     const cookie = cookies.map((c) => c.split(";")[0]).join("; ");
     const s = await this.auth.api.getSession({ headers: new Headers({ cookie }) }).catch(() => null);
     return s?.session.id ?? null;
   }
+}
 
-  private async auditVia(
-    adapter: { create(args: { model: string; data: Record<string, unknown> }): Promise<unknown> },
-    e: AuditInput,
-  ): Promise<void> {
-    await adapter.create({
-      model: "auditEvent",
-      data: {
-        organizationId: e.organizationId,
-        actorKind: e.userId ? "user" : "system",
-        actorId: e.userId,
-        userId: e.userId,
-        sessionId: e.sessionId ?? null,
-        clientKind: "web",
-        resourceType: e.resourceType,
-        resourceId: e.resourceId ?? null,
-        action: e.action,
-        result: "success",
-        metadata: e.metadata ?? {},
-      },
-    });
-  }
+/**
+ * Writes one audit row through the better-auth adapter, so it joins the CURRENT auth-plane transaction
+ * (`runWithTransaction` + `getCurrentAdapter`): the audit row commits or rolls back with the change.
+ */
+export async function auditVia(
+  adapter: { create(args: { model: string; data: Record<string, unknown> }): Promise<unknown> },
+  e: AuditInput,
+): Promise<void> {
+  await adapter.create({
+    model: "auditEvent",
+    data: {
+      organizationId: e.organizationId,
+      actorKind: e.userId ? "user" : "system",
+      actorId: e.userId,
+      userId: e.userId,
+      sessionId: e.sessionId ?? null,
+      clientKind: "web",
+      resourceType: e.resourceType,
+      resourceId: e.resourceId ?? null,
+      action: e.action,
+      result: "success",
+      metadata: e.metadata ?? {},
+    },
+  });
 }

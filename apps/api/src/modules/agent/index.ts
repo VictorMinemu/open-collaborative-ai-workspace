@@ -1,3 +1,4 @@
+// authz-legacy: 02-10 migrates this file to the resolver
 import {
   Agent,
   AgentList,
@@ -62,7 +63,7 @@ function isUniqueViolation(err: unknown): boolean {
  * `cell.config.changed` events on `cell:<orgId>`; the cell acks through the Agent Channel API.
  */
 export function createAgentModule(core: Core): ApiModule {
-  const admin = core.identity.requireRole("owner", "admin");
+  const admin = core.identity.requireRole("admin");
   const member = core.identity.requireUser;
 
   return {

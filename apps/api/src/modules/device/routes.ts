@@ -1,3 +1,4 @@
+// authz-legacy: 02-05 migrates this file to the resolver
 import { randomInt } from "node:crypto";
 import {
   CreateEnrollmentResponse,
@@ -230,7 +231,7 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
         const [row] = await tx.select().from(devices).where(eq(devices.id, req.params.id));
         if (!row) throw notFound("Device not found");
         if (row.revokedAt) throw conflict("Device already revoked");
-        const isAdmin = auth.role === "owner" || auth.role === "admin";
+        const isAdmin = auth.role === "admin";
         if (row.ownerUserId !== auth.userId && !isAdmin)
           throw forbidden("Only the owner or an admin can revoke");
         await tx

@@ -1,4 +1,5 @@
 "use client";
+// authz-legacy: 02-05 migrates this file to the resolver
 
 import { Menu } from "@base-ui/react/menu";
 import type { WorkSession } from "@ocw/contracts";
@@ -98,8 +99,7 @@ function LoadedSession({ state }: { state: LiveSession }) {
   const role = me.data?.organization.role;
   const device = devices.data?.find((d) => d.id === session.deviceId);
   const canDecide =
-    !!userId &&
-    (session.createdBy === userId || device?.ownerUserId === userId || role === "owner" || role === "admin");
+    !!userId && (session.createdBy === userId || device?.ownerUserId === userId || role === "admin");
   const deciderHint = `Waiting for ${session.createdByName ?? "the session owner"}${
     device?.ownerName && device.ownerUserId !== session.createdBy ? ` or ${device.ownerName}` : ""
   } to decide.`;

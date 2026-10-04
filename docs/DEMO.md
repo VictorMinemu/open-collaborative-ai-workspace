@@ -25,8 +25,8 @@ pnpm demo:reset                               # wipes the LOCAL database and see
 ANTHROPIC_API_KEY=sk-ant-… pnpm demo:reset    # same, plus the Anthropic provider and three bots
 ```
 
-Seeded workspace: organization **Autofy Labs**; people Víctor Ruiz (owner), Alex Kim, Marta López,
-Sam Patel (`<name>@autofylabs.demo`); channels `#general`, `#producto`, `#ingenieria`, `#lanzamiento`
+Seeded workspace: organization **Autofy Labs**; people Víctor Ruiz (Organization Admin) and the
+Developers Alex Kim, Marta López and Sam Patel (`<name>@autofylabs.demo`); channels `#general`, `#producto`, `#ingenieria`, `#lanzamiento`
 with a short history. The password for every demo user is printed at the end of the seed and stored in
 `.env.demo` (git-ignored). With a key, bots **@archie** (product), **@nova** (code review) and
 **@iris** (research) are created on Claude Sonnet 5.5 and added to their channels.

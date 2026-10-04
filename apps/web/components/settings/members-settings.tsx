@@ -1,4 +1,5 @@
 "use client";
+// authz-legacy: 02-12 migrates this file to the resolver
 
 import {
   CreateInvitationRequest,
@@ -6,6 +7,7 @@ import {
   type Invitation,
   type Member,
   type OrgRole,
+  ROLE_LABELS,
   topic,
 } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
@@ -35,17 +37,23 @@ import {
 import { useTopic } from "@/lib/realtime";
 import { cn, formatDate, relativeTime } from "@/lib/utils";
 
-const INVITE_ROLES = [
-  { value: "member", label: "Member" },
-  { value: "admin", label: "Admin" },
-] as const;
+const INVITE_ROLES: Array<{ value: OrgRole; label: string }> = (
+  ["standard", "developer", "lead", "admin"] as const
+).map((value) => ({ value, label: ROLE_LABELS[value] }));
 
-const ROLE_ORDER: Record<OrgRole, number> = { owner: 0, admin: 1, member: 2 };
+const ROLE_ORDER: Record<OrgRole, number> = { admin: 0, lead: 1, developer: 2, standard: 3 };
+
+const ROLE_VARIANT: Record<OrgRole, "brand" | "outline"> = {
+  admin: "brand",
+  lead: "brand",
+  developer: "outline",
+  standard: "outline",
+};
 
 export function MembersSettings() {
   const me = useMe();
   const qc = useQueryClient();
-  const isAdmin = me.data?.organization.role === "owner" || me.data?.organization.role === "admin";
+  const isAdmin = me.data?.organization.role === "admin";
   const orgId = me.data?.organization.id ?? null;
 
   // Someone accepted an invitation → refresh both lists live.
@@ -106,7 +114,7 @@ function InviteSection() {
   const create = useCreateInvitation();
   const { copy, copied } = useCopy();
   const [email, setEmail] = useState("");
-  const [role, setRole] = useState<"member" | "admin">("member");
+  const [role, setRole] = useState<OrgRole>("developer");
   const [error, setError] = useState<string | undefined>();
   const [created, setCreated] = useState<Invitation | null>(null);
 
@@ -175,7 +183,7 @@ function InviteSection() {
           </div>
           <div className="flex gap-2">
             <Select items={INVITE_ROLES} value={role} onValueChange={(v) => v && setRole(v)}>
-              <SelectTrigger aria-label="Role" data-testid="invite-role" className="w-28 sm:w-32" />
+              <SelectTrigger aria-label="Role" data-testid="invite-role" className="w-44" />
               <SelectContent>
                 {INVITE_ROLES.map((r) => (
                   <SelectItem key={r.value} value={r.value}>
@@ -367,8 +375,8 @@ function MemberRow({ member, isYou }: { member: Member; isYou: boolean }) {
 
 function RoleBadge({ role }: { role: OrgRole }) {
   return (
-    <Badge variant={role === "member" ? "outline" : "brand"} className="w-16 capitalize">
-      {role}
+    <Badge variant={ROLE_VARIANT[role]} className="shrink-0 whitespace-nowrap">
+      {ROLE_LABELS[role]}
     </Badge>
   );
 }

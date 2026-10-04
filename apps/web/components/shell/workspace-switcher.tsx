@@ -1,6 +1,6 @@
 "use client";
 
-import type { MeResponse } from "@ocw/contracts";
+import { type MeResponse, ROLE_LABELS } from "@ocw/contracts";
 import { ChevronsUpDown, Users } from "lucide-react";
 import { useRouter } from "next/navigation";
 import {
@@ -49,7 +49,7 @@ export function WorkspaceSwitcher({ me, collapsed = false }: { me: MeResponse; c
           >
             {org.name}
           </span>
-          <span className="block truncate text-muted-foreground text-xs capitalize">{org.role}</span>
+          <span className="block truncate text-muted-foreground text-xs">{ROLE_LABELS[org.role]}</span>
         </span>
         {collapsed ? null : <ChevronsUpDown className="size-4 shrink-0 text-muted-foreground" />}
       </DropdownMenuTrigger>

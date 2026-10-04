@@ -1,3 +1,4 @@
+// authz-legacy: 02-05 migrates this file to the resolver
 import { randomUUID } from "node:crypto";
 import {
   CreatePromptRequest,
@@ -44,7 +45,7 @@ const DIFF_TIMEOUT_MS = 20_000;
 const RUNTIME_LABEL = { "claude-code": "Claude Code", codex: "Codex" } as const;
 
 function isAdmin(auth: AuthContext) {
-  return auth.role === "owner" || auth.role === "admin";
+  return auth.role === "admin";
 }
 
 export function registerWorkSessionRoutes(

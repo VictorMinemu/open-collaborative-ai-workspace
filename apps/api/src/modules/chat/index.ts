@@ -1,3 +1,4 @@
+// authz-legacy: 02-04 migrates this file to the resolver
 import {
   AddConversationMemberRequest,
   type AgentTypingEvent,
@@ -291,7 +292,7 @@ export function createChatModule(core: Core): ApiModule {
             if (conv.slug === GENERAL_SLUG)
               throw badRequest("#general cannot be archived", "default_channel");
             const membership = await getMembership(tx, conv.id, "user", auth.userId);
-            const isAdmin = auth.role === "owner" || auth.role === "admin";
+            const isAdmin = auth.role === "admin";
             if (!isAdmin && membership?.role !== "owner") {
               throw forbidden("Only the channel owner or an admin can archive it");
             }
@@ -395,7 +396,7 @@ export function createChatModule(core: Core): ApiModule {
             if (!conv || !(await canRead(tx, conv, auth.userId))) throw notFound("Channel not found");
             const self = req.params.kind === "user" && req.params.memberId === auth.userId;
             const membership = await getMembership(tx, conv.id, "user", auth.userId);
-            const isAdmin = auth.role === "owner" || auth.role === "admin";
+            const isAdmin = auth.role === "admin";
             if (!self && !isAdmin && membership?.role !== "owner") {
               throw forbidden("Only the channel owner or an admin can remove members");
             }
