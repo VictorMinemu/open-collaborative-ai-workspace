@@ -1,0 +1,65 @@
+{
+  "name": "@ocw/openclaw-channel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenClaw native channel plugin: OCW bots as OpenClaw agents over the Agent Channel API",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist/**",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run --root . src"
+  },
+  "dependencies": {
+    "ws": "8.21.3",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.6",
+    "@types/ws": "8.18.1",
+    "typescript": "7.0.2",
+    "vitest": "5.0.2"
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "runtimeExtensions": [
+      "./dist/index.js"
+    ],
+    "channel": {
+      "id": "ocw",
+      "label": "Open Collaborative AI Workspace",
+      "selectionLabel": "OCW Agent Channel",
+      "blurb": "Bots of an Open Collaborative AI Workspace organization, via the Agent Channel API.",
+      "markdownCapable": true,
+      "configuredState": {
+        "env": {
+          "anyOf": [
+            "OCW_CELL_TOKEN_FILE",
+            "OCW_CELL_TOKEN"
+          ]
+        }
+      },
+      "commands": {
+        "nativeCommandsAutoEnabled": false,
+        "nativeSkillsAutoEnabled": false
+      }
+    },
+    "compat": {
+      "pluginApi": ">=2026.9.7"
+    },
+    "build": {
+      "openclawVersion": "2026.9.7"
+    }
+  }
+}

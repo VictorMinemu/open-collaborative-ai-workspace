@@ -1,0 +1,7 @@
+{
+  "extends": "@ocw/config/tsconfig.node.json",
+  "compilerOptions": {
+    "lib": ["es2024"]
+  },
+  "include": ["src", "scripts", "vitest.config.ts"]
+}

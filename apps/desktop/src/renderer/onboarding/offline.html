@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; base-uri 'none'"
+    />
+    <title>OCW · Server unreachable</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="drag" aria-hidden="true"></div>
+    <main class="offline">
+      <div class="card">
+        <img class="logo" src="./logo.svg" alt="" width="40" height="40" />
+        <h1>Can't reach your workspace</h1>
+        <p class="lead">OCW could not load <code id="target">the server</code>. Check that it is running; this page retries every few seconds.</p>
+        <button class="btn primary" type="button" id="retry">Try again</button>
+      </div>
+    </main>
+    <script src="./offline.js"></script>
+  </body>
+</html>

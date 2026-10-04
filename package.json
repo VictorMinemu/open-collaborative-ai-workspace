@@ -1,0 +1,37 @@
+{
+  "name": "ocw",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "packageManager": "pnpm@12.8.1",
+  "engines": {
+    "node": ">=24.21.0 <25"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "typecheck": "turbo run typecheck",
+    "test": "vitest run",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
+    "verify": "pnpm lint && pnpm typecheck && pnpm test",
+    "e2e": "playwright test -c e2e/playwright.config.ts",
+    "setup:env": "node scripts/setup-env.mjs",
+    "demo:up": "bash scripts/demo-up.sh",
+    "demo:seed": "node scripts/demo-seed.mjs",
+    "demo:reset": "bash scripts/demo-reset.sh",
+    "db:generate": "pnpm --filter @ocw/db generate",
+    "db:migrate": "pnpm --filter @ocw/db migrate"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.14",
+    "@playwright/test": "1.63.0",
+    "@types/node": "24.13.6",
+    "tsx": "4.23.15",
+    "turbo": "2.11.4",
+    "typescript": "7.0.2",
+    "vitest": "5.0.2"
+  }
+}

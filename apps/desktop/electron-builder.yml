@@ -1,0 +1,35 @@
+# Unsigned macOS build for the MVP 0 demo (ad-hoc signature only; no Developer ID, no notarization).
+appId: dev.ocw.desktop
+productName: OCW
+copyright: Open Collaborative AI Workspace · AGPL-3.0
+directories:
+  output: release
+  buildResources: resources
+files:
+  - dist/main/**
+  - dist/preload/**
+  - dist/renderer/**
+  - dist/assets/**
+  - package.json
+  - "!**/*.map"
+# The Local Runtime daemon (dist/daemon, with its node_modules) is copied into
+# Contents/Resources/daemon by scripts/after-pack.cjs: electron-builder always strips node_modules
+# from extraResources. It runs outside the asar as plain Node (Electron with ELECTRON_RUN_AS_NODE).
+afterPack: scripts/after-pack.cjs
+asar: true
+npmRebuild: false
+mac:
+  target:
+    - target: dir
+      arch: [arm64]
+    - target: dmg
+      arch: [arm64]
+  category: public.app-category.developer-tools
+  icon: resources/icon.icns
+  identity: "-"
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  darkModeSupport: true
+dmg:
+  title: OCW
+  icon: resources/icon.icns

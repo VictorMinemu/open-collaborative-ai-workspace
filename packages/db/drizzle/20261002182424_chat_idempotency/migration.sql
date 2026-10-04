@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "messages_author_client_msg_uq" ON "app"."messages" ("organization_id","author_kind","author_id","client_message_id") WHERE client_message_id is not null;

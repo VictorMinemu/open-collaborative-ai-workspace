@@ -43,3 +43,7 @@ CLAUDE.local.md
 ios/build/
 android/build/
 release/
+
+# Playwright
+e2e/test-results/
+e2e/playwright-report/

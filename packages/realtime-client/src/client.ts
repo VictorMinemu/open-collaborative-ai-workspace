@@ -1,0 +1,277 @@
+import { ClientFrame, type DurableFrame, type EphemeralFrame, ServerFrame } from "@ocw/contracts";
+import { createStore, type StoreApi } from "zustand/vanilla";
+import { backoffDelay } from "./backoff";
+
+export type ConnectionStatus = "idle" | "connecting" | "open" | "reconnecting" | "closed";
+
+export interface ConnectionState {
+  status: ConnectionStatus;
+  attempt: number;
+  lastError: string | null;
+}
+
+export type TopicFrame = DurableFrame | EphemeralFrame;
+export type TopicListener = (frame: TopicFrame) => void;
+
+/** Minimal WebSocket surface shared by the browser global and the `ws` package. */
+export interface WebSocketLike {
+  readonly readyState: number;
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+  onopen: ((ev: unknown) => void) | null;
+  onclose: ((ev: { code: number; reason?: string }) => void) | null;
+  onerror: ((ev: unknown) => void) | null;
+  onmessage: ((ev: { data: unknown }) => void) | null;
+}
+export type WebSocketCtor = new (url: string) => WebSocketLike;
+
+export interface RealtimeClientOptions {
+  url: string;
+  /** Injected constructor (browser global by default; pass `ws` in Node). */
+  WebSocket?: WebSocketCtor;
+  pingIntervalMs?: number;
+  backoffBaseMs?: number;
+  backoffMaxMs?: number;
+  /** Called for `err` frames (e.g. forbidden topic). */
+  onError?: (code: string, topic?: string, message?: string) => void;
+}
+
+interface TopicState {
+  listeners: Set<TopicListener>;
+  lastSeq: number;
+  subscribed: boolean;
+  onResync: Set<() => void>;
+  /** A replay is in flight because we observed a gap. */
+  replaying: boolean;
+}
+
+const OPEN = 1;
+
+/**
+ * One socket, many topics. Durable frames are de-duplicated by (topic, seq) and delivered in order; a gap
+ * (seq > lastSeq + 1) triggers a re-subscribe with afterSeq = lastSeq so the server replays what is missing.
+ * On reconnect every topic is re-subscribed with its lastSeq (resume).
+ */
+export class RealtimeClient {
+  readonly status: StoreApi<ConnectionState>;
+  private readonly opts: Required<Omit<RealtimeClientOptions, "onError" | "WebSocket">> &
+    Pick<RealtimeClientOptions, "onError">;
+  private readonly Ctor: WebSocketCtor;
+  private ws: WebSocketLike | null = null;
+  private topics = new Map<string, TopicState>();
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private stopped = true;
+
+  constructor(options: RealtimeClientOptions) {
+    const Ctor = options.WebSocket ?? (globalThis as { WebSocket?: WebSocketCtor }).WebSocket;
+    if (!Ctor) throw new Error("No WebSocket implementation available; pass options.WebSocket");
+    this.Ctor = Ctor;
+    this.opts = {
+      url: options.url,
+      pingIntervalMs: options.pingIntervalMs ?? 25_000,
+      backoffBaseMs: options.backoffBaseMs ?? 1000,
+      backoffMaxMs: options.backoffMaxMs ?? 30_000,
+      onError: options.onError,
+    };
+    this.status = createStore<ConnectionState>(() => ({ status: "idle", attempt: 0, lastError: null }));
+  }
+
+  connect(): void {
+    if (!this.stopped) return;
+    this.stopped = false;
+    this.open();
+  }
+
+  close(): void {
+    this.stopped = true;
+    this.clearTimers();
+    const ws = this.ws;
+    this.ws = null;
+    ws?.close(1000, "client closed");
+    for (const t of this.topics.values()) t.subscribed = false;
+    this.status.setState({ status: "closed" });
+  }
+
+  lastSeq(topic: string): number {
+    return this.topics.get(topic)?.lastSeq ?? 0;
+  }
+
+  /**
+   * Subscribe to a topic. `afterSeq` is the seq of the snapshot you already hold (from the REST response);
+   * events after it are replayed. Returns an unsubscribe function.
+   */
+  subscribe(
+    topic: string,
+    listener: TopicListener,
+    opts: { afterSeq?: number; onResync?: () => void } = {},
+  ): () => void {
+    let state = this.topics.get(topic);
+    if (!state) {
+      state = {
+        listeners: new Set(),
+        lastSeq: opts.afterSeq ?? 0,
+        subscribed: false,
+        onResync: new Set(),
+        replaying: false,
+      };
+      this.topics.set(topic, state);
+    } else if (opts.afterSeq !== undefined && opts.afterSeq > state.lastSeq) {
+      state.lastSeq = opts.afterSeq;
+    }
+    state.listeners.add(listener);
+    if (opts.onResync) state.onResync.add(opts.onResync);
+    if (!state.subscribed) this.sendSub(topic);
+
+    return () => {
+      const s = this.topics.get(topic);
+      if (!s) return;
+      s.listeners.delete(listener);
+      if (opts.onResync) s.onResync.delete(opts.onResync);
+      if (s.listeners.size === 0) {
+        this.topics.delete(topic);
+        this.send({ op: "unsub", topic });
+      }
+    };
+  }
+
+  /** Reset the cursor for a topic after refetching its snapshot (e.g. after `resync`). */
+  setLastSeq(topic: string, seq: number): void {
+    const s = this.topics.get(topic);
+    if (!s) return;
+    s.lastSeq = seq;
+    this.sendSub(topic);
+  }
+
+  sendEphemeral(topic: string, type: string, data: unknown): void {
+    this.send({ op: "eph", topic, type, data });
+  }
+
+  // ---- internals ----
+
+  private open(): void {
+    const prev = this.status.getState();
+    this.status.setState({ status: prev.attempt > 0 ? "reconnecting" : "connecting" });
+    let ws: WebSocketLike;
+    try {
+      ws = new this.Ctor(this.opts.url);
+    } catch (err) {
+      this.status.setState({ lastError: String(err) });
+      this.scheduleReconnect();
+      return;
+    }
+    this.ws = ws;
+    ws.onopen = () => {
+      this.status.setState({ status: "open", attempt: 0, lastError: null });
+      for (const topic of this.topics.keys()) this.sendSub(topic);
+      this.pingTimer = setInterval(() => this.send({ op: "ping" }), this.opts.pingIntervalMs);
+    };
+    ws.onmessage = (ev) => this.onMessage(ev.data);
+    ws.onerror = () => {
+      this.status.setState({ lastError: "socket error" });
+    };
+    ws.onclose = (ev) => {
+      if (this.ws !== ws) return;
+      this.ws = null;
+      this.clearTimers();
+      for (const t of this.topics.values()) {
+        t.subscribed = false;
+        t.replaying = false;
+      }
+      if (this.stopped) return;
+      // 4401 = session revoked/unauthenticated: stop and let the app re-authenticate.
+      if (ev.code === 4401 || ev.code === 1008) {
+        this.stopped = true;
+        this.status.setState({ status: "closed", lastError: ev.reason ?? "unauthorized" });
+        return;
+      }
+      this.scheduleReconnect();
+    };
+  }
+
+  private scheduleReconnect(): void {
+    const attempt = this.status.getState().attempt + 1;
+    this.status.setState({ status: "reconnecting", attempt });
+    const delay = backoffDelay(attempt - 1, this.opts.backoffBaseMs, this.opts.backoffMaxMs);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (!this.stopped) this.open();
+    }, delay);
+  }
+
+  private clearTimers(): void {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    this.reconnectTimer = null;
+    this.pingTimer = null;
+  }
+
+  private sendSub(topic: string): void {
+    const s = this.topics.get(topic);
+    if (!s) return;
+    if (this.send({ op: "sub", topic, afterSeq: s.lastSeq })) s.subscribed = true;
+  }
+
+  private send(frame: ClientFrame): boolean {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== OPEN) return false;
+    ws.send(JSON.stringify(ClientFrame.parse(frame)));
+    return true;
+  }
+
+  private onMessage(raw: unknown): void {
+    let parsed: ServerFrame;
+    try {
+      const text = typeof raw === "string" ? raw : String(raw);
+      const r = ServerFrame.safeParse(JSON.parse(text));
+      if (!r.success) return;
+      parsed = r.data;
+    } catch {
+      return;
+    }
+    switch (parsed.op) {
+      case "ev": {
+        const s = this.topics.get(parsed.topic);
+        if (!s) return;
+        if (parsed.seq <= s.lastSeq) return; // duplicate
+        if (parsed.seq > s.lastSeq + 1) {
+          // Gap: ask the server to replay from our cursor; frames after the gap will be re-sent.
+          if (!s.replaying) {
+            s.replaying = true;
+            this.sendSub(parsed.topic);
+          }
+          return;
+        }
+        s.lastSeq = parsed.seq;
+        for (const l of s.listeners) l(parsed);
+        return;
+      }
+      case "eph": {
+        const s = this.topics.get(parsed.topic);
+        if (!s) return;
+        for (const l of s.listeners) l(parsed);
+        return;
+      }
+      case "subscribed": {
+        const s = this.topics.get(parsed.topic);
+        if (s) {
+          s.subscribed = true;
+          s.replaying = false;
+        }
+        return;
+      }
+      case "resync": {
+        const s = this.topics.get(parsed.topic);
+        if (!s) return;
+        s.replaying = false;
+        for (const cb of s.onResync) cb();
+        return;
+      }
+      case "err":
+        this.opts.onError?.(parsed.code, parsed.topic, parsed.message);
+        return;
+      case "pong":
+        return;
+    }
+  }
+}
