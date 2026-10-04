@@ -48,3 +48,8 @@ release/
 # Playwright
 e2e/test-results/
 e2e/playwright-report/
+
+# GSD runtime state (local only)
+.gsd/
+.planning/state.json
+.planning/milestone.lock
