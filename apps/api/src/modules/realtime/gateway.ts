@@ -48,6 +48,9 @@ interface Connection {
  */
 export const PRESENCE_RATE_LIMIT = { max: 30, windowMs: 10_000 } as const;
 
+/** Re-decisions of live subscriptions running at once per API instance (RT-01, T-03-04-04). */
+export const REAUTH_CONCURRENCY = 4;
+
 /** Backstop for revocations that never reached this instance (Redis down, expiry): Pitfall 5. */
 export const SESSION_RECHECK_MS = 5 * 60_000;
 const CLIENT_EPHEMERAL_TYPE = /^user\.[a-z_.]{1,40}$/;
@@ -149,6 +152,62 @@ export function registerGateway(
     });
     return revocations;
   };
+  /**
+   * Live re-authorisation (RT-01, 03-04 D-05): an access change re-decides the matching live subscriptions through
+   * the same topic authorizers (the resolver) that decided them. "denied" drops the subscription (leaving its
+   * presence) and tells the client with `revoked`; "error" keeps it for the next check. At most
+   * REAUTH_CONCURRENCY re-decisions run at once on this instance.
+   */
+  const reauthorize = async (conn: Connection, topic: string) => {
+    const sub = conn.subs.get(topic);
+    if (!sub) return;
+    const verdict = await deps.realtime.reauthorizeTopic(conn.auth, topic);
+    // Replaced (a fresh `sub` was decided on its own) or removed meanwhile: nothing to do.
+    if (conn.subs.get(topic) !== sub) return;
+    if (verdict === "denied") {
+      await conn.unsub(topic);
+      conn.send({ op: "revoked", topic, reason: "forbidden" });
+      app.log.info({ topic, userId: conn.auth.userId }, "live subscription revoked");
+    } else if (verdict === "error") {
+      app.log.warn({ topic, userId: conn.auth.userId }, "subscription re-decision failed; kept");
+    }
+  };
+  const reauthQueue: Array<{ conn: Connection; topic: string }> = [];
+  let reauthRunning = 0;
+  const pumpReauth = () => {
+    while (reauthRunning < REAUTH_CONCURRENCY && reauthQueue.length) {
+      const job = reauthQueue.shift() as { conn: Connection; topic: string };
+      reauthRunning++;
+      reauthorize(job.conn, job.topic)
+        .catch((err: unknown) => app.log.warn({ err, topic: job.topic }, "subscription re-decision failed"))
+        .finally(() => {
+          reauthRunning--;
+          pumpReauth();
+        });
+    }
+  };
+  const scheduleReauth = (conn: Connection, topic: string) => {
+    reauthQueue.push({ conn, topic });
+    pumpReauth();
+  };
+
+  let invalidations: Promise<() => Promise<void>> | null = null;
+  const watchInvalidations = () => {
+    invalidations ??= deps.realtime.onSubscriptionInvalidation((e) => {
+      for (const conn of open) {
+        if (conn.auth.organizationId !== e.organizationId) continue;
+        if (e.userIds && !e.userIds.includes(conn.auth.userId)) continue;
+        for (const topic of conn.subs.keys()) {
+          if (!e.topics || e.topics.includes(topic)) scheduleReauth(conn, topic);
+        }
+      }
+    });
+    invalidations.catch(() => {
+      invalidations = null;
+    });
+    return invalidations;
+  };
+
   app.addHook("onClose", async () => {
     clearInterval(heartbeat);
     // Leave every joined entry so watchers on other instances see this one's people go at once.
@@ -164,6 +223,8 @@ export function registerGateway(
     await Promise.allSettled(leaving);
     const stop = await revocations?.catch(() => null);
     await stop?.();
+    const stopInvalidations = await invalidations?.catch(() => null);
+    await stopInvalidations?.();
   });
 
   app.get(
@@ -186,7 +247,7 @@ export function registerGateway(
         if (!auth)
           return reply.code(401).send({ error: { code: "unauthorized", message: "Sign in required" } });
         // Subscribed before the upgrade completes, so no revocation can slip between accept and register.
-        await watchRevocations();
+        await Promise.all([watchRevocations(), watchInvalidations()]);
         req.auth = auth;
       },
     },

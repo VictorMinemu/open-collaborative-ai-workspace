@@ -334,3 +334,16 @@ describe("wave-3 identity contracts", () => {
     );
   });
 });
+
+describe("revoked frame (03-04)", () => {
+  it("the server can tell a client it lost a topic; only the forbidden reason exists", () => {
+    const topic = "conv:0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
+    expect(ServerFrame.parse({ op: "revoked", topic, reason: "forbidden" })).toEqual({
+      op: "revoked",
+      topic,
+      reason: "forbidden",
+    });
+    expect(ServerFrame.safeParse({ op: "revoked", topic, reason: "expired" }).success).toBe(false);
+    expect(ServerFrame.safeParse({ op: "revoked", topic }).success).toBe(false);
+  });
+});

@@ -29,6 +29,28 @@ export interface RevocationEvent {
   reason: RevocationReason;
 }
 
+/**
+ * Which live subscriptions of one organization must be re-decided (RT-01, 03-04 D-05). `userIds` / `topics`
+ * absent = every user / every topic. It can only trigger re-decisions through the resolver, never grant access.
+ */
+export interface SubscriptionInvalidation {
+  organizationId: string;
+  userIds?: string[];
+  topics?: string[];
+}
+
+/**
+ * Maps a durable event (topic + payload) to the subscriptions it may have invalidated, or null when it changes
+ * nobody's access. Runs inside the domain transaction; the invalidation is published after commit.
+ */
+export type SubscriptionInvalidator = (
+  topic: string,
+  payload: unknown,
+) => { userIds?: string[]; topics?: string[] } | null;
+
+/** Outcome of re-deciding a live subscription: "error" (lookup failed) never revokes. */
+export type Reauthorization = "allowed" | "denied" | "error";
+
 export interface ReplayResult {
   events: DurableFrame[];
   lastSeq: number;
@@ -66,6 +88,50 @@ export interface RealtimeService {
   onRevocation(listener: (e: RevocationEvent) => void): Promise<() => Promise<void>>;
   /** True while the revoked-session flag for `sessionId` is set (checked on every bearer verify). */
   isSessionRevoked(sessionId: string): Promise<boolean>;
+  /**
+   * Durable events of `eventType` may change who can read which topics: `appendEvent` computes the invalidator's
+   * scope in the transaction and publishes it after commit, right after the event itself. Last one wins.
+   */
+  registerSubscriptionInvalidator(eventType: string, fn: SubscriptionInvalidator): void;
+  /** Publish an invalidation now (non-transactional callers, tests). */
+  invalidateSubscriptions(e: SubscriptionInvalidation): Promise<void>;
+  /** Subscribe to invalidations from every API instance; malformed messages are ignored. */
+  onSubscriptionInvalidation(listener: (e: SubscriptionInvalidation) => void): Promise<() => Promise<void>>;
+  /**
+   * Re-decide a live subscription with the same topic authorizer as `authorizeTopic`, but tri-state: a throwing
+   * authorizer is "error" (keep the subscription, decide again later), never "denied".
+   */
+  reauthorizeTopic(auth: AuthContext, topic: string): Promise<Reauthorization>;
+}
+
+/** Pub/sub channel of the subscription invalidation fan-out (RT-01, 03-04). */
+export const AUTHZ_INVALIDATION_CHANNEL = "ocw:realtime:authz-invalidated";
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const stringList = (v: unknown): string[] | undefined | null => {
+  if (v === undefined) return undefined;
+  return Array.isArray(v) && v.every((x) => typeof x === "string") ? (v as string[]) : null;
+};
+
+/** Defensive parse (the channel is shared by every stack on the same Redis server, Research note 8). */
+export function parseInvalidation(raw: string): SubscriptionInvalidation | null {
+  let v: unknown;
+  try {
+    v = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  if (typeof o.organizationId !== "string" || !UUID.test(o.organizationId)) return null;
+  const userIds = stringList(o.userIds);
+  const topics = stringList(o.topics);
+  if (userIds === null || topics === null) return null;
+  return {
+    organizationId: o.organizationId,
+    ...(userIds ? { userIds } : {}),
+    ...(topics ? { topics } : {}),
+  };
 }
 
 /** Pub/sub channel and per-session flag prefix of the revocation fan-out (T-02-03-07). */
@@ -111,6 +177,7 @@ export function createRealtimeService(deps: { db: TenantDb; bus: RedisBus }): Re
   // No built-in authorizers: every prefix is decided by the module that owns it (`org` and `user` by the
   // organization module's resolver); a prefix nobody registered stays denied.
   const authorizers = new Map<TopicPrefix, TopicAuthorizer>();
+  const invalidators = new Map<string, SubscriptionInvalidator>();
 
   const publish = (topic: string, frame: ServerFrame) =>
     deps.bus.publish(topicChannel(topic), JSON.stringify(frame));
@@ -128,7 +195,23 @@ export function createRealtimeService(deps: { db: TenantDb; bus: RedisBus }): Re
         insert into app.stream_events (stream_id, seq, organization_id, type, payload, actor_user_id)
         values (${topic}, ${seq}, ${ctx.organizationId}, ${type}, ${JSON.stringify(payload ?? null)}::jsonb, ${opts?.actorUserId ?? ctx.userId ?? null})`);
       const frame: DurableFrame = { op: "ev", topic, seq, type, data: payload ?? null };
-      ctx.afterCommit(() => publish(topic, frame));
+      let scope: ReturnType<SubscriptionInvalidator> = null;
+      const invalidator = invalidators.get(type);
+      if (invalidator) {
+        try {
+          scope = invalidator(topic, payload);
+        } catch (err) {
+          // Never fail the domain write: the periodic backstop re-decides anything missed.
+          console.error("subscription invalidator failed", { type, topic, err });
+        }
+      }
+      ctx.afterCommit(async () => {
+        await publish(topic, frame);
+        if (scope) {
+          const e: SubscriptionInvalidation = { organizationId: ctx.organizationId, ...scope };
+          await deps.bus.publish(AUTHZ_INVALIDATION_CHANNEL, JSON.stringify(e));
+        }
+      });
       return seq;
     },
 
@@ -157,6 +240,38 @@ export function createRealtimeService(deps: { db: TenantDb; bus: RedisBus }): Re
       } catch {
         return false;
       }
+    },
+
+    async reauthorizeTopic(auth, topic) {
+      const parsed = parseTopic(topic);
+      if (!parsed) return "denied";
+      const fn = authorizers.get(parsed.prefix);
+      if (!fn) return "denied";
+      try {
+        return (await fn(auth, parsed.id)) ? "allowed" : "denied";
+      } catch {
+        return "error";
+      }
+    },
+
+    registerSubscriptionInvalidator(eventType, fn) {
+      invalidators.set(eventType, fn);
+    },
+
+    async invalidateSubscriptions(e) {
+      const event: SubscriptionInvalidation = {
+        organizationId: e.organizationId,
+        ...(e.userIds ? { userIds: e.userIds } : {}),
+        ...(e.topics ? { topics: e.topics } : {}),
+      };
+      await deps.bus.publish(AUTHZ_INVALIDATION_CHANNEL, JSON.stringify(event));
+    },
+
+    async onSubscriptionInvalidation(listener) {
+      return deps.bus.subscribe(AUTHZ_INVALIDATION_CHANNEL, (msg) => {
+        const e = parseInvalidation(msg);
+        if (e) listener(e);
+      });
     },
 
     async replay(ctx, topic, afterSeq) {

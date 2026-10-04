@@ -17,13 +17,18 @@ export {
 import type { RealtimeService } from "./service";
 
 export {
+  AUTHZ_INVALIDATION_CHANNEL,
   createRealtimeService,
+  parseInvalidation,
   REVOCATION_CHANNEL,
   REVOKED_SID_TTL_SECONDS,
   type RealtimeService,
+  type Reauthorization,
   type ReplayResult,
   type RevocationEvent,
   type RevocationReason,
+  type SubscriptionInvalidation,
+  type SubscriptionInvalidator,
   type TopicAuthorizer,
   topicChannel,
 } from "./service";

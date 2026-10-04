@@ -5,8 +5,9 @@ import { z } from "zod";
  * Topics: `conv:<id>` (conversation incl. thread/work-session conversations), `user:<id>` (personal),
  * `org:<id>` (org-wide lists: channels, agents, devices, sessions), `ws:<id>` (work session events),
  * `cell:<orgId>` (OpenClaw cell stream; Agent Channel API only, never authorized for browsers).
- * Server ops: `ev` (durable), `eph` (ephemeral), `subscribed`, `resync`, `err`, `pong` and `presence` (who is
- * here now in a `conv`/`ws` topic: a `full` snapshot right after `subscribed`, then per-connection deltas).
+ * Server ops: `ev` (durable), `eph` (ephemeral), `subscribed`, `resync`, `err`, `pong`, `presence` (who is
+ * here now in a `conv`/`ws` topic: a `full` snapshot right after `subscribed`, then per-connection deltas) and
+ * `revoked` (a live subscription lost its access and was dropped by the server).
  */
 
 export const TopicPrefix = z.enum(["conv", "user", "org", "ws", "cell"]);
@@ -110,11 +111,17 @@ export const ServerFrame = z.discriminatedUnion("op", [
     full: z.boolean(),
     entries: z.array(PresenceEntry).max(PRESENCE_SNAPSHOT_LIMIT),
   }),
+  /**
+   * The server dropped this subscription because access to the topic was lost (RT-01, 03-04 D-05): the resolver
+   * re-decided it after a membership or permission change. The client forgets the topic and does not resubscribe.
+   */
+  z.object({ op: z.literal("revoked"), topic: z.string(), reason: z.enum(["forbidden"]) }),
 ]);
 export type ServerFrame = z.infer<typeof ServerFrame>;
 export type DurableFrame = Extract<ServerFrame, { op: "ev" }>;
 export type EphemeralFrame = Extract<ServerFrame, { op: "eph" }>;
 export type PresenceFrame = Extract<ServerFrame, { op: "presence" }>;
+export type RevokedFrame = Extract<ServerFrame, { op: "revoked" }>;
 
 /** Max events replayed per `sub`; beyond this the server sends `resync`. */
 export const REPLAY_LIMIT = 500;

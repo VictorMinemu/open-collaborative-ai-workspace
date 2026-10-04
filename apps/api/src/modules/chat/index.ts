@@ -21,6 +21,7 @@ import {
 import { conversationMembers, conversations, type TenantCtx, type Tx, tenantOf } from "@ocw/db";
 import { and, eq, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
+import { z } from "zod";
 import { type ApiModule, authOf, type Core, tenant } from "../../core";
 import type { AgentMention, ThreadContext } from "../../lib/chat-agent-bridge";
 import { badRequest, conflict, gone, notFound } from "../../lib/errors";
@@ -60,6 +61,12 @@ import {
 import { registerChatTestRoutes } from "./test-routes";
 
 export { resolveMentions } from "./mentions";
+
+/** The `conv:` copy of `conversation.member_removed` (see removeMember). */
+const MemberRemovedPayload = z.object({
+  conversationId: z.string(),
+  member: z.object({ kind: z.enum(["user", "agent"]), id: z.string() }),
+});
 
 /**
  * chat module (B1): channels, membership, messages, single-level threads, server-side @mentions, the `conv`
@@ -121,6 +128,16 @@ export function createChatModule(core: Core): ApiModule {
       return d.allowed;
     }),
   );
+
+  // Live re-authorisation (RT-01, 03-04 D-05): a user removed from a channel (or who left it) has that channel's
+  // live subscription re-decided by the authorizer above. The `user:` copy of the event and agent members need
+  // nothing: agents do not hold browser subscriptions.
+  core.realtime.registerSubscriptionInvalidator(EventTypes.conversationMemberRemoved, (topic, payload) => {
+    if (!topic.startsWith("conv:")) return null;
+    const parsed = MemberRemovedPayload.safeParse(payload);
+    if (!parsed.success || parsed.data.member.kind !== "user") return null;
+    return { userIds: [parsed.data.member.id], topics: [topic] };
+  });
 
   // ---------------------------------------------------------------- bridge: chat → agent-channel
   /**
