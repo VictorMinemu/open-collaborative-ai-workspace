@@ -64,8 +64,11 @@ export async function buildApp(
   app.setSerializerCompiler(serializerCompiler);
 
   // ---------------------------------------------------------------- infrastructure
-  const db = createTenantDb(env.DATABASE_URL);
+  const onIdleError = (pool: string) => (err: Error) =>
+    app.log.warn({ err, pool }, "postgres dropped an idle connection; it will reconnect on next use");
+  const db = createTenantDb(env.DATABASE_URL, { onIdleError: onIdleError("app") });
   const authPool = new pg.Pool({ connectionString: env.AUTH_DATABASE_URL, max: 5 });
+  authPool.on("error", onIdleError("auth"));
   const authDb = drizzle({ client: authPool });
   const bus = await RedisBus.connect(env.REDIS_URL);
   const encryptionKey = decodeKey(env.OCW_ENCRYPTION_KEY);

@@ -228,6 +228,29 @@ describe("tenant isolation (RLS)", () => {
     await expect(app.query("select * from auth.session")).rejects.toThrow(/permission denied/);
   });
 
+  it("survives Postgres dropping an idle pooled connection (no crash, next query reconnects)", async () => {
+    const errors: Error[] = [];
+    const db: TenantDb = createTenantDb(tdb.appUrl, { max: 1, onIdleError: (e) => errors.push(e) });
+    try {
+      const pid = (await db.pool.query("select pg_backend_pid() as pid")).rows[0].pid as number;
+      const su = new pg.Client({ connectionString: tdb.superuserUrl });
+      await su.connect();
+      try {
+        await su.query("select pg_terminate_backend($1)", [pid]);
+      } finally {
+        await su.end();
+      }
+      await expect.poll(() => errors.length).toBe(1);
+      const n = await db.withTenant({ organizationId: A }, async (tx) => {
+        const r = await tx.execute("select count(*)::int as n from app.conversations");
+        return (r.rows[0] as { n: number }).n;
+      });
+      expect(n).toBe(2);
+    } finally {
+      await db.close();
+    }
+  });
+
   it("withTenant scopes queries and does not leak context to the pooled connection", async () => {
     const db: TenantDb = createTenantDb(tdb.appUrl, { max: 1 });
     try {

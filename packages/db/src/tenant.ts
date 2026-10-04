@@ -57,8 +57,14 @@ export interface TenantDb {
   pool: pg.Pool;
 }
 
-export function createTenantDb(connectionString: string, opts: { max?: number } = {}): TenantDb {
+export function createTenantDb(
+  connectionString: string,
+  opts: { max?: number; onIdleError?: (error: Error) => void } = {},
+): TenantDb {
   const pool = new pg.Pool({ connectionString, max: opts.max ?? 10 });
+  // An idle client whose connection drops (Postgres restart, admin termination) emits `error` on the
+  // pool; unhandled, that crashes the process. The client is discarded and the next query reconnects.
+  pool.on("error", (error) => opts.onIdleError?.(error));
   const db = drizzle({ client: pool });
 
   async function withTenant<T>(ctx: TenantCtx, fn: (tx: Tx, afterCommit: AfterCommit) => Promise<T>) {
