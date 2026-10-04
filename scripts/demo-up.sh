@@ -9,6 +9,9 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 ROOT="$PWD"
 STATE="$HOME/.ocw-demo"
 mkdir -p "$STATE/logs"
+# Owner-only directory: the cell token below is 0644 only so the container user can read it through
+# the bind mount; the 0700 parent keeps it unreachable for other local users.
+chmod 700 "$STATE"
 [[ -f .env ]] || { echo "No .env: run pnpm setup:env first"; exit 1; }
 
 up() { curl -sf -m 2 "$1" >/dev/null; }
@@ -31,7 +34,7 @@ if ! up http://localhost:3000/login; then
 fi
 echo "web  http://localhost:3000"
 
-# OpenClaw cell: the token file lives outside the repo (0644 so the container user can read it).
+# OpenClaw cell: the token file lives outside the repo, inside the owner-only $STATE directory.
 (set -a; . ./.env; set +a; umask 022; printf '%s' "$OCW_CELL_TOKEN" >"$STATE/cell_token")
 docker network inspect ocw-demo-net >/dev/null 2>&1 || docker network create --subnet 10.231.78.0/24 ocw-demo-net >/dev/null
 docker image inspect ocw-openclaw:local >/dev/null 2>&1 || docker build -q -f infra/openclaw/Dockerfile -t ocw-openclaw:local "$ROOT" >/dev/null
