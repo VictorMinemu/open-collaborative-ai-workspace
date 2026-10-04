@@ -1,4 +1,3 @@
-// authz-legacy: 02-04 migrates this file to the resolver
 import {
   AddConversationMemberRequest,
   type AgentTypingEvent,
@@ -24,15 +23,21 @@ import { and, eq, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { type ApiModule, authOf, type Core, tenant } from "../../core";
 import type { AgentMention, ThreadContext } from "../../lib/chat-agent-bridge";
-import { badRequest, conflict, forbidden, gone, notFound } from "../../lib/errors";
-import { channelResource, createPermissionService } from "../organization";
+import { badRequest, conflict, gone, notFound } from "../../lib/errors";
+import {
+  AuthzDeniedError,
+  type ChannelFacts,
+  channelMemberResource,
+  channelResource,
+  createPermissionService,
+} from "../organization";
 import { authorOf, type Directory, loadDirectory } from "./directory";
 import { resolveMentions } from "./mentions";
 import {
   addMember,
   type ChannelRow,
   type ChatDeps,
-  canRead,
+  type ConversationRow,
   channelFacts,
   channelRow,
   convTopic,
@@ -40,6 +45,7 @@ import {
   GENERAL_SLUG,
   getChannel,
   getMembership,
+  getMessage,
   listChannelMembers,
   listChannels,
   listMessages,
@@ -83,6 +89,22 @@ export function createChatModule(core: Core): ApiModule {
     return withViewerCan(req, tx, await channelRow(tx, id, authOf(req).userId));
   }
 
+  /**
+   * The channel and the caller's facts when the resolver lets the caller read it. Missing and hidden
+   * channels are the same 404, so a private channel never reveals that it exists.
+   */
+  async function readableChannel(
+    req: FastifyRequest,
+    tx: Tx,
+    conv: ConversationRow | null,
+    notFoundMessage = "Channel not found",
+  ): Promise<{ conv: ConversationRow; facts: ChannelFacts }> {
+    if (!conv) throw notFound(notFoundMessage);
+    const facts = await channelFacts(tx, conv, { kind: "user", id: authOf(req).userId });
+    await perms.assertCan(req, tx, "channel.read", channelResource(facts), { hideAs404: true });
+    return { conv, facts };
+  }
+
   // ---------------------------------------------------------------- realtime: conv:<id>
   // Subscribing to a channel's stream is reading it: the resolver decides channel.read for the user.
   core.realtime.registerTopicAuthorizer("conv", (auth, conversationId) =>
@@ -102,9 +124,10 @@ export function createChatModule(core: Core): ApiModule {
 
   // ---------------------------------------------------------------- bridge: chat → agent-channel
   /**
-   * Agent mentions in a fresh human message: agents that are not members yet are auto-added (the poster is a
-   * member, and members may add members), disabled agents are ignored, then ONE `emitAgentMention` carries
-   * every addressed agent. Runs inside the message transaction, so a rolled-back message is never delivered.
+   * Agent mentions in a fresh human message: an agent that is not a member yet is auto-added when the
+   * resolver lets the poster add members (otherwise it is skipped and not delivered), disabled agents are
+   * ignored, then ONE `emitAgentMention` carries every addressed agent. Runs inside the message
+   * transaction, so a rolled-back message is never delivered.
    */
   async function dispatchAgentMentions(
     tx: Tx,
@@ -115,11 +138,22 @@ export function createChatModule(core: Core): ApiModule {
     const conv = await getChannel(tx, result.row.conversationId);
     if (!conv) return [];
     const agentIds: string[] = [];
+    let authorRes: ReturnType<typeof channelResource> | undefined;
     for (const m of result.row.mentions) {
       if (m.kind !== "agent") continue;
       const agent = dir.agents.get(m.id);
       if (!agent || agent.status === "disabled") continue;
-      await addMember(tx, deps, conv, { kind: "agent", id: agent.id }, { reason: "mentioned" });
+      if (!(await getMembership(tx, conv.id, "agent", agent.id))) {
+        authorRes ??= channelResource(await channelFacts(tx, conv, { kind: "user", id: author.id }));
+        const d = await perms.decide(
+          tx,
+          { kind: "user", userId: author.id },
+          "channel.members.add",
+          authorRes,
+        );
+        if (!d.allowed) continue;
+        await addMember(tx, deps, conv, { kind: "agent", id: agent.id }, { reason: "mentioned" });
+      }
       agentIds.push(agent.id);
     }
     if (agentIds.length === 0) return [];
@@ -142,12 +176,34 @@ export function createChatModule(core: Core): ApiModule {
       const dir = await loadDirectory(tx);
       const agent = dir.agents.get(input.agentId);
       if (!agent) throw notFound("Agent not found", "agent_not_found");
-      if (agent.status === "disabled") throw forbidden("Agent is disabled", "agent_disabled");
       const conv = await getChannel(tx, input.conversationId);
       if (!conv) throw notFound("Conversation not found");
       if (conv.archivedAt) throw gone("This channel is archived", "channel_archived");
-      if (!(await getMembership(tx, conv.id, "agent", agent.id))) {
-        throw forbidden("The agent is not a member of this conversation", "agent_not_member");
+      // The bot itself: enabled, a member, and not denied by a rule (agent principal gate + preconditions).
+      const agentRes = channelResource(await channelFacts(tx, conv, { kind: "agent", id: agent.id }));
+      const posting = await perms.decide(tx, { kind: "agent", agentId: agent.id }, "channel.post", agentRes);
+      if (!posting.allowed) {
+        throw new AuthzDeniedError(
+          posting.denial ?? { permission: "channel.post", layer: "agent", reason: "missing_permission" },
+        );
+      }
+      // Confused deputy: a reply to a human is allowed only while that human may still read the channel.
+      const answered = input.inReplyToMessageId ? await getMessage(tx, input.inReplyToMessageId) : null;
+      const humanId = answered?.authorKind === "user" ? answered.authorId : null;
+      if (humanId) {
+        const humanRes = channelResource(await channelFacts(tx, conv, { kind: "user", id: humanId }));
+        const reading = await perms.decide(
+          tx,
+          { kind: "agent", agentId: agent.id, onBehalfOfUserId: humanId },
+          "channel.read",
+          agentRes,
+          humanRes,
+        );
+        if (!reading.allowed) {
+          throw new AuthzDeniedError(
+            reading.denial ?? { permission: "channel.read", layer: "user", reason: "missing_permission" },
+          );
+        }
       }
       const result = await postMessage(tx, deps, dir, {
         conv,
@@ -248,7 +304,8 @@ export function createChatModule(core: Core): ApiModule {
       app.post(
         "/channels",
         {
-          preHandler: requireUser,
+          config: { authz: "user" },
+          preHandler: [requireUser, perms.requirePermission("channel.create")],
           schema: { tags, body: CreateChannelRequest, response: { 200: ChannelSummary } },
         },
         async (req) =>
@@ -305,12 +362,15 @@ export function createChatModule(core: Core): ApiModule {
 
       app.post(
         "/channels/:id/join",
-        { preHandler: requireUser, schema: { tags, params: IdParams, response: { 200: ChannelSummary } } },
+        {
+          config: { authz: "user" },
+          preHandler: requireUser,
+          schema: { tags, params: IdParams, response: { 200: ChannelSummary } },
+        },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
             const userId = authOf(req).userId;
-            const conv = await getChannel(tx, req.params.id);
-            if (!conv || !(await canRead(tx, conv, userId))) throw notFound("Channel not found");
+            const { conv } = await readableChannel(req, tx, await getChannel(tx, req.params.id));
             if (conv.archivedAt) throw gone("This channel is archived", "channel_archived");
             await addMember(tx, deps, conv, { kind: "user", id: userId }, { reason: "joined" });
             return summaryOf(req, tx, conv.id);
@@ -319,13 +379,17 @@ export function createChatModule(core: Core): ApiModule {
 
       app.post(
         "/channels/:id/leave",
-        { preHandler: requireUser, schema: { tags, params: IdParams, response: { 200: Ok } } },
+        {
+          config: { authz: "user" },
+          preHandler: requireUser,
+          schema: { tags, params: IdParams, response: { 200: Ok } },
+        },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
             const userId = authOf(req).userId;
-            const conv = await getChannel(tx, req.params.id);
-            if (!conv || !(await canRead(tx, conv, userId))) throw notFound("Channel not found");
+            const { conv, facts } = await readableChannel(req, tx, await getChannel(tx, req.params.id));
             if (conv.slug === GENERAL_SLUG) throw badRequest("Everyone stays in #general", "default_channel");
+            await perms.assertCan(req, tx, "channel.members.remove", channelMemberResource(facts, true));
             await removeMember(tx, deps, conv, { kind: "user", id: userId });
             return { ok: true as const };
           }),
@@ -341,16 +405,9 @@ export function createChatModule(core: Core): ApiModule {
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
             const auth = authOf(req);
-            const conv = await getChannel(tx, req.params.id);
-            if (!conv) throw notFound("Channel not found");
-            const membership = await getMembership(tx, conv.id, "user", auth.userId);
-            const res = channelResource({
-              visibility: conv.visibility,
-              archived: conv.archivedAt !== null,
-              viewerRole: membership?.role ?? null,
-            });
             // 404 when the channel is hidden from the caller; 403 with {permission, layer, reason} otherwise.
-            await perms.assertCan(req, tx, "channel.read", res, { hideAs404: true });
+            const { conv, facts } = await readableChannel(req, tx, await getChannel(tx, req.params.id));
+            const res = channelResource(facts);
             if (conv.slug === GENERAL_SLUG)
               throw badRequest("#general cannot be archived", "default_channel");
             await perms.assertCan(req, tx, "channel.archive", res);
@@ -380,11 +437,13 @@ export function createChatModule(core: Core): ApiModule {
       app.post(
         "/channels/:id/read",
         {
+          config: { authz: "user" },
           preHandler: requireUser,
           schema: { tags, params: IdParams, body: MarkReadRequest, response: { 200: Ok } },
         },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
+            await readableChannel(req, tx, await getChannel(tx, req.params.id));
             await tx
               .update(conversationMembers)
               .set({ lastReadSeq: sql`greatest(${conversationMembers.lastReadSeq}, ${req.body.seq})` })
@@ -402,11 +461,14 @@ export function createChatModule(core: Core): ApiModule {
       // ---------------------------------------------------------------- members
       app.get(
         "/channels/:id/members",
-        { preHandler: requireUser, schema: { tags, params: IdParams, response: { 200: ChannelMemberList } } },
+        {
+          config: { authz: "user" },
+          preHandler: requireUser,
+          schema: { tags, params: IdParams, response: { 200: ChannelMemberList } },
+        },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
-            const conv = await getChannel(tx, req.params.id);
-            if (!conv || !(await canRead(tx, conv, authOf(req).userId))) throw notFound("Channel not found");
+            const { conv } = await readableChannel(req, tx, await getChannel(tx, req.params.id));
             return { members: await listChannelMembers(tx, conv.id, await loadDirectory(tx)) };
           }),
       );
@@ -414,6 +476,7 @@ export function createChatModule(core: Core): ApiModule {
       app.post(
         "/channels/:id/members",
         {
+          config: { authz: "user" },
           preHandler: requireUser,
           schema: {
             tags,
@@ -424,13 +487,9 @@ export function createChatModule(core: Core): ApiModule {
         },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
-            const userId = authOf(req).userId;
-            const conv = await getChannel(tx, req.params.id);
-            if (!conv || !(await canRead(tx, conv, userId))) throw notFound("Channel not found");
+            const { conv, facts } = await readableChannel(req, tx, await getChannel(tx, req.params.id));
             if (conv.archivedAt) throw gone("This channel is archived", "channel_archived");
-            if (!(await getMembership(tx, conv.id, "user", userId))) {
-              throw forbidden("Join the channel to add people or bots", "not_a_member");
-            }
+            await perms.assertCan(req, tx, "channel.members.add", channelResource(facts));
             const dir = await loadDirectory(tx);
             const target =
               req.body.kind === "agent" ? dir.agents.get(req.body.id) : dir.users.get(req.body.id);
@@ -444,20 +503,17 @@ export function createChatModule(core: Core): ApiModule {
       app.delete(
         "/channels/:id/members/:kind/:memberId",
         {
+          config: { authz: "user" },
           preHandler: requireUser,
           schema: { tags, params: MemberParams, response: { 200: ChannelMemberList } },
         },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
             const auth = authOf(req);
-            const conv = await getChannel(tx, req.params.id);
-            if (!conv || !(await canRead(tx, conv, auth.userId))) throw notFound("Channel not found");
+            const { conv, facts } = await readableChannel(req, tx, await getChannel(tx, req.params.id));
+            // Self (leave), channel owner or admin: relations and role decided by the resolver.
             const self = req.params.kind === "user" && req.params.memberId === auth.userId;
-            const membership = await getMembership(tx, conv.id, "user", auth.userId);
-            const isAdmin = auth.role === "admin";
-            if (!self && !isAdmin && membership?.role !== "owner") {
-              throw forbidden("Only the channel owner or an admin can remove members");
-            }
+            await perms.assertCan(req, tx, "channel.members.remove", channelMemberResource(facts, self));
             if (conv.slug === GENERAL_SLUG && req.params.kind === "user") {
               throw badRequest("Everyone stays in #general", "default_channel");
             }
@@ -470,13 +526,13 @@ export function createChatModule(core: Core): ApiModule {
       app.get(
         "/conversations/:id/messages",
         {
+          config: { authz: "user" },
           preHandler: requireUser,
           schema: { tags, params: IdParams, querystring: PageQuery, response: { 200: MessagePage } },
         },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
-            const conv = await getChannel(tx, req.params.id);
-            if (!conv || !(await canRead(tx, conv, authOf(req).userId))) throw notFound("Channel not found");
+            const { conv } = await readableChannel(req, tx, await getChannel(tx, req.params.id));
             // lastSeq first: anything committed after this read is replayed by the subscription.
             const lastSeq = await core.realtime.lastSeq(tx, convTopic(conv.id));
             const page = await listMessages(tx, conv.id, await loadDirectory(tx), req.query);
@@ -487,18 +543,16 @@ export function createChatModule(core: Core): ApiModule {
       app.post(
         "/conversations/:id/messages",
         {
+          config: { authz: "user" },
           preHandler: requireUser,
           schema: { tags, params: IdParams, body: PostMessageRequest, response: { 200: Message } },
         },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
             const auth = authOf(req);
-            const conv = await getChannel(tx, req.params.id);
-            if (!conv || !(await canRead(tx, conv, auth.userId))) throw notFound("Channel not found");
+            const { conv, facts } = await readableChannel(req, tx, await getChannel(tx, req.params.id));
             if (conv.archivedAt) throw gone("This channel is archived", "channel_archived");
-            if (!(await getMembership(tx, conv.id, "user", auth.userId))) {
-              throw forbidden("Join the channel to post in it", "not_a_member");
-            }
+            await perms.assertCan(req, tx, "channel.post", channelResource(facts));
             const dir = await loadDirectory(tx);
             const result = await postMessage(tx, deps, dir, {
               conv,
@@ -507,7 +561,7 @@ export function createChatModule(core: Core): ApiModule {
               mentions: resolveMentions(req.body.body, dir),
               threadRootId: req.body.threadRootId,
               clientMessageId: req.body.clientMessageId,
-              clientKind: "web",
+              clientKind: auth.clientKind,
               sessionId: auth.sessionId,
             });
             if (result.created) await dispatchAgentMentions(tx, dir, result, { id: auth.userId });
@@ -517,14 +571,21 @@ export function createChatModule(core: Core): ApiModule {
 
       app.get(
         "/messages/:id/thread",
-        { preHandler: requireUser, schema: { tags, params: IdParams, response: { 200: ThreadResponse } } },
+        {
+          config: { authz: "user" },
+          preHandler: requireUser,
+          schema: { tags, params: IdParams, response: { 200: ThreadResponse } },
+        },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
             const thread = await loadThread(tx, req.params.id);
-            const conv = thread ? await getChannel(tx, thread.root.conversationId) : null;
-            if (!thread || !conv || !(await canRead(tx, conv, authOf(req).userId))) {
-              throw notFound("Thread not found");
-            }
+            if (!thread) throw notFound("Thread not found");
+            await readableChannel(
+              req,
+              tx,
+              await getChannel(tx, thread.root.conversationId),
+              "Thread not found",
+            );
             const dir = await loadDirectory(tx);
             const participants =
               (await replyParticipantsFor(tx, [thread.root.id], dir)).get(thread.root.id) ?? [];

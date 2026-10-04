@@ -9,7 +9,7 @@ import {
 } from "@ocw/contracts";
 import { conversationMembers, conversations, messages, type Tx, tenantOf } from "@ocw/db";
 import { and, asc, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
-import { badRequest, forbidden, gone, notFound } from "../../lib/errors";
+import { badRequest, notFound } from "../../lib/errors";
 import type { AuditService } from "../audit";
 import type { ChannelFacts } from "../organization";
 import type { RealtimeService } from "../realtime";
@@ -66,29 +66,6 @@ export async function getMembership(
     )
     .limit(1);
   return row ?? null;
-}
-
-/** Public channels are readable by every org member; private ones only by their members. */
-export async function canRead(tx: Tx, conv: ConversationRow, userId: string): Promise<boolean> {
-  if (conv.kind === "channel" && conv.visibility === "public") return true;
-  return (await getMembership(tx, conv.id, "user", userId)) !== null;
-}
-
-/** The channel if the user may read it; 404 otherwise (private channels do not reveal their existence). */
-export async function requireReadable(tx: Tx, id: string, userId: string): Promise<ConversationRow> {
-  const conv = await getChannel(tx, id);
-  if (!conv || !(await canRead(tx, conv, userId))) throw notFound("Channel not found");
-  return conv;
-}
-
-/** The channel if the user is a member and it is not archived. */
-export async function requireWritable(tx: Tx, id: string, userId: string): Promise<ConversationRow> {
-  const conv = await requireReadable(tx, id, userId);
-  if (conv.archivedAt) throw gone("This channel is archived", "channel_archived");
-  if (!(await getMembership(tx, conv.id, "user", userId))) {
-    throw forbidden("Join the channel to post in it", "not_a_member");
-  }
-  return conv;
 }
 
 // ---------------------------------------------------------------- channels
