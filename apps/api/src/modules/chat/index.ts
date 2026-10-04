@@ -5,6 +5,7 @@ import {
   ChannelList,
   ChannelMemberList,
   ChannelSummary,
+  type ChannelSummary as ChannelSummaryDto,
   CreateChannelRequest,
   EphemeralTypes,
   EventTypes,
@@ -20,6 +21,7 @@ import {
 } from "@ocw/contracts";
 import { conversationMembers, conversations, type TenantCtx, type Tx, tenantOf } from "@ocw/db";
 import { and, eq, sql } from "drizzle-orm";
+import type { FastifyRequest } from "fastify";
 import { type ApiModule, authOf, type Core, tenant } from "../../core";
 import type { AgentMention, ThreadContext } from "../../lib/chat-agent-bridge";
 import { badRequest, conflict, forbidden, gone, notFound } from "../../lib/errors";
@@ -28,9 +30,11 @@ import { authorOf, type Directory, loadDirectory } from "./directory";
 import { resolveMentions } from "./mentions";
 import {
   addMember,
+  type ChannelRow,
   type ChatDeps,
   canRead,
-  channelSummary,
+  channelFacts,
+  channelRow,
   convTopic,
   ensureGeneral,
   GENERAL_SLUG,
@@ -59,11 +63,40 @@ export function createChatModule(core: Core): ApiModule {
   const deps: ChatDeps = { audit: core.audit, realtime: core.realtime };
   const perms = createPermissionService(core);
 
+  /** The channel permissions the web needs per channel (header menu, composer, members panel). */
+  const VIEWER_CAN = [
+    "channel.post",
+    "channel.members.add",
+    "channel.members.remove",
+    "channel.archive",
+  ] as const;
+
+  async function withViewerCan(req: FastifyRequest, tx: Tx, row: ChannelRow): Promise<ChannelSummaryDto> {
+    return {
+      ...row.summary,
+      viewerCan: await perms.viewerCan(req, tx, channelResource(row.facts), VIEWER_CAN),
+    };
+  }
+
+  /** One channel as the caller sees it, with `viewerCan`. */
+  async function summaryOf(req: FastifyRequest, tx: Tx, id: string): Promise<ChannelSummaryDto> {
+    return withViewerCan(req, tx, await channelRow(tx, id, authOf(req).userId));
+  }
+
   // ---------------------------------------------------------------- realtime: conv:<id>
+  // Subscribing to a channel's stream is reading it: the resolver decides channel.read for the user.
   core.realtime.registerTopicAuthorizer("conv", (auth, conversationId) =>
     core.db.withTenant({ organizationId: auth.organizationId, userId: auth.userId }, async (tx) => {
       const conv = await getChannel(tx, conversationId);
-      return conv ? canRead(tx, conv, auth.userId) : false;
+      if (!conv) return false;
+      const facts = await channelFacts(tx, conv, { kind: "user", id: auth.userId });
+      const d = await perms.decide(
+        tx,
+        { kind: "user", userId: auth.userId },
+        "channel.read",
+        channelResource(facts),
+      );
+      return d.allowed;
     }),
   );
 
@@ -188,13 +221,24 @@ export function createChatModule(core: Core): ApiModule {
       // ---------------------------------------------------------------- channels
       app.get(
         "/channels",
-        { preHandler: requireUser, schema: { tags, response: { 200: ChannelList } } },
+        {
+          config: { authz: "user" },
+          preHandler: requireUser,
+          schema: { tags, response: { 200: ChannelList } },
+        },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
             const auth = authOf(req);
             await ensureGeneral(tx, deps, auth.userId);
+            const rows = await listChannels(tx, auth.userId);
+            const visible = await perms.filter(req, tx, rows, "channel.read", (r) =>
+              channelResource(r.facts),
+            );
+            const channels: ChannelSummaryDto[] = [];
+            // Sequential: every decision shares the transaction's single connection (facts are memoised).
+            for (const row of visible) channels.push(await withViewerCan(req, tx, row));
             return {
-              channels: await listChannels(tx, auth.userId),
+              channels,
               orgSeq: await core.realtime.lastSeq(tx, `org:${auth.organizationId}`),
               userSeq: await core.realtime.lastSeq(tx, `user:${auth.userId}`),
             };
@@ -240,18 +284,22 @@ export function createChatModule(core: Core): ApiModule {
               metadata: { name, visibility },
             });
             await notifyListChanged(tx, deps, row, EventTypes.conversationCreated);
-            return channelSummary(tx, row.id, auth.userId);
+            return summaryOf(req, tx, row.id);
           }),
       );
 
       app.get(
         "/channels/:id",
-        { preHandler: requireUser, schema: { tags, params: IdParams, response: { 200: ChannelSummary } } },
+        {
+          config: { authz: "user" },
+          preHandler: requireUser,
+          schema: { tags, params: IdParams, response: { 200: ChannelSummary } },
+        },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
-            const conv = await getChannel(tx, req.params.id);
-            if (!conv || !(await canRead(tx, conv, authOf(req).userId))) throw notFound("Channel not found");
-            return channelSummary(tx, conv.id, authOf(req).userId);
+            const row = await channelRow(tx, req.params.id, authOf(req).userId);
+            await perms.assertCan(req, tx, "channel.read", channelResource(row.facts), { hideAs404: true });
+            return withViewerCan(req, tx, row);
           }),
       );
 
@@ -265,7 +313,7 @@ export function createChatModule(core: Core): ApiModule {
             if (!conv || !(await canRead(tx, conv, userId))) throw notFound("Channel not found");
             if (conv.archivedAt) throw gone("This channel is archived", "channel_archived");
             await addMember(tx, deps, conv, { kind: "user", id: userId }, { reason: "joined" });
-            return channelSummary(tx, conv.id, userId);
+            return summaryOf(req, tx, conv.id);
           }),
       );
 
@@ -325,7 +373,7 @@ export function createChatModule(core: Core): ApiModule {
               });
               await notifyListChanged(tx, deps, conv, EventTypes.conversationUpdated);
             }
-            return channelSummary(tx, conv.id, auth.userId);
+            return summaryOf(req, tx, conv.id);
           }),
       );
 

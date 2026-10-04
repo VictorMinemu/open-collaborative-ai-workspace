@@ -481,6 +481,75 @@ describe("archive is decided by the resolver", () => {
   });
 });
 
+describe("reading chat is decided by the resolver", () => {
+  const viewerCanOf = async (client: TestClient, id: string) =>
+    (await ok(client.request("GET", `/api/v1/channels/${id}`))).viewerCan as string[];
+
+  it("private channels: list, detail and conv topic are hidden from non-members, visible to members", async () => {
+    const vault = await ok(
+      admin.request("POST", "/api/v1/channels", { name: "vault", visibility: "private" }),
+    );
+    const alexAuth = { userId: alexId, organizationId: orgId } as AuthContext;
+    const adminAuth = { userId: adminId, organizationId: orgId } as AuthContext;
+    const { realtime } = stack.built.core;
+
+    const hidden = await ok(alex.request("GET", "/api/v1/channels"));
+    expect(hidden.channels.some((c: { id: string }) => c.id === vault.id)).toBe(false);
+    const detail = await alex.request("GET", `/api/v1/channels/${vault.id}`);
+    expect(detail.status).toBe(404);
+    expect(JSON.stringify(detail.body)).not.toContain("private_channel");
+    expect(await realtime.authorizeTopic(alexAuth, `conv:${vault.id}`)).toBe(false);
+    expect(await realtime.authorizeTopic(adminAuth, `conv:${vault.id}`)).toBe(true);
+
+    await ok(admin.request("POST", `/api/v1/channels/${vault.id}/members`, { kind: "user", id: alexId }));
+    const shown = await ok(alex.request("GET", "/api/v1/channels"));
+    expect(shown.channels.find((c: { id: string }) => c.id === vault.id)).toMatchObject({ isMember: true });
+    expect((await alex.request("GET", `/api/v1/channels/${vault.id}`)).status).toBe(200);
+    expect(await realtime.authorizeTopic(alexAuth, `conv:${vault.id}`)).toBe(true);
+  });
+
+  it("every channel summary carries viewerCan from the resolver", async () => {
+    // alex (developer) owns alex-pub; admin owns admin-pub.
+    const alexPub = await ok(alex.request("POST", "/api/v1/channels", { name: "alex-pub" }));
+    const adminPub = await ok(admin.request("POST", "/api/v1/channels", { name: "admin-pub" }));
+
+    // Admin, not the owner and not a member: archive and remove members, but cannot post before joining.
+    const asAdmin = await viewerCanOf(admin, alexPub.id);
+    expect(asAdmin).toEqual(expect.arrayContaining(["channel.archive", "channel.members.remove"]));
+    expect(asAdmin).not.toContain("channel.post");
+
+    // Developer, not a member yet: no posting.
+    expect(await viewerCanOf(alex, adminPub.id)).not.toContain("channel.post");
+
+    // Developer member, not the owner: post and add members, never archive.
+    await ok(alex.request("POST", `/api/v1/channels/${adminPub.id}/join`));
+    const asMember = await viewerCanOf(alex, adminPub.id);
+    expect(asMember).toEqual(expect.arrayContaining(["channel.post", "channel.members.add"]));
+    expect(asMember).not.toContain("channel.archive");
+    expect(asMember).not.toContain("channel.members.remove");
+
+    // Channel owner (developer): archive their own channel.
+    expect(await viewerCanOf(alex, alexPub.id)).toEqual(
+      expect.arrayContaining([
+        "channel.post",
+        "channel.members.add",
+        "channel.members.remove",
+        "channel.archive",
+      ]),
+    );
+
+    // The list carries the same answer.
+    const list = await ok(alex.request("GET", "/api/v1/channels"));
+    expect(list.channels.find((c: { id: string }) => c.id === adminPub.id).viewerCan).toEqual(asMember);
+  });
+
+  it("the channel read routes record no undecided response", () => {
+    expect(stack.built.authz.undecided.filter((u) => u.url.startsWith("/api/v1/channels"))).toEqual([]);
+    expect(stack.built.authz.routes.get("GET /api/v1/channels")).toBe("user");
+    expect(stack.built.authz.routes.get("GET /api/v1/channels/:id")).toBe("user");
+  });
+});
+
 describe("organization: permissions for the caller", () => {
   it("GET /me/permissions returns the role and the organization-scope set", async () => {
     const mine = await ok(admin.request("GET", "/api/v1/me/permissions"));
