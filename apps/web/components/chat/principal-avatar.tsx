@@ -1,5 +1,5 @@
 import { Bot } from "lucide-react";
-import { Avatar, AvatarFallback, AvatarImage, toneFor } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage, toneFor, UserAvatar } from "@/components/ui/avatar";
 import { cn, initials } from "@/lib/utils";
 
 const isUrl = (s: string) => /^(https?:)?\/\//.test(s) || s.startsWith("/") || s.startsWith("data:");
@@ -25,9 +25,12 @@ export function PrincipalAvatar({
   className?: string;
 }) {
   if (kind !== "agent") {
+    // People's avatars are an https photo or an emoji (ORG-06).
+    if (avatarUrl && !isUrl(avatarUrl))
+      return <UserAvatar name={name} src={avatarUrl} className={className} />;
     return (
       <Avatar className={className}>
-        {avatarUrl ? <AvatarImage src={avatarUrl} alt="" /> : null}
+        {avatarUrl ? <AvatarImage src={avatarUrl} alt="" referrerPolicy="no-referrer" /> : null}
         <AvatarFallback className={cn(toneFor(seed ?? name), compact && "font-semibold text-[10px]")}>
           {initials(name, compact ? 1 : 2)}
         </AvatarFallback>
@@ -44,7 +47,7 @@ export function PrincipalAvatar({
     >
       {avatarUrl && isUrl(avatarUrl) ? (
         // biome-ignore lint/performance/noImgElement: arbitrary user-provided bot avatars (no Next image domains)
-        <img src={avatarUrl} alt="" className="size-full object-cover" />
+        <img src={avatarUrl} alt="" referrerPolicy="no-referrer" className="size-full object-cover" />
       ) : avatarUrl ? (
         <span className={cn("leading-none", compact ? "text-[11px]" : "text-[1.05em]")} aria-hidden>
           {avatarUrl}

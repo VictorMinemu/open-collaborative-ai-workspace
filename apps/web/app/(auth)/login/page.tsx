@@ -6,12 +6,14 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { type FormEvent, Suspense, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { AuthCard, AuthCardSkeleton } from "@/components/auth/auth-card";
+import { ForgotPasswordDialog } from "@/components/auth/forgot-password-dialog";
 import { PasswordInput } from "@/components/auth/password-input";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
 import { Button } from "@/components/ui/button";
 import { describedBy, FormField } from "@/components/ui/form-field";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
+import { useAuthCapabilities } from "@/lib/account-queries";
 import { errorMessage, isApiError } from "@/lib/api";
 import { type FieldErrors, validate } from "@/lib/form";
 import { useMe, useSetupStatus, useSignIn } from "@/lib/queries";
@@ -37,6 +39,9 @@ function LoginContent() {
   const status = useSetupStatus();
   const me = useMe();
   const signIn = useSignIn();
+  // Prefetched so "Forgot password?" opens on the right branch (e-mail vs ask an admin) at once.
+  useAuthCapabilities();
+  const [forgotOpen, setForgotOpen] = useState(false);
   const [values, setValues] = useState<Record<Field, string>>({ email: "", password: "" });
   const [errors, setErrors] = useState<FieldErrors<Field>>({});
   const [formError, setFormError] = useState<string | null>(null);
@@ -124,7 +129,21 @@ function LoginContent() {
           />
         </FormField>
 
-        <FormField id="password" label="Password" error={errors.password}>
+        <FormField
+          id="password"
+          label="Password"
+          error={errors.password}
+          action={
+            <button
+              type="button"
+              data-testid="forgot-password"
+              onClick={() => setForgotOpen(true)}
+              className="rounded-sm font-medium text-[13px] text-muted-foreground underline-offset-4 outline-none transition-colors hover:text-foreground hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/40"
+            >
+              Forgot password?
+            </button>
+          }
+        >
           <PasswordInput
             id="password"
             name="password"
@@ -141,6 +160,7 @@ function LoginContent() {
           {pending ? "Signing in…" : "Sign in"}
         </Button>
       </form>
+      <ForgotPasswordDialog open={forgotOpen} onOpenChange={setForgotOpen} defaultEmail={values.email} />
     </AuthCard>
   );
 }
