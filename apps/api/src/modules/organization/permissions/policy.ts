@@ -40,6 +40,8 @@ const DEVICE_GATED = new Set<Permission>([
   "work_session.prompt",
   "work_session.approve",
 ]);
+/** Channel preconditions only judge a concrete channel; organization-scope answers stay role-based. */
+const isChannel = (r: ResourceFacts) => r.type === "channel" || r.type === "channel_member";
 const notMember = (p: PrincipalFacts): Denial => ({
   layer: "resource",
   reason: p.kind === "agent" ? "agent_not_member" : "not_a_member",
@@ -50,7 +52,7 @@ export const PRECONDITIONS: readonly Precondition[] = [
     // Private channels (and, for agents, every channel) are readable by members only.
     applies: (perm) => perm === "channel.read",
     check: (p, r) => {
-      if (r.relations.has("member")) return null;
+      if (!isChannel(r) || r.relations.has("member")) return null;
       if (p.kind === "agent") return notMember(p);
       return r.state.has("private") ? { layer: "resource", reason: "private_channel" } : null;
     },
@@ -58,6 +60,7 @@ export const PRECONDITIONS: readonly Precondition[] = [
   {
     applies: (perm) => perm === "channel.post" || perm === "channel.members.add",
     check: (p, r) => {
+      if (!isChannel(r)) return null;
       if (r.state.has("archived")) return { layer: "resource", reason: "archived" };
       return r.relations.has("member") ? null : notMember(p);
     },

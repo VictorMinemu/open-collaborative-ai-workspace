@@ -1,4 +1,4 @@
-import { orgMembers, permissionRules, type Tx } from "@ocw/db";
+import { agents, devices, orgMembers, orgUnits, permissionRules, type Tx, unitMemberships } from "@ocw/db";
 import { eq } from "drizzle-orm";
 import type { PrincipalFacts, RuleFact } from "./resolve";
 
@@ -18,26 +18,54 @@ const NO_UNITS = { memberUnitPaths: [] as const, leadOfUnitIds: new Set<string>(
 export async function loadPrincipalFacts(tx: Tx, ref: PrincipalRef): Promise<PrincipalFacts> {
   switch (ref.kind) {
     case "user": {
-      const [row] = await tx
-        .select({ role: orgMembers.role, deactivatedAt: orgMembers.deactivatedAt })
-        .from(orgMembers)
-        .where(eq(orgMembers.userId, ref.userId))
-        .limit(1);
+      const [[row], units] = await Promise.all([
+        tx
+          .select({ role: orgMembers.role, deactivatedAt: orgMembers.deactivatedAt })
+          .from(orgMembers)
+          .where(eq(orgMembers.userId, ref.userId))
+          .limit(1),
+        tx
+          .select({ unitId: unitMemberships.unitId, role: unitMemberships.role, path: orgUnits.path })
+          .from(unitMemberships)
+          .innerJoin(orgUnits, eq(orgUnits.id, unitMemberships.unitId))
+          .where(eq(unitMemberships.userId, ref.userId)),
+      ]);
       return {
         kind: "user",
         id: ref.userId,
         orgRole: row?.role ?? null,
         // No membership row in this tenant = not a member: deny everything.
         deactivated: !row || row.deactivatedAt !== null,
+        memberUnitPaths: units.map((u) => u.path),
+        leadOfUnitIds: new Set(units.filter((u) => u.role === "lead").map((u) => u.unitId)),
+      };
+    }
+    case "agent": {
+      const [row] = await tx
+        .select({ status: agents.status, deletedAt: agents.deletedAt })
+        .from(agents)
+        .where(eq(agents.id, ref.agentId))
+        .limit(1);
+      const deactivated = !row || row.status === "disabled" || row.deletedAt !== null;
+      return { kind: "agent", id: ref.agentId, orgRole: null, deactivated, ...NO_UNITS };
+    }
+    case "cell":
+      // The cell is authenticated by its token; it has no disabled state of its own.
+      return { kind: "cell", id: ref.cellId, orgRole: null, deactivated: false, ...NO_UNITS };
+    case "device": {
+      const [row] = await tx
+        .select({ revokedAt: devices.revokedAt })
+        .from(devices)
+        .where(eq(devices.id, ref.deviceId))
+        .limit(1);
+      return {
+        kind: "device",
+        id: ref.deviceId,
+        orgRole: null,
+        deactivated: !row || row.revokedAt !== null,
         ...NO_UNITS,
       };
     }
-    case "agent":
-      return { kind: "agent", id: ref.agentId, orgRole: null, deactivated: false, ...NO_UNITS };
-    case "cell":
-      return { kind: "cell", id: ref.cellId, orgRole: null, deactivated: false, ...NO_UNITS };
-    case "device":
-      return { kind: "device", id: ref.deviceId, orgRole: null, deactivated: false, ...NO_UNITS };
   }
 }
 
