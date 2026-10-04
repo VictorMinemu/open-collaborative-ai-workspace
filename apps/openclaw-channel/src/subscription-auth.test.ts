@@ -52,6 +52,9 @@ type FakeDriver = {
 function fakeDriver(): FakeDriver {
   let approve: ((a: SubscriptionAccount) => void) | null = null;
   let fail: ((e: Error) => void) | null = null;
+  // The test may approve/fail as soon as the fake API has *received* the pending report, before the
+  // login has registered its resolvers (the report's HTTP response is still in flight): remember it.
+  let early: { account: SubscriptionAccount } | { error: Error } | null = null;
   const d: FakeDriver = {
     stored: new Map<string, SubscriptionAccount>(),
     logins: 0,
@@ -61,8 +64,14 @@ function fakeDriver(): FakeDriver {
       userCode: "ABCD-EFGHI",
       expiresInMs: 900_000,
     },
-    approve: (a: SubscriptionAccount = ACCOUNT) => approve?.(a),
-    fail: (message: string) => fail?.(new Error(message)),
+    approve: (a: SubscriptionAccount = ACCOUNT) => {
+      if (approve) approve(a);
+      else early = { account: a };
+    },
+    fail: (message: string) => {
+      if (fail) fail(new Error(message));
+      else early = { error: new Error(message) };
+    },
     driver: {
       async login({ provider, signal, onDeviceCode }) {
         d.logins++;
@@ -70,7 +79,16 @@ function fakeDriver(): FakeDriver {
         const account = await new Promise<SubscriptionAccount>((resolve, reject) => {
           approve = resolve;
           fail = reject;
+          // A cancel can land while the pending report is still in flight (before this point).
+          if (signal.aborted) return reject(signal.reason);
           signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          const pending = early;
+          early = null;
+          if (pending && "account" in pending) resolve(pending.account);
+          else if (pending) reject(pending.error);
+        }).finally(() => {
+          approve = null;
+          fail = null;
         });
         d.stored.set(provider, account);
         return account;
