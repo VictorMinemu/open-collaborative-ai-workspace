@@ -184,9 +184,11 @@ async function desktopSignIn(email: string, password: string) {
 
 /** Subscribe to a realtime topic and return the gateway's first answer for it. */
 async function subscribe(client: TestClient, topic: string) {
-  const ws = new WebSocket(`${stack.baseUrl.replace(/^http/, "ws")}/ws`, {
-    headers: { origin: WEB_ORIGIN, cookie: client.cookieHeader },
-  });
+  const ws = new WebSocket(
+    `${stack.baseUrl.replace(/^http/, "ws")}/ws`,
+    [WS_PROTOCOL, `${WS_AUTH_PROTOCOL_PREFIX}${await client.token()}`],
+    { headers: { origin: WEB_ORIGIN } },
+  );
   const got: Array<Record<string, unknown>> = [];
   ws.on("message", (d) => got.push(JSON.parse(d.toString())));
   await new Promise((r) => ws.once("open", r));
