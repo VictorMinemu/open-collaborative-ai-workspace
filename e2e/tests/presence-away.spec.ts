@@ -1,15 +1,13 @@
-import { expect, type Page, test } from "@playwright/test";
 import {
-  apiAs,
-  BASE_URL,
-  createChannel,
-  ensureMember,
-  joinChannel,
-  openAs,
-  SAM,
-  userIdOf,
-} from "../support/actors";
-import { ADMIN, shot } from "./env";
+  type APIRequestContext,
+  type BrowserContext,
+  expect,
+  type Page,
+  request,
+  test,
+} from "@playwright/test";
+import { BASE_URL, createChannel, ensureMember, joinChannel, openAs, SAM, userIdOf } from "../support/actors";
+import { ADMIN, API_URL, shot } from "./env";
 
 /**
  * Away (RT-04, 03-02 D-04): when Sam hides the tab, the admin (same channel open) sees Sam turn Away (amber dot,
@@ -19,6 +17,18 @@ import { ADMIN, shot } from "./env";
 test.describe.configure({ mode: "serial" });
 
 const header = (page: Page) => page.getByTestId("channel-view").locator("header").first();
+
+/**
+ * An API context that reuses a signed-in browser's session cookie: no extra sign-in, so the suite stays under the
+ * sign-in rate limit (30 per minute per IP).
+ */
+async function apiFrom(context: BrowserContext): Promise<APIRequestContext> {
+  return request.newContext({
+    baseURL: API_URL,
+    extraHTTPHeaders: { origin: BASE_URL },
+    storageState: await context.storageState(),
+  });
+}
 
 /** Headless tabs are always visible: fake the Page Visibility API and announce the change like a real switch. */
 async function setTabHidden(page: Page, hidden: boolean) {
@@ -38,15 +48,14 @@ test("presence: a hidden tab shows its owner as Away, coming back shows Active",
   test.setTimeout(120_000);
   const project = info.project.name;
   const tag = project === "mobile" ? "390" : "1440";
-  const admin = await apiAs(ADMIN);
+  const a = await openAs(browser, ADMIN, project);
+  const admin = await apiFrom(a.context);
   const samId = await ensureMember(admin, SAM, "developer");
   const adminId = await userIdOf(admin);
   const channelId = await createChannel(admin, `away-${project}-${Date.now().toString(36)}`);
-  const samApi = await apiAs(SAM);
-  await joinChannel(samApi, channelId);
-
-  const a = await openAs(browser, ADMIN, project);
   const s = await openAs(browser, SAM, project);
+  const samApi = await apiFrom(s.context);
+  await joinChannel(samApi, channelId);
   await a.page.goto(`${BASE_URL}/chat/${channelId}`);
   await expect(a.page.getByTestId("channel-title")).toBeVisible();
   await s.page.goto(`${BASE_URL}/chat/${channelId}`);
