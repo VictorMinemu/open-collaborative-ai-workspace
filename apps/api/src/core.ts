@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { OrgRole } from "@ocw/contracts";
+import type { ClientKind, OrgRole } from "@ocw/contracts";
 import type { TenantCtx, TenantDb } from "@ocw/db";
 import type { FastifyBaseLogger, FastifyInstance, FastifyRequest, RawServerDefault } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
@@ -17,9 +17,12 @@ export interface AuthContext {
   userId: string;
   organizationId: string;
   sessionId: string;
+  /** Interim role check input; 02-15 removes it once every route is decided by the resolver. */
   role: OrgRole;
   name: string;
   email: string;
+  /** AUTH-05: the client that created the session (web, desktop or mobile), recorded on audit rows. */
+  clientKind: ClientKind;
 }
 
 declare module "fastify" {
@@ -64,10 +67,14 @@ export interface ApiModule {
   close?(): Promise<void>;
 }
 
-/** Tenant context for withTenant() from an authenticated request. */
+/**
+ * Tenant context for withTenant() from an authenticated request. It carries the session and client, so every
+ * audit row written in the request inherits them (ORG-05) without each module passing them.
+ */
 export function tenant(req: FastifyRequest): TenantCtx {
   if (!req.auth) throw new Error("tenant() called on an unauthenticated request; add preHandler requireUser");
-  return { organizationId: req.auth.organizationId, userId: req.auth.userId };
+  const { organizationId, userId, sessionId, clientKind } = req.auth;
+  return { organizationId, userId, sessionId, clientKind };
 }
 
 /** Returns req.auth or throws (use after the requireUser preHandler). */

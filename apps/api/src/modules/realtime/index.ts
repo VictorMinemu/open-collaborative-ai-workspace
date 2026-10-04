@@ -5,8 +5,12 @@ import type { RealtimeService } from "./service";
 
 export {
   createRealtimeService,
+  REVOCATION_CHANNEL,
+  REVOKED_SID_TTL_SECONDS,
   type RealtimeService,
   type ReplayResult,
+  type RevocationEvent,
+  type RevocationReason,
   type TopicAuthorizer,
 } from "./service";
 

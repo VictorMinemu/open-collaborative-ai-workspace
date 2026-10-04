@@ -1,17 +1,22 @@
-// authz-legacy: 02-15 migrates this file to the resolver
+// authz-legacy: 02-15 migrates this file to the resolver (requireRole delegate)
 import type { IncomingHttpHeaders } from "node:http";
 import { getCurrentAdapter, runWithTransaction } from "@better-auth/core/context";
 import type { MeResponse, OrgRole, SetupRequest } from "@ocw/contracts";
-import { instanceSetup, member, organization, orgMembers, user } from "@ocw/db";
+import { instanceSetup, member, organization, user } from "@ocw/db";
 import { fromNodeHeaders } from "better-auth/node";
-import { and, asc, eq } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { Env } from "../../config/env";
 import type { AuthContext } from "../../core";
 import { safeEqual } from "../../lib/crypto";
-import { conflict, forbidden, HttpError, unauthorized } from "../../lib/errors";
+import { conflict, HttpError, unauthorized } from "../../lib/errors";
 import type { Auth } from "./auth";
+import { type Authenticator, createAuthenticator } from "./authenticate";
+import { clientFromRequest } from "./client-kind";
+import { createSessionStore, type SessionStore } from "./session-store";
+
+export { asRole } from "./authenticate";
 
 export interface IdentityResult {
   me: MeResponse;
@@ -27,12 +32,9 @@ export interface AuditInput {
   resourceType: string;
   resourceId?: string | null;
   metadata?: Record<string, unknown>;
+  /** Client of the acting session; defaults to "web". */
+  clientKind?: string | null;
 }
-
-const ROLES: readonly OrgRole[] = ["standard", "developer", "lead", "admin"];
-/** Unknown or missing roles fall back to the least privileged role. */
-export const asRole = (r: string | null | undefined): OrgRole =>
-  ROLES.includes(r as OrgRole) ? (r as OrgRole) : "standard";
 
 function slugify(name: string): string {
   const base = name
@@ -45,40 +47,28 @@ function slugify(name: string): string {
 }
 
 export class IdentityService {
+  /** Session list/delete for 02-07 (deactivation) and 02-09 (sessions, password); never returns secrets. */
+  readonly sessions: SessionStore;
+  private readonly authn: Authenticator;
+  /** Fastify preHandler: 401 unless signed in; sets `req.auth`. */
+  readonly requireUser: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
+  /** Legacy preHandler factory: requires one of the org roles (implies requireUser). 02-15 removes it. */
+  readonly requireRole: (...roles: OrgRole[]) => (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
+
   constructor(
     readonly auth: Auth,
     readonly authDb: NodePgDatabase,
     readonly env: Env,
-  ) {}
+  ) {
+    this.authn = createAuthenticator(auth, authDb);
+    this.sessions = createSessionStore(auth);
+    this.requireUser = this.authn.requireUser;
+    this.requireRole = this.authn.requireRole;
+  }
 
-  /** Resolve the session cookie → principal. Returns null when unauthenticated. */
-  async authenticate(headers: IncomingHttpHeaders): Promise<AuthContext | null> {
-    const result = await this.auth.api.getSession({ headers: fromNodeHeaders(headers) }).catch(() => null);
-    if (!result) return null;
-    // auth.member says which organizations the user belongs to (existence only); the organization role
-    // comes from the app.org_members projection, the single source of truth (D-06, research R12/R13).
-    const rows = await this.authDb
-      .select({ organizationId: member.organizationId })
-      .from(member)
-      .where(eq(member.userId, result.user.id))
-      .orderBy(asc(member.createdAt))
-      .limit(5);
-    const active = result.session.activeOrganizationId;
-    const m = rows.find((r) => r.organizationId === active) ?? rows[0];
-    if (!m) return null;
-    const [projection] = await this.authDb
-      .select({ role: orgMembers.role })
-      .from(orgMembers)
-      .where(and(eq(orgMembers.organizationId, m.organizationId), eq(orgMembers.userId, result.user.id)))
-      .limit(1);
-    return {
-      userId: result.user.id,
-      organizationId: m.organizationId,
-      sessionId: result.session.id,
-      role: asRole(projection?.role),
-      name: result.user.name,
-      email: result.user.email,
-    };
+  /** Resolve the session cookie → principal. Returns null when unauthenticated or deactivated. */
+  authenticate(headers: IncomingHttpHeaders): Promise<AuthContext | null> {
+    return this.authn.authenticate(headers);
   }
 
   /** First organization the user belongs to (one org per instance in MVP 0). */
@@ -104,21 +94,6 @@ export class IdentityService {
       .limit(1);
     return org?.id ?? null;
   }
-
-  /** Fastify preHandler: 401 unless signed in; sets `req.auth`. */
-  requireUser = async (req: FastifyRequest, _reply: FastifyReply) => {
-    const auth = await this.authenticate(req.headers);
-    if (!auth) throw unauthorized();
-    req.auth = auth;
-  };
-
-  /** Fastify preHandler factory: requires one of the org roles (implies requireUser). */
-  requireRole =
-    (...roles: OrgRole[]) =>
-    async (req: FastifyRequest, reply: FastifyReply) => {
-      if (!req.auth) await this.requireUser(req, reply);
-      if (!req.auth || !roles.includes(req.auth.role)) throw forbidden("This action requires an admin");
-    };
 
   async me(auth: AuthContext): Promise<MeResponse> {
     const [org] = await this.authDb
@@ -146,6 +121,7 @@ export class IdentityService {
   async setup(
     input: SetupRequest,
     hooks: { beforeCommit?: () => Promise<void> | void } = {},
+    headers?: IncomingHttpHeaders,
   ): Promise<IdentityResult> {
     if (!safeEqual(input.token, this.env.OCW_SETUP_TOKEN)) {
       throw new HttpError(401, "invalid_setup_token", "The setup token is not valid");
@@ -155,11 +131,13 @@ export class IdentityService {
     const ctx = await this.auth.$context;
     const out = await runWithTransaction(ctx.adapter, async () => {
       const adapter = await getCurrentAdapter(ctx.adapter);
-      const { headers, response } = await this.auth.api.signUpEmail({
+      // The request headers reach the session.create hook, which records the client kind and label.
+      const signUp = await this.auth.api.signUpEmail({
         body: { name: input.name, email: input.email, password: input.password },
         returnHeaders: true,
+        ...(headers ? { headers: fromNodeHeaders(headers) } : {}),
       });
-      const userId = response.user.id;
+      const userId = signUp.response.user.id;
       const org = await this.auth.api.createOrganization({
         body: { name: input.orgName, slug: `${slugify(input.orgName)}-${userId.slice(0, 6)}`, userId },
       });
@@ -170,22 +148,32 @@ export class IdentityService {
         model: "orgMember",
         data: { organizationId: org.id, userId, displayName: input.name, email: input.email, role: "admin" },
       });
+      // The session was created before the membership existed, so the hook could not set the org: set it
+      // here so the first access JWT already carries the `org` claim.
+      await adapter.update({
+        model: "session",
+        where: [{ field: "userId", value: userId }],
+        update: { activeOrganizationId: org.id },
+      });
+      const clientKind = clientFromRequest(headers).kind;
       await auditVia(adapter, {
         organizationId: org.id,
         userId,
+        clientKind,
         action: "setup.redeemed",
         resourceType: "instance",
       });
       await auditVia(adapter, {
         organizationId: org.id,
         userId,
+        clientKind,
         action: "organization.created",
         resourceType: "organization",
         resourceId: org.id,
         metadata: { name: input.orgName },
       });
       await hooks.beforeCommit?.();
-      return { headers, userId, org };
+      return { headers: signUp.headers, userId, org };
     });
     const sessionId = await this.sessionIdFromCookies(out.headers.getSetCookie());
     return {
@@ -221,7 +209,7 @@ export async function auditVia(
       actorId: e.userId,
       userId: e.userId,
       sessionId: e.sessionId ?? null,
-      clientKind: "web",
+      clientKind: e.clientKind ?? "web",
       resourceType: e.resourceType,
       resourceId: e.resourceId ?? null,
       action: e.action,
