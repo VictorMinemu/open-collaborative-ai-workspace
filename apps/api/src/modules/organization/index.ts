@@ -2,6 +2,7 @@ import { MyPermissions } from "@ocw/contracts";
 import { type ApiModule, type Core, tenant } from "../../core";
 import { registerMemberRoutes } from "./members";
 import { createPermissionService } from "./permissions/service";
+import { registerUnitRoutes } from "./units";
 
 export { listMembers, memberDirectory } from "./members";
 
@@ -44,6 +45,7 @@ export function createOrganizationModule(core: Core): ApiModule {
     name: "organization",
     register(app) {
       registerMemberRoutes(app, core, perms);
+      registerUnitRoutes(app, core, perms);
 
       app.get(
         "/me/permissions",
