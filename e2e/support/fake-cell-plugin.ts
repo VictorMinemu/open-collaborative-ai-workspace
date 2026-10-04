@@ -359,6 +359,15 @@ export class FakeCellPlugin {
     }
   }
 
+  /** Debug snapshot for failing specs: socket state and the durable events seen so far. */
+  debugState(): { readyState: number | null; lastSeq: number; events: string[] } {
+    return {
+      readyState: this.ws?.readyState ?? null,
+      lastSeq: this.lastSeq,
+      events: this.events.map((e) => `${e.seq}:${e.type}`),
+    };
+  }
+
   async stop(): Promise<void> {
     for (const f of this.flows.values()) f.abort();
     const ws = this.ws;

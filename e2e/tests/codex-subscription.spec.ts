@@ -150,9 +150,13 @@ test("ChatGPT subscription: device-code sign-in in the cell → bots on ChatGPT 
     await expect(sheet).toBeHidden();
     const botCard = page.getByTestId("bot-card").filter({ hasText: name }).first();
     await expect(botCard).toContainText("GPT-6 Astra");
-    await expect(botCard.getByTestId("bot-status")).toHaveAttribute("data-status", "ready", {
-      timeout: 15_000,
-    });
+    await expect(botCard.getByTestId("bot-status"))
+      .toHaveAttribute("data-status", "ready", { timeout: 15_000 })
+      .catch(async (error) => {
+        const cellNow = await plugin.fetchCell().catch((e) => ({ error: String(e) }));
+        console.error("codex e2e debug", JSON.stringify({ plugin: plugin.debugState(), cell: cellNow }));
+        throw error;
+      });
     const snapshot = await plugin.fetchCell();
     const agent = snapshot.agents.find((a) => a.displayName === name);
     expect(agent?.modelRef).toBe("openai-codex/gpt-6-astra");
