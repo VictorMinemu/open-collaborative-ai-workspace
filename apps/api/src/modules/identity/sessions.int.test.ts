@@ -1,6 +1,7 @@
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, type TestStack, WEB_ORIGIN } from "../../testing";
+import type { RevocationEvent } from "../realtime";
 
 const ELECTRON_MAC_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) ocw-desktop/0.1.0 Chrome/140.0.7339.80 Electron/38.1.0 Safari/537.36";
@@ -64,6 +65,20 @@ const signIn = async (ua: string, creds: { email: string; password: string } = A
   const me = await c.request("GET", "/api/v1/me");
   expect(me.status).toBe(200);
   return { client: c, sessionId: me.body.sessionId as string };
+};
+
+/** Collects revocation events published on the fan-out channel while `fn` runs. */
+const revocationsDuring = async (fn: () => Promise<void>, until: (e: RevocationEvent[]) => boolean) => {
+  const events: RevocationEvent[] = [];
+  const stop = await stack.built.core.realtime.onRevocation((e) => events.push(e));
+  try {
+    await fn();
+    const end = Date.now() + 3000;
+    while (!until(events) && Date.now() < end) await new Promise((r) => setTimeout(r, 25));
+  } finally {
+    await stop();
+  }
+  return events;
 };
 
 const auditRows = async (action: string) =>
@@ -134,8 +149,15 @@ describe("my sessions (AUTH-05)", () => {
     expect(res.text.toLowerCase()).not.toContain("token");
 
     // Revoke the desktop session: it stops working everywhere at once.
-    const del = await web.request("DELETE", `/api/v1/me/sessions/${desktop.sessionId}`);
-    expect(del.status).toBe(200);
+    const revokedEvents = await revocationsDuring(
+      async () => {
+        const del = await web.request("DELETE", `/api/v1/me/sessions/${desktop.sessionId}`);
+        expect(del.status).toBe(200);
+      },
+      (e) => e.length > 0,
+    );
+    // Session ids only: a userId would make the gateway close the caller's own sockets as well.
+    expect(revokedEvents).toEqual([{ sessionIds: [desktop.sessionId], reason: "session_revoked" }]);
     expect((await desktop.client.request("GET", "/api/v1/me")).status).toBe(401);
     expect(await stack.built.core.realtime.isSessionRevoked(desktop.sessionId)).toBe(true);
     const audit = (await auditRows("session.revoked")).filter(
@@ -235,8 +257,14 @@ describe("sign-in and sign-out audit (ORG-05)", () => {
     const signedIn = (await auditRows("user.signed_in")).at(-1);
     expect(signedIn?.client_kind).toBe("desktop");
 
-    const out = await client.request("POST", "/api/auth/sign-out", {});
-    expect(out.status).toBe(200);
+    const events = await revocationsDuring(
+      async () => {
+        const out = await client.request("POST", "/api/auth/sign-out", {});
+        expect(out.status).toBe(200);
+      },
+      (e) => e.length > 0,
+    );
+    expect(events).toEqual([{ sessionIds: [sessionId], reason: "signed_out" }]);
     expect((await client.request("GET", "/api/v1/me")).status).toBe(401);
     const row = (await auditRows("user.signed_out")).at(-1);
     expect(row).toMatchObject({ organization_id: orgId, user_id: adminId, session_id: sessionId });
