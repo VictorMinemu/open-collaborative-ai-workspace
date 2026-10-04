@@ -29,6 +29,11 @@ export interface PresenceStore {
   snapshot(orgId: string, topic: string): Promise<PresenceMember[]>;
   /** Heartbeat: re-scores every item in one MULTI; an item that had vanished (swept, key lost) is re-announced. */
   refresh(items: ReadonlyArray<{ orgId: string; topic: string; m: PresenceMember }>): Promise<void>;
+  /**
+   * Claims every expired entry of the topic (one MULTI reads and removes them, so exactly one instance wins
+   * each), announces them `offline` and returns how many it claimed.
+   */
+  sweep(orgId: string, topic: string): Promise<number>;
 }
 
 /** Heartbeat (refresh, sweep and WebSocket ping) interval. */
@@ -116,6 +121,29 @@ export function createPresenceStore(deps: {
           ),
         ),
       );
+    },
+    async sweep(orgId, topic) {
+      const key = presenceKey(orgId, topic);
+      const t = now();
+      const [expired] = await redis
+        .multi()
+        .zRangeByScore(key, "-inf", t)
+        .zRemRangeByScore(key, "-inf", t)
+        .exec();
+      const claimed = Array.isArray(expired) ? expired.map((r) => String(r)) : [];
+      const entries: PresenceFrame["entries"] = [];
+      for (const raw of claimed) {
+        const m = parseMember(raw);
+        if (m) entries.push({ conn: m.conn, userId: m.userId, state: "offline" });
+      }
+      // One frame per PRESENCE_SNAPSHOT_LIMIT entries (the contract's cap).
+      for (let i = 0; i < entries.length; i += PRESENCE_SNAPSHOT_LIMIT) {
+        await deps.bus.publish(
+          topicChannel(topic),
+          delta(topic, entries.slice(i, i + PRESENCE_SNAPSHOT_LIMIT)),
+        );
+      }
+      return claimed.length;
     },
   };
 }

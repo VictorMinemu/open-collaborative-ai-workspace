@@ -34,6 +34,8 @@ interface Connection {
   socket: WebSocket;
   subs: Map<string, Subscription>;
   presenceState: "online" | "away";
+  /** Liveness: set by every pong and client frame, cleared (with a ping) on every heartbeat tick. */
+  alive: boolean;
   send(frame: ServerFrame): void;
   unsub(topic: string): Promise<void>;
 }
@@ -77,16 +79,48 @@ export function registerGateway(
     state: conn.presenceState,
   });
 
-  // Heartbeat: re-score every joined entry of this instance so it never expires while the socket lives (D-02).
-  const heartbeat = setInterval(() => {
-    const items: Array<{ orgId: string; topic: string; m: PresenceMember }> = [];
-    for (const conn of open) {
-      for (const [topic, sub] of conn.subs) {
-        if (sub.presenceJoined) items.push({ orgId: conn.auth.organizationId, topic, m: memberOf(conn) });
+  // Heartbeat (D-02): one tick per PRESENCE_HEARTBEAT_MS for the whole instance.
+  //  1. liveness: a socket that did not answer the previous tick's ping (half-open: sleeping laptop, dead
+  //     network) is terminated; its close handler leaves presence. Browsers answer protocol pings themselves.
+  //  2. refresh: re-score every joined entry so it never expires while its socket lives.
+  //  3. sweep: claim and announce entries that expired because their instance died, for every topic this
+  //     instance has local subscribers on (somebody here is watching it).
+  let ticking = false;
+  const tick = async () => {
+    if (ticking) return; // a slow Redis never stacks ticks
+    ticking = true;
+    try {
+      const items: Array<{ orgId: string; topic: string; m: PresenceMember }> = [];
+      const watched = new Map<string, { orgId: string; topic: string }>();
+      for (const conn of open) {
+        if (!conn.alive) {
+          conn.socket.terminate();
+          continue;
+        }
+        conn.alive = false;
+        try {
+          conn.socket.ping();
+        } catch {
+          // closing already: its close handler cleans up
+        }
+        for (const [topic, sub] of conn.subs) {
+          if (!sub.presenceJoined) continue;
+          const orgId = conn.auth.organizationId;
+          items.push({ orgId, topic, m: memberOf(conn) });
+          watched.set(`${orgId}|${topic}`, { orgId, topic });
+        }
       }
+      await presence.refresh(items).catch((err: unknown) => app.log.warn({ err }, "presence refresh failed"));
+      for (const { orgId, topic } of watched.values()) {
+        await presence
+          .sweep(orgId, topic)
+          .catch((err: unknown) => app.log.warn({ err }, "presence sweep failed"));
+      }
+    } finally {
+      ticking = false;
     }
-    presence.refresh(items).catch((err: unknown) => app.log.warn({ err }, "presence heartbeat failed"));
-  }, deps.heartbeatMs ?? PRESENCE_HEARTBEAT_MS);
+  };
+  const heartbeat = setInterval(() => void tick(), deps.heartbeatMs ?? PRESENCE_HEARTBEAT_MS);
   heartbeat.unref();
 
   let revocations: Promise<() => Promise<void>> | null = null;
@@ -173,10 +207,14 @@ export function registerGateway(
         socket,
         subs,
         presenceState: "online",
+        alive: true,
         send,
         unsub,
       };
       open.add(conn);
+      socket.on("pong", () => {
+        conn.alive = true;
+      });
 
       const recheck = setInterval(async () => {
         const still = await Promise.all([
@@ -273,6 +311,7 @@ export function registerGateway(
 
       // Attach synchronously so early frames are never dropped (Pitfall 8).
       socket.on("message", (raw) => {
+        conn.alive = true;
         let frame: ClientFrame;
         try {
           const parsed = ClientFrame.safeParse(JSON.parse(String(raw)));

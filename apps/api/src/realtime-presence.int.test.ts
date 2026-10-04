@@ -1,7 +1,12 @@
+import { randomUUID } from "node:crypto";
+import websocket from "@fastify/websocket";
 import { WS_AUTH_PROTOCOL_PREFIX, WS_PROTOCOL } from "@ocw/contracts";
+import Fastify from "fastify";
 import { decodeJwt } from "jose";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
+import type { App } from "./core";
+import { createPresenceStore, createRealtimeModule, presenceKey } from "./modules/realtime";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack, WEB_ORIGIN } from "./testing";
 
 /**
@@ -217,5 +222,116 @@ describe("realtime presence (RT-04)", () => {
     await new Promise((r) => setTimeout(r, 300));
     expect(presenceFrames(s, topic)).toHaveLength(seen);
     s.socket.close();
+  });
+});
+
+/** A second gateway on the stack's realtime/identity/bus with a fast heartbeat (100 ms) and TTL (300 ms). */
+async function miniGateway() {
+  const mini = Fastify({ logger: false });
+  await mini.register(websocket, {
+    options: { handleProtocols: (p: Set<string>) => (p.has(WS_PROTOCOL) ? WS_PROTOCOL : false) },
+  });
+  const { realtime, identity, bus } = stack.built.core;
+  const module = createRealtimeModule({
+    realtime,
+    identity,
+    bus,
+    allowedOrigins: new Set([WEB_ORIGIN]),
+    presence: { heartbeatMs: HEARTBEAT, ttlMs: TTL },
+  });
+  await mini.register(async (scope) => module.register(scope as unknown as App));
+  await mini.listen({ host: "127.0.0.1", port: 0 });
+  const addr = mini.server.address();
+  return {
+    base: `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`,
+    close: () => mini.close(),
+  };
+}
+const HEARTBEAT = 100;
+const TTL = 300;
+
+describe("presence expiry (RT-04, D-02)", () => {
+  it("a dead peer (no pong) is terminated within two heartbeats and announced offline", async () => {
+    const gw = await miniGateway();
+    try {
+      const topic = `conv:${publicId}`;
+      const a = await openSocket(gw.base, await admin.token());
+      await join(a, topic, adminId);
+      const dead = await openSocket(gw.base, await sam.token(), { autoPong: false });
+      const deadConn = await join(dead, topic, samId);
+      const t0 = Date.now();
+      const closed = await Promise.race([
+        dead.closed,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("dead peer still open")), 2000)),
+      ]);
+      const terminatedMs = closed.at - t0;
+      expect(terminatedMs).toBeLessThan(400);
+      const off = await waitFor(() => deltaFor(a, topic, deadConn, "offline"));
+      console.info(`dead peer: terminated after ${terminatedMs} ms, offline after ${off.at - t0} ms`);
+      expect(a.socket.readyState).toBe(WebSocket.OPEN);
+      a.socket.close();
+    } finally {
+      await gw.close();
+    }
+  });
+
+  it("entries of a crashed instance are swept once and announced offline; a lost key heals itself", async () => {
+    const gw = await miniGateway();
+    try {
+      const topic = `conv:${publicId}`;
+      const a = await openSocket(gw.base, await admin.token());
+      const aConn = await join(a, topic, adminId);
+      const redis = stack.built.core.bus.pub;
+      const key = presenceKey(orgId, topic);
+
+      // A connection no live instance owns (its API instance crashed): expires 200 ms from now.
+      const ghost = randomUUID();
+      await redis.zAdd(key, { score: Date.now() + 200, value: `${ghost}|${samId}|online` });
+      const t0 = Date.now();
+      const swept = await waitFor(() => deltaFor(a, topic, ghost, "offline"), 2000);
+      expect(swept.entries).toEqual([{ conn: ghost, userId: samId, state: "offline" }]);
+      // Expired at +200 ms; claimed within two heartbeats of that.
+      expect(swept.at - t0).toBeLessThan(200 + 2 * HEARTBEAT + 150);
+      expect(await createPresenceStore({ bus: stack.built.core.bus }).sweep(orgId, topic)).toBe(0);
+      expect(await redis.zScore(key, `${ghost}|${samId}|online`)).toBeNull();
+
+      // The key vanishes (Redis restart, eviction): the next heartbeat re-adds the live entry and re-announces it.
+      const before = presenceFrames(a, topic).length;
+      await redis.del(key);
+      const healed = await waitFor(() =>
+        presenceFrames(a, topic)
+          .slice(before)
+          .find((f) => f.entries?.some((e) => e.conn === aConn && e.state === "online")),
+      );
+      expect(healed.full).toBe(false);
+      expect(await redis.zScore(key, `${aConn}|${adminId}|online`)).not.toBeNull();
+      a.socket.close();
+    } finally {
+      await gw.close();
+    }
+  });
+
+  it("healthy sockets answer pings and stay present across ten heartbeats", async () => {
+    const gw = await miniGateway();
+    try {
+      const topic = `conv:${publicId}`;
+      const a = await openSocket(gw.base, await admin.token());
+      const aConn = await join(a, topic, adminId);
+      const s = await openSocket(gw.base, await sam.token());
+      const sConn = await join(s, topic, samId);
+      await new Promise((r) => setTimeout(r, 12 * HEARTBEAT));
+      expect(a.socket.readyState).toBe(WebSocket.OPEN);
+      expect(s.socket.readyState).toBe(WebSocket.OPEN);
+      for (const c of [aConn, sConn]) {
+        expect(deltaFor(a, topic, c, "offline")).toBeUndefined();
+        expect(deltaFor(s, topic, c, "offline")).toBeUndefined();
+      }
+      const live = await createPresenceStore({ bus: stack.built.core.bus }).snapshot(orgId, topic);
+      expect(live.map((m) => m.conn).sort()).toEqual([aConn, sConn].sort());
+      a.socket.close();
+      s.socket.close();
+    } finally {
+      await gw.close();
+    }
   });
 });
