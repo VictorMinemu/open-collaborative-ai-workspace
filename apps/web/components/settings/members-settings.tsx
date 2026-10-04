@@ -14,6 +14,7 @@ import { BookOpenCheck, Check, Copy, Link2, Mail, Send, Sparkles, Trash2, UserPl
 import { type FormEvent, type ReactNode, type RefObject, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
+import { MemberProfileSheet } from "@/components/members/member-profile-sheet";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
@@ -50,12 +51,12 @@ export function MembersSettings() {
   const canInvite = can("invitation.create") && inviteRoles.length > 0;
   const inviteInputRef = useRef<HTMLInputElement>(null);
 
-  // Someone joined, or a member's role / status / profile changed → refresh the lists live.
+  // Someone joined, a member's role / status / profile changed, or units moved → refresh the lists live.
   useTopic(orgId ? topic("org", orgId) : null, (frame) => {
     if (frame.type === EventTypes.memberJoined) {
       void qc.invalidateQueries({ queryKey: memberKeys.all });
       void qc.invalidateQueries({ queryKey: queryKeys.invitations });
-    } else if (frame.type === EventTypes.memberUpdated) {
+    } else if (frame.type === EventTypes.memberUpdated || frame.type === EventTypes.unitsUpdated) {
       void qc.invalidateQueries({ queryKey: memberKeys.all });
     }
   });
@@ -363,6 +364,7 @@ function MembersList({
   const members = useMemberDetails();
   const [showDeactivated, setShowDeactivated] = useState(false);
   const [rolesOpen, setRolesOpen] = useState(false);
+  const [profile, setProfile] = useState<{ userId: string; open: boolean } | null>(null);
   const all = members.data?.members ?? [];
   const deactivatedCount = all.filter((m) => m.status === "deactivated").length;
   const list = all
@@ -413,13 +415,24 @@ function MembersList({
         <>
           <ul className="divide-y overflow-hidden rounded-xl border bg-card shadow-xs">
             {list.map((m) => (
-              <MemberRow key={m.userId} member={m} isYou={m.userId === currentUserId} canManage={canManage} />
+              <MemberRow
+                key={m.userId}
+                member={m}
+                isYou={m.userId === currentUserId}
+                canManage={canManage}
+                onOpenProfile={(userId) => setProfile({ userId, open: true })}
+              />
             ))}
           </ul>
           {alone && canInvite ? <JustYou onInvite={onInvite} /> : null}
         </>
       )}
       <RoleReferenceSheet open={rolesOpen} onOpenChange={setRolesOpen} />
+      <MemberProfileSheet
+        userId={profile?.userId ?? null}
+        open={profile?.open ?? false}
+        onOpenChange={(open) => setProfile((p) => (p ? { ...p, open } : p))}
+      />
     </Section>
   );
 }

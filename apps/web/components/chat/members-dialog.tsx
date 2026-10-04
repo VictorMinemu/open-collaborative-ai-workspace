@@ -4,6 +4,7 @@ import type { ChannelMember, ChannelSummary } from "@ocw/contracts";
 import { Plus, Search } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
+import { MemberProfileSheet } from "@/components/members/member-profile-sheet";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -21,6 +22,7 @@ function Row({
   avatarUrl,
   note,
   action,
+  onOpen,
 }: {
   kind: "user" | "agent";
   id: string;
@@ -29,9 +31,11 @@ function Row({
   avatarUrl: string | null;
   note?: string | null;
   action?: React.ReactNode;
+  /** People open their profile (ORG-06); bots keep their current behaviour. */
+  onOpen?: () => void;
 }) {
-  return (
-    <li className="flex items-center gap-3 rounded-lg px-2 py-1.5">
+  const body = (
+    <>
       <PrincipalAvatar kind={kind} name={name} avatarUrl={avatarUrl} seed={id} className="size-8" />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
@@ -41,6 +45,26 @@ function Row({
         </div>
         <p className="truncate text-muted-foreground text-xs">@{handle}</p>
       </div>
+    </>
+  );
+  if (onOpen) {
+    return (
+      <li>
+        <button
+          type="button"
+          onClick={onOpen}
+          data-testid="channel-member-person"
+          aria-label={`View ${name}'s profile`}
+          className="flex w-full items-center gap-3 rounded-lg px-2 py-1.5 text-left outline-none transition-colors hover:bg-accent focus-visible:ring-[3px] focus-visible:ring-ring/30"
+        >
+          {body}
+        </button>
+      </li>
+    );
+  }
+  return (
+    <li className="flex items-center gap-3 rounded-lg px-2 py-1.5">
+      {body}
       {action}
     </li>
   );
@@ -65,6 +89,7 @@ export function MembersDialog({
   const [q, setQ] = useState("");
   const add = useAddChannelMember(channel.id);
   const [pendingKey, setPendingKey] = useState<string | null>(null);
+  const [profile, setProfile] = useState<{ userId: string; open: boolean } | null>(null);
   const memberKeys = useMemo(() => new Set(members.map((m) => dirKey(m.kind, m.id))), [members]);
   const needle = q.trim().toLowerCase();
   const match = (name: string, handle: string) =>
@@ -158,6 +183,7 @@ export function MembersDialog({
                     handle={m.handle}
                     avatarUrl={m.avatarUrl}
                     note={m.id === meId ? "(you)" : m.role === "owner" ? "· owner" : null}
+                    onOpen={() => setProfile({ userId: m.id, open: true })}
                   />
                 ))}
               </ul>
@@ -187,6 +213,11 @@ export function MembersDialog({
           ) : null}
         </div>
       </DialogContent>
+      <MemberProfileSheet
+        userId={profile?.userId ?? null}
+        open={profile?.open ?? false}
+        onOpenChange={(open) => setProfile((p) => (p ? { ...p, open } : p))}
+      />
     </Dialog>
   );
 }

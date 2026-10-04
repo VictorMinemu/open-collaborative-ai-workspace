@@ -9,6 +9,8 @@ import { ADMIN, API_URL, shot } from "./env";
 
 const BASE_URL = process.env.OCW_E2E_BASE_URL ?? "http://localhost:3000";
 const PASSWORD = "member-e2e-password-123";
+const PNG_1X1 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
 
 type Person = { name: string; email: string; password: string };
 
@@ -30,39 +32,36 @@ async function apiAs(user: { email: string; password: string }): Promise<APIRequ
   return ctx;
 }
 
-/** Invite + accept through the API (fast path for people a test only needs to exist). */
-async function createMember(admin: APIRequestContext, p: Person, role: string): Promise<string> {
+/**
+ * Invite + accept through the API (fast path for people a test only needs to exist). Accepting signs the new
+ * member in, so the returned context is their session: no extra sign-in (the API rate-limits sign-in per IP).
+ */
+async function createMember(p: Person, role: string): Promise<{ id: string; api: APIRequestContext }> {
   const inv = await (await admin.post("/api/v1/invitations", { data: { email: p.email, role } })).json();
-  const anon = await request.newContext({ baseURL: API_URL, extraHTTPHeaders: { origin: BASE_URL } });
-  const res = await anon.post(`/api/v1/invitations/${inv.id}/accept`, {
+  const api = await request.newContext({ baseURL: API_URL, extraHTTPHeaders: { origin: BASE_URL } });
+  const res = await api.post(`/api/v1/invitations/${inv.id}/accept`, {
     data: { name: p.name, password: p.password },
   });
   expect(res.ok(), "accept invitation").toBe(true);
   const me = await res.json();
-  await anon.dispose();
-  return me.user.id as string;
+  return { id: me.user.id as string, api };
 }
 
-async function newPage(browser: Browser, project: string): Promise<Page> {
+type StorageState = Awaited<ReturnType<APIRequestContext["storageState"]>>;
+
+async function newPage(browser: Browser, project: string, storageState?: StorageState): Promise<Page> {
   const mobile = project === "mobile";
   const context = await browser.newContext({
+    ...(storageState ? { storageState } : {}),
     viewport: mobile ? { width: 390, height: 844 } : { width: 1440, height: 900 },
     ...(mobile ? { isMobile: true, hasTouch: true, deviceScaleFactor: 2 } : {}),
   });
   return context.newPage();
 }
 
-async function signIn(browser: Browser, user: { email: string; password: string }, project: string) {
-  const page = await newPage(browser, project);
-  await page.goto(`${BASE_URL}/login`);
-  await page.getByLabel("Email").fill(user.email);
-  await page.getByLabel("Password", { exact: true }).fill(user.password);
-  await page
-    .getByTestId("login-form")
-    .getByRole("button", { name: /sign in|log in/i })
-    .click();
-  await expect(page).toHaveURL(/\/chat/);
-  return page;
+/** A browser page that reuses an API session's cookies (the web calls the API with credentials). */
+async function pageAs(browser: Browser, api: APIRequestContext, project: string): Promise<Page> {
+  return newPage(browser, project, await api.storageState());
 }
 
 async function openMembers(page: Page) {
@@ -77,7 +76,42 @@ async function pickRole(page: Page, name: string, label: string) {
   await page.getByRole("option", { name: label, exact: true }).click();
 }
 
-async function onlyActiveAdmin(admin: APIRequestContext): Promise<boolean> {
+type Unit = { id: string; name: string; parentId: string | null };
+
+/** Get-or-create a unit (sibling names are unique, and both projects share one stack). */
+async function ensureUnit(
+  kind: "department" | "team" | "project",
+  name: string,
+  parentId: string | null,
+): Promise<string> {
+  const { units } = (await (await admin.get("/api/v1/units")).json()) as { units: Unit[] };
+  const found = units.find((u) => u.name === name && u.parentId === parentId);
+  if (found) return found.id;
+  const res = await admin.post("/api/v1/units", { data: { kind, name, parentId } });
+  expect(res.ok(), `create ${kind} ${name}`).toBe(true);
+  return (await res.json()).id as string;
+}
+
+/** Gives a member three units so the row shows two chips and "+1". Unit leads need the Team Lead or Admin org role; `leadsTeam` is only set for those. */
+async function placeInUnits(userId: string, leadsTeam: boolean) {
+  const dept = await ensureUnit("department", "Product Engineering", null);
+  const team = await ensureUnit("team", "Core Platform", dept);
+  const project = await ensureUnit("project", "Atlas Launch", team);
+  for (const [unitId, role] of [
+    [team, leadsTeam ? "lead" : "member"],
+    [dept, "member"],
+    [project, "member"],
+  ] as const) {
+    const res = await admin.post(`/api/v1/units/${unitId}/members`, { data: { userId, role } });
+    expect(res.ok(), `add to unit ${unitId}`).toBe(true);
+  }
+}
+
+async function openRowMenu(page: Page, name: string) {
+  await page.getByRole("button", { name: `Actions for ${name}`, exact: true }).click();
+}
+
+async function onlyActiveAdmin(): Promise<boolean> {
   const { members } = (await (await admin.get("/api/v1/members")).json()) as {
     members: Array<{ role: string; status: string }>;
   };
@@ -86,14 +120,22 @@ async function onlyActiveAdmin(admin: APIRequestContext): Promise<boolean> {
 
 test.describe.configure({ mode: "serial" });
 
+/** One admin session per project run (sign-in is rate limited per IP). */
+let admin: APIRequestContext;
+test.beforeAll(async () => {
+  admin = await apiAs(ADMIN);
+});
+test.afterAll(async () => {
+  await admin?.dispose();
+});
+
 test("an admin changes a teammate's role and the teammate's UI follows", async ({ browser }, info) => {
   test.setTimeout(120_000);
   const project = info.project.name;
   const mobile = project === "mobile";
-  const admin = await apiAs(ADMIN);
   const teammate = person(project, "Dana");
 
-  const a = await signIn(browser, ADMIN, project);
+  const a = await pageAs(browser, admin, project);
   await openMembers(a);
 
   // ---- invite through the form (Developer is the default role)
@@ -118,6 +160,16 @@ test("an admin changes a teammate's role and the teammate's UI follows", async (
   await pickRole(a, teammate.name, "Team Lead");
   await expect(a.getByText("Role updated")).toBeVisible();
   await expect(row.getByTestId("member-role-select")).toHaveText(/Team Lead/);
+
+  // ---- unit chips arrive live (units.updated) and link to the Organization page
+  const teammateId = (await row.getAttribute("data-user-id")) as string;
+  await placeInUnits(teammateId, true);
+  await expect(row.getByTestId("member-unit-chip")).toHaveCount(2);
+  await expect(row.getByText("+1")).toBeVisible();
+  await expect(row.getByTestId("member-unit-chip").first()).toHaveAttribute(
+    "href",
+    /\/settings\/organization\?unit=[0-9a-f-]{36}/,
+  );
   await a.waitForTimeout(600);
   await shot(a, `members-list-${project}`);
   await a.emulateMedia({ colorScheme: "dark" });
@@ -155,7 +207,7 @@ test("an admin changes a teammate's role and the teammate's UI follows", async (
   await expect(adminRow.getByTestId("revoke-invitation")).toHaveCount(0);
 
   // ---- the only admin cannot demote themselves: the server's message, and the select reverts
-  if (await onlyActiveAdmin(admin)) {
+  if (await onlyActiveAdmin()) {
     await openMembers(a);
     await pickRole(a, ADMIN.name, "Developer");
     await expect(a.getByText(/at least one active admin/i)).toBeVisible();
@@ -164,12 +216,11 @@ test("an admin changes a teammate's role and the teammate's UI follows", async (
 
   await a.context().close();
   await b.context().close();
-  await admin.dispose();
 });
 
 test("'What can each role do?' shows the server's role table", async ({ browser }, info) => {
   const project = info.project.name;
-  const a = await signIn(browser, ADMIN, project);
+  const a = await pageAs(browser, admin, project);
   await openMembers(a);
   await a.getByTestId("role-reference-trigger").click();
   const sheet = a.getByTestId("role-reference-sheet");
@@ -199,11 +250,10 @@ test("'What can each role do?' shows the server's role table", async ({ browser 
 
 test("a Developer sees the directory read-only", async ({ browser }, info) => {
   const project = info.project.name;
-  const admin = await apiAs(ADMIN);
   const dev = person(project, "Devin");
-  await createMember(admin, dev, "developer");
+  const { api: devApi } = await createMember(dev, "developer");
 
-  const d = await signIn(browser, dev, project);
+  const d = await pageAs(browser, devApi, project);
   await openMembers(d);
   await expect(rowOf(d, dev.name)).toBeVisible();
   await expect(d.getByTestId("member-role-badge").first()).toBeVisible();
@@ -211,5 +261,156 @@ test("a Developer sees the directory read-only", async ({ browser }, info) => {
   await expect(d.getByTestId("invite-member-form")).toHaveCount(0);
   await expect(d.getByTestId("pending-invitations")).toHaveCount(0);
   await d.context().close();
-  await admin.dispose();
+  await devApi.dispose();
+});
+
+test("admins deactivate, reactivate and issue one-time reset links; never on their own row", async ({
+  browser,
+}, info) => {
+  test.setTimeout(120_000);
+  const project = info.project.name;
+  const rhea = person(project, "Rhea");
+  const { api: rheaApi } = await createMember(rhea, "developer");
+  const r = await pageAs(browser, rheaApi, project);
+  await r.goto(`${BASE_URL}/chat`);
+  await expect(r.getByTestId("app-shell")).toBeVisible();
+
+  const a = await pageAs(browser, admin, project);
+  await openMembers(a);
+  const row = rowOf(a, rhea.name);
+  await expect(row).toBeVisible();
+
+  // ---- reset link: shown once, with copy and expiry; reopening issues a new one
+  await openRowMenu(a, rhea.name);
+  await a.getByRole("menuitem", { name: "Create password reset link" }).click();
+  const dialog = a.getByTestId("reset-link-dialog");
+  await expect(dialog.getByTestId("reset-link")).toBeVisible();
+  const first = await dialog.getByTestId("reset-link").inputValue();
+  expect(first).toMatch(/\/reset-password\?token=/);
+  await expect(dialog.getByText("Expires in 24 hours")).toBeVisible();
+  await expect(
+    dialog.getByText(`Anyone with this link can set a new password for ${rhea.name}`),
+  ).toBeVisible();
+  await expect(dialog.getByTestId("copy-reset-link")).toBeVisible();
+  await shot(a, `members-reset-link-${project}`);
+  await a.emulateMedia({ colorScheme: "dark" });
+  await shot(a, `members-reset-link-${project}-dark`);
+  await a.emulateMedia({ colorScheme: "light" });
+  await dialog.getByTestId("reset-link-done").click();
+  await expect(dialog).toHaveCount(0);
+  await openRowMenu(a, rhea.name);
+  await a.getByRole("menuitem", { name: "Create password reset link" }).click();
+  await expect(a.getByTestId("reset-link")).toBeVisible();
+  expect(await a.getByTestId("reset-link").inputValue()).not.toBe(first);
+  await a.keyboard.press("Escape");
+  await expect(a.getByTestId("reset-link-dialog")).toHaveCount(0);
+
+  // ---- deactivate: the confirm names the consequences; the row leaves the default list
+  await openRowMenu(a, rhea.name);
+  await a.getByRole("menuitem", { name: "Deactivate" }).click();
+  const confirm = a.getByTestId("member-confirm-dialog");
+  await expect(confirm.getByText(`Deactivate ${rhea.name}?`)).toBeVisible();
+  await expect(confirm.getByText("Their sessions end now. Messages and history stay.")).toBeVisible();
+  await shot(a, `members-deactivate-confirm-${project}`);
+  await a.emulateMedia({ colorScheme: "dark" });
+  await shot(a, `members-deactivate-confirm-${project}-dark`);
+  await a.emulateMedia({ colorScheme: "light" });
+  await confirm.getByTestId("member-confirm").click();
+  await expect(a.getByText(`${rhea.name} was deactivated`)).toBeVisible();
+  await expect(row).toHaveCount(0);
+  await a.getByTestId("show-deactivated").click();
+  await expect(row).toHaveAttribute("data-status", "deactivated");
+  await expect(row.getByTestId("member-deactivated")).toBeVisible();
+
+  // The teammate's session is gone: the next request lands on /login.
+  await r.reload();
+  await expect(r).toHaveURL(/\/login/);
+
+  // ---- reactivate restores sign-in
+  await openRowMenu(a, rhea.name);
+  await a.getByRole("menuitem", { name: "Reactivate" }).click();
+  await a.getByTestId("member-confirm-dialog").getByTestId("member-confirm").click();
+  await expect(a.getByText(`${rhea.name} can sign in again`)).toBeVisible();
+  await expect(row).toHaveAttribute("data-status", "active");
+  await expect(row.getByTestId("member-deactivated")).toHaveCount(0);
+  const again = await apiAs(rhea);
+  await again.dispose();
+
+  // ---- no admin actions on your own row
+  await openRowMenu(a, ADMIN.name);
+  await expect(a.getByRole("menuitem", { name: "View profile" })).toBeVisible();
+  await expect(a.getByRole("menuitem")).toHaveCount(1);
+  await a.keyboard.press("Escape");
+
+  await r.context().close();
+  await rheaApi.dispose();
+  await a.context().close();
+});
+
+test("anyone opens a member's profile from Members and from a channel", async ({ browser }, info) => {
+  test.setTimeout(90_000);
+  const project = info.project.name;
+  const sam = person(project, "Sam");
+  const { id: samId, api: profileUpdate } = await createMember(sam, "developer");
+  await placeInUnits(samId, false);
+  const updated = await profileUpdate.patch("/api/v1/me/profile", {
+    data: { avatarUrl: "🦊", statusEmoji: "🚀", statusText: "Shipping the demo" },
+  });
+  expect(updated.ok(), "profile update").toBe(true);
+  await profileUpdate.dispose();
+
+  // A Developer (not an admin) opens it from the directory.
+  const dev = person(project, "Viewer");
+  const { api: devApi } = await createMember(dev, "developer");
+  const d = await pageAs(browser, devApi, project);
+  await openMembers(d);
+  await rowOf(d, sam.name).getByTestId("member-name").click();
+  const sheet = d.getByTestId("member-profile-sheet");
+  await expect(sheet.getByTestId("profile-name")).toHaveText(sam.name);
+  await expect(sheet.getByText("Developer", { exact: true })).toBeVisible();
+  await expect(sheet.getByTestId("profile-joined")).toContainText("Joined");
+  await expect(sheet.getByTestId("profile-units").getByRole("link")).toHaveCount(3);
+  await expect(sheet.getByText("Core Platform")).toBeVisible();
+  await shot(d, `members-profile-sheet-${project}`);
+  await d.emulateMedia({ colorScheme: "dark" });
+  await shot(d, `members-profile-sheet-${project}-dark`);
+  await d.emulateMedia({ colorScheme: "light" });
+  await d.keyboard.press("Escape");
+  await expect(sheet).toHaveCount(0);
+
+  // From a channel's member list.
+  await d.goto(`${BASE_URL}/chat`);
+  await expect(d).toHaveURL(/\/chat\/[0-9a-f-]{36}/);
+  const channelId = d.url().match(/\/chat\/([0-9a-f-]{36})/)?.[1];
+  await admin.post(`/api/v1/channels/${channelId}/members`, { data: { kind: "user", id: samId } });
+  await d.reload();
+  await d.getByTestId("channel-members-button").filter({ visible: true }).first().click();
+  const members = d.getByTestId("members-dialog");
+  await expect(members).toBeVisible();
+  await members.getByRole("button", { name: `View ${sam.name}'s profile` }).click();
+  await expect(d.getByTestId("member-profile-sheet").getByTestId("profile-name")).toHaveText(sam.name);
+
+  // https avatars never send the workspace as referrer (T-02-12-03).
+  const referers: Array<string | undefined> = [];
+  await d.context().route("https://avatars.example.test/**", (route) => {
+    referers.push(route.request().headers().referer);
+    return route.fulfill({ contentType: "image/png", body: Buffer.from(PNG_1X1, "base64") });
+  });
+  const withPhoto = person(project, "Photo");
+  const { id: photoId, api: photo } = await createMember(withPhoto, "standard");
+  const patched = await photo.patch("/api/v1/me/profile", {
+    data: { avatarUrl: "https://avatars.example.test/photo.png" },
+  });
+  expect(patched.ok()).toBe(true);
+  await photo.dispose();
+  await openMembers(d);
+  await expect(d.locator(`[data-testid="member-row"][data-user-id="${photoId}"] img`)).toHaveAttribute(
+    "referrerpolicy",
+    "no-referrer",
+  );
+  expect(referers.length).toBeGreaterThan(0);
+  expect(referers.every((r) => r === undefined)).toBe(true);
+
+  await d.context().close();
+  await devApi.dispose();
 });
