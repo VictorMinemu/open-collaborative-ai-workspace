@@ -21,6 +21,8 @@ declare module "fastify" {
   }
 }
 
+/** A device still using its raw token is warned and audited at most once per this window. */
+export const LEGACY_TOKEN_AUDIT_EVERY_MS = 60 * 60_000;
 const HELLO_TIMEOUT_MS = 10_000;
 const IDLE_TIMEOUT_MS = 60_000;
 const TOUCH_EVERY_MS = 30_000;
@@ -44,12 +46,16 @@ export function sanitizeAnnouncements(list: DeviceProjectAnnouncement[]): Device
  * `GET /runtime/ws` — the Device Link. The credential is verified BEFORE the upgrade:
  * - a 10-minute device JWT (aud `ocw:device-link`, from `POST /api/v1/devices/token`) verified against the
  *   JWKS, then the device row re-checked (a revoked device is refused even with a JWT it still holds);
- * - the raw device token (SHA-256 lookup), kept for desktop apps built before Phase 2 (D-03).
+ * - the raw device token (SHA-256 lookup), only while `OCW_ACCEPT_LEGACY_DEVICE_TOKEN` is true, for desktop
+ *   apps built before Phase 2 (D-03): warned and audited (`device.legacy_token_used`) once per device per hour.
  * Either way the resolver decides `device.link` for the device principal. A user JWT never verifies here.
  * The first frame must be `hello`; afterwards frames are processed strictly in order.
  */
 export function registerDeviceLink(app: App, core: Core, hub: DeviceHub): void {
   const perms = createPermissionService(core);
+  const acceptLegacyToken = core.env.OCW_ACCEPT_LEGACY_DEVICE_TOKEN;
+  /** deviceId → when its legacy-token use was last warned and audited (this API instance). */
+  const legacyAuditedAt = new Map<string, number>();
 
   /** Device JWT → the non-revoked device it names, with `device.link` decided; null otherwise. */
   async function deviceFromJwt(req: FastifyRequest, token: string): Promise<DeviceRef | null> {
@@ -70,13 +76,45 @@ export function registerDeviceLink(app: App, core: Core, hub: DeviceHub): void {
 
   /** Raw device token (pre-Phase 2 desktop apps) → its non-revoked device, with `device.link` decided. */
   async function deviceFromLegacyToken(req: FastifyRequest, token: string): Promise<DeviceRef | null> {
+    if (!acceptLegacyToken) return null;
     const found = await core.db.lookups.deviceByTokenHash(sha256Hex(token));
     if (!found) return null;
     req.device = found;
     const allowed = await core.db.withTenant({ organizationId: found.organizationId, userId: null }, (tx) =>
       perms.can(req, tx, "device.link"),
     );
-    return allowed ? found : null;
+    if (!allowed) return null;
+    await noteLegacyUse(req, found);
+    return found;
+  }
+
+  /** Warn and audit a legacy-token connection, at most once per device per hour. Never fails the upgrade. */
+  async function noteLegacyUse(req: FastifyRequest, device: DeviceRef): Promise<void> {
+    const now = Date.now();
+    const last = legacyAuditedAt.get(device.deviceId);
+    if (last !== undefined && now - last < LEGACY_TOKEN_AUDIT_EVERY_MS) return;
+    legacyAuditedAt.set(device.deviceId, now);
+    req.log.warn(
+      { deviceId: device.deviceId },
+      "device connected with its legacy device token; rebuild the desktop app (OCW_ACCEPT_LEGACY_DEVICE_TOKEN)",
+    );
+    try {
+      await core.db.withTenant({ organizationId: device.organizationId, userId: null }, (tx) =>
+        core.audit.record(tx, {
+          action: "device.legacy_token_used",
+          resourceType: "device",
+          resourceId: device.deviceId,
+          actorKind: "device",
+          actorId: device.deviceId,
+          deviceId: device.deviceId,
+          userId: null,
+          result: "success",
+        }),
+      );
+    } catch (err) {
+      legacyAuditedAt.delete(device.deviceId);
+      req.log.warn({ err, deviceId: device.deviceId }, "could not audit a legacy device token use");
+    }
   }
 
   app.get(
