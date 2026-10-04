@@ -38,6 +38,11 @@ interface Connection {
   presenceChanges: number[];
   /** Liveness: set by every pong and client frame, cleared (with a ping) on every heartbeat tick. */
   alive: boolean;
+  /**
+   * Bumped by every invalidation that matches this connection (RT-01, T-03-04-02). A subscribe whose decision
+   * started before a bump is re-decided once it is live, so no subscribe slips past a concurrent removal.
+   */
+  authzEpoch: number;
   send(frame: ServerFrame): void;
   unsub(topic: string): Promise<void>;
 }
@@ -172,22 +177,48 @@ export function registerGateway(
       app.log.warn({ topic, userId: conn.auth.userId }, "subscription re-decision failed; kept");
     }
   };
-  const reauthQueue: Array<{ conn: Connection; topic: string }> = [];
+  // Coalesced per (connection, topic): a waiting job is never queued twice; a running one is marked to run once
+  // more when it finishes (its answer may predate the latest change). Bursts cost at most two decisions.
+  interface ReauthJob {
+    conn: Connection;
+    topic: string;
+    running: boolean;
+    again: boolean;
+  }
+  const reauthJobs = new Map<string, ReauthJob>();
+  const reauthQueue: ReauthJob[] = [];
   let reauthRunning = 0;
+  const jobKey = (conn: Connection, topic: string) => `${conn.id}|${topic}`;
   const pumpReauth = () => {
     while (reauthRunning < REAUTH_CONCURRENCY && reauthQueue.length) {
-      const job = reauthQueue.shift() as { conn: Connection; topic: string };
+      const job = reauthQueue.shift() as ReauthJob;
+      job.running = true;
       reauthRunning++;
       reauthorize(job.conn, job.topic)
         .catch((err: unknown) => app.log.warn({ err, topic: job.topic }, "subscription re-decision failed"))
         .finally(() => {
           reauthRunning--;
+          job.running = false;
+          if (job.again && job.conn.subs.has(job.topic)) {
+            job.again = false;
+            reauthQueue.push(job);
+          } else {
+            reauthJobs.delete(jobKey(job.conn, job.topic));
+          }
           pumpReauth();
         });
     }
   };
   const scheduleReauth = (conn: Connection, topic: string) => {
-    reauthQueue.push({ conn, topic });
+    const key = jobKey(conn, topic);
+    const existing = reauthJobs.get(key);
+    if (existing) {
+      if (existing.running) existing.again = true;
+      return;
+    }
+    const job: ReauthJob = { conn, topic, running: false, again: false };
+    reauthJobs.set(key, job);
+    reauthQueue.push(job);
     pumpReauth();
   };
 
@@ -197,6 +228,7 @@ export function registerGateway(
       for (const conn of open) {
         if (conn.auth.organizationId !== e.organizationId) continue;
         if (e.userIds && !e.userIds.includes(conn.auth.userId)) continue;
+        conn.authzEpoch++;
         for (const topic of conn.subs.keys()) {
           if (!e.topics || e.topics.includes(topic)) scheduleReauth(conn, topic);
         }
@@ -281,6 +313,7 @@ export function registerGateway(
         presenceState: "online",
         presenceChanges: [],
         alive: true,
+        authzEpoch: 0,
         send,
         unsub,
       };
@@ -349,6 +382,7 @@ export function registerGateway(
 
       const subscribe = async (topic: string, afterSeq: number, wantsPresence: boolean) => {
         await unsub(topic);
+        const epoch = conn.authzEpoch;
         if (!(await deps.realtime.authorizeTopic(auth, topic))) {
           send({ op: "err", code: "forbidden", topic, message: "Not allowed to subscribe to this topic" });
           return;
@@ -410,6 +444,8 @@ export function registerGateway(
         send({ op: "subscribed", topic, lastSeq: Math.max(sub.lastSent, replay.lastSeq) });
         // Presence only after the resolver allowed the subscription and `subscribed` was sent (T-03-01-01).
         if (withPresence) await joinPresence(topic, sub);
+        // An invalidation arrived while this was being decided: decide it again now that it is live.
+        if (conn.authzEpoch !== epoch && subs.get(topic) === sub) scheduleReauth(conn, topic);
       };
 
       // Attach synchronously so early frames are never dropped (Pitfall 8).

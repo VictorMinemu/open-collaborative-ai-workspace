@@ -1,6 +1,11 @@
+import { randomUUID } from "node:crypto";
+import websocket from "@fastify/websocket";
 import { WS_AUTH_PROTOCOL_PREFIX, WS_PROTOCOL } from "@ocw/contracts";
+import Fastify from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
+import type { App, AuthContext } from "./core";
+import { createRealtimeModule, createRealtimeService, type RealtimeService } from "./modules/realtime";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack, WEB_ORIGIN } from "./testing";
 
 /**
@@ -10,6 +15,7 @@ import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack, WEB_ORIGI
  */
 
 let stack: TestStack;
+let orgId: string;
 let adminId: string;
 let samId: string;
 let admin: TestClient;
@@ -90,6 +96,7 @@ beforeAll(async () => {
   stack = await startTestStack();
   admin = new TestClient(stack.baseUrl);
   const setup = await ok(admin.request("POST", "/api/v1/setup", { token: TEST_SETUP_TOKEN, ...ADMIN }));
+  orgId = setup.organization.id;
   adminId = setup.user.id;
   const inv = await ok(
     admin.request("POST", "/api/v1/invitations", { email: "sam@example.test", role: "developer" }),
@@ -180,6 +187,148 @@ describe("live re-authorisation of channel subscriptions (RT-01, D-05/D-06)", ()
     } finally {
       a.socket.close();
       s.socket.close();
+    }
+  });
+});
+
+/**
+ * A second gateway on its own realtime service (the stack's db and bus) whose `conv` authorizer the test drives,
+ * so races are deterministic. The stack's own gateway and resolver are untouched.
+ */
+async function controlledGateway() {
+  const { db, bus, identity } = stack.built.core;
+  const realtime: RealtimeService = createRealtimeService({ db, bus });
+  const calls: string[] = [];
+  let decide: (auth: AuthContext) => Promise<boolean> | boolean = () => true;
+  realtime.registerTopicAuthorizer("conv", (auth) => {
+    calls.push(auth.userId);
+    return decide(auth);
+  });
+  const mini = Fastify({ logger: false });
+  await mini.register(websocket, {
+    options: { handleProtocols: (p: Set<string>) => (p.has(WS_PROTOCOL) ? WS_PROTOCOL : false) },
+  });
+  const module = createRealtimeModule({ realtime, identity, bus, allowedOrigins: new Set([WEB_ORIGIN]) });
+  await mini.register(async (scope) => module.register(scope as unknown as App));
+  await mini.listen({ host: "127.0.0.1", port: 0 });
+  const addr = mini.server.address();
+  return {
+    base: `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`,
+    realtime,
+    calls,
+    setDecide: (fn: (auth: AuthContext) => Promise<boolean> | boolean) => {
+      decide = fn;
+    },
+    close: () => mini.close(),
+  };
+}
+
+const subscribedTo = (s: Sock, topic: string) =>
+  s.frames.find((f) => f.op === "subscribed" && f.topic === topic);
+
+describe("re-decisions are race-free and fail safe (RT-01, D-05)", () => {
+  it("in-flight: a subscribe decided before a concurrent invalidation is re-decided once it is live", async () => {
+    const gw = await controlledGateway();
+    const s = await openSocket(gw.base, await sam.token());
+    try {
+      const topic = `conv:${randomUUID()}`;
+      let release!: (v: boolean) => void;
+      const held = new Promise<boolean>((r) => {
+        release = r;
+      });
+      gw.setDecide(() => (gw.calls.length === 1 ? held : false));
+      s.send({ op: "sub", topic });
+      await waitFor(() => gw.calls.length === 1);
+      await gw.realtime.invalidateSubscriptions({ organizationId: orgId, userIds: [samId] });
+      await sleep(200); // the invalidation reached the gateway while the first decision was still held
+      const t0 = Date.now();
+      release(true);
+      await waitFor(() => revokedFor(s, topic), 1000);
+      console.info(`in-flight re-decision revoked after ${Date.now() - t0} ms`);
+      expect(gw.calls.length).toBe(2);
+    } finally {
+      s.socket.close();
+      await gw.close();
+    }
+  });
+
+  it("transient: an authorizer error keeps the subscription live; the next invalidation that denies revokes", async () => {
+    const gw = await controlledGateway();
+    const s = await openSocket(gw.base, await sam.token());
+    try {
+      const topic = `conv:${randomUUID()}`;
+      s.send({ op: "sub", topic });
+      await waitFor(() => subscribedTo(s, topic));
+      gw.setDecide(() => {
+        throw new Error("database hiccup");
+      });
+      const before = gw.calls.length;
+      await gw.realtime.invalidateSubscriptions({ organizationId: orgId, userIds: [samId] });
+      await waitFor(() => gw.calls.length > before);
+      await sleep(500);
+      expect(revokedFor(s, topic)).toBeUndefined();
+      await gw.realtime.publishEphemeral(topic, "user.typing", { userId: adminId });
+      await waitFor(() => s.frames.find((f) => f.op === "eph" && f.topic === topic), 1000);
+
+      gw.setDecide(() => false);
+      await gw.realtime.invalidateSubscriptions({ organizationId: orgId, userIds: [samId], topics: [topic] });
+      await waitFor(() => revokedFor(s, topic), 1000);
+    } finally {
+      s.socket.close();
+      await gw.close();
+    }
+  });
+
+  it("storm: 50 invalidations back to back cost at most two re-decisions per subscription", async () => {
+    const gw = await controlledGateway();
+    const s = await openSocket(gw.base, await sam.token());
+    try {
+      const topic = `conv:${randomUUID()}`;
+      s.send({ op: "sub", topic });
+      await waitFor(() => subscribedTo(s, topic));
+      gw.setDecide(async () => {
+        await sleep(100); // a realistic decision time: the burst lands while the first one runs
+        return true;
+      });
+      const before = gw.calls.length;
+      await Promise.all(
+        Array.from({ length: 50 }, () =>
+          gw.realtime.invalidateSubscriptions({ organizationId: orgId, userIds: [samId] }),
+        ),
+      );
+      await sleep(1000);
+      const runs = gw.calls.length - before;
+      console.info(`storm: ${runs} re-decisions for 50 invalidations`);
+      expect(runs).toBeGreaterThanOrEqual(1);
+      expect(runs).toBeLessThanOrEqual(2);
+      expect(revokedFor(s, topic)).toBeUndefined();
+      await gw.realtime.publishEphemeral(topic, "user.typing", { userId: adminId });
+      await waitFor(() => s.frames.find((f) => f.op === "eph" && f.topic === topic), 1000);
+    } finally {
+      s.socket.close();
+      await gw.close();
+    }
+  });
+
+  it("scope: another organization or another user never re-decides this connection", async () => {
+    const gw = await controlledGateway();
+    const s = await openSocket(gw.base, await sam.token());
+    try {
+      const topic = `conv:${randomUUID()}`;
+      s.send({ op: "sub", topic });
+      await waitFor(() => subscribedTo(s, topic));
+      gw.setDecide(() => false);
+      const before = gw.calls.length;
+      await gw.realtime.invalidateSubscriptions({ organizationId: randomUUID(), userIds: [samId] });
+      await gw.realtime.invalidateSubscriptions({ organizationId: randomUUID() });
+      await gw.realtime.invalidateSubscriptions({ organizationId: orgId, userIds: [adminId] });
+      await gw.realtime.invalidateSubscriptions({ organizationId: orgId, topics: [`conv:${randomUUID()}`] });
+      await sleep(500);
+      expect(gw.calls.length).toBe(before);
+      expect(revokedFor(s, topic)).toBeUndefined();
+    } finally {
+      s.socket.close();
+      await gw.close();
     }
   });
 });
