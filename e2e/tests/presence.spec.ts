@@ -12,9 +12,13 @@ import {
 import { ADMIN, shot } from "./env";
 
 /**
- * Presence (RT-04, 03-01): two people with the same channel open see each other in the channel header; typing
- * still expires on its own; the person who closes the tab disappears from the header.
+ * Presence (RT-04, 03-01, 03-03): two people with the same channel open see each other in the channel header and
+ * in the members dialog (present people first); typing still expires on its own; the person who closes the tab
+ * disappears from both.
  */
+
+/** A member of the channel who never opens the app (local to this spec; actors.ts is frozen). */
+const RIO = { name: "Rio Alvarez", email: "rio@ocw.test", password: "rio-e2e-password-123" };
 
 test.describe.configure({ mode: "serial" });
 
@@ -27,7 +31,13 @@ test("presence: who is here now in the channel header", async ({ browser }, info
   const admin = await apiAs(ADMIN);
   const samId = await ensureMember(admin, SAM, "developer");
   const adminId = await userIdOf(admin);
+  const rioId = await ensureMember(admin, RIO, "developer");
   const channelId = await createChannel(admin, `here-${project}-${Date.now().toString(36)}`);
+  // Rio joins before Sam, so "present first" has to move Sam above Rio in the members dialog.
+  const addRio = await admin.post(`/api/v1/channels/${channelId}/members`, {
+    data: { kind: "user", id: rioId },
+  });
+  expect(addRio.ok(), "add Rio to the channel").toBe(true);
   const samApi = await apiAs(SAM);
   await joinChannel(samApi, channelId);
 
@@ -71,8 +81,30 @@ test("presence: who is here now in the channel header", async ({ browser }, info
   await a.page.emulateMedia({ colorScheme: "light" });
   await a.page.mouse.move(0, 0);
 
-  // Sam closes the tab: gone from the admin's header within 3 s, and the stack disappears.
+  // Members dialog (03-03, D-08): Sam is Active and listed before Rio, who is not here; "1 here now".
+  await a.page.getByTestId("channel-members-button").click();
+  const dialog = a.page.getByTestId("members-dialog");
+  const row = (id: string) => dialog.locator(`[data-testid="member-presence"][data-user-id="${id}"]`);
+  await expect(row(samId)).toHaveAttribute("data-state", "online", { timeout: 3000 });
+  await expect(row(rioId)).toHaveAttribute("data-state", "offline");
+  await expect(row(adminId)).toHaveAttribute("data-state", "online");
+  const order = await dialog
+    .getByTestId("member-presence")
+    .evaluateAll((els) => els.map((e) => e.getAttribute("data-user-id")));
+  expect(order.indexOf(samId)).toBeGreaterThanOrEqual(0);
+  expect(order.indexOf(samId)).toBeLessThan(order.indexOf(rioId));
+  await expect(dialog.getByTestId("members-here-now")).toHaveText("· 1 here now");
+  await expect(row(samId).getByTestId("presence-dot")).toBeVisible();
+  await expect(row(rioId).getByTestId("presence-dot")).toHaveCount(0);
+  await shot(a.page, `presence-members-${tag}`);
+  await a.page.emulateMedia({ colorScheme: "dark" });
+  await shot(a.page, `presence-members-${tag}-dark`);
+  await a.page.emulateMedia({ colorScheme: "light" });
+
+  // Sam closes the tab: offline in the dialog and gone from the admin's header within 3 s.
   await s.context.close();
+  await expect(row(samId)).toHaveAttribute("data-state", "offline", { timeout: 3000 });
+  await expect(dialog.getByTestId("members-here-now")).toHaveCount(0);
   await expect(samOnA).toHaveCount(0, { timeout: 3000 });
   await expect(header(a.page).getByTestId("presence-stack")).toHaveCount(0);
 
