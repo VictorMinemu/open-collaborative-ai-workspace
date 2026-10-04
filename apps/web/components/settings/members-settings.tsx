@@ -1,78 +1,81 @@
 "use client";
-// authz-legacy: 02-12 migrates this file to the resolver
 
 import {
   CreateInvitationRequest,
   EventTypes,
+  INVITABLE_ROLES,
   type Invitation,
-  type Member,
   type OrgRole,
   ROLE_LABELS,
   topic,
 } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
-import { Check, Copy, Link2, Mail, Send, Trash2, UserPlus } from "lucide-react";
-import { type FormEvent, type ReactNode, useState } from "react";
+import { BookOpenCheck, Check, Copy, Link2, Mail, Send, Sparkles, Trash2, UserPlus } from "lucide-react";
+import { type FormEvent, type ReactNode, type RefObject, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
-import { UserAvatar } from "@/components/ui/avatar";
-import { Badge } from "@/components/ui/badge";
+import { MemberProfileSheet } from "@/components/members/member-profile-sheet";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { Switch } from "@/components/ui/switch";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useCopy } from "@/hooks/use-copy";
+import { useIsDesktop } from "@/hooks/use-media-query";
 import { errorMessage, isApiError } from "@/lib/api";
 import { validate } from "@/lib/form";
-import {
-  queryKeys,
-  useCreateInvitation,
-  useInvitations,
-  useMe,
-  useMembers,
-  useRevokeInvitation,
-} from "@/lib/queries";
+import { memberKeys, useMemberDetails } from "@/lib/member-queries";
+import { usePermissionCheck, usePermissions } from "@/lib/permissions";
+import { queryKeys, useCreateInvitation, useInvitations, useMe, useRevokeInvitation } from "@/lib/queries";
 import { useTopic } from "@/lib/realtime";
-import { cn, formatDate, relativeTime } from "@/lib/utils";
-
-const INVITE_ROLES: Array<{ value: OrgRole; label: string }> = (
-  ["standard", "developer", "lead", "admin"] as const
-).map((value) => ({ value, label: ROLE_LABELS[value] }));
+import { cn, relativeTime } from "@/lib/utils";
+import { MemberRow, RoleBadge } from "./member-row";
+import { RoleReferenceSheet } from "./role-reference-sheet";
 
 const ROLE_ORDER: Record<OrgRole, number> = { admin: 0, lead: 1, developer: 2, standard: 3 };
 
-const ROLE_VARIANT: Record<OrgRole, "brand" | "outline"> = {
-  admin: "brand",
-  lead: "brand",
-  developer: "outline",
-  standard: "outline",
-};
-
+/**
+ * Settings › Members (ORG-04, ORG-06). Every control follows the API resolver: the invite form needs
+ * `invitation.create` and offers the inviter's role ceiling, pending invitations need `invitation.read`
+ * with Revoke per `viewerCan`, and role changes need `member.manage`. The API re-decides every action.
+ */
 export function MembersSettings() {
   const me = useMe();
   const qc = useQueryClient();
-  const isAdmin = me.data?.organization.role === "admin";
+  const perms = usePermissions();
+  const can = usePermissionCheck();
   const orgId = me.data?.organization.id ?? null;
+  const inviteRoles = perms.data ? INVITABLE_ROLES[perms.data.role] : [];
+  const canInvite = can("invitation.create") && inviteRoles.length > 0;
+  const inviteInputRef = useRef<HTMLInputElement>(null);
 
-  // Someone accepted an invitation → refresh both lists live.
+  // Someone joined, a member's role / status / profile changed, or units moved → refresh the lists live.
   useTopic(orgId ? topic("org", orgId) : null, (frame) => {
     if (frame.type === EventTypes.memberJoined) {
-      void qc.invalidateQueries({ queryKey: queryKeys.members });
+      void qc.invalidateQueries({ queryKey: memberKeys.all });
       void qc.invalidateQueries({ queryKey: queryKeys.invitations });
+    } else if (frame.type === EventTypes.memberUpdated || frame.type === EventTypes.unitsUpdated) {
+      void qc.invalidateQueries({ queryKey: memberKeys.all });
     }
   });
 
+  const focusInvite = () => {
+    inviteInputRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+    inviteInputRef.current?.focus({ preventScroll: true });
+  };
+
   return (
     <div className="mx-auto grid w-full max-w-3xl gap-8 px-4 py-6 sm:px-6 sm:py-8">
-      {isAdmin ? (
-        <>
-          <InviteSection />
-          <PendingInvitations />
-        </>
-      ) : null}
-      <MembersList currentUserId={me.data?.user.id} />
+      {canInvite ? <InviteSection roles={inviteRoles} inputRef={inviteInputRef} /> : null}
+      {can("invitation.read") ? <PendingInvitations /> : null}
+      <MembersList
+        currentUserId={me.data?.user.id}
+        canManage={can("member.manage")}
+        canInvite={canInvite}
+        onInvite={focusInvite}
+      />
     </div>
   );
 }
@@ -81,27 +84,32 @@ function Section({
   title,
   description,
   count,
+  actions,
   children,
   testId,
 }: {
   title: string;
   description?: ReactNode;
   count?: number;
+  actions?: ReactNode;
   children: ReactNode;
   testId?: string;
 }) {
   return (
     <section data-testid={testId} className="grid gap-3">
-      <div>
-        <h2 className="flex items-center gap-2 font-semibold text-[15px] tracking-tight">
-          {title}
-          {count !== undefined ? (
-            <span className="rounded-full bg-muted px-1.5 py-0.5 font-medium text-[11px] text-muted-foreground tabular-nums">
-              {count}
-            </span>
-          ) : null}
-        </h2>
-        {description ? <p className="mt-0.5 text-muted-foreground text-sm">{description}</p> : null}
+      <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-2">
+        <div className="min-w-0">
+          <h2 className="flex items-center gap-2 font-semibold text-[15px] tracking-tight">
+            {title}
+            {count !== undefined ? (
+              <span className="rounded-full bg-muted px-1.5 py-0.5 font-medium text-[11px] text-muted-foreground tabular-nums">
+                {count}
+              </span>
+            ) : null}
+          </h2>
+          {description ? <p className="mt-0.5 text-muted-foreground text-sm">{description}</p> : null}
+        </div>
+        {actions ? <div className="flex flex-wrap items-center gap-x-4 gap-y-2">{actions}</div> : null}
       </div>
       {children}
     </section>
@@ -110,17 +118,27 @@ function Section({
 
 // ---- invite ----
 
-function InviteSection() {
+function InviteSection({
+  roles,
+  inputRef,
+}: {
+  roles: OrgRole[];
+  inputRef: RefObject<HTMLInputElement | null>;
+}) {
   const create = useCreateInvitation();
   const { copy, copied } = useCopy();
+  const items = roles.map((value) => ({ value, label: ROLE_LABELS[value] }));
+  const fallbackRole: OrgRole = roles.includes("developer") ? "developer" : (roles[0] ?? "developer");
   const [email, setEmail] = useState("");
-  const [role, setRole] = useState<OrgRole>("developer");
+  const [role, setRole] = useState<OrgRole>(fallbackRole);
   const [error, setError] = useState<string | undefined>();
   const [created, setCreated] = useState<Invitation | null>(null);
+  // The ceiling can shrink live (a role change): never submit a role the inviter no longer offers.
+  const effectiveRole = roles.includes(role) ? role : fallbackRole;
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
-    const result = validate(CreateInvitationRequest, { email, role });
+    const result = validate(CreateInvitationRequest, { email, role: effectiveRole });
     if (result.errors) {
       setError(result.errors.email ?? result.errors.role);
       return;
@@ -161,11 +179,12 @@ function InviteSection() {
             <div className="relative">
               <Mail className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
               <Input
+                ref={inputRef}
                 id="invite-email"
                 type="email"
                 placeholder="teammate@company.com"
                 autoComplete="off"
-                className="pl-9"
+                className="h-10 pl-9 sm:h-9"
                 value={email}
                 onChange={(e) => {
                   setEmail(e.target.value);
@@ -182,17 +201,17 @@ function InviteSection() {
             ) : null}
           </div>
           <div className="flex gap-2">
-            <Select items={INVITE_ROLES} value={role} onValueChange={(v) => v && setRole(v)}>
-              <SelectTrigger aria-label="Role" data-testid="invite-role" className="w-44" />
+            <Select items={items} value={effectiveRole} onValueChange={(v) => v && setRole(v)}>
+              <SelectTrigger aria-label="Role" data-testid="invite-role" className="h-10 w-44 sm:h-9" />
               <SelectContent>
-                {INVITE_ROLES.map((r) => (
-                  <SelectItem key={r.value} value={r.value}>
+                {items.map((r) => (
+                  <SelectItem key={r.value} value={r.value} data-testid="invite-role-option">
                     {r.label}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
-            <Button type="submit" disabled={create.isPending} className="flex-1 sm:flex-none">
+            <Button type="submit" disabled={create.isPending} className="h-10 flex-1 sm:h-9 sm:flex-none">
               {create.isPending ? <Spinner /> : <Send />}
               Invite
             </Button>
@@ -259,7 +278,7 @@ function PendingInvitations() {
       testId="pending-invitations"
     >
       {invitations.isPending ? (
-        <ListSkeleton rows={2} />
+        <ListSkeleton rows={1} />
       ) : invitations.isError ? (
         <ListError
           error={invitations.error}
@@ -267,16 +286,22 @@ function PendingInvitations() {
           retrying={invitations.isFetching}
         />
       ) : pending.length === 0 ? (
-        <div className="rounded-xl border border-dashed px-4 py-6 text-center text-muted-foreground text-sm">
+        <div className="rounded-xl border border-dashed px-4 py-5 text-center text-muted-foreground text-sm">
           No pending invitations.
         </div>
       ) : (
         <ul className="divide-y overflow-hidden rounded-xl border bg-card shadow-xs">
           {pending.map((inv) => {
             const expired = new Date(inv.expiresAt).getTime() < Date.now();
+            const canRevoke = inv.viewerCan?.includes("invitation.revoke") ?? false;
             return (
-              <li key={inv.id} data-testid="pending-invitation" className="flex items-center gap-3 px-4 py-3">
-                <span className="flex size-8 shrink-0 items-center justify-center rounded-full border border-dashed text-muted-foreground">
+              <li
+                key={inv.id}
+                data-testid="pending-invitation"
+                data-email={inv.email}
+                className="flex items-center gap-3 px-4 py-3"
+              >
+                <span className="flex size-9 shrink-0 items-center justify-center rounded-full border border-dashed text-muted-foreground">
                   <Mail className="size-3.5" />
                 </span>
                 <div className="min-w-0 flex-1">
@@ -285,7 +310,7 @@ function PendingInvitations() {
                     {expired ? "Expired" : `Expires ${relativeTime(inv.expiresAt)}`}
                   </div>
                 </div>
-                <RoleBadge role={inv.role} />
+                <RoleBadge role={inv.role} className="hidden sm:inline-flex" />
                 <div className="flex items-center gap-0.5">
                   <Tooltip content={copied === inv.link ? "Copied" : "Copy invite link"}>
                     <Button
@@ -293,23 +318,26 @@ function PendingInvitations() {
                       size="icon-sm"
                       aria-label={`Copy invite link for ${inv.email}`}
                       onClick={() => copy(inv.link).then(() => toast.success("Invite link copied"))}
+                      className="size-10 sm:size-8"
                     >
                       {copied === inv.link ? <Check className="text-success" /> : <Copy />}
                     </Button>
                   </Tooltip>
-                  <Tooltip content="Revoke">
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-label={`Revoke invitation for ${inv.email}`}
-                      data-testid="revoke-invitation"
-                      disabled={revoke.isPending && revoke.variables === inv.id}
-                      onClick={() => onRevoke(inv)}
-                      className="hover:bg-destructive/10 hover:text-destructive"
-                    >
-                      {revoke.isPending && revoke.variables === inv.id ? <Spinner /> : <Trash2 />}
-                    </Button>
-                  </Tooltip>
+                  {canRevoke ? (
+                    <Tooltip content="Revoke">
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        aria-label={`Revoke invitation for ${inv.email}`}
+                        data-testid="revoke-invitation"
+                        disabled={revoke.isPending && revoke.variables === inv.id}
+                        onClick={() => onRevoke(inv)}
+                        className="size-10 hover:bg-destructive/10 hover:text-destructive sm:size-8"
+                      >
+                        {revoke.isPending && revoke.variables === inv.id ? <Spinner /> : <Trash2 />}
+                      </Button>
+                    </Tooltip>
+                  ) : null}
                 </div>
               </li>
             );
@@ -322,77 +350,146 @@ function PendingInvitations() {
 
 // ---- members ----
 
-function MembersList({ currentUserId }: { currentUserId: string | undefined }) {
-  const members = useMembers();
-  const list = [...(members.data?.members ?? [])].sort(
-    (a, b) => ROLE_ORDER[a.role] - ROLE_ORDER[b.role] || a.displayName.localeCompare(b.displayName),
-  );
+function MembersList({
+  currentUserId,
+  canManage,
+  canInvite,
+  onInvite,
+}: {
+  currentUserId: string | undefined;
+  canManage: boolean;
+  canInvite: boolean;
+  onInvite: () => void;
+}) {
+  const members = useMemberDetails();
+  const [showDeactivated, setShowDeactivated] = useState(false);
+  const [rolesOpen, setRolesOpen] = useState(false);
+  const [profile, setProfile] = useState<{ userId: string; open: boolean } | null>(null);
+  const all = members.data?.members ?? [];
+  const deactivatedCount = all.filter((m) => m.status === "deactivated").length;
+  const list = all
+    .filter((m) => showDeactivated || m.status === "active")
+    .sort(
+      (a, b) =>
+        Number(a.status === "deactivated") - Number(b.status === "deactivated") ||
+        ROLE_ORDER[a.role] - ROLE_ORDER[b.role] ||
+        a.displayName.localeCompare(b.displayName),
+    );
+  const alone = members.data !== undefined && all.filter((m) => m.status === "active").length <= 1;
 
   return (
-    <Section title="Members" count={members.data ? list.length : undefined} testId="members-list">
+    <Section
+      title="Members"
+      count={members.data ? list.length : undefined}
+      testId="members-list"
+      actions={
+        <>
+          <Button
+            variant="link"
+            size="sm"
+            onClick={() => setRolesOpen(true)}
+            data-testid="role-reference-trigger"
+            className="h-10 text-[13px] sm:h-8"
+          >
+            <BookOpenCheck />
+            What can each role do?
+          </Button>
+          {/* biome-ignore lint/a11y/noLabelWithoutControl: the Switch renders the control inside the label */}
+          <label className="flex h-10 cursor-pointer items-center gap-2 text-[13px] text-muted-foreground sm:h-8">
+            <Switch
+              checked={showDeactivated}
+              onCheckedChange={setShowDeactivated}
+              data-testid="show-deactivated"
+            />
+            Show deactivated
+            {deactivatedCount > 0 ? <span className="tabular-nums">({deactivatedCount})</span> : null}
+          </label>
+        </>
+      }
+    >
       {members.isPending ? (
         <ListSkeleton rows={3} />
       ) : members.isError ? (
         <ListError error={members.error} onRetry={() => members.refetch()} retrying={members.isFetching} />
-      ) : list.length === 0 ? (
-        <div className="rounded-xl border border-dashed px-4 py-6 text-center text-muted-foreground text-sm">
-          <UserPlus className="mx-auto mb-2 size-5" />
-          No members yet.
-        </div>
       ) : (
-        <ul className="divide-y overflow-hidden rounded-xl border bg-card shadow-xs">
-          {list.map((m) => (
-            <MemberRow key={m.userId} member={m} isYou={m.userId === currentUserId} />
-          ))}
-        </ul>
+        <>
+          <ul className="divide-y overflow-hidden rounded-xl border bg-card shadow-xs">
+            {list.map((m) => (
+              <MemberRow
+                key={m.userId}
+                member={m}
+                isYou={m.userId === currentUserId}
+                canManage={canManage}
+                onOpenProfile={(userId) => setProfile({ userId, open: true })}
+              />
+            ))}
+          </ul>
+          {alone && canInvite ? <JustYou onInvite={onInvite} /> : null}
+        </>
       )}
+      <RoleReferenceSheet open={rolesOpen} onOpenChange={setRolesOpen} />
+      <MemberProfileSheet
+        userId={profile?.userId ?? null}
+        open={profile?.open ?? false}
+        onOpenChange={(open) => setProfile((p) => (p ? { ...p, open } : p))}
+      />
     </Section>
   );
 }
 
-function MemberRow({ member, isYou }: { member: Member; isYou: boolean }) {
+/** Empty state: the admin is the only active member. */
+function JustYou({ onInvite }: { onInvite: () => void }) {
+  const desktop = useIsDesktop();
+  // On desktop, land in the invite field; on phones, never pop the keyboard uninvited.
+  const focused = useRef(false);
+  useEffect(() => {
+    if (desktop && !focused.current) {
+      focused.current = true;
+      onInvite();
+    }
+  }, [desktop, onInvite]);
+
   return (
-    <li data-testid="member-row" className="flex items-center gap-3 px-4 py-3">
-      <UserAvatar name={member.displayName} src={member.avatarUrl} seed={member.userId} className="size-8" />
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-1.5">
-          <span className="truncate font-medium text-sm">{member.displayName}</span>
-          {isYou ? (
-            <span className="rounded bg-muted px-1 py-px text-[10px] text-muted-foreground uppercase tracking-wide">
-              You
-            </span>
-          ) : null}
-        </div>
-        <div className="truncate text-muted-foreground text-xs">{member.email ?? "—"}</div>
-      </div>
-      <span className="hidden text-muted-foreground text-xs sm:block">
-        Joined {formatDate(member.joinedAt)}
+    <div
+      data-testid="members-empty"
+      className="relative overflow-hidden rounded-xl border border-dashed px-6 py-8 text-center"
+    >
+      <div
+        aria-hidden
+        className="absolute inset-x-0 -top-16 mx-auto h-32 w-64 rounded-full bg-primary/10 blur-3xl"
+      />
+      <span className="relative mx-auto mb-3 flex size-11 items-center justify-center rounded-xl border bg-card text-primary shadow-sm">
+        <Sparkles className="size-5" strokeWidth={1.75} />
       </span>
-      <RoleBadge role={member.role} />
-    </li>
+      <h3 className="relative font-semibold text-base tracking-tight">It's just you so far</h3>
+      <p className="relative mx-auto mt-1 max-w-sm text-balance text-muted-foreground text-sm">
+        Invite your team with a link — no email server needed.
+      </p>
+      <Button onClick={onInvite} className="relative mt-4 h-10 sm:h-9" data-testid="members-empty-invite">
+        <UserPlus />
+        Invite your team
+      </Button>
+    </div>
   );
 }
 
-function RoleBadge({ role }: { role: OrgRole }) {
-  return (
-    <Badge variant={ROLE_VARIANT[role]} className="shrink-0 whitespace-nowrap">
-      {ROLE_LABELS[role]}
-    </Badge>
-  );
-}
-
+/** Shaped like member rows at both widths (the role control wraps under the name at 390 px). */
 function ListSkeleton({ rows }: { rows: number }) {
   return (
-    <div className="divide-y overflow-hidden rounded-xl border bg-card" aria-busy>
+    <div className="divide-y overflow-hidden rounded-xl border bg-card" aria-busy data-testid="list-skeleton">
       {Array.from({ length: rows }, (_, i) => (
-        // biome-ignore lint/suspicious/noArrayIndexKey: static skeleton rows
-        <div key={i} className="flex items-center gap-3 px-4 py-3">
-          <Skeleton className="size-8 rounded-full" />
-          <div className="flex-1 space-y-1.5">
-            <Skeleton className="h-3.5 w-40" />
-            <Skeleton className="h-3 w-56" />
+        <div
+          // biome-ignore lint/suspicious/noArrayIndexKey: static skeleton rows
+          key={i}
+          className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 px-4 py-3 sm:grid-cols-[auto_minmax(0,1fr)_auto_auto]"
+        >
+          <Skeleton className="row-span-2 size-9 self-start rounded-full sm:row-span-1 sm:self-center" />
+          <div className="col-start-2 space-y-1.5 py-0.5">
+            <Skeleton className="h-3.5 w-36 max-w-full" />
+            <Skeleton className="h-3 w-52 max-w-full" />
           </div>
-          <Skeleton className="h-5 w-14" />
+          <Skeleton className="col-start-2 row-start-2 h-10 w-full max-w-56 sm:col-start-3 sm:row-start-1 sm:h-8 sm:w-44" />
+          <Skeleton className="col-start-3 row-start-1 size-10 self-start sm:col-start-4 sm:size-8 sm:self-center" />
         </div>
       ))}
     </div>

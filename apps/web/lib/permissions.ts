@@ -4,7 +4,7 @@ import { EventTypes, MyPermissions, type Permission, topic } from "@ocw/contract
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
 import { api, isApiError } from "./api";
-import { useMe } from "./queries";
+import { queryKeys, useMe } from "./queries";
 import { useTopic } from "./realtime";
 
 /**
@@ -34,6 +34,10 @@ export function usePermissions() {
       frame.type === EventTypes.permissionRulesUpdated
     ) {
       void qc.invalidateQueries({ queryKey: permissionKeys.mine });
+    }
+    // Our own role or profile changed: /me carries both (workspace switcher label, user menu).
+    if (frame.type === EventTypes.memberUpdated && data?.userId === userId) {
+      void qc.invalidateQueries({ queryKey: queryKeys.me });
     }
   });
 
