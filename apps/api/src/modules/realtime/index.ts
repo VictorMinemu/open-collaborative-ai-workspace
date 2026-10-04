@@ -1,6 +1,9 @@
 import type { ApiModule, App } from "../../core";
 import type { IdentityService } from "../identity";
 import { registerGateway } from "./gateway";
+
+export { SESSION_RECHECK_MS } from "./gateway";
+
 import type { RealtimeService } from "./service";
 
 export {
@@ -19,6 +22,8 @@ export function createRealtimeModule(deps: {
   realtime: RealtimeService;
   identity: IdentityService;
   allowedOrigins: Set<string>;
+  /** Open-socket session recheck interval (default 5 minutes; tests lower it). */
+  sessionRecheckMs?: number;
 }): ApiModule {
   return {
     name: "realtime",

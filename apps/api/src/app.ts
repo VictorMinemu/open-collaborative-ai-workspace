@@ -3,7 +3,7 @@ import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import swagger from "@fastify/swagger";
 import websocket from "@fastify/websocket";
-import { HealthResponse } from "@ocw/contracts";
+import { HealthResponse, WS_PROTOCOL } from "@ocw/contracts";
 import { createTenantDb } from "@ocw/db";
 import scalar from "@scalar/fastify-api-reference";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -57,7 +57,13 @@ export async function buildApp(
         ? false
         : {
             level: env.LOG_LEVEL,
-            redact: ["req.headers.cookie", "req.headers.authorization", 'res.headers["set-cookie"]'],
+            redact: [
+              "req.headers.cookie",
+              "req.headers.authorization",
+              // The browser WebSocket carries its access JWT here (ocw.auth.<jwt>), T-02-08-04.
+              'req.headers["sec-websocket-protocol"]',
+              'res.headers["set-cookie"]',
+            ],
             ...(opts.logStream ? { stream: opts.logStream } : {}),
           },
     trustProxy: true,
@@ -81,7 +87,7 @@ export async function buildApp(
   const secretStore = createEnvFileSecretStore();
   const audit = createAuditService();
   const realtime = createRealtimeService({ db, bus });
-  const identity = new IdentityService(createAuth(env, authDb), authDb, env);
+  const identity = new IdentityService(createAuth(env, authDb), authDb, env, realtime);
   const secrets = createSecretsService({ key: encryptionKey, audit });
   const chatAgent = createChatAgentBridge();
   const core: Core = {
@@ -114,7 +120,14 @@ export async function buildApp(
     methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
   });
   await app.register(rateLimit, { global: false });
-  await app.register(websocket, { options: { maxPayload: 256 * 1024 } });
+  await app.register(websocket, {
+    options: {
+      maxPayload: 256 * 1024,
+      // Select the application protocol, never the `ocw.auth.<jwt>` entry: browsers fail a handshake that
+      // offered subprotocols and got none back (Pitfall 2), and the token must not be echoed (T-02-08-04).
+      handleProtocols: (protocols: Set<string>) => (protocols.has(WS_PROTOCOL) ? WS_PROTOCOL : false),
+    },
+  });
   await app.register(swagger, {
     openapi: {
       info: { title: "Open Collaborative AI Workspace API", version: API_VERSION },

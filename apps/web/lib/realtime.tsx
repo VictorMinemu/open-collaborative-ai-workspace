@@ -9,6 +9,7 @@ import {
 import { createContext, type ReactNode, useContext, useEffect, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { createStore } from "zustand/vanilla";
+import { clearAccessToken, getAccessToken } from "./auth-token";
 import { useRuntimeConfig } from "./config";
 import { useMe } from "./queries";
 
@@ -16,7 +17,8 @@ const RealtimeContext = createContext<RealtimeClient | null>(null);
 
 /**
  * One RealtimeClient (one WebSocket) per signed-in browser tab. Created when `/me` resolves, closed on
- * sign-out or when the session (sessionId) changes.
+ * sign-out or when the session (sessionId) changes. The socket authenticates with a short-lived access JWT
+ * fetched before every (re)connect (AUTH-06); the cached token is dropped with the client.
  */
 export function RealtimeProvider({ children }: { children: ReactNode }) {
   const { wsUrl } = useRuntimeConfig();
@@ -27,11 +29,12 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!sessionId) return;
-    const c = new RealtimeClient({ url: wsUrl });
+    const c = new RealtimeClient({ url: wsUrl, getToken: (o) => getAccessToken(o) });
     c.connect();
     setClient(c);
     return () => {
       c.close();
+      clearAccessToken();
       setClient(null);
     };
   }, [sessionId, wsUrl]);
