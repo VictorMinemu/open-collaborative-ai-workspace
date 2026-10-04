@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, type Page, test } from "@playwright/test";
+import { apiAs, ensureMember, openAs, SAM, userIdOf } from "../support/actors";
 import { ADMIN, API_URL, shot } from "./env";
 
 /**
@@ -26,7 +27,7 @@ async function signIn(page: Page) {
 
 test.describe.configure({ mode: "serial" });
 
-test("Work Zone: pair a device, run a session, approve, review changes", async ({ page }, info) => {
+test("Work Zone: pair a device, run a session, approve, review changes", async ({ page, browser }, info) => {
   test.setTimeout(180_000);
   const tag = info.project.name === "mobile" ? "390" : "1440";
   const mobile = info.project.name === "mobile";
@@ -107,6 +108,44 @@ test("Work Zone: pair a device, run a session, approve, review changes", async (
     await expect(page.getByTestId("prompt-bubble")).toHaveCount(2);
     await expect(page.getByTestId("assistant-message").last()).toContainText("Done");
     await shot(page, `workzone-session-${tag}`);
+
+    // ---- who is watching (RT-04, 03-03): Sam opens the session; each sees the other in the header
+    const adminApi = await apiAs(ADMIN);
+    const samId = await ensureMember(adminApi, SAM, "developer");
+    const adminId = await userIdOf(adminApi);
+    await adminApi.dispose();
+    const viewers = (p: Page) => p.getByTestId("session-header").getByTestId("session-viewers");
+    const samOnAdmin = viewers(page).locator(`[data-testid="presence-avatar"][data-user-id="${samId}"]`);
+    const sam = await openAs(browser, SAM, info.project.name);
+    try {
+      await sam.page.goto(sessionUrl);
+      await expect(sam.page.getByTestId("session-view")).toBeVisible();
+      await expect(samOnAdmin).toHaveAttribute("data-state", "online", { timeout: 3000 });
+      await expect(
+        viewers(sam.page).locator(`[data-testid="presence-avatar"][data-user-id="${adminId}"]`),
+      ).toHaveAttribute("data-state", "online", { timeout: 3000 });
+      // Never yourself; Sam is not listed as "not here" while watching.
+      await expect(
+        viewers(page).locator(`[data-testid="presence-avatar"][data-user-id="${adminId}"]`),
+      ).toHaveCount(0);
+      await expect(viewers(page).getByTestId("session-participant-absent")).toHaveCount(0);
+      await expect(viewers(page).getByTestId("presence-stack")).toHaveAttribute(
+        "aria-label",
+        "1 watching now",
+      );
+      // At 390 the stack must not push the header actions off-screen.
+      const box = await page.getByRole("button", { name: "Session actions" }).boundingBox();
+      expect(box && box.x + box.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+      await shot(page, `workzone-presence-${tag}`);
+      await page.emulateMedia({ colorScheme: "dark" });
+      await shot(page, `workzone-presence-${tag}-dark`);
+      await page.emulateMedia({ colorScheme: "light" });
+    } finally {
+      await sam.context.close();
+    }
+    // Sam closed the session: gone from the admin's header within 3 s.
+    await expect(samOnAdmin).toHaveCount(0, { timeout: 3000 });
+    await expect(viewers(page).getByTestId("presence-stack")).toHaveCount(0);
 
     // ---- changes from the device
     if (mobile) await page.getByTestId("open-changes").click();

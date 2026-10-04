@@ -15,10 +15,11 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { EmptyState } from "@/components/common/empty-state";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
+import { PresenceStack, usePresentPeople } from "@/components/presence/presence-stack";
 import { UserAvatar } from "@/components/ui/avatar";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
@@ -26,6 +27,7 @@ import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
 import { errorMessage, isApiError } from "@/lib/api";
+import { useMe, useMembers } from "@/lib/queries";
 import { type LiveSession, useLiveSession } from "@/lib/use-live-session";
 import { cn } from "@/lib/utils";
 import { useArchiveSession, useDevices } from "@/lib/workzone-queries";
@@ -239,8 +241,31 @@ function SessionHeader({
     const m = new Map<string, string>();
     m.set(session.createdBy, session.createdByName ?? "Owner");
     for (const p of state.prompts) m.set(p.authorUserId, p.authorName ?? "Member");
-    return [...m.entries()];
+    return m;
   }, [session.createdBy, session.createdByName, state.prompts]);
+  // Who is watching this session right now (RT-04, D-01, D-08; PRD §25). `use-live-session` subscribes to
+  // `ws:<id>` with `presence: true`; names come from the participants, then the org directory.
+  const me = useMe({ enabled: false }).data?.user.id;
+  const directory = useMembers();
+  const resolve = useCallback(
+    (userId: string) => {
+      const m = directory.data?.members.find((x) => x.userId === userId);
+      const name = participants.get(userId) ?? m?.displayName;
+      return name ? { name, avatarUrl: m?.avatarUrl ?? null } : undefined;
+    },
+    [participants, directory.data],
+  );
+  const viewers = usePresentPeople(`ws:${session.id}`, { excludeUserId: me, resolve });
+  const absent = useMemo(() => {
+    const here = new Set(viewers.map((v) => v.userId));
+    return [...participants.entries()]
+      .filter(([uid]) => uid !== me && !here.has(uid))
+      .map(([uid, name]) => ({
+        uid,
+        name,
+        avatarUrl: directory.data?.members.find((x) => x.userId === uid)?.avatarUrl ?? null,
+      }));
+  }, [participants, viewers, me, directory.data]);
   const mode = PERMISSION_MODES.find((m) => m.value === session.permissionMode);
 
   useEffect(() => {
@@ -290,14 +315,29 @@ function SessionHeader({
         ) : null}
       </div>
       <div className="flex shrink-0 items-center gap-2">
-        <div role="group" className="hidden -space-x-1.5 md:flex" aria-label="Participants">
-          {participants.slice(0, 4).map(([uid, name]) => (
-            <Tooltip key={uid} content={name}>
-              <span>
-                <UserAvatar name={name} seed={uid} className="size-6 ring-2 ring-background" />
-              </span>
-            </Tooltip>
-          ))}
+        <div className="flex items-center" data-testid="session-viewers">
+          <PresenceStack
+            people={viewers}
+            max={4}
+            label={`${viewers.length} watching now`}
+            className="-mx-1"
+          />
+          {absent.length > 0 ? (
+            <div role="group" className="ml-1 hidden -space-x-1.5 md:flex" aria-label="Participants not here">
+              {absent.slice(0, 3).map((p) => (
+                <Tooltip key={p.uid} content={`${p.name} · not here`}>
+                  <span data-testid="session-participant-absent" data-user-id={p.uid}>
+                    <UserAvatar
+                      name={p.name}
+                      src={p.avatarUrl}
+                      seed={p.uid}
+                      className="size-6 opacity-50 ring-2 ring-background grayscale"
+                    />
+                  </span>
+                </Tooltip>
+              ))}
+            </div>
+          ) : null}
         </div>
         <StatusChip status={session.status} className="hidden sm:inline-flex" />
         <div className="flex items-center gap-1 xl:hidden">
