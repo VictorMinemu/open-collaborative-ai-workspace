@@ -26,7 +26,7 @@ import {
   workPrompts,
   workSessions,
 } from "@ocw/db";
-import { and, asc, desc, eq, lte, max, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lte, max, ne, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { type App, type AuthContext, authOf, type Core, tenant } from "../../core";
@@ -135,9 +135,35 @@ export function registerWorkSessionRoutes(
       schema: { tags, querystring: ListQuery, response: { 200: WorkSessionList } },
     },
     async (req) => ({
-      sessions: await core.db.withTenant(tenant(req), (tx) =>
-        svc.sessions(tx, req.query.archived === "1" ? undefined : ne(workSessions.status, "archived")),
-      ),
+      sessions: await core.db.withTenant(tenant(req), async (tx) => {
+        const rows = await svc.sessions(
+          tx,
+          req.query.archived === "1" ? undefined : ne(workSessions.status, "archived"),
+        );
+        // Per-session decision (same facts as GET /work-sessions/:id): a unit/device deny rule or a revoked
+        // host must hide a session from the list exactly as it does from the detail route.
+        const deviceIds = [...new Set(rows.map((r) => r.deviceId))];
+        const hosts = deviceIds.length
+          ? await tx
+              .select({ id: devices.id, owner: devices.ownerUserId, revokedAt: devices.revokedAt })
+              .from(devices)
+              .where(inArray(devices.id, deviceIds))
+          : [];
+        const byId = new Map(hosts.map((h) => [h.id, h]));
+        const userId = authOf(req).userId;
+        return perms.filter(req, tx, rows, "work_session.read", (r) => {
+          const host = byId.get(r.deviceId);
+          return workSessionResource(
+            {
+              createdBy: r.createdBy,
+              deviceOwnerUserId: host?.owner ?? null,
+              deviceRevoked: !host || host.revokedAt !== null,
+              tool: null,
+            },
+            userId,
+          );
+        });
+      }),
     }),
   );
 

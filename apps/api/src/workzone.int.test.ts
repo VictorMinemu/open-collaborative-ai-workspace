@@ -959,6 +959,30 @@ describe("revocation", () => {
 });
 
 describe("authorization coverage", () => {
+  it("the session list is filtered per session by the resolver (a deny rule hides sessions from the list)", async () => {
+    const before = (await alex.request("GET", "/api/v1/work-sessions?archived=1")).body!
+      .sessions as unknown[];
+    expect(before.length).toBeGreaterThan(0);
+    const rule = await admin.request("POST", "/api/v1/permission-rules", {
+      subjectKind: "role",
+      subjectId: "developer",
+      permission: "work_session.read",
+      effect: "deny",
+    });
+    expect(rule.status).toBe(200);
+    try {
+      const list = await alex.request("GET", "/api/v1/work-sessions?archived=1");
+      // The route-level gate may already refuse; if it answers, it must not leak any session.
+      if (list.status === 200) expect(list.body!.sessions).toEqual([]);
+      else expect(list.status).toBe(403);
+      const adminList = (await admin.request("GET", "/api/v1/work-sessions?archived=1")).body!
+        .sessions as unknown[];
+      expect(adminList.length).toBeGreaterThanOrEqual(before.length);
+    } finally {
+      await admin.request("DELETE", `/api/v1/permission-rules/${rule.body!.id as string}`);
+    }
+  });
+
   it("every device, project and Work Zone answer went through the resolver", () => {
     const undecided = stack.built.authz.undecided.filter((u) =>
       /^\/api\/v1\/(devices|projects|work-sessions)/.test(u.url),
