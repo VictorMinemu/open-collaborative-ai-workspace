@@ -238,6 +238,20 @@ describe("mention → dispatch → reply", () => {
     expect(api.messages.map((x) => x.text)).toEqual(["Hi Víctor!"]);
   });
 
+  it("a turn that ends silently (no delivery, no error) is retried, then the asker gets a notice", async () => {
+    let calls = 0;
+    port.reply = () => {
+      calls++;
+      return [];
+    };
+    startPlugin();
+    await api.waitFor(() => api.openSockets() === 1);
+    api.publishMention(mention(11));
+    await api.waitFor(() => api.messages.length === 1);
+    expect(calls).toBeGreaterThan(1);
+    expect(api.messages[0]).toMatchObject({ text: FAILURE_REPLY, idempotencyKey: "evt:evt-11:failed" });
+  });
+
   it("posts a short failure notice once when the agent turn keeps failing", async () => {
     port.reply = () => {
       throw new Error("model unavailable");
