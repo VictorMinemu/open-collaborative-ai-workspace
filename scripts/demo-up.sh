@@ -49,5 +49,6 @@ if ! docker ps --format '{{.Names}}' | grep -qx ocw-demo-openclaw; then
     -e NODE_OPTIONS=--max-old-space-size=512 \
     ocw-openclaw:local >/dev/null
 fi
-for _ in $(seq 1 120); do docker logs ocw-demo-openclaw 2>&1 | grep -q "subscribed to cell" && break; sleep 2; done
+# Capture first: `docker logs | grep -q` under pipefail fails on SIGPIPE and would never break.
+for _ in $(seq 1 120); do grep -q "subscribed to cell" <<<"$(docker logs ocw-demo-openclaw 2>&1)" && break; sleep 2; done
 echo "bots $(docker logs ocw-demo-openclaw 2>&1 | grep '\[ocw\]' | tail -1)"
