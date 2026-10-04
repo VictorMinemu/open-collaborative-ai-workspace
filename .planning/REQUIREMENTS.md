@@ -130,6 +130,9 @@ SLICE-06…18 were added on 2026-10-04 after the code audit of the widened demo 
 - [ ] **BOT-05**: An Organization Admin sets a capability policy (allow/deny each capability org-wide and separately for personal bots); a bot's effective capabilities are its toggles ∩ the policy, the UI shows a disabled toggle with the reason, and dangerous tools (shell/exec, filesystem writes, browser control, gateway admin) are never offered
 - [ ] **BOT-06**: Capabilities are enforced in the OpenClaw cell on every turn (only the effective tools are passed; internet content is treated as untrusted data and cannot trigger other actions); every web search/fetch is audited with bot, human, domain and result, and runs with the intersection of the bot's and the triggering human's permissions
 - [ ] **BOT-07**: Usage per bot is metered per day; when the daily limit is reached the bot replies with a clear notice instead of calling the model; owners and admins see today's usage against the limit
+- [ ] **BOT-08**: Bots can use MCP servers: an Organization Admin registers MCP servers (remote HTTP/SSE, or stdio servers that run sandboxed inside the OpenClaw cell) with credentials held as `SecretReference`s, and whoever manages a bot attaches registered servers to it (personal bots only from an admin-approved list); each server's tools are listed, can be individually enabled, run only with the intersection of the bot's and the asking human's permissions, are treated as untrusted output, and every call is audited (bot, human, server, tool, result)
+- [ ] **BOT-09**: The OpenClaw plugin system and its Marketplace (ClawHub) are integrated: an Organization Admin browses and searches the marketplace from Settings, sees each plugin's publisher, version, permissions/tools and risk, installs a pinned version into the cell after an explicit review step, and can update or uninstall it; installs are audited and allowlisted (nothing installs itself, auto-update stays off, dangerous tool classes stay blocked regardless of what a plugin declares)
+- [ ] **BOT-10**: Installed plugins and MCP servers appear as capabilities in each bot's settings and in the org capability policy (BOT-05): a bot uses a plugin's tools only when it is enabled for that bot and allowed by policy; personal bots can use only plugins/MCP servers the admin allowed for personal bots; the effective set is delivered per turn to the cell and enforced by the same tool gate as internet access
 
 ### Self-hosted Release (SELF)
 
@@ -334,6 +337,9 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | BOT-05 | Phase 3.1 | Pending | New (owner request 2026-10-04) |
 | BOT-06 | Phase 3.1 | Pending | New (owner request 2026-10-04) |
 | BOT-07 | Phase 3.1 | Pending | New (owner request 2026-10-04) |
+| BOT-08 | Phase 3.1 | Pending | New (owner request 2026-10-04: MCP + OpenClaw plugins/Marketplace) |
+| BOT-09 | Phase 3.1 | Pending | New (owner request 2026-10-04: MCP + OpenClaw plugins/Marketplace) |
+| BOT-10 | Phase 3.1 | Pending | New (owner request 2026-10-04: MCP + OpenClaw plugins/Marketplace) |
 | CHAT-02 | Phase 4 | Partial | Flat channel list with unread dot; no department/team grouping or views |
 | CHAT-03 | Phase 1 | Delivered | `chat.int.test.ts` "thread replies update the root and refuse nesting"; `chat.spec.ts` reply count + participants |
 | CHAT-04 | Phase 4 | Pending | No DMs |

@@ -158,9 +158,9 @@ Plans:
 
 ### Phase 03.1: Personal Bots and Bot Capabilities (INSERTED)
 
-**Goal**: Every member can have their own private bot that lives as a direct chat in their sidebar and answers every message, and every bot — personal or team — has explicit, admin-governed capabilities (internet, memory, reply mode, time context, usage limit) enforced in the OpenClaw cell on every turn
+**Goal**: Every member can have their own private bot that lives as a direct chat in their sidebar and answers every message, and every bot — personal or team — has explicit, admin-governed capabilities (internet, memory, reply mode, time context, usage limit, MCP servers and OpenClaw Marketplace plugins) enforced in the OpenClaw cell on every turn
 **Mode:** mvp
-**Requirements**: BOT-01, BOT-02, BOT-03, BOT-04, BOT-05, BOT-06, BOT-07
+**Requirements**: BOT-01, BOT-02, BOT-03, BOT-04, BOT-05, BOT-06, BOT-07, BOT-08, BOT-09, BOT-10
 **Depends on:** Phase 3
 **Success Criteria** (what must be TRUE):
   1. A Developer creates a personal bot in one click; a private direct chat with it appears in their sidebar, the bot answers every message there without an @mention, and no other member (admins included) can read that conversation or use the bot
@@ -168,8 +168,10 @@ Plans:
   3. A bot owner/manager toggles internet access, memory, reply mode, date/time context and a daily limit; with internet on the bot answers a question that needs a web lookup and the search/fetch is audited, with it off no web tool reaches the model (proven in the cell contract tests and an e2e with the fake model)
   4. An Organization Admin denies a capability org-wide (or for personal bots only) and every affected bot loses it on the next turn; the bot's settings show the toggle disabled with the reason; shell/exec, filesystem writes and browser control are never offered
   5. When a bot reaches its daily limit it replies with a clear notice and makes no model call; owners and admins see usage against the limit; memory is visible to the human it belongs to and can be cleared
+  6. An Organization Admin registers an MCP server (remote or cell-sandboxed stdio) with a secret-store credential, a bot manager attaches it to a bot and enables some of its tools, and the bot calls one of those tools in a conversation; the call is audited, runs within the asking human's permissions, and a tool that is not enabled never reaches the model
+  7. An Organization Admin browses the OpenClaw Marketplace (ClawHub) from Settings, reviews a plugin (publisher, version, declared tools, risk) and installs a pinned version into the cell; the plugin's tools become a capability that can be enabled per bot and capped by policy, a bot uses them in a conversation, and the plugin can be updated or uninstalled — all audited, with dangerous tool classes blocked whatever the plugin declares
 **Plans:** 0 plans
-**Research:** needed (OpenClaw 2026.9.7 web search/fetch tools and their providers — keyless vs API key, memory plugin and per-agent/per-peer scoping, per-turn tool allowlist, DM routing in the channel plugin; resolver grants for personal bots; DM conversation model reuse)
+**Research:** needed (OpenClaw 2026.9.7 web search/fetch tools and their providers — keyless vs API key, memory plugin and per-agent/per-peer scoping, per-turn tool allowlist, DM routing in the channel plugin; resolver grants for personal bots; DM conversation model reuse; OpenClaw MCP client support (stdio/HTTP, sandboxing), OpenClaw plugin install/update/uninstall at runtime and the ClawHub marketplace API — catalog, metadata, signing/provenance)
 **UI hint**: yes
 
 Plans:
