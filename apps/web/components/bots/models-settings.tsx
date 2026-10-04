@@ -7,7 +7,7 @@ import {
   type ProviderCatalogEntry,
   UpsertModelProviderRequest,
 } from "@ocw/contracts";
-import { ExternalLink, FlaskConical, KeyRound, Plug, Plus, ShieldCheck, Trash2, X } from "lucide-react";
+import { ExternalLink, FlaskConical, KeyRound, ShieldCheck, Trash2 } from "lucide-react";
 import { type FormEvent, useState } from "react";
 import { toast } from "sonner";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
@@ -36,28 +36,8 @@ import {
   useUpsertProvider,
 } from "@/lib/bots-queries";
 import { cn, relativeTime } from "@/lib/utils";
-
-const MARKS: Record<string, { className: string; text: string }> = {
-  anthropic: { className: "bg-[#d97757] text-white", text: "A" },
-  openai: { className: "bg-foreground text-background", text: "O" },
-  openrouter: { className: "bg-indigo-500 text-white", text: "R" },
-  "openai-compatible": { className: "bg-muted text-muted-foreground", text: "" },
-};
-
-function ProviderMark({ provider }: { provider: string }) {
-  const m = MARKS[provider] ?? { className: "bg-muted", text: "?" };
-  return (
-    <span
-      aria-hidden
-      className={cn(
-        "flex size-10 shrink-0 items-center justify-center rounded-xl font-bold text-base shadow-xs",
-        m.className,
-      )}
-    >
-      {m.text || <Plug className="size-4" />}
-    </span>
-  );
-}
+import { AllowedModels, ProviderMark } from "./provider-bits";
+import { SubscriptionCard } from "./subscription-card";
 
 export function ModelsSettings() {
   useBotsRealtime();
@@ -76,7 +56,7 @@ export function ModelsSettings() {
   }
 
   const byKind = new Map((providers.data?.providers ?? []).map((p) => [p.provider, p]));
-  const connected = [...byKind.values()].filter((p) => p.hasKey && p.enabled).length;
+  const connected = [...byKind.values()].filter((p) => (p.hasKey || p.account) && p.enabled).length;
 
   return (
     <Shell>
@@ -84,7 +64,7 @@ export function ModelsSettings() {
         <div>
           <h2 className="font-semibold text-[15px] tracking-tight">Model providers</h2>
           <p className="mt-0.5 max-w-xl text-muted-foreground text-sm">
-            Bots run on the models you allow here. Keys are encrypted at rest and never shown again.
+            Bots run on the models you allow here: an API key, or your own ChatGPT subscription.
           </p>
         </div>
         {providers.data ? (
@@ -119,20 +99,32 @@ export function ModelsSettings() {
         </div>
       ) : (
         <div className="grid gap-3" data-testid="provider-cards">
-          {MODEL_PROVIDER_CATALOG.map((entry) => (
-            <ProviderCard
-              key={entry.provider}
-              entry={entry}
-              provider={byKind.get(entry.provider) ?? null}
-              onConnect={() => setConnecting(entry)}
-            />
-          ))}
+          {/* Subscriptions first: no key to manage, the quickest way to give bots a model. */}
+          {[...MODEL_PROVIDER_CATALOG]
+            .sort((a, b) => Number(b.authMode === "subscription") - Number(a.authMode === "subscription"))
+            .map((entry) =>
+              entry.authMode === "subscription" ? (
+                <SubscriptionCard
+                  key={entry.provider}
+                  entry={entry}
+                  provider={byKind.get(entry.provider) ?? null}
+                />
+              ) : (
+                <ProviderCard
+                  key={entry.provider}
+                  entry={entry}
+                  provider={byKind.get(entry.provider) ?? null}
+                  onConnect={() => setConnecting(entry)}
+                />
+              ),
+            )}
         </div>
       )}
 
       <p className="flex items-center gap-1.5 text-muted-foreground text-xs">
         <ShieldCheck className="size-3.5" />
-        Keys are stored AES-256-GCM encrypted and only delivered to your own OpenClaw runtime.
+        Keys are stored AES-256-GCM encrypted and only delivered to your own OpenClaw runtime. Subscription
+        sign-ins stay inside that runtime.
       </p>
 
       <ConnectDialog
@@ -159,13 +151,8 @@ function ProviderCard({
 }) {
   const upsert = useUpsertProvider();
   const remove = useDeleteProvider();
-  const [custom, setCustom] = useState("");
   const [confirmRemove, setConfirmRemove] = useState(false);
   const configured = !!provider?.hasKey;
-
-  const catalogIds = entry.models.map((m) => m.id);
-  const extra = (provider?.allowedModels ?? []).filter((m) => !catalogIds.includes(m));
-  const allowed = new Set(provider?.allowedModels ?? []);
 
   async function save(patch: { allowedModels?: string[]; enabled?: boolean }, message?: string) {
     if (!provider) return;
@@ -184,19 +171,6 @@ function ProviderCard({
     } catch (err) {
       toast.error("Could not update the provider", { description: errorMessage(err) });
     }
-  }
-
-  function toggleModel(id: string, on: boolean) {
-    const next = on ? [...allowed, id] : [...allowed].filter((m) => m !== id);
-    void save({ allowedModels: next });
-  }
-
-  function addCustom(e: FormEvent) {
-    e.preventDefault();
-    const id = custom.trim();
-    if (!id || allowed.has(id)) return;
-    setCustom("");
-    void save({ allowedModels: [...allowed, id] }, `${id} allowed`);
   }
 
   async function onRemove() {
@@ -295,59 +269,12 @@ function ProviderCard({
             </span>
           </div>
 
-          <div className="grid gap-1.5">
-            <span className="font-medium text-[11px] text-muted-foreground uppercase tracking-wider">
-              Allowed models
-            </span>
-            <ul className="grid gap-1 sm:grid-cols-2">
-              {entry.models.map((m) => (
-                <li key={m.id}>
-                  <div className="flex items-center justify-between gap-3 rounded-lg border bg-background px-3 py-2">
-                    <span className="min-w-0">
-                      <span className="block truncate font-medium text-[13px]">{m.label}</span>
-                      <span className="block truncate text-muted-foreground text-xs">{m.hint}</span>
-                    </span>
-                    <Switch
-                      checked={allowed.has(m.id)}
-                      onCheckedChange={(v) => toggleModel(m.id, v)}
-                      aria-label={`Allow ${m.label}`}
-                      data-testid={`allow-${m.id}`}
-                    />
-                  </div>
-                </li>
-              ))}
-              {extra.map((id) => (
-                <li key={id}>
-                  <div className="flex items-center justify-between gap-3 rounded-lg border bg-background px-3 py-2">
-                    <span className="min-w-0">
-                      <span className="block truncate font-medium font-mono text-[12.5px]">{id}</span>
-                      <span className="block text-muted-foreground text-xs">Custom model</span>
-                    </span>
-                    <Button
-                      variant="ghost"
-                      size="icon-xs"
-                      aria-label={`Remove ${id}`}
-                      onClick={() => toggleModel(id, false)}
-                    >
-                      <X />
-                    </Button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-            <form onSubmit={addCustom} className="mt-1 flex gap-2">
-              <Input
-                value={custom}
-                onChange={(e) => setCustom(e.target.value)}
-                placeholder="Add a model id, e.g. claude-sonnet-5-5-20260901"
-                aria-label="Custom model id"
-                className="h-8 font-mono text-[12.5px]"
-              />
-              <Button type="submit" variant="outline" size="sm" disabled={!custom.trim()}>
-                <Plus /> Add
-              </Button>
-            </form>
-          </div>
+          <AllowedModels
+            entry={entry}
+            provider={provider}
+            onChange={(allowedModels, message) => void save({ allowedModels }, message)}
+            customPlaceholder="Add a model id, e.g. claude-sonnet-5-5-20260901"
+          />
         </div>
       ) : null}
     </section>

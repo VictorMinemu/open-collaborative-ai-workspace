@@ -12,7 +12,9 @@ import {
   ModelProvider,
   ModelProviderList,
   Ok,
+  ProviderAuthStatus,
   RotateCellTokenResponse,
+  type SubscriptionProviderKind,
   topic,
   type UpdateAgentRequest,
   type UpsertModelProviderRequest,
@@ -28,6 +30,7 @@ export const botKeys = {
   providers: ["model-providers"] as const,
   cell: ["agent-cell"] as const,
   channels: ["channels"] as const,
+  providerAuth: (provider: string) => ["provider-auth", provider] as const,
 };
 
 function noRetryOn4xx(failureCount: number, err: unknown): boolean {
@@ -130,6 +133,52 @@ export function useDeleteProvider() {
   });
 }
 
+// ---- subscription sign-in (ChatGPT via Codex; runs in the OpenClaw cell) ----
+
+/**
+ * Sign-in flow state (admin only; includes the one-time code while pending). Live through
+ * `provider.auth.updated` (see useBotsRealtime); polls as a fallback while a flow is active.
+ */
+export function useProviderAuth(provider: SubscriptionProviderKind, enabled = true) {
+  return useQuery({
+    enabled,
+    queryKey: botKeys.providerAuth(provider),
+    queryFn: ({ signal }) =>
+      api.get(`/api/v1/model-providers/${provider}/auth`, { schema: ProviderAuthStatus, signal }),
+    retry: noRetryOn4xx,
+    refetchInterval: (q) => {
+      const state = q.state.data?.state;
+      return state === "starting" || state === "pending" ? 4_000 : false;
+    },
+  });
+}
+
+function onAuthStatus(qc: QueryClient, status: ProviderAuthStatus) {
+  qc.setQueryData(botKeys.providerAuth(status.provider), status);
+  if (status.state === "connected" || status.state === "idle") {
+    void qc.invalidateQueries({ queryKey: botKeys.providers });
+    void qc.invalidateQueries({ queryKey: botKeys.models });
+  }
+}
+
+export function useStartProviderAuth(provider: SubscriptionProviderKind) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (opts: { restart?: boolean } = {}) =>
+      api.post(`/api/v1/model-providers/${provider}/auth`, { body: opts, schema: ProviderAuthStatus }),
+    onSuccess: (status) => onAuthStatus(qc, status),
+    onError: () => void qc.invalidateQueries({ queryKey: botKeys.providerAuth(provider) }),
+  });
+}
+
+export function useCancelProviderAuth(provider: SubscriptionProviderKind) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.del(`/api/v1/model-providers/${provider}/auth`, { schema: ProviderAuthStatus }),
+    onSuccess: (status) => onAuthStatus(qc, status),
+  });
+}
+
 // ---- bots runtime (OpenClaw cell) ----
 
 export function useCellStatus(enabled = true) {
@@ -188,7 +237,18 @@ export function useBotsRealtime() {
   const orgId = me.data?.organization.id ?? null;
   useTopic(orgId ? topic("org", orgId) : null, (frame) => {
     if (frame.op === "eph") {
-      if (frame.type === EphemeralTypes.cellPresence) void qc.invalidateQueries({ queryKey: botKeys.cell });
+      if (frame.type === EphemeralTypes.cellPresence) {
+        void qc.invalidateQueries({ queryKey: botKeys.cell });
+        void qc.invalidateQueries({ queryKey: ["provider-auth"] });
+      } else if (frame.type === EphemeralTypes.providerAuth) {
+        // Only {provider, state} travels on the socket; admins refetch the code over REST.
+        const data = frame.data as { provider?: string; state?: string } | null;
+        if (data?.provider) void qc.invalidateQueries({ queryKey: botKeys.providerAuth(data.provider) });
+        if (data?.state === "connected" || data?.state === "idle") {
+          void qc.invalidateQueries({ queryKey: botKeys.providers });
+          void qc.invalidateQueries({ queryKey: botKeys.models });
+        }
+      }
       return;
     }
     if (frame.op !== "ev") return;

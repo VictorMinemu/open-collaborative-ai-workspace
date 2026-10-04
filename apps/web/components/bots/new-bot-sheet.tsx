@@ -246,7 +246,7 @@ export function NoModels({ isAdmin, className }: { isAdmin: boolean; className?:
       <h3 className="font-semibold">Configure a model provider first</h3>
       <p className="mt-1 max-w-xs text-balance text-muted-foreground text-sm">
         {isAdmin
-          ? "Bots need a model. Add an API key for Anthropic, OpenAI or another provider."
+          ? "Bots need a model. Connect your ChatGPT subscription or add an API key for Anthropic, OpenAI or another provider."
           : "Bots need a model. Ask a workspace admin to add a model provider."}
       </p>
       {isAdmin ? (
