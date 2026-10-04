@@ -29,14 +29,6 @@
     "typescript": "7.0.2",
     "vitest": "5.0.2"
   },
-  "peerDependencies": {
-    "openclaw": "2026.9.7"
-  },
-  "peerDependenciesMeta": {
-    "openclaw": {
-      "optional": true
-    }
-  },
   "openclaw": {
     "extensions": [
       "./dist/index.js"
