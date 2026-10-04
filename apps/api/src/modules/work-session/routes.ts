@@ -26,7 +26,7 @@ import {
   workPrompts,
   workSessions,
 } from "@ocw/db";
-import { and, asc, desc, eq, max, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, lte, max, ne, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { type App, type AuthContext, authOf, type Core, tenant } from "../../core";
@@ -282,23 +282,31 @@ export function registerWorkSessionRoutes(
     { ...user, schema: { tags, params: SessionParams, response: { 200: WorkSessionDetail } } },
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
-        const session = await svc.session(tx, req.params.id);
-        if (!session) throw notFound("Work session not found");
-        const facts = await sessionFacts(tx, authOf(req), session);
+        const found = await svc.session(tx, req.params.id);
+        if (!found) throw notFound("Work session not found");
+        const facts = await sessionFacts(tx, authOf(req), found);
         await perms.assertCan(req, tx, "work_session.read", facts, { hideAs404: true });
         const viewerCan = await perms.viewerCan(req, tx, facts, SESSION_VIEWER_CAN);
-        const topic = wsTopic(session.id);
-        const [prompts, approvals, lastSeq, rows] = await Promise.all([
-          svc.prompts(tx, session.id),
-          svc.approvals(tx, session.id),
-          core.realtime.lastSeq(tx, topic),
-          tx
-            .select({ seq: streamEvents.seq, payload: streamEvents.payload })
-            .from(streamEvents)
-            .where(and(eq(streamEvents.streamId, topic), eq(streamEvents.type, "work_session.event")))
-            .orderBy(desc(streamEvents.seq))
-            .limit(EVENT_WINDOW),
-        ]);
+        const topic = wsTopic(found.id);
+        // Snapshot cut: read lastSeq FIRST, then state and only events up to it. Each statement sees its own
+        // snapshot, so an event committed in between would otherwise be both in `events` and replayed after
+        // `lastSeq` (rendered twice); anything newer than the cut arrives through the topic replay instead.
+        const lastSeq = await core.realtime.lastSeq(tx, topic);
+        const session = (await svc.session(tx, found.id)) ?? found;
+        const prompts = await svc.prompts(tx, session.id);
+        const approvals = await svc.approvals(tx, session.id);
+        const rows = await tx
+          .select({ seq: streamEvents.seq, payload: streamEvents.payload })
+          .from(streamEvents)
+          .where(
+            and(
+              eq(streamEvents.streamId, topic),
+              eq(streamEvents.type, "work_session.event"),
+              lte(streamEvents.seq, lastSeq),
+            ),
+          )
+          .orderBy(desc(streamEvents.seq))
+          .limit(EVENT_WINDOW);
         const events = rows
           .reverse()
           .map((r) => {
