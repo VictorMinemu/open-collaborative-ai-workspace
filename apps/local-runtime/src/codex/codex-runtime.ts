@@ -23,6 +23,7 @@ import {
   minMode,
   PermissionMode,
   type PromptPayload,
+  type RuntimeCatalog,
   type RuntimeInfo,
   type SessionEvent,
   type SessionSettingsPatch,
@@ -39,6 +40,7 @@ import {
   type StartSessionOptions,
 } from "../runtime.js";
 import { redact } from "../sanitize.js";
+import { collectCodexCatalog } from "./catalog.js";
 import { detectCodex } from "./detect.js";
 import type { ApplyPatchApprovalParams } from "./generated/ApplyPatchApprovalParams.js";
 import type { ExecCommandApprovalParams } from "./generated/ExecCommandApprovalParams.js";
@@ -64,6 +66,8 @@ import {
 import { type CodexPolicyMode, codexModePolicy, isUnrestrictedCodexPolicy } from "./mode-policy.js";
 
 export const CODEX_APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
+/** How long a collected `model/list` catalog is reused. */
+export const CODEX_CATALOG_TTL_MS = 10 * 60 * 1000;
 const STOP_GRACE_MS = 3_000;
 
 export interface AppServerProcess {
@@ -165,6 +169,8 @@ export class CodexRuntime implements AgentRuntime {
   private readonly log: Logger;
   private readonly codexPath: string | null;
   private readonly approvalTimeoutMs: number;
+  private catalogCache: { at: number; value: RuntimeCatalog } | null = null;
+  private catalogInFlight: Promise<RuntimeCatalog | null> | null = null;
 
   constructor(private readonly opts: CodexRuntimeOptions = {}) {
     this.log = opts.logger ?? silentLogger;
@@ -178,6 +184,39 @@ export class CodexRuntime implements AgentRuntime {
       ...(this.codexPath ? { codexPath: this.codexPath } : {}),
       useApiKey: this.opts.useApiKey ?? false,
     });
+  }
+
+  /**
+   * D-08: the models, efforts and fast tiers of the logged-in ChatGPT account, from `model/list` on a short-lived
+   * app-server (no thread, no turn). Cached for 10 minutes; null when Codex is missing, not signed in with
+   * ChatGPT, or the call fails.
+   */
+  async catalog(): Promise<RuntimeCatalog | null> {
+    if (this.catalogCache && Date.now() - this.catalogCache.at < CODEX_CATALOG_TTL_MS)
+      return this.catalogCache.value;
+    this.catalogInFlight ??= this.collectCatalog().finally(() => {
+      this.catalogInFlight = null;
+    });
+    return this.catalogInFlight;
+  }
+
+  private async collectCatalog(): Promise<RuntimeCatalog | null> {
+    try {
+      const info = await this.detect();
+      if (!info.installed || !info.loggedIn) return null;
+      const spawnFn: SpawnAppServer =
+        this.opts.spawnAppServer ?? (({ cwd, env }) => this.spawnReal(cwd, env));
+      const value = await collectCodexCatalog(spawnFn, {
+        env: codexChildEnv(process.env, this.opts.useApiKey ?? false),
+        runtimeVersion: info.version,
+        permissionModes: [...this.capabilities.supportsPermissionModes],
+      });
+      this.catalogCache = { at: Date.now(), value };
+      return value;
+    } catch (err) {
+      this.log.warn("codex catalog unavailable", { error: redact(errorMessage(err)) });
+      return null;
+    }
   }
 
   async start(options: StartSessionOptions, sink: EventSink): Promise<void> {

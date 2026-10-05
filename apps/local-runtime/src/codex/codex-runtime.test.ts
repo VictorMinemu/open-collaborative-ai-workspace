@@ -737,9 +737,9 @@ describe("CodexRuntime — recorded Supervised write (codex-cli 0.160.0, read-on
 
 // ------------------------------------------------------------------------------------------------
 
-const MODEL_LIST = JSON.parse(
-  readFileSync(join(FIXTURE_DIR, "codex-0.160.0.model-list.json"), "utf8"),
-) as { data: unknown[] };
+const MODEL_LIST = JSON.parse(readFileSync(join(FIXTURE_DIR, "codex-0.160.0.model-list.json"), "utf8")) as {
+  data: unknown[];
+};
 
 /** Fake app-server for catalog collection: model/list served in pages of 3 from the recorded list. */
 class CatalogAppServer extends FakeAppServer {
@@ -762,7 +762,12 @@ describe("CodexRuntime.catalog() — model/list without a thread (D-08)", () => 
   const make = (opts: { loggedIn?: boolean; fail?: boolean } = {}) => {
     const servers: CatalogAppServer[] = [];
     const runtime = new CodexRuntime({
-      detect: async () => ({ id: "codex", installed: true, version: "0.160.0", loggedIn: opts.loggedIn ?? true }),
+      detect: async () => ({
+        id: "codex",
+        installed: true,
+        version: "0.160.0",
+        loggedIn: opts.loggedIn ?? true,
+      }),
       spawnAppServer: ({ env }) => {
         const s = new CatalogAppServer(env);
         s.failList = opts.fail ?? false;
