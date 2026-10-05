@@ -226,6 +226,19 @@ describe("createClawhubClient (D-14, P-B6)", () => {
     );
   });
 
+  it("refresh: true asks ClawHub even with a fresh copy, and falls back to the copy during an outage", async () => {
+    const cache = memoryCache();
+    const client = createClawhubClient({ baseUrl, cache });
+    await client.versionDetail("@ocw-test/notes-plugin", "1.0.0");
+    const refreshed = await client.versionDetail("@ocw-test/notes-plugin", "1.0.0", { refresh: true });
+    expect(refreshed.source).toBe("live");
+    expect(fake.requests).toHaveLength(2);
+    fake.setOutage({ status: 500 });
+    const fallback = await client.versionDetail("@ocw-test/notes-plugin", "1.0.0", { refresh: true });
+    expect(fallback.source).toBe("cache");
+    expect(fallback.detail.version).toBe("1.0.0");
+  });
+
   it("a response slower than the timeout raises MarketplaceUnavailableError (default 8 s)", async () => {
     expect(CLAWHUB_TIMEOUT_MS).toBe(8000);
     const client = createClawhubClient({ baseUrl, cache: memoryCache(), timeoutMs: 150 });

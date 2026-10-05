@@ -9,7 +9,8 @@ import { canonicalSurface } from "./risk";
  * fixed user agent and nothing that identifies the organization or the user (no cookies, no authorization, no
  * ids in the URL beyond the package, version and search terms). Responses are parsed leniently (unknown fields
  * ignored, wrong-typed optional fields dropped) and cached: fresh for 10 minutes, kept for a day as a fallback
- * while ClawHub is unreachable. Approvals read live (`live: true`) and never accept stale data.
+ * while ClawHub is unreachable. Reviews ask ClawHub first (`refresh`), approvals read live (`live`) and never
+ * accept a cached copy.
  *
  * Paths: `/api/v1/packages/search` (text search), `/api/v1/plugins` (browse) and
  * `/api/v1/packages/{name}/detail?version=` — the single request OpenClaw 2026.9.5+ itself uses for a release's
@@ -111,7 +112,8 @@ export interface ClawhubClient {
   versionDetail(
     name: string,
     version?: string,
-    opts?: { live?: boolean },
+    /** `refresh`: ask ClawHub first, a cached copy only during an outage (reviews); `live`: never cached (approvals). */
+    opts?: { live?: boolean; refresh?: boolean },
   ): Promise<{ detail: ClawhubVersionDetail; source: "live" | "cache" }>;
   /** Download URL of a release's npm-pack artifact, always on the configured origin. */
   artifactUrl(name: string, version: string): string;
@@ -392,15 +394,18 @@ export function createClawhubClient(deps: {
     }
   }
 
-  /** Cached GET + parse. The parsed value is cached, so a malformed answer is never stored. */
+  /**
+   * Cached GET + parse (the parsed value is cached, so a malformed answer is never stored). `cached`: a fresh
+   * copy wins; `refresh`: always ask ClawHub, fall back to any copy during an outage; `live`: ClawHub or an error.
+   */
   async function get<T>(
     url: URL,
     parse: (body: unknown) => T,
-    live: boolean,
+    mode: "cached" | "refresh" | "live",
   ): Promise<{ value: T; source: "live" | "cache" }> {
     const key = `ocw:clawhub:${createHash("sha256").update(url.toString()).digest("hex").slice(0, 40)}`;
     let cached: { at: number; value: T } | null = null;
-    if (cache && !live) {
+    if (cache && mode !== "live") {
       const raw = await cache.get(key).catch(() => null);
       if (raw) {
         try {
@@ -409,7 +414,7 @@ export function createClawhubClient(deps: {
           cached = null;
         }
       }
-      if (cached && now() - cached.at < CLAWHUB_FRESH_SECONDS * 1000)
+      if (mode === "cached" && cached && now() - cached.at < CLAWHUB_FRESH_SECONDS * 1000)
         return { value: cached.value, source: "cache" };
     }
     try {
@@ -444,7 +449,7 @@ export function createClawhubClient(deps: {
               throw new MarketplaceUnavailableError("malformed", "Unexpected ClawHub search answer");
             return parsed.data.results.map((r) => parsePackage(r.package)).filter((p) => p !== null);
           },
-          false,
+          "cached",
         );
         return { packages: value, nextCursor: null, source };
       }
@@ -464,7 +469,7 @@ export function createClawhubClient(deps: {
             nextCursor: parsed.data.nextCursor ?? null,
           };
         },
-        false,
+        "cached",
       );
       return { ...value, source };
     },
@@ -479,7 +484,7 @@ export function createClawhubClient(deps: {
             throw new MarketplaceUnavailableError("malformed", "Unexpected ClawHub package answer");
           return toDetail(parsed.data, version);
         },
-        opts.live === true,
+        opts.live ? "live" : opts.refresh ? "refresh" : "cached",
       );
       return { detail: value, source };
     },
