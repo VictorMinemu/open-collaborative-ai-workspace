@@ -1,9 +1,11 @@
 "use client";
 
 import {
+  Agent,
   BotCapabilityView,
   BotGovernanceList,
-  BotPolicy,
+  BotPolicyView,
+  Ok,
   type UpdateBotCapabilitiesRequest,
   type UpdateBotPolicyRequest,
 } from "@ocw/contracts";
@@ -73,7 +75,7 @@ export function useBotPolicy(enabled = true) {
   return useQuery({
     enabled,
     queryKey: capabilityKeys.policy,
-    queryFn: ({ signal }) => api.get("/api/v1/bot-policy", { schema: BotPolicy, signal }),
+    queryFn: ({ signal }) => api.get("/api/v1/bot-policy", { schema: BotPolicyView, signal }),
     retry: noRetryOn4xx,
   });
 }
@@ -82,7 +84,8 @@ export function useBotPolicy(enabled = true) {
 export function useUpdateBotPolicy() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: UpdateBotPolicyRequest) => api.put("/api/v1/bot-policy", { body, schema: BotPolicy }),
+    mutationFn: (body: UpdateBotPolicyRequest) =>
+      api.put("/api/v1/bot-policy", { body, schema: BotPolicyView }),
     onSuccess: (policy) => {
       qc.setQueryData(capabilityKeys.policy, policy);
       void qc.invalidateQueries({ queryKey: capabilityKeys.all });
@@ -98,5 +101,25 @@ export function useBotGovernance(enabled = true) {
     queryKey: capabilityKeys.governance,
     queryFn: ({ signal }) => api.get("/api/v1/bot-governance", { schema: BotGovernanceList, signal }),
     retry: noRetryOn4xx,
+  });
+}
+
+/**
+ * Governance actions on someone else's personal bot (03.1-02 routes): switch it off / on or delete it. Never
+ * touches the caller's own bots cache: the admin does not "have" these bots, the governance list refetches.
+ */
+export function useGovernBot() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (action: { id: string; kind: "disable" | "enable" | "delete" }): Promise<void> => {
+      if (action.kind === "delete") await api.del(`/api/v1/agents/${action.id}`, { schema: Ok });
+      else {
+        await api.patch(`/api/v1/agents/${action.id}`, {
+          body: { enabled: action.kind === "enable" },
+          schema: Agent,
+        });
+      }
+    },
+    onSettled: () => void qc.invalidateQueries({ queryKey: capabilityKeys.governance }),
   });
 }
