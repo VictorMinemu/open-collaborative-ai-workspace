@@ -26,11 +26,13 @@ import { applyCellStatus, cellAgents, cellProviders, cellSubscriptions, findAgen
 import { cellAgentCapabilities, loadPolicy } from "../bot-capabilities";
 import { cellMcpServers } from "../mcp";
 import { channelResource, createPermissionService, type ResourceFacts } from "../organization";
+import { cellApprovedPlugins } from "../plugins";
 import { cellOf, createCellAuth } from "./auth";
 import { registerCellGateway } from "./gateway";
 import { registerMcpCellRoutes } from "./mcp";
 import { registerMemoryRoutes } from "./memories";
 import { registerMentionHandler } from "./mentions";
+import { registerPluginCellRoutes } from "./plugins";
 import { createCellPresence } from "./presence";
 import { createProviderAuth } from "./provider-auth";
 import { registerToolCallRoutes } from "./tool-calls";
@@ -265,6 +267,8 @@ export function createAgentChannelModule(core: Core): ApiModule {
                   }));
                   // MCP servers (D-13): header values are revealed only here, for this authenticated cell.
                   const mcpServers = await cellMcpServers(core, tx);
+                  // Marketplace plugins (D-14): the approved tuples the cell's executor may act on.
+                  const plugins = await cellApprovedPlugins(tx);
                   await core.audit.record(tx, {
                     action: "agent_cell.config_read",
                     resourceType: "agent_cell",
@@ -277,6 +281,7 @@ export function createAgentChannelModule(core: Core): ApiModule {
                       providers: providers.map((p) => p.id),
                       subscriptions: subscriptions.map((p) => p.id),
                       mcpServers: mcpServers.map((s) => s.id),
+                      plugins: plugins.map((p) => p.pluginRowId),
                       credential: cell.source,
                     },
                   });
@@ -291,8 +296,7 @@ export function createAgentChannelModule(core: Core): ApiModule {
                     subscriptions,
                     webSearch: { provider: policy.searchProvider },
                     mcpServers,
-                    // Approved marketplace plugins (D-14): wired here by 03.1-12 (cell executor).
-                    plugins: [] as CellSnapshot["plugins"],
+                    plugins,
                   } as const;
                 },
               );
@@ -442,6 +446,8 @@ export function createAgentChannelModule(core: Core): ApiModule {
           registerMemoryRoutes(scope, core, perms);
           // The cell's MCP tool discovery (D-13): probe reports → the tool catalog.
           registerMcpCellRoutes(scope, core);
+          // The cell's marketplace executor and install gate (D-14).
+          registerPluginCellRoutes(scope, core);
 
           scope.post(
             "/agents/:id/status",

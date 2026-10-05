@@ -302,6 +302,43 @@ export const AgentChannelPluginReport = z.object({
 });
 export type AgentChannelPluginReport = z.infer<typeof AgentChannelPluginReport>;
 
+/**
+ * `POST /agent-channel/v1/plugins/verify-install` (03.1-12): the cell's install gate (OpenClaw
+ * `security.installPolicy` exec) asks the API whether exactly this staged artifact belongs to an admin-approved
+ * install in flight. `sha256` is the hex digest the gate computed itself over the staged npm-pack archive; the API
+ * approves only a row of this organization in status `installing` with the same package, version and digest.
+ * Every other answer (and any error) blocks the install.
+ */
+export const AgentChannelPluginVerifyInstall = z.object({
+  packageName: z.string().min(1).max(214),
+  version: z.string().min(1).max(64),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/u),
+});
+export type AgentChannelPluginVerifyInstall = z.infer<typeof AgentChannelPluginVerifyInstall>;
+
+export const AgentChannelPluginVerifyInstallResponse = z.object({
+  approved: z.boolean(),
+  /** Why it was refused (`not_approved`, `version_mismatch`, `digest_mismatch`, `not_in_flight`); null when approved. */
+  reason: z.string().nullable(),
+});
+export type AgentChannelPluginVerifyInstallResponse = z.infer<typeof AgentChannelPluginVerifyInstallResponse>;
+
+/**
+ * `GET /agent-channel/v1/plugins` (03.1-12): the organization's marketplace plugins as the cell boot needs them
+ * (the entrypoint re-adds `installed` ids to the restrictive `plugins.allow`). No digests, no secrets.
+ */
+export const AgentChannelPluginList = z.object({
+  plugins: z.array(
+    z.object({
+      pluginId: z.string(),
+      packageName: z.string(),
+      version: z.string(),
+      status: z.enum(["installing", "installed", "uninstalling"]),
+    }),
+  ),
+});
+export type AgentChannelPluginList = z.infer<typeof AgentChannelPluginList>;
+
 // ---------------------------------------------------------------- WebSocket frames (GET /ws)
 
 /**

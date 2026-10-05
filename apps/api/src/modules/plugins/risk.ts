@@ -365,6 +365,35 @@ export function scorePluginRisk(input: RiskInput): RiskVerdict {
   return { risk, reasons: sorted.map(({ code, message }) => ({ code, message })) };
 }
 
+// ---------------------------------------------------------------- what the cell reported (03.1-12)
+
+/** Reason codes that refuse a version because of its declared surface (never trust, digest or compatibility). */
+const SURFACE_REFUSALS = new Set([
+  "channel_bypass",
+  "dangerous_tool",
+  "bundled_mcp",
+  "memory_slot",
+  ...Object.values(REFUSED_FAMILIES).map((r) => r.code),
+]);
+
+/**
+ * Re-scores what an installed plugin actually declares (the cell's `plugins inspect`, untrusted) with neutral trust,
+ * digest and compatibility inputs, so only the surface itself can refuse it. Returns the refusing reasons (empty =
+ * acceptable). The install was already gated by the reviewed surface; this catches a plugin whose real manifest or
+ * runtime registrations differ from what ClawHub published (T-03.1-12-03).
+ */
+export function refusedReportedSurface(declared: DeclaredSurface, channel: PluginChannel): RiskReason[] {
+  const verdict = scorePluginRisk({
+    channel,
+    publisherOfficial: true,
+    verificationTier: "source-linked",
+    scan: { status: "clean", blockedFromDownload: false, pending: false },
+    compatibility: { minGatewayVersion: OPENCLAW_HOST_VERSION, pluginApiRange: null },
+    declared,
+  });
+  return verdict.reasons.filter((r) => SURFACE_REFUSALS.has(r.code));
+}
+
 // ---------------------------------------------------------------- review binding
 
 const SURFACE_KEYS = [

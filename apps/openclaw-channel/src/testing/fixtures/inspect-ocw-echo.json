@@ -1,0 +1,59 @@
+{
+  "$comment": "Trimmed `openclaw plugins inspect <id> --runtime --json` of OpenClaw 2026.9.7 (host CLI from the ocw-openclaw:local image, 03.1-12 spike).",
+  "plugin": {
+    "id": "ocw-echo",
+    "name": "OCW Echo (test fixture)",
+    "version": "0.1.0",
+    "packageName": "@ocw-test/echo-plugin",
+    "packageVersion": "0.1.0",
+    "status": "loaded",
+    "enabled": true,
+    "origin": "global",
+    "format": "openclaw",
+    "contracts": {
+      "tools": ["ocw_echo"]
+    },
+    "toolNames": ["ocw_echo"],
+    "hookNames": [],
+    "channelIds": [],
+    "providerIds": [],
+    "webSearchProviderIds": [],
+    "webFetchProviderIds": [],
+    "cliBackendIds": [],
+    "cliCommands": [],
+    "commands": [],
+    "services": [],
+    "httpRoutes": 0,
+    "gatewayDiscoveryServiceIds": []
+  },
+  "shape": "non-capability",
+  "capabilityMode": "none",
+  "capabilities": [],
+  "typedHooks": [],
+  "customHooks": [],
+  "tools": [
+    {
+      "names": ["ocw_echo"],
+      "optional": false
+    }
+  ],
+  "commands": [],
+  "cliCommands": [],
+  "services": [],
+  "gatewayDiscoveryServices": [],
+  "gatewayMethods": [],
+  "mcpServers": [],
+  "httpRouteCount": 0,
+  "policy": {
+    "allowedModels": [],
+    "hasAllowedModelsConfig": false
+  },
+  "install": {
+    "source": "npm",
+    "spec": "@ocw-test/echo-plugin@0.1.0",
+    "version": "0.1.0",
+    "resolvedName": "@ocw-test/echo-plugin",
+    "resolvedVersion": "0.1.0",
+    "integrity": "sha512-sQYCen7Fl90ujlxlUY775K5GRAbVPLIT7sHMD9WgdgnkeM+0QCrkC1E5FcvG3hVisVD7+uTvFCkFxY1fAek+AA=="
+  }
+}

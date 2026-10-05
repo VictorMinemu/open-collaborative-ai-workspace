@@ -16,19 +16,25 @@ export {
   canonicalSurface,
   compatibilityOf,
   OPENCLAW_HOST_VERSION,
+  refusedReportedSurface,
   reviewTokenOf,
   scorePluginRisk,
 } from "./risk";
 export {
   approveInstall,
   buildVersionReview,
+  type CellActor,
+  cellApprovedPlugins,
+  cellPluginList,
   getCellPlugin,
   listCellPlugins,
   type PluginsDeps,
   packageDetail,
+  recordPluginReport,
   searchMarketplace,
   uninstallCellPlugin,
   updateCellPlugin,
+  verifyInstall,
 } from "./service";
 
 /**

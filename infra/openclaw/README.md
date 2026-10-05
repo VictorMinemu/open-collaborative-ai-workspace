@@ -1,7 +1,8 @@
 # OpenClaw cell (`infra/openclaw`)
 
 This is the official `ghcr.io/openclaw/openclaw:2026.9.7-slim` image (pinned by digest), plus
-`apps/openclaw-channel`, the pinned official keyless search plugins and a locked-down base config. `entrypoint.mjs` renders that base config
+`apps/openclaw-channel`, the pinned official keyless search plugins, the marketplace install gate
+(`install-policy.mjs`) and a locked-down base config. `entrypoint.mjs` renders that base config
 with `render-config.mjs`, then hands over to the image's own entrypoint (`doctor --fix`, then the
 gateway).
 
@@ -104,6 +105,67 @@ API so it knows whether internet is `configured`. A bundled plugin whose directo
 `[ocw-cell] bundled plugin <id> missing from the image; skipped`, and the cell boots without it; if it was
 SearXNG the provider falls back to DuckDuckGo.
 
+## Marketplace plugins (03.1-12, D-14)
+
+Admins approve exact, pinned ClawHub versions in the API (Settings › Marketplace, 03.1-11/13). The cell then runs
+them, and nothing else:
+
+1. **Executor** (`apps/openclaw-channel/src/plugin-installer.ts`, one at a time). `plugin.install.v1` must match a
+   row of the last `GET /cell` `plugins` list (package, version, sha256, plugin id). The executor downloads
+   `artifactUrl` only from `OCW_CLAWHUB_URL` (no redirects, 50 MB, 60 s) into a private temp file and checks the
+   approved sha256, the npm integrity and ClawHub's digest header. It then runs
+   `openclaw plugins install npm-pack:<file> --force --accept-capabilities` as an argv array (120 s), applied
+   through the running gateway. `plugins inspect <id> --runtime --json` must show the approved id, version and
+   integrity, otherwise the plugin is removed again. Hook restrictions are written and the declared surface is
+   reported to `POST /agent-channel/v1/plugins/report`. `plugin.uninstall.v1` runs
+   `openclaw plugins uninstall <id> --force`. Every child process gets `CLAWHUB_DISABLE_TELEMETRY=1`.
+2. **Install gate** (`install-policy.mjs`, OpenClaw's `security.installPolicy` exec, `targets: ["plugin"]`). OpenClaw
+   runs it after staging and before committing *every* plugin install or update, CLI or Gateway, and fails closed
+   on anything but a well-formed `allow`. It accepts only `npm-pack:<absolute path>` sources. It re-hashes that
+   archive itself, reads the package name and version from the archive's own `package.json` and cross-checks
+   them with what OpenClaw says it installs. Then it asks `POST /agent-channel/v1/plugins/verify-install` with the
+   cell token (5 s). Only `200 {approved: true}` allows, and the API says so only for a row in status
+   `installing` with the same package, version and sha256. An unreachable or slow API, a refusal, a missing token,
+   a `clawhub:`/`npm:`/`git:`/path source: **block**. It never reads local state. The command is the gateway's
+   own node binary, and the script is `/opt/ocw/install-policy.mjs` (root-owned, `0644`). OpenClaw checks both
+   against `trustedDirs` and refuses group- or world-writable files, other owners and symlinks.
+3. **Boot.** `openclaw.json` is re-rendered every boot, but OpenClaw keeps install records (SQLite machine state)
+   and package roots (`<state>/npm/projects/…`) in the state volume. The entrypoint asks
+   `GET /agent-channel/v1/plugins` (cell token, 5 s) and re-adds the installed ids to `plugins.allow` with
+   `plugins.entries.<id>.hooks {allowConversationAccess: false, allowPromptInjection: false}`. Only when the API is
+   unreachable does it use the plugin-written boot cache `<state>/ocw-plugins.json`, and it logs one line. That
+   cache can only re-enable plugins already on disk and is never used to approve an install.
+4. **API side.** The report re-scores what the cell inspected. A refused surface (channels, dangerous tools,
+   gateway methods, tool-result middleware, …), a plugin id or version other than the approved one, or a tool
+   named like a built-in rejects the plugin (`failed` + `plugin.uninstall.v1`). Accepted tools become per-bot
+   capabilities (BOT-10). They are always side-effecting for the taint rule and always pass the call-time tool
+   gate.
+
+**Trust model and residual risk (T-03.1-12-10, ADR-0011).** A native plugin runs **in-process** with the gateway:
+it can read the gateway env (provider keys, gateway token), the cell token file and the state dir (sign-ins,
+transcripts). The tool policy limits what the model can call. It does not contain plugin code. What limits the
+risk:
+- official-only by default; community plugins need an explicit high-risk acknowledgement and are never for
+  personal bots by default;
+- refuse-level scoring, both at review and after install;
+- pinned digests;
+- the API-authoritative gate;
+- hook restrictions;
+- auto-update off (`OPENCLAW_NO_AUTO_UPDATE=1`, `update.checkOnStart: false`);
+- Control UI off;
+- loopback-only gateway.
+
+A separate cell or a sandboxed plugin host per trust level is the recorded future option.
+
+**Updating a plugin.** Updates are manual. The admin opens the new version, reviews it (a grown surface needs a
+fresh review) and approves it. The API sends `plugin.install.v1` with `mode: "update"` and the new digest. The
+executor reinstalls through the same gate (`--force` replaces the previous version only after the gate allowed
+the new one).
+
+**npm without registry egress.** OpenClaw plans each plugin's `openclaw` peer with npm against the registry. A
+cell without registry access would wait about 8 minutes per install on npm's default retries. The entrypoint
+therefore sets `npm_config_fetch_retries=1` and short retry and fetch timeouts unless the operator set their own.
+
 ## Env
 
 | Variable | Notes |
@@ -113,6 +175,7 @@ SearXNG the provider falls back to DuckDuckGo.
 | `NODE_OPTIONS` | compose default `--max-old-space-size=512` (see Memory) |
 | `OCW_BUNDLED_PLUGINS` | bundled search plugins to load: default `duckduckgo,searxng`, `none` disables both |
 | `OCW_SEARXNG_URL` | SearXNG base URL as seen from the cell (`http://searxng:8080` with the `search` profile) |
+| `OCW_CLAWHUB_URL` | the only origin marketplace artifacts are downloaded from (default `https://clawhub.ai`; same value as the API) |
 
 ## Memory
 
@@ -127,7 +190,7 @@ During a turn the gateway uses about 1.1–1.2 GB RSS; at idle it uses about 0.8
 ## Test
 
 ```bash
-node --test 'infra/**/*.test.mjs'                 # renderer + fake model
+node --test 'infra/**/*.test.mjs'                 # renderer, install gate, plugin lock, fake model
 pnpm --filter @ocw/openclaw-channel build
 infra/openclaw/test/run-container-smoke.sh        # real OpenClaw + plugin + fake model + fake API, internal network
 ```
@@ -141,4 +204,26 @@ the fake SearXNG, the fake API records the call and its result; internet off: `[
 (two humans' DMs with one bot never share a prompt; deleting the bot leaves no transcript in the state volume),
 `memory` and `mcp` (the fake MCP behind a bearer token: probe through the cell, `${OCW_MCP_…}` in the rendered
 config and never the token, only the enabled tool offered, a gated and audited `echo`, the tool filter re-rendered
-when the admin enables `write_note`, and `write_note` blocked by the taint rule after `echo` in the same turn).
+when the admin enables `write_note`, and `write_note` blocked by the taint rule after `echo` in the same turn), and
+`marketplace`. That scenario runs with `OCW_BUNDLED_PLUGINS=searxng` and `OCW_CLAWHUB_URL` pointing at the fake
+ClawHub on the fake model. The fake ClawHub serves the `npm pack` of the pinned official
+`@openclaw/duckduckgo-plugin@2026.9.7` (sha512 checked against `bundled-plugins.json`) and the test-only
+`test/fixtures/ocw-echo-plugin`. The scenario proves that:
+- DuckDuckGo is installed through the executor and the gate, `enabled` in `openclaw plugins list` and restricted
+  in the config;
+- a manual `openclaw plugins install` with the gateway's own environment is blocked, also after the test forges
+  the local cache, and with the API paused even for a tuple in flight (fail closed);
+- the plugin is re-allowed after `docker restart` of the smoke cell from `GET /plugins`;
+- `ocw-echo` is installed and a bot calls `ocw_echo` in a conversation through the tool gate
+  (`echo marketplace`);
+- after uninstall a turn that still lists `ocw_echo` gets `Tool ocw_echo not offered`;
+- DuckDuckGo is uninstalled.
+
+The script `docker cp`s the working-tree `install-policy.mjs` into a reused image instead of bind-mounting it:
+OpenClaw refuses a policy script owned by the runner's uid.
+
+The plugin's runtime dependencies are installed with `npm ci` from `plugin-runtime/package-lock.json` (in the image
+and in the smoke's plugin copy). `dependencies` there must equal `apps/openclaw-channel/package.json`, and
+`overrides` keep transitive versions on the ones `pnpm-lock.yaml` resolved (`plugin-runtime.test.mjs`). To change a
+plugin dependency, edit both manifests, then regenerate the lock with
+`npm install --package-lock-only --ignore-scripts --legacy-peer-deps` in `infra/openclaw/plugin-runtime`.

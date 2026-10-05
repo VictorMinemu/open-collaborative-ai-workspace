@@ -3,6 +3,7 @@ import {
   type AgentChannelMcpProbeResult,
   type AgentChannelMemorySave,
   AgentChannelMemorySaveResponse,
+  type AgentChannelPluginReport,
   type AgentChannelPostMessage,
   AgentChannelPostMessageResponse,
   type AgentChannelProviderAuthReport,
@@ -179,6 +180,14 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
      */
     async reportMcpProbe(report: AgentChannelMcpProbeResult, signal?: AbortSignal): Promise<void> {
       await request("POST", "/mcp/probe-results", report, signal, 3);
+    },
+    /**
+     * A marketplace install / uninstall outcome (D-14). Three attempts at most: the API applies a report only to the
+     * row's current flow, so a retried report is harmless. Throws AgentChannelHttpError on a refusal (404 unknown
+     * flow, 409 wrong state).
+     */
+    async reportPlugin(report: AgentChannelPluginReport, signal?: AbortSignal): Promise<void> {
+      await request("POST", "/plugins/report", report, signal, 3);
     },
     /** `ws(s)://…/agent-channel/v1/ws` */
     wsUrl(): string {

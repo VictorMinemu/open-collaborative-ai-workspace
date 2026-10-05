@@ -1,0 +1,59 @@
+{
+  "$comment": "Trimmed `openclaw plugins inspect <id> --runtime --json` of OpenClaw 2026.9.7 (host CLI from the ocw-openclaw:local image, 03.1-12 spike).",
+  "plugin": {
+    "id": "duckduckgo",
+    "name": "@openclaw/duckduckgo-plugin",
+    "version": "2026.9.7",
+    "packageName": "@openclaw/duckduckgo-plugin",
+    "packageVersion": "2026.9.7",
+    "status": "loaded",
+    "enabled": true,
+    "origin": "global",
+    "format": "openclaw",
+    "contracts": {
+      "webSearchProviders": ["duckduckgo"]
+    },
+    "toolNames": [],
+    "hookNames": [],
+    "channelIds": [],
+    "providerIds": [],
+    "webSearchProviderIds": ["duckduckgo"],
+    "webFetchProviderIds": [],
+    "cliBackendIds": [],
+    "cliCommands": [],
+    "commands": [],
+    "services": [],
+    "httpRoutes": 0,
+    "gatewayDiscoveryServiceIds": []
+  },
+  "shape": "plain-capability",
+  "capabilityMode": "plain",
+  "capabilities": [
+    {
+      "kind": "web-search",
+      "ids": ["duckduckgo"]
+    }
+  ],
+  "typedHooks": [],
+  "customHooks": [],
+  "tools": [],
+  "commands": [],
+  "cliCommands": [],
+  "services": [],
+  "gatewayDiscoveryServices": [],
+  "gatewayMethods": [],
+  "mcpServers": [],
+  "httpRouteCount": 0,
+  "policy": {
+    "allowedModels": [],
+    "hasAllowedModelsConfig": false
+  },
+  "install": {
+    "source": "npm",
+    "spec": "@openclaw/duckduckgo-plugin@2026.9.7",
+    "version": "2026.9.7",
+    "resolvedName": "@openclaw/duckduckgo-plugin",
+    "resolvedVersion": "2026.9.7",
+    "integrity": "sha512-0nFG39zPogQOGbffFwxf1rdw3Th/w6bvqSifvhBUpCHNpjv4IJLKQGGolO/XWBcdL3sJ2UYJl6qWVKs4aRR2aA=="
+  }
+}
