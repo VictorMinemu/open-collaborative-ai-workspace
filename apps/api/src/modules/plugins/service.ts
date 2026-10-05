@@ -1,12 +1,19 @@
 import { randomUUID } from "node:crypto";
 import {
   AgentChannelEventTypes,
+  type AgentChannelPluginList,
+  type AgentChannelPluginReport,
+  type AgentChannelPluginVerifyInstall,
+  type AgentChannelPluginVerifyInstallResponse,
   type ApprovePluginInstallRequest,
+  BUILTIN_TOOLS,
+  type CellApprovedPlugin,
   type CellPlugin,
   CellPluginStatus,
   cellTopic,
   type DeclaredSurface,
   DeclaredSurface as DeclaredSurfaceSchema,
+  EMPTY_DECLARED_SURFACE,
   type MarketplaceEntry,
   type MarketplacePackageDetail,
   type MarketplaceSearchQuery,
@@ -16,7 +23,7 @@ import {
   type UpdateCellPluginRequest,
 } from "@ocw/contracts";
 import { botToolGrants, cellPlugins, cellPluginTools, type TenantCtx, type Tx, tenantOf } from "@ocw/db";
-import { and, asc, eq, ne } from "drizzle-orm";
+import { and, asc, eq, inArray, ne, notInArray } from "drizzle-orm";
 import { z } from "zod";
 import type { Core } from "../../core";
 import { conflict, HttpError, notFound } from "../../lib/errors";
@@ -28,7 +35,14 @@ import {
   MarketplaceNotFoundError,
   MarketplaceUnavailableError,
 } from "./clawhub";
-import { bundledPluginIds, compatibilityOf, reviewTokenOf, scorePluginRisk } from "./risk";
+import {
+  bundledPluginIds,
+  canonicalSurface,
+  compatibilityOf,
+  refusedReportedSurface,
+  reviewTokenOf,
+  scorePluginRisk,
+} from "./risk";
 
 /**
  * Marketplace service (D-14, BOT-09, BOT-10). ClawHub is called OUTSIDE database transactions (a slow registry
@@ -611,4 +625,315 @@ export async function uninstallCellPlugin(
     }
     return getCellPlugin(tx, id);
   });
+}
+
+// ---------------------------------------------------------------- the cell's side (03.1-12)
+
+/** Who acts for the audit rows of the cell's plugin routes (the cell principal, never a human). */
+export interface CellActor {
+  sessionId: string;
+}
+
+/** Statuses the cell sees in `GET /cell`: in flight, installed, being removed, or rejected (still to remove). */
+const CELL_VISIBLE = ["installing", "installed", "uninstalling", "failed"] as const;
+
+/** `GET /cell` `plugins`: the approved tuples the cell's executor may act on (D-14). */
+export async function cellApprovedPlugins(tx: Tx): Promise<CellApprovedPlugin[]> {
+  const rows = await tx
+    .select()
+    .from(cellPlugins)
+    .where(inArray(cellPlugins.status, [...CELL_VISIBLE]))
+    .orderBy(asc(cellPlugins.packageName));
+  return rows.map((r) => ({
+    pluginRowId: r.id,
+    packageName: r.packageName,
+    version: r.version,
+    sha256: r.artifactSha256,
+    pluginId: r.pluginId,
+    status: r.status,
+  }));
+}
+
+/** `GET /agent-channel/v1/plugins`: what the boot render re-allows (installed ids); no digest, no secret. */
+export async function cellPluginList(tx: Tx): Promise<AgentChannelPluginList> {
+  const rows = await tx
+    .select()
+    .from(cellPlugins)
+    .where(inArray(cellPlugins.status, ["installing", "installed", "uninstalling"]))
+    .orderBy(asc(cellPlugins.packageName));
+  return {
+    plugins: rows.flatMap((r) =>
+      r.pluginId && (r.status === "installing" || r.status === "installed" || r.status === "uninstalling")
+        ? [{ pluginId: r.pluginId, packageName: r.packageName, version: r.version, status: r.status }]
+        : [],
+    ),
+  };
+}
+
+/**
+ * The install gate's question (`POST /agent-channel/v1/plugins/verify-install`): is exactly this staged artifact an
+ * admin-approved install in flight? Only a row of this organization (RLS) in status `installing` with the same
+ * package, version and sha256 approves. A single read; a refusal is audited (`plugin.install_blocked`).
+ */
+export async function verifyInstall(
+  core: Core,
+  tx: Tx,
+  q: AgentChannelPluginVerifyInstall,
+  actor: CellActor,
+): Promise<AgentChannelPluginVerifyInstallResponse> {
+  const rows = await tx
+    .select()
+    .from(cellPlugins)
+    .where(and(eq(cellPlugins.packageName, q.packageName), ACTIVE));
+  const sha = q.sha256.toLowerCase();
+  const inFlight = rows.filter((r) => r.status === "installing");
+  const hit = inFlight.find((r) => r.version === q.version && r.artifactSha256.toLowerCase() === sha);
+  if (hit) return { approved: true, reason: null };
+  const reason =
+    rows.length === 0
+      ? "not_approved"
+      : inFlight.length === 0
+        ? "not_in_flight"
+        : !inFlight.some((r) => r.version === q.version)
+          ? "version_mismatch"
+          : "digest_mismatch";
+  await core.audit.record(tx, {
+    action: "plugin.install_blocked",
+    resourceType: "cell_plugin",
+    resourceId: rows[0]?.id ?? null,
+    actorKind: "system",
+    clientKind: "agent",
+    sessionId: actor.sessionId,
+    result: "denied",
+    metadata: { packageName: q.packageName, version: q.version, sha256: sha, reason },
+  });
+  return { approved: false, reason };
+}
+
+const TOOL_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/iu;
+const BUILTIN_NAMES: ReadonlySet<string> = new Set(Object.values(BUILTIN_TOOLS));
+
+/**
+ * `POST /agent-channel/v1/plugins/report` (03.1-12): one flow's outcome, applied only to the row's current flow
+ * (another flow, another organization's row or an unknown row → 404 `plugin_flow_not_found`). What the cell
+ * inspected is untrusted: it is re-scored, and a refused surface, a builtin or malformed tool name, or a plugin id /
+ * version other than the approved one rejects the plugin (`failed`, `plugin.uninstall.v1`, audited
+ * `plugin.rejected_after_install`). Accepted tools replace `cell_plugin_tools` (always side-effecting). Status machine:
+ * `installing → installed | failed`, `uninstalling → uninstalled`; a rejected row stays `failed` after the cell removed
+ * it. Replays of a recorded outcome are accepted and change nothing; any other transition is 409.
+ */
+export async function recordPluginReport(
+  core: Core,
+  tx: Tx,
+  report: AgentChannelPluginReport,
+  actor: CellActor,
+): Promise<void> {
+  const { organizationId } = tenantOf(tx);
+  const [row] = await tx.select().from(cellPlugins).where(eq(cellPlugins.id, report.pluginRowId));
+  if (!row || row.flowId !== report.flowId) {
+    throw notFound("No such plugin flow in this cell", "plugin_flow_not_found");
+  }
+  const invalid = () =>
+    conflict(
+      `A ${report.state} report does not apply to a plugin that is ${row.status}`,
+      "invalid_plugin_state",
+    );
+  const audit = (
+    action: string,
+    metadata: Record<string, unknown>,
+    result?: "success" | "denied" | "error",
+  ) =>
+    core.audit.record(tx, {
+      action,
+      resourceType: "cell_plugin",
+      resourceId: row.id,
+      actorKind: "system",
+      clientKind: "agent",
+      sessionId: actor.sessionId,
+      ...(result ? { result } : {}),
+      metadata: {
+        packageName: row.packageName,
+        version: row.version,
+        sha256: row.artifactSha256,
+        flowId: report.flowId,
+        ...metadata,
+      },
+    });
+  const now = new Date().toISOString();
+
+  if (report.state === "installing") return;
+
+  if (report.state === "failed") {
+    const code = report.error?.code ?? "install_failed";
+    const detail = `${code}: ${report.error?.message ?? "The cell could not complete the change."}`;
+    if (row.status === "installing") {
+      await tx
+        .update(cellPlugins)
+        .set({ status: "failed", statusDetail: detail, updatedAt: now })
+        .where(eq(cellPlugins.id, row.id));
+      await audit("plugin.install_failed", { pluginId: row.pluginId, code }, "error");
+      return;
+    }
+    if (row.status === "uninstalling" || row.status === "failed") {
+      if (row.status === "failed" && row.statusDetail?.includes(code)) return;
+      await tx
+        .update(cellPlugins)
+        .set({
+          statusDetail: row.status === "failed" ? `${row.statusDetail ?? ""} (${detail})` : detail,
+          updatedAt: now,
+        })
+        .where(eq(cellPlugins.id, row.id));
+      await audit("plugin.uninstall_failed", { pluginId: row.pluginId, code }, "error");
+      return;
+    }
+    throw invalid();
+  }
+
+  if (report.state === "uninstalled") {
+    if (row.status === "uninstalled") return;
+    if (row.status !== "uninstalling" && row.status !== "failed") throw invalid();
+    await tx.delete(cellPluginTools).where(eq(cellPluginTools.pluginRowId, row.id));
+    await tx
+      .delete(botToolGrants)
+      .where(and(eq(botToolGrants.sourceKind, "plugin"), eq(botToolGrants.sourceId, row.id)));
+    const removedNote = " (removed from the cell)";
+    await tx
+      .update(cellPlugins)
+      .set(
+        row.status === "uninstalling"
+          ? { status: "uninstalled", statusDetail: null, updatedAt: now }
+          : {
+              statusDetail: row.statusDetail?.endsWith(removedNote)
+                ? row.statusDetail
+                : `${row.statusDetail ?? "failed"}${removedNote}`,
+              updatedAt: now,
+            },
+      )
+      .where(eq(cellPlugins.id, row.id));
+    await audit("plugin.uninstalled", { pluginId: report.pluginId ?? row.pluginId });
+    await notifyCellConfig(core, tx, "tools.updated", null);
+    return;
+  }
+
+  // installed
+  if (row.status === "installed") return;
+  if (row.status !== "installing") throw invalid();
+  const toolNames = [
+    ...new Set([...(report.declared?.tools ?? []), ...(report.declaredTools ?? []).map((t) => t.name)]),
+  ].sort();
+  const declared = canonicalSurface({
+    ...EMPTY_DECLARED_SURFACE,
+    ...(report.declared ?? {}),
+    tools: toolNames,
+  });
+  const reasons: Array<{ code: string; message: string }> = [];
+  const pluginId = report.pluginId ?? null;
+  if (
+    !pluginId ||
+    (row.pluginId !== null && pluginId !== row.pluginId) ||
+    (report.version && report.version !== row.version)
+  ) {
+    reasons.push({
+      code: "plugin_mismatch",
+      message: "The cell installed another plugin id or version than the one approved",
+    });
+  }
+  reasons.push(...refusedReportedSurface(declared, row.channel));
+  const builtin = toolNames.filter((t) => BUILTIN_NAMES.has(t.toLowerCase()));
+  if (builtin.length > 0) {
+    reasons.push({
+      code: "builtin_tool_name",
+      message: `Declares tools named like built-in tools: ${builtin.join(", ")}`,
+    });
+  }
+  const malformed = toolNames.filter((t) => !TOOL_NAME.test(t));
+  if (malformed.length > 0) {
+    reasons.push({ code: "invalid_tool_name", message: "Declares tool names that cannot be granted safely" });
+  }
+
+  if (reasons.length > 0) {
+    // Rejected after install: nothing reaches a bot, and the cell is told to remove what it installed.
+    const removePluginId = pluginId ?? row.pluginId;
+    const flowId = randomUUID();
+    await tx.delete(cellPluginTools).where(eq(cellPluginTools.pluginRowId, row.id));
+    const removed = await tx
+      .delete(botToolGrants)
+      .where(and(eq(botToolGrants.sourceKind, "plugin"), eq(botToolGrants.sourceId, row.id)))
+      .returning({ agentId: botToolGrants.agentId });
+    const codes = [...new Set(reasons.map((r) => r.code))];
+    await tx
+      .update(cellPlugins)
+      .set({
+        status: "failed",
+        statusDetail: `${codes.join(", ")}: ${reasons[0]?.message ?? "refused"}; the plugin is removed from the cell`,
+        flowId,
+        updatedAt: now,
+      })
+      .where(eq(cellPlugins.id, row.id));
+    if (removePluginId) {
+      await core.realtime.appendEvent(tx, cellTopic(organizationId), AgentChannelEventTypes.pluginUninstall, {
+        type: AgentChannelEventTypes.pluginUninstall,
+        organizationId,
+        cellId: organizationId,
+        flowId,
+        pluginRowId: row.id,
+        pluginId: removePluginId,
+      });
+    }
+    await audit(
+      "plugin.rejected_after_install",
+      { pluginId: removePluginId, reasons: codes, tools: toolNames, removedGrants: removed.length },
+      "denied",
+    );
+    if (removed.length > 0) await notifyCellConfig(core, tx, "tools.updated", null);
+    return;
+  }
+
+  const descriptions = new Map((report.declaredTools ?? []).map((t) => [t.name, t.description ?? null]));
+  await tx.delete(cellPluginTools).where(eq(cellPluginTools.pluginRowId, row.id));
+  if (toolNames.length > 0) {
+    await tx.insert(cellPluginTools).values(
+      toolNames.map((name) => ({
+        organizationId,
+        pluginRowId: row.id,
+        name,
+        description: descriptions.get(name)?.slice(0, 1000) ?? null,
+        // Plugin code is untrusted: its tools always count as side-effecting for the taint rule (D-08).
+        sideEffecting: true,
+      })),
+    );
+  }
+  // An update that dropped a tool takes it off every bot.
+  await tx
+    .delete(botToolGrants)
+    .where(
+      and(
+        eq(botToolGrants.sourceKind, "plugin"),
+        eq(botToolGrants.sourceId, row.id),
+        ...(toolNames.length > 0 ? [notInArray(botToolGrants.toolName, toolNames)] : []),
+      ),
+    );
+  const reviewed = DeclaredSurfaceSchema.safeParse(row.declared);
+  const grew = reviewed.success
+    ? (Object.keys(declared) as Array<keyof DeclaredSurface>).flatMap((k) =>
+        declared[k].filter((v) => !reviewed.data[k].includes(v)).map((v) => `${k}:${v}`),
+      )
+    : [];
+  await tx
+    .update(cellPlugins)
+    .set({
+      status: "installed",
+      pluginId,
+      installedAt: now,
+      statusDetail: null,
+      declared: storedSurface(declared),
+      updatedAt: now,
+    })
+    .where(eq(cellPlugins.id, row.id));
+  await audit("plugin.installed", {
+    pluginId,
+    tools: toolNames,
+    ...(grew.length > 0 ? { surfaceGrew: grew } : {}),
+  });
+  await notifyCellConfig(core, tx, "tools.updated", null);
 }
