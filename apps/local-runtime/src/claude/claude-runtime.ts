@@ -172,7 +172,9 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       throw new RuntimeError(`session ${options.sessionId} already running`, "session_exists");
     }
     const mode = PermissionMode.safeParse(options.permissionMode);
-    if (!mode.success) {
+    // The widened platform enum (auto, fullAccess) must never reach the runtime before this adapter supports
+    // the mode: anything outside its own capability list is refused first (T-03.2-01-01).
+    if (!mode.success || !this.capabilities.supportsPermissionModes.includes(mode.data)) {
       throw new RuntimeError(
         `permission mode not allowed: ${String(options.permissionMode)}`,
         "permission_mode_rejected",
@@ -204,7 +206,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
 
     const sdkOptions: Options = {
       cwd: options.cwd,
-      permissionMode: mode.data,
+      permissionMode: sdkPermissionMode(mode.data),
       allowDangerouslySkipPermissions: false,
       includePartialMessages: true,
       canUseTool: this.makeCanUseTool(session),
@@ -459,4 +461,15 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       return { behavior: "deny", message };
     };
   }
+}
+
+/**
+ * Platform mode → SDK mode. `fullAccess` is refused here until ADR-0012's path is wired in this adapter
+ * (Plan 06): it never becomes `bypassPermissions` by accident.
+ */
+export function sdkPermissionMode(mode: PermissionMode): NonNullable<Options["permissionMode"]> {
+  if (mode === "fullAccess") {
+    throw new RuntimeError("full access is not available in this adapter", "permission_mode_rejected");
+  }
+  return mode;
 }

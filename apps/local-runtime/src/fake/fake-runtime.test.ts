@@ -69,7 +69,9 @@ describe("FakeRuntime settings (03.2-01, D-07, D-14)", () => {
       const catalog = RuntimeCatalog.parse(await new FakeRuntime(id, 1).catalog());
       expect(catalog.runtime).toBe(id);
       expect(catalog.models.filter((m) => m.isDefault)).toHaveLength(1);
-      expect(catalog.permissionModes).toEqual(expect.arrayContaining(["default", "acceptEdits", "plan", "auto"]));
+      expect(catalog.permissionModes).toEqual(
+        expect.arrayContaining(["default", "acceptEdits", "plan", "auto"]),
+      );
       expect(catalog.permissionModes).not.toContain("fullAccess");
     }
     const claude = await new FakeRuntime("claude-code", 1).catalog();
@@ -79,7 +81,9 @@ describe("FakeRuntime settings (03.2-01, D-07, D-14)", () => {
   it("start reports the effective settings", async () => {
     const events: SessionEvent[] = [];
     const rt = new FakeRuntime("claude-code", 1);
-    await rt.start({ sessionId: "c0", cwd: tmp(), permissionMode: "default", model: "sonnet" }, (e) => events.push(e));
+    await rt.start({ sessionId: "c0", cwd: tmp(), permissionMode: "default", model: "sonnet" }, (e) =>
+      events.push(e),
+    );
     expect(events.find((e) => e.type === "session.settings")).toMatchObject({
       model: "sonnet",
       permissionMode: "default",
@@ -111,7 +115,9 @@ describe("FakeRuntime settings (03.2-01, D-07, D-14)", () => {
     const firstDone = events.findIndex((e) => e.type === "prompt.completed" && e.promptId === "p1");
     expect(settingsAt).toBeGreaterThan(firstDone);
     expect(settingsAt).toBeLessThan(secondAt);
-    const said = events.filter((e) => e.type === "assistant.message").map((e) => (e as { text: string }).text);
+    const said = events
+      .filter((e) => e.type === "assistant.message")
+      .map((e) => (e as { text: string }).text);
     expect(said.at(-1)).toContain("Model: fable");
   });
 
