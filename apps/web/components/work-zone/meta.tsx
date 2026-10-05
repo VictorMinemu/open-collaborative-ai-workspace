@@ -1,4 +1,11 @@
-import type { PermissionMode, RuntimeId, WorkSessionStatus } from "@ocw/contracts";
+import type {
+  ControlOption,
+  PermissionMode,
+  PermissionModeControl,
+  RuntimeId,
+  WorkSessionStatus,
+} from "@ocw/contracts";
+import { PERMISSION_MODE_RANK } from "@ocw/contracts";
 import {
   Archive,
   CircleAlert,
@@ -7,17 +14,30 @@ import {
   CirclePause,
   CloudOff,
   Hand,
+  ListChecks,
   Loader,
+  Lock,
+  LockOpen,
   type LucideIcon,
+  Pencil,
+  Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export const RUNTIMES: Record<
   RuntimeId,
-  { label: string; vendor: string; subscription: string; models: Array<{ value: string; label: string }> }
+  {
+    label: string;
+    /** Provider name under each model row of the picker (ref-3: "Claude"). */
+    provider: string;
+    vendor: string;
+    subscription: string;
+    models: Array<{ value: string; label: string }>;
+  }
 > = {
   "claude-code": {
     label: "Claude Code",
+    provider: "Claude",
     vendor: "Anthropic",
     subscription: "Uses your Claude subscription on this device",
     models: [
@@ -29,17 +49,105 @@ export const RUNTIMES: Record<
   },
   codex: {
     label: "Codex",
+    provider: "Codex",
     vendor: "OpenAI",
     subscription: "Uses your ChatGPT subscription on this device",
     models: [{ value: "default", label: "Default (from your Codex config)" }],
   },
 };
 
-export const PERMISSION_MODES: Array<{ value: PermissionMode; label: string; hint: string }> = [
-  { value: "default", label: "Ask", hint: "Approve every edit and command" },
-  { value: "acceptEdits", label: "Auto-edit", hint: "File edits run; commands still ask" },
-  { value: "plan", label: "Plan", hint: "Read-only: proposes a plan, changes nothing" },
+/**
+ * Permission modes in the order of the owner's reference (ref-1) plus Plan (D-12). Labels per P-03, one-line
+ * descriptions per ref-1. Full access carries the warning tone (D-04).
+ */
+export const PERMISSION_MODES: Array<{
+  value: PermissionMode;
+  label: string;
+  hint: string;
+  icon: LucideIcon;
+  tone?: "warning";
+}> = [
+  { value: "default", label: "Supervised", hint: "Ask before commands and file changes.", icon: Lock },
+  {
+    value: "acceptEdits",
+    label: "Auto-accept edits",
+    hint: "Auto-approve edits, ask before other actions.",
+    icon: Pencil,
+  },
+  {
+    value: "auto",
+    label: "Auto",
+    hint: "Supported providers approve routine actions; others still ask.",
+    icon: Sparkles,
+  },
+  {
+    value: "fullAccess",
+    label: "Full access",
+    hint: "Allow commands and edits without prompts.",
+    icon: LockOpen,
+    tone: "warning",
+  },
+  { value: "plan", label: "Plan", hint: "Read-only: proposes a plan, changes nothing.", icon: ListChecks },
 ];
+
+export const permissionModeMeta = (mode: string) => PERMISSION_MODES.find((m) => m.value === mode);
+
+/** What a runtime-reported reason code means, in words (D-11). Unknown codes stay as the runtime wrote them. */
+const RUNTIME_DETAIL_TEXT: Record<string, string> = {
+  extra_usage_disabled: "Needs paid usage credits",
+  model_not_allowed: "Not available for this model",
+  sdk_opt_in_required: "Not turned on for this runtime",
+};
+
+/**
+ * Why an option is unavailable, in one sentence (P-08). One place for every composer menu and the New session
+ * dialog. `not_confirmed` returns null: such options are hidden, never shown (WZC-06).
+ */
+export function controlReasonText(
+  option: Pick<ControlOption, "reason" | "detail">,
+  ctx: { runtime: RuntimeId; modes?: PermissionModeControl[] },
+): string | null {
+  switch (option.reason) {
+    case null:
+      return null;
+    case "org_policy":
+      return "Not allowed by your organization";
+    case "device_opt_in":
+      return "Full access is off on this device. Its owner can turn it on in the desktop app.";
+    case "device_grant": {
+      const top = (ctx.modes ?? [])
+        .filter((m) => m.available)
+        .sort((a, b) => PERMISSION_MODE_RANK[b.value] - PERMISSION_MODE_RANK[a.value])[0];
+      return top
+        ? `Your access to this device allows up to ${permissionModeMeta(top.value)?.label ?? top.value}`
+        : "Your access to this device does not allow this";
+    }
+    case "denied_for_you":
+      return "Not allowed for you";
+    case "runtime": {
+      const detail = option.detail ? (RUNTIME_DETAIL_TEXT[option.detail] ?? option.detail) : null;
+      return detail ?? `${RUNTIMES[ctx.runtime].label} does not offer this here`;
+    }
+    case "not_in_catalog":
+      return "Not reported by this device";
+    case "not_confirmed":
+      return null;
+    default:
+      return null;
+  }
+}
+
+/** The option exists for this caller (possibly disabled); `not_confirmed` options are never shown. */
+export const isShown = (option: Pick<ControlOption, "reason">) => option.reason !== "not_confirmed";
+
+/** "200k" | "1M" (D-10). */
+export function contextWindowLabel(tokens: number): string {
+  if (tokens >= 1_000_000) {
+    const m = tokens / 1_000_000;
+    return `${Number.isInteger(m) ? m : m.toFixed(1)}M`;
+  }
+  return `${Math.round(tokens / 1000)}k`;
+}
 
 export const STATUS: Record<
   WorkSessionStatus,
@@ -134,6 +242,53 @@ export function OnlineDot({ online, className }: { online: boolean; className?: 
         className,
       )}
     />
+  );
+}
+
+/** The runtime glyph alone, in its provider colour (composer chips, picker rail and rows — ref-1..3). */
+export function RuntimeMark({ runtime, className }: { runtime: RuntimeId; className?: string }) {
+  return (
+    <span
+      data-runtime-mark={runtime}
+      className={cn(
+        "inline-flex size-4 shrink-0 items-center justify-center",
+        runtime === "claude-code" ? "text-[#D97757]" : "text-foreground",
+        className,
+      )}
+      aria-hidden
+    >
+      {runtime === "claude-code" ? (
+        <svg viewBox="0 0 24 24" className="size-full" fill="currentColor" aria-hidden>
+          <title>Claude Code</title>
+          {Array.from({ length: 12 }, (_, i) => (
+            <rect
+              // biome-ignore lint/suspicious/noArrayIndexKey: static decorative rays
+              key={i}
+              x="11.1"
+              y="1"
+              width="1.8"
+              height="10.5"
+              rx="0.9"
+              transform={`rotate(${i * 30} 12 12)`}
+            />
+          ))}
+        </svg>
+      ) : (
+        <svg
+          viewBox="0 0 24 24"
+          className="size-full"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          aria-hidden
+        >
+          <title>Codex</title>
+          <rect x="2.5" y="3.5" width="19" height="17" rx="4.5" />
+          <path d="M7.5 9.5l3 2.5-3 2.5" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M12.5 15h4" strokeLinecap="round" />
+        </svg>
+      )}
+    </span>
   );
 }
 

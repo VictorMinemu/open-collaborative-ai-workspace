@@ -34,13 +34,21 @@ async function bothThemes(page: Page, name: string) {
 /** On a phone every composer menu is a bottom sheet; on a desktop a popover above its chip (D-16). */
 async function expectSurface(page: Page, surface: Locator, mobile: boolean) {
   await expect(surface).toBeVisible();
-  const box = (await surface.boundingBox())!;
   const vp = page.viewportSize()!;
+  // A sheet slides up: measure once the open transition has settled at the bottom edge.
+  if (mobile) {
+    await expect
+      .poll(async () => {
+        const b = await surface.boundingBox();
+        return b ? Math.round(b.y + b.height) : -1;
+      })
+      .toBe(vp.height);
+  }
+  const box = (await surface.boundingBox())!;
   expect(box.x).toBeGreaterThanOrEqual(0);
   expect(box.x + box.width).toBeLessThanOrEqual(vp.width + 1);
   if (mobile) {
     await expect(surface).toHaveAttribute("data-surface", "sheet");
-    expect(Math.abs(box.y + box.height - vp.height)).toBeLessThanOrEqual(2);
     expect(box.width).toBeGreaterThanOrEqual(vp.width - 1);
   } else {
     await expect(surface).toHaveAttribute("data-surface", "popover");
@@ -155,7 +163,10 @@ test("Work Zone model picker (ref): search, favorites, provider rail, shortcuts 
     // ---- favorites: star Sonnet, the star filter shows only favorites, and it survives a reload
     await chip.click();
     await expect(picker).toBeVisible();
-    await picker.locator('[data-testid="model-option"][data-model-id="sonnet"]').getByTestId("model-favorite").click();
+    await picker
+      .locator('[data-testid="model-option"][data-model-id="sonnet"]')
+      .getByTestId("model-favorite")
+      .click();
     await picker.getByTestId("model-rail-favorites").click();
     await expect(options).toHaveCount(1);
     await expect(options.first()).toHaveAttribute("data-model-id", "sonnet");

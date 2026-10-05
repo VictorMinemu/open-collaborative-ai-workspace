@@ -33,6 +33,8 @@ export function Composer({
     busy || session.status === "provisioning" || session.status === "host_offline" || queued > 0;
   const archived = session.status === "archived";
   const sending = queue.isPending || command.isPending;
+  // A `/command` never joins the queue (D-13): the button says Queue only for a prompt that will wait.
+  const queueLabel = willQueue && !text.trimStart().startsWith("/");
 
   useEffect(() => {
     const el = ref.current;
@@ -80,9 +82,9 @@ export function Composer({
   return (
     <form
       onSubmit={submit}
-      className="mx-auto w-full max-w-3xl px-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:px-6"
+      className="mx-auto w-full max-w-3xl px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6 sm:pb-4"
     >
-      <div className="rounded-2xl border bg-card shadow-sm transition-[border-color,box-shadow] focus-within:border-ring/60 focus-within:ring-[3px] focus-within:ring-ring/15">
+      <div className="rounded-[22px] border bg-card shadow-[0_1px_2px_rgb(0_0_0/0.04),0_8px_24px_-12px_rgb(0_0_0/0.12)] transition-[border-color,box-shadow] focus-within:border-ring/50 dark:shadow-none">
         <textarea
           ref={ref}
           data-testid="composer"
@@ -93,47 +95,52 @@ export function Composer({
           onKeyDown={onKeyDown}
           placeholder={archived ? "This session is archived" : `Ask ${RUNTIMES[session.runtime].label} to…`}
           aria-label="Prompt"
-          className="block max-h-[220px] min-h-[52px] w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-[14px] outline-none placeholder:text-muted-foreground/70"
+          className="block max-h-[220px] min-h-[56px] w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-[14px] outline-none placeholder:text-muted-foreground/70"
         />
-        <div className="flex items-center gap-1.5 px-2.5 pb-2.5">
-          <ModelPicker session={session} disabled={archived || !canConfigure} />
-          <p
-            data-testid="composer-hint"
-            className="min-w-0 flex-1 truncate pl-1 text-[11.5px] text-muted-foreground"
+        <div className="flex items-end gap-1.5 px-2 pb-2">
+          {/* Session controls (D-16, ref-1): model · reasoning · permission, driven only by GET /controls. */}
+          <div
+            data-testid="composer-controls"
+            className="flex min-w-0 flex-1 flex-wrap items-center gap-x-0.5 gap-y-1"
           >
-            {hint}
-          </p>
-          {busy ? (
-            <Tooltip content="Interrupt the current turn">
-              <Button
-                type="button"
-                size="icon-sm"
-                variant="outline"
-                aria-label="Interrupt"
-                data-testid="interrupt"
-                disabled={interrupt.isPending}
-                onClick={() =>
-                  interrupt.mutate(undefined, { onError: (err) => toast.error(errorMessage(err)) })
-                }
-                className="rounded-full"
-              >
-                {interrupt.isPending ? <Spinner /> : <Square className="size-3.5 fill-current" />}
-              </Button>
-            </Tooltip>
-          ) : null}
-          <Button
-            type="submit"
-            size={willQueue ? "sm" : "icon-sm"}
-            disabled={!text.trim() || sending || archived}
-            aria-label={willQueue ? "Add to queue" : "Send"}
-            data-testid="send-prompt"
-            className="rounded-full"
-          >
-            {sending ? <Spinner /> : willQueue ? <ListPlus /> : <ArrowUp />}
-            {willQueue ? "Queue" : null}
-          </Button>
+            <ModelPicker session={session} disabled={archived || !canConfigure} />
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5">
+            {busy ? (
+              <Tooltip content="Interrupt the current turn">
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="outline"
+                  aria-label="Interrupt"
+                  data-testid="interrupt"
+                  disabled={interrupt.isPending}
+                  onClick={() =>
+                    interrupt.mutate(undefined, { onError: (err) => toast.error(errorMessage(err)) })
+                  }
+                  className="rounded-full"
+                >
+                  {interrupt.isPending ? <Spinner /> : <Square className="size-3.5 fill-current" />}
+                </Button>
+              </Tooltip>
+            ) : null}
+            <Button
+              type="submit"
+              size={queueLabel ? "default" : "icon"}
+              disabled={!text.trim() || sending || archived}
+              aria-label={queueLabel ? "Add to queue" : "Send"}
+              data-testid="send-prompt"
+              className="rounded-full"
+            >
+              {sending ? <Spinner /> : queueLabel ? <ListPlus /> : <ArrowUp className="size-[18px]" />}
+              {queueLabel ? "Queue" : null}
+            </Button>
+          </div>
         </div>
       </div>
+      <p data-testid="composer-hint" className="truncate px-3 pt-1.5 text-[11.5px] text-muted-foreground">
+        {hint}
+      </p>
     </form>
   );
 }
