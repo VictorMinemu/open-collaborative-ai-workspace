@@ -99,6 +99,7 @@ function modelControl(m: RuntimeModel, runtime: RuntimeId, ctx: ControlsContext)
     id: m.id,
     displayName: m.displayName,
     description: m.description,
+    resolvedModel: m.resolvedModel ?? null,
     legacy: m.legacy,
     isDefault: m.isDefault,
     badge: m.badge,

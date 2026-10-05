@@ -28,6 +28,12 @@ describe("buildClaudeCatalog — recorded initializationResult + context probe a
   const byId = new Map(catalog.models.map((m) => [m.id, m]));
   const raw = new Map(recorded.models.map((m) => [m.value, m]));
 
+  it("carries the id each row resolves to, so the init's model (claude-sonnet-5-5) maps back to its alias row", () => {
+    expect(byId.get("sonnet")?.resolvedModel).toBe(raw.get("sonnet")?.resolvedModel);
+    expect(byId.get("sonnet")?.resolvedModel).toBe("claude-sonnet-5-5");
+    expect(byId.get("opus")?.resolvedModel).toBe("claude-opus-5-5");
+  });
+
   it("parses as a RuntimeCatalog for claude-code at the recorded version", () => {
     expect(RuntimeCatalog.parse(catalog)).toEqual(catalog);
     expect(catalog).toMatchObject({ runtime: "claude-code", runtimeVersion: "2.1.289" });

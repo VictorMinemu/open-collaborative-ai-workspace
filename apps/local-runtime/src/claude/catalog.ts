@@ -71,6 +71,7 @@ export function buildClaudeCatalog(input: {
       id: clip(m.value, 200),
       displayName: clip(m.displayName ?? "", 200) || clip(m.value, 200),
       description: description || null,
+      resolvedModel: m.resolvedModel ? clip(m.resolvedModel, 200) : null,
       legacy,
       isDefault,
       badge: null,
