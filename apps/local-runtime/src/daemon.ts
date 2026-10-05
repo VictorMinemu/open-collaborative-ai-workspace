@@ -413,14 +413,79 @@ export class Daemon {
     }
     this.remember(cmd.id);
     if (cmd.kind !== "prompt" && cmd.kind !== "session.configure") return this.execute(cmd);
-    const prev = this.sessionChains.get(cmd.sessionId) ?? Promise.resolve();
-    const run = prev.then(() => this.execute(cmd));
-    const tail = run.catch(() => undefined);
-    this.sessionChains.set(cmd.sessionId, tail);
+    return this.inSessionOrder(cmd.sessionId, () => this.execute(cmd));
+  }
+
+  /** Runs `fn` after every earlier configure / prompt of this session (D-14 order). */
+  private inSessionOrder<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.sessionChains.get(sessionId) ?? Promise.resolve();
+    const run = prev.then(fn);
+    const tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.sessionChains.set(sessionId, tail);
     void tail.then(() => {
-      if (this.sessionChains.get(cmd.sessionId) === tail) this.sessionChains.delete(cmd.sessionId);
+      if (this.sessionChains.get(sessionId) === tail) this.sessionChains.delete(sessionId);
     });
     return run;
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Full access opt-in (ADR-0012, D-02, P-12)
+
+  /**
+   * Re-reads runtime.json (the desktop Runtime menu and `ocw-runtime full-access` write it; the environment still
+   * wins). Turning the opt-in OFF takes effect at once: the gate closes for every adapter, running full-access turns
+   * are interrupted, the server gets `capabilities` with `fullAccessOptIn: false`, and those sessions are lowered to
+   * acceptEdits here (the server's own downgrade follows). Turning it on is only reported.
+   */
+  async reloadConfig(): Promise<{ fullAccessOptIn: boolean; fullAccessSource: FullAccessSource }> {
+    const loaded = await loadConfig(this.home, this.env);
+    const next = resolveFullAccess({ ...loaded, ...this.opts.config }, this.env);
+    const was = this.gate.optIn;
+    this.gate.optIn = next.optIn;
+    this.gate.source = next.source;
+    if (was !== next.optIn) {
+      this.log.warn(
+        next.optIn ? "Full access enabled on this device" : "Full access disabled on this device",
+        {
+          source: next.source,
+        },
+      );
+      const full = next.optIn ? [] : [...this.sessions.values()].filter((s) => s.mode === "fullAccess");
+      await Promise.all(
+        full.map((s) =>
+          s.runtime.interrupt(s.sessionId).catch((err: unknown) =>
+            this.log.warn("could not interrupt a full-access turn", {
+              sessionId: s.sessionId,
+              error: sanitizeString(errorMessage(err), this.rootsBySession.get(s.sessionId) ?? []),
+            }),
+          ),
+        ),
+      );
+      if (this.isConnected) this.send(await this.capabilitiesFrame());
+      await Promise.all(full.map((s) => this.leaveFullAccess(s)));
+    }
+    return { fullAccessOptIn: next.optIn, fullAccessSource: next.source };
+  }
+
+  /** Lowers one session out of fullAccess after the opt-out (in session order, before any later prompt). */
+  private leaveFullAccess(s: ActiveSession): Promise<void> {
+    return this.inSessionOrder(s.sessionId, async () => {
+      if (s.mode !== "fullAccess" || !this.sessions.has(s.sessionId)) return;
+      try {
+        if (!s.runtime.configure) throw new Error(`settings changes are not supported by ${s.runtime.id}`);
+        await s.runtime.configure(s.sessionId, { permissionMode: "acceptEdits" });
+        s.mode = "acceptEdits";
+      } catch (err) {
+        // The adapters' own gate still refuses every fullAccess turn; the server's downgrade follows.
+        this.log.warn("could not lower a full-access session", {
+          sessionId: s.sessionId,
+          error: sanitizeString(errorMessage(err), this.rootsBySession.get(s.sessionId) ?? []),
+        });
+      }
+    });
   }
 
   private async execute(cmd: CommandFrame): Promise<void> {
@@ -634,6 +699,8 @@ export class Daemon {
         if (removed) this.syncProjects();
         return { removed };
       }
+      case "reloadConfig":
+        return this.reloadConfig();
     }
   }
 }

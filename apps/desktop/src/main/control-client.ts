@@ -8,7 +8,9 @@ export type ControlCommand =
   | { cmd: "status" }
   | { cmd: "listProjects" }
   | { cmd: "addProject"; path: string; name?: string }
-  | { cmd: "removeProject"; localId: string };
+  | { cmd: "removeProject"; localId: string }
+  /** Re-read runtime.json (Full access opt-in, ADR-0012); carries no value. */
+  | { cmd: "reloadConfig" };
 
 export class ControlError extends Error {}
 

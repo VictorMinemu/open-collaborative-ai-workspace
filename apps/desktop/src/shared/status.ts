@@ -12,6 +12,8 @@ export interface StatusInputs {
   daemon: DaemonProcessState;
   /** Last successful control-socket `status` answer, or null if the socket is unreachable. */
   report: DaemonStatusPayload | null;
+  /** The Full access opt-in the main process last read from runtime.json (used while the daemon is unreachable). */
+  localFullAccess?: boolean;
 }
 
 const LABELS: Record<DesktopStatus["state"], string> = {
@@ -40,6 +42,7 @@ export function deriveStatus(input: StatusInputs): DesktopStatus {
     projects: report?.projects ?? 0,
     activeSessions: report?.sessions?.length ?? 0,
     runtimes: report?.runtimes ?? [],
+    fullAccessOptIn: report?.fullAccessOptIn ?? input.localFullAccess ?? false,
   };
 }
 

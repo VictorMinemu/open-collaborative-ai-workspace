@@ -69,6 +69,10 @@ export const DaemonStatusPayload = z.object({
   projects: z.number().optional(),
   runtimes: z.array(RuntimeInfo).optional(),
   sessions: z.array(z.unknown()).optional(),
+  /** ADR-0012: the device's own Full access opt-in, as the daemon enforces it (absent on older daemons). */
+  fullAccessOptIn: z.boolean().optional(),
+  /** Where it comes from: `env` (OCW_ALLOW_FULL_ACCESS, not switchable from the menu) or `config` (runtime.json). */
+  fullAccessSource: z.enum(["env", "config"]).optional(),
 });
 export type DaemonStatusPayload = z.infer<typeof DaemonStatusPayload>;
 
@@ -114,6 +118,8 @@ export interface DesktopStatus {
   projects: number;
   activeSessions: number;
   runtimes: RuntimeInfo[];
+  /** Read-only for web content: Full access is switched only from the desktop Runtime menu or the CLI. */
+  fullAccessOptIn: boolean;
 }
 
 export type AddProjectResult =
