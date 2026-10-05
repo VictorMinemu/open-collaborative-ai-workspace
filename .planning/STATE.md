@@ -1,19 +1,19 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-current_phase: 2
-current_phase_name: Realtime Presence and Latency
+current_phase: 03.1
+current_phase_name: Personal Bots and Bot Capabilities
 status: executing
 stopped_at: "REQUIREMENTS.md and ROADMAP.md re-mapped to the Phase 1 build (Restructure 2026-10-04); next: `/gsd-verify-work 1`, then `/gsd-plan-phase 2`"
-last_updated: "2026-10-04T22:52:36.474Z"
+last_updated: "2026-10-05T00:55:24.201Z"
 last_activity: 2026-10-04
-last_activity_desc: Phase 3 execution started
-state_head: 4d867922e090de4aaedcb0e3073a8feab2ff3b79
+last_activity_desc: Phase 03.1 execution started
+state_head: 9228ea162af1db0e0b4fbc8b8c3ef69f19c1b465
 progress:
   total_phases: 12
-  completed_phases: 1
-  total_plans: 21
-  completed_plans: 16
+  completed_phases: 2
+  total_plans: 36
+  completed_plans: 21
 ---
 
 # Project State
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-02)
 
 **Core value:** AI sessions are multiplayer — a private AI chat or coding session can be shared live with colleagues, the model knows who each participant is, and everything stays attributed and auditable.
-**Current focus:** Phase 3.1 — Personal Bots and Bot Capabilities (incl. MCP + OpenClaw Marketplace)
+**Current focus:** Phase 03.1 — Personal Bots and Bot Capabilities
 
 ## Current Position
 
-Phase: 3.1 (Personal Bots and Bot Capabilities) — planned (15 plans), executes after Phase 3 merges
-Plan: 0 of 15
-Status: Phase 3 complete and verified (6/6 plans, 591 tests, e2e 42/42, p95 < 20 ms); Phase 3.1 planned
-Last activity: 2026-10-05 - Phase 3 (Realtime Presence and Latency) executed and verified: presence + away, <500 ms latency in CI, live re-authorization of subscriptions
+Phase: 03.1 (Personal Bots and Bot Capabilities) — EXECUTING
+Plan: 1 of 15
+Status: Executing Phase 03.1
+Last activity: 2026-10-04 — Phase 03.1 execution started
 
 Progress: [░░░░░░░░░░] 0%
 
