@@ -18,6 +18,11 @@ export interface FakeDeviceHandle {
   deviceId: string;
   projectId: string;
   projectName: string;
+  /**
+   * Stop the daemon gracefully (SIGTERM) WITHOUT revoking the device: its runtimes report every session as ended
+   * ("completed"), so the sessions stay listed (a revoked host hides them). `stop()` still cleans up afterwards.
+   */
+  shutdown(): Promise<void>;
   stop(): Promise<void>;
 }
 
@@ -90,10 +95,20 @@ export async function startFakeDevice(
       .toBe(true);
 
     if (!found.deviceId || !found.projectId) throw new Error(`${opts.name} did not register its project`);
+    const shutdown = async () => {
+      const proc = daemon;
+      daemon = null;
+      if (!proc || proc.exitCode !== null) return;
+      await new Promise<void>((resolve) => {
+        proc.once("exit", () => resolve());
+        proc.kill("SIGTERM");
+      });
+    };
     return {
       deviceId: found.deviceId,
       projectId: found.projectId,
       projectName: opts.projectName,
+      shutdown,
       stop: cleanup,
     };
   } catch (err) {
