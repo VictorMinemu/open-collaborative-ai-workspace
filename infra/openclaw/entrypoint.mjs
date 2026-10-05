@@ -7,10 +7,12 @@
 //   OCW_API_URL                    Agent Channel API base, e.g. http://api:4000          (required)
 //   OCW_CELL_TOKEN_FILE            file with the cell bearer token (or OCW_CELL_TOKEN)    (required)
 //   OPENCLAW_GATEWAY_TOKEN[_FILE]  operator token (random per boot when unset; port is loopback-only)
+//   OCW_BUNDLED_PLUGINS            bundled search plugins to load (default duckduckgo,searxng; none)
+//   OCW_SEARXNG_URL                SearXNG base URL (compose profile `search`); switches the provider
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { renderConfig } from "./render-config.mjs";
+import { BUNDLED_PLUGINS_DIR, renderConfig } from "./render-config.mjs";
 
 function fail(message) {
   console.error(`[ocw-cell] ${message}`);
@@ -42,8 +44,11 @@ const configPath = process.env.OPENCLAW_CONFIG_PATH ?? path.join(stateDir, "open
 process.env.OPENCLAW_STATE_DIR = stateDir;
 process.env.OPENCLAW_CONFIG_PATH = configPath;
 
-const { config, errors } = renderConfig(process.env);
+// An image built without a bundled plugin (or a local bind-mount setup) must still boot: skip it.
+const bundledPresent = (id) => existsSync(path.join(BUNDLED_PLUGINS_DIR, id, "openclaw.plugin.json"));
+const { config, errors, skipped } = renderConfig(process.env, { bundledPresent });
 if (errors.length > 0) fail(`invalid configuration:\n  - ${errors.join("\n  - ")}`);
+for (const id of skipped) console.log(`[ocw-cell] bundled plugin ${id} missing from the image; skipped`);
 
 mkdirSync(path.dirname(configPath), { recursive: true });
 // The rendered config is authoritative on every boot. OpenClaw otherwise sees it as a suspicious
@@ -54,7 +59,7 @@ mkdirSync(path.dirname(configPath), { recursive: true });
 for (const stale of [`${configPath}.bak`, `${configPath}.last-good`]) rmSync(stale, { force: true });
 writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 console.log(
-  `[ocw-cell] base config rendered (plugins.allow=${config.plugins.allow.join(",")}); bots + providers come from the Agent Channel API`,
+  `[ocw-cell] base config rendered (plugins.allow=${config.plugins.allow.join(",")}, web search=${config.tools.web.search.provider}); bots + providers come from the Agent Channel API`,
 );
 
 const argv = process.argv.slice(2);

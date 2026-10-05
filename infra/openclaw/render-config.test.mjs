@@ -1,12 +1,12 @@
 // node --test 'infra/**/*.test.mjs'
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { DENIED_TOOLS, renderConfig } from "./render-config.mjs";
+import { BUNDLED_PLUGINS_DIR, DANGEROUS_TOOLS, renderConfig } from "./render-config.mjs";
 
 const base = { OCW_API_URL: "http://api:4000", OCW_CELL_TOKEN_FILE: "/run/secrets/ocw_cell_token" };
 
 describe("renderConfig", () => {
-  it("locks the gateway down: loopback, no control UI, no mDNS, no update check, no memory, tools off", () => {
+  it("locks the gateway down: loopback, no control UI, no mDNS, no update check, no memory slot", () => {
     const { config, errors } = renderConfig(base);
     assert.deepEqual(errors, []);
     assert.equal(config.gateway.bind, "loopback");
@@ -14,14 +14,119 @@ describe("renderConfig", () => {
     assert.equal(config.discovery.mdns.mode, "off");
     assert.equal(config.update.checkOnStart, false);
     assert.equal(config.plugins.slots.memory, "none");
-    assert.deepEqual(config.plugins.allow, ["ocw", "openai"]);
     assert.deepEqual(config.plugins.entries.openai, { enabled: true, config: { personality: "off" } });
     assert.deepEqual(config.plugins.deny, ["codex"]);
+    assert.equal(config.agents.defaults.heartbeat.every, "0m");
+  });
+
+  it("tools are an allowlist: minimal profile + explicit dangerous denies, never the wildcard or a web tool", () => {
+    const { config } = renderConfig(base);
     assert.equal(config.tools.profile, "minimal");
     assert.equal(config.tools.toolSearch, false);
     assert.equal(config.tools.elevated.enabled, false);
-    assert.deepEqual(config.tools.deny, DENIED_TOOLS);
-    assert.equal(config.agents.defaults.heartbeat.every, "0m");
+    assert.deepEqual(config.tools.deny, DANGEROUS_TOOLS);
+    assert.equal(config.tools.deny.includes("*"), false);
+    for (const t of ["web_search", "web_fetch", "ocw_memory_save"])
+      assert.equal(config.tools.deny.includes(t), false);
+    for (const t of [
+      "exec",
+      "process",
+      "read",
+      "write",
+      "edit",
+      "apply_patch",
+      "browser",
+      "canvas",
+      "gateway",
+    ]) {
+      assert.ok(config.tools.deny.includes(t), `${t} must be denied`);
+    }
+    for (const t of [
+      "openclaw",
+      "message",
+      "nodes",
+      "x_search",
+      "code_execution",
+      "group:runtime",
+      "group:fs",
+    ]) {
+      assert.ok(config.tools.deny.includes(t), `${t} must be denied`);
+    }
+    for (const g of [
+      "group:ui",
+      "group:automation",
+      "group:nodes",
+      "group:sessions",
+      "group:messaging",
+      "group:media",
+    ]) {
+      assert.ok(config.tools.deny.includes(g), `${g} must be denied`);
+    }
+  });
+
+  it("search is managed and hookable: provider pinned, hosted Codex search off, fetch capped", () => {
+    const { config } = renderConfig(base);
+    assert.deepEqual(config.tools.web.search, {
+      enabled: true,
+      provider: "duckduckgo",
+      maxResults: 5,
+      openaiCodex: { enabled: false },
+    });
+    assert.deepEqual(config.tools.web.fetch, { enabled: true, maxCharsCap: 20000, maxRedirects: 3 });
+  });
+
+  it("bundles DuckDuckGo and SearXNG plugins by default; SearXNG URL switches the provider", () => {
+    const { config, skipped } = renderConfig(base);
+    assert.deepEqual(skipped, []);
+    assert.deepEqual(config.plugins.allow, ["ocw", "openai", "duckduckgo", "searxng"]);
+    assert.ok(config.plugins.load.paths.includes(`${BUNDLED_PLUGINS_DIR}/duckduckgo`));
+    assert.ok(config.plugins.load.paths.includes(`${BUNDLED_PLUGINS_DIR}/searxng`));
+    assert.equal(config.plugins.entries.searxng, undefined);
+
+    const withSearx = renderConfig({ ...base, OCW_SEARXNG_URL: "http://searxng:8080" }).config;
+    assert.equal(withSearx.tools.web.search.provider, "searxng");
+    assert.deepEqual(withSearx.plugins.entries.searxng, {
+      enabled: true,
+      config: { webSearch: { baseUrl: `$${"{"}OCW_SEARXNG_URL}` } }, // an env reference
+    });
+    // The URL itself never lands in the file (env reference only).
+    assert.equal(JSON.stringify(withSearx).includes("searxng:8080"), false);
+  });
+
+  it("OCW_BUNDLED_PLUGINS=none removes the bundled plugins from allow and paths", () => {
+    const { config, skipped } = renderConfig({
+      ...base,
+      OCW_BUNDLED_PLUGINS: "none",
+      OCW_SEARXNG_URL: "http://s:8080",
+    });
+    assert.deepEqual(config.plugins.allow, ["ocw", "openai"]);
+    assert.equal(
+      config.plugins.load.paths.some((p) => p.startsWith(BUNDLED_PLUGINS_DIR)),
+      false,
+    );
+    assert.equal(config.plugins.entries.searxng, undefined);
+    assert.deepEqual(skipped, []);
+  });
+
+  it("a bundled plugin missing from the image is skipped (allow, paths, entries), never an error", () => {
+    const { config, errors, skipped } = renderConfig(
+      { ...base, OCW_SEARXNG_URL: "http://searxng:8080" },
+      { bundledPresent: (id) => id !== "searxng" },
+    );
+    assert.deepEqual(errors, []);
+    assert.deepEqual(skipped, ["searxng"]);
+    assert.deepEqual(config.plugins.allow, ["ocw", "openai", "duckduckgo"]);
+    assert.equal(config.plugins.load.paths.includes(`${BUNDLED_PLUGINS_DIR}/searxng`), false);
+    assert.equal(config.plugins.entries.searxng, undefined);
+    // Falls back to the plugin that is actually there.
+    assert.equal(config.tools.web.search.provider, "duckduckgo");
+  });
+
+  it("DMs never share a session; dates are deterministic; no background memory flush", () => {
+    const { config } = renderConfig(base);
+    assert.deepEqual(config.session, { dmScope: "per-channel-peer" });
+    assert.equal(config.agents.defaults.userTimezone, "UTC");
+    assert.equal(config.agents.defaults.compaction.memoryFlush.enabled, false);
   });
 
   it("never writes secrets: no token, no provider keys, no providers or bots at all", () => {

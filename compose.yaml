@@ -75,6 +75,9 @@ services:
       OCW_CELL_TOKEN: ${OCW_CELL_TOKEN:?Set OCW_CELL_TOKEN in .env (run pnpm setup:env)}
       OCW_MODEL_PROVIDER: ${OCW_MODEL_PROVIDER:-}
       OCW_MOCK_MODEL_BASE_URL: ${OCW_MOCK_MODEL_BASE_URL:-http://fake-model:18999/v1}
+      # Web search for bots (D-09): DuckDuckGo is bundled in the cell; SearXNG needs the `search` profile.
+      OCW_SEARXNG_URL: ${OCW_SEARXNG_URL:-}
+      OCW_BUNDLED_PLUGINS: ${OCW_BUNDLED_PLUGINS:-}
       # Optional password reset e-mails; without SMTP admins issue reset links.
       OCW_SMTP_URL: ${OCW_SMTP_URL:-}
       OCW_MAIL_FROM: ${OCW_MAIL_FROM:-}
@@ -117,6 +120,9 @@ services:
       OCW_CELL_TOKEN_FILE: /run/secrets/ocw_cell_token
       # The gateway peaks around 1.1-1.2 GB RSS during a turn; cap the V8 heap.
       NODE_OPTIONS: ${OCW_CELL_NODE_OPTIONS:---max-old-space-size=512}
+      # Same meaning as on the api service: which bundled search plugins load, and the SearXNG URL.
+      OCW_SEARXNG_URL: ${OCW_SEARXNG_URL:-}
+      OCW_BUNDLED_PLUGINS: ${OCW_BUNDLED_PLUGINS:-}
     secrets:
       - ocw_cell_token
     volumes:
@@ -130,6 +136,21 @@ services:
     depends_on:
       api:
         condition: service_healthy
+
+  # Optional self-hosted meta-search for bots (D-09). Off by default; enable with
+  #   OCW_SEARXNG_URL=http://searxng:8080 OCW_SEARXNG_SECRET=<random> docker compose --profile search up -d
+  # then choose SearXNG in Settings › Bot policy. Reachable only on the compose network (no ports).
+  searxng:
+    profiles: ["search"]
+    image: searxng/searxng:2026.10.4-d48c4b555@sha256:76b0bf285aca014c7191fc4d9234c4bfb358624ac33d8883833d496c059ec072
+    restart: unless-stopped
+    environment:
+      # Required in practice: unset falls back to SearXNG's placeholder key, which SearXNG itself refuses to
+      # start with ("server.secret_key is not changed"). A `:?` guard would break `docker compose config`
+      # for everyone, because compose interpolates services of inactive profiles too.
+      SEARXNG_SECRET: ${OCW_SEARXNG_SECRET:-ultrasecretkey}
+    volumes:
+      - ./infra/searxng/settings.yml:/etc/searxng/settings.yml:ro
 
 secrets:
   ocw_cell_token:
