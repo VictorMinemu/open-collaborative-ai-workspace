@@ -360,6 +360,33 @@ describe("session controls (D-07, D-08, D-14)", () => {
     await eventually(async () => (await detail(sessionId)).session.runningSince === null);
   });
 
+  it("a diff.result stores the session's diff stat and shows it live (Task 3)", async () => {
+    const cmd = await device.command("diff.request", sessionId);
+    device.send({
+      type: "diff.result",
+      requestId: cmd.id,
+      sessionId,
+      files: [
+        { path: "src/a.ts", status: "modified", additions: 6, deletions: 1 },
+        { path: "src/b.ts", status: "added", additions: 3, deletions: 0 },
+        { path: "README.md", status: "modified", additions: 1, deletions: 1 },
+      ],
+      patch: "",
+      branch: "main",
+    });
+    device.ack(cmd.id);
+    const s = await eventually(async () => {
+      const d = await detail(sessionId);
+      return d.session.diffStat ? d.session : undefined;
+    });
+    expect(s.diffStat).toEqual({ files: 3, additions: 10, deletions: 2 });
+    const emitted = await su.query(
+      "select payload from app.stream_events where stream_id = $1 and type = 'work_session.updated' order by seq desc limit 1",
+      [`ws:${sessionId}`],
+    );
+    expect(emitted.rows[0].payload.diffStat).toEqual({ files: 3, additions: 10, deletions: 2 });
+  });
+
   it("an unknown session is a 404 for controls and settings", async () => {
     const id = randomUUID();
     expect((await admin.request("GET", `/api/v1/work-sessions/${id}/controls`)).status).toBe(404);
