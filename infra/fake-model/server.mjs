@@ -235,6 +235,9 @@ export function planToolStep(messages, offered) {
     // Diagnose directive parsing inside a real cell: what does the last user turn look like after OpenClaw?
     const raw = contentText(messages[lastUserIdx].content);
     console.log(
+      `[fake-model debug] messages=${JSON.stringify(messages.map((m) => [m.role, contentText(m.content).slice(0, 160)]))}`,
+    );
+    console.log(
       `[fake-model debug] tools offered=${offered.join(",")} directives=${directives.length} lastUser(${raw.length}) head=${JSON.stringify(raw.slice(0, 900))} tail=${JSON.stringify(raw.slice(-300))}`,
     );
   }
