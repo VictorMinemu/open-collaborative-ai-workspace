@@ -45,7 +45,9 @@ describe("runtime controls inventory document (WZC-06)", () => {
     const table = renderInventoryTable(RUNTIME_CONTROL_INVENTORY);
     for (const heading of ["### Claude Code", "### Codex", "### Work Zone UI"])
       expect(table).toContain(heading);
-    const bodyRows = table.split("\n").filter((l) => l.startsWith("| ") && !l.startsWith("| Control |"));
+    const bodyRows = table
+      .split("\n")
+      .filter((l) => l.startsWith("| ") && !l.startsWith("| Control |") && !l.startsWith("| --- "));
     expect(bodyRows).toHaveLength(RUNTIME_CONTROL_INVENTORY.length);
     const rendered = renderInventoryTable([
       { ...RUNTIME_CONTROL_INVENTORY[0]!, control: "a | b", reason: "x|y" },
