@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   AddProjectArgs,
   CheckServerArgs,
+  DaemonStatusPayload,
   EnrollArgs,
   FinishArgs,
   NoArgs,
@@ -96,5 +97,56 @@ describe("deriveStatus", () => {
     expect(s.state).toBe("online");
     expect(s.projects).toBe(2);
     expect(s.activeSessions).toBe(1);
+  });
+});
+
+describe("Full access opt-in is read-only outside the main process (ADR-0012, P-12)", () => {
+  const report = {
+    paired: true,
+    connected: true,
+    deviceName: "Mac",
+    projects: 0,
+    runtimes: [],
+    sessions: [],
+  };
+
+  it("DaemonStatusPayload accepts the daemon's opt-in and its source", () => {
+    expect(
+      DaemonStatusPayload.parse({ ...report, fullAccessOptIn: true, fullAccessSource: "env" }),
+    ).toMatchObject({ fullAccessOptIn: true, fullAccessSource: "env" });
+    expect(DaemonStatusPayload.parse(report).fullAccessOptIn).toBeUndefined();
+  });
+
+  it("deriveStatus passes it into DesktopStatus (false when absent)", () => {
+    const base = { paused: false, paired: true, daemon: "running" as const };
+    expect(deriveStatus({ ...base, report: { ...report, fullAccessOptIn: true } }).fullAccessOptIn).toBe(
+      true,
+    );
+    expect(deriveStatus({ ...base, report }).fullAccessOptIn).toBe(false);
+    expect(deriveStatus({ ...base, report: null }).fullAccessOptIn).toBe(false);
+    // The daemon is down: what the main process last read from runtime.json.
+    expect(deriveStatus({ ...base, report: null, localFullAccess: true }).fullAccessOptIn).toBe(true);
+  });
+
+  it("the web origin's preload API has no setter: its keys are unchanged", async () => {
+    let exposed: Record<string, unknown> | null = null;
+    vi.doMock("electron", () => ({
+      contextBridge: {
+        exposeInMainWorld: (_name: string, api: Record<string, unknown>) => {
+          exposed = api;
+        },
+      },
+      ipcRenderer: { invoke: vi.fn(), on: vi.fn(), removeListener: vi.fn() },
+    }));
+    await import("../preload/main");
+    vi.doUnmock("electron");
+    expect(Object.keys(exposed ?? {}).sort()).toEqual([
+      "addProject",
+      "isDesktop",
+      "listProjects",
+      "onStatus",
+      "platform",
+      "status",
+    ]);
   });
 });
