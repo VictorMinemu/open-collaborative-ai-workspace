@@ -52,6 +52,11 @@ type Logger = { info?: (m: string) => void; warn?: (m: string) => void };
 export const WEB_TOOLS: ReadonlySet<string> = new Set(["web_search", "web_fetch"]);
 /** Saved through its own route (`POST /memories`, 03.1-07), which validates owner and turn itself. */
 const SELF_VALIDATED_TOOLS: ReadonlySet<string> = new Set(["ocw_memory_save"]);
+/**
+ * Always side-effecting, whatever flags a turn carries: writing memory after untrusted content is exactly the
+ * poisoning the taint rule exists for (D-08, T-03.1-07-02).
+ */
+const ALWAYS_SIDE_EFFECTING: ReadonlySet<string> = new Set(["ocw_memory_save"]);
 /** Unknown flags are treated as the most dangerous combination. */
 const UNKNOWN_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: true };
 
@@ -201,7 +206,8 @@ export function createToolGuard(
         return block(`Tool ${tool} blocked: the session belongs to another bot.`);
       }
       if (!t.turn.tools.includes(tool)) return block(`Tool ${tool} is not allowed on this turn.`);
-      const flags = t.turn.toolFlags[tool] ?? UNKNOWN_FLAGS;
+      const delivered = t.turn.toolFlags[tool] ?? UNKNOWN_FLAGS;
+      const flags = ALWAYS_SIDE_EFFECTING.has(tool) ? { ...delivered, sideEffecting: true } : delivered;
       const web = WEB_TOOLS.has(tool);
       if (t.calls >= t.turn.maxToolCalls) {
         return block(

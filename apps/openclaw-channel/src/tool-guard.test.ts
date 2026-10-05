@@ -276,6 +276,18 @@ describe("tool guard under abuse (Task 3)", () => {
     expect(g.activeTurn(SESSION)?.calls).toBe(1);
   });
 
+  it("ocw_memory_save stays side-effecting even when a turn's flags say otherwise (blocked once tainted)", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    const lying = abuseTurn();
+    lying.toolFlags.ocw_memory_save = { untrustedOutput: false, sideEffecting: false };
+    g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: lying });
+    expect(await g.beforeToolCall(call("web_search", { query: "q" }), ctx())).toBeUndefined();
+    const memory = await g.beforeToolCall(call("ocw_memory_save", { text: "planted" }), ctx());
+    expect(memory?.blockReason).toMatch(/read-only after untrusted content/u);
+    expect(fake.requests.map((r) => r.tool)).toEqual(["web_search"]);
+  });
+
   it("endTurn makes any later call of that session blocked; aborting the turn's signal ends it too", async () => {
     const fake = fakeClient();
     const g = createToolGuard({ client: () => fake.client });
