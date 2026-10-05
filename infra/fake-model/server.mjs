@@ -220,6 +220,13 @@ export function planToolStep(messages, offered) {
   const lastUserIdx = messages.findLastIndex((m) => m.role === "user");
   if (lastUserIdx === -1) return null;
   const directives = parseDirectives(userBody(contentText(messages[lastUserIdx].content)));
+  if (process.env.FAKE_MODEL_DEBUG === "1" && offered?.length) {
+    // Diagnose directive parsing inside a real cell: what does the last user turn look like after OpenClaw?
+    const raw = contentText(messages[lastUserIdx].content);
+    console.log(
+      `[fake-model debug] tools offered=${offered.join(",")} directives=${directives.length} lastUser(${raw.length})=${JSON.stringify(raw.slice(-600))}`,
+    );
+  }
   if (directives.length === 0) return null;
   const after = messages.slice(lastUserIdx + 1);
   const calls = after.flatMap((m) =>

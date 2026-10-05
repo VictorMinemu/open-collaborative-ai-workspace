@@ -85,7 +85,7 @@ CELL_LIMIT=()
 [[ -n "${SMOKE_CELL_MEMORY:-}" ]] && CELL_LIMIT=(--memory "$SMOKE_CELL_MEMORY")
 
 # The working-tree fake model (tool-call directives, fake SearXNG /search) over the image copy: no rebuild.
-docker run -d --name "${P}-model" "${OOM[@]}" --network "$NET" --network-alias fake-model \
+docker run -d --name "${P}-model" "${OOM[@]}" --network "$NET" --network-alias fake-model -e FAKE_MODEL_DEBUG=1 \
   -v "$ROOT/infra/fake-model/server.mjs:/app/server.mjs:ro" \
   -e FAKE_MODEL_CAPTURE_DIR=/tmp/capture \
   ocw-fake-model:local >/dev/null
