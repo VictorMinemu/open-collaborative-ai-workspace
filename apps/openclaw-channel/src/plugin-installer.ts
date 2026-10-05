@@ -20,7 +20,7 @@ import { runDetached } from "./openclaw-port.js";
  *
  *   1. the event must match a row of the last `GET /cell` approved list (one refresh), and its values must be safe
  *      CLI arguments (they are never interpolated into a shell);
- *   2. the artifact is downloaded only from the configured ClawHub origin (no redirects, 50 MB, 60 s) into a private
+ *   2. the artifact is downloaded only from the configured ClawHub origin (no redirects, 50 MB, 120 s) into a private
  *      temp file, and its sha256 (and npm integrity, and ClawHub's digest header) must equal the approved ones;
  *   3. `openclaw plugins install npm-pack:<file> --force --accept-capabilities` (argv array, 120 s) applies it
  *      through the running gateway; OpenClaw's `security.installPolicy` (infra/openclaw/install-policy.mjs) re-hashes
@@ -39,7 +39,9 @@ import { runDetached } from "./openclaw-port.js";
 export const OPENCLAW_CLI = "/app/openclaw.mjs";
 export const BOOT_CACHE_FILE = "ocw-plugins.json";
 export const MAX_ARTIFACT_BYTES = 50 * 1024 * 1024;
-const DOWNLOAD_TIMEOUT_MS = 60_000;
+// The real ClawHub streams `/artifact/download` itself (HTTP 200, no redirect; observed 2026-10-05) but slowly: the
+// 80 KB DuckDuckGo tarball took 3–20 s, and one attempt delivered only half of it in 30 s.
+const DOWNLOAD_TIMEOUT_MS = 120_000;
 const INSTALL_TIMEOUT_MS = 120_000;
 const INSPECT_TIMEOUT_MS = 60_000;
 const UNINSTALL_TIMEOUT_MS = 120_000;
@@ -382,6 +384,7 @@ export function createPluginInstaller(deps: PluginInstallerDeps) {
     let res: Response;
     try {
       res = await fetchImpl(url, {
+        // ClawHub serves the artifact from its own origin; a redirect elsewhere is refused (the origin pin holds).
         redirect: "error",
         headers: { accept: "application/octet-stream" },
         signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
