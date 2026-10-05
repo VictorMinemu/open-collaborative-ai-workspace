@@ -262,3 +262,79 @@ describe("consumeTurn and the UTC day", () => {
     expect(limitNotice({ botName: "x", limit: 3 })).toContain("daily limit of 3 replies");
   });
 });
+
+describe("a team bot at its limit in channels", () => {
+  let archieId: string;
+  let ch1: string;
+  let ch2: string;
+
+  beforeAll(async () => {
+    const team = await ok(
+      admin.request("POST", "/api/v1/agents", {
+        name: "Archie",
+        instructions: "You are Archie.",
+        modelProvider: "mock",
+        modelId: "mock-1",
+      }),
+    );
+    archieId = team.id;
+    await ok(admin.request("PATCH", `/api/v1/agents/${archieId}/capabilities`, { dailyLimit: 1 }));
+    ch1 = (await ok(admin.request("POST", "/api/v1/channels", { name: "busy-one" }))).id;
+    ch2 = (await ok(admin.request("POST", "/api/v1/channels", { name: "busy-two" }))).id;
+  });
+
+  it("notifies once per conversation per day, in the over-limit message's thread", async () => {
+    await say(admin, ch1, "@archie first");
+    expect(await cellEvents(archieId)).toHaveLength(1);
+    expect(await botMessages(archieId, ch1)).toHaveLength(0);
+
+    const second = await say(admin, ch1, "@archie second");
+    const third = await say(admin, ch1, "@archie third");
+    expect(await cellEvents(archieId)).toHaveLength(1);
+    const inCh1 = await botMessages(archieId, ch1);
+    expect(inCh1).toHaveLength(1);
+    expect(inCh1[0]).toMatchObject({
+      body: "I've reached my daily limit of 1 reply, so I can't answer right now. I'll be back after 00:00 UTC.",
+      thread_id: second.id,
+      client_message_id: `limit:${second.id}`,
+    });
+    expect(inCh1.some((m) => m.thread_id === third.id)).toBe(false);
+
+    // A second channel the same day gets its own (single) notice.
+    const other = await say(admin, ch2, "@archie over here");
+    await say(admin, ch2, "@archie again");
+    const inCh2 = await botMessages(archieId, ch2);
+    expect(inCh2).toHaveLength(1);
+    expect(inCh2[0]).toMatchObject({ thread_id: other.id });
+    expect(await cellEvents(archieId)).toHaveLength(1);
+  });
+
+  it("audits every over-limit delivery, with notified true only when a notice went out", async () => {
+    const rows = await limitAudits(archieId);
+    expect(rows).toHaveLength(4);
+    expect(rows.map((r) => [r.metadata.conversationId, r.metadata.notified])).toEqual([
+      [ch1, true],
+      [ch1, false],
+      [ch2, true],
+      [ch2, false],
+    ]);
+    for (const r of rows) {
+      expect(r).toMatchObject({
+        actor_kind: "agent",
+        actor_id: archieId,
+        result: "denied",
+        metadata: { limit: 1, conversationKind: "channel" },
+      });
+    }
+  });
+
+  it("admins (team bot) and owners (personal bot) see exactly what the counter holds", async () => {
+    const team = await ok(admin.request("GET", `/api/v1/agents/${archieId}/capabilities`));
+    expect(team.usage).toEqual({ today: await turnsToday(archieId), limit: 1, resetsAt: nextResetAt() });
+    expect(team.usage.today).toBe(1);
+    const personal = await ok(alex.request("GET", `/api/v1/agents/${alexBotId}/capabilities`));
+    expect(personal.usage.today).toBe(await turnsToday(alexBotId));
+    const list = await ok(admin.request("GET", "/api/v1/bot-governance"));
+    expect(list.bots.find((b: Json) => b.id === alexBotId).usage.today).toBe(await turnsToday(alexBotId));
+  });
+});
