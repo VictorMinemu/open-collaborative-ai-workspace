@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync, realpathSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -23,7 +23,12 @@ class FakeAppServer extends EventEmitter implements AppServerProcess {
   readonly stdout = new PassThrough();
   readonly received: Msg[] = [];
   killed: string[] = [];
-  sandboxType = "workspaceWrite";
+  /** Forces the sandbox the fake reports on thread/start (null = what the client asked for). */
+  sandboxType: string | null = null;
+  /** When the fake sends `thread/settings/updated` for turn/start overrides (A5 is what the fixture shows). */
+  settingsUpdates: "none" | "before" | "after" = "none";
+  /** Thread settings as the fake currently holds them (thread/start + sticky turn/start overrides). */
+  threadSettings: Record<string, unknown> = {};
   private nextServerId = 1000;
   private readonly waiters = new Map<number, (m: Msg) => void>();
   onTurnStart: (params: Record<string, unknown>) => void = () => undefined;
@@ -60,6 +65,20 @@ class FakeAppServer extends EventEmitter implements AppServerProcess {
     });
   }
 
+  sendSettings(over: Record<string, unknown> = {}): void {
+    this.notify("thread/settings/updated", {
+      threadId: "thread-1",
+      threadSettings: { cwd: "/abs/cwd", modelProvider: "openai", summary: null, ...this.threadSettings, ...over },
+    });
+  }
+
+  completeTurn(): void {
+    this.notify("turn/completed", {
+      threadId: "thread-1",
+      turn: { id: "turn-1", status: "completed", error: null, items: [] },
+    });
+  }
+
   kill(signal: NodeJS.Signals = "SIGTERM"): void {
     this.killed.push(signal);
     this.stdout.end();
@@ -79,23 +98,42 @@ class FakeAppServer extends EventEmitter implements AppServerProcess {
           result: { userAgent: "fake", codexHome: "/x", platformFamily: "unix", platformOs: "macos" },
         });
       case "thread/start":
-      case "thread/resume":
+      case "thread/resume": {
+        const sandbox = this.sandboxType ?? SANDBOX_TYPES[String(m.params?.sandbox)] ?? "workspaceWrite";
+        this.threadSettings = {
+          model: (m.params?.model as string | undefined) ?? "gpt-test",
+          effort: "medium",
+          serviceTier: "default",
+          approvalPolicy: m.params?.approvalPolicy,
+          approvalsReviewer: m.params?.approvalsReviewer ?? "user",
+          sandboxPolicy: sandbox === "readOnly" ? { type: sandbox, networkAccess: false } : { type: sandbox },
+        };
         return this.send({
           id: m.id,
           result: {
             thread: { id: "thread-1" },
-            model: "gpt-test",
-            approvalPolicy: m.params?.approvalPolicy,
-            sandbox: { type: this.sandboxType },
+            model: this.threadSettings.model,
+            serviceTier: "default",
+            reasoningEffort: "medium",
+            approvalPolicy: this.threadSettings.approvalPolicy,
+            approvalsReviewer: this.threadSettings.approvalsReviewer,
+            sandbox: this.threadSettings.sandboxPolicy,
           },
         });
-      case "turn/start":
+      }
+      case "turn/start": {
+        const p = m.params ?? {};
+        for (const k of ["model", "effort", "serviceTier", "approvalPolicy", "approvalsReviewer", "sandboxPolicy"])
+          if (p[k] !== undefined && p[k] !== null) this.threadSettings[k] = p[k];
+        if (this.settingsUpdates === "before") this.sendSettings();
         this.send({
           id: m.id,
           result: { turn: { id: "turn-1", status: "inProgress", items: [], error: null } },
         });
+        if (this.settingsUpdates === "after") this.sendSettings();
         this.notify("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
-        return this.onTurnStart(m.params ?? {});
+        return this.onTurnStart(p);
+      }
       case "turn/interrupt":
         this.send({ id: m.id, result: {} });
         return this.notify("turn/completed", {
@@ -109,6 +147,12 @@ class FakeAppServer extends EventEmitter implements AppServerProcess {
     }
   }
 }
+
+const SANDBOX_TYPES: Record<string, string> = {
+  "read-only": "readOnly",
+  "workspace-write": "workspaceWrite",
+  "danger-full-access": "dangerFullAccess",
+};
 
 const wait = (ms = 5) => new Promise((r) => setTimeout(r, ms));
 const saved = { ...process.env };
@@ -136,7 +180,7 @@ function setup() {
 }
 
 describe("CodexRuntime — handshake, sandbox and billing", () => {
-  it("initializes and starts a workspace-write, on-request thread", async () => {
+  it("initializes and starts a Supervised thread: read-only sandbox, untrusted approvals, user reviewer", async () => {
     process.env.OPENAI_API_KEY = "sk-should-not-leak";
     process.env.OCW_DEVICE_TOKEN = "device-secret";
     const { start, events, cwd } = setup();
@@ -144,8 +188,9 @@ describe("CodexRuntime — handshake, sandbox and billing", () => {
     expect(server.received.map((m) => m.method)).toEqual(["initialize", "initialized", "thread/start"]);
     expect(server.received[2]?.params).toMatchObject({
       cwd,
-      approvalPolicy: "on-request",
-      sandbox: "workspace-write",
+      approvalPolicy: "untrusted",
+      approvalsReviewer: "user",
+      sandbox: "read-only",
     });
     expect(server.env.OPENAI_API_KEY).toBeUndefined();
     expect(server.env.OCW_DEVICE_TOKEN).toBeUndefined();
@@ -157,8 +202,26 @@ describe("CodexRuntime — handshake, sandbox and billing", () => {
         model: "gpt-test",
         permissionMode: "default",
       },
+      {
+        type: "session.settings",
+        model: "gpt-test",
+        effort: "medium",
+        serviceTier: "default",
+        fastMode: false,
+        permissionMode: "default",
+      },
       { type: "session.state", status: "idle" },
     ]);
+  });
+
+  it("starts acceptEdits on a workspace-write, on-request thread", async () => {
+    const { start } = setup();
+    const server = await start("acceptEdits");
+    expect(server.received[2]?.params).toMatchObject({
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
+      sandbox: "workspace-write",
+    });
   });
 
   it("uses a read-only sandbox for plan mode and resumes by thread id", async () => {
@@ -200,13 +263,14 @@ describe("CodexRuntime — handshake, sandbox and billing", () => {
     ).rejects.toBeInstanceOf(RuntimeError);
   });
 
-  it("refuses platform modes outside its capabilities (auto, fullAccess) before spawning anything", async () => {
-    const { runtime, cwd } = setup();
-    for (const mode of ["auto", "fullAccess"] as const) {
+  it("refuses platform modes outside its capabilities (fullAccess) before spawning anything", async () => {
+    const { runtime, cwd, servers } = setup();
+    for (const mode of ["fullAccess"] as const) {
       await expect(
         runtime.start({ sessionId: `s5-${mode}`, cwd, permissionMode: mode }, () => undefined),
       ).rejects.toMatchObject({ code: "permission_mode_rejected" });
     }
+    expect(servers).toHaveLength(0);
   });
 
   it("keeps OPENAI_API_KEY only with useApiKey", () => {
@@ -292,6 +356,7 @@ describe("CodexRuntime — turns and approvals", () => {
     const flow = events.map((e) => e.type);
     expect(flow).toEqual([
       "session.started",
+      "session.settings",
       "session.state",
       "prompt.started",
       "session.state",
@@ -387,5 +452,260 @@ describe("CodexRuntime — turns and approvals", () => {
       { type: "session.error" },
       { type: "session.state", status: "failed" },
     ]);
+  });
+});
+
+const settingsEvents = (events: SessionEvent[]) =>
+  events.filter((e): e is Extract<SessionEvent, { type: "session.settings" }> => e.type === "session.settings");
+const turnStarts = (server: FakeAppServer) => server.received.filter((m) => m.method === "turn/start");
+
+describe("CodexRuntime — settings ride on the next turn/start (D-07, D-14)", () => {
+  it("configure() while idle sends nothing; the next turn/start carries the model and the Supervised policy", async () => {
+    const { start, runtime, events } = setup();
+    const server = await start("default");
+    const before = server.received.length;
+    await runtime.configure("s1", { model: "gpt-5.5" });
+    await wait(10);
+    expect(server.received).toHaveLength(before);
+
+    await runtime.prompt("s1", { promptId: "p1", text: "hi" });
+    await wait(10);
+    expect(turnStarts(server)[0]?.params).toMatchObject({
+      model: "gpt-5.5",
+      approvalPolicy: "untrusted",
+      approvalsReviewer: "user",
+      sandboxPolicy: { type: "readOnly", networkAccess: false },
+    });
+    // No experimental field is ever sent.
+    for (const m of server.received) {
+      expect(m.params ?? {}).not.toHaveProperty("collaborationMode");
+      expect(m.params ?? {}).not.toHaveProperty("permissions");
+      expect(m.params ?? {}).not.toHaveProperty("serviceTierForTurn");
+      expect(["thread/settings/update", "turn/settings/update"]).not.toContain(m.method);
+    }
+    // Synthesized from the overrides (the fake sends no thread/settings/updated).
+    expect(settingsEvents(events).at(-1)).toEqual({
+      type: "session.settings",
+      model: "gpt-5.5",
+      effort: "medium",
+      serviceTier: "default",
+      fastMode: false,
+      permissionMode: "default",
+    });
+  });
+
+  it("a change made during a running turn is held and rides on the following turn/start; changes merge, last wins", async () => {
+    const { start, runtime } = setup();
+    const server = await start("acceptEdits");
+    await runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await wait(10);
+    const during = server.received.length;
+    await runtime.configure("s1", { model: "gpt-5.5", effort: "low" });
+    await runtime.configure("s1", { model: "gpt-6", fastMode: true });
+    await runtime.prompt("s1", { promptId: "p2", text: "two" }); // queued behind p1
+    await wait(10);
+    expect(server.received).toHaveLength(during);
+    expect(turnStarts(server)[0]?.params).not.toHaveProperty("model");
+
+    server.completeTurn();
+    await wait(20);
+    expect(turnStarts(server)).toHaveLength(2);
+    expect(turnStarts(server)[1]?.params).toMatchObject({
+      model: "gpt-6",
+      effort: "low",
+      serviceTier: "priority",
+      approvalPolicy: "on-request",
+      sandboxPolicy: { type: "workspaceWrite" },
+    });
+  });
+
+  it("emits session.settings once per applied change, from thread/settings/updated when Codex sends it", async () => {
+    for (const when of ["before", "after"] as const) {
+      const { start, runtime, events } = setup();
+      const server = await start("default");
+      server.settingsUpdates = when;
+      const startCount = settingsEvents(events).length;
+      await runtime.configure("s1", { model: "gpt-5.5" });
+      await runtime.prompt("s1", { promptId: "p1", text: "hi" });
+      await wait(20);
+      const after = settingsEvents(events).slice(startCount);
+      expect(after, when).toHaveLength(1);
+      expect(after[0]).toMatchObject({ model: "gpt-5.5", permissionMode: "default" });
+
+      // A turn without changes reports nothing new.
+      server.completeTurn();
+      await wait(10);
+      await runtime.prompt("s1", { promptId: "p2", text: "again" });
+      await wait(20);
+      expect(settingsEvents(events).slice(startCount), when).toHaveLength(1);
+    }
+  });
+
+  it("refuses a mode outside the adapter's capabilities and a selectable context window", async () => {
+    const { start, runtime } = setup();
+    await start();
+    await expect(runtime.configure("s1", { permissionMode: "fullAccess" })).rejects.toMatchObject({
+      code: "settings_rejected",
+    });
+    await expect(runtime.configure("s1", { contextWindow: 1_000_000 })).rejects.toMatchObject({
+      code: "settings_rejected",
+    });
+    await expect(runtime.configure("nope", { model: "x" })).rejects.toMatchObject({ code: "unknown_session" });
+  });
+
+  it("a permission mode change sends the new policy on the next turn and reports it", async () => {
+    const { start, runtime, events } = setup();
+    const server = await start("default");
+    await runtime.configure("s1", { permissionMode: "acceptEdits" });
+    await runtime.prompt("s1", { promptId: "p1", text: "edit" });
+    await wait(10);
+    expect(turnStarts(server)[0]?.params).toMatchObject({
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
+      sandboxPolicy: { type: "workspaceWrite", writableRoots: [expect.any(String)] },
+    });
+    expect(settingsEvents(events).at(-1)).toMatchObject({ permissionMode: "acceptEdits" });
+  });
+});
+
+// ------------------------------------------------------------------------------------------------
+// Replay of a turn recorded against the real codex app-server 0.160.0 (scripts/record-codex-fixture.ts).
+
+interface RpcLine {
+  dir: "in" | "out";
+  msg: Msg;
+}
+
+const FIXTURE_DIR = join(import.meta.dirname, "__fixtures__");
+const FIXTURE_ROOT = "/tmp/ocw-fixture-repo";
+
+function loadFixture(name: string): RpcLine[] {
+  return readFileSync(join(FIXTURE_DIR, name), "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as RpcLine);
+}
+
+/**
+ * Plays the recorded app-server side back in order: every time the client writes a message, the recorded
+ * server lines up to the next recorded client line are sent. Client request ids are deterministic (1, 2, …).
+ */
+class ReplayAppServer extends EventEmitter implements AppServerProcess {
+  readonly stdin = new PassThrough();
+  readonly stdout = new PassThrough();
+  readonly sent: Msg[] = [];
+  private i = 0;
+
+  constructor(private readonly lines: RpcLine[]) {
+    super();
+    let buf = "";
+    this.stdin.setEncoding("utf8");
+    this.stdin.on("data", (c: string) => {
+      buf += c;
+      let n = buf.indexOf("\n");
+      while (n >= 0) {
+        const line = buf.slice(0, n);
+        buf = buf.slice(n + 1);
+        if (line) this.onClient(JSON.parse(line) as Msg);
+        n = buf.indexOf("\n");
+      }
+    });
+    setImmediate(() => this.flush());
+  }
+
+  private onClient(m: Msg): void {
+    this.sent.push(m);
+    if (this.lines[this.i]?.dir === "out") this.i++;
+    this.flush();
+  }
+
+  private flush(): void {
+    while (this.i < this.lines.length && this.lines[this.i]?.dir === "in") {
+      this.stdout.write(`${JSON.stringify(this.lines[this.i]?.msg)}\n`);
+      this.i++;
+    }
+  }
+
+  kill(): void {
+    this.stdout.end();
+    setImmediate(() => this.emit("exit", 0));
+  }
+}
+
+describe("CodexRuntime — recorded Supervised write (codex-cli 0.160.0, read-only + untrusted)", () => {
+  const lines = loadFixture("codex-0.160.0.supervised-write.rpc.jsonl");
+  const out = (method: string) => lines.filter((l) => l.dir === "out" && l.msg.method === method);
+
+  it("the recording asked for a read-only sandbox with untrusted approvals reviewed by the user", () => {
+    expect(out("thread/start")[0]?.msg.params).toMatchObject({
+      cwd: FIXTURE_ROOT,
+      sandbox: "read-only",
+      approvalPolicy: "untrusted",
+      approvalsReviewer: "user",
+    });
+    expect(out("turn/start")[0]?.msg.params).toMatchObject({
+      effort: "low",
+      approvalPolicy: "untrusted",
+      approvalsReviewer: "user",
+      sandboxPolicy: { type: "readOnly" },
+    });
+    expect(lines.filter((l) => l.msg.method === "turn/completed")).toHaveLength(1);
+  });
+
+  it("no file change completed with a write", () => {
+    const writes = lines.filter(
+      (l) =>
+        l.msg.method === "item/completed" &&
+        (l.msg.params as { item?: { type?: string; status?: string } }).item?.type === "fileChange" &&
+        (l.msg.params as { item?: { status?: string } }).item?.status === "completed",
+    );
+    expect(writes).toEqual([]);
+  });
+
+  it("replays through the adapter: the same requests, an approval before any write, declined", async () => {
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ocw-codex-replay-")));
+    let server: ReplayAppServer | null = null;
+    const events: SessionEvent[] = [];
+    const runtime = new CodexRuntime({
+      spawnAppServer: () => {
+        server = new ReplayAppServer(lines);
+        return server;
+      },
+    });
+    const completed = new Promise<void>((resolve) => {
+      void runtime
+        .start({ sessionId: "fixture-session", cwd, permissionMode: "default" }, (ev) => {
+          events.push(ev);
+          if (ev.type === "approval.requested") runtime.resolveApproval("fixture-session", ev.approvalId, "deny");
+          if (ev.type === "prompt.completed") resolve();
+        })
+        .then(() => runtime.configure("fixture-session", { effort: "low" }))
+        .then(() =>
+          runtime.prompt("fixture-session", {
+            promptId: "prompt-1",
+            text: "Create a file named note.txt containing the word hi.",
+          }),
+        );
+    });
+    await completed;
+    const replay = server as unknown as ReplayAppServer;
+    // The adapter sends the same client requests, in the same order, as the recording.
+    const recordedMethods = lines.filter((l) => l.dir === "out" && l.msg.method).map((l) => l.msg.method);
+    expect(replay.sent.filter((m) => m.method).map((m) => m.method)).toEqual(
+      recordedMethods.filter((m) => m !== "turn/interrupt"),
+    );
+    expect(replay.sent.find((m) => m.method === "turn/start")?.params).toEqual(
+      { ...out("turn/start")[0]?.msg.params, sandboxPolicy: expect.any(Object) },
+    );
+
+    const types = events.map((e) => e.type);
+    const firstApproval = types.indexOf("approval.requested");
+    expect(firstApproval).toBeGreaterThan(-1);
+    expect(events.find((e) => e.type === "approval.resolved")).toMatchObject({ decision: "deny" });
+    const approvedWrites = events.filter(
+      (e) => e.type === "tool.completed" && e.ok && e.summary.startsWith("Edited"),
+    );
+    expect(approvedWrites).toEqual([]);
+    expect(events.at(-1)?.type === "prompt.completed" || types.includes("prompt.completed")).toBe(true);
   });
 });
