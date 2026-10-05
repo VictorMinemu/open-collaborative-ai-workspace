@@ -78,6 +78,10 @@ services:
       # Web search for bots (D-09): DuckDuckGo is bundled in the cell; SearXNG needs the `search` profile.
       OCW_SEARXNG_URL: ${OCW_SEARXNG_URL:-}
       OCW_BUNDLED_PLUGINS: ${OCW_BUNDLED_PLUGINS:-}
+      # Optional stdio MCP sandbox (profile `mcp-sandbox`, D-13): the sidecar URL as seen from the cell and the vetted
+      # servers baked into its image (infra/mcp-sandbox/servers.json ids). Empty = admins can only add remote servers.
+      OCW_MCP_SANDBOX_URL: ${OCW_MCP_SANDBOX_URL:-}
+      OCW_MCP_SANDBOX_SERVERS: ${OCW_MCP_SANDBOX_SERVERS:-}
       # Optional password reset e-mails; without SMTP admins issue reset links.
       OCW_SMTP_URL: ${OCW_SMTP_URL:-}
       OCW_MAIL_FROM: ${OCW_MAIL_FROM:-}
@@ -127,6 +131,10 @@ services:
       - ocw_cell_token
     volumes:
       - openclaw-state:/home/node/.openclaw
+    # `mcp-sandbox` is internal and shared only with the stdio MCP sidecar (empty unless that profile runs).
+    networks:
+      - default
+      - mcp-sandbox
     healthcheck:
       test: ["CMD", "node", "dist/docker-healthcheck.js"]
       interval: 10s
@@ -151,6 +159,36 @@ services:
       SEARXNG_SECRET: ${OCW_SEARXNG_SECRET:-ultrasecretkey}
     volumes:
       - ./infra/searxng/settings.yml:/etc/searxng/settings.yml:ro
+
+  # Optional stdio MCP sandbox (D-13, infra/mcp-sandbox/README.md). Vetted, pinned stdio MCP servers baked into a
+  # separate image run here, never inside the OpenClaw gateway container, and are exposed to the cell as remote
+  # streamable-HTTP servers at http://mcp-sandbox:8080/<id>/mcp. Off by default; enable with
+  #   OCW_MCP_SANDBOX_URL=http://mcp-sandbox:8080 OCW_MCP_SANDBOX_SERVERS=everything docker compose --profile mcp-sandbox up -d
+  # No secrets, no volumes, no published ports, read-only root, no capabilities, and only an internal network shared
+  # with the cell (no egress).
+  mcp-sandbox:
+    profiles: ["mcp-sandbox"]
+    build:
+      context: infra/mcp-sandbox
+    image: ocw-mcp-sandbox:local
+    restart: unless-stopped
+    init: true
+    user: node
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    networks:
+      - mcp-sandbox
+
+networks:
+  mcp-sandbox:
+    internal: true
 
 secrets:
   ocw_cell_token:

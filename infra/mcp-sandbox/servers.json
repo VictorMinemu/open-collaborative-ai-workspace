@@ -1,0 +1,10 @@
+[
+  {
+    "id": "everything",
+    "package": "@modelcontextprotocol/server-everything",
+    "version": "2026.8.31",
+    "command": "node",
+    "args": ["node_modules/@modelcontextprotocol/server-everything/dist/index.js", "stdio"],
+    "env": []
+  }
+]
