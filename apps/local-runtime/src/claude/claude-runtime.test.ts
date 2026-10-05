@@ -455,6 +455,102 @@ describe("ClaudeCodeRuntime — settings between turns (D-07, D-14)", () => {
   });
 });
 
+const PROBE_MODELS: ModelInfo[] = [
+  { value: "default", resolvedModel: "claude-opus-5-5", displayName: "Default", description: "Opus 5.5" },
+  {
+    value: "opus",
+    resolvedModel: "claude-opus-5-5",
+    displayName: "Opus",
+    description: "Opus 5.5",
+    supportsEffort: true,
+    supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"],
+    supportsFastMode: true,
+    supportsAutoMode: true,
+  },
+  { value: "claude-opus-4-6", displayName: "Opus 4.6", description: "Older", supportsEffort: true },
+  { value: "haiku", displayName: "Haiku", description: "Fast" },
+];
+
+const prepareProbe = (q: FakeQuery) => {
+  q.models = PROBE_MODELS;
+  q.windows = {
+    opus: 1_000_000,
+    "opus[1m]": 1_000_000,
+    "claude-opus-4-6": 200_000,
+    "claude-opus-4-6[1m]": 1_000_000,
+    haiku: 200_000,
+  };
+};
+
+describe("ClaudeCodeRuntime — catalog() (no turn, D-08 … D-11)", () => {
+  it("opens one throw-away query, reads the models, probes the windows, closes it and sends no prompt", async () => {
+    const { runtime, queries } = setup({ prepare: prepareProbe });
+    const catalog = await runtime.catalog();
+    expect(queries).toHaveLength(1);
+    const q = queries[0] as FakeQuery;
+    await settle();
+    expect(q.prompts).toEqual([]);
+    expect(q.closed).toBe(true);
+    expect(q.methodCalls("initializationResult")).toHaveLength(1);
+    expect(q.methodCalls("setModel")).toEqual([
+      "opus",
+      "opus[1m]",
+      "claude-opus-4-6",
+      "claude-opus-4-6[1m]",
+      "haiku",
+      "haiku[1m]",
+    ]);
+    expect(q.methodCalls("getContextUsage")).toHaveLength(6);
+    // Same locked-down options as a session.
+    const o = q.params.options;
+    expect(o.allowDangerouslySkipPermissions).toBe(false);
+    expect(o.settingSources).toEqual(["project"]);
+    const perms = (o.settings as { permissions: { deny: string[]; disableBypassPermissionsMode: string } })
+      .permissions;
+    expect(perms.disableBypassPermissionsMode).toBe("disable");
+    expect(perms.deny).toEqual(expect.arrayContaining(["Read(**/.env)"]));
+    expect(o.env?.OCW_DEVICE_TOKEN).toBeUndefined();
+
+    expect(catalog?.runtimeVersion).toBe("2.1.289");
+    expect(catalog?.permissionModes).toEqual(runtime.capabilities.supportsPermissionModes);
+    const byId = new Map(catalog?.models.map((m) => [m.id, m]));
+    expect(byId.get("opus")).toMatchObject({ isDefault: true, contextWindows: [], defaultContextWindow: 1_000_000 });
+    expect(byId.get("claude-opus-4-6")).toMatchObject({
+      legacy: true,
+      contextWindows: [200_000, 1_000_000],
+      defaultContextWindow: 200_000,
+    });
+    expect(byId.get("haiku")).toMatchObject({ contextWindows: [], defaultContextWindow: 200_000 });
+  });
+
+  it("a failing probe yields a catalog without context windows instead of failing", async () => {
+    const { runtime } = setup({
+      prepare: (q) => {
+        q.models = PROBE_MODELS;
+        q.windows = {};
+      },
+    });
+    const catalog = await runtime.catalog();
+    expect(catalog?.models.length).toBe(3);
+    for (const m of catalog?.models ?? []) {
+      expect(m.contextWindows).toEqual([]);
+      expect(m.defaultContextWindow).toBeNull();
+    }
+  });
+
+  it("is cached, and null when the CLI is missing or signed out", async () => {
+    const { runtime, queries } = setup({ prepare: prepareProbe });
+    await runtime.catalog();
+    await runtime.catalog();
+    expect(queries).toHaveLength(1);
+    const signedOut = setup({
+      detect: () => Promise.resolve({ id: "claude-code", installed: true, version: "2.1.289", loggedIn: false }),
+    });
+    await expect(signedOut.runtime.catalog()).resolves.toBeNull();
+    expect(signedOut.queries).toHaveLength(0);
+  });
+});
+
 describe("tool policy", () => {
   const cwd = "/Users/alice/code/acme";
   const home = "/Users/alice";
