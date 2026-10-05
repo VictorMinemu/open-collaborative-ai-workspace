@@ -2,6 +2,7 @@ import { z } from "zod";
 import { RelativePath } from "./common";
 import { RuntimeInfo } from "./device";
 import { PermissionMode, RuntimeId, SessionEvent } from "./session-events";
+import { ContextWindow, EffortLevel, RuntimeCatalog, SessionSettingsPatch } from "./session-settings";
 
 /**
  * Device Link protocol: JSON frames on `GET /runtime/ws` (Authorization: Bearer <device token>).
@@ -33,6 +34,8 @@ export const CommandKind = z.enum([
   "approval.resolve",
   "session.stop",
   "diff.request",
+  /** Apply settings between turns (D-07, D-14); the device answers with a `session.settings` event. */
+  "session.configure",
 ]);
 export type CommandKind = z.infer<typeof CommandKind>;
 
@@ -74,8 +77,24 @@ export const HelloFrame = z.object({
   runtimes: z.array(RuntimeInfo),
   /** Work session ids currently alive on the device (lets the server re-attach after a daemon restart). */
   sessions: z.array(z.string().max(128)).max(1000).optional(),
+  /**
+   * The device owner's LOCAL full-access opt-in (ADR-0012, P-12). Optional so older daemons stay on protocol v1
+   * (absent = false). Never settable from the server or the web.
+   */
+  fullAccessOptIn: z.boolean().optional(),
 });
 export type HelloFrame = z.infer<typeof HelloFrame>;
+
+/**
+ * What each installed runtime offers on this device (P-05): sent after connect and whenever it changes.
+ * Collecting it never sends a model turn. Sanitised on the device (no absolute paths, no account e-mail).
+ */
+export const CapabilitiesFrame = z.object({
+  type: z.literal("capabilities"),
+  catalogs: z.array(RuntimeCatalog).max(4),
+  fullAccessOptIn: z.boolean(),
+});
+export type CapabilitiesFrame = z.infer<typeof CapabilitiesFrame>;
 
 export const ProjectsSyncFrame = z.object({
   type: z.literal("projects.sync"),
@@ -120,6 +139,7 @@ export const DeviceToServerFrame = z.discriminatedUnion("type", [
   AckFrame,
   EventFrame,
   DiffResultFrame,
+  CapabilitiesFrame,
 ]);
 export type DeviceToServerFrame = z.infer<typeof DeviceToServerFrame>;
 
@@ -149,9 +169,15 @@ export type ServerToDeviceFrame = z.infer<typeof ServerToDeviceFrame>;
 export const SessionStartPayload = z.object({
   projectLocalId: z.string().min(1).max(128),
   runtime: RuntimeId.default("claude-code"),
-  /** Explicitly rejects anything outside the allowed set, including `bypassPermissions`. */
+  /**
+   * Explicitly rejects anything outside the allowed set, including `bypassPermissions` and every other runtime
+   * bypass literal. The daemon also refuses a mode outside its adapter's `supportsPermissionModes`.
+   */
   permissionMode: PermissionMode.default("default"),
   model: z.string().max(200).optional(),
+  effort: EffortLevel.optional(),
+  fastMode: z.boolean().optional(),
+  contextWindow: ContextWindow.optional(),
   /** Run in a dedicated git worktree (`<repo>/.ocw-worktrees/<session>`). */
   worktree: z.boolean().optional(),
   resumeRuntimeSessionId: z.string().max(256).optional(),
@@ -169,8 +195,20 @@ export const PromptPayload = z.object({
   images: z.array(PromptImage).optional(),
   /** `steer` adds the input to the running turn when the runtime supports it (Codex); otherwise queued. */
   delivery: z.enum(["queue", "steer"]).optional(),
+  /**
+   * P-07: the most permissive mode this turn may run in (min of the session mode and the author's cap). The
+   * adapter lowers to it before the turn and refuses the turn if it cannot.
+   */
+  permissionMode: PermissionMode.optional(),
 });
 export type PromptPayload = z.infer<typeof PromptPayload>;
+
+/** `session.configure`: authorized settings (changed keys only), applied by the adapter between turns. */
+export const SessionConfigurePayload = z.object({
+  settings: SessionSettingsPatch,
+  reason: z.enum(["user", "slash_command", "policy", "access_changed", "device_opt_out"]),
+});
+export type SessionConfigurePayload = z.infer<typeof SessionConfigurePayload>;
 
 export const ApprovalResolvePayload = z.object({
   approvalId: z.string(),

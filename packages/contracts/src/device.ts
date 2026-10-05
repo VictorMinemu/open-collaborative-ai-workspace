@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { Id, IsoDateTime } from "./common";
 import { Permission } from "./permissions";
-import { RuntimeId } from "./session-events";
+import { PermissionMode, RuntimeId } from "./session-events";
 
 export const DevicePlatform = z.enum(["darwin", "linux", "win32"]);
 export type DevicePlatform = z.infer<typeof DevicePlatform>;
@@ -17,6 +17,20 @@ export const RuntimeInfo = z.object({
 });
 export type RuntimeInfo = z.infer<typeof RuntimeInfo>;
 
+/** Who a device is shared with (P-06): a member or an org unit (stable ids, principle 11). */
+export const DeviceGrantPrincipalKind = z.enum(["user", "unit"]);
+export type DeviceGrantPrincipalKind = z.infer<typeof DeviceGrantPrincipalKind>;
+
+export const DeviceGrant = z.object({
+  principalKind: DeviceGrantPrincipalKind,
+  principalId: Id,
+  principalName: z.string().nullable(),
+  /** Highest permission mode this principal may use on the device (up to fullAccess with the opt-in). */
+  maxMode: PermissionMode,
+  createdAt: IsoDateTime,
+});
+export type DeviceGrant = z.infer<typeof DeviceGrant>;
+
 export const Device = z.object({
   id: Id,
   ownerUserId: Id,
@@ -26,6 +40,14 @@ export const Device = z.object({
   status: DeviceStatus,
   /** The owner lets other members of the organization start sessions on this device. */
   shared: z.boolean(),
+  /** The device owner enabled full access on the device itself (reported by the daemon only, ADR-0012). */
+  fullAccessOptIn: z.boolean(),
+  /** Cap for everyone when `shared` (and the floor for unlisted controllers, P-07). */
+  shareMaxMode: PermissionMode,
+  /** The caller's cap on this device (Plan 05 fills it). */
+  viewerMaxMode: PermissionMode.nullable().optional(),
+  /** Explicit grants; owner / admin only (Plan 05 fills it). */
+  grants: z.array(DeviceGrant).optional(),
   lastSeenAt: IsoDateTime.nullable(),
   runtimes: z.array(RuntimeInfo),
   daemonVersion: z.string().nullable(),
@@ -47,8 +69,19 @@ export type DeviceList = z.infer<typeof DeviceList>;
 export const UpdateDeviceRequest = z.object({
   name: z.string().trim().min(1).max(80).optional(),
   shared: z.boolean().optional(),
+  shareMaxMode: PermissionMode.optional(),
 });
 export type UpdateDeviceRequest = z.infer<typeof UpdateDeviceRequest>;
+
+/** `PUT /api/v1/devices/:id/grants/:kind/:principalId`. */
+export const PutDeviceGrantRequest = z.object({ maxMode: PermissionMode });
+export type PutDeviceGrantRequest = z.infer<typeof PutDeviceGrantRequest>;
+
+export const DeviceGrantParams = z.object({ id: Id, kind: DeviceGrantPrincipalKind, principalId: Id });
+export type DeviceGrantParams = z.infer<typeof DeviceGrantParams>;
+
+export const DeviceGrantList = z.object({ grants: z.array(DeviceGrant) });
+export type DeviceGrantList = z.infer<typeof DeviceGrantList>;
 
 export const CreateEnrollmentResponse = z.object({
   /** Short human-typeable pairing code (`XXXX-XXXX`), valid 10 minutes, single use. */

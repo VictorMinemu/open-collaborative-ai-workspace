@@ -13,4 +13,6 @@ export * from "./organization";
 export * from "./permissions";
 export * from "./realtime";
 export * from "./session-events";
+export * from "./session-settings";
 export * from "./work-session";
+export * from "./work-zone-policy";
