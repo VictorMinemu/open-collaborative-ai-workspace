@@ -9,8 +9,10 @@ import type {
   CommandFrame,
   DeviceToServerFrame,
   PromptPayload,
+  RuntimeCatalog,
   RuntimeInfo,
   SessionEvent,
+  SessionSettingsPatch,
 } from "@ocw/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type WebSocket, WebSocketServer } from "ws";
@@ -33,7 +35,42 @@ class FakeRuntime implements AgentRuntime {
   readonly started: StartSessionOptions[] = [];
   readonly resolved: Array<[string, ApprovalDecision]> = [];
   readonly prompts: PromptPayload[] = [];
+  readonly configured: SessionSettingsPatch[] = [];
+  /** Order in which configure / prompt calls reached the runtime. */
+  readonly calls: string[] = [];
+  configureDelayMs = 0;
   sinks = new Map<string, EventSink>();
+
+  async catalog(): Promise<RuntimeCatalog> {
+    return {
+      runtime: "claude-code",
+      runtimeVersion: "9.9.9",
+      models: [
+        {
+          id: "opus",
+          displayName: "Claude Opus",
+          description: `lives in ${process.cwd()}`,
+          legacy: false,
+          isDefault: true,
+          badge: null,
+          efforts: [],
+          defaultEffort: null,
+          contextWindows: [],
+          defaultContextWindow: null,
+          fastMode: { supported: false, reason: null },
+          supportsAutoMode: false,
+        },
+      ],
+      permissionModes: [...this.capabilities.supportsPermissionModes],
+      fastModeCost: null,
+      collectedAt: new Date().toISOString(),
+    };
+  }
+  async configure(_sessionId: string, patch: SessionSettingsPatch): Promise<void> {
+    this.calls.push(`configure:${patch.model ?? patch.permissionMode ?? "?"}`);
+    if (this.configureDelayMs) await sleep(this.configureDelayMs);
+    this.configured.push(patch);
+  }
 
   detect(): Promise<RuntimeInfo> {
     return Promise.resolve({ id: "claude-code", installed: true, version: "9.9.9", loggedIn: true });
@@ -44,6 +81,7 @@ class FakeRuntime implements AgentRuntime {
     sink({ type: "session.state", status: "idle" });
   }
   async prompt(sessionId: string, p: PromptPayload): Promise<void> {
+    this.calls.push(`prompt:${p.promptId}`);
     this.prompts.push(p);
     const sink = this.sinks.get(sessionId);
     const cwd = this.started.find((s) => s.sessionId === sessionId)?.cwd ?? "";
@@ -224,6 +262,7 @@ describe("Daemon <-> Device Link", () => {
     expect(hello).toMatchObject({
       protocolVersion: 1,
       runtimes: [{ id: "claude-code", installed: true, version: "9.9.9", loggedIn: true }],
+      fullAccessOptIn: false,
     });
     const sync = await server.frame("projects.sync", (f) => f.projects.length === 1);
     expect(sync.projects).toEqual([{ localId, name: "acme", gitRemote: null, defaultBranch: "main" }]);
@@ -327,6 +366,76 @@ describe("Daemon <-> Device Link", () => {
     expect(runtime.started).toHaveLength(0);
   });
 
+  it("sends the runtimes' catalogs in a capabilities frame after connect (sanitised, opt-in off)", async () => {
+    await daemon.start();
+    const caps = await server.frame("capabilities");
+    expect(caps.fullAccessOptIn).toBe(false);
+    expect(caps.catalogs.map((c) => c.runtime)).toEqual(["claude-code"]);
+    expect(caps.catalogs[0]!.models.map((m) => m.id)).toEqual(["opus"]);
+    expect(JSON.stringify(caps)).not.toContain(process.cwd());
+  });
+
+  it("session.configure reaches the runtime with the parsed patch and is acked", async () => {
+    const localId = await addProject();
+    await daemon.start();
+    await server.frame("hello");
+    server.send({ id: "s1", kind: "session.start", sessionId: "wc1", payload: { projectLocalId: localId } });
+    await server.frame("ack", (f) => f.commandId === "s1");
+    server.send({
+      id: "k1",
+      kind: "session.configure",
+      sessionId: "wc1",
+      payload: { settings: { model: "sonnet", effort: null }, reason: "user" },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "k1")).toMatchObject({ ok: true });
+    expect(runtime.configured).toEqual([{ model: "sonnet", effort: null }]);
+  });
+
+  it("a configure with a mode outside the adapter's capabilities fails and never reaches the runtime", async () => {
+    const localId = await addProject();
+    await daemon.start();
+    await server.frame("hello");
+    server.send({ id: "s2", kind: "session.start", sessionId: "wc2", payload: { projectLocalId: localId } });
+    await server.frame("ack", (f) => f.commandId === "s2");
+    server.send({
+      id: "k2",
+      kind: "session.configure",
+      sessionId: "wc2",
+      payload: { settings: { permissionMode: "fullAccess" }, reason: "user" },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "k2")).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("permission mode fullAccess is not available on this device"),
+    });
+    server.send({
+      id: "k3",
+      kind: "session.configure",
+      sessionId: "wc2",
+      payload: { settings: { permissionMode: "bypassPermissions" }, reason: "user" },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "k3")).toMatchObject({ ok: false });
+    expect(runtime.configured).toEqual([]);
+  });
+
+  it("a prompt right after a configure of the same session reaches the runtime after the configure resolved", async () => {
+    const localId = await addProject();
+    runtime.configureDelayMs = 150;
+    await daemon.start();
+    await server.frame("hello");
+    server.send({ id: "s3", kind: "session.start", sessionId: "wc3", payload: { projectLocalId: localId } });
+    await server.frame("ack", (f) => f.commandId === "s3");
+    server.send({
+      id: "k4",
+      kind: "session.configure",
+      sessionId: "wc3",
+      payload: { settings: { model: "haiku" }, reason: "user" },
+    });
+    server.send({ id: "p4", kind: "prompt", sessionId: "wc3", payload: { promptId: "pp4", text: "go" } });
+    await server.frame("ack", (f) => f.commandId === "p4");
+    expect(runtime.calls).toEqual(["configure:haiku", "prompt:pp4"]);
+    expect(runtime.configured).toEqual([{ model: "haiku" }]);
+  });
+
   it("answers diff.request with repo-relative files and patch", async () => {
     const localId = await addProject();
     writeFileSync(join(project, "new.ts"), "export {};\n");
@@ -358,7 +467,13 @@ describe("Daemon <-> Device Link", () => {
       server.connections.length === 2 && server.last.frames.length >= 4 ? true : undefined,
     );
     const types = server.last.frames.map((f) => (f.type === "event" ? f.event.type : f.type));
-    expect(types.slice(0, 4)).toEqual(["hello", "projects.sync", "tool.started", "tool.completed"]);
+    expect(types.slice(0, 5)).toEqual([
+      "hello",
+      "projects.sync",
+      "capabilities",
+      "tool.started",
+      "tool.completed",
+    ]);
   });
 });
 

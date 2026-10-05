@@ -117,13 +117,14 @@ describe("ClaudeCodeRuntime — SDK options (security + billing)", () => {
 
   it("rejects bypassPermissions and other non-allowed modes", async () => {
     const { runtime, cwd } = setup();
-    for (const mode of ["bypassPermissions", "dontAsk", "auto"]) {
+    // `auto` and `fullAccess` are platform modes now, but outside this adapter's capabilities until Plans 02/06.
+    for (const mode of ["bypassPermissions", "dontAsk", "auto", "fullAccess"]) {
       await expect(
         runtime.start(
           { sessionId: `s-${mode}`, cwd, permissionMode: mode as PermissionMode },
           () => undefined,
         ),
-      ).rejects.toBeInstanceOf(RuntimeError);
+      ).rejects.toMatchObject({ code: "permission_mode_rejected" });
     }
   });
 
