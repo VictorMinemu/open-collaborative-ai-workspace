@@ -93,6 +93,8 @@ export function toDevice(r: DeviceRow, ownerName: string | null, projectCount: n
     platform: r.platform,
     status: r.status,
     shared: r.shared,
+    fullAccessOptIn: r.fullAccessOptIn,
+    shareMaxMode: r.shareMaxMode,
     lastSeenAt: r.lastSeenAt ? new Date(r.lastSeenAt).toISOString() : null,
     runtimes: runtimesOf(r.runtimeInfo),
     daemonVersion: r.daemonVersion,

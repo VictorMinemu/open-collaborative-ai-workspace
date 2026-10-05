@@ -1,5 +1,6 @@
 import {
   type AckFrame,
+  type CapabilitiesFrame,
   type CommandKind,
   type DiffResultFrame,
   DiffResultFrame as DiffResultFrameSchema,
@@ -199,6 +200,8 @@ export class DeviceHub {
           runtimeInfo: runtimes,
           daemonVersion: hello.device.daemonVersion ?? hello.device.appVersion ?? null,
           platform: hello.device.platform,
+          // ADR-0012: only the device itself reports its owner's local opt-in (absent = off, older daemons).
+          fullAccessOptIn: hello.fullAccessOptIn ?? false,
         })
         .where(eq(devices.id, device.deviceId));
       await this.opts.realtime.appendEvent(tx, `org:${device.organizationId}`, EventTypes.deviceUpdated, {
@@ -234,6 +237,26 @@ export class DeviceHub {
     await this.opts.db.withTenant({ organizationId: device.organizationId, userId: null }, (tx) =>
       tx.update(devices).set({ lastSeenAt: sql`now()` }).where(eq(devices.id, device.deviceId)),
     );
+  }
+
+  /**
+   * P-05: store what the device's runtimes offer and its owner's local full-access opt-in. Written only from the
+   * authenticated device socket; no user route can set either column (T-03.2-01-07).
+   */
+  async onCapabilities(device: DeviceRef, frame: CapabilitiesFrame): Promise<void> {
+    await this.opts.db.withTenant({ organizationId: device.organizationId, userId: null }, async (tx) => {
+      const rows = await tx
+        .update(devices)
+        .set({ runtimeCatalog: frame.catalogs, fullAccessOptIn: frame.fullAccessOptIn })
+        .where(eq(devices.id, device.deviceId))
+        .returning({ status: devices.status });
+      if (rows.length === 0) return;
+      await this.opts.realtime.appendEvent(tx, `org:${device.organizationId}`, EventTypes.deviceUpdated, {
+        deviceId: device.deviceId,
+        status: rows[0]!.status,
+        changed: true,
+      });
+    });
   }
 
   async onAck(device: DeviceRef, frame: AckFrame): Promise<void> {

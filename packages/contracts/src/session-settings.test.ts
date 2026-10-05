@@ -66,7 +66,9 @@ describe("permission modes (P-03, D-03)", () => {
     expect(SessionStartPayload.safeParse({ projectLocalId: "lp1", ...bad }).success).toBe(false);
     expect(SessionConfigurePayload.safeParse({ settings: bad, reason: "user" }).success).toBe(false);
     expect(PromptPayload.safeParse({ promptId: "p1", text: "hi", ...bad }).success).toBe(false);
-    expect(PromptPayload.safeParse({ promptId: "p1", text: "hi", permissionMode: "auto" }).success).toBe(true);
+    expect(PromptPayload.safeParse({ promptId: "p1", text: "hi", permissionMode: "auto" }).success).toBe(
+      true,
+    );
   });
 
   it("ranks the ladder plan < default < acceptEdits < auto < fullAccess", () => {
@@ -138,8 +140,11 @@ describe("Device Link additions (P-05)", () => {
     expect(DeviceToServerFrame.safeParse(ok).success).toBe(true);
     expect(RuntimeCatalog.safeParse(catalog(100)).success).toBe(true);
     expect(
-      DeviceToServerFrame.safeParse({ type: "capabilities", catalogs: [catalog(101)], fullAccessOptIn: false })
-        .success,
+      DeviceToServerFrame.safeParse({
+        type: "capabilities",
+        catalogs: [catalog(101)],
+        fullAccessOptIn: false,
+      }).success,
     ).toBe(false);
   });
 });
@@ -148,12 +153,19 @@ describe("Work Zone policy (D-02, D-11)", () => {
   it("defaults keep full access and fast mode off", () => {
     expect(DEFAULT_WORK_ZONE_POLICY.allowFullAccess).toBe(false);
     expect(DEFAULT_WORK_ZONE_POLICY.allowFastMode).toBe(false);
-    expect(DEFAULT_WORK_ZONE_POLICY.allowedPermissionModes).toEqual(["plan", "default", "acceptEdits", "auto"]);
+    expect(DEFAULT_WORK_ZONE_POLICY.allowedPermissionModes).toEqual([
+      "plan",
+      "default",
+      "acceptEdits",
+      "auto",
+    ]);
     expect(WorkZonePolicy.safeParse({ ...DEFAULT_WORK_ZONE_POLICY, updatedAt: null }).success).toBe(true);
   });
 
   it("fullAccess is never an allowed mode; it has its own switch", () => {
-    expect(UpdateWorkZonePolicyRequest.safeParse({ allowedPermissionModes: ["fullAccess"] }).success).toBe(false);
+    expect(UpdateWorkZonePolicyRequest.safeParse({ allowedPermissionModes: ["fullAccess"] }).success).toBe(
+      false,
+    );
     expect(UpdateWorkZonePolicyRequest.safeParse({ allowFullAccess: true }).success).toBe(true);
   });
 });

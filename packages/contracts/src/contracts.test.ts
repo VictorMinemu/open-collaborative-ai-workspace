@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   AddUnitMemberRequest,
-  CommandFrame,
   Agent,
   AuthCapabilities,
   AvatarRef,
   AWAY_AFTER_IDLE_MS,
   ChangePasswordRequest,
   ClientFrame,
+  CommandFrame,
   ConversationKind,
   CreatePermissionRuleRequest,
   CreatePersonalBotRequest,
@@ -466,11 +466,7 @@ describe("Work Zone session controls (03.2-01)", () => {
   });
 
   it("a session.settings event never carries an unbounded value", () => {
-    expect(
-      SessionEvent.safeParse({ type: "session.settings", model: "x".repeat(201) }).success,
-    ).toBe(false);
-    expect(
-      SessionEvent.safeParse({ type: "session.settings", fastModeState: "turbo" }).success,
-    ).toBe(false);
+    expect(SessionEvent.safeParse({ type: "session.settings", model: "x".repeat(201) }).success).toBe(false);
+    expect(SessionEvent.safeParse({ type: "session.settings", fastModeState: "turbo" }).success).toBe(false);
   });
 });

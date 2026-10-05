@@ -1,12 +1,19 @@
 import { randomUUID } from "node:crypto";
 import {
+  type AuthzDenial,
+  type ControlDenialReason,
   CreatePromptRequest,
   CreateWorkSessionRequest,
+  DEFAULT_WORK_ZONE_POLICY,
   Ok,
   onlyRelativePaths,
   ResolveApprovalRequest,
+  type RuntimeId,
   RuntimeInfo,
+  SessionControls,
+  type SessionSettingsPatch,
   UpdatePromptRequest,
+  UpdateWorkSessionSettingsRequest,
   WorkApproval,
   WorkPrompt,
   WorkSession,
@@ -39,6 +46,15 @@ import {
   type ResourceFacts,
   workSessionResource,
 } from "../organization";
+import {
+  buildSessionControls,
+  type ControlsContext,
+  catalogsOf,
+  decideSettings,
+  pickSettings,
+  requestedSettings,
+  storedSettings,
+} from "./controls";
 import { type SessionRow, type WorkSessionService, wsTopic } from "./service";
 
 const SessionParams = z.object({ id: z.uuid() });
@@ -50,6 +66,43 @@ const EVENT_WINDOW = 1500;
 const DIFF_TIMEOUT_MS = 20_000;
 
 const RUNTIME_LABEL = { "claude-code": "Claude Code", codex: "Codex" } as const;
+
+/** P-08: the resolver layer a settings denial belongs to. */
+const DENIAL_LAYER: Record<ControlDenialReason, AuthzDenial["layer"]> = {
+  org_policy: "org",
+  device_opt_in: "device",
+  device_grant: "device",
+  denied_for_you: "user",
+  runtime: "resource",
+  not_in_catalog: "resource",
+  not_confirmed: "resource",
+};
+
+const DENIAL_MESSAGE: Record<ControlDenialReason, string> = {
+  org_policy: "Your organization's Work Zone policy does not allow this",
+  device_opt_in: "Full access is turned off on this device",
+  device_grant: "This is above what you may use on this device",
+  denied_for_you: "You are not allowed to use this on this device",
+  runtime: "The runtime on this device does not offer this",
+  not_in_catalog: "The runtime on this device did not report this option",
+  not_confirmed: "This option is not available yet",
+};
+
+const FIELD_LABEL: Record<string, string> = {
+  model: "Model",
+  effort: "Reasoning",
+  contextWindow: "Context window",
+  fastMode: "Fast mode",
+  permissionMode: "Permission mode",
+};
+
+/** A refused settings change (P-08): 403 with the layer and reason; audited as `authz.denied` by the handler. */
+function settingsDenied(field: string, reason: ControlDenialReason): AuthzDeniedError {
+  return new AuthzDeniedError(
+    { permission: "work_session.configure", layer: DENIAL_LAYER[reason], reason },
+    { message: `${FIELD_LABEL[field] ?? field}: ${DENIAL_MESSAGE[reason]}` },
+  );
+}
 
 /** Permissions a session view renders controls for (`WorkSessionDetail.viewerCan`). */
 const SESSION_VIEWER_CAN = [
@@ -75,7 +128,7 @@ export function registerWorkSessionRoutes(
     req: FastifyRequest,
     tx: Tx,
     id: string,
-    permission: "work_session.prompt" | "work_session.interrupt",
+    permission: "work_session.prompt" | "work_session.interrupt" | "work_session.configure",
   ): Promise<SessionRow> {
     const s = await locked(tx, id);
     await perms.assertCan(req, tx, permission, await sessionFacts(tx, authOf(req), s));
@@ -112,6 +165,39 @@ export function registerWorkSessionRoutes(
       },
       auth.userId,
     );
+  }
+
+  /**
+   * What the caller may pick on a device (this plan: the default org policy, the device's own opt-in, the owner
+   * holds every mode and full access, others the share cap when the device is shared). Plan 04 replaces this
+   * loader with the stored policy and the grain resolver; `decideSettings` and the controls do not change.
+   */
+  async function controlsContext(
+    tx: Tx,
+    auth: AuthContext,
+    deviceId: string,
+    runtime: RuntimeId,
+  ): Promise<ControlsContext> {
+    const [d] = await tx
+      .select({
+        owner: devices.ownerUserId,
+        shared: devices.shared,
+        shareMaxMode: devices.shareMaxMode,
+        optIn: devices.fullAccessOptIn,
+        catalog: devices.runtimeCatalog,
+      })
+      .from(devices)
+      .where(eq(devices.id, deviceId));
+    const catalogs = catalogsOf(d?.catalog);
+    const owner = d?.owner === auth.userId;
+    return {
+      catalog: catalogs.find((c) => c.runtime === runtime) ?? null,
+      otherCatalogs: catalogs.filter((c) => c.runtime !== runtime),
+      policy: DEFAULT_WORK_ZONE_POLICY,
+      deviceOptIn: d?.optIn ?? false,
+      modeCap: owner ? "fullAccess" : d?.shared ? d.shareMaxMode : null,
+      fullAccessGrain: owner,
+    };
   }
 
   async function joinConversation(tx: Tx, auth: AuthContext, s: SessionRow) {
@@ -212,6 +298,24 @@ export function registerWorkSessionRoutes(
             "runtime_unavailable",
           );
         }
+        // The start settings go through the same decision as a change (ADR-0012: full access needs policy ∩
+        // opt-in ∩ grain). The model keeps today's free choice here; a change inside the session is catalog-checked.
+        const ctx = await controlsContext(tx, auth, d.id, body.runtime);
+        const startPatch: SessionSettingsPatch = {
+          permissionMode: body.permissionMode ?? "default",
+          ...(body.effort !== undefined ? { effort: body.effort } : {}),
+          ...(body.fastMode !== undefined ? { fastMode: body.fastMode } : {}),
+          ...(body.contextWindow !== undefined ? { contextWindow: body.contextWindow } : {}),
+        };
+        const baseline = {
+          model: body.model ?? null,
+          effort: null,
+          contextWindow: null,
+          fastMode: false,
+          permissionMode: "default" as const,
+        };
+        const start = decideSettings(baseline, startPatch, body.runtime, ctx);
+        if (!start.ok) throw settingsDenied(start.field, start.reason);
         const title = body.title ?? firstLine(body.prompt) ?? `${p.name} · ${RUNTIME_LABEL[body.runtime]}`;
         const [conv] = await tx
           .insert(conversations)
@@ -232,7 +336,8 @@ export function registerWorkSessionRoutes(
             deviceId: d.id,
             runtime: body.runtime ?? "claude-code",
             model: body.model ?? null,
-            permissionMode: body.permissionMode ?? "default",
+            permissionMode: start.next.permissionMode ?? "default",
+            settings: storedSettings(start.next),
             worktree: body.worktree ?? false,
             branch: body.worktree ? null : p.defaultBranch,
             status: "provisioning",
@@ -600,6 +705,87 @@ export function registerWorkSessionRoutes(
         generatedAt: new Date().toISOString(),
       };
     },
+  );
+
+  app.get(
+    "/work-sessions/:id/controls",
+    { ...user, schema: { tags, params: SessionParams, response: { 200: SessionControls } } },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const auth = authOf(req);
+        const session = await svc.session(tx, req.params.id);
+        if (!session) throw notFound("Work session not found");
+        await perms.assertCan(req, tx, "work_session.read", await sessionFacts(tx, auth, session), {
+          hideAs404: true,
+        });
+        return buildSessionControls(
+          session,
+          await controlsContext(tx, auth, session.deviceId, session.runtime),
+        );
+      }),
+  );
+
+  app.patch(
+    "/work-sessions/:id/settings",
+    {
+      ...user,
+      schema: {
+        tags,
+        params: SessionParams,
+        body: UpdateWorkSessionSettingsRequest,
+        response: { 200: WorkSession },
+      },
+    },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const auth = authOf(req);
+        const s = await lockedFor(req, tx, req.params.id, "work_session.configure");
+        if (s.status === "archived") throw conflict("This session is archived", "session_archived");
+        const current = requestedSettings(s);
+        const decision = decideSettings(
+          current,
+          req.body,
+          s.runtime,
+          await controlsContext(tx, auth, s.deviceId, s.runtime),
+        );
+        if (!decision.ok) throw settingsDenied(decision.field, decision.reason);
+        const keys = [...decision.changed, ...decision.adjusted];
+        if (keys.length === 0) return (await svc.session(tx, s.id))!;
+        const next = decision.next;
+        await tx
+          .update(workSessions)
+          .set({
+            model: next.model ?? null,
+            permissionMode: next.permissionMode ?? s.permissionMode,
+            settings: storedSettings(next),
+            settingsPending: true,
+            updatedAt: sql`now()`,
+          })
+          .where(eq(workSessions.id, s.id));
+        // D-14: the device holds the change until the running turn ends and applies it before the next one.
+        await hub.enqueue(tx, {
+          deviceId: s.deviceId,
+          workSessionId: s.id,
+          kind: "session.configure",
+          payload: { settings: pickSettings(next, keys), reason: "user" },
+        });
+        await core.audit.record(tx, {
+          action: "work_session.settings_changed",
+          resourceType: "work_session",
+          resourceId: s.id,
+          sessionId: s.id,
+          deviceId: s.deviceId,
+          clientKind: auth.clientKind,
+          metadata: {
+            changed: decision.changed,
+            from: pickSettings(current, keys),
+            to: pickSettings(next, keys),
+            adjusted: decision.adjusted,
+            source: "user",
+          },
+        });
+        return (await svc.emitSession(tx, s.id))!;
+      }),
   );
 
   app.post(

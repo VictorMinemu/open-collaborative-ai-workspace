@@ -59,9 +59,12 @@ export const SessionSettingsPatch = SessionSettings.partial();
 export type SessionSettingsPatch = z.infer<typeof SessionSettingsPatch>;
 
 /** `PATCH /api/v1/work-sessions/:id/settings`. */
-export const UpdateWorkSessionSettingsRequest = SessionSettingsPatch.refine((p) => Object.keys(p).length > 0, {
-  message: "Change at least one setting",
-});
+export const UpdateWorkSessionSettingsRequest = SessionSettingsPatch.refine(
+  (p) => Object.keys(p).length > 0,
+  {
+    message: "Change at least one setting",
+  },
+);
 export type UpdateWorkSessionSettingsRequest = z.infer<typeof UpdateWorkSessionSettingsRequest>;
 
 /** What the device last reported (`session.settings` / `session.started`); runtime strings, bounded. */
@@ -191,9 +194,7 @@ export type PermissionModeControl = z.infer<typeof PermissionModeControl>;
 export const RuntimeControls = z.object({
   runtime: RuntimeId,
   /** null = the device reported no catalog for this runtime (no model choices are shown). */
-  catalog: z
-    .object({ runtimeVersion: z.string().max(64).nullable(), collectedAt: IsoDateTime })
-    .nullable(),
+  catalog: z.object({ runtimeVersion: z.string().max(64).nullable(), collectedAt: IsoDateTime }).nullable(),
   models: z.array(ModelControl),
   /** The device's other runtimes, shown disabled (switching provider inside a chat is out of scope, D-08). */
   otherRuntimes: z.array(

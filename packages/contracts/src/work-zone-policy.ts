@@ -10,7 +10,10 @@ import { EffortLevel } from "./session-settings";
  */
 export const WorkZonePolicy = z.object({
   /** Modes controllers may pick; `fullAccess` is never listed here, it has its own switch. */
-  allowedPermissionModes: z.array(PermissionMode.exclude(["fullAccess"])).min(1).max(4),
+  allowedPermissionModes: z
+    .array(PermissionMode.exclude(["fullAccess"]))
+    .min(1)
+    .max(4),
   /** ADR-0012: full access is denied by default. */
   allowFullAccess: z.boolean(),
   /** Per runtime; `[]` = every model the device reports. */
