@@ -186,9 +186,18 @@ export const CELL_PERMISSIONS: readonly Permission[] = ["cell.sync"];
 /** A paired device principal (Device Link). */
 export const DEVICE_PERMISSIONS: readonly Permission[] = ["device.link"];
 
-/** Admin- and runtime-surface permissions: explicit allow rules can never grant these. */
+/**
+ * Relation-only permissions that no allow rule may confer either: Full access on a device comes only from the
+ * device owner's grant (cap) intersected with the device opt-in and the org policy (ADR-0012).
+ */
+const RELATION_ONLY_NON_DELEGABLE: readonly Permission[] = ["device.full_access"];
+
+/** Admin- and runtime-surface permissions plus relation-only ones: explicit allow rules can never grant these. */
 export const NON_DELEGABLE_PERMISSIONS: readonly Permission[] = Permission.options.filter(
-  (p) => PERMISSION_SURFACE[p] === "admin" || PERMISSION_SURFACE[p] === "runtime",
+  (p) =>
+    PERMISSION_SURFACE[p] === "admin" ||
+    PERMISSION_SURFACE[p] === "runtime" ||
+    RELATION_ONLY_NON_DELEGABLE.includes(p),
 );
 
 export const ROLE_RANK: Record<OrgRole, number> = { standard: 0, developer: 1, lead: 2, admin: 3 };
