@@ -309,7 +309,7 @@ describe("units, caps, Full access and revocation (Task 2, ADR-0012 §2)", () =>
 
     const del = await admin.request("DELETE", grantUrl(macId, "user", samId));
     expect(del.status, JSON.stringify(del.body)).toBe(200);
-    const [removed] = await audits("device.grant_removed", macId);
+    const removed = (await audits("device.grant_removed", macId)).at(-1);
     expect(removed).toMatchObject({ user_id: adminId, resource_id: macId });
     expect(removed!.metadata).toMatchObject({
       principalKind: "user",

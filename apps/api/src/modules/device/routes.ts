@@ -8,6 +8,7 @@ import {
   EventTypes,
   IdParams,
   Ok,
+  PERMISSION_MODE_RANK,
   type Project,
   ProjectList,
   RuntimeInfo,
@@ -27,7 +28,7 @@ import {
   type PermissionService,
 } from "../organization";
 import { type DeviceAccess, loadDeviceAccess } from "./access";
-import { loadGrants, registerDeviceGrantRoutes } from "./grants";
+import { FULL_ACCESS_OPT_IN_MESSAGE, loadGrants, registerDeviceGrantRoutes } from "./grants";
 import type { DeviceHub } from "./hub";
 
 export const ENROLLMENT_TTL_MS = 10 * 60_000;
@@ -247,10 +248,11 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
       ...user,
       schema: { tags: ["device"], params: IdParams, body: UpdateDeviceRequest, response: { 200: Ok } },
     },
-    async (req) =>
-      core.db.withTenant(tenant(req), async (tx) => {
+    async (req) => {
+      const { name, shared, shareMaxMode } = req.body;
+      const result = await core.db.withTenant(tenant(req), async (tx) => {
         const auth = authOf(req);
-        const [row] = await tx.select().from(devices).where(eq(devices.id, req.params.id));
+        const [row] = await tx.select().from(devices).where(eq(devices.id, req.params.id)).for("update");
         if (!row || row.revokedAt) throw notFound("Device not found");
         await perms.assertCan(
           req,
@@ -258,11 +260,16 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
           "device.update",
           deviceFacts(row, auth.userId, await loadDeviceAccess(tx, auth.userId)),
         );
+        // D-05 / D-02: the everyone cap reaches Full access only while the device reports its local opt-in.
+        if (shareMaxMode === "fullAccess" && !row.fullAccessOptIn) {
+          throw conflict(FULL_ACCESS_OPT_IN_MESSAGE, "device_opt_in");
+        }
         await tx
           .update(devices)
           .set({
-            ...(req.body.name !== undefined ? { name: req.body.name } : {}),
-            ...(req.body.shared !== undefined ? { shared: req.body.shared } : {}),
+            ...(name !== undefined ? { name } : {}),
+            ...(shared !== undefined ? { shared } : {}),
+            ...(shareMaxMode !== undefined ? { shareMaxMode } : {}),
           })
           .where(eq(devices.id, row.id));
         await core.audit.record(tx, {
@@ -270,15 +277,34 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
           resourceType: "device",
           resourceId: row.id,
           deviceId: row.id,
-          metadata: { ...req.body },
+          metadata: {
+            ...req.body,
+            ...(shareMaxMode !== undefined && shareMaxMode !== row.shareMaxMode
+              ? { previousShareMaxMode: row.shareMaxMode }
+              : {}),
+          },
         });
         await core.realtime.appendEvent(tx, `org:${auth.organizationId}`, EventTypes.deviceUpdated, {
           deviceId: row.id,
           status: row.status,
           changed: true,
         });
-        return { ok: true as const };
-      }),
+        // Access shrinks when the everyone share ends or its cap (also the controller floor, P-07) is lowered.
+        const shrank =
+          (shared === false && row.shared) ||
+          (shareMaxMode !== undefined &&
+            PERMISSION_MODE_RANK[shareMaxMode] < PERMISSION_MODE_RANK[row.shareMaxMode]);
+        return { row, shrank };
+      });
+      // ADR-0012 §2: re-check the device's live sessions once the change is committed (stop or downgrade).
+      if (result.shrank) {
+        await hub.sessionHandler?.onAccessChanged(
+          { deviceId: result.row.id, organizationId: result.row.organizationId },
+          "access_changed",
+        );
+      }
+      return { ok: true as const };
+    },
   );
 
   app.delete(
