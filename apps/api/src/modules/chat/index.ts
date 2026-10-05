@@ -6,6 +6,7 @@ import {
   ChannelSummary,
   type ChannelSummary as ChannelSummaryDto,
   CreateChannelRequest,
+  DmList,
   EphemeralTypes,
   EventTypes,
   IdParams,
@@ -27,12 +28,14 @@ import type { AgentMention, ThreadContext } from "../../lib/chat-agent-bridge";
 import { badRequest, conflict, gone, notFound } from "../../lib/errors";
 import {
   AuthzDeniedError,
+  agentResource,
   type ChannelFacts,
   channelMemberResource,
   channelResource,
   createPermissionService,
 } from "../organization";
 import { authorOf, type Directory, loadDirectory } from "./directory";
+import { dmAgentOf, listDms } from "./dm";
 import { resolveMentions } from "./mentions";
 import {
   addMember,
@@ -45,6 +48,7 @@ import {
   ensureGeneral,
   GENERAL_SLUG,
   getChannel,
+  getConversation,
   getMembership,
   getMessage,
   listChannelMembers,
@@ -60,7 +64,11 @@ import {
 } from "./service";
 import { registerChatTestRoutes } from "./test-routes";
 
+export { dmAgentOf, dmKey, ensureDm, listDms } from "./dm";
 export { resolveMentions } from "./mentions";
+
+/** Conversation kinds served by the message routes, read markers, the `conv:` topic and bot replies (D-03). */
+const MESSAGE_KINDS = ["channel", "dm"] as const;
 
 /** The `conv:` copy of `conversation.member_removed` (see removeMember). */
 const MemberRemovedPayload = z.object({
@@ -116,7 +124,7 @@ export function createChatModule(core: Core): ApiModule {
   // Subscribing to a channel's stream is reading it: the resolver decides channel.read for the user.
   core.realtime.registerTopicAuthorizer("conv", (auth, conversationId) =>
     core.db.withTenant({ organizationId: auth.organizationId, userId: auth.userId }, async (tx) => {
-      const conv = await getChannel(tx, conversationId);
+      const conv = await getConversation(tx, conversationId, MESSAGE_KINDS);
       if (!conv) return false;
       const facts = await channelFacts(tx, conv, { kind: "user", id: auth.userId });
       const d = await perms.decide(
@@ -183,9 +191,50 @@ export function createChatModule(core: Core): ApiModule {
       author: { kind: "user", id: author.id, displayName: authorOf(dir, "user", author.id).displayName },
       body: result.row.body,
       createdAt: result.message.createdAt,
+      delivery: "thread",
     };
     await core.chatAgent.emitAgentMention(tx, mention, tenantOf(tx).afterCommit);
     return agentIds;
+  }
+
+  /**
+   * D-04: every human message in a DM goes to the DM's bot, no mention needed: exactly one delivery, inside
+   * the message transaction, only while the bot is live and the author may still use it (`bot.read` on the
+   * agent resource: a personal bot answers its owner only). @mentions inside a DM never add anyone.
+   */
+  async function dispatchDmMessage(
+    tx: Tx,
+    dir: Directory,
+    conv: ConversationRow,
+    result: PostResult,
+    author: { id: string },
+  ): Promise<string | null> {
+    const botId = await dmAgentOf(tx, conv.id);
+    const bot = botId ? dir.agents.get(botId) : undefined;
+    if (!bot || bot.deleted || bot.status === "disabled") return null;
+    const d = await perms.decide(
+      tx,
+      { kind: "user", userId: author.id },
+      "bot.read",
+      agentResource(
+        { scope: bot.scope ?? "team", ownerUserId: bot.ownerUserId ?? null, disabled: false },
+        author.id,
+      ),
+    );
+    if (!d.allowed) return null;
+    const mention: AgentMention = {
+      organizationId: conv.organizationId,
+      conversationId: conv.id,
+      threadRootId: result.row.id,
+      messageId: result.row.id,
+      agentIds: [bot.id],
+      author: { kind: "user", id: author.id, displayName: authorOf(dir, "user", author.id).displayName },
+      body: result.row.body,
+      createdAt: result.message.createdAt,
+      delivery: "dm",
+    };
+    await core.chatAgent.emitAgentMention(tx, mention, tenantOf(tx).afterCommit);
+    return bot.id;
   }
 
   core.chatAgent.providePostAgentMessage((ctx, input) =>
@@ -193,9 +242,11 @@ export function createChatModule(core: Core): ApiModule {
       const dir = await loadDirectory(tx);
       const agent = dir.agents.get(input.agentId);
       if (!agent) throw notFound("Agent not found", "agent_not_found");
-      const conv = await getChannel(tx, input.conversationId);
+      const conv = await getConversation(tx, input.conversationId, MESSAGE_KINDS);
       if (!conv) throw notFound("Conversation not found");
-      if (conv.archivedAt) throw gone("This channel is archived", "channel_archived");
+      if (conv.archivedAt) throw gone("This conversation is archived", "channel_archived");
+      // DMs are flat (D-04): a bot reply always lands at the top level.
+      const threadRootId = conv.kind === "dm" ? null : input.threadRootId;
       // The bot itself: enabled, a member, and not denied by a rule (agent principal gate + preconditions).
       const agentRes = channelResource(await channelFacts(tx, conv, { kind: "agent", id: agent.id }));
       const posting = await perms.decide(tx, { kind: "agent", agentId: agent.id }, "channel.post", agentRes);
@@ -227,7 +278,7 @@ export function createChatModule(core: Core): ApiModule {
         author: { kind: "agent", id: agent.id },
         body: input.body,
         mentions: resolveMentions(input.body, dir),
-        threadRootId: input.threadRootId,
+        threadRootId,
         clientMessageId: input.idempotencyKey,
         clientKind: "agent",
         lenientThreadRoot: true,
@@ -251,7 +302,7 @@ export function createChatModule(core: Core): ApiModule {
   core.chatAgent.provideThreadContext((ctx, conversationId, threadRootId, limit) =>
     core.db.withTenant(ctx, async (tx): Promise<ThreadContext> => {
       const dir = await loadDirectory(tx);
-      const conv = await getChannel(tx, conversationId);
+      const conv = await getConversation(tx, conversationId, MESSAGE_KINDS);
       if (!conv) throw notFound("Conversation not found");
       const thread = await loadThread(tx, threadRootId);
       if (!thread || thread.root.conversationId !== conv.id) throw notFound("Thread not found");
@@ -549,7 +600,12 @@ export function createChatModule(core: Core): ApiModule {
         },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
-            const { conv } = await readableChannel(req, tx, await getChannel(tx, req.params.id));
+            const { conv } = await readableChannel(
+              req,
+              tx,
+              await getConversation(tx, req.params.id, MESSAGE_KINDS),
+              "Conversation not found",
+            );
             // lastSeq first: anything committed after this read is replayed by the subscription.
             const lastSeq = await core.realtime.lastSeq(tx, convTopic(conv.id));
             const page = await listMessages(tx, conv.id, await loadDirectory(tx), req.query);
@@ -567,9 +623,17 @@ export function createChatModule(core: Core): ApiModule {
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
             const auth = authOf(req);
-            const { conv, facts } = await readableChannel(req, tx, await getChannel(tx, req.params.id));
-            if (conv.archivedAt) throw gone("This channel is archived", "channel_archived");
+            const { conv, facts } = await readableChannel(
+              req,
+              tx,
+              await getConversation(tx, req.params.id, MESSAGE_KINDS),
+              "Conversation not found",
+            );
+            if (conv.archivedAt) throw gone("This conversation is archived", "channel_archived");
             await perms.assertCan(req, tx, "channel.post", channelResource(facts));
+            if (conv.kind === "dm" && req.body.threadRootId) {
+              throw badRequest("Direct conversations have no threads", "dm_is_flat");
+            }
             const dir = await loadDirectory(tx);
             const result = await postMessage(tx, deps, dir, {
               conv,
@@ -581,8 +645,65 @@ export function createChatModule(core: Core): ApiModule {
               clientKind: auth.clientKind,
               sessionId: auth.sessionId,
             });
-            if (result.created) await dispatchAgentMentions(tx, dir, result, { id: auth.userId });
+            if (result.created) {
+              if (conv.kind === "dm") await dispatchDmMessage(tx, dir, conv, result, { id: auth.userId });
+              else await dispatchAgentMentions(tx, dir, result, { id: auth.userId });
+            }
             return result.message;
+          }),
+      );
+
+      // ---------------------------------------------------------------- direct conversations (D-03)
+      app.get(
+        "/dms",
+        {
+          config: { authz: "user" },
+          preHandler: requireUser,
+          schema: { tags, response: { 200: DmList } },
+        },
+        async (req) =>
+          core.db.withTenant(tenant(req), async (tx) => {
+            const auth = authOf(req);
+            const rows = await listDms(tx, auth.userId);
+            // Membership is in the query; the resolver still decides each read (no second authority).
+            const dms = await perms.filter(req, tx, rows, "channel.read", (r) =>
+              channelResource({
+                visibility: r.visibility,
+                archived: r.archivedAt !== null,
+                viewerRole: "owner",
+                kind: "dm",
+              }),
+            );
+            return { dms, userSeq: await core.realtime.lastSeq(tx, `user:${auth.userId}`) };
+          }),
+      );
+
+      app.post(
+        "/conversations/:id/read",
+        {
+          config: { authz: "user" },
+          preHandler: requireUser,
+          schema: { tags, params: IdParams, body: MarkReadRequest, response: { 200: Ok } },
+        },
+        async (req) =>
+          core.db.withTenant(tenant(req), async (tx) => {
+            const { conv } = await readableChannel(
+              req,
+              tx,
+              await getConversation(tx, req.params.id, MESSAGE_KINDS),
+              "Conversation not found",
+            );
+            await tx
+              .update(conversationMembers)
+              .set({ lastReadSeq: sql`greatest(${conversationMembers.lastReadSeq}, ${req.body.seq})` })
+              .where(
+                and(
+                  eq(conversationMembers.conversationId, conv.id),
+                  eq(conversationMembers.memberKind, "user"),
+                  eq(conversationMembers.memberId, authOf(req).userId),
+                ),
+              );
+            return { ok: true as const };
           }),
       );
 

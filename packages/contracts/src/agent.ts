@@ -55,6 +55,10 @@ export const AgentAvatar = z
 
 export const ModelId = z.string().trim().min(1).max(200);
 
+/** D-01: `team` bots belong to the organization; a `personal` bot to one member (`ownerUserId`). */
+export const AgentScope = z.enum(["team", "personal"]);
+export type AgentScope = z.infer<typeof AgentScope>;
+
 export const Agent = z.object({
   id: Id,
   organizationId: Id,
@@ -72,6 +76,9 @@ export const Agent = z.object({
   createdBy: Id.nullable(),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
+  scope: AgentScope,
+  /** Personal bots only: the member who owns it (and the only one who can see or use it). */
+  ownerUserId: Id.nullable(),
 });
 export type Agent = z.infer<typeof Agent>;
 
@@ -89,6 +96,23 @@ export const CreateAgentRequest = z.object({
   modelId: ModelId,
 });
 export type CreateAgentRequest = z.infer<typeof CreateAgentRequest>;
+
+/**
+ * `POST /api/v1/agents/personal`: one click, every field optional. Defaults: "<first name>'s assistant",
+ * the organization's default allowed model, a short assistant persona.
+ */
+export const CreatePersonalBotRequest = z.object({
+  name: z.string().trim().min(1).max(80).optional(),
+  avatarUrl: AgentAvatar.optional(),
+  instructions: z.string().trim().min(1).max(20_000).optional(),
+  modelProvider: ModelProviderKind.optional(),
+  modelId: ModelId.optional(),
+});
+export type CreatePersonalBotRequest = z.infer<typeof CreatePersonalBotRequest>;
+
+/** The new personal bot and its private direct conversation with the caller. */
+export const CreatePersonalBotResponse = z.object({ agent: Agent, dmId: Id });
+export type CreatePersonalBotResponse = z.infer<typeof CreatePersonalBotResponse>;
 
 export const UpdateAgentRequest = z.object({
   name: z.string().trim().min(1).max(80).optional(),

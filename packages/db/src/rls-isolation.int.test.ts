@@ -124,6 +124,62 @@ async function seedOrg(c: pg.Client, org: string) {
     "insert into app.device_commands (organization_id, device_id, work_session_id, kind, payload) values ($1, $2, $3, 'prompt', '{}')",
     [org, device, ws],
   );
+
+  // Phase 3.1 (personal bots and bot capabilities): one row per new table.
+  const personal = randomUUID();
+  const dm = randomUUID();
+  const mcp = randomUUID();
+  const plugin = randomUUID();
+  await q(
+    "insert into app.agents (id, organization_id, name, username, instructions, model_provider, model_id, scope, owner_user_id) values ($1, $2, 'Mine', $3, 'x', 'mock', 'mock-1', 'personal', $4)",
+    [personal, org, `mine-${personal.slice(0, 8)}`, user],
+  );
+  await q(
+    "insert into app.conversations (id, organization_id, kind, visibility, dm_key) values ($1, $2, 'dm', 'private', $3)",
+    [dm, org, `agent:${personal}|user:${user}`],
+  );
+  await q("insert into app.bot_policies (organization_id) values ($1)", [org]);
+  const eventId = randomUUID();
+  await q(
+    "insert into app.agent_turns (event_id, organization_id, agent_id, user_id, conversation_id, conversation_kind, message_id) values ($1, $2, $3, $4, $5, 'dm', $6)",
+    [eventId, org, personal, user, dm, randomUUID()],
+  );
+  await q(
+    "insert into app.agent_tool_calls (organization_id, event_id, agent_id, user_id, tool, source_kind, decision) values ($1, $2, $3, $4, 'web_search', 'builtin', 'allowed')",
+    [org, eventId, personal, user],
+  );
+  await q(
+    "insert into app.agent_usage_daily (organization_id, agent_id, day, turns) values ($1, $2, current_date, 1)",
+    [org, personal],
+  );
+  await q(
+    "insert into app.agent_limit_notices (organization_id, agent_id, conversation_id, day) values ($1, $2, $3, current_date)",
+    [org, personal, dm],
+  );
+  await q(
+    "insert into app.agent_memories (organization_id, agent_id, user_id, text) values ($1, $2, $3, 'likes tea')",
+    [org, personal, user],
+  );
+  await q(
+    "insert into app.mcp_servers (id, organization_id, name, safe_name, transport, url) values ($1, $2, 'Docs', $3, 'streamable-http', 'https://mcp.example.test')",
+    [mcp, org, `m${mcp.replace(/-/g, "").slice(0, 8)}`],
+  );
+  await q(
+    "insert into app.mcp_server_tools (organization_id, server_id, name, openclaw_name) values ($1, $2, 'search', 'mx__search')",
+    [org, mcp],
+  );
+  await q(
+    "insert into app.cell_plugins (id, organization_id, package_name, version, channel, artifact_sha256, risk, status) values ($1, $2, '@openclaw/duckduckgo-plugin', '2026.9.7', 'official', 'abc', 'low', 'approved')",
+    [plugin, org],
+  );
+  await q(
+    "insert into app.cell_plugin_tools (organization_id, plugin_row_id, name) values ($1, $2, 'web_search')",
+    [org, plugin],
+  );
+  await q(
+    "insert into app.bot_tool_grants (organization_id, agent_id, source_kind, source_id, tool_name) values ($1, $2, 'mcp', $3, 'search')",
+    [org, personal, mcp],
+  );
 }
 
 async function inTenant<T>(org: string, fn: () => Promise<T>): Promise<T> {
@@ -166,6 +222,43 @@ async function orgScopedTables(): Promise<
 }
 
 describe("tenant isolation (RLS)", () => {
+  it("Phase 3.1 schema constraints: personal bots need an owner, one DM per pair, bounded memory", async () => {
+    const owner = randomUUID();
+    await expect(
+      migrator.query(
+        "insert into app.agents (organization_id, name, username, instructions, model_provider, model_id, scope) values ($1, 'X', $2, 'x', 'mock', 'mock-1', 'personal')",
+        [A, `x-${owner.slice(0, 8)}`],
+      ),
+    ).rejects.toThrow(/agents_owner_scope_check/);
+    await expect(
+      migrator.query(
+        "insert into app.agents (organization_id, name, username, instructions, model_provider, model_id, scope, owner_user_id) values ($1, 'X', $2, 'x', 'mock', 'mock-1', 'team', $3)",
+        [A, `y-${owner.slice(0, 8)}`, owner],
+      ),
+    ).rejects.toThrow(/agents_owner_scope_check/);
+    const key = (
+      await migrator.query(
+        "select dm_key from app.conversations where organization_id = $1 and kind = 'dm'",
+        [A],
+      )
+    ).rows[0].dm_key;
+    await expect(
+      migrator.query(
+        "insert into app.conversations (organization_id, kind, visibility, dm_key) values ($1, 'dm', 'private', $2)",
+        [A, key],
+      ),
+    ).rejects.toThrow(/conversations_org_dm_key_uq/);
+    const agent = (
+      await migrator.query("select id from app.agents where organization_id = $1 and scope = 'personal'", [A])
+    ).rows[0].id;
+    await expect(
+      migrator.query(
+        "insert into app.agent_memories (organization_id, agent_id, user_id, text) values ($1, $2, $3, $4)",
+        [A, agent, owner, "x".repeat(501)],
+      ),
+    ).rejects.toThrow(/agent_memories_text_len_check/);
+  });
+
   it("app role is neither superuser nor BYPASSRLS", async () => {
     const r = await app.query("select rolsuper, rolbypassrls from pg_roles where rolname = current_user");
     expect(r.rows[0]).toEqual({ rolsuper: false, rolbypassrls: false });
@@ -259,7 +352,7 @@ describe("tenant isolation (RLS)", () => {
         const r = await tx.execute("select count(*)::int as n from app.conversations");
         return (r.rows[0] as { n: number }).n;
       });
-      expect(n).toBe(2);
+      expect(n).toBe(3); // channel + work-session conversation + the 3.1 DM fixture
     } finally {
       await db.close();
     }
@@ -291,7 +384,7 @@ describe("tenant isolation (RLS)", () => {
         const r = await tx.execute("select count(*)::int as n from app.conversations");
         return (r.rows[0] as { n: number }).n;
       });
-      expect(n).toBe(2);
+      expect(n).toBe(3); // channel + work-session conversation + the 3.1 DM fixture
     } finally {
       process.off("uncaughtException", onUncaught);
       await db.close();
@@ -305,7 +398,7 @@ describe("tenant isolation (RLS)", () => {
         const r = await tx.execute("select count(*)::int as n from app.conversations");
         return (r.rows[0] as { n: number }).n;
       });
-      expect(n).toBe(2);
+      expect(n).toBe(3); // channel + work-session conversation + the 3.1 DM fixture
       // Same single pooled connection, no tenant context now.
       const after = await db.pool.query("select count(*)::int as n from app.conversations");
       expect(after.rows[0].n).toBe(0);

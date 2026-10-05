@@ -86,6 +86,7 @@ async function postHuman(opts: {
           author: { kind: "user", id: opts.authorId, displayName: opts.authorName },
           body: opts.body,
           createdAt: row!.createdAt,
+          delivery: "thread",
         },
         after,
       );

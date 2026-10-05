@@ -55,6 +55,7 @@ export function Composer({
   footer,
   apiRef,
   testId = "composer",
+  mentions = true,
 }: {
   placeholder: string;
   candidates: MentionCandidate[];
@@ -65,6 +66,8 @@ export function Composer({
   footer?: ReactNode;
   apiRef?: RefObject<ComposerApi | null>;
   testId?: string;
+  /** false hides the @ button (e.g. a direct chat with a bot, where nobody else can be mentioned). */
+  mentions?: boolean;
 }) {
   const ref = useRef<HTMLTextAreaElement>(null);
   const [value, setValue] = useState("");
@@ -252,15 +255,17 @@ export function Composer({
           onKeyDown={onKeyDown}
           className="scrollbar-thin max-h-60 min-h-8 flex-1 resize-none bg-transparent py-1.5 text-[14.5px] leading-[1.45] outline-none placeholder:text-muted-foreground/70 disabled:cursor-not-allowed"
         />
-        <button
-          type="button"
-          aria-label="Mention someone"
-          onClick={insertAt}
-          disabled={disabled}
-          className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40 disabled:opacity-50"
-        >
-          <AtSign className="size-4" />
-        </button>
+        {mentions ? (
+          <button
+            type="button"
+            aria-label="Mention someone"
+            onClick={insertAt}
+            disabled={disabled}
+            className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40 disabled:opacity-50"
+          >
+            <AtSign className="size-4" />
+          </button>
+        ) : null}
         <button
           type="button"
           aria-label="Send message"

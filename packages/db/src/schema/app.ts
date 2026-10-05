@@ -4,6 +4,7 @@ import {
   bigint,
   boolean,
   check,
+  date,
   index,
   integer,
   jsonb,
@@ -211,9 +212,15 @@ export const conversations = appSchema.table(
     createdBy: uuid("created_by"),
     archivedAt: ts("archived_at"),
     createdAt: createdAt(),
+    /**
+     * Direct conversations only (D-03): `agent:<botId>|user:<userId>` for a human ↔ bot DM, unique per pair
+     * in the organization. Phase 4 extends the format for human pairs and groups.
+     */
+    dmKey: text("dm_key"),
   },
   (t) => [
     index("conversations_org_kind_idx").on(t.organizationId, t.kind),
+    uniqueIndex("conversations_org_dm_key_uq").on(t.organizationId, t.dmKey).where(sql`kind = 'dm'`),
     uniqueIndex("conversations_org_slug_uq")
       .on(t.organizationId, t.slug)
       .where(sql`kind = 'channel' and slug is not null`),
@@ -310,9 +317,269 @@ export const agents = appSchema.table(
     updatedAt: ts("updated_at").notNull().defaultNow(),
     /** Soft delete: authored messages keep resolving the agent's name; the username becomes reusable. */
     deletedAt: ts("deleted_at"),
+    /** D-01: `team` bots belong to the organization; `personal` bots to `owner_user_id` only. */
+    scope: text("scope", { enum: ["team", "personal"] })
+      .notNull()
+      .default("team"),
+    ownerUserId: uuid("owner_user_id"),
+    /** D-06 per-bot capability toggles (partial; defaults are filled in code by the capability model). */
+    capabilities: jsonb("capabilities").$type<Record<string, unknown>>().notNull().default({}),
   },
   (t) => [
     uniqueIndex("agents_org_username_uq").on(t.organizationId, t.username).where(sql`deleted_at is null`),
+    index("agents_owner_idx")
+      .on(t.organizationId, t.ownerUserId)
+      .where(sql`scope = 'personal' and deleted_at is null`),
+    check("agents_scope_check", sql`${t.scope} in ('team','personal')`),
+    check("agents_owner_scope_check", sql`(${t.scope} = 'personal') = (${t.ownerUserId} is not null)`),
+  ],
+);
+
+// ---------------------------------------------------------------- bot capabilities (Phase 3.1, D-05 … D-14)
+
+/** Organization bot policy (D-06): one row per org; an absent row means the defaults (allow everything). */
+export const botPolicies = appSchema.table("bot_policies", {
+  organizationId: orgId().primaryKey(),
+  /** Per built-in capability `{ orgWide, personal }` (partial; defaults in code). */
+  capabilities: jsonb("capabilities").$type<Record<string, unknown>>().notNull().default({}),
+  searchProvider: text("search_provider").notNull().default("duckduckgo"),
+  maxPersonalBotsPerUser: integer("max_personal_bots_per_user").notNull().default(3),
+  personalDailyLimitMax: integer("personal_daily_limit_max").notNull().default(100),
+  /** Empty = every allowed model of the organization. Entries are `provider/modelId`. */
+  personalAllowedModels: text("personal_allowed_models").array().notNull().default(sql`'{}'::text[]`),
+  updatedBy: uuid("updated_by"),
+  updatedAt: ts("updated_at").notNull().defaultNow(),
+});
+
+/** One row per delivered bot turn (D-07): the effective tool set the API shipped in `agent.mention.v1`. */
+export const agentTurns = appSchema.table(
+  "agent_turns",
+  {
+    eventId: uuid("event_id").primaryKey(),
+    organizationId: orgId(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    userId: uuid("user_id").notNull(),
+    conversationId: uuid("conversation_id").notNull(),
+    conversationKind: text("conversation_kind").notNull(),
+    messageId: uuid("message_id").notNull(),
+    tools: text("tools").array().notNull().default(sql`'{}'::text[]`),
+    toolFlags: jsonb("tool_flags").$type<Record<string, unknown>>().notNull().default({}),
+    toolCalls: integer("tool_calls").notNull().default(0),
+    webCalls: integer("web_calls").notNull().default(0),
+    tainted: boolean("tainted").notNull().default(false),
+    createdAt: createdAt(),
+  },
+  (t) => [index("agent_turns_org_agent_time_idx").on(t.organizationId, t.agentId, t.createdAt)],
+);
+
+/** Every gated tool call the cell asked about (D-08): decision + outcome, never arguments or results. */
+export const agentToolCalls = appSchema.table(
+  "agent_tool_calls",
+  {
+    id: id(),
+    organizationId: orgId(),
+    eventId: uuid("event_id").notNull(),
+    agentId: uuid("agent_id").notNull(),
+    userId: uuid("user_id").notNull(),
+    tool: text("tool").notNull(),
+    sourceKind: text("source_kind", { enum: ["builtin", "mcp", "plugin"] }).notNull(),
+    sourceId: uuid("source_id"),
+    /** Domain (web) or MCP server safe name; never a full URL with query. */
+    target: text("target"),
+    decision: text("decision", { enum: ["allowed", "denied"] }).notNull(),
+    reason: text("reason"),
+    status: text("status", { enum: ["ok", "error", "blocked"] }),
+    resultCount: integer("result_count"),
+    durationMs: integer("duration_ms"),
+    createdAt: createdAt(),
+    completedAt: ts("completed_at"),
+  },
+  (t) => [
+    index("agent_tool_calls_org_event_idx").on(t.organizationId, t.eventId),
+    check("agent_tool_calls_source_kind_check", sql`${t.sourceKind} in ('builtin','mcp','plugin')`),
+    check("agent_tool_calls_decision_check", sql`${t.decision} in ('allowed','denied')`),
+    check(
+      "agent_tool_calls_status_check",
+      sql`${t.status} is null or ${t.status} in ('ok','error','blocked')`,
+    ),
+  ],
+);
+
+/** Daily turn counter per bot (D-11, UTC day), incremented atomically at delivery. */
+export const agentUsageDaily = appSchema.table(
+  "agent_usage_daily",
+  {
+    organizationId: orgId(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    day: date("day", { mode: "string" }).notNull(),
+    turns: integer("turns").notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.organizationId, t.agentId, t.day] })],
+);
+
+/** Channel limit notices already posted today (D-11: once per conversation per day). */
+export const agentLimitNotices = appSchema.table(
+  "agent_limit_notices",
+  {
+    organizationId: orgId(),
+    agentId: uuid("agent_id").notNull(),
+    conversationId: uuid("conversation_id").notNull(),
+    day: date("day", { mode: "string" }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.agentId, t.conversationId, t.day] })],
+);
+
+/** Per-(bot, human) memory (D-10), read and written only in that human's DM with the bot. */
+export const agentMemories = appSchema.table(
+  "agent_memories",
+  {
+    id: id(),
+    organizationId: orgId(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    userId: uuid("user_id").notNull(),
+    text: text("text").notNull(),
+    sourceEventId: uuid("source_event_id"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("agent_memories_owner_idx").on(t.organizationId, t.agentId, t.userId, t.createdAt),
+    check("agent_memories_text_len_check", sql`char_length(${t.text}) <= 500`),
+  ],
+);
+
+/** Admin MCP server registry (D-13). Header values live in `secrets` (kind `mcp_credential`). */
+export const mcpServers = appSchema.table(
+  "mcp_servers",
+  {
+    id: id(),
+    organizationId: orgId(),
+    name: text("name").notNull(),
+    /** Immutable OpenClaw server name `m` + 8 hex chars (tool names are `<safe>__<tool>`). */
+    safeName: text("safe_name").notNull(),
+    transport: text("transport", { enum: ["streamable-http", "sse", "sandboxed-stdio"] }).notNull(),
+    url: text("url"),
+    sandboxServer: text("sandbox_server"),
+    /** `[{ name, secretId }]`: header names with SecretReferences, never values. */
+    headers: jsonb("headers").$type<Array<{ name: string; secretId: string }>>().notNull().default([]),
+    orgEnabled: boolean("org_enabled").notNull().default(true),
+    personalAllowed: boolean("personal_allowed").notNull().default(false),
+    trustedChaining: boolean("trusted_chaining").notNull().default(false),
+    status: text("status", { enum: ["pending", "probing", "ready", "error"] })
+      .notNull()
+      .default("pending"),
+    statusDetail: text("status_detail"),
+    probedAt: ts("probed_at"),
+    createdBy: uuid("created_by"),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("mcp_servers_org_safe_name_uq").on(t.organizationId, t.safeName),
+    check("mcp_servers_transport_check", sql`${t.transport} in ('streamable-http','sse','sandboxed-stdio')`),
+    check("mcp_servers_status_check", sql`${t.status} in ('pending','probing','ready','error')`),
+  ],
+);
+
+/** Tools discovered on an MCP server by the cell probe. */
+export const mcpServerTools = appSchema.table(
+  "mcp_server_tools",
+  {
+    organizationId: orgId(),
+    serverId: uuid("server_id")
+      .notNull()
+      .references(() => mcpServers.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    openclawName: text("openclaw_name").notNull(),
+    title: text("title"),
+    description: text("description"),
+    readOnly: boolean("read_only").notNull().default(false),
+    destructive: boolean("destructive").notNull().default(false),
+  },
+  (t) => [primaryKey({ columns: [t.serverId, t.name] })],
+);
+
+/** Marketplace plugins approved for (and installed in) the org's OpenClaw cell (D-14). */
+export const cellPlugins = appSchema.table(
+  "cell_plugins",
+  {
+    id: id(),
+    organizationId: orgId(),
+    packageName: text("package_name").notNull(),
+    pluginId: text("plugin_id"),
+    version: text("version").notNull(),
+    channel: text("channel", { enum: ["official", "community"] }).notNull(),
+    publisher: text("publisher"),
+    artifactSha256: text("artifact_sha256").notNull(),
+    npmIntegrity: text("npm_integrity"),
+    artifactUrl: text("artifact_url"),
+    risk: text("risk", { enum: ["low", "medium", "high", "refuse"] }).notNull(),
+    riskReasons: jsonb("risk_reasons").$type<unknown[]>().notNull().default([]),
+    declared: jsonb("declared").$type<Record<string, unknown>>().notNull().default({}),
+    status: text("status", {
+      enum: ["approved", "installing", "installed", "failed", "uninstalling", "uninstalled"],
+    }).notNull(),
+    statusDetail: text("status_detail"),
+    orgEnabled: boolean("org_enabled").notNull().default(true),
+    personalAllowed: boolean("personal_allowed").notNull().default(false),
+    trustedChaining: boolean("trusted_chaining").notNull().default(false),
+    flowId: uuid("flow_id"),
+    approvedBy: uuid("approved_by"),
+    approvedAt: ts("approved_at"),
+    installedAt: ts("installed_at"),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("cell_plugins_org_package_uq")
+      .on(t.organizationId, t.packageName)
+      .where(sql`status <> 'uninstalled'`),
+    check("cell_plugins_channel_check", sql`${t.channel} in ('official','community')`),
+    check("cell_plugins_risk_check", sql`${t.risk} in ('low','medium','high','refuse')`),
+    check(
+      "cell_plugins_status_check",
+      sql`${t.status} in ('approved','installing','installed','failed','uninstalling','uninstalled')`,
+    ),
+  ],
+);
+
+/** Tools an installed plugin declared. */
+export const cellPluginTools = appSchema.table(
+  "cell_plugin_tools",
+  {
+    organizationId: orgId(),
+    pluginRowId: uuid("plugin_row_id")
+      .notNull()
+      .references(() => cellPlugins.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description"),
+    sideEffecting: boolean("side_effecting").notNull().default(true),
+  },
+  (t) => [primaryKey({ columns: [t.pluginRowId, t.name] })],
+);
+
+/** MCP / plugin tools a bot manager enabled on one bot (BOT-10). */
+export const botToolGrants = appSchema.table(
+  "bot_tool_grants",
+  {
+    organizationId: orgId(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    sourceKind: text("source_kind", { enum: ["mcp", "plugin"] }).notNull(),
+    sourceId: uuid("source_id").notNull(),
+    toolName: text("tool_name").notNull(),
+    createdBy: uuid("created_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.agentId, t.sourceKind, t.sourceId, t.toolName] }),
+    check("bot_tool_grants_source_kind_check", sql`${t.sourceKind} in ('mcp','plugin')`),
   ],
 );
 
@@ -338,7 +605,7 @@ export const secrets = appSchema.table(
     id: id(),
     organizationId: orgId(),
     name: text("name").notNull(),
-    kind: text("kind", { enum: ["provider_api_key"] }).notNull(),
+    kind: text("kind", { enum: ["provider_api_key", "mcp_credential"] }).notNull(),
     provider: text("provider"),
     ciphertext: text("ciphertext").notNull(),
     iv: text("iv").notNull(),

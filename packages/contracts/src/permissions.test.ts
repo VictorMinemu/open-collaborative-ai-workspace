@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { OrgRole, ROLE_LABELS } from "./common";
 import {
   AccessTokenClaims,
+  AGENT_PERMISSIONS,
   ALLOWED_PARENT_KINDS,
   AuthzDenial,
   DEVICE_TOKEN_AUDIENCE,
@@ -22,9 +23,43 @@ const id = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
 const now = 1_790_000_000;
 
 describe("permission vocabulary", () => {
-  it("has exactly the 35 agreed permissions", () => {
-    expect(Permission.options).toHaveLength(35);
-    expect(new Set(Permission.options).size).toBe(35);
+  it("has exactly the 41 agreed permissions", () => {
+    expect(Permission.options).toHaveLength(41);
+    expect(new Set(Permission.options).size).toBe(41);
+  });
+
+  it("Phase 3.1 bot permissions exist exactly as D-02 defines them", () => {
+    expect(PERMISSION_SURFACE).toMatchObject({
+      "bot.create_personal": "bots",
+      "bot.configure": "bots",
+      "bot.internet": "bots",
+      "bot.tool.use": "bots",
+      "plugin.manage": "admin",
+      "mcp.manage": "admin",
+    });
+    for (const role of OrgRole.options) {
+      for (const p of ["bot.create_personal", "bot.internet", "bot.tool.use"] as const) {
+        expect(ROLE_PERMISSIONS[role], `${role}: ${p}`).toContain(p);
+      }
+      for (const p of ["bot.configure", "plugin.manage", "mcp.manage"] as const) {
+        if (role === "admin") expect(ROLE_PERMISSIONS[role], `${role}: ${p}`).toContain(p);
+        else expect(ROLE_PERMISSIONS[role], `${role}: ${p}`).not.toContain(p);
+      }
+    }
+    expect(AGENT_PERMISSIONS).toEqual(expect.arrayContaining(["bot.internet", "bot.tool.use"]));
+    expect(AGENT_PERMISSIONS).not.toContain("bot.configure");
+    expect(NON_DELEGABLE_PERMISSIONS).toEqual(expect.arrayContaining(["plugin.manage", "mcp.manage"]));
+    expect(NON_DELEGABLE_PERMISSIONS).not.toContain("bot.create_personal");
+    for (const p of [
+      "bot.create_personal",
+      "bot.configure",
+      "bot.internet",
+      "bot.tool.use",
+      "plugin.manage",
+      "mcp.manage",
+    ] as const) {
+      expect(PERMISSION_DESCRIPTIONS[p].length, p).toBeGreaterThan(10);
+    }
   });
 
   it("roles are the four PRD roles with labels and ranks", () => {

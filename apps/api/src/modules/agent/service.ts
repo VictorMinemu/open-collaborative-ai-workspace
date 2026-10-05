@@ -47,6 +47,8 @@ export function toAgentDto(r: AgentRow): Agent {
     createdBy: r.createdBy,
     createdAt: new Date(r.createdAt).toISOString(),
     updatedAt: new Date(r.updatedAt).toISOString(),
+    scope: r.scope,
+    ownerUserId: r.ownerUserId,
   };
 }
 
@@ -165,14 +167,21 @@ export async function notifyCell(
   });
 }
 
-/** Broadcast an agent change to every browser of the org (status chips, autocomplete). */
+/**
+ * Broadcast an agent change: team bots to every browser of the org (status chips, autocomplete); a personal
+ * bot only to its owner's `user:` topic, so nobody else learns it exists (D-01, Pitfall 4).
+ */
 export async function publishAgent(
   core: Core,
   tx: Tx,
   type: typeof EventTypes.agentCreated | typeof EventTypes.agentUpdated,
   agent: Agent,
 ) {
-  await core.realtime.appendEvent(tx, `org:${agent.organizationId}`, type, agent);
+  const topic =
+    agent.scope === "personal" && agent.ownerUserId
+      ? `user:${agent.ownerUserId}`
+      : `org:${agent.organizationId}`;
+  await core.realtime.appendEvent(tx, topic, type, agent);
 }
 
 /** Bots as the cell must provision them (deleted ones are omitted; disabled ones are listed as such). */

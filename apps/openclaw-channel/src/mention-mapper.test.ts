@@ -9,6 +9,7 @@ import {
   replyIdempotencyKey,
   sanitizeName,
 } from "./mention-mapper.js";
+import { sessionKeyFor } from "./openclaw-port.js";
 
 const VICTOR = { kind: "user" as const, id: "u-victor", displayName: "Víctor Ruiz" };
 const ALEX = { kind: "user" as const, id: "u-alex", displayName: "Alex" };
@@ -121,9 +122,62 @@ describe("mapMention", () => {
   });
 });
 
+describe("direct conversations (D-04)", () => {
+  const dm = () =>
+    mention({
+      conversation: { id: "dm-1", kind: "dm", name: null },
+      thread: { rootMessageId: "msg-3" },
+      message: {
+        id: "msg-3",
+        text: "what's on my plate today?",
+        createdAt: "2026-10-02T18:00:03.000Z",
+        author: VICTOR,
+        mentions: [{ kind: "agent", id: BOT.id }],
+      },
+      threadHistory: [
+        { id: "msg-1", author: VICTOR, text: "hi", createdAt: "2026-10-02T18:00:01.000Z" },
+        {
+          id: "msg-2",
+          author: { kind: "agent", id: BOT.id, displayName: "Archie" },
+          text: "Hi!",
+          createdAt: "2026-10-02T18:00:02.000Z",
+        },
+      ],
+      roster: [
+        { ...VICTOR, role: "owner" },
+        { kind: "agent", id: BOT.id, displayName: "Archie", handle: "archie" },
+      ],
+    });
+
+  it("maps a dm to a flat target with no thread root and a conversation history label", () => {
+    const m = mapMention(dm(), BOT);
+    expect(m.conversationKind).toBe("dm");
+    expect(m.threadRootId).toBeNull();
+    expect(m.target).toBe("conv:dm-1");
+    expect(m.historyLabel).toBe("Conversation history");
+    expect(m.conversationLabel).toBe("Direct chat with Víctor Ruiz");
+    expect(m.chatWindow.map((c) => c.message_id)).toEqual(["msg-1", "msg-2"]);
+    expect(m.personaPrompt).toContain("private direct conversation");
+    expect(m.personaPrompt).not.toContain("chat thread");
+  });
+
+  it("a channel mention keeps its thread and the thread history label", () => {
+    const m = mapMention(mention(), BOT);
+    expect(m.conversationKind).toBe("channel");
+    expect(m.historyLabel).toBe("Thread history");
+  });
+
+  it("one OpenClaw session per DM conversation; one per thread in channels", () => {
+    const base = "agent:ocw-0199a000-aaaa:ocw:channel:dm-1";
+    expect(sessionKeyFor(base, mapMention(dm(), BOT))).toBe(base);
+    expect(sessionKeyFor(base, mapMention(mention(), BOT))).toBe(`${base}:thread:msg-root`);
+  });
+});
+
 describe("targets and idempotency keys", () => {
   it("round-trips the target grammar", () => {
     expect(parseTarget(buildTarget("c1", "m1"))).toEqual({ conversationId: "c1", threadRootId: "m1" });
+    expect(parseTarget(buildTarget("c1", null))).toEqual({ conversationId: "c1" });
     expect(parseTarget("ocw:conv:c1")).toEqual({ conversationId: "c1" });
     expect(parseTarget("garbage")).toBeNull();
   });

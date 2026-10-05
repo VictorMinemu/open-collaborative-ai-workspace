@@ -37,9 +37,12 @@ export function formatGroupMembers(roster: AgentChannelRosterEntry[]): string {
   return roster.map(principalLabel).join(", ");
 }
 
-/** Outbound/session target grammar: `conv:<conversationId>/thread:<rootMessageId>`. */
-export function buildTarget(conversationId: string, threadRootId: string): string {
-  return `conv:${conversationId}/thread:${threadRootId}`;
+/**
+ * Outbound/session target grammar: `conv:<conversationId>/thread:<rootMessageId>`, or `conv:<conversationId>`
+ * for a flat direct conversation (D-04).
+ */
+export function buildTarget(conversationId: string, threadRootId: string | null): string {
+  return threadRootId ? `conv:${conversationId}/thread:${threadRootId}` : `conv:${conversationId}`;
 }
 
 export function parseTarget(raw: string): { conversationId: string; threadRootId?: string } | null {
@@ -51,10 +54,13 @@ export function parseTarget(raw: string): { conversationId: string; threadRootId
 
 export function buildPersonaPrompt(
   bot: Pick<CellAgent, "displayName" | "handle" | "instructions"> & { description?: string | null },
+  opts: { direct?: boolean } = {},
 ): string {
   const lines = [
     `You are ${sanitizeName(bot.displayName)} (@${bot.handle}), an AI agent that is a member of this team workspace.`,
-    "You are replying inside a chat thread where several humans may participate. The sender of the current message and the thread participants are given to you as structured context; address people by name when helpful.",
+    opts.direct
+      ? "You are in a private direct conversation with one person, given to you as structured context; earlier messages of this conversation are your history."
+      : "You are replying inside a chat thread where several humans may participate. The sender of the current message and the thread participants are given to you as structured context; address people by name when helpful.",
     "Reply with plain Markdown text only. Keep replies concise unless asked for detail.",
   ];
   const description = bot.description?.trim();
@@ -68,8 +74,13 @@ export type MappedMention = {
   ocwAgentId: string;
   openClawAgentId: string;
   conversationId: string;
-  /** The thread every reply must land in (the mention itself when posted top-level). */
-  threadRootId: string;
+  /** `dm`: a flat direct conversation (D-04), one OpenClaw session per conversation. */
+  conversationKind: "dm" | "channel";
+  /**
+   * The thread every reply must land in (the mention itself when posted top-level); null in a direct
+   * conversation, where replies are flat.
+   */
+  threadRootId: string | null;
   target: string;
   messageId: string;
   timestampMs: number | undefined;
@@ -79,6 +90,8 @@ export type MappedMention = {
   /** Mentioned user ids (agents excluded), for MentionedUserIds. */
   mentionedUserIds: string[];
   body: string;
+  /** Label of the history block ("Thread history" / "Conversation history"). */
+  historyLabel: string;
   /** Thread history for `ChannelStructuredContext` chat_window (oldest first). */
   chatWindow: Array<{
     message_id?: string;
@@ -99,7 +112,9 @@ function parseTime(value: string | undefined): number | undefined {
 }
 
 export function mapMention(event: AgentMentionEvent, bot: CellAgent | undefined): MappedMention {
-  const threadRootId = event.thread.rootMessageId;
+  const direct = event.conversation.kind === "dm";
+  // In a DM `thread.rootMessageId` is the message itself (schema unchanged); the reply is flat.
+  const threadRootId = direct ? null : event.thread.rootMessageId;
   const author = event.message.author;
   const history = event.threadHistory.map((line) => ({
     id: line.id,
@@ -112,6 +127,7 @@ export function mapMention(event: AgentMentionEvent, bot: CellAgent | undefined)
     ocwAgentId: event.agent.id,
     openClawAgentId: openClawAgentIdFor(event.agent.id),
     conversationId: event.conversation.id,
+    conversationKind: direct ? "dm" : "channel",
     threadRootId,
     target: buildTarget(event.conversation.id, threadRootId),
     messageId: event.message.id,
@@ -121,12 +137,15 @@ export function mapMention(event: AgentMentionEvent, bot: CellAgent | undefined)
       name: sanitizeName(author.displayName),
       isBot: author.kind !== "user",
     },
-    conversationLabel: event.conversation.name
-      ? `#${sanitizeName(event.conversation.name)}`
-      : event.conversation.id,
+    conversationLabel: direct
+      ? `Direct chat with ${sanitizeName(author.displayName)}`
+      : event.conversation.name
+        ? `#${sanitizeName(event.conversation.name)}`
+        : event.conversation.id,
     groupMembers: formatGroupMembers(event.roster),
     mentionedUserIds: event.message.mentions.filter((m) => m.kind === "user").map((m) => m.id),
     body: event.message.text,
+    historyLabel: direct ? "Conversation history" : "Thread history",
     chatWindow: history.map((h) => ({
       message_id: h.id,
       sender: h.sender,
@@ -142,6 +161,7 @@ export function mapMention(event: AgentMentionEvent, bot: CellAgent | undefined)
     })),
     personaPrompt: buildPersonaPrompt(
       bot ?? { displayName: event.agent.displayName, handle: event.agent.handle, instructions: "" },
+      { direct },
     ),
   };
 }

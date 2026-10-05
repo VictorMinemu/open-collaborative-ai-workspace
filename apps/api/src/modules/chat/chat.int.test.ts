@@ -266,6 +266,7 @@ describe("chat: channels", () => {
         author: { kind: "user", id: alexId, displayName: "Alex Kim" },
         body: msg.body,
         createdAt: msg.createdAt,
+        delivery: "thread",
       });
       const members = await ok(admin.request("GET", `/api/v1/channels/${archId}/members`));
       expect(members.members.at(-1)).toMatchObject({ kind: "agent", id: archieId, handle: "archie" });

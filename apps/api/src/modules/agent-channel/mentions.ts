@@ -70,13 +70,16 @@ export async function buildMentionEvents(tx: Tx, mention: AgentMention): Promise
   ).filter((a) => a.status !== "disabled" && agentMembers.has(a.id));
   if (targets.length === 0) return [];
 
-  // ---- thread history (current message excluded), oldest first
+  // ---- history (current message excluded), oldest first: the thread, or the whole DM (D-04, flat)
   const root = mention.threadRootId;
-  const threadFilter = or(
-    eq(messages.id, root),
-    eq(messages.threadId, root),
-    ...(conv.kind === "thread" ? [eq(messages.conversationId, conv.id)] : []),
-  );
+  const threadFilter =
+    conv.kind === "dm"
+      ? eq(messages.conversationId, conv.id)
+      : or(
+          eq(messages.id, root),
+          eq(messages.threadId, root),
+          ...(conv.kind === "thread" ? [eq(messages.conversationId, conv.id)] : []),
+        );
   const historyRows = (
     await tx
       .select()

@@ -12,6 +12,11 @@ export interface DirectoryEntry {
   status?: "provisioning" | "ready" | "error" | "disabled";
   /** Users only. */
   role?: OrgRole;
+  /** Agents only (D-01): personal bots belong to `ownerUserId`. */
+  scope?: "team" | "personal";
+  ownerUserId?: string | null;
+  /** Agents only: soft-deleted bots keep resolving as authors. */
+  deleted?: boolean;
 }
 
 export interface Directory {
@@ -41,6 +46,8 @@ export async function loadDirectory(tx: Tx): Promise<Directory> {
         avatarUrl: agents.avatarUrl,
         status: agents.status,
         deletedAt: agents.deletedAt,
+        scope: agents.scope,
+        ownerUserId: agents.ownerUserId,
       })
       .from(agents),
   ]);
@@ -67,6 +74,9 @@ export async function loadDirectory(tx: Tx): Promise<Directory> {
       handle: a.username.toLowerCase(),
       avatarUrl: a.avatarUrl,
       status: a.status,
+      scope: a.scope,
+      ownerUserId: a.ownerUserId,
+      deleted: a.deletedAt !== null,
     };
     agentMap.set(e.id, e);
     // Deleted bots keep resolving as authors but free their handle: a new bot may reuse it (B2-6).

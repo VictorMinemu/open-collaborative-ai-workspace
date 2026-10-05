@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   AddUnitMemberRequest,
+  Agent,
   AuthCapabilities,
   AvatarRef,
   AWAY_AFTER_IDLE_MS,
@@ -8,8 +9,12 @@ import {
   ClientFrame,
   ConversationKind,
   CreatePermissionRuleRequest,
+  CreatePersonalBotRequest,
+  CreatePersonalBotResponse,
   CreateUnitRequest,
   DeviceToServerFrame,
+  DmList,
+  DmSummary,
   extractMentionHandles,
   Invitation,
   isPresenceTopic,
@@ -345,5 +350,77 @@ describe("revoked frame (03-04)", () => {
     });
     expect(ServerFrame.safeParse({ op: "revoked", topic, reason: "expired" }).success).toBe(false);
     expect(ServerFrame.safeParse({ op: "revoked", topic }).success).toBe(false);
+  });
+});
+
+describe("personal bots and direct conversations (03.1-01)", () => {
+  const now = "2026-10-04T10:00:00.000Z";
+  const agent = {
+    id,
+    organizationId: id,
+    name: "Sam's assistant",
+    username: "sams-assistant",
+    avatarUrl: null,
+    description: null,
+    instructions: "Be concise.",
+    modelProvider: "mock",
+    modelId: "mock-1",
+    runtime: "openclaw",
+    status: "ready",
+    statusMessage: null,
+    createdBy: id,
+    createdAt: now,
+    updatedAt: now,
+    scope: "personal",
+    ownerUserId: id,
+  };
+
+  it("a personal bot is created from an empty body; every field stays validated", () => {
+    expect(CreatePersonalBotRequest.parse({})).toEqual({});
+    expect(CreatePersonalBotRequest.safeParse({ name: "" }).success).toBe(false);
+    expect(CreatePersonalBotRequest.safeParse({ modelProvider: "nope" }).success).toBe(false);
+    expect(CreatePersonalBotResponse.parse({ agent, dmId: id }).agent.scope).toBe("personal");
+  });
+
+  it("Agent requires scope and ownerUserId", () => {
+    expect(Agent.safeParse(agent).success).toBe(true);
+    const { scope: _scope, ...noScope } = agent;
+    expect(Agent.safeParse(noScope).success).toBe(false);
+    expect(Agent.safeParse({ ...agent, scope: "shared" }).success).toBe(false);
+  });
+
+  it("DmSummary parses a dm with a bot counterpart and rejects a human counterpart", () => {
+    const dm = {
+      id,
+      organizationId: id,
+      kind: "dm",
+      name: null,
+      slug: null,
+      topic: null,
+      visibility: "private",
+      parentConversationId: null,
+      rootMessageId: null,
+      createdBy: id,
+      archivedAt: null,
+      createdAt: now,
+      lastSeq: 3,
+      counterpart: {
+        kind: "agent",
+        id,
+        name: "Sam's assistant",
+        username: "sams-assistant",
+        avatarUrl: null,
+        status: "ready",
+        scope: "personal",
+      },
+      latestMessageSeq: 2,
+      lastReadSeq: 1,
+      lastMessageAt: now,
+    };
+    expect(DmSummary.parse(dm).counterpart.kind).toBe("agent");
+    expect(DmList.parse({ dms: [dm], userSeq: 4 }).dms).toHaveLength(1);
+    expect(DmSummary.safeParse({ ...dm, counterpart: { ...dm.counterpart, kind: "user" } }).success).toBe(
+      false,
+    );
   });
 });

@@ -81,6 +81,15 @@ export function threadSessionKey(base: string, threadRootId: string): string {
   return `${base}:thread:${threadRootId.toLowerCase()}`;
 }
 
+/**
+ * The OpenClaw session of a delivery: one per (bot, thread) in channels; one per (bot, conversation) in a
+ * direct conversation (D-04: the base key is already per conversation, so two humans' DMs with the same bot
+ * never share a session — OpenClaw's `dmScope: main` would merge them, Pitfall 2).
+ */
+export function sessionKeyFor(base: string, m: Pick<MappedMention, "threadRootId">): string {
+  return m.threadRootId ? threadSessionKey(base, m.threadRootId) : base;
+}
+
 export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
   const { runtime, accountId } = opts;
 
@@ -136,9 +145,9 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
         peer,
         dmScope: "main",
       });
-      // One OpenClaw session per (bot, thread): OpenClaw serialises runs per session lane, which
-      // gives "one generation per thread" for free.
-      const sessionKey = threadSessionKey(baseSessionKey, m.threadRootId);
+      // One OpenClaw session per (bot, thread) — per (bot, conversation) for a DM: OpenClaw serialises runs
+      // per session lane, which gives "one generation per thread / DM" for free.
+      const sessionKey = sessionKeyFor(baseSessionKey, m);
 
       const ingress = await runtime.channel.inbound.ingress.resolveStable({
         channelId: CHANNEL_ID,
@@ -182,7 +191,7 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
           kind: "group",
           id: m.conversationId,
           label: m.conversationLabel,
-          threadId: m.threadRootId,
+          ...(m.threadRootId ? { threadId: m.threadRootId } : {}),
           nativeChannelId: m.conversationId,
         },
         route: { agentId: m.openClawAgentId, dmScope: "main", accountId, routeSessionKey: sessionKey },
@@ -190,8 +199,7 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
           to: m.target,
           originatingTo: m.target,
           replyToId: m.messageId,
-          messageThreadId: m.threadRootId,
-          threadParentId: m.threadRootId,
+          ...(m.threadRootId ? { messageThreadId: m.threadRootId, threadParentId: m.threadRootId } : {}),
         },
         message: {
           body: m.body,
@@ -222,7 +230,7 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
             ? {
                 ChannelStructuredContext: [
                   {
-                    label: "Thread history",
+                    label: m.historyLabel,
                     source: CHANNEL_ID,
                     type: "chat_window",
                     payload: {

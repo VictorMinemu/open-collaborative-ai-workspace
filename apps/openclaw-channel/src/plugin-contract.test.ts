@@ -185,6 +185,49 @@ describe("mention → dispatch → reply", () => {
     expect(api.typing.at(-1)?.typing).toBe(false);
   });
 
+  it("a DM mention is answered flat: reply and typing carry threadRootMessageId null (D-04)", async () => {
+    startPlugin();
+    await api.waitFor(() => api.openSockets() === 1);
+    api.publishMention(
+      mention(2, {
+        conversation: { id: "dm-1", kind: "dm", name: null },
+        thread: { rootMessageId: "msg-2" },
+        message: {
+          id: "msg-2",
+          text: "hello there",
+          createdAt: "2026-10-02T18:00:00.000Z",
+          author: { kind: "user", id: "u-victor", displayName: "Víctor" },
+          mentions: [{ kind: "agent", id: ARCHIE.id }],
+        },
+        roster: [
+          { kind: "user", id: "u-victor", displayName: "Víctor", role: "owner" },
+          { kind: "agent", id: ARCHIE.id, displayName: "Archie", handle: "archie" },
+        ],
+      }),
+    );
+    await api.waitFor(() => api.messages.length === 1);
+    expect(api.messages[0]).toMatchObject({
+      agentId: ARCHIE.id,
+      conversationId: "dm-1",
+      threadRootMessageId: null,
+      inReplyToMessageId: "msg-2",
+      text: "Hi Víctor!",
+      idempotencyKey: "evt:evt-2",
+    });
+    expect(port.dispatched[0]).toMatchObject({
+      conversationKind: "dm",
+      threadRootId: null,
+      target: "conv:dm-1",
+    });
+    await api.waitFor(() => api.typing.some((t) => t.typing === false));
+    expect(api.typing[0]).toEqual({
+      agentId: ARCHIE.id,
+      conversationId: "dm-1",
+      threadRootMessageId: null,
+      typing: true,
+    });
+  });
+
   it("posts multi-part replies in order with distinct keys", async () => {
     port.reply = () => ["part one", "part two"];
     startPlugin();

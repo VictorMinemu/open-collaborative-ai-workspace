@@ -7,6 +7,8 @@ import {
   AllowedModelList,
   ChannelList,
   type CreateAgentRequest,
+  type CreatePersonalBotRequest,
+  CreatePersonalBotResponse,
   EphemeralTypes,
   EventTypes,
   ModelProvider,
@@ -70,6 +72,21 @@ export function useCreateAgent() {
   return useMutation({
     mutationFn: (body: CreateAgentRequest) => api.post("/api/v1/agents", { body, schema: Agent }),
     onSuccess: (agent) => upsertAgent(qc, agent),
+  });
+}
+
+/** One-click personal bot (BOT-01): creates the bot and its private DM; the sidebar's Bots list refetches. */
+export function useCreatePersonalBot() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreatePersonalBotRequest = {}) =>
+      api.post("/api/v1/agents/personal", { body, schema: CreatePersonalBotResponse }),
+    onSuccess: (res) => {
+      upsertAgent(qc, res.agent);
+      void qc.invalidateQueries({ queryKey: ["chat", "dms"] });
+      void qc.invalidateQueries({ queryKey: botKeys.agents });
+      void qc.invalidateQueries({ queryKey: ["chat", "agents"] });
+    },
   });
 }
 

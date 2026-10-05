@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AgentScope, AgentStatus } from "./agent";
 import { ClientKind, Id, IsoDateTime, MemberKind, PrincipalKind } from "./common";
 import { Permission } from "./permissions";
 
@@ -119,6 +120,36 @@ export const ChannelList = z.object({
   userSeq: z.number().int().nonnegative().optional(),
 });
 export type ChannelList = z.infer<typeof ChannelList>;
+
+// ---- direct conversations (D-03: one human + one bot in Phase 3.1) ----
+
+/** The other party of a direct conversation. Human ↔ human DMs arrive in Phase 4. */
+export const DmCounterpart = z.object({
+  kind: z.literal("agent"),
+  id: Id,
+  name: z.string(),
+  username: z.string(),
+  avatarUrl: z.string().nullable(),
+  status: AgentStatus,
+  scope: AgentScope,
+});
+export type DmCounterpart = z.infer<typeof DmCounterpart>;
+
+export const DmSummary = Conversation.extend({
+  counterpart: DmCounterpart,
+  /** Seq of the newest message (0 when empty); unread when > lastReadSeq. */
+  latestMessageSeq: z.number().int().nonnegative(),
+  lastReadSeq: z.number().int().nonnegative(),
+  lastMessageAt: IsoDateTime.nullable(),
+});
+export type DmSummary = z.infer<typeof DmSummary>;
+
+export const DmList = z.object({
+  dms: z.array(DmSummary),
+  /** Cursor for the sidebar's `user:<id>` list-change subscription. */
+  userSeq: z.number().int().nonnegative().optional(),
+});
+export type DmList = z.infer<typeof DmList>;
 
 export const AddConversationMemberRequest = z.object({ kind: MemberKind, id: Id });
 export type AddConversationMemberRequest = z.infer<typeof AddConversationMemberRequest>;

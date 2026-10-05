@@ -7,6 +7,8 @@ import {
   ChannelMemberList,
   ChannelSummary,
   type CreateChannelRequest,
+  type DmList,
+  DmList as DmListSchema,
   type Message,
   type MessagePage,
   MessagePage as MessagePageSchema,
@@ -26,6 +28,7 @@ export const chatKeys = {
   messages: (id: string) => ["chat", "messages", id] as const,
   thread: (rootId: string) => ["chat", "thread", rootId] as const,
   agents: ["chat", "agents"] as const,
+  dms: ["chat", "dms"] as const,
 };
 
 function retryUnlessClientError(failureCount: number, err: unknown): boolean {
@@ -97,6 +100,45 @@ export function bumpLatest(qc: QueryClient, id: string, seq: number, createdAt: 
   const ch = list?.channels.find((c) => c.id === id);
   if (!ch || ch.latestMessageSeq >= seq) return;
   patchChannel(qc, id, { latestMessageSeq: seq, lastMessageAt: createdAt });
+}
+
+// ---------------------------------------------------------------- direct conversations (D-03)
+
+/** The caller's DMs with bots (personal and team), for the sidebar's Bots section. */
+export function useDms() {
+  return useQuery({
+    queryKey: chatKeys.dms,
+    queryFn: ({ signal }) => api.get("/api/v1/dms", { schema: DmListSchema, signal }),
+    retry: retryUnlessClientError,
+    staleTime: 30_000,
+  });
+}
+
+function patchDm(qc: QueryClient, id: string, patch: Partial<DmList["dms"][number]>) {
+  qc.setQueryData<DmList>(chatKeys.dms, (prev) =>
+    prev ? { ...prev, dms: prev.dms.map((d) => (d.id === id ? { ...d, ...patch } : d)) } : prev,
+  );
+}
+
+/** Moves the caller's DM read cursor forward (server keeps the max). */
+export function markDmRead(qc: QueryClient, id: string, seq: number) {
+  const dm = qc.getQueryData<DmList>(chatKeys.dms)?.dms.find((d) => d.id === id);
+  if (dm && dm.lastReadSeq >= seq) return;
+  patchDm(qc, id, { lastReadSeq: seq });
+  void api.post(`/api/v1/conversations/${id}/read`, { body: { seq }, schema: Ok }).catch(() => {});
+}
+
+/** `markDmRead` as a hook, for components that only hold the conversation id. */
+export function useMarkConversationRead() {
+  const qc = useQueryClient();
+  return (id: string, seq: number) => markDmRead(qc, id, seq);
+}
+
+/** A new top-level message arrived in a DM (sidebar unread dot). */
+export function bumpDmLatest(qc: QueryClient, id: string, seq: number, createdAt: string) {
+  const dm = qc.getQueryData<DmList>(chatKeys.dms)?.dms.find((d) => d.id === id);
+  if (!dm || dm.latestMessageSeq >= seq) return;
+  patchDm(qc, id, { latestMessageSeq: seq, lastMessageAt: createdAt });
 }
 
 // ---------------------------------------------------------------- members & agents

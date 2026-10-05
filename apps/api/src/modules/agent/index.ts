@@ -3,6 +3,8 @@ import {
   AgentList,
   AllowedModelList,
   CreateAgentRequest,
+  CreatePersonalBotRequest,
+  CreatePersonalBotResponse,
   catalogEntry,
   EventTypes,
   IdParams,
@@ -19,6 +21,7 @@ import { and, asc, eq, isNull, like, or } from "drizzle-orm";
 import { type ApiModule, authOf, type Core, tenant } from "../../core";
 import { badRequest, conflict, notFound } from "../../lib/errors";
 import { createPermissionService } from "../organization";
+import { createPersonalBot } from "./personal";
 import { keyHint, nextFreeUsername, slugifyUsername } from "./providers";
 import {
   allowedModels,
@@ -32,6 +35,7 @@ import {
 } from "./service";
 import { revokeSubscriptionInCell } from "./subscription";
 
+export { createPersonalBot, DEFAULT_MAX_PERSONAL_BOTS } from "./personal";
 export {
   agentDirectory,
   allowedModels,
@@ -312,6 +316,28 @@ export function createAgentModule(core: Core): ApiModule {
               await notifyCell(core, tx, "agent.created", row.id);
               return dto;
             });
+          } catch (err) {
+            if (isUniqueViolation(err)) throw conflict("That username is already taken", "username_taken");
+            throw err;
+          }
+        },
+      );
+
+      // One click (BOT-01): any member the resolver allows `bot.create_personal` (decided inside).
+      app.post(
+        "/agents/personal",
+        {
+          config: user,
+          preHandler: requireUser,
+          schema: {
+            tags: ["agent"],
+            body: CreatePersonalBotRequest,
+            response: { 200: CreatePersonalBotResponse },
+          },
+        },
+        async (req) => {
+          try {
+            return await core.db.withTenant(tenant(req), (tx) => createPersonalBot(core, req, tx, req.body));
           } catch (err) {
             if (isUniqueViolation(err)) throw conflict("That username is already taken", "username_taken");
             throw err;
