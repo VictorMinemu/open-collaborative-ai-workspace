@@ -3,6 +3,7 @@
 FROM node:24.21.0-bookworm-slim
 WORKDIR /app
 COPY --chown=root:root infra/fake-model/server.mjs ./server.mjs
+COPY --chown=root:root infra/fake-model/fake-mcp.mjs ./fake-mcp.mjs
 USER node
 ENV PORT=18999
 HEALTHCHECK --interval=5s --timeout=3s --start-period=5s --retries=10 \

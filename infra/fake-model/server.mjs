@@ -20,11 +20,25 @@
 //
 // Fake SearXNG: `GET /search?q=<query>&format=json` returns one deterministic result.
 //
-// Env: PORT (default 18999), FAKE_MODEL_CAPTURE_DIR (optional: write each request body as JSON).
+// Fake MCP server (fake-mcp.mjs): `/mcp` (streamable HTTP) and `/sse` + `/sse/messages` (HTTP+SSE), tools
+// `echo` (read-only) and `write_note` (destructive).
+//
+// Env: PORT (default 18999), FAKE_MODEL_CAPTURE_DIR (optional: write each request body as JSON),
+// FAKE_MCP_TOKEN (optional: the fake MCP routes then require `Authorization: Bearer <token>`).
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+
+// Images built before 03.1-09 only ship server.mjs (the container smoke bind-mounts this file alone): the
+// model routes keep working there, only the fake MCP routes are missing.
+let createFakeMcp = null;
+try {
+  ({ createFakeMcp } = await import("./fake-mcp.mjs"));
+} catch (error) {
+  if (error?.code !== "ERR_MODULE_NOT_FOUND") throw error;
+  console.warn("fake-model: fake-mcp.mjs not found, MCP routes disabled");
+}
 
 const PORT = Number(process.env.PORT ?? 18999);
 const CAPTURE_DIR = process.env.FAKE_MODEL_CAPTURE_DIR;
@@ -441,10 +455,13 @@ function anthropicMessages(res, body) {
   res.end();
 }
 
-export function createFakeModelServer() {
+/** `opts.mcpToken` overrides `FAKE_MCP_TOKEN` (empty = no token). */
+export function createFakeModelServer(opts = {}) {
+  const mcp = createFakeMcp?.({ token: opts.mcpToken ?? process.env.FAKE_MCP_TOKEN ?? "" }) ?? null;
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     try {
+      if (mcp?.(req, res, url)) return;
       if (req.method === "GET" && (url.pathname === "/health" || url.pathname === "/healthz"))
         return sendJson(res, 200, { ok: true });
       if (req.method === "GET" && url.pathname === "/v1/models") {
