@@ -138,6 +138,12 @@ export function renderConfig(env, opts = {}) {
   for (const id of installed) {
     entries[id] = { enabled: true, hooks: { allowConversationAccess: false, allowPromptInjection: false } };
   }
+  // Pin only a provider whose plugin this cell loads. With nothing loaded (OCW_BUNDLED_PLUGINS=none before an admin
+  // installs DuckDuckGo from the marketplace) no provider is set; the plugin's reconciler pins the API's choice once
+  // the installed plugin is in plugins.allow.
+  let searchProvider;
+  if (useSearxng) searchProvider = "searxng";
+  else if (bundled.includes("duckduckgo") || installed.includes("duckduckgo")) searchProvider = "duckduckgo";
 
   const config = {
     gateway: {
@@ -217,7 +223,7 @@ export function renderConfig(env, opts = {}) {
         search: {
           enabled: true,
           // Key-free providers never auto-select: pin one so routing is deterministic and hookable.
-          provider: useSearxng ? "searxng" : "duckduckgo",
+          ...(searchProvider ? { provider: searchProvider } : {}),
           maxResults: 5,
           // ChatGPT-subscription hosted search would bypass before_tool_call and the audit.
           openaiCodex: { enabled: false },

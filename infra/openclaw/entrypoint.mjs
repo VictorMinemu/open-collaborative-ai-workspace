@@ -132,7 +132,7 @@ mkdirSync(path.dirname(configPath), { recursive: true });
 for (const stale of [`${configPath}.bak`, `${configPath}.last-good`]) rmSync(stale, { force: true });
 writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 console.log(
-  `[ocw-cell] base config rendered (plugins.allow=${config.plugins.allow.join(",")}, web search=${config.tools.web.search.provider}, install gate=${config.security.installPolicy.exec.args[0]}); bots + providers come from the Agent Channel API`,
+  `[ocw-cell] base config rendered (plugins.allow=${config.plugins.allow.join(",")}, web search=${config.tools.web.search.provider ?? "none"}, install gate=${config.security.installPolicy.exec.args[0]}); bots + providers come from the Agent Channel API`,
 );
 
 const argv = process.argv.slice(2);

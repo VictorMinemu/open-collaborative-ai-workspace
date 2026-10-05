@@ -109,6 +109,23 @@ describe("renderConfig", () => {
     assert.deepEqual(skipped, []);
   });
 
+  it("no search provider is pinned until one is loaded: none bundled and none installed leaves it unset", () => {
+    // OCW_BUNDLED_PLUGINS=none, DuckDuckGo not installed yet: pinning `duckduckgo` would name a missing plugin.
+    const none = renderConfig({ ...base, OCW_BUNDLED_PLUGINS: "none" }).config;
+    assert.equal("provider" in none.tools.web.search, false);
+    assert.equal(none.tools.web.search.enabled, true);
+    assert.deepEqual(none.tools.web.search.openaiCodex, { enabled: false });
+    // SearXNG bundled without a URL cannot serve either.
+    const noUrl = renderConfig({ ...base, OCW_BUNDLED_PLUGINS: "searxng" }).config;
+    assert.equal("provider" in noUrl.tools.web.search, false);
+    // Installed from the marketplace (re-allowed at boot): DuckDuckGo is loaded, so it is pinned again.
+    const installed = renderConfig(
+      { ...base, OCW_BUNDLED_PLUGINS: "none" },
+      { installedPlugins: [{ id: "duckduckgo" }] },
+    ).config;
+    assert.equal(installed.tools.web.search.provider, "duckduckgo");
+  });
+
   it("a bundled plugin missing from the image is skipped (allow, paths, entries), never an error", () => {
     const { config, errors, skipped } = renderConfig(
       { ...base, OCW_SEARXNG_URL: "http://searxng:8080" },
