@@ -29,6 +29,7 @@ class FakeAppServer extends EventEmitter implements AppServerProcess {
   settingsUpdates: "none" | "before" | "after" = "none";
   /** Thread settings as the fake currently holds them (thread/start + sticky turn/start overrides). */
   threadSettings: Record<string, unknown> = {};
+  compactError = false;
   private nextServerId = 1000;
   private readonly waiters = new Map<number, (m: Msg) => void>();
   onTurnStart: (params: Record<string, unknown>) => void = () => undefined;
@@ -153,6 +154,10 @@ class FakeAppServer extends EventEmitter implements AppServerProcess {
         this.notify("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
         return this.onTurnStart(p);
       }
+      case "thread/compact/start":
+        if (this.compactError)
+          return this.send({ id: m.id, error: { code: -32000, message: "cannot compact" } });
+        return this.send({ id: m.id, result: {} });
       case "turn/interrupt":
         this.send({ id: m.id, result: {} });
         return this.notify("turn/completed", {
@@ -809,4 +814,229 @@ describe("CodexRuntime.catalog() — model/list without a thread (D-08)", () => 
     expect(await runtime.catalog()).toBeNull();
     expect(servers).toHaveLength(0);
   });
+});
+
+// ------------------------------------------------------------------------------------------------
+
+/** A runtime whose app-servers also answer model/list, with the catalog already collected. */
+async function setupWithCatalog() {
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ocw-codex-rt-")));
+  const servers: CatalogAppServer[] = [];
+  const events: SessionEvent[] = [];
+  const runtime = new CodexRuntime({
+    detect: async () => ({ id: "codex", installed: true, version: "0.160.0", loggedIn: true }),
+    spawnAppServer: ({ env }) => {
+      const s = new CatalogAppServer(env);
+      servers.push(s);
+      return s;
+    },
+  });
+  await runtime.catalog();
+  await runtime.start({ sessionId: "s1", cwd, permissionMode: "acceptEdits" }, (e) => events.push(e));
+  return { runtime, events, server: servers[1] as CatalogAppServer };
+}
+
+describe("CodexRuntime — auto review, fast tier, effort validation (D-09, D-11, D-12)", () => {
+  it("offers plan, default, acceptEdits and auto; never fullAccess", () => {
+    expect(new CodexRuntime().capabilities.supportsPermissionModes).toEqual([
+      "plan",
+      "default",
+      "acceptEdits",
+      "auto",
+    ]);
+  });
+
+  it("auto sends approvalsReviewer auto_review with a workspace-write sandbox", async () => {
+    const { start, runtime } = setup();
+    const server = await start("default");
+    await runtime.configure("s1", { permissionMode: "auto" });
+    await runtime.prompt("s1", { promptId: "p1", text: "go" });
+    await wait(10);
+    expect(turnStarts(server)[0]?.params).toMatchObject({
+      approvalsReviewer: "auto_review",
+      approvalPolicy: "on-request",
+      sandboxPolicy: { type: "workspaceWrite" },
+    });
+  });
+
+  it("starts an auto session directly", async () => {
+    const { start } = setup();
+    const server = await start("auto");
+    expect(server.received[2]?.params).toMatchObject({
+      approvalsReviewer: "auto_review",
+      sandbox: "workspace-write",
+    });
+  });
+
+  it("fast mode maps to the sticky serviceTier: priority on, default off", async () => {
+    const { start, runtime } = setup();
+    const server = await start();
+    await runtime.configure("s1", { fastMode: true });
+    await runtime.prompt("s1", { promptId: "p1", text: "a" });
+    await wait(10);
+    server.completeTurn();
+    await wait(10);
+    await runtime.configure("s1", { fastMode: false });
+    await runtime.prompt("s1", { promptId: "p2", text: "b" });
+    await wait(10);
+    expect(turnStarts(server).map((m) => m.params?.serviceTier)).toEqual(["priority", "default"]);
+    expect(turnStarts(server).every((m) => !("serviceTierForTurn" in (m.params ?? {})))).toBe(true);
+  });
+
+  it("refuses the ultra effort always (D-09)", async () => {
+    const { start, runtime } = setup();
+    await start();
+    await expect(runtime.configure("s1", { effort: "ultra" })).rejects.toMatchObject({
+      code: "settings_rejected",
+    });
+  });
+
+  it("validates model, effort and fast mode against the collected catalog (Pitfall 7)", async () => {
+    const { runtime } = await setupWithCatalog();
+    await expect(runtime.configure("s1", { effort: "turbo" })).rejects.toMatchObject({
+      code: "settings_rejected",
+    });
+    await expect(runtime.configure("s1", { model: "gpt-unknown" })).rejects.toMatchObject({
+      code: "settings_rejected",
+    });
+    await expect(
+      runtime.configure("s1", { model: "gpt-daybreak-blue-latest", fastMode: true }),
+    ).rejects.toMatchObject({ code: "settings_rejected" });
+    await expect(runtime.configure("s1", { model: "gpt-6-luna", effort: "max" })).resolves.toBeUndefined();
+  });
+
+  it("'default' model and effort resolve to the runtime's defaults from the catalog", async () => {
+    const { runtime, server } = await setupWithCatalog();
+    await runtime.configure("s1", { model: "gpt-6-luna", effort: "max" });
+    await runtime.prompt("s1", { promptId: "p1", text: "a" });
+    await wait(10);
+    server.completeTurn();
+    await wait(10);
+    await runtime.configure("s1", { model: null, effort: null });
+    await runtime.prompt("s1", { promptId: "p2", text: "b" });
+    await wait(10);
+    expect(turnStarts(server).map((m) => [m.params?.model, m.params?.effort])).toEqual([
+      ["gpt-6-luna", "max"],
+      ["gpt-6.1-sol", "low"],
+    ]);
+  });
+});
+
+describe("CodexRuntime — per-turn cap (P-07)", () => {
+  it("a prompt capped at plan runs read-only; the next uncapped turn returns to acceptEdits", async () => {
+    const { start, runtime, events } = setup();
+    const server = await start("acceptEdits");
+    await runtime.prompt("s1", { promptId: "p1", text: "look", permissionMode: "plan" });
+    await wait(10);
+    server.completeTurn();
+    await wait(10);
+    await runtime.prompt("s1", { promptId: "p2", text: "edit" });
+    await wait(10);
+    const [capped, uncapped] = turnStarts(server);
+    expect(capped?.params).toMatchObject({
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
+      sandboxPolicy: { type: "readOnly" },
+    });
+    expect(uncapped?.params).toMatchObject({
+      approvalPolicy: "on-request",
+      sandboxPolicy: { type: "workspaceWrite" },
+    });
+    expect(settingsEvents(events).map((e) => e.permissionMode)).toEqual([
+      "acceptEdits",
+      "plan",
+      "acceptEdits",
+    ]);
+  });
+
+  it("a cap above the session mode never raises it", async () => {
+    const { start, runtime } = setup();
+    const server = await start("default");
+    await runtime.prompt("s1", { promptId: "p1", text: "x", permissionMode: "auto" });
+    await wait(10);
+    expect(turnStarts(server)[0]?.params).toMatchObject({
+      approvalPolicy: "untrusted",
+      sandboxPolicy: { type: "readOnly" },
+    });
+  });
+
+  it("input capped below the running turn's mode is not steered into it; it waits for its own turn", async () => {
+    const { start, runtime } = setup();
+    const server = await start("acceptEdits");
+    await runtime.prompt("s1", { promptId: "p1", text: "edit" });
+    await wait(10);
+    await runtime.steer("s1", { promptId: "p2", text: "and this", permissionMode: "plan" });
+    await wait(10);
+    expect(server.received.some((m) => m.method === "turn/steer")).toBe(false);
+    server.completeTurn();
+    await wait(10);
+    expect(turnStarts(server)[1]?.params).toMatchObject({ sandboxPolicy: { type: "readOnly" } });
+  });
+});
+
+describe("CodexRuntime — slash commands (D-13, P-10)", () => {
+  it("/compact sends thread/compact/start instead of a turn and completes through turn/completed", async () => {
+    const { start, runtime, events } = setup();
+    const server = await start();
+    await runtime.prompt("s1", { promptId: "p1", text: "/compact" });
+    await wait(10);
+    expect(server.received.find((m) => m.method === "thread/compact/start")?.params).toEqual({
+      threadId: "thread-1",
+    });
+    expect(turnStarts(server)).toHaveLength(0);
+    expect(events.find((e) => e.type === "prompt.started")).toMatchObject({ promptId: "p1" });
+    server.notify("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
+    server.completeTurn();
+    await wait(10);
+    expect(events.find((e) => e.type === "prompt.completed")).toMatchObject({ promptId: "p1" });
+    expect(events.at(-1)).toEqual({ type: "session.state", status: "idle" });
+  });
+
+  it("a failed compaction completes the prompt with isError", async () => {
+    const { start, runtime, events } = setup();
+    const server = await start();
+    server.compactError = true;
+    await runtime.prompt("s1", { promptId: "p1", text: "/compact" });
+    await wait(10);
+    expect(events.find((e) => e.type === "prompt.completed")).toMatchObject({
+      promptId: "p1",
+      isError: true,
+    });
+  });
+
+  it("settings and unknown commands are refused before anything is sent", async () => {
+    const { start, runtime } = setup();
+    const server = await start();
+    const before = server.received.length;
+    for (const text of ["/model gpt-5.5", "/permissions full access", "/review", "/config"]) {
+      await expect(runtime.prompt("s1", { promptId: "p", text })).rejects.toMatchObject({
+        code: "slash_command_refused",
+      });
+      await expect(runtime.steer("s1", { promptId: "p", text })).rejects.toMatchObject({
+        code: "slash_command_refused",
+      });
+    }
+    await wait(10);
+    expect(server.received).toHaveLength(before);
+  });
+});
+
+describe("CodexRuntime — unrestricted readback guard (D-03 groundwork)", () => {
+  for (const over of [{ sandboxPolicy: { type: "dangerFullAccess" } }, { approvalPolicy: "never" }]) {
+    it(`aborts the running turn when Codex reports ${JSON.stringify(over)}`, async () => {
+      const { start, runtime, events } = setup();
+      const server = await start("acceptEdits");
+      await runtime.prompt("s1", { promptId: "p1", text: "go" });
+      await wait(10);
+      server.sendSettings(over);
+      await wait(20);
+      expect(server.received.some((m) => m.method === "turn/interrupt")).toBe(true);
+      expect(events).toContainEqual({
+        type: "session.error",
+        message: "Codex reported an unrestricted sandbox/approval policy; turn aborted",
+      });
+      // The report itself still reaches the server, as fullAccess, so it can fail closed too.
+      expect(settingsEvents(events).at(-1)).toMatchObject({ permissionMode: "fullAccess" });
+    });
+  }
 });
