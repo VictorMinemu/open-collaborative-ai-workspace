@@ -4,6 +4,9 @@
   "description": "Agent Channel API bridge: OCW bots as OpenClaw agents (tool-gated).",
   "categories": ["channels"],
   "channels": ["ocw"],
+  "contracts": {
+    "tools": ["ocw_memory_save"]
+  },
   "activation": {
     "onStartup": true
   },

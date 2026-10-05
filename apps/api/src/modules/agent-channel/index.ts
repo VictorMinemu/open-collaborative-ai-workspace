@@ -27,6 +27,7 @@ import { cellAgentCapabilities, loadPolicy } from "../bot-capabilities";
 import { channelResource, createPermissionService, type ResourceFacts } from "../organization";
 import { cellOf, createCellAuth } from "./auth";
 import { registerCellGateway } from "./gateway";
+import { registerMemoryRoutes } from "./memories";
 import { registerMentionHandler } from "./mentions";
 import { createCellPresence } from "./presence";
 import { createProviderAuth } from "./provider-auth";
@@ -429,6 +430,8 @@ export function createAgentChannelModule(core: Core): ApiModule {
 
           // The cell's tool gate (D-08): decision + caps + taint + audit for every gated tool call.
           registerToolCallRoutes(scope, core, perms);
+          // The cell's memory tool (D-10): owner bound to the delivered turn, DM only, refused once tainted.
+          registerMemoryRoutes(scope, core, perms);
 
           scope.post(
             "/agents/:id/status",

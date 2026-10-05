@@ -1,5 +1,7 @@
 import {
   AGENT_CHANNEL_BASE_PATH,
+  type AgentChannelMemorySave,
+  AgentChannelMemorySaveResponse,
   type AgentChannelPostMessage,
   AgentChannelPostMessageResponse,
   type AgentChannelProviderAuthReport,
@@ -158,6 +160,17 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
       } catch {
         /* the audit row keeps the decision; the outcome is optional */
       }
+    },
+    /**
+     * `ocw_memory_save` (D-10): stores one note for the human of the turn. Two attempts at most (a duplicate
+     * text is not stored twice); a refusal throws AgentChannelHttpError (404 unknown_turn, 409 otherwise).
+     * Never logs the text.
+     */
+    async saveMemory(
+      req: AgentChannelMemorySave,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelMemorySaveResponse> {
+      return AgentChannelMemorySaveResponse.parse(await request("POST", "/memories", req, signal, 2));
     },
     /** `ws(s)://…/agent-channel/v1/ws` */
     wsUrl(): string {

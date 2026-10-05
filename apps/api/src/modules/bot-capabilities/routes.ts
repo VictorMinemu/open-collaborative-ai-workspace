@@ -9,9 +9,12 @@ import {
   type BotUsage,
   type CellConfigChangedEvent,
   cellTopic,
+  Id,
   IdParams,
   isDangerousToolName,
   MAX_DAILY_LIMIT,
+  MemoryList,
+  Ok,
   type Permission,
   UpdateBotCapabilitiesRequest,
   UpdateBotPolicyRequest,
@@ -19,6 +22,7 @@ import {
 import { agents, orgMembers, type Tx, tenantOf } from "@ocw/db";
 import { and, asc, eq, isNull } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
+import { z } from "zod";
 import { type App, authOf, type Core, tenant } from "../../core";
 import { badRequest, notFound } from "../../lib/errors";
 import {
@@ -29,6 +33,7 @@ import {
 } from "../organization";
 import { effectiveCapabilities, effectiveTools, readCapabilities } from "./capabilities";
 import { loadCatalog, loadGrants, replaceGrants } from "./catalog";
+import { clearMemories, listMemories } from "./memory";
 import { availableSearchProviders, internetConfigured, loadPolicy, savePolicy } from "./policy";
 import { effectiveDailyLimit, nextResetAt, turnsToday } from "./usage";
 
@@ -191,6 +196,20 @@ async function configurableBot(perms: PermissionService, req: FastifyRequest, tx
   return row;
 }
 
+/**
+ * The bot whose notes about the caller are read or cleared (D-10): any bot the caller may see (`bot.read`;
+ * someone else's personal bot is 404 for everyone, admins included). The notes are always the caller's own.
+ */
+async function memoryBot(perms: PermissionService, req: FastifyRequest, tx: Tx, id: string) {
+  const row = await findBot(tx, id);
+  if (!row) throw notFound("Bot not found", "agent_not_found");
+  const resource = agentResource(botFacts(row), authOf(req).userId);
+  await perms.assertCan(req, tx, "bot.read", resource, { hideAs404: true });
+  return row;
+}
+
+const MemoryParams = z.object({ id: Id, memoryId: Id });
+
 // ---------------------------------------------------------------- routes
 
 export function registerBotCapabilityRoutes(app: App, core: Core, perms: PermissionService) {
@@ -300,6 +319,62 @@ export function registerBotCapabilityRoutes(app: App, core: Core, perms: Permiss
           await notifyCellConfig(core, tx, "agent.capabilities_updated", row.id);
         }
         return capabilityView(core, perms, req, tx, current);
+      }),
+  );
+
+  // ---- memory (D-10): the caller's own notes, never anyone else's (no admin read path exists)
+  app.get(
+    "/agents/:id/memories",
+    { ...user, schema: { tags, params: IdParams, response: { 200: MemoryList } } },
+    async (req, reply) => {
+      reply.header("cache-control", "no-store");
+      return core.db.withTenant(tenant(req), async (tx) => {
+        const row = await memoryBot(perms, req, tx, req.params.id);
+        return { items: await listMemories(tx, row.id, authOf(req).userId) };
+      });
+    },
+  );
+
+  const recordCleared = async (
+    req: FastifyRequest,
+    tx: Tx,
+    agentId: string,
+    count: number,
+    scope: string,
+  ) => {
+    // The count only: never the text of what was forgotten (T-03.1-07-05).
+    await core.audit.record(tx, {
+      action: "agent.memory_cleared",
+      resourceType: "agent",
+      resourceId: agentId,
+      agentId,
+      sessionId: authOf(req).sessionId,
+      metadata: { count, scope },
+    });
+  };
+
+  app.delete(
+    "/agents/:id/memories",
+    { ...user, schema: { tags, params: IdParams, response: { 200: Ok } } },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const row = await memoryBot(perms, req, tx, req.params.id);
+        const count = await clearMemories(tx, row.id, authOf(req).userId);
+        await recordCleared(req, tx, row.id, count, "all");
+        return { ok: true as const };
+      }),
+  );
+
+  app.delete(
+    "/agents/:id/memories/:memoryId",
+    { ...user, schema: { tags, params: MemoryParams, response: { 200: Ok } } },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const row = await memoryBot(perms, req, tx, req.params.id);
+        const count = await clearMemories(tx, row.id, authOf(req).userId, req.params.memoryId);
+        if (count === 0) throw notFound("Note not found", "memory_not_found");
+        await recordCleared(req, tx, row.id, count, "one");
+        return { ok: true as const };
       }),
   );
 

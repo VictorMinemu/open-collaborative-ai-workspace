@@ -10,6 +10,16 @@ export {
 } from "./capabilities";
 export { loadAllGrants, loadCatalog, loadGrants, replaceGrants } from "./catalog";
 export {
+  clearMemories,
+  listMemories,
+  loadTurnMemory,
+  MEMORY_CAP,
+  type MemoryRefusal,
+  type SaveMemoryResult,
+  saveMemory,
+  TURN_MEMORY_LIMIT,
+} from "./memory";
+export {
   availableSearchProviders,
   internetConfigured,
   loadPolicy,
@@ -42,7 +52,8 @@ export {
  * governance. Decisions go through the one resolver; the pure decision lives in capabilities.ts.
  *
  * Routes (all `authz: user`): GET/PATCH `/agents/:id/capabilities`, GET/PUT `/bot-policy`,
- * GET `/bot-governance`.
+ * GET `/bot-governance`, GET/DELETE `/agents/:id/memories`, DELETE `/agents/:id/memories/:memoryId` (the
+ * caller's own notes only, D-10).
  */
 export function createBotCapabilitiesModule(core: Core): ApiModule {
   const perms = createPermissionService(core);

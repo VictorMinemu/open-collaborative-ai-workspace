@@ -326,7 +326,12 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
     // D-08 guard 3: the before_tool_call hook resolves this turn by session key.
     guard.beginTurn(
       sessionKey,
-      { eventId: m.eventId, agentId: m.ocwAgentId, turn: { ...m.turn, tools: allowed } },
+      {
+        eventId: m.eventId,
+        agentId: m.ocwAgentId,
+        conversationId: m.conversationId,
+        turn: { ...m.turn, tools: allowed },
+      },
       signal,
     );
     try {

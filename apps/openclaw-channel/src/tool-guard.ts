@@ -19,6 +19,8 @@ import { openClawAgentIdFor } from "./mention-mapper.js";
 export interface ActiveTurn {
   eventId: string;
   agentId: string;
+  /** The OCW conversation (OpenClaw's `nativeChannelId`): secondary lookup for tool factories. */
+  conversationId?: string;
   turn: TurnContext;
   calls: number;
   webCalls: number;
@@ -145,7 +147,7 @@ export function createToolGuard(
     /** Starts the active turn of a session (right before dispatch). Aborting `signal` ends it. */
     beginTurn(
       sessionKey: string,
-      t: { eventId: string; agentId: string; turn: TurnContext },
+      t: { eventId: string; agentId: string; turn: TurnContext; conversationId?: string },
       signal?: AbortSignal,
     ): void {
       const key = keyOf(sessionKey);
@@ -166,6 +168,29 @@ export function createToolGuard(
 
     activeTurn(sessionKey: string): ActiveTurn | undefined {
       return state.turns.get(keyOf(sessionKey));
+    },
+
+    /**
+     * The active turn a tool runs in: by session key when the tool context carries it, otherwise by the
+     * conversation (`nativeChannelId`), only when exactly one turn of that bot is active there. An OpenClaw
+     * agent id that is not the turn's bot never resolves (fail closed).
+     */
+    findTurn(ctx: {
+      sessionKey?: string;
+      nativeChannelId?: string;
+      agentId?: string;
+    }): ActiveTurn | undefined {
+      const sameBot = (t: ActiveTurn) =>
+        !ctx.agentId || ctx.agentId.toLowerCase() === openClawAgentIdFor(t.agentId);
+      if (ctx.sessionKey?.trim()) {
+        const t = state.turns.get(keyOf(ctx.sessionKey));
+        return t && sameBot(t) ? t : undefined;
+      }
+      if (!ctx.nativeChannelId) return undefined;
+      const hits = [...state.turns.values()].filter(
+        (t) => t.conversationId === ctx.nativeChannelId && sameBot(t),
+      );
+      return hits.length === 1 ? hits[0] : undefined;
     },
 
     async beforeToolCall(event: ToolCallEvent, ctx: ToolCallContext): Promise<ToolBlock | undefined> {
@@ -276,6 +301,11 @@ type StateRegistry = { [STATE_KEY]?: ToolGuardState };
 const registry = globalThis as StateRegistry;
 if (!registry[STATE_KEY]) registry[STATE_KEY] = createToolGuardState();
 const sharedState: ToolGuardState = registry[STATE_KEY];
+
+/** The account's API client as last handed over by channel.ts (null until an account started). */
+export function sharedToolGuardClient(): AgentChannelClient | null {
+  return sharedState.client;
+}
 
 /** Hands the account's API client to the gate (channel.ts, at account start). */
 export function setToolGuardClient(client: AgentChannelClient | null): void {

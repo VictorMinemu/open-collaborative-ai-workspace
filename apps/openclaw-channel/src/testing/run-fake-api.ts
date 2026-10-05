@@ -8,7 +8,8 @@
  * FAKE_AGENT_TOOLS=web_search,web_fetch  the bot's snapshot `capabilities.tools` (its alsoAllow).
  * FAKE_WEB_SEARCH_PROVIDER=searxng       snapshot `webSearch.provider`.
  * FAKE_DENY_TOOLS=web_fetch              `/tool-calls` denies these tools (allows everything else).
- * Tool calls and their reported results are listed in GET /__test/state (`toolCalls`, `toolResults`).
+ * Tool calls, their reported results and memory saves are listed in GET /__test/state (`toolCalls`,
+ * `toolResults`, `memories`).
  */
 import { startFakeAgentChannelApi } from "./fake-agent-channel-api.ts";
 

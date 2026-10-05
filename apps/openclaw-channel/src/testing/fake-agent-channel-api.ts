@@ -13,6 +13,8 @@
  *   POST /agent-channel/v1/provider-auth  (status per report: `authResponder`, default 200)
  *   POST /agent-channel/v1/tool-calls     records and allows (denies tools listed in `denyTools`)
  *   POST /agent-channel/v1/tool-calls/:id/result  records the outcome
+ *   POST /agent-channel/v1/memories       records the note (dedupes exact text per event's bot; 409 for
+ *                                          events listed in `refuseMemoryEvents`)
  * Test-only controls under /__test/* (never part of the real API).
  */
 import { randomUUID } from "node:crypto";
@@ -20,6 +22,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 import { type WebSocket, WebSocketServer } from "ws";
 import type {
+  AgentChannelMemorySave,
   AgentChannelPostMessage,
   AgentChannelProviderAuthReport,
   AgentChannelStatusReport,
@@ -39,6 +42,7 @@ export type StatusReport = AgentChannelStatusReport & { agentId: string };
 export type MentionInput = Omit<AgentMentionEvent, "seq" | "type" | "organizationId" | "cellId">;
 export type StoredToolCall = AgentChannelToolCallRequest & { callId: string; allowed: boolean };
 export type StoredToolResult = AgentChannelToolCallResult & { callId: string };
+export type StoredMemory = AgentChannelMemorySave & { memoryId: string; created: boolean };
 
 export type FakeAgentChannelApi = {
   url: string;
@@ -56,6 +60,10 @@ export type FakeAgentChannelApi = {
   denyTools: Set<string>;
   toolCalls: StoredToolCall[];
   toolResults: StoredToolResult[];
+  /** Every POST /memories (also refused ones: `memoryId` "" and `created` false). */
+  memories: StoredMemory[];
+  /** Event ids whose memory saves the fake API refuses with 409 `tainted`. */
+  refuseMemoryEvents: Set<string>;
   events: StoredEvent[];
   authReports: AgentChannelProviderAuthReport[];
   /** HTTP status for each POST /provider-auth (default 200). */
@@ -138,6 +146,8 @@ export async function startFakeAgentChannelApi(
     denyTools: new Set(opts.denyTools ?? []),
     toolCalls: [] as StoredToolCall[],
     toolResults: [] as StoredToolResult[],
+    memories: [] as StoredMemory[],
+    refuseMemoryEvents: new Set<string>(),
   };
 
   const snapshot = (): CellSnapshot => ({
@@ -185,6 +195,7 @@ export async function startFakeAgentChannelApi(
             events: state.events.length,
             toolCalls: state.toolCalls,
             toolResults: state.toolResults,
+            memories: state.memories,
           });
         }
         return json(res, 404, { error: { code: "not_found" } });
@@ -255,6 +266,22 @@ export async function startFakeAgentChannelApi(
         }
         state.toolResults.push({ ...((await readJson(req)) as AgentChannelToolCallResult), callId });
         return json(res, 200, { ok: true });
+      }
+      if (req.method === "POST" && route === "/memories") {
+        const body = (await readJson(req)) as AgentChannelMemorySave;
+        if (!body.eventId || !body.agentId || typeof body.text !== "string" || body.text.length > 500) {
+          return json(res, 400, { error: { code: "bad_request" } });
+        }
+        if (state.refuseMemoryEvents.has(body.eventId)) {
+          state.memories.push({ ...body, memoryId: "", created: false });
+          return json(res, 409, { error: { code: "tainted", message: "refused by test" } });
+        }
+        const same = state.memories.find(
+          (m) => m.memoryId && m.agentId === body.agentId && m.text === body.text,
+        );
+        const stored: StoredMemory = { ...body, memoryId: same?.memoryId ?? randomUUID(), created: !same };
+        state.memories.push(stored);
+        return json(res, 200, { memoryId: stored.memoryId, created: stored.created });
       }
       if (req.method === "POST" && route === "/typing") {
         state.typing.push((await readJson(req)) as AgentChannelTyping);
@@ -366,6 +393,12 @@ export async function startFakeAgentChannelApi(
     },
     get toolResults() {
       return state.toolResults;
+    },
+    get memories() {
+      return state.memories;
+    },
+    get refuseMemoryEvents() {
+      return state.refuseMemoryEvents;
     },
     get authReports() {
       return state.authReports;

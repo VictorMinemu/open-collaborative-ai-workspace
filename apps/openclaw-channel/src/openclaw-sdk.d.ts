@@ -99,8 +99,42 @@ declare module "openclaw/plugin-sdk/channel-core" {
 
   export type HookOptions = { priority?: number; matcher?: string[]; timeoutMs?: number };
 
+  /**
+   * Trusted runtime context a tool factory receives when tools are assembled for a run (2026.9.7
+   * `resolveOpenClawPluginToolInputs` in dist/openclaw-tools-*.mjs, docs/plugins/building-plugins.md
+   * "Registering tools"): `sessionKey` is the run's session key, `nativeChannelId` the platform conversation.
+   */
+  export type OpenClawPluginToolContext = {
+    agentId?: string;
+    sessionKey?: string;
+    sessionId?: string;
+    messageChannel?: string;
+    agentAccountId?: string;
+    nativeChannelId?: string;
+    requesterSenderId?: string;
+    senderIsOwner?: boolean;
+    sandboxed?: boolean;
+  };
+
+  /** A concrete agent tool: `execute(toolCallId, params, signal?, onUpdate?)` (core runtime signature). */
+  export type OpenClawAgentTool = {
+    name: string;
+    label?: string;
+    description: string;
+    parameters: Record<string, unknown>;
+    execute: (
+      toolCallId: string,
+      params: unknown,
+      signal?: AbortSignal,
+    ) => Promise<{ content: Array<{ type: "text"; text: string }>; details?: unknown }>;
+  };
+
   /** The subset of `OpenClawPluginApi` this plugin uses. */
   export type OpenClawPluginApi = {
+    registerTool(
+      factory: (ctx: OpenClawPluginToolContext) => OpenClawAgentTool | null | undefined,
+      opts: { name: string; optional?: boolean },
+    ): void;
     on(
       hook: "before_tool_call",
       handler: (
