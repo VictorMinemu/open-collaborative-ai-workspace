@@ -9,11 +9,13 @@ import {
   type WorkSessionDetail,
   WorkSessionEventPayload,
   type WorkSessionEventRecord,
+  type WorkSessionList,
 } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
-import { useCallback, useEffect, useReducer } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useCallback, useEffect, useReducer, useState } from "react";
 import { useTopic } from "./realtime";
-import { useWorkSession } from "./workzone-queries";
+import { useWorkSession, wzKeys } from "./workzone-queries";
 
 export interface LiveSession {
   session: WorkSession;
@@ -101,9 +103,19 @@ function reduce(state: LiveSession | null, action: Action): LiveSession | null {
   }
 }
 
-/** REST snapshot + `ws:<id>` stream (durable events with seq replay, ephemeral deltas) → live session state. */
+/**
+ * REST snapshot + `ws:<id>` stream (durable events with seq replay, ephemeral deltas) → live session state. The
+ * subscription opts into presence: whoever has the session open is shown as watching it.
+ *
+ * RT-01: when the server drops the stream because the viewer lost access (role, rule or device change), `revoked`
+ * turns true for this id: the cached detail is removed and not refetched, and the stream stays closed. It resets
+ * when the id changes. `lostTitle` keeps the title the viewer was already looking at.
+ */
 export function useLiveSession(id: string) {
-  const query = useWorkSession(id);
+  const qc = useQueryClient();
+  const [lost, setLost] = useState<{ id: string; title: string | null } | null>(null);
+  const revoked = lost?.id === id;
+  const query = useWorkSession(id, { enabled: !revoked });
   const [state, dispatch] = useReducer(reduce, null);
 
   useEffect(() => {
@@ -112,7 +124,26 @@ export function useLiveSession(id: string) {
 
   const onFrame = useCallback((frame: TopicFrame) => dispatch({ kind: "frame", frame }), []);
   const ready = state !== null && state.session.id === id;
-  useTopic(ready ? `ws:${id}` : null, onFrame, query.data?.lastSeq, () => void query.refetch());
+  const title = ready ? state.session.title : null;
+  const onRevoked = useCallback(() => {
+    setLost({ id, title });
+    qc.removeQueries({ queryKey: wzKeys.session(id) });
+    // Drop the row at once: a refetch may now be refused (403) and would otherwise keep the stale list.
+    qc.setQueryData<WorkSessionList>(wzKeys.sessions, (old) =>
+      old ? { ...old, sessions: old.sessions.filter((s) => s.id !== id) } : old,
+    );
+    void qc.invalidateQueries({ queryKey: wzKeys.sessions });
+  }, [qc, id, title]);
+  // This is the view that shows the session, so the viewer counts as watching it (presence opt-in, RT-04).
+  useTopic(ready && !revoked ? `ws:${id}` : null, onFrame, query.data?.lastSeq, () => void query.refetch(), {
+    presence: true,
+    onRevoked,
+  });
 
-  return { state: ready ? state : null, query };
+  return {
+    state: ready && !revoked ? state : null,
+    query,
+    revoked,
+    lostTitle: revoked ? (lost?.title ?? null) : null,
+  };
 }

@@ -5,6 +5,9 @@ import { z } from "zod";
  * Topics: `conv:<id>` (conversation incl. thread/work-session conversations), `user:<id>` (personal),
  * `org:<id>` (org-wide lists: channels, agents, devices, sessions), `ws:<id>` (work session events),
  * `cell:<orgId>` (OpenClaw cell stream; Agent Channel API only, never authorized for browsers).
+ * Server ops: `ev` (durable), `eph` (ephemeral), `subscribed`, `resync`, `err`, `pong`, `presence` (who is
+ * here now in a `conv`/`ws` topic: a `full` snapshot right after `subscribed`, then per-connection deltas) and
+ * `revoked` (a live subscription lost its access and was dropped by the server).
  */
 
 export const TopicPrefix = z.enum(["conv", "user", "org", "ws", "cell"]);
@@ -24,13 +27,58 @@ export function parseTopic(t: string): { prefix: TopicPrefix; id: string } | nul
   return { prefix: t.slice(0, idx) as TopicPrefix, id: t.slice(idx + 1) };
 }
 
+/**
+ * Presence (RT-04, 03-01 D-01/D-03): per conversation, per connection. `conn` is an opaque random id per socket
+ * (never a session id); `userId` comes from the verified JWT. `offline` only appears in deltas and removes the
+ * connection. Clients aggregate per user (online beats away).
+ */
+export const PresenceEntryState = z.enum(["online", "away", "offline"]);
+export type PresenceEntryState = z.infer<typeof PresenceEntryState>;
+export const PresenceEntry = z.object({ conn: z.uuid(), userId: z.uuid(), state: PresenceEntryState });
+export type PresenceEntry = z.infer<typeof PresenceEntry>;
+/** Topic prefixes that carry presence: conversations (channels, threads) and Work Zone sessions. */
+export const PRESENCE_TOPIC_PREFIXES: readonly TopicPrefix[] = ["conv", "ws"];
+/** Max entries in one presence frame (snapshots are capped server-side). */
+export const PRESENCE_SNAPSHOT_LIMIT = 500;
+
+export function isPresenceTopic(t: string): boolean {
+  const parsed = parseTopic(t);
+  return !!parsed && PRESENCE_TOPIC_PREFIXES.includes(parsed.prefix);
+}
+
+/**
+ * The state a client reports for its own connection (RT-04, 03-02 D-04): `away` while its tab is hidden or after
+ * AWAY_AFTER_IDLE_MS without input, `online` otherwise. `offline` is never reported: closing the socket is.
+ */
+export const PresenceState = z.enum(["online", "away"]);
+export type PresenceState = z.infer<typeof PresenceState>;
+/** A visible tab with no input for this long reports `away`. */
+export const AWAY_AFTER_IDLE_MS = 5 * 60_000;
+/** Client-side leading + trailing throttle of `presence` frames. */
+export const PRESENCE_CLIENT_THROTTLE_MS = 500;
+
 // ---- client → server ----
 export const ClientFrame = z.discriminatedUnion("op", [
-  z.object({ op: z.literal("sub"), topic: Topic, afterSeq: z.number().int().nonnegative().optional() }),
+  /**
+   * `presence: true` = the subscriber is looking at this conversation (RT-04): it joins the topic's presence and
+   * receives its presence frames. Background subscriptions (unread watchers) leave it out and never count as
+   * "here". Re-sending `sub` with a different flag switches it.
+   */
+  z.object({
+    op: z.literal("sub"),
+    topic: Topic,
+    afterSeq: z.number().int().nonnegative().optional(),
+    presence: z.boolean().optional(),
+  }),
   z.object({ op: z.literal("unsub"), topic: Topic }),
   z.object({ op: z.literal("ping") }),
   /** Client-originated ephemeral signal (e.g. user.typing); the server re-authorizes and relays. */
   z.object({ op: z.literal("eph"), topic: Topic, type: z.string().max(64), data: z.unknown() }),
+  /**
+   * The sender's own state in every conversation it is present in (RT-04). Carries no user, topic or connection:
+   * the server applies it to the sending socket only (unknown fields are stripped).
+   */
+  z.object({ op: z.literal("presence"), state: PresenceState }),
 ]);
 export type ClientFrame = z.infer<typeof ClientFrame>;
 
@@ -56,10 +104,24 @@ export const ServerFrame = z.discriminatedUnion("op", [
     message: z.string().optional(),
   }),
   z.object({ op: z.literal("pong") }),
+  /** Who is here now: `full` = snapshot sent right after `subscribed`; otherwise a per-connection delta. */
+  z.object({
+    op: z.literal("presence"),
+    topic: z.string(),
+    full: z.boolean(),
+    entries: z.array(PresenceEntry).max(PRESENCE_SNAPSHOT_LIMIT),
+  }),
+  /**
+   * The server dropped this subscription because access to the topic was lost (RT-01, 03-04 D-05): the resolver
+   * re-decided it after a membership or permission change. The client forgets the topic and does not resubscribe.
+   */
+  z.object({ op: z.literal("revoked"), topic: z.string(), reason: z.enum(["forbidden"]) }),
 ]);
 export type ServerFrame = z.infer<typeof ServerFrame>;
 export type DurableFrame = Extract<ServerFrame, { op: "ev" }>;
 export type EphemeralFrame = Extract<ServerFrame, { op: "eph" }>;
+export type PresenceFrame = Extract<ServerFrame, { op: "presence" }>;
+export type RevokedFrame = Extract<ServerFrame, { op: "revoked" }>;
 
 /** Max events replayed per `sub`; beyond this the server sends `resync`. */
 export const REPLAY_LIMIT = 500;

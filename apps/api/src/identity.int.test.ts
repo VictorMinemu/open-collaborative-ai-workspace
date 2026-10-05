@@ -381,6 +381,7 @@ describe("identity + platform core", () => {
       realtime,
       identity,
       allowedOrigins: new Set([WEB_ORIGIN]),
+      bus: stack.built.core.bus,
       sessionRecheckMs: 100,
     });
     await mini.register(async (scope) => module.register(scope as unknown as App));

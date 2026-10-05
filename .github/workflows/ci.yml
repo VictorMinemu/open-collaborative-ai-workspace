@@ -40,6 +40,8 @@ jobs:
     env:
       # Bots use the deterministic mock model; CI never receives a metered model key.
       OCW_MODEL_PROVIDER: mock
+      # Specs sign many browsers in from one IP; production keeps the default 30/min.
+      OCW_SIGNIN_RATE_LIMIT_PER_MINUTE: "600"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -59,6 +61,14 @@ jobs:
           for i in $(seq 1 60); do curl -sf localhost:4000/health && curl -sf -o /dev/null localhost:3000/login && break; sleep 2; done
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm e2e
+      - name: Realtime latency report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: realtime-latency
+          path: e2e/test-results/realtime-latency.json
+          if-no-files-found: warn
+          retention-days: 30
       - name: Logs and report on failure
         if: failure()
         run: tail -n 200 api.log web.log || true

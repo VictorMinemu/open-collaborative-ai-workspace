@@ -2,7 +2,8 @@ import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect, type Page, test } from "@playwright/test";
+import { type APIRequestContext, expect, type Page, test } from "@playwright/test";
+import { apiAs, ensureMember, openAs, SAM, userIdOf } from "../support/actors";
 import { ADMIN, API_URL, shot } from "./env";
 
 /**
@@ -26,7 +27,7 @@ async function signIn(page: Page) {
 
 test.describe.configure({ mode: "serial" });
 
-test("Work Zone: pair a device, run a session, approve, review changes", async ({ page }, info) => {
+test("Work Zone: pair a device, run a session, approve, review changes", async ({ page, browser }, info) => {
   test.setTimeout(180_000);
   const tag = info.project.name === "mobile" ? "390" : "1440";
   const mobile = info.project.name === "mobile";
@@ -43,6 +44,8 @@ test("Work Zone: pair a device, run a session, approve, review changes", async (
 
   const env = { ...process.env, OCW_HOME: home, OCW_RUNTIME_FAKE: "1", OCW_RUNTIME_FAKE_DELAY_MS: "120" };
   let daemon: ChildProcess | null = null;
+  let adminApi: APIRequestContext | null = null;
+  let samToRestore: string | null = null;
 
   try {
     await signIn(page);
@@ -108,6 +111,60 @@ test("Work Zone: pair a device, run a session, approve, review changes", async (
     await expect(page.getByTestId("assistant-message").last()).toContainText("Done");
     await shot(page, `workzone-session-${tag}`);
 
+    // ---- who is watching (RT-04, 03-03): Sam opens the session; each sees the other in the header
+    adminApi = await apiAs(ADMIN);
+    const samId = await ensureMember(adminApi, SAM, "developer");
+    samToRestore = samId;
+    const adminId = await userIdOf(adminApi);
+    const viewers = (p: Page) => p.getByTestId("session-header").getByTestId("session-viewers");
+    const samOnAdmin = viewers(page).locator(`[data-testid="presence-avatar"][data-user-id="${samId}"]`);
+    const sam = await openAs(browser, SAM, info.project.name);
+    try {
+      await sam.page.goto(sessionUrl);
+      await expect(sam.page.getByTestId("session-view")).toBeVisible();
+      await expect(samOnAdmin).toHaveAttribute("data-state", "online", { timeout: 3000 });
+      await expect(
+        viewers(sam.page).locator(`[data-testid="presence-avatar"][data-user-id="${adminId}"]`),
+      ).toHaveAttribute("data-state", "online", { timeout: 3000 });
+      // Never yourself; Sam is not listed as "not here" while watching.
+      await expect(
+        viewers(page).locator(`[data-testid="presence-avatar"][data-user-id="${adminId}"]`),
+      ).toHaveCount(0);
+      await expect(viewers(page).getByTestId("session-participant-absent")).toHaveCount(0);
+      await expect(viewers(page).getByTestId("presence-stack")).toHaveAttribute(
+        "aria-label",
+        "1 watching now",
+      );
+      // At 390 the stack must not push the header actions off-screen.
+      const box = await page.getByRole("button", { name: "Session actions" }).boundingBox();
+      expect(box && box.x + box.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+      await shot(page, `workzone-presence-${tag}`);
+      await page.emulateMedia({ colorScheme: "dark" });
+      await shot(page, `workzone-presence-${tag}-dark`);
+      await page.emulateMedia({ colorScheme: "light" });
+
+      // ---- losing access while watching (RT-01, 03-06): the admin makes Sam a standard member, which has no
+      // work_session.read; Sam's open session says so within 3 s and its stream has stopped.
+      const demote = await adminApi.patch(`/api/v1/members/${samId}/role`, { data: { role: "standard" } });
+      expect(demote.ok(), "demote Sam to standard").toBe(true);
+      const lost = sam.page.getByTestId("session-access-lost");
+      await expect(lost).toBeVisible({ timeout: 3000 });
+      await expect(lost).toContainText("You no longer have access to this session");
+      await expect(lost.getByRole("link", { name: "Back to Work Zone" })).toBeVisible();
+      await expect(sam.page.getByTestId("session-view")).toHaveCount(0);
+      // The lost session also leaves Sam's session list (desktop shows the Work Zone sidebar).
+      const sessionPath = new URL(sessionUrl).pathname;
+      if (!mobile) await expect(sam.page.locator(`a[href="${sessionPath}"]`)).toHaveCount(0);
+      await shot(sam.page, `access-lost-session-${tag}`);
+      await sam.page.emulateMedia({ colorScheme: "dark" });
+      await shot(sam.page, `access-lost-session-${tag}-dark`);
+    } finally {
+      await sam.context.close();
+    }
+    // Sam closed the session: gone from the admin's header within 3 s.
+    await expect(samOnAdmin).toHaveCount(0, { timeout: 3000 });
+    await expect(viewers(page).getByTestId("presence-stack")).toHaveCount(0);
+
     // ---- changes from the device
     if (mobile) await page.getByTestId("open-changes").click();
     else await page.getByTestId("tab-changes").click();
@@ -129,6 +186,16 @@ test("Work Zone: pair a device, run a session, approve, review changes", async (
       await page.emulateMedia({ colorScheme: "light" });
     }
   } finally {
+    // Sam stays a developer for the next specs and runs, whatever happened above.
+    if (adminApi) {
+      if (samToRestore) {
+        const res = await adminApi.patch(`/api/v1/members/${samToRestore}/role`, {
+          data: { role: "developer" },
+        });
+        expect(res.ok(), "restore Sam to developer").toBe(true);
+      }
+      await adminApi.dispose();
+    }
     daemon?.kill("SIGTERM");
     // Archive the e2e session so repeated runs do not clutter the demo workspace.
     const sid = /\/work-zone\/([0-9a-f-]{36})/.exec(page.url())?.[1];

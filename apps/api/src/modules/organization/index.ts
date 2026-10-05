@@ -1,4 +1,10 @@
-import { MyPermissions } from "@ocw/contracts";
+import {
+  EventTypes,
+  MemberUpdatedPayload,
+  MyPermissions,
+  PermissionRulesUpdatedPayload,
+  UnitsUpdatedPayload,
+} from "@ocw/contracts";
 import { type ApiModule, type Core, tenant } from "../../core";
 import { registerMemberRoutes } from "./members";
 import { orgResource, userResource } from "./permissions/policy";
@@ -41,6 +47,9 @@ export {
   recordAuthzDenial,
 } from "./permissions/service";
 
+/** `member.updated` fields that change what a member may read (the rest are profile fields). */
+const ACCESS_FIELDS = new Set(["role", "status"]);
+
 export function createOrganizationModule(core: Core): ApiModule {
   const perms = createPermissionService(core);
 
@@ -67,6 +76,25 @@ export function createOrganizationModule(core: Core): ApiModule {
           )
         ).allowed,
     ),
+  );
+
+  // Live re-authorisation (RT-01, D-05): every access change this module makes re-decides the affected live
+  // subscriptions through the topic authorizers (the resolver). Topics are omitted: a role, rule or unit change can
+  // change any topic the user reads. Profile-only member updates change nobody's access and trigger nothing.
+  core.realtime.registerSubscriptionInvalidator(EventTypes.memberUpdated, (topic, payload) => {
+    if (!topic.startsWith("org:")) return null;
+    const parsed = MemberUpdatedPayload.safeParse(payload);
+    if (!parsed.success) return null;
+    const { userId, changed } = parsed.data;
+    return changed.some((c) => ACCESS_FIELDS.has(c)) ? { userIds: [userId] } : null;
+  });
+  // Unit memberships, lead roles and moves change the facts of everyone below the unit, and a rule can name a role
+  // or everyone: the whole organization is re-decided (coalesced and bounded by the gateway queue).
+  core.realtime.registerSubscriptionInvalidator(EventTypes.unitsUpdated, (topic, payload) =>
+    topic.startsWith("org:") && UnitsUpdatedPayload.safeParse(payload).success ? {} : null,
+  );
+  core.realtime.registerSubscriptionInvalidator(EventTypes.permissionRulesUpdated, (topic, payload) =>
+    topic.startsWith("org:") && PermissionRulesUpdatedPayload.safeParse(payload).success ? {} : null,
   );
 
   return {

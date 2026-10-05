@@ -2,12 +2,15 @@ import {
   ClientFrame,
   type DurableFrame,
   type EphemeralFrame,
+  PRESENCE_CLIENT_THROTTLE_MS,
+  type PresenceState,
   ServerFrame,
   WS_AUTH_PROTOCOL_PREFIX,
   WS_PROTOCOL,
 } from "@ocw/contracts";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import { backoffDelay } from "./backoff";
+import { applyPresenceFrame, type PresenceSnapshot } from "./presence";
 
 export type ConnectionStatus = "idle" | "connecting" | "open" | "reconnecting" | "closed";
 
@@ -54,8 +57,12 @@ interface TopicState {
   lastSeq: number;
   subscribed: boolean;
   onResync: Set<() => void>;
+  /** Called once when the server drops the topic because access was lost (`revoked`). */
+  onRevoked: Set<() => void>;
   /** A replay is in flight because we observed a gap. */
   replaying: boolean;
+  /** Listeners that show this conversation (RT-04): while > 0 the `sub` carries `presence: true`. */
+  presence: number;
 }
 
 const OPEN = 1;
@@ -67,6 +74,8 @@ const OPEN = 1;
  */
 export class RealtimeClient {
   readonly status: StoreApi<ConnectionState>;
+  /** Who is here now per subscribed `conv`/`ws` topic (RT-04): topic → conn → member. */
+  readonly presence: StoreApi<PresenceSnapshot>;
   private readonly opts: Required<Omit<RealtimeClientOptions, "onError" | "WebSocket" | "getToken">> &
     Pick<RealtimeClientOptions, "onError" | "getToken">;
   private readonly Ctor: WebSocketCtor;
@@ -79,6 +88,11 @@ export class RealtimeClient {
   private generation = 0;
   /** One forced token refresh per 4401; re-armed by a successful subscribe. */
   private authRetried = false;
+  /** RT-04 away: the state this tab wants to show, and the last one the current socket was told. */
+  private desiredPresence: PresenceState = "online";
+  private sentPresence: PresenceState = "online";
+  private presenceSentAt = Number.NEGATIVE_INFINITY;
+  private presenceTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: RealtimeClientOptions) {
     const Ctor = options.WebSocket ?? (globalThis as { WebSocket?: WebSocketCtor }).WebSocket;
@@ -93,6 +107,7 @@ export class RealtimeClient {
       getToken: options.getToken,
     };
     this.status = createStore<ConnectionState>(() => ({ status: "idle", attempt: 0, lastError: null }));
+    this.presence = createStore<PresenceSnapshot>(() => ({ topics: {} }));
   }
 
   connect(): void {
@@ -105,10 +120,13 @@ export class RealtimeClient {
     this.stopped = true;
     this.generation++;
     this.clearTimers();
+    if (this.presenceTimer) clearTimeout(this.presenceTimer);
+    this.presenceTimer = null;
     const ws = this.ws;
     this.ws = null;
     ws?.close(1000, "client closed");
     for (const t of this.topics.values()) t.subscribed = false;
+    this.clearPresence();
     this.status.setState({ status: "closed" });
   }
 
@@ -118,12 +136,16 @@ export class RealtimeClient {
 
   /**
    * Subscribe to a topic. `afterSeq` is the seq of the snapshot you already hold (from the REST response);
-   * events after it are replayed. Returns an unsubscribe function.
+   * events after it are replayed. `presence: true` marks a listener that shows the conversation: the user counts
+   * as "here" and `client.presence` tracks the topic while at least one such listener is subscribed (background
+   * watchers leave it out). `onRevoked` runs once if the server drops the topic because access was lost (RT-01):
+   * the topic is then forgotten (no resubscribe on reconnect) and a later `subscribe` starts fresh. Returns an
+   * unsubscribe function.
    */
   subscribe(
     topic: string,
     listener: TopicListener,
-    opts: { afterSeq?: number; onResync?: () => void } = {},
+    opts: { afterSeq?: number; onResync?: () => void; presence?: boolean; onRevoked?: () => void } = {},
   ): () => void {
     let state = this.topics.get(topic);
     if (!state) {
@@ -132,7 +154,9 @@ export class RealtimeClient {
         lastSeq: opts.afterSeq ?? 0,
         subscribed: false,
         onResync: new Set(),
+        onRevoked: new Set(),
         replaying: false,
+        presence: 0,
       };
       this.topics.set(topic, state);
     } else if (opts.afterSeq !== undefined && opts.afterSeq > state.lastSeq) {
@@ -140,16 +164,28 @@ export class RealtimeClient {
     }
     state.listeners.add(listener);
     if (opts.onResync) state.onResync.add(opts.onResync);
-    if (!state.subscribed) this.sendSub(topic);
+    if (opts.onRevoked) state.onRevoked.add(opts.onRevoked);
+    const becamePresent = opts.presence === true && state.presence++ === 0;
+    // Not subscribed yet, or already subscribed without presence: (re-)send the sub with the current flag.
+    if (!state.subscribed || becamePresent) this.sendSub(topic);
 
+    const own = state;
     return () => {
       const s = this.topics.get(topic);
-      if (!s) return;
+      // Gone (revoked) or replaced by a fresh subscription after a revoke: nothing of ours is left to undo.
+      if (!s || s !== own) return;
       s.listeners.delete(listener);
       if (opts.onResync) s.onResync.delete(opts.onResync);
+      if (opts.onRevoked) s.onRevoked.delete(opts.onRevoked);
+      const leftPresence = opts.presence === true && --s.presence === 0;
       if (s.listeners.size === 0) {
         this.topics.delete(topic);
         this.send({ op: "unsub", topic });
+        this.dropPresence(topic);
+      } else if (leftPresence) {
+        // Background listeners remain: keep the stream, stop being "here".
+        this.dropPresence(topic);
+        if (s.subscribed) this.sendSub(topic);
       }
     };
   }
@@ -164,6 +200,27 @@ export class RealtimeClient {
 
   sendEphemeral(topic: string, type: string, data: unknown): void {
     this.send({ op: "eph", topic, type, data });
+  }
+
+  /**
+   * This tab's own state in every conversation it shows (RT-04, D-04). Sent on the leading edge when it differs
+   * from what the socket was last told; changes inside PRESENCE_CLIENT_THROTTLE_MS collapse into one trailing send
+   * of the latest state. While disconnected it is only remembered: the next connection reports `away` before
+   * re-subscribing (a new server connection starts online).
+   */
+  setPresence(state: PresenceState): void {
+    this.desiredPresence = state;
+    if (this.presenceTimer) return; // the trailing send picks up the latest state
+    const wait = this.presenceSentAt + PRESENCE_CLIENT_THROTTLE_MS - Date.now();
+    if (wait <= 0) {
+      this.flushPresence();
+      return;
+    }
+    if (state === this.sentPresence) return;
+    this.presenceTimer = setTimeout(() => {
+      this.presenceTimer = null;
+      this.flushPresence();
+    }, wait);
   }
 
   // ---- internals ----
@@ -209,6 +266,9 @@ export class RealtimeClient {
     this.ws = ws;
     ws.onopen = () => {
       this.status.setState({ status: "open", attempt: 0, lastError: null });
+      // A new server connection starts online: report away first, so every join below is stored as away.
+      this.sentPresence = "online";
+      if (this.desiredPresence === "away") this.flushPresence();
       for (const topic of this.topics.keys()) this.sendSub(topic);
       this.pingTimer = setInterval(() => this.send({ op: "ping" }), this.opts.pingIntervalMs);
     };
@@ -224,6 +284,8 @@ export class RealtimeClient {
         t.subscribed = false;
         t.replaying = false;
       }
+      // Nobody is "here" for us while we are disconnected; the next `subscribed` brings a fresh snapshot.
+      this.clearPresence();
       if (this.stopped) return;
       // 4401 = session revoked or token rejected. With a token source, refresh it once and reconnect: a
       // revoked session then fails the refresh with 401 and stops; a second 4401 before any successful
@@ -259,10 +321,36 @@ export class RealtimeClient {
     this.pingTimer = null;
   }
 
+  /** Sends the desired state when the current socket was told something else (no-op while disconnected). */
+  private flushPresence(): void {
+    const state = this.desiredPresence;
+    if (state === this.sentPresence) return;
+    if (!this.send({ op: "presence", state })) return;
+    this.sentPresence = state;
+    this.presenceSentAt = Date.now();
+  }
+
+  private dropPresence(topic: string): void {
+    const p = this.presence.getState();
+    if (!p.topics[topic]) return;
+    const { [topic]: _gone, ...rest } = p.topics;
+    this.presence.setState({ topics: rest }, true);
+  }
+
+  private clearPresence(): void {
+    if (Object.keys(this.presence.getState().topics).length) this.presence.setState({ topics: {} });
+  }
+
   private sendSub(topic: string): void {
     const s = this.topics.get(topic);
     if (!s) return;
-    if (this.send({ op: "sub", topic, afterSeq: s.lastSeq })) s.subscribed = true;
+    const frame: ClientFrame = {
+      op: "sub",
+      topic,
+      afterSeq: s.lastSeq,
+      ...(s.presence > 0 ? { presence: true } : {}),
+    };
+    if (this.send(frame)) s.subscribed = true;
   }
 
   private send(frame: ClientFrame): boolean {
@@ -324,6 +412,22 @@ export class RealtimeClient {
       case "err":
         this.opts.onError?.(parsed.code, parsed.topic, parsed.message);
         return;
+      case "presence": {
+        if (!this.topics.get(parsed.topic)?.presence) return;
+        const prev = this.presence.getState();
+        const next = applyPresenceFrame(prev, parsed);
+        if (next !== prev) this.presence.setState(next, true);
+        return;
+      }
+      case "revoked": {
+        // The server already dropped the subscription (and our presence): forget the topic, never unsub.
+        const s = this.topics.get(parsed.topic);
+        if (!s) return;
+        this.topics.delete(parsed.topic);
+        this.dropPresence(parsed.topic);
+        for (const cb of s.onRevoked) cb();
+        return;
+      }
       case "pong":
         return;
     }

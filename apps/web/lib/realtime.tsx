@@ -1,12 +1,16 @@
 "use client";
 
 import {
+  aggregatePresence,
   type ConnectionState,
   type ConnectionStatus,
+  createActivityMonitor,
+  type PresenceSnapshot,
+  type PresentUser,
   RealtimeClient,
   type TopicListener,
 } from "@ocw/realtime-client";
-import { createContext, type ReactNode, useContext, useEffect, useRef, useState } from "react";
+import { createContext, type ReactNode, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { createStore } from "zustand/vanilla";
 import { clearAccessToken, getAccessToken } from "./auth-token";
@@ -14,6 +18,34 @@ import { useRuntimeConfig } from "./config";
 import { useMe } from "./queries";
 
 const RealtimeContext = createContext<RealtimeClient | null>(null);
+
+/** Input events that count as activity (RT-04 away); forwarded at most once per second. */
+const ACTIVITY_EVENTS = ["pointerdown", "pointermove", "keydown", "wheel", "touchstart", "focus"] as const;
+const ACTIVITY_FORWARD_MS = 1000;
+
+/**
+ * Reports this tab's Away/Active state to the client (RT-04, 03-02 D-04): hidden tab → away at once; 5 minutes
+ * without input in a visible tab → away; input or showing the tab again → online. Returns the cleanup.
+ */
+function reportActivity(client: RealtimeClient): () => void {
+  const monitor = createActivityMonitor({ onChange: (s) => client.setPresence(s) });
+  const onVisibility = () => monitor.visibility(document.visibilityState === "hidden");
+  let lastForward = 0;
+  const onActivity = () => {
+    const now = Date.now();
+    if (now - lastForward < ACTIVITY_FORWARD_MS) return;
+    lastForward = now;
+    monitor.activity();
+  };
+  onVisibility();
+  document.addEventListener("visibilitychange", onVisibility);
+  for (const type of ACTIVITY_EVENTS) window.addEventListener(type, onActivity, { passive: true });
+  return () => {
+    document.removeEventListener("visibilitychange", onVisibility);
+    for (const type of ACTIVITY_EVENTS) window.removeEventListener(type, onActivity);
+    monitor.dispose();
+  };
+}
 
 /**
  * One RealtimeClient (one WebSocket) per signed-in browser tab. Created when `/me` resolves, closed on
@@ -30,9 +62,11 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!sessionId) return;
     const c = new RealtimeClient({ url: wsUrl, getToken: (o) => getAccessToken(o) });
+    const stopReporting = reportActivity(c);
     c.connect();
     setClient(c);
     return () => {
+      stopReporting();
       c.close();
       clearAccessToken();
       setClient(null);
@@ -49,27 +83,36 @@ export function useRealtime(): RealtimeClient | null {
 
 /**
  * Subscribe to a topic for the lifetime of the component. The listener can change between renders without
- * re-subscribing. Pass `topic = null` to skip (e.g. while ids are loading).
+ * re-subscribing. Pass `topic = null` to skip (e.g. while ids are loading). `opts.presence` marks the view that
+ * shows the conversation: the user counts as "here" and `usePresence(topic)` gets data (RT-04). `opts.onRevoked`
+ * runs when the server drops the topic because access was lost (RT-01); like the listener, it may change between
+ * renders without re-subscribing.
  */
 export function useTopic(
   topic: string | null,
   listener: TopicListener,
   afterSeq?: number,
   onResync?: () => void,
+  opts?: { presence?: boolean; onRevoked?: () => void },
 ): void {
   const client = useRealtime();
   const listenerRef = useRef(listener);
   const resyncRef = useRef(onResync);
+  const revokedRef = useRef(opts?.onRevoked);
   listenerRef.current = listener;
   resyncRef.current = onResync;
+  revokedRef.current = opts?.onRevoked;
 
+  const presence = opts?.presence === true;
   useEffect(() => {
     if (!client || !topic) return;
     return client.subscribe(topic, (frame) => listenerRef.current(frame), {
       ...(afterSeq !== undefined ? { afterSeq } : {}),
       onResync: () => resyncRef.current?.(),
+      onRevoked: () => revokedRef.current?.(),
+      ...(presence ? { presence } : {}),
     });
-  }, [client, topic, afterSeq]);
+  }, [client, topic, afterSeq, presence]);
 }
 
 /** Stand-in store used while there is no client, so the hook order stays stable. */
@@ -78,4 +121,17 @@ const idleStore = createStore<ConnectionState>(() => ({ status: "idle", attempt:
 export function useRealtimeStatus(): ConnectionStatus {
   const client = useRealtime();
   return useStore(client?.status ?? idleStore, (s) => s.status);
+}
+
+const idlePresence = createStore<PresenceSnapshot>(() => ({ topics: {} }));
+
+/**
+ * Who is here now in a `conv:`/`ws:` topic (RT-04), one entry per user (online beats away, online first). The
+ * topic must also be subscribed with `useTopic(…, { presence: true })` for the server to send its presence. The selector returns the
+ * store's own per-topic object (never a new array: zustand v5 would re-render forever); aggregation is memoised.
+ */
+export function usePresence(topic: string | null): PresentUser[] {
+  const client = useRealtime();
+  const conns = useStore(client?.presence ?? idlePresence, (s) => (topic ? s.topics[topic] : undefined));
+  return useMemo(() => aggregatePresence(conns), [conns]);
 }

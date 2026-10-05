@@ -86,8 +86,9 @@ export function useWorkSessions() {
   });
 }
 
-export function useWorkSession(id: string) {
+export function useWorkSession(id: string, opts: { enabled?: boolean } = {}) {
   return useQuery({
+    enabled: opts.enabled ?? true,
     queryKey: wzKeys.session(id),
     queryFn: ({ signal }) => api.get(`/api/v1/work-sessions/${id}`, { schema: WorkSessionDetail, signal }),
     staleTime: Number.POSITIVE_INFINITY,

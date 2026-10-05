@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 2
-current_phase_name: Identity and Organization
-status: ready_to_plan
+current_phase_name: Realtime Presence and Latency
+status: executing
 stopped_at: "REQUIREMENTS.md and ROADMAP.md re-mapped to the Phase 1 build (Restructure 2026-10-04); next: `/gsd-verify-work 1`, then `/gsd-plan-phase 2`"
-last_updated: "2026-10-04T18:39:40.901Z"
+last_updated: "2026-10-04T22:52:36.474Z"
 last_activity: 2026-10-04
-last_activity_desc: Phase 2 execution started
-state_head: 7918f463f9c9e965fc1d361a57388c9470413616
+last_activity_desc: Phase 3 execution started
+state_head: 4d867922e090de4aaedcb0e3073a8feab2ff3b79
 progress:
   total_phases: 12
-  completed_phases: 0
-  total_plans: 15
-  completed_plans: 0
+  completed_phases: 1
+  total_plans: 21
+  completed_plans: 16
 ---
 
 # Project State
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-02)
 
 **Core value:** AI sessions are multiplayer — a private AI chat or coding session can be shared live with colleagues, the model knows who each participant is, and everything stays attributed and auditable.
-**Current focus:** Phase 3 — Realtime Presence and Latency
+**Current focus:** Phase 3.1 — Personal Bots and Bot Capabilities (incl. MCP + OpenClaw Marketplace)
 
 ## Current Position
 
-Phase: 3 (Realtime Presence and Latency) — ready to plan
-Plan: 0 of TBD
-Status: Phase 2 complete and verified (15/15 plans, 535 tests, e2e 35/35); Phase 3 ready to plan
-Last activity: 2026-10-04 - Phase 2 (Identity and Organization) executed and verified: single permission resolver on every route, four PRD roles, org hierarchy, JWT/JWKS, sessions, password reset, profiles, admin console
+Phase: 3.1 (Personal Bots and Bot Capabilities) — planned (15 plans), executes after Phase 3 merges
+Plan: 0 of 15
+Status: Phase 3 complete and verified (6/6 plans, 591 tests, e2e 42/42, p95 < 20 ms); Phase 3.1 planned
+Last activity: 2026-10-05 - Phase 3 (Realtime Presence and Latency) executed and verified: presence + away, <500 ms latency in CI, live re-authorization of subscriptions
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -91,6 +91,10 @@ Recent decisions affecting current work:
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 261002-fns | Restructure roadmap: Phase 1 becomes MVP 0 multiplayer AI chat slice | 2026-10-02 | 5f2bda9 | [261002-fns-restructure-roadmap-phase-1-becomes-mvp-](./quick/261002-fns-restructure-roadmap-phase-1-becomes-mvp-/) |
+
+### Roadmap Evolution
+
+- Phase 3.1 inserted after Phase 3: Personal (owner-only) bots with an automatic private chat, and per-bot capability toggles (internet, memory, reply mode, time context, usage limit) capped by org policy — requested by the owner 2026-10-04 (URGENT)
 
 ## Deferred Items
 
