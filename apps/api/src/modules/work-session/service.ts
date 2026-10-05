@@ -488,12 +488,25 @@ export class WorkSessionService implements DeviceSessionHandler {
       const [s] = await tx.select().from(workSessions).where(eq(workSessions.id, workSessionId));
       if (!s || s.deviceId !== device.deviceId) return;
       const branch = frame.branch ?? null;
-      if (branch !== s.branch) {
-        await tx.update(workSessions).set({ branch }).where(eq(workSessions.id, s.id));
+      const files = frame.files.filter((f) => onlyRelativePaths([f.path]).length === 1);
+      // The sidebar / footer diff stat (D-17): totals of the relative-only files.
+      const diffStat: DiffStat = {
+        files: files.length,
+        additions: files.reduce((n, f) => n + f.additions, 0),
+        deletions: files.reduce((n, f) => n + f.deletions, 0),
+      };
+      const prev = DiffStat.safeParse(s.diffStat);
+      const statChanged =
+        !prev.success ||
+        prev.data.files !== diffStat.files ||
+        prev.data.additions !== diffStat.additions ||
+        prev.data.deletions !== diffStat.deletions;
+      if (branch !== s.branch || statChanged) {
+        await tx.update(workSessions).set({ branch, diffStat }).where(eq(workSessions.id, s.id));
         await this.emitSession(tx, s.id);
       }
       const changes: WorkSessionChanges = {
-        files: frame.files.filter((f) => onlyRelativePaths([f.path]).length === 1),
+        files,
         branch,
         headSha: frame.headSha ?? null,
         truncated: frame.truncated ?? false,
