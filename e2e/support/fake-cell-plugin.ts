@@ -57,7 +57,11 @@ export interface MentionPayload {
   }>;
   roster: Array<{ kind: string; id: string; displayName: string }>;
   /** What this bot may do for this human on this turn (03.1-03); absent = no tools (fail closed). */
-  turn?: { tools: string[] };
+  turn?: {
+    tools: string[];
+    memory?: Array<{ id: string; text: string; createdAt: string }>;
+    now?: { iso: string; timeZone: string; local: string } | null;
+  };
 }
 
 /** Subscription sign-in emulation (provider.auth.* commands), against a fake device-auth server. */
@@ -76,8 +80,9 @@ export interface FakeCellOptions {
   /** Ack every non-disabled bot as `ready` on start and on each `cell.config.changed`. */
   autoAck?: boolean;
   /**
-   * Answer every mention with `replyText(mention)` (default: an identity-aware deterministic reply), followed
-   * by the turn-tools suffix (`turnToolsSuffix`).
+   * Answer every mention with `replyText(mention)` (default: an identity-aware deterministic reply), or with the
+   * simulated tool calls when the message carries `[[call …]]` directives (`simulateToolCalls`), followed by the
+   * turn-tools suffix (`turnToolsSuffix`) and the turn-context suffix (`turnContextSuffix`).
    */
   autoReply?: boolean;
   replyText?: (m: MentionPayload) => string;
@@ -94,6 +99,47 @@ export interface FakeCellOptions {
 export function turnToolsSuffix(m: MentionPayload): string {
   const tools = [...(m.turn?.tools ?? [])].sort();
   return ` [turn tools: ${tools.length > 0 ? tools.join(",") : "none"}]`;
+}
+
+/**
+ * Appended after the turn tools on every simulated reply: ` [memory: <turn.memory.length>] [now: <zone> | none]`.
+ * Lets a browser spec see the bot's notes about the asker (D-10) and the asker's time zone (D-12) per turn.
+ */
+export function turnContextSuffix(m: MentionPayload): string {
+  return ` [memory: ${m.turn?.memory?.length ?? 0}] [now: ${m.turn?.now?.timeZone ?? "none"}]`;
+}
+
+/** `[[call <tool> <json>]]` directives in a message (same grammar as infra/fake-model), in order. */
+export function parseCallDirectives(text: string): Array<{ tool: string; args: Record<string, unknown> }> {
+  const out: Array<{ tool: string; args: Record<string, unknown> }> = [];
+  for (const m of text.matchAll(/\[\[call\s+([A-Za-z0-9_.:-]+)\s+(?=\{)/gu)) {
+    const start = (m.index ?? 0) + m[0].length;
+    let depth = 0;
+    let inString = false;
+    let end = -1;
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+      if (inString) {
+        if (ch === "\\") i++;
+        else if (ch === '"') inString = false;
+      } else if (ch === '"') inString = true;
+      else if (ch === "{") depth++;
+      else if (ch === "}" && --depth === 0) {
+        end = i + 1;
+        break;
+      }
+    }
+    if (end === -1 || !text.startsWith("]]", end)) continue;
+    try {
+      const args = JSON.parse(text.slice(start, end)) as unknown;
+      if (args && typeof args === "object" && !Array.isArray(args) && m[1]) {
+        out.push({ tool: m[1], args: args as Record<string, unknown> });
+      }
+    } catch {
+      /* not a directive */
+    }
+  }
+  return out;
 }
 
 /** Deterministic, identity-aware reply (mirrors infra/fake-model): proves structured attribution travelled. */
@@ -230,7 +276,12 @@ export class FakeCellPlugin {
       if (type === "cell.config.changed" && this.opts.autoAck) await this.ackAll();
       if (type === "agent.mention.v1" && this.opts.autoReply) {
         const m = data as unknown as MentionPayload;
-        await this.reply(m, (this.opts.replyText ?? identityReply)(m) + turnToolsSuffix(m));
+        const calls = parseCallDirectives(m.message.text);
+        const body =
+          calls.length > 0
+            ? (await this.simulateToolCalls(m, calls)).join("\n")
+            : (this.opts.replyText ?? identityReply)(m);
+        await this.reply(m, body + turnToolsSuffix(m) + turnContextSuffix(m));
       }
       if (this.opts.deviceAuth) {
         if (type === "provider.auth.start") void this.runDeviceFlow(data);
@@ -243,6 +294,60 @@ export class FakeCellPlugin {
     } catch (err) {
       console.error("fake cell plugin handler failed", err);
     }
+  }
+
+  /**
+   * Simulates the cell running each `[[call <tool> <json>]]` of a mention, the way apps/openclaw-channel does:
+   * a tool is offered only when it (or a name ending in `__<tool>`) is in `turn.tools`; `ocw_memory_save` posts
+   * `{eventId, agentId, text}` to `/agent-channel/v1/memories`; any other tool asks `/agent-channel/v1/tool-calls`
+   * and, when allowed, reports a result. One line per call:
+   * `Tool <name>: allowed | saved | denied (<reason>) | not offered`.
+   */
+  async simulateToolCalls(
+    m: MentionPayload,
+    calls: Array<{ tool: string; args: Record<string, unknown> }>,
+  ): Promise<string[]> {
+    const lines: string[] = [];
+    const offered = m.turn?.tools ?? [];
+    for (const call of calls) {
+      const name = offered.find((t) => t === call.tool || t.endsWith(`__${call.tool}`));
+      if (!name) {
+        lines.push(`Tool ${call.tool}: not offered`);
+        continue;
+      }
+      if (name === "ocw_memory_save") {
+        const res = await this.request<{ error?: { code?: string } }>("POST", "/memories", {
+          eventId: m.eventId,
+          agentId: m.agent.id,
+          text: typeof call.args.text === "string" ? call.args.text : "",
+        });
+        lines.push(
+          res.status === 200
+            ? `Tool ${call.tool}: saved`
+            : `Tool ${call.tool}: denied (${res.body?.error?.code ?? res.status})`,
+        );
+        continue;
+      }
+      const params: { query?: string; url?: string } = {};
+      if (typeof call.args.query === "string") params.query = call.args.query;
+      if (typeof call.args.url === "string") params.url = call.args.url;
+      const res = await this.request<{ callId?: string; allowed?: boolean; reason?: string | null }>(
+        "POST",
+        "/tool-calls",
+        { eventId: m.eventId, agentId: m.agent.id, tool: name, params },
+      );
+      if (res.status !== 200 || !res.body.allowed || !res.body.callId) {
+        lines.push(`Tool ${call.tool}: denied (${res.body.reason ?? res.status})`);
+        continue;
+      }
+      await this.request("POST", `/tool-calls/${res.body.callId}/result`, {
+        status: "ok",
+        resultCount: 0,
+        durationMs: 1,
+      });
+      lines.push(`Tool ${call.tool}: allowed`);
+    }
+    return lines;
   }
 
   async reportAuth(body: Record<string, unknown>) {

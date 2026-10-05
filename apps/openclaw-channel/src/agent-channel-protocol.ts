@@ -13,6 +13,8 @@
  *   POST /provider-auth        ← AgentChannelProviderAuthReport (subscription sign-in progress)
  *   POST /tool-calls           ← AgentChannelToolCallRequest → AgentChannelToolCallDecision (tool gate)
  *   POST /tool-calls/:id/result ← AgentChannelToolCallResult (outcome only, never content)
+ *   POST /memories             ← AgentChannelMemorySave → AgentChannelMemorySaveResponse (ocw_memory_save;
+ *                                owner = the human of the delivered turn; 404/409 with the refusal code)
  *
  * Parsing is deliberately lenient on ids (any non-empty string) and ignores unknown fields, so the
  * API can add fields without breaking deployed cells; required fields are enforced.
@@ -320,3 +322,9 @@ export type AgentChannelToolCallResult = {
   provider?: string;
   durationMs: number;
 };
+
+/** POST /memories: the delivered turn, the bot and the note. The API binds the owner from the turn. */
+export type AgentChannelMemorySave = { eventId: string; agentId: string; text: string };
+
+export const AgentChannelMemorySaveResponse = z.object({ memoryId: z.string().min(1), created: z.boolean() });
+export type AgentChannelMemorySaveResponse = z.infer<typeof AgentChannelMemorySaveResponse>;

@@ -3,11 +3,12 @@
 import { type AgentTypingEvent, EphemeralTypes, EventTypes, type MessageCreatedEvent } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
 import { useQueryClient } from "@tanstack/react-query";
-import { Bot, Gauge, Lock, Settings2, ShieldCheck } from "lucide-react";
+import { Bot, Gauge, Lock, NotebookPen, Settings2, ShieldCheck } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { BotSettingsSheet } from "@/components/bots/bot-settings-sheet";
+import { MemoryPanel } from "@/components/bots/memory-panel";
 import { EmptyState } from "@/components/common/empty-state";
 import { PageHeader } from "@/components/shell/page-header";
 import { Button } from "@/components/ui/button";
@@ -16,7 +17,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
 import { errorMessage, isApiError } from "@/lib/api";
 import { useAgents } from "@/lib/bots-queries";
-import { capabilityKeys, useBotCapabilities } from "@/lib/capability-queries";
+import { capabilityKeys, useBotCapabilities, useBotMemories } from "@/lib/capability-queries";
 import {
   applyMessage,
   bumpDmLatest,
@@ -91,6 +92,12 @@ export function DmView({ conversationId }: { conversationId: string }) {
     .find((a) => a.id === bot?.id)
     ?.viewerCan?.includes("bot.configure");
   const capabilities = useBotCapabilities(canConfigure && bot ? bot.id : null);
+  // What the bot remembers about the caller (D-10): the caller's own notes, shown while memory is on or any
+  // note exists (a bot whose memory was switched off still lets its human see and clear what it kept).
+  const memories = useBotMemories(bot && !lost ? bot.id : null);
+  const [memoryOpen, setMemoryOpen] = useState(false);
+  const memoryOn = capabilities.data ? capabilities.data.effective.memory.effective : undefined;
+  const showMemory = memoryOn === true || (memories.data?.items.length ?? 0) > 0;
 
   // ---------------------------------------------------------------- realtime
   const onFrame = (frame: TopicFrame) => {
@@ -108,6 +115,10 @@ export function DmView({ conversationId }: { conversationId: string }) {
     // A bot reply is one more turn today: refresh the usage chip.
     if (message.authorKind === "agent" && canConfigure && bot) {
       void qc.invalidateQueries({ queryKey: capabilityKeys.bot(bot.id) });
+    }
+    // The reply may come after the bot saved a note: refresh what it remembers.
+    if (message.authorKind === "agent" && bot) {
+      void qc.invalidateQueries({ queryKey: capabilityKeys.memories(bot.id) });
     }
     if (!message.threadId) {
       bumpDmLatest(qc, conversationId, message.seq, message.createdAt);
@@ -277,15 +288,31 @@ export function DmView({ conversationId }: { conversationId: string }) {
           }
           title={<span data-testid="dm-title">{bot.name}</span>}
           description={
-            <span className="inline-flex items-center gap-1" data-testid="dm-privacy">
-              <Lock className="size-3 shrink-0" aria-hidden />
+            // Inline (not inline-flex) so a narrow header ellipsizes the line instead of clipping it.
+            <span data-testid="dm-privacy">
+              <Lock className="mr-1 inline-block size-3 align-[-1px]" aria-hidden />
               {privacyLine}
             </span>
           }
           actions={
-            canConfigure ? (
+            canConfigure || showMemory ? (
               <>
-                {capabilities.data ? (
+                {showMemory ? (
+                  <Tooltip content={`What ${bot.name} remembers about you`}>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      aria-label={`What ${bot.name} remembers about you`}
+                      data-testid="bot-memory"
+                      onClick={() => setMemoryOpen(true)}
+                      className="max-sm:w-8 max-sm:px-0!"
+                    >
+                      <NotebookPen />
+                      <span className="max-sm:sr-only">Memory</span>
+                    </Button>
+                  </Tooltip>
+                ) : null}
+                {canConfigure && capabilities.data ? (
                   <button
                     type="button"
                     onClick={() => setSettingsOpen(true)}
@@ -302,23 +329,34 @@ export function DmView({ conversationId }: { conversationId: string }) {
                     {capabilities.data.usage.today} / {capabilities.data.usage.limit} today
                   </button>
                 ) : null}
-                <Tooltip content="Bot settings">
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    aria-label="Bot settings"
-                    data-testid="bot-settings"
-                    onClick={() => setSettingsOpen(true)}
-                  >
-                    <Settings2 />
-                  </Button>
-                </Tooltip>
+                {canConfigure ? (
+                  <Tooltip content="Bot settings">
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label="Bot settings"
+                      data-testid="bot-settings"
+                      onClick={() => setSettingsOpen(true)}
+                    >
+                      <Settings2 />
+                    </Button>
+                  </Tooltip>
+                ) : null}
               </>
             ) : null
           }
         />
         {canConfigure ? (
           <BotSettingsSheet agentId={bot.id} open={settingsOpen} onOpenChange={setSettingsOpen} />
+        ) : null}
+        {showMemory || memoryOpen ? (
+          <MemoryPanel
+            agentId={bot.id}
+            botName={bot.name}
+            open={memoryOpen}
+            onOpenChange={setMemoryOpen}
+            memoryOn={memoryOn ?? true}
+          />
         ) : null}
 
         <div

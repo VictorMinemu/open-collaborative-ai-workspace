@@ -5,11 +5,12 @@
 # and participants, a mention without a turn offers 0 tools, internet on offers exactly
 # web_fetch,web_search and a search goes through the tool gate (authorized + outcome reported), no
 # published ports, and a ChatGPT-subscription sign-in command reaches OpenClaw's own device-code login
-# (which cannot reach auth.openai.com here, so it must report a classified error).
+# (which cannot reach auth.openai.com here, so it must report a classified error), and the bot's memory
+# tool `ocw_memory_save` stores a note through `POST /memories` while the turn's notes reach the model.
 #
 # Usage (repo root):  infra/openclaw/test/run-container-smoke.sh [--keep]
 #   SMOKE_ONLY=<comma list>  run only these scenarios (unset = all): mention, signin, dm, capabilities,
-#                            dm-isolation
+#                            dm-isolation, memory
 # Requires: docker, node + npm (bundled plugins are installed on the host from the pinned registry
 # tarballs), apps/openclaw-channel/node_modules (pnpm install / npm install in that dir).
 set -euo pipefail
@@ -96,7 +97,7 @@ docker run -d --name "${P}-api" "${OOM[@]}" --network "$NET" --network-alias api
   -e FAKE_BOT_ID=0199a6f0-0000-7000-8000-00000000a001 \
   -e FAKE_CELL_ID=0199a6f0-0000-7000-8000-0000000000c0 \
   -e FAKE_MODEL_BASE_URL=http://fake-model:18999/v1 \
-  -e FAKE_AGENT_TOOLS=web_search,web_fetch \
+  -e FAKE_AGENT_TOOLS=web_search,web_fetch,ocw_memory_save \
   -e FAKE_WEB_SEARCH_PROVIDER=searxng \
   node:24.21.0-bookworm-slim node /plugin/src/testing/run-fake-api.ts >/dev/null
 
@@ -253,6 +254,36 @@ const calls = s.toolCalls.filter((c) => c.eventId === "0199a6f0-0000-7000-8000-0
 console.log("   reply      :", m.text);
 if (!m.text.endsWith("[tools: 0]") || calls.length !== 0) { console.log("FAIL: tools reached the model with internet off"); process.exit(1); }
 '
+fi
+
+if want memory; then
+echo "== [memory] DM turn offering ocw_memory_save with one saved note: the model reads the note and saves a new one"
+STATE="$(inject_and_wait "$ROOT/infra/openclaw/test/mention-memory.json" 0199a6f0-0000-7000-8000-00000000d051)"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d051");
+if (!m) { console.log("FAIL: no reply to the memory mention"); process.exit(1); }
+const saves = (s.memories ?? []).filter((x) => x.eventId === "0199a6f0-0000-7000-8000-00000000e005");
+const gated = s.toolCalls.filter((c) => c.eventId === "0199a6f0-0000-7000-8000-00000000e005");
+console.log("   reply      :", m.text);
+console.log("   saves      :", JSON.stringify(saves.map(({ agentId, text, created }) => ({ agentId, text, created }))));
+const ok =
+  m.text.includes("Tool ocw_memory_save said:") &&
+  /\[tools: 1 \| [^\]]*ocw_memory_save\]/.test(m.text) &&
+  saves.length === 1 && saves[0].text === "lives in Madrid" && saves[0].created === true &&
+  saves[0].agentId === "0199a6f0-0000-7000-8000-00000000a001" &&
+  Object.keys(saves[0]).sort().join() === "agentId,created,eventId,memoryId,text" &&
+  // Validated by its own route: never sent to /tool-calls.
+  gated.length === 0;
+if (!ok) { console.log("FAIL: expected one ocw_memory_save through POST /memories and a reply from its result"); process.exit(1); }
+'
+# The turn's notes (only ever in turn.memory, rendered as the DM's "Your notes about <name>" block) reach the
+# model for this conversation only.
+NOTE_FILES="$(docker exec "${P}-model" sh -c "grep -l '0199a6f0-0000-7000-8000-00000000c005' /tmp/capture/*.json 2>/dev/null | xargs -r grep -l 'likes green tea' | wc -l")"
+LEAKED="$(docker exec "${P}-model" sh -c "grep -L '0199a6f0-0000-7000-8000-00000000c005' /tmp/capture/*.json 2>/dev/null | xargs -r grep -l 'likes green tea' | wc -l")"
+echo "   notes      : $NOTE_FILES model request(s) of this DM carry the note, $LEAKED other request(s) do"
+if [[ "$NOTE_FILES" -lt 1 ]]; then echo "FAIL: the turn's notes did not reach the model"; exit 1; fi
+if [[ "$LEAKED" -ne 0 ]]; then echo "FAIL: the note reached a model request of another conversation"; exit 1; fi
 fi
 
 if want signin; then

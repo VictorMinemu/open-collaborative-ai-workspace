@@ -13,6 +13,7 @@ import type { Core } from "../../core";
 import { agentResource, type PermissionService, type PrincipalRef } from "../organization";
 import { type CatalogSource, effectiveCapabilities, effectiveTools, readCapabilities } from "./capabilities";
 import { loadAllGrants, loadCatalog, loadGrants } from "./catalog";
+import { loadTurnMemory } from "./memory";
 import { internetConfigured, loadPolicy, type SearchEnv } from "./policy";
 import { botFacts, findBot } from "./routes";
 import { consumeTurn, effectiveDailyLimit, limitNotice } from "./usage";
@@ -208,9 +209,12 @@ export async function turnPolicy(
     };
   }
 
-  // Extension point (03.1-07): memory. Load this human's memories of this bot when memory is effective and
-  // the conversation is their DM with it.
-  const memory: TurnContext["memory"] = [];
+  // Memory (D-10): only in this human's DM with the bot, and only while memory is effective (the same
+  // decision that offers `ocw_memory_save`). Every other turn carries none.
+  const memory: TurnContext["memory"] =
+    p.conversationKind === "dm" && computed.effective.memory.effective
+      ? await loadTurnMemory(tx, p.agentId, p.humanUserId)
+      : [];
 
   const turn: TurnContext = {
     tools: computed.tools,

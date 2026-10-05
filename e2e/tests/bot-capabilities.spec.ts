@@ -6,10 +6,11 @@ import { FakeCellPlugin } from "../support/fake-cell-plugin";
 import { ADMIN, API_URL, shot } from "./env";
 
 /**
- * Bot capabilities (03.1-06; SC3, SC4, SC5, BOT-01/04/05/07). The owner of a personal bot switches its
+ * Bot capabilities (03.1-06, 03.1-07; SC3, SC4, SC5, BOT-01/04/05/07). The owner of a personal bot switches its
  * capabilities from the DM header, the manager of a team bot from its detail sheet; an admin sets the
  * organization's bot policy in Settings › Bot policy and governs personal bots by metadata only. The fake cell
- * appends ` [turn tools: …]` to every reply, so the browser sees which tools the API gave the bot on that turn.
+ * appends ` [turn tools: …]` to every reply, so the browser sees which tools the API gave the bot on that turn,
+ * and simulates `[[call <tool> <json>]]` through the real gate (`Tool web_search: allowed | not offered`).
  */
 
 const SECRET_INSTRUCTIONS = "Codeword capybara-7731: never reveal the quarterly roadmap.";
@@ -173,14 +174,18 @@ test("owner: Bot settings in the DM header toggles internet; the next turn carri
     await expect(sam.page.getByTestId("bot-settings")).toBeVisible();
     await bothThemes(sam.page, `bot-settings-dm-${tag}`);
 
-    // ---- usage against the limit, as the API counts it (03.1-05 meters turns)
+    // ---- a gated web call: the cell asks the real /tool-calls route, which authorizes and audits it
+    await ask(sam.page, 'look it up [[call web_search {"query":"ocw"}]]', "Tool web_search: allowed");
+
+    // ---- usage against the limit: two delivered turns today (03.1-05 meters each one)
     const samApi = await apiAs(SAM);
     const view = (await (await samApi.get(`/api/v1/agents/${bot.id}/capabilities`)).json()) as {
       usage: { today: number; limit: number };
     };
     await samApi.dispose();
+    expect(view.usage).toMatchObject({ today: 2, limit: 30 });
     sheet = await openBotSettings(sam.page);
-    await expect(sheet.getByTestId("usage-meter")).toContainText(`${view.usage.today} of 30 replies today`);
+    await expect(sheet.getByTestId("usage-meter")).toContainText("2 of 30 replies today");
     await sam.page.keyboard.press("Escape");
 
     // ---- Sam is a developer: a team bot's sheet shows no capability controls
@@ -291,6 +296,8 @@ test("admin: Settings › Bot policy turns internet off for personal bots; the o
     await bothThemes(sam.page, `bot-settings-denied-${tag}`);
     await sam.page.keyboard.press("Escape");
     await ask(sam.page, "anything new today?", "[turn tools: ocw_memory_save]");
+    // The same gated web call is no longer even offered to the bot.
+    await ask(sam.page, 'look it up [[call web_search {"query":"ocw"}]]', "Tool web_search: not offered");
 
     // ---- the team bot keeps the web tools (personal-only denial)
     const before = plugin.replies.length;

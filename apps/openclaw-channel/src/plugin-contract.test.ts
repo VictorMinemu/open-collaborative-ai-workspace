@@ -3,7 +3,7 @@
  * Channel API v1 server speaking the canonical contract, with OpenClaw replaced by a recording fake
  * port.
  */
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -15,6 +15,7 @@ import { CommitTracker, runEventStream } from "./event-stream.js";
 import { type MappedMention, mapMention } from "./mention-mapper.js";
 import { createOpenClawPort, type PluginRuntimeLike } from "./openclaw-port.js";
 import { planReconcile } from "./reconciler.js";
+import { registerFull } from "./register-full.js";
 import {
   type FakeAgentChannelApi,
   type MentionInput,
@@ -595,6 +596,71 @@ describe("tool gate against the fake Agent Channel API (HTTP)", () => {
     const cell = await client.getCell();
     expect(cell.agents[0]?.capabilities).toEqual({ tools: ["web_search"] });
     expect(cell.webSearch).toEqual({ provider: "searxng" });
+  });
+});
+
+describe("memory tool (D-10): manifest, registration and the fake API", () => {
+  const MEMORY = { untrustedOutput: false, sideEffecting: true };
+
+  it("the manifest declares ocw_memory_save in contracts.tools (OpenClaw discovers tool ownership there)", () => {
+    const manifest = JSON.parse(
+      readFileSync(path.join(import.meta.dirname, "..", "openclaw.plugin.json"), "utf8"),
+    ) as { contracts?: { tools?: string[] } };
+    expect(manifest.contracts?.tools).toEqual(["ocw_memory_save"]);
+  });
+
+  it("registerFull installs the tool gate hooks and registers ocw_memory_save", () => {
+    const hooks: string[] = [];
+    const tools: Array<{ opts: { name: string } }> = [];
+    const pluginApi = {
+      on: (name: string) => hooks.push(name),
+      registerTool: (_factory: unknown, opts: { name: string }) => tools.push({ opts }),
+    };
+    registerFull(pluginApi as never, createToolGuard({ client: () => null }));
+    expect(hooks).toEqual(["before_tool_call", "after_tool_call"]);
+    expect(tools.map((t) => t.opts.name)).toEqual(["ocw_memory_save"]);
+  });
+
+  it("a save in an active DM turn reaches POST /memories with the event, the bot and the text only", async () => {
+    const client = createAgentChannelClient({ apiUrl: api.url, token: () => api.token });
+    const guard = createToolGuard({ client: () => client });
+    type Factory = (ctx: Record<string, unknown>) => {
+      execute: (id: string, p: unknown) => Promise<unknown>;
+    };
+    const registered: Factory[] = [];
+    registerFull(
+      { on: () => undefined, registerTool: (f: Factory) => registered.push(f) } as never,
+      guard,
+      () => client,
+    );
+    const turn = {
+      tools: ["ocw_memory_save"],
+      toolFlags: { ocw_memory_save: MEMORY },
+      memory: [],
+      now: null,
+      maxToolCalls: 8,
+      maxWebCalls: 5,
+    };
+    guard.beginTurn("s-dm", { eventId: "evt-m1", agentId: ARCHIE.id, turn, conversationId: "dm-1" });
+    const factory = registered[0];
+    if (!factory) throw new Error("ocw_memory_save was not registered");
+    const tool = factory({ sessionKey: "s-dm" });
+    expect(await tool.execute("tc-1", { text: "lives in Madrid" })).toMatchObject({
+      content: [{ type: "text", text: "Saved." }],
+    });
+    expect(await tool.execute("tc-2", { text: "lives in Madrid" })).toMatchObject({
+      content: [{ type: "text", text: "Already saved." }],
+    });
+    api.refuseMemoryEvents.add("evt-m1");
+    const refused = (await tool.execute("tc-3", { text: "something else" })) as {
+      content: Array<{ text: string }>;
+    };
+    expect(refused.content[0]?.text).toBe("Not saved: memory is not available on this turn.");
+    expect(api.memories.map(({ eventId, agentId, text }) => ({ eventId, agentId, text }))).toEqual([
+      { eventId: "evt-m1", agentId: ARCHIE.id, text: "lives in Madrid" },
+      { eventId: "evt-m1", agentId: ARCHIE.id, text: "lives in Madrid" },
+      { eventId: "evt-m1", agentId: ARCHIE.id, text: "something else" },
+    ]);
   });
 });
 
