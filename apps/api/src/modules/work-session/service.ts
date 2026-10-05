@@ -1034,6 +1034,9 @@ export class WorkSessionService implements DeviceSessionHandler {
         return;
       case "failed":
       case "completed":
+        // A session the server already failed (access revoked, unauthorized mode) stays failed with its reason
+        // when the device then reports the stopped session as ended.
+        if (s.status === "failed" && status === "completed") return;
         await this.failInFlight(tx, s, status === "failed" ? "The session failed" : "The session ended");
         await this.setStatus(tx, s, status);
         return;

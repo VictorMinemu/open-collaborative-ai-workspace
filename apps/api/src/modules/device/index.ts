@@ -12,6 +12,7 @@ export {
   isRevokedPrincipal,
   loadDeviceAccess,
 } from "./access";
+export { listGrants, loadGrants } from "./grants";
 export {
   type DeviceCommandRow,
   DeviceHub,

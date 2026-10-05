@@ -333,6 +333,22 @@ describe("relation grants", () => {
       expect(allowed(user("developer"), r, "device.full_access")).toBe(true);
     });
 
+    it("an allow rule never confers device.full_access (non-delegable, ADR-0012): only the cap does", () => {
+      const allow = rule({ permission: "device.full_access", effect: "allow" });
+      const allowUser = rule({
+        permission: "device.full_access",
+        effect: "allow",
+        subjectKind: "user",
+        subjectId: "u-1",
+      });
+      for (const role of ["developer", "lead", "admin"] as const) {
+        expect(allowed(user(role), dev("acceptEdits"), "device.full_access", [allow, allowUser]), role).toBe(
+          false,
+        );
+        expect(allowed(user(role), dev(null), "device.full_access", [allow, allowUser]), role).toBe(false);
+      }
+    });
+
     it("a deny rule on device.full_access removes it at the user layer; device.use stays", () => {
       const deny = rule({
         permission: "device.full_access",
@@ -531,6 +547,7 @@ describe("unit leads and explicit rules", () => {
       rule({ id: "a1", permission: "member.manage", effect: "allow" }),
       rule({ id: "a2", permission: "provider.manage", effect: "allow" }),
       rule({ id: "a3", permission: "cell.*", effect: "allow" }),
+      rule({ id: "a4", permission: "device.full_access", effect: "allow" }),
     ];
     const res = resolveEffectivePermissions(user("standard"), orgResource(), allowAll);
     for (const perm of NON_DELEGABLE_PERMISSIONS) expect(res.permissions.has(perm), perm).toBe(false);
