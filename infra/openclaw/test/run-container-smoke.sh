@@ -257,7 +257,7 @@ docker start "${P}-openclaw" >/dev/null
 
 echo "== waiting for the plugin to connect"
 for i in $(seq 1 120); do
-  if docker logs "${P}-openclaw" 2>&1 | grep -q "agent channel connected"; then break; fi
+  if docker logs "${P}-openclaw" 2>&1 | grep "agent channel connected" >/dev/null; then break; fi
   if ! docker ps --format '{{.Names}}' | grep -q "^${P}-openclaw$"; then
     docker logs "${P}-openclaw" 2>&1 | tail -40
     echo "FAIL: openclaw container exited"
@@ -265,7 +265,7 @@ for i in $(seq 1 120); do
   fi
   sleep 1
 done
-if ! docker logs "${P}-openclaw" 2>&1 | grep -q "agent channel connected"; then
+if ! docker logs "${P}-openclaw" 2>&1 | grep "agent channel connected" >/dev/null; then
   echo "FAIL: the ocw channel plugin never connected to the Agent Channel API within 120 s" >&2
   exit 1
 fi
@@ -888,7 +888,7 @@ echo "== [marketplace] restart: the installed plugin is re-allowed at boot from 
 T0="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 docker restart "${P}-openclaw" >/dev/null
 for i in $(seq 1 120); do
-  if docker logs --since "$T0" "${P}-openclaw" 2>&1 | grep -q "agent channel connected"; then break; fi
+  if docker logs --since "$T0" "${P}-openclaw" 2>&1 | grep "agent channel connected" >/dev/null; then break; fi
   sleep 1
 done
 BOOT="$(docker logs --since "$T0" "${P}-openclaw" 2>&1)"
@@ -1034,7 +1034,7 @@ api_exec "
 await fetch('http://127.0.0.1:4000/__test/cell', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ agents: [], reason: 'agent.deleted', agentId: '$BOT_ID' }) });
 "
 for i in $(seq 1 60); do
-  if docker logs "${P}-openclaw" 2>&1 | grep -q "reconciled OpenClaw: agents upsert=0 remove=1"; then break; fi
+  if docker logs "${P}-openclaw" 2>&1 | grep "reconciled OpenClaw: agents upsert=0 remove=1" >/dev/null; then break; fi
   sleep 1
 done
 docker logs "${P}-openclaw" 2>&1 | grep -E "reconciled OpenClaw|purged OpenClaw state|could not purge|agent removal refused" | tail -n 3 | sed 's/^/   /'
