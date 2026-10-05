@@ -309,6 +309,12 @@ export function planReconcile(
     readySubscriptions?: ReadonlySet<string>;
     /** Search provider plugins loaded in this cell (`plugins.allow`); a provider not loaded is never set. */
     searchProviders?: ReadonlySet<string>;
+    /**
+     * The gateway env as OpenClaw last resolved it (the port passes `process.env`): an MCP header whose value
+     * changed there forces a re-render, so a rotated credential is applied even when the runtime view shows the
+     * unresolved `${ref}`.
+     */
+    env?: Readonly<Record<string, string | undefined>>;
   } = {},
 ): ReconcilePlan {
   const existingAgents = current.agents ?? {};
@@ -397,8 +403,10 @@ export function planReconcile(
       env[h.envName] = h.value;
       secrets.set(envRef(h.envName), h.value);
     }
-    if (!sameMcpServer(existingMcp[server.safeName], entry, secrets))
+    const rotated = opts.env !== undefined && server.headers.some((h) => opts.env?.[h.envName] !== h.value);
+    if (rotated || !sameMcpServer(existingMcp[server.safeName], entry, secrets)) {
       upsertMcpServers[server.safeName] = entry;
+    }
   }
   const removeMcpServers = Object.keys(existingMcp).filter(
     (name) => OWNED_MCP_SERVER.test(name) && !desiredMcp.has(name),

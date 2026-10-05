@@ -406,6 +406,17 @@ describe("MCP servers in the cell (D-13, BOT-08)", () => {
     ]);
   });
 
+  it("a rotated credential re-renders even when the runtime view shows the unresolved env ref", () => {
+    const current = { mcpServers: { [SAFE]: rendered(mcp()) } };
+    const envName = `OCW_MCP_${SAFE.toUpperCase()}_0`;
+    // The gateway env still holds the value OpenClaw resolved at its last config load.
+    expect(planReconcile(current, cell([mcp()]), { env: { [envName]: TOKEN } }).upsertMcpServers).toEqual({});
+    const rotated = mcp({ headers: [{ name: "Authorization", envName, value: "Bearer rotated-SECRET" }] });
+    const plan = planReconcile(current, cell([rotated]), { env: { [envName]: TOKEN } });
+    expect(Object.keys(plan.upsertMcpServers)).toEqual([SAFE]);
+    expect(plan.env[envName]).toBe("Bearer rotated-SECRET");
+  });
+
   it("refuses snapshot entries it cannot render safely: foreign names, bad env names or header names", () => {
     const plan = planReconcile(
       {},

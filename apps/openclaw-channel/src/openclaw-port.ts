@@ -138,6 +138,8 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
           ...reconcileOpts,
           // Only a provider whose plugin this cell loaded can be selected (a missing one stays as rendered).
           searchProviders: new Set(loadedPlugins.filter((p): p is string => typeof p === "string")),
+          // Read before the plan's values are applied below: a changed MCP credential forces a re-render.
+          env: { ...process.env },
         },
       );
       // Secrets reach OpenClaw only through the gateway process env; the config holds ${ENV} refs.
