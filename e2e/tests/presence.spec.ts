@@ -95,6 +95,8 @@ test("presence: who is here now in the channel header", async ({ browser }, info
   expect(order.indexOf(samId)).toBeLessThan(order.indexOf(rioId));
   await expect(dialog.getByTestId("members-here-now")).toHaveText("· 1 here now");
   await expect(row(samId).getByTestId("presence-dot")).toBeVisible();
+  // The channel's own people come before "Add to channel", so presence is in view even in a large organization.
+  await expect(row(samId)).toBeInViewport();
   await expect(row(rioId).getByTestId("presence-dot")).toHaveCount(0);
   await shot(a.page, `presence-members-${tag}`);
   await a.page.emulateMedia({ colorScheme: "dark" });

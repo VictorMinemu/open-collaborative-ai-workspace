@@ -181,8 +181,50 @@ export function MembersDialog({
           />
         </div>
         <div className="scrollbar-thin -mx-2 max-h-[55dvh] overflow-y-auto px-0">
+          {people.length > 0 ? (
+            <section className="mb-3 last:mb-0">
+              <h3 className="px-4 pb-1 font-medium text-[11px] text-muted-foreground uppercase tracking-wider">
+                People
+              </h3>
+              <ul className="px-2">
+                {people.map((m) => (
+                  <Row
+                    key={m.id}
+                    kind="user"
+                    id={m.id}
+                    name={m.displayName}
+                    handle={m.handle}
+                    avatarUrl={m.avatarUrl}
+                    note={m.id === meId ? "(you)" : m.role === "owner" ? "· owner" : null}
+                    presence={presenceOf(m.id)}
+                    onOpen={() => setProfile({ userId: m.id, open: true })}
+                  />
+                ))}
+              </ul>
+            </section>
+          ) : null}
+          {bots.length > 0 ? (
+            <section className="mb-3 last:mb-0">
+              <h3 className="px-4 pb-1 font-medium text-[11px] text-muted-foreground uppercase tracking-wider">
+                Bots
+              </h3>
+              <ul className="px-2">
+                {bots.map((m) => (
+                  <Row
+                    key={m.id}
+                    kind="agent"
+                    id={m.id}
+                    name={m.displayName}
+                    handle={m.handle}
+                    avatarUrl={m.avatarUrl}
+                  />
+                ))}
+              </ul>
+            </section>
+          ) : null}
           {canAdd && candidates.length > 0 ? (
-            <section className="mb-3">
+            // After the channel's own people and bots, so who is here now stays in view in a large organization.
+            <section className="mb-3 last:mb-0">
               <h3 className="px-4 pb-1 font-medium text-[11px] text-muted-foreground uppercase tracking-wider">
                 Add to channel
               </h3>
@@ -207,47 +249,6 @@ export function MembersDialog({
                         Add
                       </Button>
                     }
-                  />
-                ))}
-              </ul>
-            </section>
-          ) : null}
-          {people.length > 0 ? (
-            <section className="mb-3">
-              <h3 className="px-4 pb-1 font-medium text-[11px] text-muted-foreground uppercase tracking-wider">
-                People
-              </h3>
-              <ul className="px-2">
-                {people.map((m) => (
-                  <Row
-                    key={m.id}
-                    kind="user"
-                    id={m.id}
-                    name={m.displayName}
-                    handle={m.handle}
-                    avatarUrl={m.avatarUrl}
-                    note={m.id === meId ? "(you)" : m.role === "owner" ? "· owner" : null}
-                    presence={presenceOf(m.id)}
-                    onOpen={() => setProfile({ userId: m.id, open: true })}
-                  />
-                ))}
-              </ul>
-            </section>
-          ) : null}
-          {bots.length > 0 ? (
-            <section>
-              <h3 className="px-4 pb-1 font-medium text-[11px] text-muted-foreground uppercase tracking-wider">
-                Bots
-              </h3>
-              <ul className="px-2">
-                {bots.map((m) => (
-                  <Row
-                    key={m.id}
-                    kind="agent"
-                    id={m.id}
-                    name={m.displayName}
-                    handle={m.handle}
-                    avatarUrl={m.avatarUrl}
                   />
                 ))}
               </ul>
