@@ -5,6 +5,8 @@ import {
   BotCapabilityView,
   BotGovernanceList,
   BotPolicyView,
+  type MemoryItem,
+  MemoryList,
   Ok,
   type UpdateBotCapabilitiesRequest,
   type UpdateBotPolicyRequest,
@@ -21,6 +23,7 @@ export const capabilityKeys = {
   bot: (id: string) => ["bot-capabilities", id] as const,
   policy: ["bot-policy"] as const,
   governance: ["bot-governance"] as const,
+  memories: (id: string) => ["bot-memories", id] as const,
 };
 
 function noRetryOn4xx(failureCount: number, err: unknown): boolean {
@@ -121,5 +124,45 @@ export function useGovernBot() {
       }
     },
     onSettled: () => void qc.invalidateQueries({ queryKey: capabilityKeys.governance }),
+  });
+}
+
+/** What this bot remembers about the caller (D-10): always the caller's own notes, newest first. */
+export function useBotMemories(agentId: string | null) {
+  return useQuery({
+    enabled: !!agentId,
+    queryKey: capabilityKeys.memories(agentId ?? ""),
+    queryFn: ({ signal }) => api.get(`/api/v1/agents/${agentId}/memories`, { schema: MemoryList, signal }),
+    retry: noRetryOn4xx,
+  });
+}
+
+/**
+ * Forget one note (`memoryId`) or all of them. Optimistic: the note leaves the list at once and comes back
+ * if the API refuses; the list refetches either way.
+ */
+export function useClearBotMemory(agentId: string) {
+  const qc = useQueryClient();
+  const key = capabilityKeys.memories(agentId);
+  return useMutation({
+    mutationFn: async (memoryId?: string) => {
+      const path = memoryId
+        ? `/api/v1/agents/${agentId}/memories/${memoryId}`
+        : `/api/v1/agents/${agentId}/memories`;
+      await api.del(path, { schema: Ok });
+    },
+    onMutate: async (memoryId) => {
+      await qc.cancelQueries({ queryKey: key });
+      const previous = qc.getQueryData<MemoryList>(key);
+      if (previous) {
+        const items: MemoryItem[] = memoryId ? previous.items.filter((i) => i.id !== memoryId) : [];
+        qc.setQueryData<MemoryList>(key, { items });
+      }
+      return { previous };
+    },
+    onError: (_err, _id, ctx) => {
+      if (ctx?.previous) qc.setQueryData(key, ctx.previous);
+    },
+    onSettled: () => void qc.invalidateQueries({ queryKey: key }),
   });
 }
