@@ -393,6 +393,10 @@ if grep -q "bundled plugin .* missing from the image; skipped" <<<"$LOGS"; then
   echo "FAIL: a bundled search plugin was skipped"; grep "ocw-cell" <<<"$LOGS"; exit 1
 fi
 if grep -q "\[heartbeat\] disabled" <<<"$LOGS"; then echo "   heartbeat disabled"; else echo "FAIL: heartbeat not disabled"; exit 1; fi
+# Where the call-time tool gate got registered: the boot registry ("full") and the non-activated registry
+# OpenClaw runs agent turns with ("discovery"); the capabilities scenario proves it actually gates.
+GATES="$(grep -o "tool gate registered ([a-z-]* registry)" <<<"$LOGS" | sort -u | tr '\n' ';' || true)"
+echo "   tool gate wiring: ${GATES:-none logged}"
 if docker exec "${P}-openclaw" node -e "fetch('https://api.anthropic.com').then(()=>process.exit(0)).catch(()=>process.exit(1))"; then
   echo "FAIL: container has internet egress"; exit 1
 fi
