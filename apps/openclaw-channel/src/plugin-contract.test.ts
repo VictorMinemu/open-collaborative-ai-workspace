@@ -1013,6 +1013,27 @@ describe("marketplace executor (D-14): plugin.install.v1 / plugin.uninstall.v1 t
     expect(api.plugins[0]?.status).toBe("uninstalled");
   });
 
+  it("the fake API, like the real one, applies a report only to the row's current flow", async () => {
+    api.plugins = [
+      {
+        pluginRowId: ROW,
+        packageName: "@ocw-test/echo-plugin",
+        version: "0.1.0",
+        sha256: SHA,
+        pluginId: "ocw-echo",
+        status: "approved",
+      },
+    ];
+    api.publish("plugin.install.v1", install({ flowId: "flow-a" }));
+    api.publish("plugin.uninstall.v1", { flowId: "flow-b", pluginRowId: ROW, pluginId: "ocw-echo" });
+    const client = createAgentChannelClient({ apiUrl: api.url, token: () => api.token, maxAttempts: 1 });
+    // A late "installed" of the install flow (a replay's re-report) must not undo the uninstall in flight.
+    await expect(
+      client.reportPlugin({ flowId: "flow-a", pluginRowId: ROW, state: "installed", pluginId: "ocw-echo" }),
+    ).rejects.toMatchObject({ status: 404 });
+    expect(api.plugins[0]?.status).toBe("uninstalling");
+  });
+
   it("without an executor the plugin ignores marketplace events (older cells)", async () => {
     startPlugin();
     await api.waitFor(() => api.openSockets() > 0);

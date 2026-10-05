@@ -163,6 +163,8 @@ export async function startFakeAgentChannelApi(
   const sockets = new Set<WebSocket>();
   let failures = { n: 0, status: 503 };
   const byKey = new Map<string, StoredMessage>();
+  /** Current flow per plugin row (set when a plugin command is published), as `cell_plugins.flow_id`. */
+  const pluginFlows = new Map<string, string>();
 
   const state = {
     agents: opts.agents ?? [],
@@ -280,7 +282,11 @@ export async function startFakeAgentChannelApi(
         // Every attempt is recorded (also the ones answered 404, like a report for a row the API never approved).
         state.pluginReports.push(body);
         const row = state.plugins.find((p) => p.pluginRowId === body.pluginRowId);
-        if (!row) return json(res, 404, { error: { code: "plugin_flow_not_found" } });
+        // Like the API: only the row's current flow (the last command published for it) may change it.
+        const current = row ? pluginFlows.get(row.pluginRowId) : undefined;
+        if (!row || (current !== undefined && current !== body.flowId)) {
+          return json(res, 404, { error: { code: "plugin_flow_not_found" } });
+        }
         if (body.state === "installed") {
           row.status = "installed";
           if (body.pluginId) row.pluginId = body.pluginId;
@@ -579,6 +585,9 @@ export async function startFakeAgentChannelApi(
       const row = state.plugins.find((p) => p.pluginRowId === data.pluginRowId);
       if (row && type === "plugin.install.v1") row.status = "installing";
       if (row && type === "plugin.uninstall.v1") row.status = "uninstalling";
+      if (row && typeof data.flowId === "string" && type.startsWith("plugin.")) {
+        pluginFlows.set(row.pluginRowId, data.flowId);
+      }
       const seq = (state.events.at(-1)?.seq ?? 0) + 1;
       const ev: StoredEvent = { seq, type, data: { ...data, type, organizationId: cellId, cellId, seq } };
       state.events.push(ev);

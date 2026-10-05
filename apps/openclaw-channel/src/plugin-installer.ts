@@ -353,7 +353,10 @@ export function createPluginInstaller(deps: PluginInstallerDeps) {
     if (hit || !deps.refresh) return hit;
     try {
       return find(await deps.refresh());
-    } catch {
+    } catch (error) {
+      log.warn?.(
+        `plugin approvals: snapshot refresh failed (${error instanceof Error ? error.message.slice(0, 160) : "error"})`,
+      );
       return undefined;
     }
   }
