@@ -204,6 +204,9 @@ export function DeviceSharing({ device }: { device: Device }) {
             })}
           </ul>
         )}
+        <p className="text-muted-foreground text-xs" data-testid="share-subscription-note">
+          People you share with use this subscription.
+        </p>
       </div>
 
       <AddGrantDialog

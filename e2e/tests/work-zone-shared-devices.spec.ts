@@ -6,7 +6,8 @@ import { ADMIN, shot } from "./env";
 /**
  * Shared devices (Phase 03.2 Plan 05, D-05, D-06, WZC-05) with the REAL daemon in fake-runtime mode: the owner
  * shares a device with Sam capped at Auto-accept edits from Settings › Devices; Sam starts a session on it with
- * no acceptance step and gets the first assistant message; the owner removes Sam and Sam's session stops.
+ * no acceptance step and gets the first assistant message; the owner removes Sam and Sam's session stops. Device
+ * cards say whose subscription runs the sessions and show the device's Full access opt-in read-only.
  */
 
 test.describe.configure({ mode: "serial" });
@@ -72,13 +73,46 @@ test("Shared devices: the owner shares with Sam at a cap, Sam starts a session, 
     await card.scrollIntoViewIfNeeded();
     await bothThemes(page, `wz-shared-device-${tag}`);
 
+    // ---- whose subscription the device uses, and the read-only Full access opt-in (D-06, ADR-0012 §5)
+    const subscription = card.getByTestId("device-subscription");
+    await expect(subscription).toContainText("Claude Code runs on your Claude login");
+    await expect(subscription).toContainText("Codex runs on your ChatGPT login");
+    await expect(sharing.getByTestId("share-subscription-note")).toHaveText(
+      "People you share with use this subscription.",
+    );
+    const fullAccess = card.getByTestId("device-full-access");
+    await expect(fullAccess).toHaveAttribute("data-enabled", "false");
+    await expect(fullAccess).toContainText(
+      "Off — enable it on the device (desktop app › Runtime › Allow Full access, or ocw-runtime full-access on)",
+    );
+    await expect(fullAccess).toContainText("Recommended only on a dedicated machine");
+    await expect(fullAccess.getByRole("switch")).toHaveCount(0);
+    // Without the device's opt-in, Full access cannot be picked as anyone's maximum.
+    await row.getByTestId("grant-mode").click();
+    await expect(page.getByRole("option", { name: /Full access/ })).toHaveAttribute("aria-disabled", "true");
+    await expect(page.getByRole("option", { name: /Full access/ })).toContainText(
+      "Turn on Full access on the device first",
+    );
+    await page.keyboard.press("Escape");
+    await fullAccess.scrollIntoViewIfNeeded();
+    await bothThemes(page, `wz-device-settings-${tag}`);
+
     // ---- Sam sees the device's project and starts a session on it, no acceptance step
     sam = await openAs(browser, SAM, info.project.name);
+    await sam.page.goto(`${BASE_URL}/settings/devices`);
+    const samCard = sam.page.getByTestId("device-card").filter({ hasText: deviceName });
+    await expect(samCard.getByTestId("device-subscription")).toContainText(
+      `Claude Code runs on ${ADMIN.name}'s Claude login`,
+    );
+    await expect(samCard.getByTestId("device-sharing")).toHaveCount(0);
     await sam.page.goto(`${BASE_URL}/work-zone`);
     await sam.page.getByTestId("new-session").click();
     const start = sam.page.getByTestId("new-session-dialog");
     await expect(start).toBeVisible();
-    await start.getByTestId("project-option").filter({ hasText: `shared-${tag}` }).click();
+    await start
+      .getByTestId("project-option")
+      .filter({ hasText: `shared-${tag}` })
+      .click();
     await start.getByTestId("runtime-claude-code").click();
     await start.getByTestId("mode-acceptEdits").click();
     await start.getByTestId("first-prompt").fill("Add a short CONTRIBUTING guide for new teammates");
