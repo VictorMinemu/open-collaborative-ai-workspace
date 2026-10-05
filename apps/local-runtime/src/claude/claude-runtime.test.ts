@@ -117,6 +117,7 @@ function setup(
       return q;
     },
     claudePath: extra.claudePath ?? "/usr/local/bin/claude",
+    catalogCwd: cwd,
     detect:
       extra.detect ??
       (() => Promise.resolve({ id: "claude-code", installed: true, version: "2.1.289", loggedIn: true })),
@@ -504,6 +505,11 @@ describe("ClaudeCodeRuntime — catalog() (no turn, D-08 … D-11)", () => {
     // Same locked-down options as a session.
     const o = q.params.options;
     expect(o.allowDangerouslySkipPermissions).toBe(false);
+    // Not plan: plan mode runs Haiku as Sonnet and the probe would read the wrong window (2.1.289).
+    expect(o.permissionMode).toBe("default");
+    await expect(
+      o.canUseTool?.("Read", { file_path: "a" }, { signal: signal() } as never),
+    ).resolves.toMatchObject({ behavior: "deny" });
     expect(o.settingSources).toEqual(["project"]);
     const perms = (o.settings as { permissions: { deny: string[]; disableBypassPermissionsMode: string } })
       .permissions;
@@ -514,7 +520,11 @@ describe("ClaudeCodeRuntime — catalog() (no turn, D-08 … D-11)", () => {
     expect(catalog?.runtimeVersion).toBe("2.1.289");
     expect(catalog?.permissionModes).toEqual(runtime.capabilities.supportsPermissionModes);
     const byId = new Map(catalog?.models.map((m) => [m.id, m]));
-    expect(byId.get("opus")).toMatchObject({ isDefault: true, contextWindows: [], defaultContextWindow: 1_000_000 });
+    expect(byId.get("opus")).toMatchObject({
+      isDefault: true,
+      contextWindows: [],
+      defaultContextWindow: 1_000_000,
+    });
     expect(byId.get("claude-opus-4-6")).toMatchObject({
       legacy: true,
       contextWindows: [200_000, 1_000_000],
@@ -544,7 +554,8 @@ describe("ClaudeCodeRuntime — catalog() (no turn, D-08 … D-11)", () => {
     await runtime.catalog();
     expect(queries).toHaveLength(1);
     const signedOut = setup({
-      detect: () => Promise.resolve({ id: "claude-code", installed: true, version: "2.1.289", loggedIn: false }),
+      detect: () =>
+        Promise.resolve({ id: "claude-code", installed: true, version: "2.1.289", loggedIn: false }),
     });
     await expect(signedOut.runtime.catalog()).resolves.toBeNull();
     expect(signedOut.queries).toHaveLength(0);

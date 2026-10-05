@@ -80,6 +80,14 @@ describe("buildClaudeCatalog — recorded initializationResult + context probe a
     }
   });
 
+  it("at 2.1.289 only Opus 4.6 offers both windows; Opus 5.5 is a fixed 1M and Haiku a fixed 200k", () => {
+    expect(catalog.models.filter((m) => m.contextWindows.length > 0).map((m) => m.id)).toEqual([
+      "claude-opus-4-6",
+    ]);
+    expect(byId.get("opus")).toMatchObject({ isDefault: true, defaultContextWindow: 1_000_000 });
+    expect(byId.get("haiku")).toMatchObject({ efforts: [], defaultContextWindow: 200_000 });
+  });
+
   it("fast mode and auto mode mirror the runtime flags; the cost note names paid usage credits (D-11)", () => {
     for (const m of catalog.models) {
       const info = raw.get(m.id);
@@ -107,6 +115,10 @@ describe("buildClaudeCatalog — hand-written edges", () => {
     expect(RuntimeCatalog.parse(catalog).models).toHaveLength(2);
     expect(catalog.models[0]).toMatchObject({ displayName: "X", isDefault: false, contextWindows: [] });
     expect(catalog.models[0]?.description).toHaveLength(500);
-    expect(catalog.models[1]).toMatchObject({ displayName: "y", description: null, defaultContextWindow: null });
+    expect(catalog.models[1]).toMatchObject({
+      displayName: "y",
+      description: null,
+      defaultContextWindow: null,
+    });
   });
 });

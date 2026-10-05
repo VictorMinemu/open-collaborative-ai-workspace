@@ -11,6 +11,7 @@
 
 import { randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import {
   type CanUseTool,
   type HookCallback,
@@ -26,12 +27,14 @@ import {
   minMode,
   PermissionMode,
   type PromptPayload,
+  type RuntimeCatalog,
   type RuntimeInfo,
   type SessionEvent,
   type SessionSettingsPatch,
   type WorkSessionStatus,
 } from "@ocw/contracts";
 import { AsyncQueue } from "../async-queue.js";
+import { ocwHome } from "../config.js";
 import { filterEnv, findExecutable } from "../exec-path.js";
 import { errorMessage, type Logger, silentLogger } from "../logger.js";
 import {
@@ -42,6 +45,7 @@ import {
   type StartSessionOptions,
 } from "../runtime.js";
 import { redact } from "../sanitize.js";
+import { collectClaudeCatalog } from "./catalog.js";
 import { detectClaudeCode } from "./detect.js";
 import { ClaudeEventMapper } from "./mapper.js";
 import { extractPaths, secretDenyReason, secretDenyRules, summarizeToolInput } from "./tool-policy.js";
@@ -95,7 +99,12 @@ export interface ClaudeCodeRuntimeOptions {
   useApiKey?: boolean;
   logger?: Logger;
   detect?: () => Promise<RuntimeInfo>;
+  /** Working directory of the throw-away catalog query. Default: the OCW home. */
+  catalogCwd?: string;
 }
+
+/** How long a collected catalog is reused (P-05: the daemon re-sends it on every handshake). */
+export const CATALOG_TTL_MS = 10 * 60 * 1000;
 
 type ApprovalOutcome = ApprovalDecision | "expired";
 
@@ -185,6 +194,8 @@ export class ClaudeCodeRuntime implements AgentRuntime {
   private readonly approvalTimeoutMs: number;
   private readonly log: Logger;
   private readonly claudePath: string | null;
+  private catalogCache: { at: number; value: RuntimeCatalog } | null = null;
+  private catalogInFlight: Promise<RuntimeCatalog | null> | null = null;
 
   constructor(private readonly opts: ClaudeCodeRuntimeOptions = {}) {
     this.queryFn = opts.queryFn ?? ((params) => sdkQuery(params));
@@ -199,6 +210,34 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       ...(this.claudePath ? { claudePath: this.claudePath } : {}),
       useApiKey: this.opts.useApiKey ?? false,
     });
+  }
+
+  /**
+   * The models, efforts, context windows and fast-mode support this login really has (D-08 … D-11), from one
+   * throw-away query that never sends a turn. Cached for 10 minutes; null when the CLI is missing or signed out.
+   */
+  async catalog(): Promise<RuntimeCatalog | null> {
+    if (this.catalogCache && Date.now() - this.catalogCache.at < CATALOG_TTL_MS)
+      return this.catalogCache.value;
+    if (this.catalogInFlight) return this.catalogInFlight;
+    this.catalogInFlight = (async () => {
+      const info = await this.detect();
+      if (!info.installed || !info.loggedIn) return null;
+      const cwd = this.opts.catalogCwd ?? ocwHome();
+      await mkdir(cwd, { recursive: true });
+      const value = await collectClaudeCatalog(this.queryFn, {
+        claudePath: this.claudePath,
+        env: childEnv(process.env, this.opts.useApiKey ?? false),
+        cwd,
+        runtimeVersion: info.version,
+        permissionModes: [...this.capabilities.supportsPermissionModes],
+      });
+      this.catalogCache = { at: Date.now(), value };
+      return value;
+    })().finally(() => {
+      this.catalogInFlight = null;
+    });
+    return this.catalogInFlight;
   }
 
   hasSession(sessionId: string): boolean {

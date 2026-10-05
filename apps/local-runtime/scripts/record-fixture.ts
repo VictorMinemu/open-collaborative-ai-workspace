@@ -16,7 +16,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type SDKMessage, query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import type { SessionEvent } from "@ocw/contracts";
-import { ClaudeCodeRuntime, type QueryHandle } from "../src/claude/claude-runtime.js";
+import { probeClaudeModels } from "../src/claude/catalog.js";
+import { ClaudeCodeRuntime, childEnv, type QueryFn, type QueryHandle } from "../src/claude/claude-runtime.js";
 import { findExecutable } from "../src/exec-path.js";
 import { sanitizeEvent } from "../src/sanitize.js";
 
@@ -213,13 +214,46 @@ async function recordTurn(scenario: "plan-read" | "settings"): Promise<void> {
   for (const ev of events) console.log(JSON.stringify(sanitizeEvent(ev, roots)).slice(0, 300));
 }
 
+/** `initializationResult().models` + the context-window probe, through the adapter's own code. NO turn. */
+async function recordCatalog(): Promise<void> {
+  const claude = requirePinnedCli();
+  const { real, roots } = await tempRepo(false);
+  const calls: string[] = [];
+  const queryFn: QueryFn = (params) => {
+    const q = sdkQuery(params);
+    return {
+      interrupt: () => q.interrupt(),
+      close: () => q.close(),
+      setModel: (model) => {
+        calls.push(`setModel(${JSON.stringify(model)})`);
+        return q.setModel(model);
+      },
+      setPermissionMode: () => Promise.reject(new Error("not used by the catalog probe")),
+      applyFlagSettings: () => Promise.reject(new Error("not used by the catalog probe")),
+      initializationResult: () => q.initializationResult(),
+      getContextUsage: (opts) => q.getContextUsage(opts),
+      [Symbol.asyncIterator]: () => q[Symbol.asyncIterator](),
+    };
+  };
+  const { models, contextWindows } = await probeClaudeModels(queryFn, {
+    claudePath: claude,
+    env: childEnv(process.env, false),
+    cwd: real,
+  });
+  await rm(real, { recursive: true, force: true });
+  const fixture = scrub({ cliVersion: PINNED_CLI, models, contextWindows }, roots);
+  await mkdir(outDir, { recursive: true });
+  const file = join(outDir, `claude-code-${PINNED_CLI}.catalog.json`);
+  await writeFile(file, `${JSON.stringify(fixture, null, 2)}\n`);
+  console.log(`wrote ${models.length} models -> ${file.replace(homedir(), "~")}`);
+  console.log(`control requests: ${calls.length} setModel probes (no user message)`);
+  console.log(JSON.stringify(contextWindows));
+}
+
 async function main(): Promise<void> {
   const scenario = scenarioArg(process.argv.slice(2));
-  if (scenario === "catalog") {
-    console.error("catalog scenario not implemented yet");
-    process.exit(1);
-  }
-  await recordTurn(scenario);
+  if (scenario === "catalog") await recordCatalog();
+  else await recordTurn(scenario);
 }
 
 main().catch((err: unknown) => {
