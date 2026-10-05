@@ -1,10 +1,47 @@
 "use client";
 
 import type { Agent } from "@ocw/contracts";
-import { Hash } from "lucide-react";
+import { Hash, MessageSquare } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
+import { Tooltip } from "@/components/ui/tooltip";
+import { errorMessage } from "@/lib/api";
+import { useOpenDm } from "@/lib/bots-queries";
 import { cn } from "@/lib/utils";
 import { BotAvatar, ModelChip, StatusChip } from "./bot-bits";
+
+/** A private chat is offered for live bots the caller may use (`bot.read`, decided per bot by the API). */
+export function canMessage(agent: Agent): boolean {
+  return (
+    (agent.status === "ready" || agent.status === "provisioning") &&
+    (agent.viewerCan?.includes("bot.read") ?? false)
+  );
+}
+
+/** Opens (or creates) the caller's private chat with `agent` and navigates to it (SC2). */
+export function MessageBotButton({ agent, className }: { agent: Agent; className?: string }) {
+  const router = useRouter();
+  const open = useOpenDm();
+  return (
+    <Button
+      size="sm"
+      data-testid="bot-message"
+      disabled={open.isPending}
+      onClick={() =>
+        open.mutate(agent.id, {
+          onSuccess: (res) => router.push(`/chat/dm/${res.dmId}`),
+          onError: (err) => toast.error("Could not open the chat", { description: errorMessage(err) }),
+        })
+      }
+      className={cn("relative z-10", className)}
+    >
+      {open.isPending ? <Spinner /> : <MessageSquare />}
+      Message
+    </Button>
+  );
+}
 
 export function BotCard({
   agent,
@@ -49,18 +86,22 @@ export function BotCard({
         {agent.description || agent.instructions}
       </p>
 
-      <div className="mt-4 flex items-center justify-between gap-2">
-        <ModelChip provider={agent.modelProvider} modelId={agent.modelId} className="min-w-0" />
-        <Button
-          variant={agent.status === "ready" ? "secondary" : "ghost"}
-          size="sm"
-          onClick={onAddToChannel}
-          disabled={agent.status === "disabled"}
-          data-testid="add-to-channel"
-          className="relative z-10 shrink-0"
-        >
-          <Hash /> Add to channel
-        </Button>
+      <div className="mt-4 flex items-center gap-2">
+        <ModelChip provider={agent.modelProvider} modelId={agent.modelId} className="mr-auto min-w-0" />
+        <Tooltip content="Add to channel">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={onAddToChannel}
+            disabled={agent.status === "disabled"}
+            aria-label="Add to channel"
+            data-testid="add-to-channel"
+            className="relative z-10"
+          >
+            <Hash />
+          </Button>
+        </Tooltip>
+        {canMessage(agent) ? <MessageBotButton agent={agent} /> : null}
       </div>
     </article>
   );

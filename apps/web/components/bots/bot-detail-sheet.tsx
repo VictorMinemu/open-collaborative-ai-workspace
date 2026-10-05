@@ -14,6 +14,7 @@ import { validate } from "@/lib/form";
 import { useCan } from "@/lib/permissions";
 import { formatDate } from "@/lib/utils";
 import { BotAvatar, ModelChip, StatusChip } from "./bot-bits";
+import { canMessage, MessageBotButton } from "./bot-card";
 import {
   BotForm,
   type BotFormErrors,
@@ -155,6 +156,7 @@ export function BotDetailSheet({
               <StatusChip status={agent.status} message={agent.statusMessage} />
               <ModelChip provider={agent.modelProvider} modelId={agent.modelId} />
             </div>
+            {canMessage(agent) ? <MessageBotButton agent={agent} className="mt-3" /> : null}
           </div>
         </div>
 

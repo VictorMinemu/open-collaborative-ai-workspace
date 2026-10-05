@@ -1,4 +1,9 @@
-import { type CreatePersonalBotRequest, type CreatePersonalBotResponse, EventTypes } from "@ocw/contracts";
+import {
+  type AllowedModel,
+  type CreatePersonalBotRequest,
+  type CreatePersonalBotResponse,
+  EventTypes,
+} from "@ocw/contracts";
 import { agents, botPolicies, orgMembers, type Tx, tenantOf } from "@ocw/db";
 import { and, eq, isNull, like, or, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
@@ -11,6 +16,20 @@ import { allowedModels, notifyCell, publishAgent, toAgentDto } from "./service";
 
 /** D-01: personal bots per member when the organization has no `bot_policies` row. */
 export const DEFAULT_MAX_PERSONAL_BOTS = 3;
+
+type PolicyRow = typeof botPolicies.$inferSelect;
+
+/**
+ * Models a personal bot may use: the organization's allowed models narrowed by
+ * `bot_policies.personal_allowed_models` (empty or no policy row = every allowed model).
+ */
+export async function personalModels(core: Core, tx: Tx, policy?: PolicyRow | null): Promise<AllowedModel[]> {
+  const row = policy === undefined ? ((await tx.select().from(botPolicies).limit(1))[0] ?? null) : policy;
+  const personalAllowed = row?.personalAllowedModels ?? [];
+  return (await allowedModels(core, tx)).filter(
+    (m) => personalAllowed.length === 0 || personalAllowed.includes(`${m.provider}/${m.modelId}`),
+  );
+}
 
 function firstName(displayName: string): string {
   return displayName.trim().split(/\s+/u)[0] || "My";
@@ -35,7 +54,7 @@ export async function createPersonalBot(
   // Serialise concurrent creates of the same member so the cap cannot be raced.
   await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`ocw:personal-bots:${auth.userId}`}))`);
 
-  const [policy] = await tx.select().from(botPolicies).limit(1);
+  const [policy = null] = await tx.select().from(botPolicies).limit(1);
   const max = policy?.maxPersonalBotsPerUser ?? DEFAULT_MAX_PERSONAL_BOTS;
   const [{ n } = { n: 0 }] = await tx
     .select({ n: sql<number>`count(*)::int` })
@@ -51,10 +70,7 @@ export async function createPersonalBot(
   }
 
   // Model: the requested one when the organization allows it for personal bots, else the default.
-  const personalAllowed = policy?.personalAllowedModels ?? [];
-  const models = (await allowedModels(core, tx)).filter(
-    (m) => personalAllowed.length === 0 || personalAllowed.includes(`${m.provider}/${m.modelId}`),
-  );
+  const models = await personalModels(core, tx, policy);
   let model = models.find((m) => m.isDefault) ?? models[0];
   if (body.modelProvider || body.modelId) {
     const wanted = models.find((m) => m.provider === body.modelProvider && m.modelId === body.modelId);

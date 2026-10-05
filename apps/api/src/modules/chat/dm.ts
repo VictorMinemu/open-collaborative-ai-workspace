@@ -1,6 +1,6 @@
 import { type DmSummary, EventTypes } from "@ocw/contracts";
 import { agents, conversationMembers, conversations, type Tx, tenantOf } from "@ocw/db";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { type ChatDeps, type ConversationRow, iso, notifyListChanged } from "./service";
 
@@ -93,6 +93,36 @@ export async function dmAgentOf(tx: Tx, convId: string): Promise<string | null> 
     )
     .limit(1);
   return row?.id ?? null;
+}
+
+/**
+ * D-04: disabling or deleting a bot archives every DM with it (posting then answers 410 `channel_archived`
+ * and the chat leaves each member's sidebar); re-enabling restores them. Runs in the caller's transaction and
+ * tells each human member through `user:<id>` (DMs never reach the org topic). Returns how many changed.
+ */
+export async function setAgentDmsArchived(
+  tx: Tx,
+  deps: ChatDeps,
+  agentId: string,
+  archived: boolean,
+): Promise<number> {
+  const withBot = tx
+    .select({ id: conversationMembers.conversationId })
+    .from(conversationMembers)
+    .where(and(eq(conversationMembers.memberKind, "agent"), eq(conversationMembers.memberId, agentId)));
+  const rows = await tx
+    .update(conversations)
+    .set({ archivedAt: archived ? sql`now()` : null })
+    .where(
+      and(
+        eq(conversations.kind, "dm"),
+        inArray(conversations.id, withBot),
+        archived ? isNull(conversations.archivedAt) : isNotNull(conversations.archivedAt),
+      ),
+    )
+    .returning();
+  for (const conv of rows) await notifyListChanged(tx, deps, conv, EventTypes.conversationUpdated);
+  return rows.length;
 }
 
 /**

@@ -64,7 +64,7 @@ import {
 } from "./service";
 import { registerChatTestRoutes } from "./test-routes";
 
-export { dmAgentOf, dmKey, ensureDm, listDms } from "./dm";
+export { dmAgentOf, dmKey, ensureDm, listDms, setAgentDmsArchived } from "./dm";
 export { resolveMentions } from "./mentions";
 
 /** Conversation kinds served by the message routes, read markers, the `conv:` topic and bot replies (D-03). */
