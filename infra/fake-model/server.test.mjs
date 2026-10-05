@@ -51,11 +51,29 @@ describe("planToolStep (OpenClaw message layout)", () => {
     assert.deepEqual(step?.call?.name, "web_search");
   });
 
-  it("never steps back over an assistant message (no re-run of an earlier turn's directive)", () => {
+  it("after the tool result OpenClaw appends the context again: the turn completes from the result", () => {
+    const step = planToolStep(
+      [
+        { role: "user", content: '@archie [[call web_search {"query":"ocw smoke"}]]' },
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ id: "c1", type: "function", function: { name: "web_search", arguments: "{}" } }],
+        },
+        { role: "tool", tool_call_id: "c1", content: '{"results":[{"title":"OCW smoke result"}]}' },
+        { role: "user", content: ctx },
+      ],
+      offered,
+    );
+    assert.ok(step?.reply, "expected a final reply once the directive has a result");
+  });
+
+  it("an earlier turn's directive is never re-run when the newest human message has none", () => {
     const step = planToolStep(
       [
         { role: "user", content: '[[call web_search {"query":"old"}]]' },
         { role: "assistant", content: "done" },
+        { role: "user", content: "thanks!" },
         { role: "user", content: ctx },
       ],
       offered,

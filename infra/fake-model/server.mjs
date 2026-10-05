@@ -222,13 +222,15 @@ export function planToolStep(messages, offered) {
   // OpenClaw sends the human's text and its internal context block as consecutive user messages (the context
   // last). Use the newest user message that still has text once the context block is stripped, but never step
   // back over an assistant/tool message: that would re-run directives from an earlier turn.
+  // The turn's human message is the newest user message with text once the context block is stripped; any later
+  // user messages are context-only (OpenClaw appends its context after tool results too). Directives only ever
+  // come from that one message, so an earlier turn's directives are never re-run.
+  const isContextOnly = (m) => m.role === "user" && !userBody(contentText(m.content)).trim();
   let bodyIdx = lastUserIdx;
-  while (
-    bodyIdx > 0 &&
-    !userBody(contentText(messages[bodyIdx].content)).trim() &&
-    messages[bodyIdx - 1].role === "user"
-  ) {
-    bodyIdx--;
+  while (bodyIdx > 0 && isContextOnly(messages[bodyIdx])) {
+    const prev = messages.slice(0, bodyIdx).findLastIndex((m) => m.role === "user");
+    if (prev === -1) break;
+    bodyIdx = prev;
   }
   const directives = parseDirectives(userBody(contentText(messages[bodyIdx].content)));
   if (process.env.FAKE_MODEL_DEBUG === "1" && offered?.length) {
@@ -242,7 +244,7 @@ export function planToolStep(messages, offered) {
     );
   }
   if (directives.length === 0) return null;
-  const after = messages.slice(lastUserIdx + 1);
+  const after = messages.slice(bodyIdx + 1).filter((m) => !isContextOnly(m));
   const calls = after.flatMap((m) =>
     m.role === "assistant" && Array.isArray(m.tool_calls) ? m.tool_calls : [],
   );
