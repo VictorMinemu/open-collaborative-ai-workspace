@@ -13,7 +13,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AsyncQueue } from "../async-queue.js";
 import { RuntimeError, type StartSessionOptions } from "../runtime.js";
 import { ClaudeCodeRuntime, childEnv, type QueryHandle } from "./claude-runtime.js";
-import { commandTouchesSecrets, isSecretPath, secretDenyReason } from "./tool-policy.js";
+import { commandTouchesSecrets, isSecretPath, secretDenyReason, secretDenyRules } from "./tool-policy.js";
 
 /** Every control request a fake query received, in order, across the whole suite (T-03.2-02-01 assertion). */
 const ALL_FLAG_SETTINGS: unknown[] = [];
@@ -104,6 +104,7 @@ function setup(
     claudePath?: string;
     prepare?: (q: FakeQuery) => void;
     detect?: () => Promise<RuntimeInfo>;
+    allowFullAccess?: () => boolean;
   } = {},
 ) {
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ocw-claude-rt-")));
@@ -123,6 +124,7 @@ function setup(
       (() => Promise.resolve({ id: "claude-code", installed: true, version: "2.1.289", loggedIn: true })),
     ...(extra.approvalTimeoutMs ? { approvalTimeoutMs: extra.approvalTimeoutMs } : {}),
     ...(extra.useApiKey !== undefined ? { useApiKey: extra.useApiKey } : {}),
+    ...(extra.allowFullAccess ? { allowFullAccess: extra.allowFullAccess } : {}),
   });
   let session: FakeQuery | null = null;
   const start = async (
@@ -195,7 +197,7 @@ describe("ClaudeCodeRuntime — SDK options (security + billing)", () => {
 
   it("rejects bypassPermissions and other non-allowed modes", async () => {
     const { runtime, cwd } = setup();
-    // `fullAccess` is a platform mode, but outside this adapter's capabilities until Plan 06.
+    // `fullAccess` is a platform mode, outside this adapter's capabilities while the device gate is closed.
     for (const mode of ["bypassPermissions", "dontAsk", "fullAccess"]) {
       await expect(
         runtime.start(
@@ -671,6 +673,147 @@ describe("ClaudeCodeRuntime — per-turn mode cap (P-07)", () => {
       promptId: "p1",
       isError: true,
     });
+    expect(events.some((e) => e.type === "session.error")).toBe(true);
+  });
+});
+
+type Perms = { deny?: string[]; disableBypassPermissionsMode?: string };
+const perms = (q: FakeQuery) => (q.params.options.settings as { permissions: Perms }).permissions;
+const init = (permissionMode: string, session_id = "rt-1") => ({
+  type: "system",
+  subtype: "init",
+  permissionMode,
+  session_id,
+  model: "claude-opus-5-5",
+});
+
+describe("ClaudeCodeRuntime — Full access through ADR-0012 only (D-01, D-03, D-04, P-11)", () => {
+  it("an authorized fullAccess start runs bypassPermissions with the secret deny rules and hooks kept", async () => {
+    const { start } = setup({ allowFullAccess: () => true });
+    const q = await start("fullAccess");
+    const o = q.params.options;
+    expect(o.permissionMode).toBe("bypassPermissions");
+    expect(o.allowDangerouslySkipPermissions).toBe(true);
+    expect(perms(q).deny).toEqual(secretDenyRules());
+    expect(perms(q).disableBypassPermissionsMode).toBeUndefined();
+    expect(o.hooks?.PreToolUse?.[0]?.hooks).toHaveLength(1);
+    expect(typeof o.canUseTool).toBe("function");
+    expect(o.settingSources).toEqual(["project"]);
+  });
+
+  it("refuses fullAccess when the device gate is closed", async () => {
+    const { runtime, cwd, queries } = setup({ allowFullAccess: () => false });
+    expect(runtime.capabilities.supportsPermissionModes).not.toContain("fullAccess");
+    await expect(
+      runtime.start({ sessionId: "s1", cwd, permissionMode: "fullAccess" }, () => undefined),
+    ).rejects.toMatchObject({ code: "permission_mode_rejected" });
+    expect(queries).toHaveLength(0);
+  });
+
+  it("with the gate open, any other mode still starts locked down (no bypass availability)", async () => {
+    const { start, runtime } = setup({ allowFullAccess: () => true });
+    expect(runtime.capabilities.supportsPermissionModes).toContain("fullAccess");
+    const q = await start("acceptEdits");
+    expect(q.params.options.allowDangerouslySkipPermissions).toBe(false);
+    expect(perms(q).disableBypassPermissionsMode).toBe("disable");
+  });
+
+  it("entering fullAccess relaunches between turns with resume and the bypass options", async () => {
+    const { start, runtime, events, queries } = setup({ allowFullAccess: () => true });
+    const first = await start("acceptEdits", { model: "sonnet" });
+    first.emit(init("acceptEdits"));
+    await settle();
+    await runtime.configure("s1", { effort: "high" });
+    await runtime.configure("s1", { permissionMode: "fullAccess" });
+    expect(first.closed).toBe(true);
+    expect(queries).toHaveLength(2);
+    const second = queries[1] as FakeQuery;
+    expect(second.params.options).toMatchObject({
+      resume: "rt-1",
+      model: "sonnet",
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+    });
+    expect(perms(second).deny).toEqual(secretDenyRules());
+    // The effort set on the first process is carried over (scalar flag settings only).
+    expect(second.methodCalls("applyFlagSettings")).toEqual([{ effortLevel: "high" }]);
+    expect(events.some((e) => e.type === "session.state" && e.status === "completed")).toBe(false);
+    expect(events.some((e) => e.type === "session.error")).toBe(false);
+    expect(settingsEvents(events).at(-1)).toMatchObject({ permissionMode: "fullAccess" });
+    await runtime.prompt("s1", { promptId: "p1", text: "go" });
+    await settle();
+    expect(first.prompts).toHaveLength(0);
+    expect(second.prompts.map((p) => p.message.content)).toEqual(["go"]);
+    // The authorized bypass init is accepted (not an abort).
+    second.emit(init("bypassPermissions"));
+    await settle();
+    expect(second.closed).toBe(false);
+    expect(events.some((e) => e.type === "session.error")).toBe(false);
+  });
+
+  it("leaving fullAccess relaunches again without bypass", async () => {
+    const { start, runtime, queries } = setup({ allowFullAccess: () => true });
+    const first = await start("fullAccess");
+    first.emit(init("bypassPermissions"));
+    await settle();
+    await runtime.configure("s1", { permissionMode: "acceptEdits" });
+    expect(first.closed).toBe(true);
+    const second = queries[1] as FakeQuery;
+    expect(second.params.options).toMatchObject({
+      resume: "rt-1",
+      permissionMode: "acceptEdits",
+      allowDangerouslySkipPermissions: false,
+    });
+    expect(perms(second).disableBypassPermissionsMode).toBe("disable");
+  });
+
+  it("a prompt capped below fullAccess relaunches to the capped mode before that turn, and back after", async () => {
+    const { start, runtime, queries } = setup({ allowFullAccess: () => true });
+    const first = await start("fullAccess");
+    first.emit(init("bypassPermissions"));
+    await settle();
+    await runtime.prompt("s1", { promptId: "p1", text: "capped", permissionMode: "acceptEdits" });
+    await settle();
+    expect(first.closed).toBe(true);
+    const capped = queries[1] as FakeQuery;
+    expect(capped.params.options).toMatchObject({
+      permissionMode: "acceptEdits",
+      allowDangerouslySkipPermissions: false,
+    });
+    expect(capped.prompts.map((p) => p.message.content)).toEqual(["capped"]);
+    capped.emit(result());
+    await settle();
+    await runtime.prompt("s1", { promptId: "p2", text: "full" });
+    await settle();
+    const full = queries[2] as FakeQuery;
+    expect(full.params.options).toMatchObject({
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+    });
+    expect(full.prompts.map((p) => p.message.content)).toEqual(["full"]);
+  });
+
+  it("a fullAccess turn after the gate closed fails without pushing anything", async () => {
+    let allowed = true;
+    const { start, runtime, events, queries } = setup({ allowFullAccess: () => allowed });
+    const q = await start("fullAccess");
+    allowed = false;
+    await runtime.prompt("s1", { promptId: "p1", text: "go" });
+    await settle();
+    expect(queries.flatMap((x) => x.prompts)).toEqual([]);
+    expect(q.prompts).toEqual([]);
+    expect(events.find((e) => e.type === "prompt.completed")).toMatchObject({
+      promptId: "p1",
+      isError: true,
+    });
+  });
+
+  it("an init reporting bypassPermissions in an authorized session that is NOT in fullAccess still aborts", async () => {
+    const { start, events } = setup({ allowFullAccess: () => true });
+    const q = await start("acceptEdits");
+    q.emit(init("bypassPermissions"));
+    await settle();
+    expect(q.closed).toBe(true);
     expect(events.some((e) => e.type === "session.error")).toBe(true);
   });
 });

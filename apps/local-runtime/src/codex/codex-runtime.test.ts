@@ -184,12 +184,13 @@ afterEach(() => {
   process.env = { ...saved };
 });
 
-function setup() {
+function setup(opts: { allowFullAccess?: () => boolean } = {}) {
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ocw-codex-rt-")));
   const servers: FakeAppServer[] = [];
   const events: SessionEvent[] = [];
   const runtime = new CodexRuntime({
     codexPath: "/usr/local/bin/codex",
+    ...(opts.allowFullAccess ? { allowFullAccess: opts.allowFullAccess } : {}),
     spawnAppServer: ({ env }) => {
       const s = new FakeAppServer(env);
       servers.push(s);
@@ -1039,4 +1040,96 @@ describe("CodexRuntime — unrestricted readback guard (D-03 groundwork)", () =>
       expect(settingsEvents(events).at(-1)).toMatchObject({ permissionMode: "fullAccess" });
     });
   }
+});
+
+describe("CodexRuntime — Full access through ADR-0012 only (D-01, D-03, P-11)", () => {
+  const FULL = { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } };
+
+  it("an authorized fullAccess start asks for danger-full-access + never and accepts that report", async () => {
+    const { start, events } = setup({ allowFullAccess: () => true });
+    const server = await start("fullAccess");
+    expect(server.received[2]?.params).toMatchObject({
+      approvalPolicy: "never",
+      sandbox: "danger-full-access",
+    });
+    expect(events.some((e) => e.type === "session.error")).toBe(false);
+    expect(settingsEvents(events).at(-1)).toMatchObject({ permissionMode: "fullAccess" });
+  });
+
+  it("refuses fullAccess when the device gate is closed, before spawning anything", async () => {
+    const { runtime, cwd, servers } = setup({ allowFullAccess: () => false });
+    expect(runtime.capabilities.supportsPermissionModes).not.toContain("fullAccess");
+    await expect(
+      runtime.start({ sessionId: "s1", cwd, permissionMode: "fullAccess" }, () => undefined),
+    ).rejects.toMatchObject({ code: "permission_mode_rejected" });
+    expect(servers).toHaveLength(0);
+  });
+
+  it("a non-fullAccess start still fails closed on an unrestricted report, even with the gate open", async () => {
+    const { cwd } = setup();
+    const r = new CodexRuntime({
+      allowFullAccess: () => true,
+      spawnAppServer: ({ env }) => {
+        const s = new FakeAppServer(env);
+        s.sandboxType = "dangerFullAccess";
+        return s;
+      },
+    });
+    await expect(
+      r.start({ sessionId: "s3", cwd, permissionMode: "acceptEdits" }, () => undefined),
+    ).rejects.toMatchObject({ code: "permission_mode_rejected" });
+  });
+
+  it("each fullAccess turn sends never + dangerFullAccess; a capped turn sends its own policy", async () => {
+    const { start, runtime } = setup({ allowFullAccess: () => true });
+    const server = await start("acceptEdits");
+    await runtime.configure("s1", { permissionMode: "fullAccess" });
+    await runtime.prompt("s1", { promptId: "p1", text: "full", permissionMode: "fullAccess" });
+    await wait(10);
+    expect(turnStarts(server)[0]?.params).toMatchObject(FULL);
+    server.completeTurn();
+    await wait(10);
+    await runtime.prompt("s1", { promptId: "p2", text: "capped", permissionMode: "acceptEdits" });
+    await wait(10);
+    expect(turnStarts(server)[1]?.params).toMatchObject({
+      approvalPolicy: "on-request",
+      sandboxPolicy: { type: "workspaceWrite" },
+    });
+  });
+
+  it("an unrestricted readback during an authorized fullAccess turn is not aborted", async () => {
+    const { start, runtime, events } = setup({ allowFullAccess: () => true });
+    const server = await start("fullAccess");
+    await runtime.prompt("s1", { promptId: "p1", text: "go" });
+    await wait(10);
+    server.sendSettings(FULL);
+    await wait(20);
+    expect(server.received.some((m) => m.method === "turn/interrupt")).toBe(false);
+    expect(events.some((e) => e.type === "session.error")).toBe(false);
+  });
+
+  it("the same readback during a capped (non-fullAccess) turn of a fullAccess session aborts the turn", async () => {
+    const { start, runtime, events } = setup({ allowFullAccess: () => true });
+    const server = await start("fullAccess");
+    await runtime.prompt("s1", { promptId: "p1", text: "go", permissionMode: "acceptEdits" });
+    await wait(10);
+    server.sendSettings(FULL);
+    await wait(20);
+    expect(server.received.some((m) => m.method === "turn/interrupt")).toBe(true);
+    expect(events.some((e) => e.type === "session.error")).toBe(true);
+  });
+
+  it("a fullAccess turn after the gate closed fails without a turn/start", async () => {
+    let allowed = true;
+    const { start, runtime, events } = setup({ allowFullAccess: () => allowed });
+    const server = await start("fullAccess");
+    allowed = false;
+    await runtime.prompt("s1", { promptId: "p1", text: "go" });
+    await wait(10);
+    expect(turnStarts(server)).toHaveLength(0);
+    expect(events.find((e) => e.type === "prompt.completed")).toMatchObject({
+      promptId: "p1",
+      isError: true,
+    });
+  });
 });

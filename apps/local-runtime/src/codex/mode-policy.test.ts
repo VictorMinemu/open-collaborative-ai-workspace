@@ -58,7 +58,7 @@ describe("codexModePolicy — the platform mode → Codex sandbox / approvals ta
     expect(supervised.approvalPolicy).not.toBe(acceptEdits.approvalPolicy);
   });
 
-  it("never yields a full-access sandbox or the never policy (Plan 06 owns that path)", () => {
+  it("no mode but fullAccess yields a full-access sandbox or the never policy", () => {
     for (const mode of CODEX_POLICY_MODES) {
       const p = codexModePolicy(mode, CWD);
       expect(p.sandbox).not.toBe("danger-full-access");
@@ -66,7 +66,18 @@ describe("codexModePolicy — the platform mode → Codex sandbox / approvals ta
       expect(p.approvalPolicy).not.toBe("never");
       expect(isUnrestrictedCodexPolicy(p)).toBe(false);
     }
-    expect(() => codexModePolicy("fullAccess" as never, CWD)).toThrow();
+  });
+
+  it("fullAccess (ADR-0012 path only): danger-full-access sandbox, never asks, user reviewer", () => {
+    const p = codexModePolicy("fullAccess", CWD);
+    expect(p).toEqual({
+      sandbox: "danger-full-access",
+      sandboxPolicy: { type: "dangerFullAccess" },
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+    });
+    expect(isUnrestrictedCodexPolicy(p)).toBe(true);
+    expect(codexModeFromSettings(p.approvalPolicy, p.sandboxPolicy, p.approvalsReviewer)).toBe("fullAccess");
   });
 });
 
