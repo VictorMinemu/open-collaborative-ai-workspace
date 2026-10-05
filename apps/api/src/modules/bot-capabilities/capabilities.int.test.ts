@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
-import { findBot, governanceList } from "./index";
+import { createPermissionService } from "../organization";
+import { currentTurnTools, findBot, governanceList } from "./index";
 
 /**
  * 03.1-03 (BOT-04, BOT-05, BOT-10, SC4): bot capabilities, the org policy and personal-bot governance through
@@ -413,5 +414,191 @@ describe("personal-bot governance", () => {
     const ctxA = { organizationId: orgId, userId: samId };
     expect((await db.withTenant(ctxA, (tx) => findBot(tx, samBotId)))?.id).toBe(samBotId);
     expect(await db.withTenant(ctxA, (tx) => governanceList(tx))).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------- Task 3: the turn travels with every delivery
+
+const mentionsFor = async (agentId: string) =>
+  (
+    await su.query(
+      "select payload from app.stream_events where stream_id = $1 and type = 'agent.mention.v1' and payload->'agent'->>'id' = $2 order by seq",
+      [`cell:${orgId}`, agentId],
+    )
+  ).rows.map((r) => r.payload as Json);
+
+async function lastMention(agentId: string, messageId: string) {
+  const ev = (await mentionsFor(agentId)).at(-1);
+  expect(ev?.message.id).toBe(messageId);
+  return ev as Json;
+}
+
+const say = async (c: TestClient, conversationId: string, body: string, mentions: Json[] = []) =>
+  (await ok(c.request("POST", `/api/v1/conversations/${conversationId}/messages`, { body, mentions })))
+    .id as string;
+
+async function cellSnapshot(): Promise<Json> {
+  const res = await fetch(`${stack.baseUrl}/agent-channel/v1/cell`, {
+    headers: { authorization: `Bearer ${CELL_TOKEN}` },
+  });
+  expect(res.status).toBe(200);
+  return (await res.json()) as Json;
+}
+
+describe("per-turn policy (D-07, SC4)", () => {
+  let channelId: string;
+  const WEB_FLAGS = { untrustedOutput: true, sideEffecting: false };
+
+  it("Sam's DM message carries the effective turn and an agent_turns row in the same transaction", async () => {
+    await ok(sam.request("PATCH", `/api/v1/agents/${samBotId}/capabilities`, { tools: [] }));
+    const messageId = await say(sam, samDmId, "What's new today?");
+    const ev = await lastMention(samBotId, messageId);
+    expect(ev.turn).toMatchObject({
+      tools: ["web_search", "web_fetch", "ocw_memory_save"],
+      toolFlags: {
+        web_search: WEB_FLAGS,
+        web_fetch: WEB_FLAGS,
+        ocw_memory_save: { untrustedOutput: false, sideEffecting: true },
+      },
+      memory: [],
+      maxToolCalls: 8,
+      maxWebCalls: 5,
+    });
+    expect(ev.turn.now.timeZone).toBe("UTC");
+    expect(Math.abs(Date.parse(ev.turn.now.iso) - Date.now())).toBeLessThan(60_000);
+    expect(ev.turn.now.local).toMatch(/\d{4}/);
+
+    const row = (await su.query("select * from app.agent_turns where event_id = $1", [ev.eventId])).rows[0];
+    expect(row).toMatchObject({
+      organization_id: orgId,
+      agent_id: samBotId,
+      user_id: samId,
+      conversation_id: samDmId,
+      conversation_kind: "dm",
+      message_id: messageId,
+      tools: ["web_search", "web_fetch", "ocw_memory_save"],
+      tool_calls: 0,
+      web_calls: 0,
+      tainted: false,
+    });
+    expect(row.tool_flags).toEqual(ev.turn.toolFlags);
+  });
+
+  it("currentTurnTools returns the same set as the event for an unchanged state", async () => {
+    const { core } = stack.built;
+    const ev = (await mentionsFor(samBotId)).at(-1) as Json;
+    const now = await core.db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
+      currentTurnTools(
+        tx,
+        createPermissionService(core),
+        { agentId: samBotId, humanUserId: samId, conversationKind: "dm" },
+        core.env,
+      ),
+    );
+    expect(now).toEqual({ tools: ev.turn.tools, toolFlags: ev.turn.toolFlags });
+  });
+
+  it("denying internet to personal bots bites on the very next DM message, before any cell reconcile", async () => {
+    await ok(
+      admin.request("PUT", "/api/v1/bot-policy", {
+        capabilities: { internet: { orgWide: true, personal: false } },
+      }),
+    );
+    try {
+      const messageId = await say(sam, samDmId, "And now?");
+      const ev = await lastMention(samBotId, messageId);
+      expect(ev.turn.tools).toEqual(["ocw_memory_save"]);
+      expect(Object.keys(ev.turn.toolFlags)).toEqual(["ocw_memory_save"]);
+    } finally {
+      await ok(
+        admin.request("PUT", "/api/v1/bot-policy", {
+          capabilities: { internet: { orgWide: true, personal: true } },
+        }),
+      );
+    }
+  });
+
+  it("dateTime off → the turn carries no time", async () => {
+    await ok(sam.request("PATCH", `/api/v1/agents/${samBotId}/capabilities`, { dateTime: false }));
+    try {
+      const messageId = await say(sam, samDmId, "What time is it?");
+      expect((await lastMention(samBotId, messageId)).turn.now).toBeNull();
+    } finally {
+      await ok(sam.request("PATCH", `/api/v1/agents/${samBotId}/capabilities`, { dateTime: true }));
+    }
+  });
+
+  it("a team bot in a channel never gets memory; a deny rule removes the web tools for that human only", async () => {
+    await ok(admin.request("PATCH", `/api/v1/agents/${teamBotId}/capabilities`, { memory: true }));
+    channelId = (await ok(admin.request("POST", "/api/v1/channels", { name: "research" }))).id;
+    await ok(sam.request("POST", `/api/v1/channels/${channelId}/join`));
+    const mention = [{ kind: "agent", id: teamBotId }];
+
+    const fromAdmin = await say(admin, channelId, "@archie what changed?", mention);
+    const evAdmin = await lastMention(teamBotId, fromAdmin);
+    expect(evAdmin.turn.tools).toEqual(["web_search", "web_fetch"]);
+    expect(evAdmin.conversation.kind).toBe("channel");
+
+    const drop = await rule("deny", "user", samId, "bot.internet");
+    try {
+      const fromSam = await say(sam, channelId, "@archie and for me?", mention);
+      const evSam = await lastMention(teamBotId, fromSam);
+      expect(evSam.turn.tools).toEqual([]);
+      const row = (
+        await su.query("select tools, user_id from app.agent_turns where event_id = $1", [evSam.eventId])
+      ).rows[0];
+      expect(row).toEqual({ tools: [], user_id: samId });
+
+      const again = await say(admin, channelId, "@archie still there?", mention);
+      expect((await lastMention(teamBotId, again)).turn.tools).toEqual(["web_search", "web_fetch"]);
+    } finally {
+      await drop();
+    }
+  });
+
+  it("granted catalog tools ride in the turn with their flags; a tool-layer deny removes only that tool", async () => {
+    await ok(
+      sam.request("PATCH", `/api/v1/agents/${samBotId}/capabilities`, {
+        tools: [{ sourceKind: "mcp", sourceId: mcpId, tool: `${SAFE}__echo` }],
+      }),
+    );
+    const messageId = await say(sam, samDmId, "Echo please");
+    const ev = await lastMention(samBotId, messageId);
+    expect(ev.turn.tools).toEqual(["web_search", "web_fetch", "ocw_memory_save", `${SAFE}__echo`]);
+    expect(ev.turn.toolFlags[`${SAFE}__echo`]).toEqual({ untrustedOutput: true, sideEffecting: false });
+
+    const drop = await rule("deny", "user", samId, "bot.tool.use", `${SAFE}__echo`);
+    try {
+      const denied = await say(sam, samDmId, "Echo again");
+      expect((await lastMention(samBotId, denied)).turn.tools).toEqual([
+        "web_search",
+        "web_fetch",
+        "ocw_memory_save",
+      ]);
+    } finally {
+      await drop();
+    }
+  });
+
+  it("GET /cell lists each bot's possible tools (ignoring per-human rules) and the search provider", async () => {
+    const quiet = await ok(
+      admin.request("POST", "/api/v1/agents", {
+        name: "Quiet",
+        instructions: "You are quiet.",
+        modelProvider: "mock",
+        modelId: "mock-1",
+      }),
+    );
+    const drop = await rule("deny", "user", samId, "bot.internet");
+    try {
+      const snap = await cellSnapshot();
+      expect(snap.webSearch).toEqual({ provider: "duckduckgo" });
+      const byId = new Map((snap.agents as Json[]).map((a) => [a.id, a.capabilities.tools]));
+      expect(byId.get(samBotId)).toEqual(["web_search", "web_fetch", "ocw_memory_save", `${SAFE}__echo`]);
+      expect(byId.get(teamBotId)).toEqual(["web_search", "web_fetch", "ocw_memory_save"]);
+      expect(byId.get(quiet.id)).toEqual([]);
+    } finally {
+      await drop();
+    }
   });
 });

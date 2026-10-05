@@ -9,8 +9,21 @@ export {
   readCapabilities,
 } from "./capabilities";
 export { loadAllGrants, loadCatalog, loadGrants, replaceGrants } from "./catalog";
-export { availableSearchProviders, internetConfigured, loadPolicy, savePolicy } from "./policy";
+export {
+  availableSearchProviders,
+  internetConfigured,
+  loadPolicy,
+  type SearchEnv,
+  savePolicy,
+} from "./policy";
 export { findBot, governanceList, notifyCellConfig, usageToday } from "./routes";
+export {
+  cellAgentCapabilities,
+  currentTurnTools,
+  type TurnDecision,
+  turnNow,
+  turnPolicy,
+} from "./turn-policy";
 
 /**
  * bot-capabilities module (Phase 3.1, D-06 … D-08; BOT-04, BOT-05, BOT-10): the capability model of every

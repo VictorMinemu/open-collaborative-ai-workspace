@@ -17,6 +17,8 @@ import { badRequest } from "../../lib/errors";
  */
 
 type PolicyRow = typeof botPolicies.$inferSelect;
+/** The only configuration the capability model reads. */
+export type SearchEnv = Pick<Env, "OCW_SEARXNG_URL" | "OCW_BUNDLED_PLUGINS">;
 
 function fromRow(row: PolicyRow | undefined): BotPolicy {
   if (!row) return { ...structuredClone(DEFAULT_BOT_POLICY), updatedAt: null };
@@ -43,7 +45,7 @@ export async function loadPolicy(tx: Tx): Promise<BotPolicy> {
 }
 
 /** Search providers the cell can run right now: bundled in the image or installed from the marketplace. */
-export async function availableSearchProviders(tx: Tx, env: Env): Promise<Set<SearchProvider>> {
+export async function availableSearchProviders(tx: Tx, env: SearchEnv): Promise<Set<SearchProvider>> {
   const out = new Set<SearchProvider>();
   const bundled = new Set(env.OCW_BUNDLED_PLUGINS);
   const installed = await tx
@@ -61,7 +63,7 @@ export async function availableSearchProviders(tx: Tx, env: Env): Promise<Set<Se
 }
 
 /** Internet is `configured` when the policy's search provider is available in the cell. */
-export async function internetConfigured(tx: Tx, env: Env, policy: BotPolicy): Promise<boolean> {
+export async function internetConfigured(tx: Tx, env: SearchEnv, policy: BotPolicy): Promise<boolean> {
   return (await availableSearchProviders(tx, env)).has(policy.searchProvider);
 }
 
@@ -88,7 +90,7 @@ function changedKeys(before: BotPolicy, after: BotPolicy): string[] {
  */
 export async function savePolicy(
   tx: Tx,
-  env: Env,
+  env: SearchEnv,
   patch: UpdateBotPolicyRequest,
   actorUserId: string | null,
 ): Promise<{ policy: BotPolicy; changed: string[] }> {
