@@ -13,6 +13,7 @@ import {
   type WorkSession,
   type WorkSessionChanges,
   type WorkSessionStatus,
+  type WorkZonePolicy,
 } from "@ocw/contracts";
 import {
   deviceCommands,
@@ -29,9 +30,25 @@ import { and, asc, count, desc, eq, inArray, min, type SQL, sql } from "drizzle-
 import type { FastifyBaseLogger } from "fastify";
 import type { AuditService } from "../audit";
 import type { DeviceCommandRow, DeviceHub, DeviceRef, DeviceSessionHandler } from "../device";
-import { memberDirectory } from "../organization";
+import { memberDirectory, type PermissionService } from "../organization";
 import type { RealtimeService } from "../realtime";
-import { requestedSettings } from "./controls";
+import { loadControlsContext } from "./context";
+import {
+  buildRuntimeControls,
+  clampToControls,
+  highestAvailableMode,
+  pickSettings,
+  requestedSettings,
+  storedSettings,
+  turnMode,
+} from "./controls";
+import { loadWorkZonePolicy } from "./policy";
+
+/** Why live sessions are re-checked (ADR-0012): a policy change, a member's access change, a device opt-out. */
+export type ReauthorizeReason = "policy" | "access_changed" | "device_opt_out";
+
+const UNAUTHORIZED_MODE_ERROR =
+  "The device reported Full access without authorization; the session was stopped";
 
 export type SessionRow = typeof workSessions.$inferSelect;
 type PromptRow = typeof workPrompts.$inferSelect;
@@ -58,6 +75,8 @@ export interface WorkSessionDeps {
   audit: AuditService;
   hub: DeviceHub;
   log: FastifyBaseLogger;
+  /** The resolver: the per-turn author cap includes the author's `device.full_access` grain (P-07). */
+  perms: PermissionService;
 }
 
 /**
@@ -274,29 +293,290 @@ export class WorkSessionService implements DeviceSessionHandler {
       .where(and(eq(workPrompts.workSessionId, s.id), inArray(workPrompts.status, IN_FLIGHT)))
       .limit(1);
     if (inflight.length > 0) return null;
-    const [next] = await tx
-      .select()
-      .from(workPrompts)
-      .where(and(eq(workPrompts.workSessionId, s.id), eq(workPrompts.status, "queued")))
-      .orderBy(asc(workPrompts.position), asc(workPrompts.createdAt))
-      .limit(1);
-    if (!next) return null;
-    // P-07: the turn's authorized mode (Plan 04 caps it by the prompt author's grain on the device).
-    const mode = s.permissionMode;
-    const [dispatched] = await tx
+    let policy: WorkZonePolicy | undefined;
+    for (;;) {
+      const [next] = await tx
+        .select()
+        .from(workPrompts)
+        .where(and(eq(workPrompts.workSessionId, s.id), eq(workPrompts.status, "queued")))
+        .orderBy(asc(workPrompts.position), asc(workPrompts.createdAt))
+        .limit(1);
+      if (!next) return null;
+      // P-07: re-checked on every turn: min(session mode, the author's cap = org policy ∩ device opt-in ∩ the
+      // author's device cap (floor for unlisted controllers, nothing for revoked ones) ∩ grain ∩ catalog).
+      policy ??= await loadWorkZonePolicy(tx);
+      const author = await loadControlsContext(tx, this.deps.perms, {
+        deviceId: s.deviceId,
+        runtime: s.runtime,
+        userId: next.authorUserId,
+        inSession: true,
+        policy,
+      });
+      const cap = author ? highestAvailableMode(author.ctx, s.model, s.permissionMode) : null;
+      const mode = turnMode(s.permissionMode, cap);
+      if (mode === null) {
+        await this.refusePrompt(tx, s, next, author?.revoked === true && author.cap === null);
+        continue;
+      }
+      const [dispatched] = await tx
+        .update(workPrompts)
+        .set({ status: "dispatched", dispatchedAt: sql`now()`, permissionMode: mode })
+        .where(eq(workPrompts.id, next.id))
+        .returning();
+      await this.deps.hub.enqueue(tx, {
+        deviceId: s.deviceId,
+        workSessionId: s.id,
+        kind: "prompt",
+        payload: { promptId: next.id, text: next.body, permissionMode: mode },
+      });
+      // D-04: every turn's effective mode is audited (actor = the prompt's author, device, session, org).
+      await this.deps.audit.record(tx, {
+        action: "work_prompt.dispatched",
+        resourceType: "work_prompt",
+        resourceId: next.id,
+        userId: next.authorUserId,
+        deviceId: s.deviceId,
+        sessionId: s.id,
+        metadata: {
+          promptId: next.id,
+          authorUserId: next.authorUserId,
+          requestedMode: s.permissionMode,
+          effectiveMode: mode,
+          capped: mode !== s.permissionMode,
+          ...(mode === "fullAccess" ? { fullAccess: true } : {}),
+        },
+      });
+      await this.emitPrompt(tx, dispatched!);
+      await this.setStatus(tx, s, "running");
+      return dispatched!;
+    }
+  }
+
+  /** A turn its author may not run (P-07): failed, audited, never sent; the arbiter moves to the next prompt. */
+  private async refusePrompt(tx: Tx, s: SessionRow, p: PromptRow, revoked: boolean): Promise<void> {
+    const [row] = await tx
       .update(workPrompts)
-      .set({ status: "dispatched", dispatchedAt: sql`now()`, permissionMode: mode })
-      .where(eq(workPrompts.id, next.id))
+      .set({ status: "failed", completedAt: sql`now()` })
+      .where(eq(workPrompts.id, p.id))
       .returning();
+    await this.deps.audit.record(tx, {
+      action: "work_prompt.refused",
+      resourceType: "work_prompt",
+      resourceId: p.id,
+      userId: p.authorUserId,
+      deviceId: s.deviceId,
+      sessionId: s.id,
+      result: "denied",
+      metadata: {
+        promptId: p.id,
+        authorUserId: p.authorUserId,
+        requestedMode: s.permissionMode,
+        reason: revoked ? "access_revoked" : "mode_not_allowed",
+      },
+    });
+    if (row) await this.emitPrompt(tx, row);
+  }
+
+  // ------------------------------------------------------------------ reauthorization (ADR-0012)
+
+  /**
+   * Re-check one LOCKED active session against its creator's current access (ADR-0012): a creator with no access
+   * of their own to the device any more has the session stopped; otherwise the requested settings are lowered to
+   * what the creator may pick now (policy ∩ opt-in ∩ cap ∩ grain ∩ catalog ∩ inventory) and the device is told
+   * (`session.configure`); a Full access turn in flight is interrupted when Full access is left.
+   */
+  async reauthorize(
+    tx: Tx,
+    s: SessionRow,
+    reason: ReauthorizeReason,
+    policy?: WorkZonePolicy,
+  ): Promise<void> {
+    if (!ACTIVE_STATES.includes(s.status)) return;
+    const creator = await loadControlsContext(tx, this.deps.perms, {
+      deviceId: s.deviceId,
+      runtime: s.runtime,
+      userId: s.createdBy,
+      inSession: false,
+      ...(policy ? { policy } : {}),
+    });
+    if (!creator) return;
+    if (creator.cap === null) {
+      const [d] = await tx.select({ name: devices.name }).from(devices).where(eq(devices.id, s.deviceId));
+      const message = `Access to ${d?.name ?? "the device"} was revoked`;
+      await this.deps.hub.enqueue(tx, {
+        deviceId: s.deviceId,
+        workSessionId: s.id,
+        kind: "session.stop",
+        payload: {},
+      });
+      await this.failInFlight(tx, s, message);
+      await this.deps.audit.record(tx, {
+        action: "work_session.access_revoked",
+        resourceType: "work_session",
+        resourceId: s.id,
+        deviceId: s.deviceId,
+        sessionId: s.id,
+        result: "denied",
+        metadata: { reason, createdBy: s.createdBy, revoked: creator.revoked },
+      });
+      await this.setStatus(tx, s, "failed", { lastError: message });
+      return;
+    }
+    const current = requestedSettings(s);
+    const { next, changed } = clampToControls(current, buildRuntimeControls(s.runtime, creator.ctx, s.model));
+    if (changed.length === 0) return;
+    const from = current.permissionMode;
+    const to = next.permissionMode ?? from;
+    await tx
+      .update(workSessions)
+      .set({
+        model: next.model ?? null,
+        permissionMode: to,
+        settings: storedSettings(next),
+        settingsPending: true,
+        updatedAt: sql`now()`,
+      })
+      .where(eq(workSessions.id, s.id));
+    s.model = next.model ?? null;
+    s.permissionMode = to;
     await this.deps.hub.enqueue(tx, {
       deviceId: s.deviceId,
       workSessionId: s.id,
-      kind: "prompt",
-      payload: { promptId: next.id, text: next.body, permissionMode: mode },
+      kind: "session.configure",
+      payload: { settings: pickSettings(next, changed), reason },
     });
-    await this.emitPrompt(tx, dispatched!);
-    await this.setStatus(tx, s, "running");
-    return dispatched!;
+    await this.deps.audit.record(tx, {
+      action: "work_session.settings_downgraded",
+      resourceType: "work_session",
+      resourceId: s.id,
+      deviceId: s.deviceId,
+      sessionId: s.id,
+      metadata: { reason, changed, from: pickSettings(current, changed), to: pickSettings(next, changed) },
+    });
+    if (from === "fullAccess" && to !== "fullAccess") {
+      await this.deps.audit.record(tx, {
+        action: "work_session.full_access_left",
+        resourceType: "work_session",
+        resourceId: s.id,
+        deviceId: s.deviceId,
+        sessionId: s.id,
+        metadata: { from, to, source: reason },
+      });
+      const fullTurn = await tx
+        .select({ id: workPrompts.id })
+        .from(workPrompts)
+        .where(
+          and(
+            eq(workPrompts.workSessionId, s.id),
+            inArray(workPrompts.status, IN_FLIGHT),
+            eq(workPrompts.permissionMode, "fullAccess"),
+          ),
+        )
+        .limit(1);
+      if (fullTurn.length > 0) {
+        await this.deps.hub.enqueue(tx, {
+          deviceId: s.deviceId,
+          workSessionId: s.id,
+          kind: "interrupt",
+          payload: {},
+        });
+      }
+    }
+    await this.emitSession(tx, s.id);
+  }
+
+  /** Every active session of the transaction's organization (RLS), e.g. after a Work Zone policy change. */
+  async reauthorizeOrg(tx: Tx, reason: ReauthorizeReason): Promise<void> {
+    const policy = await loadWorkZonePolicy(tx);
+    const rows = await tx
+      .select({ id: workSessions.id })
+      .from(workSessions)
+      .where(inArray(workSessions.status, ACTIVE_STATES))
+      .orderBy(asc(workSessions.id));
+    for (const { id } of rows) {
+      const s = await this.lock(tx, id);
+      if (s) await this.reauthorize(tx, s, reason, policy);
+    }
+  }
+
+  /** `DeviceSessionHandler`: a member's access to the device or its opt-in changed. */
+  async onAccessChanged(
+    device: { deviceId: string; organizationId: string },
+    reason: ReauthorizeReason,
+  ): Promise<void> {
+    await this.deps.db.withTenant({ organizationId: device.organizationId, userId: null }, async (tx) => {
+      const policy = await loadWorkZonePolicy(tx);
+      const rows = await tx
+        .select({ id: workSessions.id })
+        .from(workSessions)
+        .where(and(eq(workSessions.deviceId, device.deviceId), inArray(workSessions.status, ACTIVE_STATES)))
+        .orderBy(asc(workSessions.id));
+      for (const { id } of rows) {
+        const s = await this.lock(tx, id);
+        if (s && s.deviceId === device.deviceId) await this.reauthorize(tx, s, reason, policy);
+      }
+    });
+  }
+
+  /**
+   * D-03 (server side): Full access — or a runtime bypass literal — reported while neither the session nor the turn
+   * in flight is authorized for it. True when the report is authorized (or not a Full access report).
+   */
+  private async fullAccessReportAllowed(
+    tx: Tx,
+    s: SessionRow,
+    reported: string | undefined,
+  ): Promise<boolean> {
+    if (!isFullAccessReport(reported)) return true;
+    if (s.permissionMode === "fullAccess") return true;
+    const turn = await tx
+      .select({ id: workPrompts.id })
+      .from(workPrompts)
+      .where(
+        and(
+          eq(workPrompts.workSessionId, s.id),
+          inArray(workPrompts.status, IN_FLIGHT),
+          eq(workPrompts.permissionMode, "fullAccess"),
+        ),
+      )
+      .limit(1);
+    return turn.length > 0;
+  }
+
+  /** D-03: interrupt, stop, fail and audit; the reported value is never stored as effective. */
+  private async failUnauthorizedMode(
+    tx: Tx,
+    device: DeviceRef,
+    s: SessionRow,
+    reported: string,
+    via: "session.settings" | "session.started",
+  ): Promise<void> {
+    await this.deps.hub.enqueue(tx, {
+      deviceId: s.deviceId,
+      workSessionId: s.id,
+      kind: "interrupt",
+      payload: {},
+    });
+    await this.deps.hub.enqueue(tx, {
+      deviceId: s.deviceId,
+      workSessionId: s.id,
+      kind: "session.stop",
+      payload: {},
+    });
+    await this.failInFlight(tx, s, UNAUTHORIZED_MODE_ERROR);
+    await this.deps.audit.record(tx, {
+      action: "work_session.unauthorized_mode",
+      resourceType: "work_session",
+      resourceId: s.id,
+      actorKind: "device",
+      actorId: device.deviceId,
+      deviceId: device.deviceId,
+      sessionId: s.id,
+      userId: null,
+      result: "denied",
+      metadata: { reported, authorizedMode: s.permissionMode, via },
+    });
+    await this.setStatus(tx, s, "failed", { lastError: UNAUTHORIZED_MODE_ERROR });
   }
 
   private async failInFlight(tx: Tx, s: SessionRow, reason: string): Promise<void> {
@@ -556,6 +836,10 @@ export class WorkSessionService implements DeviceSessionHandler {
   private async apply(tx: Tx, device: DeviceRef, s: SessionRow, ev: SessionEvent): Promise<void> {
     switch (ev.type) {
       case "session.started": {
+        if (!(await this.fullAccessReportAllowed(tx, s, ev.permissionMode))) {
+          await this.failUnauthorizedMode(tx, device, s, ev.permissionMode!, "session.started");
+          return;
+        }
         if (ev.runtimeSessionId && ev.runtimeSessionId !== s.runtimeSessionId) {
           await tx
             .update(workSessions)
@@ -574,6 +858,10 @@ export class WorkSessionService implements DeviceSessionHandler {
       }
       case "session.settings": {
         const { type: _type, ...reported } = ev;
+        if (!(await this.fullAccessReportAllowed(tx, s, reported.permissionMode))) {
+          await this.failUnauthorizedMode(tx, device, s, reported.permissionMode!, "session.settings");
+          return;
+        }
         await this.storeEffective(tx, s, reported, true);
         return;
       }

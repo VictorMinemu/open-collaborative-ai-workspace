@@ -938,7 +938,7 @@ describe("authorization coverage", () => {
 
   it("every device, project and Work Zone answer went through the resolver", () => {
     const undecided = stack.built.authz.undecided.filter((u) =>
-      /^\/api\/v1\/(devices|projects|work-sessions)/.test(u.url),
+      /^\/api\/v1\/(devices|projects|work-sessions|work-zone)/.test(u.url),
     );
     expect(undecided).toEqual([]);
   });

@@ -21,7 +21,16 @@ import { MISSING_REASON, precondition, RELATION_PERMISSIONS } from "./policy";
  * are loaded by facts.ts and composed per request by service.ts; this file only decides.
  */
 
-export type Relation = "self" | "owner" | "member" | "creator" | "device_owner" | "grantee" | "inviter";
+export type Relation =
+  | "self"
+  | "owner"
+  | "member"
+  | "creator"
+  | "device_owner"
+  | "grantee"
+  /** Devices: a member whose cap on the device is Full access (ADR-0012, P-06). */
+  | "full_access_grantee"
+  | "inviter";
 export type ResourceState =
   | "private"
   | "archived"

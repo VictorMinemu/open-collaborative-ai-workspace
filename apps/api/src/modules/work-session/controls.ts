@@ -3,7 +3,9 @@ import {
   type ControlOption,
   DEFERRED_EFFORTS,
   effortRank,
+  isExposed,
   type ModelControl,
+  minMode,
   modeWithin,
   PERMISSION_MODE_RANK,
   PermissionMode,
@@ -20,10 +22,13 @@ import {
 } from "@ocw/contracts";
 
 /**
- * Work Zone session controls (PURE, Phase 03.2, D-07 … D-12, P-03, P-08). Everything a controller may pick is
- * the intersection of the runtime-reported catalog (D-08: never a hard-coded list) ∩ org policy ∩ device opt-in
- * ∩ the caller's cap on the device ∩ grain. The routes load a `ControlsContext`; Plan 04 replaces the loader
- * (policy, opt-in, grain) without changing these signatures.
+ * Work Zone session controls (PURE, Phase 03.2, D-07 … D-12, P-03, P-07, P-08). Everything a controller may
+ * pick is the intersection of the runtime-reported catalog (D-08: never a hard-coded list) ∩ org policy ∩ device
+ * opt-in ∩ the caller's cap on the device ∩ grain ∩ the runtime controls inventory (WZC-06). `context.ts` loads a
+ * `ControlsContext` for a member on a device; routes and the dispatcher only decide through these functions.
+ *
+ * Reason precedence (the upper layer wins, principle 6): `org_policy` → `device_opt_in` → `device_grant` →
+ * `denied_for_you` → `runtime` / `not_in_catalog` → `not_confirmed` (an inventory row that is not exposed).
  */
 
 export interface ControlsContext {
@@ -38,6 +43,19 @@ export interface ControlsContext {
   modeCap: PermissionMode | null;
   /** The caller holds `device.full_access` on the device. */
   fullAccessGrain: boolean;
+  /**
+   * The inventory confirms the option (`mode.<mode>`, `effort`, `context.window`, `fast.mode`); defaults to
+   * `isExposed(<runtime>, uiKey)`. Nothing the inventory has not confirmed is ever offered (WZC-06, P-09).
+   */
+  exposed?: (uiKey: string) => boolean;
+}
+
+/** P-07: the upper bound of the floor for in-session controllers with no relation to the device. */
+export const CONTROLLER_FLOOR: PermissionMode = "acceptEdits";
+
+/** The inventory check of a context for `runtime`. */
+function exposedFor(ctx: ControlsContext, runtime: RuntimeId): (uiKey: string) => boolean {
+  return ctx.exposed ?? ((uiKey) => isExposed(runtime, uiKey));
 }
 
 /**
@@ -73,6 +91,9 @@ function modelControl(m: RuntimeModel, runtime: RuntimeId, ctx: ControlsContext)
   const allowed = ctx.policy.allowedModels[runtime];
   const base = allowed.length === 0 || allowed.includes(m.id) ? OK : no("org_policy");
   const maxEffort = ctx.policy.maxEffort[runtime];
+  const exposed = exposedFor(ctx, runtime);
+  const confirmed = (uiKey: string, option: ControlOption): ControlOption =>
+    option.available && !exposed(uiKey) ? no("not_confirmed") : option;
   return {
     ...base,
     id: m.id,
@@ -82,22 +103,22 @@ function modelControl(m: RuntimeModel, runtime: RuntimeId, ctx: ControlsContext)
     isDefault: m.isDefault,
     badge: m.badge,
     efforts: m.efforts.map((e) => ({
-      ...(DEFERRED_EFFORTS.includes(e.value)
-        ? no("not_confirmed", "Deferred to the multi-agent phase")
-        : maxEffort !== null && effortRank(e.value) > effortRank(maxEffort)
-          ? no("org_policy")
-          : OK),
+      ...(maxEffort !== null && effortRank(e.value) > effortRank(maxEffort)
+        ? no("org_policy")
+        : DEFERRED_EFFORTS.includes(e.value)
+          ? no("not_confirmed", "Deferred to the multi-agent phase")
+          : confirmed("effort", OK)),
       value: e.value,
       description: e.description,
     })),
     defaultEffort: m.defaultEffort,
-    contextWindows: m.contextWindows.map((value) => ({ ...OK, value })),
+    contextWindows: m.contextWindows.map((value) => ({ ...confirmed("context.window", OK), value })),
     defaultContextWindow: m.defaultContextWindow,
     fastMode: {
       ...(!ctx.policy.allowFastMode
         ? no("org_policy")
         : m.fastMode.supported
-          ? OK
+          ? confirmed("fast.mode", OK)
           : no("runtime", m.fastMode.reason)),
       supported: m.fastMode.supported,
     },
@@ -109,19 +130,22 @@ function modeControl(
   mode: PermissionMode,
   ctx: ControlsContext,
   model: RuntimeModel | null,
+  runtime: RuntimeId,
 ): PermissionModeControl {
   const runtimeModes = ctx.catalog?.permissionModes ?? LEGACY_PERMISSION_MODES;
   const full = mode === "fullAccess";
   let option: ControlOption;
-  // The organization's restriction is reported first: it wins over every lower layer (principle 6).
+  // The organization's restriction is reported first: it wins over every lower layer (principle 6); then the
+  // device (its owner's opt-in, the caller's cap), the caller's grain, the runtime, and the inventory last.
   if (full ? !ctx.policy.allowFullAccess : !ctx.policy.allowedPermissionModes.includes(mode))
     option = no("org_policy");
-  else if (!runtimeModes.includes(mode)) option = no("runtime");
-  else if (mode === "auto" && model && !model.supportsAutoMode)
-    option = no("runtime", `${model.displayName} does not support Auto`);
   else if (full && !ctx.deviceOptIn) option = no("device_opt_in");
   else if (!modeWithin(mode, ctx.modeCap)) option = no("device_grant");
   else if (full && !ctx.fullAccessGrain) option = no("denied_for_you");
+  else if (!runtimeModes.includes(mode)) option = no("runtime");
+  else if (mode === "auto" && model && !model.supportsAutoMode)
+    option = no("runtime", `${model.displayName} does not support Auto`);
+  else if (!exposedFor(ctx, runtime)(`mode.${mode}`)) option = no("not_confirmed");
   else option = OK;
   return { ...option, value: mode };
 }
@@ -155,7 +179,7 @@ export function buildRuntimeControls(
       })),
     permissionModes: [...PermissionMode.options]
       .sort((a, b) => PERMISSION_MODE_RANK[a] - PERMISSION_MODE_RANK[b])
-      .map((mode) => modeControl(mode, scoped, current)),
+      .map((mode) => modeControl(mode, scoped, current, runtime)),
     fastModeCost: catalog?.fastModeCost ?? null,
   };
 }
@@ -210,6 +234,7 @@ export function decideSettings(
       if (value === null) continue;
       const w = model?.contextWindows.find((x) => x.value === value);
       if (!w) return { ok: false, field: key, reason: "not_in_catalog" };
+      if (!w.available) return { ok: false, field: key, reason: w.reason ?? "runtime" };
     } else if (key === "fastMode") {
       if (value === false) continue;
       if (!model) return { ok: false, field: key, reason: "not_in_catalog" };
@@ -274,4 +299,114 @@ export function pickSettings(s: SessionSettingsPatch, keys: readonly string[]): 
   const out: Record<string, unknown> = {};
   for (const k of keys) out[k] = (s as Record<string, unknown>)[k] ?? (k === "fastMode" ? false : null);
   return out as SessionSettingsPatch;
+}
+
+// ---------------------------------------------------------------- per-turn mode and downgrades (P-07)
+
+/**
+ * The cap of a member on a device for the mode decision. A current cap (owner, everyone-share, grant) is the cap;
+ * otherwise a member named by a revoked grant gets nothing (refused, never the floor); otherwise, inside an
+ * existing session, the pre-03.2 multiplayer right at min(CONTROLLER_FLOOR, the device's floor); outside a
+ * session (a new session, the New session dialog) nothing.
+ */
+export function authorModeCap(
+  a: { cap: PermissionMode | null; revoked: boolean; floor: PermissionMode },
+  inSession: boolean,
+): PermissionMode | null {
+  if (a.cap !== null) return a.cap;
+  if (a.revoked || !inSession) return null;
+  return minMode(CONTROLLER_FLOOR, a.floor);
+}
+
+/**
+ * The highest mode the context allows (for `model`, since Auto is model-bound), at or below `ceiling` when given.
+ * Walking down the ladder skips every mode the intersection refuses, so a non-contiguous policy never yields a
+ * mode it left out. null = no mode at all.
+ */
+export function highestAvailableMode(
+  ctx: ControlsContext,
+  model?: string | null,
+  ceiling?: PermissionMode,
+): PermissionMode | null {
+  const runtime = ctx.catalog?.runtime;
+  const current = effectiveModel(ctx.catalog, model);
+  const ladder = [...PermissionMode.options].sort(
+    (a, b) => PERMISSION_MODE_RANK[b] - PERMISSION_MODE_RANK[a],
+  );
+  for (const mode of ladder) {
+    if (ceiling !== undefined && PERMISSION_MODE_RANK[mode] > PERMISSION_MODE_RANK[ceiling]) continue;
+    const option = runtime
+      ? modeControl(mode, ctx, current, runtime)
+      : // No catalog (older daemon): legacy modes, judged against the Claude Code inventory rows they share.
+        modeControl(mode, ctx, null, "claude-code");
+    if (option.available) return mode;
+  }
+  return null;
+}
+
+/** The mode a turn runs in: min(session mode, the author's cap); null refuses the turn (P-07). */
+export function turnMode(
+  sessionMode: PermissionMode,
+  authorCap: PermissionMode | null,
+): PermissionMode | null {
+  return authorCap === null ? null : minMode(sessionMode, authorCap);
+}
+
+/**
+ * Lower a requested settings value to what `controls` (built for the session's model) allow: the mode to the
+ * highest available mode at or below it (never raised: when none is below it stays, and every turn is refused at
+ * dispatch until a controller picks an allowed mode), the model to the catalog
+ * default when it is no longer available, and effort / context window / fast mode back to the runtime default
+ * when unavailable. Used when a policy, an opt-in or a member's access tightens (ADR-0012).
+ */
+export function clampToControls(
+  requested: SessionSettingsPatch,
+  controls: RuntimeControls,
+): { next: SessionSettingsPatch; changed: string[] } {
+  const next: SessionSettingsPatch = { ...requested };
+  const changed: string[] = [];
+
+  if (next.model) {
+    const m = controls.models.find((x) => x.id === next.model);
+    if (m && !m.available) {
+      const fallback =
+        controls.models.find((x) => x.isDefault && x.available) ?? controls.models.find((x) => x.available);
+      next.model = fallback?.id ?? null;
+      changed.push("model");
+    }
+  }
+  const model =
+    controls.models.find((x) => x.id === next.model) ?? controls.models.find((x) => x.isDefault) ?? null;
+  if (next.effort) {
+    const e = model?.efforts.find((x) => x.value === next.effort);
+    if (model && !e?.available) {
+      next.effort = null;
+      changed.push("effort");
+    }
+  }
+  if (next.contextWindow) {
+    const w = model?.contextWindows.find((x) => x.value === next.contextWindow);
+    if (model && !w?.available) {
+      next.contextWindow = null;
+      changed.push("contextWindow");
+    }
+  }
+  if (next.fastMode && model && !model.fastMode.available) {
+    next.fastMode = false;
+    changed.push("fastMode");
+  }
+  if (next.permissionMode) {
+    const requestedMode = next.permissionMode;
+    const available = controls.permissionModes.filter((m) => m.available).map((m) => m.value);
+    if (!available.includes(requestedMode)) {
+      const target = available
+        .filter((m) => PERMISSION_MODE_RANK[m] < PERMISSION_MODE_RANK[requestedMode])
+        .sort((a, b) => PERMISSION_MODE_RANK[b] - PERMISSION_MODE_RANK[a])[0];
+      if (target) {
+        next.permissionMode = target;
+        changed.push("permissionMode");
+      }
+    }
+  }
+  return { next, changed };
 }
