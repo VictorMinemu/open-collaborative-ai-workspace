@@ -579,10 +579,16 @@ describe("ClaudeCodeRuntime â€” effort, fast mode, context window, modes (D-09 â
 
   it("start-time effort / fast mode are applied before the first turn", async () => {
     const { start, runtime } = setup();
-    const q = await start("default", { effort: "low", fastMode: false });
+    const q = await start("default", { effort: "low", fastMode: true });
     await runtime.prompt("s1", { promptId: "p1", text: "one" });
     await settle();
-    expect(q.log).toEqual(['applyFlagSettings:{"effortLevel":"low","fastMode":false}', "prompt:one"]);
+    expect(q.log).toEqual(['applyFlagSettings:{"effortLevel":"low","fastMode":true}', "prompt:one"]);
+    // fastMode false at start is the default: no control request.
+    const other = setup();
+    const q2 = await other.start("default", { fastMode: false });
+    await other.runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await settle();
+    expect(q2.log).toEqual(["prompt:one"]);
   });
 
   it("the context window re-selects the model with or without [1m] where the catalog offers both", async () => {

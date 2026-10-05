@@ -1,8 +1,11 @@
 // Claude Code runtime adapter (Claude Agent SDK, streaming-input mode).
 //
 // Security invariants (AGENTS.md):
-// - never `bypassPermissions`: only default | acceptEdits | plan are accepted, and the CLI is
+// - never `bypassPermissions`: only default | acceptEdits | plan | auto are accepted, and the CLI is
 //   started with `disableBypassPermissionsMode` and without `allowDangerouslySkipPermissions`;
+// - settings change between turns only (setModel / setPermissionMode / applyFlagSettings with scalar keys,
+//   never `permissions`); each turn runs at min(configured mode, the prompt's cap) (P-07);
+// - settings / unknown slash commands are refused before they can reach the CLI (D-13 backstop);
 // - secret paths are denied three times over: settings deny rules, a PreToolUse hook and canUseTool;
 // - user/local Claude settings are not loaded, so personal allow-rules cannot skip cloud approvals;
 // - OCW_* variables (device token) are stripped from the Claude Code process environment;
@@ -31,6 +34,7 @@ import {
   type RuntimeInfo,
   type SessionEvent,
   type SessionSettingsPatch,
+  slashDisposition,
   type WorkSessionStatus,
 } from "@ocw/contracts";
 import { AsyncQueue } from "../async-queue.js";
@@ -45,7 +49,7 @@ import {
   type StartSessionOptions,
 } from "../runtime.js";
 import { redact } from "../sanitize.js";
-import { collectClaudeCatalog } from "./catalog.js";
+import { collectClaudeCatalog, ONE_M_CONTEXT, runtimeModelId } from "./catalog.js";
 import { detectClaudeCode } from "./detect.js";
 import { ClaudeEventMapper } from "./mapper.js";
 import { extractPaths, secretDenyReason, secretDenyRules, summarizeToolInput } from "./tool-policy.js";
@@ -299,7 +303,8 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     // Start-time effort / fast mode / context window go through the same between-turn path (first turn).
     const initial: SessionSettingsPatch = {};
     if (options.effort !== undefined) initial.effort = options.effort;
-    if (options.fastMode !== undefined) initial.fastMode = options.fastMode;
+    // Fast mode is off unless asked for (no control request for the default).
+    if (options.fastMode === true) initial.fastMode = true;
     if (options.contextWindow !== undefined) initial.contextWindow = options.contextWindow;
     if (Object.keys(initial).length > 0) session.pending = initial;
 
@@ -334,6 +339,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
 
   async prompt(sessionId: string, prompt: PromptPayload): Promise<void> {
     const s = this.get(sessionId);
+    refuseSlashCommand(prompt.text);
     if (s.stopping) throw new RuntimeError("session is stopping", "invalid_state");
     if (s.running) {
       s.queue.push(prompt);
@@ -440,8 +446,32 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     this.emit(s, { type: "prompt.started", promptId: prompt.promptId });
     this.emit(s, { type: "session.state", status: "running" });
     // Held settings first: a failure is reported and dropped, the turn still runs with the previous values.
-    await this.serially(s, () => this.applyPending(s, false));
+    // Then the turn's mode = min(configured, the author's cap) (P-07): if it cannot be set, the turn fails
+    // instead of running at a higher mode.
+    const capped = await this.serially(s, async () => {
+      await this.applyPending(s, false);
+      try {
+        await this.syncMode(s, prompt.permissionMode);
+        return true;
+      } catch (err) {
+        this.emit(s, {
+          type: "session.error",
+          message: `Permission mode could not be set for this turn: ${redact(errorMessage(err)).slice(0, 300)}`,
+        });
+        return false;
+      }
+    });
     if (s.stopping || s.input.isClosed) return; // finish() / stop() completes the prompt
+    if (!capped) {
+      this.emit(s, {
+        type: "prompt.completed",
+        promptId: prompt.promptId,
+        usage: { inputTokens: 0, outputTokens: 0 },
+        isError: true,
+      });
+      await this.onTurnComplete(s);
+      return;
+    }
     s.mapper.currentPromptId = prompt.promptId;
     s.input.push(toUserMessage(prompt));
   }
@@ -485,7 +515,8 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       const target = await this.resolveModel(model, window, patch.contextWindow !== undefined);
       await q.setModel(target.runtimeModel);
       s.configured.model = s.applied.model = model;
-      s.configured.contextWindow = s.applied.contextWindow = target.contextWindow;
+      s.configured.contextWindow = target.requested;
+      s.applied.contextWindow = target.reported;
     }
     const flags: { effortLevel?: SdkEffortLevel | null; fastMode?: boolean } = {};
     if (patch.effort !== undefined) flags.effortLevel = patch.effort as SdkEffortLevel | null;
@@ -510,15 +541,45 @@ export class ClaudeCodeRuntime implements AgentRuntime {
   }
 
   /**
-   * Model id for `setModel` and the resulting context window. Context windows are resolved in Task 3; here the
-   * catalog id goes through unchanged (null = the runtime default).
+   * The model id for `setModel` and the window it gives (D-10). A window is selected by re-selecting the model with
+   * or without `[1m]`, only where the catalog lists both values; a model's fixed window is accepted as a no-op
+   * choice; anything else is `settings_rejected`. `requested` is what the platform asked for (null = default),
+   * `reported` the window the runtime will run (from the catalog; null when unknown).
    */
   private async resolveModel(
     model: string | null,
     contextWindow: number | null,
-    _windowRequested: boolean,
-  ): Promise<{ runtimeModel: string | undefined; contextWindow: number | null }> {
-    return { runtimeModel: model ?? undefined, contextWindow };
+    windowRequested: boolean,
+  ): Promise<{ runtimeModel: string | undefined; requested: number | null; reported: number | null }> {
+    const catalog = windowRequested ? await this.catalog().catch(() => null) : this.cachedCatalog();
+    const id = model ?? catalog?.models.find((m) => m.isDefault)?.id ?? null;
+    const entry = id ? catalog?.models.find((m) => m.id === id) : undefined;
+    const selectable = entry !== undefined && entry.contextWindows.length > 1;
+    if (windowRequested && contextWindow !== null) {
+      const fixed = entry?.defaultContextWindow === contextWindow;
+      if (!fixed && !(selectable && entry.contextWindows.includes(contextWindow))) {
+        throw new RuntimeError(
+          `context window ${contextWindow} is not offered for ${id ?? "the default model"}`,
+          "settings_rejected",
+        );
+      }
+    }
+    // A window kept across a model change only where the new model offers it too.
+    const requested =
+      selectable && contextWindow !== null && entry.contextWindows.includes(contextWindow)
+        ? contextWindow
+        : null;
+    const oneM = requested === ONE_M_CONTEXT;
+    return {
+      runtimeModel:
+        id && (model !== null || oneM) ? runtimeModelId(id, oneM ? ONE_M_CONTEXT : null) : undefined,
+      requested: windowRequested ? contextWindow : requested,
+      reported: requested ?? entry?.defaultContextWindow ?? null,
+    };
+  }
+
+  private cachedCatalog(): RuntimeCatalog | null {
+    return this.catalogCache?.value ?? null;
   }
 
   /** Puts the runtime in `min(configured mode, cap)` (P-07); no request when it already runs that mode. */
@@ -696,6 +757,22 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       return { behavior: "deny", message };
     };
   }
+}
+
+/**
+ * D-13 backstop (P-10): a settings command (`/model`, `/effort`, `/fast`, `/permissions`) or any command outside the
+ * passthrough allowlist (`/config`, `/mcp`, …) never reaches the CLI raw: it could change runtime state behind the
+ * platform's policy and audit. The API already routes or refuses them; this is the device-side guard.
+ */
+export function refuseSlashCommand(text: string): void {
+  const slash = slashDisposition(text, "claude-code");
+  if (!slash || slash.kind === "passthrough") return;
+  throw new RuntimeError(
+    slash.kind === "settings"
+      ? `/${slash.name} must be changed from the session controls`
+      : `/${slash.name} is not available from the workspace`,
+    "slash_command_refused",
+  );
 }
 
 /**

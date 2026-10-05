@@ -126,8 +126,7 @@ describe("runtime controls inventory (WZC-06, P-09)", () => {
   });
 
   it("controls awaiting a recorded fixture are not exposed yet; shipped modes and full access are", () => {
-    expect(isExposed("claude-code", "effort")).toBe(false);
-    expect(isExposed("claude-code", "mode.auto")).toBe(false);
+    // Claude effort and auto were confirmed by the 2.1.289 fixtures (Plan 02); see the Claude block above.
     expect(isExposed("codex", "mode.auto")).toBe(false);
     for (const r of ["claude-code", "codex"] as const) {
       for (const m of ["mode.plan", "mode.default", "mode.acceptEdits", "mode.fullAccess", "model.list"]) {
@@ -135,9 +134,8 @@ describe("runtime controls inventory (WZC-06, P-09)", () => {
       }
     }
     for (const r of rows("claude-code").concat(rows("codex"))) {
-      if (r.uiKey === "effort" && r.area === "claude-code")
+      if (r.uiKey === "mode.auto" && r.area === "codex")
         expect(r.reason).toMatch(/awaiting recorded fixture/);
-      if (r.uiKey === "mode.auto") expect(r.reason).toMatch(/awaiting recorded fixture/);
     }
     expect(isExposed("codex", "no.such.key")).toBe(false);
     expect(controlStatus("codex", "no.such.key")).toBeNull();
