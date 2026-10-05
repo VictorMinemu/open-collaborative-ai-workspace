@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 0
+open_count: 4
 waived_count: 0
 fixed_count: 10
-total_count: 10
-last_updated: 2026-10-05T14:54:04.675Z
+total_count: 14
+last_updated: 2026-10-05T20:36:46.430Z
 ---
 
 # Broken Windows Ledger
@@ -25,6 +25,10 @@ last_updated: 2026-10-05T14:54:04.675Z
 | 8 | 03.1 | unrun-verify | infra/openclaw/test/run-container-smoke.sh |  | 03.1-10: SMOKE_ONLY=mcp real-cell smoke not run locally (no OpenClaw container on the dev VM); proven by plugin/registry-model/integration tests; CI cell-smoke must show the mcp scenario lines listed in 03.1-10-SUMMARY | fixed |  | 2026-10-05T05:29:32.197Z | 2026-10-05T05:49:08.348Z |
 | 9 | 03.1 | unrun-verify | infra/openclaw/test/run-container-smoke.sh |  | 03.1-12: SMOKE_ONLY=marketplace real-cell smoke not run locally (no OpenClaw container on the dev VM); proven by host CLI end-to-end, plugin/contract/integration tests; CI cell-smoke must show the marketplace lines listed in 03.1-12-SUMMARY | fixed |  | 2026-10-05T06:50:13.022Z | 2026-10-05T13:57:42.773Z |
 | 10 | 03.1 | unrun-verify | infra/openclaw/test/run-container-smoke.sh |  | 03.1-14: SMOKE_ONLY=sandbox real-cell smoke not run locally (no OpenClaw container and <1 GB free on the dev VM); bridge proven by 21 node tests and a real hardened container with server-everything; CI cell-smoke must show the sandbox lines listed in 03.1-14-SUMMARY | fixed |  | 2026-10-05T13:58:55.002Z | 2026-10-05T14:54:04.675Z |
+| 11 | 03.2 | stub | apps/api/src/modules/work-session/routes.ts |  | controlsContext uses DEFAULT_WORK_ZONE_POLICY and owner-only grain until Plan 04/05 | open |  | 2026-10-05T20:36:46.216Z |  |
+| 12 | 03.2 | stub | apps/local-runtime/src/daemon.ts |  | hello/capabilities fullAccessOptIn hard-coded false until Plan 06 | open |  | 2026-10-05T20:36:46.287Z |  |
+| 13 | 03.2 | stub | apps/api/src/modules/work-session/service.ts |  | dispatched turn mode = session mode; per-author cap (P-07) lands in Plan 04 | open |  | 2026-10-05T20:36:46.358Z |  |
+| 14 | 03.2 | stub | packages/contracts/src/device.ts |  | Device.viewerMaxMode/grants and UpdateDeviceRequest.shareMaxMode not wired until Plan 05 | open |  | 2026-10-05T20:36:46.430Z |  |
 
 ````json
 [
@@ -147,6 +151,54 @@ last_updated: 2026-10-05T14:54:04.675Z
     "reason": "",
     "recorded_at": "2026-10-05T13:58:55.002Z",
     "resolved_at": "2026-10-05T14:54:04.675Z"
+  },
+  {
+    "id": 11,
+    "kind": "stub",
+    "phase": "03.2",
+    "file": "apps/api/src/modules/work-session/routes.ts",
+    "line": null,
+    "description": "controlsContext uses DEFAULT_WORK_ZONE_POLICY and owner-only grain until Plan 04/05",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-05T20:36:46.216Z",
+    "resolved_at": null
+  },
+  {
+    "id": 12,
+    "kind": "stub",
+    "phase": "03.2",
+    "file": "apps/local-runtime/src/daemon.ts",
+    "line": null,
+    "description": "hello/capabilities fullAccessOptIn hard-coded false until Plan 06",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-05T20:36:46.287Z",
+    "resolved_at": null
+  },
+  {
+    "id": 13,
+    "kind": "stub",
+    "phase": "03.2",
+    "file": "apps/api/src/modules/work-session/service.ts",
+    "line": null,
+    "description": "dispatched turn mode = session mode; per-author cap (P-07) lands in Plan 04",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-05T20:36:46.358Z",
+    "resolved_at": null
+  },
+  {
+    "id": 14,
+    "kind": "stub",
+    "phase": "03.2",
+    "file": "packages/contracts/src/device.ts",
+    "line": null,
+    "description": "Device.viewerMaxMode/grants and UpdateDeviceRequest.shareMaxMode not wired until Plan 05",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-05T20:36:46.430Z",
+    "resolved_at": null
   }
 ]
 ````
