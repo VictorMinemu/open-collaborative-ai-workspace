@@ -1,5 +1,6 @@
 import {
   AGENT_CHANNEL_BASE_PATH,
+  type AgentChannelMcpProbeResult,
   type AgentChannelMemorySave,
   AgentChannelMemorySaveResponse,
   type AgentChannelPostMessage,
@@ -171,6 +172,13 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
       signal?: AbortSignal,
     ): Promise<AgentChannelMemorySaveResponse> {
       return AgentChannelMemorySaveResponse.parse(await request("POST", "/memories", req, signal, 2));
+    },
+    /**
+     * The tools an `mcp.probe` discovered, or why it failed (D-13). Three attempts at most: the API applies only
+     * the newest probe of a server, so a retried report is harmless. Never logs the report.
+     */
+    async reportMcpProbe(report: AgentChannelMcpProbeResult, signal?: AbortSignal): Promise<void> {
+      await request("POST", "/mcp/probe-results", report, signal, 3);
     },
     /** `ws(s)://…/agent-channel/v1/ws` */
     wsUrl(): string {

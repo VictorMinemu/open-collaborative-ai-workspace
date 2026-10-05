@@ -67,7 +67,10 @@ PLUGIN="$SECRETS/plugin"
 mkdir -p "$PLUGIN/node_modules"
 cp -R "$ROOT/apps/openclaw-channel/dist" "$ROOT/apps/openclaw-channel/src" "$PLUGIN/"
 cp "$ROOT/apps/openclaw-channel/package.json" "$ROOT/apps/openclaw-channel/openclaw.plugin.json" "$PLUGIN/"
-for dep in ws zod; do cp -RL "$ROOT/apps/openclaw-channel/node_modules/$dep" "$PLUGIN/node_modules/$dep"; done
+# Runtime dependencies exactly as the image build installs them (exact pins in package.json, no lifecycle scripts):
+# the MCP SDK's transitive dependencies are not reachable through pnpm's symlinks.
+(cd "$PLUGIN" && npm install --omit=dev --omit=peer --no-package-lock --legacy-peer-deps --ignore-scripts \
+  --no-audit --no-fund --loglevel=error >/dev/null)
 # The official search plugins, same pins + integrity check as the image build, bind-mounted read-only
 # (an image built before Phase 3.1 has no /opt/ocw/plugins; the mount works on either).
 echo "== bundled search plugins (pinned, sha512-checked)"

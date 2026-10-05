@@ -24,9 +24,11 @@ import { randomToken, sha256Hex } from "../../lib/crypto";
 import { badRequest, HttpError, notFound } from "../../lib/errors";
 import { applyCellStatus, cellAgents, cellProviders, cellSubscriptions, findAgent } from "../agent";
 import { cellAgentCapabilities, loadPolicy } from "../bot-capabilities";
+import { cellMcpServers } from "../mcp";
 import { channelResource, createPermissionService, type ResourceFacts } from "../organization";
 import { cellOf, createCellAuth } from "./auth";
 import { registerCellGateway } from "./gateway";
+import { registerMcpCellRoutes } from "./mcp";
 import { registerMemoryRoutes } from "./memories";
 import { registerMentionHandler } from "./mentions";
 import { createCellPresence } from "./presence";
@@ -261,6 +263,8 @@ export function createAgentChannelModule(core: Core): ApiModule {
                     ...a,
                     capabilities: capabilities.get(a.id) ?? { tools: [] },
                   }));
+                  // MCP servers (D-13): header values are revealed only here, for this authenticated cell.
+                  const mcpServers = await cellMcpServers(core, tx);
                   await core.audit.record(tx, {
                     action: "agent_cell.config_read",
                     resourceType: "agent_cell",
@@ -268,10 +272,11 @@ export function createAgentChannelModule(core: Core): ApiModule {
                     actorKind: "system",
                     clientKind: "agent",
                     sessionId: `cell:${cell.credentialId}`,
-                    // Which provider credentials were delivered; never the keys.
+                    // Which provider and MCP credentials were delivered; never the keys or header values.
                     metadata: {
                       providers: providers.map((p) => p.id),
                       subscriptions: subscriptions.map((p) => p.id),
+                      mcpServers: mcpServers.map((s) => s.id),
                       credential: cell.source,
                     },
                   });
@@ -285,8 +290,7 @@ export function createAgentChannelModule(core: Core): ApiModule {
                     providers,
                     subscriptions,
                     webSearch: { provider: policy.searchProvider },
-                    // MCP servers (D-13): `cellMcpServers` (modules/mcp) is wired here by 03.1-10.
-                    mcpServers: [] as CellSnapshot["mcpServers"],
+                    mcpServers,
                     // Approved marketplace plugins (D-14): wired here by 03.1-12 (cell executor).
                     plugins: [] as CellSnapshot["plugins"],
                   } as const;
@@ -436,6 +440,8 @@ export function createAgentChannelModule(core: Core): ApiModule {
           registerToolCallRoutes(scope, core, perms);
           // The cell's memory tool (D-10): owner bound to the delivered turn, DM only, refused once tainted.
           registerMemoryRoutes(scope, core, perms);
+          // The cell's MCP tool discovery (D-13): probe reports → the tool catalog.
+          registerMcpCellRoutes(scope, core);
 
           scope.post(
             "/agents/:id/status",

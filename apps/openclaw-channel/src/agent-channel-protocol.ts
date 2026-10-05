@@ -15,6 +15,7 @@
  *   POST /tool-calls/:id/result ← AgentChannelToolCallResult (outcome only, never content)
  *   POST /memories             ← AgentChannelMemorySave → AgentChannelMemorySaveResponse (ocw_memory_save;
  *                                owner = the human of the delivered turn; 404/409 with the refusal code)
+ *   POST /mcp/probe-results    ← AgentChannelMcpProbeResult (the tools an `mcp.probe` discovered; D-13)
  *
  * Parsing is deliberately lenient on ids (any non-empty string) and ignores unknown fields, so the
  * API can add fields without breaking deployed cells; required fields are enforced.
@@ -29,6 +30,8 @@ export const AgentChannelEventTypes = {
   providerAuthStart: "provider.auth.start",
   providerAuthCancel: "provider.auth.cancel",
   providerAuthRevoke: "provider.auth.revoke",
+  /** Phase 3.1 (D-13): connect to one MCP server of the snapshot, list its tools, report them. */
+  mcpProbe: "mcp.probe",
 } as const;
 export const cellTopic = (cellId: string) => `cell:${cellId}`;
 
@@ -252,6 +255,21 @@ export const CellSubscription = z.object({
 });
 export type CellSubscription = z.infer<typeof CellSubscription>;
 
+/**
+ * An org-enabled MCP server as the cell renders it (`mcp.servers.<safeName>`, D-13). Header values are SECRETS:
+ * never log them; they reach OpenClaw only as the env var `envName`, referenced as `${envName}` in the config.
+ */
+export const CellMcpServer = z.object({
+  id: Id,
+  safeName: z.string().min(1),
+  transport: z.enum(["streamable-http", "sse"]),
+  url: z.string().min(1),
+  headers: z.array(z.object({ name: z.string().min(1), envName: z.string().min(1), value: z.string() })),
+  /** Raw MCP tool names enabled on some bot: the server's `toolFilter.include`. */
+  tools: z.array(z.string()),
+});
+export type CellMcpServer = z.infer<typeof CellMcpServer>;
+
 export const CellSnapshot = z.object({
   protocolVersion: z.number().int(),
   cellId: Id,
@@ -264,6 +282,8 @@ export const CellSnapshot = z.object({
   subscriptions: z.array(CellSubscription).optional(),
   /** The org's web search provider (D-09); absent on older APIs. */
   webSearch: z.object({ provider: z.string() }).optional(),
+  /** The org's enabled MCP servers (D-13); absent on older APIs = none. */
+  mcpServers: z.array(CellMcpServer).optional(),
 });
 export type CellSnapshot = z.infer<typeof CellSnapshot>;
 
@@ -328,3 +348,29 @@ export type AgentChannelMemorySave = { eventId: string; agentId: string; text: s
 
 export const AgentChannelMemorySaveResponse = z.object({ memoryId: z.string().min(1), created: z.boolean() });
 export type AgentChannelMemorySaveResponse = z.infer<typeof AgentChannelMemorySaveResponse>;
+
+/** `mcp.probe`: an admin registered or changed an MCP server; the cell lists its tools (D-13). */
+export const McpProbeEvent = z.object({
+  type: z.literal(AgentChannelEventTypes.mcpProbe),
+  seq: z.number().int().positive(),
+  probeId: Id,
+  serverId: Id,
+});
+export type McpProbeEvent = z.infer<typeof McpProbeEvent>;
+
+/** One discovered MCP tool as reported (raw MCP name; the API derives the OpenClaw name itself). */
+export type McpProbeTool = {
+  name: string;
+  title?: string;
+  description?: string;
+  annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
+};
+
+/** POST /mcp/probe-results. `error` never carries a header value (≤ 300 chars); at most 200 tools. */
+export type AgentChannelMcpProbeResult = {
+  probeId: string;
+  serverId: string;
+  ok: boolean;
+  error?: string;
+  tools?: McpProbeTool[];
+};

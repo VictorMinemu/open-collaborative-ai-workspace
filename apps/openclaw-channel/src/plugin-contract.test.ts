@@ -4,14 +4,18 @@
  * port.
  */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { CellAgent, CellProvider, CellSnapshot } from "./agent-channel-protocol.js";
+import { createFakeMcp } from "../../../infra/fake-model/fake-mcp.mjs";
+import type { CellAgent, CellMcpServer, CellProvider, CellSnapshot } from "./agent-channel-protocol.js";
 import { AgentChannelHttpError, createAgentChannelClient } from "./api-client.js";
 import { AUTH_FAILURE_REPLY, createBridge, FAILURE_REPLY, type OpenClawPort } from "./bridge.js";
 import { createMemoryCursorStore } from "./cursor-store.js";
 import { CommitTracker, runEventStream } from "./event-stream.js";
+import { UNKNOWN_SERVER_ERROR } from "./mcp-probe.js";
 import { type MappedMention, mapMention } from "./mention-mapper.js";
 import { createOpenClawPort, type PluginRuntimeLike } from "./openclaw-port.js";
 import { planReconcile } from "./reconciler.js";
@@ -410,6 +414,105 @@ describe("subscription, cursor replay and reconnect", () => {
     });
     await api.waitFor(() => api.authFailures >= 4);
     expect(api.openSockets()).toBe(0);
+  });
+});
+
+describe("mcp.probe (D-13): the cell lists an MCP server's tools with the official SDK and reports them", () => {
+  const TOKEN = "contract-mcp-token-1234";
+  let mcpServer: Server;
+  let mcpBase: string;
+
+  beforeEach(async () => {
+    const handle = createFakeMcp({ token: TOKEN });
+    mcpServer = createServer((req, res) => {
+      if (!handle(req, res, new URL(req.url ?? "/", "http://localhost"))) {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+    await new Promise<void>((resolve) => mcpServer.listen(0, "127.0.0.1", resolve));
+    mcpBase = `http://127.0.0.1:${(mcpServer.address() as AddressInfo).port}`;
+  });
+
+  afterEach(async () => {
+    mcpServer.closeAllConnections();
+    await new Promise((r) => mcpServer.close(r));
+  });
+
+  const server = (over: Partial<CellMcpServer> = {}): CellMcpServer => ({
+    id: "mcp-1",
+    safeName: "m0a1b2c3d",
+    transport: "streamable-http",
+    url: `${mcpBase}/mcp`,
+    headers: [{ name: "Authorization", envName: "OCW_MCP_M0A1B2C3D_0", value: `Bearer ${TOKEN}` }],
+    tools: [],
+    ...over,
+  });
+
+  it("a probe for a snapshot server: one probe, one report with both tools and their hints", async () => {
+    api.mcpServers = [server()];
+    startPlugin();
+    await api.waitFor(() => api.openSockets() > 0);
+    const reads = api.cellReads;
+    api.publish("mcp.probe", { probeId: "probe-1", serverId: "mcp-1" });
+    await api.waitFor(() => api.mcpProbes.length > 0);
+    expect(api.mcpProbes).toEqual([
+      {
+        probeId: "probe-1",
+        serverId: "mcp-1",
+        ok: true,
+        tools: [
+          expect.objectContaining({
+            name: "echo",
+            annotations: { readOnlyHint: true, destructiveHint: false },
+          }),
+          expect.objectContaining({
+            name: "write_note",
+            annotations: { readOnlyHint: false, destructiveHint: true },
+          }),
+        ],
+      },
+    ]);
+    // Known server: no extra snapshot read.
+    expect(api.cellReads).toBe(reads);
+    expect(JSON.stringify(api.mcpProbes)).not.toContain(TOKEN);
+  });
+
+  it("an unknown server refreshes the snapshot once, then probes it when it appeared", async () => {
+    startPlugin();
+    await api.waitFor(() => api.openSockets() > 0);
+    const reads = api.cellReads;
+    // The server joins the snapshot without a cell.config.changed (the probe raced it).
+    api.mcpServers = [server({ id: "mcp-late", transport: "sse", url: `${mcpBase}/sse` })];
+    api.publish("mcp.probe", { probeId: "probe-2", serverId: "mcp-late" });
+    await api.waitFor(() => api.mcpProbes.length > 0);
+    expect(api.cellReads).toBe(reads + 1);
+    expect(api.mcpProbes[0]).toMatchObject({ probeId: "probe-2", serverId: "mcp-late", ok: true });
+    expect(api.mcpProbes[0]?.tools?.map((t) => t.name)).toEqual(["echo", "write_note"]);
+  });
+
+  it("a server still unknown after one refresh is reported ok:false without connecting anywhere", async () => {
+    startPlugin();
+    await api.waitFor(() => api.openSockets() > 0);
+    const reads = api.cellReads;
+    api.publish("mcp.probe", { probeId: "probe-3", serverId: "mcp-missing" });
+    await api.waitFor(() => api.mcpProbes.length > 0);
+    expect(api.cellReads).toBe(reads + 1);
+    expect(api.mcpProbes).toEqual([
+      { probeId: "probe-3", serverId: "mcp-missing", ok: false, error: UNKNOWN_SERVER_ERROR },
+    ]);
+  });
+
+  it("wrong credentials: ok:false with a classified reason and no header value", async () => {
+    api.mcpServers = [
+      server({ headers: [{ name: "Authorization", envName: "E", value: "Bearer not-the-token-777" }] }),
+    ];
+    startPlugin();
+    await api.waitFor(() => api.openSockets() > 0);
+    api.publish("mcp.probe", { probeId: "probe-4", serverId: "mcp-1" });
+    await api.waitFor(() => api.mcpProbes.length > 0);
+    expect(api.mcpProbes[0]).toMatchObject({ ok: false, error: expect.stringContaining("HTTP 401") });
+    expect(JSON.stringify(api.mcpProbes)).not.toContain("not-the-token-777");
   });
 });
 

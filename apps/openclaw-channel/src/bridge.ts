@@ -4,6 +4,7 @@ import {
   type AgentMentionEvent as AgentMentionEventType,
   type CellAgent,
   type CellSnapshot,
+  McpProbeEvent,
   ProviderAuthCancelEvent,
   ProviderAuthRevokeEvent,
   ProviderAuthStartEvent,
@@ -11,6 +12,7 @@ import {
 import type { AgentChannelClient } from "./api-client.js";
 import { sleep } from "./backoff.js";
 import type { DurableFrame, EventStreamLogger } from "./event-stream.js";
+import { handleMcpProbe, type probeMcpServer } from "./mcp-probe.js";
 import { type MappedMention, mapMention, replyIdempotencyKey } from "./mention-mapper.js";
 import type { AgentProvisioningResult } from "./reconciler.js";
 import type { SubscriptionAuth } from "./subscription-auth.js";
@@ -52,6 +54,8 @@ export type BridgeOptions = {
   retryDelayMs?: number;
   /** Subscription sign-in (provider.auth.* commands); omitted → those commands are ignored. */
   subscriptions?: SubscriptionAuth;
+  /** MCP tool discovery for `mcp.probe` (tests inject a fake; default: the official SDK client). */
+  mcpProbe?: typeof probeMcpServer;
 };
 
 export const FAILURE_REPLY = "Sorry, I couldn't generate a reply right now. Please try again in a moment.";
@@ -277,6 +281,28 @@ export function createBridge(opts: BridgeOptions) {
       case AgentChannelEventTypes.configChanged:
         await refreshCell();
         return;
+      case AgentChannelEventTypes.mcpProbe: {
+        const parsed = McpProbeEvent.safeParse(frame.data);
+        if (!parsed.success) {
+          log.warn?.(`seq=${frame.seq}: invalid ${frame.type} payload; skipped`);
+          return;
+        }
+        // A failed report is logged, never retried forever: the admin can ask for a new probe.
+        await handleMcpProbe(parsed.data, {
+          client: opts.client,
+          snapshot: () => lastSnapshot,
+          refresh: refreshCell,
+          signal: opts.signal,
+          log,
+          ...(opts.mcpProbe ? { probe: opts.mcpProbe } : {}),
+        }).catch((error: unknown) => {
+          if (opts.signal.aborted) throw error;
+          log.warn?.(
+            `mcp probe ${parsed.data.probeId}: report failed (${error instanceof Error ? error.message.slice(0, 120) : "error"})`,
+          );
+        });
+        return;
+      }
       case AgentChannelEventTypes.providerAuthStart:
       case AgentChannelEventTypes.providerAuthCancel:
       case AgentChannelEventTypes.providerAuthRevoke: {
