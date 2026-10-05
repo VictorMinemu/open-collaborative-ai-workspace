@@ -28,7 +28,7 @@ import { createAgentChannelModule } from "./modules/agent-channel";
 import { createAuditService } from "./modules/audit";
 import { createBotCapabilitiesModule } from "./modules/bot-capabilities";
 import { createChatModule } from "./modules/chat";
-import { createDeviceModule } from "./modules/device";
+import { createDeviceModule, type DeviceHub } from "./modules/device";
 import { createAuth, createIdentityModule, IdentityService } from "./modules/identity";
 import { createMcpModule } from "./modules/mcp";
 import { AuthzDeniedError, createOrganizationModule, recordAuthzDenial } from "./modules/organization";
@@ -44,6 +44,8 @@ export interface BuiltApp {
   core: Core;
   /** Route authz declarations and undecided answers (warn mode; strict for tests from 02-15). */
   authz: AuthzRegistry;
+  /** The Device Link hub (tests reach its session handler, e.g. `onAccessChanged`). */
+  deviceHub: DeviceHub;
   close(): Promise<void>;
 }
 
@@ -246,6 +248,7 @@ export async function buildApp(
     app,
     core,
     authz,
+    deviceHub: deviceModule.hub,
     async close() {
       await app.close();
       for (const m of modules) await m.close?.();
