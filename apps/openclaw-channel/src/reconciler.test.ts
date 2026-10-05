@@ -53,7 +53,11 @@ describe("planReconcile", () => {
     const plan = planReconcile({}, { agents: [agent("a")], providers: [ANTHROPIC] });
     expect(plan.changed).toBe(true);
     expect(plan.upsertAgents["ocw-a"]).toEqual(desiredAgentEntry(agent("a")));
-    expect(plan.upsertAgents["ocw-a"]?.tools).toEqual({ profile: "minimal", deny: [...DANGEROUS_TOOLS] });
+    expect(plan.upsertAgents["ocw-a"]?.tools).toEqual({
+      profile: "minimal",
+      deny: [...DANGEROUS_TOOLS],
+      codeMode: false,
+    });
     expect(plan.upsertAgents["ocw-a"]?.model).toEqual({
       primary: "anthropic/claude-sonnet-5-5",
       fallbacks: [],
@@ -153,7 +157,11 @@ describe("planReconcile: ChatGPT subscription", () => {
     expect(plan.upsertAgents["ocw-c"]?.models).toEqual({
       "openai/gpt-6-astra": { agentRuntime: { id: "openclaw" } },
     });
-    expect(plan.upsertAgents["ocw-c"]?.tools).toEqual({ profile: "minimal", deny: [...DANGEROUS_TOOLS] });
+    expect(plan.upsertAgents["ocw-c"]?.tools).toEqual({
+      profile: "minimal",
+      deny: [...DANGEROUS_TOOLS],
+      codeMode: false,
+    });
     expect(plan.upsertProviders).toEqual({});
     expect(plan.env).toEqual({});
     expect(plan.results).toEqual([{ agentId: "c", status: "ready" }]);
@@ -248,9 +256,29 @@ describe("capabilities in the cell (D-08 layer 1, D-09)", () => {
       profile: "minimal",
       alsoAllow: ["web_search", "web_fetch"],
       deny: [...DANGEROUS_TOOLS],
+      codeMode: false,
     });
-    expect(plan.upsertAgents["ocw-q"]?.tools).toEqual({ profile: "minimal", deny: [...DANGEROUS_TOOLS] });
-    expect(plan.upsertAgents["ocw-o"]?.tools).toEqual({ profile: "minimal", deny: [...DANGEROUS_TOOLS] });
+    expect(plan.upsertAgents["ocw-q"]?.tools).toEqual({
+      profile: "minimal",
+      deny: [...DANGEROUS_TOOLS],
+      codeMode: false,
+    });
+    expect(plan.upsertAgents["ocw-o"]?.tools).toEqual({
+      profile: "minimal",
+      deny: [...DANGEROUS_TOOLS],
+      codeMode: false,
+    });
+  });
+
+  it("Code Mode is off for every bot: it hides tools behind `exec`, which the gate always refuses", () => {
+    const plan = planReconcile(
+      {},
+      {
+        agents: [agent("w", { capabilities: { tools: ["web_search", "ocw_memory_save"] } })],
+        providers: [ANTHROPIC],
+      },
+    );
+    expect(plan.upsertAgents["ocw-w"]?.tools).toMatchObject({ codeMode: false });
   });
 
   it("never configures a dangerous tool even if the snapshot lists one", () => {
@@ -270,12 +298,17 @@ describe("capabilities in the cell (D-08 layer 1, D-09)", () => {
       { agents: { "ocw-w": before } },
       { agents: [agent("w", { capabilities: { tools: [] } })], providers: [ANTHROPIC] },
     );
-    expect(plan.upsertAgents["ocw-w"]?.tools).toEqual({ profile: "minimal", deny: [...DANGEROUS_TOOLS] });
+    expect(plan.upsertAgents["ocw-w"]?.tools).toEqual({
+      profile: "minimal",
+      deny: [...DANGEROUS_TOOLS],
+      codeMode: false,
+    });
     const draft: MutableConfig = { agents: { entries: { "ocw-w": before } } };
     applyPlanToDraft(draft, plan);
     expect(draft.agents?.entries?.["ocw-w"]?.tools).toEqual({
       profile: "minimal",
       deny: [...DANGEROUS_TOOLS],
+      codeMode: false,
     });
   });
 

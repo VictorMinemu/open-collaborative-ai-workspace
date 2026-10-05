@@ -206,6 +206,9 @@ export function desiredAgentEntry(
         profile: "minimal",
         ...(alsoAllow.length > 0 ? { alsoAllow } : {}),
         deny: [...DANGEROUS_TOOLS],
+        // Code Mode (default `auto` for catalog-preferred models such as ChatGPT's) hides every tool behind
+        // `exec`, which stays denied, so the bot could call nothing. Per agent, it beats per-model defaults.
+        codeMode: false,
       };
     })(),
   };

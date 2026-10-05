@@ -25,6 +25,8 @@ describe("renderConfig", () => {
     assert.equal(config.tools.profile, "minimal");
     assert.equal(config.tools.toolSearch, false);
     assert.equal(config.tools.elevated.enabled, false);
+    // Code Mode hides every tool behind `exec`, which is denied: a bot would be offered nothing it can call.
+    assert.equal(config.tools.codeMode, false);
     assert.deepEqual(config.tools.deny, DANGEROUS_TOOLS);
     assert.equal(config.tools.deny.includes("*"), false);
     for (const t of ["web_search", "web_fetch", "ocw_memory_save"])
