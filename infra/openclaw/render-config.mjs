@@ -218,6 +218,8 @@ export function renderConfig(env, opts = {}) {
       profile: "minimal",
       toolSearch: false,
       elevated: { enabled: false },
+      // Code Mode would expose only `exec`/`wait` and reach tools from JS; `exec` is denied (reconciler.ts too).
+      codeMode: false,
       deny: DANGEROUS_TOOLS,
       web: {
         search: {
