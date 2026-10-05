@@ -52,6 +52,10 @@ changes such as the plugin allowlist. ChatGPT-subscription sign-ins live in Open
   "per-channel-peer"` as defence in depth, so two humans' DMs with the same team bot never share context.
 - **Time:** `agents.defaults.userTimezone: "UTC"` (OpenClaw always prints the current date); the asking human's
   exact local time comes per turn as a structured context block when the bot's date/time capability is on.
+- **MCP (D-13):** no server at boot; the plugin renders `mcp.servers` from `GET /cell` (only servers with an
+  enabled tool, credentials as `${OCW_MCP_…}` env references, exact `toolFilter.include`). Bots see an MCP tool
+  only through their exact `alsoAllow` name and the turn's `toolsAllow`. `mcp.sessionIdleTtlMs: 600000` evicts
+  idle per-session MCP runtimes after 10 minutes.
 - **No background model calls:** heartbeat `0m`, no memory/dreaming, no pre-compaction memory flush, update
   check off.
 
@@ -134,4 +138,7 @@ the bundled search plugins (installed on the host into a temp dir with `install-
 changes never need an image rebuild. Scenarios (`SMOKE_ONLY=<comma list>`): `mention`, `signin`, `dm`,
 `capabilities` (internet on: the model is offered exactly `web_fetch,web_search`, searches through the gate via
 the fake SearXNG, the fake API records the call and its result; internet off: `[tools: 0]`) and `dm-isolation`
-(two humans' DMs with one bot never share a prompt; deleting the bot leaves no transcript in the state volume).
+(two humans' DMs with one bot never share a prompt; deleting the bot leaves no transcript in the state volume),
+`memory` and `mcp` (the fake MCP behind a bearer token: probe through the cell, `${OCW_MCP_…}` in the rendered
+config and never the token, only the enabled tool offered, a gated and audited `echo`, the tool filter re-rendered
+when the admin enables `write_note`, and `write_note` blocked by the taint rule after `echo` in the same turn).
