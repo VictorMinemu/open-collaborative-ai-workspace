@@ -1,11 +1,28 @@
 "use client";
 
-import type { WorkZonePolicyView } from "@ocw/contracts";
-import { RotateCcw, Save, ShieldAlert } from "lucide-react";
-import { type ReactNode, useEffect, useState } from "react";
+import {
+  EFFORT_LABELS,
+  KNOWN_EFFORTS,
+  type PermissionMode,
+  type RuntimeId,
+  type WorkZonePolicyView,
+} from "@ocw/contracts";
+import {
+  ClipboardList,
+  FilePen,
+  Hand,
+  type LucideIcon,
+  RotateCcw,
+  Save,
+  ShieldAlert,
+  Sparkles,
+  Zap,
+} from "lucide-react";
+import { type ReactNode, useEffect, useId, useState } from "react";
 import { toast } from "sonner";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
@@ -15,9 +32,41 @@ import { cn } from "@/lib/utils";
 import { useUpdateWorkZonePolicy, useWorkZonePolicy } from "@/lib/workzone-policy-queries";
 
 type Draft = Omit<WorkZonePolicyView, "updatedAt" | "knownModels">;
+type GovernedMode = Draft["allowedPermissionModes"][number];
+type Restrict = Record<RuntimeId, boolean>;
 
-const toDraft = ({ updatedAt: _u, knownModels: _k, ...rest }: WorkZonePolicyView): Draft => rest;
-const same = (a: Draft, b: Draft) => JSON.stringify(a) === JSON.stringify(b);
+const RUNTIME_IDS: readonly RuntimeId[] = ["claude-code", "codex"];
+const RUNTIME_LABELS: Record<RuntimeId, string> = { "claude-code": "Claude Code", codex: "Codex" };
+
+/** D-12: the menu a controller sees, in ladder order. Full access has its own switch (ADR-0012). */
+const MODES: Array<{ value: GovernedMode; label: string; description: string; icon: LucideIcon }> = [
+  {
+    value: "plan",
+    label: "Plan",
+    description: "Read-only: proposes a plan and changes nothing.",
+    icon: ClipboardList,
+  },
+  {
+    value: "default",
+    label: "Supervised",
+    description: "Asks before every file edit and every command.",
+    icon: Hand,
+  },
+  {
+    value: "acceptEdits",
+    label: "Auto-accept edits",
+    description: "File edits run without asking; commands still ask.",
+    icon: FilePen,
+  },
+  {
+    value: "auto",
+    label: "Auto",
+    description:
+      "The runtime approves what it judges safe and asks for the rest. Only on models that support it.",
+    icon: Sparkles,
+  },
+];
+const MODE_ORDER = MODES.map((m) => m.value as PermissionMode);
 
 /** ADR-0012: the organization switch is only one of the three conditions Full access needs. */
 const FULL_ACCESS_LEGS = [
@@ -26,10 +75,31 @@ const FULL_ACCESS_LEGS = [
   { label: "Member", note: "Has Full access on that device" },
 ];
 
+const NO_LIMIT = "none";
+
+const toDraft = ({ updatedAt: _u, knownModels: _k, ...rest }: WorkZonePolicyView): Draft => rest;
+const restrictOf = (d: Draft): Restrict => ({
+  "claude-code": d.allowedModels["claude-code"].length > 0,
+  codex: d.allowedModels.codex.length > 0,
+});
+
+/** Order-insensitive: toggling a mode or a model off and on again is not a change. */
+function canonical(d: Draft): string {
+  return JSON.stringify({
+    ...d,
+    allowedPermissionModes: [...d.allowedPermissionModes].sort(),
+    allowedModels: {
+      "claude-code": [...d.allowedModels["claude-code"]].sort(),
+      codex: [...d.allowedModels.codex].sort(),
+    },
+  });
+}
+
 /**
- * Settings › Work Zone policy (Phase 03.2, D-02, D-11; WZC-03/04): what every Work Zone session of the
- * organization may use. One Save; the API stores, audits and enforces it on every turn. Admins only
- * (`work_zone.manage`).
+ * Settings › Work Zone policy (Phase 03.2, D-02, D-11, D-12; WZC-03/04): what every Work Zone session of the
+ * organization may use: permission modes, Full access, models per runtime, a maximum effort per runtime and
+ * fast mode. One Save; the API stores, audits and enforces it on every turn (the page enforces nothing).
+ * Admins only (`work_zone.manage`).
  */
 export function WorkZonePolicySettings() {
   const permissions = usePermissions();
@@ -68,7 +138,12 @@ function PolicyForm({ policy }: { policy: WorkZonePolicyView }) {
   const save = useUpdateWorkZonePolicy();
   const saved = toDraft(policy);
   const [draft, setDraft] = useState<Draft>(saved);
-  const dirty = !same(draft, saved);
+  const [restrict, setRestrict] = useState<Restrict>(restrictOf(saved));
+  const [modelErrors, setModelErrors] = useState<Partial<Record<RuntimeId, string>>>({});
+  const savedRestrict = restrictOf(saved);
+  const dirty =
+    canonical(draft) !== canonical(saved) || RUNTIME_IDS.some((rt) => restrict[rt] !== savedRestrict[rt]);
+  const noModes = draft.allowedPermissionModes.length === 0;
 
   // Leaving the page with unsaved changes asks first.
   useEffect(() => {
@@ -78,10 +153,52 @@ function PolicyForm({ policy }: { policy: WorkZonePolicyView }) {
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [dirty]);
 
+  function toggleMode(mode: GovernedMode, on: boolean) {
+    setDraft((d) => {
+      const set = new Set<PermissionMode>(d.allowedPermissionModes);
+      if (on) set.add(mode);
+      else set.delete(mode);
+      return {
+        ...d,
+        allowedPermissionModes: MODE_ORDER.filter((m): m is GovernedMode => set.has(m)),
+      };
+    });
+  }
+
+  function toggleModel(rt: RuntimeId, id: string, on: boolean) {
+    setModelErrors((e) => ({ ...e, [rt]: undefined }));
+    setDraft((d) => {
+      const list = d.allowedModels[rt].filter((m) => m !== id);
+      return { ...d, allowedModels: { ...d.allowedModels, [rt]: on ? [...list, id] : list } };
+    });
+  }
+
+  function reset() {
+    setDraft(saved);
+    setRestrict(savedRestrict);
+    setModelErrors({});
+  }
+
   async function submit() {
+    const errors: Partial<Record<RuntimeId, string>> = {};
+    for (const rt of RUNTIME_IDS) {
+      if (restrict[rt] && draft.allowedModels[rt].length === 0) {
+        errors[rt] = "Pick at least one model, or allow any model the device reports";
+      }
+    }
+    setModelErrors(errors);
+    if (noModes || Object.keys(errors).length > 0) return;
     try {
-      const updated = await save.mutateAsync(draft);
-      setDraft(toDraft(updated));
+      const updated = await save.mutateAsync({
+        ...draft,
+        allowedModels: {
+          "claude-code": restrict["claude-code"] ? draft.allowedModels["claude-code"] : [],
+          codex: restrict.codex ? draft.allowedModels.codex : [],
+        },
+      });
+      const next = toDraft(updated);
+      setDraft(next);
+      setRestrict(restrictOf(next));
       toast.success("Work Zone policy saved", {
         description: "Every Work Zone session follows it from its next turn.",
       });
@@ -92,6 +209,49 @@ function PolicyForm({ policy }: { policy: WorkZonePolicyView }) {
 
   return (
     <div className="grid gap-8" data-testid="work-zone-policy-settings">
+      <Section
+        title="Permission modes"
+        description="The modes members may pick for a session and for each message they send."
+      >
+        <fieldset className="grid gap-2 sm:grid-cols-2">
+          <legend className="sr-only">Allowed permission modes</legend>
+          {MODES.map((m) => {
+            const on = draft.allowedPermissionModes.includes(m.value);
+            return (
+              <label
+                key={m.value}
+                className={cn(
+                  "flex cursor-pointer items-start gap-3 rounded-xl border bg-card p-3.5 shadow-xs transition-colors",
+                  on && "border-primary/50 bg-brand-soft/40 ring-1 ring-primary/30",
+                )}
+              >
+                <input
+                  type="checkbox"
+                  checked={on}
+                  onChange={(e) => toggleMode(m.value, e.target.checked)}
+                  data-testid={`mode-allow-${m.value}`}
+                  className="mt-0.5 size-4 shrink-0 accent-primary"
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-center gap-1.5 font-medium text-sm">
+                    <m.icon aria-hidden className="size-3.5 text-muted-foreground" />
+                    {m.label}
+                  </span>
+                  <span className="mt-0.5 block text-muted-foreground text-xs leading-snug">
+                    {m.description}
+                  </span>
+                </span>
+              </label>
+            );
+          })}
+        </fieldset>
+        {noModes ? (
+          <p role="alert" className="text-[13px] text-destructive">
+            Keep at least one permission mode allowed.
+          </p>
+        ) : null}
+      </Section>
+
       <Section
         title="Full access"
         description="The riskiest mode: the coding agent edits files and runs commands without asking anyone."
@@ -104,15 +264,7 @@ function PolicyForm({ policy }: { policy: WorkZonePolicyView }) {
         >
           {/* biome-ignore lint/a11y/noLabelWithoutControl: the Switch renders the control inside the label */}
           <label className="flex cursor-pointer items-start gap-3">
-            <span
-              aria-hidden
-              className={cn(
-                "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border bg-background text-muted-foreground",
-                draft.allowFullAccess && "border-warning/50 text-warning",
-              )}
-            >
-              <ShieldAlert className="size-4" />
-            </span>
+            <IconTile icon={ShieldAlert} warn={draft.allowFullAccess} />
             <span className="min-w-0 flex-1">
               <span className="block font-medium text-sm">Allow Full access</span>
               <span className="mt-0.5 block text-muted-foreground text-xs leading-relaxed">
@@ -153,19 +305,268 @@ function PolicyForm({ policy }: { policy: WorkZonePolicyView }) {
         </div>
       </Section>
 
+      <Section title="Models" description="Which models sessions may use, per coding agent.">
+        <div className="grid gap-3">
+          {RUNTIME_IDS.map((rt) => (
+            <RuntimeModels
+              key={rt}
+              runtime={rt}
+              known={policy.knownModels[rt]}
+              saved={saved.allowedModels[rt]}
+              chosen={draft.allowedModels[rt]}
+              restricted={restrict[rt]}
+              error={modelErrors[rt]}
+              onRestrict={(v) => {
+                setRestrict((r) => ({ ...r, [rt]: v }));
+                setModelErrors((e) => ({ ...e, [rt]: undefined }));
+              }}
+              onToggle={(id, on) => toggleModel(rt, id, on)}
+            />
+          ))}
+        </div>
+      </Section>
+
+      <Section
+        title="Maximum effort"
+        description="The highest reasoning effort sessions may pick. Higher effort is slower and uses more of the subscription."
+      >
+        <div className="grid gap-3 rounded-2xl border bg-card p-4 shadow-xs sm:grid-cols-2 sm:gap-4">
+          {RUNTIME_IDS.map((rt) => (
+            <EffortField
+              key={rt}
+              runtime={rt}
+              value={draft.maxEffort[rt]}
+              onChange={(v) => setDraft((d) => ({ ...d, maxEffort: { ...d.maxEffort, [rt]: v } }))}
+            />
+          ))}
+        </div>
+      </Section>
+
+      <Section title="Fast mode" description="Faster answers that cost more than the standard rate.">
+        <div
+          className={cn(
+            "rounded-2xl border bg-card p-4 shadow-xs transition-colors",
+            draft.allowFastMode && "border-warning/50 bg-warning/5",
+          )}
+        >
+          {/* biome-ignore lint/a11y/noLabelWithoutControl: the Switch renders the control inside the label */}
+          <label className="flex cursor-pointer items-start gap-3">
+            <IconTile icon={Zap} warn={draft.allowFastMode} />
+            <span className="min-w-0 flex-1">
+              <span className="block font-medium text-sm">Allow fast mode</span>
+              <span className="mt-0.5 block text-muted-foreground text-xs leading-relaxed">
+                Claude: billed from paid usage credits. Codex: uses ChatGPT plan limits at about 2.5x.
+              </span>
+            </span>
+            <Switch
+              checked={draft.allowFastMode}
+              onCheckedChange={(allowFastMode) => setDraft((d) => ({ ...d, allowFastMode }))}
+              aria-label="Allow fast mode"
+              data-testid="allow-fast-mode"
+              className="mt-1"
+            />
+          </label>
+        </div>
+      </Section>
+
       <div className="sticky bottom-0 z-10 -mx-4 flex flex-wrap items-center justify-end gap-x-3 gap-y-2 border-t bg-background/90 px-4 py-3 backdrop-blur sm:-mx-6 sm:px-6">
-        <span className="mr-auto text-muted-foreground text-xs" aria-live="polite">
-          {dirty ? "Unsaved changes" : policy.updatedAt ? "All changes saved" : "Defaults: Full access off"}
+        <span
+          className={cn("mr-auto text-xs", noModes ? "text-destructive" : "text-muted-foreground")}
+          aria-live="polite"
+        >
+          {noModes
+            ? "Allow at least one mode to save"
+            : dirty
+              ? "Unsaved changes"
+              : policy.updatedAt
+                ? "All changes saved"
+                : "Defaults: Full access and fast mode off"}
         </span>
-        <Button variant="outline" onClick={() => setDraft(saved)} disabled={!dirty || save.isPending}>
+        <Button variant="outline" onClick={reset} disabled={!dirty || save.isPending}>
           <RotateCcw /> Discard
         </Button>
-        <Button onClick={submit} disabled={!dirty || save.isPending} data-testid="save-policy">
+        <Button onClick={submit} disabled={!dirty || noModes || save.isPending} data-testid="save-policy">
           {save.isPending ? <Spinner /> : <Save />}
           Save policy
         </Button>
       </div>
     </div>
+  );
+}
+
+/**
+ * One runtime's model allow-list. Only models the organization's devices reported can be chosen; an id saved
+ * earlier that no device reports any more stays listed (marked) so it can be removed.
+ */
+function RuntimeModels({
+  runtime,
+  known,
+  saved,
+  chosen,
+  restricted,
+  error,
+  onRestrict,
+  onToggle,
+}: {
+  runtime: RuntimeId;
+  known: WorkZonePolicyView["knownModels"][RuntimeId];
+  saved: string[];
+  chosen: string[];
+  restricted: boolean;
+  error?: string;
+  onRestrict: (v: boolean) => void;
+  onToggle: (id: string, on: boolean) => void;
+}) {
+  const label = RUNTIME_LABELS[runtime];
+  const knownIds = new Set(known.map((m) => m.id));
+  const orphans = [...new Set([...saved, ...chosen])].filter((id) => !knownIds.has(id));
+  const rows = [
+    ...known.map((m) => ({ id: m.id, name: m.displayName, reported: true })),
+    ...orphans.map((id) => ({ id, name: id, reported: false })),
+  ];
+  return (
+    <div className="grid gap-3 rounded-2xl border bg-card p-4 shadow-xs" data-testid={`models-${runtime}`}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="min-w-0">
+          <span className="block font-medium text-sm">{label}</span>
+          <span className="block text-muted-foreground text-xs">
+            {restricted
+              ? `${chosen.length} of ${rows.length} chosen`
+              : "Sessions may use any model the device reports"}
+          </span>
+        </span>
+        <div
+          className="inline-flex max-w-full rounded-lg border bg-muted/40 p-0.5"
+          role="radiogroup"
+          aria-label={`${label} models`}
+        >
+          {[
+            { value: false, label: "Any model the device reports" },
+            { value: true, label: "Chosen models" },
+          ].map((o) => (
+            <button
+              key={o.label}
+              type="button"
+              role="radio"
+              aria-checked={restricted === o.value}
+              onClick={() => onRestrict(o.value)}
+              className={cn(
+                "h-7 rounded-md px-2.5 font-medium text-xs outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/40",
+                restricted === o.value
+                  ? "bg-background text-foreground shadow-xs"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      {restricted ? (
+        rows.length === 0 ? (
+          <p className="rounded-lg border border-dashed px-3 py-4 text-center text-muted-foreground text-xs">
+            No device has reported its {label} models yet. Pair a device with {label} signed in, then choose
+            here.
+          </p>
+        ) : (
+          <ul className="grid gap-1.5 sm:grid-cols-2">
+            {rows.map((m) => (
+              <li key={m.id} data-testid="model-option">
+                <label
+                  className={cn(
+                    "flex cursor-pointer items-center gap-3 rounded-lg border bg-background px-3 py-2",
+                    !m.reported && "border-dashed",
+                  )}
+                >
+                  <input
+                    type="checkbox"
+                    checked={chosen.includes(m.id)}
+                    onChange={(e) => onToggle(m.id, e.target.checked)}
+                    aria-label={`Allow ${m.name}`}
+                    className="size-4 shrink-0 accent-primary"
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-medium text-[13px]">{m.name}</span>
+                    {m.reported ? (
+                      <span className="block truncate font-mono text-[11px] text-muted-foreground">
+                        {m.id}
+                      </span>
+                    ) : (
+                      <span className="block truncate text-[11px] text-amber-700 dark:text-amber-300">
+                        Not reported by any device
+                      </span>
+                    )}
+                  </span>
+                </label>
+              </li>
+            ))}
+          </ul>
+        )
+      ) : null}
+      {error ? (
+        <p role="alert" className="text-[13px] text-destructive">
+          {error}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function EffortField({
+  runtime,
+  value,
+  onChange,
+}: {
+  runtime: RuntimeId;
+  value: string | null;
+  onChange: (v: string | null) => void;
+}) {
+  const id = useId();
+  const items = [
+    { value: NO_LIMIT, label: "No limit" },
+    ...KNOWN_EFFORTS.map((e) => ({ value: e as string, label: EFFORT_LABELS[e] ?? e })),
+  ];
+  // A level saved through the API that the ladder does not know stays visible as itself.
+  if (value !== null && !items.some((i) => i.value === value)) items.push({ value, label: value });
+  return (
+    <div className="grid gap-1.5">
+      <span id={id} className="font-medium text-sm">
+        {RUNTIME_LABELS[runtime]}
+      </span>
+      <Select
+        items={items}
+        value={value ?? NO_LIMIT}
+        onValueChange={(v) => v && onChange(v === NO_LIMIT ? null : v)}
+      >
+        <SelectTrigger aria-labelledby={id} data-testid={`max-effort-${runtime}`} className="h-10 sm:h-9" />
+        <SelectContent>
+          {items.map((i) => (
+            <SelectItem key={i.value} value={i.value}>
+              {i.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <span className="text-muted-foreground text-xs">
+        {value === null
+          ? "Sessions may pick any effort the model offers"
+          : "Sessions cannot pick a higher level"}
+      </span>
+    </div>
+  );
+}
+
+function IconTile({ icon: Icon, warn }: { icon: LucideIcon; warn: boolean }) {
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border bg-background text-muted-foreground",
+        warn && "border-warning/50 text-warning",
+      )}
+    >
+      <Icon className="size-4" />
+    </span>
   );
 }
 

@@ -1,5 +1,6 @@
 import { type APIRequestContext, expect, type Page, test } from "@playwright/test";
 import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
+import { type FakeDeviceHandle, startFakeDevice } from "../support/work-zone-device";
 import { ADMIN, shot } from "./env";
 
 /**
@@ -114,6 +115,124 @@ test("admin: Settings › Work Zone policy turns Full access on with one Save, t
     await shot(dev.page, `wz-policy-denied-${tag}`);
     await dev.context.close();
   } finally {
+    await resetPolicy(admin);
+    await admin.dispose();
+  }
+});
+
+test("admin: governs permission modes, models per runtime, maximum effort and fast mode with one Save", async ({
+  browser,
+}, info) => {
+  test.setTimeout(180_000);
+  const project = info.project.name;
+  const mobile = project === "mobile";
+  const tag = mobile ? "390" : "1440";
+
+  const admin = await apiAs(ADMIN);
+  await resetPolicy(admin);
+  let device: FakeDeviceHandle | null = null;
+  try {
+    // A REAL daemon in fake-runtime mode reports its catalog: the page offers only those models.
+    device = await startFakeDevice(admin, { name: `E2E Policy ${tag}`, projectName: `policy-${tag}` });
+    // An id saved earlier that no device reports any more stays listed so it can be removed.
+    const seeded = await admin.put("/api/v1/work-zone-policy", {
+      data: { allowedModels: { "claude-code": ["opus", "claude-retired-3"], codex: [] } },
+    });
+    expect(seeded.ok(), "seed allowed models").toBe(true);
+
+    const boss = await openAs(browser, ADMIN, project);
+    await boss.page.goto(`${BASE_URL}/settings/work-zone-policy`);
+    const form = boss.page.getByTestId("work-zone-policy-settings");
+    await expect(form).toBeVisible();
+
+    // ---- permission modes: all four allowed by default, each explained
+    for (const mode of ["plan", "default", "acceptEdits", "auto"]) {
+      await expect(form.getByTestId(`mode-allow-${mode}`)).toBeChecked();
+    }
+    await expect(form.getByText("Supervised", { exact: true })).toBeVisible();
+    await expect(form.getByText("Auto-accept edits", { exact: true })).toBeVisible();
+
+    // ---- models: Claude Code restricted to the chosen list, Codex any model
+    const claude = form.getByTestId("models-claude-code");
+    await expect(claude.getByRole("radio", { name: "Chosen models" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    const claudeOptions = claude.getByTestId("model-option");
+    await expect(claudeOptions).toHaveCount(6);
+    await expect(claudeOptions.filter({ hasText: "Claude Opus 5.5" }).getByRole("checkbox")).toBeChecked();
+    await expect(
+      claudeOptions.filter({ hasText: "Claude Sonnet 5.5" }).getByRole("checkbox"),
+    ).not.toBeChecked();
+    const retired = claudeOptions.filter({ hasText: "claude-retired-3" });
+    await expect(retired).toContainText(/not reported by any device/i);
+    await expect(retired.getByRole("checkbox")).toBeChecked();
+    const codex = form.getByTestId("models-codex");
+    await expect(codex.getByRole("radio", { name: "Any model the device reports" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await expect(codex.getByTestId("model-option")).toHaveCount(0);
+
+    // ---- maximum effort: no limit; fast mode off with its cost stated
+    await expect(form.getByTestId("max-effort-claude-code")).toContainText("No limit");
+    await expect(form.getByTestId("max-effort-codex")).toContainText("No limit");
+    await expect(form.getByTestId("allow-fast-mode")).not.toBeChecked();
+    await expect(
+      form.getByText(
+        "Claude: billed from paid usage credits. Codex: uses ChatGPT plan limits at about 2.5x.",
+      ),
+    ).toBeVisible();
+
+    // ---- review captures: every section, scrolled
+    await bothThemes(boss.page, `wz-policy-full-${tag}`);
+    await claude.evaluate((el) => el.scrollIntoView({ block: "start" }));
+    await bothThemes(boss.page, `wz-policy-full-${tag}-models`);
+    // The bottom of the page: maximum effort and fast mode above the sticky Save bar.
+    await form.evaluate((el) => el.closest(".overflow-y-auto")?.scrollTo({ top: el.scrollHeight }));
+    await bothThemes(boss.page, `wz-policy-full-${tag}-limits`);
+
+    // ---- at least one mode must stay allowed
+    const save = form.getByTestId("save-policy");
+    for (const mode of ["auto", "plan", "default", "acceptEdits"]) {
+      await form.getByTestId(`mode-allow-${mode}`).click();
+    }
+    await expect(save).toBeDisabled();
+    await expect(form.getByText("Keep at least one permission mode allowed.")).toBeVisible();
+    for (const mode of ["plan", "default", "acceptEdits"]) {
+      await form.getByTestId(`mode-allow-${mode}`).click();
+    }
+    await expect(form.getByTestId("mode-allow-auto")).not.toBeChecked();
+
+    // ---- remove the retired id, cap Claude at Medium, allow fast mode → one Save
+    await retired.getByRole("checkbox").click();
+    await form.getByTestId("max-effort-claude-code").click();
+    await boss.page.getByRole("option", { name: "Medium", exact: true }).click();
+    await expect(form.getByTestId("max-effort-claude-code")).toContainText("Medium");
+    await form.getByTestId("allow-fast-mode").click();
+    await expect(form.getByTestId("allow-fast-mode")).toBeChecked();
+    await save.click();
+    await expect(boss.page.getByText("Work Zone policy saved")).toBeVisible();
+    await expect(save).toBeDisabled();
+
+    const saved = await readPolicy(admin);
+    expect([...saved.allowedPermissionModes].sort()).toEqual(["acceptEdits", "default", "plan"]);
+    expect(saved.maxEffort["claude-code"]).toBe("medium");
+    expect(saved.maxEffort.codex).toBeNull();
+    expect(saved.allowFastMode).toBe(true);
+    expect(saved.allowedModels["claude-code"]).toEqual(["opus"]);
+    expect(saved.allowedModels.codex).toEqual([]);
+    expect(saved.allowFullAccess).toBe(false);
+
+    // ---- the saved policy comes back after a reload; the retired id is gone
+    await boss.page.reload();
+    await expect(form.getByTestId("mode-allow-auto")).not.toBeChecked();
+    await expect(form.getByTestId("max-effort-claude-code")).toContainText("Medium");
+    await expect(form.getByTestId("models-claude-code").getByTestId("model-option")).toHaveCount(5);
+    await expect(form.getByText("claude-retired-3")).toHaveCount(0);
+    await boss.context.close();
+  } finally {
+    await device?.stop();
     await resetPolicy(admin);
     await admin.dispose();
   }
