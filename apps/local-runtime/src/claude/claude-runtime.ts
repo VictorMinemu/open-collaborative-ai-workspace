@@ -1,12 +1,18 @@
 // Claude Code runtime adapter (Claude Agent SDK, streaming-input mode).
 //
-// Security invariants (AGENTS.md):
-// - never `bypassPermissions`: only default | acceptEdits | plan | auto are accepted, and the CLI is
-//   started with `disableBypassPermissionsMode` and without `allowDangerouslySkipPermissions`;
+// Security invariants (AGENTS.md, ADR-0012):
+// - `bypassPermissions` only through ADR-0012's path: the platform mode `fullAccess`, authorized by the server
+//   (org policy ∩ device opt-in ∩ grain) AND by this device's own opt-in (`allowFullAccess()`, re-read on every
+//   start, change and turn). Only then is the CLI launched with `permissionMode: "bypassPermissions"` +
+//   `allowDangerouslySkipPermissions`; every other process is launched with `disableBypassPermissionsMode` and
+//   without it. Entering or leaving fullAccess (also a per-turn cap below it) relaunches the CLI between turns
+//   with `resume` (P-11), so no process keeps bypass availability outside an authorized fullAccess turn;
+// - a runtime report of bypassPermissions that nobody authorized (e.g. repo settings) aborts the session (D-03);
 // - settings change between turns only (setModel / setPermissionMode / applyFlagSettings with scalar keys,
 //   never `permissions`); each turn runs at min(configured mode, the prompt's cap) (P-07);
 // - settings / unknown slash commands are refused before they can reach the CLI (D-13 backstop);
-// - secret paths are denied three times over: settings deny rules, a PreToolUse hook and canUseTool;
+// - secret paths are denied three times over: settings deny rules, a PreToolUse hook and canUseTool; the deny
+//   rules and the hook stay in Full access too (canUseTool is not consulted in bypass mode) (D-04);
 // - user/local Claude settings are not loaded, so personal allow-rules cannot skip cloud approvals;
 // - OCW_* variables (device token) are stripped from the Claude Code process environment;
 // - billing: runs on the user's local Claude Code login (subscription) through the installed CLI;
@@ -44,6 +50,7 @@ import { errorMessage, type Logger, silentLogger } from "../logger.js";
 import {
   type AgentRuntime,
   type EventSink,
+  type FullAccessGateOptions,
   type RuntimeCapabilities,
   RuntimeError,
   type StartSessionOptions,
@@ -91,7 +98,7 @@ interface RuntimeSettings {
 
 export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => QueryHandle;
 
-export interface ClaudeCodeRuntimeOptions {
+export interface ClaudeCodeRuntimeOptions extends FullAccessGateOptions {
   queryFn?: QueryFn;
   approvalTimeoutMs?: number;
   /**
@@ -120,6 +127,14 @@ interface PendingApproval {
 interface Session {
   id: string;
   cwd: string;
+  /** Runtime session id given at start (resume), used when no init has reported one yet. */
+  resumeId: string | null;
+  /** The model id last handed to the CLI (catalog id, possibly with `[1m]`); relaunches keep it. */
+  runtimeModel: string | undefined;
+  /** The current CLI process was launched in bypass mode (authorized fullAccess only). */
+  bypass: boolean;
+  /** Queries closed by a relaunch: their end is not the session's end. */
+  retired: WeakSet<QueryHandle>;
   input: AsyncQueue<SDKUserMessage>;
   q: QueryHandle | null;
   mapper: ClaudeEventMapper;
@@ -185,19 +200,30 @@ function toUserMessage(prompt: PromptPayload): SDKUserMessage {
 
 export class ClaudeCodeRuntime implements AgentRuntime {
   readonly id = "claude-code" as const;
-  readonly capabilities: RuntimeCapabilities = {
-    supportsSteer: false,
-    supportsResume: true,
-    // `auto` confirmed by the 2.1.289 settings fixture (setPermissionMode("auto") → init permissionMode "auto").
-    supportsPermissionModes: ["default", "acceptEdits", "plan", "auto"],
-    supportsImages: true,
-  };
+
+  get capabilities(): RuntimeCapabilities {
+    return {
+      supportsSteer: false,
+      supportsResume: true,
+      // `auto` confirmed by the 2.1.289 settings fixture (setPermissionMode("auto") → init permissionMode "auto").
+      // `fullAccess` only while this device's opt-in is on (ADR-0012).
+      supportsPermissionModes: [
+        "default",
+        "acceptEdits",
+        "plan",
+        "auto",
+        ...(this.allowFullAccess() ? (["fullAccess"] as const) : []),
+      ],
+      supportsImages: true,
+    };
+  }
 
   private readonly sessions = new Map<string, Session>();
   private readonly queryFn: QueryFn;
   private readonly approvalTimeoutMs: number;
   private readonly log: Logger;
   private readonly claudePath: string | null;
+  private readonly allowFullAccess: () => boolean;
   private catalogCache: { at: number; value: RuntimeCatalog } | null = null;
   private catalogInFlight: Promise<RuntimeCatalog | null> | null = null;
 
@@ -206,6 +232,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     this.approvalTimeoutMs = opts.approvalTimeoutMs ?? APPROVAL_TIMEOUT_MS;
     this.log = opts.logger ?? silentLogger;
     this.claudePath = opts.claudePath ?? findExecutable("claude");
+    this.allowFullAccess = opts.allowFullAccess ?? (() => false);
   }
 
   detect(): Promise<RuntimeInfo> {
@@ -221,6 +248,12 @@ export class ClaudeCodeRuntime implements AgentRuntime {
    * throw-away query that never sends a turn. Cached for 10 minutes; null when the CLI is missing or signed out.
    */
   async catalog(): Promise<RuntimeCatalog | null> {
+    // The modes follow the device opt-in at the moment of asking, not when the catalog was collected.
+    const value = await this.collectCatalog();
+    return value && { ...value, permissionModes: [...this.capabilities.supportsPermissionModes] };
+  }
+
+  private async collectCatalog(): Promise<RuntimeCatalog | null> {
     if (this.catalogCache && Date.now() - this.catalogCache.at < CATALOG_TTL_MS)
       return this.catalogCache.value;
     if (this.catalogInFlight) return this.catalogInFlight;
@@ -270,6 +303,10 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     const session: Session = {
       id: options.sessionId,
       cwd: options.cwd,
+      resumeId: options.resumeRuntimeSessionId ?? null,
+      runtimeModel: options.model,
+      bypass: mode.data === "fullAccess",
+      retired: new WeakSet(),
       input,
       mapper: new ClaudeEventMapper(),
       sink,
@@ -308,33 +345,84 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     if (options.contextWindow !== undefined) initial.contextWindow = options.contextWindow;
     if (Object.keys(initial).length > 0) session.pending = initial;
 
-    const sdkOptions: Options = {
-      cwd: options.cwd,
-      permissionMode: sdkPermissionMode(mode.data),
-      allowDangerouslySkipPermissions: false,
-      includePartialMessages: true,
-      canUseTool: this.makeCanUseTool(session),
-      hooks: { PreToolUse: [{ hooks: [this.makePreToolUseHook(session)] }] },
-      // No UI can answer free-form questions yet; the model must ask in its reply instead.
-      disallowedTools: ["AskUserQuestion"],
-      // Project settings + CLAUDE.md only. User/local settings could carry personal allow-rules
-      // (or defaultMode) that would bypass the platform approval gate.
-      settingSources: ["project"],
-      settings: { permissions: { deny: secretDenyRules(), disableBypassPermissionsMode: "disable" } },
-      env: childEnv(process.env, this.opts.useApiKey ?? false),
-      abortController: abort,
-      stderr: (data: string) =>
-        this.log.debug(`[claude-code ${options.sessionId}] ${redact(data.trimEnd())}`),
-    };
-    if (options.model) sdkOptions.model = options.model;
-    if (options.resumeRuntimeSessionId) sdkOptions.resume = options.resumeRuntimeSessionId;
-    if (this.claudePath) sdkOptions.pathToClaudeCodeExecutable = this.claudePath;
-
+    const sdkOptions = this.launchOptions(session, mode.data, session.resumeId);
     const q = this.queryFn({ prompt: input, options: sdkOptions });
     session.q = q;
     this.sessions.set(session.id, session);
     this.emit(session, { type: "session.state", status: "idle" });
     session.done = this.consume(session, q);
+  }
+
+  /**
+   * The CLI launch options for `mode`, the ONLY place bypass can be requested (ADR-0012): `fullAccess` with the
+   * device gate open → `bypassPermissions` + `allowDangerouslySkipPermissions`, keeping the secret deny rules, the
+   * PreToolUse hook and canUseTool (D-04); anything else → bypass disabled outright.
+   */
+  private launchOptions(s: Session, mode: PermissionMode, resume: string | null): Options {
+    const bypass = mode === "fullAccess";
+    if (bypass && !this.allowFullAccess()) {
+      throw new RuntimeError("Full access is not enabled on this device", "permission_mode_rejected");
+    }
+    const o: Options = {
+      cwd: s.cwd,
+      permissionMode: bypass ? "bypassPermissions" : sdkPermissionMode(mode),
+      allowDangerouslySkipPermissions: bypass,
+      includePartialMessages: true,
+      canUseTool: this.makeCanUseTool(s),
+      hooks: { PreToolUse: [{ hooks: [this.makePreToolUseHook(s)] }] },
+      // No UI can answer free-form questions yet; the model must ask in its reply instead.
+      disallowedTools: ["AskUserQuestion"],
+      // Project settings + CLAUDE.md only. User/local settings could carry personal allow-rules
+      // (or defaultMode) that would bypass the platform approval gate.
+      settingSources: ["project"],
+      settings: {
+        permissions: bypass
+          ? { deny: secretDenyRules() }
+          : { deny: secretDenyRules(), disableBypassPermissionsMode: "disable" },
+      },
+      env: childEnv(process.env, this.opts.useApiKey ?? false),
+      abortController: s.abort,
+      stderr: (data: string) => this.log.debug(`[claude-code ${s.id}] ${redact(data.trimEnd())}`),
+    };
+    if (s.runtimeModel) o.model = s.runtimeModel;
+    if (resume) o.resume = resume;
+    if (this.claudePath) o.pathToClaudeCodeExecutable = this.claudePath;
+    return o;
+  }
+
+  /**
+   * P-11: bypass availability is fixed when the CLI starts, so entering or leaving fullAccess replaces the process
+   * between turns: the current query is closed (its end is not reported as the session's end), a new one resumes
+   * the same runtime session with the launch options of `mode`, and the flag settings it ran with are re-applied.
+   */
+  private async relaunch(s: Session, mode: PermissionMode): Promise<void> {
+    const options = this.launchOptions(s, mode, s.mapper.runtimeSessionId ?? s.resumeId);
+    const old = s.q;
+    if (old) s.retired.add(old);
+    s.input.close();
+    try {
+      old?.close();
+    } catch {
+      // already closed
+    }
+    await s.done.catch(() => undefined);
+    if (s.stopping) throw new RuntimeError("session is stopping", "invalid_state");
+    s.abort = new AbortController();
+    options.abortController = s.abort;
+    s.input = new AsyncQueue<SDKUserMessage>();
+    const q = this.queryFn({ prompt: s.input, options });
+    s.q = q;
+    s.bypass = mode === "fullAccess";
+    s.applied.permissionMode = mode;
+    s.done = this.consume(s, q);
+    this.log.info("claude-code relaunched for a permission mode change", {
+      sessionId: s.id,
+      fullAccess: s.bypass,
+    });
+    const flags: { effortLevel?: SdkEffortLevel | null; fastMode?: boolean } = {};
+    if (s.applied.effort !== null) flags.effortLevel = s.applied.effort as SdkEffortLevel;
+    if (s.applied.fastMode) flags.fastMode = true;
+    if (Object.keys(flags).length > 0) await q.applyFlagSettings(flags);
   }
 
   async prompt(sessionId: string, prompt: PromptPayload): Promise<void> {
@@ -514,6 +602,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       const window = patch.contextWindow !== undefined ? patch.contextWindow : s.configured.contextWindow;
       const target = await this.resolveModel(model, window, patch.contextWindow !== undefined);
       await q.setModel(target.runtimeModel);
+      s.runtimeModel = target.runtimeModel;
       s.configured.model = s.applied.model = model;
       s.configured.contextWindow = target.requested;
       s.applied.contextWindow = target.reported;
@@ -582,11 +671,23 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     return this.catalogCache?.value ?? null;
   }
 
-  /** Puts the runtime in `min(configured mode, cap)` (P-07); no request when it already runs that mode. */
+  /**
+   * Puts the runtime in `min(configured mode, cap)` (P-07); no request when it already runs that mode. A turn in
+   * fullAccess needs the device gate open right now; crossing the fullAccess boundary relaunches the CLI (P-11).
+   */
   private async syncMode(s: Session, cap: PermissionMode | undefined): Promise<void> {
     const target = cap ? minMode(s.configured.permissionMode, cap) : s.configured.permissionMode;
+    const full = target === "fullAccess";
+    if (full && !this.allowFullAccess()) {
+      throw new RuntimeError("Full access is not enabled on this device", "permission_mode_rejected");
+    }
+    if (full !== s.bypass) {
+      await this.relaunch(s, target);
+      return;
+    }
     if (target === s.applied.permissionMode) return;
-    await s.q?.setPermissionMode(sdkPermissionMode(target));
+    // Only an authorized bypass process may be put back into bypass (e.g. after the runtime left it by itself).
+    await s.q?.setPermissionMode(full ? "bypassPermissions" : sdkPermissionMode(target));
     s.applied.permissionMode = target;
   }
 
@@ -607,12 +708,10 @@ export class ClaudeCodeRuntime implements AgentRuntime {
   private async consume(s: Session, q: QueryHandle): Promise<void> {
     try {
       for await (const message of q) {
-        if (
-          message.type === "system" &&
-          message.subtype === "init" &&
-          message.permissionMode === "bypassPermissions"
-        ) {
-          // Must never happen (we never request it and disable it); fail closed if it does.
+        if (s.retired.has(q)) break;
+        if (reportsBypass(message) && !this.bypassAuthorized(s)) {
+          // D-03 (replaced, not deleted): bypass that did not come through an authorized fullAccess launch
+          // (repo settings, a runtime bug) fails closed.
           this.emit(s, {
             type: "session.error",
             message: "Runtime reported bypassPermissions mode; session aborted.",
@@ -639,10 +738,17 @@ export class ClaudeCodeRuntime implements AgentRuntime {
           this.emit(s, ev);
         }
       }
+      if (s.retired.has(q)) return; // replaced by a relaunch: not the session's end
       this.finish(s, s.stopping ? null : "Claude Code process exited unexpectedly");
     } catch (err) {
+      if (s.retired.has(q)) return;
       this.finish(s, s.stopping ? null : errorMessage(err));
     }
+  }
+
+  /** The running process is an authorized fullAccess launch and the device opt-in is still on. */
+  private bypassAuthorized(s: Session): boolean {
+    return s.bypass && s.applied.permissionMode === "fullAccess" && this.allowFullAccess();
   }
 
   private async onTurnComplete(s: Session): Promise<void> {
@@ -775,9 +881,17 @@ export function refuseSlashCommand(text: string): void {
   );
 }
 
+/** A system frame (init or status) saying the CLI runs `bypassPermissions`. */
+function reportsBypass(message: SDKMessage): boolean {
+  if (message.type !== "system") return false;
+  const m = message as { subtype?: unknown; permissionMode?: unknown };
+  return (m.subtype === "init" || m.subtype === "status") && m.permissionMode === "bypassPermissions";
+}
+
 /**
- * Platform mode → SDK mode. `fullAccess` is refused here until ADR-0012's path is wired in this adapter
- * (Plan 06): it never becomes `bypassPermissions` by accident.
+ * Platform mode → SDK mode for `setPermissionMode` and non-bypass launches. `fullAccess` is always refused here:
+ * it becomes `bypassPermissions` only through `launchOptions` / an authorized bypass process (ADR-0012), never by
+ * accident.
  */
 export function sdkPermissionMode(mode: PermissionMode): SdkPermissionMode {
   if (mode === "fullAccess") {

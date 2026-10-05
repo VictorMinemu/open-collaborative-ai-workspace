@@ -109,8 +109,8 @@ export const CLAUDE_CODE_CONTROLS: readonly RuntimeControlRow[] = [
     "Full access (bypassPermissions)",
     "exposed",
     "mode.fullAccess",
-    "ADR-0012 path: org policy ∩ device opt-in ∩ grain; adapters report it only on opted-in devices (Plan 06)",
-    "PermissionMode 'bypassPermissions' + allowDangerouslySkipPermissions: sdk.d.ts:2479-2481; ADR-0012",
+    "ADR-0012 path: org policy ∩ device opt-in ∩ grain (server) and the daemon's own opt-in check (device); offered only on opted-in devices",
+    "Adapter path: claude-runtime.ts launchOptions + relaunch with resume between turns (bypassPermissions + allowDangerouslySkipPermissions, secret deny rules and PreToolUse hook kept), unauthorized bypass init aborts; PermissionMode 'bypassPermissions': sdk.d.ts:1987-2003; real-turn check manual-only (03.2-VALIDATION.md)",
   ),
   row(
     "dontAsk permission mode",

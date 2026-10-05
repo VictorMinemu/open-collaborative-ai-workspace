@@ -5,7 +5,8 @@
 // The reviewer is always explicit: the owner's own Codex config may default it to `auto_review` (seen in the
 // plan-read fixture), which would silently turn Supervised into an automatic review.
 //
-// `fullAccess` (danger-full-access + never) is NOT in this table: Plan 06 owns ADR-0012's authorized path.
+// `fullAccess` (danger-full-access + never) is the ADR-0012 row: the adapter uses it only for an authorized
+// fullAccess thread or turn while the device's own opt-in is on; nothing else maps to an unrestricted policy.
 
 import type { PermissionMode } from "@ocw/contracts";
 import type { ApprovalsReviewer } from "./generated/v2/ApprovalsReviewer.js";
@@ -13,9 +14,15 @@ import type { AskForApproval } from "./generated/v2/AskForApproval.js";
 import type { SandboxMode } from "./generated/v2/SandboxMode.js";
 import type { SandboxPolicy } from "./generated/v2/SandboxPolicy.js";
 
-/** Platform modes this table maps (everything except fullAccess). */
-export type CodexPolicyMode = Exclude<PermissionMode, "fullAccess">;
-export const CODEX_POLICY_MODES: readonly CodexPolicyMode[] = ["plan", "default", "acceptEdits", "auto"];
+/** Platform modes this table maps (all of them; fullAccess only through ADR-0012's path). */
+export type CodexPolicyMode = PermissionMode;
+/** The restricted modes: none of them ever yields a full-access sandbox or the `never` policy. */
+export const CODEX_POLICY_MODES: readonly Exclude<PermissionMode, "fullAccess">[] = [
+  "plan",
+  "default",
+  "acceptEdits",
+  "auto",
+];
 
 export interface CodexModePolicy {
   /** `thread/start` / `thread/resume` field. */
@@ -67,6 +74,13 @@ export function codexModePolicy(mode: CodexPolicyMode, cwd: string): CodexModePo
         sandboxPolicy: workspaceWrite(cwd),
         approvalPolicy: "on-request",
         approvalsReviewer: "auto_review",
+      };
+    case "fullAccess": // ADR-0012: no sandbox, never asks (authorized turns only)
+      return {
+        sandbox: "danger-full-access",
+        sandboxPolicy: { type: "dangerFullAccess" },
+        approvalPolicy: "never",
+        approvalsReviewer: "user",
       };
     default:
       throw new Error(`no Codex policy for permission mode ${String(mode)}`);
