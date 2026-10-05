@@ -174,3 +174,66 @@ export function DefaultTag() {
     </span>
   );
 }
+
+/**
+ * One selectable row of a surface. Disabled rows stay focusable (`aria-disabled`) and show why as secondary
+ * text, so nobody has to guess what the organization or the device refused.
+ */
+export function SurfaceOption({
+  selected,
+  disabled = false,
+  onSelect,
+  children,
+  secondary,
+  reason,
+  className,
+  ...rest
+}: {
+  selected: boolean;
+  disabled?: boolean;
+  onSelect: () => void;
+  children: ReactNode;
+  secondary?: ReactNode;
+  reason?: string | null;
+  className?: string;
+} & Omit<ComponentProps<"button">, "onSelect" | "children" | "disabled" | "className">) {
+  return (
+    <button
+      type="button"
+      role="option"
+      data-surface-item
+      aria-selected={selected}
+      aria-disabled={disabled}
+      onClick={() => {
+        if (!disabled) onSelect();
+      }}
+      className={cn(
+        "flex w-full flex-col items-start gap-0.5 rounded-lg px-2.5 py-1.5 text-left outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/30",
+        selected ? "bg-accent" : "hover:bg-accent/60",
+        disabled && "cursor-not-allowed hover:bg-transparent",
+        className,
+      )}
+      {...rest}
+    >
+      <span
+        className={cn(
+          "flex max-w-full items-center gap-2 text-[14px] leading-6",
+          disabled ? "text-muted-foreground" : "text-foreground",
+        )}
+      >
+        {children}
+      </span>
+      {secondary ? (
+        <span className="max-w-full text-[12.5px] text-muted-foreground leading-snug">{secondary}</span>
+      ) : null}
+      {reason ? (
+        <span
+          data-reason
+          className="max-w-full text-[12px] text-amber-700 leading-snug dark:text-amber-300/90"
+        >
+          {reason}
+        </span>
+      ) : null}
+    </button>
+  );
+}

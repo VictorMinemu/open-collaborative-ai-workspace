@@ -1,16 +1,22 @@
 "use client";
 
 import type { WorkSession } from "@ocw/contracts";
-import { ArrowUp, ListPlus, Square } from "lucide-react";
+import { ArrowUp, ListPlus, Paperclip, Square } from "lucide-react";
 import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
-import { useInterrupt, useQueuePrompt, useSessionCommand } from "@/lib/workzone-queries";
+import { useInterrupt, useQueuePrompt, useSessionCommand, useSessionControls } from "@/lib/workzone-queries";
+import { useSheetSurface } from "./control-surface";
 import { RUNTIMES } from "./meta";
 import { ModelPicker } from "./model-picker";
+import { PermissionMenu } from "./permission-menu";
+import { ReasoningMenu } from "./reasoning-menu";
+
+/** Thin divider between the composer chips (ref-1). */
+const ChipDivider = () => <span aria-hidden className="mx-0.5 h-4 w-px shrink-0 bg-border" />;
 
 /** Adds prompts to the session's SHARED queue; they run one at a time on the host device. */
 export function Composer({
@@ -26,6 +32,8 @@ export function Composer({
   const queue = useQueuePrompt(session.id);
   const command = useSessionCommand(session.id);
   const interrupt = useInterrupt(session.id);
+  const controls = useSessionControls(session.id);
+  const phone = useSheetSurface();
   const [text, setText] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
   const busy = session.status === "running" || session.status === "waiting_approval";
@@ -71,13 +79,23 @@ export function Composer({
     }
   }
 
-  const hint = session.settings.pending
-    ? "Applies to the next turn"
-    : session.status === "host_offline"
+  const hint =
+    session.status === "host_offline"
       ? `${session.deviceName} is offline — prompts wait in the queue`
       : willQueue
         ? `Will run after the current turn · #${queued + 1} in queue`
         : `Runs on ${session.deviceName} · ${RUNTIMES[session.runtime].subscription.replace(" on this device", "")}`;
+
+  // D-14: a change accepted while a turn runs waits for the next one; every controller sees it until the device reports.
+  const pendingMarker = (
+    <span
+      data-testid="settings-pending"
+      className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-full bg-warning/12 px-2 font-medium text-[11.5px] text-amber-800 dark:text-amber-300"
+    >
+      <span aria-hidden className="size-1.5 rounded-full bg-warning" />
+      Applies to the next turn
+    </span>
+  );
 
   return (
     <form
@@ -97,15 +115,57 @@ export function Composer({
           aria-label="Prompt"
           className="block max-h-[220px] min-h-[56px] w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-[14px] outline-none placeholder:text-muted-foreground/70"
         />
-        <div className="flex items-end gap-1.5 px-2 pb-2">
-          {/* Session controls (D-16, ref-1): model · reasoning · permission, driven only by GET /controls. */}
+        {/* Session controls (D-16, ref-1): model · reasoning · permission, driven only by GET /controls. On a phone
+            the bar takes two rows (model · reasoning, then permission and the actions) so no chip is cut. */}
+        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 px-2 pb-2">
           <div
             data-testid="composer-controls"
-            className="flex min-w-0 flex-1 flex-wrap items-center gap-x-0.5 gap-y-1"
+            className="flex min-w-0 basis-full items-center sm:basis-auto sm:flex-1"
           >
             <ModelPicker session={session} disabled={archived || !canConfigure} />
+            {controls.data ? (
+              <>
+                {/* Renders nothing (divider included) for a model without efforts, windows or fast mode. */}
+                <ReasoningMenu
+                  session={session}
+                  controls={controls.data}
+                  disabled={archived || !canConfigure}
+                  leading={<ChipDivider />}
+                />
+                {phone ? null : (
+                  <>
+                    <ChipDivider />
+                    <PermissionMenu
+                      session={session}
+                      controls={controls.data}
+                      disabled={archived || !canConfigure}
+                    />
+                  </>
+                )}
+              </>
+            ) : null}
           </div>
-          <div className="flex shrink-0 items-center gap-1.5">
+          {phone && controls.data ? (
+            <PermissionMenu session={session} controls={controls.data} disabled={archived || !canConfigure} />
+          ) : null}
+          <div className="ml-auto flex shrink-0 items-center gap-1.5">
+            {session.settings.pending && !phone ? pendingMarker : null}
+            {/* Attachments are deferred in the inventory (ui.composer.attach): shown, disabled, never faked. */}
+            <Tooltip content="Attachments arrive with file uploads">
+              <span className="inline-flex">
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  disabled
+                  data-testid="attach"
+                  aria-label="Attach files (Attachments arrive with file uploads)"
+                  className="rounded-full text-muted-foreground disabled:opacity-45"
+                >
+                  <Paperclip className="size-[18px]" />
+                </Button>
+              </span>
+            </Tooltip>
             {busy ? (
               <Tooltip content="Interrupt the current turn">
                 <Button
@@ -138,8 +198,12 @@ export function Composer({
           </div>
         </div>
       </div>
-      <p data-testid="composer-hint" className="truncate px-3 pt-1.5 text-[11.5px] text-muted-foreground">
-        {hint}
+      <p
+        data-testid="composer-hint"
+        className="flex min-w-0 items-center gap-2 px-3 pt-1.5 text-[11.5px] text-muted-foreground"
+      >
+        {session.settings.pending && phone ? pendingMarker : null}
+        <span className="truncate">{hint}</span>
       </p>
     </form>
   );
