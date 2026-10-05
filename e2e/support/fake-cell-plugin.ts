@@ -41,6 +41,15 @@ export interface FakeCellSnapshot {
     models: string[];
   }>;
   subscriptions?: Array<{ id: string; kind: string; runtimeProvider: string; models: string[] }>;
+  /** Org-enabled MCP servers with their header VALUES (cell token only, 03.1-10). */
+  mcpServers?: Array<{
+    id: string;
+    safeName: string;
+    transport: string;
+    url: string;
+    headers: Array<{ name: string; envName: string; value: string }>;
+    tools: string[];
+  }>;
 }
 
 export interface MentionPayload {
@@ -90,6 +99,20 @@ export interface FakeCellOptions {
   afterSeq?: number;
   /** Handle `provider.auth.start|cancel|revoke` like apps/openclaw-channel does (device-code sign-in). */
   deviceAuth?: FakeDeviceAuthOptions;
+  /**
+   * Simulate the marketplace executor (03.1-12): `plugin.install.v1` reports `installing`, then `installed` with
+   * `declaredTools = pluginTools["<package>@<version>"] ?? pluginTools[package] ?? []`; `plugin.uninstall.v1` reports `uninstalled`. Unset = the
+   * plugin events are ignored (an older cell).
+   */
+  pluginTools?: Record<string, string[]>;
+  /** Delay before each plugin report and each probe, so a browser can see `Installing` / `Probing` (default 1200 ms). */
+  stepMs?: number;
+  /**
+   * Simulate the MCP probe (03.1-10): on `mcp.probe`, find the server in `GET /cell`, rewrite its `host:port`
+   * through this map (e.g. `fake-mcp:4291` → `127.0.0.1:4291`), run `initialize` + `tools/list` over streamable
+   * HTTP with the snapshot's headers and POST `/mcp/probe-results`. Unset = probes are ignored.
+   */
+  hostMap?: Record<string, string>;
 }
 
 /**
@@ -164,6 +187,9 @@ export class FakeCellPlugin {
   /** Every `POST /provider-auth` report sent, with the HTTP status it got. */
   readonly authReports: Array<{ status: number; body: Record<string, unknown> }> = [];
   readonly revoked: string[] = [];
+  /** Every `POST /plugins/report` and `POST /mcp/probe-results` sent, with the HTTP status it got. */
+  readonly pluginReports: Array<{ status: number; body: Record<string, unknown> }> = [];
+  readonly probeReports: Array<{ status: number; body: Record<string, unknown> }> = [];
   private readonly flows = new Map<string, AbortController>();
   private readonly reporterId = `fake-${Math.random().toString(36).slice(2, 12)}`;
   private ws: WebSocket | null = null;
@@ -283,6 +309,10 @@ export class FakeCellPlugin {
             : (this.opts.replyText ?? identityReply)(m);
         await this.reply(m, body + turnToolsSuffix(m) + turnContextSuffix(m));
       }
+      if (this.opts.pluginTools && (type === "plugin.install.v1" || type === "plugin.uninstall.v1")) {
+        await this.runPluginFlow(type, data);
+      }
+      if (this.opts.hostMap && type === "mcp.probe") await this.runMcpProbe(data);
       if (this.opts.deviceAuth) {
         if (type === "provider.auth.start") void this.runDeviceFlow(data);
         if (type === "provider.auth.cancel") this.flows.get(String(data.flowId))?.abort();
@@ -300,8 +330,8 @@ export class FakeCellPlugin {
    * Simulates the cell running each `[[call <tool> <json>]]` of a mention, the way apps/openclaw-channel does:
    * a tool is offered only when it (or a name ending in `__<tool>`) is in `turn.tools`; `ocw_memory_save` posts
    * `{eventId, agentId, text}` to `/agent-channel/v1/memories`; any other tool asks `/agent-channel/v1/tool-calls`
-   * and, when allowed, reports a result. One line per call:
-   * `Tool <name>: allowed | saved | denied (<reason>) | not offered`.
+   * and, when allowed, reports a result. One line per call: `Tool <offered name>: allowed | denied (<reason>)`,
+   * `Tool <name>: saved | not offered`.
    */
   async simulateToolCalls(
     m: MentionPayload,
@@ -336,8 +366,9 @@ export class FakeCellPlugin {
         "/tool-calls",
         { eventId: m.eventId, agentId: m.agent.id, tool: name, params },
       );
+      // The line names the tool the turn offered (`<safe>__echo` for an MCP tool), like the gate saw it.
       if (res.status !== 200 || !res.body.allowed || !res.body.callId) {
-        lines.push(`Tool ${call.tool}: denied (${res.body.reason ?? res.status})`);
+        lines.push(`Tool ${name}: denied (${res.body.reason ?? res.status})`);
         continue;
       }
       await this.request("POST", `/tool-calls/${res.body.callId}/result`, {
@@ -345,9 +376,122 @@ export class FakeCellPlugin {
         resultCount: 0,
         durationMs: 1,
       });
-      lines.push(`Tool ${call.tool}: allowed`);
+      lines.push(`Tool ${name}: allowed`);
     }
     return lines;
+  }
+
+  private step() {
+    return new Promise((r) => setTimeout(r, this.opts.stepMs ?? 1200));
+  }
+
+  /** The marketplace executor, simulated: no download, no OpenClaw; the API re-scores the report as usual. */
+  private async runPluginFlow(type: string, data: FakeCellEvent["data"]) {
+    const step = () => this.step();
+    const report = async (body: Record<string, unknown>) => {
+      const res = await this.request("POST", "/plugins/report", body);
+      this.pluginReports.push({ status: res.status, body });
+      this.notify();
+      return res;
+    };
+    const flowId = String(data.flowId);
+    const pluginRowId = String(data.pluginRowId);
+    if (type === "plugin.uninstall.v1") {
+      await step();
+      await report({ flowId, pluginRowId, state: "uninstalled", pluginId: String(data.pluginId) });
+      return;
+    }
+    const packageName = String(data.packageName);
+    await step();
+    await report({ flowId, pluginRowId, state: "installing" });
+    await step();
+    const tools =
+      this.opts.pluginTools?.[`${packageName}@${String(data.version)}`] ??
+      this.opts.pluginTools?.[packageName] ??
+      [];
+    await report({
+      flowId,
+      pluginRowId,
+      state: "installed",
+      pluginId: typeof data.expectedPluginId === "string" ? data.expectedPluginId : packageName,
+      version: String(data.version),
+      declaredTools: tools.map((name) => ({ name })),
+    });
+  }
+
+  /** The MCP probe, simulated with plain JSON-RPC over fetch (the fake MCP answers single JSON responses). */
+  private async runMcpProbe(data: FakeCellEvent["data"]) {
+    const probeId = String(data.probeId);
+    const serverId = String(data.serverId);
+    await this.step();
+    const cell = await this.fetchCell();
+    const server = cell.mcpServers?.find((s) => s.id === serverId);
+    const send = async (body: Record<string, unknown>) => {
+      const res = await this.request("POST", "/mcp/probe-results", body);
+      this.probeReports.push({ status: res.status, body });
+      this.notify();
+    };
+    if (!server) {
+      await send({ probeId, serverId, ok: false, error: "The cell does not know this MCP server." });
+      return;
+    }
+    const url = new URL(server.url);
+    const mapped = this.opts.hostMap?.[url.host];
+    if (mapped) url.host = mapped;
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+    };
+    for (const h of server.headers) headers[h.name] = h.value;
+    let session: string | null = null;
+    const rpc = async (id: number | null, method: string, params: Record<string, unknown> = {}) => {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { ...headers, ...(session ? { "mcp-session-id": session } : {}) },
+        body: JSON.stringify({ jsonrpc: "2.0", ...(id === null ? {} : { id }), method, params }),
+        redirect: "error",
+      });
+      if (res.status === 401 || res.status === 403) {
+        throw new Error(
+          `The MCP server refused the credentials (HTTP ${res.status}). Check the header values.`,
+        );
+      }
+      if (!res.ok && res.status !== 202) throw new Error(`The MCP server answered HTTP ${res.status}.`);
+      session = res.headers.get("mcp-session-id") ?? session;
+      const text = await res.text();
+      return text ? (JSON.parse(text) as { result?: Record<string, unknown> }) : {};
+    };
+    try {
+      await rpc(1, "initialize", {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "ocw-fake-cell", version: "1.0.0" },
+      });
+      await rpc(null, "notifications/initialized");
+      const listed = await rpc(2, "tools/list");
+      const tools = ((listed.result?.tools as Array<Record<string, unknown>> | undefined) ?? []).map((t) => ({
+        name: String(t.name),
+        ...(typeof t.title === "string" ? { title: t.title } : {}),
+        ...(typeof t.description === "string" ? { description: t.description } : {}),
+        ...(t.annotations && typeof t.annotations === "object"
+          ? {
+              annotations: {
+                readOnlyHint: (t.annotations as { readOnlyHint?: boolean }).readOnlyHint === true,
+                destructiveHint: (t.annotations as { destructiveHint?: boolean }).destructiveHint === true,
+              },
+            }
+          : {}),
+      }));
+      await send({ probeId, serverId, ok: true, tools });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await send({
+        probeId,
+        serverId,
+        ok: false,
+        error: /fetch failed/i.test(message) ? "Could not reach the MCP server." : message.slice(0, 300),
+      });
+    }
   }
 
   async reportAuth(body: Record<string, unknown>) {

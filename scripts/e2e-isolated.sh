@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Isolated e2e stack for executors. It never touches the owner's running demo: it uses its own database
 # (ocw_e2e) in the existing compose postgres, Redis logical DB 9, API 127.0.0.1:4290, web 127.0.0.1:3290
-# built into apps/web/.next-e2e, and a machine-wide lock so concurrent runs queue. CI does not use it.
+# built into apps/web/.next-e2e, the fake model/MCP/ClawHub server (infra/fake-model) on 127.0.0.1:4291, and a
+# machine-wide lock so concurrent runs queue. CI does not use it.
 #   bash scripts/e2e-isolated.sh [--keep-db] [--rebuild-web] [playwright args...]
 #   bash scripts/e2e-isolated.sh [--keep-db] --cmd "<shell command run against the stack>"
 set -euo pipefail
@@ -11,6 +12,7 @@ E2E_DB=ocw_e2e          # the ONLY database this script may drop; never paramete
 E2E_REDIS_DB=9
 API_PORT=4290           # Node fetch blocks some ports (e.g. 4190); 4290/3290 are verified usable
 WEB_PORT=3290
+FAKE_PORT=4291          # fake model + fake MCP (/mcp, bearer FAKE_MCP_TOKEN) + fake ClawHub (/api/v1/*)
 WEB_DIST=.next-e2e
 LOCK=/tmp/ocw-e2e.lock
 
@@ -52,7 +54,7 @@ stop_pid() {
   kill -TERM "$pid" 2>/dev/null || true
 }
 cleanup() {
-  stop_pid "$RUN_DIR/web.pid"; stop_pid "$RUN_DIR/api.pid"
+  stop_pid "$RUN_DIR/web.pid"; stop_pid "$RUN_DIR/api.pid"; stop_pid "$RUN_DIR/fake.pid"
   release_lock
   echo "e2e-isolated: logs in $RUN_DIR"
 }
@@ -76,8 +78,11 @@ export OCW_TRUSTED_ORIGINS="" OCW_MODEL_PROVIDER=mock HOST=127.0.0.1 PORT="$API_
 # Every spec signs real browsers in from 127.0.0.1; production keeps the default (30/min).
 export OCW_SIGNIN_RATE_LIMIT_PER_MINUTE="${OCW_SIGNIN_RATE_LIMIT_PER_MINUTE:-600}"
 export OCW_E2E_BASE_URL="$OCW_PUBLIC_WEB_URL" OCW_E2E_API_URL="$OCW_PUBLIC_API_URL" OCW_API_URL="$OCW_PUBLIC_API_URL"
+# The marketplace and MCP specs: the API proxies the fake ClawHub; the simulated cell probes the fake MCP.
+export OCW_E2E_FAKE_URL="http://127.0.0.1:$FAKE_PORT" OCW_CLAWHUB_URL="http://127.0.0.1:$FAKE_PORT"
+export OCW_E2E_FAKE_MCP_TOKEN="e2e-mcp-token"
 
-for p in "$API_PORT" "$WEB_PORT"; do
+for p in "$API_PORT" "$WEB_PORT" "$FAKE_PORT"; do
   if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
     echo "e2e-isolated: port $p is busy (not started by this run); stop that process and retry"; exit 1
   fi
@@ -118,15 +123,17 @@ if [ "$need_build" -eq 1 ]; then
   (cd apps/web && OCW_NEXT_DIST_DIR="$WEB_DIST" pnpm build) >"$RUN_DIR/web-build.log" 2>&1 || { tail -60 "$RUN_DIR/web-build.log"; exit 1; }
 fi
 
-# ---------------------------------------------------------------- API + web
+# ---------------------------------------------------------------- fake server + API + web
+(PORT="$FAKE_PORT" FAKE_MODEL_HOST=127.0.0.1 FAKE_MCP_TOKEN="$OCW_E2E_FAKE_MCP_TOKEN" nohup node infra/fake-model/server.mjs >"$RUN_DIR/fake.log" 2>&1 & echo $! >"$RUN_DIR/fake.pid")
 (cd apps/api && nohup node --env-file-if-exists=../../.env --import tsx src/main.ts >"$RUN_DIR/api.log" 2>&1 & echo $! >"$RUN_DIR/api.pid")
 (cd apps/web && OCW_NEXT_DIST_DIR="$WEB_DIST" nohup node --env-file-if-exists=../../.env ./node_modules/next/dist/bin/next start -p "$WEB_PORT" -H 127.0.0.1 >"$RUN_DIR/web.log" 2>&1 & echo $! >"$RUN_DIR/web.pid")
 ready=0
 for _ in $(seq 1 90); do
-  if curl -sf "$OCW_E2E_API_URL/health" >/dev/null && curl -sf -o /dev/null "$OCW_E2E_BASE_URL/login"; then ready=1; break; fi
+  if curl -sf "$OCW_E2E_API_URL/health" >/dev/null && curl -sf -o /dev/null "$OCW_E2E_BASE_URL/login" \
+    && curl -sf -o /dev/null "$OCW_E2E_FAKE_URL/v1/models"; then ready=1; break; fi
   sleep 2
 done
-[ "$ready" -eq 1 ] || { tail -40 "$RUN_DIR/api.log"; tail -40 "$RUN_DIR/web.log"; exit 1; }
+[ "$ready" -eq 1 ] || { tail -40 "$RUN_DIR/api.log"; tail -40 "$RUN_DIR/web.log"; tail -20 "$RUN_DIR/fake.log"; exit 1; }
 
 # ---------------------------------------------------------------- run
 status=0

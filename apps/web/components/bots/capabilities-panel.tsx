@@ -13,6 +13,7 @@ import { errorMessage } from "@/lib/api";
 import { useBotCapabilities, useUpdateBotCapabilities } from "@/lib/capability-queries";
 import { cn } from "@/lib/utils";
 import { reasonText } from "./capability-reason";
+import { ToolsSection } from "./tools-section";
 import { UsageMeter } from "./usage-meter";
 
 type Toggle = "internet" | "memory" | "dateTime";
@@ -39,8 +40,8 @@ const REPLY_MODES: Array<{ value: ReplyMode; label: string }> = [
 ];
 
 /**
- * A bot's capabilities (D-06, D-11, D-16; BOT-04/05/07): internet, memory, date & time, reply mode (team bots),
- * the daily limit and today's usage. Renders only the API's decision: a capability with a `reason` is disabled
+ * A bot's capabilities (D-06, D-11, D-16; BOT-04/05/07/10): internet, memory, date & time, reply mode (team
+ * bots), the daily limit, MCP and plugin tools (`ToolsSection`) and today's usage. Renders only the API's decision: a capability with a `reason` is disabled
  * and explained, never hidden; everything is read-only without `bot.configure` on this bot.
  */
 export function CapabilitiesPanel({ agentId, className }: { agentId: string; className?: string }) {
@@ -122,6 +123,8 @@ export function CapabilitiesPanel({ agentId, className }: { agentId: string; cla
           onSave={(dailyLimit) => save({ dailyLimit }, `Daily limit set to ${dailyLimit}`)}
         />
       </div>
+
+      <ToolsSection view={view} />
 
       <div className="rounded-lg border bg-muted/30 p-3">
         <UsageMeter usage={view.usage} />

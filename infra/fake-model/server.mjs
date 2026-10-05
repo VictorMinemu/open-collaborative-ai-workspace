@@ -25,7 +25,7 @@
 //
 // Fake ClawHub (fake-clawhub.mjs): the marketplace's read-only `/api/v1/*` routes from fixtures/clawhub.
 //
-// Env: PORT (default 18999), FAKE_MODEL_CAPTURE_DIR (optional: write each request body as JSON),
+// Env: PORT (default 18999), FAKE_MODEL_HOST (default 0.0.0.0), FAKE_MODEL_CAPTURE_DIR (optional: write each request body as JSON),
 // FAKE_MCP_TOKEN (optional: the fake MCP routes then require `Authorization: Bearer <token>`),
 // FAKE_CLAWHUB_ARTIFACT_DIR (optional: npm-pack tarballs the fake ClawHub serves, digests computed from them).
 // FAKE_MODEL_DEBUG=1 (optional, off by default: log a short preview of each tool-offering request's messages,
@@ -532,8 +532,10 @@ export function createFakeModelServer(opts = {}) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const server = createFakeModelServer();
-  server.listen(PORT, "0.0.0.0", () =>
-    console.log(`fake-model listening on :${PORT} (models: ${MODELS.join(", ")})`),
+  // FAKE_MODEL_HOST=127.0.0.1 keeps a host-run fake (scripts/e2e-isolated.sh, CI e2e) on loopback.
+  const host = process.env.FAKE_MODEL_HOST || "0.0.0.0";
+  server.listen(PORT, host, () =>
+    console.log(`fake-model listening on ${host}:${PORT} (models: ${MODELS.join(", ")})`),
   );
   const stop = () => server.close(() => process.exit(0));
   process.on("SIGTERM", stop);

@@ -165,7 +165,8 @@ describe("GET /agents/:id/capabilities", () => {
       sideEffecting: false,
       granted: false,
       effective: false,
-      reason: null,
+      // Not granted, and it could not be: Docs is not allowed for personal bots (the UI explains it).
+      reason: "personal_policy",
     });
     expect(v.tools.find((t: Json) => t.tool === `${SAFE}__exec`)).toMatchObject({ reason: "dangerous" });
   });
