@@ -15,7 +15,8 @@ import { ServerFrame } from "./realtime";
  *
  * Routes: `GET /cell`, `GET /ws`, `POST /messages`, `POST /typing`, `POST /agents/:id/status`,
  * `POST /provider-auth`; Phase 3.1 adds `POST /tool-calls` and `POST /tool-calls/:callId/result` (the tool
- * gate, 03.1-04) and `POST /memories` (memory saves, 03.1-07).
+ * gate, 03.1-04), `POST /memories` (memory saves, 03.1-07) and the MCP probe result (`AgentChannelMcpProbeResult`,
+ * route wired by 03.1-10).
  */
 
 export const AGENT_CHANNEL_PROTOCOL_VERSION = 1;
@@ -31,6 +32,8 @@ export const AgentChannelEventTypes = {
   providerAuthCancel: "provider.auth.cancel",
   /** Admin disconnected the subscription: delete the cell's stored credentials for it. */
   providerAuthRevoke: "provider.auth.revoke",
+  /** Phase 3.1 (D-13): discover an MCP server's tools from inside the cell and report them. */
+  mcpProbe: "mcp.probe",
 } as const;
 
 const UUID_RE = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
@@ -184,6 +187,49 @@ export const AgentChannelProviderAuthReport = z.object({
 });
 export type AgentChannelProviderAuthReport = z.infer<typeof AgentChannelProviderAuthReport>;
 
+// ---------------------------------------------------------------- MCP probe (Phase 3.1, D-13, additive)
+
+/**
+ * Admin registered (or changed) an MCP server: the cell connects to it with the `/cell` snapshot's details,
+ * lists its tools and reports them with `AgentChannelMcpProbeResult`. Only the latest probe of a server counts.
+ */
+export const McpProbeEvent = z.object({
+  type: z.literal(AgentChannelEventTypes.mcpProbe),
+  organizationId: Id,
+  cellId: Id,
+  seq: z.number().int().positive(),
+  probeId: Id,
+  serverId: Id,
+});
+export type McpProbeEvent = z.infer<typeof McpProbeEvent>;
+
+/**
+ * The cell's probe report. Tool metadata comes from a third-party server and is untrusted: names are
+ * sanitised and re-checked against the dangerous list by the API; annotations can only make a tool safer to
+ * chain when they say so explicitly (unknown = side-effecting). `error` must never contain header values (the
+ * API redacts them again).
+ */
+export const AgentChannelMcpProbeResult = z.object({
+  probeId: Id,
+  serverId: Id,
+  ok: z.boolean(),
+  error: z.string().max(300).optional(),
+  tools: z
+    .array(
+      z.object({
+        name: z.string().min(1).max(128),
+        title: z.string().max(200).optional(),
+        description: z.string().max(1000).optional(),
+        annotations: z
+          .object({ readOnlyHint: z.boolean().optional(), destructiveHint: z.boolean().optional() })
+          .optional(),
+      }),
+    )
+    .max(200)
+    .optional(),
+});
+export type AgentChannelMcpProbeResult = z.infer<typeof AgentChannelMcpProbeResult>;
+
 // ---------------------------------------------------------------- WebSocket frames (GET /ws)
 
 /**
@@ -257,6 +303,23 @@ export const CellSubscription = z.object({
 });
 export type CellSubscription = z.infer<typeof CellSubscription>;
 
+/**
+ * An org-enabled MCP server as the cell must render it (`mcp.servers.<safeName>`, D-13). Header values are
+ * revealed ONLY here, over the authenticated channel: the cell exports each as the env var `envName` and writes
+ * `${envName}` into its config, never the literal value. A sandboxed stdio server arrives as `streamable-http`
+ * on the sandbox sidecar's URL.
+ */
+export const CellMcpServer = z.object({
+  id: Id,
+  safeName: z.string(),
+  transport: z.enum(["streamable-http", "sse"]),
+  url: z.string(),
+  headers: z.array(z.object({ name: z.string(), envName: z.string(), value: z.string() })),
+  /** MCP tool names (not OpenClaw names) enabled on any bot: the server's `toolFilter.include`. */
+  tools: z.array(z.string()),
+});
+export type CellMcpServer = z.infer<typeof CellMcpServer>;
+
 export const CellSnapshot = z.object({
   protocolVersion: z.literal(AGENT_CHANNEL_PROTOCOL_VERSION),
   cellId: Id,
@@ -270,6 +333,8 @@ export const CellSnapshot = z.object({
   subscriptions: z.array(CellSubscription).default([]),
   /** Additive (Phase 3.1, D-09): the org's web search provider (`tools.web.search.provider`). */
   webSearch: z.object({ provider: SearchProvider }).default({ provider: "duckduckgo" }),
+  /** Additive (Phase 3.1, D-13): the org's enabled MCP servers. */
+  mcpServers: z.array(CellMcpServer).default([]),
 });
 export type CellSnapshot = z.infer<typeof CellSnapshot>;
 

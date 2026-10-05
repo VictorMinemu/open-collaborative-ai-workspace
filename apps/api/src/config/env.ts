@@ -99,6 +99,26 @@ export const EnvSchema = z
               .map((x) => x.trim().toLowerCase())
               .filter(Boolean),
       ),
+    /**
+     * Base URL of the optional stdio MCP sandbox sidecar (`ocw-mcp-sandbox`, D-13), as seen from the cell. Without
+     * it admins cannot register `sandboxed-stdio` servers; the sidecar serves each vetted server at
+     * `<url>/<server>/mcp` (streamable HTTP).
+     */
+    OCW_MCP_SANDBOX_URL: z
+      .union([z.literal(""), Url])
+      .optional()
+      .transform((v) => v || null),
+    /** Vetted stdio servers baked into the sandbox image (comma list, e.g. `everything`). */
+    OCW_MCP_SANDBOX_SERVERS: z
+      .string()
+      .default("")
+      .transform((s) =>
+        s
+          .split(",")
+          .map((x) => x.trim())
+          .filter(Boolean),
+      )
+      .pipe(z.array(z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/, "server names are lowercase [a-z0-9_-]"))),
     OCW_ACCEPT_LEGACY_DEVICE_TOKEN: z
       .enum(["true", "false"])
       .default("true")

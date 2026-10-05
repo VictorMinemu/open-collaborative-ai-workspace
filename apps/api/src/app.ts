@@ -30,6 +30,7 @@ import { createBotCapabilitiesModule } from "./modules/bot-capabilities";
 import { createChatModule } from "./modules/chat";
 import { createDeviceModule } from "./modules/device";
 import { createAuth, createIdentityModule, IdentityService } from "./modules/identity";
+import { createMcpModule } from "./modules/mcp";
 import { AuthzDeniedError, createOrganizationModule, recordAuthzDenial } from "./modules/organization";
 import { createRealtimeModule, createRealtimeService } from "./modules/realtime";
 import { createSecretsModule, createSecretsService } from "./modules/secrets";
@@ -228,6 +229,7 @@ export async function buildApp(
     createChatModule(core), // B1
     createAgentModule(core), // B2
     createBotCapabilitiesModule(core), // Phase 3.1: capabilities, bot policy, governance
+    createMcpModule(core), // Phase 3.1: MCP server registry (D-13)
     createAgentChannelModule(core), // B2
     deviceModule, // B3
     createWorkSessionModule(core, deviceModule.hub), // B3

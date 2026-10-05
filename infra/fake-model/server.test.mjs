@@ -286,3 +286,250 @@ describe("HTTP surface", () => {
     assert.equal(body.content[0].text.endsWith("[tools: 1 | t]"), true);
   });
 });
+
+// ---------------------------------------------------------------- fake MCP server (03.1-09, D-13 / D-15)
+
+/** JSON-RPC over the streamable HTTP transport (single JSON responses). */
+async function rpc(base, body, { session, token, protocol } = {}) {
+  const headers = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+  if (session) headers["mcp-session-id"] = session;
+  if (protocol) headers["mcp-protocol-version"] = protocol;
+  if (token) headers.authorization = `Bearer ${token}`;
+  return fetch(`${base}/mcp`, { method: "POST", headers, body: JSON.stringify(body) });
+}
+
+async function initialize(base, opts = {}) {
+  const res = await rpc(
+    base,
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: opts.version ?? "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1" },
+      },
+    },
+    opts,
+  );
+  return { res, body: await res.json(), session: res.headers.get("mcp-session-id") };
+}
+
+/** Reads SSE events (`{event, data}`) from a fetch body until `count` events arrived. */
+async function readEvents(reader, count, state) {
+  const decoder = new TextDecoder();
+  while (state.events.length < count) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    state.buf += decoder.decode(value, { stream: true });
+    let idx = state.buf.indexOf("\n\n");
+    while (idx !== -1) {
+      const block = state.buf.slice(0, idx);
+      state.buf = state.buf.slice(idx + 2);
+      const ev = { event: "message", data: "" };
+      for (const line of block.split("\n")) {
+        if (line.startsWith("event: ")) ev.event = line.slice(7);
+        else if (line.startsWith("data: ")) ev.data += line.slice(6);
+      }
+      if (ev.data) state.events.push(ev);
+      idx = state.buf.indexOf("\n\n");
+    }
+  }
+  return state.events;
+}
+
+describe("fake MCP server: streamable HTTP", () => {
+  let server;
+  let base;
+  before(async () => {
+    server = createFakeModelServer({ mcpToken: "" });
+    await new Promise((r) => server.listen(0, "127.0.0.1", r));
+    base = `http://127.0.0.1:${server.address().port}`;
+  });
+  after(() => {
+    server.closeAllConnections();
+    return new Promise((r) => server.close(r));
+  });
+
+  it("initialize negotiates the protocol version and issues a session id", async () => {
+    const { res, body, session } = await initialize(base);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type"), /application\/json/u);
+    assert.ok(session && session.length >= 16);
+    assert.equal(body.jsonrpc, "2.0");
+    assert.equal(body.id, 1);
+    assert.equal(body.result.protocolVersion, "2025-06-18");
+    assert.ok(body.result.capabilities.tools);
+    assert.equal(body.result.serverInfo.name, "ocw-fake-mcp");
+    // An unsupported version gets the newest supported one.
+    const newest = await initialize(base, { version: "1999-01-01" });
+    assert.equal(newest.body.result.protocolVersion, "2025-11-25");
+  });
+
+  it("notifications/initialized → 202; tools/list returns echo (read-only) and write_note (destructive)", async () => {
+    const { session } = await initialize(base);
+    const note = await rpc(base, { jsonrpc: "2.0", method: "notifications/initialized" }, { session });
+    assert.equal(note.status, 202);
+    const res = await rpc(base, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, { session });
+    assert.equal(res.status, 200);
+    const { result } = await res.json();
+    assert.deepEqual(
+      result.tools.map((t) => t.name),
+      ["echo", "write_note"],
+    );
+    const [echo, writeNote] = result.tools;
+    assert.equal(echo.annotations.readOnlyHint, true);
+    assert.equal(writeNote.annotations.destructiveHint, true);
+    assert.equal(writeNote.annotations.readOnlyHint, false);
+    assert.equal(echo.inputSchema.type, "object");
+    assert.equal(result.nextCursor, undefined);
+  });
+
+  it("tools/call echo and write_note; unknown tools and methods are JSON-RPC errors", async () => {
+    const { session } = await initialize(base);
+    const call = async (id, name, args) =>
+      (
+        await rpc(
+          base,
+          { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } },
+          { session },
+        )
+      ).json();
+    const echo = await call(3, "echo", { text: "hi" });
+    assert.equal(echo.result.content[0].type, "text");
+    assert.equal(echo.result.content[0].text, "echo: hi");
+    assert.notEqual(echo.result.isError, true);
+    const note = await call(4, "write_note", { title: "Plan", text: "Ship it" });
+    assert.equal(note.result.content[0].text, "noted: Plan");
+    const bad = await call(5, "echo", { text: 42 });
+    assert.equal(bad.result.isError, true);
+    const unknown = await call(6, "nope", {});
+    assert.equal(unknown.error.code, -32602);
+    const method = await (
+      await rpc(base, { jsonrpc: "2.0", id: 7, method: "resources/list" }, { session })
+    ).json();
+    assert.equal(method.error.code, -32601);
+    const ping = await (await rpc(base, { jsonrpc: "2.0", id: 8, method: "ping" }, { session })).json();
+    assert.deepEqual(ping.result, {});
+  });
+
+  it("requires the session after initialize; DELETE ends it; GET answers 405", async () => {
+    const missing = await rpc(base, { jsonrpc: "2.0", id: 2, method: "tools/list" });
+    assert.equal(missing.status, 400);
+    const unknown = await rpc(base, { jsonrpc: "2.0", id: 2, method: "tools/list" }, { session: "nope" });
+    assert.equal(unknown.status, 404);
+    const { session } = await initialize(base);
+    const del = await fetch(`${base}/mcp`, { method: "DELETE", headers: { "mcp-session-id": session } });
+    assert.equal(del.status, 204);
+    const after = await rpc(base, { jsonrpc: "2.0", id: 2, method: "tools/list" }, { session });
+    assert.equal(after.status, 404);
+    const get = await fetch(`${base}/mcp`, { headers: { accept: "text/event-stream" } });
+    assert.equal(get.status, 405);
+    const parse = await fetch(`${base}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{not json",
+    });
+    assert.equal(parse.status, 400);
+    assert.equal((await parse.json()).error.code, -32700);
+  });
+
+  it("existing fake-model routes are unchanged", async () => {
+    assert.equal((await fetch(`${base}/health`)).status, 200);
+    assert.equal((await fetch(`${base}/nope`)).status, 404);
+  });
+});
+
+describe("fake MCP server: bearer token (FAKE_MCP_TOKEN)", () => {
+  let server;
+  let base;
+  before(async () => {
+    server = createFakeModelServer({ mcpToken: "fake-mcp-token" });
+    await new Promise((r) => server.listen(0, "127.0.0.1", r));
+    base = `http://127.0.0.1:${server.address().port}`;
+  });
+  after(() => {
+    server.closeAllConnections();
+    return new Promise((r) => server.close(r));
+  });
+
+  it("refuses requests without the bearer token with 401, accepts them with it", async () => {
+    const without = await initialize(base);
+    assert.equal(without.res.status, 401);
+    assert.match(without.res.headers.get("www-authenticate") ?? "", /Bearer/u);
+    const wrong = await initialize(base, { token: "other" });
+    assert.equal(wrong.res.status, 401);
+    const sse = await fetch(`${base}/sse`);
+    assert.equal(sse.status, 401);
+    const ok = await initialize(base, { token: "fake-mcp-token" });
+    assert.equal(ok.res.status, 200);
+    // Model routes never need the MCP token.
+    assert.equal((await fetch(`${base}/v1/models`)).status, 200);
+  });
+});
+
+describe("fake MCP server: legacy HTTP+SSE transport", () => {
+  let server;
+  let base;
+  before(async () => {
+    server = createFakeModelServer({ mcpToken: "" });
+    await new Promise((r) => server.listen(0, "127.0.0.1", r));
+    base = `http://127.0.0.1:${server.address().port}`;
+  });
+  after(() => {
+    server.closeAllConnections();
+    return new Promise((r) => server.close(r));
+  });
+
+  it("GET /sse announces the endpoint; POST /sse/messages answers tools/list on the stream", async () => {
+    const abort = new AbortController();
+    const stream = await fetch(`${base}/sse`, {
+      headers: { accept: "text/event-stream" },
+      signal: abort.signal,
+    });
+    assert.equal(stream.status, 200);
+    assert.match(stream.headers.get("content-type"), /text\/event-stream/u);
+    const reader = stream.body.getReader();
+    const state = { buf: "", events: [] };
+    try {
+      const [endpoint] = await readEvents(reader, 1, state);
+      assert.equal(endpoint.event, "endpoint");
+      assert.match(endpoint.data, /^\/sse\/messages\?sessionId=[\w-]+$/u);
+      const post = (body) =>
+        fetch(new URL(endpoint.data, base), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      const init = await post({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } },
+      });
+      assert.equal(init.status, 202);
+      assert.equal((await post({ jsonrpc: "2.0", method: "notifications/initialized" })).status, 202);
+      assert.equal((await post({ jsonrpc: "2.0", id: 2, method: "tools/list" })).status, 202);
+      const events = await readEvents(reader, 3, state);
+      const [initEv, listEv] = events.slice(1).map((e) => ({ event: e.event, msg: JSON.parse(e.data) }));
+      assert.equal(initEv.event, "message");
+      assert.equal(initEv.msg.result.protocolVersion, "2025-03-26");
+      assert.equal(initEv.msg.result.serverInfo.name, "ocw-fake-mcp");
+      assert.deepEqual(
+        listEv.msg.result.tools.map((t) => t.name),
+        ["echo", "write_note"],
+      );
+      assert.equal(listEv.msg.id, 2);
+      const unknown = await fetch(`${base}/sse/messages?sessionId=nope`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/list" }),
+      });
+      assert.equal(unknown.status, 404);
+    } finally {
+      abort.abort();
+      await reader.cancel().catch(() => {});
+    }
+  });
+});
