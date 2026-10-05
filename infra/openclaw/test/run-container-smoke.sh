@@ -28,6 +28,15 @@ printf '%s' "$TOKEN" >"$SECRETS/cell_token"
 chmod 644 "$SECRETS/cell_token"
 
 cleanup() {
+  local status=$?
+  if [[ $status -ne 0 ]]; then
+    # Diagnose real-cell failures from CI logs (no local cell can run on starved dev VMs).
+    echo "== FAILURE DIAGNOSTICS (exit $status)" >&2
+    for c in "${P}-openclaw" "${P}-api" "${P}-model"; do
+      echo "---- docker logs $c (last 200 lines)" >&2
+      docker logs "$c" 2>&1 | tail -200 >&2 || true
+    done
+  fi
   if [[ "$KEEP" != "--keep" ]]; then
     docker rm -f "${P}-openclaw" "${P}-api" "${P}-model" >/dev/null 2>&1 || true
     docker volume rm "$VOL" >/dev/null 2>&1 || true
@@ -114,6 +123,10 @@ for i in $(seq 1 120); do
   fi
   sleep 1
 done
+if ! docker logs "${P}-openclaw" 2>&1 | grep -q "agent channel connected"; then
+  echo "FAIL: the ocw channel plugin never connected to the Agent Channel API within 120 s" >&2
+  exit 1
+fi
 docker logs "${P}-openclaw" 2>&1 | grep -E "ocw-cell|http server listening|\[ocw\]|heartbeat" | sed 's/^/   /'
 
 api_exec() { docker exec -i "${P}-api" node --input-type=module -e "$1"; }
