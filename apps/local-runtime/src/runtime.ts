@@ -19,7 +19,8 @@ export interface RuntimeCapabilities {
   supportsResume: boolean;
   /**
    * Platform permission modes the adapter accepts (the daemon refuses anything else before calling it). The
-   * runtime bypass literals are never among them; `fullAccess` only once Plan 06 wires ADR-0012's path.
+   * runtime bypass literals are never among them. `fullAccess` is listed only while the adapter's
+   * `allowFullAccess()` gate answers true (ADR-0012), so adapters expose this as a getter.
    */
   supportsPermissionModes: readonly PermissionMode[];
   supportsImages: boolean;
@@ -37,6 +38,15 @@ export interface StartSessionOptions {
   contextWindow?: number;
   /** Runtime-native session id from a previous `session.started` event. */
   resumeRuntimeSessionId?: string;
+}
+
+/**
+ * Options every adapter constructor accepts besides its own. `allowFullAccess` is the daemon's device-local opt-in
+ * (ADR-0012, P-12), re-read on every call: false (the default) = the adapter never offers, starts, configures or runs
+ * `fullAccess`, whatever the server asks. The daemon checks it too, before any adapter call (defence in depth).
+ */
+export interface FullAccessGateOptions {
+  allowFullAccess?: () => boolean;
 }
 
 /** Receives normalised, NOT yet sanitised events; the daemon sanitises before they leave the device. */

@@ -2,7 +2,9 @@
 // OCW_RUNTIME_FAKE=1. It never talks to a model: it streams canned text, reads a file, asks for approval
 // before writing one (unless the session is in plan mode, or acceptEdits/auto), and honours interrupt.
 // Settings (03.2): a fixed catalog per runtime id, `configure()` applied between turns, and every turn says
-// which model it "ran" on (`Model: <id>`) so end-to-end tests can see a change land.
+// which model and mode it "ran" on (`Model: <id>`, `Mode: <mode>`) so end-to-end tests can see a change land.
+// Full access (ADR-0012): offered only while the daemon's `allowFullAccess()` gate is open; a fullAccess turn
+// approves everything itself (no approval.requested), like the real runtimes' bypass modes.
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -19,6 +21,7 @@ import { minMode, type RuntimeCatalog, type RuntimeModel, type SessionSettingsPa
 import {
   type AgentRuntime,
   type EventSink,
+  type FullAccessGateOptions,
   type RuntimeCapabilities,
   RuntimeError,
   type StartSessionOptions,
@@ -111,18 +114,31 @@ const FAST_MODE_COST: Record<RuntimeId, string> = {
 };
 
 export class FakeRuntime implements AgentRuntime {
-  readonly capabilities: RuntimeCapabilities = {
-    supportsSteer: false,
-    supportsResume: true,
-    supportsPermissionModes: ["default", "acceptEdits", "plan", "auto"],
-    supportsImages: false,
-  };
   private readonly sessions = new Map<string, FakeSession>();
+  private readonly allowFullAccess: () => boolean;
 
   constructor(
     readonly id: RuntimeId,
     private readonly delayMs = Number(process.env.OCW_RUNTIME_FAKE_DELAY_MS ?? 120),
-  ) {}
+    opts: FullAccessGateOptions = {},
+  ) {
+    this.allowFullAccess = opts.allowFullAccess ?? (() => false);
+  }
+
+  get capabilities(): RuntimeCapabilities {
+    return {
+      supportsSteer: false,
+      supportsResume: true,
+      supportsPermissionModes: [
+        "default",
+        "acceptEdits",
+        "plan",
+        "auto",
+        ...(this.allowFullAccess() ? (["fullAccess"] as const) : []),
+      ],
+      supportsImages: false,
+    };
+  }
 
   async detect(): Promise<RuntimeInfo> {
     return { id: this.id, installed: true, version: "fake", loggedIn: true };
@@ -289,8 +305,8 @@ export class FakeRuntime implements AgentRuntime {
     summary: string,
     paths: string[],
   ) {
-    // `auto` behaves like acceptEdits in the fake (no classifier).
-    if (s.allowAll || mode === "acceptEdits" || mode === "auto")
+    // `auto` behaves like acceptEdits in the fake (no classifier); fullAccess never asks (bypass).
+    if (s.allowAll || mode === "acceptEdits" || mode === "auto" || mode === "fullAccess")
       return { outcome: "once" as ApprovalOutcome };
     const approvalId = crypto.randomUUID();
     const result = new Promise<{ outcome: ApprovalOutcome; comment?: string }>((resolve) => {
@@ -322,11 +338,15 @@ export class FakeRuntime implements AgentRuntime {
     }
     // P-07: the turn runs at most at the mode the server authorized for it.
     const mode = prompt.permissionMode ? minMode(s.mode, prompt.permissionMode) : s.mode;
-    const footer = `\n\nModel: ${s.settings.model}`;
+    const footer = `\n\nModel: ${s.settings.model}\nMode: ${mode}`;
     this.emit(s, { type: "prompt.started", promptId: pid });
     this.emit(s, { type: "session.state", status: "running" });
     let isError = false;
     try {
+      // ADR-0012: a fullAccess turn needs the device gate open at the moment it starts (opt-out wins at once).
+      if (mode === "fullAccess" && !this.allowFullAccess()) {
+        throw new RuntimeError("Full access is not enabled on this device", "permission_mode_rejected");
+      }
       await this.stream(s, `${pid}-intro`, "I'll start by reading the project README to get oriented. ");
       await sleep(this.delayMs);
       if (!s.aborted) {

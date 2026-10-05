@@ -41,6 +41,7 @@ import { errorMessage, type Logger, silentLogger } from "../logger.js";
 import {
   type AgentRuntime,
   type EventSink,
+  type FullAccessGateOptions,
   type RuntimeCapabilities,
   RuntimeError,
   type StartSessionOptions,
@@ -90,7 +91,7 @@ export type SpawnAppServer = (opts: {
   env: Record<string, string | undefined>;
 }) => AppServerProcess;
 
-export interface CodexRuntimeOptions {
+export interface CodexRuntimeOptions extends FullAccessGateOptions {
   codexPath?: string;
   /** Let OPENAI_API_KEY / CODEX_API_KEY through (metered API billing). Default false. */
   useApiKey?: boolean;

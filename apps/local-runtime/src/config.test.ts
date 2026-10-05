@@ -45,7 +45,11 @@ describe("Full access opt-in (ADR-0012, D-02, P-12)", () => {
     const h = home();
     writeFileSync(
       join(h, "runtime.json"),
-      JSON.stringify({ serverUrl: "https://ocw.example.com", logLevel: "debug", fullAccess: { optIn: false } }),
+      JSON.stringify({
+        serverUrl: "https://ocw.example.com",
+        logLevel: "debug",
+        fullAccess: { optIn: false },
+      }),
     );
     await setFullAccessOptIn(h, true);
     const file = join(h, "runtime.json");
@@ -63,7 +67,9 @@ describe("Full access opt-in (ADR-0012, D-02, P-12)", () => {
   it("creates runtime.json when missing and refuses to overwrite a malformed one", async () => {
     const h = home();
     await setFullAccessOptIn(h, true);
-    expect(JSON.parse(readFileSync(join(h, "runtime.json"), "utf8"))).toEqual({ fullAccess: { optIn: true } });
+    expect(JSON.parse(readFileSync(join(h, "runtime.json"), "utf8"))).toEqual({
+      fullAccess: { optIn: true },
+    });
     const broken = home();
     writeFileSync(join(broken, "runtime.json"), "{ not json");
     await expect(setFullAccessOptIn(broken, true)).rejects.toThrow(/runtime\.json/);

@@ -1,5 +1,10 @@
 // Local Runtime daemon core: config + project registry, outbound Device Link, command handling
 // with acks, event forwarding through sanitizeEvent(), and the local control socket.
+//
+// Full access (ADR-0012, D-02, P-12): the device owner's LOCAL opt-in (runtime.json `fullAccess.optIn`, or
+// OCW_ALLOW_FULL_ACCESS) is the daemon's own gate. Every `fullAccess` start, configure and turn is refused here,
+// before any adapter call, while it is off, so a compromised or buggy server alone can never turn it on. The
+// adapters get the same gate (`allowFullAccess`) and check it again.
 
 import { realpathSync } from "node:fs";
 import { arch, platform } from "node:os";
@@ -10,6 +15,7 @@ import {
   DeviceAccessToken,
   type DeviceToServerFrame,
   DiffRequestPayload,
+  type PermissionMode,
   PromptPayload,
   RUNTIME_BYPASS_LITERALS,
   RuntimeCatalog,
@@ -24,12 +30,14 @@ import { CodexRuntime } from "./codex/codex-runtime.js";
 import {
   deviceName,
   ensureOcwHome,
+  type FullAccessSource,
   type LocalProject,
   loadConfig,
   loadDeviceToken,
   ocwHome,
   ProjectRegistry,
   type RuntimeConfig,
+  resolveFullAccess,
   toWebSocketUrl,
 } from "./config.js";
 import { type ControlRequest, ControlSocketServer, controlSocketPath } from "./control-socket.js";
@@ -63,6 +71,16 @@ export class DeviceTokenRejectedError extends Error {
   }
 }
 
+/** The refusal every fullAccess request gets while the device's own opt-in is off. */
+export const FULL_ACCESS_OFF_MESSAGE =
+  "Full access is not enabled on this device (its owner turns it on in the desktop app or with `ocw-runtime full-access on`)";
+
+/** The daemon's Full access gate, shared with every adapter it builds (read on every call). */
+interface FullAccessGate {
+  optIn: boolean;
+  source: FullAccessSource;
+}
+
 export interface DaemonOptions {
   /** Defaults to OCW_HOME or ~/.ocw */
   home?: string;
@@ -70,7 +88,8 @@ export interface DaemonOptions {
   config?: Partial<RuntimeConfig>;
   /** Override the token (tests); otherwise OCW_DEVICE_TOKEN or the token file. */
   token?: string | null;
-  runtimes?: AgentRuntime[];
+  /** Adapters to drive (tests), or a factory that receives the daemon's Full access gate. */
+  runtimes?: AgentRuntime[] | ((allowFullAccess: () => boolean) => AgentRuntime[]);
   logger?: Logger;
   link?: Partial<
     Pick<DeviceLinkOptions, "heartbeatMs" | "backoffMinMs" | "backoffMaxMs" | "maxOfflineFrames">
@@ -85,6 +104,8 @@ interface ActiveSession {
   project: LocalProject;
   cwd: string;
   worktreeBranch: string | null;
+  /** The session mode the server last authorized here (start / configure); per-turn caps only lower it. */
+  mode: PermissionMode;
 }
 
 function realpathOr(p: string): string {
@@ -123,6 +144,8 @@ export class Daemon {
     runtimes: AgentRuntime[],
     private readonly log: Logger,
     private readonly opts: DaemonOptions,
+    private readonly env: NodeJS.ProcessEnv,
+    private readonly gate: FullAccessGate,
   ) {
     this.registry = new ProjectRegistry(home);
     for (const r of runtimes) this.runtimes.set(r.id, r);
@@ -136,24 +159,40 @@ export class Daemon {
     const config = { ...loaded, ...opts.config };
     const log = opts.logger ?? createLogger(config.logLevel);
     const token = opts.token !== undefined ? opts.token : await loadDeviceToken(home, config, env);
+    const gate: FullAccessGate = resolveFullAccess(config, env);
+    if (gate.optIn) log.warn("Full access is enabled on this device", { source: gate.source });
+    const allowFullAccess = () => gate.optIn;
     const fake = env.OCW_RUNTIME_FAKE === "1";
     if (fake) log.warn("OCW_RUNTIME_FAKE=1: using the fake runtime (tests/demos only, no model is called)");
-    const runtimes = opts.runtimes ??
-      (fake ? [new FakeRuntime("claude-code"), new FakeRuntime("codex")] : null) ?? [
+    const delay = env.OCW_RUNTIME_FAKE_DELAY_MS ? Number(env.OCW_RUNTIME_FAKE_DELAY_MS) : undefined;
+    const runtimes = (typeof opts.runtimes === "function" ? opts.runtimes(allowFullAccess) : opts.runtimes) ??
+      (fake
+        ? [
+            new FakeRuntime("claude-code", delay, { allowFullAccess }),
+            new FakeRuntime("codex", delay, { allowFullAccess }),
+          ]
+        : null) ?? [
         new ClaudeCodeRuntime({
           logger: log,
           useApiKey: config.claude.useApiKey,
+          allowFullAccess,
           ...(config.claude.path ? { claudePath: config.claude.path } : {}),
         }),
         new CodexRuntime({
           logger: log,
           useApiKey: config.codex.useApiKey,
+          allowFullAccess,
           ...(config.codex.path ? { codexPath: config.codex.path } : {}),
         }),
       ];
-    const daemon = new Daemon(home, config, token, runtimes, log, opts);
+    const daemon = new Daemon(home, config, token, runtimes, log, opts, env, gate);
     await daemon.registry.load();
     return daemon;
+  }
+
+  /** The device's own Full access opt-in, as the daemon enforces it right now. */
+  get fullAccessOn(): boolean {
+    return this.gate.optIn;
   }
 
   get isConnected(): boolean {
@@ -203,6 +242,8 @@ export class Daemon {
       queuedFrames: this.link?.queuedFrames ?? 0,
       runtimes: await this.detectRuntimes(),
       projects: this.registry.list().length,
+      fullAccessOptIn: this.gate.optIn,
+      fullAccessSource: this.gate.source,
       sessions: [...this.sessions.values()].map((s) => ({
         sessionId: s.sessionId,
         projectLocalId: s.project.localId,
@@ -283,8 +324,13 @@ export class Daemon {
         const catalog = await r.catalog();
         if (!catalog) continue;
         const parsed = RuntimeCatalog.safeParse(sanitizeValue(catalog, roots));
-        if (parsed.success) out.push(parsed.data);
-        else this.log.warn("runtime catalog rejected", { runtime: r.id });
+        if (parsed.success) {
+          // The catalog never offers fullAccess while this device's opt-in is off, whatever an adapter says.
+          if (!this.gate.optIn) {
+            parsed.data.permissionModes = parsed.data.permissionModes.filter((m) => m !== "fullAccess");
+          }
+          out.push(parsed.data);
+        } else this.log.warn("runtime catalog rejected", { runtime: r.id });
       } catch (err) {
         this.log.warn("runtime catalog unavailable", {
           runtime: r.id,
@@ -308,12 +354,17 @@ export class Daemon {
         },
         runtimes: await this.detectRuntimes(),
         sessions: [...this.sessions.keys()],
-        // ADR-0012 / P-12: the local opt-in is wired in Plan 06; until then full access is off on every device.
-        fullAccessOptIn: false,
+        // ADR-0012 / P-12: the device owner's local opt-in, reported as is; the server never sets it.
+        fullAccessOptIn: this.gate.optIn,
       },
       { type: "projects.sync", projects: this.registry.toSynced() },
-      { type: "capabilities", catalogs: await this.collectCatalogs(), fullAccessOptIn: false },
+      await this.capabilitiesFrame(),
     ];
+  }
+
+  private async capabilitiesFrame(): Promise<DeviceToServerFrame> {
+    const catalogs = await this.collectCatalogs();
+    return { type: "capabilities", catalogs, fullAccessOptIn: this.gate.optIn };
   }
 
   private send(frame: DeviceToServerFrame): void {
@@ -382,6 +433,10 @@ export class Daemon {
         case "prompt": {
           const s = this.requireSession(cmd.sessionId);
           const prompt = PromptPayload.parse(cmd.payload);
+          // A turn may run in fullAccess only while the opt-in is on (an explicit fullAccess cap, or a session
+          // still in fullAccess with no cap); checked before the adapter sees the prompt.
+          this.refuseFullAccess(prompt.permissionMode ?? s.mode);
+          if (prompt.permissionMode === "fullAccess") this.refuseFullAccess("fullAccess");
           if (prompt.delivery === "steer" && s.runtime.capabilities.supportsSteer && s.runtime.steer) {
             await s.runtime.steer(cmd.sessionId, prompt);
           } else {
@@ -440,6 +495,11 @@ export class Daemon {
     return s;
   }
 
+  /** ADR-0012 / P-12: fullAccess is refused while this device's own opt-in is off. */
+  private refuseFullAccess(mode: PermissionMode | undefined): void {
+    if (mode === "fullAccess" && !this.gate.optIn) throw new Error(FULL_ACCESS_OFF_MESSAGE);
+  }
+
   /** A runtime bypass literal is refused by name, whatever the payload schema would say (D-03). */
   private refuseBypassLiteral(raw: unknown): void {
     if (typeof raw === "string" && RUNTIME_BYPASS_LITERALS.includes(raw)) {
@@ -452,19 +512,22 @@ export class Daemon {
     const raw = cmd.payload as { settings?: { permissionMode?: unknown } } | undefined;
     this.refuseBypassLiteral(raw?.settings?.permissionMode);
     const payload = SessionConfigurePayload.parse(cmd.payload ?? {});
-    const s = this.requireSession(cmd.sessionId);
     const mode = payload.settings.permissionMode;
+    this.refuseFullAccess(mode);
+    const s = this.requireSession(cmd.sessionId);
     if (mode && !s.runtime.capabilities.supportsPermissionModes.includes(mode)) {
       throw new Error(`permission mode ${mode} is not available on this device`);
     }
     if (!s.runtime.configure) throw new Error(`settings changes are not supported by ${s.runtime.id}`);
     await s.runtime.configure(cmd.sessionId, payload.settings);
+    if (mode) s.mode = mode;
   }
 
   private async startSession(cmd: CommandFrame): Promise<void> {
     if (this.sessions.has(cmd.sessionId)) return; // idempotent
     this.refuseBypassLiteral((cmd.payload as { permissionMode?: unknown } | undefined)?.permissionMode);
     const payload = SessionStartPayload.parse(cmd.payload ?? {});
+    this.refuseFullAccess(payload.permissionMode);
     const project = this.registry.get(payload.projectLocalId);
     if (!project) throw new Error("project is not registered on this device");
     const runtime = this.runtimes.get(payload.runtime);
@@ -482,7 +545,14 @@ export class Daemon {
       worktreeBranch = wt.branch;
     }
     this.rootsBySession.set(cmd.sessionId, this.rootsFor(cwd, project));
-    this.sessions.set(cmd.sessionId, { sessionId: cmd.sessionId, runtime, project, cwd, worktreeBranch });
+    this.sessions.set(cmd.sessionId, {
+      sessionId: cmd.sessionId,
+      runtime,
+      project,
+      cwd,
+      worktreeBranch,
+      mode: payload.permissionMode,
+    });
     try {
       await runtime.start(
         {

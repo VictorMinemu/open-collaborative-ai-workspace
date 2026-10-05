@@ -44,6 +44,7 @@ import { errorMessage, type Logger, silentLogger } from "../logger.js";
 import {
   type AgentRuntime,
   type EventSink,
+  type FullAccessGateOptions,
   type RuntimeCapabilities,
   RuntimeError,
   type StartSessionOptions,
@@ -91,7 +92,7 @@ interface RuntimeSettings {
 
 export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => QueryHandle;
 
-export interface ClaudeCodeRuntimeOptions {
+export interface ClaudeCodeRuntimeOptions extends FullAccessGateOptions {
   queryFn?: QueryFn;
   approvalTimeoutMs?: number;
   /**

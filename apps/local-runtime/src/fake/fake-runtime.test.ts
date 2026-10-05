@@ -165,7 +165,9 @@ describe("FakeRuntime Full access (ADR-0012, D-01)", () => {
     await until(events, (e) => e.type === "prompt.completed");
     expect(readFileSync(join(cwd, "notes/ocw-change-1.md"), "utf8")).toContain("ship it");
     expect(events.some((e) => e.type === "approval.requested")).toBe(false);
-    const said = events.filter((e) => e.type === "assistant.message").map((e) => (e as { text: string }).text);
+    const said = events
+      .filter((e) => e.type === "assistant.message")
+      .map((e) => (e as { text: string }).text);
     expect(said.at(-1)).toContain("Mode: fullAccess");
   });
 

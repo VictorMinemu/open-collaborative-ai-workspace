@@ -29,8 +29,56 @@ export const RuntimeConfigSchema = z.object({
     .object({ path: z.string().optional(), useApiKey: z.boolean().default(false) })
     .default({ useApiKey: false }),
   logLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
+  /**
+   * ADR-0012 / P-12: the device owner's LOCAL Full access opt-in (default off). Set only on this device: the desktop
+   * Runtime menu, `ocw-runtime full-access on|off`, or `OCW_ALLOW_FULL_ACCESS` for a headless daemon. Never by the
+   * server or the web.
+   */
+  fullAccess: z.object({ optIn: z.boolean().default(false) }).default({ optIn: false }),
 });
 export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
+
+/** Where the effective Full access opt-in comes from: the environment wins over runtime.json. */
+export type FullAccessSource = "env" | "config";
+
+/**
+ * The effective opt-in. `OCW_ALLOW_FULL_ACCESS` = "1"/"true" → on, "0"/"false" → off (headless servers, or to force
+ * it off whatever the file says); any other value is ignored and runtime.json decides.
+ */
+export function resolveFullAccess(
+  config: Pick<RuntimeConfig, "fullAccess">,
+  env: NodeJS.ProcessEnv = process.env,
+): { optIn: boolean; source: FullAccessSource } {
+  const raw = env.OCW_ALLOW_FULL_ACCESS?.trim().toLowerCase();
+  if (raw === "1" || raw === "true") return { optIn: true, source: "env" };
+  if (raw === "0" || raw === "false") return { optIn: false, source: "env" };
+  return { optIn: config.fullAccess?.optIn === true, source: "config" };
+}
+
+export function fullAccessOptIn(
+  config: Pick<RuntimeConfig, "fullAccess">,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return resolveFullAccess(config, env).optIn;
+}
+
+/**
+ * Writes `fullAccess.optIn` into `<home>/runtime.json` (atomic, 0600), keeping every other key. A malformed file is
+ * never overwritten (the error is surfaced). Only local callers use this (CLI, tests); the desktop app has its own
+ * writer for the same file. A running daemon picks the change up on `reloadConfig`.
+ */
+export async function setFullAccessOptIn(home: string, on: boolean): Promise<void> {
+  await ensureOcwHome(home);
+  const file = join(home, "runtime.json");
+  const raw = (await readJson(file)) ?? {};
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error("cannot update runtime.json: it is not a JSON object");
+  }
+  const current = raw as Record<string, unknown>;
+  const previous =
+    typeof current.fullAccess === "object" && current.fullAccess !== null ? current.fullAccess : {};
+  await writeJsonAtomic(file, { ...current, fullAccess: { ...previous, optIn: on } });
+}
 
 async function readJson(path: string): Promise<unknown | undefined> {
   try {

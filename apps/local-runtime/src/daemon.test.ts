@@ -414,11 +414,11 @@ describe("Daemon <-> Device Link", () => {
       id: "k2",
       kind: "session.configure",
       sessionId: "wc2",
-      payload: { settings: { permissionMode: "fullAccess" }, reason: "user" },
+      payload: { settings: { permissionMode: "auto" }, reason: "user" },
     });
     expect(await server.frame("ack", (f) => f.commandId === "k2")).toMatchObject({
       ok: false,
-      error: expect.stringContaining("permission mode fullAccess is not available on this device"),
+      error: expect.stringContaining("permission mode auto is not available on this device"),
     });
     server.send({
       id: "k3",
