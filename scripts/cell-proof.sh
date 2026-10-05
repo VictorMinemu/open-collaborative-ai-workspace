@@ -112,6 +112,10 @@ if [[ "$reach" != 200* ]]; then
   fail "the cell cannot reach the API on host.docker.internal:$API_PORT; start the stack with OCW_E2E_API_HOST=0.0.0.0 (disposable hosts only)"
 fi
 
+# The API answers the cell 503 setup_required until the workspace exists: run the first-run setup first.
+echo "== first-run setup of the isolated workspace (Playwright project setup)"
+pnpm exec playwright test -c e2e/playwright.proof.config.ts --project setup
+
 echo "== real OpenClaw cell $CELL (OCW_BUNDLED_PLUGINS=none, ClawHub $OCW_CLAWHUB_URL)"
 CELL_LIMIT=()
 [[ -n "${PROOF_CELL_MEMORY:-}" ]] && CELL_LIMIT=(--memory "$PROOF_CELL_MEMORY")
@@ -141,7 +145,8 @@ grep -E "base config rendered|agent channel connected" <<<"$logs" | sed 's/^/   
 status=0
 started="$(date +%s)"
 OCW_PROOF_DB_URL="$MIGRATE_SUPERUSER_URL" OCW_PROOF_MCP_URL="http://fake-model:18999/mcp" \
-  OCW_PROOF_MCP_TOKEN="$MCP_TOKEN" pnpm exec playwright test -c e2e/playwright.proof.config.ts || status=$?
+  OCW_PROOF_MCP_TOKEN="$MCP_TOKEN" pnpm exec playwright test -c e2e/playwright.proof.config.ts --project proof --no-deps ||
+  status=$?
 echo "== proof run: exit $status in $(($(date +%s) - started)) s"
 
 # ---------------------------------------------------------------- audit rows (read-only) and the cell log
