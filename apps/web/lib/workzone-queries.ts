@@ -8,6 +8,7 @@ import {
   Ok,
   ProjectList,
   type ResolveApprovalRequest,
+  SessionCommandResult,
   SessionControls,
   type SessionSettingsPatch,
   topic,
@@ -145,6 +146,24 @@ export function useUpdateSessionSettings(sessionId: string) {
     mutationFn: (body: SessionSettingsPatch) =>
       api.patch(`/api/v1/work-sessions/${sessionId}/settings`, { body, schema: WorkSession }),
     onSuccess: () => qc.invalidateQueries({ queryKey: wzKeys.controls(sessionId) }),
+  });
+}
+
+/**
+ * Run a `/command` typed in the composer (D-13, P-10): the API changes settings through the policy-checked path,
+ * queues a passthrough command as a prompt, or refuses it with a notice. Never sent to the prompt queue raw.
+ */
+export function useSessionCommand(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (text: string) =>
+      api.post(`/api/v1/work-sessions/${sessionId}/commands`, {
+        body: { text },
+        schema: SessionCommandResult,
+      }),
+    onSuccess: (result) => {
+      if (result.kind === "settings") void qc.invalidateQueries({ queryKey: wzKeys.controls(sessionId) });
+    },
   });
 }
 
