@@ -219,7 +219,18 @@ function offeredToolNames(body) {
 export function planToolStep(messages, offered) {
   const lastUserIdx = messages.findLastIndex((m) => m.role === "user");
   if (lastUserIdx === -1) return null;
-  const directives = parseDirectives(userBody(contentText(messages[lastUserIdx].content)));
+  // OpenClaw sends the human's text and its internal context block as consecutive user messages (the context
+  // last). Use the newest user message that still has text once the context block is stripped, but never step
+  // back over an assistant/tool message: that would re-run directives from an earlier turn.
+  let bodyIdx = lastUserIdx;
+  while (
+    bodyIdx > 0 &&
+    !userBody(contentText(messages[bodyIdx].content)).trim() &&
+    messages[bodyIdx - 1].role === "user"
+  ) {
+    bodyIdx--;
+  }
+  const directives = parseDirectives(userBody(contentText(messages[bodyIdx].content)));
   if (process.env.FAKE_MODEL_DEBUG === "1" && offered?.length) {
     // Diagnose directive parsing inside a real cell: what does the last user turn look like after OpenClaw?
     const raw = contentText(messages[lastUserIdx].content);

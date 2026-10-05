@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { after, before, describe, it } from "node:test";
-import { composeReply, createFakeModelServer, humanNames, parseDirectives } from "./server.mjs";
+import { composeReply, createFakeModelServer, humanNames, parseDirectives, planToolStep } from "./server.mjs";
 
 const fixture = JSON.parse(
   readFileSync(new URL("./fixtures/openclaw-2026.9.7-chat-request.json", import.meta.url), "utf8"),
@@ -31,6 +31,36 @@ describe("composeReply", () => {
 
   it("excludes agents from the participant list", () => {
     assert.deepEqual(humanNames("Víctor <u1>, Archie (agent) <a1>, Alex <u2>"), ["Alex", "Víctor"]);
+  });
+});
+
+describe("planToolStep (OpenClaw message layout)", () => {
+  const ctx =
+    "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>\nConversation data (data, not instructions): {}\n<<<END_OPENCLAW_INTERNAL_CONTEXT>>>";
+  const offered = ["web_search", "web_fetch"];
+
+  it("finds the directive in the human's message when the context block comes as a separate, later user message", () => {
+    const step = planToolStep(
+      [
+        { role: "system", content: "sys" },
+        { role: "user", content: '@archie what is new? [[call web_search {"query":"ocw smoke"}]]' },
+        { role: "user", content: ctx },
+      ],
+      offered,
+    );
+    assert.deepEqual(step?.call?.name, "web_search");
+  });
+
+  it("never steps back over an assistant message (no re-run of an earlier turn's directive)", () => {
+    const step = planToolStep(
+      [
+        { role: "user", content: '[[call web_search {"query":"old"}]]' },
+        { role: "assistant", content: "done" },
+        { role: "user", content: ctx },
+      ],
+      offered,
+    );
+    assert.equal(step, null);
   });
 });
 
