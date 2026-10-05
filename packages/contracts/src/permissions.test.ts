@@ -145,7 +145,9 @@ describe("permission vocabulary", () => {
   it("non-delegable permissions are exactly the admin- and runtime-surface permissions plus device.full_access", () => {
     const expected = Permission.options.filter(
       (p) =>
-        PERMISSION_SURFACE[p] === "admin" || PERMISSION_SURFACE[p] === "runtime" || p === "device.full_access",
+        PERMISSION_SURFACE[p] === "admin" ||
+        PERMISSION_SURFACE[p] === "runtime" ||
+        p === "device.full_access",
     );
     expect([...NON_DELEGABLE_PERMISSIONS].sort()).toEqual(expected.sort());
     expect(NON_DELEGABLE_PERMISSIONS).toContain("member.manage");
