@@ -129,6 +129,11 @@ describe("renderConfig", () => {
     assert.equal(config.agents.defaults.compaction.memoryFlush.enabled, false);
   });
 
+  it("MCP: no server at boot (the plugin renders them from GET /cell), idle runtimes evicted after 10 minutes", () => {
+    const { config } = renderConfig(base);
+    assert.deepEqual(config.mcp, { sessionIdleTtlMs: 600000 });
+  });
+
   it("never writes secrets: no token, no provider keys, no providers or bots at all", () => {
     const { config } = renderConfig({
       ...base,

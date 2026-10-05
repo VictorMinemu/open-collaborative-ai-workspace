@@ -15,6 +15,7 @@
  *   POST /agent-channel/v1/tool-calls/:id/result  records the outcome
  *   POST /agent-channel/v1/memories       records the note (dedupes exact text per event's bot; 409 for
  *                                          events listed in `refuseMemoryEvents`)
+ *   POST /agent-channel/v1/mcp/probe-results  records the probe report (`mcpProbes`)
  * Test-only controls under /__test/* (never part of the real API).
  */
 import { randomUUID } from "node:crypto";
@@ -22,6 +23,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 import { type WebSocket, WebSocketServer } from "ws";
 import type {
+  AgentChannelMcpProbeResult,
   AgentChannelMemorySave,
   AgentChannelPostMessage,
   AgentChannelProviderAuthReport,
@@ -31,6 +33,7 @@ import type {
   AgentChannelTyping,
   AgentMentionEvent,
   CellAgent,
+  CellMcpServer,
   CellProvider,
   CellSnapshot,
   CellSubscription,
@@ -64,6 +67,12 @@ export type FakeAgentChannelApi = {
   memories: StoredMemory[];
   /** Event ids whose memory saves the fake API refuses with 409 `tainted`. */
   refuseMemoryEvents: Set<string>;
+  /** Snapshot `mcpServers` (header values included, as the real API sends them); `[]` = none. */
+  mcpServers: CellMcpServer[];
+  /** Every POST /mcp/probe-results, in order. */
+  mcpProbes: AgentChannelMcpProbeResult[];
+  /** Number of GET /cell requests served. */
+  cellReads: number;
   events: StoredEvent[];
   authReports: AgentChannelProviderAuthReport[];
   /** HTTP status for each POST /provider-auth (default 200). */
@@ -80,7 +89,12 @@ export type FakeAgentChannelApi = {
   publishMention(input: MentionInput): StoredEvent;
   /** Replace agents/providers and emit `cell.config.changed` (`agentId` names the bot it is about). */
   updateCell(
-    next: { agents?: CellAgent[]; providers?: CellProvider[]; subscriptions?: CellSubscription[] },
+    next: {
+      agents?: CellAgent[];
+      providers?: CellProvider[];
+      subscriptions?: CellSubscription[];
+      mcpServers?: CellMcpServer[];
+    },
     reason?: string,
     agentId?: string | null,
   ): StoredEvent;
@@ -117,6 +131,7 @@ export async function startFakeAgentChannelApi(
     subscriptions?: CellSubscription[];
     webSearchProvider?: string;
     denyTools?: string[];
+    mcpServers?: CellMcpServer[];
     port?: number;
     host?: string;
   } = {},
@@ -148,6 +163,9 @@ export async function startFakeAgentChannelApi(
     toolResults: [] as StoredToolResult[],
     memories: [] as StoredMemory[],
     refuseMemoryEvents: new Set<string>(),
+    mcpServers: opts.mcpServers ?? ([] as CellMcpServer[]),
+    mcpProbes: [] as AgentChannelMcpProbeResult[],
+    cellReads: 0,
   };
 
   const snapshot = (): CellSnapshot => ({
@@ -160,6 +178,7 @@ export async function startFakeAgentChannelApi(
     providers: state.providers,
     ...(state.cellSubscriptions ? { subscriptions: state.cellSubscriptions } : {}),
     ...(state.webSearchProvider ? { webSearch: { provider: state.webSearchProvider } } : {}),
+    ...(state.mcpServers.length > 0 ? { mcpServers: state.mcpServers } : {}),
   });
   const frameFor = (ev: StoredEvent) =>
     JSON.stringify({ op: "ev", topic, seq: ev.seq, type: ev.type, data: ev.data });
@@ -176,6 +195,7 @@ export async function startFakeAgentChannelApi(
           const body = (await readJson(req)) as {
             agents?: CellAgent[];
             providers?: CellProvider[];
+            mcpServers?: CellMcpServer[];
             reason?: string;
             agentId?: string | null;
           };
@@ -196,6 +216,8 @@ export async function startFakeAgentChannelApi(
             toolCalls: state.toolCalls,
             toolResults: state.toolResults,
             memories: state.memories,
+            mcpProbes: state.mcpProbes,
+            cellReads: state.cellReads,
           });
         }
         return json(res, 404, { error: { code: "not_found" } });
@@ -206,7 +228,18 @@ export async function startFakeAgentChannelApi(
         return json(res, 401, { error: { code: "invalid_cell_token" } });
       }
       const route = url.pathname.slice(BASE.length);
-      if (req.method === "GET" && route === "/cell") return json(res, 200, snapshot());
+      if (req.method === "GET" && route === "/cell") {
+        state.cellReads++;
+        return json(res, 200, snapshot());
+      }
+      if (req.method === "POST" && route === "/mcp/probe-results") {
+        const body = (await readJson(req)) as AgentChannelMcpProbeResult;
+        if (!body.probeId || !body.serverId || typeof body.ok !== "boolean") {
+          return json(res, 400, { error: { code: "bad_request" } });
+        }
+        state.mcpProbes.push(body);
+        return json(res, 200, { ok: true, applied: true });
+      }
       if (req.method === "POST" && route === "/messages") {
         const body = (await readJson(req)) as AgentChannelPostMessage;
         state.messageAttempts.push(body);
@@ -400,6 +433,18 @@ export async function startFakeAgentChannelApi(
     get refuseMemoryEvents() {
       return state.refuseMemoryEvents;
     },
+    get mcpServers() {
+      return state.mcpServers;
+    },
+    set mcpServers(value: CellMcpServer[]) {
+      state.mcpServers = value;
+    },
+    get mcpProbes() {
+      return state.mcpProbes;
+    },
+    get cellReads() {
+      return state.cellReads;
+    },
     get authReports() {
       return state.authReports;
     },
@@ -444,6 +489,7 @@ export async function startFakeAgentChannelApi(
       if (next.agents) state.agents = next.agents;
       if (next.providers) state.providers = next.providers;
       if (next.subscriptions) state.cellSubscriptions = next.subscriptions;
+      if (next.mcpServers) state.mcpServers = next.mcpServers;
       return api.publish("cell.config.changed", { reason: reason ?? "agent.updated", agentId });
     },
     failNextPosts(n, status = 503) {

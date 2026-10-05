@@ -6,11 +6,13 @@
 # web_fetch,web_search and a search goes through the tool gate (authorized + outcome reported), no
 # published ports, and a ChatGPT-subscription sign-in command reaches OpenClaw's own device-code login
 # (which cannot reach auth.openai.com here, so it must report a classified error), and the bot's memory
-# tool `ocw_memory_save` stores a note through `POST /memories` while the turn's notes reach the model.
+# tool `ocw_memory_save` stores a note through `POST /memories` while the turn's notes reach the model, and an
+# MCP server (the fake MCP behind a bearer token) is probed through the cell, rendered with an env-referenced
+# credential and exact tool filter, called through the gate, and its output taints the turn (scenario mcp).
 #
 # Usage (repo root):  infra/openclaw/test/run-container-smoke.sh [--keep]
 #   SMOKE_ONLY=<comma list>  run only these scenarios (unset = all): mention, signin, dm, capabilities,
-#                            dm-isolation, memory
+#                            dm-isolation, memory, mcp
 #   FAKE_MODEL_DEBUG=1       the fake model logs a preview of each tool-offering request (off by default)
 # Requires: docker, node + npm (bundled plugins are installed on the host from the pinned registry
 # tarballs), apps/openclaw-channel/node_modules (pnpm install / npm install in that dir).
@@ -28,6 +30,18 @@ TOKEN="smoke-$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
 SECRETS="$(mktemp -d)"
 printf '%s' "$TOKEN" >"$SECRETS/cell_token"
 chmod 644 "$SECRETS/cell_token"
+
+# MCP (scenario mcp): one org server on the fake model's /mcp, bearer-protected. The snapshot delivers the header
+# value; the cell may only ever write ${OCW_MCP_<SAFE>_0} into its config.
+MCP_SAFE=m5e0c0de1
+MCP_SERVER_ID=0199a6f0-0000-7000-8000-000000000c51
+MCP_ENV="OCW_MCP_$(tr '[:lower:]' '[:upper:]' <<<"$MCP_SAFE")_0"
+MCP_TOKEN="mcp-$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
+# CellMcpServer[] with the given toolFilter.include (JSON array of raw MCP tool names).
+mcp_servers_json() {
+  printf '[{"id":"%s","safeName":"%s","transport":"streamable-http","url":"http://fake-model:18999/mcp","headers":[{"name":"Authorization","envName":"%s","value":"Bearer %s"}],"tools":%s}]' \
+    "$MCP_SERVER_ID" "$MCP_SAFE" "$MCP_ENV" "$MCP_TOKEN" "$1"
+}
 
 cleanup() {
   local status=$?
@@ -67,7 +81,10 @@ PLUGIN="$SECRETS/plugin"
 mkdir -p "$PLUGIN/node_modules"
 cp -R "$ROOT/apps/openclaw-channel/dist" "$ROOT/apps/openclaw-channel/src" "$PLUGIN/"
 cp "$ROOT/apps/openclaw-channel/package.json" "$ROOT/apps/openclaw-channel/openclaw.plugin.json" "$PLUGIN/"
-for dep in ws zod; do cp -RL "$ROOT/apps/openclaw-channel/node_modules/$dep" "$PLUGIN/node_modules/$dep"; done
+# Runtime dependencies exactly as the image build installs them (exact pins in package.json, no lifecycle scripts):
+# the MCP SDK's transitive dependencies are not reachable through pnpm's symlinks.
+(cd "$PLUGIN" && npm install --omit=dev --omit=peer --no-package-lock --legacy-peer-deps --ignore-scripts \
+  --no-audit --no-fund --loglevel=error >/dev/null)
 # The official search plugins, same pins + integrity check as the image build, bind-mounted read-only
 # (an image built before Phase 3.1 has no /opt/ocw/plugins; the mount works on either).
 echo "== bundled search plugins (pinned, sha512-checked)"
@@ -90,6 +107,8 @@ CELL_LIMIT=()
 docker run -d --name "${P}-model" "${OOM[@]}" --network "$NET" --network-alias fake-model \
   -e FAKE_MODEL_DEBUG="${FAKE_MODEL_DEBUG:-0}" \
   -v "$ROOT/infra/fake-model/server.mjs:/app/server.mjs:ro" \
+  -v "$ROOT/infra/fake-model/fake-mcp.mjs:/app/fake-mcp.mjs:ro" \
+  -e FAKE_MCP_TOKEN="$MCP_TOKEN" \
   -e FAKE_MODEL_CAPTURE_DIR=/tmp/capture \
   ocw-fake-model:local >/dev/null
 
@@ -99,7 +118,8 @@ docker run -d --name "${P}-api" "${OOM[@]}" --network "$NET" --network-alias api
   -e FAKE_BOT_ID=0199a6f0-0000-7000-8000-00000000a001 \
   -e FAKE_CELL_ID=0199a6f0-0000-7000-8000-0000000000c0 \
   -e FAKE_MODEL_BASE_URL=http://fake-model:18999/v1 \
-  -e FAKE_AGENT_TOOLS=web_search,web_fetch,ocw_memory_save \
+  -e FAKE_AGENT_TOOLS="web_search,web_fetch,ocw_memory_save,${MCP_SAFE}__echo,${MCP_SAFE}__write_note" \
+  -e FAKE_MCP_SERVERS="$(mcp_servers_json '["echo"]')" \
   -e FAKE_WEB_SEARCH_PROVIDER=searxng \
   node:24.21.0-bookworm-slim node /plugin/src/testing/run-fake-api.ts >/dev/null
 
@@ -286,6 +306,141 @@ LEAKED="$(docker exec "${P}-model" sh -c "grep -L '0199a6f0-0000-7000-8000-00000
 echo "   notes      : $NOTE_FILES model request(s) of this DM carry the note, $LEAKED other request(s) do"
 if [[ "$NOTE_FILES" -lt 1 ]]; then echo "FAIL: the turn's notes did not reach the model"; exit 1; fi
 if [[ "$LEAKED" -ne 0 ]]; then echo "FAIL: the note reached a model request of another conversation"; exit 1; fi
+fi
+
+if want mcp; then
+echo "== [mcp] mcp.probe: the cell lists the registered server's tools with the official SDK client"
+PROBE_ID=0199a6f0-0000-7000-8000-0000000f2001
+api_exec "
+const body = JSON.stringify({ type: 'mcp.probe', data: { probeId: '$PROBE_ID', serverId: '$MCP_SERVER_ID' } });
+await fetch('http://127.0.0.1:4000/__test/event', { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+"
+PROBES=""
+for i in $(seq 1 60); do
+  PROBES="$(api_exec "const r = await fetch('http://127.0.0.1:4000/__test/state'); console.log(JSON.stringify((await r.json()).mcpProbes));")"
+  if grep -q "$PROBE_ID" <<<"$PROBES"; then break; fi
+  sleep 1
+done
+echo "$PROBES" | PROBE_ID="$PROBE_ID" MCP_TOKEN="$MCP_TOKEN" node -e '
+const all = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const probes = all.filter((p) => p.probeId === process.env.PROBE_ID);
+const p = probes[0];
+console.log("   probe      :", JSON.stringify(probes.map(({ ok, error, tools }) => ({ ok, error, tools: tools?.map((t) => [t.name, t.annotations]) }))));
+const echo = p?.tools?.find((t) => t.name === "echo");
+const note = p?.tools?.find((t) => t.name === "write_note");
+const ok =
+  probes.length === 1 && p.ok === true && p.tools.length === 2 &&
+  echo?.annotations?.readOnlyHint === true && note?.annotations?.destructiveHint === true &&
+  !JSON.stringify(all).includes(process.env.MCP_TOKEN);
+if (!ok) { console.log("FAIL: expected one successful probe reporting echo (read-only) and write_note (destructive)"); process.exit(1); }
+'
+
+echo "== [mcp] the credential reaches OpenClaw only as \${$MCP_ENV}; idle MCP runtimes are evicted"
+CONFIG="$(docker exec "${P}-openclaw" cat /home/node/.openclaw/openclaw.json)"
+CONFIG="$CONFIG" MCP_SAFE="$MCP_SAFE" MCP_ENV="$MCP_ENV" MCP_TOKEN="$MCP_TOKEN" node -e '
+const cfg = JSON.parse(process.env.CONFIG);
+const server = cfg.mcp?.servers?.[process.env.MCP_SAFE];
+console.log("   rendered   :", JSON.stringify({ ...server, headers: server?.headers }), "sessionIdleTtlMs", cfg.mcp?.sessionIdleTtlMs);
+const ok =
+  server?.url === "http://fake-model:18999/mcp" && server?.transport === "streamable-http" &&
+  server?.headers?.Authorization === "${" + process.env.MCP_ENV + "}" &&
+  JSON.stringify(server?.toolFilter) === JSON.stringify({ include: ["echo"] }) &&
+  cfg.mcp?.sessionIdleTtlMs === 600000 &&
+  !process.env.CONFIG.includes(process.env.MCP_TOKEN);
+if (!ok) { console.log("FAIL: mcp.servers is not rendered as expected (or holds the literal credential)"); process.exit(1); }
+'
+
+echo "== [mcp] a turn allowing echo and write_note, server filter [echo]: only echo reaches the model; it is gated and audited"
+MCP_EVENT_1=0199a6f0-0000-7000-8000-00000000e061
+STATE="$(inject_and_wait "$ROOT/infra/openclaw/test/mention-mcp.json" 0199a6f0-0000-7000-8000-00000000d061)"
+echo "$STATE" | MCP_SAFE="$MCP_SAFE" EVENT="$MCP_EVENT_1" node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const safe = process.env.MCP_SAFE;
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d061");
+if (!m) { console.log("FAIL: no reply to the mcp mention"); process.exit(1); }
+const calls = s.toolCalls.filter((c) => c.eventId === process.env.EVENT);
+const results = s.toolResults.filter((r) => calls.some((c) => c.callId === r.callId));
+console.log("   reply      :", m.text);
+console.log("   tool calls :", JSON.stringify(calls.map((c) => ({ tool: c.tool, params: c.params, allowed: c.allowed }))));
+console.log("   outcomes   :", JSON.stringify(results.map(({ status, durationMs }) => ({ status, durationMs }))));
+const ok =
+  m.text.includes("Tool echo said: echo: hi from mcp") &&
+  m.text.includes(`[tools: 1 | ${safe}__echo]`) && !m.text.includes("write_note") &&
+  calls.length === 1 && calls[0].tool === `${safe}__echo` && calls[0].allowed === true &&
+  Object.keys(calls[0].params).length === 0 &&
+  results.length === 1 && results[0].status === "ok";
+if (!ok) { console.log("FAIL: expected exactly the enabled MCP tool offered, one gated echo call and an answer from its result"); process.exit(1); }
+'
+
+echo "== [mcp] the admin enables write_note on the server: the cell re-renders the tool filter"
+docker exec -e SERVERS="$(mcp_servers_json '["echo","write_note"]')" -i "${P}-api" node --input-type=module -e "
+const mcpServers = JSON.parse(process.env.SERVERS);
+await fetch('http://127.0.0.1:4000/__test/cell', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mcpServers, reason: 'tools.updated' }) });
+"
+for i in $(seq 1 60); do
+  if [[ "$(docker logs "${P}-openclaw" 2>&1 | grep -c "mcp servers upsert=1")" -ge 2 ]]; then break; fi
+  sleep 1
+done
+docker logs "${P}-openclaw" 2>&1 | grep -E "reconciled OpenClaw" | tail -n 1 | sed 's/^/   /'
+FILTER="$(docker exec "${P}-openclaw" cat /home/node/.openclaw/openclaw.json | MCP_SAFE="$MCP_SAFE" node -e '
+const cfg = JSON.parse(require("fs").readFileSync(0, "utf8"));
+console.log(JSON.stringify(cfg.mcp?.servers?.[process.env.MCP_SAFE]?.toolFilter?.include ?? null));
+')"
+echo "   filter     : $FILTER"
+[[ "$FILTER" == '["echo","write_note"]' ]] || { echo "FAIL: the tool filter was not re-rendered"; exit 1; }
+
+echo "== [mcp] a turn allowing only echo: the per-turn cap still hides write_note from the model"
+NARROW="$SECRETS/mention-mcp-narrow.json"
+MCP_SAFE="$MCP_SAFE" node -e '
+const e = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+const echo = `${process.env.MCP_SAFE}__echo`;
+e.eventId = "0199a6f0-0000-7000-8000-00000000e062";
+e.thread.rootMessageId = e.message.id = "0199a6f0-0000-7000-8000-00000000d062";
+e.message.text = "@archie echo again [[call echo {\"text\":\"narrow\"}]]";
+e.turn = { ...e.turn, tools: [echo], toolFlags: { [echo]: e.turn.toolFlags[echo] } };
+require("fs").writeFileSync(process.argv[2], JSON.stringify(e));
+' "$ROOT/infra/openclaw/test/mention-mcp.json" "$NARROW"
+STATE="$(inject_and_wait "$NARROW" 0199a6f0-0000-7000-8000-00000000d062)"
+echo "$STATE" | MCP_SAFE="$MCP_SAFE" node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const safe = process.env.MCP_SAFE;
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d062");
+if (!m) { console.log("FAIL: no reply to the narrow mcp mention"); process.exit(1); }
+console.log("   reply      :", m.text);
+if (!m.text.includes("Tool echo said: echo: narrow") || !m.text.includes(`[tools: 1 | ${safe}__echo]`)) {
+  console.log("FAIL: write_note reached the model although the turn did not allow it"); process.exit(1);
+}
+'
+
+echo "== [mcp] taint: after echo (untrusted MCP output) the destructive write_note is blocked in the same turn"
+TAINT="$SECRETS/mention-mcp-taint.json"
+node -e '
+const e = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+e.eventId = "0199a6f0-0000-7000-8000-00000000e063";
+e.thread.rootMessageId = e.message.id = "0199a6f0-0000-7000-8000-00000000d063";
+e.message.text = "@archie read then write [[call echo {\"text\":\"x\"}]] [[call write_note {\"text\":\"y\"}]]";
+require("fs").writeFileSync(process.argv[2], JSON.stringify(e));
+' "$ROOT/infra/openclaw/test/mention-mcp.json" "$TAINT"
+STATE="$(inject_and_wait "$TAINT" 0199a6f0-0000-7000-8000-00000000d063)"
+echo "$STATE" | MCP_SAFE="$MCP_SAFE" node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const safe = process.env.MCP_SAFE;
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d063");
+if (!m) { console.log("FAIL: no reply to the taint mention"); process.exit(1); }
+const calls = s.toolCalls.filter((c) => c.eventId === "0199a6f0-0000-7000-8000-00000000e063");
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   tool calls :", JSON.stringify(calls.map((c) => ({ tool: c.tool, allowed: c.allowed }))));
+const ok =
+  m.text.includes("Tool echo said: echo: x") &&
+  m.text.includes("Tool write_note said:") && !m.text.includes("noted:") &&
+  m.text.includes(`[tools: 2 | ${safe}__echo,${safe}__write_note]`) &&
+  calls.length === 1 && calls[0].tool === `${safe}__echo` && calls[0].allowed === true &&
+  !calls.some((c) => c.tool === `${safe}__write_note` && c.allowed);
+if (!ok) { console.log("FAIL: expected echo to answer and write_note to be blocked by the taint rule before reaching the server"); process.exit(1); }
+'
+LEAKS="$(docker logs "${P}-openclaw" 2>&1 | grep -c "$MCP_TOKEN" || true)"
+echo "   cell log   : $LEAKS line(s) carry the MCP credential"
+[[ "$LEAKS" -eq 0 ]] || { echo "FAIL: the MCP credential appears in the cell log"; exit 1; }
 fi
 
 if want signin; then

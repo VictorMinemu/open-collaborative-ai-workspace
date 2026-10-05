@@ -8,8 +8,10 @@
  * FAKE_AGENT_TOOLS=web_search,web_fetch  the bot's snapshot `capabilities.tools` (its alsoAllow).
  * FAKE_WEB_SEARCH_PROVIDER=searxng       snapshot `webSearch.provider`.
  * FAKE_DENY_TOOLS=web_fetch              `/tool-calls` denies these tools (allows everything else).
- * Tool calls, their reported results and memory saves are listed in GET /__test/state (`toolCalls`,
- * `toolResults`, `memories`).
+ * FAKE_MCP_SERVERS='[{"id":…,"safeName":…,"transport":…,"url":…,"headers":[…],"tools":[…]}]'
+ *                                        snapshot `mcpServers` (CellMcpServer[], header values included).
+ * Tool calls, their reported results, memory saves and MCP probe reports are listed in GET /__test/state
+ * (`toolCalls`, `toolResults`, `memories`, `mcpProbes`).
  */
 import { startFakeAgentChannelApi } from "./fake-agent-channel-api.ts";
 
@@ -28,6 +30,7 @@ const api = await startFakeAgentChannelApi({
     ? { webSearchProvider: process.env.FAKE_WEB_SEARCH_PROVIDER }
     : {}),
   denyTools: list(process.env.FAKE_DENY_TOOLS),
+  ...(process.env.FAKE_MCP_SERVERS ? { mcpServers: JSON.parse(process.env.FAKE_MCP_SERVERS) } : {}),
   agents: [
     {
       id: process.env.FAKE_BOT_ID ?? "0199a000-0000-7000-8000-00000000a001",

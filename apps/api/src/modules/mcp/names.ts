@@ -47,14 +47,22 @@ export function openclawToolName(safeName: string, tool: string): string {
   return buildSafeToolName(safeName, tool, new Set());
 }
 
-/** OpenClaw names for a server's tool list, collisions suffixed `-2`, `-3` … in listing order. */
+/**
+ * OpenClaw names for a server's tool list, returned in input order. OpenClaw 2026.9.7
+ * (`buildBundleMcpToolsFromCatalog`) materialises a server's tools sorted by MCP name (`localeCompare`) and only
+ * then assigns the `-2`, `-3` … collision suffixes, so the suffixes follow that order, never the server's listing
+ * order: a server that reorders its list keeps every tool's name.
+ */
 export function openclawToolNames(safeName: string, tools: readonly string[]): string[] {
   const reserved = new Set<string>();
-  return tools.map((tool) => {
+  const out: string[] = new Array(tools.length);
+  const order = tools.map((tool, index) => ({ tool, index })).sort((a, b) => a.tool.localeCompare(b.tool));
+  for (const { tool, index } of order) {
     const name = buildSafeToolName(safeName, tool, reserved);
     reserved.add(name.toLowerCase());
-    return name;
-  });
+    out[index] = name;
+  }
+  return out;
 }
 
 /** Env var the cell exports a header value as (`${OCW_MCP_<SAFE>_<index>}` in its config, D-13). */

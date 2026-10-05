@@ -42,7 +42,24 @@ describe("openclawToolName (mirrors OpenClaw 2026.9.7 buildSafeToolName)", () =>
     expect(name.startsWith("m3f9a12c4__xxx")).toBe(true);
   });
 
-  it("assigns collision suffixes in listing order, case-insensitively", () => {
+  it("a tool keeps its name when the server lists its tools in another order (OpenClaw sorts before suffixing)", () => {
+    const listed = ["b.x", "b-x", "b x", "a"];
+    const forward = openclawToolNames("m3f9a12c4", listed);
+    const reversed = openclawToolNames("m3f9a12c4", [...listed].reverse()).reverse();
+    expect(reversed).toEqual(forward);
+    expect(new Set(forward).size).toBe(4);
+    // OpenClaw 2026.9.7 materialises a server's tools sorted by name (localeCompare), then assigns suffixes.
+    const sorted = [...listed].sort((x, y) => x.localeCompare(y));
+    const bySorted = openclawToolNames("m3f9a12c4", sorted);
+    expect(listed.map((t) => bySorted[sorted.indexOf(t)])).toEqual(forward);
+    // The first of the colliding names in sorted order is the one without a suffix.
+    const firstColliding = sorted.find((t) => t !== "a") as string;
+    expect(forward[listed.indexOf(firstColliding)]).toBe(
+      `m3f9a12c4__${firstColliding.replace(/[^A-Za-z0-9_-]/g, "-")}`,
+    );
+  });
+
+  it("assigns collision suffixes in sorted order, case-insensitively", () => {
     expect(openclawToolNames("m3f9a12c4", ["a b", "a-b", "A-B", "c"])).toEqual([
       "m3f9a12c4__a-b",
       "m3f9a12c4__a-b-2",

@@ -1,13 +1,16 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import type { CellAgent, CellProvider, CellSubscription } from "./agent-channel-protocol.js";
+import type { CellAgent, CellMcpServer, CellProvider, CellSubscription } from "./agent-channel-protocol.js";
 import {
   agentStateDirFor,
+  allowedAgentTools,
   applyPlanToDraft,
   DANGEROUS_TOOLS,
   desiredAgentEntry,
+  desiredMcpServerEntry,
   desiredProviderEntry,
   envRef,
+  type McpServerEntry,
   type MutableConfig,
   planReconcile,
   providerKeyEnvName,
@@ -301,6 +304,148 @@ describe("capabilities in the cell (D-08 layer 1, D-09)", () => {
     });
     expect(missing.webSearchProvider).toBeNull();
     expect(missing.changed).toBe(false);
+  });
+});
+
+describe("MCP servers in the cell (D-13, BOT-08)", () => {
+  const SAFE = "m0a1b2c3d";
+  const TOKEN = "Bearer mcp-SECRET-token";
+  const mcp = (over: Partial<CellMcpServer> = {}): CellMcpServer => ({
+    id: "srv-1",
+    safeName: SAFE,
+    transport: "streamable-http",
+    url: "http://fake-model:18999/mcp",
+    headers: [{ name: "Authorization", envName: `OCW_MCP_${SAFE.toUpperCase()}_0`, value: TOKEN }],
+    tools: ["echo"],
+    ...over,
+  });
+  /** The rendered entry of a server the test knows is renderable. */
+  const rendered = (s: CellMcpServer): McpServerEntry => {
+    const entry = desiredMcpServerEntry(s);
+    if (!entry) throw new Error("not renderable");
+    return entry;
+  };
+  const cell = (servers: CellMcpServer[], tools: string[] = [`${SAFE}__echo`]) => ({
+    agents: [agent("a", { modelRef: "fake/mock-1", capabilities: { tools } })],
+    providers: [FAKE],
+    mcpServers: servers,
+  });
+
+  it("renders a server with tools: url, transport, env-var header refs, toolFilter.include; the value only in env", () => {
+    const plan = planReconcile({}, cell([mcp()]));
+    expect(plan.changed).toBe(true);
+    expect(plan.upsertMcpServers).toEqual({
+      [SAFE]: {
+        url: "http://fake-model:18999/mcp",
+        transport: "streamable-http",
+        headers: { Authorization: envRef(`OCW_MCP_${SAFE.toUpperCase()}_0`) },
+        toolFilter: { include: ["echo"] },
+      },
+    });
+    expect(plan.env[`OCW_MCP_${SAFE.toUpperCase()}_0`]).toBe(TOKEN);
+    const draft: MutableConfig = { mcp: { sessionIdleTtlMs: 600_000 } };
+    applyPlanToDraft(draft, plan);
+    expect(draft.mcp).toEqual({ sessionIdleTtlMs: 600_000, servers: plan.upsertMcpServers });
+    // The serialized config never holds the credential.
+    expect(JSON.stringify(draft)).not.toContain("mcp-SECRET-token");
+    // Agents keep exact MCP tool names in alsoAllow.
+    expect(plan.upsertAgents["ocw-a"]?.tools).toMatchObject({ alsoAllow: [`${SAFE}__echo`] });
+  });
+
+  it("an SSE server says so explicitly; a server without headers renders none", () => {
+    const plan = planReconcile({}, cell([mcp({ transport: "sse", url: "http://h:1/sse", headers: [] })]));
+    expect(plan.upsertMcpServers[SAFE]).toEqual({
+      url: "http://h:1/sse",
+      transport: "sse",
+      toolFilter: { include: ["echo"] },
+    });
+  });
+
+  it("a server with no enabled tool is never rendered, and removed when it was", () => {
+    expect(planReconcile({}, cell([mcp({ tools: [] })])).upsertMcpServers).toEqual({});
+    const current = { mcpServers: { [SAFE]: rendered(mcp()), operatorOwned: { url: "x" } } };
+    const plan = planReconcile(current, cell([mcp({ tools: [] })]));
+    expect(plan.removeMcpServers).toEqual([SAFE]);
+    expect(plan.changed).toBe(true);
+    const draft: MutableConfig = { mcp: { servers: { ...current.mcpServers } } };
+    applyPlanToDraft(draft, plan);
+    // Only plugin-owned m<8hex> entries are ever removed.
+    expect(Object.keys(draft.mcp?.servers ?? {})).toEqual(["operatorOwned"]);
+  });
+
+  it("a server that left the snapshot is removed; a foreign entry never is", () => {
+    const current = { mcpServers: { [SAFE]: rendered(mcp()), mdeadbeef0: { url: "y" } } };
+    const plan = planReconcile(current, cell([]));
+    expect(plan.removeMcpServers.sort()).toEqual([SAFE]);
+  });
+
+  it("is a no-op when OpenClaw already has it, including the resolved header value in the runtime view", () => {
+    const resolved = { ...rendered(mcp()), headers: { Authorization: TOKEN } };
+    const first = planReconcile({}, cell([mcp()]));
+    const agents = first.upsertAgents;
+    const providers = { fake: { ...desiredProviderEntry(FAKE, ["mock-1"]), apiKey: "mock-key-not-secret" } };
+    const plan = planReconcile({ agents, providers, mcpServers: { [SAFE]: resolved } }, cell([mcp()]));
+    expect(plan.upsertMcpServers).toEqual({});
+    expect(plan.changed).toBe(false);
+    // The env still carries the value (a restarted gateway process needs it before the next write).
+    expect(plan.env[`OCW_MCP_${SAFE.toUpperCase()}_0`]).toBe(TOKEN);
+  });
+
+  it("a newly enabled tool or a rotated credential re-renders the server", () => {
+    const current = { mcpServers: { [SAFE]: rendered(mcp()) } };
+    expect(
+      planReconcile(current, cell([mcp({ tools: ["echo", "write_note"] })])).upsertMcpServers[SAFE],
+    ).toMatchObject({
+      toolFilter: { include: ["echo", "write_note"] },
+    });
+    const resolved = {
+      [SAFE]: { ...rendered(mcp()), headers: { Authorization: "Bearer old" } },
+    };
+    expect(Object.keys(planReconcile({ mcpServers: resolved }, cell([mcp()])).upsertMcpServers)).toEqual([
+      SAFE,
+    ]);
+  });
+
+  it("a rotated credential re-renders even when the runtime view shows the unresolved env ref", () => {
+    const current = { mcpServers: { [SAFE]: rendered(mcp()) } };
+    const envName = `OCW_MCP_${SAFE.toUpperCase()}_0`;
+    // The gateway env still holds the value OpenClaw resolved at its last config load.
+    expect(planReconcile(current, cell([mcp()]), { env: { [envName]: TOKEN } }).upsertMcpServers).toEqual({});
+    const rotated = mcp({ headers: [{ name: "Authorization", envName, value: "Bearer rotated-SECRET" }] });
+    const plan = planReconcile(current, cell([rotated]), { env: { [envName]: TOKEN } });
+    expect(Object.keys(plan.upsertMcpServers)).toEqual([SAFE]);
+    expect(plan.env[envName]).toBe("Bearer rotated-SECRET");
+  });
+
+  it("refuses snapshot entries it cannot render safely: foreign names, bad env names or header names", () => {
+    const plan = planReconcile(
+      {},
+      cell([
+        mcp({ safeName: "docs" }),
+        mcp({
+          id: "s2",
+          safeName: "m11111111",
+          headers: [{ name: "Authorization", envName: "PATH", value: "x" }],
+        }),
+        mcp({
+          id: "s3",
+          safeName: "m22222222",
+          headers: [{ name: "Bad Header", envName: "OCW_MCP_M22222222_0", value: "x" }],
+        }),
+        mcp({ id: "s4", safeName: "m33333333", tools: ["*", "ok"] }),
+        mcp({ id: "s5", safeName: "m44444444", url: "file:///etc/passwd" }),
+      ]),
+    );
+    expect(Object.keys(plan.upsertMcpServers)).toEqual(["m33333333"]);
+    // Tool filter entries are exact names: no globs.
+    expect(plan.upsertMcpServers.m33333333?.toolFilter).toEqual({ include: ["ok"] });
+    expect(plan.env.PATH).toBeUndefined();
+  });
+
+  it("agent alsoAllow never carries a whole-MCP or whole-plugin grant", () => {
+    expect(allowedAgentTools(["bundle-mcp", "bundle-lsp", `${SAFE}__*`, `${SAFE}__echo`])).toEqual([
+      `${SAFE}__echo`,
+    ]);
   });
 });
 

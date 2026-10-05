@@ -53,6 +53,18 @@ is in the workspace.
    - If the turn still fails, one notice is posted with key `evt:<eventId>:failed`.
    - Typing: `POST /typing {typing:true}` every 4 s, then `{typing:false}`.
 5. **`cell.config.changed`:** re-read `/cell`, reconcile, then send the status acks again.
+   - **MCP servers (D-13):** every snapshot server with at least one enabled tool becomes
+     `mcp.servers.<safeName>` (`m` + 8 hex) with `url`, `transport`, `headers` as `${OCW_MCP_<SAFE>_<i>}` references
+     (the values only in the gateway env, removed with the server) and `toolFilter.include` = the exact enabled MCP
+     tool names. A server without enabled tools is not rendered, so the cell never connects to it. Only `m<8hex>`
+     entries are ever touched.
+   - **`mcp.probe`:** the plugin connects to the snapshot server with the official MCP SDK client
+     (`@modelcontextprotocol/sdk` 1.30.0, the version OpenClaw bundles; streamable HTTP or SSE, no redirects,
+     20 s), lists its tools and reports `POST /mcp/probe-results`. Errors are classified and never carry a header
+     value; the server's metadata is bounded and treated as untrusted.
+   - **MCP calls** go through the same `before_tool_call` gate as every tool (OpenClaw hands the hook a
+     lower-cased name; the gate resolves it to the turn's exact `<safe>__<tool>`), are audited with the server,
+     and MCP output taints the turn unless the admin trusts the server for chained calls.
 
 6. **Subscription sign-in (`provider.auth.*`, ADR-0006).** On `provider.auth.start` the plugin runs
    OpenClaw's own ChatGPT/Codex device-code login (`runModelsAuthLoginFlow` from
