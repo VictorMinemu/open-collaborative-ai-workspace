@@ -150,9 +150,11 @@ describe("GET /agents/:id/capabilities", () => {
         internet: { enabled: false, effective: false, reason: null },
         memory: { enabled: true, effective: true, reason: null },
         dateTime: { enabled: true, effective: true, reason: null },
-        replyModeAll: { enabled: false, effective: false, reason: null },
+        // Off, and refused while off: a personal bot only lives in its owner's DM.
+        replyModeAll: { enabled: false, effective: false, reason: "dm_only" },
       },
       usage: { today: 0, limit: 30, resetsAt: nextUtcMidnight() },
+      dailyLimitMax: 100,
     });
     expect(v.viewerCan).toEqual(expect.arrayContaining(["bot.read", "bot.configure"]));
     const echo = v.tools.find((t: Json) => t.tool === `${SAFE}__echo`);
@@ -181,6 +183,7 @@ describe("GET /agents/:id/capabilities", () => {
       scope: "team",
       capabilities: { internet: false, memory: false, dateTime: true, dailyLimit: 100 },
       usage: { limit: 100 },
+      dailyLimitMax: 10_000,
     });
     const denied = await sam.request("GET", `/api/v1/agents/${teamBotId}/capabilities`);
     expect(denied.status).toBe(403);
@@ -290,6 +293,8 @@ describe("org bot policy", () => {
       personalDailyLimitMax: 100,
       personalAllowedModels: [],
       updatedAt: null,
+      // SearXNG is bundled but has no OCW_SEARXNG_URL here (no compose `search` profile).
+      availableSearchProviders: ["duckduckgo"],
     });
     expect(p.capabilities.internet).toEqual({ orgWide: true, personal: true });
     expect((await sam.request("GET", "/api/v1/bot-policy")).status).toBe(403);

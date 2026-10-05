@@ -114,14 +114,21 @@ describe("effectiveCapabilities", () => {
     expect(view("team", { human: null }).internet.effective).toBe(true);
   });
 
-  it("a toggle that is off is disabled with no reason, whatever the policy", () => {
+  it("a toggle that is off is never effective and keeps the reason it could not be switched on", () => {
     const off = view("team", {
       caps: { internet: false, memory: false, dateTime: false, replyMode: "mentions" },
       policy: policy({ internet: { orgWide: false, personal: false } }),
     });
-    for (const cap of ["internet", "memory", "dateTime", "replyModeAll"] as const) {
+    expect(off.internet).toEqual({ enabled: false, effective: false, reason: "org_policy" });
+    for (const cap of ["memory", "dateTime", "replyModeAll"] as const) {
       expect(off[cap]).toEqual({ enabled: false, effective: false, reason: null });
     }
+    // Personal bots: reply mode `all` is a channel setting, so it is refused even while off.
+    expect(view("personal", { caps: { replyMode: "mentions" } }).replyModeAll).toEqual({
+      enabled: false,
+      effective: false,
+      reason: "dm_only",
+    });
   });
 
   it("reply mode `all` on a personal bot → dm_only (it lives only in its owner's DM)", () => {

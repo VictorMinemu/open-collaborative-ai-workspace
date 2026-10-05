@@ -412,6 +412,9 @@ describe("personal bot visibility and governance", () => {
   it("an admin disables it (audited as governance), its chat is archived; only an admin re-enables it", async () => {
     const off = await ok(admin.request("PATCH", `/api/v1/agents/${kimBot}`, { enabled: false }));
     expect(off).toMatchObject({ status: "disabled", statusMessage: "Disabled by a workspace admin" });
+    // The governance response carries metadata only, never the owner's instructions.
+    expect(off.instructions).toBe("");
+    expect(JSON.stringify(off)).not.toContain("Be brief.");
     const audit = (
       await su.query(
         "select user_id, metadata from app.audit_events where action = 'agent.disabled' and resource_id = $1",

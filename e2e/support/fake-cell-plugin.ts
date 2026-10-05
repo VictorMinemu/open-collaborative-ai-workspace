@@ -56,6 +56,8 @@ export interface MentionPayload {
     text: string;
   }>;
   roster: Array<{ kind: string; id: string; displayName: string }>;
+  /** What this bot may do for this human on this turn (03.1-03); absent = no tools (fail closed). */
+  turn?: { tools: string[] };
 }
 
 /** Subscription sign-in emulation (provider.auth.* commands), against a fake device-auth server. */
@@ -73,13 +75,25 @@ export interface FakeCellOptions {
   token: string;
   /** Ack every non-disabled bot as `ready` on start and on each `cell.config.changed`. */
   autoAck?: boolean;
-  /** Answer every mention with `replyText(mention)` (default: an identity-aware deterministic reply). */
+  /**
+   * Answer every mention with `replyText(mention)` (default: an identity-aware deterministic reply), followed
+   * by the turn-tools suffix (`turnToolsSuffix`).
+   */
   autoReply?: boolean;
   replyText?: (m: MentionPayload) => string;
   /** Resume cursor; omit to start live. */
   afterSeq?: number;
   /** Handle `provider.auth.start|cancel|revoke` like apps/openclaw-channel does (device-code sign-in). */
   deviceAuth?: FakeDeviceAuthOptions;
+}
+
+/**
+ * Appended to every simulated reply: ` [turn tools: <sorted turn.tools joined by commas> | none]`. Lets a
+ * browser spec see which tools the API gave the bot for that very turn (a policy change bites next turn).
+ */
+export function turnToolsSuffix(m: MentionPayload): string {
+  const tools = [...(m.turn?.tools ?? [])].sort();
+  return ` [turn tools: ${tools.length > 0 ? tools.join(",") : "none"}]`;
 }
 
 /** Deterministic, identity-aware reply (mirrors infra/fake-model): proves structured attribution travelled. */
@@ -216,7 +230,7 @@ export class FakeCellPlugin {
       if (type === "cell.config.changed" && this.opts.autoAck) await this.ackAll();
       if (type === "agent.mention.v1" && this.opts.autoReply) {
         const m = data as unknown as MentionPayload;
-        await this.reply(m, (this.opts.replyText ?? identityReply)(m));
+        await this.reply(m, (this.opts.replyText ?? identityReply)(m) + turnToolsSuffix(m));
       }
       if (this.opts.deviceAuth) {
         if (type === "provider.auth.start") void this.runDeviceFlow(data);

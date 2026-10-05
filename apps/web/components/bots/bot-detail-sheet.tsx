@@ -22,6 +22,7 @@ import {
   SheetSection,
   splitModelKey,
 } from "./bot-form";
+import { CapabilitiesPanel } from "./capabilities-panel";
 
 function toValues(a: Agent): BotFormValues {
   return {
@@ -34,14 +35,23 @@ function toValues(a: Agent): BotFormValues {
   };
 }
 
+/**
+ * One bot's sheet. `variant="gallery"` (Bots page): profile, Message, Add to channel. `variant="dm"` (Bot
+ * settings from the bot's private chat): the same controls minus Message and Add to channel. Both show the
+ * Capabilities section when the API grants `bot.configure` on this bot.
+ */
 export function BotDetailSheet({
   agent,
   onOpenChange,
   onAddToChannel,
+  onDeleted,
+  variant = "gallery",
 }: {
   agent: Agent | null;
   onOpenChange: (open: boolean) => void;
-  onAddToChannel: (agent: Agent) => void;
+  onAddToChannel?: (agent: Agent) => void;
+  onDeleted?: () => void;
+  variant?: "gallery" | "dm";
 }) {
   const models = useModels();
   const update = useUpdateAgent();
@@ -69,7 +79,9 @@ export function BotDetailSheet({
 
   // Controls follow what the API decided for this bot (viewerCan), not the caller's org-wide role.
   const { edit: canEdit, govern: canGovern } = botAbilities(agent);
+  const canConfigure = (agent.viewerCan ?? []).includes("bot.configure");
   const personal = agent.scope === "personal";
+  const inDm = variant === "dm";
   // An owner cannot switch back on a personal bot an admin disabled (the API refuses with disabled_by_admin).
   const lockedByAdmin =
     personal &&
@@ -140,6 +152,7 @@ export function BotDetailSheet({
       await remove.mutateAsync(agent.id);
       toast.success(`${agent.name} deleted`);
       onOpenChange(false);
+      onDeleted?.();
     } catch (err) {
       toast.error("Could not delete the bot", { description: errorMessage(err) });
     }
@@ -150,7 +163,7 @@ export function BotDetailSheet({
       <SheetContent
         side="right"
         className="w-full max-w-full sm:w-[36rem] sm:max-w-[92vw]"
-        data-testid="bot-detail-sheet"
+        data-testid={inDm ? "bot-settings-sheet" : "bot-detail-sheet"}
       >
         <div className="flex items-start gap-3 border-b px-5 py-4 pr-14">
           <BotAvatar name={agent.name} avatar={agent.avatarUrl} seed={agent.id} />
@@ -164,7 +177,7 @@ export function BotDetailSheet({
               <ModelChip provider={agent.modelProvider} modelId={agent.modelId} />
               {personal ? <PersonalBadge /> : null}
             </div>
-            {canMessage(agent) ? <MessageBotButton agent={agent} className="mt-3" /> : null}
+            {!inDm && canMessage(agent) ? <MessageBotButton agent={agent} className="mt-3" /> : null}
           </div>
         </div>
 
@@ -180,6 +193,12 @@ export function BotDetailSheet({
                 <p className="mt-0.5 text-muted-foreground">{agent.statusMessage}</p>
               </div>
             </div>
+          ) : null}
+
+          {canConfigure ? (
+            <SheetSection title="Capabilities">
+              <CapabilitiesPanel agentId={agent.id} />
+            </SheetSection>
           ) : null}
 
           {canEdit ? (
@@ -229,7 +248,7 @@ export function BotDetailSheet({
           ) : null}
 
           <p className="text-muted-foreground text-xs">
-            Created {formatDate(agent.createdAt)} · runtime OpenClaw · tools disabled
+            Created {formatDate(agent.createdAt)} · runtime OpenClaw
           </p>
 
           {canGovern ? (
@@ -259,7 +278,7 @@ export function BotDetailSheet({
         </div>
 
         <div className="flex items-center justify-between gap-2 border-t bg-muted/30 px-5 py-3 empty:hidden">
-          {personal ? null : (
+          {personal || inDm || !onAddToChannel ? null : (
             <Button
               variant="outline"
               onClick={() => onAddToChannel(agent)}
