@@ -113,12 +113,26 @@ them, and nothing else:
 1. **Executor** (`apps/openclaw-channel/src/plugin-installer.ts`, one at a time). `plugin.install.v1` must match a
    row of the last `GET /cell` `plugins` list (package, version, sha256, plugin id). The executor downloads
    `artifactUrl` only from `OCW_CLAWHUB_URL` (no redirects, 50 MB, 60 s) into a private temp file and checks the
-   approved sha256, the npm integrity and ClawHub's digest header. It then runs
-   `openclaw plugins install npm-pack:<file> --force --accept-capabilities` as an argv array (120 s), applied
+   approved sha256, the npm integrity and ClawHub's digest header. Before the plugin exists it writes
+   `plugins.entries["<id>"].hooks` with `openclaw config set` (conversation access and prompt injection off). It then
+   runs `openclaw plugins install npm-pack:<file> --force --accept-capabilities` as an argv array (120 s), applied
    through the running gateway. `plugins inspect <id> --runtime --json` must show the approved id, version and
-   integrity, otherwise the plugin is removed again. Hook restrictions are written and the declared surface is
-   reported to `POST /agent-channel/v1/plugins/report`. `plugin.uninstall.v1` runs
-   `openclaw plugins uninstall <id> --force`. Every child process gets `CLAWHUB_DISABLE_TELEMETRY=1`.
+   integrity, otherwise the plugin is removed again. OpenClaw's own view must also show the hook restriction and
+   the plugin enabled; a reinstall after an uninstall keeps `enabled: false`, so the executor runs
+   `plugins enable`. The declared surface is reported to `POST /agent-channel/v1/plugins/report`.
+   `plugin.uninstall.v1` runs `openclaw plugins uninstall <id> --force`. Every child process gets
+   `CLAWHUB_DISABLE_TELEMETRY=1`.
+
+   **Plugin-generation swaps.** Installing, removing or restricting a plugin makes OpenClaw replace the plugin
+   generation. It stops our channel and gives our plugin 5 s to finish its admitted work before it commits. Jobs
+   therefore run detached, in a process-wide queue, outside the channel's lifetime. The event handler returns as
+   soon as the channel is stopped and leaves the event uncommitted. Otherwise the stop waits for the install, the
+   install waits for the stop, the drain times out and OpenClaw rolls the install back (the first CI run of this
+   scenario). The successor instance replays the event, queues behind the running job, finds the plugin
+   installed (inspect) and reports it again; it never installs twice. A retired instance cannot use OpenClaw's
+   wrapped `fetch` or the host's account object. The job therefore reads the token through the plugin's own
+   account copy and, if the in-process report still fails, posts it from a short-lived `node` child process.
+   The token travels on that child's stdin.
 2. **Install gate** (`install-policy.mjs`, OpenClaw's `security.installPolicy` exec, `targets: ["plugin"]`). OpenClaw
    runs it after staging and before committing *every* plugin install or update, CLI or Gateway, and fails closed
    on anything but a well-formed `allow`. It accepts only `npm-pack:<absolute path>` sources. It re-hashes that

@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11,7 +11,8 @@ import type {
   PluginInstallEvent,
   PluginUninstallEvent,
 } from "./agent-channel-protocol.js";
-import type { AgentChannelClient } from "./api-client.js";
+import { type AgentChannelClient, AgentChannelHttpError } from "./api-client.js";
+import { runDetached } from "./openclaw-port.js";
 
 /**
  * Marketplace executor (03.1-12, D-14; BOT-09). Runs admin-approved `plugin.install.v1` / `plugin.uninstall.v1`
@@ -42,6 +43,9 @@ const DOWNLOAD_TIMEOUT_MS = 60_000;
 const INSTALL_TIMEOUT_MS = 120_000;
 const INSPECT_TIMEOUT_MS = 60_000;
 const UNINSTALL_TIMEOUT_MS = 120_000;
+const CONFIG_TIMEOUT_MS = 60_000;
+/** What every marketplace plugin gets (D-14, T-03.1-12-04), written before it is installed. */
+const HOOKS_OFF = { allowConversationAccess: false, allowPromptInjection: false } as const;
 const REPORT_TIMEOUT_MS = 30_000;
 
 /** Values that end up as CLI arguments: never a flag, never a path. */
@@ -71,9 +75,12 @@ export type PluginInstallerDeps = {
   clawhubOrigin: string;
   exec?: RunCli;
   fetchImpl?: typeof fetch;
-  /** Writes `plugins.entries.<id>.hooks {allowConversationAccess:false, allowPromptInjection:false}`. */
-  restrictHooks?: (pluginId: string) => Promise<void>;
   log?: Logger;
+  /**
+   * Delivers a report when this plugin instance can no longer use `fetch` (OpenClaw retires an instance's wrapped
+   * globals when it replaces the plugin generation, which installing or removing a plugin does). Default: none.
+   */
+  reportFallback?: (report: AgentChannelPluginReport) => Promise<void>;
   /** Test knobs. */
   maxBytes?: number;
   tmpDir?: string;
@@ -95,7 +102,8 @@ const FAILURES = {
   install_failed: "OpenClaw could not install the plugin.",
   inspect_failed: "The installed plugin could not be inspected, so it was removed again.",
   plugin_mismatch: "The installed plugin is not the approved one, so it was removed again.",
-  hook_restriction_failed: "The plugin's hook restrictions could not be applied, so it was removed again.",
+  hook_restriction_failed: "The plugin's hook restrictions could not be applied, so it was not kept.",
+  enable_failed: "OpenClaw did not enable the installed plugin, so it was removed again.",
   uninstall_failed: "OpenClaw could not uninstall the plugin.",
 } as const;
 type FailureCode = keyof typeof FAILURES;
@@ -266,12 +274,22 @@ export function createPluginInstaller(deps: PluginInstallerDeps) {
   const run = (args: string[], timeoutMs: number) => exec([cliPath, ...args], { env: childEnv(), timeoutMs });
 
   async function report(r: AgentChannelPluginReport): Promise<void> {
+    const why = (error: unknown) => (error instanceof Error ? error.message.slice(0, 120) : "error");
     try {
       await deps.client.reportPlugin(r, AbortSignal.timeout(REPORT_TIMEOUT_MS));
+      return;
     } catch (error) {
-      log.warn?.(
-        `plugin flow ${r.flowId}: report ${r.state} failed (${error instanceof Error ? error.message.slice(0, 120) : "error"})`,
-      );
+      // The API answered (404 unknown flow, 409 wrong state): final, never retried another way.
+      if (error instanceof AgentChannelHttpError || !deps.reportFallback) {
+        log.warn?.(`plugin flow ${r.flowId}: report ${r.state} failed (${why(error)})`);
+        return;
+      }
+      log.info?.(`plugin flow ${r.flowId}: report ${r.state} through a separate process (${why(error)})`);
+    }
+    try {
+      await deps.reportFallback(r);
+    } catch (error) {
+      log.warn?.(`plugin flow ${r.flowId}: report ${r.state} failed (${why(error)})`);
     }
   }
 
@@ -342,27 +360,30 @@ export function createPluginInstaller(deps: PluginInstallerDeps) {
 
   // ------------------------------------------------------------ download + verify
 
-  async function download(ev: PluginInstallEvent, dir: string, signal: AbortSignal): Promise<string> {
-    let url: URL;
-    let origin: URL;
+  /** The artifact URL, only on the configured ClawHub origin (checked before anything runs). */
+  function artifactUrlOf(ev: PluginInstallEvent): URL | null {
     try {
-      url = new URL(ev.artifactUrl);
-      origin = new URL(deps.clawhubOrigin);
+      const url = new URL(ev.artifactUrl);
+      const origin = new URL(deps.clawhubOrigin);
+      return (url.protocol === "https:" || url.protocol === "http:") && url.origin === origin.origin
+        ? url
+        : null;
     } catch {
-      throw new InstallFailure("untrusted_origin");
+      return null;
     }
-    if ((url.protocol !== "https:" && url.protocol !== "http:") || url.origin !== origin.origin) {
-      throw new InstallFailure("untrusted_origin");
-    }
+  }
+
+  async function download(ev: PluginInstallEvent, dir: string): Promise<string> {
+    const url = artifactUrlOf(ev);
+    if (!url) throw new InstallFailure("untrusted_origin");
     let res: Response;
     try {
       res = await fetchImpl(url, {
         redirect: "error",
         headers: { accept: "application/octet-stream" },
-        signal: AbortSignal.any([signal, AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS)]),
+        signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
       });
-    } catch (error) {
-      if (signal.aborted) throw error;
+    } catch {
       throw new InstallFailure("download_failed");
     }
     if (res.status !== 200 || !res.body) {
@@ -388,7 +409,7 @@ export function createPluginInstaller(deps: PluginInstallerDeps) {
         await handle.write(chunk);
       }
     } catch (error) {
-      if (error instanceof InstallFailure || signal.aborted) throw error;
+      if (error instanceof InstallFailure) throw error;
       throw new InstallFailure("download_failed");
     } finally {
       await handle.close();
@@ -406,11 +427,13 @@ export function createPluginInstaller(deps: PluginInstallerDeps) {
 
   // ------------------------------------------------------------ inspect
 
-  async function inspect(pluginId: string): Promise<Record<string, unknown> | null> {
-    for (const args of [
+  /** `plugins inspect` (with runtime registrations unless `staticOnly`); null when absent or unreadable. */
+  async function inspect(pluginId: string, staticOnly = false): Promise<Record<string, unknown> | null> {
+    const attempts = [
       ["plugins", "inspect", pluginId, "--runtime", "--json"],
       ["plugins", "inspect", pluginId, "--json"],
-    ]) {
+    ];
+    for (const args of staticOnly ? attempts.slice(1) : attempts) {
       const r = await run(args, INSPECT_TIMEOUT_MS);
       if (r.code !== 0) continue;
       const text = r.stdout.trim();
@@ -447,6 +470,44 @@ export function createPluginInstaller(deps: PluginInstallerDeps) {
     await cacheRemoved(pluginId);
   }
 
+  /**
+   * `plugins.entries["<id>"].hooks` through OpenClaw's own CLI (a separate process, like the install): never through
+   * this plugin's runtime handle, which a plugin-generation swap during the install can retire.
+   */
+  async function restrictHooks(pluginId: string): Promise<boolean> {
+    const r = await run(
+      [
+        "config",
+        "set",
+        `plugins.entries["${pluginId}"].hooks`,
+        JSON.stringify(HOOKS_OFF),
+        "--strict-json",
+        "--merge",
+      ],
+      CONFIG_TIMEOUT_MS,
+    );
+    return r.code === 0 && !r.timedOut;
+  }
+
+  const isEnabled = (data: Record<string, unknown>) => asRecord(data.plugin)?.enabled === true;
+
+  /**
+   * An uninstall leaves `plugins.entries.<id>.enabled: false` and a reinstall preserves it, so a plugin installed
+   * again after a removal would stay disabled: enable it explicitly (the documented `plugins enable`) and re-inspect.
+   */
+  async function ensureEnabled(pluginId: string, data: Record<string, unknown>) {
+    if (isEnabled(data)) return data;
+    const r = await run(["plugins", "enable", pluginId, "--accept-capabilities"], CONFIG_TIMEOUT_MS);
+    if (r.code !== 0 || r.timedOut) return null;
+    const after = await inspect(pluginId, true);
+    return after && isEnabled(after) ? after : null;
+  }
+
+  const hooksRestricted = (data: Record<string, unknown>) => {
+    const policy = asRecord(data.policy) ?? {};
+    return policy.allowConversationAccess === false && policy.allowPromptInjection === false;
+  };
+
   async function reportInstalled(ev: PluginInstallEvent, pluginId: string, data: Record<string, unknown>) {
     const declared = declaredSurfaceOfInspect(data);
     await report({
@@ -465,7 +526,7 @@ export function createPluginInstaller(deps: PluginInstallerDeps) {
 
   // ------------------------------------------------------------ handlers
 
-  async function install(ev: PluginInstallEvent, signal: AbortSignal): Promise<void> {
+  async function install(ev: PluginInstallEvent): Promise<void> {
     const pluginId = ev.expectedPluginId;
     if (
       !pluginId ||
@@ -493,21 +554,34 @@ export function createPluginInstaller(deps: PluginInstallerDeps) {
       return failed(ev, "not_approved");
     }
 
-    // Replay of a flow the API already recorded: report what is installed, never reinstall.
-    if (row.status === "installed") {
-      const data = await inspect(pluginId);
-      if (data && matchesApproval(ev, data)) {
-        await cacheInstalled({ pluginId, packageName: ev.packageName, version: ev.version });
-        return reportInstalled(ev, pluginId, data);
+    if (!artifactUrlOf(ev)) {
+      log.warn?.(`plugin flow ${ev.flowId}: artifact URL is not on the configured ClawHub origin; refused`);
+      return failed(ev, "untrusted_origin");
+    }
+
+    // Already there (a replay after this channel instance was replaced mid-install, or a flow the API already
+    // recorded): what OpenClaw has must be exactly the approved plugin, restricted; then report, never reinstall.
+    const present = await inspect(pluginId, true);
+    if (present && matchesApproval(ev, present)) {
+      if (!hooksRestricted(present) && !(await restrictHooks(pluginId))) {
+        await removeAgain(pluginId);
+        return failed(ev, "hook_restriction_failed");
       }
+      if (!(await ensureEnabled(pluginId, present))) {
+        await removeAgain(pluginId);
+        return failed(ev, "enable_failed");
+      }
+      await cacheInstalled({ pluginId, packageName: ev.packageName, version: ev.version });
+      log.info?.(`plugin ${ev.packageName}@${ev.version} already installed as ${pluginId}; reporting it`);
+      return reportInstalled(ev, pluginId, (await inspect(pluginId)) ?? present);
     }
 
     const dir = await mkdtemp(path.join(deps.tmpDir ?? tmpdir(), "ocw-plugin-"));
     try {
-      const file = await download(ev, dir, signal);
+      const file = await download(ev, dir);
+      // Hooks off BEFORE the plugin exists, so it never runs with conversation access or prompt injection.
+      if (!(await restrictHooks(pluginId))) return failed(ev, "hook_restriction_failed");
       log.info?.(`plugin ${ev.packageName}@${ev.version}: artifact verified; installing through OpenClaw`);
-      // Not tied to the account signal: a plugin-instance swap during the install must not kill it half-way
-      // (a replayed event then re-reports or reinstalls the same approved artifact).
       const result = await run(
         ["plugins", "install", `npm-pack:${file}`, "--force", "--accept-capabilities"],
         INSTALL_TIMEOUT_MS,
@@ -529,13 +603,14 @@ export function createPluginInstaller(deps: PluginInstallerDeps) {
         await removeAgain(pluginId);
         return failed(ev, "plugin_mismatch");
       }
-      if (deps.restrictHooks) {
-        try {
-          await deps.restrictHooks(pluginId);
-        } catch {
-          await removeAgain(pluginId);
-          return failed(ev, "hook_restriction_failed");
-        }
+      // OpenClaw's own view must show the restriction (the install must not have dropped it).
+      if (!hooksRestricted(data) && !(await restrictHooks(pluginId))) {
+        await removeAgain(pluginId);
+        return failed(ev, "hook_restriction_failed");
+      }
+      if (!(await ensureEnabled(pluginId, data))) {
+        await removeAgain(pluginId);
+        return failed(ev, "enable_failed");
       }
       await cacheInstalled({ pluginId, packageName: ev.packageName, version: ev.version });
       log.info?.(`plugin ${ev.packageName}@${ev.version} installed as ${pluginId}`);
@@ -545,7 +620,10 @@ export function createPluginInstaller(deps: PluginInstallerDeps) {
         log.warn?.(`plugin ${ev.packageName}@${ev.version}: ${error.code}`);
         return failed(ev, error.code);
       }
-      throw error;
+      log.error?.(
+        `plugin ${ev.packageName}@${ev.version}: install error (${error instanceof Error ? error.message.slice(0, 120) : "error"})`,
+      );
+      return failed(ev, "install_failed");
     } finally {
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
@@ -560,7 +638,14 @@ export function createPluginInstaller(deps: PluginInstallerDeps) {
         p.pluginId === ev.pluginId &&
         (p.status === "uninstalling" || p.status === "failed"),
     );
-    if (!row) return failed(ev, "not_approved");
+    if (!row) {
+      // A replay after this flow already completed (the API dropped the row): nothing to do, nothing to report.
+      if (!(await inspect(ev.pluginId, true))) {
+        log.info?.(`plugin flow ${ev.flowId}: ${ev.pluginId} is not in the cell; nothing to uninstall`);
+        return;
+      }
+      return failed(ev, "not_approved");
+    }
     const r = await run(["plugins", "uninstall", ev.pluginId, "--force"], UNINSTALL_TIMEOUT_MS);
     if (r.code !== 0 && !ALREADY_GONE.test(`${r.stdout}\n${r.stderr}`)) {
       log.warn?.(`plugin ${ev.pluginId}: uninstall failed (exit ${r.code})`);
@@ -576,9 +661,38 @@ export function createPluginInstaller(deps: PluginInstallerDeps) {
     });
   }
 
+  /**
+   * Runs a plugin job outside this channel instance's lifetime. Installing or removing a plugin makes OpenClaw
+   * replace the plugin generation: it stops our channel and drains this plugin's admitted work (5 s) before it
+   * commits. If the event handler kept waiting for the job, the channel could not stop, the drain would time out
+   * and OpenClaw would roll the install back (the 03.1-12 CI deadlock). So the job runs detached (OpenClaw's root
+   * async context, the process-wide queue) and the handler returns as soon as the account is aborted, leaving the
+   * event uncommitted: the successor instance replays it, waits for the job in the same queue, finds the plugin
+   * installed and reports it. The job itself always reports its outcome.
+   */
+  function detached(label: string, job: () => Promise<void>, signal: AbortSignal): Promise<void> {
+    const done = serialized(() => runDetached(job)).catch((error: unknown) => {
+      log.error?.(`${label}: ${error instanceof Error ? error.message.slice(0, 120) : "error"}`);
+    });
+    if (signal.aborted) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const onAbort = () => {
+        log.info?.(`${label}: continues while this channel instance stops; its successor reports it`);
+        resolve();
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      void done.finally(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      });
+    });
+  }
+
   return {
-    onInstall: (ev: PluginInstallEvent, signal: AbortSignal) => serialized(() => install(ev, signal)),
-    onUninstall: (ev: PluginUninstallEvent, _signal: AbortSignal) => serialized(() => uninstall(ev)),
+    onInstall: (ev: PluginInstallEvent, signal: AbortSignal) =>
+      detached(`plugin flow ${ev.flowId}`, () => install(ev), signal),
+    onUninstall: (ev: PluginUninstallEvent, signal: AbortSignal) =>
+      detached(`plugin flow ${ev.flowId}`, () => uninstall(ev), signal),
     // Not queued: it runs after every snapshot refresh, and an install itself may refresh the snapshot (a queued
     // write would wait for that install forever). Writes are atomic (rename); the last one wins.
     writeBootCache,
@@ -586,3 +700,49 @@ export function createPluginInstaller(deps: PluginInstallerDeps) {
 }
 
 export type PluginInstaller = ReturnType<typeof createPluginInstaller>;
+
+/**
+ * `POST /agent-channel/v1/plugins/report` from a short-lived `node` child process: what a plugin job uses once its
+ * plugin instance was retired by the generation swap its own install caused (that instance's `fetch` is refused, a
+ * child process is not). The token and the report travel on stdin, never in argv or the environment. 15 s, no
+ * redirects; non-2xx rejects.
+ */
+export function reportPluginViaChild(
+  apiUrl: string,
+  token: string,
+  report: AgentChannelPluginReport,
+  timeoutMs = 15_000,
+): Promise<void> {
+  const script = `
+let raw = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (c) => { raw += c; });
+process.stdin.on("end", async () => {
+  try {
+    const { url, token, report } = JSON.parse(raw);
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { authorization: "Bearer " + token, "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify(report),
+      redirect: "error",
+      signal: AbortSignal.timeout(${Math.max(1000, timeoutMs - 1000)}),
+    });
+    process.exitCode = res.ok ? 0 : 10 + Math.min(Math.floor(res.status / 100), 5);
+  } catch { process.exitCode = 2; }
+});`;
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["--input-type=module", "-e", script], {
+      env: {},
+      stdio: ["pipe", "ignore", "ignore"],
+      timeout: timeoutMs,
+      killSignal: "SIGKILL",
+      windowsHide: true,
+    });
+    child.on("error", reject);
+    child.on("close", (code) =>
+      code === 0 ? resolve() : reject(new Error(`report process exited with ${code ?? "a signal"}`)),
+    );
+    const url = `${apiUrl.replace(/\/+$/u, "")}/agent-channel/v1/plugins/report`;
+    child.stdin.end(JSON.stringify({ url, token, report }));
+  });
+}

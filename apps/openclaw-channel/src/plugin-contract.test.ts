@@ -876,9 +876,20 @@ describe("marketplace executor (D-14): plugin.install.v1 / plugin.uninstall.v1 t
   let cliCalls: string[][];
   let downloads: string[];
 
+  /** OpenClaw as the CLI sees it: the plugin exists after `plugins install`, with the hooks `config set` wrote. */
+  let installed = false;
+  let hooksOff = false;
   const exec: RunCli = async (args) => {
     cliCalls.push([...args]);
-    return { code: 0, stdout: args[2] === "inspect" ? INSPECT : "", stderr: "", timedOut: false };
+    if (args[1] === "config") hooksOff = true;
+    if (args[2] === "install") installed = true;
+    if (args[2] === "inspect") {
+      if (!installed) return { code: 1, stdout: "", stderr: "Plugin not found", timedOut: false };
+      const data = JSON.parse(INSPECT);
+      if (hooksOff) data.policy = { allowConversationAccess: false, allowPromptInjection: false };
+      return { code: 0, stdout: JSON.stringify(data), stderr: "", timedOut: false };
+    }
+    return { code: 0, stdout: "", stderr: "", timedOut: false };
   };
   const fetchImpl = (async (input: string | URL | Request) => {
     downloads.push(String(input));
@@ -920,6 +931,8 @@ describe("marketplace executor (D-14): plugin.install.v1 / plugin.uninstall.v1 t
     state = mkdtempSync(path.join(tmpdir(), "ocw-market-"));
     cliCalls = [];
     downloads = [];
+    installed = false;
+    hooksOff = false;
   });
   afterEach(() => rmSync(state, { recursive: true, force: true }));
 
@@ -939,7 +952,13 @@ describe("marketplace executor (D-14): plugin.install.v1 / plugin.uninstall.v1 t
     api.publish("plugin.install.v1", install());
     await api.waitFor(() => api.pluginReports.length > 0);
     expect(downloads).toHaveLength(1);
-    expect(cliCalls.map((c) => c[2])).toEqual(["install", "inspect"]);
+    // Not there yet → hooks off first → install → inspect.
+    expect(cliCalls.map((c) => c.slice(1, 3).join(" "))).toEqual([
+      "plugins inspect",
+      "config set",
+      "plugins install",
+      "plugins inspect",
+    ]);
     expect(api.pluginReports).toEqual([
       expect.objectContaining({
         flowId: "flow-1",
@@ -1001,26 +1020,5 @@ describe("marketplace executor (D-14): plugin.install.v1 / plugin.uninstall.v1 t
     api.publishMention(mention(1));
     await api.waitFor(() => api.messages.length === 1);
     expect(api.pluginReports).toEqual([]);
-  });
-
-  it("the real port restricts a plugin's hooks through the runtime config mutation, keeping its other settings", async () => {
-    const config: Record<string, unknown> = {
-      plugins: { allow: ["ocw", "ocw-echo"], entries: { "ocw-echo": { enabled: true } } },
-    };
-    const runtime = {
-      config: {
-        current: () => config,
-        mutateConfigFile: async (p: { mutate: (d: Record<string, unknown>) => void }) => p.mutate(config),
-      },
-      channel: {} as PluginRuntimeLike["channel"],
-    } as PluginRuntimeLike;
-    const p = createOpenClawPort({ runtime, accountId: "default", cfg: {} });
-    await p.restrictPluginHooks?.("ocw-echo");
-    expect(config.plugins).toEqual({
-      allow: ["ocw", "ocw-echo"],
-      entries: {
-        "ocw-echo": { enabled: true, hooks: { allowConversationAccess: false, allowPromptInjection: false } },
-      },
-    });
   });
 });

@@ -42,11 +42,6 @@ export type OpenClawPort = {
     cell: CellSnapshot,
     opts?: { readySubscriptions?: ReadonlySet<string> },
   ): Promise<{ changed: boolean; results: AgentProvisioningResult[] }>;
-  /**
-   * Marketplace plugins (D-14): `plugins.entries.<id>.hooks {allowConversationAccess:false, allowPromptInjection:false}`
-   * through the same runtime config mutation as `reconcile`. Optional (test ports).
-   */
-  restrictPluginHooks?(pluginId: string): Promise<void>;
 };
 
 export type BridgeOptions = {

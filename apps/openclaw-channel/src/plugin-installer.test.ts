@@ -5,6 +5,8 @@
  */
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -15,6 +17,7 @@ import type {
   PluginInstallEvent,
   PluginUninstallEvent,
 } from "./agent-channel-protocol.js";
+import { AgentChannelHttpError } from "./api-client.js";
 import {
   BOOT_CACHE_FILE,
   type CliResult,
@@ -23,6 +26,7 @@ import {
   defaultRunCli,
   OPENCLAW_CLI,
   type RunCli,
+  reportPluginViaChild,
 } from "./plugin-installer.js";
 
 const ORIGIN = "http://fake-model:18999";
@@ -101,9 +105,28 @@ let reports: AgentChannelPluginReport[];
 let fetched: string[];
 let snap: CellSnapshot;
 let refreshes: number;
-let restricted: string[];
-/** CLI behaviour per subcommand. */
-let cli: { install: CliResult; uninstall: CliResult; inspect: CliResult };
+/** CLI behaviour per subcommand; `inspect` is the plugin's inspect output once it is installed. */
+let cli: {
+  install: CliResult;
+  uninstall: CliResult;
+  inspect: CliResult;
+  config: CliResult;
+  installsAs: string;
+};
+/** The modelled OpenClaw: installed plugin ids and `plugins.entries[<id>].hooks` written by `config set`. */
+let oc: { installed: Set<string>; hooks: Map<string, Record<string, unknown>>; disabled: Set<string> };
+const HOOKS_OFF = '{"allowConversationAccess":false,"allowPromptInjection":false}';
+const configSet = (id: string) => [
+  OPENCLAW_CLI,
+  "config",
+  "set",
+  `plugins.entries["${id}"].hooks`,
+  HOOKS_OFF,
+  "--strict-json",
+  "--merge",
+];
+/** Verbs of the recorded CLI calls (`plugins install`, `config set`, …). */
+const verbs = () => calls.map((c) => c.args.slice(1, 3).join(" "));
 
 const ok = (stdout = ""): CliResult => ({ code: 0, stdout, stderr: "", timedOut: false });
 
@@ -119,10 +142,43 @@ const runCli: RunCli = async (args, opts) => {
     };
   }
   calls.push(call);
-  // args = [<openclaw cli>, "plugins", <verb>, ...]
-  if (args[2] === "install") return cli.install;
-  if (args[2] === "uninstall") return cli.uninstall;
-  if (args[2] === "inspect") return cli.inspect;
+  // args = [<openclaw cli>, "plugins" | "config", <verb>, ...]
+  if (args[1] === "config") {
+    const id = /^plugins\.entries\["([^"]+)"\]\.hooks$/u.exec(args[3] ?? "")?.[1];
+    if (cli.config.code === 0 && id) oc.hooks.set(id, JSON.parse(args[4] ?? "{}"));
+    return cli.config;
+  }
+  if (args[2] === "install") {
+    if (cli.install.code === 0) oc.installed.add(cli.installsAs);
+    return cli.install;
+  }
+  if (args[2] === "uninstall") {
+    if (cli.uninstall.code === 0) {
+      oc.installed.delete(args[3] ?? "");
+      oc.disabled.add(args[3] ?? ""); // OpenClaw keeps `enabled: false` after an uninstall
+    }
+    return cli.uninstall;
+  }
+  if (args[2] === "enable") {
+    oc.disabled.delete(args[3] ?? "");
+    return ok();
+  }
+  if (args[2] === "inspect") {
+    const id = args[3] ?? "";
+    if (!oc.installed.has(id)) {
+      return {
+        code: 1,
+        stdout: `{"ok":false,"error":{"message":"Plugin not found: ${id}"}}`,
+        stderr: "",
+        timedOut: false,
+      };
+    }
+    if (cli.inspect.code !== 0) return cli.inspect;
+    const data = JSON.parse(cli.inspect.stdout);
+    data.policy = { ...data.policy, ...(oc.hooks.get(id) ?? {}) };
+    data.plugin = { ...data.plugin, enabled: !oc.disabled.has(id) };
+    return ok(JSON.stringify(data));
+  }
   return ok();
 };
 
@@ -155,9 +211,6 @@ function installer(over: { fetchImpl?: typeof fetch; maxBytes?: number } = {}) {
     clawhubOrigin: ORIGIN,
     exec: runCli,
     fetchImpl: over.fetchImpl ?? fetchOf(ARTIFACT, { headers: { "x-clawhub-artifact-sha256": SHA } }),
-    restrictHooks: async (id) => {
-      restricted.push(id);
-    },
     ...(over.maxBytes ? { maxBytes: over.maxBytes } : {}),
   });
 }
@@ -171,9 +224,15 @@ beforeEach(() => {
   reports = [];
   fetched = [];
   refreshes = 0;
-  restricted = [];
   snap = snapshot([approved()]);
-  cli = { install: ok("Installed plugin: ocw-echo\n"), uninstall: ok(), inspect: ok(INSPECT_ECHO) };
+  cli = {
+    install: ok("Installed plugin: ocw-echo\n"),
+    uninstall: ok(),
+    inspect: ok(INSPECT_ECHO),
+    config: ok(),
+    installsAs: "ocw-echo",
+  };
+  oc = { installed: new Set(), hooks: new Map(), disabled: new Set() };
 });
 
 afterEach(() => {
@@ -198,9 +257,12 @@ describe("plugin.install.v1", () => {
     expect(existsSync(spec?.slice("npm-pack:".length) ?? "/")).toBe(false);
     expect(install[0]?.timeoutMs).toBe(120_000);
 
-    expect(calls.map((c) => c.args.slice(1, 3).join(" "))).toEqual(["plugins install", "plugins inspect"]);
-    expect(calls[1]?.args).toEqual([OPENCLAW_CLI, "plugins", "inspect", "ocw-echo", "--runtime", "--json"]);
-    expect(restricted).toEqual(["ocw-echo"]);
+    // Not there yet → hooks off BEFORE the plugin exists → install → inspect with runtime registrations.
+    expect(verbs()).toEqual(["plugins inspect", "config set", "plugins install", "plugins inspect"]);
+    expect(calls[0]?.args).toEqual([OPENCLAW_CLI, "plugins", "inspect", "ocw-echo", "--json"]);
+    expect(calls[1]?.args).toEqual(configSet("ocw-echo"));
+    expect(calls[3]?.args).toEqual([OPENCLAW_CLI, "plugins", "inspect", "ocw-echo", "--runtime", "--json"]);
+    expect(oc.hooks.get("ocw-echo")).toEqual({ allowConversationAccess: false, allowPromptInjection: false });
 
     expect(reports).toEqual([
       {
@@ -264,7 +326,8 @@ describe("plugin.install.v1", () => {
     await installer({
       fetchImpl: fetchOf(ARTIFACT, { headers: { "x-clawhub-artifact-sha256": "0".repeat(64) } }),
     }).onInstall(event(), signal());
-    expect(calls).toEqual([]);
+    // Only the read-only "already installed?" check ran: no hooks write, no install.
+    expect(verbs().filter((v) => v !== "plugins inspect")).toEqual([]);
     expect(reports.map((r) => [r.state, r.error?.code])).toEqual([
       ["failed", "digest_mismatch"],
       ["failed", "digest_mismatch"],
@@ -279,7 +342,7 @@ describe("plugin.install.v1", () => {
       event(),
       signal(),
     );
-    expect(calls).toEqual([]);
+    expect(verbs().filter((v) => v !== "plugins inspect")).toEqual([]);
     expect(reports.map((r) => [r.state, r.error?.code])).toEqual([
       ["failed", "too_large"],
       ["failed", "download_failed"],
@@ -295,7 +358,7 @@ describe("plugin.install.v1", () => {
     expect(reports[0]).toMatchObject({ state: "failed", error: { code: "install_blocked" } });
     expect(reports[0]?.error?.message).not.toContain("/home/node");
     expect(reports[0]?.error?.message).not.toContain("Reason:");
-    expect(restricted).toEqual([]);
+    expect(oc.installed.size).toBe(0);
 
     reports = [];
     cli.install = { code: null, stdout: "", stderr: "", timedOut: true };
@@ -352,26 +415,99 @@ describe("plugin.install.v1", () => {
   it("what got installed is not what was approved (plugin id or version) → uninstalled again, failed plugin_mismatch", async () => {
     cli.inspect = ok(INSPECT_DDG);
     await installer().onInstall(event(), signal());
-    expect(calls.map((c) => c.args.slice(1, 4).join(" "))).toEqual([
-      `plugins install npm-pack:${calls[0]?.args[3]?.slice(9) ?? ""}`,
-      "plugins inspect ocw-echo",
-      "plugins uninstall ocw-echo",
+    expect(verbs()).toEqual([
+      "plugins inspect",
+      "config set",
+      "plugins install",
+      "plugins inspect",
+      "plugins uninstall",
     ]);
+    expect(calls.at(-1)?.args).toEqual([OPENCLAW_CLI, "plugins", "uninstall", "ocw-echo", "--force"]);
     expect(reports).toEqual([
       expect.objectContaining({
         state: "failed",
         error: expect.objectContaining({ code: "plugin_mismatch" }),
       }),
     ]);
-    expect(restricted).toEqual([]);
   });
 
-  it("a replayed event for a row the API already shows installed reports again without reinstalling", async () => {
-    snap = snapshot([approved({ status: "installed" })]);
+  it("a replay finds the approved plugin already installed and restricted: reports it without reinstalling", async () => {
+    for (const status of ["installed", "installing"]) {
+      snap = snapshot([approved({ status })]);
+      oc.installed.add("ocw-echo");
+      oc.hooks.set("ocw-echo", JSON.parse(HOOKS_OFF));
+      calls = [];
+      reports = [];
+      await installer().onInstall(event(), signal());
+      expect(fetched).toEqual([]);
+      expect(verbs()).toEqual(["plugins inspect", "plugins inspect"]);
+      expect(reports).toEqual([expect.objectContaining({ state: "installed", pluginId: "ocw-echo" })]);
+    }
+  });
+
+  it("a plugin found installed without the hook restriction gets it before it is reported", async () => {
+    oc.installed.add("ocw-echo");
     await installer().onInstall(event(), signal());
-    expect(fetched).toEqual([]);
-    expect(calls.map((c) => c.args[2])).toEqual(["inspect"]);
-    expect(reports).toEqual([expect.objectContaining({ state: "installed", pluginId: "ocw-echo" })]);
+    expect(verbs()).toEqual(["plugins inspect", "config set", "plugins inspect"]);
+    expect(reports).toEqual([expect.objectContaining({ state: "installed" })]);
+    // If the restriction cannot be written, the plugin is not kept.
+    oc.hooks.clear();
+    cli.config = { code: 1, stdout: "", stderr: "refused", timedOut: false };
+    calls = [];
+    reports = [];
+    await installer().onInstall(event(), signal());
+    expect(verbs()).toEqual(["plugins inspect", "config set", "plugins uninstall"]);
+    expect(reports).toEqual([
+      expect.objectContaining({
+        state: "failed",
+        error: expect.objectContaining({ code: "hook_restriction_failed" }),
+      }),
+    ]);
+  });
+
+  it("a hook restriction that cannot be written before the install stops it: nothing is installed", async () => {
+    cli.config = { code: 1, stdout: "", stderr: "refused", timedOut: false };
+    await installer().onInstall(event(), signal());
+    expect(verbs()).toEqual(["plugins inspect", "config set"]);
+    expect(reports).toEqual([
+      expect.objectContaining({
+        state: "failed",
+        error: expect.objectContaining({ code: "hook_restriction_failed" }),
+      }),
+    ]);
+  });
+
+  it("an aborted channel instance stops waiting at once; the install finishes and reports, and the replay re-reports", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const slowInstall: RunCli = async (args, opts) => {
+      if (args[2] === "install") await gate; // OpenClaw is replacing the plugin generation
+      return runCli(args, opts);
+    };
+    const make = () =>
+      createPluginInstaller({
+        client: { reportPlugin: async (r) => void reports.push(structuredClone(r)) },
+        snapshot: () => snap,
+        stateDir,
+        clawhubOrigin: ORIGIN,
+        exec: slowInstall,
+        fetchImpl: fetchOf(ARTIFACT),
+      });
+    const account = new AbortController();
+    const first = make().onInstall(event(), account.signal);
+    await new Promise((r) => setTimeout(r, 30));
+    // OpenClaw stops our channel to drain it: the handler must return now, not when the install ends.
+    account.abort();
+    await first;
+    expect(reports).toEqual([]);
+    // The successor instance replays the (uncommitted) event: it queues behind the running install.
+    const replay = make().onInstall(event(), new AbortController().signal);
+    release();
+    await replay;
+    expect(verbs().filter((v) => v === "plugins install")).toHaveLength(1);
+    expect(reports.map((r) => r.state)).toEqual(["installed", "installed"]);
   });
 
   it("installs run one at a time", async () => {
@@ -443,6 +579,7 @@ describe("plugin.uninstall.v1", () => {
     snap = snapshot([approved({ status: "failed" })]);
     await installer().onUninstall(uninstall(), signal());
     expect(reports.at(-1)).toMatchObject({ state: "uninstalled" });
+    oc.installed.add("ocw-echo");
     snap = snapshot([approved({ status: "installed" })]);
     await installer().onUninstall(uninstall(), signal());
     snap = snapshot([approved({ status: "uninstalling", pluginId: "other" })]);
@@ -452,6 +589,12 @@ describe("plugin.uninstall.v1", () => {
       ["failed", "not_approved"],
     ]);
     expect(calls.filter((c) => c.args[2] === "uninstall")).toHaveLength(1);
+    // A replay after the flow completed (the API dropped the row) finds nothing to do and reports nothing.
+    oc.installed.clear();
+    snap = snapshot([]);
+    reports = [];
+    await installer().onUninstall(uninstall(), signal());
+    expect(reports).toEqual([]);
   });
 
   it("a CLI failure → failed uninstall_failed (classified)", async () => {
@@ -536,5 +679,88 @@ describe("default CLI runner", () => {
     const slow = path.join(stateDir, "slow.mjs");
     writeFileSync(slow, "setTimeout(() => {}, 10_000);\n");
     expect(await defaultRunCli([slow], { env: {}, timeoutMs: 200 })).toMatchObject({ timedOut: true });
+  });
+});
+
+describe("reporting after the plugin instance was retired", () => {
+  it("a transport failure (retired instance fetch) falls back to the separate report process; an API refusal does not", async () => {
+    const fallback: AgentChannelPluginReport[] = [];
+    const make = (error: Error) =>
+      createPluginInstaller({
+        client: {
+          async reportPlugin() {
+            throw error;
+          },
+        },
+        snapshot: () => snap,
+        stateDir,
+        clawhubOrigin: ORIGIN,
+        exec: runCli,
+        fetchImpl: fetchOf(ARTIFACT),
+        reportFallback: async (r) => void fallback.push(r),
+      });
+    await make(new Error("Plugin ocw was reloaded or disabled; use its current tools.")).onInstall(
+      event(),
+      signal(),
+    );
+    expect(fallback).toEqual([
+      expect.objectContaining({ flowId: FLOW, state: "installed", pluginId: "ocw-echo" }),
+    ]);
+    fallback.length = 0;
+    await make(new AgentChannelHttpError(409, "/plugins/report", "conflict")).onInstall(event(), signal());
+    expect(fallback).toEqual([]);
+  });
+
+  it("reportPluginViaChild posts the report with the cell token from a child process; non-2xx rejects", async () => {
+    const seen: Array<{ url?: string; auth?: string; body: unknown }> = [];
+    let status = 200;
+    const server = createServer(async (req, res) => {
+      let raw = "";
+      for await (const c of req) raw += c;
+      seen.push({ url: req.url, auth: req.headers.authorization, body: JSON.parse(raw) });
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end('{"ok":true}');
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`;
+    const r: AgentChannelPluginReport = {
+      flowId: FLOW,
+      pluginRowId: ROW,
+      state: "uninstalled",
+      pluginId: "ocw-echo",
+    };
+    try {
+      await reportPluginViaChild(base, "cell-token-xyz", r);
+      expect(seen).toEqual([
+        { url: "/agent-channel/v1/plugins/report", auth: "Bearer cell-token-xyz", body: r },
+      ]);
+      status = 409;
+      await expect(reportPluginViaChild(base, "cell-token-xyz", r)).rejects.toThrow(/exited with 14/u);
+    } finally {
+      await new Promise((done) => server.close(done));
+    }
+  });
+});
+
+describe("reinstall after an uninstall", () => {
+  it("OpenClaw keeps the plugin disabled after a removal: the executor enables it before reporting it installed", async () => {
+    const inst = installer();
+    await inst.onInstall(event(), signal());
+    snap = snapshot([approved({ status: "uninstalling" })]);
+    await inst.onUninstall(uninstall(), signal());
+    snap = snapshot([approved({ status: "installing" })]);
+    calls = [];
+    reports = [];
+    await inst.onInstall(event({ flowId: "flow-again" }), signal());
+    expect(verbs()).toEqual([
+      "plugins inspect",
+      "config set",
+      "plugins install",
+      "plugins inspect",
+      "plugins enable",
+      "plugins inspect",
+    ]);
+    expect(calls[4]?.args).toEqual([OPENCLAW_CLI, "plugins", "enable", "ocw-echo", "--accept-capabilities"]);
+    expect(reports).toEqual([expect.objectContaining({ flowId: "flow-again", state: "installed" })]);
   });
 });

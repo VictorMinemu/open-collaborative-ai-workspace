@@ -182,28 +182,6 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
       return { changed: true, results: plan.results };
     },
 
-    async restrictPluginHooks(pluginId: string) {
-      // A marketplace plugin never reads conversations nor injects prompts (D-14, T-03.1-12-04). OpenClaw
-      // hot-reloads hook policy changes into the running plugin.
-      await runtime.config.mutateConfigFile({
-        afterWrite: { mode: "auto" },
-        mutate(draft) {
-          const cfg = draft as MutableConfig;
-          cfg.plugins ??= {};
-          const plugins = cfg.plugins as { entries?: Record<string, Record<string, unknown>> };
-          plugins.entries ??= {};
-          const entries = plugins.entries;
-          const current = entries[pluginId] ?? {};
-          const hooks = (current.hooks ?? {}) as Record<string, unknown>;
-          entries[pluginId] = {
-            ...current,
-            hooks: { ...hooks, allowConversationAccess: false, allowPromptInjection: false },
-          };
-        },
-      });
-      opts.log?.info?.(`plugin ${pluginId}: conversation access and prompt injection off`);
-    },
-
     async dispatchMention(m: MappedMention, deliver, signal) {
       const baseSessionKey = runtime.channel.routing.buildAgentSessionKey({
         agentId: m.openClawAgentId,

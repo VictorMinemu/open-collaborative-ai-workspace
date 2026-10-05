@@ -698,16 +698,18 @@ echo "   plugins list: ocw-echo $STATUS"
 
 echo "== [marketplace] a bot granted ocw_echo calls it in a conversation, through the tool gate"
 ECHO_MENTION="$SECRETS/mention-echo.json"
-mention_echo() { # <event id> <message id> <text>
+mention_echo() { # <event id> <message id> <text> [turn tools, JSON; default ["ocw_echo"]]
   node -e '
 const e = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
 e.eventId = process.argv[3];
 e.conversation = { ...e.conversation, id: "0199a6f0-0000-7000-8000-00000000c007", name: "marketplace" };
 e.thread.rootMessageId = e.message.id = process.argv[4];
 e.message.text = process.argv[5];
-e.turn = { ...e.turn, tools: ["ocw_echo"], toolFlags: { ocw_echo: { untrustedOutput: true, sideEffecting: true } } };
+const tools = JSON.parse(process.argv[6] || "[\"ocw_echo\"]");
+const flags = { ocw_echo: { untrustedOutput: true, sideEffecting: true }, web_fetch: { untrustedOutput: true, sideEffecting: false } };
+e.turn = { ...e.turn, tools, toolFlags: Object.fromEntries(tools.map((t) => [t, flags[t]])) };
 require("fs").writeFileSync(process.argv[2], JSON.stringify(e));
-' "$ROOT/infra/openclaw/test/mention-mcp.json" "$ECHO_MENTION" "$1" "$2" "$3"
+' "$ROOT/infra/openclaw/test/mention-mcp.json" "$ECHO_MENTION" "$1" "$2" "$3" "${4:-}"
 }
 mention_echo 0199a6f0-0000-7000-8000-00000000e071 0199a6f0-0000-7000-8000-00000000d071 \
   '@archie please echo [[call ocw_echo {"text":"marketplace"}]]'
@@ -738,8 +740,10 @@ echo "   report     : $REPORT"
 STATUS="$(listed ocw-echo)"
 echo "   plugins list: ocw-echo $STATUS"
 [[ "$STATUS" == "absent" ]] || { echo "FAIL: ocw-echo is still in the cell"; exit 1; }
+# The turn (and the bot's alsoAllow) still list ocw_echo, next to web_fetch: OpenClaw refuses a turn whose
+# allowlist matches no registered tool, so web_fetch keeps the turn alive while the removed tool cannot be offered.
 mention_echo 0199a6f0-0000-7000-8000-00000000e072 0199a6f0-0000-7000-8000-00000000d072 \
-  '@archie echo once more [[call ocw_echo {"text":"after uninstall"}]]'
+  '@archie echo once more [[call ocw_echo {"text":"after uninstall"}]]' '["ocw_echo","web_fetch"]'
 STATE="$(inject_and_wait "$ECHO_MENTION" 0199a6f0-0000-7000-8000-00000000d072)"
 echo "$STATE" | node -e '
 const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
@@ -747,7 +751,7 @@ const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-80
 if (!m) { console.log("FAIL: no reply to the post-uninstall mention"); process.exit(1); }
 const calls = s.toolCalls.filter((c) => c.eventId === "0199a6f0-0000-7000-8000-00000000e072");
 console.log("   reply      :", m.text);
-if (!m.text.includes("Tool ocw_echo not offered") || !m.text.endsWith("[tools: 0]") || calls.length !== 0) {
+if (!m.text.includes("Tool ocw_echo not offered") || !m.text.endsWith("[tools: 1 | web_fetch]") || calls.length !== 0) {
   console.log("FAIL: the uninstalled plugin tool still reached the model"); process.exit(1);
 }
 '

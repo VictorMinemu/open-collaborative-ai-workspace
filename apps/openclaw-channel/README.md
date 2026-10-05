@@ -88,12 +88,18 @@ is in the workspace.
    only an event that matches the snapshot's approved `plugins` (one refresh). It downloads from `OCW_CLAWHUB_URL`
    only, verifies the approved sha256 and npm integrity, and runs
    `openclaw plugins install npm-pack:<file> --force --accept-capabilities` (argv array, no shell). OpenClaw's
-   install gate (`infra/openclaw/install-policy.mjs`) then asks the API again. The executor checks the inspected id,
-   version and integrity, writes `plugins.entries.<id>.hooks` (conversation access and prompt injection off),
-   reports the declared surface and keeps `<state>/ocw-plugins.json` as a boot fallback (never trusted for an
-   install). Installs run one at a time and are not tied to the account's abort signal. A replayed event for an
-   installed row re-reports without reinstalling. Reports carry classified codes, never CLI output. Details and the
-   trust model: `infra/openclaw/README.md` › Marketplace plugins.
+   install gate (`infra/openclaw/install-policy.mjs`) then asks the API again.
+   - Before the install, the executor writes `plugins.entries["<id>"].hooks` through `openclaw config set`
+     (conversation access and prompt injection off).
+   - After it, the executor checks the inspected id, version, integrity, hook restriction and `enabled`.
+   - It reports the declared surface and keeps `<state>/ocw-plugins.json` as a boot fallback (never trusted for an
+     install).
+   - Jobs run detached, one at a time per process. The handler returns when OpenClaw stops the channel for the
+     plugin-generation swap the job itself causes; see `infra/openclaw/README.md`.
+   - A replay finds the plugin installed and re-reports it without reinstalling.
+   - A job that outlives its plugin instance reports from a short-lived child process.
+   - Reports carry classified codes, never CLI output.
+   - Details and the trust model: `infra/openclaw/README.md` › Marketplace plugins.
 
 ## Notes from running against the real gateway
 
