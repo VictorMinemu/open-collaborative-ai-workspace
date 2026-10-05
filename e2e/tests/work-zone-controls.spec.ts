@@ -340,3 +340,101 @@ test("Work Zone reasoning and permission menus (ref): only real options, reasons
     await adminApi.dispose();
   }
 });
+
+test("New session dialog: only the chosen device's catalog models and the modes the caller may use there, with reasons", async ({
+  page,
+}, info) => {
+  test.setTimeout(240_000);
+  const mobile = info.project.name === "mobile";
+  const tag = mobile ? "390" : "1440";
+  const adminApi = await apiAs(ADMIN);
+  let device: FakeDeviceHandle | null = null;
+  let sessionId: string | null = null;
+  const projectName = `new-session-${tag}`;
+
+  try {
+    // The org allows Full access, so the device's own opt-in (off here) is the layer that refuses it.
+    const policy = await adminApi.put("/api/v1/work-zone-policy", { data: { allowFullAccess: true } });
+    expect(policy.ok(), await policy.text()).toBe(true);
+    device = await startFakeDevice(adminApi, { name: `E2E New session ${tag}`, projectName });
+
+    await signIn(page);
+    await page.goto("/work-zone");
+    await page.getByTestId("new-session").click();
+    const dialog = page.getByTestId("new-session-dialog");
+    await expect(dialog).toBeVisible();
+    await dialog.getByTestId("project-option").filter({ hasText: projectName }).click();
+    await dialog.getByTestId("runtime-claude-code").click();
+
+    // ---- modes: the five, with descriptions; Full access disabled with the device's reason
+    for (const m of ["default", "acceptEdits", "auto", "fullAccess", "plan"])
+      await expect(dialog.getByTestId(`mode-${m}`)).toBeVisible({ timeout: 15_000 });
+    const full = dialog.getByTestId("mode-fullAccess");
+    await expect(full).toBeDisabled();
+    await expect(full).toContainText("Full access is off on this device");
+    await expect(dialog.getByTestId("mode-default")).toHaveAttribute("aria-checked", "true");
+    await expect(dialog.getByTestId("mode-default")).toContainText("Ask before commands and file changes.");
+
+    // ---- models: Default plus what the device's runtime reported (never the old static list)
+    const modelSelect = dialog.getByTestId("new-session-model");
+    await modelSelect.click();
+    const options = page.getByRole("option");
+    await expect(options.first()).toHaveText("Default");
+    await expect(page.getByRole("option", { name: "Claude Sonnet 5.5" })).toBeVisible();
+    await expect(page.getByRole("option", { name: "Claude Opus 4.6" })).toBeVisible();
+    await expect(page.getByRole("option", { name: "Opus", exact: true })).toHaveCount(0);
+    await page.getByRole("option", { name: "Claude Haiku 4.5" }).click();
+    // Haiku reports no efforts: no effort choice.
+    await expect(dialog.getByTestId("new-session-effort")).toHaveCount(0);
+    await modelSelect.click();
+    await page.getByRole("option", { name: "Claude Sonnet 5.5" }).click();
+    const effortSelect = dialog.getByTestId("new-session-effort");
+    await expect(effortSelect).toBeVisible();
+    await effortSelect.click();
+    await expect(page.getByRole("option")).toHaveText([
+      "Default",
+      "Low",
+      "Medium",
+      "High",
+      "Extra High",
+      "Max",
+    ]);
+    await page.getByRole("option", { name: "High", exact: true }).click();
+    await dialog.getByTestId("mode-acceptEdits").click();
+    await dialog.getByTestId("mode-acceptEdits").scrollIntoViewIfNeeded();
+    await bothThemes(page, `wz-new-session-${tag}`);
+
+    // ---- switching runtime reloads the options from that runtime's catalog and resets the model
+    await dialog.getByTestId("runtime-codex").click();
+    await expect(modelSelect).toHaveText(/Default/);
+    await modelSelect.click();
+    await expect(page.getByRole("option", { name: "GPT-6.1 Sol" })).toBeVisible();
+    await expect(page.getByRole("option", { name: "Claude Sonnet 5.5" })).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await bothThemes(page, `wz-new-session-${tag}-codex`);
+    await dialog.getByTestId("runtime-claude-code").click();
+    await modelSelect.click();
+    await page.getByRole("option", { name: "Claude Sonnet 5.5" }).click();
+    await dialog.getByTestId("new-session-effort").click();
+    await page.getByRole("option", { name: "High", exact: true }).click();
+    await dialog.getByTestId("mode-acceptEdits").click();
+
+    // ---- the request carries model, mode and effort
+    await dialog.getByTestId("start-session").click();
+    await expect(page).toHaveURL(/\/work-zone\/[0-9a-f-]{36}$/, { timeout: 15_000 });
+    sessionId = page.url().split("/").pop()!;
+    const detail = (await (await adminApi.get(`/api/v1/work-sessions/${sessionId}`)).json()) as {
+      session: { model: string | null; permissionMode: string; settings: { requested: { effort?: string } } };
+    };
+    expect(detail.session).toMatchObject({ model: "sonnet", permissionMode: "acceptEdits" });
+    expect(detail.session.settings.requested.effort).toBe("high");
+    await expect(page.getByTestId("model-chip")).toContainText("Claude Sonnet 5.5", { timeout: 15_000 });
+    await expect(page.getByTestId("reasoning-chip")).toContainText("High");
+    await expect(page.getByTestId("permission-chip")).toContainText("Auto-accept edits");
+  } finally {
+    if (sessionId) await adminApi.post(`/api/v1/work-sessions/${sessionId}/archive`, { data: {} });
+    await device?.stop();
+    await adminApi.put("/api/v1/work-zone-policy", { data: { allowFullAccess: false } });
+    await adminApi.dispose();
+  }
+});
