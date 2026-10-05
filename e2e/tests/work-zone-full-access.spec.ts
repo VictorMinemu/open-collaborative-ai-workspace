@@ -1,5 +1,5 @@
 import { expect, type Page, test } from "@playwright/test";
-import { apiAs } from "../support/actors";
+import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import { type FakeDeviceHandle, startFakeDevice } from "../support/work-zone-device";
 import { ADMIN, shot } from "./env";
 
@@ -26,6 +26,7 @@ async function signIn(page: Page) {
 
 test("Full access: an opted-in device runs the owner's session without prompts; a device without the opt-in is refused", async ({
   page,
+  browser,
 }, info) => {
   test.setTimeout(180_000);
   const tag = info.project.name === "mobile" ? "390" : "1440";
@@ -97,6 +98,18 @@ test("Full access: an opted-in device runs the owner's session without prompts; 
     await expect(chip).toContainText("Full access");
     await expect(chip).toHaveAttribute("data-tone", "warning");
     await expect(page.getByTestId("session-header")).toContainText("Full access");
+    // D-04, D-17: the persistent header badge (ref-4 header), for this controller and for a second one.
+    await expect(page.getByTestId("session-header").getByTestId("full-access-badge")).toBeVisible();
+    await ensureMember(adminApi, SAM, "developer");
+    const sam = await openAs(browser, SAM, info.project.name);
+    try {
+      await sam.page.goto(`${BASE_URL}/work-zone/${sessionId}`);
+      await expect(sam.page.getByTestId("session-header").getByTestId("full-access-badge")).toBeVisible({
+        timeout: 15_000,
+      });
+    } finally {
+      await sam.context.close();
+    }
     await shot(page, `wz-composer-full-access-${tag}`);
     await page.emulateMedia({ colorScheme: "dark" });
     await shot(page, `wz-composer-full-access-${tag}-dark`);
