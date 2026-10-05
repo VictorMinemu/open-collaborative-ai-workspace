@@ -464,7 +464,7 @@ describe("Daemon <-> Device Link", () => {
     runtime.emit("ws5", { type: "tool.completed", toolUseId: "t1", ok: true, summary: "done" });
 
     await server.waitFor(() =>
-      server.connections.length === 2 && server.last.frames.length >= 4 ? true : undefined,
+      server.connections.length === 2 && server.last.frames.length >= 5 ? true : undefined,
     );
     const types = server.last.frames.map((f) => (f.type === "event" ? f.event.type : f.type));
     expect(types.slice(0, 5)).toEqual([
