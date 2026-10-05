@@ -129,8 +129,9 @@ docker compose up       # full self-hosted stack
 
 - Never commit secrets, tokens, `.env` files or real credentials. Use `.env.example` with placeholders.
 - Never log absolute host paths, prompt contents with credentials, or provider API keys.
-- Never weaken a permission check, RLS policy or approval gate to make a test pass. Never enable a
-  runtime's bypass-permissions mode (`bypassPermissions`, `danger-full-access` or equivalents).
+- Never weaken a permission check, RLS policy or approval gate to make a test pass. A runtime's
+  bypass mode (`bypassPermissions`, `danger-full-access`) is enabled only through ADR-0012's path (org
+  policy ∩ device opt-in ∩ grain, server-checked, audited), never ad hoc.
 - Never expose a listening TCP port for the daemon; shell ↔ daemon uses a Unix socket / named pipe.
 - Destructive shell commands, migrations against non-ephemeral databases and pushes to `main` require
   explicit human confirmation.
