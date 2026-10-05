@@ -1,7 +1,12 @@
 // node --test infra/fake-model/
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { after, before, describe, it } from "node:test";
+import { createFakeClawhub } from "./fake-clawhub.mjs";
 import { composeReply, createFakeModelServer, humanNames, parseDirectives, planToolStep } from "./server.mjs";
 
 const fixture = JSON.parse(
@@ -578,6 +583,165 @@ describe("fake MCP server: legacy HTTP+SSE transport", () => {
     } finally {
       abort.abort();
       await reader.cancel().catch(() => {});
+    }
+  });
+});
+
+describe("fake ClawHub (03.1-11)", () => {
+  let server;
+  let base;
+  let dir;
+  const tarball = Buffer.from("fake npm-pack bytes for @ocw-test/notes-plugin@1.0.0\n".repeat(40));
+  const sha256 = createHash("sha256").update(tarball).digest("hex");
+  const enc = encodeURIComponent;
+  const notes = `/api/v1/packages/${enc("@ocw-test/notes-plugin")}`;
+
+  before(async () => {
+    dir = mkdtempSync(path.join(tmpdir(), "fake-clawhub-"));
+    writeFileSync(path.join(dir, "ocw-test-notes-plugin-1.0.0.tgz"), tarball);
+    server = createFakeModelServer({ mcpToken: "", clawhubArtifactDir: dir });
+    await new Promise((r) => server.listen(0, "127.0.0.1", r));
+    base = `http://127.0.0.1:${server.address().port}`;
+  });
+  after(async () => {
+    await new Promise((r) => server.close(r));
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const get = async (p) => {
+    const res = await fetch(`${base}${p}`);
+    return {
+      status: res.status,
+      body: res.headers.get("content-type")?.includes("json") ? await res.json() : null,
+    };
+  };
+
+  it("searches packages by text (q=duck → the official DuckDuckGo plugin)", async () => {
+    const { status, body } = await get("/api/v1/packages/search?q=duck&family=code-plugin&limit=10");
+    assert.equal(status, 200);
+    const names = body.results.map((r) => r.package.name);
+    assert.deepEqual(names, ["@openclaw/duckduckgo-plugin"]);
+    const pkg = body.results[0].package;
+    assert.equal(pkg.channel, "official");
+    assert.equal(pkg.runtimeId, "duckduckgo");
+    assert.equal(pkg.latestVersion, "2026.9.7");
+    assert.equal(pkg.verificationTier, "source-linked");
+    assert.equal((await get("/api/v1/packages/search?q=zzz-nothing")).body.results.length, 0);
+  });
+
+  it("browses the catalog with a cursor", async () => {
+    const first = await get("/api/v1/plugins?limit=3");
+    assert.equal(first.status, 200);
+    assert.equal(first.body.items.length, 3);
+    assert.ok(first.body.nextCursor);
+    const second = await get(`/api/v1/plugins?limit=3&cursor=${first.body.nextCursor}`);
+    assert.equal(second.body.items.length, 2);
+    assert.equal(second.body.nextCursor, null);
+  });
+
+  it("serves package, versions, version, security and detail from the fixtures", async () => {
+    const pkg = await get(notes);
+    assert.equal(pkg.status, 200);
+    assert.equal(pkg.body.package.latestVersion, "1.1.0");
+    assert.equal(pkg.body.owner.handle, "ocw-test");
+
+    const versions = await get(`${notes}/versions`);
+    assert.deepEqual(
+      versions.body.items.map((v) => v.version),
+      ["1.1.0", "1.0.0"],
+    );
+
+    const v = await get(`${notes}/versions/1.0.0`);
+    assert.equal(v.body.version.version, "1.0.0");
+    assert.deepEqual(v.body.version.pluginManifestSummary.contracts.tools, ["notes_lookup"]);
+
+    const sec = await get(`${notes}/versions/1.0.0/security`);
+    assert.equal(sec.body.trust.blockedFromDownload, false);
+    assert.equal(sec.body.trust.scanStatus, "clean");
+
+    const detail = await get(`${notes}/detail?version=1.0.0`);
+    assert.equal(detail.body.version.version, "1.0.0");
+    assert.equal(detail.body.package.name, "@ocw-test/notes-plugin");
+    assert.equal(detail.body.security.trust.pending, false);
+    assert.equal(detail.body.versions.items.length, 2);
+    const latest = await get(`${notes}/detail`);
+    assert.equal(latest.body.version.version, "1.1.0");
+  });
+
+  it("reports the real digest of a tarball present in the artifact dir and streams it", async () => {
+    const v = await get(`${notes}/versions/1.0.0`);
+    assert.equal(v.body.version.artifact.sha256, sha256);
+    assert.equal(v.body.version.artifact.size, tarball.length);
+    assert.match(v.body.version.artifact.npmIntegrity, /^sha512-/u);
+    const detail = await get(`${notes}/detail?version=1.0.0`);
+    assert.equal(detail.body.version.artifact.sha256, sha256);
+
+    const meta = await get(`${notes}/versions/1.0.0/artifact`);
+    assert.equal(meta.body.artifact.sha256, sha256);
+
+    const res = await fetch(`${base}${notes}/versions/1.0.0/artifact/download`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("x-clawhub-artifact-sha256"), sha256);
+    const bytes = Buffer.from(await res.arrayBuffer());
+    assert.equal(createHash("sha256").update(bytes).digest("hex"), sha256);
+
+    // No tarball on disk for 1.1.0: fixture digest, and no download.
+    const v11 = await get(`${notes}/versions/1.1.0`);
+    assert.equal(v11.body.version.artifact.sha256, "1b".repeat(32));
+    assert.equal((await fetch(`${base}${notes}/versions/1.1.0/artifact/download`)).status, 404);
+  });
+
+  it("answers 404 for unknown packages and versions", async () => {
+    assert.equal((await get(`/api/v1/packages/${enc("@nobody/nothing")}`)).status, 404);
+    assert.equal((await get(`/api/v1/packages/${enc("@nobody/nothing")}/detail`)).status, 404);
+    assert.equal((await get(`${notes}/versions/9.9.9`)).status, 404);
+    assert.equal((await get(`${notes}/detail?version=9.9.9`)).status, 404);
+  });
+
+  it("does not shadow the model routes", async () => {
+    assert.equal((await get("/v1/models")).status, 200);
+  });
+});
+
+describe("createFakeClawhub (in-process controls)", () => {
+  it("records request headers, mutates fixtures and simulates outages", async () => {
+    const fake = createFakeClawhub();
+    const http = createServer((req, res) => {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      if (!fake(req, res, url)) {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+    await new Promise((r) => http.listen(0, "127.0.0.1", r));
+    const base = `http://127.0.0.1:${http.address().port}`;
+    try {
+      await fetch(`${base}/api/v1/packages/search?q=notes`, {
+        headers: { "user-agent": "ocw-marketplace-proxy" },
+      });
+      assert.equal(fake.requests.length, 1);
+      assert.equal(fake.requests[0].path, "/api/v1/packages/search");
+      assert.equal(fake.requests[0].headers["user-agent"], "ocw-marketplace-proxy");
+
+      fake
+        .version("@ocw-test/notes-plugin", "1.0.0")
+        .pluginManifestSummary.contracts.tools.push("notes_delete");
+      const v = await (
+        await fetch(`${base}/api/v1/packages/${encodeURIComponent("@ocw-test/notes-plugin")}/versions/1.0.0`)
+      ).json();
+      assert.deepEqual(v.version.pluginManifestSummary.contracts.tools, ["notes_lookup", "notes_delete"]);
+
+      fake.setOutage({ status: 503 });
+      assert.equal((await fetch(`${base}/api/v1/packages/search?q=notes`)).status, 503);
+      fake.setOutage(null);
+      fake.reset();
+      const again = await (
+        await fetch(`${base}/api/v1/packages/${encodeURIComponent("@ocw-test/notes-plugin")}/versions/1.0.0`)
+      ).json();
+      assert.deepEqual(again.version.pluginManifestSummary.contracts.tools, ["notes_lookup"]);
+      assert.equal(fake.requests.length, 1);
+    } finally {
+      await new Promise((r) => http.close(r));
     }
   });
 });

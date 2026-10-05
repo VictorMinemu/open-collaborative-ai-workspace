@@ -119,6 +119,11 @@ export const EnvSchema = z
           .filter(Boolean),
       )
       .pipe(z.array(z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/, "server names are lowercase [a-z0-9_-]"))),
+    /**
+     * OpenClaw Marketplace registry (ClawHub, D-14) the API proxies for Settings › Marketplace, and the only origin
+     * approved artifacts are downloaded from. Point it at the fake ClawHub (fake-model `/api/v1/*`) in tests.
+     */
+    OCW_CLAWHUB_URL: Url.default("https://clawhub.ai"),
     OCW_ACCEPT_LEGACY_DEVICE_TOKEN: z
       .enum(["true", "false"])
       .default("true")
