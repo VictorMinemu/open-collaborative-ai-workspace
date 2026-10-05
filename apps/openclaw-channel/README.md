@@ -84,6 +84,17 @@ is in the workspace.
    - A provider 401/403 during a turn is answered once with "the provider rejected my credentials… reconnect
      in Settings › Models" instead of OpenClaw's own text.
 
+7. **Marketplace plugins (`plugin.install.v1` / `plugin.uninstall.v1`, D-14).** `plugin-installer.ts` installs
+   only an event that matches the snapshot's approved `plugins` (one refresh). It downloads from `OCW_CLAWHUB_URL`
+   only, verifies the approved sha256 and npm integrity, and runs
+   `openclaw plugins install npm-pack:<file> --force --accept-capabilities` (argv array, no shell). OpenClaw's
+   install gate (`infra/openclaw/install-policy.mjs`) then asks the API again. The executor checks the inspected id,
+   version and integrity, writes `plugins.entries.<id>.hooks` (conversation access and prompt injection off),
+   reports the declared surface and keeps `<state>/ocw-plugins.json` as a boot fallback (never trusted for an
+   install). Installs run one at a time and are not tied to the account's abort signal. A replayed event for an
+   installed row re-reports without reinstalling. Reports carry classified codes, never CLI output. Details and the
+   trust model: `infra/openclaw/README.md` › Marketplace plugins.
+
 ## Notes from running against the real gateway
 
 - The ChatGPT sign-in was verified on a real 2026.9.7 gateway: the plugin obtained a device code from
@@ -105,6 +116,7 @@ is in the workspace.
 |---|---|
 | `OCW_API_URL` | Agent Channel API base, e.g. `http://api:4000` (required) |
 | `OCW_CELL_TOKEN_FILE` / `OCW_CELL_TOKEN` | cell token, re-read on every request so it can rotate |
+| `OCW_CLAWHUB_URL` | the only origin marketplace artifacts are downloaded from (default `https://clawhub.ai`) |
 
 Model provider keys are **not** env inputs. They come from `GET /cell`, which serves the keys
 admins enter in Settings › Models.

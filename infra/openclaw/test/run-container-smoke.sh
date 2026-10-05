@@ -85,10 +85,14 @@ PLUGIN="$SECRETS/plugin"
 mkdir -p "$PLUGIN/node_modules"
 cp -R "$ROOT/apps/openclaw-channel/dist" "$ROOT/apps/openclaw-channel/src" "$PLUGIN/"
 cp "$ROOT/apps/openclaw-channel/package.json" "$ROOT/apps/openclaw-channel/openclaw.plugin.json" "$PLUGIN/"
-# Runtime dependencies exactly as the image build installs them (exact pins in package.json, no lifecycle scripts):
-# the MCP SDK's transitive dependencies are not reachable through pnpm's symlinks.
-(cd "$PLUGIN" && npm install --omit=dev --omit=peer --no-package-lock --legacy-peer-deps --ignore-scripts \
-  --no-audit --no-fund --loglevel=error >/dev/null)
+# Runtime dependencies exactly as the image build installs them (`npm ci` from infra/openclaw/plugin-runtime's
+# lockfile, no lifecycle scripts): the MCP SDK's transitive dependencies are not reachable through pnpm's symlinks.
+mkdir -p "$SECRETS/plugin-deps"
+cp "$ROOT/infra/openclaw/plugin-runtime/package.json" "$ROOT/infra/openclaw/plugin-runtime/package-lock.json" \
+  "$SECRETS/plugin-deps/"
+(cd "$SECRETS/plugin-deps" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error >/dev/null)
+rm -rf "$PLUGIN/node_modules"
+cp -R "$SECRETS/plugin-deps/node_modules" "$PLUGIN/node_modules"
 # The official search plugins, same pins + integrity check as the image build, bind-mounted read-only
 # (an image built before Phase 3.1 has no /opt/ocw/plugins; the mount works on either).
 echo "== bundled search plugins (pinned, sha512-checked)"
@@ -670,6 +674,76 @@ if grep -q "API unreachable at boot" <<<"$BOOT"; then echo "FAIL: the boot rende
 STATUS="$(listed duckduckgo)"
 echo "   plugins list: duckduckgo $STATUS"
 [[ "$STATUS" == "enabled" ]] || { echo "FAIL: duckduckgo did not survive the restart"; exit 1; }
+
+echo "== [marketplace] the ocw-echo test plugin (community fixture) is installed and reports its tool"
+ECHO_FLOW=0199a6f0-0000-7000-8000-0000000f3003
+publish_plugin_event "$(install_event "$ECHO_ROW" "$ECHO_FLOW" "@ocw-test/echo-plugin" 0.1.0 "$ECHO_SHA" "$ECHO_SHA512" ocw-echo)"
+REPORT="$(wait_report "$ECHO_FLOW")"
+echo "   report     : $REPORT"
+if [[ "$(REPORT="$REPORT" node -e '
+const r = JSON.parse(process.env.REPORT);
+console.log(r?.state === "installed" && r.pluginId === "ocw-echo" && JSON.stringify(r.declaredTools) === JSON.stringify([{ name: "ocw_echo" }]) ? "ok" : "no");')" != "ok" ]]; then
+  echo "FAIL: expected ocw-echo installed, declaring exactly ocw_echo"; exit 1
+fi
+STATUS="$(listed ocw-echo)"
+echo "   plugins list: ocw-echo $STATUS"
+[[ "$STATUS" == "enabled" ]] || { echo "FAIL: ocw-echo is not enabled in the cell"; exit 1; }
+
+echo "== [marketplace] a bot granted ocw_echo calls it in a conversation, through the tool gate"
+ECHO_MENTION="$SECRETS/mention-echo.json"
+mention_echo() { # <event id> <message id> <text>
+  node -e '
+const e = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+e.eventId = process.argv[3];
+e.conversation = { ...e.conversation, id: "0199a6f0-0000-7000-8000-00000000c007", name: "marketplace" };
+e.thread.rootMessageId = e.message.id = process.argv[4];
+e.message.text = process.argv[5];
+e.turn = { ...e.turn, tools: ["ocw_echo"], toolFlags: { ocw_echo: { untrustedOutput: true, sideEffecting: true } } };
+require("fs").writeFileSync(process.argv[2], JSON.stringify(e));
+' "$ROOT/infra/openclaw/test/mention-mcp.json" "$ECHO_MENTION" "$1" "$2" "$3"
+}
+mention_echo 0199a6f0-0000-7000-8000-00000000e071 0199a6f0-0000-7000-8000-00000000d071 \
+  '@archie please echo [[call ocw_echo {"text":"marketplace"}]]'
+STATE="$(inject_and_wait "$ECHO_MENTION" 0199a6f0-0000-7000-8000-00000000d071)"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d071");
+if (!m) { console.log("FAIL: no reply to the echo mention"); process.exit(1); }
+const calls = s.toolCalls.filter((c) => c.eventId === "0199a6f0-0000-7000-8000-00000000e071");
+const results = s.toolResults.filter((r) => calls.some((c) => c.callId === r.callId));
+console.log("   reply      :", m.text);
+console.log("   tool calls :", JSON.stringify(calls.map((c) => ({ tool: c.tool, allowed: c.allowed }))));
+console.log("   outcomes   :", JSON.stringify(results.map(({ status }) => ({ status }))));
+const ok =
+  m.text.includes("Tool ocw_echo said: echo marketplace") && m.text.includes("[tools: 1 | ocw_echo]") &&
+  calls.length === 1 && calls[0].tool === "ocw_echo" && calls[0].allowed === true &&
+  results.length === 1 && results[0].status === "ok";
+if (!ok) { console.log("FAIL: expected one gated ocw_echo call answering echo marketplace"); process.exit(1); }
+'
+
+echo "== [marketplace] uninstalled: a turn that still lists ocw_echo (stale grant) is offered no such tool"
+ECHO_UNFLOW=0199a6f0-0000-7000-8000-0000000f3004
+publish_plugin_event "$(uninstall_event "$ECHO_ROW" "$ECHO_UNFLOW" ocw-echo)"
+REPORT="$(wait_report "$ECHO_UNFLOW")"
+echo "   report     : $REPORT"
+[[ "$(REPORT="$REPORT" node -e 'console.log(JSON.parse(process.env.REPORT)?.state ?? "none")')" == "uninstalled" ]] \
+  || { echo "FAIL: ocw-echo was not uninstalled"; exit 1; }
+STATUS="$(listed ocw-echo)"
+echo "   plugins list: ocw-echo $STATUS"
+[[ "$STATUS" == "absent" ]] || { echo "FAIL: ocw-echo is still in the cell"; exit 1; }
+mention_echo 0199a6f0-0000-7000-8000-00000000e072 0199a6f0-0000-7000-8000-00000000d072 \
+  '@archie echo once more [[call ocw_echo {"text":"after uninstall"}]]'
+STATE="$(inject_and_wait "$ECHO_MENTION" 0199a6f0-0000-7000-8000-00000000d072)"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d072");
+if (!m) { console.log("FAIL: no reply to the post-uninstall mention"); process.exit(1); }
+const calls = s.toolCalls.filter((c) => c.eventId === "0199a6f0-0000-7000-8000-00000000e072");
+console.log("   reply      :", m.text);
+if (!m.text.includes("Tool ocw_echo not offered") || !m.text.endsWith("[tools: 0]") || calls.length !== 0) {
+  console.log("FAIL: the uninstalled plugin tool still reached the model"); process.exit(1);
+}
+'
 
 echo "== [marketplace] plugin.uninstall.v1: removed from the cell"
 DDG_UNFLOW=0199a6f0-0000-7000-8000-0000000f3002
