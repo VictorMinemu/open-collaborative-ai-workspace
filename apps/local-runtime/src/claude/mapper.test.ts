@@ -96,6 +96,33 @@ describe("ClaudeEventMapper — recorded fixture (real Claude Code session, plan
 });
 
 describe("ClaudeEventMapper — hand-written cases", () => {
+  it("forwards every system/init as session.settings, session.started only once (D-15)", () => {
+    const init = (extra: Record<string, unknown>) =>
+      sdk({ type: "system", subtype: "init", session_id: "abc", claude_code_version: "2.1.289", ...extra });
+    const events = run([
+      init({ model: "claude-haiku-4-5", permissionMode: "plan" }),
+      init({
+        model: "claude-sonnet-5-5",
+        permissionMode: "auto",
+        fast_mode_state: "off",
+        fast_mode_disabled_reason: "extra_usage_disabled",
+        effort: "low",
+      }),
+    ]);
+    expect(events).toEqual([
+      expect.objectContaining({ type: "session.started", model: "claude-haiku-4-5", permissionMode: "plan" }),
+      { type: "session.settings", model: "claude-haiku-4-5", permissionMode: "plan" },
+      {
+        type: "session.settings",
+        model: "claude-sonnet-5-5",
+        permissionMode: "auto",
+        fastModeState: "off",
+        fastModeReason: "extra_usage_disabled",
+        effort: "low",
+      },
+    ]);
+  });
+
   it("reports per-prompt cost from the cumulative total_cost_usd", () => {
     const mapper = new ClaudeEventMapper();
     const result = (cost: number) =>

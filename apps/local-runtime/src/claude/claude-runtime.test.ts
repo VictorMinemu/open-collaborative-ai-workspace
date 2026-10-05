@@ -1,22 +1,44 @@
 import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { HookCallback, Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { PermissionMode, SessionEvent } from "@ocw/contracts";
+import type {
+  HookCallback,
+  ModelInfo,
+  Options,
+  SDKMessage,
+  SDKUserMessage,
+} from "@anthropic-ai/claude-agent-sdk";
+import type { PermissionMode, RuntimeInfo, SessionEvent } from "@ocw/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AsyncQueue } from "../async-queue.js";
-import { RuntimeError } from "../runtime.js";
+import { RuntimeError, type StartSessionOptions } from "../runtime.js";
 import { ClaudeCodeRuntime, childEnv, type QueryHandle } from "./claude-runtime.js";
 import { commandTouchesSecrets, isSecretPath, secretDenyReason } from "./tool-policy.js";
+
+/** Every control request a fake query received, in order, across the whole suite (T-03.2-02-01 assertion). */
+const ALL_FLAG_SETTINGS: unknown[] = [];
 
 class FakeQuery implements QueryHandle {
   readonly out = new AsyncQueue<SDKMessage>();
   readonly prompts: SDKUserMessage[] = [];
+  /** Control requests and pushed prompts, in the order the runtime saw them. */
+  readonly log: string[] = [];
+  readonly calls: Array<{ method: string; arg: unknown }> = [];
+  /** Next call of `method` rejects with this message. */
+  readonly failNext = new Map<string, string>();
+  /** Reported by `initializationResult()`. */
+  models: ModelInfo[] = [];
+  /** Model → maxTokens for `getContextUsage()`; a missing model rejects (the runtime refusing it). */
+  windows: Record<string, number> = {};
+  private model: string | undefined;
   interrupts = 0;
   closed = false;
   constructor(readonly params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) {
     void (async () => {
-      for await (const m of params.prompt) this.prompts.push(m);
+      for await (const m of params.prompt) {
+        this.prompts.push(m);
+        this.log.push(`prompt:${String(m.message.content)}`);
+      }
       this.out.close();
     })();
   }
@@ -31,32 +53,87 @@ class FakeQuery implements QueryHandle {
     this.closed = true;
     this.out.close();
   }
+  private record(method: string, arg: unknown): Promise<void> {
+    this.calls.push({ method, arg });
+    this.log.push(`${method}:${JSON.stringify(arg) ?? "undefined"}`);
+    const failure = this.failNext.get(method);
+    if (failure) {
+      this.failNext.delete(method);
+      return Promise.reject(new Error(failure));
+    }
+    return Promise.resolve();
+  }
+  setModel(model?: string): Promise<void> {
+    this.model = model;
+    return this.record("setModel", model);
+  }
+  setPermissionMode(mode: string): Promise<void> {
+    return this.record("setPermissionMode", mode);
+  }
+  applyFlagSettings(settings: Record<string, unknown>): Promise<void> {
+    ALL_FLAG_SETTINGS.push(settings);
+    return this.record("applyFlagSettings", settings);
+  }
+  initializationResult(): Promise<{ models: ModelInfo[] }> {
+    this.calls.push({ method: "initializationResult", arg: undefined });
+    return Promise.resolve({ models: this.models });
+  }
+  getContextUsage(): Promise<{ maxTokens: number; model: string }> {
+    this.calls.push({ method: "getContextUsage", arg: this.model });
+    const max = this.model === undefined ? undefined : this.windows[this.model];
+    if (max === undefined) return Promise.reject(new Error(`model not available: ${this.model}`));
+    return Promise.resolve({ maxTokens: max, model: this.model ?? "" });
+  }
+  methodCalls(method: string): unknown[] {
+    return this.calls.filter((c) => c.method === method).map((c) => c.arg);
+  }
   [Symbol.asyncIterator](): AsyncIterator<SDKMessage> {
     return this.out[Symbol.asyncIterator]();
   }
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+const settle = async (n = 4) => {
+  for (let i = 0; i < n; i++) await tick();
+};
 
-function setup(extra: { approvalTimeoutMs?: number; useApiKey?: boolean; claudePath?: string } = {}) {
+function setup(
+  extra: {
+    approvalTimeoutMs?: number;
+    useApiKey?: boolean;
+    claudePath?: string;
+    prepare?: (q: FakeQuery) => void;
+    detect?: () => Promise<RuntimeInfo>;
+  } = {},
+) {
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ocw-claude-rt-")));
-  let fake: FakeQuery | null = null;
+  const queries: FakeQuery[] = [];
   const events: SessionEvent[] = [];
   const runtime = new ClaudeCodeRuntime({
     queryFn: (params) => {
-      fake = new FakeQuery(params);
-      return fake;
+      const q = new FakeQuery(params);
+      extra.prepare?.(q);
+      queries.push(q);
+      return q;
     },
     claudePath: extra.claudePath ?? "/usr/local/bin/claude",
+    detect:
+      extra.detect ??
+      (() => Promise.resolve({ id: "claude-code", installed: true, version: "2.1.289", loggedIn: true })),
     ...(extra.approvalTimeoutMs ? { approvalTimeoutMs: extra.approvalTimeoutMs } : {}),
     ...(extra.useApiKey !== undefined ? { useApiKey: extra.useApiKey } : {}),
   });
-  const start = async (permissionMode: PermissionMode = "default") => {
-    await runtime.start({ sessionId: "s1", cwd, permissionMode }, (e) => events.push(e));
-    if (!fake) throw new Error("query not created");
-    return fake as FakeQuery;
+  let session: FakeQuery | null = null;
+  const start = async (
+    permissionMode: PermissionMode = "default",
+    more: Partial<Omit<StartSessionOptions, "sessionId" | "cwd" | "permissionMode">> = {},
+  ) => {
+    await runtime.start({ sessionId: "s1", cwd, permissionMode, ...more }, (e) => events.push(e));
+    session = queries.at(-1) ?? null;
+    if (!session) throw new Error("query not created");
+    return session as FakeQuery;
   };
-  return { cwd, runtime, events, start };
+  return { cwd, runtime, events, start, queries };
 }
 
 const signal = () => new AbortController().signal;
@@ -294,6 +371,85 @@ describe("ClaudeCodeRuntime — prompts, interrupt, stop", () => {
     await runtime.stop("s1");
     expect(events.at(-1)).toEqual({ type: "session.state", status: "completed" });
     await expect(runtime.prompt("s1", { promptId: "x", text: "y" })).rejects.toBeInstanceOf(RuntimeError);
+  });
+});
+
+const settingsEvents = (events: SessionEvent[]) =>
+  events.filter((e): e is Extract<SessionEvent, { type: "session.settings" }> => e.type === "session.settings");
+
+describe("ClaudeCodeRuntime — settings between turns (D-07, D-14)", () => {
+  it("applies a model change at once while idle and reports it", async () => {
+    const { start, runtime, events } = setup();
+    const q = await start();
+    await runtime.configure("s1", { model: "sonnet" });
+    expect(q.methodCalls("setModel")).toEqual(["sonnet"]);
+    expect(settingsEvents(events).at(-1)).toMatchObject({ model: "sonnet", permissionMode: "default" });
+  });
+
+  it("holds a change made during a turn and applies it before the next prompt is pushed", async () => {
+    const { start, runtime } = setup();
+    const q = await start();
+    await runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await runtime.configure("s1", { model: "sonnet" });
+    await runtime.prompt("s1", { promptId: "p2", text: "two" });
+    await settle();
+    expect(q.methodCalls("setModel")).toEqual([]);
+    q.emit(result());
+    await settle();
+    expect(q.log).toEqual(["prompt:one", 'setModel:"sonnet"', "prompt:two"]);
+  });
+
+  it("merges several changes made during one turn into one application (last value wins)", async () => {
+    const { start, runtime, events } = setup();
+    const q = await start();
+    await runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await runtime.configure("s1", { model: "sonnet" });
+    await runtime.configure("s1", { model: "opus" });
+    await runtime.prompt("s1", { promptId: "p2", text: "two" });
+    q.emit(result());
+    await settle();
+    expect(q.methodCalls("setModel")).toEqual(["opus"]);
+    expect(settingsEvents(events).at(-1)).toMatchObject({ model: "opus" });
+  });
+
+  it("a failing setModel reports the error, rejects with settings_rejected and leaves the next prompt alone", async () => {
+    const { start, runtime, events } = setup();
+    const q = await start();
+    q.failNext.set("setModel", "model not available for your account");
+    await expect(runtime.configure("s1", { model: "nope" })).rejects.toMatchObject({
+      code: "settings_rejected",
+    });
+    expect(events.some((e) => e.type === "session.error")).toBe(true);
+    expect(settingsEvents(events)).toEqual([]);
+    await runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await settle();
+    expect(q.log).toEqual(['setModel:"nope"', "prompt:one"]);
+  });
+
+  it("a held change that fails at dispatch is dropped and the turn still runs", async () => {
+    const { start, runtime, events } = setup();
+    const q = await start();
+    await runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await runtime.configure("s1", { model: "nope" });
+    await runtime.prompt("s1", { promptId: "p2", text: "two" });
+    q.failNext.set("setModel", "model not available");
+    q.emit(result());
+    await settle();
+    expect(q.log).toEqual(["prompt:one", 'setModel:"nope"', "prompt:two"]);
+    expect(events.filter((e) => e.type === "session.error")).toHaveLength(1);
+    q.emit(result());
+    await runtime.prompt("s1", { promptId: "p3", text: "three" });
+    await settle();
+    expect(q.methodCalls("setModel")).toEqual(["nope"]);
+  });
+
+  it("refuses a permission mode outside its capabilities", async () => {
+    const { start, runtime } = setup();
+    const q = await start();
+    await expect(runtime.configure("s1", { permissionMode: "fullAccess" })).rejects.toMatchObject({
+      code: "settings_rejected",
+    });
+    expect(q.calls).toEqual([]);
   });
 });
 
