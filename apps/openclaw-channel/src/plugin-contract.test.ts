@@ -3,6 +3,7 @@
  * Channel API v1 server speaking the canonical contract, with OpenClaw replaced by a recording fake
  * port.
  */
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -18,6 +19,12 @@ import { CommitTracker, runEventStream } from "./event-stream.js";
 import { UNKNOWN_SERVER_ERROR } from "./mcp-probe.js";
 import { type MappedMention, mapMention } from "./mention-mapper.js";
 import { createOpenClawPort, type PluginRuntimeLike } from "./openclaw-port.js";
+import {
+  BOOT_CACHE_FILE,
+  createPluginInstaller,
+  type PluginInstaller,
+  type RunCli,
+} from "./plugin-installer.js";
 import { planReconcile } from "./reconciler.js";
 import { registerCapabilities } from "./register-capabilities.js";
 import { registerFull } from "./register-full.js";
@@ -100,7 +107,7 @@ let abort: AbortController;
 let cursor: ReturnType<typeof createMemoryCursorStore>;
 let running: Promise<void> | undefined;
 
-function startPlugin(opts: { token?: string; initialCursor?: number } = {}) {
+function startPlugin(opts: { token?: string; initialCursor?: number; plugins?: PluginInstaller } = {}) {
   abort = new AbortController();
   cursor = createMemoryCursorStore(
     opts.initialCursor === undefined ? null : { topic: api.topic, seq: opts.initialCursor },
@@ -110,7 +117,14 @@ function startPlugin(opts: { token?: string; initialCursor?: number } = {}) {
     token: () => opts.token ?? api.token,
     backoff: { baseMs: 5, maxMs: 20 },
   });
-  const bridge = createBridge({ client, port, signal: abort.signal, typingIntervalMs: 50, retryDelayMs: 10 });
+  const bridge = createBridge({
+    client,
+    port,
+    signal: abort.signal,
+    typingIntervalMs: 50,
+    retryDelayMs: 10,
+    ...(opts.plugins ? { plugins: opts.plugins } : {}),
+  });
   running = (async () => {
     const cell = await bridge.refreshCell();
     await runEventStream({
@@ -843,5 +857,170 @@ describe("real port reconcile: deleted bots leave no transcripts (Pitfall 12)", 
     } finally {
       rmSync(state, { recursive: true, force: true });
     }
+  });
+});
+
+describe("marketplace executor (D-14): plugin.install.v1 / plugin.uninstall.v1 through the bridge and the fake API", () => {
+  const ORIGIN = "http://fake-clawhub.test";
+  const BYTES = Buffer.from("echo plugin tarball for the contract test");
+  const SHA = createHash("sha256").update(BYTES).digest("hex");
+  const ROW = "row-echo";
+  const INSPECT = (() => {
+    const d = JSON.parse(
+      readFileSync(new URL("./testing/fixtures/inspect-ocw-echo.json", import.meta.url), "utf8"),
+    );
+    delete d.install.integrity;
+    return JSON.stringify(d);
+  })();
+  let state: string;
+  let cliCalls: string[][];
+  let downloads: string[];
+
+  const exec: RunCli = async (args) => {
+    cliCalls.push([...args]);
+    return { code: 0, stdout: args[2] === "inspect" ? INSPECT : "", stderr: "", timedOut: false };
+  };
+  const fetchImpl = (async (input: string | URL | Request) => {
+    downloads.push(String(input));
+    return new Response(new Uint8Array(BYTES), { status: 200 });
+  }) as typeof fetch;
+
+  function startWithInstaller() {
+    const holder: { bridge?: ReturnType<typeof createBridge> } = {};
+    const installer = createPluginInstaller({
+      client: createAgentChannelClient({
+        apiUrl: api.url,
+        token: () => api.token,
+        backoff: { baseMs: 5, maxMs: 20 },
+      }),
+      snapshot: () => holder.bridge?.snapshot(),
+      refresh: () => (holder.bridge as ReturnType<typeof createBridge>).refreshCell(),
+      stateDir: state,
+      clawhubOrigin: ORIGIN,
+      exec,
+      fetchImpl,
+    });
+    holder.bridge = startPlugin({ plugins: installer }).bridge;
+  }
+
+  const install = (over: Record<string, unknown> = {}) => ({
+    flowId: "flow-1",
+    pluginRowId: ROW,
+    packageName: "@ocw-test/echo-plugin",
+    version: "0.1.0",
+    artifactUrl: `${ORIGIN}/api/v1/packages/%40ocw-test%2Fecho-plugin/versions/0.1.0/artifact/download`,
+    sha256: SHA,
+    npmIntegrity: null,
+    expectedPluginId: "ocw-echo",
+    mode: "install",
+    ...over,
+  });
+
+  beforeEach(() => {
+    state = mkdtempSync(path.join(tmpdir(), "ocw-market-"));
+    cliCalls = [];
+    downloads = [];
+  });
+  afterEach(() => rmSync(state, { recursive: true, force: true }));
+
+  it("an approved install is executed once and its declared tools reach POST /plugins/report", async () => {
+    api.plugins = [
+      {
+        pluginRowId: ROW,
+        packageName: "@ocw-test/echo-plugin",
+        version: "0.1.0",
+        sha256: SHA,
+        pluginId: "ocw-echo",
+        status: "approved",
+      },
+    ];
+    startWithInstaller();
+    await api.waitFor(() => api.openSockets() > 0);
+    api.publish("plugin.install.v1", install());
+    await api.waitFor(() => api.pluginReports.length > 0);
+    expect(downloads).toHaveLength(1);
+    expect(cliCalls.map((c) => c[2])).toEqual(["install", "inspect"]);
+    expect(api.pluginReports).toEqual([
+      expect.objectContaining({
+        flowId: "flow-1",
+        pluginRowId: ROW,
+        state: "installed",
+        pluginId: "ocw-echo",
+        declaredTools: [{ name: "ocw_echo" }],
+      }),
+    ]);
+    expect(api.plugins[0]?.status).toBe("installed");
+    // The next refresh mirrors the API's installed rows into the boot cache.
+    api.updateCell({});
+    await api.waitFor(() => existsSync(path.join(state, BOOT_CACHE_FILE)));
+    await api.waitFor(() =>
+      JSON.parse(readFileSync(path.join(state, BOOT_CACHE_FILE), "utf8")).installed?.some(
+        (p: { pluginId: string }) => p.pluginId === "ocw-echo",
+      ),
+    );
+  });
+
+  it("an install the snapshot does not approve is reported failed and never downloaded nor executed", async () => {
+    startWithInstaller();
+    await api.waitFor(() => api.openSockets() > 0);
+    const reads = api.cellReads;
+    api.publish("plugin.install.v1", install());
+    await api.waitFor(() => api.pluginReports.length > 0);
+    expect(api.cellReads).toBe(reads + 1);
+    expect(api.pluginReports[0]).toMatchObject({ state: "failed", error: { code: "not_approved" } });
+    expect(downloads).toEqual([]);
+    expect(cliCalls).toEqual([]);
+  });
+
+  it("an uninstall command removes the plugin and reports uninstalled", async () => {
+    api.plugins = [
+      {
+        pluginRowId: ROW,
+        packageName: "@ocw-test/echo-plugin",
+        version: "0.1.0",
+        sha256: SHA,
+        pluginId: "ocw-echo",
+        status: "installed",
+      },
+    ];
+    startWithInstaller();
+    await api.waitFor(() => api.openSockets() > 0);
+    api.publish("plugin.uninstall.v1", { flowId: "flow-2", pluginRowId: ROW, pluginId: "ocw-echo" });
+    await api.waitFor(() => api.pluginReports.length > 0);
+    expect(cliCalls.map((c) => c.slice(2))).toEqual([["uninstall", "ocw-echo", "--force"]]);
+    expect(api.pluginReports).toEqual([
+      { flowId: "flow-2", pluginRowId: ROW, state: "uninstalled", pluginId: "ocw-echo" },
+    ]);
+    expect(api.plugins[0]?.status).toBe("uninstalled");
+  });
+
+  it("without an executor the plugin ignores marketplace events (older cells)", async () => {
+    startPlugin();
+    await api.waitFor(() => api.openSockets() > 0);
+    api.publish("plugin.install.v1", install());
+    api.publishMention(mention(1));
+    await api.waitFor(() => api.messages.length === 1);
+    expect(api.pluginReports).toEqual([]);
+  });
+
+  it("the real port restricts a plugin's hooks through the runtime config mutation, keeping its other settings", async () => {
+    const config: Record<string, unknown> = {
+      plugins: { allow: ["ocw", "ocw-echo"], entries: { "ocw-echo": { enabled: true } } },
+    };
+    const runtime = {
+      config: {
+        current: () => config,
+        mutateConfigFile: async (p: { mutate: (d: Record<string, unknown>) => void }) => p.mutate(config),
+      },
+      channel: {} as PluginRuntimeLike["channel"],
+    } as PluginRuntimeLike;
+    const p = createOpenClawPort({ runtime, accountId: "default", cfg: {} });
+    await p.restrictPluginHooks?.("ocw-echo");
+    expect(config.plugins).toEqual({
+      allow: ["ocw", "ocw-echo"],
+      entries: {
+        "ocw-echo": { enabled: true, hooks: { allowConversationAccess: false, allowPromptInjection: false } },
+      },
+    });
   });
 });

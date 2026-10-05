@@ -16,6 +16,10 @@
  *   POST /agent-channel/v1/memories       records the note (dedupes exact text per event's bot; 409 for
  *                                          events listed in `refuseMemoryEvents`)
  *   POST /agent-channel/v1/mcp/probe-results  records the probe report (`mcpProbes`)
+ *   POST /agent-channel/v1/plugins/report     records the report (`pluginReports`) and moves the row's status
+ *   POST /agent-channel/v1/plugins/verify-install  approves only a row `installing` with the same package, version
+ *                                          and sha256 (`verifyCalls`); like the real API, the install gate's authority
+ *   GET  /agent-channel/v1/plugins            the rows with a plugin id (boot allowlist)
  * Test-only controls under /__test/* (never part of the real API).
  */
 import { randomUUID } from "node:crypto";
@@ -25,6 +29,7 @@ import { type WebSocket, WebSocketServer } from "ws";
 import type {
   AgentChannelMcpProbeResult,
   AgentChannelMemorySave,
+  AgentChannelPluginReport,
   AgentChannelPostMessage,
   AgentChannelProviderAuthReport,
   AgentChannelStatusReport,
@@ -33,6 +38,7 @@ import type {
   AgentChannelTyping,
   AgentMentionEvent,
   CellAgent,
+  CellApprovedPlugin,
   CellMcpServer,
   CellProvider,
   CellSnapshot,
@@ -46,6 +52,13 @@ export type MentionInput = Omit<AgentMentionEvent, "seq" | "type" | "organizatio
 export type StoredToolCall = AgentChannelToolCallRequest & { callId: string; allowed: boolean };
 export type StoredToolResult = AgentChannelToolCallResult & { callId: string };
 export type StoredMemory = AgentChannelMemorySave & { memoryId: string; created: boolean };
+export type VerifyCall = {
+  packageName: string;
+  version: string;
+  sha256: string;
+  approved: boolean;
+  reason: string | null;
+};
 
 export type FakeAgentChannelApi = {
   url: string;
@@ -73,6 +86,12 @@ export type FakeAgentChannelApi = {
   mcpProbes: AgentChannelMcpProbeResult[];
   /** Number of GET /cell requests served. */
   cellReads: number;
+  /** Snapshot `plugins` (approved marketplace plugins); publishing a plugin event moves its row's status. */
+  plugins: CellApprovedPlugin[];
+  /** Every POST /plugins/report attempt, in order (404s for unknown rows included). */
+  pluginReports: AgentChannelPluginReport[];
+  /** Every POST /plugins/verify-install (the install gate's questions) with the answer. */
+  verifyCalls: VerifyCall[];
   events: StoredEvent[];
   authReports: AgentChannelProviderAuthReport[];
   /** HTTP status for each POST /provider-auth (default 200). */
@@ -132,6 +151,7 @@ export async function startFakeAgentChannelApi(
     webSearchProvider?: string;
     denyTools?: string[];
     mcpServers?: CellMcpServer[];
+    plugins?: CellApprovedPlugin[];
     port?: number;
     host?: string;
   } = {},
@@ -166,6 +186,9 @@ export async function startFakeAgentChannelApi(
     mcpServers: opts.mcpServers ?? ([] as CellMcpServer[]),
     mcpProbes: [] as AgentChannelMcpProbeResult[],
     cellReads: 0,
+    plugins: opts.plugins ?? ([] as CellApprovedPlugin[]),
+    pluginReports: [] as AgentChannelPluginReport[],
+    verifyCalls: [] as VerifyCall[],
   };
 
   const snapshot = (): CellSnapshot => ({
@@ -179,6 +202,7 @@ export async function startFakeAgentChannelApi(
     ...(state.cellSubscriptions ? { subscriptions: state.cellSubscriptions } : {}),
     ...(state.webSearchProvider ? { webSearch: { provider: state.webSearchProvider } } : {}),
     ...(state.mcpServers.length > 0 ? { mcpServers: state.mcpServers } : {}),
+    plugins: state.plugins.filter((p) => p.status !== "uninstalled"),
   });
   const frameFor = (ev: StoredEvent) =>
     JSON.stringify({ op: "ev", topic, seq: ev.seq, type: ev.type, data: ev.data });
@@ -201,6 +225,11 @@ export async function startFakeAgentChannelApi(
           };
           return json(res, 200, api.updateCell(body, body.reason, body.agentId ?? null));
         }
+        if (req.method === "POST" && url.pathname === "/__test/plugins") {
+          // Replace the approved list without an event (the smoke publishes the install event next).
+          state.plugins = ((await readJson(req)) as { plugins: CellApprovedPlugin[] }).plugins ?? [];
+          return json(res, 200, { ok: true, plugins: state.plugins });
+        }
         if (req.method === "POST" && url.pathname === "/__test/event") {
           const { type, data } = (await readJson(req)) as { type: string; data: Record<string, unknown> };
           return json(res, 200, api.publish(type, data));
@@ -218,6 +247,9 @@ export async function startFakeAgentChannelApi(
             memories: state.memories,
             mcpProbes: state.mcpProbes,
             cellReads: state.cellReads,
+            plugins: state.plugins,
+            pluginReports: state.pluginReports,
+            verifyCalls: state.verifyCalls,
           });
         }
         return json(res, 404, { error: { code: "not_found" } });
@@ -239,6 +271,61 @@ export async function startFakeAgentChannelApi(
         }
         state.mcpProbes.push(body);
         return json(res, 200, { ok: true, applied: true });
+      }
+      if (req.method === "POST" && route === "/plugins/report") {
+        const body = (await readJson(req)) as AgentChannelPluginReport;
+        if (!body.flowId || !body.pluginRowId || !body.state) {
+          return json(res, 400, { error: { code: "bad_request" } });
+        }
+        // Every attempt is recorded (also the ones answered 404, like a report for a row the API never approved).
+        state.pluginReports.push(body);
+        const row = state.plugins.find((p) => p.pluginRowId === body.pluginRowId);
+        if (!row) return json(res, 404, { error: { code: "plugin_flow_not_found" } });
+        if (body.state === "installed") {
+          row.status = "installed";
+          if (body.pluginId) row.pluginId = body.pluginId;
+        } else if (body.state === "failed") row.status = "failed";
+        else if (body.state === "uninstalled") row.status = "uninstalled";
+        return json(res, 200, { ok: true });
+      }
+      if (req.method === "POST" && route === "/plugins/verify-install") {
+        const body = (await readJson(req)) as { packageName?: string; version?: string; sha256?: string };
+        if (!body.packageName || !body.version || !/^[0-9a-f]{64}$/u.test(body.sha256 ?? "")) {
+          return json(res, 400, { error: { code: "bad_request" } });
+        }
+        const same = state.plugins.filter((p) => p.packageName === body.packageName);
+        const row = same.find(
+          (p) => p.status === "installing" && p.version === body.version && p.sha256 === body.sha256,
+        );
+        const reason = row
+          ? null
+          : same.length === 0
+            ? "not_approved"
+            : !same.some((p) => p.status === "installing")
+              ? "not_in_flight"
+              : !same.some((p) => p.version === body.version)
+                ? "version_mismatch"
+                : "digest_mismatch";
+        const call: VerifyCall = {
+          packageName: body.packageName,
+          version: body.version,
+          sha256: body.sha256 as string,
+          approved: Boolean(row),
+          reason,
+        };
+        state.verifyCalls.push(call);
+        return json(res, 200, { approved: call.approved, reason });
+      }
+      if (req.method === "GET" && route === "/plugins") {
+        const plugins = state.plugins
+          .filter((p) => p.pluginId && ["installing", "installed", "uninstalling"].includes(p.status))
+          .map((p) => ({
+            pluginId: p.pluginId,
+            packageName: p.packageName,
+            version: p.version,
+            status: p.status,
+          }));
+        return json(res, 200, { plugins });
       }
       if (req.method === "POST" && route === "/messages") {
         const body = (await readJson(req)) as AgentChannelPostMessage;
@@ -445,6 +532,18 @@ export async function startFakeAgentChannelApi(
     get cellReads() {
       return state.cellReads;
     },
+    get plugins() {
+      return state.plugins;
+    },
+    set plugins(value: CellApprovedPlugin[]) {
+      state.plugins = value;
+    },
+    get pluginReports() {
+      return state.pluginReports;
+    },
+    get verifyCalls() {
+      return state.verifyCalls;
+    },
     get authReports() {
       return state.authReports;
     },
@@ -476,6 +575,10 @@ export async function startFakeAgentChannelApi(
       return state.authFailures;
     },
     publish(type, data) {
+      // Like the API: an install / uninstall command moves its row (installing / uninstalling) before it is sent.
+      const row = state.plugins.find((p) => p.pluginRowId === data.pluginRowId);
+      if (row && type === "plugin.install.v1") row.status = "installing";
+      if (row && type === "plugin.uninstall.v1") row.status = "uninstalling";
       const seq = (state.events.at(-1)?.seq ?? 0) + 1;
       const ev: StoredEvent = { seq, type, data: { ...data, type, organizationId: cellId, cellId, seq } };
       state.events.push(ev);

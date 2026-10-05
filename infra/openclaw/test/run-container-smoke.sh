@@ -8,11 +8,15 @@
 # (which cannot reach auth.openai.com here, so it must report a classified error), and the bot's memory
 # tool `ocw_memory_save` stores a note through `POST /memories` while the turn's notes reach the model, and an
 # MCP server (the fake MCP behind a bearer token) is probed through the cell, rendered with an env-referenced
-# credential and exact tool filter, called through the gate, and its output taints the turn (scenario mcp).
+# credential and exact tool filter, called through the gate, and its output taints the turn (scenario mcp), and
+# marketplace plugins are installed only as approved (scenario marketplace, 03.1-12 / D-14): the official
+# DuckDuckGo plugin (pinned, sha512-checked npm pack) and the ocw-echo test plugin are served by the fake ClawHub,
+# installed by the executor through OpenClaw's install gate, kept across a restart, used by a bot in a conversation
+# (ocw_echo) and uninstalled; a manual install is blocked (also with a forged local cache and with the API down).
 #
 # Usage (repo root):  infra/openclaw/test/run-container-smoke.sh [--keep]
 #   SMOKE_ONLY=<comma list>  run only these scenarios (unset = all): mention, signin, dm, capabilities,
-#                            dm-isolation, memory, mcp
+#                            dm-isolation, memory, mcp, marketplace
 #   FAKE_MODEL_DEBUG=1       the fake model logs a preview of each tool-offering request (off by default)
 # Requires: docker, node + npm (bundled plugins are installed on the host from the pinned registry
 # tarballs), apps/openclaw-channel/node_modules (pnpm install / npm install in that dir).
@@ -89,6 +93,27 @@ cp "$ROOT/apps/openclaw-channel/package.json" "$ROOT/apps/openclaw-channel/openc
 # (an image built before Phase 3.1 has no /opt/ocw/plugins; the mount works on either).
 echo "== bundled search plugins (pinned, sha512-checked)"
 bash "$ROOT/infra/openclaw/install-bundled-plugins.sh" "$SECRETS/bundled" | sed 's/^/   /'
+# Marketplace (scenario marketplace): tarballs the fake ClawHub serves (it reports their real digests). The official
+# DuckDuckGo plugin comes from the npm registry at the pinned version and must match the pinned sha512 (T-03.1-SC);
+# ocw-echo is the test-only fixture (infra/openclaw/test/fixtures, never shipped).
+ARTIFACTS="$SECRETS/clawhub-artifacts"
+mkdir -p "$ARTIFACTS"
+if want marketplace; then
+  echo "== [marketplace] artifacts for the fake ClawHub (pinned official DuckDuckGo + the ocw-echo test fixture)"
+  read -r DDG_PKG DDG_VERSION DDG_INTEGRITY < <(node -e '
+const p = require(process.argv[1]).find((x) => x.id === "duckduckgo");
+console.log([p.package, p.version, p.integrity].join(" "));' "$ROOT/infra/openclaw/bundled-plugins.json")
+  DDG_TGZ="$(cd "$ARTIFACTS" && npm pack "${DDG_PKG}@${DDG_VERSION}" --silent --ignore-scripts --no-audit --no-fund | tail -n 1)"
+  ECHO_TGZ="$(cd "$ARTIFACTS" && npm pack "$ROOT/infra/openclaw/test/fixtures/ocw-echo-plugin" --silent --ignore-scripts | tail -n 1)"
+  digest() { node -e 'const c=require("crypto"),f=require("fs"),b=f.readFileSync(process.argv[1]); console.log(c.createHash("sha256").update(b).digest("hex"), "sha512-"+c.createHash("sha512").update(b).digest("base64"))' "$1"; }
+  read -r DDG_SHA DDG_SHA512 < <(digest "$ARTIFACTS/$DDG_TGZ")
+  read -r ECHO_SHA ECHO_SHA512 < <(digest "$ARTIFACTS/$ECHO_TGZ")
+  if [[ "$DDG_SHA512" != "$DDG_INTEGRITY" ]]; then
+    echo "FAIL: ${DDG_PKG}@${DDG_VERSION} does not match the pinned integrity" >&2; exit 1
+  fi
+  echo "   $DDG_TGZ sha256 $DDG_SHA (sha512 = pin)"
+  echo "   $ECHO_TGZ sha256 $ECHO_SHA"
+fi
 chmod -R a+rX "$SECRETS"
 
 echo "== internal network (no egress)"
@@ -108,6 +133,10 @@ docker run -d --name "${P}-model" "${OOM[@]}" --network "$NET" --network-alias f
   -e FAKE_MODEL_DEBUG="${FAKE_MODEL_DEBUG:-0}" \
   -v "$ROOT/infra/fake-model/server.mjs:/app/server.mjs:ro" \
   -v "$ROOT/infra/fake-model/fake-mcp.mjs:/app/fake-mcp.mjs:ro" \
+  -v "$ROOT/infra/fake-model/fake-clawhub.mjs:/app/fake-clawhub.mjs:ro" \
+  -v "$ROOT/infra/fake-model/fixtures/clawhub:/app/fixtures/clawhub:ro" \
+  -v "$ARTIFACTS:/artifacts:ro" \
+  -e FAKE_CLAWHUB_ARTIFACT_DIR=/artifacts \
   -e FAKE_MCP_TOKEN="$MCP_TOKEN" \
   -e FAKE_MODEL_CAPTURE_DIR=/tmp/capture \
   ocw-fake-model:local >/dev/null
@@ -118,7 +147,7 @@ docker run -d --name "${P}-api" "${OOM[@]}" --network "$NET" --network-alias api
   -e FAKE_BOT_ID=0199a6f0-0000-7000-8000-00000000a001 \
   -e FAKE_CELL_ID=0199a6f0-0000-7000-8000-0000000000c0 \
   -e FAKE_MODEL_BASE_URL=http://fake-model:18999/v1 \
-  -e FAKE_AGENT_TOOLS="web_search,web_fetch,ocw_memory_save,${MCP_SAFE}__echo,${MCP_SAFE}__write_note" \
+  -e FAKE_AGENT_TOOLS="web_search,web_fetch,ocw_memory_save,${MCP_SAFE}__echo,${MCP_SAFE}__write_note,ocw_echo" \
   -e FAKE_MCP_SERVERS="$(mcp_servers_json '["echo"]')" \
   -e FAKE_WEB_SEARCH_PROVIDER=searxng \
   node:24.21.0-bookworm-slim node /plugin/src/testing/run-fake-api.ts >/dev/null
@@ -135,15 +164,26 @@ if [[ "${SMOKE_BUILD:-0}" != "1" ]]; then
     -v "$SECRETS/bundled:/opt/ocw/plugins:ro"
   )
 fi
-docker run -d --name "${P}-openclaw" "${OOM[@]}" ${CELL_LIMIT[@]+"${CELL_LIMIT[@]}"} --network "$NET" \
+# Only SearXNG is bundled: DuckDuckGo is the marketplace scenario's install target (an image-bundled copy would
+# shadow it); the capabilities scenario searches through SearXNG either way. The executor downloads only from
+# OCW_CLAWHUB_URL (the fake ClawHub on the fake model).
+docker create --name "${P}-openclaw" "${OOM[@]}" ${CELL_LIMIT[@]+"${CELL_LIMIT[@]}"} --network "$NET" \
   -v "$VOL:/home/node/.openclaw" \
   -v "$SECRETS/cell_token:/run/secrets/ocw_cell_token:ro" \
   ${OVERLAY[@]+"${OVERLAY[@]}"} \
   -e OCW_API_URL=http://api:4000 \
   -e OCW_CELL_TOKEN_FILE=/run/secrets/ocw_cell_token \
   -e OCW_SEARXNG_URL=http://fake-model:18999 \
+  -e OCW_BUNDLED_PLUGINS=searxng \
+  -e OCW_CLAWHUB_URL=http://fake-model:18999 \
   -e NODE_OPTIONS="${CELL_NODE_OPTIONS:---max-old-space-size=512}" \
   ocw-openclaw:local >/dev/null
+if [[ "${SMOKE_BUILD:-0}" != "1" ]]; then
+  # OpenClaw refuses an install-policy script that is not root- (or gateway-) owned: a bind mount would carry the
+  # runner's uid, so the working-tree gate is copied in (docker cp writes root-owned files).
+  docker cp "$ROOT/infra/openclaw/install-policy.mjs" "${P}-openclaw:/opt/ocw/install-policy.mjs"
+fi
+docker start "${P}-openclaw" >/dev/null
 
 echo "== waiting for the plugin to connect"
 for i in $(seq 1 120); do
@@ -464,6 +504,183 @@ if (!r || r.state !== "error" || !["failed", "unsupported"].includes(r.error?.co
   console.log("FAIL: expected a classified sign-in error from the cell"); process.exit(1);
 }
 '
+fi
+
+if want marketplace; then
+# Marketplace (03.1-12, D-14). The fake Agent Channel API plays the API's part: it delivers the approved rows in GET /cell
+# (CellApprovedPlugin), publishes plugin.install.v1 / plugin.uninstall.v1 (moving the row to installing / uninstalling),
+# answers the install gate (POST /plugins/verify-install: only a row in flight with the same package, version and
+# sha256) and records POST /plugins/report.
+DDG_ROW=0199a6f0-0000-7000-8000-00000000c1a1
+ECHO_ROW=0199a6f0-0000-7000-8000-00000000c1a2
+set_plugins() { # <duckduckgo status> <ocw-echo status>
+  local rows
+  rows="$(DDG_STATUS="$1" ECHO_STATUS="$2" DDG_ROW="$DDG_ROW" ECHO_ROW="$ECHO_ROW" DDG_PKG="$DDG_PKG" \
+    DDG_VERSION="$DDG_VERSION" DDG_SHA="$DDG_SHA" ECHO_SHA="$ECHO_SHA" node -e '
+const e = process.env;
+console.log(JSON.stringify([
+  { pluginRowId: e.DDG_ROW, packageName: e.DDG_PKG, version: e.DDG_VERSION, sha256: e.DDG_SHA, pluginId: "duckduckgo", status: e.DDG_STATUS },
+  { pluginRowId: e.ECHO_ROW, packageName: "@ocw-test/echo-plugin", version: "0.1.0", sha256: e.ECHO_SHA, pluginId: "ocw-echo", status: e.ECHO_STATUS },
+]));')"
+  docker exec -e ROWS="$rows" -i "${P}-api" node --input-type=module -e "
+await fetch('http://127.0.0.1:4000/__test/plugins', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ plugins: JSON.parse(process.env.ROWS) }) });
+"
+}
+publish_plugin_event() { # <json {type, data}>
+  docker exec -e EV="$1" -i "${P}-api" node --input-type=module -e "
+await fetch('http://127.0.0.1:4000/__test/event', { method: 'POST', headers: { 'content-type': 'application/json' }, body: process.env.EV });
+"
+}
+install_event() { # <row> <flow> <package> <version> <sha256> <sha512> <plugin id>
+  ROW="$1" FLOW="$2" PKG="$3" VER="$4" SHA="$5" SRI="$6" PLUGIN="$7" node -e '
+const e = process.env;
+console.log(JSON.stringify({ type: "plugin.install.v1", data: {
+  flowId: e.FLOW, pluginRowId: e.ROW, packageName: e.PKG, version: e.VER,
+  artifactUrl: `http://fake-model:18999/api/v1/packages/${encodeURIComponent(e.PKG)}/versions/${encodeURIComponent(e.VER)}/artifact/download`,
+  sha256: e.SHA, npmIntegrity: e.SRI, expectedPluginId: e.PLUGIN, mode: "install" } }));'
+}
+uninstall_event() { # <row> <flow> <plugin id>
+  printf '{"type":"plugin.uninstall.v1","data":{"flowId":"%s","pluginRowId":"%s","pluginId":"%s"}}' "$2" "$1" "$3"
+}
+wait_report() { # <flow id> → the flow's final report (JSON) or null after 240 s
+  local r="null"
+  for i in $(seq 1 240); do
+    r="$(api_exec "const s = await (await fetch('http://127.0.0.1:4000/__test/state')).json(); const x = s.pluginReports.filter((p) => p.flowId === '$1' && p.state !== 'installing'); console.log(JSON.stringify(x.at(-1) ?? null));")"
+    [[ "$r" != "null" ]] && break
+    if [[ "$(docker inspect -f '{{.State.Running}}' "${P}-openclaw")" != "true" ]]; then
+      echo "FAIL: openclaw container died during a plugin flow" >&2; exit 1
+    fi
+    sleep 1
+  done
+  printf '%s' "$r"
+}
+# OpenClaw's CLI inside the cell with the gateway's own environment (its token, and the provider and MCP env refs the
+# config needs): what someone with a shell in the cell could run.
+cat >"$SECRETS/ocw-cli.mjs" <<'JS'
+import { spawnSync } from "node:child_process";
+import { readdirSync, readFileSync } from "node:fs";
+let gateway = {};
+for (const pid of readdirSync("/proc").filter((p) => /^\d+$/.test(p))) {
+  try {
+    const vars = readFileSync(`/proc/${pid}/environ`, "utf8").split("\0").filter(Boolean);
+    if (vars.some((v) => v.startsWith("OPENCLAW_GATEWAY_TOKEN="))) {
+      gateway = Object.fromEntries(vars.map((v) => [v.slice(0, v.indexOf("=")), v.slice(v.indexOf("=") + 1)]));
+      break;
+    }
+  } catch {}
+}
+const r = spawnSync(process.execPath, ["/app/openclaw.mjs", ...process.argv.slice(2)], {
+  env: { ...process.env, ...gateway },
+  encoding: "utf8",
+  timeout: 180000,
+  maxBuffer: 16 * 1024 * 1024,
+});
+console.log(JSON.stringify({ code: r.status, stdout: r.stdout ?? "", out: `${r.stdout ?? ""}\n${r.stderr ?? ""}`.slice(-1500) }));
+JS
+cell_cli() { docker exec "${P}-openclaw" node /tmp/ocw-cli.mjs "$@"; }
+listed() { # <plugin id> → enabled | disabled | absent (OpenClaw's own inventory inside the cell)
+  cell_cli plugins list --json | ID="$1" node -e '
+const r = JSON.parse(require("fs").readFileSync(0, "utf8"));
+let p;
+try { p = JSON.parse(r.stdout.slice(r.stdout.indexOf("{"))).plugins.find((x) => x.id === process.env.ID); } catch { console.log("unreadable"); process.exit(0); }
+console.log(!p ? "absent" : p.enabled ? "enabled" : "disabled");'
+}
+manual_install() { # <tarball in the container> → {code, out}
+  cell_cli plugins install "npm-pack:$1" --force --accept-capabilities
+}
+docker cp "$SECRETS/ocw-cli.mjs" "${P}-openclaw:/tmp/ocw-cli.mjs"
+docker cp "$ARTIFACTS/$ECHO_TGZ" "${P}-openclaw:/tmp/ocw-echo.tgz"
+
+echo "== [marketplace] plugin.install.v1 for the official DuckDuckGo plugin: downloaded, verified, gated, installed"
+set_plugins approved approved
+DDG_FLOW=0199a6f0-0000-7000-8000-0000000f3001
+publish_plugin_event "$(install_event "$DDG_ROW" "$DDG_FLOW" "$DDG_PKG" "$DDG_VERSION" "$DDG_SHA" "$DDG_SHA512" duckduckgo)"
+REPORT="$(wait_report "$DDG_FLOW")"
+echo "   report     : $REPORT"
+STATE="$(api_exec "const r = await fetch('http://127.0.0.1:4000/__test/state'); console.log(JSON.stringify(await r.json()));")"
+echo "$STATE" | DDG_SHA="$DDG_SHA" REPORT="$REPORT" node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const r = JSON.parse(process.env.REPORT);
+const gate = s.verifyCalls.filter((c) => c.sha256 === process.env.DDG_SHA);
+console.log("   gate       :", JSON.stringify(gate.map(({ packageName, version, approved }) => ({ packageName, version, approved }))));
+const ok =
+  r?.state === "installed" && r.pluginId === "duckduckgo" && r.version === "2026.9.7" &&
+  JSON.stringify(r.declared?.webSearchProviders) === "[\"duckduckgo\"]" && (r.declared?.tools ?? []).length === 0 &&
+  gate.length >= 1 && gate.every((c) => c.approved === true);
+if (!ok) { console.log("FAIL: expected an installed report for duckduckgo, approved by the install gate for the exact digest"); process.exit(1); }
+'
+STATUS="$(listed duckduckgo)"
+echo "   plugins list: duckduckgo $STATUS"
+[[ "$STATUS" == "enabled" ]] || { echo "FAIL: duckduckgo is not enabled in OpenClaw's plugin inventory"; exit 1; }
+CONFIG="$(docker exec "${P}-openclaw" cat /home/node/.openclaw/openclaw.json)"
+CONFIG="$CONFIG" node -e '
+const cfg = JSON.parse(process.env.CONFIG);
+const entry = cfg.plugins?.entries?.duckduckgo;
+console.log("   config     :", JSON.stringify({ allow: cfg.plugins?.allow, duckduckgo: entry, gate: cfg.security?.installPolicy?.exec?.args }));
+const ok =
+  cfg.plugins.allow.includes("duckduckgo") && entry?.hooks?.allowConversationAccess === false &&
+  entry?.hooks?.allowPromptInjection === false && cfg.security?.installPolicy?.enabled === true;
+if (!ok) { console.log("FAIL: duckduckgo must be allowed with conversation access and prompt injection off, behind the gate"); process.exit(1); }
+'
+
+echo "== [marketplace] a manual install of an unapproved package is blocked by the install gate"
+OUT="$(manual_install /tmp/ocw-echo.tgz)"
+echo "$OUT" | node -e '
+const r = JSON.parse(require("fs").readFileSync(0, "utf8"));
+console.log("   manual     : exit", r.code, "|", (r.out.match(/Reason: [^\n]*/) ?? [""])[0]);
+if (r.code === 0 || !/blocked by policy/i.test(r.out) || !/not_in_flight|not_approved/.test(r.out)) { console.log("FAIL: the unapproved install was not blocked by the gate"); process.exit(1); }
+'
+echo "== [marketplace] a forged local cache listing the tuple changes nothing (the gate asks only the API)"
+docker exec -i "${P}-openclaw" sh -c 'cat > /home/node/.openclaw/ocw-plugins.json' <<EOF
+{"version":1,"installed":[{"pluginId":"ocw-echo","packageName":"@ocw-test/echo-plugin","version":"0.1.0"}],"approved":[{"packageName":"@ocw-test/echo-plugin","version":"0.1.0","sha256":"$ECHO_SHA"}]}
+EOF
+OUT="$(manual_install /tmp/ocw-echo.tgz)"
+echo "$OUT" | node -e '
+const r = JSON.parse(require("fs").readFileSync(0, "utf8"));
+console.log("   manual     : exit", r.code, "|", (r.out.match(/Reason: [^\n]*/) ?? [""])[0]);
+if (r.code === 0 || !/blocked by policy/i.test(r.out)) { console.log("FAIL: a forged cache turned a refusal into an install"); process.exit(1); }
+'
+echo "== [marketplace] with the API down even an in-flight tuple is blocked (fail closed)"
+set_plugins installed installing
+docker pause "${P}-api" >/dev/null
+OUT="$(manual_install /tmp/ocw-echo.tgz || true)"
+docker unpause "${P}-api" >/dev/null
+set_plugins installed approved
+echo "$OUT" | node -e '
+const r = JSON.parse(require("fs").readFileSync(0, "utf8"));
+console.log("   manual     : exit", r.code, "|", (r.out.match(/Reason: [^\n]*/) ?? [""])[0]);
+if (r.code === 0 || !/blocked by policy|failed closed/i.test(r.out) || !/unreachable|did not answer/i.test(r.out)) { console.log("FAIL: the gate did not fail closed with the API down"); process.exit(1); }
+'
+STATUS="$(listed ocw-echo)"
+echo "   plugins list: ocw-echo $STATUS"
+[[ "$STATUS" == "absent" ]] || { echo "FAIL: a blocked install left ocw-echo in the cell"; exit 1; }
+
+echo "== [marketplace] restart: the installed plugin is re-allowed at boot from GET /agent-channel/v1/plugins"
+T0="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+docker restart "${P}-openclaw" >/dev/null
+for i in $(seq 1 120); do
+  if docker logs --since "$T0" "${P}-openclaw" 2>&1 | grep -q "agent channel connected"; then break; fi
+  sleep 1
+done
+BOOT="$(docker logs --since "$T0" "${P}-openclaw" 2>&1)"
+grep -E "\[ocw-cell\]" <<<"$BOOT" | sed 's/^/   /'
+grep -q "agent channel connected" <<<"$BOOT" || { echo "FAIL: the cell did not reconnect after the restart"; exit 1; }
+grep -q "base config rendered (plugins.allow=[^)]*duckduckgo" <<<"$BOOT" || { echo "FAIL: duckduckgo was not re-allowed at boot"; exit 1; }
+if grep -q "API unreachable at boot" <<<"$BOOT"; then echo "FAIL: the boot render fell back to the local cache"; exit 1; fi
+STATUS="$(listed duckduckgo)"
+echo "   plugins list: duckduckgo $STATUS"
+[[ "$STATUS" == "enabled" ]] || { echo "FAIL: duckduckgo did not survive the restart"; exit 1; }
+
+echo "== [marketplace] plugin.uninstall.v1: removed from the cell"
+DDG_UNFLOW=0199a6f0-0000-7000-8000-0000000f3002
+publish_plugin_event "$(uninstall_event "$DDG_ROW" "$DDG_UNFLOW" duckduckgo)"
+REPORT="$(wait_report "$DDG_UNFLOW")"
+echo "   report     : $REPORT"
+STATUS="$(listed duckduckgo)"
+echo "   plugins list: duckduckgo $STATUS"
+if [[ "$(REPORT="$REPORT" node -e 'console.log(JSON.parse(process.env.REPORT)?.state ?? "none")')" != "uninstalled" || "$STATUS" != "absent" ]]; then
+  echo "FAIL: duckduckgo was not uninstalled"; exit 1
+fi
 fi
 
 if want dm-isolation; then

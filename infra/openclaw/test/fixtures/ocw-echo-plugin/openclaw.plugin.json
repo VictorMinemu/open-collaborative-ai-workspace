@@ -1,0 +1,7 @@
+{
+  "id": "ocw-echo",
+  "name": "OCW Echo (test fixture)",
+  "description": "Test fixture for the OCW marketplace smoke: one tool that echoes its input.",
+  "contracts": { "tools": ["ocw_echo"] },
+  "configSchema": { "type": "object", "additionalProperties": false, "properties": {} }
+}

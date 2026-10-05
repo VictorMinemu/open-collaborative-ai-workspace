@@ -1,7 +1,8 @@
 // node --test 'infra/**/*.test.mjs'
 import assert from "node:assert/strict";
+import path from "node:path";
 import { describe, it } from "node:test";
-import { BUNDLED_PLUGINS_DIR, DANGEROUS_TOOLS, renderConfig } from "./render-config.mjs";
+import { BUNDLED_PLUGINS_DIR, DANGEROUS_TOOLS, INSTALL_POLICY_PATH, renderConfig } from "./render-config.mjs";
 
 const base = { OCW_API_URL: "http://api:4000", OCW_CELL_TOKEN_FILE: "/run/secrets/ocw_cell_token" };
 
@@ -149,5 +150,69 @@ describe("renderConfig", () => {
   it("fails fast on missing required inputs", () => {
     const { errors } = renderConfig({});
     assert.equal(errors.length, 2);
+  });
+
+  // ---------------------------------------------------------------- marketplace (03.1-12, D-14)
+
+  it("every plugin install goes through the install gate: absolute node + /opt/ocw/install-policy.mjs, two env names", () => {
+    const { config } = renderConfig(base, { nodePath: "/usr/local/bin/node" });
+    assert.deepEqual(config.security.installPolicy, {
+      enabled: true,
+      targets: ["plugin"],
+      exec: {
+        source: "exec",
+        command: "/usr/local/bin/node",
+        args: [INSTALL_POLICY_PATH],
+        timeoutMs: 10000,
+        passEnv: ["OCW_API_URL", "OCW_CELL_TOKEN_FILE"],
+        // OpenClaw checks the command AND the script argument against trustedDirs.
+        trustedDirs: ["/usr/local/bin", "/opt/ocw"],
+      },
+    });
+    assert.equal(INSTALL_POLICY_PATH, "/opt/ocw/install-policy.mjs");
+    assert.ok(path.isAbsolute(config.security.installPolicy.exec.command));
+    // Default: the node running the entrypoint (the gateway's own node).
+    assert.equal(renderConfig(base).config.security.installPolicy.exec.command, process.execPath);
+  });
+
+  it("installedPlugins are re-allowed at boot with conversation access and prompt injection off", () => {
+    const env = { ...base, OCW_BUNDLED_PLUGINS: "searxng" };
+    const { config } = renderConfig(env, { installedPlugins: [{ id: "duckduckgo" }] });
+    assert.ok(config.plugins.allow.includes("duckduckgo"));
+    assert.deepEqual(config.plugins.entries.duckduckgo, {
+      enabled: true,
+      hooks: { allowConversationAccess: false, allowPromptInjection: false },
+    });
+    // A bundled copy wins: the same id is never allowed twice nor re-rendered as a marketplace entry.
+    const bundled = renderConfig(base, { installedPlugins: [{ id: "duckduckgo" }] }).config;
+    assert.deepEqual(bundled.plugins.allow, ["ocw", "openai", "duckduckgo", "searxng"]);
+    assert.equal(bundled.plugins.entries.duckduckgo, undefined);
+  });
+
+  it("with OCW_BUNDLED_PLUGINS=none an installed DuckDuckGo is allowed once and never loaded from the image path", () => {
+    const { config } = renderConfig(
+      { ...base, OCW_BUNDLED_PLUGINS: "none" },
+      { installedPlugins: [{ id: "duckduckgo" }, { id: "duckduckgo" }, { id: "ocw-echo" }] },
+    );
+    assert.deepEqual(config.plugins.allow, ["ocw", "openai", "duckduckgo", "ocw-echo"]);
+    assert.deepEqual(config.plugins.load.paths, ["/opt/ocw/openclaw-channel"]);
+    assert.deepEqual(config.plugins.entries["ocw-echo"].hooks, {
+      allowConversationAccess: false,
+      allowPromptInjection: false,
+    });
+  });
+
+  it("an installed plugin never overrides our own plugins or the deny list; malformed ids are ignored", () => {
+    const { config } = renderConfig(base, {
+      installedPlugins: [{ id: "ocw" }, { id: "openai" }, { id: "codex" }, { id: "../x" }, { id: "" }, {}],
+    });
+    assert.deepEqual(config.plugins.allow, ["ocw", "openai", "duckduckgo", "searxng"]);
+    assert.deepEqual(config.plugins.entries.openai, { enabled: true, config: { personality: "off" } });
+    assert.equal(config.plugins.entries.codex, undefined);
+    assert.deepEqual(config.plugins.deny, ["codex"]);
+  });
+
+  it("no installed plugin changes nothing else", () => {
+    assert.deepEqual(renderConfig(base, { installedPlugins: [] }).config, renderConfig(base, {}).config);
   });
 });

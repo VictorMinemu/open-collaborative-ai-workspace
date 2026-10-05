@@ -17,10 +17,17 @@
 // Search is a managed, hookable provider (DuckDuckGo by default, SearXNG when configured); OpenAI's
 // hosted search is off so no search bypasses the hook and the audit.
 
+import path from "node:path";
+
 export const PLUGIN_DIR_DEFAULT = "/opt/ocw/openclaw-channel";
 /** Official search plugins installed into the image at build time (install-bundled-plugins.sh). */
 export const BUNDLED_PLUGINS_DIR = "/opt/ocw/plugins";
 export const BUNDLED_PLUGIN_IDS = ["duckduckgo", "searxng"];
+/** The install gate (03.1-12, D-14): OpenClaw's `security.installPolicy` exec, root-owned in the image. */
+export const INSTALL_POLICY_PATH = "/opt/ocw/install-policy.mjs";
+/** Plugin ids a marketplace install can never take over in the boot allowlist. */
+const RESERVED_PLUGIN_IDS = new Set(["ocw", "openai", "codex"]);
+const PLUGIN_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/iu;
 
 /**
  * Tools no bot may ever be offered. Mirrors `DANGEROUS_TOOL_NAMES` in
@@ -78,12 +85,31 @@ export function bundledPluginIds(env) {
 }
 
 /**
+ * Marketplace plugins installed in this cell (03.1-12): OpenClaw keeps their install records and package roots in
+ * the state volume, but this file is re-rendered on every boot, so their allowlist entries come back from the API
+ * (`GET /agent-channel/v1/plugins`, the boot cache only when the API is unreachable; Pitfall P-B1). Each gets
+ * conversation access and prompt injection off (T-03.1-12-04). Our own plugins and denied ids are never taken over.
+ */
+function installedPluginIds(list, taken) {
+  const out = [];
+  for (const p of Array.isArray(list) ? list : []) {
+    const id = typeof p?.id === "string" ? p.id.trim() : "";
+    if (!PLUGIN_ID.test(id) || RESERVED_PLUGIN_IDS.has(id) || taken.has(id) || out.includes(id)) continue;
+    out.push(id);
+  }
+  return out;
+}
+
+/**
  * @param {Record<string, string | undefined>} env  process env AFTER *_FILE secrets were loaded
- * @param {{ bundledPresent?: (id: string) => boolean }} [opts]  whether a bundled plugin directory
- *   exists in this image (the entrypoint checks the filesystem; default: assume present, keeps this pure)
+ * @param {{ bundledPresent?: (id: string) => boolean, installedPlugins?: Array<{ id: string }>, nodePath?: string }} [opts]
+ *   `bundledPresent`: whether a bundled plugin directory exists in this image (the entrypoint checks the filesystem;
+ *   default: assume present, keeps this pure). `installedPlugins`: marketplace plugins installed in this cell.
+ *   `nodePath`: absolute node binary that runs the install gate (default: this process's).
  */
 export function renderConfig(env, opts = {}) {
   const bundledPresent = opts.bundledPresent ?? (() => true);
+  const nodePath = opts.nodePath ?? process.execPath;
   const errors = [];
   if (!nonEmpty(env.OCW_API_URL)) errors.push("OCW_API_URL is required (e.g. http://api:4000)");
   if (!nonEmpty(env.OCW_CELL_TOKEN_FILE) && !nonEmpty(env.OCW_CELL_TOKEN)) {
@@ -108,6 +134,10 @@ export function renderConfig(env, opts = {}) {
     // Env reference: the URL is resolved by OpenClaw from the gateway env, never written to the file.
     entries.searxng = { enabled: true, config: { webSearch: { baseUrl: `$${"{"}OCW_SEARXNG_URL}` } } };
   }
+  const installed = installedPluginIds(opts.installedPlugins, new Set(bundled));
+  for (const id of installed) {
+    entries[id] = { enabled: true, hooks: { allowConversationAccess: false, allowPromptInjection: false } };
+  }
 
   const config = {
     gateway: {
@@ -128,7 +158,7 @@ export function renderConfig(env, opts = {}) {
       // swaps plugin instances, which would abort a sign-in in progress. API-key providers stay plain
       // config entries (anthropic-messages / openai-completions). Then the bundled keyless search
       // providers (D-09).
-      allow: ["ocw", "openai", ...bundled],
+      allow: ["ocw", "openai", ...bundled, ...installed],
       entries,
       // With no providers at boot, the implicit default model routes to the Codex runtime and
       // `doctor --fix` would add `codex` to the allowlist; an explicit deny blocks that repair. The
@@ -141,6 +171,25 @@ export function renderConfig(env, opts = {}) {
         ],
       },
       slots: { memory: "none" },
+    },
+    // Nothing installs itself (D-14): every plugin install or update, from the CLI or the Gateway, is staged and then
+    // checked by our gate, which asks the API whether exactly this (package, version, sha256) is an admin-approved
+    // install in flight; OpenClaw fails closed on a block, an error or a timeout. OpenClaw checks the command AND the
+    // script argument against trustedDirs (root-owned, not group/world-writable, no symlinks).
+    security: {
+      installPolicy: {
+        enabled: true,
+        targets: ["plugin"],
+        exec: {
+          // Required by OpenClaw's schema (`security.installPolicy.exec.source: "exec"`).
+          source: "exec",
+          command: nodePath,
+          args: [INSTALL_POLICY_PATH],
+          timeoutMs: 10000,
+          passEnv: ["OCW_API_URL", "OCW_CELL_TOKEN_FILE"],
+          trustedDirs: [path.dirname(nodePath), path.dirname(INSTALL_POLICY_PATH)],
+        },
+      },
     },
     channels: { ocw: { enabled: true } },
     // MCP servers (D-13) are rendered by the plugin from GET /cell (only servers with a tool some bot may use).

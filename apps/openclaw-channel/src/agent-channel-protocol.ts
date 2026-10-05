@@ -16,6 +16,8 @@
  *   POST /memories             ← AgentChannelMemorySave → AgentChannelMemorySaveResponse (ocw_memory_save;
  *                                owner = the human of the delivered turn; 404/409 with the refusal code)
  *   POST /mcp/probe-results    ← AgentChannelMcpProbeResult (the tools an `mcp.probe` discovered; D-13)
+ *   POST /plugins/report       ← AgentChannelPluginReport (a marketplace install / uninstall outcome; D-14)
+ *   POST /plugins/verify-install, GET /plugins: used by infra/openclaw (install gate, boot render), not here
  *
  * Parsing is deliberately lenient on ids (any non-empty string) and ignores unknown fields, so the
  * API can add fields without breaking deployed cells; required fields are enforced.
@@ -32,6 +34,10 @@ export const AgentChannelEventTypes = {
   providerAuthRevoke: "provider.auth.revoke",
   /** Phase 3.1 (D-13): connect to one MCP server of the snapshot, list its tools, report them. */
   mcpProbe: "mcp.probe",
+  /** Phase 3.1 (D-14): install an admin-approved, pinned marketplace plugin version. */
+  pluginInstall: "plugin.install.v1",
+  /** Phase 3.1 (D-14): remove a marketplace plugin from the cell. */
+  pluginUninstall: "plugin.uninstall.v1",
 } as const;
 export const cellTopic = (cellId: string) => `cell:${cellId}`;
 
@@ -270,6 +276,20 @@ export const CellMcpServer = z.object({
 });
 export type CellMcpServer = z.infer<typeof CellMcpServer>;
 
+/**
+ * One marketplace plugin the API approved for this cell (D-14). The executor installs only an event that matches
+ * one of these (row, package, version, sha256); the install gate asks the API again for every staged artifact.
+ */
+export const CellApprovedPlugin = z.object({
+  pluginRowId: Id,
+  packageName: z.string().min(1),
+  version: z.string().min(1),
+  sha256: z.string(),
+  pluginId: z.string().nullable(),
+  status: z.string(),
+});
+export type CellApprovedPlugin = z.infer<typeof CellApprovedPlugin>;
+
 export const CellSnapshot = z.object({
   protocolVersion: z.number().int(),
   cellId: Id,
@@ -284,6 +304,8 @@ export const CellSnapshot = z.object({
   webSearch: z.object({ provider: z.string() }).optional(),
   /** The org's enabled MCP servers (D-13); absent on older APIs = none. */
   mcpServers: z.array(CellMcpServer).optional(),
+  /** Approved marketplace plugins (D-14); absent on older APIs = none (every install event is refused). */
+  plugins: z.array(CellApprovedPlugin).optional(),
 });
 export type CellSnapshot = z.infer<typeof CellSnapshot>;
 
@@ -373,4 +395,54 @@ export type AgentChannelMcpProbeResult = {
   ok: boolean;
   error?: string;
   tools?: McpProbeTool[];
+};
+
+/** `plugin.install.v1` (D-14): download `artifactUrl` (configured ClawHub origin only), verify, install, report. */
+export const PluginInstallEvent = z.object({
+  type: z.literal(AgentChannelEventTypes.pluginInstall),
+  seq: z.number().int().positive(),
+  flowId: Id,
+  pluginRowId: Id,
+  packageName: z.string().min(1).max(214),
+  version: z.string().min(1).max(64),
+  artifactUrl: z.string().min(1).max(2000),
+  sha256: z.string(),
+  npmIntegrity: z.string().nullable().optional(),
+  expectedPluginId: z.string().nullable(),
+  mode: z.enum(["install", "update"]).default("install"),
+});
+export type PluginInstallEvent = z.infer<typeof PluginInstallEvent>;
+
+/** `plugin.uninstall.v1` (D-14): remove the plugin; its tools were already taken off every bot by the API. */
+export const PluginUninstallEvent = z.object({
+  type: z.literal(AgentChannelEventTypes.pluginUninstall),
+  seq: z.number().int().positive(),
+  flowId: Id,
+  pluginRowId: Id,
+  pluginId: z.string().min(1).max(128),
+});
+export type PluginUninstallEvent = z.infer<typeof PluginUninstallEvent>;
+
+/** What an installed plugin declares (its manifest and runtime registrations; untrusted, re-scored by the API). */
+export type DeclaredSurface = {
+  tools: string[];
+  hooks: string[];
+  channels: string[];
+  providers: string[];
+  webSearchProviders: string[];
+  webFetchProviders: string[];
+  mcpServers: string[];
+  other: string[];
+};
+
+/** POST /plugins/report: one flow's outcome. `error.message` is a fixed classified text, never CLI output. */
+export type AgentChannelPluginReport = {
+  flowId: string;
+  pluginRowId: string;
+  state: "installing" | "installed" | "failed" | "uninstalled";
+  pluginId?: string;
+  version?: string;
+  declared?: DeclaredSurface;
+  declaredTools?: Array<{ name: string; description?: string }>;
+  error?: { code: string; message: string };
 };

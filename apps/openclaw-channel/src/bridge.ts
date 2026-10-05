@@ -5,6 +5,8 @@ import {
   type CellAgent,
   type CellSnapshot,
   McpProbeEvent,
+  PluginInstallEvent,
+  PluginUninstallEvent,
   ProviderAuthCancelEvent,
   ProviderAuthRevokeEvent,
   ProviderAuthStartEvent,
@@ -14,6 +16,7 @@ import { sleep } from "./backoff.js";
 import type { DurableFrame, EventStreamLogger } from "./event-stream.js";
 import { handleMcpProbe, type probeMcpServer } from "./mcp-probe.js";
 import { type MappedMention, mapMention, replyIdempotencyKey } from "./mention-mapper.js";
+import type { PluginInstaller } from "./plugin-installer.js";
 import type { AgentProvisioningResult } from "./reconciler.js";
 import type { SubscriptionAuth } from "./subscription-auth.js";
 
@@ -39,6 +42,11 @@ export type OpenClawPort = {
     cell: CellSnapshot,
     opts?: { readySubscriptions?: ReadonlySet<string> },
   ): Promise<{ changed: boolean; results: AgentProvisioningResult[] }>;
+  /**
+   * Marketplace plugins (D-14): `plugins.entries.<id>.hooks {allowConversationAccess:false, allowPromptInjection:false}`
+   * through the same runtime config mutation as `reconcile`. Optional (test ports).
+   */
+  restrictPluginHooks?(pluginId: string): Promise<void>;
 };
 
 export type BridgeOptions = {
@@ -56,6 +64,8 @@ export type BridgeOptions = {
   subscriptions?: SubscriptionAuth;
   /** MCP tool discovery for `mcp.probe` (tests inject a fake; default: the official SDK client). */
   mcpProbe?: typeof probeMcpServer;
+  /** Marketplace executor for `plugin.install.v1` / `plugin.uninstall.v1` (D-14); omitted → those events are ignored. */
+  plugins?: PluginInstaller;
 };
 
 export const FAILURE_REPLY = "Sorry, I couldn't generate a reply right now. Please try again in a moment.";
@@ -144,6 +154,12 @@ export function createBridge(opts: BridgeOptions) {
       `cell synced: ${cell.agents.length} bot(s), ${cell.providers.length} provider(s), ${cell.mcpServers?.length ?? 0} MCP server(s)${changed ? ", OpenClaw updated" : ""}`,
     );
     await reportStatuses(results);
+    // The boot render's fallback list of installed marketplace plugins follows the API's view (never trusted for installs).
+    await opts.plugins?.writeBootCache().catch((error: unknown) => {
+      log.warn?.(
+        `plugin boot cache not written (${error instanceof Error ? error.message.slice(0, 80) : "error"})`,
+      );
+    });
     return cell;
   }
 
@@ -301,6 +317,31 @@ export function createBridge(opts: BridgeOptions) {
             `mcp probe ${parsed.data.probeId}: report failed (${error instanceof Error ? error.message.slice(0, 120) : "error"})`,
           );
         });
+        return;
+      }
+      case AgentChannelEventTypes.pluginInstall:
+      case AgentChannelEventTypes.pluginUninstall: {
+        const installer = opts.plugins;
+        if (!installer) {
+          log.info?.(`seq=${frame.seq}: ${frame.type} ignored (marketplace executor not available)`);
+          return;
+        }
+        if (frame.type === AgentChannelEventTypes.pluginInstall) {
+          const parsed = PluginInstallEvent.safeParse(frame.data);
+          if (!parsed.success) {
+            log.warn?.(`seq=${frame.seq}: invalid ${frame.type} payload; skipped`);
+            return;
+          }
+          // Awaited (one at a time inside the installer): the cursor commits only after the outcome was reported.
+          await installer.onInstall(parsed.data, opts.signal);
+        } else {
+          const parsed = PluginUninstallEvent.safeParse(frame.data);
+          if (!parsed.success) {
+            log.warn?.(`seq=${frame.seq}: invalid ${frame.type} payload; skipped`);
+            return;
+          }
+          await installer.onUninstall(parsed.data, opts.signal);
+        }
         return;
       }
       case AgentChannelEventTypes.providerAuthStart:

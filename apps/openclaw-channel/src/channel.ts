@@ -8,6 +8,7 @@ import { runEventStream } from "./event-stream.js";
 import { CHANNEL_ID, parseTarget } from "./mention-mapper.js";
 import { createOpenClawAuthDriver } from "./openclaw-auth.js";
 import { createOpenClawPort, type PluginRuntimeLike } from "./openclaw-port.js";
+import { createPluginInstaller } from "./plugin-installer.js";
 import { createSubscriptionAuth } from "./subscription-auth.js";
 import { setToolGuardClient } from "./tool-guard.js";
 
@@ -93,7 +94,22 @@ async function startOcwAccount(ctx: ChannelGatewayContext<ResolvedOcwAccount>): 
     signal,
     log,
   });
-  const bridge = createBridge({ client, port, signal, log, subscriptions });
+  // Marketplace executor (D-14): approved installs only, behind OpenClaw's install gate (infra/openclaw/install-policy.mjs).
+  let bridgeRef: ReturnType<typeof createBridge> | undefined;
+  const plugins = createPluginInstaller({
+    client,
+    snapshot: () => bridgeRef?.snapshot(),
+    refresh: () => {
+      if (!bridgeRef) throw new Error("bridge not ready");
+      return bridgeRef.refreshCell();
+    },
+    stateDir: resolveStateDir(runtime),
+    clawhubOrigin: process.env.OCW_CLAWHUB_URL?.trim() || "https://clawhub.ai",
+    restrictHooks: (id) => port.restrictPluginHooks?.(id) ?? Promise.resolve(),
+    log,
+  });
+  const bridge = createBridge({ client, port, signal, log, subscriptions, plugins });
+  bridgeRef = bridge;
   const cursorFile = path.join(resolveStateDir(runtime), "ocw-channel", `cursor-${account.accountId}.json`);
 
   ctx.setStatus({
