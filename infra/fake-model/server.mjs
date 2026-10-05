@@ -25,6 +25,8 @@
 //
 // Env: PORT (default 18999), FAKE_MODEL_CAPTURE_DIR (optional: write each request body as JSON),
 // FAKE_MCP_TOKEN (optional: the fake MCP routes then require `Authorization: Bearer <token>`).
+// FAKE_MODEL_DEBUG=1 (optional, off by default: log a short preview of each tool-offering request's messages,
+// to diagnose directive parsing inside a real cell; run-container-smoke.sh passes it through).
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import path from "node:path";

@@ -11,6 +11,7 @@
 # Usage (repo root):  infra/openclaw/test/run-container-smoke.sh [--keep]
 #   SMOKE_ONLY=<comma list>  run only these scenarios (unset = all): mention, signin, dm, capabilities,
 #                            dm-isolation, memory
+#   FAKE_MODEL_DEBUG=1       the fake model logs a preview of each tool-offering request (off by default)
 # Requires: docker, node + npm (bundled plugins are installed on the host from the pinned registry
 # tarballs), apps/openclaw-channel/node_modules (pnpm install / npm install in that dir).
 set -euo pipefail
@@ -86,7 +87,8 @@ CELL_LIMIT=()
 [[ -n "${SMOKE_CELL_MEMORY:-}" ]] && CELL_LIMIT=(--memory "$SMOKE_CELL_MEMORY")
 
 # The working-tree fake model (tool-call directives, fake SearXNG /search) over the image copy: no rebuild.
-docker run -d --name "${P}-model" "${OOM[@]}" --network "$NET" --network-alias fake-model -e FAKE_MODEL_DEBUG=1 \
+docker run -d --name "${P}-model" "${OOM[@]}" --network "$NET" --network-alias fake-model \
+  -e FAKE_MODEL_DEBUG="${FAKE_MODEL_DEBUG:-0}" \
   -v "$ROOT/infra/fake-model/server.mjs:/app/server.mjs:ro" \
   -e FAKE_MODEL_CAPTURE_DIR=/tmp/capture \
   ocw-fake-model:local >/dev/null
