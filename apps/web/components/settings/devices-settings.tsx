@@ -31,7 +31,6 @@ import {
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
-import { Switch } from "@/components/ui/switch";
 import { OnlineDot, RUNTIMES, RuntimeLogo } from "@/components/work-zone/meta";
 import { useCopy } from "@/hooks/use-copy";
 import { errorMessage } from "@/lib/api";
@@ -43,10 +42,10 @@ import {
   useCreateEnrollment,
   useDevices,
   useRevokeDevice,
-  useUpdateDevice,
   useWorkZoneOrgSync,
   wzKeys,
 } from "@/lib/workzone-queries";
+import { DeviceSharing } from "./device-sharing";
 
 const PLATFORM: Record<string, string> = { darwin: "macOS", linux: "Linux", win32: "Windows" };
 
@@ -148,7 +147,6 @@ export function DevicesSettings() {
 }
 
 function DeviceCard({ device: d, owned }: { device: Device; owned: boolean }) {
-  const update = useUpdateDevice();
   const revoke = useRevokeDevice();
   const [confirm, setConfirm] = useState(false);
   // Decided by the API resolver: revoke = owner or admin; update (rename, share) = owner only.
@@ -226,23 +224,7 @@ function DeviceCard({ device: d, owned }: { device: Device; owned: boolean }) {
           </Button>
         ) : null}
       </div>
-      {canUpdate ? (
-        <div className="flex items-center justify-between gap-3 border-t px-4 py-3">
-          <span className="text-sm">
-            Let teammates start sessions on this device
-            <span className="block text-muted-foreground text-xs">
-              You can still approve every change they request.
-            </span>
-          </span>
-          <Switch
-            checked={d.shared}
-            aria-label="Share with the team"
-            onCheckedChange={(shared) =>
-              update.mutate({ id: d.id, shared }, { onError: (err) => toast.error(errorMessage(err)) })
-            }
-          />
-        </div>
-      ) : null}
+      {canUpdate ? <DeviceSharing device={d} /> : null}
       <Dialog open={confirm} onOpenChange={setConfirm}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>

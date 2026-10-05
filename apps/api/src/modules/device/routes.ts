@@ -27,6 +27,7 @@ import {
   type PermissionService,
 } from "../organization";
 import { type DeviceAccess, loadDeviceAccess } from "./access";
+import { loadGrants, registerDeviceGrantRoutes } from "./grants";
 import type { DeviceHub } from "./hub";
 
 export const ENROLLMENT_TTL_MS = 10 * 60_000;
@@ -90,12 +91,19 @@ async function listDevices(
   ]);
   const byDevice = new Map(counts.map((c) => [c.deviceId, Number(c.n)]));
   const out: Device[] = [];
+  const managed: string[] = [];
   for (const r of rows) {
+    const viewerCan = await perms.viewerCan(req, tx, deviceFacts(r, userId, access), DEVICE_VIEWER_CAN);
+    // The list of grants is for the owner (device.update) and admins (device.revoke) only (T-03.2-05-05).
+    if (viewerCan.includes("device.update") || viewerCan.includes("device.revoke")) managed.push(r.id);
     out.push({
       ...toDevice(r, dir.get(r.ownerUserId)?.displayName ?? null, byDevice.get(r.id) ?? 0),
-      viewerCan: await perms.viewerCan(req, tx, deviceFacts(r, userId, access), DEVICE_VIEWER_CAN),
+      viewerMaxMode: access.capOf(r),
+      viewerCan,
     });
   }
+  const grants = await loadGrants(tx, managed);
+  for (const d of out) if (managed.includes(d.id)) d.grants = grants.get(d.id) ?? [];
   return out;
 }
 
@@ -137,6 +145,8 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
   const perms = createPermissionService(core);
   const requireUser = core.identity.requireUser;
   const user = { config: { authz: "user" as const }, preHandler: requireUser };
+
+  registerDeviceGrantRoutes(app, core, hub, perms);
 
   app.post(
     "/devices/enrollments",
