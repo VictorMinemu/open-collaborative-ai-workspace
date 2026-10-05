@@ -4,7 +4,6 @@ import {
   type ControlDenialReason,
   CreatePromptRequest,
   CreateWorkSessionRequest,
-  DEFAULT_WORK_ZONE_POLICY,
   Ok,
   onlyRelativePaths,
   ResolveApprovalRequest,
@@ -14,6 +13,7 @@ import {
   type SessionSettingsPatch,
   UpdatePromptRequest,
   UpdateWorkSessionSettingsRequest,
+  UpdateWorkZonePolicyRequest,
   WorkApproval,
   WorkPrompt,
   WorkSession,
@@ -21,6 +21,8 @@ import {
   WorkSessionDiff,
   WorkSessionEventPayload,
   WorkSessionList,
+  type WorkZonePolicy,
+  WorkZonePolicyView,
 } from "@ocw/contracts";
 import {
   conversationMembers,
@@ -55,6 +57,7 @@ import {
   requestedSettings,
   storedSettings,
 } from "./controls";
+import { knownModels, loadWorkZonePolicy, saveWorkZonePolicy } from "./policy";
 import { type SessionRow, type WorkSessionService, wsTopic } from "./service";
 
 const SessionParams = z.object({ id: z.uuid() });
@@ -169,9 +172,8 @@ export function registerWorkSessionRoutes(
   }
 
   /**
-   * What the caller may pick on a device (this plan: the default org policy, the device's own opt-in, the owner
-   * holds every mode and full access, others the share cap when the device is shared). Plan 04 replaces this
-   * loader with the stored policy and the grain resolver; `decideSettings` and the controls do not change.
+   * What the caller may pick on a device: the organization's stored policy, the device's own opt-in, the owner
+   * holds every mode and full access, others the share cap when the device is shared.
    */
   async function controlsContext(
     tx: Tx,
@@ -194,12 +196,50 @@ export function registerWorkSessionRoutes(
     return {
       catalog: catalogs.find((c) => c.runtime === runtime) ?? null,
       otherCatalogs: catalogs.filter((c) => c.runtime !== runtime),
-      policy: DEFAULT_WORK_ZONE_POLICY,
+      policy: await loadWorkZonePolicy(tx),
       deviceOptIn: d?.optIn ?? false,
       modeCap: owner ? "fullAccess" : d?.shared ? d.shareMaxMode : null,
       fullAccessGrain: owner,
     };
   }
+
+  // ---------------------------------------------------------------- organization Work Zone policy (D-02, D-11)
+
+  const manage = {
+    config: { authz: "user" as const },
+    preHandler: [requireUser, perms.requirePermission("work_zone.manage")],
+  };
+  const policyView = async (tx: Tx, policy: WorkZonePolicy): Promise<WorkZonePolicyView> => ({
+    ...policy,
+    knownModels: await knownModels(tx),
+  });
+
+  app.get(
+    "/work-zone-policy",
+    { ...manage, schema: { tags, response: { 200: WorkZonePolicyView } } },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => policyView(tx, await loadWorkZonePolicy(tx))),
+  );
+
+  app.put(
+    "/work-zone-policy",
+    { ...manage, schema: { tags, body: UpdateWorkZonePolicyRequest, response: { 200: WorkZonePolicyView } } },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const auth = authOf(req);
+        const { policy, changed } = await saveWorkZonePolicy(tx, req.body, auth.userId);
+        if (changed.length > 0) {
+          await core.audit.record(tx, {
+            action: "work_zone_policy.updated",
+            resourceType: "work_zone_policy",
+            resourceId: auth.organizationId,
+            clientKind: auth.clientKind,
+            metadata: { changed },
+          });
+        }
+        return policyView(tx, policy);
+      }),
+  );
 
   async function joinConversation(tx: Tx, auth: AuthContext, s: SessionRow) {
     await tx

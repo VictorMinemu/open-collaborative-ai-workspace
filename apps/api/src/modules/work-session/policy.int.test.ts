@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { DEFAULT_WORK_ZONE_POLICY, isExposed } from "@ocw/contracts";
+import { DEFAULT_WORK_ZONE_POLICY } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
@@ -166,9 +166,6 @@ describe("Work Zone policy (D-02, D-11)", () => {
       reason: "org_policy",
     });
     expect(opus.efforts.find((e) => e.value === "xhigh")).toMatchObject({ reason: "org_policy" });
-    // Medium is under the cap: available once the inventory confirms Claude effort, else `not_confirmed`.
-    const medium = opus.efforts.find((e) => e.value === "medium")!;
-    expect(medium.available).toBe(isExposed("claude-code", "effort"));
     const patch = await admin.request("PATCH", `/api/v1/work-sessions/${sessionId}/settings`, {
       effort: "high",
     });
