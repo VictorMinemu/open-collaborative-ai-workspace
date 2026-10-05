@@ -200,6 +200,15 @@ describe("CodexRuntime — handshake, sandbox and billing", () => {
     ).rejects.toBeInstanceOf(RuntimeError);
   });
 
+  it("refuses platform modes outside its capabilities (auto, fullAccess) before spawning anything", async () => {
+    const { runtime, cwd } = setup();
+    for (const mode of ["auto", "fullAccess"] as const) {
+      await expect(
+        runtime.start({ sessionId: `s5-${mode}`, cwd, permissionMode: mode }, () => undefined),
+      ).rejects.toMatchObject({ code: "permission_mode_rejected" });
+    }
+  });
+
   it("keeps OPENAI_API_KEY only with useApiKey", () => {
     process.env.OPENAI_API_KEY = "k";
     expect(codexChildEnv(process.env).OPENAI_API_KEY).toBeUndefined();

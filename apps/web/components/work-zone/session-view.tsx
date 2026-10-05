@@ -165,7 +165,11 @@ function LoadedSession({ state, viewerCan }: { state: LiveSession; viewerCan: re
                 deciderHint={deciderHint}
               />
             ) : null}
-            <Composer session={session} queued={queued} />
+            <Composer
+              session={session}
+              queued={queued}
+              canConfigure={viewerCan.includes("work_session.configure")}
+            />
           </div>
         </div>
         <aside className="hidden w-[380px] shrink-0 flex-col border-l bg-sidebar/30 xl:flex">

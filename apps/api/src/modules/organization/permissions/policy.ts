@@ -47,6 +47,7 @@ const DEVICE_GATED = new Set<Permission>([
   "work_session.create",
   "work_session.prompt",
   "work_session.approve",
+  "work_session.configure",
 ]);
 /** Channel preconditions only judge a concrete channel; organization-scope answers stay role-based. */
 const isChannel = (r: ResourceFacts) => r.type === "channel" || r.type === "channel_member";

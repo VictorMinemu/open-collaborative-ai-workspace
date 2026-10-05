@@ -122,7 +122,16 @@ export function useLiveSession(id: string) {
     if (query.data) dispatch({ kind: "reset", detail: query.data });
   }, [query.data]);
 
-  const onFrame = useCallback((frame: TopicFrame) => dispatch({ kind: "frame", frame }), []);
+  const onFrame = useCallback(
+    (frame: TopicFrame) => {
+      dispatch({ kind: "frame", frame });
+      // Settings and what the caller may pick follow the session (D-07): refresh the controls with it.
+      if (frame.op !== "eph" && frame.type === EventTypes.workSessionUpdated) {
+        void qc.invalidateQueries({ queryKey: wzKeys.controls(id) });
+      }
+    },
+    [qc, id],
+  );
   const ready = state !== null && state.session.id === id;
   const title = ready ? state.session.title : null;
   const onRevoked = useCallback(() => {

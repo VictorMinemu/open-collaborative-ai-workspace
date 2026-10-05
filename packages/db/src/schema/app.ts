@@ -649,6 +649,11 @@ export const modelProviders = appSchema.table(
 
 // ---------------------------------------------------------------- devices & projects
 
+/** The permission mode ladder (P-03); every mode column carries this check. */
+const PERMISSION_MODES = ["default", "acceptEdits", "plan", "auto", "fullAccess"] as const;
+const modeCheck = (name: string, column: AnyPgColumn) =>
+  check(name, sql`${column} in ('default','acceptEdits','plan','auto','fullAccess')`);
+
 export const devices = appSchema.table(
   "devices",
   {
@@ -666,11 +671,64 @@ export const devices = appSchema.table(
     daemonVersion: text("daemon_version"),
     /** The owner lets other org members start sessions on this device. */
     shared: boolean("shared").notNull().default(false),
+    /** The owner's LOCAL full-access opt-in, written only from the device's own hello/capabilities (ADR-0012). */
+    fullAccessOptIn: boolean("full_access_opt_in").notNull().default(false),
+    /** Cap for everyone when `shared`, and the controller floor bound (P-06, P-07). */
+    shareMaxMode: text("share_max_mode", { enum: PERMISSION_MODES }).notNull().default("acceptEdits"),
+    /** `RuntimeCatalog[]` from the device's last `capabilities` frame (P-05). */
+    runtimeCatalog: jsonb("runtime_catalog").$type<unknown[]>().notNull().default([]),
     revokedAt: ts("revoked_at"),
     createdAt: createdAt(),
   },
-  (t) => [index("devices_org_idx").on(t.organizationId)],
+  (t) => [
+    index("devices_org_idx").on(t.organizationId),
+    modeCheck("devices_share_max_mode_ck", t.shareMaxMode),
+  ],
 );
+
+/**
+ * Who a device is shared with, each with a max permission mode (P-06, ADR-0012). Removing a grant sets
+ * `revoked_at` (soft revocation) so a revoked principal can be told apart from one never listed (P-07).
+ */
+export const deviceGrants = appSchema.table(
+  "device_grants",
+  {
+    organizationId: orgId(),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => devices.id, { onDelete: "cascade" }),
+    principalKind: text("principal_kind", { enum: ["user", "unit"] }).notNull(),
+    principalId: uuid("principal_id").notNull(),
+    maxMode: text("max_mode", { enum: PERMISSION_MODES }).notNull(),
+    createdBy: uuid("created_by"),
+    createdAt: createdAt(),
+    revokedAt: ts("revoked_at"),
+    revokedBy: uuid("revoked_by"),
+  },
+  (t) => [
+    primaryKey({ columns: [t.deviceId, t.principalKind, t.principalId] }),
+    index("device_grants_principal_idx").on(t.organizationId, t.principalKind, t.principalId),
+    check("device_grants_principal_kind_ck", sql`${t.principalKind} in ('user','unit')`),
+    modeCheck("device_grants_max_mode_ck", t.maxMode),
+  ],
+);
+
+/** Organization Work Zone policy (D-02, D-11): one row per org; an absent row means the defaults. */
+export const workZonePolicies = appSchema.table("work_zone_policies", {
+  organizationId: orgId().primaryKey(),
+  allowedPermissionModes: text("allowed_permission_modes")
+    .array()
+    .notNull()
+    .default(sql`'{plan,default,acceptEdits,auto}'::text[]`),
+  allowFullAccess: boolean("allow_full_access").notNull().default(false),
+  /** `{ "claude-code": string[], codex: string[] }` (partial; `[]` = every reported model). */
+  allowedModels: jsonb("allowed_models").$type<Record<string, unknown>>().notNull().default({}),
+  /** `{ "claude-code": effort | null, codex: effort | null }` (partial; absent = no cap). */
+  maxEffort: jsonb("max_effort").$type<Record<string, unknown>>().notNull().default({}),
+  allowFastMode: boolean("allow_fast_mode").notNull().default(false),
+  updatedBy: uuid("updated_by"),
+  updatedAt: ts("updated_at").notNull().defaultNow(),
+});
 
 export const deviceEnrollments = appSchema.table(
   "device_enrollments",
@@ -726,9 +784,8 @@ export const workSessions = appSchema.table(
       .notNull()
       .default("claude-code"),
     model: text("model"),
-    permissionMode: text("permission_mode", { enum: ["default", "acceptEdits", "plan"] })
-      .notNull()
-      .default("default"),
+    /** Requested (authorized) session mode (P-04). */
+    permissionMode: text("permission_mode", { enum: PERMISSION_MODES }).notNull().default("default"),
     status: text("status", {
       enum: [
         "provisioning",
@@ -751,10 +808,21 @@ export const workSessions = appSchema.table(
     /** Highest device localSeq stored for this session (Device Link replay de-duplication). */
     lastLocalSeq: bigint("last_local_seq", { mode: "number" }).notNull().default(0),
     lastError: text("last_error"),
+    /** Other requested settings: `{ effort?, contextWindow?, fastMode? }` (P-04). */
+    settings: jsonb("settings").$type<Record<string, unknown>>().notNull().default({}),
+    /** What the device last reported (`EffectiveSessionSettings`). */
+    effectiveSettings: jsonb("effective_settings").$type<Record<string, unknown>>(),
+    /** A change was accepted and the device has not reported it yet (D-14). */
+    settingsPending: boolean("settings_pending").notNull().default(false),
+    /** `DiffStat` of the last `diff.result`. */
+    diffStat: jsonb("diff_stat").$type<{ files: number; additions: number; deletions: number }>(),
     createdAt: createdAt(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
   },
-  (t) => [index("work_sessions_org_idx").on(t.organizationId, t.projectId)],
+  (t) => [
+    index("work_sessions_org_idx").on(t.organizationId, t.projectId),
+    modeCheck("work_sessions_permission_mode_ck", t.permissionMode),
+  ],
 );
 
 export const workPrompts = appSchema.table(
@@ -772,11 +840,16 @@ export const workPrompts = appSchema.table(
       .notNull()
       .default("queued"),
     position: integer("position").notNull(),
+    /** The authorized mode this turn was dispatched with (P-04, P-07); null before dispatch. */
+    permissionMode: text("permission_mode", { enum: PERMISSION_MODES }),
     createdAt: createdAt(),
     dispatchedAt: ts("dispatched_at"),
     completedAt: ts("completed_at"),
   },
-  (t) => [index("work_prompts_session_idx").on(t.organizationId, t.workSessionId, t.position)],
+  (t) => [
+    index("work_prompts_session_idx").on(t.organizationId, t.workSessionId, t.position),
+    modeCheck("work_prompts_permission_mode_ck", t.permissionMode),
+  ],
 );
 
 export const workApprovals = appSchema.table(
@@ -814,7 +887,15 @@ export const deviceCommands = appSchema.table(
       .references(() => devices.id, { onDelete: "cascade" }),
     workSessionId: uuid("work_session_id").references(() => workSessions.id, { onDelete: "cascade" }),
     kind: text("kind", {
-      enum: ["session.start", "prompt", "interrupt", "approval.resolve", "session.stop", "diff.request"],
+      enum: [
+        "session.start",
+        "prompt",
+        "interrupt",
+        "approval.resolve",
+        "session.stop",
+        "diff.request",
+        "session.configure",
+      ],
     }).notNull(),
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     status: text("status", { enum: ["pending", "sent", "acked", "failed"] })

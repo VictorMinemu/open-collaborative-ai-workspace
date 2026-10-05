@@ -99,6 +99,9 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "bot.tool.use": true,
     "plugin.manage": false,
     "mcp.manage": false,
+    "work_session.configure": false,
+    "device.full_access": false,
+    "work_zone.manage": false,
   },
   developer: {
     "org.read": true,
@@ -142,6 +145,9 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "bot.tool.use": true,
     "plugin.manage": false,
     "mcp.manage": false,
+    "work_session.configure": true,
+    "device.full_access": false,
+    "work_zone.manage": false,
   },
   lead: {
     "org.read": true,
@@ -185,6 +191,9 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "bot.tool.use": true,
     "plugin.manage": false,
     "mcp.manage": false,
+    "work_session.configure": true,
+    "device.full_access": false,
+    "work_zone.manage": false,
   },
   admin: {
     "org.read": true,
@@ -228,6 +237,9 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "bot.tool.use": true,
     "plugin.manage": true,
     "mcp.manage": true,
+    "work_session.configure": true,
+    "device.full_access": false,
+    "work_zone.manage": true,
   },
 };
 

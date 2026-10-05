@@ -11,8 +11,11 @@ import {
   type DeviceToServerFrame,
   DiffRequestPayload,
   PromptPayload,
+  RUNTIME_BYPASS_LITERALS,
+  RuntimeCatalog,
   type RuntimeId,
   type RuntimeInfo,
+  SessionConfigurePayload,
   type SessionEvent,
   SessionStartPayload,
 } from "@ocw/contracts";
@@ -102,6 +105,11 @@ export class Daemon {
   private readonly rootsBySession = new Map<string, string[]>();
   private readonly seqBySession = new Map<string, number>();
   private readonly processedCommands = new Set<string>();
+  /**
+   * Per-session order for `session.configure` and `prompt` (D-14): a prompt queued right after a settings change
+   * reaches the runtime only once the change was handed over. Other commands stay immediate.
+   */
+  private readonly sessionChains = new Map<string, Promise<void>>();
   private detectCache: { at: number; value: RuntimeInfo[] } | null = null;
   private started = false;
   /** The current device JWT (never logged). */
@@ -260,6 +268,33 @@ export class Daemon {
     return value;
   }
 
+  /**
+   * The catalogs of every installed, signed-in runtime (P-05). Collecting one never sends a model turn; an adapter
+   * that fails to answer is skipped (logged). Sanitised like every outbound value (no absolute paths).
+   */
+  private async collectCatalogs(): Promise<RuntimeCatalog[]> {
+    const infos = await this.detectRuntimes();
+    const roots = [this.home, ...this.registry.list().map((p) => p.path)];
+    const out: RuntimeCatalog[] = [];
+    for (const r of this.runtimes.values()) {
+      const info = infos.find((i) => i.id === r.id);
+      if (!info?.installed || !info.loggedIn || !r.catalog) continue;
+      try {
+        const catalog = await r.catalog();
+        if (!catalog) continue;
+        const parsed = RuntimeCatalog.safeParse(sanitizeValue(catalog, roots));
+        if (parsed.success) out.push(parsed.data);
+        else this.log.warn("runtime catalog rejected", { runtime: r.id });
+      } catch (err) {
+        this.log.warn("runtime catalog unavailable", {
+          runtime: r.id,
+          error: sanitizeString(errorMessage(err), roots),
+        });
+      }
+    }
+    return out;
+  }
+
   private async handshakeFrames(): Promise<DeviceToServerFrame[]> {
     return [
       {
@@ -273,8 +308,11 @@ export class Daemon {
         },
         runtimes: await this.detectRuntimes(),
         sessions: [...this.sessions.keys()],
+        // ADR-0012 / P-12: the local opt-in is wired in Plan 06; until then full access is off on every device.
+        fullAccessOptIn: false,
       },
       { type: "projects.sync", projects: this.registry.toSynced() },
+      { type: "capabilities", catalogs: await this.collectCatalogs(), fullAccessOptIn: false },
     ];
   }
 
@@ -323,6 +361,18 @@ export class Daemon {
       return;
     }
     this.remember(cmd.id);
+    if (cmd.kind !== "prompt" && cmd.kind !== "session.configure") return this.execute(cmd);
+    const prev = this.sessionChains.get(cmd.sessionId) ?? Promise.resolve();
+    const run = prev.then(() => this.execute(cmd));
+    const tail = run.catch(() => undefined);
+    this.sessionChains.set(cmd.sessionId, tail);
+    void tail.then(() => {
+      if (this.sessionChains.get(cmd.sessionId) === tail) this.sessionChains.delete(cmd.sessionId);
+    });
+    return run;
+  }
+
+  private async execute(cmd: CommandFrame): Promise<void> {
     const roots = this.rootsBySession.get(cmd.sessionId) ?? [];
     try {
       switch (cmd.kind) {
@@ -364,6 +414,9 @@ export class Daemon {
         case "diff.request":
           await this.sendDiff(cmd);
           break;
+        case "session.configure":
+          await this.configureSession(cmd);
+          break;
       }
       this.ack(cmd.id);
     } catch (err) {
@@ -387,17 +440,39 @@ export class Daemon {
     return s;
   }
 
+  /** A runtime bypass literal is refused by name, whatever the payload schema would say (D-03). */
+  private refuseBypassLiteral(raw: unknown): void {
+    if (typeof raw === "string" && RUNTIME_BYPASS_LITERALS.includes(raw)) {
+      throw new Error(`permission mode '${raw}' is not allowed`);
+    }
+  }
+
+  /** `session.configure` (D-07): only modes this device's adapter supports; the adapter applies between turns. */
+  private async configureSession(cmd: CommandFrame): Promise<void> {
+    const raw = cmd.payload as { settings?: { permissionMode?: unknown } } | undefined;
+    this.refuseBypassLiteral(raw?.settings?.permissionMode);
+    const payload = SessionConfigurePayload.parse(cmd.payload ?? {});
+    const s = this.requireSession(cmd.sessionId);
+    const mode = payload.settings.permissionMode;
+    if (mode && !s.runtime.capabilities.supportsPermissionModes.includes(mode)) {
+      throw new Error(`permission mode ${mode} is not available on this device`);
+    }
+    if (!s.runtime.configure) throw new Error(`settings changes are not supported by ${s.runtime.id}`);
+    await s.runtime.configure(cmd.sessionId, payload.settings);
+  }
+
   private async startSession(cmd: CommandFrame): Promise<void> {
     if (this.sessions.has(cmd.sessionId)) return; // idempotent
-    const rawMode = (cmd.payload as { permissionMode?: unknown } | undefined)?.permissionMode;
-    if (rawMode === "bypassPermissions" || rawMode === "dontAsk" || rawMode === "auto") {
-      throw new Error(`permission mode '${String(rawMode)}' is not allowed`);
-    }
+    this.refuseBypassLiteral((cmd.payload as { permissionMode?: unknown } | undefined)?.permissionMode);
     const payload = SessionStartPayload.parse(cmd.payload ?? {});
     const project = this.registry.get(payload.projectLocalId);
     if (!project) throw new Error("project is not registered on this device");
     const runtime = this.runtimes.get(payload.runtime);
     if (!runtime) throw new Error(`runtime ${payload.runtime} is not available on this device`);
+    // Only modes this device's adapter supports (replaces the old hard-coded rejection list, T-03.2-01-01).
+    if (!runtime.capabilities.supportsPermissionModes.includes(payload.permissionMode)) {
+      throw new Error(`permission mode '${payload.permissionMode}' is not allowed on this device`);
+    }
 
     let cwd = project.path;
     let worktreeBranch: string | null = null;
@@ -415,6 +490,9 @@ export class Daemon {
           cwd,
           permissionMode: payload.permissionMode,
           ...(payload.model ? { model: payload.model } : {}),
+          ...(payload.effort ? { effort: payload.effort } : {}),
+          ...(payload.fastMode !== undefined ? { fastMode: payload.fastMode } : {}),
+          ...(payload.contextWindow ? { contextWindow: payload.contextWindow } : {}),
           ...(payload.resumeRuntimeSessionId
             ? { resumeRuntimeSessionId: payload.resumeRuntimeSessionId }
             : {}),

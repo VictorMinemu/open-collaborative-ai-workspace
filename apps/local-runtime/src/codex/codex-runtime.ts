@@ -155,7 +155,9 @@ export class CodexRuntime implements AgentRuntime {
       throw new RuntimeError(`session ${options.sessionId} already running`, "session_exists");
     }
     const mode = PermissionMode.safeParse(options.permissionMode);
-    if (!mode.success) {
+    // The widened platform enum (auto, fullAccess) must never reach the runtime before this adapter supports
+    // the mode: anything outside its own capability list is refused first (T-03.2-01-01).
+    if (!mode.success || !this.capabilities.supportsPermissionModes.includes(mode.data)) {
       throw new RuntimeError(
         `permission mode not allowed: ${String(options.permissionMode)}`,
         "permission_mode_rejected",
