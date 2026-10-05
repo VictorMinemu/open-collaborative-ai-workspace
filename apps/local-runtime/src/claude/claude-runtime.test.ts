@@ -9,7 +9,7 @@ import type {
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { PermissionMode, RuntimeInfo, SessionEvent } from "@ocw/contracts";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AsyncQueue } from "../async-queue.js";
 import { RuntimeError, type StartSessionOptions } from "../runtime.js";
 import { ClaudeCodeRuntime, childEnv, type QueryHandle } from "./claude-runtime.js";
@@ -560,6 +560,158 @@ describe("ClaudeCodeRuntime — catalog() (no turn, D-08 … D-11)", () => {
     await expect(signedOut.runtime.catalog()).resolves.toBeNull();
     expect(signedOut.queries).toHaveLength(0);
   });
+});
+
+describe("ClaudeCodeRuntime — effort, fast mode, context window, modes (D-09 … D-12)", () => {
+  it("effort and fast mode go through applyFlagSettings with only the changed scalar keys", async () => {
+    const { start, runtime, events } = setup();
+    const q = await start();
+    await runtime.configure("s1", { effort: "high" });
+    await runtime.configure("s1", { effort: null });
+    await runtime.configure("s1", { fastMode: true });
+    expect(q.methodCalls("applyFlagSettings")).toEqual([
+      { effortLevel: "high" },
+      { effortLevel: null },
+      { fastMode: true },
+    ]);
+    expect(settingsEvents(events).at(-1)).toMatchObject({ effort: null, fastMode: true });
+  });
+
+  it("start-time effort / fast mode are applied before the first turn", async () => {
+    const { start, runtime } = setup();
+    const q = await start("default", { effort: "low", fastMode: false });
+    await runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await settle();
+    expect(q.log).toEqual(['applyFlagSettings:{"effortLevel":"low","fastMode":false}', "prompt:one"]);
+  });
+
+  it("the context window re-selects the model with or without [1m] where the catalog offers both", async () => {
+    const { start, runtime, events } = setup({ prepare: prepareProbe });
+    const q = await start("default", { model: "claude-opus-4-6" });
+    await runtime.configure("s1", { contextWindow: 1_000_000 });
+    expect(settingsEvents(events).at(-1)).toMatchObject({
+      model: "claude-opus-4-6",
+      contextWindow: 1_000_000,
+    });
+    await runtime.configure("s1", { contextWindow: 200_000 });
+    expect(q.methodCalls("setModel")).toEqual(["claude-opus-4-6[1m]", "claude-opus-4-6"]);
+    expect(settingsEvents(events).at(-1)).toMatchObject({ contextWindow: 200_000 });
+    // A model change reports the new model's base window from the catalog.
+    await runtime.configure("s1", { model: "opus" });
+    expect(settingsEvents(events).at(-1)).toMatchObject({ model: "opus", contextWindow: 1_000_000 });
+  });
+
+  it("refuses a context window the model does not offer", async () => {
+    const { start, runtime } = setup({ prepare: prepareProbe });
+    const q = await start("default", { model: "opus" });
+    await expect(runtime.configure("s1", { contextWindow: 200_000 })).rejects.toMatchObject({
+      code: "settings_rejected",
+    });
+    expect(q.methodCalls("setModel")).toEqual([]);
+  });
+
+  it("permission modes plan / default / acceptEdits / auto go through setPermissionMode", async () => {
+    const { start, runtime, events } = setup();
+    const q = await start("plan");
+    await runtime.configure("s1", { permissionMode: "auto" });
+    await runtime.configure("s1", { permissionMode: "plan" });
+    await runtime.configure("s1", { permissionMode: "acceptEdits" });
+    expect(q.methodCalls("setPermissionMode")).toEqual(["auto", "plan", "acceptEdits"]);
+    expect(settingsEvents(events).at(-1)).toMatchObject({ permissionMode: "acceptEdits" });
+    expect(runtime.capabilities.supportsPermissionModes).toEqual(["default", "acceptEdits", "plan", "auto"]);
+  });
+
+  it("starts in auto mode (confirmed by the 2.1.289 settings fixture)", async () => {
+    const { start } = setup();
+    const q = await start("auto");
+    expect(q.params.options.permissionMode).toBe("auto");
+  });
+});
+
+describe("ClaudeCodeRuntime — per-turn mode cap (P-07)", () => {
+  it("lowers the mode before a capped turn and restores it before the next uncapped one", async () => {
+    const { start, runtime } = setup();
+    const q = await start("acceptEdits");
+    await runtime.prompt("s1", { promptId: "p1", text: "capped", permissionMode: "default" });
+    await runtime.prompt("s1", { promptId: "p2", text: "free" });
+    await settle();
+    q.emit(result());
+    await settle();
+    expect(q.log).toEqual([
+      'setPermissionMode:"default"',
+      "prompt:capped",
+      'setPermissionMode:"acceptEdits"',
+      "prompt:free",
+    ]);
+  });
+
+  it("a cap above the configured mode changes nothing", async () => {
+    const { start, runtime } = setup();
+    const q = await start("plan");
+    await runtime.prompt("s1", { promptId: "p1", text: "one", permissionMode: "acceptEdits" });
+    await settle();
+    expect(q.log).toEqual(["prompt:one"]);
+  });
+
+  it("fails the turn without pushing it when the mode cannot be lowered", async () => {
+    const { start, runtime, events } = setup();
+    const q = await start("acceptEdits");
+    q.failNext.set("setPermissionMode", "control request failed");
+    await runtime.prompt("s1", { promptId: "p1", text: "capped", permissionMode: "plan" });
+    await runtime.prompt("s1", { promptId: "p2", text: "next" });
+    await settle();
+    expect(q.prompts.map((p) => p.message.content)).toEqual(["next"]);
+    expect(events.find((e) => e.type === "prompt.completed")).toMatchObject({
+      promptId: "p1",
+      isError: true,
+    });
+    expect(events.some((e) => e.type === "session.error")).toBe(true);
+  });
+});
+
+describe("ClaudeCodeRuntime — slash command backstop (D-13, P-10)", () => {
+  it.each(["/model x", "/config", "/permissions full access", "/mcp", "/effort max", "/fast on"])(
+    "refuses %s before anything is queued",
+    async (text) => {
+      const { start, runtime } = setup();
+      const q = await start();
+      await expect(runtime.prompt("s1", { promptId: "p1", text })).rejects.toMatchObject({
+        code: "slash_command_refused",
+      });
+      await settle();
+      expect(q.prompts).toEqual([]);
+      expect(q.calls).toEqual([]);
+    },
+  );
+
+  it("refuses a queued settings command too (not only when idle)", async () => {
+    const { start, runtime } = setup();
+    const q = await start();
+    await runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await expect(runtime.prompt("s1", { promptId: "p2", text: "/model opus" })).rejects.toMatchObject({
+      code: "slash_command_refused",
+    });
+    q.emit(result());
+    await settle();
+    expect(q.prompts.map((p) => p.message.content)).toEqual(["one"]);
+  });
+
+  it("passes /compact through as a normal user message", async () => {
+    const { start, runtime } = setup();
+    const q = await start();
+    await runtime.prompt("s1", { promptId: "p1", text: "/compact" });
+    await settle();
+    expect(q.prompts.map((p) => p.message.content)).toEqual(["/compact"]);
+  });
+});
+
+afterAll(() => {
+  // T-03.2-02-01: across the whole suite, applyFlagSettings never carried anything but scalar keys.
+  expect(ALL_FLAG_SETTINGS.length).toBeGreaterThan(0);
+  for (const arg of ALL_FLAG_SETTINGS) {
+    for (const key of Object.keys(arg as object)) expect(["effortLevel", "fastMode"]).toContain(key);
+    expect(arg).not.toHaveProperty("permissions");
+  }
 });
 
 describe("tool policy", () => {
