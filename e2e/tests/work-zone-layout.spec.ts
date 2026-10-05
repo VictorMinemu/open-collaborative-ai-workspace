@@ -83,15 +83,19 @@ test("Work Zone layout (ref-4): sidebar rows and groups, collapsible turns, chan
     const listed = async () =>
       ((await (await adminApi.get("/api/v1/work-sessions")).json()) as { sessions: Listed[] }).sessions;
     await expect
-      .poll(async () => (await listed()).filter((s) => settledIds.includes(s.id) && s.status === "idle").length, {
-        timeout: 30_000,
-        message: "the settled sessions start",
-      })
+      .poll(
+        async () => (await listed()).filter((s) => settledIds.includes(s.id) && s.status === "idle").length,
+        {
+          timeout: 30_000,
+          message: "the settled sessions start",
+        },
+      )
       .toBe(12);
     await settledDevice.shutdown();
     await expect
       .poll(
-        async () => (await listed()).filter((s) => settledIds.includes(s.id) && s.status === "completed").length,
+        async () =>
+          (await listed()).filter((s) => settledIds.includes(s.id) && s.status === "completed").length,
         { timeout: 30_000, message: "the settled sessions end when their device shuts down" },
       )
       .toBe(12);
@@ -246,7 +250,9 @@ test("Work Zone layout (ref-4): sidebar rows and groups, collapsible turns, chan
     expect(detail.prompts.find((p) => p.body === "And a short FAQ")?.status).toBe("cancelled");
   } finally {
     for (const id of sessionIds) {
-      await adminApi.post(`${API_URL}/api/v1/work-sessions/${id}/archive`, { data: {} }).catch(() => undefined);
+      await adminApi
+        .post(`${API_URL}/api/v1/work-sessions/${id}/archive`, { data: {} })
+        .catch(() => undefined);
     }
     await device?.stop();
     await settledDevice?.stop();
