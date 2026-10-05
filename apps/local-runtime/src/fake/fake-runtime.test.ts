@@ -143,6 +143,57 @@ describe("FakeRuntime settings (03.2-01, D-07, D-14)", () => {
   });
 });
 
+describe("FakeRuntime Full access (ADR-0012, D-01)", () => {
+  it("offers fullAccess only while the device gate allows it", async () => {
+    let allowed = false;
+    const rt = new FakeRuntime("claude-code", 1, { allowFullAccess: () => allowed });
+    expect(rt.capabilities.supportsPermissionModes).not.toContain("fullAccess");
+    expect((await rt.catalog()).permissionModes).not.toContain("fullAccess");
+    allowed = true;
+    expect(rt.capabilities.supportsPermissionModes).toContain("fullAccess");
+    expect((await rt.catalog()).permissionModes).toContain("fullAccess");
+  });
+
+  it("a fullAccess turn writes its file without any approval.requested and reports the mode", async () => {
+    const cwd = tmp();
+    writeFileSync(join(cwd, "README.md"), "# Demo\n");
+    const events: SessionEvent[] = [];
+    const rt = new FakeRuntime("claude-code", 1, { allowFullAccess: () => true });
+    await rt.start({ sessionId: "fa1", cwd, permissionMode: "fullAccess" }, (e) => events.push(e));
+    expect(events.find((e) => e.type === "session.settings")).toMatchObject({ permissionMode: "fullAccess" });
+    await rt.prompt("fa1", { promptId: "p1", text: "ship it", permissionMode: "fullAccess" });
+    await until(events, (e) => e.type === "prompt.completed");
+    expect(readFileSync(join(cwd, "notes/ocw-change-1.md"), "utf8")).toContain("ship it");
+    expect(events.some((e) => e.type === "approval.requested")).toBe(false);
+    const said = events.filter((e) => e.type === "assistant.message").map((e) => (e as { text: string }).text);
+    expect(said.at(-1)).toContain("Mode: fullAccess");
+  });
+
+  it("allowFullAccess false: start and configure refuse fullAccess", async () => {
+    const rt = new FakeRuntime("codex", 1, { allowFullAccess: () => false });
+    await expect(
+      rt.start({ sessionId: "fa2", cwd: tmp(), permissionMode: "fullAccess" }, () => undefined),
+    ).rejects.toMatchObject({ code: "permission_mode_rejected" });
+    await rt.start({ sessionId: "fa3", cwd: tmp(), permissionMode: "acceptEdits" }, () => undefined);
+    await expect(rt.configure("fa3", { permissionMode: "fullAccess" })).rejects.toMatchObject({
+      code: "settings_rejected",
+    });
+  });
+
+  it("a fullAccess turn after the gate closed fails instead of running unprompted", async () => {
+    const cwd = tmp();
+    let allowed = true;
+    const events: SessionEvent[] = [];
+    const rt = new FakeRuntime("claude-code", 1, { allowFullAccess: () => allowed });
+    await rt.start({ sessionId: "fa4", cwd, permissionMode: "fullAccess" }, (e) => events.push(e));
+    allowed = false;
+    await rt.prompt("fa4", { promptId: "p1", text: "go" });
+    const done = await until(events, (e) => e.type === "prompt.completed");
+    expect(done).toMatchObject({ isError: true });
+    expect(existsSync(join(cwd, "notes"))).toBe(false);
+  });
+});
+
 describe("enroll", () => {
   it("writes the token (0600) and runtime.json, never echoing the token", async () => {
     const home = tmp();

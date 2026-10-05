@@ -18,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type WebSocket, WebSocketServer } from "ws";
 import { controlRequest } from "./control-socket.js";
 import { Daemon } from "./daemon.js";
+import { FakeRuntime as ScriptedRuntime } from "./fake/fake-runtime.js";
 import { type Logger, silentLogger } from "./logger.js";
 import type { AgentRuntime, EventSink, RuntimeCapabilities, StartSessionOptions } from "./runtime.js";
 
@@ -26,12 +27,22 @@ const LEAKY_KEY = ["sk", "ant", "api03", "abcdefghijklmnopqrstuvwxyz0123"].join(
 
 class FakeRuntime implements AgentRuntime {
   readonly id = "claude-code" as const;
-  readonly capabilities: RuntimeCapabilities = {
-    supportsSteer: false,
-    supportsResume: true,
-    supportsPermissionModes: ["default", "acceptEdits", "plan"],
-    supportsImages: false,
-  };
+  /** ADR-0012: the daemon's opt-in gate; `fullAccess` is offered only while it answers true. */
+  constructor(private readonly allowFullAccess: () => boolean = () => false) {}
+  get capabilities(): RuntimeCapabilities {
+    return {
+      supportsSteer: false,
+      supportsResume: true,
+      supportsPermissionModes: [
+        "default",
+        "acceptEdits",
+        "plan",
+        ...(this.allowFullAccess() ? (["fullAccess"] as const) : []),
+      ],
+      supportsImages: false,
+    };
+  }
+  interrupts: string[] = [];
   readonly started: StartSessionOptions[] = [];
   readonly resolved: Array<[string, ApprovalDecision]> = [];
   readonly prompts: PromptPayload[] = [];
@@ -95,7 +106,9 @@ class FakeRuntime implements AgentRuntime {
       paths: [`${cwd}/src/x.ts`],
     });
   }
-  async interrupt(): Promise<void> {}
+  async interrupt(sessionId: string): Promise<void> {
+    this.interrupts.push(sessionId);
+  }
   resolveApproval(_s: string, approvalId: string, decision: ApprovalDecision): boolean {
     if (approvalId !== "ap1") return false;
     this.resolved.push([approvalId, decision]);
@@ -593,5 +606,164 @@ describe("Control socket", () => {
     expect(
       await controlRequest(socketPath(), { cmd: "addProject", path: join(home, "missing") }),
     ).toMatchObject({ ok: false });
+  });
+});
+
+/** Replace the default daemon with one whose runtime sees the daemon's own Full access gate (ADR-0012). */
+async function gatedDaemon(env: NodeJS.ProcessEnv): Promise<Daemon> {
+  await daemon.stop();
+  daemon = await Daemon.create({
+    home,
+    env,
+    token: "device-token-123",
+    config: { serverUrl: server.url },
+    runtimes: (allowFullAccess) => {
+      runtime = new FakeRuntime(allowFullAccess);
+      return [runtime];
+    },
+    logger: silentLogger,
+    controlSocket: socketPath(),
+    link: { backoffMinMs: 20, backoffMaxMs: 50, heartbeatMs: 60_000 },
+  });
+  return daemon;
+}
+
+const FULL_ACCESS_OFF = "Full access is not enabled on this device";
+
+describe("Full access: the device's own opt-in (ADR-0012, D-02, P-12)", () => {
+  it("opt-in off: hello and capabilities say false, no catalog lists fullAccess", async () => {
+    await gatedDaemon({});
+    await daemon.start();
+    expect((await server.frame("hello")).fullAccessOptIn).toBe(false);
+    const caps = await server.frame("capabilities");
+    expect(caps.fullAccessOptIn).toBe(false);
+    expect(caps.catalogs.flatMap((c) => c.permissionModes)).not.toContain("fullAccess");
+    const status = await controlRequest(socketPath(), { cmd: "status" });
+    expect(status.result).toMatchObject({ fullAccessOptIn: false, fullAccessSource: "config" });
+  });
+
+  it("opt-in off: a fullAccess start, configure or prompt fails before reaching the runtime", async () => {
+    await gatedDaemon({});
+    const localId = await addProject();
+    await daemon.start();
+    await server.frame("hello");
+    server.send({
+      id: "f1",
+      kind: "session.start",
+      sessionId: "wf1",
+      payload: { projectLocalId: localId, permissionMode: "fullAccess" },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "f1")).toMatchObject({
+      ok: false,
+      error: expect.stringContaining(FULL_ACCESS_OFF),
+    });
+    expect(runtime.started).toEqual([]);
+
+    server.send({
+      id: "f2",
+      kind: "session.start",
+      sessionId: "wf2",
+      payload: { projectLocalId: localId, permissionMode: "acceptEdits" },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "f2")).toMatchObject({ ok: true });
+    server.send({
+      id: "f3",
+      kind: "session.configure",
+      sessionId: "wf2",
+      payload: { settings: { permissionMode: "fullAccess" }, reason: "user" },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "f3")).toMatchObject({
+      ok: false,
+      error: expect.stringContaining(FULL_ACCESS_OFF),
+    });
+    expect(runtime.configured).toEqual([]);
+    server.send({
+      id: "f4",
+      kind: "prompt",
+      sessionId: "wf2",
+      payload: { promptId: "pf4", text: "go", permissionMode: "fullAccess" },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "f4")).toMatchObject({
+      ok: false,
+      error: expect.stringContaining(FULL_ACCESS_OFF),
+    });
+    expect(runtime.prompts).toEqual([]);
+  });
+
+  it("opt-in on (OCW_ALLOW_FULL_ACCESS=1): reported true, fullAccess in the catalog, commands reach the runtime", async () => {
+    await gatedDaemon({ OCW_ALLOW_FULL_ACCESS: "1" });
+    const localId = await addProject();
+    await daemon.start();
+    expect((await server.frame("hello")).fullAccessOptIn).toBe(true);
+    const caps = await server.frame("capabilities");
+    expect(caps.fullAccessOptIn).toBe(true);
+    for (const c of caps.catalogs) expect(c.permissionModes).toContain("fullAccess");
+    const status = await controlRequest(socketPath(), { cmd: "status" });
+    expect(status.result).toMatchObject({ fullAccessOptIn: true, fullAccessSource: "env" });
+
+    server.send({
+      id: "g1",
+      kind: "session.start",
+      sessionId: "wg1",
+      payload: { projectLocalId: localId, permissionMode: "fullAccess" },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "g1")).toMatchObject({ ok: true });
+    expect(runtime.started[0]).toMatchObject({ sessionId: "wg1", permissionMode: "fullAccess" });
+    server.send({
+      id: "g2",
+      kind: "session.configure",
+      sessionId: "wg1",
+      payload: { settings: { permissionMode: "fullAccess" }, reason: "user" },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "g2")).toMatchObject({ ok: true });
+    expect(runtime.configured).toEqual([{ permissionMode: "fullAccess" }]);
+    server.send({
+      id: "g3",
+      kind: "prompt",
+      sessionId: "wg1",
+      payload: { promptId: "pg3", text: "go", permissionMode: "fullAccess" },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "g3")).toMatchObject({ ok: true });
+    expect(runtime.prompts.map((p) => p.permissionMode)).toEqual(["fullAccess"]);
+  });
+
+  it("a fullAccess prompt in an acceptEdits session runs at acceptEdits (min rule, never a raise)", async () => {
+    await daemon.stop();
+    daemon = await Daemon.create({
+      home,
+      env: { OCW_ALLOW_FULL_ACCESS: "1" },
+      token: "device-token-123",
+      config: { serverUrl: server.url },
+      runtimes: (allowFullAccess) => [new ScriptedRuntime("claude-code", 1, { allowFullAccess })],
+      logger: silentLogger,
+      controlSocket: socketPath(),
+      link: { backoffMinMs: 20, backoffMaxMs: 50, heartbeatMs: 60_000 },
+    });
+    const localId = await addProject();
+    await daemon.start();
+    await server.frame("hello");
+    server.send({
+      id: "m1",
+      kind: "session.start",
+      sessionId: "wm1",
+      payload: { projectLocalId: localId, permissionMode: "acceptEdits" },
+    });
+    await server.frame("ack", (f) => f.commandId === "m1");
+    server.send({
+      id: "m2",
+      kind: "prompt",
+      sessionId: "wm1",
+      payload: { promptId: "pm2", text: "go", permissionMode: "fullAccess" },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "m2")).toMatchObject({ ok: true });
+    const done = await server.frame(
+      "event",
+      (f) => f.sessionId === "wm1" && f.event.type === "assistant.message" && f.event.text.includes("Mode:"),
+    );
+    expect(done.event).toMatchObject({ text: expect.stringContaining("Mode: acceptEdits") });
+    const modes = server.last.frames.flatMap((f) =>
+      f.type === "event" && f.event.type === "session.settings" ? [f.event.permissionMode] : [],
+    );
+    expect(modes).not.toContain("fullAccess");
   });
 });
