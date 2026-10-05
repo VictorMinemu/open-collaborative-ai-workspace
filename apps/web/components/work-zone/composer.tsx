@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
-import { useInterrupt, useQueuePrompt } from "@/lib/workzone-queries";
+import { useInterrupt, useQueuePrompt, useSessionCommand } from "@/lib/workzone-queries";
 import { RUNTIMES } from "./meta";
 import { ModelPicker } from "./model-picker";
 
@@ -24,6 +24,7 @@ export function Composer({
   canConfigure?: boolean;
 }) {
   const queue = useQueuePrompt(session.id);
+  const command = useSessionCommand(session.id);
   const interrupt = useInterrupt(session.id);
   const [text, setText] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -31,6 +32,7 @@ export function Composer({
   const willQueue =
     busy || session.status === "provisioning" || session.status === "host_offline" || queued > 0;
   const archived = session.status === "archived";
+  const sending = queue.isPending || command.isPending;
 
   useEffect(() => {
     const el = ref.current;
@@ -42,8 +44,16 @@ export function Composer({
   async function submit(e?: FormEvent) {
     e?.preventDefault();
     const body = text.trim();
-    if (!body || queue.isPending) return;
+    if (!body || sending) return;
     try {
+      // D-13: a leading `/command` goes to the session controls on the server, never to the queue raw.
+      if (body.startsWith("/")) {
+        const result = await command.mutateAsync(body);
+        setText("");
+        if (result.kind === "refused") toast.warning(result.notice);
+        else toast.success(result.notice);
+        return;
+      }
       await queue.mutateAsync(body);
       setText("");
       if (willQueue) toast.success(`Queued #${queued + 1}`, { description: "Runs after the current turn" });
@@ -114,12 +124,12 @@ export function Composer({
           <Button
             type="submit"
             size={willQueue ? "sm" : "icon-sm"}
-            disabled={!text.trim() || queue.isPending || archived}
+            disabled={!text.trim() || sending || archived}
             aria-label={willQueue ? "Add to queue" : "Send"}
             data-testid="send-prompt"
             className="rounded-full"
           >
-            {queue.isPending ? <Spinner /> : willQueue ? <ListPlus /> : <ArrowUp />}
+            {sending ? <Spinner /> : willQueue ? <ListPlus /> : <ArrowUp />}
             {willQueue ? "Queue" : null}
           </Button>
         </div>
