@@ -15,6 +15,7 @@ import { type CatalogSource, effectiveCapabilities, effectiveTools, readCapabili
 import { loadAllGrants, loadCatalog, loadGrants } from "./catalog";
 import { internetConfigured, loadPolicy, type SearchEnv } from "./policy";
 import { botFacts, findBot } from "./routes";
+import { consumeTurn, effectiveDailyLimit, limitNotice } from "./usage";
 
 /**
  * The per-turn policy (D-07): the API decides, for every delivery, exactly which tools this bot may use for
@@ -78,6 +79,9 @@ const toolKey = (t: { sourceKind: string; sourceId: string; tool: string }) =>
 
 interface ComputedTurn extends TurnTools {
   effective: BotCapabilityView["effective"];
+  /** The bot's display name and the daily limit that applies today (D-11). */
+  botName: string;
+  dailyLimit: number;
 }
 
 async function computeTurn(
@@ -119,7 +123,12 @@ async function computeTurn(
     const d = await perms.decide(tx, as, "bot.tool.use", { ...resource, tool: t.tool });
     if (d.allowed) allowed.add(toolKey(t));
   }
-  return { effective, ...assemble(effective, p.conversationKind, catalog, allowed) };
+  return {
+    effective,
+    botName: row.name,
+    dailyLimit: effectiveDailyLimit(row.scope, caps, policy),
+    ...assemble(effective, p.conversationKind, catalog, allowed),
+  };
 }
 
 /**
@@ -155,12 +164,20 @@ export function turnNow(clientTimeZone: string | null | undefined, at = new Date
   return { iso: at.toISOString(), timeZone, local };
 }
 
-export type TurnDecision = { deliver: true; turn: TurnContext } | { deliver: false; notice: string };
+/**
+ * `deliver: false` means no cell event (so no model call). `limit_reached` carries the notice the bot posts
+ * instead (the caller decides whether to post it: always in a DM, once per conversation per day elsewhere)
+ * and must be audited with `recordLimitReached`. `unavailable` (a disabled or deleted bot) posts nothing.
+ */
+export type TurnDecision =
+  | { deliver: true; turn: TurnContext }
+  | { deliver: false; reason: "unavailable"; notice: null }
+  | { deliver: false; reason: "limit_reached"; notice: string; limit: number };
 
 /**
  * The single per-turn entrypoint used by delivery (agent-channel mentions), inside the message transaction:
- * computes the effective turn, records it in `agent_turns` (the ledger the tool gate and memory saves trust)
- * and returns it for `agent.mention.v1.turn`.
+ * computes the effective turn, meters it against the bot's daily limit (D-11), records it in `agent_turns`
+ * (the ledger the tool gate and memory saves trust) and returns it for `agent.mention.v1.turn`.
  */
 export async function turnPolicy(
   tx: Tx,
@@ -177,10 +194,19 @@ export async function turnPolicy(
   },
 ): Promise<TurnDecision> {
   const computed = await computeTurn(tx, perms, p, core.env);
-  if (!computed) return { deliver: false, notice: "This bot is no longer available." };
+  if (!computed) return { deliver: false, reason: "unavailable", notice: null };
 
-  // Extension point (03.1-05): metering. Increment `agent_usage_daily` atomically here; at the limit return
-  // `{ deliver: false, notice }` so no cell event (and no model call) happens.
+  // Metering (D-11): one conditional upsert counts this turn, before anything is built or recorded. At the
+  // limit nothing is delivered, so the cell never sees the message and no model is called.
+  const metered = await consumeTurn(tx, p.agentId, computed.dailyLimit);
+  if (!metered.ok) {
+    return {
+      deliver: false,
+      reason: "limit_reached",
+      notice: limitNotice({ botName: computed.botName, limit: computed.dailyLimit }),
+      limit: computed.dailyLimit,
+    };
+  }
 
   // Extension point (03.1-07): memory. Load this human's memories of this bot when memory is effective and
   // the conversation is their DM with it.
@@ -206,6 +232,42 @@ export async function turnPolicy(
     toolFlags: turn.toolFlags,
   });
   return { deliver: true, turn };
+}
+
+/**
+ * Audits one over-limit delivery (`agent.limit_reached`, T-03.1-05-04): the bot is the actor, the asking human
+ * the user; ids and numbers only, never message content. `notified` says whether a notice was posted.
+ */
+export async function recordLimitReached(
+  tx: Tx,
+  core: Core,
+  p: {
+    agentId: string;
+    humanUserId: string;
+    conversationId: string;
+    conversationKind: string;
+    messageId: string;
+    limit: number;
+    notified: boolean;
+  },
+): Promise<void> {
+  await core.audit.record(tx, {
+    action: "agent.limit_reached",
+    resourceType: "agent",
+    resourceId: p.agentId,
+    result: "denied",
+    actorKind: "agent",
+    actorId: p.agentId,
+    agentId: p.agentId,
+    userId: p.humanUserId,
+    metadata: {
+      limit: p.limit,
+      conversationId: p.conversationId,
+      conversationKind: p.conversationKind,
+      messageId: p.messageId,
+      notified: p.notified,
+    },
+  });
 }
 
 /**
