@@ -154,6 +154,28 @@ export type DmList = z.infer<typeof DmList>;
 export const AddConversationMemberRequest = z.object({ kind: MemberKind, id: Id });
 export type AddConversationMemberRequest = z.infer<typeof AddConversationMemberRequest>;
 
+/**
+ * An IANA time zone name as reported by the client (`Intl.DateTimeFormat().resolvedOptions().timeZone`), e.g.
+ * `Europe/Madrid`. Strict (D-12, T-03.1-08-02): at most 64 characters of the zone alphabet, and accepted by
+ * `Intl.DateTimeFormat`, so nothing but a real zone name ever reaches a bot's turn.
+ */
+export const IanaTimeZone = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[A-Za-z0-9_+\-/]+$/)
+  .refine(
+    (zone) => {
+      try {
+        new Intl.DateTimeFormat("en", { timeZone: zone });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    { message: "Unknown time zone" },
+  );
+
 export const PostMessageRequest = z.object({
   body: MessageBody,
   mentions: z.array(Mention).max(50).default([]),
@@ -161,6 +183,11 @@ export const PostMessageRequest = z.object({
   threadRootId: Id.optional(),
   /** Client-generated idempotency key. */
   clientMessageId: z.string().max(64).optional(),
+  /**
+   * The poster's time zone, for the local date and time a bot sees on this turn (D-12). Never stored on the
+   * message.
+   */
+  clientTimeZone: IanaTimeZone.optional(),
 });
 export type PostMessageRequest = z.infer<typeof PostMessageRequest>;
 

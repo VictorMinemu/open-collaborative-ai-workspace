@@ -196,6 +196,8 @@ export async function buildMentionEvents(
       conversationKind: conv.kind,
       messageId: mention.messageId,
       eventId,
+      // The asking human's zone (D-12); turnPolicy re-validates it and falls back to UTC.
+      clientTimeZone: mention.clientTimeZone ?? null,
     });
     // Not delivered (daily limit reached, or the bot is gone): no cell event, so no model call.
     if (!decision.deliver) {

@@ -9,6 +9,7 @@ import { ADMIN, API_URL, shot } from "./env";
  * Reply mode "every message" (03.1-08, BOT-04, D-12): a team bot set to answer every message follows a channel
  * on its own. A plain human message, with no @mention, gets the bot's reply in that message's thread. The fake
  * cell (e2e/support/fake-cell-plugin.ts) stands in for OpenClaw and replies to whatever the API delivers.
+ * Every post also carries the browser's time zone, so a bot with date/time on sees the poster's local time.
  */
 
 function cellToken(): string {
@@ -130,6 +131,77 @@ test("reply mode: a team bot answers an unmentioned message in that message's th
     await bothThemes(page, `reply-mode-thread-${tag}`);
     await context.close();
   } finally {
+    await plugin.stop();
+    await samApi.dispose();
+    await admin.dispose();
+  }
+});
+
+test("date/time: every post carries the browser's time zone, and the bot's turn uses it", async ({
+  browser,
+}, info) => {
+  test.setTimeout(120_000);
+  const project = info.project.name;
+  const mobile = project === "mobile";
+  const token = cellToken();
+  test.skip(!token, "OCW_CELL_TOKEN is not configured");
+
+  const admin = await apiAs(ADMIN);
+  await ensureMember(admin, SAM, "developer");
+  const name = mobile ? "Clockwork" : "Timekeeper";
+  const botId = await freshTeamBot(admin, name);
+  // Reply mode all: a plain question (no autocomplete involved) reaches the bot.
+  const patched = await admin.patch(`/api/v1/agents/${botId}/capabilities`, { data: { replyMode: "all" } });
+  expect(patched.ok(), "reply mode all").toBe(true);
+  const channelId = await createChannel(admin, `zones-${project}-${Date.now().toString(36)}`);
+  const added = await admin.post(`/api/v1/channels/${channelId}/members`, {
+    data: { kind: "agent", id: botId },
+  });
+  expect(added.ok(), "add the bot to the channel").toBe(true);
+  const samApi = await apiAs(SAM);
+  expect((await samApi.post(`/api/v1/channels/${channelId}/join`)).ok()).toBe(true);
+
+  const plugin = new FakeCellPlugin({ apiUrl: API_URL, token, autoAck: true, autoReply: true });
+  await plugin.start();
+  // A browser in New York (the zone the API must receive), sized like the project.
+  const context = await browser.newContext({
+    timezoneId: "America/New_York",
+    viewport: mobile ? { width: 390, height: 844 } : { width: 1440, height: 900 },
+    ...(mobile ? { isMobile: true, hasTouch: true, deviceScaleFactor: 2 } : {}),
+  });
+  try {
+    const page = await context.newPage();
+    await page.goto(`${BASE_URL}/login`);
+    await page.getByLabel("Email").fill(SAM.email);
+    await page.getByLabel("Password", { exact: true }).fill(SAM.password);
+    await page
+      .getByTestId("login-form")
+      .getByRole("button", { name: /sign in|log in/i })
+      .click();
+    await expect(page).toHaveURL(/\/chat\/[0-9a-f-]{36}/);
+    await page.goto(`${BASE_URL}/chat/${channelId}`);
+    await expect(page.getByTestId("composer")).toBeVisible();
+
+    const posted = page.waitForRequest(
+      (r) => r.method() === "POST" && r.url().includes(`/api/v1/conversations/${channelId}/messages`),
+    );
+    await send(page, "what time is it for me?");
+    const body = (await posted).postDataJSON() as { body: string; clientTimeZone?: string };
+    expect(body.clientTimeZone).toBe("America/New_York");
+
+    // The bot's turn carries that zone (date/time is on by default for team bots).
+    await expect
+      .poll(
+        () =>
+          plugin.events
+            .filter((e) => e.type === "agent.mention.v1")
+            .map((e) => e.data as unknown as MentionPayload & { turn?: { now?: { timeZone?: string } } })
+            .find((m) => m.conversation.id === channelId)?.turn?.now?.timeZone,
+        { timeout: 10_000 },
+      )
+      .toBe("America/New_York");
+  } finally {
+    await context.close();
     await plugin.stop();
     await samApi.dispose();
     await admin.dispose();

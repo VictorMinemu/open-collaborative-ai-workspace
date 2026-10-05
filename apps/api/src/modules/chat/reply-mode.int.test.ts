@@ -266,3 +266,64 @@ describe("org policy (BOT-05, T-03.1-08-03)", () => {
     expect(await cellEvents(followerId, quiet)).toHaveLength(2);
   });
 });
+
+describe("date and time context (D-12, T-03.1-08-02)", () => {
+  const madrid = (iso: string) =>
+    new Intl.DateTimeFormat("en-GB", {
+      dateStyle: "full",
+      timeStyle: "short",
+      timeZone: "Europe/Madrid",
+    }).format(new Date(iso));
+
+  it("a DM carries the asking human's exact local time and zone", async () => {
+    const bot = await ok(sam.request("POST", "/api/v1/agents/personal", {}));
+    const msg = await say(sam, bot.dmId, "what time is it?", { clientTimeZone: "Europe/Madrid" });
+    const events = await cellEvents(bot.agent.id, bot.dmId);
+    expect(events).toHaveLength(1);
+    const now = events[0]!.turn.now;
+    expect(now.timeZone).toBe("Europe/Madrid");
+    expect(now.local).toBe(madrid(now.iso));
+    expect(Math.abs(Date.parse(now.iso) - Date.parse(msg.createdAt))).toBeLessThan(60_000);
+    // The zone is turn context only: never stored on the message.
+    const stored = await su.query("select to_jsonb(m) as row from app.messages m where id = $1", [msg.id]);
+    expect(JSON.stringify(stored.rows[0].row)).not.toContain("Europe/Madrid");
+  });
+
+  it("with date/time off the turn carries no time at all", async () => {
+    const list = await ok(sam.request("GET", "/api/v1/dms"));
+    const dm = list.dms.find((d: Json) => d.counterpart.kind === "agent");
+    const botId = dm.counterpart.id as string;
+    await ok(sam.request("PATCH", `/api/v1/agents/${botId}/capabilities`, { dateTime: false }));
+    await say(sam, dm.id, "and now?", { clientTimeZone: "Europe/Madrid" });
+    const events = await cellEvents(botId, dm.id);
+    expect(events).toHaveLength(2);
+    expect(events[1]!.turn.now).toBeNull();
+  });
+
+  it("a mention in a channel carries the mentioning human's zone; no zone falls back to UTC", async () => {
+    const room = await channel("timezones", []);
+    await say(sam, room, "@other-bot what time is it for me?", { clientTimeZone: "America/New_York" });
+    await say(sam, room, "@other-bot and without a zone?");
+    const events = await cellEvents(otherBotId, room);
+    expect(events).toHaveLength(2);
+    expect(events[0]!.turn.now.timeZone).toBe("America/New_York");
+    expect(events[1]!.turn.now.timeZone).toBe("UTC");
+  });
+
+  it("reply-mode turns carry the human's zone too", async () => {
+    const room = await channel("follow-zones", [followerId]);
+    await say(sam, room, "standup in five", { clientTimeZone: "Asia/Tokyo" });
+    const events = await cellEvents(followerId, room);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.turn.now.timeZone).toBe("Asia/Tokyo");
+  });
+
+  it("an invalid zone is refused at the boundary", async () => {
+    const room = await channel("bad-zones", []);
+    const r = await sam.request("POST", `/api/v1/conversations/${room}/messages`, {
+      body: "hi",
+      clientTimeZone: "Mars/Base",
+    });
+    expect(r.status).toBe(400);
+  });
+});

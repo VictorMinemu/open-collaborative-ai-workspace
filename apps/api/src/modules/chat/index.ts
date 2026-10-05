@@ -69,6 +69,10 @@ export { dmAgentOf, dmKey, ensureDm, listDms, setAgentDmsArchived } from "./dm";
 export { resolveMentions } from "./mentions";
 export { REPLY_MODE_PER_MINUTE, replyModeCandidates } from "./reply-mode";
 
+/** The poster's zone on a delivery, only when the client sent one (absent = UTC in the turn). */
+const zoneOf = (author: { clientTimeZone?: string }) =>
+  author.clientTimeZone ? { clientTimeZone: author.clientTimeZone } : {};
+
 /** Conversation kinds served by the message routes, read markers, the `conv:` topic and bot replies (D-03). */
 const MESSAGE_KINDS = ["channel", "dm"] as const;
 
@@ -160,7 +164,7 @@ export function createChatModule(core: Core): ApiModule {
     tx: Tx,
     dir: Directory,
     result: PostResult,
-    author: { id: string },
+    author: { id: string; clientTimeZone?: string },
   ): Promise<string[]> {
     const conv = await getChannel(tx, result.row.conversationId);
     if (!conv) return [];
@@ -196,6 +200,7 @@ export function createChatModule(core: Core): ApiModule {
       body: result.row.body,
       createdAt: result.message.createdAt,
       delivery: "thread",
+      ...zoneOf(author),
     };
     await core.chatAgent.emitAgentMention(tx, mention, tenantOf(tx).afterCommit);
     return agentIds;
@@ -212,7 +217,7 @@ export function createChatModule(core: Core): ApiModule {
     dir: Directory,
     conv: ConversationRow,
     result: PostResult,
-    author: { id: string },
+    author: { id: string; clientTimeZone?: string },
   ): Promise<string[]> {
     const agentIds = await replyModeCandidates(tx, dir, {
       conversationId: conv.id,
@@ -232,6 +237,7 @@ export function createChatModule(core: Core): ApiModule {
       createdAt: result.message.createdAt,
       delivery: "thread",
       trigger: "reply_mode",
+      ...zoneOf(author),
     };
     await core.chatAgent.emitAgentMention(tx, mention, tenantOf(tx).afterCommit);
     return agentIds;
@@ -247,7 +253,7 @@ export function createChatModule(core: Core): ApiModule {
     dir: Directory,
     conv: ConversationRow,
     result: PostResult,
-    author: { id: string },
+    author: { id: string; clientTimeZone?: string },
   ): Promise<string | null> {
     const botId = await dmAgentOf(tx, conv.id);
     const bot = botId ? dir.agents.get(botId) : undefined;
@@ -272,6 +278,7 @@ export function createChatModule(core: Core): ApiModule {
       body: result.row.body,
       createdAt: result.message.createdAt,
       delivery: "dm",
+      ...zoneOf(author),
     };
     await core.chatAgent.emitAgentMention(tx, mention, tenantOf(tx).afterCommit);
     return bot.id;
@@ -689,7 +696,8 @@ export function createChatModule(core: Core): ApiModule {
               sessionId: auth.sessionId,
             });
             if (result.created) {
-              const author = { id: auth.userId };
+              // The zone only travels with this message's deliveries (turn context); it is never stored.
+              const author = { id: auth.userId, clientTimeZone: req.body.clientTimeZone };
               if (conv.kind === "dm") await dispatchDmMessage(tx, dir, conv, result, author);
               else if ((await dispatchAgentMentions(tx, dir, result, author)).length === 0) {
                 await dispatchReplyMode(tx, dir, conv, result, author);
