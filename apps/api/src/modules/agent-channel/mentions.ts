@@ -13,7 +13,8 @@ import { and, desc, eq, inArray, isNull, ne, or } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
 import { agentDirectory } from "../agent";
-import { memberDirectory } from "../organization";
+import { turnPolicy } from "../bot-capabilities";
+import { createPermissionService, memberDirectory, type PermissionService } from "../organization";
 
 /** Bounded thread context per mention (A2.2). */
 export const HISTORY_LIMIT = 50;
@@ -28,11 +29,13 @@ const toIso = (v: string) => new Date(v).toISOString();
  * mention is delivered iff the message commits. For every mentioned agent that is live, not disabled and a
  * member of the conversation (or of its parent channel), it appends one `agent.mention.v1` event to the
  * cell stream `cell:<orgId>` with server-resolved identity: author id + display name, roster, and the
- * thread history (current message excluded). Nothing is taken from message text.
+ * thread history (current message excluded). Nothing is taken from message text. Every event carries the
+ * effective `turn` for this bot and this human (D-07), recorded in `agent_turns` in the same transaction.
  */
 export function registerMentionHandler(core: Core) {
+  const perms = createPermissionService(core);
   core.chatAgent.onAgentMention(async (tx, mention) => {
-    const events = await buildMentionEvents(tx, mention);
+    const events = await buildMentionEvents(tx, mention, { core, perms });
     const { organizationId } = tenantOf(tx);
     for (const ev of events) {
       await core.realtime.appendEvent(tx, cellTopic(organizationId), AgentChannelEventTypes.mention, ev, {
@@ -42,7 +45,11 @@ export function registerMentionHandler(core: Core) {
   });
 }
 
-export async function buildMentionEvents(tx: Tx, mention: AgentMention): Promise<StoredMention[]> {
+export async function buildMentionEvents(
+  tx: Tx,
+  mention: AgentMention,
+  deps: { core: Core; perms: PermissionService },
+): Promise<StoredMention[]> {
   // MVP 0: only human-authored mentions reach the cell (no agent ↔ agent loops).
   if (mention.author.kind !== "user") return [];
   const agentIds = [...new Set(mention.agentIds)];
@@ -154,22 +161,39 @@ export async function buildMentionEvents(tx: Tx, mention: AgentMention): Promise
   };
   const conversationName = conv.kind === "thread" && parent ? parent.name : conv.name;
 
-  return targets.map((a) => ({
-    eventId: randomUUID(),
-    type: AgentChannelEventTypes.mention,
-    organizationId,
-    cellId: organizationId,
-    agent: { id: a.id, handle: a.username, displayName: a.name },
-    conversation: { id: conv.id, kind: conv.kind, name: conversationName },
-    thread: { rootMessageId: root },
-    message: {
-      id: mention.messageId,
-      text: mention.body,
-      createdAt: toIso(mention.createdAt),
-      author,
-      mentions,
-    },
-    threadHistory,
-    roster,
-  }));
+  const events: StoredMention[] = [];
+  for (const a of targets) {
+    // The event id first: the turn ledger row (`agent_turns`) is keyed by it.
+    const eventId = randomUUID();
+    const decision = await turnPolicy(tx, deps.core, deps.perms, {
+      agentId: a.id,
+      humanUserId: mention.author.id,
+      conversationId: conv.id,
+      conversationKind: conv.kind,
+      messageId: mention.messageId,
+      eventId,
+    });
+    // Not delivered (03.1-05: daily limit reached; bot gone): no cell event, so no model call.
+    if (!decision.deliver) continue;
+    events.push({
+      eventId,
+      type: AgentChannelEventTypes.mention,
+      organizationId,
+      cellId: organizationId,
+      agent: { id: a.id, handle: a.username, displayName: a.name },
+      conversation: { id: conv.id, kind: conv.kind, name: conversationName },
+      thread: { rootMessageId: root },
+      message: {
+        id: mention.messageId,
+        text: mention.body,
+        createdAt: toIso(mention.createdAt),
+        author,
+        mentions,
+      },
+      threadHistory,
+      roster,
+      turn: decision.turn,
+    });
+  }
+  return events;
 }
