@@ -15,6 +15,7 @@ import { CommitTracker, runEventStream } from "./event-stream.js";
 import { type MappedMention, mapMention } from "./mention-mapper.js";
 import { createOpenClawPort, type PluginRuntimeLike } from "./openclaw-port.js";
 import { planReconcile } from "./reconciler.js";
+import { registerCapabilities } from "./register-capabilities.js";
 import { registerFull } from "./register-full.js";
 import {
   type FakeAgentChannelApi,
@@ -609,16 +610,20 @@ describe("memory tool (D-10): manifest, registration and the fake API", () => {
     expect(manifest.contracts?.tools).toEqual(["ocw_memory_save"]);
   });
 
-  it("registerFull installs the tool gate hooks and registers ocw_memory_save", () => {
+  it("registerFull registers ocw_memory_save; the gate hooks come from registerCapabilities", () => {
     const hooks: string[] = [];
     const tools: Array<{ opts: { name: string } }> = [];
     const pluginApi = {
       on: (name: string) => hooks.push(name),
       registerTool: (_factory: unknown, opts: { name: string }) => tools.push({ opts }),
     };
-    registerFull(pluginApi as never, createToolGuard({ client: () => null }));
-    expect(hooks).toEqual(["before_tool_call", "after_tool_call"]);
+    const guard = createToolGuard({ client: () => null });
+    registerFull(pluginApi as never, guard);
+    expect(hooks).toEqual([]);
     expect(tools.map((t) => t.opts.name)).toEqual(["ocw_memory_save"]);
+    registerCapabilities(pluginApi as never, guard);
+    expect(hooks).toEqual(["before_tool_call", "after_tool_call"]);
+    expect(tools).toHaveLength(1);
   });
 
   it("a save in an active DM turn reaches POST /memories with the event, the bot and the text only", async () => {

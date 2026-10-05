@@ -5,7 +5,7 @@ import { openClawAgentIdFor } from "./mention-mapper.js";
 
 /**
  * The cell's call-time tool gate (D-08 guard 3), wired to OpenClaw's `before_tool_call` / `after_tool_call`
- * hooks (index.ts, registered unscoped). The API decided the turn's tool set at delivery and stays the
+ * hooks (register-capabilities.ts, registered unscoped). The API decided the turn's tool set at delivery and stays the
  * authority at call time; this gate:
  *   - blocks any call when no OCW turn is active for the session (fail closed),
  *   - blocks tools outside `turn.tools`, over the per-turn caps, or side-effecting after untrusted output
@@ -325,7 +325,8 @@ export const toolGuard: ToolGuard = createToolGuard({ client: () => sharedState.
 export const TOOL_GATE_PRIORITY = 10_000;
 
 /**
- * Registers the gate on OpenClaw (`registerFull`). No matcher, so it sees EVERY tool: matchers reject wildcards,
+ * Registers the gate on OpenClaw (`registerCapabilities`, so it also exists in the non-activated registry agent
+ * turns run with). No matcher, so it sees EVERY tool: matchers reject wildcards,
  * and a tool we did not list must not slip through. A thrown error or a timeout in `before_tool_call` blocks the
  * call (OpenClaw's fail-closed policy for that hook).
  */

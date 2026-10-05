@@ -1,0 +1,178 @@
+/**
+ * Contract: our real plugin entry (index.ts) registered the way OpenClaw 2026.9.7 registers it
+ * (testing/openclaw-host.ts mirrors the shipped dist), in every registration mode. Regression for the real-cell
+ * bypass found by the CI cell-smoke: the gate lived in `registerFull`, which OpenClaw skips when it loads the
+ * non-activated ("discovery") registry it runs agent turns with, so `web_search` ran with no gate and no audit.
+ */
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createAgentChannelClient } from "./api-client.js";
+import { openClawAgentIdFor } from "./mention-mapper.js";
+import { type FakeAgentChannelApi, startFakeAgentChannelApi } from "./testing/fake-agent-channel-api.js";
+import {
+  ALL_REGISTRATION_MODES,
+  createTurnHookRunner,
+  loadRegistry,
+  type PluginEntry,
+  type RegistrationMode,
+} from "./testing/openclaw-host.js";
+import { setToolGuardClient, TOOL_GATE_PRIORITY, toolGuard } from "./tool-guard.js";
+
+vi.mock(
+  "openclaw/plugin-sdk/channel-core",
+  async () => (await import("./testing/openclaw-host.js")).channelCoreModule,
+);
+
+const { default: entry } = (await import("./index.js")) as unknown as { default: PluginEntry };
+const manifest = JSON.parse(
+  readFileSync(path.join(import.meta.dirname, "..", "openclaw.plugin.json"), "utf8"),
+) as {
+  id: string;
+  contracts?: { tools?: string[] };
+};
+
+const BOT = "0199a6f0-0000-7000-8000-00000000a001";
+const SESSION = `agent:${openClawAgentIdFor(BOT)}:ocw:channel:c3:thread:d21`;
+const WEB = { untrustedOutput: true, sideEffecting: false };
+const WEB_TURN = {
+  tools: ["web_search", "web_fetch"],
+  toolFlags: { web_search: WEB, web_fetch: WEB },
+  memory: [],
+  now: null,
+  maxToolCalls: 8,
+  maxWebCalls: 5,
+};
+
+const ocwHooks = (mode: RegistrationMode) =>
+  loadRegistry(entry, manifest, { mode })
+    .typedHooks.filter((h) => h.pluginId === "ocw")
+    .map(({ hookName, matcher, priority }) => ({ hookName, matcher, priority }));
+
+describe("OpenClaw 2026.9.7 registration of the real entry", () => {
+  it.each(["full", "discovery", "tool-discovery"] as const)(
+    "a %s registry carries the gate exactly once: before_tool_call unscoped at top priority + after_tool_call",
+    (mode) => {
+      expect(ocwHooks(mode)).toEqual([
+        { hookName: "before_tool_call", matcher: undefined, priority: TOOL_GATE_PRIORITY },
+        { hookName: "after_tool_call", matcher: undefined, priority: undefined },
+      ]);
+    },
+  );
+
+  it.each(["setup-only", "setup-runtime", "cli-metadata"] as const)(
+    "a %s load (no capability handlers, no agent turns) registers no hook and does not throw",
+    (mode) => {
+      expect(ocwHooks(mode)).toEqual([]);
+    },
+  );
+
+  it("the memory tool is registered where OpenClaw resolves plugin tools (boot registry and tool discovery)", () => {
+    const tools = (mode: RegistrationMode) =>
+      loadRegistry(entry, manifest, { mode }).tools.flatMap((t) => t.names);
+    expect(tools("full")).toEqual(["ocw_memory_save"]);
+    expect(tools("tool-discovery")).toEqual(["ocw_memory_save"]);
+  });
+
+  it("no registration diagnostics in any mode", () => {
+    for (const mode of ALL_REGISTRATION_MODES) {
+      expect(loadRegistry(entry, manifest, { mode }).diagnostics, mode).toEqual([]);
+    }
+  });
+});
+
+describe("a tool call inside a prepared turn (non-activated registry, read exclusively by the hook runner)", () => {
+  let api: FakeAgentChannelApi;
+
+  beforeEach(async () => {
+    api = await startFakeAgentChannelApi({ agents: [], providers: [] });
+    // What channel.ts does at account start, in the boot ("full") instance.
+    loadRegistry(entry, manifest, { activate: true });
+    setToolGuardClient(createAgentChannelClient({ apiUrl: api.url, token: () => api.token }));
+  });
+
+  afterEach(async () => {
+    toolGuard.endTurn(SESSION);
+    setToolGuardClient(null);
+    await api.close();
+  });
+
+  const runner = () => createTurnHookRunner(loadRegistry(entry, manifest, { activate: false }));
+  const ctx = { sessionKey: SESSION, agentId: openClawAgentIdFor(BOT), runId: "run-1" };
+
+  it("has the gate at all (the bug: hasHooks('before_tool_call') was false, so every call ran ungated)", () => {
+    expect(runner().hasHooks("before_tool_call")).toBe(true);
+    expect(runner().hasHooks("after_tool_call")).toBe(true);
+  });
+
+  it("blocks web_search when no OCW turn is active, without asking the API", async () => {
+    const r = await runner().runBeforeToolCall(
+      { toolName: "web_search", params: { query: "ocw smoke" }, toolCallId: "tc-0" },
+      ctx,
+    );
+    expect(r).toMatchObject({ blocked: true });
+    expect(api.toolCalls).toEqual([]);
+  });
+
+  it("asks POST /tool-calls for a turn's web_search, lets it run, then reports the outcome", async () => {
+    // What openclaw-port.ts does right before dispatch (boot instance); the turn registry's hook must see it.
+    toolGuard.beginTurn(SESSION, { eventId: "evt-web", agentId: BOT, turn: WEB_TURN });
+    const r = runner();
+    const event = { toolName: "web_search", params: { query: "ocw smoke" }, toolCallId: "tc-1" };
+    expect(await r.runBeforeToolCall(event, ctx)).toEqual({ blocked: false });
+    await r.runAfterToolCall(
+      { ...event, result: { details: { count: 1, provider: "searxng" } }, durationMs: 9 },
+      ctx,
+    );
+    expect(
+      api.toolCalls.map(({ eventId, agentId, tool, params, allowed }) => ({
+        eventId,
+        agentId,
+        tool,
+        params,
+        allowed,
+      })),
+    ).toEqual([
+      { eventId: "evt-web", agentId: BOT, tool: "web_search", params: { query: "ocw smoke" }, allowed: true },
+    ]);
+    expect(api.toolResults).toEqual([
+      { callId: api.toolCalls[0]?.callId, status: "ok", resultCount: 1, provider: "searxng", durationMs: 9 },
+    ]);
+  });
+
+  it("blocks a tool the turn does not offer, and a denial from the API", async () => {
+    toolGuard.beginTurn(SESSION, { eventId: "evt-web2", agentId: BOT, turn: WEB_TURN });
+    api.denyTools.add("web_fetch");
+    const r = runner();
+    expect(
+      await r.runBeforeToolCall({ toolName: "exec", params: { cmd: "id" }, toolCallId: "tc-2" }, ctx),
+    ).toMatchObject({
+      blocked: true,
+    });
+    const denied = await r.runBeforeToolCall(
+      { toolName: "web_fetch", params: { url: "https://x.example/" }, toolCallId: "tc-3" },
+      ctx,
+    );
+    expect(denied).toMatchObject({ blocked: true });
+    expect(denied.reason).toContain("denied_by_test");
+  });
+
+  it("fails closed when the API never answers: blocked before OpenClaw's 15 s budget expires", async () => {
+    toolGuard.beginTurn(SESSION, { eventId: "evt-web3", agentId: BOT, turn: WEB_TURN });
+    setToolGuardClient({
+      ...createAgentChannelClient({ apiUrl: api.url, token: () => api.token }),
+      authorizeToolCall: () => new Promise(() => undefined),
+    });
+    vi.useFakeTimers();
+    try {
+      const pending = runner().runBeforeToolCall(
+        { toolName: "web_search", params: { query: "q" }, toolCallId: "tc-4" },
+        ctx,
+      );
+      await vi.advanceTimersByTimeAsync(toolGuard.timeoutMs + 100);
+      expect(await pending).toMatchObject({ blocked: true, reason: expect.stringContaining("fail closed") });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

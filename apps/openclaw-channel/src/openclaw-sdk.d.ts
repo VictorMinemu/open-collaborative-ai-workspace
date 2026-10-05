@@ -129,8 +129,19 @@ declare module "openclaw/plugin-sdk/channel-core" {
     ) => Promise<{ content: Array<{ type: "text"; text: string }>; details?: unknown }>;
   };
 
+  /** How the registry being built was loaded (docs/plugins/sdk-entrypoints/registration-mode.md). */
+  export type PluginRegistrationMode =
+    | "full"
+    | "discovery"
+    | "tool-discovery"
+    | "setup-only"
+    | "setup-runtime"
+    | "cli-metadata";
+
   /** The subset of `OpenClawPluginApi` this plugin uses. */
   export type OpenClawPluginApi = {
+    registrationMode?: PluginRegistrationMode;
+    logger?: { info?: (msg: string) => void; warn?: (msg: string) => void };
     registerTool(
       factory: (ctx: OpenClawPluginToolContext) => OpenClawAgentTool | null | undefined,
       opts: { name: string; optional?: boolean },
@@ -156,7 +167,13 @@ declare module "openclaw/plugin-sdk/channel-core" {
     description: string;
     plugin: ChannelPlugin<ResolvedAccount>;
     setRuntime?: (runtime: unknown) => void;
+    /** Runs only in "full" and "tool-discovery" (dist/core-*.mjs). */
     registerFull?: (api: OpenClawPluginApi) => void;
+    /**
+     * Runs in "full", "discovery" and "tool-discovery". Agent turns run with a non-activated ("discovery")
+     * registry whenever the config changed after boot, so anything a turn needs (typed hooks) goes here.
+     */
+    registerCapabilities?: (api: OpenClawPluginApi) => void;
   }): unknown;
 
   export function defineSetupPluginEntry<ResolvedAccount>(plugin: ChannelPlugin<ResolvedAccount>): unknown;

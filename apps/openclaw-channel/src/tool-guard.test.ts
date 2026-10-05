@@ -190,7 +190,7 @@ describe("tool guard: after_tool_call", () => {
   });
 });
 
-describe("hook registration (registerFull)", () => {
+describe("hook registration (registerToolGate, called from registerCapabilities)", () => {
   it("registers before_tool_call unscoped at the highest priority, and after_tool_call", async () => {
     const hooks: Array<{ name: string; opts: unknown; handler: (e: unknown, c: unknown) => unknown }> = [];
     const api = {
