@@ -14,6 +14,7 @@ import {
   SessionCommandResult,
   SessionControls,
   type SessionSettingsPatch,
+  slashDisposition,
   UpdatePromptRequest,
   UpdateWorkSessionSettingsRequest,
   UpdateWorkZonePolicyRequest,
@@ -321,6 +322,7 @@ export function registerWorkSessionRoutes(
         const auth = authOf(req);
         const body = req.body;
         await perms.assertCan(req, tx, "work_session.create", orgResource());
+        if (body.prompt) assertNotSlashCommand(body.prompt, body.runtime ?? "claude-code");
         const [row] = await tx
           .select({ p: projects, d: devices })
           .from(projects)
@@ -552,6 +554,7 @@ export function registerWorkSessionRoutes(
   async function submitPrompt(req: FastifyRequest, tx: Tx, s: SessionRow, body: string): Promise<WorkPrompt> {
     const auth = authOf(req);
     if (s.status === "archived") throw conflict("This session is archived", "session_archived");
+    assertNotSlashCommand(body, s.runtime);
     await joinConversation(tx, auth, s);
     const p = await queuePrompt(tx, auth, s, body);
     if (s.status === "failed" || s.status === "completed") await svc.restart(tx, s);
@@ -670,6 +673,7 @@ export function registerWorkSessionRoutes(
       return;
     }
     if (change.body !== undefined && change.body !== p.body) {
+      assertNotSlashCommand(change.body, s.runtime);
       const [row] = await tx
         .update(workPrompts)
         .set({ body: change.body })
@@ -959,6 +963,17 @@ export function registerWorkSessionRoutes(
         return { ok: true as const };
       }),
   );
+}
+
+/**
+ * D-13: a prompt body that starts with a settings or refused slash command never enters the queue; it must go
+ * through `POST /work-sessions/:id/commands`. Passthrough commands and slashes later in the text are prompts.
+ */
+function assertNotSlashCommand(body: string, runtime: RuntimeId): void {
+  const disposition = slashDisposition(body, runtime);
+  if (disposition?.kind === "settings" || disposition?.kind === "refused") {
+    throw new HttpError(400, "slash_command", "Send slash commands from the composer");
+  }
 }
 
 function firstLine(text: string | undefined): string | undefined {

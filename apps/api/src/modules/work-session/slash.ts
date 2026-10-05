@@ -10,7 +10,7 @@ import {
 } from "@ocw/contracts";
 import type { Tx } from "@ocw/db";
 import type { FastifyRequest } from "fastify";
-import type { Core } from "../../core";
+import { authOf, type Core } from "../../core";
 import { HttpError } from "../../lib/errors";
 import { buildRuntimeControls, type ControlsContext } from "./controls";
 import type { SessionRow } from "./service";
@@ -111,6 +111,17 @@ export async function runSessionCommand(
     return { kind: "prompt", command, notice: `/${command} sent to ${RUNTIME_LABEL[s.runtime]}`, prompt };
   }
 
+  // T-03.2-07-04/05: audited by command name only, never its free-text arguments.
+  await deps.core.audit.record(tx, {
+    action: "work_session.slash_refused",
+    resourceType: "work_session",
+    resourceId: s.id,
+    sessionId: s.id,
+    deviceId: s.deviceId,
+    clientKind: authOf(req).clientKind,
+    result: "denied",
+    metadata: { command },
+  });
   return {
     kind: "refused",
     command,
