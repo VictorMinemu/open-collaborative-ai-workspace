@@ -63,9 +63,9 @@ function policyReason(
   return null;
 }
 
+/** A toggle that is off keeps its reason, so the UI can refuse to switch on what would not work. */
 function result(enabled: boolean, reason: CapabilityDenialReason | null): EffectiveCapability {
-  if (!enabled) return { enabled: false, effective: false, reason: null };
-  return { enabled: true, effective: reason === null, reason };
+  return { enabled, effective: enabled && reason === null, reason };
 }
 
 /**

@@ -10,6 +10,7 @@ import {
   cellTopic,
   IdParams,
   isDangerousToolName,
+  MAX_DAILY_LIMIT,
   type Permission,
   UpdateBotCapabilitiesRequest,
   UpdateBotPolicyRequest,
@@ -175,6 +176,7 @@ async function capabilityView(
       humanToolAllowed: (tool) => toolAllowed.get(tool) ?? null,
     }),
     usage: usageOf(usage.get(row.id) ?? 0, caps),
+    dailyLimitMax: row.scope === "personal" ? policy.personalDailyLimitMax : MAX_DAILY_LIMIT,
     viewerCan: await perms.viewerCan(req, tx, resource, VIEWER_CANDIDATES),
   };
 }

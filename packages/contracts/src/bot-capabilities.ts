@@ -25,6 +25,9 @@ export type ReplyMode = z.infer<typeof ReplyMode>;
 export const BuiltinCapability = z.enum(["internet", "memory", "dateTime", "replyModeAll"]);
 export type BuiltinCapability = z.infer<typeof BuiltinCapability>;
 
+/** Highest daily limit any bot may have (team bots; personal bots are capped by the org policy). */
+export const MAX_DAILY_LIMIT = 10_000;
+
 export const BotCapabilities = z.object({
   /** Web search + page fetch (read-only). */
   internet: z.boolean(),
@@ -34,7 +37,7 @@ export const BotCapabilities = z.object({
   dateTime: z.boolean(),
   replyMode: ReplyMode,
   /** Turns per UTC day (D-11). */
-  dailyLimit: z.number().int().min(1).max(10_000),
+  dailyLimit: z.number().int().min(1).max(MAX_DAILY_LIMIT),
 });
 export type BotCapabilities = z.infer<typeof BotCapabilities>;
 
@@ -126,7 +129,10 @@ export const EffectiveCapability = z.object({
   enabled: z.boolean(),
   /** What the bot really gets on its next turn for this viewer. */
   effective: z.boolean(),
-  /** Why an enabled capability is not effective; null when effective or disabled. */
+  /**
+   * Why the capability is not (or, while the toggle is off, would not be) effective; null when nothing stands
+   * in the way. The UI shows it and refuses the toggle, so a denied capability is never switched on in vain.
+   */
   reason: CapabilityDenialReason.nullable(),
 });
 export type EffectiveCapability = z.infer<typeof EffectiveCapability>;
@@ -175,6 +181,8 @@ export const BotCapabilityView = z.object({
   }),
   tools: z.array(CatalogTool),
   usage: BotUsage,
+  /** Highest `dailyLimit` this bot accepts: the org's personal maximum for personal bots. */
+  dailyLimitMax: z.number().int().positive(),
   viewerCan: z.array(Permission),
 });
 export type BotCapabilityView = z.infer<typeof BotCapabilityView>;
