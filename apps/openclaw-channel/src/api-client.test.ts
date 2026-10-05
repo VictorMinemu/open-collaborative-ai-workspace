@@ -85,6 +85,62 @@ describe("agent channel client", () => {
   });
 });
 
+describe("tool gate calls", () => {
+  const req = { eventId: "e1", agentId: "a1", tool: "web_search", params: { query: "ocw" } };
+
+  it("authorizeToolCall posts once to /tool-calls and parses the decision", async () => {
+    const { fetchImpl, calls } = scriptedFetch([
+      { status: 200, body: { callId: "c1", allowed: true, reason: null } },
+    ]);
+    const client = createAgentChannelClient({ apiUrl: "http://api", token: () => "t", fetch: fetchImpl });
+    await expect(client.authorizeToolCall(req)).resolves.toEqual({
+      callId: "c1",
+      allowed: true,
+      reason: null,
+    });
+    expect(calls[0]?.url).toBe("http://api/agent-channel/v1/tool-calls");
+    expect(JSON.parse(String(calls[0]?.init.body))).toEqual(req);
+  });
+
+  it("authorizeToolCall never retries: a 5xx rejects at once (the gate fails closed)", async () => {
+    const { fetchImpl, calls } = scriptedFetch([
+      { status: 503 },
+      { status: 200, body: { callId: "c", allowed: true } },
+    ]);
+    const client = createAgentChannelClient({ apiUrl: "http://api", token: () => "t", fetch: fetchImpl });
+    await expect(client.authorizeToolCall(req)).rejects.toBeInstanceOf(AgentChannelHttpError);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("authorizeToolCall rejects within its timeout when the API hangs", async () => {
+    const hanging = ((_url: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+      })) as typeof fetch;
+    const client = createAgentChannelClient({ apiUrl: "http://api", token: () => "t", fetch: hanging });
+    const started = Date.now();
+    await expect(client.authorizeToolCall(req, undefined, 50)).rejects.toBeDefined();
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("reportToolCallResult posts the outcome and never throws", async () => {
+    const ok = scriptedFetch([{ status: 200, body: { ok: true } }]);
+    const client = createAgentChannelClient({ apiUrl: "http://api", token: () => "t", fetch: ok.fetchImpl });
+    await client.reportToolCallResult("c 1", { status: "ok", resultCount: 3, durationMs: 120 });
+    expect(ok.calls[0]?.url).toBe("http://api/agent-channel/v1/tool-calls/c%201/result");
+    const failing = scriptedFetch([{ status: 500 }, { status: 500 }]);
+    const client2 = createAgentChannelClient({
+      apiUrl: "http://api",
+      token: () => "t",
+      fetch: failing.fetchImpl,
+      backoff: { baseMs: 1, maxMs: 2 },
+    });
+    await expect(
+      client2.reportToolCallResult("c", { status: "error", durationMs: 1 }),
+    ).resolves.toBeUndefined();
+  });
+});
+
 describe("account resolution", () => {
   it("reads api url and token file from env; never needs secrets in config", () => {
     const acc = resolveOcwAccount(

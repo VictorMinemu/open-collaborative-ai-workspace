@@ -1,16 +1,23 @@
-import type { CellAgent, CellProvider, CellSnapshot, CellSubscription } from "./agent-channel-protocol.js";
+import path from "node:path";
+import type {
+  CellAgent,
+  CellMcpServer,
+  CellProvider,
+  CellSnapshot,
+  CellSubscription,
+} from "./agent-channel-protocol.js";
 import { openClawAgentIdFor, sanitizeName } from "./mention-mapper.js";
 
 /** Prefix that marks agent entries owned by this plugin. Entries without it are never touched. */
 export const OWNED_AGENT_PREFIX = "ocw-";
 
 /**
- * Every tool OpenClaw 2026.9.7 can offer by default, plus the wildcard. Verified: profile "minimal" +
- * this deny list + toolSearch off ⇒ the model receives 0 tools. The plugin also passes
- * `disableTools: true` on every dispatch (second guard).
+ * Tools no bot may ever be offered (lockdown v2, D-08). Mirrors `DANGEROUS_TOOL_NAMES` in
+ * packages/contracts/src/bot-capabilities.ts and `DANGEROUS_TOOLS` in infra/openclaw/render-config.mjs (parity
+ * test in reconciler.test.ts). No wildcard: tools are an allowlist (profile `minimal` + per-agent `alsoAllow`),
+ * and a global `*` deny would also remove the web tools (deny always wins).
  */
-export const DENIED_TOOLS = [
-  "*",
+export const DANGEROUS_TOOLS = [
   "apply_patch",
   "edit",
   "exec",
@@ -28,7 +35,56 @@ export const DENIED_TOOLS = [
   "browser",
   "canvas",
   "message",
+  "gateway",
+  "nodes",
+  "x_search",
+  "code_execution",
+  "group:runtime",
+  "group:fs",
+  "group:ui",
+  "group:automation",
+  "group:nodes",
+  "group:sessions",
+  "group:messaging",
+  "group:media",
 ] as const;
+
+const DANGEROUS_SET: ReadonlySet<string> = new Set(DANGEROUS_TOOLS.map((t) => t.toLowerCase()));
+/**
+ * Policy entries that grant a whole tool family at once: OpenClaw treats `bundle-mcp` as "every MCP server" and
+ * `bundle-lsp` as every LSP tool. A bot is only ever granted exact names.
+ */
+const FAMILY_GRANTS: ReadonlySet<string> = new Set(["bundle-mcp", "bundle-lsp"]);
+
+/** The tools a bot entry may list in `alsoAllow`: never a dangerous name, a group, a family or a wildcard. */
+export function allowedAgentTools(tools: readonly string[] | undefined): string[] {
+  return [...new Set(tools ?? [])].filter((t) => {
+    const lower = t.trim().toLowerCase();
+    return (
+      lower.length > 0 &&
+      !lower.includes("*") &&
+      !lower.startsWith("group:") &&
+      !DANGEROUS_SET.has(lower) &&
+      !FAMILY_GRANTS.has(lower)
+    );
+  });
+}
+
+/** A plugin-owned OpenClaw agent id (`openClawAgentIdFor`): `ocw-` + lower-case letters, digits, `-`, `_`. */
+const OWNED_AGENT_ID = /^ocw-[a-z0-9_-]+$/u;
+
+/**
+ * The directory holding a removed bot's OpenClaw state (session rows, transcripts, archives):
+ * `<stateDir>/agents/<agentId>`. Removing an entry from config does not delete it (only
+ * `openclaw agents delete` does), so the port purges it after a successful write (research Pitfall 12).
+ * Null — never purge — for anything but a plugin-owned `ocw-*` id under an absolute state dir.
+ */
+export function agentStateDirFor(stateDir: string, agentId: string): string | null {
+  if (!stateDir || !path.isAbsolute(stateDir) || !OWNED_AGENT_ID.test(agentId)) return null;
+  const agentsRoot = path.resolve(stateDir, "agents");
+  const dir = path.resolve(agentsRoot, agentId);
+  return path.dirname(dir) === agentsRoot ? dir : null;
+}
 
 /** Env var that carries a provider key inside the gateway process (never written to config). */
 export function providerKeyEnvName(providerId: string): string {
@@ -40,6 +96,79 @@ export function envRef(name: string): string {
   return `$${"{"}${name}}`;
 }
 
+/** Plugin-owned MCP server names: the API's immutable `m` + 8 hex (`safeServerName`). Nothing else is touched. */
+export const OWNED_MCP_SERVER = /^m[0-9a-f]{8}$/u;
+/** Env var names the API assigns to MCP header values (`cellEnvName`). */
+const MCP_ENV_NAME = /^OCW_MCP_[A-Z0-9_]{1,64}$/u;
+/** RFC 9110 token: what an HTTP header name may be. */
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/u;
+
+/**
+ * `mcp.servers.<safeName>` for one snapshot server (D-13): exact tool names in `toolFilter.include` (never a glob),
+ * header values as `${ENV}` references (the value goes to the gateway env only). Null when the entry cannot be
+ * rendered safely (not a plugin-owned name, an env or header name we would not write, or no enabled tool).
+ */
+export function desiredMcpServerEntry(s: CellMcpServer): McpServerEntry | null {
+  if (!OWNED_MCP_SERVER.test(s.safeName)) return null;
+  // OpenClaw validates the whole config on write: one unusable URL must not block every bot's sync.
+  if (!isHttpUrl(s.url)) return null;
+  if (s.headers.some((h) => !MCP_ENV_NAME.test(h.envName) || !HEADER_NAME.test(h.name))) return null;
+  const include = [...new Set(s.tools.map((t) => t.trim()))]
+    .filter((t) => t.length > 0 && !t.includes("*"))
+    .sort();
+  if (include.length === 0) return null;
+  return {
+    url: s.url,
+    transport: s.transport,
+    ...(s.headers.length > 0
+      ? { headers: Object.fromEntries(s.headers.map((h) => [h.name, envRef(h.envName)])) }
+      : {}),
+    toolFilter: { include },
+  };
+}
+
+function isHttpUrl(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function includeOf(filter: unknown): string[] {
+  const include = (filter as { include?: unknown } | undefined)?.include;
+  return Array.isArray(include) ? include.filter((t): t is string => typeof t === "string").sort() : [];
+}
+
+/**
+ * Semantic MCP server comparison (a needless write retires the server's live connections): OpenClaw's runtime view shows `${ENV}` header refs already resolved, so a header
+ * matches when it is the ref or the secret it stands for.
+ */
+function sameMcpServer(
+  before: McpServerEntry | undefined,
+  desired: McpServerEntry,
+  secrets: ReadonlyMap<string, string>,
+): boolean {
+  if (!before) return false;
+  const want = (desired.headers ?? {}) as Record<string, string>;
+  const have = (before.headers && typeof before.headers === "object" ? before.headers : {}) as Record<
+    string,
+    unknown
+  >;
+  const headersMatch =
+    Object.keys(want).length === Object.keys(have).length &&
+    Object.entries(want).every(([name, ref]) => have[name] === ref || have[name] === secrets.get(ref));
+  return (
+    headersMatch &&
+    before.url === desired.url &&
+    before.transport === desired.transport &&
+    stableStringify(includeOf(before.toolFilter)) === stableStringify(includeOf(desired.toolFilter))
+  );
+}
+
+export type McpServerEntry = { headers?: Record<string, string> } & Record<string, unknown>;
+export type McpServerEntries = Record<string, McpServerEntry>;
 export type AgentEntry = Record<string, unknown>;
 export type AgentEntries = Record<string, AgentEntry>;
 export type ProviderEntry = Record<string, unknown>;
@@ -70,7 +199,15 @@ export function desiredAgentEntry(
     models: pinEmbeddedRuntime ? { [modelRef]: { agentRuntime: { id: "openclaw" } } } : undefined,
     skills: [],
     identity: { name },
-    tools: { profile: "minimal", deny: [...DENIED_TOOLS] },
+    // Allowlist: only this bot's effective tools on top of `minimal`; dangerous names stay denied regardless.
+    tools: (() => {
+      const alsoAllow = allowedAgentTools(agent.capabilities?.tools);
+      return {
+        profile: "minimal",
+        ...(alsoAllow.length > 0 ? { alsoAllow } : {}),
+        deny: [...DANGEROUS_TOOLS],
+      };
+    })(),
   };
 }
 
@@ -143,6 +280,12 @@ export type ReconcilePlan = {
   env: Record<string, string>;
   /** What to report via POST /agents/:id/status once the write succeeded. */
   results: AgentProvisioningResult[];
+  /** New `tools.web.search.provider` (D-09), or null to leave it alone. */
+  webSearchProvider: string | null;
+  /** `mcp.servers.<safeName>` to write (D-13). */
+  upsertMcpServers: McpServerEntries;
+  /** Plugin-owned MCP servers that must go (left the snapshot or lost every enabled tool). */
+  removeMcpServers: string[];
   changed: boolean;
 };
 
@@ -155,9 +298,24 @@ export const SUBSCRIPTION_NOT_SIGNED_IN =
  * subscription-auth.ts); bots on any other listed subscription are reported as `error`.
  */
 export function planReconcile(
-  current: { agents?: AgentEntries; providers?: ProviderEntries },
-  cell: Pick<CellSnapshot, "agents" | "providers" | "subscriptions">,
-  opts: { readySubscriptions?: ReadonlySet<string> } = {},
+  current: {
+    agents?: AgentEntries;
+    providers?: ProviderEntries;
+    webSearchProvider?: string;
+    mcpServers?: McpServerEntries;
+  },
+  cell: Pick<CellSnapshot, "agents" | "providers" | "subscriptions" | "webSearch" | "mcpServers">,
+  opts: {
+    readySubscriptions?: ReadonlySet<string>;
+    /** Search provider plugins loaded in this cell (`plugins.allow`); a provider not loaded is never set. */
+    searchProviders?: ReadonlySet<string>;
+    /**
+     * The gateway env as OpenClaw last resolved it (the port passes `process.env`): an MCP header whose value
+     * changed there forces a re-render, so a rotated credential is applied even when the runtime view shows the
+     * unresolved `${ref}`.
+     */
+    env?: Readonly<Record<string, string | undefined>>;
+  } = {},
 ): ReconcilePlan {
   const existingAgents = current.agents ?? {};
   const existingProviders = current.providers ?? {};
@@ -226,6 +384,34 @@ export function planReconcile(
   const staleOpenAIId = renameOpenAI ? "openai" : RENAMED_OPENAI_PROVIDER;
   const removeProviders = staleOpenAIId in existingProviders ? [staleOpenAIId] : [];
 
+  const wantedSearch = cell.webSearch?.provider;
+  const webSearchProvider =
+    wantedSearch && wantedSearch !== current.webSearchProvider && opts.searchProviders?.has(wantedSearch)
+      ? wantedSearch
+      : null;
+
+  // MCP servers (D-13): only servers with an enabled tool are rendered, so the cell never connects to the rest.
+  const existingMcp = current.mcpServers ?? {};
+  const upsertMcpServers: McpServerEntries = {};
+  const desiredMcp = new Set<string>();
+  for (const server of cell.mcpServers ?? []) {
+    const entry = desiredMcpServerEntry(server);
+    if (!entry) continue;
+    desiredMcp.add(server.safeName);
+    const secrets = new Map<string, string>();
+    for (const h of server.headers) {
+      env[h.envName] = h.value;
+      secrets.set(envRef(h.envName), h.value);
+    }
+    const rotated = opts.env !== undefined && server.headers.some((h) => opts.env?.[h.envName] !== h.value);
+    if (rotated || !sameMcpServer(existingMcp[server.safeName], entry, secrets)) {
+      upsertMcpServers[server.safeName] = entry;
+    }
+  }
+  const removeMcpServers = Object.keys(existingMcp).filter(
+    (name) => OWNED_MCP_SERVER.test(name) && !desiredMcp.has(name),
+  );
+
   return {
     upsertAgents,
     removeAgents,
@@ -233,7 +419,13 @@ export function planReconcile(
     removeProviders,
     env,
     results,
+    webSearchProvider,
+    upsertMcpServers,
+    removeMcpServers,
     changed:
+      webSearchProvider !== null ||
+      Object.keys(upsertMcpServers).length > 0 ||
+      removeMcpServers.length > 0 ||
       Object.keys(upsertAgents).length > 0 ||
       removeAgents.length > 0 ||
       Object.keys(upsertProviders).length > 0 ||
@@ -244,11 +436,19 @@ export function planReconcile(
 export type MutableConfig = {
   agents?: { entries?: AgentEntries; [k: string]: unknown };
   models?: { providers?: ProviderEntries; [k: string]: unknown };
+  tools?: { web?: { search?: Record<string, unknown>; [k: string]: unknown }; [k: string]: unknown };
+  plugins?: { allow?: unknown; [k: string]: unknown };
+  mcp?: { servers?: McpServerEntries; [k: string]: unknown };
   [k: string]: unknown;
 };
 
 /** Applies a plan to a mutable config draft (inside OpenClaw's `mutateConfigFile`). */
 export function applyPlanToDraft(draft: MutableConfig, plan: ReconcilePlan): void {
+  if (plan.webSearchProvider) {
+    draft.tools ??= {};
+    draft.tools.web ??= {};
+    draft.tools.web.search = { ...(draft.tools.web.search ?? {}), provider: plan.webSearchProvider };
+  }
   if (Object.keys(plan.upsertProviders).length > 0) {
     draft.models ??= {};
     draft.models.providers ??= {};
@@ -257,6 +457,14 @@ export function applyPlanToDraft(draft: MutableConfig, plan: ReconcilePlan): voi
     }
   }
   for (const id of plan.removeProviders ?? []) delete draft.models?.providers?.[id];
+  const mcpUpserts = Object.entries(plan.upsertMcpServers ?? {});
+  if (mcpUpserts.length > 0) {
+    draft.mcp ??= {};
+    draft.mcp.servers ??= {};
+    // Replaced whole: a header or filter entry removed by the admin must not survive a merge.
+    for (const [name, entry] of mcpUpserts) draft.mcp.servers[name] = entry;
+  }
+  for (const name of plan.removeMcpServers ?? []) delete draft.mcp?.servers?.[name];
   if (Object.keys(plan.upsertAgents).length > 0 || plan.removeAgents.length > 0) {
     draft.agents ??= {};
     draft.agents.entries ??= {};

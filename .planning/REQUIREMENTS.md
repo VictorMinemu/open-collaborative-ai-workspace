@@ -123,16 +123,16 @@ SLICE-06…18 were added on 2026-10-04 after the code audit of the widened demo 
 
 ### Personal Bots and Bot Capabilities (BOT) — added 2026-10-04 by the owner
 
-- [ ] **BOT-01**: Any member allowed by policy (new permission `bot.create_personal`, granted to every role by default, deniable by rules) can create a personal bot from the same one-click flow; a personal bot is visible to and usable by its owner only (resolver-enforced); admins see its metadata (name, owner, model, capabilities, usage) for governance but never its conversations
-- [ ] **BOT-02**: Creating a personal bot creates a private direct conversation between the owner and the bot that appears in the owner's chat sidebar (Bots section) and that nobody else can read (RLS + resolver); deleting or disabling the bot archives it
-- [ ] **BOT-03**: In a bot's direct conversation the bot answers every message without an @mention, one generation at a time, using the conversation history as context; members can also open a direct conversation with any team bot they may use (personal history, invisible to others)
-- [ ] **BOT-04**: Per-bot capability toggles, editable by whoever manages the bot: internet access (web search + page fetch, read-only), persistent memory (per bot and per human, user-visible and clearable), current date/time in context, reply mode in channels (mentions only / every message), and a daily usage limit (turns per day)
-- [ ] **BOT-05**: An Organization Admin sets a capability policy (allow/deny each capability org-wide and separately for personal bots); a bot's effective capabilities are its toggles ∩ the policy, the UI shows a disabled toggle with the reason, and dangerous tools (shell/exec, filesystem writes, browser control, gateway admin) are never offered
-- [ ] **BOT-06**: Capabilities are enforced in the OpenClaw cell on every turn (only the effective tools are passed; internet content is treated as untrusted data and cannot trigger other actions); every web search/fetch is audited with bot, human, domain and result, and runs with the intersection of the bot's and the triggering human's permissions
-- [ ] **BOT-07**: Usage per bot is metered per day; when the daily limit is reached the bot replies with a clear notice instead of calling the model; owners and admins see today's usage against the limit
-- [ ] **BOT-08**: Bots can use MCP servers: an Organization Admin registers MCP servers (remote HTTP/SSE, or stdio servers that run sandboxed inside the OpenClaw cell) with credentials held as `SecretReference`s, and whoever manages a bot attaches registered servers to it (personal bots only from an admin-approved list); each server's tools are listed, can be individually enabled, run only with the intersection of the bot's and the asking human's permissions, are treated as untrusted output, and every call is audited (bot, human, server, tool, result)
-- [ ] **BOT-09**: The OpenClaw plugin system and its Marketplace (ClawHub) are integrated: an Organization Admin browses and searches the marketplace from Settings, sees each plugin's publisher, version, permissions/tools and risk, installs a pinned version into the cell after an explicit review step, and can update or uninstall it; installs are audited and allowlisted (nothing installs itself, auto-update stays off, dangerous tool classes stay blocked regardless of what a plugin declares)
-- [ ] **BOT-10**: Installed plugins and MCP servers appear as capabilities in each bot's settings and in the org capability policy (BOT-05): a bot uses a plugin's tools only when it is enabled for that bot and allowed by policy; personal bots can use only plugins/MCP servers the admin allowed for personal bots; the effective set is delivered per turn to the cell and enforced by the same tool gate as internet access
+- [x] **BOT-01**: Any member allowed by policy (new permission `bot.create_personal`, granted to every role by default, deniable by rules) can create a personal bot from the same one-click flow; a personal bot is visible to and usable by its owner only (resolver-enforced); admins see its metadata (name, owner, model, capabilities, usage) for governance but never its conversations
+- [x] **BOT-02**: Creating a personal bot creates a private direct conversation between the owner and the bot that appears in the owner's chat sidebar (Bots section) and that nobody else can read (RLS + resolver); deleting or disabling the bot archives it
+- [x] **BOT-03**: In a bot's direct conversation the bot answers every message without an @mention, one generation at a time, using the conversation history as context; members can also open a direct conversation with any team bot they may use (personal history, invisible to others)
+- [x] **BOT-04**: Per-bot capability toggles, editable by whoever manages the bot: internet access (web search + page fetch, read-only), persistent memory (per bot and per human, user-visible and clearable), current date/time in context, reply mode in channels (mentions only / every message), and a daily usage limit (turns per day)
+- [x] **BOT-05**: An Organization Admin sets a capability policy (allow/deny each capability org-wide and separately for personal bots); a bot's effective capabilities are its toggles ∩ the policy, the UI shows a disabled toggle with the reason, and dangerous tools (shell/exec, filesystem writes, browser control, gateway admin) are never offered
+- [x] **BOT-06**: Capabilities are enforced in the OpenClaw cell on every turn (only the effective tools are passed; internet content is treated as untrusted data and cannot trigger other actions); every web search/fetch is audited with bot, human, domain and result, and runs with the intersection of the bot's and the triggering human's permissions
+- [x] **BOT-07**: Usage per bot is metered per day; when the daily limit is reached the bot replies with a clear notice instead of calling the model; owners and admins see today's usage against the limit
+- [x] **BOT-08**: Bots can use MCP servers: an Organization Admin registers MCP servers (remote HTTP/SSE, or stdio servers that run sandboxed inside the OpenClaw cell) with credentials held as `SecretReference`s, and whoever manages a bot attaches registered servers to it (personal bots only from an admin-approved list); each server's tools are listed, can be individually enabled, run only with the intersection of the bot's and the asking human's permissions, are treated as untrusted output, and every call is audited (bot, human, server, tool, result)
+- [x] **BOT-09**: The OpenClaw plugin system and its Marketplace (ClawHub) are integrated: an Organization Admin browses and searches the marketplace from Settings, sees each plugin's publisher, version, permissions/tools and risk, installs a pinned version into the cell after an explicit review step, and can update or uninstall it; installs are audited and allowlisted (nothing installs itself, auto-update stays off, dangerous tool classes stay blocked regardless of what a plugin declares)
+- [x] **BOT-10**: Installed plugins and MCP servers appear as capabilities in each bot's settings and in the org capability policy (BOT-05): a bot uses a plugin's tools only when it is enabled for that bot and allowed by policy; personal bots can use only plugins/MCP servers the admin allowed for personal bots; the effective set is delivered per turn to the cell and enforced by the same tool gate as internet access
 
 ### Self-hosted Release (SELF)
 
@@ -330,16 +330,16 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | RT-04 | Phase 3 | Delivered | realtime-presence.int.test.ts (expiry, dead peer, crashed instance), e2e presence.spec + presence-away.spec (header, members, Work Zone) |
 | RT-05 | Phase 1 | Delivered | `packages/realtime-client` (`client.test.ts`) used by web; desktop renders the web app |
 | CHAT-01 | Phase 1 | Delivered | `chat.int.test.ts` channels suite (public/private, join, archive by owner/admin); leave route; `chat.spec.ts` create + join in UI |
-| BOT-01 | Phase 3.1 | Pending | New (owner request 2026-10-04) |
-| BOT-02 | Phase 3.1 | Pending | New (owner request 2026-10-04) |
-| BOT-03 | Phase 3.1 | Pending | New (owner request 2026-10-04) |
-| BOT-04 | Phase 3.1 | Pending | New (owner request 2026-10-04) |
-| BOT-05 | Phase 3.1 | Pending | New (owner request 2026-10-04) |
-| BOT-06 | Phase 3.1 | Pending | New (owner request 2026-10-04) |
-| BOT-07 | Phase 3.1 | Pending | New (owner request 2026-10-04) |
-| BOT-08 | Phase 3.1 | Pending | New (owner request 2026-10-04: MCP + OpenClaw plugins/Marketplace) |
-| BOT-09 | Phase 3.1 | Pending | New (owner request 2026-10-04: MCP + OpenClaw plugins/Marketplace) |
-| BOT-10 | Phase 3.1 | Pending | New (owner request 2026-10-04: MCP + OpenClaw plugins/Marketplace) |
+| BOT-01 | Phase 3.1 | Complete | New (owner request 2026-10-04) |
+| BOT-02 | Phase 3.1 | Complete | New (owner request 2026-10-04) |
+| BOT-03 | Phase 3.1 | Complete | New (owner request 2026-10-04) |
+| BOT-04 | Phase 3.1 | Complete | New (owner request 2026-10-04) |
+| BOT-05 | Phase 3.1 | Complete | New (owner request 2026-10-04) |
+| BOT-06 | Phase 3.1 | Complete | New (owner request 2026-10-04) |
+| BOT-07 | Phase 3.1 | Complete | New (owner request 2026-10-04) |
+| BOT-08 | Phase 3.1 | Complete | New (owner request 2026-10-04: MCP + OpenClaw plugins/Marketplace) |
+| BOT-09 | Phase 3.1 | Complete | New (owner request 2026-10-04: MCP + OpenClaw plugins/Marketplace) |
+| BOT-10 | Phase 3.1 | Complete | New (owner request 2026-10-04: MCP + OpenClaw plugins/Marketplace) |
 | CHAT-02 | Phase 4 | Partial | Flat channel list with unread dot; no department/team grouping or views |
 | CHAT-03 | Phase 1 | Delivered | `chat.int.test.ts` "thread replies update the root and refuse nesting"; `chat.spec.ts` reply count + participants |
 | CHAT-04 | Phase 4 | Pending | No DMs |
@@ -439,6 +439,7 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | ART-06 | Phase 12 | Pending | No acceptance specs |
 
 **Coverage:**
+
 - v1 requirement IDs: 140 total (127 + SLICE-06…18 added 2026-10-04)
 - Superseded (not mapped): 5 (SLICE-01…04, DEV-07)
 - Active, mapped to phases: 135

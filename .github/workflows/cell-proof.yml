@@ -1,0 +1,72 @@
+name: Cell proof
+
+# Real-cell proof of the Phase 3.1 done-criterion (scripts/cell-proof.sh): a real OpenClaw cell installs the official
+# DuckDuckGo plugin from the REAL ClawHub, a personal bot searches the REAL web with it and calls a fake MCP tool, both
+# audited, then the plugin is uninstalled. It depends on third-party services, so it never runs on ordinary pushes:
+# add the `cell-proof` label to a pull request (remove and re-add it to run again), or dispatch it once this file is
+# on the default branch.
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+
+concurrency:
+  group: cell-proof-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    name: real-cell proof (real ClawHub + DuckDuckGo, fake model + MCP)
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'cell-proof'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # Nothing bundled: web search exists only after the marketplace install (attributable to the plugin).
+      OCW_BUNDLED_PLUGINS: none
+      # The cell container reaches the native API through host.docker.internal (disposable runner only).
+      OCW_E2E_API_HOST: 0.0.0.0
+      OCW_E2E_CLAWHUB_URL: https://clawhub.ai
+      OCW_MOCK_MODEL_BASE_URL: http://fake-model:18999/v1
+      PROOF_BUILD: "1"
+      PROOF_OUT: ${{ github.workspace }}/proof-out
+      OCW_E2E_SCREENSHOT_DIR: ${{ github.workspace }}/proof-out/screenshots
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      # The OpenClaw base image is ~5 GB unpacked; make room on the hosted runner first.
+      - name: Free runner disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - name: Environment and database roles
+        run: |
+          pnpm setup:env
+          docker compose up -d --wait postgres redis
+          pnpm db:migrate
+      - run: pnpm exec playwright install --with-deps chromium
+      - name: ClawHub reachable (one retry)
+        run: |
+          for i in 1 2; do
+            curl -sf -m 30 -o /dev/null "https://clawhub.ai/api/v1/packages/search?q=duckduckgo&family=code-plugin" && exit 0
+            echo "ClawHub unreachable (attempt $i, $(date -u +%FT%TZ))"; sleep 60
+          done
+          exit 1
+      - name: Real-cell proof (isolated stack + real cell)
+        run: |
+          mkdir -p "$OCW_E2E_SCREENSHOT_DIR"
+          bash scripts/e2e-isolated.sh --cmd "bash scripts/cell-proof.sh"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: cell-proof
+          path: |
+            proof-out
+            e2e/playwright-report
+            e2e/test-results
+          if-no-files-found: warn
+          retention-days: 30

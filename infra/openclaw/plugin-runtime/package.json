@@ -1,0 +1,16 @@
+{
+  "name": "ocw-openclaw-channel-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Runtime dependencies of apps/openclaw-channel for the cell image, pinned by package-lock.json (npm ci). `dependencies` must equal apps/openclaw-channel/package.json (plugin-runtime.test.mjs); `overrides` keep transitive versions on the ones pnpm-lock.yaml resolved.",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "ws": "8.21.3",
+    "zod": "4.6.5"
+  },
+  "overrides": {
+    "@hono/node-server": "2.1.1",
+    "hono": "4.13.9",
+    "ip-address": "10.7.2"
+  }
+}

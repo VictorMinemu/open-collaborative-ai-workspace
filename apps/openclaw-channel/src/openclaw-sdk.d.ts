@@ -67,13 +67,113 @@ declare module "openclaw/plugin-sdk/channel-core" {
     security?: Record<string, unknown>;
   }): ChannelPlugin<ResolvedAccount>;
 
+  /** `before_tool_call` / `after_tool_call` event (2026.9.7 docs/plugins/hooks/tool-policy.md, dist hook runner). */
+  export type PluginHookToolCallEvent = {
+    toolName: string;
+    params?: Record<string, unknown>;
+    toolCallId?: string;
+    runId?: string;
+    /** after_tool_call only. */
+    result?: unknown;
+    error?: unknown;
+    durationMs?: number;
+  };
+
+  export type PluginHookToolContext = {
+    toolName?: string;
+    agentId?: string;
+    sessionKey?: string;
+    sessionId?: string;
+    runId?: string;
+    toolCallId?: string;
+    /** Aborts when the owning tool call is cancelled (before_tool_call). */
+    abortSignal?: AbortSignal;
+    requester?: { channel?: string; accountId?: string; senderId?: string; senderIsOwner?: boolean };
+  };
+
+  export type BeforeToolCallResult = {
+    block?: boolean;
+    blockReason?: string;
+    params?: Record<string, unknown>;
+  };
+
+  export type HookOptions = { priority?: number; matcher?: string[]; timeoutMs?: number };
+
+  /**
+   * Trusted runtime context a tool factory receives when tools are assembled for a run (2026.9.7
+   * `resolveOpenClawPluginToolInputs` in dist/openclaw-tools-*.mjs, docs/plugins/building-plugins.md
+   * "Registering tools"): `sessionKey` is the run's session key, `nativeChannelId` the platform conversation.
+   */
+  export type OpenClawPluginToolContext = {
+    agentId?: string;
+    sessionKey?: string;
+    sessionId?: string;
+    messageChannel?: string;
+    agentAccountId?: string;
+    nativeChannelId?: string;
+    requesterSenderId?: string;
+    senderIsOwner?: boolean;
+    sandboxed?: boolean;
+  };
+
+  /** A concrete agent tool: `execute(toolCallId, params, signal?, onUpdate?)` (core runtime signature). */
+  export type OpenClawAgentTool = {
+    name: string;
+    label?: string;
+    description: string;
+    parameters: Record<string, unknown>;
+    execute: (
+      toolCallId: string,
+      params: unknown,
+      signal?: AbortSignal,
+    ) => Promise<{ content: Array<{ type: "text"; text: string }>; details?: unknown }>;
+  };
+
+  /** How the registry being built was loaded (docs/plugins/sdk-entrypoints/registration-mode.md). */
+  export type PluginRegistrationMode =
+    | "full"
+    | "discovery"
+    | "tool-discovery"
+    | "setup-only"
+    | "setup-runtime"
+    | "cli-metadata";
+
+  /** The subset of `OpenClawPluginApi` this plugin uses. */
+  export type OpenClawPluginApi = {
+    registrationMode?: PluginRegistrationMode;
+    logger?: { info?: (msg: string) => void; warn?: (msg: string) => void };
+    registerTool(
+      factory: (ctx: OpenClawPluginToolContext) => OpenClawAgentTool | null | undefined,
+      opts: { name: string; optional?: boolean },
+    ): void;
+    on(
+      hook: "before_tool_call",
+      handler: (
+        event: PluginHookToolCallEvent,
+        ctx: PluginHookToolContext,
+      ) => BeforeToolCallResult | undefined | Promise<BeforeToolCallResult | undefined>,
+      opts?: HookOptions,
+    ): void;
+    on(
+      hook: "after_tool_call",
+      handler: (event: PluginHookToolCallEvent, ctx: PluginHookToolContext) => void | Promise<void>,
+      opts?: HookOptions,
+    ): void;
+  };
+
   export function defineChannelPluginEntry<ResolvedAccount>(params: {
     id: string;
     name: string;
     description: string;
     plugin: ChannelPlugin<ResolvedAccount>;
     setRuntime?: (runtime: unknown) => void;
-    registerFull?: (api: unknown) => void;
+    /** Runs only in "full" and "tool-discovery" (dist/core-*.mjs). */
+    registerFull?: (api: OpenClawPluginApi) => void;
+    /**
+     * Runs in "full", "discovery" and "tool-discovery". Agent turns run with a non-activated ("discovery")
+     * registry whenever the config changed after boot, so anything a turn needs (typed hooks) goes here.
+     */
+    registerCapabilities?: (api: OpenClawPluginApi) => void;
   }): unknown;
 
   export function defineSetupPluginEntry<ResolvedAccount>(plugin: ChannelPlugin<ResolvedAccount>): unknown;

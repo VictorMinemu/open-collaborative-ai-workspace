@@ -128,15 +128,21 @@ export type PermissionRule = z.infer<typeof PermissionRule>;
 export const PermissionRuleList = z.object({ rules: z.array(PermissionRule) });
 export type PermissionRuleList = z.infer<typeof PermissionRuleList>;
 
-/** Tool-layer name (a Work Zone tool such as `Bash` or `mcp__github:create_pr`). */
+/**
+ * Tool-layer name: a Work Zone tool such as `Bash` or `mcp__github:create_pr`, or a bot tool (an MCP tool
+ * `<safeServerName>__<tool>` or a plugin tool) for `bot.tool.use`.
+ */
 export const RuleTool = z
   .string()
   .min(1)
   .max(64)
   .regex(/^[A-Za-z0-9_.:-]+$/);
 
-/** The permission a tool-layer rule refines: only Work Zone approvals name a tool. */
-const TOOL_PERMISSION: Permission = "work_session.approve";
+/**
+ * The permissions a tool-layer rule refines: Work Zone approvals and bot tool use (Phase 3.1, so an admin can
+ * deny one MCP or plugin tool to a role, unit or user).
+ */
+const TOOL_PERMISSIONS: readonly Permission[] = ["work_session.approve", "bot.tool.use"];
 
 export const CreatePermissionRuleRequest = z
   .object({
@@ -170,8 +176,12 @@ export const CreatePermissionRuleRequest = z
         message: "this permission cannot be granted by an allow rule",
       });
     }
-    if (r.tool !== null && !permissionMatches(r.permission, TOOL_PERMISSION)) {
-      ctx.addIssue({ code: "custom", path: ["tool"], message: `a tool applies only to ${TOOL_PERMISSION}` });
+    if (r.tool !== null && !TOOL_PERMISSIONS.some((p) => permissionMatches(r.permission, p))) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["tool"],
+        message: `a tool applies only to ${TOOL_PERMISSIONS.join(" or ")}`,
+      });
     }
   });
 export type CreatePermissionRuleRequest = z.infer<typeof CreatePermissionRuleRequest>;

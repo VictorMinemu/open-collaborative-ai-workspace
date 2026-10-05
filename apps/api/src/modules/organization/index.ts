@@ -17,6 +17,8 @@ export { listMembers, memberDirectory } from "./members";
 export { AuthzDeniedError } from "./permissions/errors";
 export type { PrincipalRef } from "./permissions/facts";
 export {
+  type AgentFacts,
+  agentResource,
   type ChannelFacts,
   channelMemberResource,
   channelResource,

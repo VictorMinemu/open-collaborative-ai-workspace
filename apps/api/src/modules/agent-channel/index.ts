@@ -23,12 +23,19 @@ import { type ApiModule, type App, authOf, type Core, tenant } from "../../core"
 import { randomToken, sha256Hex } from "../../lib/crypto";
 import { badRequest, HttpError, notFound } from "../../lib/errors";
 import { applyCellStatus, cellAgents, cellProviders, cellSubscriptions, findAgent } from "../agent";
+import { cellAgentCapabilities, loadPolicy } from "../bot-capabilities";
+import { cellMcpServers } from "../mcp";
 import { channelResource, createPermissionService, type ResourceFacts } from "../organization";
+import { cellApprovedPlugins } from "../plugins";
 import { cellOf, createCellAuth } from "./auth";
 import { registerCellGateway } from "./gateway";
+import { registerMcpCellRoutes } from "./mcp";
+import { registerMemoryRoutes } from "./memories";
 import { registerMentionHandler } from "./mentions";
+import { registerPluginCellRoutes } from "./plugins";
 import { createCellPresence } from "./presence";
 import { createProviderAuth } from "./provider-auth";
+import { registerToolCallRoutes } from "./tool-calls";
 
 export { buildMentionEvents } from "./mentions";
 
@@ -251,6 +258,17 @@ export function createAgentChannelModule(core: Core): ApiModule {
                   const topic = cellTopic(cell.cellId);
                   const providers = await cellProviders(core, tx);
                   const subscriptions = await cellSubscriptions(tx);
+                  // Per-agent tool sets (D-08 layer 2) and the org's search provider (D-09).
+                  const capabilities = await cellAgentCapabilities(tx, core.env);
+                  const policy = await loadPolicy(tx);
+                  const agents = (await cellAgents(tx)).map((a) => ({
+                    ...a,
+                    capabilities: capabilities.get(a.id) ?? { tools: [] },
+                  }));
+                  // MCP servers (D-13): header values are revealed only here, for this authenticated cell.
+                  const mcpServers = await cellMcpServers(core, tx);
+                  // Marketplace plugins (D-14): the approved tuples the cell's executor may act on.
+                  const plugins = await cellApprovedPlugins(tx);
                   await core.audit.record(tx, {
                     action: "agent_cell.config_read",
                     resourceType: "agent_cell",
@@ -258,10 +276,12 @@ export function createAgentChannelModule(core: Core): ApiModule {
                     actorKind: "system",
                     clientKind: "agent",
                     sessionId: `cell:${cell.credentialId}`,
-                    // Which provider credentials were delivered; never the keys.
+                    // Which provider and MCP credentials were delivered; never the keys or header values.
                     metadata: {
                       providers: providers.map((p) => p.id),
                       subscriptions: subscriptions.map((p) => p.id),
+                      mcpServers: mcpServers.map((s) => s.id),
+                      plugins: plugins.map((p) => p.pluginRowId),
                       credential: cell.source,
                     },
                   });
@@ -271,9 +291,12 @@ export function createAgentChannelModule(core: Core): ApiModule {
                     organizationId: cell.organizationId,
                     topic,
                     lastSeq: await core.realtime.lastSeq(tx, topic),
-                    agents: await cellAgents(tx),
+                    agents,
                     providers,
                     subscriptions,
+                    webSearch: { provider: policy.searchProvider },
+                    mcpServers,
+                    plugins,
                   } as const;
                 },
               );
@@ -416,6 +439,15 @@ export function createAgentChannelModule(core: Core): ApiModule {
               return { ok: true as const };
             },
           );
+
+          // The cell's tool gate (D-08): decision + caps + taint + audit for every gated tool call.
+          registerToolCallRoutes(scope, core, perms);
+          // The cell's memory tool (D-10): owner bound to the delivered turn, DM only, refused once tainted.
+          registerMemoryRoutes(scope, core, perms);
+          // The cell's MCP tool discovery (D-13): probe reports → the tool catalog.
+          registerMcpCellRoutes(scope, core);
+          // The cell's marketplace executor and install gate (D-14).
+          registerPluginCellRoutes(scope, core);
 
           scope.post(
             "/agents/:id/status",

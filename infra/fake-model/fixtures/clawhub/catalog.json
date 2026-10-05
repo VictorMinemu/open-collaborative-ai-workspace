@@ -1,0 +1,418 @@
+{
+  "$comment": "Fake ClawHub catalog (03.1-11, D-14 / D-15). Shapes mirror the live clawhub.ai API (GET /api/v1/packages/search and /api/v1/packages/{name}/detail?version=, observed 2026-10-04). Each package lists its versions; the newest is `package.latestVersion`. Digests of the @ocw-test packages are placeholders: when FAKE_CLAWHUB_ARTIFACT_DIR holds the tarball (`artifact.npmTarballName`), the fake serves it and reports its real sha256, sha512 integrity, sha1 shasum and size instead. @openclaw/duckduckgo-plugin carries the live 2026.9.7 values.",
+  "packages": [
+    {
+      "package": {
+        "name": "@ocw-test/notes-plugin",
+        "displayName": "OCW Test Notes",
+        "family": "code-plugin",
+        "channel": "official",
+        "isOfficial": true,
+        "ownerHandle": "ocw-test",
+        "ownerOfficial": true,
+        "runtimeId": "ocw-notes",
+        "summary": "Look up team notes (test fixture).",
+        "categories": ["productivity"],
+        "stats": { "downloads": 120, "installs": 14, "stars": 3, "versions": 2 },
+        "verificationTier": "source-linked",
+        "scanStatus": "clean",
+        "createdAt": 1788000000000,
+        "updatedAt": 1790000000000
+      },
+      "owner": { "handle": "ocw-test", "displayName": "OCW Test", "official": true },
+      "readme": "# OCW Test Notes\n\nTest fixture: one read-only tool.",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "createdAt": 1788000000000,
+          "changelog": "First release.",
+          "distTags": [],
+          "compatibility": {
+            "builtWithOpenClawVersion": "2026.9.7",
+            "minGatewayVersion": ">=2026.7.2",
+            "pluginApiRange": ">=2026.9.7"
+          },
+          "pluginManifestSummary": {
+            "schemaVersion": 1,
+            "bundledSkills": [],
+            "configFields": [],
+            "mcpServers": [],
+            "contracts": { "tools": ["notes_lookup"] }
+          },
+          "verification": {
+            "tier": "source-linked",
+            "scope": "artifact-only",
+            "hasProvenance": false,
+            "scanStatus": "clean",
+            "sourceRepo": "ocw-test/notes-plugin",
+            "sourceCommit": "1111111111111111111111111111111111111111",
+            "trustedOpenClawPlugin": false
+          },
+          "artifact": {
+            "kind": "npm-pack",
+            "format": "tgz",
+            "sha256": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+            "npmIntegrity": "sha512-b2N3LXRlc3Qtbm90ZXMtcGx1Z2luLTEuMC4wLXBsYWNlaG9sZGVyLWludGVncml0eS0wMDAwMDAwMDAwMDA=",
+            "npmShasum": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+            "npmTarballName": "ocw-test-notes-plugin-1.0.0.tgz",
+            "size": 2048
+          },
+          "security": {
+            "overview": "A notes lookup tool. No shell, filesystem or credential access found.",
+            "verdict": "benign",
+            "securityAuditUrl": "https://clawhub.example/ocw-test/plugins/notes-plugin/security-audit?version=1.0.0",
+            "trust": {
+              "scanStatus": "clean",
+              "moderationState": null,
+              "blockedFromDownload": false,
+              "reasons": [],
+              "pending": false,
+              "stale": false
+            }
+          }
+        },
+        {
+          "version": "1.1.0",
+          "createdAt": 1790000000000,
+          "changelog": "Adds notes_search.",
+          "distTags": ["latest"],
+          "compatibility": {
+            "builtWithOpenClawVersion": "2026.9.7",
+            "minGatewayVersion": ">=2026.7.2",
+            "pluginApiRange": ">=2026.9.7"
+          },
+          "pluginManifestSummary": {
+            "schemaVersion": 1,
+            "bundledSkills": [],
+            "configFields": [],
+            "mcpServers": [],
+            "contracts": { "tools": ["notes_lookup", "notes_search"] }
+          },
+          "verification": {
+            "tier": "source-linked",
+            "scope": "artifact-only",
+            "hasProvenance": false,
+            "scanStatus": "clean",
+            "sourceRepo": "ocw-test/notes-plugin",
+            "sourceCommit": "2222222222222222222222222222222222222222",
+            "trustedOpenClawPlugin": false
+          },
+          "artifact": {
+            "kind": "npm-pack",
+            "format": "tgz",
+            "sha256": "1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b",
+            "npmIntegrity": "sha512-b2N3LXRlc3Qtbm90ZXMtcGx1Z2luLTEuMS4wLXBsYWNlaG9sZGVyLWludGVncml0eS0wMDAwMDAwMDAwMDA=",
+            "npmShasum": "1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b",
+            "npmTarballName": "ocw-test-notes-plugin-1.1.0.tgz",
+            "size": 2304
+          },
+          "security": {
+            "overview": "A notes lookup and search tool. No shell, filesystem or credential access found.",
+            "verdict": "benign",
+            "securityAuditUrl": "https://clawhub.example/ocw-test/plugins/notes-plugin/security-audit?version=1.1.0",
+            "trust": {
+              "scanStatus": "clean",
+              "moderationState": null,
+              "blockedFromDownload": false,
+              "reasons": [],
+              "pending": false,
+              "stale": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "package": {
+        "name": "@ocw-test/echo-plugin",
+        "displayName": "OCW Test Echo",
+        "family": "code-plugin",
+        "channel": "community",
+        "isOfficial": false,
+        "ownerHandle": "ocw-community-dev",
+        "ownerOfficial": false,
+        "runtimeId": "ocw-echo",
+        "summary": "Echoes text back (community test fixture).",
+        "categories": ["other"],
+        "stats": { "downloads": 7, "installs": 1, "stars": 0, "versions": 1 },
+        "verificationTier": "source-linked",
+        "scanStatus": "clean",
+        "createdAt": 1789000000000,
+        "updatedAt": 1789000000000
+      },
+      "owner": { "handle": "ocw-community-dev", "displayName": "Community Dev", "official": false },
+      "readme": "# OCW Test Echo\n\nCommunity test fixture: tool `ocw_echo` returns `echo <text>`.",
+      "versions": [
+        {
+          "version": "0.1.0",
+          "createdAt": 1789000000000,
+          "changelog": "",
+          "distTags": ["latest"],
+          "compatibility": {
+            "builtWithOpenClawVersion": "2026.9.7",
+            "minGatewayVersion": ">=2026.9.0",
+            "pluginApiRange": ">=2026.9.7"
+          },
+          "pluginManifestSummary": {
+            "schemaVersion": 1,
+            "bundledSkills": [],
+            "configFields": [],
+            "mcpServers": [],
+            "contracts": { "tools": ["ocw_echo"] }
+          },
+          "verification": {
+            "tier": "source-linked",
+            "scope": "artifact-only",
+            "hasProvenance": false,
+            "scanStatus": "clean",
+            "sourceRepo": "ocw-community-dev/echo-plugin",
+            "sourceCommit": "3333333333333333333333333333333333333333",
+            "trustedOpenClawPlugin": false
+          },
+          "artifact": {
+            "kind": "npm-pack",
+            "format": "tgz",
+            "sha256": "2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c",
+            "npmIntegrity": null,
+            "npmShasum": null,
+            "npmTarballName": "ocw-test-echo-plugin-0.1.0.tgz",
+            "size": 1536
+          },
+          "security": {
+            "overview": "Returns its input. No network, shell or filesystem access found.",
+            "verdict": "benign",
+            "securityAuditUrl": "https://clawhub.example/ocw-community-dev/plugins/echo-plugin/security-audit?version=0.1.0",
+            "trust": {
+              "scanStatus": "clean",
+              "moderationState": null,
+              "blockedFromDownload": false,
+              "reasons": [],
+              "pending": false,
+              "stale": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "package": {
+        "name": "@ocw-test/shell-plugin",
+        "displayName": "OCW Test Shell Runner",
+        "family": "code-plugin",
+        "channel": "community",
+        "isOfficial": false,
+        "ownerHandle": "shady-dev",
+        "ownerOfficial": false,
+        "runtimeId": "ocw-shell",
+        "summary": "Runs shell commands for the model (test fixture; must be refused).",
+        "categories": ["developer-tools"],
+        "stats": { "downloads": 3, "installs": 0, "stars": 0, "versions": 1 },
+        "verificationTier": "source-linked",
+        "scanStatus": "clean",
+        "createdAt": 1789500000000,
+        "updatedAt": 1789500000000
+      },
+      "owner": { "handle": "shady-dev", "displayName": "Shady Dev", "official": false },
+      "readme": "# Shell runner\n\nGives the model a shell.",
+      "versions": [
+        {
+          "version": "2.0.0",
+          "createdAt": 1789500000000,
+          "changelog": "",
+          "distTags": ["latest"],
+          "compatibility": {
+            "builtWithOpenClawVersion": "2026.9.7",
+            "minGatewayVersion": ">=2026.9.0",
+            "pluginApiRange": ">=2026.9.7"
+          },
+          "pluginManifestSummary": {
+            "schemaVersion": 1,
+            "bundledSkills": [],
+            "configFields": [],
+            "mcpServers": [],
+            "contracts": { "tools": ["run_shell"] }
+          },
+          "verification": {
+            "tier": "source-linked",
+            "scope": "artifact-only",
+            "hasProvenance": false,
+            "scanStatus": "clean",
+            "sourceRepo": "shady-dev/shell-plugin",
+            "sourceCommit": "4444444444444444444444444444444444444444",
+            "trustedOpenClawPlugin": false
+          },
+          "artifact": {
+            "kind": "npm-pack",
+            "format": "tgz",
+            "sha256": "3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d",
+            "npmIntegrity": null,
+            "npmShasum": null,
+            "npmTarballName": "ocw-test-shell-plugin-2.0.0.tgz",
+            "size": 1800
+          },
+          "security": {
+            "overview": "Executes arbitrary shell commands passed by the model.",
+            "verdict": "suspicious",
+            "securityAuditUrl": "https://clawhub.example/shady-dev/plugins/shell-plugin/security-audit?version=2.0.0",
+            "trust": {
+              "scanStatus": "clean",
+              "moderationState": null,
+              "blockedFromDownload": false,
+              "reasons": [],
+              "pending": false,
+              "stale": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "package": {
+        "name": "@ocw-test/relay-channel-plugin",
+        "displayName": "OCW Test Relay Channel",
+        "family": "code-plugin",
+        "channel": "official",
+        "isOfficial": true,
+        "ownerHandle": "ocw-test",
+        "ownerOfficial": true,
+        "runtimeId": "ocw-relay",
+        "summary": "A messaging channel (test fixture; channels bypass the Agent Channel API and are refused).",
+        "categories": ["channels"],
+        "stats": { "downloads": 40, "installs": 5, "stars": 1, "versions": 1 },
+        "verificationTier": "source-linked",
+        "scanStatus": "clean",
+        "createdAt": 1789200000000,
+        "updatedAt": 1789200000000
+      },
+      "owner": { "handle": "ocw-test", "displayName": "OCW Test", "official": true },
+      "readme": "# Relay channel\n\nBridges a chat network into OpenClaw.",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "createdAt": 1789200000000,
+          "changelog": "",
+          "distTags": ["latest"],
+          "compatibility": {
+            "builtWithOpenClawVersion": "2026.9.7",
+            "minGatewayVersion": ">=2026.7.2",
+            "pluginApiRange": ">=2026.9.7"
+          },
+          "pluginManifestSummary": {
+            "schemaVersion": 1,
+            "bundledSkills": [],
+            "configFields": [{ "name": "relayToken", "required": true, "sensitive": true }],
+            "mcpServers": [],
+            "channels": ["relay"],
+            "contracts": {}
+          },
+          "verification": {
+            "tier": "source-linked",
+            "scope": "artifact-only",
+            "hasProvenance": false,
+            "scanStatus": "clean",
+            "sourceRepo": "ocw-test/relay-channel-plugin",
+            "sourceCommit": "5555555555555555555555555555555555555555",
+            "trustedOpenClawPlugin": false
+          },
+          "artifact": {
+            "kind": "npm-pack",
+            "format": "tgz",
+            "sha256": "4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e",
+            "npmIntegrity": null,
+            "npmShasum": null,
+            "npmTarballName": "ocw-test-relay-channel-plugin-1.0.0.tgz",
+            "size": 4096
+          },
+          "security": {
+            "overview": "A chat bridge channel.",
+            "verdict": "benign",
+            "securityAuditUrl": "https://clawhub.example/ocw-test/plugins/relay-channel-plugin/security-audit?version=1.0.0",
+            "trust": {
+              "scanStatus": "clean",
+              "moderationState": null,
+              "blockedFromDownload": false,
+              "reasons": [],
+              "pending": false,
+              "stale": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "package": {
+        "name": "@openclaw/duckduckgo-plugin",
+        "displayName": "OpenClaw DuckDuckGo Plugin",
+        "family": "code-plugin",
+        "channel": "official",
+        "isOfficial": true,
+        "ownerHandle": "openclaw",
+        "ownerOfficial": true,
+        "runtimeId": "duckduckgo",
+        "summary": "OpenClaw DuckDuckGo plugin.",
+        "categories": ["web"],
+        "stats": { "downloads": 11164, "installs": 59, "stars": 0, "versions": 9 },
+        "verificationTier": "source-linked",
+        "scanStatus": "clean",
+        "tags": { "beta": "2026.7.2-beta.7", "latest": "2026.9.7" },
+        "createdAt": 1785614287703,
+        "updatedAt": 1790746980405
+      },
+      "owner": { "handle": "openclaw", "displayName": "OpenClaw", "official": true },
+      "readme": "# OpenClaw DuckDuckGo Plugin\n\nOfficial OpenClaw plugin for DuckDuckGo web search.",
+      "versions": [
+        {
+          "version": "2026.9.7",
+          "createdAt": 1790738814644,
+          "changelog": "",
+          "distTags": ["latest"],
+          "compatibility": {
+            "builtWithOpenClawVersion": "2026.9.7",
+            "minGatewayVersion": ">=2026.7.2",
+            "pluginApiRange": ">=2026.9.7"
+          },
+          "pluginManifestSummary": {
+            "schemaVersion": 1,
+            "bundledSkills": [],
+            "categories": ["web"],
+            "configFields": [{ "name": "webSearch", "required": false, "sensitive": false }],
+            "mcpServers": [],
+            "contracts": { "webSearchProviders": ["duckduckgo"] }
+          },
+          "verification": {
+            "tier": "source-linked",
+            "scope": "artifact-only",
+            "hasProvenance": false,
+            "scanStatus": "clean",
+            "sourceRepo": "openclaw/openclaw",
+            "sourceCommit": "c074824a27c96d3983043f9eeb33823cd1772d8c",
+            "sourcePath": "extensions/duckduckgo",
+            "trustedOpenClawPlugin": true
+          },
+          "artifact": {
+            "kind": "npm-pack",
+            "format": "tgz",
+            "sha256": "4b91c155182453529ac1b8f44751cf39e64d1b4d92a44c3637ef63d482453ee5",
+            "npmIntegrity": "sha512-gZOYJcqpMXDKahZLhE7RupawScXvc/ERGwmDM+NdiA1OyRYWLk+WpGVYhnNqGt7zJAdtTUkMJZKEg55fnvdk1A==",
+            "npmShasum": "a7a60fafa87caec4150b00b46a8adb7c30eba50f",
+            "npmTarballName": "openclaw-duckduckgo-plugin-2026.9.7.tgz",
+            "size": 80004
+          },
+          "security": {
+            "overview": "This package is a DuckDuckGo web search plugin that only registers a user-invoked search provider and sends search queries to DuckDuckGo.",
+            "verdict": "benign",
+            "securityAuditUrl": "https://clawhub.ai/openclaw/plugins/duckduckgo-plugin/security-audit?version=2026.9.7",
+            "trust": {
+              "scanStatus": "clean",
+              "moderationState": null,
+              "blockedFromDownload": false,
+              "reasons": [],
+              "pending": false,
+              "stale": false
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

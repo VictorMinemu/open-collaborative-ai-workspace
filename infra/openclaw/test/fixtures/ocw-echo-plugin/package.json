@@ -1,0 +1,34 @@
+{
+  "name": "@ocw-test/echo-plugin",
+  "version": "0.1.0",
+  "description": "TEST FIXTURE ONLY (never shipped): one tool, ocw_echo, for the OCW cell's marketplace smoke.",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./index.js"
+    ],
+    "runtimeExtensions": [
+      "./index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.9.7"
+    },
+    "build": {
+      "openclawVersion": "2026.9.7"
+    }
+  },
+  "files": [
+    "index.js",
+    "openclaw.plugin.json"
+  ],
+  "peerDependencies": {
+    "openclaw": ">=2026.9.7"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  }
+}

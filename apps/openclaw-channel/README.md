@@ -53,6 +53,18 @@ is in the workspace.
    - If the turn still fails, one notice is posted with key `evt:<eventId>:failed`.
    - Typing: `POST /typing {typing:true}` every 4 s, then `{typing:false}`.
 5. **`cell.config.changed`:** re-read `/cell`, reconcile, then send the status acks again.
+   - **MCP servers (D-13):** every snapshot server with at least one enabled tool becomes
+     `mcp.servers.<safeName>` (`m` + 8 hex) with `url`, `transport`, `headers` as `${OCW_MCP_<SAFE>_<i>}` references
+     (the values only in the gateway env, removed with the server) and `toolFilter.include` = the exact enabled MCP
+     tool names. A server without enabled tools is not rendered, so the cell never connects to it. Only `m<8hex>`
+     entries are ever touched.
+   - **`mcp.probe`:** the plugin connects to the snapshot server with the official MCP SDK client
+     (`@modelcontextprotocol/sdk` 1.30.0, the version OpenClaw bundles; streamable HTTP or SSE, no redirects,
+     20 s), lists its tools and reports `POST /mcp/probe-results`. Errors are classified and never carry a header
+     value; the server's metadata is bounded and treated as untrusted.
+   - **MCP calls** go through the same `before_tool_call` gate as every tool (OpenClaw hands the hook a
+     lower-cased name; the gate resolves it to the turn's exact `<safe>__<tool>`), are audited with the server,
+     and MCP output taints the turn unless the admin trusts the server for chained calls.
 
 6. **Subscription sign-in (`provider.auth.*`, ADR-0006).** On `provider.auth.start` the plugin runs
    OpenClaw's own ChatGPT/Codex device-code login (`runModelsAuthLoginFlow` from
@@ -71,6 +83,23 @@ is in the workspace.
      API key configured as well, the key-based provider is written as `ocw-openai`.
    - A provider 401/403 during a turn is answered once with "the provider rejected my credentials… reconnect
      in Settings › Models" instead of OpenClaw's own text.
+
+7. **Marketplace plugins (`plugin.install.v1` / `plugin.uninstall.v1`, D-14).** `plugin-installer.ts` installs
+   only an event that matches the snapshot's approved `plugins` (one refresh). It downloads from `OCW_CLAWHUB_URL`
+   only, verifies the approved sha256 and npm integrity, and runs
+   `openclaw plugins install npm-pack:<file> --force --accept-capabilities` (argv array, no shell). OpenClaw's
+   install gate (`infra/openclaw/install-policy.mjs`) then asks the API again.
+   - Before the install, the executor writes `plugins.entries["<id>"].hooks` through `openclaw config set`
+     (conversation access and prompt injection off).
+   - After it, the executor checks the inspected id, version, integrity, hook restriction and `enabled`.
+   - It reports the declared surface and keeps `<state>/ocw-plugins.json` as a boot fallback (never trusted for an
+     install).
+   - Jobs run detached, one at a time per process. The handler returns when OpenClaw stops the channel for the
+     plugin-generation swap the job itself causes; see `infra/openclaw/README.md`.
+   - A replay finds the plugin installed and re-reports it without reinstalling.
+   - A job that outlives its plugin instance reports from a short-lived child process.
+   - Reports carry classified codes, never CLI output.
+   - Details and the trust model: `infra/openclaw/README.md` › Marketplace plugins.
 
 ## Notes from running against the real gateway
 
@@ -93,6 +122,7 @@ is in the workspace.
 |---|---|
 | `OCW_API_URL` | Agent Channel API base, e.g. `http://api:4000` (required) |
 | `OCW_CELL_TOKEN_FILE` / `OCW_CELL_TOKEN` | cell token, re-read on every request so it can rotate |
+| `OCW_CLAWHUB_URL` | the only origin marketplace artifacts are downloaded from (default `https://clawhub.ai`) |
 
 Model provider keys are **not** env inputs. They come from `GET /cell`, which serves the keys
 admins enter in Settings › Models.

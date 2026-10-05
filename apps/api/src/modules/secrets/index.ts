@@ -5,14 +5,20 @@ import { open, seal } from "../../lib/crypto";
 import type { AuditService } from "../audit";
 
 /**
- * Org secrets entered in the UI (e.g. model provider API keys) — demo exception in 01-BUILD-SPEC: stored
+ * Org secrets entered in the UI (model provider API keys, MCP server header credentials) — demo exception in 01-BUILD-SPEC: stored
  * AES-256-GCM encrypted with OCW_ENCRYPTION_KEY (AAD = organization id), referenced by id, NEVER returned by
  * any API response and never logged. Operator secrets stay in env/files (SecretStore).
  */
 export interface SecretsService {
   put(
     tx: Tx,
-    input: { name: string; kind: "provider_api_key"; provider?: string | null; value: string },
+    input: {
+      name: string;
+      /** `mcp_credential`: an MCP server header value (D-13), revealed only for the cell snapshot. */
+      kind: "provider_api_key" | "mcp_credential";
+      provider?: string | null;
+      value: string;
+    },
   ): Promise<string>;
   /** Server-side only (e.g. provisioning a bot runtime). Never send the result to a client. */
   reveal(tx: Tx, secretId: string): Promise<string>;

@@ -76,6 +76,54 @@ export const EnvSchema = z
      * (`device.legacy_token_used`, at most once per device per hour). Removed in Phase 8 together with the
      * raw device token (RFC 8628 device grant).
      */
+    /**
+     * Base URL of the optional SearXNG instance (compose profile `search`, D-09), as seen from the cell. Set for
+     * both the API and the cell; without it admins cannot pick `searxng` as the web search provider.
+     */
+    OCW_SEARXNG_URL: z
+      .union([z.literal(""), Url])
+      .optional()
+      .transform((v) => v || null),
+    /**
+     * Web search plugins bundled in the cell image (mirrors the cell's variable): comma list, `none` = nothing
+     * bundled. Internet is `configured` only when the chosen provider is bundled or installed (D-06, D-09).
+     */
+    OCW_BUNDLED_PLUGINS: z
+      .string()
+      .default("duckduckgo,searxng")
+      .transform((s) =>
+        s.trim().toLowerCase() === "none"
+          ? []
+          : s
+              .split(",")
+              .map((x) => x.trim().toLowerCase())
+              .filter(Boolean),
+      ),
+    /**
+     * Base URL of the optional stdio MCP sandbox sidecar (`ocw-mcp-sandbox`, D-13), as seen from the cell. Without
+     * it admins cannot register `sandboxed-stdio` servers; the sidecar serves each vetted server at
+     * `<url>/<server>/mcp` (streamable HTTP).
+     */
+    OCW_MCP_SANDBOX_URL: z
+      .union([z.literal(""), Url])
+      .optional()
+      .transform((v) => v || null),
+    /** Vetted stdio servers baked into the sandbox image (comma list, e.g. `everything`). */
+    OCW_MCP_SANDBOX_SERVERS: z
+      .string()
+      .default("")
+      .transform((s) =>
+        s
+          .split(",")
+          .map((x) => x.trim())
+          .filter(Boolean),
+      )
+      .pipe(z.array(z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/, "server names are lowercase [a-z0-9_-]"))),
+    /**
+     * OpenClaw Marketplace registry (ClawHub, D-14) the API proxies for Settings › Marketplace, and the only origin
+     * approved artifacts are downloaded from. Point it at the fake ClawHub (fake-model `/api/v1/*`) in tests.
+     */
+    OCW_CLAWHUB_URL: Url.default("https://clawhub.ai"),
     OCW_ACCEPT_LEGACY_DEVICE_TOKEN: z
       .enum(["true", "false"])
       .default("true")

@@ -3,6 +3,8 @@ import {
   AgentList,
   AllowedModelList,
   CreateAgentRequest,
+  CreatePersonalBotRequest,
+  CreatePersonalBotResponse,
   catalogEntry,
   EventTypes,
   IdParams,
@@ -10,15 +12,20 @@ import {
   ModelProvider,
   ModelProviderList,
   Ok,
+  OpenDmResponse,
+  type Permission,
   ProviderParams,
   UpdateAgentRequest,
   UpsertModelProviderRequest,
 } from "@ocw/contracts";
-import { agents, conversationMembers, modelProviders } from "@ocw/db";
-import { and, asc, eq, isNull, like, or } from "drizzle-orm";
+import { agents, conversationMembers, conversations, modelProviders, type Tx } from "@ocw/db";
+import { and, asc, eq, inArray, isNull, like, ne, or } from "drizzle-orm";
+import type { FastifyRequest } from "fastify";
 import { type ApiModule, authOf, type Core, tenant } from "../../core";
-import { badRequest, conflict, notFound } from "../../lib/errors";
-import { createPermissionService } from "../organization";
+import { badRequest, conflict, forbidden, notFound } from "../../lib/errors";
+import { ensureDm, setAgentDmsArchived } from "../chat";
+import { agentResource, createPermissionService } from "../organization";
+import { createPersonalBot, personalModels } from "./personal";
 import { keyHint, nextFreeUsername, slugifyUsername } from "./providers";
 import {
   allowedModels,
@@ -27,11 +34,13 @@ import {
   listAgents,
   notifyCell,
   publishAgent,
+  publishAgentDeleted,
   toAgentDto,
   toProviderDto,
 } from "./service";
 import { revokeSubscriptionInCell } from "./subscription";
 
+export { createPersonalBot, DEFAULT_MAX_PERSONAL_BOTS } from "./personal";
 export {
   agentDirectory,
   allowedModels,
@@ -51,6 +60,26 @@ export {
 
 /** Fields the OpenClaw cell provisions from; changing one re-provisions the bot. */
 const CELL_FIELDS = ["name", "username", "instructions", "modelProvider", "modelId", "description"] as const;
+
+/** Per-bot permissions every bot list and detail reports as `viewerCan`. */
+const BOT_VIEWER_CAN: readonly Permission[] = ["bot.read", "bot.configure", "bot.manage"];
+
+/**
+ * Set as the status message when an admin (not the owner) disables a personal bot: the owner may still edit
+ * it but cannot switch it back on; only someone holding `bot.manage` can (BOT-01 governance).
+ */
+export const GOVERNANCE_DISABLED_MESSAGE = "Disabled by a workspace admin";
+
+/** Resolver facts of one bot, as seen by `userId` (the `owner` relation only for the owner). */
+function botResource(
+  a: { scope: Agent["scope"]; ownerUserId: string | null; status: string },
+  userId: string,
+) {
+  return agentResource(
+    { scope: a.scope, ownerUserId: a.ownerUserId, disabled: a.status === "disabled" },
+    userId,
+  );
+}
 
 function isUniqueViolation(err: unknown): boolean {
   const e = err as { code?: string; cause?: { code?: string } };
@@ -232,20 +261,77 @@ export function createAgentModule(core: Core): ApiModule {
       );
 
       // ---------------------------------------------------------------- bots
+      // Lists and details are decided per bot (`bot.read` on the agent resource): a personal bot exists only
+      // for its owner, admins included (D-01, T-03.1-02-01). Personal bots are governed through 03.1-03's list.
+      const withViewerCan = async (req: FastifyRequest, tx: Tx, a: Agent): Promise<Agent> => ({
+        ...a,
+        viewerCan: await perms.viewerCan(req, tx, botResource(a, authOf(req).userId), BOT_VIEWER_CAN),
+      });
+
       app.get(
         "/agents",
-        { ...allow["bot.read"], schema: { tags: ["agent"], response: { 200: AgentList } } },
-        async (req) => ({ agents: await core.db.withTenant(tenant(req), listAgents) }),
+        { config: user, preHandler: requireUser, schema: { tags: ["agent"], response: { 200: AgentList } } },
+        async (req) =>
+          core.db.withTenant(tenant(req), async (tx) => {
+            const me = authOf(req).userId;
+            const rows = (await listAgents(tx)).filter((a) => a.scope === "team" || a.ownerUserId === me);
+            const visible = await perms.filter(req, tx, rows, "bot.read", (a) => botResource(a, me));
+            const out: Agent[] = [];
+            for (const a of visible) out.push(await withViewerCan(req, tx, a));
+            return { agents: out };
+          }),
       );
 
       app.get(
         "/agents/:id",
-        { ...allow["bot.read"], schema: { tags: ["agent"], params: IdParams, response: { 200: Agent } } },
+        {
+          config: user,
+          preHandler: requireUser,
+          schema: { tags: ["agent"], params: IdParams, response: { 200: Agent } },
+        },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
             const row = await findAgent(tx, req.params.id);
             if (!row) throw notFound("Bot not found");
-            return toAgentDto(row);
+            await perms.assertCan(req, tx, "bot.read", botResource(row, authOf(req).userId), {
+              hideAs404: true,
+            });
+            return withViewerCan(req, tx, toAgentDto(row));
+          }),
+      );
+
+      // SC2 (D-03): the caller's private chat with a bot they may use, created on first use. One DM per
+      // (bot, member): two members never share history.
+      app.post(
+        "/agents/:id/dm",
+        {
+          config: user,
+          preHandler: requireUser,
+          schema: { tags: ["agent"], params: IdParams, response: { 200: OpenDmResponse } },
+        },
+        async (req) =>
+          core.db.withTenant(tenant(req), async (tx) => {
+            const auth = authOf(req);
+            const row = await findAgent(tx, req.params.id);
+            if (!row) throw notFound("Bot not found");
+            await perms.assertCan(req, tx, "bot.read", botResource(row, auth.userId), { hideAs404: true });
+            if (row.status === "disabled") throw conflict("This bot is disabled", "bot_disabled");
+            const { conv, created } = await ensureDm(
+              tx,
+              { audit: core.audit, realtime: core.realtime },
+              { agentId: row.id, userId: auth.userId },
+            );
+            if (created) {
+              await core.audit.record(tx, {
+                action: "dm.opened",
+                resourceType: "conversation",
+                resourceId: conv.id,
+                agentId: row.id,
+                sessionId: auth.sessionId,
+                metadata: { agentId: row.id },
+              });
+            }
+            return { dmId: conv.id, created };
           }),
       );
 
@@ -319,10 +405,36 @@ export function createAgentModule(core: Core): ApiModule {
         },
       );
 
+      // One click (BOT-01): any member the resolver allows `bot.create_personal` (decided inside).
+      app.post(
+        "/agents/personal",
+        {
+          config: user,
+          preHandler: requireUser,
+          schema: {
+            tags: ["agent"],
+            body: CreatePersonalBotRequest,
+            response: { 200: CreatePersonalBotResponse },
+          },
+        },
+        async (req) => {
+          try {
+            return await core.db.withTenant(tenant(req), (tx) => createPersonalBot(core, req, tx, req.body));
+          } catch (err) {
+            if (isUniqueViolation(err)) throw conflict("That username is already taken", "username_taken");
+            throw err;
+          }
+        },
+      );
+
+      // Per-bot decision (D-01/D-02): a team bot needs `bot.manage` for every field; a personal bot takes
+      // field edits from its owner only (`bot.configure`) and `{enabled}` from its owner or an admin
+      // (`bot.manage`, governance). Anyone else does not learn the personal bot exists (404).
       app.patch(
         "/agents/:id",
         {
-          ...allow["bot.manage"],
+          config: user,
+          preHandler: requireUser,
           schema: { tags: ["agent"], params: IdParams, body: UpdateAgentRequest, response: { 200: Agent } },
         },
         async (req) => {
@@ -332,12 +444,40 @@ export function createAgentModule(core: Core): ApiModule {
               const body = req.body;
               const row = await findAgent(tx, req.params.id);
               if (!row) throw notFound("Bot not found");
+              const resource = botResource(row, auth.userId);
+              const personal = row.scope === "personal";
+              const owner = personal && row.ownerUserId === auth.userId;
+              const fields = (Object.keys(body) as Array<keyof typeof body>).filter(
+                (k) => k !== "enabled" && body[k] !== undefined,
+              );
+              if (!personal) {
+                await perms.assertCan(req, tx, "bot.manage", resource);
+              } else if (owner) {
+                await perms.assertCan(req, tx, "bot.configure", resource, { hideAs404: true });
+              } else {
+                await perms.assertCan(req, tx, "bot.manage", resource, { hideAs404: true });
+                // Governance never touches what is inside: instructions, model, identity (403 personal_bot).
+                if (fields.length) await perms.assertCan(req, tx, "bot.configure", resource);
+              }
+              const governance = personal && !owner;
 
               const provider = body.modelProvider ?? row.modelProvider;
               const modelId = body.modelId ?? row.modelId;
               const modelChanged = provider !== row.modelProvider || modelId !== row.modelId;
-              if (modelChanged && !(await isModelAllowed(core, tx, provider, modelId))) {
-                throw badRequest("This model is not in the organization's allowed list", "model_not_allowed");
+              if (modelChanged) {
+                const allowed = personal
+                  ? (await personalModels(core, tx)).some(
+                      (m) => m.provider === provider && m.modelId === modelId,
+                    )
+                  : await isModelAllowed(core, tx, provider, modelId);
+                if (!allowed) {
+                  throw badRequest(
+                    personal
+                      ? "This model is not allowed for personal bots"
+                      : "This model is not in the organization's allowed list",
+                    "model_not_allowed",
+                  );
+                }
               }
               if (body.username && body.username !== row.username) {
                 const [taken] = await tx
@@ -345,6 +485,17 @@ export function createAgentModule(core: Core): ApiModule {
                   .from(agents)
                   .where(and(eq(agents.username, body.username), isNull(agents.deletedAt)));
                 if (taken) throw conflict(`@${body.username} is already taken`, "username_taken");
+              }
+              if (
+                body.enabled === true &&
+                row.status === "disabled" &&
+                owner &&
+                row.statusMessage === GOVERNANCE_DISABLED_MESSAGE
+              ) {
+                throw forbidden(
+                  "A workspace admin disabled this bot; ask them to enable it",
+                  "disabled_by_admin",
+                );
               }
 
               const next = {
@@ -374,20 +525,30 @@ export function createAgentModule(core: Core): ApiModule {
               } else if (cellChanged && row.status !== "disabled") {
                 status = "provisioning";
               }
-              if (!changed.length && status === row.status) return toAgentDto(row);
+              if (!changed.length && status === row.status) return withViewerCan(req, tx, toAgentDto(row));
 
+              const statusMessage =
+                status === row.status
+                  ? row.statusMessage
+                  : reason === "agent.disabled" && governance
+                    ? GOVERNANCE_DISABLED_MESSAGE
+                    : null;
               const [updated] = await tx
                 .update(agents)
-                .set({
-                  ...next,
-                  status,
-                  statusMessage: status === row.status ? row.statusMessage : null,
-                  updatedAt: new Date().toISOString(),
-                })
+                .set({ ...next, status, statusMessage, updatedAt: new Date().toISOString() })
                 .where(eq(agents.id, row.id))
                 .returning();
               if (!updated) throw notFound("Bot not found");
               const dto = toAgentDto(updated);
+              // D-04: a disabled bot's chats are archived; re-enabling restores them (same transaction).
+              if (reason === "agent.disabled" || reason === "agent.enabled") {
+                await setAgentDmsArchived(
+                  tx,
+                  { audit: core.audit, realtime: core.realtime },
+                  row.id,
+                  reason === "agent.disabled",
+                );
+              }
               await core.audit.record(tx, {
                 action:
                   reason === "agent.disabled"
@@ -399,11 +560,18 @@ export function createAgentModule(core: Core): ApiModule {
                 resourceId: row.id,
                 agentId: row.id,
                 sessionId: auth.sessionId,
-                metadata: { changed, ...(modelChanged ? { model: `${provider}/${modelId}` } : {}) },
+                metadata: {
+                  changed,
+                  ...(modelChanged ? { model: `${provider}/${modelId}` } : {}),
+                  ...(personal ? { scope: "personal", ownerUserId: row.ownerUserId } : {}),
+                  ...(governance ? { governance: true } : {}),
+                },
               });
               await publishAgent(core, tx, EventTypes.agentUpdated, dto);
               if (reason) await notifyCell(core, tx, reason, row.id);
-              return dto;
+              const out = await withViewerCan(req, tx, dto);
+              // Governance sees metadata only (D-01): never what is inside someone else's personal bot.
+              return governance ? { ...out, instructions: "", description: null } : out;
             });
           } catch (err) {
             if (isUniqueViolation(err)) throw conflict("That username is already taken", "username_taken");
@@ -412,24 +580,46 @@ export function createAgentModule(core: Core): ApiModule {
         },
       );
 
+      // Owner (`bot.configure`) or, as governance, an admin (`bot.manage`); team bots need `bot.manage`.
       app.delete(
         "/agents/:id",
-        { ...allow["bot.manage"], schema: { tags: ["agent"], params: IdParams, response: { 200: Ok } } },
+        {
+          config: user,
+          preHandler: requireUser,
+          schema: { tags: ["agent"], params: IdParams, response: { 200: Ok } },
+        },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
             const auth = authOf(req);
             const row = await findAgent(tx, req.params.id);
             if (!row) throw notFound("Bot not found");
+            const resource = botResource(row, auth.userId);
+            const personal = row.scope === "personal";
+            const owner = personal && row.ownerUserId === auth.userId;
+            if (!personal) await perms.assertCan(req, tx, "bot.manage", resource);
+            else if (owner) await perms.assertCan(req, tx, "bot.configure", resource, { hideAs404: true });
+            else await perms.assertCan(req, tx, "bot.manage", resource, { hideAs404: true });
+
             const now = new Date().toISOString();
             await tx
               .update(agents)
               .set({ status: "disabled", deletedAt: now, updatedAt: now })
               .where(eq(agents.id, row.id));
-            // The bot leaves every conversation; its past messages stay attributed to it.
+            // Its DMs are archived (history kept for their member); then it leaves every channel. Its past
+            // messages stay attributed to it.
+            await setAgentDmsArchived(tx, { audit: core.audit, realtime: core.realtime }, row.id, true);
+            const channels = tx
+              .select({ id: conversations.id })
+              .from(conversations)
+              .where(ne(conversations.kind, "dm"));
             await tx
               .delete(conversationMembers)
               .where(
-                and(eq(conversationMembers.memberKind, "agent"), eq(conversationMembers.memberId, row.id)),
+                and(
+                  eq(conversationMembers.memberKind, "agent"),
+                  eq(conversationMembers.memberId, row.id),
+                  inArray(conversationMembers.conversationId, channels),
+                ),
               );
             await core.audit.record(tx, {
               action: "agent.deleted",
@@ -437,11 +627,13 @@ export function createAgentModule(core: Core): ApiModule {
               resourceId: row.id,
               agentId: row.id,
               sessionId: auth.sessionId,
-              metadata: { username: row.username },
+              metadata: {
+                username: row.username,
+                ...(personal ? { scope: "personal", ownerUserId: row.ownerUserId } : {}),
+                ...(personal && !owner ? { governance: true } : {}),
+              },
             });
-            await core.realtime.appendEvent(tx, `org:${auth.organizationId}`, EventTypes.agentDeleted, {
-              id: row.id,
-            });
+            await publishAgentDeleted(core, tx, row);
             await notifyCell(core, tx, "agent.deleted", row.id);
             return { ok: true as const };
           }),

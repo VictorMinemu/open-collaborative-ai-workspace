@@ -148,6 +148,43 @@ connected. Design: `docs/adr/0006-subscription-sign-in-inside-the-cell.md`.
 **Disconnect** (card › Disconnect, confirm) deletes the sign-in from the cell; bots on ChatGPT models then
 report an error until you connect again. **Switch account** starts a new sign-in.
 
+## Personal bots, capabilities, MCP and the marketplace
+
+Phase 3.1 (ADR-0010, ADR-0011). Use two browsers: an admin (`victor@`) and a member (e.g. a Developer).
+
+1. **Personal bot.** As the member, sidebar **Bots › New personal bot**. The private chat opens ("Personal bot · only
+   you can see this chat"); send a plain message, no `@` needed. The admin cannot open this chat.
+2. **Internet.** In the chat header open **Bot settings** and turn **Internet** on. Ask something current ("what's new
+   in OpenClaw this week?"): the bot searches (DuckDuckGo, keyless) and answers from the results.
+3. **Admin policy, with a reason.** Admin › **Settings › Bot policy** → turn Internet off for personal bots. The
+   member's switch turns off with "Turned off for personal bots by your organization". Turn it back on.
+4. **Limit notice.** In Bot settings set the daily limit to 1 and send two messages: the second gets the limit
+   notice instead of a reply, and the usage meter shows "1 of 1 replies today". Set it back.
+5. **Memory.** Ask the bot to remember something ("remember that I work from Madrid"). Bot settings › **Memory**
+   lists the note; the member can delete it. Admins never see memory.
+6. **MCP server.** Admin › **Settings › MCP servers › Add**: name, URL (HTTPS, or http to an internal service), and an
+   `Authorization` header (write-only: it shows as "• set"). The cell probes it: *Probing* → *Ready* with its tools
+   marked Read-only / Changes data. Turn on **Allow for personal bots**.
+7. **Marketplace.** Admin › **Settings › Marketplace**: search ClawHub, open a plugin, read the review (publisher,
+   official/community, scan, what it adds, risk with reasons), pick the version and **Install**. The row goes
+   *Installing* → *Installed* once the cell downloaded it, verified the digest and passed the install gate. On the
+   demo DuckDuckGo shows *Built in* (bundled); community plugins need the typed `install anyway`.
+8. **Enable a tool and use it.** Member › Bot settings › **Tools**: switch on one MCP or plugin tool and ask the bot to
+   use it. Every call is checked against the turn and audited (`bot.tool_call`). Uninstalling the plugin removes the
+   tool from every bot on the next turn.
+
+Optional providers (full `docker compose` stack, not the native demo):
+
+```bash
+# SearXNG as the search provider (then Settings › Bot policy › Search provider: SearXNG)
+OCW_SEARXNG_URL=http://searxng:8080 OCW_SEARXNG_SECRET=$(openssl rand -hex 32) docker compose --profile search up -d
+# Sandboxed stdio MCP servers baked into the sidecar (then MCP servers › Add › Sandboxed stdio)
+OCW_MCP_SANDBOX_URL=http://mcp-sandbox:8080 OCW_MCP_SANDBOX_SERVERS=everything docker compose --profile mcp-sandbox up -d
+```
+
+The real-cell proof of this flow (real ClawHub and DuckDuckGo, fake model and MCP) runs in CI on demand: add the
+`cell-proof` label to the pull request (`.github/workflows/cell-proof.yml`, `scripts/cell-proof.sh`).
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -166,8 +203,8 @@ report an error until you connect again. **Switch account** starts a new sign-in
 
 ## Known limits (MVP 0)
 
-Desktop app is ad-hoc signed (no notarization); its main window loads the web app URL. Bots have no
-tools (by design for MVP 0). No DMs, reactions, message edit/delete, search or attachments yet. Full
+Desktop app is ad-hoc signed (no notarization); its main window loads the web app URL. DMs exist only
+between a person and a bot (Phase 3.1). No human DMs, reactions, message edit/delete, search or attachments yet. Full
 `docker compose up` (with API/web images) is defined but was not re-run on this machine because the
 Docker disk is full; the demo runs API/web natively. See
 `.planning/phases/01-mvp-0-multiplayer-ai-chat-slice/01-DEVIATIONS.md`.

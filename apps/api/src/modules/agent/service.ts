@@ -47,6 +47,8 @@ export function toAgentDto(r: AgentRow): Agent {
     createdBy: r.createdBy,
     createdAt: new Date(r.createdAt).toISOString(),
     updatedAt: new Date(r.updatedAt).toISOString(),
+    scope: r.scope,
+    ownerUserId: r.ownerUserId,
   };
 }
 
@@ -165,14 +167,31 @@ export async function notifyCell(
   });
 }
 
-/** Broadcast an agent change to every browser of the org (status chips, autocomplete). */
+/**
+ * Broadcast an agent change: team bots to every browser of the org (status chips, autocomplete); a personal
+ * bot only to its owner's `user:` topic, so nobody else learns it exists (D-01, Pitfall 4).
+ */
 export async function publishAgent(
   core: Core,
   tx: Tx,
   type: typeof EventTypes.agentCreated | typeof EventTypes.agentUpdated,
   agent: Agent,
 ) {
-  await core.realtime.appendEvent(tx, `org:${agent.organizationId}`, type, agent);
+  await core.realtime.appendEvent(tx, agentTopic(agent), type, agent);
+}
+
+/** Same routing as `publishAgent` for a deletion (payload `{ id }`). */
+export async function publishAgentDeleted(
+  core: Core,
+  tx: Tx,
+  agent: Pick<Agent, "id" | "organizationId" | "scope" | "ownerUserId">,
+) {
+  await core.realtime.appendEvent(tx, agentTopic(agent), EventTypes.agentDeleted, { id: agent.id });
+}
+
+/** `user:<owner>` for a personal bot, `org:<org>` for a team bot. */
+function agentTopic(a: Pick<Agent, "organizationId" | "scope" | "ownerUserId">): string {
+  return a.scope === "personal" && a.ownerUserId ? `user:${a.ownerUserId}` : `org:${a.organizationId}`;
 }
 
 /** Bots as the cell must provision them (deleted ones are omitted; disabled ones are listed as such). */
@@ -189,6 +208,8 @@ export async function cellAgents(tx: Tx): Promise<CellAgent[]> {
     modelRef: modelRef(r.modelProvider, r.modelId),
     model: { provider: r.modelProvider, providerId: OPENCLAW_PROVIDER_ID[r.modelProvider], id: r.modelId },
     updatedAt: new Date(r.updatedAt).toISOString(),
+    // Filled per agent by the agent-channel `/cell` route from bot-capabilities (D-08 layer 2).
+    capabilities: { tools: [] },
   }));
 }
 

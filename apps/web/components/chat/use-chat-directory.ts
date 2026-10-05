@@ -24,7 +24,7 @@ export interface OrgDirectory {
 
 export const dirKey = (kind: string, id: string | null | undefined) => `${kind}:${id ?? ""}`;
 
-/** Everyone you can @mention in the org: members (GET /members) + bots (GET /agents, optional). */
+/** Everyone you can @mention in the org: members (GET /members) + team bots (GET /agents, optional). */
 export function useOrgDirectory(): OrgDirectory {
   const members = useMembers();
   const agents = useAgents();
@@ -41,7 +41,8 @@ export function useOrgDirectory(): OrgDirectory {
       });
     }
     for (const a of agents.data?.agents ?? []) {
-      if (a.status === "disabled") continue;
+      // Disabled bots and personal bots (DM-only, D-01) are never offered as @mentions.
+      if (a.status === "disabled" || a.scope === "personal") continue;
       entries.push({
         kind: "agent",
         id: a.id,

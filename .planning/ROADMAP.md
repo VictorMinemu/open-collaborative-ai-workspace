@@ -163,6 +163,7 @@ Plans:
 **Requirements**: BOT-01, BOT-02, BOT-03, BOT-04, BOT-05, BOT-06, BOT-07, BOT-08, BOT-09, BOT-10
 **Depends on:** Phase 3
 **Success Criteria** (what must be TRUE):
+
   1. A Developer creates a personal bot in one click; a private direct chat with it appears in their sidebar, the bot answers every message there without an @mention, and no other member (admins included) can read that conversation or use the bot
   2. Any member opens a private direct chat with a team bot they may use; their history is invisible to other members
   3. A bot owner/manager toggles internet access, memory, reply mode, date/time context and a daily limit; with internet on the bot answers a question that needs a web lookup and the search/fetch is audited, with it off no web tool reaches the model (proven in the cell contract tests and an e2e with the fake model)
@@ -170,27 +171,28 @@ Plans:
   5. When a bot reaches its daily limit it replies with a clear notice and makes no model call; owners and admins see usage against the limit; memory is visible to the human it belongs to and can be cleared
   6. An Organization Admin registers an MCP server (remote or cell-sandboxed stdio) with a secret-store credential, a bot manager attaches it to a bot and enables some of its tools, and the bot calls one of those tools in a conversation; the call is audited, runs within the asking human's permissions, and a tool that is not enabled never reaches the model
   7. An Organization Admin browses the OpenClaw Marketplace (ClawHub) from Settings, reviews a plugin (publisher, version, declared tools, risk) and installs a pinned version into the cell; the plugin's tools become a capability that can be enabled per bot and capped by policy, a bot uses them in a conversation, and the plugin can be updated or uninstalled — all audited, with dangerous tool classes blocked whatever the plugin declares
-**Plans:** 15 plans in 8 waves (validation strategy: `03.1-VALIDATION.md`; decisions D-01 … D-16 in `03.1-01-PLAN.md`; executes after Phase 3 merges to `main`)
+
+**Plans:** 15/15 plans complete
 **Research:** needed (OpenClaw 2026.9.7 web search/fetch tools and their providers — keyless vs API key, memory plugin and per-agent/per-peer scoping, per-turn tool allowlist, DM routing in the channel plugin; resolver grants for personal bots; DM conversation model reuse; OpenClaw MCP client support (stdio/HTTP, sandboxing), OpenClaw plugin install/update/uninstall at runtime and the ClawHub marketplace API — catalog, metadata, signing/provenance)
 **UI hint**: yes
 
 Plans:
 
-- [ ] 03.1-01-PLAN.md — Wave 1: tracer — whole-phase migration, six permissions, resolver agent resource; one-click personal bot → private DM under Bots → answers without @mention (real cell + fake model smoke, browser e2e); privacy hardening
-- [ ] 03.1-02-PLAN.md — Wave 2: team-bot DMs for every member; personal bots invisible to others (lists, events, autocomplete); admin governance (disable/delete) and DM archiving; personal-bot limit
-- [ ] 03.1-03-PLAN.md — Wave 2: capability model contracts, pure effective decision with reasons, bot capabilities / org policy / governance routes, per-turn `turn` block and `agent_turns` ledger
-- [ ] 03.1-04-PLAN.md — Wave 3: cell enforcement — lockdown v2, bundled DuckDuckGo/SearXNG search, fail-closed tool gate with API re-decision and audit, taint and caps, DM session isolation, SearXNG profile
-- [ ] 03.1-05-PLAN.md — Wave 3: daily usage limits — atomic counter, notice instead of a model call, channel notice once per day
-- [ ] 03.1-06-PLAN.md — Wave 3: capabilities UI (toggles with reasons, usage meter, bot settings sheet) and Settings › Bot policy with personal-bot governance
-- [ ] 03.1-07-PLAN.md — Wave 4: per-human bot memory in Postgres via `ocw_memory_save`, DM-only, visible and clearable, taint-protected
-- [ ] 03.1-08-PLAN.md — Wave 4: reply mode "every message" with loop/flood guardrails; asking human's local date/time
-- [ ] 03.1-09-PLAN.md — Wave 4: MCP server registry API (write-only secret credentials, safe names, URL policy, probe request) and fake MCP server
-- [ ] 03.1-10-PLAN.md — Wave 5: MCP in the cell — probe via SDK 1.30.0, `mcp.servers` rendering with env refs, gated and audited MCP calls, taint for MCP output
-- [ ] 03.1-11-PLAN.md — Wave 5: Marketplace API — ClawHub proxy without telemetry, risk scorer, pinned approve/update/uninstall, fake ClawHub
-- [ ] 03.1-12-PLAN.md — Wave 6: Marketplace executor in the cell — digest-verified installs behind `security.installPolicy`, boot persistence, report route; official DuckDuckGo install/uninstall and a plugin tool used in a conversation (real cell)
-- [ ] 03.1-13-PLAN.md — Wave 7: Settings › Marketplace, Settings › MCP servers and per-bot tool toggles; browser e2e of a bot using an MCP tool and a plugin tool
-- [ ] 03.1-14-PLAN.md — Wave 7 (optional, may slip without blocking SC6): hardened stdio MCP sandbox sidecar
-- [ ] 03.1-15-PLAN.md — Wave 8: ADR-0010/0011, AGENTS.md and DEMO.md; real-cell proof against the isolated stack (real ClawHub, real web search, MCP tool, audit, uninstall); phase gate
+- [x] 03.1-01-PLAN.md — Wave 1: tracer — whole-phase migration, six permissions, resolver agent resource; one-click personal bot → private DM under Bots → answers without @mention (real cell + fake model smoke, browser e2e); privacy hardening
+- [x] 03.1-02-PLAN.md — Wave 2: team-bot DMs for every member; personal bots invisible to others (lists, events, autocomplete); admin governance (disable/delete) and DM archiving; personal-bot limit
+- [x] 03.1-03-PLAN.md — Wave 2: capability model contracts, pure effective decision with reasons, bot capabilities / org policy / governance routes, per-turn `turn` block and `agent_turns` ledger
+- [x] 03.1-04-PLAN.md — Wave 3: cell enforcement — lockdown v2, bundled DuckDuckGo/SearXNG search, fail-closed tool gate with API re-decision and audit, taint and caps, DM session isolation, SearXNG profile
+- [x] 03.1-05-PLAN.md — Wave 3: daily usage limits — atomic counter, notice instead of a model call, channel notice once per day
+- [x] 03.1-06-PLAN.md — Wave 3: capabilities UI (toggles with reasons, usage meter, bot settings sheet) and Settings › Bot policy with personal-bot governance
+- [x] 03.1-07-PLAN.md — Wave 4: per-human bot memory in Postgres via `ocw_memory_save`, DM-only, visible and clearable, taint-protected
+- [x] 03.1-08-PLAN.md — Wave 4: reply mode "every message" with loop/flood guardrails; asking human's local date/time
+- [x] 03.1-09-PLAN.md — Wave 4: MCP server registry API (write-only secret credentials, safe names, URL policy, probe request) and fake MCP server
+- [x] 03.1-10-PLAN.md — Wave 5: MCP in the cell — probe via SDK 1.30.0, `mcp.servers` rendering with env refs, gated and audited MCP calls, taint for MCP output
+- [x] 03.1-11-PLAN.md — Wave 5: Marketplace API — ClawHub proxy without telemetry, risk scorer, pinned approve/update/uninstall, fake ClawHub
+- [x] 03.1-12-PLAN.md — Wave 6: Marketplace executor in the cell — digest-verified installs behind `security.installPolicy`, boot persistence, report route; official DuckDuckGo install/uninstall and a plugin tool used in a conversation (real cell)
+- [x] 03.1-13-PLAN.md — Wave 7: Settings › Marketplace, Settings › MCP servers and per-bot tool toggles; browser e2e of a bot using an MCP tool and a plugin tool
+- [x] 03.1-14-PLAN.md — Wave 7 (optional, may slip without blocking SC6): hardened stdio MCP sandbox sidecar
+- [x] 03.1-15-PLAN.md — Wave 8: ADR-0010/0011, AGENTS.md and DEMO.md; real-cell proof against the isolated stack (real ClawHub, real web search, MCP tool, audit, uninstall); phase gate
 
 ### Phase 4: Chat
 

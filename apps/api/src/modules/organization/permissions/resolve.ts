@@ -22,7 +22,16 @@ import { MISSING_REASON, precondition, RELATION_PERMISSIONS } from "./policy";
  */
 
 export type Relation = "self" | "owner" | "member" | "creator" | "device_owner" | "grantee" | "inviter";
-export type ResourceState = "private" | "archived" | "revoked" | "device_revoked";
+export type ResourceState =
+  | "private"
+  | "archived"
+  | "revoked"
+  | "device_revoked"
+  /** Agents: a personal bot (owner-only) / a disabled bot. */
+  | "personal"
+  | "disabled"
+  /** Channel resources: a direct conversation (fixed membership). */
+  | "dm";
 export type ResourceType =
   | "organization"
   | "unit"
@@ -32,7 +41,8 @@ export type ResourceType =
   | "channel_member"
   | "device"
   | "work_session"
-  | "invitation";
+  | "invitation"
+  | "agent";
 
 export interface PrincipalFacts {
   kind: "user" | "agent" | "cell" | "device";

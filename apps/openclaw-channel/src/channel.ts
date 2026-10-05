@@ -8,7 +8,9 @@ import { runEventStream } from "./event-stream.js";
 import { CHANNEL_ID, parseTarget } from "./mention-mapper.js";
 import { createOpenClawAuthDriver } from "./openclaw-auth.js";
 import { createOpenClawPort, type PluginRuntimeLike } from "./openclaw-port.js";
+import { createPluginInstaller, reportPluginViaChild } from "./plugin-installer.js";
 import { createSubscriptionAuth } from "./subscription-auth.js";
+import { setToolGuardClient } from "./tool-guard.js";
 
 let pluginRuntime: PluginRuntimeLike | undefined;
 
@@ -75,8 +77,22 @@ async function startOcwAccount(ctx: ChannelGatewayContext<ResolvedOcwAccount>): 
     warn: (m: string) => ctx.log?.warn(`[ocw] ${m}`),
     error: (m: string) => ctx.log?.error(`[ocw] ${m}`),
   };
-  const client = createAgentChannelClient({ apiUrl: account.apiUrl, token: account.readToken });
-  const port = createOpenClawPort({ runtime, accountId: account.accountId, cfg: ctx.cfg, log });
+  // Our own copy of the account (plain strings and a closure in this module): `ctx.account` is a host view that
+  // OpenClaw retires with this plugin instance, while a plugin job started here may still have to report after
+  // the instance was replaced (installing a plugin replaces the plugin generation).
+  const own = resolveOcwAccount(readSection(ctx.cfg));
+  const apiUrl = own.apiUrl ?? account.apiUrl;
+  const readToken = own.tokenSource === "missing" ? account.readToken : own.readToken;
+  const client = createAgentChannelClient({ apiUrl, token: readToken });
+  // The tool gate (hooks registered in index.ts) asks the API through this account's client.
+  setToolGuardClient(client);
+  const port = createOpenClawPort({
+    runtime,
+    accountId: account.accountId,
+    cfg: ctx.cfg,
+    log,
+    stateDir: resolveStateDir(runtime),
+  });
   // Subscription sign-in (ChatGPT via Codex device code) runs here, inside OpenClaw (ADR-0006).
   const subscriptions = createSubscriptionAuth({
     client,
@@ -84,7 +100,25 @@ async function startOcwAccount(ctx: ChannelGatewayContext<ResolvedOcwAccount>): 
     signal,
     log,
   });
-  const bridge = createBridge({ client, port, signal, log, subscriptions });
+  // Marketplace executor (D-14): approved installs only, behind OpenClaw's install gate (infra/openclaw/install-policy.mjs).
+  let bridgeRef: ReturnType<typeof createBridge> | undefined;
+  const plugins = createPluginInstaller({
+    client,
+    snapshot: () => bridgeRef?.snapshot(),
+    refresh: () => {
+      if (!bridgeRef) throw new Error("bridge not ready");
+      return bridgeRef.refreshCell();
+    },
+    stateDir: resolveStateDir(runtime),
+    clawhubOrigin: process.env.OCW_CLAWHUB_URL?.trim() || "https://clawhub.ai",
+    // OpenClaw's CLI entry in the image; overridable for a gateway run outside the image.
+    ...(process.env.OCW_OPENCLAW_CLI?.trim() ? { cliPath: process.env.OCW_OPENCLAW_CLI.trim() } : {}),
+    // Installing a plugin retires this instance (and its fetch) before the job can report: report from a child.
+    reportFallback: (report) => reportPluginViaChild(apiUrl, readToken(), report),
+    log,
+  });
+  const bridge = createBridge({ client, port, signal, log, subscriptions, plugins });
+  bridgeRef = bridge;
   const cursorFile = path.join(resolveStateDir(runtime), "ocw-channel", `cursor-${account.accountId}.json`);
 
   ctx.setStatus({

@@ -41,6 +41,15 @@ export interface FakeCellSnapshot {
     models: string[];
   }>;
   subscriptions?: Array<{ id: string; kind: string; runtimeProvider: string; models: string[] }>;
+  /** Org-enabled MCP servers with their header VALUES (cell token only, 03.1-10). */
+  mcpServers?: Array<{
+    id: string;
+    safeName: string;
+    transport: string;
+    url: string;
+    headers: Array<{ name: string; envName: string; value: string }>;
+    tools: string[];
+  }>;
 }
 
 export interface MentionPayload {
@@ -56,6 +65,12 @@ export interface MentionPayload {
     text: string;
   }>;
   roster: Array<{ kind: string; id: string; displayName: string }>;
+  /** What this bot may do for this human on this turn (03.1-03); absent = no tools (fail closed). */
+  turn?: {
+    tools: string[];
+    memory?: Array<{ id: string; text: string; createdAt: string }>;
+    now?: { iso: string; timeZone: string; local: string } | null;
+  };
 }
 
 /** Subscription sign-in emulation (provider.auth.* commands), against a fake device-auth server. */
@@ -73,13 +88,81 @@ export interface FakeCellOptions {
   token: string;
   /** Ack every non-disabled bot as `ready` on start and on each `cell.config.changed`. */
   autoAck?: boolean;
-  /** Answer every mention with `replyText(mention)` (default: an identity-aware deterministic reply). */
+  /**
+   * Answer every mention with `replyText(mention)` (default: an identity-aware deterministic reply), or with the
+   * simulated tool calls when the message carries `[[call …]]` directives (`simulateToolCalls`), followed by the
+   * turn-tools suffix (`turnToolsSuffix`) and the turn-context suffix (`turnContextSuffix`).
+   */
   autoReply?: boolean;
   replyText?: (m: MentionPayload) => string;
   /** Resume cursor; omit to start live. */
   afterSeq?: number;
   /** Handle `provider.auth.start|cancel|revoke` like apps/openclaw-channel does (device-code sign-in). */
   deviceAuth?: FakeDeviceAuthOptions;
+  /**
+   * Simulate the marketplace executor (03.1-12): `plugin.install.v1` reports `installing`, then `installed` with
+   * `declaredTools = pluginTools["<package>@<version>"] ?? pluginTools[package] ?? []`; `plugin.uninstall.v1` reports `uninstalled`. Unset = the
+   * plugin events are ignored (an older cell).
+   */
+  pluginTools?: Record<string, string[]>;
+  /** Delay before each plugin report and each probe, so a browser can see `Installing` / `Probing` (default 1200 ms). */
+  stepMs?: number;
+  /**
+   * Simulate the MCP probe (03.1-10): on `mcp.probe`, find the server in `GET /cell`, rewrite its `host:port`
+   * through this map (e.g. `fake-mcp:4291` → `127.0.0.1:4291`), run `initialize` + `tools/list` over streamable
+   * HTTP with the snapshot's headers and POST `/mcp/probe-results`. Unset = probes are ignored.
+   */
+  hostMap?: Record<string, string>;
+}
+
+/**
+ * Appended to every simulated reply: ` [turn tools: <sorted turn.tools joined by commas> | none]`. Lets a
+ * browser spec see which tools the API gave the bot for that very turn (a policy change bites next turn).
+ */
+export function turnToolsSuffix(m: MentionPayload): string {
+  const tools = [...(m.turn?.tools ?? [])].sort();
+  return ` [turn tools: ${tools.length > 0 ? tools.join(",") : "none"}]`;
+}
+
+/**
+ * Appended after the turn tools on every simulated reply: ` [memory: <turn.memory.length>] [now: <zone> | none]`.
+ * Lets a browser spec see the bot's notes about the asker (D-10) and the asker's time zone (D-12) per turn.
+ */
+export function turnContextSuffix(m: MentionPayload): string {
+  return ` [memory: ${m.turn?.memory?.length ?? 0}] [now: ${m.turn?.now?.timeZone ?? "none"}]`;
+}
+
+/** `[[call <tool> <json>]]` directives in a message (same grammar as infra/fake-model), in order. */
+export function parseCallDirectives(text: string): Array<{ tool: string; args: Record<string, unknown> }> {
+  const out: Array<{ tool: string; args: Record<string, unknown> }> = [];
+  for (const m of text.matchAll(/\[\[call\s+([A-Za-z0-9_.:-]+)\s+(?=\{)/gu)) {
+    const start = (m.index ?? 0) + m[0].length;
+    let depth = 0;
+    let inString = false;
+    let end = -1;
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+      if (inString) {
+        if (ch === "\\") i++;
+        else if (ch === '"') inString = false;
+      } else if (ch === '"') inString = true;
+      else if (ch === "{") depth++;
+      else if (ch === "}" && --depth === 0) {
+        end = i + 1;
+        break;
+      }
+    }
+    if (end === -1 || !text.startsWith("]]", end)) continue;
+    try {
+      const args = JSON.parse(text.slice(start, end)) as unknown;
+      if (args && typeof args === "object" && !Array.isArray(args) && m[1]) {
+        out.push({ tool: m[1], args: args as Record<string, unknown> });
+      }
+    } catch {
+      /* not a directive */
+    }
+  }
+  return out;
 }
 
 /** Deterministic, identity-aware reply (mirrors infra/fake-model): proves structured attribution travelled. */
@@ -104,6 +187,9 @@ export class FakeCellPlugin {
   /** Every `POST /provider-auth` report sent, with the HTTP status it got. */
   readonly authReports: Array<{ status: number; body: Record<string, unknown> }> = [];
   readonly revoked: string[] = [];
+  /** Every `POST /plugins/report` and `POST /mcp/probe-results` sent, with the HTTP status it got. */
+  readonly pluginReports: Array<{ status: number; body: Record<string, unknown> }> = [];
+  readonly probeReports: Array<{ status: number; body: Record<string, unknown> }> = [];
   private readonly flows = new Map<string, AbortController>();
   private readonly reporterId = `fake-${Math.random().toString(36).slice(2, 12)}`;
   private ws: WebSocket | null = null;
@@ -152,15 +238,17 @@ export class FakeCellPlugin {
   }
 
   async reply(m: MentionPayload, text: string) {
+    // Direct conversations are flat (D-04): like apps/openclaw-channel, reply and type with no thread root.
+    const threadRootMessageId = m.conversation.kind === "dm" ? null : m.thread.rootMessageId;
     await this.request("POST", "/typing", {
       agentId: m.agent.id,
       conversationId: m.conversation.id,
-      threadRootMessageId: m.thread.rootMessageId,
+      threadRootMessageId,
     });
     const res = await this.request<{ messageId: string; created: boolean }>("POST", "/messages", {
       agentId: m.agent.id,
       conversationId: m.conversation.id,
-      threadRootMessageId: m.thread.rootMessageId,
+      threadRootMessageId,
       inReplyToMessageId: m.message.id,
       text,
       idempotencyKey: `evt:${m.eventId}`,
@@ -214,8 +302,17 @@ export class FakeCellPlugin {
       if (type === "cell.config.changed" && this.opts.autoAck) await this.ackAll();
       if (type === "agent.mention.v1" && this.opts.autoReply) {
         const m = data as unknown as MentionPayload;
-        await this.reply(m, (this.opts.replyText ?? identityReply)(m));
+        const calls = parseCallDirectives(m.message.text);
+        const body =
+          calls.length > 0
+            ? (await this.simulateToolCalls(m, calls)).join("\n")
+            : (this.opts.replyText ?? identityReply)(m);
+        await this.reply(m, body + turnToolsSuffix(m) + turnContextSuffix(m));
       }
+      if (this.opts.pluginTools && (type === "plugin.install.v1" || type === "plugin.uninstall.v1")) {
+        await this.runPluginFlow(type, data);
+      }
+      if (this.opts.hostMap && type === "mcp.probe") await this.runMcpProbe(data);
       if (this.opts.deviceAuth) {
         if (type === "provider.auth.start") void this.runDeviceFlow(data);
         if (type === "provider.auth.cancel") this.flows.get(String(data.flowId))?.abort();
@@ -226,6 +323,174 @@ export class FakeCellPlugin {
       }
     } catch (err) {
       console.error("fake cell plugin handler failed", err);
+    }
+  }
+
+  /**
+   * Simulates the cell running each `[[call <tool> <json>]]` of a mention, the way apps/openclaw-channel does:
+   * a tool is offered only when it (or a name ending in `__<tool>`) is in `turn.tools`; `ocw_memory_save` posts
+   * `{eventId, agentId, text}` to `/agent-channel/v1/memories`; any other tool asks `/agent-channel/v1/tool-calls`
+   * and, when allowed, reports a result. One line per call: `Tool <offered name>: allowed | denied (<reason>)`,
+   * `Tool <name>: saved | not offered`.
+   */
+  async simulateToolCalls(
+    m: MentionPayload,
+    calls: Array<{ tool: string; args: Record<string, unknown> }>,
+  ): Promise<string[]> {
+    const lines: string[] = [];
+    const offered = m.turn?.tools ?? [];
+    for (const call of calls) {
+      const name = offered.find((t) => t === call.tool || t.endsWith(`__${call.tool}`));
+      if (!name) {
+        lines.push(`Tool ${call.tool}: not offered`);
+        continue;
+      }
+      if (name === "ocw_memory_save") {
+        const res = await this.request<{ error?: { code?: string } }>("POST", "/memories", {
+          eventId: m.eventId,
+          agentId: m.agent.id,
+          text: typeof call.args.text === "string" ? call.args.text : "",
+        });
+        lines.push(
+          res.status === 200
+            ? `Tool ${call.tool}: saved`
+            : `Tool ${call.tool}: denied (${res.body?.error?.code ?? res.status})`,
+        );
+        continue;
+      }
+      const params: { query?: string; url?: string } = {};
+      if (typeof call.args.query === "string") params.query = call.args.query;
+      if (typeof call.args.url === "string") params.url = call.args.url;
+      const res = await this.request<{ callId?: string; allowed?: boolean; reason?: string | null }>(
+        "POST",
+        "/tool-calls",
+        { eventId: m.eventId, agentId: m.agent.id, tool: name, params },
+      );
+      // The line names the tool the turn offered (`<safe>__echo` for an MCP tool), like the gate saw it.
+      if (res.status !== 200 || !res.body.allowed || !res.body.callId) {
+        lines.push(`Tool ${name}: denied (${res.body.reason ?? res.status})`);
+        continue;
+      }
+      await this.request("POST", `/tool-calls/${res.body.callId}/result`, {
+        status: "ok",
+        resultCount: 0,
+        durationMs: 1,
+      });
+      lines.push(`Tool ${name}: allowed`);
+    }
+    return lines;
+  }
+
+  private step() {
+    return new Promise((r) => setTimeout(r, this.opts.stepMs ?? 1200));
+  }
+
+  /** The marketplace executor, simulated: no download, no OpenClaw; the API re-scores the report as usual. */
+  private async runPluginFlow(type: string, data: FakeCellEvent["data"]) {
+    const step = () => this.step();
+    const report = async (body: Record<string, unknown>) => {
+      const res = await this.request("POST", "/plugins/report", body);
+      this.pluginReports.push({ status: res.status, body });
+      this.notify();
+      return res;
+    };
+    const flowId = String(data.flowId);
+    const pluginRowId = String(data.pluginRowId);
+    if (type === "plugin.uninstall.v1") {
+      await step();
+      await report({ flowId, pluginRowId, state: "uninstalled", pluginId: String(data.pluginId) });
+      return;
+    }
+    const packageName = String(data.packageName);
+    await step();
+    await report({ flowId, pluginRowId, state: "installing" });
+    await step();
+    const tools =
+      this.opts.pluginTools?.[`${packageName}@${String(data.version)}`] ??
+      this.opts.pluginTools?.[packageName] ??
+      [];
+    await report({
+      flowId,
+      pluginRowId,
+      state: "installed",
+      pluginId: typeof data.expectedPluginId === "string" ? data.expectedPluginId : packageName,
+      version: String(data.version),
+      declaredTools: tools.map((name) => ({ name })),
+    });
+  }
+
+  /** The MCP probe, simulated with plain JSON-RPC over fetch (the fake MCP answers single JSON responses). */
+  private async runMcpProbe(data: FakeCellEvent["data"]) {
+    const probeId = String(data.probeId);
+    const serverId = String(data.serverId);
+    await this.step();
+    const cell = await this.fetchCell();
+    const server = cell.mcpServers?.find((s) => s.id === serverId);
+    const send = async (body: Record<string, unknown>) => {
+      const res = await this.request("POST", "/mcp/probe-results", body);
+      this.probeReports.push({ status: res.status, body });
+      this.notify();
+    };
+    if (!server) {
+      await send({ probeId, serverId, ok: false, error: "The cell does not know this MCP server." });
+      return;
+    }
+    const url = new URL(server.url);
+    const mapped = this.opts.hostMap?.[url.host];
+    if (mapped) url.host = mapped;
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+    };
+    for (const h of server.headers) headers[h.name] = h.value;
+    let session: string | null = null;
+    const rpc = async (id: number | null, method: string, params: Record<string, unknown> = {}) => {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { ...headers, ...(session ? { "mcp-session-id": session } : {}) },
+        body: JSON.stringify({ jsonrpc: "2.0", ...(id === null ? {} : { id }), method, params }),
+        redirect: "error",
+      });
+      if (res.status === 401 || res.status === 403) {
+        throw new Error(
+          `The MCP server refused the credentials (HTTP ${res.status}). Check the header values.`,
+        );
+      }
+      if (!res.ok && res.status !== 202) throw new Error(`The MCP server answered HTTP ${res.status}.`);
+      session = res.headers.get("mcp-session-id") ?? session;
+      const text = await res.text();
+      return text ? (JSON.parse(text) as { result?: Record<string, unknown> }) : {};
+    };
+    try {
+      await rpc(1, "initialize", {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "ocw-fake-cell", version: "1.0.0" },
+      });
+      await rpc(null, "notifications/initialized");
+      const listed = await rpc(2, "tools/list");
+      const tools = ((listed.result?.tools as Array<Record<string, unknown>> | undefined) ?? []).map((t) => ({
+        name: String(t.name),
+        ...(typeof t.title === "string" ? { title: t.title } : {}),
+        ...(typeof t.description === "string" ? { description: t.description } : {}),
+        ...(t.annotations && typeof t.annotations === "object"
+          ? {
+              annotations: {
+                readOnlyHint: (t.annotations as { readOnlyHint?: boolean }).readOnlyHint === true,
+                destructiveHint: (t.annotations as { destructiveHint?: boolean }).destructiveHint === true,
+              },
+            }
+          : {}),
+      }));
+      await send({ probeId, serverId, ok: true, tools });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await send({
+        probeId,
+        serverId,
+        ok: false,
+        error: /fetch failed/i.test(message) ? "Could not reach the MCP server." : message.slice(0, 300),
+      });
     }
   }
 

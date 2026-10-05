@@ -42,6 +42,13 @@ export const Permission = z.enum([
   "work_session.interrupt",
   "work_session.approve",
   "work_session.archive",
+  // Phase 3.1 (D-02): personal bots and bot capabilities.
+  "bot.create_personal",
+  "bot.configure",
+  "bot.internet",
+  "bot.tool.use",
+  "plugin.manage",
+  "mcp.manage",
 ]);
 export type Permission = z.infer<typeof Permission>;
 
@@ -85,6 +92,12 @@ export const PERMISSION_SURFACE: Record<Permission, PermissionSurface> = {
   "work_session.interrupt": "workzone",
   "work_session.approve": "workzone",
   "work_session.archive": "workzone",
+  "bot.create_personal": "bots",
+  "bot.configure": "bots",
+  "bot.internet": "bots",
+  "bot.tool.use": "bots",
+  "plugin.manage": "admin",
+  "mcp.manage": "admin",
 };
 
 export const ROLE_SURFACES: Record<OrgRole, PermissionSurface[]> = {
@@ -103,6 +116,9 @@ const STANDARD: readonly Permission[] = [
   "channel.post",
   "channel.members.add",
   "bot.read",
+  "bot.create_personal",
+  "bot.internet",
+  "bot.tool.use",
 ];
 const DEVELOPER: readonly Permission[] = [
   ...STANDARD,
@@ -130,6 +146,9 @@ const ADMIN: readonly Permission[] = [
   "device.revoke",
   "work_session.approve",
   "work_session.archive",
+  "bot.configure",
+  "plugin.manage",
+  "mcp.manage",
 ];
 
 /**
@@ -147,7 +166,12 @@ export const ROLE_PERMISSIONS: Record<OrgRole, readonly Permission[]> = {
 /** Granted to a unit lead on the lead's unit subtree. */
 export const LEAD_PERMISSIONS: readonly Permission[] = ["unit.members.manage"];
 /** Upper bound for an agent principal (intersected with the triggering human). */
-export const AGENT_PERMISSIONS: readonly Permission[] = ["channel.read", "channel.post"];
+export const AGENT_PERMISSIONS: readonly Permission[] = [
+  "channel.read",
+  "channel.post",
+  "bot.internet",
+  "bot.tool.use",
+];
 /** The OpenClaw cell principal. */
 export const CELL_PERMISSIONS: readonly Permission[] = ["cell.sync"];
 /** A paired device principal (Device Link). */
@@ -267,6 +291,12 @@ export const PERMISSION_DESCRIPTIONS: Record<Permission, string> = {
   "work_session.interrupt": "Interrupt running Work Zone sessions",
   "work_session.approve": "Approve or deny any Work Zone tool request",
   "work_session.archive": "Archive any Work Zone session",
+  "bot.create_personal": "Create your own private personal bots",
+  "bot.configure": "Configure a bot's instructions, model and capabilities",
+  "bot.internet": "Let bots search and read the web when they answer you",
+  "bot.tool.use": "Let bots use connected tools (MCP servers and plugins) when they answer you",
+  "plugin.manage": "Review, install, update and remove OpenClaw Marketplace plugins",
+  "mcp.manage": "Register and configure MCP servers for the organization's bots",
 };
 
 // ---------------------------------------------------------------- tokens (AUTH-06)

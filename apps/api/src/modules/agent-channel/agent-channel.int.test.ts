@@ -86,6 +86,7 @@ async function postHuman(opts: {
           author: { kind: "user", id: opts.authorId, displayName: opts.authorName },
           body: opts.body,
           createdAt: row!.createdAt,
+          delivery: "thread",
         },
         after,
       );
@@ -560,7 +561,7 @@ describe("mention → delivery → reply", () => {
     );
     expect(row.rows[0]).toMatchObject({ author_kind: "agent", author_id: agentId, thread_id: rootId });
     expect(row.rows[0].body).toBe(
-      `Asked by ${ADMIN.name} (${adminId}). Thread participants: Alex, ${ADMIN.name}.`,
+      `Asked by ${ADMIN.name} (${adminId}). Thread participants: Alex, ${ADMIN.name}. [turn tools: none] [memory: 0] [now: UTC]`,
     );
 
     const audit = await su.query(

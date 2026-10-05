@@ -33,15 +33,23 @@ jobs:
           pnpm --filter @ocw/desktop test
 
   e2e:
-    name: e2e (Playwright, desktop + mobile)
+    # Runs alongside verify (no `needs`), one job per viewport, each on its own fresh stack.
+    name: e2e (Playwright, ${{ matrix.project }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [desktop, mobile]
     env:
       # Bots use the deterministic mock model; CI never receives a metered model key.
       OCW_MODEL_PROVIDER: mock
       # Specs sign many browsers in from one IP; production keeps the default 30/min.
       OCW_SIGNIN_RATE_LIMIT_PER_MINUTE: "600"
+      # Marketplace / MCP specs: the API proxies the fake ClawHub, the simulated cell probes the fake MCP.
+      OCW_CLAWHUB_URL: http://127.0.0.1:4291
+      OCW_E2E_FAKE_URL: http://127.0.0.1:4291
+      OCW_E2E_FAKE_MCP_TOKEN: e2e-mcp-token
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -54,38 +62,76 @@ jobs:
           pnpm setup:env
           docker compose up -d --wait postgres redis
           pnpm db:migrate
+      - name: Fake model, MCP and ClawHub (loopback, no internet)
+        run: |
+          (PORT=4291 FAKE_MODEL_HOST=127.0.0.1 FAKE_MCP_TOKEN=e2e-mcp-token nohup node infra/fake-model/server.mjs > fake.log 2>&1 &)
+          for i in $(seq 1 20); do curl -sf -o /dev/null localhost:4291/v1/models && break; sleep 1; done
       - name: Start API and web
         run: |
           (cd apps/api && nohup node --env-file-if-exists=../../.env --import tsx src/main.ts > ../../api.log 2>&1 &)
           (cd apps/web && pnpm build && nohup node --env-file-if-exists=../../.env ./node_modules/next/dist/bin/next start -p 3000 > ../../web.log 2>&1 &)
           for i in $(seq 1 60); do curl -sf localhost:4000/health && curl -sf -o /dev/null localhost:3000/login && break; sleep 2; done
+      - name: Cache Playwright browsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
       - run: pnpm exec playwright install --with-deps chromium
-      - run: pnpm e2e
+      - run: pnpm e2e --project=${{ matrix.project }}
       - name: Realtime latency report
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: realtime-latency
+          name: ${{ matrix.project == 'desktop' && 'realtime-latency' || 'realtime-latency-mobile' }}
           path: e2e/test-results/realtime-latency.json
           if-no-files-found: warn
           retention-days: 30
       - name: Logs and report on failure
         if: failure()
-        run: tail -n 200 api.log web.log || true
+        run: tail -n 200 api.log web.log fake.log || true
       - uses: actions/upload-artifact@v7
         if: failure()
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.project }}
           path: |
             e2e/playwright-report
             e2e/test-results
           retention-days: 7
 
   images:
-    name: docker images (api, web)
+    name: docker images (api, web, openclaw cell)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
+      # The OpenClaw base image is ~5 GB unpacked; make room on the hosted runner first.
+      - name: Free runner disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
       - run: docker build -f apps/api/Dockerfile -t ocw-api:ci .
       - run: docker build -f apps/web/Dockerfile -t ocw-web:ci .
+      # The shipped cell image with the bundled search plugins (pinned + sha512-checked at build time).
+      - run: docker build -f infra/openclaw/Dockerfile -t ocw-openclaw:ci .
+
+  cell-smoke:
+    name: openclaw cell smoke (real container, offline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: Free runner disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - name: Stdio MCP sandbox dependencies (locked, no lifecycle scripts)
+        run: npm ci --prefix infra/mcp-sandbox --ignore-scripts --no-audit --no-fund
+      - name: Renderer and fake model unit tests
+        run: node --test 'infra/**/*.test.mjs'
+      - name: Build the plugin
+        run: pnpm --filter @ocw/openclaw-channel build
+      # Real OpenClaw 2026.9.7 cell (image built here from infra/openclaw/Dockerfile) + the working-tree
+      # plugin + fake model + fake Agent Channel API on an egress-less network: no real model, no real web.
+      - name: Container smoke (all scenarios)
+        run: SMOKE_BUILD=1 bash infra/openclaw/test/run-container-smoke.sh

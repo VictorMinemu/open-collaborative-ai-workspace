@@ -12,12 +12,20 @@ export interface DirectoryEntry {
   status?: "provisioning" | "ready" | "error" | "disabled";
   /** Users only. */
   role?: OrgRole;
+  /** Agents only (D-01): personal bots belong to `ownerUserId`. */
+  scope?: "team" | "personal";
+  ownerUserId?: string | null;
+  /** Agents only: soft-deleted bots keep resolving as authors. */
+  deleted?: boolean;
 }
 
 export interface Directory {
   users: Map<string, DirectoryEntry>;
   agents: Map<string, DirectoryEntry>;
-  /** handle → entry (agents win over users on a clash; agents are what mentions trigger). */
+  /**
+   * handle → entry (agents win over users on a clash; agents are what mentions trigger). Personal bots are
+   * excluded: they can never be mentioned (D-01).
+   */
   byHandle: Map<string, DirectoryEntry>;
 }
 
@@ -41,6 +49,8 @@ export async function loadDirectory(tx: Tx): Promise<Directory> {
         avatarUrl: agents.avatarUrl,
         status: agents.status,
         deletedAt: agents.deletedAt,
+        scope: agents.scope,
+        ownerUserId: agents.ownerUserId,
       })
       .from(agents),
   ]);
@@ -67,10 +77,14 @@ export async function loadDirectory(tx: Tx): Promise<Directory> {
       handle: a.username.toLowerCase(),
       avatarUrl: a.avatarUrl,
       status: a.status,
+      scope: a.scope,
+      ownerUserId: a.ownerUserId,
+      deleted: a.deletedAt !== null,
     };
     agentMap.set(e.id, e);
     // Deleted bots keep resolving as authors but free their handle: a new bot may reuse it (B2-6).
-    if (!a.deletedAt) byHandle.set(e.handle, e);
+    // Personal bots live only in their owner's DM (D-01): never resolved as a text @mention.
+    if (!a.deletedAt && a.scope !== "personal") byHandle.set(e.handle, e);
   }
   return { users, agents: agentMap, byHandle };
 }

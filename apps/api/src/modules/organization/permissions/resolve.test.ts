@@ -8,6 +8,7 @@ import {
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
+  agentResource,
   channelMemberResource,
   channelResource,
   deviceResource,
@@ -92,6 +93,12 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "work_session.interrupt": false,
     "work_session.approve": false,
     "work_session.archive": false,
+    "bot.create_personal": true,
+    "bot.configure": false,
+    "bot.internet": true,
+    "bot.tool.use": true,
+    "plugin.manage": false,
+    "mcp.manage": false,
   },
   developer: {
     "org.read": true,
@@ -129,6 +136,12 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "work_session.interrupt": true,
     "work_session.approve": false,
     "work_session.archive": false,
+    "bot.create_personal": true,
+    "bot.configure": false,
+    "bot.internet": true,
+    "bot.tool.use": true,
+    "plugin.manage": false,
+    "mcp.manage": false,
   },
   lead: {
     "org.read": true,
@@ -166,6 +179,12 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "work_session.interrupt": true,
     "work_session.approve": false,
     "work_session.archive": false,
+    "bot.create_personal": true,
+    "bot.configure": false,
+    "bot.internet": true,
+    "bot.tool.use": true,
+    "plugin.manage": false,
+    "mcp.manage": false,
   },
   admin: {
     "org.read": true,
@@ -203,6 +222,12 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "work_session.interrupt": true,
     "work_session.approve": true,
     "work_session.archive": true,
+    "bot.create_personal": true,
+    "bot.configure": true,
+    "bot.internet": true,
+    "bot.tool.use": true,
+    "plugin.manage": true,
+    "mcp.manage": true,
   },
 };
 
@@ -509,11 +534,139 @@ describe("unit leads and explicit rules", () => {
   });
 });
 
+// ---------------------------------------------------------------- personal bots and direct conversations (03.1-01)
+
+describe("personal bots (D-01) and direct conversations (D-03)", () => {
+  const SAM = "u-sam";
+  const ALEX = "u-alex";
+  const ADMIN_ID = "u-admin";
+  const sam = user("developer", { id: SAM });
+  const alex = user("developer", { id: ALEX });
+  const admin = user("admin", { id: ADMIN_ID });
+  const personal = { scope: "personal" as const, ownerUserId: SAM, disabled: false };
+  const team = { scope: "team" as const, ownerUserId: null, disabled: false };
+  const bot: PrincipalFacts = { ...user(null), kind: "agent", id: "bot-1" };
+
+  it("the owner sees and configures their personal bot", () => {
+    const r = agentResource(personal, SAM);
+    expect(r.relations.has("owner")).toBe(true);
+    expect(r.state.has("personal")).toBe(true);
+    expect(allowed(sam, r, "bot.read")).toBe(true);
+    expect(allowed(sam, r, "bot.configure")).toBe(true);
+    expect(allowed(sam, r, "bot.internet")).toBe(true);
+  });
+
+  it("another member and an admin are denied with personal_bot; the admin keeps governance (bot.manage)", () => {
+    for (const [who, id] of [
+      [alex, ALEX],
+      [admin, ADMIN_ID],
+    ] as const) {
+      const r = agentResource(personal, id);
+      for (const perm of ["bot.read", "bot.internet", "bot.tool.use"] as const) {
+        expect(decide(who, r, [], perm)).toEqual({
+          allowed: false,
+          denial: { permission: perm, layer: "resource", reason: "personal_bot" },
+        });
+      }
+    }
+    // The admin's role grants bot.configure; the precondition removes it. A developer never had it.
+    expect(decide(admin, agentResource(personal, ADMIN_ID), [], "bot.configure").denial).toEqual({
+      permission: "bot.configure",
+      layer: "resource",
+      reason: "personal_bot",
+    });
+    expect(allowed(alex, agentResource(personal, ALEX), "bot.configure")).toBe(false);
+    // Even an explicit allow rule for Alex cannot open someone else's personal bot.
+    const allowAll = rule({ subjectKind: "user", subjectId: ALEX, permission: "bot.*", effect: "allow" });
+    expect(decide(alex, agentResource(personal, ALEX), [allowAll], "bot.configure").denial).toMatchObject({
+      reason: "personal_bot",
+    });
+    expect(allowed(admin, agentResource(personal, ADMIN_ID), "bot.manage")).toBe(true);
+    expect(allowed(alex, agentResource(personal, ALEX), "bot.manage")).toBe(false);
+  });
+
+  it("on a team bot the admin configures and a developer does not", () => {
+    expect(allowed(admin, agentResource(team, ADMIN_ID), "bot.configure")).toBe(true);
+    expect(decide(sam, agentResource(team, SAM), [], "bot.configure").denial).toMatchObject({
+      layer: "role",
+      reason: "missing_permission",
+    });
+    expect(allowed(sam, agentResource(team, SAM), "bot.read")).toBe(true);
+  });
+
+  it("an owner relation never outlives the role surface (a standard owner still holds bot.configure)", () => {
+    expect(allowed(user("standard", { id: SAM }), agentResource(personal, SAM), "bot.configure")).toBe(true);
+  });
+
+  it("a deny rule removes bot.create_personal at the org layer", () => {
+    const deny = rule({
+      subjectKind: "role",
+      subjectId: "developer",
+      permission: "bot.create_personal",
+      effect: "deny",
+    });
+    expect(decide(sam, orgResource(), [deny], "bot.create_personal").denial).toMatchObject({
+      layer: "org",
+      reason: "denied_by_rule",
+    });
+    expect(allowed(user("standard"), orgResource(), "bot.create_personal", [deny])).toBe(true);
+  });
+
+  it("a bot acting for its owner keeps bot.internet; for anyone else it loses it with personal_bot", () => {
+    const asBot = agentResource(personal, null);
+    expect(
+      decide(bot, asBot, [], "bot.internet", { principal: sam, resource: agentResource(personal, SAM) }),
+    ).toEqual({ allowed: true });
+    expect(
+      decide(bot, asBot, [], "bot.internet", { principal: alex, resource: agentResource(personal, ALEX) }),
+    ).toEqual({
+      allowed: false,
+      denial: { permission: "bot.internet", layer: "resource", reason: "personal_bot" },
+    });
+    expect(
+      decide(bot, asBot, [], "bot.tool.use", {
+        principal: admin,
+        resource: agentResource(personal, ADMIN_ID),
+      }).denial,
+    ).toMatchObject({ reason: "personal_bot" });
+  });
+
+  it("a DM has fixed membership: the owner reads and posts but never adds, removes or archives", () => {
+    const own = channelResource({ visibility: "private", archived: false, viewerRole: "owner", kind: "dm" });
+    expect(own.state.has("dm")).toBe(true);
+    expect(allowed(sam, own, "channel.read")).toBe(true);
+    expect(allowed(sam, own, "channel.post")).toBe(true);
+    for (const perm of ["channel.members.add", "channel.members.remove", "channel.archive"] as const) {
+      expect(decide(sam, own, [], perm)).toEqual({
+        allowed: false,
+        denial: { permission: perm, layer: "resource", reason: "direct_conversation" },
+      });
+      expect(decide(admin, own, [], perm).denial).toMatchObject({ reason: "direct_conversation" });
+    }
+  });
+
+  it("a non-member admin cannot read someone's DM (private_channel)", () => {
+    const theirs = channelResource({ visibility: "private", archived: false, viewerRole: null, kind: "dm" });
+    expect(decide(admin, theirs, [], "channel.read")).toEqual({
+      allowed: false,
+      denial: { permission: "channel.read", layer: "resource", reason: "private_channel" },
+    });
+  });
+});
+
 // ---------------------------------------------------------------- properties (fast-check)
 
 const UNITS = ["u0", "u1", "u2", "u3", "u4", "u5"] as const;
 const RELATIONS: Relation[] = ["self", "owner", "member", "creator", "device_owner", "grantee", "inviter"];
-const STATES: ResourceState[] = ["private", "archived", "revoked", "device_revoked"];
+const STATES: ResourceState[] = [
+  "private",
+  "archived",
+  "revoked",
+  "device_revoked",
+  "personal",
+  "disabled",
+  "dm",
+];
 const TYPES: ResourceType[] = [
   "organization",
   "unit",
@@ -524,6 +677,7 @@ const TYPES: ResourceType[] = [
   "device",
   "work_session",
   "invitation",
+  "agent",
 ];
 const PATTERNS = [...Permission.options, "channel.*", "device.*", "work_session.*", "unit.*", "invitation.*"];
 const IDS = ["p1", "p2"];

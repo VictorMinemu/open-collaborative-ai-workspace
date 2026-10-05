@@ -1,9 +1,16 @@
 import {
   AGENT_CHANNEL_BASE_PATH,
+  type AgentChannelMcpProbeResult,
+  type AgentChannelMemorySave,
+  AgentChannelMemorySaveResponse,
+  type AgentChannelPluginReport,
   type AgentChannelPostMessage,
   AgentChannelPostMessageResponse,
   type AgentChannelProviderAuthReport,
   type AgentChannelStatusReport,
+  AgentChannelToolCallDecision,
+  type AgentChannelToolCallRequest,
+  type AgentChannelToolCallResult,
   type AgentChannelTyping,
   CellSnapshot,
 } from "./agent-channel-protocol.js";
@@ -127,6 +134,60 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
      */
     async reportProviderAuth(report: AgentChannelProviderAuthReport, signal?: AbortSignal): Promise<void> {
       await request("POST", "/provider-auth", report, signal, 3);
+    },
+    /**
+     * The tool gate's question for one call (D-08). Single attempt, bounded by `timeoutMs` (default 10 s, under
+     * OpenClaw's 15 s hook budget) and the caller's signal: any failure rejects, and the caller blocks the call
+     * (fail closed). Never logs params.
+     */
+    async authorizeToolCall(
+      req: AgentChannelToolCallRequest,
+      signal?: AbortSignal,
+      timeoutMs = 10_000,
+    ): Promise<AgentChannelToolCallDecision> {
+      const timeout = AbortSignal.timeout(timeoutMs);
+      const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+      return AgentChannelToolCallDecision.parse(await request("POST", "/tool-calls", req, combined, 1));
+    },
+    /** Outcome of an allowed call (never its content). Best effort: never throws. */
+    async reportToolCallResult(callId: string, result: AgentChannelToolCallResult): Promise<void> {
+      try {
+        await request(
+          "POST",
+          `/tool-calls/${encodeURIComponent(callId)}/result`,
+          result,
+          AbortSignal.timeout(10_000),
+          2,
+        );
+      } catch {
+        /* the audit row keeps the decision; the outcome is optional */
+      }
+    },
+    /**
+     * `ocw_memory_save` (D-10): stores one note for the human of the turn. Two attempts at most (a duplicate
+     * text is not stored twice); a refusal throws AgentChannelHttpError (404 unknown_turn, 409 otherwise).
+     * Never logs the text.
+     */
+    async saveMemory(
+      req: AgentChannelMemorySave,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelMemorySaveResponse> {
+      return AgentChannelMemorySaveResponse.parse(await request("POST", "/memories", req, signal, 2));
+    },
+    /**
+     * The tools an `mcp.probe` discovered, or why it failed (D-13). Three attempts at most: the API applies only
+     * the newest probe of a server, so a retried report is harmless. Never logs the report.
+     */
+    async reportMcpProbe(report: AgentChannelMcpProbeResult, signal?: AbortSignal): Promise<void> {
+      await request("POST", "/mcp/probe-results", report, signal, 3);
+    },
+    /**
+     * A marketplace install / uninstall outcome (D-14). Three attempts at most: the API applies a report only to the
+     * row's current flow, so a retried report is harmless. Throws AgentChannelHttpError on a refusal (404 unknown
+     * flow, 409 wrong state).
+     */
+    async reportPlugin(report: AgentChannelPluginReport, signal?: AbortSignal): Promise<void> {
+      await request("POST", "/plugins/report", report, signal, 3);
     },
     /** `ws(s)://…/agent-channel/v1/ws` */
     wsUrl(): string {

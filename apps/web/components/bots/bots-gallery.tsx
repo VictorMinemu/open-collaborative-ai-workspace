@@ -35,6 +35,7 @@ export function BotsGallery() {
     return () => clearTimeout(t);
   }, [fresh]);
 
+  // The API already filters: team bots the caller may read, plus the caller's own personal bots (D-01).
   const list = agents.data?.agents ?? [];
   const open = list.find((a) => a.id === openId) ?? null;
   const noModels = models.isSuccess && models.data.models.length === 0;
@@ -44,7 +45,7 @@ export function BotsGallery() {
     <div className="flex min-w-0 flex-1 flex-col">
       <PageHeader
         title="Bots"
-        description="Teammates with their own identity. Mention them in any channel."
+        description="Teammates with their own identity. Message them privately or mention them in any channel."
         icon={<Bot />}
         actions={
           canManage ? (

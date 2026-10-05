@@ -20,6 +20,9 @@ export const RELATION_PERMISSIONS: Record<ResourceType, Partial<Record<Relation,
     device_owner: ["work_session.approve", "work_session.archive"],
   },
   invitation: { inviter: ["invitation.revoke"] },
+  // D-01: the owner of a (personal) bot sees, uses and configures it; the surface filter keeps it to
+  // members whose role has the `bots` surface (every role).
+  agent: { owner: ["bot.read", "bot.configure"] },
 };
 
 /** Reason reported when a permission is simply not granted (default `missing_permission`). */
@@ -34,6 +37,11 @@ export interface Precondition {
   applies(permission: Permission): boolean;
   check(p: PrincipalFacts, r: ResourceFacts, permission: Permission): Denial | null;
 }
+
+/** Permissions that use or configure one bot: owner-only on a personal bot (D-01). */
+const PERSONAL_BOT_GATED = new Set<Permission>(["bot.read", "bot.configure", "bot.internet", "bot.tool.use"]);
+/** Membership of a direct conversation is fixed at creation (D-03). */
+const DM_FIXED = new Set<Permission>(["channel.members.add", "channel.members.remove", "channel.archive"]);
 
 const DEVICE_GATED = new Set<Permission>([
   "work_session.create",
@@ -72,6 +80,23 @@ export const PRECONDITIONS: readonly Precondition[] = [
       r.state.has("revoked") || r.state.has("device_revoked")
         ? { layer: "device", reason: "device_revoked" }
         : null,
+  },
+  {
+    // Personal bots (D-01): nobody but the owner (admins included) sees, uses or configures one. Agent
+    // principals are judged as themselves; the human they act for is judged by the on-behalf-of pass.
+    applies: (perm) => PERSONAL_BOT_GATED.has(perm),
+    check: (p, r) => {
+      if (r.type !== "agent" || p.kind !== "user") return null;
+      return r.state.has("personal") && !r.relations.has("owner")
+        ? { layer: "resource", reason: "personal_bot" }
+        : null;
+    },
+  },
+  {
+    // Direct conversations (D-03): two fixed members; nobody adds, removes or archives.
+    applies: (perm) => DM_FIXED.has(perm),
+    check: (_p, r) =>
+      isChannel(r) && r.state.has("dm") ? { layer: "resource", reason: "direct_conversation" } : null,
   },
   {
     // Role ceiling: an inviter never grants a role above what their own role may invite.
@@ -127,6 +152,8 @@ export interface ChannelFacts {
   visibility: "public" | "private";
   archived: boolean;
   viewerRole: "owner" | "member" | null;
+  /** `dm` = a direct conversation (state `dm`: fixed membership). Omitted = a channel. */
+  kind?: "channel" | "dm";
 }
 
 function channelRelations(c: ChannelFacts): Relation[] {
@@ -137,7 +164,11 @@ function channelRelations(c: ChannelFacts): Relation[] {
 }
 
 function channelState(c: ChannelFacts): ResourceState[] {
-  return [...when(c.visibility === "private", "private" as const), ...when(c.archived, "archived" as const)];
+  return [
+    ...when(c.visibility === "private", "private" as const),
+    ...when(c.archived, "archived" as const),
+    ...when(c.kind === "dm", "dm" as const),
+  ];
 }
 
 export function channelResource(c: ChannelFacts): ResourceFacts {
@@ -195,4 +226,23 @@ export function invitationResource(
     ),
     invitedRole: i.role,
   };
+}
+
+/** D-01: what the resolver needs about a bot. */
+export interface AgentFacts {
+  scope: "team" | "personal";
+  ownerUserId: string | null;
+  disabled: boolean;
+}
+
+/** A bot as a resource: `owner` relation for its owner; states `personal` and `disabled`. */
+export function agentResource(a: AgentFacts, principalUserId: string | null): ResourceFacts {
+  return facts(
+    "agent",
+    when(
+      principalUserId !== null && a.ownerUserId !== null && a.ownerUserId === principalUserId,
+      "owner" as const,
+    ),
+    [...when(a.scope === "personal", "personal" as const), ...when(a.disabled, "disabled" as const)],
+  );
 }

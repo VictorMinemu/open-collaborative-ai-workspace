@@ -1,19 +1,19 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-current_phase: 2
-current_phase_name: Realtime Presence and Latency
-status: executing
-stopped_at: "REQUIREMENTS.md and ROADMAP.md re-mapped to the Phase 1 build (Restructure 2026-10-04); next: `/gsd-verify-work 1`, then `/gsd-plan-phase 2`"
-last_updated: "2026-10-04T22:52:36.474Z"
-last_activity: 2026-10-04
-last_activity_desc: Phase 3 execution started
-state_head: 4d867922e090de4aaedcb0e3073a8feab2ff3b79
+current_phase: 1
+current_phase_name: MVP 0 — Collaborative Workspace Demo Slice
+status: planning
+stopped_at: Phase 03.1 complete, ready to plan Phase 1
+last_updated: "2026-10-05T16:09:23.953Z"
+last_activity: 2026-10-05
+last_activity_desc: Phase 03.1 complete, transitioned to Phase 1
+state_head: b6d40007285328e5feae4ea37f336b4ada1909c3
 progress:
   total_phases: 12
-  completed_phases: 1
-  total_plans: 21
-  completed_plans: 16
+  completed_phases: 3
+  total_plans: 36
+  completed_plans: 36
 ---
 
 # Project State
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-02)
 
 **Core value:** AI sessions are multiplayer — a private AI chat or coding session can be shared live with colleagues, the model knows who each participant is, and everything stays attributed and auditable.
-**Current focus:** Phase 3.1 — Personal Bots and Bot Capabilities (incl. MCP + OpenClaw Marketplace)
+**Current focus:** Phase 03.1 — Personal Bots and Bot Capabilities
 
 ## Current Position
 
-Phase: 3.1 (Personal Bots and Bot Capabilities) — planned (15 plans), executes after Phase 3 merges
-Plan: 0 of 15
-Status: Phase 3 complete and verified (6/6 plans, 591 tests, e2e 42/42, p95 < 20 ms); Phase 3.1 planned
-Last activity: 2026-10-05 - Phase 3 (Realtime Presence and Latency) executed and verified: presence + away, <500 ms latency in CI, live re-authorization of subscriptions
+Phase: 1 — MVP 0 — Collaborative Workspace Demo Slice
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-10-05 — Phase 03.1 complete, transitioned to Phase 1
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -38,7 +38,7 @@ Progress: [░░░░░░░░░░] 0%
 
 **Velocity:**
 
-- Total plans completed: 0
+- Total plans completed: 15
 - Average duration: — min
 - Total execution time: 0.0 hours
 
@@ -46,7 +46,7 @@ Progress: [░░░░░░░░░░] 0%
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| 03.1 | 15 | - | - |
 
 **Recent Trend:**
 
@@ -107,5 +107,5 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-10-04
-Stopped at: REQUIREMENTS.md and ROADMAP.md re-mapped to the Phase 1 build (Restructure 2026-10-04); next: `/gsd-verify-work 1`, then `/gsd-plan-phase 2`
+Stopped at: Phase 03.1 complete, ready to plan Phase 1
 Resume file: None

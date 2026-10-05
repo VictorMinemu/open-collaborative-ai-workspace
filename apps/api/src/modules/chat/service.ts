@@ -48,6 +48,23 @@ export async function getChannel(tx: Tx, id: string): Promise<ConversationRow | 
   return row ?? null;
 }
 
+/**
+ * A conversation of one of `kinds` (D-03: message routes, read markers, the `conv:` topic and the agent reply
+ * path accept `channel | dm`; `/channels/*` routes stay channel-only through `getChannel`).
+ */
+export async function getConversation(
+  tx: Tx,
+  id: string,
+  kinds: ReadonlyArray<"channel" | "dm">,
+): Promise<ConversationRow | null> {
+  const [row] = await tx
+    .select()
+    .from(conversations)
+    .where(and(eq(conversations.id, id), inArray(conversations.kind, [...kinds])))
+    .limit(1);
+  return row ?? null;
+}
+
 export async function getMembership(
   tx: Tx,
   conversationId: string,
@@ -234,6 +251,7 @@ export async function channelFacts(
     visibility: channel.visibility,
     archived: channel.archivedAt !== null,
     viewerRole: membership?.role ?? null,
+    kind: channel.kind === "dm" ? "dm" : "channel",
   };
 }
 

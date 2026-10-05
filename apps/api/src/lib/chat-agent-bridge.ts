@@ -20,13 +20,32 @@ export interface PrincipalRef {
 export interface AgentMention {
   organizationId: string;
   conversationId: string;
-  /** Root message id of the thread the reply must go to (the message itself when posted at channel level). */
+  /**
+   * Root message id of the thread the reply must go to (the message itself when posted at channel level).
+   * For `delivery: "dm"` it is the message id (event schema unchanged); the reply is flat.
+   */
   threadRootId: string;
   messageId: string;
   agentIds: string[];
   author: PrincipalRef;
   body: string;
   createdAt: string;
+  /**
+   * `thread`: an @mention in a channel (reply in the thread). `dm`: a message in a direct conversation with
+   * the bot (D-04: no mention needed, flat reply, history = the DM itself).
+   */
+  delivery: "thread" | "dm";
+  /**
+   * `mention` (default): the bot was addressed (an @mention, or the DM itself). `reply_mode`: nobody was
+   * addressed and the candidates are team bots with reply mode `all` (D-12); delivery re-decides the org
+   * policy and applies the per-minute cap before metering.
+   */
+  trigger?: "mention" | "reply_mode";
+  /**
+   * The asking human's IANA time zone as sent by their client (validated by the contract); used only for the
+   * turn's local date and time (D-12). Never stored on the message.
+   */
+  clientTimeZone?: string | null;
 }
 
 export interface ThreadContext {

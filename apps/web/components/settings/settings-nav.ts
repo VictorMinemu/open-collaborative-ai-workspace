@@ -1,5 +1,5 @@
 import type { Permission } from "@ocw/contracts";
-import { Cpu, Laptop, type LucideIcon, Network, Server, Users } from "lucide-react";
+import { Cpu, Laptop, type LucideIcon, Network, Plug, Server, ShieldCheck, Store, Users } from "lucide-react";
 
 /** Settings sections. Add ONE entry here and create `app/(app)/settings/<slug>/page.tsx`. */
 export interface SettingsSection {
@@ -21,6 +21,27 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     permission: "unit.read",
   },
   { id: "models", label: "Models", href: "/settings/models", icon: Cpu, permission: "provider.manage" },
+  {
+    id: "bot-policy",
+    label: "Bot policy",
+    href: "/settings/bot-policy",
+    icon: ShieldCheck,
+    permission: "bot.manage",
+  },
+  {
+    id: "marketplace",
+    label: "Marketplace",
+    href: "/settings/marketplace",
+    icon: Store,
+    permission: "plugin.manage",
+  },
+  {
+    id: "mcp-servers",
+    label: "MCP servers",
+    href: "/settings/mcp-servers",
+    icon: Plug,
+    permission: "mcp.manage",
+  },
   {
     id: "bots-runtime",
     label: "Bots runtime",

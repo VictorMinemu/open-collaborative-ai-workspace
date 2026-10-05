@@ -11,6 +11,15 @@
  *   POST /agent-channel/v1/typing
  *   POST /agent-channel/v1/agents/:id/status
  *   POST /agent-channel/v1/provider-auth  (status per report: `authResponder`, default 200)
+ *   POST /agent-channel/v1/tool-calls     records and allows (denies tools listed in `denyTools`)
+ *   POST /agent-channel/v1/tool-calls/:id/result  records the outcome
+ *   POST /agent-channel/v1/memories       records the note (dedupes exact text per event's bot; 409 for
+ *                                          events listed in `refuseMemoryEvents`)
+ *   POST /agent-channel/v1/mcp/probe-results  records the probe report (`mcpProbes`)
+ *   POST /agent-channel/v1/plugins/report     records the report (`pluginReports`) and moves the row's status
+ *   POST /agent-channel/v1/plugins/verify-install  approves only a row `installing` with the same package, version
+ *                                          and sha256 (`verifyCalls`); like the real API, the install gate's authority
+ *   GET  /agent-channel/v1/plugins            the rows with a plugin id (boot allowlist)
  * Test-only controls under /__test/* (never part of the real API).
  */
 import { randomUUID } from "node:crypto";
@@ -18,12 +27,19 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 import { type WebSocket, WebSocketServer } from "ws";
 import type {
+  AgentChannelMcpProbeResult,
+  AgentChannelMemorySave,
+  AgentChannelPluginReport,
   AgentChannelPostMessage,
   AgentChannelProviderAuthReport,
   AgentChannelStatusReport,
+  AgentChannelToolCallRequest,
+  AgentChannelToolCallResult,
   AgentChannelTyping,
   AgentMentionEvent,
   CellAgent,
+  CellApprovedPlugin,
+  CellMcpServer,
   CellProvider,
   CellSnapshot,
   CellSubscription,
@@ -33,6 +49,16 @@ export type StoredEvent = { seq: number; type: string; data: Record<string, unkn
 export type StoredMessage = AgentChannelPostMessage & { messageId: string; receivedAt: number };
 export type StatusReport = AgentChannelStatusReport & { agentId: string };
 export type MentionInput = Omit<AgentMentionEvent, "seq" | "type" | "organizationId" | "cellId">;
+export type StoredToolCall = AgentChannelToolCallRequest & { callId: string; allowed: boolean };
+export type StoredToolResult = AgentChannelToolCallResult & { callId: string };
+export type StoredMemory = AgentChannelMemorySave & { memoryId: string; created: boolean };
+export type VerifyCall = {
+  packageName: string;
+  version: string;
+  sha256: string;
+  approved: boolean;
+  reason: string | null;
+};
 
 export type FakeAgentChannelApi = {
   url: string;
@@ -44,6 +70,28 @@ export type FakeAgentChannelApi = {
   providers: CellProvider[];
   /** Snapshot `subscriptions`; `undefined` = an older API that does not send the field. */
   cellSubscriptions: CellSubscription[] | undefined;
+  /** Snapshot `webSearch.provider`; `undefined` = not sent. */
+  webSearchProvider: string | undefined;
+  /** Tools whose `/tool-calls` the fake API denies (`denied_by_test`). */
+  denyTools: Set<string>;
+  toolCalls: StoredToolCall[];
+  toolResults: StoredToolResult[];
+  /** Every POST /memories (also refused ones: `memoryId` "" and `created` false). */
+  memories: StoredMemory[];
+  /** Event ids whose memory saves the fake API refuses with 409 `tainted`. */
+  refuseMemoryEvents: Set<string>;
+  /** Snapshot `mcpServers` (header values included, as the real API sends them); `[]` = none. */
+  mcpServers: CellMcpServer[];
+  /** Every POST /mcp/probe-results, in order. */
+  mcpProbes: AgentChannelMcpProbeResult[];
+  /** Number of GET /cell requests served. */
+  cellReads: number;
+  /** Snapshot `plugins` (approved marketplace plugins); publishing a plugin event moves its row's status. */
+  plugins: CellApprovedPlugin[];
+  /** Every POST /plugins/report attempt, in order (404s for unknown rows included). */
+  pluginReports: AgentChannelPluginReport[];
+  /** Every POST /plugins/verify-install (the install gate's questions) with the answer. */
+  verifyCalls: VerifyCall[];
   events: StoredEvent[];
   authReports: AgentChannelProviderAuthReport[];
   /** HTTP status for each POST /provider-auth (default 200). */
@@ -58,10 +106,16 @@ export type FakeAgentChannelApi = {
   authFailures: number;
   publish(type: string, data: Record<string, unknown>): StoredEvent;
   publishMention(input: MentionInput): StoredEvent;
-  /** Replace agents/providers and emit `cell.config.changed`. */
+  /** Replace agents/providers and emit `cell.config.changed` (`agentId` names the bot it is about). */
   updateCell(
-    next: { agents?: CellAgent[]; providers?: CellProvider[]; subscriptions?: CellSubscription[] },
+    next: {
+      agents?: CellAgent[];
+      providers?: CellProvider[];
+      subscriptions?: CellSubscription[];
+      mcpServers?: CellMcpServer[];
+    },
     reason?: string,
+    agentId?: string | null,
   ): StoredEvent;
   /** Next `n` POST /messages respond with `status` (before idempotency handling). */
   failNextPosts(n: number, status?: number): void;
@@ -94,6 +148,10 @@ export async function startFakeAgentChannelApi(
     agents?: CellAgent[];
     providers?: CellProvider[];
     subscriptions?: CellSubscription[];
+    webSearchProvider?: string;
+    denyTools?: string[];
+    mcpServers?: CellMcpServer[];
+    plugins?: CellApprovedPlugin[];
     port?: number;
     host?: string;
   } = {},
@@ -105,6 +163,8 @@ export async function startFakeAgentChannelApi(
   const sockets = new Set<WebSocket>();
   let failures = { n: 0, status: 503 };
   const byKey = new Map<string, StoredMessage>();
+  /** Current flow per plugin row (set when a plugin command is published), as `cell_plugins.flow_id`. */
+  const pluginFlows = new Map<string, string>();
 
   const state = {
     agents: opts.agents ?? [],
@@ -119,6 +179,18 @@ export async function startFakeAgentChannelApi(
     statusReports: [] as StatusReport[],
     subscriptions: [] as Array<number | null>,
     authFailures: 0,
+    webSearchProvider: opts.webSearchProvider,
+    denyTools: new Set(opts.denyTools ?? []),
+    toolCalls: [] as StoredToolCall[],
+    toolResults: [] as StoredToolResult[],
+    memories: [] as StoredMemory[],
+    refuseMemoryEvents: new Set<string>(),
+    mcpServers: opts.mcpServers ?? ([] as CellMcpServer[]),
+    mcpProbes: [] as AgentChannelMcpProbeResult[],
+    cellReads: 0,
+    plugins: opts.plugins ?? ([] as CellApprovedPlugin[]),
+    pluginReports: [] as AgentChannelPluginReport[],
+    verifyCalls: [] as VerifyCall[],
   };
 
   const snapshot = (): CellSnapshot => ({
@@ -130,6 +202,9 @@ export async function startFakeAgentChannelApi(
     agents: state.agents,
     providers: state.providers,
     ...(state.cellSubscriptions ? { subscriptions: state.cellSubscriptions } : {}),
+    ...(state.webSearchProvider ? { webSearch: { provider: state.webSearchProvider } } : {}),
+    ...(state.mcpServers.length > 0 ? { mcpServers: state.mcpServers } : {}),
+    plugins: state.plugins.filter((p) => p.status !== "uninstalled"),
   });
   const frameFor = (ev: StoredEvent) =>
     JSON.stringify({ op: "ev", topic, seq: ev.seq, type: ev.type, data: ev.data });
@@ -143,11 +218,19 @@ export async function startFakeAgentChannelApi(
           return json(res, 200, api.publishMention((await readJson(req)) as MentionInput));
         }
         if (req.method === "POST" && url.pathname === "/__test/cell") {
-          return json(
-            res,
-            200,
-            api.updateCell((await readJson(req)) as { agents?: CellAgent[]; providers?: CellProvider[] }),
-          );
+          const body = (await readJson(req)) as {
+            agents?: CellAgent[];
+            providers?: CellProvider[];
+            mcpServers?: CellMcpServer[];
+            reason?: string;
+            agentId?: string | null;
+          };
+          return json(res, 200, api.updateCell(body, body.reason, body.agentId ?? null));
+        }
+        if (req.method === "POST" && url.pathname === "/__test/plugins") {
+          // Replace the approved list without an event (the smoke publishes the install event next).
+          state.plugins = ((await readJson(req)) as { plugins: CellApprovedPlugin[] }).plugins ?? [];
+          return json(res, 200, { ok: true, plugins: state.plugins });
         }
         if (req.method === "POST" && url.pathname === "/__test/event") {
           const { type, data } = (await readJson(req)) as { type: string; data: Record<string, unknown> };
@@ -161,6 +244,14 @@ export async function startFakeAgentChannelApi(
             subscriptions: state.subscriptions,
             authReports: state.authReports,
             events: state.events.length,
+            toolCalls: state.toolCalls,
+            toolResults: state.toolResults,
+            memories: state.memories,
+            mcpProbes: state.mcpProbes,
+            cellReads: state.cellReads,
+            plugins: state.plugins,
+            pluginReports: state.pluginReports,
+            verifyCalls: state.verifyCalls,
           });
         }
         return json(res, 404, { error: { code: "not_found" } });
@@ -171,7 +262,77 @@ export async function startFakeAgentChannelApi(
         return json(res, 401, { error: { code: "invalid_cell_token" } });
       }
       const route = url.pathname.slice(BASE.length);
-      if (req.method === "GET" && route === "/cell") return json(res, 200, snapshot());
+      if (req.method === "GET" && route === "/cell") {
+        state.cellReads++;
+        return json(res, 200, snapshot());
+      }
+      if (req.method === "POST" && route === "/mcp/probe-results") {
+        const body = (await readJson(req)) as AgentChannelMcpProbeResult;
+        if (!body.probeId || !body.serverId || typeof body.ok !== "boolean") {
+          return json(res, 400, { error: { code: "bad_request" } });
+        }
+        state.mcpProbes.push(body);
+        return json(res, 200, { ok: true, applied: true });
+      }
+      if (req.method === "POST" && route === "/plugins/report") {
+        const body = (await readJson(req)) as AgentChannelPluginReport;
+        if (!body.flowId || !body.pluginRowId || !body.state) {
+          return json(res, 400, { error: { code: "bad_request" } });
+        }
+        // Every attempt is recorded (also the ones answered 404, like a report for a row the API never approved).
+        state.pluginReports.push(body);
+        const row = state.plugins.find((p) => p.pluginRowId === body.pluginRowId);
+        // Like the API: only the row's current flow (the last command published for it) may change it.
+        const current = row ? pluginFlows.get(row.pluginRowId) : undefined;
+        if (!row || (current !== undefined && current !== body.flowId)) {
+          return json(res, 404, { error: { code: "plugin_flow_not_found" } });
+        }
+        if (body.state === "installed") {
+          row.status = "installed";
+          if (body.pluginId) row.pluginId = body.pluginId;
+        } else if (body.state === "failed") row.status = "failed";
+        else if (body.state === "uninstalled") row.status = "uninstalled";
+        return json(res, 200, { ok: true });
+      }
+      if (req.method === "POST" && route === "/plugins/verify-install") {
+        const body = (await readJson(req)) as { packageName?: string; version?: string; sha256?: string };
+        if (!body.packageName || !body.version || !/^[0-9a-f]{64}$/u.test(body.sha256 ?? "")) {
+          return json(res, 400, { error: { code: "bad_request" } });
+        }
+        const same = state.plugins.filter((p) => p.packageName === body.packageName);
+        const row = same.find(
+          (p) => p.status === "installing" && p.version === body.version && p.sha256 === body.sha256,
+        );
+        const reason = row
+          ? null
+          : same.length === 0
+            ? "not_approved"
+            : !same.some((p) => p.status === "installing")
+              ? "not_in_flight"
+              : !same.some((p) => p.version === body.version)
+                ? "version_mismatch"
+                : "digest_mismatch";
+        const call: VerifyCall = {
+          packageName: body.packageName,
+          version: body.version,
+          sha256: body.sha256 as string,
+          approved: Boolean(row),
+          reason,
+        };
+        state.verifyCalls.push(call);
+        return json(res, 200, { approved: call.approved, reason });
+      }
+      if (req.method === "GET" && route === "/plugins") {
+        const plugins = state.plugins
+          .filter((p) => p.pluginId && ["installing", "installed", "uninstalling"].includes(p.status))
+          .map((p) => ({
+            pluginId: p.pluginId,
+            packageName: p.packageName,
+            version: p.version,
+            status: p.status,
+          }));
+        return json(res, 200, { plugins });
+      }
       if (req.method === "POST" && route === "/messages") {
         const body = (await readJson(req)) as AgentChannelPostMessage;
         state.messageAttempts.push(body);
@@ -211,6 +372,42 @@ export async function startFakeAgentChannelApi(
         return status === 200
           ? json(res, 200, { ok: true })
           : json(res, status, { error: { code: status === 409 ? "flow_claimed" : "error" } });
+      }
+      if (req.method === "POST" && route === "/tool-calls") {
+        const body = (await readJson(req)) as AgentChannelToolCallRequest;
+        const allowed = !state.denyTools.has(body.tool);
+        const stored: StoredToolCall = { ...body, callId: randomUUID(), allowed };
+        state.toolCalls.push(stored);
+        return json(res, 200, {
+          callId: stored.callId,
+          allowed,
+          reason: allowed ? null : "denied_by_test",
+        });
+      }
+      const resultMatch = /^\/tool-calls\/([^/]+)\/result$/u.exec(route);
+      if (req.method === "POST" && resultMatch?.[1]) {
+        const callId = decodeURIComponent(resultMatch[1]);
+        if (!state.toolCalls.some((c) => c.callId === callId && c.allowed)) {
+          return json(res, 404, { error: { code: "unknown_call" } });
+        }
+        state.toolResults.push({ ...((await readJson(req)) as AgentChannelToolCallResult), callId });
+        return json(res, 200, { ok: true });
+      }
+      if (req.method === "POST" && route === "/memories") {
+        const body = (await readJson(req)) as AgentChannelMemorySave;
+        if (!body.eventId || !body.agentId || typeof body.text !== "string" || body.text.length > 500) {
+          return json(res, 400, { error: { code: "bad_request" } });
+        }
+        if (state.refuseMemoryEvents.has(body.eventId)) {
+          state.memories.push({ ...body, memoryId: "", created: false });
+          return json(res, 409, { error: { code: "tainted", message: "refused by test" } });
+        }
+        const same = state.memories.find(
+          (m) => m.memoryId && m.agentId === body.agentId && m.text === body.text,
+        );
+        const stored: StoredMemory = { ...body, memoryId: same?.memoryId ?? randomUUID(), created: !same };
+        state.memories.push(stored);
+        return json(res, 200, { memoryId: stored.memoryId, created: stored.created });
       }
       if (req.method === "POST" && route === "/typing") {
         state.typing.push((await readJson(req)) as AgentChannelTyping);
@@ -308,6 +505,51 @@ export async function startFakeAgentChannelApi(
     set cellSubscriptions(value: CellSubscription[] | undefined) {
       state.cellSubscriptions = value;
     },
+    get webSearchProvider() {
+      return state.webSearchProvider;
+    },
+    set webSearchProvider(value: string | undefined) {
+      state.webSearchProvider = value;
+    },
+    get denyTools() {
+      return state.denyTools;
+    },
+    get toolCalls() {
+      return state.toolCalls;
+    },
+    get toolResults() {
+      return state.toolResults;
+    },
+    get memories() {
+      return state.memories;
+    },
+    get refuseMemoryEvents() {
+      return state.refuseMemoryEvents;
+    },
+    get mcpServers() {
+      return state.mcpServers;
+    },
+    set mcpServers(value: CellMcpServer[]) {
+      state.mcpServers = value;
+    },
+    get mcpProbes() {
+      return state.mcpProbes;
+    },
+    get cellReads() {
+      return state.cellReads;
+    },
+    get plugins() {
+      return state.plugins;
+    },
+    set plugins(value: CellApprovedPlugin[]) {
+      state.plugins = value;
+    },
+    get pluginReports() {
+      return state.pluginReports;
+    },
+    get verifyCalls() {
+      return state.verifyCalls;
+    },
     get authReports() {
       return state.authReports;
     },
@@ -339,6 +581,13 @@ export async function startFakeAgentChannelApi(
       return state.authFailures;
     },
     publish(type, data) {
+      // Like the API: an install / uninstall command moves its row (installing / uninstalling) before it is sent.
+      const row = state.plugins.find((p) => p.pluginRowId === data.pluginRowId);
+      if (row && type === "plugin.install.v1") row.status = "installing";
+      if (row && type === "plugin.uninstall.v1") row.status = "uninstalling";
+      if (row && typeof data.flowId === "string" && type.startsWith("plugin.")) {
+        pluginFlows.set(row.pluginRowId, data.flowId);
+      }
       const seq = (state.events.at(-1)?.seq ?? 0) + 1;
       const ev: StoredEvent = { seq, type, data: { ...data, type, organizationId: cellId, cellId, seq } };
       state.events.push(ev);
@@ -348,11 +597,12 @@ export async function startFakeAgentChannelApi(
     publishMention(input) {
       return api.publish("agent.mention.v1", input as unknown as Record<string, unknown>);
     },
-    updateCell(next, reason = "agent.updated") {
+    updateCell(next, reason = "agent.updated", agentId = null) {
       if (next.agents) state.agents = next.agents;
       if (next.providers) state.providers = next.providers;
       if (next.subscriptions) state.cellSubscriptions = next.subscriptions;
-      return api.publish("cell.config.changed", { reason, agentId: null });
+      if (next.mcpServers) state.mcpServers = next.mcpServers;
+      return api.publish("cell.config.changed", { reason: reason ?? "agent.updated", agentId });
     },
     failNextPosts(n, status = 503) {
       failures = { n, status };

@@ -8,12 +8,29 @@ import {
   cellTopic,
   type Mention,
 } from "@ocw/contracts";
-import { agents, conversationMembers, conversations, messages, type Tx, tenantOf } from "@ocw/db";
+import {
+  type AfterCommit,
+  agents,
+  conversationMembers,
+  conversations,
+  messages,
+  type Tx,
+  tenantOf,
+} from "@ocw/db";
 import { and, desc, eq, inArray, isNull, ne, or } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
 import { agentDirectory } from "../agent";
-import { memberDirectory } from "../organization";
+import {
+  claimChannelNotice,
+  effectiveCapabilities,
+  loadPolicy,
+  readCapabilities,
+  recordLimitReached,
+  turnPolicy,
+} from "../bot-capabilities";
+import { REPLY_MODE_PER_MINUTE } from "../chat";
+import { createPermissionService, memberDirectory, type PermissionService } from "../organization";
 
 /** Bounded thread context per mention (A2.2). */
 export const HISTORY_LIMIT = 50;
@@ -28,11 +45,14 @@ const toIso = (v: string) => new Date(v).toISOString();
  * mention is delivered iff the message commits. For every mentioned agent that is live, not disabled and a
  * member of the conversation (or of its parent channel), it appends one `agent.mention.v1` event to the
  * cell stream `cell:<orgId>` with server-resolved identity: author id + display name, roster, and the
- * thread history (current message excluded). Nothing is taken from message text.
+ * thread history (current message excluded). Nothing is taken from message text. Every event carries the
+ * effective `turn` for this bot and this human (D-07), recorded in `agent_turns` in the same transaction.
+ * A bot at its daily limit gets no event; it answers with a notice posted after commit (D-11).
  */
 export function registerMentionHandler(core: Core) {
-  core.chatAgent.onAgentMention(async (tx, mention) => {
-    const events = await buildMentionEvents(tx, mention);
+  const perms = createPermissionService(core);
+  core.chatAgent.onAgentMention(async (tx, mention, after) => {
+    const events = await buildMentionEvents(tx, mention, { core, perms, after });
     const { organizationId } = tenantOf(tx);
     for (const ev of events) {
       await core.realtime.appendEvent(tx, cellTopic(organizationId), AgentChannelEventTypes.mention, ev, {
@@ -42,7 +62,11 @@ export function registerMentionHandler(core: Core) {
   });
 }
 
-export async function buildMentionEvents(tx: Tx, mention: AgentMention): Promise<StoredMention[]> {
+export async function buildMentionEvents(
+  tx: Tx,
+  mention: AgentMention,
+  deps: { core: Core; perms: PermissionService; after?: AfterCommit },
+): Promise<StoredMention[]> {
   // MVP 0: only human-authored mentions reach the cell (no agent ↔ agent loops).
   if (mention.author.kind !== "user") return [];
   const agentIds = [...new Set(mention.agentIds)];
@@ -67,16 +91,25 @@ export async function buildMentionEvents(tx: Tx, mention: AgentMention): Promise
       .select()
       .from(agents)
       .where(and(inArray(agents.id, agentIds), isNull(agents.deletedAt)))
-  ).filter((a) => a.status !== "disabled" && agentMembers.has(a.id));
+  )
+    .filter((a) => a.status !== "disabled" && agentMembers.has(a.id))
+    // A stable order keeps row locks (the daily usage counters) in the same order across transactions.
+    .sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
   if (targets.length === 0) return [];
+  const replyMode = mention.trigger === "reply_mode";
+  const delivered = replyMode ? await replyModeGate(tx, deps.core, mention, conv, targets) : targets;
+  if (delivered.length === 0) return [];
 
-  // ---- thread history (current message excluded), oldest first
+  // ---- history (current message excluded), oldest first: the thread, or the whole DM (D-04, flat)
   const root = mention.threadRootId;
-  const threadFilter = or(
-    eq(messages.id, root),
-    eq(messages.threadId, root),
-    ...(conv.kind === "thread" ? [eq(messages.conversationId, conv.id)] : []),
-  );
+  const threadFilter =
+    conv.kind === "dm"
+      ? eq(messages.conversationId, conv.id)
+      : or(
+          eq(messages.id, root),
+          eq(messages.threadId, root),
+          ...(conv.kind === "thread" ? [eq(messages.conversationId, conv.id)] : []),
+        );
   const historyRows = (
     await tx
       .select()
@@ -139,8 +172,9 @@ export async function buildMentionEvents(tx: Tx, mention: AgentMention): Promise
     .select({ mentions: messages.mentions })
     .from(messages)
     .where(eq(messages.id, mention.messageId));
+  // A reply-mode turn carries the message's own mentions only: it never claims the bot was mentioned.
   const mentions: Mention[] =
-    stored && stored.mentions.length > 0
+    stored && (stored.mentions.length > 0 || replyMode)
       ? stored.mentions
       : agentIds.map((id) => ({ kind: "agent" as const, id }));
 
@@ -151,22 +185,176 @@ export async function buildMentionEvents(tx: Tx, mention: AgentMention): Promise
   };
   const conversationName = conv.kind === "thread" && parent ? parent.name : conv.name;
 
-  return targets.map((a) => ({
-    eventId: randomUUID(),
-    type: AgentChannelEventTypes.mention,
-    organizationId,
-    cellId: organizationId,
-    agent: { id: a.id, handle: a.username, displayName: a.name },
-    conversation: { id: conv.id, kind: conv.kind, name: conversationName },
-    thread: { rootMessageId: root },
-    message: {
-      id: mention.messageId,
-      text: mention.body,
-      createdAt: toIso(mention.createdAt),
-      author,
-      mentions,
-    },
-    threadHistory,
-    roster,
-  }));
+  const events: StoredMention[] = [];
+  for (const a of delivered) {
+    // The event id first: the turn ledger row (`agent_turns`) is keyed by it.
+    const eventId = randomUUID();
+    const decision = await turnPolicy(tx, deps.core, deps.perms, {
+      agentId: a.id,
+      humanUserId: mention.author.id,
+      conversationId: conv.id,
+      conversationKind: conv.kind,
+      messageId: mention.messageId,
+      eventId,
+      // The asking human's zone (D-12); turnPolicy re-validates it and falls back to UTC.
+      clientTimeZone: mention.clientTimeZone ?? null,
+    });
+    // Not delivered (daily limit reached, or the bot is gone): no cell event, so no model call.
+    if (!decision.deliver) {
+      if (decision.reason === "limit_reached") {
+        await limitReached(tx, deps, mention, conv, a.id, decision.notice, decision.limit);
+      }
+      continue;
+    }
+    events.push({
+      eventId,
+      type: AgentChannelEventTypes.mention,
+      organizationId,
+      cellId: organizationId,
+      agent: { id: a.id, handle: a.username, displayName: a.name },
+      conversation: { id: conv.id, kind: conv.kind, name: conversationName },
+      thread: { rootMessageId: root },
+      message: {
+        id: mention.messageId,
+        text: mention.body,
+        createdAt: toIso(mention.createdAt),
+        author,
+        mentions,
+      },
+      threadHistory,
+      roster,
+      turn: decision.turn,
+    });
+  }
+  return events;
+}
+
+/**
+ * Reply mode `all` (D-12) at delivery: keeps only the bots for which reply mode `all` is effective under the
+ * CURRENT org policy (T-03.1-08-03), then applies the per-minute cap per (bot, conversation) with a Redis
+ * counter per epoch minute (T-03.1-08-01). The first message over the cap is audited once per window
+ * (`agent.reply_rate_limited`, ids and numbers only); capped messages get no event and no notice, and are
+ * not metered against the daily limit. A Redis failure fails closed: no automatic reply, the post succeeds.
+ */
+async function replyModeGate<T extends typeof agents.$inferSelect>(
+  tx: Tx,
+  core: Core,
+  mention: AgentMention,
+  conv: { id: string; kind: string },
+  targets: T[],
+): Promise<T[]> {
+  const policy = await loadPolicy(tx);
+  const allowed = targets.filter(
+    (a) =>
+      effectiveCapabilities({
+        scope: a.scope,
+        caps: readCapabilities(a),
+        policy,
+        configured: { internet: true },
+        human: null,
+      }).replyModeAll.effective,
+  );
+  const { organizationId } = tenantOf(tx);
+  const minute = Math.floor(Date.now() / 60_000);
+  const out: T[] = [];
+  for (const a of allowed) {
+    let count: number;
+    try {
+      const key = `ocw:replycap:${organizationId}:${a.id}:${conv.id}:${minute}`;
+      count = await core.bus.pub.incr(key);
+      if (count === 1) await core.bus.pub.expire(key, 120);
+    } catch (err) {
+      core.log.warn(
+        {
+          agentId: a.id,
+          conversationId: conv.id,
+          messageId: mention.messageId,
+          code: err instanceof Error ? err.name : "unknown",
+        },
+        "reply-mode rate cap unavailable; automatic reply skipped",
+      );
+      continue;
+    }
+    if (count <= REPLY_MODE_PER_MINUTE) {
+      out.push(a);
+      continue;
+    }
+    if (count === REPLY_MODE_PER_MINUTE + 1) {
+      await core.audit.record(tx, {
+        action: "agent.reply_rate_limited",
+        resourceType: "agent",
+        resourceId: a.id,
+        result: "denied",
+        actorKind: "agent",
+        actorId: a.id,
+        agentId: a.id,
+        userId: mention.author.id,
+        metadata: {
+          limit: REPLY_MODE_PER_MINUTE,
+          conversationId: conv.id,
+          conversationKind: conv.kind,
+          messageId: mention.messageId,
+          windowStart: new Date(minute * 60_000).toISOString(),
+        },
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * D-11: a bot at its limit answers with a notice instead of a model reply. In a DM every over-limit message
+ * gets it; elsewhere it goes out once per (bot, conversation, UTC day). The notice is posted AFTER commit by
+ * the chat module (its own transaction: inside this one it would wait on the conversation's stream lock),
+ * idempotent on `limit:<messageId>`. A failed notice is logged without payload and never fails the post.
+ */
+async function limitReached(
+  tx: Tx,
+  deps: { core: Core; after?: AfterCommit },
+  mention: AgentMention,
+  conv: { id: string; kind: string },
+  agentId: string,
+  notice: string,
+  limit: number,
+): Promise<void> {
+  const isDm = mention.delivery === "dm" || conv.kind === "dm";
+  const notified = isDm || (await claimChannelNotice(tx, agentId, conv.id));
+  await recordLimitReached(tx, deps.core, {
+    agentId,
+    humanUserId: mention.author.id,
+    conversationId: conv.id,
+    conversationKind: conv.kind,
+    messageId: mention.messageId,
+    limit,
+    notified,
+  });
+  if (!notified) return;
+  const { organizationId } = tenantOf(tx);
+  const after = deps.after ?? tenantOf(tx).afterCommit;
+  after(async () => {
+    try {
+      await deps.core.chatAgent.postAgentMessage(
+        { organizationId, userId: null },
+        {
+          agentId,
+          conversationId: conv.id,
+          // DMs are flat (D-04); in a channel the notice goes to the message's thread.
+          threadRootId: isDm ? null : mention.threadRootId,
+          body: notice,
+          idempotencyKey: `limit:${mention.messageId}`,
+          inReplyToMessageId: mention.messageId,
+        },
+      );
+    } catch (err) {
+      deps.core.log.warn(
+        {
+          agentId,
+          conversationId: conv.id,
+          messageId: mention.messageId,
+          code: (err as { code?: unknown } | null)?.code ?? (err instanceof Error ? err.name : "unknown"),
+        },
+        "daily limit notice could not be posted",
+      );
+    }
+  });
 }

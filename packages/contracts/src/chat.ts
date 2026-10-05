@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AgentScope, AgentStatus } from "./agent";
 import { ClientKind, Id, IsoDateTime, MemberKind, PrincipalKind } from "./common";
 import { Permission } from "./permissions";
 
@@ -120,8 +121,60 @@ export const ChannelList = z.object({
 });
 export type ChannelList = z.infer<typeof ChannelList>;
 
+// ---- direct conversations (D-03: one human + one bot in Phase 3.1) ----
+
+/** The other party of a direct conversation. Human ↔ human DMs arrive in Phase 4. */
+export const DmCounterpart = z.object({
+  kind: z.literal("agent"),
+  id: Id,
+  name: z.string(),
+  username: z.string(),
+  avatarUrl: z.string().nullable(),
+  status: AgentStatus,
+  scope: AgentScope,
+});
+export type DmCounterpart = z.infer<typeof DmCounterpart>;
+
+export const DmSummary = Conversation.extend({
+  counterpart: DmCounterpart,
+  /** Seq of the newest message (0 when empty); unread when > lastReadSeq. */
+  latestMessageSeq: z.number().int().nonnegative(),
+  lastReadSeq: z.number().int().nonnegative(),
+  lastMessageAt: IsoDateTime.nullable(),
+});
+export type DmSummary = z.infer<typeof DmSummary>;
+
+export const DmList = z.object({
+  dms: z.array(DmSummary),
+  /** Cursor for the sidebar's `user:<id>` list-change subscription. */
+  userSeq: z.number().int().nonnegative().optional(),
+});
+export type DmList = z.infer<typeof DmList>;
+
 export const AddConversationMemberRequest = z.object({ kind: MemberKind, id: Id });
 export type AddConversationMemberRequest = z.infer<typeof AddConversationMemberRequest>;
+
+/**
+ * An IANA time zone name as reported by the client (`Intl.DateTimeFormat().resolvedOptions().timeZone`), e.g.
+ * `Europe/Madrid`. Strict (D-12, T-03.1-08-02): at most 64 characters of the zone alphabet, and accepted by
+ * `Intl.DateTimeFormat`, so nothing but a real zone name ever reaches a bot's turn.
+ */
+export const IanaTimeZone = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[A-Za-z0-9_+\-/]+$/)
+  .refine(
+    (zone) => {
+      try {
+        new Intl.DateTimeFormat("en", { timeZone: zone });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    { message: "Unknown time zone" },
+  );
 
 export const PostMessageRequest = z.object({
   body: MessageBody,
@@ -130,6 +183,11 @@ export const PostMessageRequest = z.object({
   threadRootId: Id.optional(),
   /** Client-generated idempotency key. */
   clientMessageId: z.string().max(64).optional(),
+  /**
+   * The poster's time zone, for the local date and time a bot sees on this turn (D-12). Never stored on the
+   * message.
+   */
+  clientTimeZone: IanaTimeZone.optional(),
 });
 export type PostMessageRequest = z.infer<typeof PostMessageRequest>;
 

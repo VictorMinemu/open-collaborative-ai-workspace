@@ -1,0 +1,14 @@
+[
+  {
+    "id": "duckduckgo",
+    "package": "@openclaw/duckduckgo-plugin",
+    "version": "2026.9.7",
+    "integrity": "sha512-0nFG39zPogQOGbffFwxf1rdw3Th/w6bvqSifvhBUpCHNpjv4IJLKQGGolO/XWBcdL3sJ2UYJl6qWVKs4aRR2aA=="
+  },
+  {
+    "id": "searxng",
+    "package": "@openclaw/searxng-plugin",
+    "version": "2026.9.7",
+    "integrity": "sha512-nqW0LBzUWL3Tt37z3+t8qVyKe86l29KT15ibGSuTQ/grQuDkznDNMlwil8OKTc0BoXpBo0NQ2Hf8SjQ4q9Mt/g=="
+  }
+]
