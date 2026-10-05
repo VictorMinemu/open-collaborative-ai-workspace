@@ -1,5 +1,6 @@
 export * from "./agent";
 export * from "./agent-channel";
+export * from "./bot-capabilities";
 export * from "./chat";
 export * from "./common";
 export * from "./device";

@@ -198,6 +198,8 @@ export async function cellAgents(tx: Tx): Promise<CellAgent[]> {
     modelRef: modelRef(r.modelProvider, r.modelId),
     model: { provider: r.modelProvider, providerId: OPENCLAW_PROVIDER_ID[r.modelProvider], id: r.modelId },
     updatedAt: new Date(r.updatedAt).toISOString(),
+    // Filled per agent by the agent-channel `/cell` route from bot-capabilities (D-08 layer 2).
+    capabilities: { tools: [] },
   }));
 }
 

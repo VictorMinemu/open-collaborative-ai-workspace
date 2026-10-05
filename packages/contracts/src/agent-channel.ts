@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { AgentStatus, ModelProviderKind, ProviderAuthErrorCode, SubscriptionProviderKind } from "./agent";
+import { SearchProvider, TurnContext } from "./bot-capabilities";
 import { ConversationKind, Mention, MessageBody } from "./chat";
 import { Id, IsoDateTime, MemberKind, PrincipalKind } from "./common";
 import { ServerFrame } from "./realtime";
@@ -11,6 +12,10 @@ import { ServerFrame } from "./realtime";
  * `.planning/phases/01-mvp-0-multiplayer-ai-chat-slice/01-AGENT-CHANNEL-API.md`.
  *
  * Shapes follow 01-RESEARCH.md Addendum A §A2 exactly; fields beyond the addendum are additive.
+ *
+ * Routes: `GET /cell`, `GET /ws`, `POST /messages`, `POST /typing`, `POST /agents/:id/status`,
+ * `POST /provider-auth`; Phase 3.1 adds `POST /tool-calls` and `POST /tool-calls/:callId/result` (the tool
+ * gate, 03.1-04) and `POST /memories` (memory saves, 03.1-07).
  */
 
 export const AGENT_CHANNEL_PROTOCOL_VERSION = 1;
@@ -82,6 +87,11 @@ export const AgentMentionEvent = z.object({
   /** Oldest first, newest last, max 50, EXCLUDES the current message. */
   threadHistory: z.array(AgentChannelHistoryEntry),
   roster: z.array(AgentChannelRosterEntry),
+  /**
+   * Additive (Phase 3.1, D-07): the effective tools, memory and time for THIS bot and THIS human, computed by
+   * the API at delivery. Absent (older API) = no tools: the plugin fails closed.
+   */
+  turn: TurnContext.optional(),
 });
 export type AgentMentionEvent = z.infer<typeof AgentMentionEvent>;
 
@@ -96,6 +106,10 @@ export const CellConfigChangedEvent = z.object({
     "agent.enabled",
     "agent.deleted",
     "providers.updated",
+    // Phase 3.1: org bot policy, one bot's capabilities, or the tool catalog (MCP servers, plugins) changed.
+    "policy.updated",
+    "agent.capabilities_updated",
+    "tools.updated",
   ]),
   agentId: Id.nullable(),
   /** Seq of this event on `cell:<cellId>`. */
@@ -218,6 +232,11 @@ export const CellAgent = z.object({
   modelRef: z.string(),
   model: z.object({ provider: ModelProviderKind, providerId: z.string(), id: z.string() }),
   updatedAt: IsoDateTime,
+  /**
+   * Additive (Phase 3.1, D-08 layer 2): every tool this bot could use for some human (toggles ∩ policy ∩
+   * configured ∩ grants ∩ not dangerous); the reconciler renders it as the agent's `alsoAllow`.
+   */
+  capabilities: z.object({ tools: z.array(z.string()) }).default({ tools: [] }),
 });
 export type CellAgent = z.infer<typeof CellAgent>;
 
@@ -249,6 +268,8 @@ export const CellSnapshot = z.object({
   providers: z.array(CellProvider),
   /** Additive (older plugins ignore it): connected subscription providers. */
   subscriptions: z.array(CellSubscription).default([]),
+  /** Additive (Phase 3.1, D-09): the org's web search provider (`tools.web.search.provider`). */
+  webSearch: z.object({ provider: SearchProvider }).default({ provider: "duckduckgo" }),
 });
 export type CellSnapshot = z.infer<typeof CellSnapshot>;
 
@@ -290,3 +311,54 @@ export const AgentChannelStatusReport = z.object({
   detail: z.string().max(500).optional(),
 });
 export type AgentChannelStatusReport = z.infer<typeof AgentChannelStatusReport>;
+
+// ---------------------------------------------------------------- tool gate and memory (Phase 3.1, additive)
+
+/**
+ * `POST /agent-channel/v1/tool-calls`: the cell's `before_tool_call` hook asks before every gated call. Only
+ * the search query / fetched URL travel (for the domain audit), never other arguments; `argsBytes` = size.
+ */
+export const AgentChannelToolCallRequest = z.object({
+  /** The delivery (`agent.mention.v1.eventId`) whose turn is running. */
+  eventId: Id,
+  agentId: Id,
+  tool: z.string().min(1).max(64),
+  toolCallId: z.string().max(200).optional(),
+  params: z
+    .object({ query: z.string().max(500).optional(), url: z.string().max(2000).optional() })
+    .default({}),
+  argsBytes: z.number().int().nonnegative().max(1_000_000).optional(),
+});
+export type AgentChannelToolCallRequest = z.infer<typeof AgentChannelToolCallRequest>;
+
+export const AgentChannelToolCallDecision = z.object({
+  callId: Id,
+  allowed: z.boolean(),
+  /** Why a call was refused (shown in the cell log and audit); null when allowed. */
+  reason: z.string().max(200).nullable(),
+});
+export type AgentChannelToolCallDecision = z.infer<typeof AgentChannelToolCallDecision>;
+
+/** `POST /agent-channel/v1/tool-calls/:callId/result`: outcome only, never the result content. */
+export const AgentChannelToolCallResult = z.object({
+  status: z.enum(["ok", "error", "blocked"]),
+  resultCount: z.number().int().nonnegative().optional(),
+  finalUrl: z.string().max(2000).optional(),
+  provider: z.string().max(64).optional(),
+  durationMs: z.number().int().nonnegative(),
+});
+export type AgentChannelToolCallResult = z.infer<typeof AgentChannelToolCallResult>;
+
+/**
+ * `POST /agent-channel/v1/memories` (the `ocw_memory_save` tool). The owner of the memory is the human of the
+ * stored delivery `eventId`, never a tool parameter (D-10).
+ */
+export const AgentChannelMemorySave = z.object({
+  eventId: Id,
+  agentId: Id,
+  text: z.string().trim().min(1).max(500),
+});
+export type AgentChannelMemorySave = z.infer<typeof AgentChannelMemorySave>;
+
+export const AgentChannelMemorySaveResponse = z.object({ memoryId: Id, created: z.boolean() });
+export type AgentChannelMemorySaveResponse = z.infer<typeof AgentChannelMemorySaveResponse>;

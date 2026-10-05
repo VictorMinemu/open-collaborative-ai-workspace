@@ -274,6 +274,7 @@ export function createAgentChannelModule(core: Core): ApiModule {
                     agents: await cellAgents(tx),
                     providers,
                     subscriptions,
+                    webSearch: { provider: "duckduckgo" },
                   } as const;
                 },
               );
