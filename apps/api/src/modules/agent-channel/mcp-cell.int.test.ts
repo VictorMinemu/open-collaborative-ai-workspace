@@ -366,3 +366,88 @@ describe("an MCP call in a conversation goes through the gate and is audited (Ta
     expect(logLines.join("\n")).not.toContain(SECRET);
   });
 });
+
+describe("MCP output taints the turn unless the server is trusted for chained calls (Task 3, D-08)", () => {
+  let teamBotId: string;
+  let channelId: string;
+  const mention = () => [{ kind: "agent", id: teamBotId }];
+
+  beforeAll(async () => {
+    const team = await ok(
+      admin.request("POST", "/api/v1/agents", {
+        name: "Scribe",
+        instructions: "You are Scribe.",
+        modelProvider: "mock",
+        modelId: "mock-1",
+      }),
+    );
+    teamBotId = team.id;
+    channelId = (await ok(admin.request("POST", "/api/v1/channels", { name: "notes" }))).id;
+    await ok(
+      admin.request("PATCH", `/api/v1/agents/${teamBotId}/capabilities`, {
+        tools: [
+          { sourceKind: "mcp", sourceId: server.id, tool: echoName },
+          { sourceKind: "mcp", sourceId: server.id, tool: noteName },
+        ],
+      }),
+    );
+  });
+
+  it("one turn: echo is allowed, then write_note is refused as tainted; both decisions audited", async () => {
+    const msg = await say(admin, channelId, "@scribe read then write", mention());
+    const ev = await deliveredFor(msg);
+    expect(ev.turn.tools).toEqual(expect.arrayContaining([echoName, noteName]));
+    expect(ev.turn.toolFlags[noteName]).toEqual({ untrustedOutput: true, sideEffecting: true });
+
+    const read = await askTool(ev.eventId, teamBotId, echoName);
+    expect(read.body).toMatchObject({ allowed: true, reason: null });
+    const write = await askTool(ev.eventId, teamBotId, noteName);
+    expect(write.body).toMatchObject({ allowed: false, reason: "tainted" });
+
+    const decisions = (await audits("bot.tool_call")).slice(-2);
+    expect(decisions.map((a) => [a.resource_id, a.result, a.metadata.reason, a.metadata.sourceKind])).toEqual(
+      [
+        [echoName, "success", null, "mcp"],
+        [noteName, "denied", "tainted", "mcp"],
+      ],
+    );
+    const row = (
+      await su.query("select tainted, tool_calls from app.agent_turns where event_id = $1", [ev.eventId])
+    ).rows[0];
+    expect(row).toEqual({ tainted: true, tool_calls: 1 });
+  });
+
+  it("with trustedChaining on the server, a new turn may write after reading; both allowed and audited", async () => {
+    await ok(admin.request("PATCH", `/api/v1/mcp-servers/${server.id}`, { trustedChaining: true }));
+    try {
+      const msg = await say(admin, channelId, "@scribe read then write, trusted", mention());
+      const ev = await deliveredFor(msg);
+      expect(ev.turn.toolFlags[noteName]).toEqual({ untrustedOutput: true, sideEffecting: false });
+      expect((await askTool(ev.eventId, teamBotId, echoName)).body).toMatchObject({ allowed: true });
+      expect((await askTool(ev.eventId, teamBotId, noteName)).body).toMatchObject({
+        allowed: true,
+        reason: null,
+      });
+      const decisions = (await audits("bot.tool_call")).slice(-2);
+      expect(decisions.map((a) => [a.resource_id, a.result])).toEqual([
+        [echoName, "success"],
+        [noteName, "success"],
+      ]);
+    } finally {
+      await ok(admin.request("PATCH", `/api/v1/mcp-servers/${server.id}`, { trustedChaining: false }));
+    }
+  });
+
+  it("revoking trust bites a turn delivered while trusted: the stricter (current) flags apply at call time", async () => {
+    await ok(admin.request("PATCH", `/api/v1/mcp-servers/${server.id}`, { trustedChaining: true }));
+    const msg = await say(admin, channelId, "@scribe trusted at delivery", mention());
+    const ev = await deliveredFor(msg);
+    expect(ev.turn.toolFlags[noteName]).toEqual({ untrustedOutput: true, sideEffecting: false });
+    await ok(admin.request("PATCH", `/api/v1/mcp-servers/${server.id}`, { trustedChaining: false }));
+    expect((await askTool(ev.eventId, teamBotId, echoName)).body).toMatchObject({ allowed: true });
+    expect((await askTool(ev.eventId, teamBotId, noteName)).body).toMatchObject({
+      allowed: false,
+      reason: "tainted",
+    });
+  });
+});

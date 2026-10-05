@@ -388,4 +388,40 @@ describe("MCP tools through the gate (D-13, 03.1-10)", () => {
     expect(await g.beforeToolCall(call(`${SAFE}__delete_all`), ctx())).toMatchObject({ block: true });
     expect(fake.requests).toHaveLength(1);
   });
+
+  it("after an MCP read (untrusted output), a side-effecting MCP tool is blocked locally with the read-only reason", async () => {
+    const fake = fakeClient();
+    const g = mcpGuard(fake);
+    expect(await g.beforeToolCall(call(ECHO, { text: "x" }), ctx())).toBeUndefined();
+    const r = await g.beforeToolCall(call(NOTE, { text: "y" }), ctx());
+    expect(r).toMatchObject({ block: true });
+    expect(r?.blockReason).toContain("read-only after untrusted content");
+    // Never asked: the API would have refused it as tainted anyway.
+    expect(fake.requests.map((q) => q.tool)).toEqual([ECHO]);
+  });
+
+  it("a server trusted for chained calls (write_note delivered as not side-effecting) proceeds to the API", async () => {
+    const fake = fakeClient();
+    const g = mcpGuard(fake, {
+      tools: [ECHO, NOTE],
+      toolFlags: { [ECHO]: MCP_READ, [NOTE]: { untrustedOutput: true, sideEffecting: false } },
+    });
+    expect(await g.beforeToolCall(call(ECHO, { text: "x" }), ctx())).toBeUndefined();
+    expect(await g.beforeToolCall(call(NOTE, { text: "y" }), ctx())).toBeUndefined();
+    expect(fake.requests.map((q) => q.tool)).toEqual([ECHO, NOTE]);
+  });
+
+  it("an MCP tool without delivered flags is treated as untrusted and side-effecting", async () => {
+    const fake = fakeClient();
+    const g = mcpGuard(fake, { tools: [ECHO, NOTE], toolFlags: { [ECHO]: MCP_READ } });
+    expect(await g.beforeToolCall(call(ECHO), ctx())).toBeUndefined();
+    expect(await g.beforeToolCall(call(NOTE), ctx())).toMatchObject({ block: true });
+  });
+
+  it("a side-effecting MCP tool before any untrusted read runs; its own output then taints the turn", async () => {
+    const fake = fakeClient();
+    const g = mcpGuard(fake);
+    expect(await g.beforeToolCall(call(NOTE, { text: "first" }), ctx())).toBeUndefined();
+    expect(await g.beforeToolCall(call(NOTE, { text: "second" }), ctx())).toMatchObject({ block: true });
+  });
 });
