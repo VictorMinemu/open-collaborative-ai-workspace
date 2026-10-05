@@ -3,16 +3,20 @@
 import { type AgentTypingEvent, EphemeralTypes, EventTypes, type MessageCreatedEvent } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
 import { useQueryClient } from "@tanstack/react-query";
-import { Bot, Lock, ShieldCheck } from "lucide-react";
+import { Bot, Gauge, Lock, Settings2, ShieldCheck } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { BotSettingsSheet } from "@/components/bots/bot-settings-sheet";
 import { EmptyState } from "@/components/common/empty-state";
 import { PageHeader } from "@/components/shell/page-header";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { Tooltip } from "@/components/ui/tooltip";
 import { errorMessage, isApiError } from "@/lib/api";
+import { useAgents } from "@/lib/bots-queries";
+import { capabilityKeys, useBotCapabilities } from "@/lib/capability-queries";
 import {
   applyMessage,
   bumpDmLatest,
@@ -25,6 +29,7 @@ import {
 } from "@/lib/chat-queries";
 import { useMe } from "@/lib/queries";
 import { useTopic } from "@/lib/realtime";
+import { cn } from "@/lib/utils";
 import { Composer } from "./composer";
 import { MessageList, type PendingMessage } from "./message-list";
 import { PrincipalAvatar } from "./principal-avatar";
@@ -79,6 +84,13 @@ export function DmView({ conversationId }: { conversationId: string }) {
   const { typers, touch, clear } = useTypers();
   const [pending, setPending] = useState<PendingMessage[]>([]);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // Bot settings for whoever may configure this bot (its owner; a team bot's managers), per the API.
+  const agents = useAgents();
+  const canConfigure = !!agents.data?.agents
+    .find((a) => a.id === bot?.id)
+    ?.viewerCan?.includes("bot.configure");
+  const capabilities = useBotCapabilities(canConfigure && bot ? bot.id : null);
 
   // ---------------------------------------------------------------- realtime
   const onFrame = (frame: TopicFrame) => {
@@ -93,6 +105,10 @@ export function DmView({ conversationId }: { conversationId: string }) {
     const { message } = frame.data as MessageCreatedEvent;
     applyMessage(qc, message);
     if (message.authorKind !== "system") clear(message.authorKind, message.authorId);
+    // A bot reply is one more turn today: refresh the usage chip.
+    if (message.authorKind === "agent" && canConfigure && bot) {
+      void qc.invalidateQueries({ queryKey: capabilityKeys.bot(bot.id) });
+    }
     if (!message.threadId) {
       bumpDmLatest(qc, conversationId, message.seq, message.createdAt);
       if (document.visibilityState === "visible") markDmRead(qc, conversationId, message.seq);
@@ -266,7 +282,44 @@ export function DmView({ conversationId }: { conversationId: string }) {
               {privacyLine}
             </span>
           }
+          actions={
+            canConfigure ? (
+              <>
+                {capabilities.data ? (
+                  <button
+                    type="button"
+                    onClick={() => setSettingsOpen(true)}
+                    data-testid="dm-usage"
+                    aria-label={`${capabilities.data.usage.today} of ${capabilities.data.usage.limit} replies used today`}
+                    className={cn(
+                      "hidden h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs tabular-nums outline-none transition-colors hover:bg-accent focus-visible:ring-[3px] focus-visible:ring-ring/40 sm:inline-flex",
+                      capabilities.data.usage.today >= capabilities.data.usage.limit
+                        ? "border-destructive/30 text-destructive"
+                        : "text-muted-foreground",
+                    )}
+                  >
+                    <Gauge className="size-3.5" aria-hidden />
+                    {capabilities.data.usage.today} / {capabilities.data.usage.limit} today
+                  </button>
+                ) : null}
+                <Tooltip content="Bot settings">
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label="Bot settings"
+                    data-testid="bot-settings"
+                    onClick={() => setSettingsOpen(true)}
+                  >
+                    <Settings2 />
+                  </Button>
+                </Tooltip>
+              </>
+            ) : null
+          }
         />
+        {canConfigure ? (
+          <BotSettingsSheet agentId={bot.id} open={settingsOpen} onOpenChange={setSettingsOpen} />
+        ) : null}
 
         <div
           ref={scroll.ref}
