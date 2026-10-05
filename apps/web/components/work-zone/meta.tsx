@@ -32,7 +32,6 @@ export const RUNTIMES: Record<
     provider: string;
     vendor: string;
     subscription: string;
-    models: Array<{ value: string; label: string }>;
   }
 > = {
   "claude-code": {
@@ -40,19 +39,12 @@ export const RUNTIMES: Record<
     provider: "Claude",
     vendor: "Anthropic",
     subscription: "Uses your Claude subscription on this device",
-    models: [
-      { value: "default", label: "Default" },
-      { value: "opus", label: "Opus" },
-      { value: "sonnet", label: "Sonnet" },
-      { value: "haiku", label: "Haiku" },
-    ],
   },
   codex: {
     label: "Codex",
     provider: "Codex",
     vendor: "OpenAI",
     subscription: "Uses your ChatGPT subscription on this device",
-    models: [{ value: "default", label: "Default (from your Codex config)" }],
   },
 };
 

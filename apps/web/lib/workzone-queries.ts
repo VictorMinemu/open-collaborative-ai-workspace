@@ -8,6 +8,8 @@ import {
   Ok,
   ProjectList,
   type ResolveApprovalRequest,
+  RuntimeControls,
+  type RuntimeId,
   SessionCommandResult,
   SessionControls,
   type SessionSettingsPatch,
@@ -33,6 +35,8 @@ export const wzKeys = {
   session: (id: string) => ["wz", "session", id] as const,
   diff: (id: string) => ["wz", "diff", id] as const,
   controls: (id: string) => ["wz", "controls", id] as const,
+  runtimeControls: (deviceId: string, runtime: RuntimeId) =>
+    ["wz", "controls", "runtime", deviceId, runtime] as const,
 };
 
 // ---- devices & projects ----
@@ -135,6 +139,23 @@ export function useSessionControls(sessionId: string) {
     queryKey: wzKeys.controls(sessionId),
     queryFn: ({ signal }) =>
       api.get(`/api/v1/work-sessions/${sessionId}/controls`, { schema: SessionControls, signal }),
+    staleTime: 30_000,
+  });
+}
+
+/**
+ * What the caller may pick for a NEW session on `deviceId` with `runtime` (catalog ∩ policy ∩ device ∩ grain),
+ * decided by the API (D-08, WZC-03). Disabled until both are known.
+ */
+export function useRuntimeControls(deviceId: string | null | undefined, runtime: RuntimeId) {
+  return useQuery({
+    enabled: !!deviceId,
+    queryKey: wzKeys.runtimeControls(deviceId ?? "", runtime),
+    queryFn: ({ signal }) =>
+      api.get(
+        `/api/v1/work-zone/controls?deviceId=${encodeURIComponent(deviceId ?? "")}&runtime=${encodeURIComponent(runtime)}`,
+        { schema: RuntimeControls, signal },
+      ),
     staleTime: 30_000,
   });
 }
