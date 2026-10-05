@@ -194,8 +194,8 @@ describe("ClaudeCodeRuntime — SDK options (security + billing)", () => {
 
   it("rejects bypassPermissions and other non-allowed modes", async () => {
     const { runtime, cwd } = setup();
-    // `auto` and `fullAccess` are platform modes now, but outside this adapter's capabilities until Plans 02/06.
-    for (const mode of ["bypassPermissions", "dontAsk", "auto", "fullAccess"]) {
+    // `fullAccess` is a platform mode, but outside this adapter's capabilities until Plan 06.
+    for (const mode of ["bypassPermissions", "dontAsk", "fullAccess"]) {
       await expect(
         runtime.start(
           { sessionId: `s-${mode}`, cwd, permissionMode: mode as PermissionMode },
@@ -375,7 +375,9 @@ describe("ClaudeCodeRuntime — prompts, interrupt, stop", () => {
 });
 
 const settingsEvents = (events: SessionEvent[]) =>
-  events.filter((e): e is Extract<SessionEvent, { type: "session.settings" }> => e.type === "session.settings");
+  events.filter(
+    (e): e is Extract<SessionEvent, { type: "session.settings" }> => e.type === "session.settings",
+  );
 
 describe("ClaudeCodeRuntime — settings between turns (D-07, D-14)", () => {
   it("applies a model change at once while idle and reports it", async () => {
