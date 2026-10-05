@@ -56,6 +56,24 @@ async function freshTurn(text = "look something up"): Promise<string> {
 const ask = (eventId: string, tool: string, params: Json = {}, agentId = samBotId) =>
   cell("/tool-calls", { eventId, agentId, tool, params });
 
+/** Superuser-inserted permission rule; returns its removal. */
+async function rule(
+  effect: "allow" | "deny",
+  subjectKind: "user" | "agent",
+  subjectId: string,
+  permission: string,
+) {
+  const id = randomUUID();
+  await su.query(
+    `insert into app.permission_rules (id, organization_id, subject_kind, subject_id, permission, effect)
+     values ($1, $2, $3, $4, $5, $6)`,
+    [id, orgId, subjectKind, subjectId, permission, effect],
+  );
+  return async () => {
+    await su.query("delete from app.permission_rules where id = $1", [id]);
+  };
+}
+
 const audits = async (action: string) =>
   (
     await su.query(
@@ -221,5 +239,98 @@ describe("POST /agent-channel/v1/tool-calls (D-08)", () => {
       body: JSON.stringify({ eventId: randomUUID(), agentId: samBotId, tool: "web_search", params: {} }),
     });
     expect(res.status).toBe(401);
+  });
+});
+
+describe("the gate holds under abuse (Task 3)", () => {
+  it("a deny rule created after delivery bites on the next call: policy_changed (re-decided at call time)", async () => {
+    const eventId = await freshTurn();
+    expect((await ask(eventId, "web_search", { query: "x" })).body.allowed).toBe(true);
+    const drop = await rule("deny", "user", samId, "bot.internet");
+    try {
+      expect((await ask(eventId, "web_search", { query: "x" })).body).toMatchObject({
+        allowed: false,
+        reason: "policy_changed",
+      });
+    } finally {
+      await drop();
+    }
+    // The rule is gone: the same turn may search again.
+    expect((await ask(eventId, "web_search", { query: "x" })).body.allowed).toBe(true);
+  });
+
+  it("an org policy that denies internet to personal bots after delivery: policy_changed", async () => {
+    const eventId = await freshTurn();
+    await ok(
+      admin.request("PUT", "/api/v1/bot-policy", {
+        capabilities: { internet: { orgWide: true, personal: false } },
+      }),
+    );
+    try {
+      expect((await ask(eventId, "web_fetch", { url: "https://a.example/" })).body).toMatchObject({
+        allowed: false,
+        reason: "policy_changed",
+      });
+    } finally {
+      await ok(
+        admin.request("PUT", "/api/v1/bot-policy", {
+          capabilities: { internet: { orgWide: true, personal: true } },
+        }),
+      );
+    }
+  });
+
+  it("6 concurrent web_search calls on one turn: exactly 5 allowed (atomic caps)", async () => {
+    const eventId = await freshTurn();
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () => ask(eventId, "web_search", { query: "x" })),
+    );
+    expect(results.map((r) => r.status)).toEqual([200, 200, 200, 200, 200, 200]);
+    expect(results.filter((r) => r.body.allowed)).toHaveLength(5);
+    expect(results.filter((r) => !r.body.allowed).map((r) => r.body.reason)).toEqual(["cap_reached"]);
+    const turn = (
+      await su.query("select tool_calls, web_calls from app.agent_turns where event_id = $1", [eventId])
+    ).rows[0];
+    expect(turn).toEqual({ tool_calls: 5, web_calls: 5 });
+  });
+
+  it("after an allowed web_search, a memory save on the same turn is refused: tainted", async () => {
+    const eventId = await freshTurn();
+    // Before any untrusted content, the memory tool is fine.
+    expect((await ask(eventId, "ocw_memory_save")).body.allowed).toBe(true);
+    expect((await ask(eventId, "web_search", { query: "x" })).body.allowed).toBe(true);
+    expect((await ask(eventId, "ocw_memory_save")).body).toMatchObject({ allowed: false, reason: "tainted" });
+  });
+
+  it("an event id of another organization's turn is unknown here (RLS): unknown_turn", async () => {
+    const otherOrg = randomUUID();
+    const otherEvent = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Other Org', $2)", [
+      otherOrg,
+      `other-${otherOrg.slice(0, 8)}`,
+    ]);
+    await su.query(
+      `insert into app.agent_turns (event_id, organization_id, agent_id, user_id, conversation_id, conversation_kind, message_id, tools)
+       values ($1, $2, $3, $4, $5, 'dm', $6, $7)`,
+      [otherEvent, otherOrg, samBotId, samId, randomUUID(), randomUUID(), ["web_search"]],
+    );
+    expect((await ask(otherEvent, "web_search", { query: "x" })).body).toMatchObject({
+      allowed: false,
+      reason: "unknown_turn",
+    });
+    const row = (await su.query("select tool_calls from app.agent_turns where event_id = $1", [otherEvent]))
+      .rows[0];
+    expect(row.tool_calls).toBe(0);
+  });
+
+  it("no audit row ever contains the query text or a fetched URL path", async () => {
+    const rows = (
+      await su.query("select metadata::text as m from app.audit_events where organization_id = $1", [orgId])
+    ).rows as Array<{ m: string }>;
+    expect(rows.length).toBeGreaterThan(0);
+    for (const r of rows) {
+      expect(r.m).not.toContain(QUERY);
+      expect(r.m).not.toContain("secret-token");
+    }
   });
 });

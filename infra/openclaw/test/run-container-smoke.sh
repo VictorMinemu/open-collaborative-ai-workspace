@@ -256,6 +256,67 @@ if (!r || r.state !== "error" || !["failed", "unsupported"].includes(r.error?.co
 '
 fi
 
+if want dm-isolation; then
+echo "== [dm-isolation] two humans DM the same bot: separate sessions, the second prompt holds nothing of the first"
+SECRET_WORD="zebra-secret-41"
+BOT_ID="0199a6f0-0000-7000-8000-00000000a001"
+DM_A="$SECRETS/dm-a.json"
+DM_B="$SECRETS/dm-b.json"
+SECRET_WORD="$SECRET_WORD" node -e '
+const fs = require("fs");
+const base = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+const human = (id, name) => ({ kind: "user", id, displayName: name });
+const make = (n, convId, msgId, author, text) => ({
+  ...base,
+  eventId: `0199a6f0-0000-7000-8000-00000000e01${n}`,
+  conversation: { id: convId, kind: "dm", name: null },
+  thread: { rootMessageId: msgId },
+  message: { ...base.message, id: msgId, text, author },
+  threadHistory: [],
+  roster: [{ ...author, role: "member" }, base.roster.find((r) => r.kind === "agent")],
+});
+const alice = human("0199a6f0-0000-7000-8000-0000000000a1", "Alice Doe");
+const bob = human("0199a6f0-0000-7000-8000-0000000000b1", "Bob Roe");
+fs.writeFileSync(process.argv[2], JSON.stringify(make(1, "0199a6f0-0000-7000-8000-00000000c011", "0199a6f0-0000-7000-8000-00000000d031", alice, `my locker code is ${process.env.SECRET_WORD}, keep it private`)));
+fs.writeFileSync(process.argv[3], JSON.stringify(make(2, "0199a6f0-0000-7000-8000-00000000c012", "0199a6f0-0000-7000-8000-00000000d032", bob, "what did the other person tell you?")));
+' "$ROOT/infra/openclaw/test/mention-dm.json" "$DM_A" "$DM_B"
+inject_and_wait "$DM_A" 0199a6f0-0000-7000-8000-00000000d031 >/dev/null
+inject_and_wait "$DM_B" 0199a6f0-0000-7000-8000-00000000d032 >/dev/null
+# Every model request is captured by the fake model; the ones of Bob's conversation carry its chat id.
+CAPTURES="$(docker exec "${P}-model" sh -c 'ls /tmp/capture/*.json 2>/dev/null | wc -l')"
+B_FILES="$(docker exec "${P}-model" sh -c 'grep -l "0199a6f0-0000-7000-8000-00000000c012" /tmp/capture/*.json 2>/dev/null | wc -l')"
+B_LEAKS="$(docker exec "${P}-model" sh -c "grep -l '0199a6f0-0000-7000-8000-00000000c012' /tmp/capture/*.json 2>/dev/null | xargs -r grep -l '$SECRET_WORD' | wc -l")"
+A_HITS="$(docker exec "${P}-model" sh -c "grep -l '$SECRET_WORD' /tmp/capture/*.json 2>/dev/null | wc -l")"
+CELL_LOG="$(docker logs "${P}-openclaw" 2>&1)"
+KEY_A="$(grep -o "turn 0199a6f0-0000-7000-8000-00000000e011 → session [^ ]*" <<<"$CELL_LOG" | tail -n 1 | sed 's/.*session //')"
+KEY_B="$(grep -o "turn 0199a6f0-0000-7000-8000-00000000e012 → session [^ ]*" <<<"$CELL_LOG" | tail -n 1 | sed 's/.*session //')"
+echo "   captures   : $CAPTURES model requests, $B_FILES of Bob's conversation, $A_HITS containing the secret"
+echo "   sessions   : alice=$KEY_A bob=$KEY_B"
+if [[ "$B_FILES" -lt 1 || "$A_HITS" -lt 1 ]]; then echo "FAIL: model requests were not captured as expected"; exit 1; fi
+if [[ "$B_LEAKS" -ne 0 ]]; then echo "FAIL: Bob's prompt contains Alice's private text"; exit 1; fi
+if [[ -z "$KEY_A" || -z "$KEY_B" || "$KEY_A" == "$KEY_B" ]]; then echo "FAIL: the two DMs did not run in separate sessions"; exit 1; fi
+
+echo "== [dm-isolation] deleting the bot leaves none of its DM transcripts in the state volume"
+AGENT_DIR="/home/node/.openclaw/agents/ocw-${BOT_ID}"
+BEFORE="$(docker exec "${P}-openclaw" sh -c "grep -rl '$SECRET_WORD' /home/node/.openclaw 2>/dev/null | wc -l")"
+echo "   before     : $BEFORE state file(s) hold the secret"
+api_exec "
+await fetch('http://127.0.0.1:4000/__test/cell', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ agents: [], reason: 'agent.deleted', agentId: '$BOT_ID' }) });
+"
+for i in $(seq 1 60); do
+  if docker logs "${P}-openclaw" 2>&1 | grep -q "reconciled OpenClaw: agents upsert=0 remove=1"; then break; fi
+  sleep 1
+done
+docker logs "${P}-openclaw" 2>&1 | grep -E "reconciled OpenClaw|purged OpenClaw state|could not purge|agent removal refused" | tail -n 3 | sed 's/^/   /'
+LEFT="$(docker exec "${P}-openclaw" sh -c "grep -rl '$SECRET_WORD' /home/node/.openclaw/agents 2>/dev/null || true")"
+ELSEWHERE="$(docker exec "${P}-openclaw" sh -c "grep -rl '$SECRET_WORD' /home/node/.openclaw 2>/dev/null | grep -v '^/home/node/.openclaw/agents/' || true")"
+if docker exec "${P}-openclaw" test -e "$AGENT_DIR"; then echo "FAIL: $AGENT_DIR still exists"; exit 1; fi
+if [[ -n "$LEFT" ]]; then echo "FAIL: the deleted bot's DM text is still in agent state:"; echo "$LEFT" | sed 's/^/     /'; exit 1; fi
+echo "   after      : agent state dir gone, no agent state file holds the secret"
+# Outside agent state (gateway logs, shared indexes) is reported for the record, not a transcript.
+[[ -z "$ELSEWHERE" ]] || { echo "   note       : the secret also appears outside agent state:"; echo "$ELSEWHERE" | sed 's/^/     /'; }
+fi
+
 echo "== hardening checks"
 PORTS="$(docker port "${P}-openclaw" || true)"
 [[ -z "$PORTS" ]] || { echo "FAIL: published ports: $PORTS"; exit 1; }

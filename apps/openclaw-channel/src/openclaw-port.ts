@@ -1,8 +1,15 @@
+import { rm } from "node:fs/promises";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/channel-core";
 import type { CellSnapshot } from "./agent-channel-protocol.js";
 import type { OpenClawPort } from "./bridge.js";
 import { CHANNEL_ID, type MappedMention } from "./mention-mapper.js";
-import { applyPlanToDraft, type MutableConfig, planReconcile, type ReconcilePlan } from "./reconciler.js";
+import {
+  agentStateDirFor,
+  applyPlanToDraft,
+  type MutableConfig,
+  planReconcile,
+  type ReconcilePlan,
+} from "./reconciler.js";
 import { type ToolGuard, toolGuard } from "./tool-guard.js";
 
 /**
@@ -78,6 +85,8 @@ export type RealPortOptions = {
   log?: { info?: (m: string) => void; warn?: (m: string) => void };
   /** Call-time tool gate (defaults to the module singleton the plugin's hooks use). */
   guard?: ToolGuard;
+  /** OpenClaw state dir (default: the runtime's, then OPENCLAW_STATE_DIR); removed bots' state is purged there. */
+  stateDir?: string;
 };
 
 export function threadSessionKey(base: string, threadRootId: string): string {
@@ -158,6 +167,7 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
         await write({ ...plan, removeAgents: [] });
         removed = 0;
       }
+      if (removed > 0) await purgeRemovedAgents(plan.removeAgents);
       opts.log?.info?.(
         `reconciled OpenClaw: agents upsert=${Object.keys(plan.upsertAgents).length} remove=${removed}, providers upsert=${Object.keys(plan.upsertProviders).length} remove=${plan.removeProviders.length}${plan.webSearchProvider ? `, web search=${plan.webSearchProvider}` : ""}`,
       );
@@ -178,6 +188,28 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
       return inLane(sessionKey, () => dispatchOne(m, sessionKey, deliver, signal));
     },
   };
+
+  /**
+   * A deleted bot's DM transcripts must not stay in the cell volume (Pitfall 12): a config-only roster removal
+   * keeps `<stateDir>/agents/<id>`, so delete it once the removal is written. Only plugin-owned `ocw-*` ids,
+   * only inside the state dir (agentStateDirFor); failures are logged, never thrown.
+   */
+  async function purgeRemovedAgents(ids: readonly string[]): Promise<void> {
+    const stateDir =
+      opts.stateDir ?? runtime.state?.resolveStateDir?.(process.env) ?? process.env.OPENCLAW_STATE_DIR ?? "";
+    for (const id of ids) {
+      const dir = agentStateDirFor(stateDir, id);
+      if (!dir) continue;
+      try {
+        await rm(dir, { recursive: true, force: true });
+        opts.log?.info?.(`purged OpenClaw state of removed bot ${id}`);
+      } catch (error) {
+        opts.log?.warn?.(
+          `could not purge the state of removed bot ${id}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  }
 
   async function dispatchOne(
     m: MappedMention,
@@ -289,6 +321,8 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
     // D-08 guard 2: the run may only use `turn.tools ∩ the bot's configured tools`; OpenClaw's
     // `toolsAllow` only ever narrows the configured list. Nothing allowed → tools fully disabled.
     const allowed = m.allowedTools;
+    // Ids only (no content): lets operators and the smoke test see which session a turn ran in.
+    opts.log?.info?.(`turn ${m.eventId} → session ${sessionKey} (tools: ${allowed.join(",") || "none"})`);
     // D-08 guard 3: the before_tool_call hook resolves this turn by session key.
     guard.beginTurn(
       sessionKey,

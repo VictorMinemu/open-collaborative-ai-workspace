@@ -3,6 +3,9 @@
  * Channel API v1 server speaking the canonical contract, with OpenClaw replaced by a recording fake
  * port.
  */
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { CellAgent, CellProvider, CellSnapshot } from "./agent-channel-protocol.js";
 import { AgentChannelHttpError, createAgentChannelClient } from "./api-client.js";
@@ -592,5 +595,79 @@ describe("tool gate against the fake Agent Channel API (HTTP)", () => {
     const cell = await client.getCell();
     expect(cell.agents[0]?.capabilities).toEqual({ tools: ["web_search"] });
     expect(cell.webSearch).toEqual({ provider: "searxng" });
+  });
+});
+
+describe("real port reconcile: deleted bots leave no transcripts (Pitfall 12)", () => {
+  function runtimeWith(config: Record<string, unknown>) {
+    const runtime = {
+      config: {
+        current: () => config,
+        mutateConfigFile: async (p: { mutate: (d: Record<string, unknown>) => void }) => {
+          p.mutate(config);
+        },
+      },
+      channel: {} as PluginRuntimeLike["channel"],
+    } as PluginRuntimeLike;
+    return runtime;
+  }
+
+  it("purges <state>/agents/<ocw-id> of a removed bot after the write; never foreign agents", async () => {
+    const state = mkdtempSync(path.join(tmpdir(), "ocw-state-"));
+    try {
+      for (const id of ["ocw-gone", "main"]) {
+        mkdirSync(path.join(state, "agents", id, "agent"), { recursive: true });
+        writeFileSync(path.join(state, "agents", id, "agent", "openclaw-agent.sqlite"), "zebra-secret-41");
+      }
+      const config = { agents: { entries: { "ocw-gone": { name: "Gone" }, main: { name: "main" } } } };
+      const p = createOpenClawPort({
+        runtime: runtimeWith(config),
+        accountId: "default",
+        cfg: {},
+        stateDir: state,
+      });
+      const r = await p.reconcile({
+        protocolVersion: 1,
+        cellId: "c",
+        organizationId: "c",
+        topic: "cell:c",
+        lastSeq: 0,
+        agents: [],
+        providers: [],
+      });
+      expect(r.changed).toBe(true);
+      expect(existsSync(path.join(state, "agents", "ocw-gone"))).toBe(false);
+      expect(existsSync(path.join(state, "agents", "main", "agent", "openclaw-agent.sqlite"))).toBe(true);
+    } finally {
+      rmSync(state, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the state when OpenClaw refused the removal (the bot is still configured)", async () => {
+    const state = mkdtempSync(path.join(tmpdir(), "ocw-state-"));
+    try {
+      mkdirSync(path.join(state, "agents", "ocw-gone"), { recursive: true });
+      const config = { agents: { entries: { "ocw-gone": { name: "Gone" } } } };
+      let calls = 0;
+      const runtime = runtimeWith(config);
+      runtime.config.mutateConfigFile = async (params) => {
+        calls++;
+        if (calls === 1) throw new Error("roster removal refused");
+        params.mutate(config as never);
+      };
+      const p = createOpenClawPort({ runtime, accountId: "default", cfg: {}, stateDir: state });
+      await p.reconcile({
+        protocolVersion: 1,
+        cellId: "c",
+        organizationId: "c",
+        topic: "t",
+        lastSeq: 0,
+        agents: [],
+        providers: [],
+      });
+      expect(existsSync(path.join(state, "agents", "ocw-gone"))).toBe(true);
+    } finally {
+      rmSync(state, { recursive: true, force: true });
+    }
   });
 });

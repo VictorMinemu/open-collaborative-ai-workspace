@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { CellAgent, CellProvider, CellSnapshot, CellSubscription } from "./agent-channel-protocol.js";
 import { openClawAgentIdFor, sanitizeName } from "./mention-mapper.js";
 
@@ -52,6 +53,22 @@ export function allowedAgentTools(tools: readonly string[] | undefined): string[
       lower.length > 0 && !lower.includes("*") && !lower.startsWith("group:") && !DANGEROUS_SET.has(lower)
     );
   });
+}
+
+/** A plugin-owned OpenClaw agent id (`openClawAgentIdFor`): `ocw-` + lower-case letters, digits, `-`, `_`. */
+const OWNED_AGENT_ID = /^ocw-[a-z0-9_-]+$/u;
+
+/**
+ * The directory holding a removed bot's OpenClaw state (session rows, transcripts, archives):
+ * `<stateDir>/agents/<agentId>`. Removing an entry from config does not delete it (only
+ * `openclaw agents delete` does), so the port purges it after a successful write (research Pitfall 12).
+ * Null — never purge — for anything but a plugin-owned `ocw-*` id under an absolute state dir.
+ */
+export function agentStateDirFor(stateDir: string, agentId: string): string | null {
+  if (!stateDir || !path.isAbsolute(stateDir) || !OWNED_AGENT_ID.test(agentId)) return null;
+  const agentsRoot = path.resolve(stateDir, "agents");
+  const dir = path.resolve(agentsRoot, agentId);
+  return path.dirname(dir) === agentsRoot ? dir : null;
 }
 
 /** Env var that carries a provider key inside the gateway process (never written to config). */

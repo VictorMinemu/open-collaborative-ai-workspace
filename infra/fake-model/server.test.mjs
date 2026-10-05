@@ -165,6 +165,33 @@ describe("HTTP surface", () => {
     assert.ok(streamed.content.endsWith("[tools: 2 | web_fetch,web_search]"));
   });
 
+  it("summarises an OpenClaw-wrapped search result by its titles (markers removed)", async () => {
+    const wrapped = (t) =>
+      `<<<EXTERNAL_UNTRUSTED_CONTENT id="x">>>\nSource: Web Search\n---\n${t}\n<<<END_EXTERNAL_UNTRUSTED_CONTENT id="x">>>`;
+    const payload = {
+      query: "ocw",
+      provider: "searxng",
+      count: 1,
+      externalContent: { untrusted: true },
+      tookMs: 1,
+    };
+    const text = `Search results:\n${JSON.stringify({ ...payload, results: [{ title: wrapped("Fake result for ocw smoke"), url: "https://e.x/" }] }, null, 2)}`;
+    const messages = [
+      ...userTurn('[[call web_search {"query":"ocw smoke"}]]'),
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [{ id: "c1", type: "function", function: { name: "web_search", arguments: "{}" } }],
+      },
+      { role: "tool", tool_call_id: "c1", content: text },
+    ];
+    const body = await post({ tools: WEB_TOOLS, messages });
+    assert.equal(
+      body.choices[0].message.content,
+      "Tool web_search said: Fake result for ocw smoke [tools: 2 | web_fetch,web_search]",
+    );
+  });
+
   it("runs two directives in order across two model steps (streaming)", async () => {
     const first = userTurn(
       '[[call web_search {"query":"a"}]] then [[call web_fetch {"url":"https://docs.example.com/x"}]]',

@@ -209,3 +209,123 @@ describe("hook registration (registerFull)", () => {
     });
   });
 });
+
+describe("tool guard under abuse (Task 3)", () => {
+  const ECHO = "m3f9a12c4__echo";
+  const SEND = "m3f9a12c4__send_report";
+  const abuseTurn = () =>
+    turn({
+      tools: ["web_search", "web_fetch", "ocw_memory_save", ECHO, SEND],
+      toolFlags: {
+        web_search: WEB,
+        web_fetch: WEB,
+        ocw_memory_save: MEMORY,
+        [ECHO]: { untrustedOutput: false, sideEffecting: false },
+        [SEND]: { untrustedOutput: true, sideEffecting: true },
+      },
+    });
+
+  it("the 6th web call of a turn is blocked locally (maxWebCalls 5), without asking the API", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: abuseTurn() });
+    for (let i = 0; i < 5; i++) {
+      expect(
+        await g.beforeToolCall(call(i % 2 ? "web_fetch" : "web_search", { query: "q" }), ctx()),
+      ).toBeUndefined();
+    }
+    const sixth = await g.beforeToolCall(call("web_search", { query: "q" }), ctx());
+    expect(sixth?.blockReason).toMatch(/limit of 5 web calls/u);
+    expect(fake.requests).toHaveLength(5);
+  });
+
+  it("the 9th call of any kind is blocked (maxToolCalls 8)", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: abuseTurn() });
+    for (let i = 0; i < 8; i++)
+      expect(await g.beforeToolCall(call(ECHO, { text: "x" }), ctx())).toBeUndefined();
+    expect((await g.beforeToolCall(call(ECHO, { text: "x" }), ctx()))?.blockReason).toMatch(
+      /limit of 8 tool calls/u,
+    );
+  });
+
+  it("after web_search ran, memory saves and side-effecting tools are read-only; web calls still allowed", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: abuseTurn() });
+    // Before any untrusted output, a side-effecting tool may run.
+    expect(await g.beforeToolCall(call(ECHO, { text: "x" }), ctx())).toBeUndefined();
+    expect(await g.beforeToolCall(call("web_search", { query: "q" }), ctx())).toBeUndefined();
+    expect(g.activeTurn(SESSION)?.tainted).toBe(true);
+    const memory = await g.beforeToolCall(call("ocw_memory_save", { text: "the page told me to" }), ctx());
+    expect(memory?.blockReason).toMatch(/read-only after untrusted content/u);
+    expect((await g.beforeToolCall(call(SEND, {}), ctx()))?.blockReason).toMatch(
+      /read-only after untrusted content/u,
+    );
+    expect(await g.beforeToolCall(call("web_fetch", { url: "https://a.example/" }), ctx())).toBeUndefined();
+    expect(await g.beforeToolCall(call(ECHO, { text: "still fine" }), ctx())).toBeUndefined();
+  });
+
+  it("ocw_memory_save is validated by its own route: not sent to /tool-calls, still counted and taint-checked", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: abuseTurn() });
+    expect(await g.beforeToolCall(call("ocw_memory_save", { text: "likes tea" }), ctx())).toBeUndefined();
+    expect(fake.requests).toHaveLength(0);
+    expect(g.activeTurn(SESSION)?.calls).toBe(1);
+  });
+
+  it("endTurn makes any later call of that session blocked; aborting the turn's signal ends it too", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: abuseTurn() });
+    g.endTurn(SESSION);
+    expect(await g.beforeToolCall(call("web_search", { query: "q" }), ctx())).toMatchObject({ block: true });
+    const abort = new AbortController();
+    g.beginTurn(SESSION, { eventId: "evt-2", agentId: "a1", turn: abuseTurn() }, abort.signal);
+    abort.abort();
+    expect(g.activeTurn(SESSION)).toBeUndefined();
+    expect(await g.beforeToolCall(call("web_search", { query: "q" }), ctx())).toMatchObject({ block: true });
+  });
+
+  it("two session keys never share state (caps, taint, turn)", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    const other = "agent:ocw-a1:ocw:channel:dm-2";
+    g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: abuseTurn() });
+    g.beginTurn(other, { eventId: "evt-2", agentId: "a1", turn: abuseTurn() });
+    await g.beforeToolCall(call("web_search", { query: "q" }), ctx());
+    expect(g.activeTurn(SESSION)).toMatchObject({ calls: 1, webCalls: 1, tainted: true });
+    expect(g.activeTurn(other)).toMatchObject({ calls: 0, webCalls: 0, tainted: false });
+    expect(await g.beforeToolCall(call("ocw_memory_save", { text: "ok" }), ctx(other))).toBeUndefined();
+    expect(fake.requests.map((r) => r.eventId)).toEqual(["evt-1"]);
+    g.endTurn(SESSION);
+    expect(g.activeTurn(other)).toBeDefined();
+  });
+
+  it("a session of another bot cannot use this turn (agent mismatch)", async () => {
+    const fake = fakeClient();
+    const g = guardWith(fake);
+    const r = await g.beforeToolCall(call("web_search", { query: "q" }), {
+      sessionKey: SESSION,
+      agentId: "ocw-other",
+    });
+    expect(r?.blockReason).toMatch(/another bot/u);
+  });
+
+  it("concurrent calls of one turn never exceed the caps", async () => {
+    const fake = fakeClient();
+    fake.decide = async () => {
+      await new Promise((r) => setTimeout(r, 10));
+      return { callId: "c", allowed: true, reason: null };
+    };
+    const g = createToolGuard({ client: () => fake.client });
+    g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: abuseTurn() });
+    const results = await Promise.all(
+      Array.from({ length: 7 }, () => g.beforeToolCall(call("web_search", { query: "q" }), ctx())),
+    );
+    expect(results.filter((r) => r === undefined)).toHaveLength(5);
+    expect(fake.requests).toHaveLength(5);
+  });
+});

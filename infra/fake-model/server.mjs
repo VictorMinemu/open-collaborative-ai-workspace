@@ -173,14 +173,20 @@ function summarizeResult(text) {
       .replace(/^(Source: .*|---)$/gmu, " ")
       .replace(/\s+/gu, " ")
       .trim();
-  try {
-    const parsed = JSON.parse(text);
-    const results = parsed?.results ?? parsed?.details?.results;
-    if (Array.isArray(results) && results.length > 0) {
-      return clean(results.map((r) => r?.title ?? r?.url ?? "").join("; ")).slice(0, 200);
+  // The JSON payload itself, or one embedded in a text wrapper (first `{` … last `}`).
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  for (const candidate of [text, start !== -1 && end > start ? text.slice(start, end + 1) : null]) {
+    if (!candidate) continue;
+    try {
+      const parsed = JSON.parse(candidate);
+      const results = parsed?.results ?? parsed?.details?.results;
+      if (Array.isArray(results) && results.length > 0) {
+        return clean(results.map((r) => r?.title ?? r?.url ?? "").join("; ")).slice(0, 200);
+      }
+    } catch {
+      /* not JSON */
     }
-  } catch {
-    /* plain text */
   }
   return clean(text).slice(0, 200);
 }
