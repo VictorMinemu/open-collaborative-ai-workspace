@@ -218,6 +218,8 @@ describe("wave-3 organization contracts", () => {
     expect(rule({ effect: "deny", permission: "rule.*" })).toBe(true);
     expect(rule({ effect: "allow", permission: "bot.manage" })).toBe(false); // admin surface
     expect(rule({ effect: "allow", permission: "device.link" })).toBe(false); // runtime surface
+    expect(rule({ effect: "allow", permission: "device.full_access" })).toBe(false); // ADR-0012: owner's grant only
+    expect(rule({ effect: "deny", permission: "device.full_access" })).toBe(true);
     expect(rule({ effect: "allow", permission: "work_session.*" })).toBe(true);
     expect(rule({ effect: "allow", permission: "channel.post" })).toBe(true);
   });
