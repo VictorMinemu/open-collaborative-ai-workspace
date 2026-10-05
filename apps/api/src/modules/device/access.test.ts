@@ -12,6 +12,7 @@ const TEAM = "team-t";
 const SIBLING = "team-s";
 
 const device = (extra: Partial<Parameters<typeof deviceModeCap>[0]> = {}) => ({
+  id: DEV,
   ownerUserId: OWNER,
   shared: false,
   shareMaxMode: "acceptEdits" as const,

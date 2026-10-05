@@ -5,6 +5,14 @@ import { registerDeviceRoutes } from "./routes";
 import { registerDeviceTokenRoute } from "./token";
 
 export {
+  type DeviceAccess,
+  deviceControllerFloor,
+  deviceModeCap,
+  type GrantRow,
+  isRevokedPrincipal,
+  loadDeviceAccess,
+} from "./access";
+export {
   type DeviceCommandRow,
   DeviceHub,
   type DeviceRef,

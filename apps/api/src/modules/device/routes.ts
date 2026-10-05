@@ -26,6 +26,7 @@ import {
   memberDirectory,
   type PermissionService,
 } from "../organization";
+import { type DeviceAccess, loadDeviceAccess } from "./access";
 import type { DeviceHub } from "./hub";
 
 export const ENROLLMENT_TTL_MS = 10 * 60_000;
@@ -47,10 +48,23 @@ const runtimesOf = (value: unknown) => z.array(RuntimeInfo).catch([]).parse(valu
 
 type DeviceRow = typeof devices.$inferSelect;
 
-/** Resolver facts for a device row: owner / grantee (shared) relations and the revoked state. */
-export function deviceFacts(row: Pick<DeviceRow, "ownerUserId" | "shared" | "revokedAt">, userId: string) {
+/**
+ * Resolver facts for a device row: owner / grantee / full_access_grantee relations and the revoked state. With
+ * `access` (loadDeviceAccess) the member's cap decides (everyone-share, user and unit grants, P-06); without it the
+ * legacy rule applies (grantee when shared).
+ */
+export function deviceFacts(
+  row: Pick<DeviceRow, "id" | "ownerUserId" | "shared" | "shareMaxMode" | "revokedAt">,
+  userId: string,
+  access?: DeviceAccess,
+) {
   return deviceResource(
-    { ownerUserId: row.ownerUserId, shared: row.shared, revoked: row.revokedAt !== null },
+    {
+      ownerUserId: row.ownerUserId,
+      shared: row.shared,
+      revoked: row.revokedAt !== null,
+      ...(access ? { cap: access.capOf(row) } : {}),
+    },
     userId,
   );
 }
@@ -64,6 +78,7 @@ async function listDevices(
   perms: PermissionService,
   userId: string,
 ): Promise<Device[]> {
+  const access = await loadDeviceAccess(tx, userId);
   const [rows, dir, counts] = await Promise.all([
     tx.select().from(devices).where(isNull(devices.revokedAt)).orderBy(asc(devices.createdAt)),
     memberDirectory(tx),
@@ -78,7 +93,7 @@ async function listDevices(
   for (const r of rows) {
     out.push({
       ...toDevice(r, dir.get(r.ownerUserId)?.displayName ?? null, byDevice.get(r.id) ?? 0),
-      viewerCan: await perms.viewerCan(req, tx, deviceFacts(r, userId), DEVICE_VIEWER_CAN),
+      viewerCan: await perms.viewerCan(req, tx, deviceFacts(r, userId, access), DEVICE_VIEWER_CAN),
     });
   }
   return out;
@@ -227,7 +242,12 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
         const auth = authOf(req);
         const [row] = await tx.select().from(devices).where(eq(devices.id, req.params.id));
         if (!row || row.revokedAt) throw notFound("Device not found");
-        await perms.assertCan(req, tx, "device.update", deviceFacts(row, auth.userId));
+        await perms.assertCan(
+          req,
+          tx,
+          "device.update",
+          deviceFacts(row, auth.userId, await loadDeviceAccess(tx, auth.userId)),
+        );
         await tx
           .update(devices)
           .set({
@@ -261,7 +281,12 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
         if (!row) throw notFound("Device not found");
         if (row.revokedAt) throw conflict("Device already revoked");
         // The owner (relation) or an admin (role).
-        await perms.assertCan(req, tx, "device.revoke", deviceFacts(row, auth.userId));
+        await perms.assertCan(
+          req,
+          tx,
+          "device.revoke",
+          deviceFacts(row, auth.userId, await loadDeviceAccess(tx, auth.userId)),
+        );
         await tx
           .update(devices)
           .set({ revokedAt: sql`now()`, status: "offline" })
@@ -302,8 +327,11 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
           .innerJoin(devices, eq(devices.id, projects.deviceId))
           .where(isNull(devices.revokedAt))
           .orderBy(asc(projects.name));
-        // Projects on devices the caller may use: their own, or shared by the owner (device.use).
-        const usable = await perms.filter(req, tx, rows, "device.use", ({ d }) => deviceFacts(d, userId));
+        // Projects on devices the caller may use: their own, shared with everyone, or granted (device.use).
+        const access = await loadDeviceAccess(tx, userId);
+        const usable = await perms.filter(req, tx, rows, "device.use", ({ d }) =>
+          deviceFacts(d, userId, access),
+        );
         return usable.map(toProject);
       }),
     }),

@@ -7,7 +7,8 @@ import {
   Ok,
   onlyRelativePaths,
   ResolveApprovalRequest,
-  type RuntimeId,
+  RuntimeControls,
+  RuntimeId,
   RuntimeInfo,
   SessionControls,
   type SessionSettingsPatch,
@@ -40,7 +41,7 @@ import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { type App, type AuthContext, authOf, type Core, tenant } from "../../core";
 import { conflict, HttpError, notFound } from "../../lib/errors";
-import { type DeviceHub, deviceFacts } from "../device";
+import { type DeviceAccess, type DeviceHub, deviceFacts, loadDeviceAccess } from "../device";
 import {
   AuthzDeniedError,
   createPermissionService,
@@ -48,11 +49,12 @@ import {
   type ResourceFacts,
   workSessionResource,
 } from "../organization";
+import { loadControlsContext } from "./context";
 import {
+  buildRuntimeControls,
   buildSessionControls,
-  type ControlsContext,
-  catalogsOf,
   decideSettings,
+  highestAvailableMode,
   pickSettings,
   requestedSettings,
   storedSettings,
@@ -64,6 +66,7 @@ const SessionParams = z.object({ id: z.uuid() });
 const PromptParams = z.object({ id: z.uuid(), pid: z.uuid() });
 const ApprovalParams = z.object({ id: z.uuid(), aid: z.uuid() });
 const ListQuery = z.object({ archived: z.enum(["0", "1"]).optional() });
+const WorkZoneControlsQuery = z.object({ deviceId: z.uuid(), runtime: RuntimeId });
 
 const EVENT_WINDOW = 1500;
 const DIFF_TIMEOUT_MS = 20_000;
@@ -172,35 +175,45 @@ export function registerWorkSessionRoutes(
   }
 
   /**
-   * What the caller may pick on a device: the organization's stored policy, the device's own opt-in, the owner
-   * holds every mode and full access, others the share cap when the device is shared.
+   * What the caller may pick on a device (context.ts): org policy ∩ device opt-in ∩ the caller's cap ∩ grain ∩
+   * catalog ∩ inventory. Inside a session unlisted controllers get the device's floor (P-07); a 404 when the
+   * device is not visible (never happens for a session of this tenant).
    */
-  async function controlsContext(
+  async function controlsFor(
     tx: Tx,
     auth: AuthContext,
     deviceId: string,
     runtime: RuntimeId,
-  ): Promise<ControlsContext> {
-    const [d] = await tx
-      .select({
-        owner: devices.ownerUserId,
-        shared: devices.shared,
-        shareMaxMode: devices.shareMaxMode,
-        optIn: devices.fullAccessOptIn,
-        catalog: devices.runtimeCatalog,
-      })
-      .from(devices)
-      .where(eq(devices.id, deviceId));
-    const catalogs = catalogsOf(d?.catalog);
-    const owner = d?.owner === auth.userId;
-    return {
-      catalog: catalogs.find((c) => c.runtime === runtime) ?? null,
-      otherCatalogs: catalogs.filter((c) => c.runtime !== runtime),
-      policy: await loadWorkZonePolicy(tx),
-      deviceOptIn: d?.optIn ?? false,
-      modeCap: owner ? "fullAccess" : d?.shared ? d.shareMaxMode : null,
-      fullAccessGrain: owner,
-    };
+    inSession: boolean,
+    access?: DeviceAccess,
+  ) {
+    const loaded = await loadControlsContext(tx, perms, {
+      deviceId,
+      runtime,
+      userId: auth.userId,
+      inSession,
+      ...(access ? { access } : {}),
+    });
+    if (!loaded) throw notFound("Device not found");
+    return loaded.ctx;
+  }
+
+  /** Device layer for a new session: own, shared or granted (device_not_shared), never revoked (device_revoked). */
+  async function assertDeviceUsable(
+    req: FastifyRequest,
+    tx: Tx,
+    d: typeof devices.$inferSelect,
+    access: DeviceAccess,
+  ): Promise<void> {
+    await perms.assertCan(req, tx, "device.use", deviceFacts(d, authOf(req).userId, access)).catch((err) => {
+      if (!(err instanceof AuthzDeniedError)) throw err;
+      throw new AuthzDeniedError(err.denial, {
+        message:
+          err.denial.reason === "device_revoked"
+            ? `${d.name} was revoked. Pair it again to use it.`
+            : "This device is not shared with you. Ask its owner to share it.",
+      });
+    });
   }
 
   // ---------------------------------------------------------------- organization Work Zone policy (D-02, D-11)
@@ -310,16 +323,9 @@ export function registerWorkSessionRoutes(
         if (!row || row.p.removedAt) throw notFound("Project not found");
         const { p, d } = row;
         if (body.deviceId && body.deviceId !== d.id) throw conflict("The project belongs to another device");
-        // Device layer: own or shared (device_not_shared), never revoked (device_revoked).
-        await perms.assertCan(req, tx, "device.use", deviceFacts(d, auth.userId)).catch((err) => {
-          if (!(err instanceof AuthzDeniedError)) throw err;
-          throw new AuthzDeniedError(err.denial, {
-            message:
-              err.denial.reason === "device_revoked"
-                ? `${d.name} was revoked. Pair it again to use it.`
-                : "This device is not shared with you. Ask its owner to share it.",
-          });
-        });
+        // Device layer: own, shared or granted (device_not_shared), never revoked (device_revoked).
+        const access = await loadDeviceAccess(tx, auth.userId);
+        await assertDeviceUsable(req, tx, d, access);
         if (d.status !== "online")
           throw conflict(`${d.name} is offline. Start the desktop app.`, "device_offline");
         const runtime = z
@@ -341,9 +347,23 @@ export function registerWorkSessionRoutes(
         }
         // The start settings go through the same decision as a change (ADR-0012: full access needs policy ∩
         // opt-in ∩ grain). The model keeps today's free choice here; a change inside the session is catalog-checked.
-        const ctx = await controlsContext(tx, auth, d.id, body.runtime);
+        const ctx = await controlsFor(tx, auth, d.id, body.runtime, false, access);
+        // The start mode is always within the creator's intersection: an explicit mode is refused with its reason;
+        // the implicit default is lowered to the highest available mode under it (e.g. a grant capped at plan).
+        let startMode = body.permissionMode ?? "default";
+        const startOption = buildRuntimeControls(body.runtime, ctx, body.model ?? null).permissionModes.find(
+          (m) => m.value === startMode,
+        );
+        if (!startOption?.available) {
+          const lower =
+            body.permissionMode === undefined
+              ? highestAvailableMode(ctx, body.model ?? null, startMode)
+              : null;
+          if (!lower) throw settingsDenied("permissionMode", startOption?.reason ?? "runtime");
+          startMode = lower;
+        }
         const startPatch: SessionSettingsPatch = {
-          permissionMode: body.permissionMode ?? "default",
+          permissionMode: startMode,
           ...(body.effort !== undefined ? { effort: body.effort } : {}),
           ...(body.fastMode !== undefined ? { fastMode: body.fastMode } : {}),
           ...(body.contextWindow !== undefined ? { contextWindow: body.contextWindow } : {}),
@@ -761,7 +781,7 @@ export function registerWorkSessionRoutes(
         });
         return buildSessionControls(
           session,
-          await controlsContext(tx, auth, session.deviceId, session.runtime),
+          await controlsFor(tx, auth, session.deviceId, session.runtime, true),
         );
       }),
   );
@@ -787,7 +807,7 @@ export function registerWorkSessionRoutes(
           current,
           req.body,
           s.runtime,
-          await controlsContext(tx, auth, s.deviceId, s.runtime),
+          await controlsFor(tx, auth, s.deviceId, s.runtime, true),
         );
         if (!decision.ok) throw settingsDenied(decision.field, decision.reason);
         const keys = [...decision.changed, ...decision.adjusted];
@@ -825,7 +845,39 @@ export function registerWorkSessionRoutes(
             source: "user",
           },
         });
+        // D-04: entering and leaving Full access are audited on their own (actor, device, session, org).
+        const from = current.permissionMode;
+        const to = next.permissionMode ?? from;
+        if ((from === "fullAccess") !== (to === "fullAccess")) {
+          await core.audit.record(tx, {
+            action:
+              to === "fullAccess" ? "work_session.full_access_entered" : "work_session.full_access_left",
+            resourceType: "work_session",
+            resourceId: s.id,
+            sessionId: s.id,
+            deviceId: s.deviceId,
+            clientKind: auth.clientKind,
+            metadata: { from, to, source: "user" },
+          });
+        }
         return (await svc.emitSession(tx, s.id))!;
+      }),
+  );
+
+  app.get(
+    "/work-zone/controls",
+    { ...user, schema: { tags, querystring: WorkZoneControlsQuery, response: { 200: RuntimeControls } } },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const auth = authOf(req);
+        const [d] = await tx.select().from(devices).where(eq(devices.id, req.query.deviceId));
+        if (!d) throw notFound("Device not found");
+        const access = await loadDeviceAccess(tx, auth.userId);
+        await assertDeviceUsable(req, tx, d, access);
+        return buildRuntimeControls(
+          req.query.runtime,
+          await controlsFor(tx, auth, d.id, req.query.runtime, false, access),
+        );
       }),
   );
 
