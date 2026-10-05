@@ -13,7 +13,7 @@ import {
   pairDevice,
   startSession,
 } from "../../testing-workzone";
-import { loadWorkZonePolicy } from "./policy";
+import { knownModels, loadWorkZonePolicy } from "./policy";
 
 /**
  * Organization Work Zone policy (Phase 03.2 Plan 04 Task 1, D-02, D-11, P-08): admin-only, audited with the
@@ -227,6 +227,11 @@ describe("Work Zone policy (D-02, D-11)", () => {
       loadWorkZonePolicy(tx),
     );
     expect(policyB).toEqual({ ...DEFAULT_WORK_ZONE_POLICY, updatedAt: null });
+    // Org A's device catalogs never show up in org B's known models.
+    expect(await db.withTenant({ organizationId: orgB, userId: userB }, (tx) => knownModels(tx))).toEqual({
+      "claude-code": [],
+      codex: [],
+    });
     // Not vacuous: the same call in org A sees its own row.
     const policyA = await db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
       loadWorkZonePolicy(tx),

@@ -12,6 +12,7 @@ import {
   pairDevice,
   startSession,
 } from "../../testing-workzone";
+import { loadDeviceAccess } from "../device";
 import type { WorkSessionService } from "./service";
 
 /**
@@ -506,5 +507,21 @@ describe("tenant isolation", () => {
     expect(server.pending("session.stop")).toHaveLength(0);
     expect(await auditOf("work_session.settings_downgraded", { sessionId: s3 })).toHaveLength(1); // the policy test
     await intruder.close();
+
+    // Device grants are tenant-scoped: org B's tenant sees none of org A's (not vacuous: org A sees it).
+    await grant(samId, "acceptEdits");
+    const macRow = {
+      id: macId,
+      ownerUserId: adminId,
+      shared: false,
+      shareMaxMode: "acceptEdits" as const,
+      revokedAt: null,
+    };
+    const capIn = (organizationId: string) =>
+      stack.built.core.db.withTenant({ organizationId, userId: null }, async (tx) =>
+        (await loadDeviceAccess(tx, samId)).capOf(macRow),
+      );
+    expect(await capIn(orgId)).toBe("acceptEdits");
+    expect(await capIn(orgB)).toBeNull();
   });
 });

@@ -641,6 +641,9 @@ describe("tenant isolation (Task 2)", () => {
     expect(
       (await admin.request("PATCH", `/api/v1/work-sessions/${wsB}/settings`, { model: "opus" })).status,
     ).toBe(404);
+    expect(
+      (await admin.request("GET", `/api/v1/work-zone/controls?deviceId=${devB}&runtime=codex`)).status,
+    ).toBe(404);
     const untouched = await su.query("select model, settings_pending from app.work_sessions where id = $1", [
       wsB,
     ]);
