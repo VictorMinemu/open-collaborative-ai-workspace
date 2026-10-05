@@ -33,10 +33,14 @@ jobs:
           pnpm --filter @ocw/desktop test
 
   e2e:
-    name: e2e (Playwright, desktop + mobile)
+    # Runs alongside verify (no `needs`), one job per viewport, each on its own fresh stack.
+    name: e2e (Playwright, ${{ matrix.project }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [desktop, mobile]
     env:
       # Bots use the deterministic mock model; CI never receives a metered model key.
       OCW_MODEL_PROVIDER: mock
@@ -67,13 +71,18 @@ jobs:
           (cd apps/api && nohup node --env-file-if-exists=../../.env --import tsx src/main.ts > ../../api.log 2>&1 &)
           (cd apps/web && pnpm build && nohup node --env-file-if-exists=../../.env ./node_modules/next/dist/bin/next start -p 3000 > ../../web.log 2>&1 &)
           for i in $(seq 1 60); do curl -sf localhost:4000/health && curl -sf -o /dev/null localhost:3000/login && break; sleep 2; done
+      - name: Cache Playwright browsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
       - run: pnpm exec playwright install --with-deps chromium
-      - run: pnpm e2e
+      - run: pnpm e2e --project=${{ matrix.project }}
       - name: Realtime latency report
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: realtime-latency
+          name: ${{ matrix.project == 'desktop' && 'realtime-latency' || 'realtime-latency-mobile' }}
           path: e2e/test-results/realtime-latency.json
           if-no-files-found: warn
           retention-days: 30
@@ -83,7 +92,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: failure()
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.project }}
           path: |
             e2e/playwright-report
             e2e/test-results
