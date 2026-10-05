@@ -1,5 +1,16 @@
 import type { Permission } from "@ocw/contracts";
-import { Cpu, Laptop, type LucideIcon, Network, Plug, Server, ShieldCheck, Store, Users } from "lucide-react";
+import {
+  Cpu,
+  Laptop,
+  LockKeyhole,
+  type LucideIcon,
+  Network,
+  Plug,
+  Server,
+  ShieldCheck,
+  Store,
+  Users,
+} from "lucide-react";
 
 /** Settings sections. Add ONE entry here and create `app/(app)/settings/<slug>/page.tsx`. */
 export interface SettingsSection {
@@ -27,6 +38,13 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     href: "/settings/bot-policy",
     icon: ShieldCheck,
     permission: "bot.manage",
+  },
+  {
+    id: "work-zone-policy",
+    label: "Work Zone policy",
+    href: "/settings/work-zone-policy",
+    icon: LockKeyhole,
+    permission: "work_zone.manage",
   },
   {
     id: "marketplace",
