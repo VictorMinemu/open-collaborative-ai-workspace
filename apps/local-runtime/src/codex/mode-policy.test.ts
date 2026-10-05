@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { CODEX_POLICY_MODES, codexModeFromSettings, codexModePolicy, isUnrestrictedCodexPolicy } from "./mode-policy.js";
+import {
+  CODEX_POLICY_MODES,
+  codexModeFromSettings,
+  codexModePolicy,
+  isUnrestrictedCodexPolicy,
+} from "./mode-policy.js";
 
 const CWD = "/tmp/ocw-mode-policy";
 
@@ -76,18 +81,55 @@ describe("codexModeFromSettings — the inverse table (effective readback)", () 
   it("reports an unrestricted sandbox or the never policy as fullAccess, so the server can fail closed", () => {
     expect(codexModeFromSettings("never", { type: "dangerFullAccess" }, "user")).toBe("fullAccess");
     expect(codexModeFromSettings("on-request", { type: "dangerFullAccess" }, "user")).toBe("fullAccess");
-    expect(codexModeFromSettings("never", { type: "readOnly", networkAccess: false }, "user")).toBe("fullAccess");
+    expect(codexModeFromSettings("never", { type: "readOnly", networkAccess: false }, "user")).toBe(
+      "fullAccess",
+    );
   });
 
   it("returns null for combinations no platform mode produces", () => {
-    expect(codexModeFromSettings("on-request", { type: "readOnly", networkAccess: false }, "auto_review")).toBeNull();
-    expect(codexModeFromSettings("untrusted", { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false }, "user")).toBeNull();
-    expect(codexModeFromSettings({ granular: { sandbox_approval: true, rules: true, skill_approval: true, request_permissions: true, mcp_elicitations: true } }, { type: "readOnly", networkAccess: false }, "user")).toBeNull();
+    expect(
+      codexModeFromSettings("on-request", { type: "readOnly", networkAccess: false }, "auto_review"),
+    ).toBeNull();
+    expect(
+      codexModeFromSettings(
+        "untrusted",
+        {
+          type: "workspaceWrite",
+          writableRoots: [],
+          networkAccess: false,
+          excludeTmpdirEnvVar: false,
+          excludeSlashTmp: false,
+        },
+        "user",
+      ),
+    ).toBeNull();
+    expect(
+      codexModeFromSettings(
+        {
+          granular: {
+            sandbox_approval: true,
+            rules: true,
+            skill_approval: true,
+            request_permissions: true,
+            mcp_elicitations: true,
+          },
+        },
+        { type: "readOnly", networkAccess: false },
+        "user",
+      ),
+    ).toBeNull();
   });
 
   it("isUnrestrictedCodexPolicy flags dangerFullAccess or never", () => {
-    expect(isUnrestrictedCodexPolicy({ approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: false } })).toBe(true);
-    expect(isUnrestrictedCodexPolicy({ approvalPolicy: "untrusted", sandboxPolicy: { type: "dangerFullAccess" } })).toBe(true);
+    expect(
+      isUnrestrictedCodexPolicy({
+        approvalPolicy: "never",
+        sandboxPolicy: { type: "readOnly", networkAccess: false },
+      }),
+    ).toBe(true);
+    expect(
+      isUnrestrictedCodexPolicy({ approvalPolicy: "untrusted", sandboxPolicy: { type: "dangerFullAccess" } }),
+    ).toBe(true);
     expect(isUnrestrictedCodexPolicy({ approvalPolicy: "untrusted", sandboxPolicy: null })).toBe(false);
   });
 });

@@ -68,7 +68,13 @@ class FakeAppServer extends EventEmitter implements AppServerProcess {
   sendSettings(over: Record<string, unknown> = {}): void {
     this.notify("thread/settings/updated", {
       threadId: "thread-1",
-      threadSettings: { cwd: "/abs/cwd", modelProvider: "openai", summary: null, ...this.threadSettings, ...over },
+      threadSettings: {
+        cwd: "/abs/cwd",
+        modelProvider: "openai",
+        summary: null,
+        ...this.threadSettings,
+        ...over,
+      },
     });
   }
 
@@ -123,7 +129,14 @@ class FakeAppServer extends EventEmitter implements AppServerProcess {
       }
       case "turn/start": {
         const p = m.params ?? {};
-        for (const k of ["model", "effort", "serviceTier", "approvalPolicy", "approvalsReviewer", "sandboxPolicy"])
+        for (const k of [
+          "model",
+          "effort",
+          "serviceTier",
+          "approvalPolicy",
+          "approvalsReviewer",
+          "sandboxPolicy",
+        ])
           if (p[k] !== undefined && p[k] !== null) this.threadSettings[k] = p[k];
         if (this.settingsUpdates === "before") this.sendSettings();
         this.send({
@@ -456,7 +469,9 @@ describe("CodexRuntime — turns and approvals", () => {
 });
 
 const settingsEvents = (events: SessionEvent[]) =>
-  events.filter((e): e is Extract<SessionEvent, { type: "session.settings" }> => e.type === "session.settings");
+  events.filter(
+    (e): e is Extract<SessionEvent, { type: "session.settings" }> => e.type === "session.settings",
+  );
 const turnStarts = (server: FakeAppServer) => server.received.filter((m) => m.method === "turn/start");
 
 describe("CodexRuntime — settings ride on the next turn/start (D-07, D-14)", () => {
@@ -550,7 +565,9 @@ describe("CodexRuntime — settings ride on the next turn/start (D-07, D-14)", (
     await expect(runtime.configure("s1", { contextWindow: 1_000_000 })).rejects.toMatchObject({
       code: "settings_rejected",
     });
-    await expect(runtime.configure("nope", { model: "x" })).rejects.toMatchObject({ code: "unknown_session" });
+    await expect(runtime.configure("nope", { model: "x" })).rejects.toMatchObject({
+      code: "unknown_session",
+    });
   });
 
   it("a permission mode change sends the new policy on the next turn and reports it", async () => {
@@ -676,7 +693,8 @@ describe("CodexRuntime — recorded Supervised write (codex-cli 0.160.0, read-on
       void runtime
         .start({ sessionId: "fixture-session", cwd, permissionMode: "default" }, (ev) => {
           events.push(ev);
-          if (ev.type === "approval.requested") runtime.resolveApproval("fixture-session", ev.approvalId, "deny");
+          if (ev.type === "approval.requested")
+            runtime.resolveApproval("fixture-session", ev.approvalId, "deny");
           if (ev.type === "prompt.completed") resolve();
         })
         .then(() => runtime.configure("fixture-session", { effort: "low" }))
@@ -694,9 +712,10 @@ describe("CodexRuntime — recorded Supervised write (codex-cli 0.160.0, read-on
     expect(replay.sent.filter((m) => m.method).map((m) => m.method)).toEqual(
       recordedMethods.filter((m) => m !== "turn/interrupt"),
     );
-    expect(replay.sent.find((m) => m.method === "turn/start")?.params).toEqual(
-      { ...out("turn/start")[0]?.msg.params, sandboxPolicy: expect.any(Object) },
-    );
+    expect(replay.sent.find((m) => m.method === "turn/start")?.params).toEqual({
+      ...out("turn/start")[0]?.msg.params,
+      sandboxPolicy: expect.any(Object),
+    });
 
     const types = events.map((e) => e.type);
     const firstApproval = types.indexOf("approval.requested");

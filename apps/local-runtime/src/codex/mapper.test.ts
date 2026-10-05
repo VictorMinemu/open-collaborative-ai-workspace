@@ -42,7 +42,19 @@ describe("CodexEventMapper — recorded fixture (real codex app-server, read-onl
 
   it("emits tool and message events in order and completes the prompt", () => {
     const types = events.map((e) => e.type).filter((t) => t !== "assistant.delta" && t !== "runtime.raw");
-    expect(types).toEqual(["tool.started", "tool.completed", "assistant.message", "prompt.completed"]);
+    expect(types).toEqual([
+      "tool.started",
+      "tool.completed",
+      "session.settings",
+      "assistant.message",
+      "prompt.completed",
+    ]);
+  });
+
+  it("reports the recorded model context window once (display only, D-10)", () => {
+    expect(events.filter((e) => e.type === "session.settings")).toEqual([
+      { type: "session.settings", contextWindow: 258_400 },
+    ]);
   });
 
   it("maps the command execution", () => {
@@ -187,8 +199,22 @@ describe("CodexEventMapper — hand-written cases", () => {
         threadId: "t",
         turnId,
         tokenUsage: {
-          total: { totalTokens: 1, inputTokens: 1, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
-          last: { totalTokens: 1, inputTokens: 1, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
+          total: {
+            totalTokens: 1,
+            inputTokens: 1,
+            cachedInputTokens: 0,
+            cacheWriteInputTokens: 0,
+            outputTokens: 0,
+            reasoningOutputTokens: 0,
+          },
+          last: {
+            totalTokens: 1,
+            inputTokens: 1,
+            cachedInputTokens: 0,
+            cacheWriteInputTokens: 0,
+            outputTokens: 0,
+            reasoningOutputTokens: 0,
+          },
           modelContextWindow,
         },
       },
