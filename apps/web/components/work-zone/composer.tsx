@@ -10,9 +10,19 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { useInterrupt, useQueuePrompt } from "@/lib/workzone-queries";
 import { RUNTIMES } from "./meta";
+import { ModelPicker } from "./model-picker";
 
 /** Adds prompts to the session's SHARED queue; they run one at a time on the host device. */
-export function Composer({ session, queued }: { session: WorkSession; queued: number }) {
+export function Composer({
+  session,
+  queued,
+  canConfigure = true,
+}: {
+  session: WorkSession;
+  queued: number;
+  /** The viewer may change the session's settings (`work_session.configure`). */
+  canConfigure?: boolean;
+}) {
   const queue = useQueuePrompt(session.id);
   const interrupt = useInterrupt(session.id);
   const [text, setText] = useState("");
@@ -49,8 +59,9 @@ export function Composer({ session, queued }: { session: WorkSession; queued: nu
     }
   }
 
-  const hint =
-    session.status === "host_offline"
+  const hint = session.settings.pending
+    ? "Applies to the next turn"
+    : session.status === "host_offline"
       ? `${session.deviceName} is offline — prompts wait in the queue`
       : willQueue
         ? `Will run after the current turn · #${queued + 1} in queue`
@@ -74,8 +85,14 @@ export function Composer({ session, queued }: { session: WorkSession; queued: nu
           aria-label="Prompt"
           className="block max-h-[220px] min-h-[52px] w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-[14px] outline-none placeholder:text-muted-foreground/70"
         />
-        <div className="flex items-center gap-2 px-2.5 pb-2.5">
-          <p className="min-w-0 flex-1 truncate pl-1.5 text-[11.5px] text-muted-foreground">{hint}</p>
+        <div className="flex items-center gap-1.5 px-2.5 pb-2.5">
+          <ModelPicker session={session} disabled={archived || !canConfigure} />
+          <p
+            data-testid="composer-hint"
+            className="min-w-0 flex-1 truncate pl-1 text-[11.5px] text-muted-foreground"
+          >
+            {hint}
+          </p>
           {busy ? (
             <Tooltip content="Interrupt the current turn">
               <Button

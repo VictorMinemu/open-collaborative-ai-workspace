@@ -8,6 +8,8 @@ import {
   Ok,
   ProjectList,
   type ResolveApprovalRequest,
+  SessionControls,
+  type SessionSettingsPatch,
   topic,
   type UpdateDeviceRequest,
   type UpdatePromptRequest,
@@ -29,6 +31,7 @@ export const wzKeys = {
   sessions: ["wz", "sessions"] as const,
   session: (id: string) => ["wz", "session", id] as const,
   diff: (id: string) => ["wz", "diff", id] as const,
+  controls: (id: string) => ["wz", "controls", id] as const,
 };
 
 // ---- devices & projects ----
@@ -122,6 +125,26 @@ export function useUpdatePrompt(sessionId: string) {
 export function useInterrupt(sessionId: string) {
   return useMutation({
     mutationFn: () => api.post(`/api/v1/work-sessions/${sessionId}/interrupt`, { body: {}, schema: Ok }),
+  });
+}
+
+/** What the caller may pick in this session (catalog ∩ policy ∩ device ∩ grain), decided by the API (D-08). */
+export function useSessionControls(sessionId: string) {
+  return useQuery({
+    queryKey: wzKeys.controls(sessionId),
+    queryFn: ({ signal }) =>
+      api.get(`/api/v1/work-sessions/${sessionId}/controls`, { schema: SessionControls, signal }),
+    staleTime: 30_000,
+  });
+}
+
+/** Change the session's settings; the device applies them before the next turn (D-07, D-14). */
+export function useUpdateSessionSettings(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: SessionSettingsPatch) =>
+      api.patch(`/api/v1/work-sessions/${sessionId}/settings`, { body, schema: WorkSession }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: wzKeys.controls(sessionId) }),
   });
 }
 

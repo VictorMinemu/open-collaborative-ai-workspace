@@ -107,6 +107,7 @@ function settingsDenied(field: string, reason: ControlDenialReason): AuthzDenied
 /** Permissions a session view renders controls for (`WorkSessionDetail.viewerCan`). */
 const SESSION_VIEWER_CAN = [
   "work_session.prompt",
+  "work_session.configure",
   "work_session.interrupt",
   "work_session.approve",
   "work_session.archive",
