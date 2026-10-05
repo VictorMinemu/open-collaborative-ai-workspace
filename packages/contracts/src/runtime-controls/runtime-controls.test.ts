@@ -144,6 +144,26 @@ describe("runtime controls inventory (WZC-06, P-09)", () => {
     }
   });
 
+  it("every built layout element points at its component and test id; every deferred one says why (Plan 10)", () => {
+    for (const k of ["ui.sidebar.search", "ui.sidebar.settled", "ui.stream.message-footer"]) {
+      expect(isExposed("workzone-ui", k), k).toBe(true);
+    }
+    for (const r of rows("workzone-ui")) {
+      if (r.status === "exposed") {
+        expect(r.evidence, r.control).toMatch(/apps\/web\/components\/work-zone\/[a-z-]+\.tsx/);
+        expect(r.evidence, r.control).toMatch(/data-testid="[a-z-]+"/);
+      } else {
+        expect(r.status, r.control).toBe("deferred");
+        expect(r.evidence, r.control).toContain("ref-4-layout.png");
+      }
+    }
+    const reason = (k: string) => rows("workzone-ui").find((r) => r.uiKey === k)?.reason ?? "";
+    expect(reason("ui.stream.subagents")).toMatch(/sub-agent events/i);
+    expect(reason("ui.header.actions")).toMatch(/git and editor integration/);
+    expect(reason("ui.composer.attach")).toMatch(/file uploads/i);
+    expect(reason("ui.minimap")).toMatch(/turn navigation rail/i);
+  });
+
   it("fixture-confirmed controls, shipped modes and full access are exposed", () => {
     // Claude effort and auto were confirmed by the 2.1.289 fixtures (Plan 02); Codex auto by Plan 03.
     expect(isExposed("claude-code", "effort")).toBe(true);

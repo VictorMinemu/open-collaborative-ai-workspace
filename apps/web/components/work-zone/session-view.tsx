@@ -23,6 +23,7 @@ import { useMe, useMembers } from "@/lib/queries";
 import { type LiveSession, useLiveSession } from "@/lib/use-live-session";
 import { cn } from "@/lib/utils";
 import { useArchiveSession, useDevices, useDiff } from "@/lib/workzone-queries";
+import { AgentBar } from "./agent-bar";
 import { ApprovalBanner } from "./approval-banner";
 import { ChangesCard } from "./changes-card";
 import { ChangesPanel } from "./changes-panel";
@@ -31,6 +32,7 @@ import { EventStream } from "./event-stream";
 import { FullAccessBadge } from "./full-access-badge";
 import { RUNTIMES, StatusChip, StatusDot } from "./meta";
 import { QueuePanel } from "./queue-panel";
+import { SessionFooter } from "./session-footer";
 import { projectInitials } from "./session-sidebar";
 
 type PanelTab = "queue" | "changes";
@@ -184,7 +186,8 @@ function LoadedSession({ state, viewerCan }: { state: LiveSession; viewerCan: re
               const el = e.currentTarget;
               pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
             }}
-            className="scrollbar-thin min-h-0 flex-1 overflow-y-auto"
+            // The stream fades under the borderless header (ref-4).
+            className="scrollbar-thin min-h-0 flex-1 overflow-y-auto [mask-image:linear-gradient(to_bottom,transparent,black_20px)]"
           >
             <EventStream
               state={state}
@@ -213,6 +216,20 @@ function LoadedSession({ state, viewerCan }: { state: LiveSession; viewerCan: re
               session={session}
               queued={queued}
               canConfigure={viewerCan.includes("work_session.configure")}
+              above={
+                <AgentBar
+                  session={session}
+                  canInterrupt={viewerCan.includes("work_session.interrupt")}
+                  onView={() => {
+                    const el = scroller.current;
+                    const running = el?.querySelector("[data-turn-running]");
+                    if (running) running.scrollIntoView({ block: "start", behavior: "smooth" });
+                    else el?.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+                    pinned.current = !running;
+                  }}
+                />
+              }
+              below={<SessionFooter session={session} />}
             />
           </div>
         </div>
