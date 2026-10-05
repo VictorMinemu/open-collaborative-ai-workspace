@@ -194,3 +194,64 @@ describe("team bot DMs: one private chat per member", () => {
     });
   });
 });
+
+describe("disabling a team bot archives every member's chat with it", () => {
+  const archived = async (id: string) =>
+    (await su.query("select archived_at from app.conversations where id = $1", [id])).rows[0]?.archived_at !==
+    null;
+
+  it("disable → both DMs archived (410 on post, gone from /dms); enable → restored", async () => {
+    await ok(admin.request("PATCH", `/api/v1/agents/${teamBotId}`, { enabled: false }));
+    expect(await archived(samDm)).toBe(true);
+    expect(await archived(alexDm)).toBe(true);
+    const post = await sam.request("POST", `/api/v1/conversations/${samDm}/messages`, {
+      body: "still there?",
+    });
+    expect(post.status).toBe(410);
+    expect(((await ok(sam.request("GET", "/api/v1/dms"))).dms as Payload[]).some((d) => d.id === samDm)).toBe(
+      false,
+    );
+    expect(
+      ((await ok(alex.request("GET", "/api/v1/dms"))).dms as Payload[]).some((d) => d.id === alexDm),
+    ).toBe(false);
+    for (const [uid, conv] of [
+      [samId, samDm],
+      [alexId, alexDm],
+    ] as const) {
+      const ev = await su.query(
+        "select 1 from app.stream_events where stream_id = $1 and type = 'conversation.updated' and payload->>'conversationId' = $2",
+        [`user:${uid}`, conv],
+      );
+      expect(ev.rowCount).toBe(1);
+    }
+    // A team bot is not personal: no governance flag.
+    const audit = (
+      await su.query(
+        "select metadata from app.audit_events where action = 'agent.disabled' and resource_id = $1",
+        [teamBotId],
+      )
+    ).rows;
+    expect(audit[0].metadata.governance).toBeUndefined();
+
+    await ok(admin.request("PATCH", `/api/v1/agents/${teamBotId}`, { enabled: true }));
+    expect(await archived(samDm)).toBe(false);
+    expect(await archived(alexDm)).toBe(false);
+    expect(((await ok(sam.request("GET", "/api/v1/dms"))).dms as Payload[]).map((d) => d.id)).toContain(
+      samDm,
+    );
+  });
+
+  it("deleting a team bot archives its DMs and removes it from channels", async () => {
+    const ch = await ok(admin.request("POST", "/api/v1/channels", { name: "ops-room" }));
+    await ok(admin.request("POST", `/api/v1/channels/${ch.id}/members`, { kind: "agent", id: teamBotId }));
+    await ok(admin.request("DELETE", `/api/v1/agents/${teamBotId}`));
+    expect(await archived(samDm)).toBe(true);
+    expect(await archived(alexDm)).toBe(true);
+    const inChannel = await su.query(
+      "select 1 from app.conversation_members where conversation_id = $1 and member_kind = 'agent' and member_id = $2",
+      [ch.id, teamBotId],
+    );
+    expect(inChannel.rowCount).toBe(0);
+    expect((await sam.request("POST", `/api/v1/agents/${teamBotId}/dm`)).status).toBe(404);
+  });
+});

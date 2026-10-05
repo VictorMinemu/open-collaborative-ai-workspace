@@ -11,9 +11,8 @@ import { Switch } from "@/components/ui/switch";
 import { errorMessage, isApiError } from "@/lib/api";
 import { useDeleteAgent, useModels, useUpdateAgent } from "@/lib/bots-queries";
 import { validate } from "@/lib/form";
-import { useCan } from "@/lib/permissions";
 import { formatDate } from "@/lib/utils";
-import { BotAvatar, ModelChip, StatusChip } from "./bot-bits";
+import { BotAvatar, botAbilities, ModelChip, PersonalBadge, StatusChip } from "./bot-bits";
 import { canMessage, MessageBotButton } from "./bot-card";
 import {
   BotForm,
@@ -44,7 +43,6 @@ export function BotDetailSheet({
   onOpenChange: (open: boolean) => void;
   onAddToChannel: (agent: Agent) => void;
 }) {
-  const canManage = useCan("bot.manage");
   const models = useModels();
   const update = useUpdateAgent();
   const remove = useDeleteAgent();
@@ -69,6 +67,15 @@ export function BotDetailSheet({
     );
   }
 
+  // Controls follow what the API decided for this bot (viewerCan), not the caller's org-wide role.
+  const { edit: canEdit, govern: canGovern } = botAbilities(agent);
+  const personal = agent.scope === "personal";
+  // An owner cannot switch back on a personal bot an admin disabled (the API refuses with disabled_by_admin).
+  const lockedByAdmin =
+    personal &&
+    agent.status === "disabled" &&
+    !!agent.statusMessage &&
+    !(agent.viewerCan ?? []).includes("bot.manage");
   const original = toValues(agent);
   const dirty = (Object.keys(values) as Array<keyof BotFormValues>).some((k) => values[k] !== original[k]);
   // Keep the bot's current model selectable even if it left the allowed list.
@@ -155,6 +162,7 @@ export function BotDetailSheet({
             <div className="mt-2 flex flex-wrap items-center gap-1.5">
               <StatusChip status={agent.status} message={agent.statusMessage} />
               <ModelChip provider={agent.modelProvider} modelId={agent.modelId} />
+              {personal ? <PersonalBadge /> : null}
             </div>
             {canMessage(agent) ? <MessageBotButton agent={agent} className="mt-3" /> : null}
           </div>
@@ -174,7 +182,7 @@ export function BotDetailSheet({
             </div>
           ) : null}
 
-          {canManage ? (
+          {canEdit ? (
             <SheetSection title="Profile & behaviour">
               <BotForm
                 idPrefix={`bot-${agent.id}`}
@@ -198,19 +206,21 @@ export function BotDetailSheet({
             </SheetSection>
           )}
 
-          {canManage ? (
+          {canGovern ? (
             <SheetSection title="Availability">
               <div className="flex items-center justify-between gap-4 rounded-lg border p-3">
                 <span>
                   <span className="block font-medium text-sm">Enabled</span>
-                  <span className="block text-muted-foreground text-xs">
-                    Disabled bots ignore mentions and cannot post.
+                  <span className="block text-muted-foreground text-xs" data-testid="bot-enabled-hint">
+                    {lockedByAdmin
+                      ? `${agent.statusMessage}. Ask them to enable it again.`
+                      : "Disabled bots stop answering; their private chats are archived until re-enabled."}
                   </span>
                 </span>
                 <Switch
                   checked={agent.status !== "disabled"}
                   onCheckedChange={(v) => toggle(v)}
-                  disabled={update.isPending}
+                  disabled={update.isPending || lockedByAdmin}
                   aria-label="Enabled"
                   data-testid="bot-enabled"
                 />
@@ -222,13 +232,15 @@ export function BotDetailSheet({
             Created {formatDate(agent.createdAt)} · runtime OpenClaw · tools disabled
           </p>
 
-          {canManage ? (
+          {canGovern ? (
             <SheetSection title="Danger zone">
               <div className="flex items-center justify-between gap-4 rounded-lg border border-destructive/25 p-3">
                 <span className="text-sm">
                   <span className="block font-medium">Delete bot</span>
                   <span className="block text-muted-foreground text-xs">
-                    It leaves every channel. Its past messages stay.
+                    {personal
+                      ? "Its private chat is archived. This cannot be undone."
+                      : "It leaves every channel and its private chats are archived. Its past messages stay."}
                   </span>
                 </span>
                 <Button
@@ -246,21 +258,23 @@ export function BotDetailSheet({
           ) : null}
         </div>
 
-        <div className="flex items-center justify-between gap-2 border-t bg-muted/30 px-5 py-3">
-          <Button
-            variant="outline"
-            onClick={() => onAddToChannel(agent)}
-            disabled={agent.status === "disabled"}
-            className="flex-1 sm:flex-none"
-          >
-            <Hash /> Add to channel
-          </Button>
-          {canManage ? (
+        <div className="flex items-center justify-between gap-2 border-t bg-muted/30 px-5 py-3 empty:hidden">
+          {personal ? null : (
+            <Button
+              variant="outline"
+              onClick={() => onAddToChannel(agent)}
+              disabled={agent.status === "disabled"}
+              className="flex-1 sm:flex-none"
+            >
+              <Hash /> Add to channel
+            </Button>
+          )}
+          {canEdit ? (
             <Button
               onClick={save}
               disabled={!dirty || update.isPending}
               data-testid="save-bot"
-              className="flex-1 sm:flex-none"
+              className="flex-1 sm:ml-auto sm:flex-none"
             >
               {update.isPending && dirty ? <Spinner /> : null}
               Save changes

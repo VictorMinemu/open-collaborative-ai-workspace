@@ -87,8 +87,20 @@ test("team bot: each member gets a private chat from the card; histories stay se
   test.skip(!token, "OCW_CELL_TOKEN is not configured");
 
   const admin = await apiAs(ADMIN);
-  await ensureMember(admin, SAM, "developer");
+  const samId = await ensureMember(admin, SAM, "developer");
   await ensureMember(admin, ALEX, "developer");
+  // Sam also owns a personal bot: only he sees it (badge), and nobody is offered it as an @mention.
+  const samApi = await apiAs(SAM);
+  const own = (await (await samApi.get("/api/v1/agents")).json()) as {
+    agents: Array<{ name: string; scope: string; ownerUserId: string | null }>;
+  };
+  let personalName = own.agents.find((a) => a.scope === "personal" && a.ownerUserId === samId)?.name;
+  if (!personalName) {
+    const res = await samApi.post("/api/v1/agents/personal", { data: {} });
+    expect(res.ok(), "create Sam's personal bot").toBe(true);
+    personalName = ((await res.json()) as { agent: { name: string } }).agent.name;
+  }
+  await samApi.dispose();
   const name = mobile ? "Beacon" : "Pulse";
   await freshTeamBot(admin, name);
 
@@ -97,6 +109,15 @@ test("team bot: each member gets a private chat from the card; histories stay se
   try {
     // ---- Sam: Bots › the team bot › Message → his private chat
     const sam = await openAs(browser, SAM, project);
+    // The channel @mention autocomplete never offers a personal bot, not even to its owner.
+    const channelBox = sam.page.getByTestId("composer");
+    await channelBox.click();
+    // "@a" matches Alex Kim and, by its last word, "Sam's assistant": only the person is offered.
+    await channelBox.pressSequentially("@a");
+    await expect(sam.page.getByTestId("mention-option").filter({ hasText: ALEX.name })).toBeVisible();
+    await expect(sam.page.getByTestId("mention-option").filter({ hasText: personalName })).toHaveCount(0);
+    await channelBox.fill("");
+
     const samDm = await messageFromGallery(sam.page, name, mobile, `team-bot-dm-gallery-${tag}`);
     await expect(sam.page.getByTestId("dm-title")).toHaveText(name);
     await expect(sam.page.getByTestId("dm-privacy")).toHaveText("Private chat · only you can see it");
@@ -128,11 +149,26 @@ test("team bot: each member gets a private chat from the card; histories stay se
 
     // Opening again from the gallery lands in the same chat.
     expect(await messageFromGallery(sam.page, name, mobile)).toBe(samDm);
+
+    // His personal bot carries the Personal badge and cannot be added to a channel.
+    await sam.page.goto(`${BASE_URL}/bots`);
+    const personalCard = sam.page.getByTestId("bot-card").filter({ hasText: personalName });
+    await expect(personalCard.getByTestId("bot-personal-badge")).toBeVisible();
+    await expect(personalCard.getByTestId("add-to-channel")).toHaveCount(0);
+    await personalCard.scrollIntoViewIfNeeded();
+    await shot(sam.page, `team-bot-dm-personal-card-${tag}`);
     await sam.context.close();
 
     // ---- Alex: same bot, his own empty chat; Sam's messages never appear
     const alex = await openAs(browser, ALEX, project);
     const alexDm = await messageFromGallery(alex.page, name, mobile);
+    // Sam's personal bot never shows up for Alex.
+    await alex.page.goto(`${BASE_URL}/bots`);
+    await expect(alex.page.getByTestId("bot-card").filter({ hasText: name })).toBeVisible();
+    await expect(alex.page.getByTestId("bot-card").filter({ hasText: personalName })).toHaveCount(0);
+    await expect(alex.page.getByTestId("bot-personal-badge")).toHaveCount(0);
+    await alex.page.goto(`${BASE_URL}/chat/dm/${alexDm}`);
+    await expect(alex.page.getByTestId("dm-view")).toBeVisible();
     expect(alexDm).not.toBe(samDm);
     await expect(alex.page.getByTestId("dm-title")).toHaveText(name);
     await expect(alex.page.getByTestId("dm-intro")).toBeVisible();

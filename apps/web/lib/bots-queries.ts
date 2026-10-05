@@ -273,6 +273,11 @@ export function useBotsRealtime() {
   const qc = useQueryClient();
   const me = useMe({ enabled: false });
   const orgId = me.data?.organization.id ?? null;
+  const userId = me.data?.user.id ?? null;
+  // A personal bot's changes travel only on its owner's topic (D-01): the owner's gallery follows both.
+  useTopic(userId ? topic("user", userId) : null, (frame) => {
+    if (frame.op === "ev") onAgentEvent(qc, frame.type, frame.data);
+  });
   useTopic(orgId ? topic("org", orgId) : null, (frame) => {
     if (frame.op === "eph") {
       if (frame.type === EphemeralTypes.cellPresence) {
@@ -290,18 +295,28 @@ export function useBotsRealtime() {
       return;
     }
     if (frame.op !== "ev") return;
-    if (frame.type === EventTypes.agentCreated || frame.type === EventTypes.agentUpdated) {
-      const parsed = Agent.safeParse(frame.data);
-      if (parsed.success) upsertAgent(qc, parsed.data);
-      else void qc.invalidateQueries({ queryKey: botKeys.agents });
-    } else if (frame.type === EventTypes.agentDeleted) {
-      const id = (frame.data as { id?: string } | null)?.id;
-      qc.setQueryData<AgentList>(botKeys.agents, (prev) =>
-        prev ? { agents: prev.agents.filter((a) => a.id !== id) } : prev,
-      );
-    } else if (frame.type === EventTypes.modelProvidersUpdated) {
+    if (onAgentEvent(qc, frame.type, frame.data)) return;
+    if (frame.type === EventTypes.modelProvidersUpdated) {
       void qc.invalidateQueries({ queryKey: botKeys.models });
       void qc.invalidateQueries({ queryKey: botKeys.providers });
     }
   });
+}
+
+/** Applies an agent created/updated/deleted event to the bots list; false when `type` is not one. */
+function onAgentEvent(qc: QueryClient, type: string, data: unknown): boolean {
+  if (type === EventTypes.agentCreated || type === EventTypes.agentUpdated) {
+    const parsed = Agent.safeParse(data);
+    if (parsed.success) upsertAgent(qc, parsed.data);
+    else void qc.invalidateQueries({ queryKey: botKeys.agents });
+    return true;
+  }
+  if (type === EventTypes.agentDeleted) {
+    const id = (data as { id?: string } | null)?.id;
+    qc.setQueryData<AgentList>(botKeys.agents, (prev) =>
+      prev ? { agents: prev.agents.filter((a) => a.id !== id) } : prev,
+    );
+    return true;
+  }
+  return false;
 }

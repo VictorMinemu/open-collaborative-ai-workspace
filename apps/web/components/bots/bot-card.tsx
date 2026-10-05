@@ -10,7 +10,7 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { useOpenDm } from "@/lib/bots-queries";
 import { cn } from "@/lib/utils";
-import { BotAvatar, ModelChip, StatusChip } from "./bot-bits";
+import { BotAvatar, ModelChip, PersonalBadge, StatusChip } from "./bot-bits";
 
 /** A private chat is offered for live bots the caller may use (`bot.read`, decided per bot by the API). */
 export function canMessage(agent: Agent): boolean {
@@ -77,7 +77,10 @@ export function BotCard({
               {agent.name}
             </button>
           </h3>
-          <p className="mt-0.5 truncate font-mono text-[12px] text-muted-foreground">@{agent.username}</p>
+          <p className="mt-0.5 flex min-w-0 items-center gap-1.5">
+            <span className="truncate font-mono text-[12px] text-muted-foreground">@{agent.username}</span>
+            {agent.scope === "personal" ? <PersonalBadge /> : null}
+          </p>
         </div>
         <StatusChip status={agent.status} message={agent.statusMessage} className="relative" />
       </div>
@@ -88,19 +91,21 @@ export function BotCard({
 
       <div className="mt-4 flex items-center gap-2">
         <ModelChip provider={agent.modelProvider} modelId={agent.modelId} className="mr-auto min-w-0" />
-        <Tooltip content="Add to channel">
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={onAddToChannel}
-            disabled={agent.status === "disabled"}
-            aria-label="Add to channel"
-            data-testid="add-to-channel"
-            className="relative z-10"
-          >
-            <Hash />
-          </Button>
-        </Tooltip>
+        {agent.scope === "team" ? (
+          <Tooltip content="Add to channel">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={onAddToChannel}
+              disabled={agent.status === "disabled"}
+              aria-label="Add to channel"
+              data-testid="add-to-channel"
+              className="relative z-10"
+            >
+              <Hash />
+            </Button>
+          </Tooltip>
+        ) : null}
         {canMessage(agent) ? <MessageBotButton agent={agent} /> : null}
       </div>
     </article>
