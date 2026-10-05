@@ -103,6 +103,12 @@ export const RuntimeModel = z.object({
   id: z.string().min(1).max(200),
   displayName: z.string().min(1).max(200),
   description: z.string().max(500).nullable(),
+  /**
+   * The concrete model id the runtime runs for this row when `id` is an alias (Claude `sonnet` →
+   * `claude-sonnet-5-5`). The effective settings report the concrete id, so this maps them back to the row.
+   * Optional: older daemons and runtimes without aliases omit it.
+   */
+  resolvedModel: z.string().min(1).max(200).nullable().optional(),
   /** Explicit version rows (Claude `claude-*`) or hidden/upgradable rows (Codex): the "Legacy models" group. */
   legacy: z.boolean(),
   isDefault: z.boolean(),
@@ -175,6 +181,7 @@ export const ModelControl = ControlOption.extend({
   id: RuntimeModel.shape.id,
   displayName: RuntimeModel.shape.displayName,
   description: RuntimeModel.shape.description,
+  resolvedModel: RuntimeModel.shape.resolvedModel,
   legacy: RuntimeModel.shape.legacy,
   isDefault: RuntimeModel.shape.isDefault,
   badge: RuntimeModel.shape.badge,

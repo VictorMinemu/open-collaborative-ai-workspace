@@ -1,6 +1,6 @@
 "use client";
 
-import type { PermissionMode, Project, RuntimeId } from "@ocw/contracts";
+import { EFFORT_LABELS, type PermissionMode, type Project, type RuntimeId } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
 import { Check, FolderGit2, FolderPlus, GitBranch, Laptop, Rocket } from "lucide-react";
 import Link from "next/link";
@@ -25,8 +25,17 @@ import { Textarea } from "@/components/ui/textarea";
 import { errorMessage } from "@/lib/api";
 import { useDesktop } from "@/lib/desktop";
 import { cn } from "@/lib/utils";
-import { useCreateWorkSession, useDevices, useProjects, wzKeys } from "@/lib/workzone-queries";
-import { OnlineDot, PERMISSION_MODES, RUNTIMES, RuntimeLogo } from "./meta";
+import {
+  useCreateWorkSession,
+  useDevices,
+  useProjects,
+  useRuntimeControls,
+  wzKeys,
+} from "@/lib/workzone-queries";
+import { controlReasonText, isShown, OnlineDot, PERMISSION_MODES, RUNTIMES, RuntimeLogo } from "./meta";
+
+/** Before the device's controls load (or for a device with no catalog): the modes every runtime always had. */
+const LEGACY_MODES: PermissionMode[] = ["default", "acceptEdits", "plan"];
 
 export function NewSessionDialog({
   open,
@@ -48,6 +57,7 @@ export function NewSessionDialog({
   const [projectId, setProjectId] = useState<string | null>(null);
   const [runtime, setRuntime] = useState<RuntimeId>("claude-code");
   const [model, setModel] = useState("default");
+  const [effort, setEffort] = useState("default");
   const [mode, setMode] = useState<PermissionMode>("default");
   const [worktree, setWorktree] = useState(false);
   const [prompt, setPrompt] = useState("");
@@ -68,6 +78,55 @@ export function NewSessionDialog({
   const device = devices.data?.find((d) => d.id === project?.deviceId) ?? null;
   const runtimeInfo = (id: RuntimeId) => device?.runtimes.find((r) => r.id === id);
 
+  // Everything below the runtime comes from the device's reported catalog as the API filtered it for the caller
+  // (D-08, WZC-03): models, efforts and modes, with the reason for each refused mode.
+  const controls = useRuntimeControls(device?.id, runtime);
+  const rc = controls.data && controls.data.runtime === runtime ? controls.data : undefined;
+  const catalogModels = useMemo(
+    () =>
+      (rc?.models ?? [])
+        .filter((m) => m.available && isShown(m))
+        .sort((a, b) => Number(a.legacy) - Number(b.legacy)),
+    [rc],
+  );
+  const chosenModel = catalogModels.find((m) => m.id === model) ?? catalogModels.find((m) => m.isDefault);
+  const efforts = (model === "default" ? [] : (chosenModel?.efforts ?? [])).filter(
+    (e) => e.available && isShown(e),
+  );
+  const modeOptions = useMemo(() => {
+    const ctx = { runtime, modes: rc?.permissionModes ?? [] };
+    return PERMISSION_MODES.flatMap((meta) => {
+      if (!rc) return LEGACY_MODES.includes(meta.value) ? [{ meta, available: true, reason: null }] : [];
+      const option = rc.permissionModes.find((m) => m.value === meta.value);
+      if (!option || !isShown(option)) return [];
+      if (option.available && meta.value === "auto" && chosenModel && !chosenModel.supportsAutoMode)
+        return [{ meta, available: false, reason: `${chosenModel.displayName} does not support Auto` }];
+      return [
+        {
+          meta,
+          available: option.available,
+          reason: option.available ? null : controlReasonText(option, ctx),
+        },
+      ];
+    });
+  }, [rc, runtime, chosenModel]);
+
+  // A choice the new device / runtime / model does not offer falls back to its default.
+  useEffect(() => {
+    if (!rc) return;
+    if (model !== "default" && !catalogModels.some((m) => m.id === model)) setModel("default");
+  }, [rc, model, catalogModels]);
+  useEffect(() => {
+    if (effort !== "default" && !efforts.some((e) => e.value === effort)) setEffort("default");
+  }, [effort, efforts]);
+  useEffect(() => {
+    if (modeOptions.length === 0 || modeOptions.some((o) => o.meta.value === mode && o.available)) return;
+    const fallback =
+      modeOptions.find((o) => o.meta.value === "default" && o.available) ??
+      modeOptions.find((o) => o.available);
+    if (fallback) setMode(fallback.meta.value);
+  }, [modeOptions, mode]);
+
   useEffect(() => {
     // Prefer a runtime that is ready on the chosen device.
     const ready = (id: RuntimeId) => {
@@ -79,6 +138,7 @@ export function NewSessionDialog({
       if (alt) {
         setRuntime(alt);
         setModel("default");
+        setEffort("default");
       }
     }
   }, [device, runtime]);
@@ -113,6 +173,7 @@ export function NewSessionDialog({
         permissionMode: mode,
         worktree,
         ...(model !== "default" ? { model } : {}),
+        ...(effort !== "default" ? { effort } : {}),
         ...(prompt.trim() ? { prompt: prompt.trim() } : {}),
       });
       onOpenChange(false);
@@ -226,6 +287,7 @@ export function NewSessionDialog({
                       onClick={() => {
                         setRuntime(id);
                         setModel("default");
+                        setEffort("default");
                       }}
                       className={cn(
                         "flex items-start gap-3 rounded-lg border p-3 text-left transition-[border-color,background-color,box-shadow] disabled:cursor-not-allowed disabled:opacity-55",
@@ -258,55 +320,108 @@ export function NewSessionDialog({
               </div>
             </section>
 
-            <div className="grid gap-5 sm:grid-cols-[1fr_auto]">
-              <section className="grid gap-2">
-                <Label>Permissions</Label>
-                <div
-                  className="grid grid-cols-3 gap-1 rounded-lg bg-muted p-1"
-                  role="radiogroup"
-                  aria-label="Permission mode"
-                >
-                  {PERMISSION_MODES.map((m) => (
-                    <button
-                      key={m.value}
-                      type="button"
-                      role="radio"
-                      aria-checked={mode === m.value}
-                      data-testid={`mode-${m.value}`}
-                      onClick={() => setMode(m.value)}
-                      className={cn(
-                        "h-8 rounded-md font-medium text-[13px] transition-colors",
-                        mode === m.value
-                          ? "bg-background text-foreground shadow-sm"
-                          : "text-muted-foreground hover:text-foreground",
-                      )}
-                    >
-                      {m.label}
-                    </button>
-                  ))}
-                </div>
-                <p className="text-muted-foreground text-xs">
-                  {PERMISSION_MODES.find((m) => m.value === mode)?.hint}
-                </p>
-              </section>
-              <section className="grid content-start gap-2 sm:w-44">
-                <Label>Model</Label>
+            <section className="grid gap-2">
+              <Label>Model</Label>
+              <div className="grid gap-2 sm:grid-cols-2">
                 <Select
-                  items={RUNTIMES[runtime].models}
+                  items={[
+                    { value: "default", label: "Default" },
+                    ...catalogModels.map((m) => ({ value: m.id, label: m.displayName })),
+                  ]}
                   value={model}
-                  onValueChange={(v) => setModel(v ?? "default")}
+                  onValueChange={(v) => {
+                    setModel(v ?? "default");
+                    setEffort("default");
+                  }}
                 >
-                  <SelectTrigger aria-label="Model" />
+                  <SelectTrigger aria-label="Model" data-testid="new-session-model" />
                   <SelectContent>
-                    {RUNTIMES[runtime].models.map((m) => (
-                      <SelectItem key={m.value} value={m.value}>
-                        {m.label}
+                    <SelectItem value="default">Default</SelectItem>
+                    {catalogModels.map((m) => (
+                      <SelectItem key={m.id} value={m.id}>
+                        {m.displayName}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
-              </section>
-            </div>
+                {efforts.length > 0 ? (
+                  <Select
+                    items={[
+                      { value: "default", label: "Default" },
+                      ...efforts.map((e) => ({ value: e.value, label: EFFORT_LABELS[e.value] ?? e.value })),
+                    ]}
+                    value={effort}
+                    onValueChange={(v) => setEffort(v ?? "default")}
+                  >
+                    <SelectTrigger aria-label="Reasoning effort" data-testid="new-session-effort" />
+                    <SelectContent>
+                      <SelectItem value="default">Default</SelectItem>
+                      {efforts.map((e) => (
+                        <SelectItem key={e.value} value={e.value}>
+                          {EFFORT_LABELS[e.value] ?? e.value}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : null}
+              </div>
+              <p className="text-muted-foreground text-xs">
+                {device && controls.isSuccess && !rc?.catalog
+                  ? `${device.name} has not reported its ${RUNTIMES[runtime].label} models yet; the runtime picks its default.`
+                  : `Models ${RUNTIMES[runtime].label} reported on ${device?.name ?? "the device"}. Change them anytime from the composer.`}
+              </p>
+            </section>
+
+            <section className="grid gap-2">
+              <Label>Permissions</Label>
+              <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Permission mode">
+                {modeOptions.map(({ meta, available, reason }) => {
+                  const Icon = meta.icon;
+                  const selected = mode === meta.value;
+                  return (
+                    <button
+                      key={meta.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={selected}
+                      data-testid={`mode-${meta.value}`}
+                      disabled={!available}
+                      onClick={() => setMode(meta.value)}
+                      className={cn(
+                        "flex items-start gap-2.5 rounded-lg border p-2.5 text-left transition-[border-color,background-color,box-shadow] disabled:cursor-not-allowed",
+                        selected
+                          ? "border-primary/60 bg-primary/5 ring-[3px] ring-primary/15"
+                          : "hover:border-foreground/20 hover:bg-accent/40 disabled:hover:border-border disabled:hover:bg-transparent",
+                      )}
+                    >
+                      <Icon
+                        className={cn(
+                          "mt-0.5 size-4 shrink-0",
+                          !available
+                            ? "text-muted-foreground/60"
+                            : meta.tone === "warning"
+                              ? "text-amber-600 dark:text-amber-400"
+                              : "text-foreground/80",
+                        )}
+                      />
+                      <span className="grid min-w-0 gap-0.5">
+                        <span
+                          className={cn("font-medium text-[13px]", !available && "text-muted-foreground")}
+                        >
+                          {meta.label}
+                        </span>
+                        <span className="text-muted-foreground text-xs leading-snug">{meta.hint}</span>
+                        {reason ? (
+                          <span className="text-amber-700 text-xs leading-snug dark:text-amber-300/90">
+                            {reason}
+                          </span>
+                        ) : null}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
 
             <div className="flex items-start justify-between gap-4 rounded-lg border p-3">
               <span className="grid gap-0.5">

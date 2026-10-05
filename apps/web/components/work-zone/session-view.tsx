@@ -12,6 +12,7 @@ import {
   Lock,
   MoreHorizontal,
   SearchX,
+  ShieldAlert,
   ShieldCheck,
 } from "lucide-react";
 import Link from "next/link";
@@ -333,9 +334,19 @@ function SessionHeader({
               <span className="truncate">{session.branch}</span>
             </span>
           ) : null}
-          <span className="inline-flex items-center gap-1">
-            <ShieldCheck className="size-3.5" /> {mode?.label ?? session.permissionMode}
-          </span>
+          {session.fullAccess ? (
+            // D-04: every controller sees that commands and edits run without prompts.
+            <span
+              data-testid="session-full-access"
+              className="inline-flex h-5 items-center gap-1 rounded-full bg-warning/15 px-1.5 font-medium text-amber-800 dark:text-amber-300"
+            >
+              <ShieldAlert className="size-3.5" /> Full access
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1">
+              <ShieldCheck className="size-3.5" /> {mode?.label ?? session.permissionMode}
+            </span>
+          )}
         </div>
         {session.lastError && (session.status === "failed" || session.status === "idle") ? (
           <p className="mt-1.5 line-clamp-2 text-destructive text-xs">{session.lastError}</p>
