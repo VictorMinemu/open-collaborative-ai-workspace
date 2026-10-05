@@ -78,6 +78,9 @@ services:
       # Web search for bots (D-09): DuckDuckGo is bundled in the cell; SearXNG needs the `search` profile.
       OCW_SEARXNG_URL: ${OCW_SEARXNG_URL:-}
       OCW_BUNDLED_PLUGINS: ${OCW_BUNDLED_PLUGINS:-}
+      # OpenClaw Marketplace (D-14): the ClawHub origin the API proxies and the cell downloads approved artifacts from.
+      # Keep it identical on api and openclaw (the cell refuses artifact URLs of any other origin).
+      OCW_CLAWHUB_URL: ${OCW_CLAWHUB_URL:-https://clawhub.ai}
       # Optional stdio MCP sandbox (profile `mcp-sandbox`, D-13): the sidecar URL as seen from the cell and the vetted
       # servers baked into its image (infra/mcp-sandbox/servers.json ids). Empty = admins can only add remote servers.
       OCW_MCP_SANDBOX_URL: ${OCW_MCP_SANDBOX_URL:-}
@@ -127,6 +130,7 @@ services:
       # Same meaning as on the api service: which bundled search plugins load, and the SearXNG URL.
       OCW_SEARXNG_URL: ${OCW_SEARXNG_URL:-}
       OCW_BUNDLED_PLUGINS: ${OCW_BUNDLED_PLUGINS:-}
+      OCW_CLAWHUB_URL: ${OCW_CLAWHUB_URL:-https://clawhub.ai}
     secrets:
       - ocw_cell_token
     volumes:
