@@ -2,9 +2,12 @@
 # Isolated e2e stack for executors. It never touches the owner's running demo: it uses its own database
 # (ocw_e2e) in the existing compose postgres, Redis logical DB 9, API 127.0.0.1:4290, web 127.0.0.1:3290
 # built into apps/web/.next-e2e, the fake model/MCP/ClawHub server (infra/fake-model) on 127.0.0.1:4291, and a
-# machine-wide lock so concurrent runs queue. CI does not use it.
+# machine-wide lock so concurrent runs queue. CI uses it only for the real-cell proof (.github/workflows/cell-proof.yml).
 #   bash scripts/e2e-isolated.sh [--keep-db] [--rebuild-web] [playwright args...]
 #   bash scripts/e2e-isolated.sh [--keep-db] --cmd "<shell command run against the stack>"
+# Optional env (scripts/cell-proof.sh): OCW_E2E_API_HOST (API bind address, default 127.0.0.1; 0.0.0.0 only where a
+# container must reach the API and the host is disposable, e.g. CI), OCW_E2E_CLAWHUB_URL (ClawHub the API proxies,
+# default the fake); OCW_BUNDLED_PLUGINS and OCW_MOCK_MODEL_BASE_URL are kept over .env when the caller sets them.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -61,7 +64,13 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # ---------------------------------------------------------------- environment (demo values → e2e values)
+# The caller's values of these win over .env (the real-cell proof sets them).
+caller_keep=()
+for v in OCW_BUNDLED_PLUGINS OCW_MOCK_MODEL_BASE_URL; do
+  if [ -n "${!v-}" ]; then caller_keep+=("$v=${!v}"); fi
+done
 set -a; . ./.env; set +a
+for kv in ${caller_keep[@]+"${caller_keep[@]}"}; do export "${kv?}"; done
 swap_path() { node -e 'const u=new URL(process.argv[1]); u.pathname="/"+process.argv[2]; process.stdout.write(u.toString())' "$1" "$2"; }
 E2E_DATABASE_URL="$(swap_path "$DATABASE_URL" "$E2E_DB")"
 E2E_AUTH_DATABASE_URL="$(swap_path "$AUTH_DATABASE_URL" "$E2E_DB")"
@@ -74,12 +83,12 @@ done
 export DATABASE_URL="$E2E_DATABASE_URL" AUTH_DATABASE_URL="$E2E_AUTH_DATABASE_URL" REDIS_URL="$E2E_REDIS_URL"
 export MIGRATE_SUPERUSER_URL="$E2E_SUPERUSER_URL" MIGRATOR_DATABASE_URL="$E2E_MIGRATOR_URL"
 export OCW_PUBLIC_API_URL="http://127.0.0.1:$API_PORT" OCW_PUBLIC_WEB_URL="http://127.0.0.1:$WEB_PORT"
-export OCW_TRUSTED_ORIGINS="" OCW_MODEL_PROVIDER=mock HOST=127.0.0.1 PORT="$API_PORT"
+export OCW_TRUSTED_ORIGINS="" OCW_MODEL_PROVIDER=mock HOST="${OCW_E2E_API_HOST:-127.0.0.1}" PORT="$API_PORT"
 # Every spec signs real browsers in from 127.0.0.1; production keeps the default (30/min).
 export OCW_SIGNIN_RATE_LIMIT_PER_MINUTE="${OCW_SIGNIN_RATE_LIMIT_PER_MINUTE:-600}"
 export OCW_E2E_BASE_URL="$OCW_PUBLIC_WEB_URL" OCW_E2E_API_URL="$OCW_PUBLIC_API_URL" OCW_API_URL="$OCW_PUBLIC_API_URL"
 # The marketplace and MCP specs: the API proxies the fake ClawHub; the simulated cell probes the fake MCP.
-export OCW_E2E_FAKE_URL="http://127.0.0.1:$FAKE_PORT" OCW_CLAWHUB_URL="http://127.0.0.1:$FAKE_PORT"
+export OCW_E2E_FAKE_URL="http://127.0.0.1:$FAKE_PORT" OCW_CLAWHUB_URL="${OCW_E2E_CLAWHUB_URL:-http://127.0.0.1:$FAKE_PORT}"
 export OCW_E2E_FAKE_MCP_TOKEN="e2e-mcp-token"
 
 for p in "$API_PORT" "$WEB_PORT" "$FAKE_PORT"; do
