@@ -209,15 +209,25 @@ Plans:
   3. A permission menu offers *Supervised* (ask before commands and edits), *Auto-accept edits*, *Auto* where the runtime supports it, and *Full access* — the real bypass mode of Claude Code and Codex (ADR-0012) — mapped onto the common `permissionMode` enum. Full access is offered only when org policy, the device owner's opt-in and the asker's grain all allow it (each off by default), is checked server-side on every turn, shows a persistent badge to every controller and is audited; slash commands typed in a prompt cannot raise the mode
   4. A documented inventory lists every option of Claude Code (Agent SDK) and Codex (app-server) at the pinned versions with its status: exposed, deferred or impossible, and why. Each exposed option is reachable from the same chat (menus or slash commands), and nothing in the UI claims an option the inventory has not confirmed
   5. A device owner marks a device (e.g. a server hosting the harnesses) as *shared* with chosen members or units, each with a maximum permission mode; those people start and control sessions on it without the owner accepting each session or action, revoking someone stops their sessions, and the device settings show whose runtime subscription is used (ADR-0012)
-  6. The composer matches the reference screenshots at 1440 and 390 in light and dark (side-by-side review recorded in the phase), every change made by one controller shows live to the others, and the single execution authority is unchanged
+  6. The whole session screen (sidebar, header, stream with turn summaries and changed-files card, agent-working bar, composer, worktree/branch footer — `reference/ref-4-layout.png`) and the composer menus match the reference screenshots at 1440 and 390 in light and dark (side-by-side review recorded in the phase), every change made by one controller shows live to the others, and the single execution authority is unchanged
 
-**Plans:** 0 plans
+**Plans:** 11 plans
 **Research:** needed (Agent SDK `setModel` / `setPermissionMode` / effort and thinking options and model listing at the pinned version; `codex app-server` per-turn model, effort, approval policy and sandbox overrides and `model/list`; plan mode, fast mode and context window support; how to cap modes by org policy; research for cross-provider switching and multi-agent sessions is in `.planning/research/` as input for later phases)
 **UI hint**: yes
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 03.2 to break down)
+- [ ] 03.2-01-PLAN.md — Wave 1: tracer — whole-phase contracts (settings, catalog, controls, policy, slash, inventory) and the only migration; a model change flows composer → API → `session.configure` → daemon → fake runtime → `session.settings` → second controller
+- [ ] 03.2-02-PLAN.md — Wave 2: Claude Code adapter — between-turn settings, every init forwarded, runtime catalog with context-window probe, per-turn cap, slash backstop; fixtures at 2.1.289
+- [ ] 03.2-03-PLAN.md — Wave 2: Codex adapter — per-turn overrides, Supervised = read-only + untrusted, `model/list` catalog, `thread/settings/updated`, `/compact`; fixtures at 0.160.0
+- [ ] 03.2-04-PLAN.md — Wave 2: Work Zone policy and server-side intersection (policy ∩ device opt-in ∩ cap ∩ grain ∩ catalog), per-turn mode audit, downgrades, unauthorized-bypass fail-closed
+- [ ] 03.2-05-PLAN.md — Wave 3: shared devices — grants per member/unit with max mode, no per-session acceptance, revocation stops sessions, "Runs on X's login"
+- [ ] 03.2-06-PLAN.md — Wave 3: Full access through ADR-0012 — device-local opt-in (desktop menu, CLI, env), daemon refusal, real bypass in both adapters only when authorized
+- [ ] 03.2-07-PLAN.md — Wave 3: slash commands routed through the settings path or refused; `POST /prompts` is no back door
+- [ ] 03.2-08-PLAN.md — Wave 3: Settings › Work Zone policy page
+- [ ] 03.2-09-PLAN.md — Wave 4: reference composer — model picker, reasoning and permission menus (ref-1..3), mobile sheets, catalog-driven New session dialog
+- [ ] 03.2-10-PLAN.md — Wave 5: session screen layout per ref-4 — sidebar rows, breadcrumb header + Full access badge, turn summaries, changes card, agent bar, footer strip
+- [ ] 03.2-11-PLAN.md — Wave 6: documented inventory with parity tests, ADR-0013, AGENTS.md/DEMO.md, side-by-side reference review, phase gate
 
 ### Phase 4: Chat
 
