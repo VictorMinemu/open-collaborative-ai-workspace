@@ -20,10 +20,21 @@ export { findBot, governanceList, notifyCellConfig, usageToday } from "./routes"
 export {
   cellAgentCapabilities,
   currentTurnTools,
+  recordLimitReached,
   type TurnDecision,
   turnNow,
   turnPolicy,
 } from "./turn-policy";
+export {
+  claimChannelNotice,
+  consumeTurn,
+  effectiveDailyLimit,
+  limitNotice,
+  nextResetAt,
+  turnsToday,
+  usageOf,
+  utcDay,
+} from "./usage";
 
 /**
  * bot-capabilities module (Phase 3.1, D-06 … D-08; BOT-04, BOT-05, BOT-10): the capability model of every

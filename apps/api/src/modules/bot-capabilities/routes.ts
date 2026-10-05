@@ -14,7 +14,7 @@ import {
   UpdateBotCapabilitiesRequest,
   UpdateBotPolicyRequest,
 } from "@ocw/contracts";
-import { agents, agentUsageDaily, orgMembers, type Tx, tenantOf } from "@ocw/db";
+import { agents, orgMembers, type Tx, tenantOf } from "@ocw/db";
 import { and, asc, eq, isNull } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { type App, authOf, type Core, tenant } from "../../core";
@@ -28,6 +28,7 @@ import {
 import { effectiveCapabilities, effectiveTools, readCapabilities } from "./capabilities";
 import { loadCatalog, loadGrants, replaceGrants } from "./catalog";
 import { internetConfigured, loadPolicy, savePolicy } from "./policy";
+import { effectiveDailyLimit, nextResetAt, turnsToday } from "./usage";
 
 type AgentRow = typeof agents.$inferSelect;
 
@@ -46,27 +47,21 @@ export async function findBot(tx: Tx, id: string): Promise<AgentRow | null> {
   return row ?? null;
 }
 
-export const utcDay = (d = new Date()) => d.toISOString().slice(0, 10);
-
-function nextUtcMidnight(d = new Date()): string {
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1)).toISOString();
-}
-
-/** Turns delivered today (UTC) per bot (D-11). */
+/** Turns delivered today (UTC) per bot (D-11); the counter itself lives in usage.ts. */
 export async function usageToday(tx: Tx, agentId?: string): Promise<Map<string, number>> {
-  const rows = await tx
-    .select({ agentId: agentUsageDaily.agentId, turns: agentUsageDaily.turns })
-    .from(agentUsageDaily)
-    .where(
-      and(eq(agentUsageDaily.day, utcDay()), ...(agentId ? [eq(agentUsageDaily.agentId, agentId)] : [])),
-    );
-  return new Map(rows.map((r) => [r.agentId, r.turns]));
+  return turnsToday(tx, agentId ? [agentId] : undefined);
 }
 
-const usageOf = (today: number, caps: BotCapabilities): BotUsage => ({
+/** Today's turns against the limit that applies today (the same one delivery meters with). */
+const usageView = (
+  today: number,
+  row: Pick<AgentRow, "scope">,
+  caps: BotCapabilities,
+  policy: Pick<BotPolicy, "personalDailyLimitMax">,
+): BotUsage => ({
   today,
-  limit: caps.dailyLimit,
-  resetsAt: nextUtcMidnight(),
+  limit: effectiveDailyLimit(row.scope, caps, policy),
+  resetsAt: nextResetAt(),
 });
 
 /**
@@ -81,6 +76,7 @@ export async function governanceList(tx: Tx): Promise<BotGovernanceEntry[]> {
     .where(and(eq(agents.scope, "personal"), isNull(agents.deletedAt)))
     .orderBy(asc(agents.name), asc(agents.createdAt));
   const usage = await usageToday(tx);
+  const policy = await loadPolicy(tx);
   return rows.map(({ agent: a, ownerName }) => {
     const caps = readCapabilities(a);
     return {
@@ -92,7 +88,7 @@ export async function governanceList(tx: Tx): Promise<BotGovernanceEntry[]> {
       model: { provider: a.modelProvider, modelId: a.modelId },
       status: a.status,
       capabilities: caps,
-      usage: usageOf(usage.get(a.id) ?? 0, caps),
+      usage: usageView(usage.get(a.id) ?? 0, a, caps, policy),
       createdAt: new Date(a.createdAt).toISOString(),
     };
   });
@@ -174,7 +170,7 @@ async function capabilityView(
       grants,
       humanToolAllowed: (tool) => toolAllowed.get(tool) ?? null,
     }),
-    usage: usageOf(usage.get(row.id) ?? 0, caps),
+    usage: usageView(usage.get(row.id) ?? 0, row, caps, policy),
     viewerCan: await perms.viewerCan(req, tx, resource, VIEWER_CANDIDATES),
   };
 }
