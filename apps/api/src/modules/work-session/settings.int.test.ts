@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { RuntimeCatalog, RuntimeModel } from "@ocw/contracts";
+import { isExposed, type RuntimeCatalog, type RuntimeModel } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
@@ -209,7 +209,9 @@ describe("session controls (D-07, D-08, D-14)", () => {
     expect(body.models[0]!.fastMode).toMatchObject({ available: false, reason: "org_policy" });
     const modes = Object.fromEntries(body.permissionModes.map((m) => [m.value, m]));
     expect(modes.default).toMatchObject({ available: true });
-    expect(modes.auto).toMatchObject({ available: true });
+    // Auto awaits its fixture in the inventory (Plans 02/03 flip it): available exactly when it is exposed.
+    expect(modes.auto!.available).toBe(isExposed("claude-code", "mode.auto"));
+    if (!modes.auto!.available) expect(modes.auto!.reason).toBe("not_confirmed");
     expect(modes.fullAccess).toMatchObject({ available: false, reason: "org_policy" });
     expect(body.settings.pending).toBe(false);
   });
@@ -286,11 +288,8 @@ describe("session controls (D-07, D-08, D-14)", () => {
   });
 
   it("a model switch drops an effort the new model does not offer (adjusted)", async () => {
-    const eff = await admin.request("PATCH", `/api/v1/work-sessions/${sessionId}/settings`, {
-      effort: "xhigh",
-    });
-    expect(eff.status, JSON.stringify(eff.body)).toBe(200);
-    device.ack((await device.command("session.configure", sessionId)).id);
+    // Claude effort awaits its fixture in the inventory (Plan 02): store the requested effort directly.
+    await su.query(`update app.work_sessions set settings = '{"effort":"xhigh"}' where id = $1`, [sessionId]);
     const res = await admin.request("PATCH", `/api/v1/work-sessions/${sessionId}/settings`, {
       model: "haiku",
     });
@@ -396,6 +395,218 @@ describe("session controls (D-07, D-08, D-14)", () => {
   });
 });
 
+describe("Full access and device caps (Plan 04 Task 2: policy ∩ opt-in ∩ cap ∩ grain, D-02, D-04, P-06 … P-08)", () => {
+  let ownerSession: string;
+  let orgId: string;
+  let adminId: string;
+  let samId: string;
+  let rexId: string;
+  let sam: TestClient;
+  let rex: TestClient;
+  const FULL_CLAUDE: RuntimeCatalog = {
+    ...CLAUDE,
+    permissionModes: ["default", "acceptEdits", "plan", "auto", "fullAccess"],
+  };
+  const FULL_CODEX: RuntimeCatalog = {
+    ...CODEX,
+    permissionModes: ["default", "acceptEdits", "plan", "fullAccess"],
+  };
+  const userId = async (email: string) =>
+    (await su.query("select id from auth.user where email = $1", [email])).rows[0].id as string;
+  const report = async (optIn: boolean) => {
+    device.capabilities([FULL_CLAUDE, FULL_CODEX], optIn);
+    await eventually(async () => {
+      const r = await su.query("select full_access_opt_in, runtime_catalog from app.devices where id = $1", [
+        deviceId,
+      ]);
+      const modes = (r.rows[0].runtime_catalog as RuntimeCatalog[])[0]?.permissionModes ?? [];
+      return r.rows[0].full_access_opt_in === optIn && modes.includes("fullAccess");
+    });
+  };
+  const patch = (as: TestClient, id: string, body: Record<string, unknown>) =>
+    as.request("PATCH", `/api/v1/work-sessions/${id}/settings`, body);
+  const lastDenial = async () =>
+    (
+      await su.query(
+        "select metadata from app.audit_events where action = 'authz.denied' and metadata->>'permission' = 'work_session.configure' order by occurred_at desc limit 1",
+      )
+    ).rows[0]?.metadata as Record<string, unknown> | undefined;
+  const grant = (principalId: string, maxMode: string, revoked = false) =>
+    su.query(
+      `insert into app.device_grants (organization_id, device_id, principal_kind, principal_id, max_mode, revoked_at)
+       values ($1, $2, 'user', $3, $4, ${revoked ? "now()" : "null"})
+       on conflict (device_id, principal_kind, principal_id) do update set max_mode = excluded.max_mode, revoked_at = excluded.revoked_at`,
+      [orgId, deviceId, principalId, maxMode],
+    );
+
+  beforeAll(async () => {
+    orgId = (await su.query("select organization_id from app.devices where id = $1", [deviceId])).rows[0]
+      .organization_id as string;
+    adminId = await userId(ADMIN.email);
+    sam = await invite("sam@example.test", "Sam", "developer");
+    rex = await invite("rex@example.test", "Rex", "developer");
+    samId = await userId("sam@example.test");
+    rexId = await userId("rex@example.test");
+    const put = await admin.request("PUT", "/api/v1/work-zone-policy", { allowFullAccess: true });
+    expect(put.status, JSON.stringify(put.body)).toBe(200);
+    await report(true);
+    ({ id: ownerSession } = await newSession({ title: "Full access" }));
+  });
+
+  it("the owner enters Full access (audited) and leaves it (audited)", async () => {
+    const res = await patch(admin, ownerSession, { permissionMode: "fullAccess" });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect((res.body as unknown as SessionDto).fullAccess).toBe(true);
+    const cmd = await device.command("session.configure", ownerSession);
+    expect(cmd.payload).toEqual({ settings: { permissionMode: "fullAccess" }, reason: "user" });
+    device.ack(cmd.id);
+    const actions = async () =>
+      (
+        await su.query(
+          "select action, metadata, device_id from app.audit_events where session_id = $1 and action like 'work_session.%' order by occurred_at",
+          [ownerSession],
+        )
+      ).rows as Array<{ action: string; metadata: Record<string, unknown>; device_id: string }>;
+    let rows = await actions();
+    expect(rows.map((r) => r.action)).toEqual(
+      expect.arrayContaining(["work_session.settings_changed", "work_session.full_access_entered"]),
+    );
+    const entered = rows.find((r) => r.action === "work_session.full_access_entered")!;
+    expect(entered.metadata).toMatchObject({ from: "default", to: "fullAccess" });
+    expect(entered.device_id).toBe(deviceId);
+
+    const back = await patch(admin, ownerSession, { permissionMode: "acceptEdits" });
+    expect(back.status, JSON.stringify(back.body)).toBe(200);
+    device.ack((await device.command("session.configure", ownerSession)).id);
+    rows = await actions();
+    expect(rows.find((r) => r.action === "work_session.full_access_left")?.metadata).toMatchObject({
+      from: "fullAccess",
+      to: "acceptEdits",
+    });
+  });
+
+  it("with the device opt-in off, Full access is refused at the device layer", async () => {
+    await report(false);
+    const res = await patch(admin, ownerSession, { permissionMode: "fullAccess" });
+    expect([res.status, errorCode(res)]).toEqual([403, "device_opt_in"]);
+    expect(await lastDenial()).toMatchObject({ reason: "device_opt_in", layer: "device" });
+    await report(true);
+  });
+
+  it("an unlisted developer gets the controller floor: acceptEdits yes, auto no", async () => {
+    const ok = await patch(alex, ownerSession, { permissionMode: "default" });
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200);
+    device.ack((await device.command("session.configure", ownerSession)).id);
+    const up = await patch(alex, ownerSession, { permissionMode: "acceptEdits" });
+    expect(up.status, JSON.stringify(up.body)).toBe(200);
+    device.ack((await device.command("session.configure", ownerSession)).id);
+    const auto = await patch(alex, ownerSession, { permissionMode: "auto" });
+    expect([auto.status, errorCode(auto)]).toEqual([403, "device_grant"]);
+    const full = await patch(alex, ownerSession, { permissionMode: "fullAccess" });
+    expect([full.status, errorCode(full)]).toEqual([403, "device_grant"]);
+  });
+
+  it("a grant below the floor lowers the floor for unlisted members (no inversion)", async () => {
+    await patch(admin, ownerSession, { permissionMode: "default" });
+    device.ack((await device.command("session.configure", ownerSession)).id);
+    await grant(samId, "default");
+    const res = await patch(alex, ownerSession, { permissionMode: "acceptEdits" });
+    expect([res.status, errorCode(res)]).toEqual([403, "device_grant"]);
+    // The grantee capped at default cannot go above it either.
+    const samUp = await patch(sam, ownerSession, { permissionMode: "acceptEdits" });
+    expect([samUp.status, errorCode(samUp)]).toEqual([403, "device_grant"]);
+    const samPlan = await patch(sam, ownerSession, { permissionMode: "plan" });
+    expect(samPlan.status, JSON.stringify(samPlan.body)).toBe(200);
+    device.ack((await device.command("session.configure", ownerSession)).id);
+  });
+
+  it("a principal whose grant was revoked gets nothing in others' sessions, not even the floor", async () => {
+    await grant(rexId, "acceptEdits", true);
+    const res = await patch(rex, ownerSession, { permissionMode: "default" });
+    expect([res.status, errorCode(res)]).toEqual([403, "device_grant"]);
+    // An active grant wins over the revoked row.
+    await grant(rexId, "default");
+    const ok = await patch(rex, ownerSession, { permissionMode: "default" });
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200);
+    device.ack((await device.command("session.configure", ownerSession)).id);
+  });
+
+  it("POST /work-sessions in Full access follows the same rules", async () => {
+    const ok = await admin.request("POST", "/api/v1/work-sessions", {
+      projectId,
+      title: "Born full",
+      permissionMode: "fullAccess",
+    });
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200);
+    const start = await device.command("session.start", ok.body!.id as string);
+    expect(start.payload).toMatchObject({ permissionMode: "fullAccess" });
+    device.ack(start.id);
+    // Sam holds a current grant (default): he may start sessions on the device, but never in Full access.
+    const samFull = await sam.request("POST", "/api/v1/work-sessions", {
+      projectId,
+      permissionMode: "fullAccess",
+    });
+    expect([samFull.status, errorCode(samFull)]).toEqual([403, "device_grant"]);
+    await report(false);
+    const off = await admin.request("POST", "/api/v1/work-sessions", {
+      projectId,
+      permissionMode: "fullAccess",
+    });
+    expect([off.status, errorCode(off)]).toEqual([403, "device_opt_in"]);
+    await report(true);
+  });
+
+  it("GET /work-zone/controls answers for a usable device and refuses others", async () => {
+    const res = await admin.request("GET", `/api/v1/work-zone/controls?deviceId=${deviceId}&runtime=codex`);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const body = res.body as {
+      runtime: string;
+      models: Array<{ id: string }>;
+      permissionModes: Array<{ value: string; available: boolean }>;
+    };
+    expect(body.runtime).toBe("codex");
+    expect(body.models.map((m) => m.id)).toEqual(["gpt-6.1-sol"]);
+    expect(body.permissionModes.find((m) => m.value === "fullAccess")?.available).toBe(true);
+    // Sam (grant: default) sees fullAccess as above his cap.
+    const samView = await sam.request("GET", `/api/v1/work-zone/controls?deviceId=${deviceId}&runtime=codex`);
+    expect(samView.status).toBe(200);
+    expect((samView.body as typeof body).permissionModes.find((m) => m.value === "fullAccess")).toMatchObject(
+      { available: false, reason: "device_grant" },
+    );
+    // Alex has no relation to the device: no controls for a new session on it.
+    const denied = await alex.request("GET", `/api/v1/work-zone/controls?deviceId=${deviceId}&runtime=codex`);
+    expect([denied.status, errorCode(denied)]).toEqual([403, "device_not_shared"]);
+    expect(
+      (await admin.request("GET", `/api/v1/work-zone/controls?deviceId=${randomUUID()}&runtime=codex`))
+        .status,
+    ).toBe(404);
+  });
+
+  it("a deny rule on device.full_access makes Full access denied_for_you, even for the owner", async () => {
+    const rule = await admin.request("POST", "/api/v1/permission-rules", {
+      subjectKind: "user",
+      subjectId: adminId,
+      permission: "device.full_access",
+      effect: "deny",
+    });
+    expect(rule.status, JSON.stringify(rule.body)).toBe(200);
+    const c = await admin.request("GET", `/api/v1/work-sessions/${ownerSession}/controls`);
+    const modes = (
+      c.body as { permissionModes: Array<{ value: string; available: boolean; reason: string }> }
+    ).permissionModes;
+    expect(modes.find((m) => m.value === "fullAccess")).toMatchObject({
+      available: false,
+      reason: "denied_for_you",
+    });
+    const res = await patch(admin, ownerSession, { permissionMode: "fullAccess" });
+    expect([res.status, errorCode(res)]).toEqual([403, "denied_for_you"]);
+    expect(await lastDenial()).toMatchObject({ reason: "denied_for_you", layer: "user" });
+    expect(
+      (await admin.request("DELETE", `/api/v1/permission-rules/${rule.body!.id as string}`)).status,
+    ).toBe(200);
+  });
+});
+
 describe("tenant isolation (Task 2)", () => {
   it("another organization's session controls, settings, device frames and events are refused", async () => {
     const orgB = randomUUID();
@@ -465,7 +676,7 @@ describe("tenant isolation (Task 2)", () => {
 
   it("every device, project and Work Zone answer went through the resolver", () => {
     const undecided = stack.built.authz.undecided.filter((u) =>
-      /^\/api\/v1\/(devices|projects|work-sessions)/.test(u.url),
+      /^\/api\/v1\/(devices|projects|work-sessions|work-zone)/.test(u.url),
     );
     expect(undecided).toEqual([]);
   });

@@ -309,6 +309,78 @@ describe("relation grants", () => {
     });
   });
 
+  describe("device caps and the Full access grain (Phase 03.2, P-06)", () => {
+    const dev = (cap: Parameters<typeof deviceResource>[0]["cap"], owner = "other", revoked = false) =>
+      deviceResource({ ownerUserId: owner, shared: false, revoked, cap }, "u-1");
+
+    it("the owner holds device.full_access", () => {
+      expect(allowed(user("developer"), dev("fullAccess", "u-1"), "device.full_access")).toBe(true);
+      expect(allowed(user("developer"), ownDevice, "device.full_access")).toBe(true);
+    });
+
+    it("a grantee capped at acceptEdits uses the device but has no Full access", () => {
+      const r = dev("acceptEdits");
+      expect(r.relations.has("grantee")).toBe(true);
+      expect(r.relations.has("full_access_grantee")).toBe(false);
+      expect(allowed(user("developer"), r, "device.use")).toBe(true);
+      expect(allowed(user("developer"), r, "device.full_access")).toBe(false);
+    });
+
+    it("a grantee capped at fullAccess holds both", () => {
+      const r = dev("fullAccess");
+      expect(r.relations.has("full_access_grantee")).toBe(true);
+      expect(allowed(user("developer"), r, "device.use")).toBe(true);
+      expect(allowed(user("developer"), r, "device.full_access")).toBe(true);
+    });
+
+    it("a deny rule on device.full_access removes it at the user layer; device.use stays", () => {
+      const deny = rule({
+        permission: "device.full_access",
+        effect: "deny",
+        subjectKind: "user",
+        subjectId: "u-1",
+      });
+      const r = dev("fullAccess");
+      expect(decide(user("developer"), r, [deny], "device.full_access").denial).toMatchObject({
+        layer: "user",
+        reason: "denied_by_rule",
+      });
+      expect(allowed(user("developer"), r, "device.use", [deny])).toBe(true);
+      expect(decide(user("developer"), dev("fullAccess", "u-1"), [deny], "device.full_access").allowed).toBe(
+        false,
+      );
+    });
+
+    it("a standard member never gets device.use or device.full_access (no Work Zone surface)", () => {
+      for (const r of [dev("fullAccess"), dev("fullAccess", "u-1")]) {
+        expect(allowed(user("standard"), r, "device.use")).toBe(false);
+        expect(allowed(user("standard"), r, "device.full_access")).toBe(false);
+      }
+    });
+
+    it("no cap: neither relation; work_session.configure is denied on a revoked device", () => {
+      const none = dev(null);
+      expect(none.relations.size).toBe(0);
+      expect(decide(user("developer"), none, [], "device.use").denial).toMatchObject({
+        reason: "device_not_shared",
+      });
+      const session = workSessionResource(
+        { createdBy: "u-1", deviceOwnerUserId: "u-1", deviceRevoked: true },
+        "u-1",
+      );
+      expect(decide(user("admin"), session, [], "work_session.configure").denial).toMatchObject({
+        layer: "device",
+        reason: "device_revoked",
+      });
+    });
+
+    it("without a cap the legacy behaviour is unchanged (shared → grantee)", () => {
+      const legacy = deviceResource({ ownerUserId: "other", shared: true, revoked: false }, "u-1");
+      expect([...legacy.relations]).toEqual(["grantee"]);
+      expect(allowed(user("developer"), legacy, "device.full_access")).toBe(false);
+    });
+  });
+
   it("a lead revokes their own invitation; a developer inviter cannot", () => {
     const own = invitationResource({ inviterId: "u-1", role: "developer" }, "u-1");
     expect(allowed(user("lead"), own, "invitation.revoke")).toBe(true);
@@ -669,7 +741,16 @@ describe("personal bots (D-01) and direct conversations (D-03)", () => {
 // ---------------------------------------------------------------- properties (fast-check)
 
 const UNITS = ["u0", "u1", "u2", "u3", "u4", "u5"] as const;
-const RELATIONS: Relation[] = ["self", "owner", "member", "creator", "device_owner", "grantee", "inviter"];
+const RELATIONS: Relation[] = [
+  "self",
+  "owner",
+  "member",
+  "creator",
+  "device_owner",
+  "grantee",
+  "full_access_grantee",
+  "inviter",
+];
 const STATES: ResourceState[] = [
   "private",
   "archived",
