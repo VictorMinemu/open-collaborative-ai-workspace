@@ -123,8 +123,8 @@ export const CODEX_CONTROLS: readonly RuntimeControlRow[] = [
     "Full access (danger-full-access + never)",
     "exposed",
     "mode.fullAccess",
-    "ADR-0012 path: org policy ∩ device opt-in ∩ grain; adapters report it only on opted-in devices (Plan 06)",
-    "sandboxPolicy dangerFullAccess + approvalPolicy never: v2/SandboxPolicy.ts; ADR-0012",
+    "ADR-0012 path: org policy ∩ device opt-in ∩ grain (server) and the daemon's own opt-in check (device); offered only on opted-in devices",
+    "Adapter path: codexModePolicy('fullAccess') → approvalPolicy never + sandboxPolicy dangerFullAccess per turn/start (thread/start danger-full-access), unrestricted readback outside a fullAccess turn aborts it; v2/SandboxPolicy.ts; real-turn check manual-only (03.2-VALIDATION.md)",
   ),
   row(
     "Permission profiles",

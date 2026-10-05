@@ -2,14 +2,15 @@
 //
 // Security / billing invariants:
 // - sandbox, approval policy and reviewer come from one table (`mode-policy.ts`, D-12): Supervised is a
-//   read-only sandbox with `untrusted` approvals; never `danger-full-access` or `never` (Plan 06 owns
-//   ADR-0012's path). The thread is aborted if Codex reports a full-access sandbox.
+//   read-only sandbox with `untrusted` approvals. `danger-full-access` + `never` only through ADR-0012's path:
+//   an authorized `fullAccess` thread or turn while the device's own opt-in (`allowFullAccess()`) is on, re-checked
+//   on every turn. A thread start that reports a full-access sandbox for any other mode is refused.
 // - settings (model, effort, fast tier, mode) are stable per-turn overrides on the next `turn/start`
 //   (D-07, D-14); every turn carries the policy of its own mode = min(session mode, the prompt's cap, P-07).
 //   `experimentalApi` stays false: no `thread/settings/update`, `collaborationMode` or `permissions`.
 // - slash commands never reach Codex as text (D-13): `/compact` runs the native `thread/compact/start`,
 //   everything else is refused with `slash_command_refused`. A readback reporting an unrestricted sandbox or
-//   the `never` policy aborts the running turn (no fullAccess turn is authorized here; Plan 06).
+//   the `never` policy aborts the running turn unless that turn is an authorized fullAccess turn (D-03).
 // - runs on the user's local Codex login (ChatGPT subscription); OPENAI_API_KEY / CODEX_API_KEY are
 //   stripped from the child environment unless `useApiKey` is set. OCW_* never reaches Codex.
 // - approval requests (commands, patches, extra permissions) are forwarded as approval.requested
@@ -168,18 +169,28 @@ function toInput(p: PromptPayload): UserInput[] {
 
 export class CodexRuntime implements AgentRuntime {
   readonly id = "codex" as const;
-  readonly capabilities: RuntimeCapabilities = {
-    supportsSteer: true,
-    supportsResume: true,
-    // Plan 06 adds fullAccess through ADR-0012's path only.
-    supportsPermissionModes: ["plan", "default", "acceptEdits", "auto"],
-    supportsImages: true,
-  };
+
+  get capabilities(): RuntimeCapabilities {
+    return {
+      supportsSteer: true,
+      supportsResume: true,
+      // fullAccess only while this device's opt-in is on (ADR-0012).
+      supportsPermissionModes: [
+        "plan",
+        "default",
+        "acceptEdits",
+        "auto",
+        ...(this.allowFullAccess() ? (["fullAccess"] as const) : []),
+      ],
+      supportsImages: true,
+    };
+  }
 
   private readonly sessions = new Map<string, Session>();
   private readonly log: Logger;
   private readonly codexPath: string | null;
   private readonly approvalTimeoutMs: number;
+  private readonly allowFullAccess: () => boolean;
   private catalogCache: { at: number; value: RuntimeCatalog } | null = null;
   private catalogInFlight: Promise<RuntimeCatalog | null> | null = null;
 
@@ -187,6 +198,7 @@ export class CodexRuntime implements AgentRuntime {
     this.log = opts.logger ?? silentLogger;
     this.codexPath = opts.codexPath ?? findExecutable("codex");
     this.approvalTimeoutMs = opts.approvalTimeoutMs ?? CODEX_APPROVAL_TIMEOUT_MS;
+    this.allowFullAccess = opts.allowFullAccess ?? (() => false);
   }
 
   detect(): Promise<RuntimeInfo> {
@@ -203,8 +215,14 @@ export class CodexRuntime implements AgentRuntime {
    * ChatGPT, or the call fails.
    */
   async catalog(): Promise<RuntimeCatalog | null> {
+    const value = await this.cachedOrCollect();
+    // The modes follow the device opt-in at the moment of asking, not when the catalog was collected.
+    return value && { ...value, permissionModes: [...this.capabilities.supportsPermissionModes] };
+  }
+
+  private cachedOrCollect(): Promise<RuntimeCatalog | null> {
     if (this.catalogCache && Date.now() - this.catalogCache.at < CODEX_CATALOG_TTL_MS)
-      return this.catalogCache.value;
+      return Promise.resolve(this.catalogCache.value);
     this.catalogInFlight ??= this.collectCatalog().finally(() => {
       this.catalogInFlight = null;
     });
@@ -257,7 +275,7 @@ export class CodexRuntime implements AgentRuntime {
     );
 
     // The session object is completed once the thread exists; handlers only run after that.
-    const startMode = mode.data as CodexPolicyMode;
+    const startMode: CodexPolicyMode = mode.data;
     const policy = codexModePolicy(startMode, options.cwd);
     const session = {
       id: options.sessionId,
@@ -329,7 +347,10 @@ export class CodexRuntime implements AgentRuntime {
             60_000,
           )
         : await session.peer.request<ThreadStartResponse>("thread/start", threadParams, 60_000);
-      if (isUnrestrictedCodexPolicy({ approvalPolicy: resp.approvalPolicy, sandboxPolicy: resp.sandbox })) {
+      if (
+        isUnrestrictedCodexPolicy({ approvalPolicy: resp.approvalPolicy, sandboxPolicy: resp.sandbox }) &&
+        !(startMode === "fullAccess" && this.allowFullAccess())
+      ) {
         throw new RuntimeError(
           "Codex reported an unrestricted sandbox/approval policy; session aborted",
           "permission_mode_rejected",
@@ -411,7 +432,7 @@ export class CodexRuntime implements AgentRuntime {
       }
       next.fastMode = false;
     }
-    if (patch.permissionMode !== undefined) next.permissionMode = patch.permissionMode as CodexPolicyMode;
+    if (patch.permissionMode !== undefined) next.permissionMode = patch.permissionMode;
     s.configured = next;
     s.pending = { ...(s.pending ?? {}), ...patch };
   }
@@ -528,8 +549,11 @@ export class CodexRuntime implements AgentRuntime {
     prompt: PromptPayload,
   ): { mode: CodexPolicyMode; params: Partial<TurnStartParams> } {
     const c = s.configured;
-    // P-07: the turn runs at most at the prompt's cap. fullAccess never reaches here (not in the capabilities).
-    const mode = minMode(c.permissionMode, prompt.permissionMode ?? c.permissionMode) as CodexPolicyMode;
+    // P-07: the turn runs at most at the prompt's cap. A fullAccess turn needs the device gate open right now.
+    const mode = minMode(c.permissionMode, prompt.permissionMode ?? c.permissionMode);
+    if (mode === "fullAccess" && !this.allowFullAccess()) {
+      throw new RuntimeError("Full access is not enabled on this device", "permission_mode_rejected");
+    }
     const policy = codexModePolicy(mode, s.cwd);
     return {
       mode,
@@ -605,10 +629,10 @@ export class CodexRuntime implements AgentRuntime {
     s.mapper.currentPromptId = prompt.promptId;
     this.emit(s, { type: "prompt.started", promptId: prompt.promptId });
     this.emit(s, { type: "session.state", status: "running" });
-    const { mode, params } = this.turnOverrides(s, prompt);
-    s.turnMode = mode;
-    s.pending = null;
     try {
+      const { mode, params } = this.turnOverrides(s, prompt);
+      s.turnMode = mode;
+      s.pending = null;
       const resp = await s.peer.request<TurnStartResponse>("turn/start", {
         threadId: s.threadId,
         input: toInput(prompt),
@@ -647,7 +671,7 @@ export class CodexRuntime implements AgentRuntime {
       if (ev.type === "session.settings") {
         const unrestricted = this.onSettingsReadback(s, n);
         this.emitSettings(s, ev);
-        if (unrestricted) this.abortUnrestricted(s);
+        if (unrestricted && !this.unrestrictedAuthorized(s)) this.abortUnrestricted(s);
         continue;
       }
       if (ev.type === "prompt.completed") {
@@ -662,10 +686,14 @@ export class CodexRuntime implements AgentRuntime {
     }
   }
 
+  /** The current turn (or, between turns, the session) is an authorized fullAccess one and the gate is open. */
+  private unrestrictedAuthorized(s: Session): boolean {
+    return (s.turnMode ?? s.configured.permissionMode) === "fullAccess" && this.allowFullAccess();
+  }
+
   /**
-   * D-03 groundwork: no turn is authorized to run unrestricted in this adapter (Plan 06 narrows this to "unless
-   * the turn is an authorized fullAccess turn"). The running turn is interrupted; the next turn/start sends the
-   * restricted policy again.
+   * D-03 (replaced, not deleted): an unrestricted report for a turn that is not an authorized fullAccess turn
+   * interrupts it; the next turn/start sends that turn's own policy again.
    */
   private abortUnrestricted(s: Session): void {
     this.emit(s, {
