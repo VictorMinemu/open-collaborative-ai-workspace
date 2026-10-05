@@ -37,6 +37,7 @@ import {
 import { authorOf, type Directory, loadDirectory } from "./directory";
 import { dmAgentOf, listDms } from "./dm";
 import { resolveMentions } from "./mentions";
+import { replyModeCandidates } from "./reply-mode";
 import {
   addMember,
   type ChannelRow,
@@ -66,6 +67,7 @@ import { registerChatTestRoutes } from "./test-routes";
 
 export { dmAgentOf, dmKey, ensureDm, listDms, setAgentDmsArchived } from "./dm";
 export { resolveMentions } from "./mentions";
+export { REPLY_MODE_PER_MINUTE, replyModeCandidates } from "./reply-mode";
 
 /** Conversation kinds served by the message routes, read markers, the `conv:` topic and bot replies (D-03). */
 const MESSAGE_KINDS = ["channel", "dm"] as const;
@@ -194,6 +196,42 @@ export function createChatModule(core: Core): ApiModule {
       body: result.row.body,
       createdAt: result.message.createdAt,
       delivery: "thread",
+    };
+    await core.chatAgent.emitAgentMention(tx, mention, tenantOf(tx).afterCommit);
+    return agentIds;
+  }
+
+  /**
+   * D-12: a human message that addressed no bot goes to the team bots of this conversation whose reply mode
+   * is `all`, in the message's thread (the message itself, or its root for a thread reply). One
+   * `emitAgentMention` with `trigger: "reply_mode"`; delivery decides the org policy, the per-minute cap and
+   * the daily limit. Runs inside the message transaction.
+   */
+  async function dispatchReplyMode(
+    tx: Tx,
+    dir: Directory,
+    conv: ConversationRow,
+    result: PostResult,
+    author: { id: string },
+  ): Promise<string[]> {
+    const agentIds = await replyModeCandidates(tx, dir, {
+      conversationId: conv.id,
+      parentConversationId: conv.parentConversationId,
+      authorKind: "user",
+      mentions: result.row.mentions,
+    });
+    if (agentIds.length === 0) return [];
+    const mention: AgentMention = {
+      organizationId: conv.organizationId,
+      conversationId: conv.id,
+      threadRootId: result.root?.id ?? result.row.id,
+      messageId: result.row.id,
+      agentIds,
+      author: { kind: "user", id: author.id, displayName: authorOf(dir, "user", author.id).displayName },
+      body: result.row.body,
+      createdAt: result.message.createdAt,
+      delivery: "thread",
+      trigger: "reply_mode",
     };
     await core.chatAgent.emitAgentMention(tx, mention, tenantOf(tx).afterCommit);
     return agentIds;
@@ -651,8 +689,11 @@ export function createChatModule(core: Core): ApiModule {
               sessionId: auth.sessionId,
             });
             if (result.created) {
-              if (conv.kind === "dm") await dispatchDmMessage(tx, dir, conv, result, { id: auth.userId });
-              else await dispatchAgentMentions(tx, dir, result, { id: auth.userId });
+              const author = { id: auth.userId };
+              if (conv.kind === "dm") await dispatchDmMessage(tx, dir, conv, result, author);
+              else if ((await dispatchAgentMentions(tx, dir, result, author)).length === 0) {
+                await dispatchReplyMode(tx, dir, conv, result, author);
+              }
             }
             return result.message;
           }),
