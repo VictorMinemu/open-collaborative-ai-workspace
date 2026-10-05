@@ -1,9 +1,9 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { RuntimeCatalog, RuntimeModel } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
-import { eventually, FakeDevice } from "../../testing-device";
+import { eventually, FakeDevice, sleep } from "../../testing-device";
 
 /**
  * Work Zone session controls (Phase 03.2, D-07, D-08, D-14, P-04 … P-08) against a real PostgreSQL + Redis and
@@ -366,5 +366,80 @@ describe("session controls (D-07, D-08, D-14)", () => {
     expect(
       (await admin.request("PATCH", `/api/v1/work-sessions/${id}/settings`, { model: "opus" })).status,
     ).toBe(404);
+  });
+});
+
+describe("tenant isolation (Task 2)", () => {
+  it("another organization's session controls, settings, device frames and events are refused", async () => {
+    const orgB = randomUUID();
+    const userB = randomUUID();
+    const devB = randomUUID();
+    const projB = randomUUID();
+    const convB = randomUUID();
+    const wsB = randomUUID();
+    const tokenB = `ocwd_${randomUUID()}`;
+    const q = (t: string, v: unknown[]) => su.query(t, v);
+    await q("insert into auth.organization (id, name, slug) values ($1, 'Other', $2)", [orgB, `o-${orgB}`]);
+    await q("insert into auth.user (id, name, email) values ($1, 'B', $2)", [userB, `${userB}@b.test`]);
+    await q(
+      "insert into app.devices (id, organization_id, owner_user_id, name, platform, token_hash, shared, status, runtime_info) values ($1, $2, $3, 'B mac', 'darwin', $4, true, 'online', '[]')",
+      [devB, orgB, userB, createHash("sha256").update(tokenB).digest("hex")],
+    );
+    await q(
+      "insert into app.projects (id, organization_id, device_id, local_id, name) values ($1, $2, $3, 'lb', 'secret')",
+      [projB, orgB, devB],
+    );
+    await q(
+      "insert into app.conversations (id, organization_id, kind, name) values ($1, $2, 'work_session', 'b')",
+      [convB, orgB],
+    );
+    await q(
+      "insert into app.work_sessions (id, organization_id, conversation_id, project_id, device_id, title, created_by, status) values ($1, $2, $3, $4, $5, 'B', $6, 'idle')",
+      [wsB, orgB, convB, projB, devB, userB],
+    );
+
+    // Org A's admin cannot read or change org B's session (404, nothing leaks).
+    expect((await admin.request("GET", `/api/v1/work-sessions/${wsB}/controls`)).status).toBe(404);
+    expect(
+      (await admin.request("PATCH", `/api/v1/work-sessions/${wsB}/settings`, { model: "opus" })).status,
+    ).toBe(404);
+    const untouched = await su.query("select model, settings_pending from app.work_sessions where id = $1", [
+      wsB,
+    ]);
+    expect(untouched.rows[0]).toEqual({ model: null, settings_pending: false });
+
+    // Org B's device reports a catalog and an opt-in: only its own row changes.
+    const before = await su.query(
+      "select runtime_catalog, full_access_opt_in from app.devices where id = $1",
+      [deviceId],
+    );
+    const intruder = await FakeDevice.connect(stack.baseUrl, tokenB);
+    intruder.capabilities([{ ...CODEX, models: [model("evil", "Evil")] }], true);
+    await eventually(async () => {
+      const r = await su.query("select full_access_opt_in from app.devices where id = $1", [devB]);
+      return r.rows[0].full_access_opt_in === true;
+    });
+    const after = await su.query(
+      "select runtime_catalog, full_access_opt_in from app.devices where id = $1",
+      [deviceId],
+    );
+    expect(after.rows[0]).toEqual(before.rows[0]);
+
+    // Org B's device cannot report settings for org A's session.
+    const { id: target } = await newSession({ title: "Tenant target" });
+    const effectiveBefore = (await detail(target)).session.settings.effective;
+    intruder.event(target, { type: "session.settings", model: "evil", permissionMode: "fullAccess" });
+    await sleep(400);
+    const s = (await detail(target)).session;
+    expect(s.settings.effective).toEqual(effectiveBefore);
+    expect(s.fullAccess).toBe(false);
+    await intruder.close();
+  });
+
+  it("every device, project and Work Zone answer went through the resolver", () => {
+    const undecided = stack.built.authz.undecided.filter((u) =>
+      /^\/api\/v1\/(devices|projects|work-sessions)/.test(u.url),
+    );
+    expect(undecided).toEqual([]);
   });
 });
