@@ -5,6 +5,7 @@ import {
   Check,
   ChevronRight,
   CircleAlert,
+  Copy,
   FilePen,
   FileText,
   Globe,
@@ -21,27 +22,37 @@ import {
 import { type ReactNode, useState } from "react";
 import { UserAvatar } from "@/components/ui/avatar";
 import { Spinner } from "@/components/ui/spinner";
+import { Tooltip } from "@/components/ui/tooltip";
+import { useCopy } from "@/hooks/use-copy";
 import type { LiveSession } from "@/lib/use-live-session";
 import { cn } from "@/lib/utils";
 import { Markdown } from "./markdown";
 import { RUNTIMES, RuntimeLogo } from "./meta";
+import { groupTurns, type Turn, TurnSummary } from "./turn-summary";
 
-type Item =
-  | { kind: "prompt"; key: string; prompt: WorkPrompt | undefined; pending?: boolean }
-  | { kind: "assistant"; key: string; text: string; streaming?: boolean }
+/** One rendered stream entry. `at` is the event time (absent for live text and prompts not started yet). */
+export type Item = { key: string; at?: string } & (
+  | { kind: "prompt"; prompt: WorkPrompt | undefined; promptId?: string; pending?: boolean }
+  | { kind: "assistant"; text: string; streaming?: boolean }
   | {
       kind: "tool";
-      key: string;
       name: string;
       summary: string;
       done: { ok: boolean; summary: string; output?: string | undefined } | null;
     }
-  | { kind: "approval"; key: string; approval: WorkApproval | undefined; tool: string; summary: string }
-  | { kind: "turn"; key: string; label: string; tone: "ok" | "warn" | "error" }
-  | { kind: "system"; key: string; text: string }
-  | { kind: "error"; key: string; message: string };
+  | { kind: "approval"; approval: WorkApproval | undefined; tool: string; summary: string }
+  | {
+      kind: "turn";
+      promptId: string;
+      label: string;
+      tone: "ok" | "warn" | "error";
+      tokens: string | null;
+    }
+  | { kind: "system"; text: string }
+  | { kind: "error"; message: string }
+);
 
-function buildItems(state: LiveSession): Item[] {
+export function buildItems(state: LiveSession): Item[] {
   const prompts = new Map(state.prompts.map((p) => [p.id, p]));
   const approvals = new Map(state.approvals.map((a) => [a.id, a]));
   const items: Item[] = [];
@@ -49,28 +60,30 @@ function buildItems(state: LiveSession): Item[] {
   const started = new Set<string>();
   const finals = new Set<string>();
 
-  for (const { seq, event: e } of state.events) {
+  for (const { seq, at, event: e } of state.events) {
     const key = `e${seq}`;
     switch (e.type) {
       case "session.started":
         items.push({
           kind: "system",
           key,
+          at,
           text: `Session started${e.runtimeVersion ? ` · ${e.runtimeVersion}` : ""}${e.model ? ` · ${e.model}` : ""}`,
         });
         break;
       case "prompt.started":
         started.add(e.promptId);
-        items.push({ kind: "prompt", key, prompt: prompts.get(e.promptId) });
+        items.push({ kind: "prompt", key, at, promptId: e.promptId, prompt: prompts.get(e.promptId) });
         break;
       case "assistant.message":
         finals.add(e.messageId);
-        if (e.text.trim()) items.push({ kind: "assistant", key, text: e.text });
+        if (e.text.trim()) items.push({ kind: "assistant", key, at, text: e.text });
         break;
       case "tool.started": {
         const t: Extract<Item, { kind: "tool" }> = {
           kind: "tool",
           key,
+          at,
           name: e.name,
           summary: e.summary,
           done: null,
@@ -83,13 +96,14 @@ function buildItems(state: LiveSession): Item[] {
         const t = tools.get(e.toolUseId);
         const done = { ok: e.ok, summary: e.summary, output: e.output };
         if (t) t.done = done;
-        else items.push({ kind: "tool", key, name: "Tool", summary: e.summary, done });
+        else items.push({ kind: "tool", key, at, name: "Tool", summary: e.summary, done });
         break;
       }
       case "approval.requested":
         items.push({
           kind: "approval",
           key,
+          at,
           approval: approvals.get(e.approvalId),
           tool: e.tool,
           summary: e.summary,
@@ -102,11 +116,19 @@ function buildItems(state: LiveSession): Item[] {
           : e.isError
             ? "Turn failed"
             : `Turn finished${tokens > 0 ? ` · ${formatTokens(tokens)} tokens` : ""}`;
-        items.push({ kind: "turn", key, label, tone: e.interrupted ? "warn" : e.isError ? "error" : "ok" });
+        items.push({
+          kind: "turn",
+          key,
+          at,
+          promptId: e.promptId,
+          label,
+          tone: e.interrupted ? "warn" : e.isError ? "error" : "ok",
+          tokens: tokens > 0 ? formatTokens(tokens) : null,
+        });
         break;
       }
       case "session.error":
-        items.push({ kind: "error", key, message: e.message });
+        items.push({ kind: "error", key, at, message: e.message });
         break;
       default:
         break;
@@ -146,16 +168,27 @@ function toolIcon(name: string) {
   return TOOL_ICONS.find(([re]) => re.test(name))?.[1] ?? Wrench;
 }
 
-export function EventStream({ state, session }: { state: LiveSession; session: WorkSession }) {
+export function EventStream({
+  state,
+  session,
+  changesCard,
+}: {
+  state: LiveSession;
+  session: WorkSession;
+  /** The "N changed files · Open diff" card, shown after the latest completed turn (ref-4). */
+  changesCard?: ReactNode;
+}) {
   const items = buildItems(state);
+  const turns = groupTurns(items, state.prompts);
   const busy = session.status === "running" || session.status === "provisioning";
   const lastIsStreaming =
     items.at(-1)?.kind === "assistant" && (items.at(-1) as { streaming?: boolean }).streaming;
+  const latestDone = turns.findLastIndex((t) => t.promptId !== null && t.done);
 
   return (
     <div
       data-testid="event-stream"
-      className="mx-auto grid w-full max-w-3xl grid-cols-[minmax(0,1fr)] gap-4 px-4 py-6 sm:px-6"
+      className="mx-auto grid w-full max-w-3xl grid-cols-[minmax(0,1fr)] gap-5 px-4 py-6 sm:px-6 sm:py-8"
     >
       {items.length === 0 && !busy ? (
         <div className="rounded-xl border border-dashed px-6 py-10 text-center">
@@ -166,11 +199,20 @@ export function EventStream({ state, session }: { state: LiveSession; session: W
           </p>
         </div>
       ) : null}
-      {items.map((item) => (
-        <StreamItem key={item.key} item={item} session={session} />
-      ))}
+      {turns.map((turn, i) =>
+        turn.promptId === null ? (
+          turn.items.map((item) => <StreamItem key={item.key} item={item} session={session} />)
+        ) : (
+          <TurnBlock
+            key={turn.prompt?.key ?? turn.promptId}
+            turn={turn}
+            session={session}
+            changesCard={i === latestDone ? changesCard : null}
+          />
+        ),
+      )}
       {busy && !lastIsStreaming ? (
-        <div className="flex items-center gap-2.5 pl-0.5 text-muted-foreground text-sm" data-testid="working">
+        <div className="flex items-center gap-2.5 text-muted-foreground text-sm" data-testid="working">
           <RuntimeLogo runtime={session.runtime} className="size-6 rounded-md" />
           <span className="animate-pulse">
             {session.status === "provisioning"
@@ -183,43 +225,174 @@ export function EventStream({ state, session }: { state: LiveSession; session: W
   );
 }
 
+/** A turn of ref-4: prompt bubble, then the work (collapsed once done), the final message and its footer. */
+function TurnBlock({
+  turn,
+  session,
+  changesCard,
+}: {
+  turn: Turn;
+  session: WorkSession;
+  changesCard: ReactNode;
+}) {
+  const work = (
+    <TurnItems items={turn.items.filter((i) => i.kind !== "error")} session={session} running={!turn.done} />
+  );
+  const errors = turn.items.filter((i) => i.kind === "error");
+  return (
+    <section
+      className="grid grid-cols-[minmax(0,1fr)] gap-4"
+      data-turn={turn.promptId}
+      data-turn-running={turn.done ? undefined : ""}
+    >
+      {turn.prompt ? <StreamItem item={turn.prompt} session={session} /> : null}
+      {turn.done ? (
+        <TurnSummary turn={turn} session={session}>
+          {work}
+        </TurnSummary>
+      ) : (
+        work
+      )}
+      {turn.done ? errors.map((item) => <StreamItem key={item.key} item={item} session={session} />) : null}
+      {turn.finalMessage ? <StreamItem item={turn.finalMessage} session={session} /> : null}
+      {changesCard}
+      {turn.finalMessage ? <MessageFooter item={turn.finalMessage} /> : null}
+    </section>
+  );
+}
+
+/** A turn's items with consecutive tool calls (and their approvals) grouped behind one row. */
+function TurnItems({ items, session, running }: { items: Item[]; session: WorkSession; running: boolean }) {
+  const out: ReactNode[] = [];
+  let run: Item[] = [];
+  const flush = () => {
+    const tools = run.filter((i) => i.kind === "tool").length;
+    if (run.length > 1 && tools > 1) {
+      out.push(
+        <ToolGroup
+          key={`g-${run[0]?.key}`}
+          items={run}
+          tools={tools}
+          defaultOpen={running}
+          session={session}
+        />,
+      );
+    } else {
+      for (const item of run) out.push(<StreamItem key={item.key} item={item} session={session} />);
+    }
+    run = [];
+  };
+  for (const item of items) {
+    if (item.kind === "tool" || item.kind === "approval") {
+      run.push(item);
+      continue;
+    }
+    flush();
+    out.push(<StreamItem key={item.key} item={item} session={session} />);
+  }
+  flush();
+  return <>{out}</>;
+}
+
+function ToolGroup({
+  items,
+  tools,
+  defaultOpen,
+  session,
+}: {
+  items: Item[];
+  tools: number;
+  defaultOpen: boolean;
+  session: WorkSession;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const approvals = items.length - tools;
+  const pending = items.some(
+    (i) => (i.kind === "tool" && !i.done) || (i.kind === "approval" && i.approval?.status === "pending"),
+  );
+  return (
+    <div data-testid="tool-group" className="grid grid-cols-[minmax(0,1fr)] gap-2">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-fit items-center gap-2 rounded-md py-0.5 text-[13.5px] text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40"
+      >
+        {pending ? <Spinner className="size-3.5" /> : <Wrench aria-hidden className="size-3.5" />}
+        <span>
+          {tools} tool calls
+          {approvals > 0 ? ` · ${approvals} approval${approvals === 1 ? "" : "s"}` : ""}
+        </span>
+        <ChevronRight aria-hidden className={cn("size-3.5 transition-transform", open && "rotate-90")} />
+      </button>
+      <div hidden={!open} className={cn("grid-cols-[minmax(0,1fr)] gap-2 pl-5", open ? "grid" : "hidden")}>
+        {items.map((item) => (
+          <StreamItem key={item.key} item={item} session={session} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const hhmm = (iso: string) =>
+  new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+
+/** Copy + time under a turn's final message (ref-4). */
+function MessageFooter({ item }: { item: Extract<Item, { kind: "assistant" }> }) {
+  const { copy, copied } = useCopy();
+  return (
+    <div className="-mt-1 flex items-center gap-2 text-[12.5px] text-muted-foreground">
+      <Tooltip content={copied ? "Copied" : "Copy message"}>
+        <button
+          type="button"
+          data-testid="copy-message"
+          aria-label="Copy message"
+          onClick={() => void copy(item.text)}
+          className="inline-flex size-7 items-center justify-center rounded-md transition-colors hover:bg-accent hover:text-foreground"
+        >
+          {copied ? <Check className="size-3.5 text-success" /> : <Copy className="size-3.5" />}
+        </button>
+      </Tooltip>
+      {item.at ? (
+        <time data-testid="message-time" dateTime={item.at} className="tabular-nums">
+          {hhmm(item.at)}
+        </time>
+      ) : null}
+    </div>
+  );
+}
+
 function StreamItem({ item, session }: { item: Item; session: WorkSession }) {
   switch (item.kind) {
     case "prompt": {
       const p = item.prompt;
       const name = p?.authorName ?? "Someone";
+      // Multiplayer attribution stays on every prompt (an intentional difference from ref-4).
       return (
-        <div className="flex gap-3" data-testid="prompt-bubble">
-          <UserAvatar name={name} seed={p?.authorUserId} className="mt-0.5 size-7" />
-          <div className="min-w-0 flex-1">
-            <p className="mb-1 flex items-center gap-2 text-muted-foreground text-xs">
-              <span className="font-medium text-foreground">{name}</span>
-              {p
-                ? new Date(p.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-                : null}
-              {item.pending ? (
-                <span className="inline-flex items-center gap-1">
-                  <Spinner className="size-3" /> sending to {session.deviceName}
-                </span>
-              ) : null}
-            </p>
-            <div className="whitespace-pre-wrap break-words rounded-2xl rounded-tl-md bg-muted px-3.5 py-2.5 text-[14px] leading-relaxed">
-              {p?.body ?? "…"}
-            </div>
+        <div className="flex flex-col items-end gap-1.5 pl-8 sm:pl-20" data-testid="prompt-bubble">
+          <p className="flex items-center gap-1.5 text-muted-foreground text-xs">
+            {item.pending ? (
+              <span className="inline-flex items-center gap-1">
+                <Spinner className="size-3" /> sending to {session.deviceName}
+              </span>
+            ) : null}
+            {p ? <span className="tabular-nums">{hhmm(p.createdAt)}</span> : null}
+            <span className="font-medium text-foreground">{name}</span>
+            <UserAvatar name={name} seed={p?.authorUserId} className="size-5 text-[9px]" />
+          </p>
+          <div className="max-w-full whitespace-pre-wrap break-words rounded-2xl bg-muted px-3.5 py-2.5 text-[14.5px] leading-relaxed">
+            {p?.body ?? "…"}
           </div>
         </div>
       );
     }
     case "assistant":
       return (
-        <div className="flex gap-3" data-testid="assistant-message">
-          <RuntimeLogo runtime={session.runtime} className="mt-0.5 size-7 rounded-lg" />
-          <div className="min-w-0 flex-1 pt-0.5">
-            <Markdown text={item.text} />
-            {item.streaming ? (
-              <span className="ml-0.5 inline-block h-4 w-1.5 translate-y-0.5 animate-pulse rounded-sm bg-primary/70" />
-            ) : null}
-          </div>
+        <div className="min-w-0 text-[14.5px]" data-testid="assistant-message">
+          <Markdown text={item.text} />
+          {item.streaming ? (
+            <span className="ml-0.5 inline-block h-4 w-1.5 translate-y-0.5 animate-pulse rounded-sm bg-primary/70" />
+          ) : null}
         </div>
       );
     case "tool":
@@ -267,7 +440,7 @@ function ToolCard({ item }: { item: Extract<Item, { kind: "tool" }> }) {
     <X className="size-3.5 text-destructive" />
   );
   return (
-    <div className="ml-10 overflow-hidden rounded-lg border bg-card" data-testid="tool-card">
+    <div className="overflow-hidden rounded-lg border bg-card" data-testid="tool-card">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -322,7 +495,7 @@ function ApprovalLine({ item }: { item: Extract<Item, { kind: "approval" }> }) {
       data-testid="approval-line"
       data-status={status}
       className={cn(
-        "ml-10 flex items-center gap-2 rounded-lg border px-3 py-2 text-[13px]",
+        "flex items-center gap-2 rounded-lg border px-3 py-2 text-[13px]",
         status === "pending" && "border-warning/40 bg-warning/8",
         status === "approved" && "border-success/30 bg-success/6",
         (status === "denied" || status === "expired") && "border-destructive/25 bg-destructive/6",
