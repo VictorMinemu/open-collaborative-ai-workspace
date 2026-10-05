@@ -21,7 +21,15 @@ import { and, desc, eq, inArray, isNull, ne, or } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
 import { agentDirectory } from "../agent";
-import { claimChannelNotice, recordLimitReached, turnPolicy } from "../bot-capabilities";
+import {
+  claimChannelNotice,
+  effectiveCapabilities,
+  loadPolicy,
+  readCapabilities,
+  recordLimitReached,
+  turnPolicy,
+} from "../bot-capabilities";
+import { REPLY_MODE_PER_MINUTE } from "../chat";
 import { createPermissionService, memberDirectory, type PermissionService } from "../organization";
 
 /** Bounded thread context per mention (A2.2). */
@@ -88,6 +96,9 @@ export async function buildMentionEvents(
     // A stable order keeps row locks (the daily usage counters) in the same order across transactions.
     .sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
   if (targets.length === 0) return [];
+  const replyMode = mention.trigger === "reply_mode";
+  const delivered = replyMode ? await replyModeGate(tx, deps.core, mention, conv, targets) : targets;
+  if (delivered.length === 0) return [];
 
   // ---- history (current message excluded), oldest first: the thread, or the whole DM (D-04, flat)
   const root = mention.threadRootId;
@@ -161,8 +172,9 @@ export async function buildMentionEvents(
     .select({ mentions: messages.mentions })
     .from(messages)
     .where(eq(messages.id, mention.messageId));
+  // A reply-mode turn carries the message's own mentions only: it never claims the bot was mentioned.
   const mentions: Mention[] =
-    stored && stored.mentions.length > 0
+    stored && (stored.mentions.length > 0 || replyMode)
       ? stored.mentions
       : agentIds.map((id) => ({ kind: "agent" as const, id }));
 
@@ -174,7 +186,7 @@ export async function buildMentionEvents(
   const conversationName = conv.kind === "thread" && parent ? parent.name : conv.name;
 
   const events: StoredMention[] = [];
-  for (const a of targets) {
+  for (const a of delivered) {
     // The event id first: the turn ledger row (`agent_turns`) is keyed by it.
     const eventId = randomUUID();
     const decision = await turnPolicy(tx, deps.core, deps.perms, {
@@ -184,6 +196,8 @@ export async function buildMentionEvents(
       conversationKind: conv.kind,
       messageId: mention.messageId,
       eventId,
+      // The asking human's zone (D-12); turnPolicy re-validates it and falls back to UTC.
+      clientTimeZone: mention.clientTimeZone ?? null,
     });
     // Not delivered (daily limit reached, or the bot is gone): no cell event, so no model call.
     if (!decision.deliver) {
@@ -213,6 +227,79 @@ export async function buildMentionEvents(
     });
   }
   return events;
+}
+
+/**
+ * Reply mode `all` (D-12) at delivery: keeps only the bots for which reply mode `all` is effective under the
+ * CURRENT org policy (T-03.1-08-03), then applies the per-minute cap per (bot, conversation) with a Redis
+ * counter per epoch minute (T-03.1-08-01). The first message over the cap is audited once per window
+ * (`agent.reply_rate_limited`, ids and numbers only); capped messages get no event and no notice, and are
+ * not metered against the daily limit. A Redis failure fails closed: no automatic reply, the post succeeds.
+ */
+async function replyModeGate<T extends typeof agents.$inferSelect>(
+  tx: Tx,
+  core: Core,
+  mention: AgentMention,
+  conv: { id: string; kind: string },
+  targets: T[],
+): Promise<T[]> {
+  const policy = await loadPolicy(tx);
+  const allowed = targets.filter(
+    (a) =>
+      effectiveCapabilities({
+        scope: a.scope,
+        caps: readCapabilities(a),
+        policy,
+        configured: { internet: true },
+        human: null,
+      }).replyModeAll.effective,
+  );
+  const { organizationId } = tenantOf(tx);
+  const minute = Math.floor(Date.now() / 60_000);
+  const out: T[] = [];
+  for (const a of allowed) {
+    let count: number;
+    try {
+      const key = `ocw:replycap:${organizationId}:${a.id}:${conv.id}:${minute}`;
+      count = await core.bus.pub.incr(key);
+      if (count === 1) await core.bus.pub.expire(key, 120);
+    } catch (err) {
+      core.log.warn(
+        {
+          agentId: a.id,
+          conversationId: conv.id,
+          messageId: mention.messageId,
+          code: err instanceof Error ? err.name : "unknown",
+        },
+        "reply-mode rate cap unavailable; automatic reply skipped",
+      );
+      continue;
+    }
+    if (count <= REPLY_MODE_PER_MINUTE) {
+      out.push(a);
+      continue;
+    }
+    if (count === REPLY_MODE_PER_MINUTE + 1) {
+      await core.audit.record(tx, {
+        action: "agent.reply_rate_limited",
+        resourceType: "agent",
+        resourceId: a.id,
+        result: "denied",
+        actorKind: "agent",
+        actorId: a.id,
+        agentId: a.id,
+        userId: mention.author.id,
+        metadata: {
+          limit: REPLY_MODE_PER_MINUTE,
+          conversationId: conv.id,
+          conversationKind: conv.kind,
+          messageId: mention.messageId,
+          windowStart: new Date(minute * 60_000).toISOString(),
+        },
+      });
+    }
+  }
+  return out;
 }
 
 /**

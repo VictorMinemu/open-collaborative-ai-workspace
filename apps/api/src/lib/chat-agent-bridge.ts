@@ -35,6 +35,17 @@ export interface AgentMention {
    * the bot (D-04: no mention needed, flat reply, history = the DM itself).
    */
   delivery: "thread" | "dm";
+  /**
+   * `mention` (default): the bot was addressed (an @mention, or the DM itself). `reply_mode`: nobody was
+   * addressed and the candidates are team bots with reply mode `all` (D-12); delivery re-decides the org
+   * policy and applies the per-minute cap before metering.
+   */
+  trigger?: "mention" | "reply_mode";
+  /**
+   * The asking human's IANA time zone as sent by their client (validated by the contract); used only for the
+   * turn's local date and time (D-12). Never stored on the message.
+   */
+  clientTimeZone?: string | null;
 }
 
 export interface ThreadContext {
