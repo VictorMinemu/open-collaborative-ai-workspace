@@ -176,3 +176,55 @@ describe("a tool call inside a prepared turn (non-activated registry, read exclu
     }
   });
 });
+
+describe("MCP tools inside a prepared turn (03.1-10): same gate, exact names, taint", () => {
+  let api: FakeAgentChannelApi;
+  const SAFE = "m5e0c0de1";
+  const READ = `${SAFE}__getFile`;
+  const WRITE = `${SAFE}__write_note`;
+  const MCP_TURN = {
+    tools: [READ, WRITE],
+    toolFlags: {
+      [READ]: { untrustedOutput: true, sideEffecting: false },
+      [WRITE]: { untrustedOutput: true, sideEffecting: true },
+    },
+    memory: [],
+    now: null,
+    maxToolCalls: 8,
+    maxWebCalls: 5,
+  };
+
+  beforeEach(async () => {
+    api = await startFakeAgentChannelApi({ agents: [], providers: [] });
+    loadRegistry(entry, manifest, { activate: true });
+    setToolGuardClient(createAgentChannelClient({ apiUrl: api.url, token: () => api.token }));
+  });
+
+  afterEach(async () => {
+    toolGuard.endTurn(SESSION);
+    setToolGuardClient(null);
+    await api.close();
+  });
+
+  const ctx = { sessionKey: SESSION, agentId: openClawAgentIdFor(BOT), runId: "run-mcp" };
+
+  it.each(["discovery", "full"] as const)(
+    "%s registry: the MCP read is asked with its exact name (the hook sees it lower-cased), the write after it is blocked",
+    async (mode) => {
+      toolGuard.beginTurn(SESSION, { eventId: `evt-mcp-${mode}`, agentId: BOT, turn: MCP_TURN });
+      const r = createTurnHookRunner(loadRegistry(entry, manifest, { mode }));
+      const read = { toolName: READ, params: { path: "/notes.md" }, toolCallId: `tc-r-${mode}` };
+      expect(await r.runBeforeToolCall(read, ctx)).toEqual({ blocked: false });
+      await r.runAfterToolCall({ ...read, result: { content: [] }, durationMs: 4 }, ctx);
+      const write = await r.runBeforeToolCall(
+        { toolName: WRITE, params: { text: "y" }, toolCallId: `tc-w-${mode}` },
+        ctx,
+      );
+      expect(write).toMatchObject({ blocked: true, reason: expect.stringContaining("read-only") });
+      expect(api.toolCalls.map(({ tool, params, allowed }) => ({ tool, params, allowed }))).toEqual([
+        { tool: READ, params: {}, allowed: true },
+      ]);
+      expect(api.toolResults).toEqual([{ callId: api.toolCalls[0]?.callId, status: "ok", durationMs: 4 }]);
+    },
+  );
+});

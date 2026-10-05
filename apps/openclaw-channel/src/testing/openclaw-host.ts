@@ -15,6 +15,10 @@
  *                                         15 s default budget) + dist/hook-runner-global-*.mjs (fail-closed
  *                                         policy for before_tool_call; a prepared generation's registry is
  *                                         used EXCLUSIVELY while a turn runs)
+ * - hook event tool name                  dist/agent-tools.before-tool-call-*.mjs `wrapToolWithBeforeToolCallHook`
+ *                                         (`toolName: normalizeToolPolicyName(tool.name)`: lower-cased, aliases
+ *                                         bash→exec, apply-patch→apply_patch, cron→automations; MCP tools keep
+ *                                         their server's casing in the model-facing name, not in the hook event)
  *
  * Why the modes matter: OpenClaw runs each agent turn inside a prepared plugin generation. Whenever the config
  * differs from the one the boot registry was activated with (always, in an OCW cell: the plugin writes the
@@ -262,6 +266,17 @@ async function withBudget<T>(promise: Promise<T>, ms: number): Promise<T> {
   }
 }
 
+/** dist tool-policy-shared-*.mjs `normalizeToolPolicyName`. */
+const TOOL_NAME_ALIASES = new Map([
+  ["bash", "exec"],
+  ["apply-patch", "apply_patch"],
+  ["cron", "automations"],
+]);
+export function normalizeToolPolicyName(name: string): string {
+  const normalized = name.trim().toLowerCase();
+  return TOOL_NAME_ALIASES.get(normalized) ?? normalized;
+}
+
 /**
  * The global hook runner as seen by a tool call inside a prepared turn: it reads ONLY `registry` (dist
  * `resolveHookRegistry` returns the generation registry exclusively), runs before_tool_call handlers in
@@ -276,9 +291,11 @@ export function createTurnHookRunner(registry: HostRegistry, opts: { budgetMs?: 
     hasHooks: (hookName: string) => registry.typedHooks.some((h) => h.hookName === hookName),
     /** dist agent-tools.before-tool-call `runBeforeToolCallHook`: no hooks → the call runs unchecked. */
     async runBeforeToolCall(
-      event: { toolName: string; params?: Record<string, unknown>; toolCallId?: string },
+      call: { toolName: string; params?: Record<string, unknown>; toolCallId?: string },
       ctx: Record<string, unknown>,
     ): Promise<{ blocked: boolean; reason?: string }> {
+      // `toolName` is the tool's model-facing name; the hook sees OpenClaw's policy name.
+      const event = { ...call, toolName: normalizeToolPolicyName(call.toolName) };
       const hooks = hooksFor("before_tool_call", event.toolName);
       if (hooks.length === 0) return { blocked: false };
       for (const hook of hooks) {
@@ -295,9 +312,10 @@ export function createTurnHookRunner(registry: HostRegistry, opts: { budgetMs?: 
       return { blocked: false };
     },
     async runAfterToolCall(
-      event: Record<string, unknown> & { toolName: string },
+      call: Record<string, unknown> & { toolName: string },
       ctx: Record<string, unknown>,
     ) {
+      const event = { ...call, toolName: normalizeToolPolicyName(call.toolName) };
       await Promise.allSettled(hooksFor("after_tool_call", event.toolName).map((h) => h.handler(event, ctx)));
     },
   };
