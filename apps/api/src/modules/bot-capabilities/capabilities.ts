@@ -103,7 +103,8 @@ const grantKey = (g: { sourceKind: string; sourceId: string; tool: string }) =>
 /**
  * Every tool of the catalog with its grant and effective state for this bot. Reason precedence:
  * `dangerous` → `source_unavailable` → `org_policy` → `personal_policy` → `denied_for_you`. An ungranted tool
- * is listed with `effective: false` and no reason (unless it is dangerous). `humanToolAllowed` answers the
+ * is listed with `effective: false` and the reason it could not be enabled (source, org or personal policy), so
+ * the UI disables and explains it; the human side (`denied_for_you`) is judged for granted tools only. `humanToolAllowed` answers the
  * resolver's `bot.tool.use` (agent ∩ human, tool layer); null = no human side. Grants whose tool is no longer
  * in the catalog are dropped.
  */
@@ -123,12 +124,10 @@ export function effectiveTools(input: {
       const isGranted = granted.has(grantKey(g));
       let reason: CapabilityDenialReason | null = null;
       if (isDangerousToolName(t.name)) reason = "dangerous";
-      else if (isGranted) {
-        if (source.status !== USABLE_STATUS[source.sourceKind]) reason = "source_unavailable";
-        else if (!source.orgEnabled) reason = "org_policy";
-        else if (input.scope === "personal" && !source.personalAllowed) reason = "personal_policy";
-        else if (input.humanToolAllowed(t.name) === false) reason = "denied_for_you";
-      }
+      else if (source.status !== USABLE_STATUS[source.sourceKind]) reason = "source_unavailable";
+      else if (!source.orgEnabled) reason = "org_policy";
+      else if (input.scope === "personal" && !source.personalAllowed) reason = "personal_policy";
+      else if (isGranted && input.humanToolAllowed(t.name) === false) reason = "denied_for_you";
       out.push({
         ...g,
         sourceName: source.sourceName,

@@ -297,9 +297,34 @@ describe("effectiveTools", () => {
     ).toBe(true);
   });
 
-  it("an ungranted tool is listed with granted:false, effective:false, reason:null", () => {
+  it("an ungranted tool of a usable source is listed with granted:false, effective:false, reason:null", () => {
     const list = tools("team", [mcp()], [grant("mcp", MCP_ID, "m3f9a12c4__echo")]);
     expect(find(list, "m3f9a12c4__search")).toMatchObject({ granted: false, effective: false, reason: null });
+  });
+
+  it("an ungranted tool carries the reason it could not be enabled (source, org, personal policy)", () => {
+    // The UI disables the switch and explains it, so a manager never enables a tool in vain.
+    expect(find(tools("personal", [mcp()], []), "m3f9a12c4__echo")).toMatchObject({
+      granted: false,
+      effective: false,
+      reason: "personal_policy",
+    });
+    expect(find(tools("personal", [mcp({ personalAllowed: true })], []), "m3f9a12c4__echo").reason).toBe(
+      null,
+    );
+    expect(find(tools("team", [mcp({ orgEnabled: false })], []), "m3f9a12c4__echo").reason).toBe(
+      "org_policy",
+    );
+    expect(find(tools("team", [mcp({ status: "probing" })], []), "m3f9a12c4__echo").reason).toBe(
+      "source_unavailable",
+    );
+    // The human side is only judged for granted tools (the resolver is asked per grant).
+    expect(
+      find(
+        tools("team", [mcp()], [], () => false),
+        "m3f9a12c4__echo",
+      ).reason,
+    ).toBe(null);
   });
 
   it("a grant pointing at a tool the catalog no longer lists is dropped", () => {
