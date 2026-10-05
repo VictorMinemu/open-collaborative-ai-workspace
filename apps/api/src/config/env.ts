@@ -76,6 +76,29 @@ export const EnvSchema = z
      * (`device.legacy_token_used`, at most once per device per hour). Removed in Phase 8 together with the
      * raw device token (RFC 8628 device grant).
      */
+    /**
+     * Base URL of the optional SearXNG instance (compose profile `search`, D-09), as seen from the cell. Set for
+     * both the API and the cell; without it admins cannot pick `searxng` as the web search provider.
+     */
+    OCW_SEARXNG_URL: z
+      .union([z.literal(""), Url])
+      .optional()
+      .transform((v) => v || null),
+    /**
+     * Web search plugins bundled in the cell image (mirrors the cell's variable): comma list, `none` = nothing
+     * bundled. Internet is `configured` only when the chosen provider is bundled or installed (D-06, D-09).
+     */
+    OCW_BUNDLED_PLUGINS: z
+      .string()
+      .default("duckduckgo,searxng")
+      .transform((s) =>
+        s.trim().toLowerCase() === "none"
+          ? []
+          : s
+              .split(",")
+              .map((x) => x.trim().toLowerCase())
+              .filter(Boolean),
+      ),
     OCW_ACCEPT_LEGACY_DEVICE_TOKEN: z
       .enum(["true", "false"])
       .default("true")

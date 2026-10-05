@@ -26,6 +26,7 @@ import { createEnvFileSecretStore } from "./lib/secret-store";
 import { createAgentModule } from "./modules/agent";
 import { createAgentChannelModule } from "./modules/agent-channel";
 import { createAuditService } from "./modules/audit";
+import { createBotCapabilitiesModule } from "./modules/bot-capabilities";
 import { createChatModule } from "./modules/chat";
 import { createDeviceModule } from "./modules/device";
 import { createAuth, createIdentityModule, IdentityService } from "./modules/identity";
@@ -226,6 +227,7 @@ export async function buildApp(
     createSecretsModule(),
     createChatModule(core), // B1
     createAgentModule(core), // B2
+    createBotCapabilitiesModule(core), // Phase 3.1: capabilities, bot policy, governance
     createAgentChannelModule(core), // B2
     deviceModule, // B3
     createWorkSessionModule(core, deviceModule.hub), // B3
