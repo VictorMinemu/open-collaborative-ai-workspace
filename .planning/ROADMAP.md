@@ -198,7 +198,7 @@ Plans:
 
 **Goal**: Inside one Work Zone chat, a controller changes the model, the thinking level and the permission mode, and reaches every option Claude Code and Codex expose, from a composer that matches the reference layout (provider-grouped model picker, reasoning menu, permission menu). Every control is driven by what the runtime reports: an option is never shown as available unless the adapter has confirmed it
 **Mode:** mvp
-**Requirements**: TBD (defined in /gsd-plan-phase 03.2)
+**Requirements**: WZC-01, WZC-02, WZC-03, WZC-04, WZC-05, WZC-06
 **Depends on:** Phase 03.1; pulls forward part of Phase 8 (device grains), Phase 9 (org-capped permission modes), Phase 10 (host acceptance) and Phase 11 (capability-driven controls)
 **Decisions:** ADR-0012 (owner, 2026-10-05): real Full access mode and shared devices
 **Reference:** `.planning/phases/03.2-work-zone-session-controls/reference/` (owner's screenshots, 2026-10-05)
