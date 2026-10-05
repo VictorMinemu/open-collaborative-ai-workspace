@@ -78,6 +78,15 @@ export const BotPolicy = z.object({
 });
 export type BotPolicy = z.infer<typeof BotPolicy>;
 
+/**
+ * `GET/PUT /api/v1/bot-policy` response: the policy plus the search providers the cell can run right now
+ * (bundled or installed; SearXNG also needs `OCW_SEARXNG_URL`, the compose `search` profile).
+ */
+export const BotPolicyView = BotPolicy.extend({
+  availableSearchProviders: z.array(SearchProvider),
+});
+export type BotPolicyView = z.infer<typeof BotPolicyView>;
+
 const ALLOW = { orgWide: true, personal: true } as const;
 
 /** Defaults when an organization has no `bot_policies` row: everything allowed (D-06). */

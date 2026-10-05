@@ -569,7 +569,9 @@ export function createAgentModule(core: Core): ApiModule {
               });
               await publishAgent(core, tx, EventTypes.agentUpdated, dto);
               if (reason) await notifyCell(core, tx, reason, row.id);
-              return withViewerCan(req, tx, dto);
+              const out = await withViewerCan(req, tx, dto);
+              // Governance sees metadata only (D-01): never what is inside someone else's personal bot.
+              return governance ? { ...out, instructions: "", description: null } : out;
             });
           } catch (err) {
             if (isUniqueViolation(err)) throw conflict("That username is already taken", "username_taken");

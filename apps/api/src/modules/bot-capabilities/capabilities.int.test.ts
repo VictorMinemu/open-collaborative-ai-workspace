@@ -293,6 +293,8 @@ describe("org bot policy", () => {
       personalDailyLimitMax: 100,
       personalAllowedModels: [],
       updatedAt: null,
+      // SearXNG is bundled but has no OCW_SEARXNG_URL here (no compose `search` profile).
+      availableSearchProviders: ["duckduckgo"],
     });
     expect(p.capabilities.internet).toEqual({ orgWide: true, personal: true });
     expect((await sam.request("GET", "/api/v1/bot-policy")).status).toBe(403);

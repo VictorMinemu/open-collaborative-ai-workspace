@@ -4,7 +4,8 @@ import {
   BotCapabilityView,
   type BotGovernanceEntry,
   BotGovernanceList,
-  BotPolicy,
+  type BotPolicy,
+  BotPolicyView,
   type BotUsage,
   type CellConfigChangedEvent,
   cellTopic,
@@ -28,7 +29,7 @@ import {
 } from "../organization";
 import { effectiveCapabilities, effectiveTools, readCapabilities } from "./capabilities";
 import { loadCatalog, loadGrants, replaceGrants } from "./catalog";
-import { internetConfigured, loadPolicy, savePolicy } from "./policy";
+import { availableSearchProviders, internetConfigured, loadPolicy, savePolicy } from "./policy";
 
 type AgentRow = typeof agents.$inferSelect;
 
@@ -306,13 +307,19 @@ export function registerBotCapabilityRoutes(app: App, core: Core, perms: Permiss
       }),
   );
 
-  app.get("/bot-policy", { ...manage, schema: { tags, response: { 200: BotPolicy } } }, async (req) =>
-    core.db.withTenant(tenant(req), (tx) => loadPolicy(tx)),
+  /** The policy and which search providers the cell can run (the admin page explains the others). */
+  const policyView = async (tx: Tx, policy: BotPolicy): Promise<BotPolicyView> => ({
+    ...policy,
+    availableSearchProviders: [...(await availableSearchProviders(tx, core.env))].sort(),
+  });
+
+  app.get("/bot-policy", { ...manage, schema: { tags, response: { 200: BotPolicyView } } }, async (req) =>
+    core.db.withTenant(tenant(req), async (tx) => policyView(tx, await loadPolicy(tx))),
   );
 
   app.put(
     "/bot-policy",
-    { ...manage, schema: { tags, body: UpdateBotPolicyRequest, response: { 200: BotPolicy } } },
+    { ...manage, schema: { tags, body: UpdateBotPolicyRequest, response: { 200: BotPolicyView } } },
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
         const auth = authOf(req);
@@ -327,7 +334,7 @@ export function registerBotCapabilityRoutes(app: App, core: Core, perms: Permiss
           });
           await notifyCellConfig(core, tx, "policy.updated", null);
         }
-        return policy;
+        return policyView(tx, policy);
       }),
   );
 
