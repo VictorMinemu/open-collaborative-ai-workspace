@@ -168,6 +168,8 @@ export function createChatModule(core: Core): ApiModule {
       if (m.kind !== "agent") continue;
       const agent = dir.agents.get(m.id);
       if (!agent || agent.status === "disabled") continue;
+      // A personal bot lives only in its owner's DM (D-01): never auto-added to, or asked in, a channel.
+      if (agent.scope === "personal") continue;
       if (!(await getMembership(tx, conv.id, "agent", agent.id))) {
         authorRes ??= channelResource(await channelFacts(tx, conv, { kind: "user", id: author.id }));
         const d = await perms.decide(
@@ -562,6 +564,9 @@ export function createChatModule(core: Core): ApiModule {
             const target =
               req.body.kind === "agent" ? dir.agents.get(req.body.id) : dir.users.get(req.body.id);
             if (!target) throw notFound(req.body.kind === "agent" ? "Bot not found" : "Member not found");
+            if (target.scope === "personal") {
+              throw conflict("Personal bots only chat in their owner's private chat", "personal_bot_dm_only");
+            }
             if (target.status === "disabled") throw badRequest("This bot is disabled", "agent_disabled");
             await addMember(tx, deps, conv, { kind: req.body.kind, id: req.body.id });
             return { members: await listChannelMembers(tx, conv.id, dir) };
