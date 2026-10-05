@@ -74,19 +74,30 @@ async function auditRows(): Promise<AuditRow[]> {
 
 /**
  * Sends `text` in the open DM and returns the text of the bot's reply that answers it (contains `marker`).
- * Waits for a NEW bot message: an earlier reply with the same marker must not satisfy a later question.
+ * The answer is the first bot message after the human message just sent, in DOM order: an earlier reply with
+ * the same marker cannot satisfy a later question, and history still loading on a fresh page does not matter.
  */
 async function askBot(page: Page, text: string, marker: string): Promise<string> {
-  const botMessages = page.locator('[data-testid="message"][data-author-kind="agent"]');
-  const before = await botMessages.count();
   const box = page.getByTestId("composer");
   await box.click();
   await box.fill(text);
   await box.press("Enter");
-  await expect(botMessages).toHaveCount(before + 1, { timeout: REAL });
-  const reply = botMessages.nth(before);
-  await expect(reply).toContainText(marker);
-  return (await reply.innerText()).trim();
+  const answer = () =>
+    page.evaluate((sent) => {
+      const messages = [...document.querySelectorAll<HTMLElement>('[data-testid="message"]')];
+      const asked = messages.findLastIndex(
+        (m) => m.dataset.authorKind !== "agent" && m.innerText.includes(sent),
+      );
+      if (asked === -1) return "";
+      return (
+        messages
+          .slice(asked + 1)
+          .find((m) => m.dataset.authorKind === "agent")
+          ?.innerText.trim() ?? ""
+      );
+    }, text);
+  await expect.poll(answer, { timeout: REAL }).toContain(marker);
+  return answer();
 }
 
 async function openBotSettings(page: Page) {
