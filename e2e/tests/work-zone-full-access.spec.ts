@@ -92,6 +92,15 @@ test("Full access: an opted-in device runs the owner's session without prompts; 
     await expect(view).toHaveAttribute("data-status", "idle", { timeout: 30_000 });
     // The header names the session's mode to every controller.
     await expect(view.getByText(/full ?access/i).first()).toBeVisible();
+    // D-04: the composer's permission chip names Full access in the warning tone for every controller.
+    const chip = page.getByTestId("permission-chip");
+    await expect(chip).toContainText("Full access");
+    await expect(chip).toHaveAttribute("data-tone", "warning");
+    await expect(page.getByTestId("session-header")).toContainText("Full access");
+    await shot(page, `wz-composer-full-access-${tag}`);
+    await page.emulateMedia({ colorScheme: "dark" });
+    await shot(page, `wz-composer-full-access-${tag}-dark`);
+    await page.emulateMedia({ colorScheme: "light" });
 
     // ---- a writing turn runs straight through: no approval banner, ever
     await page.getByTestId("composer").fill("Add a CHANGELOG note for the release");
