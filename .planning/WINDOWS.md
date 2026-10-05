@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 4
+open_count: 6
 waived_count: 0
 fixed_count: 10
-total_count: 14
-last_updated: 2026-10-05T20:36:46.430Z
+total_count: 16
+last_updated: 2026-10-05T21:04:47.745Z
 ---
 
 # Broken Windows Ledger
@@ -29,6 +29,8 @@ last_updated: 2026-10-05T20:36:46.430Z
 | 12 | 03.2 | stub | apps/local-runtime/src/daemon.ts |  | hello/capabilities fullAccessOptIn hard-coded false until Plan 06 | open |  | 2026-10-05T20:36:46.287Z |  |
 | 13 | 03.2 | stub | apps/api/src/modules/work-session/service.ts |  | dispatched turn mode = session mode; per-author cap (P-07) lands in Plan 04 | open |  | 2026-10-05T20:36:46.358Z |  |
 | 14 | 03.2 | stub | packages/contracts/src/device.ts |  | Device.viewerMaxMode/grants and UpdateDeviceRequest.shareMaxMode not wired until Plan 05 | open |  | 2026-10-05T20:36:46.430Z |  |
+| 15 | 03.2 | deviation | apps/local-runtime/src/codex/codex-runtime.ts |  | /compact completes via turn/completed (compaction is a non-steerable turn at 0.160.0); not fixtured | open |  | 2026-10-05T21:04:47.656Z |  |
+| 16 | 03.2 | unrun-verify | packages/contracts/src/runtime-controls/codex.ts |  | Codex Auto (approvalsReviewer auto_review) exposed but its review behaviour is not fixtured | open |  | 2026-10-05T21:04:47.745Z |  |
 
 ````json
 [
@@ -198,6 +200,30 @@ last_updated: 2026-10-05T20:36:46.430Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-05T20:36:46.430Z",
+    "resolved_at": null
+  },
+  {
+    "id": 15,
+    "kind": "deviation",
+    "phase": "03.2",
+    "file": "apps/local-runtime/src/codex/codex-runtime.ts",
+    "line": null,
+    "description": "/compact completes via turn/completed (compaction is a non-steerable turn at 0.160.0); not fixtured",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-05T21:04:47.656Z",
+    "resolved_at": null
+  },
+  {
+    "id": 16,
+    "kind": "unrun-verify",
+    "phase": "03.2",
+    "file": "packages/contracts/src/runtime-controls/codex.ts",
+    "line": null,
+    "description": "Codex Auto (approvalsReviewer auto_review) exposed but its review behaviour is not fixtured",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-05T21:04:47.745Z",
     "resolved_at": null
   }
 ]
