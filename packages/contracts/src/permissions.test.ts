@@ -23,9 +23,29 @@ const id = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
 const now = 1_790_000_000;
 
 describe("permission vocabulary", () => {
-  it("has exactly the 41 agreed permissions", () => {
-    expect(Permission.options).toHaveLength(41);
-    expect(new Set(Permission.options).size).toBe(41);
+  it("has exactly the 44 agreed permissions", () => {
+    expect(Permission.options).toHaveLength(44);
+    expect(new Set(Permission.options).size).toBe(44);
+  });
+
+  it("Phase 03.2 Work Zone control permissions exist exactly as P-06 defines them", () => {
+    expect(PERMISSION_SURFACE).toMatchObject({
+      "work_session.configure": "workzone",
+      "device.full_access": "workzone",
+      "work_zone.manage": "admin",
+    });
+    expect(ROLE_PERMISSIONS.developer).toContain("work_session.configure");
+    expect(ROLE_PERMISSIONS.standard).not.toContain("work_session.configure");
+    for (const role of OrgRole.options) {
+      if (role === "admin") expect(ROLE_PERMISSIONS[role]).toContain("work_zone.manage");
+      else expect(ROLE_PERMISSIONS[role], role).not.toContain("work_zone.manage");
+      // Relation-only: full access always comes from the person's own grain on one device.
+      expect(ROLE_PERMISSIONS[role], role).not.toContain("device.full_access");
+    }
+    expect(NON_DELEGABLE_PERMISSIONS).toContain("work_zone.manage");
+    for (const p of ["work_session.configure", "device.full_access", "work_zone.manage"] as const) {
+      expect(PERMISSION_DESCRIPTIONS[p].length, p).toBeGreaterThan(10);
+    }
   });
 
   it("Phase 3.1 bot permissions exist exactly as D-02 defines them", () => {
@@ -92,7 +112,14 @@ describe("permission vocabulary", () => {
   });
 
   it("relation-only and principal-only permissions are never granted by a role", () => {
-    for (const p of ["account.manage", "device.use", "device.update", "cell.sync", "device.link"] as const) {
+    for (const p of [
+      "account.manage",
+      "device.use",
+      "device.update",
+      "cell.sync",
+      "device.link",
+      "device.full_access",
+    ] as const) {
       expect(ROLE_PERMISSIONS.admin).not.toContain(p);
     }
   });
