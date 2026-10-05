@@ -177,11 +177,21 @@ export async function publishAgent(
   type: typeof EventTypes.agentCreated | typeof EventTypes.agentUpdated,
   agent: Agent,
 ) {
-  const topic =
-    agent.scope === "personal" && agent.ownerUserId
-      ? `user:${agent.ownerUserId}`
-      : `org:${agent.organizationId}`;
-  await core.realtime.appendEvent(tx, topic, type, agent);
+  await core.realtime.appendEvent(tx, agentTopic(agent), type, agent);
+}
+
+/** Same routing as `publishAgent` for a deletion (payload `{ id }`). */
+export async function publishAgentDeleted(
+  core: Core,
+  tx: Tx,
+  agent: Pick<Agent, "id" | "organizationId" | "scope" | "ownerUserId">,
+) {
+  await core.realtime.appendEvent(tx, agentTopic(agent), EventTypes.agentDeleted, { id: agent.id });
+}
+
+/** `user:<owner>` for a personal bot, `org:<org>` for a team bot. */
+function agentTopic(a: Pick<Agent, "organizationId" | "scope" | "ownerUserId">): string {
+  return a.scope === "personal" && a.ownerUserId ? `user:${a.ownerUserId}` : `org:${a.organizationId}`;
 }
 
 /** Bots as the cell must provision them (deleted ones are omitted; disabled ones are listed as such). */

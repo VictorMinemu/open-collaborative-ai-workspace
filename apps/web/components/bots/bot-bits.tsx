@@ -1,6 +1,6 @@
 "use client";
 
-import { type AgentStatus, type ModelProviderKind, modelLabel } from "@ocw/contracts";
+import { type Agent, type AgentStatus, type ModelProviderKind, modelLabel } from "@ocw/contracts";
 import { Cpu } from "lucide-react";
 import { toneFor } from "@/components/ui/avatar";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -120,4 +120,15 @@ export function ModelChip({
       <span className="truncate">{modelLabel(provider, modelId)}</span>
     </span>
   );
+}
+
+/**
+ * What the caller may do with one bot, from the API's per-bot `viewerCan` (never the org-wide role): a team bot
+ * is edited with `bot.manage`; a personal bot only by its owner (`bot.configure`), while an admin may still
+ * switch it off or delete it (`bot.manage`, governance) without seeing inside.
+ */
+export function botAbilities(agent: Agent): { edit: boolean; govern: boolean } {
+  const can = new Set(agent.viewerCan ?? []);
+  const edit = agent.scope === "personal" ? can.has("bot.configure") : can.has("bot.manage");
+  return { edit, govern: edit || can.has("bot.manage") };
 }

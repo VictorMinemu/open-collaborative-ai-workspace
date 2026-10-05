@@ -267,3 +267,249 @@ describe("personal bot: one click → private DM", () => {
     expect((res.body as { error: { code: string } }).error.code).toBe("model_not_allowed");
   });
 });
+
+/**
+ * 03.1-02 Task 2 (SC1, BOT-01/02, D-01/D-04, T-03.1-02-01/02/03/05/06/07): a personal bot exists only for its
+ * owner in lists, details and events; admins govern it (disable, enable, delete; audited) without editing
+ * what is inside; disabling or deleting archives its chat.
+ */
+describe("personal bot visibility and governance", () => {
+  let kim: TestClient;
+  let kimId: string;
+  let rex: TestClient;
+  let kimBot: string;
+  let kimDm: string;
+  let teamId: string;
+
+  const errorOf = (r: { body: Record<string, unknown> | null }) =>
+    (r.body as { error?: { code?: string; details?: Record<string, unknown> } } | null)?.error ?? {};
+  const archivedAt = async (convId: string) =>
+    (await su.query("select archived_at from app.conversations where id = $1", [convId])).rows[0]
+      ?.archived_at;
+  const orgEventsAbout = async (agentId: string) =>
+    (
+      await su.query(
+        "select type from app.stream_events where stream_id = $1 and (payload->>'id' = $2 or payload->>'agentId' = $2)",
+        [`org:${orgId}`, agentId],
+      )
+    ).rows.map((r) => r.type as string);
+  const userEventsAbout = async (userId: string, agentId: string) =>
+    (
+      await su.query(
+        "select type from app.stream_events where stream_id = $1 and payload->>'id' = $2 order by seq",
+        [`user:${userId}`, agentId],
+      )
+    ).rows.map((r) => r.type as string);
+
+  beforeAll(async () => {
+    [kim, kimId] = await joinAs("kim@example.test", "Kim Park", "developer");
+    [rex] = await joinAs("rex@example.test", "Rex Moore", "developer");
+    const created = await ok(kim.request("POST", "/api/v1/agents/personal", {}));
+    kimBot = created.agent.id;
+    kimDm = created.dmId;
+    const team = await ok(
+      admin.request("POST", "/api/v1/agents", {
+        name: "Ops",
+        instructions: "Help with operations.",
+        modelProvider: "mock",
+        modelId: "mock-1",
+      }),
+    );
+    teamId = team.id;
+  });
+
+  it("GET /agents lists team bots for everyone and a personal bot for its owner only, with viewerCan", async () => {
+    const asRex = (await ok(rex.request("GET", "/api/v1/agents"))).agents as Payload[];
+    const asKim = (await ok(kim.request("GET", "/api/v1/agents"))).agents as Payload[];
+    const asAdmin = (await ok(admin.request("GET", "/api/v1/agents"))).agents as Payload[];
+    expect(asRex.some((a) => a.scope === "personal")).toBe(false);
+    expect(asAdmin.some((a) => a.scope === "personal")).toBe(false);
+    expect(asKim.filter((a) => a.scope === "personal").map((a) => a.id)).toEqual([kimBot]);
+    for (const list of [asRex, asKim, asAdmin]) {
+      expect(list.some((a) => a.id === teamId)).toBe(true);
+      for (const a of list) expect(Array.isArray(a.viewerCan)).toBe(true);
+    }
+    expect(asKim.find((a) => a.id === kimBot)?.viewerCan).toEqual(["bot.read", "bot.configure"]);
+    expect(asRex.find((a) => a.id === teamId)?.viewerCan).toEqual(["bot.read"]);
+    expect(asAdmin.find((a) => a.id === teamId)?.viewerCan).toEqual([
+      "bot.read",
+      "bot.configure",
+      "bot.manage",
+    ]);
+  });
+
+  it("GET /agents/:id hides a personal bot from everyone but its owner (404)", async () => {
+    expect((await rex.request("GET", `/api/v1/agents/${kimBot}`)).status).toBe(404);
+    expect((await admin.request("GET", `/api/v1/agents/${kimBot}`)).status).toBe(404);
+    expect(await ok(kim.request("GET", `/api/v1/agents/${kimBot}`))).toMatchObject({
+      id: kimBot,
+      viewerCan: ["bot.read", "bot.configure"],
+    });
+  });
+
+  it("the owner edits it; an admin cannot (403 personal_bot); anyone else does not see it (404)", async () => {
+    const edited = await ok(
+      kim.request("PATCH", `/api/v1/agents/${kimBot}`, {
+        name: "Kim's helper",
+        instructions: "Be brief.",
+        modelProvider: "mock",
+        modelId: "mock-1",
+      }),
+    );
+    expect(edited).toMatchObject({ name: "Kim's helper", instructions: "Be brief." });
+
+    const byAdmin = await admin.request("PATCH", `/api/v1/agents/${kimBot}`, { instructions: "Spy." });
+    expect(byAdmin.status).toBe(403);
+    expect(errorOf(byAdmin).details).toMatchObject({ permission: "bot.configure", reason: "personal_bot" });
+    expect((await rex.request("PATCH", `/api/v1/agents/${kimBot}`, { enabled: false })).status).toBe(404);
+    expect((await rex.request("DELETE", `/api/v1/agents/${kimBot}`)).status).toBe(404);
+    const row = (await su.query("select instructions, status from app.agents where id = $1", [kimBot]))
+      .rows[0];
+    expect(row.instructions).toBe("Be brief.");
+
+    // Every change so far travelled on Kim's topic only.
+    expect(await userEventsAbout(kimId, kimBot)).toEqual(
+      expect.arrayContaining(["agent.created", "agent.updated"]),
+    );
+    expect(await orgEventsAbout(kimBot)).toEqual([]);
+  });
+
+  it("an owner's model change honours personal_allowed_models (400 model_not_allowed)", async () => {
+    await ok(
+      admin.request("POST", "/api/v1/model-providers", {
+        provider: "anthropic",
+        apiKey: "sk-ant-test-fake-key-not-real-000000",
+        allowedModels: ["claude-sonnet-5-5"],
+      }),
+    );
+    await su.query(
+      `insert into app.bot_policies (organization_id, personal_allowed_models) values ($1, '{mock/mock-1}')
+       on conflict (organization_id) do update set personal_allowed_models = excluded.personal_allowed_models`,
+      [orgId],
+    );
+    try {
+      const res = await kim.request("PATCH", `/api/v1/agents/${kimBot}`, {
+        modelProvider: "anthropic",
+        modelId: "claude-sonnet-5-5",
+      });
+      expect(res.status).toBe(400);
+      expect(errorOf(res).code).toBe("model_not_allowed");
+      // The same model is fine for a team bot: the narrowing is for personal bots only.
+      await ok(
+        admin.request("PATCH", `/api/v1/agents/${teamId}`, {
+          modelProvider: "anthropic",
+          modelId: "claude-sonnet-5-5",
+        }),
+      );
+    } finally {
+      await su.query(
+        "update app.bot_policies set personal_allowed_models = '{}' where organization_id = $1",
+        [orgId],
+      );
+    }
+  });
+
+  it("an admin disables it (audited as governance), its chat is archived; only an admin re-enables it", async () => {
+    const off = await ok(admin.request("PATCH", `/api/v1/agents/${kimBot}`, { enabled: false }));
+    expect(off).toMatchObject({ status: "disabled", statusMessage: "Disabled by a workspace admin" });
+    const audit = (
+      await su.query(
+        "select user_id, metadata from app.audit_events where action = 'agent.disabled' and resource_id = $1",
+        [kimBot],
+      )
+    ).rows;
+    expect(audit).toHaveLength(1);
+    expect(audit[0].metadata).toMatchObject({ governance: true, scope: "personal", ownerUserId: kimId });
+    expect(JSON.stringify(audit[0].metadata)).not.toContain("Be brief.");
+
+    expect(await archivedAt(kimDm)).not.toBeNull();
+    const post = await kim.request("POST", `/api/v1/conversations/${kimDm}/messages`, { body: "hello?" });
+    expect(post.status).toBe(410);
+    expect(((await ok(kim.request("GET", "/api/v1/dms"))).dms as Payload[]).some((d) => d.id === kimDm)).toBe(
+      false,
+    );
+    const updated = await su.query(
+      "select 1 from app.stream_events where stream_id = $1 and type = 'conversation.updated' and payload->>'conversationId' = $2",
+      [`user:${kimId}`, kimDm],
+    );
+    expect(updated.rowCount).toBe(1);
+
+    // The owner cannot undo an admin's decision.
+    const undo = await kim.request("PATCH", `/api/v1/agents/${kimBot}`, { enabled: true });
+    expect(undo.status).toBe(403);
+    expect(errorOf(undo).code).toBe("disabled_by_admin");
+
+    const on = await ok(admin.request("PATCH", `/api/v1/agents/${kimBot}`, { enabled: true }));
+    expect(on).toMatchObject({ status: "provisioning", statusMessage: null });
+    expect(await archivedAt(kimDm)).toBeNull();
+    expect(((await ok(kim.request("GET", "/api/v1/dms"))).dms as Payload[]).some((d) => d.id === kimDm)).toBe(
+      true,
+    );
+    await ok(kim.request("POST", `/api/v1/conversations/${kimDm}/messages`, { body: "back" }));
+
+    // The owner may switch their own bot off and on again (not governance).
+    await ok(kim.request("PATCH", `/api/v1/agents/${kimBot}`, { enabled: false }));
+    await ok(kim.request("PATCH", `/api/v1/agents/${kimBot}`, { enabled: true }));
+    const own = (
+      await su.query(
+        "select metadata from app.audit_events where action = 'agent.disabled' and resource_id = $1 and user_id = $2",
+        [kimBot, kimId],
+      )
+    ).rows;
+    expect(own).toHaveLength(1);
+    expect(own[0].metadata.governance).toBeUndefined();
+    expect(await orgEventsAbout(kimBot)).toEqual([]);
+  });
+
+  it("an admin deletes it (audited as governance); the chat is archived and leaves /dms", async () => {
+    await ok(admin.request("DELETE", `/api/v1/agents/${kimBot}`));
+    const audit = (
+      await su.query(
+        "select metadata from app.audit_events where action = 'agent.deleted' and resource_id = $1",
+        [kimBot],
+      )
+    ).rows;
+    expect(audit).toHaveLength(1);
+    expect(audit[0].metadata).toMatchObject({ governance: true, scope: "personal", ownerUserId: kimId });
+    expect(await archivedAt(kimDm)).not.toBeNull();
+    expect(((await ok(kim.request("GET", "/api/v1/dms"))).dms as Payload[]).some((d) => d.id === kimDm)).toBe(
+      false,
+    );
+    expect((await kim.request("GET", `/api/v1/agents/${kimBot}`)).status).toBe(404);
+    expect(await userEventsAbout(kimId, kimBot)).toContain("agent.deleted");
+    expect(await orgEventsAbout(kimBot)).toEqual([]);
+  });
+
+  it("the owner deletes their own bot (no governance flag)", async () => {
+    const created = await ok(kim.request("POST", "/api/v1/agents/personal", { name: "Scratch" }));
+    await ok(kim.request("DELETE", `/api/v1/agents/${created.agent.id}`));
+    const audit = (
+      await su.query(
+        "select metadata from app.audit_events where action = 'agent.deleted' and resource_id = $1",
+        [created.agent.id],
+      )
+    ).rows;
+    expect(audit[0].metadata.governance).toBeUndefined();
+    expect(await archivedAt(created.dmId)).not.toBeNull();
+  });
+
+  it("the organization's limit applies (bot_policies.max_personal_bots_per_user = 1)", async () => {
+    await su.query(
+      `insert into app.bot_policies (organization_id, max_personal_bots_per_user) values ($1, 1)
+       on conflict (organization_id) do update set max_personal_bots_per_user = 1`,
+      [orgId],
+    );
+    try {
+      const [lou] = await joinAs("lou@example.test", "Lou Diaz", "developer");
+      await ok(lou.request("POST", "/api/v1/agents/personal", {}));
+      const second = await lou.request("POST", "/api/v1/agents/personal", { name: "Another" });
+      expect(second.status).toBe(409);
+      expect(errorOf(second).code).toBe("personal_bot_limit");
+    } finally {
+      await su.query(
+        "update app.bot_policies set max_personal_bots_per_user = 3 where organization_id = $1",
+        [orgId],
+      );
+    }
+  });
+});

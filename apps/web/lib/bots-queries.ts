@@ -14,6 +14,7 @@ import {
   ModelProvider,
   ModelProviderList,
   Ok,
+  OpenDmResponse,
   ProviderAuthStatus,
   RotateCellTokenResponse,
   type SubscriptionProviderKind,
@@ -54,17 +55,23 @@ export function useAgents() {
   });
 }
 
-function upsertAgent(qc: QueryClient, agent: Agent) {
+function upsertAgent(qc: QueryClient, incoming: Agent) {
+  let unknown = false;
   qc.setQueryData<AgentList>(botKeys.agents, (prev) => {
     if (!prev) return prev;
-    const current = prev.agents.find((a) => a.id === agent.id);
+    const current = prev.agents.find((a) => a.id === incoming.id);
     // Never let an older snapshot (e.g. the create response) overwrite a newer realtime update.
-    if (current && Date.parse(current.updatedAt) > Date.parse(agent.updatedAt)) return prev;
+    if (current && Date.parse(current.updatedAt) > Date.parse(incoming.updatedAt)) return prev;
+    // Realtime payloads carry no `viewerCan` (it is per viewer): keep the last value the API decided.
+    const agent = { ...incoming, viewerCan: incoming.viewerCan ?? current?.viewerCan };
+    unknown = !current && !incoming.viewerCan;
     const agents = current
       ? prev.agents.map((a) => (a.id === agent.id ? agent : a))
       : [...prev.agents, agent];
     return { agents: agents.sort((a, b) => a.name.localeCompare(b.name)) };
   });
+  // A bot first seen over realtime: ask the API what this viewer may do with it.
+  if (unknown) void qc.invalidateQueries({ queryKey: botKeys.agents });
 }
 
 export function useCreateAgent() {
@@ -87,6 +94,18 @@ export function useCreatePersonalBot() {
       void qc.invalidateQueries({ queryKey: botKeys.agents });
       void qc.invalidateQueries({ queryKey: ["chat", "agents"] });
     },
+  });
+}
+
+/**
+ * The caller's private chat with a bot (SC2, D-03), created on first use. Resolves after the DM list has
+ * refetched, so the caller can navigate to `/chat/dm/<dmId>` without the chat flashing as missing.
+ */
+export function useOpenDm() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (agentId: string) => api.post(`/api/v1/agents/${agentId}/dm`, { schema: OpenDmResponse }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["chat", "dms"] }),
   });
 }
 
@@ -254,6 +273,11 @@ export function useBotsRealtime() {
   const qc = useQueryClient();
   const me = useMe({ enabled: false });
   const orgId = me.data?.organization.id ?? null;
+  const userId = me.data?.user.id ?? null;
+  // A personal bot's changes travel only on its owner's topic (D-01): the owner's gallery follows both.
+  useTopic(userId ? topic("user", userId) : null, (frame) => {
+    if (frame.op === "ev") onAgentEvent(qc, frame.type, frame.data);
+  });
   useTopic(orgId ? topic("org", orgId) : null, (frame) => {
     if (frame.op === "eph") {
       if (frame.type === EphemeralTypes.cellPresence) {
@@ -271,18 +295,28 @@ export function useBotsRealtime() {
       return;
     }
     if (frame.op !== "ev") return;
-    if (frame.type === EventTypes.agentCreated || frame.type === EventTypes.agentUpdated) {
-      const parsed = Agent.safeParse(frame.data);
-      if (parsed.success) upsertAgent(qc, parsed.data);
-      else void qc.invalidateQueries({ queryKey: botKeys.agents });
-    } else if (frame.type === EventTypes.agentDeleted) {
-      const id = (frame.data as { id?: string } | null)?.id;
-      qc.setQueryData<AgentList>(botKeys.agents, (prev) =>
-        prev ? { agents: prev.agents.filter((a) => a.id !== id) } : prev,
-      );
-    } else if (frame.type === EventTypes.modelProvidersUpdated) {
+    if (onAgentEvent(qc, frame.type, frame.data)) return;
+    if (frame.type === EventTypes.modelProvidersUpdated) {
       void qc.invalidateQueries({ queryKey: botKeys.models });
       void qc.invalidateQueries({ queryKey: botKeys.providers });
     }
   });
+}
+
+/** Applies an agent created/updated/deleted event to the bots list; false when `type` is not one. */
+function onAgentEvent(qc: QueryClient, type: string, data: unknown): boolean {
+  if (type === EventTypes.agentCreated || type === EventTypes.agentUpdated) {
+    const parsed = Agent.safeParse(data);
+    if (parsed.success) upsertAgent(qc, parsed.data);
+    else void qc.invalidateQueries({ queryKey: botKeys.agents });
+    return true;
+  }
+  if (type === EventTypes.agentDeleted) {
+    const id = (data as { id?: string } | null)?.id;
+    qc.setQueryData<AgentList>(botKeys.agents, (prev) =>
+      prev ? { agents: prev.agents.filter((a) => a.id !== id) } : prev,
+    );
+    return true;
+  }
+  return false;
 }

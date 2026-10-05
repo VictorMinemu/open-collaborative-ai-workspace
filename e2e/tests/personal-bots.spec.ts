@@ -43,13 +43,16 @@ test("personal bot: one click → private chat under Bots → answers without @m
 
   const admin = await apiAs(ADMIN);
   const samId = await ensureMember(admin, SAM, "developer");
-  // Re-runnable: remove Sam's personal bots left by an earlier project or run (admin governance delete).
-  const listed = (await (await admin.get("/api/v1/agents")).json()) as {
+  // Re-runnable: remove Sam's personal bots left by an earlier project or run. Only Sam sees them in
+  // GET /agents (03.1-02); deleting them as their owner.
+  const samApi = await apiAs(SAM);
+  const listed = (await (await samApi.get("/api/v1/agents")).json()) as {
     agents: Array<{ id: string; scope: string; ownerUserId: string | null }>;
   };
   for (const a of listed.agents.filter((x) => x.scope === "personal" && x.ownerUserId === samId)) {
-    expect((await admin.delete(`/api/v1/agents/${a.id}`)).ok()).toBe(true);
+    expect((await samApi.delete(`/api/v1/agents/${a.id}`)).ok()).toBe(true);
   }
+  await samApi.dispose();
 
   const plugin = new FakeCellPlugin({ apiUrl: API_URL, token, autoAck: true, autoReply: true });
   await plugin.start();
