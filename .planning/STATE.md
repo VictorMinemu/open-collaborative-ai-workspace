@@ -5,10 +5,10 @@ current_phase: 1
 current_phase_name: MVP 0 — Collaborative Workspace Demo Slice
 status: planning
 stopped_at: Phase 03.1 complete, ready to plan Phase 1
-last_updated: "2026-10-05T16:09:23.953Z"
+last_updated: "2026-10-05T16:45:41.358Z"
 last_activity: 2026-10-05
 last_activity_desc: Phase 03.1 complete, transitioned to Phase 1
-state_head: b6d40007285328e5feae4ea37f336b4ada1909c3
+state_head: 22e3d65ee10104abc96e8550e390a6f05a0c0d0d
 progress:
   total_phases: 12
   completed_phases: 3
@@ -95,6 +95,7 @@ Recent decisions affecting current work:
 ### Roadmap Evolution
 
 - Phase 3.1 inserted after Phase 3: Personal (owner-only) bots with an automatic private chat, and per-bot capability toggles (internet, memory, reply mode, time context, usage limit) capped by org policy — requested by the owner 2026-10-04 (URGENT)
+- Phase 03.2 inserted after Phase 03.1: Work Zone session controls
 
 ## Deferred Items
 

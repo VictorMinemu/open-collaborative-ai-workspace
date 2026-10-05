@@ -194,6 +194,31 @@ Plans:
 - [x] 03.1-14-PLAN.md — Wave 7 (optional, may slip without blocking SC6): hardened stdio MCP sandbox sidecar
 - [x] 03.1-15-PLAN.md — Wave 8: ADR-0010/0011, AGENTS.md and DEMO.md; real-cell proof against the isolated stack (real ClawHub, real web search, MCP tool, audit, uninstall); phase gate
 
+### Phase 03.2: Work Zone session controls (INSERTED)
+
+**Goal**: Inside one Work Zone chat, a controller changes the model, the thinking level and the permission mode, and reaches every option Claude Code and Codex expose, from a composer that matches the reference layout (provider-grouped model picker, reasoning menu, permission menu). Every control is driven by what the runtime reports: an option is never shown as available unless the adapter has confirmed it
+**Mode:** mvp
+**Requirements**: TBD (defined in /gsd-plan-phase 03.2)
+**Depends on:** Phase 03.1; pulls forward part of Phase 8 (device grains), Phase 9 (org-capped permission modes), Phase 10 (host acceptance) and Phase 11 (capability-driven controls)
+**Decisions:** ADR-0012 (owner, 2026-10-05): real Full access mode and shared devices
+**Reference:** `.planning/phases/03.2-work-zone-session-controls/reference/` (owner's screenshots, 2026-10-05)
+**Success Criteria** (what must be TRUE):
+
+  1. In an open session the composer shows a model picker grouped by runtime (Claude Code, Codex) that lists only the models the host runtime reports for that user's own subscription. Choosing another model of the same runtime applies from the next turn, keeps the conversation and is audited. Proven with recorded adapter fixtures per pinned runtime version and an e2e
+  2. A reasoning menu offers only the levels the selected model supports (Claude Code effort / thinking, Codex reasoning effort), plus context window and fast mode when the runtime reports them. Unsupported options are hidden or shown disabled with the reason; switching models re-validates the current choice
+  3. A permission menu offers *Supervised* (ask before commands and edits), *Auto-accept edits*, *Auto* where the runtime supports it, and *Full access* — the real bypass mode of Claude Code and Codex (ADR-0012) — mapped onto the common `permissionMode` enum. Full access is offered only when org policy, the device owner's opt-in and the asker's grain all allow it (each off by default), is checked server-side on every turn, shows a persistent badge to every controller and is audited; slash commands typed in a prompt cannot raise the mode
+  4. A documented inventory lists every option of Claude Code (Agent SDK) and Codex (app-server) at the pinned versions with its status: exposed, deferred or impossible, and why. Each exposed option is reachable from the same chat (menus or slash commands), and nothing in the UI claims an option the inventory has not confirmed
+  5. A device owner marks a device (e.g. a server hosting the harnesses) as *shared* with chosen members or units, each with a maximum permission mode; those people start and control sessions on it without the owner accepting each session or action, revoking someone stops their sessions, and the device settings show whose runtime subscription is used (ADR-0012)
+  6. The composer matches the reference screenshots at 1440 and 390 in light and dark (side-by-side review recorded in the phase), every change made by one controller shows live to the others, and the single execution authority is unchanged
+
+**Plans:** 0 plans
+**Research:** needed (Agent SDK `setModel` / `setPermissionMode` / effort and thinking options and model listing at the pinned version; `codex app-server` per-turn model, effort, approval policy and sandbox overrides and `model/list`; plan mode, fast mode and context window support; how to cap modes by org policy; research for cross-provider switching and multi-agent sessions is in `.planning/research/` as input for later phases)
+**UI hint**: yes
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 03.2 to break down)
+
 ### Phase 4: Chat
 
 **Goal**: A team can do its daily conversation in the workspace — completing the Phase 1 channels, threads and mentions with DMs, notifications, search and files — with every message attributed, editable under audit and delivered in realtime
