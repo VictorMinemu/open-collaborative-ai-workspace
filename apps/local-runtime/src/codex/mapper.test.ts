@@ -42,7 +42,19 @@ describe("CodexEventMapper — recorded fixture (real codex app-server, read-onl
 
   it("emits tool and message events in order and completes the prompt", () => {
     const types = events.map((e) => e.type).filter((t) => t !== "assistant.delta" && t !== "runtime.raw");
-    expect(types).toEqual(["tool.started", "tool.completed", "assistant.message", "prompt.completed"]);
+    expect(types).toEqual([
+      "tool.started",
+      "tool.completed",
+      "session.settings",
+      "assistant.message",
+      "prompt.completed",
+    ]);
+  });
+
+  it("reports the recorded model context window once (display only, D-10)", () => {
+    expect(events.filter((e) => e.type === "session.settings")).toEqual([
+      { type: "session.settings", contextWindow: 258_400 },
+    ]);
   });
 
   it("maps the command execution", () => {
@@ -130,6 +142,87 @@ describe("CodexEventMapper — hand-written cases", () => {
       { type: "session.error", message: "quota" },
       { type: "prompt.completed", isError: true },
     ]);
+  });
+
+  it("maps thread/settings/updated to session.settings with the platform mode from the inverse table", () => {
+    const m = new CodexEventMapper();
+    const settings = (over: Record<string, unknown>) => ({
+      method: "thread/settings/updated",
+      params: {
+        threadId: "t",
+        threadSettings: {
+          disabledPluginIds: [],
+          cwd: "/r",
+          approvalPolicy: "untrusted",
+          approvalsReviewer: "user",
+          sandboxPolicy: { type: "readOnly", networkAccess: false },
+          activePermissionProfile: null,
+          model: "gpt-5.5",
+          modelProvider: "openai",
+          serviceTier: "priority",
+          effort: "low",
+          summary: null,
+          collaborationMode: { mode: "default", settings: {} },
+          personality: null,
+          ...over,
+        },
+      },
+    });
+    expect(m.map(settings({}))).toEqual([
+      {
+        type: "session.settings",
+        model: "gpt-5.5",
+        effort: "low",
+        serviceTier: "priority",
+        fastMode: true,
+        permissionMode: "default",
+      },
+    ]);
+    // A combination no platform mode produces: the mode is left out (the contract field is not nullable).
+    const [odd] = m.map(settings({ approvalsReviewer: "auto_review", serviceTier: null, effort: null }));
+    expect(odd).toEqual({
+      type: "session.settings",
+      model: "gpt-5.5",
+      effort: null,
+      serviceTier: null,
+      fastMode: false,
+    });
+    // Never forwards the absolute cwd.
+    expect(JSON.stringify(odd)).not.toContain("/r");
+  });
+
+  it("reports the model context window once per value, display only (D-10)", () => {
+    const m = new CodexEventMapper();
+    const usage = (turnId: string, modelContextWindow: number | null) => ({
+      method: "thread/tokenUsage/updated",
+      params: {
+        threadId: "t",
+        turnId,
+        tokenUsage: {
+          total: {
+            totalTokens: 1,
+            inputTokens: 1,
+            cachedInputTokens: 0,
+            cacheWriteInputTokens: 0,
+            outputTokens: 0,
+            reasoningOutputTokens: 0,
+          },
+          last: {
+            totalTokens: 1,
+            inputTokens: 1,
+            cachedInputTokens: 0,
+            cacheWriteInputTokens: 0,
+            outputTokens: 0,
+            reasoningOutputTokens: 0,
+          },
+          modelContextWindow,
+        },
+      },
+    });
+    expect(m.map(usage("u1", 258_400))).toEqual([{ type: "session.settings", contextWindow: 258_400 }]);
+    expect(m.map(usage("u1", 258_400))).toEqual([]);
+    expect(m.map(usage("u2", null))).toEqual([]);
+    expect(m.map(usage("u2", 1_000_000))).toEqual([{ type: "session.settings", contextWindow: 1_000_000 }]);
   });
 
   it("forwards unknown notifications as runtime.raw", () => {

@@ -43,6 +43,13 @@ const ROOTS = [
   "ApplyPatchApprovalParams",
   "ApplyPatchApprovalResponse",
   "RequestId",
+  // Phase 03.2 (session controls): catalog, effective-settings readback and native compaction.
+  "v2/ModelListParams",
+  "v2/ModelListResponse",
+  "v2/Model",
+  "v2/ThreadSettingsUpdatedNotification",
+  "v2/ThreadSettings",
+  "v2/ThreadCompactStartParams",
 ];
 
 const argIdx = process.argv.indexOf("--codex");

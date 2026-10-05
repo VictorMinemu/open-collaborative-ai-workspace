@@ -5,19 +5,23 @@ import type { SessionEvent, Usage } from "@ocw/contracts";
 import { rawEvent, TOOL_OUTPUT_MAX_BYTES } from "../claude/mapper.js";
 import { truncateBytes } from "../sanitize.js";
 import type { AgentMessageDeltaNotification } from "./generated/v2/AgentMessageDeltaNotification.js";
+import type { ApprovalsReviewer } from "./generated/v2/ApprovalsReviewer.js";
+import type { AskForApproval } from "./generated/v2/AskForApproval.js";
 import type { ErrorNotification } from "./generated/v2/ErrorNotification.js";
 import type { ItemCompletedNotification } from "./generated/v2/ItemCompletedNotification.js";
 import type { ItemStartedNotification } from "./generated/v2/ItemStartedNotification.js";
+import type { SandboxPolicy } from "./generated/v2/SandboxPolicy.js";
 import type { ThreadItem } from "./generated/v2/ThreadItem.js";
+import type { ThreadSettingsUpdatedNotification } from "./generated/v2/ThreadSettingsUpdatedNotification.js";
 import type { ThreadTokenUsageUpdatedNotification } from "./generated/v2/ThreadTokenUsageUpdatedNotification.js";
 import type { TurnCompletedNotification } from "./generated/v2/TurnCompletedNotification.js";
 import type { JsonRpcNotification } from "./jsonrpc.js";
+import { codexModeFromSettings } from "./mode-policy.js";
 
 /** Notifications we understand and deliberately do not forward. */
 const IGNORED: ReadonlySet<string> = new Set([
   "thread/started",
   "thread/status/changed",
-  "thread/settings/updated",
   "thread/name/updated",
   "turn/started",
   "turn/diff/updated",
@@ -150,12 +154,42 @@ function toUsage(u: ThreadTokenUsageUpdatedNotification["tokenUsage"]["last"] | 
   };
 }
 
+/** The effective-settings fields Codex reports (ThreadStartResponse, ThreadSettings) or the adapter sent. */
+export interface CodexEffectiveSettings {
+  model: string | null;
+  effort: string | null;
+  serviceTier: string | null;
+  approvalPolicy: AskForApproval | null;
+  sandboxPolicy: SandboxPolicy | null;
+  approvalsReviewer: ApprovalsReviewer | null;
+}
+
+/**
+ * `session.settings` for an effective Codex configuration (D-07). Fast mode = the `priority` service tier; the
+ * permission mode comes from the inverse of the mode table and is left out when no platform mode matches (the
+ * event field is optional, not nullable). Never carries the thread's absolute cwd.
+ */
+export function codexSettingsEvent(
+  e: CodexEffectiveSettings,
+): Extract<SessionEvent, { type: "session.settings" }> {
+  const mode = codexModeFromSettings(e.approvalPolicy, e.sandboxPolicy, e.approvalsReviewer);
+  return {
+    type: "session.settings",
+    model: e.model,
+    effort: e.effort,
+    serviceTier: e.serviceTier,
+    fastMode: e.serviceTier === "priority",
+    ...(mode ? { permissionMode: mode } : {}),
+  };
+}
+
 export class CodexEventMapper {
   currentPromptId: string | null = null;
   currentTurnId: string | null = null;
   /** Items seen in `item/started`, so approvals can show file lists. */
   readonly items = new Map<string, ThreadItem>();
   private readonly usageByTurn = new Map<string, Usage>();
+  private lastContextWindow: number | null = null;
 
   map(n: JsonRpcNotification): SessionEvent[] {
     if (IGNORED.has(n.method)) {
@@ -192,7 +226,26 @@ export class CodexEventMapper {
       case "thread/tokenUsage/updated": {
         const p = n.params as ThreadTokenUsageUpdatedNotification;
         this.usageByTurn.set(p.turnId, toUsage(p.tokenUsage.last));
+        // D-10: display only, reported once per value.
+        const window = p.tokenUsage.modelContextWindow;
+        if (window && window > 0 && window !== this.lastContextWindow) {
+          this.lastContextWindow = window;
+          return [{ type: "session.settings", contextWindow: window }];
+        }
         return [];
+      }
+      case "thread/settings/updated": {
+        const { threadSettings: t } = n.params as ThreadSettingsUpdatedNotification;
+        return [
+          codexSettingsEvent({
+            model: t.model ?? null,
+            effort: t.effort ?? null,
+            serviceTier: t.serviceTier ?? null,
+            approvalPolicy: t.approvalPolicy ?? null,
+            sandboxPolicy: t.sandboxPolicy ?? null,
+            approvalsReviewer: t.approvalsReviewer ?? null,
+          }),
+        ];
       }
       case "error": {
         const p = n.params as ErrorNotification;
