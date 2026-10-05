@@ -1,15 +1,14 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { RuntimeCatalog } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
-import { eventually, type FakeDevice, sleep } from "../../testing-device";
+import { eventually, type FakeDevice } from "../../testing-device";
 import {
   CLAUDE_CATALOG,
   CODEX_CATALOG,
   connectWithProject,
   errorCode,
-  invite,
   pairDevice,
   startSession,
 } from "../../testing-workzone";
@@ -26,9 +25,6 @@ const ADMIN = { name: "Víctor Ruiz", email: "victor@example.test", password: "c
 let stack: TestStack;
 let su: pg.Client;
 let admin: TestClient;
-let sam: TestClient;
-let samId: string;
-let orgId: string;
 let device: FakeDevice;
 let deviceId: string;
 let projectId: string;
@@ -40,14 +36,16 @@ type CommandResult = {
   kind: "settings" | "prompt" | "refused";
   command: string;
   notice: string;
-  session?: { model: string | null; permissionMode: string; settings: { requested: Record<string, unknown> } };
+  session?: {
+    model: string | null;
+    permissionMode: string;
+    settings: { requested: Record<string, unknown> };
+  };
   prompt?: { id: string; body: string; status: string };
 };
 
 const command = (as: TestClient, id: string, text: string) =>
   as.request("POST", `/api/v1/work-sessions/${id}/commands`, { text });
-const prompt = (as: TestClient, id: string, body: string) =>
-  as.request("POST", `/api/v1/work-sessions/${id}/prompts`, { body });
 
 async function putPolicy(body: Record<string, unknown>) {
   const res = await admin.request("PUT", "/api/v1/work-zone-policy", body);
@@ -73,13 +71,6 @@ async function audits(action: string, id: string) {
   ).rows as Array<{ result: string; metadata: Record<string, unknown>; user_id: string | null }>;
 }
 
-const lastDenial = async () =>
-  (
-    await su.query(
-      "select metadata from app.audit_events where action = 'authz.denied' and metadata->>'permission' = 'work_session.configure' order by occurred_at desc limit 1",
-    )
-  ).rows[0]?.metadata as Record<string, unknown> | undefined;
-
 const promptCount = async (id: string) =>
   (await su.query("select count(*)::int as n from app.work_prompts where work_session_id = $1", [id])).rows[0]
     .n as number;
@@ -95,15 +86,12 @@ beforeAll(async () => {
     orgName: "Autofy Labs",
   });
   expect(setup.status).toBe(200);
-  ({ client: sam, userId: samId } = await invite(stack, admin, "sam@example.test", "Sam", "developer"));
   const paired = await pairDevice(stack, admin, "Víctor's MacBook");
   deviceId = paired.deviceId;
   ({ device, projectId } = await connectWithProject(stack, admin, paired.token, {
     localId: "lp_slash",
     name: "ocw",
   }));
-  orgId = (await su.query("select organization_id from app.devices where id = $1", [deviceId])).rows[0]
-    .organization_id as string;
   await optIn(false);
   sessionId = await startSession(admin, device, projectId, { title: "Slash" });
 }, 180_000);
@@ -137,7 +125,11 @@ describe("settings commands go through the settings path (Task 1, D-13, WZC-01)"
     await putPolicy({ allowFastMode: true });
     const on = await command(admin, sessionId, "/fast on");
     expect(on.status, JSON.stringify(on.body)).toBe(200);
-    expect(on.body).toMatchObject({ kind: "settings", command: "fast", notice: "Fast mode on — applies to the next turn" });
+    expect(on.body).toMatchObject({
+      kind: "settings",
+      command: "fast",
+      notice: "Fast mode on — applies to the next turn",
+    });
     const cmdOn = await device.command("session.configure", sessionId);
     expect(cmdOn.payload).toEqual({ settings: { fastMode: true }, reason: "slash_command" });
     device.ack(cmdOn.id);
@@ -183,9 +175,11 @@ describe("settings commands go through the settings path (Task 1, D-13, WZC-01)"
   it("/model nope is refused exactly like the menu (403 not_in_catalog); bad arguments are a 400", async () => {
     const res = await command(admin, sessionId, "/model nope");
     expect([res.status, errorCode(res)]).toEqual([403, "not_in_catalog"]);
-    const bad = await command(admin, sessionId, "/effort loud");
+    const bad = await command(admin, sessionId, "/fast maybe");
     expect([bad.status, errorCode(bad)]).toEqual([400, "bad_command"]);
-    expect((bad.body?.error as { message?: string }).message).toBe("Usage: /effort <level|default>");
+    expect((bad.body?.error as { message?: string } | undefined)?.message).toBe(
+      "Usage: /fast on|off",
+    );
     expect(device.pending("session.configure")).toHaveLength(0);
   });
 });

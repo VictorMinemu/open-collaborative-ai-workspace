@@ -10,6 +10,8 @@ import {
   RuntimeControls,
   RuntimeId,
   RuntimeInfo,
+  SessionCommandRequest,
+  SessionCommandResult,
   SessionControls,
   type SessionSettingsPatch,
   UpdatePromptRequest,
@@ -53,6 +55,7 @@ import { loadControlsContext } from "./context";
 import {
   buildRuntimeControls,
   buildSessionControls,
+  type ControlsContext,
   decideSettings,
   highestAvailableMode,
   pickSettings,
@@ -61,6 +64,7 @@ import {
 } from "./controls";
 import { knownModels, loadWorkZonePolicy, saveWorkZonePolicy } from "./policy";
 import { type SessionRow, type WorkSessionService, wsTopic } from "./service";
+import { runSessionCommand } from "./slash";
 
 const SessionParams = z.object({ id: z.uuid() });
 const PromptParams = z.object({ id: z.uuid(), pid: z.uuid() });
@@ -471,6 +475,91 @@ export function registerWorkSessionRoutes(
     return p!;
   }
 
+  /**
+   * The one settings path (D-07, D-13, ADR-0012): `PATCH /settings` and settings slash commands. Call with the
+   * session LOCKED and `work_session.configure` asserted. Policy ∩ opt-in ∩ cap ∩ grain ∩ catalog decide; the
+   * change is stored, sent to the device as `session.configure`, audited (with its `source`) and emitted live.
+   */
+  async function applySettingsChange(
+    req: FastifyRequest,
+    tx: Tx,
+    s: SessionRow,
+    patch: SessionSettingsPatch,
+    source: "user" | "slash_command",
+  ): Promise<{ session: WorkSession; ctx: ControlsContext; changed: boolean }> {
+    const auth = authOf(req);
+    if (s.status === "archived") throw conflict("This session is archived", "session_archived");
+    const current = requestedSettings(s);
+    const ctx = await controlsFor(tx, auth, s.deviceId, s.runtime, true);
+    const decision = decideSettings(current, patch, s.runtime, ctx);
+    if (!decision.ok) throw settingsDenied(decision.field, decision.reason);
+    const keys = [...decision.changed, ...decision.adjusted];
+    if (keys.length === 0) return { session: (await svc.session(tx, s.id))!, ctx, changed: false };
+    const next = decision.next;
+    await tx
+      .update(workSessions)
+      .set({
+        model: next.model ?? null,
+        permissionMode: next.permissionMode ?? s.permissionMode,
+        settings: storedSettings(next),
+        settingsPending: true,
+        updatedAt: sql`now()`,
+      })
+      .where(eq(workSessions.id, s.id));
+    // D-14: the device holds the change until the running turn ends and applies it before the next one.
+    await hub.enqueue(tx, {
+      deviceId: s.deviceId,
+      workSessionId: s.id,
+      kind: "session.configure",
+      payload: { settings: pickSettings(next, keys), reason: source },
+    });
+    await core.audit.record(tx, {
+      action: "work_session.settings_changed",
+      resourceType: "work_session",
+      resourceId: s.id,
+      sessionId: s.id,
+      deviceId: s.deviceId,
+      clientKind: auth.clientKind,
+      metadata: {
+        changed: decision.changed,
+        from: pickSettings(current, keys),
+        to: pickSettings(next, keys),
+        adjusted: decision.adjusted,
+        source,
+      },
+    });
+    // D-04: entering and leaving Full access are audited on their own (actor, device, session, org).
+    const from = current.permissionMode;
+    const to = next.permissionMode ?? from;
+    if ((from === "fullAccess") !== (to === "fullAccess")) {
+      await core.audit.record(tx, {
+        action: to === "fullAccess" ? "work_session.full_access_entered" : "work_session.full_access_left",
+        resourceType: "work_session",
+        resourceId: s.id,
+        sessionId: s.id,
+        deviceId: s.deviceId,
+        clientKind: auth.clientKind,
+        metadata: { from, to, source },
+      });
+    }
+    return { session: (await svc.emitSession(tx, s.id))!, ctx, changed: true };
+  }
+
+  /**
+   * Queue a prompt from the caller and dispatch it (or restart a finished session). Call with the session LOCKED
+   * and `work_session.prompt` asserted.
+   */
+  async function submitPrompt(req: FastifyRequest, tx: Tx, s: SessionRow, body: string): Promise<WorkPrompt> {
+    const auth = authOf(req);
+    if (s.status === "archived") throw conflict("This session is archived", "session_archived");
+    await joinConversation(tx, auth, s);
+    const p = await queuePrompt(tx, auth, s, body);
+    if (s.status === "failed" || s.status === "completed") await svc.restart(tx, s);
+    else await svc.tryDispatch(tx, s);
+    await svc.emitSession(tx, s.id);
+    return (await svc.prompts(tx, s.id)).find((x) => x.id === p.id)!;
+  }
+
   app.get(
     "/work-sessions/:id",
     { ...user, schema: { tags, params: SessionParams, response: { 200: WorkSessionDetail } } },
@@ -520,17 +609,32 @@ export function registerWorkSessionRoutes(
     },
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
-        const auth = authOf(req);
         const s = await lockedFor(req, tx, req.params.id, "work_session.prompt");
-        if (s.status === "archived") throw conflict("This session is archived", "session_archived");
-        await joinConversation(tx, auth, s);
-        const p = await queuePrompt(tx, auth, s, req.body.body);
-        if (s.status === "failed" || s.status === "completed") await svc.restart(tx, s);
-        else await svc.tryDispatch(tx, s);
-        await svc.emitSession(tx, s.id);
-        const [fresh] = await tx.select().from(workPrompts).where(eq(workPrompts.id, p.id));
-        return (await svc.prompts(tx, s.id)).find((x) => x.id === fresh!.id)!;
+        return submitPrompt(req, tx, s, req.body.body);
       }),
+  );
+
+  app.post(
+    "/work-sessions/:id/commands",
+    {
+      ...user,
+      schema: {
+        tags,
+        params: SessionParams,
+        body: SessionCommandRequest,
+        response: { 200: SessionCommandResult },
+      },
+    },
+    async (req) =>
+      core.db.withTenant(tenant(req), (tx) =>
+        runSessionCommand(
+          req,
+          tx,
+          { core, locked, lockedFor, applySettingsChange, submitPrompt },
+          req.params.id,
+          req.body.text,
+        ),
+      ),
   );
 
   async function updatePrompt(
@@ -801,68 +905,8 @@ export function registerWorkSessionRoutes(
     },
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
-        const auth = authOf(req);
         const s = await lockedFor(req, tx, req.params.id, "work_session.configure");
-        if (s.status === "archived") throw conflict("This session is archived", "session_archived");
-        const current = requestedSettings(s);
-        const decision = decideSettings(
-          current,
-          req.body,
-          s.runtime,
-          await controlsFor(tx, auth, s.deviceId, s.runtime, true),
-        );
-        if (!decision.ok) throw settingsDenied(decision.field, decision.reason);
-        const keys = [...decision.changed, ...decision.adjusted];
-        if (keys.length === 0) return (await svc.session(tx, s.id))!;
-        const next = decision.next;
-        await tx
-          .update(workSessions)
-          .set({
-            model: next.model ?? null,
-            permissionMode: next.permissionMode ?? s.permissionMode,
-            settings: storedSettings(next),
-            settingsPending: true,
-            updatedAt: sql`now()`,
-          })
-          .where(eq(workSessions.id, s.id));
-        // D-14: the device holds the change until the running turn ends and applies it before the next one.
-        await hub.enqueue(tx, {
-          deviceId: s.deviceId,
-          workSessionId: s.id,
-          kind: "session.configure",
-          payload: { settings: pickSettings(next, keys), reason: "user" },
-        });
-        await core.audit.record(tx, {
-          action: "work_session.settings_changed",
-          resourceType: "work_session",
-          resourceId: s.id,
-          sessionId: s.id,
-          deviceId: s.deviceId,
-          clientKind: auth.clientKind,
-          metadata: {
-            changed: decision.changed,
-            from: pickSettings(current, keys),
-            to: pickSettings(next, keys),
-            adjusted: decision.adjusted,
-            source: "user",
-          },
-        });
-        // D-04: entering and leaving Full access are audited on their own (actor, device, session, org).
-        const from = current.permissionMode;
-        const to = next.permissionMode ?? from;
-        if ((from === "fullAccess") !== (to === "fullAccess")) {
-          await core.audit.record(tx, {
-            action:
-              to === "fullAccess" ? "work_session.full_access_entered" : "work_session.full_access_left",
-            resourceType: "work_session",
-            resourceId: s.id,
-            sessionId: s.id,
-            deviceId: s.deviceId,
-            clientKind: auth.clientKind,
-            metadata: { from, to, source: "user" },
-          });
-        }
-        return (await svc.emitSession(tx, s.id))!;
+        return (await applySettingsChange(req, tx, s, req.body, "user")).session;
       }),
   );
 
