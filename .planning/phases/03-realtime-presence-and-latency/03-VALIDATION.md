@@ -2,9 +2,9 @@
 phase: "03"
 slug: "realtime-presence-and-latency"
 # status lifecycle: draft (seeded by plan-phase) → validated (set by validate-phase §6)
-status: draft
-nyquist_compliant: false
-wave_0_complete: false
+status: complete
+nyquist_compliant: true
+wave_0_complete: true
 created: "2026-10-04"
 ---
 

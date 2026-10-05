@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-02)
 
 **Core value:** AI sessions are multiplayer — a private AI chat or coding session can be shared live with colleagues, the model knows who each participant is, and everything stays attributed and auditable.
-**Current focus:** Phase 3 — Realtime Presence and Latency
+**Current focus:** Phase 3.1 — Personal Bots and Bot Capabilities (incl. MCP + OpenClaw Marketplace)
 
 ## Current Position
 
-Phase: 3 (Realtime Presence and Latency) — EXECUTING
-Plan: 1 of 6
-Status: Executing Phase 3
-Last activity: 2026-10-04 — Phase 3 execution started
+Phase: 3.1 (Personal Bots and Bot Capabilities) — planned (15 plans), executes after Phase 3 merges
+Plan: 0 of 15
+Status: Phase 3 complete and verified (6/6 plans, 591 tests, e2e 42/42, p95 < 20 ms); Phase 3.1 planned
+Last activity: 2026-10-05 - Phase 3 (Realtime Presence and Latency) executed and verified: presence + away, <500 ms latency in CI, live re-authorization of subscriptions
 
 Progress: [░░░░░░░░░░] 0%
 

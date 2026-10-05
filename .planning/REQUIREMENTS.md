@@ -68,10 +68,10 @@ SLICE-06…18 were added on 2026-10-04 after the code audit of the widened demo 
 
 ### Realtime (RT)
 
-- [ ] **RT-01**: Client keeps one authenticated WebSocket and subscribes to topics it is authorised for; authorisation is re-evaluated when membership changes (PRD §85)
+- [x] **RT-01**: Client keeps one authenticated WebSocket and subscribes to topics it is authorised for; authorisation is re-evaluated when membership changes (PRD §85)
 - [x] **RT-02**: Every durable event is persisted with a per-stream monotonic `seq` before being published over Redis; a reconnecting client replays from `afterSeq` and never loses or duplicates events (PRD §97)
-- [ ] **RT-03**: Typical propagation of collaborative events between two connected clients is under 500 ms, measured in an automated test against the compose stack (PRD §85)
-- [ ] **RT-04**: Presence (online/away) and typing indicators are visible per conversation and expire automatically when a client disappears
+- [x] **RT-03**: Typical propagation of collaborative events between two connected clients is under 500 ms, measured in an automated test against the compose stack (PRD §85)
+- [x] **RT-04**: Presence (online/away) and typing indicators are visible per conversation and expire automatically when a client disappears
 - [x] **RT-05**: A shared realtime client package handles reconnect with backoff, resume, and exposes stores consumed by web and desktop
 
 ### Chat (CHAT)
@@ -324,10 +324,10 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | ORG-04 | Phase 2 | Delivered | e2e admin-members.spec + admin-org.spec (Settings › Members / Organization CRUD) |
 | ORG-05 | Phase 2 | Delivered | same-tx audit across identity/org/units/rules/members; failed sign-in + sign-out audited (sessions.int.test.ts); denials audited |
 | ORG-06 | Phase 2 | Delivered | identity/profile.int.test.ts (member.updated emitted), e2e account.spec (name, emoji avatar, status visible across the app) |
-| RT-01 | Phase 3 | Partial | One WS with deny-by-default topic authorizers (SLICE-07); not re-evaluated on membership change |
+| RT-01 | Phase 3 | Delivered | realtime-reauth.int.test.ts (removal, leave, role/rule/unit invalidators, 5-min backstop), e2e realtime-access.spec, ADR-0009 |
 | RT-02 | Phase 1 | Delivered | `identity.int.test.ts` WS replay exactly once; realtime-client "requests replay on gap and resumes after reconnect" |
-| RT-03 | Phase 3 | Pending | No latency test |
-| RT-04 | Phase 3 | Partial | Typing indicators with expiry (people and bots); no presence |
+| RT-03 | Phase 3 | Delivered | e2e realtime-latency.spec (two real browsers, p95 message 19.6 ms / typing 4.3 ms / presence 4.6 ms vs 500 ms budget; CI artifact) |
+| RT-04 | Phase 3 | Delivered | realtime-presence.int.test.ts (expiry, dead peer, crashed instance), e2e presence.spec + presence-away.spec (header, members, Work Zone) |
 | RT-05 | Phase 1 | Delivered | `packages/realtime-client` (`client.test.ts`) used by web; desktop renders the web app |
 | CHAT-01 | Phase 1 | Delivered | `chat.int.test.ts` channels suite (public/private, join, archive by owner/admin); leave route; `chat.spec.ts` create + join in UI |
 | BOT-01 | Phase 3.1 | Pending | New (owner request 2026-10-04) |

@@ -55,7 +55,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **MVP 1 — Collaborative Workspace**
 
 - [x] **Phase 2: Identity and Organization** - Password reset, session management, org hierarchy with four roles, one effective-permission resolver adopted by every Phase 1 route (chat, bots, devices, Work Zone, realtime), JWT/JWKS auth, admin console, profiles and the remaining audit gaps
-- [ ] **Phase 3: Realtime Presence and Latency** - Subscription re-authorisation on membership change, sub-500 ms propagation test on the compose stack, presence with expiry (typing already ships)
+- [x] **Phase 3: Realtime Presence and Latency** - Subscription re-authorisation on membership change, sub-500 ms propagation test on the compose stack, presence with expiry (typing already ships)
 - [ ] **Phase 4: Chat** - Completes chat on the Phase 1 channels and threads: grouped sidebar and views, DMs, one shared Markdown renderer, edit/delete, reactions, @channel/@here and notifications, badges, search, attachments (adds S3-compatible object storage), pins and permalinks
 - [ ] **Phase 5: Direct AI Chat** - Private streaming AI chats with model choice, stop, regenerate, titles, instructions, usage metering and attachments; Phase 1 provider settings move to `SecretReference`s and govern AI chats and bots
 - [ ] **Phase 6: Multiplayer AI Chat, Shared-Context Safety and Agents** - AI chats shared in place from a person to the whole organization, several humans and the model with structural identity and one generation at a time (Scenario B steps 1–4), intersected tool permissions, no private memory in multi-human chats, the spoofing eval, full agent personas in DMs and AI chats, Agent Cards
@@ -451,7 +451,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 ‖
 |-------|-----------|----------------|--------|-----------|
 | 1. MVP 0 — Collaborative Workspace Demo Slice | MVP 0 | built from 01-BUILD-SPEC.md (no plans) | Executed, demo-verified; formal verification pending | - |
 | 2. Identity and Organization | MVP 1 | 15/15 | Complete | 2026-10-04 |
-| 3. Realtime Presence and Latency | MVP 1 | 0/6 | Planned | - |
+| 3. Realtime Presence and Latency | MVP 1 | 6/6 | Complete | 2026-10-05 |
 | 4. Chat | MVP 1 | 0/TBD | Not started | - |
 | 5. Direct AI Chat | MVP 1 | 0/TBD | Not started | - |
 | 6. Multiplayer AI Chat, Shared-Context Safety and Agents | MVP 1 | 0/TBD | Not started | - |
