@@ -119,7 +119,7 @@ describe("registry (D-13, BOT-08)", () => {
     });
     expect(body.safeName).toMatch(/^m[0-9a-f]{8}$/);
     // The credential never comes back.
-    expect(JSON.stringify(body)).not.toContain(SECRET);
+    expect(JSON.stringify(body)).not.toContain("s3cr3t-token");
 
     const stored = (await su.query("select headers from app.mcp_servers where id = $1", [docsId]))
       .rows[0] as Json;
@@ -143,7 +143,7 @@ describe("registry (D-13, BOT-08)", () => {
     const allAudits = (
       await su.query("select metadata from app.audit_events where organization_id = $1", [orgId])
     ).rows;
-    expect(JSON.stringify(allAudits)).not.toContain(SECRET);
+    expect(JSON.stringify(allAudits)).not.toContain("s3cr3t-token");
     const probes = await cellEvents("mcp.probe");
     expect(probes).toHaveLength(1);
     expect(probes[0]).toMatchObject({
@@ -152,7 +152,7 @@ describe("registry (D-13, BOT-08)", () => {
       cellId: orgId,
       serverId: docsId,
     });
-    expect(JSON.stringify(probes)).not.toContain(SECRET);
+    expect(JSON.stringify(probes)).not.toContain("s3cr3t-token");
     expect((await cellEvents("cell.config.changed")).at(-1)).toMatchObject({ reason: "tools.updated" });
     expect(logLines.join("\n")).not.toContain(SECRET);
   });
