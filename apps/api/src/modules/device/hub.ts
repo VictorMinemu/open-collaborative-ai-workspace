@@ -43,6 +43,15 @@ export interface DeviceSessionHandler {
   ): Promise<void>;
   /** A `diff.result` for a session's `diff.request` (also relayed to any waiting requester). */
   onDiffResult(device: DeviceRef, workSessionId: string, frame: DiffResultFrame): Promise<void>;
+  /**
+   * Who may use the device, or what it allows, changed (ADR-0012): re-check its live sessions — downgrade them
+   * (`session.configure`) or stop the ones whose creator lost access. Called after a device opt-out and by the
+   * grant routes (Plan 05).
+   */
+  onAccessChanged(
+    device: { deviceId: string; organizationId: string },
+    reason: "policy" | "access_changed" | "device_opt_out",
+  ): Promise<void>;
 }
 
 export interface EnqueueCommand {
@@ -244,19 +253,30 @@ export class DeviceHub {
    * authenticated device socket; no user route can set either column (T-03.2-01-07).
    */
   async onCapabilities(device: DeviceRef, frame: CapabilitiesFrame): Promise<void> {
-    await this.opts.db.withTenant({ organizationId: device.organizationId, userId: null }, async (tx) => {
-      const rows = await tx
-        .update(devices)
-        .set({ runtimeCatalog: frame.catalogs, fullAccessOptIn: frame.fullAccessOptIn })
-        .where(eq(devices.id, device.deviceId))
-        .returning({ status: devices.status });
-      if (rows.length === 0) return;
-      await this.opts.realtime.appendEvent(tx, `org:${device.organizationId}`, EventTypes.deviceUpdated, {
-        deviceId: device.deviceId,
-        status: rows[0]!.status,
-        changed: true,
-      });
-    });
+    const optedOut = await this.opts.db.withTenant(
+      { organizationId: device.organizationId, userId: null },
+      async (tx) => {
+        const [before] = await tx
+          .select({ optIn: devices.fullAccessOptIn })
+          .from(devices)
+          .where(eq(devices.id, device.deviceId))
+          .for("update");
+        if (!before) return false;
+        const rows = await tx
+          .update(devices)
+          .set({ runtimeCatalog: frame.catalogs, fullAccessOptIn: frame.fullAccessOptIn })
+          .where(eq(devices.id, device.deviceId))
+          .returning({ status: devices.status });
+        await this.opts.realtime.appendEvent(tx, `org:${device.organizationId}`, EventTypes.deviceUpdated, {
+          deviceId: device.deviceId,
+          status: rows[0]!.status,
+          changed: true,
+        });
+        return before.optIn && !frame.fullAccessOptIn;
+      },
+    );
+    // ADR-0012: the owner turned Full access off on the device: its live sessions leave Full access now.
+    if (optedOut) await this.handler?.onAccessChanged(device, "device_opt_out");
   }
 
   async onAck(device: DeviceRef, frame: AckFrame): Promise<void> {

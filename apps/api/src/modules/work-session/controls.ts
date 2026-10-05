@@ -354,7 +354,8 @@ export function turnMode(
 
 /**
  * Lower a requested settings value to what `controls` (built for the session's model) allow: the mode to the
- * highest available mode at or below it (the lowest available one when none is below), the model to the catalog
+ * highest available mode at or below it (never raised: when none is below it stays, and every turn is refused at
+ * dispatch until a controller picks an allowed mode), the model to the catalog
  * default when it is no longer available, and effort / context window / fast mode back to the runtime default
  * when unavailable. Used when a policy, an opt-in or a member's access tightens (ADR-0012).
  */
@@ -398,12 +399,10 @@ export function clampToControls(
     const requestedMode = next.permissionMode;
     const available = controls.permissionModes.filter((m) => m.available).map((m) => m.value);
     if (!available.includes(requestedMode)) {
-      const below = available
-        .filter((m) => PERMISSION_MODE_RANK[m] <= PERMISSION_MODE_RANK[requestedMode])
-        .sort((a, b) => PERMISSION_MODE_RANK[b] - PERMISSION_MODE_RANK[a]);
-      const lowest = [...available].sort((a, b) => PERMISSION_MODE_RANK[a] - PERMISSION_MODE_RANK[b]);
-      const target = below[0] ?? lowest[0];
-      if (target && target !== requestedMode) {
+      const target = available
+        .filter((m) => PERMISSION_MODE_RANK[m] < PERMISSION_MODE_RANK[requestedMode])
+        .sort((a, b) => PERMISSION_MODE_RANK[b] - PERMISSION_MODE_RANK[a])[0];
+      if (target) {
         next.permissionMode = target;
         changed.push("permissionMode");
       }

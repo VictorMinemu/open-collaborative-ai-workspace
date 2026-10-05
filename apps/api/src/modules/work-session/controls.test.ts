@@ -277,6 +277,16 @@ describe("clampToControls", () => {
     expect(changed).toEqual(["effort"]);
   });
 
+  it("a mode is never raised: with nothing available below it, it stays (turns are refused at dispatch)", () => {
+    const c = ctx({ policy: { ...ctx().policy, allowedPermissionModes: ["acceptEdits"] } });
+    const { next, changed } = clampToControls(
+      { model: "big", effort: null, contextWindow: null, fastMode: false, permissionMode: "plan" },
+      buildRuntimeControls("codex", c, "big"),
+    );
+    expect(next.permissionMode).toBe("plan");
+    expect(changed).toEqual([]);
+  });
+
   it("nothing to lower → no change", () => {
     const { changed } = clampToControls(
       { model: "big", effort: "low", contextWindow: null, fastMode: false, permissionMode: "default" },

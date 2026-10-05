@@ -88,7 +88,7 @@ const idle = (id: string) => eventually(async () => (await sessionRow(id)).statu
 async function auditOf(action: string, where: { promptId?: string; sessionId?: string }) {
   const rows = await su.query(
     `select result, metadata, user_id, device_id, session_id from app.audit_events where action = $1
-       and ($2::text is null or metadata->>'promptId' = $2) and ($3::uuid is null or session_id = $3)
+       and ($2::text is null or metadata->>'promptId' = $2) and ($3::text is null or session_id = $3)
      order by occurred_at`,
     [action, where.promptId ?? null, where.sessionId ?? null],
   );
@@ -312,7 +312,11 @@ describe("downgrades (ADR-0012)", () => {
         "select payload from app.stream_events where stream_id = $1 and type = 'work_session.updated' order by seq desc limit 1",
         [`ws:${id}`],
       );
-      expect(emitted.rows[0].payload).toMatchObject({ permissionMode: OWNER_TOP, fullAccess: false });
+      // The badge stays until the device reports the lower mode (the effective value still says Full access).
+      expect(emitted.rows[0].payload).toMatchObject({
+        permissionMode: OWNER_TOP,
+        settings: { pending: true, requested: { permissionMode: OWNER_TOP } },
+      });
     }
     // s2 (acceptEdits) was within the new policy: untouched.
     await sleep(200);

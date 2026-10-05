@@ -6,7 +6,8 @@ import { createPermissionService, workSessionResource } from "../organization";
 import { registerWorkSessionRoutes } from "./routes";
 import { WorkSessionService } from "./service";
 
-export { ACTIVE_STATES, WorkSessionService, wsTopic } from "./service";
+export { loadWorkZonePolicy } from "./policy";
+export { ACTIVE_STATES, type ReauthorizeReason, WorkSessionService, wsTopic } from "./service";
 
 /**
  * work-session module: Work Zone sessions on a paired device, the shared prompt queue with its server-side
@@ -14,17 +15,18 @@ export { ACTIVE_STATES, WorkSessionService, wsTopic } from "./service";
  * Event Protocol events from the Device Link (it is the device hub's session handler).
  */
 export function createWorkSessionModule(core: Core, hub: DeviceHub): ApiModule {
+  const perms = createPermissionService(core);
   const service = new WorkSessionService({
     db: core.db,
     realtime: core.realtime,
     audit: core.audit,
     hub,
     log: core.log,
+    perms,
   });
   hub.setSessionHandler(service);
 
   // Following a session's stream is `work_session.read` on that session (RLS scopes the lookup to the org).
-  const perms = createPermissionService(core);
   core.realtime.registerTopicAuthorizer("ws", async (auth, workSessionId) =>
     core.db.withTenant({ organizationId: auth.organizationId, userId: auth.userId }, async (tx) => {
       const [row] = await tx

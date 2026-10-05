@@ -249,6 +249,8 @@ export function registerWorkSessionRoutes(
             clientKind: auth.clientKind,
             metadata: { changed },
           });
+          // ADR-0012: a tighter policy reaches live sessions at once (downgrade, audited, device told).
+          await svc.reauthorizeOrg(tx, "policy");
         }
         return policyView(tx, policy);
       }),
