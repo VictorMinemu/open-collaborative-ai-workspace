@@ -82,10 +82,37 @@ jobs:
           retention-days: 7
 
   images:
-    name: docker images (api, web)
+    name: docker images (api, web, openclaw cell)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
+      # The OpenClaw base image is ~5 GB unpacked; make room on the hosted runner first.
+      - name: Free runner disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
       - run: docker build -f apps/api/Dockerfile -t ocw-api:ci .
       - run: docker build -f apps/web/Dockerfile -t ocw-web:ci .
+      # The shipped cell image with the bundled search plugins (pinned + sha512-checked at build time).
+      - run: docker build -f infra/openclaw/Dockerfile -t ocw-openclaw:ci .
+
+  cell-smoke:
+    name: openclaw cell smoke (real container, offline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: Free runner disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - name: Renderer and fake model unit tests
+        run: node --test 'infra/**/*.test.mjs'
+      - name: Build the plugin
+        run: pnpm --filter @ocw/openclaw-channel build
+      # Real OpenClaw 2026.9.7 cell (image built here from infra/openclaw/Dockerfile) + the working-tree
+      # plugin + fake model + fake Agent Channel API on an egress-less network: no real model, no real web.
+      - name: Container smoke (all scenarios)
+        run: SMOKE_BUILD=1 bash infra/openclaw/test/run-container-smoke.sh

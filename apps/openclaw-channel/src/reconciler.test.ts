@@ -1,8 +1,10 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { CellAgent, CellProvider, CellSubscription } from "./agent-channel-protocol.js";
 import {
+  agentStateDirFor,
   applyPlanToDraft,
-  DENIED_TOOLS,
+  DANGEROUS_TOOLS,
   desiredAgentEntry,
   desiredProviderEntry,
   envRef,
@@ -48,7 +50,7 @@ describe("planReconcile", () => {
     const plan = planReconcile({}, { agents: [agent("a")], providers: [ANTHROPIC] });
     expect(plan.changed).toBe(true);
     expect(plan.upsertAgents["ocw-a"]).toEqual(desiredAgentEntry(agent("a")));
-    expect(plan.upsertAgents["ocw-a"]?.tools).toEqual({ profile: "minimal", deny: [...DENIED_TOOLS] });
+    expect(plan.upsertAgents["ocw-a"]?.tools).toEqual({ profile: "minimal", deny: [...DANGEROUS_TOOLS] });
     expect(plan.upsertAgents["ocw-a"]?.model).toEqual({
       primary: "anthropic/claude-sonnet-5-5",
       fallbacks: [],
@@ -148,7 +150,7 @@ describe("planReconcile: ChatGPT subscription", () => {
     expect(plan.upsertAgents["ocw-c"]?.models).toEqual({
       "openai/gpt-6-astra": { agentRuntime: { id: "openclaw" } },
     });
-    expect(plan.upsertAgents["ocw-c"]?.tools).toEqual({ profile: "minimal", deny: [...DENIED_TOOLS] });
+    expect(plan.upsertAgents["ocw-c"]?.tools).toEqual({ profile: "minimal", deny: [...DANGEROUS_TOOLS] });
     expect(plan.upsertProviders).toEqual({});
     expect(plan.env).toEqual({});
     expect(plan.results).toEqual([{ agentId: "c", status: "ready" }]);
@@ -226,6 +228,82 @@ describe("planReconcile: ChatGPT subscription", () => {
   });
 });
 
+describe("capabilities in the cell (D-08 layer 1, D-09)", () => {
+  it("each bot is minimal + alsoAllow <its tools> + the dangerous denies; no alsoAllow key when it has none", () => {
+    const plan = planReconcile(
+      {},
+      {
+        agents: [
+          agent("w", { capabilities: { tools: ["web_search", "web_fetch"] } }),
+          agent("q", { capabilities: { tools: [] } }),
+          agent("o"),
+        ],
+        providers: [ANTHROPIC],
+      },
+    );
+    expect(plan.upsertAgents["ocw-w"]?.tools).toEqual({
+      profile: "minimal",
+      alsoAllow: ["web_search", "web_fetch"],
+      deny: [...DANGEROUS_TOOLS],
+    });
+    expect(plan.upsertAgents["ocw-q"]?.tools).toEqual({ profile: "minimal", deny: [...DANGEROUS_TOOLS] });
+    expect(plan.upsertAgents["ocw-o"]?.tools).toEqual({ profile: "minimal", deny: [...DANGEROUS_TOOLS] });
+  });
+
+  it("never configures a dangerous tool even if the snapshot lists one", () => {
+    const plan = planReconcile(
+      {},
+      {
+        agents: [agent("x", { capabilities: { tools: ["web_search", "exec", "group:fs"] } })],
+        providers: [ANTHROPIC],
+      },
+    );
+    expect(plan.upsertAgents["ocw-x"]?.tools).toMatchObject({ alsoAllow: ["web_search"] });
+  });
+
+  it("losing a tool re-provisions the agent without it", () => {
+    const before = desiredAgentEntry(agent("w", { capabilities: { tools: ["web_search", "web_fetch"] } }));
+    const plan = planReconcile(
+      { agents: { "ocw-w": before } },
+      { agents: [agent("w", { capabilities: { tools: [] } })], providers: [ANTHROPIC] },
+    );
+    expect(plan.upsertAgents["ocw-w"]?.tools).toEqual({ profile: "minimal", deny: [...DANGEROUS_TOOLS] });
+    const draft: MutableConfig = { agents: { entries: { "ocw-w": before } } };
+    applyPlanToDraft(draft, plan);
+    expect(draft.agents?.entries?.["ocw-w"]?.tools).toEqual({
+      profile: "minimal",
+      deny: [...DANGEROUS_TOOLS],
+    });
+  });
+
+  it("the snapshot's webSearch.provider becomes tools.web.search.provider when that plugin is loaded", () => {
+    const cell = { agents: [], providers: [], webSearch: { provider: "searxng" } };
+    const plan = planReconcile({ webSearchProvider: "duckduckgo" }, cell, {
+      searchProviders: new Set(["duckduckgo", "searxng"]),
+    });
+    expect(plan.webSearchProvider).toBe("searxng");
+    expect(plan.changed).toBe(true);
+    const draft: MutableConfig = {
+      tools: { profile: "minimal", web: { search: { enabled: true, provider: "duckduckgo" } } },
+    };
+    applyPlanToDraft(draft, plan);
+    expect(draft).toMatchObject({
+      tools: { profile: "minimal", web: { search: { enabled: true, provider: "searxng" } } },
+    });
+
+    // Already set → nothing to do; provider plugin not loaded in this cell → keep the current one.
+    expect(
+      planReconcile({ webSearchProvider: "searxng" }, cell, { searchProviders: new Set(["searxng"]) })
+        .changed,
+    ).toBe(false);
+    const missing = planReconcile({ webSearchProvider: "duckduckgo" }, cell, {
+      searchProviders: new Set(["duckduckgo"]),
+    });
+    expect(missing.webSearchProvider).toBeNull();
+    expect(missing.changed).toBe(false);
+  });
+});
+
 describe("applyPlanToDraft", () => {
   it("writes agents and providers, deletes removed agents, keeps foreign entries", () => {
     const draft: MutableConfig = {
@@ -238,5 +316,59 @@ describe("applyPlanToDraft", () => {
     applyPlanToDraft(draft, plan);
     expect(Object.keys(draft.agents?.entries ?? {}).sort()).toEqual(["main", "ocw-n"]);
     expect(draft.models?.providers?.fake?.baseUrl).toBe("http://fake-model:18999/v1");
+  });
+});
+
+describe("dangerous-tool parity (contracts ↔ render-config ↔ reconciler)", () => {
+  // Non-literal specifiers: these files live outside this package (and are not type-checked from here).
+  const renderConfigPath = new URL("../../../infra/openclaw/render-config.mjs", import.meta.url).href;
+  const contractsPath = new URL("../../../packages/contracts/src/bot-capabilities.ts", import.meta.url).href;
+
+  it("the three lists are identical, with no wildcard and no built-in tool", async () => {
+    const render = (await import(renderConfigPath)) as { DANGEROUS_TOOLS: string[] };
+    const contracts = (await import(contractsPath)) as {
+      DANGEROUS_TOOL_NAMES: readonly string[];
+      BUILTIN_TOOLS: Record<string, string>;
+      isDangerousToolName: (n: string) => boolean;
+    };
+    const sorted = (xs: readonly string[]) => [...xs].sort();
+    expect(sorted(render.DANGEROUS_TOOLS)).toEqual(sorted(contracts.DANGEROUS_TOOL_NAMES));
+    expect(sorted(DANGEROUS_TOOLS)).toEqual(sorted(contracts.DANGEROUS_TOOL_NAMES));
+    const builtins = Object.values(contracts.BUILTIN_TOOLS);
+    for (const list of [render.DANGEROUS_TOOLS, [...DANGEROUS_TOOLS], [...contracts.DANGEROUS_TOOL_NAMES]]) {
+      expect(list.some((t) => t.includes("*"))).toBe(false);
+      for (const b of builtins) expect(list).not.toContain(b);
+    }
+    for (const t of DANGEROUS_TOOLS) expect(contracts.isDangerousToolName(t)).toBe(true);
+  });
+});
+
+describe("transcript purge path (Pitfall 12)", () => {
+  const STATE = "/home/node/.openclaw";
+
+  it("is <stateDir>/agents/<id> for plugin-owned ocw-* agents", () => {
+    expect(agentStateDirFor(STATE, "ocw-0199a6f0-0000-7000-8000-00000000a001")).toBe(
+      path.join(STATE, "agents", "ocw-0199a6f0-0000-7000-8000-00000000a001"),
+    );
+  });
+
+  it("is null for foreign agents, traversal attempts and odd ids; never outside the state dir", () => {
+    for (const id of [
+      "main",
+      "work",
+      "ocw-",
+      "ocw-../../etc",
+      "ocw-a/b",
+      "../ocw-a",
+      "OCW-A",
+      "ocw-a b",
+      "",
+    ]) {
+      expect(agentStateDirFor(STATE, id)).toBeNull();
+    }
+    expect(agentStateDirFor("", "ocw-a")).toBeNull();
+    expect(agentStateDirFor("relative/state", "ocw-a")).toBeNull();
+    const dir = agentStateDirFor(STATE, "ocw-a1");
+    expect(dir?.startsWith(`${STATE}${path.sep}agents${path.sep}`)).toBe(true);
   });
 });

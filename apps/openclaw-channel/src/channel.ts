@@ -9,6 +9,7 @@ import { CHANNEL_ID, parseTarget } from "./mention-mapper.js";
 import { createOpenClawAuthDriver } from "./openclaw-auth.js";
 import { createOpenClawPort, type PluginRuntimeLike } from "./openclaw-port.js";
 import { createSubscriptionAuth } from "./subscription-auth.js";
+import { setToolGuardClient } from "./tool-guard.js";
 
 let pluginRuntime: PluginRuntimeLike | undefined;
 
@@ -76,7 +77,15 @@ async function startOcwAccount(ctx: ChannelGatewayContext<ResolvedOcwAccount>): 
     error: (m: string) => ctx.log?.error(`[ocw] ${m}`),
   };
   const client = createAgentChannelClient({ apiUrl: account.apiUrl, token: account.readToken });
-  const port = createOpenClawPort({ runtime, accountId: account.accountId, cfg: ctx.cfg, log });
+  // The tool gate (hooks registered in index.ts) asks the API through this account's client.
+  setToolGuardClient(client);
+  const port = createOpenClawPort({
+    runtime,
+    accountId: account.accountId,
+    cfg: ctx.cfg,
+    log,
+    stateDir: resolveStateDir(runtime),
+  });
   // Subscription sign-in (ChatGPT via Codex device code) runs here, inside OpenClaw (ADR-0006).
   const subscriptions = createSubscriptionAuth({
     client,

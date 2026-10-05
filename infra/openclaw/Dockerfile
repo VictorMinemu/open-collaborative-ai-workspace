@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1
-# OCW OpenClaw cell: the official OpenClaw 2026.9.7 image + our channel plugin + a locked-down config.
+# OCW OpenClaw cell: the official OpenClaw 2026.9.7 image + our channel plugin + the pinned official
+# keyless search plugins (DuckDuckGo, SearXNG) + a locked-down config.
 # Build from the repo root:  docker build -f infra/openclaw/Dockerfile -t ocw-openclaw:local .
 #
 # Pin the image tag AND digest together; bump both deliberately and re-run the contract suite
@@ -21,9 +22,16 @@ RUN npx tsc -p tsconfig.build.json \
  && npm install --omit=dev --omit=peer --no-package-lock --legacy-peer-deps --ignore-scripts --no-audit --no-fund \
  && rm -rf /out/node_modules/.package-lock.json
 
+# Official search plugins, exact versions + sha512 integrity from bundled-plugins.json, no lifecycle
+# scripts (T-03.1-SC). Network is used at build time only; the cell never installs at runtime.
+COPY infra/openclaw/bundled-plugins.json infra/openclaw/install-bundled-plugins.sh /src/bundled/
+RUN bash /src/bundled/install-bundled-plugins.sh /out-plugins /src/bundled/bundled-plugins.json
+
 FROM ${OPENCLAW_IMAGE}
 # Plugin code is root-owned and read-only for the gateway user (`node`).
 COPY --from=build --chown=root:root /out /opt/ocw/openclaw-channel
+# render-config.mjs loads /opt/ocw/plugins/<id>; a missing directory is skipped at boot, never fatal.
+COPY --from=build --chown=root:root /out-plugins /opt/ocw/plugins
 COPY --chown=root:root infra/openclaw/entrypoint.mjs infra/openclaw/render-config.mjs /opt/ocw/
 ENV OPENCLAW_STATE_DIR=/home/node/.openclaw \
     OPENCLAW_NO_AUTO_UPDATE=1 \

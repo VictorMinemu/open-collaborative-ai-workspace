@@ -1,0 +1,43 @@
+{
+  "eventId": "0199a6f0-0000-7000-8000-00000000e003",
+  "agent": { "id": "0199a6f0-0000-7000-8000-00000000a001", "handle": "archie", "displayName": "Archie" },
+  "conversation": { "id": "0199a6f0-0000-7000-8000-00000000c003", "kind": "channel", "name": "research" },
+  "thread": { "rootMessageId": "0199a6f0-0000-7000-8000-00000000d021" },
+  "message": {
+    "id": "0199a6f0-0000-7000-8000-00000000d021",
+    "text": "@archie what is new? [[call web_search {\"query\":\"ocw smoke\"}]]",
+    "createdAt": "2026-10-04T09:00:03.000Z",
+    "author": { "kind": "user", "id": "0199a6f0-0000-7000-8000-0000000000f1", "displayName": "Víctor Ruiz" },
+    "mentions": [{ "kind": "agent", "id": "0199a6f0-0000-7000-8000-00000000a001" }]
+  },
+  "threadHistory": [],
+  "roster": [
+    {
+      "kind": "user",
+      "id": "0199a6f0-0000-7000-8000-0000000000f1",
+      "displayName": "Víctor Ruiz",
+      "role": "owner"
+    },
+    {
+      "kind": "agent",
+      "id": "0199a6f0-0000-7000-8000-00000000a001",
+      "displayName": "Archie",
+      "handle": "archie"
+    }
+  ],
+  "turn": {
+    "tools": ["web_search", "web_fetch"],
+    "toolFlags": {
+      "web_search": { "untrustedOutput": true, "sideEffecting": false },
+      "web_fetch": { "untrustedOutput": true, "sideEffecting": false }
+    },
+    "memory": [],
+    "now": {
+      "iso": "2026-10-04T09:00:03.000Z",
+      "timeZone": "UTC",
+      "local": "Sunday 4 October 2026 at 09:00"
+    },
+    "maxToolCalls": 8,
+    "maxWebCalls": 5
+  }
+}

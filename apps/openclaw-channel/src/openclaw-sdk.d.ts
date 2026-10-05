@@ -67,13 +67,62 @@ declare module "openclaw/plugin-sdk/channel-core" {
     security?: Record<string, unknown>;
   }): ChannelPlugin<ResolvedAccount>;
 
+  /** `before_tool_call` / `after_tool_call` event (2026.9.7 docs/plugins/hooks/tool-policy.md, dist hook runner). */
+  export type PluginHookToolCallEvent = {
+    toolName: string;
+    params?: Record<string, unknown>;
+    toolCallId?: string;
+    runId?: string;
+    /** after_tool_call only. */
+    result?: unknown;
+    error?: unknown;
+    durationMs?: number;
+  };
+
+  export type PluginHookToolContext = {
+    toolName?: string;
+    agentId?: string;
+    sessionKey?: string;
+    sessionId?: string;
+    runId?: string;
+    toolCallId?: string;
+    /** Aborts when the owning tool call is cancelled (before_tool_call). */
+    abortSignal?: AbortSignal;
+    requester?: { channel?: string; accountId?: string; senderId?: string; senderIsOwner?: boolean };
+  };
+
+  export type BeforeToolCallResult = {
+    block?: boolean;
+    blockReason?: string;
+    params?: Record<string, unknown>;
+  };
+
+  export type HookOptions = { priority?: number; matcher?: string[]; timeoutMs?: number };
+
+  /** The subset of `OpenClawPluginApi` this plugin uses. */
+  export type OpenClawPluginApi = {
+    on(
+      hook: "before_tool_call",
+      handler: (
+        event: PluginHookToolCallEvent,
+        ctx: PluginHookToolContext,
+      ) => BeforeToolCallResult | undefined | Promise<BeforeToolCallResult | undefined>,
+      opts?: HookOptions,
+    ): void;
+    on(
+      hook: "after_tool_call",
+      handler: (event: PluginHookToolCallEvent, ctx: PluginHookToolContext) => void | Promise<void>,
+      opts?: HookOptions,
+    ): void;
+  };
+
   export function defineChannelPluginEntry<ResolvedAccount>(params: {
     id: string;
     name: string;
     description: string;
     plugin: ChannelPlugin<ResolvedAccount>;
     setRuntime?: (runtime: unknown) => void;
-    registerFull?: (api: unknown) => void;
+    registerFull?: (api: OpenClawPluginApi) => void;
   }): unknown;
 
   export function defineSetupPluginEntry<ResolvedAccount>(plugin: ChannelPlugin<ResolvedAccount>): unknown;

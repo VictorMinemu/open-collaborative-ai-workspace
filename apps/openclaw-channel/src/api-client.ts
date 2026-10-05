@@ -4,6 +4,9 @@ import {
   AgentChannelPostMessageResponse,
   type AgentChannelProviderAuthReport,
   type AgentChannelStatusReport,
+  AgentChannelToolCallDecision,
+  type AgentChannelToolCallRequest,
+  type AgentChannelToolCallResult,
   type AgentChannelTyping,
   CellSnapshot,
 } from "./agent-channel-protocol.js";
@@ -127,6 +130,34 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
      */
     async reportProviderAuth(report: AgentChannelProviderAuthReport, signal?: AbortSignal): Promise<void> {
       await request("POST", "/provider-auth", report, signal, 3);
+    },
+    /**
+     * The tool gate's question for one call (D-08). Single attempt, bounded by `timeoutMs` (default 10 s, under
+     * OpenClaw's 15 s hook budget) and the caller's signal: any failure rejects, and the caller blocks the call
+     * (fail closed). Never logs params.
+     */
+    async authorizeToolCall(
+      req: AgentChannelToolCallRequest,
+      signal?: AbortSignal,
+      timeoutMs = 10_000,
+    ): Promise<AgentChannelToolCallDecision> {
+      const timeout = AbortSignal.timeout(timeoutMs);
+      const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+      return AgentChannelToolCallDecision.parse(await request("POST", "/tool-calls", req, combined, 1));
+    },
+    /** Outcome of an allowed call (never its content). Best effort: never throws. */
+    async reportToolCallResult(callId: string, result: AgentChannelToolCallResult): Promise<void> {
+      try {
+        await request(
+          "POST",
+          `/tool-calls/${encodeURIComponent(callId)}/result`,
+          result,
+          AbortSignal.timeout(10_000),
+          2,
+        );
+      } catch {
+        /* the audit row keeps the decision; the outcome is optional */
+      }
     },
     /** `ws(s)://…/agent-channel/v1/ws` */
     wsUrl(): string {

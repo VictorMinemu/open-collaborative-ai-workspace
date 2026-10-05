@@ -174,6 +174,68 @@ describe("direct conversations (D-04)", () => {
   });
 });
 
+describe("per-turn tools and context (D-07, D-08)", () => {
+  const WEB = { untrustedOutput: true, sideEffecting: false };
+  const turn = {
+    tools: ["web_search", "web_fetch"],
+    toolFlags: { web_search: WEB, web_fetch: WEB },
+    memory: [{ id: "m1", text: "Prefers short answers", createdAt: "2026-10-01T00:00:00.000Z" }],
+    now: {
+      iso: "2026-10-05T10:00:00.000Z",
+      timeZone: "Europe/Madrid",
+      local: "Monday 5 October 2026 at 12:00",
+    },
+    maxToolCalls: 8,
+    maxWebCalls: 5,
+  };
+
+  it("an event without turn maps to an empty tool set (fail closed)", () => {
+    const m = mapMention(mention(), { ...BOT, capabilities: { tools: ["web_search", "web_fetch"] } });
+    expect(m.turn.tools).toEqual([]);
+    expect(m.turn.maxToolCalls).toBe(0);
+    expect(m.allowedTools).toEqual([]);
+    expect(m.eventId).toBe("evt-1");
+  });
+
+  it("allowed tools = turn.tools ∩ the bot's snapshot tools", () => {
+    const m = mapMention(mention({ turn }), { ...BOT, capabilities: { tools: ["web_fetch"] } });
+    expect(m.agentTools).toEqual(["web_fetch"]);
+    expect(m.allowedTools).toEqual(["web_fetch"]);
+    expect(mapMention(mention({ turn }), BOT).allowedTools).toEqual([]);
+  });
+
+  it("an invalid turn block parses as no turn", () => {
+    const parsed = AgentMentionEvent.parse({ ...mention(), turn: { tools: "web_search" } });
+    expect(parsed.turn).toBeUndefined();
+  });
+
+  it("turn.now becomes a structured 'Current time for <name>' block; memory only in a DM", () => {
+    const channel = mapMention(mention({ turn }), BOT);
+    expect(channel.contextBlocks).toEqual([
+      {
+        label: "Current time for Víctor Ruiz",
+        source: "ocw",
+        type: "current_time",
+        payload: { local: turn.now.local, time_zone: "Europe/Madrid", iso: turn.now.iso },
+      },
+    ]);
+    const dm = mapMention(
+      mention({
+        turn,
+        conversation: { id: "dm-1", kind: "dm", name: null },
+        thread: { rootMessageId: "msg-3" },
+      }),
+      BOT,
+    );
+    expect(dm.contextBlocks.map((b) => b.label)).toEqual([
+      "Current time for Víctor Ruiz",
+      "Your notes about Víctor Ruiz (private to this conversation)",
+    ]);
+    expect(dm.contextBlocks[1]?.payload).toEqual({ notes: ["Prefers short answers"] });
+    expect(mapMention(mention({ turn: { ...turn, now: null } }), BOT).contextBlocks).toEqual([]);
+  });
+});
+
 describe("targets and idempotency keys", () => {
   it("round-trips the target grammar", () => {
     expect(parseTarget(buildTarget("c1", "m1"))).toEqual({ conversationId: "c1", threadRootId: "m1" });

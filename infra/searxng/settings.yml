@@ -1,0 +1,20 @@
+# SearXNG for OCW bots (compose profile `search`, D-09). Mounted read-only at /etc/searxng/settings.yml.
+# The secret key is NOT here: SearXNG reads it from the SEARXNG_SECRET env var (compose sets it from
+# OCW_SEARXNG_SECRET). The instance is reachable only on the compose network (no published port).
+use_default_settings: true
+
+general:
+  instance_name: "OCW search"
+
+search:
+  # The OpenClaw searxng plugin calls /search?format=json.
+  formats:
+    - html
+    - json
+
+server:
+  # Only the cell talks to this instance, from the internal network: no per-client rate limiter
+  # (it needs Valkey), no image proxy.
+  limiter: false
+  image_proxy: false
+  public_instance: false
