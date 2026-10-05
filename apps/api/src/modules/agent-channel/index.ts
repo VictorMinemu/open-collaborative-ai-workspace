@@ -287,6 +287,8 @@ export function createAgentChannelModule(core: Core): ApiModule {
                     webSearch: { provider: policy.searchProvider },
                     // MCP servers (D-13): `cellMcpServers` (modules/mcp) is wired here by 03.1-10.
                     mcpServers: [] as CellSnapshot["mcpServers"],
+                    // Approved marketplace plugins (D-14): wired here by 03.1-12 (cell executor).
+                    plugins: [] as CellSnapshot["plugins"],
                   } as const;
                 },
               );

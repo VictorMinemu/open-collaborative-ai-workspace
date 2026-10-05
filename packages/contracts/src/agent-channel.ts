@@ -3,6 +3,7 @@ import { AgentStatus, ModelProviderKind, ProviderAuthErrorCode, SubscriptionProv
 import { SearchProvider, TurnContext } from "./bot-capabilities";
 import { ConversationKind, Mention, MessageBody } from "./chat";
 import { Id, IsoDateTime, MemberKind, PrincipalKind } from "./common";
+import { DeclaredSurface } from "./marketplace";
 import { ServerFrame } from "./realtime";
 
 /**
@@ -15,8 +16,8 @@ import { ServerFrame } from "./realtime";
  *
  * Routes: `GET /cell`, `GET /ws`, `POST /messages`, `POST /typing`, `POST /agents/:id/status`,
  * `POST /provider-auth`; Phase 3.1 adds `POST /tool-calls` and `POST /tool-calls/:callId/result` (the tool
- * gate, 03.1-04), `POST /memories` (memory saves, 03.1-07) and the MCP probe result (`AgentChannelMcpProbeResult`,
- * route wired by 03.1-10).
+ * gate, 03.1-04), `POST /memories` (memory saves, 03.1-07), the MCP probe result (`AgentChannelMcpProbeResult`,
+ * route wired by 03.1-10) and the marketplace plugin report (`AgentChannelPluginReport`, route wired by 03.1-12).
  */
 
 export const AGENT_CHANNEL_PROTOCOL_VERSION = 1;
@@ -34,6 +35,10 @@ export const AgentChannelEventTypes = {
   providerAuthRevoke: "provider.auth.revoke",
   /** Phase 3.1 (D-13): discover an MCP server's tools from inside the cell and report them. */
   mcpProbe: "mcp.probe",
+  /** Phase 3.1 (D-14): install (or update to) an admin-approved, pinned marketplace plugin version. */
+  pluginInstall: "plugin.install.v1",
+  /** Phase 3.1 (D-14): remove an installed marketplace plugin from the cell. */
+  pluginUninstall: "plugin.uninstall.v1",
 } as const;
 
 const UUID_RE = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
@@ -230,6 +235,73 @@ export const AgentChannelMcpProbeResult = z.object({
 });
 export type AgentChannelMcpProbeResult = z.infer<typeof AgentChannelMcpProbeResult>;
 
+// ---------------------------------------------------------------- marketplace plugins (Phase 3.1, D-14, additive)
+
+/**
+ * An Organization Admin approved a pinned marketplace plugin version. The cell downloads `artifactUrl` (always on
+ * the configured ClawHub origin), verifies `sha256` (and `npmIntegrity` when given) BEFORE installing, installs
+ * through OpenClaw's install gate and reports with `AgentChannelPluginReport`. Older plugins skip the type.
+ */
+export const PluginInstallEvent = z.object({
+  type: z.literal(AgentChannelEventTypes.pluginInstall),
+  organizationId: Id,
+  cellId: Id,
+  seq: z.number().int().positive(),
+  flowId: Id,
+  pluginRowId: Id,
+  packageName: z.string(),
+  version: z.string(),
+  artifactUrl: z.string(),
+  sha256: z.string(),
+  npmIntegrity: z.string().nullable(),
+  /** ClawHub's `runtimeId`: the plugin id the install must produce. */
+  expectedPluginId: z.string().nullable(),
+  mode: z.enum(["install", "update"]),
+});
+export type PluginInstallEvent = z.infer<typeof PluginInstallEvent>;
+
+/** Remove an installed plugin (its tools were already taken off every bot by the API). */
+export const PluginUninstallEvent = z.object({
+  type: z.literal(AgentChannelEventTypes.pluginUninstall),
+  organizationId: Id,
+  cellId: Id,
+  seq: z.number().int().positive(),
+  flowId: Id,
+  pluginRowId: Id,
+  pluginId: z.string(),
+});
+export type PluginUninstallEvent = z.infer<typeof PluginUninstallEvent>;
+
+/** One approved plugin in `GET /cell` (the cell's install gate allows only these tuples). */
+export const CellApprovedPlugin = z.object({
+  pluginRowId: Id,
+  packageName: z.string(),
+  version: z.string(),
+  sha256: z.string(),
+  pluginId: z.string().nullable(),
+  status: z.string(),
+});
+export type CellApprovedPlugin = z.infer<typeof CellApprovedPlugin>;
+
+/**
+ * `POST /agent-channel/v1/plugins/report` (03.1-12): progress of one install/uninstall flow. What the cell
+ * inspected is untrusted: tool names are re-checked against the dangerous list by the API.
+ */
+export const AgentChannelPluginReport = z.object({
+  flowId: Id,
+  pluginRowId: Id,
+  state: z.enum(["installing", "installed", "failed", "uninstalled"]),
+  pluginId: z.string().max(128).optional(),
+  version: z.string().max(64).optional(),
+  declared: DeclaredSurface.optional(),
+  declaredTools: z
+    .array(z.object({ name: z.string().max(128), description: z.string().max(1000).optional() }))
+    .max(100)
+    .optional(),
+  error: z.object({ code: z.string().max(64), message: z.string().max(300) }).optional(),
+});
+export type AgentChannelPluginReport = z.infer<typeof AgentChannelPluginReport>;
+
 // ---------------------------------------------------------------- WebSocket frames (GET /ws)
 
 /**
@@ -335,6 +407,8 @@ export const CellSnapshot = z.object({
   webSearch: z.object({ provider: SearchProvider }).default({ provider: "duckduckgo" }),
   /** Additive (Phase 3.1, D-13): the org's enabled MCP servers. */
   mcpServers: z.array(CellMcpServer).default([]),
+  /** Additive (Phase 3.1, D-14): approved marketplace plugins (wired into `GET /cell` by 03.1-12). */
+  plugins: z.array(CellApprovedPlugin).default([]),
 });
 export type CellSnapshot = z.infer<typeof CellSnapshot>;
 
