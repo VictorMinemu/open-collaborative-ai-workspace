@@ -91,12 +91,18 @@ class FakeAppServer extends EventEmitter implements AppServerProcess {
     setImmediate(() => this.emit("exit", 0));
   }
 
+  /** Subclasses answer extra methods here (return true when handled). */
+  protected handleExtra(_m: Msg): boolean {
+    return false;
+  }
+
   private handle(m: Msg): unknown {
     this.received.push(m);
     if (m.id !== undefined && !m.method) {
       this.waiters.get(Number(m.id))?.(m);
       return;
     }
+    if (this.handleExtra(m)) return;
     switch (m.method) {
       case "initialize":
         return this.send({
@@ -726,5 +732,76 @@ describe("CodexRuntime — recorded Supervised write (codex-cli 0.160.0, read-on
     );
     expect(approvedWrites).toEqual([]);
     expect(events.at(-1)?.type === "prompt.completed" || types.includes("prompt.completed")).toBe(true);
+  });
+});
+
+// ------------------------------------------------------------------------------------------------
+
+const MODEL_LIST = JSON.parse(
+  readFileSync(join(FIXTURE_DIR, "codex-0.160.0.model-list.json"), "utf8"),
+) as { data: unknown[] };
+
+/** Fake app-server for catalog collection: model/list served in pages of 3 from the recorded list. */
+class CatalogAppServer extends FakeAppServer {
+  failList = false;
+  protected override handleExtra(m: Msg): boolean {
+    if (m.method !== "model/list") return false;
+    if (this.failList) {
+      this.send({ id: m.id, error: { code: -32000, message: "not signed in" } });
+      return true;
+    }
+    const start = Number((m.params?.cursor as string | undefined) ?? 0);
+    const data = MODEL_LIST.data.slice(start, start + 3);
+    const next = start + 3 < MODEL_LIST.data.length ? String(start + 3) : null;
+    this.send({ id: m.id, result: { data, nextCursor: next } });
+    return true;
+  }
+}
+
+describe("CodexRuntime.catalog() — model/list without a thread (D-08)", () => {
+  const make = (opts: { loggedIn?: boolean; fail?: boolean } = {}) => {
+    const servers: CatalogAppServer[] = [];
+    const runtime = new CodexRuntime({
+      detect: async () => ({ id: "codex", installed: true, version: "0.160.0", loggedIn: opts.loggedIn ?? true }),
+      spawnAppServer: ({ env }) => {
+        const s = new CatalogAppServer(env);
+        s.failList = opts.fail ?? false;
+        servers.push(s);
+        return s;
+      },
+    });
+    return { runtime, servers };
+  };
+
+  it("spawns one app-server, sends initialize, initialized and every model/list page, never a thread or a turn", async () => {
+    const { runtime, servers } = make();
+    const catalog = await runtime.catalog();
+    expect(servers).toHaveLength(1);
+    const methods = servers[0]?.received.map((m) => m.method);
+    expect(methods).toEqual(["initialize", "initialized", "model/list", "model/list", "model/list"]);
+    expect(servers[0]?.received[0]?.params).toMatchObject({ capabilities: { experimentalApi: false } });
+    expect(servers[0]?.killed).toContain("SIGTERM");
+    expect(catalog?.models).toHaveLength(MODEL_LIST.data.length);
+    expect(catalog).toMatchObject({ runtime: "codex", runtimeVersion: "0.160.0" });
+    expect(catalog?.permissionModes).toEqual([...runtime.capabilities.supportsPermissionModes]);
+  });
+
+  it("caches the catalog for 10 minutes", async () => {
+    const { runtime, servers } = make();
+    await runtime.catalog();
+    await runtime.catalog();
+    expect(servers).toHaveLength(1);
+  });
+
+  it("a model/list error yields null and the process is still killed", async () => {
+    const { runtime, servers } = make({ fail: true });
+    expect(await runtime.catalog()).toBeNull();
+    expect(servers[0]?.killed).toContain("SIGTERM");
+  });
+
+  it("null without spawning when Codex is not signed in with ChatGPT", async () => {
+    const { runtime, servers } = make({ loggedIn: false });
+    expect(await runtime.catalog()).toBeNull();
+    expect(servers).toHaveLength(0);
   });
 });
