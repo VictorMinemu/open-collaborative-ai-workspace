@@ -659,22 +659,22 @@ if (!(probes.length === 1 && p.ok === true && echo?.annotations?.readOnlyHint ==
 '
 
 echo "== [sandbox] a bot calls the stdio server's echo through the gate"
-SBX_EVENT=0199a6f0-0000-7000-8000-00000000e071
+SBX_EVENT=0199a6f0-0000-7000-8000-00000000e081
 SBX_MENTION="$SECRETS/mention-sandbox.json"
 SBX_SAFE="$SBX_SAFE" SBX_EVENT="$SBX_EVENT" node -e '
 const e = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
 const echo = `${process.env.SBX_SAFE}__echo`;
 e.eventId = process.env.SBX_EVENT;
-e.thread.rootMessageId = e.message.id = "0199a6f0-0000-7000-8000-00000000d071";
+e.thread.rootMessageId = e.message.id = "0199a6f0-0000-7000-8000-00000000d081";
 e.message.text = "@archie stdio echo [[call echo {\"message\":\"from stdio\"}]]";
 e.turn = { ...e.turn, tools: [echo], toolFlags: { [echo]: { untrustedOutput: true, sideEffecting: false } } };
 require("fs").writeFileSync(process.argv[2], JSON.stringify(e));
 ' "$ROOT/infra/openclaw/test/mention-mcp.json" "$SBX_MENTION"
-STATE="$(inject_and_wait "$SBX_MENTION" 0199a6f0-0000-7000-8000-00000000d071)"
+STATE="$(inject_and_wait "$SBX_MENTION" 0199a6f0-0000-7000-8000-00000000d081)"
 echo "$STATE" | SBX_SAFE="$SBX_SAFE" EVENT="$SBX_EVENT" node -e '
 const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
 const tool = `${process.env.SBX_SAFE}__echo`;
-const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d071");
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d081");
 if (!m) { console.log("FAIL: no reply to the sandbox mention"); process.exit(1); }
 const calls = s.toolCalls.filter((c) => c.eventId === process.env.EVENT);
 const results = s.toolResults.filter((r) => calls.some((c) => c.callId === r.callId));
