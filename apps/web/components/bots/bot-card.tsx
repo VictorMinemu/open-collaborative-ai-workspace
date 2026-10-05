@@ -1,7 +1,7 @@
 "use client";
 
 import type { Agent } from "@ocw/contracts";
-import { Hash, MessageSquare } from "lucide-react";
+import { Hash, Lock, MessageSquare } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -10,7 +10,23 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { useOpenDm } from "@/lib/bots-queries";
 import { cn } from "@/lib/utils";
-import { BotAvatar, ModelChip, PersonalBadge, StatusChip } from "./bot-bits";
+import { BotAvatar, ModelChip, StatusChip } from "./bot-bits";
+
+/** Marks the caller's own personal bot (D-01): nobody else can see it. */
+export function PersonalBadge({ className }: { className?: string }) {
+  return (
+    <span
+      data-testid="bot-personal-badge"
+      className={cn(
+        "inline-flex h-5 shrink-0 items-center gap-1 rounded-full bg-brand-soft px-1.5 font-medium text-[11px] text-brand-soft-foreground",
+        className,
+      )}
+    >
+      <Lock className="size-2.5" aria-hidden />
+      Personal
+    </span>
+  );
+}
 
 /** A private chat is offered for live bots the caller may use (`bot.read`, decided per bot by the API). */
 export function canMessage(agent: Agent): boolean {

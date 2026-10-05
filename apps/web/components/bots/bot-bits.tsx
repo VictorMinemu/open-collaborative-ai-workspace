@@ -1,7 +1,7 @@
 "use client";
 
 import { type Agent, type AgentStatus, type ModelProviderKind, modelLabel } from "@ocw/contracts";
-import { Cpu, Lock } from "lucide-react";
+import { Cpu } from "lucide-react";
 import { toneFor } from "@/components/ui/avatar";
 import { Tooltip } from "@/components/ui/tooltip";
 import { cn, initials } from "@/lib/utils";
@@ -131,20 +131,4 @@ export function botAbilities(agent: Agent): { edit: boolean; govern: boolean } {
   const can = new Set(agent.viewerCan ?? []);
   const edit = agent.scope === "personal" ? can.has("bot.configure") : can.has("bot.manage");
   return { edit, govern: edit || can.has("bot.manage") };
-}
-
-/** Marks the caller's own personal bot (D-01): nobody else can see it. */
-export function PersonalBadge({ className }: { className?: string }) {
-  return (
-    <span
-      data-testid="bot-personal-badge"
-      className={cn(
-        "inline-flex h-5 shrink-0 items-center gap-1 rounded-full bg-brand-soft px-1.5 font-medium text-[11px] text-brand-soft-foreground",
-        className,
-      )}
-    >
-      <Lock className="size-2.5" aria-hidden />
-      Personal
-    </span>
-  );
 }

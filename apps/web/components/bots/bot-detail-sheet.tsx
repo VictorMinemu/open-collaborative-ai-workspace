@@ -12,8 +12,8 @@ import { errorMessage, isApiError } from "@/lib/api";
 import { useDeleteAgent, useModels, useUpdateAgent } from "@/lib/bots-queries";
 import { validate } from "@/lib/form";
 import { formatDate } from "@/lib/utils";
-import { BotAvatar, botAbilities, ModelChip, PersonalBadge, StatusChip } from "./bot-bits";
-import { canMessage, MessageBotButton } from "./bot-card";
+import { BotAvatar, botAbilities, ModelChip, StatusChip } from "./bot-bits";
+import { canMessage, MessageBotButton, PersonalBadge } from "./bot-card";
 import {
   BotForm,
   type BotFormErrors,
