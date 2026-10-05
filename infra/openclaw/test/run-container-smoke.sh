@@ -595,6 +595,13 @@ manual_install() { # <tarball in the container> → {code, out}
 docker cp "$SECRETS/ocw-cli.mjs" "${P}-openclaw:/tmp/ocw-cli.mjs"
 docker cp "$ARTIFACTS/$ECHO_TGZ" "${P}-openclaw:/tmp/ocw-echo.tgz"
 
+echo "== [marketplace] OpenClaw's doctor validated the install gate at boot (root-owned script, trusted dirs)"
+GATE_NOTE="$(docker logs "${P}-openclaw" 2>&1 | grep -E "Install policy enabled|Static checks passed|install-policy|fail closed until this is fixed" | head -5 || true)"
+[[ -n "$GATE_NOTE" ]] && sed 's/^/   /' <<<"$GATE_NOTE"
+if grep -q "fail closed until this is fixed" <<<"$GATE_NOTE"; then
+  echo "FAIL: OpenClaw rejects the install gate configuration (every install would be blocked)"; exit 1
+fi
+
 echo "== [marketplace] plugin.install.v1 for the official DuckDuckGo plugin: downloaded, verified, gated, installed"
 set_plugins approved approved
 DDG_FLOW=0199a6f0-0000-7000-8000-0000000f3001
