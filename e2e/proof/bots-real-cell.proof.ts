@@ -72,15 +72,21 @@ async function auditRows(): Promise<AuditRow[]> {
 
 // ---------------------------------------------------------------- helpers
 
-/** Sends `text` in the open DM and returns the text of the bot's reply that answers it (contains `marker`). */
+/**
+ * Sends `text` in the open DM and returns the text of the bot's reply that answers it (contains `marker`).
+ * Waits for a NEW bot message: an earlier reply with the same marker must not satisfy a later question.
+ */
 async function askBot(page: Page, text: string, marker: string): Promise<string> {
+  const botMessages = page.locator('[data-testid="message"][data-author-kind="agent"]');
+  const before = await botMessages.count();
   const box = page.getByTestId("composer");
   await box.click();
   await box.fill(text);
   await box.press("Enter");
-  const reply = page.locator('[data-testid="message"][data-author-kind="agent"]').filter({ hasText: marker });
-  await expect(reply.last()).toBeVisible({ timeout: REAL });
-  return (await reply.last().innerText()).trim();
+  await expect(botMessages).toHaveCount(before + 1, { timeout: REAL });
+  const reply = botMessages.nth(before);
+  await expect(reply).toContainText(marker);
+  return (await reply.innerText()).trim();
 }
 
 async function openBotSettings(page: Page) {
