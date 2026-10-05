@@ -141,7 +141,7 @@ export function createBridge(opts: BridgeOptions) {
     const { changed, results } = await opts.port.reconcile(cell, { readySubscriptions });
     lastSnapshot = cell;
     log.info?.(
-      `cell synced: ${cell.agents.length} bot(s), ${cell.providers.length} provider(s)${changed ? ", OpenClaw updated" : ""}`,
+      `cell synced: ${cell.agents.length} bot(s), ${cell.providers.length} provider(s), ${cell.mcpServers?.length ?? 0} MCP server(s)${changed ? ", OpenClaw updated" : ""}`,
     );
     await reportStatuses(results);
     return cell;

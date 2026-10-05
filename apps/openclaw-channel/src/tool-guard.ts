@@ -78,6 +78,15 @@ function block(reason: string): ToolBlock {
 
 const keyOf = (sessionKey: string | undefined) => (sessionKey ?? "").trim().toLowerCase();
 
+/** The turn's own spelling of a tool name OpenClaw reports case-folded; the reported name when none matches. */
+export function canonicalToolName(turnTools: readonly string[], reported: string): string {
+  if (turnTools.includes(reported)) return reported;
+  const folded = reported.trim().toLowerCase();
+  const hits = turnTools.filter((t) => t.toLowerCase() === folded);
+  // Two turn tools that differ only by case are ambiguous: keep the reported name (not in the turn → blocked).
+  return hits.length === 1 ? (hits[0] as string) : reported;
+}
+
 /** Only the search query / fetched URL travel (domain audit); never any other argument. */
 function pickParams(params: Record<string, unknown> | undefined): AgentChannelToolCallRequest["params"] {
   const out: AgentChannelToolCallRequest["params"] = {};
@@ -199,9 +208,11 @@ export function createToolGuard(
     },
 
     async beforeToolCall(event: ToolCallEvent, ctx: ToolCallContext): Promise<ToolBlock | undefined> {
-      const tool = event.toolName;
       const t = state.turns.get(keyOf(ctx.sessionKey));
-      if (!t) return block(`Tool ${tool} blocked: no active OCW turn for this session.`);
+      if (!t) return block(`Tool ${event.toolName} blocked: no active OCW turn for this session.`);
+      // OpenClaw hands the hook a lower-cased policy name (`normalizeToolPolicyName`), while MCP tools keep the
+      // server's casing (`m…__getFile`): resolve to the turn's exact name, the one the API decides on.
+      const tool = canonicalToolName(t.turn.tools, event.toolName);
       if (ctx.agentId && ctx.agentId.toLowerCase() !== openClawAgentIdFor(t.agentId)) {
         return block(`Tool ${tool} blocked: the session belongs to another bot.`);
       }

@@ -341,3 +341,51 @@ describe("tool guard under abuse (Task 3)", () => {
     expect(fake.requests).toHaveLength(5);
   });
 });
+
+describe("MCP tools through the gate (D-13, 03.1-10)", () => {
+  const SAFE = "m0a1b2c3d";
+  const ECHO = `${SAFE}__echo`;
+  const NOTE = `${SAFE}__write_note`;
+  const MCP_READ = { untrustedOutput: true, sideEffecting: false };
+  const MCP_WRITE = { untrustedOutput: true, sideEffecting: true };
+
+  function mcpGuard(fake: FakeClient, over: Partial<TurnContext> = {}) {
+    const g = createToolGuard({ client: () => fake.client });
+    g.beginTurn(SESSION, {
+      eventId: "evt-mcp",
+      agentId: "a1",
+      turn: turn({
+        tools: [ECHO, NOTE, `${SAFE}__getFile`],
+        toolFlags: { [ECHO]: MCP_READ, [NOTE]: MCP_WRITE, [`${SAFE}__getFile`]: MCP_READ },
+        ...over,
+      }),
+    });
+    return g;
+  }
+
+  it("an MCP call is asked to the API with the exact turn name and no argument values", async () => {
+    const fake = fakeClient();
+    const g = mcpGuard(fake);
+    expect(await g.beforeToolCall(call(ECHO, { text: "secret payload" }), ctx())).toBeUndefined();
+    expect(fake.requests).toEqual([
+      {
+        eventId: "evt-mcp",
+        agentId: "a1",
+        tool: ECHO,
+        toolCallId: expect.any(String),
+        params: {},
+        argsBytes: 25,
+      },
+    ]);
+  });
+
+  it("OpenClaw lowercases the hook's tool name: it resolves to the turn's exact (mixed-case) name", async () => {
+    const fake = fakeClient();
+    const g = mcpGuard(fake);
+    expect(await g.beforeToolCall(call(`${SAFE}__getfile`), ctx())).toBeUndefined();
+    expect(fake.requests.at(-1)?.tool).toBe(`${SAFE}__getFile`);
+    // A name that is not in the turn in any case is still blocked locally.
+    expect(await g.beforeToolCall(call(`${SAFE}__delete_all`), ctx())).toMatchObject({ block: true });
+    expect(fake.requests).toHaveLength(1);
+  });
+});

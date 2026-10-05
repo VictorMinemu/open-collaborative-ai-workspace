@@ -130,6 +130,7 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
         {
           agents: current.agents?.entries,
           providers: current.models?.providers,
+          mcpServers: current.mcp?.servers,
           ...(typeof searchProvider === "string" ? { webSearchProvider: searchProvider } : {}),
         },
         cell,
@@ -168,8 +169,13 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
         removed = 0;
       }
       if (removed > 0) await purgeRemovedAgents(plan.removeAgents);
+      // A removed MCP server's credentials leave the gateway env too (`OCW_MCP_<SAFE>_<i>`).
+      for (const name of plan.removeMcpServers) {
+        const prefix = `OCW_MCP_${name.toUpperCase()}_`;
+        for (const key of Object.keys(process.env)) if (key.startsWith(prefix)) delete process.env[key];
+      }
       opts.log?.info?.(
-        `reconciled OpenClaw: agents upsert=${Object.keys(plan.upsertAgents).length} remove=${removed}, providers upsert=${Object.keys(plan.upsertProviders).length} remove=${plan.removeProviders.length}${plan.webSearchProvider ? `, web search=${plan.webSearchProvider}` : ""}`,
+        `reconciled OpenClaw: agents upsert=${Object.keys(plan.upsertAgents).length} remove=${removed}, providers upsert=${Object.keys(plan.upsertProviders).length} remove=${plan.removeProviders.length}, mcp servers upsert=${Object.keys(plan.upsertMcpServers).length} remove=${plan.removeMcpServers.length}${plan.webSearchProvider ? `, web search=${plan.webSearchProvider}` : ""}`,
       );
       return { changed: true, results: plan.results };
     },

@@ -143,6 +143,9 @@ export function renderConfig(env, opts = {}) {
       slots: { memory: "none" },
     },
     channels: { ocw: { enabled: true } },
+    // MCP servers (D-13) are rendered by the plugin from GET /cell (only servers with a tool some bot may use).
+    // MCP runtimes are per session (each DM, each thread): evict idle ones after 10 minutes (Pitfall P-B3).
+    mcp: { sessionIdleTtlMs: 600000 },
     // Defence in depth: the plugin already routes one session per DM conversation (Pitfall 2).
     session: { dmScope: "per-channel-peer" },
     agents: {

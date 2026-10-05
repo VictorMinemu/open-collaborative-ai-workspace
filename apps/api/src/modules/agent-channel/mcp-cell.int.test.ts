@@ -31,7 +31,9 @@ let su: pg.Client;
 let admin: TestClient;
 let sam: TestClient;
 let orgId: string;
+let samId: string;
 let samBotId: string;
+let samDmId: string;
 let server: Json;
 let safe: string;
 let echoName: string;
@@ -83,6 +85,25 @@ const cellEvents = async (type: string) =>
 const latestProbeId = async (serverId: string) =>
   (await cellEvents("mcp.probe")).filter((p) => p.serverId === serverId).at(-1)?.probeId as string;
 
+/** The delivered event of a message (its turn). */
+async function deliveredFor(messageId: string): Promise<Json> {
+  const rows = (
+    await su.query(
+      "select payload from app.stream_events where stream_id = $1 and type = 'agent.mention.v1' and payload->'message'->>'id' = $2",
+      [`cell:${orgId}`, messageId],
+    )
+  ).rows;
+  expect(rows).toHaveLength(1);
+  return rows[0].payload as Json;
+}
+
+const say = async (c: TestClient, conversationId: string, body: string, mentions: Json[] = []) =>
+  (await ok(c.request("POST", `/api/v1/conversations/${conversationId}/messages`, { body, mentions })))
+    .id as string;
+
+const askTool = (eventId: string, agentId: string, tool: string, params: Json = {}) =>
+  cell("POST", "/tool-calls", { eventId, agentId, tool, params });
+
 const cellServer = async () =>
   ((await ok(cell("GET", "/cell"))).mcpServers as Json[]).find((s) => s.id === server.id);
 
@@ -108,14 +129,16 @@ beforeAll(async () => {
     admin.request("POST", "/api/v1/invitations", { email: "sam@example.test", role: "developer" }),
   );
   sam = new TestClient(stack.baseUrl);
-  await ok(
+  const acc = await ok(
     sam.request("POST", `/api/v1/invitations/${inv.id}/accept`, {
       name: "Sam Lee",
       password: "another-long-password",
     }),
   );
   const personal = await ok(sam.request("POST", "/api/v1/agents/personal", {}));
+  samId = acc.user.id;
   samBotId = personal.agent.id;
+  samDmId = personal.dmId;
   server = await ok(
     admin.request("POST", "/api/v1/mcp-servers", {
       name: "Notes",
@@ -232,5 +255,114 @@ describe("GET /cell mcpServers and POST /mcp/probe-results (Task 1, D-13)", () =
     const bot = ((await ok(cell("GET", "/cell"))).agents as Json[]).find((a) => a.id === samBotId);
     expect(bot?.capabilities.tools).toContain(echoName);
     expect(bot?.capabilities.tools).not.toContain(noteName);
+  });
+});
+
+describe("an MCP call in a conversation goes through the gate and is audited (Task 2, BOT-06, SC6)", () => {
+  let eventId: string;
+
+  it("the delivered turn offers exactly the enabled MCP tool with its taint flags; write_note never", async () => {
+    const msg = await say(sam, samDmId, 'please echo [[call echo {"text":"hi from mcp"}]]');
+    const ev = await deliveredFor(msg);
+    eventId = ev.eventId;
+    expect(ev.turn.tools).toContain(echoName);
+    expect(ev.turn.tools).not.toContain(noteName);
+    expect(ev.turn.toolFlags[echoName]).toEqual({ untrustedOutput: true, sideEffecting: false });
+  });
+
+  it("the call is allowed, recorded with the server as source and audited with bot, human, server and tool", async () => {
+    const r = await askTool(eventId, samBotId, echoName);
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ callId: expect.any(String), allowed: true, reason: null });
+    const row = (await su.query("select * from app.agent_tool_calls where id = $1", [r.body.callId])).rows[0];
+    expect(row).toMatchObject({
+      event_id: eventId,
+      agent_id: samBotId,
+      user_id: samId,
+      tool: echoName,
+      source_kind: "mcp",
+      source_id: server.id,
+      target: safe,
+      decision: "allowed",
+      reason: null,
+    });
+    const audit = (await audits("bot.tool_call")).at(-1);
+    expect(audit).toMatchObject({
+      actor_kind: "agent",
+      actor_id: samBotId,
+      agent_id: samBotId,
+      user_id: samId,
+      resource_type: "tool",
+      resource_id: echoName,
+      result: "success",
+    });
+    expect(audit?.metadata).toMatchObject({
+      tool: echoName,
+      sourceKind: "mcp",
+      sourceId: server.id,
+      target: safe,
+      reason: null,
+    });
+
+    const done = await cell("POST", `/tool-calls/${r.body.callId}/result`, { status: "ok", durationMs: 12 });
+    expect(done.status).toBe(200);
+    expect((await audits("bot.tool_call.completed")).at(-1)).toMatchObject({
+      resource_id: echoName,
+      result: "success",
+      user_id: samId,
+    });
+  });
+
+  it("a tool that is not enabled for the bot is refused at call time too: not_in_turn, audited", async () => {
+    const r = await askTool(eventId, samBotId, noteName);
+    expect(r.body).toMatchObject({ allowed: false, reason: "not_in_turn" });
+    expect((await audits("bot.tool_call")).at(-1)).toMatchObject({
+      resource_id: noteName,
+      result: "denied",
+      user_id: samId,
+    });
+  });
+
+  it("a deny rule for the asking human: absent from the next turn (denied_for_you), policy_changed at call time", async () => {
+    const before = await say(sam, samDmId, "echo before the rule");
+    const delivered = (await deliveredFor(before)).eventId as string;
+    const rule = await ok(
+      admin.request("POST", "/api/v1/permission-rules", {
+        subjectKind: "user",
+        subjectId: samId,
+        permission: "bot.tool.use",
+        tool: echoName,
+        effect: "deny",
+      }),
+    );
+    try {
+      const view = await ok(sam.request("GET", `/api/v1/agents/${samBotId}/capabilities`));
+      expect((view.tools as Json[]).find((t) => t.tool === echoName)).toMatchObject({
+        effective: false,
+        reason: "denied_for_you",
+      });
+      const after = await say(sam, samDmId, "echo after the rule");
+      expect((await deliveredFor(after)).turn.tools).not.toContain(echoName);
+      // A turn delivered before the rule is re-decided at call time.
+      const r = await askTool(delivered, samBotId, echoName);
+      expect(r.body).toMatchObject({ allowed: false, reason: "policy_changed" });
+      expect((await audits("bot.tool_call")).at(-1)?.metadata).toMatchObject({
+        sourceKind: "mcp",
+        target: safe,
+        reason: "policy_changed",
+      });
+    } finally {
+      await ok(admin.request("DELETE", `/api/v1/permission-rules/${rule.id}`));
+    }
+  });
+
+  it("no audit row, tool call row or log line ever carries the credential", async () => {
+    const all = (await su.query("select metadata from app.audit_events where organization_id = $1", [orgId]))
+      .rows;
+    expect(JSON.stringify(all)).not.toContain(SECRET);
+    const calls = (await su.query("select * from app.agent_tool_calls where organization_id = $1", [orgId]))
+      .rows;
+    expect(JSON.stringify(calls)).not.toContain(SECRET);
+    expect(logLines.join("\n")).not.toContain(SECRET);
   });
 });

@@ -74,6 +74,10 @@ function readFlags(stored: unknown, tool: string): TurnToolFlags | null {
   return { untrustedOutput: f.untrustedOutput !== false, sideEffecting: f.sideEffecting !== false };
 }
 
+/**
+ * Where a tool comes from, for the `agent_tool_calls` row and the audit: built-in (target decided per call), an
+ * MCP server (target = its safe name, the `<safe>__` prefix OpenClaw gives its tools) or a plugin (package name).
+ */
 type Source = { sourceKind: "builtin" | "mcp" | "plugin"; sourceId: string | null; target: string | null };
 
 async function toolSource(tx: Tx, tool: string): Promise<Source> {
@@ -218,7 +222,15 @@ export function registerToolCallRoutes(scope: App, core: Core, perms: Permission
           resourceType: "tool",
           resourceId: body.tool,
           result: reason ? "denied" : "success",
-          metadata: { tool: body.tool, sourceKind: source.sourceKind, target, reason, queryChars },
+          // Source = the MCP server (id + safe name) or plugin the tool belongs to; never arguments or results.
+          metadata: {
+            tool: body.tool,
+            sourceKind: source.sourceKind,
+            sourceId: source.sourceId,
+            target,
+            reason,
+            queryChars,
+          },
         });
         return { callId: row.id, allowed: reason === null, reason };
       });

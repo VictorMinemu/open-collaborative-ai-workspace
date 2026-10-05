@@ -1,5 +1,11 @@
 import path from "node:path";
-import type { CellAgent, CellProvider, CellSnapshot, CellSubscription } from "./agent-channel-protocol.js";
+import type {
+  CellAgent,
+  CellMcpServer,
+  CellProvider,
+  CellSnapshot,
+  CellSubscription,
+} from "./agent-channel-protocol.js";
 import { openClawAgentIdFor, sanitizeName } from "./mention-mapper.js";
 
 /** Prefix that marks agent entries owned by this plugin. Entries without it are never touched. */
@@ -44,13 +50,22 @@ export const DANGEROUS_TOOLS = [
 ] as const;
 
 const DANGEROUS_SET: ReadonlySet<string> = new Set(DANGEROUS_TOOLS.map((t) => t.toLowerCase()));
+/**
+ * Policy entries that grant a whole tool family at once: OpenClaw treats `bundle-mcp` as "every MCP server" and
+ * `bundle-lsp` as every LSP tool. A bot is only ever granted exact names.
+ */
+const FAMILY_GRANTS: ReadonlySet<string> = new Set(["bundle-mcp", "bundle-lsp"]);
 
-/** The tools a bot entry may list in `alsoAllow`: never a dangerous name, a group or a wildcard. */
+/** The tools a bot entry may list in `alsoAllow`: never a dangerous name, a group, a family or a wildcard. */
 export function allowedAgentTools(tools: readonly string[] | undefined): string[] {
   return [...new Set(tools ?? [])].filter((t) => {
     const lower = t.trim().toLowerCase();
     return (
-      lower.length > 0 && !lower.includes("*") && !lower.startsWith("group:") && !DANGEROUS_SET.has(lower)
+      lower.length > 0 &&
+      !lower.includes("*") &&
+      !lower.startsWith("group:") &&
+      !DANGEROUS_SET.has(lower) &&
+      !FAMILY_GRANTS.has(lower)
     );
   });
 }
@@ -81,6 +96,79 @@ export function envRef(name: string): string {
   return `$${"{"}${name}}`;
 }
 
+/** Plugin-owned MCP server names: the API's immutable `m` + 8 hex (`safeServerName`). Nothing else is touched. */
+export const OWNED_MCP_SERVER = /^m[0-9a-f]{8}$/u;
+/** Env var names the API assigns to MCP header values (`cellEnvName`). */
+const MCP_ENV_NAME = /^OCW_MCP_[A-Z0-9_]{1,64}$/u;
+/** RFC 9110 token: what an HTTP header name may be. */
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/u;
+
+/**
+ * `mcp.servers.<safeName>` for one snapshot server (D-13): exact tool names in `toolFilter.include` (never a glob),
+ * header values as `${ENV}` references (the value goes to the gateway env only). Null when the entry cannot be
+ * rendered safely (not a plugin-owned name, an env or header name we would not write, or no enabled tool).
+ */
+export function desiredMcpServerEntry(s: CellMcpServer): McpServerEntry | null {
+  if (!OWNED_MCP_SERVER.test(s.safeName)) return null;
+  // OpenClaw validates the whole config on write: one unusable URL must not block every bot's sync.
+  if (!isHttpUrl(s.url)) return null;
+  if (s.headers.some((h) => !MCP_ENV_NAME.test(h.envName) || !HEADER_NAME.test(h.name))) return null;
+  const include = [...new Set(s.tools.map((t) => t.trim()))]
+    .filter((t) => t.length > 0 && !t.includes("*"))
+    .sort();
+  if (include.length === 0) return null;
+  return {
+    url: s.url,
+    transport: s.transport,
+    ...(s.headers.length > 0
+      ? { headers: Object.fromEntries(s.headers.map((h) => [h.name, envRef(h.envName)])) }
+      : {}),
+    toolFilter: { include },
+  };
+}
+
+function isHttpUrl(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function includeOf(filter: unknown): string[] {
+  const include = (filter as { include?: unknown } | undefined)?.include;
+  return Array.isArray(include) ? include.filter((t): t is string => typeof t === "string").sort() : [];
+}
+
+/**
+ * Semantic MCP server comparison (a needless write retires the server's live connections): OpenClaw's runtime view shows `${ENV}` header refs already resolved, so a header
+ * matches when it is the ref or the secret it stands for.
+ */
+function sameMcpServer(
+  before: McpServerEntry | undefined,
+  desired: McpServerEntry,
+  secrets: ReadonlyMap<string, string>,
+): boolean {
+  if (!before) return false;
+  const want = (desired.headers ?? {}) as Record<string, string>;
+  const have = (before.headers && typeof before.headers === "object" ? before.headers : {}) as Record<
+    string,
+    unknown
+  >;
+  const headersMatch =
+    Object.keys(want).length === Object.keys(have).length &&
+    Object.entries(want).every(([name, ref]) => have[name] === ref || have[name] === secrets.get(ref));
+  return (
+    headersMatch &&
+    before.url === desired.url &&
+    before.transport === desired.transport &&
+    stableStringify(includeOf(before.toolFilter)) === stableStringify(includeOf(desired.toolFilter))
+  );
+}
+
+export type McpServerEntry = { headers?: Record<string, string> } & Record<string, unknown>;
+export type McpServerEntries = Record<string, McpServerEntry>;
 export type AgentEntry = Record<string, unknown>;
 export type AgentEntries = Record<string, AgentEntry>;
 export type ProviderEntry = Record<string, unknown>;
@@ -194,6 +282,10 @@ export type ReconcilePlan = {
   results: AgentProvisioningResult[];
   /** New `tools.web.search.provider` (D-09), or null to leave it alone. */
   webSearchProvider: string | null;
+  /** `mcp.servers.<safeName>` to write (D-13). */
+  upsertMcpServers: McpServerEntries;
+  /** Plugin-owned MCP servers that must go (left the snapshot or lost every enabled tool). */
+  removeMcpServers: string[];
   changed: boolean;
 };
 
@@ -206,8 +298,13 @@ export const SUBSCRIPTION_NOT_SIGNED_IN =
  * subscription-auth.ts); bots on any other listed subscription are reported as `error`.
  */
 export function planReconcile(
-  current: { agents?: AgentEntries; providers?: ProviderEntries; webSearchProvider?: string },
-  cell: Pick<CellSnapshot, "agents" | "providers" | "subscriptions" | "webSearch">,
+  current: {
+    agents?: AgentEntries;
+    providers?: ProviderEntries;
+    webSearchProvider?: string;
+    mcpServers?: McpServerEntries;
+  },
+  cell: Pick<CellSnapshot, "agents" | "providers" | "subscriptions" | "webSearch" | "mcpServers">,
   opts: {
     readySubscriptions?: ReadonlySet<string>;
     /** Search provider plugins loaded in this cell (`plugins.allow`); a provider not loaded is never set. */
@@ -287,6 +384,26 @@ export function planReconcile(
       ? wantedSearch
       : null;
 
+  // MCP servers (D-13): only servers with an enabled tool are rendered, so the cell never connects to the rest.
+  const existingMcp = current.mcpServers ?? {};
+  const upsertMcpServers: McpServerEntries = {};
+  const desiredMcp = new Set<string>();
+  for (const server of cell.mcpServers ?? []) {
+    const entry = desiredMcpServerEntry(server);
+    if (!entry) continue;
+    desiredMcp.add(server.safeName);
+    const secrets = new Map<string, string>();
+    for (const h of server.headers) {
+      env[h.envName] = h.value;
+      secrets.set(envRef(h.envName), h.value);
+    }
+    if (!sameMcpServer(existingMcp[server.safeName], entry, secrets))
+      upsertMcpServers[server.safeName] = entry;
+  }
+  const removeMcpServers = Object.keys(existingMcp).filter(
+    (name) => OWNED_MCP_SERVER.test(name) && !desiredMcp.has(name),
+  );
+
   return {
     upsertAgents,
     removeAgents,
@@ -295,8 +412,12 @@ export function planReconcile(
     env,
     results,
     webSearchProvider,
+    upsertMcpServers,
+    removeMcpServers,
     changed:
       webSearchProvider !== null ||
+      Object.keys(upsertMcpServers).length > 0 ||
+      removeMcpServers.length > 0 ||
       Object.keys(upsertAgents).length > 0 ||
       removeAgents.length > 0 ||
       Object.keys(upsertProviders).length > 0 ||
@@ -309,6 +430,7 @@ export type MutableConfig = {
   models?: { providers?: ProviderEntries; [k: string]: unknown };
   tools?: { web?: { search?: Record<string, unknown>; [k: string]: unknown }; [k: string]: unknown };
   plugins?: { allow?: unknown; [k: string]: unknown };
+  mcp?: { servers?: McpServerEntries; [k: string]: unknown };
   [k: string]: unknown;
 };
 
@@ -327,6 +449,14 @@ export function applyPlanToDraft(draft: MutableConfig, plan: ReconcilePlan): voi
     }
   }
   for (const id of plan.removeProviders ?? []) delete draft.models?.providers?.[id];
+  const mcpUpserts = Object.entries(plan.upsertMcpServers ?? {});
+  if (mcpUpserts.length > 0) {
+    draft.mcp ??= {};
+    draft.mcp.servers ??= {};
+    // Replaced whole: a header or filter entry removed by the admin must not survive a merge.
+    for (const [name, entry] of mcpUpserts) draft.mcp.servers[name] = entry;
+  }
+  for (const name of plan.removeMcpServers ?? []) delete draft.mcp?.servers?.[name];
   if (Object.keys(plan.upsertAgents).length > 0 || plan.removeAgents.length > 0) {
     draft.agents ??= {};
     draft.agents.entries ??= {};
