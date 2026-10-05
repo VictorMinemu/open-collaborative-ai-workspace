@@ -188,9 +188,10 @@ export const DEVICE_PERMISSIONS: readonly Permission[] = ["device.link"];
 
 /**
  * Relation-only permissions that no allow rule may confer either: Full access on a device comes only from the
- * device owner's grant (cap) intersected with the device opt-in and the org policy (ADR-0012).
+ * device owner's grant (cap) intersected with the device opt-in and the org policy, and sharing a device
+ * (`device.update`: grants, share max mode) belongs to its owner alone (ADR-0012).
  */
-const RELATION_ONLY_NON_DELEGABLE: readonly Permission[] = ["device.full_access"];
+const RELATION_ONLY_NON_DELEGABLE: readonly Permission[] = ["device.full_access", "device.update"];
 
 /** Admin- and runtime-surface permissions plus relation-only ones: explicit allow rules can never grant these. */
 export const NON_DELEGABLE_PERMISSIONS: readonly Permission[] = Permission.options.filter(

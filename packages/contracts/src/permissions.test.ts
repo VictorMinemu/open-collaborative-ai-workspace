@@ -45,6 +45,8 @@ describe("permission vocabulary", () => {
     expect(NON_DELEGABLE_PERMISSIONS).toContain("work_zone.manage");
     // ADR-0012: Full access comes only from the device owner's grant; an allow rule never confers it.
     expect(NON_DELEGABLE_PERMISSIONS).toContain("device.full_access");
+    // Sharing a device (grants, share max mode) is the owner's alone; an allow rule never confers it.
+    expect(NON_DELEGABLE_PERMISSIONS).toContain("device.update");
     for (const p of ["work_session.configure", "device.full_access", "work_zone.manage"] as const) {
       expect(PERMISSION_DESCRIPTIONS[p].length, p).toBeGreaterThan(10);
     }
@@ -142,12 +144,13 @@ describe("permission vocabulary", () => {
     expect(Object.keys(PERMISSION_DESCRIPTIONS).sort()).toEqual([...Permission.options].sort());
   });
 
-  it("non-delegable permissions are exactly the admin- and runtime-surface permissions plus device.full_access", () => {
+  it("non-delegable permissions are exactly the admin- and runtime-surface permissions plus device.full_access and device.update", () => {
     const expected = Permission.options.filter(
       (p) =>
         PERMISSION_SURFACE[p] === "admin" ||
         PERMISSION_SURFACE[p] === "runtime" ||
-        p === "device.full_access",
+        p === "device.full_access" ||
+        p === "device.update",
     );
     expect([...NON_DELEGABLE_PERMISSIONS].sort()).toEqual(expected.sort());
     expect(NON_DELEGABLE_PERMISSIONS).toContain("member.manage");
