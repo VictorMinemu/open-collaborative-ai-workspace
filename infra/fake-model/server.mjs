@@ -23,8 +23,11 @@
 // Fake MCP server (fake-mcp.mjs): `/mcp` (streamable HTTP) and `/sse` + `/sse/messages` (HTTP+SSE), tools
 // `echo` (read-only) and `write_note` (destructive).
 //
+// Fake ClawHub (fake-clawhub.mjs): the marketplace's read-only `/api/v1/*` routes from fixtures/clawhub.
+//
 // Env: PORT (default 18999), FAKE_MODEL_CAPTURE_DIR (optional: write each request body as JSON),
-// FAKE_MCP_TOKEN (optional: the fake MCP routes then require `Authorization: Bearer <token>`).
+// FAKE_MCP_TOKEN (optional: the fake MCP routes then require `Authorization: Bearer <token>`),
+// FAKE_CLAWHUB_ARTIFACT_DIR (optional: npm-pack tarballs the fake ClawHub serves, digests computed from them).
 // FAKE_MODEL_DEBUG=1 (optional, off by default: log a short preview of each tool-offering request's messages,
 // to diagnose directive parsing inside a real cell; run-container-smoke.sh passes it through).
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -40,6 +43,14 @@ try {
 } catch (error) {
   if (error?.code !== "ERR_MODULE_NOT_FOUND") throw error;
   console.warn("fake-model: fake-mcp.mjs not found, MCP routes disabled");
+}
+// Same for the fake ClawHub (03.1-11).
+let createFakeClawhub = null;
+try {
+  ({ createFakeClawhub } = await import("./fake-clawhub.mjs"));
+} catch (error) {
+  if (error?.code !== "ERR_MODULE_NOT_FOUND") throw error;
+  console.warn("fake-model: fake-clawhub.mjs not found, ClawHub routes disabled");
 }
 
 const PORT = Number(process.env.PORT ?? 18999);
@@ -480,13 +491,18 @@ function anthropicMessages(res, body) {
   res.end();
 }
 
-/** `opts.mcpToken` overrides `FAKE_MCP_TOKEN` (empty = no token). */
+/**
+ * `opts.mcpToken` overrides `FAKE_MCP_TOKEN` (empty = no token); `opts.clawhubArtifactDir` overrides
+ * `FAKE_CLAWHUB_ARTIFACT_DIR`.
+ */
 export function createFakeModelServer(opts = {}) {
   const mcp = createFakeMcp?.({ token: opts.mcpToken ?? process.env.FAKE_MCP_TOKEN ?? "" }) ?? null;
+  const clawhub = createFakeClawhub?.({ artifactDir: opts.clawhubArtifactDir }) ?? null;
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     try {
       if (mcp?.(req, res, url)) return;
+      if (clawhub?.(req, res, url)) return;
       if (req.method === "GET" && (url.pathname === "/health" || url.pathname === "/healthz"))
         return sendJson(res, 200, { ok: true });
       if (req.method === "GET" && url.pathname === "/v1/models") {
