@@ -13,10 +13,15 @@
 # DuckDuckGo plugin (pinned, sha512-checked npm pack) and the ocw-echo test plugin are served by the fake ClawHub,
 # installed by the executor through OpenClaw's install gate, kept across a restart, used by a bot in a conversation
 # (ocw_echo) and uninstalled; a manual install is blocked (also with a forged local cache and with the API down).
+# Scenario sandbox (03.1-14 / D-13): a vetted stdio MCP server runs only in the hardened `ocw-mcp-sandbox` sidecar; the
+# cell sees it as a remote streamable-HTTP server on an internal network shared with the sidecar alone, probes it and a
+# bot calls its `echo` tool through the gate, while no third-party MCP code runs inside the gateway container.
 #
 # Usage (repo root):  infra/openclaw/test/run-container-smoke.sh [--keep]
 #   SMOKE_ONLY=<comma list>  run only these scenarios (unset = all): mention, signin, dm, capabilities,
 #                            dm-isolation, memory, mcp, marketplace
+#                            and sandbox (runs when it is listed, with SMOKE_BUILD=1, or when ocw-mcp-sandbox:local
+#                            exists; otherwise it prints "SKIP sandbox (image not built)")
 #   FAKE_MODEL_DEBUG=1       the fake model logs a preview of each tool-offering request (off by default)
 # Requires: docker, node + npm (bundled plugins are installed on the host from the pinned registry
 # tarballs), apps/openclaw-channel/node_modules (pnpm install / npm install in that dir).
@@ -47,6 +52,27 @@ mcp_servers_json() {
     "$MCP_SERVER_ID" "$MCP_SAFE" "$MCP_ENV" "$MCP_TOKEN" "$1"
 }
 
+# Stdio MCP sandbox (scenario sandbox): the sidecar serves the baked `everything` server; the cell reaches it on a second
+# internal network shared with the sidecar alone (compose network `mcp-sandbox`). No header, no credential.
+SBX_NET="${P}-sbx-net"
+SBX_SAFE=m5a4db0c5
+SBX_SERVER_ID=0199a6f0-0000-7000-8000-000000000c52
+SBX_URL=http://mcp-sandbox:8080/everything/mcp
+# Fake MCP + sandbox servers (CellMcpServer[]): the fake keeps echo and write_note enabled, the sandbox only echo.
+sandbox_servers_json() {
+  printf '[%s,{"id":"%s","safeName":"%s","transport":"streamable-http","url":"%s","headers":[],"tools":["echo"]}]' \
+    "$(mcp_servers_json '["echo","write_note"]' | sed 's/^\[//; s/\]$//')" "$SBX_SERVER_ID" "$SBX_SAFE" "$SBX_URL"
+}
+SANDBOX=0
+if want sandbox; then
+  if [[ ",${SMOKE_ONLY:-}," == *",sandbox,"* || "${SMOKE_BUILD:-0}" == "1" ]] ||
+    docker image inspect ocw-mcp-sandbox:local >/dev/null 2>&1; then
+    SANDBOX=1
+  else
+    echo "SKIP sandbox (image not built)"
+  fi
+fi
+
 cleanup() {
   local status=$?
   if [[ $status -ne 0 ]]; then
@@ -65,6 +91,23 @@ cleanup() {
   rm -rf "$SECRETS"
 }
 trap cleanup EXIT
+# Scenario sandbox: its sidecar and network are diagnosed and removed first, then cleanup runs as before.
+sandbox_cleanup() {
+  if [[ "$SANDBOX" == "1" ]]; then
+    if [[ "$1" -ne 0 ]]; then
+      echo "---- docker logs ${P}-mcp-sandbox (last 50 lines)" >&2
+      docker logs "${P}-mcp-sandbox" 2>&1 | tail -50 >&2 || true
+    fi
+    if [[ "$KEEP" != "--keep" ]]; then
+      docker rm -f "${P}-mcp-sandbox" >/dev/null 2>&1 || true
+      # The cell (removed by cleanup) is still attached to the network here.
+      docker network disconnect -f "$SBX_NET" "${P}-openclaw" >/dev/null 2>&1 || true
+      docker network rm "$SBX_NET" >/dev/null 2>&1 || true
+    fi
+  fi
+}
+# errexit is off inside the trap so cleanup always runs, and `(exit …)` hands it the script's real exit status.
+trap 'SMOKE_STATUS=$?; set +e; sandbox_cleanup "$SMOKE_STATUS"; (exit "$SMOKE_STATUS"); cleanup' EXIT
 
 # Images are built only when missing or SMOKE_BUILD=1 (the cell image is ~1.3 GB compressed).
 # The working-tree plugin (dist, copied with its runtime deps) and entrypoint are bind-mounted over
@@ -76,6 +119,11 @@ fi
 if [[ "${SMOKE_BUILD:-0}" == "1" ]] || ! docker image inspect ocw-fake-model:local >/dev/null 2>&1; then
   echo "== build ocw-fake-model:local"
   docker build -q -f "$ROOT/infra/fake-model/Dockerfile" -t ocw-fake-model:local "$ROOT" >/dev/null
+fi
+# The stdio MCP sandbox image is small (node slim base shared with the cell, the pinned servers from its lockfile).
+if [[ "$SANDBOX" == "1" ]] && { [[ "${SMOKE_BUILD:-0}" == "1" ]] || ! docker image inspect ocw-mcp-sandbox:local >/dev/null 2>&1; }; then
+  echo "== build ocw-mcp-sandbox:local"
+  docker build -q -f "$ROOT/infra/mcp-sandbox/Dockerfile" -t ocw-mcp-sandbox:local "$ROOT/infra/mcp-sandbox" >/dev/null
 fi
 [[ -f "$ROOT/apps/openclaw-channel/dist/index.js" ]] || { echo "FAIL: build the plugin first (dist/ missing)"; exit 1; }
 
@@ -124,6 +172,10 @@ echo "== internal network (no egress)"
 docker network rm "$NET" >/dev/null 2>&1 || true
 # Explicit subnet: hosts with many compose projects can exhaust Docker's default address pools.
 docker network create --internal --subnet "${SMOKE_SUBNET:-10.231.77.0/24}" "$NET" >/dev/null
+if [[ "$SANDBOX" == "1" ]]; then
+  docker network rm "$SBX_NET" >/dev/null 2>&1 || true
+  docker network create --internal --subnet "${SMOKE_SANDBOX_SUBNET:-10.231.76.0/24}" "$SBX_NET" >/dev/null
+fi
 
 # Smoke containers are the kernel's first OOM victims (oom-score-adj 1000): on a memory-tight Docker VM the
 # smoke must fail, never take down another workload (e.g. a running demo cell).
@@ -131,6 +183,15 @@ OOM=(--oom-score-adj 1000)
 # Optional hard cap for the cell (e.g. SMOKE_CELL_MEMORY=1g on a shared, memory-starved Docker VM).
 CELL_LIMIT=()
 [[ -n "${SMOKE_CELL_MEMORY:-}" ]] && CELL_LIMIT=(--memory "$SMOKE_CELL_MEMORY")
+
+# Stdio MCP sandbox sidecar with the compose hardening (compose.yaml service mcp-sandbox): only on its own internal
+# network, which the cell joins below. Nothing mounted, no secrets, no ports.
+if [[ "$SANDBOX" == "1" ]]; then
+  docker run -d --name "${P}-mcp-sandbox" "${OOM[@]}" --network "$SBX_NET" --network-alias mcp-sandbox \
+    --init --user node --read-only --cap-drop ALL --security-opt no-new-privileges \
+    --pids-limit 128 --memory 512m --cpus 1 --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
+    ocw-mcp-sandbox:local >/dev/null
+fi
 
 # The working-tree fake model (tool-call directives, fake SearXNG /search) over the image copy: no rebuild.
 docker run -d --name "${P}-model" "${OOM[@]}" --network "$NET" --network-alias fake-model \
@@ -145,13 +206,16 @@ docker run -d --name "${P}-model" "${OOM[@]}" --network "$NET" --network-alias f
   -e FAKE_MODEL_CAPTURE_DIR=/tmp/capture \
   ocw-fake-model:local >/dev/null
 
+# The bot may use the sandbox's echo (its alsoAllow); the server itself reaches the snapshot in scenario sandbox.
+SBX_TOOLS=""
+[[ "$SANDBOX" == "1" ]] && SBX_TOOLS=",${SBX_SAFE}__echo"
 docker run -d --name "${P}-api" "${OOM[@]}" --network "$NET" --network-alias api \
   -v "$PLUGIN:/plugin:ro" \
   -e FAKE_API_PORT=4000 -e FAKE_API_TOKEN="$TOKEN" \
   -e FAKE_BOT_ID=0199a6f0-0000-7000-8000-00000000a001 \
   -e FAKE_CELL_ID=0199a6f0-0000-7000-8000-0000000000c0 \
   -e FAKE_MODEL_BASE_URL=http://fake-model:18999/v1 \
-  -e FAKE_AGENT_TOOLS="web_search,web_fetch,ocw_memory_save,${MCP_SAFE}__echo,${MCP_SAFE}__write_note,ocw_echo" \
+  -e FAKE_AGENT_TOOLS="web_search,web_fetch,ocw_memory_save,${MCP_SAFE}__echo,${MCP_SAFE}__write_note,ocw_echo${SBX_TOOLS:-}" \
   -e FAKE_MCP_SERVERS="$(mcp_servers_json '["echo"]')" \
   -e FAKE_WEB_SEARCH_PROVIDER=searxng \
   node:24.21.0-bookworm-slim node /plugin/src/testing/run-fake-api.ts >/dev/null
@@ -187,6 +251,8 @@ if [[ "${SMOKE_BUILD:-0}" != "1" ]]; then
   # runner's uid, so the working-tree gate is copied in (docker cp writes root-owned files).
   docker cp "$ROOT/infra/openclaw/install-policy.mjs" "${P}-openclaw:/opt/ocw/install-policy.mjs"
 fi
+# The cell also joins the sandbox network (compose: openclaw is on default + mcp-sandbox).
+[[ "$SANDBOX" == "1" ]] && docker network connect "$SBX_NET" "${P}-openclaw"
 docker start "${P}-openclaw" >/dev/null
 
 echo "== waiting for the plugin to connect"
@@ -485,6 +551,158 @@ if (!ok) { console.log("FAIL: expected echo to answer and write_note to be block
 LEAKS="$(docker logs "${P}-openclaw" 2>&1 | grep -c "$MCP_TOKEN" || true)"
 echo "   cell log   : $LEAKS line(s) carry the MCP credential"
 [[ "$LEAKS" -eq 0 ]] || { echo "FAIL: the MCP credential appears in the cell log"; exit 1; }
+fi
+
+if [[ "$SANDBOX" == "1" ]]; then
+# Stdio MCP sandbox (03.1-14, D-13). The API maps a `sandboxed-stdio` server to ${OCW_MCP_SANDBOX_URL}/<id>/mcp
+# (cellMcpServers); the fake Agent Channel API delivers exactly that remote entry.
+SBX="${P}-mcp-sandbox"
+echo "== [sandbox] the stdio sidecar is locked down: non-root, read-only, no capabilities, limits, no ports, no mounts"
+for i in $(seq 1 30); do
+  [[ "$(docker inspect -f '{{.State.Health.Status}}' "$SBX" 2>/dev/null)" == "healthy" ]] && break
+  sleep 1
+done
+docker logs "$SBX" 2>&1 | head -n 3 | sed 's/^/   /'
+INSPECT="$(docker inspect "$SBX")"
+INSPECT="$INSPECT" SBX_NET="$SBX_NET" node -e '
+const [c] = JSON.parse(process.env.INSPECT);
+const h = c.HostConfig;
+const nets = Object.keys(c.NetworkSettings.Networks);
+const facts = {
+  health: c.State.Health?.Status, user: c.Config.User, readOnly: h.ReadonlyRootfs, capDrop: h.CapDrop, capAdd: h.CapAdd,
+  securityOpt: h.SecurityOpt, pids: h.PidsLimit, memory: h.Memory, nanoCpus: h.NanoCpus, tmpfs: Object.keys(h.Tmpfs ?? {}),
+  mounts: c.Mounts.length, ports: Object.keys(c.NetworkSettings.Ports ?? {}).length, privileged: h.Privileged, networks: nets,
+  envNames: c.Config.Env.map((e) => e.split("=")[0]).sort(),
+};
+console.log("   sidecar    :", JSON.stringify(facts));
+const ok =
+  facts.health === "healthy" && facts.user === "node" && facts.readOnly === true &&
+  JSON.stringify(facts.capDrop) === "[\"ALL\"]" && !facts.capAdd?.length && facts.privileged === false &&
+  facts.securityOpt?.includes("no-new-privileges") && facts.pids === 128 && facts.memory > 0 && facts.nanoCpus > 0 &&
+  JSON.stringify(facts.tmpfs) === "[\"/tmp\"]" && facts.mounts === 0 && facts.ports === 0 &&
+  JSON.stringify(nets) === JSON.stringify([process.env.SBX_NET]) &&
+  facts.envNames.every((n) => /^(PATH|HOSTNAME|HOME|NODE_ENV|NODE_VERSION|YARN_VERSION|MCP_SANDBOX_\w+)$/.test(n));
+if (!ok) { console.log("FAIL: the sandbox sidecar is not hardened as compose.yaml specifies"); process.exit(1); }
+'
+SBX_UID="$(docker exec "$SBX" id -u)"
+echo "   sidecar uid: $SBX_UID; writes to / and /app: $(docker exec "$SBX" sh -c 'touch /x /app/x 2>&1 | grep -c "Read-only file system"') refused"
+[[ "$SBX_UID" != "0" ]] || { echo "FAIL: the sandbox runs as root"; exit 1; }
+if docker exec "$SBX" node -e "fetch('http://api:4000/agent-channel/v1/cell').then(()=>process.exit(0)).catch(()=>process.exit(1))"; then
+  echo "FAIL: the sandbox reaches the Agent Channel API"; exit 1
+fi
+if docker exec "$SBX" node -e "fetch('https://api.anthropic.com').then(()=>process.exit(0)).catch(()=>process.exit(1))"; then
+  echo "FAIL: the sandbox has internet egress"; exit 1
+fi
+echo "   sidecar reaches neither the API nor the internet"
+CELL_SEES="$(docker exec "${P}-openclaw" node -e "fetch('http://mcp-sandbox:8080/healthz').then(async (r) => console.log(r.status, await r.text())).catch((e) => console.log('unreachable', e.cause?.code ?? e.message))")"
+echo "   cell → sidecar /healthz: $CELL_SEES"
+[[ "$CELL_SEES" == 200* ]] || { echo "FAIL: the cell cannot reach the sandbox"; exit 1; }
+
+echo "== [sandbox] the stdio child gets only PATH and HOME=/tmp, whatever the sidecar's environment holds"
+CHILD_ENV="$(docker exec "$SBX" node --input-type=module -e '
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+const c = new Client({ name: "smoke", version: "0" });
+const t = new StreamableHTTPClientTransport(new URL("http://127.0.0.1:8080/everything/mcp"));
+await c.connect(t);
+const r = await c.callTool({ name: "get-env", arguments: {} });
+const env = JSON.parse(r.content[0].text);
+console.log(JSON.stringify({ names: Object.keys(env).sort(), home: env.HOME }));
+await t.terminateSession();
+await c.close();
+')"
+echo "   child env  : $CHILD_ENV"
+[[ "$CHILD_ENV" == '{"names":["HOME","PATH"],"home":"/tmp"}' ]] || { echo "FAIL: the stdio child inherited more than PATH and HOME"; exit 1; }
+
+echo "== [sandbox] the admin attaches the sandboxed stdio server: the cell renders it as a remote streamable-HTTP server"
+docker exec -e SERVERS="$(sandbox_servers_json)" -i "${P}-api" node --input-type=module -e "
+const mcpServers = JSON.parse(process.env.SERVERS);
+await fetch('http://127.0.0.1:4000/__test/cell', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mcpServers, reason: 'tools.updated' }) });
+"
+RENDERED="null"
+for i in $(seq 1 60); do
+  RENDERED="$(docker exec "${P}-openclaw" cat /home/node/.openclaw/openclaw.json | SBX_SAFE="$SBX_SAFE" node -e '
+const cfg = JSON.parse(require("fs").readFileSync(0, "utf8"));
+console.log(JSON.stringify(cfg.mcp?.servers?.[process.env.SBX_SAFE] ?? null));')"
+  [[ "$RENDERED" != "null" ]] && break
+  sleep 1
+done
+echo "   rendered   : $RENDERED"
+RENDERED="$RENDERED" SBX_URL="$SBX_URL" node -e '
+const s = JSON.parse(process.env.RENDERED);
+const ok = s && s.url === process.env.SBX_URL && s.transport === "streamable-http" &&
+  JSON.stringify(s.toolFilter) === JSON.stringify({ include: ["echo"] }) && Object.keys(s.headers ?? {}).length === 0 &&
+  s.command === undefined && s.args === undefined;
+if (!ok) { console.log("FAIL: the sandboxed server is not rendered as a remote streamable-HTTP server with filter [echo]"); process.exit(1); }
+'
+
+echo "== [sandbox] mcp.probe: the cell lists the stdio server's tools through the bridge"
+SBX_PROBE_ID=0199a6f0-0000-7000-8000-0000000f2071
+api_exec "
+const body = JSON.stringify({ type: 'mcp.probe', data: { probeId: '$SBX_PROBE_ID', serverId: '$SBX_SERVER_ID' } });
+await fetch('http://127.0.0.1:4000/__test/event', { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+"
+PROBES=""
+for i in $(seq 1 60); do
+  PROBES="$(api_exec "const r = await fetch('http://127.0.0.1:4000/__test/state'); console.log(JSON.stringify((await r.json()).mcpProbes));")"
+  if grep -q "$SBX_PROBE_ID" <<<"$PROBES"; then break; fi
+  sleep 1
+done
+echo "$PROBES" | PROBE_ID="$SBX_PROBE_ID" node -e '
+const probes = JSON.parse(require("fs").readFileSync(0, "utf8")).filter((p) => p.probeId === process.env.PROBE_ID);
+const p = probes[0];
+console.log("   probe      :", JSON.stringify(probes.map(({ ok, error, tools }) => ({ ok, error, tools: tools?.map((t) => t.name) }))));
+const echo = p?.tools?.find((t) => t.name === "echo");
+if (!(probes.length === 1 && p.ok === true && echo?.annotations?.readOnlyHint === true)) {
+  console.log("FAIL: expected one successful probe listing the stdio echo tool as read-only"); process.exit(1);
+}
+'
+
+echo "== [sandbox] a bot calls the stdio server's echo through the gate"
+SBX_EVENT=0199a6f0-0000-7000-8000-00000000e071
+SBX_MENTION="$SECRETS/mention-sandbox.json"
+SBX_SAFE="$SBX_SAFE" SBX_EVENT="$SBX_EVENT" node -e '
+const e = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+const echo = `${process.env.SBX_SAFE}__echo`;
+e.eventId = process.env.SBX_EVENT;
+e.thread.rootMessageId = e.message.id = "0199a6f0-0000-7000-8000-00000000d071";
+e.message.text = "@archie stdio echo [[call echo {\"message\":\"from stdio\"}]]";
+e.turn = { ...e.turn, tools: [echo], toolFlags: { [echo]: { untrustedOutput: true, sideEffecting: false } } };
+require("fs").writeFileSync(process.argv[2], JSON.stringify(e));
+' "$ROOT/infra/openclaw/test/mention-mcp.json" "$SBX_MENTION"
+STATE="$(inject_and_wait "$SBX_MENTION" 0199a6f0-0000-7000-8000-00000000d071)"
+echo "$STATE" | SBX_SAFE="$SBX_SAFE" EVENT="$SBX_EVENT" node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const tool = `${process.env.SBX_SAFE}__echo`;
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d071");
+if (!m) { console.log("FAIL: no reply to the sandbox mention"); process.exit(1); }
+const calls = s.toolCalls.filter((c) => c.eventId === process.env.EVENT);
+const results = s.toolResults.filter((r) => calls.some((c) => c.callId === r.callId));
+console.log("   reply      :", m.text);
+console.log("   tool calls :", JSON.stringify(calls.map((c) => ({ tool: c.tool, params: c.params, allowed: c.allowed }))));
+console.log("   outcomes   :", JSON.stringify(results.map(({ status }) => ({ status }))));
+const ok =
+  m.text.includes("Tool echo said: Echo: from stdio") && m.text.includes(`[tools: 1 | ${tool}]`) &&
+  calls.length === 1 && calls[0].tool === tool && calls[0].allowed === true &&
+  results.length === 1 && results[0].status === "ok";
+if (!ok) { console.log("FAIL: expected one gated, reported call of the sandboxed echo and an answer from its result"); process.exit(1); }
+'
+
+echo "== [sandbox] the stdio server ran in the sidecar, never in the gateway container"
+SBX_LOG="$(docker logs "$SBX" 2>&1)"
+STARTED="$(grep -c "started server=everything" <<<"$SBX_LOG" || true)"
+echo "   sidecar log: $STARTED session(s) started; $(grep -c "ended reason=" <<<"$SBX_LOG" || true) ended"
+grep -E "session [0-9a-f]{8} (started|ended)" <<<"$SBX_LOG" | tail -n 4 | sed 's/^/     /'
+# The probe, the env check and OpenClaw's own MCP runtime each opened a session.
+[[ "$STARTED" -ge 3 ]] || { echo "FAIL: expected the probe, the env check and the bot's call to reach the sidecar"; exit 1; }
+if grep -q "from stdio" <<<"$SBX_LOG"; then echo "FAIL: the sidecar logged a payload"; exit 1; fi
+# (The bracket keeps this probe's own command line from matching itself.)
+IN_CELL="$(docker exec "${P}-openclaw" sh -c 'for f in /proc/[0-9]*/cmdline; do tr "\0" " " <"$f" 2>/dev/null; echo; done | grep -c "server-everythin[g]" || true')"
+echo "   gateway container: $IN_CELL process(es) of the stdio server"
+[[ "$IN_CELL" -eq 0 ]] || { echo "FAIL: the stdio server runs inside the gateway container"; exit 1; }
+if docker exec "${P}-openclaw" sh -c 'test -e /app/node_modules/@modelcontextprotocol/server-everything'; then
+  echo "FAIL: the stdio server package is present in the gateway container"; exit 1
+fi
 fi
 
 if want signin; then
