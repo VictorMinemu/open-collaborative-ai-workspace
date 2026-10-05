@@ -1,8 +1,10 @@
-import type {
-  AgentChannelAuthor,
-  AgentChannelRosterEntry,
-  AgentMentionEvent,
-  CellAgent,
+import {
+  type AgentChannelAuthor,
+  type AgentChannelRosterEntry,
+  type AgentMentionEvent,
+  type CellAgent,
+  EMPTY_TURN,
+  type TurnContext,
 } from "./agent-channel-protocol.js";
 
 export const CHANNEL_ID = "ocw";
@@ -70,7 +72,11 @@ export function buildPersonaPrompt(
   return lines.join("\n");
 }
 
+/** One `ChannelStructuredContext` entry (rendered by OpenClaw as a labelled JSON block, data not instructions). */
+export type ContextBlock = { label: string; source: string; type: string; payload: Record<string, unknown> };
+
 export type MappedMention = {
+  eventId: string;
   ocwAgentId: string;
   openClawAgentId: string;
   conversationId: string;
@@ -103,7 +109,37 @@ export type MappedMention = {
   /** Same history as OpenClaw `HistoryEntry[]` (InboundHistory). */
   inboundHistory: Array<{ sender: string; body: string; timestamp?: number; messageId?: string }>;
   personaPrompt: string;
+  /** What the API decided for this bot, this human, this turn; `EMPTY_TURN` when the event has none. */
+  turn: TurnContext;
+  /** The bot's tools in the cell snapshot (its `alsoAllow`). */
+  agentTools: string[];
+  /** `turn.tools ∩ agentTools`: the per-run `toolsAllow` cap (empty → tools disabled). */
+  allowedTools: string[];
+  /** Structured per-turn context: the asker's local time and, in a DM only, the bot's notes about them. */
+  contextBlocks: ContextBlock[];
 };
+
+function turnContextBlocks(turn: TurnContext, askerName: string, direct: boolean): ContextBlock[] {
+  const blocks: ContextBlock[] = [];
+  if (turn.now) {
+    blocks.push({
+      label: `Current time for ${askerName}`,
+      source: "ocw",
+      type: "current_time",
+      payload: { local: turn.now.local, time_zone: turn.now.timeZone, iso: turn.now.iso },
+    });
+  }
+  // Memory is private to the human's DM with the bot (D-10): never rendered anywhere else.
+  if (direct && turn.memory.length > 0) {
+    blocks.push({
+      label: `Your notes about ${askerName} (private to this conversation)`,
+      source: "ocw",
+      type: "notes",
+      payload: { notes: turn.memory.map((item) => item.text) },
+    });
+  }
+  return blocks;
+}
 
 function parseTime(value: string | undefined): number | undefined {
   if (!value) return undefined;
@@ -116,6 +152,11 @@ export function mapMention(event: AgentMentionEvent, bot: CellAgent | undefined)
   // In a DM `thread.rootMessageId` is the message itself (schema unchanged); the reply is flat.
   const threadRootId = direct ? null : event.thread.rootMessageId;
   const author = event.message.author;
+  const turn = event.turn ?? EMPTY_TURN;
+  const agentTools = bot?.capabilities?.tools ?? [];
+  const agentToolSet = new Set(agentTools);
+  const allowedTools = [...new Set(turn.tools)].filter((t) => agentToolSet.has(t));
+  const askerName = sanitizeName(author.displayName);
   const history = event.threadHistory.map((line) => ({
     id: line.id,
     sender: principalLabel(line.author),
@@ -124,6 +165,7 @@ export function mapMention(event: AgentMentionEvent, bot: CellAgent | undefined)
     body: line.text,
   }));
   return {
+    eventId: event.eventId,
     ocwAgentId: event.agent.id,
     openClawAgentId: openClawAgentIdFor(event.agent.id),
     conversationId: event.conversation.id,
@@ -163,6 +205,10 @@ export function mapMention(event: AgentMentionEvent, bot: CellAgent | undefined)
       bot ?? { displayName: event.agent.displayName, handle: event.agent.handle, instructions: "" },
       { direct },
     ),
+    turn,
+    agentTools,
+    allowedTools,
+    contextBlocks: turnContextBlocks(turn, askerName, direct),
   };
 }
 

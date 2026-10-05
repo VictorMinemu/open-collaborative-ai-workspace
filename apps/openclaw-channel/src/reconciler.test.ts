@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { CellAgent, CellProvider, CellSubscription } from "./agent-channel-protocol.js";
 import {
   applyPlanToDraft,
-  DENIED_TOOLS,
+  DANGEROUS_TOOLS,
   desiredAgentEntry,
   desiredProviderEntry,
   envRef,
@@ -48,7 +48,7 @@ describe("planReconcile", () => {
     const plan = planReconcile({}, { agents: [agent("a")], providers: [ANTHROPIC] });
     expect(plan.changed).toBe(true);
     expect(plan.upsertAgents["ocw-a"]).toEqual(desiredAgentEntry(agent("a")));
-    expect(plan.upsertAgents["ocw-a"]?.tools).toEqual({ profile: "minimal", deny: [...DENIED_TOOLS] });
+    expect(plan.upsertAgents["ocw-a"]?.tools).toEqual({ profile: "minimal", deny: [...DANGEROUS_TOOLS] });
     expect(plan.upsertAgents["ocw-a"]?.model).toEqual({
       primary: "anthropic/claude-sonnet-5-5",
       fallbacks: [],
@@ -148,7 +148,7 @@ describe("planReconcile: ChatGPT subscription", () => {
     expect(plan.upsertAgents["ocw-c"]?.models).toEqual({
       "openai/gpt-6-astra": { agentRuntime: { id: "openclaw" } },
     });
-    expect(plan.upsertAgents["ocw-c"]?.tools).toEqual({ profile: "minimal", deny: [...DENIED_TOOLS] });
+    expect(plan.upsertAgents["ocw-c"]?.tools).toEqual({ profile: "minimal", deny: [...DANGEROUS_TOOLS] });
     expect(plan.upsertProviders).toEqual({});
     expect(plan.env).toEqual({});
     expect(plan.results).toEqual([{ agentId: "c", status: "ready" }]);
@@ -223,6 +223,82 @@ describe("planReconcile: ChatGPT subscription", () => {
         { agents: [agent("c")], providers: [ANTHROPIC], subscriptions: [CODEX] },
       ).changed,
     ).toBe(false);
+  });
+});
+
+describe("capabilities in the cell (D-08 layer 1, D-09)", () => {
+  it("each bot is minimal + alsoAllow <its tools> + the dangerous denies; no alsoAllow key when it has none", () => {
+    const plan = planReconcile(
+      {},
+      {
+        agents: [
+          agent("w", { capabilities: { tools: ["web_search", "web_fetch"] } }),
+          agent("q", { capabilities: { tools: [] } }),
+          agent("o"),
+        ],
+        providers: [ANTHROPIC],
+      },
+    );
+    expect(plan.upsertAgents["ocw-w"]?.tools).toEqual({
+      profile: "minimal",
+      alsoAllow: ["web_search", "web_fetch"],
+      deny: [...DANGEROUS_TOOLS],
+    });
+    expect(plan.upsertAgents["ocw-q"]?.tools).toEqual({ profile: "minimal", deny: [...DANGEROUS_TOOLS] });
+    expect(plan.upsertAgents["ocw-o"]?.tools).toEqual({ profile: "minimal", deny: [...DANGEROUS_TOOLS] });
+  });
+
+  it("never configures a dangerous tool even if the snapshot lists one", () => {
+    const plan = planReconcile(
+      {},
+      {
+        agents: [agent("x", { capabilities: { tools: ["web_search", "exec", "group:fs"] } })],
+        providers: [ANTHROPIC],
+      },
+    );
+    expect(plan.upsertAgents["ocw-x"]?.tools).toMatchObject({ alsoAllow: ["web_search"] });
+  });
+
+  it("losing a tool re-provisions the agent without it", () => {
+    const before = desiredAgentEntry(agent("w", { capabilities: { tools: ["web_search", "web_fetch"] } }));
+    const plan = planReconcile(
+      { agents: { "ocw-w": before } },
+      { agents: [agent("w", { capabilities: { tools: [] } })], providers: [ANTHROPIC] },
+    );
+    expect(plan.upsertAgents["ocw-w"]?.tools).toEqual({ profile: "minimal", deny: [...DANGEROUS_TOOLS] });
+    const draft: MutableConfig = { agents: { entries: { "ocw-w": before } } };
+    applyPlanToDraft(draft, plan);
+    expect(draft.agents?.entries?.["ocw-w"]?.tools).toEqual({
+      profile: "minimal",
+      deny: [...DANGEROUS_TOOLS],
+    });
+  });
+
+  it("the snapshot's webSearch.provider becomes tools.web.search.provider when that plugin is loaded", () => {
+    const cell = { agents: [], providers: [], webSearch: { provider: "searxng" } };
+    const plan = planReconcile({ webSearchProvider: "duckduckgo" }, cell, {
+      searchProviders: new Set(["duckduckgo", "searxng"]),
+    });
+    expect(plan.webSearchProvider).toBe("searxng");
+    expect(plan.changed).toBe(true);
+    const draft: MutableConfig = {
+      tools: { profile: "minimal", web: { search: { enabled: true, provider: "duckduckgo" } } },
+    };
+    applyPlanToDraft(draft, plan);
+    expect(draft).toMatchObject({
+      tools: { profile: "minimal", web: { search: { enabled: true, provider: "searxng" } } },
+    });
+
+    // Already set → nothing to do; provider plugin not loaded in this cell → keep the current one.
+    expect(
+      planReconcile({ webSearchProvider: "searxng" }, cell, { searchProviders: new Set(["searxng"]) })
+        .changed,
+    ).toBe(false);
+    const missing = planReconcile({ webSearchProvider: "duckduckgo" }, cell, {
+      searchProviders: new Set(["duckduckgo"]),
+    });
+    expect(missing.webSearchProvider).toBeNull();
+    expect(missing.changed).toBe(false);
   });
 });
 

@@ -11,6 +11,8 @@
  *   POST /agent-channel/v1/typing
  *   POST /agent-channel/v1/agents/:id/status
  *   POST /agent-channel/v1/provider-auth  (status per report: `authResponder`, default 200)
+ *   POST /agent-channel/v1/tool-calls     records and allows (denies tools listed in `denyTools`)
+ *   POST /agent-channel/v1/tool-calls/:id/result  records the outcome
  * Test-only controls under /__test/* (never part of the real API).
  */
 import { randomUUID } from "node:crypto";
@@ -21,6 +23,8 @@ import type {
   AgentChannelPostMessage,
   AgentChannelProviderAuthReport,
   AgentChannelStatusReport,
+  AgentChannelToolCallRequest,
+  AgentChannelToolCallResult,
   AgentChannelTyping,
   AgentMentionEvent,
   CellAgent,
@@ -33,6 +37,8 @@ export type StoredEvent = { seq: number; type: string; data: Record<string, unkn
 export type StoredMessage = AgentChannelPostMessage & { messageId: string; receivedAt: number };
 export type StatusReport = AgentChannelStatusReport & { agentId: string };
 export type MentionInput = Omit<AgentMentionEvent, "seq" | "type" | "organizationId" | "cellId">;
+export type StoredToolCall = AgentChannelToolCallRequest & { callId: string; allowed: boolean };
+export type StoredToolResult = AgentChannelToolCallResult & { callId: string };
 
 export type FakeAgentChannelApi = {
   url: string;
@@ -44,6 +50,12 @@ export type FakeAgentChannelApi = {
   providers: CellProvider[];
   /** Snapshot `subscriptions`; `undefined` = an older API that does not send the field. */
   cellSubscriptions: CellSubscription[] | undefined;
+  /** Snapshot `webSearch.provider`; `undefined` = not sent. */
+  webSearchProvider: string | undefined;
+  /** Tools whose `/tool-calls` the fake API denies (`denied_by_test`). */
+  denyTools: Set<string>;
+  toolCalls: StoredToolCall[];
+  toolResults: StoredToolResult[];
   events: StoredEvent[];
   authReports: AgentChannelProviderAuthReport[];
   /** HTTP status for each POST /provider-auth (default 200). */
@@ -58,10 +70,11 @@ export type FakeAgentChannelApi = {
   authFailures: number;
   publish(type: string, data: Record<string, unknown>): StoredEvent;
   publishMention(input: MentionInput): StoredEvent;
-  /** Replace agents/providers and emit `cell.config.changed`. */
+  /** Replace agents/providers and emit `cell.config.changed` (`agentId` names the bot it is about). */
   updateCell(
     next: { agents?: CellAgent[]; providers?: CellProvider[]; subscriptions?: CellSubscription[] },
     reason?: string,
+    agentId?: string | null,
   ): StoredEvent;
   /** Next `n` POST /messages respond with `status` (before idempotency handling). */
   failNextPosts(n: number, status?: number): void;
@@ -94,6 +107,8 @@ export async function startFakeAgentChannelApi(
     agents?: CellAgent[];
     providers?: CellProvider[];
     subscriptions?: CellSubscription[];
+    webSearchProvider?: string;
+    denyTools?: string[];
     port?: number;
     host?: string;
   } = {},
@@ -119,6 +134,10 @@ export async function startFakeAgentChannelApi(
     statusReports: [] as StatusReport[],
     subscriptions: [] as Array<number | null>,
     authFailures: 0,
+    webSearchProvider: opts.webSearchProvider,
+    denyTools: new Set(opts.denyTools ?? []),
+    toolCalls: [] as StoredToolCall[],
+    toolResults: [] as StoredToolResult[],
   };
 
   const snapshot = (): CellSnapshot => ({
@@ -130,6 +149,7 @@ export async function startFakeAgentChannelApi(
     agents: state.agents,
     providers: state.providers,
     ...(state.cellSubscriptions ? { subscriptions: state.cellSubscriptions } : {}),
+    ...(state.webSearchProvider ? { webSearch: { provider: state.webSearchProvider } } : {}),
   });
   const frameFor = (ev: StoredEvent) =>
     JSON.stringify({ op: "ev", topic, seq: ev.seq, type: ev.type, data: ev.data });
@@ -143,11 +163,13 @@ export async function startFakeAgentChannelApi(
           return json(res, 200, api.publishMention((await readJson(req)) as MentionInput));
         }
         if (req.method === "POST" && url.pathname === "/__test/cell") {
-          return json(
-            res,
-            200,
-            api.updateCell((await readJson(req)) as { agents?: CellAgent[]; providers?: CellProvider[] }),
-          );
+          const body = (await readJson(req)) as {
+            agents?: CellAgent[];
+            providers?: CellProvider[];
+            reason?: string;
+            agentId?: string | null;
+          };
+          return json(res, 200, api.updateCell(body, body.reason, body.agentId ?? null));
         }
         if (req.method === "POST" && url.pathname === "/__test/event") {
           const { type, data } = (await readJson(req)) as { type: string; data: Record<string, unknown> };
@@ -161,6 +183,8 @@ export async function startFakeAgentChannelApi(
             subscriptions: state.subscriptions,
             authReports: state.authReports,
             events: state.events.length,
+            toolCalls: state.toolCalls,
+            toolResults: state.toolResults,
           });
         }
         return json(res, 404, { error: { code: "not_found" } });
@@ -211,6 +235,26 @@ export async function startFakeAgentChannelApi(
         return status === 200
           ? json(res, 200, { ok: true })
           : json(res, status, { error: { code: status === 409 ? "flow_claimed" : "error" } });
+      }
+      if (req.method === "POST" && route === "/tool-calls") {
+        const body = (await readJson(req)) as AgentChannelToolCallRequest;
+        const allowed = !state.denyTools.has(body.tool);
+        const stored: StoredToolCall = { ...body, callId: randomUUID(), allowed };
+        state.toolCalls.push(stored);
+        return json(res, 200, {
+          callId: stored.callId,
+          allowed,
+          reason: allowed ? null : "denied_by_test",
+        });
+      }
+      const resultMatch = /^\/tool-calls\/([^/]+)\/result$/u.exec(route);
+      if (req.method === "POST" && resultMatch?.[1]) {
+        const callId = decodeURIComponent(resultMatch[1]);
+        if (!state.toolCalls.some((c) => c.callId === callId && c.allowed)) {
+          return json(res, 404, { error: { code: "unknown_call" } });
+        }
+        state.toolResults.push({ ...((await readJson(req)) as AgentChannelToolCallResult), callId });
+        return json(res, 200, { ok: true });
       }
       if (req.method === "POST" && route === "/typing") {
         state.typing.push((await readJson(req)) as AgentChannelTyping);
@@ -308,6 +352,21 @@ export async function startFakeAgentChannelApi(
     set cellSubscriptions(value: CellSubscription[] | undefined) {
       state.cellSubscriptions = value;
     },
+    get webSearchProvider() {
+      return state.webSearchProvider;
+    },
+    set webSearchProvider(value: string | undefined) {
+      state.webSearchProvider = value;
+    },
+    get denyTools() {
+      return state.denyTools;
+    },
+    get toolCalls() {
+      return state.toolCalls;
+    },
+    get toolResults() {
+      return state.toolResults;
+    },
     get authReports() {
       return state.authReports;
     },
@@ -348,11 +407,11 @@ export async function startFakeAgentChannelApi(
     publishMention(input) {
       return api.publish("agent.mention.v1", input as unknown as Record<string, unknown>);
     },
-    updateCell(next, reason = "agent.updated") {
+    updateCell(next, reason = "agent.updated", agentId = null) {
       if (next.agents) state.agents = next.agents;
       if (next.providers) state.providers = next.providers;
       if (next.subscriptions) state.cellSubscriptions = next.subscriptions;
-      return api.publish("cell.config.changed", { reason, agentId: null });
+      return api.publish("cell.config.changed", { reason: reason ?? "agent.updated", agentId });
     },
     failNextPosts(n, status = 503) {
       failures = { n, status };

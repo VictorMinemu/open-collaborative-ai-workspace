@@ -30,6 +30,7 @@ import { registerCellGateway } from "./gateway";
 import { registerMentionHandler } from "./mentions";
 import { createCellPresence } from "./presence";
 import { createProviderAuth } from "./provider-auth";
+import { registerToolCallRoutes } from "./tool-calls";
 
 export { buildMentionEvents } from "./mentions";
 
@@ -425,6 +426,9 @@ export function createAgentChannelModule(core: Core): ApiModule {
               return { ok: true as const };
             },
           );
+
+          // The cell's tool gate (D-08): decision + caps + taint + audit for every gated tool call.
+          registerToolCallRoutes(scope, core, perms);
 
           scope.post(
             "/agents/:id/status",

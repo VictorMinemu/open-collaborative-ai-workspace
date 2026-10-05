@@ -21,8 +21,9 @@ changes such as the plugin allowlist. ChatGPT-subscription sign-ins live in Open
 - **Gateway:** `bind: loopback` inside the container, Control UI off, no published ports. The
   operator token is random per boot unless `OPENCLAW_GATEWAY_TOKEN[_FILE]` is set.
 - **Plugins:** `allow: ["ocw", "openai", "duckduckgo", "searxng"]` and `deny: ["codex"]`, memory slot `none`,
-  mDNS off. Boot log: `4 plugins: ocw, openai, duckduckgo, searxng` (fewer when a bundled plugin is disabled or
-  missing, see below).
+  mDNS off. `ocw` and `openai` load at boot; the search plugins are activated lazily (their manifests say
+  `onStartup: false`), so the boot line `http server listening (N plugins: …)` lists them only once loaded. The
+  smoke test accepts exactly these four ids and nothing else.
   - Why `openai`: OpenClaw's bundled OpenAI plugin owns the ChatGPT/Codex device-code sign-in, the OAuth
     refresh and the Codex model catalog behind the "ChatGPT subscription" provider (ADR-0006). It is
     loaded at boot because enabling it later swaps plugin instances and would abort a sign-in. Its GPT-5

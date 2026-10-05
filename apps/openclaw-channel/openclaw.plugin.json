@@ -1,7 +1,7 @@
 {
   "id": "ocw",
   "name": "Open Collaborative AI Workspace",
-  "description": "Agent Channel API bridge: OCW bots as OpenClaw agents (tools disabled).",
+  "description": "Agent Channel API bridge: OCW bots as OpenClaw agents (tool-gated).",
   "categories": ["channels"],
   "channels": ["ocw"],
   "activation": {

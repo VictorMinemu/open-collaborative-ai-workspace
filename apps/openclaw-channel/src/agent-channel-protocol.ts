@@ -11,6 +11,8 @@
  *   POST /typing               ← AgentChannelTyping → {ok:true}
  *   POST /agents/:id/status    ← AgentChannelStatusReport (ready | error) after provisioning
  *   POST /provider-auth        ← AgentChannelProviderAuthReport (subscription sign-in progress)
+ *   POST /tool-calls           ← AgentChannelToolCallRequest → AgentChannelToolCallDecision (tool gate)
+ *   POST /tool-calls/:id/result ← AgentChannelToolCallResult (outcome only, never content)
  *
  * Parsing is deliberately lenient on ids (any non-empty string) and ignores unknown fields, so the
  * API can add fields without breaking deployed cells; required fields are enforced.
@@ -54,6 +56,42 @@ export const AgentChannelHistoryEntry = z.object({
 });
 export type AgentChannelHistoryEntry = z.infer<typeof AgentChannelHistoryEntry>;
 
+/** Taint flags of one tool on this turn (D-08). */
+export const TurnToolFlags = z.object({
+  untrustedOutput: z.boolean(),
+  sideEffecting: z.boolean(),
+});
+export type TurnToolFlags = z.infer<typeof TurnToolFlags>;
+
+/** The asking human's local time (D-12). */
+export const TurnNow = z.object({ iso: z.string(), timeZone: z.string(), local: z.string() });
+export type TurnNow = z.infer<typeof TurnNow>;
+
+export const TurnMemoryItem = z.object({ id: Id, text: z.string(), createdAt: z.string() });
+
+/**
+ * `agent.mention.v1.turn`: exactly what this bot may do for this human on this turn (decided by the API).
+ * A mention without it runs with no tools (fail closed, `EMPTY_TURN`).
+ */
+export const TurnContext = z.object({
+  tools: z.array(z.string()),
+  toolFlags: z.record(z.string(), TurnToolFlags).default({}),
+  memory: z.array(TurnMemoryItem).default([]),
+  now: TurnNow.nullable().default(null),
+  maxToolCalls: z.number().int().nonnegative(),
+  maxWebCalls: z.number().int().nonnegative(),
+});
+export type TurnContext = z.infer<typeof TurnContext>;
+
+export const EMPTY_TURN: TurnContext = {
+  tools: [],
+  toolFlags: {},
+  memory: [],
+  now: null,
+  maxToolCalls: 0,
+  maxWebCalls: 0,
+};
+
 export const AgentMentionEvent = z.object({
   eventId: Id,
   seq: z.number().int().positive(),
@@ -74,6 +112,8 @@ export const AgentMentionEvent = z.object({
   /** Oldest first, max 50, EXCLUDES the current message. */
   threadHistory: z.array(AgentChannelHistoryEntry),
   roster: z.array(AgentChannelRosterEntry),
+  /** Additive (Phase 3.1). Absent → no tools on this turn. An invalid block also means no tools. */
+  turn: TurnContext.optional().catch(undefined),
 });
 export type AgentMentionEvent = z.infer<typeof AgentMentionEvent>;
 
@@ -193,6 +233,8 @@ export const CellAgent = z.object({
   modelRef: z.string().min(3),
   model: z.object({ provider: z.string(), providerId: z.string(), id: z.string() }),
   updatedAt: z.string().optional(),
+  /** Every tool this bot may use for some human (the agent's `alsoAllow`, D-08 layer 2). Absent → none. */
+  capabilities: z.object({ tools: z.array(z.string()) }).optional(),
 });
 export type CellAgent = z.infer<typeof CellAgent>;
 
@@ -218,6 +260,8 @@ export const CellSnapshot = z.object({
   providers: z.array(CellProvider),
   /** Additive: absent on older APIs (then the plugin leaves stored sign-ins alone). */
   subscriptions: z.array(CellSubscription).optional(),
+  /** The org's web search provider (D-09); absent on older APIs. */
+  webSearch: z.object({ provider: z.string() }).optional(),
 });
 export type CellSnapshot = z.infer<typeof CellSnapshot>;
 
@@ -250,3 +294,29 @@ export type AgentChannelTyping = {
 };
 
 export type AgentChannelStatusReport = { status: "ready" | "error"; detail?: string };
+
+/** POST /tool-calls: only the search query / fetched URL travel (for the domain audit), never other params. */
+export type AgentChannelToolCallRequest = {
+  eventId: string;
+  agentId: string;
+  tool: string;
+  toolCallId?: string;
+  params: { query?: string; url?: string };
+  argsBytes?: number;
+};
+
+export const AgentChannelToolCallDecision = z.object({
+  callId: Id,
+  allowed: z.boolean(),
+  reason: z.string().nullable().optional(),
+});
+export type AgentChannelToolCallDecision = z.infer<typeof AgentChannelToolCallDecision>;
+
+/** POST /tool-calls/:callId/result: outcome only, never the result content. */
+export type AgentChannelToolCallResult = {
+  status: "ok" | "error" | "blocked";
+  resultCount?: number;
+  finalUrl?: string;
+  provider?: string;
+  durationMs: number;
+};

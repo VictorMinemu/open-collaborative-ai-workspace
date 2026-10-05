@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# Real-container smoke test: OpenClaw 2026.9.7 cell + our plugin + fake model + fake Agent Channel
-# API, all on an egress-less internal network. Proves: plugin loads, cell sync, WS connect, a
-# mention produces a reply in the right thread naming the asker and participants, 0 tools reach the
-# model, no published ports, and a ChatGPT-subscription sign-in command reaches OpenClaw's own
-# device-code login (which cannot reach auth.openai.com here, so it must report a classified error).
+# Real-container smoke test: OpenClaw 2026.9.7 cell + our plugin + the bundled search plugins + fake
+# model (also a fake SearXNG) + fake Agent Channel API, all on an egress-less internal network. Proves:
+# plugins load, cell sync, WS connect, a mention produces a reply in the right thread naming the asker
+# and participants, a mention without a turn offers 0 tools, internet on offers exactly
+# web_fetch,web_search and a search goes through the tool gate (authorized + outcome reported), no
+# published ports, and a ChatGPT-subscription sign-in command reaches OpenClaw's own device-code login
+# (which cannot reach auth.openai.com here, so it must report a classified error).
 #
 # Usage (repo root):  infra/openclaw/test/run-container-smoke.sh [--keep]
-#   SMOKE_ONLY=<comma list>  run only these scenarios (unset = all): mention, signin, dm
-# Requires: docker, apps/openclaw-channel/node_modules (pnpm install / npm install in that dir).
+#   SMOKE_ONLY=<comma list>  run only these scenarios (unset = all): mention, signin, dm, capabilities,
+#                            dm-isolation
+# Requires: docker, node + npm (bundled plugins are installed on the host from the pinned registry
+# tarballs), apps/openclaw-channel/node_modules (pnpm install / npm install in that dir).
 set -euo pipefail
 
 # Scenario selection: `want <name>` is true when SMOKE_ONLY is unset or lists <name>.
@@ -53,6 +57,10 @@ mkdir -p "$PLUGIN/node_modules"
 cp -R "$ROOT/apps/openclaw-channel/dist" "$ROOT/apps/openclaw-channel/src" "$PLUGIN/"
 cp "$ROOT/apps/openclaw-channel/package.json" "$ROOT/apps/openclaw-channel/openclaw.plugin.json" "$PLUGIN/"
 for dep in ws zod; do cp -RL "$ROOT/apps/openclaw-channel/node_modules/$dep" "$PLUGIN/node_modules/$dep"; done
+# The official search plugins, same pins + integrity check as the image build, bind-mounted read-only
+# (an image built before Phase 3.1 has no /opt/ocw/plugins; the mount works on either).
+echo "== bundled search plugins (pinned, sha512-checked)"
+bash "$ROOT/infra/openclaw/install-bundled-plugins.sh" "$SECRETS/bundled" | sed 's/^/   /'
 chmod -R a+rX "$SECRETS"
 
 echo "== internal network (no egress)"
@@ -63,8 +71,15 @@ docker network create --internal --subnet "${SMOKE_SUBNET:-10.231.77.0/24}" "$NE
 # Smoke containers are the kernel's first OOM victims (oom-score-adj 1000): on a memory-tight Docker VM the
 # smoke must fail, never take down another workload (e.g. a running demo cell).
 OOM=(--oom-score-adj 1000)
+# Optional hard cap for the cell (e.g. SMOKE_CELL_MEMORY=1g on a shared, memory-starved Docker VM).
+CELL_LIMIT=()
+[[ -n "${SMOKE_CELL_MEMORY:-}" ]] && CELL_LIMIT=(--memory "$SMOKE_CELL_MEMORY")
 
-docker run -d --name "${P}-model" "${OOM[@]}" --network "$NET" --network-alias fake-model ocw-fake-model:local >/dev/null
+# The working-tree fake model (tool-call directives, fake SearXNG /search) over the image copy: no rebuild.
+docker run -d --name "${P}-model" "${OOM[@]}" --network "$NET" --network-alias fake-model \
+  -v "$ROOT/infra/fake-model/server.mjs:/app/server.mjs:ro" \
+  -e FAKE_MODEL_CAPTURE_DIR=/tmp/capture \
+  ocw-fake-model:local >/dev/null
 
 docker run -d --name "${P}-api" "${OOM[@]}" --network "$NET" --network-alias api \
   -v "$PLUGIN:/plugin:ro" \
@@ -72,16 +87,20 @@ docker run -d --name "${P}-api" "${OOM[@]}" --network "$NET" --network-alias api
   -e FAKE_BOT_ID=0199a6f0-0000-7000-8000-00000000a001 \
   -e FAKE_CELL_ID=0199a6f0-0000-7000-8000-0000000000c0 \
   -e FAKE_MODEL_BASE_URL=http://fake-model:18999/v1 \
+  -e FAKE_AGENT_TOOLS=web_search,web_fetch \
+  -e FAKE_WEB_SEARCH_PROVIDER=searxng \
   node:24.21.0-bookworm-slim node /plugin/src/testing/run-fake-api.ts >/dev/null
 
-docker run -d --name "${P}-openclaw" "${OOM[@]}" --network "$NET" \
+docker run -d --name "${P}-openclaw" "${OOM[@]}" ${CELL_LIMIT[@]+"${CELL_LIMIT[@]}"} --network "$NET" \
   -v "$VOL:/home/node/.openclaw" \
   -v "$SECRETS/cell_token:/run/secrets/ocw_cell_token:ro" \
   -v "$PLUGIN:/opt/ocw/openclaw-channel:ro" \
   -v "$ROOT/infra/openclaw/entrypoint.mjs:/opt/ocw/entrypoint.mjs:ro" \
   -v "$ROOT/infra/openclaw/render-config.mjs:/opt/ocw/render-config.mjs:ro" \
+  -v "$SECRETS/bundled:/opt/ocw/plugins:ro" \
   -e OCW_API_URL=http://api:4000 \
   -e OCW_CELL_TOKEN_FILE=/run/secrets/ocw_cell_token \
+  -e OCW_SEARXNG_URL=http://fake-model:18999 \
   -e NODE_OPTIONS="${CELL_NODE_OPTIONS:---max-old-space-size=512}" \
   ocw-openclaw:local >/dev/null
 
@@ -174,6 +193,46 @@ if (!ok) { console.log("FAIL: unexpected dm reply"); process.exit(1); }
 '
 fi
 
+if want capabilities; then
+echo "== [capabilities] internet on: the model is offered exactly the web tools and searches through the gate"
+STATE="$(inject_and_wait "$ROOT/infra/openclaw/test/mention-web.json" 0199a6f0-0000-7000-8000-00000000d021)"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d021");
+if (!m) { console.log("FAIL: no reply to the web mention"); process.exit(1); }
+const calls = s.toolCalls.filter((c) => c.eventId === "0199a6f0-0000-7000-8000-00000000e003");
+const results = s.toolResults.filter((r) => calls.some((c) => c.callId === r.callId));
+console.log("   reply      :", m.text);
+console.log("   tool calls :", JSON.stringify(calls.map((c) => ({ tool: c.tool, params: c.params, allowed: c.allowed }))));
+console.log("   outcomes   :", JSON.stringify(results.map(({ status, resultCount, provider }) => ({ status, resultCount, provider }))));
+const ok =
+  m.text.includes("Fake result for ocw smoke") &&
+  m.text.includes("[tools: 2 | web_fetch,web_search]") &&
+  calls.length === 1 && calls[0].tool === "web_search" && calls[0].allowed === true &&
+  calls[0].params.query === "ocw smoke" && Object.keys(calls[0].params).join() === "query" &&
+  results.length === 1 && results[0].status === "ok";
+if (!ok) { console.log("FAIL: expected one gated, audited web_search and an answer from its result"); process.exit(1); }
+'
+echo "== [capabilities] internet off (turn.tools = []): the model is offered no tool at all"
+NOTOOLS="$SECRETS/mention-no-tools.json"
+node -e '
+const e = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+e.eventId = "0199a6f0-0000-7000-8000-00000000e004";
+e.thread.rootMessageId = e.message.id = "0199a6f0-0000-7000-8000-00000000d022";
+e.turn = { ...e.turn, tools: [], toolFlags: {} };
+require("fs").writeFileSync(process.argv[2], JSON.stringify(e));
+' "$ROOT/infra/openclaw/test/mention-web.json" "$NOTOOLS"
+STATE="$(inject_and_wait "$NOTOOLS" 0199a6f0-0000-7000-8000-00000000d022)"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d022");
+if (!m) { console.log("FAIL: no reply to the no-tools mention"); process.exit(1); }
+const calls = s.toolCalls.filter((c) => c.eventId === "0199a6f0-0000-7000-8000-00000000e004");
+console.log("   reply      :", m.text);
+if (!m.text.endsWith("[tools: 0]") || calls.length !== 0) { console.log("FAIL: tools reached the model with internet off"); process.exit(1); }
+'
+fi
+
 if want signin; then
 echo "== [signin] subscription sign-in command → OpenClaw's device-code login (no egress → reported error)"
 api_exec "
@@ -203,8 +262,21 @@ PORTS="$(docker port "${P}-openclaw" || true)"
 echo "   no published ports"
 # Capture once: `docker logs | grep -q` under pipefail can fail on SIGPIPE.
 LOGS="$(docker logs "${P}-openclaw" 2>&1)"
-if grep -q "(2 plugins: ocw, openai;" <<<"$LOGS"; then echo "   plugins loaded: ocw + openai (sign-in owner)"; else
-  echo "FAIL: unexpected plugin set"; grep "plugins\? loaded\|http server listening" <<<"$LOGS" | head; exit 1
+# Startup line (sorted ids): "http server listening (N plugins: a, b, …; …)". ocw + openai always load at
+# boot; the bundled search plugins are lazily activated (manifest `onStartup: false`), so they may only load
+# on first use. Nothing else may ever load.
+PLUGINS="$(grep -o "http server listening ([0-9]* plugins\?: [^;)]*" <<<"$LOGS" | tail -n 1 | sed 's/.*plugins\?: //')"
+if node -e '
+const ids = process.argv[1].split(",").map((s) => s.trim()).filter(Boolean);
+const allowed = new Set(["ocw", "openai", "duckduckgo", "searxng"]);
+process.exit(ids.includes("ocw") && ids.includes("openai") && ids.every((id) => allowed.has(id)) ? 0 : 1);
+' "$PLUGINS"; then
+  echo "   plugins loaded at boot: $PLUGINS (only ocw, openai and the bundled search plugins are permitted)"
+else
+  echo "FAIL: unexpected plugin set: '$PLUGINS'"; grep "plugins\? loaded\|http server listening\|ocw-cell" <<<"$LOGS" | head; exit 1
+fi
+if grep -q "bundled plugin .* missing from the image; skipped" <<<"$LOGS"; then
+  echo "FAIL: a bundled search plugin was skipped"; grep "ocw-cell" <<<"$LOGS"; exit 1
 fi
 if grep -q "\[heartbeat\] disabled" <<<"$LOGS"; then echo "   heartbeat disabled"; else echo "FAIL: heartbeat not disabled"; exit 1; fi
 if docker exec "${P}-openclaw" node -e "fetch('https://api.anthropic.com').then(()=>process.exit(0)).catch(()=>process.exit(1))"; then

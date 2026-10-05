@@ -5,14 +5,28 @@
  * Publish any cell event (e.g. provider.auth.start): POST /__test/event {type, data}.
  * Read results: GET /__test/state.
  * FAKE_SUBSCRIPTION=1 adds a connected "ChatGPT subscription" (openai-codex) and a bot on it.
+ * FAKE_AGENT_TOOLS=web_search,web_fetch  the bot's snapshot `capabilities.tools` (its alsoAllow).
+ * FAKE_WEB_SEARCH_PROVIDER=searxng       snapshot `webSearch.provider`.
+ * FAKE_DENY_TOOLS=web_fetch              `/tool-calls` denies these tools (allows everything else).
+ * Tool calls and their reported results are listed in GET /__test/state (`toolCalls`, `toolResults`).
  */
 import { startFakeAgentChannelApi } from "./fake-agent-channel-api.ts";
+
+const list = (v: string | undefined) =>
+  (v ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 
 const api = await startFakeAgentChannelApi({
   port: Number(process.env.FAKE_API_PORT ?? 4010),
   host: process.env.FAKE_API_HOST ?? "0.0.0.0",
   token: process.env.FAKE_API_TOKEN ?? "dev-cell-token",
   ...(process.env.FAKE_CELL_ID ? { cellId: process.env.FAKE_CELL_ID } : {}),
+  ...(process.env.FAKE_WEB_SEARCH_PROVIDER
+    ? { webSearchProvider: process.env.FAKE_WEB_SEARCH_PROVIDER }
+    : {}),
+  denyTools: list(process.env.FAKE_DENY_TOOLS),
   agents: [
     {
       id: process.env.FAKE_BOT_ID ?? "0199a000-0000-7000-8000-00000000a001",
@@ -25,6 +39,7 @@ const api = await startFakeAgentChannelApi({
       modelRef: process.env.FAKE_BOT_MODEL_REF ?? "fake/mock-1",
       model: { provider: "mock", providerId: "fake", id: "mock-1" },
       updatedAt: new Date().toISOString(),
+      capabilities: { tools: list(process.env.FAKE_AGENT_TOOLS) },
     },
   ],
   providers: [

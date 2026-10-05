@@ -5,12 +5,12 @@ import { openClawAgentIdFor, sanitizeName } from "./mention-mapper.js";
 export const OWNED_AGENT_PREFIX = "ocw-";
 
 /**
- * Every tool OpenClaw 2026.9.7 can offer by default, plus the wildcard. Verified: profile "minimal" +
- * this deny list + toolSearch off ⇒ the model receives 0 tools. The plugin also passes
- * `disableTools: true` on every dispatch (second guard).
+ * Tools no bot may ever be offered (lockdown v2, D-08). Mirrors `DANGEROUS_TOOL_NAMES` in
+ * packages/contracts/src/bot-capabilities.ts and `DANGEROUS_TOOLS` in infra/openclaw/render-config.mjs (parity
+ * test in reconciler.test.ts). No wildcard: tools are an allowlist (profile `minimal` + per-agent `alsoAllow`),
+ * and a global `*` deny would also remove the web tools (deny always wins).
  */
-export const DENIED_TOOLS = [
-  "*",
+export const DANGEROUS_TOOLS = [
   "apply_patch",
   "edit",
   "exec",
@@ -28,7 +28,31 @@ export const DENIED_TOOLS = [
   "browser",
   "canvas",
   "message",
+  "gateway",
+  "nodes",
+  "x_search",
+  "code_execution",
+  "group:runtime",
+  "group:fs",
+  "group:ui",
+  "group:automation",
+  "group:nodes",
+  "group:sessions",
+  "group:messaging",
+  "group:media",
 ] as const;
+
+const DANGEROUS_SET: ReadonlySet<string> = new Set(DANGEROUS_TOOLS.map((t) => t.toLowerCase()));
+
+/** The tools a bot entry may list in `alsoAllow`: never a dangerous name, a group or a wildcard. */
+export function allowedAgentTools(tools: readonly string[] | undefined): string[] {
+  return [...new Set(tools ?? [])].filter((t) => {
+    const lower = t.trim().toLowerCase();
+    return (
+      lower.length > 0 && !lower.includes("*") && !lower.startsWith("group:") && !DANGEROUS_SET.has(lower)
+    );
+  });
+}
 
 /** Env var that carries a provider key inside the gateway process (never written to config). */
 export function providerKeyEnvName(providerId: string): string {
@@ -70,7 +94,15 @@ export function desiredAgentEntry(
     models: pinEmbeddedRuntime ? { [modelRef]: { agentRuntime: { id: "openclaw" } } } : undefined,
     skills: [],
     identity: { name },
-    tools: { profile: "minimal", deny: [...DENIED_TOOLS] },
+    // Allowlist: only this bot's effective tools on top of `minimal`; dangerous names stay denied regardless.
+    tools: (() => {
+      const alsoAllow = allowedAgentTools(agent.capabilities?.tools);
+      return {
+        profile: "minimal",
+        ...(alsoAllow.length > 0 ? { alsoAllow } : {}),
+        deny: [...DANGEROUS_TOOLS],
+      };
+    })(),
   };
 }
 
@@ -143,6 +175,8 @@ export type ReconcilePlan = {
   env: Record<string, string>;
   /** What to report via POST /agents/:id/status once the write succeeded. */
   results: AgentProvisioningResult[];
+  /** New `tools.web.search.provider` (D-09), or null to leave it alone. */
+  webSearchProvider: string | null;
   changed: boolean;
 };
 
@@ -155,9 +189,13 @@ export const SUBSCRIPTION_NOT_SIGNED_IN =
  * subscription-auth.ts); bots on any other listed subscription are reported as `error`.
  */
 export function planReconcile(
-  current: { agents?: AgentEntries; providers?: ProviderEntries },
-  cell: Pick<CellSnapshot, "agents" | "providers" | "subscriptions">,
-  opts: { readySubscriptions?: ReadonlySet<string> } = {},
+  current: { agents?: AgentEntries; providers?: ProviderEntries; webSearchProvider?: string },
+  cell: Pick<CellSnapshot, "agents" | "providers" | "subscriptions" | "webSearch">,
+  opts: {
+    readySubscriptions?: ReadonlySet<string>;
+    /** Search provider plugins loaded in this cell (`plugins.allow`); a provider not loaded is never set. */
+    searchProviders?: ReadonlySet<string>;
+  } = {},
 ): ReconcilePlan {
   const existingAgents = current.agents ?? {};
   const existingProviders = current.providers ?? {};
@@ -226,6 +264,12 @@ export function planReconcile(
   const staleOpenAIId = renameOpenAI ? "openai" : RENAMED_OPENAI_PROVIDER;
   const removeProviders = staleOpenAIId in existingProviders ? [staleOpenAIId] : [];
 
+  const wantedSearch = cell.webSearch?.provider;
+  const webSearchProvider =
+    wantedSearch && wantedSearch !== current.webSearchProvider && opts.searchProviders?.has(wantedSearch)
+      ? wantedSearch
+      : null;
+
   return {
     upsertAgents,
     removeAgents,
@@ -233,7 +277,9 @@ export function planReconcile(
     removeProviders,
     env,
     results,
+    webSearchProvider,
     changed:
+      webSearchProvider !== null ||
       Object.keys(upsertAgents).length > 0 ||
       removeAgents.length > 0 ||
       Object.keys(upsertProviders).length > 0 ||
@@ -244,11 +290,18 @@ export function planReconcile(
 export type MutableConfig = {
   agents?: { entries?: AgentEntries; [k: string]: unknown };
   models?: { providers?: ProviderEntries; [k: string]: unknown };
+  tools?: { web?: { search?: Record<string, unknown>; [k: string]: unknown }; [k: string]: unknown };
+  plugins?: { allow?: unknown; [k: string]: unknown };
   [k: string]: unknown;
 };
 
 /** Applies a plan to a mutable config draft (inside OpenClaw's `mutateConfigFile`). */
 export function applyPlanToDraft(draft: MutableConfig, plan: ReconcilePlan): void {
+  if (plan.webSearchProvider) {
+    draft.tools ??= {};
+    draft.tools.web ??= {};
+    draft.tools.web.search = { ...(draft.tools.web.search ?? {}), provider: plan.webSearchProvider };
+  }
   if (Object.keys(plan.upsertProviders).length > 0) {
     draft.models ??= {};
     draft.models.providers ??= {};
