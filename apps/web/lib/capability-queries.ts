@@ -56,10 +56,18 @@ export function useUpdateBotCapabilities(agentId: string) {
       await qc.cancelQueries({ queryKey: key });
       const previous = qc.getQueryData<BotCapabilityView>(key);
       if (previous) {
-        const { tools: _tools, ...toggles } = body;
+        const { tools, ...toggles } = body;
+        // A tool switch flips at once too; the server's view brings back the effective state and reasons.
+        const granted = tools ? new Set(tools.map((g) => `${g.sourceKind}:${g.sourceId}:${g.tool}`)) : null;
         qc.setQueryData<BotCapabilityView>(key, {
           ...previous,
           capabilities: { ...previous.capabilities, ...toggles },
+          tools: granted
+            ? previous.tools.map((t) => ({
+                ...t,
+                granted: granted.has(`${t.sourceKind}:${t.sourceId}:${t.tool}`),
+              }))
+            : previous.tools,
         });
       }
       return { previous };
