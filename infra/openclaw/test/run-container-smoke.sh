@@ -100,13 +100,22 @@ docker run -d --name "${P}-api" "${OOM[@]}" --network "$NET" --network-alias api
   -e FAKE_WEB_SEARCH_PROVIDER=searxng \
   node:24.21.0-bookworm-slim node /plugin/src/testing/run-fake-api.ts >/dev/null
 
+# A freshly built image (SMOKE_BUILD=1, e.g. CI) already contains this tree's plugin, entrypoint and bundled
+# plugins owned by root. Bind-mounting the checkout over them would hand OpenClaw directories owned by the
+# runner's uid, which it refuses to load ("suspicious ownership"). Overlay only when reusing an older image.
+OVERLAY=()
+if [[ "${SMOKE_BUILD:-0}" != "1" ]]; then
+  OVERLAY=(
+    -v "$PLUGIN:/opt/ocw/openclaw-channel:ro"
+    -v "$ROOT/infra/openclaw/entrypoint.mjs:/opt/ocw/entrypoint.mjs:ro"
+    -v "$ROOT/infra/openclaw/render-config.mjs:/opt/ocw/render-config.mjs:ro"
+    -v "$SECRETS/bundled:/opt/ocw/plugins:ro"
+  )
+fi
 docker run -d --name "${P}-openclaw" "${OOM[@]}" ${CELL_LIMIT[@]+"${CELL_LIMIT[@]}"} --network "$NET" \
   -v "$VOL:/home/node/.openclaw" \
   -v "$SECRETS/cell_token:/run/secrets/ocw_cell_token:ro" \
-  -v "$PLUGIN:/opt/ocw/openclaw-channel:ro" \
-  -v "$ROOT/infra/openclaw/entrypoint.mjs:/opt/ocw/entrypoint.mjs:ro" \
-  -v "$ROOT/infra/openclaw/render-config.mjs:/opt/ocw/render-config.mjs:ro" \
-  -v "$SECRETS/bundled:/opt/ocw/plugins:ro" \
+  ${OVERLAY[@]+"${OVERLAY[@]}"} \
   -e OCW_API_URL=http://api:4000 \
   -e OCW_CELL_TOKEN_FILE=/run/secrets/ocw_cell_token \
   -e OCW_SEARXNG_URL=http://fake-model:18999 \
