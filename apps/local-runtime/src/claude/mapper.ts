@@ -2,7 +2,7 @@
 // session; no I/O, so it can be tested against recorded fixtures. Output is NOT sanitised yet.
 
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { SessionEvent, Usage, WorkSessionStatus } from "@ocw/contracts";
+import { FastModeState, type SessionEvent, type Usage, type WorkSessionStatus } from "@ocw/contracts";
 import { truncateBytes } from "../sanitize.js";
 import { summarizeToolInput } from "./tool-policy.js";
 
@@ -78,6 +78,22 @@ export function rawEvent(rawType: string, msg: unknown): SessionEvent {
   };
 }
 
+/** `session.settings` from a `system/init` (model, permissionMode, fast_mode_state/_disabled_reason, effort). */
+function initSettings(msg: Loose): Extract<SessionEvent, { type: "session.settings" }> {
+  const ev: Extract<SessionEvent, { type: "session.settings" }> = { type: "session.settings" };
+  if (typeof msg.model === "string") ev.model = msg.model.slice(0, 200);
+  if (typeof msg.permissionMode === "string") ev.permissionMode = msg.permissionMode.slice(0, 32);
+  const state = FastModeState.safeParse(msg.fast_mode_state);
+  if (state.success) ev.fastModeState = state.data;
+  if (typeof msg.fast_mode_disabled_reason === "string") {
+    ev.fastModeReason = msg.fast_mode_disabled_reason.slice(0, 64);
+  }
+  if (typeof msg.effort === "string" || msg.effort === null) {
+    ev.effort = msg.effort === null ? null : msg.effort.slice(0, 32);
+  }
+  return ev;
+}
+
 export class ClaudeEventMapper {
   /** Prompt the next `result` message completes. Set by the runtime when it dispatches a prompt. */
   currentPromptId: string | null = null;
@@ -118,22 +134,33 @@ export class ClaudeEventMapper {
     switch (msg.subtype) {
       case "init": {
         this.permissionMode = typeof msg.permissionMode === "string" ? msg.permissionMode : null;
-        if (this.started) return [];
+        // Every init (one per turn) carries the effective settings; a change made by the runtime itself is
+        // visible to every controller (D-15). session.started only once.
+        const settings = initSettings(msg);
+        if (this.started) return [settings];
         this.started = true;
         const ev: SessionEvent = { type: "session.started", runtime: "claude-code" };
         if (this.runtimeSessionId) ev.runtimeSessionId = this.runtimeSessionId;
         if (typeof msg.claude_code_version === "string") ev.runtimeVersion = msg.claude_code_version;
         if (typeof msg.model === "string") ev.model = msg.model;
         if (this.permissionMode) ev.permissionMode = this.permissionMode;
-        return [ev];
+        return [ev, settings];
       }
       case "session_state_changed": {
         const status = STATE_MAP[String(msg.state)];
         return status ? [{ type: "session.state", status }] : [rawEvent(key, msg)];
       }
-      case "status":
-        // `requesting` is per-API-call noise; `null` clears a status. Only compaction is forwarded.
-        return msg.status && msg.status !== "requesting" ? [rawEvent(key, msg)] : [];
+      case "status": {
+        // `requesting` is per-API-call noise; `null` clears a status. Only compaction is forwarded raw.
+        const out: SessionEvent[] = msg.status && msg.status !== "requesting" ? [rawEvent(key, msg)] : [];
+        // A mode change (ours via setPermissionMode, or the runtime's own, e.g. ExitPlanMode) is reported here
+        // before the next init (fixture claude-code-2.1.289.settings): forward it as the mode readback.
+        if (typeof msg.permissionMode === "string") {
+          this.permissionMode = msg.permissionMode;
+          out.push({ type: "session.settings", permissionMode: msg.permissionMode.slice(0, 32) });
+        }
+        return out;
+      }
       default:
         return [rawEvent(key, msg)];
     }

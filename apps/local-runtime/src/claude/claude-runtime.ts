@@ -1,8 +1,11 @@
 // Claude Code runtime adapter (Claude Agent SDK, streaming-input mode).
 //
 // Security invariants (AGENTS.md):
-// - never `bypassPermissions`: only default | acceptEdits | plan are accepted, and the CLI is
+// - never `bypassPermissions`: only default | acceptEdits | plan | auto are accepted, and the CLI is
 //   started with `disableBypassPermissionsMode` and without `allowDangerouslySkipPermissions`;
+// - settings change between turns only (setModel / setPermissionMode / applyFlagSettings with scalar keys,
+//   never `permissions`); each turn runs at min(configured mode, the prompt's cap) (P-07);
+// - settings / unknown slash commands are refused before they can reach the CLI (D-13 backstop);
 // - secret paths are denied three times over: settings deny rules, a PreToolUse hook and canUseTool;
 // - user/local Claude settings are not loaded, so personal allow-rules cannot skip cloud approvals;
 // - OCW_* variables (device token) are stripped from the Claude Code process environment;
@@ -11,9 +14,11 @@
 
 import { randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import {
   type CanUseTool,
   type HookCallback,
+  type ModelInfo,
   type Options,
   type PermissionResult,
   type SDKMessage,
@@ -22,13 +27,18 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import {
   type ApprovalDecision,
+  minMode,
   PermissionMode,
   type PromptPayload,
+  type RuntimeCatalog,
   type RuntimeInfo,
   type SessionEvent,
+  type SessionSettingsPatch,
+  slashDisposition,
   type WorkSessionStatus,
 } from "@ocw/contracts";
 import { AsyncQueue } from "../async-queue.js";
+import { ocwHome } from "../config.js";
 import { filterEnv, findExecutable } from "../exec-path.js";
 import { errorMessage, type Logger, silentLogger } from "../logger.js";
 import {
@@ -39,6 +49,7 @@ import {
   type StartSessionOptions,
 } from "../runtime.js";
 import { redact } from "../sanitize.js";
+import { collectClaudeCatalog, ONE_M_CONTEXT, runtimeModelId } from "./catalog.js";
 import { detectClaudeCode } from "./detect.js";
 import { ClaudeEventMapper } from "./mapper.js";
 import { extractPaths, secretDenyReason, secretDenyRules, summarizeToolInput } from "./tool-policy.js";
@@ -50,6 +61,32 @@ const STOP_GRACE_MS = 5_000;
 export interface QueryHandle extends AsyncIterable<SDKMessage> {
   interrupt(): Promise<unknown>;
   close(): void;
+  /** Next response's model (streaming input only); undefined = the runtime default. sdk.d.ts:2887-2893 */
+  setModel(model?: string): Promise<void>;
+  /** sdk.d.ts:2858-2864. Never `bypassPermissions` outside ADR-0012's path (Plan 06). */
+  setPermissionMode(mode: SdkPermissionMode): Promise<void>;
+  /**
+   * Flag settings layer (sdk.d.ts:2920-2944). Only scalar keys: a `permissions` key would REPLACE the secret deny
+   * rules and `disableBypassPermissionsMode` passed at start (T-03.2-02-01), so the type does not even allow it.
+   */
+  applyFlagSettings(settings: {
+    effortLevel?: SdkEffortLevel | null;
+    fastMode?: boolean | null;
+  }): Promise<void>;
+  initializationResult(): Promise<{ models: ModelInfo[] }>;
+  getContextUsage(opts?: { detail?: "summary" | "full" }): Promise<{ maxTokens: number; model: string }>;
+}
+
+type SdkPermissionMode = NonNullable<Options["permissionMode"]>;
+type SdkEffortLevel = NonNullable<Options["effort"]>;
+
+/** What the session runs with (platform values; `model` is the catalog id, without the `[1m]` suffix). */
+interface RuntimeSettings {
+  model: string | null;
+  contextWindow: number | null;
+  effort: string | null;
+  fastMode: boolean;
+  permissionMode: PermissionMode;
 }
 
 export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => QueryHandle;
@@ -66,7 +103,12 @@ export interface ClaudeCodeRuntimeOptions {
   useApiKey?: boolean;
   logger?: Logger;
   detect?: () => Promise<RuntimeInfo>;
+  /** Working directory of the throw-away catalog query. Default: the OCW home. */
+  catalogCwd?: string;
 }
+
+/** How long a collected catalog is reused (P-05: the daemon re-sends it on every handshake). */
+export const CATALOG_TTL_MS = 10 * 60 * 1000;
 
 type ApprovalOutcome = ApprovalDecision | "expired";
 
@@ -91,6 +133,14 @@ interface Session {
   status: WorkSessionStatus | null;
   stopping: boolean;
   done: Promise<void>;
+  /** The settings as last authorized by the platform (session.configure / start). */
+  configured: RuntimeSettings;
+  /** What the runtime currently runs (the permission mode may be lowered for one turn, P-07). */
+  applied: RuntimeSettings;
+  /** Changes received during a turn, merged (last value wins), applied before the next one (D-14). */
+  pending: SessionSettingsPatch | null;
+  /** Serialises control requests (settings changes, the per-turn mode) on this session. */
+  applying: Promise<void>;
 }
 
 /**
@@ -138,7 +188,8 @@ export class ClaudeCodeRuntime implements AgentRuntime {
   readonly capabilities: RuntimeCapabilities = {
     supportsSteer: false,
     supportsResume: true,
-    supportsPermissionModes: ["default", "acceptEdits", "plan"],
+    // `auto` confirmed by the 2.1.289 settings fixture (setPermissionMode("auto") → init permissionMode "auto").
+    supportsPermissionModes: ["default", "acceptEdits", "plan", "auto"],
     supportsImages: true,
   };
 
@@ -147,6 +198,8 @@ export class ClaudeCodeRuntime implements AgentRuntime {
   private readonly approvalTimeoutMs: number;
   private readonly log: Logger;
   private readonly claudePath: string | null;
+  private catalogCache: { at: number; value: RuntimeCatalog } | null = null;
+  private catalogInFlight: Promise<RuntimeCatalog | null> | null = null;
 
   constructor(private readonly opts: ClaudeCodeRuntimeOptions = {}) {
     this.queryFn = opts.queryFn ?? ((params) => sdkQuery(params));
@@ -161,6 +214,34 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       ...(this.claudePath ? { claudePath: this.claudePath } : {}),
       useApiKey: this.opts.useApiKey ?? false,
     });
+  }
+
+  /**
+   * The models, efforts, context windows and fast-mode support this login really has (D-08 … D-11), from one
+   * throw-away query that never sends a turn. Cached for 10 minutes; null when the CLI is missing or signed out.
+   */
+  async catalog(): Promise<RuntimeCatalog | null> {
+    if (this.catalogCache && Date.now() - this.catalogCache.at < CATALOG_TTL_MS)
+      return this.catalogCache.value;
+    if (this.catalogInFlight) return this.catalogInFlight;
+    this.catalogInFlight = (async () => {
+      const info = await this.detect();
+      if (!info.installed || !info.loggedIn) return null;
+      const cwd = this.opts.catalogCwd ?? ocwHome();
+      await mkdir(cwd, { recursive: true });
+      const value = await collectClaudeCatalog(this.queryFn, {
+        claudePath: this.claudePath,
+        env: childEnv(process.env, this.opts.useApiKey ?? false),
+        cwd,
+        runtimeVersion: info.version,
+        permissionModes: [...this.capabilities.supportsPermissionModes],
+      });
+      this.catalogCache = { at: Date.now(), value };
+      return value;
+    })().finally(() => {
+      this.catalogInFlight = null;
+    });
+    return this.catalogInFlight;
   }
 
   hasSession(sessionId: string): boolean {
@@ -202,7 +283,30 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       stopping: false,
       q: null,
       done: Promise.resolve(),
+      configured: {
+        model: options.model ?? null,
+        contextWindow: null,
+        effort: null,
+        fastMode: false,
+        permissionMode: mode.data,
+      },
+      applied: {
+        model: options.model ?? null,
+        contextWindow: null,
+        effort: null,
+        fastMode: false,
+        permissionMode: mode.data,
+      },
+      pending: null,
+      applying: Promise.resolve(),
     };
+    // Start-time effort / fast mode / context window go through the same between-turn path (first turn).
+    const initial: SessionSettingsPatch = {};
+    if (options.effort !== undefined) initial.effort = options.effort;
+    // Fast mode is off unless asked for (no control request for the default).
+    if (options.fastMode === true) initial.fastMode = true;
+    if (options.contextWindow !== undefined) initial.contextWindow = options.contextWindow;
+    if (Object.keys(initial).length > 0) session.pending = initial;
 
     const sdkOptions: Options = {
       cwd: options.cwd,
@@ -235,12 +339,32 @@ export class ClaudeCodeRuntime implements AgentRuntime {
 
   async prompt(sessionId: string, prompt: PromptPayload): Promise<void> {
     const s = this.get(sessionId);
+    refuseSlashCommand(prompt.text);
     if (s.stopping) throw new RuntimeError("session is stopping", "invalid_state");
     if (s.running) {
       s.queue.push(prompt);
       return;
     }
-    this.dispatch(s, prompt);
+    await this.dispatch(s, prompt);
+  }
+
+  /**
+   * Settings between turns (D-07, D-14): applied at once while idle, otherwise held (merged) and applied before the
+   * next turn's user message is pushed. The effective values are reported as `session.settings`; the next
+   * `system/init` refines them (D-15).
+   */
+  async configure(sessionId: string, patch: SessionSettingsPatch): Promise<void> {
+    const s = this.get(sessionId);
+    if (s.stopping) throw new RuntimeError("session is stopping", "invalid_state");
+    if (
+      patch.permissionMode !== undefined &&
+      !this.capabilities.supportsPermissionModes.includes(patch.permissionMode)
+    ) {
+      throw new RuntimeError(`permission mode ${patch.permissionMode} is not supported`, "settings_rejected");
+    }
+    s.pending = { ...(s.pending ?? {}), ...patch };
+    if (s.running) return;
+    await this.serially(s, () => this.applyPending(s, true));
   }
 
   async interrupt(sessionId: string): Promise<void> {
@@ -316,13 +440,168 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     }
   }
 
-  private dispatch(s: Session, prompt: PromptPayload): void {
+  private async dispatch(s: Session, prompt: PromptPayload): Promise<void> {
     s.running = prompt;
     s.interruptRequested = false;
-    s.mapper.currentPromptId = prompt.promptId;
     this.emit(s, { type: "prompt.started", promptId: prompt.promptId });
     this.emit(s, { type: "session.state", status: "running" });
+    // Held settings first: a failure is reported and dropped, the turn still runs with the previous values.
+    // Then the turn's mode = min(configured, the author's cap) (P-07): if it cannot be set, the turn fails
+    // instead of running at a higher mode.
+    const capped = await this.serially(s, async () => {
+      await this.applyPending(s, false);
+      try {
+        await this.syncMode(s, prompt.permissionMode);
+        return true;
+      } catch (err) {
+        this.emit(s, {
+          type: "session.error",
+          message: `Permission mode could not be set for this turn: ${redact(errorMessage(err)).slice(0, 300)}`,
+        });
+        return false;
+      }
+    });
+    if (s.stopping || s.input.isClosed) return; // finish() / stop() completes the prompt
+    if (!capped) {
+      this.emit(s, {
+        type: "prompt.completed",
+        promptId: prompt.promptId,
+        usage: { inputTokens: 0, outputTokens: 0 },
+        isError: true,
+      });
+      await this.onTurnComplete(s);
+      return;
+    }
+    s.mapper.currentPromptId = prompt.promptId;
     s.input.push(toUserMessage(prompt));
+  }
+
+  /** Runs `fn` after every earlier control request of this session (never two at once). */
+  private serially<T>(s: Session, fn: () => Promise<T>): Promise<T> {
+    const run = s.applying.then(fn);
+    s.applying = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  /** Applies the held change. `strict`: reject with `settings_rejected` (configure while idle). */
+  private async applyPending(s: Session, strict: boolean): Promise<void> {
+    const patch = s.pending;
+    s.pending = null;
+    if (!patch || Object.keys(patch).length === 0) return;
+    const before = JSON.stringify(s.applied);
+    try {
+      await this.applyPatch(s, patch);
+    } catch (err) {
+      const message = redact(errorMessage(err)).slice(0, 500);
+      this.emit(s, { type: "session.error", message: `Settings change not applied: ${message}` });
+      // Whatever was applied before the failure is still reported (the runtime runs it now).
+      if (JSON.stringify(s.applied) !== before) this.emitSettings(s);
+      if (strict) throw new RuntimeError(message, "settings_rejected");
+      return;
+    }
+    this.emitSettings(s);
+  }
+
+  /** One control request per kind of change; `configured` / `applied` follow each successful step. */
+  private async applyPatch(s: Session, patch: SessionSettingsPatch): Promise<void> {
+    const q = s.q;
+    if (!q) throw new Error("runtime not started");
+    if (patch.model !== undefined || patch.contextWindow !== undefined) {
+      const model = patch.model !== undefined ? patch.model : s.configured.model;
+      const window = patch.contextWindow !== undefined ? patch.contextWindow : s.configured.contextWindow;
+      const target = await this.resolveModel(model, window, patch.contextWindow !== undefined);
+      await q.setModel(target.runtimeModel);
+      s.configured.model = s.applied.model = model;
+      s.configured.contextWindow = target.requested;
+      s.applied.contextWindow = target.reported;
+    }
+    const flags: { effortLevel?: SdkEffortLevel | null; fastMode?: boolean } = {};
+    if (patch.effort !== undefined) flags.effortLevel = patch.effort as SdkEffortLevel | null;
+    if (patch.fastMode !== undefined) flags.fastMode = patch.fastMode;
+    if (Object.keys(flags).length > 0) {
+      await q.applyFlagSettings(flags);
+      if (patch.effort !== undefined) s.configured.effort = s.applied.effort = patch.effort;
+      if (patch.fastMode !== undefined) s.configured.fastMode = s.applied.fastMode = patch.fastMode;
+    }
+    if (patch.permissionMode !== undefined && patch.permissionMode !== s.configured.permissionMode) {
+      const previous = s.configured.permissionMode;
+      s.configured.permissionMode = patch.permissionMode;
+      if (!s.running) {
+        try {
+          await this.syncMode(s, undefined);
+        } catch (err) {
+          s.configured.permissionMode = previous;
+          throw err;
+        }
+      }
+    }
+  }
+
+  /**
+   * The model id for `setModel` and the window it gives (D-10). A window is selected by re-selecting the model with
+   * or without `[1m]`, only where the catalog lists both values; a model's fixed window is accepted as a no-op
+   * choice; anything else is `settings_rejected`. `requested` is what the platform asked for (null = default),
+   * `reported` the window the runtime will run (from the catalog; null when unknown).
+   */
+  private async resolveModel(
+    model: string | null,
+    contextWindow: number | null,
+    windowRequested: boolean,
+  ): Promise<{ runtimeModel: string | undefined; requested: number | null; reported: number | null }> {
+    const catalog = windowRequested ? await this.catalog().catch(() => null) : this.cachedCatalog();
+    const id = model ?? catalog?.models.find((m) => m.isDefault)?.id ?? null;
+    const entry = id ? catalog?.models.find((m) => m.id === id) : undefined;
+    const selectable = entry !== undefined && entry.contextWindows.length > 1;
+    if (windowRequested && contextWindow !== null) {
+      const fixed = entry?.defaultContextWindow === contextWindow;
+      if (!fixed && !(selectable && entry.contextWindows.includes(contextWindow))) {
+        throw new RuntimeError(
+          `context window ${contextWindow} is not offered for ${id ?? "the default model"}`,
+          "settings_rejected",
+        );
+      }
+    }
+    // A window kept across a model change only where the new model offers it too.
+    const requested =
+      selectable && contextWindow !== null && entry.contextWindows.includes(contextWindow)
+        ? contextWindow
+        : null;
+    const oneM = requested === ONE_M_CONTEXT;
+    return {
+      runtimeModel:
+        id && (model !== null || oneM) ? runtimeModelId(id, oneM ? ONE_M_CONTEXT : null) : undefined,
+      requested: windowRequested ? contextWindow : requested,
+      reported: requested ?? entry?.defaultContextWindow ?? null,
+    };
+  }
+
+  private cachedCatalog(): RuntimeCatalog | null {
+    return this.catalogCache?.value ?? null;
+  }
+
+  /** Puts the runtime in `min(configured mode, cap)` (P-07); no request when it already runs that mode. */
+  private async syncMode(s: Session, cap: PermissionMode | undefined): Promise<void> {
+    const target = cap ? minMode(s.configured.permissionMode, cap) : s.configured.permissionMode;
+    if (target === s.applied.permissionMode) return;
+    await s.q?.setPermissionMode(sdkPermissionMode(target));
+    s.applied.permissionMode = target;
+  }
+
+  private emitSettings(s: Session): void {
+    const a = s.applied;
+    const ev: Extract<SessionEvent, { type: "session.settings" }> = {
+      type: "session.settings",
+      permissionMode: a.permissionMode,
+      effort: a.effort,
+      fastMode: a.fastMode,
+    };
+    // null model = the runtime default: the next init reports which one it is.
+    if (a.model) ev.model = a.model;
+    if (a.contextWindow !== null) ev.contextWindow = a.contextWindow;
+    this.emit(s, ev);
   }
 
   private async consume(s: Session, q: QueryHandle): Promise<void> {
@@ -351,9 +630,12 @@ export class ClaudeCodeRuntime implements AgentRuntime {
           if (ev.type === "prompt.completed") {
             if (s.interruptRequested) ev.interrupted = true;
             this.emit(s, ev);
-            this.onTurnComplete(s);
+            void this.onTurnComplete(s).catch((err: unknown) =>
+              this.log.error("next turn failed", { sessionId: s.id, error: errorMessage(err) }),
+            );
             continue;
           }
+          if (ev.type === "session.settings") this.noteReported(s, ev);
           this.emit(s, ev);
         }
       }
@@ -363,12 +645,26 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     }
   }
 
-  private onTurnComplete(s: Session): void {
+  private async onTurnComplete(s: Session): Promise<void> {
     s.running = null;
     s.interruptRequested = false;
     const next = s.queue.shift();
-    if (next && !s.stopping) this.dispatch(s, next);
-    else this.emit(s, { type: "session.state", status: "idle" });
+    if (next && !s.stopping) {
+      await this.dispatch(s, next);
+      return;
+    }
+    this.emit(s, { type: "session.state", status: "idle" });
+    // A change received during the turn with no prompt behind it is applied now, not at some later prompt.
+    if (s.pending && !s.stopping) await this.serially(s, () => this.applyPending(s, false));
+  }
+
+  /**
+   * The runtime's own report (init) is authoritative for the mode it runs: e.g. leaving plan mode through
+   * ExitPlanMode changes it without us (D-15). The server compares it with the authorized mode (Plan 04).
+   */
+  private noteReported(s: Session, ev: Extract<SessionEvent, { type: "session.settings" }>): void {
+    const mode = PermissionMode.safeParse(ev.permissionMode);
+    if (mode.success) s.applied.permissionMode = mode.data;
   }
 
   private finish(s: Session, error: string | null): void {
@@ -464,10 +760,26 @@ export class ClaudeCodeRuntime implements AgentRuntime {
 }
 
 /**
+ * D-13 backstop (P-10): a settings command (`/model`, `/effort`, `/fast`, `/permissions`) or any command outside the
+ * passthrough allowlist (`/config`, `/mcp`, …) never reaches the CLI raw: it could change runtime state behind the
+ * platform's policy and audit. The API already routes or refuses them; this is the device-side guard.
+ */
+export function refuseSlashCommand(text: string): void {
+  const slash = slashDisposition(text, "claude-code");
+  if (!slash || slash.kind === "passthrough") return;
+  throw new RuntimeError(
+    slash.kind === "settings"
+      ? `/${slash.name} must be changed from the session controls`
+      : `/${slash.name} is not available from the workspace`,
+    "slash_command_refused",
+  );
+}
+
+/**
  * Platform mode → SDK mode. `fullAccess` is refused here until ADR-0012's path is wired in this adapter
  * (Plan 06): it never becomes `bypassPermissions` by accident.
  */
-export function sdkPermissionMode(mode: PermissionMode): NonNullable<Options["permissionMode"]> {
+export function sdkPermissionMode(mode: PermissionMode): SdkPermissionMode {
   if (mode === "fullAccess") {
     throw new RuntimeError("full access is not available in this adapter", "permission_mode_rejected");
   }

@@ -9,7 +9,9 @@ const row = (
   evidence: string,
 ): RuntimeControlRow => ({ area: "claude-code", control, status, reason, evidence, uiKey });
 
-const FIXTURE = "awaiting recorded fixture";
+/** Fixtures recorded at CLI 2.1.289 / SDK 0.3.282 (apps/local-runtime/src/claude/__fixtures__/). */
+const SETTINGS_FIXTURE = "fixture claude-code-2.1.289.settings.sdk.jsonl";
+const CATALOG_FIXTURE = "fixture claude-code-2.1.289.catalog.json";
 
 export const CLAUDE_CODE_CONTROLS: readonly RuntimeControlRow[] = [
   row(
@@ -17,21 +19,21 @@ export const CLAUDE_CODE_CONTROLS: readonly RuntimeControlRow[] = [
     "exposed",
     "model.list",
     "Reported by the runtime per account; the picker renders only this catalog (D-08)",
-    "Query.initializationResult().models / supportedModels(): sdk.d.ts:2998-3004",
+    `Query.initializationResult().models / supportedModels(): sdk.d.ts:2998-3004; ${CATALOG_FIXTURE} (12 rows, no turn)`,
   ),
   row(
     "Switch model",
     "exposed",
     "model.switch",
-    "Applied between turns with setModel in streaming input mode (D-07, D-14)",
-    "Query.setModel(): sdk.d.ts:2887-2893; probe changed getContextUsage().model",
+    "Applied between turns with setModel in streaming input mode (D-07, D-14); every init reports the effective model (D-15)",
+    `Query.setModel(): sdk.d.ts:2887-2893; ${SETTINGS_FIXTURE}: setModel("sonnet") → init model claude-sonnet-5-5`,
   ),
   row(
     "Effort (Low / Medium / High / Extra High / Max)",
-    "deferred",
+    "exposed",
     "effort",
-    `${FIXTURE}: applyFlagSettings({ effortLevel }) exists, its runtime effect is not fixtured yet (Plan 02)`,
-    "Options.effort / applyFlagSettings: sdk.d.ts:688, 1905-1916, 2920-2944",
+    "Levels from ModelInfo.supportedEffortLevels; applied between turns with applyFlagSettings({ effortLevel }) (only scalar keys, never permissions). The SDK init does not echo effort, so the readback is the applied value",
+    `applyFlagSettings: sdk.d.ts:1905-1916, 2920-2944; ${SETTINGS_FIXTURE}: applyFlagSettings({effortLevel:"low"}) accepted, turn ran`,
   ),
   row(
     "Ultracode",
@@ -58,8 +60,8 @@ export const CLAUDE_CODE_CONTROLS: readonly RuntimeControlRow[] = [
     "Context window 200k / 1M",
     "exposed",
     "context.window",
-    "Only where the runtime accepts both values (Opus 4.6 today); elsewhere the fixed value is shown (D-10)",
-    "Probe getContextUsage().maxTokens with the [1m] model suffix; sdk.d.ts:1706-1713, 3716",
+    "Only where the runtime accepts both values (at 2.1.289: claude-opus-4-6 only); elsewhere the fixed value is shown (D-10)",
+    `Probe setModel(id / id[1m]) + getContextUsage().maxTokens; sdk.d.ts:1706-1713, 3716; ${CATALOG_FIXTURE}`,
   ),
   row(
     "Context usage indicator",
@@ -72,8 +74,8 @@ export const CLAUDE_CODE_CONTROLS: readonly RuntimeControlRow[] = [
     "Fast mode on / off",
     "exposed",
     "fast.mode",
-    "Metered (paid usage credits); org policy default off; shown disabled with the runtime's reason (D-11)",
-    "Settings.fastMode / fast_mode_state: sdk.d.ts:766-776, 8861-8869, 4529-4532",
+    "Metered (paid usage credits, not the plan limits); org policy default off; applied with applyFlagSettings({ fastMode }) and shown disabled with the runtime's reason from init fast_mode_disabled_reason (sdk_opt_in_required before opt-in, extra_usage_disabled on this account per research) (D-11)",
+    `Settings.fastMode / fast_mode_state: sdk.d.ts:766-776, 8861-8869, 4529-4532; ${SETTINGS_FIXTURE}: init fast_mode_state off / sdk_opt_in_required`,
   ),
   row(
     "Plan mode",
@@ -98,10 +100,10 @@ export const CLAUDE_CODE_CONTROLS: readonly RuntimeControlRow[] = [
   ),
   row(
     "Auto (permission mode auto)",
-    "deferred",
+    "exposed",
     "mode.auto",
-    `${FIXTURE}: the effective mode after setPermissionMode('auto') must be read back from system/init (Plan 02)`,
-    "PermissionMode 'auto', ModelInfo.supportsAutoMode: sdk.d.ts:1420-1423, 2858-2864, 9019-9021",
+    "Offered only for models with supportsAutoMode; the runtime confirmed it: after setPermissionMode('auto') the status frame and the next system/init report permissionMode auto",
+    `PermissionMode 'auto', ModelInfo.supportsAutoMode: sdk.d.ts:1420-1423, 2858-2864, 9019-9021; ${SETTINGS_FIXTURE}`,
   ),
   row(
     "Full access (bypassPermissions)",
@@ -128,8 +130,8 @@ export const CLAUDE_CODE_CONTROLS: readonly RuntimeControlRow[] = [
     "Slash commands that change settings (/model, /effort, /fast, /permissions)",
     "exposed",
     "slash.settings",
-    "Intercepted and routed through the policy-checked, audited settings path (D-13, P-10)",
-    "supportedCommands() / system/init.slash_commands: sdk.d.ts:2998, 3719, 9200-9222",
+    "Intercepted and routed through the policy-checked, audited settings path (D-13, P-10); the adapter refuses them as a backstop (slash_command_refused)",
+    "supportedCommands() / system/init.slash_commands: sdk.d.ts:2998, 3719, 9200-9222; refuseSlashCommand in claude-runtime.ts",
   ),
   row(
     "Slash commands passed through (/compact, /context, /usage, /cost, /init, /review)",

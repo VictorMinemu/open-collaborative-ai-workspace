@@ -63,6 +63,22 @@ describe("runtime controls inventory (WZC-06, P-09)", () => {
     expect(["impossible", "deferred"]).toContain(dontAsk?.status);
   });
 
+  it("Claude rows confirmed by the 2.1.289 fixtures (Plan 02)", () => {
+    const row = (key: string) => rows("claude-code").find((r) => r.uiKey === key);
+    expect(controlStatus("claude-code", "mode.auto")).toBe("exposed");
+    expect(row("mode.auto")?.evidence).toMatch(/claude-code-2\.1\.289\.settings/);
+    expect(controlStatus("claude-code", "effort")).toBe("exposed");
+    expect(row("effort")?.evidence).toMatch(/2\.1\.289/);
+    expect(controlStatus("claude-code", "effort.ultracode")).toBe("deferred");
+    expect(controlStatus("claude-code", "effort.ultrathink")).toBe("deferred");
+    expect(controlStatus("claude-code", "context.window")).toBe("exposed");
+    expect(row("context.window")?.evidence).toMatch(/claude-code-2\.1\.289\.catalog/);
+    expect(controlStatus("claude-code", "fast.mode")).toBe("exposed");
+    expect(row("fast.mode")?.reason).toMatch(/paid usage credits/);
+    expect(row("fast.mode")?.reason).toMatch(/sdk_opt_in_required|extra_usage_disabled/);
+    expect(row("model.list")?.evidence).toMatch(/claude-code-2\.1\.289\.catalog/);
+  });
+
   it("lists every Codex control of Inventory B", () => {
     for (const c of [
       "model/list",
@@ -110,8 +126,7 @@ describe("runtime controls inventory (WZC-06, P-09)", () => {
   });
 
   it("controls awaiting a recorded fixture are not exposed yet; shipped modes and full access are", () => {
-    expect(isExposed("claude-code", "effort")).toBe(false);
-    expect(isExposed("claude-code", "mode.auto")).toBe(false);
+    // Claude effort and auto were confirmed by the 2.1.289 fixtures (Plan 02); see the Claude block above.
     expect(isExposed("codex", "mode.auto")).toBe(false);
     for (const r of ["claude-code", "codex"] as const) {
       for (const m of ["mode.plan", "mode.default", "mode.acceptEdits", "mode.fullAccess", "model.list"]) {
@@ -119,9 +134,8 @@ describe("runtime controls inventory (WZC-06, P-09)", () => {
       }
     }
     for (const r of rows("claude-code").concat(rows("codex"))) {
-      if (r.uiKey === "effort" && r.area === "claude-code")
+      if (r.uiKey === "mode.auto" && r.area === "codex")
         expect(r.reason).toMatch(/awaiting recorded fixture/);
-      if (r.uiKey === "mode.auto") expect(r.reason).toMatch(/awaiting recorded fixture/);
     }
     expect(isExposed("codex", "no.such.key")).toBe(false);
     expect(controlStatus("codex", "no.such.key")).toBeNull();
