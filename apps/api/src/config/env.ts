@@ -171,6 +171,19 @@ export const EnvSchema = z
       .enum(["true", "false"])
       .default("true")
       .transform((v) => v === "true"),
+    /**
+     * TEST-ONLY (P-12): the OpenAI API the ChatGPT-plan backend calls (`/responses`, `/models`). Unset = the real
+     * https://api.openai.com/v1. Refused when NODE_ENV is production.
+     */
+    OCW_CHATGPT_API_BASE_URL: optionalUrl,
+    /** TEST-ONLY (P-12): the ChatGPT sign-in issuer (05-05). Unset = https://auth.openai.com. Refused in production. */
+    OCW_CHATGPT_AUTH_BASE_URL: optionalUrl,
+    /** The fake model as seen from the API (mock AI chat backend, 05-04); defaults to OCW_MOCK_MODEL_BASE_URL. */
+    OCW_AI_MOCK_BASE_URL: optionalUrl,
+    /** SearXNG as seen from the API (AI chat web search on org keys, 05-11); defaults to OCW_SEARXNG_URL. */
+    OCW_AI_SEARXNG_URL: optionalUrl,
+    /** AI chat sends per user per minute (create + message). Keep the default in production. */
+    OCW_AI_SEND_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(1).max(10_000).default(30),
   })
   .superRefine((v, ctx) => {
     if (v.OCW_SMTP_URL === "memory:" && v.NODE_ENV !== "test") {
@@ -180,8 +193,25 @@ export const EnvSchema = z
         message: "memory: is only allowed when NODE_ENV is test",
       });
     }
+    // The ChatGPT overrides point a member's token at another server: never in production (T-05-02-07).
+    if (v.NODE_ENV === "production") {
+      for (const name of ["OCW_CHATGPT_API_BASE_URL", "OCW_CHATGPT_AUTH_BASE_URL"] as const) {
+        if (v[name]) {
+          ctx.addIssue({
+            code: "custom",
+            path: [name],
+            message: "is test-only and refused when NODE_ENV is production",
+          });
+        }
+      }
+    }
   })
-  .transform((v) => ({ ...v, OCW_S3_PUBLIC_URL: v.OCW_S3_PUBLIC_URL ?? v.OCW_S3_ENDPOINT }));
+  .transform((v) => ({
+    ...v,
+    OCW_S3_PUBLIC_URL: v.OCW_S3_PUBLIC_URL ?? v.OCW_S3_ENDPOINT,
+    OCW_AI_MOCK_BASE_URL: v.OCW_AI_MOCK_BASE_URL ?? v.OCW_MOCK_MODEL_BASE_URL,
+    OCW_AI_SEARXNG_URL: v.OCW_AI_SEARXNG_URL ?? v.OCW_SEARXNG_URL,
+  }));
 export type Env = z.infer<typeof EnvSchema>;
 
 const SECRET_VARS = [

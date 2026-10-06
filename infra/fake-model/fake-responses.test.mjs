@@ -1,0 +1,280 @@
+// node --test infra/fake-model/
+// The fake OpenAI Responses API (ChatGPT plan backend, Phase 5): SSE shape, usage, plan preview rules,
+// failure directives, slow mode, request capture and the plan catalog.
+import assert from "node:assert/strict";
+import { after, before, beforeEach, describe, it } from "node:test";
+import { PLAN_FORBIDDEN_KEYS, planCatalog } from "./fake-responses.mjs";
+import { createFakeModelServer } from "./server.mjs";
+
+const seen = [];
+let server;
+let base;
+
+before(async () => {
+  server = createFakeModelServer({ onRequest: (r) => seen.push(r) });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  base = `http://127.0.0.1:${server.address().port}`;
+});
+after(() => new Promise((resolve) => server.close(resolve)));
+beforeEach(() => {
+  seen.length = 0;
+});
+
+const PLAN = "Bearer fake-plan-user-1-abc";
+
+/** A minimal request in the shape @ai-sdk/openai 4.0.80 sends for the plan backend. */
+const planBody = (text, extra = {}) => ({
+  model: "gpt-6-astra",
+  input: [
+    { role: "developer", content: "You are chatting with Sam in Autofy Labs." },
+    { role: "user", content: [{ type: "input_text", text }] },
+  ],
+  store: false,
+  stream: true,
+  ...extra,
+});
+
+async function post(path, body, auth = PLAN) {
+  return fetch(`${base}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: auth },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Parses an SSE body into [{event, data}] (data JSON-decoded). */
+async function sse(res) {
+  const text = await res.text();
+  return text
+    .split("\n\n")
+    .filter((b) => b.trim())
+    .map((block) => {
+      const lines = block.split("\n");
+      const event = lines.find((l) => l.startsWith("event: "))?.slice(7);
+      const data = lines.find((l) => l.startsWith("data: "))?.slice(6);
+      return { event, data: data === "[DONE]" ? data : JSON.parse(data) };
+    });
+}
+
+const deltasOf = (events) =>
+  events.filter((e) => e.data.type === "response.output_text.delta").map((e) => e.data.delta);
+
+describe("POST /v1/responses (stream)", () => {
+  it("streams created, output item, several text deltas and completed with usage; reply echoes the user text", async () => {
+    const res = await post("/v1/responses", planBody("Hello there, how are you today?"));
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type"), /text\/event-stream/);
+    const events = await sse(res);
+    const types = events.map((e) => e.data.type);
+    assert.equal(types[0], "response.created");
+    assert.ok(types.includes("response.output_item.added"));
+    assert.ok(types.includes("response.content_part.added"));
+    assert.ok(types.includes("response.output_text.done"));
+    assert.ok(types.includes("response.output_item.done"));
+    assert.equal(types.at(-1), "response.completed");
+    for (const e of events) {
+      assert.equal(e.event, e.data.type, "event name mirrors the data type");
+      assert.equal(typeof e.data.sequence_number, "number");
+    }
+    const deltas = deltasOf(events);
+    assert.ok(deltas.length > 1, "several deltas");
+    assert.equal(deltas.join(""), "Echo: Hello there, how are you today?");
+    const delta = events.find((e) => e.data.type === "response.output_text.delta").data;
+    assert.equal(typeof delta.item_id, "string");
+    assert.equal(delta.output_index, 0);
+    assert.equal(delta.content_index, 0);
+    const completed = events.at(-1).data.response;
+    assert.equal(completed.status, "completed");
+    assert.equal(typeof completed.usage.input_tokens, "number");
+    assert.equal(typeof completed.usage.output_tokens, "number");
+    assert.equal(typeof completed.usage.input_tokens_details.cached_tokens, "number");
+  });
+
+  it("strips directives from the echo and answers with the last user message", async () => {
+    const body = planBody("second question [[note]]");
+    body.input.splice(1, 0, { role: "user", content: [{ type: "input_text", text: "first" }] });
+    body.input.splice(2, 0, {
+      role: "assistant",
+      content: [{ type: "output_text", text: "Echo: first" }],
+    });
+    const events = await sse(await post("/v1/responses", { ...body }));
+    assert.equal(deltasOf(events).join(""), "Echo: second question");
+  });
+
+  it("[[slow]] emits 40 deltas about 100 ms apart: the echo, then counting to forty", async () => {
+    const started = Date.now();
+    const events = await sse(await post("/v1/responses", planBody("go [[slow]]")));
+    const deltas = deltasOf(events);
+    assert.equal(deltas.length, 40);
+    assert.equal(deltas.join(""), `Echo: go${Array.from({ length: 40 }, (_, i) => ` ${i + 1}`).join("")}`);
+    assert.ok(Date.now() - started >= 3_500, "about 4 s in total");
+    assert.equal(events.at(-1).data.type, "response.completed");
+  });
+
+  it("[[plan:usage_limit]] streams 3 deltas then response.failed with the SIWC code", async () => {
+    const events = await sse(await post("/v1/responses", planBody("hi [[plan:usage_limit]]")));
+    assert.equal(deltasOf(events).length, 3);
+    const failed = events.at(-1).data;
+    assert.equal(failed.type, "response.failed");
+    assert.equal(failed.response.error.code, "subscription_sharing_usage_limit_exceeded");
+    assert.equal(typeof failed.response.error.message, "string");
+  });
+
+  it("admission failures answer before streaming with the documented status and code", async () => {
+    const cases = [
+      ["[[plan:not_eligible]]", 403, "subscription_sharing_user_not_eligible", null],
+      ["[[plan:invalid_user]]", 401, "subscription_sharing_invalid_user", null],
+      ["[[plan:unavailable]]", 503, "subscription_sharing_usage_unavailable", null],
+      ["[[plan:unsupported:tools]]", 400, "subscription_sharing_unsupported_capability", "tools"],
+    ];
+    for (const [directive, status, code, param] of cases) {
+      const res = await post("/v1/responses", planBody(`hi ${directive}`));
+      assert.equal(res.status, status, directive);
+      const body = await res.json();
+      assert.equal(body.error.code, code);
+      assert.equal(body.error.param ?? null, param);
+      assert.equal(typeof body.error.message, "string");
+    }
+  });
+
+  it("plan tokens: store, stream, a system item or any forbidden key is a 400 fake_preview_violation naming it", async () => {
+    const violations = [
+      [{ store: true }, "store"],
+      [{ store: undefined }, "store"],
+      [{ stream: false }, "stream"],
+      ...PLAN_FORBIDDEN_KEYS.map((k) => [{ [k]: k === "metadata" ? {} : 1 }, k]),
+    ];
+    for (const [extra, key] of violations) {
+      const res = await post("/v1/responses", planBody("hi", extra));
+      assert.equal(res.status, 400, key);
+      const body = await res.json();
+      assert.equal(body.error.code, "fake_preview_violation");
+      assert.match(body.error.message, new RegExp(key));
+    }
+    const withSystem = planBody("hi");
+    withSystem.input.unshift({ role: "system", content: "nope" });
+    const res = await post("/v1/responses", withSystem);
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).error.message, /system/);
+  });
+
+  it("the preview rules apply to plan tokens only", async () => {
+    const res = await post(
+      "/v1/responses",
+      planBody("hi", { store: true, temperature: 0.2 }),
+      "Bearer sk-org",
+    );
+    assert.equal(res.status, 200);
+    assert.equal(deltasOf(await sse(res)).join(""), "Echo: hi");
+  });
+
+  it("image and file parts add [images:N] and [files:N]", async () => {
+    const body = planBody("look");
+    body.input[1].content.push(
+      { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+      { type: "input_image", image_url: "data:image/png;base64,BBBB" },
+      { type: "input_file", filename: "a.pdf", file_data: "data:application/pdf;base64,AAAA" },
+    );
+    const events = await sse(await post("/v1/responses", body));
+    assert.equal(deltasOf(events).join(""), "Echo: look [images:2] [files:1]");
+  });
+});
+
+describe("GET /v1/models", () => {
+  it("a plan bearer gets the plan catalog (slug, display_name, visibility)", async () => {
+    const res = await fetch(`${base}/v1/models`, { headers: { authorization: PLAN } });
+    assert.deepEqual(await res.json(), planCatalog());
+    assert.deepEqual(planCatalog(), {
+      data: [
+        { slug: "gpt-6-astra", display_name: "GPT-6 Astra", visibility: "list" },
+        { slug: "gpt-5.6-luna", display_name: "GPT-5.6 Luna", visibility: "list" },
+        { slug: "gpt-internal", visibility: "hide" },
+      ],
+    });
+  });
+
+  it("any other caller keeps the OpenAI-shaped list", async () => {
+    const res = await fetch(`${base}/v1/models`);
+    const body = await res.json();
+    assert.equal(body.object, "list");
+    assert.ok(body.data.every((m) => typeof m.id === "string"));
+  });
+});
+
+describe("request capture (onRequest)", () => {
+  it("reports kind, path, headers and body of every model request", async () => {
+    await sse(await post("/v1/responses", planBody("capture me")));
+    await fetch(`${base}/v1/models`, { headers: { authorization: PLAN } });
+    const responses = seen.filter((r) => r.kind === "responses");
+    assert.equal(responses.length, 1);
+    assert.equal(responses[0].path, "/v1/responses");
+    assert.equal(responses[0].headers.authorization, PLAN);
+    assert.equal(responses[0].body.store, false);
+    assert.ok(seen.some((r) => r.kind === "models" && r.headers.authorization === PLAN));
+  });
+});
+
+describe("chat completions and Anthropic honour [[slow]] and count images", () => {
+  it("chat completions: [[slow]] streams 40 chunks and image parts add [images:N]", async () => {
+    const res = await post(
+      "/v1/chat/completions",
+      {
+        model: "mock-1",
+        stream: true,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "see [[slow]]" },
+              { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } },
+            ],
+          },
+        ],
+      },
+      "Bearer x",
+    );
+    const text = await res.text();
+    const chunks = text
+      .split("\n\n")
+      .filter((b) => b.startsWith("data: {"))
+      .map((b) => JSON.parse(b.slice(6)))
+      .filter((c) => c.choices?.[0]?.delta?.content);
+    assert.equal(chunks.length, 40);
+    assert.match(chunks.map((c) => c.choices[0].delta.content).join(""), /\[images:1\]/);
+  });
+
+  it("anthropic: [[slow]] streams 40 text deltas and image blocks add [images:N]", async () => {
+    const res = await post(
+      "/v1/messages",
+      {
+        model: "mock-1",
+        stream: true,
+        max_tokens: 100,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "see [[slow]]" },
+              { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+            ],
+          },
+        ],
+      },
+      "Bearer x",
+    );
+    const text = await res.text();
+    const deltas = text
+      .split("\n\n")
+      .map((b) =>
+        b
+          .split("\n")
+          .find((l) => l.startsWith("data: "))
+          ?.slice(6),
+      )
+      .filter(Boolean)
+      .map((d) => JSON.parse(d))
+      .filter((d) => d.type === "content_block_delta");
+    assert.equal(deltas.length, 40);
+    assert.match(deltas.map((d) => d.delta.text).join(""), /\[images:1\]/);
+  });
+});
