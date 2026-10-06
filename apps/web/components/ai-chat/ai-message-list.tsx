@@ -1,6 +1,6 @@
 "use client";
 
-import type { Message } from "@ocw/contracts";
+import type { Message, SendAiMessageResponse } from "@ocw/contracts";
 import { useStickToBottom } from "@/components/chat/use-stick-to-bottom";
 import { AiMessage } from "./ai-message";
 
@@ -13,13 +13,20 @@ export function AiMessageList({
   chatId,
   messages,
   textOf,
+  onRegenerated,
 }: {
   chatId: string;
   messages: Message[];
   textOf: (m: Message) => string;
+  /** Applies a regenerate answered by the API (05-06). */
+  onRegenerated?: (response: SendAiMessageResponse) => void;
 }) {
   const streamed = messages.reduce((n, m) => n + (m.status === "streaming" ? textOf(m).length : 0), 0);
   const last = messages.at(-1);
+  const writing = messages.some((m) => m.status === "streaming");
+  // Only the chat's last answer can be regenerated, and only while nothing is being written (05-06).
+  const regenerableId =
+    onRegenerated && last?.authorKind === "agent" && last.status !== "streaming" ? last.id : null;
   const { ref, onScroll } = useStickToBottom(
     `${messages.length}:${last?.id ?? ""}:${last?.status ?? ""}:${streamed}`,
     chatId,
@@ -34,7 +41,16 @@ export function AiMessageList({
     >
       <div className="mx-auto grid w-full max-w-3xl grid-cols-[minmax(0,1fr)] gap-7 px-4 pt-6 pb-8 sm:px-6 sm:pt-8">
         {messages.map((m) => (
-          <AiMessage key={m.id} message={m} text={textOf(m)} />
+          <AiMessage
+            key={m.id}
+            message={m}
+            text={textOf(m)}
+            regenerate={
+              onRegenerated && m.id === regenerableId
+                ? { chatId, disabled: writing, onRegenerated }
+                : undefined
+            }
+          />
         ))}
       </div>
     </div>

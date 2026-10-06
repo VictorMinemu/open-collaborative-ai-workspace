@@ -1,12 +1,22 @@
 "use client";
 
-import type { AiGeneration, Message } from "@ocw/contracts";
+import type { AiGeneration, Message, SendAiMessageResponse } from "@ocw/contracts";
 import { Check, Copy, Square, Unplug } from "lucide-react";
+import type { ReactNode } from "react";
 import { Markdown } from "@/components/markdown/markdown";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useCopy } from "@/hooks/use-copy";
 import { cn } from "@/lib/utils";
 import { GenerationError } from "./generation-error";
+import { RegenerateMenu } from "./regenerate-menu";
+
+/** Regenerate on the chat's last answer only (05-06). */
+export interface AnswerRegenerate {
+  chatId: string;
+  /** Something is being written in the chat (one generation per chat). */
+  disabled: boolean;
+  onRegenerated: (response: SendAiMessageResponse) => void;
+}
 
 /**
  * One turn of an AI chat (P-09): the member's turns are right-aligned bubbles; answers are full width through the
@@ -15,7 +25,15 @@ import { GenerationError } from "./generation-error";
  * and ends with a calm card instead of a spinner. A stopped or interrupted answer keeps its text and says so in the
  * line under it ("Stopped" / "Interrupted"), quietly: it was cut short, not broken (05-06).
  */
-export function AiMessage({ message, text }: { message: Message; text: string }) {
+export function AiMessage({
+  message,
+  text,
+  regenerate,
+}: {
+  message: Message;
+  text: string;
+  regenerate?: AnswerRegenerate | undefined;
+}) {
   if (message.authorKind !== "agent") {
     return (
       <div
@@ -56,7 +74,20 @@ export function AiMessage({ message, text }: { message: Message; text: string })
           className="block size-3 animate-pulse rounded-full bg-foreground/80"
         />
       ) : (
-        <AnswerFooter text={text} generation={message.generation} />
+        <AnswerFooter
+          text={text}
+          generation={message.generation}
+          actions={
+            regenerate ? (
+              <RegenerateMenu
+                chatId={regenerate.chatId}
+                message={message}
+                disabled={regenerate.disabled}
+                onRegenerated={regenerate.onRegenerated}
+              />
+            ) : null
+          }
+        />
       )}
     </div>
   );
@@ -107,14 +138,22 @@ function CutShortLabel({ generation }: { generation: AiGeneration | undefined })
   );
 }
 
-function AnswerFooter({ text, generation }: { text: string; generation: AiGeneration | undefined }) {
+function AnswerFooter({
+  text,
+  generation,
+  actions,
+}: {
+  text: string;
+  generation: AiGeneration | undefined;
+  actions: ReactNode;
+}) {
   const { copy, copied } = useCopy();
   return (
     <div
       className={cn(
         "flex min-h-7 min-w-0 items-center gap-1.5 text-[12px] text-muted-foreground",
         // The copy button's padding sits outside the text column, so the label lines up with the answer.
-        text && "-ml-1.5",
+        (text || actions) && "-ml-1.5",
       )}
     >
       {text ? (
@@ -130,6 +169,7 @@ function AnswerFooter({ text, generation }: { text: string; generation: AiGenera
           </button>
         </Tooltip>
       ) : null}
+      {actions}
       {generation ? (
         <span
           data-testid="ai-message-footer"

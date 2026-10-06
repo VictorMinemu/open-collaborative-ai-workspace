@@ -197,8 +197,20 @@ export function reduceAiChat(state: AiChatState, action: AiChatAction): AiChatSt
       const add = [r.userMessage, r.assistantMessage].filter(
         (m) => !state.messages.some((x) => x.id === m.id),
       );
-      if (add.length === 0) return state;
-      return prune({ ...state, messages: [...state.messages, ...add].sort(bySeq) });
+      // A regenerate answers an answer we hold with a newer attempt: it restarts empty (05-06).
+      const held = state.messages.find((x) => x.id === r.assistantMessage.id);
+      const restarted =
+        held !== undefined && (r.assistantMessage.generation?.attempt ?? 0) > (held.generation?.attempt ?? 0);
+      if (add.length === 0 && !restarted) return state;
+      let messages = [...state.messages, ...add];
+      let streaming = state.streaming;
+      if (restarted) {
+        messages = messages.map((x) => (x.id === r.assistantMessage.id ? r.assistantMessage : x));
+        const next = new Map(streaming);
+        next.delete(r.assistantMessage.id);
+        streaming = next;
+      }
+      return prune({ ...state, messages: messages.sort(bySeq), streaming });
     }
     case "frame": {
       const f = action.frame;

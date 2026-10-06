@@ -163,7 +163,12 @@ function ExistingChat({ chatId }: { chatId: string }) {
 
   return (
     <Frame title={detail?.title ?? "New chat"}>
-      <AiMessageList chatId={chatId} messages={chat.messages} textOf={chat.textOf} />
+      <AiMessageList
+        chatId={chatId}
+        messages={chat.messages}
+        textOf={chat.textOf}
+        onRegenerated={chat.applySent}
+      />
       <AiComposer
         chatKey={chatId}
         models={models.data?.models}

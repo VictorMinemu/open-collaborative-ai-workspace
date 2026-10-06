@@ -7,6 +7,7 @@ import {
   type CreateAiChatRequest,
   EventTypes,
   type Message,
+  type RegenerateRequest,
   type SendAiMessageRequest,
   SendAiMessageResponse,
   StopAiGenerationResponse,
@@ -77,6 +78,15 @@ export function stopGeneration(chatId: string, generationId: string): Promise<St
     body: {},
     schema: StopAiGenerationResponse,
   });
+}
+
+/**
+ * Regenerates the chat's last answer (05-06), on its previous model or `model`. `messageId` is the answer on
+ * screen: the API refuses (409 `not_last_answer`) when another tab already moved the chat on. The answer resets and
+ * streams again on the same message; the replaced text is kept server-side (message_versions).
+ */
+export function regenerate(chatId: string, body: RegenerateRequest): Promise<SendAiMessageResponse> {
+  return api.post(`/api/v1/ai-chats/${chatId}/regenerate`, { body, schema: SendAiMessageResponse });
 }
 
 /**

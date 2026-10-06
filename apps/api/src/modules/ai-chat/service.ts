@@ -81,41 +81,45 @@ const isUniqueViolation = (err: unknown): boolean => {
   return e?.code === "23505" || e?.cause?.code === "23505";
 };
 
+/** The requester's model, or 409 `model_unavailable` (reason) / 503 `usage_unavailable` (sends, regenerate). */
+export async function resolveModelOr409(
+  gateway: ModelGateway,
+  tx: Tx,
+  ref: ModelRef,
+  userId: string,
+): Promise<ResolvedModel> {
+  try {
+    return await gateway.resolve(tx, ref, userId);
+  } catch (err) {
+    if (err instanceof ModelUnavailableError) {
+      throw new HttpError(409, "model_unavailable", "This model is not available to you right now", {
+        reason: err.reason,
+      });
+    }
+    // The member's plan tokens could not be refreshed right now (05-05): nothing was cleared, try again later.
+    if (err instanceof PlanTokenUnavailableError) {
+      throw new HttpError(503, "usage_unavailable", "ChatGPT is temporarily unavailable. Try again shortly.");
+    }
+    throw err;
+  }
+}
+
+/** P-07: per-user advisory lock, then the running-generation cap across every chat of the member (429). */
+export async function capOr429(tx: Tx, userId: string, cap: number): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`ai:${userId}`}))`);
+  const [row] = await tx
+    .select({ n: sql<number>`count(*)::int` })
+    .from(aiGenerations)
+    .where(and(eq(aiGenerations.requesterUserId, userId), eq(aiGenerations.status, "running")));
+  if ((row?.n ?? 0) >= cap) {
+    throw new HttpError(429, "concurrent_generations", `At most ${cap} answers can run at the same time`);
+  }
+}
+
 export function createAiChatService(deps: AiChatDeps) {
   const { core, gateway, runLoop, access, perms } = deps;
 
-  async function resolveOr409(tx: Tx, ref: ModelRef, userId: string): Promise<ResolvedModel> {
-    try {
-      return await gateway.resolve(tx, ref, userId);
-    } catch (err) {
-      if (err instanceof ModelUnavailableError) {
-        throw new HttpError(409, "model_unavailable", "This model is not available to you right now", {
-          reason: err.reason,
-        });
-      }
-      // The member's plan tokens could not be refreshed right now (05-05): nothing was cleared, try again later.
-      if (err instanceof PlanTokenUnavailableError) {
-        throw new HttpError(
-          503,
-          "usage_unavailable",
-          "ChatGPT is temporarily unavailable. Try again shortly.",
-        );
-      }
-      throw err;
-    }
-  }
-
-  /** P-07: per-user advisory lock, then the running-generation cap across every chat of the member. */
-  async function capOr429(tx: Tx, userId: string, cap: number): Promise<void> {
-    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`ai:${userId}`}))`);
-    const [row] = await tx
-      .select({ n: sql<number>`count(*)::int` })
-      .from(aiGenerations)
-      .where(and(eq(aiGenerations.requesterUserId, userId), eq(aiGenerations.status, "running")));
-    if ((row?.n ?? 0) >= cap) {
-      throw new HttpError(429, "concurrent_generations", `At most ${cap} answers can run at the same time`);
-    }
-  }
+  const resolveOr409 = (tx: Tx, ref: ModelRef, userId: string) => resolveModelOr409(gateway, tx, ref, userId);
 
   async function isGenerating(tx: Tx, conversationId: string): Promise<boolean> {
     const [row] = await tx
