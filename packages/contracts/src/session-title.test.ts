@@ -54,6 +54,12 @@ describe("normalizeSessionTitle (D-20, P-16)", () => {
     );
   });
 
+  it("a cut title never ends on a dangling connector word", () => {
+    expect(normalizeSessionTitle("Add a toggle for the dark mode")).toBe("Add a toggle");
+    expect(normalizeSessionTitle("Revisar la caché de las sesiones activas")).toBe("Revisar la caché");
+    expect(normalizeSessionTitle("Explain how the auth works")).toBe("Explain how the auth works");
+  });
+
   it("cuts on a word boundary when five words are still longer than 32 characters", () => {
     expect(normalizeSessionTitle("Arregla error inicio sesión página")).toBe("Arregla error inicio sesión");
   });

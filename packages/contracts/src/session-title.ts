@@ -98,6 +98,55 @@ function stripMarks(line: string): string {
   return s;
 }
 
+/** Articles, prepositions and conjunctions (English, Spanish) a cut title must not end on: "Add a toggle for the". */
+const CONNECTORS = new Set([
+  "a",
+  "an",
+  "the",
+  "of",
+  "to",
+  "for",
+  "in",
+  "on",
+  "at",
+  "by",
+  "with",
+  "from",
+  "and",
+  "or",
+  "into",
+  "el",
+  "la",
+  "los",
+  "las",
+  "un",
+  "una",
+  "unos",
+  "unas",
+  "de",
+  "del",
+  "al",
+  "a",
+  "en",
+  "con",
+  "por",
+  "para",
+  "y",
+  "o",
+  "que",
+]);
+
+/** After a cut, drop trailing connector words while at least the minimum number of words remains. */
+function dropDanglingConnectors(s: string): string {
+  let out = s;
+  for (;;) {
+    const words = out.split(" ");
+    const last = words.at(-1)?.toLocaleLowerCase() ?? "";
+    if (words.length <= SESSION_TITLE_MIN_WORDS || !CONNECTORS.has(last)) return out;
+    out = words.slice(0, -1).join(" ");
+  }
+}
+
 /**
  * The device-side shape rule (P-16): first non-empty line, no label / markdown / quotes / control characters /
  * trailing punctuation, collapsed whitespace, sentence case, first letter upper, at most 5 words and 32 characters
@@ -114,13 +163,19 @@ export function normalizeSessionTitle(raw: string): string | null {
   s = toSentenceCase(s);
   s = s.charAt(0).toLocaleUpperCase() + s.slice(1);
   const ends = wordEnds(s);
-  if (ends.length > SESSION_TITLE_MAX_WORDS) s = s.slice(0, ends[SESSION_TITLE_MAX_WORDS - 1]);
+  let cut = false;
+  if (ends.length > SESSION_TITLE_MAX_WORDS) {
+    s = s.slice(0, ends[SESSION_TITLE_MAX_WORDS - 1]);
+    cut = true;
+  }
   if (s.length > SESSION_TITLE_MAX_CHARS) {
     const fit = wordEnds(s).filter((e) => e <= SESSION_TITLE_MAX_CHARS);
     if (fit.length === 0) return null;
     s = s.slice(0, fit[fit.length - 1]);
+    cut = true;
   }
   s = stripMarks(s).replace(/\s+/gu, " ").trim();
+  if (cut) s = dropDanglingConnectors(s);
   if (titleWords(s).length < SESSION_TITLE_MIN_WORDS) return null;
   // Content checks (host paths, secrets) are the caller's: the device sanitizes, the API validates (SessionTitle).
   return s;
