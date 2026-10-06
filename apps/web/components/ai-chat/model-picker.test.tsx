@@ -101,20 +101,84 @@ describe("ModelPickerList", () => {
     expect(reasonText("not_connected")).toBe("Not connected");
   });
 
-  it("a member without a connected plan sees one disabled plan row: Not connected", () => {
-    const html = render(
-      [
-        option(
-          { backend: "chatgpt_plan", provider: "openai", modelId: "chatgpt" },
-          { label: "ChatGPT", available: false, reason: "not_connected" },
-        ),
-        option(SONNET, { label: "Claude Sonnet 5.5" }),
-      ],
-      SONNET,
+  const PLACEHOLDER: ModelRef = { backend: "chatgpt_plan", provider: "openai", modelId: "chatgpt" };
+  const planState = (reason: AiModelOption["reason"]) => [
+    option(PLACEHOLDER, { label: "ChatGPT", available: false, reason }),
+    option(SONNET, { label: "Claude Sonnet 5.5" }),
+  ];
+  /** The element props of the row with `testId` in the list rendered with `onConnect`. */
+  function rowProps(models: AiModelOption[], testId: string, onConnect = vi.fn()) {
+    const tree = ModelPickerList({ models, value: SONNET, onChange: vi.fn(), onConnect });
+    return elements(tree).find((e) => e.props["data-testid"] === testId)?.props as
+      | (Record<string, unknown> & { onClick?: () => void })
+      | undefined;
+  }
+
+  it("not connected: the plan group offers Continue with ChatGPT, which opens the connect dialog", () => {
+    const html = renderToStaticMarkup(
+      <ModelPickerList
+        models={planState("not_connected")}
+        value={SONNET}
+        onChange={() => {}}
+        onConnect={() => {}}
+      />,
     );
     expect(html).toContain("Your ChatGPT plan");
-    expect(html).toContain("Not connected");
+    expect(html).toContain("Continue with ChatGPT");
     expect(html).not.toContain("Testing");
+    const onConnect = vi.fn();
+    const row = rowProps(planState("not_connected"), "ai-model-continue-chatgpt", onConnect);
+    expect(row).toBeDefined();
+    expect(row?.["aria-disabled"]).toBeUndefined();
+    row?.onClick?.();
+    expect(onConnect).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["needs_reconnect", "plan_usage_disabled"] as const)(
+    "%s: the plan group offers Reconnect ChatGPT, which opens the connect dialog",
+    (reason) => {
+      const html = renderToStaticMarkup(
+        <ModelPickerList
+          models={planState(reason)}
+          value={SONNET}
+          onChange={() => {}}
+          onConnect={() => {}}
+        />,
+      );
+      expect(html).toContain("Reconnect ChatGPT");
+      expect(html).not.toContain("Continue with ChatGPT");
+      const onConnect = vi.fn();
+      rowProps(planState(reason), "ai-model-reconnect-chatgpt", onConnect)?.onClick?.();
+      expect(onConnect).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("not eligible: one disabled row explains it and points to the organization models", () => {
+    const html = render(planState("not_eligible"), SONNET);
+    expect(reasonText("not_eligible")).toBe(
+      "Your ChatGPT account isn't eligible here — use an organization model",
+    );
+    expect(html).toContain("Your ChatGPT account isn&#x27;t eligible here — use an organization model");
+    expect(html).not.toContain("Continue with ChatGPT");
+    expect(html).not.toContain("Reconnect ChatGPT");
+    const onConnect = vi.fn();
+    const row = rowProps(planState("not_eligible"), `ai-model-${modelRefKey(PLACEHOLDER)}`, onConnect);
+    expect(row?.["aria-disabled"]).toBe(true);
+    row?.onClick?.();
+    expect(onConnect).not.toHaveBeenCalled();
+  });
+
+  it("turned off by the admin: a disabled row says so, with no action", () => {
+    const html = render(planState("plan_disabled_by_org"), SONNET);
+    expect(html).toContain("Turned off by your admin");
+    expect(html).not.toContain("Continue with ChatGPT");
+    expect(html).not.toContain("Reconnect ChatGPT");
+  });
+
+  it("without onConnect (no dialog available) the not-connected row stays a disabled explanation", () => {
+    const html = render(planState("not_connected"), SONNET);
+    expect(html).toContain("Not connected");
+    expect(html).not.toContain("Continue with ChatGPT");
   });
 
   it("choosing an available row calls onChange with its ModelRef; a disabled row does not", () => {

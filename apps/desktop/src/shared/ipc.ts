@@ -44,6 +44,16 @@ export const FinishArgs = z.object({ skipPairing: z.boolean() }).strict();
 /** `setBadgeCount(n)`: the unread mention count for the dock/taskbar badge, a whole number 0–9999 (0 clears). */
 export const SetBadgeCountArgs = z.number().int().min(0).max(9999);
 
+/** A ChatGPT loopback flow token: 32 random bytes, base64url (43 characters). */
+export const ChatgptFlowToken = z.string().regex(/^[A-Za-z0-9_-]{43}$/u);
+
+/** `chatgptLoopbackAwait(flowToken, authorizeUrl)`; the main process also requires https (or loopback in dev). */
+export const ChatgptLoopbackAwaitArgs = z
+  .object({ flowToken: ChatgptFlowToken, authorizeUrl: z.string().min(1).max(2048) })
+  .strict();
+
+export const ChatgptLoopbackCancelArgs = z.object({ flowToken: ChatgptFlowToken }).strict();
+
 /** Parse IPC args, turning Zod errors into a short message (never echo the payload back). */
 export function parseArgs<T>(schema: z.ZodType<T>, value: unknown): T {
   const res = schema.safeParse(value);
@@ -124,6 +134,15 @@ export interface DesktopStatus {
   /** Read-only for web content: Full access is switched only from the desktop Runtime menu or the CLI. */
   fullAccessOptIn: boolean;
 }
+
+export interface ChatgptLoopbackPrepared {
+  flowToken: string;
+  port: number;
+}
+
+export type ChatgptLoopbackResult =
+  | { ok: true; redirectUrl: string }
+  | { ok: false; reason: "timeout" | "cancelled" | "invalid_url" };
 
 export type AddProjectResult =
   | { ok: true; project: PublicProject }

@@ -5,6 +5,7 @@ import { ArrowUpRight, CircleAlert, Unplug } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { toast } from "sonner";
 import { ChatgptConnectDialog } from "@/components/ai-chat/chatgpt-connect-dialog";
+import { ChatgptWelcomeModal } from "@/components/ai-chat/chatgpt-welcome-modal";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Dialog,
@@ -212,13 +213,16 @@ function Connected({ status }: { status: ChatgptPlanStatus }) {
 
 /**
  * Settings › AI chat › ChatGPT plan (D-02, P-09): the member's own plan, never anyone else's. Not connected →
- * "Continue with ChatGPT"; connected → account, plan, "Manage usage", "Disconnect"; reconnect / not eligible /
- * turned off by the admin → why, and what to do.
+ * "Continue with ChatGPT"; connected → account, plan, "Manage usage", "Disconnect" (and the one-time welcome until
+ * it is seen); reconnect / not eligible / turned off by the admin → why, and what to do.
  */
 export function ChatgptPlanCard() {
   const status = useChatgptPlan();
   const [connectOpen, setConnectOpen] = useState(false);
+  const [welcomeClosed, setWelcomeClosed] = useState(false);
   const s = status.data;
+  // The one-time welcome (05-07): right after connecting here, or on the first visit after connecting elsewhere.
+  const welcomeOpen = s?.state === "connected" && !s.welcomeSeen && !welcomeClosed && !connectOpen;
 
   let body: ReactNode;
   if (status.isPending) {
@@ -290,6 +294,7 @@ export function ChatgptPlanCard() {
         onOpenChange={setConnectOpen}
         onConnected={() => toast.success("ChatGPT plan connected")}
       />
+      <ChatgptWelcomeModal open={welcomeOpen} onDone={() => setWelcomeClosed(true)} />
     </section>
   );
 }

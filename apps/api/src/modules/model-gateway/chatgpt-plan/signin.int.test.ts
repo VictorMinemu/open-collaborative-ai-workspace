@@ -167,6 +167,15 @@ beforeAll(async () => {
     "Alex Kim",
     "standard",
   ));
+  // An organization model (05-04) exists, so "organization rows stay available" below is a real assertion.
+  await ok(
+    admin.request("POST", "/api/v1/model-providers", {
+      provider: "anthropic",
+      apiKey: "sk-ant-signin-SECRET-0123456789-z9Yx",
+      baseUrl: stack.fake.baseUrl,
+      allowedModels: ["claude-sonnet-5-5"],
+    }),
+  );
 });
 
 afterAll(async () => {
@@ -502,9 +511,19 @@ describe("disconnect revokes at the auth server and erases the member's tokens",
     const plan = list.models.filter((m: Json) => m.group === "chatgpt_plan");
     expect(plan.length).toBeGreaterThan(0);
     expect(plan.every((m: Json) => !m.available && m.reason === "not_connected")).toBe(true);
+    // Disconnecting the plan never touches the organization's models (05-04 merged: this is no longer vacuous).
+    const org = list.models.filter((m: Json) => m.group === "organization");
+    expect(org.map((m: Json) => m.ref)).toEqual([
+      { backend: "org_key", provider: "anthropic", modelId: "claude-sonnet-5-5" },
+    ]);
     expect(list.models.filter((m: Json) => m.group !== "chatgpt_plan").every((m: Json) => m.available)).toBe(
       true,
     );
+    expect(list.defaultRef).toEqual({
+      backend: "org_key",
+      provider: "anthropic",
+      modelId: "claude-sonnet-5-5",
+    });
 
     const send = await sam.request("POST", "/api/v1/ai-chats", {
       clientMessageId: `cm-${randomUUID()}`,

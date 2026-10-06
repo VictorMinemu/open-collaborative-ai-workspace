@@ -59,3 +59,24 @@ export function useDisconnectChatgpt() {
     onSuccess: apply,
   });
 }
+
+/** The one-time welcome after connecting was seen (05-07); idempotent on the API. */
+export function useMarkChatgptWelcomeSeen() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post(`${PATH}/welcome-seen`, { body: {}, schema: ChatgptPlanStatusSchema }),
+    onSuccess: (status) => qc.setQueryData(chatgptPlanKeys.status, status),
+  });
+}
+
+/**
+ * A live plan failure may have moved the member's credential (not eligible, needs reconnect): re-read the plan state
+ * and the model list so the picker and the next New chat reflect it.
+ */
+export function useRefreshPlanState() {
+  const qc = useQueryClient();
+  return () => {
+    void qc.invalidateQueries({ queryKey: chatgptPlanKeys.status });
+    void qc.invalidateQueries({ queryKey: aiKeys.models });
+  };
+}

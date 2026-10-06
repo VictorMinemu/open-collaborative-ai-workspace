@@ -54,6 +54,14 @@ async function captureLoopback(context: BrowserContext): Promise<() => string> {
   return () => landed;
 }
 
+/** A new connection shows the one-time welcome (05-07); these tests dismiss it and move on. */
+async function dismissWelcome(page: Page) {
+  const welcome = page.getByTestId("chatgpt-welcome");
+  await expect(welcome).toBeVisible();
+  await welcome.getByTestId("chatgpt-welcome-done").click();
+  await expect(welcome).toBeHidden();
+}
+
 let sam: APIRequestContext;
 
 test.beforeAll(async () => {
@@ -103,6 +111,7 @@ test("Sam connects his own ChatGPT plan by pasting the loopback address and his 
   await bothThemes(page, `chatgpt-connect-dialog-${w}`);
   await dialog.getByTestId("chatgpt-connect-submit").click();
   await expect(dialog).toBeHidden();
+  await dismissWelcome(page);
 
   await expect(card).toHaveAttribute("data-state", "connected");
   await expect(card.getByTestId("chatgpt-plan-connected")).toHaveText("Connected");
@@ -147,6 +156,7 @@ test("a wrong paste is explained in place and the right one still connects", asy
   await input.fill(landed());
   await dialog.getByTestId("chatgpt-connect-submit").click();
   await expect(dialog).toBeHidden();
+  await dismissWelcome(page);
   await expect(page.getByTestId("chatgpt-plan-card")).toHaveAttribute("data-state", "connected");
   await context.close();
 });

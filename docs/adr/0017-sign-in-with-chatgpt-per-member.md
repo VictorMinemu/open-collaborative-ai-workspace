@@ -48,7 +48,8 @@ member's **own ChatGPT plan by default**, bring-your-own and never pooled, and o
    `http://127.0.0.1:<the requested port>/auth/callback` or its bare query. A wrong paste does not spend the flow. A
    state mismatch, a cancellation or a code exchange does spend it. Plan 05-07 adds an optional desktop path: the
    Electron main process (never the Local Runtime daemon) opens a transient loopback listener for one request and
-   forwards `{code, state}` the same way.
+   hands a clean loopback URL carrying only `code`, `state`, `client_id` and `error` to the web app, which POSTs it
+   to the same `complete` route (see the scoped exception under Consequences).
 4. **ID token and scope checks.** The ID token is verified against the issuer's JWKS with `jose`. The checks are the
    issuer, the audience (the issued client id), expiry with 30 s of tolerance, and the nonce. Subject, email and the
    `chatgpt_plan_type` claim are kept as identity metadata. Without the `chatgpt.tokens.use.direct` scope the
@@ -90,6 +91,17 @@ member's **own ChatGPT plan by default**, bring-your-own and never pooled, and o
     mapped and falls back cleanly);
   - whether real discovery returns `/api/accounts/authorize` or another authorize path. The client follows
     discovery.
+- **Scoped exception to "no listening TCP port" (05-07).** AGENTS.md forbids a listening TCP port for the Local
+  Runtime daemon, and the daemon still has none. The desktop *main process* listens on `127.0.0.1` only (1455, else
+  an ephemeral port that the API puts in the redirect URI) and only while a sign-in is pending. It serves one
+  `GET /auth/callback` whose `Host` is the loopback address and then closes. It times out after 5 minutes, keeps one
+  flow at a time, and is cancelled when the window closes or the app quits. It never reads, keeps or forwards a
+  header or cookie and never logs the URL. This matters when the workspace itself is served from `127.0.0.1` (dev,
+  e2e): browsers send its session cookie to every `127.0.0.1` port, so the listener ignores everything but the query.
+  A local process that answers first can at worst feed a forged callback, which the API refuses (state bound to the
+  member, single use, PKCE). Covered by `apps/desktop/src/main/chatgpt-loopback.test.ts`. The plain-browser paste
+  path keeps the 05-05 caveat: on a loopback-hosted workspace, whatever listens on the redirect port receives that
+  cookie.
 - **The managed cloud** later counts as a "paid or remotely hosted app" and needs OpenAI's interest form before it
   offers plan usage. Self-hosted deployments match the documented "Self-hosted VMs" case.
 - **Per-app limits** are managed by each member at `chatgpt.com/settings/usage`. The UI links there ("Manage

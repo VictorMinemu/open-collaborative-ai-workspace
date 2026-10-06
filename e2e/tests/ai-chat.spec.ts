@@ -146,7 +146,7 @@ test("a failed answer ends with a calm card instead of spinning", async ({ brows
   const answer = lastAssistant(page);
   await expect(answer).toHaveAttribute("data-status", "failed", { timeout: 15_000 });
   const card = answer.getByTestId("ai-generation-error");
-  await expect(card).toHaveText("This answer failed — ChatGPT is temporarily unavailable");
+  await expect(card).toHaveText("ChatGPT is temporarily unavailable. Try again in a moment.");
   await expect(page.getByTestId("ai-streaming-caret")).toHaveCount(0);
   await expect(answer.getByTestId("ai-message-footer")).toContainText("GPT-6 Astra · ChatGPT plan");
   // The composer is ready for the next message.
