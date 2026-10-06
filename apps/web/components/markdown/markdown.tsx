@@ -1,5 +1,6 @@
 "use client";
 
+import { isReservedHandle } from "@ocw/contracts";
 import { code } from "@streamdown/code";
 import { createContext, memo, useContext } from "react";
 import {
@@ -110,6 +111,18 @@ const CONTROLS: ControlsConfig = {
 /** A `@handle` chip (people and bots from MentionContext; unknown handles stay plain text). Also used by snippets. */
 export function MentionChip({ handle, children }: { handle: string; children: React.ReactNode }) {
   const { handles, myHandle } = useContext(MentionContext);
+  // @channel / @here / @everyone: a broadcast, never a person (Pitfall 6); no directory entry needed.
+  if (isReservedHandle(handle)) {
+    return (
+      <span
+        data-testid="mention-all"
+        title={handle === "here" ? "Notified everyone online" : "Notified everyone in the channel"}
+        className="rounded-[4px] bg-amber-400/25 px-0.5 font-semibold text-amber-900 dark:bg-amber-400/20 dark:text-amber-200"
+      >
+        {children}
+      </span>
+    );
+  }
   const target = handles.get(handle);
   if (!target) return <>{children}</>;
   const me = handle === myHandle;

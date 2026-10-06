@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
+import { WS_AUTH_PROTOCOL_PREFIX, WS_PROTOCOL } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import WebSocket from "ws";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
-import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
+import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack, WEB_ORIGIN } from "../../testing";
+import { createOnlineSet } from "../realtime";
 
 /**
  * CHAT-08 (04-09): the Notification module against real PostgreSQL + Redis. Rows hold ids and the actor only
@@ -69,6 +72,32 @@ async function events(userId: string, type: string): Promise<Json[]> {
   );
   return res.rows.map((r) => r.payload);
 }
+
+/** Authenticated /ws socket (being connected is what puts a member in the online set). */
+async function socketFor(client: TestClient) {
+  const token = await client.token();
+  const ws = new WebSocket(
+    `${stack.baseUrl.replace("http", "ws")}/ws`,
+    [WS_PROTOCOL, `${WS_AUTH_PROTOCOL_PREFIX}${token}`],
+    { headers: { origin: WEB_ORIGIN } },
+  );
+  await new Promise((resolve, reject) => {
+    ws.once("open", resolve);
+    ws.once("error", reject);
+  });
+  return ws;
+}
+
+async function until(fn: () => Promise<boolean>, ms = 3000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (await fn()) return;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error(`condition not met within ${ms} ms`);
+}
+
+const onlineNow = () => createOnlineSet(stack.built.core.bus).onlineUserIds(orgId);
 
 async function channel(name: string, visibility: "public" | "private", joiners: TestClient[] = []) {
   const id = (await ok(ada.request("POST", "/api/v1/channels", { name, visibility }))).id as string;
@@ -294,5 +323,188 @@ describe("mentions (CHAT-08 tracer)", () => {
     await ok(eve.request("POST", "/api/v1/notifications/read", { ids: [row?.id] }));
     const [after] = (await su.query("select read_at from app.notifications where id = $1", [row?.id])).rows;
     expect(after.read_at).toBeNull();
+  });
+});
+
+describe("DMs, groups and threads (CHAT-08)", () => {
+  it("a DM notifies the other person", async () => {
+    const dm = await ok(ada.request("POST", "/api/v1/dms", { participants: [{ kind: "user", id: samId }] }));
+    const m = await post(ada, dm.id, "lunch at 1?");
+    expect(await rowsFor(samId, m.id)).toMatchObject([{ kind: "dm", actor_id: adaId }]);
+    expect(await rowsFor(adaId, m.id)).toEqual([]);
+    const [ev] = (await events(samId, "notification.created")).filter(
+      (e) => e.notification.messageId === m.id,
+    );
+    // DMs notify at the default level (popup), labelled with the other person's name.
+    expect(ev).toMatchObject({
+      popup: true,
+      notification: { conversation: { kind: "dm", label: "Ada Lovelace" } },
+    });
+  });
+
+  it("a group message notifies every other person", async () => {
+    const g = await ok(
+      ada.request("POST", "/api/v1/dms", {
+        participants: [
+          { kind: "user", id: samId },
+          { kind: "user", id: alexId },
+        ],
+      }),
+    );
+    const m = await post(sam, g.id, "standup notes are in");
+    expect((await rowsFor(adaId, m.id))[0]?.kind).toBe("group_dm");
+    expect((await rowsFor(alexId, m.id))[0]?.kind).toBe("group_dm");
+    expect(await rowsFor(samId, m.id)).toEqual([]);
+  });
+
+  it("a thread reply notifies the root author and earlier repliers, once each, never its author", async () => {
+    const ch = await channel(`threads-${randomUUID().slice(0, 6)}`, "public", [sam, alex, bob]);
+    const root = await post(sam, ch, "what should we name the release?");
+    const r1 = await post(alex, ch, "Aurora", root.id);
+    expect(await rowsFor(samId, r1.id)).toMatchObject([{ kind: "thread_reply", thread_root_id: root.id }]);
+    await post(sam, ch, "nice", root.id);
+    const r3 = await post(bob, ch, "Borealis", root.id);
+    expect((await rowsFor(samId, r3.id)).map((r) => r.kind)).toEqual(["thread_reply"]);
+    expect((await rowsFor(alexId, r3.id)).map((r) => r.kind)).toEqual(["thread_reply"]);
+    expect(await rowsFor(bobId, r3.id)).toEqual([]);
+    expect(await rowsFor(adaId, r3.id)).toEqual([]);
+    const list = await inbox(alex, "?filter=all");
+    expect(list.items.find((n: Json) => n.messageId === r3.id)).toMatchObject({
+      kind: "thread_reply",
+      threadRootId: root.id,
+    });
+    // The Mentions filter leaves thread replies out.
+    expect((await inbox(alex, "?filter=mentions")).items.some((n: Json) => n.messageId === r3.id)).toBe(
+      false,
+    );
+  });
+});
+
+describe("@channel and @here (CHAT-08, Pitfall 6, P-11)", () => {
+  it("@channel notifies every other human member", async () => {
+    const ch = await channel(`all-${randomUUID().slice(0, 6)}`, "public", [sam, alex]);
+    const m = await post(ada, ch, "@channel the deploy window opens now");
+    expect((await rowsFor(samId, m.id))[0]?.kind).toBe("channel");
+    expect((await rowsFor(alexId, m.id))[0]?.kind).toBe("channel");
+    expect(await rowsFor(bobId, m.id)).toEqual([]);
+    expect(await rowsFor(adaId, m.id)).toEqual([]);
+    expect(
+      (await su.query("select count(*)::int as n from app.notifications where message_id = $1", [m.id]))
+        .rows[0].n,
+    ).toBe(2);
+  });
+
+  it("a second @channel in the same channel within a minute is refused (429) and posts nothing", async () => {
+    const ch = await channel(`limit-${randomUUID().slice(0, 6)}`, "public", [sam]);
+    await post(ada, ch, "@channel first");
+    const again = await ada.request("POST", `/api/v1/conversations/${ch}/messages`, { body: "@here second" });
+    expect(again.status).toBe(429);
+    expect((again.body as Json).error.code).toBe("mention_all_rate_limited");
+    const n = (await su.query("select count(*)::int as n from app.messages where conversation_id = $1", [ch]))
+      .rows[0].n;
+    expect(n).toBe(1);
+    // Ordinary messages still post.
+    await post(ada, ch, "no broadcast here");
+    // A retry of the same message (same clientMessageId) returns it instead of hitting the limit.
+    const ch2 = await channel(`retry-${randomUUID().slice(0, 6)}`, "public", [sam]);
+    const clientMessageId = randomUUID();
+    const sent = await ok(
+      ada.request("POST", `/api/v1/conversations/${ch2}/messages`, {
+        body: "@channel once",
+        clientMessageId,
+      }),
+    );
+    const retried = await ok(
+      ada.request("POST", `/api/v1/conversations/${ch2}/messages`, {
+        body: "@channel once",
+        clientMessageId,
+      }),
+    );
+    expect(retried.id).toBe(sent.id);
+  });
+
+  it("@here notifies only members online now (an away socket and an offline member get nothing)", async () => {
+    const ch = await channel(`here-${randomUUID().slice(0, 6)}`, "public", [sam, alex, bob]);
+    const samWs = await socketFor(sam);
+    const alexWs = await socketFor(alex);
+    try {
+      alexWs.send(JSON.stringify({ op: "presence", state: "away" }));
+      await until(async () => {
+        const on = await onlineNow();
+        return on.has(samId) && !on.has(alexId) && !on.has(bobId);
+      });
+      const m = await post(ada, ch, "@here quick sync in 5?");
+      expect((await rowsFor(samId, m.id))[0]?.kind).toBe("here");
+      expect(await rowsFor(alexId, m.id)).toEqual([]);
+      expect(await rowsFor(bobId, m.id)).toEqual([]);
+    } finally {
+      samWs.close();
+      alexWs.close();
+    }
+  });
+
+  it("the online set follows sockets: away and back, and close leaves it", async () => {
+    const ws = await socketFor(bob);
+    await until(async () => (await onlineNow()).has(bobId));
+    ws.send(JSON.stringify({ op: "presence", state: "away" }));
+    await until(async () => !(await onlineNow()).has(bobId));
+    ws.send(JSON.stringify({ op: "presence", state: "online" }));
+    await until(async () => (await onlineNow()).has(bobId));
+    ws.close();
+    await until(async () => !(await onlineNow()).has(bobId));
+  });
+
+  it("a deny rule on channel.mention_all refuses the post with 403 and creates no message", async () => {
+    const ch = await channel(`deny-${randomUUID().slice(0, 6)}`, "public", [sam, alex]);
+    const rule = await ok(
+      ada.request("POST", "/api/v1/permission-rules", {
+        subjectKind: "user",
+        subjectId: alexId,
+        permission: "channel.mention_all",
+        effect: "deny",
+      }),
+    );
+    try {
+      const res = await alex.request("POST", `/api/v1/conversations/${ch}/messages`, {
+        body: "@channel hello",
+      });
+      expect(res.status).toBe(403);
+      expect((res.body as Json).error.details).toMatchObject({ permission: "channel.mention_all" });
+      const n = (
+        await su.query("select count(*)::int as n from app.messages where conversation_id = $1", [ch])
+      ).rows[0].n;
+      expect(n).toBe(0);
+      // The channel permissions the web reads no longer offer it to Alex.
+      const summary = await ok(alex.request("GET", `/api/v1/channels/${ch}`));
+      expect(summary.viewerCan).not.toContain("channel.mention_all");
+      expect((await ok(sam.request("GET", `/api/v1/channels/${ch}`))).viewerCan).toContain(
+        "channel.mention_all",
+      );
+      // Ordinary posts still work.
+      await post(alex, ch, "hello without a broadcast");
+    } finally {
+      await ok(ada.request("DELETE", `/api/v1/permission-rules/${rule.id}`));
+    }
+  });
+
+  it("@channel never wakes a bot and never notifies one; inside code it notifies nobody", async () => {
+    const ch = await channel(`bots-${randomUUID().slice(0, 6)}`, "public", [sam]);
+    await ok(ada.request("POST", `/api/v1/channels/${ch}/members`, { kind: "agent", id: archieId }));
+    const before = mentions.length;
+    const m = await post(ada, ch, "@channel heads up");
+    expect(mentions.slice(before).filter((x) => x.messageId === m.id)).toEqual([]);
+    expect(await rowsFor(archieId)).toEqual([]);
+    expect((await rowsFor(samId, m.id))[0]?.kind).toBe("channel");
+
+    const ch2 = await channel(`code-${randomUUID().slice(0, 6)}`, "public", [sam]);
+    const code = await post(ada, ch2, "type `@channel` to ping everyone\n```\n@here\n```");
+    expect(await rowsFor(samId, code.id)).toEqual([]);
+  });
+
+  it("a mention beats @channel for the same person (one row, kind mention)", async () => {
+    const ch = await channel(`both-${randomUUID().slice(0, 6)}`, "public", [sam, alex]);
+    const m = await post(ada, ch, "@channel and especially @sam");
+    expect((await rowsFor(samId, m.id)).map((r) => r.kind)).toEqual(["mention"]);
+    expect((await rowsFor(alexId, m.id)).map((r) => r.kind)).toEqual(["channel"]);
   });
 });

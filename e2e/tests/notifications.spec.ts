@@ -115,3 +115,97 @@ test("a mention reaches the Mentions view live; opening it jumps to the message 
   await api.dispose();
   await admin.dispose();
 });
+
+/** Twenty-odd colleagues for the member-count warning (created once; both projects share the stack). */
+async function crowd(admin: APIRequestContext, n: number): Promise<string[]> {
+  const ids: string[] = [];
+  for (let i = 1; i <= n; i++) {
+    const tag = String(i).padStart(2, "0");
+    ids.push(
+      await ensureMember(
+        admin,
+        { name: `Crowd Member ${tag}`, email: `crowd-${tag}@ocw.test`, password: "crowd-e2e-password-123" },
+        "developer",
+      ),
+    );
+  }
+  return ids;
+}
+
+test("@channel and @here: autocomplete, a confirmation above 20 members, a special chip and a notification", async ({
+  browser,
+}, info) => {
+  test.setTimeout(180_000);
+  const project = info.project.name;
+  const mobile = project === "mobile";
+  const size = mobile ? "390" : "1440";
+  const who = RECIPIENT[project] ?? (RECIPIENT.desktop as Actor);
+
+  const admin = await apiAs(ADMIN);
+  const whoId = await ensureMember(admin, who, "developer");
+  const api = await apiAs(who);
+  const channel = await freshChannel(admin, [api], "all-hands");
+  for (const id of await crowd(admin, 20)) {
+    const res = await admin.post(`/api/v1/channels/${channel.id}/members`, { data: { kind: "user", id } });
+    expect(res.ok(), `add ${id}: ${res.status()}`).toBe(true);
+  }
+  expect(whoId).toBeTruthy();
+
+  const a = await openAs(browser, ADMIN, project);
+  await a.page.goto(`/chat/${channel.id}`);
+  const composer = a.page.getByTestId("composer");
+  await expect(composer).toBeVisible();
+
+  // ---- "@" offers @channel and @here with what they do
+  await composer.click();
+  await composer.pressSequentially("@");
+  const suggestions = a.page.getByTestId("mention-suggestions");
+  await expect(suggestions).toBeVisible();
+  const channelOpt = suggestions.locator('[data-testid="mention-option-special"][data-handle="channel"]');
+  const hereOpt = suggestions.locator('[data-testid="mention-option-special"][data-handle="here"]');
+  await expect(channelOpt).toContainText("Notify everyone in this channel");
+  await expect(hereOpt).toContainText("Notify everyone online now");
+  await shot(a.page, `composer-special-mentions-${size}`);
+  // Typing narrows to the broadcast, shown first.
+  await composer.pressSequentially("ch");
+  await expect(suggestions.getByRole("option").first()).toHaveAttribute("data-handle", "channel");
+  await channelOpt.click();
+  await expect(composer).toHaveValue("@channel ");
+
+  // ---- more than 20 members: sending asks first
+  const text = `the release is live (${project})`;
+  await composer.pressSequentially(text);
+  await composer.press("Enter");
+  const confirm = a.page.getByTestId("mention-all-confirm");
+  await expect(confirm).toBeVisible();
+  await expect(confirm).toContainText(/Notify 2\d people\?/);
+  await bothThemes(a.page, `mention-all-confirm-${size}`);
+  await confirm.getByTestId("mention-all-send").click();
+  await expect(confirm).toBeHidden();
+
+  // ---- the message shows @channel as a special chip; the member gets a `channel` notification
+  const row = a.page.getByTestId("message").filter({ hasText: text }).last();
+  await expect(row.getByTestId("mention-all")).toHaveText("@channel");
+  await expect
+    .poll(
+      async () => {
+        const list = (await (await api.get("/api/v1/notifications?filter=mentions")).json()) as {
+          items: Array<{ kind: string; conversation: { id: string } }>;
+        };
+        return list.items.find((n) => n.conversation.id === channel.id)?.kind ?? null;
+      },
+      { timeout: 5_000 },
+    )
+    .toBe("channel");
+
+  // ---- a second broadcast within the minute is refused, and says why
+  await composer.pressSequentially("@here again");
+  await composer.press("Enter");
+  await expect(confirm).toBeVisible();
+  await confirm.getByTestId("mention-all-send").click();
+  await expect(a.page.getByText(/at most one @channel or @here per minute/i).first()).toBeVisible();
+
+  await a.context.close();
+  await api.dispose();
+  await admin.dispose();
+});

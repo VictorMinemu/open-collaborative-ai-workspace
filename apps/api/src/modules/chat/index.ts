@@ -17,6 +17,7 @@ import {
   MemberParams,
   Message,
   MessagePage,
+  mentionAllOf,
   Ok,
   PageQueryFields,
   PostMessageRequest,
@@ -27,6 +28,7 @@ import {
 import {
   conversationMembers,
   conversations,
+  messages,
   orgMembers,
   orgUnits,
   type TenantCtx,
@@ -38,7 +40,7 @@ import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { type ApiModule, authOf, type Core, tenant } from "../../core";
 import type { AgentMention, ThreadContext } from "../../lib/chat-agent-bridge";
-import { badRequest, conflict, forbidden, gone, notFound } from "../../lib/errors";
+import { badRequest, conflict, forbidden, gone, HttpError, notFound } from "../../lib/errors";
 import {
   AuthzDeniedError,
   agentResource,
@@ -118,6 +120,9 @@ const zoneOf = (author: { clientTimeZone?: string }) =>
  */
 const MESSAGE_KINDS = ["channel", "dm", "group"] as const;
 
+/** One `@channel` / `@here` per channel per minute (P-11). */
+const MENTION_ALL_WINDOW_MS = 60_000;
+
 /**
  * The unit a channel is placed in (create or move, CHAT-02, T-04-08-01): it must exist in the tenant (another
  * organization's unit is simply missing: 404 `unit_not_found`), and unless `mayManageUnits` (the resolver's
@@ -175,6 +180,7 @@ export function createChatModule(core: Core): ApiModule {
     "channel.archive",
     "message.delete_any",
     "channel.update",
+    "channel.mention_all",
   ] as const;
 
   async function withViewerCan(req: FastifyRequest, tx: Tx, row: ChannelRow): Promise<ChannelSummaryDto> {
@@ -201,6 +207,40 @@ export function createChatModule(core: Core): ApiModule {
     notFoundMessage = "Channel not found",
   ): Promise<{ conv: ConversationRow; facts: ChannelFacts }> {
     return access.readableRow(req, tx, conv, notFoundMessage);
+  }
+
+  /**
+   * The 1-per-minute gate of `@channel` / `@here` in one channel (P-11, T-04-09-02), claimed before the insert:
+   * `SET NX PX` in Redis, so every API instance shares it. A refused claim is 429 `mention_all_rate_limited`.
+   */
+  async function claimMentionAll(conversationId: string): Promise<void> {
+    const claimed = await core.bus.pub.set(`ocw:mention_all:${conversationId}`, "1", {
+      condition: "NX",
+      expiration: { type: "PX", value: MENTION_ALL_WINDOW_MS },
+    });
+    if (claimed !== "OK") {
+      throw new HttpError(
+        429,
+        "mention_all_rate_limited",
+        "You can send at most one @channel or @here per minute in this channel",
+      );
+    }
+  }
+
+  /** A client retry of a message already posted (same author and clientMessageId) answers it, not the limit. */
+  async function isOwnRetry(tx: Tx, userId: string, clientMessageId: string): Promise<boolean> {
+    const [row] = await tx
+      .select({ id: messages.id })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.authorKind, "user"),
+          eq(messages.authorId, userId),
+          eq(messages.clientMessageId, clientMessageId),
+        ),
+      )
+      .limit(1);
+    return row !== undefined;
   }
 
   // ---------------------------------------------------------------- realtime: conv:<id>
@@ -960,6 +1000,15 @@ export function createChatModule(core: Core): ApiModule {
             if (req.body.attachmentIds?.length || !req.body.body) {
               throw badRequest("Attachments are not available yet", "attachments_unavailable");
             }
+            // @channel / @here (CHAT-08, Pitfall 6, P-11): channels only, deny-able, one per channel per minute.
+            const mentionAll = conv.kind === "channel" ? mentionAllOf(req.body.body) : null;
+            if (mentionAll) {
+              await perms.assertCan(req, tx, "channel.mention_all", channelResource(facts));
+              const retry =
+                req.body.clientMessageId !== undefined &&
+                (await isOwnRetry(tx, auth.userId, req.body.clientMessageId));
+              if (!retry) await claimMentionAll(conv.id);
+            }
             const dir = await loadDirectory(tx);
             const result = await postMessage(tx, deps, dir, {
               conv,
@@ -978,7 +1027,8 @@ export function createChatModule(core: Core): ApiModule {
                 message: result.message,
                 author: { kind: "user", id: auth.userId },
                 mentions: result.row.mentions,
-                mentionAll: null,
+                // Reserved handles never resolve as people or bots, so a broadcast never wakes a bot.
+                mentionAll,
                 threadRootId: result.root?.id ?? null,
               });
               // The zone only travels with this message's deliveries (turn context); it is never stored.

@@ -11,6 +11,7 @@ import type { FastifyRequest } from "fastify";
 import type { WebSocket } from "ws";
 import type { App, AuthContext } from "../../core";
 import type { IdentityService } from "../identity";
+import type { OnlineSet } from "./online";
 import { PRESENCE_HEARTBEAT_MS, type PresenceMember, type PresenceStore } from "./presence";
 import type { RealtimeService } from "./service";
 
@@ -84,6 +85,8 @@ export function registerGateway(
     /** Session/member recheck interval for open sockets (tests lower it). */
     sessionRecheckMs?: number;
     presence: PresenceStore;
+    /** Organization-level online set for @here (CHAT-08): one entry per open socket, refreshed on the heartbeat. */
+    online: OnlineSet;
     /** Presence refresh interval (default PRESENCE_HEARTBEAT_MS; tests lower it). */
     heartbeatMs?: number;
     /** Presence change limit per socket (default PRESENCE_RATE_LIMIT; tests shorten the window). */
@@ -93,6 +96,7 @@ export function registerGateway(
   const rateLimit = deps.presenceRateLimit ?? PRESENCE_RATE_LIMIT;
   const recheckMs = deps.sessionRecheckMs ?? SESSION_RECHECK_MS;
   const presence = deps.presence;
+  const online = deps.online;
   // Open sockets of this API instance, so a revocation (Redis fan-out from any instance) closes them at once.
   const open = new Set<Connection>();
   const memberOf = (conn: Connection): PresenceMember => ({
@@ -133,6 +137,16 @@ export function registerGateway(
         }
       }
       await presence.refresh(items).catch((err: unknown) => app.log.warn({ err }, "presence refresh failed"));
+      await online
+        .refresh(
+          [...open].map((c) => ({
+            orgId: c.auth.organizationId,
+            conn: c.id,
+            userId: c.auth.userId,
+            state: c.presenceState,
+          })),
+        )
+        .catch((err: unknown) => app.log.warn({ err }, "online set refresh failed"));
       for (const { orgId, topic } of watched.values()) {
         await presence
           .sweep(orgId, topic)
@@ -248,6 +262,7 @@ export function registerGateway(
     // Leave every joined entry so watchers on other instances see this one's people go at once.
     const leaving: Promise<void>[] = [];
     for (const conn of open) {
+      leaving.push(online.remove(conn.auth.organizationId, conn.id, conn.auth.userId));
       for (const [topic, sub] of conn.subs) {
         if (sub.presenceJoined) {
           sub.presenceJoined = false;
@@ -330,6 +345,10 @@ export function registerGateway(
         unsub,
       };
       open.add(conn);
+      // @here (CHAT-08): an open socket is online until it says away or closes.
+      online
+        .set(auth.organizationId, conn.id, auth.userId, conn.presenceState)
+        .catch((err: unknown) => req.log.warn({ err }, "online set add failed"));
       socket.on("pong", () => {
         conn.alive = true;
       });
@@ -369,7 +388,11 @@ export function registerGateway(
         }
         recent.push(now);
         conn.presenceState = to;
-        const updates: Promise<void>[] = [];
+        const updates: Promise<void>[] = [
+          online
+            .set(auth.organizationId, conn.id, auth.userId, to)
+            .catch((err: unknown) => req.log.warn({ err }, "online set state change failed")),
+        ];
         for (const [topic, sub] of subs) {
           if (!sub.presenceJoined) continue;
           updates.push(
@@ -510,6 +533,9 @@ export function registerGateway(
       socket.on("close", () => {
         open.delete(conn);
         clearInterval(recheck);
+        online
+          .remove(auth.organizationId, conn.id, auth.userId)
+          .catch((err: unknown) => req.log.warn({ err }, "online set remove failed"));
         for (const topic of [...subs.keys()]) void unsub(topic);
       });
     },

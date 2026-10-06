@@ -239,7 +239,7 @@ export async function buildApp(
       signInRatePerMinute: env.OCW_SIGNIN_RATE_LIMIT_PER_MINUTE,
     }),
     createOrganizationModule(core),
-    createRealtimeModule({ realtime, identity, allowedOrigins, bus }),
+    createRealtimeModule({ realtime, identity, allowedOrigins, bus, online }),
     createSecretsModule(),
     createChatModule(core), // B1
     createNotificationModule(core, { online }), // Phase 4: mentions, DMs, threads, @channel/@here (CHAT-08)
