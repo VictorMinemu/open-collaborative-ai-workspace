@@ -1,7 +1,7 @@
 "use client";
 
 import { badgeStyle, type ChannelSummary, type ChannelUnit } from "@ocw/contracts";
-import { ChevronRight, Plus } from "lucide-react";
+import { BellOff, ChevronRight, Plus } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { sectionItemClass } from "@/components/shell/section-sidebar";
@@ -23,6 +23,16 @@ export function rowBadge(
     mentionCount: show ? (c.mentionCount ?? 0) : 0,
   };
   return { input, style: badgeStyle(input) };
+}
+
+/** The bell-off mark of a muted row (CHAT-10); it sits before the badge, so a mention badge still shows. */
+export function MutedIcon() {
+  return (
+    <span data-testid="muted-icon" className="ml-auto flex shrink-0 text-muted-foreground/80">
+      <BellOff aria-hidden className="size-3.5" />
+      <span className="sr-only">(muted)</span>
+    </span>
+  );
 }
 
 /**
@@ -131,6 +141,7 @@ function ChannelRow({ c, active }: { c: SidebarChannel; active: boolean }) {
       data-channel-name={c.name}
       data-joined={c.isMember ? undefined : "false"}
       data-unread={unread || undefined}
+      data-muted={c.muted || undefined}
       aria-current={active ? "page" : undefined}
       className={cn(
         sectionItemClass(active),
@@ -149,7 +160,8 @@ function ChannelRow({ c, active }: { c: SidebarChannel; active: boolean }) {
           {c.subLabel}
         </span>
       ) : null}
-      <ConversationBadge {...input} />
+      {c.muted ? <MutedIcon /> : null}
+      <ConversationBadge {...input} className={c.muted ? "ml-1" : undefined} />
     </Link>
   );
 }
@@ -177,7 +189,10 @@ export function SidebarSections({
     <div className="grid grid-cols-1 gap-3">
       {sections.map((s) => {
         const isCollapsed = collapsed.has(s.key);
-        const shown = isCollapsed ? s.channels.filter((c) => c.id === activeId || isUnread(c)) : s.channels;
+        // A collapsed section keeps what has a badge (a muted channel only with a mention, CHAT-10).
+        const shown = isCollapsed
+          ? s.channels.filter((c) => c.id === activeId || rowBadge(c, isUnread(c)).style !== "none")
+          : s.channels;
         const hidden = s.channels.length - shown.length;
         const unitId = s.unit?.id ?? null;
         const headingId = `section-${s.key}`;

@@ -211,7 +211,32 @@ test("onboarding → pairing → main window, hardened and supervised", async ()
     };
   });
   expect(bridge.isDesktop).toBe(true);
-  expect(bridge.keys).toEqual(["addProject", "isDesktop", "listProjects", "onStatus", "platform", "status"]);
+  expect(bridge.keys).toEqual([
+    "addProject",
+    "isDesktop",
+    "listProjects",
+    "onStatus",
+    "platform",
+    "setBadgeCount",
+    "status",
+  ]);
+
+  // CHAT-10: the web app sets the dock/taskbar badge through the one validated channel.
+  const setBadge = (n: unknown) =>
+    main.evaluate(
+      (v) =>
+        (window as unknown as { ocwDesktop: { setBadgeCount: (n: unknown) => Promise<void> } }).ocwDesktop
+          .setBadgeCount(v)
+          .then(() => "ok")
+          .catch((e: Error) => e.message),
+      n,
+    );
+  expect(await setBadge(3)).toBe("ok");
+  if (process.platform === "darwin") expect(await app.evaluate(({ app: a }) => a.getBadgeCount())).toBe(3);
+  // Out of range reaches the main process and is refused there (the payload is never echoed).
+  expect(await setBadge(100000)).toMatch(/invalid arguments/);
+  expect(await setBadge(0)).toBe("ok");
+  if (process.platform === "darwin") expect(await app.evaluate(({ app: a }) => a.getBadgeCount())).toBe(0);
   expect(bridge.paired).toBe(true);
   expect(["connecting", "online"]).toContain(bridge.state);
   expect(bridge.projects).toEqual([]);

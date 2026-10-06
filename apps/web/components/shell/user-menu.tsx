@@ -1,9 +1,22 @@
 "use client";
 
-import type { MeResponse } from "@ocw/contracts";
-import { LogOut, Monitor, Moon, Settings, ShieldCheck, Sun, UserRound } from "lucide-react";
+import type { MeResponse, UpdateNotificationPrefsRequest } from "@ocw/contracts";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  Bell,
+  BellOff,
+  LogOut,
+  Monitor,
+  Moon,
+  Settings,
+  ShieldCheck,
+  SlidersHorizontal,
+  Sun,
+  UserRound,
+} from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
+import { toast } from "sonner";
 import { UserAvatar } from "@/components/ui/avatar";
 import {
   DropdownMenu,
@@ -14,9 +27,15 @@ import {
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useProfile } from "@/lib/account-queries";
+import { errorMessage } from "@/lib/api";
+import { dndActive, updateNotificationPrefs, useNotificationPrefs } from "@/lib/notification-queries";
+import { DND_PRESETS, dndPresetUntil, formatDndUntil } from "@/lib/os-notifications";
 import { useSignOut } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { ConnectionDot, useConnectionMeta } from "./connection-dot";
@@ -35,6 +54,8 @@ export function UserMenu({
   const { theme, setTheme } = useTheme();
   const signOut = useSignOut();
   const conn = useConnectionMeta();
+  const prefs = useNotificationPrefs();
+  const paused = !!prefs.data && dndActive(prefs.data);
   const { user } = me;
 
   return (
@@ -51,6 +72,16 @@ export function UserMenu({
         <span className="relative">
           <UserAvatar name={user.name} src={user.image} seed={user.id} className="size-8" />
           <ConnectionDot className="absolute -right-0.5 -bottom-0.5" />
+          {paused ? (
+            <span
+              data-testid="dnd-indicator"
+              title="Notifications paused"
+              className="absolute -top-1 -right-1 flex size-4 items-center justify-center rounded-full bg-sidebar text-muted-foreground ring-1 ring-border"
+            >
+              <Moon className="size-2.5" aria-hidden />
+              <span className="sr-only">Notifications paused</span>
+            </span>
+          ) : null}
         </span>
         {compact || collapsed ? null : (
           <span className="min-w-0 flex-1">
@@ -78,6 +109,8 @@ export function UserMenu({
           <span className={cn("size-2 rounded-full", conn.className)} />
           Realtime: {conn.label}
         </div>
+        <DropdownMenuSeparator />
+        <PauseNotifications inline={compact} />
         <DropdownMenuSeparator />
         <DropdownMenuGroup>
           <DropdownMenuLabel>Theme</DropdownMenuLabel>
@@ -132,5 +165,77 @@ function MenuStatus() {
       {p.statusEmoji ? <span className="text-sm leading-none">{p.statusEmoji}</span> : null}
       <span className="truncate text-muted-foreground">{p.statusText ?? ""}</span>
     </div>
+  );
+}
+
+/**
+ * Do not disturb from the user menu (CHAT-10): the paused state with "Resume notifications", and "Pause
+ * notifications" with the same presets as Settings › Notifications (custom times live there). A submenu beside the
+ * menu on wide screens; inline rows on phones, where a submenu would cover its parent.
+ */
+function PauseNotifications({ inline = false }: { inline?: boolean }) {
+  const qc = useQueryClient();
+  const router = useRouter();
+  const prefs = useNotificationPrefs();
+  const until = prefs.data?.dndUntil ?? null;
+  const paused = !!prefs.data && dndActive(prefs.data);
+  const save = (patch: UpdateNotificationPrefsRequest) =>
+    void updateNotificationPrefs(qc, patch).catch((err) => toast.error(errorMessage(err)));
+  const presets = (
+    <>
+      {DND_PRESETS.map((d) => (
+        <DropdownMenuItem
+          key={d.id}
+          data-testid={`pause-${d.id}`}
+          className={cn(inline && "pl-7.5")}
+          onClick={() => save({ dndUntil: dndPresetUntil(d.id) })}
+        >
+          {d.label}
+        </DropdownMenuItem>
+      ))}
+      {inline ? null : <DropdownMenuSeparator />}
+      <DropdownMenuItem
+        data-testid="pause-custom"
+        className={cn(inline && "pl-7.5 text-muted-foreground")}
+        onClick={() => router.push("/settings/notifications")}
+      >
+        {inline ? null : <SlidersHorizontal />} Custom and settings…
+      </DropdownMenuItem>
+    </>
+  );
+  return (
+    <DropdownMenuGroup>
+      {paused && until ? (
+        <>
+          <div
+            data-testid="notifications-paused"
+            className="mx-2 mb-1 flex items-center gap-2 rounded-md bg-primary/10 px-2 py-1.5 text-primary text-xs"
+          >
+            <Moon className="size-3.5 shrink-0" aria-hidden />
+            <span className="truncate">Notifications paused until {formatDndUntil(until)}</span>
+          </div>
+          <DropdownMenuItem data-testid="resume-notifications" onClick={() => save({ dndUntil: null })}>
+            <Bell /> Resume notifications
+          </DropdownMenuItem>
+        </>
+      ) : null}
+      {inline ? (
+        <>
+          <DropdownMenuLabel data-testid="pause-notifications" className="flex items-center gap-2">
+            <BellOff className="size-3.5" aria-hidden /> {paused ? "Pause for longer" : "Pause notifications"}
+          </DropdownMenuLabel>
+          {presets}
+        </>
+      ) : (
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger data-testid="pause-notifications">
+            <BellOff /> {paused ? "Pause for longer" : "Pause notifications"}
+          </DropdownMenuSubTrigger>
+          <DropdownMenuSubContent className="w-56" data-testid="pause-notifications-menu">
+            {presets}
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+      )}
+    </DropdownMenuGroup>
   );
 }

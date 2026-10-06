@@ -7,6 +7,7 @@ import {
   FinishArgs,
   NoArgs,
   parseArgs,
+  SetBadgeCountArgs,
   toPublicProject,
 } from "./ipc";
 import { deriveStatus } from "./status";
@@ -44,6 +45,26 @@ describe("IPC argument validation", () => {
     expect(() => parseArgs(CheckServerArgs, { webUrl: 42 })).toThrow();
     expect(parseArgs(FinishArgs, { skipPairing: true })).toEqual({ skipPairing: true });
     expect(() => parseArgs(FinishArgs, {})).toThrow();
+  });
+});
+
+describe("setBadgeCount (CHAT-10, T-04-11-01)", () => {
+  it("accepts an integer from 0 to 9999 and nothing else", () => {
+    for (const n of [0, 7, 9999]) expect(parseArgs(SetBadgeCountArgs, n)).toBe(n);
+    for (const bad of [-1, 10000, 1.5, "3", { count: 3 }, null, undefined, Number.NaN]) {
+      expect(() => parseArgs(SetBadgeCountArgs, bad)).toThrow();
+    }
+  });
+
+  it("errors never echo the payload", () => {
+    const secret = "/Users/someone/secret-token-123";
+    try {
+      parseArgs(SetBadgeCountArgs, secret);
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Error).message).toBe("invalid arguments");
+      expect((err as Error).message).not.toContain("secret");
+    }
   });
 });
 
@@ -128,16 +149,18 @@ describe("Full access opt-in is read-only outside the main process (ADR-0012, P-
     expect(deriveStatus({ ...base, report: null, localFullAccess: true }).fullAccessOptIn).toBe(true);
   });
 
-  it("the web origin's preload API has no setter: its keys are unchanged", async () => {
+  it("the web origin's preload API has no Full access setter: only the badge count was added (04-11)", async () => {
     let exposed: Record<string, unknown> | null = null;
+    const invoke = vi.fn(async () => undefined);
     vi.doMock("electron", () => ({
       contextBridge: {
         exposeInMainWorld: (_name: string, api: Record<string, unknown>) => {
           exposed = api;
         },
       },
-      ipcRenderer: { invoke: vi.fn(), on: vi.fn(), removeListener: vi.fn() },
+      ipcRenderer: { invoke, on: vi.fn(), removeListener: vi.fn() },
     }));
+    vi.resetModules();
     await import("../preload/main");
     vi.doUnmock("electron");
     expect(Object.keys(exposed ?? {}).sort()).toEqual([
@@ -146,7 +169,18 @@ describe("Full access opt-in is read-only outside the main process (ADR-0012, P-
       "listProjects",
       "onStatus",
       "platform",
+      "setBadgeCount",
       "status",
     ]);
+    // setBadgeCount forwards only a whole number on its own channel; anything else never reaches IPC.
+    const setBadgeCount = (exposed as unknown as { setBadgeCount(n: unknown): Promise<unknown> })
+      .setBadgeCount;
+    await setBadgeCount(3);
+    expect(invoke).toHaveBeenLastCalledWith("ocw:set-badge-count", 3);
+    invoke.mockClear();
+    await setBadgeCount("3");
+    await setBadgeCount(1.5);
+    await setBadgeCount({ n: 1 });
+    expect(invoke).not.toHaveBeenCalled();
   });
 });

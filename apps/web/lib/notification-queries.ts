@@ -1,21 +1,27 @@
 "use client";
 
 import {
+  DEFAULT_NOTIFICATION_PREFS,
   type MarkNotificationsReadRequest,
   type Notification,
   type NotificationCreatedEvent,
   NotificationList,
+  type NotificationPrefs,
+  NotificationPrefs as NotificationPrefsSchema,
+  type NotificationPrefsUpdatedEvent,
   type NotificationReadEvent,
   Ok,
+  type UpdateNotificationPrefsRequest,
 } from "@ocw/contracts";
-import { type InfiniteData, type QueryClient, useInfiniteQuery } from "@tanstack/react-query";
+import { type InfiniteData, type QueryClient, useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api, isApiError } from "./api";
+import { applyConversationSettings } from "./chat-queries";
 
 /**
  * The inbox (CHAT-08): the member's notifications, newest first, as the Mentions view (`mentions`: @mentions,
  * @channel, @here) or All activity (also DMs, group DMs and thread replies). The server re-checks access and
- * computes snippets on every read (Pitfall 9). Live updates arrive on the member's own `user:` stream, which the
- * chat sidebar already subscribes to (Pitfall 13: no new subscription).
+ * computes snippets on every read (Pitfall 9). Live updates arrive on the member's own `user:` stream: the chat sidebar
+ * and the app-level OsNotifier share the one subscription of the tab (Pitfall 13); both apply frames idempotently.
  */
 
 export type NotificationFilter = "all" | "mentions";
@@ -23,6 +29,8 @@ export type NotificationFilter = "all" | "mentions";
 export const notifKeys = {
   all: ["notifications"] as const,
   list: (filter: NotificationFilter) => ["notifications", filter] as const,
+  /** Not under the `notifications` prefix: invalidating the lists never refetches the prefs. */
+  prefs: ["notification-prefs"] as const,
 };
 
 const MENTIONS_FILTER = new Set<Notification["kind"]>(["mention", "channel", "here"]);
@@ -142,4 +150,54 @@ export function applyNotificationRead(qc: QueryClient, ev: NotificationReadEvent
 /** The unread count of a cached list (its first page carries it). */
 export function unreadOf(data: Cache | undefined): number {
   return data?.pages[0]?.unreadCount ?? 0;
+}
+
+// ---------------------------------------------------------------- preferences (CHAT-10)
+
+/** The member's notification preferences (DND, default level, desktop and web toggles). */
+export function useNotificationPrefs(opts: { enabled?: boolean } = {}) {
+  return useQuery({
+    queryKey: notifKeys.prefs,
+    queryFn: ({ signal }) =>
+      api.get("/api/v1/notification-prefs", { schema: NotificationPrefsSchema, signal }),
+    retry: retryUnlessClientError,
+    staleTime: 5 * 60_000,
+    enabled: opts.enabled ?? true,
+  });
+}
+
+/** The cached prefs, or the defaults until they load. */
+export function prefsOf(qc: QueryClient): NotificationPrefs {
+  return qc.getQueryData<NotificationPrefs>(notifKeys.prefs) ?? DEFAULT_NOTIFICATION_PREFS;
+}
+
+/** Changes some prefs: applied at once, the server's answer wins, rolled back if it refuses. */
+export async function updateNotificationPrefs(
+  qc: QueryClient,
+  patch: UpdateNotificationPrefsRequest,
+): Promise<NotificationPrefs> {
+  const before = prefsOf(qc);
+  qc.setQueryData<NotificationPrefs>(notifKeys.prefs, { ...before, ...patch });
+  try {
+    const saved = await api.put("/api/v1/notification-prefs", {
+      body: patch,
+      schema: NotificationPrefsSchema,
+    });
+    qc.setQueryData<NotificationPrefs>(notifKeys.prefs, saved);
+    return saved;
+  } catch (err) {
+    qc.setQueryData<NotificationPrefs>(notifKeys.prefs, before);
+    throw err;
+  }
+}
+
+/** `notification_prefs.updated` from any of the member's tabs or devices: global prefs or one conversation's. */
+export function applyNotificationPrefsUpdated(qc: QueryClient, ev: NotificationPrefsUpdatedEvent) {
+  if (ev.prefs) qc.setQueryData<NotificationPrefs>(notifKeys.prefs, ev.prefs);
+  if (ev.conversationId && ev.settings) applyConversationSettings(qc, ev.conversationId, ev.settings);
+}
+
+/** True while do-not-disturb is on. */
+export function dndActive(prefs: Pick<NotificationPrefs, "dndUntil">, now = Date.now()): boolean {
+  return prefs.dndUntil !== null && Date.parse(prefs.dndUntil) > now;
 }

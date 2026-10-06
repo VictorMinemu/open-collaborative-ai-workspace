@@ -20,6 +20,9 @@ const api = Object.freeze({
     ),
   /** Projects registered on this computer (names and ids only, never paths). */
   listProjects: (): Promise<unknown> => ipcRenderer.invoke(Channels.listProjects),
+  /** Dock/taskbar badge = unread mentions (0 clears). Whole numbers only; the main process validates again. */
+  setBadgeCount: (count: unknown): Promise<void> =>
+    Number.isInteger(count) ? ipcRenderer.invoke(Channels.setBadgeCount, count) : Promise.resolve(),
   /** Subscribe to status changes; returns an unsubscribe function. */
   onStatus: (callback: Listener): (() => void) => {
     if (typeof callback !== "function") throw new TypeError("onStatus expects a function");

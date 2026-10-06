@@ -187,4 +187,9 @@ export const EphemeralTypes = {
    */
   providerAuth: "provider.auth.updated",
   assistantDelta: "assistant.delta",
+  /**
+   * On `user:<id>` (CHAT-10, P-04): a plain channel message for a member who chose "all new messages" there
+   * (`MessageNotifyEvent`). Ephemeral, so ordinary messages are never stored on personal streams.
+   */
+  messageNotify: "message.notify",
 } as const;

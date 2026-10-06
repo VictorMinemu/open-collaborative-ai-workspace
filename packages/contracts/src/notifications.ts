@@ -135,6 +135,19 @@ export const NotificationPrefsUpdatedEvent = z.object({
 });
 export type NotificationPrefsUpdatedEvent = z.infer<typeof NotificationPrefsUpdatedEvent>;
 
+/**
+ * Ephemeral `message.notify` on `user:<id>` (P-04: never stored): a plain top-level channel message for a member
+ * whose effective level there is "all" (not muted, not in DND, not the author, and not already notified by a row).
+ * The client applies its desktop/web toggle and focus like for `notification.created`; the tag is the message id.
+ */
+export const MessageNotifyEvent = z.object({
+  conversation: ConversationRef,
+  messageId: Id,
+  actor: MessageAuthor,
+  snippet: z.string().max(SNIPPET_MAX),
+});
+export type MessageNotifyEvent = z.infer<typeof MessageNotifyEvent>;
+
 /** What happened: a notification kind, or a plain message (no mention). */
 export type NotifyEvent = NotificationKind | "message";
 
@@ -142,6 +155,10 @@ export type NotifyEvent = NotificationKind | "message";
  * Whether an event pops an OS / in-app notification for one user. DND or mute → never. The effective level is
  * the conversation's level, or for `default` "all" in DMs and groups and the user's default level in channels.
  * A plain message pops only at "all"; every mention-like event pops at "all" or "mentions".
+ *
+ * A bot's reply in a bot DM (`actorKind: "agent"` in a DM) is an answer the member asked for, not someone reaching
+ * out: it counts as a plain message and the DM's `default` means "mentions", so it pops only when the reply
+ * @mentions the member or the member set that DM to "all" (04-09 open item). The row still reaches the inbox.
  */
 export function decideNotify(i: {
   event: NotifyEvent;
@@ -150,11 +167,14 @@ export function decideNotify(i: {
   defaultLevel: DefaultNotifyLevel;
   muted: boolean;
   dndActive: boolean;
+  actorKind?: "user" | "agent" | "system";
 }): { popup: boolean } {
   if (i.dndActive || i.muted) return { popup: false };
-  const effective =
-    i.level === "default" ? (i.conversationKind === "channel" ? i.defaultLevel : "all") : i.level;
-  if (i.event === "message") return { popup: effective === "all" };
+  const botDm = i.conversationKind === "dm" && i.actorKind === "agent";
+  const event = botDm && i.event === "dm" ? "message" : i.event;
+  const fallback = i.conversationKind === "channel" ? i.defaultLevel : botDm ? "mentions" : "all";
+  const effective = i.level === "default" ? fallback : i.level;
+  if (event === "message") return { popup: effective === "all" };
   return { popup: effective === "all" || effective === "mentions" };
 }
 

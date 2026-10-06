@@ -3,8 +3,10 @@ import {
   type ConversationRef,
   DEFAULT_NOTIFICATION_PREFS,
   decideNotify,
+  EphemeralTypes,
   EventTypes,
   type MessageAuthor,
+  type MessageNotifyEvent,
   NOTIFICATION_KIND_RANK,
   type Notification,
   type NotificationCreatedEvent,
@@ -18,8 +20,9 @@ import {
   notifications,
   orgMembers,
   type Tx,
+  tenantOf,
 } from "@ocw/db";
-import { and, count, eq, inArray, isNull, ne, type SQL, sql } from "drizzle-orm";
+import { and, count, eq, inArray, isNull, ne, or, type SQL, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { ConversationReadInput, MessageEditedInput, MessagePostedInput } from "../../lib/chat-events";
 import { authorOf, type ConversationAccess, conversationRefs, loadDirectory } from "../chat";
@@ -226,6 +229,7 @@ export function createNotificationService(
         defaultLevel: p?.defaultLevel ?? DEFAULT_NOTIFICATION_PREFS.defaultLevel,
         muted: m?.muted ?? false,
         dndActive: p?.dndUntil ? new Date(p.dndUntil).getTime() > now : false,
+        actorKind: t.actor.kind,
       });
       const notification: Notification = {
         id: r.id,
@@ -241,6 +245,76 @@ export function createNotificationService(
       const ev: NotificationCreatedEvent = { notification, popup };
       await core.realtime.appendEvent(tx, `user:${r.user_id}`, EventTypes.notificationCreated, ev);
     }
+  }
+
+  /**
+   * CHAT-10, P-04: a plain top-level channel message for each member who chose "all new messages" there (explicitly,
+   * or `default` with a default level of "all"), is not muted, not in DND, is not the author and got no notification
+   * row for it. Ephemeral `message.notify` after commit: ordinary messages are never stored on personal streams.
+   */
+  async function notifyAllLevel(
+    tx: Tx,
+    input: MessagePostedInput,
+    actor: MessageAuthor,
+    skip: ReadonlySet<string>,
+  ): Promise<void> {
+    const { conv, message } = input;
+    // Narrowing only (the default level of a missing prefs row is "mentions", which never wants plain messages);
+    // decideNotify below is the decision, the resolver decides readability (P-03).
+    const candidates = await tx
+      .select({
+        id: conversationMembers.memberId,
+        level: conversationMembers.notifyLevel,
+        muted: conversationMembers.muted,
+        defaultLevel: notificationPrefs.defaultLevel,
+        dndUntil: notificationPrefs.dndUntil,
+      })
+      .from(conversationMembers)
+      .leftJoin(notificationPrefs, eq(notificationPrefs.userId, conversationMembers.memberId))
+      .where(
+        and(
+          eq(conversationMembers.conversationId, conv.id),
+          eq(conversationMembers.memberKind, "user"),
+          eq(conversationMembers.muted, false),
+          or(
+            eq(conversationMembers.notifyLevel, "all"),
+            and(eq(conversationMembers.notifyLevel, "default"), eq(notificationPrefs.defaultLevel, "all")),
+          ),
+        ),
+      );
+    const now = Date.now();
+    const wanted = candidates
+      .filter((c) => !skip.has(c.id))
+      .filter(
+        (c) =>
+          decideNotify({
+            event: "message",
+            conversationKind: "channel",
+            level: c.level as ConversationNotifyLevel,
+            defaultLevel: c.defaultLevel ?? DEFAULT_NOTIFICATION_PREFS.defaultLevel,
+            muted: c.muted,
+            dndActive: c.dndUntil ? new Date(c.dndUntil).getTime() > now : false,
+            actorKind: actor.kind,
+          }).popup,
+      )
+      .map((c) => c.id);
+    const ids = await eligible(tx, conv.id, wanted);
+    if (ids.length === 0) return;
+    // A channel's label is the same for every member.
+    const conversation = (
+      await conversationRefs(tx, [conv.id], ids[0] as string, await loadDirectory(tx))
+    ).get(conv.id);
+    if (!conversation) return;
+    const ev: MessageNotifyEvent = {
+      conversation,
+      messageId: message.id,
+      actor,
+      snippet: snippetOf(message.body),
+    };
+    tenantOf(tx).afterCommit(async () => {
+      for (const id of ids)
+        await core.realtime.publishEphemeral(`user:${id}`, EphemeralTypes.messageNotify, ev);
+    });
   }
 
   return {
@@ -261,15 +335,22 @@ export function createNotificationService(
         threadParticipantIds: threadRootId ? await threadParticipantIds(tx, threadRootId, message.id) : [],
         isThreadReply: threadRootId !== null,
       });
-      if (recipients.size === 0) return;
-      await deliver(tx, {
-        conv,
-        messageId: message.id,
-        body: message.body,
-        threadRootId,
-        actor: message.author ?? authorOf(dir, input.author.kind, input.author.id),
-        recipients,
-      });
+      const actor = message.author ?? authorOf(dir, input.author.kind, input.author.id);
+      if (recipients.size > 0) {
+        await deliver(tx, {
+          conv,
+          messageId: message.id,
+          body: message.body,
+          threadRootId,
+          actor,
+          recipients,
+        });
+      }
+      if (conv.kind === "channel" && threadRootId === null) {
+        const skip = new Set(recipients.keys());
+        if (input.author.kind === "user") skip.add(input.author.id);
+        await notifyAllLevel(tx, input, actor, skip);
+      }
     },
 
     async onRead(tx, input) {
