@@ -10,6 +10,7 @@ import {
   type SessionEvent,
   SessionTitle,
   TITLE_PROMPT_MAX_CHARS,
+  TitleFailureCode,
   type TitleResultFrame,
   type WorkApproval,
   type WorkPrompt,
@@ -47,7 +48,7 @@ import {
   turnMode,
 } from "./controls";
 import { loadWorkZonePolicy } from "./policy";
-import { decideTitleRequest, loadTitleContext } from "./title";
+import { decideTitleRequest, heuristicTitle, loadTitleContext } from "./title";
 
 /** Why live sessions are re-checked (ADR-0012): a policy change, a member's access change, a device opt-out. */
 export type ReauthorizeReason = "policy" | "access_changed" | "device_opt_out";
@@ -701,6 +702,16 @@ export class WorkSessionService implements DeviceSessionHandler {
     await this.deps.db.withTenant(this.sys(device), async (tx) => {
       const s = await this.lock(tx, sessionId);
       if (!s || s.deviceId !== device.deviceId) return;
+      if (cmd.kind === "session.title") {
+        // D-19: a title that never came is only audited; the session keeps its first line and is never failed,
+        // marked with an error or delayed.
+        if (!ok) {
+          const code = TitleFailureCode.safeParse((error ?? "").split(":")[0]?.trim());
+          const model = typeof cmd.payload.model === "string" ? cmd.payload.model : null;
+          await this.titleFailed(tx, device, s, code.success ? code.data : "title_failed", model, "error");
+        }
+        return;
+      }
       if (cmd.kind === "session.start") {
         if (!ok) {
           await this.failInFlight(tx, s, "The session could not start");
@@ -777,6 +788,17 @@ export class WorkSessionService implements DeviceSessionHandler {
    * session keeps its first-line title. The audit carries the prompt length, never its text.
    */
   async requestTitle(tx: Tx, s: SessionRow, prompt: string, clientKind: string | null): Promise<boolean> {
+    // A session created without a prompt still carries its placeholder: its first prompt's first line replaces
+    // it now (still `heuristic`, so the automatic title may follow). The caller emits the session.
+    const first = heuristicTitle(prompt);
+    if (first && first !== s.title) {
+      await tx
+        .update(workSessions)
+        .set({ title: first, updatedAt: sql`now()` })
+        .where(and(eq(workSessions.id, s.id), eq(workSessions.titleSource, "heuristic")));
+      await tx.update(conversations).set({ name: first }).where(eq(conversations.id, s.conversationId));
+      s.title = first;
+    }
     const { catalog, policy } = await loadTitleContext(tx, s.deviceId, s.runtime);
     const decision = decideTitleRequest({ runtime: s.runtime, catalog, policy });
     if (!decision.ok) return false;
