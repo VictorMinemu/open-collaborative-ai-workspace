@@ -5,23 +5,31 @@
 // Codex login to be ChatGPT (subscription). At most ONE trivial turn per fixture, in a throwaway temp
 // git repo, never in a full-access sandbox.
 //
-//   npx tsx scripts/record-codex-fixture.ts [--scenario plan-read|supervised-write|model-list] [--codex /path/to/codex]
+//   npx tsx scripts/record-codex-fixture.ts [--scenario plan-read|supervised-write|model-list|title] [--codex /path/to/codex]
 //
 // Scenarios:
 //   plan-read         plan mode (read-only sandbox), "cat hello.txt", reply OK            (default)
 //   supervised-write  Supervised (read-only + untrusted), effort low via configure(), asks to create a
 //                     file; every approval request is declined (03.2-03, D-12)
 //   model-list        `initialize` + `model/list` only: no thread, no turn, no cost (03.2-03, D-08)
+//   title             the session-title call (03.2-12): an ephemeral read-only gpt-6-luna thread on its own
+//                     app-server, effort low, one turn; pinned to codex-cli 0.160.0
 
 import { execFileSync, spawn } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { PermissionMode, SessionEvent, SessionSettingsPatch } from "@ocw/contracts";
+import {
+  normalizeSessionTitle,
+  type PermissionMode,
+  type SessionEvent,
+  type SessionSettingsPatch,
+} from "@ocw/contracts";
 import { listCodexModels } from "../src/codex/catalog.js";
 import { type AppServerProcess, CodexRuntime, codexChildEnv } from "../src/codex/codex-runtime.js";
 import { detectCodex } from "../src/codex/detect.js";
+import { generateCodexTitle } from "../src/codex/title.js";
 import { sanitizeEvent } from "../src/sanitize.js";
 
 const FIXTURE_ROOT = "/tmp/ocw-fixture-repo";
@@ -33,8 +41,9 @@ interface Scenario {
   prompt: string;
 }
 
-const SCENARIOS: Record<string, Scenario | "no-turn"> = {
+const SCENARIOS: Record<string, Scenario | "no-turn" | "title"> = {
   "model-list": "no-turn",
+  title: "title",
   "plan-read": { mode: "plan", prompt: "Run `cat hello.txt`, then reply with exactly: OK" },
   "supervised-write": {
     mode: "default",
@@ -106,6 +115,66 @@ async function recordModelList(version: string | null): Promise<void> {
     );
 }
 
+/** The codex-cli version the title fixture is pinned to. */
+const PINNED_TITLE_CODEX = "0.160.0";
+const TITLE_PROMPT = "Please fix the login redirect bug on the settings page when the session expires";
+
+/** Notifications that only describe the owner's personal Codex config; never fit for an open-source fixture. */
+const PERSONAL =
+  /^(mcpServer\/startupStatus\/updated|hook\/.*|warning|configWarning|account\/.*|remoteControl\/.*)$/;
+
+/**
+ * The session-title call through the adapter's own `generateCodexTitle` (ONE turn). `hookPrompt` items (the owner's
+ * local hooks) are dropped. The recording is kept even when the adapter refuses the answer.
+ */
+async function recordTitle(version: string | null): Promise<void> {
+  if (version !== PINNED_TITLE_CODEX) {
+    console.error(`codex ${version} is not the pinned ${PINNED_TITLE_CODEX}; pass --codex <pinned binary>.`);
+    process.exit(1);
+  }
+  const bin = codexPath ?? "codex";
+  const parent = await mkdtemp(join(tmpdir(), "ocw-fixture-"));
+  const real = await realpath(parent);
+  const roots = [...new Set([real, parent])].sort((a, b) => b.length - a.length);
+  const rpc: Array<{ dir: "in" | "out"; msg: unknown }> = [];
+  let answer: string | null = null;
+  try {
+    answer = await generateCodexTitle(
+      ({ cwd, env }) =>
+        spawn(bin, ["app-server"], {
+          cwd,
+          env,
+          stdio: ["pipe", "pipe", "pipe"],
+        }) as unknown as AppServerProcess,
+      {
+        env: codexChildEnv(process.env),
+        prompt: TITLE_PROMPT,
+        model: "gpt-6-luna",
+        effort: "low",
+        signal: AbortSignal.timeout(90_000),
+        tmpRoot: real,
+        onRpcMessage: (dir, msg) => rpc.push({ dir, msg }),
+      },
+    );
+  } catch (err) {
+    console.error("title call refused (recorded as observed):", err);
+  }
+  await rm(real, { recursive: true, force: true });
+  const isHookItem = (m: unknown) => {
+    const p = (m as { params?: { item?: { type?: unknown } } }).params;
+    return p?.item?.type === "hookPrompt";
+  };
+  const kept = rpc.filter(
+    (r) => !PERSONAL.test(String((r.msg as { method?: unknown }).method ?? "")) && !isHookItem(r.msg),
+  );
+  await mkdir(fixtureDir(), { recursive: true });
+  const file = join(fixtureDir(), `codex-${version}.title.rpc.jsonl`);
+  await writeFile(file, `${kept.map((r) => JSON.stringify(scrub(r, roots))).join("\n")}\n`);
+  console.log(`wrote ${kept.length} of ${rpc.length} JSON-RPC messages -> ${file.replace(homedir(), "~")}`);
+  console.log("raw answer:", JSON.stringify(answer));
+  console.log("normalized:", JSON.stringify(answer === null ? null : normalizeSessionTitle(answer)));
+}
+
 async function main(): Promise<void> {
   const info = await detectCodex(codexPath ? { codexPath } : {});
   if (!info.installed || !info.loggedIn) {
@@ -113,6 +182,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   if (scenario === "no-turn") return recordModelList(info.version);
+  if (scenario === "title") return recordTitle(info.version);
   const tmp = await mkdtemp(join(tmpdir(), "ocw-fixture-"));
   const real = await realpath(tmp);
   const roots = [...new Set([real, tmp])].sort((a, b) => b.length - a.length);
@@ -150,8 +220,6 @@ async function main(): Promise<void> {
   const file = join(outDir, `codex-${info.version ?? "unknown"}.${scenarioName}.rpc.jsonl`);
   // Drop notifications that only describe the owner's personal Codex config (MCP servers, hooks,
   // plugins, account): ignored by the mapper anyway and not fit for an open-source fixture.
-  const PERSONAL =
-    /^(mcpServer\/startupStatus\/updated|hook\/.*|warning|configWarning|account\/.*|remoteControl\/.*)$/;
   const kept = rpc.filter((r) => !PERSONAL.test(String((r.msg as { method?: unknown }).method ?? "")));
   await writeFile(file, `${kept.map((r) => JSON.stringify(scrub(r, roots))).join("\n")}\n`);
   await rm(real, { recursive: true, force: true });
