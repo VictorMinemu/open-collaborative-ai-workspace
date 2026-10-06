@@ -407,6 +407,11 @@ export function createAiChatService(deps: AiChatDeps) {
     async snapshot(req: FastifyRequest, chatId: string): Promise<AiChatSnapshot> {
       return core.db.withTenant(tenant(req), async (tx) => {
         const { conv, facts } = await ownedChat(req, tx, chatId);
+        // The cursor is read FIRST: every later statement of this (READ COMMITTED) transaction sees at least the
+        // state of `lastSeq`, so replaying the events after it only moves the client forward. Read last, a
+        // generation finalized between the reads came back `streaming` under a cursor that already covered its
+        // final `message.updated`, and the answer stayed "writing" in the browser (05-03).
+        const lastSeq = await core.realtime.lastSeq(tx, convTopic(conv.id));
         const { chat } = await loadChat(tx, conv.id);
         const rows = await tx
           .select()
@@ -436,7 +441,7 @@ export function createAiChatService(deps: AiChatDeps) {
                 partialText: runLoop.textOf(running.id) ?? running.partialText,
               }
             : null,
-          lastSeq: await core.realtime.lastSeq(tx, convTopic(conv.id)),
+          lastSeq,
         };
       });
     },
