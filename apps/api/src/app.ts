@@ -20,6 +20,7 @@ import { type AuthzRegistry, installAuthz } from "./authz";
 import { decodeKey, type Env } from "./config/env";
 import type { ApiModule, App, Core } from "./core";
 import { createChatAgentBridge } from "./lib/chat-agent-bridge";
+import { createChatEvents } from "./lib/chat-events";
 import { HttpError } from "./lib/errors";
 import { RedisBus } from "./lib/redis";
 import { createEnvFileSecretStore, type SecretStore } from "./lib/secret-store";
@@ -32,9 +33,10 @@ import { createChatModule, createConversationAccess } from "./modules/chat";
 import { createDeviceModule, type DeviceHub } from "./modules/device";
 import { createAuth, createIdentityModule, IdentityService } from "./modules/identity";
 import { createMcpModule } from "./modules/mcp";
+import { createNotificationModule } from "./modules/notification";
 import { AuthzDeniedError, createOrganizationModule, recordAuthzDenial } from "./modules/organization";
 import { createPluginsModule } from "./modules/plugins";
-import { createRealtimeModule, createRealtimeService } from "./modules/realtime";
+import { createOnlineSet, createRealtimeModule, createRealtimeService } from "./modules/realtime";
 import { createSearchModule } from "./modules/search";
 import { createSecretsModule, createSecretsService } from "./modules/secrets";
 import { createWorkSessionModule } from "./modules/work-session";
@@ -104,6 +106,9 @@ export async function buildApp(
   const identity = new IdentityService(createAuth(env, authDb), authDb, env, realtime);
   const secrets = createSecretsService({ key: encryptionKey, audit });
   const chatAgent = createChatAgentBridge();
+  const chatEvents = createChatEvents();
+  // Organization-level online set (@here, CHAT-08): maintained by the realtime gateway, read by notifications.
+  const online = createOnlineSet(bus);
   const core: Core = {
     env,
     log: app.log,
@@ -115,6 +120,7 @@ export async function buildApp(
     identity,
     secrets,
     chatAgent,
+    chatEvents,
   };
 
   const allowedOrigins = new Set([
@@ -236,6 +242,7 @@ export async function buildApp(
     createRealtimeModule({ realtime, identity, allowedOrigins, bus }),
     createSecretsModule(),
     createChatModule(core), // B1
+    createNotificationModule(core, { online }), // Phase 4: mentions, DMs, threads, @channel/@here (CHAT-08)
     createArtifactModule(core, { access: createConversationAccess(core) }), // Phase 4: attachments (ADR-0015)
     createSearchModule(core), // Phase 4: full-text search (CHAT-11, D-04)
     createAgentModule(core), // B2

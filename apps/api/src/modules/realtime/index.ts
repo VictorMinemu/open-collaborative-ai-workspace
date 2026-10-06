@@ -5,6 +5,7 @@ import { registerGateway } from "./gateway";
 import { createPresenceStore } from "./presence";
 
 export { PRESENCE_RATE_LIMIT, SESSION_RECHECK_MS } from "./gateway";
+export { createOnlineSet, type OnlineSet, onlineKey } from "./online";
 export {
   createPresenceStore,
   PRESENCE_HEARTBEAT_MS,

@@ -89,6 +89,7 @@ import { registerChatTestRoutes } from "./test-routes";
 import { registerThreadRoutes } from "./threads";
 
 export { type ConversationAccess, createConversationAccess } from "./access";
+export { authorOf, type Directory, loadDirectory } from "./directory";
 export {
   dmAgentOf,
   dmKey,
@@ -101,6 +102,7 @@ export {
 } from "./dm";
 export { resolveMentions } from "./mentions";
 export { REPLY_MODE_PER_MINUTE, replyModeCandidates } from "./reply-mode";
+export { conversationRefs } from "./saves";
 export { listThreadsFor } from "./threads";
 
 /** What the chat module hands to its route files (message actions, reactions, pins, saves). */
@@ -139,6 +141,10 @@ async function placeableUnit(
   }
   return u;
 }
+
+/** The kind of a conversation served by the message routes (they only load MESSAGE_KINDS). */
+const messageKindOf = (conv: ConversationRow): (typeof MESSAGE_KINDS)[number] =>
+  conv.kind === "dm" || conv.kind === "group" ? conv.kind : "channel";
 
 /** Direct conversations (1:1 and group) are flat: no threads, bot replies at the top level (D-04, D-06). */
 const isDirect = (kind: string) => kind === "dm" || kind === "group";
@@ -448,6 +454,15 @@ export function createChatModule(core: Core): ApiModule {
         lenientThreadRoot: true,
       });
       if (result.created) {
+        // Observers (notifications) in the same transaction; a bot is never a recipient, only an actor.
+        await core.chatEvents.messagePosted(tx, {
+          conv: { id: conv.id, kind: messageKindOf(conv), organizationId: conv.organizationId },
+          message: result.message,
+          author: { kind: "agent", id: agent.id },
+          mentions: result.row.mentions,
+          mentionAll: null,
+          threadRootId: result.root?.id ?? null,
+        });
         await core.audit.record(tx, {
           action: "agent.message.posted",
           resourceType: "message",
@@ -957,6 +972,15 @@ export function createChatModule(core: Core): ApiModule {
               sessionId: auth.sessionId,
             });
             if (result.created) {
+              // Observers (notifications, CHAT-08) in the message transaction, through the seam (no import).
+              await core.chatEvents.messagePosted(tx, {
+                conv: { id: conv.id, kind: messageKindOf(conv), organizationId: conv.organizationId },
+                message: result.message,
+                author: { kind: "user", id: auth.userId },
+                mentions: result.row.mentions,
+                mentionAll: null,
+                threadRootId: result.root?.id ?? null,
+              });
               // The zone only travels with this message's deliveries (turn context); it is never stored.
               const author = { id: auth.userId, clientTimeZone: req.body.clientTimeZone };
               if (conv.kind === "dm") await dispatchDmMessage(tx, dir, conv, result, author);

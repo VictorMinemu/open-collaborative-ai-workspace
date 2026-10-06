@@ -5,6 +5,7 @@ import type { FastifyBaseLogger, FastifyInstance, FastifyRequest, RawServerDefau
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import type { Env } from "./config/env";
 import type { ChatAgentBridge } from "./lib/chat-agent-bridge";
+import type { ChatEvents } from "./lib/chat-events";
 import type { RedisBus } from "./lib/redis";
 import type { SecretStore } from "./lib/secret-store";
 import type { AuditService } from "./modules/audit";
@@ -54,6 +55,8 @@ export interface Core {
   secrets: SecretsService;
   /** Seam between chat (B1) and agent-channel (B2); see lib/chat-agent-bridge.ts. */
   chatAgent: ChatAgentBridge;
+  /** Seam between chat and the observers of its messages (notifications, CHAT-08); see lib/chat-events.ts. */
+  chatEvents: ChatEvents;
 }
 
 export interface ApiModule {

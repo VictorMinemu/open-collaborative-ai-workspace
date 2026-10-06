@@ -107,7 +107,8 @@ const CONTROLS: ControlsConfig = {
 
 // ---------------------------------------------------------------- shared components
 
-function Mention({ handle, children }: { handle: string; children: React.ReactNode }) {
+/** A `@handle` chip (people and bots from MentionContext; unknown handles stay plain text). Also used by snippets. */
+export function MentionChip({ handle, children }: { handle: string; children: React.ReactNode }) {
   const { handles, myHandle } = useContext(MentionContext);
   const target = handles.get(handle);
   if (!target) return <>{children}</>;
@@ -147,7 +148,7 @@ function shared(variant: MarkdownVariant): Components {
   return {
     span: ({ node: _node, ...props }: Props) => {
       const handle = (props as Record<string, unknown>)["data-mention"];
-      if (typeof handle === "string") return <Mention handle={handle}>{props.children}</Mention>;
+      if (typeof handle === "string") return <MentionChip handle={handle}>{props.children}</MentionChip>;
       return <span {...props} />;
     },
     a: ({ node: _node, className, href, children, ...rest }: Props) => {

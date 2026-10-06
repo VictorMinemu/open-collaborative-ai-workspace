@@ -1,13 +1,13 @@
 "use client";
 
-import { Bookmark, Inbox, type LucideIcon, MessagesSquare, Sparkles } from "lucide-react";
+import { AtSign, Bookmark, Inbox, type LucideIcon, MessagesSquare, Sparkles } from "lucide-react";
 import Link from "next/link";
 import { sectionItemClass } from "@/components/shell/section-sidebar";
 import { useIsDesktop } from "@/hooks/use-media-query";
 import { cn } from "@/lib/utils";
 
 /**
- * The chat sidebar's views (CHAT-02, D-08): All, Threads, AI Chats and Saved; Plan 09 inserts Mentions second.
+ * The chat sidebar's views (CHAT-02, D-08): All, Mentions (the inbox, CHAT-08), Threads, AI Chats and Saved.
  * Desktop: compact rows at the top of the sidebar. 390: a horizontally scrollable segmented row on the sidebar home.
  */
 
@@ -15,6 +15,7 @@ export type ChatViewId = "all" | "mentions" | "threads" | "ai" | "saved";
 
 export const CHAT_VIEWS: ReadonlyArray<{ id: ChatViewId; label: string; href: string; icon: LucideIcon }> = [
   { id: "all", label: "All", href: "/chat/all", icon: Inbox },
+  { id: "mentions", label: "Mentions", href: "/chat/mentions", icon: AtSign },
   { id: "threads", label: "Threads", href: "/chat/threads", icon: MessagesSquare },
   { id: "ai", label: "AI Chats", href: "/chat/ai", icon: Sparkles },
   { id: "saved", label: "Saved", href: "/chat/saved", icon: Bookmark },

@@ -223,10 +223,10 @@ test("the views: Threads with unread replies, All unread first with previews, AI
   const list = await openSidebar(sam.page, mobile);
   const views = sam.page.getByTestId(mobile ? "views-segmented" : "views-list").filter({ visible: true });
   await expect(views).toBeVisible();
-  for (const id of ["view-all", "view-threads", "view-ai", "saved-link"]) {
+  for (const id of ["view-all", "view-mentions", "view-threads", "view-ai", "saved-link"]) {
     await expect(views.getByTestId(id)).toBeVisible();
   }
-  await expect(views.locator("a")).toHaveText([/All/, /Threads/, /AI Chats/, /Saved/]);
+  await expect(views.locator("a")).toHaveText([/All/, /Mentions/, /Threads/, /AI Chats/, /Saved/]);
   if (mobile) {
     const rowBox = await views.boundingBox();
     const firstSection = await list.locator('[data-testid="sidebar-section"]').first().boundingBox();

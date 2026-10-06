@@ -2,6 +2,7 @@
 
 import { memo } from "react";
 import {
+  MentionChip,
   MentionContext,
   type MentionContextValue,
   type MentionTarget,
@@ -10,7 +11,7 @@ import {
 
 export type { MentionContextValue, MentionTarget };
 // The chat surfaces keep their import path; the renderer itself is shared (04-02, D-05).
-export { MentionContext };
+export { MentionChip, MentionContext };
 
 /** Message body: GitHub-flavoured markdown, highlighted code, @mention chips. Raw HTML is never rendered. */
 export const Markdown = memo(function Markdown({ body, className }: { body: string; className?: string }) {
