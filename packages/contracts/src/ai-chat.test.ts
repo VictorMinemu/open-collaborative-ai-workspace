@@ -6,7 +6,9 @@ import {
   AiChatSummary,
   type AiDeltaEvent,
   AiModelList,
+  AiMyUsageReportQuery,
   AiUsageReport,
+  AiUsageReportQuery,
   AiUsageToday,
   applyAiDelta,
   CHATGPT_MANAGE_USAGE_URL,
@@ -339,5 +341,18 @@ describe("AI chat payloads", () => {
         revokedAt: null,
       }).path,
     ).toBe(`/share/ai/${id}`);
+  });
+});
+
+describe("usage report queries (05-09)", () => {
+  it("the organization report defaults to 30 days by member and caps the window at 90", () => {
+    expect(AiUsageReportQuery.parse({})).toEqual({ days: 30, groupBy: "user" });
+    expect(AiUsageReportQuery.parse({ days: "7", groupBy: "model" })).toEqual({ days: 7, groupBy: "model" });
+    expect(AiUsageReportQuery.safeParse({ days: "91" }).success).toBe(false);
+  });
+
+  it("a member's own report groups by model only", () => {
+    expect(AiMyUsageReportQuery.parse({})).toEqual({ days: 30, groupBy: "model" });
+    expect(AiMyUsageReportQuery.safeParse({ groupBy: "user" }).success).toBe(false);
   });
 });
