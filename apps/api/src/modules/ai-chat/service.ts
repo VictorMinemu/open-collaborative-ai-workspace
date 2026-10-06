@@ -1,0 +1,488 @@
+import {
+  AI_SNAPSHOT_MESSAGES,
+  type AiChatSnapshot,
+  type AiChatSummary,
+  type CreateAiChatRequest,
+  EventTypes,
+  type MessagePage,
+  type ModelRef,
+  normalizeSessionTitle,
+  type Permission,
+  type SendAiMessageRequest,
+  type SendAiMessageResponse,
+} from "@ocw/contracts";
+import { aiChats, aiGenerations, conversationMembers, conversations, messages, type Tx } from "@ocw/db";
+import { and, desc, eq, isNull, lt, sql } from "drizzle-orm";
+import type { FastifyRequest } from "fastify";
+import { authOf, type Core, tenant } from "../../core";
+import { badRequest, conflict, HttpError, notFound } from "../../lib/errors";
+import {
+  type ConversationAccess,
+  type ConversationRow,
+  convTopic,
+  lockNextSeq,
+  type MessageRow,
+} from "../chat";
+import {
+  loadAiChatPolicy,
+  type ModelGateway,
+  ModelUnavailableError,
+  type ResolvedModel,
+} from "../model-gateway";
+import { channelResource, orgResource, type PermissionService } from "../organization";
+import {
+  type AiChatRow,
+  aiMessage,
+  chatDetail,
+  chatSummary,
+  DEFAULT_CHAT_TITLE,
+  directoryOf,
+  EMPTY_DIRECTORY,
+  type GenerationRow,
+  generationDto,
+  generationsFor,
+} from "./dto";
+import type { RunLoop } from "./run-loop";
+
+/**
+ * AI chat sends (D-01, D-05, P-03, P-07): one tenant transaction decides `ai_chat.use`, resolves the model for the
+ * REQUESTER (refusal → 409 `model_unavailable`), takes the per-user advisory lock and concurrency cap (429), inserts
+ * the user message and the streaming assistant placeholder (each with the seq of its `message.created`) and a
+ * `running` generation (one per conversation → 409). The run loop starts after commit.
+ */
+
+export interface AiChatDeps {
+  core: Core;
+  gateway: ModelGateway;
+  runLoop: RunLoop;
+  access: ConversationAccess;
+  perms: PermissionService;
+}
+
+const VIEWER_CAN: readonly Permission[] = ["ai_chat.use", "ai_chat.web", "ai_chat.share"];
+const NOT_FOUND = "AI chat not found";
+const TITLE_FALLBACK_MAX = 32;
+
+/** ADR-0014 heuristic title from the first message: normalized, else its first line cut to 32 chars. */
+export function heuristicTitle(body: string): string {
+  const normalized = normalizeSessionTitle(body);
+  if (normalized) return normalized;
+  const line = (body.split(/\r?\n/u).find((l) => l.trim().length > 0) ?? "").replace(/\s+/gu, " ").trim();
+  if (!line) return DEFAULT_CHAT_TITLE;
+  if (line.length <= TITLE_FALLBACK_MAX) return line;
+  const cut = line.slice(0, TITLE_FALLBACK_MAX);
+  const space = cut.lastIndexOf(" ");
+  return (space > 0 ? cut.slice(0, space) : cut).trim();
+}
+
+const isUniqueViolation = (err: unknown): boolean => {
+  const e = err as { code?: string; cause?: { code?: string } } | null;
+  return e?.code === "23505" || e?.cause?.code === "23505";
+};
+
+export function createAiChatService(deps: AiChatDeps) {
+  const { core, gateway, runLoop, access, perms } = deps;
+
+  async function resolveOr409(tx: Tx, ref: ModelRef, userId: string): Promise<ResolvedModel> {
+    try {
+      return await gateway.resolve(tx, ref, userId);
+    } catch (err) {
+      if (err instanceof ModelUnavailableError) {
+        throw new HttpError(409, "model_unavailable", "This model is not available to you right now", {
+          reason: err.reason,
+        });
+      }
+      throw err;
+    }
+  }
+
+  /** P-07: per-user advisory lock, then the running-generation cap across every chat of the member. */
+  async function capOr429(tx: Tx, userId: string, cap: number): Promise<void> {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`ai:${userId}`}))`);
+    const [row] = await tx
+      .select({ n: sql<number>`count(*)::int` })
+      .from(aiGenerations)
+      .where(and(eq(aiGenerations.requesterUserId, userId), eq(aiGenerations.status, "running")));
+    if ((row?.n ?? 0) >= cap) {
+      throw new HttpError(429, "concurrent_generations", `At most ${cap} answers can run at the same time`);
+    }
+  }
+
+  async function isGenerating(tx: Tx, conversationId: string): Promise<boolean> {
+    const [row] = await tx
+      .select({ id: aiGenerations.id })
+      .from(aiGenerations)
+      .where(and(eq(aiGenerations.conversationId, conversationId), eq(aiGenerations.status, "running")))
+      .limit(1);
+    return row !== undefined;
+  }
+
+  async function loadChat(
+    tx: Tx,
+    conversationId: string,
+  ): Promise<{ conv: ConversationRow; chat: AiChatRow }> {
+    const [conv] = await tx.select().from(conversations).where(eq(conversations.id, conversationId)).limit(1);
+    const [chat] = await tx.select().from(aiChats).where(eq(aiChats.conversationId, conversationId)).limit(1);
+    if (!conv || !chat) throw notFound(NOT_FOUND);
+    return { conv, chat };
+  }
+
+  /** The send response for a user message (fresh or retried) and its latest generation. */
+  async function responseFor(tx: Tx, userRow: MessageRow): Promise<SendAiMessageResponse> {
+    const [gen] = await tx
+      .select()
+      .from(aiGenerations)
+      .where(eq(aiGenerations.userMessageId, userRow.id))
+      .orderBy(desc(aiGenerations.attempt))
+      .limit(1);
+    if (!gen) throw conflict("This message has no answer", "client_message_id_reused");
+    const [assistant] = await tx
+      .select()
+      .from(messages)
+      .where(eq(messages.id, gen.assistantMessageId))
+      .limit(1);
+    if (!assistant) throw new Error("assistant message missing");
+    const generation = (await generationsFor(tx, [assistant.id], gateway)).get(assistant.id);
+    if (!generation) throw new Error("generation projection missing");
+    const { conv, chat } = await loadChat(tx, userRow.conversationId);
+    const dir = await directoryOf(tx, [userRow.authorId ?? ""]);
+    return {
+      chat: chatSummary(conv, chat, { generating: await isGenerating(tx, conv.id), gateway }),
+      userMessage: aiMessage(userRow, dir),
+      assistantMessage: aiMessage(assistant, EMPTY_DIRECTORY, generation),
+      generation,
+    };
+  }
+
+  /** A retried send (same author + clientMessageId): the existing message, or null. */
+  async function ownSend(tx: Tx, userId: string, clientMessageId: string): Promise<MessageRow | null> {
+    const [row] = await tx
+      .select()
+      .from(messages)
+      .where(
+        and(
+          eq(messages.authorKind, "user"),
+          eq(messages.authorId, userId),
+          eq(messages.clientMessageId, clientMessageId),
+        ),
+      )
+      .limit(1);
+    return row ?? null;
+  }
+
+  /** Inserts the user message, the assistant placeholder and the running generation; emits both message.created. */
+  async function insertTurn(
+    req: FastifyRequest,
+    tx: Tx,
+    conv: ConversationRow,
+    body: SendAiMessageRequest,
+    resolved: ResolvedModel,
+  ): Promise<{ turn: Omit<SendAiMessageResponse, "chat">; generation: GenerationRow }> {
+    const auth = authOf(req);
+    const topic = convTopic(conv.id);
+    const userSeq = await lockNextSeq(tx, topic);
+    // Under the stream lock: one running generation per conversation (the partial unique index is the backstop).
+    if (await isGenerating(tx, conv.id)) {
+      throw conflict("An answer is still being generated in this chat", "generation_in_progress");
+    }
+    const [userRow] = await tx
+      .insert(messages)
+      .values({
+        organizationId: conv.organizationId,
+        conversationId: conv.id,
+        seq: userSeq,
+        authorKind: "user",
+        authorId: auth.userId,
+        body: body.body,
+        clientKind: auth.clientKind,
+        sessionId: auth.sessionId,
+        clientMessageId: body.clientMessageId,
+      })
+      .returning();
+    if (!userRow) throw new Error("user message insert returned no row");
+    const dir = await directoryOf(tx, [auth.userId]);
+    const userMessage = aiMessage(userRow, dir);
+    const s1 = await core.realtime.appendEvent(tx, topic, EventTypes.messageCreated, {
+      message: userMessage,
+    });
+    if (s1 !== userSeq) throw new Error(`stream seq drift on ${topic}: expected ${userSeq}, got ${s1}`);
+
+    const [assistantRow] = await tx
+      .insert(messages)
+      .values({
+        organizationId: conv.organizationId,
+        conversationId: conv.id,
+        seq: userSeq + 1,
+        authorKind: "agent",
+        authorId: null,
+        body: "",
+        status: "streaming",
+      })
+      .returning();
+    if (!assistantRow) throw new Error("assistant message insert returned no row");
+    let genRow: GenerationRow | undefined;
+    try {
+      [genRow] = await tx
+        .insert(aiGenerations)
+        .values({
+          organizationId: conv.organizationId,
+          conversationId: conv.id,
+          userMessageId: userRow.id,
+          assistantMessageId: assistantRow.id,
+          requesterUserId: auth.userId,
+          backend: resolved.ref.backend,
+          provider: resolved.ref.provider,
+          modelId: resolved.ref.modelId,
+          attempt: 1,
+          status: "running",
+          instanceId: runLoop.instanceId,
+        })
+        .returning();
+    } catch (err) {
+      if (isUniqueViolation(err)) {
+        throw conflict("An answer is still being generated in this chat", "generation_in_progress");
+      }
+      throw err;
+    }
+    if (!genRow) throw new Error("generation insert returned no row");
+    const generation = generationDto(genRow, null, gateway);
+    const assistantMessage = aiMessage(assistantRow, EMPTY_DIRECTORY, generation);
+    const s2 = await core.realtime.appendEvent(tx, topic, EventTypes.messageCreated, {
+      message: assistantMessage,
+    });
+    if (s2 !== userSeq + 1)
+      throw new Error(`stream seq drift on ${topic}: expected ${userSeq + 1}, got ${s2}`);
+    return { turn: { userMessage, assistantMessage, generation }, generation: genRow };
+  }
+
+  async function touchChat(
+    tx: Tx,
+    conv: ConversationRow,
+    ref: ModelRef,
+    tools: { web: boolean } | undefined,
+  ): Promise<AiChatSummary> {
+    const at = new Date().toISOString();
+    const [chat] = await tx
+      .update(aiChats)
+      .set({ lastModel: ref, lastActivityAt: at, updatedAt: at, ...(tools ? { tools } : {}) })
+      .where(eq(aiChats.conversationId, conv.id))
+      .returning();
+    if (!chat) throw notFound(NOT_FOUND);
+    const summary = chatSummary(conv, chat, { generating: true, gateway });
+    await core.realtime.appendEvent(tx, `user:${chat.ownerUserId}`, EventTypes.aiChatUpdated, {
+      chat: summary,
+    });
+    return summary;
+  }
+
+  async function auditSend(
+    tx: Tx,
+    action: "ai_chat.created" | "ai_chat.message.sent",
+    conv: ConversationRow,
+    g: GenerationRow,
+  ): Promise<void> {
+    // Ids, backend, provider and model only: never a body (T-05-02-02).
+    await core.audit.record(tx, {
+      action,
+      resourceType: "ai_chat",
+      resourceId: conv.id,
+      metadata: {
+        conversationId: conv.id,
+        generationId: g.id,
+        backend: g.backend,
+        provider: g.provider,
+        modelId: g.modelId,
+        attempt: g.attempt,
+      },
+    });
+  }
+
+  function refuseAttachments(body: SendAiMessageRequest): void {
+    // Files in AI chats arrive in 05-12 (vision through the Phase 4 upload pipeline).
+    if (body.attachmentIds?.length)
+      throw badRequest("Attachments are not available in AI chats yet", "attachments_unavailable");
+  }
+
+  /** The chat if the caller owns it (hidden = 404 for everyone else, admins included). */
+  async function ownedChat(req: FastifyRequest, tx: Tx, chatId: string) {
+    const { conv, facts } = await access.readable(req, tx, chatId, {
+      kinds: ["ai_chat"],
+      notFoundMessage: NOT_FOUND,
+    });
+    await perms.assertCan(req, tx, "ai_chat.use", channelResource(facts), { hideAs404: true });
+    return { conv, facts };
+  }
+
+  return {
+    async createChat(req: FastifyRequest, body: CreateAiChatRequest): Promise<SendAiMessageResponse> {
+      refuseAttachments(body);
+      const auth = authOf(req);
+      const out = await core.db.withTenant(tenant(req), async (tx) => {
+        await perms.assertCan(req, tx, "ai_chat.use", orgResource());
+        const retried = await ownSend(tx, auth.userId, body.clientMessageId);
+        if (retried) {
+          const [conv] = await tx
+            .select({ kind: conversations.kind })
+            .from(conversations)
+            .where(eq(conversations.id, retried.conversationId))
+            .limit(1);
+          if (conv?.kind !== "ai_chat")
+            throw conflict("clientMessageId already used", "client_message_id_reused");
+          return { response: await responseFor(tx, retried), start: null };
+        }
+        const resolved = await resolveOr409(tx, body.model, auth.userId);
+        const policy = await loadAiChatPolicy(tx);
+        await capOr429(tx, auth.userId, policy.concurrentGenerationsPerUser);
+
+        const [conv] = await tx
+          .insert(conversations)
+          .values({
+            organizationId: auth.organizationId,
+            kind: "ai_chat",
+            visibility: "private",
+            name: heuristicTitle(body.body),
+            createdBy: auth.userId,
+          })
+          .returning();
+        if (!conv) throw new Error("conversation insert returned no row");
+        await tx.insert(conversationMembers).values({
+          conversationId: conv.id,
+          organizationId: auth.organizationId,
+          memberKind: "user",
+          memberId: auth.userId,
+          role: "owner",
+        });
+        await tx.insert(aiChats).values({
+          conversationId: conv.id,
+          organizationId: auth.organizationId,
+          ownerUserId: auth.userId,
+          titleSource: "heuristic",
+          instructions: body.settings?.instructions ?? "",
+          usePersonalInstructions: body.settings?.usePersonalInstructions ?? true,
+          tools: body.tools ?? body.settings?.tools ?? { web: false },
+          lastModel: body.model,
+        });
+        const turn = await insertTurn(req, tx, conv, body, resolved);
+        const chat = await touchChat(tx, conv, body.model, undefined);
+        await auditSend(tx, "ai_chat.created", conv, turn.generation);
+        return { response: { ...turn.turn, chat }, start: turn.generation };
+      });
+      if (out.start) runLoop.start({ organizationId: out.start.organizationId, generationId: out.start.id });
+      return out.response;
+    },
+
+    async sendMessage(
+      req: FastifyRequest,
+      chatId: string,
+      body: SendAiMessageRequest,
+    ): Promise<SendAiMessageResponse> {
+      refuseAttachments(body);
+      const auth = authOf(req);
+      const out = await core.db.withTenant(tenant(req), async (tx) => {
+        const { conv } = await ownedChat(req, tx, chatId);
+        // Serializes sends on this chat, which also makes the retry check below race-free.
+        await lockNextSeq(tx, convTopic(conv.id));
+        const retried = await ownSend(tx, auth.userId, body.clientMessageId);
+        if (retried) {
+          if (retried.conversationId !== conv.id) {
+            throw conflict("clientMessageId already used", "client_message_id_reused");
+          }
+          return { response: await responseFor(tx, retried), start: null };
+        }
+        const resolved = await resolveOr409(tx, body.model, auth.userId);
+        if (await isGenerating(tx, conv.id)) {
+          throw conflict("An answer is still being generated in this chat", "generation_in_progress");
+        }
+        const policy = await loadAiChatPolicy(tx);
+        await capOr429(tx, auth.userId, policy.concurrentGenerationsPerUser);
+        const turn = await insertTurn(req, tx, conv, body, resolved);
+        const chat = await touchChat(tx, conv, body.model, body.tools);
+        await auditSend(tx, "ai_chat.message.sent", conv, turn.generation);
+        return { response: { ...turn.turn, chat }, start: turn.generation };
+      });
+      if (out.start) runLoop.start({ organizationId: out.start.organizationId, generationId: out.start.id });
+      return out.response;
+    },
+
+    async snapshot(req: FastifyRequest, chatId: string): Promise<AiChatSnapshot> {
+      return core.db.withTenant(tenant(req), async (tx) => {
+        const { conv, facts } = await ownedChat(req, tx, chatId);
+        const { chat } = await loadChat(tx, conv.id);
+        const rows = await tx
+          .select()
+          .from(messages)
+          .where(and(eq(messages.conversationId, conv.id), isNull(messages.threadId)))
+          .orderBy(desc(messages.seq))
+          .limit(AI_SNAPSHOT_MESSAGES + 1);
+        const hasMore = rows.length > AI_SNAPSHOT_MESSAGES;
+        const page = rows.slice(0, AI_SNAPSHOT_MESSAGES).reverse();
+        const list = await toDtos(tx, page, chat);
+        const [running] = await tx
+          .select()
+          .from(aiGenerations)
+          .where(and(eq(aiGenerations.conversationId, conv.id), eq(aiGenerations.status, "running")))
+          .limit(1);
+        const policy = await loadAiChatPolicy(tx);
+        const viewerCan = await perms.viewerCan(req, tx, channelResource(facts), VIEWER_CAN);
+        const summary = chatSummary(conv, chat, { generating: running !== undefined, gateway });
+        return {
+          chat: chatDetail(summary, chat, policy, viewerCan),
+          messages: list,
+          hasMore,
+          running: running
+            ? {
+                generationId: running.id,
+                messageId: running.assistantMessageId,
+                partialText: runLoop.textOf(running.id) ?? running.partialText,
+              }
+            : null,
+          lastSeq: await core.realtime.lastSeq(tx, convTopic(conv.id)),
+        };
+      });
+    },
+
+    async page(
+      req: FastifyRequest,
+      chatId: string,
+      q: { before?: number; limit: number },
+    ): Promise<MessagePage> {
+      return core.db.withTenant(tenant(req), async (tx) => {
+        const { conv } = await ownedChat(req, tx, chatId);
+        const { chat } = await loadChat(tx, conv.id);
+        const rows = await tx
+          .select()
+          .from(messages)
+          .where(
+            and(
+              eq(messages.conversationId, conv.id),
+              isNull(messages.threadId),
+              q.before ? lt(messages.seq, q.before) : undefined,
+            ),
+          )
+          .orderBy(desc(messages.seq))
+          .limit(q.limit + 1);
+        const hasMore = rows.length > q.limit;
+        const page = rows.slice(0, q.limit).reverse();
+        return {
+          messages: await toDtos(tx, page, chat),
+          nextBefore: hasMore ? (page[0]?.seq ?? null) : null,
+          lastSeq: await core.realtime.lastSeq(tx, convTopic(conv.id)),
+        };
+      });
+    },
+  };
+
+  async function toDtos(tx: Tx, rows: MessageRow[], chat: AiChatRow) {
+    const gens = await generationsFor(
+      tx,
+      rows.filter((r) => r.authorKind === "agent").map((r) => r.id),
+      gateway,
+    );
+    const dir = await directoryOf(tx, [chat.ownerUserId]);
+    return rows.map((r) =>
+      r.authorKind === "agent" ? aiMessage(r, EMPTY_DIRECTORY, gens.get(r.id)) : aiMessage(r, dir),
+    );
+  }
+}
+
+export type AiChatService = ReturnType<typeof createAiChatService>;

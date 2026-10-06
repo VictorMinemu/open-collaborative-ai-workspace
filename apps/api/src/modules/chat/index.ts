@@ -111,6 +111,15 @@ export {
 export { resolveMentions } from "./mentions";
 export { REPLY_MODE_PER_MINUTE, replyModeCandidates } from "./reply-mode";
 export { conversationRefs } from "./saves";
+/** For the ai-chat module (Phase 5): stream seq allocation and the message DTO it shares with chat. */
+export {
+  type ConversationRow,
+  convTopic,
+  iso,
+  lockNextSeq,
+  type MessageRow,
+  toMessage,
+} from "./service";
 export { listThreadsFor } from "./threads";
 
 /** What the chat module hands to its route files (message actions, reactions, pins, saves). */
@@ -125,6 +134,8 @@ const zoneOf = (author: { clientTimeZone?: string }) =>
  * D-06: group DMs).
  */
 const MESSAGE_KINDS = ["channel", "dm", "group"] as const;
+/** Kinds whose `conv:<id>` stream a reader may subscribe to: the message kinds plus AI chats (P-03, owner only). */
+const CONV_TOPIC_KINDS = ["channel", "dm", "group", "ai_chat"] as const;
 
 /** One `@channel` / `@here` per channel per minute (P-11). */
 const MENTION_ALL_WINDOW_MS = 60_000;
@@ -318,9 +329,9 @@ export function createChatModule(core: Core): ApiModule {
   // Subscribing to a channel's stream is reading it: the resolver decides channel.read for the user.
   core.realtime.registerTopicAuthorizer("conv", (auth, conversationId) =>
     core.db.withTenant({ organizationId: auth.organizationId, userId: auth.userId }, async (tx) => {
-      const conv = await getConversation(tx, conversationId, MESSAGE_KINDS);
+      const conv = await getConversation(tx, conversationId, CONV_TOPIC_KINDS);
       if (!conv) return false;
-      return access.isReadable(tx, auth.userId, conv.id);
+      return access.isReadable(tx, auth.userId, conv.id, { kinds: CONV_TOPIC_KINDS });
     }),
   );
 

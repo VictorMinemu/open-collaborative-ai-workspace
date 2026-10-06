@@ -61,6 +61,23 @@ const DM_FIXED = new Set<Permission>([
   "channel.update",
 ]);
 
+/**
+ * An AI chat (P-03) is private to its owner: nobody adds or removes members, archives, moves, moderates or
+ * broadcasts through the channel permissions, and the generic chat routes never post into it (the ai-chat module
+ * decides `ai_chat.use` instead).
+ */
+const AI_CHAT_FIXED = new Set<Permission>([
+  "channel.members.add",
+  "channel.members.remove",
+  "channel.archive",
+  "channel.update",
+  "message.delete_any",
+  "channel.mention_all",
+  "channel.post",
+]);
+/** Permissions that act on one AI chat: owner-only when decided on a channel resource. */
+const AI_CHAT_OWNED = new Set<Permission>(["ai_chat.use", "ai_chat.web", "ai_chat.share"]);
+
 const DEVICE_GATED = new Set<Permission>([
   "work_session.create",
   "work_session.prompt",
@@ -83,6 +100,20 @@ export const PRECONDITIONS: readonly Precondition[] = [
       if (p.kind === "agent") return notMember(p);
       return r.state.has("private") ? { layer: "resource", reason: "private_channel" } : null;
     },
+  },
+  {
+    applies: (perm) => AI_CHAT_FIXED.has(perm),
+    check: (_p, r) =>
+      isChannel(r) && r.state.has("ai_chat") ? { layer: "resource", reason: "ai_chat_private" } : null,
+  },
+  {
+    // On a concrete conversation, ai_chat.* needs an AI chat the principal owns; at organization scope (a new
+    // chat) the role decides.
+    applies: (perm) => AI_CHAT_OWNED.has(perm),
+    check: (_p, r) =>
+      isChannel(r) && !(r.state.has("ai_chat") && r.relations.has("owner"))
+        ? { layer: "resource", reason: "not_ai_chat_owner" }
+        : null,
   },
   {
     applies: (perm) => perm === "channel.post" || perm === "channel.members.add",
@@ -179,9 +210,9 @@ export interface ChannelFacts {
   viewerRole: "owner" | "member" | null;
   /**
    * `dm` = a 1:1 direct conversation, `group` = a group DM (D-06); both carry state `dm` (fixed membership, no
-   * moderation). Omitted = a channel.
+   * moderation). `ai_chat` = a private AI chat (state `ai_chat`, P-03). Omitted = a channel.
    */
-  kind?: "channel" | "dm" | "group";
+  kind?: "channel" | "dm" | "group" | "ai_chat";
   /**
    * The unit the channel belongs to, root → self (CHAT-02): unit-scoped allow and deny rules apply to the channels of
    * that unit (principle 6). Omitted or [] = the organization (and every direct conversation).
@@ -201,6 +232,9 @@ function channelState(c: ChannelFacts): ResourceState[] {
     ...when(c.visibility === "private", "private" as const),
     ...when(c.archived, "archived" as const),
     ...when(c.kind === "dm" || c.kind === "group", "dm" as const),
+    // An AI chat is always private, whatever the row says.
+    ...when(c.kind === "ai_chat", "ai_chat" as const),
+    ...when(c.kind === "ai_chat" && c.visibility !== "private", "private" as const),
   ];
 }
 
