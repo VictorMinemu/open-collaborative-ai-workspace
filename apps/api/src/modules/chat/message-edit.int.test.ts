@@ -235,3 +235,57 @@ describe("PATCH /messages/:id (edit)", () => {
     expect((await edit(admin, messageId, "   ")).status).toBe(400);
   });
 });
+
+/**
+ * An HTTP client signed in as the admin of ANOTHER organization: a fresh invitee of this org whose membership is
+ * moved to org B (auth.member, the org_members projection and the session's active organization).
+ */
+async function otherOrgAdmin(): Promise<{ client: TestClient; orgB: string; userB: string }> {
+  const email = `eve-${randomUUID().slice(0, 8)}@example.test`;
+  const inv = await ok(admin.request("POST", "/api/v1/invitations", { email, role: "standard" }));
+  const client = new TestClient(stack.baseUrl);
+  const accepted = await ok(
+    client.request("POST", `/api/v1/invitations/${inv.id}/accept`, {
+      name: "Eve",
+      password: "eve-long-password-1",
+    }),
+  );
+  const userB: string = accepted.user.id;
+  const orgB = randomUUID();
+  await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil', $2)", [
+    orgB,
+    `evil-${orgB}`,
+  ]);
+  await su.query("delete from auth.member where user_id = $1", [userB]);
+  await su.query("delete from app.org_members where user_id = $1", [userB]);
+  await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
+    orgB,
+    userB,
+  ]);
+  await su.query(
+    "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Eve', 'admin')",
+    [orgB, userB],
+  );
+  await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, userB]);
+  const me = await ok(client.request("GET", "/api/v1/me/permissions"));
+  expect(me.role).toBe("admin");
+  return { client, orgB, userB };
+}
+
+describe("cross-tenant", () => {
+  it("org B's admin gets 404 on PATCH for org A's message, and nothing is written", async () => {
+    const msg = await post(admin, channelId, "org A only");
+    const { client, orgB } = await otherOrgAdmin();
+    const r = await edit(client, msg.id, "pwned");
+    expect(r.status).toBe(404);
+    expect(errorOf(r).details).toBeUndefined();
+    const row = (await su.query("select body, edited_at from app.messages where id = $1", [msg.id])).rows[0];
+    expect(row).toEqual({ body: "org A only", edited_at: null });
+    expect(await versionsOf(msg.id)).toHaveLength(0);
+    const leaked = await su.query(
+      "select count(*)::int as n from app.message_versions where organization_id = $1",
+      [orgB],
+    );
+    expect(leaked.rows[0].n).toBe(0);
+  });
+});
