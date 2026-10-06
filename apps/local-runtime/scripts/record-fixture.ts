@@ -8,16 +8,18 @@
 //   npx tsx scripts/record-fixture.ts                      # plan-read: plan mode, haiku, one Read
 //   npx tsx scripts/record-fixture.ts --scenario settings  # setModel + applyFlagSettings + setPermissionMode, one turn
 //   npx tsx scripts/record-fixture.ts --scenario catalog   # initializationResult + context probe, NO turn
+//   npx tsx scripts/record-fixture.ts --scenario title     # one-shot haiku title query (03.2-12), ONE turn
 
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type SDKMessage, query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
-import type { SessionEvent } from "@ocw/contracts";
+import { normalizeSessionTitle, type SessionEvent } from "@ocw/contracts";
 import { probeClaudeModels } from "../src/claude/catalog.js";
 import { ClaudeCodeRuntime, childEnv, type QueryFn, type QueryHandle } from "../src/claude/claude-runtime.js";
+import { generateClaudeTitle } from "../src/claude/title.js";
 import { findExecutable } from "../src/exec-path.js";
 import { sanitizeEvent } from "../src/sanitize.js";
 
@@ -40,13 +42,17 @@ const INIT_KEEP = new Set([
 /** Settings scenario: the init fields that carry the effective settings (D-11, D-15). */
 const SETTINGS_INIT_KEEP = new Set([...INIT_KEEP, "fast_mode_state", "fast_mode_disabled_reason", "effort"]);
 
-type Scenario = "plan-read" | "settings" | "catalog";
+type Scenario = "plan-read" | "settings" | "catalog" | "title";
+
+/** Title scenario (03.2-12): a Spanish prompt, so the fixture also proves the title keeps the prompt's language. */
+const TITLE_PROMPT =
+  "Arregla el error de redirección del login cuando caduca la sesión en la página de ajustes";
 
 function scenarioArg(argv: string[]): Scenario {
   const i = argv.indexOf("--scenario");
   const v = i >= 0 ? argv[i + 1] : "plan-read";
-  if (v === "plan-read" || v === "settings" || v === "catalog") return v;
-  console.error(`unknown scenario ${String(v)} (plan-read | settings | catalog)`);
+  if (v === "plan-read" || v === "settings" || v === "catalog" || v === "title") return v;
+  console.error(`unknown scenario ${String(v)} (plan-read | settings | catalog | title)`);
   process.exit(1);
 }
 
@@ -250,9 +256,92 @@ async function recordCatalog(): Promise<void> {
   console.log(JSON.stringify(contextWindows));
 }
 
+/**
+ * The session-title call (03.2-12) through the adapter's own `generateClaudeTitle`: a separate one-shot haiku query
+ * with no tools, nothing persisted, in an empty temp directory. ONE turn. The recording is kept even when the
+ * adapter refuses the answer (a model substitution, a tool), so the behaviour is visible in the fixture.
+ */
+async function recordTitle(): Promise<void> {
+  const claude = requirePinnedCli();
+  const parent = await mkdtemp(join(tmpdir(), "ocw-fixture-"));
+  const real = await realpath(parent);
+  const roots = [...new Set([real, parent])].sort((a, b) => b.length - a.length);
+  const catalog = JSON.parse(
+    await readFile(join(outDir, `claude-code-${PINNED_CLI}.catalog.json`), "utf8"),
+  ) as { models: Array<{ value: string; resolvedModel?: string }> };
+  const resolvedModel = catalog.models.find((m) => m.value === "haiku")?.resolvedModel ?? null;
+  const raw: SDKMessage[] = [];
+  const state = { aborted: false };
+  const queryFn: QueryFn = (params) => {
+    const q = sdkQuery(params);
+    return {
+      interrupt: () => q.interrupt(),
+      close: () => q.close(),
+      setModel: () => Promise.reject(new Error("not used by the title query")),
+      setPermissionMode: () => Promise.reject(new Error("not used by the title query")),
+      applyFlagSettings: () => Promise.reject(new Error("not used by the title query")),
+      initializationResult: () => q.initializationResult(),
+      getContextUsage: (opts) => q.getContextUsage(opts),
+      async *[Symbol.asyncIterator]() {
+        for await (const m of q) {
+          if (m.type === "system" && m.subtype === "init") {
+            if (m.apiKeySource !== "none") {
+              state.aborted = true;
+              console.error(`apiKeySource=${m.apiKeySource}: not the local login; aborting.`);
+              q.close();
+              return;
+            }
+            if (m.permissionMode === "bypassPermissions") {
+              state.aborted = true;
+              console.error("init reported bypassPermissions; aborting.");
+              q.close();
+              return;
+            }
+          }
+          raw.push(m);
+          yield m;
+        }
+      },
+    };
+  };
+  let answer: string | null = null;
+  try {
+    answer = await generateClaudeTitle(queryFn, {
+      claudePath: claude,
+      env: childEnv(process.env, false),
+      prompt: TITLE_PROMPT,
+      model: "haiku",
+      resolvedModel,
+      signal: AbortSignal.timeout(60_000),
+      tmpRoot: real,
+    });
+  } catch (err) {
+    console.error("title call refused (recorded as observed):", err);
+  }
+  await rm(real, { recursive: true, force: true });
+  if (state.aborted) process.exit(1);
+
+  const fixtureMessages = raw.map((m) => {
+    const scrubbed = scrub(m, roots) as Record<string, unknown>;
+    if (scrubbed.type === "system" && scrubbed.subtype === "init") {
+      for (const k of Object.keys(scrubbed)) if (!INIT_KEEP.has(k)) delete scrubbed[k];
+    }
+    return scrubbed;
+  });
+  await mkdir(outDir, { recursive: true });
+  const version =
+    (fixtureMessages.find((m) => m.subtype === "init")?.claude_code_version as string) ?? "unknown";
+  const file = join(outDir, `claude-code-${version}.title.sdk.jsonl`);
+  await writeFile(file, `${fixtureMessages.map((m) => JSON.stringify(m)).join("\n")}\n`);
+  console.log(`wrote ${fixtureMessages.length} SDK messages -> ${file.replace(homedir(), "~")}`);
+  console.log("raw answer:", JSON.stringify(answer));
+  console.log("normalized:", JSON.stringify(answer === null ? null : normalizeSessionTitle(answer)));
+}
+
 async function main(): Promise<void> {
   const scenario = scenarioArg(process.argv.slice(2));
   if (scenario === "catalog") await recordCatalog();
+  else if (scenario === "title") await recordTitle();
   else await recordTurn(scenario);
 }
 
