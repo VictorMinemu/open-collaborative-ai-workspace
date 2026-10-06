@@ -3,6 +3,7 @@ import { RelativePath } from "./common";
 import { RuntimeInfo } from "./device";
 import { PermissionMode, RuntimeId, SessionEvent } from "./session-events";
 import { ContextWindow, EffortLevel, RuntimeCatalog, SessionSettingsPatch } from "./session-settings";
+import { TITLE_PROMPT_MAX_CHARS } from "./session-title";
 
 /**
  * Device Link protocol: JSON frames on `GET /runtime/ws` (Authorization: Bearer <device token>).
@@ -36,6 +37,8 @@ export const CommandKind = z.enum([
   "diff.request",
   /** Apply settings between turns (D-07, D-14); the device answers with a `session.settings` event. */
   "session.configure",
+  /** Ask the session runtime's small model for a short title (D-18, P-15); answered by a `title.result` frame. */
+  "session.title",
 ]);
 export type CommandKind = z.infer<typeof CommandKind>;
 
@@ -132,6 +135,20 @@ export const DiffResultFrame = z.object({
 });
 export type DiffResultFrame = z.infer<typeof DiffResultFrame>;
 
+/**
+ * The answer to a `session.title` command (P-15), sent before its ok ack. Lenient bounds on purpose: the API
+ * validates the title with `SessionTitle` and refuses (and audits) anything out of shape.
+ */
+export const TitleResultFrame = z.object({
+  type: z.literal("title.result"),
+  /** The id of the `session.title` command this answers. */
+  requestId: z.string().max(128),
+  sessionId: z.uuid(),
+  title: z.string().max(200),
+  model: z.string().max(200),
+});
+export type TitleResultFrame = z.infer<typeof TitleResultFrame>;
+
 export const DeviceToServerFrame = z.discriminatedUnion("type", [
   HelloFrame,
   ProjectsSyncFrame,
@@ -140,6 +157,7 @@ export const DeviceToServerFrame = z.discriminatedUnion("type", [
   EventFrame,
   DiffResultFrame,
   CapabilitiesFrame,
+  TitleResultFrame,
 ]);
 export type DeviceToServerFrame = z.infer<typeof DeviceToServerFrame>;
 
@@ -222,6 +240,14 @@ export const DiffRequestPayload = z.object({
   projectLocalId: z.string().optional(),
 });
 export type DiffRequestPayload = z.infer<typeof DiffRequestPayload>;
+
+/** `session.title`: the session runtime, its small model and the start of the first prompt (P-15). */
+export const SessionTitlePayload = z.object({
+  runtime: RuntimeId,
+  model: z.string().min(1).max(200),
+  prompt: z.string().min(1).max(TITLE_PROMPT_MAX_CHARS),
+});
+export type SessionTitlePayload = z.infer<typeof SessionTitlePayload>;
 
 /** Keep only repo-relative paths (server-side defence in depth for AGENTS principle 7). */
 export function onlyRelativePaths(paths: readonly string[]): string[] {

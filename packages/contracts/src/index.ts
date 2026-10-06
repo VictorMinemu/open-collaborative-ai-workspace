@@ -15,6 +15,7 @@ export * from "./realtime";
 export * from "./runtime-controls/index";
 export * from "./session-events";
 export * from "./session-settings";
+export * from "./session-title";
 export * from "./slash-commands";
 export * from "./work-session";
 export * from "./work-zone-policy";

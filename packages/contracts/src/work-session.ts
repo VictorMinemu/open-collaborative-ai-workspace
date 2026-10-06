@@ -10,6 +10,7 @@ import {
   WorkSessionStatus,
 } from "./session-events";
 import { ContextWindow, EffortLevel, WorkSessionSettings } from "./session-settings";
+import { TitleSource } from "./session-title";
 
 /** Working-tree change totals of a session (from the device's last `diff.result`). */
 export const DiffStat = z.object({
@@ -35,6 +36,8 @@ export const WorkSession = z.object({
   branch: z.string().nullable(),
   status: WorkSessionStatus,
   title: z.string(),
+  /** Typed (`user`, never replaced), the prompt's first line (`heuristic`) or generated (`auto`) (D-19). */
+  titleSource: TitleSource,
   createdBy: Id,
   createdByName: z.string().nullable(),
   /** Prompts waiting in the shared queue. */

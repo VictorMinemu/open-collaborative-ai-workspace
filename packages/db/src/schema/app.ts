@@ -801,6 +801,14 @@ export const workSessions = appSchema.table(
       .notNull()
       .default("provisioning"),
     title: text("title").notNull(),
+    /**
+     * Where the title came from (D-19, P-14): `user` typed it (never replaced), `heuristic` is the prompt's first
+     * line (an automatic title may replace it once), `auto` was generated on the device. The default is the
+     * protected value, so rows created before this column are never retitled.
+     */
+    titleSource: text("title_source", { enum: ["user", "heuristic", "auto"] })
+      .notNull()
+      .default("user"),
     createdBy: uuid("created_by").notNull(),
     runtimeSessionId: text("runtime_session_id"),
     worktree: boolean("worktree").notNull().default(false),
@@ -822,6 +830,7 @@ export const workSessions = appSchema.table(
   (t) => [
     index("work_sessions_org_idx").on(t.organizationId, t.projectId),
     modeCheck("work_sessions_permission_mode_ck", t.permissionMode),
+    check("work_sessions_title_source_ck", sql`${t.titleSource} in ('user','heuristic','auto')`),
   ],
 );
 
@@ -895,6 +904,7 @@ export const deviceCommands = appSchema.table(
         "session.stop",
         "diff.request",
         "session.configure",
+        "session.title",
       ],
     }).notNull(),
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
