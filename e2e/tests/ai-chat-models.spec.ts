@@ -105,7 +105,7 @@ test("a member picks an organization model labelled METERED and the answer strea
   const answer = lastAssistant(page);
   await expect(answer).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
   await expect(answer.getByTestId("ai-message-text")).not.toBeEmpty();
-  await expect(answer.getByTestId("ai-message-footer")).toContainText(/^Claude Sonnet 5\.5 · METERED · /);
+  await expect(answer.getByTestId("ai-message-footer")).toHaveText(/ · Claude Sonnet 5\.5 · METERED$/);
   await expect(page.getByTestId("ai-model-chip")).toContainText("Claude Sonnet 5.5");
   await expect(page.getByText(FAKE_ANTHROPIC_KEY)).toHaveCount(0);
   await bothThemes(page, `ai-chat-metered-${w}`);
@@ -202,11 +202,9 @@ test("a member switches model per message: plan and org answers side by side, ea
   await expect(answers.nth(1)).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
 
   // Each answer keeps the model and backend that produced it; switching never rewrites an earlier answer.
-  await expect(answers.nth(0).getByTestId("ai-message-footer")).toContainText(
-    /^GPT-6 Astra · ChatGPT plan · /,
-  );
-  await expect(answers.nth(1).getByTestId("ai-message-footer")).toContainText(
-    /^Claude Sonnet 5\.5 · METERED · /,
+  await expect(answers.nth(0).getByTestId("ai-message-footer")).toHaveText(/ · GPT-6 Astra · ChatGPT plan$/);
+  await expect(answers.nth(1).getByTestId("ai-message-footer")).toHaveText(
+    / · Claude Sonnet 5\.5 · METERED$/,
   );
   await bothThemes(page, `ai-chat-model-switch-${w}`);
 

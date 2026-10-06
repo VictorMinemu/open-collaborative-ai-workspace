@@ -18,6 +18,10 @@
 // `Tool <tool> not offered`. Once every directive has a result the reply is one line per directive,
 // `Tool <tool> said: <first 200 chars of the result>`, plus the `[tools: …]` suffix.
 //
+// Anthropic usage and failure directives (05-08, metering tests), in the last user message:
+//   [[cache:N]]   the response reports N cache-read input tokens (`cache_read_input_tokens`) besides input_tokens 100
+//   [[http:NNN]]  the request fails with HTTP NNN (an Anthropic `api_error` body) before any streaming
+//
 // Fake SearXNG: `GET /search?q=<query>&format=json` returns one deterministic result.
 //
 // Fake OpenAI Responses API (fake-responses.mjs, Phase 5): `POST /v1/responses` (SSE) and, for `fake-plan-…`
@@ -386,6 +390,8 @@ function deltas(text) {
 }
 
 const SLOW_RE = /\[\[slow\]\]/u;
+const CACHE_RE = /\[\[cache:(\d{1,9})\]\]/u;
+const HTTP_RE = /\[\[http:([45]\d\d)\]\]/u;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** `[[slow]]`: the reply (with " 1"), then " 2" … " 40", 100 ms apart (same contract as fake-responses.mjs). */
@@ -404,8 +410,11 @@ function imageCount(message) {
 function turnFlags(messages) {
   const lastUser = [...messages].reverse().find((m) => m.role === "user");
   const images = imageCount(lastUser);
+  const text = contentText(lastUser?.content);
   return {
-    slow: SLOW_RE.test(contentText(lastUser?.content)),
+    slow: SLOW_RE.test(text),
+    cacheRead: Number(CACHE_RE.exec(text)?.[1] ?? 0),
+    httpStatus: Number(HTTP_RE.exec(text)?.[1] ?? 0),
     suffix: images > 0 ? ` [images:${images}]` : "",
   };
 }
@@ -501,10 +510,18 @@ async function anthropicMessages(res, body) {
   capture("anthropic", body);
   const toolCount = Array.isArray(body.tools) ? body.tools.length : 0;
   const flags = turnFlags(Array.isArray(body.messages) ? body.messages : []);
+  if (flags.httpStatus) {
+    sendJson(res, flags.httpStatus, {
+      type: "error",
+      error: { type: "api_error", message: `fake failure ${flags.httpStatus}` },
+    });
+    return;
+  }
   const reply = `${composeReply(promptFromAnthropic(body).all, toolCount, offeredToolNames(body))}${flags.suffix}`;
   const id = `msg_fake_${counter}`;
   const model = body.model ?? MODELS[0];
-  const usage = { input_tokens: 100, output_tokens: reply.length };
+  const cache = flags.cacheRead ? { cache_read_input_tokens: flags.cacheRead } : {};
+  const usage = { input_tokens: 100, output_tokens: reply.length, ...cache };
   if (!body.stream) {
     sendJson(res, 200, {
       id,
@@ -530,7 +547,7 @@ async function anthropicMessages(res, body) {
       content: [],
       stop_reason: null,
       stop_sequence: null,
-      usage: { input_tokens: 100, output_tokens: 0 },
+      usage: { input_tokens: 100, output_tokens: 0, ...cache },
     },
   });
   ev("content_block_start", { index: 0, content_block: { type: "text", text: "" } });

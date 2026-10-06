@@ -7,13 +7,15 @@ import { registerAiChatRoutes } from "./routes";
 import { createRunLoop } from "./run-loop";
 import { createAiChatService } from "./service";
 import { createGenerationSweeper } from "./sweeper";
+import { registerUsageRoutes } from "./usage-routes";
 
 /**
  * Direct AI chat (Phase 5, AICHAT-02/03/07): private chats with one owner, answers streamed by one run loop over
- * the realtime WebSocket and persisted with a usage record. Prompts come only from `buildModelMessages`.
+ * the realtime WebSocket and persisted with a usage record, under daily per-member caps (05-08). Prompts come only from `buildModelMessages`.
  */
 export { type BuildInput, type BuiltPrompt, buildModelMessages } from "./build-model-messages";
 export { ABORT_CHANNEL } from "./generations";
+export { consumeGeneration, usageToday } from "./limits";
 export { type AfterFinalize, createRunLoop, type RunLoop } from "./run-loop";
 export { createGenerationSweeper, type GenerationSweeper } from "./sweeper";
 
@@ -33,6 +35,8 @@ export function createAiChatModule(core: Core, deps: { gateway: ModelGateway }):
     name: "ai-chat",
     async register(app: App) {
       registerAiChatRoutes(app, core, service);
+      // Today's usage (05-08); 05-09 adds the reports to usage-routes.ts, never here.
+      registerUsageRoutes(app, { core });
       unsubscribeAbort = await registerGenerationRoutes(app, { core, gateway: deps.gateway, runLoop });
       sweeper.start();
     },

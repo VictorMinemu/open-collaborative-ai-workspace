@@ -1,12 +1,14 @@
 "use client";
 
 import type { Message, ModelRef, SendAiMessageResponse } from "@ocw/contracts";
+import { useQueryClient } from "@tanstack/react-query";
 import { ChevronLeft, ChevronRight, RotateCcw, Sparkles } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { toast } from "sonner";
 import { Spinner } from "@/components/ui/spinner";
 import { ControlSurface } from "@/components/work-zone/control-surface";
 import { regenerate, useAiModels } from "@/lib/ai-chat-queries";
+import { refreshAiUsageToday } from "@/lib/ai-usage-queries";
 import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { ModelPickerList } from "./model-picker";
@@ -34,6 +36,7 @@ export function RegenerateMenu({
   const [view, setView] = useState<"menu" | "models">("menu");
   const [pending, setPending] = useState(false);
   const models = useAiModels();
+  const qc = useQueryClient();
   const g = message.generation;
   const current = g ? ({ backend: g.backend, provider: g.provider, modelId: g.modelId } as ModelRef) : null;
 
@@ -52,6 +55,8 @@ export function RegenerateMenu({
       toast.error("Couldn't regenerate the answer", { description: errorMessage(err) });
     } finally {
       setPending(false);
+      // A regenerate counts against the same daily cap as a send (05-08).
+      refreshAiUsageToday(qc);
     }
   }
 

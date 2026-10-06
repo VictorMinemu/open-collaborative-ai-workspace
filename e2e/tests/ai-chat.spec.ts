@@ -80,7 +80,7 @@ test("a ChatGPT-plan answer streams into the page and is still there after a rel
   await expect(answer).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
   await expect(answer.getByTestId("ai-streaming-caret")).toHaveCount(0);
   const footer = answer.getByTestId("ai-message-footer");
-  await expect(footer).toHaveText(/GPT-6 Astra · ChatGPT plan · [\d,]+ in · [\d,]+ out/);
+  await expect(footer).toHaveText(/^[\d.]+[kM]? in · [\d.]+[kM]? out · GPT-6 Astra · ChatGPT plan$/);
   const finalText = await answerText(answer);
   expect(finalText).toMatch(/^Echo: Write two short lines 1 2 3 .* 40$/);
   const footerText = (await footer.textContent()) ?? "";
