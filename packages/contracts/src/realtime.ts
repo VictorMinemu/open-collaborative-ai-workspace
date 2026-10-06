@@ -164,6 +164,9 @@ export const EventTypes = {
   conversationRead: "conversation.read",
   threadRead: "thread.read",
   notificationPrefsUpdated: "notification_prefs.updated",
+  // Phase 5 (P-06). On `user:<owner>`: an AI chat's summary changed (title, last model, generating, archived).
+  // Payload AiChatUpdatedEvent.
+  aiChatUpdated: "ai_chat.updated",
 } as const;
 
 export const MemberUpdatedPayload = z.object({ userId: z.uuid(), changed: z.array(z.string()) });
@@ -192,4 +195,9 @@ export const EphemeralTypes = {
    * (`MessageNotifyEvent`). Ephemeral, so ordinary messages are never stored on personal streams.
    */
   messageNotify: "message.notify",
+  /**
+   * On `conv:<id>` of an AI chat (Phase 5, P-06): streamed answer text at a UTF-16 `offset` (`AiDeltaEvent`),
+   * coalesced every AI_DELTA_COALESCE_MS. The durable `message.updated` at the end carries the final body.
+   */
+  aiDelta: "ai.delta",
 } as const;

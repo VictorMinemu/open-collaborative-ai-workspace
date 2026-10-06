@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { DEFAULT_AI_CHAT_POLICY } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTenantDb, type TenantDb } from "./tenant";
@@ -219,7 +220,62 @@ async function seedOrg(c: pg.Client, org: string) {
     "insert into app.attachments (organization_id, conversation_id, uploader_id, filename, declared_type, size_bytes) values ($1, $2, $3, 'plan.pdf', 'application/pdf', 1234)",
     [org, conv, user],
   );
+
+  // Phase 5 (direct AI chat): one row per new table, on the seeded conversation and an assistant message.
+  const assistant = randomUUID();
+  const completedGen = randomUUID();
+  const credentialSecret = randomUUID();
+  await q(
+    "insert into app.messages (id, organization_id, conversation_id, seq, author_kind, author_id, body, status) values ($1, $2, $3, 2, 'agent', null, '', 'streaming')",
+    [assistant, org, conv],
+  );
+  await q("insert into app.ai_chats (conversation_id, organization_id, owner_user_id) values ($1, $2, $3)", [
+    conv,
+    org,
+    user,
+  ]);
+  await q("insert into app.ai_user_preferences (organization_id, user_id) values ($1, $2)", [org, user]);
+  await q(
+    "insert into app.ai_generations (id, organization_id, conversation_id, assistant_message_id, requester_user_id, backend, provider, model_id, status, instance_id, finished_at) values ($1, $2, $3, $4, $5, 'org_key', 'anthropic', 'claude-sonnet-5-5', 'completed', 'api-1', now())",
+    [completedGen, org, conv, assistant, user],
+  );
+  await q(
+    "insert into app.ai_generations (organization_id, conversation_id, assistant_message_id, requester_user_id, backend, provider, model_id, attempt, instance_id) values ($1, $2, $3, $4, 'org_key', 'anthropic', 'claude-sonnet-5-5', 2, 'api-1')",
+    [org, conv, assistant, user],
+  );
+  await q(
+    "insert into app.ai_usage_records (organization_id, generation_id, kind, requester_user_id, conversation_id, message_id, backend, provider, model_id, input_tokens, output_tokens, cost_micros_usd, price_ref) values ($1, $2, 'chat', $3, $4, $5, 'org_key', 'anthropic', 'claude-sonnet-5-5', 10, 20, 220, '2026-10-06:anthropic/claude-sonnet-5-5')",
+    [org, completedGen, user, conv, assistant],
+  );
+  await q(
+    "insert into app.ai_usage_daily (organization_id, user_id, day, backend_class, generations, input_tokens, output_tokens, cost_micros_usd) values ($1, $2, current_date, 'org_key', 1, 10, 20, 220)",
+    [org, user],
+  );
+  await q("insert into app.ai_chat_policies (organization_id) values ($1)", [org]);
+  await q(
+    "insert into app.secrets (id, organization_id, name, kind, provider, ciphertext, iv, tag) values ($1, $2, 'chatgpt', 'user_model_credential', 'chatgpt_plan', 'c', 'i', 't')",
+    [credentialSecret, org],
+  );
+  await q(
+    "insert into app.user_model_credentials (organization_id, user_id, provider, secret_id, status) values ($1, $2, 'chatgpt_plan', $3, 'connected')",
+    [org, user, credentialSecret],
+  );
+  await q(
+    `insert into app.ai_chat_shares (organization_id, conversation_id, created_by, title, snapshot) values ($1, $2, $3, 'Trip plan', '{"messages":[]}')`,
+    [org, conv, user],
+  );
 }
+
+const AI_CHAT_TABLES = [
+  "app.ai_chats",
+  "app.ai_user_preferences",
+  "app.ai_generations",
+  "app.ai_usage_records",
+  "app.ai_usage_daily",
+  "app.ai_chat_policies",
+  "app.user_model_credentials",
+  "app.ai_chat_shares",
+] as const;
 
 async function inTenant<T>(org: string, fn: () => Promise<T>): Promise<T> {
   await app.query("begin");
@@ -459,6 +515,159 @@ describe("tenant isolation (RLS)", () => {
     await expect(inTenant(A, () => app.query("delete from app.audit_events"))).rejects.toThrow(
       /permission denied/,
     );
+  });
+
+  it("Phase 5: the eight AI chat tables are org-scoped, forced, seeded and invisible and unwritable across tenants", async () => {
+    const scoped = new Map((await orgScopedTables()).map((t) => [t.tbl, t]));
+    for (const tbl of AI_CHAT_TABLES) {
+      expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true });
+      expect(scoped.get(tbl)?.policies, tbl).toBeGreaterThan(0);
+      const own = await inTenant(A, () => app.query(`select count(*)::int as n from ${tbl}`));
+      expect(own.rows[0].n, `${tbl} seeded`).toBeGreaterThan(0);
+      // As ocw_app in org A, nothing of org B is visible…
+      const cross = await inTenant(A, () =>
+        app.query(`select count(*)::int as n from ${tbl} where organization_id = $1`, [B]),
+      );
+      expect(cross.rows[0].n, `${tbl} cross-tenant`).toBe(0);
+      // …updatable or deletable (0 rows, or not even granted for the append-only usage store)…
+      for (const stmt of [
+        `update ${tbl} set organization_id = organization_id where organization_id = $1`,
+        `delete from ${tbl} where organization_id = $1`,
+      ]) {
+        const n = await inTenant(A, () =>
+          app.query(stmt, [B]).then(
+            (res) => res.rowCount,
+            (err: Error) => (/permission denied/.test(err.message) ? 0 : Promise.reject(err)),
+          ),
+        );
+        expect(n, `${tbl}: ${stmt}`).toBe(0);
+      }
+      // …or insertable: a copy of B's row written from A's context is refused by the policy.
+      const row = await migrator.query(
+        `select row_to_json(t) as j from ${tbl} t where organization_id = $1 limit 1`,
+        [B],
+      );
+      await expect(
+        inTenant(A, () =>
+          app.query(`insert into ${tbl} select * from json_populate_record(null::${tbl}, $1::json)`, [
+            JSON.stringify(row.rows[0].j),
+          ]),
+        ),
+        `${tbl} cross-tenant insert`,
+      ).rejects.toThrow(/row-level security/);
+    }
+  });
+
+  it("Phase 5: usage records are append-only for the app role", async () => {
+    const seeded = (
+      await migrator.query(
+        "select requester_user_id, conversation_id from app.ai_usage_records where organization_id = $1",
+        [A],
+      )
+    ).rows[0];
+    const inserted = await inTenant(A, () =>
+      app.query(
+        "insert into app.ai_usage_records (organization_id, generation_id, kind, requester_user_id, conversation_id, backend, provider, model_id, input_tokens, output_tokens) values ($1, $2, 'title', $3, $4, 'mock', 'mock', 'mock-1', 1, 1)",
+        [A, randomUUID(), seeded.requester_user_id, seeded.conversation_id],
+      ),
+    );
+    expect(inserted.rowCount).toBe(1);
+    for (const stmt of [
+      "update app.ai_usage_records set output_tokens = 0",
+      "delete from app.ai_usage_records",
+      "truncate app.ai_usage_records",
+    ]) {
+      await expect(
+        inTenant(A, () => app.query(stmt)),
+        stmt,
+      ).rejects.toThrow(/permission denied/);
+    }
+    // One record per generation and kind: a duplicate finalize can never double-count.
+    const gen = (
+      await migrator.query("select generation_id from app.ai_usage_records where organization_id = $1", [A])
+    ).rows[0].generation_id;
+    await expect(
+      inTenant(A, () =>
+        app.query(
+          "insert into app.ai_usage_records (organization_id, generation_id, kind, requester_user_id, conversation_id, backend, provider, model_id, input_tokens, output_tokens) values ($1, $2, 'chat', $3, $4, 'org_key', 'anthropic', 'claude-sonnet-5-5', 1, 1)",
+          [A, gen, seeded.requester_user_id, seeded.conversation_id],
+        ),
+      ),
+    ).rejects.toThrow(/ai_usage_records_generation_kind_uq/);
+  });
+
+  it("Phase 5: at most one running generation per conversation", async () => {
+    const running = (
+      await migrator.query(
+        "select conversation_id, assistant_message_id, requester_user_id from app.ai_generations where organization_id = $1 and status = 'running'",
+        [A],
+      )
+    ).rows;
+    expect(running).toHaveLength(1);
+    const g = running[0];
+    const insert = (conversationId: string, status: string) =>
+      app.query(
+        "insert into app.ai_generations (organization_id, conversation_id, assistant_message_id, requester_user_id, backend, provider, model_id, status, instance_id) values ($1, $2, $3, $4, 'mock', 'mock', 'mock-1', $5, 'api-2')",
+        [A, conversationId, g.assistant_message_id, g.requester_user_id, status],
+      );
+    await expect(inTenant(A, () => insert(g.conversation_id, "running"))).rejects.toThrow(
+      /ai_generations_one_running_uq/,
+    );
+    for (const status of ["completed", "stopped", "failed", "interrupted"]) {
+      const r = await inTenant(A, () => insert(g.conversation_id, status));
+      expect(r.rowCount, status).toBe(1);
+    }
+    // Another conversation may run its own generation at the same time.
+    const other = (
+      await migrator.query("select id from app.conversations where organization_id = $1 and kind = 'dm'", [A])
+    ).rows[0].id;
+    expect((await inTenant(A, () => insert(other, "running"))).rowCount).toBe(1);
+    await expect(inTenant(A, () => insert(g.conversation_id, "paused"))).rejects.toThrow(
+      /ai_generations_status_check/,
+    );
+  });
+
+  it("Phase 5: regenerate versions, credential secrets and the policy defaults", async () => {
+    const msg = (
+      await migrator.query(
+        "select assistant_message_id from app.ai_generations where organization_id = $1 limit 1",
+        [A],
+      )
+    ).rows[0].assistant_message_id;
+    const version = (kind: string) =>
+      app.query(
+        "insert into app.message_versions (organization_id, message_id, version, kind, body, edited_by_kind) values ($1, $2, 1, $3, 'old answer', 'system')",
+        [A, msg, kind],
+      );
+    expect((await inTenant(A, () => version("regenerate"))).rowCount).toBe(1);
+    await expect(inTenant(A, () => version("rewrite"))).rejects.toThrow(/message_versions_kind_check/);
+    const cred = await inTenant(A, () =>
+      app.query(
+        "select s.kind from app.user_model_credentials c join app.secrets s on s.id = c.secret_id where c.provider = 'chatgpt_plan'",
+      ),
+    );
+    expect(cred.rows).toEqual([{ kind: "user_model_credential" }]);
+    const policy = (
+      await migrator.query(
+        `select chatgpt_plan_enabled, org_keys_enabled, plan_allowed_models, org_key_daily_generations,
+                org_key_daily_cost_micros, plan_daily_generations, concurrent_generations_per_user,
+                max_context_tokens, web_enabled, title_models
+           from app.ai_chat_policies where organization_id = $1`,
+        [A],
+      )
+    ).rows[0];
+    expect({
+      chatgptPlanEnabled: policy.chatgpt_plan_enabled,
+      orgKeysEnabled: policy.org_keys_enabled,
+      planAllowedModels: policy.plan_allowed_models,
+      orgKeyDailyGenerations: policy.org_key_daily_generations,
+      orgKeyDailyCostMicros: policy.org_key_daily_cost_micros,
+      planDailyGenerations: policy.plan_daily_generations,
+      concurrentGenerationsPerUser: policy.concurrent_generations_per_user,
+      maxContextTokens: policy.max_context_tokens,
+      webEnabled: policy.web_enabled,
+      titleModels: policy.title_models,
+    }).toEqual(DEFAULT_AI_CHAT_POLICY);
   });
 
   it("Phase 4: accent-insensitive Spanish search, a stored tsvector and the search indexes", async () => {

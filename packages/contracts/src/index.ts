@@ -1,5 +1,7 @@
 export * from "./agent";
 export * from "./agent-channel";
+export * from "./ai-chat";
+export * from "./ai-generation";
 export * from "./attachments";
 export * from "./bot-capabilities";
 export * from "./chat";
@@ -10,6 +12,7 @@ export * from "./health";
 export * from "./identity";
 export * from "./marketplace";
 export * from "./mcp";
+export * from "./model-prices";
 export * from "./notifications";
 export * from "./organization";
 export * from "./permissions";
