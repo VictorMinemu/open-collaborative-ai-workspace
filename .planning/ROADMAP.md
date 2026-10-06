@@ -212,7 +212,7 @@ Plans:
   6. The whole session screen (sidebar, header, stream with turn summaries and changed-files card, agent-working bar, composer, worktree/branch footer — `reference/ref-4-layout.png`) and the composer menus match the reference screenshots at 1440 and 390 in light and dark (side-by-side review recorded in the phase), every change made by one controller shows live to the others, and the single execution authority is unchanged
   7. A new session gets an automatic short title (3–6 words, ≤ 48 characters) that describes the request, generated from the first prompt by the session's runtime with a small model (Claude Code: Haiku; Codex: GPT-6-Luna) on the user's own subscription; if that model is unavailable or not allowed the first line of the prompt is kept, a title typed by the user is never replaced, and the title fits the sidebar, breadcrumb and tab at 1440 and 390
 
-**Plans:** 11 plans
+**Plans:** 12 plans
 **Research:** needed (Agent SDK `setModel` / `setPermissionMode` / effort and thinking options and model listing at the pinned version; `codex app-server` per-turn model, effort, approval policy and sandbox overrides and `model/list`; plan mode, fast mode and context window support; how to cap modes by org policy; research for cross-provider switching and multi-agent sessions is in `.planning/research/` as input for later phases)
 **UI hint**: yes
 
@@ -229,6 +229,7 @@ Plans:
 - [ ] 03.2-09-PLAN.md — Wave 4: reference composer — model picker, reasoning and permission menus (ref-1..3), mobile sheets, catalog-driven New session dialog
 - [ ] 03.2-10-PLAN.md — Wave 5: session screen layout per ref-4 — sidebar rows, breadcrumb header + Full access badge, turn summaries, changes card, agent bar, footer strip
 - [ ] 03.2-11-PLAN.md — Wave 6: documented inventory with parity tests, ADR-0013, AGENTS.md/DEMO.md, side-by-side reference review, phase gate
+- [ ] 03.2-12-PLAN.md — Wave 7: automatic session titles (WZC-07) — tracer: `title_source` migration, `session.title` → device → `title.result`, typed title kept, live in sidebar/breadcrumb/tab; Claude Code Haiku one-shot and Codex GPT-6-Luna ephemeral thread with one fixture each; fallbacks, `wz-title-*` fit screenshots, ADR-0014
 
 ### Phase 4: Chat
 
