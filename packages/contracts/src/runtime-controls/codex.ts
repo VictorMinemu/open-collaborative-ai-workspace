@@ -162,4 +162,11 @@ export const CODEX_CONTROLS: readonly RuntimeControlRow[] = [
     "thread/compact/start: v2/ThreadCompactStartParams.ts, NonSteerableTurnKind 'compact' (0.160.0 schema); codex-runtime.test.ts",
   ),
   row("Interrupt", "exposed", "interrupt", "Already shipped", "turn/interrupt: ClientRequest.ts"),
+  row(
+    "Session title model (GPT-6-Luna, ephemeral thread)",
+    "exposed",
+    "session.title",
+    "Automatic session titles (D-18): an ephemeral `gpt-6-luna` thread on its own short-lived app-server on the device owner's ChatGPT login, isolated from the session: read-only sandbox, untrusted approvals (every request declined), any tool item interrupts, effort low, empty temp directory",
+    "thread/start.ephemeral + baseInstructions: v2/ThreadStartParams.ts; turn/start.effort + summary: v2/TurnStartParams.ts; fixture codex-0.160.0.title.rpc.jsonl",
+  ),
 ];

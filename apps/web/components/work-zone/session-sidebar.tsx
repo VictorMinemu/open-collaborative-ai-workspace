@@ -168,7 +168,8 @@ export function SessionSidebar() {
         ) : null}
 
         {active.length > 0 ? (
-          <div className="grid gap-0.5">
+          // grid-cols-1 = minmax(0, 1fr): a long title truncates inside its row instead of widening the track.
+          <div className="grid grid-cols-1 gap-0.5">
             {active.map((s) => (
               <ActiveRow
                 key={s.id}
@@ -182,7 +183,7 @@ export function SessionSidebar() {
         ) : null}
 
         {settled.length > 0 ? (
-          <div className="grid gap-0.5 pt-2" data-testid="settled-group">
+          <div className="grid grid-cols-1 gap-0.5 pt-2" data-testid="settled-group">
             <button
               type="button"
               data-testid="settled-toggle"
@@ -336,7 +337,11 @@ function ActiveRow({
           </span>
           <RowStatus s={s} now={now} />
         </span>
-        <span data-testid="row-title" className="truncate text-[14px] text-foreground leading-snug">
+        <span
+          data-testid="row-title"
+          title={s.title}
+          className="truncate text-[14px] text-foreground leading-snug"
+        >
           {s.title}
         </span>
         <span className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-muted-foreground/80">
@@ -379,7 +384,11 @@ function SettledRow({ s, now, active }: { s: WorkSession; now: number; active: b
       className={cn(sectionItemClass(active), "gap-2 text-muted-foreground")}
     >
       <ProjectBadge name={s.projectName} muted />
-      <span data-testid="row-title" className="min-w-0 flex-1 truncate text-[13.5px] text-foreground/80">
+      <span
+        data-testid="row-title"
+        title={s.title}
+        className="min-w-0 flex-1 truncate text-[13.5px] text-foreground/80"
+      >
         {s.title}
       </span>
       <RowDiffStat s={s} className="text-[12px]" />

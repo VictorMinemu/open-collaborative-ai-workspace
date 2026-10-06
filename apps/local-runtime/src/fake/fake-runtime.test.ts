@@ -240,3 +240,34 @@ describe("enroll", () => {
     );
   });
 });
+
+describe("FakeRuntime titles (03.2-12)", () => {
+  it("generateTitle is deterministic and returns a raw answer the daemon must normalize", async () => {
+    const rt = new FakeRuntime("claude-code", 1);
+    const req = (prompt: string) => ({ prompt, model: "haiku", signal: new AbortController().signal });
+    const en = "Please fix the login redirect bug on the settings page when the session expires";
+    expect(await rt.generateTitle(req(en))).toBe('"Fix login redirect bug settings page."');
+    expect(await rt.generateTitle(req(en))).toBe('"Fix login redirect bug settings page."');
+    expect(
+      await rt.generateTitle(req("Por favor arregla el error de inicio de sesión en la página de ajustes")),
+    ).toBe('"Arregla error inicio sesión página ajustes."');
+    expect(await rt.generateTitle(req("Add a dark mode toggle to the account settings page"))).toBe(
+      '"Add dark mode toggle account settings."',
+    );
+  });
+
+  it("generateTitle is abortable", async () => {
+    const rt = new FakeRuntime("codex", 200);
+    const ac = new AbortController();
+    const pending = rt.generateTitle({ prompt: "Fix the login", model: "gpt-6-luna", signal: ac.signal });
+    ac.abort();
+    await expect(pending).rejects.toThrow(/aborted/i);
+  });
+
+  it("the codex fake catalog lists gpt-6-luna", async () => {
+    const codex = await new FakeRuntime("codex", 1).catalog();
+    const luna = codex.models.find((m) => m.id === "gpt-6-luna");
+    expect(luna).toMatchObject({ displayName: "GPT-6-Luna", defaultEffort: "medium", legacy: false });
+    expect(luna!.efforts.map((e) => e.value)).toEqual(["low", "medium", "high", "xhigh", "max"]);
+  });
+});

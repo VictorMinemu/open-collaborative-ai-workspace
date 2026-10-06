@@ -8,6 +8,7 @@ import {
   ChangePasswordRequest,
   ClientFrame,
   CommandFrame,
+  CommandKind,
   ConversationKind,
   CreatePermissionRuleRequest,
   CreatePersonalBotRequest,
@@ -38,6 +39,7 @@ import {
   SessionEvent,
   SessionInfo,
   SessionList,
+  SessionTitlePayload,
   StatusEmoji,
   StatusText,
   UnitMemberParams,
@@ -45,6 +47,7 @@ import {
   UpdateProfileRequest,
   UserIdParams,
   userHandle,
+  WorkSession,
 } from "./index";
 
 const id = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
@@ -470,5 +473,34 @@ describe("Work Zone session controls (03.2-01)", () => {
   it("a session.settings event never carries an unbounded value", () => {
     expect(SessionEvent.safeParse({ type: "session.settings", model: "x".repeat(201) }).success).toBe(false);
     expect(SessionEvent.safeParse({ type: "session.settings", fastModeState: "turbo" }).success).toBe(false);
+  });
+});
+
+describe("automatic session titles (03.2-12)", () => {
+  it("session.title is a command kind with a bounded payload", () => {
+    expect(CommandKind.options).toContain("session.title");
+    const payload = { runtime: "claude-code", model: "haiku", prompt: "Fix the login redirect" };
+    expect(SessionTitlePayload.safeParse(payload).success).toBe(true);
+    expect(SessionTitlePayload.safeParse({ ...payload, prompt: "x".repeat(4001) }).success).toBe(false);
+    expect(SessionTitlePayload.safeParse({ model: "haiku", prompt: "x" }).success).toBe(false);
+    expect(SessionTitlePayload.safeParse({ runtime: "codex", prompt: "x" }).success).toBe(false);
+  });
+
+  it("title.result is a device frame", () => {
+    const frame = DeviceToServerFrame.parse({
+      type: "title.result",
+      requestId: id,
+      sessionId: id,
+      title: "Fix login redirect bug",
+      model: "haiku",
+    });
+    expect(frame.type).toBe("title.result");
+  });
+
+  it("WorkSession requires titleSource", () => {
+    const shape = WorkSession.shape;
+    expect(shape.titleSource.safeParse("auto").success).toBe(true);
+    expect(shape.titleSource.safeParse(undefined).success).toBe(false);
+    expect(shape.titleSource.safeParse("model").success).toBe(false);
   });
 });

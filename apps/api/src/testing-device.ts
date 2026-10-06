@@ -41,7 +41,12 @@ export class FakeDevice {
   }
 
   /** Connect like the daemon: exchange the device token for a device JWT, open the link with it, say hello. */
-  static async connect(baseUrl: string, deviceToken: string, sessions?: string[]): Promise<FakeDevice> {
+  static async connect(
+    baseUrl: string,
+    deviceToken: string,
+    sessions?: string[],
+    opts: { codexLoggedIn?: boolean } = {},
+  ): Promise<FakeDevice> {
     const d = await FakeDevice.open(baseUrl, await FakeDevice.exchange(baseUrl, deviceToken));
     d.send({
       type: "hello",
@@ -49,7 +54,7 @@ export class FakeDevice {
       device: { name: "Test Mac", platform: "darwin", daemonVersion: "0.0.0-test" },
       runtimes: [
         { id: "claude-code", installed: true, version: "2.1.287", loggedIn: true },
-        { id: "codex", installed: true, version: "0.160.0", loggedIn: false },
+        { id: "codex", installed: true, version: "0.160.0", loggedIn: opts.codexLoggedIn ?? false },
       ],
       ...(sessions ? { sessions } : {}),
     });
@@ -95,6 +100,11 @@ export class FakeDevice {
   /** Report what the device's runtimes offer (P-05). */
   capabilities(catalogs: unknown[], fullAccessOptIn = false) {
     this.send({ type: "capabilities", catalogs, fullAccessOptIn });
+  }
+
+  /** Answer a `session.title` command (P-15); the ack follows separately. */
+  titleResult(requestId: string, sessionId: string, title: string, model: string) {
+    this.send({ type: "title.result", requestId, sessionId, title, model });
   }
 
   seq = Date.now() * 1000;

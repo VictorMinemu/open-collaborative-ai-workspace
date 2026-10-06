@@ -8,6 +8,7 @@ import {
   EventTypes,
   type HelloFrame,
   type ServerToDeviceFrame,
+  type TitleResultFrame,
 } from "@ocw/contracts";
 import { deviceCommands, devices, type TenantDb, type Tx, tenantOf } from "@ocw/db";
 import { and, asc, eq, inArray, lt, sql } from "drizzle-orm";
@@ -43,6 +44,8 @@ export interface DeviceSessionHandler {
   ): Promise<void>;
   /** A `diff.result` for a session's `diff.request` (also relayed to any waiting requester). */
   onDiffResult(device: DeviceRef, workSessionId: string, frame: DiffResultFrame): Promise<void>;
+  /** A `title.result` answering this device's own `session.title` command (`command`), before its ack (P-15). */
+  onTitleResult(device: DeviceRef, command: DeviceCommandRow, frame: TitleResultFrame): Promise<void>;
   /**
    * Who may use the device, or what it allows, changed (ADR-0012): re-check its live sessions — downgrade them
    * (`session.configure`) or stop the ones whose creator lost access. Called after a device opt-out and by the
@@ -324,6 +327,27 @@ export class DeviceHub {
     if (!cmd) return;
     await this.opts.bus.publish(diffChannel(frame.requestId), JSON.stringify(frame));
     if (cmd.workSessionId) await this.handler?.onDiffResult(device, cmd.workSessionId, frame);
+  }
+
+  /** Only a `session.title` command of this same device is answered; anything else is dropped (T-03.2-12-02). */
+  async onTitleResult(device: DeviceRef, frame: TitleResultFrame): Promise<void> {
+    if (!/^[0-9a-f-]{36}$/i.test(frame.requestId)) return;
+    const [cmd] = await this.opts.db.withTenant(
+      { organizationId: device.organizationId, userId: null },
+      (tx) =>
+        tx
+          .select()
+          .from(deviceCommands)
+          .where(
+            and(
+              eq(deviceCommands.id, frame.requestId),
+              eq(deviceCommands.deviceId, device.deviceId),
+              eq(deviceCommands.kind, "session.title"),
+            ),
+          ),
+    );
+    if (!cmd) return;
+    await this.handler?.onTitleResult(device, cmd, frame);
   }
 
   async closeAll(): Promise<void> {

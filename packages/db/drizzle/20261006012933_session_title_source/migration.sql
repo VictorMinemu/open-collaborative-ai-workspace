@@ -1,0 +1,2 @@
+ALTER TABLE "app"."work_sessions" ADD COLUMN "title_source" text DEFAULT 'user' NOT NULL;--> statement-breakpoint
+ALTER TABLE "app"."work_sessions" ADD CONSTRAINT "work_sessions_title_source_ck" CHECK ("title_source" in ('user','heuristic','auto'));

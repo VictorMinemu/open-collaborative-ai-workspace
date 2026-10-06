@@ -63,6 +63,19 @@ describe("runtime controls inventory (WZC-06, P-09)", () => {
     expect(["impossible", "deferred"]).toContain(dontAsk?.status);
   });
 
+  it("each runtime lists its session title model as exposed, with the title fixture as evidence (03.2-12)", () => {
+    const claude = rows("claude-code").find((r) => r.uiKey === "session.title");
+    const codex = rows("codex").find((r) => r.uiKey === "session.title");
+    expect(isExposed("claude-code", "session.title")).toBe(true);
+    expect(isExposed("codex", "session.title")).toBe(true);
+    expect(claude?.control).toMatch(/Haiku/);
+    expect(claude?.evidence).toMatch(/claude-code-2\.1\.289\.title\.sdk\.jsonl/);
+    expect(claude?.reason).toMatch(/D-18/);
+    expect(codex?.control).toMatch(/GPT-6-Luna/);
+    expect(codex?.evidence).toMatch(/codex-0\.160\.0\.title\.rpc\.jsonl/);
+    expect(codex?.reason).toMatch(/D-18/);
+  });
+
   it("Claude rows confirmed by the 2.1.289 fixtures (Plan 02)", () => {
     const row = (key: string) => rows("claude-code").find((r) => r.uiKey === key);
     expect(controlStatus("claude-code", "mode.auto")).toBe("exposed");
