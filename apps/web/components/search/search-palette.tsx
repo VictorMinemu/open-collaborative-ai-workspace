@@ -2,7 +2,17 @@
 
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 import type { SearchChannel, SearchMessageHit, SearchPerson } from "@ocw/contracts";
-import { Clock, CornerDownLeft, Hash, Lock, MessageSquareText, Search, X } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  Clock,
+  CornerDownLeft,
+  Hash,
+  Lock,
+  MessageSquareText,
+  Search,
+  X,
+} from "lucide-react";
 import { useRouter } from "next/navigation";
 import {
   createContext,
@@ -127,6 +137,8 @@ function PaletteBody({ initialQuery, onClose }: { initialQuery: string; onClose:
   const [q, setQ] = useState(initialQuery);
   const [recent, setRecent] = useState<string[]>([]);
   const [active, setActive] = useState(0);
+  /** A person picked from the People section (humans show their card; Plan 07 adds "Message"). */
+  const [profile, setProfile] = useState<SearchPerson | null>(null);
   const debounced = useDebounced(q);
   const query = debounced.trim();
   const overview = useSearchOverview(query);
@@ -194,6 +206,8 @@ function PaletteBody({ initialQuery, onClose }: { initialQuery: string; onClose:
         case "person":
           if (item.person.kind === "agent") {
             openDm.mutate(item.person.id, { onSuccess: (r) => go(`/chat/dm/${r.dmId}`) });
+          } else {
+            setProfile(item.person);
           }
           return;
       }
@@ -201,7 +215,13 @@ function PaletteBody({ initialQuery, onClose }: { initialQuery: string; onClose:
     [go, openDm],
   );
 
+  const seeAll = () => go(`/search?q=${encodeURIComponent(q.trim())}`);
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (profile) {
+      if (e.key === "Backspace" && !q) setProfile(null);
+      return;
+    }
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
       if (items.length === 0) return;
@@ -245,6 +265,7 @@ function PaletteBody({ initialQuery, onClose }: { initialQuery: string; onClose:
           onChange={(e) => {
             setQ(e.target.value);
             setActive(0);
+            setProfile(null);
           }}
           onKeyDown={onKeyDown}
           maxLength={200}
@@ -289,7 +310,9 @@ function PaletteBody({ initialQuery, onClose }: { initialQuery: string; onClose:
           overview.isPlaceholderData && "opacity-70",
         )}
       >
-        {overview.isError && q.trim() ? (
+        {profile ? (
+          <ProfileCard person={profile} onBack={() => setProfile(null)} />
+        ) : overview.isError && q.trim() ? (
           <p className="px-3 py-8 text-center text-muted-foreground text-sm">
             {searchErrorMessage(overview.error)}
           </p>
@@ -327,6 +350,18 @@ function PaletteBody({ initialQuery, onClose }: { initialQuery: string; onClose:
         )}
       </div>
 
+      {q.trim() && !profile ? (
+        <button
+          type="button"
+          data-testid="search-see-all"
+          onClick={seeAll}
+          className="flex shrink-0 items-center gap-2 border-t px-4 py-3 text-left font-medium text-primary text-sm outline-none hover:bg-accent/60 focus-visible:bg-accent/60 md:py-2.5"
+        >
+          <Search className="size-4" aria-hidden />
+          <span className="min-w-0 flex-1 truncate">See all results for “{q.trim()}”</span>
+          <ArrowRight className="size-4" aria-hidden />
+        </button>
+      ) : null}
       <div className="hidden shrink-0 items-center gap-4 border-t px-4 py-2 text-[11px] text-muted-foreground md:flex">
         <span className="flex items-center gap-1">
           <kbd className="rounded border bg-muted px-1 font-mono">↑</kbd>
@@ -340,6 +375,35 @@ function PaletteBody({ initialQuery, onClose }: { initialQuery: string; onClose:
         </span>
       </div>
     </>
+  );
+}
+
+/** A member's card inside the palette (no profile page yet; Plan 07 adds "Message"). */
+function ProfileCard({ person, onBack }: { person: SearchPerson; onBack: () => void }) {
+  return (
+    <div data-testid="search-profile" className="px-2 py-2">
+      <button
+        type="button"
+        onClick={onBack}
+        className="mb-3 inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-muted-foreground text-sm outline-none hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40"
+      >
+        <ArrowLeft className="size-4" /> Back to results
+      </button>
+      <div className="flex items-center gap-4 rounded-xl border bg-card p-4">
+        <PrincipalAvatar
+          kind={person.kind}
+          name={person.displayName}
+          avatarUrl={person.avatarUrl}
+          seed={person.id}
+          className="size-14 text-lg"
+        />
+        <div className="min-w-0">
+          <p className="truncate font-semibold text-base">{person.displayName}</p>
+          <p className="truncate text-muted-foreground text-sm">@{person.handle}</p>
+          {person.subtitle ? <p className="mt-1 truncate text-sm">{person.subtitle}</p> : null}
+        </div>
+      </div>
+    </div>
   );
 }
 

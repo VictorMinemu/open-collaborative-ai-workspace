@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { createConversationAccess } from "../chat";
 import { loadDirectory } from "../chat/directory";
-import { searchMessages } from "./service";
+import { searchChannels, searchMessages, searchPeople } from "./service";
 
 /**
  * CHAT-11 / D-04 (04-06): PostgreSQL full-text search over messages (and, Task 2, people and channels) on the
@@ -36,9 +36,21 @@ const ids = {} as Record<
   | "deletedViaApi"
   | "deletedRaw"
   | "boardMessage"
-  | "dmMessage",
+  | "dmMessage"
+  | "teamBot"
+  | "oldOps"
+  | "oldOpsMessage"
+  | "pickles"
+  | "radishOld"
+  | "radishMid"
+  | "radishNew",
   string
 >;
+let pager: TestClient;
+let rita: TestClient;
+let danaId: string;
+/** The 45 "pepino" messages, newest first (created in one statement: equal timestamps, id breaks ties). */
+let cucumbers: string[] = [];
 
 // biome-ignore lint/suspicious/noExplicitAny: loose JSON access keeps the assertions readable
 type Json = Record<string, any>;
@@ -185,6 +197,66 @@ beforeAll(async () => {
     body: "La migración de autenticación terminó",
     seq: 1,
   });
+
+  // ---- Task 2 fixtures
+  ids.teamBot = randomUUID();
+  await su.query(
+    `insert into app.agents (id, organization_id, name, username, instructions, model_provider, model_id, status)
+     values ($1, $2, 'Archie', 'archie', 'x', 'mock', 'mock-1', 'ready')`,
+    [ids.teamBot, orgId],
+  );
+  // A bot of organization B with a matching name.
+  await su.query(
+    `insert into app.agents (id, organization_id, name, username, instructions, model_provider, model_id, status)
+     values ($1, $2, 'Archie', 'archie', 'x', 'mock', 'mock-1', 'ready')`,
+    [randomUUID(), orgB],
+  );
+  [, danaId] = await joinAs("dana@example.test", "Dana Deactivated", "standard");
+  await su.query("update app.org_members set deactivated_at = now() where user_id = $1", [danaId]);
+  [pager] = await joinAs("pager@example.test", "Paula Pager", "standard");
+  [rita] = await joinAs("rita@example.test", "Rita Rate", "standard");
+
+  ids.oldOps = (await ok(admin.request("POST", "/api/v1/channels", { name: "old-ops" }))).id;
+  ids.oldOpsMessage = (await post(admin, ids.oldOps, "El nabo archivado")).id;
+  await ok(admin.request("POST", `/api/v1/channels/${ids.oldOps}/archive`));
+
+  ids.radishOld = await rawMessage({
+    org: orgId,
+    conv: ids.engineering,
+    authorKind: "user",
+    authorId: adminId,
+    body: "rábano antiguo",
+    seq: 9001,
+    createdAt: "2026-01-10T12:00:00Z",
+  });
+  ids.radishMid = await rawMessage({
+    org: orgId,
+    conv: ids.engineering,
+    authorKind: "user",
+    authorId: adminId,
+    body: "rábano medio",
+    seq: 9002,
+    createdAt: "2026-03-15T23:30:00Z",
+  });
+  ids.radishNew = await rawMessage({
+    org: orgId,
+    conv: ids.engineering,
+    authorKind: "user",
+    authorId: adminId,
+    body: "rábano reciente",
+    seq: 9003,
+  });
+
+  ids.pickles = (
+    await ok(admin.request("POST", "/api/v1/channels", { name: "pickles", topic: "Fermentation" }))
+  ).id;
+  const inserted = await su.query(
+    `insert into app.messages (organization_id, conversation_id, seq, author_kind, author_id, body)
+     select $1, $2, 10000 + n, 'user', $3, 'pepino número ' || n from generate_series(1, 45) n
+     returning id`,
+    [orgId, ids.pickles, adminId],
+  );
+  cucumbers = (inserted.rows as Array<{ id: string }>).map((r) => r.id).sort((a, b) => b.localeCompare(a));
 }, 180_000);
 
 afterAll(async () => {
@@ -231,10 +303,28 @@ describe("GET /search/messages (CHAT-11, D-04)", () => {
   it("stems English and keeps code identifiers", async () => {
     const deployed = await search(sam, { q: "deployed" });
     expect(hitIds(deployed)).toEqual([ids.deploy]);
-    expect((deployed.hits as Json[])[0]?.snippet).toContain(`${S}deploying${E}`);
+    // A short message is shown whole, the stemmed match marked.
+    expect((deployed.hits as Json[])[0]?.snippet).toBe(`We are ${S}deploying${E} the API tonight`);
     const code = await search(sam, { q: "useEffect" });
     expect(hitIds(code)).toEqual([ids.code]);
     expect((code.hits as Json[])[0]?.snippet).toContain(`${S}useEffect${E}`);
+  });
+
+  it("long messages get one fragment around the match; markers typed by users never become marks", async () => {
+    const filler = Array.from({ length: 60 }, (_, i) => `palabra${i}`).join(" ");
+    const long = (await post(sam, ids.engineering, `${filler} berenjena ${filler}`)).id;
+    const r = await search(sam, { q: "berenjena" });
+    expect(hitIds(r)).toEqual([long]);
+    const snippet = (r.hits as Json[])[0]?.snippet as string;
+    expect(snippet.length).toBeLessThanOrEqual(400);
+    expect(snippet).toContain(`${S}berenjena${E}`);
+    expect(snippet.split(" ").length).toBeLessThanOrEqual(20);
+
+    const forged = (await post(sam, ids.engineering, `${S}falso${E} pimiento rojo`)).id;
+    const f = await search(sam, { q: "pimiento" });
+    expect(hitIds(f)).toEqual([forged]);
+    const parts = splitSnippet((f.hits as Json[])[0]?.snippet as string);
+    expect(parts.filter((p) => p.mark).map((p) => p.text)).toEqual(["pimiento"]);
   });
 
   it("returns thread replies with their root and never deleted messages", async () => {
@@ -317,5 +407,170 @@ describe("GET /search/messages (CHAT-11, D-04)", () => {
       }),
     );
     expect(fromA.hits).toEqual([]);
+  });
+});
+
+describe("filters and paging (CHAT-11)", () => {
+  it("`in` limits hits to one readable conversation", async () => {
+    expect(hitIds(await search(sam, { q: "migracion", in: ids.engineering }))).toEqual([ids.migration]);
+    expect(hitIds(await search(sam, { q: "migracion", in: ids.samDm }))).toEqual([ids.dmMessage]);
+  });
+
+  it("`from` limits hits to one author, people and bots alike", async () => {
+    expect(hitIds(await search(sam, { q: "migracion", from: adminId }))).toEqual([ids.migration]);
+    expect(hitIds(await search(sam, { q: "migracion", from: ids.samBot }))).toEqual([ids.dmMessage]);
+    expect(hitIds(await search(sam, { q: "zanahoria", from: samId }))).toEqual([ids.reply]);
+    expect(hitIds(await search(sam, { q: "zanahoria", from: adminId }))).toEqual([]);
+  });
+
+  it("`after` / `before` are inclusive UTC days", async () => {
+    expect(hitIds(await search(admin, { q: "rabano", after: "2026-03-01" }))).toEqual([
+      ids.radishNew,
+      ids.radishMid,
+    ]);
+    expect(hitIds(await search(admin, { q: "rabano", before: "2026-03-15" }))).toEqual([
+      ids.radishMid,
+      ids.radishOld,
+    ]);
+    expect(hitIds(await search(admin, { q: "rabano", after: "2026-03-15", before: "2026-03-15" }))).toEqual([
+      ids.radishMid,
+    ]);
+    expect(
+      (await admin.request("GET", `/api/v1/search/messages?${qs({ q: "rabano", after: "15/03" })}`)).status,
+    ).toBe(400);
+  });
+
+  it("45 hits page as 20 / 20 / 5 with an opaque cursor, no duplicates, nextCursor null at the end", async () => {
+    const p1 = await search(pager, { q: "pepino" });
+    const p2 = await search(pager, { q: "pepino", cursor: p1.nextCursor });
+    const p3 = await search(pager, { q: "pepino", cursor: p2.nextCursor });
+    expect([p1.hits.length, p2.hits.length, p3.hits.length]).toEqual([20, 20, 5]);
+    expect(p1.nextCursor).toEqual(expect.any(String));
+    expect(p2.nextCursor).toEqual(expect.any(String));
+    expect(p3.nextCursor).toBeNull();
+    const all = [...hitIds(p1), ...hitIds(p2), ...hitIds(p3)];
+    expect(new Set(all).size).toBe(45);
+    // Equal timestamps: the id breaks the tie, newest-first order is stable across pages.
+    expect(all).toEqual(cucumbers);
+    expect(
+      (await pager.request("GET", `/api/v1/search/messages?${qs({ q: "pepino", cursor: "not-a-cursor" })}`))
+        .status,
+    ).toBe(400);
+  });
+
+  it("an archived channel's hit carries archived: true", async () => {
+    const r = await search(admin, { q: "nabo" });
+    expect(hitIds(r)).toEqual([ids.oldOpsMessage]);
+    expect((r.hits as Json[])[0]?.conversation).toMatchObject({
+      id: ids.oldOps,
+      label: "#old-ops",
+      archived: true,
+    });
+  });
+});
+
+describe("GET /search/people", () => {
+  const people = async (as: TestClient, q: string) =>
+    (await ok(as.request("GET", `/api/v1/search/people?${qs({ q })}`))).people as Json[];
+
+  it("finds members without accents by prefix, never deactivated members or another org's people", async () => {
+    const r = await people(sam, "vict");
+    expect(r[0]).toMatchObject({
+      kind: "user",
+      id: adminId,
+      displayName: "Víctor Ruiz",
+      handle: expect.any(String),
+    });
+    expect(r.map((p) => p.id)).not.toContain(userB);
+    expect(JSON.stringify(r)).not.toContain("Evil");
+    expect(await people(admin, "dana")).toEqual([]);
+    expect((await people(admin, "sam lee")).map((p) => p.id)).toContain(samId);
+  });
+
+  it("team bots for everyone; a personal bot only for its owner", async () => {
+    const forAdmin = await people(admin, "archi");
+    expect(forAdmin).toEqual([expect.objectContaining({ kind: "agent", id: ids.teamBot, handle: "archie" })]);
+    expect(await people(admin, "helper")).toEqual([]);
+    expect(await people(sam, "helper")).toEqual([
+      expect.objectContaining({ kind: "agent", id: ids.samBot, displayName: "Sam Helper" }),
+    ]);
+  });
+
+  it("fuzzy matches survive a typo", async () => {
+    expect((await people(admin, "Rutz")).map((p) => p.id)).toContain(adminId);
+  });
+});
+
+describe("GET /search/channels", () => {
+  const channels = async (as: TestClient, q: string) =>
+    (await ok(as.request("GET", `/api/v1/search/channels?${qs({ q })}`))).channels as Json[];
+
+  it("a typo still finds #engineering (only this org's)", async () => {
+    const r = await channels(admin, "enginering");
+    expect(r.map((c) => c.id)).toEqual([ids.engineering]);
+    expect(r[0]).toMatchObject({
+      name: "engineering",
+      visibility: "public",
+      isMember: true,
+      archived: false,
+    });
+    expect(r[0]?.memberCount).toBeGreaterThanOrEqual(2);
+  });
+
+  it("never returns a private channel the caller cannot read; flags archived channels; matches topics", async () => {
+    expect(await channels(admin, "board")).toEqual([]);
+    expect(await channels(sam, "board")).toEqual([
+      expect.objectContaining({ id: ids.board, visibility: "private", isMember: true }),
+    ]);
+    expect(await channels(admin, "old-ops")).toEqual([
+      expect.objectContaining({ id: ids.oldOps, archived: true }),
+    ]);
+    expect((await channels(admin, "fermentation")).map((c) => c.id)).toEqual([ids.pickles]);
+  });
+});
+
+describe("overview, tenancy and rate limit", () => {
+  it("the overview fills people and channels (≤ 5 each)", async () => {
+    const r = await ok(admin.request("GET", `/api/v1/search?${qs({ q: "engineering" })}`));
+    expect((r.channels as Json[]).map((c) => c.id)).toEqual([ids.engineering]);
+    const p = await ok(admin.request("GET", `/api/v1/search?${qs({ q: "archie" })}`));
+    expect((p.people as Json[]).map((x) => x.id)).toEqual([ids.teamBot]);
+    for (const k of ["messages", "people", "channels"])
+      expect((r[k] as Json[]).length).toBeLessThanOrEqual(5);
+  });
+
+  it("people and channels from org B's tenant never include org A rows", async () => {
+    const db = stack.built.core.db;
+    const access = createConversationAccess(stack.built.core);
+    const readableA = await db.withTenant({ organizationId: orgId, userId: adminId }, (tx) =>
+      access.readableIds(tx, adminId, { includeArchived: true }),
+    );
+    const fromB = await db.withTenant({ organizationId: orgB, userId: userB }, async (tx) => ({
+      people: await searchPeople(tx, { viewerId: userB, q: "vict", limit: 20, dir: await loadDirectory(tx) }),
+      channels: await searchChannels(tx, {
+        readableIds: [...readableA, ids.orgBChannel],
+        viewerId: userB,
+        q: "engineering",
+        limit: 20,
+      }),
+    }));
+    expect(fromB.people.map((p) => p.id)).toEqual([userB]);
+    expect(fromB.channels.map((c) => c.id)).toEqual([ids.orgBChannel]);
+  });
+
+  it("the 31st search request within a minute by one user answers 429; other users are unaffected", async () => {
+    const routes = [
+      "/api/v1/search",
+      "/api/v1/search/messages",
+      "/api/v1/search/people",
+      "/api/v1/search/channels",
+    ];
+    for (let i = 0; i < 30; i++) {
+      const res = await rita.request("GET", `${routes[i % routes.length]}?${qs({ q: `probe ${i}` })}`);
+      expect(res.status, `request ${i + 1}`).toBe(200);
+    }
+    const limited = await rita.request("GET", `/api/v1/search/people?${qs({ q: "probe" })}`);
+    expect(limited.status).toBe(429);
+    expect((await pager.request("GET", `/api/v1/search?${qs({ q: "probe" })}`)).status).toBe(200);
   });
 });
