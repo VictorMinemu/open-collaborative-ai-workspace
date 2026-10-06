@@ -22,12 +22,13 @@ import type { ApiModule, App, Core } from "./core";
 import { createChatAgentBridge } from "./lib/chat-agent-bridge";
 import { HttpError } from "./lib/errors";
 import { RedisBus } from "./lib/redis";
-import { createEnvFileSecretStore } from "./lib/secret-store";
+import { createEnvFileSecretStore, type SecretStore } from "./lib/secret-store";
 import { createAgentModule } from "./modules/agent";
 import { createAgentChannelModule } from "./modules/agent-channel";
+import { createArtifactModule } from "./modules/artifact";
 import { createAuditService } from "./modules/audit";
 import { createBotCapabilitiesModule } from "./modules/bot-capabilities";
-import { createChatModule } from "./modules/chat";
+import { createChatModule, createConversationAccess } from "./modules/chat";
 import { createDeviceModule, type DeviceHub } from "./modules/device";
 import { createAuth, createIdentityModule, IdentityService } from "./modules/identity";
 import { createMcpModule } from "./modules/mcp";
@@ -54,6 +55,8 @@ export async function buildApp(
   opts: {
     logger?: boolean /** Test hook: capture log lines. */;
     logStream?: { write(msg: string): void };
+    /** Test hook: resolve env/file SecretReferences from these values instead of process.env. */
+    secretStore?: SecretStore;
   } = {},
 ): Promise<BuiltApp> {
   const app = Fastify({
@@ -92,7 +95,7 @@ export async function buildApp(
   if (!encryptionKey) throw new Error("OCW_ENCRYPTION_KEY is invalid");
 
   // ---------------------------------------------------------------- core services (explicit wiring)
-  const secretStore = createEnvFileSecretStore();
+  const secretStore = opts.secretStore ?? createEnvFileSecretStore();
   const audit = createAuditService();
   const realtime = createRealtimeService({ db, bus });
   const identity = new IdentityService(createAuth(env, authDb), authDb, env, realtime);
@@ -230,6 +233,7 @@ export async function buildApp(
     createRealtimeModule({ realtime, identity, allowedOrigins, bus }),
     createSecretsModule(),
     createChatModule(core), // B1
+    createArtifactModule(core, { access: createConversationAccess(core) }), // Phase 4: attachments (ADR-0015)
     createAgentModule(core), // B2
     createBotCapabilitiesModule(core), // Phase 3.1: capabilities, bot policy, governance
     createMcpModule(core), // Phase 3.1: MCP server registry (D-13)

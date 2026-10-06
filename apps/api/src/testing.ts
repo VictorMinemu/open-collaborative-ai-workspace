@@ -3,6 +3,7 @@ import { startTestDatabase, type TestDatabase } from "@ocw/db/testing";
 import { RedisContainer, type StartedRedisContainer } from "@testcontainers/redis";
 import { type BuiltApp, buildApp } from "./app";
 import { type Env, loadEnv } from "./config/env";
+import { createEnvFileSecretStore } from "./lib/secret-store";
 
 export const TEST_SETUP_TOKEN = "test-setup-token-0123456789";
 export const WEB_ORIGIN = "http://localhost:3999";
@@ -26,7 +27,7 @@ export async function startTestStack(
   } = {},
 ): Promise<TestStack> {
   const [db, redis] = await Promise.all([startTestDatabase(), new RedisContainer("redis:8").start()]);
-  const env = loadEnv({
+  const source = {
     NODE_ENV: "test",
     LOG_LEVEL: "silent",
     DATABASE_URL: db.appUrl,
@@ -38,10 +39,15 @@ export async function startTestStack(
     OCW_PUBLIC_WEB_URL: WEB_ORIGIN,
     OCW_PUBLIC_API_URL: "http://localhost:4999",
     ...opts.env,
-  });
+  };
+  const env = loadEnv(source);
+  // SecretReferences (env provider) resolve against the same values, e.g. OCW_S3_SECRET_ACCESS_KEY.
+  const secretStore = createEnvFileSecretStore({ ...process.env, ...source });
   const built = await buildApp(
     env,
-    opts.logStream ? { logger: true, logStream: opts.logStream } : { logger: false },
+    opts.logStream
+      ? { logger: true, logStream: opts.logStream, secretStore }
+      : { logger: false, secretStore },
   );
   await built.app.listen({ host: "127.0.0.1", port: 0 });
   const addr = built.app.server.address();
