@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 39
+open_count: 46
 waived_count: 0
 fixed_count: 16
-total_count: 55
-last_updated: 2026-10-06T10:38:03.410Z
+total_count: 62
+last_updated: 2026-10-06T12:07:48.055Z
 ---
 
 # Broken Windows Ledger
@@ -70,6 +70,13 @@ last_updated: 2026-10-06T10:38:03.410Z
 | 53 | 04 | deviation | apps/web/components/settings/account-nav.ts |  | Settings › Notifications linked as an Account section instead of settings-nav.ts | open |  | 2026-10-06T10:38:03.268Z |  |
 | 54 | 04 | deviation | apps/web/components/notifications/os-notifier.tsx |  | OsNotifier shares the sidebar's user: cursor (GET /channels userSeq), applies notification_prefs.updated app-wide, skips pop-ups older than 10 minutes | open |  | 2026-10-06T10:38:03.340Z |  |
 | 55 | 04 | deviation | apps/desktop/e2e/smoke.e2e.ts |  | Smoke bridge key list gains setBadgeCount plus a badge round trip (not in plan list) | open |  | 2026-10-06T10:38:03.410Z |  |
+| 56 | 04 | deviation | apps/web/components/chat/attachments/lightbox.tsx |  | 04-13: lightbox backdrop forceRender (Base UI skips nested dialog backdrops; phone thread is a sheet) | open |  | 2026-10-06T12:07:47.641Z |  |
+| 57 | 04 | deviation | e2e/tests/work-zone-title.spec.ts |  | 04-13: tab-title assertions accept the 04-11 unread-count prefix | open |  | 2026-10-06T12:07:47.711Z |  |
+| 58 | 04 | deviation | e2e/tests/search.spec.ts |  | 04-13: palette bot found by 'sammy'; 'sam' overflows the 5-person overview on a shared stack | open |  | 2026-10-06T12:07:47.779Z |  |
+| 59 | 04 | todo | apps/web/components/chat/views/threads-view.tsx |  | 04-13 review: Threads view cards render @mentions as plain text (no MentionContext) | open |  | 2026-10-06T12:07:47.849Z |  |
+| 60 | 04 | todo | apps/web/components/chat/message-list.tsx |  | 04-13 review: (edited) marker on its own line instead of inline | open |  | 2026-10-06T12:07:47.918Z |  |
+| 61 | 04 | todo | e2e/tests/attachments.spec.ts |  | 04-13 review: capture upload progress mid-flight with a throttled route | open |  | 2026-10-06T12:07:47.987Z |  |
+| 62 | 04 | unrun-verify | apps/desktop/src/main/index.ts |  | Signed-build notification click-to-focus and dock badge remain manual checks (Pitfall 11) | open |  | 2026-10-06T12:07:48.055Z |  |
 
 ````json
 [
@@ -731,6 +738,90 @@ last_updated: 2026-10-06T10:38:03.410Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-06T10:38:03.410Z",
+    "resolved_at": null
+  },
+  {
+    "id": 56,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/web/components/chat/attachments/lightbox.tsx",
+    "line": null,
+    "description": "04-13: lightbox backdrop forceRender (Base UI skips nested dialog backdrops; phone thread is a sheet)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T12:07:47.641Z",
+    "resolved_at": null
+  },
+  {
+    "id": 57,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "e2e/tests/work-zone-title.spec.ts",
+    "line": null,
+    "description": "04-13: tab-title assertions accept the 04-11 unread-count prefix",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T12:07:47.711Z",
+    "resolved_at": null
+  },
+  {
+    "id": 58,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "e2e/tests/search.spec.ts",
+    "line": null,
+    "description": "04-13: palette bot found by 'sammy'; 'sam' overflows the 5-person overview on a shared stack",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T12:07:47.779Z",
+    "resolved_at": null
+  },
+  {
+    "id": 59,
+    "kind": "todo",
+    "phase": "04",
+    "file": "apps/web/components/chat/views/threads-view.tsx",
+    "line": null,
+    "description": "04-13 review: Threads view cards render @mentions as plain text (no MentionContext)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T12:07:47.849Z",
+    "resolved_at": null
+  },
+  {
+    "id": 60,
+    "kind": "todo",
+    "phase": "04",
+    "file": "apps/web/components/chat/message-list.tsx",
+    "line": null,
+    "description": "04-13 review: (edited) marker on its own line instead of inline",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T12:07:47.918Z",
+    "resolved_at": null
+  },
+  {
+    "id": 61,
+    "kind": "todo",
+    "phase": "04",
+    "file": "e2e/tests/attachments.spec.ts",
+    "line": null,
+    "description": "04-13 review: capture upload progress mid-flight with a throttled route",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T12:07:47.987Z",
+    "resolved_at": null
+  },
+  {
+    "id": 62,
+    "kind": "unrun-verify",
+    "phase": "04",
+    "file": "apps/desktop/src/main/index.ts",
+    "line": null,
+    "description": "Signed-build notification click-to-focus and dock badge remain manual checks (Pitfall 11)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T12:07:48.055Z",
     "resolved_at": null
   }
 ]
