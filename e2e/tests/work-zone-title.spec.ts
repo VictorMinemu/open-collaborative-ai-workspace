@@ -14,7 +14,7 @@ import { ADMIN, shot } from "./env";
 test.describe.configure({ mode: "serial" });
 
 const PROMPT = "Please fix the login redirect bug on the settings page when the session expires";
-const AUTO = "Fix login redirect bug settings page";
+const AUTO = "Fix login redirect bug settings";
 
 async function signIn(page: Page) {
   await page.goto("/login");
@@ -180,7 +180,7 @@ test("a session created without a prompt takes its title from the first prompt s
   let device: FakeDeviceHandle | null = null;
   let sam: Awaited<ReturnType<typeof openAs>> | null = null;
   const FIRST = "Add a dark mode toggle to the account settings page";
-  const AUTO_DARK = "Add dark mode toggle account settings";
+  const AUTO_DARK = "Add dark mode toggle account";
 
   try {
     // Slower fake: the first line is visible for ~4 s before the generated title replaces it.

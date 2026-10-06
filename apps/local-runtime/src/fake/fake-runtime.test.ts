@@ -1,7 +1,13 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RuntimeCatalog, type SessionEvent } from "@ocw/contracts";
+import {
+  normalizeSessionTitle,
+  RuntimeCatalog,
+  SESSION_TITLE_MAX_CHARS,
+  SESSION_TITLE_MAX_WORDS,
+  type SessionEvent,
+} from "@ocw/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { enroll } from "../enroll.js";
 import { RuntimeError } from "../runtime.js";
@@ -246,14 +252,34 @@ describe("FakeRuntime titles (03.2-12)", () => {
     const rt = new FakeRuntime("claude-code", 1);
     const req = (prompt: string) => ({ prompt, model: "haiku", signal: new AbortController().signal });
     const en = "Please fix the login redirect bug on the settings page when the session expires";
-    expect(await rt.generateTitle(req(en))).toBe('"Fix login redirect bug settings page."');
-    expect(await rt.generateTitle(req(en))).toBe('"Fix login redirect bug settings page."');
+    expect(await rt.generateTitle(req(en))).toBe('"Fix login redirect bug settings."');
+    expect(await rt.generateTitle(req(en))).toBe('"Fix login redirect bug settings."');
+    // Five words would be 34 characters: cut on a word boundary within 32.
     expect(
       await rt.generateTitle(req("Por favor arregla el error de inicio de sesión en la página de ajustes")),
-    ).toBe('"Arregla error inicio sesión página ajustes."');
+    ).toBe('"Arregla error inicio sesión."');
     expect(await rt.generateTitle(req("Add a dark mode toggle to the account settings page"))).toBe(
-      '"Add dark mode toggle account settings."',
+      '"Add dark mode toggle account."',
     );
+  });
+
+  it("generateTitle follows the title shape: 2-5 words, at most 32 characters, valid once normalized", async () => {
+    const rt = new FakeRuntime("codex", 1);
+    for (const prompt of [
+      "Please fix the login redirect bug on the settings page when the session expires",
+      "Investigate why the nightly export job sometimes writes duplicate rows into the analytics warehouse",
+      "Refactor the authentication middleware configuration loader",
+    ]) {
+      const raw = await rt.generateTitle({
+        prompt,
+        model: "gpt-6-luna",
+        signal: new AbortController().signal,
+      });
+      const text = raw.slice(1, -2); // drop the chatty quotes and period
+      expect(text.length, prompt).toBeLessThanOrEqual(SESSION_TITLE_MAX_CHARS);
+      expect(text.split(" ").length, prompt).toBeLessThanOrEqual(SESSION_TITLE_MAX_WORDS);
+      expect(normalizeSessionTitle(raw), prompt).toBe(text);
+    }
   });
 
   it("generateTitle is abortable", async () => {
