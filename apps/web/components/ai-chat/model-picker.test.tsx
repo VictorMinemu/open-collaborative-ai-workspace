@@ -155,7 +155,10 @@ describe("ModelPickerList", () => {
 
   it("not eligible: one disabled row explains it and points to the organization models", () => {
     const html = render(planState("not_eligible"), SONNET);
-    expect(html).toContain("Your ChatGPT account isn't eligible here — use an organization model");
+    expect(reasonText("not_eligible")).toBe(
+      "Your ChatGPT account isn't eligible here — use an organization model",
+    );
+    expect(html).toContain("Your ChatGPT account isn&#x27;t eligible here — use an organization model");
     expect(html).not.toContain("Continue with ChatGPT");
     expect(html).not.toContain("Reconnect ChatGPT");
     const onConnect = vi.fn();
