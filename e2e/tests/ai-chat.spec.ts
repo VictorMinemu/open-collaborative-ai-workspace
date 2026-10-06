@@ -1,4 +1,5 @@
 import { type APIRequestContext, expect, type Page, test } from "@playwright/test";
+import { apiAs, ensureMember, openAs, SAM } from "../support/actors";
 import {
   answerText,
   lastAssistant,
@@ -7,7 +8,6 @@ import {
   sendAi,
   waitForLonger,
 } from "../support/ai-chat";
-import { apiAs, ensureMember, openAs, SAM } from "../support/actors";
 import { ADMIN, shot } from "./env";
 
 /**
