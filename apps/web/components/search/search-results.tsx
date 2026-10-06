@@ -1,7 +1,7 @@
 "use client";
 
 import type { SearchMessageHit } from "@ocw/contracts";
-import { Hash, Lock, MessageCircle, Search, SearchX, X } from "lucide-react";
+import { Hash, Lock, MessageCircle, Search, SearchX, Sparkles, X } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -147,6 +147,8 @@ function groupByConversation(hits: SearchMessageHit[]) {
 
 function linkFor(hit: SearchMessageHit): string | null {
   const c = hit.conversation;
+  // The member's own AI chat (05-10): its page (no message anchor there yet).
+  if (c.kind === "ai_chat") return `/chat/ai/${c.id}`;
   const kind = c.kind === "channel" || c.kind === "dm" || c.kind === "group" ? c.kind : null;
   return kind ? permalinkPath({ id: c.id, kind }, hit.messageId, hit.threadRootId) : null;
 }
@@ -205,9 +207,16 @@ export function SearchResults({ filters }: { filters: SearchFilters }) {
               ? g.conversation.visibility === "private"
                 ? Lock
                 : Hash
-              : MessageCircle;
+              : g.conversation.kind === "ai_chat"
+                ? Sparkles
+                : MessageCircle;
           return (
-            <section key={g.key} className="overflow-hidden rounded-xl border bg-card">
+            <section
+              key={g.key}
+              data-testid="search-page-group"
+              data-kind={g.conversation.kind}
+              className="overflow-hidden rounded-xl border bg-card"
+            >
               <header className="flex items-center gap-1.5 border-b bg-muted/40 px-3.5 py-2 font-medium text-[13px]">
                 <Icon className="size-3.5 text-muted-foreground" aria-hidden />
                 <span className="truncate">
@@ -215,6 +224,11 @@ export function SearchResults({ filters }: { filters: SearchFilters }) {
                     ? g.conversation.label.replace(/^#/, "")
                     : g.conversation.label}
                 </span>
+                {g.conversation.kind === "ai_chat" ? (
+                  <span className="rounded bg-brand-soft px-1 font-normal text-[10px] text-brand-soft-foreground">
+                    AI chat
+                  </span>
+                ) : null}
                 {g.conversation.archived ? (
                   <span className="rounded bg-muted px-1 font-normal text-[10px] text-muted-foreground">
                     archived

@@ -28,6 +28,7 @@ import {
   PostMessageRequest,
   PresignUploadRequest,
   RESERVED_HANDLES,
+  SearchOverview,
   SearchQuery,
   SNIPPET_MARK_END,
   SNIPPET_MARK_START,
@@ -422,6 +423,27 @@ describe("search (04-01)", () => {
     expect(parts.map((p) => p.text).join("")).toBe("a and b");
     expect(SNIPPET_MARK_START).toBe("");
     expect(SNIPPET_MARK_END).toBe("");
+  });
+
+  it("SearchOverview parses with and without aiChats (05-10, add-only)", () => {
+    const base = { messages: [], people: [], channels: [] };
+    expect(SearchOverview.parse(base)).toEqual(base);
+    const chat = {
+      id: "01a1d2c3-0000-7000-8000-000000000001",
+      title: "Quarterly kumquat roadmap",
+      titleSource: "auto",
+      lastModel: { backend: "org_key", provider: "anthropic", modelId: "claude-sonnet-5-5" },
+      lastModelLabel: "Claude Sonnet 5.5",
+      archived: false,
+      generating: false,
+      createdAt: "2026-10-06T10:00:00.000Z",
+      lastActivityAt: "2026-10-06T10:05:00.000Z",
+    };
+    expect(SearchOverview.parse({ ...base, aiChats: [chat] }).aiChats).toEqual([chat]);
+    expect(
+      SearchOverview.safeParse({ ...base, aiChats: Array.from({ length: 9 }, () => chat) }).success,
+    ).toBe(false);
+    expect(SearchOverview.safeParse({ ...base, aiChats: [{ ...chat, title: 3 }] }).success).toBe(false);
   });
 
   it("SearchQuery bounds", () => {

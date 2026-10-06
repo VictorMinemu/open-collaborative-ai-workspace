@@ -10,7 +10,7 @@ import { eq } from "drizzle-orm";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { TEST_SETUP_TOKEN, TestClient } from "../../testing";
-import { type AiStack, seedPlan, startAiStack } from "../../testing-ai";
+import { type AiStack, seedPlan, startAiStack, withoutTitles } from "../../testing-ai";
 import { invite } from "../../testing-workzone";
 import { createModelGateway } from "../model-gateway";
 import { createRunLoop } from "./run-loop";
@@ -75,9 +75,26 @@ async function settled(generationId: string, timeoutMs = 20_000): Promise<Json> 
   }
 }
 
-const usageOf = async (generationId: string) =>
-  (await su.query("select * from app.ai_usage_records where generation_id = $1", [generationId]))
-    .rows as Json[];
+/** Usage records of a generation of one kind (the chat answer's by default; 05-10 adds a `title` record). */
+const usageOf = async (generationId: string, kind: "chat" | "title" = "chat") =>
+  (
+    await su.query("select * from app.ai_usage_records where generation_id = $1 and kind = $2", [
+      generationId,
+      kind,
+    ])
+  ).rows as Json[];
+
+/**
+ * Waits for the auto-title call of a chat's first answer to be metered (05-10), so counters read afterwards are
+ * stable. A title call that fails records nothing: give up quietly after a few seconds.
+ */
+async function titleSettled(generationId: string): Promise<void> {
+  const until = Date.now() + 5_000;
+  while (Date.now() < until) {
+    if ((await usageOf(generationId, "title")).length > 0) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
 
 /** The one usage record of a generation (fails when there is none or more than one). */
 async function oneUsage(generationId: string): Promise<Json> {
@@ -118,6 +135,7 @@ async function recordSums(userId: string, backendClass: "org_key" | "chatgpt_pla
 async function turn(text: string, model: Json = SONNET) {
   const created = await ok(createChat(sam, text, model), 201);
   const g = await settled(created.generation.id);
+  if (g.status === "completed") await titleSettled(created.generation.id);
   return { created, g, chatId: created.chat.id as string, generationId: created.generation.id as string };
 }
 
@@ -320,6 +338,7 @@ describe("today's counters (one row per member, day and backend class)", () => {
   it("are written in the usage record's transaction: a rollback leaves neither, a retried finalize adds nothing", async () => {
     const { generationId } = await turn("Something to re-record");
     const before = await daily(samId, "org_key");
+    const titlesBefore = await usageOf(generationId, "title");
     const core = stack.built.core;
     const [gen] = await core.db.withTenant({ organizationId: orgId }, (tx) =>
       tx.select().from(aiGenerations).where(eq(aiGenerations.id, generationId)),
@@ -356,6 +375,7 @@ describe("today's counters (one row per member, day and backend class)", () => {
       }),
     ).rejects.toThrow("roll back");
     expect(await usageOf(generationId)).toHaveLength(1);
+    expect(await usageOf(generationId, "title")).toEqual(titlesBefore);
     expect(await daily(samId, "org_key")).toEqual(before);
   });
 
@@ -442,7 +462,7 @@ describe("daily caps stop organization-key use before any model call (D-06, T-05
     const again = await ok(regenerate(riley, first.chat.id), 201);
     await settled(again.generation.id);
 
-    const requestsBefore = stack.fake.requests("anthropic").length;
+    const requestsBefore = withoutTitles(stack.fake.requests("anthropic")).length;
     const gensBefore = await generationsOf(rileyId);
     const messagesBefore = await messagesBy(rileyId);
     const refused = await send(riley, first.chat.id, "A third one");
@@ -462,7 +482,7 @@ describe("daily caps stop organization-key use before any model call (D-06, T-05
     }
     expect(await generationsOf(rileyId)).toBe(gensBefore);
     expect(await messagesBy(rileyId)).toBe(messagesBefore);
-    expect(stack.fake.requests("anthropic").length).toBe(requestsBefore);
+    expect(withoutTitles(stack.fake.requests("anthropic")).length).toBe(requestsBefore);
     const row = await daily(rileyId, "org_key");
     expect(row?.generations).toBe(2);
 

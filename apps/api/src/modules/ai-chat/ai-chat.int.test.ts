@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "../../app";
 import { createEnvFileSecretStore } from "../../lib/secret-store";
 import { TEST_SETUP_TOKEN, TestClient } from "../../testing";
-import { type AiStack, seedPlan, startAiStack, subscribeConv } from "../../testing-ai";
+import { type AiStack, seedPlan, startAiStack, subscribeConv, withoutTitles } from "../../testing-ai";
 import { invite } from "../../testing-workzone";
 
 /**
@@ -216,7 +216,7 @@ describe("a plan turn streams over the WebSocket and persists with a usage recor
   });
 
   it("the fake saw exactly one /v1/responses call with Sam's own bearer, store:false, stream:true, a developer item and no forbidden key", async () => {
-    const calls = stack.fake.requests("responses");
+    const calls = withoutTitles(stack.fake.requests("responses"));
     expect(calls).toHaveLength(1);
     const call = calls[0]!;
     expect(call.headers.authorization).toMatch(new RegExp(`^Bearer fake-plan-${samId}-`));
@@ -234,8 +234,11 @@ describe("a plan turn streams over the WebSocket and persists with a usage recor
     const gen = (await su.query("select * from app.ai_generations where conversation_id = $1", [chatId]))
       .rows;
     expect(gen).toHaveLength(1);
-    const usage = (await su.query("select * from app.ai_usage_records where generation_id = $1", [gen[0].id]))
-      .rows;
+    const usage = (
+      await su.query("select * from app.ai_usage_records where generation_id = $1 and kind = 'chat'", [
+        gen[0].id,
+      ])
+    ).rows;
     expect(usage).toHaveLength(1);
     expect(usage[0]).toMatchObject({
       kind: "chat",
@@ -377,7 +380,7 @@ describe("another member never uses Sam's plan (D-01, T-05-02-01)", () => {
     const res = await createChat(alex, "use Sam's plan please");
     expect(res.status).toBe(409);
     expect(errorOf(res)).toMatchObject({ code: "model_unavailable", details: { reason: "not_connected" } });
-    expect(stack.fake.requests()).toEqual([]);
+    expect(withoutTitles(stack.fake.requests())).toEqual([]);
     const created = await su.query("select count(*)::int as n from app.ai_chats where owner_user_id = $1", [
       alexId,
     ]);
@@ -523,7 +526,10 @@ describe("provider failures finalize cleanly (Pitfall 5, P-10)", () => {
     expect(msg.status).toBe("failed");
     expect(msg.body.length).toBeGreaterThan(0);
     expect("Echo: hello".startsWith(msg.body) || msg.body.startsWith("Echo")).toBe(true);
-    const usage = await su.query("select * from app.ai_usage_records where generation_id = $1", [g.id]);
+    const usage = await su.query(
+      "select * from app.ai_usage_records where generation_id = $1 and kind = 'chat'",
+      [g.id],
+    );
     expect(usage.rows).toHaveLength(1);
     const line = stack.logs.find((l) => l.includes("ai generation failed"));
     expect(line).toBeDefined();

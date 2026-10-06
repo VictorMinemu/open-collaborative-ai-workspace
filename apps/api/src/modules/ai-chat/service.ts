@@ -1,19 +1,23 @@
 import {
   AI_SNAPSHOT_MESSAGES,
+  type AiChatDetail,
+  type AiChatList,
+  type AiChatListQuery,
   type AiChatSnapshot,
   type AiChatSummary,
   type CreateAiChatRequest,
   EventTypes,
   type MessagePage,
   type ModelRef,
-  normalizeSessionTitle,
   type Permission,
   type SendAiMessageRequest,
   type SendAiMessageResponse,
+  type UpdateAiChatRequest,
 } from "@ocw/contracts";
 import { aiChats, aiGenerations, conversationMembers, conversations, messages, type Tx } from "@ocw/db";
-import { and, desc, eq, isNull, lt, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
+import { z } from "zod";
 import { authOf, type Core, tenant } from "../../core";
 import { badRequest, conflict, HttpError, notFound } from "../../lib/errors";
 import {
@@ -36,7 +40,6 @@ import {
   aiMessage,
   chatDetail,
   chatSummary,
-  DEFAULT_CHAT_TITLE,
   directoryOf,
   EMPTY_DIRECTORY,
   type GenerationRow,
@@ -45,6 +48,7 @@ import {
 } from "./dto";
 import { consumeGeneration, refuseOverLimit } from "./limits";
 import type { RunLoop } from "./run-loop";
+import { heuristicTitle } from "./titles";
 import { backendClassOf } from "./usage";
 
 /**
@@ -66,18 +70,26 @@ export interface AiChatDeps {
 
 const VIEWER_CAN: readonly Permission[] = ["ai_chat.use", "ai_chat.web", "ai_chat.share"];
 const NOT_FOUND = "AI chat not found";
-const TITLE_FALLBACK_MAX = 32;
 
-/** ADR-0014 heuristic title from the first message: normalized, else its first line cut to 32 chars. */
-export function heuristicTitle(body: string): string {
-  const normalized = normalizeSessionTitle(body);
-  if (normalized) return normalized;
-  const line = (body.split(/\r?\n/u).find((l) => l.trim().length > 0) ?? "").replace(/\s+/gu, " ").trim();
-  if (!line) return DEFAULT_CHAT_TITLE;
-  if (line.length <= TITLE_FALLBACK_MAX) return line;
-  const cut = line.slice(0, TITLE_FALLBACK_MAX);
-  const space = cut.lastIndexOf(" ");
-  return (space > 0 ? cut.slice(0, space) : cut).trim();
+/** 410 on anything that would write a turn into an archived chat (05-10): it opens read-only until unarchived. */
+export function refuseArchived(conv: ConversationRow): void {
+  if (conv.archivedAt !== null) {
+    throw new HttpError(410, "chat_archived", "This chat is archived. Unarchive it to continue.");
+  }
+}
+
+/** Opaque keyset cursor of the chat list: (last activity with microseconds, conversation id), newest first. */
+const ListCursor = z.object({ t: z.string().min(1).max(64), i: z.uuid() });
+const encodeListCursor = (c: z.infer<typeof ListCursor>) =>
+  Buffer.from(JSON.stringify(c), "utf8").toString("base64url");
+function decodeListCursor(raw: string): z.infer<typeof ListCursor> {
+  try {
+    const parsed = ListCursor.parse(JSON.parse(Buffer.from(raw, "base64url").toString("utf8")));
+    if (Number.isNaN(Date.parse(parsed.t))) throw new Error("bad time");
+    return parsed;
+  } catch {
+    throw badRequest("Invalid cursor", "invalid_cursor");
+  }
 }
 
 const isUniqueViolation = (err: unknown): boolean => {
@@ -411,6 +423,7 @@ export function createAiChatService(deps: AiChatDeps) {
           }
           return { response: await responseFor(tx, retried), start: null };
         }
+        refuseArchived(conv);
         const resolved = await resolveOr409(tx, body.model, auth.userId);
         if (await isGenerating(tx, conv.id)) {
           throw conflict("An answer is still being generated in this chat", "generation_in_progress");
@@ -429,6 +442,130 @@ export function createAiChatService(deps: AiChatDeps) {
       if ("refused" in out) throw out.refused;
       if (out.start) runLoop.start({ organizationId: out.start.organizationId, generationId: out.start.id });
       return out.response;
+    },
+
+    /**
+     * The caller's own AI chats (05-10, AICHAT-04, P-03): the resolver's readable set with kind `ai_chat` (owner
+     * only, admins included), narrowed to `owner_user_id = caller`, newest activity first, keyset-paged; archived
+     * ones only with `archived=true`. A member without `ai_chat.use` simply has none to list.
+     */
+    async list(req: FastifyRequest, q: AiChatListQuery): Promise<AiChatList> {
+      const auth = authOf(req);
+      return core.db.withTenant(tenant(req), async (tx) => {
+        const cursor = q.cursor ? decodeListCursor(q.cursor) : null;
+        if (!(await perms.can(req, tx, "ai_chat.use"))) return { chats: [], nextCursor: null };
+        const readable = await access.readableIds(tx, auth.userId, {
+          kinds: ["ai_chat"],
+          includeArchived: true,
+        });
+        if (readable.length === 0) return { chats: [], nextCursor: null };
+        const rows = await tx
+          .select({ conv: conversations, chat: aiChats, at: sql<string>`${aiChats.lastActivityAt}::text` })
+          .from(aiChats)
+          .innerJoin(conversations, eq(conversations.id, aiChats.conversationId))
+          .where(
+            and(
+              inArray(aiChats.conversationId, readable),
+              eq(aiChats.ownerUserId, auth.userId),
+              q.archived ? isNotNull(conversations.archivedAt) : isNull(conversations.archivedAt),
+              cursor
+                ? or(
+                    sql`${aiChats.lastActivityAt} < ${cursor.t}::timestamptz`,
+                    and(
+                      sql`${aiChats.lastActivityAt} = ${cursor.t}::timestamptz`,
+                      sql`${aiChats.conversationId} < ${cursor.i}::uuid`,
+                    ),
+                  )
+                : undefined,
+            ),
+          )
+          .orderBy(desc(aiChats.lastActivityAt), desc(aiChats.conversationId))
+          .limit(q.limit + 1);
+        const page = rows.slice(0, q.limit);
+        const ids = page.map((r) => r.conv.id);
+        const live = ids.length
+          ? await tx
+              .select({ id: aiGenerations.conversationId })
+              .from(aiGenerations)
+              .where(and(inArray(aiGenerations.conversationId, ids), eq(aiGenerations.status, "running")))
+          : [];
+        const generating = new Set(live.map((g) => g.id));
+        const last = page.at(-1);
+        return {
+          chats: page.map((r) =>
+            chatSummary(r.conv, r.chat, { generating: generating.has(r.conv.id), gateway }),
+          ),
+          nextCursor:
+            rows.length > q.limit && last ? encodeListCursor({ t: last.at, i: last.conv.id }) : null,
+        };
+      });
+    },
+
+    /**
+     * Rename and archive/unarchive (05-10, owner only, hidden = 404). A typed title becomes `title_source = 'user'`
+     * and is never replaced by a generated one; archive is the conversation's `archived_at`. Each real change is
+     * audited (`ai_chat.renamed` carries the id only, never the title) and announced as `ai_chat.updated`.
+     * Settings (instructions, tools) arrive with 05-11 and are refused until then.
+     */
+    async update(req: FastifyRequest, chatId: string, body: UpdateAiChatRequest): Promise<AiChatDetail> {
+      if (body.settings !== undefined) {
+        throw badRequest("Chat settings cannot be changed yet", "settings_unavailable");
+      }
+      return core.db.withTenant(tenant(req), async (tx) => {
+        const { conv, facts } = await ownedChat(req, tx, chatId);
+        const { chat } = await loadChat(tx, conv.id);
+        const at = new Date().toISOString();
+        const audits: Array<"ai_chat.renamed" | "ai_chat.archived" | "ai_chat.unarchived"> = [];
+        if (body.title !== undefined && (body.title !== conv.name || chat.titleSource !== "user")) {
+          await tx.update(conversations).set({ name: body.title }).where(eq(conversations.id, conv.id));
+          await tx
+            .update(aiChats)
+            .set({ titleSource: "user", updatedAt: at })
+            .where(eq(aiChats.conversationId, conv.id));
+          audits.push("ai_chat.renamed");
+        }
+        if (body.archived !== undefined && body.archived !== (conv.archivedAt !== null)) {
+          await tx
+            .update(conversations)
+            .set({ archivedAt: body.archived ? at : null })
+            .where(eq(conversations.id, conv.id));
+          await tx.update(aiChats).set({ updatedAt: at }).where(eq(aiChats.conversationId, conv.id));
+          audits.push(body.archived ? "ai_chat.archived" : "ai_chat.unarchived");
+        }
+        for (const action of audits) {
+          // The id only: a title is the member's own text (T-05-10-04).
+          await core.audit.record(tx, {
+            action,
+            resourceType: "ai_chat",
+            resourceId: conv.id,
+            metadata: { conversationId: conv.id },
+          });
+        }
+        const fresh = await loadChat(tx, conv.id);
+        const summary = chatSummary(fresh.conv, fresh.chat, {
+          generating: await isGenerating(tx, conv.id),
+          gateway,
+        });
+        if (audits.length > 0) {
+          await core.realtime.appendEvent(tx, `user:${fresh.chat.ownerUserId}`, EventTypes.aiChatUpdated, {
+            chat: summary,
+          });
+        }
+        const policy = await loadAiChatPolicy(tx);
+        const viewerCan = await perms.viewerCan(req, tx, channelResource(facts), VIEWER_CAN);
+        return chatDetail(summary, fresh.chat, policy, viewerCan);
+      });
+    },
+
+    /**
+     * TEST-ONLY (05-10 e2e): moves a chat's last activity back so the list's date groups can be exercised. Owner
+     * only, like every route here; mounted only where the ChatGPT test seed is (never in production).
+     */
+    async setActivityForTest(req: FastifyRequest, chatId: string, lastActivityAt: string): Promise<void> {
+      await core.db.withTenant(tenant(req), async (tx) => {
+        const { conv } = await ownedChat(req, tx, chatId);
+        await tx.update(aiChats).set({ lastActivityAt }).where(eq(aiChats.conversationId, conv.id));
+      });
     },
 
     async snapshot(req: FastifyRequest, chatId: string): Promise<AiChatSnapshot> {

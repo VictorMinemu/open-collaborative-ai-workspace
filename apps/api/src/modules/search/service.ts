@@ -1,5 +1,8 @@
 import {
+  type AiChatSummary,
   type ConversationRef,
+  type MessageAuthor,
+  ModelRef,
   type SearchChannel,
   type SearchMessageHit,
   type SearchMessagesResult,
@@ -144,6 +147,41 @@ export async function conversationRefs(
 
 // ---------------------------------------------------------------- messages
 
+/** Display label of a model (the model gateway's `labelOf`): the author of an AI chat answer (05-10). */
+export type ModelLabelOf = (ref: ModelRef) => string;
+
+/** The label an AI chat answer is shown under when its generation is unknown. */
+const ASSISTANT_LABEL = "Assistant";
+
+/**
+ * Authors of AI chat answers (P-13: `agent` rows without an author id): the model of each answer's latest
+ * generation, else "Assistant" — never "System".
+ */
+async function aiAnswerAuthors(
+  tx: Tx,
+  messageIds: readonly string[],
+  labelOf: ModelLabelOf | undefined,
+): Promise<Map<string, MessageAuthor>> {
+  const out = new Map<string, MessageAuthor>();
+  if (messageIds.length === 0) return out;
+  const rows = (
+    await tx.execute(sql`
+      select distinct on (assistant_message_id) assistant_message_id, backend, provider, model_id
+      from app.ai_generations where assistant_message_id = any(${uuidArray(messageIds)})
+      order by assistant_message_id, attempt desc, started_at desc`)
+  ).rows as Array<{ assistant_message_id: string; backend: string; provider: string; model_id: string }>;
+  const byMessage = new Map(rows.map((r) => [r.assistant_message_id, r]));
+  for (const id of messageIds) {
+    const g = byMessage.get(id);
+    const ref = g
+      ? ModelRef.safeParse({ backend: g.backend, provider: g.provider, modelId: g.model_id })
+      : null;
+    const displayName = ref?.success && labelOf ? labelOf(ref.data) : ASSISTANT_LABEL;
+    out.set(id, { kind: "agent", id: null, displayName, avatarUrl: null });
+  }
+  return out;
+}
+
 export interface SearchMessagesInput {
   /** Resolver-filtered conversation ids (P-03). */
   readableIds: string[];
@@ -159,6 +197,8 @@ export interface SearchMessagesInput {
   cursor?: string;
   limit: number;
   dir: Directory;
+  /** Labels the model that wrote an AI chat answer (05-10). */
+  labelOf?: ModelLabelOf;
 }
 
 /**
@@ -218,6 +258,18 @@ export async function searchMessages(tx: Tx, input: SearchMessagesInput): Promis
     input.viewerId,
     input.dir,
   );
+  const answers = await aiAnswerAuthors(
+    tx,
+    page
+      .filter(
+        (r) =>
+          r.author_kind === "agent" &&
+          r.author_id === null &&
+          refs.get(r.conversation_id)?.kind === "ai_chat",
+      )
+      .map((r) => r.id),
+    input.labelOf,
+  );
   const hits: SearchMessageHit[] = [];
   for (const r of page) {
     const conversation = refs.get(r.conversation_id);
@@ -227,7 +279,7 @@ export async function searchMessages(tx: Tx, input: SearchMessagesInput): Promis
       conversation,
       threadRootId: r.thread_id,
       seq: Number(r.seq),
-      author: authorOf(input.dir, r.author_kind, r.author_id),
+      author: answers.get(r.id) ?? authorOf(input.dir, r.author_kind, r.author_id),
       createdAt: iso(r.created_at),
       snippet: pickSnippet([r.s_simple, r.s_es, r.s_en]),
     });
@@ -397,4 +449,64 @@ export async function searchChannels(
     archived: r.archived_at !== null,
     memberCount: Number(r.member_count),
   }));
+}
+
+// ---------------------------------------------------------------- AI chats (05-10)
+
+/**
+ * The caller's own AI chats whose title matches `q` (05-10, AICHAT-04, P-03): only ids of the readable set (the
+ * resolver keeps AI chats owner-only, admins included) and, narrowing further, chats the viewer owns. Same matching
+ * as channels (contains, else trigram); live chats first, then title prefix, similarity and recent activity.
+ */
+export async function searchAiChats(
+  tx: Tx,
+  input: { readableIds: string[]; viewerId: string; q: string; limit: number; labelOf?: ModelLabelOf },
+): Promise<AiChatSummary[]> {
+  const like = likeEscaped(input.q);
+  if (!like || input.readableIds.length === 0) return [];
+  const res = await tx.execute(sql`
+    with p as (select app.unaccent(lower(${input.q.trim()})) as q, app.unaccent(${like}) as l),
+    scored as (
+      select c.id, c.name, c.archived_at, a.title_source, a.last_model, a.created_at, a.last_activity_at,
+             app.unaccent(lower(coalesce(c.name, ''))) as norm
+      from app.conversations c join app.ai_chats a on a.conversation_id = c.id
+      where c.kind = 'ai_chat' and c.id = any(${uuidArray(input.readableIds)})
+        and a.owner_user_id = ${input.viewerId}::uuid
+    )
+    select s.id, s.name, s.archived_at, s.title_source, s.last_model, s.created_at, s.last_activity_at,
+           exists (select 1 from app.ai_generations g where g.conversation_id = s.id and g.status = 'running') as generating,
+           (s.norm like p.l || '%' escape '\\') as prefix,
+           greatest(app.similarity(s.norm, p.q), app.word_similarity(p.q, s.norm)) as score
+    from scored s, p
+    where s.norm like '%' || p.l || '%' escape '\\'
+       or app.similarity(s.norm, p.q) >= ${SIMILARITY}
+       or app.word_similarity(p.q, s.norm) >= ${WORD_SIMILARITY}
+    order by (s.archived_at is not null), prefix desc, score desc, s.last_activity_at desc, s.id
+    limit ${input.limit}`);
+  return (
+    res.rows as Array<{
+      id: string;
+      name: string | null;
+      archived_at: unknown;
+      title_source: AiChatSummary["titleSource"];
+      last_model: unknown;
+      created_at: unknown;
+      last_activity_at: unknown;
+      generating: boolean;
+    }>
+  ).map((r) => {
+    const parsed = ModelRef.safeParse(r.last_model);
+    const lastModel = parsed.success ? parsed.data : null;
+    return {
+      id: r.id,
+      title: r.name ?? "New chat",
+      titleSource: r.title_source,
+      lastModel,
+      lastModelLabel: lastModel && input.labelOf ? input.labelOf(lastModel) : null,
+      archived: r.archived_at !== null,
+      generating: r.generating,
+      createdAt: iso(r.created_at),
+      lastActivityAt: iso(r.last_activity_at),
+    };
+  });
 }

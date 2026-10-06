@@ -8,7 +8,7 @@ import WebSocket from "ws";
 import { FakeCellPlugin, type MentionPayload } from "../../../../../e2e/support/fake-cell-plugin";
 import { MissingSecretError } from "../../lib/secret-store";
 import { TEST_SETUP_TOKEN, TestClient, WEB_ORIGIN } from "../../testing";
-import { type AiStack, seedPlan, startAiStack, subscribeConv } from "../../testing-ai";
+import { type AiStack, seedPlan, startAiStack, subscribeConv, withoutTitles } from "../../testing-ai";
 import { invite } from "../../testing-workzone";
 
 /**
@@ -92,7 +92,7 @@ async function anthropicKeyOfTurn(model: Json = SONNET): Promise<string | undefi
   expect(res.status, JSON.stringify(res.body)).toBe(201);
   const g = await settled((res.body as Json).generation.id);
   expect(g.status, JSON.stringify(g)).toBe("completed");
-  const calls = stack.fake.requests("anthropic");
+  const calls = withoutTitles(stack.fake.requests("anthropic"));
   expect(calls).toHaveLength(1);
   return calls[0]?.headers["x-api-key"] as string | undefined;
 }
@@ -312,7 +312,7 @@ describe("keys are resolved only through secret_ref (D-07, P-10)", () => {
     const res = await createChat(SONNET);
     expect(res.status).toBe(409);
     expect(errorOf(res).details).toEqual({ reason: "no_key" });
-    expect(stack.fake.requests("anthropic")).toHaveLength(0);
+    expect(withoutTitles(stack.fake.requests("anthropic"))).toHaveLength(0);
     const cell = await cellSnapshot();
     expect(cell.providers.some((p) => p.id === "anthropic")).toBe(false);
   });
@@ -345,7 +345,7 @@ describe("keys are resolved only through secret_ref (D-07, P-10)", () => {
       const res = await createChat(SONNET);
       expect(res.status).toBe(409);
       expect(errorOf(res).details).toEqual({ reason: "no_key" });
-      expect(stack.fake.requests("anthropic")).toHaveLength(0);
+      expect(withoutTitles(stack.fake.requests("anthropic"))).toHaveLength(0);
       const cell = await cellSnapshot();
       expect(cell.providers.some((p) => p.id === "anthropic")).toBe(false);
       expect(JSON.stringify(cell)).not.toContain(FOREIGN_KEY);

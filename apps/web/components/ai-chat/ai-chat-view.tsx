@@ -1,9 +1,11 @@
 "use client";
 
 import type { AiModelOption, SendAiMessageResponse } from "@ocw/contracts";
-import { ChevronLeft, Lock, MessageCircleQuestion, SquarePen } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { Archive, Lock, MessageCircleQuestion } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useState } from "react";
 import { toast } from "sonner";
 import { EmptyState } from "@/components/common/empty-state";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -15,11 +17,13 @@ import {
   primeAiChat,
   sendAiMessage,
   stopGeneration,
+  updateAiChat,
   useAiChat,
+  useAiChatSummary,
   useAiModels,
 } from "@/lib/ai-chat-queries";
 import { errorMessage, isApiError } from "@/lib/api";
-import { cn } from "@/lib/utils";
+import { AiChatHeader, AiChatPlainHeader } from "./ai-chat-header";
 import { AiComposer } from "./ai-composer";
 import { AiMessageList } from "./ai-message-list";
 
@@ -89,7 +93,10 @@ function NewChat() {
 function ExistingChat({ chatId }: { chatId: string }) {
   const chat = useAiChat(chatId);
   const models = useAiModels();
-  const detail = chat.snapshot?.chat;
+  // A title generated or typed after the snapshot, or an archive, arrives live as the chat's latest summary.
+  const live = useAiChatSummary(chatId);
+  const snapshotChat = chat.snapshot?.chat;
+  const detail = snapshotChat && live ? { ...snapshotChat, ...live } : snapshotChat;
   const writing = chat.messages.findLast((m) => m.authorKind === "agent" && m.status === "streaming");
   const busy = writing !== undefined;
   // The generation to stop: the streaming answer's, else the snapshot's running one.
@@ -165,60 +172,75 @@ function ExistingChat({ chatId }: { chatId: string }) {
   }
 
   return (
-    <Frame title={detail?.title ?? "New chat"}>
+    <Frame header={detail ? <AiChatHeader chat={detail} /> : <AiChatPlainHeader title="New chat" />}>
       <AiMessageList
         chatId={chatId}
         messages={chat.messages}
         textOf={chat.textOf}
         onRegenerated={chat.applySent}
       />
-      <AiComposer
-        chatKey={chatId}
-        models={models.data?.models}
-        preferred={[detail?.lastModel, models.data?.defaultRef]}
-        modelsLoading={models.isPending}
-        busy={busy}
-        onSend={onSend}
-        onStop={runningId ? onStop : undefined}
-      />
+      {detail?.archived ? (
+        <ArchivedNotice chatId={chatId} />
+      ) : (
+        <AiComposer
+          chatKey={chatId}
+          models={models.data?.models}
+          preferred={[detail?.lastModel, models.data?.defaultRef]}
+          modelsLoading={models.isPending}
+          busy={busy}
+          onSend={onSend}
+          onStop={runningId ? onStop : undefined}
+        />
+      )}
     </Frame>
   );
 }
 
+/** An archived chat opens read-only (05-10): the composer's place explains it and offers the way back. */
+function ArchivedNotice({ chatId }: { chatId: string }) {
+  const qc = useQueryClient();
+  const [pending, setPending] = useState(false);
+  async function unarchive() {
+    setPending(true);
+    try {
+      await updateAiChat(qc, chatId, { archived: false });
+    } catch (err) {
+      toast.error("Couldn't restore the chat", { description: errorMessage(err) });
+    } finally {
+      setPending(false);
+    }
+  }
+  return (
+    <div className="mx-auto w-full max-w-3xl shrink-0 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6 sm:pb-5">
+      <div
+        data-testid="ai-archived-notice"
+        className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-2xl border bg-muted/40 px-4 py-3"
+      >
+        <Archive aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+        <p className="min-w-0 flex-1 text-[13.5px] text-muted-foreground">
+          This chat is archived. You can read it, but not send new messages.
+        </p>
+        <Button size="sm" disabled={pending} onClick={() => void unarchive()} data-testid="ai-unarchive">
+          Unarchive to continue
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 /** Header + content column shared by every state of the screen. */
-function Frame({ title, children }: { title: React.ReactNode; children: React.ReactNode }) {
+function Frame({
+  title,
+  header,
+  children,
+}: {
+  title?: React.ReactNode;
+  header?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="ai-chat-view">
-      <header
-        className="flex h-12 shrink-0 items-center gap-1 px-2 sm:h-14 sm:px-4"
-        data-testid="ai-chat-header"
-      >
-        <Link
-          href="/chat/ai"
-          aria-label="All AI chats"
-          className={cn(
-            buttonVariants({ variant: "ghost", size: "icon-sm" }),
-            "text-muted-foreground sm:hidden",
-          )}
-        >
-          <ChevronLeft />
-        </Link>
-        <h1
-          data-testid="ai-chat-title"
-          className="min-w-0 flex-1 truncate px-1 font-medium text-[14px] tracking-tight sm:text-[15px]"
-        >
-          {title}
-        </h1>
-        <Link
-          href="/chat/ai/new"
-          aria-label="New chat"
-          title="New chat"
-          data-testid="ai-header-new-chat"
-          className={cn(buttonVariants({ variant: "ghost", size: "icon-sm" }), "text-muted-foreground")}
-        >
-          <SquarePen />
-        </Link>
-      </header>
+      {header ?? <AiChatPlainHeader title={title} />}
       {children}
     </div>
   );

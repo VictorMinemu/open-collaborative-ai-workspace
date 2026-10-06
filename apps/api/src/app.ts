@@ -247,7 +247,7 @@ export async function buildApp(
     createChatModule(core), // B1
     createNotificationModule(core, { online }), // Phase 4: mentions, DMs, threads, @channel/@here (CHAT-08)
     createArtifactModule(core, { access: createConversationAccess(core) }), // Phase 4: attachments (ADR-0015)
-    createSearchModule(core), // Phase 4: full-text search (CHAT-11, D-04)
+    createSearchModule(core, { modelLabel: (ref) => modelGateway.labelOf(ref) }), // Phase 4: full-text search (CHAT-11, D-04); AI chats of their owner (05-10)
     createModelGatewayModule(core, modelGateway), // Phase 5: AI chat models and ChatGPT plan status
     createAiChatModule(core, { gateway: modelGateway }), // Phase 5: direct AI chat (AICHAT-02/03/07)
     createAgentModule(core), // B2

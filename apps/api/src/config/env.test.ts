@@ -99,6 +99,7 @@ describe("AI chat variables (P-12)", () => {
     expect(env.OCW_AI_MOCK_BASE_URL).toBe("http://fake-model:18999/v1");
     expect(env.OCW_AI_SEARXNG_URL).toBeNull();
     expect(env.OCW_AI_SEND_RATE_LIMIT_PER_MINUTE).toBe(30);
+    expect(env.OCW_AI_TITLE_TIMEOUT_MS).toBe(20_000);
   });
 
   it("AI mock and SearXNG fall back to OCW_MOCK_MODEL_BASE_URL and OCW_SEARXNG_URL; empty means unset", () => {
@@ -123,12 +124,14 @@ describe("AI chat variables (P-12)", () => {
       OCW_AI_MOCK_BASE_URL: "http://127.0.0.1:4291/v1",
       OCW_AI_SEARXNG_URL: "http://127.0.0.1:4291",
       OCW_AI_SEND_RATE_LIMIT_PER_MINUTE: "600",
+      OCW_AI_TITLE_TIMEOUT_MS: "1500",
     });
     expect(env.OCW_CHATGPT_API_BASE_URL).toBe("http://127.0.0.1:4291/v1");
     expect(env.OCW_CHATGPT_AUTH_BASE_URL).toBe("http://127.0.0.1:4291");
     expect(env.OCW_AI_MOCK_BASE_URL).toBe("http://127.0.0.1:4291/v1");
     expect(env.OCW_AI_SEARXNG_URL).toBe("http://127.0.0.1:4291");
     expect(env.OCW_AI_SEND_RATE_LIMIT_PER_MINUTE).toBe(600);
+    expect(env.OCW_AI_TITLE_TIMEOUT_MS).toBe(1_500);
   });
 
   it("rejects a bad URL and an out-of-range send limit", () => {

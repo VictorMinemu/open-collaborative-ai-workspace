@@ -1,4 +1,4 @@
-import { ATTACHMENT_DEFAULT_MAX_BYTES } from "@ocw/contracts";
+import { ATTACHMENT_DEFAULT_MAX_BYTES, TITLE_TIMEOUT_MS } from "@ocw/contracts";
 import { readEnvOrFile } from "@ocw/db";
 import { z } from "zod";
 
@@ -184,6 +184,8 @@ export const EnvSchema = z
     OCW_AI_SEARXNG_URL: optionalUrl,
     /** AI chat sends per user per minute (create + message). Keep the default in production. */
     OCW_AI_SEND_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(1).max(10_000).default(30),
+    /** Deadline of one AI chat title call (05-10, ADR-0014: 20 s); tests shorten it. */
+    OCW_AI_TITLE_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(TITLE_TIMEOUT_MS),
   })
   .superRefine((v, ctx) => {
     if (v.OCW_SMTP_URL === "memory:" && v.NODE_ENV !== "test") {

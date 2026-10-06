@@ -1,3 +1,4 @@
+import { tenantOf } from "@ocw/db";
 import type { ApiModule, App, Core } from "../../core";
 import { createConversationAccess } from "../chat";
 import type { ModelGateway } from "../model-gateway";
@@ -7,6 +8,7 @@ import { registerAiChatRoutes } from "./routes";
 import { createRunLoop } from "./run-loop";
 import { createAiChatService } from "./service";
 import { createGenerationSweeper } from "./sweeper";
+import { createTitler } from "./titles";
 import { registerUsageRoutes } from "./usage-routes";
 
 /**
@@ -18,9 +20,17 @@ export { ABORT_CHANNEL } from "./generations";
 export { consumeGeneration, usageToday } from "./limits";
 export { type AfterFinalize, createRunLoop, type RunLoop } from "./run-loop";
 export { createGenerationSweeper, type GenerationSweeper } from "./sweeper";
+export { createTitler, heuristicTitle, pickTitleModel, type Titler } from "./titles";
 
 export function createAiChatModule(core: Core, deps: { gateway: ModelGateway }): ApiModule {
   const runLoop = createRunLoop(core, { gateway: deps.gateway });
+  // Auto titles (05-10): the hook only schedules, after the finalize commits; the call runs in its own transactions.
+  const titler = createTitler(core, { gateway: deps.gateway, timeoutMs: core.env.OCW_AI_TITLE_TIMEOUT_MS });
+  runLoop.onAfterFinalize(async (tx, done) => {
+    if (!done.firstAnswer) return;
+    const { organizationId, afterCommit } = tenantOf(tx);
+    afterCommit(() => titler.schedule(organizationId, done.chatId, done.generation.id));
+  });
   const service = createAiChatService({
     core,
     gateway: deps.gateway,
@@ -45,6 +55,7 @@ export function createAiChatModule(core: Core, deps: { gateway: ModelGateway }):
       sweeper.stop();
       await unsubscribeAbort?.();
       await runLoop.shutdown();
+      await titler.close();
     },
   };
 }

@@ -70,7 +70,11 @@ const audit = async (action: string) =>
   (await su.query("select * from app.audit_events where action = $1 order by occurred_at", [action])).rows;
 
 const usageOf = async (generationId: string) =>
-  (await su.query("select * from app.ai_usage_records where generation_id = $1", [generationId])).rows;
+  (
+    await su.query("select * from app.ai_usage_records where generation_id = $1 and kind = 'chat'", [
+      generationId,
+    ])
+  ).rows;
 
 /** Durable `message.updated` events of one message on its chat stream. */
 const updatesOf = async (chatId: string, messageId: string) =>

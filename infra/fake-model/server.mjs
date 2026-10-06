@@ -22,6 +22,9 @@
 //   [[cache:N]]   the response reports N cache-read input tokens (`cache_read_input_tokens`) besides input_tokens 100
 //   [[http:NNN]]  the request fails with HTTP NNN (an Anthropic `api_error` body) before any streaming
 //
+// Title requests (05-10, fake-responses.mjs `titleReply`): a system/developer message (chat completions) or `system`
+// (Anthropic) asking for a "short title" answers `Title: <first three words of the user text>` ([[title:<text>]] forces it).
+//
 // Fake SearXNG: `GET /search?q=<query>&format=json` returns one deterministic result.
 //
 // Fake OpenAI Responses API (fake-responses.mjs, Phase 5): `POST /v1/responses` (SSE) and, for `fake-plan-…`
@@ -381,6 +384,12 @@ function sendJson(res, status, obj) {
   res.end(JSON.stringify(obj));
 }
 
+/** The title reply when the instructions ask for a short title (05-10), else null. */
+function titleOf(instructionTexts, lastUserText) {
+  if (!fakeResponses?.isTitleRequest(instructionTexts)) return null;
+  return fakeResponses.titleReply(lastUserText);
+}
+
 /** Splits the reply into a few deltas so streaming code paths are exercised. */
 function deltas(text) {
   const words = text.split(/(\s+)/u);
@@ -427,7 +436,12 @@ async function openAIChat(res, body) {
   const step = planToolStep(messages, offered);
   if (step?.call) return openAIToolCall(res, body, step.call);
   const flags = turnFlags(messages);
-  const reply = `${step?.reply ?? composeReply(promptFromOpenAI(body).all, toolCount, offered)}${flags.suffix}`;
+  const title = titleOf(
+    messages.filter((m) => m.role === "system" || m.role === "developer").map((m) => contentText(m.content)),
+    promptFromOpenAI(body).lastUser,
+  );
+  const reply =
+    title ?? `${step?.reply ?? composeReply(promptFromOpenAI(body).all, toolCount, offered)}${flags.suffix}`;
   const id = `chatcmpl-fake-${counter}`;
   const model = body.model ?? MODELS[0];
   const created = Math.floor(Date.now() / 1000);
@@ -449,9 +463,11 @@ async function openAIChat(res, body) {
       `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: finish }], ...extra })}\n\n`,
     );
   chunk({ role: "assistant", content: "" });
-  for (const piece of flags.slow ? slowPieces(reply) : deltas(reply)) {
+  if (title && flags.slow) await sleep(4_000);
+  const slowNow = flags.slow && !title;
+  for (const piece of slowNow ? slowPieces(reply) : deltas(reply)) {
     chunk({ content: piece });
-    if (flags.slow) await sleep(100);
+    if (slowNow) await sleep(100);
   }
   chunk({}, "stop");
   res.write(
@@ -517,7 +533,10 @@ async function anthropicMessages(res, body) {
     });
     return;
   }
-  const reply = `${composeReply(promptFromAnthropic(body).all, toolCount, offeredToolNames(body))}${flags.suffix}`;
+  const title = titleOf([contentText(body.system)], promptFromAnthropic(body).lastUser);
+  const reply =
+    title ??
+    `${composeReply(promptFromAnthropic(body).all, toolCount, offeredToolNames(body))}${flags.suffix}`;
   const id = `msg_fake_${counter}`;
   const model = body.model ?? MODELS[0];
   const cache = flags.cacheRead ? { cache_read_input_tokens: flags.cacheRead } : {};
@@ -551,9 +570,11 @@ async function anthropicMessages(res, body) {
     },
   });
   ev("content_block_start", { index: 0, content_block: { type: "text", text: "" } });
-  for (const piece of flags.slow ? slowPieces(reply) : deltas(reply)) {
+  if (title && flags.slow) await sleep(4_000);
+  const slowNow = flags.slow && !title;
+  for (const piece of slowNow ? slowPieces(reply) : deltas(reply)) {
     ev("content_block_delta", { index: 0, delta: { type: "text_delta", text: piece } });
-    if (flags.slow) await sleep(100);
+    if (slowNow) await sleep(100);
   }
   ev("content_block_stop", { index: 0 });
   ev("message_delta", {
