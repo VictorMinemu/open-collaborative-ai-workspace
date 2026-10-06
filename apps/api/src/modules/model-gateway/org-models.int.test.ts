@@ -260,21 +260,21 @@ describe("each provider kind speaks its own wire API to the fake (P-04)", () => 
         provider: "openrouter",
         apiKey: OPENROUTER_KEY,
         baseUrl: `${stack.fake.baseUrl}/v1`,
-        allowedModels: ["anthropic/claude-sonnet-5-5"],
+        allowedModels: ["anthropic/claude-sonnet-5.5"],
       }),
     );
     stack.fake.reset();
     const { g } = await orgTurn({
       backend: "org_key",
       provider: "openrouter",
-      modelId: "anthropic/claude-sonnet-5-5",
+      modelId: "anthropic/claude-sonnet-5.5",
     });
     const calls = stack.fake.requests("openai");
     expect(calls).toHaveLength(1);
     expect(calls[0]?.path).toBe("/v1/chat/completions");
     expect(calls[0]?.headers.authorization).toBe(`Bearer ${OPENROUTER_KEY}`);
     expect(calls[0]?.body?.stream_options?.include_usage).toBe(true);
-    expect(calls[0]?.body?.model).toBe("anthropic/claude-sonnet-5-5");
+    expect(calls[0]?.body?.model).toBe("anthropic/claude-sonnet-5.5");
     const [u] = await usageOf(g.id);
     expect(u).toMatchObject({ estimated: false, input_tokens: 100 });
   });

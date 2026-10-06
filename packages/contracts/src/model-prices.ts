@@ -66,8 +66,8 @@ export const MODEL_PRICES: Readonly<Record<string, ModelPrice>> = Object.freeze(
     cachedInputPerMTokUsd: 0.5,
     source: OPENAI_SOURCE,
   },
-  // OpenRouter lists this model as `anthropic/claude-sonnet-5.5`; the catalog id keeps the hyphenated form.
-  "openrouter/anthropic/claude-sonnet-5-5": {
+  // OpenRouter lists this model as `anthropic/claude-sonnet-5.5` (dot), which is the id the catalog sends.
+  "openrouter/anthropic/claude-sonnet-5.5": {
     inputPerMTokUsd: 2,
     outputPerMTokUsd: 10,
     cachedInputPerMTokUsd: 0.2,

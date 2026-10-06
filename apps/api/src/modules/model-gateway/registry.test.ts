@@ -89,7 +89,7 @@ describe("orgModelCaps", () => {
     expect(orgModelCaps("openai", "o3")).toEqual({ vision: false, pdf: false, webSearch: "function" });
   });
   it("openrouter anthropic/… → vision + pdf, openai/… → vision only", () => {
-    expect(orgModelCaps("openrouter", "anthropic/claude-sonnet-5-5")).toEqual(vp);
+    expect(orgModelCaps("openrouter", "anthropic/claude-sonnet-5.5")).toEqual(vp);
     expect(orgModelCaps("openrouter", "openai/gpt-5")).toEqual({
       vision: true,
       pdf: false,

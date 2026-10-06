@@ -130,7 +130,7 @@ describe("price sources (05-08)", () => {
       ["openai", "gpt-5", "https://developers.openai.com/api/docs/pricing"],
       ["openai", "gpt-5-mini", "https://developers.openai.com/api/docs/pricing"],
       ["openai", "gpt-4.1", "https://developers.openai.com/api/docs/pricing"],
-      ["openrouter", "anthropic/claude-sonnet-5-5", "https://openrouter.ai/api/v1/models"],
+      ["openrouter", "anthropic/claude-sonnet-5.5", "https://openrouter.ai/api/v1/models"],
       ["openrouter", "openai/gpt-5", "https://openrouter.ai/api/v1/models"],
     ];
     for (const [provider, id, url] of rows) {
