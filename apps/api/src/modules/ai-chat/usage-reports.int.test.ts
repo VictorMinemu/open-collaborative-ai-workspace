@@ -35,7 +35,11 @@ const FAKE_KEY = "sk-ant-usage-reports-0123456789-r9Qz";
 const SONNET_KEY = "org_key:anthropic/claude-sonnet-5-5";
 const PLAN_KEY = "chatgpt_plan:openai/gpt-6-astra";
 const MOCK_KEY = "mock:mock/mock-1";
+// Auto titles (05-10) run after each chat's first completed answer, on the chat's backend: Sonnet chats title on the
+// cheapest allowed Anthropic model (Haiku), plan chats on the plan's "luna" model, mock chats on the mock.
 const HAIKU_TITLES_KEY = "org_key:anthropic/claude-haiku-4-5 · titles";
+const PLAN_TITLES_KEY = "chatgpt_plan:openai/gpt-5.6-luna · titles";
+const MOCK_TITLES_KEY = "mock:mock/mock-1 · titles";
 
 const cid = () => `cm-${randomUUID()}`;
 
@@ -70,6 +74,42 @@ async function turn(as: TestClient, text: string, model: Json) {
   if (body) answerBodies.push(body);
   return { g, chatId: created.chat.id as string, generationId: created.generation.id as string };
 }
+
+const titleRecords = async (generationId: string) =>
+  Number(
+    (
+      await su.query(
+        "select count(*)::int as n from app.ai_usage_records where generation_id = $1 and kind = 'title'",
+        [generationId],
+      )
+    ).rows[0].n,
+  );
+
+/**
+ * Waits until the auto-title job of every given first answer has written its `title` usage record (05-10): the job
+ * runs after the answer commits, on its own schedule, so reports read before it lands would race it.
+ */
+async function titlesSettled(generationIds: string[], timeoutMs = 20_000) {
+  const until = Date.now() + timeoutMs;
+  for (const id of generationIds) {
+    while ((await titleRecords(id)) === 0) {
+      if (Date.now() > until) throw new Error(`no title usage record for generation ${id}`);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+}
+
+/** The number of `title` usage records of the organization on one model (exact counts, not just tokens). */
+const titleRecordsOn = async (backend: string, modelId: string) =>
+  Number(
+    (
+      await su.query(
+        `select count(*)::int as n from app.ai_usage_records
+         where organization_id = $1 and kind = 'title' and backend = $2 and model_id = $3`,
+        [orgId, backend, modelId],
+      )
+    ).rows[0].n,
+  );
 
 /** A stopped answer (estimated usage). */
 async function stoppedTurn(as: TestClient) {
@@ -206,13 +246,20 @@ beforeAll(async () => {
   );
 
   // Real answers: Sam on his plan and on Anthropic (one stopped → estimated), Alex on the mock.
-  await turn(sam, `Summarise ${SECRET_PROMPT}`, SONNET);
-  await turn(sam, `Again on Sonnet: ${SECRET_PROMPT}`, SONNET);
-  await turn(sam, `On my plan: ${SECRET_PROMPT}`, PLAN);
+  const firstAnswers = [
+    await turn(sam, `Summarise ${SECRET_PROMPT}`, SONNET),
+    await turn(sam, `Again on Sonnet: ${SECRET_PROMPT}`, SONNET),
+    await turn(sam, `On my plan: ${SECRET_PROMPT}`, PLAN),
+  ];
   await stoppedTurn(sam);
-  await turn(alex, `Mock question ${SECRET_PROMPT}`, MOCK);
-  await turn(alex, `Another mock question ${SECRET_PROMPT}`, MOCK);
-  // A title record (05-10 produces real ones) and a record outside the 30-day window.
+  firstAnswers.push(
+    await turn(alex, `Mock question ${SECRET_PROMPT}`, MOCK),
+    await turn(alex, `Another mock question ${SECRET_PROMPT}`, MOCK),
+  );
+  // Each completed first answer gets one auto-title record (the stopped answer gets none): wait for all five so the
+  // reports below read a settled table, never a half-written one.
+  await titlesSettled(firstAnswers.map((t) => t.generationId));
+  // One more title record written directly (exact tokens and cost) and a record outside the 30-day window.
   await seedRecord({
     userId: samId,
     kind: "title",
@@ -271,7 +318,9 @@ describe("the organization report by member and by model (AICHAT-07)", () => {
     const r = await ok(report(admin, "days=30&groupBy=model"));
     expect(r.groupBy).toBe("model");
     const byKey = new Map((r.rows as Json[]).map((x) => [x.key as string, x]));
-    expect([...byKey.keys()].sort()).toEqual([HAIKU_TITLES_KEY, PLAN_KEY, MOCK_KEY, SONNET_KEY].sort());
+    expect([...byKey.keys()].sort()).toEqual(
+      [HAIKU_TITLES_KEY, PLAN_KEY, PLAN_TITLES_KEY, MOCK_KEY, MOCK_TITLES_KEY, SONNET_KEY].sort(),
+    );
 
     expect(byKey.get(SONNET_KEY)).toMatchObject({
       label: "Claude Sonnet 5.5",
@@ -287,14 +336,33 @@ describe("the organization report by member and by model (AICHAT-07)", () => {
       costMicrosUsd: null,
     });
     expect(byKey.get(MOCK_KEY)).toMatchObject({ backend: "mock", generations: 2, costMicrosUsd: 0 });
-    expect(byKey.get(HAIKU_TITLES_KEY)).toMatchObject({
-      label: "Claude Haiku 4.5 · titles",
-      backend: "org_key",
+    // Titles are never answers: tokens and cost under their own key, generations 0. Haiku holds the two Sonnet
+    // chats' auto titles plus the seeded record (40 in, 8 out, 80 µ$); plan titles are not billed (null), mock ones
+    // cost 0.
+    expect(await titleRecordsOn("org_key", "claude-haiku-4-5")).toBe(3);
+    expect(await titleRecordsOn("chatgpt_plan", "gpt-5.6-luna")).toBe(1);
+    expect(await titleRecordsOn("mock", "mock-1")).toBe(2);
+    const haiku = byKey.get(HAIKU_TITLES_KEY) as Json;
+    expect(haiku).toMatchObject({ label: "Claude Haiku 4.5 · titles", backend: "org_key", generations: 0 });
+    expect(haiku.inputTokens).toBeGreaterThan(40);
+    expect(haiku.outputTokens).toBeGreaterThan(8);
+    expect(haiku.costMicrosUsd).toBeGreaterThan(80);
+    expect(byKey.get(PLAN_TITLES_KEY)).toMatchObject({
+      label: "GPT-5.6 Luna · titles",
+      backend: "chatgpt_plan",
       generations: 0,
-      inputTokens: 40,
-      outputTokens: 8,
-      costMicrosUsd: 80,
+      estimatedGenerations: 0,
+      costMicrosUsd: null,
     });
+    expect(byKey.get(MOCK_TITLES_KEY)).toMatchObject({
+      backend: "mock",
+      generations: 0,
+      estimatedGenerations: 0,
+      costMicrosUsd: 0,
+    });
+    for (const key of [HAIKU_TITLES_KEY, PLAN_TITLES_KEY, MOCK_TITLES_KEY]) {
+      expect((byKey.get(key) as Json).inputTokens, key).toBeGreaterThan(0);
+    }
     for (const [key, row] of byKey) {
       const [ref = "", titles] = key.split(" · ");
       const [backend, rest = ""] = ref.split(":");
@@ -387,8 +455,11 @@ describe("a member's own usage report (AICHAT-07, T-05-09-01)", () => {
     const r = await ok(myReport(sam, "days=30&groupBy=model"));
     expect(r.groupBy).toBe("model");
     const byKey = new Map((r.rows as Json[]).map((x) => [x.key as string, x]));
-    // Alex's mock answers are not there; Sam's titles are.
-    expect([...byKey.keys()].sort()).toEqual([HAIKU_TITLES_KEY, PLAN_KEY, SONNET_KEY].sort());
+    // Alex's mock answers and mock titles are not there; Sam's titles (Haiku and plan) are.
+    expect([...byKey.keys()].sort()).toEqual(
+      [HAIKU_TITLES_KEY, PLAN_KEY, PLAN_TITLES_KEY, SONNET_KEY].sort(),
+    );
+    expect(byKey.get(PLAN_TITLES_KEY)).toMatchObject({ generations: 0, costMicrosUsd: null });
     expect(byKey.get(PLAN_KEY)).toMatchObject({ label: "GPT-6 Astra", generations: 1, costMicrosUsd: null });
     expect(byKey.get(SONNET_KEY)).toMatchObject({ generations: 3, estimatedGenerations: 1 });
     expect(r.totals).toMatchObject(
@@ -408,8 +479,16 @@ describe("a member's own usage report (AICHAT-07, T-05-09-01)", () => {
 
   it("Alex's report holds only Alex's records", async () => {
     const r = await ok(myReport(alex, "days=30&groupBy=model"));
-    expect((r.rows as Json[]).map((x) => x.key)).toEqual([MOCK_KEY]);
+    expect((r.rows as Json[]).map((x) => x.key).sort()).toEqual([MOCK_KEY, MOCK_TITLES_KEY].sort());
     expect(r.totals).toMatchObject({ generations: 2, costMicrosUsd: 0 });
+    expect(r.totals).toMatchObject(
+      await expected("requester_user_id = $1 and created_at >= $2::date and organization_id = $3", [
+        alexId,
+        r.from,
+        orgId,
+      ]),
+    );
+    expect(r.totals).toEqual(sumRows(r.rows));
     expectNoText(r);
   });
 
