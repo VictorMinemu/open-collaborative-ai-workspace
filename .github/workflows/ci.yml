@@ -25,8 +25,11 @@ jobs:
       - name: Enable pnpm (packageManager pin)
         run: corepack enable && pnpm --version
       - run: pnpm install --frozen-lockfile
-      # Integration tests start real PostgreSQL 18 / Redis 8 containers (testcontainers).
+      # Integration tests start real PostgreSQL 18 / Redis 8 / Garage containers (testcontainers).
       - run: pnpm verify
+      # setup-env (Garage/S3 keys, --add-missing); infra/**/*.test.mjs (incl. infra/garage) run in cell-smoke.
+      - name: Script tests
+        run: node --test 'scripts/**/*.test.mjs'
       - name: Package suites (daemon, desktop)
         run: |
           pnpm --filter @ocw/local-runtime test
@@ -57,10 +60,12 @@ jobs:
           node-version-file: .nvmrc
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
-      - name: Environment and database
+      # Garage (attachments, ADR-0015) comes from compose with the keys setup:env generated; the API runs on the host
+      # and reaches it on 127.0.0.1:3900 (OCW_S3_ENDPOINT in .env), browsers on localhost:3900 (OCW_S3_PUBLIC_URL).
+      - name: Environment, database and object storage
         run: |
           pnpm setup:env
-          docker compose up -d --wait postgres redis
+          docker compose up -d --wait postgres redis garage
           pnpm db:migrate
       - name: Fake model, MCP and ClawHub (loopback, no internet)
         run: |
@@ -97,7 +102,9 @@ jobs:
           retention-days: 30
       - name: Logs and report on failure
         if: failure()
-        run: tail -n 200 api.log web.log fake.log || true
+        run: |
+          tail -n 200 api.log web.log fake.log || true
+          docker compose logs --tail 50 garage || true
       - uses: actions/upload-artifact@v7
         if: failure()
         with:

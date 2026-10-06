@@ -1,3 +1,4 @@
+import { ATTACHMENT_DEFAULT_MAX_BYTES } from "@ocw/contracts";
 import { readEnvOrFile } from "@ocw/db";
 import { z } from "zod";
 
@@ -8,6 +9,26 @@ import { z } from "zod";
 const Url = z.url();
 /** Sign-in attempts per IP per minute; production default 30 (credential-stuffing brake). */
 export const SignInRatePerMinute = z.coerce.number().int().min(1).max(10_000).default(30);
+/** Empty and unset are the same (compose passes `${VAR:-}`). */
+const optionalUrl = z
+  .union([z.literal(""), Url])
+  .optional()
+  .transform((v) => v || null);
+const withDefault = (fallback: string) =>
+  z
+    .string()
+    .default("")
+    .transform((v) => v.trim() || fallback);
+/** Per-file attachment limit in bytes: default 25 MiB, at most 1 GiB. */
+export const AttachmentMaxBytes = z.preprocess(
+  (v) => (v === "" ? undefined : v),
+  z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(1024 ** 3, "must be at most 1 GiB (1073741824)")
+    .default(ATTACHMENT_DEFAULT_MAX_BYTES),
+);
 const DEFAULT_MAIL_FROM = "Open Collaborative AI Workspace <no-reply@localhost>";
 
 export const EnvSchema = z
@@ -124,6 +145,23 @@ export const EnvSchema = z
      * approved artifacts are downloaded from. Point it at the fake ClawHub (fake-model `/api/v1/*`) in tests.
      */
     OCW_CLAWHUB_URL: Url.default("https://clawhub.ai"),
+    /**
+     * S3-compatible object storage for chat attachments (Garage in compose, ADR-0015, P-10). Storage is configured
+     * only when the endpoint, the key id and the secret (`OCW_S3_SECRET_ACCESS_KEY` or `_FILE`, resolved through the
+     * SecretStore and never part of Env) are all present; otherwise attachments report `enabled: false`.
+     * `OCW_S3_ENDPOINT` serves server operations (e.g. http://garage:3900); `OCW_S3_PUBLIC_URL` is the origin the
+     * browser reaches and the only one presigned URLs are signed for (SigV4 signs the Host); it defaults to the
+     * endpoint.
+     */
+    OCW_S3_ENDPOINT: optionalUrl,
+    OCW_S3_PUBLIC_URL: optionalUrl,
+    OCW_S3_BUCKET: withDefault("ocw-attachments"),
+    OCW_S3_REGION: withDefault("garage"),
+    OCW_S3_ACCESS_KEY_ID: z
+      .string()
+      .default("")
+      .transform((v) => v.trim() || null),
+    OCW_ATTACHMENT_MAX_BYTES: AttachmentMaxBytes,
     OCW_ACCEPT_LEGACY_DEVICE_TOKEN: z
       .enum(["true", "false"])
       .default("true")
@@ -137,7 +175,8 @@ export const EnvSchema = z
         message: "memory: is only allowed when NODE_ENV is test",
       });
     }
-  });
+  })
+  .transform((v) => ({ ...v, OCW_S3_PUBLIC_URL: v.OCW_S3_PUBLIC_URL ?? v.OCW_S3_ENDPOINT }));
 export type Env = z.infer<typeof EnvSchema>;
 
 const SECRET_VARS = [
