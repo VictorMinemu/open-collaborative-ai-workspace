@@ -14,7 +14,7 @@ import {
 } from "@ocw/contracts";
 import { aiChats, aiGenerations, conversations, messages, type Tx } from "@ocw/db";
 import { streamText } from "ai";
-import { and, eq, ne, sql } from "drizzle-orm";
+import { and, eq, lt, ne, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { convTopic } from "../chat";
 import {
@@ -58,6 +58,12 @@ export interface RunLoop {
   running(): number;
   /** The text produced so far by a generation this instance holds (snapshots), else null. */
   textOf(generationId: string): string | null;
+  /**
+   * Finalizes a generation no process streams anymore (its heartbeat is older than `staleBefore`) as
+   * `interrupted`, keeping its last flushed `partial_text` (the sweeper, 05-06). False when it is not running and
+   * stale anymore, or when this process holds it.
+   */
+  finalizeStale(organizationId: string, generationId: string, staleBefore: Date): Promise<boolean>;
   shutdown(): Promise<void>;
   readonly instanceId: string;
 }
@@ -67,8 +73,11 @@ const DELTA_MAX = 16_000;
 
 interface Active {
   controller: AbortController;
+  /** The answer so far; frozen once the controller fires (later provider deltas are dropped). */
   text: string;
   reason: "stop" | "shutdown" | null;
+  /** Publishes the not-yet-sent tail as `ai.delta` (set once streaming starts); called right before an abort. */
+  flushDeltas: (() => void) | null;
   done: Promise<void>;
   /** Set once prepared: what a crash fail-safe needs to finalize the generation as failed. */
   prepared: { gen: GenerationRow; ref: ModelRef; turn: Turn } | null;
@@ -91,6 +100,33 @@ function promptText(turn: Turn): string {
         if (p.type === "text") parts.push(p.text ?? "");
   }
   return parts.join("\n");
+}
+
+/** Sums the usage of finished steps (undefined counts stay undefined: the record is then estimated). */
+function addUsage(
+  acc: ReportedUsage | null,
+  u: {
+    inputTokens: number | undefined;
+    outputTokens: number | undefined;
+    inputTokenDetails?: { cacheReadTokens?: number | undefined };
+    outputTokenDetails?: { reasoningTokens?: number | undefined };
+  },
+): ReportedUsage {
+  const sum = (a: number | undefined, b: number | undefined) =>
+    a === undefined || b === undefined ? undefined : a + b;
+  const next: ReportedUsage = {
+    inputTokens: u.inputTokens,
+    outputTokens: u.outputTokens,
+    cachedInputTokens: u.inputTokenDetails?.cacheReadTokens,
+    reasoningTokens: u.outputTokenDetails?.reasoningTokens,
+  };
+  if (!acc) return next;
+  return {
+    inputTokens: sum(acc.inputTokens, next.inputTokens),
+    outputTokens: sum(acc.outputTokens, next.outputTokens),
+    cachedInputTokens: sum(acc.cachedInputTokens, next.cachedInputTokens),
+    reasoningTokens: sum(acc.reasoningTokens, next.reasoningTokens),
+  };
 }
 
 const unavailableCode = (e: ModelUnavailableError): AiErrorCode =>
@@ -128,76 +164,89 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
     outcome: Outcome,
     turn: Turn | null,
   ): Promise<void> {
-    await core.db.withTenant({ organizationId, userId: gen.requesterUserId }, async (tx) => {
-      const finishedAt = now().toISOString();
-      const [g] = await tx
-        .update(aiGenerations)
-        .set({
-          status: outcome.status,
-          finishReason: outcome.finishReason,
-          errorCode: outcome.error?.code ?? null,
-          errorParam: outcome.error?.param ?? null,
-          partialText: text,
-          truncated: turn?.truncated ?? false,
-          heartbeatAt: finishedAt,
-          finishedAt,
-        })
-        .where(and(eq(aiGenerations.id, gen.id), eq(aiGenerations.status, "running")))
-        .returning();
-      // Someone else finalized it (the sweeper, 05-06): their outcome stands.
-      if (!g) return;
-      const [row] = await tx
-        .update(messages)
-        .set({ body: text, status: outcome.status === "failed" ? "failed" : "completed" })
-        .where(eq(messages.id, g.assistantMessageId))
-        .returning();
-      if (!row) throw new Error("assistant message missing at finalize");
-      const usage: AiUsage = await recordUsage(tx, {
-        generation: g,
-        kind: "chat",
-        reported: outcome.usage,
-        promptText: turn ? promptText(turn) : "",
-        outputText: text,
-      });
-      if (outcome.error) await deps.gateway.reportFailure(tx, ref, g.requesterUserId, outcome.error);
-      const [chat] = await tx
-        .update(aiChats)
-        .set({ lastActivityAt: finishedAt, updatedAt: finishedAt })
-        .where(eq(aiChats.conversationId, g.conversationId))
-        .returning();
-      const [conv] = await tx
-        .select()
-        .from(conversations)
-        .where(eq(conversations.id, g.conversationId))
-        .limit(1);
-      const generation = generationDto(g, usage, deps.gateway);
-      await core.realtime.appendEvent(tx, convTopic(g.conversationId), EventTypes.messageUpdated, {
-        message: aiMessage(row, EMPTY_DIRECTORY, generation),
-      });
-      if (chat && conv) {
-        await core.realtime.appendEvent(tx, `user:${chat.ownerUserId}`, EventTypes.aiChatUpdated, {
-          chat: chatSummary(conv, chat, { generating: false, gateway: deps.gateway }),
-        });
-      }
-      const [earlier] = await tx
-        .select({ n: sql<number>`count(*)::int` })
-        .from(aiGenerations)
-        .where(
-          and(
-            eq(aiGenerations.conversationId, g.conversationId),
-            eq(aiGenerations.status, "completed"),
-            ne(aiGenerations.id, g.id),
-          ),
-        );
-      const done = {
-        chatId: g.conversationId,
-        generation,
-        ref,
-        requesterUserId: g.requesterUserId,
-        firstAnswer: outcome.status === "completed" && (earlier?.n ?? 0) === 0,
-      };
-      for (const fn of listeners) await fn(tx, done);
+    await core.db.withTenant({ organizationId, userId: gen.requesterUserId }, (tx) =>
+      finalizeIn(tx, gen, ref, text, outcome, turn),
+    );
+  }
+
+  /** The one finalize: generation outcome, message body + status, one usage record, the durable events. */
+  async function finalizeIn(
+    tx: Tx,
+    gen: GenerationRow,
+    ref: ModelRef,
+    text: string,
+    outcome: Outcome,
+    turn: Turn | null,
+  ): Promise<boolean> {
+    const finishedAt = now().toISOString();
+    const [g] = await tx
+      .update(aiGenerations)
+      .set({
+        status: outcome.status,
+        finishReason: outcome.finishReason,
+        errorCode: outcome.error?.code ?? null,
+        errorParam: outcome.error?.param ?? null,
+        partialText: text,
+        truncated: turn?.truncated ?? false,
+        heartbeatAt: finishedAt,
+        finishedAt,
+      })
+      .where(and(eq(aiGenerations.id, gen.id), eq(aiGenerations.status, "running")))
+      .returning();
+    // Someone else finalized it (the sweeper, 05-06): their outcome stands.
+    if (!g) return false;
+    const [row] = await tx
+      .update(messages)
+      .set({ body: text, status: outcome.status === "failed" ? "failed" : "completed" })
+      .where(eq(messages.id, g.assistantMessageId))
+      .returning();
+    if (!row) throw new Error("assistant message missing at finalize");
+    const usage: AiUsage = await recordUsage(tx, {
+      generation: g,
+      kind: "chat",
+      reported: outcome.usage,
+      promptText: turn ? promptText(turn) : "",
+      outputText: text,
     });
+    if (outcome.error) await deps.gateway.reportFailure(tx, ref, g.requesterUserId, outcome.error);
+    const [chat] = await tx
+      .update(aiChats)
+      .set({ lastActivityAt: finishedAt, updatedAt: finishedAt })
+      .where(eq(aiChats.conversationId, g.conversationId))
+      .returning();
+    const [conv] = await tx
+      .select()
+      .from(conversations)
+      .where(eq(conversations.id, g.conversationId))
+      .limit(1);
+    const generation = generationDto(g, usage, deps.gateway);
+    await core.realtime.appendEvent(tx, convTopic(g.conversationId), EventTypes.messageUpdated, {
+      message: aiMessage(row, EMPTY_DIRECTORY, generation),
+    });
+    if (chat && conv) {
+      await core.realtime.appendEvent(tx, `user:${chat.ownerUserId}`, EventTypes.aiChatUpdated, {
+        chat: chatSummary(conv, chat, { generating: false, gateway: deps.gateway }),
+      });
+    }
+    const [earlier] = await tx
+      .select({ n: sql<number>`count(*)::int` })
+      .from(aiGenerations)
+      .where(
+        and(
+          eq(aiGenerations.conversationId, g.conversationId),
+          eq(aiGenerations.status, "completed"),
+          ne(aiGenerations.id, g.id),
+        ),
+      );
+    const done = {
+      chatId: g.conversationId,
+      generation,
+      ref,
+      requesterUserId: g.requesterUserId,
+      firstAnswer: outcome.status === "completed" && (earlier?.n ?? 0) === 0,
+    };
+    for (const fn of listeners) await fn(tx, done);
+    return true;
   }
 
   async function run(job: { organizationId: string; generationId: string }, entry: Active): Promise<void> {
@@ -286,10 +335,15 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
       }
     }, AI_DELTA_COALESCE_MS);
     timer.unref();
+    // An abort publishes the tail it has now and freezes the text: no delta is ever sent after the controller
+    // fires, so what the browser saw equals the body that finalize persists.
+    entry.flushDeltas = publishPending;
 
     let error: unknown = null;
     let aborted = false;
     let usage: ReportedUsage | null = null;
+    /** Usage of the steps that finished before an abort (Pitfall 3); null when none did. */
+    let stepUsage: ReportedUsage | null = null;
     let finishReason: string | null = null;
     try {
       const result = streamText({
@@ -303,8 +357,11 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
         onError: () => {},
       });
       for await (const part of result.stream) {
-        if (part.type === "text-delta") entry.text += part.text;
-        else if (part.type === "finish") {
+        if (part.type === "text-delta") {
+          if (!entry.controller.signal.aborted) entry.text += part.text;
+        } else if (part.type === "finish-step") {
+          stepUsage = addUsage(stepUsage, part.usage);
+        } else if (part.type === "finish") {
           finishReason = part.finishReason;
           usage = {
             inputTokens: part.totalUsage.inputTokens,
@@ -332,7 +389,8 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
         status: shutdown ? "interrupted" : "stopped",
         finishReason: "abort",
         error: shutdown ? deps.gateway.classify(new DOMException("aborted", "AbortError")) : null,
-        usage,
+        // Provider counts arrive with the last event, so an aborted stream usually has none: estimated then.
+        usage: usage ?? stepUsage,
       };
     } else if (error !== null) {
       const classified = deps.gateway.classify(error);
@@ -383,6 +441,7 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
         controller: new AbortController(),
         text: "",
         reason: null,
+        flushDeltas: null,
         done: Promise.resolve(),
         prepared: null,
       };
@@ -404,6 +463,7 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
       const entry = active.get(generationId);
       if (!entry) return false;
       entry.reason ??= reason;
+      if (!entry.controller.signal.aborted) entry.flushDeltas?.();
       entry.controller.abort(reason);
       return true;
     },
@@ -412,6 +472,36 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
     },
     running: () => active.size,
     textOf: (generationId) => active.get(generationId)?.text ?? null,
+    async finalizeStale(organizationId, generationId, staleBefore) {
+      if (active.has(generationId)) return false;
+      const orgName = (await core.identity.organizationName(organizationId)) ?? "your organization";
+      return core.db.withTenant({ organizationId }, async (tx) => {
+        const [gen] = await tx
+          .select()
+          .from(aiGenerations)
+          .where(
+            and(
+              eq(aiGenerations.id, generationId),
+              eq(aiGenerations.status, "running"),
+              lt(aiGenerations.heartbeatAt, staleBefore.toISOString()),
+            ),
+          )
+          .for("update");
+        if (!gen) return false;
+        // The prompt is rebuilt only to estimate the input tokens of the estimated usage record.
+        const turn = await loadTurn(tx, gen, { orgName, now: now(), policy: await loadAiChatPolicy(tx) });
+        const ref = { backend: gen.backend, provider: gen.provider, modelId: gen.modelId } as ModelRef;
+        const error = deps.gateway.classify(new DOMException("interrupted", "AbortError"));
+        return finalizeIn(
+          tx,
+          gen,
+          ref,
+          gen.partialText,
+          { status: "interrupted", finishReason: null, error, usage: null },
+          turn,
+        );
+      });
+    },
     async shutdown() {
       for (const [id] of active) loop.abort(id, "shutdown");
       await Promise.allSettled([...active.values()].map((e) => e.done));

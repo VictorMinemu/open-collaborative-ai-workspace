@@ -1,20 +1,39 @@
 "use client";
 
-import type { AiGeneration, Message } from "@ocw/contracts";
-import { Check, Copy } from "lucide-react";
+import type { AiGeneration, Message, SendAiMessageResponse } from "@ocw/contracts";
+import { Check, Copy, Square, Unplug } from "lucide-react";
+import type { ReactNode } from "react";
 import { Markdown } from "@/components/markdown/markdown";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useCopy } from "@/hooks/use-copy";
 import { cn } from "@/lib/utils";
 import { GenerationError } from "./generation-error";
+import { RegenerateMenu } from "./regenerate-menu";
+
+/** Regenerate on the chat's last answer only (05-06). */
+export interface AnswerRegenerate {
+  chatId: string;
+  /** Something is being written in the chat (one generation per chat). */
+  disabled: boolean;
+  onRegenerated: (response: SendAiMessageResponse) => void;
+}
 
 /**
  * One turn of an AI chat (P-09): the member's turns are right-aligned bubbles; answers are full width through the
  * one shared Markdown renderer (no raw HTML, images as links, `safeUrl`), with a caret while they stream and a
  * quiet footer once done: `<model> · ChatGPT plan · <in> in · <out> out`. A failed answer keeps any partial text
- * and ends with a calm card instead of a spinner.
+ * and ends with a calm card instead of a spinner. A stopped or interrupted answer keeps its text and says so in the
+ * line under it ("Stopped" / "Interrupted"), quietly: it was cut short, not broken (05-06).
  */
-export function AiMessage({ message, text }: { message: Message; text: string }) {
+export function AiMessage({
+  message,
+  text,
+  regenerate,
+}: {
+  message: Message;
+  text: string;
+  regenerate?: AnswerRegenerate | undefined;
+}) {
   if (message.authorKind !== "agent") {
     return (
       <div
@@ -45,6 +64,7 @@ export function AiMessage({ message, text }: { message: Message; text: string })
           <Markdown text={text} variant="document" streaming={streaming} className="text-[15px] leading-7" />
         ) : null}
       </div>
+      {streaming ? null : <CutShortLabel generation={message.generation} />}
       {message.status === "failed" ? <GenerationError code={message.generation?.errorCode ?? null} /> : null}
       {streaming ? (
         <span
@@ -54,7 +74,20 @@ export function AiMessage({ message, text }: { message: Message; text: string })
           className="block size-3 animate-pulse rounded-full bg-foreground/80"
         />
       ) : (
-        <AnswerFooter text={text} generation={message.generation} />
+        <AnswerFooter
+          text={text}
+          generation={message.generation}
+          actions={
+            regenerate ? (
+              <RegenerateMenu
+                chatId={regenerate.chatId}
+                message={message}
+                disabled={regenerate.disabled}
+                onRegenerated={regenerate.onRegenerated}
+              />
+            ) : null
+          }
+        />
       )}
     </div>
   );
@@ -78,14 +111,49 @@ export function footerLabel(g: AiGeneration): string {
   return parts.join(" · ");
 }
 
-function AnswerFooter({ text, generation }: { text: string; generation: AiGeneration | undefined }) {
+const CUT_SHORT: Partial<
+  Record<AiGeneration["status"], { label: string; hint: string; icon: typeof Square }>
+> = {
+  stopped: { label: "Stopped", hint: "You stopped this answer", icon: Square },
+  interrupted: {
+    label: "Interrupted",
+    hint: "The server restarted while writing this answer",
+    icon: Unplug,
+  },
+};
+
+/** "Stopped" / "Interrupted" right under an answer that was cut short (its text is kept), above the footer. */
+function CutShortLabel({ generation }: { generation: AiGeneration | undefined }) {
+  const state = generation ? CUT_SHORT[generation.status] : undefined;
+  if (!state) return null;
+  const Icon = state.icon;
+  return (
+    <span
+      title={state.hint}
+      className="inline-flex w-fit items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 font-medium text-[11.5px] text-foreground/70"
+    >
+      <Icon aria-hidden className={cn(Icon === Square ? "size-2.5 fill-current" : "size-3")} />
+      <span data-testid="ai-generation-state">{state.label}</span>
+    </span>
+  );
+}
+
+function AnswerFooter({
+  text,
+  generation,
+  actions,
+}: {
+  text: string;
+  generation: AiGeneration | undefined;
+  actions: ReactNode;
+}) {
   const { copy, copied } = useCopy();
   return (
     <div
       className={cn(
         "flex min-h-7 min-w-0 items-center gap-1.5 text-[12px] text-muted-foreground",
         // The copy button's padding sits outside the text column, so the label lines up with the answer.
-        text && "-ml-1.5",
+        (text || actions) && "-ml-1.5",
       )}
     >
       {text ? (
@@ -101,6 +169,7 @@ function AnswerFooter({ text, generation }: { text: string; generation: AiGenera
           </button>
         </Tooltip>
       ) : null}
+      {actions}
       {generation ? (
         <span
           data-testid="ai-message-footer"

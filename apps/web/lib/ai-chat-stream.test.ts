@@ -308,3 +308,65 @@ describe("reduceAiChat: a snapshot never undoes a finished answer", () => {
     expect(s.messages.find((m) => m.id === ANSWER)?.status).toBe("streaming");
   });
 });
+
+describe("reduceAiChat: regenerate (05-06)", () => {
+  const gen2 = "1a2b3c4d-0000-4000-8000-00000000000a";
+  const done: Message = {
+    ...streamingAnswer,
+    status: "completed",
+    body: "the old answer",
+    generation: generation(GEN, "completed"),
+  };
+  const again: Message = {
+    ...streamingAnswer,
+    status: "streaming",
+    body: "",
+    generation: { ...generation(gen2, "running"), attempt: 2 },
+  };
+  const regenerated = (over: Partial<Message> = {}) =>
+    ({
+      chat: snapshot([], 0, null).chat,
+      userMessage: userMsg,
+      assistantMessage: { ...again, ...over },
+      generation: again.generation,
+    }) as unknown as SendAiMessageResponse;
+  const answerDelta = (offset: number, text: string): TopicFrame => ({
+    op: "eph",
+    topic: `conv:${CHAT}`,
+    type: "ai.delta",
+    data: {
+      conversationId: CHAT,
+      messageId: ANSWER,
+      generationId: gen2,
+      offset,
+      text,
+    } satisfies AiDeltaEvent,
+  });
+  const start = () =>
+    reduceAiChat(initialAiChatState(CHAT), {
+      kind: "snapshot",
+      snapshot: snapshot([userMsg, done], 2, null),
+    });
+
+  it("the POST answer resets the answer to an empty stream that new deltas fill from offset 0", () => {
+    let s = reduceAiChat(start(), { kind: "sent", response: regenerated() });
+    const answer = s.messages.find((m) => m.id === ANSWER);
+    expect(answer?.status).toBe("streaming");
+    expect(answer?.generation?.id).toBe(gen2);
+    expect(textOf(s)).toBe("");
+    s = run(s, answerDelta(0, "New "), answerDelta(4, "text"));
+    expect(textOf(s)).toBe("New text");
+    s = run(s, durable(4, "message.updated", { ...again, status: "completed", body: "New text" }));
+    expect(textOf(s)).toBe("New text");
+    expect(s.messages.find((m) => m.id === ANSWER)?.status).toBe("completed");
+  });
+
+  it("the WebSocket reset alone works too, and a late POST answer never steps back", () => {
+    let s = run(start(), durable(3, "message.updated", again), answerDelta(0, "Fresh"));
+    expect(textOf(s)).toBe("Fresh");
+    s = run(s, durable(4, "message.updated", { ...again, status: "completed", body: "Fresh" }));
+    s = reduceAiChat(s, { kind: "sent", response: regenerated() });
+    expect(s.messages.find((m) => m.id === ANSWER)?.status).toBe("completed");
+    expect(textOf(s)).toBe("Fresh");
+  });
+});

@@ -7,8 +7,10 @@ import {
   type CreateAiChatRequest,
   EventTypes,
   type Message,
+  type RegenerateRequest,
   type SendAiMessageRequest,
   SendAiMessageResponse,
+  StopAiGenerationResponse,
   topic,
 } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
@@ -65,6 +67,26 @@ export function createAiChat(body: CreateAiChatRequest): Promise<SendAiMessageRe
 
 export function sendAiMessage(chatId: string, body: SendAiMessageRequest): Promise<SendAiMessageResponse> {
   return api.post(`/api/v1/ai-chats/${chatId}/messages`, { body, schema: SendAiMessageResponse });
+}
+
+/**
+ * Stops a running answer (05-06). The request may land on any API instance; the text written so far stays and the
+ * final `message.updated` (Stopped) arrives over the socket. Idempotent: a finished answer answers its status.
+ */
+export function stopGeneration(chatId: string, generationId: string): Promise<StopAiGenerationResponse> {
+  return api.post(`/api/v1/ai-chats/${chatId}/generations/${generationId}/stop`, {
+    body: {},
+    schema: StopAiGenerationResponse,
+  });
+}
+
+/**
+ * Regenerates the chat's last answer (05-06), on its previous model or `model`. `messageId` is the answer on
+ * screen: the API refuses (409 `not_last_answer`) when another tab already moved the chat on. The answer resets and
+ * streams again on the same message; the replaced text is kept server-side (message_versions).
+ */
+export function regenerate(chatId: string, body: RegenerateRequest): Promise<SendAiMessageResponse> {
+  return api.post(`/api/v1/ai-chats/${chatId}/regenerate`, { body, schema: SendAiMessageResponse });
 }
 
 /**

@@ -14,6 +14,7 @@ import {
   newClientMessageId,
   primeAiChat,
   sendAiMessage,
+  stopGeneration,
   useAiChat,
   useAiModels,
 } from "@/lib/ai-chat-queries";
@@ -86,7 +87,22 @@ function ExistingChat({ chatId }: { chatId: string }) {
   const chat = useAiChat(chatId);
   const models = useAiModels();
   const detail = chat.snapshot?.chat;
-  const busy = chat.messages.some((m) => m.status === "streaming");
+  const writing = chat.messages.findLast((m) => m.authorKind === "agent" && m.status === "streaming");
+  const busy = writing !== undefined;
+  // The generation to stop: the streaming answer's, else the snapshot's running one.
+  const runningId =
+    writing?.generation?.id ??
+    (chat.snapshot?.running?.messageId === writing?.id ? chat.snapshot?.running?.generationId : undefined);
+
+  async function onStop() {
+    if (!runningId) return;
+    try {
+      await stopGeneration(chatId, runningId);
+    } catch (err) {
+      toast.error("Couldn't stop the answer", { description: errorMessage(err) });
+      throw err;
+    }
+  }
 
   async function onSend(body: string, m: AiModelOption) {
     try {
@@ -147,7 +163,12 @@ function ExistingChat({ chatId }: { chatId: string }) {
 
   return (
     <Frame title={detail?.title ?? "New chat"}>
-      <AiMessageList chatId={chatId} messages={chat.messages} textOf={chat.textOf} />
+      <AiMessageList
+        chatId={chatId}
+        messages={chat.messages}
+        textOf={chat.textOf}
+        onRegenerated={chat.applySent}
+      />
       <AiComposer
         chatKey={chatId}
         models={models.data?.models}
@@ -155,6 +176,7 @@ function ExistingChat({ chatId }: { chatId: string }) {
         modelsLoading={models.isPending}
         busy={busy}
         onSend={onSend}
+        onStop={runningId ? onStop : undefined}
       />
     </Frame>
   );

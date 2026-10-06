@@ -98,3 +98,17 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $f
 $fn$;
 REVOKE ALL ON FUNCTION app.due_attachment_sweeps(integer, timestamptz) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.due_attachment_sweeps(integer, timestamptz) TO ocw_app;
+
+-- AI generation sweeper (Plan 05-06, D-05): running generations whose heartbeat is older than p_before (their API
+-- process died or stalled). Ids only; the sweeper re-checks and finalizes each row as `interrupted` inside its own
+-- organization's withTenant() transaction.
+CREATE OR REPLACE FUNCTION app.stale_ai_generations(p_limit integer, p_before timestamptz)
+RETURNS TABLE (id uuid, organization_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT g.id, g.organization_id FROM app.ai_generations g
+  WHERE g.status = 'running' AND g.heartbeat_at < p_before
+  ORDER BY g.heartbeat_at
+  LIMIT least(greatest(p_limit, 1), 1000)
+$fn$;
+REVOKE ALL ON FUNCTION app.stale_ai_generations(integer, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.stale_ai_generations(integer, timestamptz) TO ocw_app;
