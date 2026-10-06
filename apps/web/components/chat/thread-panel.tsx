@@ -1,15 +1,19 @@
 "use client";
 
-import type { ChannelSummary } from "@ocw/contracts";
+import type { ChannelSummary, Message } from "@ocw/contracts";
 import { MessagesSquare, X } from "lucide-react";
+import { useCallback } from "react";
+import { toast } from "sonner";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useIsDesktop } from "@/hooks/use-media-query";
 import { useThread } from "@/lib/chat-queries";
+import { permalinkPath } from "@/lib/permalink";
 import { Composer, type MentionCandidate } from "./composer";
 import { MessageList, type PendingMessage } from "./message-list";
 import { PrincipalAvatar } from "./principal-avatar";
 import { type Typer, TypingIndicator } from "./typing";
+import { useCentreOnce } from "./use-permalink-window";
 import { useStickToBottom } from "./use-stick-to-bottom";
 
 interface ThreadPanelProps {
@@ -24,6 +28,8 @@ interface ThreadPanelProps {
   onSend: (body: string, threadRootId: string) => void;
   onRetry: (p: PendingMessage) => void;
   onTyping: (threadRootId: string) => void;
+  /** A permalink to a reply of this thread (`m` with `thread`): scrolled to and highlighted (CHAT-14). */
+  highlightId?: string | null;
 }
 
 function ThreadBody({
@@ -38,6 +44,7 @@ function ThreadBody({
   onSend,
   onRetry,
   onTyping,
+  highlightId = null,
 }: ThreadPanelProps) {
   const thread = useThread(rootId);
   const replies = thread.data?.replies ?? [];
@@ -45,6 +52,14 @@ function ThreadBody({
   const threadTypers = typers.filter((t) => t.threadRootId === rootId);
   const scroll = useStickToBottom(`${replies.length}:${myPending.length}:${threadTypers.length}`, rootId);
   const participants = thread.data?.participants ?? [];
+  // Centre the linked reply once it rendered; a deleted one is gone from the list (P-05), so say so instead.
+  useCentreOnce(scroll, highlightId, highlightId);
+  const onReplyHidden = useCallback(() => toast("This message was deleted"), []);
+  // Replies link to the thread form (`?thread=<root>&m=<reply>`); the root links as a channel message.
+  const linkFor = useCallback(
+    (m: Message) => permalinkPath({ id: channel.id, kind: "channel" }, m.id, m.threadId),
+    [channel.id],
+  );
 
   return (
     <div className="flex h-full min-h-0 flex-col" data-testid="thread-panel">
@@ -105,6 +120,8 @@ function ThreadBody({
               readOnly={!!channel.archivedAt}
               canDeleteAny={channel.viewerCan?.includes("message.delete_any") ?? false}
               showTombstones
+              anchorId={highlightId}
+              linkFor={linkFor}
             />
             <div className="flex items-center gap-3 px-4 py-1.5 sm:px-5" data-testid="thread-reply-count">
               <span className="text-muted-foreground text-xs">
@@ -124,6 +141,9 @@ function ThreadBody({
               showThreadSummary={false}
               readOnly={!!channel.archivedAt}
               canDeleteAny={channel.viewerCan?.includes("message.delete_any") ?? false}
+              anchorId={highlightId}
+              linkFor={linkFor}
+              onAnchorHidden={onReplyHidden}
             />
           </>
         ) : null}

@@ -220,3 +220,87 @@ describe("GET /conversations/:id/messages?around= (CHAT-14)", () => {
     expect(orgId).not.toBe(orgB);
   });
 });
+
+describe("permalink edge cases (deleted, bot DMs, tiny pages)", () => {
+  let edgeId: string;
+
+  beforeAll(async () => {
+    edgeId = (await ok(admin.request("POST", "/api/v1/channels", { name: "edges" }))).id;
+    await ok(sam.request("POST", `/api/v1/channels/${edgeId}/join`));
+  });
+
+  it("a deleted message with replies anchors as its tombstone", async () => {
+    const before = await post(admin, edgeId, "before the retro");
+    const root = await post(admin, edgeId, "retro notes");
+    await post(sam, edgeId, "my notes", { threadRootId: root.id });
+    const after = await post(admin, edgeId, "after the retro");
+    await ok(admin.request("DELETE", `/api/v1/messages/${root.id}`));
+
+    const p = await ok(page(sam, edgeId, `around=${root.id}&limit=3`));
+    expect(p.anchorId).toBe(root.id);
+    expect((p.messages as Json[]).map((m) => m.id)).toEqual([before.id, root.id, after.id]);
+    const tomb = (p.messages as Json[])[1];
+    expect(tomb).toMatchObject({ body: "", replyCount: 1 });
+    expect(tomb?.deletedAt).toEqual(expect.any(String));
+  });
+
+  it("a deleted message without replies still answers 200 with its tombstone (the client decides)", async () => {
+    const gone = await post(admin, edgeId, "soon gone");
+    await ok(admin.request("DELETE", `/api/v1/messages/${gone.id}`));
+    const p = await ok(page(sam, edgeId, `around=${gone.id}&limit=5`));
+    expect(p.anchorId).toBe(gone.id);
+    const tomb = (p.messages as Json[]).find((m) => m.id === gone.id);
+    expect(tomb).toMatchObject({ body: "", replyCount: 0, mentions: [] });
+    expect(tomb?.deletedAt).toEqual(expect.any(String));
+  });
+
+  it("limit=1 returns only the anchor, with both cursors when neighbours exist", async () => {
+    const a = await post(admin, edgeId, "one");
+    const b = await post(admin, edgeId, "two");
+    const c = await post(admin, edgeId, "three");
+    const p = await ok(page(sam, edgeId, `around=${b.id}&limit=1`));
+    expect((p.messages as Json[]).map((m) => m.id)).toEqual([b.id]);
+    expect(p.nextBefore).toBe(b.seq);
+    expect(p.nextAfter).toBe(b.seq);
+    // The cursors continue on both sides.
+    expect((await ok(page(sam, edgeId, `before=${p.nextBefore}&limit=1`))).messages[0].id).toBe(a.id);
+    expect((await ok(page(sam, edgeId, `after=${p.nextAfter}&limit=1`))).messages[0].id).toBe(c.id);
+    // At the live end: a newest anchor has no newer cursor even at limit=1.
+    const end = await ok(page(sam, edgeId, `around=${c.id}&limit=1`));
+    expect(end.nextAfter).toBeNull();
+    expect(end.nextBefore).toBe(c.seq);
+  });
+
+  it("a 3.1 bot DM: its member gets the around page; the admin who is not in it gets 404", async () => {
+    const bot = randomUUID();
+    const dmId = randomUUID();
+    await su.query(
+      `insert into app.agents (id, organization_id, name, username, instructions, model_provider, model_id, status)
+       values ($1, $2, 'Archie', 'archie', 'x', 'mock', 'mock-1', 'ready')`,
+      [bot, orgId],
+    );
+    await su.query(
+      "insert into app.conversations (id, organization_id, kind, visibility, dm_key, created_by) values ($1, $2, 'dm', 'private', $3, $4)",
+      [dmId, orgId, `agent:${bot}|user:${samId}`, samId],
+    );
+    await su.query(
+      `insert into app.conversation_members (conversation_id, organization_id, member_kind, member_id, role)
+       values ($1, $2, 'user', $3, 'owner'), ($1, $2, 'agent', $4, 'member')`,
+      [dmId, orgId, samId, bot],
+    );
+    const sent: Json[] = [];
+    for (const body of ["first", "second", "third", "fourth"]) sent.push(await post(sam, dmId, body));
+
+    const p = await ok(page(sam, dmId, `around=${sent[1]?.id}&limit=3`));
+    expect(bodies(p)).toEqual(["first", "second", "third"]);
+    expect(p.anchorId).toBe(sent[1]?.id);
+    expect(p.threadRootId ?? null).toBeNull();
+    expect(p.lastSeq).toEqual(expect.any(Number));
+
+    const hidden = await page(admin, dmId, `around=${sent[1]?.id}`);
+    const missing = await page(admin, randomUUID(), `around=${sent[1]?.id}`);
+    expect(hidden.status).toBe(404);
+    expect(hidden.body).toEqual(missing.body);
+    expect((await page(admin, dmId, `after=${sent[0]?.seq}`)).status).toBe(404);
+  });
+});

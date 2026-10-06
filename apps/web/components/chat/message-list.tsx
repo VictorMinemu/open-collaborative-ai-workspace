@@ -494,6 +494,20 @@ function PendingRow({
   );
 }
 
+/** Reports a hidden permalink target once per anchor (after render, never during it). */
+function useHiddenAnchor(
+  anchorId: string | null,
+  neighbour: string | null,
+  report: ((neighbourId: string | null) => void) | undefined,
+) {
+  const reported = useRef<string | null>(null);
+  useEffect(() => {
+    if (!anchorId || !report || reported.current === anchorId) return;
+    reported.current = anchorId;
+    report(neighbour);
+  }, [anchorId, neighbour, report]);
+}
+
 /**
  * Slack-style list: day dividers, consecutive messages from the same author within 5 minutes collapse
  * under one avatar/name, bots carry a BOT badge, roots show their thread summary.
@@ -514,6 +528,7 @@ export function MessageList({
   showTombstones = false,
   anchorId,
   linkFor,
+  onAnchorHidden,
 }: {
   messages: Message[];
   pending: PendingMessage[];
@@ -536,14 +551,35 @@ export function MessageList({
   anchorId?: string | null;
   /** Builds a message's permalink path; absent = no "Copy link" (e.g. optimistic rows). Must be stable. */
   linkFor?: (m: Message) => string;
+  /**
+   * The permalink target is a deleted message this list hides (P-05, no replies): called once per anchor with the
+   * nearest visible neighbour (the next one, else the previous one), so the view can say so and land nearby.
+   */
+  onAnchorHidden?: (neighbourId: string | null) => void;
 }) {
   let prev: { key: string; at: number; day: string } | null = startDay
     ? { key: "", at: 0, day: new Date(startDay).toDateString() }
     : null;
   const rows: ReactNode[] = [];
+  let hiddenAnchor = false;
+  let lastVisible: string | null = null;
+  let neighbour: string | null = null;
+  let wantNext = false;
   for (const m of messages) {
     // P-05: a deleted message disappears, unless its thread keeps it as a tombstone.
-    if (m.deletedAt && m.replyCount === 0 && !showTombstones) continue;
+    if (m.deletedAt && m.replyCount === 0 && !showTombstones) {
+      if (anchorId && m.id === anchorId) {
+        hiddenAnchor = true;
+        neighbour = lastVisible;
+        wantNext = true;
+      }
+      continue;
+    }
+    if (wantNext) {
+      neighbour = m.id;
+      wantNext = false;
+    }
+    lastVisible = m.id;
     const key = m.deletedAt ? `deleted:${m.id}` : authorKey(m.author, m);
     const at = new Date(m.createdAt).getTime();
     const day = new Date(m.createdAt).toDateString();
@@ -569,6 +605,7 @@ export function MessageList({
     // A message with a thread breaks the group so the next one shows its author again.
     prev = { key: m.replyCount > 0 ? `${key}:thread` : key, at, day };
   }
+  useHiddenAnchor(hiddenAnchor ? (anchorId ?? null) : null, neighbour, onAnchorHidden);
   const meKey = `user:${me.id}`;
   for (const p of pending) {
     const at = new Date(p.createdAt).getTime();

@@ -191,7 +191,18 @@ export function DmView({ conversationId }: { conversationId: string }) {
     conversationId,
     detached,
   );
-  useCentreOnce(scroll, permalinkId, win.centreTarget);
+  // A deleted target hidden by P-05 lands on its nearest visible neighbour, without a highlight.
+  const [fallback, setFallback] = useState<{ link: string; target: string | null } | null>(null);
+  const onAnchorHidden = useCallback(
+    (neighbourId: string | null) => {
+      if (!permalinkId) return;
+      toast("This message was deleted");
+      setFallback({ link: permalinkId, target: neighbourId });
+    },
+    [permalinkId],
+  );
+  const fallbackTarget = fallback && fallback.link === permalinkId ? fallback.target : null;
+  useCentreOnce(scroll, permalinkId, fallbackTarget ?? win.centreTarget);
 
   const { release } = win;
   const jumpToLatest = useCallback(() => {
@@ -448,6 +459,7 @@ export function DmView({ conversationId }: { conversationId: string }) {
                   readOnly={!!dm.archivedAt || disabled}
                   anchorId={permalinkId}
                   linkFor={linkFor}
+                  onAnchorHidden={onAnchorHidden}
                 />
                 {loadingNewer ? (
                   <div className="flex justify-center py-3 text-muted-foreground">

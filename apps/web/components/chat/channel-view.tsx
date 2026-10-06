@@ -286,7 +286,18 @@ export function ChannelView({ channelId }: { channelId: string }) {
     detached,
   );
 
-  useCentreOnce(scroll, permalinkId, win.centreTarget);
+  // A deleted target hidden by P-05 lands on its nearest visible neighbour, without a highlight.
+  const [fallback, setFallback] = useState<{ link: string; target: string | null } | null>(null);
+  const onAnchorHidden = useCallback(
+    (neighbourId: string | null) => {
+      if (!permalinkId) return;
+      toast("This message was deleted");
+      setFallback({ link: permalinkId, target: neighbourId });
+    },
+    [permalinkId],
+  );
+  const fallbackTarget = fallback && fallback.link === permalinkId ? fallback.target : null;
+  useCentreOnce(scroll, permalinkId, fallbackTarget ?? win.centreTarget);
 
   // A reply linked without its root (`?m=<reply>`): open its thread like a full thread link would.
   const linkRoot = win.threadRootId;
@@ -599,6 +610,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
                     highlightId={threadId}
                     anchorId={threadId ? null : permalinkId}
                     linkFor={linkFor}
+                    onAnchorHidden={onAnchorHidden}
                     intro={intro}
                     readOnly={!!channel.archivedAt}
                     canDeleteAny={canModerate}
@@ -672,6 +684,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
             onSend={(body, rootId) => send(body, rootId)}
             onRetry={retry}
             onTyping={(rootId) => sendTyping(rootId)}
+            highlightId={permalinkId}
           />
         ) : null}
 
