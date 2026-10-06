@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 21
+open_count: 25
 waived_count: 0
 fixed_count: 14
-total_count: 35
-last_updated: 2026-10-06T07:09:19.714Z
+total_count: 39
+last_updated: 2026-10-06T08:08:43.546Z
 ---
 
 # Broken Windows Ledger
@@ -50,6 +50,10 @@ last_updated: 2026-10-06T07:09:19.714Z
 | 33 | 04 | deviation | apps/api/src/modules/chat/index.ts |  | GET /messages/:id/thread now serves DM and group roots to participants (was channel-only); outsiders still 404 | open |  | 2026-10-06T07:09:19.575Z |  |
 | 34 | 04 | deviation | apps/api/src/modules/chat/dm-privacy.int.test.ts |  | Privacy suite links attachments to messages via SQL until 04-12 wires attachments on send; Plan 09 adds the inbox route | open |  | 2026-10-06T07:09:19.644Z |  |
 | 35 | 04 | deviation | apps/web/components/members/member-profile-sheet.tsx |  | Message action added to the member profile sheet (not in plan file list) | open |  | 2026-10-06T07:09:19.714Z |  |
+| 36 | 04 | deviation | apps/web/components/chat/chat-sidebar.tsx |  | Unit sections also list unjoined public channels of the member's own units (muted) so new department channels reach members live | open |  | 2026-10-06T08:08:43.342Z |  |
+| 37 | 04 | deviation | packages/contracts/src/chat.ts |  | Add-only ChannelUnit.pathNames, ChannelList.memberUnitIds, ThreadSummary.lastReplies | open |  | 2026-10-06T08:08:43.410Z |  |
+| 38 | 04 | deviation | apps/api/src/modules/agent-channel/index.ts |  | Agent channel resource carries the channel's unit path so unit-scoped rules reach bots | open |  | 2026-10-06T08:08:43.479Z |  |
+| 39 | 04 | deviation | apps/api/src/modules/chat/index.ts |  | conversation.updated with unitId re-decides live conv: subscriptions; #general cannot move; archived PATCH 410 | open |  | 2026-10-06T08:08:43.546Z |  |
 
 ````json
 [
@@ -471,6 +475,54 @@ last_updated: 2026-10-06T07:09:19.714Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-06T07:09:19.714Z",
+    "resolved_at": null
+  },
+  {
+    "id": 36,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/web/components/chat/chat-sidebar.tsx",
+    "line": null,
+    "description": "Unit sections also list unjoined public channels of the member's own units (muted) so new department channels reach members live",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T08:08:43.342Z",
+    "resolved_at": null
+  },
+  {
+    "id": 37,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "packages/contracts/src/chat.ts",
+    "line": null,
+    "description": "Add-only ChannelUnit.pathNames, ChannelList.memberUnitIds, ThreadSummary.lastReplies",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T08:08:43.410Z",
+    "resolved_at": null
+  },
+  {
+    "id": 38,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/api/src/modules/agent-channel/index.ts",
+    "line": null,
+    "description": "Agent channel resource carries the channel's unit path so unit-scoped rules reach bots",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T08:08:43.479Z",
+    "resolved_at": null
+  },
+  {
+    "id": 39,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/api/src/modules/chat/index.ts",
+    "line": null,
+    "description": "conversation.updated with unitId re-decides live conv: subscriptions; #general cannot move; archived PATCH 410",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T08:08:43.546Z",
     "resolved_at": null
   }
 ]
