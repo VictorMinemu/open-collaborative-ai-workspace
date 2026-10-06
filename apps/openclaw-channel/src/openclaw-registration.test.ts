@@ -44,9 +44,11 @@ const WEB_TURN = {
   maxWebCalls: 5,
 };
 
-const ocwHooks = (mode: RegistrationMode) =>
+const ocwHooks = (mode: RegistrationMode, kind: "tool" | "gateway" = "tool") =>
   loadRegistry(entry, manifest, { mode })
-    .typedHooks.filter((h) => h.pluginId === "ocw")
+    .typedHooks.filter(
+      (h) => h.pluginId === "ocw" && h.hookName.startsWith("gateway_") === (kind === "gateway"),
+    )
     .map(({ hookName, matcher, priority }) => ({ hookName, matcher, priority }));
 
 describe("OpenClaw 2026.9.7 registration of the real entry", () => {
@@ -64,8 +66,16 @@ describe("OpenClaw 2026.9.7 registration of the real entry", () => {
     "a %s load (no capability handlers, no agent turns) registers no hook and does not throw",
     (mode) => {
       expect(ocwHooks(mode)).toEqual([]);
+      expect(ocwHooks(mode, "gateway")).toEqual([]);
     },
   );
+
+  it("the restart-loop breaker guard is armed by gateway_start of the boot registry (full), never a turn registry", () => {
+    expect(ocwHooks("full", "gateway")).toEqual([
+      { hookName: "gateway_start", matcher: undefined, priority: undefined },
+    ]);
+    expect(ocwHooks("discovery", "gateway")).toEqual([]);
+  });
 
   it("the memory tool is registered where OpenClaw resolves plugin tools (boot registry and tool discovery)", () => {
     const tools = (mode: RegistrationMode) =>

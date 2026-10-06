@@ -19,6 +19,17 @@
  *                                         (`toolName: normalizeToolPolicyName(tool.name)`: lower-cased, aliases
  *                                         bash→exec, apply-patch→apply_patch, cron→automations; MCP tools keep
  *                                         their server's casing in the model-facing name, not in the hook event)
+ * - known hook names                      dist/hooks-*.mjs `pluginHookNameSet` (subset below)
+ * - gateway_start                         dist/server-startup-post-attach-*.mjs `runGatewayStartupObservers`: once per
+ *                                         boot, AFTER the startup sidecars (channel auto-start included), from the
+ *                                         boot registry, void hook awaited with a timeout
+ * - restart-loop breaker                  dist/run-*.mjs `beginBoot` (message) + dist/gateway-boot-lifecycle-*.mjs
+ *                                         (3 unclean boots / 5 min) + dist/server-channels-*.mjs
+ *                                         `startChannelProcessOwned` (a non-manual start is refused and the account
+ *                                         gets `lastError` = the breaker message; `manual: true` bypasses it)
+ * - channels.status / channels.start      dist/channels-*.mjs gateway methods (`channelAccounts[<id>]` is an array;
+ *                                         start is `startChannel(id, account, { manual: true })`), reached in process
+ *                                         through `openclaw/plugin-sdk/gateway-runtime` `callGatewayFromCli`
  *
  * Why the modes matter: OpenClaw runs each agent turn inside a prepared plugin generation. Whenever the config
  * differs from the one the boot registry was activated with (always, in an OCW cell: the plugin writes the
@@ -75,6 +86,8 @@ const KNOWN_HOOKS = new Set([
   "agent_end",
   "message_received",
   "message_sending",
+  "gateway_start",
+  "gateway_stop",
 ]);
 
 /** dist/hooks-*.mjs `normalizePluginToolMatcher`: omission is the only match-all form. */
@@ -319,4 +332,162 @@ export function createTurnHookRunner(registry: HostRegistry, opts: { budgetMs?: 
       await Promise.allSettled(hooksFor("after_tool_call", event.toolName).map((h) => h.handler(event, ctx)));
     },
   };
+}
+
+// ---------------------------------------------------------------- gateway boot: channels, breaker, gateway_start
+
+/** dist/run-*.mjs `beginBoot` + `formatGatewayCrashLoopManualChannelStartHint()`, verbatim. */
+export function breakerMessage(uncleanBoots: number, windowMs = 300_000): string {
+  return (
+    `gateway restart-loop breaker tripped: ${uncleanBoots} unclean boot(s) within ${windowMs}ms; suppressing ` +
+    "channel/provider account auto-start. Inspect the stability bundle and fix the startup crash before restarting " +
+    `the service. Start a channel manually with: openclaw gateway call channels.start --params '{"channel":"<id>"}'`
+  );
+}
+
+type HostChannelPlugin = {
+  id: string;
+  config: {
+    listAccountIds: (cfg: unknown) => string[];
+    resolveAccount: (cfg: unknown, accountId?: string | null) => unknown;
+  };
+  gateway?: { startAccount?: (ctx: Record<string, unknown>) => Promise<unknown> };
+};
+
+export type HostAccountRuntime = { accountId: string; running: boolean; lastError?: string | null };
+export type HostStartRecord = { channelId: string; accountId: string; manual: boolean; outcome: string };
+
+/**
+ * The gateway's channel manager for one boot (dist/server-channels-*.mjs `createChannelManager`, subset): the
+ * crash-loop suppression is set before channels start; automatic starts are refused while it is set, manual ones
+ * (`channels.start`) are not; an account task that already runs is "task-owned".
+ */
+export function createHostChannelManager(opts: {
+  registry: HostRegistry;
+  config: Record<string, unknown>;
+  /** `channelAutostartSuppression` of this boot (null: the breaker did not trip). */
+  suppression?: { reason: "crash-loop-breaker"; message: string } | null;
+}) {
+  const runtimes = new Map<string, HostAccountRuntime>();
+  const tasks = new Map<string, AbortController>();
+  const starts: HostStartRecord[] = [];
+  const key = (channelId: string, accountId: string) => `${channelId}:${accountId}`;
+  const pluginOf = (channelId: string) =>
+    opts.registry.channels.map((c) => c.plugin as HostChannelPlugin).find((p) => p.id === channelId);
+
+  function startChannel(channelId: string, accountId: string | undefined, start: { manual: boolean }) {
+    const plugin = pluginOf(channelId);
+    const outcomes = new Map<string, string>();
+    if (!plugin?.gateway?.startAccount) return outcomes;
+    const ids = accountId ? [accountId] : plugin.config.listAccountIds(opts.config);
+    for (const id of ids) {
+      const k = key(channelId, id);
+      let outcome: string;
+      if (opts.suppression && !start.manual) {
+        runtimes.set(k, { accountId: id, running: false, lastError: opts.suppression.message });
+        outcome = "autostart-suppressed";
+      } else if (tasks.has(k)) {
+        outcome = "task-owned";
+      } else {
+        const abort = new AbortController();
+        tasks.set(k, abort);
+        runtimes.set(k, { accountId: id, running: true, lastError: null });
+        const ctx = {
+          cfg: opts.config,
+          accountId: id,
+          account: plugin.config.resolveAccount(opts.config, id),
+          abortSignal: abort.signal,
+          log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+          getStatus: () => runtimes.get(k),
+          setStatus: (next: Record<string, unknown>) =>
+            runtimes.set(k, {
+              ...(runtimes.get(k) ?? { accountId: id, running: false }),
+              ...next,
+            } as HostAccountRuntime),
+        };
+        // The account task runs until its abort signal fires (it is not awaited by the manager).
+        void Promise.resolve()
+          .then(() => plugin.gateway?.startAccount?.(ctx))
+          .catch((error: unknown) =>
+            runtimes.set(k, { accountId: id, running: false, lastError: String(error) }),
+          )
+          .finally(() => {
+            if (tasks.get(k) === abort) tasks.delete(k);
+          });
+        outcome = "started";
+      }
+      starts.push({ channelId, accountId: id, manual: start.manual, outcome });
+      outcomes.set(id, outcome);
+    }
+    return outcomes;
+  }
+
+  const manager = {
+    starts,
+    /** Startup sidecar `startChannels()`: every channel, automatic. */
+    startChannels() {
+      for (const c of opts.registry.channels)
+        startChannel((c.plugin as HostChannelPlugin).id, undefined, { manual: false });
+    },
+    account(channelId: string, accountId: string): HostAccountRuntime | undefined {
+      return runtimes.get(key(channelId, accountId));
+    },
+    stopAll() {
+      for (const abort of tasks.values()) abort.abort();
+      tasks.clear();
+    },
+    /** The two gateway methods (dist/channels-*.mjs), as the in-process gateway client sees them. */
+    async call(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+      if (method === "channels.status") {
+        const channelAccounts: Record<string, HostAccountRuntime[]> = {};
+        for (const c of opts.registry.channels) {
+          const plugin = c.plugin as HostChannelPlugin;
+          if (typeof params.channel === "string" && params.channel !== plugin.id) continue;
+          channelAccounts[plugin.id] = plugin.config
+            .listAccountIds(opts.config)
+            .map((id) => runtimes.get(key(plugin.id, id)) ?? { accountId: id, running: false });
+        }
+        return { ts: Date.now(), channelAccounts };
+      }
+      if (method === "channels.start") {
+        const channelId = String(params.channel);
+        if (!pluginOf(channelId)) throw new Error(`unknown channel: ${channelId}`);
+        const accountId = typeof params.accountId === "string" ? params.accountId : "default";
+        const outcome = startChannel(channelId, accountId, { manual: true }).get(accountId);
+        return {
+          channel: channelId,
+          accountId,
+          started: runtimes.get(key(channelId, accountId))?.running === true,
+          outcome,
+        };
+      }
+      throw new Error(`unknown method: ${method}`);
+    },
+  };
+  activeGateway = manager;
+  return manager;
+}
+
+export type HostChannelManager = ReturnType<typeof createHostChannelManager>;
+
+let activeGateway: HostChannelManager | null = null;
+
+/** The module our plugin imports as `openclaw/plugin-sdk/gateway-runtime` (for `vi.mock`): the latest manager. */
+export const gatewayRuntimeModule = {
+  async callGatewayFromCli(method: string, _opts: unknown, params?: Record<string, unknown>) {
+    if (!activeGateway) throw new Error("gateway closed (1006): no gateway is running");
+    return activeGateway.call(method, params ?? {});
+  },
+};
+
+/** `runGatewayStartupObservers`: every gateway_start handler of the boot registry, awaited (void hook). */
+export async function runGatewayStart(
+  registry: HostRegistry,
+  ctx: { port: number; config: Record<string, unknown>; abortSignal: AbortSignal },
+): Promise<void> {
+  await Promise.allSettled(
+    registry.typedHooks
+      .filter((h) => h.hookName === "gateway_start")
+      .map((h) => Promise.resolve(h.handler({ port: ctx.port }, ctx))),
+  );
 }

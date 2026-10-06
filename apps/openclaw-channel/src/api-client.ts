@@ -7,6 +7,7 @@ import {
   type AgentChannelPostMessage,
   AgentChannelPostMessageResponse,
   type AgentChannelProviderAuthReport,
+  type AgentChannelRuntimeReport,
   type AgentChannelStatusReport,
   AgentChannelToolCallDecision,
   type AgentChannelToolCallRequest,
@@ -127,6 +128,10 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
       signal?: AbortSignal,
     ): Promise<void> {
       await request("POST", `/agents/${encodeURIComponent(agentId)}/status`, report, signal, 3);
+    },
+    /** Why the cell runs without its channel (or that it no longer does). Three attempts at most. */
+    async reportRuntime(report: AgentChannelRuntimeReport, signal?: AbortSignal): Promise<void> {
+      await request("POST", "/runtime", report, signal, 3);
     },
     /**
      * Subscription sign-in progress. The report may carry the one-time user code: never log it.

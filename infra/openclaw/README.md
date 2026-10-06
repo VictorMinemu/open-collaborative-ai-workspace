@@ -190,6 +190,22 @@ therefore sets `npm_config_fetch_retries=1` and short retry and fetch timeouts u
 | `OCW_BUNDLED_PLUGINS` | bundled search plugins to load: default `duckduckgo,searxng`, `none` disables both |
 | `OCW_SEARXNG_URL` | SearXNG base URL as seen from the cell (`http://searxng:8080` with the `search` profile) |
 | `OCW_CLAWHUB_URL` | the only origin marketplace artifacts are downloaded from (default `https://clawhub.ai`; same value as the API) |
+| `OCW_BREAKER_BACKOFF_MS` | back-off before the plugin starts the `ocw` channel itself after OpenClaw's restart-loop breaker (default `60000`) |
+
+## Restart-loop breaker
+
+OpenClaw 2026.9.7 counts gateway boots that never completed. Three or more within 5 minutes (a starved Docker VM is
+enough) trip its breaker: the next boot starts the gateway but refuses every automatic channel start until a stable
+process has outlived the window, so the cell answers no bot for 5 to 10 minutes while it looks healthy. On
+`gateway_start` the plugin reads the `ocw` account through OpenClaw's own gateway client in process
+(`callGatewayFromCli`, loopback with the shared token already in the gateway env, the same call as
+`openclaw gateway call`). When the breaker is what keeps the account stopped, it reports the pause to the API
+(`POST /agent-channel/v1/runtime`; Settings › Bots runtime shows "Paused" and when it restarts), waits
+`OCW_BREAKER_BACKOFF_MS` and then makes OpenClaw's manual `channels.start`, so OpenClaw's channel manager still owns
+the account. Failed starts are retried with a doubling back-off (5 attempts, at most 5 minutes apart). The log says
+why: `[ocw] OpenClaw's restart-loop breaker suppressed this channel's auto-start (N unclean boots within 300 s) …`.
+A path-loaded plugin cannot use `api.runtime.gateway.request` (bundled or trusted official plugins only, and no
+operator.admin scope), which is why the guard uses the gateway client.
 
 ## Memory
 
@@ -232,6 +248,10 @@ ClawHub on the fake model. The fake ClawHub serves the `npm pack` of the pinned 
   (`echo marketplace`);
 - after uninstall a turn that still lists `ocw_echo` gets `Tool ocw_echo not offered`;
 - DuckDuckGo is uninstalled.
+
+`breaker` SIGKILLs the cell until OpenClaw's restart-loop breaker trips on the next boot, then checks that the plugin
+noticed the suppressed channel, reported the pause to the fake API and started the channel itself (the smoke cell
+runs with `OCW_BREAKER_BACKOFF_MS=5000`).
 
 The script `docker cp`s the working-tree `install-policy.mjs` into a reused image instead of bind-mounting it:
 OpenClaw refuses a policy script owned by the runner's uid.

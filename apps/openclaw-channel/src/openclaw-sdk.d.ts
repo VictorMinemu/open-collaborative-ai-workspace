@@ -141,7 +141,11 @@ declare module "openclaw/plugin-sdk/channel-core" {
   /** The subset of `OpenClawPluginApi` this plugin uses. */
   export type OpenClawPluginApi = {
     registrationMode?: PluginRegistrationMode;
-    logger?: { info?: (msg: string) => void; warn?: (msg: string) => void };
+    logger?: {
+      info?: (msg: string) => void;
+      warn?: (msg: string) => void;
+      error?: (msg: string) => void;
+    };
     registerTool(
       factory: (ctx: OpenClawPluginToolContext) => OpenClawAgentTool | null | undefined,
       opts: { name: string; optional?: boolean },
@@ -159,6 +163,23 @@ declare module "openclaw/plugin-sdk/channel-core" {
       handler: (event: PluginHookToolCallEvent, ctx: PluginHookToolContext) => void | Promise<void>,
       opts?: HookOptions,
     ): void;
+    /**
+     * Fired once per gateway boot, after the startup sidecars (channel auto-start included) ran, from the boot
+     * registry only (dist/server-startup-post-attach-*.mjs `runGatewayStartupObservers`). Awaited with a timeout:
+     * long work must be detached. `abortSignal` aborts on shutdown and restart drain.
+     */
+    on(
+      hook: "gateway_start",
+      handler: (event: { port: number }, ctx: PluginHookGatewayStartContext) => void | Promise<void>,
+      opts?: HookOptions,
+    ): void;
+  };
+
+  export type PluginHookGatewayStartContext = {
+    port: number;
+    config?: OpenClawConfig;
+    workspaceDir?: string;
+    abortSignal?: AbortSignal;
   };
 
   export function defineChannelPluginEntry<ResolvedAccount>(params: {
@@ -244,6 +265,19 @@ declare module "openclaw/plugin-sdk/provider-auth-login-flow-runtime" {
     readConfig(): Record<string, unknown>;
     assertCurrent(config: Record<string, unknown>): void;
   }): Promise<void>;
+}
+
+/**
+ * Public `openclaw/plugin-sdk/gateway-runtime` (subset): the client behind `openclaw gateway call`
+ * (dist/gateway-rpc-*.mjs). Inside the gateway it resolves the local URL and the shared token from config/env.
+ */
+declare module "openclaw/plugin-sdk/gateway-runtime" {
+  export function callGatewayFromCli(
+    method: string,
+    opts: { json?: boolean; timeout?: string; token?: string; url?: string },
+    params?: unknown,
+    extra?: { progress?: boolean; timeoutMs?: number },
+  ): Promise<unknown>;
 }
 
 /** Public, typed `openclaw/plugin-sdk/provider-auth` (subset). */

@@ -10,6 +10,7 @@
  *   POST /messages             ← AgentChannelPostMessage → AgentChannelPostMessageResponse
  *   POST /typing               ← AgentChannelTyping → {ok:true}
  *   POST /agents/:id/status    ← AgentChannelStatusReport (ready | error) after provisioning
+ *   POST /runtime              ← AgentChannelRuntimeReport (why the cell runs without its channel; autostart-guard.ts)
  *   POST /provider-auth        ← AgentChannelProviderAuthReport (subscription sign-in progress)
  *   POST /tool-calls           ← AgentChannelToolCallRequest → AgentChannelToolCallDecision (tool gate)
  *   POST /tool-calls/:id/result ← AgentChannelToolCallResult (outcome only, never content)
@@ -338,6 +339,11 @@ export type AgentChannelTyping = {
 };
 
 export type AgentChannelStatusReport = { status: "ready" | "error"; detail?: string };
+
+/** POST /runtime: the cell is up but its channel is paused (`null`: no longer paused). */
+export type AgentChannelRuntimeReport = {
+  paused: { reason: "restart_loop_breaker"; detail: string | null; resumeAt: string | null } | null;
+};
 
 /** POST /tool-calls: only the search query / fetched URL travel (for the domain audit), never other params. */
 export type AgentChannelToolCallRequest = {
