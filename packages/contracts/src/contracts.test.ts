@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   AddUnitMemberRequest,
   Agent,
+  AgentCellStatus,
+  AgentChannelRuntimeReport,
   AuthCapabilities,
   AvatarRef,
   AWAY_AFTER_IDLE_MS,
@@ -502,5 +504,47 @@ describe("automatic session titles (03.2-12)", () => {
     expect(shape.titleSource.safeParse("auto").success).toBe(true);
     expect(shape.titleSource.safeParse(undefined).success).toBe(false);
     expect(shape.titleSource.safeParse("model").success).toBe(false);
+  });
+});
+
+describe("cell runtime pause (stability 2026-10-06)", () => {
+  const paused = {
+    reason: "restart_loop_breaker",
+    detail: "6 unclean restarts within 5 min",
+    resumeAt: "2026-10-06T10:01:00.000Z",
+  };
+
+  it("the cell reports a pause (or its end) with a closed reason set", () => {
+    expect(AgentChannelRuntimeReport.parse({ paused }).paused?.reason).toBe("restart_loop_breaker");
+    expect(AgentChannelRuntimeReport.parse({ paused: null }).paused).toBeNull();
+    expect(AgentChannelRuntimeReport.safeParse({ paused: { ...paused, reason: "whatever" } }).success).toBe(
+      false,
+    );
+    expect(
+      AgentChannelRuntimeReport.safeParse({ paused: { ...paused, detail: "x".repeat(301) } }).success,
+    ).toBe(false);
+    expect(AgentChannelRuntimeReport.safeParse({ paused: { ...paused, resumeAt: null } }).success).toBe(true);
+  });
+
+  it("the admin cell status carries the pause next to presence", () => {
+    const status = {
+      cellId: id,
+      connected: false,
+      connections: 0,
+      connectedAt: null,
+      lastSeenAt: "2026-10-06T10:00:00.000Z",
+      envTokenConfigured: true,
+      uiTokenCreatedAt: null,
+    };
+    expect(AgentCellStatus.parse({ ...status, paused: null }).paused).toBeNull();
+    const withPause = AgentCellStatus.parse({
+      ...status,
+      paused: { ...paused, since: "2026-10-06T10:00:00.000Z" },
+    });
+    expect(withPause.paused).toMatchObject({
+      reason: "restart_loop_breaker",
+      since: "2026-10-06T10:00:00.000Z",
+    });
+    expect(AgentCellStatus.safeParse(status).success).toBe(false);
   });
 });

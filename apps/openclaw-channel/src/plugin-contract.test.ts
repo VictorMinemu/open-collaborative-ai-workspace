@@ -727,7 +727,7 @@ describe("memory tool (D-10): manifest, registration and the fake API", () => {
     expect(manifest.contracts?.tools).toEqual(["ocw_memory_save"]);
   });
 
-  it("registerFull registers ocw_memory_save; the gate hooks come from registerCapabilities", () => {
+  it("registerFull registers ocw_memory_save (+ the breaker guard on gateway_start); the gate hooks come from registerCapabilities", () => {
     const hooks: string[] = [];
     const tools: Array<{ opts: { name: string } }> = [];
     const pluginApi = {
@@ -736,10 +736,10 @@ describe("memory tool (D-10): manifest, registration and the fake API", () => {
     };
     const guard = createToolGuard({ client: () => null });
     registerFull(pluginApi as never, guard);
-    expect(hooks).toEqual([]);
+    expect(hooks).toEqual(["gateway_start"]);
     expect(tools.map((t) => t.opts.name)).toEqual(["ocw_memory_save"]);
     registerCapabilities(pluginApi as never, guard);
-    expect(hooks).toEqual(["before_tool_call", "after_tool_call"]);
+    expect(hooks).toEqual(["gateway_start", "before_tool_call", "after_tool_call"]);
     expect(tools).toHaveLength(1);
   });
 

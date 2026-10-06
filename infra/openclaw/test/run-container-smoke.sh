@@ -16,10 +16,12 @@
 # Scenario sandbox (03.1-14 / D-13): a vetted stdio MCP server runs only in the hardened `ocw-mcp-sandbox` sidecar; the
 # cell sees it as a remote streamable-HTTP server on an internal network shared with the sidecar alone, probes it and a
 # bot calls its `echo` tool through the gate, while no third-party MCP code runs inside the gateway container.
+# Scenario breaker (stability 2026-10-06): SIGKILLed boots trip OpenClaw's restart-loop breaker, which refuses the ocw
+# channel's automatic start; the plugin reports the pause to the API and starts the channel itself after its back-off.
 #
 # Usage (repo root):  infra/openclaw/test/run-container-smoke.sh [--keep]
 #   SMOKE_ONLY=<comma list>  run only these scenarios (unset = all): mention, signin, dm, capabilities,
-#                            dm-isolation, memory, mcp, marketplace
+#                            dm-isolation, memory, mcp, marketplace, breaker
 #                            and sandbox (runs when it is listed, with SMOKE_BUILD=1, or when ocw-mcp-sandbox:local
 #                            exists; otherwise it prints "SKIP sandbox (image not built)")
 #   FAKE_MODEL_DEBUG=1       the fake model logs a preview of each tool-offering request (off by default)
@@ -244,6 +246,7 @@ docker create --name "${P}-openclaw" "${OOM[@]}" ${CELL_LIMIT[@]+"${CELL_LIMIT[@
   -e OCW_SEARXNG_URL=http://fake-model:18999 \
   -e OCW_BUNDLED_PLUGINS=searxng \
   -e OCW_CLAWHUB_URL=http://fake-model:18999 \
+  -e OCW_BREAKER_BACKOFF_MS=5000 \
   -e NODE_OPTIONS="${CELL_NODE_OPTIONS:---max-old-space-size=512}" \
   ocw-openclaw:local >/dev/null
 if [[ "${SMOKE_BUILD:-0}" != "1" ]]; then
@@ -1045,6 +1048,46 @@ if [[ -n "$LEFT" ]]; then echo "FAIL: the deleted bot's DM text is still in agen
 echo "   after      : agent state dir gone, no agent state file holds the secret"
 # Outside agent state (gateway logs, shared indexes) is reported for the record, not a transcript.
 [[ -z "$ELSEWHERE" ]] || { echo "   note       : the secret also appears outside agent state:"; echo "$ELSEWHERE" | sed 's/^/     /'; }
+fi
+
+if want breaker; then
+echo "== [breaker] unclean restarts trip OpenClaw's restart-loop breaker; the plugin reports the pause and starts ocw"
+# OpenClaw counts boots that never completed (SIGKILL) and started within the last 5 minutes; 3 trip the next boot.
+# The cell's first boot may be older than the window by now, so kill until the breaker trips (at most 6 times).
+boots() { docker logs "${P}-openclaw" 2>&1 | grep -c "http server listening" || true; }
+tripped() { docker logs "${P}-openclaw" 2>&1 | grep -c "restart-loop breaker tripped" || true; }
+for i in $(seq 1 6); do
+  [[ "$(tripped)" -gt 0 ]] && break
+  B="$(boots)"
+  docker kill -s KILL "${P}-openclaw" >/dev/null
+  docker start "${P}-openclaw" >/dev/null
+  for _ in $(seq 1 180); do [[ "$(boots)" -gt "$B" ]] && break; sleep 1; done
+  [[ "$(boots)" -gt "$B" ]] || { echo "FAIL: the cell did not boot again after unclean stop $i"; exit 1; }
+  echo "   unclean stop $i: boot $((B + 1)) up"
+done
+[[ "$(tripped)" -gt 0 ]] || { echo "FAIL: OpenClaw's restart-loop breaker never tripped"; exit 1; }
+# Only the log of the breaker boot (from its breaker line on).
+since_breaker() { docker logs "${P}-openclaw" 2>&1 | awk '/restart-loop breaker tripped/ { buf = "" } { buf = buf $0 "\n" } END { printf "%s", buf }'; }
+for i in $(seq 1 120); do
+  if since_breaker | grep "agent channel connected" >/dev/null; then break; fi
+  sleep 1
+done
+AFTER="$(since_breaker)"
+grep -E "restart-loop breaker|autostart suppressed|\[ocw\] (OpenClaw's|started the ocw|agent channel connected)" <<<"$AFTER" | cut -c1-220 | sed 's/^/   /'
+grep -q "suppressed this channel's auto-start" <<<"$AFTER" || { echo "FAIL: the plugin did not notice the suppressed channel"; exit 1; }
+grep -q "started the ocw channel after the restart-loop breaker back-off" <<<"$AFTER" || {
+  echo "FAIL: the plugin did not start the ocw channel (channels.start in process)"; exit 1
+}
+grep -q "agent channel connected" <<<"$AFTER" || { echo "FAIL: the ocw channel never connected after the breaker"; exit 1; }
+REPORTS="$(api_exec "const r = await fetch('http://127.0.0.1:4000/__test/state'); console.log(JSON.stringify((await r.json()).runtimeReports));")"
+echo "   runtime    : $REPORTS"
+REPORTS="$REPORTS" node -e '
+const reports = JSON.parse(process.env.REPORTS);
+const p = reports.at(-1)?.paused;
+const ok = p && p.reason === "restart_loop_breaker" && /^\d+ unclean restarts within 5 min$/.test(p.detail ?? "") &&
+  typeof p.resumeAt === "string";
+if (!ok) { console.log("FAIL: the API was not told why the channel was paused"); process.exit(1); }
+'
 fi
 
 echo "== hardening checks"
