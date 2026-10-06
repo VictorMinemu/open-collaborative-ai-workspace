@@ -2,6 +2,7 @@
 created: 2026-10-05
 title: Cell stays Offline after OpenClaw's restart-loop breaker suppresses the ocw channel
 area: openclaw-cell
+done: 2026-10-06
 ---
 
 ## Problem
@@ -17,3 +18,10 @@ container is healthy. Fixed by hand with `openclaw gateway call channels.start -
 - Report the suppression to the API so the UI shows the reason ("bot runtime paused after repeated restarts")
   instead of a bare Offline.
 - Investigate the exit-0 restarts under VM CPU starvation (OpenClaw watchdog?).
+
+## Done (stability batch 2026-10-06)
+- The plugin's restart-loop breaker guard (`apps/openclaw-channel/src/autostart-guard.ts`, on `gateway_start`) reports
+  the pause and starts `ocw` with OpenClaw's manual `channels.start` (in process) after `OCW_BREAKER_BACKOFF_MS`.
+- `POST /agent-channel/v1/runtime` → `AgentCellStatus.paused` → Settings › Bots runtime shows "Paused" and when it
+  restarts. Report: `.planning/debug/stability-batch-2026-10-06.md`.
+- Still open: why the cell exits 0 under VM CPU starvation (not reproduced; no local OpenClaw containers).

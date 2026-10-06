@@ -10,6 +10,7 @@
  *   POST /agent-channel/v1/messages      idempotent on agentId + idempotencyKey
  *   POST /agent-channel/v1/typing
  *   POST /agent-channel/v1/agents/:id/status
+ *   POST /agent-channel/v1/runtime         records the report (`runtimeReports`)
  *   POST /agent-channel/v1/provider-auth  (status per report: `authResponder`, default 200)
  *   POST /agent-channel/v1/tool-calls     records and allows (denies tools listed in `denyTools`)
  *   POST /agent-channel/v1/tool-calls/:id/result  records the outcome
@@ -32,6 +33,7 @@ import type {
   AgentChannelPluginReport,
   AgentChannelPostMessage,
   AgentChannelProviderAuthReport,
+  AgentChannelRuntimeReport,
   AgentChannelStatusReport,
   AgentChannelToolCallRequest,
   AgentChannelToolCallResult,
@@ -101,6 +103,8 @@ export type FakeAgentChannelApi = {
   messageAttempts: AgentChannelPostMessage[];
   typing: AgentChannelTyping[];
   statusReports: StatusReport[];
+  /** Every POST /runtime (why the cell runs without its channel), in order. */
+  runtimeReports: AgentChannelRuntimeReport[];
   /** `afterSeq` of every accepted `sub` (null = live), in order. */
   subscriptions: Array<number | null>;
   authFailures: number;
@@ -177,6 +181,7 @@ export async function startFakeAgentChannelApi(
     messageAttempts: [] as AgentChannelPostMessage[],
     typing: [] as AgentChannelTyping[],
     statusReports: [] as StatusReport[],
+    runtimeReports: [] as AgentChannelRuntimeReport[],
     subscriptions: [] as Array<number | null>,
     authFailures: 0,
     webSearchProvider: opts.webSearchProvider,
@@ -241,6 +246,7 @@ export async function startFakeAgentChannelApi(
             messages: state.messages,
             typing: state.typing,
             statusReports: state.statusReports,
+            runtimeReports: state.runtimeReports,
             subscriptions: state.subscriptions,
             authReports: state.authReports,
             events: state.events.length,
@@ -413,6 +419,10 @@ export async function startFakeAgentChannelApi(
         state.typing.push((await readJson(req)) as AgentChannelTyping);
         return json(res, 200, { ok: true });
       }
+      if (req.method === "POST" && route === "/runtime") {
+        state.runtimeReports.push((await readJson(req)) as AgentChannelRuntimeReport);
+        return json(res, 200, { ok: true });
+      }
       const statusMatch = /^\/agents\/([^/]+)\/status$/u.exec(route);
       if (req.method === "POST" && statusMatch?.[1]) {
         const agentId = decodeURIComponent(statusMatch[1]);
@@ -573,6 +583,9 @@ export async function startFakeAgentChannelApi(
     },
     get statusReports() {
       return state.statusReports;
+    },
+    get runtimeReports() {
+      return state.runtimeReports;
     },
     get subscriptions() {
       return state.subscriptions;

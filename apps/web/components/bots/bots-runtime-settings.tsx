@@ -1,5 +1,6 @@
 "use client";
 
+import type { AgentCellStatus } from "@ocw/contracts";
 import { AlertTriangle, Check, Copy, KeyRound, RefreshCw, Server, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -85,6 +86,7 @@ export function BotsRuntimeSettings() {
         <section
           data-testid="cell-status"
           data-connected={s.connected}
+          data-paused={!s.connected && s.paused ? s.paused.reason : undefined}
           className={cn(
             "overflow-hidden rounded-2xl border bg-card shadow-xs",
             s.connected ? "border-success/30" : "border-warning/30",
@@ -110,13 +112,17 @@ export function BotsRuntimeSettings() {
               </span>
             </span>
             <div className="min-w-0 flex-1">
-              <p className="font-semibold text-base">{s.connected ? "Connected" : "Offline"}</p>
+              <p className="font-semibold text-base">
+                {s.connected ? "Connected" : s.paused ? "Paused" : "Offline"}
+              </p>
               <p className="text-muted-foreground text-sm">
                 {s.connected
                   ? `Since ${relativeTime(s.connectedAt ?? new Date().toISOString())}${s.connections > 1 ? ` · ${s.connections} connections` : ""}`
-                  : s.lastSeenAt
-                    ? `Last seen ${relativeTime(s.lastSeenAt)}`
-                    : "The OpenClaw cell has never connected."}
+                  : s.paused
+                    ? pausedSummary(s.paused)
+                    : s.lastSeenAt
+                      ? `Last seen ${relativeTime(s.lastSeenAt)}`
+                      : "The OpenClaw cell has never connected."}
               </p>
             </div>
             <Button variant="ghost" size="sm" onClick={() => cell.refetch()} disabled={cell.isFetching}>
@@ -247,6 +253,15 @@ export function BotsRuntimeSettings() {
       </Dialog>
     </Shell>
   );
+}
+
+/** The cell is up but OpenClaw held its channel back; say why and when it comes back. */
+function pausedSummary(p: NonNullable<AgentCellStatus["paused"]>, now = Date.now()): string {
+  const why = `OpenClaw paused the bots after repeated restarts${p.detail ? ` (${p.detail})` : ""}.`;
+  if (!p.resumeAt) return `${why} They resume once the cell stays up for 5 minutes.`;
+  const inMs = new Date(p.resumeAt).getTime() - now;
+  const when = inMs <= 0 ? "now" : inMs < 60_000 ? "in under a minute" : relativeTime(p.resumeAt, now);
+  return `${why} Restarting ${when}.`;
 }
 
 function Shell({ children }: { children: React.ReactNode }) {

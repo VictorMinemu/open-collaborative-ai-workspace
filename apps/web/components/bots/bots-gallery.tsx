@@ -63,7 +63,11 @@ export function BotsGallery() {
           >
             <WifiOff className="size-4 shrink-0 text-warning" />
             <p className="min-w-0 flex-1">
-              <span className="font-medium">Bots runtime is offline.</span>{" "}
+              <span className="font-medium">
+                {cell.data.paused
+                  ? "Bots runtime is paused after repeated restarts."
+                  : "Bots runtime is offline."}
+              </span>{" "}
               <span className="text-muted-foreground">
                 {pending > 0
                   ? "New bots stay in Provisioning until OpenClaw connects."

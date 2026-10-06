@@ -13,6 +13,11 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: process.env.CI ? 1 : 0,
+  // CI safety net: the whole run gets 15 minutes (a full desktop run takes about 6), inside the job's 30 (ci.yml).
+  // Anything that outlives the per-test timeout (a test with its timeout disabled, a teardown that never settles, a
+  // stuck worker) then fails fast with a report instead of running into the job timeout, which cancels the job and
+  // skips the failure artifacts.
+  globalTimeout: process.env.CI ? 15 * 60_000 : 0,
   reporter: [["list"], ["html", { outputFolder: "./playwright-report", open: "never" }]],
   use: {
     baseURL: process.env.OCW_E2E_BASE_URL ?? "http://localhost:3000",

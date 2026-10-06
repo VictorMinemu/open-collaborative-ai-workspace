@@ -48,7 +48,10 @@ jobs:
           pnpm setup:env
           docker compose up -d --wait postgres redis
           pnpm db:migrate
-      - run: pnpm exec playwright install --with-deps chromium
+      # Bounded on its own (apt mirror; see ci.yml).
+      - name: Chromium and its system packages
+        timeout-minutes: 8
+        run: pnpm exec playwright install --with-deps chromium
       - name: ClawHub reachable (one retry)
         run: |
           for i in 1 2; do

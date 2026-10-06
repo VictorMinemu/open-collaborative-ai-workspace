@@ -76,8 +76,17 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
-      - run: pnpm exec playwright install --with-deps chromium
-      - run: pnpm e2e --project=${{ matrix.project }}
+      # Bounded on its own: the system packages come from the runner's apt mirror, and one slow mirror (32 MB in
+      # 26 min) once ate the whole job budget, so the job was cancelled two seconds into the 22nd test and looked
+      # like a hung codex-subscription spec. A timed-out step fails (and keeps the failure artifacts); a cancelled
+      # job does not.
+      - name: Chromium and its system packages
+        timeout-minutes: 8
+        run: pnpm exec playwright install --with-deps chromium
+      # globalTimeout is 15 minutes in CI (e2e/playwright.config.ts); this only backs it up. Setup (~2) + 8 + 17 < 30.
+      - name: Playwright
+        timeout-minutes: 17
+        run: pnpm e2e --project=${{ matrix.project }}
       - name: Realtime latency report
         if: always()
         uses: actions/upload-artifact@v7
