@@ -54,6 +54,19 @@ declare module "openclaw/plugin-sdk/channel-core" {
     gateway?: {
       startAccount?: (ctx: ChannelGatewayContext<ResolvedAccount>) => Promise<unknown>;
     };
+    /**
+     * dist/status-*.mjs `buildChannelAccountSnapshotFromAccount`: when present, its result is the account's
+     * `channels.status` snapshot (then OpenClaw applies enabled/configured/running state and keeps `lastError`).
+     */
+    status?: {
+      buildAccountSnapshot?: (params: {
+        account: ResolvedAccount;
+        cfg: OpenClawConfig;
+        runtime?: ChannelAccountSnapshot;
+        probe?: unknown;
+        audit?: unknown;
+      }) => Record<string, unknown> | Promise<Record<string, unknown>>;
+    };
     messaging?: Record<string, unknown>;
   };
 

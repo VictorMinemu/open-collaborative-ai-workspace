@@ -189,7 +189,13 @@ export async function runAutostartGuard(opts: AutostartGuardOptions): Promise<Au
     }
     if (state?.running) return "running";
     const breaker = parseBreakerSuppression(state?.lastError);
-    if (!breaker) return "not-suppressed";
+    if (!breaker) {
+      // Not ours to fix (OpenClaw restarts it on its own), but say what was seen: a silent guard is undiagnosable.
+      log.info?.(
+        `the ocw channel did not start with the gateway (${state ? `lastError: ${state.lastError ?? "none"}` : "account not listed"}); not the restart-loop breaker, leaving it to OpenClaw`,
+      );
+      return "not-suppressed";
+    }
 
     const counts =
       breaker.uncleanBoots === null

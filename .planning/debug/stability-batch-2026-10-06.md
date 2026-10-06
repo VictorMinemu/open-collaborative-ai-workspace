@@ -1,5 +1,5 @@
 ---
-status: awaiting_human_verify
+status: fixing
 trigger: "Stability batch: (1) OpenClaw cell stays Offline after the restart-loop breaker; (2) flaky CI e2e hang in codex-subscription.spec.ts; (3) toasts cover the composer send button at 1440"
 created: 2026-10-05T22:00:00Z
 updated: 2026-10-06T00:30:00Z
@@ -52,6 +52,23 @@ Left: the exit-0 restarts under VM CPU starvation themselves (OpenClaw liveness 
 "liveness heartbeat delayed … exited with code 0") are not reproduced here. While the breaker is still active, an
 OpenClaw hot reload that restarts `ocw` (a `channels.ocw` edit or a plugin generation swap) only stops it
 (dist `restartGatewayChannels`, "suppressed hot reload"); OpenClaw's own recovery restarts it once the window drains.
+
+### 1b. CI cell-smoke `breaker` failed on PR #15 (run 37411421709, job 112100473690)
+
+Evidence: the real gateway tripped the breaker (`3 unclean boot(s) within 300000ms`), refused ocw
+(`[ocw] channel autostart suppressed by crash-loop breaker`) and ran the gateway_start hooks
+(`startup outcomes: … gateway-start-hooks=scheduled`, after "starting channels and sidecars", so timing was right),
+yet the guard logged nothing: it took its silent `not-suppressed` path. dist/channels-*.mjs `channels.status` builds
+the account snapshot with `buildChannelAccountSnapshotFromAccount` (dist/status-*.mjs): without a plugin
+`status.buildAccountSnapshot` it uses `projectSafeChannelAccountSnapshotFields`, which drops `lastError`, and
+`applyChannelAccountState` then sets `lastError: null`. The refusal message lives only in the channel manager's
+runtime. The host model had returned the raw runtime (with `lastError`), so the contract test passed on a contract the
+real gateway does not offer.
+
+Fix: the ocw channel plugin gets `status.buildAccountSnapshot` (channel-status.ts: explicit fields, `lastError`
+bounded to 500 chars, never the account's token reader), so `channels.status` (and `openclaw channels status`) carries
+the refusal; the host's channels.status now mirrors the dist projection (the breaker contract test went red with it,
+green with the plugin snapshot); the guard logs every non-running outcome.
 
 ## 2. "Flaky CI e2e hang" in codex-subscription.spec.ts — FIXED (it was not a test hang)
 

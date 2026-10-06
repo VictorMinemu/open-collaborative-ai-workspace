@@ -30,6 +30,11 @@
  * - channels.status / channels.start      dist/channels-*.mjs gateway methods (`channelAccounts[<id>]` is an array;
  *                                         start is `startChannel(id, account, { manual: true })`), reached in process
  *                                         through `openclaw/plugin-sdk/gateway-runtime` `callGatewayFromCli`
+ * - channels.status account snapshot      dist/status-*.mjs `buildChannelAccountSnapshotFromAccount`: the plugin's
+ *                                         `status.buildAccountSnapshot`, else dist/account-snapshot-fields-*.mjs
+ *                                         `projectSafeChannelAccountSnapshotFields`, which DROPS `lastError`; then
+ *                                         dist/account-state-*.mjs `applyChannelAccountState` (lastError = the
+ *                                         snapshot's, else null). A breaker refusal is only visible through the plugin.
  *
  * Why the modes matter: OpenClaw runs each agent turn inside a prepared plugin generation. Whenever the config
  * differs from the one the boot registry was activated with (always, in an OCW cell: the plugin writes the
@@ -352,9 +357,55 @@ type HostChannelPlugin = {
     resolveAccount: (cfg: unknown, accountId?: string | null) => unknown;
   };
   gateway?: { startAccount?: (ctx: Record<string, unknown>) => Promise<unknown> };
+  status?: {
+    buildAccountSnapshot?: (params: {
+      account: unknown;
+      cfg: unknown;
+      runtime?: Record<string, unknown>;
+    }) => Record<string, unknown> | Promise<Record<string, unknown>>;
+  };
 };
 
-export type HostAccountRuntime = { accountId: string; running: boolean; lastError?: string | null };
+/** dist/account-snapshot-fields-*.mjs `projectSafeChannelAccountSnapshotFields` (subset): no `lastError`. */
+const SAFE_SNAPSHOT_FIELDS = [
+  "running",
+  "connected",
+  "restartPending",
+  "reconnectAttempts",
+  "lifecycle",
+] as const;
+
+/** dist/status-*.mjs `buildChannelAccountSnapshotFromAccount` + `applyChannelAccountState` (subset). */
+async function buildAccountSnapshot(
+  plugin: HostChannelPlugin,
+  cfg: unknown,
+  accountId: string,
+  runtime: HostAccountRuntime | undefined,
+): Promise<Record<string, unknown>> {
+  const account = plugin.config.resolveAccount(cfg, accountId);
+  let snapshot: Record<string, unknown>;
+  if (plugin.status?.buildAccountSnapshot) {
+    snapshot = await plugin.status.buildAccountSnapshot({ account, cfg, ...(runtime ? { runtime } : {}) });
+  } else {
+    snapshot = { accountId };
+    for (const key of SAFE_SNAPSHOT_FIELDS) {
+      if (runtime && runtime[key] !== undefined) snapshot[key] = runtime[key];
+    }
+  }
+  return {
+    ...snapshot,
+    accountId,
+    running: snapshot.running === true,
+    lastError: typeof snapshot.lastError === "string" ? snapshot.lastError : null,
+  };
+}
+
+export type HostAccountRuntime = {
+  accountId: string;
+  running: boolean;
+  lastError?: string | null;
+  [key: string]: unknown;
+};
 export type HostStartRecord = { channelId: string; accountId: string; manual: boolean; outcome: string };
 
 /**
@@ -439,13 +490,15 @@ export function createHostChannelManager(opts: {
     /** The two gateway methods (dist/channels-*.mjs), as the in-process gateway client sees them. */
     async call(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
       if (method === "channels.status") {
-        const channelAccounts: Record<string, HostAccountRuntime[]> = {};
+        const channelAccounts: Record<string, Array<Record<string, unknown>>> = {};
         for (const c of opts.registry.channels) {
           const plugin = c.plugin as HostChannelPlugin;
           if (typeof params.channel === "string" && params.channel !== plugin.id) continue;
-          channelAccounts[plugin.id] = plugin.config
-            .listAccountIds(opts.config)
-            .map((id) => runtimes.get(key(plugin.id, id)) ?? { accountId: id, running: false });
+          channelAccounts[plugin.id] = await Promise.all(
+            plugin.config
+              .listAccountIds(opts.config)
+              .map((id) => buildAccountSnapshot(plugin, opts.config, id, runtimes.get(key(plugin.id, id)))),
+          );
         }
         return { ts: Date.now(), channelAccounts };
       }

@@ -4,6 +4,7 @@ import { DEFAULT_ACCOUNT_ID, type ResolvedOcwAccount, readSection, resolveOcwAcc
 import { claimActiveAccount, releaseActiveAccount } from "./active-account.js";
 import { createAgentChannelClient } from "./api-client.js";
 import { createBridge } from "./bridge.js";
+import { buildOcwAccountSnapshot } from "./channel-status.js";
 import { createFileCursorStore } from "./cursor-store.js";
 import { runEventStream } from "./event-stream.js";
 import { CHANNEL_ID, parseTarget } from "./mention-mapper.js";
@@ -189,6 +190,8 @@ export const ocwChannelPlugin = createChatChannelPlugin<ResolvedOcwAccount>({
       isConfigured: (account) => account.configured,
     },
     gateway: { startAccount: startOcwAccount },
+    // OpenClaw's default status projection drops `lastError`; ours keeps why the account is stopped (channel-status.ts).
+    status: { buildAccountSnapshot: ({ account, runtime }) => buildOcwAccountSnapshot({ account, runtime }) },
     messaging: {
       targetPrefixes: ["ocw"],
       normalizeTarget: (raw: string) => {
