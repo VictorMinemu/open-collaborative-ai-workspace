@@ -278,3 +278,97 @@ describe("chat completions and Anthropic honour [[slow]] and count images", () =
     assert.match(deltas.map((d) => d.delta.text).join(""), /\[images:1\]/);
   });
 });
+
+describe("title requests (05-10): instructions asking for a short title answer `Title: <first three words>`", () => {
+  const TITLE = "You name chats. Reply with a short title for the user's message and nothing else.";
+  const request = "Write the title for this message.\n<request>\nPlan the quarterly offsite agenda\n</request>";
+
+  const textOfSse = (text) =>
+    text
+      .split("\n\n")
+      .map((b) =>
+        b
+          .split("\n")
+          .find((l) => l.startsWith("data: "))
+          ?.slice(6),
+      )
+      .filter((d) => d && d !== "[DONE]")
+      .map((d) => JSON.parse(d));
+
+  it("responses: a developer item asking for a title (plan bearer) answers the title, with usage", async () => {
+    const res = await post("/v1/responses", {
+      model: "gpt-5.6-luna",
+      input: [
+        { role: "developer", content: TITLE },
+        { role: "user", content: [{ type: "input_text", text: request }] },
+      ],
+      store: false,
+      stream: true,
+    });
+    assert.equal(res.status, 200);
+    const events = await sse(res);
+    assert.equal(deltasOf(events).join(""), "Title: Plan the quarterly");
+    assert.ok(events.at(-1).data.response.usage.output_tokens > 0);
+  });
+
+  it("responses: `instructions` asking for a title works too; [[title:…]] forces the exact reply", async () => {
+    const res = await post(
+      "/v1/responses",
+      {
+        model: "gpt-5",
+        instructions: TITLE,
+        input: [{ role: "user", content: [{ type: "input_text", text: "Hi [[title:Overlong]] there" }] }],
+        store: false,
+        stream: true,
+      },
+      "Bearer sk-org",
+    );
+    assert.equal(deltasOf(await sse(res)).join(""), "Overlong");
+  });
+
+  it("responses: without title instructions the echo is unchanged", async () => {
+    const res = await post("/v1/responses", planBody("Plan the quarterly offsite agenda"));
+    assert.equal(deltasOf(await sse(res)).join(""), "Echo: Plan the quarterly offsite agenda");
+  });
+
+  it("chat completions: a system message asking for a title answers the title", async () => {
+    const res = await post(
+      "/v1/chat/completions",
+      {
+        model: "mock-1",
+        stream: true,
+        messages: [
+          { role: "system", content: TITLE },
+          { role: "user", content: request },
+        ],
+      },
+      "Bearer x",
+    );
+    const content = textOfSse(await res.text())
+      .map((c) => c.choices?.[0]?.delta?.content ?? "")
+      .join("");
+    assert.equal(content, "Title: Plan the quarterly");
+  });
+
+  it("anthropic: a system prompt asking for a title answers the title; [[slow]] still streams slowly", async () => {
+    const body = (text) => ({
+      model: "claude-haiku-4-5",
+      stream: true,
+      max_tokens: 100,
+      system: [{ type: "text", text: TITLE }],
+      messages: [{ role: "user", content: [{ type: "text", text }] }],
+    });
+    const fast = textOfSse(await (await post("/v1/messages", body(request), "Bearer x")).text())
+      .filter((d) => d.type === "content_block_delta")
+      .map((d) => d.delta.text)
+      .join("");
+    assert.equal(fast, "Title: Plan the quarterly");
+    const started = Date.now();
+    const slow = textOfSse(await (await post("/v1/messages", body(`${request} [[slow]]`), "Bearer x")).text())
+      .filter((d) => d.type === "content_block_delta")
+      .map((d) => d.delta.text)
+      .join("");
+    assert.ok(slow.startsWith("Title: Plan the quarterly"));
+    assert.ok(Date.now() - started >= 3_000, "slow title replies take seconds");
+  });
+});

@@ -111,11 +111,16 @@ export interface ConvSubscription {
 }
 
 /** Opens `/ws` with the client's access JWT and subscribes to `conv:<conversationId>`. */
-export async function subscribeConv(
+export function subscribeConv(
   baseUrl: string,
   client: TestClient,
   conversationId: string,
 ): Promise<ConvSubscription> {
+  return subscribeTopic(baseUrl, client, `conv:${conversationId}`);
+}
+
+/** Opens `/ws` with the client's access JWT and subscribes to any topic (e.g. `user:<id>` for `ai_chat.updated`). */
+export async function subscribeTopic(baseUrl: string, client: TestClient, topic: string): Promise<ConvSubscription> {
   const token = await client.token();
   const socket = new WebSocket(
     `${baseUrl.replace("http", "ws")}/ws`,
@@ -128,7 +133,6 @@ export async function subscribeConv(
     socket.once("open", resolve);
     socket.once("error", reject);
   });
-  const topic = `conv:${conversationId}`;
   socket.send(JSON.stringify({ op: "sub", topic }));
   const waitFor = async (pred: () => boolean, timeoutMs = 10_000) => {
     const until = Date.now() + timeoutMs;
