@@ -1,16 +1,16 @@
 ---
-status: investigating
+status: awaiting_human_verify
 trigger: "Stability batch: (1) OpenClaw cell stays Offline after the restart-loop breaker; (2) flaky CI e2e hang in codex-subscription.spec.ts; (3) toasts cover the composer send button at 1440"
 created: 2026-10-05T22:00:00Z
-updated: 2026-10-05T23:10:00Z
+updated: 2026-10-06T00:30:00Z
 ---
 
 # Stability batch 2026-10-06 (branch wt/stability, from main b61e623)
 
 ## Current Focus
 
-hypothesis: (3) the app toaster sits bottom-right over the Work Zone composer's send button at 1440
-next_action: find the Toaster config and the Work Zone composer layout
+hypothesis: all three root causes confirmed and fixed (commits 5868f9d, 64674f0, b9f712e, 80a786b)
+next_action: owner checks the CI cell-smoke `breaker` scenario and the screenshots, then merge
 
 ## 1. Cell stays Offline after OpenClaw's restart-loop breaker — FIXED
 
@@ -101,7 +101,18 @@ else keep Sonner's 24 px. Phones unchanged (top-center).
 
 ## Resolution
 
-root_cause: (1) see above
-fix: (1) see above
-verification: (1) plugin 200 tests, API int 23, pnpm verify 1480 tests green; smoke scenario runs in CI only
-files_changed: []
+root_cause: (1) OpenClaw's restart-loop breaker suppresses the cell's only channel for a full window and nothing reacted
+  or reported it; (2) an unbounded apt step consumed the e2e job budget, the cancellation looked like a hung spec;
+  (3) bottom-right toaster over a bottom-pinned composer at 1440.
+fix: see sections 1-3.
+verification: pnpm typecheck --force (8/8); pnpm verify: lint clean, 113 files / 1480 tests; openclaw-channel 14 files /
+  200 tests; node --test infra 71/71; isolated e2e full suite 94 passed, 1 skipped (realtime-latency mobile, pre-existing)
+  in 11.9 min incl. bots.spec paused step, codex-subscription and work-zone-slash at 1440 and 390; screenshots
+  wz-slash-1440(-dark), wz-slash-390, bots-runtime-paused-1440/390 checked. Cell smoke `breaker` runs in CI only.
+files_changed: [packages/contracts/src/agent.ts, packages/contracts/src/agent-channel.ts,
+  apps/api/src/modules/agent-channel/{index,presence}.ts, apps/web/components/bots/{bots-runtime-settings,bots-gallery}.tsx,
+  apps/openclaw-channel/src/{autostart-guard,active-account,channel,register-full,api-client,agent-channel-protocol,
+  openclaw-sdk.d}.ts, apps/openclaw-channel/src/testing/{openclaw-host,fake-agent-channel-api}.ts,
+  infra/openclaw/test/run-container-smoke.sh, infra/openclaw/README.md, e2e/playwright.config.ts,
+  .github/workflows/{ci,cell-proof}.yml, apps/web/hooks/use-toast-clearance.ts, apps/web/components/ui/sonner.tsx,
+  apps/web/components/work-zone/composer.tsx, tests alongside]
