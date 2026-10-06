@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Isolated e2e stack for executors. It never touches the owner's running demo: it uses its own database
 # (ocw_e2e) in the existing compose postgres, Redis logical DB 9, API 127.0.0.1:4290, web 127.0.0.1:3290
-# built into apps/web/.next-e2e, the fake model/MCP/ClawHub server (infra/fake-model) on 127.0.0.1:4291, and a
+# built into apps/web/.next-e2e, the fake model/MCP/ClawHub server (infra/fake-model) on 127.0.0.1:4291, its own
+# Garage (attachments, ADR-0015) in the separate compose project `ocw-e2e-storage` on 127.0.0.1:4292, and a
 # machine-wide lock so concurrent runs queue. CI uses it only for the real-cell proof (.github/workflows/cell-proof.yml).
 #   bash scripts/e2e-isolated.sh [--keep-db] [--rebuild-web] [playwright args...]
 #   bash scripts/e2e-isolated.sh [--keep-db] --cmd "<shell command run against the stack>"
@@ -16,6 +17,8 @@ E2E_REDIS_DB=9
 API_PORT=4290           # Node fetch blocks some ports (e.g. 4190); 4290/3290 are verified usable
 WEB_PORT=3290
 FAKE_PORT=4291          # fake model + fake MCP (/mcp, bearer FAKE_MCP_TOKEN) + fake ClawHub (/api/v1/*)
+STORAGE_PORT=4292       # Garage S3 API of the harness's own compose project
+STORAGE_PROJECT=ocw-e2e-storage   # the ONLY compose project this script runs lifecycle commands on
 WEB_DIST=.next-e2e
 LOCK=/tmp/ocw-e2e.lock
 
@@ -56,8 +59,10 @@ stop_pid() {
   pkill -TERM -P "$pid" 2>/dev/null || true
   kill -TERM "$pid" 2>/dev/null || true
 }
+storage() { docker compose -p "$STORAGE_PROJECT" -f compose.yaml "$@"; }
 cleanup() {
   stop_pid "$RUN_DIR/web.pid"; stop_pid "$RUN_DIR/api.pid"; stop_pid "$RUN_DIR/fake.pid"
+  storage stop garage >/dev/null 2>&1 || true
   release_lock
   echo "e2e-isolated: logs in $RUN_DIR"
 }
@@ -90,8 +95,16 @@ export OCW_E2E_BASE_URL="$OCW_PUBLIC_WEB_URL" OCW_E2E_API_URL="$OCW_PUBLIC_API_U
 # The marketplace and MCP specs: the API proxies the fake ClawHub; the simulated cell probes the fake MCP.
 export OCW_E2E_FAKE_URL="http://127.0.0.1:$FAKE_PORT" OCW_CLAWHUB_URL="${OCW_E2E_CLAWHUB_URL:-http://127.0.0.1:$FAKE_PORT}"
 export OCW_E2E_FAKE_MCP_TOKEN="e2e-mcp-token"
+# Attachments: the harness's own Garage with fixed, loopback-only test credentials (never the demo's keys).
+export OCW_S3_PORT="$STORAGE_PORT" OCW_S3_ENDPOINT="http://127.0.0.1:$STORAGE_PORT" OCW_S3_PUBLIC_URL="http://127.0.0.1:$STORAGE_PORT"
+export OCW_S3_BUCKET=ocw-attachments OCW_S3_REGION=garage
+export GARAGE_RPC_SECRET="e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0"
+export OCW_S3_ACCESS_KEY_ID="GKe2e0e2e0e2e0e2e0e2e0e2e0"
+export OCW_S3_SECRET_ACCESS_KEY="e2e5e2e5e2e5e2e5e2e5e2e5e2e5e2e5e2e5e2e5e2e5e2e5e2e5e2e5e2e5e2e5"
 
-for p in "$API_PORT" "$WEB_PORT" "$FAKE_PORT"; do
+# A Garage left running by an interrupted earlier run of this script is ours to stop (never another project's).
+storage stop garage >/dev/null 2>&1 || true
+for p in "$API_PORT" "$WEB_PORT" "$FAKE_PORT" "$STORAGE_PORT"; do
   if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
     echo "e2e-isolated: port $p is busy (not started by this run); stop that process and retry"; exit 1
   fi
@@ -121,6 +134,19 @@ if [ "$keep_db" -eq 0 ]; then
   docker compose exec -T redis redis-cli -n "$E2E_REDIS_DB" FLUSHDB >/dev/null
   pnpm --filter @ocw/db migrate >"$RUN_DIR/migrate.log" 2>&1 || { tail -40 "$RUN_DIR/migrate.log"; exit 1; }
 fi
+
+# ---------------------------------------------------------------- object storage (own compose project)
+# Only `-p ocw-e2e-storage` lifecycle commands: the demo project's containers are never stopped or recreated.
+if [ "$keep_db" -eq 0 ]; then
+  storage down -v >/dev/null 2>&1 || true
+fi
+storage up -d garage >"$RUN_DIR/garage.log" 2>&1 || { tail -20 "$RUN_DIR/garage.log"; exit 1; }
+s3_ready=0
+for _ in $(seq 1 30); do
+  if [ "$(curl -s -o /dev/null -w '%{http_code}' "$OCW_S3_ENDPOINT/" || true)" != "000" ]; then s3_ready=1; break; fi
+  sleep 1
+done
+[ "$s3_ready" -eq 1 ] || { storage logs --tail 40 garage; exit 1; }
 
 # ---------------------------------------------------------------- web build (separate distDir)
 need_build=$rebuild_web

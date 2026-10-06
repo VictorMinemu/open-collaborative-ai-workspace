@@ -1,0 +1,21 @@
+# Garage v2.4.1, single node (ADR-0015). Mounted read-only at /etc/garage.toml by compose.yaml and by the
+# integration tests (apps/api/src/testing-storage.ts). No secrets here: Garage reads GARAGE_RPC_SECRET and the
+# optional GARAGE_ADMIN_TOKEN from the environment, and `server --single-node --default-bucket` creates the layout,
+# the access key (GARAGE_DEFAULT_ACCESS_KEY / GARAGE_DEFAULT_SECRET_KEY) and the bucket (GARAGE_DEFAULT_BUCKET) on
+# first start. Keys checked against the Garage v2 configuration reference and by booting dxflrs/garage:v2.4.1.
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "lmdb"
+replication_factor = 1
+
+# Inter-node RPC; unused by a single node and never published.
+rpc_bind_addr = "[::]:3901"
+rpc_public_addr = "127.0.0.1:3901"
+
+[s3_api]
+s3_region = "garage"
+api_bind_addr = "[::]:3900"
+
+# Admin API (metrics, health); never published. Its endpoints need GARAGE_ADMIN_TOKEN, which is unset by default.
+[admin]
+api_bind_addr = "[::]:3903"

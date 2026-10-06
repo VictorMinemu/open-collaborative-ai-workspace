@@ -726,7 +726,12 @@ describe("Garage memory under load (ADR-0015)", () => {
         }
       }
     });
+    const waitFor = async (cond: () => boolean, ms: number) => {
+      const until = Date.now() + ms;
+      while (!cond() && Date.now() < until) await new Promise((r) => setTimeout(r, 100));
+    };
     try {
+      await waitFor(() => samples > 0, 15_000); // `docker stats` needs a moment for its first line
       for (let round = 0; round < 3; round++) {
         const results = await Promise.all(
           Array.from({ length: 5 }, (_, i) =>
@@ -735,6 +740,8 @@ describe("Garage memory under load (ADR-0015)", () => {
         );
         expect(results.map((r) => r.status)).toEqual(Array(5).fill("ready"));
       }
+      const seen = samples;
+      await waitFor(() => samples > seen, 5_000); // one sample after the last round
     } finally {
       stats.kill();
     }

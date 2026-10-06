@@ -1,26 +1,13 @@
 import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 
 /** Same image as compose.yaml (ADR-0015). */
 export const GARAGE_IMAGE = "dxflrs/garage:v2.4.1";
 export const TEST_BUCKET = "ocw-attachments";
 
-// Single-node Garage without secrets (they come from GARAGE_* env). Task 3 moves this to infra/garage/garage.toml.
-const GARAGE_TOML = `metadata_dir = "/var/lib/garage/meta"
-data_dir = "/var/lib/garage/data"
-db_engine = "lmdb"
-replication_factor = 1
-
-rpc_bind_addr = "[::]:3901"
-rpc_public_addr = "127.0.0.1:3901"
-
-[s3_api]
-s3_region = "garage"
-api_bind_addr = "[::]:3900"
-
-[admin]
-api_bind_addr = "[::]:3903"
-`;
+/** The same single-node config compose.yaml mounts (no secrets; they come from GARAGE_* env). */
+const GARAGE_TOML = readFileSync(new URL("../../../infra/garage/garage.toml", import.meta.url), "utf8");
 
 export interface TestStorage {
   /** `OCW_S3_*` for `startTestStack({ env })` (the secret is resolved through the SecretStore from it). */
