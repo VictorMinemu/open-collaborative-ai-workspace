@@ -66,12 +66,13 @@ export async function getChannel(tx: Tx, id: string): Promise<ConversationRow | 
 
 /**
  * A conversation of one of `kinds` (D-03: message routes, read markers, the `conv:` topic and the agent reply
- * path accept `channel | dm`; `/channels/*` routes stay channel-only through `getChannel`).
+ * path accept `channel | dm`; `/channels/*` routes stay channel-only through `getChannel`; the `conv:` topic and
+ * the ai-chat module also pass `ai_chat`, P-03).
  */
 export async function getConversation(
   tx: Tx,
   id: string,
-  kinds: ReadonlyArray<"channel" | "dm" | "group">,
+  kinds: ReadonlyArray<"channel" | "dm" | "group" | "ai_chat">,
 ): Promise<ConversationRow | null> {
   const [row] = await tx
     .select()

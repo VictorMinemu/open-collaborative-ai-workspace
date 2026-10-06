@@ -359,7 +359,7 @@ describe("one generation per conversation, idempotent sends, a per-member cap (D
     const fourth = await createChat(sam, "slow 4 [[slow]]");
     expect(fourth.status).toBe(429);
     expect(errorOf(fourth).code).toBe("concurrent_generations");
-    await Promise.all(running.map((r) => settled(r.generation.id)));
+    for (const r of running) await settled(r.generation.id);
   });
 });
 

@@ -160,6 +160,16 @@ export class IdentityService {
     return org?.id ?? null;
   }
 
+  /** Display name of an organization (AI chat preamble, 05-02); null when it does not exist. */
+  async organizationName(organizationId: string): Promise<string | null> {
+    const [org] = await this.authDb
+      .select({ name: organization.name })
+      .from(organization)
+      .where(eq(organization.id, organizationId))
+      .limit(1);
+    return org?.name ?? null;
+  }
+
   async me(auth: AuthContext): Promise<MeResponse> {
     const [org] = await this.authDb
       .select()
