@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 2
+open_count: 4
 waived_count: 0
 fixed_count: 14
-total_count: 16
-last_updated: 2026-10-05T21:50:29.369Z
+total_count: 18
+last_updated: 2026-10-06T00:14:50.629Z
 ---
 
 # Broken Windows Ledger
@@ -31,6 +31,8 @@ last_updated: 2026-10-05T21:50:29.369Z
 | 14 | 03.2 | stub | packages/contracts/src/device.ts |  | Device.viewerMaxMode/grants and UpdateDeviceRequest.shareMaxMode not wired until Plan 05 | fixed |  | 2026-10-05T20:36:46.430Z | 2026-10-05T21:49:49.987Z |
 | 15 | 03.2 | deviation | apps/local-runtime/src/codex/codex-runtime.ts |  | /compact completes via turn/completed (compaction is a non-steerable turn at 0.160.0); not fixtured | open |  | 2026-10-05T21:04:47.656Z |  |
 | 16 | 03.2 | unrun-verify | packages/contracts/src/runtime-controls/codex.ts |  | Codex Auto (approvalsReviewer auto_review) exposed but its review behaviour is not fixtured | open |  | 2026-10-05T21:04:47.745Z |  |
+| 17 | 03.2 | deviation | packages/realtime-client/src/client.ts |  | Fixed pre-existing resync cursor bug (org topics past REPLAY_LIMIT dropped live events); found by the 03.2-11 full e2e | open |  | 2026-10-06T00:14:50.556Z |  |
+| 18 | 03.2 | unrun-verify | .planning/phases/03.2-work-zone-session-controls/03.2-VALIDATION.md |  | Manual-only: real Full access turn (Claude relaunch with resume, Codex never+dangerFullAccess), resolved-model mapping, Codex Auto reviewer | open |  | 2026-10-06T00:14:50.629Z |  |
 
 ````json
 [
@@ -224,6 +226,30 @@ last_updated: 2026-10-05T21:50:29.369Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-05T21:04:47.745Z",
+    "resolved_at": null
+  },
+  {
+    "id": 17,
+    "kind": "deviation",
+    "phase": "03.2",
+    "file": "packages/realtime-client/src/client.ts",
+    "line": null,
+    "description": "Fixed pre-existing resync cursor bug (org topics past REPLAY_LIMIT dropped live events); found by the 03.2-11 full e2e",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T00:14:50.556Z",
+    "resolved_at": null
+  },
+  {
+    "id": 18,
+    "kind": "unrun-verify",
+    "phase": "03.2",
+    "file": ".planning/phases/03.2-work-zone-session-controls/03.2-VALIDATION.md",
+    "line": null,
+    "description": "Manual-only: real Full access turn (Claude relaunch with resume, Codex never+dangerFullAccess), resolved-model mapping, Codex Auto reviewer",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T00:14:50.629Z",
     "resolved_at": null
   }
 ]
