@@ -18,11 +18,24 @@ import {
   MessagePage as MessagePageSchema,
   Message as MessageSchema,
   Ok,
+  PinnedMessageList,
+  type PinUpdatedEvent,
+  type ReactionSummary,
+  type ReactionUpdatedEvent,
+  SavedList,
+  type SaveUpdatedEvent,
   type ThreadResponse,
   ThreadResponse as ThreadResponseSchema,
   type ThreadUpdatedEvent,
 } from "@ocw/contracts";
-import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type InfiniteData,
+  type QueryClient,
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { api, isApiError } from "./api";
 
 export const chatKeys = {
@@ -33,6 +46,10 @@ export const chatKeys = {
   /** A detached window around a permalink target; shares the `messages` prefix so updates reach both. */
   around: (id: string, anchorId: string) => ["chat", "messages", id, "around", anchorId] as const,
   thread: (rootId: string) => ["chat", "thread", rootId] as const,
+  threads: ["chat", "thread"] as const,
+  pins: (convId: string) => ["chat", "pins", convId] as const,
+  allMessages: ["chat", "messages"] as const,
+  saved: ["chat", "saved"] as const,
   agents: ["chat", "agents"] as const,
   dms: ["chat", "dms"] as const,
 };
@@ -457,4 +474,184 @@ export function applyMessageDeleted(qc: QueryClient, ev: MessageDeletedEvent) {
   qc.setQueryData<ThreadResponse>(chatKeys.thread(ev.messageId), (prev) =>
     prev ? { ...prev, root: tomb(prev.root) } : prev,
   );
+}
+
+// ---------------------------------------------------------------- reactions (CHAT-07)
+
+/**
+ * Applies `patch` to one message wherever it is cached: a reply in its thread, a top-level message in every window
+ * of its conversation and as the root of its thread.
+ */
+function patchMessage(
+  qc: QueryClient,
+  at: { messageId: string; conversationId: string; threadId: string | null },
+  patch: (m: Message) => Message,
+) {
+  const one = (m: Message) => (m.id === at.messageId ? patch(m) : m);
+  if (at.threadId) {
+    qc.setQueryData<ThreadResponse>(chatKeys.thread(at.threadId), (prev) =>
+      prev ? { ...prev, replies: prev.replies.map(one) } : prev,
+    );
+    return;
+  }
+  patchWindows(qc, at.conversationId, one);
+  qc.setQueryData<ThreadResponse>(chatKeys.thread(at.messageId), (prev) =>
+    prev ? { ...prev, root: one(prev.root) } : prev,
+  );
+}
+
+/** One emoji's chip set to `next` (removed when null or at count 0); a new emoji goes last (first-reaction order). */
+function withReaction(m: Message, emoji: string, next: ReactionSummary | null): Message {
+  const list = m.reactions ?? [];
+  const i = list.findIndex((r) => r.emoji === emoji);
+  if (!next || next.count <= 0) return i < 0 ? m : { ...m, reactions: list.filter((r) => r.emoji !== emoji) };
+  if (i < 0) return { ...m, reactions: [...list, next] };
+  return { ...m, reactions: list.map((r, j) => (j === i ? next : r)) };
+}
+
+/**
+ * Applies `reaction.updated` (P-04: absolute count, first reactors, actor). `mine` only changes when the actor is
+ * the viewer; any other actor keeps the viewer's own state.
+ */
+export function applyReactionUpdate(qc: QueryClient, ev: ReactionUpdatedEvent, meId: string) {
+  const isMe = ev.actor.kind === "user" && ev.actor.id === meId;
+  patchMessage(qc, ev, (m) => {
+    const prev = m.reactions?.find((r) => r.emoji === ev.emoji);
+    const mine = isMe ? ev.added : (prev?.mine ?? false);
+    return withReaction(m, ev.emoji, { emoji: ev.emoji, count: ev.count, mine, members: ev.members });
+  });
+}
+
+/**
+ * Toggles the viewer's `emoji` on `message`: optimistic in every cache, then PUT/DELETE; on failure the previous
+ * chip comes back and the error is thrown for the caller's toast. The `reaction.updated` echo sets the absolute
+ * count afterwards (idempotent).
+ */
+export async function toggleReaction(qc: QueryClient, message: Message, emoji: string, meId: string) {
+  const before = message.reactions?.find((r) => r.emoji === emoji) ?? null;
+  const adding = !before?.mine;
+  const me = { kind: "user" as const, id: meId };
+  const others = (before?.members ?? []).filter((x) => !(x.kind === "user" && x.id === meId));
+  const optimistic: ReactionSummary = {
+    emoji,
+    count: (before?.count ?? 0) + (adding ? 1 : -1),
+    mine: adding,
+    members: adding ? [...others, me].slice(0, 20) : others,
+  };
+  const at = { messageId: message.id, conversationId: message.conversationId, threadId: message.threadId };
+  patchMessage(qc, at, (m) => withReaction(m, emoji, optimistic));
+  const path = `/api/v1/messages/${message.id}/reactions/${encodeURIComponent(emoji)}`;
+  try {
+    if (adding) await api.put(path, { body: {}, schema: Ok });
+    else await api.del(path, { schema: Ok });
+  } catch (err) {
+    patchMessage(qc, at, (m) => withReaction(m, emoji, before));
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------- pins (CHAT-13)
+
+/** The pinned messages of a conversation, newest pin first. */
+export function usePins(convId: string, enabled = true) {
+  return useQuery({
+    enabled: enabled && !!convId,
+    queryKey: chatKeys.pins(convId),
+    queryFn: ({ signal }) =>
+      api.get(`/api/v1/conversations/${convId}/pins`, { schema: PinnedMessageList, signal }),
+    retry: retryUnlessClientError,
+    staleTime: 60_000,
+  });
+}
+
+export function pinMessage(convId: string, messageId: string): Promise<{ ok: true }> {
+  return api.put(`/api/v1/conversations/${convId}/pins/${messageId}`, { body: {}, schema: Ok });
+}
+
+export function unpinMessage(convId: string, messageId: string): Promise<{ ok: true }> {
+  return api.del(`/api/v1/conversations/${convId}/pins/${messageId}`, { schema: Ok });
+}
+
+/** Patches one message by id in every window of `convId` and in every cached thread (as root or reply). */
+function patchById(qc: QueryClient, convId: string, messageId: string, patch: (m: Message) => Message) {
+  const one = (m: Message) => (m.id === messageId ? patch(m) : m);
+  patchWindows(qc, convId, one);
+  qc.setQueriesData<ThreadResponse>({ queryKey: chatKeys.threads }, (prev) =>
+    prev && (prev.root.id === messageId || prev.replies.some((r) => r.id === messageId))
+      ? { ...prev, root: one(prev.root), replies: prev.replies.map(one) }
+      : prev,
+  );
+}
+
+/** Applies `pin.updated` (or a local pin/unpin): the message's `pinned` flag everywhere, then the pins list. */
+export function applyPinUpdate(
+  qc: QueryClient,
+  ev: Pick<PinUpdatedEvent, "conversationId" | "messageId" | "pinned">,
+) {
+  patchById(qc, ev.conversationId, ev.messageId, (m) => ({ ...m, pinned: ev.pinned }));
+  if (!ev.pinned) {
+    qc.setQueryData<PinnedMessageList>(chatKeys.pins(ev.conversationId), (prev) =>
+      prev ? { pins: prev.pins.filter((p) => p.message.id !== ev.messageId) } : prev,
+    );
+  }
+  void qc.invalidateQueries({ queryKey: chatKeys.pins(ev.conversationId) });
+}
+
+// ---------------------------------------------------------------- personal saves (CHAT-13)
+
+/** The member's Saved list, newest first, paged on `nextCursor`. */
+export function useSaved() {
+  return useInfiniteQuery({
+    queryKey: chatKeys.saved,
+    initialPageParam: null as string | null,
+    queryFn: ({ pageParam, signal }) =>
+      api.get(`/api/v1/saved?limit=30${pageParam ? `&cursor=${encodeURIComponent(pageParam)}` : ""}`, {
+        schema: SavedList,
+        signal,
+      }),
+    getNextPageParam: (last) => last.nextCursor,
+    retry: retryUnlessClientError,
+    staleTime: 30_000,
+  });
+}
+
+export function saveMessage(messageId: string): Promise<{ ok: true }> {
+  return api.put(`/api/v1/messages/${messageId}/save`, { body: {}, schema: Ok });
+}
+
+export function unsaveMessage(messageId: string): Promise<{ ok: true }> {
+  return api.del(`/api/v1/messages/${messageId}/save`, { schema: Ok });
+}
+
+/**
+ * Applies `save.updated` (the member's own `user:` stream, any device) or a local save/unsave: the message's
+ * `saved` flag in every cached window, thread and pins list, then the Saved list (removed at once, refetched).
+ */
+export function applySaveUpdate(qc: QueryClient, ev: SaveUpdatedEvent) {
+  const one = (m: Message) => (m.id === ev.messageId ? { ...m, saved: ev.saved } : m);
+  qc.setQueriesData<MessagePage>({ queryKey: chatKeys.allMessages }, (prev) =>
+    prev?.messages.some((m) => m.id === ev.messageId) ? { ...prev, messages: prev.messages.map(one) } : prev,
+  );
+  qc.setQueriesData<ThreadResponse>({ queryKey: chatKeys.threads }, (prev) =>
+    prev && (prev.root.id === ev.messageId || prev.replies.some((r) => r.id === ev.messageId))
+      ? { ...prev, root: one(prev.root), replies: prev.replies.map(one) }
+      : prev,
+  );
+  qc.setQueriesData<PinnedMessageList>({ queryKey: ["chat", "pins"] }, (prev) =>
+    prev ? { pins: prev.pins.map((p) => ({ ...p, message: one(p.message) })) } : prev,
+  );
+  if (!ev.saved) {
+    qc.setQueryData<InfiniteData<SavedList>>(chatKeys.saved, (prev) =>
+      prev
+        ? {
+            ...prev,
+            pages: prev.pages.map((pg) => ({
+              ...pg,
+              items: pg.items.filter((i) => i.message.id !== ev.messageId),
+            })),
+          }
+        : prev,
+    );
+  }
+  void qc.invalidateQueries({ queryKey: chatKeys.saved });
 }

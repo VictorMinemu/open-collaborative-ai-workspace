@@ -9,6 +9,8 @@ import {
   type MessageCreatedEvent,
   type MessageDeletedEvent,
   type MessageUpdatedEvent,
+  type PinUpdatedEvent,
+  type ReactionUpdatedEvent,
   type ThreadUpdatedEvent,
   type UserTypingEvent,
 } from "@ocw/contracts";
@@ -37,6 +39,8 @@ import {
   applyMessage,
   applyMessageDeleted,
   applyMessageUpdate,
+  applyPinUpdate,
+  applyReactionUpdate,
   applyThreadUpdate,
   bumpLatest,
   chatKeys,
@@ -46,6 +50,7 @@ import {
   useChannelMembers,
   useChannels,
   useMessages,
+  usePins,
 } from "@/lib/chat-queries";
 import { parsePermalink, permalinkPath } from "@/lib/permalink";
 import { useMe } from "@/lib/queries";
@@ -58,6 +63,7 @@ import { MentionContext } from "./markdown";
 import { MembersDialog } from "./members-dialog";
 import { MessageList, type PendingMessage } from "./message-list";
 import { MessageUnavailable } from "./message-unavailable";
+import { PinnedButton, PinnedSheet } from "./pinned-sheet";
 import { PrincipalAvatar } from "./principal-avatar";
 import { ThreadPanel } from "./thread-panel";
 import { TypingIndicator, useTypers } from "./typing";
@@ -119,6 +125,12 @@ export function ChannelView({ channelId }: { channelId: string }) {
   const channel = fromList ?? single.data;
   const messages = useMessages(channelId, !!channel);
   const members = useChannelMembers(channel ? channelId : null);
+  const pins = usePins(channelId, !!channel && !revoked);
+  const [pinsOpen, setPinsOpen] = useState(false);
+  const pinnedBy = useMemo(
+    () => new Map((pins.data?.pins ?? []).map((p) => [p.message.id, p.pinnedBy.id ?? ""])),
+    [pins.data],
+  );
   const directory = useOrgDirectory();
   const { typers, touch, clear } = useTypers();
   const [pending, setPending] = useState<PendingMessage[]>([]);
@@ -232,6 +244,13 @@ export function ChannelView({ channelId }: { channelId: string }) {
         return;
       case EventTypes.messageDeleted:
         applyMessageDeleted(qc, frame.data as MessageDeletedEvent);
+        return;
+      case EventTypes.pinUpdated:
+        applyPinUpdate(qc, frame.data as PinUpdatedEvent);
+        return;
+      case EventTypes.reactionUpdated:
+        // Channel messages, thread replies and roots alike (the thread panel reads the same caches).
+        applyReactionUpdate(qc, frame.data as ReactionUpdatedEvent, me.id);
         return;
       case EventTypes.conversationMemberAdded:
       case EventTypes.conversationMemberRemoved:
@@ -488,6 +507,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
             actions={
               <>
                 <PresenceStack people={present} />
+                <PinnedButton count={pins.data?.pins.length ?? 0} onClick={() => setPinsOpen(true)} />
                 <button
                   type="button"
                   onClick={() => setMembersOpen(true)}
@@ -614,6 +634,9 @@ export function ChannelView({ channelId }: { channelId: string }) {
                     intro={intro}
                     readOnly={!!channel.archivedAt}
                     canDeleteAny={canModerate}
+                    canReact={canPost}
+                    canUnpinAny={canArchive}
+                    pinnedBy={pinnedBy}
                   />
                   {loadingNewer ? (
                     <div className="flex justify-center py-3 text-muted-foreground">
@@ -685,8 +708,17 @@ export function ChannelView({ channelId }: { channelId: string }) {
             onRetry={retry}
             onTyping={(rootId) => sendTyping(rootId)}
             highlightId={permalinkId}
+            canUnpinAny={canArchive}
+            pinnedBy={pinnedBy}
           />
         ) : null}
+
+        <PinnedSheet
+          conversation={{ id: channel.id, kind: "channel", name: channel.name }}
+          open={pinsOpen}
+          onOpenChange={setPinsOpen}
+          canModerate={canArchive}
+        />
 
         <MembersDialog
           channel={channel}

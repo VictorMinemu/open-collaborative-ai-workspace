@@ -39,8 +39,11 @@ import { createConversationAccess } from "./access";
 import { authorOf, type Directory, loadDirectory } from "./directory";
 import { dmAgentOf, listDms } from "./dm";
 import { resolveMentions } from "./mentions";
-import { registerMessageActionRoutes } from "./message-actions";
+import { type MessageActionsContext, registerMessageActionRoutes } from "./message-actions";
+import { registerPinRoutes } from "./pins";
+import { registerReactionRoutes } from "./reactions";
 import { replyModeCandidates } from "./reply-mode";
+import { registerSaveRoutes } from "./saves";
 import {
   addMember,
   type ChannelRow,
@@ -55,6 +58,7 @@ import {
   getConversation,
   getMembership,
   getMessage,
+  hydrateViewer,
   listChannelMembers,
   listChannels,
   listMessages,
@@ -74,6 +78,9 @@ export { type ConversationAccess, createConversationAccess } from "./access";
 export { dmAgentOf, dmKey, ensureDm, listDms, setAgentDmsArchived } from "./dm";
 export { resolveMentions } from "./mentions";
 export { REPLY_MODE_PER_MINUTE, replyModeCandidates } from "./reply-mode";
+
+/** What the chat module hands to its route files (message actions, reactions, pins, saves). */
+export type ChatRouteCtx = MessageActionsContext;
 
 /** The poster's zone on a delivery, only when the client sent one (absent = UTC in the turn). */
 const zoneOf = (author: { clientTimeZone?: string }) =>
@@ -668,20 +675,21 @@ export function createChatModule(core: Core): ApiModule {
             // lastSeq first: anything committed after this read is replayed by the subscription.
             const lastSeq = await core.realtime.lastSeq(tx, convTopic(conv.id));
             const dir = await loadDirectory(tx);
+            const me = authOf(req).userId;
             if (q.around) {
               // Permalinks (CHAT-14): the anchor must belong to this conversation; a reply anchors on its root.
               const target = await getMessage(tx, q.around);
               if (!target || target.conversationId !== conv.id) throw notFound("Message not found");
               const anchor = target.threadId ? await getMessage(tx, target.threadId) : target;
               if (!anchor || anchor.conversationId !== conv.id) throw notFound("Message not found");
-              const page = await listMessagesAround(tx, conv.id, dir, anchor, q.limit);
+              const page = await listMessagesAround(tx, conv.id, dir, anchor, q.limit, me);
               return { ...page, threadRootId: target.threadId ? anchor.id : null, lastSeq };
             }
             if (q.after !== undefined) {
-              const page = await listMessagesAfter(tx, conv.id, dir, q.after, q.limit);
+              const page = await listMessagesAfter(tx, conv.id, dir, q.after, q.limit, me);
               return { ...page, nextBefore: null, lastSeq };
             }
-            const page = await listMessages(tx, conv.id, dir, q);
+            const page = await listMessages(tx, conv.id, dir, q, me);
             return { ...page, lastSeq };
           }),
       );
@@ -814,16 +822,28 @@ export function createChatModule(core: Core): ApiModule {
               const a = authorOf(dir, r.authorKind, r.authorId);
               everyone.set(`${a.kind}:${a.id}`, a);
             }
+            const [root, ...replies] = await hydrateViewer(
+              tx,
+              [toMessage(thread.root, dir, participants), ...thread.replies.map((r) => toMessage(r, dir))],
+              authOf(req).userId,
+            );
             return {
-              root: toMessage(thread.root, dir, participants),
-              replies: thread.replies.map((r) => toMessage(r, dir)),
+              root: root ?? toMessage(thread.root, dir, participants),
+              replies,
               participants: [...everyone.values()],
             };
           }),
       );
 
       // ---------------------------------------------------------------- message actions (CHAT-06)
-      registerMessageActionRoutes(app, { core, deps, access, perms });
+      const routeCtx: ChatRouteCtx = { core, deps, access, perms };
+      registerMessageActionRoutes(app, routeCtx);
+      // ---------------------------------------------------------------- reactions (CHAT-07)
+      registerReactionRoutes(app, routeCtx);
+      // ---------------------------------------------------------------- pins (CHAT-13)
+      registerPinRoutes(app, routeCtx);
+      // ---------------------------------------------------------------- personal saves (CHAT-13)
+      registerSaveRoutes(app, routeCtx);
 
       if (core.env.NODE_ENV === "test") registerChatTestRoutes(app, core);
     },

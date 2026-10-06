@@ -2,7 +2,7 @@
 
 import type { Message, MessageAuthor } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, RotateCw, Trash2 } from "lucide-react";
+import { AlertCircle, Bookmark, Pin, RotateCw, Trash2 } from "lucide-react";
 import { Fragment, memo, type ReactNode, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -11,8 +11,21 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useCopy } from "@/hooks/use-copy";
 import { errorMessage } from "@/lib/api";
-import { applyMessageDeleted, applyMessageUpdate, deleteMessage, editMessage } from "@/lib/chat-queries";
+import {
+  applyMessageDeleted,
+  applyMessageUpdate,
+  applyPinUpdate,
+  applySaveUpdate,
+  deleteMessage,
+  editMessage,
+  pinMessage,
+  saveMessage,
+  toggleReaction,
+  unpinMessage,
+  unsaveMessage,
+} from "@/lib/chat-queries";
 import { cn, relativeTime } from "@/lib/utils";
+import { EmojiPicker } from "./emoji-picker";
 import { Markdown } from "./markdown";
 import {
   DeleteMessageDialog,
@@ -22,6 +35,7 @@ import {
   MessageActions,
 } from "./message-actions";
 import { BotBadge, PrincipalAvatar } from "./principal-avatar";
+import { ReactionBar } from "./reactions";
 import { type Typer, TypingDots } from "./typing";
 
 /** A message being sent (optimistic) or that failed to send. */
@@ -226,6 +240,12 @@ interface RowProps {
   meId: string;
   readOnly: boolean;
   canDeleteAny: boolean;
+  /** The viewer may react (channel.post: a member of a live conversation). */
+  canReact: boolean;
+  /** The viewer may unpin anyone's pin (channel moderators, every DM participant). */
+  canUnpinAny: boolean;
+  /** Who pinned each pinned message (from the pins list), so pinners can unpin their own. */
+  pinnedBy?: ReadonlyMap<string, string> | undefined;
   linkFor?: ((m: Message) => string) | undefined;
 }
 
@@ -240,6 +260,9 @@ const MessageRow = memo(function MessageRow({
   meId,
   readOnly,
   canDeleteAny,
+  canReact,
+  canUnpinAny,
+  pinnedBy,
   linkFor,
 }: RowProps) {
   const author = message.author ?? {
@@ -255,11 +278,16 @@ const MessageRow = memo(function MessageRow({
   const [sheetUsed, setSheetUsed] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmUsed, setConfirmUsed] = useState(false);
+  // The full picker opened from the touch sheet (the toolbar and the reaction bar anchor their own).
+  const [pickerOpen, setPickerOpen] = useState(false);
   const qc = useQueryClient();
   const { copy } = useCopy();
   const deleted = !!message.deletedAt;
   const own = message.authorKind === "user" && !!meId && message.authorId === meId;
   const mutable = !readOnly && !deleted;
+  const reactable = canReact && !deleted && !!meId;
+  const react = (emoji: string) =>
+    void toggleReaction(qc, message, emoji, meId).catch((err) => toast.error(errorMessage(err)));
   const actions: MessageActionSet = {
     onReply: onOpenThread ? () => onOpenThread(message.id) : undefined,
     onEdit: own && mutable ? () => setEditing(true) : undefined,
@@ -278,7 +306,35 @@ const MessageRow = memo(function MessageRow({
               () => toast.error("Couldn't copy the link"),
             )
         : undefined,
+    onReact: reactable ? react : undefined,
+    onAddReaction: reactable ? () => setPickerOpen(true) : undefined,
+    onPin: reactable && !message.pinned ? () => void setPin(true) : undefined,
+    onUnpin:
+      !deleted && message.pinned && (canUnpinAny || pinnedBy?.get(message.id) === meId)
+        ? () => void setPin(false)
+        : undefined,
+    // Saving is personal and works wherever the message is readable (archived conversations included).
+    onToggleSave: !deleted && meId ? () => void setSaved(!message.saved) : undefined,
+    saved: !!message.saved,
   };
+  async function setSaved(saved: boolean) {
+    try {
+      await (saved ? saveMessage : unsaveMessage)(message.id);
+      applySaveUpdate(qc, { messageId: message.id, saved });
+      toast.success(saved ? "Saved for later" : "Removed from saved");
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  }
+  async function setPin(pinned: boolean) {
+    try {
+      await (pinned ? pinMessage : unpinMessage)(message.conversationId, message.id);
+      applyPinUpdate(qc, { conversationId: message.conversationId, messageId: message.id, pinned });
+      toast.success(pinned ? "Pinned to this conversation" : "Unpinned");
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  }
   const confirmDelete = async () => {
     try {
       await deleteMessage(message.id);
@@ -360,6 +416,10 @@ const MessageRow = memo(function MessageRow({
         highlighted && "chat-flash",
         anchored && "chat-anchor",
         (editing || sheetOpen) && "bg-muted/45 dark:bg-white/[0.025]",
+        message.pinned &&
+          !deleted &&
+          !anchored &&
+          "bg-amber-50/70 hover:bg-amber-50 dark:bg-amber-400/[0.05] dark:hover:bg-amber-400/[0.07]",
       )}
     >
       <div className="w-9 shrink-0">
@@ -387,6 +447,23 @@ const MessageRow = memo(function MessageRow({
         )}
       </div>
       <div className="min-w-0 flex-1">
+        {(message.pinned || message.saved) && !deleted ? (
+          <div className="flex items-center gap-2.5 pb-0.5 font-medium text-[11.5px]">
+            {message.pinned ? (
+              <span
+                data-testid="pinned-label"
+                className="flex items-center gap-1 text-amber-700 dark:text-amber-400"
+              >
+                <Pin className="size-3 -rotate-45" /> Pinned
+              </span>
+            ) : null}
+            {message.saved ? (
+              <span data-testid="saved-label" className="flex items-center gap-1 text-primary">
+                <Bookmark className="size-3 fill-current" /> Saved for later
+              </span>
+            ) : null}
+          </div>
+        ) : null}
         {continuation || deleted ? null : (
           <div className="flex items-baseline gap-1.5">
             <span className="truncate font-semibold text-[14.5px] leading-6" data-testid="message-author">
@@ -421,6 +498,7 @@ const MessageRow = memo(function MessageRow({
         ) : (
           <Markdown body={message.body} />
         )}
+        {editing ? null : <ReactionBar message={message} meId={meId} canReact={reactable} onToggle={react} />}
         {showThreadSummary && onOpenThread ? (
           <ThreadSummary message={message} typers={typers} onOpen={() => onOpenThread(message.id)} />
         ) : null}
@@ -434,6 +512,7 @@ const MessageRow = memo(function MessageRow({
           onOpenChange={setSheetOpen}
         />
       ) : null}
+      {pickerOpen ? <EmojiPicker open onOpenChange={setPickerOpen} onPick={react} /> : null}
       {confirmUsed ? (
         <DeleteMessageDialog
           message={message}
@@ -525,6 +604,9 @@ export function MessageList({
   startDay,
   readOnly = false,
   canDeleteAny = false,
+  canReact,
+  canUnpinAny = false,
+  pinnedBy,
   showTombstones = false,
   anchorId,
   linkFor,
@@ -545,6 +627,12 @@ export function MessageList({
   readOnly?: boolean;
   /** The channel's `viewerCan` has `message.delete_any` (admins in channels; never in DMs). */
   canDeleteAny?: boolean;
+  /** The viewer may add reactions (members of a live conversation); defaults to `!readOnly`. */
+  canReact?: boolean;
+  /** The viewer may unpin anyone's pin (channel moderators; every participant of a direct conversation). */
+  canUnpinAny?: boolean;
+  /** messageId → pinner id, from the conversation's pins list. */
+  pinnedBy?: ReadonlyMap<string, string>;
   /** Show a deleted message as a tombstone even without replies (the thread panel's root). */
   showTombstones?: boolean;
   /** The permalink target to highlight (`data-highlighted`, CHAT-14). */
@@ -585,7 +673,9 @@ export function MessageList({
     const day = new Date(m.createdAt).toDateString();
     if (!prev || prev.day !== day)
       rows.push(<DayDivider key={`day-${m.id}`} label={dayLabel(m.createdAt)} />);
-    const continuation = !!prev && prev.day === day && prev.key === key && at - prev.at < GROUP_WINDOW_MS;
+    // A pinned message always shows its author under its "Pinned" label.
+    const continuation =
+      !m.pinned && !!prev && prev.day === day && prev.key === key && at - prev.at < GROUP_WINDOW_MS;
     rows.push(
       <MessageRow
         key={m.id}
@@ -599,6 +689,9 @@ export function MessageList({
         meId={me.id}
         readOnly={readOnly}
         canDeleteAny={canDeleteAny}
+        canReact={canReact ?? !readOnly}
+        canUnpinAny={canUnpinAny && !readOnly}
+        pinnedBy={pinnedBy}
         linkFor={linkFor}
       />,
     );

@@ -8,6 +8,8 @@ import {
   type MessageCreatedEvent,
   type MessageDeletedEvent,
   type MessageUpdatedEvent,
+  type PinUpdatedEvent,
+  type ReactionUpdatedEvent,
 } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
 import { useQueryClient } from "@tanstack/react-query";
@@ -31,6 +33,8 @@ import {
   applyMessage,
   applyMessageDeleted,
   applyMessageUpdate,
+  applyPinUpdate,
+  applyReactionUpdate,
   bumpDmLatest,
   chatKeys,
   isBotDm,
@@ -38,6 +42,7 @@ import {
   postMessage,
   useDms,
   useMessages,
+  usePins,
 } from "@/lib/chat-queries";
 import { parsePermalink, permalinkPath } from "@/lib/permalink";
 import { useMe } from "@/lib/queries";
@@ -47,6 +52,7 @@ import { Composer } from "./composer";
 import { JumpToLatest } from "./jump-to-latest";
 import { MessageList, type PendingMessage } from "./message-list";
 import { MessageUnavailable } from "./message-unavailable";
+import { PinnedButton, PinnedSheet } from "./pinned-sheet";
 import { PrincipalAvatar } from "./principal-avatar";
 import { TypingIndicator, useTypers } from "./typing";
 import { useCentreOnce, usePermalinkWindow, useWindowPaging } from "./use-permalink-window";
@@ -102,6 +108,8 @@ export function DmView({ conversationId }: { conversationId: string }) {
   const bot = dm && isBotDm(dm) ? dm.counterpart : undefined;
   const [lost, setLost] = useState(false);
   const messages = useMessages(conversationId, !!dm && !lost);
+  const pins = usePins(conversationId, !!dm && !lost);
+  const [pinsOpen, setPinsOpen] = useState(false);
   const { typers, touch, clear } = useTypers();
   const [pending, setPending] = useState<PendingMessage[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -142,6 +150,14 @@ export function DmView({ conversationId }: { conversationId: string }) {
     }
     if (frame.type === EventTypes.messageDeleted) {
       applyMessageDeleted(qc, frame.data as MessageDeletedEvent);
+      return;
+    }
+    if (frame.type === EventTypes.pinUpdated) {
+      applyPinUpdate(qc, frame.data as PinUpdatedEvent);
+      return;
+    }
+    if (frame.type === EventTypes.reactionUpdated) {
+      applyReactionUpdate(qc, frame.data as ReactionUpdatedEvent, me.id);
       return;
     }
     if (frame.type !== EventTypes.messageCreated) return;
@@ -352,8 +368,9 @@ export function DmView({ conversationId }: { conversationId: string }) {
             </span>
           }
           actions={
-            canConfigure || showMemory ? (
+            canConfigure || showMemory || (pins.data?.pins.length ?? 0) > 0 ? (
               <>
+                <PinnedButton count={pins.data?.pins.length ?? 0} onClick={() => setPinsOpen(true)} />
                 {showMemory ? (
                   <Tooltip content={`What ${bot.name} remembers about you`}>
                     <Button
@@ -402,6 +419,11 @@ export function DmView({ conversationId }: { conversationId: string }) {
               </>
             ) : null
           }
+        />
+        <PinnedSheet
+          conversation={{ id: dm.id, kind: "dm", name: bot.name }}
+          open={pinsOpen}
+          onOpenChange={setPinsOpen}
         />
         {canConfigure ? (
           <BotSettingsSheet agentId={bot.id} open={settingsOpen} onOpenChange={setSettingsOpen} />
@@ -460,6 +482,7 @@ export function DmView({ conversationId }: { conversationId: string }) {
                   anchorId={permalinkId}
                   linkFor={linkFor}
                   onAnchorHidden={onAnchorHidden}
+                  canUnpinAny
                 />
                 {loadingNewer ? (
                   <div className="flex justify-center py-3 text-muted-foreground">
