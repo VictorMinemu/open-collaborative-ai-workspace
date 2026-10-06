@@ -8,9 +8,15 @@ import type { ConversationAccess } from "../chat/access";
 import { registerAttachmentRoutes } from "./attachments";
 import { toAttachment } from "./model";
 import { createObjectStorage, type ObjectStorage } from "./storage";
+import { createAttachmentSweeper } from "./sweeper";
 
 export { type AttachmentRow, toAttachment } from "./model";
 export { attachmentKey, createObjectStorage, type ObjectStorage } from "./storage";
+export { type AttachmentSweeper, createAttachmentSweeper } from "./sweeper";
+
+const CORS_RETRY_MAX_MS = 60_000;
+/** How long `GET /attachments/config` waits for an in-flight storage check before answering `unavailable`. */
+const STATUS_WAIT_MS = 3_000;
 
 /**
  * Artifact module (PRD Artifact service): chat attachments on S3-compatible storage (ADR-0015, D-03). Bytes go
@@ -22,16 +28,54 @@ export function createArtifactModule(
   deps: { access: ConversationAccess },
 ): ApiModule & { storage: ObjectStorage | null } {
   const storage = createObjectStorage(core.env, core.secretStore);
+  const sweeper = storage ? createAttachmentSweeper(core, storage) : null;
+  const origins = [core.env.OCW_PUBLIC_WEB_URL, ...core.env.OCW_TRUSTED_ORIGINS];
+
+  // Bucket CORS is configured by the API itself (no init container): in the background, retried with backoff, so
+  // an unreachable store never blocks or fails the API start (T-04-04-09). Until it succeeds, attachments
+  // report `enabled: false, reason: "unavailable"`.
+  let ready = false;
+  let closed = false;
+  let inFlight: Promise<void> | null = null;
+  let retry: NodeJS.Timeout | null = null;
+
+  function configure(delayMs = 1_000): Promise<void> {
+    if (!storage || closed) return Promise.resolve();
+    inFlight ??= storage.ensureBucketCors(origins).then(
+      () => {
+        ready = true;
+        inFlight = null;
+      },
+      (err: Error) => {
+        inFlight = null;
+        core.log.warn({ err: { name: err?.name } }, "object storage not reachable yet; retrying bucket CORS");
+        if (closed) return;
+        retry = setTimeout(() => void configure(Math.min(delayMs * 2, CORS_RETRY_MAX_MS)), delayMs);
+        retry.unref();
+      },
+    );
+    return inFlight;
+  }
+
+  async function storageStatus(): Promise<"ok" | "unavailable"> {
+    if (ready) return "ok";
+    const pending = inFlight ?? configure();
+    await Promise.race([pending, new Promise((r) => setTimeout(r, STATUS_WAIT_MS).unref())]);
+    return ready ? "ok" : "unavailable";
+  }
+
   return {
     name: "artifact",
     storage,
     register(app: App) {
-      registerAttachmentRoutes(app, {
-        core,
-        access: deps.access,
-        storage,
-        storageStatus: async () => "ok",
-      });
+      registerAttachmentRoutes(app, { core, access: deps.access, storage, storageStatus });
+      void configure();
+      sweeper?.start();
+    },
+    async close() {
+      closed = true;
+      if (retry) clearTimeout(retry);
+      sweeper?.stop();
     },
   };
 }

@@ -71,6 +71,8 @@ export async function buildApp(
               // The browser WebSocket carries its access JWT here (ocw.auth.<jwt>), T-02-08-04.
               'req.headers["sec-websocket-protocol"]',
               'res.headers["set-cookie"]',
+              // Attachment routes redirect to presigned URLs; a signed query string is a bearer credential.
+              "res.headers.location",
             ],
             ...(opts.logStream ? { stream: opts.logStream } : {}),
           },

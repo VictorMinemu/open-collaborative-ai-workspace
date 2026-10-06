@@ -78,3 +78,21 @@ REVOKE ALL ON FUNCTION app.lookup_device_enrollment(text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.lookup_device_token(text) TO ocw_app;
 GRANT EXECUTE ON FUNCTION app.lookup_agent_credential(text) TO ocw_app;
 GRANT EXECUTE ON FUNCTION app.lookup_device_enrollment(text) TO ocw_app;
+
+-- Attachment sweeper (Plan 04-04): ids of attachments whose objects are due for deletion across organizations
+-- (pending/rejected for 24 h, deleted for 30 days). Ids only, like the lookups above; the sweeper re-checks each
+-- row inside its own organization's withTenant() transaction. p_now lets tests inject the clock.
+CREATE OR REPLACE FUNCTION app.due_attachment_sweeps(p_limit integer, p_now timestamptz DEFAULT now())
+RETURNS TABLE (id uuid, organization_id uuid, conversation_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT a.id, a.organization_id, a.conversation_id FROM app.attachments a
+  WHERE a.purged_at IS NULL
+    AND (
+      (a.status IN ('pending', 'rejected') AND a.created_at < p_now - interval '24 hours')
+      OR (a.status = 'deleted' AND coalesce(a.deleted_at, a.created_at) < p_now - interval '30 days')
+    )
+  ORDER BY a.created_at
+  LIMIT least(greatest(p_limit, 1), 1000)
+$fn$;
+REVOKE ALL ON FUNCTION app.due_attachment_sweeps(integer, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.due_attachment_sweeps(integer, timestamptz) TO ocw_app;

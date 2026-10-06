@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { pipeline } from "node:stream/promises";
 import {
   Attachment,
   type Attachment as AttachmentDto,
@@ -15,13 +17,18 @@ import { type App, authOf, type Core, tenant } from "../../core";
 import { conflict, gone, HttpError, notFound } from "../../lib/errors";
 import type { ConversationAccess } from "../chat/access";
 import { channelResource, createPermissionService } from "../organization";
+import { dispositionFor } from "./disposition";
 import { type AttachmentRow, toAttachment } from "./model";
+import { ImageTooLargeError, type Renditions, renderRenditions } from "./renditions";
+import { SNIFF_BYTES, sniff } from "./sniff";
 import { type AttachmentPart, attachmentKey, type ObjectStorage } from "./storage";
 
 /** Presigned PUT lifetime (the browser starts the upload right away). */
 export const PUT_TTL_SECONDS = 300;
 /** Presigned GET lifetime: issued after the read decision, followed immediately by the browser. */
 export const GET_TTL_SECONDS = 60;
+/** P-11: presigns per user per minute. */
+export const PRESIGN_PER_MINUTE = 60;
 
 export interface AttachmentRoutesDeps {
   core: Core;
@@ -81,7 +88,16 @@ export function registerAttachmentRoutes(app: App, deps: AttachmentRoutesDeps): 
   app.post(
     "/conversations/:id/attachments",
     {
-      config: { authz: "user" },
+      config: {
+        authz: "user",
+        // After requireUser, so the bucket is the user (P-11), not the IP.
+        rateLimit: {
+          max: PRESIGN_PER_MINUTE,
+          timeWindow: "1 minute",
+          hook: "preHandler",
+          keyGenerator: (req: FastifyRequest) => `presign:${req.auth?.userId ?? req.ip}`,
+        },
+      },
       preHandler: requireUser,
       schema: {
         tags,
@@ -145,7 +161,8 @@ export function registerAttachmentRoutes(app: App, deps: AttachmentRoutesDeps): 
       if (row.status === "ready") return toAttachment(row); // idempotent retry
       if (row.status !== "pending") throw conflict("This upload can no longer be completed", "not_pending");
 
-      // 2. Verify the bytes outside any transaction (storage calls can take a while).
+      // 2. Verify the bytes outside any transaction (storage calls can take a while): size, type by magic bytes,
+      //    SHA-256, then EXIF-stripped renditions for raster images.
       const original = keyOf(row, "original");
       const head = await storageCall("head", () => storage.head(original));
       if (!head) throw conflict("The file has not been uploaded yet", "upload_missing");
@@ -153,15 +170,63 @@ export function registerAttachmentRoutes(app: App, deps: AttachmentRoutesDeps): 
         await reject();
         throw conflict("The uploaded file does not match the declared size", "size_mismatch");
       }
+      const first = await storageCall("range", () => storage.rangeGet(original, SNIFF_BYTES));
+      const sniffed = await sniff(first, row.declaredType);
+      if (!sniffed.ok) {
+        await reject();
+        throw conflict("The file content does not match its type", "type_mismatch");
+      }
+      const sha256 = await storageCall("hash", async () => {
+        const hash = createHash("sha256");
+        await pipeline(await storage.stream(original), hash);
+        return hash.digest("hex");
+      });
+      let renditions: Renditions | null = null;
+      if (sniffed.raster) {
+        try {
+          renditions = await renderRenditions(await storageCall("stream", () => storage.stream(original)));
+        } catch (err) {
+          if (err instanceof ImageTooLargeError) {
+            await reject();
+            throw conflict("The image is too large to process", "image_too_large");
+          }
+          if (err instanceof HttpError) throw err;
+          // A file sharp cannot decode stays a plain download (no preview).
+          core.log.warn({ attachmentId: row.id, err: { name: (err as Error)?.name } }, "rendition failed");
+        }
+        for (const { part, body } of renditions?.parts ?? []) {
+          await storageCall("put", () => storage.put(keyOf(row, part), body, "image/webp"));
+        }
+      }
 
-      // 3. Mark ready (only from pending: a concurrent complete or delete wins). Task 2 sniffs the type.
+      // 3. Mark ready (only from pending: a concurrent complete or delete wins) and audit, in one transaction.
       return core.db.withTenant(ctx, async (tx) => {
         const [ready] = await tx
           .update(attachments)
-          .set({ status: "ready", contentType: row.declaredType, completedAt: new Date().toISOString() })
+          .set({
+            status: "ready",
+            contentType: sniffed.contentType,
+            sha256,
+            hasRenditions: renditions !== null,
+            width: renditions?.width ?? null,
+            height: renditions?.height ?? null,
+            completedAt: new Date().toISOString(),
+          })
           .where(and(eq(attachments.id, row.id), eq(attachments.status, "pending")))
           .returning();
         if (!ready) throw conflict("This upload can no longer be completed", "not_pending");
+        await core.audit.record(tx, {
+          action: "attachment.uploaded",
+          resourceType: "attachment",
+          resourceId: ready.id,
+          metadata: {
+            attachmentId: ready.id,
+            conversationId: ready.conversationId,
+            size: ready.sizeBytes,
+            contentType: sniffed.contentType,
+            sha256,
+          },
+        });
         return toAttachment(ready);
       });
 
@@ -210,14 +275,44 @@ export function registerAttachmentRoutes(app: App, deps: AttachmentRoutesDeps): 
       if (!storage) throw disabled();
       const url = await core.db.withTenant(tenant(req), async (tx) => {
         const row = await visible(req, tx, req.params.id);
-        const filename = row.filename.replace(/["\\\r\n]/g, "_");
+        await core.audit.record(tx, {
+          action: "attachment.downloaded",
+          resourceType: "attachment",
+          resourceId: row.id,
+          metadata: { attachmentId: row.id, conversationId: row.conversationId },
+        });
         return storage.presignGet(keyOf(row, "original"), {
           ttlSeconds: GET_TTL_SECONDS,
           contentType: row.contentType ?? "application/octet-stream",
-          disposition: `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+          disposition: dispositionFor("original", row.filename),
         });
       });
       return redirect(reply, url);
     },
   );
+
+  // Inline webp renditions of sniffed raster images. Not audited: a message list loads one per image, and the
+  // original (with its EXIF) is only reachable through the audited download (ADR-0015).
+  for (const [path, part] of [
+    ["preview", "thumb.webp"],
+    ["large", "large.webp"],
+  ] as const) {
+    app.get(
+      `/attachments/:id/${path}`,
+      { config: { authz: "user" }, preHandler: requireUser, schema: { tags, params: IdParams } },
+      async (req, reply) => {
+        if (!storage) throw disabled();
+        const url = await core.db.withTenant(tenant(req), async (tx) => {
+          const row = await visible(req, tx, req.params.id);
+          if (!toAttachment(row).isImage) throw hidden();
+          return storage.presignGet(keyOf(row, part), {
+            ttlSeconds: GET_TTL_SECONDS,
+            contentType: "image/webp",
+            disposition: dispositionFor(part, row.filename),
+          });
+        });
+        return redirect(reply, url);
+      },
+    );
+  }
 }
