@@ -9,8 +9,8 @@ updated: 2026-10-05T23:10:00Z
 
 ## Current Focus
 
-hypothesis: (2) something in the e2e worker can outlive Playwright's per-test timeout
-next_action: read Playwright 1.63 worker stop path and the codex spec's teardown
+hypothesis: (3) the app toaster sits bottom-right over the Work Zone composer's send button at 1440
+next_action: find the Toaster config and the Work Zone composer layout
 
 ## 1. Cell stays Offline after OpenClaw's restart-loop breaker — FIXED
 
@@ -51,7 +51,33 @@ e2e bots.spec paused step, cell-smoke scenario `breaker` (SIGKILL until the brea
 Left: the exit-0 restarts under VM CPU starvation themselves (OpenClaw liveness watchdog suspected, cf. 03.1-15
 "liveness heartbeat delayed … exited with code 0") are not reproduced here.
 
+## 2. "Flaky CI e2e hang" in codex-subscription.spec.ts — FIXED (it was not a test hang)
+
+Evidence: the incident is run 37341305017 attempt 1, job "e2e (Playwright, desktop)" (16:30:07 → cancelled 17:00:25).
+- `pnpm exec playwright install --with-deps chromium` (browsers were a cache hit) spent 16:31:38 → 16:58:01 in apt:
+  "Fetched 32.1 MB in 26min 7s (20.4 kB/s)" (fonts-wqy-zenhei alone 19 min) from the runner's Ubuntu mirror.
+- `pnpm e2e` started at 16:58:06; tests ran normally (21 passed in 2 m 17 s, each a few seconds); chat.spec passed at
+  17:00:23 and the job hit its 30-minute timeout at 17:00:25, two seconds into codex-subscription (test 22).
+- Attempt 2: the same 32.1 MB in 2 s (19.4 MB/s); codex-subscription passed in 8.4 s; 36 passed in 5.9 min.
+- Playwright 1.63 races every test, hook and fixture teardown against its timeout (worker `TimeoutManager`): a test
+  outlives it only with a blocked event loop or a disabled timeout. A job-level timeout cancels the job, so the
+  `if: failure()` report/log steps never ran and the log simply ended after chat.spec.
+
+Root cause: an unbounded, network-bound CI step (apt via `playwright install --with-deps`) shared the e2e job's
+30-minute budget with the test run; one slow mirror consumed it and the cancellation looked like a hung spec.
+
+Fix: the install step has its own `timeout-minutes: 8` (ci.yml e2e and cell-proof.yml), the Playwright step 17, and
+`globalTimeout` is 15 min in CI (e2e/playwright.config.ts), so each phase fails on its own, as a failed step that
+keeps the report and logs. Proof of the safety net: a spec that never settles with `test.setTimeout(0)` ran forever
+without it and failed after 5 s with "Timed out waiting 5s for the test suite to run" with it (CI=1, temp config).
+No spec change: codex-subscription.spec has no await outside its timeout scope.
+
 ## Eliminated
+
+- hypothesis: codex-subscription.spec (or its fake device-auth server / fake cell) can outlive Playwright's test timeout
+  evidence: the job log shows the spec ran 2 s before the job timeout; attempt 2 passed in 8.4 s; Playwright 1.63
+  bounds test body, hooks and teardown with timers
+  timestamp: 2026-10-05T23:30:00Z
 
 - hypothesis: the plugin can reach OpenClaw's channel manager through `api.runtime.gateway.request`
   evidence: dist/server-plugins-*.mjs `dispatchTrustedPluginGatewayMethod` throws for non-bundled, non-official
