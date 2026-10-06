@@ -220,6 +220,44 @@ OCW_MCP_SANDBOX_URL=http://mcp-sandbox:8080 OCW_MCP_SANDBOX_SERVERS=everything d
 The real-cell proof of this flow (real ClawHub and DuckDuckGo, fake model and MCP) runs in CI on demand: add the
 `cell-proof` label to the pull request (`.github/workflows/cell-proof.yml`, `scripts/cell-proof.sh`).
 
+## Chat (Phase 4)
+
+Phase 4 (ADR-0015, ADR-0016). Use two browsers: the admin (`victor@`) and a member (e.g. `alex@`), at desktop width
+and on a phone-sized window.
+
+**Existing install, once:** attachments need Garage (S3) and its keys. An `.env` written before Phase 4 lacks them;
+nothing else depends on them, and without them the paperclip is simply hidden.
+
+```bash
+pnpm setup:env --add-missing   # appends only the Garage/S3 keys your .env lacks; never rotates existing values
+docker compose up -d garage    # Garage next to postgres/redis (S3 API on 127.0.0.1:3900, restarts with Docker)
+pnpm demo:up                   # restart the API so it reads the new keys
+```
+
+Do not use `pnpm setup:env --force` to upgrade: it rotates every secret, database passwords included.
+
+1. **Sidebar by department.** Channels sit under their department or team (Settings › Organization owns the tree);
+   **New channel › Belongs to** places one, the owner or an admin moves it later. Views at the top: **All,
+   Mentions, Threads, AI Chats, Saved** (a segmented row on phones).
+2. **DMs and groups.** **Direct messages › New message**: pick a colleague for a 1:1, or up to 8 people and team
+   bots for a group. Membership is fixed; bots in a group answer only when `@mentioned`, at the top level.
+3. **Mentions and the inbox.** `@alex` in a channel: Alex's **Mentions** count and the channel's mention badge
+   update live; opening the item lands on the message, highlighted. `@channel` / `@here` notify everyone / everyone
+   online (a confirmation above 20 members, at most one per minute per channel).
+4. **Unread.** Badges count messages, live on every tab and device. **Mark unread** on any message (or the header
+   bell menu) holds the conversation unread until you read it again.
+5. **Preferences and pop-ups.** Header bell: mute, or *All new messages / Mentions only / Nothing* per
+   conversation. Settings › **Notifications**: do not disturb, the default level, desktop and web pop-ups (the
+   browser asks only after *Enable notifications*). The desktop dock badge mirrors unread mentions.
+6. **Search.** **⌘K** (or the search button on phones): type `migracion` and it finds "migración"; Enter opens the
+   message highlighted. **See all results** filters by channel, person and date.
+7. **Files.** Drop, paste or pick files in a channel, thread or DM: the tray shows upload progress; images get a
+   preview grid and a lightbox, other files a card with **Download**. Files are limited to 25 MB and 10 per message.
+8. **Reactions, pins, saved, links.** Hover a message (long-press on a phone): quick reactions or the full picker,
+   **Pin** (the header's *Pinned* sheet jumps to it), **Save for later** (the *Saved* view), **Copy link** (opens
+   the message highlighted, with *Jump to latest*). Edit and delete your own messages; "(edited)" shows for
+   everyone, live.
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -238,8 +276,9 @@ The real-cell proof of this flow (real ClawHub and DuckDuckGo, fake model and MC
 
 ## Known limits (MVP 0)
 
-Desktop app is ad-hoc signed (no notarization); its main window loads the web app URL. DMs exist only
-between a person and a bot (Phase 3.1). No human DMs, reactions, message edit/delete, search or attachments yet. Full
+Desktop app is ad-hoc signed (no notarization); its main window loads the web app URL, and clicking a chat
+notification may not focus it until the app is code-signed. Bots cannot read attachments yet (files are hidden in
+bot DMs). Full
 `docker compose up` (with API/web images) is defined but was not re-run on this machine because the
 Docker disk is full; the demo runs API/web natively. See
 `.planning/phases/01-mvp-0-multiplayer-ai-chat-slice/01-DEVIATIONS.md`.

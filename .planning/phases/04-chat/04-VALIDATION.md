@@ -2,10 +2,11 @@
 phase: "04"
 slug: "chat"
 # status lifecycle: draft (seeded by plan-phase) → validated (set by validate-phase §6; Plan 04-13 Task 3 signs off)
-status: draft
-nyquist_compliant: false
-wave_0_complete: false
+status: validated
+nyquist_compliant: true
+wave_0_complete: true
 created: "2026-10-06"
+validated: "2026-10-06"
 ---
 
 # Phase 4 — Validation Strategy
@@ -42,43 +43,56 @@ E2E commands run as `OCW_E2E_SCREENSHOT_DIR=$PWD/.planning/phases/04-chat/screen
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 04-01-01 (tracer) | 01 | 1 | CHAT-06, D-01 | T-04-01-01/03/05/07/08 | Edit by author only; prior version append-only; audit without body; no bot re-trigger; reserved handles | unit + integration + e2e | `vitest --project unit chat-workspace contracts permissions`; `pnpm typecheck --force`; `vitest --project integration chat/message-edit.int`; e2e `chat-edit chat.spec team-bot-dm` | ❌ task | ⬜ pending |
-| 04-01-02 [BLOCKING] | 01 | 1 | P-02 | T-04-01-01/04 | Migration applies fresh; RLS forced on 8 new tables; `message_versions` UPDATE/DELETE denied to `ocw_app`; unaccent FTS works | integration | `vitest --project integration rls-isolation.int chat/message-edit.int`; no `*_chat_workspace_check` dir | ✅ | ⬜ pending |
-| 04-01-03 | 01 | 1 | CHAT-06, D-01 | T-04-01-02/06 | Admin delete only where readable, never in DMs; tombstones; bots never see deleted text; one readable-set authority | unit + integration + e2e | `vitest --project unit resolve.test`; `vitest --project integration chat/access.int`, `chat/message-edit.int`; e2e `chat-edit chat.spec` | ❌ task | ⬜ pending |
-| 04-02-01 (tracer) | 02 | 1 | CHAT-05, D-05 | T-04-02-01/02/04 | One renderer; no script/on*/javascript:/data:/iframe/style; images as links; mentions not chipped in code | unit (web) + e2e screenshots | `vitest --project web components/markdown/markdown.test.tsx`; e2e `renderer chat.spec work-zone.spec` | ❌ task | ⬜ pending |
-| 04-02-02 (checkpoint) | 02 | 1 | CHAT-05 | T-04-02-03, T-04-02-SC | Human verifies streamdown, @streamdown/code, frimousse before install | manual gate (blocking-human) | — | — | ⬜ pending |
-| 04-02-03 | 02 | 1 | CHAT-05, D-05 | T-04-02-01/03 | streamdown without raw HTML; shiki; streaming fences; old engines removed | unit (web) + e2e | `vitest --project web markdown.test`; `pnpm install --frozen-lockfile`; e2e `--rebuild-web renderer chat.spec work-zone.spec` | ✅ | ⬜ pending |
-| 04-03-01 (tracer) | 03 | 2 | CHAT-14, CHAT-13 | T-04-03-01/02/03 | Hidden = missing (404); anchor must belong to the conversation | integration + e2e | `vitest --project integration chat/permalink.int`; e2e `permalinks chat-edit chat.spec` | ❌ task | ⬜ pending |
-| 04-03-02 | 03 | 2 | CHAT-14, CHAT-13 | T-04-03-01 | Thread/DM anchors; deleted and unavailable targets leak nothing | integration + e2e | `vitest --project integration chat/permalink.int`; e2e `permalinks team-bot-dm` | ✅ | ⬜ pending |
-| 04-04-01 (tracer) | 04 | 2 | CHAT-12, D-03 | T-04-04-01/07/08 | Presigned PUT with signed type; download 302 only after read decision; tenant-scoped keys; non-member 404 | unit + integration (Garage) | `vitest --project unit config/env.test`; `vitest --project integration artifact/attachments.int` | ❌ task | ⬜ pending |
-| 04-04-02 | 04 | 2 | CHAT-12, D-03 | T-04-04-02/03/04/05/06 | Sniffing, EXIF-stripped renditions, inline only webp, RFC 6266, no URL in logs/audit, rate limit, sweeper per tenant | unit + integration (Garage) | `vitest --project unit artifact/disposition.test`; `vitest --project integration artifact/attachments.int` | ❌ task | ⬜ pending |
-| 04-04-03 | 04 | 2 | CHAT-12, D-03, principle 10 | T-04-04-07/09 | Garage in compose without `:?` guards; setup-env keys; harness and CI storage; ADR-0015 | node + compose + e2e | `node --test infra/garage/compose-garage.test.mjs scripts/setup-env.test.mjs`; `docker compose -f compose.yaml config -q`; e2e `attachments-api chat.spec` | ❌ task | ⬜ pending |
-| 04-05-01 (tracer) | 05 | 3 | CHAT-07 | T-04-05-02/03, T-04-05-SC | Reactions need read + post; Emoji contract; no viewer fields in events | integration + e2e | `vitest --project integration chat/reactions.int`; e2e `reactions-pins chat-edit permalinks` | ❌ task | ⬜ pending |
-| 04-05-02 | 05 | 3 | CHAT-13 | T-04-05-02/04/06 | Pins: post to pin, pinner/moderator to unpin, audited, capped | integration + e2e | `vitest --project integration chat/pins.int`; e2e `reactions-pins` | ❌ task | ⬜ pending |
-| 04-05-03 | 05 | 3 | CHAT-13 | T-04-05-01/05 | Saved filtered by readable set at read time; private events | integration + e2e | `vitest --project integration chat/pins.int`; e2e `reactions-pins chat.spec` | ✅ | ⬜ pending |
-| 04-06-01 (tracer) | 06 | 3 | CHAT-11, D-04 | T-04-06-01/02/03/04 | Hits only from resolver readable ids; `websearch_to_tsquery`; snippets as text | integration + e2e | `vitest --project integration search/search.int`; e2e `search permalinks` | ❌ task | ⬜ pending |
-| 04-06-02 | 06 | 3 | CHAT-11, D-04 | T-04-06-05/06 | Filters; people without deactivated/others' personal bots; channels readable only; 429 | integration + e2e | `vitest --project integration search/search.int`; e2e `search` | ✅ | ⬜ pending |
-| 04-07-01 (tracer) | 07 | 4 | CHAT-04, D-06 | T-04-07-05/06 | Human DM insert-or-get race-safe; ids-only key; foreign ids 404 | integration + e2e | `vitest --project integration chat/dm.int`; e2e `dms team-bot-dm personal-bots search` | ✅ | ⬜ pending |
-| 04-07-02 | 07 | 4 | CHAT-04, D-06 | T-04-07-02/03/04 | Fixed membership; personal bots refused; mention-only bots; memory off with ≥ 2 humans | unit + integration + e2e | `vitest --project unit resolve.test`; `vitest --project integration chat/group-dm.int`, `bot-capabilities/memory.int`; e2e `dms bot-memory bot-reply-mode` | ❌ task | ⬜ pending |
-| 04-07-03 | 07 | 4 | CHAT-04, D-01 | T-04-07-01 | Non-participant admin 404 on every DM path incl. WS, search, attachments | integration (Garage) | `vitest --project integration chat/dm-privacy.int` | ❌ task | ⬜ pending |
-| 04-08-01 (tracer) | 08 | 5 | CHAT-02, D-08 | T-04-08-01 | Unit placement limited to the caller's units | integration + e2e | `vitest --project integration chat/sidebar.int`; e2e `chat-sidebar chat.spec dms` | ❌ task | ⬜ pending |
-| 04-08-02 | 08 | 5 | CHAT-02 | T-04-08-01/02 | `channel.update` owner/admin; unit-scoped deny rules apply to channels (list, 404, search) | unit + integration + e2e | `vitest --project unit resolve.test`; `vitest --project integration chat/sidebar.int`; e2e `chat-sidebar admin-org` | ✅ | ⬜ pending |
-| 04-08-03 | 08 | 5 | CHAT-02, D-08 | T-04-08-03/05/06 | Threads view from readable ids; no new subscriptions | integration + e2e | `vitest --project integration chat/threads.int`; e2e `chat-sidebar reactions-pins chat.spec` | ❌ task | ⬜ pending |
-| 04-09-01 (tracer) | 09 | 6 | CHAT-08 | T-04-09-01/05/07 | Rows ids-only; canRead at write; readable at list; chat never imports notification | unit + integration + e2e | `vitest --project unit notification/recipients.test`; `vitest --project integration notification/notifications.int`; e2e `notifications chat.spec bots` | ❌ task | ⬜ pending |
-| 04-09-02 | 09 | 6 | CHAT-08 | T-04-09-02/03/04 | `channel.mention_all` deny-able; 1/min/channel; reserved handles never resolve; no bot wake-up | unit + integration + e2e | `vitest --project unit chat/mentions.test notification/recipients.test`; `vitest --project integration notification/notifications.int`, `realtime-presence.int`; e2e `notifications presence dms` | ✅ | ⬜ pending |
-| 04-09-03 | 09 | 6 | CHAT-08 | T-04-09-01/06 | Edits notify only new mentions; inbox re-filtered on lost access; DM privacy for inbox | integration | `vitest --project integration notification/notifications.int`, `chat/dm-privacy.int` | ✅ | ⬜ pending |
-| 04-10-01 (tracer) | 10 | 7 | CHAT-09, D-07 | T-04-10-01/04 | Counts from messages (capped), not stream seq; only on resolver-filtered rows | integration + e2e | `vitest --project integration chat/unread.int`; e2e `unread notifications chat-sidebar chat.spec` | ❌ task | ⬜ pending |
-| 04-10-02 | 10 | 7 | CHAT-09, D-07 | T-04-10-02/03 | Mark unread backwards, own rows only, foreign ids 404 | integration + e2e | `vitest --project integration chat/unread.int`; e2e `unread permalinks` | ✅ | ⬜ pending |
-| 04-11-01 (tracer) | 11 | 8 | CHAT-10, D-02 | T-04-11-03/04 | Server decides popup; no Push API; prefs scoped to self and members | integration + e2e | `vitest --project integration notification/prefs.int`; e2e `notification-prefs notifications unread` | ❌ task | ⬜ pending |
-| 04-11-02 | 11 | 8 | CHAT-10, D-02 | T-04-11-02/05 | DND, levels, toggles; permission only on click; level-all is ephemeral | integration + e2e | `vitest --project integration notification/prefs.int`; `pnpm typecheck --force`; e2e `notification-prefs account` | ✅ | ⬜ pending |
-| 04-11-03 | 11 | 8 | CHAT-10 | T-04-11-01 | Badge IPC: trusted sender, integer 0–9999, no passthrough | unit (desktop) + e2e | `env -u ELECTRON_RUN_AS_NODE pnpm --filter @ocw/desktop test`; e2e `notification-prefs` | ✅ | ⬜ pending |
-| 04-12-01 (tracer) | 12 | 8 | CHAT-12 | T-04-12-01/02/05 | Link only own, ready, same-conversation attachments; previews are renditions | integration (Garage) + e2e | `vitest --project integration chat/message-attachments.int`; e2e `attachments chat.spec chat-edit` | ❌ task | ⬜ pending |
-| 04-12-02 | 12 | 8 | CHAT-12 | T-04-12-03/04 | Deleted message → downloads 404; limits; disabled mode | integration (Garage) + e2e | `vitest --project integration chat/message-attachments.int`; e2e `attachments dms` | ✅ | ⬜ pending |
-| 04-13-01 (tracer) | 13 | 9 | CHAT-02 … CHAT-14 | T-04-13-01 | Cross-feature day on a fresh isolated stack | e2e | e2e `--rebuild-web chat-day` | ❌ task | ⬜ pending |
-| 04-13-02 | 13 | 9 | CHAT-02 … CHAT-14 | T-04-13-03 | Full regression incl. privacy suites; screenshot review | full suite + e2e | full suite command; e2e `--rebuild-web` (all specs) | ✅ | ⬜ pending |
-| 04-13-03 | 13 | 9 | all | T-04-13-02 | ADR-0016, AGENTS.md, DEMO.md, traceability, sign-off | docs checks | `test -f docs/adr/0016-…`; `grep -c "^- \[x\] \*\*CHAT-" .planning/REQUIREMENTS.md` | ❌ task | ⬜ pending |
+| 04-01-01 (tracer) | 01 | 1 | CHAT-06, D-01 | T-04-01-01/03/05/07/08 | Edit by author only; prior version append-only; audit without body; no bot re-trigger; reserved handles | unit + integration + e2e | `vitest --project unit chat-workspace contracts permissions`; `pnpm typecheck --force`; `vitest --project integration chat/message-edit.int`; e2e `chat-edit chat.spec team-bot-dm` | ❌ task | ✅ green |
+| 04-01-02 [BLOCKING] | 01 | 1 | P-02 | T-04-01-01/04 | Migration applies fresh; RLS forced on 8 new tables; `message_versions` UPDATE/DELETE denied to `ocw_app`; unaccent FTS works | integration | `vitest --project integration rls-isolation.int chat/message-edit.int`; no `*_chat_workspace_check` dir | ✅ | ✅ green |
+| 04-01-03 | 01 | 1 | CHAT-06, D-01 | T-04-01-02/06 | Admin delete only where readable, never in DMs; tombstones; bots never see deleted text; one readable-set authority | unit + integration + e2e | `vitest --project unit resolve.test`; `vitest --project integration chat/access.int`, `chat/message-edit.int`; e2e `chat-edit chat.spec` | ❌ task | ✅ green |
+| 04-02-01 (tracer) | 02 | 1 | CHAT-05, D-05 | T-04-02-01/02/04 | One renderer; no script/on*/javascript:/data:/iframe/style; images as links; mentions not chipped in code | unit (web) + e2e screenshots | `vitest --project web components/markdown/markdown.test.tsx`; e2e `renderer chat.spec work-zone.spec` | ❌ task | ✅ green |
+| 04-02-02 (checkpoint) | 02 | 1 | CHAT-05 | T-04-02-03, T-04-02-SC | Human verifies streamdown, @streamdown/code, frimousse before install | manual gate (blocking-human) | — | — | ✅ green (owner-approved gate, 04-02) |
+| 04-02-03 | 02 | 1 | CHAT-05, D-05 | T-04-02-01/03 | streamdown without raw HTML; shiki; streaming fences; old engines removed | unit (web) + e2e | `vitest --project web markdown.test`; `pnpm install --frozen-lockfile`; e2e `--rebuild-web renderer chat.spec work-zone.spec` | ✅ | ✅ green |
+| 04-03-01 (tracer) | 03 | 2 | CHAT-14, CHAT-13 | T-04-03-01/02/03 | Hidden = missing (404); anchor must belong to the conversation | integration + e2e | `vitest --project integration chat/permalink.int`; e2e `permalinks chat-edit chat.spec` | ❌ task | ✅ green |
+| 04-03-02 | 03 | 2 | CHAT-14, CHAT-13 | T-04-03-01 | Thread/DM anchors; deleted and unavailable targets leak nothing | integration + e2e | `vitest --project integration chat/permalink.int`; e2e `permalinks team-bot-dm` | ✅ | ✅ green |
+| 04-04-01 (tracer) | 04 | 2 | CHAT-12, D-03 | T-04-04-01/07/08 | Presigned PUT with signed type; download 302 only after read decision; tenant-scoped keys; non-member 404 | unit + integration (Garage) | `vitest --project unit config/env.test`; `vitest --project integration artifact/attachments.int` | ❌ task | ✅ green |
+| 04-04-02 | 04 | 2 | CHAT-12, D-03 | T-04-04-02/03/04/05/06 | Sniffing, EXIF-stripped renditions, inline only webp, RFC 6266, no URL in logs/audit, rate limit, sweeper per tenant | unit + integration (Garage) | `vitest --project unit artifact/disposition.test`; `vitest --project integration artifact/attachments.int` | ❌ task | ✅ green |
+| 04-04-03 | 04 | 2 | CHAT-12, D-03, principle 10 | T-04-04-07/09 | Garage in compose without `:?` guards; setup-env keys; harness and CI storage; ADR-0015 | node + compose + e2e | `node --test infra/garage/compose-garage.test.mjs scripts/setup-env.test.mjs`; `docker compose -f compose.yaml config -q`; e2e `attachments-api chat.spec` | ❌ task | ✅ green |
+| 04-05-01 (tracer) | 05 | 3 | CHAT-07 | T-04-05-02/03, T-04-05-SC | Reactions need read + post; Emoji contract; no viewer fields in events | integration + e2e | `vitest --project integration chat/reactions.int`; e2e `reactions-pins chat-edit permalinks` | ❌ task | ✅ green |
+| 04-05-02 | 05 | 3 | CHAT-13 | T-04-05-02/04/06 | Pins: post to pin, pinner/moderator to unpin, audited, capped | integration + e2e | `vitest --project integration chat/pins.int`; e2e `reactions-pins` | ❌ task | ✅ green |
+| 04-05-03 | 05 | 3 | CHAT-13 | T-04-05-01/05 | Saved filtered by readable set at read time; private events | integration + e2e | `vitest --project integration chat/pins.int`; e2e `reactions-pins chat.spec` | ✅ | ✅ green |
+| 04-06-01 (tracer) | 06 | 3 | CHAT-11, D-04 | T-04-06-01/02/03/04 | Hits only from resolver readable ids; `websearch_to_tsquery`; snippets as text | integration + e2e | `vitest --project integration search/search.int`; e2e `search permalinks` | ❌ task | ✅ green |
+| 04-06-02 | 06 | 3 | CHAT-11, D-04 | T-04-06-05/06 | Filters; people without deactivated/others' personal bots; channels readable only; 429 | integration + e2e | `vitest --project integration search/search.int`; e2e `search` | ✅ | ✅ green |
+| 04-07-01 (tracer) | 07 | 4 | CHAT-04, D-06 | T-04-07-05/06 | Human DM insert-or-get race-safe; ids-only key; foreign ids 404 | integration + e2e | `vitest --project integration chat/dm.int`; e2e `dms team-bot-dm personal-bots search` | ✅ | ✅ green |
+| 04-07-02 | 07 | 4 | CHAT-04, D-06 | T-04-07-02/03/04 | Fixed membership; personal bots refused; mention-only bots; memory off with ≥ 2 humans | unit + integration + e2e | `vitest --project unit resolve.test`; `vitest --project integration chat/group-dm.int`, `bot-capabilities/memory.int`; e2e `dms bot-memory bot-reply-mode` | ❌ task | ✅ green |
+| 04-07-03 | 07 | 4 | CHAT-04, D-01 | T-04-07-01 | Non-participant admin 404 on every DM path incl. WS, search, attachments | integration (Garage) | `vitest --project integration chat/dm-privacy.int` | ❌ task | ✅ green |
+| 04-08-01 (tracer) | 08 | 5 | CHAT-02, D-08 | T-04-08-01 | Unit placement limited to the caller's units | integration + e2e | `vitest --project integration chat/sidebar.int`; e2e `chat-sidebar chat.spec dms` | ❌ task | ✅ green |
+| 04-08-02 | 08 | 5 | CHAT-02 | T-04-08-01/02 | `channel.update` owner/admin; unit-scoped deny rules apply to channels (list, 404, search) | unit + integration + e2e | `vitest --project unit resolve.test`; `vitest --project integration chat/sidebar.int`; e2e `chat-sidebar admin-org` | ✅ | ✅ green |
+| 04-08-03 | 08 | 5 | CHAT-02, D-08 | T-04-08-03/05/06 | Threads view from readable ids; no new subscriptions | integration + e2e | `vitest --project integration chat/threads.int`; e2e `chat-sidebar reactions-pins chat.spec` | ❌ task | ✅ green |
+| 04-09-01 (tracer) | 09 | 6 | CHAT-08 | T-04-09-01/05/07 | Rows ids-only; canRead at write; readable at list; chat never imports notification | unit + integration + e2e | `vitest --project unit notification/recipients.test`; `vitest --project integration notification/notifications.int`; e2e `notifications chat.spec bots` | ❌ task | ✅ green |
+| 04-09-02 | 09 | 6 | CHAT-08 | T-04-09-02/03/04 | `channel.mention_all` deny-able; 1/min/channel; reserved handles never resolve; no bot wake-up | unit + integration + e2e | `vitest --project unit chat/mentions.test notification/recipients.test`; `vitest --project integration notification/notifications.int`, `realtime-presence.int`; e2e `notifications presence dms` | ✅ | ✅ green |
+| 04-09-03 | 09 | 6 | CHAT-08 | T-04-09-01/06 | Edits notify only new mentions; inbox re-filtered on lost access; DM privacy for inbox | integration | `vitest --project integration notification/notifications.int`, `chat/dm-privacy.int` | ✅ | ✅ green |
+| 04-10-01 (tracer) | 10 | 7 | CHAT-09, D-07 | T-04-10-01/04 | Counts from messages (capped), not stream seq; only on resolver-filtered rows | integration + e2e | `vitest --project integration chat/unread.int`; e2e `unread notifications chat-sidebar chat.spec` | ❌ task | ✅ green |
+| 04-10-02 | 10 | 7 | CHAT-09, D-07 | T-04-10-02/03 | Mark unread backwards, own rows only, foreign ids 404 | integration + e2e | `vitest --project integration chat/unread.int`; e2e `unread permalinks` | ✅ | ✅ green |
+| 04-11-01 (tracer) | 11 | 8 | CHAT-10, D-02 | T-04-11-03/04 | Server decides popup; no Push API; prefs scoped to self and members | integration + e2e | `vitest --project integration notification/prefs.int`; e2e `notification-prefs notifications unread` | ❌ task | ✅ green |
+| 04-11-02 | 11 | 8 | CHAT-10, D-02 | T-04-11-02/05 | DND, levels, toggles; permission only on click; level-all is ephemeral | integration + e2e | `vitest --project integration notification/prefs.int`; `pnpm typecheck --force`; e2e `notification-prefs account` | ✅ | ✅ green |
+| 04-11-03 | 11 | 8 | CHAT-10 | T-04-11-01 | Badge IPC: trusted sender, integer 0–9999, no passthrough | unit (desktop) + e2e | `env -u ELECTRON_RUN_AS_NODE pnpm --filter @ocw/desktop test`; e2e `notification-prefs` | ✅ | ✅ green |
+| 04-12-01 (tracer) | 12 | 8 | CHAT-12 | T-04-12-01/02/05 | Link only own, ready, same-conversation attachments; previews are renditions | integration (Garage) + e2e | `vitest --project integration chat/message-attachments.int`; e2e `attachments chat.spec chat-edit` | ❌ task | ✅ green |
+| 04-12-02 | 12 | 8 | CHAT-12 | T-04-12-03/04 | Deleted message → downloads 404; limits; disabled mode | integration (Garage) + e2e | `vitest --project integration chat/message-attachments.int`; e2e `attachments dms` | ✅ | ✅ green |
+| 04-13-01 (tracer) | 13 | 9 | CHAT-02 … CHAT-14 | T-04-13-01 | Cross-feature day on a fresh isolated stack | e2e | e2e `--rebuild-web chat-day` | ❌ task | ✅ green |
+| 04-13-02 | 13 | 9 | CHAT-02 … CHAT-14 | T-04-13-03 | Full regression incl. privacy suites; screenshot review | full suite + e2e | full suite command; e2e `--rebuild-web` (all specs) | ✅ | ✅ green |
+| 04-13-03 | 13 | 9 | all | T-04-13-02 | ADR-0016, AGENTS.md, DEMO.md, traceability, sign-off | docs checks | `test -f docs/adr/0016-…`; `grep -c "^- \[x\] \*\*CHAT-" .planning/REQUIREMENTS.md` | ❌ task | ✅ green |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
+
+### Phase gate run (04-13, 2026-10-06, final branch state)
+
+| Command | Result |
+|---------|--------|
+| `pnpm verify` | lint clean · typecheck 8/8 · 139 files / 1917 tests passed (unit, integration on ephemeral PostgreSQL + Garage, web) |
+| `pnpm typecheck --force` | 8/8 |
+| `env -u ELECTRON_RUN_AS_NODE OCW_HOME=<tmp> pnpm --filter @ocw/desktop test` | 10 files / 67 tests passed |
+| `pnpm --filter @ocw/local-runtime test` | 17 files / 286 tests passed |
+| `pnpm --filter @ocw/openclaw-channel test` | 15 files / 203 tests passed |
+| `node --test 'infra/**/*.test.mjs' 'scripts/**/*.test.mjs'` | 80 passed (infra alone: 76) |
+| `OCW_E2E_SCREENSHOT_DIR=… bash scripts/e2e-isolated.sh --rebuild-web` (all specs, fresh stack) | 153 passed, 2 skipped by design (`attachments-api` and `realtime-latency` are desktop-only), 0 failed, 0 flaky |
+| `bash scripts/e2e-isolated.sh --rebuild-web chat-day` (fresh stack) | 3 passed (setup + desktop + mobile) |
 
 ### Requirement → test files
 
@@ -104,12 +118,12 @@ E2E commands run as `OCW_E2E_SCREENSHOT_DIR=$PWD/.planning/phases/04-chat/screen
 
 Created inside the first task that needs them (TDD: the test infrastructure lands before the behaviour it checks):
 
-- [ ] `vitest.config.ts` project `web` and `apps/web/components/markdown/markdown.test.tsx` — 04-02 Task 1
-- [ ] `apps/api/src/testing-storage.ts` (Garage GenericContainer) — 04-04 Task 1
-- [ ] `e2e/support/chat.ts` (Phase 4 e2e helpers: `ALEX`, `postAs`, `freshChannel`, `openMessageActions`) — 04-01 Task 1
-- [ ] Isolated harness Garage (`ocw-e2e-storage`, :4292) — 04-04 Task 3 (specs that upload run after it)
-- [ ] streamdown 2.6.0 + @streamdown/code 1.1.1 compatibility spike (fallback 2.7.0 + 2.0.0) — 04-02 Task 3
-- [ ] `window.Notification` recorder init script + `grantPermissions(["notifications"])` — 04-11 Task 1
+- [x] `vitest.config.ts` project `web` and `apps/web/components/markdown/markdown.test.tsx` — 04-02 Task 1
+- [x] `apps/api/src/testing-storage.ts` (Garage GenericContainer) — 04-04 Task 1
+- [x] `e2e/support/chat.ts` (Phase 4 e2e helpers: `ALEX`, `postAs`, `freshChannel`, `openMessageActions`) — 04-01 Task 1
+- [x] Isolated harness Garage (`ocw-e2e-storage`, :4292) — 04-04 Task 3 (specs that upload run after it)
+- [x] streamdown 2.6.0 + @streamdown/code 1.1.1 compatibility spike (fallback 2.7.0 + 2.0.0) — 04-02 Task 3
+- [x] `window.Notification` recorder init script + `grantPermissions(["notifications"])` — 04-11 Task 1
 
 ---
 
@@ -126,11 +140,11 @@ Created inside the first task that needs them (TDD: the test infrastructure land
 
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags
-- [ ] Feedback latency < 300 s
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] All tasks have `<automated>` verify or Wave 0 dependencies
+- [x] Sampling continuity: no 3 consecutive tasks without automated verify
+- [x] Wave 0 covers all MISSING references
+- [x] No watch-mode flags
+- [x] Feedback latency < 300 s
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending (set by 04-13 Task 3)
+**Approval:** approved 2026-10-06 (04-13 Task 3). Manual-only rows above stay with the owner: the visual review in `04-UI-REVIEW.md` and the signed-build notification click / dock badge checks.

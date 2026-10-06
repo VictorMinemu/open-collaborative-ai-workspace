@@ -14,8 +14,8 @@ shared and controlled from the cloud) and **Agents** (persistent server-side age
 models, devices and audit.
 
 Authoritative spec: `docs/prd/PRD.md` (v1.0, English). Original draft: `docs/prd/archive/PRD-v0.3-es.md`.
-Decisions: `docs/adr/`. Planning and roadmap: `.planning/` (GSD). Built so far: phases 1–3.2 (API, web, desktop + Local Runtime,
-OpenClaw cell with personal bots, MCP, marketplace, Work Zone session controls). Add packages only when a roadmap phase needs them.
+Decisions: `docs/adr/`. Planning and roadmap: `.planning/` (GSD). Built so far: phases 1–4 (API, web, desktop + Local Runtime,
+OpenClaw bots, MCP, marketplace, Work Zone controls, complete chat). Add packages only when a roadmap phase needs them.
 
 ## Non-negotiable architectural principles
 
@@ -60,13 +60,13 @@ Taken from the PRD. Any design that violates one of these must be raised, not si
 | Realtime | `@fastify/websocket` + Redis pub/sub; per-stream `seq` persisted in PostgreSQL, cursor replay | research |
 | AI layer | Vercel AI SDK 7 server-side; prompts assembled from persisted messages by one `buildModelMessages` | research |
 | Web | Next.js 16 + React; Tailwind + shadcn/ui (Base UI); TanStack Query + Zustand | PRD, research |
-| Desktop | Electron + bundled Vite renderer; Local Runtime daemon is a standalone process supervised by the app | PRD, 0005 |
+| Desktop / mobile | Electron + bundled Vite renderer; Local Runtime daemon is a standalone process supervised by the app. Mobile (MVP7): Expo / React Native | PRD, 0005 |
 | Runtime adapters | Claude Code via Claude Agent SDK (streaming input, `canUseTool`); Codex via `codex app-server` JSON-RPC. Never scrape CLI stdout. Settings apply between turns; options come from the runtime-reported catalog, gated by `docs/workzone/runtime-controls-inventory.md` | research, 0013 |
-| Mobile | Expo / React Native | PRD |
-| Database | PostgreSQL only (MVP1) | 0003 |
+| Database / search | PostgreSQL only (MVP1). Chat search: STORED tsvector over three unaccented configs (simple, spanish, english) + GIN, `pg_trgm` for people/channels, always restricted to the resolver's readable set | 0003, 0016 |
 | Cache / pub-sub / presence | Redis | 0003 |
 | Event streaming / workflows | NATS JetStream and Temporal are **deferred**; do not add them yet | 0003 |
-| Object storage | S3-compatible | 0003 |
+| Object storage | Garage (single node) in compose, used only through the S3 API; browsers upload/download via presigned URLs, the API is the only ACL | 0015 (supersedes MinIO in 0003) |
+| Markdown | One `<Markdown>` on streamdown + shiki for chat, bot output and Work Zone; no raw HTML, `safeUrl` links, images as links | 0016 |
 | Secrets | `SecretStore` abstraction: `env`/`file` provider by default, OpenBao as optional compose profile | 0003 |
 | Observability | OpenTelemetry via `@fastify/otel`; Prometheus / Grafana / Loki / Tempo as optional compose profile | 0003 |
 | Server agents | OpenClaw in Docker (later Kubernetes, gVisor/Kata) | PRD |
@@ -75,13 +75,12 @@ Taken from the PRD. Any design that violates one of these must be raised, not si
 | OpenClaw plugins | ClawHub marketplace via the API proxy, pinned admin approvals, API-authoritative install gate | 0011 |
 | License | AGPLv3 (apps, server); Apache 2.0 for protocol, SDKs and plugins | PRD |
 
-Rows marked "research" come from `.planning/research/STACK.md` (2026-09-10) and become an ADR in the phase that
-first implements them. Exact versions live in STACK.md, not here.
+"research" rows come from `.planning/research/STACK.md` (exact versions live there) and get an ADR when first built.
 
 ## Monorepo layout
 
-`apps/`: `api` (Fastify control plane, one module per PRD service), `web` (Next.js client + admin), `desktop`
-(Electron), `local-runtime` (daemon), `openclaw-channel` (OpenClaw plugin); later `mobile` (Expo, MVP7).
+`apps/`: `api` (Fastify control plane, one module per PRD service, e.g. `chat`, `notification`, `search`, `artifact`),
+`web` (Next.js), `desktop` (Electron), `local-runtime` (daemon), `openclaw-channel` (OpenClaw plugin); later `mobile`.
 `packages/`: `contracts` (Zod schemas, event protocol, permissions; Apache 2.0), `db`, `realtime-client`, `config`;
 later `auth`, `runtime-adapters`, `ui`. `docs/`: `prd/` (PRD.md authoritative), `adr/` (`NNNN-kebab-title.md`).
 `infra/`: compose profiles, OpenClaw cell image, fakes (model, MCP, ClawHub), stdio MCP sandbox. `.planning/`: GSD.
