@@ -2,6 +2,7 @@
 
 import {
   type AgentTypingEvent,
+  type Attachment,
   type DmGroupMember,
   EphemeralTypes,
   EventTypes,
@@ -17,7 +18,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Bot, Gauge, Lock, NotebookPen, Settings2, ShieldCheck, UserX } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { BotSettingsSheet } from "@/components/bots/bot-settings-sheet";
 import { MemoryPanel } from "@/components/bots/memory-panel";
@@ -29,6 +30,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
 import { errorMessage, isApiError } from "@/lib/api";
+import { useAttachmentsConfig } from "@/lib/attachment-queries";
 import { useAgents } from "@/lib/bots-queries";
 import { capabilityKeys, useBotCapabilities, useBotMemories } from "@/lib/capability-queries";
 import {
@@ -54,7 +56,8 @@ import { parsePermalink, permalinkPath } from "@/lib/permalink";
 import { useMe } from "@/lib/queries";
 import { useTopic } from "@/lib/realtime";
 import { cn } from "@/lib/utils";
-import { Composer, type MentionCandidate } from "./composer";
+import { DropZone } from "./attachments/drop-zone";
+import { attachmentLimitsHint, Composer, type ComposerApi, type MentionCandidate } from "./composer";
 import { ConversationNotifyMenu } from "./conversation-notify-menu";
 import { JumpToLatest } from "./jump-to-latest";
 import { MentionContext } from "./markdown";
@@ -162,6 +165,8 @@ export function DmView({ conversationId }: { conversationId: string }) {
 
   const dms = useDms();
   const dm = dms.data?.dms.find((d) => d.id === conversationId);
+  const composerApi = useRef<ComposerApi | null>(null);
+  const filesConfig = useAttachmentsConfig();
   // The other party: a bot (3.1 DMs), a person (CHAT-04) or the other members of a group (D-06).
   const bot = dm && isBotDm(dm) ? dm.counterpart : undefined;
   const person = dm && isHumanDm(dm) ? dm.counterpart : undefined;
@@ -326,7 +331,11 @@ export function DmView({ conversationId }: { conversationId: string }) {
   const deliver = useCallback(
     async (p: PendingMessage) => {
       try {
-        const msg = await postMessage(conversationId, { body: p.body, clientMessageId: p.clientMessageId });
+        const msg = await postMessage(conversationId, {
+          body: p.body,
+          clientMessageId: p.clientMessageId,
+          ...(p.attachments?.length ? { attachmentIds: p.attachments.map((a) => a.id) } : {}),
+        });
         applyMessage(qc, msg);
         setPending((prev) => prev.filter((x) => x.clientMessageId !== p.clientMessageId));
         // Sending ends a "marked unread" hold: the member is reading here (CHAT-09).
@@ -343,13 +352,14 @@ export function DmView({ conversationId }: { conversationId: string }) {
   );
 
   const send = useCallback(
-    (body: string) => {
+    (body: string, attachments: Attachment[] = []) => {
       const p: PendingMessage = {
         clientMessageId: newId(),
         body,
         threadRootId: null,
         failed: false,
         createdAt: new Date().toISOString(),
+        ...(attachments.length ? { attachments } : {}),
       };
       // Posting from old history returns to the live tail, where the message appears.
       if (detached) jumpToLatest();
@@ -422,6 +432,9 @@ export function DmView({ conversationId }: { conversationId: string }) {
       : `@${person?.handle} · only the two of you can see this`;
   const disabled = bot?.status === "disabled";
   const deactivated = person?.deactivated === true;
+  // Bots read text only for now, so a DM with a bot offers no files; people and groups do (CHAT-12, P-10).
+  const canAttach = !bot && !disabled && !deactivated && !dm.archivedAt;
+  const canDrop = canAttach && filesConfig.data?.enabled === true;
   const headerAvatar = bot ? (
     <PrincipalAvatar
       kind="agent"
@@ -612,95 +625,105 @@ export function DmView({ conversationId }: { conversationId: string }) {
             />
           ) : null}
 
-          <div className="relative flex min-h-0 flex-1 flex-col">
-            <div
-              ref={scroll.ref}
-              onScroll={onScroll}
-              className="scrollbar-thin flex min-h-0 flex-1 flex-col overflow-y-auto"
-              data-testid="dm-scroll"
-              data-detached={detached ? "true" : undefined}
-            >
-              {messages.isPending || win.loading ? (
-                <div className="flex flex-1 items-end justify-center pb-8 text-muted-foreground">
-                  <Spinner />
-                </div>
-              ) : messages.isError || win.error ? (
-                <EmptyState
-                  icon={isApiError(messages.error, 404) ? Lock : Bot}
-                  title="Couldn't load messages"
-                  description={errorMessage(messages.error ?? win.error)}
-                >
-                  <Button
-                    variant="outline"
-                    onClick={() => (messages.isError ? void messages.refetch() : win.retry())}
+          <DropZone
+            conversationLabel={group ? title : `your conversation with ${title}`}
+            enabled={canDrop}
+            hint={attachmentLimitsHint(filesConfig.data)}
+            onFiles={(files) => composerApi.current?.addFiles(files)}
+          >
+            <div className="relative flex min-h-0 flex-1 flex-col">
+              <div
+                ref={scroll.ref}
+                onScroll={onScroll}
+                className="scrollbar-thin flex min-h-0 flex-1 flex-col overflow-y-auto"
+                data-testid="dm-scroll"
+                data-detached={detached ? "true" : undefined}
+              >
+                {messages.isPending || win.loading ? (
+                  <div className="flex flex-1 items-end justify-center pb-8 text-muted-foreground">
+                    <Spinner />
+                  </div>
+                ) : messages.isError || win.error ? (
+                  <EmptyState
+                    icon={isApiError(messages.error, 404) ? Lock : Bot}
+                    title="Couldn't load messages"
+                    description={errorMessage(messages.error ?? win.error)}
                   >
-                    Try again
-                  </Button>
-                </EmptyState>
-              ) : (
-                <div className="mt-auto">
-                  {loadingOlder ? (
-                    <div className="flex justify-center py-3 text-muted-foreground">
-                      <Spinner />
-                    </div>
-                  ) : null}
-                  <MessageList
-                    messages={shown?.messages ?? []}
-                    pending={detached ? [] : pending}
-                    me={me}
-                    typers={typers}
-                    onRetry={retry}
-                    showThreadSummary={false}
-                    intro={intro}
-                    readOnly={!!dm.archivedAt || disabled || deactivated}
-                    anchorId={permalinkId}
-                    linkFor={linkFor}
-                    onAnchorHidden={onAnchorHidden}
-                    canUnpinAny
-                    dividerAfterSeq={reading.dividerAfterSeq}
-                    onMarkUnread={markUnreadFrom}
-                  />
-                  {loadingNewer ? (
-                    <div className="flex justify-center py-3 text-muted-foreground">
-                      <Spinner />
-                    </div>
-                  ) : null}
+                    <Button
+                      variant="outline"
+                      onClick={() => (messages.isError ? void messages.refetch() : win.retry())}
+                    >
+                      Try again
+                    </Button>
+                  </EmptyState>
+                ) : (
+                  <div className="mt-auto">
+                    {loadingOlder ? (
+                      <div className="flex justify-center py-3 text-muted-foreground">
+                        <Spinner />
+                      </div>
+                    ) : null}
+                    <MessageList
+                      messages={shown?.messages ?? []}
+                      pending={detached ? [] : pending}
+                      me={me}
+                      typers={typers}
+                      onRetry={retry}
+                      showThreadSummary={false}
+                      intro={intro}
+                      readOnly={!!dm.archivedAt || disabled || deactivated}
+                      anchorId={permalinkId}
+                      linkFor={linkFor}
+                      onAnchorHidden={onAnchorHidden}
+                      canUnpinAny
+                      dividerAfterSeq={reading.dividerAfterSeq}
+                      onMarkUnread={markUnreadFrom}
+                    />
+                    {loadingNewer ? (
+                      <div className="flex justify-center py-3 text-muted-foreground">
+                        <Spinner />
+                      </div>
+                    ) : null}
+                  </div>
+                )}
+              </div>
+              {detached ? <JumpToLatest newCount={win.newCount} onJump={jumpToLatest} /> : null}
+            </div>
+
+            <TypingIndicator typers={typers} />
+            <div className="shrink-0 px-4 pb-[max(env(safe-area-inset-bottom),12px)] sm:px-5">
+              {disabled || deactivated ? (
+                <div
+                  className="flex items-center gap-3 rounded-xl border bg-muted/40 px-4 py-3 text-muted-foreground text-sm"
+                  data-testid="dm-readonly"
+                >
+                  {bot ? <Bot className="size-4 shrink-0" /> : <UserX className="size-4 shrink-0" />}
+                  <span>
+                    {bot
+                      ? `${bot.name} is turned off. Its history stays readable here.`
+                      : `${title} is no longer active in this workspace. The history stays readable here.`}
+                  </span>
                 </div>
+              ) : (
+                <Composer
+                  placeholder={`Message ${title}`}
+                  candidates={groupCandidates}
+                  mentions={!!group}
+                  conversationId={conversationId}
+                  attachments={canAttach}
+                  apiRef={composerApi}
+                  onSend={(body, _ids, files) => send(body, files)}
+                  autoFocus
+                  footer={
+                    <p className="mt-1.5 hidden px-1 text-[11px] text-muted-foreground/80 md:block">
+                      <kbd className="font-sans font-medium">Enter</kbd> to send ·{" "}
+                      <kbd className="font-sans font-medium">Shift + Enter</kbd> for a new line
+                    </p>
+                  }
+                />
               )}
             </div>
-            {detached ? <JumpToLatest newCount={win.newCount} onJump={jumpToLatest} /> : null}
-          </div>
-
-          <TypingIndicator typers={typers} />
-          <div className="shrink-0 px-4 pb-[max(env(safe-area-inset-bottom),12px)] sm:px-5">
-            {disabled || deactivated ? (
-              <div
-                className="flex items-center gap-3 rounded-xl border bg-muted/40 px-4 py-3 text-muted-foreground text-sm"
-                data-testid="dm-readonly"
-              >
-                {bot ? <Bot className="size-4 shrink-0" /> : <UserX className="size-4 shrink-0" />}
-                <span>
-                  {bot
-                    ? `${bot.name} is turned off. Its history stays readable here.`
-                    : `${title} is no longer active in this workspace. The history stays readable here.`}
-                </span>
-              </div>
-            ) : (
-              <Composer
-                placeholder={`Message ${title}`}
-                candidates={groupCandidates}
-                mentions={!!group}
-                onSend={send}
-                autoFocus
-                footer={
-                  <p className="mt-1.5 hidden px-1 text-[11px] text-muted-foreground/80 md:block">
-                    <kbd className="font-sans font-medium">Enter</kbd> to send ·{" "}
-                    <kbd className="font-sans font-medium">Shift + Enter</kbd> for a new line
-                  </p>
-                }
-              />
-            )}
-          </div>
+          </DropZone>
         </div>
       </div>
     </MentionContext.Provider>

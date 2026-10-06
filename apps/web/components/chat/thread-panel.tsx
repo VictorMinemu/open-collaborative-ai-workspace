@@ -3,14 +3,16 @@
 import type { Attachment, ChannelSummary, Message } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
 import { MessagesSquare, X } from "lucide-react";
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { toast } from "sonner";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useIsDesktop } from "@/hooks/use-media-query";
+import { useAttachmentsConfig } from "@/lib/attachment-queries";
 import { markThreadRead, useThread } from "@/lib/chat-queries";
 import { permalinkPath } from "@/lib/permalink";
-import { Composer, type MentionCandidate } from "./composer";
+import { DropZone } from "./attachments/drop-zone";
+import { attachmentLimitsHint, Composer, type ComposerApi, type MentionCandidate } from "./composer";
 import { MessageList, type PendingMessage } from "./message-list";
 import { PrincipalAvatar } from "./principal-avatar";
 import { type Typer, TypingIndicator } from "./typing";
@@ -54,6 +56,8 @@ function ThreadBody({
   pinnedBy,
 }: ThreadPanelProps) {
   const thread = useThread(rootId);
+  const composerApi = useRef<ComposerApi | null>(null);
+  const filesConfig = useAttachmentsConfig();
   const replies = thread.data?.replies ?? [];
   const myPending = pending.filter((p) => p.threadRootId === rootId);
   const threadTypers = typers.filter((t) => t.threadRootId === rootId);
@@ -115,82 +119,92 @@ function ThreadBody({
         </button>
       </header>
 
-      <div
-        ref={scroll.ref}
-        onScroll={scroll.onScroll}
-        className="scrollbar-thin min-h-0 flex-1 overflow-y-auto"
+      <DropZone
+        conversationLabel="this thread"
+        enabled={canPost && filesConfig.data?.enabled === true}
+        hint={attachmentLimitsHint(filesConfig.data)}
+        onFiles={(files) => composerApi.current?.addFiles(files)}
       >
-        {thread.isPending ? (
-          <div className="grid gap-3 p-5">
-            <Skeleton className="h-4 w-1/3" />
-            <Skeleton className="h-4 w-4/5" />
-            <Skeleton className="h-4 w-2/3" />
-          </div>
-        ) : thread.isError ? (
-          <p className="p-6 text-center text-muted-foreground text-sm">This thread is no longer available.</p>
-        ) : thread.data ? (
-          <>
-            <MessageList
-              messages={[thread.data.root]}
-              pending={[]}
-              me={me}
-              typers={[]}
-              onRetry={onRetry}
-              showThreadSummary={false}
-              readOnly={!!channel.archivedAt}
-              canDeleteAny={channel.viewerCan?.includes("message.delete_any") ?? false}
-              canReact={canPost}
-              canUnpinAny={canUnpinAny}
-              {...(pinnedBy ? { pinnedBy } : {})}
-              showTombstones
-              anchorId={highlightId}
-              linkFor={linkFor}
-            />
-            <div className="flex items-center gap-3 px-4 py-1.5 sm:px-5" data-testid="thread-reply-count">
-              <span className="text-muted-foreground text-xs">
-                {thread.data.root.replyCount === 0
-                  ? "No replies yet"
-                  : `${thread.data.root.replyCount} ${thread.data.root.replyCount === 1 ? "reply" : "replies"}`}
-              </span>
-              <div className="h-px flex-1 bg-border" />
+        <div
+          ref={scroll.ref}
+          onScroll={scroll.onScroll}
+          className="scrollbar-thin min-h-0 flex-1 overflow-y-auto"
+        >
+          {thread.isPending ? (
+            <div className="grid gap-3 p-5">
+              <Skeleton className="h-4 w-1/3" />
+              <Skeleton className="h-4 w-4/5" />
+              <Skeleton className="h-4 w-2/3" />
             </div>
-            <MessageList
-              startDay={thread.data.root.createdAt}
-              messages={replies}
-              pending={myPending}
-              me={me}
-              typers={[]}
-              onRetry={onRetry}
-              showThreadSummary={false}
-              readOnly={!!channel.archivedAt}
-              canDeleteAny={channel.viewerCan?.includes("message.delete_any") ?? false}
-              canReact={canPost}
-              canUnpinAny={canUnpinAny}
-              {...(pinnedBy ? { pinnedBy } : {})}
-              anchorId={highlightId}
-              linkFor={linkFor}
-              onAnchorHidden={onReplyHidden}
-            />
-          </>
-        ) : null}
-      </div>
+          ) : thread.isError ? (
+            <p className="p-6 text-center text-muted-foreground text-sm">
+              This thread is no longer available.
+            </p>
+          ) : thread.data ? (
+            <>
+              <MessageList
+                messages={[thread.data.root]}
+                pending={[]}
+                me={me}
+                typers={[]}
+                onRetry={onRetry}
+                showThreadSummary={false}
+                readOnly={!!channel.archivedAt}
+                canDeleteAny={channel.viewerCan?.includes("message.delete_any") ?? false}
+                canReact={canPost}
+                canUnpinAny={canUnpinAny}
+                {...(pinnedBy ? { pinnedBy } : {})}
+                showTombstones
+                anchorId={highlightId}
+                linkFor={linkFor}
+              />
+              <div className="flex items-center gap-3 px-4 py-1.5 sm:px-5" data-testid="thread-reply-count">
+                <span className="text-muted-foreground text-xs">
+                  {thread.data.root.replyCount === 0
+                    ? "No replies yet"
+                    : `${thread.data.root.replyCount} ${thread.data.root.replyCount === 1 ? "reply" : "replies"}`}
+                </span>
+                <div className="h-px flex-1 bg-border" />
+              </div>
+              <MessageList
+                startDay={thread.data.root.createdAt}
+                messages={replies}
+                pending={myPending}
+                me={me}
+                typers={[]}
+                onRetry={onRetry}
+                showThreadSummary={false}
+                readOnly={!!channel.archivedAt}
+                canDeleteAny={channel.viewerCan?.includes("message.delete_any") ?? false}
+                canReact={canPost}
+                canUnpinAny={canUnpinAny}
+                {...(pinnedBy ? { pinnedBy } : {})}
+                anchorId={highlightId}
+                linkFor={linkFor}
+                onAnchorHidden={onReplyHidden}
+              />
+            </>
+          ) : null}
+        </div>
 
-      <TypingIndicator typers={threadTypers} />
-      <div className="shrink-0 px-4 pb-[max(env(safe-area-inset-bottom),12px)] sm:px-5">
-        <Composer
-          testId="thread-composer"
-          placeholder={canPost ? "Reply…" : "Join the channel to reply"}
-          disabled={!canPost}
-          candidates={candidates}
-          autoFocus
-          onTyping={() => onTyping(rootId)}
-          conversationId={channel.id}
-          onSend={(body, _ids, files) => {
-            scroll.scrollToBottom();
-            onSend(body, rootId, files);
-          }}
-        />
-      </div>
+        <TypingIndicator typers={threadTypers} />
+        <div className="shrink-0 px-4 pb-[max(env(safe-area-inset-bottom),12px)] sm:px-5">
+          <Composer
+            testId="thread-composer"
+            placeholder={canPost ? "Reply…" : "Join the channel to reply"}
+            disabled={!canPost}
+            candidates={candidates}
+            autoFocus
+            onTyping={() => onTyping(rootId)}
+            conversationId={channel.id}
+            apiRef={composerApi}
+            onSend={(body, _ids, files) => {
+              scroll.scrollToBottom();
+              onSend(body, rootId, files);
+            }}
+          />
+        </div>
+      </DropZone>
     </div>
   );
 }

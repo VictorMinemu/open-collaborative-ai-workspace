@@ -3,6 +3,7 @@
 import { type Attachment, MENTION_ALL_WARN_AT, mentionAllOf } from "@ocw/contracts";
 import { ArrowUp, AtSign, Megaphone, Paperclip } from "lucide-react";
 import {
+  type ClipboardEvent,
   type KeyboardEvent,
   type ReactNode,
   type RefObject,
@@ -207,6 +208,19 @@ export function Composer({
     commit(body);
   };
 
+  /**
+   * Pasted files (a screenshot, an image copied from a page, files copied in the file manager) join the tray. The
+   * text of the paste still goes into the message, except a bare file name the system adds next to the file.
+   */
+  const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!canAttach) return;
+    const files = Array.from(e.clipboardData?.files ?? []);
+    if (files.length === 0) return;
+    const text = e.clipboardData.getData("text/plain").trim();
+    if (!text || files.some((f) => f.name === text)) e.preventDefault();
+    addFiles(files);
+  };
+
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing) return;
     if (query && suggestions.length > 0) {
@@ -333,6 +347,7 @@ export function Composer({
             onSelect={(e) => detect(e.currentTarget.value, e.currentTarget.selectionStart ?? 0)}
             onBlur={() => setTimeout(() => setQuery(null), 120)}
             onKeyDown={onKeyDown}
+            onPaste={onPaste}
             className="scrollbar-thin max-h-60 min-h-8 flex-1 resize-none bg-transparent py-1.5 text-[14.5px] leading-[1.45] outline-none placeholder:text-muted-foreground/70 disabled:cursor-not-allowed"
           />
           {canAttach ? (

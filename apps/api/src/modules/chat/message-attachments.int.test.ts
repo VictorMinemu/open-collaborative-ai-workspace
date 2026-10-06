@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { buildApp } from "../../app";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack, WEB_ORIGIN } from "../../testing";
 import { startTestStorage, type TestStorage } from "../../testing-storage";
 
@@ -17,6 +18,7 @@ let admin: TestClient;
 let sam: TestClient;
 let pat: TestClient;
 let samId: string;
+let patId: string;
 let general: string;
 let random: string;
 
@@ -103,6 +105,7 @@ beforeAll(async () => {
   sam = await invite("sam@example.test", "Sam Lee");
   pat = await invite("pat@example.test", "Pat Doe");
   samId = (await ok(sam.request("GET", "/api/v1/me"))).user.id;
+  patId = (await ok(pat.request("GET", "/api/v1/me"))).user.id;
   general = (await ok(admin.request("GET", "/api/v1/channels"))).channels[0].id;
   random = (await ok(admin.request("POST", "/api/v1/channels", { name: "random", visibility: "public" }))).id;
   await ok(sam.request("POST", `/api/v1/channels/${random}/join`));
@@ -226,6 +229,125 @@ describe("posting with attachments", () => {
     expect((await post(client, general, { body: "", attachmentIds: [id] })).status).toBe(404);
     const { rows } = await su.query("select message_id from app.attachments where id = $1", [id]);
     expect(rows[0].message_id).toBeNull();
+  });
+});
+
+describe("files, edits, deletes, threads and groups", () => {
+  it("a PNG and a PDF on one message hydrate as an image and a file, in upload order", async () => {
+    const png = await upload(sam, general);
+    const pdf = await upload(sam, general, { name: "Q3 report.pdf", type: "application/pdf", bytes: PDF });
+    const msg = await ok(post(sam, general, { body: "numbers and a chart", attachmentIds: [png, pdf] }));
+    expect(msg.attachments.map((a: Json) => [a.id, a.isImage])).toEqual([
+      [png, true],
+      [pdf, false],
+    ]);
+    expect(msg.attachments[1]).toMatchObject({
+      filename: "Q3 report.pdf",
+      contentType: "application/pdf",
+      size: PDF.length,
+      previewUrl: null,
+      largeUrl: null,
+      downloadUrl: `/api/v1/attachments/${pdf}/download`,
+    });
+    const page = await ok(pat.request("GET", `/api/v1/conversations/${general}/messages`));
+    expect(page.messages.find((m: Json) => m.id === msg.id).attachments).toHaveLength(2);
+    const download = await raw(pat, `/api/v1/attachments/${pdf}/download`);
+    expect(download.status).toBe(302);
+  });
+
+  it("editing a message keeps its attachments (response, page and message.updated)", async () => {
+    const id = await upload(sam, general);
+    const msg = await ok(post(sam, general, { body: "draft", attachmentIds: [id] }));
+    const edited = await ok(sam.request("PATCH", `/api/v1/messages/${msg.id}`, { body: "final version" }));
+    expect(edited.attachments.map((a: Json) => a.id)).toEqual([id]);
+    const ev = await su.query(
+      "select payload from app.stream_events where stream_id = $1 and type = 'message.updated' order by seq desc limit 1",
+      [`conv:${general}`],
+    );
+    expect(ev.rows[0].payload.message.attachments.map((a: Json) => a.id)).toEqual([id]);
+    const page = await ok(admin.request("GET", `/api/v1/conversations/${general}/messages`));
+    expect(page.messages.find((m: Json) => m.id === msg.id).attachments[0].id).toBe(id);
+  });
+
+  it("deleting a message hides its files from every page and makes download and previews 404 for everyone", async () => {
+    const png = await upload(sam, general);
+    const pdf = await upload(sam, general, { name: "plan.pdf", type: "application/pdf", bytes: PDF });
+    const msg = await ok(post(sam, general, { body: "to be removed", attachmentIds: [png, pdf] }));
+    expect((await raw(pat, `/api/v1/attachments/${png}/preview`)).status).toBe(302);
+    await ok(sam.request("DELETE", `/api/v1/messages/${msg.id}`));
+
+    const { rows } = await su.query("select status from app.attachments where id = any($1) order by id", [
+      [png, pdf],
+    ]);
+    expect(rows.map((r) => r.status)).toEqual(["deleted", "deleted"]);
+    for (const client of [sam, pat, admin]) {
+      const page = await ok(client.request("GET", `/api/v1/conversations/${general}/messages`));
+      const tomb = page.messages.find((m: Json) => m.id === msg.id);
+      if (tomb) expect(tomb.attachments).toEqual([]);
+      const around = await ok(
+        client.request("GET", `/api/v1/conversations/${general}/messages?around=${msg.id}`),
+      );
+      expect(around.messages.find((m: Json) => m.id === msg.id)?.attachments ?? []).toEqual([]);
+      for (const path of [`${png}/preview`, `${png}/large`, `${png}/download`, `${pdf}/download`]) {
+        expect((await raw(client, `/api/v1/attachments/${path}`)).status).toBe(404);
+      }
+    }
+  });
+
+  it("a thread reply carries attachments; the thread view hydrates them", async () => {
+    const root = await ok(post(admin, general, { body: "Feedback on the deck?" }));
+    const id = await upload(sam, general);
+    const reply = await ok(post(sam, general, { body: "", threadRootId: root.id, attachmentIds: [id] }));
+    expect(reply.threadId).toBe(root.id);
+    expect(reply.attachments[0].id).toBe(id);
+    const thread = await ok(pat.request("GET", `/api/v1/messages/${root.id}/thread`));
+    expect(thread.replies.find((r: Json) => r.id === reply.id).attachments[0].id).toBe(id);
+  });
+
+  it("a group DM message carries attachments that only its participants can open", async () => {
+    const group = await ok(
+      admin.request("POST", "/api/v1/dms", {
+        participants: [
+          { kind: "user", id: samId },
+          { kind: "user", id: patId },
+        ],
+      }),
+    );
+    const id = await upload(admin, group.id);
+    const msg = await ok(post(admin, group.id, { body: "", attachmentIds: [id] }));
+    const page = await ok(pat.request("GET", `/api/v1/conversations/${group.id}/messages`));
+    expect(page.messages.find((m: Json) => m.id === msg.id).attachments[0].id).toBe(id);
+    expect((await raw(pat, `/api/v1/attachments/${id}/preview`)).status).toBe(302);
+    // Someone outside the group: hidden = missing.
+    const outsider = await invite(`zed-${randomUUID().slice(0, 8)}@example.test`, "Zed");
+    expect((await raw(outsider, `/api/v1/attachments/${id}/preview`)).status).toBe(404);
+    expect((await raw(outsider, `/api/v1/attachments/${id}/download`)).status).toBe(404);
+  });
+
+  it("without storage, text messages still post and attachmentIds answer 503 attachments_disabled", async () => {
+    const env = {
+      ...stack.env,
+      OCW_S3_ENDPOINT: null,
+      OCW_S3_PUBLIC_URL: null,
+      OCW_S3_ACCESS_KEY_ID: null,
+    };
+    const bare = await buildApp(env, { logger: false });
+    try {
+      const headers = { origin: WEB_ORIGIN, cookie: sam.cookieHeader };
+      const url = `/api/v1/conversations/${general}/messages`;
+      const text = await bare.app.inject({ method: "POST", url, headers, payload: { body: "plain text" } });
+      expect(text.statusCode).toBe(200);
+      const files = await bare.app.inject({
+        method: "POST",
+        url,
+        headers,
+        payload: { body: "", attachmentIds: [randomUUID()] },
+      });
+      expect(files.statusCode).toBe(503);
+      expect(files.json().error.code).toBe("attachments_disabled");
+    } finally {
+      await bare.close();
+    }
   });
 });
 

@@ -1,6 +1,6 @@
 import { crc32, deflateSync } from "node:zlib";
 import { expect, type Locator, type Page, request, test } from "@playwright/test";
-import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
+import { apiAs, BASE_URL, ensureMember, openAs, SAM, userIdOf } from "../support/actors";
 import { freshChannel } from "../support/chat";
 import { ADMIN, API_URL, shot } from "./env";
 
@@ -108,6 +108,29 @@ async function addFiles(
   }
 }
 
+/** Pastes files into a composer the way the browser does (a ClipboardEvent carrying the files). */
+async function pasteFiles(target: Locator, files: Array<{ name: string; type: string; bytes: Buffer }>) {
+  await target.click();
+  await target.evaluate(
+    (el, list) => {
+      const dataTransfer = new DataTransfer();
+      for (const f of list) {
+        const bytes = Uint8Array.from(atob(f.b64), (c) => c.charCodeAt(0));
+        dataTransfer.items.add(new File([bytes], f.name, { type: f.type }));
+      }
+      el.dispatchEvent(
+        new ClipboardEvent("paste", { clipboardData: dataTransfer, bubbles: true, cancelable: true }),
+      );
+    },
+    files.map((f) => ({ name: f.name, type: f.type, b64: f.bytes.toString("base64") })),
+  );
+}
+
+/** A minimal one-page PDF (what the server sniffs is the %PDF magic). */
+const PDF = Buffer.from(
+  "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj 2 0 obj<</Type/Pages/Kids[]/Count 0>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n",
+);
+
 /** Waits until an `<img>` decoded (natural width > 0). */
 async function expectLoaded(img: Locator) {
   await expect
@@ -212,6 +235,164 @@ test("drop or pick an image, watch it upload, send it; another member sees the p
     expect(got.fileStatus).toBe(200);
     expect(got.body.equals(image)).toBe(true);
     expect(got.disposition).toMatch(/^attachment;/);
+  } finally {
+    await a.context.close();
+    await s.context.close();
+    await admin.dispose();
+    await sam.dispose();
+  }
+});
+
+test("paste, a PDF card, an oversized file and removal before sending; threads and DMs take files; a delete hides them; no storage hides the paperclip", async ({
+  browser,
+}, info) => {
+  test.setTimeout(180_000);
+  const project = info.project.name;
+  const mobile = project === "mobile";
+  const size = mobile ? "390" : "1440";
+  const admin = await apiAs(ADMIN);
+  await ensureMember(admin, SAM, "developer");
+  const sam = await apiAs(SAM);
+  const samId = await userIdOf(sam);
+  const channel = await freshChannel(admin, [sam], "files");
+
+  const a = await openAs(browser, ADMIN, project);
+  const s = await openAs(browser, SAM, project);
+  try {
+    await a.page.goto(`${BASE_URL}/chat/${channel.id}`);
+    await s.page.goto(`${BASE_URL}/chat/${channel.id}`);
+    const composer = a.page.getByTestId("composer");
+    const send = a.page.getByTestId("composer-send");
+    const tray = a.page.getByTestId("attachment-tray");
+    const items = tray.getByTestId("attachment-item");
+
+    // ---- paste a screenshot, then pick a PDF and a stray image; remove the stray one before sending
+    await pasteFiles(composer, [
+      { name: "screenshot.png", type: "image/png", bytes: mockup(800, 500, [16, 185, 129]) },
+    ]);
+    await expect(items).toHaveCount(1);
+    await a.page
+      .getByTestId("attach-file")
+      .first()
+      .setInputFiles([
+        { name: "Q3 report.pdf", mimeType: "application/pdf", buffer: PDF },
+        { name: "draft.png", mimeType: "image/png", buffer: mockup(320, 200, [244, 63, 94]) },
+      ]);
+    await expect(items).toHaveCount(3);
+    await expect(tray.locator('[data-testid="attachment-item"][data-status="ready"]')).toHaveCount(3, {
+      timeout: 15_000,
+    });
+    await tray.getByRole("button", { name: "Remove draft.png" }).click();
+    await expect(items).toHaveCount(2);
+
+    // ---- a file over the limit is refused in the tray before any upload and blocks sending until removed
+    await a.page
+      .getByTestId("attach-file")
+      .first()
+      .setInputFiles({
+        name: "raw-footage.mov",
+        mimeType: "video/quicktime",
+        buffer: Buffer.alloc(26 * 1024 * 1024, 1),
+      });
+    const refused = tray.locator('[data-testid="attachment-item"][data-status="error"]');
+    await expect(refused).toHaveCount(1);
+    await expect(refused.getByTestId("attachment-error")).toHaveText("Larger than the 25 MB limit");
+    await composer.fill("Screens and the Q3 report");
+    await expect(send).toBeDisabled();
+    await a.page.mouse.move(0, 0);
+    await shot(a.page, `attachments-error-${size}`);
+    await refused.getByTestId("attachment-remove").click();
+    await expect(items).toHaveCount(2);
+    await expect(send).toBeEnabled();
+    await send.click();
+    await expect(tray).toBeHidden();
+
+    // ---- Sam sees the pasted image and a PDF card (name, size, download) live; the stray image never left
+    const onSam = s.page.getByTestId("message").filter({ hasText: "Screens and the Q3 report" }).last();
+    await expect(onSam.getByTestId("attachment-image")).toHaveCount(1, { timeout: 5_000 });
+    await expectLoaded(onSam.getByTestId("attachment-image"));
+    const card = onSam.getByTestId("file-card");
+    await expect(card).toHaveCount(1);
+    await expect(card).toContainText("Q3 report.pdf");
+    await expect(card).toContainText(`PDF · ${PDF.length} B`);
+    const pdfId = (await card.getAttribute("data-attachment-id")) ?? "";
+    await expect(card.getByTestId("file-download")).toHaveAttribute(
+      "href",
+      `${API_URL}/api/v1/attachments/${pdfId}/download`,
+    );
+    const got = await download(sam, pdfId);
+    expect(got.status).toBe(302);
+    expect(got.body.equals(PDF)).toBe(true);
+    await s.page.mouse.move(0, 0);
+    await bothThemes(s.page, `attachments-file-card-${size}`);
+    const messageId = (await onSam.getAttribute("data-message-id")) ?? "";
+
+    // ---- the thread panel takes files too
+    await a.page.goto(`${BASE_URL}/chat/${channel.id}?thread=${messageId}`);
+    const panel = a.page.getByTestId("thread-panel");
+    await expect(panel).toBeVisible();
+    await panel.getByTestId("attach-file").setInputFiles({
+      name: "thread-reply.png",
+      mimeType: "image/png",
+      buffer: mockup(640, 400, [245, 158, 11]),
+    });
+    await expect(panel.locator('[data-testid="attachment-item"][data-status="ready"]')).toHaveCount(1, {
+      timeout: 15_000,
+    });
+    await panel.getByTestId("thread-composer-send").click();
+    // The root and the delivered reply (a pending row is `message-pending`, not `message`).
+    await expect(panel.getByTestId("message")).toHaveCount(2, { timeout: 5_000 });
+    await expectLoaded(panel.getByTestId("message").last().getByTestId("attachment-image"));
+    const thread = await (await sam.get(`/api/v1/messages/${messageId}/thread`)).json();
+    expect(thread.replies.at(-1).attachments.map((x: { filename: string }) => x.filename)).toEqual([
+      "thread-reply.png",
+    ]);
+
+    // ---- a DM takes files; when the message is deleted, Sam's page drops the image and the download is gone
+    const dm = await (
+      await admin.post("/api/v1/dms", { data: { participants: [{ kind: "user", id: samId }] } })
+    ).json();
+    await a.page.goto(`${BASE_URL}/chat/dm/${dm.id}`);
+    await s.page.goto(`${BASE_URL}/chat/dm/${dm.id}`);
+    await a.page
+      .getByTestId("attach-file")
+      .first()
+      .setInputFiles({
+        name: "whiteboard.png",
+        mimeType: "image/png",
+        buffer: mockup(700, 460, [14, 165, 233]),
+      });
+    await expect(a.page.locator('[data-testid="attachment-item"][data-status="ready"]')).toHaveCount(1, {
+      timeout: 15_000,
+    });
+    await a.page.getByTestId("composer").fill("From the whiteboard");
+    await a.page.getByTestId("composer-send").click();
+    const dmOnSam = s.page.getByTestId("message").filter({ hasText: "From the whiteboard" }).last();
+    const dmImage = dmOnSam.getByTestId("attachment-image");
+    await expect(dmImage).toBeVisible({ timeout: 5_000 });
+    const dmImageId = idOf(await dmImage.getAttribute("src"));
+    const dmMessageId = (await dmOnSam.getAttribute("data-message-id")) ?? "";
+    expect((await admin.delete(`/api/v1/messages/${dmMessageId}`)).ok()).toBe(true);
+    await expect(s.page.getByTestId("dm-view").getByTestId("attachment-image")).toHaveCount(0, {
+      timeout: 5_000,
+    });
+    expect((await sam.get(`/api/v1/attachments/${dmImageId}/download`, { maxRedirects: 0 })).status()).toBe(
+      404,
+    );
+
+    // ---- without storage (config says disabled) there is no paperclip and no drop target; text still sends
+    await a.page.route("**/api/v1/attachments/config", (route) =>
+      route.fulfill({
+        json: { enabled: false, maxBytes: 26214400, maxPerMessage: 10, reason: "not_configured" },
+      }),
+    );
+    await a.page.goto(`${BASE_URL}/chat/${channel.id}`);
+    await expect(a.page.getByTestId("composer")).toBeVisible();
+    await expect(a.page.getByTestId("attach-button")).toHaveCount(0);
+    await expect(a.page.getByTestId("attach-file")).toHaveCount(0);
+    await a.page.getByTestId("composer").fill("Text still works");
+    await a.page.getByTestId("composer-send").click();
+    await expect(a.page.getByTestId("message").filter({ hasText: "Text still works" })).toBeVisible();
   } finally {
     await a.context.close();
     await s.context.close();

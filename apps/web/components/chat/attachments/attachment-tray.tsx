@@ -260,6 +260,11 @@ function TrayItem({
   onRetry: () => void;
 }) {
   const failed = item.status === "error";
+  const ref = useRef<HTMLLIElement>(null);
+  // A refused or failed file scrolls into view, so the reason sending is blocked is never off-screen (phones).
+  useEffect(() => {
+    if (failed) ref.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [failed]);
   if (item.thumbUrl && !failed) {
     return (
       <li
@@ -282,10 +287,11 @@ function TrayItem({
   }
   return (
     <li
+      ref={ref}
       data-testid="attachment-item"
       data-status={item.status}
       className={cn(
-        "relative flex h-16 w-56 shrink-0 items-center gap-2.5 overflow-hidden rounded-lg border bg-background py-2 pr-1.5 pl-2.5 dark:bg-input/20",
+        "relative flex h-16 w-48 sm:w-56 shrink-0 items-center gap-2.5 overflow-hidden rounded-lg border bg-background py-2 pr-1.5 pl-2.5 dark:bg-input/20",
         failed && "border-destructive/50 bg-destructive/[0.04] dark:bg-destructive/10",
       )}
     >
