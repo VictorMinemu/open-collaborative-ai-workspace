@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 10
+open_count: 12
 waived_count: 0
 fixed_count: 14
-total_count: 24
-last_updated: 2026-10-06T05:27:09.695Z
+total_count: 26
+last_updated: 2026-10-06T05:31:09.529Z
 ---
 
 # Broken Windows Ledger
@@ -39,6 +39,8 @@ last_updated: 2026-10-06T05:27:09.695Z
 | 22 | 04 | deviation | apps/api/src/modules/chat/access.ts |  | Hidden conversations now 404 with the route's not-found message (identical to missing); was generic 'Not found' | open |  | 2026-10-06T05:27:09.545Z |  |
 | 23 | 04 | deviation | packages/contracts/src/chat.ts |  | Added PageQueryFields + pageCursorCount; messages route enforces one cursor after readable (400 invalid_page_query) | open |  | 2026-10-06T05:27:09.619Z |  |
 | 24 | 04 | deviation | apps/web/components/chat/use-permalink-window.ts |  | Detached window logic extracted into shared hooks (not in plan file list); 04-07 group DMs must reuse it | open |  | 2026-10-06T05:27:09.695Z |  |
+| 25 | 04 | deviation | apps/api/src/app.ts |  | buildApp gained an optional secretStore test hook so testcontainer S3 secrets resolve via SecretReference | open |  | 2026-10-06T05:31:09.460Z |  |
+| 26 | 04 | deviation | packages/db/sql/post-migrate.sql |  | app.due_attachment_sweeps takes p_now (default now()) in addition to p_limit, for the sweeper's injectable clock | open |  | 2026-10-06T05:31:09.529Z |  |
 
 ````json
 [
@@ -328,6 +330,30 @@ last_updated: 2026-10-06T05:27:09.695Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-06T05:27:09.695Z",
+    "resolved_at": null
+  },
+  {
+    "id": 25,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/api/src/app.ts",
+    "line": null,
+    "description": "buildApp gained an optional secretStore test hook so testcontainer S3 secrets resolve via SecretReference",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T05:31:09.460Z",
+    "resolved_at": null
+  },
+  {
+    "id": 26,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "packages/db/sql/post-migrate.sql",
+    "line": null,
+    "description": "app.due_attachment_sweeps takes p_now (default now()) in addition to p_limit, for the sweeper's injectable clock",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T05:31:09.529Z",
     "resolved_at": null
   }
 ]
