@@ -497,12 +497,14 @@ Reuse the Phase 4 presign → sniff → `ready` pipeline with `conversationId` =
 
 Everything else (data model, protocol, plan split) is Claude's discretion.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Paste-redirect acceptability (A1).** Recommendation: build paste-redirect (works on web, desktop and mobile) plus an optional desktop loopback listener. Before release, add a manual owner check: one real sign-in on the demo with the owner's own Plus/Pro account (not in CI).
-2. **Business/Enterprise eligibility (A2).** Recommendation: surface `not_eligible` cleanly and fall back to org models. The owner tests with a Business seat when available.
-3. **Assistant `author_kind`.** Recommendation: `agent` + null `author_id` + generation projection. Decide in plan 01 with a grep of every `authorKind` switch.
-4. **CI availability.** 04-VERIFICATION reports GitHub Actions blocked by an account billing issue [VERIFIED: .planning/phases/04-chat/04-VERIFICATION.md:24]. Phase 5 gates must be runnable locally (isolated e2e harness), as in Phase 4.
+1. **Paste-redirect acceptability (A1).** RESOLVED: paste-redirect on every client (05-05) plus a one-shot desktop loopback listener in the desktop main process (05-07, ADR-0017); the real sign-in stays a manual owner check on the demo (05-15, 05-VALIDATION manual rows).
+2. **Business/Enterprise eligibility (A2).** RESOLVED: `not_eligible` is mapped and falls back to organization models with a clear reason in the picker and the error card (05-07); the owner checks a Business seat when one is available (05-15 manual check).
+3. **Assistant `author_kind`.** RESOLVED: `agent` + null `author_id` + `generation` projection (P-13 in 05-01-PLAN.md); AI chats stay out of every chat list, unread count and notification path because `ai_chat` is not a default readable kind (P-03).
+4. **CI availability.** RESOLVED: every gate runs locally through the isolated harness and testcontainers (P-08 in 05-01-PLAN.md; 05-VALIDATION.md); no plan depends on GitHub Actions.
+
+Original notes (kept for the record): (1) recommended paste-redirect plus an optional desktop loopback listener and a manual owner check; (2) recommended surfacing `not_eligible` and falling back to org models; (3) recommended `agent` + null `author_id`, to be decided in plan 01; (4) 04-VERIFICATION reports GitHub Actions blocked by an account billing issue [VERIFIED: .planning/phases/04-chat/04-VERIFICATION.md:24].
 
 ## Environment Availability
 

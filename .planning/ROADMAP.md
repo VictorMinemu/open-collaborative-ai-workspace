@@ -279,24 +279,27 @@ Plans:
   4. Every generation writes a usage record (model, provider, input/output tokens, cost estimate, requester) and the chat shows tokens per message; the settings expose Web, Company Knowledge, MCP and Skills toggles with only Web search functional and the rest visibly disabled
   5. User attaches files and images to a prompt for vision-capable models through the upload pipeline, and can create an organization-scoped read-only snapshot share link that is never public
 
-**Plans:** 12 plans in 10 waves (validation strategy: `05-VALIDATION.md`; owner decisions D-01 … D-08 in `05-CONTEXT.md`, planner decisions P-01 … P-14 in `05-01-PLAN.md`)
+**Plans:** 15 plans in 12 waves (validation strategy: `05-VALIDATION.md`; owner decisions D-01 … D-08 in `05-CONTEXT.md`, planner decisions P-01 … P-14 in `05-01-PLAN.md`)
 **Research:** standard (AI SDK 7 `streamText` and provider packages are documented in STACK; the model integration contract is captured by `/gsd-ai-integration-phase` during planning)
 **UI hint**: yes
 
 Plans:
 
-- [ ] 05-01-PLAN.md — Wave 1: tracer — package-legitimacy gate for the AI SDK 7 pins; every Phase 5 contract and both migrations (`*_ai_chat`, `*_provider_secret_refs` with the SecretReference backfill); one ChatGPT-plan turn streams end to end (gateway → `streamText` → fake Responses API → WS `ai.delta` offsets → durable message + usage record)
-- [ ] 05-02-PLAN.md — Wave 2: org provider keys on SecretReferences (cell included), org-key and mock backends in the gateway, one allowed list for chats and bots, grouped model picker with METERED labels, per-message model switch
-- [ ] 05-03-PLAN.md — Wave 2: Sign in with ChatGPT per member (PKCE, paste redirect, ID-token/JWKS and scope checks, serialized refresh, revoke), fake SIWC server, Settings › AI chat card, ADR-0017 (proposed)
-- [ ] 05-04-PLAN.md — Wave 3: stop across API instances (partial kept), one-generation gate, interrupted-generation sweeper and shutdown, reload resume, regenerate (also with another model) with append-only versions
-- [ ] 05-05-PLAN.md — Wave 3: ChatGPT-plan errors and UX (usage-limit dialog with Manage usage, no silent billing switch, not-eligible fallback, reconnect, Continue with ChatGPT, welcome dialog) and the desktop loopback sign-in
-- [ ] 05-06-PLAN.md — Wave 4: metering complete — sourced prices, one record per outcome, tokens/cost per message, atomic daily caps, admin AI chat policy and usage reports, member usage
-- [ ] 05-07-PLAN.md — Wave 5: auto titles per backend (ADR-0014 contract), AI chats list and sidebar section, rename/archive, owner-only search in the palette and results
-- [ ] 05-08-PLAN.md — Wave 6: personal and per-chat instructions; Web / Company Knowledge / MCP / Skills toggles with only Web functional (hosted search on the plan, SearXNG on org keys) and every disabled state explained
-- [ ] 05-09-PLAN.md — Wave 7: files and images to vision/PDF-capable models through the Phase 4 upload pipeline, server-read bytes, capability gating in the composer
-- [ ] 05-10-PLAN.md — Wave 8: org-scoped read-only snapshot share links (never public), revoke, share-scoped images, audit
-- [ ] 05-11-PLAN.md — Wave 9: ChatGPT/Claude.ai-quality polish of every AI chat screen, 1440/390 light/dark review (`05-UI-REVIEW.md`), keyboard and screen-reader pass
-- [ ] 05-12-PLAN.md — Wave 10: phase gate — cross-feature e2e, leak and anonymous-access sweep, full regression, ADR-0017 accepted + ADR-0018, AGENTS.md/DEMO.md/traceability, validation sign-off, owner's real sign-in check
+- [ ] 05-01-PLAN.md — Wave 1 [BLOCKING]: every Phase 5 contract and both migrations (`*_ai_chat`; `*_provider_secret_refs` with the SecretReference backfill, proven on legacy rows with a documented rollback); RLS and append-only proofs on fresh PostgreSQL
+- [ ] 05-02-PLAN.md — Wave 2: API tracer — package-legitimacy gate for the AI SDK 7 pins (approved); model gateway + run loop: one ChatGPT-plan turn streams to a WebSocket subscriber from the fake Responses API and persists with a usage record; owner-only privacy and static prompt/model guards
+- [ ] 05-03-PLAN.md — Wave 3: browser tracer — harness wiring to the fakes, `/chat/ai/new` and `/chat/ai/[chatId]`, streaming screen with footer and "Using ChatGPT plan · Manage usage", reconnect-safe stitching, first e2e at 1440/390
+- [ ] 05-04-PLAN.md — Wave 4: org provider keys on SecretReferences (cell included; resolution from `secret_ref` only; migrated rows still serve bots), org-key and mock backends, one allowed list for chats and bots, grouped model picker with METERED labels, per-message model switch
+- [ ] 05-05-PLAN.md — Wave 4: Sign in with ChatGPT per member (PKCE, paste redirect, ID-token/JWKS and scope checks, serialized refresh, revoke), fake SIWC server, Settings › AI chat card, ADR-0017 (proposed)
+- [ ] 05-06-PLAN.md — Wave 5: stop across API instances (partial kept), one-generation gate, interrupted-generation sweeper and shutdown, reload resume, regenerate (also with another model) with append-only versions
+- [ ] 05-07-PLAN.md — Wave 5: ChatGPT-plan errors and UX (usage-limit dialog with Manage usage, no silent billing switch, not-eligible fallback, reconnect, Continue with ChatGPT, welcome dialog) and the desktop loopback sign-in
+- [ ] 05-08-PLAN.md — Wave 6: metering — sourced prices, one record per outcome, tokens/cost per message, atomic daily caps with no model call at the cap, admin AI chat policy
+- [ ] 05-09-PLAN.md — Wave 7: usage reports — admin by member and by model (7/30/90 days), member's own today/30-day usage
+- [ ] 05-10-PLAN.md — Wave 7: auto titles per backend (ADR-0014 contract), AI chats list and sidebar section, rename/archive, owner-only search in the palette and results
+- [ ] 05-11-PLAN.md — Wave 8: personal and per-chat instructions; Web / Company Knowledge / MCP / Skills toggles with only Web functional (hosted search on the plan, SearXNG on org keys) and every disabled state explained
+- [ ] 05-12-PLAN.md — Wave 9: files and images to vision/PDF-capable models through the Phase 4 upload pipeline, server-read bytes, untrusted content that cannot trigger tools, capability gating in the composer
+- [ ] 05-13-PLAN.md — Wave 10: org-scoped read-only snapshot share links (never public), revoke, share-scoped images, audit
+- [ ] 05-14-PLAN.md — Wave 11: ChatGPT/Claude.ai-quality polish of every AI chat screen, 1440/390 light/dark review (`05-UI-REVIEW.md`), keyboard and screen-reader pass
+- [ ] 05-15-PLAN.md — Wave 12: phase gate — cross-feature e2e, leak and anonymous-access sweep, full regression, ADR-0017 accepted + ADR-0018, AGENTS.md/DEMO.md/traceability, validation sign-off, owner's real sign-in check
 
 ### Phase 6: Multiplayer AI Chat, Shared-Context Safety and Agents
 
