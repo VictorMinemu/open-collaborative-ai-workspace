@@ -369,6 +369,7 @@ test("in the desktop app Continue with ChatGPT completes without pasting", async
     "Waiting for ChatGPT in your browser",
   );
   await expect(dialog.getByTestId("chatgpt-redirect-input")).toHaveCount(0);
+  await bothThemes(page, `chatgpt-desktop-waiting-${widthOf(project)}`);
   // The API built the redirect URI on the port the desktop listener bound.
   await expect.poll(() => desktop.calls.opened).toContain("/siwc/api/accounts/authorize?");
   expect(new URL(desktop.calls.opened).searchParams.get("redirect_uri")).toBe(

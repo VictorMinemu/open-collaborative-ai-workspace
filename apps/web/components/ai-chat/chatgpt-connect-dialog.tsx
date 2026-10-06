@@ -231,13 +231,13 @@ export function ChatgptConnectDialog({
                     Waiting for ChatGPT in your browser…
                   </span>
                   <Button
-                    variant="ghost"
+                    variant="link"
                     size="sm"
                     onClick={onCancelWaiting}
                     data-testid="chatgpt-desktop-cancel"
-                    className="h-8 text-foreground"
+                    className="h-auto px-0 font-medium text-foreground"
                   >
-                    Cancel
+                    Paste the address instead
                   </Button>
                 </div>
               ) : flow ? (
