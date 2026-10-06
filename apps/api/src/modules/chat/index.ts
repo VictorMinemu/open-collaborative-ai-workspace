@@ -22,6 +22,7 @@ import {
   PostMessageRequest,
   pageCursorCount,
   ThreadResponse,
+  UpdateChannelRequest,
 } from "@ocw/contracts";
 import {
   conversationMembers,
@@ -140,6 +141,9 @@ async function placeableUnit(
 /** Direct conversations (1:1 and group) are flat: no threads, bot replies at the top level (D-04, D-06). */
 const isDirect = (kind: string) => kind === "dm" || kind === "group";
 
+/** The `conv:` copy of `conversation.updated` when a channel moved to another unit (PATCH /channels/:id). */
+const ChannelMovedPayload = z.object({ conversationId: z.string(), unitId: z.string().nullable() });
+
 /** The `conv:` copy of `conversation.member_removed` (see removeMember). */
 const MemberRemovedPayload = z.object({
   conversationId: z.string(),
@@ -162,6 +166,7 @@ export function createChatModule(core: Core): ApiModule {
     "channel.members.remove",
     "channel.archive",
     "message.delete_any",
+    "channel.update",
   ] as const;
 
   async function withViewerCan(req: FastifyRequest, tx: Tx, row: ChannelRow): Promise<ChannelSummaryDto> {
@@ -209,6 +214,12 @@ export function createChatModule(core: Core): ApiModule {
     if (!parsed.success || parsed.data.member.kind !== "user") return null;
     return { userIds: [parsed.data.member.id], topics: [topic] };
   });
+
+  // A channel moved to another unit: unit-scoped rules may now hide it (or show it) to anyone subscribed, so every
+  // live subscription to its stream is re-decided by the authorizer above (CHAT-02, T-04-08-02).
+  core.realtime.registerSubscriptionInvalidator(EventTypes.conversationUpdated, (topic, payload) =>
+    topic.startsWith("conv:") && ChannelMovedPayload.safeParse(payload).success ? { topics: [topic] } : null,
+  );
 
   // ---------------------------------------------------------------- bridge: chat → agent-channel
   /**
@@ -633,6 +644,68 @@ export function createChatModule(core: Core): ApiModule {
             const row = await channelRow(tx, req.params.id, authOf(req).userId);
             await perms.assertCan(req, tx, "channel.read", channelResource(row.facts), { hideAs404: true });
             return withViewerCan(req, tx, row);
+          }),
+      );
+
+      /**
+       * CHAT-02: move a channel to another unit (or back to the organization) and/or change its topic. The owner
+       * (relation) or an admin (`channel.update`); the target unit follows the placement rule of creation. Audited
+       * `channel.updated {from, to}`; `conversation.updated` on the channel and the sidebars' list topics.
+       */
+      app.patch(
+        "/channels/:id",
+        {
+          config: { authz: "user" },
+          preHandler: requireUser,
+          schema: { tags, params: IdParams, body: UpdateChannelRequest, response: { 200: ChannelSummary } },
+        },
+        async (req) =>
+          core.db.withTenant(tenant(req), async (tx) => {
+            const auth = authOf(req);
+            const { conv, facts } = await readableChannel(req, tx, await getChannel(tx, req.params.id));
+            await perms.assertCan(req, tx, "channel.update", channelResource(facts));
+            if (conv.archivedAt) throw gone("This channel is archived", "channel_archived");
+            const { unitId, topic } = req.body;
+            if (unitId !== undefined && unitId !== null && conv.slug === GENERAL_SLUG) {
+              throw badRequest("#general belongs to the whole organization", "default_channel");
+            }
+            const target =
+              unitId === undefined || unitId === null
+                ? null
+                : await placeableUnit(tx, unitId, auth.userId, await perms.can(req, tx, "unit.manage"));
+            const from: Record<string, string | null> = {};
+            const to: Record<string, string | null> = {};
+            if (unitId !== undefined && (target?.id ?? null) !== conv.unitId) {
+              from.unitId = conv.unitId;
+              to.unitId = target?.id ?? null;
+            }
+            const nextTopic = topic === undefined ? undefined : topic || null;
+            if (nextTopic !== undefined && nextTopic !== conv.topic) {
+              from.topic = conv.topic;
+              to.topic = nextTopic;
+            }
+            if (Object.keys(to).length > 0) {
+              await tx
+                .update(conversations)
+                .set({
+                  ...("unitId" in to ? { unitId: to.unitId } : {}),
+                  ...("topic" in to ? { topic: to.topic } : {}),
+                })
+                .where(eq(conversations.id, conv.id));
+              await core.audit.record(tx, {
+                action: "channel.updated",
+                resourceType: "conversation",
+                resourceId: conv.id,
+                sessionId: auth.sessionId,
+                metadata: { from, to },
+              });
+              await core.realtime.appendEvent(tx, convTopic(conv.id), EventTypes.conversationUpdated, {
+                conversationId: conv.id,
+                ...to,
+              });
+              await notifyListChanged(tx, deps, conv, EventTypes.conversationUpdated);
+            }
+            return summaryOf(req, tx, conv.id);
           }),
       );
 

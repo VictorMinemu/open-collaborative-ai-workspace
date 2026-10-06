@@ -32,6 +32,7 @@ import {
   type ThreadResponse,
   ThreadResponse as ThreadResponseSchema,
   type ThreadUpdatedEvent,
+  type UpdateChannelRequest,
 } from "@ocw/contracts";
 import {
   type InfiniteData,
@@ -100,6 +101,20 @@ function patchChannel(qc: QueryClient, id: string, patch: Partial<ChannelSummary
   qc.setQueryData<ChannelList>(chatKeys.channels, (prev) =>
     prev ? { ...prev, channels: prev.channels.map((c) => (c.id === id ? { ...c, ...patch } : c)) } : prev,
   );
+}
+
+/** CHAT-02: move a channel to another unit (or the organization) and/or change its topic (owner or admin). */
+export function useUpdateChannel() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body }: { id: string; body: UpdateChannelRequest }) =>
+      api.patch(`/api/v1/channels/${id}`, { body, schema: ChannelSummary }),
+    onSuccess: (channel) => {
+      patchChannel(qc, channel.id, channel);
+      qc.setQueryData(chatKeys.channel(channel.id), channel);
+      void qc.invalidateQueries({ queryKey: chatKeys.channels });
+    },
+  });
 }
 
 export function useChannelAction(action: "join" | "leave" | "archive") {

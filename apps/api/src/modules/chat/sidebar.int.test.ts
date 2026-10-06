@@ -37,6 +37,16 @@ async function ok(res: Promise<{ status: number; body: Record<string, unknown> |
 
 const errorOf = (r: { body: Record<string, unknown> | null }) => (r.body as Json | null)?.error as Json;
 
+async function events(topic: string, type: string): Promise<Json[]> {
+  const res = await su.query(
+    "select payload from app.stream_events where stream_id = $1 and type = $2 order by seq",
+    [topic, type],
+  );
+  return res.rows.map((r) => r.payload);
+}
+
+const move = (as: TestClient, id: string, body: Json) => as.request("PATCH", `/api/v1/channels/${id}`, body);
+
 async function invite(
   email: string,
   name: string,
@@ -213,9 +223,135 @@ describe("channel placement (CHAT-02, task 1)", () => {
       id: product,
       path: [product],
     });
-    // Unused principals keep the setup honest (Finn is used by the rule cases of task 2).
-    expect(finnId).toBeTruthy();
-    expect(orgId).toBeTruthy();
-    expect(finn).toBeTruthy();
+  });
+});
+
+describe("moving channels and unit-scoped rules (CHAT-02, task 2)", () => {
+  it("the owner moves a channel: audit channel.updated {from, to}, conversation.updated on the channel and the list", async () => {
+    const ledger = await ok(create(finn, "ledger"));
+    expect(ledger.unit).toBeNull();
+    expect(ledger.viewerCan).toContain("channel.update");
+    const moved = await ok(move(finn, ledger.id, { unitId: finance }));
+    expect(moved.unit).toMatchObject({ id: finance, name: "Finance", path: [finance] });
+    expect((await listed(sam, ledger.id))?.unit?.id).toBe(finance);
+
+    const rows = (
+      await su.query(
+        "select actor_id, metadata from app.audit_events where action = 'channel.updated' and resource_id = $1",
+        [ledger.id],
+      )
+    ).rows;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ actor_id: finnId });
+    expect(rows[0]?.metadata).toEqual({ from: { unitId: null }, to: { unitId: finance } });
+    expect(await events(`conv:${ledger.id}`, "conversation.updated")).toEqual([
+      { conversationId: ledger.id, unitId: finance },
+    ]);
+    const listEvents = await events(`org:${orgId}`, "conversation.updated");
+    expect(listEvents.at(-1)).toEqual({ conversationId: ledger.id });
+
+    // Unchanged unit: no new audit row, no event.
+    await ok(move(finn, ledger.id, { unitId: finance }));
+    expect(
+      (
+        await su.query(
+          "select 1 from app.audit_events where action = 'channel.updated' and resource_id = $1",
+          [ledger.id],
+        )
+      ).rowCount,
+    ).toBe(1);
+    // The topic travels with the same route.
+    expect((await ok(move(finn, ledger.id, { topic: "Month-end close" }))).topic).toBe("Month-end close");
+  });
+
+  it("a plain member gets 403 channel.update; an admin moves any channel; DMs and empty bodies are refused", async () => {
+    const room = await ok(create(dana, "mobile-room", mobile));
+    await ok(sam.request("POST", `/api/v1/channels/${room.id}/join`));
+    expect((await listed(sam, room.id))?.viewerCan).not.toContain("channel.update");
+    const denied = await move(sam, room.id, { unitId: product });
+    expect(denied.status).toBe(403);
+    expect(errorOf(denied).details).toMatchObject({ permission: "channel.update" });
+    expect((await listed(sam, room.id))?.unit?.id).toBe(mobile);
+
+    // An admin who is not even a member moves it anywhere.
+    expect((await ok(move(admin, room.id, { unitId: finance }))).unit.id).toBe(finance);
+    // Back to the organization.
+    expect((await ok(move(admin, room.id, { unitId: null }))).unit).toBeNull();
+
+    const empty = await move(admin, room.id, {});
+    expect(empty.status).toBe(400);
+  });
+
+  it("the owner may only move to units on their own paths (unit_not_allowed); unknown units 404", async () => {
+    const standup = await ok(create(dana, "dana-standup", mobile));
+    expect((await ok(move(dana, standup.id, { unitId: product }))).unit.id).toBe(product);
+    const refused = await move(dana, standup.id, { unitId: finance });
+    expect(refused.status).toBe(403);
+    expect(errorOf(refused).code).toBe("unit_not_allowed");
+    const unknown = await move(dana, standup.id, { unitId: randomUUID() });
+    expect(unknown.status).toBe(404);
+    expect(errorOf(unknown).code).toBe("unit_not_found");
+    expect((await listed(dana, standup.id))?.unit?.id).toBe(product);
+  });
+
+  it("a deny on channel.read scoped to Finance hides Finance channels from people outside it (list, 404, search)", async () => {
+    const plans = await ok(create(admin, "plans"));
+    await ok(sam.request("POST", `/api/v1/channels/${plans.id}/join`));
+    await ok(finn.request("POST", `/api/v1/channels/${plans.id}/join`));
+    await ok(
+      admin.request("POST", `/api/v1/conversations/${plans.id}/messages`, { body: "quarzite forecast" }),
+    );
+    const rule = await ok(
+      admin.request("POST", "/api/v1/permission-rules", {
+        scopeUnitId: finance,
+        subjectKind: "role",
+        subjectId: "standard",
+        permission: "channel.read",
+        effect: "deny",
+      }),
+    );
+    expect(rule.scopeUnitId).toBe(finance);
+
+    const searchFor = async (as: TestClient) =>
+      ((await ok(as.request("GET", "/api/v1/search/messages?q=quarzite"))).hits as Json[]).map(
+        (h) => h.conversation.id,
+      );
+    // In the organization the rule does not reach the channel.
+    expect(await listed(sam, plans.id)).toBeTruthy();
+    expect(await searchFor(sam)).toContain(plans.id);
+
+    await ok(move(admin, plans.id, { unitId: finance }));
+    // Sam (standard, Product) loses it everywhere; Finn (developer, Finance) keeps it.
+    expect(await listed(sam, plans.id)).toBeUndefined();
+    const hidden = await sam.request("GET", `/api/v1/channels/${plans.id}`);
+    expect(hidden.status).toBe(404);
+    expect((await sam.request("GET", `/api/v1/conversations/${plans.id}/messages`)).status).toBe(404);
+    expect(await searchFor(sam)).not.toContain(plans.id);
+    expect((await listed(finn, plans.id))?.unit?.id).toBe(finance);
+    expect(await searchFor(finn)).toContain(plans.id);
+    expect((await finn.request("GET", `/api/v1/channels/${plans.id}`)).status).toBe(200);
+
+    // Moving it back restores access.
+    await ok(move(admin, plans.id, { unitId: null }));
+    expect(await listed(sam, plans.id)).toBeTruthy();
+    expect(await searchFor(sam)).toContain(plans.id);
+    await ok(admin.request("DELETE", `/api/v1/permission-rules/${rule.id}`));
+  });
+
+  it("another organization's channel is 404", async () => {
+    const orgB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'B', $2)", [
+      orgB,
+      `b-${orgB}`,
+    ]);
+    const foreign = randomUUID();
+    await su.query(
+      "insert into app.conversations (id, organization_id, kind, name, slug, visibility) values ($1, $2, 'channel', 'secret', 'secret', 'public')",
+      [foreign, orgB],
+    );
+    const r = await move(admin, foreign, { unitId: null });
+    expect(r.status).toBe(404);
+    const row = (await su.query("select unit_id from app.conversations where id = $1", [foreign])).rows[0];
+    expect(row?.unit_id).toBeNull();
   });
 });

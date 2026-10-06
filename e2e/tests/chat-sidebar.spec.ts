@@ -66,7 +66,7 @@ async function bothThemes(page: Page, name: string) {
 
 test.describe.configure({ mode: "serial" });
 
-test("channels are grouped by department; a new Product channel reaches Product members live; collapse persists", async ({
+test("channels are grouped by department; a new Product channel reaches Product members live; collapse persists; the owner moves it", async ({
   browser,
 }, info) => {
   test.setTimeout(150_000);
@@ -139,6 +139,28 @@ test("channels are grouped by department; a new Product channel reaches Product 
   // Expand again so later runs (and screenshots) start from the default state.
   await section(list, finance).getByTestId("section-toggle").click();
   await expect(channelLink(section(list, finance), budget)).toBeVisible();
+
+  // ---- Sam joins #design from his Product section; the owner moves it to Finance with "Move to…"
+  await channelLink(section(list, product), design).click();
+  await expect(sam.page.getByTestId("channel-title")).toHaveText(design);
+  await sam.page.getByTestId("join-channel").click();
+  await expect(sam.page.getByTestId("composer")).toBeVisible();
+  list = await openSidebar(sam.page, mobile);
+  await expect(channelLink(section(list, product), design)).not.toHaveAttribute("data-joined", "false");
+
+  await a.page.getByTestId("channel-menu").click();
+  await a.page.getByTestId("move-channel").click();
+  const moveDialog = a.page.getByTestId("move-channel-dialog");
+  await expect(moveDialog.getByTestId("channel-unit-select")).toHaveText(/^Product$/);
+  await moveDialog.getByTestId("channel-unit-select").click();
+  await a.page.getByRole("option", { name: "Finance", exact: true }).click();
+  await bothThemes(a.page, `channel-move-${size}`);
+  await moveDialog.getByTestId("move-channel-submit").click();
+  await expect(moveDialog).toBeHidden();
+
+  // Live: out of Product, into Finance, without a reload.
+  await expect(channelLink(section(list, finance), design)).toBeVisible({ timeout: 5_000 });
+  await expect(channelLink(section(list, product), design)).toHaveCount(0);
 
   await a.context.close();
   await sam.context.close();
