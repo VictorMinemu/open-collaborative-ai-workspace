@@ -348,7 +348,7 @@ export function Composer({
             onBlur={() => setTimeout(() => setQuery(null), 120)}
             onKeyDown={onKeyDown}
             onPaste={onPaste}
-            className="scrollbar-thin max-h-60 min-h-8 flex-1 resize-none bg-transparent py-1.5 text-[14.5px] leading-[1.45] outline-none placeholder:text-muted-foreground/70 disabled:cursor-not-allowed"
+            className="scrollbar-thin max-h-60 min-h-8 flex-1 resize-none overflow-x-hidden text-ellipsis bg-transparent py-1.5 text-[14.5px] leading-[1.45] outline-none placeholder:truncate placeholder:text-muted-foreground/70 disabled:cursor-not-allowed"
           />
           {canAttach ? (
             <>

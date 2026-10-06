@@ -291,7 +291,12 @@ test("a chat day: group DM with a bot, mention and notification, thread reply wi
     await replyOnAdmin.getByTestId("attachment-tile").first().click();
     const lightbox = a.page.getByTestId("lightbox");
     await expect(lightbox).toBeVisible();
+    // Opened from a thread: on a phone the thread is a sheet, and the viewer still gets its own dark backdrop.
+    await expect(a.page.getByTestId("lightbox-backdrop")).toBeVisible();
     await expectLoaded(lightbox.getByTestId("lightbox-image"));
+    // Capture after the 200 ms open transition (a phone can still be mid-fade when the image has decoded).
+    await expect(lightbox).not.toHaveAttribute("data-starting-style");
+    await a.page.waitForTimeout(300);
     await shot(a.page, step("lightbox"));
     await a.page.keyboard.press("Escape");
     await expect(lightbox).toBeHidden();
@@ -373,6 +378,9 @@ test("a chat day: group DM with a bot, mention and notification, thread reply wi
       /^[1-9]\d*$/,
       { timeout: 5_000 },
     );
+    // On a stack with many channels the row can sit below the fold of the drawer: bring it into the capture.
+    await channelLink(list, channelName).scrollIntoViewIfNeeded();
+    await settle(tabB);
     await shot(tabB, step("mark-unread"));
     await closeSidebar(tabB, mobile);
 
