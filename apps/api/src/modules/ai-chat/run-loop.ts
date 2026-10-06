@@ -67,8 +67,11 @@ const DELTA_MAX = 16_000;
 
 interface Active {
   controller: AbortController;
+  /** The answer so far; frozen once the controller fires (later provider deltas are dropped). */
   text: string;
   reason: "stop" | "shutdown" | null;
+  /** Publishes the not-yet-sent tail as `ai.delta` (set once streaming starts); called right before an abort. */
+  flushDeltas: (() => void) | null;
   done: Promise<void>;
   /** Set once prepared: what a crash fail-safe needs to finalize the generation as failed. */
   prepared: { gen: GenerationRow; ref: ModelRef; turn: Turn } | null;
@@ -91,6 +94,33 @@ function promptText(turn: Turn): string {
         if (p.type === "text") parts.push(p.text ?? "");
   }
   return parts.join("\n");
+}
+
+/** Sums the usage of finished steps (undefined counts stay undefined: the record is then estimated). */
+function addUsage(
+  acc: ReportedUsage | null,
+  u: {
+    inputTokens: number | undefined;
+    outputTokens: number | undefined;
+    inputTokenDetails?: { cacheReadTokens?: number | undefined };
+    outputTokenDetails?: { reasoningTokens?: number | undefined };
+  },
+): ReportedUsage {
+  const sum = (a: number | undefined, b: number | undefined) =>
+    a === undefined || b === undefined ? undefined : a + b;
+  const next: ReportedUsage = {
+    inputTokens: u.inputTokens,
+    outputTokens: u.outputTokens,
+    cachedInputTokens: u.inputTokenDetails?.cacheReadTokens,
+    reasoningTokens: u.outputTokenDetails?.reasoningTokens,
+  };
+  if (!acc) return next;
+  return {
+    inputTokens: sum(acc.inputTokens, next.inputTokens),
+    outputTokens: sum(acc.outputTokens, next.outputTokens),
+    cachedInputTokens: sum(acc.cachedInputTokens, next.cachedInputTokens),
+    reasoningTokens: sum(acc.reasoningTokens, next.reasoningTokens),
+  };
 }
 
 const unavailableCode = (e: ModelUnavailableError): AiErrorCode =>
@@ -286,10 +316,15 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
       }
     }, AI_DELTA_COALESCE_MS);
     timer.unref();
+    // An abort publishes the tail it has now and freezes the text: no delta is ever sent after the controller
+    // fires, so what the browser saw equals the body that finalize persists.
+    entry.flushDeltas = publishPending;
 
     let error: unknown = null;
     let aborted = false;
     let usage: ReportedUsage | null = null;
+    /** Usage of the steps that finished before an abort (Pitfall 3); null when none did. */
+    let stepUsage: ReportedUsage | null = null;
     let finishReason: string | null = null;
     try {
       const result = streamText({
@@ -303,8 +338,11 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
         onError: () => {},
       });
       for await (const part of result.stream) {
-        if (part.type === "text-delta") entry.text += part.text;
-        else if (part.type === "finish") {
+        if (part.type === "text-delta") {
+          if (!entry.controller.signal.aborted) entry.text += part.text;
+        } else if (part.type === "finish-step") {
+          stepUsage = addUsage(stepUsage, part.usage);
+        } else if (part.type === "finish") {
           finishReason = part.finishReason;
           usage = {
             inputTokens: part.totalUsage.inputTokens,
@@ -332,7 +370,8 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
         status: shutdown ? "interrupted" : "stopped",
         finishReason: "abort",
         error: shutdown ? deps.gateway.classify(new DOMException("aborted", "AbortError")) : null,
-        usage,
+        // Provider counts arrive with the last event, so an aborted stream usually has none: estimated then.
+        usage: usage ?? stepUsage,
       };
     } else if (error !== null) {
       const classified = deps.gateway.classify(error);
@@ -383,6 +422,7 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
         controller: new AbortController(),
         text: "",
         reason: null,
+        flushDeltas: null,
         done: Promise.resolve(),
         prepared: null,
       };
@@ -404,6 +444,7 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
       const entry = active.get(generationId);
       if (!entry) return false;
       entry.reason ??= reason;
+      if (!entry.controller.signal.aborted) entry.flushDeltas?.();
       entry.controller.abort(reason);
       return true;
     },

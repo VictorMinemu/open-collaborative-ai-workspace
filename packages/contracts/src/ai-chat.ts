@@ -245,9 +245,20 @@ export const UpdateAiChatRequest = z
   .refine(atLeastOneKey, NOTHING_TO_UPDATE);
 export type UpdateAiChatRequest = z.infer<typeof UpdateAiChatRequest>;
 
-/** Regenerate the last answer, optionally on another model. */
-export const RegenerateRequest = z.object({ model: ModelRef.optional() });
+/**
+ * Regenerate the last answer, optionally on another model. `messageId` names the answer the client shows: when it
+ * is no longer the chat's last answer (a stale tab) the API refuses with 409 `not_last_answer` (05-06).
+ */
+export const RegenerateRequest = z.object({ messageId: Id.optional(), model: ModelRef.optional() });
 export type RegenerateRequest = z.infer<typeof RegenerateRequest>;
+
+/** `POST /ai-chats/:id/generations/:gid/stop` path parameters (05-06). */
+export const AiGenerationParams = z.object({ id: Id, gid: Id });
+export type AiGenerationParams = z.infer<typeof AiGenerationParams>;
+
+/** Stop is idempotent: 202 with the generation's status when the request was handled (`running` until it lands). */
+export const StopAiGenerationResponse = z.object({ status: AiGeneration.shape.status });
+export type StopAiGenerationResponse = z.infer<typeof StopAiGenerationResponse>;
 
 // ---------------------------------------------------------------- streaming (P-06)
 

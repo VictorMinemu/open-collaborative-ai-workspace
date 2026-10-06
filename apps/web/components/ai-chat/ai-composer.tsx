@@ -1,7 +1,7 @@
 "use client";
 
 import { type AiModelOption, type ModelRef, modelRefKey } from "@ocw/contracts";
-import { ArrowUp } from "lucide-react";
+import { ArrowUp, Square } from "lucide-react";
 import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
@@ -29,7 +29,8 @@ export function pickModel(
 
 /**
  * The AI chat composer (P-09): an auto-growing textarea (Enter sends, Shift+Enter is a new line), the model picker
- * chip and the send button, in the Work Zone composer card. The model is chosen per chat (`chatKey`) and per
+ * chip and the send button, in the Work Zone composer card. While an answer is being written the send button is
+ * Stop (05-06, D-05: one generation per chat): the textarea keeps taking text, Enter does not send, Esc stops. The model is chosen per chat (`chatKey`) and per
  * message: the selection survives sends and only ever applies to the next answer. Plan models carry "Using ChatGPT
  * plan · Manage usage" under the card (P-11); organization models carry METERED on the chip.
  */
@@ -40,6 +41,7 @@ export function AiComposer({
   modelsLoading,
   busy,
   onSend,
+  onStop,
   autoFocus,
   className,
 }: {
@@ -49,8 +51,10 @@ export function AiComposer({
   /** Fallbacks before the member picks: the chat's last model, then the member's default. */
   preferred: (ModelRef | null | undefined)[];
   modelsLoading: boolean;
-  /** An answer is being written: one generation per chat (Stop arrives in 05-06). */
+  /** An answer is being written: one generation per chat, so Stop replaces Send. */
   busy: boolean;
+  /** Stops the answer being written (absent while the chat has none to stop). */
+  onStop?: () => Promise<void>;
   /** Resolves once the API accepted the send; rejects to keep the text. */
   onSend: (text: string, model: AiModelOption) => Promise<void>;
   autoFocus?: boolean;
@@ -62,6 +66,7 @@ export function AiComposer({
   const model = pickModel(models, [selected, fallback?.ref]);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: re-measure whenever the text changes
@@ -72,7 +77,13 @@ export function AiComposer({
     el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
   }, [text]);
 
+  // A new answer clears the "stopping" state of the previous one.
+  useEffect(() => {
+    if (!busy) setStopping(false);
+  }, [busy]);
+
   const noModel = !model && !modelsLoading;
+  const showStop = busy && !!onStop;
   const canSend = text.trim().length > 0 && !!model && !busy && !sending;
 
   async function submit(e?: FormEvent) {
@@ -91,7 +102,22 @@ export function AiComposer({
     }
   }
 
+  async function stop() {
+    if (!onStop || stopping) return;
+    setStopping(true);
+    try {
+      await onStop();
+    } catch {
+      setStopping(false); // the caller reported the error; Stop stays available
+    }
+  }
+
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === "Escape" && showStop) {
+      e.preventDefault();
+      void stop();
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       void submit();
@@ -128,16 +154,31 @@ export function AiComposer({
           ) : modelsLoading ? (
             <span className="h-4 w-24 animate-pulse rounded bg-muted" />
           ) : null}
-          <Button
-            type="submit"
-            size="icon"
-            disabled={!canSend}
-            aria-label="Send"
-            data-testid="ai-send"
-            className="ml-auto rounded-full"
-          >
-            {sending ? <Spinner /> : <ArrowUp className="size-[18px]" />}
-          </Button>
+          {showStop ? (
+            <Button
+              type="button"
+              size="icon"
+              onClick={() => void stop()}
+              disabled={stopping}
+              aria-label="Stop writing"
+              title="Stop writing (Esc)"
+              data-testid="ai-stop"
+              className="ml-auto rounded-full"
+            >
+              {stopping ? <Spinner /> : <Square aria-hidden className="size-3.5 fill-current" />}
+            </Button>
+          ) : (
+            <Button
+              type="submit"
+              size="icon"
+              disabled={!canSend}
+              aria-label="Send"
+              data-testid="ai-send"
+              className="ml-auto rounded-full"
+            >
+              {sending ? <Spinner /> : <ArrowUp className="size-[18px]" />}
+            </Button>
+          )}
         </div>
       </div>
       {model?.group === "chatgpt_plan" ? <PlanUsageLine /> : null}

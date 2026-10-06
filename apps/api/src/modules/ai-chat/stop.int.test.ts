@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { type AiDeltaEvent, estimateTokens, EventTypes } from "@ocw/contracts";
+import { type AiDeltaEvent, EventTypes, estimateTokens } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TEST_SETUP_TOKEN, TestClient } from "../../testing";
@@ -42,7 +42,11 @@ async function ok(res: Promise<{ status: number; body: Record<string, unknown> |
 const createChat = (as: TestClient, body: string) =>
   as.request("POST", "/api/v1/ai-chats", { clientMessageId: cid(), body, model: PLAN_MODEL });
 const send = (as: TestClient, chatId: string, body: string) =>
-  as.request("POST", `/api/v1/ai-chats/${chatId}/messages`, { clientMessageId: cid(), body, model: PLAN_MODEL });
+  as.request("POST", `/api/v1/ai-chats/${chatId}/messages`, {
+    clientMessageId: cid(),
+    body,
+    model: PLAN_MODEL,
+  });
 const stop = (as: TestClient, chatId: string, generationId: string) =>
   as.request("POST", `/api/v1/ai-chats/${chatId}/generations/${generationId}/stop`, {});
 
@@ -146,7 +150,10 @@ describe("Stop crosses API instances and keeps the partial answer (D-05, AICHAT-
     expect(message.body).not.toMatch(/ 40$/u);
     // No delta after the final message.
     const finalAt = ws.frames.findIndex(
-      (f) => f.op === "ev" && f.type === EventTypes.messageUpdated && ((f.data as Json).message as Json).id === mid,
+      (f) =>
+        f.op === "ev" &&
+        f.type === EventTypes.messageUpdated &&
+        ((f.data as Json).message as Json).id === mid,
     );
     expect(
       ws.frames.slice(finalAt).some((f) => f.op === "eph" && (f.data as Json).generationId === gid),
@@ -167,7 +174,9 @@ describe("Stop crosses API instances and keeps the partial answer (D-05, AICHAT-
 
     // Idempotent: a second stop answers the final status and audits nothing.
     expect(await ok(stop(sam, chatId, gid), 202)).toEqual({ status: "stopped" });
-    expect((await audit("ai_generation.stopped")).filter((a) => a.metadata.generationId === gid)).toHaveLength(1);
+    expect(
+      (await audit("ai_generation.stopped")).filter((a) => a.metadata.generationId === gid),
+    ).toHaveLength(1);
 
     // The abort hint on Redis carries the two ids only.
     const hints = abortMessages.map((m) => JSON.parse(m) as Json).filter((m) => m.generationId === gid);

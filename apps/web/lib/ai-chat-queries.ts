@@ -9,6 +9,7 @@ import {
   type Message,
   type SendAiMessageRequest,
   SendAiMessageResponse,
+  StopAiGenerationResponse,
   topic,
 } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
@@ -65,6 +66,17 @@ export function createAiChat(body: CreateAiChatRequest): Promise<SendAiMessageRe
 
 export function sendAiMessage(chatId: string, body: SendAiMessageRequest): Promise<SendAiMessageResponse> {
   return api.post(`/api/v1/ai-chats/${chatId}/messages`, { body, schema: SendAiMessageResponse });
+}
+
+/**
+ * Stops a running answer (05-06). The request may land on any API instance; the text written so far stays and the
+ * final `message.updated` (Stopped) arrives over the socket. Idempotent: a finished answer answers its status.
+ */
+export function stopGeneration(chatId: string, generationId: string): Promise<StopAiGenerationResponse> {
+  return api.post(`/api/v1/ai-chats/${chatId}/generations/${generationId}/stop`, {
+    body: {},
+    schema: StopAiGenerationResponse,
+  });
 }
 
 /**
