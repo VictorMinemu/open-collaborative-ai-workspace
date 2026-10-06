@@ -177,3 +177,51 @@ test("Settings › Models labels org keys METERED and one allowed list governs A
   await samUi.context.close();
   await configureAnthropic();
 });
+
+test("a member switches model per message: plan and org answers side by side, each labelled", async ({
+  browser,
+}, info) => {
+  const project = info.project.name;
+  const w = widthOf(project);
+  await configureAnthropic();
+  const { context, page } = await openAs(browser, SAM, project);
+
+  await openNewAiChat(page);
+  await expect(page.getByTestId("ai-model-chip")).toContainText("GPT-6 Astra");
+  await sendAi(page, "Draft the agenda for Monday");
+  await expect(page).toHaveURL(/\/chat\/ai\/[0-9a-f-]{36}$/);
+  const answers = page.locator('[data-testid="ai-message"][data-role="assistant"]');
+  await expect(answers).toHaveCount(1);
+  await expect(answers.nth(0)).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
+
+  const picker = await openPicker(page, project);
+  await picker.getByTestId(`ai-model-${SONNET_KEY}`).click();
+  await expect(page.getByTestId("ai-model-chip")).toContainText("Claude Sonnet 5.5");
+  await sendAi(page, "Now make it shorter");
+  await expect(answers).toHaveCount(2);
+  await expect(answers.nth(1)).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
+
+  // Each answer keeps the model and backend that produced it; switching never rewrites an earlier answer.
+  await expect(answers.nth(0).getByTestId("ai-message-footer")).toContainText(
+    /^GPT-6 Astra · ChatGPT plan · /,
+  );
+  await expect(answers.nth(1).getByTestId("ai-message-footer")).toContainText(
+    /^Claude Sonnet 5\.5 · METERED · /,
+  );
+  await bothThemes(page, `ai-chat-model-switch-${w}`);
+
+  // A reload preselects the chat's last model.
+  await page.reload();
+  await expect(answers).toHaveCount(2);
+  await expect(page.getByTestId("ai-model-chip")).toContainText("Claude Sonnet 5.5");
+  await expect(page.getByTestId("ai-model-chip").getByTestId("ai-model-metered")).toBeVisible();
+  await expect(answers.nth(0).getByTestId("ai-message-footer")).toContainText("GPT-6 Astra · ChatGPT plan");
+
+  // A fresh New chat starts from the member's default (the plan), not from the last pick.
+  await page.getByTestId("ai-header-new-chat").click();
+  await expect(page).toHaveURL(/\/chat\/ai\/new$/);
+  await expect(page.getByTestId("ai-model-chip")).toContainText("GPT-6 Astra");
+  await expect(page.getByTestId("plan-usage-line")).toBeVisible();
+
+  await context.close();
+});

@@ -343,6 +343,74 @@ describe("each provider kind speaks its own wire API to the fake (P-04)", () => 
   });
 });
 
+describe("per-message model switching across backends (AICHAT-02)", () => {
+  it("plan → Claude Sonnet 5.5 → mock in one chat: each answer keeps its own backend, history crosses backends", async () => {
+    stack.fake.reset();
+    const first = await ok(createChat(sam, "First question on my plan", PLAN_MODEL), 201);
+    const chatId = first.chat.id;
+    const g1 = await settled(first.generation.id);
+    expect(g1.status).toBe("completed");
+    const answer1 = (
+      await su.query("select body from app.messages where id = $1", [first.assistantMessage.id])
+    ).rows[0].body as string;
+    expect(answer1.length).toBeGreaterThan(0);
+
+    const second = await ok(send(sam, chatId, "Second question on Claude", SONNET), 201);
+    const g2 = await settled(second.generation.id);
+    expect(g2.status).toBe("completed");
+    const third = await ok(send(sam, chatId, "Third question on the mock", MOCK), 201);
+    const g3 = await settled(third.generation.id);
+    expect(g3.status).toBe("completed");
+
+    const triple = (g: Json) => `${g.backend}/${g.provider}/${g.model_id}`;
+    expect([g1, g2, g3].map(triple)).toEqual([
+      "chatgpt_plan/openai/gpt-6-astra",
+      "org_key/anthropic/claude-sonnet-5-5",
+      "mock/mock/mock-1",
+    ]);
+
+    // The Claude turn saw the plan turn as history: the first question and the first answer (as an assistant turn).
+    const claude = stack.fake.requests("anthropic");
+    expect(claude).toHaveLength(1);
+    const messages = claude[0]?.body?.messages as Json[];
+    const textOf = (m: Json) =>
+      typeof m.content === "string" ? m.content : (m.content as Json[]).map((c) => c.text ?? "").join("");
+    expect(messages.some((m) => m.role === "user" && textOf(m).includes("First question on my plan"))).toBe(
+      true,
+    );
+    expect(messages.some((m) => m.role === "assistant" && textOf(m) === answer1)).toBe(true);
+    expect(textOf(messages.at(-1) as Json)).toContain("Second question on Claude");
+    // And the mock turn saw both earlier answers.
+    const mock = stack.fake.requests("openai").at(-1);
+    const mockMessages = mock?.body?.messages as Json[];
+    expect(mockMessages.filter((m) => m.role === "assistant")).toHaveLength(2);
+
+    const chat = (await su.query("select last_model from app.ai_chats where conversation_id = $1", [chatId]))
+      .rows[0];
+    expect(chat.last_model).toEqual(MOCK);
+
+    const snap = await ok(sam.request("GET", `/api/v1/ai-chats/${chatId}`));
+    expect(snap.chat.lastModel).toEqual(MOCK);
+    const answers = snap.messages.filter((m: Json) => m.authorKind === "agent");
+    expect(
+      answers.map((m: Json) => [m.generation.backend, m.generation.modelLabel, m.generation.metered]),
+    ).toEqual([
+      ["chatgpt_plan", "GPT-6 Astra", false],
+      ["org_key", "Claude Sonnet 5.5", true],
+      ["mock", "Mock (E2E)", false],
+    ]);
+
+    const costs = [];
+    for (const g of [g1, g2, g3]) {
+      const [u] = await usageOf(g.id);
+      costs.push(u.cost_micros_usd === null ? null : Number(u.cost_micros_usd));
+    }
+    expect(costs[0]).toBeNull();
+    expect(costs[1]).toBeGreaterThan(0);
+    expect(costs[2]).toBe(0);
+  });
+});
+
 describe("without OCW_MODEL_PROVIDER=mock there is no mock backend", () => {
   it("no mock group and {mock, mock, mock-1} → 409 model_unavailable", async () => {
     const env = { ...stack.env, OCW_MODEL_PROVIDER: null };
