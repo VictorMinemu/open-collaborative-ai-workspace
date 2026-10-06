@@ -16,6 +16,8 @@ import {
   validateIdToken,
 } from "./oauth";
 
+type PrivateKey = Awaited<ReturnType<typeof generateKeyPair>>["privateKey"];
+
 /** Unit tests of the SIWC OAuth client (05-05): no network, local JWKS, stubbed fetch. */
 
 const BASE = "https://auth.example.test";
@@ -127,8 +129,8 @@ describe("parseRedirect", () => {
 
 describe("validateIdToken", () => {
   let keys: ReturnType<typeof createLocalJWKSet>;
-  let good: CryptoKey;
-  let other: CryptoKey;
+  let good: PrivateKey;
+  let other: PrivateKey;
 
   beforeAll(async () => {
     const a = await generateKeyPair("RS256");
@@ -140,7 +142,7 @@ describe("validateIdToken", () => {
 
   const sign = (
     claims: Record<string, unknown>,
-    opts: { key?: CryptoKey; aud?: string; iss?: string; exp?: number } = {},
+    opts: { key?: PrivateKey; aud?: string; iss?: string; exp?: number } = {},
   ) =>
     new SignJWT({ nonce: "n-1", email: "sam@chatgpt.test", ...claims })
       .setProtectedHeader({ alg: "RS256", kid: "k1" })
