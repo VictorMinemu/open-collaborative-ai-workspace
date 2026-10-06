@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 5
+open_count: 7
 waived_count: 0
 fixed_count: 14
-total_count: 19
-last_updated: 2026-10-06T02:17:25.305Z
+total_count: 21
+last_updated: 2026-10-06T04:56:06.615Z
 ---
 
 # Broken Windows Ledger
@@ -34,6 +34,8 @@ last_updated: 2026-10-06T02:17:25.305Z
 | 17 | 03.2 | deviation | packages/realtime-client/src/client.ts |  | Fixed pre-existing resync cursor bug (org topics past REPLAY_LIMIT dropped live events); found by the 03.2-11 full e2e | open |  | 2026-10-06T00:14:50.556Z |  |
 | 18 | 03.2 | unrun-verify | .planning/phases/03.2-work-zone-session-controls/03.2-VALIDATION.md |  | Manual-only: real Full access turn (Claude relaunch with resume, Codex never+dangerFullAccess), resolved-model mapping, Codex Auto reviewer | open |  | 2026-10-06T00:14:50.629Z |  |
 | 19 | 03.2 | unrun-verify | apps/local-runtime/src/claude/title.ts |  | Claude title latency with thinking disabled not recorded (fixture recorded with thinking: 31 s); owner manual check | open |  | 2026-10-06T02:17:25.305Z |  |
+| 20 | 04 | deviation | apps/api/src/modules/chat/index.ts |  | POST /conversations/:id/messages answers 400 attachments_unavailable for attachment-only posts until 04-04 wires uploads | open |  | 2026-10-06T04:56:06.542Z |  |
+| 21 | 04 | deviation | apps/api/src/modules/chat/access.ts |  | ConversationAccess boolean check is isReadable (plan said canRead; static guard bans that identifier); 04-09 must call isReadable | open |  | 2026-10-06T04:56:06.615Z |  |
 
 ````json
 [
@@ -263,6 +265,30 @@ last_updated: 2026-10-06T02:17:25.305Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-06T02:17:25.305Z",
+    "resolved_at": null
+  },
+  {
+    "id": 20,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/api/src/modules/chat/index.ts",
+    "line": null,
+    "description": "POST /conversations/:id/messages answers 400 attachments_unavailable for attachment-only posts until 04-04 wires uploads",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T04:56:06.542Z",
+    "resolved_at": null
+  },
+  {
+    "id": 21,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/api/src/modules/chat/access.ts",
+    "line": null,
+    "description": "ConversationAccess boolean check is isReadable (plan said canRead; static guard bans that identifier); 04-09 must call isReadable",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T04:56:06.615Z",
     "resolved_at": null
   }
 ]
