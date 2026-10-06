@@ -2,10 +2,11 @@
 
 import type { AiGeneration, Message, SendAiMessageResponse } from "@ocw/contracts";
 import { Check, Copy, Square, Unplug } from "lucide-react";
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 import { Markdown } from "@/components/markdown/markdown";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useCopy } from "@/hooks/use-copy";
+import { footerParts, formatUsage, usageTitle } from "@/lib/ai-format";
 import { cn } from "@/lib/utils";
 import { GenerationError, markStreamed } from "./generation-error";
 import { RegenerateMenu } from "./regenerate-menu";
@@ -21,8 +22,9 @@ export interface AnswerRegenerate {
 /**
  * One turn of an AI chat (P-09): the member's turns are right-aligned bubbles; answers are full width through the
  * one shared Markdown renderer (no raw HTML, images as links, `safeUrl`), with a caret while they stream and a
- * quiet footer once done: `<model> · ChatGPT plan · <in> in · <out> out`. A failed answer keeps any partial text
- * and ends with a calm card instead of a spinner. A stopped or interrupted answer keeps its text and says so in the
+ * quiet footer once done: tokens, cost on organization keys, model and who pays (`1.2k in · 340 out · ~$0.004 ·
+ * Claude Sonnet 5.5 · METERED`, `… · GPT-6 Astra · ChatGPT plan`), exact counts in its tooltip (05-08). A failed
+ * answer keeps any partial text and ends with a calm card instead of a spinner. A stopped or interrupted answer keeps its text and says so in the
  * line under it ("Stopped" / "Interrupted"), quietly: it was cut short, not broken (05-06).
  */
 export function AiMessage({
@@ -102,24 +104,6 @@ export function AiMessage({
   );
 }
 
-const count = (n: number) => n.toLocaleString("en-US");
-
-const BACKEND_LABEL: Record<AiGeneration["backend"], string> = {
-  chatgpt_plan: "ChatGPT plan",
-  org_key: "METERED",
-  mock: "not metered",
-};
-
-/** `GPT-6 Astra · ChatGPT plan · 1,204 in · 87 out` (estimated counts carry a "~"). */
-export function footerLabel(g: AiGeneration): string {
-  const parts = [g.modelLabel, BACKEND_LABEL[g.backend]];
-  if (g.usage) {
-    const approx = g.usage.estimated ? "~" : "";
-    parts.push(`${approx}${count(g.usage.inputTokens)} in`, `${approx}${count(g.usage.outputTokens)} out`);
-  }
-  return parts.join(" · ");
-}
-
 const CUT_SHORT: Partial<
   Record<AiGeneration["status"], { label: string; hint: string; icon: typeof Square }>
 > = {
@@ -182,10 +166,17 @@ function AnswerFooter({
       {generation ? (
         <span
           data-testid="ai-message-footer"
-          title={generation.usage?.estimated ? "Token counts are estimated" : undefined}
-          className="min-w-0 truncate tabular-nums"
+          data-usage={formatUsage(generation) || undefined}
+          title={usageTitle(generation)}
+          className="min-w-0 py-1 leading-[18px] tabular-nums"
         >
-          {footerLabel(generation)}
+          {/* Each part stays whole: on a phone the line wraps between parts, never inside one. */}
+          {footerParts(generation).map((part, i) => (
+            <Fragment key={part}>
+              {i > 0 ? " · " : null}
+              <span className="whitespace-nowrap">{part}</span>
+            </Fragment>
+          ))}
         </span>
       ) : null}
     </div>

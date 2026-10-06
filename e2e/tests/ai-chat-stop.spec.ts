@@ -159,7 +159,7 @@ test("the last answer regenerates on the same model, then with another model", a
   await expect(answer).toHaveAttribute("data-message-id", messageId ?? "");
   await expect(answer).toHaveAttribute("data-status", "streaming");
   await expect(answer).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
-  await expect(answer.getByTestId("ai-message-footer")).toHaveText(/^GPT-6 Astra · ChatGPT plan · /);
+  await expect(answer.getByTestId("ai-message-footer")).toHaveText(/ · GPT-6 Astra · ChatGPT plan$/);
   expect(await answerText(answer)).toMatch(/^Echo: second question/);
 
   // Regenerate with… the mock: the footer follows the new model.
@@ -172,14 +172,14 @@ test("the last answer regenerates on the same model, then with another model", a
   await mock.click();
   await expect(menu).toBeHidden();
   await expect(answer).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
-  await expect(answer.getByTestId("ai-message-footer")).toHaveText(/^Mock \(E2E\) · not metered/);
+  await expect(answer.getByTestId("ai-message-footer")).toHaveText(/ · Mock \(E2E\) · not metered$/);
   await expect(answers).toHaveCount(2);
   await expect(answers.first().getByTestId("ai-regenerate")).toHaveCount(0);
 
   // Persisted: a reload shows the regenerated answer on the mock.
   await page.reload();
   await expect(lastAssistant(page).getByTestId("ai-message-footer")).toHaveText(
-    /^Mock \(E2E\) · not metered/,
+    / · Mock \(E2E\) · not metered$/,
   );
 
   await context.close();

@@ -179,7 +179,7 @@ test("choosing Use an organization model in the dialog closes it and switches th
   await sendAi(page, "Carry on");
   const next = lastAssistant(page);
   await expect(next).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
-  await expect(next.getByTestId("ai-message-footer")).toContainText(/^Claude Sonnet 5\.5 · METERED · /u);
+  await expect(next.getByTestId("ai-message-footer")).toHaveText(/ · Claude Sonnet 5\.5 · METERED$/u);
   await context.close();
 });
 
