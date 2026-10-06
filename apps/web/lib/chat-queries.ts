@@ -6,6 +6,8 @@ import {
   ChannelList as ChannelListSchema,
   ChannelMemberList,
   ChannelSummary,
+  type ConversationNotificationSettings,
+  ConversationNotificationSettings as ConversationNotificationSettingsSchema,
   type ConversationReadEvent,
   type CreateChannelRequest,
   type CreateDmRequest,
@@ -39,6 +41,7 @@ import {
   type ThreadUpdatedEvent,
   UNREAD_CAP,
   type UpdateChannelRequest,
+  type UpdateConversationNotificationSettingsRequest,
 } from "@ocw/contracts";
 import {
   type InfiniteData,
@@ -919,6 +922,50 @@ export function applyConversationRead(qc: QueryClient, ev: ConversationReadEvent
     mentionCount: ev.mentionCount,
   }));
   if (ev.latestMessageSeq !== undefined && row.latestMessageSeq > ev.latestMessageSeq) refreshCountsSoon(qc);
+}
+
+/**
+ * One conversation's notification level and mute (CHAT-10), from this tab's change or a `notification_prefs.updated`
+ * frame of another tab or device: the sidebar row (dimmed when muted) and the header menu follow at once.
+ */
+export function applyConversationSettings(
+  qc: QueryClient,
+  id: string,
+  settings: ConversationNotificationSettings,
+) {
+  patchBadges(qc, id, () => ({ notifyLevel: settings.level, muted: settings.muted }));
+  qc.setQueryData<ChannelSummary>(chatKeys.channel(id), (prev) =>
+    prev ? { ...prev, notifyLevel: settings.level, muted: settings.muted } : prev,
+  );
+}
+
+/** The level and mute of a joined channel or DM as the sidebar caches hold them (defaults until loaded). */
+export function useConversationSettings(id: string): ConversationNotificationSettings {
+  const channels = useChannels();
+  const dms = useDms();
+  const row =
+    channels.data?.channels.find((c) => c.id === id && c.isMember) ?? dms.data?.dms.find((d) => d.id === id);
+  return { level: row?.notifyLevel ?? "default", muted: row?.muted ?? false };
+}
+
+/** Changes a conversation's level or mute: applied at once, rolled back if the server refuses. */
+export async function updateConversationSettings(
+  qc: QueryClient,
+  id: string,
+  patch: UpdateConversationNotificationSettingsRequest,
+  current: ConversationNotificationSettings,
+): Promise<void> {
+  applyConversationSettings(qc, id, { ...current, ...patch });
+  try {
+    const saved = await api.put(`/api/v1/conversations/${id}/notification-settings`, {
+      body: patch,
+      schema: ConversationNotificationSettingsSchema,
+    });
+    applyConversationSettings(qc, id, saved);
+  } catch (err) {
+    applyConversationSettings(qc, id, current);
+    throw err;
+  }
 }
 
 // The per-tab hold of a conversation marked unread: conversation id → the cursor it was set to. Kept in

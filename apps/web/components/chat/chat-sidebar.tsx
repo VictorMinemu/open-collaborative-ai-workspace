@@ -57,7 +57,7 @@ import { ConversationBadge } from "./conversation-badge";
 import { CreateChannelDialog } from "./create-channel-dialog";
 import { NewDmDialog } from "./new-dm-dialog";
 import { GroupAvatars, PrincipalAvatar } from "./principal-avatar";
-import { rowBadge, SidebarSections } from "./sidebar-sections";
+import { MutedIcon, rowBadge, SidebarSections } from "./sidebar-sections";
 import { SidebarViews } from "./sidebar-views";
 
 export { ChannelIcon, isUnread } from "./channel-icon";
@@ -255,6 +255,7 @@ function DmRow({ d, active }: { d: DmSummary; active: boolean }) {
       data-dm-kind={c.kind}
       {...(c.kind === "agent" ? { "data-bot-name": c.name } : {})}
       data-unread={unread || undefined}
+      data-muted={d.muted || undefined}
       aria-current={active ? "page" : undefined}
       className={cn(
         sectionItemClass(active),
@@ -282,7 +283,8 @@ function DmRow({ d, active }: { d: DmSummary; active: boolean }) {
           {c.members.length + 1}
         </span>
       ) : null}
-      <ConversationBadge {...input} />
+      {d.muted ? <MutedIcon /> : null}
+      <ConversationBadge {...input} className={d.muted ? "ml-1" : undefined} />
     </Link>
   );
 }
@@ -368,9 +370,11 @@ export function ChatSidebar() {
   const suggestedIds = new Set(suggested.map((c) => c.id));
   const others = list.filter((c) => !c.isMember && !suggestedIds.has(c.id));
   // View badges: conversations with unread messages (All) and threads with unread replies (Threads).
+  // A muted conversation counts only while something addresses the member (CHAT-10: same rule as its badge).
   const unreadAll =
-    joined.filter((c) => c.id !== activeId && isUnread(c)).length +
-    (dms.data?.dms ?? []).filter((d) => d.id !== activeId && hasUnread(d)).length;
+    joined.filter((c) => c.id !== activeId && rowBadge(c, isUnread(c)).style !== "none").length +
+    (dms.data?.dms ?? []).filter((d) => d.id !== activeId && rowBadge(d, hasUnread(d)).style !== "none")
+      .length;
   // Every thread with unread replies (the API counts all pages on the first one, CHAT-09); the loaded pages otherwise.
   const unreadThreads =
     threads.data?.pages[0]?.unreadThreads ??

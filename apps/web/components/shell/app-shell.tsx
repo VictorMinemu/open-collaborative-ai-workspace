@@ -3,6 +3,7 @@
 import type { MeResponse } from "@ocw/contracts";
 import { usePathname } from "next/navigation";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { OsNotifier } from "@/components/notifications/os-notifier";
 import { SearchPalette, SearchPaletteProvider, useSearchPalette } from "@/components/search/search-palette";
 import { useIsDesktop } from "@/hooks/use-media-query";
 import { AppRail } from "./app-rail";
@@ -11,7 +12,8 @@ import { ShellContext, type ShellContextValue } from "./shell-context";
 
 /**
  * Workspace chrome: rail (desktop) or top bar + drawer (mobile), and a flex main area that pages fill.
- * Pages render `<SectionSidebar>` (optional) followed by their content.
+ * Pages render `<SectionSidebar>` (optional) followed by their content. `OsNotifier` runs once here, on every page
+ * (OS notifications, title count and the desktop badge, CHAT-10).
  */
 export function AppShell({ me, children }: { me: MeResponse; children: ReactNode }) {
   const isDesktop = useIsDesktop();
@@ -38,6 +40,7 @@ export function AppShell({ me, children }: { me: MeResponse; children: ReactNode
     <ShellContext.Provider value={ctx}>
       <SearchPaletteProvider>
         <SearchHotkey />
+        <OsNotifier />
         <div data-testid="app-shell" className="flex h-dvh w-full overflow-hidden bg-background">
           {isDesktop ? <AppRail me={me} /> : null}
           <div className="flex min-w-0 flex-1 flex-col">
