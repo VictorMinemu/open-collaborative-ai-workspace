@@ -87,6 +87,40 @@ const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 const bearerOf = (r: { headers: Record<string, unknown> }) =>
   String(r.headers.authorization ?? "").replace(/^Bearer\s+/u, "");
 
+/** Signs `as` in end to end (start → authorize → complete) and returns the status. */
+async function signIn(as: TestClient): Promise<Json> {
+  const { start, location } = await startFlow(as);
+  return ok(complete(as, start.flowId, location));
+}
+
+/** The member's sealed token bundle, opened the way the API does (test-only: never printed). */
+async function bundleOf(userId: string): Promise<Json | null> {
+  const cred = await credential(userId);
+  if (!cred?.secret_id) return null;
+  const { core } = stack.built;
+  return core.db.withTenant({ organizationId: orgId }, async (tx) =>
+    JSON.parse(await core.secrets.revealSealed(tx, cred.secret_id, `${orgId}:${userId}:chatgpt_plan`)),
+  );
+}
+
+const sendTurn = (as: TestClient, chatId: string, body: string) =>
+  as.request("POST", `/api/v1/ai-chats/${chatId}/messages`, {
+    clientMessageId: `cm-${randomUUID()}`,
+    body,
+    model: PLAN_MODEL,
+  });
+
+async function newChat(as: TestClient, body: string): Promise<string> {
+  const res = await as.request("POST", "/api/v1/ai-chats", {
+    clientMessageId: `cm-${randomUUID()}`,
+    body,
+    model: PLAN_MODEL,
+  });
+  if (res.status !== 201) throw new Error(`create chat: ${res.status} ${JSON.stringify(res.body)}`);
+  await settled((res.body as Json).generation.id);
+  return (res.body as Json).chat.id;
+}
+
 /** Every text, varchar, text[] and jsonb value of every app.* and auth.* table, as one string per row. */
 async function everyStoredText(): Promise<string> {
   const cols = (
@@ -336,6 +370,156 @@ describe("failure paths: nothing is stored and flows stay bound to their member"
   it("start refuses a redirect port outside the unprivileged range", async () => {
     const res = await sam.request("POST", START, { redirectPort: 80 });
     expect(res.status).toBe(400);
+  });
+});
+
+describe("refresh is serialized and rotation-safe; failures degrade (Pitfall 2)", () => {
+  let chatA: string;
+  let chatB: string;
+
+  it("two racing sends refresh an expiring token exactly once and both use the new token", async () => {
+    chatA = await newChat(sam, "First chat");
+    chatB = await newChat(sam, "Second chat");
+    await scenario({ expires_in: 1 });
+    await signIn(sam);
+    await scenario({});
+    const old = await bundleOf(samId);
+    expect(Date.parse(old?.expiresAt) - Date.now()).toBeLessThan(5 * 60_000);
+    const before = await stats();
+    stack.fake.reset();
+
+    const [a, b] = await Promise.all([sendTurn(sam, chatA, "race one"), sendTurn(sam, chatB, "race two")]);
+    expect(a.status, JSON.stringify(a.body)).toBe(201);
+    expect(b.status, JSON.stringify(b.body)).toBe(201);
+    await settled((a.body as Json).generation.id);
+    await settled((b.body as Json).generation.id);
+
+    const after = await stats();
+    expect(after.refresh - before.refresh).toBe(1);
+    const newest = after.accessTokenHashes.at(-1);
+    const bearers = stack.fake.requests("responses").map((r) => sha256(bearerOf(r)));
+    expect(bearers.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(bearers)).toEqual(new Set([newest]));
+    expect(bearers).not.toContain(sha256(old?.accessToken));
+
+    const fresh = await bundleOf(samId);
+    expect(fresh?.refreshToken).not.toBe(old?.refreshToken);
+    expect(fresh?.clientId).toBe(old?.clientId);
+    const cred = await credential(samId);
+    expect(Date.parse(cred?.access_expires_at) - Date.now()).toBeGreaterThan(3_500_000);
+    expect(cred?.status).toBe("connected");
+
+    // The old refresh token was rotated: replaying it is refused by the auth server.
+    const replay = await fetch(`${siwc()}/oauth/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: old?.refreshToken,
+        client_id: old?.clientId,
+      }),
+    });
+    expect(((await replay.json()) as Json).error).toBe("refresh_token_reused");
+  });
+
+  it("a transient auth outage keeps the tokens and the send answers 503 usage_unavailable", async () => {
+    await scenario({ expires_in: 1 });
+    await signIn(sam);
+    const cred = await credential(samId);
+    const bundle = await bundleOf(samId);
+    await scenario({ token_unavailable: true });
+    const res = await sendTurn(sam, chatA, "during an outage");
+    expect(res.status, JSON.stringify(res.body)).toBe(503);
+    expect(errorOf(res).code).toBe("usage_unavailable");
+    const now = await credential(samId);
+    expect(now?.status).toBe("connected");
+    expect(now?.secret_id).toBe(cred?.secret_id);
+    expect(await bundleOf(samId)).toEqual(bundle);
+    await scenario({});
+  });
+
+  it("a stale refresh token moves the member to needs_reconnect, deletes the secret and audits the reason", async () => {
+    // The token from the previous case is still expiring: one refresh rotates it.
+    const cred = await credential(samId);
+    const stale = (
+      await su.query("select ciphertext, iv, tag from app.secrets where id = $1", [cred?.secret_id])
+    ).rows[0];
+    await ok(sam.request("GET", "/api/v1/ai-chat/models"));
+    const rotated = await credential(samId);
+    expect(rotated?.secret_id).not.toBe(cred?.secret_id);
+    // Restore the pre-rotation bundle (its refresh token is now a rotated one).
+    await su.query("update app.secrets set ciphertext = $2, iv = $3, tag = $4 where id = $1", [
+      rotated?.secret_id,
+      stale.ciphertext,
+      stale.iv,
+      stale.tag,
+    ]);
+
+    const res = await sendTurn(sam, chatA, "after the rotation race");
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    expect(errorOf(res)).toMatchObject({ code: "model_unavailable", details: { reason: "needs_reconnect" } });
+    const now = await credential(samId);
+    expect(now).toMatchObject({
+      status: "needs_reconnect",
+      secret_id: null,
+      last_error: "refresh_token_reused",
+    });
+    const gone = await su.query("select 1 from app.secrets where id = $1", [rotated?.secret_id]);
+    expect(gone.rowCount).toBe(0);
+    const failed = await audit("ai_credential.refresh_failed");
+    expect(failed).toHaveLength(1);
+    expect(failed[0].metadata).toEqual({ provider: "chatgpt_plan", reason: "refresh_token_reused" });
+    const me = await ok(sam.request("GET", STATUS));
+    expect(me.state).toBe("needs_reconnect");
+  });
+});
+
+describe("disconnect revokes at the auth server and erases the member's tokens", () => {
+  it("Alex's disconnect never touches Sam's connection", async () => {
+    await signIn(sam);
+    const samCred = await credential(samId);
+    await ok(alex.request("DELETE", STATUS));
+    expect(await credential(alexId)).toBeUndefined();
+    expect((await credential(samId))?.secret_id).toBe(samCred?.secret_id);
+  });
+
+  it("DELETE revokes the refresh and access tokens, deletes the secret and the row, and audits", async () => {
+    const cred = await credential(samId);
+    const before = await stats();
+    const status = await ok(sam.request("DELETE", STATUS));
+    expect(status).toMatchObject({ state: "not_connected", email: null, planType: null });
+    const after = await stats();
+    expect(after.revoke - before.revoke).toBe(2);
+    expect(after.revokedRefreshTokens - before.revokedRefreshTokens).toBe(1);
+    expect(after.revokedAccessTokens - before.revokedAccessTokens).toBe(1);
+    expect(await credential(samId)).toBeUndefined();
+    expect((await su.query("select 1 from app.secrets where id = $1", [cred?.secret_id])).rowCount).toBe(0);
+    const disconnected = await audit("ai_credential.disconnected");
+    expect(disconnected.at(-1)?.metadata).toEqual({ provider: "chatgpt_plan" });
+    expect(disconnected.at(-1)?.user_id).toBe(samId);
+
+    const list = await ok(sam.request("GET", "/api/v1/ai-chat/models"));
+    const plan = list.models.filter((m: Json) => m.group === "chatgpt_plan");
+    expect(plan.length).toBeGreaterThan(0);
+    expect(plan.every((m: Json) => !m.available && m.reason === "not_connected")).toBe(true);
+    expect(list.models.filter((m: Json) => m.group !== "chatgpt_plan").every((m: Json) => m.available)).toBe(
+      true,
+    );
+
+    const send = await sam.request("POST", "/api/v1/ai-chats", {
+      clientMessageId: `cm-${randomUUID()}`,
+      body: "after disconnect",
+      model: PLAN_MODEL,
+    });
+    expect(send.status).toBe(409);
+    expect(errorOf(send).details.reason).toBe("not_connected");
+  });
+
+  it("disconnecting without a connection is idempotent and calls nothing", async () => {
+    const before = await stats();
+    const status = await ok(sam.request("DELETE", STATUS));
+    expect(status.state).toBe("not_connected");
+    expect((await stats()).revoke).toBe(before.revoke);
   });
 });
 
