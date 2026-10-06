@@ -2,11 +2,14 @@ import {
   type ChannelMember,
   type ChannelSummary,
   type ChannelUnit,
+  type ConversationNotifyLevel,
   EventTypes,
+  MENTION_KINDS,
   type Mention,
   type Message,
   type MessageAuthor,
   type ThreadUpdatedEvent,
+  UNREAD_CAP,
 } from "@ocw/contracts";
 import {
   conversationMembers,
@@ -175,6 +178,8 @@ export async function listChannels(tx: Tx, userId: string, id?: string): Promise
       memberId: me.memberId,
       memberRole: me.role,
       lastReadSeq: me.lastReadSeq,
+      notifyLevel: me.notifyLevel,
+      muted: me.muted,
       memberCount:
         sql<number>`(select count(*) from app.conversation_members cm where cm.conversation_id = ${conversations.id})`.mapWith(
           Number,
@@ -249,6 +254,11 @@ export async function listChannels(tx: Tx, userId: string, id?: string): Promise
         lastMessagePreview: r.lastMessagePreview ?? null,
         isDefault: r.c.slug === GENERAL_SLUG,
         unit,
+        notifyLevel: (r.notifyLevel ?? "default") as ConversationNotifyLevel,
+        muted: r.muted ?? false,
+        // Filled for the rows the resolver keeps (`withUnreadCounts`); a non-member has nothing unread.
+        unreadCount: 0,
+        mentionCount: 0,
       },
       facts: {
         visibility: r.c.visibility,
@@ -258,6 +268,77 @@ export async function listChannels(tx: Tx, userId: string, id?: string): Promise
       },
     };
   });
+}
+
+export interface UnreadCounts {
+  unreadCount: number;
+  mentionCount: number;
+}
+
+/**
+ * CHAT-09 (D-07, P-07): the badges of `userId`'s memberships among `conversationIds`. Unread = top-level, live
+ * messages from others after the member's read cursor, counted (never `streams.last_seq - last_read_seq`, Pitfall 1)
+ * and capped at `UNREAD_CAP` on `messages_conv_seq_idx`; mentions = the member's unread mention-like notifications
+ * (`MENTION_KINDS`) of live top-level messages there, on `notifications_unread_idx` (a mention inside a thread
+ * belongs to that thread). Conversations the member has not joined are absent (= nothing unread). Callers pass only
+ * ids the resolver already lets the member read (T-04-10-01).
+ */
+export async function unreadCountsFor(
+  tx: Tx,
+  userId: string,
+  conversationIds: string[],
+): Promise<Map<string, UnreadCounts>> {
+  const out = new Map<string, UnreadCounts>();
+  if (conversationIds.length === 0) return out;
+  const ids = sql.join(
+    conversationIds.map((id) => sql`${id}::uuid`),
+    sql`, `,
+  );
+  const kinds = sql.join(
+    MENTION_KINDS.map((k) => sql`${k}`),
+    sql`, `,
+  );
+  const res = await tx.execute(sql`
+    select cm.conversation_id as id, u.n as unread, x.n as mentions
+    from app.conversation_members cm
+    cross join lateral (
+      select count(*)::int as n from (
+        select 1 from app.messages m
+        where m.organization_id = cm.organization_id and m.conversation_id = cm.conversation_id
+          and m.thread_id is null and m.deleted_at is null and m.seq > cm.last_read_seq
+          and not (m.author_kind = 'user' and m.author_id = ${userId}::uuid)
+        limit ${UNREAD_CAP}
+      ) capped
+    ) u
+    cross join lateral (
+      select count(*)::int as n from (
+        select 1 from app.notifications n
+        join app.messages m on m.id = n.message_id and m.deleted_at is null
+        where n.organization_id = cm.organization_id and n.user_id = ${userId}::uuid
+          and n.conversation_id = cm.conversation_id and n.read_at is null
+          and n.thread_root_id is null and n.kind in (${kinds})
+        limit ${UNREAD_CAP}
+      ) capped
+    ) x
+    where cm.member_kind = 'user' and cm.member_id = ${userId}::uuid and cm.conversation_id in (${ids})`);
+  for (const r of res.rows as Array<{ id: string; unread: number; mentions: number }>) {
+    out.set(r.id, { unreadCount: Number(r.unread), mentionCount: Number(r.mentions) });
+  }
+  return out;
+}
+
+/** The channel summaries with the caller's badges (P-07); rows must already be filtered by the resolver. */
+export async function withUnreadCounts<T extends { id: string; isMember?: boolean }>(
+  tx: Tx,
+  userId: string,
+  rows: T[],
+): Promise<Array<T & UnreadCounts>> {
+  const counts = await unreadCountsFor(
+    tx,
+    userId,
+    rows.filter((r) => r.isMember !== false).map((r) => r.id),
+  );
+  return rows.map((r) => ({ ...r, ...(counts.get(r.id) ?? { unreadCount: 0, mentionCount: 0 }) }));
 }
 
 /** The unit path (root → self) of a channel's unit; [] for the organization (and every direct conversation). */
@@ -660,7 +741,7 @@ export async function loadThread(tx: Tx, messageId: string) {
  * Locks the conversation stream row and returns the seq the next `appendEvent` on it will get, so the
  * message row can carry the seq of its own `message.created` event.
  */
-async function lockNextSeq(tx: Tx, topic: string): Promise<number> {
+export async function lockNextSeq(tx: Tx, topic: string): Promise<number> {
   const ctx = tenantOf(tx);
   await tx.execute(sql`
     insert into app.streams (id, organization_id, last_seq) values (${topic}, ${ctx.organizationId}, 0)

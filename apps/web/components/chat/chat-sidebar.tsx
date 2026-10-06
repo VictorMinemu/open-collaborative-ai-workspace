@@ -2,9 +2,11 @@
 
 import {
   type ChannelSummary,
+  type ConversationReadEvent,
   type DmSummary,
   EventTypes,
   type MessageCreatedEvent,
+  type MessageDeletedEvent,
   type NotificationCreatedEvent,
   type NotificationReadEvent,
   type SaveUpdatedEvent,
@@ -23,14 +25,21 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
 import {
+  applyConversationRead,
   applySaveUpdate,
   applyThreadRead,
+  badgeRowOf,
   bumpDmLatest,
   bumpLatest,
+  bumpMention,
+  bumpUnread,
   chatKeys,
+  hasUnread,
   isListedThread,
+  refreshCountsSoon,
   useChannels,
   useDms,
+  useReadHold,
   useThreadList,
 } from "@/lib/chat-queries";
 import {
@@ -44,39 +53,79 @@ import { useMe } from "@/lib/queries";
 import { useTopic } from "@/lib/realtime";
 import { cn } from "@/lib/utils";
 import { ChannelIcon, isUnread } from "./channel-icon";
+import { ConversationBadge } from "./conversation-badge";
 import { CreateChannelDialog } from "./create-channel-dialog";
 import { NewDmDialog } from "./new-dm-dialog";
 import { GroupAvatars, PrincipalAvatar } from "./principal-avatar";
-import { SidebarSections } from "./sidebar-sections";
+import { rowBadge, SidebarSections } from "./sidebar-sections";
 import { SidebarViews } from "./sidebar-views";
 
 export { ChannelIcon, isUnread } from "./channel-icon";
 
-/** Watches one DM for new messages so its unread dot updates live (own messages never count). */
+/**
+ * Badge deltas of one conversation from its `conv:` frames (CHAT-09, D-07): a new top-level message from someone
+ * else counts once (seq-idempotent against the snapshot), the member's own (any device) moves the cursor, a deleted
+ * top-level message re-reads the snapshot. Reactions, edits, thread replies and membership changes never count.
+ */
+function applyBadgeFrame(
+  qc: QueryClient,
+  id: string,
+  frame: TopicFrame,
+  meId: string,
+  kind: "channel" | "dm",
+) {
+  if (frame.op !== "ev") return;
+  if (frame.type === EventTypes.messageDeleted) {
+    if (!(frame.data as MessageDeletedEvent).threadId) refreshCountsSoon(qc);
+    return;
+  }
+  if (frame.type !== EventTypes.messageCreated) return;
+  const { message } = frame.data as MessageCreatedEvent;
+  if (message.threadId) return;
+  const before = badgeRowOf(qc, id);
+  const fresh = !!before && frame.seq > before.latestMessageSeq;
+  if (kind === "dm") bumpDmLatest(qc, id, frame.seq, message.createdAt, message.body);
+  else bumpLatest(qc, id, frame.seq, message.createdAt, message.body);
+  if (message.authorKind === "user" && message.authorId === meId) {
+    // Own messages (from any device) never make a conversation unread.
+    if (kind === "dm") {
+      qc.setQueryData(chatKeys.dms, (prev: { dms: DmSummary[] } | undefined) =>
+        prev
+          ? {
+              ...prev,
+              dms: prev.dms.map((d) =>
+                d.id === id ? { ...d, lastReadSeq: Math.max(d.lastReadSeq, frame.seq) } : d,
+              ),
+            }
+          : prev,
+      );
+    } else {
+      qc.setQueryData(chatKeys.channels, (prev: { channels: ChannelSummary[] } | undefined) =>
+        prev
+          ? {
+              ...prev,
+              channels: prev.channels.map((c) =>
+                c.id === id ? { ...c, lastReadSeq: Math.max(c.lastReadSeq, frame.seq) } : c,
+              ),
+            }
+          : prev,
+      );
+    }
+    return;
+  }
+  if (fresh && before && frame.seq > before.lastReadSeq) bumpUnread(qc, id);
+}
+
+/** Watches one DM for new messages so its badge updates live (own messages never count). */
 function DmWatcher({ dm, meId }: { dm: DmSummary; meId: string }) {
   const qc = useQueryClient();
   const [afterSeq] = useState(dm.lastSeq);
   useTopic(
     `conv:${dm.id}`,
-    (frame) => {
-      if (frame.op !== "ev" || frame.type !== EventTypes.messageCreated) return;
-      const { message } = frame.data as MessageCreatedEvent;
-      if (message.threadId) return;
-      bumpDmLatest(qc, dm.id, frame.seq, message.createdAt, message.body);
-      if (message.authorKind === "user" && message.authorId === meId) {
-        qc.setQueryData(chatKeys.dms, (prev: { dms: DmSummary[] } | undefined) =>
-          prev
-            ? {
-                ...prev,
-                dms: prev.dms.map((d) =>
-                  d.id === dm.id ? { ...d, lastReadSeq: Math.max(d.lastReadSeq, frame.seq) } : d,
-                ),
-              }
-            : prev,
-        );
-      }
-    },
+    (frame) => applyBadgeFrame(qc, dm.id, frame, meId, "dm"),
     afterSeq,
+    // A gap beyond the replay window: the snapshot is the authority again (03.2-11 keeps the cursor right).
+    () => refreshCountsSoon(qc),
   );
   return null;
 }
@@ -94,39 +143,24 @@ function refreshThreadsSoon(qc: QueryClient) {
   }, 400);
 }
 
-/** Watches one joined channel for new top-level messages so its unread dot updates live. */
+/** Watches one joined channel so its badge and the Threads view update live (no other subscription). */
 function ChannelWatcher({ channel, meId }: { channel: ChannelSummary; meId: string }) {
   const qc = useQueryClient();
   const [afterSeq] = useState(channel.lastSeq);
   useTopic(
     `conv:${channel.id}`,
     (frame) => {
-      if (frame.op !== "ev") return;
-      if (frame.type === EventTypes.threadUpdated) {
+      if (frame.op === "ev" && frame.type === EventTypes.threadUpdated) {
         const ev = frame.data as ThreadUpdatedEvent;
         const mine = ev.replyParticipants?.some((p) => p.kind === "user" && p.id === meId);
         if (mine || isListedThread(qc, ev.rootId)) refreshThreadsSoon(qc);
         return;
       }
-      if (frame.type !== EventTypes.messageCreated) return;
-      const { message } = frame.data as MessageCreatedEvent;
-      if (message.threadId) return;
-      bumpLatest(qc, channel.id, frame.seq, message.createdAt, message.body);
-      if (message.authorKind === "user" && message.authorId === meId) {
-        // Own messages (from any device) never make a channel unread.
-        qc.setQueryData(chatKeys.channels, (prev: { channels: ChannelSummary[] } | undefined) =>
-          prev
-            ? {
-                ...prev,
-                channels: prev.channels.map((c) =>
-                  c.id === channel.id ? { ...c, lastReadSeq: Math.max(c.lastReadSeq, frame.seq) } : c,
-                ),
-              }
-            : prev,
-        );
-      }
+      applyBadgeFrame(qc, channel.id, frame, meId, "channel");
     },
     afterSeq,
+    // A gap beyond the replay window: the snapshot is the authority again (03.2-11 keeps the cursor right).
+    () => refreshCountsSoon(qc),
   );
   return null;
 }
@@ -168,11 +202,18 @@ function useChannelListSync(
     if (frame.op === "ev" && frame.type === EventTypes.notificationCreated) {
       const ev = frame.data as NotificationCreatedEvent;
       applyNotificationCreated(qc, ev);
+      // CHAT-09: a mention-like notification of a top-level message is a mention badge on its conversation.
+      bumpMention(qc, ev.notification);
       if (ev.notification.threadRootId) refreshThreadsSoon(qc);
       return;
     }
     if (frame.op === "ev" && frame.type === EventTypes.notificationRead) {
       applyNotificationRead(qc, frame.data as NotificationReadEvent);
+      return;
+    }
+    // Read and mark-unread from any of the member's tabs and devices (CHAT-09, Pitfall 2).
+    if (frame.op === "ev" && frame.type === EventTypes.conversationRead) {
+      applyConversationRead(qc, frame.data as ConversationReadEvent);
       return;
     }
     onFrame(frame);
@@ -202,7 +243,9 @@ function ListSync({
 
 /** One row of Direct messages: a bot (as in 3.1), a person or a group. */
 function DmRow({ d, active }: { d: DmSummary; active: boolean }) {
-  const unread = !active && d.latestMessageSeq > d.lastReadSeq;
+  const held = useReadHold(d.id) !== null;
+  const { input, style } = rowBadge(d, (!active || held) && hasUnread(d));
+  const unread = style !== "none";
   const c = d.counterpart;
   const label = c.name;
   return (
@@ -213,7 +256,11 @@ function DmRow({ d, active }: { d: DmSummary; active: boolean }) {
       {...(c.kind === "agent" ? { "data-bot-name": c.name } : {})}
       data-unread={unread || undefined}
       aria-current={active ? "page" : undefined}
-      className={cn(sectionItemClass(active), unread && "font-semibold text-foreground")}
+      className={cn(
+        sectionItemClass(active),
+        unread && "font-semibold text-foreground",
+        d.muted && !active && style !== "mention" && "opacity-60",
+      )}
     >
       {c.kind === "group" ? (
         <GroupAvatars members={c.members} />
@@ -235,12 +282,7 @@ function DmRow({ d, active }: { d: DmSummary; active: boolean }) {
           {c.members.length + 1}
         </span>
       ) : null}
-      {unread ? (
-        <>
-          <span className="sr-only">(unread)</span>
-          <span aria-hidden className="ml-auto size-2 shrink-0 rounded-full bg-primary" />
-        </>
-      ) : null}
+      <ConversationBadge {...input} />
     </Link>
   );
 }
@@ -328,10 +370,11 @@ export function ChatSidebar() {
   // View badges: conversations with unread messages (All) and threads with unread replies (Threads).
   const unreadAll =
     joined.filter((c) => c.id !== activeId && isUnread(c)).length +
-    (dms.data?.dms ?? []).filter((d) => d.id !== activeId && d.latestMessageSeq > d.lastReadSeq).length;
-  const unreadThreads = (threads.data?.pages ?? [])
-    .flatMap((p) => p.threads)
-    .filter((t) => t.unreadReplies > 0).length;
+    (dms.data?.dms ?? []).filter((d) => d.id !== activeId && hasUnread(d)).length;
+  // Every thread with unread replies (the API counts all pages on the first one, CHAT-09); the loaded pages otherwise.
+  const unreadThreads =
+    threads.data?.pages[0]?.unreadThreads ??
+    (threads.data?.pages ?? []).flatMap((p) => p.threads).filter((t) => t.unreadReplies > 0).length;
   // The API decides every placement; the "+" per section only mirrors it (admins: any unit).
   const canPlace = (unitId: string | null) =>
     unitId === null || can("unit.manage") || memberUnitIds.has(unitId);

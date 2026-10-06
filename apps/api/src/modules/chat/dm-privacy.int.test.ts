@@ -525,9 +525,11 @@ describe("the inbox (CHAT-08, T-04-09-01/05)", () => {
   });
 
   it("marking someone else's notification read changes nothing (200, same count, no event)", async () => {
+    // Alex read this DM above, and reading a conversation reads its notifications (CHAT-09, 04-10): make the row
+    // unread again so the outsiders' attempts have something to change.
     const [row] = (
       await su.query(
-        "select id from app.notifications where user_id = $1 and message_id = $2 and read_at is null",
+        "update app.notifications set read_at = null where user_id = $1 and message_id = $2 returning id",
         [alexId, human.messageId],
       )
     ).rows as Json[];

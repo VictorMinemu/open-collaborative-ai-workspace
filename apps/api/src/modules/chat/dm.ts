@@ -9,7 +9,7 @@ import {
 } from "@ocw/contracts";
 import { agents, conversationMembers, conversations, orgMembers, type Tx, tenantOf } from "@ocw/db";
 import { and, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
-import { type ChatDeps, type ConversationRow, iso, notifyListChanged } from "./service";
+import { type ChatDeps, type ConversationRow, iso, notifyListChanged, unreadCountsFor } from "./service";
 
 /**
  * Direct conversations (D-03, D-06), all `visibility = 'private'` with fixed membership:
@@ -229,6 +229,8 @@ export async function listDms(tx: Tx, userId: string, opts: { ids?: string[] } =
     .select({
       c: conversations,
       lastReadSeq: me.lastReadSeq,
+      notifyLevel: me.notifyLevel,
+      muted: me.muted,
       latestMessageSeq:
         sql<number>`(select coalesce(max(m.seq), 0) from app.messages m where m.conversation_id = ${conversations.id} and m.thread_id is null)`.mapWith(
           Number,
@@ -369,6 +371,12 @@ export async function listDms(tx: Tx, userId: string, opts: { ids?: string[] } =
     };
   };
 
+  // CHAT-09: badges of the caller's own direct conversations (membership is in the query above).
+  const counts = await unreadCountsFor(
+    tx,
+    userId,
+    rows.map((r) => r.c.id),
+  );
   const out: DmSummary[] = [];
   for (const r of rows) {
     const counterpart = counterpartOf(r.c.id, r.c.kind);
@@ -392,6 +400,9 @@ export async function listDms(tx: Tx, userId: string, opts: { ids?: string[] } =
       lastReadSeq: Number(r.lastReadSeq ?? 0),
       lastMessageAt: r.lastMessageAt === null ? null : iso(r.lastMessageAt),
       lastMessagePreview: r.lastMessagePreview ?? null,
+      notifyLevel: r.notifyLevel,
+      muted: r.muted,
+      ...(counts.get(r.c.id) ?? { unreadCount: 0, mentionCount: 0 }),
     });
   }
   // Personal bots first, then by most recent activity (new DMs without messages by creation time).

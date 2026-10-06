@@ -17,7 +17,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Bot, Gauge, Lock, NotebookPen, Settings2, ShieldCheck, UserX } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { BotSettingsSheet } from "@/components/bots/bot-settings-sheet";
 import { MemoryPanel } from "@/components/bots/memory-panel";
@@ -42,8 +42,10 @@ import {
   isBotDm,
   isGroupDm,
   isHumanDm,
+  markConversationUnread,
   markDmRead,
   postMessage,
+  setReadHold,
   useDms,
   useMessages,
   usePins,
@@ -53,6 +55,7 @@ import { useMe } from "@/lib/queries";
 import { useTopic } from "@/lib/realtime";
 import { cn } from "@/lib/utils";
 import { Composer, type MentionCandidate } from "./composer";
+import { ConversationNotifyMenu } from "./conversation-notify-menu";
 import { JumpToLatest } from "./jump-to-latest";
 import { MentionContext } from "./markdown";
 import { MessageList, type PendingMessage } from "./message-list";
@@ -62,6 +65,7 @@ import { BotBadge, GroupAvatars, PrincipalAvatar } from "./principal-avatar";
 import { TypingIndicator, useTypers } from "./typing";
 import { dirKey, useOrgDirectory } from "./use-chat-directory";
 import { useCentreOnce, usePermalinkWindow, useWindowPaging } from "./use-permalink-window";
+import { useReadCursor } from "./use-read-cursor";
 import { useStickToBottom } from "./use-stick-to-bottom";
 
 function newId(): string {
@@ -256,7 +260,8 @@ export function DmView({ conversationId }: { conversationId: string }) {
     }
     if (!message.threadId) {
       bumpDmLatest(qc, conversationId, message.seq, message.createdAt, message.body);
-      if (document.visibilityState === "visible") markDmRead(qc, conversationId, message.seq);
+      // Reading old history (a detached window) never reads the live end (CHAT-09).
+      if (!detached && document.visibilityState === "visible") markDmRead(qc, conversationId, message.seq);
     }
   };
   useTopic(
@@ -273,21 +278,25 @@ export function DmView({ conversationId }: { conversationId: string }) {
     },
   );
 
-  // ---------------------------------------------------------------- read cursor
-  const lastSeq = messages.data?.messages.at(-1)?.seq ?? 0;
-  useEffect(() => {
-    if (!lastSeq) return;
-    const mark = () => document.visibilityState === "visible" && markDmRead(qc, conversationId, lastSeq);
-    mark();
-    document.addEventListener("visibilitychange", mark);
-    return () => document.removeEventListener("visibilitychange", mark);
-  }, [qc, conversationId, lastSeq]);
-
   // ---------------------------------------------------------------- sending
   const scroll = useStickToBottom(
     `${detached ? "window" : "tail"}:${shown?.messages.length ?? 0}:${pending.length}:${typers.length}`,
     conversationId,
     detached,
+  );
+
+  // ---------------------------------------------------------------- read cursor (CHAT-09)
+  const lastSeq = messages.data?.messages.at(-1)?.seq ?? 0;
+  const reading = useReadCursor({
+    convId: conversationId,
+    tailLastSeq: lastSeq,
+    windowLastSeq: detached ? (shown?.messages.at(-1)?.seq ?? null) : null,
+    scrollRef: scroll.ref,
+  });
+  const markUnreadFrom = useCallback(
+    (m: Message) =>
+      void markConversationUnread(qc, conversationId, m.id).catch((err) => toast.error(errorMessage(err))),
+    [qc, conversationId],
   );
   // A deleted target hidden by P-05 lands on its nearest visible neighbour, without a highlight.
   const [fallback, setFallback] = useState<{ link: string; target: string | null } | null>(null);
@@ -320,6 +329,8 @@ export function DmView({ conversationId }: { conversationId: string }) {
         const msg = await postMessage(conversationId, { body: p.body, clientMessageId: p.clientMessageId });
         applyMessage(qc, msg);
         setPending((prev) => prev.filter((x) => x.clientMessageId !== p.clientMessageId));
+        // Sending ends a "marked unread" hold: the member is reading here (CHAT-09).
+        setReadHold(conversationId, null);
         markDmRead(qc, conversationId, msg.seq);
       } catch (err) {
         setPending((prev) =>
@@ -524,56 +535,63 @@ export function DmView({ conversationId }: { conversationId: string }) {
               </span>
             }
             actions={
-              (bot && (canConfigure || showMemory)) || (pins.data?.pins.length ?? 0) > 0 ? (
-                <>
-                  <PinnedButton count={pins.data?.pins.length ?? 0} onClick={() => setPinsOpen(true)} />
-                  {bot && showMemory ? (
-                    <Tooltip content={`What ${bot.name} remembers about you`}>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        aria-label={`What ${bot.name} remembers about you`}
-                        data-testid="bot-memory"
-                        onClick={() => setMemoryOpen(true)}
-                        className="max-sm:w-8 max-sm:px-0!"
-                      >
-                        <NotebookPen />
-                        <span className="max-sm:sr-only">Memory</span>
-                      </Button>
-                    </Tooltip>
-                  ) : null}
-                  {bot && canConfigure && capabilities.data ? (
-                    <button
-                      type="button"
-                      onClick={() => setSettingsOpen(true)}
-                      data-testid="dm-usage"
-                      aria-label={`${capabilities.data.usage.today} of ${capabilities.data.usage.limit} replies used today`}
-                      className={cn(
-                        "hidden h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs tabular-nums outline-none transition-colors hover:bg-accent focus-visible:ring-[3px] focus-visible:ring-ring/40 sm:inline-flex",
-                        capabilities.data.usage.today >= capabilities.data.usage.limit
-                          ? "border-destructive/30 text-destructive"
-                          : "text-muted-foreground",
-                      )}
-                    >
-                      <Gauge className="size-3.5" aria-hidden />
-                      {capabilities.data.usage.today} / {capabilities.data.usage.limit} today
-                    </button>
-                  ) : null}
-                  {bot && canConfigure ? (
-                    <Tooltip content="Bot settings">
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label="Bot settings"
-                        data-testid="bot-settings"
+              <>
+                <PinnedButton count={pins.data?.pins.length ?? 0} onClick={() => setPinsOpen(true)} />
+                <ConversationNotifyMenu
+                  conversation={{ id: dm.id, kind: dm.kind === "group" ? "group" : "dm" }}
+                  lastSeq={lastSeq}
+                  latestMessageId={messages.data?.messages.at(-1)?.id ?? null}
+                />
+                {bot && (canConfigure || showMemory) ? (
+                  <>
+                    {bot && showMemory ? (
+                      <Tooltip content={`What ${bot.name} remembers about you`}>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          aria-label={`What ${bot.name} remembers about you`}
+                          data-testid="bot-memory"
+                          onClick={() => setMemoryOpen(true)}
+                          className="max-sm:w-8 max-sm:px-0!"
+                        >
+                          <NotebookPen />
+                          <span className="max-sm:sr-only">Memory</span>
+                        </Button>
+                      </Tooltip>
+                    ) : null}
+                    {bot && canConfigure && capabilities.data ? (
+                      <button
+                        type="button"
                         onClick={() => setSettingsOpen(true)}
+                        data-testid="dm-usage"
+                        aria-label={`${capabilities.data.usage.today} of ${capabilities.data.usage.limit} replies used today`}
+                        className={cn(
+                          "hidden h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs tabular-nums outline-none transition-colors hover:bg-accent focus-visible:ring-[3px] focus-visible:ring-ring/40 sm:inline-flex",
+                          capabilities.data.usage.today >= capabilities.data.usage.limit
+                            ? "border-destructive/30 text-destructive"
+                            : "text-muted-foreground",
+                        )}
                       >
-                        <Settings2 />
-                      </Button>
-                    </Tooltip>
-                  ) : null}
-                </>
-              ) : null
+                        <Gauge className="size-3.5" aria-hidden />
+                        {capabilities.data.usage.today} / {capabilities.data.usage.limit} today
+                      </button>
+                    ) : null}
+                    {bot && canConfigure ? (
+                      <Tooltip content="Bot settings">
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          aria-label="Bot settings"
+                          data-testid="bot-settings"
+                          onClick={() => setSettingsOpen(true)}
+                        >
+                          <Settings2 />
+                        </Button>
+                      </Tooltip>
+                    ) : null}
+                  </>
+                ) : null}
+              </>
             }
           />
           <PinnedSheet
@@ -639,6 +657,8 @@ export function DmView({ conversationId }: { conversationId: string }) {
                     linkFor={linkFor}
                     onAnchorHidden={onAnchorHidden}
                     canUnpinAny
+                    dividerAfterSeq={reading.dividerAfterSeq}
+                    onMarkUnread={markUnreadFrom}
                   />
                   {loadingNewer ? (
                     <div className="flex justify-center py-3 text-muted-foreground">

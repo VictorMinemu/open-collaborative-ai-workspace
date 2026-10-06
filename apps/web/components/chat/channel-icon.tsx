@@ -1,5 +1,6 @@
 import type { ChannelSummary } from "@ocw/contracts";
 import { Hash, Lock } from "lucide-react";
+import { hasUnread } from "@/lib/chat-queries";
 import { cn } from "@/lib/utils";
 
 /** `#` for public channels, a lock for private ones. */
@@ -19,7 +20,7 @@ export function ChannelIcon({
   );
 }
 
-/** A joined channel with a top-level message newer than the member's read cursor. */
+/** A joined channel with unread messages or mentions (CHAT-09: counted messages, P-07). */
 export function isUnread(c: ChannelSummary): boolean {
-  return c.isMember && c.latestMessageSeq > c.lastReadSeq;
+  return c.isMember && hasUnread(c);
 }

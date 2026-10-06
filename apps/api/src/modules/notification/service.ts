@@ -9,11 +9,19 @@ import {
   type Notification,
   type NotificationCreatedEvent,
   type NotificationKind,
+  type NotificationReadEvent,
 } from "@ocw/contracts";
-import { conversationMembers, messages, notificationPrefs, orgMembers, type Tx } from "@ocw/db";
-import { and, eq, inArray, isNull, ne, sql } from "drizzle-orm";
+import {
+  conversationMembers,
+  messages,
+  notificationPrefs,
+  notifications,
+  orgMembers,
+  type Tx,
+} from "@ocw/db";
+import { and, count, eq, inArray, isNull, ne, type SQL, sql } from "drizzle-orm";
 import type { Core } from "../../core";
-import type { MessageEditedInput, MessagePostedInput } from "../../lib/chat-events";
+import type { ConversationReadInput, MessageEditedInput, MessagePostedInput } from "../../lib/chat-events";
 import { authorOf, type ConversationAccess, conversationRefs, loadDirectory } from "../chat";
 import type { OnlineSet } from "../realtime";
 import { computeRecipients } from "./recipients";
@@ -42,6 +50,32 @@ const RANK_ARRAY = sql.raw(`array[${RANKED.map((k) => `'${k}'`).join(",")}]::tex
 
 export const iso = (v: unknown) => new Date(v as string).toISOString();
 
+/** The caller's visible notifications: own rows, readable conversations, live messages, optional kinds. */
+export function visible(me: string, readableIds: string[], filter: "all" | "mentions"): SQL | undefined {
+  return and(
+    eq(notifications.userId, me),
+    inArray(notifications.conversationId, readableIds),
+    isNull(messages.deletedAt),
+    filter === "mentions" ? inArray(notifications.kind, [...MENTIONS_FILTER_KINDS]) : undefined,
+  );
+}
+
+/** Unread notifications the caller can see now, for one filter. */
+export async function unreadCountFor(
+  tx: Tx,
+  me: string,
+  readableIds: string[],
+  filter: "all" | "mentions",
+): Promise<number> {
+  if (readableIds.length === 0) return 0;
+  const [row] = await tx
+    .select({ n: count() })
+    .from(notifications)
+    .innerJoin(messages, eq(messages.id, notifications.messageId))
+    .where(and(visible(me, readableIds, filter), isNull(notifications.readAt)));
+  return Number(row?.n ?? 0);
+}
+
 interface Target {
   conv: MessagePostedInput["conv"];
   messageId: string;
@@ -54,7 +88,12 @@ interface Target {
 export interface NotificationService {
   onPosted(tx: Tx, input: MessagePostedInput): Promise<void>;
   onEdited(tx: Tx, input: MessageEditedInput): Promise<void>;
+  /** CHAT-09: reading a conversation (or a thread) reads the member's notifications of what was read. */
+  onRead(tx: Tx, input: ConversationReadInput): Promise<void>;
 }
+
+/** `NotificationReadEvent.ids` holds at most this many ids; larger reads go out in several events. */
+const READ_EVENT_IDS = 200;
 
 export function createNotificationService(
   core: Core,
@@ -231,6 +270,33 @@ export function createNotificationService(
         actor: message.author ?? authorOf(dir, input.author.kind, input.author.id),
         recipients,
       });
+    },
+
+    async onRead(tx, input) {
+      // Own rows only (the read route is the member's own); top-level messages of the conversation, or the replies
+      // of one thread for a thread read, up to the seq read. Ids and the read time only change.
+      const scope = input.threadRootId
+        ? sql`n.thread_root_id = ${input.threadRootId}::uuid`
+        : sql`n.thread_root_id is null`;
+      const res = await tx.execute(sql`
+        update app.notifications n set read_at = now()
+        from app.messages m
+        where m.id = n.message_id and n.user_id = ${input.userId}::uuid
+          and n.conversation_id = ${input.conversationId}::uuid and n.read_at is null
+          and m.seq <= ${input.lastReadSeq} and ${scope}
+        returning n.id`);
+      const ids = (res.rows as Array<{ id: string }>).map((r) => r.id);
+      if (ids.length === 0) return;
+      const unreadCount = await unreadCountFor(
+        tx,
+        input.userId,
+        await deps.access.readableIds(tx, input.userId),
+        "all",
+      );
+      for (let i = 0; i < ids.length; i += READ_EVENT_IDS) {
+        const ev: NotificationReadEvent = { ids: ids.slice(i, i + READ_EVENT_IDS), unreadCount };
+        await core.realtime.appendEvent(tx, `user:${input.userId}`, EventTypes.notificationRead, ev);
+      }
     },
 
     async onEdited(tx, input) {
