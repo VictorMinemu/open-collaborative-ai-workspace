@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 17
+open_count: 21
 waived_count: 0
 fixed_count: 14
-total_count: 31
-last_updated: 2026-10-06T06:20:53.784Z
+total_count: 35
+last_updated: 2026-10-06T07:09:19.714Z
 ---
 
 # Broken Windows Ledger
@@ -46,6 +46,10 @@ last_updated: 2026-10-06T06:20:53.784Z
 | 29 | 04 | deviation | apps/web/public/emojibase/README.md |  | Emoji picker data self-hosted (emojibase-data 17.0.0 en, vendored JSON) instead of frimousse's jsDelivr default | open |  | 2026-10-06T06:20:53.647Z |  |
 | 30 | 04 | deviation | apps/web/components/chat/message-actions.tsx |  | Hover toolbar hidden on hover:none devices; touch uses the long-press sheet only | open |  | 2026-10-06T06:20:53.716Z |  |
 | 31 | 04 | deviation | apps/api/src/modules/chat/saves.ts |  | GET /saved marks the request decided after access.readableIds (request-less filterFor) for the strict authz hook | open |  | 2026-10-06T06:20:53.784Z |  |
+| 32 | 04 | deviation | packages/contracts/src/chat.ts |  | CreateDmRequestFields (route body, max 32) so POST /dms answers too_many_participants after dedupe instead of validation_error | open |  | 2026-10-06T07:09:19.504Z |  |
+| 33 | 04 | deviation | apps/api/src/modules/chat/index.ts |  | GET /messages/:id/thread now serves DM and group roots to participants (was channel-only); outsiders still 404 | open |  | 2026-10-06T07:09:19.575Z |  |
+| 34 | 04 | deviation | apps/api/src/modules/chat/dm-privacy.int.test.ts |  | Privacy suite links attachments to messages via SQL until 04-12 wires attachments on send; Plan 09 adds the inbox route | open |  | 2026-10-06T07:09:19.644Z |  |
+| 35 | 04 | deviation | apps/web/components/members/member-profile-sheet.tsx |  | Message action added to the member profile sheet (not in plan file list) | open |  | 2026-10-06T07:09:19.714Z |  |
 
 ````json
 [
@@ -419,6 +423,54 @@ last_updated: 2026-10-06T06:20:53.784Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-06T06:20:53.784Z",
+    "resolved_at": null
+  },
+  {
+    "id": 32,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "packages/contracts/src/chat.ts",
+    "line": null,
+    "description": "CreateDmRequestFields (route body, max 32) so POST /dms answers too_many_participants after dedupe instead of validation_error",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T07:09:19.504Z",
+    "resolved_at": null
+  },
+  {
+    "id": 33,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/api/src/modules/chat/index.ts",
+    "line": null,
+    "description": "GET /messages/:id/thread now serves DM and group roots to participants (was channel-only); outsiders still 404",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T07:09:19.575Z",
+    "resolved_at": null
+  },
+  {
+    "id": 34,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/api/src/modules/chat/dm-privacy.int.test.ts",
+    "line": null,
+    "description": "Privacy suite links attachments to messages via SQL until 04-12 wires attachments on send; Plan 09 adds the inbox route",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T07:09:19.644Z",
+    "resolved_at": null
+  },
+  {
+    "id": 35,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/web/components/members/member-profile-sheet.tsx",
+    "line": null,
+    "description": "Message action added to the member profile sheet (not in plan file list)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T07:09:19.714Z",
     "resolved_at": null
   }
 ]
