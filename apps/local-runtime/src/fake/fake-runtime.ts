@@ -17,7 +17,14 @@ import type {
   RuntimeInfo,
   SessionEvent,
 } from "@ocw/contracts";
-import { minMode, type RuntimeCatalog, type RuntimeModel, type SessionSettingsPatch } from "@ocw/contracts";
+import {
+  minMode,
+  type RuntimeCatalog,
+  type RuntimeModel,
+  SESSION_TITLE_MAX_CHARS,
+  SESSION_TITLE_MAX_WORDS,
+  type SessionSettingsPatch,
+} from "@ocw/contracts";
 import {
   type AgentRuntime,
   type EventSink,
@@ -123,8 +130,8 @@ const STOP_WORDS = new Set(
 
 /**
  * The fake's deterministic "small model" (tests and demos only): the first line without a polite lead-in and
- * English / Spanish stop words, first 6 words, first letter upper. Returned quoted and with a period, like a
- * chatty model, so the daemon's normalizer is exercised.
+ * English / Spanish stop words, at most 5 words and 32 characters cut on a word boundary (D-20), first letter
+ * upper. Returned quoted and with a period, like a chatty model, so the daemon's normalizer is exercised.
  */
 export function fakeTitle(prompt: string): string {
   const line = (prompt.split("\n").find((l) => l.trim()) ?? "").trim().replace(POLITE_LEAD, "");
@@ -132,7 +139,8 @@ export function fakeTitle(prompt: string): string {
     .split(/\s+/)
     .map((w) => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ""))
     .filter((w) => w && !STOP_WORDS.has(w.toLowerCase()))
-    .slice(0, 6);
+    .slice(0, SESSION_TITLE_MAX_WORDS);
+  while (words.length > 1 && words.join(" ").length > SESSION_TITLE_MAX_CHARS) words.pop();
   const text = words.join(" ");
   return `"${text.charAt(0).toUpperCase()}${text.slice(1)}."`;
 }

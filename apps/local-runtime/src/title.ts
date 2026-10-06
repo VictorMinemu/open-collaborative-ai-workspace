@@ -16,9 +16,9 @@ import { sanitizeString } from "./sanitize.js";
 
 /** System instructions of every title call (both runtimes). */
 export const TITLE_INSTRUCTIONS =
-  "You name coding sessions. Reply with a short title for the user's request and nothing else: 3 to 6 words " +
+  "You name coding sessions. Reply with a short title for the user's request and nothing else: 2 to 5 words " +
   "in the same language as the request, sentence case, no quotes, no markdown, no emoji and no trailing " +
-  "punctuation, at most 48 characters. Describe what is being asked. Do not answer or carry out the request, " +
+  "punctuation, at most 32 characters. Describe what is being asked. Do not answer or carry out the request, " +
   "do not ask questions and do not use tools.";
 
 /** The single user message of a title call: the prompt between clear delimiters. */
@@ -90,10 +90,15 @@ export async function runTitle(o: RunTitleOptions): Promise<string> {
     clearTimeout(timer);
   }
 
-  const title = normalizeSessionTitle(raw);
-  if (!title) throw new TitleError("title_invalid_shape", "the answer is not a 3 to 6 word title");
   // D-20: no absolute host path and no secret ever leaves the device inside a title; never "fixed", refused.
-  if (sanitizeString(title, o.roots, o.home) !== title) {
+  // The raw answer is checked too: the word-boundary cut could otherwise keep the head of a credential.
+  const sanitized = (text: string) => sanitizeString(text, o.roots, o.home) === text;
+  if (!sanitized(raw)) {
+    throw new TitleError("title_sanitized", "the title contained a host path or a credential");
+  }
+  const title = normalizeSessionTitle(raw);
+  if (!title) throw new TitleError("title_invalid_shape", "the answer is not a 2 to 5 word title");
+  if (!sanitized(title)) {
     throw new TitleError("title_sanitized", "the title contained a host path or a credential");
   }
   if (!SessionTitle.safeParse(title).success) {

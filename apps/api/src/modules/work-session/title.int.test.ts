@@ -13,7 +13,7 @@ import { CLAUDE_CATALOG, CODEX_CATALOG, model, pairDevice } from "../../testing-
 
 const ADMIN = { name: "Víctor Ruiz", email: "victor@example.test", password: "correct-horse-battery" };
 const PROMPT = "Please fix the login redirect bug on the settings page when the session expires";
-const TITLE = "Fix login redirect bug settings page";
+const TITLE = "Fix login redirect bug settings";
 
 let stack: TestStack;
 let su: pg.Client;
@@ -183,9 +183,12 @@ describe("refused title results (D-20, T-03.2-12-02)", () => {
     const { s, cmd } = await untitled();
     device.titleResult(cmd.id, s.id, "Fix the login redirect bug on settings", "haiku");
     device.titleResult(cmd.id, s.id, "Fix login\nredirect bug", "haiku");
-    await eventually(async () => (await audits("work_session.title_failed", s.id)).length === 2);
+    // 36 characters: the old 48-character cap allowed it; it no longer fits a 1440 sidebar row (D-20).
+    device.titleResult(cmd.id, s.id, "Fix login redirect bug settings page", "haiku");
+    await eventually(async () => (await audits("work_session.title_failed", s.id)).length === 3);
     const failed = await audits("work_session.title_failed", s.id);
     expect(failed.map((f) => f.metadata)).toEqual([
+      { reason: "invalid_title", model: "haiku" },
       { reason: "invalid_title", model: "haiku" },
       { reason: "invalid_title", model: "haiku" },
     ]);

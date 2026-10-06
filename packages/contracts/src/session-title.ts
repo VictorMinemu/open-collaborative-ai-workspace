@@ -11,9 +11,10 @@ import type { RuntimeId } from "./session-events";
 export const TitleSource = z.enum(["user", "heuristic", "auto"]);
 export type TitleSource = z.infer<typeof TitleSource>;
 
-export const SESSION_TITLE_MAX_CHARS = 48;
-export const SESSION_TITLE_MIN_WORDS = 3;
-export const SESSION_TITLE_MAX_WORDS = 6;
+/** 32 characters fit one Work Zone sidebar row (~219 px at 14 px) at 1440 and in the 390 drawer (D-20). */
+export const SESSION_TITLE_MAX_CHARS = 32;
+export const SESSION_TITLE_MIN_WORDS = 2;
+export const SESSION_TITLE_MAX_WORDS = 5;
 /** The device's own deadline for a title call (P-19). */
 export const TITLE_TIMEOUT_MS = 20_000;
 /** Only the start of the first prompt goes to the title call. */
@@ -99,8 +100,8 @@ function stripMarks(line: string): string {
 
 /**
  * The device-side shape rule (P-16): first non-empty line, no label / markdown / quotes / control characters /
- * trailing punctuation, collapsed whitespace, sentence case, first letter upper, at most 6 words and 48 characters
- * cut on a word boundary. Returns null when fewer than 3 words remain.
+ * trailing punctuation, collapsed whitespace, sentence case, first letter upper, at most 5 words and 32 characters
+ * cut on a word boundary. Returns null when fewer than 2 words remain.
  */
 export function normalizeSessionTitle(raw: string): string | null {
   const line = raw

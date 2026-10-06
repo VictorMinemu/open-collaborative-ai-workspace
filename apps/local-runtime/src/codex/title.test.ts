@@ -166,15 +166,24 @@ const FIXTURE = readFileSync(
   .split("\n")
   .map((l) => JSON.parse(l) as Line);
 const RECORDED_PROMPT = "Please fix the login redirect bug on the settings page when the session expires";
+/** The recorded raw answer (6 words, 36 characters: the 3-6 word / 48 rule it was recorded under). */
 const RECORDED_TITLE = "Fix settings page login redirect bug";
+/** What the device stores today (2-5 words, at most 32 characters, cut on a word boundary). */
+const STORED_TITLE = "Fix settings page login redirect";
+/** The instructions the recording was made with; TITLE_INSTRUCTIONS now asks for 2-5 words and 32 characters. */
+const RECORDED_INSTRUCTIONS =
+  "You name coding sessions. Reply with a short title for the user's request and nothing else: 3 to 6 words " +
+  "in the same language as the request, sentence case, no quotes, no markdown, no emoji and no trailing " +
+  "punctuation, at most 48 characters. Describe what is being asked. Do not answer or carry out the request, " +
+  "do not ask questions and do not use tools.";
 
 describe("generateCodexTitle over the 0.160.0 recording", () => {
   it("sends the recorded requests and returns the final agent message, a valid English title", async () => {
     const h = harness(FIXTURE, RECORDED_PROMPT);
     const raw = await h.run;
     expect(raw).toBe(RECORDED_TITLE);
-    expect(normalizeSessionTitle(raw)).toBe(RECORDED_TITLE);
-    expect(titleProblems(RECORDED_TITLE)).toEqual([]);
+    expect(normalizeSessionTitle(raw)).toBe(STORED_TITLE);
+    expect(titleProblems(STORED_TITLE)).toEqual([]);
     const s = h.servers[0]!;
     const recorded = (method: string) =>
       FIXTURE.find((l) => l.dir === "out" && l.msg.method === method)!.msg.params as Record<string, unknown>;
@@ -186,16 +195,25 @@ describe("generateCodexTitle over the 0.160.0 recording", () => {
     ]);
     expect(sent(s, "initialize")?.params).toEqual(recorded("initialize"));
     expect(recorded("initialize")).toMatchObject({ capabilities: { experimentalApi: false } });
-    const { cwd: _a, ...thread } = sent(s, "thread/start")!.params as Record<string, unknown>;
-    const { cwd: _b, ...recordedThread } = recorded("thread/start");
+    // Same thread options as recorded; only the instructions' shape numbers changed since (not re-recorded).
+    const {
+      cwd: _a,
+      baseInstructions,
+      ...thread
+    } = sent(s, "thread/start")!.params as Record<string, unknown>;
+    const { cwd: _b, baseInstructions: recordedInstructions, ...recordedThread } = recorded("thread/start");
     expect(thread).toEqual(recordedThread);
+    expect(baseInstructions).toBe(TITLE_INSTRUCTIONS);
+    expect(recordedInstructions).toBe(RECORDED_INSTRUCTIONS);
+    expect(TITLE_INSTRUCTIONS).toBe(
+      RECORDED_INSTRUCTIONS.replace("3 to 6 words", "2 to 5 words").replace("48 characters", "32 characters"),
+    );
     expect(recordedThread).toEqual({
       model: "gpt-6-luna",
       sandbox: "read-only",
       approvalPolicy: "untrusted",
       approvalsReviewer: "user",
       ephemeral: true,
-      baseInstructions: TITLE_INSTRUCTIONS,
     });
     expect(sent(s, "turn/start")?.params).toEqual(recorded("turn/start"));
     expect(recorded("turn/start")).toMatchObject({ effort: "low", summary: "none" });

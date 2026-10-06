@@ -128,11 +128,13 @@ const FIXTURE = readFileSync(
   .trim()
   .split("\n")
   .map((l) => JSON.parse(l) as Record<string, unknown>);
-/** The recorded prompt is Spanish; so is the recorded title. */
+/** The recorded prompt is Spanish; so is the recorded title (6 words, recorded under the 3-6 word / 48 rule). */
 const RECORDED_TITLE = "Redirección de login al expirar sesión";
+/** What the device stores today: the first 5 words (31 characters, within 32). */
+const STORED_TITLE = "Redirección de login al expirar";
 
 describe("generateClaudeTitle over the 2.1.289 recording", () => {
-  it("returns the recorded answer, which normalizes to a valid 3-6 word Spanish title", async () => {
+  it("returns the recorded answer, which normalizes to a valid 2-5 word Spanish title", async () => {
     const init = FIXTURE.find((m) => m.subtype === "init")!;
     expect(init).toMatchObject({ claude_code_version: "2.1.289", model: "claude-haiku-4-5-20251001" });
     expect(init).toMatchObject({ permissionMode: "default", apiKeySource: "none" });
@@ -140,7 +142,7 @@ describe("generateClaudeTitle over the 2.1.289 recording", () => {
     const raw = await harness(FIXTURE).run;
     expect(raw).toBe(RECORDED_TITLE);
     const title = normalizeSessionTitle(raw);
-    expect(title).toBe(RECORDED_TITLE);
+    expect(title).toBe(STORED_TITLE);
     expect(titleProblems(title!)).toEqual([]);
   });
 
