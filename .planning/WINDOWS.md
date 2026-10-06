@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 7
+open_count: 10
 waived_count: 0
 fixed_count: 14
-total_count: 21
-last_updated: 2026-10-06T04:56:06.615Z
+total_count: 24
+last_updated: 2026-10-06T05:27:09.695Z
 ---
 
 # Broken Windows Ledger
@@ -36,6 +36,9 @@ last_updated: 2026-10-06T04:56:06.615Z
 | 19 | 03.2 | unrun-verify | apps/local-runtime/src/claude/title.ts |  | Claude title latency with thinking disabled not recorded (fixture recorded with thinking: 31 s); owner manual check | open |  | 2026-10-06T02:17:25.305Z |  |
 | 20 | 04 | deviation | apps/api/src/modules/chat/index.ts |  | POST /conversations/:id/messages answers 400 attachments_unavailable for attachment-only posts until 04-04 wires uploads | open |  | 2026-10-06T04:56:06.542Z |  |
 | 21 | 04 | deviation | apps/api/src/modules/chat/access.ts |  | ConversationAccess boolean check is isReadable (plan said canRead; static guard bans that identifier); 04-09 must call isReadable | open |  | 2026-10-06T04:56:06.615Z |  |
+| 22 | 04 | deviation | apps/api/src/modules/chat/access.ts |  | Hidden conversations now 404 with the route's not-found message (identical to missing); was generic 'Not found' | open |  | 2026-10-06T05:27:09.545Z |  |
+| 23 | 04 | deviation | packages/contracts/src/chat.ts |  | Added PageQueryFields + pageCursorCount; messages route enforces one cursor after readable (400 invalid_page_query) | open |  | 2026-10-06T05:27:09.619Z |  |
+| 24 | 04 | deviation | apps/web/components/chat/use-permalink-window.ts |  | Detached window logic extracted into shared hooks (not in plan file list); 04-07 group DMs must reuse it | open |  | 2026-10-06T05:27:09.695Z |  |
 
 ````json
 [
@@ -289,6 +292,42 @@ last_updated: 2026-10-06T04:56:06.615Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-06T04:56:06.615Z",
+    "resolved_at": null
+  },
+  {
+    "id": 22,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/api/src/modules/chat/access.ts",
+    "line": null,
+    "description": "Hidden conversations now 404 with the route's not-found message (identical to missing); was generic 'Not found'",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T05:27:09.545Z",
+    "resolved_at": null
+  },
+  {
+    "id": 23,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "packages/contracts/src/chat.ts",
+    "line": null,
+    "description": "Added PageQueryFields + pageCursorCount; messages route enforces one cursor after readable (400 invalid_page_query)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T05:27:09.619Z",
+    "resolved_at": null
+  },
+  {
+    "id": 24,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/web/components/chat/use-permalink-window.ts",
+    "line": null,
+    "description": "Detached window logic extracted into shared hooks (not in plan file list); 04-07 group DMs must reuse it",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T05:27:09.695Z",
     "resolved_at": null
   }
 ]
