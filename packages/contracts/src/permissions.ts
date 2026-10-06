@@ -58,6 +58,11 @@ export const Permission = z.enum([
   "channel.mention_all",
   "attachment.upload",
   "channel.update",
+  // Phase 5 (05-01): Direct AI Chat.
+  "ai_chat.use",
+  "ai_chat.web",
+  "ai_chat.share",
+  "ai_chat.share.read",
 ]);
 export type Permission = z.infer<typeof Permission>;
 
@@ -114,6 +119,10 @@ export const PERMISSION_SURFACE: Record<Permission, PermissionSurface> = {
   "channel.mention_all": "chat",
   "attachment.upload": "chat",
   "channel.update": "chat",
+  "ai_chat.use": "chat",
+  "ai_chat.web": "chat",
+  "ai_chat.share": "chat",
+  "ai_chat.share.read": "chat",
 };
 
 export const ROLE_SURFACES: Record<OrgRole, PermissionSurface[]> = {
@@ -137,6 +146,10 @@ const STANDARD: readonly Permission[] = [
   "bot.tool.use",
   "channel.mention_all",
   "attachment.upload",
+  "ai_chat.use",
+  "ai_chat.web",
+  "ai_chat.share",
+  "ai_chat.share.read",
 ];
 const DEVELOPER: readonly Permission[] = [
   ...STANDARD,
@@ -336,6 +349,10 @@ export const PERMISSION_DESCRIPTIONS: Record<Permission, string> = {
   "channel.mention_all": "Notify a whole channel with @channel or @here",
   "attachment.upload": "Attach files and images to messages",
   "channel.update": "Change any channel's topic and the team it is grouped under",
+  "ai_chat.use": "Create private AI chats and send messages in your own",
+  "ai_chat.web": "Turn on web search in your AI chats",
+  "ai_chat.share": "Create and revoke read-only share links of your AI chats",
+  "ai_chat.share.read": "Open AI chat share links from your organization",
 };
 
 // ---------------------------------------------------------------- tokens (AUTH-06)

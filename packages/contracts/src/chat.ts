@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { AgentScope, AgentStatus } from "./agent";
+import { AiGeneration } from "./ai-generation";
 import { Attachment, MAX_ATTACHMENTS_PER_MESSAGE } from "./attachments";
 import { ClientKind, Id, IsoDateTime, isReservedHandle, MemberKind, PrincipalKind } from "./common";
 import { Permission, UnitKind } from "./permissions";
@@ -117,6 +118,8 @@ export const Message = z.object({
   attachments: z.array(Attachment).optional(),
   pinned: z.boolean().optional(),
   saved: z.boolean().optional(),
+  /** Assistant turns of AI chats only (Phase 5, P-13): the generation that produced this answer. */
+  generation: AiGeneration.optional(),
 });
 export type Message = z.infer<typeof Message>;
 

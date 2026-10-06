@@ -106,6 +106,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "channel.mention_all": true,
     "attachment.upload": true,
     "channel.update": false,
+    "ai_chat.use": true,
+    "ai_chat.web": true,
+    "ai_chat.share": true,
+    "ai_chat.share.read": true,
   },
   developer: {
     "org.read": true,
@@ -156,6 +160,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "channel.mention_all": true,
     "attachment.upload": true,
     "channel.update": false,
+    "ai_chat.use": true,
+    "ai_chat.web": true,
+    "ai_chat.share": true,
+    "ai_chat.share.read": true,
   },
   lead: {
     "org.read": true,
@@ -206,6 +214,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "channel.mention_all": true,
     "attachment.upload": true,
     "channel.update": false,
+    "ai_chat.use": true,
+    "ai_chat.web": true,
+    "ai_chat.share": true,
+    "ai_chat.share.read": true,
   },
   admin: {
     "org.read": true,
@@ -256,6 +268,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "channel.mention_all": true,
     "attachment.upload": true,
     "channel.update": true,
+    "ai_chat.use": true,
+    "ai_chat.web": true,
+    "ai_chat.share": true,
+    "ai_chat.share.read": true,
   },
 };
 
