@@ -1,6 +1,13 @@
 "use client";
 
-import { type AgentTypingEvent, EphemeralTypes, EventTypes, type MessageCreatedEvent } from "@ocw/contracts";
+import {
+  type AgentTypingEvent,
+  EphemeralTypes,
+  EventTypes,
+  type MessageCreatedEvent,
+  type MessageDeletedEvent,
+  type MessageUpdatedEvent,
+} from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
 import { useQueryClient } from "@tanstack/react-query";
 import { Bot, Gauge, Lock, NotebookPen, Settings2, ShieldCheck } from "lucide-react";
@@ -20,8 +27,11 @@ import { useAgents } from "@/lib/bots-queries";
 import { capabilityKeys, useBotCapabilities, useBotMemories } from "@/lib/capability-queries";
 import {
   applyMessage,
+  applyMessageDeleted,
+  applyMessageUpdate,
   bumpDmLatest,
   chatKeys,
+  isBotDm,
   loadOlder,
   markDmRead,
   postMessage,
@@ -79,7 +89,7 @@ export function DmView({ conversationId }: { conversationId: string }) {
 
   const dms = useDms();
   const dm = dms.data?.dms.find((d) => d.id === conversationId);
-  const bot = dm?.counterpart;
+  const bot = dm && isBotDm(dm) ? dm.counterpart : undefined;
   const [lost, setLost] = useState(false);
   const messages = useMessages(conversationId, !!dm && !lost);
   const { typers, touch, clear } = useTypers();
@@ -106,6 +116,14 @@ export function DmView({ conversationId }: { conversationId: string }) {
         const d = frame.data as AgentTypingEvent;
         touch({ kind: "agent", id: d.agentId, name: d.displayName, threadRootId: null });
       }
+      return;
+    }
+    if (frame.type === EventTypes.messageUpdated) {
+      applyMessageUpdate(qc, (frame.data as MessageUpdatedEvent).message);
+      return;
+    }
+    if (frame.type === EventTypes.messageDeleted) {
+      applyMessageDeleted(qc, frame.data as MessageDeletedEvent);
       return;
     }
     if (frame.type !== EventTypes.messageCreated) return;
@@ -394,6 +412,7 @@ export function DmView({ conversationId }: { conversationId: string }) {
                 onRetry={retry}
                 showThreadSummary={false}
                 intro={intro}
+                readOnly={!!dm.archivedAt || disabled}
               />
             </div>
           )}

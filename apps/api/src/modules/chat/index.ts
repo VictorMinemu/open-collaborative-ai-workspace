@@ -34,9 +34,11 @@ import {
   channelResource,
   createPermissionService,
 } from "../organization";
+import { createConversationAccess } from "./access";
 import { authorOf, type Directory, loadDirectory } from "./directory";
 import { dmAgentOf, listDms } from "./dm";
 import { resolveMentions } from "./mentions";
+import { registerMessageActionRoutes } from "./message-actions";
 import { replyModeCandidates } from "./reply-mode";
 import {
   addMember,
@@ -65,6 +67,7 @@ import {
 } from "./service";
 import { registerChatTestRoutes } from "./test-routes";
 
+export { type ConversationAccess, createConversationAccess } from "./access";
 export { dmAgentOf, dmKey, ensureDm, listDms, setAgentDmsArchived } from "./dm";
 export { resolveMentions } from "./mentions";
 export { REPLY_MODE_PER_MINUTE, replyModeCandidates } from "./reply-mode";
@@ -89,13 +92,15 @@ const MemberRemovedPayload = z.object({
 export function createChatModule(core: Core): ApiModule {
   const deps: ChatDeps = { audit: core.audit, realtime: core.realtime };
   const perms = createPermissionService(core);
+  const access = createConversationAccess(core);
 
-  /** The channel permissions the web needs per channel (header menu, composer, members panel). */
+  /** The channel permissions the web needs per channel (header menu, composer, members panel, message actions). */
   const VIEWER_CAN = [
     "channel.post",
     "channel.members.add",
     "channel.members.remove",
     "channel.archive",
+    "message.delete_any",
   ] as const;
 
   async function withViewerCan(req: FastifyRequest, tx: Tx, row: ChannelRow): Promise<ChannelSummaryDto> {
@@ -112,18 +117,16 @@ export function createChatModule(core: Core): ApiModule {
 
   /**
    * The channel and the caller's facts when the resolver lets the caller read it. Missing and hidden
-   * channels are the same 404, so a private channel never reveals that it exists.
+   * channels are the same 404, so a private channel never reveals that it exists. Delegates to the one
+   * readable-set authority (P-03).
    */
-  async function readableChannel(
+  function readableChannel(
     req: FastifyRequest,
     tx: Tx,
     conv: ConversationRow | null,
     notFoundMessage = "Channel not found",
   ): Promise<{ conv: ConversationRow; facts: ChannelFacts }> {
-    if (!conv) throw notFound(notFoundMessage);
-    const facts = await channelFacts(tx, conv, { kind: "user", id: authOf(req).userId });
-    await perms.assertCan(req, tx, "channel.read", channelResource(facts), { hideAs404: true });
-    return { conv, facts };
+    return access.readableRow(req, tx, conv, notFoundMessage);
   }
 
   // ---------------------------------------------------------------- realtime: conv:<id>
@@ -132,14 +135,7 @@ export function createChatModule(core: Core): ApiModule {
     core.db.withTenant({ organizationId: auth.organizationId, userId: auth.userId }, async (tx) => {
       const conv = await getConversation(tx, conversationId, MESSAGE_KINDS);
       if (!conv) return false;
-      const facts = await channelFacts(tx, conv, { kind: "user", id: auth.userId });
-      const d = await perms.decide(
-        tx,
-        { kind: "user", userId: auth.userId },
-        "channel.read",
-        channelResource(facts),
-      );
-      return d.allowed;
+      return access.isReadable(tx, auth.userId, conv.id);
     }),
   );
 
@@ -354,12 +350,17 @@ export function createChatModule(core: Core): ApiModule {
       const thread = await loadThread(tx, threadRootId);
       if (!thread || thread.root.conversationId !== conv.id) throw notFound("Thread not found");
       const members = await listChannelMembers(tx, conv.id, dir);
-      const replies = thread.replies.slice(-Math.max(0, limit - 1));
+      // Deleted text never reaches a model (Pitfall 8): tombstones are left out of the bot's context.
+      const head = thread.root.deletedAt === null ? [thread.root] : [];
+      const replies = thread.replies
+        .filter((r) => r.deletedAt === null)
+        .slice(-Math.max(0, limit - head.length));
+      const history = [...head, ...replies];
       return {
         conversationId: conv.id,
         threadRootId: thread.root.id,
         roster: members.map((m) => ({ kind: m.kind, id: m.id, displayName: m.displayName })),
-        history: [thread.root, ...replies].map((r) => {
+        history: history.map((r) => {
           const a = authorOf(dir, r.authorKind, r.authorId);
           return {
             messageId: r.id,
@@ -684,6 +685,11 @@ export function createChatModule(core: Core): ApiModule {
             if (conv.kind === "dm" && req.body.threadRootId) {
               throw badRequest("Direct conversations have no threads", "dm_is_flat");
             }
+            // The contract accepts attachment-only posts; the upload pipeline (Plan 04-04) has not landed yet,
+            // so nothing may create an empty message in the meantime.
+            if (req.body.attachmentIds?.length || !req.body.body) {
+              throw badRequest("Attachments are not available yet", "attachments_unavailable");
+            }
             const dir = await loadDirectory(tx);
             const result = await postMessage(tx, deps, dir, {
               conv,
@@ -793,6 +799,9 @@ export function createChatModule(core: Core): ApiModule {
             };
           }),
       );
+
+      // ---------------------------------------------------------------- message actions (CHAT-06)
+      registerMessageActionRoutes(app, { core, deps, access, perms });
 
       if (core.env.NODE_ENV === "test") registerChatTestRoutes(app, core);
     },

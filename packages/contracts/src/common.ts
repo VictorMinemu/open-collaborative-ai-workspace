@@ -15,6 +15,16 @@ export const MemberKind = z.enum(["user", "agent"]);
 export type MemberKind = z.infer<typeof MemberKind>;
 
 /**
+ * Mention handles no person or bot may hold: `@channel`, `@here` and its alias `@everyone` (Pitfall 6). Lives
+ * here (re-exported by chat.ts) so agent.ts can refuse them without an import cycle.
+ */
+export const RESERVED_HANDLES = ["channel", "here", "everyone"] as const;
+
+export function isReservedHandle(handle: string): boolean {
+  return (RESERVED_HANDLES as readonly string[]).includes(handle.trim().toLowerCase());
+}
+
+/**
  * The four PRD organization roles (PRD §7), cumulative: standard ⊂ developer ⊂ lead ⊂ admin.
  * Stored in `app.org_members.role` (the single source of truth; better-auth's member role is existence only).
  */

@@ -11,7 +11,7 @@ import { SectionSidebar, sectionItemClass } from "@/components/shell/section-sid
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
-import { bumpDmLatest, bumpLatest, chatKeys, useChannels, useDms } from "@/lib/chat-queries";
+import { bumpDmLatest, bumpLatest, chatKeys, isBotDm, useChannels, useDms } from "@/lib/chat-queries";
 import { useMe } from "@/lib/queries";
 import { useTopic } from "@/lib/realtime";
 import { cn } from "@/lib/utils";
@@ -143,7 +143,7 @@ function ListSync({
 /** "Bots" group under Channels: the caller's private chats with bots (personal first), one-click create. */
 function BotsSection({ activeId }: { activeId: string | null }) {
   const dms = useDms();
-  const list = dms.data?.dms ?? [];
+  const list = (dms.data?.dms ?? []).filter(isBotDm);
   const hasPersonal = list.some((d) => d.counterpart.scope === "personal");
   return (
     <section aria-labelledby="bots-heading" className="mt-5" data-testid="bots-section">

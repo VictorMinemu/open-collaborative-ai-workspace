@@ -14,6 +14,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA app TO ocw_app;
 -- Append-only logs.
 REVOKE UPDATE, DELETE, TRUNCATE ON app.audit_events FROM ocw_app;
 REVOKE UPDATE, DELETE, TRUNCATE ON app.stream_events FROM ocw_app;
+-- Message edit/delete history (CHAT-06): the app role may only add versions, never rewrite them.
+REVOKE UPDATE, DELETE, TRUNCATE ON app.message_versions FROM ocw_app;
 
 -- Identity plane writes its audit rows and the org_members projection in the same transaction.
 GRANT SELECT, INSERT ON app.audit_events TO ocw_auth;

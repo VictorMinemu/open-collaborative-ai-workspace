@@ -6,6 +6,8 @@ import {
   EphemeralTypes,
   EventTypes,
   type MessageCreatedEvent,
+  type MessageDeletedEvent,
+  type MessageUpdatedEvent,
   type ThreadUpdatedEvent,
   type UserTypingEvent,
 } from "@ocw/contracts";
@@ -32,6 +34,8 @@ import { Spinner } from "@/components/ui/spinner";
 import { api, errorMessage, isApiError } from "@/lib/api";
 import {
   applyMessage,
+  applyMessageDeleted,
+  applyMessageUpdate,
   applyThreadUpdate,
   bumpLatest,
   chatKeys,
@@ -208,6 +212,13 @@ export function ChannelView({ channelId }: { channelId: string }) {
       case EventTypes.threadUpdated:
         applyThreadUpdate(qc, channelId, frame.data as ThreadUpdatedEvent);
         return;
+      case EventTypes.messageUpdated:
+        // An edit never moves the read cursor nor makes the channel unread.
+        applyMessageUpdate(qc, (frame.data as MessageUpdatedEvent).message);
+        return;
+      case EventTypes.messageDeleted:
+        applyMessageDeleted(qc, frame.data as MessageDeletedEvent);
+        return;
       case EventTypes.conversationMemberAdded:
       case EventTypes.conversationMemberRemoved:
         void qc.invalidateQueries({ queryKey: chatKeys.members(channelId) });
@@ -383,6 +394,8 @@ export function ChannelView({ channelId }: { channelId: string }) {
   const canPost = channel.isMember && !channel.archivedAt;
   // The server decides per channel (admin, or the channel owner): the menu only mirrors viewerCan.
   const canArchive = channel.viewerCan?.includes("channel.archive") ?? false;
+  // Admins moderate channels they can read (D-01); the server re-decides every delete.
+  const canModerate = channel.viewerCan?.includes("message.delete_any") ?? false;
   const channelTypers = typers;
 
   const intro =
@@ -538,6 +551,8 @@ export function ChannelView({ channelId }: { channelId: string }) {
                   onRetry={retry}
                   highlightId={threadId}
                   intro={intro}
+                  readOnly={!!channel.archivedAt}
+                  canDeleteAny={canModerate}
                 />
               </div>
             )}

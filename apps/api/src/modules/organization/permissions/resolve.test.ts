@@ -102,6 +102,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "work_session.configure": false,
     "device.full_access": false,
     "work_zone.manage": false,
+    "message.delete_any": false,
+    "channel.mention_all": true,
+    "attachment.upload": true,
+    "channel.update": false,
   },
   developer: {
     "org.read": true,
@@ -148,6 +152,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "work_session.configure": true,
     "device.full_access": false,
     "work_zone.manage": false,
+    "message.delete_any": false,
+    "channel.mention_all": true,
+    "attachment.upload": true,
+    "channel.update": false,
   },
   lead: {
     "org.read": true,
@@ -194,6 +202,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "work_session.configure": true,
     "device.full_access": false,
     "work_zone.manage": false,
+    "message.delete_any": false,
+    "channel.mention_all": true,
+    "attachment.upload": true,
+    "channel.update": false,
   },
   admin: {
     "org.read": true,
@@ -240,6 +252,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "work_session.configure": true,
     "device.full_access": false,
     "work_zone.manage": true,
+    "message.delete_any": true,
+    "channel.mention_all": true,
+    "attachment.upload": true,
+    "channel.update": true,
   },
 };
 
@@ -744,6 +760,23 @@ describe("personal bots (D-01) and direct conversations (D-03)", () => {
       });
       expect(decide(admin, own, [], perm).denial).toMatchObject({ reason: "direct_conversation" });
     }
+  });
+
+  it("message.delete_any (D-01): admins moderate channels, never a direct conversation", () => {
+    const publicNotJoined = channelResource({ visibility: "public", archived: false, viewerRole: null });
+    expect(allowed(admin, publicNotJoined, "message.delete_any")).toBe(true);
+    expect(decide(sam, publicNotJoined, [], "message.delete_any").denial).toMatchObject({
+      permission: "message.delete_any",
+      reason: "missing_permission",
+    });
+    const dm = channelResource({ visibility: "private", archived: false, viewerRole: "owner", kind: "dm" });
+    expect(decide(admin, dm, [], "message.delete_any")).toEqual({
+      allowed: false,
+      denial: { permission: "message.delete_any", layer: "resource", reason: "direct_conversation" },
+    });
+    // An allow rule never hands moderation to anyone else (admin surface, non-delegable).
+    const allowAll = [rule({ subjectKind: "everyone", permission: "message.delete_any", effect: "allow" })];
+    expect(allowed(sam, publicNotJoined, "message.delete_any", allowAll)).toBe(false);
   });
 
   it("a non-member admin cannot read someone's DM (private_channel)", () => {

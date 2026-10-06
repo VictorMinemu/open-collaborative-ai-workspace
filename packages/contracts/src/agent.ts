@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { Id, IsoDateTime } from "./common";
+import { Id, IsoDateTime, isReservedHandle } from "./common";
 import { Permission } from "./permissions";
 
 /**
@@ -44,7 +44,8 @@ export const AgentUsername = z
   .toLowerCase()
   .min(2)
   .max(40)
-  .regex(/^[a-z0-9][a-z0-9-_]*$/, "lowercase letters, digits, - and _");
+  .regex(/^[a-z0-9][a-z0-9-_]*$/, "lowercase letters, digits, - and _")
+  .refine((u) => !isReservedHandle(u), { message: "@channel, @here and @everyone are reserved" });
 
 /** Emoji (1-16 chars) or an http(s) image URL. */
 export const AgentAvatar = z
