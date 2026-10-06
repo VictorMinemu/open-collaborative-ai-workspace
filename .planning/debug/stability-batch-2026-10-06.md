@@ -1,5 +1,5 @@
 ---
-status: fixing
+status: awaiting_human_verify
 trigger: "Stability batch: (1) OpenClaw cell stays Offline after the restart-loop breaker; (2) flaky CI e2e hang in codex-subscription.spec.ts; (3) toasts cover the composer send button at 1440"
 created: 2026-10-05T22:00:00Z
 updated: 2026-10-06T00:30:00Z
@@ -70,6 +70,13 @@ bounded to 500 chars, never the account's token reader), so `channels.status` (a
 the refusal; the host's channels.status now mirrors the dist projection (the breaker contract test went red with it,
 green with the plugin snapshot); the guard logs every non-running outcome.
 
+CI evidence (run 37412787331, all 5 jobs green; cell smoke job 112104722296): `restart-loop breaker tripped: 3 unclean
+boot(s)` 04:24:55 → `[ocw] channel autostart suppressed by crash-loop breaker` 04:25:05.8 → `[plugins] [ocw] OpenClaw's
+restart-loop breaker suppressed this channel's auto-start (3 unclean boots within 300 s)` 04:25:11.9 → `[plugins] [ocw]
+started the ocw channel after the restart-loop breaker back-off (OpenClaw manual start)` 04:25:17.0 → `[ocw] agent
+channel connected` 04:25:22.5; fake API runtime report `{"reason":"restart_loop_breaker","detail":"3 unclean restarts
+within 5 min",…}`; PASS. The in-process `channels.start` (callGatewayFromCli, operator.admin) works in the real gateway.
+
 ## 2. "Flaky CI e2e hang" in codex-subscription.spec.ts — FIXED (it was not a test hang)
 
 Evidence: the incident is run 37341305017 attempt 1, job "e2e (Playwright, desktop)" (16:30:07 → cancelled 17:00:25).
@@ -122,8 +129,9 @@ root_cause: (1) OpenClaw's restart-loop breaker suppresses the cell's only chann
   or reported it; (2) an unbounded apt step consumed the e2e job budget, the cancellation looked like a hung spec;
   (3) bottom-right toaster over a bottom-pinned composer at 1440.
 fix: see sections 1-3.
-verification: pnpm typecheck --force (8/8); pnpm verify: lint clean, 113 files / 1480 tests; openclaw-channel 14 files /
-  200 tests; node --test infra 71/71; isolated e2e full suite 94 passed, 1 skipped (realtime-latency mobile, pre-existing)
+verification: CI run 37412787331 green (verify, images, cell smoke incl. `breaker`, e2e desktop 48 passed in 9.1 min
+  with the bounded install step fetching in 2 s, e2e mobile); locally pnpm typecheck --force (8/8); pnpm verify: lint clean, 113 files / 1480 tests; openclaw-channel 15 files /
+  203 tests; node --test infra 71/71; isolated e2e full suite 94 passed, 1 skipped (realtime-latency mobile, pre-existing)
   in 11.9 min incl. bots.spec paused step, codex-subscription and work-zone-slash at 1440 and 390; screenshots
   wz-slash-1440(-dark), wz-slash-390, bots-runtime-paused-1440/390 checked. Cell smoke `breaker` runs in CI only.
 files_changed: [packages/contracts/src/agent.ts, packages/contracts/src/agent-channel.ts,
