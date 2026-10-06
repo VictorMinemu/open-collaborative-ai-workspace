@@ -368,3 +368,87 @@ test("Settings › Notifications, pause from the user menu, all new messages, an
   await api.dispose();
   await admin.dispose();
 });
+
+/** A stand-in for the desktop preload bridge (`window.ocwDesktop`) that records the badge counts it is given. */
+function installDesktopBridge() {
+  window.__badge = [];
+  const status = {
+    state: "offline",
+    label: "Runtime offline",
+    paired: false,
+    deviceName: null,
+    projects: 0,
+  };
+  Object.defineProperty(window, "ocwDesktop", {
+    configurable: true,
+    value: Object.freeze({
+      isDesktop: true,
+      platform: "darwin",
+      status: async () => status,
+      addProject: async () => ({ ok: false, canceled: true }),
+      listProjects: async () => [],
+      onStatus: () => () => {},
+      setBadgeCount: async (n: number) => {
+        window.__badge.push(n);
+      },
+    }),
+  });
+}
+
+test("inside the desktop app the badge mirrors the unread mention count and the desktop toggle applies", async ({
+  browser,
+}, info) => {
+  test.setTimeout(150_000);
+  const project = info.project.name;
+  const who = MEMBER[project] ?? (MEMBER.desktop as Actor);
+  const handle = handleOf(who);
+
+  const admin = await apiAs(ADMIN);
+  await ensureMember(admin, who, "developer");
+  const api = await apiAs(who);
+  await resetPrefs(api);
+  expect((await api.post("/api/v1/notifications/read", { data: { all: true } })).ok()).toBe(true);
+  const random = await freshChannel(admin, [api], "random");
+  const design = await freshChannel(admin, [api], "design");
+
+  const s = await openAs(browser, who, project);
+  await s.context.grantPermissions(["notifications"]);
+  await s.context.addInitScript(installRecorder);
+  await s.context.addInitScript(installDesktopBridge);
+  const page = s.page;
+  await page.goto(`/chat/${random.id}`);
+  await expect(page.getByTestId("channel-view")).toHaveAttribute("data-channel-id", random.id);
+  const badge = () => page.evaluate(() => window.__badge.at(-1));
+  await expect.poll(badge).toBe(0);
+
+  // Two mentions in #design: the title and the badge both say 2; the desktop toggle lets them pop.
+  await postAs(admin, design.id, `@${handle} first`);
+  await postAs(admin, design.id, `@${handle} second`);
+  await expect(page).toHaveTitle(/^\(2\) /, { timeout: 5_000 });
+  await expect.poll(badge, { timeout: 5_000 }).toBe(2);
+  await expect.poll(async () => (await notes(page)).length, { timeout: 5_000 }).toBe(2);
+
+  // Desktop notifications off: the badge still counts, nothing pops (the web toggle does not apply here).
+  expect(
+    (await api.put("/api/v1/notification-prefs", { data: { desktopEnabled: false, webEnabled: true } })).ok(),
+  ).toBe(true);
+  await page.reload();
+  await expect(page.getByTestId("channel-view")).toHaveAttribute("data-channel-id", random.id);
+  await expect.poll(badge, { timeout: 5_000 }).toBe(2);
+  const third = await postAs(admin, design.id, `@${handle} third`);
+  await notificationOf(api, third.id);
+  await expect.poll(badge, { timeout: 5_000 }).toBe(3);
+  await page.waitForTimeout(1_000);
+  expect(await notes(page)).toEqual([]);
+
+  // Reading #design clears both.
+  await page.goto(`/chat/${design.id}`);
+  await expect(page.getByTestId("channel-view")).toHaveAttribute("data-channel-id", design.id);
+  await expect.poll(badge, { timeout: 5_000 }).toBe(0);
+  await expect(page).not.toHaveTitle(/^\(\d+\+?\) /);
+
+  await s.context.close();
+  await resetPrefs(api);
+  await api.dispose();
+  await admin.dispose();
+});

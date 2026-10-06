@@ -47,7 +47,8 @@ const kindOf = (k: string): "channel" | "dm" | "group" =>
  * sidebar (same snapshot cursor, so neither skips the other's frames) and keeps the inbox cache live everywhere.
  * The server decided `popup` (DND, mute, level); here only the desktop/web toggle and "already in front" apply
  * (`shouldPopup`). Each pop-up is tagged with its notification id and shown once per tab (Pitfall 12). Level "all"
- * channels arrive as ephemeral `message.notify` (tag = message id). It also keeps the tab title count.
+ * channels arrive as ephemeral `message.notify` (tag = message id). It also keeps the tab title count and the desktop
+ * app's dock/taskbar badge.
  */
 export function OsNotifier(): null {
   const qc = useQueryClient();
@@ -163,12 +164,15 @@ export function OsNotifier(): null {
     apply();
     const observer = new MutationObserver(apply);
     observer.observe(document.head, { subtree: true, childList: true, characterData: true });
+    // The desktop app mirrors it on the dock/taskbar badge (one validated IPC channel; older builds lack it).
+    void window.ocwDesktop?.setBadgeCount?.(count).catch(() => {});
     return () => observer.disconnect();
   }, [count]);
-  // Signing out unmounts the shell: leave a clean title behind.
+  // Signing out unmounts the shell: leave a clean title and badge behind.
   useEffect(
     () => () => {
       document.title = titleWithCount(document.title, 0);
+      void window.ocwDesktop?.setBadgeCount?.(0).catch(() => {});
     },
     [],
   );

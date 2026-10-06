@@ -41,6 +41,9 @@ export type EnrollArgs = z.infer<typeof EnrollArgs>;
 
 export const FinishArgs = z.object({ skipPairing: z.boolean() }).strict();
 
+/** `setBadgeCount(n)`: the unread mention count for the dock/taskbar badge, a whole number 0–9999 (0 clears). */
+export const SetBadgeCountArgs = z.number().int().min(0).max(9999);
+
 /** Parse IPC args, turning Zod errors into a short message (never echo the payload back). */
 export function parseArgs<T>(schema: z.ZodType<T>, value: unknown): T {
   const res = schema.safeParse(value);
