@@ -18,6 +18,7 @@ import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useMediaQuery } from "@/hooks/use-media-query";
+import { useToastClearance } from "@/hooks/use-toast-clearance";
 import { errorMessage, isApiError } from "@/lib/api";
 import { useMe, useMembers } from "@/lib/queries";
 import { type LiveSession, useLiveSession } from "@/lib/use-live-session";
@@ -118,6 +119,10 @@ function LoadedSession({ state, viewerCan }: { state: LiveSession; viewerCan: re
   const [sheet, setSheet] = useState<PanelTab | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
+  // Toasts stack above the whole bottom dock: never over the composer's send button (03.2 review note 3) nor over
+  // the approval banner's decisions (a hovered toast never times out, so it kept "Allow for session" covered).
+  const dock = useRef<HTMLDivElement>(null);
+  useToastClearance(dock);
 
   const setPanel = useCallback((t: PanelTab | null) => {
     setPanelState(t);
@@ -201,7 +206,7 @@ function LoadedSession({ state, viewerCan }: { state: LiveSession; viewerCan: re
               }
             />
           </div>
-          <div className="grid grid-cols-[minmax(0,1fr)] gap-3 pt-1">
+          <div ref={dock} className="grid grid-cols-[minmax(0,1fr)] gap-3 pt-1">
             {pending[0] ? (
               <ApprovalBanner
                 sessionId={session.id}
