@@ -203,6 +203,8 @@ export function registerDeviceLink(app: App, core: Core, hub: DeviceHub): void {
             return hub.sessionHandler?.onEvent(device, frame);
           case "diff.result":
             return hub.onDiffResult(device, frame);
+          case "title.result":
+            return hub.onTitleResult(device, frame);
           case "capabilities":
             return hub.onCapabilities(device, frame);
         }
