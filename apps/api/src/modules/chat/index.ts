@@ -15,6 +15,7 @@ import {
   IdParams,
   MAX_GROUP_PARTICIPANTS,
   MarkReadRequest,
+  MarkUnreadRequest,
   MemberParams,
   Message,
   MessagePage,
@@ -207,14 +208,14 @@ export function createChatModule(core: Core): ApiModule {
    * Moves the caller's read cursor of a readable conversation (CHAT-09, Pitfall 2) and tells the caller's other tabs
    * and devices with `conversation.read` on `user:<me>` (P-04). `forward` keeps the highest cursor (read) and clears
    * the notifications it covers through the chat-events seam; `exact` sets it (mark unread) and never un-reads a
-   * notification. A non-member has no cursor (nothing moves); a call that changes nothing announces nothing.
+   * notification. A non-member has no cursor (nothing moves: false); a call that changes nothing announces nothing.
    */
   async function moveReadCursor(
     tx: Tx,
     userId: string,
     conversationId: string,
     to: { forward: number } | { exact: number },
-  ): Promise<void> {
+  ): Promise<boolean> {
     const mine = and(
       eq(conversationMembers.conversationId, conversationId),
       eq(conversationMembers.memberKind, "user"),
@@ -226,7 +227,7 @@ export function createChatModule(core: Core): ApiModule {
       .from(conversationMembers)
       .where(mine)
       .for("update");
-    if (!row) return;
+    if (!row) return false;
     const before = (await unreadCountsFor(tx, userId, [conversationId])).get(conversationId);
     const prev = Number(row.lastReadSeq);
     const next = "forward" in to ? Math.max(prev, to.forward) : to.exact;
@@ -246,7 +247,7 @@ export function createChatModule(core: Core): ApiModule {
       before?.unreadCount === after.unreadCount &&
       before?.mentionCount === after.mentionCount
     ) {
-      return;
+      return true;
     }
     const [latest] = await tx
       .select({ seq: sql<number>`coalesce(max(${messages.seq}), 0)`.mapWith(Number) })
@@ -259,6 +260,7 @@ export function createChatModule(core: Core): ApiModule {
       latestMessageSeq: latest?.seq ?? 0,
     };
     await core.realtime.appendEvent(tx, `user:${userId}`, EventTypes.conversationRead, ev);
+    return true;
   }
 
   /**
@@ -1199,6 +1201,45 @@ export function createChatModule(core: Core): ApiModule {
             );
             // greatest(...): a read never moves the cursor backwards (mark unread has its own route).
             await moveReadCursor(tx, authOf(req).userId, conv.id, { forward: req.body.seq });
+            return { ok: true as const };
+          }),
+      );
+
+      /**
+       * CHAT-09 (D-07, Pitfall 2): mark a conversation unread from one of its top-level messages. The caller's cursor
+       * becomes exactly that message's seq - 1 (backwards included). Readable first (hidden = missing = 404); the
+       * message must belong to it (otherwise 404, T-04-10-03); a thread reply is 400 `not_top_level`; only the
+       * caller's own membership moves (T-04-10-02) and a non-member has none (400 `not_a_member`). Never un-reads a
+       * notification; `conversation.read` tells the caller's other tabs and devices.
+       */
+      app.post(
+        "/conversations/:id/unread",
+        {
+          config: { authz: "user" },
+          preHandler: requireUser,
+          schema: { tags, params: IdParams, body: MarkUnreadRequest, response: { 200: Ok } },
+        },
+        async (req) =>
+          core.db.withTenant(tenant(req), async (tx) => {
+            const { conv } = await readableChannel(
+              req,
+              tx,
+              await getConversation(tx, req.params.id, MESSAGE_KINDS),
+              "Conversation not found",
+            );
+            const message = await getMessage(tx, req.body.messageId);
+            if (!message || message.conversationId !== conv.id) throw notFound("Message not found");
+            if (message.threadId) {
+              throw badRequest(
+                "Mark a message of the conversation unread, not a thread reply",
+                "not_top_level",
+              );
+            }
+            const moved = await moveReadCursor(tx, authOf(req).userId, conv.id, {
+              exact: Math.max(0, Number(message.seq) - 1),
+            });
+            if (!moved)
+              throw badRequest("Join the conversation to keep track of what you read", "not_a_member");
             return { ok: true as const };
           }),
       );

@@ -359,3 +359,93 @@ describe("the Threads view counts every unread thread, not only the first page (
     expect(next.unreadThreads).toBeUndefined();
   });
 });
+
+describe("mark unread moves the cursor backwards (Task 2, D-07, Pitfall 2, T-04-10-02/03)", () => {
+  const unread = (as: TestClient, conv: string, messageId: string) =>
+    as.request("POST", `/api/v1/conversations/${conv}/unread`, { messageId });
+
+  let room: string;
+  const five: Json[] = [];
+
+  it("after reading 5 of 5, unread from #3 sets last_read_seq to #3.seq - 1: 3 unread, announced on user:<sam>", async () => {
+    room = await channel("unread-room", "public", [sam]);
+    for (const i of [1, 2, 3, 4, 5]) five.push(await post(ada, room, `note ${i}`));
+    const last = five[4] as Json;
+    await ok(read(sam, room, last.seq));
+    expect(await countsOf(sam, room)).toEqual({ unreadCount: 0, mentionCount: 0 });
+    const third = five[2] as Json;
+    await ok(unread(sam, room, third.id));
+    const c = await channelOf(sam, room);
+    expect(c).toMatchObject({ lastReadSeq: third.seq - 1, unreadCount: 3, mentionCount: 0 });
+    const ev = (await events(samId, "conversation.read")).filter((e) => e.conversationId === room).at(-1);
+    expect(ev).toMatchObject({ lastReadSeq: third.seq - 1, unreadCount: 3, mentionCount: 0 });
+    // A plain read moves it forward again (greatest), never back.
+    await ok(read(sam, room, (five[0] as Json).seq));
+    expect((await channelOf(sam, room))?.lastReadSeq).toBe(third.seq - 1);
+  });
+
+  it("it never un-reads a notification: a read mention stays read", async () => {
+    const m = await post(ada, room, "@sam a mention to read");
+    await ok(read(sam, room, m.seq));
+    expect((await countsOf(sam, room)).mentionCount).toBe(0);
+    await ok(unread(sam, room, m.id));
+    expect(await countsOf(sam, room)).toEqual({ unreadCount: 1, mentionCount: 0 });
+    expect(await unreadNotifications(samId, room)).toEqual([]);
+  });
+
+  it("a thread reply is 400 not_top_level; another conversation's message and a random id are 404", async () => {
+    const reply = await post(ada, room, "a reply", (five[0] as Json).id);
+    const r400 = await unread(sam, room, reply.id);
+    expect(r400.status).toBe(400);
+    expect((r400.body as Json).error.code).toBe("not_top_level");
+    const elsewhere = await post(ada, generalId, "in general");
+    await ok(unread(sam, room, elsewhere.id), 404);
+    await ok(unread(sam, room, randomUUID()), 404);
+  });
+
+  it("a hidden conversation is 404 and changes nothing; org B is 404", async () => {
+    const secret = await channel("unread-secret", "private");
+    const m = await post(ada, secret, "quiet");
+    await ok(read(ada, secret, m.seq));
+    const adaBefore = (await channelOf(ada, secret))?.lastReadSeq;
+    const samEvents = (await events(samId, "conversation.read")).length;
+    await ok(unread(sam, secret, m.id), 404);
+    await ok(unread(eve, room, (five[0] as Json).id), 404);
+    // Nobody else's cursor moved, and Sam's devices heard nothing.
+    expect((await channelOf(ada, secret))?.lastReadSeq).toBe(adaBefore);
+    expect((await events(samId, "conversation.read")).length).toBe(samEvents);
+  });
+
+  it("a public channel Sam has not joined is 400 not_a_member (no cursor to move)", async () => {
+    const open = await channel("unread-open", "public");
+    const m = await post(ada, open, "hello");
+    const r = await unread(sam, open, m.id);
+    expect(r.status).toBe(400);
+    expect((r.body as Json).error.code).toBe("not_a_member");
+  });
+
+  it("works the same in a DM and in a group", async () => {
+    const dm = await ok(ada.request("POST", "/api/v1/dms", { participants: [{ kind: "user", id: samId }] }));
+    const d1 = await post(ada, dm.id, "dm one");
+    const d2 = await post(ada, dm.id, "dm two");
+    await ok(sam.request("POST", `/api/v1/conversations/${dm.id}/read`, { seq: d2.seq }));
+    expect(await dmCountsOf(sam, dm.id)).toEqual({ unreadCount: 0, mentionCount: 0 });
+    await ok(unread(sam, dm.id, d1.id));
+    expect(await dmCountsOf(sam, dm.id)).toEqual({ unreadCount: 2, mentionCount: 0 });
+
+    const group = await ok(
+      ada.request("POST", "/api/v1/dms", {
+        participants: [
+          { kind: "user", id: samId },
+          { kind: "user", id: alexId },
+        ],
+      }),
+    );
+    const g1 = await post(alex, group.id, "group one");
+    await ok(sam.request("POST", `/api/v1/conversations/${group.id}/read`, { seq: g1.seq }));
+    await ok(unread(sam, group.id, g1.id));
+    expect((await dmCountsOf(sam, group.id)).unreadCount).toBe(1);
+    // Another organization never reaches it.
+    await ok(unread(eve, group.id, g1.id), 404);
+  });
+});

@@ -910,6 +910,9 @@ export function bumpMention(
 export function applyConversationRead(qc: QueryClient, ev: ConversationReadEvent) {
   const row = badgeRowOf(qc, ev.conversationId);
   if (!row) return;
+  // Read past this tab's "marked unread" point somewhere else: the hold here is over.
+  const hold = readHoldOf(ev.conversationId);
+  if (hold !== null && ev.lastReadSeq > hold) setReadHold(ev.conversationId, null);
   patchBadges(qc, ev.conversationId, () => ({
     lastReadSeq: ev.lastReadSeq,
     unreadCount: ev.unreadCount,
@@ -918,20 +921,43 @@ export function applyConversationRead(qc: QueryClient, ev: ConversationReadEvent
   if (ev.latestMessageSeq !== undefined && row.latestMessageSeq > ev.latestMessageSeq) refreshCountsSoon(qc);
 }
 
-// The per-tab hold of a conversation marked unread: conversation id → the cursor it was set to.
-const readHolds = new Map<string, number>();
+// The per-tab hold of a conversation marked unread: conversation id → the cursor it was set to. Kept in
+// sessionStorage, so it is per tab and survives a reload of that tab.
+const HOLDS_KEY = "ocw.chat.readHolds";
+let readHolds: Map<string, number> | null = null;
 const holdListeners = new Set<() => void>();
 
+function holds(): Map<string, number> {
+  if (readHolds) return readHolds;
+  readHolds = new Map();
+  try {
+    const raw: unknown = JSON.parse(window.sessionStorage.getItem(HOLDS_KEY) ?? "{}");
+    if (raw && typeof raw === "object") {
+      for (const [k, v] of Object.entries(raw)) if (typeof v === "number") readHolds.set(k, v);
+    }
+  } catch {
+    // No storage (or a corrupt value): holds live for this page only.
+  }
+  return readHolds;
+}
+
 export function readHoldOf(id: string): number | null {
-  return readHolds.get(id) ?? null;
+  if (typeof window === "undefined") return null;
+  return holds().get(id) ?? null;
 }
 
 /** Sets (a cursor) or clears (null) the hold of a conversation in this tab. */
 export function setReadHold(id: string, cursor: number | null) {
+  const map = holds();
   if (cursor === null) {
-    if (!readHolds.delete(id)) return;
+    if (!map.delete(id)) return;
   } else {
-    readHolds.set(id, cursor);
+    map.set(id, cursor);
+  }
+  try {
+    window.sessionStorage.setItem(HOLDS_KEY, JSON.stringify(Object.fromEntries(map)));
+  } catch {
+    // Private mode / quota: the hold still applies for this page.
   }
   for (const l of holdListeners) l();
 }

@@ -1,6 +1,6 @@
 import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
 import { type Actor, apiAs, ensureMember, openAs } from "../support/actors";
-import { freshChannel, postAs } from "../support/chat";
+import { freshChannel, messageRow, openMessageActions, postAs } from "../support/chat";
 import { ADMIN, shot } from "./env";
 
 /**
@@ -120,6 +120,108 @@ test("live unread and mention badges; opening a conversation clears them on the 
       { timeout: 5_000 },
     )
     .toBe(0);
+
+  await a.context.close();
+  await api.dispose();
+  await admin.dispose();
+});
+
+test("mark unread from a message holds the conversation unread here and on the other tab until read", async ({
+  browser,
+}, info) => {
+  test.setTimeout(150_000);
+  const project = info.project.name;
+  const mobile = project === "mobile";
+  const size = mobile ? "390" : "1440";
+  const who = MEMBER[project] ?? (MEMBER.desktop as Actor);
+
+  const admin = await apiAs(ADMIN);
+  await ensureMember(admin, who, "developer");
+  const api = await apiAs(who);
+  const random = await freshChannel(admin, [api], "random");
+  const msgs: Array<{ id: string; seq: number }> = [];
+  for (const body of ["Agenda for Friday", "Item two: budget", "Item three: hiring", "Item four: offsite"]) {
+    msgs.push(await postAs(admin, random.id, body));
+  }
+  const second = msgs[1] as { id: string; seq: number };
+
+  const a = await openAs(browser, who, project);
+  const tabA = a.page;
+  const landing = tabA.url();
+  const tabB = await a.context.newPage();
+  await tabB.goto(landing);
+  await expect(tabB.getByTestId("channel-view")).toBeVisible();
+
+  // ---- tab A reads #random, then marks it unread from message 2
+  await tabA.goto(`/chat/${random.id}`);
+  await expect(messageRow(tabA, second.id)).toBeVisible();
+  let listB = await openSidebar(tabB, mobile);
+  await expect(badgeOf(channelLink(listB, random.name))).toHaveCount(0, { timeout: 5_000 });
+  await closeSidebar(tabB, mobile);
+
+  const actions = await openMessageActions(tabA, second.id, project);
+  await actions
+    .getByTestId(mobile ? "mark-unread" : "message-more")
+    .first()
+    .click();
+  if (!mobile) await tabA.getByTestId("mark-unread").click();
+
+  // The divider sits right above message 2; staying here does not read it again.
+  const divider = tabA.getByTestId("new-messages-divider");
+  await expect(divider).toBeVisible();
+  const next = divider.locator("xpath=following-sibling::*[1]");
+  await expect(next).toHaveAttribute("data-message-id", second.id);
+  // A calm capture: no hover toolbar, no focused trigger.
+  await tabA.mouse.move(1, 1);
+  await tabA.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await bothThemes(tabA, `mark-unread-${size}`);
+  await tabA.waitForTimeout(1_500);
+
+  // ---- tab B shows the badge again (3 unread: messages 2, 3 and 4)
+  listB = await openSidebar(tabB, mobile);
+  await expect(badgeOf(channelLink(listB, random.name))).toHaveAttribute("data-count", "3", {
+    timeout: 5_000,
+  });
+  await closeSidebar(tabB, mobile);
+
+  // ---- leaving and coming back (in the app, then a reload) keeps it unread
+  let listA = await openSidebar(tabA, mobile);
+  await channelLink(listA, "general").click();
+  await expect(tabA).toHaveURL(/\/chat\/[0-9a-f-]{36}$/);
+  await expect(tabA).not.toHaveURL(new RegExp(random.id));
+  listA = await openSidebar(tabA, mobile);
+  await expect(badgeOf(channelLink(listA, random.name))).toHaveAttribute("data-count", "3");
+  await channelLink(listA, random.name).click();
+  await expect(messageRow(tabA, second.id)).toBeVisible();
+  await tabA.reload();
+  await expect(messageRow(tabA, second.id)).toBeVisible();
+  await expect(tabA.getByTestId("new-messages-divider")).toBeVisible();
+  await tabA.waitForTimeout(1_500);
+  listB = await openSidebar(tabB, mobile);
+  await expect(badgeOf(channelLink(listB, random.name))).toHaveAttribute("data-count", "3");
+  await closeSidebar(tabB, mobile);
+
+  // ---- "Mark as read" in the header menu reads it everywhere
+  await tabA.getByTestId("conversation-notify-menu").click();
+  await tabA.getByTestId("mark-read").click();
+  listB = await openSidebar(tabB, mobile);
+  await expect(badgeOf(channelLink(listB, random.name))).toHaveCount(0, { timeout: 5_000 });
+  await closeSidebar(tabB, mobile);
+
+  // ---- "Mark as unread" from the header marks the latest message unread; reaching the bottom reads it again
+  await tabA.getByTestId("conversation-notify-menu").click();
+  await tabA.getByTestId("mark-unread-latest").click();
+  listB = await openSidebar(tabB, mobile);
+  await expect(badgeOf(channelLink(listB, random.name))).toHaveAttribute("data-count", "1", {
+    timeout: 5_000,
+  });
+  await closeSidebar(tabB, mobile);
+  if (!mobile) {
+    await tabA.getByTestId("channel-scroll").hover();
+    await tabA.mouse.wheel(0, 400);
+    listB = await openSidebar(tabB, mobile);
+    await expect(badgeOf(channelLink(listB, random.name))).toHaveCount(0, { timeout: 5_000 });
+  }
 
   await a.context.close();
   await api.dispose();
