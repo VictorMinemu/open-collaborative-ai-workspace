@@ -1,5 +1,6 @@
 import {
   type AiBackend,
+  AiMyUsageReportQuery,
   AiUsageReport,
   AiUsageReportQuery,
   type AiUsageReportRow,
@@ -21,6 +22,7 @@ import { usageToday } from "./limits";
  *
  *   GET /me/ai-usage/today  → the caller's own counters for today against the organization's caps (only the caller's
  *                             rows; RLS isolates organizations).
+ *   GET /me/ai-usage/report → the caller's own records over the last `days`, by model only (`groupBy=user` is a 400).
  *   GET /ai-usage/report    → the organization's usage over the last `days` (1-90, default 30) UTC days, by member or
  *                             by model (`provider.manage`, T-05-09-01).
  */
@@ -39,6 +41,22 @@ export function registerUsageRoutes(app: App, ctx: { core: Core }): void {
         await perms.assertCan(req, tx, "ai_chat.use", orgResource());
         return usageToday(tx, authOf(req).userId, await loadAiChatPolicy(tx));
       }),
+  );
+
+  app.get(
+    "/me/ai-usage/report",
+    {
+      config: { authz: "user" },
+      preHandler: core.identity.requireUser,
+      schema: { tags: ["ai-chat"], querystring: AiMyUsageReportQuery, response: { 200: AiUsageReport } },
+    },
+    async (req) => {
+      const q = req.query as AiMyUsageReportQuery;
+      return core.db.withTenant(tenant(req), async (tx) => {
+        await perms.assertCan(req, tx, "ai_chat.use", orgResource());
+        return usageReport(tx, { days: q.days, groupBy: "model", userId: authOf(req).userId });
+      });
+    },
   );
 
   app.get(

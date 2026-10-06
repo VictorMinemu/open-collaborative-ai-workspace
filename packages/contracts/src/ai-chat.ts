@@ -386,6 +386,12 @@ export const AiUsageReportQuery = z.object({
 });
 export type AiUsageReportQuery = z.infer<typeof AiUsageReportQuery>;
 
+/** A member's own report (`GET /me/ai-usage/report`): by model only, never by member (05-09, T-05-09-01). */
+export const AiMyUsageReportQuery = AiUsageReportQuery.extend({
+  groupBy: z.literal("model").default("model"),
+});
+export type AiMyUsageReportQuery = z.infer<typeof AiMyUsageReportQuery>;
+
 export const AiUsageReportRow = BackendTotals.extend({
   key: z.string(),
   label: z.string(),
