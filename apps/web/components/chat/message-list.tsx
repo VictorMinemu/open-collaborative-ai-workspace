@@ -1,6 +1,6 @@
 "use client";
 
-import type { Message, MessageAuthor } from "@ocw/contracts";
+import type { Attachment, Message, MessageAuthor } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Bookmark, Pin, RotateCw, Trash2 } from "lucide-react";
 import { Fragment, memo, type ReactNode, useEffect, useRef, useState } from "react";
@@ -25,6 +25,8 @@ import {
   unsaveMessage,
 } from "@/lib/chat-queries";
 import { cn, relativeTime } from "@/lib/utils";
+import { MessageAttachments } from "./attachments/attachment-grid";
+import { Lightbox } from "./attachments/lightbox";
 import { EmojiPicker } from "./emoji-picker";
 import { Markdown } from "./markdown";
 import {
@@ -45,6 +47,8 @@ export interface PendingMessage {
   threadRootId: string | null;
   failed: boolean;
   createdAt: string;
+  /** Verified uploads sent with the message (CHAT-12); shown in the optimistic row and resent on retry. */
+  attachments?: Attachment[];
 }
 
 const GROUP_WINDOW_MS = 5 * 60_000;
@@ -298,6 +302,8 @@ const MessageRow = memo(function MessageRow({
   const [confirmUsed, setConfirmUsed] = useState(false);
   // The full picker opened from the touch sheet (the toolbar and the reaction bar anchor their own).
   const [pickerOpen, setPickerOpen] = useState(false);
+  // The image viewer (CHAT-12), opened on one of this message's images.
+  const [lightbox, setLightbox] = useState<number | null>(null);
   const qc = useQueryClient();
   const { copy } = useCopy();
   const deleted = !!message.deletedAt;
@@ -514,9 +520,10 @@ const MessageRow = memo(function MessageRow({
             <Markdown body={message.body} />
             <EditedMarker editedAt={message.editedAt} />
           </div>
-        ) : (
+        ) : message.body ? (
           <Markdown body={message.body} />
-        )}
+        ) : null}
+        {deleted ? null : <MessageAttachments attachments={message.attachments} onOpenImage={setLightbox} />}
         {editing ? null : <ReactionBar message={message} meId={meId} canReact={reactable} onToggle={react} />}
         {showThreadSummary && onOpenThread ? (
           <ThreadSummary message={message} typers={typers} onOpen={() => onOpenThread(message.id)} />
@@ -532,6 +539,13 @@ const MessageRow = memo(function MessageRow({
         />
       ) : null}
       {pickerOpen ? <EmojiPicker open onOpenChange={setPickerOpen} onPick={react} /> : null}
+      {lightbox !== null && !deleted ? (
+        <Lightbox
+          images={(message.attachments ?? []).filter((a) => a.isImage && a.previewUrl)}
+          index={lightbox}
+          onClose={() => setLightbox(null)}
+        />
+      ) : null}
       {confirmUsed ? (
         <DeleteMessageDialog
           message={message}
@@ -577,7 +591,8 @@ function PendingRow({
             <span className="text-muted-foreground text-xs">Sending…</span>
           </div>
         )}
-        <Markdown body={pending.body} />
+        {pending.body ? <Markdown body={pending.body} /> : null}
+        <MessageAttachments attachments={pending.attachments} onOpenImage={() => {}} />
         {pending.failed ? (
           <button
             type="button"

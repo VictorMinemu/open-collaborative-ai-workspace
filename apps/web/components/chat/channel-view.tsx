@@ -2,6 +2,7 @@
 
 import {
   type AgentTypingEvent,
+  type Attachment,
   ChannelSummary,
   EphemeralTypes,
   EventTypes,
@@ -45,6 +46,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { api, errorMessage, isApiError } from "@/lib/api";
+import { useAttachmentsConfig } from "@/lib/attachment-queries";
 import {
   applyMessage,
   applyMessageDeleted,
@@ -68,8 +70,10 @@ import { parsePermalink, permalinkPath } from "@/lib/permalink";
 import { useMe } from "@/lib/queries";
 import { useRealtime, useTopic } from "@/lib/realtime";
 import { formatDate } from "@/lib/utils";
+import { DropZone } from "./attachments/drop-zone";
 import { ChannelIcon } from "./chat-sidebar";
 import {
+  attachmentLimitsHint,
   Composer,
   type ComposerApi,
   ComposerHint,
@@ -164,6 +168,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
   const [membersOpen, setMembersOpen] = useState(false);
   const [moveOpen, setMoveOpen] = useState(false);
   const composerApi = useRef<ComposerApi | null>(null);
+  const filesConfig = useAttachmentsConfig();
   const join = useChannelAction("join");
   const leave = useChannelAction("leave");
   const archive = useChannelAction("archive");
@@ -381,6 +386,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
           body: p.body,
           clientMessageId: p.clientMessageId,
           ...(p.threadRootId ? { threadRootId: p.threadRootId } : {}),
+          ...(p.attachments?.length ? { attachmentIds: p.attachments.map((a) => a.id) } : {}),
         });
         applyMessage(qc, msg);
         setPending((prev) => prev.filter((x) => x.clientMessageId !== p.clientMessageId));
@@ -400,13 +406,14 @@ export function ChannelView({ channelId }: { channelId: string }) {
   );
 
   const send = useCallback(
-    (body: string, threadRootId: string | null = null) => {
+    (body: string, threadRootId: string | null = null, attachments: Attachment[] = []) => {
       const p: PendingMessage = {
         clientMessageId: newId(),
         body,
         threadRootId,
         failed: false,
         createdAt: new Date().toISOString(),
+        ...(attachments.length ? { attachments } : {}),
       };
       if (!threadRootId) {
         // Posting from old history returns to the live tail, where the message appears.
@@ -501,6 +508,8 @@ export function ChannelView({ channelId }: { channelId: string }) {
   const memberList = members.data?.members ?? [];
   const bots = memberList.filter((m) => m.kind === "agent");
   const canPost = channel.isMember && !channel.archivedAt;
+  // Files go to the composer, so the pane takes drops only where it shows (P-10: none without storage).
+  const canDrop = canPost && filesConfig.data?.enabled === true;
   // The server decides per channel (admin, or the channel owner): the menu only mirrors viewerCan.
   const canArchive = channel.viewerCan?.includes("channel.archive") ?? false;
   // CHAT-02: the owner or an admin regroups the channel under another unit (#general stays organization-wide).
@@ -644,111 +653,119 @@ export function ChannelView({ channelId }: { channelId: string }) {
             }
           />
 
-          <div className="relative flex min-h-0 flex-1 flex-col">
-            <div
-              ref={scroll.ref}
-              onScroll={onScroll}
-              className="scrollbar-thin flex min-h-0 flex-1 flex-col overflow-y-auto"
-              data-testid="channel-scroll"
-              data-detached={detached ? "true" : undefined}
-            >
-              {messages.isPending || win.loading ? (
-                <MessagesSkeleton />
-              ) : messages.isError || win.error ? (
-                <EmptyState
-                  icon={Hash}
-                  title="Couldn't load messages"
-                  description={errorMessage(messages.error ?? win.error)}
-                >
-                  <Button
-                    variant="outline"
-                    onClick={() => (messages.isError ? void messages.refetch() : win.retry())}
+          <DropZone
+            conversationLabel={`#${channel.name}`}
+            enabled={canDrop}
+            hint={attachmentLimitsHint(filesConfig.data)}
+            onFiles={(files) => composerApi.current?.addFiles(files)}
+          >
+            <div className="relative flex min-h-0 flex-1 flex-col">
+              <div
+                ref={scroll.ref}
+                onScroll={onScroll}
+                className="scrollbar-thin flex min-h-0 flex-1 flex-col overflow-y-auto"
+                data-testid="channel-scroll"
+                data-detached={detached ? "true" : undefined}
+              >
+                {messages.isPending || win.loading ? (
+                  <MessagesSkeleton />
+                ) : messages.isError || win.error ? (
+                  <EmptyState
+                    icon={Hash}
+                    title="Couldn't load messages"
+                    description={errorMessage(messages.error ?? win.error)}
                   >
-                    Try again
-                  </Button>
-                </EmptyState>
-              ) : (
-                <div className="mt-auto">
-                  {loadingOlder ? (
-                    <div className="flex justify-center py-3 text-muted-foreground">
-                      <Spinner />
-                    </div>
-                  ) : null}
-                  <MessageList
-                    messages={shown?.messages ?? []}
-                    pending={detached ? [] : channelPending}
-                    me={me}
-                    typers={channelTypers}
-                    onOpenThread={openThread}
-                    onRetry={retry}
-                    highlightId={threadId}
-                    anchorId={threadId ? null : permalinkId}
-                    linkFor={linkFor}
-                    onAnchorHidden={onAnchorHidden}
-                    intro={intro}
-                    readOnly={!!channel.archivedAt}
-                    canDeleteAny={canModerate}
-                    canReact={canPost}
-                    canUnpinAny={canArchive}
-                    pinnedBy={pinnedBy}
-                    dividerAfterSeq={reading.dividerAfterSeq}
-                    onMarkUnread={channel.isMember ? markUnreadFrom : undefined}
-                  />
-                  {loadingNewer ? (
-                    <div className="flex justify-center py-3 text-muted-foreground">
-                      <Spinner />
-                    </div>
-                  ) : null}
+                    <Button
+                      variant="outline"
+                      onClick={() => (messages.isError ? void messages.refetch() : win.retry())}
+                    >
+                      Try again
+                    </Button>
+                  </EmptyState>
+                ) : (
+                  <div className="mt-auto">
+                    {loadingOlder ? (
+                      <div className="flex justify-center py-3 text-muted-foreground">
+                        <Spinner />
+                      </div>
+                    ) : null}
+                    <MessageList
+                      messages={shown?.messages ?? []}
+                      pending={detached ? [] : channelPending}
+                      me={me}
+                      typers={channelTypers}
+                      onOpenThread={openThread}
+                      onRetry={retry}
+                      highlightId={threadId}
+                      anchorId={threadId ? null : permalinkId}
+                      linkFor={linkFor}
+                      onAnchorHidden={onAnchorHidden}
+                      intro={intro}
+                      readOnly={!!channel.archivedAt}
+                      canDeleteAny={canModerate}
+                      canReact={canPost}
+                      canUnpinAny={canArchive}
+                      pinnedBy={pinnedBy}
+                      dividerAfterSeq={reading.dividerAfterSeq}
+                      onMarkUnread={channel.isMember ? markUnreadFrom : undefined}
+                    />
+                    {loadingNewer ? (
+                      <div className="flex justify-center py-3 text-muted-foreground">
+                        <Spinner />
+                      </div>
+                    ) : null}
+                  </div>
+                )}
+              </div>
+              {detached ? <JumpToLatest newCount={win.newCount} onJump={jumpToLatest} /> : null}
+            </div>
+
+            <TypingIndicator typers={channelTypers} inThreadHint />
+            <div className="shrink-0 px-4 pb-[max(env(safe-area-inset-bottom),12px)] sm:px-5">
+              {channel.archivedAt ? (
+                <div className="flex items-center gap-3 rounded-xl border bg-muted/40 px-4 py-3 text-muted-foreground text-sm">
+                  <Archive className="size-4 shrink-0" />
+                  <span>
+                    #{channel.name} was archived on {formatDate(channel.archivedAt)}. Its history stays
+                    readable.
+                  </span>
                 </div>
+              ) : !channel.isMember ? (
+                <div
+                  className="flex flex-col items-center gap-3 rounded-xl border bg-muted/40 px-4 py-4 text-center sm:flex-row sm:text-left"
+                  data-testid="join-banner"
+                >
+                  <div className="min-w-0 flex-1">
+                    <p className="font-medium text-sm">You're previewing #{channel.name}</p>
+                    <p className="text-muted-foreground text-xs">
+                      Join to post, reply in threads and get unread updates.
+                    </p>
+                  </div>
+                  <Button
+                    data-testid="join-channel"
+                    disabled={join.isPending}
+                    onClick={() => join.mutate(channel.id, { onError: (e) => toast.error(errorMessage(e)) })}
+                  >
+                    {join.isPending ? <Spinner /> : null}
+                    Join channel
+                  </Button>
+                </div>
+              ) : (
+                <Composer
+                  placeholder={`Message #${channel.name}`}
+                  candidates={candidates}
+                  conversationId={channel.id}
+                  onSend={(body, _ids, files) => send(body, null, files)}
+                  onTyping={() => sendTyping(null)}
+                  apiRef={composerApi}
+                  autoFocus
+                  footer={<ComposerHint />}
+                  specialMentions={specialMentions}
+                  memberCount={memberList.length || channel.memberCount}
+                />
               )}
             </div>
-            {detached ? <JumpToLatest newCount={win.newCount} onJump={jumpToLatest} /> : null}
-          </div>
-
-          <TypingIndicator typers={channelTypers} inThreadHint />
-          <div className="shrink-0 px-4 pb-[max(env(safe-area-inset-bottom),12px)] sm:px-5">
-            {channel.archivedAt ? (
-              <div className="flex items-center gap-3 rounded-xl border bg-muted/40 px-4 py-3 text-muted-foreground text-sm">
-                <Archive className="size-4 shrink-0" />
-                <span>
-                  #{channel.name} was archived on {formatDate(channel.archivedAt)}. Its history stays
-                  readable.
-                </span>
-              </div>
-            ) : !channel.isMember ? (
-              <div
-                className="flex flex-col items-center gap-3 rounded-xl border bg-muted/40 px-4 py-4 text-center sm:flex-row sm:text-left"
-                data-testid="join-banner"
-              >
-                <div className="min-w-0 flex-1">
-                  <p className="font-medium text-sm">You're previewing #{channel.name}</p>
-                  <p className="text-muted-foreground text-xs">
-                    Join to post, reply in threads and get unread updates.
-                  </p>
-                </div>
-                <Button
-                  data-testid="join-channel"
-                  disabled={join.isPending}
-                  onClick={() => join.mutate(channel.id, { onError: (e) => toast.error(errorMessage(e)) })}
-                >
-                  {join.isPending ? <Spinner /> : null}
-                  Join channel
-                </Button>
-              </div>
-            ) : (
-              <Composer
-                placeholder={`Message #${channel.name}`}
-                candidates={candidates}
-                onSend={(body) => send(body)}
-                onTyping={() => sendTyping(null)}
-                apiRef={composerApi}
-                autoFocus
-                footer={<ComposerHint />}
-                specialMentions={specialMentions}
-                memberCount={memberList.length || channel.memberCount}
-              />
-            )}
-          </div>
+          </DropZone>
         </div>
 
         {threadId ? (
@@ -762,7 +779,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
             pending={pending}
             canPost={canPost}
             onClose={closeThread}
-            onSend={(body, rootId) => send(body, rootId)}
+            onSend={(body, rootId, files) => send(body, rootId, files)}
             onRetry={retry}
             onTyping={(rootId) => sendTyping(rootId)}
             highlightId={permalinkId}

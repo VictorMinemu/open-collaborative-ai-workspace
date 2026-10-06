@@ -1,6 +1,6 @@
 "use client";
 
-import type { ChannelSummary, Message } from "@ocw/contracts";
+import type { Attachment, ChannelSummary, Message } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
 import { MessagesSquare, X } from "lucide-react";
 import { useCallback, useEffect } from "react";
@@ -26,7 +26,7 @@ interface ThreadPanelProps {
   pending: PendingMessage[];
   canPost: boolean;
   onClose: () => void;
-  onSend: (body: string, threadRootId: string) => void;
+  onSend: (body: string, threadRootId: string, attachments: Attachment[]) => void;
   onRetry: (p: PendingMessage) => void;
   onTyping: (threadRootId: string) => void;
   /** A permalink to a reply of this thread (`m` with `thread`): scrolled to and highlighted (CHAT-14). */
@@ -184,9 +184,10 @@ function ThreadBody({
           candidates={candidates}
           autoFocus
           onTyping={() => onTyping(rootId)}
-          onSend={(body) => {
+          conversationId={channel.id}
+          onSend={(body, _ids, files) => {
             scroll.scrollToBottom();
-            onSend(body, rootId);
+            onSend(body, rootId, files);
           }}
         />
       </div>
