@@ -421,6 +421,7 @@ function SessionHeader({
             <h1
               className="truncate font-medium text-[15px] leading-snug tracking-tight sm:text-[14.5px]"
               data-testid="session-title"
+              title={session.title}
             >
               {session.title}
             </h1>
