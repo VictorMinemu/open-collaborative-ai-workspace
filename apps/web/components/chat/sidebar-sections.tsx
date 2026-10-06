@@ -1,13 +1,29 @@
 "use client";
 
-import type { ChannelSummary, ChannelUnit } from "@ocw/contracts";
+import { badgeStyle, type ChannelSummary, type ChannelUnit } from "@ocw/contracts";
 import { ChevronRight, Plus } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { sectionItemClass } from "@/components/shell/section-sidebar";
 import { Tooltip } from "@/components/ui/tooltip";
+import { useReadHold } from "@/lib/chat-queries";
 import { cn } from "@/lib/utils";
 import { ChannelIcon, isUnread } from "./channel-icon";
+import { ConversationBadge } from "./conversation-badge";
+
+/** The badge inputs of a row (CHAT-09); the open conversation shows none unless the member marked it unread. */
+export function rowBadge(
+  c: Pick<ChannelSummary, "notifyLevel" | "muted" | "unreadCount" | "mentionCount">,
+  show: boolean,
+) {
+  const input = {
+    level: c.notifyLevel ?? "default",
+    muted: c.muted ?? false,
+    unreadCount: show ? (c.unreadCount ?? 0) : 0,
+    mentionCount: show ? (c.mentionCount ?? 0) : 0,
+  };
+  return { input, style: badgeStyle(input) };
+}
 
 /**
  * The channel part of the chat sidebar (CHAT-02, D-08): an Organization section, then one collapsible section per
@@ -105,7 +121,9 @@ export function useCollapsedSections(): [ReadonlySet<string>, (key: string) => v
 }
 
 function ChannelRow({ c, active }: { c: SidebarChannel; active: boolean }) {
-  const unread = !active && isUnread(c);
+  const held = useReadHold(c.id) !== null;
+  const { input, style } = rowBadge(c, (!active || held) && isUnread(c));
+  const unread = style !== "none";
   return (
     <Link
       href={`/chat/${c.id}`}
@@ -118,6 +136,7 @@ function ChannelRow({ c, active }: { c: SidebarChannel; active: boolean }) {
         sectionItemClass(active),
         unread && "font-semibold text-foreground",
         !c.isMember && !active && "text-muted-foreground",
+        c.muted && !active && style !== "mention" && "opacity-60",
       )}
     >
       <ChannelIcon channel={c} className={active ? "" : "text-muted-foreground"} />
@@ -130,12 +149,7 @@ function ChannelRow({ c, active }: { c: SidebarChannel; active: boolean }) {
           {c.subLabel}
         </span>
       ) : null}
-      {unread ? (
-        <>
-          <span className="sr-only">(unread)</span>
-          <span aria-hidden className="ml-auto size-2 shrink-0 rounded-full bg-primary" />
-        </>
-      ) : null}
+      <ConversationBadge {...input} />
     </Link>
   );
 }

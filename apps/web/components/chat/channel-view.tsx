@@ -54,8 +54,10 @@ import {
   applyThreadUpdate,
   bumpLatest,
   chatKeys,
+  markConversationUnread,
   markRead,
   postMessage,
+  setReadHold,
   useChannelAction,
   useChannelMembers,
   useChannels,
@@ -74,6 +76,7 @@ import {
   type MentionCandidate,
   type SpecialMention,
 } from "./composer";
+import { ConversationNotifyMenu } from "./conversation-notify-menu";
 import { JumpToLatest } from "./jump-to-latest";
 import { MentionContext } from "./markdown";
 import { MembersDialog } from "./members-dialog";
@@ -86,6 +89,7 @@ import { ThreadPanel } from "./thread-panel";
 import { TypingIndicator, useTypers } from "./typing";
 import { dirKey, useOrgDirectory } from "./use-chat-directory";
 import { useCentreOnce, usePermalinkWindow, useWindowPaging } from "./use-permalink-window";
+import { useReadCursor } from "./use-read-cursor";
 import { useStickToBottom } from "./use-stick-to-bottom";
 
 function newId(): string {
@@ -255,7 +259,8 @@ export function ChannelView({ channelId }: { channelId: string }) {
         if (message.authorKind !== "system") clear(message.authorKind, message.authorId);
         if (!message.threadId) {
           bumpLatest(qc, channelId, message.seq, message.createdAt, message.body);
-          if (document.visibilityState === "visible") markRead(qc, channelId, message.seq);
+          // Reading old history (a detached window) never reads the live end (CHAT-09).
+          if (!detached && document.visibilityState === "visible") markRead(qc, channelId, message.seq);
         }
         return;
       }
@@ -311,22 +316,26 @@ export function ChannelView({ channelId }: { channelId: string }) {
     [realtime, topic],
   );
 
-  // ---------------------------------------------------------------- read cursor
-  const lastSeq = messages.data?.messages.at(-1)?.seq ?? 0;
-  useEffect(() => {
-    if (!lastSeq) return;
-    const mark = () => document.visibilityState === "visible" && markRead(qc, channelId, lastSeq);
-    mark();
-    document.addEventListener("visibilitychange", mark);
-    return () => document.removeEventListener("visibilitychange", mark);
-  }, [qc, channelId, lastSeq]);
-
   // ---------------------------------------------------------------- sending
   const channelPending = pending.filter((p) => !p.threadRootId);
   const scroll = useStickToBottom(
     `${detached ? "window" : "tail"}:${shown?.messages.length ?? 0}:${channelPending.length}:${shown?.messages.at(-1)?.replyCount ?? 0}`,
     channelId,
     detached,
+  );
+
+  // ---------------------------------------------------------------- read cursor (CHAT-09)
+  const lastSeq = messages.data?.messages.at(-1)?.seq ?? 0;
+  const reading = useReadCursor({
+    convId: channelId,
+    tailLastSeq: fromList?.isMember ? lastSeq : 0,
+    windowLastSeq: detached ? (shown?.messages.at(-1)?.seq ?? null) : null,
+    scrollRef: scroll.ref,
+  });
+  const markUnreadFrom = useCallback(
+    (m: Message) =>
+      void markConversationUnread(qc, channelId, m.id).catch((err) => toast.error(errorMessage(err))),
+    [qc, channelId],
   );
 
   // A deleted target hidden by P-05 lands on its nearest visible neighbour, without a highlight.
@@ -375,7 +384,11 @@ export function ChannelView({ channelId }: { channelId: string }) {
         });
         applyMessage(qc, msg);
         setPending((prev) => prev.filter((x) => x.clientMessageId !== p.clientMessageId));
-        if (!msg.threadId) markRead(qc, channelId, msg.seq);
+        if (!msg.threadId) {
+          // Sending ends a "marked unread" hold: the member is reading here (CHAT-09).
+          setReadHold(channelId, null);
+          markRead(qc, channelId, msg.seq);
+        }
       } catch (err) {
         setPending((prev) =>
           prev.map((x) => (x.clientMessageId === p.clientMessageId ? { ...x, failed: true } : x)),
@@ -537,6 +550,13 @@ export function ChannelView({ channelId }: { channelId: string }) {
               <>
                 <PresenceStack people={present} />
                 <PinnedButton count={pins.data?.pins.length ?? 0} onClick={() => setPinsOpen(true)} />
+                {channel.isMember ? (
+                  <ConversationNotifyMenu
+                    conversation={{ id: channel.id, kind: "channel" }}
+                    lastSeq={lastSeq}
+                    latestMessageId={messages.data?.messages.at(-1)?.id ?? null}
+                  />
+                ) : null}
                 <button
                   type="button"
                   onClick={() => setMembersOpen(true)}
@@ -671,6 +691,8 @@ export function ChannelView({ channelId }: { channelId: string }) {
                     canReact={canPost}
                     canUnpinAny={canArchive}
                     pinnedBy={pinnedBy}
+                    dividerAfterSeq={reading.dividerAfterSeq}
+                    onMarkUnread={channel.isMember ? markUnreadFrom : undefined}
                   />
                   {loadingNewer ? (
                     <div className="flex justify-center py-3 text-muted-foreground">

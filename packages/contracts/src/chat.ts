@@ -489,7 +489,12 @@ export const ThreadSummary = z.object({
   lastReplies: z.array(Message).max(3).optional(),
 });
 export type ThreadSummary = z.infer<typeof ThreadSummary>;
-export const ThreadList = z.object({ threads: z.array(ThreadSummary), nextCursor: z.string().nullable() });
+export const ThreadList = z.object({
+  threads: z.array(ThreadSummary),
+  nextCursor: z.string().nullable(),
+  /** First page only: how many of the member's threads have unread replies (all pages, capped at 100; CHAT-09). */
+  unreadThreads: z.number().int().min(0).max(100).optional(),
+});
 export type ThreadList = z.infer<typeof ThreadList>;
 
 export const ThreadReadRequest = z.object({ seq: z.number().int().nonnegative() });

@@ -6,6 +6,7 @@ import {
   ChannelList as ChannelListSchema,
   ChannelMemberList,
   ChannelSummary,
+  type ConversationReadEvent,
   type CreateChannelRequest,
   type CreateDmRequest,
   type DmAgentCounterpart,
@@ -17,6 +18,8 @@ import {
   DmSummary as DmSummarySchema,
   type DmUserCounterpart,
   IanaTimeZone,
+  type MarkUnreadRequest,
+  MENTION_KINDS,
   type Message,
   type MessageDeletedEvent,
   type MessagePage,
@@ -34,6 +37,7 @@ import {
   type ThreadResponse,
   ThreadResponse as ThreadResponseSchema,
   type ThreadUpdatedEvent,
+  UNREAD_CAP,
   type UpdateChannelRequest,
 } from "@ocw/contracts";
 import {
@@ -44,6 +48,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { useSyncExternalStore } from "react";
 import { api, isApiError } from "./api";
 
 export const chatKeys = {
@@ -133,13 +138,9 @@ export function useChannelAction(action: "join" | "leave" | "archive") {
   });
 }
 
-/** Moves the caller's read cursor forward (server keeps the max). */
+/** Moves the caller's channel read cursor forward (server keeps the max); see `markConversationRead`. */
 export function markRead(qc: QueryClient, id: string, seq: number) {
-  const list = qc.getQueryData<ChannelList>(chatKeys.channels);
-  const ch = list?.channels.find((c) => c.id === id);
-  if (!ch?.isMember || ch.lastReadSeq >= seq) return;
-  patchChannel(qc, id, { lastReadSeq: seq });
-  void api.post(`/api/v1/channels/${id}/read`, { body: { seq }, schema: Ok }).catch(() => {});
+  markConversationRead(qc, id, seq);
 }
 
 /** A new top-level message arrived on a channel the user is not looking at. */
@@ -209,18 +210,15 @@ function patchDm(qc: QueryClient, id: string, patch: Partial<DmList["dms"][numbe
   );
 }
 
-/** Moves the caller's DM read cursor forward (server keeps the max). */
+/** Moves the caller's DM read cursor forward (server keeps the max); see `markConversationRead`. */
 export function markDmRead(qc: QueryClient, id: string, seq: number) {
-  const dm = qc.getQueryData<DmList>(chatKeys.dms)?.dms.find((d) => d.id === id);
-  if (dm && dm.lastReadSeq >= seq) return;
-  patchDm(qc, id, { lastReadSeq: seq });
-  void api.post(`/api/v1/conversations/${id}/read`, { body: { seq }, schema: Ok }).catch(() => {});
+  markConversationRead(qc, id, seq);
 }
 
-/** `markDmRead` as a hook, for components that only hold the conversation id. */
+/** `markConversationRead` as a hook, for components that only hold the conversation id. */
 export function useMarkConversationRead() {
   const qc = useQueryClient();
-  return (id: string, seq: number) => markDmRead(qc, id, seq);
+  return (id: string, seq: number) => markConversationRead(qc, id, seq);
 }
 
 /** A new top-level message arrived in a DM (sidebar unread dot). */
@@ -745,17 +743,23 @@ export function isListedThread(qc: QueryClient, rootId: string): boolean {
 }
 
 function zeroUnread(qc: QueryClient, rootId: string) {
-  qc.setQueryData<InfiniteData<ThreadList>>(chatKeys.threadList, (prev) =>
-    prev
-      ? {
-          ...prev,
-          pages: prev.pages.map((p) => ({
-            ...p,
-            threads: p.threads.map((t) => (t.root.id === rootId ? { ...t, unreadReplies: 0 } : t)),
-          })),
-        }
-      : prev,
-  );
+  qc.setQueryData<InfiniteData<ThreadList>>(chatKeys.threadList, (prev) => {
+    if (!prev) return prev;
+    const wasUnread = prev.pages.some((p) =>
+      p.threads.some((t) => t.root.id === rootId && t.unreadReplies > 0),
+    );
+    return {
+      ...prev,
+      pages: prev.pages.map((p, i) => ({
+        ...p,
+        threads: p.threads.map((t) => (t.root.id === rootId ? { ...t, unreadReplies: 0 } : t)),
+        // The total (first page) drops with it; the refetch that follows brings the exact number.
+        ...(i === 0 && wasUnread && p.unreadThreads !== undefined
+          ? { unreadThreads: Math.max(0, p.unreadThreads - 1) }
+          : {}),
+      })),
+    };
+  });
 }
 
 /** The highest seq this tab already sent per thread, so re-renders never repeat the POST. */
@@ -775,4 +779,197 @@ export function markThreadRead(qc: QueryClient, rootId: string, seq: number) {
 export function applyThreadRead(qc: QueryClient, ev: ThreadReadEvent) {
   zeroUnread(qc, ev.rootId);
   void qc.invalidateQueries({ queryKey: chatKeys.threadList });
+}
+
+// ---------------------------------------------------------------- unread and mention badges (CHAT-09)
+
+/** A conversation row of the sidebar caches: a channel (`chatKeys.channels`) or a DM (`chatKeys.dms`). */
+type BadgeRow = Pick<
+  ChannelSummary,
+  "id" | "lastReadSeq" | "latestMessageSeq" | "unreadCount" | "mentionCount" | "muted" | "notifyLevel"
+> & { isMember?: boolean };
+
+/** The cached row of a channel or DM (joined channels and the member's DMs only). */
+export function badgeRowOf(qc: QueryClient, id: string): BadgeRow | undefined {
+  const ch = qc.getQueryData<ChannelList>(chatKeys.channels)?.channels.find((c) => c.id === id);
+  if (ch) return ch.isMember ? ch : undefined;
+  return qc.getQueryData<DmList>(chatKeys.dms)?.dms.find((d) => d.id === id);
+}
+
+function patchBadges(qc: QueryClient, id: string, patch: (row: BadgeRow) => Partial<BadgeRow>) {
+  qc.setQueryData<ChannelList>(chatKeys.channels, (prev) =>
+    prev?.channels.some((c) => c.id === id && c.isMember)
+      ? { ...prev, channels: prev.channels.map((c) => (c.id === id ? { ...c, ...patch(c) } : c)) }
+      : prev,
+  );
+  qc.setQueryData<DmList>(chatKeys.dms, (prev) =>
+    prev?.dms.some((d) => d.id === id)
+      ? { ...prev, dms: prev.dms.map((d) => (d.id === id ? { ...d, ...patch(d) } : d)) }
+      : prev,
+  );
+}
+
+/** A joined channel or DM with something to read: counted messages or mentions (P-07), else the seq fallback. */
+export function hasUnread(row: BadgeRow): boolean {
+  if (row.isMember === false) return false;
+  if (row.unreadCount !== undefined || row.mentionCount !== undefined) {
+    return (row.unreadCount ?? 0) > 0 || (row.mentionCount ?? 0) > 0;
+  }
+  return row.latestMessageSeq > row.lastReadSeq;
+}
+
+let countsTimer: ReturnType<typeof setTimeout> | null = null;
+/** The authoritative counts come back from the snapshot (`GET /channels`, `GET /dms`) shortly. */
+export function refreshCountsSoon(qc: QueryClient) {
+  if (countsTimer) clearTimeout(countsTimer);
+  countsTimer = setTimeout(() => {
+    countsTimer = null;
+    void qc.invalidateQueries({ queryKey: chatKeys.channels });
+    void qc.invalidateQueries({ queryKey: chatKeys.dms });
+  }, 400);
+}
+
+/**
+ * Marks a channel or DM read up to `seq` (the server keeps the greatest and clears the mentions it covers). Runs
+ * when the cursor moves, and also when mentions are pending on what is already read (an edit that mentions the
+ * member later). Paused while the member holds the conversation unread (`markConversationUnread`).
+ */
+export function markConversationRead(
+  qc: QueryClient,
+  id: string,
+  seq: number,
+  opts: { force?: boolean } = {},
+) {
+  const row = badgeRowOf(qc, id);
+  if (!row) return;
+  if (!opts.force && readHoldOf(id) !== null) return;
+  if (row.lastReadSeq >= seq && (row.mentionCount ?? 0) === 0) return;
+  const caughtUp = seq >= row.latestMessageSeq;
+  patchBadges(qc, id, (r) => ({
+    lastReadSeq: Math.max(r.lastReadSeq, seq),
+    ...(caughtUp ? { unreadCount: 0, mentionCount: 0 } : {}),
+  }));
+  void api.post(`/api/v1/conversations/${id}/read`, { body: { seq }, schema: Ok }).catch(() => {});
+}
+
+/**
+ * Marks a channel or DM unread from `messageId` (that message and everything after it, Pitfall 2). This tab holds it
+ * unread: the views stop marking it read until the member reaches the bottom, sends, or marks it read.
+ */
+export async function markConversationUnread(qc: QueryClient, id: string, messageId: string): Promise<void> {
+  const cached = qc
+    .getQueriesData<MessagePage>({ queryKey: chatKeys.messages(id) })
+    .flatMap(([, page]) => page?.messages ?? [])
+    .find((m) => m.id === messageId);
+  setReadHold(id, cached ? cached.seq - 1 : (badgeRowOf(qc, id)?.lastReadSeq ?? 0));
+  const body: MarkUnreadRequest = { messageId };
+  try {
+    await api.post(`/api/v1/conversations/${id}/unread`, { body, schema: Ok });
+    if (cached) patchBadges(qc, id, () => ({ lastReadSeq: cached.seq - 1 }));
+    refreshCountsSoon(qc);
+  } catch (err) {
+    setReadHold(id, null);
+    throw err;
+  }
+}
+
+/** One more unread top-level message from someone else (a live `message.created`), capped like the server. */
+export function bumpUnread(qc: QueryClient, id: string) {
+  patchBadges(qc, id, (r) => ({ unreadCount: Math.min(UNREAD_CAP, (r.unreadCount ?? 0) + 1) }));
+}
+
+const MENTION_KIND_SET = new Set<string>(MENTION_KINDS);
+const bumpedMentions = new Set<string>();
+
+/**
+ * A live `notification.created`: a mention-like notification of a top-level message counts toward its
+ * conversation's mention badge once per notification id (replays and upgrades never double count).
+ */
+export function bumpMention(
+  qc: QueryClient,
+  n: {
+    id: string;
+    kind: string;
+    threadRootId: string | null;
+    readAt: string | null;
+    conversation: { id: string };
+  },
+) {
+  if (!MENTION_KIND_SET.has(n.kind) || n.threadRootId !== null || n.readAt !== null) return;
+  if (bumpedMentions.has(n.id) || !badgeRowOf(qc, n.conversation.id)) return;
+  bumpedMentions.add(n.id);
+  patchBadges(qc, n.conversation.id, (r) => ({
+    mentionCount: Math.min(UNREAD_CAP, (r.mentionCount ?? 0) + 1),
+  }));
+}
+
+/**
+ * `conversation.read` from any of the member's tabs or devices (read or mark unread): the cursor and counts as the
+ * server computed them. A message this tab already holds beyond what the counts saw refetches the snapshot.
+ */
+export function applyConversationRead(qc: QueryClient, ev: ConversationReadEvent) {
+  const row = badgeRowOf(qc, ev.conversationId);
+  if (!row) return;
+  // Read past this tab's "marked unread" point somewhere else: the hold here is over.
+  const hold = readHoldOf(ev.conversationId);
+  if (hold !== null && ev.lastReadSeq > hold) setReadHold(ev.conversationId, null);
+  patchBadges(qc, ev.conversationId, () => ({
+    lastReadSeq: ev.lastReadSeq,
+    unreadCount: ev.unreadCount,
+    mentionCount: ev.mentionCount,
+  }));
+  if (ev.latestMessageSeq !== undefined && row.latestMessageSeq > ev.latestMessageSeq) refreshCountsSoon(qc);
+}
+
+// The per-tab hold of a conversation marked unread: conversation id → the cursor it was set to. Kept in
+// sessionStorage, so it is per tab and survives a reload of that tab.
+const HOLDS_KEY = "ocw.chat.readHolds";
+let readHolds: Map<string, number> | null = null;
+const holdListeners = new Set<() => void>();
+
+function holds(): Map<string, number> {
+  if (readHolds) return readHolds;
+  readHolds = new Map();
+  try {
+    const raw: unknown = JSON.parse(window.sessionStorage.getItem(HOLDS_KEY) ?? "{}");
+    if (raw && typeof raw === "object") {
+      for (const [k, v] of Object.entries(raw)) if (typeof v === "number") readHolds.set(k, v);
+    }
+  } catch {
+    // No storage (or a corrupt value): holds live for this page only.
+  }
+  return readHolds;
+}
+
+export function readHoldOf(id: string): number | null {
+  if (typeof window === "undefined") return null;
+  return holds().get(id) ?? null;
+}
+
+/** Sets (a cursor) or clears (null) the hold of a conversation in this tab. */
+export function setReadHold(id: string, cursor: number | null) {
+  const map = holds();
+  if (cursor === null) {
+    if (!map.delete(id)) return;
+  } else {
+    map.set(id, cursor);
+  }
+  try {
+    window.sessionStorage.setItem(HOLDS_KEY, JSON.stringify(Object.fromEntries(map)));
+  } catch {
+    // Private mode / quota: the hold still applies for this page.
+  }
+  for (const l of holdListeners) l();
+}
+
+/** The hold of a conversation as React state (null = not held). */
+export function useReadHold(id: string): number | null {
+  return useSyncExternalStore(
+    (l) => {
+      holdListeners.add(l);
+      return () => holdListeners.delete(l);
+    },
+    () => readHoldOf(id),
+    () => null,
+  );
 }

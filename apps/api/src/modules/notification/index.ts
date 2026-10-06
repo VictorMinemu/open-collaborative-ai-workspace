@@ -5,8 +5,7 @@ import { registerNotificationRoutes } from "./routes";
 import { createNotificationService } from "./service";
 
 export { computeRecipients, type RecipientsInput } from "./recipients";
-export { unreadCountFor } from "./routes";
-export { MENTIONS_FILTER_KINDS } from "./service";
+export { MENTIONS_FILTER_KINDS, unreadCountFor } from "./service";
 export { snippetOf } from "./snippet";
 
 /**
@@ -19,6 +18,7 @@ export function createNotificationModule(core: Core, deps: { online: OnlineSet }
   const service = createNotificationService(core, { online: deps.online, access });
   core.chatEvents.onMessagePosted(service.onPosted);
   core.chatEvents.onMessageEdited(service.onEdited);
+  core.chatEvents.onConversationRead(service.onRead);
   return {
     name: "notification",
     register(app) {

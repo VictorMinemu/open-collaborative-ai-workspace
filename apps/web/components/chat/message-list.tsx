@@ -86,6 +86,21 @@ function DayDivider({ label }: { label: string }) {
   );
 }
 
+/** Where the member's unread messages start (CHAT-09): on open, or from a message they marked unread. */
+function NewMessagesDivider() {
+  return (
+    <div
+      className="relative my-2 flex items-center gap-2 px-4 sm:px-5"
+      role="separator"
+      aria-label="New messages"
+      data-testid="new-messages-divider"
+    >
+      <div className="h-px flex-1 bg-destructive/60" />
+      <span className="font-semibold text-[11px] text-destructive uppercase tracking-wider">New</span>
+    </div>
+  );
+}
+
 function ThreadSummary({
   message,
   typers,
@@ -247,6 +262,8 @@ interface RowProps {
   /** Who pinned each pinned message (from the pins list), so pinners can unpin their own. */
   pinnedBy?: ReadonlyMap<string, string> | undefined;
   linkFor?: ((m: Message) => string) | undefined;
+  /** Marks the conversation unread from a message (stable callback; top-level messages only). */
+  onMarkUnread?: ((m: Message) => void) | undefined;
 }
 
 const MessageRow = memo(function MessageRow({
@@ -264,6 +281,7 @@ const MessageRow = memo(function MessageRow({
   canUnpinAny,
   pinnedBy,
   linkFor,
+  onMarkUnread,
 }: RowProps) {
   const author = message.author ?? {
     kind: message.authorKind,
@@ -316,6 +334,7 @@ const MessageRow = memo(function MessageRow({
     // Saving is personal and works wherever the message is readable (archived conversations included).
     onToggleSave: !deleted && meId ? () => void setSaved(!message.saved) : undefined,
     saved: !!message.saved,
+    onMarkUnread: onMarkUnread && !message.threadId && !deleted ? () => onMarkUnread(message) : undefined,
   };
   async function setSaved(saved: boolean) {
     try {
@@ -611,6 +630,8 @@ export function MessageList({
   anchorId,
   linkFor,
   onAnchorHidden,
+  dividerAfterSeq = null,
+  onMarkUnread,
 }: {
   messages: Message[];
   pending: PendingMessage[];
@@ -644,6 +665,10 @@ export function MessageList({
    * nearest visible neighbour (the next one, else the previous one), so the view can say so and land nearby.
    */
   onAnchorHidden?: (neighbourId: string | null) => void;
+  /** A "New messages" divider above the first message after this seq (CHAT-09); null = none. */
+  dividerAfterSeq?: number | null;
+  /** "Mark unread" on top-level messages (CHAT-09); must be stable. */
+  onMarkUnread?: (m: Message) => void;
 }) {
   let prev: { key: string; at: number; day: string } | null = startDay
     ? { key: "", at: 0, day: new Date(startDay).toDateString() }
@@ -653,6 +678,7 @@ export function MessageList({
   let lastVisible: string | null = null;
   let neighbour: string | null = null;
   let wantNext = false;
+  let dividerShown = false;
   for (const m of messages) {
     // P-05: a deleted message disappears, unless its thread keeps it as a tombstone.
     if (m.deletedAt && m.replyCount === 0 && !showTombstones) {
@@ -673,9 +699,19 @@ export function MessageList({
     const day = new Date(m.createdAt).toDateString();
     if (!prev || prev.day !== day)
       rows.push(<DayDivider key={`day-${m.id}`} label={dayLabel(m.createdAt)} />);
-    // A pinned message always shows its author under its "Pinned" label.
+    const newHere = dividerAfterSeq !== null && !dividerShown && m.seq > dividerAfterSeq;
+    if (newHere) {
+      dividerShown = true;
+      rows.push(<NewMessagesDivider key={`new-${m.id}`} />);
+    }
+    // A pinned message always shows its author under its "Pinned" label (and so does the first new one).
     const continuation =
-      !m.pinned && !!prev && prev.day === day && prev.key === key && at - prev.at < GROUP_WINDOW_MS;
+      !newHere &&
+      !m.pinned &&
+      !!prev &&
+      prev.day === day &&
+      prev.key === key &&
+      at - prev.at < GROUP_WINDOW_MS;
     rows.push(
       <MessageRow
         key={m.id}
@@ -693,6 +729,7 @@ export function MessageList({
         canUnpinAny={canUnpinAny && !readOnly}
         pinnedBy={pinnedBy}
         linkFor={linkFor}
+        onMarkUnread={onMarkUnread}
       />,
     );
     // A message with a thread breaks the group so the next one shows its author again.

@@ -53,8 +53,20 @@ export async function listThreadsFor(
 ): Promise<ThreadList> {
   const { userId: me, readableIds, limit, dir } = input;
   const after = input.cursor ? decodeCursor(input.cursor) : null;
-  if (readableIds.length === 0) return { threads: [], nextCursor: null };
+  if (readableIds.length === 0)
+    return { threads: [], nextCursor: null, ...(after ? {} : { unreadThreads: 0 }) };
   const mentionsMe = JSON.stringify([{ kind: "user", id: me }]);
+  // Narrowing to the member's own threads; the readable set decided visibility.
+  const mine = sql`(
+          (${messages.authorKind} = 'user' and ${messages.authorId} = ${me})
+          or ${messages.mentions} @> ${mentionsMe}::jsonb
+          or exists (
+            select 1 from app.messages r
+            where r.thread_id = ${messages.id}
+              and r.deleted_at is null
+              and ((r.author_kind = 'user' and r.author_id = ${me}) or r.mentions @> ${mentionsMe}::jsonb)
+          )
+        )`;
   const rows = await tx
     .select({
       m: messages,
@@ -67,17 +79,7 @@ export async function listThreadsFor(
         gt(messages.replyCount, 0),
         isNotNull(messages.lastReplyAt),
         inArray(messages.conversationId, readableIds),
-        // Narrowing to the member's own threads; the readable set above decided visibility.
-        sql`(
-          (${messages.authorKind} = 'user' and ${messages.authorId} = ${me})
-          or ${messages.mentions} @> ${mentionsMe}::jsonb
-          or exists (
-            select 1 from app.messages r
-            where r.thread_id = ${messages.id}
-              and r.deleted_at is null
-              and ((r.author_kind = 'user' and r.author_id = ${me}) or r.mentions @> ${mentionsMe}::jsonb)
-          )
-        )`,
+        mine,
         after
           ? sql`(${messages.lastReplyAt}, ${messages.id}) < (${after.t}::timestamptz, ${after.id}::uuid)`
           : undefined,
@@ -165,9 +167,38 @@ export async function listThreadsFor(
       },
     ];
   });
+  // The sidebar's Threads badge (CHAT-09): every one of the member's threads with others' unread replies, not just
+  // this page; counted once, on the first page.
+  let unreadThreads: number | undefined;
+  if (!after) {
+    const [n] = await tx.select({ n: sql<number>`count(*)`.mapWith(Number) }).from(
+      tx
+        .select({ one: sql`1`.as("one") })
+        .from(messages)
+        .where(
+          and(
+            isNull(messages.threadId),
+            gt(messages.replyCount, 0),
+            inArray(messages.conversationId, readableIds),
+            mine,
+            sql`exists (
+                select 1 from app.messages r
+                left join app.thread_reads tr on tr.root_message_id = r.thread_id and tr.user_id = ${me}
+                where r.thread_id = ${messages.id} and r.deleted_at is null
+                  and not (r.author_kind = 'user' and r.author_id = ${me})
+                  and r.seq > coalesce(tr.last_read_seq, 0)
+              )`,
+          ),
+        )
+        .limit(UNREAD_CAP)
+        .as("capped"),
+    );
+    unreadThreads = n?.n ?? 0;
+  }
   return {
     threads,
     nextCursor: rows.length > limit && last ? encodeCursor({ t: last.lastReplyKey, id: last.m.id }) : null,
+    ...(unreadThreads !== undefined ? { unreadThreads } : {}),
   };
 }
 
@@ -232,6 +263,13 @@ export function registerThreadRoutes(app: App, ctx: ChatRouteCtx): void {
           rootId: root.id,
           lastReadSeq: Number(mark?.lastReadSeq ?? req.body.seq),
         };
+        // CHAT-09: reading the thread reads its notifications (replies and mentions in it) up to the mark.
+        await core.chatEvents.conversationRead(tx, {
+          userId: me,
+          conversationId: root.conversationId,
+          lastReadSeq: ev.lastReadSeq,
+          threadRootId: root.id,
+        });
         await deps.realtime.appendEvent(tx, `user:${me}`, EventTypes.threadRead, ev);
         return { ok: true as const };
       }),

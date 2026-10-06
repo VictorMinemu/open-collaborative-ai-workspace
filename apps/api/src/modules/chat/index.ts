@@ -5,6 +5,7 @@ import {
   ChannelMemberList,
   ChannelSummary,
   type ChannelSummary as ChannelSummaryDto,
+  type ConversationReadEvent,
   CreateChannelRequest,
   CreateDmRequestFields,
   DmList,
@@ -14,6 +15,7 @@ import {
   IdParams,
   MAX_GROUP_PARTICIPANTS,
   MarkReadRequest,
+  MarkUnreadRequest,
   MemberParams,
   Message,
   MessagePage,
@@ -35,7 +37,7 @@ import {
   type Tx,
   tenantOf,
 } from "@ocw/db";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { type ApiModule, authOf, type Core, tenant } from "../../core";
@@ -79,6 +81,7 @@ import {
   listMessagesAfter,
   listMessagesAround,
   loadThread,
+  lockNextSeq,
   memberUnitIdsOf,
   notifyListChanged,
   type PostResult,
@@ -86,6 +89,8 @@ import {
   removeMember,
   replyParticipantsFor,
   toMessage,
+  unreadCountsFor,
+  withUnreadCounts,
 } from "./service";
 import { registerChatTestRoutes } from "./test-routes";
 import { registerThreadRoutes } from "./threads";
@@ -190,9 +195,72 @@ export function createChatModule(core: Core): ApiModule {
     };
   }
 
-  /** One channel as the caller sees it, with `viewerCan`. */
+  /** One channel as the caller sees it, with `viewerCan` and the caller's badges. */
   async function summaryOf(req: FastifyRequest, tx: Tx, id: string): Promise<ChannelSummaryDto> {
-    return withViewerCan(req, tx, await channelRow(tx, id, authOf(req).userId));
+    const [one] = await withUnreadCounts(tx, authOf(req).userId, [
+      await withViewerCan(req, tx, await channelRow(tx, id, authOf(req).userId)),
+    ]);
+    if (!one) throw notFound("Channel not found");
+    return one;
+  }
+
+  /**
+   * Moves the caller's read cursor of a readable conversation (CHAT-09, Pitfall 2) and tells the caller's other tabs
+   * and devices with `conversation.read` on `user:<me>` (P-04). `forward` keeps the highest cursor (read) and clears
+   * the notifications it covers through the chat-events seam; `exact` sets it (mark unread) and never un-reads a
+   * notification. A non-member has no cursor (nothing moves: false); a call that changes nothing announces nothing.
+   */
+  async function moveReadCursor(
+    tx: Tx,
+    userId: string,
+    conversationId: string,
+    to: { forward: number } | { exact: number },
+  ): Promise<boolean> {
+    const mine = and(
+      eq(conversationMembers.conversationId, conversationId),
+      eq(conversationMembers.memberKind, "user"),
+      eq(conversationMembers.memberId, userId),
+    );
+    // Lock order (cursor row → notifications → user stream) matches the notification writer (rows → stream).
+    const [row] = await tx
+      .select({ lastReadSeq: conversationMembers.lastReadSeq })
+      .from(conversationMembers)
+      .where(mine)
+      .for("update");
+    if (!row) return false;
+    const before = (await unreadCountsFor(tx, userId, [conversationId])).get(conversationId);
+    const prev = Number(row.lastReadSeq);
+    const next = "forward" in to ? Math.max(prev, to.forward) : to.exact;
+    if (next !== prev) await tx.update(conversationMembers).set({ lastReadSeq: next }).where(mine);
+    if ("forward" in to) {
+      await core.chatEvents.conversationRead(tx, { userId, conversationId, lastReadSeq: next });
+    }
+    // Serialise with notification writes on the same stream, so a mention committed before this event is counted
+    // here and one committed after reaches the client after it (as a `notification.created` delta).
+    await lockNextSeq(tx, `user:${userId}`);
+    const after = (await unreadCountsFor(tx, userId, [conversationId])).get(conversationId) ?? {
+      unreadCount: 0,
+      mentionCount: 0,
+    };
+    if (
+      next === prev &&
+      before?.unreadCount === after.unreadCount &&
+      before?.mentionCount === after.mentionCount
+    ) {
+      return true;
+    }
+    const [latest] = await tx
+      .select({ seq: sql<number>`coalesce(max(${messages.seq}), 0)`.mapWith(Number) })
+      .from(messages)
+      .where(and(eq(messages.conversationId, conversationId), isNull(messages.threadId)));
+    const ev: ConversationReadEvent = {
+      conversationId,
+      lastReadSeq: next,
+      ...after,
+      latestMessageSeq: latest?.seq ?? 0,
+    };
+    await core.realtime.appendEvent(tx, `user:${userId}`, EventTypes.conversationRead, ev);
+    return true;
   }
 
   /**
@@ -628,9 +696,11 @@ export function createChatModule(core: Core): ApiModule {
             const visible = await perms.filter(req, tx, rows, "channel.read", (r) =>
               channelResource(r.facts),
             );
-            const channels: ChannelSummaryDto[] = [];
+            const withCan: ChannelSummaryDto[] = [];
             // Sequential: every decision shares the transaction's single connection (facts are memoised).
-            for (const row of visible) channels.push(await withViewerCan(req, tx, row));
+            for (const row of visible) withCan.push(await withViewerCan(req, tx, row));
+            // CHAT-09: badges only on the rows the resolver kept (T-04-10-01).
+            const channels = await withUnreadCounts(tx, auth.userId, withCan);
             return {
               channels,
               orgSeq: await core.realtime.lastSeq(tx, `org:${auth.organizationId}`),
@@ -700,7 +770,9 @@ export function createChatModule(core: Core): ApiModule {
           core.db.withTenant(tenant(req), async (tx) => {
             const row = await channelRow(tx, req.params.id, authOf(req).userId);
             await perms.assertCan(req, tx, "channel.read", channelResource(row.facts), { hideAs404: true });
-            return withViewerCan(req, tx, row);
+            const [one] = await withUnreadCounts(tx, authOf(req).userId, [await withViewerCan(req, tx, row)]);
+            if (!one) throw notFound("Channel not found");
+            return one;
           }),
       );
 
@@ -849,17 +921,9 @@ export function createChatModule(core: Core): ApiModule {
         },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
-            await readableChannel(req, tx, await getChannel(tx, req.params.id));
-            await tx
-              .update(conversationMembers)
-              .set({ lastReadSeq: sql`greatest(${conversationMembers.lastReadSeq}, ${req.body.seq})` })
-              .where(
-                and(
-                  eq(conversationMembers.conversationId, req.params.id),
-                  eq(conversationMembers.memberKind, "user"),
-                  eq(conversationMembers.memberId, authOf(req).userId),
-                ),
-              );
+            const { conv } = await readableChannel(req, tx, await getChannel(tx, req.params.id));
+            // greatest(...): a read never moves the cursor backwards (mark unread has its own route).
+            await moveReadCursor(tx, authOf(req).userId, conv.id, { forward: req.body.seq });
             return { ok: true as const };
           }),
       );
@@ -1135,16 +1199,47 @@ export function createChatModule(core: Core): ApiModule {
               await getConversation(tx, req.params.id, MESSAGE_KINDS),
               "Conversation not found",
             );
-            await tx
-              .update(conversationMembers)
-              .set({ lastReadSeq: sql`greatest(${conversationMembers.lastReadSeq}, ${req.body.seq})` })
-              .where(
-                and(
-                  eq(conversationMembers.conversationId, conv.id),
-                  eq(conversationMembers.memberKind, "user"),
-                  eq(conversationMembers.memberId, authOf(req).userId),
-                ),
+            // greatest(...): a read never moves the cursor backwards (mark unread has its own route).
+            await moveReadCursor(tx, authOf(req).userId, conv.id, { forward: req.body.seq });
+            return { ok: true as const };
+          }),
+      );
+
+      /**
+       * CHAT-09 (D-07, Pitfall 2): mark a conversation unread from one of its top-level messages. The caller's cursor
+       * becomes exactly that message's seq - 1 (backwards included). Readable first (hidden = missing = 404); the
+       * message must belong to it (otherwise 404, T-04-10-03); a thread reply is 400 `not_top_level`; only the
+       * caller's own membership moves (T-04-10-02) and a non-member has none (400 `not_a_member`). Never un-reads a
+       * notification; `conversation.read` tells the caller's other tabs and devices.
+       */
+      app.post(
+        "/conversations/:id/unread",
+        {
+          config: { authz: "user" },
+          preHandler: requireUser,
+          schema: { tags, params: IdParams, body: MarkUnreadRequest, response: { 200: Ok } },
+        },
+        async (req) =>
+          core.db.withTenant(tenant(req), async (tx) => {
+            const { conv } = await readableChannel(
+              req,
+              tx,
+              await getConversation(tx, req.params.id, MESSAGE_KINDS),
+              "Conversation not found",
+            );
+            const message = await getMessage(tx, req.body.messageId);
+            if (!message || message.conversationId !== conv.id) throw notFound("Message not found");
+            if (message.threadId) {
+              throw badRequest(
+                "Mark a message of the conversation unread, not a thread reply",
+                "not_top_level",
               );
+            }
+            const moved = await moveReadCursor(tx, authOf(req).userId, conv.id, {
+              exact: Math.max(0, Number(message.seq) - 1),
+            });
+            if (!moved)
+              throw badRequest("Join the conversation to keep track of what you read", "not_a_member");
             return { ok: true as const };
           }),
       );

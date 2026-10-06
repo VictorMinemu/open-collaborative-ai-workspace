@@ -7,14 +7,14 @@ import {
   type NotificationReadEvent,
   Ok,
 } from "@ocw/contracts";
-import { messages, notifications, type Tx } from "@ocw/db";
-import { and, count, desc, eq, inArray, isNull, type SQL, sql } from "drizzle-orm";
+import { messages, notifications } from "@ocw/db";
+import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { markDecided } from "../../authz";
 import { type App, authOf, type Core, tenant } from "../../core";
 import { badRequest } from "../../lib/errors";
 import { authorOf, type ConversationAccess, conversationRefs, loadDirectory } from "../chat";
-import { iso, MENTIONS_FILTER_KINDS } from "./service";
+import { iso, unreadCountFor, visible } from "./service";
 import { snippetOf } from "./snippet";
 
 /**
@@ -35,32 +35,6 @@ function decodeCursor(raw: string): z.infer<typeof Cursor> {
   } catch {
     throw badRequest("Invalid cursor", "invalid_cursor");
   }
-}
-
-/** The caller's visible notifications: own rows, readable conversations, live messages, optional kinds. */
-function visible(me: string, readableIds: string[], filter: "all" | "mentions"): SQL | undefined {
-  return and(
-    eq(notifications.userId, me),
-    inArray(notifications.conversationId, readableIds),
-    isNull(messages.deletedAt),
-    filter === "mentions" ? inArray(notifications.kind, [...MENTIONS_FILTER_KINDS]) : undefined,
-  );
-}
-
-/** Unread notifications the caller can see now, for one filter. */
-export async function unreadCountFor(
-  tx: Tx,
-  me: string,
-  readableIds: string[],
-  filter: "all" | "mentions",
-): Promise<number> {
-  if (readableIds.length === 0) return 0;
-  const [row] = await tx
-    .select({ n: count() })
-    .from(notifications)
-    .innerJoin(messages, eq(messages.id, notifications.messageId))
-    .where(and(visible(me, readableIds, filter), isNull(notifications.readAt)));
-  return Number(row?.n ?? 0);
 }
 
 export function registerNotificationRoutes(app: App, ctx: { core: Core; access: ConversationAccess }): void {

@@ -79,6 +79,11 @@ export const ConversationReadEvent = z.object({
   lastReadSeq: z.number().int().nonnegative(),
   unreadCount: z.number().int().min(0).max(UNREAD_CAP),
   mentionCount: z.number().int().min(0).max(UNREAD_CAP),
+  /**
+   * The newest top-level message seq the counts saw. A client that already holds a newer message (its `conv:`
+   * frame overtook this `user:` event) refetches the snapshot instead of trusting the counts.
+   */
+  latestMessageSeq: z.number().int().nonnegative().optional(),
 });
 export type ConversationReadEvent = z.infer<typeof ConversationReadEvent>;
 

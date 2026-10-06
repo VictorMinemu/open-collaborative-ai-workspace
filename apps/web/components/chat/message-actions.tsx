@@ -4,6 +4,7 @@ import type { Message } from "@ocw/contracts";
 import {
   Bookmark,
   BookmarkCheck,
+  CircleDot,
   Link2,
   MessageSquareReply,
   MoreHorizontal,
@@ -61,6 +62,8 @@ export interface MessageActionSet {
   /** Toggles the viewer's private save (CHAT-13); `saved` says which way it goes. */
   onToggleSave?: (() => void) | undefined;
   saved?: boolean | undefined;
+  /** Marks the conversation unread from this message (CHAT-09): top-level messages of a joined conversation. */
+  onMarkUnread?: (() => void) | undefined;
 }
 
 export const hasMessageActions = (a: MessageActionSet) =>
@@ -72,7 +75,8 @@ export const hasMessageActions = (a: MessageActionSet) =>
     a.onReact ||
     a.onPin ||
     a.onUnpin ||
-    a.onToggleSave
+    a.onToggleSave ||
+    a.onMarkUnread
   );
 
 const toolbarButton =
@@ -90,6 +94,16 @@ export function MessageActions({ actions }: { actions: MessageActionSet }) {
       node: (
         <DropdownMenuItem key="copy-link" onClick={actions.onCopyLink} data-testid="copy-link">
           <Link2 /> Copy link
+        </DropdownMenuItem>
+      ),
+    });
+  }
+  if (actions.onMarkUnread) {
+    more.push({
+      key: "mark-unread",
+      node: (
+        <DropdownMenuItem key="mark-unread" onClick={actions.onMarkUnread} data-testid="mark-unread">
+          <CircleDot /> Mark unread
         </DropdownMenuItem>
       ),
     });
@@ -334,6 +348,14 @@ export function MessageActionSheet({
               label="Copy link"
               testId="copy-link"
               onClick={run(actions.onCopyLink)}
+            />
+          ) : null}
+          {actions.onMarkUnread ? (
+            <SheetRow
+              icon={<CircleDot />}
+              label="Mark unread"
+              testId="mark-unread"
+              onClick={run(actions.onMarkUnread)}
             />
           ) : null}
           {actions.onToggleSave ? (
