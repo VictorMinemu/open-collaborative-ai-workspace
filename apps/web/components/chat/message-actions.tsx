@@ -1,7 +1,7 @@
 "use client";
 
 import type { Message } from "@ocw/contracts";
-import { MessageSquareReply, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
+import { Link2, MessageSquareReply, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -33,9 +33,12 @@ export interface MessageActionSet {
   onEdit?: (() => void) | undefined;
   /** Own messages, or anyone's when the channel's `viewerCan` has `message.delete_any` (never in DMs). */
   onDelete?: (() => void) | undefined;
+  /** Copies the message's permalink (CHAT-13); every readable, non-deleted message offers it. */
+  onCopyLink?: (() => void) | undefined;
 }
 
-export const hasMessageActions = (a: MessageActionSet) => !!(a.onReply || a.onEdit || a.onDelete);
+export const hasMessageActions = (a: MessageActionSet) =>
+  !!(a.onReply || a.onEdit || a.onDelete || a.onCopyLink);
 
 const toolbarButton =
   "inline-flex size-7 items-center justify-center rounded-md text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40 data-[popup-open]:bg-accent data-[popup-open]:text-foreground";
@@ -44,6 +47,16 @@ const toolbarButton =
 export function MessageActions({ actions }: { actions: MessageActionSet }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const more: Array<{ key: string; node: ReactNode }> = [];
+  if (actions.onCopyLink) {
+    more.push({
+      key: "copy-link",
+      node: (
+        <DropdownMenuItem key="copy-link" onClick={actions.onCopyLink} data-testid="copy-link">
+          <Link2 /> Copy link
+        </DropdownMenuItem>
+      ),
+    });
+  }
   if (actions.onEdit) {
     more.push({
       key: "edit",
@@ -188,6 +201,14 @@ export function MessageActionSheet({
               label="Reply in thread"
               testId="reply-in-thread"
               onClick={run(actions.onReply)}
+            />
+          ) : null}
+          {actions.onCopyLink ? (
+            <SheetRow
+              icon={<Link2 />}
+              label="Copy link"
+              testId="copy-link"
+              onClick={run(actions.onCopyLink)}
             />
           ) : null}
           {actions.onEdit ? (

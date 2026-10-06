@@ -4,11 +4,14 @@ import { useCallback, useLayoutEffect, useRef } from "react";
 
 /**
  * Chat scrolling: start at the bottom, follow new content while the reader is at the bottom, keep the
- * reading position when older content is prepended (`preserve()` before loading it).
+ * reading position when older content is prepended (`preserve()` before loading it). `detached` (a permalink
+ * window, CHAT-14) disables following: the view decides where to scroll, and newer pages append below.
  */
-export function useStickToBottom(contentKey: unknown, resetKey: string) {
+export function useStickToBottom(contentKey: unknown, resetKey: string, detached = false) {
   const ref = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
+  const detachedRef = useRef(detached);
+  detachedRef.current = detached;
   const restore = useRef<{ height: number; top: number } | null>(null);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset when switching conversations
@@ -26,7 +29,7 @@ export function useStickToBottom(contentKey: unknown, resetKey: string) {
       restore.current = null;
       return;
     }
-    if (atBottom.current) el.scrollTop = el.scrollHeight;
+    if (atBottom.current && !detachedRef.current) el.scrollTop = el.scrollHeight;
   }, [contentKey]);
 
   const onScroll = useCallback(() => {

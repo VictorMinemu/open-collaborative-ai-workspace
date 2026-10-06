@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip } from "@/components/ui/tooltip";
+import { useCopy } from "@/hooks/use-copy";
 import { errorMessage } from "@/lib/api";
 import { applyMessageDeleted, applyMessageUpdate, deleteMessage, editMessage } from "@/lib/chat-queries";
 import { cn, relativeTime } from "@/lib/utils";
@@ -219,10 +220,13 @@ interface RowProps {
   typers: Typer[];
   onOpenThread?: ((id: string) => void) | undefined;
   highlighted: boolean;
+  /** The permalink target (CHAT-14): flashes, then keeps a steady tint while the link is open. */
+  anchored: boolean;
   showThreadSummary: boolean;
   meId: string;
   readOnly: boolean;
   canDeleteAny: boolean;
+  linkFor?: ((m: Message) => string) | undefined;
 }
 
 const MessageRow = memo(function MessageRow({
@@ -231,10 +235,12 @@ const MessageRow = memo(function MessageRow({
   typers,
   onOpenThread,
   highlighted,
+  anchored,
   showThreadSummary,
   meId,
   readOnly,
   canDeleteAny,
+  linkFor,
 }: RowProps) {
   const author = message.author ?? {
     kind: message.authorKind,
@@ -250,6 +256,7 @@ const MessageRow = memo(function MessageRow({
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmUsed, setConfirmUsed] = useState(false);
   const qc = useQueryClient();
+  const { copy } = useCopy();
   const deleted = !!message.deletedAt;
   const own = message.authorKind === "user" && !!meId && message.authorId === meId;
   const mutable = !readOnly && !deleted;
@@ -262,6 +269,14 @@ const MessageRow = memo(function MessageRow({
             setConfirmUsed(true);
             setConfirmOpen(true);
           }
+        : undefined,
+    onCopyLink:
+      linkFor && !deleted
+        ? () =>
+            copy(`${window.location.origin}${linkFor(message)}`).then(
+              () => toast.success("Link copied"),
+              () => toast.error("Couldn't copy the link"),
+            )
         : undefined,
   };
   const confirmDelete = async () => {
@@ -301,6 +316,7 @@ const MessageRow = memo(function MessageRow({
       data-testid="message"
       data-message-id={message.id}
       data-author-kind={author.kind}
+      data-highlighted={anchored ? "true" : undefined}
       onPointerDown={(e) => {
         if (e.pointerType !== "touch" || !actionable) return;
         cancelPress();
@@ -342,6 +358,7 @@ const MessageRow = memo(function MessageRow({
         "group relative flex gap-3 px-4 py-1 transition-colors hover:bg-muted/45 sm:px-5 dark:hover:bg-white/[0.025] [-webkit-touch-callout:none]",
         continuation ? "py-0.5" : "mt-2 pt-1.5",
         highlighted && "chat-flash",
+        anchored && "chat-anchor",
         (editing || sheetOpen) && "bg-muted/45 dark:bg-white/[0.025]",
       )}
     >
@@ -477,6 +494,20 @@ function PendingRow({
   );
 }
 
+/** Reports a hidden permalink target once per anchor (after render, never during it). */
+function useHiddenAnchor(
+  anchorId: string | null,
+  neighbour: string | null,
+  report: ((neighbourId: string | null) => void) | undefined,
+) {
+  const reported = useRef<string | null>(null);
+  useEffect(() => {
+    if (!anchorId || !report || reported.current === anchorId) return;
+    reported.current = anchorId;
+    report(neighbour);
+  }, [anchorId, neighbour, report]);
+}
+
 /**
  * Slack-style list: day dividers, consecutive messages from the same author within 5 minutes collapse
  * under one avatar/name, bots carry a BOT badge, roots show their thread summary.
@@ -495,6 +526,9 @@ export function MessageList({
   readOnly = false,
   canDeleteAny = false,
   showTombstones = false,
+  anchorId,
+  linkFor,
+  onAnchorHidden,
 }: {
   messages: Message[];
   pending: PendingMessage[];
@@ -513,14 +547,39 @@ export function MessageList({
   canDeleteAny?: boolean;
   /** Show a deleted message as a tombstone even without replies (the thread panel's root). */
   showTombstones?: boolean;
+  /** The permalink target to highlight (`data-highlighted`, CHAT-14). */
+  anchorId?: string | null;
+  /** Builds a message's permalink path; absent = no "Copy link" (e.g. optimistic rows). Must be stable. */
+  linkFor?: (m: Message) => string;
+  /**
+   * The permalink target is a deleted message this list hides (P-05, no replies): called once per anchor with the
+   * nearest visible neighbour (the next one, else the previous one), so the view can say so and land nearby.
+   */
+  onAnchorHidden?: (neighbourId: string | null) => void;
 }) {
   let prev: { key: string; at: number; day: string } | null = startDay
     ? { key: "", at: 0, day: new Date(startDay).toDateString() }
     : null;
   const rows: ReactNode[] = [];
+  let hiddenAnchor = false;
+  let lastVisible: string | null = null;
+  let neighbour: string | null = null;
+  let wantNext = false;
   for (const m of messages) {
     // P-05: a deleted message disappears, unless its thread keeps it as a tombstone.
-    if (m.deletedAt && m.replyCount === 0 && !showTombstones) continue;
+    if (m.deletedAt && m.replyCount === 0 && !showTombstones) {
+      if (anchorId && m.id === anchorId) {
+        hiddenAnchor = true;
+        neighbour = lastVisible;
+        wantNext = true;
+      }
+      continue;
+    }
+    if (wantNext) {
+      neighbour = m.id;
+      wantNext = false;
+    }
+    lastVisible = m.id;
     const key = m.deletedAt ? `deleted:${m.id}` : authorKey(m.author, m);
     const at = new Date(m.createdAt).getTime();
     const day = new Date(m.createdAt).toDateString();
@@ -535,15 +594,18 @@ export function MessageList({
         typers={typers}
         onOpenThread={onOpenThread}
         highlighted={m.id === highlightId}
+        anchored={!!anchorId && m.id === anchorId}
         showThreadSummary={showThreadSummary}
         meId={me.id}
         readOnly={readOnly}
         canDeleteAny={canDeleteAny}
+        linkFor={linkFor}
       />,
     );
     // A message with a thread breaks the group so the next one shows its author again.
     prev = { key: m.replyCount > 0 ? `${key}:thread` : key, at, day };
   }
+  useHiddenAnchor(hiddenAnchor ? (anchorId ?? null) : null, neighbour, onAnchorHidden);
   const meKey = `user:${me.id}`;
   for (const p of pending) {
     const at = new Date(p.createdAt).getTime();

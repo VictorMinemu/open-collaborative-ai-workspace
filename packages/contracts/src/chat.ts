@@ -437,18 +437,27 @@ export const ThreadResponse = z.object({
 });
 export type ThreadResponse = z.infer<typeof ThreadResponse>;
 
-export const PageQuery = z
-  .object({
-    before: z.coerce.number().int().positive().optional(),
-    /** Messages with seq > after, oldest first (forward paging of a detached page). */
-    after: z.coerce.number().int().nonnegative().optional(),
-    /** A page centred on this message (permalinks, CHAT-14). */
-    around: Id.optional(),
-    limit: z.coerce.number().int().min(1).max(200).default(50),
-  })
-  .refine((q) => [q.before, q.after, q.around].filter((v) => v !== undefined).length <= 1, {
-    message: "Use at most one of before, after and around",
-  });
+/**
+ * The page parameters without the one-cursor rule. The API route validates these and refuses more than one
+ * cursor itself, after the readable check, with 400 `invalid_page_query` (hidden conversations stay 404).
+ */
+export const PageQueryFields = z.object({
+  before: z.coerce.number().int().positive().optional(),
+  /** Messages with seq > after, oldest first (forward paging of a detached page). */
+  after: z.coerce.number().int().nonnegative().optional(),
+  /** A page centred on this message (permalinks, CHAT-14). */
+  around: Id.optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+export type PageQueryFields = z.infer<typeof PageQueryFields>;
+
+/** Number of cursors (`before`, `after`, `around`) set on a page query; at most one is allowed. */
+export const pageCursorCount = (q: { before?: unknown; after?: unknown; around?: unknown }) =>
+  [q.before, q.after, q.around].filter((v) => v !== undefined).length;
+
+export const PageQuery = PageQueryFields.refine((q) => pageCursorCount(q) <= 1, {
+  message: "Use at most one of before, after and around",
+});
 
 // ---- threads view (CHAT-02) ----
 

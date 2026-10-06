@@ -30,6 +30,8 @@ export const chatKeys = {
   channel: (id: string) => ["chat", "channel", id] as const,
   members: (id: string) => ["chat", "members", id] as const,
   messages: (id: string) => ["chat", "messages", id] as const,
+  /** A detached window around a permalink target; shares the `messages` prefix so updates reach both. */
+  around: (id: string, anchorId: string) => ["chat", "messages", id, "around", anchorId] as const,
   thread: (rootId: string) => ["chat", "thread", rootId] as const,
   agents: ["chat", "agents"] as const,
   dms: ["chat", "dms"] as const,
@@ -206,14 +208,43 @@ export function useMessages(channelId: string, enabled: boolean) {
   });
 }
 
-export async function loadOlder(qc: QueryClient, channelId: string): Promise<boolean> {
-  const page = qc.getQueryData<MessagePage>(chatKeys.messages(channelId));
+/** The cache key of the window a view shows: the live tail, or the detached window around `anchorId`. */
+const windowKey = (convId: string, anchorId?: string | null) =>
+  anchorId ? chatKeys.around(convId, anchorId) : chatKeys.messages(convId);
+
+/**
+ * The page around a permalink target (CHAT-14): older and newer neighbours of the anchor (a thread reply
+ * resolves to its root, `threadRootId`). Detached from the live tail: live messages never grow it at the bottom.
+ */
+export function useMessagesAround(convId: string, anchorId: string | null) {
+  return useQuery({
+    enabled: !!anchorId,
+    queryKey: chatKeys.around(convId, anchorId ?? ""),
+    queryFn: ({ signal }) =>
+      api.get(
+        `/api/v1/conversations/${convId}/messages?limit=50&around=${encodeURIComponent(anchorId ?? "")}`,
+        { schema: MessagePageSchema, signal },
+      ),
+    retry: retryUnlessClientError,
+    staleTime: Number.POSITIVE_INFINITY,
+    gcTime: 60_000,
+  });
+}
+
+/** Prepends the previous page to the shown window (the tail, or the detached window when `anchorId` is set). */
+export async function loadOlder(
+  qc: QueryClient,
+  channelId: string,
+  anchorId?: string | null,
+): Promise<boolean> {
+  const key = windowKey(channelId, anchorId);
+  const page = qc.getQueryData<MessagePage>(key);
   if (!page?.nextBefore) return false;
   const older = await api.get(
     `/api/v1/conversations/${channelId}/messages?limit=50&before=${page.nextBefore}`,
     { schema: MessagePageSchema },
   );
-  qc.setQueryData<MessagePage>(chatKeys.messages(channelId), (prev) => {
+  qc.setQueryData<MessagePage>(key, (prev) => {
     if (!prev) return prev;
     const known = new Set(prev.messages.map((m) => m.id));
     return {
@@ -223,6 +254,48 @@ export async function loadOlder(qc: QueryClient, channelId: string): Promise<boo
     };
   });
   return older.nextBefore !== null;
+}
+
+/** Appends the next page (`after=<nextAfter>`) to a detached window; false once it reached the live end. */
+export async function loadNewer(qc: QueryClient, convId: string, anchorId: string): Promise<boolean> {
+  const key = chatKeys.around(convId, anchorId);
+  const page = qc.getQueryData<MessagePage>(key);
+  if (!page?.nextAfter) return false;
+  const newer = await api.get(`/api/v1/conversations/${convId}/messages?limit=50&after=${page.nextAfter}`, {
+    schema: MessagePageSchema,
+  });
+  qc.setQueryData<MessagePage>(key, (prev) => {
+    if (!prev) return prev;
+    const known = new Set(prev.messages.map((m) => m.id));
+    return {
+      ...prev,
+      messages: [...prev.messages, ...newer.messages.filter((m) => !known.has(m.id))],
+      nextAfter: newer.nextAfter ?? null,
+    };
+  });
+  return (newer.nextAfter ?? null) !== null;
+}
+
+/**
+ * A detached window that reached the live end folds into the tail page (same rows, so the scroll position holds)
+ * and the view is live again. The tail keeps its live updates; the window adds the older history.
+ */
+export function rejoinTail(qc: QueryClient, convId: string, anchorId: string): boolean {
+  const win = qc.getQueryData<MessagePage>(chatKeys.around(convId, anchorId));
+  const tail = qc.getQueryData<MessagePage>(chatKeys.messages(convId));
+  if (!win || win.nextAfter || !tail) return false;
+  const byId = new Map<string, Message>();
+  for (const m of win.messages) byId.set(m.id, m);
+  for (const m of tail.messages) byId.set(m.id, m);
+  const messages = [...byId.values()].sort((a, b) => a.seq - b.seq);
+  const winFirst = win.messages[0]?.seq ?? Number.POSITIVE_INFINITY;
+  const tailFirst = tail.messages[0]?.seq ?? Number.POSITIVE_INFINITY;
+  qc.setQueryData<MessagePage>(chatKeys.messages(convId), {
+    ...tail,
+    messages,
+    nextBefore: winFirst <= tailFirst ? win.nextBefore : tail.nextBefore,
+  });
+  return true;
 }
 
 export function useThread(rootId: string | null) {
@@ -261,7 +334,10 @@ export function postMessage(
   });
 }
 
-/** Applies a message (from the POST response or a `message.created` event) to the caches, idempotently. */
+/**
+ * Applies a message (from the POST response or a `message.created` event) to the caches, idempotently. A
+ * top-level message joins the live tail only: a detached permalink window never grows at the bottom by itself.
+ */
 export function applyMessage(qc: QueryClient, message: Message) {
   if (message.threadId) {
     qc.setQueryData<ThreadResponse>(chatKeys.thread(message.threadId), (prev) => {
@@ -284,6 +360,16 @@ export function applyMessage(qc: QueryClient, message: Message) {
   });
 }
 
+/**
+ * Patches every message window of a conversation: the live tail and any detached permalink window (they share
+ * the `chatKeys.messages` prefix). Only creation is tail-only (`applyMessage`).
+ */
+function patchWindows(qc: QueryClient, convId: string, patch: (m: Message) => Message) {
+  qc.setQueriesData<MessagePage>({ queryKey: chatKeys.messages(convId) }, (prev) =>
+    prev ? { ...prev, messages: prev.messages.map(patch) } : prev,
+  );
+}
+
 export function applyThreadUpdate(qc: QueryClient, channelId: string, ev: ThreadUpdatedEvent) {
   const patch = (m: Message): Message =>
     m.id === ev.rootId
@@ -294,9 +380,7 @@ export function applyThreadUpdate(qc: QueryClient, channelId: string, ev: Thread
           replyParticipants: ev.replyParticipants,
         }
       : m;
-  qc.setQueryData<MessagePage>(chatKeys.messages(channelId), (prev) =>
-    prev ? { ...prev, messages: prev.messages.map(patch) } : prev,
-  );
+  patchWindows(qc, channelId, patch);
   qc.setQueryData<ThreadResponse>(chatKeys.thread(ev.rootId), (prev) =>
     prev ? { ...prev, root: patch(prev.root) } : prev,
   );
@@ -333,9 +417,7 @@ export function applyMessageUpdate(qc: QueryClient, message: Message) {
     );
     return;
   }
-  qc.setQueryData<MessagePage>(chatKeys.messages(message.conversationId), (prev) =>
-    prev ? { ...prev, messages: prev.messages.map(patch) } : prev,
-  );
+  patchWindows(qc, message.conversationId, patch);
   qc.setQueryData<ThreadResponse>(chatKeys.thread(message.id), (prev) =>
     prev ? { ...prev, root: patch(prev.root) } : prev,
   );
@@ -371,9 +453,7 @@ export function applyMessageDeleted(qc: QueryClient, ev: MessageDeletedEvent) {
     );
     return;
   }
-  qc.setQueryData<MessagePage>(chatKeys.messages(ev.conversationId), (prev) =>
-    prev ? { ...prev, messages: prev.messages.map(tomb) } : prev,
-  );
+  patchWindows(qc, ev.conversationId, tomb);
   qc.setQueryData<ThreadResponse>(chatKeys.thread(ev.messageId), (prev) =>
     prev ? { ...prev, root: tomb(prev.root) } : prev,
   );
