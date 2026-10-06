@@ -57,6 +57,16 @@ test("Work Zone: pair a device, run a session, approve, review changes", async (
   let daemon: ChildProcess | null = null;
   let adminApi: APIRequestContext | null = null;
   let samToRestore: string | null = null;
+  // Cleanup never throws from `finally` (that would replace the body's error: a stuck click was once reported as a
+  // hung cleanup request); its failures fail the test after a passing body.
+  const cleanupErrors: unknown[] = [];
+  const tidy = async (step: () => Promise<unknown>) => {
+    try {
+      await step();
+    } catch (e) {
+      cleanupErrors.push(e);
+    }
+  };
 
   try {
     await signIn(page);
@@ -200,39 +210,51 @@ test("Work Zone: pair a device, run a session, approve, review changes", async (
       await page.emulateMedia({ colorScheme: "light" });
     }
   } finally {
+    // Every cleanup request has its own short timeout: a cleanup step can never eat the test's budget.
+    const CLEANUP_TIMEOUT = 10_000;
+    const origin = new URL(page.url()).origin;
     // Sam stays a developer for the next specs and runs, whatever happened above.
     if (adminApi) {
+      const api = adminApi;
       if (samToRestore) {
-        const res = await adminApi.patch(`/api/v1/members/${samToRestore}/role`, {
-          data: { role: "developer" },
+        const sam = samToRestore;
+        await tidy(async () => {
+          const res = await api.patch(`/api/v1/members/${sam}/role`, {
+            data: { role: "developer" },
+            timeout: CLEANUP_TIMEOUT,
+          });
+          expect(res.ok(), "restore Sam to developer").toBe(true);
         });
-        expect(res.ok(), "restore Sam to developer").toBe(true);
       }
-      await adminApi.dispose();
+      await tidy(() => api.dispose());
     }
     daemon?.kill("SIGTERM");
     // Archive the e2e session so repeated runs do not clutter the demo workspace.
     const sid = /\/work-zone\/([0-9a-f-]{36})/.exec(page.url())?.[1];
     if (sid) {
-      // Bounded: a hung archive must not eat the test timeout and skip the device revocation below.
-      await page.request
-        .post(`${API_URL}/api/v1/work-sessions/${sid}/archive`, {
-          headers: { origin: new URL(page.url()).origin },
+      await tidy(() =>
+        page.request.post(`${API_URL}/api/v1/work-sessions/${sid}/archive`, {
+          headers: { origin },
           data: {},
-          timeout: 15_000,
-        })
-        .catch(() => undefined);
+          timeout: CLEANUP_TIMEOUT,
+        }),
+      );
     }
     // Leave the workspace tidy: revoke the e2e device (also proves revocation from the API).
-    const devices = (await (await page.request.get(`${API_URL}/api/v1/devices`)).json()) as {
-      devices: Array<{ id: string; name: string }>;
-    };
-    for (const d of devices.devices?.filter((x) => x.name === deviceName) ?? []) {
-      await page.request.delete(`${API_URL}/api/v1/devices/${d.id}`, {
-        headers: { origin: new URL(page.url()).origin },
-      });
-    }
+    await tidy(async () => {
+      const res = await page.request.get(`${API_URL}/api/v1/devices`, { timeout: CLEANUP_TIMEOUT });
+      const { devices } = (await res.json()) as { devices?: Array<{ id: string; name: string }> };
+      for (const d of devices?.filter((x) => x.name === deviceName) ?? []) {
+        const del = await page.request.delete(`${API_URL}/api/v1/devices/${d.id}`, {
+          headers: { origin },
+          timeout: CLEANUP_TIMEOUT,
+        });
+        expect(del.ok(), `revoke ${deviceName}`).toBe(true);
+      }
+    });
     rmSync(home, { recursive: true, force: true });
     rmSync(repoParent, { recursive: true, force: true });
   }
+  // Reached only when the body passed.
+  if (cleanupErrors.length > 0) throw cleanupErrors[0];
 });
