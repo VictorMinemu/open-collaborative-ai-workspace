@@ -1,6 +1,6 @@
 "use client";
 
-import { AiChatPolicy, AiUsageToday, type UpdateAiChatPolicyRequest } from "@ocw/contracts";
+import { AiChatPolicy, AiUsageReport, AiUsageToday, type UpdateAiChatPolicyRequest } from "@ocw/contracts";
 import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { aiKeys } from "./ai-chat-queries";
 import { api, isApiError } from "./api";
@@ -8,13 +8,19 @@ import { api, isApiError } from "./api";
 /**
  * AI chat usage and policy data (05-08, AICHAT-07, D-06): the member's usage today against the organization's daily
  * caps (`GET /me/ai-usage/today`) and the admin AI chat policy (`GET|PUT /ai-chat/policy`, `provider.manage`).
- * 05-09 adds the 30-day reports here.
+ * The reports (05-09): the organization's usage by member or by model over 7/30/90 days (`GET /ai-usage/report`,
+ * `provider.manage`) and the member's own usage by model (`GET /me/ai-usage/report`).
  */
 
 export const aiUsageKeys = {
   today: ["ai", "usage", "today"] as const,
   policy: ["ai", "policy"] as const,
+  report: (scope: "org" | "me", days: number, groupBy: "user" | "model") =>
+    ["ai", "usage", "report", scope, days, groupBy] as const,
 };
+
+export type UsageWindow = 7 | 30 | 90;
+export type UsageGrouping = "user" | "model";
 
 const noRetryOn4xx = (n: number, err: unknown) => !(isApiError(err) && err.status < 500) && n < 2;
 
@@ -32,6 +38,19 @@ export function useAiUsageToday(enabled = true) {
 /** A send was counted (or refused at a cap): today's counters move. */
 export function refreshAiUsageToday(qc: QueryClient): void {
   void qc.invalidateQueries({ queryKey: aiUsageKeys.today });
+}
+
+/** The organization's usage over the last `days` UTC days, by member or by model (admins only). */
+export function useAiUsageReport(days: UsageWindow, groupBy: UsageGrouping, enabled = true) {
+  return useQuery({
+    enabled,
+    queryKey: aiUsageKeys.report("org", days, groupBy),
+    queryFn: ({ signal }) =>
+      api.get(`/api/v1/ai-usage/report?days=${days}&groupBy=${groupBy}`, { schema: AiUsageReport, signal }),
+    placeholderData: (previous) => previous,
+    staleTime: 30_000,
+    retry: noRetryOn4xx,
+  });
 }
 
 export function useAiChatPolicy(enabled = true) {
