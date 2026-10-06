@@ -25,3 +25,18 @@
 .chat-flash {
   animation: chat-flash 1.6s ease-out;
 }
+
+/* Permalink target (CHAT-14): a 2.5 s flash that settles into a steady tint with an accent bar while the link is open. */
+@keyframes chat-anchor-flash {
+  from {
+    background-color: color-mix(in oklch, var(--primary) 20%, transparent);
+  }
+  to {
+    background-color: color-mix(in oklch, var(--primary) 6%, transparent);
+  }
+}
+.chat-anchor {
+  background-color: color-mix(in oklch, var(--primary) 6%, transparent);
+  box-shadow: inset 3px 0 0 var(--primary);
+  animation: chat-anchor-flash 2.5s ease-out;
+}

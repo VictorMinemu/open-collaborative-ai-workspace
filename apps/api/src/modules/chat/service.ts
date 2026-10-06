@@ -8,7 +8,7 @@ import {
   type ThreadUpdatedEvent,
 } from "@ocw/contracts";
 import { conversationMembers, conversations, messages, type Tx, tenantOf } from "@ocw/db";
-import { and, asc, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lt, sql } from "drizzle-orm";
 import { badRequest, notFound } from "../../lib/errors";
 import type { AuditService } from "../audit";
 import type { ChannelFacts } from "../organization";
@@ -467,14 +467,80 @@ export async function listMessages(
     .limit(page.limit + 1);
   const hasMore = rows.length > page.limit;
   const pageRows = rows.slice(0, page.limit).reverse();
+  return {
+    messages: await topLevelDtos(tx, pageRows, dir),
+    nextBefore: hasMore ? (pageRows[0]?.seq ?? null) : null,
+  };
+}
+
+/** DTOs for top-level rows (ascending), with reply participants on thread roots, exactly like `listMessages`. */
+async function topLevelDtos(tx: Tx, rows: MessageRow[], dir: Directory): Promise<Message[]> {
   const participants = await replyParticipantsFor(
     tx,
-    pageRows.filter((r) => r.replyCount > 0).map((r) => r.id),
+    rows.filter((r) => r.replyCount > 0).map((r) => r.id),
     dir,
   );
+  return rows.map((r) => toMessage(r, dir, r.replyCount > 0 ? (participants.get(r.id) ?? []) : []));
+}
+
+/**
+ * A page centred on a top-level `anchor` (permalinks, CHAT-14): `floor(limit / 2)` older messages, the anchor,
+ * then the rest newer, ascending. Tombstones are included (P-05: the client decides what to show). The caller
+ * resolves a thread reply to its root before calling. `nextBefore`/`nextAfter` are null at either end.
+ */
+export async function listMessagesAround(
+  tx: Tx,
+  conversationId: string,
+  dir: Directory,
+  anchor: MessageRow,
+  limit: number,
+): Promise<{ messages: Message[]; nextBefore: number | null; nextAfter: number | null; anchorId: string }> {
+  const olderWanted = Math.floor(limit / 2);
+  const newerWanted = Math.max(0, limit - 1 - olderWanted);
+  const topLevel = and(eq(messages.conversationId, conversationId), isNull(messages.threadId));
+  const older = await tx
+    .select()
+    .from(messages)
+    .where(and(topLevel, lt(messages.seq, anchor.seq)))
+    .orderBy(desc(messages.seq))
+    .limit(olderWanted + 1);
+  const newer = await tx
+    .select()
+    .from(messages)
+    .where(and(topLevel, gt(messages.seq, anchor.seq)))
+    .orderBy(asc(messages.seq))
+    .limit(newerWanted + 1);
+  const olderRows = older.slice(0, olderWanted).reverse();
+  const newerRows = newer.slice(0, newerWanted);
+  const rows = [...olderRows, anchor, ...newerRows];
   return {
-    messages: pageRows.map((r) => toMessage(r, dir, r.replyCount > 0 ? (participants.get(r.id) ?? []) : [])),
-    nextBefore: hasMore ? (pageRows[0]?.seq ?? null) : null,
+    messages: await topLevelDtos(tx, rows, dir),
+    nextBefore: older.length > olderWanted ? (rows[0]?.seq ?? null) : null,
+    nextAfter: newer.length > newerWanted ? (rows.at(-1)?.seq ?? null) : null,
+    anchorId: anchor.id,
+  };
+}
+
+/** Top-level messages with seq > `after`, ascending (forward paging of a detached window). */
+export async function listMessagesAfter(
+  tx: Tx,
+  conversationId: string,
+  dir: Directory,
+  after: number,
+  limit: number,
+): Promise<{ messages: Message[]; nextAfter: number | null }> {
+  const rows = await tx
+    .select()
+    .from(messages)
+    .where(
+      and(eq(messages.conversationId, conversationId), isNull(messages.threadId), gt(messages.seq, after)),
+    )
+    .orderBy(asc(messages.seq))
+    .limit(limit + 1);
+  const pageRows = rows.slice(0, limit);
+  return {
+    messages: await topLevelDtos(tx, pageRows, dir),
+    nextAfter: rows.length > limit ? (pageRows.at(-1)?.seq ?? null) : null,
   };
 }
 

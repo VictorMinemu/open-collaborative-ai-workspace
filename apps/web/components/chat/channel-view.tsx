@@ -5,6 +5,7 @@ import {
   ChannelSummary,
   EphemeralTypes,
   EventTypes,
+  type Message,
   type MessageCreatedEvent,
   type MessageDeletedEvent,
   type MessageUpdatedEvent,
@@ -39,7 +40,6 @@ import {
   applyThreadUpdate,
   bumpLatest,
   chatKeys,
-  loadOlder,
   markRead,
   postMessage,
   useChannelAction,
@@ -47,18 +47,22 @@ import {
   useChannels,
   useMessages,
 } from "@/lib/chat-queries";
+import { parsePermalink, permalinkPath } from "@/lib/permalink";
 import { useMe } from "@/lib/queries";
 import { useRealtime, useTopic } from "@/lib/realtime";
 import { formatDate } from "@/lib/utils";
 import { ChannelIcon } from "./chat-sidebar";
 import { Composer, type ComposerApi, ComposerHint, type MentionCandidate } from "./composer";
+import { JumpToLatest } from "./jump-to-latest";
 import { MentionContext } from "./markdown";
 import { MembersDialog } from "./members-dialog";
 import { MessageList, type PendingMessage } from "./message-list";
+import { MessageUnavailable } from "./message-unavailable";
 import { PrincipalAvatar } from "./principal-avatar";
 import { ThreadPanel } from "./thread-panel";
 import { TypingIndicator, useTypers } from "./typing";
 import { dirKey, useOrgDirectory } from "./use-chat-directory";
+import { useCentreOnce, usePermalinkWindow, useWindowPaging } from "./use-permalink-window";
 import { useStickToBottom } from "./use-stick-to-bottom";
 
 function newId(): string {
@@ -89,6 +93,8 @@ export function ChannelView({ channelId }: { channelId: string }) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const threadId = searchParams.get("thread");
+  // A permalink (CHAT-14): `m` is the linked message, `thread` its root when it is a reply.
+  const { messageId: permalinkId } = parsePermalink(searchParams);
   const meQ = useMe({ enabled: false });
   const me = useMemo(
     () => ({ id: meQ.data?.user.id ?? "", name: meQ.data?.user.name ?? "You" }),
@@ -117,7 +123,6 @@ export function ChannelView({ channelId }: { channelId: string }) {
   const { typers, touch, clear } = useTypers();
   const [pending, setPending] = useState<PendingMessage[]>([]);
   const [membersOpen, setMembersOpen] = useState(false);
-  const [loadingOlder, setLoadingOlder] = useState(false);
   const composerApi = useRef<ComposerApi | null>(null);
   const join = useChannelAction("join");
   const leave = useChannelAction("leave");
@@ -125,6 +130,15 @@ export function ChannelView({ channelId }: { channelId: string }) {
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset per channel
   useEffect(() => setPending([]), [channelId]);
+
+  // ---------------------------------------------------------------- permalink window (CHAT-14)
+  const win = usePermalinkWindow({
+    convId: channelId,
+    tail: messages.data,
+    permalinkId,
+    linkedTop: threadId ?? permalinkId,
+  });
+  const { detached, shown } = win;
 
   // Mentionable: channel members (incl. bots even before the bots API exists) ∪ org directory.
   const candidates = useMemo<MentionCandidate[]>(() => {
@@ -267,8 +281,34 @@ export function ChannelView({ channelId }: { channelId: string }) {
   // ---------------------------------------------------------------- sending
   const channelPending = pending.filter((p) => !p.threadRootId);
   const scroll = useStickToBottom(
-    `${messages.data?.messages.length ?? 0}:${channelPending.length}:${messages.data?.messages.at(-1)?.replyCount ?? 0}`,
+    `${detached ? "window" : "tail"}:${shown?.messages.length ?? 0}:${channelPending.length}:${shown?.messages.at(-1)?.replyCount ?? 0}`,
     channelId,
+    detached,
+  );
+
+  useCentreOnce(scroll, permalinkId, win.centreTarget);
+
+  // A reply linked without its root (`?m=<reply>`): open its thread like a full thread link would.
+  const linkRoot = win.threadRootId;
+  useEffect(() => {
+    if (permalinkId && linkRoot && !threadId) {
+      router.replace(`${pathname}?thread=${linkRoot}&m=${permalinkId}`, { scroll: false });
+    }
+  }, [permalinkId, linkRoot, threadId, router, pathname]);
+
+  const { release } = win;
+  const jumpToLatest = useCallback(() => {
+    release();
+    scroll.scrollToBottom();
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete("m");
+    const query = params.toString();
+    router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
+  }, [release, scroll, searchParams, router, pathname]);
+
+  const linkFor = useCallback(
+    (m: Message) => permalinkPath({ id: channelId, kind: "channel" }, m.id, m.threadId),
+    [channelId],
   );
 
   const deliver = useCallback(
@@ -301,11 +341,15 @@ export function ChannelView({ channelId }: { channelId: string }) {
         failed: false,
         createdAt: new Date().toISOString(),
       };
-      if (!threadRootId) scroll.scrollToBottom();
+      if (!threadRootId) {
+        // Posting from old history returns to the live tail, where the message appears.
+        if (detached) jumpToLatest();
+        scroll.scrollToBottom();
+      }
       setPending((prev) => [...prev, p]);
       void deliver(p);
     },
-    [deliver, scroll],
+    [deliver, scroll, detached, jumpToLatest],
   );
 
   const retry = useCallback(
@@ -325,22 +369,14 @@ export function ChannelView({ channelId }: { channelId: string }) {
   );
   const closeThread = useCallback(() => router.replace(pathname, { scroll: false }), [router, pathname]);
 
-  // ---------------------------------------------------------------- older pages
-  const olderBusy = useRef(false);
-  const onScroll = () => {
-    scroll.onScroll();
-    const el = scroll.ref.current;
-    if (!el || el.scrollTop > 240 || olderBusy.current || !messages.data?.nextBefore) return;
-    olderBusy.current = true;
-    setLoadingOlder(true);
-    scroll.preserve();
-    loadOlder(qc, channelId)
-      .catch(() => toast.error("Couldn't load older messages"))
-      .finally(() => {
-        olderBusy.current = false;
-        setLoadingOlder(false);
-      });
-  };
+  // ---------------------------------------------------------------- older / newer pages
+  const { onScroll, loadingOlder, loadingNewer } = useWindowPaging({
+    convId: channelId,
+    scroll,
+    shown,
+    windowId: win.windowId,
+    detached,
+  });
 
   // ---------------------------------------------------------------- render
   if (revoked) {
@@ -370,6 +406,10 @@ export function ChannelView({ channelId }: { channelId: string }) {
   }
 
   if (!channel) {
+    // A permalink never says whether the conversation exists (T-04-03-01).
+    if (permalinkId && (isApiError(single.error, 404) || single.isSuccess || channels.isSuccess)) {
+      return <MessageUnavailable />;
+    }
     const missing = isApiError(single.error, 404) || single.isSuccess || channels.isSuccess;
     return (
       <div className="flex min-w-0 flex-1 flex-col">
@@ -389,6 +429,8 @@ export function ChannelView({ channelId }: { channelId: string }) {
     );
   }
 
+  if (win.unavailable) return <MessageUnavailable />;
+
   const memberList = members.data?.members ?? [];
   const bots = memberList.filter((m) => m.kind === "agent");
   const canPost = channel.isMember && !channel.archivedAt;
@@ -399,7 +441,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
   const channelTypers = typers;
 
   const intro =
-    messages.data && messages.data.nextBefore === null ? (
+    shown && shown.nextBefore === null ? (
       <div className="px-4 pt-10 pb-4 sm:px-5" data-testid="channel-intro">
         <div className="flex size-12 items-center justify-center rounded-xl bg-brand-soft text-brand-soft-foreground">
           <ChannelIcon channel={channel} className="size-6" />
@@ -517,45 +559,59 @@ export function ChannelView({ channelId }: { channelId: string }) {
             }
           />
 
-          <div
-            ref={scroll.ref}
-            onScroll={onScroll}
-            className="scrollbar-thin flex min-h-0 flex-1 flex-col overflow-y-auto"
-            data-testid="channel-scroll"
-          >
-            {messages.isPending ? (
-              <MessagesSkeleton />
-            ) : messages.isError ? (
-              <EmptyState
-                icon={Hash}
-                title="Couldn't load messages"
-                description={errorMessage(messages.error)}
-              >
-                <Button variant="outline" onClick={() => void messages.refetch()}>
-                  Try again
-                </Button>
-              </EmptyState>
-            ) : (
-              <div className="mt-auto">
-                {loadingOlder ? (
-                  <div className="flex justify-center py-3 text-muted-foreground">
-                    <Spinner />
-                  </div>
-                ) : null}
-                <MessageList
-                  messages={messages.data?.messages ?? []}
-                  pending={channelPending}
-                  me={me}
-                  typers={channelTypers}
-                  onOpenThread={openThread}
-                  onRetry={retry}
-                  highlightId={threadId}
-                  intro={intro}
-                  readOnly={!!channel.archivedAt}
-                  canDeleteAny={canModerate}
-                />
-              </div>
-            )}
+          <div className="relative flex min-h-0 flex-1 flex-col">
+            <div
+              ref={scroll.ref}
+              onScroll={onScroll}
+              className="scrollbar-thin flex min-h-0 flex-1 flex-col overflow-y-auto"
+              data-testid="channel-scroll"
+              data-detached={detached ? "true" : undefined}
+            >
+              {messages.isPending || win.loading ? (
+                <MessagesSkeleton />
+              ) : messages.isError || win.error ? (
+                <EmptyState
+                  icon={Hash}
+                  title="Couldn't load messages"
+                  description={errorMessage(messages.error ?? win.error)}
+                >
+                  <Button
+                    variant="outline"
+                    onClick={() => (messages.isError ? void messages.refetch() : win.retry())}
+                  >
+                    Try again
+                  </Button>
+                </EmptyState>
+              ) : (
+                <div className="mt-auto">
+                  {loadingOlder ? (
+                    <div className="flex justify-center py-3 text-muted-foreground">
+                      <Spinner />
+                    </div>
+                  ) : null}
+                  <MessageList
+                    messages={shown?.messages ?? []}
+                    pending={detached ? [] : channelPending}
+                    me={me}
+                    typers={channelTypers}
+                    onOpenThread={openThread}
+                    onRetry={retry}
+                    highlightId={threadId}
+                    anchorId={threadId ? null : permalinkId}
+                    linkFor={linkFor}
+                    intro={intro}
+                    readOnly={!!channel.archivedAt}
+                    canDeleteAny={canModerate}
+                  />
+                  {loadingNewer ? (
+                    <div className="flex justify-center py-3 text-muted-foreground">
+                      <Spinner />
+                    </div>
+                  ) : null}
+                </div>
+              )}
+            </div>
+            {detached ? <JumpToLatest newCount={win.newCount} onJump={jumpToLatest} /> : null}
           </div>
 
           <TypingIndicator typers={channelTypers} inThreadHint />

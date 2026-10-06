@@ -15,8 +15,9 @@ import {
   Message,
   MessagePage,
   Ok,
-  PageQuery,
+  PageQueryFields,
   PostMessageRequest,
+  pageCursorCount,
   ThreadResponse,
 } from "@ocw/contracts";
 import { conversationMembers, conversations, type TenantCtx, type Tx, tenantOf } from "@ocw/db";
@@ -57,6 +58,8 @@ import {
   listChannelMembers,
   listChannels,
   listMessages,
+  listMessagesAfter,
+  listMessagesAround,
   loadThread,
   notifyListChanged,
   type PostResult,
@@ -647,7 +650,8 @@ export function createChatModule(core: Core): ApiModule {
         {
           config: { authz: "user" },
           preHandler: requireUser,
-          schema: { tags, params: IdParams, querystring: PageQuery, response: { 200: MessagePage } },
+          // PageQueryFields: the one-cursor rule is checked below, after the readable check (hidden stays 404).
+          schema: { tags, params: IdParams, querystring: PageQueryFields, response: { 200: MessagePage } },
         },
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
@@ -657,9 +661,27 @@ export function createChatModule(core: Core): ApiModule {
               await getConversation(tx, req.params.id, MESSAGE_KINDS),
               "Conversation not found",
             );
+            const q = req.query;
+            if (pageCursorCount(q) > 1) {
+              throw badRequest("Use at most one of before, after and around", "invalid_page_query");
+            }
             // lastSeq first: anything committed after this read is replayed by the subscription.
             const lastSeq = await core.realtime.lastSeq(tx, convTopic(conv.id));
-            const page = await listMessages(tx, conv.id, await loadDirectory(tx), req.query);
+            const dir = await loadDirectory(tx);
+            if (q.around) {
+              // Permalinks (CHAT-14): the anchor must belong to this conversation; a reply anchors on its root.
+              const target = await getMessage(tx, q.around);
+              if (!target || target.conversationId !== conv.id) throw notFound("Message not found");
+              const anchor = target.threadId ? await getMessage(tx, target.threadId) : target;
+              if (!anchor || anchor.conversationId !== conv.id) throw notFound("Message not found");
+              const page = await listMessagesAround(tx, conv.id, dir, anchor, q.limit);
+              return { ...page, threadRootId: target.threadId ? anchor.id : null, lastSeq };
+            }
+            if (q.after !== undefined) {
+              const page = await listMessagesAfter(tx, conv.id, dir, q.after, q.limit);
+              return { ...page, nextBefore: null, lastSeq };
+            }
+            const page = await listMessages(tx, conv.id, dir, q);
             return { ...page, lastSeq };
           }),
       );

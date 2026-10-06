@@ -4,6 +4,7 @@ import {
   type AgentTypingEvent,
   EphemeralTypes,
   EventTypes,
+  type Message,
   type MessageCreatedEvent,
   type MessageDeletedEvent,
   type MessageUpdatedEvent,
@@ -12,7 +13,8 @@ import type { TopicFrame } from "@ocw/realtime-client";
 import { useQueryClient } from "@tanstack/react-query";
 import { Bot, Gauge, Lock, NotebookPen, Settings2, ShieldCheck } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { BotSettingsSheet } from "@/components/bots/bot-settings-sheet";
 import { MemoryPanel } from "@/components/bots/memory-panel";
@@ -32,19 +34,22 @@ import {
   bumpDmLatest,
   chatKeys,
   isBotDm,
-  loadOlder,
   markDmRead,
   postMessage,
   useDms,
   useMessages,
 } from "@/lib/chat-queries";
+import { parsePermalink, permalinkPath } from "@/lib/permalink";
 import { useMe } from "@/lib/queries";
 import { useTopic } from "@/lib/realtime";
 import { cn } from "@/lib/utils";
 import { Composer } from "./composer";
+import { JumpToLatest } from "./jump-to-latest";
 import { MessageList, type PendingMessage } from "./message-list";
+import { MessageUnavailable } from "./message-unavailable";
 import { PrincipalAvatar } from "./principal-avatar";
 import { TypingIndicator, useTypers } from "./typing";
+import { useCentreOnce, usePermalinkWindow, useWindowPaging } from "./use-permalink-window";
 import { useStickToBottom } from "./use-stick-to-bottom";
 
 function newId(): string {
@@ -81,6 +86,11 @@ function DmSkeleton() {
  */
 export function DmView({ conversationId }: { conversationId: string }) {
   const qc = useQueryClient();
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  // A permalink (CHAT-14): DMs are flat, so `m` is always a top-level message.
+  const { messageId: permalinkId } = parsePermalink(searchParams);
   const meQ = useMe({ enabled: false });
   const me = useMemo(
     () => ({ id: meQ.data?.user.id ?? "", name: meQ.data?.user.name ?? "You" }),
@@ -94,7 +104,6 @@ export function DmView({ conversationId }: { conversationId: string }) {
   const messages = useMessages(conversationId, !!dm && !lost);
   const { typers, touch, clear } = useTypers();
   const [pending, setPending] = useState<PendingMessage[]>([]);
-  const [loadingOlder, setLoadingOlder] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Bot settings for whoever may configure this bot (its owner; a team bot's managers), per the API.
   const agents = useAgents();
@@ -108,6 +117,15 @@ export function DmView({ conversationId }: { conversationId: string }) {
   const [memoryOpen, setMemoryOpen] = useState(false);
   const memoryOn = capabilities.data ? capabilities.data.effective.memory.effective : undefined;
   const showMemory = memoryOn === true || (memories.data?.items.length ?? 0) > 0;
+
+  // ---------------------------------------------------------------- permalink window (CHAT-14)
+  const win = usePermalinkWindow({
+    convId: conversationId,
+    tail: messages.data,
+    permalinkId,
+    linkedTop: permalinkId,
+  });
+  const { detached, shown } = win;
 
   // ---------------------------------------------------------------- realtime
   const onFrame = (frame: TopicFrame) => {
@@ -169,8 +187,22 @@ export function DmView({ conversationId }: { conversationId: string }) {
 
   // ---------------------------------------------------------------- sending
   const scroll = useStickToBottom(
-    `${messages.data?.messages.length ?? 0}:${pending.length}:${typers.length}`,
+    `${detached ? "window" : "tail"}:${shown?.messages.length ?? 0}:${pending.length}:${typers.length}`,
     conversationId,
+    detached,
+  );
+  useCentreOnce(scroll, permalinkId, win.centreTarget);
+
+  const { release } = win;
+  const jumpToLatest = useCallback(() => {
+    release();
+    scroll.scrollToBottom();
+    router.replace(pathname, { scroll: false });
+  }, [release, scroll, router, pathname]);
+
+  const linkFor = useCallback(
+    (m: Message) => permalinkPath({ id: conversationId, kind: "dm" }, m.id),
+    [conversationId],
   );
 
   const deliver = useCallback(
@@ -199,11 +231,13 @@ export function DmView({ conversationId }: { conversationId: string }) {
         failed: false,
         createdAt: new Date().toISOString(),
       };
+      // Posting from old history returns to the live tail, where the message appears.
+      if (detached) jumpToLatest();
       scroll.scrollToBottom();
       setPending((prev) => [...prev, p]);
       void deliver(p);
     },
-    [deliver, scroll],
+    [deliver, scroll, detached, jumpToLatest],
   );
 
   const retry = useCallback(
@@ -216,25 +250,19 @@ export function DmView({ conversationId }: { conversationId: string }) {
     [deliver],
   );
 
-  // ---------------------------------------------------------------- older pages
-  const olderBusy = useRef(false);
-  const onScroll = () => {
-    scroll.onScroll();
-    const el = scroll.ref.current;
-    if (!el || el.scrollTop > 240 || olderBusy.current || !messages.data?.nextBefore) return;
-    olderBusy.current = true;
-    setLoadingOlder(true);
-    scroll.preserve();
-    loadOlder(qc, conversationId)
-      .catch(() => toast.error("Couldn't load older messages"))
-      .finally(() => {
-        olderBusy.current = false;
-        setLoadingOlder(false);
-      });
-  };
+  // ---------------------------------------------------------------- older / newer pages
+  const { onScroll, loadingOlder, loadingNewer } = useWindowPaging({
+    convId: conversationId,
+    scroll,
+    shown,
+    windowId: win.windowId,
+    detached,
+  });
 
   // ---------------------------------------------------------------- render
-  if (lost || (dms.isSuccess && !dm)) {
+  if (lost || (dms.isSuccess && !dm) || win.unavailable) {
+    // A permalink never says whether the conversation exists (T-04-03-01).
+    if (permalinkId && !lost) return <MessageUnavailable />;
     return (
       <div className="flex min-w-0 flex-1 flex-col" data-testid="dm-missing">
         <PageHeader title="Private chat" icon={<Lock />} />
@@ -269,7 +297,7 @@ export function DmView({ conversationId }: { conversationId: string }) {
   const disabled = bot.status === "disabled";
 
   const intro =
-    messages.data && messages.data.nextBefore === null ? (
+    shown && shown.nextBefore === null ? (
       <div className="px-4 pt-10 pb-4 sm:px-5" data-testid="dm-intro">
         <PrincipalAvatar
           kind="agent"
@@ -377,45 +405,59 @@ export function DmView({ conversationId }: { conversationId: string }) {
           />
         ) : null}
 
-        <div
-          ref={scroll.ref}
-          onScroll={onScroll}
-          className="scrollbar-thin flex min-h-0 flex-1 flex-col overflow-y-auto"
-          data-testid="dm-scroll"
-        >
-          {messages.isPending ? (
-            <div className="flex flex-1 items-end justify-center pb-8 text-muted-foreground">
-              <Spinner />
-            </div>
-          ) : messages.isError ? (
-            <EmptyState
-              icon={isApiError(messages.error, 404) ? Lock : Bot}
-              title="Couldn't load messages"
-              description={errorMessage(messages.error)}
-            >
-              <Button variant="outline" onClick={() => void messages.refetch()}>
-                Try again
-              </Button>
-            </EmptyState>
-          ) : (
-            <div className="mt-auto">
-              {loadingOlder ? (
-                <div className="flex justify-center py-3 text-muted-foreground">
-                  <Spinner />
-                </div>
-              ) : null}
-              <MessageList
-                messages={messages.data?.messages ?? []}
-                pending={pending}
-                me={me}
-                typers={typers}
-                onRetry={retry}
-                showThreadSummary={false}
-                intro={intro}
-                readOnly={!!dm.archivedAt || disabled}
-              />
-            </div>
-          )}
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          <div
+            ref={scroll.ref}
+            onScroll={onScroll}
+            className="scrollbar-thin flex min-h-0 flex-1 flex-col overflow-y-auto"
+            data-testid="dm-scroll"
+            data-detached={detached ? "true" : undefined}
+          >
+            {messages.isPending || win.loading ? (
+              <div className="flex flex-1 items-end justify-center pb-8 text-muted-foreground">
+                <Spinner />
+              </div>
+            ) : messages.isError || win.error ? (
+              <EmptyState
+                icon={isApiError(messages.error, 404) ? Lock : Bot}
+                title="Couldn't load messages"
+                description={errorMessage(messages.error ?? win.error)}
+              >
+                <Button
+                  variant="outline"
+                  onClick={() => (messages.isError ? void messages.refetch() : win.retry())}
+                >
+                  Try again
+                </Button>
+              </EmptyState>
+            ) : (
+              <div className="mt-auto">
+                {loadingOlder ? (
+                  <div className="flex justify-center py-3 text-muted-foreground">
+                    <Spinner />
+                  </div>
+                ) : null}
+                <MessageList
+                  messages={shown?.messages ?? []}
+                  pending={detached ? [] : pending}
+                  me={me}
+                  typers={typers}
+                  onRetry={retry}
+                  showThreadSummary={false}
+                  intro={intro}
+                  readOnly={!!dm.archivedAt || disabled}
+                  anchorId={permalinkId}
+                  linkFor={linkFor}
+                />
+                {loadingNewer ? (
+                  <div className="flex justify-center py-3 text-muted-foreground">
+                    <Spinner />
+                  </div>
+                ) : null}
+              </div>
+            )}
+          </div>
+          {detached ? <JumpToLatest newCount={win.newCount} onJump={jumpToLatest} /> : null}
         </div>
 
         <TypingIndicator typers={typers} />

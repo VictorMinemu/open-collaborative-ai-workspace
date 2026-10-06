@@ -3,7 +3,12 @@ import { and, eq, inArray, isNull, or } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import type { Core } from "../../core";
 import { notFound } from "../../lib/errors";
-import { type ChannelFacts, channelResource, createPermissionService } from "../organization";
+import {
+  AuthzDeniedError,
+  type ChannelFacts,
+  channelResource,
+  createPermissionService,
+} from "../organization";
 import { type ConversationRow, channelFacts, getConversation } from "./service";
 
 /**
@@ -53,7 +58,16 @@ export function createConversationAccess(core: Core): ConversationAccess {
       const userId = req.auth?.userId;
       if (!userId) throw notFound(notFoundMessage);
       const facts = await channelFacts(tx, conv, { kind: "user", id: userId });
-      await perms.assertCan(req, tx, "channel.read", channelResource(facts), { hideAs404: true });
+      try {
+        await perms.assertCan(req, tx, "channel.read", channelResource(facts), { hideAs404: true });
+      } catch (err) {
+        // Hidden must read exactly like missing (same status, code and message), or the message itself would
+        // tell a permalink holder that the conversation exists.
+        if (err instanceof AuthzDeniedError && err.hidden) {
+          throw new AuthzDeniedError(err.denial, { hideAs404: true, message: notFoundMessage });
+        }
+        throw err;
+      }
       return { conv, facts };
     },
 
