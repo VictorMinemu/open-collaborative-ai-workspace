@@ -55,7 +55,7 @@ export interface AiStack extends TestStack {
 }
 
 /**
- * `startTestStack` with the mock model provider, the ChatGPT API override, the mock base URL and SearXNG all
+ * `startTestStack` with the mock model provider, the ChatGPT API and sign-in (SIWC, 05-05) overrides, the mock base URL and SearXNG all
  * pointing at an in-process fake, and log capture at `debug`. `chatgptOverride: false` leaves the override unset
  * (the production shape: no test seed route).
  */
@@ -68,7 +68,12 @@ export async function startAiStack(
     env: {
       LOG_LEVEL: "debug",
       OCW_MODEL_PROVIDER: "mock",
-      ...(opts.chatgptOverride === false ? {} : { OCW_CHATGPT_API_BASE_URL: `${fake.baseUrl}/v1` }),
+      ...(opts.chatgptOverride === false
+        ? {}
+        : {
+            OCW_CHATGPT_API_BASE_URL: `${fake.baseUrl}/v1`,
+            OCW_CHATGPT_AUTH_BASE_URL: `${fake.baseUrl}/siwc`,
+          }),
       OCW_AI_MOCK_BASE_URL: `${fake.baseUrl}/v1`,
       OCW_AI_SEARXNG_URL: fake.baseUrl,
       OCW_AI_SEND_RATE_LIMIT_PER_MINUTE: "600",

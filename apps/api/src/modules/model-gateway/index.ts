@@ -21,6 +21,7 @@ import { MissingSecretError } from "../../lib/secret-store";
 import { allowedModels } from "../agent";
 import {
   CatalogUnavailableError,
+  cachedPlanCatalog,
   DEFAULT_CHATGPT_API_BASE_URL,
   type PlanModel,
   planCatalog,
@@ -33,7 +34,12 @@ import {
   planStatusOf,
 } from "./chatgpt-plan/credentials";
 import { registerChatgptPlanRoutes } from "./chatgpt-plan/routes";
-import { type ClassifiedModelError, classify, ModelUnavailableError } from "./errors";
+import {
+  type ClassifiedModelError,
+  classify,
+  ModelUnavailableError,
+  PlanTokenUnavailableError,
+} from "./errors";
 import { loadAiChatPolicy } from "./policy";
 import { mockLanguageModel, type OrgProviderKind, orgLanguageModel, orgModelCaps } from "./registry";
 import { registerModelRoutes } from "./routes";
@@ -47,7 +53,12 @@ import { registerModelRoutes } from "./routes";
  */
 
 export { credentialOf, planStatusOf } from "./chatgpt-plan/credentials";
-export { type ClassifiedModelError, classify, ModelUnavailableError } from "./errors";
+export {
+  type ClassifiedModelError,
+  classify,
+  ModelUnavailableError,
+  PlanTokenUnavailableError,
+} from "./errors";
 export { loadAiChatPolicy } from "./policy";
 
 export interface ResolvedModel {
@@ -292,8 +303,15 @@ export function createModelGateway(core: Core, opts: { fetch?: typeof fetch } = 
       });
       let models: AiModelOption[] = [];
       try {
-        const { token } = await usablePlan(tx, requesterUserId);
-        const catalog = (row ? await catalogOf(row, token) : null) ?? [];
+        let catalog: PlanModel[];
+        try {
+          const { token } = await usablePlan(tx, requesterUserId);
+          catalog = (row ? await catalogOf(row, token) : null) ?? [];
+        } catch (err) {
+          // A refresh outage (05-05) keeps the member connected: show the cached catalog, sends answer 503.
+          if (!(err instanceof PlanTokenUnavailableError) || !row) throw err;
+          catalog = (await cachedPlanCatalog(core, row.id)) ?? [];
+        }
         models = catalog
           .filter((m) => policy.planAllowedModels.length === 0 || policy.planAllowedModels.includes(m.slug))
           .map((m) => ({

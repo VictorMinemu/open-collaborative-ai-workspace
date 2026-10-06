@@ -50,6 +50,17 @@ export class CatalogUnavailableError extends Error {
   }
 }
 
+/** The cached catalog only (no token needed): what the picker shows while the plan's auth server is out. */
+export async function cachedPlanCatalog(core: Core, credentialId: string): Promise<PlanModel[] | null> {
+  const cached = await core.bus.pub.get(catalogCacheKey(credentialId)).catch(() => null);
+  if (!cached) return null;
+  try {
+    return z.array(z.object({ slug: z.string(), label: z.string() })).parse(JSON.parse(cached));
+  } catch {
+    return null;
+  }
+}
+
 export async function planCatalog(
   core: Core,
   credential: CredentialRow,
