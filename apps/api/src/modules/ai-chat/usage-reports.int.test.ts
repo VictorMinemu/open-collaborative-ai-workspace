@@ -381,3 +381,53 @@ describe("the organization report by member and by model (AICHAT-07)", () => {
     expectNoText(theirs);
   });
 });
+
+describe("a member's own usage report (AICHAT-07, T-05-09-01)", () => {
+  it("Sam's report holds only Sam's records, by model, with his plan answers counted and not billed", async () => {
+    const r = await ok(myReport(sam, "days=30&groupBy=model"));
+    expect(r.groupBy).toBe("model");
+    const byKey = new Map((r.rows as Json[]).map((x) => [x.key as string, x]));
+    // Alex's mock answers are not there; Sam's titles are.
+    expect([...byKey.keys()].sort()).toEqual([HAIKU_TITLES_KEY, PLAN_KEY, SONNET_KEY].sort());
+    expect(byKey.get(PLAN_KEY)).toMatchObject({ label: "GPT-6 Astra", generations: 1, costMicrosUsd: null });
+    expect(byKey.get(SONNET_KEY)).toMatchObject({ generations: 3, estimatedGenerations: 1 });
+    expect(r.totals).toMatchObject(
+      await expected("requester_user_id = $1 and created_at >= $2::date and organization_id = $3", [
+        samId,
+        r.from,
+        orgId,
+      ]),
+    );
+    // Org B's record naming Sam's id never reaches him.
+    expect(JSON.stringify(r)).not.toContain("66666");
+    expect(r.totals).toEqual(sumRows(r.rows));
+    expectNoText(r);
+    // groupBy defaults to model on /me.
+    expect(await ok(myReport(sam, "days=30"))).toEqual(r);
+  });
+
+  it("Alex's report holds only Alex's records", async () => {
+    const r = await ok(myReport(alex, "days=30&groupBy=model"));
+    expect((r.rows as Json[]).map((x) => x.key)).toEqual([MOCK_KEY]);
+    expect(r.totals).toMatchObject({ generations: 2, costMicrosUsd: 0 });
+    expectNoText(r);
+  });
+
+  it("refuses a grouping by member and windows over 90 days (400)", async () => {
+    for (const q of ["days=30&groupBy=user", "days=91", "days=0"]) {
+      expect((await myReport(sam, q)).status, q).toBe(400);
+    }
+  });
+
+  it("an admin's own report is their own records, not the organization's", async () => {
+    const r = await ok(myReport(admin, "days=30"));
+    expect(r.rows).toEqual([]);
+    expect(r.totals).toEqual({
+      generations: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      estimatedGenerations: 0,
+      costMicrosUsd: null,
+    });
+  });
+});
