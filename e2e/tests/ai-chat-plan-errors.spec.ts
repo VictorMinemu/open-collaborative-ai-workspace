@@ -1,5 +1,5 @@
-import { type APIRequestContext, expect, type Page, test } from "@playwright/test";
-import { apiAs, ensureMember, openAs, SAM } from "../support/actors";
+import { type APIRequestContext, type BrowserContext, expect, type Page, test } from "@playwright/test";
+import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import { answerText, lastAssistant, openNewAiChat, seedPlan, sendAi } from "../support/ai-chat";
 import { ADMIN, shot } from "./env";
 
@@ -16,6 +16,9 @@ const FAKE_URL = process.env.OCW_E2E_FAKE_URL ?? "";
 /** A fake key: the harness fake accepts anything and never forwards it. */
 const FAKE_ANTHROPIC_KEY = "sk-ant-e2e-fake-key-not-real-0000";
 const MANAGE_USAGE = "https://chatgpt.com/settings/usage";
+const STATUS = "/api/v1/me/model-credentials/chatgpt";
+const LOOPBACK = "http://127.0.0.1:1455/**";
+const SONNET_KEY = "org_key:anthropic/claude-sonnet-5-5";
 
 const widthOf = (project: string) => (project === "mobile" ? "390" : "1440");
 
@@ -40,6 +43,41 @@ async function configureAnthropic() {
     },
   });
   expect(res.ok(), `configure Anthropic: ${res.status()} ${await res.text()}`).toBe(true);
+}
+
+/**
+ * Records the http://127.0.0.1:1455 address the browser lands on after the fake authorize page (as in
+ * ai-chat-signin.spec: the 302 is replayed client-side because Playwright does not route a redirect's target).
+ */
+async function captureLoopback(context: BrowserContext): Promise<() => string> {
+  let landed = "";
+  await context.route(/\/siwc\/api\/accounts\/authorize\?/u, async (route) => {
+    const res = await route.fetch({ maxRedirects: 0 });
+    const location = res.headers().location;
+    if (res.status() !== 302 || !location) return route.fulfill({ response: res });
+    return route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: `<!doctype html><title>ChatGPT</title><script>location.replace(${JSON.stringify(location)})</script>`,
+    });
+  });
+  await context.route(LOOPBACK, (route) => {
+    landed = route.request().url();
+    return route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: "<!doctype html><title>127.0.0.1</title><p>This site can't be reached</p>",
+    });
+  });
+  return () => landed;
+}
+
+/** Opens the composer's model picker (popover on desktop, bottom sheet on a phone). */
+async function openPicker(page: Page) {
+  await page.getByTestId("ai-model-chip").click();
+  const picker = page.getByTestId("ai-model-picker");
+  await expect(picker).toBeVisible();
+  return picker;
 }
 
 test.beforeAll(async () => {
@@ -142,5 +180,124 @@ test("choosing Use an organization model in the dialog closes it and switches th
   const next = lastAssistant(page);
   await expect(next).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
   await expect(next.getByTestId("ai-message-footer")).toContainText(/^Claude Sonnet 5\.5 · METERED · /u);
+  await context.close();
+});
+
+test("a member without a connection finds Continue with ChatGPT in the picker and sees the welcome once", async ({
+  browser,
+}, info) => {
+  const project = info.project.name;
+  const w = widthOf(project);
+  const off = await sam.delete(STATUS);
+  expect(off.ok(), `disconnect: ${off.status()}`).toBe(true);
+  const { context, page } = await openAs(browser, SAM, project);
+  const landed = await captureLoopback(context);
+
+  await openNewAiChat(page);
+  // Without a plan, the default is the organization's model, labelled METERED.
+  await expect(page.getByTestId("ai-model-chip")).toContainText("Claude Sonnet 5.5");
+  const picker = await openPicker(page);
+  const entry = picker.getByTestId("ai-model-continue-chatgpt");
+  await expect(entry).toContainText("Continue with ChatGPT");
+  await bothThemes(page, `ai-picker-continue-chatgpt-${w}`);
+
+  await entry.click();
+  await expect(picker).toBeHidden();
+  const dialog = page.getByTestId("chatgpt-connect-dialog");
+  await expect(dialog).toBeVisible();
+  const popupPromise = page.waitForEvent("popup");
+  await dialog.getByTestId("chatgpt-dialog-continue").click();
+  await (await popupPromise).close().catch(() => {});
+  await expect.poll(landed, { timeout: 10_000 }).toMatch(/^http:\/\/127\.0\.0\.1:1455\/auth\/callback\?/u);
+  await dialog.getByTestId("chatgpt-redirect-input").fill(landed());
+  await dialog.getByTestId("chatgpt-connect-submit").click();
+  await expect(dialog).toBeHidden();
+
+  const welcome = page.getByTestId("chatgpt-welcome");
+  await expect(welcome).toBeVisible();
+  await expect(welcome).toContainText("You're using your ChatGPT plan");
+  await expect(welcome).toContainText("not your organization's bill");
+  await expect(welcome.getByTestId("chatgpt-welcome-manage-usage")).toHaveAttribute("href", MANAGE_USAGE);
+  await bothThemes(page, `chatgpt-welcome-${w}`);
+  await welcome.getByTestId("chatgpt-welcome-done").click();
+  await expect(welcome).toBeHidden();
+  // The new connection is the default again.
+  await expect(page.getByTestId("ai-model-chip")).toContainText("GPT-6 Astra");
+
+  // Once: neither a reload nor Settings › AI chat shows it again.
+  await page.reload();
+  await expect(page.getByTestId("ai-composer")).toBeVisible();
+  await page.goto(`${BASE_URL}/settings/ai-chat`);
+  await expect(page.getByTestId("chatgpt-plan-card")).toHaveAttribute("data-state", "connected");
+  await page.waitForTimeout(500);
+  await expect(page.getByTestId("chatgpt-welcome")).toHaveCount(0);
+  expect(((await (await sam.get(STATUS)).json()) as { welcomeSeen: boolean }).welcomeSeen).toBe(true);
+  await context.close();
+});
+
+test("a not-eligible account explains itself and the next New chat starts on an organization model", async ({
+  browser,
+}, info) => {
+  const project = info.project.name;
+  const w = widthOf(project);
+  await seedPlan(sam);
+  const { context, page } = await openAs(browser, SAM, project);
+  await openNewAiChat(page);
+  await expect(page.getByTestId("ai-model-chip")).toContainText("GPT-6 Astra");
+  await sendAi(page, "hi [[plan:not_eligible]]");
+  const answer = lastAssistant(page);
+  await expect(answer).toHaveAttribute("data-status", "failed", { timeout: 15_000 });
+  const card = answer.getByTestId("ai-generation-error-card");
+  await expect(card).toHaveAttribute("data-code", "user_not_eligible");
+  await expect(card.getByTestId("ai-generation-error")).toHaveText(
+    "Your ChatGPT account isn't eligible for plan usage here.",
+  );
+  await expect(card.getByTestId("ai-error-use-org")).toBeVisible();
+  // Not a usage limit: no dialog.
+  await expect(page.getByTestId("ai-usage-limit-dialog")).toHaveCount(0);
+  await bothThemes(page, `ai-plan-not-eligible-${w}`);
+
+  // The picker says why, and a New chat defaults to the organization's model (METERED), nothing sent.
+  await expect(page.getByTestId("ai-model-chip")).toContainText("Claude Sonnet 5.5");
+  const picker = await openPicker(page);
+  await expect(picker.getByTestId("ai-model-group-chatgpt_plan")).toContainText(
+    "Your ChatGPT account isn't eligible here — use an organization model",
+  );
+  await expect(picker.getByTestId("ai-model-continue-chatgpt")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await page.getByTestId("ai-header-new-chat").click();
+  await expect(page).toHaveURL(/\/chat\/ai\/new$/u);
+  const chip = page.getByTestId("ai-model-chip");
+  await expect(chip).toHaveAttribute("data-model", SONNET_KEY);
+  await expect(chip.getByTestId("ai-model-metered")).toBeVisible();
+  await context.close();
+});
+
+test("an invalid sign-in offers Reconnect ChatGPT in the card and the picker, which open the connect dialog", async ({
+  browser,
+}, info) => {
+  const project = info.project.name;
+  await seedPlan(sam);
+  const { context, page } = await openAs(browser, SAM, project);
+  await openNewAiChat(page);
+  await sendAi(page, "hi [[plan:invalid_user]]");
+  const answer = lastAssistant(page);
+  await expect(answer).toHaveAttribute("data-status", "failed", { timeout: 15_000 });
+  const card = answer.getByTestId("ai-generation-error-card");
+  await expect(card).toHaveAttribute("data-code", "invalid_credential");
+  await expect(card.getByTestId("ai-generation-error")).toHaveText(
+    "Your ChatGPT sign-in is no longer valid. Reconnect to keep using your plan.",
+  );
+  await card.getByTestId("ai-error-reconnect").click();
+  const dialog = page.getByTestId("chatgpt-connect-dialog");
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toBeHidden();
+
+  const picker = await openPicker(page);
+  const row = picker.getByTestId("ai-model-reconnect-chatgpt");
+  await expect(row).toContainText("Reconnect ChatGPT");
+  await row.click();
+  await expect(page.getByTestId("chatgpt-connect-dialog")).toBeVisible();
   await context.close();
 });

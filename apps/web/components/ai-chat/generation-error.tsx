@@ -20,7 +20,13 @@ import {
 } from "@/components/ui/dialog";
 import { setAiChatModel } from "@/lib/ai-chat-model-store";
 import { useAiModels } from "@/lib/ai-chat-queries";
+import { useRefreshPlanState } from "@/lib/chatgpt-plan-queries";
 import { cn } from "@/lib/utils";
+import { ChatgptConnectDialog } from "./chatgpt-connect-dialog";
+import { ChatgptWelcomeModal } from "./chatgpt-welcome-modal";
+
+/** Failures that move the member's credential (not eligible, needs reconnect): the plan state is re-read live. */
+const CREDENTIAL_CODES: ReadonlySet<AiErrorCode> = new Set(["user_not_eligible", "invalid_credential"]);
 
 /**
  * What a failed answer says, per normalized code (provider error bodies never reach the client, T-05-07-05), and
@@ -29,24 +35,37 @@ import { cn } from "@/lib/utils";
  */
 const TEXT: Record<AiErrorCode, string> = {
   usage_limit_exceeded: "You've reached your ChatGPT usage limit",
-  user_not_eligible: "this ChatGPT account can't be used for AI chats here",
-  usage_unavailable: "ChatGPT is temporarily unavailable",
-  unsupported_capability: "the model doesn't support part of this request",
-  invalid_credential: "your ChatGPT sign-in is no longer valid",
-  route_not_supported: "this request isn't supported on this model",
-  not_connected: "your ChatGPT plan isn't connected",
-  model_unavailable: "this model isn't available to you",
-  daily_limit_reached: "today's AI usage limit is reached",
-  rate_limited: "the model is busy right now",
-  context_too_large: "this conversation is too long for the model",
-  provider_error: "the model returned an error",
-  timeout: "the model took too long to answer",
-  interrupted: "it was interrupted",
+  user_not_eligible: "Your ChatGPT account isn't eligible for plan usage here.",
+  usage_unavailable: "ChatGPT is temporarily unavailable. Try again in a moment.",
+  unsupported_capability: "", // built from the refused parameter, see generationErrorText
+  invalid_credential: "Your ChatGPT sign-in is no longer valid. Reconnect to keep using your plan.",
+  route_not_supported: "Something went wrong on the model's side. Try again later.",
+  not_connected: "Your ChatGPT plan isn't connected.",
+  model_unavailable: "This model isn't available to you anymore. Choose another model.",
+  daily_limit_reached: "You've reached today's AI usage limit.",
+  rate_limited: "The model is busy right now. Try again in a moment.",
+  context_too_large: "This conversation is too long for this model. Start a new chat to continue.",
+  provider_error: "Something went wrong on the model's side. Try again later.",
+  timeout: "The model took too long to answer. Try again.",
+  interrupted: "This answer was interrupted.",
 };
 
-export function generationErrorText(code: AiErrorCode | null): string {
+/** `error.param` of an unsupported-capability refusal, in words (anything else stays generic). */
+const CAPABILITY: Record<string, string> = {
+  input_file: "files",
+  input_image: "images",
+  web_search: "web search",
+  web_search_preview: "web search",
+  tools: "tools",
+};
+
+export function generationErrorText(code: AiErrorCode | null, param: string | null = null): string {
   const c = code ?? "provider_error";
-  return c === "usage_limit_exceeded" ? TEXT[c] : `This answer failed — ${TEXT[c]}`;
+  if (c === "unsupported_capability") {
+    const what = (param && CAPABILITY[param]) || "this feature";
+    return `This model can't use ${what} on your plan.`;
+  }
+  return TEXT[c];
 }
 
 // ---------------------------------------------------------------- live failures
@@ -159,6 +178,7 @@ export function GenerationError({
   messageId,
   chatKey,
   code,
+  param = null,
   className,
 }: {
   messageId: string;
@@ -169,14 +189,21 @@ export function GenerationError({
 }) {
   const models = useAiModels();
   const org = orgFallback(models.data?.models);
+  const refreshPlan = useRefreshPlanState();
   const usageLimit = code === "usage_limit_exceeded";
-  const [dialogOpen, setDialogOpen] = useState(
-    () => usageLimit && streamedHere.has(messageId) && !dialogShown.has(messageId),
-  );
+  const [live] = useState(() => streamedHere.has(messageId));
+  const [dialogOpen, setDialogOpen] = useState(() => usageLimit && live && !dialogShown.has(messageId));
+  const [connectOpen, setConnectOpen] = useState(false);
+  const [welcomeOpen, setWelcomeOpen] = useState(false);
 
   useEffect(() => {
     if (dialogOpen) dialogShown.add(messageId);
   }, [dialogOpen, messageId]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: once per live failure
+  useEffect(() => {
+    if (live && code && CREDENTIAL_CODES.has(code)) refreshPlan();
+  }, [live, code]);
 
   function useOrg() {
     if (!org) return;
@@ -184,24 +211,43 @@ export function GenerationError({
     setDialogOpen(false);
   }
 
+  const useOrgButton = org ? (
+    <Button
+      variant="ghost"
+      size="sm"
+      onClick={useOrg}
+      data-testid="ai-error-use-org"
+      className="h-8 text-foreground"
+    >
+      Use an organization model
+    </Button>
+  ) : null;
+  const connectButton = (label: string) => (
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={() => setConnectOpen(true)}
+      data-testid="ai-error-reconnect"
+      className="h-8"
+    >
+      {label}
+    </Button>
+  );
+
   let actions: ReactNode = null;
   if (usageLimit) {
     actions = (
       <>
         <ManageUsageLink testId="ai-error-manage-usage" />
-        {org ? (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={useOrg}
-            data-testid="ai-error-use-org"
-            className="h-8 text-foreground"
-          >
-            Use an organization model
-          </Button>
-        ) : null}
+        {useOrgButton}
       </>
     );
+  } else if (code === "user_not_eligible") {
+    actions = useOrgButton;
+  } else if (code === "invalid_credential") {
+    actions = connectButton("Reconnect ChatGPT");
+  } else if (code === "not_connected") {
+    actions = connectButton("Continue with ChatGPT");
   }
 
   return (
@@ -217,12 +263,24 @@ export function GenerationError({
       <div className="flex items-start gap-2">
         <CircleAlert aria-hidden className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" />
         <span data-testid="ai-generation-error" className="min-w-0 break-words">
-          {generationErrorText(code)}
+          {generationErrorText(code, param)}
         </span>
       </div>
       {actions ? <div className="flex flex-wrap items-center gap-1.5 pl-6">{actions}</div> : null}
       {usageLimit ? (
         <UsageLimitDialog open={dialogOpen} onOpenChange={setDialogOpen} org={org} onUseOrg={useOrg} />
+      ) : null}
+      {code === "invalid_credential" || code === "not_connected" ? (
+        <>
+          <ChatgptConnectDialog
+            open={connectOpen}
+            onOpenChange={setConnectOpen}
+            onConnected={(status) => {
+              if (status.state === "connected" && !status.welcomeSeen) setWelcomeOpen(true);
+            }}
+          />
+          <ChatgptWelcomeModal open={welcomeOpen} onDone={() => setWelcomeOpen(false)} />
+        </>
       ) : null}
     </div>
   );

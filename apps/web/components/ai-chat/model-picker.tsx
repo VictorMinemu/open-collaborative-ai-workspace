@@ -7,23 +7,26 @@ import {
   type ModelUnavailableReason,
   modelRefKey,
 } from "@ocw/contracts";
-import { Check, ChevronDown, Sparkles } from "lucide-react";
+import { ArrowRight, Check, ChevronDown, Sparkles } from "lucide-react";
 import { useState } from "react";
 import { ControlChip, ControlSurface } from "@/components/work-zone/control-surface";
 import { useAiModels } from "@/lib/ai-chat-queries";
 import { cn } from "@/lib/utils";
+import { ChatgptConnectDialog } from "./chatgpt-connect-dialog";
+import { ChatgptWelcomeModal } from "./chatgpt-welcome-modal";
 
 /**
  * The AI chat model picker (AICHAT-02, P-09, P-11): the composer chip opens the Work Zone control surface (a popover
  * above the chip on a desktop, a bottom sheet at 390) with three groups — the member's own ChatGPT plan, the
  * organization's models (every one METERED: billed to the organization) and the E2E mock. Rows the member cannot
- * use stay visible, disabled, with the reason in plain words.
+ * use stay visible, disabled, with the reason in plain words. When the member's own plan can be (re)connected, the plan
+ * group's row is the OpenAI-required entry point instead: "Continue with ChatGPT" / "Reconnect ChatGPT" (05-07, D-02).
  */
 
 const REASON_TEXT: Record<ModelUnavailableReason, string> = {
   not_connected: "Not connected",
   needs_reconnect: "Sign in to ChatGPT again",
-  not_eligible: "Your ChatGPT account can't be used here",
+  not_eligible: "Your ChatGPT account isn't eligible here — use an organization model",
   plan_usage_disabled: "Plan usage is turned off",
   plan_disabled_by_org: "Turned off by your admin",
   org_keys_disabled: "Turned off by your admin",
@@ -58,6 +61,26 @@ export function MeteredBadge({ className }: { className?: string }) {
   );
 }
 
+/** Plan states the member fixes by signing in to ChatGPT (again): the row opens the connect dialog. */
+const PLAN_ACTIONS: Partial<Record<ModelUnavailableReason, { label: string; note: string; testId: string }>> =
+  {
+    not_connected: {
+      label: "Continue with ChatGPT",
+      note: "Use your own ChatGPT plan in AI chats",
+      testId: "ai-model-continue-chatgpt",
+    },
+    needs_reconnect: {
+      label: "Reconnect ChatGPT",
+      note: "Your ChatGPT sign-in expired",
+      testId: "ai-model-reconnect-chatgpt",
+    },
+    plan_usage_disabled: {
+      label: "Reconnect ChatGPT",
+      note: "Allow plan usage when you sign in",
+      testId: "ai-model-reconnect-chatgpt",
+    },
+  };
+
 /** Secondary line of a row: why it is disabled, else the provider (and "not metered" for the mock). */
 function secondary(m: AiModelOption): string {
   if (!m.available && m.reason) return reasonText(m.reason);
@@ -72,10 +95,13 @@ export function ModelPickerList({
   models,
   value,
   onChange,
+  onConnect,
 }: {
   models: AiModelOption[];
   value: ModelRef | null;
   onChange: (ref: ModelRef) => void;
+  /** Opens the ChatGPT connect dialog; without it the plan's sign-in states stay disabled explanations. */
+  onConnect?: () => void;
 }) {
   const selectedKey = value ? modelRefKey(value) : null;
   return (
@@ -97,6 +123,37 @@ export function ModelPickerList({
             </div>
             {rows.map((m) => {
               const key = modelRefKey(m.ref);
+              const action = !m.available && m.reason && onConnect ? PLAN_ACTIONS[m.reason] : undefined;
+              if (m.group === "chatgpt_plan" && action && onConnect) {
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    role="option"
+                    aria-selected={false}
+                    data-surface-item
+                    data-testid={action.testId}
+                    onClick={onConnect}
+                    className="flex w-full min-w-0 items-center gap-2.5 rounded-lg py-2 pr-2.5 pl-3 text-left outline-none transition-colors hover:bg-accent/60 focus-visible:ring-[3px] focus-visible:ring-ring/30"
+                  >
+                    <span
+                      aria-hidden
+                      className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-[#10a37f] font-bold text-[9px] text-white tracking-tight"
+                    >
+                      GPT
+                    </span>
+                    <span className="grid min-w-0 flex-1 gap-0.5">
+                      <span className="truncate font-medium text-[13.5px] text-foreground leading-5">
+                        {action.label}
+                      </span>
+                      <span className="truncate text-[12px] text-muted-foreground leading-4">
+                        {action.note}
+                      </span>
+                    </span>
+                    <ArrowRight aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+                  </button>
+                );
+              }
               const selected = key === selectedKey;
               return (
                 <button
@@ -126,7 +183,13 @@ export function ModelPickerList({
                       <span className="truncate">{m.label}</span>
                       {m.metered ? <MeteredBadge /> : null}
                     </span>
-                    <span className="truncate text-[12px] text-muted-foreground leading-4">
+                    <span
+                      className={cn(
+                        "text-[12px] text-muted-foreground leading-4",
+                        // A reason may be a full sentence: it wraps instead of being cut off.
+                        m.available ? "truncate" : "text-pretty break-words",
+                      )}
+                    >
                       {secondary(m)}
                     </span>
                   </span>
@@ -160,6 +223,8 @@ export function ModelPicker({
 }) {
   const models = useAiModels();
   const [open, setOpen] = useState(false);
+  const [connectOpen, setConnectOpen] = useState(false);
+  const [welcomeOpen, setWelcomeOpen] = useState(false);
   const list = models.data?.models ?? [];
   const current = value ? list.find((m) => modelRefKey(m.ref) === modelRefKey(value)) : undefined;
   const label = current?.label ?? "Choose a model";
@@ -182,22 +247,36 @@ export function ModelPicker({
   );
 
   return (
-    <ControlSurface
-      trigger={chip}
-      title="Model"
-      testId="ai-model-picker"
-      open={open}
-      onOpenChange={setOpen}
-      className="w-[min(21rem,calc(100vw-1.5rem))]"
-    >
-      <ModelPickerList
-        models={list}
-        value={value}
-        onChange={(ref) => {
-          setOpen(false);
-          onChange(ref);
+    <>
+      <ControlSurface
+        trigger={chip}
+        title="Model"
+        testId="ai-model-picker"
+        open={open}
+        onOpenChange={setOpen}
+        className="w-[min(21rem,calc(100vw-1.5rem))]"
+      >
+        <ModelPickerList
+          models={list}
+          value={value}
+          onChange={(ref) => {
+            setOpen(false);
+            onChange(ref);
+          }}
+          onConnect={() => {
+            setOpen(false);
+            setConnectOpen(true);
+          }}
+        />
+      </ControlSurface>
+      <ChatgptConnectDialog
+        open={connectOpen}
+        onOpenChange={setConnectOpen}
+        onConnected={(status) => {
+          if (status.state === "connected" && !status.welcomeSeen) setWelcomeOpen(true);
         }}
       />
-    </ControlSurface>
+      <ChatgptWelcomeModal open={welcomeOpen} onDone={() => setWelcomeOpen(false)} />
+    </>
   );
 }
