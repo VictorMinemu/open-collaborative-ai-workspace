@@ -2,6 +2,7 @@
 
 import {
   type AgentTypingEvent,
+  type DmGroupMember,
   EphemeralTypes,
   EventTypes,
   type Message,
@@ -23,6 +24,7 @@ import { MemoryPanel } from "@/components/bots/memory-panel";
 import { EmptyState } from "@/components/common/empty-state";
 import { PageHeader } from "@/components/shell/page-header";
 import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -38,6 +40,7 @@ import {
   bumpDmLatest,
   chatKeys,
   isBotDm,
+  isGroupDm,
   isHumanDm,
   markDmRead,
   postMessage,
@@ -49,15 +52,15 @@ import { parsePermalink, permalinkPath } from "@/lib/permalink";
 import { useMe } from "@/lib/queries";
 import { useTopic } from "@/lib/realtime";
 import { cn } from "@/lib/utils";
-import { Composer } from "./composer";
+import { Composer, type MentionCandidate } from "./composer";
 import { JumpToLatest } from "./jump-to-latest";
 import { MentionContext } from "./markdown";
 import { MessageList, type PendingMessage } from "./message-list";
 import { MessageUnavailable } from "./message-unavailable";
 import { PinnedButton, PinnedSheet } from "./pinned-sheet";
-import { PrincipalAvatar } from "./principal-avatar";
+import { BotBadge, GroupAvatars, PrincipalAvatar } from "./principal-avatar";
 import { TypingIndicator, useTypers } from "./typing";
-import { useOrgDirectory } from "./use-chat-directory";
+import { dirKey, useOrgDirectory } from "./use-chat-directory";
 import { useCentreOnce, usePermalinkWindow, useWindowPaging } from "./use-permalink-window";
 import { useStickToBottom } from "./use-stick-to-bottom";
 
@@ -65,6 +68,53 @@ function newId(): string {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+/** "N members" in a group's header: opens the fixed member list (bots badged). */
+function GroupMembersPopover({
+  members,
+  me,
+  count,
+}: {
+  members: DmGroupMember[];
+  me: { id: string; name: string };
+  count: number;
+}) {
+  return (
+    <Popover>
+      <PopoverTrigger
+        data-testid="group-members"
+        className="rounded-sm font-medium text-foreground/80 underline-offset-2 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring/40"
+      >
+        {count} members
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-64 p-2" data-testid="group-members-list">
+        <p className="px-2 pt-1 pb-2 text-muted-foreground text-xs">
+          Members are fixed. A different set of people starts a new group.
+        </p>
+        <ul className="grid gap-0.5">
+          <li className="flex items-center gap-2.5 rounded-md px-2 py-1.5">
+            <PrincipalAvatar kind="user" name={me.name} seed={me.id} className="size-6 text-[10px]" />
+            <span className="truncate text-sm">{me.name}</span>
+            <span className="text-muted-foreground text-xs">(you)</span>
+          </li>
+          {members.map((m) => (
+            <li key={`${m.kind}:${m.id}`} className="flex items-center gap-2.5 rounded-md px-2 py-1.5">
+              <PrincipalAvatar
+                kind={m.kind}
+                name={m.name}
+                avatarUrl={m.avatarUrl}
+                seed={m.id}
+                className="size-6 text-[10px]"
+              />
+              <span className="truncate text-sm">{m.name}</span>
+              {m.kind === "agent" ? <BotBadge /> : null}
+            </li>
+          ))}
+        </ul>
+      </PopoverContent>
+    </Popover>
+  );
 }
 
 function DmSkeleton() {
@@ -111,6 +161,7 @@ export function DmView({ conversationId }: { conversationId: string }) {
   // The other party: a bot (3.1 DMs), a person (CHAT-04) or the other members of a group (D-06).
   const bot = dm && isBotDm(dm) ? dm.counterpart : undefined;
   const person = dm && isHumanDm(dm) ? dm.counterpart : undefined;
+  const group = dm && isGroupDm(dm) ? dm.counterpart : undefined;
   const directory = useOrgDirectory();
   // @handles render as chips here too (04-02 open item), from the same org directory as channels.
   const mentionCtx = useMemo(
@@ -119,6 +170,23 @@ export function DmView({ conversationId }: { conversationId: string }) {
       myHandle: directory.entries.find((e) => e.kind === "user" && e.id === me.id)?.handle ?? null,
     }),
     [directory, me.id],
+  );
+  // In a group, @mentions offer its members only: a team bot there answers only when mentioned (D-06).
+  const groupCandidates = useMemo<MentionCandidate[]>(
+    () =>
+      (group?.members ?? []).map((m) => {
+        const e = directory.byKey.get(dirKey(m.kind, m.id));
+        return {
+          kind: m.kind,
+          id: m.id,
+          displayName: m.name,
+          handle: e?.handle ?? m.name.toLowerCase().replace(/[^a-z0-9._-]/g, ""),
+          avatarUrl: m.avatarUrl,
+          subtitle: e?.subtitle ?? null,
+          inChannel: true,
+        };
+      }),
+    [group, directory.byKey],
   );
   const [lost, setLost] = useState(false);
   const messages = useMessages(conversationId, !!dm && !lost);
@@ -329,15 +397,18 @@ export function DmView({ conversationId }: { conversationId: string }) {
       </div>
     );
   }
-  if (!dm || (!bot && !person)) return <DmSkeleton />;
+  if (!dm || (!bot && !person && !group)) return <DmSkeleton />;
 
   const personal = bot?.scope === "personal";
-  const title = bot?.name ?? person?.name ?? "Direct message";
+  const title = bot?.name ?? person?.name ?? group?.name ?? "Direct message";
+  const memberCount = (group?.members.length ?? 0) + 1;
   const privacyLine = bot
     ? personal
       ? "Personal bot · only you can see this chat"
       : "Private chat · only you can see it"
-    : `@${person?.handle} · only the two of you can see this`;
+    : group
+      ? "only members can see this"
+      : `@${person?.handle} · only the two of you can see this`;
   const disabled = bot?.status === "disabled";
   const deactivated = person?.deactivated === true;
   const headerAvatar = bot ? (
@@ -356,7 +427,30 @@ export function DmView({ conversationId }: { conversationId: string }) {
       seed={person.id}
       className="size-8 text-sm"
     />
+  ) : group ? (
+    <GroupAvatars members={group.members} className="size-8" large />
   ) : null;
+
+  const groupIntro =
+    group && shown && shown.nextBefore === null ? (
+      <div className="px-4 pt-10 pb-4 sm:px-5" data-testid="dm-intro">
+        <GroupAvatars members={group.members} className="size-14" large />
+        <h2 className="mt-3 font-semibold text-xl tracking-tight">{group.name}</h2>
+        <p className="mt-1 max-w-xl text-muted-foreground text-sm">
+          This is the start of your group conversation with {memberCount - 1} others.
+          {group.members.some((m) => m.kind === "agent")
+            ? " Bots here answer only when you @mention them."
+            : ""}
+        </p>
+        <p className="mt-3 inline-flex max-w-xl items-start gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-muted-foreground text-xs">
+          <ShieldCheck className="mt-px size-3.5 shrink-0 text-primary" />
+          <span>
+            Only these {memberCount} members can read it — not other members, not admins. Nobody can be added
+            later: a different set of people starts a new group.
+          </span>
+        </p>
+      </div>
+    ) : null;
 
   const personIntro =
     person && shown && shown.nextBefore === null ? (
@@ -401,7 +495,7 @@ export function DmView({ conversationId }: { conversationId: string }) {
         </p>
       </div>
     ) : (
-      personIntro
+      (personIntro ?? groupIntro)
     );
 
   return (
@@ -420,6 +514,12 @@ export function DmView({ conversationId }: { conversationId: string }) {
               // Inline (not inline-flex) so a narrow header ellipsizes the line instead of clipping it.
               <span data-testid="dm-privacy">
                 <Lock className="mr-1 inline-block size-3 align-[-1px]" aria-hidden />
+                {group ? (
+                  <>
+                    <GroupMembersPopover members={group.members} me={me} count={memberCount} />
+                    {" · "}
+                  </>
+                ) : null}
                 {privacyLine}
               </span>
             }
@@ -568,8 +668,8 @@ export function DmView({ conversationId }: { conversationId: string }) {
             ) : (
               <Composer
                 placeholder={`Message ${title}`}
-                candidates={[]}
-                mentions={false}
+                candidates={groupCandidates}
+                mentions={!!group}
                 onSend={send}
                 autoFocus
                 footer={

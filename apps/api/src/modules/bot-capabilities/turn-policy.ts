@@ -7,8 +7,8 @@ import {
   type TurnNow,
   type TurnToolFlags,
 } from "@ocw/contracts";
-import { agents, agentTurns, type Tx, tenantOf } from "@ocw/db";
-import { isNull } from "drizzle-orm";
+import { agents, agentTurns, conversationMembers, type Tx, tenantOf } from "@ocw/db";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { agentResource, type PermissionService, type PrincipalRef } from "../organization";
 import { type CatalogSource, effectiveCapabilities, effectiveTools, readCapabilities } from "./capabilities";
@@ -166,6 +166,24 @@ export function turnNow(clientTimeZone: string | null | undefined, at = new Date
 }
 
 /**
+ * Memory lives only in one human's private chat with the bot (D-10, D-06 Pitfall 7): a `dm` with exactly one
+ * human member. A group DM, or anything holding two or more humans, never reads or writes a note: one person's
+ * memory would otherwise surface to the others.
+ */
+async function memoryScopeKind(tx: Tx, conversationId: string, conversationKind: string): Promise<string> {
+  if (conversationKind !== "dm") return conversationKind;
+  const [row] = await tx
+    .select({ humans: sql<number>`count(*)`.mapWith(Number) })
+    .from(conversationMembers)
+    .where(
+      and(eq(conversationMembers.conversationId, conversationId), eq(conversationMembers.memberKind, "user")),
+    );
+  const humanCount = row?.humans ?? 0;
+  // Any other kind keeps memory off downstream (assemble and the memory gate only accept "dm").
+  return humanCount === 1 ? "dm" : "dm_shared";
+}
+
+/**
  * `deliver: false` means no cell event (so no model call). `limit_reached` carries the notice the bot posts
  * instead (the caller decides whether to post it: always in a DM, once per conversation per day elsewhere)
  * and must be audited with `recordLimitReached`. `unavailable` (a disabled or deleted bot) posts nothing.
@@ -194,7 +212,9 @@ export async function turnPolicy(
     clientTimeZone?: string | null;
   },
 ): Promise<TurnDecision> {
-  const computed = await computeTurn(tx, perms, p, core.env);
+  // The kind the capability rules see: a "dm" shared by two or more humans is not a private chat (no memory).
+  const scopeKind = await memoryScopeKind(tx, p.conversationId, p.conversationKind);
+  const computed = await computeTurn(tx, perms, { ...p, conversationKind: scopeKind }, core.env);
   if (!computed) return { deliver: false, reason: "unavailable", notice: null };
 
   // Metering (D-11): one conditional upsert counts this turn, before anything is built or recorded. At the
@@ -209,10 +229,10 @@ export async function turnPolicy(
     };
   }
 
-  // Memory (D-10): only in this human's DM with the bot, and only while memory is effective (the same
-  // decision that offers `ocw_memory_save`). Every other turn carries none.
+  // Memory (D-10, D-06): only in this human's DM with the bot (one human member), and only while memory is
+  // effective (the same decision that offers `ocw_memory_save`). Every other turn carries none.
   const memory: TurnContext["memory"] =
-    p.conversationKind === "dm" && computed.effective.memory.effective
+    scopeKind === "dm" && computed.effective.memory.effective
       ? await loadTurnMemory(tx, p.agentId, p.humanUserId)
       : [];
 

@@ -24,7 +24,7 @@ import { useTopic } from "@/lib/realtime";
 import { cn } from "@/lib/utils";
 import { CreateChannelDialog } from "./create-channel-dialog";
 import { NewDmDialog } from "./new-dm-dialog";
-import { PrincipalAvatar } from "./principal-avatar";
+import { GroupAvatars, PrincipalAvatar } from "./principal-avatar";
 
 export function ChannelIcon({
   channel,
@@ -154,41 +154,6 @@ function ListSync({
     ...(userSeq !== undefined ? { user: userSeq } : {}),
   });
   return null;
-}
-
-/** A person's or group's stacked avatars (up to two, the second offset), for DM rows and headers. */
-export function GroupAvatars({
-  members,
-  className,
-}: {
-  members: ReadonlyArray<{ kind: "user" | "agent"; id: string; name: string; avatarUrl: string | null }>;
-  className?: string;
-}) {
-  const [a, b] = members;
-  return (
-    <span className={cn("relative inline-flex size-5 shrink-0", className)} aria-hidden>
-      {a ? (
-        <PrincipalAvatar
-          kind={a.kind}
-          name={a.name}
-          avatarUrl={a.avatarUrl}
-          seed={a.id}
-          compact
-          className="absolute top-0 left-0 size-[70%] text-[8px] ring-1 ring-background"
-        />
-      ) : null}
-      {b ? (
-        <PrincipalAvatar
-          kind={b.kind}
-          name={b.name}
-          avatarUrl={b.avatarUrl}
-          seed={b.id}
-          compact
-          className="absolute right-0 bottom-0 size-[70%] text-[8px] ring-1 ring-background"
-        />
-      ) : null}
-    </span>
-  );
 }
 
 /** One row of Direct messages: a bot (as in 3.1), a person or a group. */

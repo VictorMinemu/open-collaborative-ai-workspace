@@ -1,4 +1,12 @@
-import { type DmCounterpart, type DmSummary, dmKeyOf, EventTypes, userHandle } from "@ocw/contracts";
+import {
+  type DmCounterpart,
+  type DmGroupMember,
+  type DmSummary,
+  dmKeyOf,
+  EventTypes,
+  MAX_GROUP_PARTICIPANTS,
+  userHandle,
+} from "@ocw/contracts";
 import { agents, conversationMembers, conversations, orgMembers, type Tx, tenantOf } from "@ocw/db";
 import { and, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { type ChatDeps, type ConversationRow, iso, notifyListChanged } from "./service";
@@ -7,7 +15,7 @@ import { type ChatDeps, type ConversationRow, iso, notifyListChanged } from "./s
  * Direct conversations (D-03, D-06), all `visibility = 'private'` with fixed membership:
  *   - a bot DM (`kind = 'dm'`): one human (role `owner`) and one bot (Phase 3.1);
  *   - a human DM (`kind = 'dm'`): two humans, both `member`;
- *   - a group DM (`kind = 'group'`): 3–9 participants, humans and team bots (Task 2).
+ *   - a group DM (`kind = 'group'`): 3–9 participants, humans and team bots, all `member`.
  * Each is unique per participant set through `dm_key` = `dmKeyOf` (sorted `<kind>:<id>` parts, ids only, P-06)
  * and a partial unique index per kind; creation is insert-or-get, so concurrent opens converge on one row.
  */
@@ -63,13 +71,15 @@ async function insertOrGet(
     if (!existing) throw new Error("dm insert-or-get found no row");
     return { conv: existing, created: false };
   }
+  // `joined_at` keeps the creator's pick order (a group's label lists the others in that order).
   await tx.insert(conversationMembers).values(
-    p.members.map((m) => ({
+    p.members.map((m, i) => ({
       conversationId: inserted.id,
       organizationId: ctx.organizationId,
       memberKind: m.kind,
       memberId: m.id,
       role: m.role,
+      joinedAt: sql`now() + ${i} * interval '1 microsecond'`,
     })),
   );
   await deps.audit.record(tx, {
@@ -121,6 +131,43 @@ export function ensureHumanDm(
     ],
     audit: { metadata: { kind: "dm", counterpart: { kind: "user", id: p.otherUserId } } },
   });
+}
+
+/**
+ * The group DM of exactly these participants (D-06), created on first use. `members` includes the creator;
+ * duplicates are dropped, humans keep the pick order ahead of bots, and every participant is a plain member.
+ * Callers validate each participant first (active humans; live team bots the creator may use; never a personal
+ * bot). The same set in any order is the same group; one more member is a different group (new key).
+ */
+export function ensureGroup(
+  tx: Tx,
+  deps: ChatDeps,
+  p: { creatorId: string; members: Array<{ kind: "user" | "agent"; id: string }> },
+): Promise<{ conv: ConversationRow; created: boolean }> {
+  const seen = new Set<string>();
+  const unique: Array<{ kind: "user" | "agent"; id: string }> = [];
+  for (const m of [{ kind: "user" as const, id: p.creatorId }, ...p.members]) {
+    const key = `${m.kind}:${m.id.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push({ kind: m.kind, id: m.id.toLowerCase() });
+  }
+  if (unique.length < 3) throw new Error("a group needs at least three participants");
+  if (unique.length > MAX_GROUP_PARTICIPANTS) throw new Error("too many group participants");
+  const ordered = [...unique.filter((m) => m.kind === "user"), ...unique.filter((m) => m.kind === "agent")];
+  return insertOrGet(tx, deps, {
+    kind: "group",
+    createdBy: p.creatorId,
+    members: ordered.map((m) => ({ ...m, role: "member" as const })),
+    audit: { metadata: { kind: "group", members: ordered.map((m) => ({ kind: m.kind, id: m.id })) } },
+  });
+}
+
+/** "A", "A and B", "A, B and C", "A, B, C and N more" (up to three names, D-06). */
+export function groupLabel(names: readonly string[]): string {
+  if (names.length <= 1) return names[0] ?? "Group";
+  if (names.length <= 3) return `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+  return `${names.slice(0, 3).join(", ")} and ${names.length - 3} more`;
 }
 
 /** The bot of a DM (its only agent member), or null when `convId` is not a DM with a bot. */
@@ -201,7 +248,7 @@ export async function listDms(tx: Tx, userId: string, opts: { ids?: string[] } =
     )
     .where(
       and(
-        eq(conversations.kind, "dm"),
+        inArray(conversations.kind, ["dm", "group"]),
         isNull(conversations.archivedAt),
         opts.ids ? inArray(conversations.id, opts.ids) : undefined,
       ),
@@ -220,7 +267,8 @@ export async function listDms(tx: Tx, userId: string, opts: { ids?: string[] } =
         conversationMembers.conversationId,
         rows.map((r) => r.c.id),
       ),
-    );
+    )
+    .orderBy(conversationMembers.joinedAt, conversationMembers.memberId);
   const othersOf = new Map<string, Array<{ kind: "user" | "agent"; id: string }>>();
   for (const m of memberRows) {
     if (m.kind === "user" && m.id === userId) continue;
@@ -263,8 +311,31 @@ export async function listDms(tx: Tx, userId: string, opts: { ids?: string[] } =
     ).map((u) => [u.userId, u]),
   );
 
-  const counterpartOf = (convId: string): DmCounterpart | null => {
+  const counterpartOf = (convId: string, kind: string): DmCounterpart | null => {
     const others = othersOf.get(convId) ?? [];
+    if (kind === "group") {
+      const members: DmGroupMember[] = others.slice(0, 8).map((o) => {
+        if (o.kind === "agent") {
+          const a = agentById.get(o.id);
+          const gone = !a || a.deletedAt !== null;
+          return {
+            kind: "agent",
+            id: o.id,
+            name: gone ? "Deleted bot" : a.name,
+            avatarUrl: a?.avatarUrl ?? null,
+          };
+        }
+        const u = userById.get(o.id);
+        return {
+          kind: "user",
+          id: o.id,
+          name: u?.displayName ?? "Former member",
+          avatarUrl: u?.avatarUrl ?? null,
+        };
+      });
+      if (members.length < 2) return null;
+      return { kind: "group", name: groupLabel(members.map((m) => m.name)), members };
+    }
     const bot = others.find((o) => o.kind === "agent");
     if (bot) {
       const a = agentById.get(bot.id);
@@ -296,7 +367,7 @@ export async function listDms(tx: Tx, userId: string, opts: { ids?: string[] } =
 
   const out: DmSummary[] = [];
   for (const r of rows) {
-    const counterpart = counterpartOf(r.c.id);
+    const counterpart = counterpartOf(r.c.id, r.c.kind);
     if (!counterpart) continue;
     out.push({
       id: r.c.id,

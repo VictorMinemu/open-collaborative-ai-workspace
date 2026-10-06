@@ -779,6 +779,43 @@ describe("personal bots (D-01) and direct conversations (D-03)", () => {
     expect(allowed(sam, publicNotJoined, "message.delete_any", allowAll)).toBe(false);
   });
 
+  it("a group DM (D-06) carries state dm: members read and post; nobody adds, removes, archives or moderates", () => {
+    const group = channelResource({
+      visibility: "private",
+      archived: false,
+      viewerRole: "member",
+      kind: "group",
+    });
+    expect(group.state.has("dm")).toBe(true);
+    expect(allowed(sam, group, "channel.read")).toBe(true);
+    expect(allowed(sam, group, "channel.post")).toBe(true);
+    const asAdminMember = channelResource({
+      visibility: "private",
+      archived: false,
+      viewerRole: "member",
+      kind: "group",
+    });
+    for (const perm of [
+      "channel.members.add",
+      "channel.members.remove",
+      "channel.archive",
+      "message.delete_any",
+    ] as const) {
+      expect(decide(sam, group, [], perm).allowed).toBe(false);
+      expect(decide(admin, asAdminMember, [], perm)).toEqual({
+        allowed: false,
+        denial: { permission: perm, layer: "resource", reason: "direct_conversation" },
+      });
+    }
+    const theirs = channelResource({
+      visibility: "private",
+      archived: false,
+      viewerRole: null,
+      kind: "group",
+    });
+    expect(decide(admin, theirs, [], "channel.read").denial).toMatchObject({ reason: "private_channel" });
+  });
+
   it("a non-member admin cannot read someone's DM (private_channel)", () => {
     const theirs = channelResource({ visibility: "private", archived: false, viewerRole: null, kind: "dm" });
     expect(decide(admin, theirs, [], "channel.read")).toEqual({
