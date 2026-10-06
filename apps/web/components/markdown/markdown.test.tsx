@@ -28,11 +28,17 @@ function attrs(html: string, name: "href" | "src"): string[] {
   );
 }
 
-/** http(s), mailto, or a same-origin path; never another scheme or a protocol-relative URL. */
-function allowedHref(href: string): boolean {
+/**
+ * http(s), mailto, or a same-origin path, judged the way a browser reads the attribute: tab/CR/LF are removed
+ * anywhere, C0 controls and spaces at the ends, and "\\" counts as "/".
+ */
+function allowedHref(raw: string): boolean {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: the fixture models how browsers drop controls.
+  const href = raw.replace(/[\t\n\r]/g, "").replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, "");
   if (/^(https?:\/\/|mailto:)/i.test(href)) return true;
-  if (href.startsWith("//")) return false;
-  return !/^[a-z][a-z0-9+.-]*:/i.test(href.trim());
+  if (/^[/\\]{2}/.test(href)) return false;
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: the fixture models how browsers drop controls.
+  return !/^[a-z][a-z0-9+.-]*:/i.test(href) && !/[\u0000-\u001f\u007f]/.test(href);
 }
 
 function expectSafe(html: string) {
@@ -69,6 +75,20 @@ const XSS: Array<[string, string]> = [
   ["svg with onload", '<svg onload="alert(1)"><circle r="4"/></svg>'],
   ["javascript: image", "![pixel](javascript:alert(1))"],
   ["reference-style javascript: link", "[ref][1]\n\n[1]: javascript:alert(1)"],
+  // Browsers drop tab/CR/LF inside URLs: each of these would run as javascript: if checked on the raw string.
+  ["tab inside the scheme (pointy destination)", "[x](<java\tscript:alert(1)>)"],
+  ["entity-encoded tab inside the scheme", "[x](java&#9;script:alert(1))"],
+  ["entity-encoded newline inside the scheme", "[x](java&#10;script:alert(1))"],
+  ["entity-encoded CR inside the scheme", "[x](java&#13;script:alert(1))"],
+  ["entity-encoded NUL inside the scheme", "[x](java&#0;script:alert(1))"],
+  ["entity-encoded leading control", "[x](&#1;javascript:alert(1))"],
+  ["hex-entity-encoded scheme", "[x](&#x6A;avascript:alert(1))"],
+  ["named-entity colon", "[x](javascript&colon;alert(1))"],
+  ["tab in a reference definition", "[ref][2]\n\n[2]: <java\tscript:alert(1)>"],
+  ["image with an encoded javascript: scheme", "![p](java&#9;script:alert(1))"],
+  ["protocol-relative link", "[x](//evil.example/x)"],
+  ["backslash protocol-relative link", "[x](<\\\\evil.example>) [y](/\\evil.example)"],
+  ["data: link, mixed case", "[x](DaTa:text/html,hi)"],
 ];
 
 describe("Markdown: no raw HTML, no unsafe URLs (T-04-02-01)", () => {

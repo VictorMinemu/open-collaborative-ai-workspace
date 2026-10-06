@@ -1,11 +1,12 @@
 "use client";
 
 import { createContext, memo, useContext } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
+import ReactMarkdown, { type Components, defaultUrlTransform } from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
 import { type HastNode, rehypeMentions } from "./rehype-mentions";
+import { safeUrl } from "./safe-url";
 
 /**
  * The one Markdown renderer (D-05, CHAT-05): channel messages, thread replies, DMs, bot output and the Work Zone
@@ -28,15 +29,8 @@ export const MentionContext = createContext<MentionContextValue>({ handles: new 
 
 export type MarkdownVariant = "chat" | "document";
 
-/** Keeps http(s), mailto and same-origin references; drops every other scheme (javascript:, data:, …). */
-export function safeUrl(url: string): string | undefined {
-  const value = url.trim();
-  if (/^(https?:\/\/|mailto:)/i.test(value)) return value;
-  // Protocol-relative URLs leave the origin; anything else with a scheme is refused.
-  if (value.startsWith("//") || value.startsWith("\\\\")) return undefined;
-  if (/^[a-z][a-z0-9+.-]*:/i.test(value)) return undefined;
-  return value;
-}
+/** The engine's default transform first, then our allowlist (the authority). */
+const urlTransform = (url: string) => safeUrl(defaultUrlTransform(url));
 
 const LINK_REL = "noopener noreferrer nofollow";
 
@@ -265,7 +259,7 @@ export const Markdown = memo(function Markdown({
           rehypeMentions,
         ]}
         components={COMPONENTS[variant]}
-        urlTransform={safeUrl}
+        urlTransform={urlTransform}
       >
         {text}
       </ReactMarkdown>
