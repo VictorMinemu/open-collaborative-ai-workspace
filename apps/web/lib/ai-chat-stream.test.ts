@@ -1,4 +1,10 @@
-import type { AiChatSnapshot, AiDeltaEvent, Message, SendAiMessageResponse } from "@ocw/contracts";
+import type {
+  AiChatSnapshot,
+  AiDeltaEvent,
+  AiGeneration,
+  Message,
+  SendAiMessageResponse,
+} from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
 import { describe, expect, it } from "vitest";
 import { type AiChatState, displayText, initialAiChatState, reduceAiChat } from "./ai-chat-stream";
@@ -26,6 +32,26 @@ function message(over: Partial<Message> & Pick<Message, "id" | "seq">): Message 
     createdAt: AT,
     editedAt: null,
     ...over,
+  };
+}
+
+function generation(id: string, status: AiGeneration["status"]): AiGeneration {
+  return {
+    id,
+    status,
+    backend: "chatgpt_plan",
+    provider: "openai",
+    modelId: "gpt-6-astra",
+    modelLabel: "GPT-6 Astra",
+    metered: false,
+    attempt: 1,
+    errorCode: status === "failed" ? "usage_unavailable" : null,
+    errorParam: null,
+    usage: null,
+    webUsed: false,
+    sourceDomains: [],
+    startedAt: AT,
+    finishedAt: status === "running" ? null : AT,
   };
 }
 
@@ -195,5 +221,90 @@ describe("reduceAiChat", () => {
     });
     expect(next.messages).toHaveLength(2);
     expect(textOf(next)).toBe("");
+  });
+});
+
+describe("reduceAiChat: a send answered by the server before the page subscribed", () => {
+  it("ends failed whether the replayed events or the snapshot land first", () => {
+    const failed = { ...streamingAnswer, status: "failed" as const };
+    const response = {
+      chat: snapshot([], 0, null).chat,
+      userMessage: userMsg,
+      assistantMessage: streamingAnswer,
+      generation: {},
+    } as unknown as SendAiMessageResponse;
+    const frames = [
+      durable(1, "message.created", userMsg),
+      durable(2, "message.created", streamingAnswer),
+      durable(3, "message.updated", failed),
+    ];
+    const finalSnap = snapshot([userMsg, failed], 3, null);
+    const staleSnap = snapshot([userMsg, streamingAnswer], 2, "");
+
+    const eventsFirst = reduceAiChat(run(initialAiChatState(CHAT, response), ...frames), {
+      kind: "snapshot",
+      snapshot: finalSnap,
+    });
+    expect(eventsFirst.messages.map((m) => m.status)).toEqual(["sent", "failed"]);
+
+    const staleSnapshotFirst = run(
+      reduceAiChat(initialAiChatState(CHAT, response), { kind: "snapshot", snapshot: staleSnap }),
+      ...frames,
+    );
+    expect(staleSnapshotFirst.messages.map((m) => m.status)).toEqual(["sent", "failed"]);
+    expect(staleSnapshotFirst.lastSeq).toBe(3);
+
+    const staleSnapshotLast = reduceAiChat(run(initialAiChatState(CHAT, response), ...frames), {
+      kind: "snapshot",
+      snapshot: staleSnap,
+    });
+    expect(staleSnapshotLast.messages.map((m) => m.status)).toEqual(["sent", "failed"]);
+  });
+});
+
+describe("reduceAiChat: a snapshot never undoes a finished answer", () => {
+  it("keeps the final answer when a snapshot still shows the same generation streaming", () => {
+    const withGen = (m: Message, status: Message["status"]): Message => ({
+      ...m,
+      status,
+      generation: generation(GEN, status === "streaming" ? "running" : "failed"),
+    });
+    let s = reduceAiChat(initialAiChatState(CHAT), {
+      kind: "snapshot",
+      snapshot: snapshot([userMsg, withGen(streamingAnswer, "streaming")], 2, ""),
+    });
+    s = run(s, durable(3, "message.updated", { ...withGen(streamingAnswer, "failed"), body: "partial" }));
+    // Read across a finalize: cursor 3, but the row read before it committed.
+    s = reduceAiChat(s, {
+      kind: "snapshot",
+      snapshot: snapshot([userMsg, withGen(streamingAnswer, "streaming")], 3, null),
+    });
+    expect(s.messages.find((m) => m.id === ANSWER)?.status).toBe("failed");
+    expect(textOf(s)).toBe("partial");
+  });
+
+  it("lets a new generation of the same answer stream again (regenerate)", () => {
+    const gen2 = "1a2b3c4d-0000-4000-8000-000000000009";
+    const done: Message = {
+      ...streamingAnswer,
+      status: "completed",
+      body: "one",
+      generation: generation(GEN, "completed"),
+    };
+    const again: Message = {
+      ...streamingAnswer,
+      status: "streaming",
+      body: "",
+      generation: generation(gen2, "running"),
+    };
+    let s = reduceAiChat(initialAiChatState(CHAT), {
+      kind: "snapshot",
+      snapshot: snapshot([userMsg, done], 3, null),
+    });
+    s = reduceAiChat(s, {
+      kind: "snapshot",
+      snapshot: snapshot([userMsg, again], 4, ""),
+    });
+    expect(s.messages.find((m) => m.id === ANSWER)?.status).toBe("streaming");
   });
 });

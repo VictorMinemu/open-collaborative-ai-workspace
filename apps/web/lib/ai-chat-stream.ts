@@ -145,10 +145,23 @@ function applySnapshot(state: AiChatState, snap: AiChatSnapshot): AiChatState {
   const maxSeq = snap.messages.reduce((n, m) => Math.max(n, m.seq), 0);
   // Messages we hold that are newer than the snapshot (e.g. a send whose events are still on the wire) stay.
   const newer = state.messages.filter((m) => !fromSnapshot.has(m.id) && m.seq > maxSeq);
+  // The same generation never goes back from a final state to streaming: a snapshot read across its finalize
+  // (row before, cursor after) must not undo the final `message.updated` we already applied.
+  const held = new Map(state.messages.map((m) => [m.id, m]));
+  const merged = snap.messages.map((m) => {
+    const mine = held.get(m.id);
+    const regress =
+      mine !== undefined &&
+      mine.status !== "streaming" &&
+      m.status === "streaming" &&
+      mine.generation?.id !== undefined &&
+      mine.generation.id === m.generation?.id;
+    return regress ? mine : m;
+  });
   let next: AiChatState = {
     ...state,
     snapshot: snap,
-    messages: [...snap.messages, ...newer].sort(bySeq),
+    messages: [...merged, ...newer].sort(bySeq),
     lastSeq: snap.lastSeq,
   };
   // Durable frames newer than the snapshot win over it.

@@ -5,11 +5,14 @@ import { Check, Copy } from "lucide-react";
 import { Markdown } from "@/components/markdown/markdown";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useCopy } from "@/hooks/use-copy";
+import { cn } from "@/lib/utils";
+import { GenerationError } from "./generation-error";
 
 /**
  * One turn of an AI chat (P-09): the member's turns are right-aligned bubbles; answers are full width through the
  * one shared Markdown renderer (no raw HTML, images as links, `safeUrl`), with a caret while they stream and a
- * quiet footer once done: `<model> · ChatGPT plan · <in> in · <out> out`.
+ * quiet footer once done: `<model> · ChatGPT plan · <in> in · <out> out`. A failed answer keeps any partial text
+ * and ends with a calm card instead of a spinner.
  */
 export function AiMessage({ message, text }: { message: Message; text: string }) {
   if (message.authorKind !== "agent") {
@@ -42,6 +45,7 @@ export function AiMessage({ message, text }: { message: Message; text: string })
           <Markdown text={text} variant="document" streaming={streaming} className="text-[15px] leading-7" />
         ) : null}
       </div>
+      {message.status === "failed" ? <GenerationError code={message.generation?.errorCode ?? null} /> : null}
       {streaming ? (
         <span
           data-testid="ai-streaming-caret"
@@ -77,7 +81,13 @@ export function footerLabel(g: AiGeneration): string {
 function AnswerFooter({ text, generation }: { text: string; generation: AiGeneration | undefined }) {
   const { copy, copied } = useCopy();
   return (
-    <div className="-ml-1.5 flex min-h-7 min-w-0 items-center gap-1.5 text-[12px] text-muted-foreground">
+    <div
+      className={cn(
+        "flex min-h-7 min-w-0 items-center gap-1.5 text-[12px] text-muted-foreground",
+        // The copy button's padding sits outside the text column, so the label lines up with the answer.
+        text && "-ml-1.5",
+      )}
+    >
       {text ? (
         <Tooltip content={copied ? "Copied" : "Copy answer"}>
           <button

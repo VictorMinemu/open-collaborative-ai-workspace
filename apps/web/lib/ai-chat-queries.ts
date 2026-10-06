@@ -32,6 +32,8 @@ export const aiKeys = {
 
 const GAP_REFETCH_MS = 1_200;
 const GAP_REFETCH_TRIES = 3;
+/** A streaming answer with no frame for this long re-reads the snapshot (the server heartbeats every 10 s). */
+const STALL_REFETCH_MS = 10_000;
 
 export function useAiModels() {
   return useQuery({
@@ -85,7 +87,16 @@ export function useAiChat(chatId: string): AiChatView {
   // 1. Subscribe first (declared before the query, so its effect runs first). A snapshot already in the cache
   //    gives the replay cursor; otherwise the server replays the chat's events, which the reducer dedupes by seq.
   const cursor = useRef(qc.getQueryData<AiChatSnapshot>(aiKeys.chat(chatId))?.lastSeq);
-  const onFrame = useCallback((frame: TopicFrame) => dispatch({ kind: "frame", frame }), []);
+  const lastFrameAt = useRef(Date.now());
+  const onFrame = useCallback((frame: TopicFrame) => {
+    lastFrameAt.current = Date.now();
+    dispatch({ kind: "frame", frame });
+  }, []);
+  // A `resync` (too many events to replay) re-reads the snapshot; the query is declared below.
+  const resync = useRef<() => void>(() => {});
+  useTopic(`conv:${chatId}`, onFrame, cursor.current, () => resync.current());
+
+  // 2. Then the snapshot. Every snapshot (first load, gap refetch, reconnect) is stitched with what streamed.
   const query = useQuery({
     queryKey: aiKeys.chat(chatId),
     queryFn: () => api.get(`/api/v1/ai-chats/${chatId}`, { schema: AiChatSnapshotSchema }),
@@ -93,9 +104,8 @@ export function useAiChat(chatId: string): AiChatView {
     refetchOnWindowFocus: false,
   });
   const refetch = query.refetch;
-  useTopic(`conv:${chatId}`, onFrame, cursor.current, () => void refetch());
+  resync.current = () => void refetch();
 
-  // 2. Every snapshot (first load, gap refetch, reconnect) is stitched with what streamed meanwhile.
   useEffect(() => {
     if (query.data) dispatch({ kind: "snapshot", snapshot: query.data });
   }, [query.data]);
@@ -118,7 +128,21 @@ export function useAiChat(chatId: string): AiChatView {
     };
   }, [state.gap, refetch]);
 
-  // 4. Back online after a drop: the socket resumes durable events by seq; the snapshot brings the partial text.
+  // 4. Safety net: an answer still streaming with nothing heard for a while re-reads the snapshot (the final
+  //    `message.updated` may have raced a snapshot taken just before it).
+  const streamingNow = state.messages.some((m) => m.status === "streaming");
+  useEffect(() => {
+    if (!streamingNow) return;
+    lastFrameAt.current = Date.now();
+    const t = setInterval(() => {
+      if (Date.now() - lastFrameAt.current < STALL_REFETCH_MS) return;
+      lastFrameAt.current = Date.now();
+      void refetch();
+    }, 2_000);
+    return () => clearInterval(t);
+  }, [streamingNow, refetch]);
+
+  // 5. Back online after a drop: the socket resumes durable events by seq; the snapshot brings the partial text.
   const status = useRealtimeStatus();
   const wasDown = useRef(false);
   useEffect(() => {
