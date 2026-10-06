@@ -16,7 +16,8 @@
 //
 // Title requests (05-10): when the instructions (`instructions`, a developer/system item) ask for a "short title",
 // the reply is `Title: <first three words of the user text>` (the text inside `<request>…</request>` when present,
-// directives stripped); `[[title:<text>]]` in the user text forces the reply to exactly <text>. server.mjs applies
+// directives stripped); `[[title:<text>]]` in the user text forces the reply to exactly <text>. With `[[slow]]` the
+// title arrives after the same 4 s, unchanged. server.mjs applies
 // the same rule to chat completions (system/developer message) and Anthropic (`system`).
 //
 // Plan bearers (`fake-plan-…`) get the ChatGPT-plan preview rules: `store` must be false, `stream` true, no
@@ -215,13 +216,16 @@ export async function handleResponses(req, res, body, ctx = {}) {
     });
   }
 
-  const reply = isTitleRequest(responsesInstructions(body))
+  const title = isTitleRequest(responsesInstructions(body));
+  const reply = title
     ? titleReply(userText)
     : `Echo: ${withoutDirectives(userText)}${attachmentSuffix(
         partCount(user, "input_image"),
         partCount(user, "input_file"),
       )}`;
-  const slow = has("slow");
+  // A slow title is the same title after the same 4 s (no counting appended to it).
+  const slow = has("slow") && !title;
+  if (has("slow") && title) await sleep(SLOW_DELTAS * SLOW_INTERVAL_MS);
   const usageLimit = has("plan:usage_limit");
   const all = slow ? slowPieces(reply) : pieces(reply);
   const deltas = usageLimit ? all.slice(0, 3) : all;

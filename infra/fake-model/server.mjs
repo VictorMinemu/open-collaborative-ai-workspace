@@ -463,9 +463,11 @@ async function openAIChat(res, body) {
       `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: finish }], ...extra })}\n\n`,
     );
   chunk({ role: "assistant", content: "" });
-  for (const piece of flags.slow ? slowPieces(reply) : deltas(reply)) {
+  if (title && flags.slow) await sleep(4_000);
+  const slowNow = flags.slow && !title;
+  for (const piece of slowNow ? slowPieces(reply) : deltas(reply)) {
     chunk({ content: piece });
-    if (flags.slow) await sleep(100);
+    if (slowNow) await sleep(100);
   }
   chunk({}, "stop");
   res.write(
@@ -531,8 +533,9 @@ async function anthropicMessages(res, body) {
     });
     return;
   }
+  const title = titleOf([contentText(body.system)], promptFromAnthropic(body).lastUser);
   const reply =
-    titleOf([contentText(body.system)], promptFromAnthropic(body).lastUser) ??
+    title ??
     `${composeReply(promptFromAnthropic(body).all, toolCount, offeredToolNames(body))}${flags.suffix}`;
   const id = `msg_fake_${counter}`;
   const model = body.model ?? MODELS[0];
@@ -567,9 +570,11 @@ async function anthropicMessages(res, body) {
     },
   });
   ev("content_block_start", { index: 0, content_block: { type: "text", text: "" } });
-  for (const piece of flags.slow ? slowPieces(reply) : deltas(reply)) {
+  if (title && flags.slow) await sleep(4_000);
+  const slowNow = flags.slow && !title;
+  for (const piece of slowNow ? slowPieces(reply) : deltas(reply)) {
     ev("content_block_delta", { index: 0, delta: { type: "text_delta", text: piece } });
-    if (flags.slow) await sleep(100);
+    if (slowNow) await sleep(100);
   }
   ev("content_block_stop", { index: 0 });
   ev("message_delta", {

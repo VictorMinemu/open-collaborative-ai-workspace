@@ -1,8 +1,11 @@
 "use client";
 
 import {
+  AiChatDetail,
+  AiChatList,
   type AiChatSnapshot,
   AiChatSnapshot as AiChatSnapshotSchema,
+  type AiChatSummary,
   AiModelList,
   type CreateAiChatRequest,
   EventTypes,
@@ -12,9 +15,16 @@ import {
   SendAiMessageResponse,
   StopAiGenerationResponse,
   topic,
+  type UpdateAiChatRequest,
 } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type InfiniteData,
+  type QueryClient,
+  useInfiniteQuery,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import { type AiChatState, displayText, initialAiChatState, reduceAiChat } from "./ai-chat-stream";
 import { api, isApiError } from "./api";
@@ -33,7 +43,87 @@ import { useRealtimeStatus, useTopic } from "./realtime";
 export const aiKeys = {
   models: ["ai", "models"] as const,
   chat: (id: string) => ["ai", "chat", id] as const,
+  /** The member's chat list (05-10): the recent one (sidebar and /chat/ai) or the archived one. */
+  list: (archived: boolean) => ["ai", "chats", archived ? "archived" : "recent"] as const,
+  /** The latest summary of one chat seen live (`ai_chat.updated`, a rename): the header's title and archive state. */
+  summary: (id: string) => ["ai", "summary", id] as const,
 };
+
+/** Rows per page of the chat list (the API's keyset cursor). */
+const LIST_PAGE = 30;
+
+/**
+ * The member's AI chats (05-10, AICHAT-04): newest activity first, keyset-paged, the archived ones apart. Kept live
+ * by `applyAiChatUpdated` (the sidebar's `user:` topic), so a new chat, a generated title, a rename or an archive
+ * moves rows without a refetch.
+ */
+export function useAiChats(archived = false, opts: { enabled?: boolean } = {}) {
+  return useInfiniteQuery({
+    queryKey: aiKeys.list(archived),
+    queryFn: ({ pageParam, signal }) => {
+      const p = new URLSearchParams({ limit: String(LIST_PAGE), archived: String(archived) });
+      if (pageParam) p.set("cursor", pageParam);
+      return api.get(`/api/v1/ai-chats?${p.toString()}`, { schema: AiChatList, signal });
+    },
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => last.nextCursor,
+    staleTime: 30_000,
+    enabled: opts.enabled ?? true,
+  });
+}
+
+type ListData = InfiniteData<AiChatList, string | null>;
+
+const newestFirst = (a: AiChatSummary, b: AiChatSummary) =>
+  b.lastActivityAt.localeCompare(a.lastActivityAt) || b.id.localeCompare(a.id);
+
+/**
+ * Applies a chat summary from `ai_chat.updated` (or a PATCH answer) to every cache that shows it: the chat's live
+ * summary, and both lists (removed from the one it no longer belongs to, inserted or moved in the other; loaded rows
+ * are re-sorted onto the first page so the next page's cursor stays valid).
+ */
+export function applyAiChatUpdated(qc: QueryClient, chat: AiChatSummary): void {
+  qc.setQueryData(aiKeys.summary(chat.id), chat);
+  for (const archived of [false, true]) {
+    qc.setQueryData<ListData>(aiKeys.list(archived), (prev) => {
+      if (!prev) return prev;
+      const rest = prev.pages.flatMap((p) => p.chats).filter((c) => c.id !== chat.id);
+      const belongs = chat.archived === archived;
+      const last = prev.pages.at(-1);
+      const tail = rest.at(-1);
+      // Older than everything loaded while more pages exist: it arrives with paging.
+      const later = belongs && !!last?.nextCursor && !!tail && newestFirst(tail, chat) < 0;
+      const rows = belongs && !later ? [...rest, chat].sort(newestFirst) : rest;
+      return {
+        ...prev,
+        pages: prev.pages.map((p, i) => ({ ...p, chats: i === 0 ? rows : [] })),
+      };
+    });
+  }
+}
+
+/** The live summary of a chat when one arrived after its snapshot (title, archive), else undefined. */
+export function useAiChatSummary(chatId: string): AiChatSummary | undefined {
+  const q = useQuery<AiChatSummary | null>({
+    queryKey: aiKeys.summary(chatId),
+    queryFn: () => null,
+    enabled: false,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+  return q.data ?? undefined;
+}
+
+/** Rename and archive/unarchive (owner only); the answer updates every cache at once. */
+export async function updateAiChat(
+  qc: QueryClient,
+  chatId: string,
+  body: UpdateAiChatRequest,
+): Promise<AiChatDetail> {
+  const detail = await api.patch(`/api/v1/ai-chats/${chatId}`, { body, schema: AiChatDetail });
+  const { settings: _s, tools: _t, viewerCan: _v, ...summary } = detail;
+  applyAiChatUpdated(qc, summary);
+  return detail;
+}
 
 const GAP_REFETCH_MS = 1_200;
 const GAP_REFETCH_TRIES = 3;

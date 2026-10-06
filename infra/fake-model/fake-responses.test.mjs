@@ -369,7 +369,7 @@ describe("title requests (05-10): instructions asking for a short title answer `
       .filter((d) => d.type === "content_block_delta")
       .map((d) => d.delta.text)
       .join("");
-    assert.ok(slow.startsWith("Title: Plan the quarterly"));
+    assert.equal(slow, "Title: Plan the quarterly", "a slow title is the same title, later");
     assert.ok(Date.now() - started >= 3_000, "slow title replies take seconds");
   });
 });
