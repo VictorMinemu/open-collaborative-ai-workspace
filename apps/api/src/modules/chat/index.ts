@@ -972,10 +972,12 @@ export function createChatModule(core: Core): ApiModule {
           core.db.withTenant(tenant(req), async (tx) => {
             const thread = await loadThread(tx, req.params.id);
             if (!thread) throw notFound("Thread not found");
+            // Any conversation with messages, DMs and groups included (flat: a root with no replies); hidden =
+            // missing = 404 (D-01).
             await readableChannel(
               req,
               tx,
-              await getChannel(tx, thread.root.conversationId),
+              await getConversation(tx, thread.root.conversationId, MESSAGE_KINDS),
               "Thread not found",
             );
             const dir = await loadDirectory(tx);
