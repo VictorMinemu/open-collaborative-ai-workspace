@@ -34,6 +34,8 @@ export interface OcwDesktopApi {
   addProject(options?: { name?: string }): Promise<DesktopAddProjectResult>;
   listProjects(): Promise<DesktopProject[]>;
   onStatus(callback: (status: DesktopStatus) => void): () => void;
+  /** Dock/taskbar badge = unread mentions (0 clears). Optional: desktop builds before 04-11 lack it. */
+  setBadgeCount?(count: number): Promise<void>;
 }
 
 declare global {

@@ -7,8 +7,9 @@ export const TOAST_CLEARANCE_VAR = "--toast-clearance";
 
 /**
  * Keeps bottom-anchored toasts clear of `ref`, an element pinned to the bottom of the viewport (the Work Zone
- * composer): while mounted, `--toast-clearance` on <html> is the distance from the viewport's bottom edge to the
- * element's top edge, kept current as it grows (a longer prompt, a hint line) or the window resizes.
+ * session's dock: approval banner, agent bar, composer): while mounted, `--toast-clearance` on <html> is the
+ * distance from the viewport's bottom edge to the element's top edge, kept current as it grows (an approval, a
+ * longer prompt, a hint line) or the window resizes.
  */
 export function useToastClearance(ref: RefObject<HTMLElement | null>): void {
   useEffect(() => {

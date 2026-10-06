@@ -389,9 +389,12 @@ function StreamItem({ item, session }: { item: Item; session: WorkSession }) {
     case "assistant":
       return (
         <div className="min-w-0 text-[14.5px]" data-testid="assistant-message">
-          <Markdown text={item.text} />
+          <Markdown text={item.text} streaming={item.streaming} />
           {item.streaming ? (
-            <span className="ml-0.5 inline-block h-4 w-1.5 translate-y-0.5 animate-pulse rounded-sm bg-primary/70" />
+            <span
+              data-testid="streaming-caret"
+              className="ml-0.5 inline-block h-4 w-1.5 translate-y-0.5 animate-pulse rounded-sm bg-primary/70"
+            />
           ) : null}
         </div>
       );

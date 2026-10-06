@@ -102,6 +102,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "work_session.configure": false,
     "device.full_access": false,
     "work_zone.manage": false,
+    "message.delete_any": false,
+    "channel.mention_all": true,
+    "attachment.upload": true,
+    "channel.update": false,
   },
   developer: {
     "org.read": true,
@@ -148,6 +152,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "work_session.configure": true,
     "device.full_access": false,
     "work_zone.manage": false,
+    "message.delete_any": false,
+    "channel.mention_all": true,
+    "attachment.upload": true,
+    "channel.update": false,
   },
   lead: {
     "org.read": true,
@@ -194,6 +202,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "work_session.configure": true,
     "device.full_access": false,
     "work_zone.manage": false,
+    "message.delete_any": false,
+    "channel.mention_all": true,
+    "attachment.upload": true,
+    "channel.update": false,
   },
   admin: {
     "org.read": true,
@@ -240,6 +252,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "work_session.configure": true,
     "device.full_access": false,
     "work_zone.manage": true,
+    "message.delete_any": true,
+    "channel.mention_all": true,
+    "attachment.upload": true,
+    "channel.update": true,
   },
 };
 
@@ -637,6 +653,102 @@ describe("unit leads and explicit rules", () => {
 
 // ---------------------------------------------------------------- personal bots and direct conversations (03.1-01)
 
+describe("channels in units (CHAT-02, 04-08)", () => {
+  const FIN = "dept-finance";
+  const PROD = "dept-product";
+  const MOB = "team-mobile";
+  const financeDeny = rule({
+    id: "deny-finance",
+    scopeUnitId: FIN,
+    subjectKind: "role",
+    subjectId: "standard",
+    permission: "channel.read",
+    effect: "deny",
+  });
+  const inFinance = (c: Partial<Parameters<typeof channelResource>[0]> = {}) =>
+    channelResource({ visibility: "public", archived: false, viewerRole: null, unitPath: [FIN], ...c });
+  const inProduct = channelResource({
+    visibility: "public",
+    archived: false,
+    viewerRole: null,
+    unitPath: [PROD, MOB],
+  });
+
+  it("a channel resource carries its unit path (root → self); none = the organization", () => {
+    expect(inProduct.unitPath).toEqual([PROD, MOB]);
+    expect(channelResource({ visibility: "public", archived: false, viewerRole: null }).unitPath).toEqual([]);
+    expect(
+      channelMemberResource(
+        { visibility: "public", archived: false, viewerRole: "member", unitPath: [FIN] },
+        true,
+      ).unitPath,
+    ).toEqual([FIN]);
+  });
+
+  it("a deny scoped to Finance hides Finance channels from a non-Finance member and leaves Product ones", () => {
+    const outsider = user("standard", { memberUnitPaths: [[PROD]] });
+    expect(decide(outsider, inFinance(), [financeDeny], "channel.read")).toEqual({
+      allowed: false,
+      denial: {
+        permission: "channel.read",
+        layer: "unit",
+        reason: "denied_by_rule",
+        ruleId: "deny-finance",
+        unitId: FIN,
+      },
+    });
+    // Membership of the channel does not outrank the rule (explicit deny precedence).
+    expect(allowed(outsider, inFinance({ viewerRole: "owner" }), "channel.read", [financeDeny])).toBe(false);
+    expect(allowed(outsider, inProduct, "channel.read", [financeDeny])).toBe(true);
+    // Without a unit path (the organization) the Finance rule does not reach the channel.
+    expect(allowed(outsider, inFinance({ unitPath: [] }), "channel.read", [financeDeny])).toBe(true);
+    // A role the rule does not name keeps reading it.
+    expect(
+      allowed(user("developer", { memberUnitPaths: [[FIN]] }), inFinance(), "channel.read", [financeDeny]),
+    ).toBe(true);
+  });
+
+  it("a deny scoped to a department reaches its team channels (the team is below it on the path)", () => {
+    const productDeny = rule({
+      id: "deny-product",
+      scopeUnitId: PROD,
+      permission: "channel.post",
+      effect: "deny",
+    });
+    const outsider = user("developer", { memberUnitPaths: [[FIN]] });
+    const joined = channelResource({
+      visibility: "public",
+      archived: false,
+      viewerRole: "member",
+      unitPath: [PROD, MOB],
+    });
+    expect(allowed(outsider, joined, "channel.post")).toBe(true);
+    expect(allowed(outsider, joined, "channel.post", [productDeny])).toBe(false);
+  });
+
+  it("channel.update: the channel owner relation and the admin role, nobody else", () => {
+    const owned = (role: "owner" | "member" | null) =>
+      channelResource({ visibility: "public", archived: false, viewerRole: role, unitPath: [PROD] });
+    for (const r of ["standard", "developer", "lead"] as const) {
+      expect(allowed(user(r), owned("owner"), "channel.update"), `${r} owner`).toBe(true);
+      expect(allowed(user(r), owned("member"), "channel.update"), `${r} member`).toBe(false);
+      expect(allowed(user(r), owned(null), "channel.update"), `${r} outsider`).toBe(false);
+    }
+    expect(allowed(user("admin"), owned(null), "channel.update")).toBe(true);
+    expect(allowed(user("admin"), orgResource(), "channel.update")).toBe(true);
+    expect(allowed(user("lead"), orgResource(), "channel.update")).toBe(false);
+    // Direct conversations never move into a unit, whoever owns them.
+    const dm = channelResource({ visibility: "private", archived: false, viewerRole: "owner", kind: "dm" });
+    expect(decide(user("admin"), dm, [], "channel.update").denial).toMatchObject({
+      layer: "resource",
+      reason: "direct_conversation",
+    });
+    // Agents never move channels.
+    const agent: PrincipalFacts = { ...user(null), kind: "agent", id: "a-1" };
+    expect(allowed(agent, owned("owner"), "channel.update")).toBe(false);
+  });
+});
+
 describe("personal bots (D-01) and direct conversations (D-03)", () => {
   const SAM = "u-sam";
   const ALEX = "u-alex";
@@ -744,6 +856,60 @@ describe("personal bots (D-01) and direct conversations (D-03)", () => {
       });
       expect(decide(admin, own, [], perm).denial).toMatchObject({ reason: "direct_conversation" });
     }
+  });
+
+  it("message.delete_any (D-01): admins moderate channels, never a direct conversation", () => {
+    const publicNotJoined = channelResource({ visibility: "public", archived: false, viewerRole: null });
+    expect(allowed(admin, publicNotJoined, "message.delete_any")).toBe(true);
+    expect(decide(sam, publicNotJoined, [], "message.delete_any").denial).toMatchObject({
+      permission: "message.delete_any",
+      reason: "missing_permission",
+    });
+    const dm = channelResource({ visibility: "private", archived: false, viewerRole: "owner", kind: "dm" });
+    expect(decide(admin, dm, [], "message.delete_any")).toEqual({
+      allowed: false,
+      denial: { permission: "message.delete_any", layer: "resource", reason: "direct_conversation" },
+    });
+    // An allow rule never hands moderation to anyone else (admin surface, non-delegable).
+    const allowAll = [rule({ subjectKind: "everyone", permission: "message.delete_any", effect: "allow" })];
+    expect(allowed(sam, publicNotJoined, "message.delete_any", allowAll)).toBe(false);
+  });
+
+  it("a group DM (D-06) carries state dm: members read and post; nobody adds, removes, archives or moderates", () => {
+    const group = channelResource({
+      visibility: "private",
+      archived: false,
+      viewerRole: "member",
+      kind: "group",
+    });
+    expect(group.state.has("dm")).toBe(true);
+    expect(allowed(sam, group, "channel.read")).toBe(true);
+    expect(allowed(sam, group, "channel.post")).toBe(true);
+    const asAdminMember = channelResource({
+      visibility: "private",
+      archived: false,
+      viewerRole: "member",
+      kind: "group",
+    });
+    for (const perm of [
+      "channel.members.add",
+      "channel.members.remove",
+      "channel.archive",
+      "message.delete_any",
+    ] as const) {
+      expect(decide(sam, group, [], perm).allowed).toBe(false);
+      expect(decide(admin, asAdminMember, [], perm)).toEqual({
+        allowed: false,
+        denial: { permission: perm, layer: "resource", reason: "direct_conversation" },
+      });
+    }
+    const theirs = channelResource({
+      visibility: "private",
+      archived: false,
+      viewerRole: null,
+      kind: "group",
+    });
+    expect(decide(admin, theirs, [], "channel.read").denial).toMatchObject({ reason: "private_channel" });
   });
 
   it("a non-member admin cannot read someone's DM (private_channel)", () => {

@@ -153,6 +153,17 @@ export const EventTypes = {
   workSessionChanges: "work_session.changes",
   promptUpdated: "prompt.updated",
   approvalUpdated: "approval.updated",
+  // Phase 4 (P-04). On `conv:<id>`:
+  messageDeleted: "message.deleted",
+  reactionUpdated: "reaction.updated",
+  pinUpdated: "pin.updated",
+  // On `user:<id>` (personal; ordinary channel messages are never fanned out here):
+  saveUpdated: "save.updated",
+  notificationCreated: "notification.created",
+  notificationRead: "notification.read",
+  conversationRead: "conversation.read",
+  threadRead: "thread.read",
+  notificationPrefsUpdated: "notification_prefs.updated",
 } as const;
 
 export const MemberUpdatedPayload = z.object({ userId: z.uuid(), changed: z.array(z.string()) });
@@ -176,4 +187,9 @@ export const EphemeralTypes = {
    */
   providerAuth: "provider.auth.updated",
   assistantDelta: "assistant.delta",
+  /**
+   * On `user:<id>` (CHAT-10, P-04): a plain channel message for a member who chose "all new messages" there
+   * (`MessageNotifyEvent`). Ephemeral, so ordinary messages are never stored on personal streams.
+   */
+  messageNotify: "message.notify",
 } as const;

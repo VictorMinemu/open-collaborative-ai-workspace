@@ -1,14 +1,22 @@
 "use client";
 
 import type { MemberDetail } from "@ocw/contracts";
-import { CalendarDays, Mail, Network } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { CalendarDays, Mail, MessageCircle, Network } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useState } from "react";
+import { toast } from "sonner";
 import { Avatar, AvatarFallback, AvatarImage, toneFor } from "@/components/ui/avatar";
+import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Spinner } from "@/components/ui/spinner";
 import { useIsDesktop } from "@/hooks/use-media-query";
 import { errorMessage } from "@/lib/api";
+import { createDm } from "@/lib/chat-queries";
 import { useMemberProfile } from "@/lib/member-queries";
+import { useMe } from "@/lib/queries";
 import { cn, formatDate, initials } from "@/lib/utils";
 import { DeactivatedPill, RoleBadge } from "./member-badges";
 import { sortUnits, UNIT_KIND_ICON, UNIT_KIND_LABEL, UNIT_ROLE_TAG } from "./unit-chip";
@@ -88,7 +96,7 @@ export function MemberProfileSheet({
         className={cn("overflow-hidden", responsiveSheetClass(desktop))}
       >
         {profile.data ? (
-          <ProfileBody member={profile.data} />
+          <ProfileBody member={profile.data} onClose={() => onOpenChange(false)} />
         ) : profile.isError ? (
           <div className="grid gap-2 px-6 pt-16 pb-10 text-center">
             <SheetTitle>Profile unavailable</SheetTitle>
@@ -102,7 +110,33 @@ export function MemberProfileSheet({
   );
 }
 
-function ProfileBody({ member }: { member: MemberDetail }) {
+/** "Message" on someone else's active profile: opens (or creates) the DM with them (CHAT-04). */
+function MessageButton({ member, onClose }: { member: MemberDetail; onClose: () => void }) {
+  const qc = useQueryClient();
+  const router = useRouter();
+  const me = useMe({ enabled: false });
+  const [busy, setBusy] = useState(false);
+  if (member.status === "deactivated" || member.userId === me.data?.user.id) return null;
+  const run = async () => {
+    setBusy(true);
+    try {
+      const dm = await createDm(qc, [{ kind: "user", id: member.userId }]);
+      onClose();
+      router.push(`/chat/dm/${dm.id}`);
+    } catch (err) {
+      toast.error(errorMessage(err));
+      setBusy(false);
+    }
+  };
+  return (
+    <Button className="mt-4 w-full" data-testid="profile-message" disabled={busy} onClick={() => void run()}>
+      {busy ? <Spinner /> : <MessageCircle />}
+      Message
+    </Button>
+  );
+}
+
+function ProfileBody({ member, onClose }: { member: MemberDetail; onClose: () => void }) {
   const deactivated = member.status === "deactivated";
   return (
     <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto pb-8">
@@ -137,6 +171,7 @@ function ProfileBody({ member }: { member: MemberDetail }) {
           <RoleBadge role={member.role} />
           {deactivated ? <DeactivatedPill className="h-6 px-2 text-xs" /> : null}
         </SheetDescription>
+        <MessageButton member={member} onClose={onClose} />
       </div>
 
       <dl className="mt-6 grid gap-px overflow-hidden border-y bg-border">

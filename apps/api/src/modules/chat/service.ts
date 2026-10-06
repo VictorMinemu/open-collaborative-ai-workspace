@@ -1,19 +1,35 @@
 import {
   type ChannelMember,
   type ChannelSummary,
+  type ChannelUnit,
+  type ConversationNotifyLevel,
   EventTypes,
+  MENTION_KINDS,
   type Mention,
   type Message,
   type MessageAuthor,
   type ThreadUpdatedEvent,
+  UNREAD_CAP,
 } from "@ocw/contracts";
-import { conversationMembers, conversations, messages, type Tx, tenantOf } from "@ocw/db";
-import { and, asc, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
+import {
+  conversationMembers,
+  conversations,
+  messages,
+  orgUnits,
+  type Tx,
+  tenantOf,
+  unitMemberships,
+} from "@ocw/db";
+import { and, asc, desc, eq, gt, inArray, isNull, lt, sql } from "drizzle-orm";
 import { badRequest, notFound } from "../../lib/errors";
+import { attachmentsForMessages, linkAttachments } from "../artifact";
 import type { AuditService } from "../audit";
 import type { ChannelFacts } from "../organization";
 import type { RealtimeService } from "../realtime";
 import { authorOf, type Directory } from "./directory";
+import { pinnedFor } from "./pins";
+import { reactionsFor } from "./reactions";
+import { savedFor } from "./saves";
 
 /**
  * Chat domain logic. Every function runs inside the caller's `withTenant()` transaction, so RLS scopes all
@@ -55,7 +71,7 @@ export async function getChannel(tx: Tx, id: string): Promise<ConversationRow | 
 export async function getConversation(
   tx: Tx,
   id: string,
-  kinds: ReadonlyArray<"channel" | "dm">,
+  kinds: ReadonlyArray<"channel" | "dm" | "group">,
 ): Promise<ConversationRow | null> {
   const [row] = await tx
     .select()
@@ -163,6 +179,8 @@ export async function listChannels(tx: Tx, userId: string, id?: string): Promise
       memberId: me.memberId,
       memberRole: me.role,
       lastReadSeq: me.lastReadSeq,
+      notifyLevel: me.notifyLevel,
+      muted: me.muted,
       memberCount:
         sql<number>`(select count(*) from app.conversation_members cm where cm.conversation_id = ${conversations.id})`.mapWith(
           Number,
@@ -178,12 +196,24 @@ export async function listChannels(tx: Tx, userId: string, id?: string): Promise
         sql<number>`(select coalesce(max(s.last_seq), 0) from app.streams s where s.id = 'conv:' || ${conversations.id}::text)`.mapWith(
           Number,
         ),
+      // The sidebar's All view (CHAT-02): the latest live top-level message as one line of plain text.
+      lastMessagePreview: sql<
+        string | null
+      >`(select nullif(left(btrim(regexp_replace(m.body, '\\s+', ' ', 'g')), 140), '') from app.messages m where m.conversation_id = ${conversations.id} and m.thread_id is null and m.deleted_at is null order by m.seq desc limit 1)`,
+      unitId: orgUnits.id,
+      unitName: orgUnits.name,
+      unitKind: orgUnits.kind,
+      unitPath: orgUnits.path,
+      unitPathNames: sql<
+        string[] | null
+      >`(select array_agg(u2.name order by array_position(${orgUnits.path}, u2.id)) from app.org_units u2 where u2.id = any(${orgUnits.path}))`,
     })
     .from(conversations)
     .leftJoin(
       me,
       and(eq(me.conversationId, conversations.id), eq(me.memberKind, "user"), eq(me.memberId, userId)),
     )
+    .leftJoin(orgUnits, eq(orgUnits.id, conversations.unitId))
     .where(
       and(
         eq(conversations.kind, "channel"),
@@ -191,34 +221,145 @@ export async function listChannels(tx: Tx, userId: string, id?: string): Promise
       ),
     )
     .orderBy(asc(conversations.name));
-  return rows.map((r) => ({
-    summary: {
-      id: r.c.id,
-      organizationId: r.c.organizationId,
-      kind: r.c.kind,
-      name: r.c.name,
-      slug: r.c.slug,
-      topic: r.c.topic,
-      visibility: r.c.visibility,
-      parentConversationId: r.c.parentConversationId,
-      rootMessageId: r.c.rootMessageId,
-      createdBy: r.c.createdBy,
-      archivedAt: isoOrNull(r.c.archivedAt),
-      createdAt: iso(r.c.createdAt),
-      lastSeq: r.lastSeq,
-      isMember: r.memberId !== null,
-      memberCount: r.memberCount,
-      latestMessageSeq: r.latestMessageSeq,
-      lastReadSeq: r.memberId !== null ? Number(r.lastReadSeq ?? 0) : 0,
-      lastMessageAt: isoOrNull(r.lastMessageAt),
-      isDefault: r.c.slug === GENERAL_SLUG,
-    },
-    facts: {
-      visibility: r.c.visibility,
-      archived: r.c.archivedAt !== null,
-      viewerRole: r.memberId !== null ? r.memberRole : null,
-    },
-  }));
+  return rows.map((r) => {
+    const unit: ChannelUnit | null =
+      r.unitId && r.unitName && r.unitKind && r.unitPath
+        ? {
+            id: r.unitId,
+            name: r.unitName,
+            kind: r.unitKind,
+            path: r.unitPath,
+            pathNames: r.unitPathNames ?? [r.unitName],
+          }
+        : null;
+    return {
+      summary: {
+        id: r.c.id,
+        organizationId: r.c.organizationId,
+        kind: r.c.kind,
+        name: r.c.name,
+        slug: r.c.slug,
+        topic: r.c.topic,
+        visibility: r.c.visibility,
+        parentConversationId: r.c.parentConversationId,
+        rootMessageId: r.c.rootMessageId,
+        createdBy: r.c.createdBy,
+        archivedAt: isoOrNull(r.c.archivedAt),
+        createdAt: iso(r.c.createdAt),
+        lastSeq: r.lastSeq,
+        isMember: r.memberId !== null,
+        memberCount: r.memberCount,
+        latestMessageSeq: r.latestMessageSeq,
+        lastReadSeq: r.memberId !== null ? Number(r.lastReadSeq ?? 0) : 0,
+        lastMessageAt: isoOrNull(r.lastMessageAt),
+        lastMessagePreview: r.lastMessagePreview ?? null,
+        isDefault: r.c.slug === GENERAL_SLUG,
+        unit,
+        notifyLevel: (r.notifyLevel ?? "default") as ConversationNotifyLevel,
+        muted: r.muted ?? false,
+        // Filled for the rows the resolver keeps (`withUnreadCounts`); a non-member has nothing unread.
+        unreadCount: 0,
+        mentionCount: 0,
+      },
+      facts: {
+        visibility: r.c.visibility,
+        archived: r.c.archivedAt !== null,
+        viewerRole: r.memberId !== null ? r.memberRole : null,
+        unitPath: unit?.path ?? [],
+      },
+    };
+  });
+}
+
+export interface UnreadCounts {
+  unreadCount: number;
+  mentionCount: number;
+}
+
+/**
+ * CHAT-09 (D-07, P-07): the badges of `userId`'s memberships among `conversationIds`. Unread = top-level, live
+ * messages from others after the member's read cursor, counted (never `streams.last_seq - last_read_seq`, Pitfall 1)
+ * and capped at `UNREAD_CAP` on `messages_conv_seq_idx`; mentions = the member's unread mention-like notifications
+ * (`MENTION_KINDS`) of live top-level messages there, on `notifications_unread_idx` (a mention inside a thread
+ * belongs to that thread). Conversations the member has not joined are absent (= nothing unread). Callers pass only
+ * ids the resolver already lets the member read (T-04-10-01).
+ */
+export async function unreadCountsFor(
+  tx: Tx,
+  userId: string,
+  conversationIds: string[],
+): Promise<Map<string, UnreadCounts>> {
+  const out = new Map<string, UnreadCounts>();
+  if (conversationIds.length === 0) return out;
+  const ids = sql.join(
+    conversationIds.map((id) => sql`${id}::uuid`),
+    sql`, `,
+  );
+  const kinds = sql.join(
+    MENTION_KINDS.map((k) => sql`${k}`),
+    sql`, `,
+  );
+  const res = await tx.execute(sql`
+    select cm.conversation_id as id, u.n as unread, x.n as mentions
+    from app.conversation_members cm
+    cross join lateral (
+      select count(*)::int as n from (
+        select 1 from app.messages m
+        where m.organization_id = cm.organization_id and m.conversation_id = cm.conversation_id
+          and m.thread_id is null and m.deleted_at is null and m.seq > cm.last_read_seq
+          and not (m.author_kind = 'user' and m.author_id = ${userId}::uuid)
+        limit ${UNREAD_CAP}
+      ) capped
+    ) u
+    cross join lateral (
+      select count(*)::int as n from (
+        select 1 from app.notifications n
+        join app.messages m on m.id = n.message_id and m.deleted_at is null
+        where n.organization_id = cm.organization_id and n.user_id = ${userId}::uuid
+          and n.conversation_id = cm.conversation_id and n.read_at is null
+          and n.thread_root_id is null and n.kind in (${kinds})
+        limit ${UNREAD_CAP}
+      ) capped
+    ) x
+    where cm.member_kind = 'user' and cm.member_id = ${userId}::uuid and cm.conversation_id in (${ids})`);
+  for (const r of res.rows as Array<{ id: string; unread: number; mentions: number }>) {
+    out.set(r.id, { unreadCount: Number(r.unread), mentionCount: Number(r.mentions) });
+  }
+  return out;
+}
+
+/** The channel summaries with the caller's badges (P-07); rows must already be filtered by the resolver. */
+export async function withUnreadCounts<T extends { id: string; isMember?: boolean }>(
+  tx: Tx,
+  userId: string,
+  rows: T[],
+): Promise<Array<T & UnreadCounts>> {
+  const counts = await unreadCountsFor(
+    tx,
+    userId,
+    rows.filter((r) => r.isMember !== false).map((r) => r.id),
+  );
+  return rows.map((r) => ({ ...r, ...(counts.get(r.id) ?? { unreadCount: 0, mentionCount: 0 }) }));
+}
+
+/** The unit path (root → self) of a channel's unit; [] for the organization (and every direct conversation). */
+export async function unitPathOf(tx: Tx, unitId: string | null): Promise<string[]> {
+  if (!unitId) return [];
+  const [u] = await tx.select({ path: orgUnits.path }).from(orgUnits).where(eq(orgUnits.id, unitId)).limit(1);
+  return u?.path ?? [];
+}
+
+/**
+ * Every unit on the paths (root → self) of `userId`'s unit memberships (member or lead): where the user may place
+ * a channel, and the departments the sidebar lists first.
+ */
+export async function memberUnitIdsOf(tx: Tx, userId: string): Promise<string[]> {
+  const rows = await tx
+    .select({ path: orgUnits.path })
+    .from(unitMemberships)
+    .innerJoin(orgUnits, eq(orgUnits.id, unitMemberships.unitId))
+    .where(eq(unitMemberships.userId, userId));
+  return [...new Set(rows.flatMap((r) => r.path))];
 }
 
 /** One channel row (archived included); 404 when it does not exist in the tenant. */
@@ -251,7 +392,10 @@ export async function channelFacts(
     visibility: channel.visibility,
     archived: channel.archivedAt !== null,
     viewerRole: membership?.role ?? null,
-    kind: channel.kind === "dm" ? "dm" : "channel",
+    // Group DMs are direct conversations too: fixed membership, never moderated (D-01, D-06; state dm).
+    kind: channel.kind === "dm" || channel.kind === "group" ? channel.kind : "channel",
+    // Unit-scoped rules apply to the unit's channels (CHAT-02, principle 6).
+    unitPath: channel.kind === "channel" ? await unitPathOf(tx, channel.unitId) : [],
   };
 }
 
@@ -409,7 +553,8 @@ export async function replyParticipantsFor(
       last: sql<string>`max(${messages.createdAt})`,
     })
     .from(messages)
-    .where(inArray(messages.threadId, rootIds))
+    // Deleted replies no longer count as participation (P-05).
+    .where(and(inArray(messages.threadId, rootIds), isNull(messages.deletedAt)))
     .groupBy(messages.threadId, messages.authorKind, messages.authorId);
   const sorted = rows.sort((a, b) => new Date(b.last).getTime() - new Date(a.last).getTime());
   for (const r of sorted) {
@@ -439,8 +584,36 @@ export function toMessage(row: MessageRow, dir: Directory, replyParticipants?: M
     clientKind: (row.clientKind as Message["clientKind"]) ?? null,
     createdAt: iso(row.createdAt),
     editedAt: isoOrNull(row.editedAt),
+    deletedAt: isoOrNull(row.deletedAt),
     ...(replyParticipants ? { replyParticipants } : {}),
   };
+}
+
+/** Adds `attachments` (ready files, upload order; one batched query) to message DTOs; tombstones get none (P-05). */
+export async function withAttachments(tx: Tx, list: Message[]): Promise<Message[]> {
+  const files = await attachmentsForMessages(
+    tx,
+    list.filter((m) => !m.deletedAt).map((m) => m.id),
+  );
+  return list.map((m) => ({ ...m, attachments: m.deletedAt ? [] : (files.get(m.id) ?? []) }));
+}
+
+/**
+ * Adds the viewer-specific fields (P-04) to REST snapshots: `reactions` with `mine` for `viewerId`, `pinned` and
+ * whether `viewerId` saved it, plus the message's `attachments` (CHAT-12), so every page, thread, pin and saved
+ * list shows its files. Tombstones carry no reactions, no pin and no attachments (P-05). Realtime payloads never go
+ * through here (they carry `attachments` themselves).
+ */
+export async function hydrateViewer(tx: Tx, list: Message[], viewerId: string): Promise<Message[]> {
+  const live = list.filter((m) => !m.deletedAt).map((m) => m.id);
+  const reactions = await reactionsFor(tx, live, viewerId);
+  const pinned = await pinnedFor(tx, live);
+  const saved = await savedFor(tx, live, viewerId);
+  return (await withAttachments(tx, list)).map((m) =>
+    m.deletedAt
+      ? { ...m, reactions: [], pinned: false, saved: false }
+      : { ...m, reactions: reactions.get(m.id) ?? [], pinned: pinned.has(m.id), saved: saved.has(m.id) },
+  );
 }
 
 /** Top-level messages of a channel, newest page first in the DB, returned oldest → newest. */
@@ -449,6 +622,7 @@ export async function listMessages(
   conversationId: string,
   dir: Directory,
   page: { before?: number | undefined; limit: number },
+  viewerId: string,
 ): Promise<{ messages: Message[]; nextBefore: number | null }> {
   const rows = await tx
     .select()
@@ -464,14 +638,94 @@ export async function listMessages(
     .limit(page.limit + 1);
   const hasMore = rows.length > page.limit;
   const pageRows = rows.slice(0, page.limit).reverse();
+  return {
+    messages: await topLevelDtos(tx, pageRows, dir, viewerId),
+    nextBefore: hasMore ? (pageRows[0]?.seq ?? null) : null,
+  };
+}
+
+/**
+ * DTOs for top-level rows (ascending), with reply participants on thread roots and the viewer's fields, exactly
+ * like `listMessages`.
+ */
+async function topLevelDtos(
+  tx: Tx,
+  rows: MessageRow[],
+  dir: Directory,
+  viewerId: string,
+): Promise<Message[]> {
   const participants = await replyParticipantsFor(
     tx,
-    pageRows.filter((r) => r.replyCount > 0).map((r) => r.id),
+    rows.filter((r) => r.replyCount > 0).map((r) => r.id),
     dir,
   );
+  return hydrateViewer(
+    tx,
+    rows.map((r) => toMessage(r, dir, r.replyCount > 0 ? (participants.get(r.id) ?? []) : [])),
+    viewerId,
+  );
+}
+
+/**
+ * A page centred on a top-level `anchor` (permalinks, CHAT-14): `floor(limit / 2)` older messages, the anchor,
+ * then the rest newer, ascending. Tombstones are included (P-05: the client decides what to show). The caller
+ * resolves a thread reply to its root before calling. `nextBefore`/`nextAfter` are null at either end.
+ */
+export async function listMessagesAround(
+  tx: Tx,
+  conversationId: string,
+  dir: Directory,
+  anchor: MessageRow,
+  limit: number,
+  viewerId: string,
+): Promise<{ messages: Message[]; nextBefore: number | null; nextAfter: number | null; anchorId: string }> {
+  const olderWanted = Math.floor(limit / 2);
+  const newerWanted = Math.max(0, limit - 1 - olderWanted);
+  const topLevel = and(eq(messages.conversationId, conversationId), isNull(messages.threadId));
+  const older = await tx
+    .select()
+    .from(messages)
+    .where(and(topLevel, lt(messages.seq, anchor.seq)))
+    .orderBy(desc(messages.seq))
+    .limit(olderWanted + 1);
+  const newer = await tx
+    .select()
+    .from(messages)
+    .where(and(topLevel, gt(messages.seq, anchor.seq)))
+    .orderBy(asc(messages.seq))
+    .limit(newerWanted + 1);
+  const olderRows = older.slice(0, olderWanted).reverse();
+  const newerRows = newer.slice(0, newerWanted);
+  const rows = [...olderRows, anchor, ...newerRows];
   return {
-    messages: pageRows.map((r) => toMessage(r, dir, r.replyCount > 0 ? (participants.get(r.id) ?? []) : [])),
-    nextBefore: hasMore ? (pageRows[0]?.seq ?? null) : null,
+    messages: await topLevelDtos(tx, rows, dir, viewerId),
+    nextBefore: older.length > olderWanted ? (rows[0]?.seq ?? null) : null,
+    nextAfter: newer.length > newerWanted ? (rows.at(-1)?.seq ?? null) : null,
+    anchorId: anchor.id,
+  };
+}
+
+/** Top-level messages with seq > `after`, ascending (forward paging of a detached window). */
+export async function listMessagesAfter(
+  tx: Tx,
+  conversationId: string,
+  dir: Directory,
+  after: number,
+  limit: number,
+  viewerId: string,
+): Promise<{ messages: Message[]; nextAfter: number | null }> {
+  const rows = await tx
+    .select()
+    .from(messages)
+    .where(
+      and(eq(messages.conversationId, conversationId), isNull(messages.threadId), gt(messages.seq, after)),
+    )
+    .orderBy(asc(messages.seq))
+    .limit(limit + 1);
+  const pageRows = rows.slice(0, limit);
+  return {
+    messages: await topLevelDtos(tx, pageRows, dir, viewerId),
+    nextAfter: rows.length > limit ? (pageRows.at(-1)?.seq ?? null) : null,
   };
 }
 
@@ -498,7 +752,7 @@ export async function loadThread(tx: Tx, messageId: string) {
  * Locks the conversation stream row and returns the seq the next `appendEvent` on it will get, so the
  * message row can carry the seq of its own `message.created` event.
  */
-async function lockNextSeq(tx: Tx, topic: string): Promise<number> {
+export async function lockNextSeq(tx: Tx, topic: string): Promise<number> {
   const ctx = tenantOf(tx);
   await tx.execute(sql`
     insert into app.streams (id, organization_id, last_seq) values (${topic}, ${ctx.organizationId}, 0)
@@ -518,6 +772,11 @@ export interface PostInput {
   sessionId?: string | null;
   /** Agents may answer a reply id; it is normalised to its root instead of being refused. */
   lenientThreadRoot?: boolean;
+  /**
+   * Files the author uploaded to this conversation (CHAT-12), linked in this transaction before `message.created`
+   * is appended, so the event carries them. Any id that is not linkable rolls the post back (409).
+   */
+  attachmentIds?: string[] | undefined;
 }
 
 export interface PostResult {
@@ -556,7 +815,8 @@ export async function postMessage(
       .limit(1);
     if (existing) {
       const root = existing.threadId ? await getMessage(tx, existing.threadId) : null;
-      return { row: existing, message: toMessage(existing, dir), created: false, root };
+      const [message] = await withAttachments(tx, [toMessage(existing, dir)]);
+      return { row: existing, message: message!, created: false, root };
     }
   }
 
@@ -590,7 +850,18 @@ export async function postMessage(
     })
     .returning();
   if (!row) throw new Error("message insert returned no row");
-  const message = toMessage(row, dir, root ? undefined : []);
+  let message = toMessage(row, dir, root ? undefined : []);
+  if (input.attachmentIds?.length) {
+    await linkAttachments(tx, {
+      conversationId: conv.id,
+      messageId: row.id,
+      uploaderId: author.id,
+      ids: input.attachmentIds,
+    });
+    const [hydrated] = await withAttachments(tx, [message]);
+    if (!hydrated) throw new Error("message DTO missing");
+    message = hydrated;
+  }
   const seq = await deps.realtime.appendEvent(tx, topic, EventTypes.messageCreated, { message });
   if (seq !== nextSeq) throw new Error(`stream seq drift on ${topic}: expected ${nextSeq}, got ${seq}`);
 

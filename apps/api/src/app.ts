@@ -20,20 +20,24 @@ import { type AuthzRegistry, installAuthz } from "./authz";
 import { decodeKey, type Env } from "./config/env";
 import type { ApiModule, App, Core } from "./core";
 import { createChatAgentBridge } from "./lib/chat-agent-bridge";
+import { createChatEvents } from "./lib/chat-events";
 import { HttpError } from "./lib/errors";
 import { RedisBus } from "./lib/redis";
-import { createEnvFileSecretStore } from "./lib/secret-store";
+import { createEnvFileSecretStore, type SecretStore } from "./lib/secret-store";
 import { createAgentModule } from "./modules/agent";
 import { createAgentChannelModule } from "./modules/agent-channel";
+import { createArtifactModule } from "./modules/artifact";
 import { createAuditService } from "./modules/audit";
 import { createBotCapabilitiesModule } from "./modules/bot-capabilities";
-import { createChatModule } from "./modules/chat";
+import { createChatModule, createConversationAccess } from "./modules/chat";
 import { createDeviceModule, type DeviceHub } from "./modules/device";
 import { createAuth, createIdentityModule, IdentityService } from "./modules/identity";
 import { createMcpModule } from "./modules/mcp";
+import { createNotificationModule } from "./modules/notification";
 import { AuthzDeniedError, createOrganizationModule, recordAuthzDenial } from "./modules/organization";
 import { createPluginsModule } from "./modules/plugins";
-import { createRealtimeModule, createRealtimeService } from "./modules/realtime";
+import { createOnlineSet, createRealtimeModule, createRealtimeService } from "./modules/realtime";
+import { createSearchModule } from "./modules/search";
 import { createSecretsModule, createSecretsService } from "./modules/secrets";
 import { createWorkSessionModule } from "./modules/work-session";
 
@@ -54,6 +58,8 @@ export async function buildApp(
   opts: {
     logger?: boolean /** Test hook: capture log lines. */;
     logStream?: { write(msg: string): void };
+    /** Test hook: resolve env/file SecretReferences from these values instead of process.env. */
+    secretStore?: SecretStore;
   } = {},
 ): Promise<BuiltApp> {
   const app = Fastify({
@@ -68,6 +74,8 @@ export async function buildApp(
               // The browser WebSocket carries its access JWT here (ocw.auth.<jwt>), T-02-08-04.
               'req.headers["sec-websocket-protocol"]',
               'res.headers["set-cookie"]',
+              // Attachment routes redirect to presigned URLs; a signed query string is a bearer credential.
+              "res.headers.location",
             ],
             ...(opts.logStream ? { stream: opts.logStream } : {}),
           },
@@ -92,12 +100,15 @@ export async function buildApp(
   if (!encryptionKey) throw new Error("OCW_ENCRYPTION_KEY is invalid");
 
   // ---------------------------------------------------------------- core services (explicit wiring)
-  const secretStore = createEnvFileSecretStore();
+  const secretStore = opts.secretStore ?? createEnvFileSecretStore();
   const audit = createAuditService();
   const realtime = createRealtimeService({ db, bus });
   const identity = new IdentityService(createAuth(env, authDb), authDb, env, realtime);
   const secrets = createSecretsService({ key: encryptionKey, audit });
   const chatAgent = createChatAgentBridge();
+  const chatEvents = createChatEvents();
+  // Organization-level online set (@here, CHAT-08): maintained by the realtime gateway, read by notifications.
+  const online = createOnlineSet(bus);
   const core: Core = {
     env,
     log: app.log,
@@ -109,6 +120,7 @@ export async function buildApp(
     identity,
     secrets,
     chatAgent,
+    chatEvents,
   };
 
   const allowedOrigins = new Set([
@@ -227,9 +239,12 @@ export async function buildApp(
       signInRatePerMinute: env.OCW_SIGNIN_RATE_LIMIT_PER_MINUTE,
     }),
     createOrganizationModule(core),
-    createRealtimeModule({ realtime, identity, allowedOrigins, bus }),
+    createRealtimeModule({ realtime, identity, allowedOrigins, bus, online }),
     createSecretsModule(),
     createChatModule(core), // B1
+    createNotificationModule(core, { online }), // Phase 4: mentions, DMs, threads, @channel/@here (CHAT-08)
+    createArtifactModule(core, { access: createConversationAccess(core) }), // Phase 4: attachments (ADR-0015)
+    createSearchModule(core), // Phase 4: full-text search (CHAT-11, D-04)
     createAgentModule(core), // B2
     createBotCapabilitiesModule(core), // Phase 3.1: capabilities, bot policy, governance
     createMcpModule(core), // Phase 3.1: MCP server registry (D-13)

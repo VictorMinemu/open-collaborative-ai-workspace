@@ -2,16 +2,32 @@
 
 import {
   type AgentTypingEvent,
+  type Attachment,
   ChannelSummary,
   EphemeralTypes,
   EventTypes,
+  type Message,
   type MessageCreatedEvent,
+  type MessageDeletedEvent,
+  type MessageUpdatedEvent,
+  type PinUpdatedEvent,
+  type ReactionUpdatedEvent,
   type ThreadUpdatedEvent,
   type UserTypingEvent,
 } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Archive, AtSign, Hash, Lock, LogOut, MoreHorizontal, UserPlus, Users } from "lucide-react";
+import {
+  Archive,
+  AtSign,
+  FolderInput,
+  Hash,
+  Lock,
+  LogOut,
+  MoreHorizontal,
+  UserPlus,
+  Users,
+} from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -30,31 +46,54 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { api, errorMessage, isApiError } from "@/lib/api";
+import { useAttachmentsConfig } from "@/lib/attachment-queries";
 import {
   applyMessage,
+  applyMessageDeleted,
+  applyMessageUpdate,
+  applyPinUpdate,
+  applyReactionUpdate,
   applyThreadUpdate,
   bumpLatest,
   chatKeys,
-  loadOlder,
+  markConversationUnread,
   markRead,
   postMessage,
+  setReadHold,
   useChannelAction,
   useChannelMembers,
   useChannels,
   useMessages,
+  usePins,
 } from "@/lib/chat-queries";
+import { parsePermalink, permalinkPath } from "@/lib/permalink";
 import { useMe } from "@/lib/queries";
 import { useRealtime, useTopic } from "@/lib/realtime";
 import { formatDate } from "@/lib/utils";
+import { DropZone } from "./attachments/drop-zone";
 import { ChannelIcon } from "./chat-sidebar";
-import { Composer, type ComposerApi, ComposerHint, type MentionCandidate } from "./composer";
+import {
+  attachmentLimitsHint,
+  Composer,
+  type ComposerApi,
+  ComposerHint,
+  type MentionCandidate,
+  type SpecialMention,
+} from "./composer";
+import { ConversationNotifyMenu } from "./conversation-notify-menu";
+import { JumpToLatest } from "./jump-to-latest";
 import { MentionContext } from "./markdown";
 import { MembersDialog } from "./members-dialog";
 import { MessageList, type PendingMessage } from "./message-list";
+import { MessageUnavailable } from "./message-unavailable";
+import { MoveChannelDialog } from "./move-channel-dialog";
+import { PinnedButton, PinnedSheet } from "./pinned-sheet";
 import { PrincipalAvatar } from "./principal-avatar";
 import { ThreadPanel } from "./thread-panel";
 import { TypingIndicator, useTypers } from "./typing";
 import { dirKey, useOrgDirectory } from "./use-chat-directory";
+import { useCentreOnce, usePermalinkWindow, useWindowPaging } from "./use-permalink-window";
+import { useReadCursor } from "./use-read-cursor";
 import { useStickToBottom } from "./use-stick-to-bottom";
 
 function newId(): string {
@@ -79,12 +118,20 @@ function MessagesSkeleton() {
   );
 }
 
+/** The broadcasts the channel composer offers (CHAT-08). */
+const SPECIAL_MENTIONS: SpecialMention[] = [
+  { handle: "channel", label: "@channel", description: "Notify everyone in this channel" },
+  { handle: "here", label: "@here", description: "Notify everyone online now" },
+];
+
 export function ChannelView({ channelId }: { channelId: string }) {
   const qc = useQueryClient();
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const threadId = searchParams.get("thread");
+  // A permalink (CHAT-14): `m` is the linked message, `thread` its root when it is a reply.
+  const { messageId: permalinkId } = parsePermalink(searchParams);
   const meQ = useMe({ enabled: false });
   const me = useMemo(
     () => ({ id: meQ.data?.user.id ?? "", name: meQ.data?.user.name ?? "You" }),
@@ -109,18 +156,34 @@ export function ChannelView({ channelId }: { channelId: string }) {
   const channel = fromList ?? single.data;
   const messages = useMessages(channelId, !!channel);
   const members = useChannelMembers(channel ? channelId : null);
+  const pins = usePins(channelId, !!channel && !revoked);
+  const [pinsOpen, setPinsOpen] = useState(false);
+  const pinnedBy = useMemo(
+    () => new Map((pins.data?.pins ?? []).map((p) => [p.message.id, p.pinnedBy.id ?? ""])),
+    [pins.data],
+  );
   const directory = useOrgDirectory();
   const { typers, touch, clear } = useTypers();
   const [pending, setPending] = useState<PendingMessage[]>([]);
   const [membersOpen, setMembersOpen] = useState(false);
-  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [moveOpen, setMoveOpen] = useState(false);
   const composerApi = useRef<ComposerApi | null>(null);
+  const filesConfig = useAttachmentsConfig();
   const join = useChannelAction("join");
   const leave = useChannelAction("leave");
   const archive = useChannelAction("archive");
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset per channel
   useEffect(() => setPending([]), [channelId]);
+
+  // ---------------------------------------------------------------- permalink window (CHAT-14)
+  const win = usePermalinkWindow({
+    convId: channelId,
+    tail: messages.data,
+    permalinkId,
+    linkedTop: threadId ?? permalinkId,
+  });
+  const { detached, shown } = win;
 
   // Mentionable: channel members (incl. bots even before the bots API exists) ∪ org directory.
   const candidates = useMemo<MentionCandidate[]>(() => {
@@ -200,13 +263,28 @@ export function ChannelView({ channelId }: { channelId: string }) {
         applyMessage(qc, message);
         if (message.authorKind !== "system") clear(message.authorKind, message.authorId);
         if (!message.threadId) {
-          bumpLatest(qc, channelId, message.seq, message.createdAt);
-          if (document.visibilityState === "visible") markRead(qc, channelId, message.seq);
+          bumpLatest(qc, channelId, message.seq, message.createdAt, message.body);
+          // Reading old history (a detached window) never reads the live end (CHAT-09).
+          if (!detached && document.visibilityState === "visible") markRead(qc, channelId, message.seq);
         }
         return;
       }
       case EventTypes.threadUpdated:
         applyThreadUpdate(qc, channelId, frame.data as ThreadUpdatedEvent);
+        return;
+      case EventTypes.messageUpdated:
+        // An edit never moves the read cursor nor makes the channel unread.
+        applyMessageUpdate(qc, (frame.data as MessageUpdatedEvent).message);
+        return;
+      case EventTypes.messageDeleted:
+        applyMessageDeleted(qc, frame.data as MessageDeletedEvent);
+        return;
+      case EventTypes.pinUpdated:
+        applyPinUpdate(qc, frame.data as PinUpdatedEvent);
+        return;
+      case EventTypes.reactionUpdated:
+        // Channel messages, thread replies and roots alike (the thread panel reads the same caches).
+        applyReactionUpdate(qc, frame.data as ReactionUpdatedEvent, me.id);
         return;
       case EventTypes.conversationMemberAdded:
       case EventTypes.conversationMemberRemoved:
@@ -243,21 +321,62 @@ export function ChannelView({ channelId }: { channelId: string }) {
     [realtime, topic],
   );
 
-  // ---------------------------------------------------------------- read cursor
-  const lastSeq = messages.data?.messages.at(-1)?.seq ?? 0;
-  useEffect(() => {
-    if (!lastSeq) return;
-    const mark = () => document.visibilityState === "visible" && markRead(qc, channelId, lastSeq);
-    mark();
-    document.addEventListener("visibilitychange", mark);
-    return () => document.removeEventListener("visibilitychange", mark);
-  }, [qc, channelId, lastSeq]);
-
   // ---------------------------------------------------------------- sending
   const channelPending = pending.filter((p) => !p.threadRootId);
   const scroll = useStickToBottom(
-    `${messages.data?.messages.length ?? 0}:${channelPending.length}:${messages.data?.messages.at(-1)?.replyCount ?? 0}`,
+    `${detached ? "window" : "tail"}:${shown?.messages.length ?? 0}:${channelPending.length}:${shown?.messages.at(-1)?.replyCount ?? 0}`,
     channelId,
+    detached,
+  );
+
+  // ---------------------------------------------------------------- read cursor (CHAT-09)
+  const lastSeq = messages.data?.messages.at(-1)?.seq ?? 0;
+  const reading = useReadCursor({
+    convId: channelId,
+    tailLastSeq: fromList?.isMember ? lastSeq : 0,
+    windowLastSeq: detached ? (shown?.messages.at(-1)?.seq ?? null) : null,
+    scrollRef: scroll.ref,
+  });
+  const markUnreadFrom = useCallback(
+    (m: Message) =>
+      void markConversationUnread(qc, channelId, m.id).catch((err) => toast.error(errorMessage(err))),
+    [qc, channelId],
+  );
+
+  // A deleted target hidden by P-05 lands on its nearest visible neighbour, without a highlight.
+  const [fallback, setFallback] = useState<{ link: string; target: string | null } | null>(null);
+  const onAnchorHidden = useCallback(
+    (neighbourId: string | null) => {
+      if (!permalinkId) return;
+      toast("This message was deleted");
+      setFallback({ link: permalinkId, target: neighbourId });
+    },
+    [permalinkId],
+  );
+  const fallbackTarget = fallback && fallback.link === permalinkId ? fallback.target : null;
+  useCentreOnce(scroll, permalinkId, fallbackTarget ?? win.centreTarget);
+
+  // A reply linked without its root (`?m=<reply>`): open its thread like a full thread link would.
+  const linkRoot = win.threadRootId;
+  useEffect(() => {
+    if (permalinkId && linkRoot && !threadId) {
+      router.replace(`${pathname}?thread=${linkRoot}&m=${permalinkId}`, { scroll: false });
+    }
+  }, [permalinkId, linkRoot, threadId, router, pathname]);
+
+  const { release } = win;
+  const jumpToLatest = useCallback(() => {
+    release();
+    scroll.scrollToBottom();
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete("m");
+    const query = params.toString();
+    router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
+  }, [release, scroll, searchParams, router, pathname]);
+
+  const linkFor = useCallback(
+    (m: Message) => permalinkPath({ id: channelId, kind: "channel" }, m.id, m.threadId),
+    [channelId],
   );
 
   const deliver = useCallback(
@@ -267,10 +386,15 @@ export function ChannelView({ channelId }: { channelId: string }) {
           body: p.body,
           clientMessageId: p.clientMessageId,
           ...(p.threadRootId ? { threadRootId: p.threadRootId } : {}),
+          ...(p.attachments?.length ? { attachmentIds: p.attachments.map((a) => a.id) } : {}),
         });
         applyMessage(qc, msg);
         setPending((prev) => prev.filter((x) => x.clientMessageId !== p.clientMessageId));
-        if (!msg.threadId) markRead(qc, channelId, msg.seq);
+        if (!msg.threadId) {
+          // Sending ends a "marked unread" hold: the member is reading here (CHAT-09).
+          setReadHold(channelId, null);
+          markRead(qc, channelId, msg.seq);
+        }
       } catch (err) {
         setPending((prev) =>
           prev.map((x) => (x.clientMessageId === p.clientMessageId ? { ...x, failed: true } : x)),
@@ -282,19 +406,24 @@ export function ChannelView({ channelId }: { channelId: string }) {
   );
 
   const send = useCallback(
-    (body: string, threadRootId: string | null = null) => {
+    (body: string, threadRootId: string | null = null, attachments: Attachment[] = []) => {
       const p: PendingMessage = {
         clientMessageId: newId(),
         body,
         threadRootId,
         failed: false,
         createdAt: new Date().toISOString(),
+        ...(attachments.length ? { attachments } : {}),
       };
-      if (!threadRootId) scroll.scrollToBottom();
+      if (!threadRootId) {
+        // Posting from old history returns to the live tail, where the message appears.
+        if (detached) jumpToLatest();
+        scroll.scrollToBottom();
+      }
       setPending((prev) => [...prev, p]);
       void deliver(p);
     },
-    [deliver, scroll],
+    [deliver, scroll, detached, jumpToLatest],
   );
 
   const retry = useCallback(
@@ -314,22 +443,14 @@ export function ChannelView({ channelId }: { channelId: string }) {
   );
   const closeThread = useCallback(() => router.replace(pathname, { scroll: false }), [router, pathname]);
 
-  // ---------------------------------------------------------------- older pages
-  const olderBusy = useRef(false);
-  const onScroll = () => {
-    scroll.onScroll();
-    const el = scroll.ref.current;
-    if (!el || el.scrollTop > 240 || olderBusy.current || !messages.data?.nextBefore) return;
-    olderBusy.current = true;
-    setLoadingOlder(true);
-    scroll.preserve();
-    loadOlder(qc, channelId)
-      .catch(() => toast.error("Couldn't load older messages"))
-      .finally(() => {
-        olderBusy.current = false;
-        setLoadingOlder(false);
-      });
-  };
+  // ---------------------------------------------------------------- older / newer pages
+  const { onScroll, loadingOlder, loadingNewer } = useWindowPaging({
+    convId: channelId,
+    scroll,
+    shown,
+    windowId: win.windowId,
+    detached,
+  });
 
   // ---------------------------------------------------------------- render
   if (revoked) {
@@ -359,6 +480,10 @@ export function ChannelView({ channelId }: { channelId: string }) {
   }
 
   if (!channel) {
+    // A permalink never says whether the conversation exists (T-04-03-01).
+    if (permalinkId && (isApiError(single.error, 404) || single.isSuccess || channels.isSuccess)) {
+      return <MessageUnavailable />;
+    }
     const missing = isApiError(single.error, 404) || single.isSuccess || channels.isSuccess;
     return (
       <div className="flex min-w-0 flex-1 flex-col">
@@ -378,15 +503,26 @@ export function ChannelView({ channelId }: { channelId: string }) {
     );
   }
 
+  if (win.unavailable) return <MessageUnavailable />;
+
   const memberList = members.data?.members ?? [];
   const bots = memberList.filter((m) => m.kind === "agent");
   const canPost = channel.isMember && !channel.archivedAt;
+  // Files go to the composer, so the pane takes drops only where it shows (P-10: none without storage).
+  const canDrop = canPost && filesConfig.data?.enabled === true;
   // The server decides per channel (admin, or the channel owner): the menu only mirrors viewerCan.
   const canArchive = channel.viewerCan?.includes("channel.archive") ?? false;
+  // CHAT-02: the owner or an admin regroups the channel under another unit (#general stays organization-wide).
+  const canMove =
+    (channel.viewerCan?.includes("channel.update") ?? false) && !channel.isDefault && !channel.archivedAt;
+  // Admins moderate channels they can read (D-01); the server re-decides every delete.
+  const canModerate = channel.viewerCan?.includes("message.delete_any") ?? false;
+  // @channel / @here only where the server allows them (`channel.mention_all`, deny-able by rules).
+  const specialMentions = channel.viewerCan?.includes("channel.mention_all") ? SPECIAL_MENTIONS : undefined;
   const channelTypers = typers;
 
   const intro =
-    messages.data && messages.data.nextBefore === null ? (
+    shown && shown.nextBefore === null ? (
       <div className="px-4 pt-10 pb-4 sm:px-5" data-testid="channel-intro">
         <div className="flex size-12 items-center justify-center rounded-xl bg-brand-soft text-brand-soft-foreground">
           <ChannelIcon channel={channel} className="size-6" />
@@ -422,6 +558,14 @@ export function ChannelView({ channelId }: { channelId: string }) {
             actions={
               <>
                 <PresenceStack people={present} />
+                <PinnedButton count={pins.data?.pins.length ?? 0} onClick={() => setPinsOpen(true)} />
+                {channel.isMember ? (
+                  <ConversationNotifyMenu
+                    conversation={{ id: channel.id, kind: "channel" }}
+                    lastSeq={lastSeq}
+                    latestMessageId={messages.data?.messages.at(-1)?.id ?? null}
+                  />
+                ) : null}
                 <button
                   type="button"
                   onClick={() => setMembersOpen(true)}
@@ -459,6 +603,11 @@ export function ChannelView({ channelId }: { channelId: string }) {
                     <DropdownMenuItem onClick={() => setMembersOpen(true)}>
                       <Users /> Members and bots
                     </DropdownMenuItem>
+                    {canMove ? (
+                      <DropdownMenuItem data-testid="move-channel" onClick={() => setMoveOpen(true)}>
+                        <FolderInput /> Move to…
+                      </DropdownMenuItem>
+                    ) : null}
                     {channel.isMember && !channel.isDefault ? (
                       <DropdownMenuItem
                         onClick={() => {
@@ -504,87 +653,119 @@ export function ChannelView({ channelId }: { channelId: string }) {
             }
           />
 
-          <div
-            ref={scroll.ref}
-            onScroll={onScroll}
-            className="scrollbar-thin flex min-h-0 flex-1 flex-col overflow-y-auto"
-            data-testid="channel-scroll"
+          <DropZone
+            conversationLabel={`#${channel.name}`}
+            enabled={canDrop}
+            hint={attachmentLimitsHint(filesConfig.data)}
+            onFiles={(files) => composerApi.current?.addFiles(files)}
           >
-            {messages.isPending ? (
-              <MessagesSkeleton />
-            ) : messages.isError ? (
-              <EmptyState
-                icon={Hash}
-                title="Couldn't load messages"
-                description={errorMessage(messages.error)}
-              >
-                <Button variant="outline" onClick={() => void messages.refetch()}>
-                  Try again
-                </Button>
-              </EmptyState>
-            ) : (
-              <div className="mt-auto">
-                {loadingOlder ? (
-                  <div className="flex justify-center py-3 text-muted-foreground">
-                    <Spinner />
-                  </div>
-                ) : null}
-                <MessageList
-                  messages={messages.data?.messages ?? []}
-                  pending={channelPending}
-                  me={me}
-                  typers={channelTypers}
-                  onOpenThread={openThread}
-                  onRetry={retry}
-                  highlightId={threadId}
-                  intro={intro}
-                />
-              </div>
-            )}
-          </div>
-
-          <TypingIndicator typers={channelTypers} inThreadHint />
-          <div className="shrink-0 px-4 pb-[max(env(safe-area-inset-bottom),12px)] sm:px-5">
-            {channel.archivedAt ? (
-              <div className="flex items-center gap-3 rounded-xl border bg-muted/40 px-4 py-3 text-muted-foreground text-sm">
-                <Archive className="size-4 shrink-0" />
-                <span>
-                  #{channel.name} was archived on {formatDate(channel.archivedAt)}. Its history stays
-                  readable.
-                </span>
-              </div>
-            ) : !channel.isMember ? (
+            <div className="relative flex min-h-0 flex-1 flex-col">
               <div
-                className="flex flex-col items-center gap-3 rounded-xl border bg-muted/40 px-4 py-4 text-center sm:flex-row sm:text-left"
-                data-testid="join-banner"
+                ref={scroll.ref}
+                onScroll={onScroll}
+                className="scrollbar-thin flex min-h-0 flex-1 flex-col overflow-y-auto"
+                data-testid="channel-scroll"
+                data-detached={detached ? "true" : undefined}
               >
-                <div className="min-w-0 flex-1">
-                  <p className="font-medium text-sm">You're previewing #{channel.name}</p>
-                  <p className="text-muted-foreground text-xs">
-                    Join to post, reply in threads and get unread updates.
-                  </p>
-                </div>
-                <Button
-                  data-testid="join-channel"
-                  disabled={join.isPending}
-                  onClick={() => join.mutate(channel.id, { onError: (e) => toast.error(errorMessage(e)) })}
-                >
-                  {join.isPending ? <Spinner /> : null}
-                  Join channel
-                </Button>
+                {messages.isPending || win.loading ? (
+                  <MessagesSkeleton />
+                ) : messages.isError || win.error ? (
+                  <EmptyState
+                    icon={Hash}
+                    title="Couldn't load messages"
+                    description={errorMessage(messages.error ?? win.error)}
+                  >
+                    <Button
+                      variant="outline"
+                      onClick={() => (messages.isError ? void messages.refetch() : win.retry())}
+                    >
+                      Try again
+                    </Button>
+                  </EmptyState>
+                ) : (
+                  <div className="mt-auto">
+                    {loadingOlder ? (
+                      <div className="flex justify-center py-3 text-muted-foreground">
+                        <Spinner />
+                      </div>
+                    ) : null}
+                    <MessageList
+                      messages={shown?.messages ?? []}
+                      pending={detached ? [] : channelPending}
+                      me={me}
+                      typers={channelTypers}
+                      onOpenThread={openThread}
+                      onRetry={retry}
+                      highlightId={threadId}
+                      anchorId={threadId ? null : permalinkId}
+                      linkFor={linkFor}
+                      onAnchorHidden={onAnchorHidden}
+                      intro={intro}
+                      readOnly={!!channel.archivedAt}
+                      canDeleteAny={canModerate}
+                      canReact={canPost}
+                      canUnpinAny={canArchive}
+                      pinnedBy={pinnedBy}
+                      dividerAfterSeq={reading.dividerAfterSeq}
+                      onMarkUnread={channel.isMember ? markUnreadFrom : undefined}
+                    />
+                    {loadingNewer ? (
+                      <div className="flex justify-center py-3 text-muted-foreground">
+                        <Spinner />
+                      </div>
+                    ) : null}
+                  </div>
+                )}
               </div>
-            ) : (
-              <Composer
-                placeholder={`Message #${channel.name}`}
-                candidates={candidates}
-                onSend={(body) => send(body)}
-                onTyping={() => sendTyping(null)}
-                apiRef={composerApi}
-                autoFocus
-                footer={<ComposerHint />}
-              />
-            )}
-          </div>
+              {detached ? <JumpToLatest newCount={win.newCount} onJump={jumpToLatest} /> : null}
+            </div>
+
+            <TypingIndicator typers={channelTypers} inThreadHint />
+            <div className="shrink-0 px-4 pb-[max(env(safe-area-inset-bottom),12px)] sm:px-5">
+              {channel.archivedAt ? (
+                <div className="flex items-center gap-3 rounded-xl border bg-muted/40 px-4 py-3 text-muted-foreground text-sm">
+                  <Archive className="size-4 shrink-0" />
+                  <span>
+                    #{channel.name} was archived on {formatDate(channel.archivedAt)}. Its history stays
+                    readable.
+                  </span>
+                </div>
+              ) : !channel.isMember ? (
+                <div
+                  className="flex flex-col items-center gap-3 rounded-xl border bg-muted/40 px-4 py-4 text-center sm:flex-row sm:text-left"
+                  data-testid="join-banner"
+                >
+                  <div className="min-w-0 flex-1">
+                    <p className="font-medium text-sm">You're previewing #{channel.name}</p>
+                    <p className="text-muted-foreground text-xs">
+                      Join to post, reply in threads and get unread updates.
+                    </p>
+                  </div>
+                  <Button
+                    data-testid="join-channel"
+                    disabled={join.isPending}
+                    onClick={() => join.mutate(channel.id, { onError: (e) => toast.error(errorMessage(e)) })}
+                  >
+                    {join.isPending ? <Spinner /> : null}
+                    Join channel
+                  </Button>
+                </div>
+              ) : (
+                <Composer
+                  placeholder={`Message #${channel.name}`}
+                  candidates={candidates}
+                  conversationId={channel.id}
+                  onSend={(body, _ids, files) => send(body, null, files)}
+                  onTyping={() => sendTyping(null)}
+                  apiRef={composerApi}
+                  autoFocus
+                  footer={<ComposerHint />}
+                  specialMentions={specialMentions}
+                  memberCount={memberList.length || channel.memberCount}
+                />
+              )}
+            </div>
+          </DropZone>
         </div>
 
         {threadId ? (
@@ -598,11 +779,23 @@ export function ChannelView({ channelId }: { channelId: string }) {
             pending={pending}
             canPost={canPost}
             onClose={closeThread}
-            onSend={(body, rootId) => send(body, rootId)}
+            onSend={(body, rootId, files) => send(body, rootId, files)}
             onRetry={retry}
             onTyping={(rootId) => sendTyping(rootId)}
+            highlightId={permalinkId}
+            canUnpinAny={canArchive}
+            pinnedBy={pinnedBy}
           />
         ) : null}
+
+        <PinnedSheet
+          conversation={{ id: channel.id, kind: "channel", name: channel.name }}
+          open={pinsOpen}
+          onOpenChange={setPinsOpen}
+          canModerate={canArchive}
+        />
+
+        {canMove ? <MoveChannelDialog channel={channel} open={moveOpen} onOpenChange={setMoveOpen} /> : null}
 
         <MembersDialog
           channel={channel}

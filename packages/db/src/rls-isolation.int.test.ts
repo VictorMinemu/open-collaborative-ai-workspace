@@ -187,6 +187,38 @@ async function seedOrg(c: pg.Client, org: string) {
     [org, device, user],
   );
   await q("insert into app.work_zone_policies (organization_id) values ($1)", [org]);
+
+  // Phase 4 (chat workspace): one row per new table, on the seeded channel message.
+  await q(
+    "insert into app.message_versions (organization_id, message_id, version, kind, body, edited_by_kind, edited_by) values ($1, $2, 1, 'edit', 'hi there', 'user', $3)",
+    [org, msg, user],
+  );
+  await q(
+    "insert into app.message_reactions (organization_id, message_id, conversation_id, emoji, member_kind, member_id) values ($1, $2, $3, '👍', 'user', $4)",
+    [org, msg, conv, user],
+  );
+  await q(
+    "insert into app.message_pins (organization_id, conversation_id, message_id, pinned_by) values ($1, $2, $3, $4)",
+    [org, conv, msg, user],
+  );
+  await q("insert into app.message_saves (organization_id, user_id, message_id) values ($1, $2, $3)", [
+    org,
+    user,
+    msg,
+  ]);
+  await q(
+    "insert into app.notifications (organization_id, user_id, kind, conversation_id, message_id, actor_kind, actor_id) values ($1, $2, 'mention', $3, $4, 'user', $2)",
+    [org, user, conv, msg],
+  );
+  await q("insert into app.notification_prefs (organization_id, user_id) values ($1, $2)", [org, user]);
+  await q(
+    "insert into app.thread_reads (organization_id, user_id, root_message_id, last_read_seq) values ($1, $2, $3, 1)",
+    [org, user, msg],
+  );
+  await q(
+    "insert into app.attachments (organization_id, conversation_id, uploader_id, filename, declared_type, size_bytes) values ($1, $2, $3, 'plan.pdf', 'application/pdf', 1234)",
+    [org, conv, user],
+  );
 }
 
 async function inTenant<T>(org: string, fn: () => Promise<T>): Promise<T> {
@@ -354,20 +386,122 @@ describe("tenant isolation (RLS)", () => {
         expect(r, `${tbl}: ${stmt}`).toBe(0);
       }
 
-      // INSERT of a row belonging to A while in B's context → RLS violation.
+      // INSERT of a row belonging to A while in B's context → RLS violation. Generated columns (messages.
+      // search_tsv) can never be written explicitly, so the copy lists the writable columns only.
       const row = await migrator.query(
         `select row_to_json(t) as j from ${tbl} t where organization_id = $1 limit 1`,
         [A],
       );
+      const cols = (
+        await migrator.query(
+          `select a.attname from pg_attribute a where a.attrelid = $1::regclass and a.attnum > 0
+             and not a.attisdropped and a.attgenerated = '' order by a.attnum`,
+          [tbl],
+        )
+      ).rows.map((r) => `"${r.attname}"`);
       await expect(
         inTenant(B, () =>
-          app.query(`insert into ${tbl} select * from json_populate_record(null::${tbl}, $1::json)`, [
-            JSON.stringify(row.rows[0].j),
-          ]),
+          app.query(
+            `insert into ${tbl} (${cols.join(", ")}) select ${cols.join(", ")} from json_populate_record(null::${tbl}, $1::json)`,
+            [JSON.stringify(row.rows[0].j)],
+          ),
         ),
         `${tbl} cross-tenant insert`,
       ).rejects.toThrow(/row-level security/);
     }
+  });
+
+  it("Phase 4: the eight chat workspace tables are org-scoped, forced and seeded", async () => {
+    const scoped = new Map((await orgScopedTables()).map((t) => [t.tbl, t]));
+    for (const tbl of [
+      "app.message_versions",
+      "app.message_reactions",
+      "app.message_pins",
+      "app.message_saves",
+      "app.notifications",
+      "app.notification_prefs",
+      "app.thread_reads",
+      "app.attachments",
+    ]) {
+      expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true });
+      const own = await inTenant(A, () => app.query(`select count(*)::int as n from ${tbl}`));
+      expect(own.rows[0].n, `${tbl} seeded`).toBeGreaterThan(0);
+      const cross = await inTenant(B, () =>
+        app.query(`select count(*)::int as n from ${tbl} where organization_id = $1`, [A]),
+      );
+      expect(cross.rows[0].n, `${tbl} cross-tenant`).toBe(0);
+    }
+  });
+
+  it("Phase 4: message versions are append-only for the app role", async () => {
+    const msg = (
+      await migrator.query("select message_id from app.message_versions where organization_id = $1", [A])
+    ).rows[0].message_id;
+    // Insert succeeds in the tenant…
+    await inTenant(A, async () => {
+      await app.query(
+        "insert into app.message_versions (organization_id, message_id, version, kind, body, edited_by_kind) values ($1, $2, 2, 'delete', 'x', 'system')",
+        [A, msg],
+      );
+    });
+    // …but history can never be rewritten or erased, even in the owning tenant.
+    for (const stmt of [
+      "update app.message_versions set body = 'rewritten'",
+      "delete from app.message_versions",
+      "truncate app.message_versions",
+    ]) {
+      await expect(
+        inTenant(A, () => app.query(stmt)),
+        stmt,
+      ).rejects.toThrow(/permission denied/);
+    }
+    // The audit and stream logs stay append-only too.
+    await expect(inTenant(A, () => app.query("delete from app.audit_events"))).rejects.toThrow(
+      /permission denied/,
+    );
+  });
+
+  it("Phase 4: accent-insensitive Spanish search, a stored tsvector and the search indexes", async () => {
+    const match = await migrator.query(
+      "select to_tsvector('app.ocw_es', 'migración') @@ websearch_to_tsquery('app.ocw_es', 'migracion') as ok",
+    );
+    expect(match.rows[0].ok).toBe(true);
+    const english = await migrator.query(
+      "select to_tsvector('app.ocw_en', 'Deploying migrations') @@ websearch_to_tsquery('app.ocw_en', 'deploy migration') as ok",
+    );
+    expect(english.rows[0].ok).toBe(true);
+    const tsv = await inTenant(A, () =>
+      app.query("select search_tsv::text as tsv from app.messages where body = 'hi' limit 1"),
+    );
+    expect(tsv.rows[0].tsv).toContain("hi");
+    // Written by the app role on insert (generated column), searchable within the tenant.
+    const found = await inTenant(A, async () => {
+      const conv = (await app.query("select id from app.conversations where kind = 'channel' limit 1"))
+        .rows[0].id;
+      await app.query(
+        "insert into app.messages (organization_id, conversation_id, seq, author_kind, body) values ($1, $2, 99, 'system', 'Revisión de la autenticación')",
+        [A, conv],
+      );
+      return app.query(
+        "select count(*)::int as n from app.messages where search_tsv @@ (websearch_to_tsquery('app.ocw_simple', $1) || websearch_to_tsquery('app.ocw_es', $1) || websearch_to_tsquery('app.ocw_en', $1))",
+        ["autenticacion"],
+      );
+    });
+    expect(found.rows[0].n).toBe(1);
+    const idx = await migrator.query(
+      "select indexname from pg_indexes where schemaname = 'app' and indexname = any($1) order by 1",
+      [["messages_search_gin", "org_members_name_trgm", "conversations_name_trgm", "agents_name_trgm"]],
+    );
+    expect(idx.rows.map((r) => r.indexname)).toEqual([
+      "agents_name_trgm",
+      "conversations_name_trgm",
+      "messages_search_gin",
+      "org_members_name_trgm",
+    ]);
+    const group = await migrator.query(
+      "select indexdef from pg_indexes where schemaname = 'app' and indexname = 'conversations_org_group_key_uq'",
+    );
+    expect(group.rows[0].indexdef).toMatch(/WHERE \(kind = 'group'::text\)/);
   });
 
   it("app role is denied on schema auth", async () => {

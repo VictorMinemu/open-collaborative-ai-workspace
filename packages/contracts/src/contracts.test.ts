@@ -19,6 +19,7 @@ import {
   DeviceToServerFrame,
   DmList,
   DmSummary,
+  EventTypes,
   extractMentionHandles,
   IanaTimeZone,
   Invitation,
@@ -546,5 +547,47 @@ describe("cell runtime pause (stability 2026-10-06)", () => {
       since: "2026-10-06T10:00:00.000Z",
     });
     expect(AgentCellStatus.safeParse(status).success).toBe(false);
+  });
+});
+
+describe("Phase 4 realtime event types (04-01)", () => {
+  it("keeps every 03.x event type and adds the nine chat workspace ones", () => {
+    expect(EventTypes).toMatchObject({
+      messageCreated: "message.created",
+      messageUpdated: "message.updated",
+      threadUpdated: "thread.updated",
+      conversationCreated: "conversation.created",
+      conversationUpdated: "conversation.updated",
+      conversationMemberAdded: "conversation.member_added",
+      conversationMemberRemoved: "conversation.member_removed",
+      memberJoined: "member.joined",
+      memberUpdated: "member.updated",
+      unitsUpdated: "units.updated",
+      permissionRulesUpdated: "permission_rules.updated",
+      agentCreated: "agent.created",
+      agentUpdated: "agent.updated",
+      agentDeleted: "agent.deleted",
+      modelProvidersUpdated: "model_providers.updated",
+      deviceUpdated: "device.updated",
+      projectUpdated: "project.updated",
+      workSessionUpdated: "work_session.updated",
+      workSessionEvent: "work_session.event",
+      workSessionChanges: "work_session.changes",
+      promptUpdated: "prompt.updated",
+      approvalUpdated: "approval.updated",
+    });
+    expect(EventTypes).toMatchObject({
+      messageDeleted: "message.deleted",
+      reactionUpdated: "reaction.updated",
+      pinUpdated: "pin.updated",
+      saveUpdated: "save.updated",
+      notificationCreated: "notification.created",
+      notificationRead: "notification.read",
+      conversationRead: "conversation.read",
+      threadRead: "thread.read",
+      notificationPrefsUpdated: "notification_prefs.updated",
+    });
+    const values = Object.values(EventTypes);
+    expect(new Set(values).size).toBe(values.length);
   });
 });

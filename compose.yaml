@@ -1,7 +1,10 @@
 # Open Collaborative AI Workspace — self-hosted stack (minimal profile).
 #   pnpm setup:env          # once: writes .env with random secrets
 #   docker compose up -d --build
-# Web: http://localhost:3000   API: http://localhost:4000 (/docs for OpenAPI)
+# Web: http://localhost:3000   API: http://localhost:4000 (/docs for OpenAPI)   Attachments (S3): http://localhost:3900
+# Upgrading an install whose .env predates attachments: `pnpm setup:env --add-missing` appends the Garage/S3 keys
+# (it never rotates existing values), then `docker compose up -d`. Without them Garage does not start and the API
+# reports attachments as disabled; nothing else is affected (infra/garage/README.md).
 x-db-urls: &db-urls
   DATABASE_URL: postgres://ocw_app:${OCW_DB_APP_PASSWORD:?Set OCW_DB_APP_PASSWORD in .env (run pnpm setup:env)}@postgres:5432/ocw
   AUTH_DATABASE_URL: postgres://ocw_auth:${OCW_DB_AUTH_PASSWORD:?Set OCW_DB_AUTH_PASSWORD in .env (run pnpm setup:env)}@postgres:5432/ocw
@@ -36,6 +39,28 @@ services:
       interval: 3s
       timeout: 3s
       retries: 20
+
+  # S3-compatible object storage for chat attachments (Garage, ADR-0015). One process, no init container:
+  # `--single-node --default-bucket` creates the layout, the access key and the private bucket on first start from
+  # the GARAGE_DEFAULT_* values below (the same key pair the API uses). No `:?` guards here (P-10): compose
+  # interpolates every service, so a guard would break `docker compose up postgres redis` for an .env without these
+  # keys. No healthcheck: the image has no shell or probe tool; the API retries until the bucket answers. The S3 port
+  # is published on loopback only, for presigned browser URLs (a reverse proxy fronts it from Phase 7).
+  garage:
+    image: dxflrs/garage:v2.4.1
+    restart: unless-stopped
+    command: ["/garage", "server", "--single-node", "--default-bucket"]
+    environment:
+      GARAGE_RPC_SECRET: ${GARAGE_RPC_SECRET:-}
+      GARAGE_DEFAULT_ACCESS_KEY: ${OCW_S3_ACCESS_KEY_ID:-}
+      GARAGE_DEFAULT_SECRET_KEY: ${OCW_S3_SECRET_ACCESS_KEY:-}
+      GARAGE_DEFAULT_BUCKET: ${OCW_S3_BUCKET:-ocw-attachments}
+    volumes:
+      - ./infra/garage/garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
+    ports:
+      - "127.0.0.1:${OCW_S3_PORT:-3900}:3900"
 
   # One-shot: bootstrap roles (superuser), run migrations + FORCE RLS step (ocw_migrator), then exit 0.
   migrate:
@@ -88,6 +113,15 @@ services:
       # Optional password reset e-mails; without SMTP admins issue reset links.
       OCW_SMTP_URL: ${OCW_SMTP_URL:-}
       OCW_MAIL_FROM: ${OCW_MAIL_FROM:-}
+      # Chat attachments (ADR-0015): server calls go to garage on the compose network; browser URLs are signed for
+      # OCW_S3_PUBLIC_URL. An empty key id or secret disables attachments instead of failing the boot.
+      OCW_S3_ENDPOINT: http://garage:3900
+      OCW_S3_PUBLIC_URL: ${OCW_S3_PUBLIC_URL:-http://localhost:3900}
+      OCW_S3_BUCKET: ${OCW_S3_BUCKET:-ocw-attachments}
+      OCW_S3_REGION: ${OCW_S3_REGION:-garage}
+      OCW_S3_ACCESS_KEY_ID: ${OCW_S3_ACCESS_KEY_ID:-}
+      OCW_S3_SECRET_ACCESS_KEY: ${OCW_S3_SECRET_ACCESS_KEY:-}
+      OCW_ATTACHMENT_MAX_BYTES: ${OCW_ATTACHMENT_MAX_BYTES:-26214400}
     ports:
       - "${OCW_API_PORT:-4000}:4000"
     depends_on:
@@ -95,6 +129,8 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+      garage:
+        condition: service_started
 
   web:
     build:
@@ -201,3 +237,5 @@ secrets:
 volumes:
   pgdata:
   openclaw-state:
+  garage-meta:
+  garage-data:

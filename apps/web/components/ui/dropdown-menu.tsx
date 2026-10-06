@@ -1,7 +1,7 @@
 "use client";
 
 import { Menu } from "@base-ui/react/menu";
-import { Check } from "lucide-react";
+import { Check, ChevronRight } from "lucide-react";
 import type { ComponentProps } from "react";
 import { cn } from "@/lib/utils";
 
@@ -9,6 +9,7 @@ export const DropdownMenu = Menu.Root;
 export const DropdownMenuTrigger = Menu.Trigger;
 export const DropdownMenuGroup = Menu.Group;
 export const DropdownMenuRadioGroup = Menu.RadioGroup;
+export const DropdownMenuSub = Menu.SubmenuRoot;
 
 export function DropdownMenuContent({
   className,
@@ -84,4 +85,23 @@ export function DropdownMenuLabel({ className, ...props }: ComponentProps<typeof
 
 export function DropdownMenuSeparator({ className, ...props }: ComponentProps<typeof Menu.Separator>) {
   return <Menu.Separator className={cn("-mx-1 my-1 h-px bg-border", className)} {...props} />;
+}
+
+/** Opens a nested menu (click or tap; hover on pointer devices). */
+export function DropdownMenuSubTrigger({
+  className,
+  children,
+  ...props
+}: ComponentProps<typeof Menu.SubmenuTrigger>) {
+  return (
+    <Menu.SubmenuTrigger className={cn(itemClass, "data-popup-open:bg-accent", className)} {...props}>
+      {children}
+      <ChevronRight className="ml-auto size-4" />
+    </Menu.SubmenuTrigger>
+  );
+}
+
+/** The nested menu's popup: beside its trigger, flipped or shifted when there is no room (phones). */
+export function DropdownMenuSubContent(props: ComponentProps<typeof DropdownMenuContent>) {
+  return <DropdownMenuContent side="right" align="start" sideOffset={4} {...props} />;
 }

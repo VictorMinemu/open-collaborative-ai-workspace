@@ -1,3 +1,4 @@
+import { userHandle } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
 import type { Directory, DirectoryEntry } from "./directory";
 import { resolveMentions } from "./mentions";
@@ -43,5 +44,25 @@ describe("resolveMentions", () => {
       { kind: "agent", id: "a1" },
       { kind: "user", id: "u1" },
     ]);
+  });
+});
+
+describe("resolveMentions and reserved handles (Pitfall 6)", () => {
+  it("never resolves @here, @channel or @everyone as a person or a bot", () => {
+    // Even a directory that (wrongly) held entries under reserved handles resolves only Sam.
+    const tricky = dir([
+      user("u3", "sam"),
+      user("u4", "here"),
+      agent("a2", "channel"),
+      user("u5", "everyone"),
+    ]);
+    expect(resolveMentions("@here @channel @everyone @sam", tricky)).toEqual([{ kind: "user", id: "u3" }]);
+  });
+
+  it("a member whose email starts with a reserved word is reachable as here-1", () => {
+    const handle = userHandle({ displayName: "Here Person", email: "here@acme.test" });
+    expect(handle).toBe("here-1");
+    const d2 = dir([user("u6", handle)]);
+    expect(resolveMentions("ping @here-1 and @here", d2)).toEqual([{ kind: "user", id: "u6" }]);
   });
 });

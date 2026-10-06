@@ -245,9 +245,25 @@ Plans:
   4. Unread and mention badges with counts per channel/DM update in realtime from the Phase 1 read markers with mark-as-read/unread; user can mute a channel, set do-not-disturb or mention-only and toggle desktop/web, and the notification inbox honours those preferences
   5. User finds messages, people and channels through full-text search with channel/author/date filters, attaches files and images by drag-and-drop or paste (preview and download) through the artifact upload pipeline on S3-compatible object storage added to the compose stack (MinIO was dropped from Phase 1), and history jumps to a permalink on top of the Phase 1 cursor pagination
 
-**Plans**: TBD
+**Plans:** 13 plans
 **Research:** needed only for the object-storage choice (MinIO community-edition trajectory vs Garage/SeaweedFS); the rest is standard Slack-model chat over the Phase 1 model and realtime client
 **UI hint**: yes
+
+Plans:
+
+- [ ] 04-01-PLAN.md — Wave 1: tracer — every Phase 4 contract and the only migration (`*_chat_workspace`); an author's edit reaches a second member live with an (edited) marker and an append-only version; delete with tombstones (admins only where readable, never DMs); the readable-set helper
+- [ ] 04-02-PLAN.md — Wave 1: one shared Markdown renderer for chat, threads, DMs, agent output and the Work Zone (XSS fixtures, web unit project), then streamdown + shiki after a package-legitimacy checkpoint
+- [ ] 04-03-PLAN.md — Wave 2: permalinks — copy link, `around`/`after` pages, detached history with highlight and "Jump to latest", thread-reply and DM anchors
+- [ ] 04-04-PLAN.md — Wave 2: Garage object storage in compose (ADR-0015), Artifact module (presign, sniff, renditions, authorized download, audit, sweeper), harness and CI storage
+- [ ] 04-05-PLAN.md — Wave 3: emoji reactions (frimousse picker), pins with a pinned sheet, personal saves with the Saved view
+- [ ] 04-06-PLAN.md — Wave 3: PostgreSQL full-text search (messages, people, channels, filters) on the resolver's readable set, ⌘K palette and results page
+- [ ] 04-07-PLAN.md — Wave 4: human DMs and group/mixed DMs (fixed membership, mention-only bots, no shared memory) and the DM privacy suite
+- [ ] 04-08-PLAN.md — Wave 5: sidebar grouped by department/team (unit on create/move, unit-scoped rules) and the All, Threads, AI Chats and Saved views
+- [ ] 04-09-PLAN.md — Wave 6: Notification module — mentions, DMs, thread replies, @channel/@here (online set, permission, rate limit), Mentions inbox
+- [ ] 04-10-PLAN.md — Wave 7: unread and mention badges counted over messages, mark read/unread synced across devices
+- [ ] 04-11-PLAN.md — Wave 8: notification preferences (mute, DND, levels, desktop/web toggles), OS notifications while the app runs, title count and desktop dock badge
+- [ ] 04-12-PLAN.md — Wave 8: attachments in chat — drag-and-drop, paste, progress, previews, lightbox, file cards, downloads
+- [ ] 04-13-PLAN.md — Wave 9: phase gate — cross-feature e2e, full regression, 1440/390 light/dark review, ADR-0016, AGENTS.md/DEMO.md/traceability, validation sign-off
 
 ### Phase 5: Direct AI Chat
 

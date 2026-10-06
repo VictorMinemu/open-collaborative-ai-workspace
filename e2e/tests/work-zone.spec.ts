@@ -2,7 +2,7 @@ import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type APIRequestContext, expect, type Page, test } from "@playwright/test";
+import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
 import { apiAs, ensureMember, openAs, SAM, userIdOf } from "../support/actors";
 import { ADMIN, API_URL, shot } from "./env";
 
@@ -25,6 +25,15 @@ async function signIn(page: Page) {
   await expect(page).toHaveURL(/\/chat/);
 }
 
+/** True when the toast showing `text` intersects `target` (or either box is missing). */
+async function toastCovers(page: Page, text: string, target: Locator): Promise<boolean> {
+  const box = (l: Locator) => l.boundingBox({ timeout: 1_000 }).catch(() => null);
+  const t = await box(page.locator("[data-sonner-toast]").filter({ hasText: text }));
+  const b = await box(target);
+  if (!t || !b) return true;
+  return t.x < b.x + b.width && b.x < t.x + t.width && t.y < b.y + b.height && b.y < t.y + t.height;
+}
+
 test.describe.configure({ mode: "serial" });
 
 test("Work Zone: pair a device, run a session, approve, review changes", async ({ page, browser }, info) => {
@@ -33,6 +42,8 @@ test("Work Zone: pair a device, run a session, approve, review changes", async (
   const mobile = info.project.name === "mobile";
   const home = mkdtempSync(join(tmpdir(), "ocw-e2e-home-"));
   const repoParent = mkdtempSync(join(tmpdir(), "ocw-e2e-repo-"));
+  // A retry gets its own device name, so a device the failed attempt left behind never collides (strict mode).
+  const deviceName = `E2E Mac ${tag}${info.retry ? ` retry ${info.retry}` : ""}`;
   const projectName = `acme-web-${tag}`;
   const repo = join(repoParent, projectName);
   mkdirSync(repo);
@@ -46,6 +57,16 @@ test("Work Zone: pair a device, run a session, approve, review changes", async (
   let daemon: ChildProcess | null = null;
   let adminApi: APIRequestContext | null = null;
   let samToRestore: string | null = null;
+  // Cleanup never throws from `finally` (that would replace the body's error: a stuck click was once reported as a
+  // hung cleanup request); its failures fail the test after a passing body.
+  const cleanupErrors: unknown[] = [];
+  const tidy = async (step: () => Promise<unknown>) => {
+    try {
+      await step();
+    } catch (e) {
+      cleanupErrors.push(e);
+    }
+  };
 
   try {
     await signIn(page);
@@ -60,16 +81,16 @@ test("Work Zone: pair a device, run a session, approve, review changes", async (
 
     execFileSync(
       process.execPath,
-      [RUNTIME_BIN, "enroll", "--server", API_URL, "--code", code, "--name", `E2E Mac ${tag}`],
+      [RUNTIME_BIN, "enroll", "--server", API_URL, "--code", code, "--name", deviceName],
       { env, stdio: "pipe" },
     );
     execFileSync(process.execPath, [RUNTIME_BIN, "add-project", repo], { env, stdio: "pipe" });
     daemon = spawn(process.execPath, [RUNTIME_BIN, "run"], { env, stdio: "ignore" });
 
     await expect(page.getByTestId("device-paired")).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByTestId("device-paired")).toContainText(`E2E Mac ${tag}`);
+    await expect(page.getByTestId("device-paired")).toContainText(deviceName);
     await page.getByRole("button", { name: "Done" }).click();
-    const card = page.getByTestId("device-card").filter({ hasText: `E2E Mac ${tag}` });
+    const card = page.getByTestId("device-card").filter({ hasText: deviceName });
     await expect(card).toHaveAttribute("data-status", "online");
     await expect(card).toContainText("Claude Code");
     await shot(page, `workzone-devices-${tag}`);
@@ -95,6 +116,9 @@ test("Work Zone: pair a device, run a session, approve, review changes", async (
     await page.getByTestId("composer").fill("Then add a changelog entry for the guide");
     await page.getByTestId("send-prompt").click();
     await expect(page.getByText("Queued #1")).toBeVisible();
+    // The toast never sits on the approval decisions: hovered by the pointer, a toast does not time out, so one
+    // over "Allow for session" kept that button unclickable for good.
+    await expect.poll(() => toastCovers(page, "Queued #1", banner), { timeout: 5_000 }).toBe(false);
     await shot(page, `workzone-session-approval-${tag}`);
 
     await banner.getByTestId("approve-once").click();
@@ -186,35 +210,51 @@ test("Work Zone: pair a device, run a session, approve, review changes", async (
       await page.emulateMedia({ colorScheme: "light" });
     }
   } finally {
+    // Every cleanup request has its own short timeout: a cleanup step can never eat the test's budget.
+    const CLEANUP_TIMEOUT = 10_000;
+    const origin = new URL(page.url()).origin;
     // Sam stays a developer for the next specs and runs, whatever happened above.
     if (adminApi) {
+      const api = adminApi;
       if (samToRestore) {
-        const res = await adminApi.patch(`/api/v1/members/${samToRestore}/role`, {
-          data: { role: "developer" },
+        const sam = samToRestore;
+        await tidy(async () => {
+          const res = await api.patch(`/api/v1/members/${sam}/role`, {
+            data: { role: "developer" },
+            timeout: CLEANUP_TIMEOUT,
+          });
+          expect(res.ok(), "restore Sam to developer").toBe(true);
         });
-        expect(res.ok(), "restore Sam to developer").toBe(true);
       }
-      await adminApi.dispose();
+      await tidy(() => api.dispose());
     }
     daemon?.kill("SIGTERM");
     // Archive the e2e session so repeated runs do not clutter the demo workspace.
     const sid = /\/work-zone\/([0-9a-f-]{36})/.exec(page.url())?.[1];
     if (sid) {
-      await page.request.post(`${API_URL}/api/v1/work-sessions/${sid}/archive`, {
-        headers: { origin: new URL(page.url()).origin },
-        data: {},
-      });
+      await tidy(() =>
+        page.request.post(`${API_URL}/api/v1/work-sessions/${sid}/archive`, {
+          headers: { origin },
+          data: {},
+          timeout: CLEANUP_TIMEOUT,
+        }),
+      );
     }
     // Leave the workspace tidy: revoke the e2e device (also proves revocation from the API).
-    const devices = (await (await page.request.get(`${API_URL}/api/v1/devices`)).json()) as {
-      devices: Array<{ id: string; name: string }>;
-    };
-    for (const d of devices.devices?.filter((x) => x.name === `E2E Mac ${tag}`) ?? []) {
-      await page.request.delete(`${API_URL}/api/v1/devices/${d.id}`, {
-        headers: { origin: new URL(page.url()).origin },
-      });
-    }
+    await tidy(async () => {
+      const res = await page.request.get(`${API_URL}/api/v1/devices`, { timeout: CLEANUP_TIMEOUT });
+      const { devices } = (await res.json()) as { devices?: Array<{ id: string; name: string }> };
+      for (const d of devices?.filter((x) => x.name === deviceName) ?? []) {
+        const del = await page.request.delete(`${API_URL}/api/v1/devices/${d.id}`, {
+          headers: { origin },
+          timeout: CLEANUP_TIMEOUT,
+        });
+        expect(del.ok(), `revoke ${deviceName}`).toBe(true);
+      }
+    });
     rmSync(home, { recursive: true, force: true });
     rmSync(repoParent, { recursive: true, force: true });
   }
+  // Reached only when the body passed.
+  if (cleanupErrors.length > 0) throw cleanupErrors[0];
 });

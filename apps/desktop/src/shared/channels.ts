@@ -6,6 +6,8 @@ export const Channels = {
   addProject: "ocw:add-project",
   listProjects: "ocw:list-projects",
   statusChanged: "ocw:status-changed",
+  /** Dock/taskbar badge = the unread mention count (CHAT-10); the only thing web content may set. */
+  setBadgeCount: "ocw:set-badge-count",
   // window.ocwOnboarding (bundled local page)
   onboardingDefaults: "ocw-onboarding:defaults",
   onboardingStatus: "ocw-onboarding:status",

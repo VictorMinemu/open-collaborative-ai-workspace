@@ -77,19 +77,19 @@ SLICE-06…18 were added on 2026-10-04 after the code audit of the widened demo 
 ### Chat (CHAT)
 
 - [x] **CHAT-01**: User can create, join, leave and archive public and private channels; private membership is enforced server-side (PRD §11)
-- [ ] **CHAT-02**: Sidebar groups channels by department/team with All, Mentions, Threads and AI Chats views (PRD §11.1)
+- [x] **CHAT-02**: Sidebar groups channels by department/team with All, Mentions, Threads and AI Chats views (PRD §11.1)
 - [x] **CHAT-03**: User can reply in a side-panel thread (single level, no nesting); the parent shows reply count and participants (PRD §12)
-- [ ] **CHAT-04**: User can open DMs and group DMs between humans, humans and agents, and mixed groups (PRD §13)
-- [ ] **CHAT-05**: Messages support a Markdown subset with syntax-highlighted code blocks, rendered by one renderer shared with AI chats and agent output
-- [ ] **CHAT-06**: Author can edit and delete their own messages (edited marker, prior versions kept for audit); admins can delete any message
-- [ ] **CHAT-07**: User can add emoji reactions to messages, thread replies and AI messages
-- [ ] **CHAT-08**: User can @mention users, agents, @channel and @here with autocomplete; mentions generate notifications and trigger agents
-- [ ] **CHAT-09**: Unread and mention badges per channel/DM, mark as read/unread, computed from read markers (`last_seq - last_read_seq`)
-- [ ] **CHAT-10**: User can set notification preferences: per-channel mute, do-not-disturb, mention-only, desktop/web toggle; the notification inbox honours them (PRD §98)
-- [ ] **CHAT-11**: User can search messages, people and channels with filters (channel, author, date) using PostgreSQL full-text search
-- [ ] **CHAT-12**: User can attach files and images (drag-and-drop, paste) through the artifact upload pipeline with preview and download
-- [ ] **CHAT-13**: User can pin messages per channel, save messages personally, and copy permalinks to messages and threads
-- [ ] **CHAT-14**: Message history loads with cursor pagination and jump-to-permalink
+- [x] **CHAT-04**: User can open DMs and group DMs between humans, humans and agents, and mixed groups (PRD §13)
+- [x] **CHAT-05**: Messages support a Markdown subset with syntax-highlighted code blocks, rendered by one renderer shared with AI chats and agent output
+- [x] **CHAT-06**: Author can edit and delete their own messages (edited marker, prior versions kept for audit); admins can delete any message
+- [x] **CHAT-07**: User can add emoji reactions to messages, thread replies and AI messages
+- [x] **CHAT-08**: User can @mention users, agents, @channel and @here with autocomplete; mentions generate notifications and trigger agents
+- [x] **CHAT-09**: Unread and mention badges per channel/DM, mark as read/unread, computed from read markers (`last_seq - last_read_seq`)
+- [x] **CHAT-10**: User can set notification preferences: per-channel mute, do-not-disturb, mention-only, desktop/web toggle; the notification inbox honours them (PRD §98)
+- [x] **CHAT-11**: User can search messages, people and channels with filters (channel, author, date) using PostgreSQL full-text search
+- [x] **CHAT-12**: User can attach files and images (drag-and-drop, paste) through the artifact upload pipeline with preview and download
+- [x] **CHAT-13**: User can pin messages per channel, save messages personally, and copy permalinks to messages and threads
+- [x] **CHAT-14**: Message history loads with cursor pagination and jump-to-permalink
 
 ### Direct AI Chat (AICHAT)
 
@@ -357,19 +357,19 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | WZC-05 | Phase 3.2 | Pending | New (owner request 2026-10-05: Work Zone session controls, ADR-0012) |
 | WZC-06 | Phase 3.2 | Pending | New (owner request 2026-10-05: Work Zone session controls, ADR-0012) |
 | WZC-07 | Phase 3.2 | Pending | New (owner request 2026-10-05: automatic session titles with Haiku / GPT-6-Luna) |
-| CHAT-02 | Phase 4 | Partial | Flat channel list with unread dot; no department/team grouping or views |
+| CHAT-02 | Phase 4 | Delivered | Sections per department/team (collapsible) and views All, Mentions, Threads, AI Chats, Saved: `sidebar.int.test.ts`, `threads.int.test.ts`; `chat-sidebar.spec.ts`, `chat-day.spec.ts` |
 | CHAT-03 | Phase 1 | Delivered | `chat.int.test.ts` "thread replies update the root and refuse nesting"; `chat.spec.ts` reply count + participants |
-| CHAT-04 | Phase 4 | Pending | No DMs |
-| CHAT-05 | Phase 4 | Partial | Markdown + highlighted code in chat; Work Zone has a separate renderer |
-| CHAT-06 | Phase 4 | Pending | No edit/delete |
-| CHAT-07 | Phase 4 | Pending | No reactions |
-| CHAT-08 | Phase 4 | Partial | People and bots with autocomplete, bots triggered; no @channel/@here or notifications |
-| CHAT-09 | Phase 4 | Partial | Unread dot from read markers; no counts, mention badges or mark-unread |
-| CHAT-10 | Phase 4 | Pending | No notification preferences |
-| CHAT-11 | Phase 4 | Pending | No search |
-| CHAT-12 | Phase 4 | Pending | No attachments; no object storage in Phase 1 |
-| CHAT-13 | Phase 4 | Pending | No pins, saves or permalinks |
-| CHAT-14 | Phase 4 | Partial | Cursor pagination delivered; no jump-to-permalink |
+| CHAT-04 | Phase 4 | Delivered | Human DMs, group and mixed DMs up to 9 (fixed membership, bots mention-only): `dm.int.test.ts`, `group-dm.int.test.ts`, `dm-privacy.int.test.ts`; `dms.spec.ts`, `chat-day.spec.ts` |
+| CHAT-05 | Phase 4 | Delivered | One streamdown + shiki `<Markdown>` for chat, threads, DMs, bot output and the Work Zone, no raw HTML (ADR-0016): `markdown.test.tsx`, `safe-url.test.ts`; `renderer.spec.ts` |
+| CHAT-06 | Phase 4 | Delivered | Live edit with append-only versions and "(edited)"; delete with tombstones; admins delete where readable: `message-edit.int.test.ts`, `chat.int.test.ts`; `chat-edit.spec.ts`, `chat-day.spec.ts` |
+| CHAT-07 | Phase 4 | Delivered | Reactions on messages, thread replies and bot messages (quick reactions, self-hosted picker): `reactions.int.test.ts`; `reactions-pins.spec.ts`, `chat-day.spec.ts`. Agents cannot react yet |
+| CHAT-08 | Phase 4 | Delivered | @people/@bots/@channel/@here with autocomplete, permission + 1/min limit, Mentions inbox, bots triggered: `notifications.int.test.ts`; `notifications.spec.ts`, `chat-day.spec.ts` |
+| CHAT-09 | Phase 4 | Delivered | Live unread and mention badges, mark read/unread synced across tabs: `unread.int.test.ts`; `unread.spec.ts`, `chat-day.spec.ts`. Wording differs: counts are over messages after `last_read_seq` (P-07), not `last_seq - last_read_seq` |
+| CHAT-10 | Phase 4 | Delivered | Mute, levels (all/mentions/nothing), default level, DND, desktop/web toggles; inbox and pop-ups honour them; dock badge: `prefs.int.test.ts`; `notification-prefs.spec.ts`. Click-to-focus on macOS needs a signed build (manual) |
+| CHAT-11 | Phase 4 | Delivered | PostgreSQL FTS (unaccented simple/spanish/english) + pg_trgm over the readable set, In/From/Date filters (ADR-0016): `search.int.test.ts`; `search.spec.ts`, `chat-day.spec.ts` |
+| CHAT-12 | Phase 4 | Delivered | Drag-and-drop, paste and picker uploads to Garage via presigned URLs, previews, lightbox, authorized download (ADR-0015): `attachments.int.test.ts`, `message-attachments.int.test.ts`; `attachments-api.spec.ts`, `attachments.spec.ts`, `chat-day.spec.ts` |
+| CHAT-13 | Phase 4 | Delivered | Pins per conversation, personal Saved view, copy link to messages and thread replies: `pins.int.test.ts`, `permalink.int.test.ts`; `reactions-pins.spec.ts`, `permalinks.spec.ts`, `chat-day.spec.ts` |
+| CHAT-14 | Phase 4 | Delivered | Cursor pagination plus detached permalink windows with Jump to latest: `permalink.int.test.ts`; `permalinks.spec.ts`, `search.spec.ts` |
 | AICHAT-01 | Phase 5 | Partial | Provider settings for bots (SLICE-09); keys in `app.secrets`, not `SecretReference`; no AI chats |
 | AICHAT-02 | Phase 5 | Pending | No AI chat surface |
 | AICHAT-03 | Phase 5 | Pending | No AI chat surface |
@@ -475,4 +475,4 @@ today; every later phase still audits the sensitive actions it introduces.
 
 ---
 *Requirements defined: 2026-09-10*
-*Last updated: 2026-10-04 after the Phase 1 code audit (Restructure 2026-10-04: SLICE-06…18 added, SLICE-01…04 and DEV-07 superseded, traceability re-mapped)*
+*Last updated: 2026-10-06 after Phase 4 (CHAT-02, CHAT-04…14 delivered). Previously: 2026-10-04 after the Phase 1 code audit (Restructure 2026-10-04: SLICE-06…18 added, SLICE-01…04 and DEV-07 superseded, traceability re-mapped)*

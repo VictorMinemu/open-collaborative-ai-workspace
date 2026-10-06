@@ -39,6 +39,7 @@ import {
   NoArgs,
   type PublicProject,
   parseArgs,
+  SetBadgeCountArgs,
   toPublicProject,
 } from "../shared/ipc";
 import { ProjectPathError, validateProjectDir } from "../shared/project-path";
@@ -368,6 +369,11 @@ function registerIpc(): void {
     return listProjects();
   });
   handle(Channels.addProject, fromWeb, (arg) => addProjectFlow(parseArgs(AddProjectArgs, arg)?.name));
+  // CHAT-10 (T-04-11-01): the web app's unread mention count on the dock/taskbar badge. Trusted web sender only,
+  // a validated integer, and nothing else reachable through it.
+  handle(Channels.setBadgeCount, fromWeb, (arg) => {
+    app.setBadgeCount(parseArgs(SetBadgeCountArgs, arg));
+  });
 
   // window.ocwOnboarding
   handle(Channels.onboardingDefaults, fromOnboarding, (arg) => {

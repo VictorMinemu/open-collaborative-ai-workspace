@@ -1,92 +1,3 @@
-/* Code highlighting for chat messages (highlight.js classes from rehype-highlight). Light + dark. */
-.chat-markdown .hljs-comment,
-.chat-markdown .hljs-quote {
-  color: oklch(0.55 0.02 286);
-  font-style: italic;
-}
-.chat-markdown .hljs-keyword,
-.chat-markdown .hljs-selector-tag,
-.chat-markdown .hljs-built_in,
-.chat-markdown .hljs-doctag {
-  color: oklch(0.5 0.2 300);
-}
-.chat-markdown .hljs-string,
-.chat-markdown .hljs-regexp,
-.chat-markdown .hljs-addition,
-.chat-markdown .hljs-template-string {
-  color: oklch(0.5 0.13 150);
-}
-.chat-markdown .hljs-number,
-.chat-markdown .hljs-literal,
-.chat-markdown .hljs-symbol,
-.chat-markdown .hljs-variable.language_ {
-  color: oklch(0.58 0.15 50);
-}
-.chat-markdown .hljs-title,
-.chat-markdown .hljs-title.function_,
-.chat-markdown .hljs-section {
-  color: oklch(0.5 0.17 255);
-}
-.chat-markdown .hljs-type,
-.chat-markdown .hljs-title.class_,
-.chat-markdown .hljs-attr,
-.chat-markdown .hljs-attribute {
-  color: oklch(0.55 0.13 200);
-}
-.chat-markdown .hljs-meta,
-.chat-markdown .hljs-tag,
-.chat-markdown .hljs-name {
-  color: oklch(0.55 0.15 20);
-}
-.chat-markdown .hljs-deletion {
-  color: oklch(0.55 0.2 25);
-}
-.chat-markdown .hljs-emphasis {
-  font-style: italic;
-}
-.chat-markdown .hljs-strong {
-  font-weight: 600;
-}
-
-.dark .chat-markdown .hljs-comment,
-.dark .chat-markdown .hljs-quote {
-  color: oklch(0.62 0.02 286);
-}
-.dark .chat-markdown .hljs-keyword,
-.dark .chat-markdown .hljs-selector-tag,
-.dark .chat-markdown .hljs-built_in,
-.dark .chat-markdown .hljs-doctag {
-  color: oklch(0.76 0.14 305);
-}
-.dark .chat-markdown .hljs-string,
-.dark .chat-markdown .hljs-regexp,
-.dark .chat-markdown .hljs-addition,
-.dark .chat-markdown .hljs-template-string {
-  color: oklch(0.8 0.13 145);
-}
-.dark .chat-markdown .hljs-number,
-.dark .chat-markdown .hljs-literal,
-.dark .chat-markdown .hljs-symbol,
-.dark .chat-markdown .hljs-variable.language_ {
-  color: oklch(0.8 0.13 60);
-}
-.dark .chat-markdown .hljs-title,
-.dark .chat-markdown .hljs-title.function_,
-.dark .chat-markdown .hljs-section {
-  color: oklch(0.78 0.12 250);
-}
-.dark .chat-markdown .hljs-type,
-.dark .chat-markdown .hljs-title.class_,
-.dark .chat-markdown .hljs-attr,
-.dark .chat-markdown .hljs-attribute {
-  color: oklch(0.8 0.1 200);
-}
-.dark .chat-markdown .hljs-meta,
-.dark .chat-markdown .hljs-tag,
-.dark .chat-markdown .hljs-name {
-  color: oklch(0.75 0.13 20);
-}
-
 @keyframes chat-typing-dot {
   0%,
   60%,
@@ -113,4 +24,19 @@
 }
 .chat-flash {
   animation: chat-flash 1.6s ease-out;
+}
+
+/* Permalink target (CHAT-14): a 2.5 s flash that settles into a steady tint with an accent bar while the link is open. */
+@keyframes chat-anchor-flash {
+  from {
+    background-color: color-mix(in oklch, var(--primary) 20%, transparent);
+  }
+  to {
+    background-color: color-mix(in oklch, var(--primary) 6%, transparent);
+  }
+}
+.chat-anchor {
+  background-color: color-mix(in oklch, var(--primary) 6%, transparent);
+  box-shadow: inset 3px 0 0 var(--primary);
+  animation: chat-anchor-flash 2.5s ease-out;
 }

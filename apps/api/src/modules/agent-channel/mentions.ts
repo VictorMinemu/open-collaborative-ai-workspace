@@ -100,10 +100,11 @@ export async function buildMentionEvents(
   const delivered = replyMode ? await replyModeGate(tx, deps.core, mention, conv, targets) : targets;
   if (delivered.length === 0) return [];
 
-  // ---- history (current message excluded), oldest first: the thread, or the whole DM (D-04, flat)
+  // ---- history (current message excluded), oldest first: the thread, or the whole DM / group DM (D-04, D-06,
+  // flat)
   const root = mention.threadRootId;
   const threadFilter =
-    conv.kind === "dm"
+    conv.kind === "dm" || conv.kind === "group"
       ? eq(messages.conversationId, conv.id)
       : or(
           eq(messages.id, root),
@@ -114,7 +115,8 @@ export async function buildMentionEvents(
     await tx
       .select()
       .from(messages)
-      .where(and(threadFilter, ne(messages.id, mention.messageId)))
+      // Deleted text never reaches a model (Pitfall 8): tombstones are not history.
+      .where(and(threadFilter, ne(messages.id, mention.messageId), isNull(messages.deletedAt)))
       .orderBy(desc(messages.createdAt), desc(messages.seq))
       .limit(HISTORY_LIMIT)
   ).reverse();
@@ -303,8 +305,8 @@ async function replyModeGate<T extends typeof agents.$inferSelect>(
 }
 
 /**
- * D-11: a bot at its limit answers with a notice instead of a model reply. In a DM every over-limit message
- * gets it; elsewhere it goes out once per (bot, conversation, UTC day). The notice is posted AFTER commit by
+ * D-11: a bot at its limit answers with a notice instead of a model reply. In a 1:1 DM every over-limit message
+ * gets it; elsewhere (channels, group DMs) it goes out once per (bot, conversation, UTC day). The notice is posted AFTER commit by
  * the chat module (its own transaction: inside this one it would wait on the conversation's stream lock),
  * idempotent on `limit:<messageId>`. A failed notice is logged without payload and never fails the post.
  */
@@ -317,8 +319,9 @@ async function limitReached(
   notice: string,
   limit: number,
 ): Promise<void> {
-  const isDm = mention.delivery === "dm" || conv.kind === "dm";
-  const notified = isDm || (await claimChannelNotice(tx, agentId, conv.id));
+  // Direct conversations are flat; a 1:1 DM gets every notice, a group (mentions only) once a day like a channel.
+  const isDm = mention.delivery === "dm" || conv.kind === "dm" || conv.kind === "group";
+  const notified = conv.kind === "dm" || (await claimChannelNotice(tx, agentId, conv.id));
   await recordLimitReached(tx, deps.core, {
     agentId,
     humanUserId: mention.author.id,
