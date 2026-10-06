@@ -1,5 +1,6 @@
 import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
 import { apiAs, BASE_URL, createChannel, ensureMember, openAs, SAM } from "../support/actors";
+import { cellToken } from "../support/cell-token";
 import { FakeCellPlugin } from "../support/fake-cell-plugin";
 import { type FakeDeviceHandle, startFakeDevice } from "../support/work-zone-device";
 import { ADMIN, API_URL, shot } from "./env";
@@ -163,7 +164,7 @@ test("renderer: a bot's answer in its DM (agent output) renders through the shar
   test.setTimeout(120_000);
   const project = info.project.name;
   const tag = project === "mobile" ? "390" : "1440";
-  const token = process.env.OCW_CELL_TOKEN ?? "";
+  const token = cellToken();
   expect(token, "OCW_CELL_TOKEN is configured (the fake cell answers as the bot)").not.toBe("");
   const admin = await apiAs(ADMIN);
   const botName = `Renderer ${tag}`;
