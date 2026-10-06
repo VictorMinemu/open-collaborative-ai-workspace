@@ -54,7 +54,13 @@ export function Lightbox({
     <div className="contents" onClick={stop} onPointerDown={stop} onPointerUp={stop} onContextMenu={stop}>
       <Dialog.Root open onOpenChange={(open) => !open && onClose()}>
         <Dialog.Portal>
-          <Dialog.Backdrop className="fixed inset-0 z-50 bg-black/95 backdrop-blur-sm transition-opacity duration-200 data-ending-style:opacity-0 data-starting-style:opacity-0" />
+          {/* forceRender: on phones the thread is itself a sheet (a dialog), and Base UI skips a nested dialog's
+              backdrop by default, which left the viewer see-through with its white header unreadable. */}
+          <Dialog.Backdrop
+            forceRender
+            data-testid="lightbox-backdrop"
+            className="fixed inset-0 z-50 bg-black/95 backdrop-blur-sm transition-opacity duration-200 data-ending-style:opacity-0 data-starting-style:opacity-0"
+          />
           <Dialog.Popup
             data-testid="lightbox"
             aria-label={image.filename}

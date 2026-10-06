@@ -33,6 +33,8 @@ test("Work Zone: pair a device, run a session, approve, review changes", async (
   const mobile = info.project.name === "mobile";
   const home = mkdtempSync(join(tmpdir(), "ocw-e2e-home-"));
   const repoParent = mkdtempSync(join(tmpdir(), "ocw-e2e-repo-"));
+  // A retry gets its own device name, so a device the failed attempt left behind never collides (strict mode).
+  const deviceName = `E2E Mac ${tag}${info.retry ? ` retry ${info.retry}` : ""}`;
   const projectName = `acme-web-${tag}`;
   const repo = join(repoParent, projectName);
   mkdirSync(repo);
@@ -60,16 +62,16 @@ test("Work Zone: pair a device, run a session, approve, review changes", async (
 
     execFileSync(
       process.execPath,
-      [RUNTIME_BIN, "enroll", "--server", API_URL, "--code", code, "--name", `E2E Mac ${tag}`],
+      [RUNTIME_BIN, "enroll", "--server", API_URL, "--code", code, "--name", deviceName],
       { env, stdio: "pipe" },
     );
     execFileSync(process.execPath, [RUNTIME_BIN, "add-project", repo], { env, stdio: "pipe" });
     daemon = spawn(process.execPath, [RUNTIME_BIN, "run"], { env, stdio: "ignore" });
 
     await expect(page.getByTestId("device-paired")).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByTestId("device-paired")).toContainText(`E2E Mac ${tag}`);
+    await expect(page.getByTestId("device-paired")).toContainText(deviceName);
     await page.getByRole("button", { name: "Done" }).click();
-    const card = page.getByTestId("device-card").filter({ hasText: `E2E Mac ${tag}` });
+    const card = page.getByTestId("device-card").filter({ hasText: deviceName });
     await expect(card).toHaveAttribute("data-status", "online");
     await expect(card).toContainText("Claude Code");
     await shot(page, `workzone-devices-${tag}`);
@@ -200,16 +202,20 @@ test("Work Zone: pair a device, run a session, approve, review changes", async (
     // Archive the e2e session so repeated runs do not clutter the demo workspace.
     const sid = /\/work-zone\/([0-9a-f-]{36})/.exec(page.url())?.[1];
     if (sid) {
-      await page.request.post(`${API_URL}/api/v1/work-sessions/${sid}/archive`, {
-        headers: { origin: new URL(page.url()).origin },
-        data: {},
-      });
+      // Bounded: a hung archive must not eat the test timeout and skip the device revocation below.
+      await page.request
+        .post(`${API_URL}/api/v1/work-sessions/${sid}/archive`, {
+          headers: { origin: new URL(page.url()).origin },
+          data: {},
+          timeout: 15_000,
+        })
+        .catch(() => undefined);
     }
     // Leave the workspace tidy: revoke the e2e device (also proves revocation from the API).
     const devices = (await (await page.request.get(`${API_URL}/api/v1/devices`)).json()) as {
       devices: Array<{ id: string; name: string }>;
     };
-    for (const d of devices.devices?.filter((x) => x.name === `E2E Mac ${tag}`) ?? []) {
+    for (const d of devices.devices?.filter((x) => x.name === deviceName) ?? []) {
       await page.request.delete(`${API_URL}/api/v1/devices/${d.id}`, {
         headers: { origin: new URL(page.url()).origin },
       });

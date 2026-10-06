@@ -59,7 +59,10 @@ export function PrincipalAvatar({
   );
 }
 
-/** A group DM's stacked avatars (the first two members, the second offset), for DM rows and headers. */
+/**
+ * A group DM's stacked avatars (the first two members, the second offset), for DM rows and headers. Each takes 60%
+ * of the box so the back avatar's initial stays clear of the front one (at 70% the front covered it).
+ */
 export function GroupAvatars({
   members,
   className,
@@ -81,7 +84,7 @@ export function GroupAvatars({
           avatarUrl={a.avatarUrl}
           seed={a.id}
           compact
-          className={cn("absolute top-0 left-0 size-[70%] ring-1 ring-background", text)}
+          className={cn("absolute top-0 left-0 size-[60%] ring-1 ring-background", text)}
         />
       ) : null}
       {b ? (
@@ -91,7 +94,7 @@ export function GroupAvatars({
           avatarUrl={b.avatarUrl}
           seed={b.id}
           compact
-          className={cn("absolute right-0 bottom-0 size-[70%] ring-1 ring-background", text)}
+          className={cn("absolute right-0 bottom-0 size-[60%] ring-2 ring-background", text)}
         />
       ) : null}
     </span>
