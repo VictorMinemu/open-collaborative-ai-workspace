@@ -14,6 +14,11 @@
 //   [[plan:unavailable]]         503 `subscription_sharing_usage_unavailable`
 //   [[plan:unsupported:<param>]] 400 `subscription_sharing_unsupported_capability` with `error.param`
 //
+// Title requests (05-10): when the instructions (`instructions`, a developer/system item) ask for a "short title",
+// the reply is `Title: <first three words of the user text>` (the text inside `<request>…</request>` when present,
+// directives stripped); `[[title:<text>]]` in the user text forces the reply to exactly <text>. server.mjs applies
+// the same rule to chat completions (system/developer message) and Anthropic (`system`).
+//
 // Plan bearers (`fake-plan-…`) get the ChatGPT-plan preview rules: `store` must be false, `stream` true, no
 // `system` input item and none of PLAN_FORBIDDEN_KEYS, else 400 `fake_preview_violation` naming the key.
 
@@ -75,6 +80,33 @@ function lastUserItem(input) {
     if (input[i]?.role === "user") return input[i];
   }
   return null;
+}
+
+const TITLE_REQUEST_RE = /\bshort title\b/iu;
+const FORCED_TITLE_RE = /\[\[title:([^\]]*)\]\]/u;
+const REQUEST_BLOCK_RE = /<request>\s*([\s\S]*?)\s*<\/request>/u;
+
+/** True when any of these instruction texts asks for a short title (the API's title prompt, 05-10). */
+export function isTitleRequest(instructionTexts) {
+  return instructionTexts.some((t) => typeof t === "string" && TITLE_REQUEST_RE.test(t));
+}
+
+/** The reply to a title request: `[[title:<text>]]` verbatim, else `Title: <first three words>`. */
+export function titleReply(userText) {
+  const forced = FORCED_TITLE_RE.exec(userText);
+  if (forced) return (forced[1] ?? "").trim();
+  const inner = REQUEST_BLOCK_RE.exec(userText)?.[1] ?? userText;
+  const words = withoutDirectives(inner).split(" ").filter(Boolean).slice(0, 3);
+  return `Title: ${words.join(" ")}`;
+}
+
+/** Instruction texts of a Responses body: `instructions` and every developer/system item. */
+function responsesInstructions(body) {
+  const items = Array.isArray(body.input) ? body.input : [];
+  return [
+    typeof body.instructions === "string" ? body.instructions : "",
+    ...items.filter((i) => i?.role === "developer" || i?.role === "system").map(itemText),
+  ];
 }
 
 /** Counts `type` parts of an item's content. */
@@ -183,10 +215,12 @@ export async function handleResponses(req, res, body, ctx = {}) {
     });
   }
 
-  const reply = `Echo: ${withoutDirectives(userText)}${attachmentSuffix(
-    partCount(user, "input_image"),
-    partCount(user, "input_file"),
-  )}`;
+  const reply = isTitleRequest(responsesInstructions(body))
+    ? titleReply(userText)
+    : `Echo: ${withoutDirectives(userText)}${attachmentSuffix(
+        partCount(user, "input_image"),
+        partCount(user, "input_file"),
+      )}`;
   const slow = has("slow");
   const usageLimit = has("plan:usage_limit");
   const all = slow ? slowPieces(reply) : pieces(reply);

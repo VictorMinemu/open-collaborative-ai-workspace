@@ -48,6 +48,19 @@ export async function startFakeModel(): Promise<FakeModel> {
   };
 }
 
+/**
+ * A model request made by the auto-title job (05-10): its instructions ask for a "short title". Specs that count the
+ * chat's own model calls leave these out — titles run after the first answer, on their own schedule.
+ */
+export function isTitleRequest(r: FakeModelRequest): boolean {
+  return JSON.stringify(r.body ?? {}).includes("short title");
+}
+
+/** The captured requests without the auto-title calls. */
+export function withoutTitles(requests: FakeModelRequest[]): FakeModelRequest[] {
+  return requests.filter((r) => !isTitleRequest(r));
+}
+
 export interface AiStack extends TestStack {
   fake: FakeModel;
   /** Every API log line (JSON) since start. */
@@ -120,7 +133,11 @@ export function subscribeConv(
 }
 
 /** Opens `/ws` with the client's access JWT and subscribes to any topic (e.g. `user:<id>` for `ai_chat.updated`). */
-export async function subscribeTopic(baseUrl: string, client: TestClient, topic: string): Promise<ConvSubscription> {
+export async function subscribeTopic(
+  baseUrl: string,
+  client: TestClient,
+  topic: string,
+): Promise<ConvSubscription> {
   const token = await client.token();
   const socket = new WebSocket(
     `${baseUrl.replace("http", "ws")}/ws`,

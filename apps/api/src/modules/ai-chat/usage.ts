@@ -4,6 +4,7 @@ import {
   estimateCostMicros,
   estimateTokens,
   type ModelProviderKind,
+  type ModelRef,
 } from "@ocw/contracts";
 import { aiUsageDaily, aiUsageRecords, type Tx, tenantOf } from "@ocw/db";
 import { and, eq, sql } from "drizzle-orm";
@@ -38,6 +39,8 @@ export async function recordUsage(
   input: {
     generation: GenerationRow;
     kind: "chat" | "title";
+    /** The model that ran, when it is not the generation's own (a title on the backend's small model, 05-10). */
+    model?: ModelRef;
     reported: ReportedUsage | null;
     /** Text sent and received, for the estimate when the provider reported nothing. */
     promptText: string;
@@ -45,13 +48,14 @@ export async function recordUsage(
   },
 ): Promise<AiUsage> {
   const g = input.generation;
+  const m = input.model ?? { backend: g.backend, provider: g.provider, modelId: g.modelId };
   const r = input.reported;
   const reported = r !== null && typeof r.inputTokens === "number" && typeof r.outputTokens === "number";
   const inputTokens = reported ? (r?.inputTokens ?? 0) : estimateTokens(input.promptText);
   const outputTokens = reported ? (r?.outputTokens ?? 0) : estimateTokens(input.outputText);
   const cachedInputTokens = reported ? (r?.cachedInputTokens ?? null) : null;
   const reasoningTokens = reported ? (r?.reasoningTokens ?? null) : null;
-  const cost = estimateCostMicros(g.backend, g.provider as ModelProviderKind, g.modelId, {
+  const cost = estimateCostMicros(m.backend, m.provider as ModelProviderKind, m.modelId, {
     inputTokens,
     outputTokens,
     cachedInputTokens,
@@ -65,9 +69,9 @@ export async function recordUsage(
       requesterUserId: g.requesterUserId,
       conversationId: g.conversationId,
       messageId: g.assistantMessageId,
-      backend: g.backend,
-      provider: g.provider,
-      modelId: g.modelId,
+      backend: m.backend,
+      provider: m.provider,
+      modelId: m.modelId,
       inputTokens,
       outputTokens,
       cachedInputTokens,

@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "../../app";
 import { createEnvFileSecretStore } from "../../lib/secret-store";
 import { TEST_SETUP_TOKEN, TestClient } from "../../testing";
-import { type AiStack, seedPlan, startAiStack, subscribeConv } from "../../testing-ai";
+import { type AiStack, seedPlan, startAiStack, subscribeConv, withoutTitles } from "../../testing-ai";
 import { invite } from "../../testing-workzone";
 
 /**
@@ -216,7 +216,7 @@ describe("a plan turn streams over the WebSocket and persists with a usage recor
   });
 
   it("the fake saw exactly one /v1/responses call with Sam's own bearer, store:false, stream:true, a developer item and no forbidden key", async () => {
-    const calls = stack.fake.requests("responses");
+    const calls = withoutTitles(stack.fake.requests("responses"));
     expect(calls).toHaveLength(1);
     const call = calls[0]!;
     expect(call.headers.authorization).toMatch(new RegExp(`^Bearer fake-plan-${samId}-`));
@@ -377,7 +377,7 @@ describe("another member never uses Sam's plan (D-01, T-05-02-01)", () => {
     const res = await createChat(alex, "use Sam's plan please");
     expect(res.status).toBe(409);
     expect(errorOf(res)).toMatchObject({ code: "model_unavailable", details: { reason: "not_connected" } });
-    expect(stack.fake.requests()).toEqual([]);
+    expect(withoutTitles(stack.fake.requests())).toEqual([]);
     const created = await su.query("select count(*)::int as n from app.ai_chats where owner_user_id = $1", [
       alexId,
     ]);

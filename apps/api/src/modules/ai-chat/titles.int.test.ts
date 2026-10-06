@@ -42,7 +42,10 @@ async function ok(res: Promise<{ status: number; body: Record<string, unknown> |
 const createChat = (body: string, model: Json) =>
   ok(sam.request("POST", "/api/v1/ai-chats", { clientMessageId: cid(), body, model }), 201);
 const send = (chatId: string, body: string, model: Json) =>
-  ok(sam.request("POST", `/api/v1/ai-chats/${chatId}/messages`, { clientMessageId: cid(), body, model }), 201);
+  ok(
+    sam.request("POST", `/api/v1/ai-chats/${chatId}/messages`, { clientMessageId: cid(), body, model }),
+    201,
+  );
 
 async function settled(generationId: string, timeoutMs = 15_000): Promise<Json> {
   const until = Date.now() + timeoutMs;
@@ -83,8 +86,11 @@ const chatRequests = (needle: string) =>
   stack.fake.requests().filter((r) => !isTitle(r) && r.body && JSON.stringify(r.body).includes(needle));
 
 const titleUsage = async (generationId: string) =>
-  (await su.query("select * from app.ai_usage_records where generation_id = $1 and kind = 'title'", [generationId]))
-    .rows as Json[];
+  (
+    await su.query("select * from app.ai_usage_records where generation_id = $1 and kind = 'title'", [
+      generationId,
+    ])
+  ).rows as Json[];
 
 beforeAll(async () => {
   stack = await startAiStack({ env: { OCW_AI_TITLE_TIMEOUT_MS: String(TITLE_TIMEOUT_MS) } });
@@ -148,10 +154,10 @@ describe("the first answer titles the chat on its own backend (AICHAT-04, D-06)"
     const [title] = titleRequests("Plan the quarterly offsite agenda");
     const [chat] = chatRequests("Plan the quarterly offsite agenda");
     expect(title?.kind).toBe("responses");
-    expect(title?.body.model).toBe("gpt-5.6-luna");
-    expect(title?.body.store).toBe(false);
-    expect(title?.body.stream).toBe(true);
-    expect(title?.body.tools ?? []).toEqual([]);
+    expect(title?.body?.model).toBe("gpt-5.6-luna");
+    expect(title?.body?.store).toBe(false);
+    expect(title?.body?.stream).toBe(true);
+    expect(title?.body?.tools ?? []).toEqual([]);
     expect(title?.headers.authorization).toMatch(new RegExp(`^Bearer fake-plan-${samId}-`, "u"));
     expect(title?.headers.authorization).toBe(chat?.headers.authorization);
 
@@ -178,7 +184,10 @@ describe("the first answer titles the chat on its own backend (AICHAT-04, D-06)"
       .durable(EventTypes.aiChatUpdated)
       .filter((f) => (f.data as Json).chat.id === chatId)
       .at(-1);
-    expect((last?.data as Json).chat).toMatchObject({ title: "Plan the quarterly", titleSource: "auto" });
+    expect((last?.data as Json | undefined)?.chat).toMatchObject({
+      title: "Plan the quarterly",
+      titleSource: "auto",
+    });
     user.close();
 
     // The snapshot agrees.
@@ -198,7 +207,9 @@ describe("the first answer titles the chat on its own backend (AICHAT-04, D-06)"
 
   it("a title Sam typed before the first answer is kept and no title call is made", async () => {
     const created = await createChat("Rename me before the answer arrives [[slow]]", PLAN);
-    await su.query("update app.ai_chats set title_source = 'user' where conversation_id = $1", [created.chat.id]);
+    await su.query("update app.ai_chats set title_source = 'user' where conversation_id = $1", [
+      created.chat.id,
+    ]);
     await su.query("update app.conversations set name = 'My own title' where id = $1", [created.chat.id]);
     await settled(created.generation.id);
     await sleep(800);
@@ -217,7 +228,7 @@ describe("the first answer titles the chat on its own backend (AICHAT-04, D-06)"
     expect((await chatRow(created.chat.id)).name).toBe("Summarize the incident");
     const [title] = titleRequests("Summarize the incident review notes");
     expect(title?.kind).toBe("anthropic");
-    expect(title?.body.model).toBe("claude-haiku-4-5");
+    expect(title?.body?.model).toBe("claude-haiku-4-5");
     const [usage] = await waitFor(
       () => titleUsage(created.generation.id),
       (u) => u.length === 1,
@@ -228,17 +239,19 @@ describe("the first answer titles the chat on its own backend (AICHAT-04, D-06)"
       outputTokens: usage?.output_tokens,
       cachedInputTokens: usage?.cached_input_tokens,
     });
-    expect(usage?.cost_micros_usd).toBe(expected.costMicrosUsd);
-    expect(usage?.cost_micros_usd).toBeGreaterThan(0);
+    expect(Number(usage?.cost_micros_usd)).toBe(expected.costMicrosUsd);
+    expect(Number(usage?.cost_micros_usd)).toBeGreaterThan(0);
 
-    await ok(admin.request("PUT", "/api/v1/ai-chat/policy", { titleModels: { anthropic: "claude-sonnet-5-5" } }));
+    await ok(
+      admin.request("PUT", "/api/v1/ai-chat/policy", { titleModels: { anthropic: "claude-sonnet-5-5" } }),
+    );
     const second = await createChat("Draft the hiring plan for Q3", OPUS);
     await settled(second.generation.id);
     await waitFor(
       () => chatRow(second.chat.id),
       (r) => r.title_source === "auto",
     );
-    expect(titleRequests("Draft the hiring plan for Q3")[0]?.body.model).toBe("claude-sonnet-5-5");
+    expect(titleRequests("Draft the hiring plan for Q3")[0]?.body?.model).toBe("claude-sonnet-5-5");
     await ok(admin.request("PUT", "/api/v1/ai-chat/policy", { titleModels: {} }));
   });
 

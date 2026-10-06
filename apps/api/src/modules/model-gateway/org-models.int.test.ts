@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "../../app";
 import { createEnvFileSecretStore } from "../../lib/secret-store";
 import { TEST_SETUP_TOKEN, TestClient } from "../../testing";
-import { type AiStack, seedPlan, startAiStack, subscribeConv } from "../../testing-ai";
+import { type AiStack, seedPlan, startAiStack, subscribeConv, withoutTitles } from "../../testing-ai";
 import { invite } from "../../testing-workzone";
 
 /**
@@ -61,7 +61,11 @@ async function settled(generationId: string, timeoutMs = 15_000): Promise<Json> 
 }
 
 const usageOf = async (generationId: string) =>
-  (await su.query("select * from app.ai_usage_records where generation_id = $1", [generationId])).rows;
+  (
+    await su.query("select * from app.ai_usage_records where generation_id = $1 and kind = 'chat'", [
+      generationId,
+    ])
+  ).rows;
 
 const providerRow = async (provider: string) =>
   (await su.query("select * from app.model_providers where provider = $1", [provider])).rows[0] as Json;
@@ -187,13 +191,13 @@ describe("an admin's Anthropic key reaches a member's AI chat through its Secret
           .some((f) => (f.data as Json).message.id === assistantMessage.id),
       15_000,
     );
-    const calls = stack.fake.requests("anthropic");
+    const calls = withoutTitles(stack.fake.requests("anthropic"));
     expect(calls).toHaveLength(1);
     expect(calls[0]?.path).toBe("/v1/messages");
     expect(calls[0]?.headers["x-api-key"]).toBe(ANTHROPIC_KEY);
     expect(calls[0]?.body?.model).toBe("claude-sonnet-5-5");
     expect(calls[0]?.body?.stream).toBe(true);
-    expect(stack.fake.requests("responses")).toHaveLength(0);
+    expect(withoutTitles(stack.fake.requests("responses"))).toHaveLength(0);
 
     const deltas = ws.deltas().filter((d) => d.messageId === assistantMessage.id);
     expect(deltas.length).toBeGreaterThan(0);
@@ -245,7 +249,7 @@ describe("each provider kind speaks its own wire API to the fake (P-04)", () => 
     );
     stack.fake.reset();
     const { g } = await orgTurn({ backend: "org_key", provider: "openai", modelId: "gpt-5" });
-    const calls = stack.fake.requests("responses");
+    const calls = withoutTitles(stack.fake.requests("responses"));
     expect(calls).toHaveLength(1);
     expect(calls[0]?.path).toBe("/v1/responses");
     expect(calls[0]?.headers.authorization).toBe(`Bearer ${OPENAI_KEY}`);
@@ -269,7 +273,7 @@ describe("each provider kind speaks its own wire API to the fake (P-04)", () => 
       provider: "openrouter",
       modelId: "anthropic/claude-sonnet-5.5",
     });
-    const calls = stack.fake.requests("openai");
+    const calls = withoutTitles(stack.fake.requests("openai"));
     expect(calls).toHaveLength(1);
     expect(calls[0]?.path).toBe("/v1/chat/completions");
     expect(calls[0]?.headers.authorization).toBe(`Bearer ${OPENROUTER_KEY}`);
@@ -298,7 +302,7 @@ describe("each provider kind speaks its own wire API to the fake (P-04)", () => 
     });
     stack.fake.reset();
     await orgTurn({ backend: "org_key", provider: "openai-compatible", modelId: "llama-4-70b" });
-    const calls = stack.fake.requests("openai");
+    const calls = withoutTitles(stack.fake.requests("openai"));
     expect(calls).toHaveLength(1);
     expect(calls[0]?.headers.authorization).toBe(`Bearer ${COMPATIBLE_KEY}`);
     expect(calls[0]?.body?.stream_options?.include_usage).toBe(true);
@@ -308,7 +312,7 @@ describe("each provider kind speaks its own wire API to the fake (P-04)", () => 
     stack.fake.reset();
     const { g, created } = await orgTurn(MOCK, "Hello mock");
     expect(created.generation).toMatchObject({ backend: "mock", metered: false });
-    const calls = stack.fake.requests("openai");
+    const calls = withoutTitles(stack.fake.requests("openai"));
     expect(calls).toHaveLength(1);
     expect(calls[0]?.body?.model).toBe("mock-1");
     const [u] = await usageOf(g.id);
@@ -370,7 +374,7 @@ describe("per-message model switching across backends (AICHAT-02)", () => {
     ]);
 
     // The Claude turn saw the plan turn as history: the first question and the first answer (as an assistant turn).
-    const claude = stack.fake.requests("anthropic");
+    const claude = withoutTitles(stack.fake.requests("anthropic"));
     expect(claude).toHaveLength(1);
     const messages = claude[0]?.body?.messages as Json[];
     const textOf = (m: Json) =>
@@ -381,7 +385,7 @@ describe("per-message model switching across backends (AICHAT-02)", () => {
     expect(messages.some((m) => m.role === "assistant" && textOf(m) === answer1)).toBe(true);
     expect(textOf(messages.at(-1) as Json)).toContain("Second question on Claude");
     // And the mock turn saw both earlier answers.
-    const mock = stack.fake.requests("openai").at(-1);
+    const mock = withoutTitles(stack.fake.requests("openai")).at(-1);
     const mockMessages = mock?.body?.messages as Json[];
     expect(mockMessages.filter((m) => m.role === "assistant")).toHaveLength(2);
 

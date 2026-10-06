@@ -1,4 +1,4 @@
-import { type AiGenerationStatus, estimateTokens } from "@ocw/contracts";
+import { type AiGenerationStatus, estimateTokens, TITLE_PROMPT_MAX_CHARS } from "@ocw/contracts";
 import type { FilePart, ModelMessage, TextPart } from "ai";
 
 /**
@@ -60,9 +60,6 @@ function preamble(input: BuildInput): string {
     `You are chatting with ${input.viewer.displayName} in ${input.viewer.orgName}.`,
     "Answer in the language the user writes in. Use Markdown when it helps.",
   ];
-  if (input.purpose === "title") {
-    lines.push("Write a short title (2 to 5 words) for this conversation. Reply with the title only.");
-  }
   return lines.join("\n");
 }
 
@@ -106,7 +103,36 @@ function tokensOf(m: ModelMessage): number {
   return total;
 }
 
+/**
+ * The instructions of every title call (05-10, ADR-0014 shape): nothing about the viewer, the organization or any
+ * user-authored preference travels with a title prompt; the model only sees the first user message.
+ */
+export const TITLE_INSTRUCTIONS =
+  "You name chats. Reply with a short title for the user's message and nothing else: 2 to 5 words in the same " +
+  "language as the message, sentence case, no quotes, no markdown, no emoji and no trailing punctuation, at most " +
+  "32 characters. Describe what is being asked. Do not answer the message, do not ask questions and do not use tools.";
+
+/** The single user message of a title call: the first message between delimiters it cannot close. */
+export function titleUserMessage(text: string): string {
+  const safe = text.replaceAll("</request>", "</ request>").replaceAll("<request>", "< request>");
+  return `Write the title for this message.\n<request>\n${safe}\n</request>`;
+}
+
+/** Title purpose: the chat's first non-deleted user message (trimmed, cut to TITLE_PROMPT_MAX_CHARS), nothing else. */
+function buildTitle(input: BuildInput): BuiltPrompt {
+  const first = input.rows.find((r) => r.role === "user" && !r.deleted && r.body.trim().length > 0);
+  if (!first) return { instructions: TITLE_INSTRUCTIONS, messages: [], truncated: false };
+  const text = first.body.trim();
+  const cut = text.slice(0, TITLE_PROMPT_MAX_CHARS);
+  return {
+    instructions: TITLE_INSTRUCTIONS,
+    messages: [{ role: "user", content: titleUserMessage(cut) }],
+    truncated: cut.length < text.length,
+  };
+}
+
 export function buildModelMessages(input: BuildInput): BuiltPrompt {
+  if (input.purpose === "title") return buildTitle(input);
   const instructions = buildInstructions(input);
 
   const drafts: Draft[] = [];

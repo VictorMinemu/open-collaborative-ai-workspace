@@ -3,7 +3,7 @@ import { EventTypes } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TEST_SETUP_TOKEN, TestClient } from "../../testing";
-import { type AiStack, seedPlan, startAiStack, subscribeConv } from "../../testing-ai";
+import { type AiStack, seedPlan, startAiStack, subscribeConv, withoutTitles } from "../../testing-ai";
 import { invite } from "../../testing-workzone";
 
 /**
@@ -164,7 +164,7 @@ describe("regenerate the last answer (AICHAT-03)", () => {
     expect(usage[1]).toMatchObject({ generation_id: gid, kind: "chat" });
 
     // The prompt ends with the last user turn and never carries the replaced answer.
-    const calls = stack.fake.requests("responses");
+    const calls = withoutTitles(stack.fake.requests("responses"));
     expect(calls).toHaveLength(1);
     const input = calls[0]?.body?.input as Json[];
     const lastItem = input.at(-1) as Json;
@@ -192,8 +192,8 @@ describe("regenerate the last answer (AICHAT-03)", () => {
     });
     const g = await settled(res.generation.id);
     expect(g).toMatchObject({ status: "completed", backend: "mock", model_id: "mock-1" });
-    expect(stack.fake.requests("openai")).toHaveLength(1);
-    expect(stack.fake.requests("responses")).toHaveLength(0);
+    expect(withoutTitles(stack.fake.requests("openai"))).toHaveLength(1);
+    expect(withoutTitles(stack.fake.requests("responses"))).toHaveLength(0);
     const chat = (await su.query("select last_model from app.ai_chats where conversation_id = $1", [chatId]))
       .rows[0];
     expect(chat.last_model).toEqual(MOCK);

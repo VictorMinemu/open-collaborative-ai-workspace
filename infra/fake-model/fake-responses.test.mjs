@@ -281,7 +281,8 @@ describe("chat completions and Anthropic honour [[slow]] and count images", () =
 
 describe("title requests (05-10): instructions asking for a short title answer `Title: <first three words>`", () => {
   const TITLE = "You name chats. Reply with a short title for the user's message and nothing else.";
-  const request = "Write the title for this message.\n<request>\nPlan the quarterly offsite agenda\n</request>";
+  const request =
+    "Write the title for this message.\n<request>\nPlan the quarterly offsite agenda\n</request>";
 
   const textOfSse = (text) =>
     text

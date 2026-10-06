@@ -6,7 +6,6 @@ import {
   EventTypes,
   type MessagePage,
   type ModelRef,
-  normalizeSessionTitle,
   type Permission,
   type SendAiMessageRequest,
   type SendAiMessageResponse,
@@ -36,7 +35,6 @@ import {
   aiMessage,
   chatDetail,
   chatSummary,
-  DEFAULT_CHAT_TITLE,
   directoryOf,
   EMPTY_DIRECTORY,
   type GenerationRow,
@@ -45,6 +43,7 @@ import {
 } from "./dto";
 import { consumeGeneration, refuseOverLimit } from "./limits";
 import type { RunLoop } from "./run-loop";
+import { heuristicTitle } from "./titles";
 import { backendClassOf } from "./usage";
 
 /**
@@ -66,19 +65,6 @@ export interface AiChatDeps {
 
 const VIEWER_CAN: readonly Permission[] = ["ai_chat.use", "ai_chat.web", "ai_chat.share"];
 const NOT_FOUND = "AI chat not found";
-const TITLE_FALLBACK_MAX = 32;
-
-/** ADR-0014 heuristic title from the first message: normalized, else its first line cut to 32 chars. */
-export function heuristicTitle(body: string): string {
-  const normalized = normalizeSessionTitle(body);
-  if (normalized) return normalized;
-  const line = (body.split(/\r?\n/u).find((l) => l.trim().length > 0) ?? "").replace(/\s+/gu, " ").trim();
-  if (!line) return DEFAULT_CHAT_TITLE;
-  if (line.length <= TITLE_FALLBACK_MAX) return line;
-  const cut = line.slice(0, TITLE_FALLBACK_MAX);
-  const space = cut.lastIndexOf(" ");
-  return (space > 0 ? cut.slice(0, space) : cut).trim();
-}
 
 const isUniqueViolation = (err: unknown): boolean => {
   const e = err as { code?: string; cause?: { code?: string } } | null;

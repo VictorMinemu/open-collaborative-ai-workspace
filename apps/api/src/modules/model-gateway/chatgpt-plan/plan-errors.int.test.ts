@@ -3,7 +3,7 @@ import { EventTypes } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TEST_SETUP_TOKEN, TestClient } from "../../../testing";
-import { type AiStack, startAiStack, subscribeConv } from "../../../testing-ai";
+import { type AiStack, startAiStack, subscribeConv, withoutTitles } from "../../../testing-ai";
 import { invite } from "../../../testing-workzone";
 
 /**
@@ -55,7 +55,11 @@ const credential = async (userId: string) =>
 const messageOf = async (id: string) =>
   (await su.query("select * from app.messages where id = $1", [id])).rows[0] as Json;
 const usageOf = async (generationId: string) =>
-  (await su.query("select * from app.ai_usage_records where generation_id = $1", [generationId])).rows;
+  (
+    await su.query("select * from app.ai_usage_records where generation_id = $1 and kind = 'chat'", [
+      generationId,
+    ])
+  ).rows;
 
 /** A chat with one completed plan exchange, so a test can subscribe before its failing turn. */
 async function planChat(as: TestClient): Promise<string> {
@@ -81,8 +85,8 @@ async function failingTurn(as: TestClient, chatId: string, body: string) {
     res,
     g,
     msg: await messageOf(res.assistantMessage.id),
-    responses: stack.fake.requests("responses").length,
-    anthropic: stack.fake.requests("anthropic").length,
+    responses: withoutTitles(stack.fake.requests("responses")).length,
+    anthropic: withoutTitles(stack.fake.requests("anthropic")).length,
   };
 }
 
@@ -212,8 +216,8 @@ describe("a usage limit mid-answer keeps the partial text and never switches bil
     const res = await ok(send(sam, chatId, "now on the organization model", SONNET), 201);
     const g = await settled(res.generation.id);
     expect(g).toMatchObject({ status: "completed", backend: "org_key" });
-    expect(stack.fake.requests("anthropic").length).toBeGreaterThan(0);
-    expect(stack.fake.requests("responses")).toHaveLength(0);
+    expect(withoutTitles(stack.fake.requests("anthropic")).length).toBeGreaterThan(0);
+    expect(withoutTitles(stack.fake.requests("responses"))).toHaveLength(0);
     expect(res.generation.metered).toBe(true);
   });
 });

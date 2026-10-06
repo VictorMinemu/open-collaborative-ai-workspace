@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TEST_SETUP_TOKEN, TestClient } from "../../../testing";
-import { type AiStack, startAiStack } from "../../../testing-ai";
+import { type AiStack, startAiStack, withoutTitles } from "../../../testing-ai";
 import { invite } from "../../../testing-workzone";
 
 /**
@@ -265,7 +265,7 @@ describe("Sam connects his own ChatGPT plan by pasting the loopback address (D-0
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     const g = await settled((res.body as Json).generation.id);
     expect(g.status).toBe("completed");
-    const calls = stack.fake.requests("responses");
+    const calls = withoutTitles(stack.fake.requests("responses"));
     expect(calls.length).toBeGreaterThan(0);
     const token = bearerOf(calls.at(-1) as { headers: Record<string, unknown> });
     expect(token).toMatch(/^fake-plan-/u);
@@ -406,7 +406,7 @@ describe("refresh is serialized and rotation-safe; failures degrade (Pitfall 2)"
     const after = await stats();
     expect(after.refresh - before.refresh).toBe(1);
     const newest = after.accessTokenHashes.at(-1);
-    const bearers = stack.fake.requests("responses").map((r) => sha256(bearerOf(r)));
+    const bearers = withoutTitles(stack.fake.requests("responses")).map((r) => sha256(bearerOf(r)));
     expect(bearers.length).toBeGreaterThanOrEqual(2);
     expect(new Set(bearers)).toEqual(new Set([newest]));
     expect(bearers).not.toContain(sha256(old?.accessToken));
