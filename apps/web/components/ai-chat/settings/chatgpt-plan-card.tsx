@@ -1,14 +1,23 @@
 "use client";
 
 import type { ChatgptPlanState, ChatgptPlanStatus } from "@ocw/contracts";
-import { ArrowUpRight, CircleAlert } from "lucide-react";
+import { ArrowUpRight, CircleAlert, Unplug } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { toast } from "sonner";
 import { ChatgptConnectDialog } from "@/components/ai-chat/chatgpt-connect-dialog";
 import { Button, buttonVariants } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Spinner } from "@/components/ui/spinner";
 import { errorMessage } from "@/lib/api";
-import { useChatgptPlan } from "@/lib/chatgpt-plan-queries";
+import { useChatgptPlan, useDisconnectChatgpt } from "@/lib/chatgpt-plan-queries";
 import { cn } from "@/lib/utils";
 
 const EXPLAINER =
@@ -89,6 +98,68 @@ function Shell({ state, children }: { state: string; children: ReactNode }) {
   );
 }
 
+/** "Disconnect" with a confirmation: revokes the member's tokens at OpenAI and removes them (D-02). */
+function DisconnectButton({ variant = "outline" }: { variant?: "outline" | "ghost" }) {
+  const [open, setOpen] = useState(false);
+  const disconnect = useDisconnectChatgpt();
+  async function onConfirm() {
+    try {
+      await disconnect.mutateAsync();
+      setOpen(false);
+      toast.success("ChatGPT plan disconnected");
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  }
+  return (
+    <>
+      <Button
+        variant={variant}
+        size="sm"
+        onClick={() => setOpen(true)}
+        data-testid="chatgpt-disconnect"
+        className="h-10 flex-1 sm:h-8 sm:flex-none"
+      >
+        Disconnect
+      </Button>
+      <Dialog open={open} onOpenChange={(o) => !disconnect.isPending && setOpen(o)}>
+        <DialogContent data-testid="chatgpt-disconnect-dialog">
+          <DialogHeader>
+            <span className="mb-1 flex size-10 items-center justify-center rounded-xl border border-destructive/25 bg-destructive/10 text-destructive shadow-xs">
+              <Unplug className="size-5" strokeWidth={1.75} />
+            </span>
+            <DialogTitle>Disconnect your ChatGPT plan?</DialogTitle>
+            <DialogDescription>
+              Your AI chats on ChatGPT models will switch to organization models. Your sign-in is revoked at
+              OpenAI and removed from this workspace; you can connect again at any time.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setOpen(false)}
+              disabled={disconnect.isPending}
+              className="h-10 sm:h-9"
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={onConfirm}
+              disabled={disconnect.isPending}
+              data-testid="chatgpt-disconnect-confirm"
+              className="h-10 sm:h-9"
+            >
+              {disconnect.isPending ? <Spinner /> : null}
+              Disconnect
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
 function Connected({ status }: { status: ChatgptPlanStatus }) {
   const plan = planLabel(status.planType);
   return (
@@ -133,6 +204,7 @@ function Connected({ status }: { status: ChatgptPlanStatus }) {
           Manage usage
           <ArrowUpRight aria-hidden className="size-3.5" />
         </a>
+        <DisconnectButton />
       </div>
     </Shell>
   );
@@ -140,8 +212,8 @@ function Connected({ status }: { status: ChatgptPlanStatus }) {
 
 /**
  * Settings › AI chat › ChatGPT plan (D-02, P-09): the member's own plan, never anyone else's. Not connected →
- * "Continue with ChatGPT"; connected → account, plan, "Manage usage"; reconnect / not eligible / turned off by the
- * admin → why, and what to do.
+ * "Continue with ChatGPT"; connected → account, plan, "Manage usage", "Disconnect"; reconnect / not eligible /
+ * turned off by the admin → why, and what to do.
  */
 export function ChatgptPlanCard() {
   const status = useChatgptPlan();
@@ -189,11 +261,14 @@ export function ChatgptPlanCard() {
             {s.email ? <p className="mt-1 truncate text-muted-foreground text-xs">{s.email}</p> : null}
           </div>
         </div>
-        {a?.action ? (
-          <ContinueWithChatgptButton onClick={() => setConnectOpen(true)} testId="chatgpt-reconnect">
-            {a.action}
-          </ContinueWithChatgptButton>
-        ) : null}
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          {a?.action ? (
+            <ContinueWithChatgptButton onClick={() => setConnectOpen(true)} testId="chatgpt-reconnect">
+              {a.action}
+            </ContinueWithChatgptButton>
+          ) : null}
+          {s.connectedAt ? <DisconnectButton variant="ghost" /> : null}
+        </div>
       </Shell>
     );
   }
