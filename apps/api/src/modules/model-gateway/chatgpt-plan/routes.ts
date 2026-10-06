@@ -5,8 +5,8 @@ import {
   ChatgptSignInStartRequest,
   ChatgptSignInStartResponse,
 } from "@ocw/contracts";
-import { aiChatPolicies, type Tx, tenantOf } from "@ocw/db";
-import { sql } from "drizzle-orm";
+import { aiChatPolicies, type Tx, tenantOf, userModelCredentials } from "@ocw/db";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { type App, authOf, type Core, tenant } from "../../../core";
 import { randomToken } from "../../../lib/crypto";
@@ -277,6 +277,33 @@ export function registerChatgptPlanRoutes(app: App, core: Core): void {
         throw err;
       }
     },
+  );
+
+  // The one-time welcome after connecting (OpenAI UI rules, 05-07): the caller's own row only, idempotent (the first
+  // time stays). Without a connection nothing is written and the status is returned as it is.
+  app.post(
+    "/me/model-credentials/chatgpt/welcome-seen",
+    {
+      config: { authz: "user" },
+      preHandler: core.identity.requireUser,
+      schema: { tags, response: { 200: ChatgptPlanStatus } },
+    },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        await perms.assertCan(req, tx, "ai_chat.use", orgResource());
+        const userId = authOf(req).userId;
+        await tx
+          .update(userModelCredentials)
+          .set({ welcomeSeenAt: new Date().toISOString() })
+          .where(
+            and(
+              eq(userModelCredentials.userId, userId),
+              eq(userModelCredentials.provider, "chatgpt_plan"),
+              isNull(userModelCredentials.welcomeSeenAt),
+            ),
+          );
+        return planStatusOf(await credentialOf(tx, userId), await loadAiChatPolicy(tx));
+      }),
   );
 
   app.delete(

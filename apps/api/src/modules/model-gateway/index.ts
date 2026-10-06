@@ -15,7 +15,7 @@ import {
 } from "@ocw/contracts";
 import { aiUserPreferences, modelProviders, type Tx, userModelCredentials } from "@ocw/db";
 import type { JSONValue, LanguageModel } from "ai";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, ne } from "drizzle-orm";
 import type { ApiModule, App, Core } from "../../core";
 import { MissingSecretError } from "../../lib/secret-store";
 import { allowedModels } from "../agent";
@@ -364,15 +364,28 @@ export function createModelGateway(core: Core, opts: { fetch?: typeof fetch } = 
     async reportFailure(tx, ref, requesterUserId, e) {
       if (ref.backend !== "chatgpt_plan" || !e.credentialState) return;
       if (e.credentialState !== "needs_reconnect" && e.credentialState !== "not_eligible") return;
-      await tx
+      const [changed] = await tx
         .update(userModelCredentials)
         .set({ status: e.credentialState, lastError: e.code, updatedAt: new Date().toISOString() })
         .where(
           and(
             eq(userModelCredentials.userId, requesterUserId),
             eq(userModelCredentials.provider, "chatgpt_plan"),
+            ne(userModelCredentials.status, e.credentialState),
           ),
-        );
+        )
+        .returning({ id: userModelCredentials.id });
+      // A credential transition is a sensitive change (AGENTS principle 12): code and state only, never a body.
+      if (changed) {
+        await core.audit.record(tx, {
+          action: "ai_credential.state_changed",
+          resourceType: "user_model_credential",
+          resourceId: changed.id,
+          actorKind: "system",
+          userId: requesterUserId,
+          metadata: { provider: "chatgpt_plan", state: e.credentialState, reason: e.code },
+        });
+      }
     },
   };
   return gateway;
