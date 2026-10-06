@@ -35,6 +35,7 @@ import { createMcpModule } from "./modules/mcp";
 import { AuthzDeniedError, createOrganizationModule, recordAuthzDenial } from "./modules/organization";
 import { createPluginsModule } from "./modules/plugins";
 import { createRealtimeModule, createRealtimeService } from "./modules/realtime";
+import { createSearchModule } from "./modules/search";
 import { createSecretsModule, createSecretsService } from "./modules/secrets";
 import { createWorkSessionModule } from "./modules/work-session";
 
@@ -236,6 +237,7 @@ export async function buildApp(
     createSecretsModule(),
     createChatModule(core), // B1
     createArtifactModule(core, { access: createConversationAccess(core) }), // Phase 4: attachments (ADR-0015)
+    createSearchModule(core), // Phase 4: full-text search (CHAT-11, D-04)
     createAgentModule(core), // B2
     createBotCapabilitiesModule(core), // Phase 3.1: capabilities, bot policy, governance
     createMcpModule(core), // Phase 3.1: MCP server registry (D-13)

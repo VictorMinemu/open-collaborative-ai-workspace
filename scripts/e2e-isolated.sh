@@ -91,6 +91,8 @@ export OCW_PUBLIC_API_URL="http://127.0.0.1:$API_PORT" OCW_PUBLIC_WEB_URL="http:
 export OCW_TRUSTED_ORIGINS="" OCW_MODEL_PROVIDER=mock HOST="${OCW_E2E_API_HOST:-127.0.0.1}" PORT="$API_PORT"
 # Every spec signs real browsers in from 127.0.0.1; production keeps the default (30/min).
 export OCW_SIGNIN_RATE_LIMIT_PER_MINUTE="${OCW_SIGNIN_RATE_LIMIT_PER_MINUTE:-600}"
+# The search specs type and filter as one user many times a minute; production keeps 30/min/user (P-11).
+export OCW_SEARCH_RATE_LIMIT_PER_MINUTE="${OCW_SEARCH_RATE_LIMIT_PER_MINUTE:-600}"
 export OCW_E2E_BASE_URL="$OCW_PUBLIC_WEB_URL" OCW_E2E_API_URL="$OCW_PUBLIC_API_URL" OCW_API_URL="$OCW_PUBLIC_API_URL"
 # The marketplace and MCP specs: the API proxies the fake ClawHub; the simulated cell probes the fake MCP.
 export OCW_E2E_FAKE_URL="http://127.0.0.1:$FAKE_PORT" OCW_CLAWHUB_URL="${OCW_E2E_CLAWHUB_URL:-http://127.0.0.1:$FAKE_PORT}"

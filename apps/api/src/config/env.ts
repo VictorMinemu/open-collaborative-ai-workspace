@@ -82,6 +82,11 @@ export const EnvSchema = z
      * only test harnesses that sign many browsers in from one IP raise it.
      */
     OCW_SIGNIN_RATE_LIMIT_PER_MINUTE: SignInRatePerMinute,
+    /**
+     * Search requests per user per minute, shared by every /search route (P-11). Keep the default in
+     * production; only test harnesses that drive many searches as one user raise it.
+     */
+    OCW_SEARCH_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(1).max(10_000).default(30),
     OCW_SMTP_URL: z
       .string()
       .regex(/^(smtps?:\/\/\S+|memory:)$/, "must be an smtp:// or smtps:// URL")
