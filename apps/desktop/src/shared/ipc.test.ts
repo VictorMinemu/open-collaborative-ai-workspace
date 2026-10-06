@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import { Channels } from "./channels";
 import {
   AddProjectArgs,
+  ChatgptLoopbackAwaitArgs,
+  ChatgptLoopbackCancelArgs,
   CheckServerArgs,
   DaemonStatusPayload,
   EnrollArgs,
@@ -149,7 +152,7 @@ describe("Full access opt-in is read-only outside the main process (ADR-0012, P-
     expect(deriveStatus({ ...base, report: null, localFullAccess: true }).fullAccessOptIn).toBe(true);
   });
 
-  it("the web origin's preload API has no Full access setter: only the badge count was added (04-11)", async () => {
+  it("the web origin's preload API has no Full access setter: only the badge count (04-11) and the ChatGPT loopback (05-07) were added", async () => {
     let exposed: Record<string, unknown> | null = null;
     const invoke = vi.fn(async () => undefined);
     vi.doMock("electron", () => ({
@@ -165,6 +168,9 @@ describe("Full access opt-in is read-only outside the main process (ADR-0012, P-
     vi.doUnmock("electron");
     expect(Object.keys(exposed ?? {}).sort()).toEqual([
       "addProject",
+      "chatgptLoopbackAwait",
+      "chatgptLoopbackCancel",
+      "chatgptLoopbackPrepare",
       "isDesktop",
       "listProjects",
       "onStatus",
@@ -181,6 +187,72 @@ describe("Full access opt-in is read-only outside the main process (ADR-0012, P-
     await setBadgeCount("3");
     await setBadgeCount(1.5);
     await setBadgeCount({ n: 1 });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+});
+
+describe("ChatGPT loopback sign-in channels (05-07, T-05-07-04)", () => {
+  const token = "a".repeat(20) + "B-_" + "9".repeat(20);
+
+  it("three channels exist under ocw:chatgpt-loopback-*", () => {
+    expect(Channels.chatgptLoopbackPrepare).toBe("ocw:chatgpt-loopback-prepare");
+    expect(Channels.chatgptLoopbackAwait).toBe("ocw:chatgpt-loopback-await");
+    expect(Channels.chatgptLoopbackCancel).toBe("ocw:chatgpt-loopback-cancel");
+  });
+
+  it("prepare takes no arguments", () => {
+    expect(parseArgs(NoArgs, undefined)).toBeUndefined();
+    expect(() => parseArgs(NoArgs, { port: 80 })).toThrow();
+  });
+
+  it("await takes a flow token and an authorize URL of at most 2048 characters, nothing else", () => {
+    const ok = { flowToken: token, authorizeUrl: "https://auth.openai.com/oauth/authorize?x=1" };
+    expect(parseArgs(ChatgptLoopbackAwaitArgs, ok)).toEqual(ok);
+    expect(() => parseArgs(ChatgptLoopbackAwaitArgs, { ...ok, extra: 1 })).toThrow("invalid arguments");
+    expect(() => parseArgs(ChatgptLoopbackAwaitArgs, { ...ok, flowToken: "short" })).toThrow();
+    expect(() => parseArgs(ChatgptLoopbackAwaitArgs, { ...ok, flowToken: `${token}!` })).toThrow();
+    expect(() => parseArgs(ChatgptLoopbackAwaitArgs, { ...ok, flowToken: "../".repeat(15) })).toThrow();
+    expect(() =>
+      parseArgs(ChatgptLoopbackAwaitArgs, { ...ok, authorizeUrl: `https://a.b/${"x".repeat(2048)}` }),
+    ).toThrow();
+    expect(() => parseArgs(ChatgptLoopbackAwaitArgs, { ...ok, authorizeUrl: "" })).toThrow();
+    expect(() => parseArgs(ChatgptLoopbackAwaitArgs, ok.authorizeUrl)).toThrow();
+  });
+
+  it("cancel takes a flow token only", () => {
+    expect(parseArgs(ChatgptLoopbackCancelArgs, { flowToken: token })).toEqual({ flowToken: token });
+    expect(() => parseArgs(ChatgptLoopbackCancelArgs, { flowToken: token, port: 1455 })).toThrow();
+    expect(() => parseArgs(ChatgptLoopbackCancelArgs, token)).toThrow();
+    expect(() => parseArgs(ChatgptLoopbackCancelArgs, undefined)).toThrow();
+  });
+
+  it("the preload forwards only well-typed values on the three channels", async () => {
+    let exposed: Record<string, (...a: unknown[]) => Promise<unknown>> | null = null;
+    const invoke = vi.fn(async () => undefined);
+    vi.doMock("electron", () => ({
+      contextBridge: {
+        exposeInMainWorld: (_name: string, api: Record<string, (...a: unknown[]) => Promise<unknown>>) => {
+          exposed = api;
+        },
+      },
+      ipcRenderer: { invoke, on: vi.fn(), removeListener: vi.fn() },
+    }));
+    vi.resetModules();
+    await import("../preload/main");
+    vi.doUnmock("electron");
+    const api = exposed as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
+    await api.chatgptLoopbackPrepare?.();
+    expect(invoke).toHaveBeenLastCalledWith("ocw:chatgpt-loopback-prepare");
+    await api.chatgptLoopbackAwait?.(token, "https://auth.openai.com/x");
+    expect(invoke).toHaveBeenLastCalledWith("ocw:chatgpt-loopback-await", {
+      flowToken: token,
+      authorizeUrl: "https://auth.openai.com/x",
+    });
+    await api.chatgptLoopbackCancel?.(token);
+    expect(invoke).toHaveBeenLastCalledWith("ocw:chatgpt-loopback-cancel", { flowToken: token });
+    invoke.mockClear();
+    await expect(api.chatgptLoopbackAwait?.({ flowToken: token }, 1)).rejects.toThrow();
+    await api.chatgptLoopbackCancel?.(42);
     expect(invoke).not.toHaveBeenCalled();
   });
 });
