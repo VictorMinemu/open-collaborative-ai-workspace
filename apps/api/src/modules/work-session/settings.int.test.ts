@@ -667,12 +667,14 @@ describe("tenant isolation (Task 2)", () => {
     expect(after.rows[0]).toEqual(before.rows[0]);
 
     // Org B's device cannot report settings for org A's session.
+    // Org A's own device may still report its settings for the new session concurrently, so the check is on
+    // what the intruder sent (model "evil", fullAccess), not on an exact before/after snapshot.
     const { id: target } = await newSession({ title: "Tenant target" });
-    const effectiveBefore = (await detail(target)).session.settings.effective;
     intruder.event(target, { type: "session.settings", model: "evil", permissionMode: "fullAccess" });
     await sleep(400);
     const s = (await detail(target)).session;
-    expect(s.settings.effective).toEqual(effectiveBefore);
+    expect(s.settings.effective?.model ?? null).not.toBe("evil");
+    expect(s.settings.effective?.permissionMode ?? null).not.toBe("fullAccess");
     expect(s.fullAccess).toBe(false);
     await intruder.close();
   });
