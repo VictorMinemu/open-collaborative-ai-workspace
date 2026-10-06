@@ -27,6 +27,7 @@ import {
   loadAiChatPolicy,
   type ModelGateway,
   ModelUnavailableError,
+  PlanTokenUnavailableError,
   type ResolvedModel,
 } from "../model-gateway";
 import { channelResource, orgResource, type PermissionService } from "../organization";
@@ -91,6 +92,14 @@ export function createAiChatService(deps: AiChatDeps) {
         throw new HttpError(409, "model_unavailable", "This model is not available to you right now", {
           reason: err.reason,
         });
+      }
+      // The member's plan tokens could not be refreshed right now (05-05): nothing was cleared, try again later.
+      if (err instanceof PlanTokenUnavailableError) {
+        throw new HttpError(
+          503,
+          "usage_unavailable",
+          "ChatGPT is temporarily unavailable. Try again shortly.",
+        );
       }
       throw err;
     }

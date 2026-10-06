@@ -9,6 +9,17 @@ export class ModelUnavailableError extends Error {
 }
 
 /**
+ * The member's ChatGPT plan tokens could not be refreshed for a transient reason (auth server outage, a refresh
+ * running elsewhere for too long). Nothing was cleared: the send answers 503 `usage_unavailable` (Pitfall 2).
+ */
+export class PlanTokenUnavailableError extends Error {
+  constructor(readonly code: string) {
+    super("chatgpt plan token temporarily unavailable");
+    this.name = "PlanTokenUnavailableError";
+  }
+}
+
+/**
  * Provider failure → normalized `AiErrorCode` (PURE). AI SDK errors carry `requestBodyValues` (the prompt) and
  * `responseBody`; this function reads codes and status only and never copies either (P-10). Log the classified
  * value (`{code, status, provider}`), never the error object.

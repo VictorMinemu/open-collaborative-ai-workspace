@@ -22,6 +22,7 @@ import {
   loadAiChatPolicy,
   type ModelGateway,
   ModelUnavailableError,
+  PlanTokenUnavailableError,
   type ResolvedModel,
 } from "../model-gateway";
 import { aiMessage, chatSummary, EMPTY_DIRECTORY, type GenerationRow, generationDto } from "./dto";
@@ -112,7 +113,8 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
       try {
         return { gen, turn, ref, resolved: await deps.gateway.resolve(tx, ref, gen.requesterUserId) };
       } catch (err) {
-        if (err instanceof ModelUnavailableError) return { gen, turn, ref, unavailable: err };
+        if (err instanceof ModelUnavailableError || err instanceof PlanTokenUnavailableError)
+          return { gen, turn, ref, unavailable: err };
         throw err;
       }
     });
@@ -214,8 +216,8 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
           status: "failed",
           finishReason: null,
           error: {
-            code: unavailableCode(e),
-            param: e.reason,
+            code: e instanceof ModelUnavailableError ? unavailableCode(e) : "usage_unavailable",
+            param: e instanceof ModelUnavailableError ? e.reason : null,
             status: null,
             credentialState: null,
             retryable: false,

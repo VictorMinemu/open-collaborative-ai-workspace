@@ -13,10 +13,9 @@ import { randomToken } from "../../../lib/crypto";
 import { conflict, HttpError, notFound } from "../../../lib/errors";
 import { createPermissionService, orgResource } from "../../organization";
 import { loadAiChatPolicy } from "../policy";
-import { credentialOf, planStatusOf, storeCredential } from "./credentials";
+import { authBaseOf, credentialOf, disconnectCredential, planStatusOf, storeCredential } from "./credentials";
 import {
   CHATGPT_SCOPES,
-  DEFAULT_CHATGPT_AUTH_BASE_URL,
   type Discovery,
   DYNAMIC_CLIENT_ID,
   discovery,
@@ -47,9 +46,6 @@ const FlowRecord = z.object({
   redirectPort: z.number().int(),
 });
 type FlowRecord = z.infer<typeof FlowRecord>;
-
-/** The issuer the API signs members in with: OpenAI, or the fake in tests (P-12: the override is test-only). */
-export const authBaseOf = (core: Core) => core.env.OCW_CHATGPT_AUTH_BASE_URL ?? DEFAULT_CHATGPT_AUTH_BASE_URL;
 
 const REDIRECT_MESSAGES = {
   signin_cancelled: "The sign-in was cancelled in the ChatGPT window.",
@@ -281,6 +277,22 @@ export function registerChatgptPlanRoutes(app: App, core: Core): void {
         throw err;
       }
     },
+  );
+
+  app.delete(
+    "/me/model-credentials/chatgpt",
+    {
+      config: { authz: "user" },
+      logLevel: "info",
+      preHandler: core.identity.requireUser,
+      schema: { tags, response: { 200: ChatgptPlanStatus } },
+    },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        await perms.assertCan(req, tx, "ai_chat.use", orgResource());
+        await disconnectCredential(tx, core, authOf(req).userId);
+        return planStatusOf(null, await loadAiChatPolicy(tx));
+      }),
   );
 
   if (!chatgptPlanSeedEnabled(core)) return;
