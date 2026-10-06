@@ -68,6 +68,15 @@ const WZ_PROMPT = [
   "export function sum(values: number[]): number {",
   "  return values.reduce((total, value) => total + value, 0);",
   "}",
+  "",
+  "export function average(values: number[]): number {",
+  "  if (values.length === 0) return 0;",
+  "  return sum(values) / values.length;",
+  "}",
+  "",
+  "export function clamp(value: number, min: number, max: number): number {",
+  "  return Math.min(Math.max(value, min), max);",
+  "}",
   FENCE,
 ].join("\n");
 
@@ -86,8 +95,18 @@ async function post(api: APIRequestContext, conversationId: string, body: string
   return ((await res.json()) as { id: string }).id;
 }
 
+/** A fenced block is visible and shiki has coloured at least one token (an inline --sdm-c colour). */
 async function expectCode(scope: Locator) {
   await expect(scope.locator("pre code").first()).toBeVisible();
+  await expect
+    .poll(
+      () =>
+        scope
+          .locator("pre code span[style]")
+          .evaluateAll((els) => els.some((e) => /--sdm-c:\s*#/i.test(e.getAttribute("style") ?? ""))),
+      { message: "shiki-highlighted tokens", timeout: 15_000 },
+    )
+    .toBe(true);
 }
 
 test.describe.configure({ mode: "serial" });
@@ -219,7 +238,8 @@ test("renderer: a Work Zone answer with a fenced block renders through the share
     device = await startFakeDevice(admin, {
       name: `E2E Renderer ${tag}`,
       projectName: `renderer-${tag}`,
-      env: { OCW_RUNTIME_FAKE_ECHO: "1" },
+      // Slow enough that the open fence stays on screen for a few seconds while the answer streams.
+      env: { OCW_RUNTIME_FAKE_ECHO: "1", OCW_RUNTIME_FAKE_DELAY_MS: "600" },
     });
     // Plan mode: the fake never asks for approval; with ECHO it repeats the prompt (a fenced block) in its answer.
     const created = await admin.post("/api/v1/work-sessions", {
@@ -235,6 +255,15 @@ test("renderer: a Work Zone answer with a fenced block renders through the share
     sessionId = ((await created.json()) as { id: string }).id;
 
     await page.goto(`${BASE_URL}/work-zone/${sessionId}`);
+    // While it streams, the unterminated fence already renders as a code block (never literal backticks).
+    const live = page
+      .locator('[data-testid="assistant-message"]:has([data-testid="streaming-caret"])')
+      .last();
+    await expect(live.locator('[data-streamdown="code-block"][data-incomplete="true"]')).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(live).not.toContainText(FENCE);
+    await shot(page, `renderer-workzone-streaming-${tag}`);
     await expect(page.getByTestId("session-view")).toHaveAttribute("data-status", "idle", {
       timeout: 30_000,
     });

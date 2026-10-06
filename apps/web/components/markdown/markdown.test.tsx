@@ -104,7 +104,8 @@ describe("Markdown: no raw HTML, no unsafe URLs (T-04-02-01)", () => {
     );
     expect(attrs(html, "href")).toEqual([
       "https://example.com/a?b=1",
-      "http://example.com",
+      // The hardening plugin rebuilds absolute URLs from the parsed URL (adds the root slash).
+      "http://example.com/",
       "mailto:team@example.com",
       "/chat/abc?m=1",
     ]);
@@ -196,5 +197,39 @@ describe("Markdown: the shared subset", () => {
     const elapsed = performance.now() - started;
     expect(html).toContain("value9999");
     expect(elapsed).toBeLessThan(1000);
+  });
+});
+
+describe("Markdown: streaming (D-05)", () => {
+  const OPEN_FENCE =
+    "Here is the helper:\n\n```ts\nexport function sum(values: number[]) {\n  return values.reduce(";
+
+  it("an unterminated fence while streaming renders a code block marked incomplete, never a literal fence", () => {
+    const html = render(OPEN_FENCE, { variant: "document", streaming: true });
+    expect(html).toMatch(/<[^>]*data-incomplete="true"/);
+    expect(html).toContain("values.reduce(");
+    expect(html).not.toContain("```");
+  });
+
+  it("an unfinished emphasis while streaming is completed instead of showing asterisks", () => {
+    const html = render("The answer is **almost read", { variant: "document", streaming: true });
+    expect(html).toMatch(/<strong[^>]*>almost read<\/strong>/);
+    expect(html).not.toContain("**");
+  });
+
+  it("without streaming the same body renders the same markup every time", () => {
+    const first = render(OPEN_FENCE, { variant: "document" });
+    expect(render(OPEN_FENCE, { variant: "document" })).toEqual(first);
+    expect(first).toContain("values.reduce(");
+    expect(first).not.toMatch(/data-incomplete="true"/);
+  });
+
+  it("raw HTML in a streamed answer is still text", () => {
+    const html = render('Look <img src=x onerror="alert(1)"> and <script>alert(2)</script>', {
+      variant: "document",
+      streaming: true,
+    });
+    expectSafe(html);
+    expect(html).toContain("&lt;script&gt;");
   });
 });
