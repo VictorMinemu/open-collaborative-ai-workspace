@@ -23,13 +23,21 @@ import {
   pageCursorCount,
   ThreadResponse,
 } from "@ocw/contracts";
-import { conversationMembers, conversations, orgMembers, type TenantCtx, type Tx, tenantOf } from "@ocw/db";
+import {
+  conversationMembers,
+  conversations,
+  orgMembers,
+  orgUnits,
+  type TenantCtx,
+  type Tx,
+  tenantOf,
+} from "@ocw/db";
 import { and, eq, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { type ApiModule, authOf, type Core, tenant } from "../../core";
 import type { AgentMention, ThreadContext } from "../../lib/chat-agent-bridge";
-import { badRequest, conflict, gone, notFound } from "../../lib/errors";
+import { badRequest, conflict, forbidden, gone, notFound } from "../../lib/errors";
 import {
   AuthzDeniedError,
   agentResource,
@@ -68,6 +76,7 @@ import {
   listMessagesAfter,
   listMessagesAround,
   loadThread,
+  memberUnitIdsOf,
   notifyListChanged,
   type PostResult,
   postMessage,
@@ -103,6 +112,30 @@ const zoneOf = (author: { clientTimeZone?: string }) =>
  * D-06: group DMs).
  */
 const MESSAGE_KINDS = ["channel", "dm", "group"] as const;
+
+/**
+ * The unit a channel is placed in (create or move, CHAT-02, T-04-08-01): it must exist in the tenant (another
+ * organization's unit is simply missing: 404 `unit_not_found`), and unless `mayManageUnits` (the resolver's
+ * `unit.manage` at organization scope) it must lie on the path of one of the caller's own units (403
+ * `unit_not_allowed`): a member of Product → Mobile may use Mobile or Product, never Finance.
+ */
+async function placeableUnit(
+  tx: Tx,
+  unitId: string,
+  userId: string,
+  mayManageUnits: boolean,
+): Promise<typeof orgUnits.$inferSelect> {
+  const [u] = await tx.select().from(orgUnits).where(eq(orgUnits.id, unitId)).limit(1);
+  if (!u) throw notFound("Unit not found", "unit_not_found");
+  if (mayManageUnits) return u;
+  if (!(await memberUnitIdsOf(tx, userId)).includes(u.id)) {
+    throw forbidden(
+      "You can only place a channel in your own department, team or project",
+      "unit_not_allowed",
+    );
+  }
+  return u;
+}
 
 /** Direct conversations (1:1 and group) are flat: no threads, bot replies at the top level (D-04, D-06). */
 const isDirect = (kind: string) => kind === "dm" || kind === "group";
@@ -534,6 +567,7 @@ export function createChatModule(core: Core): ApiModule {
               channels,
               orgSeq: await core.realtime.lastSeq(tx, `org:${auth.organizationId}`),
               userSeq: await core.realtime.lastSeq(tx, `user:${auth.userId}`),
+              memberUnitIds: await memberUnitIdsOf(tx, auth.userId),
             };
           }),
       );
@@ -549,6 +583,10 @@ export function createChatModule(core: Core): ApiModule {
           core.db.withTenant(tenant(req), async (tx) => {
             const auth = authOf(req);
             const { name, topic, visibility } = req.body;
+            // CHAT-02: the organization (null) or a unit on one of the caller's own paths (admins: any unit).
+            const unit = req.body.unitId
+              ? await placeableUnit(tx, req.body.unitId, auth.userId, await perms.can(req, tx, "unit.manage"))
+              : null;
             const [row] = await tx
               .insert(conversations)
               .values({
@@ -559,6 +597,7 @@ export function createChatModule(core: Core): ApiModule {
                 topic: topic || null,
                 visibility,
                 createdBy: auth.userId,
+                unitId: unit?.id ?? null,
               })
               .onConflictDoNothing()
               .returning();
@@ -575,7 +614,7 @@ export function createChatModule(core: Core): ApiModule {
               resourceType: "conversation",
               resourceId: row.id,
               sessionId: auth.sessionId,
-              metadata: { name, visibility },
+              metadata: { name, visibility, unitId: unit?.id ?? null },
             });
             await notifyListChanged(tx, deps, row, EventTypes.conversationCreated);
             return summaryOf(req, tx, row.id);

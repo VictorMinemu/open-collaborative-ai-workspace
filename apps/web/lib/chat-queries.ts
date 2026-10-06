@@ -84,6 +84,7 @@ export function useCreateChannel() {
       qc.setQueryData<ChannelList>(chatKeys.channels, (prev) =>
         prev
           ? {
+              ...prev,
               channels: [...prev.channels.filter((c) => c.id !== channel.id), channel].sort((a, b) =>
                 (a.name ?? "").localeCompare(b.name ?? ""),
               ),
@@ -97,7 +98,7 @@ export function useCreateChannel() {
 
 function patchChannel(qc: QueryClient, id: string, patch: Partial<ChannelSummary>) {
   qc.setQueryData<ChannelList>(chatKeys.channels, (prev) =>
-    prev ? { channels: prev.channels.map((c) => (c.id === id ? { ...c, ...patch } : c)) } : prev,
+    prev ? { ...prev, channels: prev.channels.map((c) => (c.id === id ? { ...c, ...patch } : c)) } : prev,
   );
 }
 

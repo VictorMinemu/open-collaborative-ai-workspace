@@ -175,6 +175,11 @@ export interface ChannelFacts {
    * moderation). Omitted = a channel.
    */
   kind?: "channel" | "dm" | "group";
+  /**
+   * The unit the channel belongs to, root → self (CHAT-02): unit-scoped allow and deny rules apply to the channels of
+   * that unit (principle 6). Omitted or [] = the organization (and every direct conversation).
+   */
+  unitPath?: readonly string[];
 }
 
 function channelRelations(c: ChannelFacts): Relation[] {
@@ -193,7 +198,7 @@ function channelState(c: ChannelFacts): ResourceState[] {
 }
 
 export function channelResource(c: ChannelFacts): ResourceFacts {
-  return facts("channel", channelRelations(c), channelState(c));
+  return facts("channel", channelRelations(c), channelState(c), c.unitPath ?? []);
 }
 
 export function channelMemberResource(c: ChannelFacts, targetIsViewer: boolean): ResourceFacts {
@@ -201,6 +206,7 @@ export function channelMemberResource(c: ChannelFacts, targetIsViewer: boolean):
     "channel_member",
     [...channelRelations(c), ...when(targetIsViewer, "self" as const)],
     channelState(c),
+    c.unitPath ?? [],
   );
 }
 

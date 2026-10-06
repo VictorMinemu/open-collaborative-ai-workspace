@@ -9,7 +9,7 @@ import {
 } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
 import { useQueryClient } from "@tanstack/react-query";
-import { Bookmark, ChevronRight, Hash, Lock, MessageSquarePlus, Plus } from "lucide-react";
+import { Bookmark, ChevronRight, MessageSquarePlus, Plus } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
@@ -19,32 +19,17 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
 import { applySaveUpdate, bumpDmLatest, bumpLatest, chatKeys, useChannels, useDms } from "@/lib/chat-queries";
+import { usePermissionCheck } from "@/lib/permissions";
 import { useMe } from "@/lib/queries";
 import { useTopic } from "@/lib/realtime";
 import { cn } from "@/lib/utils";
+import { ChannelIcon } from "./channel-icon";
 import { CreateChannelDialog } from "./create-channel-dialog";
 import { NewDmDialog } from "./new-dm-dialog";
 import { GroupAvatars, PrincipalAvatar } from "./principal-avatar";
+import { SidebarSections } from "./sidebar-sections";
 
-export function ChannelIcon({
-  channel,
-  className,
-}: {
-  channel: Pick<ChannelSummary, "visibility">;
-  className?: string;
-}) {
-  const Icon = channel.visibility === "private" ? Lock : Hash;
-  return (
-    <Icon
-      className={cn("size-4 shrink-0", className)}
-      strokeWidth={channel.visibility === "private" ? 2 : 2.2}
-    />
-  );
-}
-
-export function isUnread(c: ChannelSummary): boolean {
-  return c.isMember && c.latestMessageSeq > c.lastReadSeq;
-}
+export { ChannelIcon, isUnread } from "./channel-icon";
 
 /** Watches one DM for new messages so its unread dot updates live (own messages never count). */
 function DmWatcher({ dm, meId }: { dm: DmSummary; meId: string }) {
@@ -123,7 +108,8 @@ function useChannelListSync(
     }, 150);
   };
   const onFrame = (frame: TopicFrame) => {
-    if (frame.type.startsWith("conversation.")) refetch();
+    // A renamed, moved or deleted unit changes section titles and channel placement (CHAT-02).
+    if (frame.type.startsWith("conversation.") || frame.type === EventTypes.unitsUpdated) refetch();
   };
   // The member's own stream also carries their private saves (P-04), from any of their devices.
   const onUserFrame = (frame: TopicFrame) => {
@@ -265,13 +251,24 @@ export function ChatSidebar() {
   const me = useMe({ enabled: false });
   const channels = useChannels();
   const dms = useDms();
-  const [creating, setCreating] = useState(false);
+  const can = usePermissionCheck();
+  const [creating, setCreating] = useState<{ unitId: string | null } | null>(null);
   const [browseOpen, setBrowseOpen] = useState(false);
   const [newDmOpen, setNewDmOpen] = useState(false);
 
   const list = channels.data?.channels ?? [];
+  const memberUnitIds = new Set(channels.data?.memberUnitIds ?? []);
   const joined = list.filter((c) => c.isMember);
-  const others = list.filter((c) => !c.isMember);
+  // CHAT-02: the public channels of the member's own departments and teams show in their section (muted until
+  // joined), so a new department channel reaches everyone in it live; everything else stays under More channels.
+  const suggested = list.filter(
+    (c) => !c.isMember && !c.archivedAt && c.unit != null && memberUnitIds.has(c.unit.id),
+  );
+  const suggestedIds = new Set(suggested.map((c) => c.id));
+  const others = list.filter((c) => !c.isMember && !suggestedIds.has(c.id));
+  // The API decides every placement; the "+" per section only mirrors it (admins: any unit).
+  const canPlace = (unitId: string | null) =>
+    unitId === null || can("unit.manage") || memberUnitIds.has(unitId);
 
   return (
     <>
@@ -284,7 +281,7 @@ export function ChatSidebar() {
               size="icon-xs"
               aria-label="Create channel"
               data-testid="create-channel"
-              onClick={() => setCreating(true)}
+              onClick={() => setCreating({ unitId: null })}
             >
               <Plus />
             </Button>
@@ -310,37 +307,21 @@ export function ChatSidebar() {
             ))}
           </div>
         ) : (
-          <nav aria-label="Channels" className="grid gap-px" data-testid="channel-list">
-            {joined.map((c) => {
-              const active = c.id === activeId;
-              const unread = !active && isUnread(c);
-              return (
-                <Link
-                  key={c.id}
-                  href={`/chat/${c.id}`}
-                  data-testid="channel-link"
-                  data-channel-name={c.name}
-                  data-unread={unread || undefined}
-                  aria-current={active ? "page" : undefined}
-                  className={cn(sectionItemClass(active), unread && "font-semibold text-foreground")}
-                >
-                  <ChannelIcon channel={c} className={active ? "" : "text-muted-foreground"} />
-                  <span className="truncate">{c.name}</span>
-                  {unread ? (
-                    <>
-                      <span className="sr-only">(unread)</span>
-                      <span aria-hidden className="ml-auto size-2 shrink-0 rounded-full bg-primary" />
-                    </>
-                  ) : null}
-                </Link>
-              );
-            })}
+          <nav aria-label="Channels" className="grid grid-cols-1 gap-px" data-testid="channel-list">
+            <SidebarSections
+              channels={[...joined, ...suggested]}
+              activeId={activeId}
+              memberUnitIds={memberUnitIds}
+              onCreate={(unitId) => setCreating({ unitId })}
+              canPlace={canPlace}
+            />
             {others.length > 0 ? (
               <>
                 <button
                   type="button"
                   onClick={() => setBrowseOpen((o) => !o)}
                   aria-expanded={browseOpen}
+                  data-testid="more-channels"
                   className="mt-3 mb-0.5 flex h-7 items-center gap-1 px-2.5 text-left font-medium text-muted-foreground text-xs outline-none hover:text-foreground"
                 >
                   <ChevronRight className={cn("size-3.5 transition-transform", browseOpen && "rotate-90")} />
@@ -356,11 +337,17 @@ export function ChatSidebar() {
                         href={`/chat/${c.id}`}
                         data-testid="channel-link"
                         data-channel-name={c.name}
+                        data-joined="false"
                         aria-current={c.id === activeId ? "page" : undefined}
                         className={cn(sectionItemClass(c.id === activeId), "text-muted-foreground")}
                       >
                         <ChannelIcon channel={c} />
                         <span className="truncate">{c.name}</span>
+                        {c.unit ? (
+                          <span className="ml-auto max-w-[45%] shrink-0 truncate text-[11px] text-muted-foreground/80">
+                            {c.unit.name}
+                          </span>
+                        ) : null}
                       </Link>
                     ))
                   : null}
@@ -368,7 +355,7 @@ export function ChatSidebar() {
             ) : null}
             <button
               type="button"
-              onClick={() => setCreating(true)}
+              onClick={() => setCreating({ unitId: null })}
               className={cn(sectionItemClass(false), "mt-1 text-muted-foreground")}
             >
               <span className="flex size-4 items-center justify-center rounded-[4px] bg-muted">
@@ -398,7 +385,11 @@ export function ChatSidebar() {
         </>
       ) : null}
 
-      <CreateChannelDialog open={creating} onOpenChange={setCreating} />
+      <CreateChannelDialog
+        open={creating !== null}
+        onOpenChange={(o) => !o && setCreating(null)}
+        defaultUnitId={creating?.unitId ?? null}
+      />
       <NewDmDialog open={newDmOpen} onOpenChange={setNewDmOpen} />
     </>
   );

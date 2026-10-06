@@ -1,0 +1,229 @@
+"use client";
+
+import type { ChannelSummary, ChannelUnit } from "@ocw/contracts";
+import { ChevronRight, Plus } from "lucide-react";
+import Link from "next/link";
+import { useCallback, useEffect, useState } from "react";
+import { sectionItemClass } from "@/components/shell/section-sidebar";
+import { Tooltip } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
+import { ChannelIcon, isUnread } from "./channel-icon";
+
+/**
+ * The channel part of the chat sidebar (CHAT-02, D-08): an Organization section, then one collapsible section per
+ * department (the member's own first), team and project channels nested inside their department with a sub-label.
+ * Never deeper than two levels (PRD §13: no infinite visual hierarchies). Collapse state lives in localStorage.
+ */
+
+export const SECTIONS_STORAGE_KEY = "ocw.chat.sections.collapsed";
+const ORG_KEY = "org";
+
+export type SidebarChannel = ChannelSummary & { subLabel: string | null };
+
+export interface ChannelSection {
+  /** `org` or the department id. */
+  key: string;
+  title: string;
+  /** The department (root of the channels' unit paths); null for Organization. */
+  unit: ChannelUnit | null;
+  channels: SidebarChannel[];
+}
+
+const byName = (a: ChannelSummary, b: ChannelSummary) => (a.name ?? "").localeCompare(b.name ?? "");
+
+/**
+ * Groups channels by the top-level unit of their path (or Organization). Sections: Organization first, then the
+ * departments in `myUnitIds`, then the others, each alphabetically. Inside a section: joined channels before
+ * suggestions, #general first, then by name; a channel deeper than its department carries its own unit's name as
+ * `subLabel`.
+ */
+export function groupChannelsByUnit(
+  channels: ChannelSummary[],
+  myUnitIds: ReadonlySet<string>,
+): ChannelSection[] {
+  const sections = new Map<string, ChannelSection>();
+  for (const c of channels) {
+    const unit = c.unit ?? null;
+    const top = unit?.path[0];
+    const key = unit && top ? top : ORG_KEY;
+    let section = sections.get(key);
+    if (!section) {
+      const title =
+        unit && top
+          ? (unit.pathNames?.[0] ?? (unit.path.length === 1 ? unit.name : "Department"))
+          : "Organization";
+      section = {
+        key,
+        title,
+        unit:
+          unit && top ? { id: top, name: title, kind: "department", path: [top], pathNames: [title] } : null,
+        channels: [],
+      };
+      sections.set(key, section);
+    }
+    section.channels.push({ ...c, subLabel: unit && unit.path.length > 1 ? unit.name : null });
+  }
+  for (const s of sections.values()) {
+    s.channels.sort(
+      (a, b) =>
+        Number(b.isMember) - Number(a.isMember) || Number(b.isDefault) - Number(a.isDefault) || byName(a, b),
+    );
+  }
+  const org = sections.get(ORG_KEY);
+  const units = [...sections.values()].filter((s) => s.key !== ORG_KEY);
+  units.sort(
+    (a, b) => Number(myUnitIds.has(b.key)) - Number(myUnitIds.has(a.key)) || a.title.localeCompare(b.title),
+  );
+  return org ? [org, ...units] : units;
+}
+
+/** Collapsed section keys, persisted in localStorage (survives reloads, per browser). */
+export function useCollapsedSections(): [ReadonlySet<string>, (key: string) => void] {
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
+  useEffect(() => {
+    try {
+      const raw = JSON.parse(window.localStorage.getItem(SECTIONS_STORAGE_KEY) ?? "[]");
+      if (Array.isArray(raw)) setCollapsed(new Set(raw.filter((k): k is string => typeof k === "string")));
+    } catch {
+      // A corrupt value just means nothing is collapsed.
+    }
+  }, []);
+  const toggle = useCallback((key: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      try {
+        window.localStorage.setItem(SECTIONS_STORAGE_KEY, JSON.stringify([...next]));
+      } catch {
+        // Private mode / quota: the state still applies for this page.
+      }
+      return next;
+    });
+  }, []);
+  return [collapsed, toggle];
+}
+
+function ChannelRow({ c, active }: { c: SidebarChannel; active: boolean }) {
+  const unread = !active && isUnread(c);
+  return (
+    <Link
+      href={`/chat/${c.id}`}
+      data-testid="channel-link"
+      data-channel-name={c.name}
+      data-joined={c.isMember ? undefined : "false"}
+      data-unread={unread || undefined}
+      aria-current={active ? "page" : undefined}
+      className={cn(
+        sectionItemClass(active),
+        unread && "font-semibold text-foreground",
+        !c.isMember && !active && "text-muted-foreground",
+      )}
+    >
+      <ChannelIcon channel={c} className={active ? "" : "text-muted-foreground"} />
+      <span className="min-w-0 flex-1 truncate">{c.name}</span>
+      {c.subLabel ? (
+        <span
+          data-testid="channel-sublabel"
+          className="max-w-[45%] shrink-0 truncate rounded-[4px] bg-muted/80 px-1 py-px font-medium text-[10.5px] text-muted-foreground leading-tight"
+        >
+          {c.subLabel}
+        </span>
+      ) : null}
+      {unread ? (
+        <>
+          <span className="sr-only">(unread)</span>
+          <span aria-hidden className="ml-auto size-2 shrink-0 rounded-full bg-primary" />
+        </>
+      ) : null}
+    </Link>
+  );
+}
+
+/**
+ * Collapsible channel sections. A collapsed section still shows its active and unread channels (like Slack) and
+ * counts the rest. `onCreate` adds a hover "+" that opens the create dialog in that unit when `canPlace` allows it.
+ */
+export function SidebarSections({
+  channels,
+  activeId,
+  memberUnitIds = new Set<string>(),
+  onCreate,
+  canPlace,
+}: {
+  channels: ChannelSummary[];
+  activeId: string | null;
+  memberUnitIds?: ReadonlySet<string>;
+  onCreate?: (unitId: string | null) => void;
+  canPlace?: (unitId: string | null) => boolean;
+}) {
+  const [collapsed, toggle] = useCollapsedSections();
+  const sections = groupChannelsByUnit(channels, memberUnitIds);
+  return (
+    <div className="grid grid-cols-1 gap-3">
+      {sections.map((s) => {
+        const isCollapsed = collapsed.has(s.key);
+        const shown = isCollapsed ? s.channels.filter((c) => c.id === activeId || isUnread(c)) : s.channels;
+        const hidden = s.channels.length - shown.length;
+        const unitId = s.unit?.id ?? null;
+        const headingId = `section-${s.key}`;
+        return (
+          <section
+            key={s.key}
+            aria-labelledby={headingId}
+            data-testid="sidebar-section"
+            data-unit-id={s.unit?.id ?? ORG_KEY}
+            data-collapsed={isCollapsed ? "true" : undefined}
+            className="grid grid-cols-1 gap-px"
+          >
+            <div className="group/section flex h-7 items-center gap-1 pr-1">
+              <button
+                type="button"
+                id={headingId}
+                data-testid="section-toggle"
+                aria-expanded={!isCollapsed}
+                onClick={() => toggle(s.key)}
+                className="flex h-7 min-w-0 flex-1 items-center gap-1 rounded-md px-1 text-left outline-none transition-colors hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40"
+              >
+                <ChevronRight
+                  aria-hidden
+                  className={cn(
+                    "size-3.5 shrink-0 text-muted-foreground/70 transition-transform",
+                    !isCollapsed && "rotate-90",
+                  )}
+                />
+                <span className="truncate font-semibold text-[11.5px] text-muted-foreground uppercase tracking-wider">
+                  {s.title}
+                </span>
+                {isCollapsed && hidden > 0 ? (
+                  <span
+                    data-testid="section-count"
+                    className="ml-1 rounded-full bg-muted px-1.5 text-[10.5px] text-muted-foreground tabular-nums"
+                  >
+                    {hidden}
+                  </span>
+                ) : null}
+              </button>
+              {onCreate && (canPlace?.(unitId) ?? true) ? (
+                <Tooltip content={s.unit ? `Create a channel in ${s.title}` : "Create a channel"}>
+                  <button
+                    type="button"
+                    aria-label={s.unit ? `Create a channel in ${s.title}` : "Create a channel"}
+                    data-testid="section-create"
+                    onClick={() => onCreate(unitId)}
+                    className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 outline-none transition-opacity hover:bg-sidebar-accent hover:text-foreground focus-visible:opacity-100 focus-visible:ring-[3px] focus-visible:ring-ring/40 group-hover/section:opacity-100 [@media(hover:none)]:hidden"
+                  >
+                    <Plus className="size-3.5" />
+                  </button>
+                </Tooltip>
+              ) : null}
+            </div>
+            {shown.map((c) => (
+              <ChannelRow key={c.id} c={c} active={c.id === activeId} />
+            ))}
+          </section>
+        );
+      })}
+    </div>
+  );
+}

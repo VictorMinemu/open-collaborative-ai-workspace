@@ -1,13 +1,22 @@
 import {
   type ChannelMember,
   type ChannelSummary,
+  type ChannelUnit,
   EventTypes,
   type Mention,
   type Message,
   type MessageAuthor,
   type ThreadUpdatedEvent,
 } from "@ocw/contracts";
-import { conversationMembers, conversations, messages, type Tx, tenantOf } from "@ocw/db";
+import {
+  conversationMembers,
+  conversations,
+  messages,
+  orgUnits,
+  type Tx,
+  tenantOf,
+  unitMemberships,
+} from "@ocw/db";
 import { and, asc, desc, eq, gt, inArray, isNull, lt, sql } from "drizzle-orm";
 import { badRequest, notFound } from "../../lib/errors";
 import type { AuditService } from "../audit";
@@ -181,12 +190,20 @@ export async function listChannels(tx: Tx, userId: string, id?: string): Promise
         sql<number>`(select coalesce(max(s.last_seq), 0) from app.streams s where s.id = 'conv:' || ${conversations.id}::text)`.mapWith(
           Number,
         ),
+      unitId: orgUnits.id,
+      unitName: orgUnits.name,
+      unitKind: orgUnits.kind,
+      unitPath: orgUnits.path,
+      unitPathNames: sql<
+        string[] | null
+      >`(select array_agg(u2.name order by array_position(${orgUnits.path}, u2.id)) from app.org_units u2 where u2.id = any(${orgUnits.path}))`,
     })
     .from(conversations)
     .leftJoin(
       me,
       and(eq(me.conversationId, conversations.id), eq(me.memberKind, "user"), eq(me.memberId, userId)),
     )
+    .leftJoin(orgUnits, eq(orgUnits.id, conversations.unitId))
     .where(
       and(
         eq(conversations.kind, "channel"),
@@ -194,34 +211,68 @@ export async function listChannels(tx: Tx, userId: string, id?: string): Promise
       ),
     )
     .orderBy(asc(conversations.name));
-  return rows.map((r) => ({
-    summary: {
-      id: r.c.id,
-      organizationId: r.c.organizationId,
-      kind: r.c.kind,
-      name: r.c.name,
-      slug: r.c.slug,
-      topic: r.c.topic,
-      visibility: r.c.visibility,
-      parentConversationId: r.c.parentConversationId,
-      rootMessageId: r.c.rootMessageId,
-      createdBy: r.c.createdBy,
-      archivedAt: isoOrNull(r.c.archivedAt),
-      createdAt: iso(r.c.createdAt),
-      lastSeq: r.lastSeq,
-      isMember: r.memberId !== null,
-      memberCount: r.memberCount,
-      latestMessageSeq: r.latestMessageSeq,
-      lastReadSeq: r.memberId !== null ? Number(r.lastReadSeq ?? 0) : 0,
-      lastMessageAt: isoOrNull(r.lastMessageAt),
-      isDefault: r.c.slug === GENERAL_SLUG,
-    },
-    facts: {
-      visibility: r.c.visibility,
-      archived: r.c.archivedAt !== null,
-      viewerRole: r.memberId !== null ? r.memberRole : null,
-    },
-  }));
+  return rows.map((r) => {
+    const unit: ChannelUnit | null =
+      r.unitId && r.unitName && r.unitKind && r.unitPath
+        ? {
+            id: r.unitId,
+            name: r.unitName,
+            kind: r.unitKind,
+            path: r.unitPath,
+            pathNames: r.unitPathNames ?? [r.unitName],
+          }
+        : null;
+    return {
+      summary: {
+        id: r.c.id,
+        organizationId: r.c.organizationId,
+        kind: r.c.kind,
+        name: r.c.name,
+        slug: r.c.slug,
+        topic: r.c.topic,
+        visibility: r.c.visibility,
+        parentConversationId: r.c.parentConversationId,
+        rootMessageId: r.c.rootMessageId,
+        createdBy: r.c.createdBy,
+        archivedAt: isoOrNull(r.c.archivedAt),
+        createdAt: iso(r.c.createdAt),
+        lastSeq: r.lastSeq,
+        isMember: r.memberId !== null,
+        memberCount: r.memberCount,
+        latestMessageSeq: r.latestMessageSeq,
+        lastReadSeq: r.memberId !== null ? Number(r.lastReadSeq ?? 0) : 0,
+        lastMessageAt: isoOrNull(r.lastMessageAt),
+        isDefault: r.c.slug === GENERAL_SLUG,
+        unit,
+      },
+      facts: {
+        visibility: r.c.visibility,
+        archived: r.c.archivedAt !== null,
+        viewerRole: r.memberId !== null ? r.memberRole : null,
+        unitPath: unit?.path ?? [],
+      },
+    };
+  });
+}
+
+/** The unit path (root → self) of a channel's unit; [] for the organization (and every direct conversation). */
+export async function unitPathOf(tx: Tx, unitId: string | null): Promise<string[]> {
+  if (!unitId) return [];
+  const [u] = await tx.select({ path: orgUnits.path }).from(orgUnits).where(eq(orgUnits.id, unitId)).limit(1);
+  return u?.path ?? [];
+}
+
+/**
+ * Every unit on the paths (root → self) of `userId`'s unit memberships (member or lead): where the user may place
+ * a channel, and the departments the sidebar lists first.
+ */
+export async function memberUnitIdsOf(tx: Tx, userId: string): Promise<string[]> {
+  const rows = await tx
+    .select({ path: orgUnits.path })
+    .from(unitMemberships)
+    .innerJoin(orgUnits, eq(orgUnits.id, unitMemberships.unitId))
+    .where(eq(unitMemberships.userId, userId));
+  return [...new Set(rows.flatMap((r) => r.path))];
 }
 
 /** One channel row (archived included); 404 when it does not exist in the tenant. */
@@ -256,6 +307,8 @@ export async function channelFacts(
     viewerRole: membership?.role ?? null,
     // Group DMs are direct conversations too: fixed membership, never moderated (D-01, D-06; state dm).
     kind: channel.kind === "dm" || channel.kind === "group" ? channel.kind : "channel",
+    // Unit-scoped rules apply to the unit's channels (CHAT-02, principle 6).
+    unitPath: channel.kind === "channel" ? await unitPathOf(tx, channel.unitId) : [],
   };
 }
 
