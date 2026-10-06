@@ -14,14 +14,18 @@ The web renders a control only when `isExposed(area, uiKey)` is true, and the AP
 - `apps/api/src/modules/work-session/inventory-parity.test.ts`: with every other layer wide open (full catalog,
   most permissive policy, device opted in, owner, grain), the API offers only options whose row is exposed.
 
+Automatic session titles ([ADR-0014](../adr/0014-automatic-session-titles-on-the-device.md)) use the
+`session.title` row of each runtime (Haiku for Claude Code, GPT-6-Luna for Codex); the API asks a device for a
+title only while that row is exposed.
+
 ## Pinned runtime versions
 
 The rows were checked, and the fixtures recorded, against:
 
 | Runtime | Version | Fixtures |
 | --- | --- | --- |
-| Claude Code | CLI 2.1.289, Claude Agent SDK 0.3.282 | `apps/local-runtime/src/claude/__fixtures__/claude-code-2.1.289.{settings.sdk.jsonl,catalog.json}` (plus the 2.1.287 plan-read lifecycle fixture) |
-| Codex | `codex app-server` 0.160.0 (stable API, `experimentalApi` off) | `apps/local-runtime/src/codex/__fixtures__/codex-0.160.0.{plan-read.rpc.jsonl,supervised-write.rpc.jsonl,model-list.json}` |
+| Claude Code | CLI 2.1.289, Claude Agent SDK 0.3.282 | `apps/local-runtime/src/claude/__fixtures__/claude-code-2.1.289.{settings.sdk.jsonl,catalog.json,title.sdk.jsonl}` (plus the 2.1.287 plan-read lifecycle fixture) |
+| Codex | `codex app-server` 0.160.0 (stable API, `experimentalApi` off) | `apps/local-runtime/src/codex/__fixtures__/codex-0.160.0.{plan-read.rpc.jsonl,supervised-write.rpc.jsonl,model-list.json,title.rpc.jsonl}` |
 
 Codex auto-updated to 0.160.1 on the recording machine; types, fixtures and `PINNED_RUNTIME_VERSIONS` stay on
 0.160.0 (recorded with the still-installed 0.160.0 binary). A device running 0.160.1 reports that version in its
