@@ -76,7 +76,7 @@ const search = (as: TestClient, params: Record<string, string | number | undefin
 
 const hitIds = (r: Json) => (r.hits as Json[]).map((h) => h.messageId as string);
 
-async function joinAs(email: string, name: string, role: "developer" | "standard") {
+async function joinAs(email: string, name: string, role: "developer" | "standard" | "admin") {
   const inv = await ok(admin.request("POST", "/api/v1/invitations", { email, role }));
   const c = new TestClient(stack.baseUrl);
   const acc = await ok(
@@ -572,5 +572,136 @@ describe("overview, tenancy and rate limit", () => {
     const limited = await rita.request("GET", `/api/v1/search/people?${qs({ q: "probe" })}`);
     expect(limited.status).toBe(429);
     expect((await pager.request("GET", `/api/v1/search?${qs({ q: "probe" })}`)).status).toBe(200);
+  });
+});
+
+describe("AI chats are found by their owner alone (05-10, AICHAT-04, P-03, Pitfall 6)", () => {
+  let olive: TestClient;
+  let oliveId: string;
+  let alex: TestClient;
+  let ada: TestClient;
+  const ai = {} as Record<"chat" | "archived" | "question" | "answer" | "archivedLine", string>;
+
+  /** An AI chat of Olive's (P-03 shape: private, one owner member, an ai_chats row). */
+  async function aiChat(name: string, archived: boolean): Promise<string> {
+    const id = randomUUID();
+    await su.query(
+      `insert into app.conversations (id, organization_id, kind, visibility, name, created_by, archived_at)
+       values ($1, $2, 'ai_chat', 'private', $3, $4, ${archived ? "now()" : "null"})`,
+      [id, orgId, name, oliveId],
+    );
+    await su.query(
+      `insert into app.conversation_members (conversation_id, organization_id, member_kind, member_id, role)
+       values ($1, $2, 'user', $3, 'owner')`,
+      [id, orgId, oliveId],
+    );
+    await su.query(
+      `insert into app.ai_chats (conversation_id, organization_id, owner_user_id, title_source, last_model)
+       values ($1, $2, $3, 'auto', $4)`,
+      [id, orgId, oliveId, { backend: "org_key", provider: "anthropic", modelId: "claude-sonnet-5-5" }],
+    );
+    return id;
+  }
+
+  beforeAll(async () => {
+    [olive, oliveId] = await joinAs("olive@example.test", "Olive Owner", "standard");
+    [alex] = await joinAs("alex@example.test", "Alex Other", "standard");
+    [ada] = await joinAs("ada@example.test", "Ada Admin", "admin");
+    ai.chat = await aiChat("Quarterly kumquat roadmap", false);
+    ai.archived = await aiChat("Old kumquat notes", true);
+    ai.question = await rawMessage({
+      org: orgId,
+      conv: ai.chat,
+      authorKind: "user",
+      authorId: oliveId,
+      body: "Where do kumquats grow best?",
+      seq: 1,
+    });
+    ai.answer = randomUUID();
+    await su.query(
+      `insert into app.messages (id, organization_id, conversation_id, seq, author_kind, author_id, body, status)
+       values ($1, $2, $3, 2, 'agent', null, 'Kumquats grow best in warm, sunny climates', 'completed')`,
+      [ai.answer, orgId, ai.chat],
+    );
+    await su.query(
+      `insert into app.ai_generations (organization_id, conversation_id, user_message_id, assistant_message_id,
+         requester_user_id, backend, provider, model_id, attempt, status, instance_id, finished_at)
+       values ($1, $2, $3, $4, $5, 'org_key', 'anthropic', 'claude-sonnet-5-5', 1, 'completed', 'test', now())`,
+      [orgId, ai.chat, ai.question, ai.answer, oliveId],
+    );
+    ai.archivedLine = await rawMessage({
+      org: orgId,
+      conv: ai.archived,
+      authorKind: "user",
+      authorId: oliveId,
+      body: "A kumquat line in an archived chat",
+      seq: 1,
+    });
+  });
+
+  it("the owner's message search finds both turns, labelled with the chat title; the answer is by the model", async () => {
+    const r = await search(olive, { q: "kumquats" });
+    expect(hitIds(r)).toEqual(expect.arrayContaining([ai.question, ai.answer, ai.archivedLine]));
+    const answer = (r.hits as Json[]).find((h) => h.messageId === ai.answer) as Json;
+    expect(answer.conversation).toMatchObject({
+      id: ai.chat,
+      kind: "ai_chat",
+      label: "Quarterly kumquat roadmap",
+      archived: false,
+    });
+    expect(answer.author).toEqual({ kind: "agent", id: null, displayName: "Claude Sonnet 5.5", avatarUrl: null });
+    const question = (r.hits as Json[]).find((h) => h.messageId === ai.question) as Json;
+    expect(question.author).toMatchObject({ kind: "user", id: oliveId, displayName: "Olive Owner" });
+    // Archived AI chats are found, like archived channels, and flagged.
+    const archived = (r.hits as Json[]).find((h) => h.messageId === ai.archivedLine) as Json;
+    expect(archived.conversation).toMatchObject({ id: ai.archived, kind: "ai_chat", archived: true });
+    // `in` narrows to one AI chat.
+    expect(hitIds(await search(olive, { q: "kumquats", in: ai.chat })).sort()).toEqual(
+      [ai.question, ai.answer].sort(),
+    );
+  });
+
+  it("the overview lists the owner's AI chats by title (trigram, archived flagged)", async () => {
+    const r = await ok(olive.request("GET", `/api/v1/search?${qs({ q: "kumquat" })}`));
+    const chats = r.aiChats as Json[];
+    expect(chats.map((c) => c.id)).toEqual([ai.chat, ai.archived]);
+    expect(chats[0]).toMatchObject({
+      id: ai.chat,
+      title: "Quarterly kumquat roadmap",
+      archived: false,
+      lastModelLabel: "Claude Sonnet 5.5",
+    });
+    expect(chats[1]).toMatchObject({ id: ai.archived, archived: true });
+    // A typo still finds it.
+    const typo = await ok(olive.request("GET", `/api/v1/search?${qs({ q: "kumqat roadmap" })}`));
+    expect((typo.aiChats as Json[]).map((c) => c.id)).toContain(ai.chat);
+  });
+
+  it("another member and an admin never see an AI chat hit, entry or title", async () => {
+    for (const as of [alex, ada]) {
+      const messages = await search(as, { q: "kumquats" });
+      expect(messages.hits).toEqual([]);
+      const scoped = await search(as, { q: "kumquats", in: ai.chat });
+      expect(scoped.hits).toEqual([]);
+      const overview = await ok(as.request("GET", `/api/v1/search?${qs({ q: "kumquat" })}`));
+      expect(overview.aiChats ?? []).toEqual([]);
+      expect(overview.messages).toEqual([]);
+      const text = JSON.stringify([messages, scoped, overview]);
+      expect(text).not.toContain("Quarterly kumquat roadmap");
+      expect(text).not.toContain("Old kumquat notes");
+      // Channels search never surfaces an AI chat either.
+      const channels = await ok(as.request("GET", `/api/v1/search/channels?${qs({ q: "kumquat" })}`));
+      expect(channels.channels).toEqual([]);
+    }
+  });
+
+  it("existing results stay as they were: Sam's overview has no AI chats and the same message hits", async () => {
+    const r = await ok(sam.request("GET", `/api/v1/search?${qs({ q: "migracion" })}`));
+    expect((r.messages as Json[]).map((h) => h.messageId)).toEqual([
+      ids.dmMessage,
+      ids.boardMessage,
+      ids.migration,
+    ]);
+    expect(r.aiChats ?? []).toEqual([]);
   });
 });
