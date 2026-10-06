@@ -5,9 +5,11 @@ import type {
   ApprovalDecision,
   PermissionMode,
   PromptPayload,
+  RuntimeCatalog,
   RuntimeId,
   RuntimeInfo,
   SessionEvent,
+  SessionSettingsPatch,
 } from "@ocw/contracts";
 
 export interface RuntimeCapabilities {
@@ -15,7 +17,11 @@ export interface RuntimeCapabilities {
   supportsSteer: boolean;
   /** Can reattach to an earlier runtime session id. */
   supportsResume: boolean;
-  /** Permission modes the adapter accepts. `bypassPermissions` is never among them. */
+  /**
+   * Platform permission modes the adapter accepts (the daemon refuses anything else before calling it). The
+   * runtime bypass literals are never among them. `fullAccess` is listed only while the adapter's
+   * `allowFullAccess()` gate answers true (ADR-0012), so adapters expose this as a getter.
+   */
   supportsPermissionModes: readonly PermissionMode[];
   supportsImages: boolean;
 }
@@ -27,8 +33,20 @@ export interface StartSessionOptions {
   cwd: string;
   permissionMode: PermissionMode;
   model?: string;
+  effort?: string;
+  fastMode?: boolean;
+  contextWindow?: number;
   /** Runtime-native session id from a previous `session.started` event. */
   resumeRuntimeSessionId?: string;
+}
+
+/**
+ * Options every adapter constructor accepts besides its own. `allowFullAccess` is the daemon's device-local opt-in
+ * (ADR-0012, P-12), re-read on every call: false (the default) = the adapter never offers, starts, configures or runs
+ * `fullAccess`, whatever the server asks. The daemon checks it too, before any adapter call (defence in depth).
+ */
+export interface FullAccessGateOptions {
+  allowFullAccess?: () => boolean;
 }
 
 /** Receives normalised, NOT yet sanitised events; the daemon sanitises before they leave the device. */
@@ -57,6 +75,17 @@ export interface AgentRuntime {
     decision: ApprovalDecision,
     comment?: string,
   ): boolean;
+  /**
+   * Apply settings between turns (D-07, D-14): while a turn runs they are held and applied before the next one;
+   * the adapter then reports the effective values as `session.settings`. Throws `settings_rejected` for a value
+   * it cannot apply. Absent = the adapter cannot change settings in a live session.
+   */
+  configure?(sessionId: string, patch: SessionSettingsPatch): Promise<void>;
+  /**
+   * What this runtime offers on this device (models, efforts, modes). Never sends a model turn. Absent or null =
+   * no catalog (the web then shows no model choices, D-08).
+   */
+  catalog?(): Promise<RuntimeCatalog | null>;
   /** Stop the session and release the runtime process. */
   stop(sessionId: string): Promise<void>;
   /** Stop every session (daemon shutdown). */
@@ -71,7 +100,9 @@ export class RuntimeError extends Error {
       | "session_exists"
       | "permission_mode_rejected"
       | "runtime_unavailable"
-      | "invalid_state",
+      | "invalid_state"
+      | "settings_rejected"
+      | "slash_command_refused",
   ) {
     super(message);
     this.name = "RuntimeError";

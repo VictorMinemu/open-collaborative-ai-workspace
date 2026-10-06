@@ -49,6 +49,10 @@ export const Permission = z.enum([
   "bot.tool.use",
   "plugin.manage",
   "mcp.manage",
+  // Phase 03.2 (P-06): Work Zone session controls, full access (ADR-0012) and the org policy.
+  "work_session.configure",
+  "device.full_access",
+  "work_zone.manage",
 ]);
 export type Permission = z.infer<typeof Permission>;
 
@@ -98,6 +102,9 @@ export const PERMISSION_SURFACE: Record<Permission, PermissionSurface> = {
   "bot.tool.use": "bots",
   "plugin.manage": "admin",
   "mcp.manage": "admin",
+  "work_session.configure": "workzone",
+  "device.full_access": "workzone",
+  "work_zone.manage": "admin",
 };
 
 export const ROLE_SURFACES: Record<OrgRole, PermissionSurface[]> = {
@@ -128,6 +135,7 @@ const DEVELOPER: readonly Permission[] = [
   "work_session.create",
   "work_session.prompt",
   "work_session.interrupt",
+  "work_session.configure",
 ];
 const LEAD: readonly Permission[] = [...DEVELOPER, "invitation.read", "invitation.create"];
 const ADMIN: readonly Permission[] = [
@@ -149,12 +157,13 @@ const ADMIN: readonly Permission[] = [
   "bot.configure",
   "plugin.manage",
   "mcp.manage",
+  "work_zone.manage",
 ];
 
 /**
- * Unconditional, organization-wide grants per role (cumulative). `account.manage`, `device.use` and
- * `device.update` come only from relations (self, device owner/shared); `cell.sync` and `device.link`
- * only from non-human principals.
+ * Unconditional, organization-wide grants per role (cumulative). `account.manage`, `device.use`,
+ * `device.update` and `device.full_access` come only from relations (self, device owner/shared/grantee);
+ * `cell.sync` and `device.link` only from non-human principals.
  */
 export const ROLE_PERMISSIONS: Record<OrgRole, readonly Permission[]> = {
   standard: STANDARD,
@@ -177,9 +186,19 @@ export const CELL_PERMISSIONS: readonly Permission[] = ["cell.sync"];
 /** A paired device principal (Device Link). */
 export const DEVICE_PERMISSIONS: readonly Permission[] = ["device.link"];
 
-/** Admin- and runtime-surface permissions: explicit allow rules can never grant these. */
+/**
+ * Relation-only permissions that no allow rule may confer either: Full access on a device comes only from the
+ * device owner's grant (cap) intersected with the device opt-in and the org policy, and sharing a device
+ * (`device.update`: grants, share max mode) belongs to its owner alone (ADR-0012).
+ */
+const RELATION_ONLY_NON_DELEGABLE: readonly Permission[] = ["device.full_access", "device.update"];
+
+/** Admin- and runtime-surface permissions plus relation-only ones: explicit allow rules can never grant these. */
 export const NON_DELEGABLE_PERMISSIONS: readonly Permission[] = Permission.options.filter(
-  (p) => PERMISSION_SURFACE[p] === "admin" || PERMISSION_SURFACE[p] === "runtime",
+  (p) =>
+    PERMISSION_SURFACE[p] === "admin" ||
+    PERMISSION_SURFACE[p] === "runtime" ||
+    RELATION_ONLY_NON_DELEGABLE.includes(p),
 );
 
 export const ROLE_RANK: Record<OrgRole, number> = { standard: 0, developer: 1, lead: 2, admin: 3 };
@@ -297,6 +316,9 @@ export const PERMISSION_DESCRIPTIONS: Record<Permission, string> = {
   "bot.tool.use": "Let bots use connected tools (MCP servers and plugins) when they answer you",
   "plugin.manage": "Review, install, update and remove OpenClaw Marketplace plugins",
   "mcp.manage": "Register and configure MCP servers for the organization's bots",
+  "work_session.configure": "Change a Work Zone session's model, reasoning and permission mode",
+  "device.full_access": "Run Work Zone sessions in Full access on a device that allows it",
+  "work_zone.manage": "Set the organization's Work Zone policy (modes, models, full access, fast mode)",
 };
 
 // ---------------------------------------------------------------- tokens (AUTH-06)

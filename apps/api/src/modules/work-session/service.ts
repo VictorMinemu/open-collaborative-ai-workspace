@@ -1,8 +1,11 @@
 import {
   type DiffResultFrame,
+  DiffStat,
+  EffectiveSessionSettings,
   type EventFrame,
   EventTypes,
   type HelloFrame,
+  isFullAccessReport,
   onlyRelativePaths,
   type SessionEvent,
   type WorkApproval,
@@ -10,6 +13,7 @@ import {
   type WorkSession,
   type WorkSessionChanges,
   type WorkSessionStatus,
+  type WorkZonePolicy,
 } from "@ocw/contracts";
 import {
   deviceCommands,
@@ -22,12 +26,29 @@ import {
   workPrompts,
   workSessions,
 } from "@ocw/db";
-import { and, asc, count, desc, eq, inArray, type SQL, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, min, type SQL, sql } from "drizzle-orm";
 import type { FastifyBaseLogger } from "fastify";
 import type { AuditService } from "../audit";
 import type { DeviceCommandRow, DeviceHub, DeviceRef, DeviceSessionHandler } from "../device";
-import { memberDirectory } from "../organization";
+import { memberDirectory, type PermissionService } from "../organization";
 import type { RealtimeService } from "../realtime";
+import { loadControlsContext } from "./context";
+import {
+  buildRuntimeControls,
+  clampToControls,
+  highestAvailableMode,
+  pickSettings,
+  requestedSettings,
+  storedSettings,
+  turnMode,
+} from "./controls";
+import { loadWorkZonePolicy } from "./policy";
+
+/** Why live sessions are re-checked (ADR-0012): a policy change, a member's access change, a device opt-out. */
+export type ReauthorizeReason = "policy" | "access_changed" | "device_opt_out";
+
+const UNAUTHORIZED_MODE_ERROR =
+  "The device reported Full access without authorization; the session was stopped";
 
 export type SessionRow = typeof workSessions.$inferSelect;
 type PromptRow = typeof workPrompts.$inferSelect;
@@ -54,6 +75,8 @@ export interface WorkSessionDeps {
   audit: AuditService;
   hub: DeviceHub;
   log: FastifyBaseLogger;
+  /** The resolver: the per-turn author cap includes the author's `device.full_access` grain (P-07). */
+  perms: PermissionService;
 }
 
 /**
@@ -82,7 +105,7 @@ export class WorkSessionService implements DeviceSessionHandler {
       .orderBy(desc(workSessions.updatedAt));
     if (rows.length === 0) return [];
     const ids = rows.map((r) => r.s.id);
-    const [queued, pending, dir] = await Promise.all([
+    const [queued, pending, running, dir] = await Promise.all([
       tx
         .select({ id: workPrompts.workSessionId, n: count() })
         .from(workPrompts)
@@ -93,33 +116,53 @@ export class WorkSessionService implements DeviceSessionHandler {
         .from(workApprovals)
         .where(and(inArray(workApprovals.workSessionId, ids), eq(workApprovals.status, "pending")))
         .groupBy(workApprovals.workSessionId),
+      tx
+        .select({ id: workPrompts.workSessionId, since: min(workPrompts.dispatchedAt) })
+        .from(workPrompts)
+        .where(and(inArray(workPrompts.workSessionId, ids), inArray(workPrompts.status, IN_FLIGHT)))
+        .groupBy(workPrompts.workSessionId),
       memberDirectory(tx),
     ]);
     const q = new Map(queued.map((r) => [r.id, Number(r.n)]));
     const p = new Map(pending.map((r) => [r.id, Number(r.n)]));
-    return rows.map(({ s, projectName, deviceName, deviceStatus, deviceRevoked }) => ({
-      id: s.id,
-      conversationId: s.conversationId,
-      projectId: s.projectId,
-      projectName,
-      deviceId: s.deviceId,
-      deviceName,
-      deviceOnline: deviceStatus === "online" && !deviceRevoked,
-      runtime: s.runtime,
-      model: s.model,
-      permissionMode: s.permissionMode,
-      worktree: s.worktree,
-      branch: s.branch,
-      status: s.status,
-      title: s.title,
-      createdBy: s.createdBy,
-      createdByName: dir.get(s.createdBy)?.displayName ?? null,
-      queuedCount: q.get(s.id) ?? 0,
-      pendingApprovals: p.get(s.id) ?? 0,
-      lastError: s.lastError,
-      createdAt: new Date(s.createdAt).toISOString(),
-      updatedAt: new Date(s.updatedAt).toISOString(),
-    }));
+    const since = new Map(running.map((r) => [r.id, r.since]));
+    return rows.map(({ s, projectName, deviceName, deviceStatus, deviceRevoked }) => {
+      const effective = EffectiveSessionSettings.safeParse(s.effectiveSettings);
+      const diffStat = DiffStat.safeParse(s.diffStat);
+      return {
+        id: s.id,
+        conversationId: s.conversationId,
+        projectId: s.projectId,
+        projectName,
+        deviceId: s.deviceId,
+        deviceName,
+        deviceOnline: deviceStatus === "online" && !deviceRevoked,
+        runtime: s.runtime,
+        model: s.model,
+        permissionMode: s.permissionMode,
+        worktree: s.worktree,
+        branch: s.branch,
+        status: s.status,
+        title: s.title,
+        createdBy: s.createdBy,
+        createdByName: dir.get(s.createdBy)?.displayName ?? null,
+        queuedCount: q.get(s.id) ?? 0,
+        pendingApprovals: p.get(s.id) ?? 0,
+        lastError: s.lastError,
+        settings: {
+          requested: requestedSettings(s),
+          effective: effective.success ? effective.data : null,
+          pending: s.settingsPending,
+        },
+        fullAccess:
+          s.permissionMode === "fullAccess" ||
+          (effective.success && isFullAccessReport(effective.data.permissionMode)),
+        runningSince: iso(since.get(s.id) ?? null),
+        diffStat: diffStat.success ? diffStat.data : null,
+        createdAt: new Date(s.createdAt).toISOString(),
+        updatedAt: new Date(s.updatedAt).toISOString(),
+      };
+    });
   }
 
   async session(tx: Tx, id: string): Promise<WorkSession | null> {
@@ -213,11 +256,15 @@ export class WorkSessionService implements DeviceSessionHandler {
       .select({ localId: projects.localId })
       .from(projects)
       .where(eq(projects.id, s.projectId));
+    const requested = requestedSettings(s);
     return {
       projectLocalId: p?.localId ?? "",
       runtime: s.runtime,
       permissionMode: s.permissionMode,
       ...(s.model ? { model: s.model } : {}),
+      ...(requested.effort ? { effort: requested.effort } : {}),
+      ...(requested.fastMode ? { fastMode: true } : {}),
+      ...(requested.contextWindow ? { contextWindow: requested.contextWindow } : {}),
       ...(s.worktree ? { worktree: true } : {}),
       ...(s.runtimeSessionId ? { resumeRuntimeSessionId: s.runtimeSessionId } : {}),
     };
@@ -246,27 +293,290 @@ export class WorkSessionService implements DeviceSessionHandler {
       .where(and(eq(workPrompts.workSessionId, s.id), inArray(workPrompts.status, IN_FLIGHT)))
       .limit(1);
     if (inflight.length > 0) return null;
-    const [next] = await tx
-      .select()
-      .from(workPrompts)
-      .where(and(eq(workPrompts.workSessionId, s.id), eq(workPrompts.status, "queued")))
-      .orderBy(asc(workPrompts.position), asc(workPrompts.createdAt))
-      .limit(1);
-    if (!next) return null;
-    const [dispatched] = await tx
+    let policy: WorkZonePolicy | undefined;
+    for (;;) {
+      const [next] = await tx
+        .select()
+        .from(workPrompts)
+        .where(and(eq(workPrompts.workSessionId, s.id), eq(workPrompts.status, "queued")))
+        .orderBy(asc(workPrompts.position), asc(workPrompts.createdAt))
+        .limit(1);
+      if (!next) return null;
+      // P-07: re-checked on every turn: min(session mode, the author's cap = org policy ∩ device opt-in ∩ the
+      // author's device cap (floor for unlisted controllers, nothing for revoked ones) ∩ grain ∩ catalog).
+      policy ??= await loadWorkZonePolicy(tx);
+      const author = await loadControlsContext(tx, this.deps.perms, {
+        deviceId: s.deviceId,
+        runtime: s.runtime,
+        userId: next.authorUserId,
+        inSession: true,
+        policy,
+      });
+      const cap = author ? highestAvailableMode(author.ctx, s.model, s.permissionMode) : null;
+      const mode = turnMode(s.permissionMode, cap);
+      if (mode === null) {
+        await this.refusePrompt(tx, s, next, author?.revoked === true && author.cap === null);
+        continue;
+      }
+      const [dispatched] = await tx
+        .update(workPrompts)
+        .set({ status: "dispatched", dispatchedAt: sql`now()`, permissionMode: mode })
+        .where(eq(workPrompts.id, next.id))
+        .returning();
+      await this.deps.hub.enqueue(tx, {
+        deviceId: s.deviceId,
+        workSessionId: s.id,
+        kind: "prompt",
+        payload: { promptId: next.id, text: next.body, permissionMode: mode },
+      });
+      // D-04: every turn's effective mode is audited (actor = the prompt's author, device, session, org).
+      await this.deps.audit.record(tx, {
+        action: "work_prompt.dispatched",
+        resourceType: "work_prompt",
+        resourceId: next.id,
+        userId: next.authorUserId,
+        deviceId: s.deviceId,
+        sessionId: s.id,
+        metadata: {
+          promptId: next.id,
+          authorUserId: next.authorUserId,
+          requestedMode: s.permissionMode,
+          effectiveMode: mode,
+          capped: mode !== s.permissionMode,
+          ...(mode === "fullAccess" ? { fullAccess: true } : {}),
+        },
+      });
+      await this.emitPrompt(tx, dispatched!);
+      await this.setStatus(tx, s, "running");
+      return dispatched!;
+    }
+  }
+
+  /** A turn its author may not run (P-07): failed, audited, never sent; the arbiter moves to the next prompt. */
+  private async refusePrompt(tx: Tx, s: SessionRow, p: PromptRow, revoked: boolean): Promise<void> {
+    const [row] = await tx
       .update(workPrompts)
-      .set({ status: "dispatched", dispatchedAt: sql`now()` })
-      .where(eq(workPrompts.id, next.id))
+      .set({ status: "failed", completedAt: sql`now()` })
+      .where(eq(workPrompts.id, p.id))
       .returning();
+    await this.deps.audit.record(tx, {
+      action: "work_prompt.refused",
+      resourceType: "work_prompt",
+      resourceId: p.id,
+      userId: p.authorUserId,
+      deviceId: s.deviceId,
+      sessionId: s.id,
+      result: "denied",
+      metadata: {
+        promptId: p.id,
+        authorUserId: p.authorUserId,
+        requestedMode: s.permissionMode,
+        reason: revoked ? "access_revoked" : "mode_not_allowed",
+      },
+    });
+    if (row) await this.emitPrompt(tx, row);
+  }
+
+  // ------------------------------------------------------------------ reauthorization (ADR-0012)
+
+  /**
+   * Re-check one LOCKED active session against its creator's current access (ADR-0012): a creator with no access
+   * of their own to the device any more has the session stopped; otherwise the requested settings are lowered to
+   * what the creator may pick now (policy ∩ opt-in ∩ cap ∩ grain ∩ catalog ∩ inventory) and the device is told
+   * (`session.configure`); a Full access turn in flight is interrupted when Full access is left.
+   */
+  async reauthorize(
+    tx: Tx,
+    s: SessionRow,
+    reason: ReauthorizeReason,
+    policy?: WorkZonePolicy,
+  ): Promise<void> {
+    if (!ACTIVE_STATES.includes(s.status)) return;
+    const creator = await loadControlsContext(tx, this.deps.perms, {
+      deviceId: s.deviceId,
+      runtime: s.runtime,
+      userId: s.createdBy,
+      inSession: false,
+      ...(policy ? { policy } : {}),
+    });
+    if (!creator) return;
+    if (creator.cap === null) {
+      const [d] = await tx.select({ name: devices.name }).from(devices).where(eq(devices.id, s.deviceId));
+      const message = `Access to ${d?.name ?? "the device"} was revoked`;
+      await this.deps.hub.enqueue(tx, {
+        deviceId: s.deviceId,
+        workSessionId: s.id,
+        kind: "session.stop",
+        payload: {},
+      });
+      await this.failInFlight(tx, s, message);
+      await this.deps.audit.record(tx, {
+        action: "work_session.access_revoked",
+        resourceType: "work_session",
+        resourceId: s.id,
+        deviceId: s.deviceId,
+        sessionId: s.id,
+        result: "denied",
+        metadata: { reason, createdBy: s.createdBy, revoked: creator.revoked },
+      });
+      await this.setStatus(tx, s, "failed", { lastError: message });
+      return;
+    }
+    const current = requestedSettings(s);
+    const { next, changed } = clampToControls(current, buildRuntimeControls(s.runtime, creator.ctx, s.model));
+    if (changed.length === 0) return;
+    const from = current.permissionMode;
+    const to = next.permissionMode ?? from;
+    await tx
+      .update(workSessions)
+      .set({
+        model: next.model ?? null,
+        permissionMode: to,
+        settings: storedSettings(next),
+        settingsPending: true,
+        updatedAt: sql`now()`,
+      })
+      .where(eq(workSessions.id, s.id));
+    s.model = next.model ?? null;
+    s.permissionMode = to;
     await this.deps.hub.enqueue(tx, {
       deviceId: s.deviceId,
       workSessionId: s.id,
-      kind: "prompt",
-      payload: { promptId: next.id, text: next.body },
+      kind: "session.configure",
+      payload: { settings: pickSettings(next, changed), reason },
     });
-    await this.emitPrompt(tx, dispatched!);
-    await this.setStatus(tx, s, "running");
-    return dispatched!;
+    await this.deps.audit.record(tx, {
+      action: "work_session.settings_downgraded",
+      resourceType: "work_session",
+      resourceId: s.id,
+      deviceId: s.deviceId,
+      sessionId: s.id,
+      metadata: { reason, changed, from: pickSettings(current, changed), to: pickSettings(next, changed) },
+    });
+    if (from === "fullAccess" && to !== "fullAccess") {
+      await this.deps.audit.record(tx, {
+        action: "work_session.full_access_left",
+        resourceType: "work_session",
+        resourceId: s.id,
+        deviceId: s.deviceId,
+        sessionId: s.id,
+        metadata: { from, to, source: reason },
+      });
+      const fullTurn = await tx
+        .select({ id: workPrompts.id })
+        .from(workPrompts)
+        .where(
+          and(
+            eq(workPrompts.workSessionId, s.id),
+            inArray(workPrompts.status, IN_FLIGHT),
+            eq(workPrompts.permissionMode, "fullAccess"),
+          ),
+        )
+        .limit(1);
+      if (fullTurn.length > 0) {
+        await this.deps.hub.enqueue(tx, {
+          deviceId: s.deviceId,
+          workSessionId: s.id,
+          kind: "interrupt",
+          payload: {},
+        });
+      }
+    }
+    await this.emitSession(tx, s.id);
+  }
+
+  /** Every active session of the transaction's organization (RLS), e.g. after a Work Zone policy change. */
+  async reauthorizeOrg(tx: Tx, reason: ReauthorizeReason): Promise<void> {
+    const policy = await loadWorkZonePolicy(tx);
+    const rows = await tx
+      .select({ id: workSessions.id })
+      .from(workSessions)
+      .where(inArray(workSessions.status, ACTIVE_STATES))
+      .orderBy(asc(workSessions.id));
+    for (const { id } of rows) {
+      const s = await this.lock(tx, id);
+      if (s) await this.reauthorize(tx, s, reason, policy);
+    }
+  }
+
+  /** `DeviceSessionHandler`: a member's access to the device or its opt-in changed. */
+  async onAccessChanged(
+    device: { deviceId: string; organizationId: string },
+    reason: ReauthorizeReason,
+  ): Promise<void> {
+    await this.deps.db.withTenant({ organizationId: device.organizationId, userId: null }, async (tx) => {
+      const policy = await loadWorkZonePolicy(tx);
+      const rows = await tx
+        .select({ id: workSessions.id })
+        .from(workSessions)
+        .where(and(eq(workSessions.deviceId, device.deviceId), inArray(workSessions.status, ACTIVE_STATES)))
+        .orderBy(asc(workSessions.id));
+      for (const { id } of rows) {
+        const s = await this.lock(tx, id);
+        if (s && s.deviceId === device.deviceId) await this.reauthorize(tx, s, reason, policy);
+      }
+    });
+  }
+
+  /**
+   * D-03 (server side): Full access — or a runtime bypass literal — reported while neither the session nor the turn
+   * in flight is authorized for it. True when the report is authorized (or not a Full access report).
+   */
+  private async fullAccessReportAllowed(
+    tx: Tx,
+    s: SessionRow,
+    reported: string | undefined,
+  ): Promise<boolean> {
+    if (!isFullAccessReport(reported)) return true;
+    if (s.permissionMode === "fullAccess") return true;
+    const turn = await tx
+      .select({ id: workPrompts.id })
+      .from(workPrompts)
+      .where(
+        and(
+          eq(workPrompts.workSessionId, s.id),
+          inArray(workPrompts.status, IN_FLIGHT),
+          eq(workPrompts.permissionMode, "fullAccess"),
+        ),
+      )
+      .limit(1);
+    return turn.length > 0;
+  }
+
+  /** D-03: interrupt, stop, fail and audit; the reported value is never stored as effective. */
+  private async failUnauthorizedMode(
+    tx: Tx,
+    device: DeviceRef,
+    s: SessionRow,
+    reported: string,
+    via: "session.settings" | "session.started",
+  ): Promise<void> {
+    await this.deps.hub.enqueue(tx, {
+      deviceId: s.deviceId,
+      workSessionId: s.id,
+      kind: "interrupt",
+      payload: {},
+    });
+    await this.deps.hub.enqueue(tx, {
+      deviceId: s.deviceId,
+      workSessionId: s.id,
+      kind: "session.stop",
+      payload: {},
+    });
+    await this.failInFlight(tx, s, UNAUTHORIZED_MODE_ERROR);
+    await this.deps.audit.record(tx, {
+      action: "work_session.unauthorized_mode",
+      resourceType: "work_session",
+      resourceId: s.id,
+      actorKind: "device",
+      actorId: device.deviceId,
+      deviceId: device.deviceId,
+      sessionId: s.id,
+      userId: null,
+      result: "denied",
+      metadata: { reported, authorizedMode: s.permissionMode, via },
+    });
+    await this.setStatus(tx, s, "failed", { lastError: UNAUTHORIZED_MODE_ERROR });
   }
 
   private async failInFlight(tx: Tx, s: SessionRow, reason: string): Promise<void> {
@@ -395,6 +705,36 @@ export class WorkSessionService implements DeviceSessionHandler {
         }
         return;
       }
+      if (cmd.kind === "session.configure" && !ok) {
+        // A session the daemon no longer runs gets its settings from the next session.start instead.
+        const lost = /not active/i.test(error ?? "");
+        await tx
+          .update(workSessions)
+          .set({
+            settingsPending: false,
+            updatedAt: sql`now()`,
+            ...(lost
+              ? {}
+              : { lastError: (error ?? "The device could not apply the settings").slice(0, 2000) }),
+          })
+          .where(eq(workSessions.id, s.id));
+        if (!lost) {
+          await this.deps.audit.record(tx, {
+            action: "work_session.settings_failed",
+            resourceType: "work_session",
+            resourceId: s.id,
+            actorKind: "device",
+            actorId: device.deviceId,
+            deviceId: device.deviceId,
+            sessionId: s.id,
+            userId: null,
+            result: "error",
+            metadata: { settings: cmd.payload.settings ?? null, error: error ?? null },
+          });
+        }
+        await this.emitSession(tx, s.id);
+        return;
+      }
       if (cmd.kind === "prompt" && !ok) {
         const promptId = String((cmd.payload as { promptId?: unknown }).promptId ?? "");
         if (!UUID_RE.test(promptId)) return;
@@ -428,12 +768,25 @@ export class WorkSessionService implements DeviceSessionHandler {
       const [s] = await tx.select().from(workSessions).where(eq(workSessions.id, workSessionId));
       if (!s || s.deviceId !== device.deviceId) return;
       const branch = frame.branch ?? null;
-      if (branch !== s.branch) {
-        await tx.update(workSessions).set({ branch }).where(eq(workSessions.id, s.id));
+      const files = frame.files.filter((f) => onlyRelativePaths([f.path]).length === 1);
+      // The sidebar / footer diff stat (D-17): totals of the relative-only files.
+      const diffStat: DiffStat = {
+        files: files.length,
+        additions: files.reduce((n, f) => n + f.additions, 0),
+        deletions: files.reduce((n, f) => n + f.deletions, 0),
+      };
+      const prev = DiffStat.safeParse(s.diffStat);
+      const statChanged =
+        !prev.success ||
+        prev.data.files !== diffStat.files ||
+        prev.data.additions !== diffStat.additions ||
+        prev.data.deletions !== diffStat.deletions;
+      if (branch !== s.branch || statChanged) {
+        await tx.update(workSessions).set({ branch, diffStat }).where(eq(workSessions.id, s.id));
         await this.emitSession(tx, s.id);
       }
       const changes: WorkSessionChanges = {
-        files: frame.files.filter((f) => onlyRelativePaths([f.path]).length === 1),
+        files,
         branch,
         headSha: frame.headSha ?? null,
         truncated: frame.truncated ?? false,
@@ -482,7 +835,11 @@ export class WorkSessionService implements DeviceSessionHandler {
 
   private async apply(tx: Tx, device: DeviceRef, s: SessionRow, ev: SessionEvent): Promise<void> {
     switch (ev.type) {
-      case "session.started":
+      case "session.started": {
+        if (!(await this.fullAccessReportAllowed(tx, s, ev.permissionMode))) {
+          await this.failUnauthorizedMode(tx, device, s, ev.permissionMode!, "session.started");
+          return;
+        }
         if (ev.runtimeSessionId && ev.runtimeSessionId !== s.runtimeSessionId) {
           await tx
             .update(workSessions)
@@ -490,7 +847,24 @@ export class WorkSessionService implements DeviceSessionHandler {
             .where(eq(workSessions.id, s.id));
           s.runtimeSessionId = ev.runtimeSessionId;
         }
+        // A (re)start reports the model and mode it really runs: seed or refresh the effective settings.
+        if (ev.model !== undefined || ev.permissionMode !== undefined || s.effectiveSettings === null) {
+          await this.storeEffective(tx, s, {
+            ...(ev.model !== undefined ? { model: ev.model } : {}),
+            ...(ev.permissionMode !== undefined ? { permissionMode: ev.permissionMode } : {}),
+          });
+        }
         return;
+      }
+      case "session.settings": {
+        const { type: _type, ...reported } = ev;
+        if (!(await this.fullAccessReportAllowed(tx, s, reported.permissionMode))) {
+          await this.failUnauthorizedMode(tx, device, s, reported.permissionMode!, "session.settings");
+          return;
+        }
+        await this.storeEffective(tx, s, reported, true);
+        return;
+      }
       case "session.state":
         return this.applyDeviceState(tx, s, ev.status);
       case "prompt.started": {
@@ -595,6 +969,45 @@ export class WorkSessionService implements DeviceSessionHandler {
     }
   }
 
+  /** Merge reported values into `effective_settings` (D-07); `settled` clears the pending flag. */
+  private async storeEffective(
+    tx: Tx,
+    s: SessionRow,
+    reported: Partial<Omit<EffectiveSessionSettings, "at">>,
+    settled = false,
+  ): Promise<void> {
+    const prev = EffectiveSessionSettings.safeParse(s.effectiveSettings);
+    const base: Omit<EffectiveSessionSettings, "at"> = prev.success
+      ? prev.data
+      : {
+          model: null,
+          effort: null,
+          contextWindow: null,
+          fastMode: null,
+          fastModeState: null,
+          fastModeReason: null,
+          permissionMode: null,
+          serviceTier: null,
+        };
+    const merged: EffectiveSessionSettings = { ...base, at: new Date().toISOString() };
+    for (const [k, v] of Object.entries(reported)) {
+      if (v !== undefined) (merged as Record<string, unknown>)[k] = v;
+    }
+    const parsed = EffectiveSessionSettings.safeParse(merged);
+    if (!parsed.success) return;
+    await tx
+      .update(workSessions)
+      .set({
+        effectiveSettings: parsed.data,
+        updatedAt: sql`now()`,
+        ...(settled ? { settingsPending: false } : {}),
+      })
+      .where(eq(workSessions.id, s.id));
+    s.effectiveSettings = parsed.data;
+    if (settled) s.settingsPending = false;
+    await this.emitSession(tx, s.id);
+  }
+
   private async applyDeviceState(tx: Tx, s: SessionRow, status: WorkSessionStatus): Promise<void> {
     if (s.status === "archived") return;
     switch (status) {
@@ -621,6 +1034,9 @@ export class WorkSessionService implements DeviceSessionHandler {
         return;
       case "failed":
       case "completed":
+        // A session the server already failed (access revoked, unauthorized mode) stays failed with its reason
+        // when the device then reports the stopped session as ended.
+        if (s.status === "failed" && status === "completed") return;
         await this.failInFlight(tx, s, status === "failed" ? "The session failed" : "The session ended");
         await this.setStatus(tx, s, status);
         return;

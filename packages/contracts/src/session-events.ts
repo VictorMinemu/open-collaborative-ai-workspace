@@ -11,9 +11,53 @@ import { z } from "zod";
 export const RuntimeId = z.enum(["claude-code", "codex"]);
 export type RuntimeId = z.infer<typeof RuntimeId>;
 
-/** Permission modes a work session may request. `bypassPermissions` is never accepted, anywhere. */
-export const PermissionMode = z.enum(["default", "acceptEdits", "plan"]);
+/**
+ * Permission modes a work session may request (the platform names; adapters map them to their runtime).
+ *
+ * `fullAccess` is the platform name for a runtime's bypass mode (Claude `bypassPermissions`, Codex
+ * `approvalPolicy: "never"` + `danger-full-access`). It is reachable ONLY through ADR-0012's path: org policy ∩
+ * device opt-in ∩ the asker's grain, checked server-side on every turn and again by the daemon. The runtime
+ * literals themselves (`RUNTIME_BYPASS_LITERALS`) are never accepted by this enum, anywhere.
+ */
+export const PermissionMode = z.enum(["default", "acceptEdits", "plan", "auto", "fullAccess"]);
 export type PermissionMode = z.infer<typeof PermissionMode>;
+
+/** The mode ladder (P-03): every cap (policy, device grant, per-turn) is a rank on it. */
+export const PERMISSION_MODE_RANK: Readonly<Record<PermissionMode, number>> = {
+  plan: 0,
+  default: 1,
+  acceptEdits: 2,
+  auto: 3,
+  fullAccess: 4,
+};
+
+/** The less permissive of two modes. */
+export function minMode(a: PermissionMode, b: PermissionMode): PermissionMode {
+  return PERMISSION_MODE_RANK[a] <= PERMISSION_MODE_RANK[b] ? a : b;
+}
+
+/** True when `mode` is at or below `cap`; a missing cap (`null`) allows nothing. */
+export function modeWithin(mode: PermissionMode, cap: PermissionMode | null): boolean {
+  return cap !== null && PERMISSION_MODE_RANK[mode] <= PERMISSION_MODE_RANK[cap];
+}
+
+/** Runtime-native bypass values. Never valid as a `PermissionMode`; seen only in what a runtime reports. */
+export const RUNTIME_BYPASS_LITERALS: readonly string[] = [
+  "bypassPermissions",
+  "dontAsk",
+  "danger-full-access",
+  "dangerFullAccess",
+];
+
+/** A runtime's reported mode means full access (the platform name or a runtime bypass literal). */
+export function isFullAccessReport(raw: string | null | undefined): boolean {
+  if (!raw) return false;
+  return raw === "fullAccess" || RUNTIME_BYPASS_LITERALS.includes(raw);
+}
+
+/** Fast mode as the runtime reports it (Claude `fast_mode_state`; Codex service tier). */
+export const FastModeState = z.enum(["on", "off", "cooldown", "unavailable"]);
+export type FastModeState = z.infer<typeof FastModeState>;
 
 export const WorkSessionStatus = z.enum([
   "provisioning",
@@ -54,6 +98,21 @@ export const SessionEvent = z.discriminatedUnion("type", [
     runtimeVersion: z.string().max(64).optional(),
     model: z.string().max(200).optional(),
     permissionMode: z.string().max(32).optional(),
+  }),
+  /**
+   * The effective settings the runtime applied (D-07): after a `session.configure`, after every runtime-side
+   * change (Claude `system/init`, Codex `thread/settings/updated`) and at start. Values are the runtime's own
+   * bounded strings, not enums (Codex effort is an open set).
+   */
+  ev("session.settings", {
+    model: z.string().max(200).nullable().optional(),
+    permissionMode: z.string().max(32).optional(),
+    effort: z.string().max(32).nullable().optional(),
+    contextWindow: z.number().int().positive().nullable().optional(),
+    fastMode: z.boolean().nullable().optional(),
+    fastModeState: FastModeState.nullable().optional(),
+    fastModeReason: z.string().max(64).nullable().optional(),
+    serviceTier: z.string().max(64).nullable().optional(),
   }),
   ev("session.state", { status: WorkSessionStatus }),
   ev("prompt.started", { promptId: z.string().min(1).max(128) }),

@@ -8,6 +8,11 @@ import {
   Ok,
   ProjectList,
   type ResolveApprovalRequest,
+  RuntimeControls,
+  type RuntimeId,
+  SessionCommandResult,
+  SessionControls,
+  type SessionSettingsPatch,
   topic,
   type UpdateDeviceRequest,
   type UpdatePromptRequest,
@@ -29,6 +34,9 @@ export const wzKeys = {
   sessions: ["wz", "sessions"] as const,
   session: (id: string) => ["wz", "session", id] as const,
   diff: (id: string) => ["wz", "diff", id] as const,
+  controls: (id: string) => ["wz", "controls", id] as const,
+  runtimeControls: (deviceId: string, runtime: RuntimeId) =>
+    ["wz", "controls", "runtime", deviceId, runtime] as const,
 };
 
 // ---- devices & projects ----
@@ -122,6 +130,61 @@ export function useUpdatePrompt(sessionId: string) {
 export function useInterrupt(sessionId: string) {
   return useMutation({
     mutationFn: () => api.post(`/api/v1/work-sessions/${sessionId}/interrupt`, { body: {}, schema: Ok }),
+  });
+}
+
+/** What the caller may pick in this session (catalog ∩ policy ∩ device ∩ grain), decided by the API (D-08). */
+export function useSessionControls(sessionId: string) {
+  return useQuery({
+    queryKey: wzKeys.controls(sessionId),
+    queryFn: ({ signal }) =>
+      api.get(`/api/v1/work-sessions/${sessionId}/controls`, { schema: SessionControls, signal }),
+    staleTime: 30_000,
+  });
+}
+
+/**
+ * What the caller may pick for a NEW session on `deviceId` with `runtime` (catalog ∩ policy ∩ device ∩ grain),
+ * decided by the API (D-08, WZC-03). Disabled until both are known.
+ */
+export function useRuntimeControls(deviceId: string | null | undefined, runtime: RuntimeId) {
+  return useQuery({
+    enabled: !!deviceId,
+    queryKey: wzKeys.runtimeControls(deviceId ?? "", runtime),
+    queryFn: ({ signal }) =>
+      api.get(
+        `/api/v1/work-zone/controls?deviceId=${encodeURIComponent(deviceId ?? "")}&runtime=${encodeURIComponent(runtime)}`,
+        { schema: RuntimeControls, signal },
+      ),
+    staleTime: 30_000,
+  });
+}
+
+/** Change the session's settings; the device applies them before the next turn (D-07, D-14). */
+export function useUpdateSessionSettings(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: SessionSettingsPatch) =>
+      api.patch(`/api/v1/work-sessions/${sessionId}/settings`, { body, schema: WorkSession }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: wzKeys.controls(sessionId) }),
+  });
+}
+
+/**
+ * Run a `/command` typed in the composer (D-13, P-10): the API changes settings through the policy-checked path,
+ * queues a passthrough command as a prompt, or refuses it with a notice. Never sent to the prompt queue raw.
+ */
+export function useSessionCommand(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (text: string) =>
+      api.post(`/api/v1/work-sessions/${sessionId}/commands`, {
+        body: { text },
+        schema: SessionCommandResult,
+      }),
+    onSuccess: (result) => {
+      if (result.kind === "settings") void qc.invalidateQueries({ queryKey: wzKeys.controls(sessionId) });
+    },
   });
 }
 

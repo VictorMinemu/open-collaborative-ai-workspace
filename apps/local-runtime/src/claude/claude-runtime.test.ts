@@ -1,22 +1,44 @@
 import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { HookCallback, Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { PermissionMode, SessionEvent } from "@ocw/contracts";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type {
+  HookCallback,
+  ModelInfo,
+  Options,
+  SDKMessage,
+  SDKUserMessage,
+} from "@anthropic-ai/claude-agent-sdk";
+import type { PermissionMode, RuntimeInfo, SessionEvent } from "@ocw/contracts";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AsyncQueue } from "../async-queue.js";
-import { RuntimeError } from "../runtime.js";
+import { RuntimeError, type StartSessionOptions } from "../runtime.js";
 import { ClaudeCodeRuntime, childEnv, type QueryHandle } from "./claude-runtime.js";
-import { commandTouchesSecrets, isSecretPath, secretDenyReason } from "./tool-policy.js";
+import { commandTouchesSecrets, isSecretPath, secretDenyReason, secretDenyRules } from "./tool-policy.js";
+
+/** Every control request a fake query received, in order, across the whole suite (T-03.2-02-01 assertion). */
+const ALL_FLAG_SETTINGS: unknown[] = [];
 
 class FakeQuery implements QueryHandle {
   readonly out = new AsyncQueue<SDKMessage>();
   readonly prompts: SDKUserMessage[] = [];
+  /** Control requests and pushed prompts, in the order the runtime saw them. */
+  readonly log: string[] = [];
+  readonly calls: Array<{ method: string; arg: unknown }> = [];
+  /** Next call of `method` rejects with this message. */
+  readonly failNext = new Map<string, string>();
+  /** Reported by `initializationResult()`. */
+  models: ModelInfo[] = [];
+  /** Model → maxTokens for `getContextUsage()`; a missing model rejects (the runtime refusing it). */
+  windows: Record<string, number> = {};
+  private model: string | undefined;
   interrupts = 0;
   closed = false;
   constructor(readonly params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) {
     void (async () => {
-      for await (const m of params.prompt) this.prompts.push(m);
+      for await (const m of params.prompt) {
+        this.prompts.push(m);
+        this.log.push(`prompt:${String(m.message.content)}`);
+      }
       this.out.close();
     })();
   }
@@ -31,32 +53,90 @@ class FakeQuery implements QueryHandle {
     this.closed = true;
     this.out.close();
   }
+  private record(method: string, arg: unknown): Promise<void> {
+    this.calls.push({ method, arg });
+    this.log.push(`${method}:${JSON.stringify(arg) ?? "undefined"}`);
+    const failure = this.failNext.get(method);
+    if (failure) {
+      this.failNext.delete(method);
+      return Promise.reject(new Error(failure));
+    }
+    return Promise.resolve();
+  }
+  setModel(model?: string): Promise<void> {
+    this.model = model;
+    return this.record("setModel", model);
+  }
+  setPermissionMode(mode: string): Promise<void> {
+    return this.record("setPermissionMode", mode);
+  }
+  applyFlagSettings(settings: Record<string, unknown>): Promise<void> {
+    ALL_FLAG_SETTINGS.push(settings);
+    return this.record("applyFlagSettings", settings);
+  }
+  initializationResult(): Promise<{ models: ModelInfo[] }> {
+    this.calls.push({ method: "initializationResult", arg: undefined });
+    return Promise.resolve({ models: this.models });
+  }
+  getContextUsage(): Promise<{ maxTokens: number; model: string }> {
+    this.calls.push({ method: "getContextUsage", arg: this.model });
+    const max = this.model === undefined ? undefined : this.windows[this.model];
+    if (max === undefined) return Promise.reject(new Error(`model not available: ${this.model}`));
+    return Promise.resolve({ maxTokens: max, model: this.model ?? "" });
+  }
+  methodCalls(method: string): unknown[] {
+    return this.calls.filter((c) => c.method === method).map((c) => c.arg);
+  }
   [Symbol.asyncIterator](): AsyncIterator<SDKMessage> {
     return this.out[Symbol.asyncIterator]();
   }
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+const settle = async (n = 4) => {
+  for (let i = 0; i < n; i++) await tick();
+};
 
-function setup(extra: { approvalTimeoutMs?: number; useApiKey?: boolean; claudePath?: string } = {}) {
+function setup(
+  extra: {
+    approvalTimeoutMs?: number;
+    useApiKey?: boolean;
+    claudePath?: string;
+    prepare?: (q: FakeQuery) => void;
+    detect?: () => Promise<RuntimeInfo>;
+    allowFullAccess?: () => boolean;
+  } = {},
+) {
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ocw-claude-rt-")));
-  let fake: FakeQuery | null = null;
+  const queries: FakeQuery[] = [];
   const events: SessionEvent[] = [];
   const runtime = new ClaudeCodeRuntime({
     queryFn: (params) => {
-      fake = new FakeQuery(params);
-      return fake;
+      const q = new FakeQuery(params);
+      extra.prepare?.(q);
+      queries.push(q);
+      return q;
     },
     claudePath: extra.claudePath ?? "/usr/local/bin/claude",
+    catalogCwd: cwd,
+    detect:
+      extra.detect ??
+      (() => Promise.resolve({ id: "claude-code", installed: true, version: "2.1.289", loggedIn: true })),
     ...(extra.approvalTimeoutMs ? { approvalTimeoutMs: extra.approvalTimeoutMs } : {}),
     ...(extra.useApiKey !== undefined ? { useApiKey: extra.useApiKey } : {}),
+    ...(extra.allowFullAccess ? { allowFullAccess: extra.allowFullAccess } : {}),
   });
-  const start = async (permissionMode: PermissionMode = "default") => {
-    await runtime.start({ sessionId: "s1", cwd, permissionMode }, (e) => events.push(e));
-    if (!fake) throw new Error("query not created");
-    return fake as FakeQuery;
+  let session: FakeQuery | null = null;
+  const start = async (
+    permissionMode: PermissionMode = "default",
+    more: Partial<Omit<StartSessionOptions, "sessionId" | "cwd" | "permissionMode">> = {},
+  ) => {
+    await runtime.start({ sessionId: "s1", cwd, permissionMode, ...more }, (e) => events.push(e));
+    session = queries.at(-1) ?? null;
+    if (!session) throw new Error("query not created");
+    return session as FakeQuery;
   };
-  return { cwd, runtime, events, start };
+  return { cwd, runtime, events, start, queries };
 }
 
 const signal = () => new AbortController().signal;
@@ -117,13 +197,14 @@ describe("ClaudeCodeRuntime — SDK options (security + billing)", () => {
 
   it("rejects bypassPermissions and other non-allowed modes", async () => {
     const { runtime, cwd } = setup();
-    for (const mode of ["bypassPermissions", "dontAsk", "auto"]) {
+    // `fullAccess` is a platform mode, outside this adapter's capabilities while the device gate is closed.
+    for (const mode of ["bypassPermissions", "dontAsk", "fullAccess"]) {
       await expect(
         runtime.start(
           { sessionId: `s-${mode}`, cwd, permissionMode: mode as PermissionMode },
           () => undefined,
         ),
-      ).rejects.toBeInstanceOf(RuntimeError);
+      ).rejects.toMatchObject({ code: "permission_mode_rejected" });
     }
   });
 
@@ -294,6 +375,492 @@ describe("ClaudeCodeRuntime — prompts, interrupt, stop", () => {
     expect(events.at(-1)).toEqual({ type: "session.state", status: "completed" });
     await expect(runtime.prompt("s1", { promptId: "x", text: "y" })).rejects.toBeInstanceOf(RuntimeError);
   });
+});
+
+const settingsEvents = (events: SessionEvent[]) =>
+  events.filter(
+    (e): e is Extract<SessionEvent, { type: "session.settings" }> => e.type === "session.settings",
+  );
+
+describe("ClaudeCodeRuntime — settings between turns (D-07, D-14)", () => {
+  it("applies a model change at once while idle and reports it", async () => {
+    const { start, runtime, events } = setup();
+    const q = await start();
+    await runtime.configure("s1", { model: "sonnet" });
+    expect(q.methodCalls("setModel")).toEqual(["sonnet"]);
+    expect(settingsEvents(events).at(-1)).toMatchObject({ model: "sonnet", permissionMode: "default" });
+  });
+
+  it("holds a change made during a turn and applies it before the next prompt is pushed", async () => {
+    const { start, runtime } = setup();
+    const q = await start();
+    await runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await runtime.configure("s1", { model: "sonnet" });
+    await runtime.prompt("s1", { promptId: "p2", text: "two" });
+    await settle();
+    expect(q.methodCalls("setModel")).toEqual([]);
+    q.emit(result());
+    await settle();
+    expect(q.log).toEqual(["prompt:one", 'setModel:"sonnet"', "prompt:two"]);
+  });
+
+  it("merges several changes made during one turn into one application (last value wins)", async () => {
+    const { start, runtime, events } = setup();
+    const q = await start();
+    await runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await runtime.configure("s1", { model: "sonnet" });
+    await runtime.configure("s1", { model: "opus" });
+    await runtime.prompt("s1", { promptId: "p2", text: "two" });
+    q.emit(result());
+    await settle();
+    expect(q.methodCalls("setModel")).toEqual(["opus"]);
+    expect(settingsEvents(events).at(-1)).toMatchObject({ model: "opus" });
+  });
+
+  it("a failing setModel reports the error, rejects with settings_rejected and leaves the next prompt alone", async () => {
+    const { start, runtime, events } = setup();
+    const q = await start();
+    q.failNext.set("setModel", "model not available for your account");
+    await expect(runtime.configure("s1", { model: "nope" })).rejects.toMatchObject({
+      code: "settings_rejected",
+    });
+    expect(events.some((e) => e.type === "session.error")).toBe(true);
+    expect(settingsEvents(events)).toEqual([]);
+    await runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await settle();
+    expect(q.log).toEqual(['setModel:"nope"', "prompt:one"]);
+  });
+
+  it("a held change that fails at dispatch is dropped and the turn still runs", async () => {
+    const { start, runtime, events } = setup();
+    const q = await start();
+    await runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await runtime.configure("s1", { model: "nope" });
+    await runtime.prompt("s1", { promptId: "p2", text: "two" });
+    q.failNext.set("setModel", "model not available");
+    q.emit(result());
+    await settle();
+    expect(q.log).toEqual(["prompt:one", 'setModel:"nope"', "prompt:two"]);
+    expect(events.filter((e) => e.type === "session.error")).toHaveLength(1);
+    q.emit(result());
+    await runtime.prompt("s1", { promptId: "p3", text: "three" });
+    await settle();
+    expect(q.methodCalls("setModel")).toEqual(["nope"]);
+  });
+
+  it("refuses a permission mode outside its capabilities", async () => {
+    const { start, runtime } = setup();
+    const q = await start();
+    await expect(runtime.configure("s1", { permissionMode: "fullAccess" })).rejects.toMatchObject({
+      code: "settings_rejected",
+    });
+    expect(q.calls).toEqual([]);
+  });
+});
+
+const PROBE_MODELS: ModelInfo[] = [
+  { value: "default", resolvedModel: "claude-opus-5-5", displayName: "Default", description: "Opus 5.5" },
+  {
+    value: "opus",
+    resolvedModel: "claude-opus-5-5",
+    displayName: "Opus",
+    description: "Opus 5.5",
+    supportsEffort: true,
+    supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"],
+    supportsFastMode: true,
+    supportsAutoMode: true,
+  },
+  { value: "claude-opus-4-6", displayName: "Opus 4.6", description: "Older", supportsEffort: true },
+  { value: "haiku", displayName: "Haiku", description: "Fast" },
+];
+
+const prepareProbe = (q: FakeQuery) => {
+  q.models = PROBE_MODELS;
+  q.windows = {
+    opus: 1_000_000,
+    "opus[1m]": 1_000_000,
+    "claude-opus-4-6": 200_000,
+    "claude-opus-4-6[1m]": 1_000_000,
+    haiku: 200_000,
+  };
+};
+
+describe("ClaudeCodeRuntime — catalog() (no turn, D-08 … D-11)", () => {
+  it("opens one throw-away query, reads the models, probes the windows, closes it and sends no prompt", async () => {
+    const { runtime, queries } = setup({ prepare: prepareProbe });
+    const catalog = await runtime.catalog();
+    expect(queries).toHaveLength(1);
+    const q = queries[0] as FakeQuery;
+    await settle();
+    expect(q.prompts).toEqual([]);
+    expect(q.closed).toBe(true);
+    expect(q.methodCalls("initializationResult")).toHaveLength(1);
+    expect(q.methodCalls("setModel")).toEqual([
+      "opus",
+      "opus[1m]",
+      "claude-opus-4-6",
+      "claude-opus-4-6[1m]",
+      "haiku",
+      "haiku[1m]",
+    ]);
+    expect(q.methodCalls("getContextUsage")).toHaveLength(6);
+    // Same locked-down options as a session.
+    const o = q.params.options;
+    expect(o.allowDangerouslySkipPermissions).toBe(false);
+    // Not plan: plan mode runs Haiku as Sonnet and the probe would read the wrong window (2.1.289).
+    expect(o.permissionMode).toBe("default");
+    await expect(
+      o.canUseTool?.("Read", { file_path: "a" }, { signal: signal() } as never),
+    ).resolves.toMatchObject({ behavior: "deny" });
+    expect(o.settingSources).toEqual(["project"]);
+    const perms = (o.settings as { permissions: { deny: string[]; disableBypassPermissionsMode: string } })
+      .permissions;
+    expect(perms.disableBypassPermissionsMode).toBe("disable");
+    expect(perms.deny).toEqual(expect.arrayContaining(["Read(**/.env)"]));
+    expect(o.env?.OCW_DEVICE_TOKEN).toBeUndefined();
+
+    expect(catalog?.runtimeVersion).toBe("2.1.289");
+    expect(catalog?.permissionModes).toEqual(runtime.capabilities.supportsPermissionModes);
+    const byId = new Map(catalog?.models.map((m) => [m.id, m]));
+    expect(byId.get("opus")).toMatchObject({
+      isDefault: true,
+      contextWindows: [],
+      defaultContextWindow: 1_000_000,
+    });
+    expect(byId.get("claude-opus-4-6")).toMatchObject({
+      legacy: true,
+      contextWindows: [200_000, 1_000_000],
+      defaultContextWindow: 200_000,
+    });
+    expect(byId.get("haiku")).toMatchObject({ contextWindows: [], defaultContextWindow: 200_000 });
+  });
+
+  it("a failing probe yields a catalog without context windows instead of failing", async () => {
+    const { runtime } = setup({
+      prepare: (q) => {
+        q.models = PROBE_MODELS;
+        q.windows = {};
+      },
+    });
+    const catalog = await runtime.catalog();
+    expect(catalog?.models.length).toBe(3);
+    for (const m of catalog?.models ?? []) {
+      expect(m.contextWindows).toEqual([]);
+      expect(m.defaultContextWindow).toBeNull();
+    }
+  });
+
+  it("is cached, and null when the CLI is missing or signed out", async () => {
+    const { runtime, queries } = setup({ prepare: prepareProbe });
+    await runtime.catalog();
+    await runtime.catalog();
+    expect(queries).toHaveLength(1);
+    const signedOut = setup({
+      detect: () =>
+        Promise.resolve({ id: "claude-code", installed: true, version: "2.1.289", loggedIn: false }),
+    });
+    await expect(signedOut.runtime.catalog()).resolves.toBeNull();
+    expect(signedOut.queries).toHaveLength(0);
+  });
+});
+
+describe("ClaudeCodeRuntime — effort, fast mode, context window, modes (D-09 … D-12)", () => {
+  it("effort and fast mode go through applyFlagSettings with only the changed scalar keys", async () => {
+    const { start, runtime, events } = setup();
+    const q = await start();
+    await runtime.configure("s1", { effort: "high" });
+    await runtime.configure("s1", { effort: null });
+    await runtime.configure("s1", { fastMode: true });
+    expect(q.methodCalls("applyFlagSettings")).toEqual([
+      { effortLevel: "high" },
+      { effortLevel: null },
+      { fastMode: true },
+    ]);
+    expect(settingsEvents(events).at(-1)).toMatchObject({ effort: null, fastMode: true });
+  });
+
+  it("start-time effort / fast mode are applied before the first turn", async () => {
+    const { start, runtime } = setup();
+    const q = await start("default", { effort: "low", fastMode: true });
+    await runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await settle();
+    expect(q.log).toEqual(['applyFlagSettings:{"effortLevel":"low","fastMode":true}', "prompt:one"]);
+    // fastMode false at start is the default: no control request.
+    const other = setup();
+    const q2 = await other.start("default", { fastMode: false });
+    await other.runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await settle();
+    expect(q2.log).toEqual(["prompt:one"]);
+  });
+
+  it("the context window re-selects the model with or without [1m] where the catalog offers both", async () => {
+    const { start, runtime, events } = setup({ prepare: prepareProbe });
+    const q = await start("default", { model: "claude-opus-4-6" });
+    await runtime.configure("s1", { contextWindow: 1_000_000 });
+    expect(settingsEvents(events).at(-1)).toMatchObject({
+      model: "claude-opus-4-6",
+      contextWindow: 1_000_000,
+    });
+    await runtime.configure("s1", { contextWindow: 200_000 });
+    expect(q.methodCalls("setModel")).toEqual(["claude-opus-4-6[1m]", "claude-opus-4-6"]);
+    expect(settingsEvents(events).at(-1)).toMatchObject({ contextWindow: 200_000 });
+    // A model change reports the new model's base window from the catalog.
+    await runtime.configure("s1", { model: "opus" });
+    expect(settingsEvents(events).at(-1)).toMatchObject({ model: "opus", contextWindow: 1_000_000 });
+  });
+
+  it("refuses a context window the model does not offer", async () => {
+    const { start, runtime } = setup({ prepare: prepareProbe });
+    const q = await start("default", { model: "opus" });
+    await expect(runtime.configure("s1", { contextWindow: 200_000 })).rejects.toMatchObject({
+      code: "settings_rejected",
+    });
+    expect(q.methodCalls("setModel")).toEqual([]);
+  });
+
+  it("permission modes plan / default / acceptEdits / auto go through setPermissionMode", async () => {
+    const { start, runtime, events } = setup();
+    const q = await start("plan");
+    await runtime.configure("s1", { permissionMode: "auto" });
+    await runtime.configure("s1", { permissionMode: "plan" });
+    await runtime.configure("s1", { permissionMode: "acceptEdits" });
+    expect(q.methodCalls("setPermissionMode")).toEqual(["auto", "plan", "acceptEdits"]);
+    expect(settingsEvents(events).at(-1)).toMatchObject({ permissionMode: "acceptEdits" });
+    expect(runtime.capabilities.supportsPermissionModes).toEqual(["default", "acceptEdits", "plan", "auto"]);
+  });
+
+  it("starts in auto mode (confirmed by the 2.1.289 settings fixture)", async () => {
+    const { start } = setup();
+    const q = await start("auto");
+    expect(q.params.options.permissionMode).toBe("auto");
+  });
+});
+
+describe("ClaudeCodeRuntime — per-turn mode cap (P-07)", () => {
+  it("lowers the mode before a capped turn and restores it before the next uncapped one", async () => {
+    const { start, runtime } = setup();
+    const q = await start("acceptEdits");
+    await runtime.prompt("s1", { promptId: "p1", text: "capped", permissionMode: "default" });
+    await runtime.prompt("s1", { promptId: "p2", text: "free" });
+    await settle();
+    q.emit(result());
+    await settle();
+    expect(q.log).toEqual([
+      'setPermissionMode:"default"',
+      "prompt:capped",
+      'setPermissionMode:"acceptEdits"',
+      "prompt:free",
+    ]);
+  });
+
+  it("a cap above the configured mode changes nothing", async () => {
+    const { start, runtime } = setup();
+    const q = await start("plan");
+    await runtime.prompt("s1", { promptId: "p1", text: "one", permissionMode: "acceptEdits" });
+    await settle();
+    expect(q.log).toEqual(["prompt:one"]);
+  });
+
+  it("fails the turn without pushing it when the mode cannot be lowered", async () => {
+    const { start, runtime, events } = setup();
+    const q = await start("acceptEdits");
+    q.failNext.set("setPermissionMode", "control request failed");
+    await runtime.prompt("s1", { promptId: "p1", text: "capped", permissionMode: "plan" });
+    await runtime.prompt("s1", { promptId: "p2", text: "next" });
+    await settle();
+    expect(q.prompts.map((p) => p.message.content)).toEqual(["next"]);
+    expect(events.find((e) => e.type === "prompt.completed")).toMatchObject({
+      promptId: "p1",
+      isError: true,
+    });
+    expect(events.some((e) => e.type === "session.error")).toBe(true);
+  });
+});
+
+type Perms = { deny?: string[]; disableBypassPermissionsMode?: string };
+const perms = (q: FakeQuery) => (q.params.options.settings as { permissions: Perms }).permissions;
+const init = (permissionMode: string, session_id = "rt-1") => ({
+  type: "system",
+  subtype: "init",
+  permissionMode,
+  session_id,
+  model: "claude-opus-5-5",
+});
+
+describe("ClaudeCodeRuntime — Full access through ADR-0012 only (D-01, D-03, D-04, P-11)", () => {
+  it("an authorized fullAccess start runs bypassPermissions with the secret deny rules and hooks kept", async () => {
+    const { start } = setup({ allowFullAccess: () => true });
+    const q = await start("fullAccess");
+    const o = q.params.options;
+    expect(o.permissionMode).toBe("bypassPermissions");
+    expect(o.allowDangerouslySkipPermissions).toBe(true);
+    expect(perms(q).deny).toEqual(secretDenyRules());
+    expect(perms(q).disableBypassPermissionsMode).toBeUndefined();
+    expect(o.hooks?.PreToolUse?.[0]?.hooks).toHaveLength(1);
+    expect(typeof o.canUseTool).toBe("function");
+    expect(o.settingSources).toEqual(["project"]);
+  });
+
+  it("refuses fullAccess when the device gate is closed", async () => {
+    const { runtime, cwd, queries } = setup({ allowFullAccess: () => false });
+    expect(runtime.capabilities.supportsPermissionModes).not.toContain("fullAccess");
+    await expect(
+      runtime.start({ sessionId: "s1", cwd, permissionMode: "fullAccess" }, () => undefined),
+    ).rejects.toMatchObject({ code: "permission_mode_rejected" });
+    expect(queries).toHaveLength(0);
+  });
+
+  it("with the gate open, any other mode still starts locked down (no bypass availability)", async () => {
+    const { start, runtime } = setup({ allowFullAccess: () => true });
+    expect(runtime.capabilities.supportsPermissionModes).toContain("fullAccess");
+    const q = await start("acceptEdits");
+    expect(q.params.options.allowDangerouslySkipPermissions).toBe(false);
+    expect(perms(q).disableBypassPermissionsMode).toBe("disable");
+  });
+
+  it("entering fullAccess relaunches between turns with resume and the bypass options", async () => {
+    const { start, runtime, events, queries } = setup({ allowFullAccess: () => true });
+    const first = await start("acceptEdits", { model: "sonnet" });
+    first.emit(init("acceptEdits"));
+    await settle();
+    await runtime.configure("s1", { effort: "high" });
+    await runtime.configure("s1", { permissionMode: "fullAccess" });
+    expect(first.closed).toBe(true);
+    expect(queries).toHaveLength(2);
+    const second = queries[1] as FakeQuery;
+    expect(second.params.options).toMatchObject({
+      resume: "rt-1",
+      model: "sonnet",
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+    });
+    expect(perms(second).deny).toEqual(secretDenyRules());
+    // The effort set on the first process is carried over (scalar flag settings only).
+    expect(second.methodCalls("applyFlagSettings")).toEqual([{ effortLevel: "high" }]);
+    expect(events.some((e) => e.type === "session.state" && e.status === "completed")).toBe(false);
+    expect(events.some((e) => e.type === "session.error")).toBe(false);
+    expect(settingsEvents(events).at(-1)).toMatchObject({ permissionMode: "fullAccess" });
+    await runtime.prompt("s1", { promptId: "p1", text: "go" });
+    await settle();
+    expect(first.prompts).toHaveLength(0);
+    expect(second.prompts.map((p) => p.message.content)).toEqual(["go"]);
+    // The authorized bypass init is accepted (not an abort).
+    second.emit(init("bypassPermissions"));
+    await settle();
+    expect(second.closed).toBe(false);
+    expect(events.some((e) => e.type === "session.error")).toBe(false);
+  });
+
+  it("leaving fullAccess relaunches again without bypass", async () => {
+    const { start, runtime, queries } = setup({ allowFullAccess: () => true });
+    const first = await start("fullAccess");
+    first.emit(init("bypassPermissions"));
+    await settle();
+    await runtime.configure("s1", { permissionMode: "acceptEdits" });
+    expect(first.closed).toBe(true);
+    const second = queries[1] as FakeQuery;
+    expect(second.params.options).toMatchObject({
+      resume: "rt-1",
+      permissionMode: "acceptEdits",
+      allowDangerouslySkipPermissions: false,
+    });
+    expect(perms(second).disableBypassPermissionsMode).toBe("disable");
+  });
+
+  it("a prompt capped below fullAccess relaunches to the capped mode before that turn, and back after", async () => {
+    const { start, runtime, queries } = setup({ allowFullAccess: () => true });
+    const first = await start("fullAccess");
+    first.emit(init("bypassPermissions"));
+    await settle();
+    await runtime.prompt("s1", { promptId: "p1", text: "capped", permissionMode: "acceptEdits" });
+    await settle();
+    expect(first.closed).toBe(true);
+    const capped = queries[1] as FakeQuery;
+    expect(capped.params.options).toMatchObject({
+      permissionMode: "acceptEdits",
+      allowDangerouslySkipPermissions: false,
+    });
+    expect(capped.prompts.map((p) => p.message.content)).toEqual(["capped"]);
+    capped.emit(result());
+    await settle();
+    await runtime.prompt("s1", { promptId: "p2", text: "full" });
+    await settle();
+    const full = queries[2] as FakeQuery;
+    expect(full.params.options).toMatchObject({
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+    });
+    expect(full.prompts.map((p) => p.message.content)).toEqual(["full"]);
+  });
+
+  it("a fullAccess turn after the gate closed fails without pushing anything", async () => {
+    let allowed = true;
+    const { start, runtime, events, queries } = setup({ allowFullAccess: () => allowed });
+    const q = await start("fullAccess");
+    allowed = false;
+    await runtime.prompt("s1", { promptId: "p1", text: "go" });
+    await settle();
+    expect(queries.flatMap((x) => x.prompts)).toEqual([]);
+    expect(q.prompts).toEqual([]);
+    expect(events.find((e) => e.type === "prompt.completed")).toMatchObject({
+      promptId: "p1",
+      isError: true,
+    });
+  });
+
+  it("an init reporting bypassPermissions in an authorized session that is NOT in fullAccess still aborts", async () => {
+    const { start, events } = setup({ allowFullAccess: () => true });
+    const q = await start("acceptEdits");
+    q.emit(init("bypassPermissions"));
+    await settle();
+    expect(q.closed).toBe(true);
+    expect(events.some((e) => e.type === "session.error")).toBe(true);
+  });
+});
+
+describe("ClaudeCodeRuntime — slash command backstop (D-13, P-10)", () => {
+  it.each(["/model x", "/config", "/permissions full access", "/mcp", "/effort max", "/fast on"])(
+    "refuses %s before anything is queued",
+    async (text) => {
+      const { start, runtime } = setup();
+      const q = await start();
+      await expect(runtime.prompt("s1", { promptId: "p1", text })).rejects.toMatchObject({
+        code: "slash_command_refused",
+      });
+      await settle();
+      expect(q.prompts).toEqual([]);
+      expect(q.calls).toEqual([]);
+    },
+  );
+
+  it("refuses a queued settings command too (not only when idle)", async () => {
+    const { start, runtime } = setup();
+    const q = await start();
+    await runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await expect(runtime.prompt("s1", { promptId: "p2", text: "/model opus" })).rejects.toMatchObject({
+      code: "slash_command_refused",
+    });
+    q.emit(result());
+    await settle();
+    expect(q.prompts.map((p) => p.message.content)).toEqual(["one"]);
+  });
+
+  it("passes /compact through as a normal user message", async () => {
+    const { start, runtime } = setup();
+    const q = await start();
+    await runtime.prompt("s1", { promptId: "p1", text: "/compact" });
+    await settle();
+    expect(q.prompts.map((p) => p.message.content)).toEqual(["/compact"]);
+  });
+});
+
+afterAll(() => {
+  // T-03.2-02-01: across the whole suite, applyFlagSettings never carried anything but scalar keys.
+  expect(ALL_FLAG_SETTINGS.length).toBeGreaterThan(0);
+  for (const arg of ALL_FLAG_SETTINGS) {
+    for (const key of Object.keys(arg as object)) expect(["effortLevel", "fastMode"]).toContain(key);
+    expect(arg).not.toHaveProperty("permissions");
+  }
 });
 
 describe("tool policy", () => {

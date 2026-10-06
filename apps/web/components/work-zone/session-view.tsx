@@ -1,19 +1,8 @@
 "use client";
 
 import { Menu } from "@base-ui/react/menu";
-import type { Permission, WorkSession } from "@ocw/contracts";
-import {
-  Archive,
-  ArrowLeft,
-  FileDiff,
-  FolderGit2,
-  GitBranch,
-  ListOrdered,
-  Lock,
-  MoreHorizontal,
-  SearchX,
-  ShieldCheck,
-} from "lucide-react";
+import type { Permission, WorkSession, WorkSessionChanges } from "@ocw/contracts";
+import { Archive, ArrowLeft, FileDiff, ListOrdered, Lock, MoreHorizontal, SearchX, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -28,17 +17,23 @@ import { DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
+import { useMediaQuery } from "@/hooks/use-media-query";
 import { errorMessage, isApiError } from "@/lib/api";
 import { useMe, useMembers } from "@/lib/queries";
 import { type LiveSession, useLiveSession } from "@/lib/use-live-session";
 import { cn } from "@/lib/utils";
-import { useArchiveSession, useDevices } from "@/lib/workzone-queries";
+import { useArchiveSession, useDevices, useDiff } from "@/lib/workzone-queries";
+import { AgentBar } from "./agent-bar";
 import { ApprovalBanner } from "./approval-banner";
+import { ChangesCard } from "./changes-card";
 import { ChangesPanel } from "./changes-panel";
 import { Composer } from "./composer";
 import { EventStream } from "./event-stream";
-import { OnlineDot, PERMISSION_MODES, RUNTIMES, RuntimeLogo, StatusChip, StatusDot } from "./meta";
+import { FullAccessBadge } from "./full-access-badge";
+import { RUNTIMES, StatusChip, StatusDot } from "./meta";
 import { QueuePanel } from "./queue-panel";
+import { SessionFooter } from "./session-footer";
+import { projectInitials } from "./session-sidebar";
 
 type PanelTab = "queue" | "changes";
 
@@ -105,17 +100,56 @@ function SessionSkeleton() {
   );
 }
 
+const PANEL_KEY = "ocw.wz.panel";
+
+function readPanel(): PanelTab | null {
+  if (typeof window === "undefined") return null;
+  const v = window.localStorage.getItem(PANEL_KEY);
+  return v === "queue" || v === "changes" ? v : null;
+}
+
 function LoadedSession({ state, viewerCan }: { state: LiveSession; viewerCan: readonly Permission[] }) {
   const session = state.session;
   const devices = useDevices();
-  const [tab, setTab] = useState<PanelTab>("queue");
+  // ref-4: the stream owns the width; Queue / Changes open as a side panel on wide screens (remembered), as a
+  // sheet below xl.
+  const wide = useMediaQuery("(min-width: 1280px)");
+  const [panel, setPanelState] = useState<PanelTab | null>(readPanel);
   const [sheet, setSheet] = useState<PanelTab | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
 
+  const setPanel = useCallback((t: PanelTab | null) => {
+    setPanelState(t);
+    if (t) window.localStorage.setItem(PANEL_KEY, t);
+    else window.localStorage.removeItem(PANEL_KEY);
+  }, []);
+  const openPanel = useCallback(
+    (t: PanelTab) => {
+      if (wide) setPanel(t);
+      else setSheet(t);
+    },
+    [wide, setPanel],
+  );
+
   const pending = state.approvals.filter((a) => a.status === "pending");
   const queued = state.prompts.filter((p) => p.status === "queued").length;
-  const changesCount = state.changes?.files.length ?? 0;
+  const changesCount = state.changes?.files.length ?? session.diffStat?.files ?? 0;
+  // After a reload the live `changes` event is gone: the card's folder rows come from the device's diff (same
+  // query the Changes panel uses), fetched only when the session reports changes.
+  const needDiff = !state.changes && (session.diffStat?.files ?? 0) > 0 && session.deviceOnline;
+  const diff = useDiff(session.id, needDiff);
+  const cardChanges: WorkSessionChanges | null =
+    state.changes ??
+    (diff.data
+      ? {
+          files: diff.data.files,
+          branch: diff.data.branch,
+          headSha: diff.data.headSha,
+          truncated: diff.data.truncated,
+          at: diff.data.generatedAt,
+        }
+      : null);
 
   const device = devices.data?.find((d) => d.id === session.deviceId);
   // Decided by the API resolver (creator, device owner or admin, minus Tool and Device layer denials).
@@ -137,7 +171,9 @@ function LoadedSession({ state, viewerCan }: { state: LiveSession; viewerCan: re
       <SessionHeader
         session={session}
         state={state}
-        onPanel={(t) => setSheet(t)}
+        panel={wide ? panel : null}
+        wide={wide}
+        onPanel={(t) => (wide ? setPanel(panel === t ? null : t) : setSheet(t))}
         queued={queued}
         changesCount={changesCount}
         canArchive={viewerCan.includes("work_session.archive")}
@@ -150,11 +186,22 @@ function LoadedSession({ state, viewerCan }: { state: LiveSession; viewerCan: re
               const el = e.currentTarget;
               pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
             }}
-            className="scrollbar-thin min-h-0 flex-1 overflow-y-auto"
+            // The stream fades under the borderless header (ref-4).
+            className="scrollbar-thin min-h-0 flex-1 overflow-y-auto [mask-image:linear-gradient(to_bottom,transparent,black_20px)]"
           >
-            <EventStream state={state} session={session} />
+            <EventStream
+              state={state}
+              session={session}
+              changesCard={
+                <ChangesCard
+                  changes={cardChanges}
+                  diffStat={session.diffStat}
+                  onOpenDiff={() => openPanel("changes")}
+                />
+              }
+            />
           </div>
-          <div className="grid grid-cols-[minmax(0,1fr)] gap-3 border-t pt-3">
+          <div className="grid grid-cols-[minmax(0,1fr)] gap-3 pt-1">
             {pending[0] ? (
               <ApprovalBanner
                 sessionId={session.id}
@@ -165,19 +212,54 @@ function LoadedSession({ state, viewerCan }: { state: LiveSession; viewerCan: re
                 deciderHint={deciderHint}
               />
             ) : null}
-            <Composer session={session} queued={queued} />
+            <Composer
+              session={session}
+              queued={queued}
+              canConfigure={viewerCan.includes("work_session.configure")}
+              above={
+                <AgentBar
+                  session={session}
+                  canInterrupt={viewerCan.includes("work_session.interrupt")}
+                  onView={() => {
+                    const el = scroller.current;
+                    const running = el?.querySelector("[data-turn-running]");
+                    if (running) running.scrollIntoView({ block: "start", behavior: "smooth" });
+                    else el?.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+                    pinned.current = !running;
+                  }}
+                />
+              }
+              below={<SessionFooter session={session} />}
+            />
           </div>
         </div>
-        <aside className="hidden w-[380px] shrink-0 flex-col border-l bg-sidebar/30 xl:flex">
-          <PanelTabs tab={tab} onTab={setTab} queued={queued} changesCount={changesCount} />
-          <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto p-4">
-            {tab === "queue" ? (
-              <QueuePanel sessionId={session.id} prompts={state.prompts} />
-            ) : (
-              <ChangesPanel sessionId={session.id} live={state.changes} deviceOnline={session.deviceOnline} />
-            )}
-          </div>
-        </aside>
+        {wide && panel ? (
+          <aside
+            className="flex w-[380px] shrink-0 flex-col border-l bg-sidebar/30"
+            data-testid="session-panel"
+          >
+            <div className="flex h-12 shrink-0 items-center gap-2 border-b pr-2 pl-4">
+              <h2 className="flex flex-1 items-center gap-1.5 font-medium text-[13px] [&_svg]:size-4">
+                {panel === "queue" ? <ListOrdered /> : <FileDiff />}
+                {panel === "queue" ? "Queue" : "Changes"}
+              </h2>
+              <Button size="icon-xs" variant="ghost" aria-label="Close panel" onClick={() => setPanel(null)}>
+                <X />
+              </Button>
+            </div>
+            <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto p-4">
+              {panel === "queue" ? (
+                <QueuePanel sessionId={session.id} prompts={state.prompts} />
+              ) : (
+                <ChangesPanel
+                  sessionId={session.id}
+                  live={state.changes}
+                  deviceOnline={session.deviceOnline}
+                />
+              )}
+            </div>
+          </aside>
+        ) : null}
       </div>
       <Sheet open={sheet !== null} onOpenChange={(o) => !o && setSheet(null)}>
         <SheetContent side="right" className="w-[30rem] max-w-[100vw]">
@@ -246,6 +328,8 @@ function PanelTabs({
 function SessionHeader({
   session,
   state,
+  panel,
+  wide,
   onPanel,
   queued,
   changesCount,
@@ -253,6 +337,9 @@ function SessionHeader({
 }: {
   session: WorkSession;
   state: LiveSession;
+  /** The open side panel on wide screens. */
+  panel: PanelTab | null;
+  wide: boolean;
   onPanel: (t: PanelTab) => void;
   queued: number;
   changesCount: number;
@@ -289,126 +376,129 @@ function SessionHeader({
         avatarUrl: directory.data?.members.find((x) => x.userId === uid)?.avatarUrl ?? null,
       }));
   }, [participants, viewers, me, directory.data]);
-  const mode = PERMISSION_MODES.find((m) => m.value === session.permissionMode);
+  const sm = useMediaQuery("(min-width: 640px)", true);
 
   useEffect(() => {
     document.title = `${session.title} · Work Zone`;
   }, [session.title]);
 
+  // Queue / Changes: toggles of the side panel on wide screens (`tab-*`), sheet openers below (`open-*`).
+  const panelButton = (t: PanelTab, label: string, icon: ReactNode, count: number) => (
+    <Tooltip key={t} content={label}>
+      <Button
+        size="sm"
+        variant="ghost"
+        aria-label={label}
+        aria-pressed={wide ? panel === t : undefined}
+        data-testid={wide ? `tab-${t}` : `open-${t}`}
+        onClick={() => onPanel(t)}
+        className={cn("gap-1 px-2 text-muted-foreground", wide && panel === t && "bg-accent text-foreground")}
+      >
+        {icon}
+        {count > 0 ? <span className="text-[12px] tabular-nums">{count}</span> : null}
+      </Button>
+    </Tooltip>
+  );
+
   return (
-    <header
-      className="flex shrink-0 items-start gap-3 border-b px-4 py-3 sm:px-6"
-      data-testid="session-header"
-    >
-      <RuntimeLogo runtime={session.runtime} className="mt-0.5 hidden size-9 rounded-xl sm:inline-flex" />
-      <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-center gap-2">
-          <StatusDot status={session.status} className="sm:hidden" />
-          <h1
-            className="line-clamp-2 font-semibold text-[15px] leading-snug tracking-tight sm:truncate"
-            data-testid="session-title"
-          >
-            {session.title}
-          </h1>
-        </div>
-        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground text-xs">
-          <span className="inline-flex items-center gap-1">
-            <FolderGit2 className="size-3.5" /> {session.projectName}
+    <header className="shrink-0 px-3 pt-2.5 pb-2 sm:px-5 sm:pt-3" data-testid="session-header">
+      <div className="flex min-h-9 items-center gap-2">
+        {/* ref-4 breadcrumb: project / session title (stacked on a phone). */}
+        <nav
+          aria-label="Breadcrumb"
+          className="flex min-w-0 flex-1 flex-col sm:flex-row sm:items-center sm:gap-2.5"
+        >
+          <span className="flex min-w-0 items-center gap-1.5 text-[12px] text-muted-foreground sm:max-w-[45%] sm:text-[14px]">
+            <ProjectMark name={session.projectName} />
+            <span className="truncate">{session.projectName}</span>
+            {!sm && session.fullAccess ? <FullAccessBadge className="ml-1 h-5 px-1.5 text-[11px]" /> : null}
           </span>
-          <span className="inline-flex items-center gap-1.5">
-            <OnlineDot online={session.deviceOnline} className="size-1.5" /> {session.deviceName}
+          <span aria-hidden className="hidden text-muted-foreground/50 sm:inline">
+            /
           </span>
-          <span className="inline-flex items-center gap-1">
-            <RuntimeLogo runtime={session.runtime} className="size-3.5 rounded-[4px] sm:hidden" />
-            {RUNTIMES[session.runtime].label}
-            {session.model ? ` · ${session.model}` : ""}
-          </span>
-          {session.branch ? (
-            <span className="inline-flex max-w-48 items-center gap-1 font-mono">
-              <GitBranch className="size-3.5 shrink-0" />
-              <span className="truncate">{session.branch}</span>
-            </span>
-          ) : null}
-          <span className="inline-flex items-center gap-1">
-            <ShieldCheck className="size-3.5" /> {mode?.label ?? session.permissionMode}
-          </span>
-        </div>
-        {session.lastError && (session.status === "failed" || session.status === "idle") ? (
-          <p className="mt-1.5 line-clamp-2 text-destructive text-xs">{session.lastError}</p>
-        ) : null}
-      </div>
-      <div className="flex shrink-0 items-center gap-2">
-        <div className="flex items-center" data-testid="session-viewers">
-          <PresenceStack
-            people={viewers}
-            max={4}
-            label={`${viewers.length} watching now`}
-            className="-mx-1"
-          />
-          {absent.length > 0 ? (
-            <div role="group" className="ml-1 hidden -space-x-1.5 md:flex" aria-label="Participants not here">
-              {absent.slice(0, 3).map((p) => (
-                <Tooltip key={p.uid} content={`${p.name} · not here`}>
-                  <span data-testid="session-participant-absent" data-user-id={p.uid}>
-                    <UserAvatar
-                      name={p.name}
-                      src={p.avatarUrl}
-                      seed={p.uid}
-                      className="size-6 opacity-50 ring-2 ring-background grayscale"
-                    />
-                  </span>
-                </Tooltip>
-              ))}
-            </div>
-          ) : null}
-        </div>
-        <StatusChip status={session.status} className="hidden sm:inline-flex" />
-        <div className="flex items-center gap-1 xl:hidden">
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => onPanel("queue")}
-            aria-label="Queue"
-            data-testid="open-queue"
-          >
-            <ListOrdered />
-            <span className="hidden sm:inline">Queue</span>
-            {queued > 0 ? <span className="tabular-nums">{queued}</span> : null}
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => onPanel("changes")}
-            aria-label="Changes"
-            data-testid="open-changes"
-          >
-            <FileDiff />
-            <span className="hidden sm:inline">Changes</span>
-            {changesCount > 0 ? <span className="tabular-nums">{changesCount}</span> : null}
-          </Button>
-        </div>
-        <Menu.Root>
-          <Menu.Trigger render={<Button size="icon-sm" variant="ghost" aria-label="Session actions" />}>
-            <MoreHorizontal />
-          </Menu.Trigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem
-              disabled={session.status === "archived" || !canArchive}
-              onClick={() =>
-                archive.mutate(undefined, {
-                  onSuccess: () => {
-                    toast.success("Session archived");
-                    router.push("/work-zone");
-                  },
-                  onError: (err) => toast.error(errorMessage(err)),
-                })
-              }
+          <span className="flex min-w-0 items-center gap-2">
+            <StatusDot status={session.status} className="sm:hidden" />
+            <h1
+              className="truncate font-medium text-[15px] leading-snug tracking-tight sm:text-[14.5px]"
+              data-testid="session-title"
             >
-              <Archive /> Archive session
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </Menu.Root>
+              {session.title}
+            </h1>
+          </span>
+        </nav>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {sm && session.fullAccess ? <FullAccessBadge /> : null}
+          <div className="flex items-center" data-testid="session-viewers">
+            <PresenceStack
+              people={viewers}
+              max={4}
+              label={`${viewers.length} watching now`}
+              className="-mx-1"
+            />
+            {absent.length > 0 ? (
+              <div
+                role="group"
+                className="ml-1 hidden -space-x-1.5 md:flex"
+                aria-label="Participants not here"
+              >
+                {absent.slice(0, 3).map((p) => (
+                  <Tooltip key={p.uid} content={`${p.name} · not here`}>
+                    <span data-testid="session-participant-absent" data-user-id={p.uid}>
+                      <UserAvatar
+                        name={p.name}
+                        src={p.avatarUrl}
+                        seed={p.uid}
+                        className="size-6 opacity-50 ring-2 ring-background grayscale"
+                      />
+                    </span>
+                  </Tooltip>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <StatusChip status={session.status} className="hidden sm:inline-flex" />
+          <div className="flex items-center">
+            {panelButton("queue", "Queue", <ListOrdered />, queued)}
+            {panelButton("changes", "Changes", <FileDiff />, changesCount)}
+          </div>
+          <Menu.Root>
+            <Menu.Trigger render={<Button size="icon-sm" variant="ghost" aria-label="Session actions" />}>
+              <MoreHorizontal />
+            </Menu.Trigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem
+                disabled={session.status === "archived" || !canArchive}
+                onClick={() =>
+                  archive.mutate(undefined, {
+                    onSuccess: () => {
+                      toast.success("Session archived");
+                      router.push("/work-zone");
+                    },
+                    onError: (err) => toast.error(errorMessage(err)),
+                  })
+                }
+              >
+                <Archive /> Archive session
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </Menu.Root>
+        </div>
       </div>
+      {session.lastError && (session.status === "failed" || session.status === "idle") ? (
+        <p className="mt-1 line-clamp-2 text-destructive text-xs">{session.lastError}</p>
+      ) : null}
     </header>
+  );
+}
+
+/** The project's two-letter mark (ref-4 breadcrumb and sidebar). */
+function ProjectMark({ name }: { name: string }) {
+  return (
+    <span
+      aria-hidden
+      className="inline-flex size-4 shrink-0 items-center justify-center rounded-[4px] bg-primary/12 font-bold text-[8px] text-primary leading-none tracking-tight"
+    >
+      {projectInitials(name)}
+    </span>
   );
 }

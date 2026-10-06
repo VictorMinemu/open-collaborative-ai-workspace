@@ -1,8 +1,16 @@
 // Codex runtime adapter over `codex app-server` (JSON-RPC on stdio, one process per session).
 //
 // Security / billing invariants:
-// - sandbox `workspace-write` (`read-only` for plan mode), approval policy `on-request`; never
-//   `danger-full-access` or `never`. The thread is aborted if Codex reports a full-access sandbox.
+// - sandbox, approval policy and reviewer come from one table (`mode-policy.ts`, D-12): Supervised is a
+//   read-only sandbox with `untrusted` approvals. `danger-full-access` + `never` only through ADR-0012's path:
+//   an authorized `fullAccess` thread or turn while the device's own opt-in (`allowFullAccess()`) is on, re-checked
+//   on every turn. A thread start that reports a full-access sandbox for any other mode is refused.
+// - settings (model, effort, fast tier, mode) are stable per-turn overrides on the next `turn/start`
+//   (D-07, D-14); every turn carries the policy of its own mode = min(session mode, the prompt's cap, P-07).
+//   `experimentalApi` stays false: no `thread/settings/update`, `collaborationMode` or `permissions`.
+// - slash commands never reach Codex as text (D-13): `/compact` runs the native `thread/compact/start`,
+//   everything else is refused with `slash_command_refused`. A readback reporting an unrestricted sandbox or
+//   the `never` policy aborts the running turn unless that turn is an authorized fullAccess turn (D-03).
 // - runs on the user's local Codex login (ChatGPT subscription); OPENAI_API_KEY / CODEX_API_KEY are
 //   stripped from the child environment unless `useApiKey` is set. OCW_* never reaches Codex.
 // - approval requests (commands, patches, extra permissions) are forwarded as approval.requested
@@ -16,10 +24,16 @@ import { existsSync, statSync } from "node:fs";
 import type { Readable, Writable } from "node:stream";
 import {
   type ApprovalDecision,
+  DEFERRED_EFFORTS,
+  minMode,
+  PERMISSION_MODE_RANK,
   PermissionMode,
   type PromptPayload,
+  type RuntimeCatalog,
   type RuntimeInfo,
   type SessionEvent,
+  type SessionSettingsPatch,
+  slashDisposition,
   type WorkSessionStatus,
 } from "@ocw/contracts";
 import { commandTouchesSecrets, isSecretPath } from "../claude/tool-policy.js";
@@ -28,11 +42,13 @@ import { errorMessage, type Logger, silentLogger } from "../logger.js";
 import {
   type AgentRuntime,
   type EventSink,
+  type FullAccessGateOptions,
   type RuntimeCapabilities,
   RuntimeError,
   type StartSessionOptions,
 } from "../runtime.js";
 import { redact } from "../sanitize.js";
+import { collectCodexCatalog } from "./catalog.js";
 import { detectCodex } from "./detect.js";
 import type { ApplyPatchApprovalParams } from "./generated/ApplyPatchApprovalParams.js";
 import type { ExecCommandApprovalParams } from "./generated/ExecCommandApprovalParams.js";
@@ -43,14 +59,24 @@ import type { CommandExecutionRequestApprovalParams } from "./generated/v2/Comma
 import type { FileChangeRequestApprovalParams } from "./generated/v2/FileChangeRequestApprovalParams.js";
 import type { PermissionsRequestApprovalParams } from "./generated/v2/PermissionsRequestApprovalParams.js";
 import type { PermissionsRequestApprovalResponse } from "./generated/v2/PermissionsRequestApprovalResponse.js";
+import type { ThreadCompactStartParams } from "./generated/v2/ThreadCompactStartParams.js";
 import type { ThreadStartParams } from "./generated/v2/ThreadStartParams.js";
 import type { ThreadStartResponse } from "./generated/v2/ThreadStartResponse.js";
+import type { TurnStartParams } from "./generated/v2/TurnStartParams.js";
 import type { TurnStartResponse } from "./generated/v2/TurnStartResponse.js";
 import type { UserInput } from "./generated/v2/UserInput.js";
 import { JsonRpcError, type JsonRpcNotification, JsonRpcPeer, type JsonRpcRequest } from "./jsonrpc.js";
-import { CodexEventMapper, summarizeItem } from "./mapper.js";
+import {
+  type CodexEffectiveSettings,
+  CodexEventMapper,
+  codexSettingsEvent,
+  summarizeItem,
+} from "./mapper.js";
+import { type CodexPolicyMode, codexModePolicy, isUnrestrictedCodexPolicy } from "./mode-policy.js";
 
 export const CODEX_APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
+/** How long a collected `model/list` catalog is reused. */
+export const CODEX_CATALOG_TTL_MS = 10 * 60 * 1000;
 const STOP_GRACE_MS = 3_000;
 
 export interface AppServerProcess {
@@ -66,7 +92,7 @@ export type SpawnAppServer = (opts: {
   env: Record<string, string | undefined>;
 }) => AppServerProcess;
 
-export interface CodexRuntimeOptions {
+export interface CodexRuntimeOptions extends FullAccessGateOptions {
   codexPath?: string;
   /** Let OPENAI_API_KEY / CODEX_API_KEY through (metered API billing). Default false. */
   useApiKey?: boolean;
@@ -94,10 +120,29 @@ export function codexChildEnv(
 
 type Outcome = ApprovalDecision | "expired";
 
+/** What the platform authorized for the session (merged `configure()` patches; null = runtime default). */
+interface ConfiguredSettings {
+  model: string | null;
+  effort: string | null;
+  /** undefined = never chosen: no service tier is sent. */
+  fastMode: boolean | undefined;
+  permissionMode: CodexPolicyMode;
+}
+
 interface Session {
   id: string;
   cwd: string;
-  permissionMode: string;
+  configured: ConfiguredSettings;
+  /** Keys changed by `configure()` that no `turn/start` has carried yet (D-14). */
+  pending: SessionSettingsPatch | null;
+  /** Last effective configuration (thread/start response, readback, or what the last turn/start sent). */
+  applied: CodexEffectiveSettings;
+  /** Mode of the running turn (P-07). */
+  turnMode: CodexPolicyMode | null;
+  /** The running "turn" is a native compaction (`/compact`), which Codex does not let anyone steer. */
+  compacting: boolean;
+  /** Dedupe key of the last `session.settings` emitted (one event per applied change). */
+  lastSettingsKey: string | null;
   proc: AppServerProcess;
   peer: JsonRpcPeer;
   threadId: string;
@@ -124,22 +169,36 @@ function toInput(p: PromptPayload): UserInput[] {
 
 export class CodexRuntime implements AgentRuntime {
   readonly id = "codex" as const;
-  readonly capabilities: RuntimeCapabilities = {
-    supportsSteer: true,
-    supportsResume: true,
-    supportsPermissionModes: ["default", "acceptEdits", "plan"],
-    supportsImages: true,
-  };
+
+  get capabilities(): RuntimeCapabilities {
+    return {
+      supportsSteer: true,
+      supportsResume: true,
+      // fullAccess only while this device's opt-in is on (ADR-0012).
+      supportsPermissionModes: [
+        "plan",
+        "default",
+        "acceptEdits",
+        "auto",
+        ...(this.allowFullAccess() ? (["fullAccess"] as const) : []),
+      ],
+      supportsImages: true,
+    };
+  }
 
   private readonly sessions = new Map<string, Session>();
   private readonly log: Logger;
   private readonly codexPath: string | null;
   private readonly approvalTimeoutMs: number;
+  private readonly allowFullAccess: () => boolean;
+  private catalogCache: { at: number; value: RuntimeCatalog } | null = null;
+  private catalogInFlight: Promise<RuntimeCatalog | null> | null = null;
 
   constructor(private readonly opts: CodexRuntimeOptions = {}) {
     this.log = opts.logger ?? silentLogger;
     this.codexPath = opts.codexPath ?? findExecutable("codex");
     this.approvalTimeoutMs = opts.approvalTimeoutMs ?? CODEX_APPROVAL_TIMEOUT_MS;
+    this.allowFullAccess = opts.allowFullAccess ?? (() => false);
   }
 
   detect(): Promise<RuntimeInfo> {
@@ -150,12 +209,53 @@ export class CodexRuntime implements AgentRuntime {
     });
   }
 
+  /**
+   * D-08: the models, efforts and fast tiers of the logged-in ChatGPT account, from `model/list` on a short-lived
+   * app-server (no thread, no turn). Cached for 10 minutes; null when Codex is missing, not signed in with
+   * ChatGPT, or the call fails.
+   */
+  async catalog(): Promise<RuntimeCatalog | null> {
+    const value = await this.cachedOrCollect();
+    // The modes follow the device opt-in at the moment of asking, not when the catalog was collected.
+    return value && { ...value, permissionModes: [...this.capabilities.supportsPermissionModes] };
+  }
+
+  private cachedOrCollect(): Promise<RuntimeCatalog | null> {
+    if (this.catalogCache && Date.now() - this.catalogCache.at < CODEX_CATALOG_TTL_MS)
+      return Promise.resolve(this.catalogCache.value);
+    this.catalogInFlight ??= this.collectCatalog().finally(() => {
+      this.catalogInFlight = null;
+    });
+    return this.catalogInFlight;
+  }
+
+  private async collectCatalog(): Promise<RuntimeCatalog | null> {
+    try {
+      const info = await this.detect();
+      if (!info.installed || !info.loggedIn) return null;
+      const spawnFn: SpawnAppServer =
+        this.opts.spawnAppServer ?? (({ cwd, env }) => this.spawnReal(cwd, env));
+      const value = await collectCodexCatalog(spawnFn, {
+        env: codexChildEnv(process.env, this.opts.useApiKey ?? false),
+        runtimeVersion: info.version,
+        permissionModes: [...this.capabilities.supportsPermissionModes],
+      });
+      this.catalogCache = { at: Date.now(), value };
+      return value;
+    } catch (err) {
+      this.log.warn("codex catalog unavailable", { error: redact(errorMessage(err)) });
+      return null;
+    }
+  }
+
   async start(options: StartSessionOptions, sink: EventSink): Promise<void> {
     if (this.sessions.has(options.sessionId)) {
       throw new RuntimeError(`session ${options.sessionId} already running`, "session_exists");
     }
     const mode = PermissionMode.safeParse(options.permissionMode);
-    if (!mode.success) {
+    // The widened platform enum (auto, fullAccess) must never reach the runtime before this adapter supports
+    // the mode: anything outside its own capability list is refused first (T-03.2-01-01).
+    if (!mode.success || !this.capabilities.supportsPermissionModes.includes(mode.data)) {
       throw new RuntimeError(
         `permission mode not allowed: ${String(options.permissionMode)}`,
         "permission_mode_rejected",
@@ -175,10 +275,29 @@ export class CodexRuntime implements AgentRuntime {
     );
 
     // The session object is completed once the thread exists; handlers only run after that.
+    const startMode: CodexPolicyMode = mode.data;
+    const policy = codexModePolicy(startMode, options.cwd);
     const session = {
       id: options.sessionId,
       cwd: options.cwd,
-      permissionMode: mode.data,
+      configured: {
+        model: options.model ?? null,
+        effort: options.effort ?? null,
+        fastMode: options.fastMode,
+        permissionMode: startMode,
+      },
+      pending: null,
+      applied: {
+        model: options.model ?? null,
+        effort: null,
+        serviceTier: null,
+        approvalPolicy: policy.approvalPolicy,
+        sandboxPolicy: policy.sandboxPolicy,
+        approvalsReviewer: policy.approvalsReviewer,
+      },
+      turnMode: null,
+      compacting: false,
+      lastSettingsKey: null,
       proc,
       threadId: "",
       mapper: new CodexEventMapper(),
@@ -215,9 +334,11 @@ export class CodexRuntime implements AgentRuntime {
 
       const threadParams: ThreadStartParams = {
         cwd: options.cwd,
-        approvalPolicy: "on-request",
-        sandbox: mode.data === "plan" ? "read-only" : "workspace-write",
+        approvalPolicy: policy.approvalPolicy,
+        approvalsReviewer: policy.approvalsReviewer,
+        sandbox: policy.sandbox,
         ...(options.model ? { model: options.model } : {}),
+        ...(options.fastMode !== undefined ? { serviceTier: options.fastMode ? "priority" : "default" } : {}),
       };
       const resp = options.resumeRuntimeSessionId
         ? await session.peer.request<ThreadStartResponse>(
@@ -226,7 +347,10 @@ export class CodexRuntime implements AgentRuntime {
             60_000,
           )
         : await session.peer.request<ThreadStartResponse>("thread/start", threadParams, 60_000);
-      if (resp.sandbox?.type === "dangerFullAccess" || resp.approvalPolicy === "never") {
+      if (
+        isUnrestrictedCodexPolicy({ approvalPolicy: resp.approvalPolicy, sandboxPolicy: resp.sandbox }) &&
+        !(startMode === "fullAccess" && this.allowFullAccess())
+      ) {
         throw new RuntimeError(
           "Codex reported an unrestricted sandbox/approval policy; session aborted",
           "permission_mode_rejected",
@@ -241,6 +365,15 @@ export class CodexRuntime implements AgentRuntime {
         model: resp.model,
         permissionMode: mode.data,
       });
+      session.applied = {
+        model: resp.model ?? session.applied.model,
+        effort: resp.reasoningEffort ?? null,
+        serviceTier: resp.serviceTier ?? null,
+        approvalPolicy: resp.approvalPolicy ?? null,
+        sandboxPolicy: resp.sandbox ?? null,
+        approvalsReviewer: resp.approvalsReviewer ?? null,
+      };
+      this.emitSettings(session, codexSettingsEvent(session.applied));
       this.emit(session, { type: "session.state", status: "idle" });
     } catch (err) {
       session.stopping = true;
@@ -252,8 +385,61 @@ export class CodexRuntime implements AgentRuntime {
     }
   }
 
+  /**
+   * D-07 / D-14: merge authorized settings; nothing is sent now (the stable API has no between-turn setter).
+   * The next `turn/start` carries them, and the effective values come back as `session.settings`.
+   */
+  async configure(sessionId: string, patch: SessionSettingsPatch): Promise<void> {
+    const s = this.get(sessionId);
+    if (
+      patch.permissionMode !== undefined &&
+      !this.capabilities.supportsPermissionModes.includes(patch.permissionMode)
+    ) {
+      throw new RuntimeError(
+        `permission mode ${patch.permissionMode} is not supported by Codex`,
+        "settings_rejected",
+      );
+    }
+    if (patch.contextWindow !== undefined && patch.contextWindow !== null) {
+      throw new RuntimeError(
+        "the Codex context window is not selectable (display only)",
+        "settings_rejected",
+      );
+    }
+    if (patch.effort && DEFERRED_EFFORTS.includes(patch.effort)) {
+      throw new RuntimeError(`effort ${patch.effort} is not offered (D-09)`, "settings_rejected");
+    }
+    const next: ConfiguredSettings = { ...s.configured };
+    // Validated against the account's catalog when it was collected (Pitfall 7: Codex effort is an open
+    // string). `null` = the runtime default, resolved from the catalog so a sticky override really reverts.
+    const models = this.catalogCache?.value.models ?? null;
+    if (patch.model !== undefined) next.model = patch.model ?? models?.find((m) => m.isDefault)?.id ?? null;
+    const model = models?.find((m) => m.id === next.model) ?? models?.find((m) => m.isDefault) ?? null;
+    if (models && next.model && !models.some((m) => m.id === next.model)) {
+      throw new RuntimeError(`model ${next.model} is not offered on this device`, "settings_rejected");
+    }
+    if (patch.effort !== undefined) next.effort = patch.effort ?? model?.defaultEffort ?? null;
+    if (model && next.effort && !model.efforts.some((e) => e.value === next.effort)) {
+      if (patch.effort !== undefined) {
+        throw new RuntimeError(`effort ${next.effort} is not offered for ${model.id}`, "settings_rejected");
+      }
+      next.effort = model.defaultEffort; // model switch: drop to the new model's default
+    }
+    if (patch.fastMode !== undefined) next.fastMode = patch.fastMode;
+    if (model && next.fastMode === true && !model.fastMode.supported) {
+      if (patch.fastMode === true) {
+        throw new RuntimeError(`fast mode is not offered for ${model.id}`, "settings_rejected");
+      }
+      next.fastMode = false;
+    }
+    if (patch.permissionMode !== undefined) next.permissionMode = patch.permissionMode;
+    s.configured = next;
+    s.pending = { ...(s.pending ?? {}), ...patch };
+  }
+
   async prompt(sessionId: string, prompt: PromptPayload): Promise<void> {
     const s = this.get(sessionId);
+    this.slashCommand(prompt); // D-13 backstop: throws before anything is queued or sent
     if (s.stopping) throw new RuntimeError("session is stopping", "invalid_state");
     if (s.running) {
       s.queue.push(prompt);
@@ -265,7 +451,13 @@ export class CodexRuntime implements AgentRuntime {
   async steer(sessionId: string, prompt: PromptPayload): Promise<void> {
     const s = this.get(sessionId);
     const turnId = s.mapper.currentTurnId;
-    if (!s.running || !turnId) return this.prompt(sessionId, prompt);
+    if (!s.running || !turnId || s.compacting || this.slashCommand(prompt))
+      return this.prompt(sessionId, prompt);
+    // P-07: input capped below the running turn's mode must not run inside it; it gets its own turn.
+    const cap = minMode(s.configured.permissionMode, prompt.permissionMode ?? s.configured.permissionMode);
+    if (s.turnMode && PERMISSION_MODE_RANK[cap] < PERMISSION_MODE_RANK[s.turnMode]) {
+      return this.prompt(sessionId, prompt);
+    }
     await s.peer.request("turn/steer", {
       threadId: s.threadId,
       input: toInput(prompt),
@@ -338,6 +530,44 @@ export class CodexRuntime implements AgentRuntime {
     return s;
   }
 
+  /** One `session.settings` per applied change: the same effective values are never reported twice. */
+  private emitSettings(s: Session, event: Extract<SessionEvent, { type: "session.settings" }>): void {
+    const { type: _t, contextWindow: _c, ...rest } = event;
+    if (Object.keys(rest).length === 0) {
+      this.emit(s, event); // context window only (the mapper dedupes it)
+      return;
+    }
+    const key = JSON.stringify(rest);
+    if (key === s.lastSettingsKey) return;
+    s.lastSettingsKey = key;
+    this.emit(s, event);
+  }
+
+  /** `turn/start` overrides for this prompt: the configured settings and the policy of the turn's mode. */
+  private turnOverrides(
+    s: Session,
+    prompt: PromptPayload,
+  ): { mode: CodexPolicyMode; params: Partial<TurnStartParams> } {
+    const c = s.configured;
+    // P-07: the turn runs at most at the prompt's cap. A fullAccess turn needs the device gate open right now.
+    const mode = minMode(c.permissionMode, prompt.permissionMode ?? c.permissionMode);
+    if (mode === "fullAccess" && !this.allowFullAccess()) {
+      throw new RuntimeError("Full access is not enabled on this device", "permission_mode_rejected");
+    }
+    const policy = codexModePolicy(mode, s.cwd);
+    return {
+      mode,
+      params: {
+        approvalPolicy: policy.approvalPolicy,
+        approvalsReviewer: policy.approvalsReviewer,
+        sandboxPolicy: policy.sandboxPolicy,
+        ...(c.model ? { model: c.model } : {}),
+        ...(c.effort ? { effort: c.effort } : {}),
+        ...(c.fastMode !== undefined ? { serviceTier: c.fastMode ? "priority" : "default" } : {}),
+      },
+    };
+  }
+
   private emit(s: Session, event: SessionEvent): void {
     if (event.type === "session.state") {
       if (s.status === event.status) return;
@@ -350,18 +580,77 @@ export class CodexRuntime implements AgentRuntime {
     }
   }
 
+  /**
+   * D-13 / P-10: `/compact` is the only command Codex runs (native `thread/compact/start`); settings commands
+   * and anything else are refused here, so they can never reach Codex as text.
+   */
+  private slashCommand(prompt: PromptPayload): "compact" | null {
+    const d = slashDisposition(prompt.text, "codex");
+    if (!d) return null;
+    if (d.kind === "passthrough" && d.name === "compact") return "compact";
+    throw new RuntimeError(
+      d.kind === "settings"
+        ? `/${d.name} changes session settings; use the session controls`
+        : `/${d.name} is not available on Codex`,
+      "slash_command_refused",
+    );
+  }
+
+  /** `/compact`: Codex compacts the thread as its own (non-steerable) turn; it completes via turn/completed. */
+  private async compact(s: Session, prompt: PromptPayload): Promise<void> {
+    s.running = prompt;
+    s.interruptRequested = false;
+    s.compacting = true;
+    s.mapper.currentPromptId = prompt.promptId;
+    this.emit(s, { type: "prompt.started", promptId: prompt.promptId });
+    this.emit(s, { type: "session.state", status: "running" });
+    try {
+      await s.peer.request("thread/compact/start", {
+        threadId: s.threadId,
+      } satisfies ThreadCompactStartParams);
+    } catch (err) {
+      if (s.running?.promptId !== prompt.promptId) return;
+      this.emit(s, { type: "session.error", message: `compaction failed: ${errorMessage(err)}` });
+      this.emit(s, {
+        type: "prompt.completed",
+        promptId: prompt.promptId,
+        usage: { inputTokens: 0, outputTokens: 0 },
+        isError: true,
+      });
+      s.mapper.currentPromptId = null;
+      this.onTurnComplete(s);
+    }
+  }
+
   private async dispatch(s: Session, prompt: PromptPayload): Promise<void> {
+    if (this.slashCommand(prompt) === "compact") return this.compact(s, prompt);
     s.running = prompt;
     s.interruptRequested = false;
     s.mapper.currentPromptId = prompt.promptId;
     this.emit(s, { type: "prompt.started", promptId: prompt.promptId });
     this.emit(s, { type: "session.state", status: "running" });
     try {
+      const { mode, params } = this.turnOverrides(s, prompt);
+      s.turnMode = mode;
+      s.pending = null;
       const resp = await s.peer.request<TurnStartResponse>("turn/start", {
         threadId: s.threadId,
         input: toInput(prompt),
-      });
+        ...params,
+      } satisfies TurnStartParams);
       if (!s.mapper.currentTurnId && resp?.turn?.id) s.mapper.currentTurnId = resp.turn.id;
+      // A5: when Codex did not report the overrides (thread/settings/updated), synthesize the readback from what
+      // was sent. A later readback with the same values is deduplicated; a different one wins.
+      s.applied = {
+        ...s.applied,
+        ...(params.model ? { model: params.model } : {}),
+        ...(params.effort ? { effort: params.effort } : {}),
+        ...(params.serviceTier ? { serviceTier: params.serviceTier } : {}),
+        approvalPolicy: params.approvalPolicy ?? s.applied.approvalPolicy,
+        approvalsReviewer: params.approvalsReviewer ?? s.applied.approvalsReviewer,
+        sandboxPolicy: params.sandboxPolicy ?? s.applied.sandboxPolicy,
+      };
+      this.emitSettings(s, codexSettingsEvent(s.applied));
     } catch (err) {
       if (s.running?.promptId !== prompt.promptId) return;
       this.emit(s, { type: "session.error", message: `turn/start failed: ${errorMessage(err)}` });
@@ -379,6 +668,12 @@ export class CodexRuntime implements AgentRuntime {
   private onNotification(s: Session, n: JsonRpcNotification): void {
     for (const ev of s.mapper.map(n)) {
       if (ev.type === "session.error" && s.interruptRequested) continue;
+      if (ev.type === "session.settings") {
+        const unrestricted = this.onSettingsReadback(s, n);
+        this.emitSettings(s, ev);
+        if (unrestricted && !this.unrestrictedAuthorized(s)) this.abortUnrestricted(s);
+        continue;
+      }
       if (ev.type === "prompt.completed") {
         this.emit(s, ev);
         for (const promptId of s.steered.splice(0)) {
@@ -391,8 +686,46 @@ export class CodexRuntime implements AgentRuntime {
     }
   }
 
+  /** The current turn (or, between turns, the session) is an authorized fullAccess one and the gate is open. */
+  private unrestrictedAuthorized(s: Session): boolean {
+    return (s.turnMode ?? s.configured.permissionMode) === "fullAccess" && this.allowFullAccess();
+  }
+
+  /**
+   * D-03 (replaced, not deleted): an unrestricted report for a turn that is not an authorized fullAccess turn
+   * interrupts it; the next turn/start sends that turn's own policy again.
+   */
+  private abortUnrestricted(s: Session): void {
+    this.emit(s, {
+      type: "session.error",
+      message: "Codex reported an unrestricted sandbox/approval policy; turn aborted",
+    });
+    if (s.running) void this.interrupt(s.id);
+  }
+
+  /** Effective state reported by Codex becomes the base for the next synthesized readback. True = unrestricted. */
+  private onSettingsReadback(s: Session, n: JsonRpcNotification): boolean {
+    if (n.method !== "thread/settings/updated") return false;
+    const t = (n.params as { threadSettings?: Partial<Record<keyof CodexEffectiveSettings, unknown>> })
+      .threadSettings;
+    if (!t) return false;
+    s.applied = {
+      model: (t.model as string | null | undefined) ?? s.applied.model,
+      effort: (t.effort as string | null | undefined) ?? null,
+      serviceTier: (t.serviceTier as string | null | undefined) ?? null,
+      approvalPolicy:
+        (t.approvalPolicy as CodexEffectiveSettings["approvalPolicy"]) ?? s.applied.approvalPolicy,
+      sandboxPolicy: (t.sandboxPolicy as CodexEffectiveSettings["sandboxPolicy"]) ?? s.applied.sandboxPolicy,
+      approvalsReviewer:
+        (t.approvalsReviewer as CodexEffectiveSettings["approvalsReviewer"]) ?? s.applied.approvalsReviewer,
+    };
+    return isUnrestrictedCodexPolicy(s.applied);
+  }
+
   private onTurnComplete(s: Session): void {
     s.running = null;
+    s.turnMode = null;
+    s.compacting = false;
     s.interruptRequested = false;
     const next = s.queue.shift();
     if (next && !s.stopping) void this.dispatch(s, next);

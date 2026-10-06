@@ -180,6 +180,13 @@ async function seedOrg(c: pg.Client, org: string) {
     "insert into app.bot_tool_grants (organization_id, agent_id, source_kind, source_id, tool_name) values ($1, $2, 'mcp', $3, 'search')",
     [org, personal, mcp],
   );
+
+  // Phase 03.2 (Work Zone session controls): one row per new table.
+  await q(
+    "insert into app.device_grants (organization_id, device_id, principal_kind, principal_id, max_mode, created_by) values ($1, $2, 'user', $3, 'acceptEdits', $3)",
+    [org, device, user],
+  );
+  await q("insert into app.work_zone_policies (organization_id) values ($1)", [org]);
 }
 
 async function inTenant<T>(org: string, fn: () => Promise<T>): Promise<T> {
@@ -257,6 +264,39 @@ describe("tenant isolation (RLS)", () => {
         [A, agent, owner, "x".repeat(501)],
       ),
     ).rejects.toThrow(/agent_memories_text_len_check/);
+  });
+
+  it("Phase 03.2 schema constraints: modes are the platform ladder, grants name a user or a unit", async () => {
+    const device = (await migrator.query("select id from app.devices where organization_id = $1", [A]))
+      .rows[0].id;
+    for (const bad of ["bypassPermissions", "dontAsk", "danger-full-access"]) {
+      await expect(
+        migrator.query("update app.work_sessions set permission_mode = $2 where organization_id = $1", [
+          A,
+          bad,
+        ]),
+      ).rejects.toThrow(/work_sessions_permission_mode_ck/);
+      await expect(
+        migrator.query("update app.devices set share_max_mode = $2 where organization_id = $1", [A, bad]),
+      ).rejects.toThrow(/devices_share_max_mode_ck/);
+    }
+    await expect(
+      migrator.query(
+        "insert into app.device_grants (organization_id, device_id, principal_kind, principal_id, max_mode) values ($1, $2, 'team', $3, 'plan')",
+        [A, device, randomUUID()],
+      ),
+    ).rejects.toThrow(/device_grants_principal_kind_ck/);
+    const policy = (
+      await migrator.query(
+        "select allowed_permission_modes, allow_full_access, allow_fast_mode from app.work_zone_policies where organization_id = $1",
+        [A],
+      )
+    ).rows[0];
+    expect(policy).toEqual({
+      allowed_permission_modes: ["plan", "default", "acceptEdits", "auto"],
+      allow_full_access: false,
+      allow_fast_mode: false,
+    });
   });
 
   it("app role is neither superuser nor BYPASSRLS", async () => {

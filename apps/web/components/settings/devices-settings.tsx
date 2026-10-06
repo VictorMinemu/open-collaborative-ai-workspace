@@ -1,6 +1,6 @@
 "use client";
 
-import type { Device } from "@ocw/contracts";
+import type { Device, RuntimeId } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   Check,
@@ -8,8 +8,11 @@ import {
   Copy,
   FolderPlus,
   Laptop,
+  Lock,
   Monitor,
   Plus,
+  ShieldAlert,
+  ShieldCheck,
   Terminal,
   Trash2,
   Users,
@@ -31,7 +34,6 @@ import {
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
-import { Switch } from "@/components/ui/switch";
 import { OnlineDot, RUNTIMES, RuntimeLogo } from "@/components/work-zone/meta";
 import { useCopy } from "@/hooks/use-copy";
 import { errorMessage } from "@/lib/api";
@@ -43,10 +45,10 @@ import {
   useCreateEnrollment,
   useDevices,
   useRevokeDevice,
-  useUpdateDevice,
   useWorkZoneOrgSync,
   wzKeys,
 } from "@/lib/workzone-queries";
+import { DeviceSharing } from "./device-sharing";
 
 const PLATFORM: Record<string, string> = { darwin: "macOS", linux: "Linux", win32: "Windows" };
 
@@ -148,7 +150,6 @@ export function DevicesSettings() {
 }
 
 function DeviceCard({ device: d, owned }: { device: Device; owned: boolean }) {
-  const update = useUpdateDevice();
   const revoke = useRevokeDevice();
   const [confirm, setConfirm] = useState(false);
   // Decided by the API resolver: revoke = owner or admin; update (rename, share) = owner only.
@@ -226,23 +227,8 @@ function DeviceCard({ device: d, owned }: { device: Device; owned: boolean }) {
           </Button>
         ) : null}
       </div>
-      {canUpdate ? (
-        <div className="flex items-center justify-between gap-3 border-t px-4 py-3">
-          <span className="text-sm">
-            Let teammates start sessions on this device
-            <span className="block text-muted-foreground text-xs">
-              You can still approve every change they request.
-            </span>
-          </span>
-          <Switch
-            checked={d.shared}
-            aria-label="Share with the team"
-            onCheckedChange={(shared) =>
-              update.mutate({ id: d.id, shared }, { onError: (err) => toast.error(errorMessage(err)) })
-            }
-          />
-        </div>
-      ) : null}
+      <DeviceFacts device={d} owned={owned} />
+      {canUpdate ? <DeviceSharing device={d} /> : null}
       <Dialog open={confirm} onOpenChange={setConfirm}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
@@ -276,6 +262,73 @@ function DeviceCard({ device: d, owned }: { device: Device; owned: boolean }) {
         </DialogContent>
       </Dialog>
     </li>
+  );
+}
+
+/** Whose subscription a runtime on the device uses (D-06). */
+const LOGIN: Record<RuntimeId, string> = { "claude-code": "Claude login", codex: "ChatGPT login" };
+
+/**
+ * Whose runtime subscription the device uses (D-06) and its Full access opt-in, which is set on the device itself
+ * and only shown here (ADR-0012 §5).
+ */
+function DeviceFacts({ device: d, owned }: { device: Device; owned: boolean }) {
+  const whose = owned ? "your" : `${d.ownerName ?? "the owner"}'s`;
+  const signedIn = d.runtimes.filter((r) => r.installed && r.loggedIn);
+  return (
+    <div className="grid gap-3 border-t px-4 py-3">
+      {signedIn.length > 0 ? (
+        <ul className="grid gap-1.5" data-testid="device-subscription" aria-label="Subscriptions used">
+          {signedIn.map((r) => (
+            <li key={r.id} className="flex items-center gap-2 text-sm">
+              <RuntimeLogo runtime={r.id} className="size-4 shrink-0 rounded-[4px]" />
+              <span className="min-w-0">
+                {RUNTIMES[r.id].label} runs on {whose} {LOGIN[r.id]}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      <div
+        className="flex items-start gap-2.5"
+        data-testid="device-full-access"
+        data-enabled={d.fullAccessOptIn}
+      >
+        <span
+          className={cn(
+            "mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md [&_svg]:size-3.5",
+            d.fullAccessOptIn ? "bg-warning/15 text-warning" : "bg-muted text-muted-foreground",
+          )}
+        >
+          {d.fullAccessOptIn ? <ShieldAlert /> : <ShieldCheck />}
+        </span>
+        <div className="grid min-w-0 flex-1 gap-0.5">
+          <p className="flex flex-wrap items-center gap-x-2 gap-y-1 font-medium text-sm">
+            Full access
+            <span className="inline-flex items-center gap-1 font-normal text-muted-foreground text-xs">
+              <Lock className="size-3" aria-hidden /> Set on the device
+            </span>
+          </p>
+          <p className="text-sm">
+            {d.fullAccessOptIn ? (
+              "On — enabled on this device by its owner"
+            ) : (
+              <>
+                Off — enable it on the device (desktop app › Runtime › Allow Full access, or{" "}
+                <code className="whitespace-nowrap rounded bg-muted px-1 py-0.5 font-mono text-[12px]">
+                  ocw-runtime full-access on
+                </code>
+                )
+              </>
+            )}
+          </p>
+          <p className="text-muted-foreground text-xs">
+            Recommended only on a dedicated machine: the agent can run any command and edit any file this
+            computer's user can reach, without asking.
+          </p>
+        </div>
+      </div>
+    </div>
   );
 }
 

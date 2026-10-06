@@ -134,6 +134,15 @@ SLICE-06…18 were added on 2026-10-04 after the code audit of the widened demo 
 - [x] **BOT-09**: The OpenClaw plugin system and its Marketplace (ClawHub) are integrated: an Organization Admin browses and searches the marketplace from Settings, sees each plugin's publisher, version, permissions/tools and risk, installs a pinned version into the cell after an explicit review step, and can update or uninstall it; installs are audited and allowlisted (nothing installs itself, auto-update stays off, dangerous tool classes stay blocked regardless of what a plugin declares)
 - [x] **BOT-10**: Installed plugins and MCP servers appear as capabilities in each bot's settings and in the org capability policy (BOT-05): a bot uses a plugin's tools only when it is enabled for that bot and allowed by policy; personal bots can use only plugins/MCP servers the admin allowed for personal bots; the effective set is delivered per turn to the cell and enforced by the same tool gate as internet access
 
+### Work Zone Session Controls (WZC) — added 2026-10-05 by the owner
+
+- [ ] **WZC-01**: In an open Work Zone session, a controller changes the model of the session's runtime from a provider-grouped picker that lists only the models the host runtime reports for that user's own subscription; the change applies from the next turn, keeps the conversation, is audited and shows live to every controller
+- [ ] **WZC-02**: A reasoning menu offers only the effort levels the selected model supports, plus context window and fast mode only where the runtime reports a real choice; unsupported or policy-blocked options are hidden or disabled with the runtime's or policy's reason, and a model switch re-validates the current choice
+- [ ] **WZC-03**: A permission menu offers Supervised (asks before commands and file changes on both runtimes), Auto-accept edits, Auto (where the runtime supports it), Plan and Full access, mapped onto the common `permissionMode` enum; org policy caps the mode server-side on every turn and every change is audited
+- [ ] **WZC-04**: Full access runs the real bypass mode of Claude Code and Codex only through ADR-0012's path: org policy allows it, the device has it enabled locally by its owner, and the asker holds the grain; each is off by default, a persistent badge shows it to every controller, and slash commands typed in a prompt cannot raise the mode or change settings outside policy
+- [ ] **WZC-05**: A device owner shares a device (e.g. a server that hosts the harnesses) with chosen members or units, each with a maximum permission mode; those people start and control sessions on it without per-session acceptance, revoking someone stops their sessions, and the device settings show whose runtime subscription is used
+- [ ] **WZC-06**: A documented inventory lists every Claude Code (Agent SDK) and Codex (app-server) session option at the pinned versions as exposed, deferred or impossible with the reason; the composer matches the owner's reference screenshots at 1440 and 390 in light and dark, and never claims an option the inventory has not confirmed
+
 ### Self-hosted Release (SELF)
 
 - [ ] **SELF-01**: `git clone` + `pnpm ocw setup` + `docker compose up` yields a working MVP1 instance; OpenBao and observability (Prometheus, Grafana, Loki, Tempo) are optional compose profiles (ADR-0003 amended)
@@ -340,6 +349,12 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | BOT-08 | Phase 3.1 | Complete | New (owner request 2026-10-04: MCP + OpenClaw plugins/Marketplace) |
 | BOT-09 | Phase 3.1 | Complete | New (owner request 2026-10-04: MCP + OpenClaw plugins/Marketplace) |
 | BOT-10 | Phase 3.1 | Complete | New (owner request 2026-10-04: MCP + OpenClaw plugins/Marketplace) |
+| WZC-01 | Phase 3.2 | Pending | New (owner request 2026-10-05: Work Zone session controls, ADR-0012) |
+| WZC-02 | Phase 3.2 | Pending | New (owner request 2026-10-05: Work Zone session controls, ADR-0012) |
+| WZC-03 | Phase 3.2 | Pending | New (owner request 2026-10-05: Work Zone session controls, ADR-0012) |
+| WZC-04 | Phase 3.2 | Pending | New (owner request 2026-10-05: Work Zone session controls, ADR-0012) |
+| WZC-05 | Phase 3.2 | Pending | New (owner request 2026-10-05: Work Zone session controls, ADR-0012) |
+| WZC-06 | Phase 3.2 | Pending | New (owner request 2026-10-05: Work Zone session controls, ADR-0012) |
 | CHAT-02 | Phase 4 | Partial | Flat channel list with unread dot; no department/team grouping or views |
 | CHAT-03 | Phase 1 | Delivered | `chat.int.test.ts` "thread replies update the root and refuse nesting"; `chat.spec.ts` reply count + participants |
 | CHAT-04 | Phase 4 | Pending | No DMs |

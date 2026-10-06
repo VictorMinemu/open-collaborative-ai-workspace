@@ -9,6 +9,15 @@ import {
   SessionEvent,
   WorkSessionStatus,
 } from "./session-events";
+import { ContextWindow, EffortLevel, WorkSessionSettings } from "./session-settings";
+
+/** Working-tree change totals of a session (from the device's last `diff.result`). */
+export const DiffStat = z.object({
+  files: z.number().int().nonnegative(),
+  additions: z.number().int().nonnegative(),
+  deletions: z.number().int().nonnegative(),
+});
+export type DiffStat = z.infer<typeof DiffStat>;
 
 export const WorkSession = z.object({
   id: Id,
@@ -33,6 +42,13 @@ export const WorkSession = z.object({
   /** Approval requests nobody answered yet ("Needs attention"). */
   pendingApprovals: z.number().int().nonnegative(),
   lastError: z.string().nullable(),
+  /** Requested (authorized) settings, what the device reported, and whether a change is pending (D-07, D-14). */
+  settings: WorkSessionSettings,
+  /** Full access is requested or reported (persistent badge for every controller, D-04). */
+  fullAccess: z.boolean(),
+  /** When the in-flight turn was dispatched ("Working 5m"); null when nothing runs. */
+  runningSince: IsoDateTime.nullable(),
+  diffStat: DiffStat.nullable(),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -49,6 +65,9 @@ export const CreateWorkSessionRequest = z.object({
   title: z.string().trim().min(1).max(200).optional(),
   model: z.string().trim().min(1).max(200).optional(),
   permissionMode: PermissionMode.default("default"),
+  effort: EffortLevel.optional(),
+  fastMode: z.boolean().optional(),
+  contextWindow: ContextWindow.optional(),
   /** Work in a dedicated git worktree on the device. */
   worktree: z.boolean().default(false),
   /** Optional first prompt queued immediately. */
@@ -73,6 +92,19 @@ export const WorkPrompt = z.object({
   completedAt: IsoDateTime.nullable(),
 });
 export type WorkPrompt = z.infer<typeof WorkPrompt>;
+
+/** `POST /api/v1/work-sessions/:id/commands`: a `/` command typed in the composer (P-10). */
+export const SessionCommandRequest = z.object({ text: z.string().trim().min(2).max(2000) });
+export type SessionCommandRequest = z.infer<typeof SessionCommandRequest>;
+
+export const SessionCommandResult = z.object({
+  kind: z.enum(["settings", "prompt", "refused"]),
+  command: z.string().max(64),
+  notice: z.string().max(500),
+  session: WorkSession.optional(),
+  prompt: WorkPrompt.optional(),
+});
+export type SessionCommandResult = z.infer<typeof SessionCommandResult>;
 
 export const CreatePromptRequest = z.object({ body: z.string().trim().min(1).max(50_000) });
 export type CreatePromptRequest = z.infer<typeof CreatePromptRequest>;

@@ -5,6 +5,8 @@
 // - Device token encrypted with safeStorage; passed to the daemon via env at spawn time.
 // - Supervises apps/local-runtime (ADR-0005) and talks to it ONLY over the Unix control socket.
 // - Main window loads the web app; `window.ocwDesktop` is a narrow, validated bridge.
+// - Full access opt-in (ADR-0012): switched ONLY from the Runtime menu / tray here, after a native confirmation;
+//   written to the daemon's runtime.json and applied with `reloadConfig`. Web content can only read it.
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, statSync, truncateSync } from "node:fs";
@@ -47,6 +49,7 @@ import { ControlError, controlRequest, controlSocketPath } from "./control-clien
 import { buildDaemonEnv, ocwHomeDir, resolveDaemonCommand } from "./daemon-launch";
 import { checkServer, EnrollError, enrollDevice } from "./enroll";
 import { pidfilePath, reapStaleDaemon, removePidfile, removePidfileIfOwner, writePidfile } from "./pidfile";
+import { readDaemonFullAccess, writeDaemonFullAccess } from "./runtime-config";
 import { hardenedPreferences, installGlobalGuards, isTrustedSender, restrictNavigation } from "./security";
 import { DaemonSupervisor } from "./supervisor";
 
@@ -73,6 +76,8 @@ let tray: Tray | null = null;
 let paused = false;
 let externalDaemon = false;
 let lastReport: DaemonStatusPayload | null = null;
+/** runtime.json's Full access opt-in as last read here (shown while the daemon is unreachable). */
+let localFullAccess = false;
 let status: DesktopStatus | null = null;
 let polling = false;
 let quitting = false;
@@ -171,7 +176,13 @@ async function startDaemon(): Promise<void> {
 // ---- status ---------------------------------------------------------------------------------
 
 function computeStatus(): DesktopStatus {
-  return deriveStatus({ paused, paired: store.paired, daemon: daemonState(), report: lastReport });
+  return deriveStatus({
+    paused,
+    paired: store.paired,
+    daemon: daemonState(),
+    report: lastReport,
+    localFullAccess,
+  });
 }
 
 function publishStatus(): void {
@@ -457,6 +468,69 @@ async function unpair(): Promise<void> {
   openOnboarding();
 }
 
+// ADR-0012 §Decision 5: say it in plain words before the owner enables it.
+const FULL_ACCESS_WARNING =
+  "Full access lets agents run any command and edit any file your user can reach on this computer, without asking. " +
+  "Recommended only on a dedicated machine such as a server or VM. Your organization must also allow it.";
+
+async function readLocalFullAccess(): Promise<void> {
+  try {
+    localFullAccess = await readDaemonFullAccess(ocwHome);
+  } catch {
+    localFullAccess = false; // a malformed runtime.json is reported when the owner tries to change it
+  }
+}
+
+/**
+ * The device owner's Full access opt-in. Turning it on needs the native confirmation (Cancel is the default);
+ * turning it off is immediate. The daemon reloads runtime.json at once (no restart): an opt-out interrupts running
+ * Full access turns and tells the server. Never reachable from web content.
+ */
+async function setFullAccess(on: boolean): Promise<void> {
+  if (on) {
+    const { response } = await dialog.showMessageBox({
+      type: "warning",
+      buttons: ["Allow Full access", "Cancel"],
+      defaultId: 1,
+      cancelId: 1,
+      message: "Allow Full access on this device?",
+      detail: FULL_ACCESS_WARNING,
+    });
+    if (response !== 0) {
+      refreshChrome(); // the checkbox flipped itself on click; put it back
+      return;
+    }
+  }
+  try {
+    await writeDaemonFullAccess(ocwHome, on);
+    localFullAccess = on;
+  } catch (err) {
+    dialog.showErrorBox(
+      "Full access was not changed",
+      err instanceof Error ? err.message : "The runtime configuration could not be written.",
+    );
+    refreshChrome();
+    return;
+  }
+  await controlRequest(socketPath, { cmd: "reloadConfig" }).catch(() => undefined); // daemon down: read at start
+  log(`full access ${on ? "enabled" : "disabled"} on this device`);
+  await pollStatus();
+  refreshChrome();
+}
+
+function fullAccessItem(s: DesktopStatus): MenuItemConstructorOptions {
+  const fromEnv = lastReport?.fullAccessSource === "env";
+  return {
+    label: fromEnv
+      ? "Allow Full access on this device… (set by OCW_ALLOW_FULL_ACCESS)"
+      : "Allow Full access on this device…",
+    type: "checkbox",
+    checked: s.fullAccessOptIn,
+    enabled: !fromEnv,
+    click: () => void setFullAccess(!s.fullAccessOptIn),
+  };
+}
+
 function runtimeItems(s: DesktopStatus): MenuItemConstructorOptions[] {
   return [
     { label: `${statusDot(s)}  ${s.label}`, enabled: false },
@@ -470,6 +544,8 @@ function runtimeItems(s: DesktopStatus): MenuItemConstructorOptions[] {
       enabled: !externalDaemon,
       click: () => void togglePause(),
     },
+    { type: "separator" },
+    fullAccessItem(s),
   ];
 }
 
@@ -570,6 +646,7 @@ async function main(): Promise<void> {
     decrypt: (b) => safeStorage.decryptString(b),
   });
   await store.load();
+  await readLocalFullAccess();
 
   supervisor = new DaemonSupervisor({
     spawn: spawnDaemon,

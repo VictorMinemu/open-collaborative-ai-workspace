@@ -4,129 +4,13 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack, WEB_ORIGIN } from "./testing";
+import { eventually, FakeDevice, sleep } from "./testing-device";
 
 /**
  * Work Zone integration: pairing, Device Link auth, command queue (ack + at-least-once redelivery), event
  * de-duplication, the shared-queue arbiter, approvals and tenant isolation. The device side is a
  * contracts-level fake daemon speaking raw Device Link frames.
  */
-
-type Frame = Record<string, unknown> & { type: string };
-
-class FakeDevice {
-  readonly frames: Frame[] = [];
-  private cursor = 0;
-  closed = false;
-  private constructor(readonly ws: WebSocket) {
-    ws.on("message", (d) => this.frames.push(JSON.parse(d.toString()) as Frame));
-    ws.on("close", () => {
-      this.closed = true;
-    });
-  }
-
-  static open(baseUrl: string, token: string): Promise<FakeDevice> {
-    const ws = new WebSocket(`${baseUrl.replace(/^http/, "ws")}/runtime/ws`, {
-      headers: { authorization: `Bearer ${token}` },
-    });
-    return new Promise((resolve, reject) => {
-      ws.once("open", () => resolve(new FakeDevice(ws)));
-      ws.once("unexpected-response", (_req, res) => reject(new Error(`HTTP ${res.statusCode}`)));
-      ws.once("error", reject);
-    });
-  }
-
-  /** Exchange the long-lived device token for a 10-minute device JWT (what the daemon does before connecting). */
-  static async exchange(baseUrl: string, deviceToken: string): Promise<string> {
-    const res = await fetch(`${baseUrl}/api/v1/devices/token`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${deviceToken}` },
-    });
-    if (res.status !== 200) throw new Error(`device token exchange: HTTP ${res.status}`);
-    return ((await res.json()) as { token: string }).token;
-  }
-
-  /** Connect like the daemon: exchange the device token for a device JWT, open the link with it, say hello. */
-  static async connect(baseUrl: string, deviceToken: string, sessions?: string[]): Promise<FakeDevice> {
-    const d = await FakeDevice.open(baseUrl, await FakeDevice.exchange(baseUrl, deviceToken));
-    d.send({
-      type: "hello",
-      protocolVersion: 1,
-      device: { name: "Test Mac", platform: "darwin", daemonVersion: "0.0.0-test" },
-      runtimes: [
-        { id: "claude-code", installed: true, version: "2.1.287", loggedIn: true },
-        { id: "codex", installed: true, version: "0.160.0", loggedIn: false },
-      ],
-      ...(sessions ? { sessions } : {}),
-    });
-    await d.next((f) => f.type === "welcome");
-    return d;
-  }
-
-  send(frame: Record<string, unknown>) {
-    this.ws.send(JSON.stringify(frame));
-  }
-
-  /** Wait for (and consume) the next frame matching `pred` after the cursor. */
-  async next(pred: (f: Frame) => boolean, timeoutMs = 8000): Promise<Frame> {
-    const until = Date.now() + timeoutMs;
-    while (Date.now() < until) {
-      for (let i = this.cursor; i < this.frames.length; i++) {
-        const f = this.frames[i]!;
-        if (pred(f)) {
-          this.frames.splice(i, 1);
-          return f;
-        }
-      }
-      await sleep(20);
-    }
-    throw new Error(`timed out waiting for frame; got ${JSON.stringify(this.frames.slice(-5))}`);
-  }
-
-  command(kind: string, sessionId?: string, timeoutMs?: number) {
-    return this.next(
-      (f) => f.type === "command" && f.kind === kind && (!sessionId || f.sessionId === sessionId),
-      timeoutMs,
-    ) as Promise<Frame & { id: string; payload: Record<string, unknown>; sessionId: string }>;
-  }
-
-  pending(kind: string) {
-    return this.frames.filter((f) => f.type === "command" && f.kind === kind);
-  }
-
-  ack(id: string, ok = true, error?: string) {
-    this.send({ type: "ack", commandId: id, ...(ok ? { ok: true } : { ok: false, error }) });
-  }
-
-  seq = Date.now() * 1000;
-  event(sessionId: string, event: Record<string, unknown>, localSeq = ++this.seq) {
-    this.send({ type: "event", sessionId, localSeq, event });
-  }
-
-  async close() {
-    if (this.closed) return;
-    await new Promise<void>((r) => {
-      this.ws.once("close", () => r());
-      this.ws.close();
-    });
-  }
-}
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-async function eventually<T>(fn: () => Promise<T | undefined | false>, timeoutMs = 8000): Promise<T> {
-  const until = Date.now() + timeoutMs;
-  let last: unknown;
-  while (Date.now() < until) {
-    try {
-      const v = await fn();
-      if (v) return v;
-    } catch (err) {
-      last = err;
-    }
-    await sleep(50);
-  }
-  throw new Error(`condition not met in time${last ? `: ${String(last)}` : ""}`);
-}
 
 const ADMIN = { name: "Víctor Ruiz", email: "victor@example.test", password: "correct-horse-battery" };
 
@@ -1054,7 +938,7 @@ describe("authorization coverage", () => {
 
   it("every device, project and Work Zone answer went through the resolver", () => {
     const undecided = stack.built.authz.undecided.filter((u) =>
-      /^\/api\/v1\/(devices|projects|work-sessions)/.test(u.url),
+      /^\/api\/v1\/(devices|projects|work-sessions|work-zone)/.test(u.url),
     );
     expect(undecided).toEqual([]);
   });

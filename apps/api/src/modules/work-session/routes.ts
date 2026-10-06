@@ -1,12 +1,23 @@
 import { randomUUID } from "node:crypto";
 import {
+  type AuthzDenial,
+  type ControlDenialReason,
   CreatePromptRequest,
   CreateWorkSessionRequest,
   Ok,
   onlyRelativePaths,
   ResolveApprovalRequest,
+  RuntimeControls,
+  RuntimeId,
   RuntimeInfo,
+  SessionCommandRequest,
+  SessionCommandResult,
+  SessionControls,
+  type SessionSettingsPatch,
+  slashDisposition,
   UpdatePromptRequest,
+  UpdateWorkSessionSettingsRequest,
+  UpdateWorkZonePolicyRequest,
   WorkApproval,
   WorkPrompt,
   WorkSession,
@@ -14,6 +25,8 @@ import {
   WorkSessionDiff,
   WorkSessionEventPayload,
   WorkSessionList,
+  type WorkZonePolicy,
+  WorkZonePolicyView,
 } from "@ocw/contracts";
 import {
   conversationMembers,
@@ -31,7 +44,7 @@ import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { type App, type AuthContext, authOf, type Core, tenant } from "../../core";
 import { conflict, HttpError, notFound } from "../../lib/errors";
-import { type DeviceHub, deviceFacts } from "../device";
+import { type DeviceAccess, type DeviceHub, deviceFacts, loadDeviceAccess } from "../device";
 import {
   AuthzDeniedError,
   createPermissionService,
@@ -39,21 +52,73 @@ import {
   type ResourceFacts,
   workSessionResource,
 } from "../organization";
+import { loadControlsContext } from "./context";
+import {
+  buildRuntimeControls,
+  buildSessionControls,
+  type ControlsContext,
+  decideSettings,
+  highestAvailableMode,
+  pickSettings,
+  requestedSettings,
+  storedSettings,
+} from "./controls";
+import { knownModels, loadWorkZonePolicy, saveWorkZonePolicy } from "./policy";
 import { type SessionRow, type WorkSessionService, wsTopic } from "./service";
+import { runSessionCommand } from "./slash";
 
 const SessionParams = z.object({ id: z.uuid() });
 const PromptParams = z.object({ id: z.uuid(), pid: z.uuid() });
 const ApprovalParams = z.object({ id: z.uuid(), aid: z.uuid() });
 const ListQuery = z.object({ archived: z.enum(["0", "1"]).optional() });
+const WorkZoneControlsQuery = z.object({ deviceId: z.uuid(), runtime: RuntimeId });
 
 const EVENT_WINDOW = 1500;
 const DIFF_TIMEOUT_MS = 20_000;
 
 const RUNTIME_LABEL = { "claude-code": "Claude Code", codex: "Codex" } as const;
 
+/** P-08: the resolver layer a settings denial belongs to. */
+const DENIAL_LAYER: Record<ControlDenialReason, AuthzDenial["layer"]> = {
+  org_policy: "org",
+  device_opt_in: "device",
+  device_grant: "device",
+  denied_for_you: "user",
+  runtime: "resource",
+  not_in_catalog: "resource",
+  not_confirmed: "resource",
+};
+
+const DENIAL_MESSAGE: Record<ControlDenialReason, string> = {
+  org_policy: "Your organization's Work Zone policy does not allow this",
+  device_opt_in: "Full access is turned off on this device",
+  device_grant: "This is above what you may use on this device",
+  denied_for_you: "You are not allowed to use this on this device",
+  runtime: "The runtime on this device does not offer this",
+  not_in_catalog: "The runtime on this device did not report this option",
+  not_confirmed: "This option is not available yet",
+};
+
+const FIELD_LABEL: Record<string, string> = {
+  model: "Model",
+  effort: "Reasoning",
+  contextWindow: "Context window",
+  fastMode: "Fast mode",
+  permissionMode: "Permission mode",
+};
+
+/** A refused settings change (P-08): 403 with the layer and reason; audited as `authz.denied` by the handler. */
+function settingsDenied(field: string, reason: ControlDenialReason): AuthzDeniedError {
+  return new AuthzDeniedError(
+    { permission: "work_session.configure", layer: DENIAL_LAYER[reason], reason },
+    { message: `${FIELD_LABEL[field] ?? field}: ${DENIAL_MESSAGE[reason]}` },
+  );
+}
+
 /** Permissions a session view renders controls for (`WorkSessionDetail.viewerCan`). */
 const SESSION_VIEWER_CAN = [
   "work_session.prompt",
+  "work_session.configure",
   "work_session.interrupt",
   "work_session.approve",
   "work_session.archive",
@@ -75,7 +140,7 @@ export function registerWorkSessionRoutes(
     req: FastifyRequest,
     tx: Tx,
     id: string,
-    permission: "work_session.prompt" | "work_session.interrupt",
+    permission: "work_session.prompt" | "work_session.interrupt" | "work_session.configure",
   ): Promise<SessionRow> {
     const s = await locked(tx, id);
     await perms.assertCan(req, tx, permission, await sessionFacts(tx, authOf(req), s));
@@ -113,6 +178,88 @@ export function registerWorkSessionRoutes(
       auth.userId,
     );
   }
+
+  /**
+   * What the caller may pick on a device (context.ts): org policy ∩ device opt-in ∩ the caller's cap ∩ grain ∩
+   * catalog ∩ inventory. Inside a session unlisted controllers get the device's floor (P-07); a 404 when the
+   * device is not visible (never happens for a session of this tenant).
+   */
+  async function controlsFor(
+    tx: Tx,
+    auth: AuthContext,
+    deviceId: string,
+    runtime: RuntimeId,
+    inSession: boolean,
+    access?: DeviceAccess,
+  ) {
+    const loaded = await loadControlsContext(tx, perms, {
+      deviceId,
+      runtime,
+      userId: auth.userId,
+      inSession,
+      ...(access ? { access } : {}),
+    });
+    if (!loaded) throw notFound("Device not found");
+    return loaded.ctx;
+  }
+
+  /** Device layer for a new session: own, shared or granted (device_not_shared), never revoked (device_revoked). */
+  async function assertDeviceUsable(
+    req: FastifyRequest,
+    tx: Tx,
+    d: typeof devices.$inferSelect,
+    access: DeviceAccess,
+  ): Promise<void> {
+    await perms.assertCan(req, tx, "device.use", deviceFacts(d, authOf(req).userId, access)).catch((err) => {
+      if (!(err instanceof AuthzDeniedError)) throw err;
+      throw new AuthzDeniedError(err.denial, {
+        message:
+          err.denial.reason === "device_revoked"
+            ? `${d.name} was revoked. Pair it again to use it.`
+            : "This device is not shared with you. Ask its owner to share it.",
+      });
+    });
+  }
+
+  // ---------------------------------------------------------------- organization Work Zone policy (D-02, D-11)
+
+  const manage = {
+    config: { authz: "user" as const },
+    preHandler: [requireUser, perms.requirePermission("work_zone.manage")],
+  };
+  const policyView = async (tx: Tx, policy: WorkZonePolicy): Promise<WorkZonePolicyView> => ({
+    ...policy,
+    knownModels: await knownModels(tx),
+  });
+
+  app.get(
+    "/work-zone-policy",
+    { ...manage, schema: { tags, response: { 200: WorkZonePolicyView } } },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => policyView(tx, await loadWorkZonePolicy(tx))),
+  );
+
+  app.put(
+    "/work-zone-policy",
+    { ...manage, schema: { tags, body: UpdateWorkZonePolicyRequest, response: { 200: WorkZonePolicyView } } },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const auth = authOf(req);
+        const { policy, changed } = await saveWorkZonePolicy(tx, req.body, auth.userId);
+        if (changed.length > 0) {
+          await core.audit.record(tx, {
+            action: "work_zone_policy.updated",
+            resourceType: "work_zone_policy",
+            resourceId: auth.organizationId,
+            clientKind: auth.clientKind,
+            metadata: { changed },
+          });
+          // ADR-0012: a tighter policy reaches live sessions at once (downgrade, audited, device told).
+          await svc.reauthorizeOrg(tx, "policy");
+        }
+        return policyView(tx, policy);
+      }),
+  );
 
   async function joinConversation(tx: Tx, auth: AuthContext, s: SessionRow) {
     await tx
@@ -175,6 +322,7 @@ export function registerWorkSessionRoutes(
         const auth = authOf(req);
         const body = req.body;
         await perms.assertCan(req, tx, "work_session.create", orgResource());
+        if (body.prompt) assertNotSlashCommand(body.prompt, body.runtime ?? "claude-code");
         const [row] = await tx
           .select({ p: projects, d: devices })
           .from(projects)
@@ -183,16 +331,9 @@ export function registerWorkSessionRoutes(
         if (!row || row.p.removedAt) throw notFound("Project not found");
         const { p, d } = row;
         if (body.deviceId && body.deviceId !== d.id) throw conflict("The project belongs to another device");
-        // Device layer: own or shared (device_not_shared), never revoked (device_revoked).
-        await perms.assertCan(req, tx, "device.use", deviceFacts(d, auth.userId)).catch((err) => {
-          if (!(err instanceof AuthzDeniedError)) throw err;
-          throw new AuthzDeniedError(err.denial, {
-            message:
-              err.denial.reason === "device_revoked"
-                ? `${d.name} was revoked. Pair it again to use it.`
-                : "This device is not shared with you. Ask its owner to share it.",
-          });
-        });
+        // Device layer: own, shared or granted (device_not_shared), never revoked (device_revoked).
+        const access = await loadDeviceAccess(tx, auth.userId);
+        await assertDeviceUsable(req, tx, d, access);
         if (d.status !== "online")
           throw conflict(`${d.name} is offline. Start the desktop app.`, "device_offline");
         const runtime = z
@@ -212,6 +353,38 @@ export function registerWorkSessionRoutes(
             "runtime_unavailable",
           );
         }
+        // The start settings go through the same decision as a change (ADR-0012: full access needs policy ∩
+        // opt-in ∩ grain). The model keeps today's free choice here; a change inside the session is catalog-checked.
+        const ctx = await controlsFor(tx, auth, d.id, body.runtime, false, access);
+        // The start mode is always within the creator's intersection: an explicit mode is refused with its reason;
+        // the implicit default is lowered to the highest available mode under it (e.g. a grant capped at plan).
+        let startMode = body.permissionMode ?? "default";
+        const startOption = buildRuntimeControls(body.runtime, ctx, body.model ?? null).permissionModes.find(
+          (m) => m.value === startMode,
+        );
+        if (!startOption?.available) {
+          const lower =
+            body.permissionMode === undefined
+              ? highestAvailableMode(ctx, body.model ?? null, startMode)
+              : null;
+          if (!lower) throw settingsDenied("permissionMode", startOption?.reason ?? "runtime");
+          startMode = lower;
+        }
+        const startPatch: SessionSettingsPatch = {
+          permissionMode: startMode,
+          ...(body.effort !== undefined ? { effort: body.effort } : {}),
+          ...(body.fastMode !== undefined ? { fastMode: body.fastMode } : {}),
+          ...(body.contextWindow !== undefined ? { contextWindow: body.contextWindow } : {}),
+        };
+        const baseline = {
+          model: body.model ?? null,
+          effort: null,
+          contextWindow: null,
+          fastMode: false,
+          permissionMode: "default" as const,
+        };
+        const start = decideSettings(baseline, startPatch, body.runtime, ctx);
+        if (!start.ok) throw settingsDenied(start.field, start.reason);
         const title = body.title ?? firstLine(body.prompt) ?? `${p.name} · ${RUNTIME_LABEL[body.runtime]}`;
         const [conv] = await tx
           .insert(conversations)
@@ -232,7 +405,8 @@ export function registerWorkSessionRoutes(
             deviceId: d.id,
             runtime: body.runtime ?? "claude-code",
             model: body.model ?? null,
-            permissionMode: body.permissionMode ?? "default",
+            permissionMode: start.next.permissionMode ?? "default",
+            settings: storedSettings(start.next),
             worktree: body.worktree ?? false,
             branch: body.worktree ? null : p.defaultBranch,
             status: "provisioning",
@@ -303,6 +477,92 @@ export function registerWorkSessionRoutes(
     return p!;
   }
 
+  /**
+   * The one settings path (D-07, D-13, ADR-0012): `PATCH /settings` and settings slash commands. Call with the
+   * session LOCKED and `work_session.configure` asserted. Policy ∩ opt-in ∩ cap ∩ grain ∩ catalog decide; the
+   * change is stored, sent to the device as `session.configure`, audited (with its `source`) and emitted live.
+   */
+  async function applySettingsChange(
+    req: FastifyRequest,
+    tx: Tx,
+    s: SessionRow,
+    patch: SessionSettingsPatch,
+    source: "user" | "slash_command",
+  ): Promise<{ session: WorkSession; ctx: ControlsContext; changed: boolean }> {
+    const auth = authOf(req);
+    if (s.status === "archived") throw conflict("This session is archived", "session_archived");
+    const current = requestedSettings(s);
+    const ctx = await controlsFor(tx, auth, s.deviceId, s.runtime, true);
+    const decision = decideSettings(current, patch, s.runtime, ctx);
+    if (!decision.ok) throw settingsDenied(decision.field, decision.reason);
+    const keys = [...decision.changed, ...decision.adjusted];
+    if (keys.length === 0) return { session: (await svc.session(tx, s.id))!, ctx, changed: false };
+    const next = decision.next;
+    await tx
+      .update(workSessions)
+      .set({
+        model: next.model ?? null,
+        permissionMode: next.permissionMode ?? s.permissionMode,
+        settings: storedSettings(next),
+        settingsPending: true,
+        updatedAt: sql`now()`,
+      })
+      .where(eq(workSessions.id, s.id));
+    // D-14: the device holds the change until the running turn ends and applies it before the next one.
+    await hub.enqueue(tx, {
+      deviceId: s.deviceId,
+      workSessionId: s.id,
+      kind: "session.configure",
+      payload: { settings: pickSettings(next, keys), reason: source },
+    });
+    await core.audit.record(tx, {
+      action: "work_session.settings_changed",
+      resourceType: "work_session",
+      resourceId: s.id,
+      sessionId: s.id,
+      deviceId: s.deviceId,
+      clientKind: auth.clientKind,
+      metadata: {
+        changed: decision.changed,
+        from: pickSettings(current, keys),
+        to: pickSettings(next, keys),
+        adjusted: decision.adjusted,
+        source,
+      },
+    });
+    // D-04: entering and leaving Full access are audited on their own (actor, device, session, org).
+    const from = current.permissionMode;
+    const to = next.permissionMode ?? from;
+    if ((from === "fullAccess") !== (to === "fullAccess")) {
+      await core.audit.record(tx, {
+        action: to === "fullAccess" ? "work_session.full_access_entered" : "work_session.full_access_left",
+        resourceType: "work_session",
+        resourceId: s.id,
+        sessionId: s.id,
+        deviceId: s.deviceId,
+        clientKind: auth.clientKind,
+        metadata: { from, to, source },
+      });
+    }
+    return { session: (await svc.emitSession(tx, s.id))!, ctx, changed: true };
+  }
+
+  /**
+   * Queue a prompt from the caller and dispatch it (or restart a finished session). Call with the session LOCKED
+   * and `work_session.prompt` asserted.
+   */
+  async function submitPrompt(req: FastifyRequest, tx: Tx, s: SessionRow, body: string): Promise<WorkPrompt> {
+    const auth = authOf(req);
+    if (s.status === "archived") throw conflict("This session is archived", "session_archived");
+    assertNotSlashCommand(body, s.runtime);
+    await joinConversation(tx, auth, s);
+    const p = await queuePrompt(tx, auth, s, body);
+    if (s.status === "failed" || s.status === "completed") await svc.restart(tx, s);
+    else await svc.tryDispatch(tx, s);
+    await svc.emitSession(tx, s.id);
+    return (await svc.prompts(tx, s.id)).find((x) => x.id === p.id)!;
+  }
+
   app.get(
     "/work-sessions/:id",
     { ...user, schema: { tags, params: SessionParams, response: { 200: WorkSessionDetail } } },
@@ -352,17 +612,32 @@ export function registerWorkSessionRoutes(
     },
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
-        const auth = authOf(req);
         const s = await lockedFor(req, tx, req.params.id, "work_session.prompt");
-        if (s.status === "archived") throw conflict("This session is archived", "session_archived");
-        await joinConversation(tx, auth, s);
-        const p = await queuePrompt(tx, auth, s, req.body.body);
-        if (s.status === "failed" || s.status === "completed") await svc.restart(tx, s);
-        else await svc.tryDispatch(tx, s);
-        await svc.emitSession(tx, s.id);
-        const [fresh] = await tx.select().from(workPrompts).where(eq(workPrompts.id, p.id));
-        return (await svc.prompts(tx, s.id)).find((x) => x.id === fresh!.id)!;
+        return submitPrompt(req, tx, s, req.body.body);
       }),
+  );
+
+  app.post(
+    "/work-sessions/:id/commands",
+    {
+      ...user,
+      schema: {
+        tags,
+        params: SessionParams,
+        body: SessionCommandRequest,
+        response: { 200: SessionCommandResult },
+      },
+    },
+    async (req) =>
+      core.db.withTenant(tenant(req), (tx) =>
+        runSessionCommand(
+          req,
+          tx,
+          { core, locked, lockedFor, applySettingsChange, submitPrompt },
+          req.params.id,
+          req.body.text,
+        ),
+      ),
   );
 
   async function updatePrompt(
@@ -398,6 +673,7 @@ export function registerWorkSessionRoutes(
       return;
     }
     if (change.body !== undefined && change.body !== p.body) {
+      assertNotSlashCommand(change.body, s.runtime);
       const [row] = await tx
         .update(workPrompts)
         .set({ body: change.body })
@@ -602,6 +878,59 @@ export function registerWorkSessionRoutes(
     },
   );
 
+  app.get(
+    "/work-sessions/:id/controls",
+    { ...user, schema: { tags, params: SessionParams, response: { 200: SessionControls } } },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const auth = authOf(req);
+        const session = await svc.session(tx, req.params.id);
+        if (!session) throw notFound("Work session not found");
+        await perms.assertCan(req, tx, "work_session.read", await sessionFacts(tx, auth, session), {
+          hideAs404: true,
+        });
+        return buildSessionControls(
+          session,
+          await controlsFor(tx, auth, session.deviceId, session.runtime, true),
+        );
+      }),
+  );
+
+  app.patch(
+    "/work-sessions/:id/settings",
+    {
+      ...user,
+      schema: {
+        tags,
+        params: SessionParams,
+        body: UpdateWorkSessionSettingsRequest,
+        response: { 200: WorkSession },
+      },
+    },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const s = await lockedFor(req, tx, req.params.id, "work_session.configure");
+        return (await applySettingsChange(req, tx, s, req.body, "user")).session;
+      }),
+  );
+
+  app.get(
+    "/work-zone/controls",
+    { ...user, schema: { tags, querystring: WorkZoneControlsQuery, response: { 200: RuntimeControls } } },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const auth = authOf(req);
+        const [d] = await tx.select().from(devices).where(eq(devices.id, req.query.deviceId));
+        if (!d) throw notFound("Device not found");
+        const access = await loadDeviceAccess(tx, auth.userId);
+        await assertDeviceUsable(req, tx, d, access);
+        return buildRuntimeControls(
+          req.query.runtime,
+          await controlsFor(tx, auth, d.id, req.query.runtime, false, access),
+        );
+      }),
+  );
+
   app.post(
     "/work-sessions/:id/archive",
     { ...user, schema: { tags, params: SessionParams, response: { 200: Ok } } },
@@ -634,6 +963,17 @@ export function registerWorkSessionRoutes(
         return { ok: true as const };
       }),
   );
+}
+
+/**
+ * D-13: a prompt body that starts with a settings or refused slash command never enters the queue; it must go
+ * through `POST /work-sessions/:id/commands`. Passthrough commands and slashes later in the text are prompts.
+ */
+function assertNotSlashCommand(body: string, runtime: RuntimeId): void {
+  const disposition = slashDisposition(body, runtime);
+  if (disposition?.kind === "settings" || disposition?.kind === "refused") {
+    throw new HttpError(400, "slash_command", "Send slash commands from the composer");
+  }
 }
 
 function firstLine(text: string | undefined): string | undefined {

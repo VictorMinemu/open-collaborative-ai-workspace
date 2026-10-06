@@ -1,4 +1,10 @@
-import { type AuthzDenial, INVITABLE_ROLES, type OrgRole, type Permission } from "@ocw/contracts";
+import {
+  type AuthzDenial,
+  INVITABLE_ROLES,
+  type OrgRole,
+  type Permission,
+  type PermissionMode,
+} from "@ocw/contracts";
 import type { PrincipalFacts, Relation, ResourceFacts, ResourceState, ResourceType } from "./resolve";
 
 /**
@@ -14,7 +20,12 @@ export const RELATION_PERMISSIONS: Record<ResourceType, Partial<Record<Relation,
   member: {},
   channel: { owner: ["channel.archive", "channel.members.remove"] },
   channel_member: { owner: ["channel.members.remove"], self: ["channel.members.remove"] },
-  device: { owner: ["device.use", "device.update", "device.revoke"], grantee: ["device.use"] },
+  // P-06: `device.full_access` is relation-only — the owner, or a member whose cap on the device is Full access.
+  device: {
+    owner: ["device.use", "device.update", "device.revoke", "device.full_access"],
+    grantee: ["device.use"],
+    full_access_grantee: ["device.use", "device.full_access"],
+  },
   work_session: {
     creator: ["work_session.approve", "work_session.archive"],
     device_owner: ["work_session.approve", "work_session.archive"],
@@ -47,6 +58,7 @@ const DEVICE_GATED = new Set<Permission>([
   "work_session.create",
   "work_session.prompt",
   "work_session.approve",
+  "work_session.configure",
 ]);
 /** Channel preconditions only judge a concrete channel; organization-scope answers stay role-based. */
 const isChannel = (r: ResourceFacts) => r.type === "channel" || r.type === "channel_member";
@@ -183,13 +195,24 @@ export function channelMemberResource(c: ChannelFacts, targetIsViewer: boolean):
   );
 }
 
+/**
+ * A device as a resource. `cap` is the principal's highest mode on the device (device/access.ts, P-06): given, a
+ * non-owner is a `grantee` when it is not null and a `full_access_grantee` when it is Full access; omitted, the
+ * legacy rule applies (every member is a grantee of a shared device).
+ */
 export function deviceResource(
-  d: { ownerUserId: string; shared: boolean; revoked: boolean },
+  d: { ownerUserId: string; shared: boolean; revoked: boolean; cap?: PermissionMode | null },
   principalUserId: string | null,
 ): ResourceFacts {
+  const owner = principalUserId !== null && d.ownerUserId === principalUserId;
+  const grantee = d.cap === undefined ? d.shared : !owner && d.cap !== null;
   return facts(
     "device",
-    [...when(d.ownerUserId === principalUserId, "owner" as const), ...when(d.shared, "grantee" as const)],
+    [
+      ...when(owner, "owner" as const),
+      ...when(grantee, "grantee" as const),
+      ...when(!owner && d.cap === "fullAccess", "full_access_grantee" as const),
+    ],
     when(d.revoked, "revoked" as const),
   );
 }

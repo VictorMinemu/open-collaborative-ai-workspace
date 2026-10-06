@@ -21,6 +21,11 @@ export const ControlRequestSchema = z.discriminatedUnion("cmd", [
     cmd: z.literal("removeProject"),
     localId: z.string(),
   }),
+  /**
+   * Re-read runtime.json (ADR-0012: the Full access opt-in written by the desktop app or the CLI). Carries NO value:
+   * the opt-in can only change through the file on this device; strict so a forged value is refused, not ignored.
+   */
+  z.object({ id: z.union([z.string(), z.number()]).optional(), cmd: z.literal("reloadConfig") }).strict(),
 ]);
 export type ControlRequest = z.infer<typeof ControlRequestSchema>;
 
