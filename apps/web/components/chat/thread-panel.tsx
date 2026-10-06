@@ -119,6 +119,7 @@ function ThreadBody({
               showThreadSummary={false}
               readOnly={!!channel.archivedAt}
               canDeleteAny={channel.viewerCan?.includes("message.delete_any") ?? false}
+              canReact={canPost}
               showTombstones
               anchorId={highlightId}
               linkFor={linkFor}
@@ -141,6 +142,7 @@ function ThreadBody({
               showThreadSummary={false}
               readOnly={!!channel.archivedAt}
               canDeleteAny={channel.viewerCan?.includes("message.delete_any") ?? false}
+              canReact={canPost}
               anchorId={highlightId}
               linkFor={linkFor}
               onAnchorHidden={onReplyHidden}

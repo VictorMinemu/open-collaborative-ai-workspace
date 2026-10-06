@@ -9,6 +9,7 @@ import {
   type MessageCreatedEvent,
   type MessageDeletedEvent,
   type MessageUpdatedEvent,
+  type ReactionUpdatedEvent,
   type ThreadUpdatedEvent,
   type UserTypingEvent,
 } from "@ocw/contracts";
@@ -37,6 +38,7 @@ import {
   applyMessage,
   applyMessageDeleted,
   applyMessageUpdate,
+  applyReactionUpdate,
   applyThreadUpdate,
   bumpLatest,
   chatKeys,
@@ -232,6 +234,10 @@ export function ChannelView({ channelId }: { channelId: string }) {
         return;
       case EventTypes.messageDeleted:
         applyMessageDeleted(qc, frame.data as MessageDeletedEvent);
+        return;
+      case EventTypes.reactionUpdated:
+        // Channel messages, thread replies and roots alike (the thread panel reads the same caches).
+        applyReactionUpdate(qc, frame.data as ReactionUpdatedEvent, me.id);
         return;
       case EventTypes.conversationMemberAdded:
       case EventTypes.conversationMemberRemoved:
@@ -614,6 +620,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
                     intro={intro}
                     readOnly={!!channel.archivedAt}
                     canDeleteAny={canModerate}
+                    canReact={canPost}
                   />
                   {loadingNewer ? (
                     <div className="flex justify-center py-3 text-muted-foreground">

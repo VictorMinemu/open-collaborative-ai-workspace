@@ -14,6 +14,7 @@ import type { AuditService } from "../audit";
 import type { ChannelFacts } from "../organization";
 import type { RealtimeService } from "../realtime";
 import { authorOf, type Directory } from "./directory";
+import { reactionsFor } from "./reactions";
 
 /**
  * Chat domain logic. Every function runs inside the caller's `withTenant()` transaction, so RLS scopes all
@@ -446,12 +447,23 @@ export function toMessage(row: MessageRow, dir: Directory, replyParticipants?: M
   };
 }
 
+/**
+ * Adds the viewer-specific fields (P-04) to REST snapshots: `reactions` with `mine` for `viewerId`. Tombstones
+ * carry none (P-05). Realtime payloads never go through here.
+ */
+export async function hydrateViewer(tx: Tx, list: Message[], viewerId: string): Promise<Message[]> {
+  const live = list.filter((m) => !m.deletedAt).map((m) => m.id);
+  const reactions = await reactionsFor(tx, live, viewerId);
+  return list.map((m) => ({ ...m, reactions: m.deletedAt ? [] : (reactions.get(m.id) ?? []) }));
+}
+
 /** Top-level messages of a channel, newest page first in the DB, returned oldest → newest. */
 export async function listMessages(
   tx: Tx,
   conversationId: string,
   dir: Directory,
   page: { before?: number | undefined; limit: number },
+  viewerId: string,
 ): Promise<{ messages: Message[]; nextBefore: number | null }> {
   const rows = await tx
     .select()
@@ -468,19 +480,31 @@ export async function listMessages(
   const hasMore = rows.length > page.limit;
   const pageRows = rows.slice(0, page.limit).reverse();
   return {
-    messages: await topLevelDtos(tx, pageRows, dir),
+    messages: await topLevelDtos(tx, pageRows, dir, viewerId),
     nextBefore: hasMore ? (pageRows[0]?.seq ?? null) : null,
   };
 }
 
-/** DTOs for top-level rows (ascending), with reply participants on thread roots, exactly like `listMessages`. */
-async function topLevelDtos(tx: Tx, rows: MessageRow[], dir: Directory): Promise<Message[]> {
+/**
+ * DTOs for top-level rows (ascending), with reply participants on thread roots and the viewer's fields, exactly
+ * like `listMessages`.
+ */
+async function topLevelDtos(
+  tx: Tx,
+  rows: MessageRow[],
+  dir: Directory,
+  viewerId: string,
+): Promise<Message[]> {
   const participants = await replyParticipantsFor(
     tx,
     rows.filter((r) => r.replyCount > 0).map((r) => r.id),
     dir,
   );
-  return rows.map((r) => toMessage(r, dir, r.replyCount > 0 ? (participants.get(r.id) ?? []) : []));
+  return hydrateViewer(
+    tx,
+    rows.map((r) => toMessage(r, dir, r.replyCount > 0 ? (participants.get(r.id) ?? []) : [])),
+    viewerId,
+  );
 }
 
 /**
@@ -494,6 +518,7 @@ export async function listMessagesAround(
   dir: Directory,
   anchor: MessageRow,
   limit: number,
+  viewerId: string,
 ): Promise<{ messages: Message[]; nextBefore: number | null; nextAfter: number | null; anchorId: string }> {
   const olderWanted = Math.floor(limit / 2);
   const newerWanted = Math.max(0, limit - 1 - olderWanted);
@@ -514,7 +539,7 @@ export async function listMessagesAround(
   const newerRows = newer.slice(0, newerWanted);
   const rows = [...olderRows, anchor, ...newerRows];
   return {
-    messages: await topLevelDtos(tx, rows, dir),
+    messages: await topLevelDtos(tx, rows, dir, viewerId),
     nextBefore: older.length > olderWanted ? (rows[0]?.seq ?? null) : null,
     nextAfter: newer.length > newerWanted ? (rows.at(-1)?.seq ?? null) : null,
     anchorId: anchor.id,
@@ -528,6 +553,7 @@ export async function listMessagesAfter(
   dir: Directory,
   after: number,
   limit: number,
+  viewerId: string,
 ): Promise<{ messages: Message[]; nextAfter: number | null }> {
   const rows = await tx
     .select()
@@ -539,7 +565,7 @@ export async function listMessagesAfter(
     .limit(limit + 1);
   const pageRows = rows.slice(0, limit);
   return {
-    messages: await topLevelDtos(tx, pageRows, dir),
+    messages: await topLevelDtos(tx, pageRows, dir, viewerId),
     nextAfter: rows.length > limit ? (pageRows.at(-1)?.seq ?? null) : null,
   };
 }

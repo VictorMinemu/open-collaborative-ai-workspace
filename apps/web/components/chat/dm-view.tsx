@@ -8,6 +8,7 @@ import {
   type MessageCreatedEvent,
   type MessageDeletedEvent,
   type MessageUpdatedEvent,
+  type ReactionUpdatedEvent,
 } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
 import { useQueryClient } from "@tanstack/react-query";
@@ -31,6 +32,7 @@ import {
   applyMessage,
   applyMessageDeleted,
   applyMessageUpdate,
+  applyReactionUpdate,
   bumpDmLatest,
   chatKeys,
   isBotDm,
@@ -142,6 +144,10 @@ export function DmView({ conversationId }: { conversationId: string }) {
     }
     if (frame.type === EventTypes.messageDeleted) {
       applyMessageDeleted(qc, frame.data as MessageDeletedEvent);
+      return;
+    }
+    if (frame.type === EventTypes.reactionUpdated) {
+      applyReactionUpdate(qc, frame.data as ReactionUpdatedEvent, me.id);
       return;
     }
     if (frame.type !== EventTypes.messageCreated) return;

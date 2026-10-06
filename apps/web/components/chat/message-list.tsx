@@ -11,8 +11,15 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useCopy } from "@/hooks/use-copy";
 import { errorMessage } from "@/lib/api";
-import { applyMessageDeleted, applyMessageUpdate, deleteMessage, editMessage } from "@/lib/chat-queries";
+import {
+  applyMessageDeleted,
+  applyMessageUpdate,
+  deleteMessage,
+  editMessage,
+  toggleReaction,
+} from "@/lib/chat-queries";
 import { cn, relativeTime } from "@/lib/utils";
+import { EmojiPicker } from "./emoji-picker";
 import { Markdown } from "./markdown";
 import {
   DeleteMessageDialog,
@@ -22,6 +29,7 @@ import {
   MessageActions,
 } from "./message-actions";
 import { BotBadge, PrincipalAvatar } from "./principal-avatar";
+import { ReactionBar } from "./reactions";
 import { type Typer, TypingDots } from "./typing";
 
 /** A message being sent (optimistic) or that failed to send. */
@@ -226,6 +234,8 @@ interface RowProps {
   meId: string;
   readOnly: boolean;
   canDeleteAny: boolean;
+  /** The viewer may react (channel.post: a member of a live conversation). */
+  canReact: boolean;
   linkFor?: ((m: Message) => string) | undefined;
 }
 
@@ -240,6 +250,7 @@ const MessageRow = memo(function MessageRow({
   meId,
   readOnly,
   canDeleteAny,
+  canReact,
   linkFor,
 }: RowProps) {
   const author = message.author ?? {
@@ -255,11 +266,16 @@ const MessageRow = memo(function MessageRow({
   const [sheetUsed, setSheetUsed] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmUsed, setConfirmUsed] = useState(false);
+  // The full picker opened from the touch sheet (the toolbar and the reaction bar anchor their own).
+  const [pickerOpen, setPickerOpen] = useState(false);
   const qc = useQueryClient();
   const { copy } = useCopy();
   const deleted = !!message.deletedAt;
   const own = message.authorKind === "user" && !!meId && message.authorId === meId;
   const mutable = !readOnly && !deleted;
+  const reactable = canReact && !deleted && !!meId;
+  const react = (emoji: string) =>
+    void toggleReaction(qc, message, emoji, meId).catch((err) => toast.error(errorMessage(err)));
   const actions: MessageActionSet = {
     onReply: onOpenThread ? () => onOpenThread(message.id) : undefined,
     onEdit: own && mutable ? () => setEditing(true) : undefined,
@@ -278,6 +294,8 @@ const MessageRow = memo(function MessageRow({
               () => toast.error("Couldn't copy the link"),
             )
         : undefined,
+    onReact: reactable ? react : undefined,
+    onAddReaction: reactable ? () => setPickerOpen(true) : undefined,
   };
   const confirmDelete = async () => {
     try {
@@ -421,6 +439,7 @@ const MessageRow = memo(function MessageRow({
         ) : (
           <Markdown body={message.body} />
         )}
+        {editing ? null : <ReactionBar message={message} meId={meId} canReact={reactable} onToggle={react} />}
         {showThreadSummary && onOpenThread ? (
           <ThreadSummary message={message} typers={typers} onOpen={() => onOpenThread(message.id)} />
         ) : null}
@@ -434,6 +453,7 @@ const MessageRow = memo(function MessageRow({
           onOpenChange={setSheetOpen}
         />
       ) : null}
+      {pickerOpen ? <EmojiPicker open onOpenChange={setPickerOpen} onPick={react} /> : null}
       {confirmUsed ? (
         <DeleteMessageDialog
           message={message}
@@ -525,6 +545,7 @@ export function MessageList({
   startDay,
   readOnly = false,
   canDeleteAny = false,
+  canReact,
   showTombstones = false,
   anchorId,
   linkFor,
@@ -545,6 +566,8 @@ export function MessageList({
   readOnly?: boolean;
   /** The channel's `viewerCan` has `message.delete_any` (admins in channels; never in DMs). */
   canDeleteAny?: boolean;
+  /** The viewer may add reactions (members of a live conversation); defaults to `!readOnly`. */
+  canReact?: boolean;
   /** Show a deleted message as a tombstone even without replies (the thread panel's root). */
   showTombstones?: boolean;
   /** The permalink target to highlight (`data-highlighted`, CHAT-14). */
@@ -599,6 +622,7 @@ export function MessageList({
         meId={me.id}
         readOnly={readOnly}
         canDeleteAny={canDeleteAny}
+        canReact={canReact ?? !readOnly}
         linkFor={linkFor}
       />,
     );

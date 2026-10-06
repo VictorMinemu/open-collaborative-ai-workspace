@@ -1,7 +1,7 @@
 "use client";
 
 import type { Message } from "@ocw/contracts";
-import { Link2, MessageSquareReply, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
+import { Link2, MessageSquareReply, MoreHorizontal, Pencil, SmilePlus, Trash2 } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,6 +22,10 @@ import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { EmojiPicker } from "./emoji-picker";
+
+/** The quick reactions offered next to the full picker (toolbar and long-press sheet). */
+export const QUICK_REACTIONS = ["👍", "✅", "👀"] as const;
 
 /**
  * The one place message actions live (P-09): a hover toolbar on pointer devices and a long-press bottom sheet on
@@ -35,10 +39,14 @@ export interface MessageActionSet {
   onDelete?: (() => void) | undefined;
   /** Copies the message's permalink (CHAT-13); every readable, non-deleted message offers it. */
   onCopyLink?: (() => void) | undefined;
+  /** Toggles the viewer's reaction (CHAT-07): members who may post, on non-deleted messages. */
+  onReact?: ((emoji: string) => void) | undefined;
+  /** Opens the full picker from the touch sheet (the toolbar anchors its own picker). */
+  onAddReaction?: (() => void) | undefined;
 }
 
 export const hasMessageActions = (a: MessageActionSet) =>
-  !!(a.onReply || a.onEdit || a.onDelete || a.onCopyLink);
+  !!(a.onReply || a.onEdit || a.onDelete || a.onCopyLink || a.onReact);
 
 const toolbarButton =
   "inline-flex size-7 items-center justify-center rounded-md text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40 data-[popup-open]:bg-accent data-[popup-open]:text-foreground";
@@ -46,6 +54,8 @@ const toolbarButton =
 /** Hover toolbar (top-right of a message row). Stays visible while its menu is open. */
 export function MessageActions({ actions }: { actions: MessageActionSet }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const react = actions.onReact;
   const more: Array<{ key: string; node: ReactNode }> = [];
   if (actions.onCopyLink) {
     more.push({
@@ -86,10 +96,44 @@ export function MessageActions({ actions }: { actions: MessageActionSet }) {
     <div
       data-testid="message-toolbar"
       className={cn(
-        "pointer-events-none absolute -top-3.5 right-4 z-10 flex gap-px rounded-lg border bg-background p-0.5 opacity-0 shadow-sm transition-opacity group-focus-within:pointer-events-auto group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100 sm:right-5",
-        menuOpen && "pointer-events-auto opacity-100",
+        // Pointer devices only (P-09): touch screens use the long-press sheet, so a tapped chip never pops it up.
+        "pointer-events-none absolute -top-3.5 right-4 z-10 flex gap-px rounded-lg border bg-background p-0.5 opacity-0 shadow-sm transition-opacity group-focus-within:pointer-events-auto group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100 sm:right-5 [@media(hover:none)]:hidden",
+        (menuOpen || pickerOpen) && "pointer-events-auto opacity-100",
       )}
     >
+      {react ? (
+        <>
+          {QUICK_REACTIONS.map((emoji) => (
+            <Tooltip key={emoji} content={`React with ${emoji}`}>
+              <button
+                type="button"
+                aria-label={`React with ${emoji}`}
+                data-testid="quick-reaction"
+                data-emoji={emoji}
+                onClick={() => react(emoji)}
+                className={cn(toolbarButton, "text-[15px] leading-none")}
+              >
+                {emoji}
+              </button>
+            </Tooltip>
+          ))}
+          <EmojiPicker
+            onPick={react}
+            onOpenChange={setPickerOpen}
+            trigger={
+              <button
+                type="button"
+                aria-label="Add reaction"
+                data-testid="add-reaction"
+                className={toolbarButton}
+              >
+                <SmilePlus className="size-4" />
+              </button>
+            }
+          />
+          <span aria-hidden className="mx-0.5 my-1 w-px bg-border" />
+        </>
+      ) : null}
       {actions.onReply ? (
         <Tooltip content="Reply in thread">
           <button
@@ -194,6 +238,34 @@ export function MessageActionSheet({
             {preview || "Attachment"}
           </SheetDescription>
         </div>
+        {actions.onReact ? (
+          <div className="flex items-center gap-2 border-t px-1.5 py-2.5" data-testid="sheet-reactions">
+            {QUICK_REACTIONS.map((emoji) => (
+              <button
+                key={emoji}
+                type="button"
+                aria-label={`React with ${emoji}`}
+                data-testid="quick-reaction"
+                data-emoji={emoji}
+                onClick={run(() => actions.onReact?.(emoji))}
+                className="flex size-12 items-center justify-center rounded-full bg-muted text-[22px] leading-none outline-none transition-colors active:bg-accent focus-visible:ring-[3px] focus-visible:ring-ring/40"
+              >
+                {emoji}
+              </button>
+            ))}
+            {actions.onAddReaction ? (
+              <button
+                type="button"
+                aria-label="Add reaction"
+                data-testid="add-reaction"
+                onClick={run(actions.onAddReaction)}
+                className="flex size-12 items-center justify-center rounded-full bg-muted text-muted-foreground outline-none transition-colors active:bg-accent focus-visible:ring-[3px] focus-visible:ring-ring/40"
+              >
+                <SmilePlus className="size-[22px]" />
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         <div className="grid gap-0.5 border-t pt-2">
           {actions.onReply ? (
             <SheetRow

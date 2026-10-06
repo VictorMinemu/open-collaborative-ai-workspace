@@ -18,6 +18,8 @@ import {
   MessagePage as MessagePageSchema,
   Message as MessageSchema,
   Ok,
+  type ReactionSummary,
+  type ReactionUpdatedEvent,
   type ThreadResponse,
   ThreadResponse as ThreadResponseSchema,
   type ThreadUpdatedEvent,
@@ -457,4 +459,78 @@ export function applyMessageDeleted(qc: QueryClient, ev: MessageDeletedEvent) {
   qc.setQueryData<ThreadResponse>(chatKeys.thread(ev.messageId), (prev) =>
     prev ? { ...prev, root: tomb(prev.root) } : prev,
   );
+}
+
+// ---------------------------------------------------------------- reactions (CHAT-07)
+
+/**
+ * Applies `patch` to one message wherever it is cached: a reply in its thread, a top-level message in every window
+ * of its conversation and as the root of its thread.
+ */
+function patchMessage(
+  qc: QueryClient,
+  at: { messageId: string; conversationId: string; threadId: string | null },
+  patch: (m: Message) => Message,
+) {
+  const one = (m: Message) => (m.id === at.messageId ? patch(m) : m);
+  if (at.threadId) {
+    qc.setQueryData<ThreadResponse>(chatKeys.thread(at.threadId), (prev) =>
+      prev ? { ...prev, replies: prev.replies.map(one) } : prev,
+    );
+    return;
+  }
+  patchWindows(qc, at.conversationId, one);
+  qc.setQueryData<ThreadResponse>(chatKeys.thread(at.messageId), (prev) =>
+    prev ? { ...prev, root: one(prev.root) } : prev,
+  );
+}
+
+/** One emoji's chip set to `next` (removed when null or at count 0); a new emoji goes last (first-reaction order). */
+function withReaction(m: Message, emoji: string, next: ReactionSummary | null): Message {
+  const list = m.reactions ?? [];
+  const i = list.findIndex((r) => r.emoji === emoji);
+  if (!next || next.count <= 0) return i < 0 ? m : { ...m, reactions: list.filter((r) => r.emoji !== emoji) };
+  if (i < 0) return { ...m, reactions: [...list, next] };
+  return { ...m, reactions: list.map((r, j) => (j === i ? next : r)) };
+}
+
+/**
+ * Applies `reaction.updated` (P-04: absolute count, first reactors, actor). `mine` only changes when the actor is
+ * the viewer; any other actor keeps the viewer's own state.
+ */
+export function applyReactionUpdate(qc: QueryClient, ev: ReactionUpdatedEvent, meId: string) {
+  const isMe = ev.actor.kind === "user" && ev.actor.id === meId;
+  patchMessage(qc, ev, (m) => {
+    const prev = m.reactions?.find((r) => r.emoji === ev.emoji);
+    const mine = isMe ? ev.added : (prev?.mine ?? false);
+    return withReaction(m, ev.emoji, { emoji: ev.emoji, count: ev.count, mine, members: ev.members });
+  });
+}
+
+/**
+ * Toggles the viewer's `emoji` on `message`: optimistic in every cache, then PUT/DELETE; on failure the previous
+ * chip comes back and the error is thrown for the caller's toast. The `reaction.updated` echo sets the absolute
+ * count afterwards (idempotent).
+ */
+export async function toggleReaction(qc: QueryClient, message: Message, emoji: string, meId: string) {
+  const before = message.reactions?.find((r) => r.emoji === emoji) ?? null;
+  const adding = !before?.mine;
+  const me = { kind: "user" as const, id: meId };
+  const others = (before?.members ?? []).filter((x) => !(x.kind === "user" && x.id === meId));
+  const optimistic: ReactionSummary = {
+    emoji,
+    count: (before?.count ?? 0) + (adding ? 1 : -1),
+    mine: adding,
+    members: adding ? [...others, me].slice(0, 20) : others,
+  };
+  const at = { messageId: message.id, conversationId: message.conversationId, threadId: message.threadId };
+  patchMessage(qc, at, (m) => withReaction(m, emoji, optimistic));
+  const path = `/api/v1/messages/${message.id}/reactions/${encodeURIComponent(emoji)}`;
+  try {
+    if (adding) await api.put(path, { body: {}, schema: Ok });
+    else await api.del(path, { schema: Ok });
+  } catch (err) {
+    patchMessage(qc, at, (m) => withReaction(m, emoji, before));
+    throw err;
+  }
 }
