@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
@@ -21,6 +22,18 @@ export default defineConfig({
           testTimeout: 60_000,
           hookTimeout: 180_000,
           fileParallelism: false,
+        },
+      },
+      {
+        // apps/web components rendered to static markup (renderToStaticMarkup, no DOM). Vite 8 transforms with
+        // oxc; apps/web's tsconfig says `jsx: preserve` (Next compiles it), so the runtime is set here.
+        oxc: { jsx: { runtime: "automatic" } },
+        resolve: { alias: { "@": fileURLToPath(new URL("./apps/web", import.meta.url)) } },
+        test: {
+          name: "web",
+          include: ["apps/web/**/*.test.{ts,tsx}"],
+          exclude: ["**/node_modules/**", "apps/web/.next*/**"],
+          environment: "node",
         },
       },
     ],
