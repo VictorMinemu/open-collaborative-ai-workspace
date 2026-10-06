@@ -37,12 +37,71 @@ async function bothThemes(page: Page, name: string) {
 /** Width of an element's text box against its own box, and how it overflows. */
 function measure(page: Page, testId: string, scope?: ReturnType<Page["locator"]>) {
   const loc = (scope ?? page).getByTestId(testId).first();
-  return loc.evaluate((el) => ({
-    scroll: el.scrollWidth,
-    client: el.clientWidth,
-    textOverflow: getComputedStyle(el).textOverflow,
-    title: el.getAttribute("title"),
-  }));
+  return loc.evaluate((el) => {
+    const contentWidth = (e: Element) => {
+      const cs = getComputedStyle(e);
+      const edges = ["paddingLeft", "paddingRight", "borderLeftWidth", "borderRightWidth"] as const;
+      return e.getBoundingClientRect().width - edges.reduce((sum, k) => sum + Number.parseFloat(cs[k]), 0);
+    };
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    return {
+      scroll: el.scrollWidth,
+      client: el.clientWidth,
+      box: contentWidth(el),
+      /** The text's own width, even when the box clips it (scrollWidth never drops below clientWidth). */
+      textWidth: range.getBoundingClientRect().width,
+      textOverflow: getComputedStyle(el).textOverflow,
+      title: el.getAttribute("title"),
+    };
+  });
+}
+
+/**
+ * Whether each text would fit, untruncated, in the element's box: a hidden clone of the element (same classes, same
+ * parent, so the same font and width) carries the text and is measured, then removed.
+ */
+function fitsLike(loc: ReturnType<Page["locator"]>, texts: string[]) {
+  return loc.evaluate((el, ts) => {
+    const contentWidth = (e: Element) => {
+      const cs = getComputedStyle(e);
+      const edges = ["paddingLeft", "paddingRight", "borderLeftWidth", "borderRightWidth"] as const;
+      return e.getBoundingClientRect().width - edges.reduce((sum, k) => sum + Number.parseFloat(cs[k]), 0);
+    };
+    return ts.map((t) => {
+      const probe = el.cloneNode(false) as HTMLElement;
+      probe.textContent = t;
+      probe.style.visibility = "hidden";
+      el.parentElement!.appendChild(probe);
+      const range = document.createRange();
+      range.selectNodeContents(probe);
+      const fit = {
+        text: t,
+        scroll: probe.scrollWidth,
+        client: probe.clientWidth,
+        box: contentWidth(probe),
+        textWidth: range.getBoundingClientRect().width,
+      };
+      probe.remove();
+      return fit;
+    });
+  }, texts);
+}
+
+/** The two recorded fixture titles as stored today: 32 and 31 characters, the longest the shape allows. */
+const RECORDED_TITLES = ["Fix settings page login redirect", "Redirección de login al expirar"];
+
+/**
+ * Shown in full: the box does not scroll and the text's own width fits the box's content width (fractional pixels;
+ * 0.5 px for sub-pixel layout, since clientWidth rounds and a content-sized box equals its text).
+ */
+function expectNotTruncated(
+  m: { scroll: number; client: number; box: number; textWidth: number },
+  message: string,
+) {
+  expect(m.client, `${message}: the box has a width`).toBeGreaterThan(100);
+  expect(m.scroll, message).toBeLessThanOrEqual(m.client);
+  expect(m.textWidth, message).toBeLessThanOrEqual(m.box + 0.5);
 }
 
 /** No horizontal page overflow. */
@@ -287,16 +346,16 @@ test("fallback and fit: a policy without haiku keeps the first line; titles fit 
     await expect(page).toHaveTitle(`${AUTO} · Work Zone`);
     const header = await measure(page, "session-title");
     expect(header.title).toBe(AUTO);
+    expectNotTruncated(header, `the breadcrumb title is not truncated at ${tag}`);
     if (!mobile) {
-      expect(header.scroll, "the breadcrumb title is not truncated at 1440").toBeLessThanOrEqual(
-        header.client,
-      );
       const row = await measure(page, "row-title", sessionRow(page, auto));
       expect(row.title).toBe(AUTO);
-      // The ref-4 sidebar (~256 px) fits ~35 characters per row: a longer title is cut with an ellipsis INSIDE the
-      // row (the full text stays in the title attribute), never past the sidebar.
-      if (row.scroll > row.client) expect(row.textOverflow).toBe("ellipsis");
+      // D-20: a title of at most 32 characters fits the ref-4 sidebar row (~219 px) in full.
+      expectNotTruncated(row, "the auto title is not truncated in its 1440 sidebar row");
       expect(row.client, "the row stays inside the 256 px sidebar").toBeLessThanOrEqual(240);
+      for (const fit of await fitsLike(sessionRow(page, auto).getByTestId("row-title"), RECORDED_TITLES)) {
+        expectNotTruncated(fit, `"${fit.text}" fits a 1440 sidebar row`);
+      }
     }
     await expectPageFits(page);
     await bothThemes(page, `wz-title-${tag}`);
@@ -305,6 +364,10 @@ test("fallback and fit: a policy without haiku keeps the first line; titles fit 
       await expect(page.getByTestId("session-list")).toBeVisible();
       const row = await measure(page, "row-title", sessionRow(page, auto));
       expect(row.title).toBe(AUTO);
+      expectNotTruncated(row, "the auto title is not truncated in the 390 drawer");
+      for (const fit of await fitsLike(sessionRow(page, auto).getByTestId("row-title"), RECORDED_TITLES)) {
+        expectNotTruncated(fit, `"${fit.text}" fits a 390 drawer row`);
+      }
       await expectPageFits(page);
       await bothThemes(page, "wz-title-sidebar-390");
       await page.keyboard.press("Escape");
