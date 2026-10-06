@@ -121,3 +121,66 @@ test("a reload mid-answer shows the partial text at once and streams on to the p
 
   await context.close();
 });
+
+/** Opens the answer's Regenerate menu (popover on desktop, bottom sheet on a phone). */
+async function openRegenerate(page: Page, project: string) {
+  await lastAssistant(page).getByTestId("ai-regenerate").click();
+  const menu = page.getByTestId("ai-regenerate-menu");
+  await expect(menu).toBeVisible();
+  await expect(menu).toHaveAttribute("data-surface", project === "mobile" ? "sheet" : "popover");
+  return menu;
+}
+
+test("the last answer regenerates on the same model, then with another model", async ({ browser }, info) => {
+  const project = info.project.name;
+  const w = widthOf(project);
+  const { context, page } = await openAs(browser, SAM, project);
+
+  await openNewAiChat(page);
+  await sendAi(page, "first question");
+  await expect(page).toHaveURL(/\/chat\/ai\/[0-9a-f-]{36}$/);
+  await expect(lastAssistant(page)).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
+  await sendAi(page, "second question");
+  const answers = page.locator('[data-testid="ai-message"][data-role="assistant"]');
+  await expect(answers).toHaveCount(2);
+  const answer = answers.last();
+  await expect(answer).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
+  const messageId = await answer.getAttribute("data-message-id");
+  // Only the last answer offers Regenerate.
+  await expect(answers.first().getByTestId("ai-regenerate")).toHaveCount(0);
+  await expect(answer.getByTestId("ai-copy-answer")).toBeVisible();
+
+  // Regenerate (same model): the same message streams again and keeps its model.
+  let menu = await openRegenerate(page, project);
+  await expect(menu.getByTestId("ai-regenerate-same")).toContainText("GPT-6 Astra");
+  await bothThemes(page, `ai-chat-regenerate-menu-${w}`);
+  await menu.getByTestId("ai-regenerate-same").click();
+  await expect(menu).toBeHidden();
+  await expect(answer).toHaveAttribute("data-message-id", messageId ?? "");
+  await expect(answer).toHaveAttribute("data-status", "streaming");
+  await expect(answer).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
+  await expect(answer.getByTestId("ai-message-footer")).toHaveText(/^GPT-6 Astra · ChatGPT plan · /);
+  expect(await answerText(answer)).toMatch(/^Echo: second question/);
+
+  // Regenerate with… the mock: the footer follows the new model.
+  menu = await openRegenerate(page, project);
+  await menu.getByTestId("ai-regenerate-with").click();
+  const mock = menu.getByTestId("ai-model-mock:mock/mock-1");
+  await expect(mock).toBeVisible();
+  await expect(menu.getByTestId("ai-model-group-chatgpt_plan")).toBeVisible();
+  await bothThemes(page, `ai-chat-regenerate-with-${w}`);
+  await mock.click();
+  await expect(menu).toBeHidden();
+  await expect(answer).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
+  await expect(answer.getByTestId("ai-message-footer")).toHaveText(/^Mock \(E2E\) · not metered/);
+  await expect(answers).toHaveCount(2);
+  await expect(answers.first().getByTestId("ai-regenerate")).toHaveCount(0);
+
+  // Persisted: a reload shows the regenerated answer on the mock.
+  await page.reload();
+  await expect(lastAssistant(page).getByTestId("ai-message-footer")).toHaveText(
+    /^Mock \(E2E\) · not metered/,
+  );
+
+  await context.close();
+});
