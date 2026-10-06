@@ -142,6 +142,7 @@ SLICE-06…18 were added on 2026-10-04 after the code audit of the widened demo 
 - [ ] **WZC-04**: Full access runs the real bypass mode of Claude Code and Codex only through ADR-0012's path: org policy allows it, the device has it enabled locally by its owner, and the asker holds the grain; each is off by default, a persistent badge shows it to every controller, and slash commands typed in a prompt cannot raise the mode or change settings outside policy
 - [ ] **WZC-05**: A device owner shares a device (e.g. a server that hosts the harnesses) with chosen members or units, each with a maximum permission mode; those people start and control sessions on it without per-session acceptance, revoking someone stops their sessions, and the device settings show whose runtime subscription is used
 - [ ] **WZC-06**: A documented inventory lists every Claude Code (Agent SDK) and Codex (app-server) session option at the pinned versions as exposed, deferred or impossible with the reason; the composer matches the owner's reference screenshots at 1440 and 390 in light and dark, and never claims an option the inventory has not confirmed
+- [ ] **WZC-07**: Each Work Zone session gets an automatic short title (3–6 words, ≤ 48 characters) generated from its first prompt by the session's own runtime with a small model (Claude Code: Haiku; Codex: GPT-6-Luna) on the user's subscription; it falls back to the prompt's first line when the model is unavailable or not allowed, never overwrites a title the user typed, shows live to every controller and fits the sidebar, breadcrumb and tab at 1440 and 390
 
 ### Self-hosted Release (SELF)
 
@@ -355,6 +356,7 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | WZC-04 | Phase 3.2 | Pending | New (owner request 2026-10-05: Work Zone session controls, ADR-0012) |
 | WZC-05 | Phase 3.2 | Pending | New (owner request 2026-10-05: Work Zone session controls, ADR-0012) |
 | WZC-06 | Phase 3.2 | Pending | New (owner request 2026-10-05: Work Zone session controls, ADR-0012) |
+| WZC-07 | Phase 3.2 | Pending | New (owner request 2026-10-05: automatic session titles with Haiku / GPT-6-Luna) |
 | CHAT-02 | Phase 4 | Partial | Flat channel list with unread dot; no department/team grouping or views |
 | CHAT-03 | Phase 1 | Delivered | `chat.int.test.ts` "thread replies update the root and refuse nesting"; `chat.spec.ts` reply count + participants |
 | CHAT-04 | Phase 4 | Pending | No DMs |
