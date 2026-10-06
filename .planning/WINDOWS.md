@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 12
+open_count: 14
 waived_count: 0
 fixed_count: 14
-total_count: 26
-last_updated: 2026-10-06T05:31:09.529Z
+total_count: 28
+last_updated: 2026-10-06T06:11:49.318Z
 ---
 
 # Broken Windows Ledger
@@ -41,6 +41,8 @@ last_updated: 2026-10-06T05:31:09.529Z
 | 24 | 04 | deviation | apps/web/components/chat/use-permalink-window.ts |  | Detached window logic extracted into shared hooks (not in plan file list); 04-07 group DMs must reuse it | open |  | 2026-10-06T05:27:09.695Z |  |
 | 25 | 04 | deviation | apps/api/src/app.ts |  | buildApp gained an optional secretStore test hook so testcontainer S3 secrets resolve via SecretReference | open |  | 2026-10-06T05:31:09.460Z |  |
 | 26 | 04 | deviation | packages/db/sql/post-migrate.sql |  | app.due_attachment_sweeps takes p_now (default now()) in addition to p_limit, for the sweeper's injectable clock | open |  | 2026-10-06T05:31:09.529Z |  |
+| 27 | 04 | deviation | apps/api/src/config/env.ts |  | OCW_SEARCH_RATE_LIMIT_PER_MINUTE (default 30) added; e2e-isolated.sh raises it to 600 for specs | open |  | 2026-10-06T06:11:49.247Z |  |
+| 28 | 04 | deviation | apps/api/src/modules/search/index.ts |  | Search routes call markDecided after access.readableIds (request-less filterFor) and share one app.rateLimit handler | open |  | 2026-10-06T06:11:49.318Z |  |
 
 ````json
 [
@@ -354,6 +356,30 @@ last_updated: 2026-10-06T05:31:09.529Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-06T05:31:09.529Z",
+    "resolved_at": null
+  },
+  {
+    "id": 27,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/api/src/config/env.ts",
+    "line": null,
+    "description": "OCW_SEARCH_RATE_LIMIT_PER_MINUTE (default 30) added; e2e-isolated.sh raises it to 600 for specs",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T06:11:49.247Z",
+    "resolved_at": null
+  },
+  {
+    "id": 28,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/api/src/modules/search/index.ts",
+    "line": null,
+    "description": "Search routes call markDecided after access.readableIds (request-less filterFor) and share one app.rateLimit handler",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T06:11:49.318Z",
     "resolved_at": null
   }
 ]
