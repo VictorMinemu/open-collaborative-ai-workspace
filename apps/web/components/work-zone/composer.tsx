@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
+import { useToastClearance } from "@/hooks/use-toast-clearance";
 import { errorMessage } from "@/lib/api";
 import { useQueuePrompt, useSessionCommand, useSessionControls } from "@/lib/workzone-queries";
 import { useSheetSurface } from "./control-surface";
@@ -41,6 +42,9 @@ export function Composer({
   const phone = useSheetSurface();
   const [text, setText] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
+  // Toasts (e.g. a /model notice) stack above the composer, never over its send button (03.2 review note 3).
+  useToastClearance(formRef);
   const busy = session.status === "running" || session.status === "waiting_approval";
   const willQueue =
     busy || session.status === "provisioning" || session.status === "host_offline" || queued > 0;
@@ -106,7 +110,9 @@ export function Composer({
 
   return (
     <form
+      ref={formRef}
       onSubmit={submit}
+      data-testid="composer-form"
       className="mx-auto w-full max-w-3xl px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6 sm:pb-4"
     >
       {above}

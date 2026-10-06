@@ -49,7 +49,9 @@ and contract tests updated, API `agent-channel.int.test.ts` "cell runtime pause"
 e2e bots.spec paused step, cell-smoke scenario `breaker` (SIGKILL until the breaker trips; CI only).
 
 Left: the exit-0 restarts under VM CPU starvation themselves (OpenClaw liveness watchdog suspected, cf. 03.1-15
-"liveness heartbeat delayed … exited with code 0") are not reproduced here.
+"liveness heartbeat delayed … exited with code 0") are not reproduced here. While the breaker is still active, an
+OpenClaw hot reload that restarts `ocw` (a `channels.ocw` edit or a plugin generation swap) only stops it
+(dist `restartGatewayChannels`, "suppressed hot reload"); OpenClaw's own recovery restarts it once the window drains.
 
 ## 2. "Flaky CI e2e hang" in codex-subscription.spec.ts — FIXED (it was not a test hang)
 
@@ -71,6 +73,19 @@ Fix: the install step has its own `timeout-minutes: 8` (ci.yml e2e and cell-proo
 keeps the report and logs. Proof of the safety net: a spec that never settles with `test.setTimeout(0)` ran forever
 without it and failed after 5 s with "Timed out waiting 5s for the test suite to run" with it (CI=1, temp config).
 No spec change: codex-subscription.spec has no await outside its timeout scope.
+
+## 3. Toasts cover the Work Zone composer's send button at 1440 — FIXED
+
+Evidence: `components/ui/sonner.tsx` places toasts bottom-right (24 px) from 640 px up; the Work Zone composer
+(`max-w-3xl`, centred in the session column) reaches x ≈ 1328 at 1440, so a 356 px toast at the right edge sits on
+its right end and send button (03.2-REFERENCE-REVIEW observation 3). Phones (< 640 px) already drop toasts from the
+top. New e2e assertion in work-zone-slash.spec (toast box ∩ `composer-form` box) failed at 1440 before the fix
+("Received: true").
+
+Fix: the composer publishes its clearance (viewport bottom → composer top, ResizeObserver + resize) as
+`--toast-clearance` on <html> while mounted (`hooks/use-toast-clearance.ts`); the Toaster's bottom offset is
+`calc(var(--toast-clearance, 0px) + 24px)`, so on Work Zone pages toasts stack just above the composer and everywhere
+else keep Sonner's 24 px. Phones unchanged (top-center).
 
 ## Eliminated
 

@@ -25,6 +25,14 @@ async function signIn(page: Page) {
 const toast = (page: Page, text: string | RegExp) =>
   page.locator("[data-sonner-toast]").filter({ hasText: text });
 
+/** True when the toast's box intersects the composer's (agent bar, card with the send button, footer). */
+async function toastCoversComposer(page: Page, text: string | RegExp): Promise<boolean> {
+  const t = await toast(page, text).boundingBox();
+  const c = await page.getByTestId("composer-form").boundingBox();
+  if (!t || !c) return true;
+  return t.x < c.x + c.width && c.x < t.x + t.width && t.y < c.y + c.height && c.y < t.y + t.height;
+}
+
 test("Work Zone slash commands: /model changes the chip for both controllers; /config is refused", async ({
   page,
   browser,
@@ -70,6 +78,8 @@ test("Work Zone slash commands: /model changes the chip for both controllers; /c
     await expect(toast(page, "Model set to Claude Sonnet 5.5 — applies to the next turn")).toBeVisible({
       timeout: 10_000,
     });
+    // The toast never covers the composer or its send button (03.2 reference review, observation 3).
+    await expect.poll(() => toastCoversComposer(page, "Model set to"), { timeout: 5_000 }).toBe(false);
     await expect(composer).toHaveValue("");
     await expect(chip).toContainText("Claude Sonnet 5.5", { timeout: 10_000 });
     await expect(sam.page.getByTestId("model-chip")).toContainText("Claude Sonnet 5.5", { timeout: 10_000 });
@@ -88,6 +98,9 @@ test("Work Zone slash commands: /model changes the chip for both controllers; /c
     await expect(
       toast(page, "/config is not available from the workspace. Use the session controls."),
     ).toBeVisible({ timeout: 10_000 });
+    await expect
+      .poll(() => toastCoversComposer(page, "/config is not available"), { timeout: 5_000 })
+      .toBe(false);
     await expect(composer).toHaveValue("");
     await expect(page.getByTestId("prompt-bubble")).toHaveCount(0);
     await expect(sam.page.getByTestId("prompt-bubble")).toHaveCount(0);
