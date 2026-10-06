@@ -142,6 +142,13 @@ export const CLAUDE_CODE_CONTROLS: readonly RuntimeControlRow[] = [
   ),
   row("Interrupt", "exposed", "interrupt", "Already shipped", "Query.interrupt(): sdk.d.ts:2851-2857"),
   row(
+    "Session title model (Haiku, one-shot query)",
+    "exposed",
+    "session.title",
+    "Automatic session titles (D-18): a separate one-shot query with `haiku` on the device owner's login, isolated from the session: no tools (deny-all canUseTool), default mode (plan swaps Haiku for Sonnet), bypass disabled, no filesystem settings or MCP servers, not persisted, empty temp directory, thinking off",
+    "Options.tools ~1637, persistSession ~1814, thinking ~1903, maxTurns ~1930, settingSources ~2249, strictMcpConfig ~2298, systemPrompt ~2400 (sdk.d.ts); fixture claude-code-2.1.289.title.sdk.jsonl",
+  ),
+  row(
     "Rewind files",
     "deferred",
     null,

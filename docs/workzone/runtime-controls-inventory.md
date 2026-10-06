@@ -85,6 +85,7 @@ Never edit the text between the markers by hand: the next `--write` replaces it 
 | Slash commands that change settings (/model, /effort, /fast, /permissions) | exposed | Intercepted and routed through the policy-checked, audited settings path (D-13, P-10); the adapter refuses them as a backstop (slash_command_refused) | supportedCommands() / system/init.slash_commands: sdk.d.ts:2998, 3719, 9200-9222; refuseSlashCommand in claude-runtime.ts |
 | Slash commands passed through (/compact, /context, /usage, /cost, /init, /review) | exposed | Allowlist sent as a prompt; every other command is refused with a notice (Pitfall 3) | code.claude.com/docs/en/agent-sdk/slash-commands |
 | Interrupt | exposed | Already shipped | Query.interrupt(): sdk.d.ts:2851-2857 |
+| Session title model (Haiku, one-shot query) | exposed | Automatic session titles (D-18): a separate one-shot query with `haiku` on the device owner's login, isolated from the session: no tools (deny-all canUseTool), default mode (plan swaps Haiku for Sonnet), bypass disabled, no filesystem settings or MCP servers, not persisted, empty temp directory, thinking off | Options.tools ~1637, persistSession ~1814, thinking ~1903, maxTurns ~1930, settingSources ~2249, strictMcpConfig ~2298, systemPrompt ~2400 (sdk.d.ts); fixture claude-code-2.1.289.title.sdk.jsonl |
 | Rewind files | deferred | Changes the working tree outside a turn; needs its own approval design | Query.rewindFiles(): sdk.d.ts:3010-3016 |
 | MCP server status | deferred | Not part of the session controls | Query.mcpServerStatus(): sdk.d.ts:3010-3016 |
 
@@ -114,6 +115,7 @@ Never edit the text between the markers by hand: the next `--write` replaces it 
 | Slash commands that change settings (/model, /effort, /fast, /permissions) | exposed | Handled by the platform settings path (D-13, P-10) | No slash-command API in app-server: ClientRequest.ts method list |
 | Slash commands passed through (/compact only) | exposed | /compact maps to the native thread/compact/start (a non-steerable compaction turn); everything else is refused | thread/compact/start: v2/ThreadCompactStartParams.ts, NonSteerableTurnKind 'compact' (0.160.0 schema); codex-runtime.test.ts |
 | Interrupt | exposed | Already shipped | turn/interrupt: ClientRequest.ts |
+| Session title model (GPT-6-Luna, ephemeral thread) | exposed | Automatic session titles (D-18): an ephemeral `gpt-6-luna` thread on its own short-lived app-server on the device owner's ChatGPT login, isolated from the session: read-only sandbox, untrusted approvals (every request declined), any tool item interrupts, effort low, empty temp directory | thread/start.ephemeral + baseInstructions: v2/ThreadStartParams.ts; turn/start.effort + summary: v2/TurnStartParams.ts; fixture codex-0.160.0.title.rpc.jsonl |
 
 ### Work Zone UI
 

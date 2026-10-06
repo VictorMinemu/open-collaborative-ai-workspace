@@ -89,6 +89,34 @@ describe("decideTitleRequest", () => {
   });
 });
 
+describe("decideTitleRequest — the inventory gate (Task 2)", () => {
+  it("skips with not_confirmed when the runtime's session.title row is not exposed", () => {
+    const seen: string[] = [];
+    expect(
+      decideTitleRequest({
+        runtime: "codex",
+        catalog: catalog("codex", ["gpt-6-luna"]),
+        policy: policy(),
+        exposed: (k) => {
+          seen.push(k);
+          return false;
+        },
+      }),
+    ).toEqual({ ok: false, reason: "not_confirmed" });
+    expect(seen).toEqual(["session.title"]);
+  });
+
+  it("defaults to the runtime controls inventory (both rows are exposed with their fixtures)", () => {
+    for (const runtime of ["claude-code", "codex"] as const) {
+      const model = runtime === "codex" ? "gpt-6-luna" : "haiku";
+      expect(decideTitleRequest({ runtime, catalog: catalog(runtime, [model]), policy: policy() })).toEqual({
+        ok: true,
+        model,
+      });
+    }
+  });
+});
+
 describe("heuristicTitle (the first-line rule, unchanged)", () => {
   it("takes the first non-empty line", () => {
     expect(heuristicTitle("\n  Fix the login  \nmore")).toBe("Fix the login");

@@ -1,4 +1,10 @@
-import { type RuntimeCatalog, type RuntimeId, TITLE_MODEL, type WorkZonePolicy } from "@ocw/contracts";
+import {
+  isExposed,
+  type RuntimeCatalog,
+  type RuntimeId,
+  TITLE_MODEL,
+  type WorkZonePolicy,
+} from "@ocw/contracts";
 import { devices, type Tx } from "@ocw/db";
 import { eq } from "drizzle-orm";
 import { catalogFor } from "./controls";
@@ -25,14 +31,18 @@ export type TitleDecision =
   | { ok: false; reason: "not_in_catalog" | "org_policy" | "not_confirmed" };
 
 /**
- * Ask for a title only with the session runtime's own small model, when the device reports it and the org
- * Work Zone policy allows it (an empty `allowedModels` list = any model). Never a hard-coded availability.
+ * Ask for a title only with the session runtime's own small model, when the device reports it, the org Work Zone
+ * policy allows it (an empty `allowedModels` list = any model) and the runtime's `session.title` inventory row is
+ * exposed (confirmed by a recorded fixture). Never a hard-coded availability.
  */
 export function decideTitleRequest(i: {
   runtime: RuntimeId;
   catalog: RuntimeCatalog | null;
   policy: WorkZonePolicy;
+  exposed?: (uiKey: string) => boolean;
 }): TitleDecision {
+  const exposed = i.exposed ?? ((k: string) => isExposed(i.runtime, k));
+  if (!exposed("session.title")) return { ok: false, reason: "not_confirmed" };
   const model = TITLE_MODEL[i.runtime];
   if (!i.catalog?.models.some((m) => m.id === model)) return { ok: false, reason: "not_in_catalog" };
   const allowed = i.policy.allowedModels[i.runtime];
