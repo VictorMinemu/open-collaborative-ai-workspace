@@ -6,10 +6,13 @@ import {
   ChannelSummary,
   type ChannelSummary as ChannelSummaryDto,
   CreateChannelRequest,
+  CreateDmRequestFields,
   DmList,
+  DmSummary,
   EphemeralTypes,
   EventTypes,
   IdParams,
+  MAX_GROUP_PARTICIPANTS,
   MarkReadRequest,
   MemberParams,
   Message,
@@ -20,7 +23,7 @@ import {
   pageCursorCount,
   ThreadResponse,
 } from "@ocw/contracts";
-import { conversationMembers, conversations, type TenantCtx, type Tx, tenantOf } from "@ocw/db";
+import { conversationMembers, conversations, orgMembers, type TenantCtx, type Tx, tenantOf } from "@ocw/db";
 import { and, eq, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -37,7 +40,7 @@ import {
 } from "../organization";
 import { createConversationAccess } from "./access";
 import { authorOf, type Directory, loadDirectory } from "./directory";
-import { dmAgentOf, listDms } from "./dm";
+import { dmAgentOf, ensureDm, ensureHumanDm, listDms } from "./dm";
 import { resolveMentions } from "./mentions";
 import { type MessageActionsContext, registerMessageActionRoutes } from "./message-actions";
 import { registerPinRoutes } from "./pins";
@@ -75,7 +78,7 @@ import {
 import { registerChatTestRoutes } from "./test-routes";
 
 export { type ConversationAccess, createConversationAccess } from "./access";
-export { dmAgentOf, dmKey, ensureDm, listDms, setAgentDmsArchived } from "./dm";
+export { dmAgentOf, dmKey, ensureDm, ensureHumanDm, listDms, setAgentDmsArchived } from "./dm";
 export { resolveMentions } from "./mentions";
 export { REPLY_MODE_PER_MINUTE, replyModeCandidates } from "./reply-mode";
 
@@ -382,6 +385,52 @@ export function createChatModule(core: Core): ApiModule {
       };
     }),
   );
+
+  /**
+   * One participant of `POST /dms` (D-06): an active member of this organization (RLS: another org's id is
+   * simply missing → 404), or a live bot the caller may use (`bot.read`, hidden as 404). Personal bots only
+   * ever live in their owner's 1:1 DM, never in a group (409 `personal_bot_dm_only`).
+   */
+  async function checkParticipant(
+    req: FastifyRequest,
+    tx: Tx,
+    dir: Directory,
+    p: { kind: "user" | "agent"; id: string },
+    group: boolean,
+  ): Promise<void> {
+    if (p.kind === "user") {
+      // Seeing who is in the organization is what lets a member pick someone to message.
+      await perms.assertCan(req, tx, "member.read");
+      const [m] = await tx
+        .select({ deactivatedAt: orgMembers.deactivatedAt })
+        .from(orgMembers)
+        .where(eq(orgMembers.userId, p.id))
+        .limit(1);
+      if (!m) throw notFound("Member not found");
+      if (m.deactivatedAt) throw badRequest("This member is deactivated", "member_deactivated");
+      return;
+    }
+    const bot = dir.agents.get(p.id);
+    if (!bot || bot.deleted) throw notFound("Bot not found");
+    await perms.assertCan(
+      req,
+      tx,
+      "bot.read",
+      agentResource(
+        {
+          scope: bot.scope ?? "team",
+          ownerUserId: bot.ownerUserId ?? null,
+          disabled: bot.status === "disabled",
+        },
+        authOf(req).userId,
+      ),
+      { hideAs404: true },
+    );
+    if (group && bot.scope === "personal") {
+      throw conflict("Personal bots only chat in their owner's private chat", "personal_bot_dm_only");
+    }
+    if (bot.status === "disabled") throw badRequest("This bot is disabled", "agent_disabled");
+  }
 
   core.chatAgent.provideAgentTyping(async (ctx: TenantCtx, agentId, conversationId, threadRootId) => {
     const data = await core.db.withTenant(ctx, async (tx): Promise<AgentTypingEvent | null> => {
@@ -765,6 +814,54 @@ export function createChatModule(core: Core): ApiModule {
               }),
             );
             return { dms, userSeq: await core.realtime.lastSeq(tx, `user:${auth.userId}`) };
+          }),
+      );
+
+      /**
+       * CHAT-04 (D-06): open a direct conversation with the given participants (the caller is implied and
+       * removed from the list). One person → their DM; one bot → the bot DM (`bot.read` decided, personal bots
+       * for their owner only); insert-or-get, so it answers the existing conversation when there is one.
+       */
+      app.post(
+        "/dms",
+        {
+          config: { authz: "user" },
+          preHandler: requireUser,
+          schema: { tags, body: CreateDmRequestFields, response: { 200: DmSummary } },
+        },
+        async (req) =>
+          core.db.withTenant(tenant(req), async (tx) => {
+            const auth = authOf(req);
+            const seen = new Set<string>();
+            const others = req.body.participants.filter((p) => {
+              const key = `${p.kind}:${p.id.toLowerCase()}`;
+              if (seen.has(key) || (p.kind === "user" && p.id.toLowerCase() === auth.userId)) return false;
+              seen.add(key);
+              return true;
+            });
+            if (others.length === 0) throw badRequest("You cannot message yourself", "cannot_dm_self");
+            if (others.length > MAX_GROUP_PARTICIPANTS - 1) {
+              throw badRequest(
+                `A group can have at most ${MAX_GROUP_PARTICIPANTS} participants`,
+                "too_many_participants",
+              );
+            }
+            const dir = await loadDirectory(tx);
+            for (const p of others) await checkParticipant(req, tx, dir, p, others.length > 1);
+            let conv: ConversationRow;
+            const only = others[0];
+            if (others.length === 1 && only?.kind === "user") {
+              ({ conv } = await ensureHumanDm(tx, deps, { userId: auth.userId, otherUserId: only.id }));
+            } else if (others.length === 1 && only) {
+              ({ conv } = await ensureDm(tx, deps, { agentId: only.id, userId: auth.userId }));
+            } else {
+              throw badRequest("Group conversations are not available yet", "groups_unavailable");
+            }
+            // The caller reads what was opened (the resolver decides it, like every read).
+            await readableChannel(req, tx, conv, "Conversation not found");
+            const [summary] = await listDms(tx, auth.userId, { ids: [conv.id] });
+            if (!summary) throw notFound("Conversation not found");
+            return summary;
           }),
       );
 

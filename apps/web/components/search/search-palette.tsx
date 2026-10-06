@@ -2,6 +2,7 @@
 
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 import type { SearchChannel, SearchMessageHit, SearchPerson } from "@ocw/contracts";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
   ArrowRight,
@@ -9,6 +10,7 @@ import {
   CornerDownLeft,
   Hash,
   Lock,
+  MessageCircle,
   MessageSquareText,
   Search,
   X,
@@ -25,10 +27,15 @@ import {
   useRef,
   useState,
 } from "react";
+import { toast } from "sonner";
 import { PrincipalAvatar } from "@/components/chat/principal-avatar";
+import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
+import { errorMessage } from "@/lib/api";
 import { useOpenDm } from "@/lib/bots-queries";
+import { createDm } from "@/lib/chat-queries";
 import { permalinkPath } from "@/lib/permalink";
+import { useMe } from "@/lib/queries";
 import {
   readRecentSearches,
   rememberSearch,
@@ -311,7 +318,7 @@ function PaletteBody({ initialQuery, onClose }: { initialQuery: string; onClose:
         )}
       >
         {profile ? (
-          <ProfileCard person={profile} onBack={() => setProfile(null)} />
+          <ProfileCard person={profile} onBack={() => setProfile(null)} onMessage={go} />
         ) : overview.isError && q.trim() ? (
           <p className="px-3 py-8 text-center text-muted-foreground text-sm">
             {searchErrorMessage(overview.error)}
@@ -378,8 +385,30 @@ function PaletteBody({ initialQuery, onClose }: { initialQuery: string; onClose:
   );
 }
 
-/** A member's card inside the palette (no profile page yet; Plan 07 adds "Message"). */
-function ProfileCard({ person, onBack }: { person: SearchPerson; onBack: () => void }) {
+/** A member's card inside the palette, with "Message" to open (or create) the DM with them (CHAT-04). */
+function ProfileCard({
+  person,
+  onBack,
+  onMessage,
+}: {
+  person: SearchPerson;
+  onBack: () => void;
+  onMessage: (path: string) => void;
+}) {
+  const qc = useQueryClient();
+  const me = useMe({ enabled: false });
+  const [busy, setBusy] = useState(false);
+  const self = person.kind === "user" && person.id === me.data?.user.id;
+  const message = async () => {
+    setBusy(true);
+    try {
+      const dm = await createDm(qc, [{ kind: person.kind, id: person.id }]);
+      onMessage(`/chat/dm/${dm.id}`);
+    } catch (err) {
+      toast.error(errorMessage(err));
+      setBusy(false);
+    }
+  };
   return (
     <div data-testid="search-profile" className="px-2 py-2">
       <button
@@ -403,6 +432,17 @@ function ProfileCard({ person, onBack }: { person: SearchPerson; onBack: () => v
           {person.subtitle ? <p className="mt-1 truncate text-sm">{person.subtitle}</p> : null}
         </div>
       </div>
+      {self ? null : (
+        <Button
+          className="mt-3 w-full sm:w-auto"
+          data-testid="search-profile-message"
+          disabled={busy}
+          onClick={() => void message()}
+        >
+          {busy ? <Spinner /> : <MessageCircle />}
+          Message
+        </Button>
+      )}
     </div>
   );
 }

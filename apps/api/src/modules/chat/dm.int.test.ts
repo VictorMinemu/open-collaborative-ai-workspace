@@ -28,6 +28,10 @@ let admin: TestClient;
 let sam: TestClient;
 let alex: TestClient;
 let orgId: string;
+let adminId: string;
+let samId: string;
+let alexId: string;
+let deeId: string;
 let botId: string;
 let botUsername: string;
 let dmId: string;
@@ -96,8 +100,11 @@ beforeAll(async () => {
   admin = new TestClient(stack.baseUrl);
   const setup = await ok(admin.request("POST", "/api/v1/setup", { token: TEST_SETUP_TOKEN, ...ADMIN }));
   orgId = setup.organization.id;
-  [sam] = await joinAs("sam@example.test", "Sam Lee", "developer");
-  [alex] = await joinAs("alex@example.test", "Alex Kim", "developer");
+  adminId = setup.user.id;
+  [sam, samId] = await joinAs("sam@example.test", "Sam Lee", "developer");
+  [alex, alexId] = await joinAs("alex@example.test", "Alex Kim", "developer");
+  [, deeId] = await joinAs("dee@example.test", "Dee Deactivated", "developer");
+  await su.query("update app.org_members set deactivated_at = now() where user_id = $1", [deeId]);
 
   const created = await ok(sam.request("POST", "/api/v1/agents/personal", {}));
   botId = created.agent.id;
@@ -280,5 +287,164 @@ describe("cross-tenant", () => {
     ).rejects.toMatchObject({ statusCode: 404 });
     const leaked = await su.query("select count(*)::int as n from app.messages where body = 'pwned'");
     expect(leaked.rows[0].n).toBe(0);
+  });
+});
+
+type Dm = { id: string; counterpart: Record<string, unknown> };
+
+describe("human DMs (CHAT-04, D-06)", () => {
+  const humanKey = (a: string, b: string) => [`user:${a}`, `user:${b}`].sort().join("|");
+  let humanDmId: string;
+
+  it("the admin opens a DM with Sam: a private dm with both humans, keyed by sorted user ids", async () => {
+    const dm = await ok(
+      admin.request("POST", "/api/v1/dms", { participants: [{ kind: "user", id: samId }] }),
+    );
+    humanDmId = dm.id;
+    expect(dm.kind).toBe("dm");
+    expect(dm.visibility).toBe("private");
+    expect(dm.counterpart).toEqual({
+      kind: "user",
+      id: samId,
+      name: "Sam Lee",
+      handle: "sam",
+      avatarUrl: null,
+      deactivated: false,
+    });
+    const row = (
+      await su.query("select kind, dm_key, visibility from app.conversations where id = $1", [dm.id])
+    ).rows[0];
+    expect(row).toEqual({ kind: "dm", dm_key: humanKey(adminId, samId), visibility: "private" });
+    expect(row.dm_key).not.toMatch(/Sam|Víctor/);
+    const members = (
+      await su.query(
+        "select member_kind, member_id, role from app.conversation_members where conversation_id = $1 order by member_id",
+        [dm.id],
+      )
+    ).rows;
+    expect(members).toEqual(
+      [adminId, samId].sort().map((id) => ({ member_kind: "user", member_id: id, role: "member" })),
+    );
+  });
+
+  it("Sam opening a DM with the admin gets the same conversation", async () => {
+    const again = await ok(
+      sam.request("POST", "/api/v1/dms", { participants: [{ kind: "user", id: adminId }] }),
+    );
+    expect(again.id).toBe(humanDmId);
+    expect(again.counterpart).toMatchObject({ kind: "user", id: adminId, name: "Víctor Ruiz" });
+  });
+
+  it("20 concurrent opens from both sides create exactly one conversation", async () => {
+    const results = await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        i % 2 === 0
+          ? ok(alex.request("POST", "/api/v1/dms", { participants: [{ kind: "user", id: adminId }] }))
+          : ok(admin.request("POST", "/api/v1/dms", { participants: [{ kind: "user", id: alexId }] })),
+      ),
+    );
+    const ids = new Set(results.map((r) => r.id));
+    expect(ids.size).toBe(1);
+    const rows = await su.query("select count(*)::int as n from app.conversations where dm_key = $1", [
+      humanKey(adminId, alexId),
+    ]);
+    expect(rows.rows[0].n).toBe(1);
+  });
+
+  it("GET /dms lists the human DM for both sides; bot DMs keep their agent counterpart, personal first", async () => {
+    const mine = (await ok(admin.request("GET", "/api/v1/dms"))).dms as Dm[];
+    expect(mine.find((d) => d.id === humanDmId)?.counterpart).toMatchObject({ kind: "user", id: samId });
+    const samList = (await ok(sam.request("GET", "/api/v1/dms"))).dms as Dm[];
+    expect(samList.find((d) => d.id === humanDmId)?.counterpart).toMatchObject({
+      kind: "user",
+      id: adminId,
+      handle: "victor",
+    });
+    // Sam's personal bot DM (03.1) is still there, with the bot as counterpart, and listed first.
+    expect(samList[0]).toMatchObject({
+      id: dmId,
+      counterpart: { kind: "agent", id: botId, scope: "personal" },
+    });
+    // Alex never sees it.
+    const alexList = (await ok(alex.request("GET", "/api/v1/dms"))).dms as Array<{ id: string }>;
+    expect(alexList.some((d) => d.id === humanDmId)).toBe(false);
+  });
+
+  it("posting in a human DM works and dispatches no bot", async () => {
+    const before = await cellMentionCount();
+    const msg = await ok(
+      sam.request("POST", `/api/v1/conversations/${humanDmId}/messages`, { body: `hi @${botUsername}` }),
+    );
+    expect(msg.conversationId).toBe(humanDmId);
+    const read = await ok(admin.request("GET", `/api/v1/conversations/${humanDmId}/messages`));
+    expect(read.messages.map((m: { body: string }) => m.body)).toContain(`hi @${botUsername}`);
+    expect(await cellMentionCount()).toBe(before);
+    const added = await su.query(
+      "select count(*)::int as n from app.conversation_members where conversation_id = $1",
+      [humanDmId],
+    );
+    expect(added.rows[0].n).toBe(2);
+  });
+
+  it("refuses yourself, a deactivated member and another organization's user", async () => {
+    const self = await admin.request("POST", "/api/v1/dms", {
+      participants: [{ kind: "user", id: adminId }],
+    });
+    expect(self.status).toBe(400);
+    expect(codeOf(self)).toBe("cannot_dm_self");
+    const dee = await admin.request("POST", "/api/v1/dms", { participants: [{ kind: "user", id: deeId }] });
+    expect(dee.status).toBe(400);
+    expect(codeOf(dee)).toBe("member_deactivated");
+    const orgB = randomUUID();
+    const userB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Other', $2)", [
+      orgB,
+      `other-${orgB}`,
+    ]);
+    await su.query("insert into auth.user (id, name, email) values ($1, 'Otto', $2)", [
+      userB,
+      `${userB}@other.test`,
+    ]);
+    await su.query(
+      "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Otto', 'admin')",
+      [orgB, userB],
+    );
+    const foreign = await admin.request("POST", "/api/v1/dms", {
+      participants: [{ kind: "user", id: userB }],
+    });
+    expect(foreign.status).toBe(404);
+    const unknown = await admin.request("POST", "/api/v1/dms", {
+      participants: [{ kind: "user", id: randomUUID() }],
+    });
+    expect(unknown.status).toBe(404);
+  });
+
+  it("one bot participant opens the existing bot DM path; someone else's personal bot is hidden", async () => {
+    const own = await ok(
+      sam.request("POST", "/api/v1/dms", { participants: [{ kind: "agent", id: botId }] }),
+    );
+    expect(own.id).toBe(dmId);
+    expect(own.counterpart).toMatchObject({ kind: "agent", id: botId, scope: "personal" });
+    const other = await alex.request("POST", "/api/v1/dms", { participants: [{ kind: "agent", id: botId }] });
+    expect(other.status).toBe(404);
+  });
+
+  it("audits dm.created with ids only and tells both users' streams, never the org stream", async () => {
+    const audit = (
+      await su.query(
+        "select metadata, resource_id from app.audit_events where action = 'dm.created' and resource_id = $1",
+        [humanDmId],
+      )
+    ).rows;
+    expect(audit).toHaveLength(1);
+    expect(audit[0].metadata).toEqual({ kind: "dm", counterpart: { kind: "user", id: samId } });
+    expect(JSON.stringify(audit[0].metadata)).not.toMatch(/Sam|Víctor|body/);
+    const streams = (
+      await su.query(
+        "select stream_id from app.stream_events where type = 'conversation.created' and payload->>'conversationId' = $1",
+        [humanDmId],
+      )
+    ).rows.map((r) => r.stream_id as string);
+    expect(streams.sort()).toEqual([`user:${adminId}`, `user:${samId}`].sort());
   });
 });

@@ -13,7 +13,7 @@ import {
 } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
 import { useQueryClient } from "@tanstack/react-query";
-import { Bot, Gauge, Lock, NotebookPen, Settings2, ShieldCheck } from "lucide-react";
+import { Bot, Gauge, Lock, NotebookPen, Settings2, ShieldCheck, UserX } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -38,6 +38,7 @@ import {
   bumpDmLatest,
   chatKeys,
   isBotDm,
+  isHumanDm,
   markDmRead,
   postMessage,
   useDms,
@@ -50,11 +51,13 @@ import { useTopic } from "@/lib/realtime";
 import { cn } from "@/lib/utils";
 import { Composer } from "./composer";
 import { JumpToLatest } from "./jump-to-latest";
+import { MentionContext } from "./markdown";
 import { MessageList, type PendingMessage } from "./message-list";
 import { MessageUnavailable } from "./message-unavailable";
 import { PinnedButton, PinnedSheet } from "./pinned-sheet";
 import { PrincipalAvatar } from "./principal-avatar";
 import { TypingIndicator, useTypers } from "./typing";
+import { useOrgDirectory } from "./use-chat-directory";
 import { useCentreOnce, usePermalinkWindow, useWindowPaging } from "./use-permalink-window";
 import { useStickToBottom } from "./use-stick-to-bottom";
 
@@ -105,7 +108,18 @@ export function DmView({ conversationId }: { conversationId: string }) {
 
   const dms = useDms();
   const dm = dms.data?.dms.find((d) => d.id === conversationId);
+  // The other party: a bot (3.1 DMs), a person (CHAT-04) or the other members of a group (D-06).
   const bot = dm && isBotDm(dm) ? dm.counterpart : undefined;
+  const person = dm && isHumanDm(dm) ? dm.counterpart : undefined;
+  const directory = useOrgDirectory();
+  // @handles render as chips here too (04-02 open item), from the same org directory as channels.
+  const mentionCtx = useMemo(
+    () => ({
+      handles: directory.handles,
+      myHandle: directory.entries.find((e) => e.kind === "user" && e.id === me.id)?.handle ?? null,
+    }),
+    [directory, me.id],
+  );
   const [lost, setLost] = useState(false);
   const messages = useMessages(conversationId, !!dm && !lost);
   const pins = usePins(conversationId, !!dm && !lost);
@@ -315,16 +329,58 @@ export function DmView({ conversationId }: { conversationId: string }) {
       </div>
     );
   }
-  if (!dm || !bot) return <DmSkeleton />;
+  if (!dm || (!bot && !person)) return <DmSkeleton />;
 
-  const personal = bot.scope === "personal";
-  const privacyLine = personal
-    ? "Personal bot · only you can see this chat"
-    : "Private chat · only you can see it";
-  const disabled = bot.status === "disabled";
+  const personal = bot?.scope === "personal";
+  const title = bot?.name ?? person?.name ?? "Direct message";
+  const privacyLine = bot
+    ? personal
+      ? "Personal bot · only you can see this chat"
+      : "Private chat · only you can see it"
+    : `@${person?.handle} · only the two of you can see this`;
+  const disabled = bot?.status === "disabled";
+  const deactivated = person?.deactivated === true;
+  const headerAvatar = bot ? (
+    <PrincipalAvatar
+      kind="agent"
+      name={bot.name}
+      avatarUrl={bot.avatarUrl}
+      seed={bot.id}
+      className="size-8 text-base"
+    />
+  ) : person ? (
+    <PrincipalAvatar
+      kind="user"
+      name={person.name}
+      avatarUrl={person.avatarUrl}
+      seed={person.id}
+      className="size-8 text-sm"
+    />
+  ) : null;
+
+  const personIntro =
+    person && shown && shown.nextBefore === null ? (
+      <div className="px-4 pt-10 pb-4 sm:px-5" data-testid="dm-intro">
+        <PrincipalAvatar
+          kind="user"
+          name={person.name}
+          avatarUrl={person.avatarUrl}
+          seed={person.id}
+          className="size-14 text-xl"
+        />
+        <h2 className="mt-3 font-semibold text-xl tracking-tight">{person.name}</h2>
+        <p className="mt-1 max-w-xl text-muted-foreground text-sm">
+          This is the start of your direct messages with {person.name}.
+        </p>
+        <p className="mt-3 inline-flex max-w-xl items-start gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-muted-foreground text-xs">
+          <ShieldCheck className="mt-px size-3.5 shrink-0 text-primary" />
+          <span>Only the two of you can read this conversation — not other members, not admins.</span>
+        </p>
+      </div>
+    ) : null;
 
   const intro =
-    shown && shown.nextBefore === null ? (
+    bot && shown && shown.nextBefore === null ? (
       <div className="px-4 pt-10 pb-4 sm:px-5" data-testid="dm-intro">
         <PrincipalAvatar
           kind="agent"
@@ -344,181 +400,189 @@ export function DmView({ conversationId }: { conversationId: string }) {
           <span>Nobody else can read this conversation — not other members, not admins.</span>
         </p>
       </div>
-    ) : null;
+    ) : (
+      personIntro
+    );
 
   return (
-    <div className="flex min-w-0 flex-1" data-testid="dm-view" data-conversation-id={dm.id}>
-      <div className="flex min-w-0 flex-1 flex-col">
-        <PageHeader
-          icon={
-            <PrincipalAvatar
-              kind="agent"
-              name={bot.name}
-              avatarUrl={bot.avatarUrl}
-              seed={bot.id}
-              className="size-8 text-base"
-            />
-          }
-          title={<span data-testid="dm-title">{bot.name}</span>}
-          description={
-            // Inline (not inline-flex) so a narrow header ellipsizes the line instead of clipping it.
-            <span data-testid="dm-privacy">
-              <Lock className="mr-1 inline-block size-3 align-[-1px]" aria-hidden />
-              {privacyLine}
-            </span>
-          }
-          actions={
-            canConfigure || showMemory || (pins.data?.pins.length ?? 0) > 0 ? (
-              <>
-                <PinnedButton count={pins.data?.pins.length ?? 0} onClick={() => setPinsOpen(true)} />
-                {showMemory ? (
-                  <Tooltip content={`What ${bot.name} remembers about you`}>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      aria-label={`What ${bot.name} remembers about you`}
-                      data-testid="bot-memory"
-                      onClick={() => setMemoryOpen(true)}
-                      className="max-sm:w-8 max-sm:px-0!"
-                    >
-                      <NotebookPen />
-                      <span className="max-sm:sr-only">Memory</span>
-                    </Button>
-                  </Tooltip>
-                ) : null}
-                {canConfigure && capabilities.data ? (
-                  <button
-                    type="button"
-                    onClick={() => setSettingsOpen(true)}
-                    data-testid="dm-usage"
-                    aria-label={`${capabilities.data.usage.today} of ${capabilities.data.usage.limit} replies used today`}
-                    className={cn(
-                      "hidden h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs tabular-nums outline-none transition-colors hover:bg-accent focus-visible:ring-[3px] focus-visible:ring-ring/40 sm:inline-flex",
-                      capabilities.data.usage.today >= capabilities.data.usage.limit
-                        ? "border-destructive/30 text-destructive"
-                        : "text-muted-foreground",
-                    )}
-                  >
-                    <Gauge className="size-3.5" aria-hidden />
-                    {capabilities.data.usage.today} / {capabilities.data.usage.limit} today
-                  </button>
-                ) : null}
-                {canConfigure ? (
-                  <Tooltip content="Bot settings">
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-label="Bot settings"
-                      data-testid="bot-settings"
+    <MentionContext.Provider value={mentionCtx}>
+      <div
+        className="flex min-w-0 flex-1"
+        data-testid="dm-view"
+        data-conversation-id={dm.id}
+        data-dm-kind={dm.counterpart.kind}
+      >
+        <div className="flex min-w-0 flex-1 flex-col">
+          <PageHeader
+            icon={headerAvatar}
+            title={<span data-testid="dm-title">{title}</span>}
+            description={
+              // Inline (not inline-flex) so a narrow header ellipsizes the line instead of clipping it.
+              <span data-testid="dm-privacy">
+                <Lock className="mr-1 inline-block size-3 align-[-1px]" aria-hidden />
+                {privacyLine}
+              </span>
+            }
+            actions={
+              (bot && (canConfigure || showMemory)) || (pins.data?.pins.length ?? 0) > 0 ? (
+                <>
+                  <PinnedButton count={pins.data?.pins.length ?? 0} onClick={() => setPinsOpen(true)} />
+                  {bot && showMemory ? (
+                    <Tooltip content={`What ${bot.name} remembers about you`}>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        aria-label={`What ${bot.name} remembers about you`}
+                        data-testid="bot-memory"
+                        onClick={() => setMemoryOpen(true)}
+                        className="max-sm:w-8 max-sm:px-0!"
+                      >
+                        <NotebookPen />
+                        <span className="max-sm:sr-only">Memory</span>
+                      </Button>
+                    </Tooltip>
+                  ) : null}
+                  {bot && canConfigure && capabilities.data ? (
+                    <button
+                      type="button"
                       onClick={() => setSettingsOpen(true)}
+                      data-testid="dm-usage"
+                      aria-label={`${capabilities.data.usage.today} of ${capabilities.data.usage.limit} replies used today`}
+                      className={cn(
+                        "hidden h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs tabular-nums outline-none transition-colors hover:bg-accent focus-visible:ring-[3px] focus-visible:ring-ring/40 sm:inline-flex",
+                        capabilities.data.usage.today >= capabilities.data.usage.limit
+                          ? "border-destructive/30 text-destructive"
+                          : "text-muted-foreground",
+                      )}
                     >
-                      <Settings2 />
-                    </Button>
-                  </Tooltip>
-                ) : null}
-              </>
-            ) : null
-          }
-        />
-        <PinnedSheet
-          conversation={{ id: dm.id, kind: "dm", name: bot.name }}
-          open={pinsOpen}
-          onOpenChange={setPinsOpen}
-        />
-        {canConfigure ? (
-          <BotSettingsSheet agentId={bot.id} open={settingsOpen} onOpenChange={setSettingsOpen} />
-        ) : null}
-        {showMemory || memoryOpen ? (
-          <MemoryPanel
-            agentId={bot.id}
-            botName={bot.name}
-            open={memoryOpen}
-            onOpenChange={setMemoryOpen}
-            memoryOn={memoryOn ?? true}
+                      <Gauge className="size-3.5" aria-hidden />
+                      {capabilities.data.usage.today} / {capabilities.data.usage.limit} today
+                    </button>
+                  ) : null}
+                  {bot && canConfigure ? (
+                    <Tooltip content="Bot settings">
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        aria-label="Bot settings"
+                        data-testid="bot-settings"
+                        onClick={() => setSettingsOpen(true)}
+                      >
+                        <Settings2 />
+                      </Button>
+                    </Tooltip>
+                  ) : null}
+                </>
+              ) : null
+            }
           />
-        ) : null}
+          <PinnedSheet
+            conversation={{ id: dm.id, kind: "dm", name: title }}
+            open={pinsOpen}
+            onOpenChange={setPinsOpen}
+          />
+          {bot && canConfigure ? (
+            <BotSettingsSheet agentId={bot.id} open={settingsOpen} onOpenChange={setSettingsOpen} />
+          ) : null}
+          {bot && (showMemory || memoryOpen) ? (
+            <MemoryPanel
+              agentId={bot.id}
+              botName={bot.name}
+              open={memoryOpen}
+              onOpenChange={setMemoryOpen}
+              memoryOn={memoryOn ?? true}
+            />
+          ) : null}
 
-        <div className="relative flex min-h-0 flex-1 flex-col">
-          <div
-            ref={scroll.ref}
-            onScroll={onScroll}
-            className="scrollbar-thin flex min-h-0 flex-1 flex-col overflow-y-auto"
-            data-testid="dm-scroll"
-            data-detached={detached ? "true" : undefined}
-          >
-            {messages.isPending || win.loading ? (
-              <div className="flex flex-1 items-end justify-center pb-8 text-muted-foreground">
-                <Spinner />
-              </div>
-            ) : messages.isError || win.error ? (
-              <EmptyState
-                icon={isApiError(messages.error, 404) ? Lock : Bot}
-                title="Couldn't load messages"
-                description={errorMessage(messages.error ?? win.error)}
-              >
-                <Button
-                  variant="outline"
-                  onClick={() => (messages.isError ? void messages.refetch() : win.retry())}
+          <div className="relative flex min-h-0 flex-1 flex-col">
+            <div
+              ref={scroll.ref}
+              onScroll={onScroll}
+              className="scrollbar-thin flex min-h-0 flex-1 flex-col overflow-y-auto"
+              data-testid="dm-scroll"
+              data-detached={detached ? "true" : undefined}
+            >
+              {messages.isPending || win.loading ? (
+                <div className="flex flex-1 items-end justify-center pb-8 text-muted-foreground">
+                  <Spinner />
+                </div>
+              ) : messages.isError || win.error ? (
+                <EmptyState
+                  icon={isApiError(messages.error, 404) ? Lock : Bot}
+                  title="Couldn't load messages"
+                  description={errorMessage(messages.error ?? win.error)}
                 >
-                  Try again
-                </Button>
-              </EmptyState>
-            ) : (
-              <div className="mt-auto">
-                {loadingOlder ? (
-                  <div className="flex justify-center py-3 text-muted-foreground">
-                    <Spinner />
-                  </div>
-                ) : null}
-                <MessageList
-                  messages={shown?.messages ?? []}
-                  pending={detached ? [] : pending}
-                  me={me}
-                  typers={typers}
-                  onRetry={retry}
-                  showThreadSummary={false}
-                  intro={intro}
-                  readOnly={!!dm.archivedAt || disabled}
-                  anchorId={permalinkId}
-                  linkFor={linkFor}
-                  onAnchorHidden={onAnchorHidden}
-                  canUnpinAny
-                />
-                {loadingNewer ? (
-                  <div className="flex justify-center py-3 text-muted-foreground">
-                    <Spinner />
-                  </div>
-                ) : null}
+                  <Button
+                    variant="outline"
+                    onClick={() => (messages.isError ? void messages.refetch() : win.retry())}
+                  >
+                    Try again
+                  </Button>
+                </EmptyState>
+              ) : (
+                <div className="mt-auto">
+                  {loadingOlder ? (
+                    <div className="flex justify-center py-3 text-muted-foreground">
+                      <Spinner />
+                    </div>
+                  ) : null}
+                  <MessageList
+                    messages={shown?.messages ?? []}
+                    pending={detached ? [] : pending}
+                    me={me}
+                    typers={typers}
+                    onRetry={retry}
+                    showThreadSummary={false}
+                    intro={intro}
+                    readOnly={!!dm.archivedAt || disabled || deactivated}
+                    anchorId={permalinkId}
+                    linkFor={linkFor}
+                    onAnchorHidden={onAnchorHidden}
+                    canUnpinAny
+                  />
+                  {loadingNewer ? (
+                    <div className="flex justify-center py-3 text-muted-foreground">
+                      <Spinner />
+                    </div>
+                  ) : null}
+                </div>
+              )}
+            </div>
+            {detached ? <JumpToLatest newCount={win.newCount} onJump={jumpToLatest} /> : null}
+          </div>
+
+          <TypingIndicator typers={typers} />
+          <div className="shrink-0 px-4 pb-[max(env(safe-area-inset-bottom),12px)] sm:px-5">
+            {disabled || deactivated ? (
+              <div
+                className="flex items-center gap-3 rounded-xl border bg-muted/40 px-4 py-3 text-muted-foreground text-sm"
+                data-testid="dm-readonly"
+              >
+                {bot ? <Bot className="size-4 shrink-0" /> : <UserX className="size-4 shrink-0" />}
+                <span>
+                  {bot
+                    ? `${bot.name} is turned off. Its history stays readable here.`
+                    : `${title} is no longer active in this workspace. The history stays readable here.`}
+                </span>
               </div>
+            ) : (
+              <Composer
+                placeholder={`Message ${title}`}
+                candidates={[]}
+                mentions={false}
+                onSend={send}
+                autoFocus
+                footer={
+                  <p className="mt-1.5 hidden px-1 text-[11px] text-muted-foreground/80 md:block">
+                    <kbd className="font-sans font-medium">Enter</kbd> to send ·{" "}
+                    <kbd className="font-sans font-medium">Shift + Enter</kbd> for a new line
+                  </p>
+                }
+              />
             )}
           </div>
-          {detached ? <JumpToLatest newCount={win.newCount} onJump={jumpToLatest} /> : null}
-        </div>
-
-        <TypingIndicator typers={typers} />
-        <div className="shrink-0 px-4 pb-[max(env(safe-area-inset-bottom),12px)] sm:px-5">
-          {disabled ? (
-            <div className="flex items-center gap-3 rounded-xl border bg-muted/40 px-4 py-3 text-muted-foreground text-sm">
-              <Bot className="size-4 shrink-0" />
-              <span>{bot.name} is turned off. Its history stays readable here.</span>
-            </div>
-          ) : (
-            <Composer
-              placeholder={`Message ${bot.name}`}
-              candidates={[]}
-              mentions={false}
-              onSend={send}
-              autoFocus
-              footer={
-                <p className="mt-1.5 hidden px-1 text-[11px] text-muted-foreground/80 md:block">
-                  <kbd className="font-sans font-medium">Enter</kbd> to send ·{" "}
-                  <kbd className="font-sans font-medium">Shift + Enter</kbd> for a new line
-                </p>
-              }
-            />
-          )}
         </div>
       </div>
-    </div>
+    </MentionContext.Provider>
   );
 }

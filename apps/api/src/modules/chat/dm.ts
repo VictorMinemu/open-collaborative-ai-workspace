@@ -1,81 +1,126 @@
-import { type DmSummary, EventTypes } from "@ocw/contracts";
-import { agents, conversationMembers, conversations, type Tx, tenantOf } from "@ocw/db";
+import { type DmCounterpart, type DmSummary, dmKeyOf, EventTypes, userHandle } from "@ocw/contracts";
+import { agents, conversationMembers, conversations, orgMembers, type Tx, tenantOf } from "@ocw/db";
 import { and, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
-import { alias } from "drizzle-orm/pg-core";
 import { type ChatDeps, type ConversationRow, iso, notifyListChanged } from "./service";
 
 /**
- * Direct conversations (D-03). Phase 3.1 has only human ↔ bot DMs: `kind = 'dm'`, `visibility = 'private'`,
- * exactly two members (the human with role `owner`, the bot), unique per pair through `dm_key`. Human ↔ human
- * and group DMs arrive in Phase 4 (CHAT-02) and extend the key format.
+ * Direct conversations (D-03, D-06), all `visibility = 'private'` with fixed membership:
+ *   - a bot DM (`kind = 'dm'`): one human (role `owner`) and one bot (Phase 3.1);
+ *   - a human DM (`kind = 'dm'`): two humans, both `member`;
+ *   - a group DM (`kind = 'group'`): 3–9 participants, humans and team bots (Task 2).
+ * Each is unique per participant set through `dm_key` = `dmKeyOf` (sorted `<kind>:<id>` parts, ids only, P-06)
+ * and a partial unique index per kind; creation is insert-or-get, so concurrent opens converge on one row.
  */
 
-/** Stable pair key: ids only, never names (AGENTS principle 11). */
+/** Stable pair key of a bot DM: ids only, never names (AGENTS principle 11). Equals `dmKeyOf` of the pair. */
 export function dmKey(agentId: string, userId: string): string {
-  return `agent:${agentId}|user:${userId}`;
+  return dmKeyOf([
+    { kind: "agent", id: agentId },
+    { kind: "user", id: userId },
+  ]);
 }
 
+type Participant = { kind: "user" | "agent"; id: string; role: "owner" | "member" };
+
 /**
- * The DM between `userId` and the bot `agentId`, created on first use (insert-or-get on the unique `dm_key`,
- * race-safe). On creation the user's sidebar is told through `user:<id>` (private conversations never reach
- * the org topic).
+ * Insert-or-get on `(organization_id, dm_key)` for `kind` (race-safe: a concurrent insert waits on the unique
+ * index, then the read finds the winner). On creation the members are inserted, `dm.created` is audited with
+ * ids only, and every human member's sidebar is told through `user:<id>` (never the org topic).
  */
-export async function ensureDm(
+async function insertOrGet(
   tx: Tx,
   deps: ChatDeps,
-  p: { agentId: string; userId: string },
+  p: {
+    kind: "dm" | "group";
+    createdBy: string;
+    members: Participant[];
+    audit: { agentId?: string | null; metadata: Record<string, unknown> };
+  },
 ): Promise<{ conv: ConversationRow; created: boolean }> {
   const ctx = tenantOf(tx);
-  const key = dmKey(p.agentId, p.userId);
+  const key = dmKeyOf(p.members);
   const [inserted] = await tx
     .insert(conversations)
     .values({
       organizationId: ctx.organizationId,
-      kind: "dm",
+      kind: p.kind,
       name: null,
       visibility: "private",
-      createdBy: p.userId,
+      createdBy: p.createdBy,
       dmKey: key,
     })
     .onConflictDoNothing({
       target: [conversations.organizationId, conversations.dmKey],
-      where: sql`kind = 'dm'`,
+      where: p.kind === "dm" ? sql`kind = 'dm'` : sql`kind = 'group'`,
     })
     .returning();
   if (!inserted) {
     const [existing] = await tx
       .select()
       .from(conversations)
-      .where(and(eq(conversations.kind, "dm"), eq(conversations.dmKey, key)))
+      .where(and(eq(conversations.kind, p.kind), eq(conversations.dmKey, key)))
       .limit(1);
     if (!existing) throw new Error("dm insert-or-get found no row");
     return { conv: existing, created: false };
   }
-  await tx.insert(conversationMembers).values([
-    {
+  await tx.insert(conversationMembers).values(
+    p.members.map((m) => ({
       conversationId: inserted.id,
       organizationId: ctx.organizationId,
-      memberKind: "user",
-      memberId: p.userId,
-      role: "owner",
-    },
-    {
-      conversationId: inserted.id,
-      organizationId: ctx.organizationId,
-      memberKind: "agent",
-      memberId: p.agentId,
-      role: "member",
-    },
-  ]);
+      memberKind: m.kind,
+      memberId: m.id,
+      role: m.role,
+    })),
+  );
   await deps.audit.record(tx, {
     action: "dm.created",
     resourceType: "conversation",
     resourceId: inserted.id,
-    agentId: p.agentId,
-    metadata: { kind: "dm", counterpart: { kind: "agent", id: p.agentId } },
+    agentId: p.audit.agentId ?? null,
+    metadata: p.audit.metadata,
   });
   await notifyListChanged(tx, deps, inserted, EventTypes.conversationCreated);
   return { conv: inserted, created: true };
+}
+
+/**
+ * The DM between `userId` and the bot `agentId`, created on first use. The human is the `owner` (Phase 3.1
+ * shape). Callers decide `bot.read` first.
+ */
+export function ensureDm(
+  tx: Tx,
+  deps: ChatDeps,
+  p: { agentId: string; userId: string },
+): Promise<{ conv: ConversationRow; created: boolean }> {
+  return insertOrGet(tx, deps, {
+    kind: "dm",
+    createdBy: p.userId,
+    members: [
+      { kind: "user", id: p.userId, role: "owner" },
+      { kind: "agent", id: p.agentId, role: "member" },
+    ],
+    audit: { agentId: p.agentId, metadata: { kind: "dm", counterpart: { kind: "agent", id: p.agentId } } },
+  });
+}
+
+/**
+ * The DM between two people (D-06), created on first use: both humans are plain members. Callers check that
+ * `otherUserId` is an active member of the organization and not the caller.
+ */
+export function ensureHumanDm(
+  tx: Tx,
+  deps: ChatDeps,
+  p: { userId: string; otherUserId: string },
+): Promise<{ conv: ConversationRow; created: boolean }> {
+  return insertOrGet(tx, deps, {
+    kind: "dm",
+    createdBy: p.userId,
+    members: [
+      { kind: "user", id: p.userId, role: "member" },
+      { kind: "user", id: p.otherUserId, role: "member" },
+    ],
+    audit: { metadata: { kind: "dm", counterpart: { kind: "user", id: p.otherUserId } } },
+  });
 }
 
 /** The bot of a DM (its only agent member), or null when `convId` is not a DM with a bot. */
@@ -126,24 +171,17 @@ export async function setAgentDmsArchived(
 }
 
 /**
- * The caller's open (non-archived) DMs with their bot counterpart, newest activity first. Callers still
- * decide `channel.read` per row through the resolver (`perms.filter`).
+ * The caller's open (non-archived) direct conversations with their counterpart: a bot (its DM disappears
+ * with the bot), a person (deactivated flagged), or the other members of a group. Personal bots first, then
+ * the most recent activity. `ids` narrows the list (one conversation after `POST /dms`). Callers still decide
+ * `channel.read` per row through the resolver (`perms.filter`).
  */
-export async function listDms(tx: Tx, userId: string): Promise<DmSummary[]> {
+export async function listDms(tx: Tx, userId: string, opts: { ids?: string[] } = {}): Promise<DmSummary[]> {
   const me = conversationMembers;
-  const bot = alias(conversationMembers, "bot");
   const rows = await tx
     .select({
       c: conversations,
       lastReadSeq: me.lastReadSeq,
-      agent: {
-        id: agents.id,
-        name: agents.name,
-        username: agents.username,
-        avatarUrl: agents.avatarUrl,
-        status: agents.status,
-        scope: agents.scope,
-      },
       latestMessageSeq:
         sql<number>`(select coalesce(max(m.seq), 0) from app.messages m where m.conversation_id = ${conversations.id} and m.thread_id is null)`.mapWith(
           Number,
@@ -161,41 +199,129 @@ export async function listDms(tx: Tx, userId: string): Promise<DmSummary[]> {
       me,
       and(eq(me.conversationId, conversations.id), eq(me.memberKind, "user"), eq(me.memberId, userId)),
     )
-    .innerJoin(bot, and(eq(bot.conversationId, conversations.id), eq(bot.memberKind, "agent")))
-    .innerJoin(agents, eq(agents.id, bot.memberId))
-    .where(and(eq(conversations.kind, "dm"), isNull(conversations.archivedAt), isNull(agents.deletedAt)));
+    .where(
+      and(
+        eq(conversations.kind, "dm"),
+        isNull(conversations.archivedAt),
+        opts.ids ? inArray(conversations.id, opts.ids) : undefined,
+      ),
+    );
+  if (rows.length === 0) return [];
 
-  const out: DmSummary[] = rows.map((r) => ({
-    id: r.c.id,
-    organizationId: r.c.organizationId,
-    kind: r.c.kind,
-    name: r.c.name,
-    slug: r.c.slug,
-    topic: r.c.topic,
-    visibility: r.c.visibility,
-    parentConversationId: r.c.parentConversationId,
-    rootMessageId: r.c.rootMessageId,
-    createdBy: r.c.createdBy,
-    archivedAt: r.c.archivedAt === null ? null : iso(r.c.archivedAt),
-    createdAt: iso(r.c.createdAt),
-    lastSeq: r.lastSeq,
-    counterpart: {
-      kind: "agent",
-      id: r.agent.id,
-      name: r.agent.name,
-      username: r.agent.username,
-      avatarUrl: r.agent.avatarUrl,
-      status: r.agent.status,
-      scope: r.agent.scope,
-    },
-    latestMessageSeq: r.latestMessageSeq,
-    lastReadSeq: Number(r.lastReadSeq ?? 0),
-    lastMessageAt: r.lastMessageAt === null ? null : iso(r.lastMessageAt),
-  }));
+  const memberRows = await tx
+    .select({
+      conversationId: conversationMembers.conversationId,
+      kind: conversationMembers.memberKind,
+      id: conversationMembers.memberId,
+    })
+    .from(conversationMembers)
+    .where(
+      inArray(
+        conversationMembers.conversationId,
+        rows.map((r) => r.c.id),
+      ),
+    );
+  const othersOf = new Map<string, Array<{ kind: "user" | "agent"; id: string }>>();
+  for (const m of memberRows) {
+    if (m.kind === "user" && m.id === userId) continue;
+    const list = othersOf.get(m.conversationId) ?? [];
+    list.push({ kind: m.kind, id: m.id });
+    othersOf.set(m.conversationId, list);
+  }
+  const agentIds = [...new Set(memberRows.filter((m) => m.kind === "agent").map((m) => m.id))];
+  const userIds = [...new Set(memberRows.filter((m) => m.kind === "user").map((m) => m.id))];
+  const agentById = new Map(
+    (agentIds.length === 0
+      ? []
+      : await tx
+          .select({
+            id: agents.id,
+            name: agents.name,
+            username: agents.username,
+            avatarUrl: agents.avatarUrl,
+            status: agents.status,
+            scope: agents.scope,
+            deletedAt: agents.deletedAt,
+          })
+          .from(agents)
+          .where(inArray(agents.id, agentIds))
+    ).map((a) => [a.id, a]),
+  );
+  const userById = new Map(
+    (userIds.length === 0
+      ? []
+      : await tx
+          .select({
+            userId: orgMembers.userId,
+            displayName: orgMembers.displayName,
+            email: orgMembers.email,
+            avatarUrl: orgMembers.avatarUrl,
+            deactivatedAt: orgMembers.deactivatedAt,
+          })
+          .from(orgMembers)
+          .where(inArray(orgMembers.userId, userIds))
+    ).map((u) => [u.userId, u]),
+  );
+
+  const counterpartOf = (convId: string): DmCounterpart | null => {
+    const others = othersOf.get(convId) ?? [];
+    const bot = others.find((o) => o.kind === "agent");
+    if (bot) {
+      const a = agentById.get(bot.id);
+      // A deleted bot's DM leaves the list (its history stays in the database).
+      if (!a || a.deletedAt !== null) return null;
+      return {
+        kind: "agent",
+        id: a.id,
+        name: a.name,
+        username: a.username,
+        avatarUrl: a.avatarUrl,
+        status: a.status,
+        scope: a.scope,
+      };
+    }
+    const other = others[0];
+    if (!other) return null;
+    const u = userById.get(other.id);
+    return {
+      kind: "user",
+      id: other.id,
+      name: u?.displayName ?? "Former member",
+      handle: u ? userHandle({ displayName: u.displayName, email: u.email }) : "former-member",
+      avatarUrl: u?.avatarUrl ?? null,
+      // A member who left the organization reads like a deactivated one: no new messages reach them.
+      deactivated: !u || u.deactivatedAt !== null,
+    };
+  };
+
+  const out: DmSummary[] = [];
+  for (const r of rows) {
+    const counterpart = counterpartOf(r.c.id);
+    if (!counterpart) continue;
+    out.push({
+      id: r.c.id,
+      organizationId: r.c.organizationId,
+      kind: r.c.kind,
+      name: r.c.name,
+      slug: r.c.slug,
+      topic: r.c.topic,
+      visibility: r.c.visibility,
+      parentConversationId: r.c.parentConversationId,
+      rootMessageId: r.c.rootMessageId,
+      createdBy: r.c.createdBy,
+      archivedAt: r.c.archivedAt === null ? null : iso(r.c.archivedAt),
+      createdAt: iso(r.c.createdAt),
+      lastSeq: r.lastSeq,
+      counterpart,
+      latestMessageSeq: r.latestMessageSeq,
+      lastReadSeq: Number(r.lastReadSeq ?? 0),
+      lastMessageAt: r.lastMessageAt === null ? null : iso(r.lastMessageAt),
+    });
+  }
   // Personal bots first, then by most recent activity (new DMs without messages by creation time).
-  const scopeOf = (d: DmSummary) => (d.counterpart.kind === "agent" ? d.counterpart.scope : "team");
+  const personal = (d: DmSummary) => d.counterpart.kind === "agent" && d.counterpart.scope === "personal";
   return out.sort((a, b) => {
-    if (scopeOf(a) !== scopeOf(b)) return scopeOf(a) === "personal" ? -1 : 1;
+    if (personal(a) !== personal(b)) return personal(a) ? -1 : 1;
     const at = Date.parse(a.lastMessageAt ?? a.createdAt);
     const bt = Date.parse(b.lastMessageAt ?? b.createdAt);
     return bt - at;
