@@ -94,6 +94,42 @@ describe("RealtimeClient", () => {
     expect(c.status.getState().status).toBe("open");
   });
 
+  it("after a resync (replay truncated) the cursor moves to the server's lastSeq so live events keep flowing", () => {
+    const c = new RealtimeClient({ url: "ws://x/ws", WebSocket: FakeWS });
+    const seqs: number[] = [];
+    let resyncs = 0;
+    c.subscribe(T, (f) => f.op === "ev" && seqs.push(f.seq), { onResync: () => resyncs++ });
+    c.connect();
+    const ws = FakeWS.last!;
+    ws.open();
+    expect(ws.sent).toContainEqual({ op: "sub", topic: T, afterSeq: 0 });
+    // More than REPLAY_LIMIT events since afterSeq: the server skips them, then goes live at its lastSeq.
+    ws.push({ op: "resync", topic: T });
+    ws.push(ev(901)); // buffered live event sent before `subscribed`: covered by the consumer's refetch
+    ws.push({ op: "subscribed", topic: T, lastSeq: 901 });
+    expect(resyncs).toBe(1);
+    expect(c.lastSeq(T)).toBe(901);
+    const subsBefore = ws.sent.filter((f) => f.op === "sub").length;
+    ws.push(ev(902));
+    ws.push(ev(903));
+    expect(seqs).toEqual([902, 903]);
+    // No re-subscribe loop: contiguous live events are delivered, not treated as a gap from seq 0.
+    expect(ws.sent.filter((f) => f.op === "sub").length).toBe(subsBefore);
+  });
+
+  it("a plain subscribed frame never moves the cursor past events the client has not seen", () => {
+    const c = new RealtimeClient({ url: "ws://x/ws", WebSocket: FakeWS });
+    const seqs: number[] = [];
+    c.subscribe(T, (f) => f.op === "ev" && seqs.push(f.seq), { afterSeq: 5 });
+    c.connect();
+    const ws = FakeWS.last!;
+    ws.open();
+    ws.push({ op: "subscribed", topic: T, lastSeq: 9 });
+    expect(c.lastSeq(T)).toBe(5);
+    ws.push(ev(6));
+    expect(seqs).toEqual([6]);
+  });
+
   it("on 4401 with getToken forces one token refresh and reconnects; a second 4401 before subscribing stops", async () => {
     let n = 0;
     const getToken = vi.fn(async (_o: { force: boolean }) => `tok${++n}`);

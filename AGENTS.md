@@ -14,8 +14,8 @@ shared and controlled from the cloud) and **Agents** (persistent server-side age
 models, devices and audit.
 
 Authoritative spec: `docs/prd/PRD.md` (v1.0, English). Original draft: `docs/prd/archive/PRD-v0.3-es.md`.
-Decisions: `docs/adr/`. Planning and roadmap: `.planning/` (GSD). Built so far: phases 1–3.1 (API, web, desktop +
-Local Runtime, OpenClaw cell with personal bots, MCP, marketplace). Add packages only when a roadmap phase needs them.
+Decisions: `docs/adr/`. Planning and roadmap: `.planning/` (GSD). Built so far: phases 1–3.2 (API, web, desktop + Local Runtime,
+OpenClaw cell with personal bots, MCP, marketplace, Work Zone session controls). Add packages only when a roadmap phase needs them.
 
 ## Non-negotiable architectural principles
 
@@ -61,7 +61,7 @@ Taken from the PRD. Any design that violates one of these must be raised, not si
 | AI layer | Vercel AI SDK 7 server-side; prompts assembled from persisted messages by one `buildModelMessages` | research |
 | Web | Next.js 16 + React; Tailwind + shadcn/ui (Base UI); TanStack Query + Zustand | PRD, research |
 | Desktop | Electron + bundled Vite renderer; Local Runtime daemon is a standalone process supervised by the app | PRD, 0005 |
-| Runtime adapters | Claude Code via Claude Agent SDK (streaming input, `canUseTool`); Codex via `codex app-server` JSON-RPC. Never scrape CLI stdout | research |
+| Runtime adapters | Claude Code via Claude Agent SDK (streaming input, `canUseTool`); Codex via `codex app-server` JSON-RPC. Never scrape CLI stdout. Settings apply between turns; options come from the runtime-reported catalog, gated by `docs/workzone/runtime-controls-inventory.md` | research, 0013 |
 | Mobile | Expo / React Native | PRD |
 | Database | PostgreSQL only (MVP1) | 0003 |
 | Cache / pub-sub / presence | Redis | 0003 |

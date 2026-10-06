@@ -62,7 +62,7 @@ run `pnpm demo:reset` when you want the roles and units above.
    device → copy the code → paste it in the app. In the app: *Add project…* → pick a git repository
    (for "the product improves itself", a clone of this repository).
 6. **Work Zone session** — Work Zone › New session → your Mac, the project, **Claude Code** (or
-   **Codex**), permission mode *Plan* (safe) or *Default* (asks before editing). Prompt, e.g.
+   **Codex**), permission mode *Plan* (safe) or *Supervised* (asks before editing). Prompt, e.g.
    *"Propose one small UX improvement for the chat composer"*. Show the live stream, tool cards, the
    shared queue (add a second prompt as Alex), the approval banner, and the Changes panel.
 7. **Roles and organization** — Settings › Members: each person's role, the role select (admins only)
@@ -70,6 +70,35 @@ run `pnpm demo:reset` when you want the roles and units above.
    tree, Alex as lead of Backend, a unit's members. Then sign in (private window) as `sam@autofylabs.demo`:
    a Standard User chats and uses bots but has no Work Zone and no admin settings. Every decision comes
    from one permission resolver on the server, so the UI only hides what the API would refuse anyway.
+
+## Work Zone controls
+
+Phase 03.2 (ADR-0012, ADR-0013). What each runtime offers, and why some options are missing:
+`docs/workzone/runtime-controls-inventory.md`.
+
+1. **Model, reasoning, permission.** In a session, the composer bar has three chips. The model chip lists only the
+   models your runtime reports for your subscription (search, starred favorites, "Legacy models"). The reasoning chip
+   offers the effort levels, the context window where the model has two (Opus 4.6: 200k / 1M) and fast mode (off
+   unless the organization allows it; the menu states its cost). The permission chip offers Supervised, Auto-accept
+   edits, Auto (models that support it), Full access and Plan. A change made during a turn shows "Applies to the
+   next turn". Typing `/model sonnet` or `/effort high` in the composer goes through the same checks.
+2. **Allow Full access** (all three are needed; every turn's mode is audited):
+   - organization: admin › **Settings › Work Zone policy** › *Allow Full access*;
+   - device: the desktop app's Runtime menu › *Allow Full access on this device…* (confirm the warning), or
+     `ocw-runtime full-access on` on a headless server;
+   - person: the device owner, or someone the owner shared the device with at *Full access*.
+   The session header and the permission chip then show the amber **Full access** badge to every controller.
+   Recommended only on a dedicated machine.
+3. **Share a device.** Owner › **Settings › Devices** › the device card: *Everyone in the organization* with a
+   maximum mode, or *Add people or teams* with a mode each. Listed people start sessions on it without your
+   acceptance and use your Claude / ChatGPT login (the card says whose). Removing someone stops their sessions.
+
+**Owner check before relying on Full access** (never run by an agent): on an opted-in device, start a Claude Code
+session in Supervised, switch to Full access, ask for a file edit and a shell command: no approval prompt, the
+badge is visible, and `app.audit_events` has `work_session.full_access_entered` and `work_prompt.dispatched` rows.
+Switch back to Supervised and send another prompt: it asks again and the conversation continued (Claude relaunches
+with `resume` when entering or leaving Full access). Repeat with Codex. Also check the model chip shows the alias
+row (e.g. *Sonnet*) for the model the runtime reports.
 
 ## Presence and live access
 

@@ -61,6 +61,11 @@ interface TopicState {
   onRevoked: Set<() => void>;
   /** A replay is in flight because we observed a gap. */
   replaying: boolean;
+  /**
+   * The server answered `resync` (more than REPLAY_LIMIT events to replay): the skipped events are the consumer's
+   * to refetch, and the next `subscribed` frame's `lastSeq` is the cursor live events continue from.
+   */
+  awaitingCursor: boolean;
   /** Listeners that show this conversation (RT-04): while > 0 the `sub` carries `presence: true`. */
   presence: number;
 }
@@ -156,6 +161,7 @@ export class RealtimeClient {
         onResync: new Set(),
         onRevoked: new Set(),
         replaying: false,
+        awaitingCursor: false,
         presence: 0,
       };
       this.topics.set(topic, state);
@@ -195,6 +201,7 @@ export class RealtimeClient {
     const s = this.topics.get(topic);
     if (!s) return;
     s.lastSeq = seq;
+    s.awaitingCursor = false;
     this.sendSub(topic);
   }
 
@@ -283,6 +290,7 @@ export class RealtimeClient {
       for (const t of this.topics.values()) {
         t.subscribed = false;
         t.replaying = false;
+        t.awaitingCursor = false;
       }
       // Nobody is "here" for us while we are disconnected; the next `subscribed` brings a fresh snapshot.
       this.clearPresence();
@@ -376,6 +384,8 @@ export class RealtimeClient {
         if (!s) return;
         if (parsed.seq <= s.lastSeq) return; // duplicate
         if (parsed.seq > s.lastSeq + 1) {
+          // After a resync, frames before `subscribed` are covered by the consumer's refetch: wait for the cursor.
+          if (s.awaitingCursor) return;
           // Gap: ask the server to replay from our cursor; frames after the gap will be re-sent.
           if (!s.replaying) {
             s.replaying = true;
@@ -399,6 +409,8 @@ export class RealtimeClient {
         if (s) {
           s.subscribed = true;
           s.replaying = false;
+          if (s.awaitingCursor && parsed.lastSeq > s.lastSeq) s.lastSeq = parsed.lastSeq;
+          s.awaitingCursor = false;
         }
         return;
       }
@@ -406,6 +418,7 @@ export class RealtimeClient {
         const s = this.topics.get(parsed.topic);
         if (!s) return;
         s.replaying = false;
+        s.awaitingCursor = true;
         for (const cb of s.onResync) cb();
         return;
       }
