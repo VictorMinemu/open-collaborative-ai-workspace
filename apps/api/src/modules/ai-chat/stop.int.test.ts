@@ -5,7 +5,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TEST_SETUP_TOKEN, TestClient } from "../../testing";
 import { type AiStack, seedPlan, startAiStack, startSecondInstance, subscribeConv } from "../../testing-ai";
 import { invite } from "../../testing-workzone";
+import { createModelGateway } from "../model-gateway";
 import { ABORT_CHANNEL } from "./generations";
+import { createRunLoop } from "./run-loop";
+import { createGenerationSweeper } from "./sweeper";
 
 /**
  * The generation lifecycle (05-06, D-05): Stop crosses API instances through Redis and keeps the partial answer;
@@ -69,6 +72,16 @@ const audit = async (action: string) =>
 const usageOf = async (generationId: string) =>
   (await su.query("select * from app.ai_usage_records where generation_id = $1", [generationId])).rows;
 
+/** Durable `message.updated` events of one message on its chat stream. */
+const updatesOf = async (chatId: string, messageId: string) =>
+  (
+    await su.query(
+      `select seq, payload from app.stream_events
+       where stream_id = $1 and type = $2 and payload->'message'->>'id' = $3 order by seq`,
+      [`conv:${chatId}`, EventTypes.messageUpdated, messageId],
+    )
+  ).rows as Array<{ seq: string; payload: Json }>;
+
 /** The concatenated text of contiguous deltas from offset 0 (throws on a hole or an overlap). */
 function joined(deltas: AiDeltaEvent[]): string {
   let text = "";
@@ -84,6 +97,55 @@ async function readyChat(as: TestClient = sam): Promise<string> {
   const created = await ok(createChat(as, "hello there"), 201);
   await settled(created.generation.id);
   return created.chat.id as string;
+}
+
+/**
+ * A `running` generation planted with the superuser (no process holds it): a user turn plus a streaming answer,
+ * `partial_text`, `instance_id` and a heartbeat `ageSeconds` old.
+ */
+async function plantRunning(
+  chatId: string,
+  opts: { partial: string; ageSeconds: number; instanceId: string },
+): Promise<{ generationId: string; messageId: string }> {
+  const bumped = await su.query(
+    "update app.streams set last_seq = last_seq + 2 where id = $1 returning last_seq",
+    [`conv:${chatId}`],
+  );
+  const last = Number(bumped.rows[0].last_seq);
+  const user = await su.query(
+    `insert into app.messages (organization_id, conversation_id, seq, author_kind, author_id, body)
+     values ($1, $2, $3, 'user', $4, 'a planted question') returning id`,
+    [orgId, chatId, last - 1, samId],
+  );
+  const answer = await su.query(
+    `insert into app.messages (organization_id, conversation_id, seq, author_kind, author_id, body, status)
+     values ($1, $2, $3, 'agent', null, '', 'streaming') returning id`,
+    [orgId, chatId, last],
+  );
+  const gen = await su.query(
+    `insert into app.ai_generations (organization_id, conversation_id, user_message_id, assistant_message_id,
+       requester_user_id, backend, provider, model_id, attempt, status, partial_text, instance_id, heartbeat_at)
+     values ($1, $2, $3, $4, $5, 'chatgpt_plan', 'openai', 'gpt-6-astra', 1, 'running', $6, $7,
+       now() - make_interval(secs => $8)) returning id`,
+    [
+      orgId,
+      chatId,
+      user.rows[0].id,
+      answer.rows[0].id,
+      samId,
+      opts.partial,
+      opts.instanceId,
+      opts.ageSeconds,
+    ],
+  );
+  return { generationId: gen.rows[0].id as string, messageId: answer.rows[0].id as string };
+}
+
+/** A sweeper of a run loop that holds nothing (like an instance that just started). */
+function freshSweeper() {
+  const core = stack.built.core;
+  const runLoop = createRunLoop(core, { gateway: createModelGateway(core) });
+  return createGenerationSweeper(core, { runLoop });
 }
 
 beforeAll(async () => {
@@ -225,5 +287,110 @@ describe("Stop crosses API instances and keeps the partial answer (D-05, AICHAT-
     expect((await generation(gid)).status).toBe("running");
     await ok(stop(sam, chatId, gid), 202);
     await settled(gid, 3_000);
+  });
+});
+
+describe("crashed and closing instances never leave an answer spinning (D-05, P-07)", () => {
+  it("the sweeper finalizes a dead instance's stale generation as interrupted with its partial text", async () => {
+    const chatId = await readyChat();
+    const planted = await plantRunning(chatId, {
+      partial: "half an answer",
+      ageSeconds: 120,
+      instanceId: `dead-${randomUUID()}`,
+    });
+    const liveChat = await readyChat();
+    const live = await plantRunning(liveChat, { partial: "still going", ageSeconds: 1, instanceId: "live" });
+
+    const swept = await freshSweeper().runOnce();
+    expect(swept).toBeLessThanOrEqual(1);
+
+    const g = await generation(planted.generationId);
+    expect(g).toMatchObject({
+      status: "interrupted",
+      error_code: "interrupted",
+      partial_text: "half an answer",
+    });
+    const msg = (await su.query("select body, status from app.messages where id = $1", [planted.messageId]))
+      .rows[0];
+    expect(msg).toEqual({ body: "half an answer", status: "completed" });
+    const updates = await updatesOf(chatId, planted.messageId);
+    expect(updates).toHaveLength(1);
+    expect(updates[0]?.payload.message).toMatchObject({
+      body: "half an answer",
+      status: "completed",
+      generation: { status: "interrupted", errorCode: "interrupted", usage: { estimated: true } },
+    });
+    const usage = await usageOf(planted.generationId);
+    expect(usage).toHaveLength(1);
+    expect(usage[0]).toMatchObject({ estimated: true, output_tokens: estimateTokens("half an answer") });
+    const snap = await ok(sam.request("GET", `/api/v1/ai-chats/${chatId}`));
+    expect(snap.running).toBeNull();
+
+    // A fresh heartbeat is left alone.
+    expect((await generation(live.generationId)).status).toBe("running");
+    expect(await usageOf(live.generationId)).toHaveLength(0);
+    await su.query("update app.ai_generations set status = 'failed' where id = $1", [live.generationId]);
+  });
+
+  it("two sweepers at once finalize each stale row exactly once", async () => {
+    const a = await plantRunning(await readyChat(), { partial: "one", ageSeconds: 90, instanceId: "gone-1" });
+    const b = await plantRunning(await readyChat(), { partial: "two", ageSeconds: 90, instanceId: "gone-2" });
+    const [n1, n2] = await Promise.all([freshSweeper().runOnce(), freshSweeper().runOnce()]);
+    expect(n1 + n2).toBeLessThanOrEqual(2);
+    for (const p of [a, b]) {
+      expect((await generation(p.generationId)).status).toBe("interrupted");
+      expect(await usageOf(p.generationId)).toHaveLength(1);
+      const chat = (await generation(p.generationId)).conversation_id as string;
+      expect(await updatesOf(chat, p.messageId)).toHaveLength(1);
+    }
+  });
+
+  it("closing an instance mid-answer finalizes it as interrupted with its partial text", async () => {
+    const third = await startSecondInstance(stack);
+    const samC = new TestClient(third.baseUrl);
+    samC.cookies = sam.cookies;
+    const chatId = await readyChat();
+    const ws = await subscribeConv(stack.baseUrl, sam, chatId);
+    const slow = await ok(send(samC, chatId, "count until shutdown [[slow]]"), 201);
+    const gid = slow.generation.id as string;
+    await ws.waitFor(() => ws.deltas().filter((d) => d.generationId === gid).length >= 3);
+    const at = Date.now();
+    await third.stop();
+    const g = await settled(gid, 5_000);
+    expect(Date.now() - at).toBeLessThan(5_000);
+    expect(g.status).toBe("interrupted");
+    expect(g.partial_text.length).toBeGreaterThan(0);
+    const snap = await ok(sam.request("GET", `/api/v1/ai-chats/${chatId}`));
+    const answer = (snap.messages as Json[]).find((m) => m.id === slow.assistantMessage.id) as Json;
+    expect(answer).toMatchObject({ status: "completed", body: g.partial_text });
+    expect(answer.generation).toMatchObject({ status: "interrupted", usage: { estimated: true } });
+    expect(snap.running).toBeNull();
+    ws.close();
+  });
+
+  it("Sam's fourth simultaneous answer is 429 concurrent_generations and goes through once one ends", async () => {
+    const running = await Promise.all([1, 2, 3].map((i) => ok(createChat(sam, `cap ${i} [[slow]]`), 201)));
+    const fourth = await createChat(sam, "cap 4 [[slow]]");
+    expect(fourth.status).toBe(429);
+    expect(errorOf(fourth).code).toBe("concurrent_generations");
+    const [first, ...rest] = running;
+    await ok(stop(sam, first?.chat.id, first?.generation.id), 202);
+    await settled(first?.generation.id, 3_000);
+    const retry = await ok(createChat(sam, "cap 4 [[slow]]"), 201);
+    for (const r of [...rest, retry]) await ok(stop(sam, r.chat.id, r.generation.id), 202);
+    for (const r of [...rest, retry]) expect((await settled(r.generation.id, 3_000)).status).toBe("stopped");
+  });
+
+  it("app.stale_ai_generations returns ids only and is not executable by PUBLIC", async () => {
+    const res = await su.query("select * from app.stale_ai_generations(10, now())");
+    expect(res.fields.map((f) => f.name)).toEqual(["id", "organization_id"]);
+    const priv = await su.query(
+      `select has_function_privilege('public', 'app.stale_ai_generations(integer, timestamptz)', 'execute') as pub,
+              has_function_privilege('ocw_app', 'app.stale_ai_generations(integer, timestamptz)', 'execute') as app,
+              p.prosecdef as definer, p.proconfig as config
+       from pg_proc p where p.oid = 'app.stale_ai_generations(integer, timestamptz)'::regprocedure`,
+    );
+    expect(priv.rows[0]).toMatchObject({ pub: false, app: true, definer: true });
+    expect(priv.rows[0].config).toContain("search_path=pg_catalog, pg_temp");
   });
 });

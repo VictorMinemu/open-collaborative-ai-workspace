@@ -2,8 +2,10 @@ import { type APIRequestContext, expect, type Page, test } from "@playwright/tes
 import { apiAs, ensureMember, openAs, SAM } from "../support/actors";
 import {
   answerText,
+  chatIdOf,
   lastAssistant,
   openNewAiChat,
+  persistedAnswer,
   seedPlan,
   sendAi,
   waitForLonger,
@@ -83,6 +85,39 @@ test("Stop keeps the text received so far, marked Stopped, and Send returns", as
   const reloaded = lastAssistant(page);
   await expect(reloaded.getByTestId("ai-generation-state")).toHaveText("Stopped");
   expect(await answerText(reloaded)).toBe(kept);
+
+  await context.close();
+});
+
+test("a reload mid-answer shows the partial text at once and streams on to the persisted text", async ({
+  browser,
+}, info) => {
+  const { context, page } = await openAs(browser, SAM, info.project.name);
+
+  await openNewAiChat(page);
+  await sendAi(page, "count after a reload [[slow]]");
+  await expect(page).toHaveURL(/\/chat\/ai\/[0-9a-f-]{36}$/);
+  const chatId = chatIdOf(page);
+  const before = await waitForLonger(lastAssistant(page), "Echo: count after a reload 1 2 3".length);
+
+  await page.reload();
+  const resumed = lastAssistant(page);
+  // The partial answer is on screen right away (from the snapshot), Stop is offered, and it keeps growing.
+  await expect(resumed).toHaveAttribute("data-status", "streaming");
+  await expect
+    .poll(async () => (await answerText(resumed)).length, { timeout: 2_000, intervals: [50] })
+    .toBeGreaterThanOrEqual(before.length);
+  await expect(page.getByTestId("ai-stop")).toBeVisible();
+  const partial = await answerText(resumed);
+  expect(partial.startsWith(before.slice(0, Math.min(before.length, partial.length)))).toBe(true);
+  await waitForLonger(resumed, partial.length);
+
+  await expect(resumed).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
+  const final = await answerText(resumed);
+  expect(final.startsWith(partial), `"${final}" continues "${partial}"`).toBe(true);
+  expect(final).toBe(await persistedAnswer(sam, chatId));
+  expect(final).toMatch(/^Echo: count after a reload 1 2 3 .* 39 40$/);
+  await expect(page.getByTestId("ai-send")).toBeVisible();
 
   await context.close();
 });
