@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   normalizeSessionTitle,
   SESSION_TITLE_MAX_CHARS,
+  SESSION_TITLE_MAX_WORDS,
+  SESSION_TITLE_MIN_WORDS,
   SessionTitle,
   TITLE_MODEL,
   TITLE_PROMPT_MAX_CHARS,
@@ -26,8 +28,8 @@ describe("normalizeSessionTitle (D-20, P-16)", () => {
     expect(normalizeSessionTitle("# Fix Login Redirect Bug")).toBe("Fix login redirect bug");
   });
 
-  it("keeps all-caps and mixed-case words and caps the title at six words", () => {
-    expect(normalizeSessionTitle("Fix API Rate Limit In GitHub Client")).toBe("Fix API rate limit in GitHub");
+  it("keeps all-caps and mixed-case words and caps the title at five words", () => {
+    expect(normalizeSessionTitle("Fix API Rate Limit GitHub Client")).toBe("Fix API rate limit GitHub");
   });
 
   it("takes the first non-empty line of a multi-line answer", () => {
@@ -36,10 +38,24 @@ describe("normalizeSessionTitle (D-20, P-16)", () => {
     );
   });
 
-  it("cuts a long title at a word boundary within 48 characters, without trailing punctuation", () => {
-    const out = normalizeSessionTitle("Investigate intermittent synchronization, failures in replication");
-    expect(out).toBe("Investigate intermittent synchronization");
+  it("cuts a long title at a word boundary within 32 characters, without trailing punctuation", () => {
+    const out = normalizeSessionTitle("Investigate flaky replication, sync failures");
+    expect(out).toBe("Investigate flaky replication");
     expect(out!.length).toBeLessThanOrEqual(SESSION_TITLE_MAX_CHARS);
+  });
+
+  it("normalizes the recorded fixture answers to five words within 32 characters", () => {
+    // Claude Code 2.1.289 (haiku) and codex 0.160.0 (gpt-6-luna) recordings, made under the 3-6 word / 48 rule.
+    expect(normalizeSessionTitle("Redirección de login al expirar sesión")).toBe(
+      "Redirección de login al expirar",
+    );
+    expect(normalizeSessionTitle("Fix settings page login redirect bug")).toBe(
+      "Fix settings page login redirect",
+    );
+  });
+
+  it("cuts on a word boundary when five words are still longer than 32 characters", () => {
+    expect(normalizeSessionTitle("Arregla error inicio sesión página")).toBe("Arregla error inicio sesión");
   });
 
   it("keeps the prompt's language", () => {
@@ -58,8 +74,13 @@ describe("normalizeSessionTitle (D-20, P-16)", () => {
     expect(normalizeSessionTitle("add dark mode toggle")).toBe("Add dark mode toggle");
   });
 
+  it("accepts two words", () => {
+    expect(normalizeSessionTitle("Fix login.")).toBe("Fix login");
+  });
+
   it("returns null for an unusable answer", () => {
-    expect(normalizeSessionTitle("Fix login")).toBeNull();
+    expect(normalizeSessionTitle("Fix")).toBeNull();
+    expect(normalizeSessionTitle("Internationalization localization")).toBeNull(); // 33 characters, no cut fits 2 words
     expect(normalizeSessionTitle("")).toBeNull();
     expect(normalizeSessionTitle("   \n  ")).toBeNull();
     expect(normalizeSessionTitle("x".repeat(60))).toBeNull();
@@ -74,8 +95,10 @@ describe("normalizeSessionTitle (D-20, P-16)", () => {
       '"Fix login redirect bug."',
       "Title: **Add dark mode toggle**",
       "# Fix Login Redirect Bug",
-      "Fix API Rate Limit In GitHub Client",
-      "Investigate intermittent synchronization, failures in replication",
+      "Fix API Rate Limit GitHub Client",
+      "Investigate flaky replication, sync failures",
+      "Redirección de login al expirar sesión",
+      "Fix settings page login redirect bug",
       "修复登录重定向错误",
       "<b>Fix the broken login form</b>",
       "`Add retry to webhook handler`!",
@@ -91,14 +114,16 @@ describe("SessionTitle (D-20, P-16)", () => {
   const ok = (t: string) => SessionTitle.safeParse(t).success;
 
   it("accepts a short sentence-case title", () => {
-    expect(ok("Fix login redirect bug settings page")).toBe(true);
-    expect(ok("Arregla error inicio sesión página ajustes")).toBe(true);
+    expect(ok("Fix login redirect bug settings")).toBe(true);
+    expect(ok("Arregla error inicio sesión")).toBe(true);
+    expect(ok("Fix login")).toBe(true);
   });
 
   it("refuses titles out of shape", () => {
-    expect(ok(`Fix ${"a".repeat(45)} now`)).toBe(false); // 49 characters
-    expect(ok("Fix the login redirect bug on settings")).toBe(false); // 7 words
-    expect(ok("Fix login")).toBe(false);
+    expect(ok(`Fix ${"a".repeat(25)} now`)).toBe(false); // 33 characters
+    expect(ok("Fix login redirect bug settings page")).toBe(false); // 36 characters, 6 words
+    expect(ok("Fix the login bug on it")).toBe(false); // 6 words, 23 characters
+    expect(ok("Fix")).toBe(false);
     expect(ok("")).toBe(false);
     expect(ok("Fix login\nredirect bug")).toBe(false);
     expect(ok("Fix login\u0007 redirect bug")).toBe(false);
@@ -118,12 +143,18 @@ describe("SessionTitle (D-20, P-16)", () => {
   });
 
   it("names its problems", () => {
-    expect(titleProblems("Fix login")).toContain("too_few_words");
+    expect(titleProblems("Fix")).toContain("too_few_words");
+    expect(titleProblems("Fix the login bug on it")).toContain("too_many_words");
+    expect(titleProblems(`Fix ${"a".repeat(25)} now`)).toContain("too_long");
     expect(titleProblems("Fix login redirect bug.")).toContain("trailing_punctuation");
   });
 });
 
 describe("title constants", () => {
+  it("pins the shape: 2 to 5 words, at most 32 characters (fits a 1440 sidebar row)", () => {
+    expect([SESSION_TITLE_MIN_WORDS, SESSION_TITLE_MAX_WORDS, SESSION_TITLE_MAX_CHARS]).toEqual([2, 5, 32]);
+  });
+
   it("pins the small model per runtime, the timeout and the prompt cap", () => {
     expect(TITLE_MODEL).toEqual({ "claude-code": "haiku", codex: "gpt-6-luna" });
     expect(TITLE_TIMEOUT_MS).toBe(20_000);

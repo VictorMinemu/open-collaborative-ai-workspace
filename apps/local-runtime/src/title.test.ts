@@ -87,6 +87,9 @@ describe("runTitle", () => {
   it("normalizes the raw answer and passes the model, the prompt and an abort signal", async () => {
     const rt = stubRuntime(async () => '"Fix login redirect bug."');
     expect(await run(rt)).toBe("Fix login redirect bug");
+    expect(await run(stubRuntime(async () => "Fix login redirect bug settings page"))).toBe(
+      "Fix login redirect bug settings",
+    );
     expect(rt.requests).toHaveLength(1);
     expect(rt.requests[0]).toMatchObject({ model: "haiku", prompt: "Please fix the login redirect bug" });
     expect(rt.requests[0]!.signal).toBeInstanceOf(AbortSignal);
@@ -122,6 +125,9 @@ describe("runTitle", () => {
 
   it("refuses an unusable answer", async () => {
     expect(await failure(run(stubRuntime(async () => "Fix")))).toBe("title_invalid_shape");
+    expect(await failure(run(stubRuntime(async () => "Internationalization localization")))).toBe(
+      "title_invalid_shape",
+    );
     expect(await failure(run(stubRuntime(async () => "")))).toBe("title_invalid_shape");
   });
 
@@ -150,9 +156,10 @@ describe("runTitle", () => {
 
 describe("title prompt", () => {
   it("instructions ask for the title only, in the request's language, without tools", () => {
-    expect(TITLE_INSTRUCTIONS).toMatch(/3 to 6 words/);
+    expect(TITLE_INSTRUCTIONS).toMatch(/2 to 5 words/);
     expect(TITLE_INSTRUCTIONS).toMatch(/same language/);
-    expect(TITLE_INSTRUCTIONS).toMatch(/48 characters/);
+    expect(TITLE_INSTRUCTIONS).toMatch(/at most 32 characters/);
+    expect(TITLE_INSTRUCTIONS).not.toMatch(/48|3 to 6/);
     expect(TITLE_INSTRUCTIONS).toMatch(/do not use tools/i);
   });
 
