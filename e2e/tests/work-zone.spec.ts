@@ -2,7 +2,7 @@ import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type APIRequestContext, expect, type Page, test } from "@playwright/test";
+import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
 import { apiAs, ensureMember, openAs, SAM, userIdOf } from "../support/actors";
 import { ADMIN, API_URL, shot } from "./env";
 
@@ -23,6 +23,15 @@ async function signIn(page: Page) {
     .getByRole("button", { name: /sign in|log in/i })
     .click();
   await expect(page).toHaveURL(/\/chat/);
+}
+
+/** True when the toast showing `text` intersects `target` (or either box is missing). */
+async function toastCovers(page: Page, text: string, target: Locator): Promise<boolean> {
+  const box = (l: Locator) => l.boundingBox({ timeout: 1_000 }).catch(() => null);
+  const t = await box(page.locator("[data-sonner-toast]").filter({ hasText: text }));
+  const b = await box(target);
+  if (!t || !b) return true;
+  return t.x < b.x + b.width && b.x < t.x + t.width && t.y < b.y + b.height && b.y < t.y + t.height;
 }
 
 test.describe.configure({ mode: "serial" });
@@ -97,6 +106,9 @@ test("Work Zone: pair a device, run a session, approve, review changes", async (
     await page.getByTestId("composer").fill("Then add a changelog entry for the guide");
     await page.getByTestId("send-prompt").click();
     await expect(page.getByText("Queued #1")).toBeVisible();
+    // The toast never sits on the approval decisions: hovered by the pointer, a toast does not time out, so one
+    // over "Allow for session" kept that button unclickable for good.
+    await expect.poll(() => toastCovers(page, "Queued #1", banner), { timeout: 5_000 }).toBe(false);
     await shot(page, `workzone-session-approval-${tag}`);
 
     await banner.getByTestId("approve-once").click();
