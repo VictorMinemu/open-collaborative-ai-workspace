@@ -12,6 +12,7 @@ import {
   dmKeyOf,
   EditMessageRequest,
   Emoji,
+  EphemeralTypes,
   INLINE_IMAGE_TYPES,
   isReservedHandle,
   MAX_ATTACHMENTS_PER_MESSAGE,
@@ -19,6 +20,7 @@ import {
   MarkNotificationsReadRequest,
   Message,
   MessageDeletedEvent,
+  MessageNotifyEvent,
   MessageUpdatedEvent,
   mentionAllOf,
   NOTIFICATION_KIND_RANK,
@@ -316,6 +318,36 @@ describe("notifications (04-01)", () => {
     expect(decideNotify({ ...base, event: "message", conversationKind: "dm", level: "mentions" })).toEqual({
       popup: false,
     });
+  });
+
+  it("decideNotify: a bot's reply in a bot DM pops only when it mentions the member or the DM is set to all", () => {
+    const botDm = { ...base, conversationKind: "dm" as const, actorKind: "agent" as const };
+    expect(decideNotify({ ...botDm, event: "dm" })).toEqual({ popup: false });
+    expect(decideNotify({ ...botDm, event: "mention" })).toEqual({ popup: true });
+    expect(decideNotify({ ...botDm, event: "dm", level: "all" })).toEqual({ popup: true });
+    expect(decideNotify({ ...botDm, event: "mention", muted: true })).toEqual({ popup: false });
+    // A person's DM is unchanged, and so is a bot in a channel.
+    expect(decideNotify({ ...botDm, event: "dm", actorKind: "user" })).toEqual({ popup: true });
+    expect(decideNotify({ ...base, actorKind: "agent" })).toEqual({ popup: true });
+  });
+
+  it("MessageNotifyEvent (ephemeral level-all pop-up) carries ids, the actor and a bounded snippet", () => {
+    const ev = {
+      conversation: {
+        id,
+        kind: "channel",
+        name: "design",
+        label: "#design",
+        visibility: "public",
+        archived: false,
+      },
+      messageId: A,
+      actor: { kind: "user", id: A, displayName: "Ada" },
+      snippet: "ship it",
+    };
+    expect(MessageNotifyEvent.parse(ev)).toEqual(ev);
+    expect(() => MessageNotifyEvent.parse({ ...ev, snippet: "x".repeat(141) })).toThrow();
+    expect(EphemeralTypes.messageNotify).toBe("message.notify");
   });
 
   it("badgeStyle covers every row", () => {

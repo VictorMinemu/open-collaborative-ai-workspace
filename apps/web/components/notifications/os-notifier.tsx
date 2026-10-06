@@ -1,7 +1,10 @@
 "use client";
 
 import {
+  decideNotify,
+  EphemeralTypes,
   EventTypes,
+  MessageNotifyEvent,
   type NotificationCreatedEvent,
   type NotificationPrefsUpdatedEvent,
   type NotificationReadEvent,
@@ -9,20 +12,24 @@ import {
 import type { TopicFrame } from "@ocw/realtime-client";
 import { useQueryClient } from "@tanstack/react-query";
 import { usePathname, useRouter } from "next/navigation";
-import { useRef, useState } from "react";
-import { useChannels } from "@/lib/chat-queries";
+import { useEffect, useRef, useState } from "react";
+import { badgeRowOf, useChannels } from "@/lib/chat-queries";
 import {
   applyNotificationCreated,
   applyNotificationPrefsUpdated,
   applyNotificationRead,
+  dndActive,
   prefsOf,
+  unreadOf,
   useNotificationPrefs,
+  useNotifications,
 } from "@/lib/notification-queries";
 import {
   focusedConversationOf,
   osNotificationTitle,
   shouldPopup,
   showOsNotification,
+  titleWithCount,
 } from "@/lib/os-notifications";
 import { permalinkPath } from "@/lib/permalink";
 import { useMe } from "@/lib/queries";
@@ -39,7 +46,8 @@ const kindOf = (k: string): "channel" | "dm" | "group" =>
  * while the web app or the desktop app is open. It shares the tab's one `user:<me>` subscription with the chat
  * sidebar (same snapshot cursor, so neither skips the other's frames) and keeps the inbox cache live everywhere.
  * The server decided `popup` (DND, mute, level); here only the desktop/web toggle and "already in front" apply
- * (`shouldPopup`). Each pop-up is tagged with its notification id and shown once per tab (Pitfall 12).
+ * (`shouldPopup`). Each pop-up is tagged with its notification id and shown once per tab (Pitfall 12). Level "all"
+ * channels arrive as ephemeral `message.notify` (tag = message id). It also keeps the tab title count.
  */
 export function OsNotifier(): null {
   const qc = useQueryClient();
@@ -56,7 +64,14 @@ export function OsNotifier(): null {
   const pathRef = useRef(pathname);
   pathRef.current = pathname;
 
+  const visibleNow = () => document.visibilityState === "visible";
+  const isDesktop = () => !!window.ocwDesktop?.isDesktop;
+
   const onFrame = (frame: TopicFrame) => {
+    if (frame.op === "eph" && frame.type === EphemeralTypes.messageNotify) {
+      onMessageNotify(frame.data);
+      return;
+    }
     if (frame.op !== "ev") return;
     if (frame.type === EventTypes.notificationPrefsUpdated) {
       applyNotificationPrefsUpdated(qc, frame.data as NotificationPrefsUpdatedEvent);
@@ -75,11 +90,11 @@ export function OsNotifier(): null {
     if (Date.now() - Date.parse(n.createdAt) > STALE_MS) return;
     const pop = shouldPopup({
       popup: ev.popup,
-      isDesktop: !!window.ocwDesktop?.isDesktop,
+      isDesktop: isDesktop(),
       prefs: prefsOf(qc),
       focusedConversationId: focusedConversationOf(pathRef.current),
       conversationId: n.conversation.id,
-      visible: document.visibilityState === "visible",
+      visible: visibleNow(),
     });
     if (!pop) return;
     showOsNotification({
@@ -97,6 +112,66 @@ export function OsNotifier(): null {
     });
   };
 
+  /**
+   * `message.notify` (ephemeral, level "all"): the server already decided with the prefs it had; this tab decides
+   * again with what it holds now (a DND or level change from another device may be newer), then applies its toggle.
+   */
+  const onMessageNotify = (data: unknown) => {
+    const parsed = MessageNotifyEvent.safeParse(data);
+    if (!parsed.success) return;
+    const ev = parsed.data;
+    if (shown.current.has(ev.messageId)) return;
+    shown.current.add(ev.messageId);
+    const prefs = prefsOf(qc);
+    const row = badgeRowOf(qc, ev.conversation.id);
+    const { popup } = decideNotify({
+      event: "message",
+      conversationKind: "channel",
+      level: row?.notifyLevel ?? "default",
+      defaultLevel: prefs.defaultLevel,
+      muted: row?.muted ?? false,
+      dndActive: dndActive(prefs),
+      actorKind: ev.actor.kind,
+    });
+    const pop = shouldPopup({
+      popup,
+      isDesktop: isDesktop(),
+      prefs,
+      focusedConversationId: focusedConversationOf(pathRef.current),
+      conversationId: ev.conversation.id,
+      visible: visibleNow(),
+    });
+    if (!pop) return;
+    showOsNotification({
+      id: ev.messageId,
+      title: osNotificationTitle(ev.actor, ev.conversation),
+      body: ev.snippet,
+      onClick: () => router.push(permalinkPath({ id: ev.conversation.id, kind: "channel" }, ev.messageId)),
+    });
+  };
+
   useTopic(userId && cursor !== null ? `user:${userId}` : null, onFrame, cursor ?? undefined);
+
+  // The tab title shows the unread Mentions count, "(2) …" (Next sets titles on navigation: re-apply after it).
+  const mentions = useNotifications("mentions");
+  const count = unreadOf(mentions.data);
+  useEffect(() => {
+    const apply = () => {
+      const next = titleWithCount(document.title, count);
+      if (next !== document.title) document.title = next;
+    };
+    apply();
+    const observer = new MutationObserver(apply);
+    observer.observe(document.head, { subtree: true, childList: true, characterData: true });
+    return () => observer.disconnect();
+  }, [count]);
+  // Signing out unmounts the shell: leave a clean title behind.
+  useEffect(
+    () => () => {
+      document.title = titleWithCount(document.title, 0);
+    },
+    [],
+  );
+
   return null;
 }

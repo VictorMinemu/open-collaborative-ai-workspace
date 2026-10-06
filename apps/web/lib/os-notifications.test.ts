@@ -1,7 +1,9 @@
 import { DEFAULT_NOTIFICATION_PREFS } from "@ocw/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  dndPresetUntil,
   focusedConversationOf,
+  formatDndUntil,
   notificationPermission,
   osNotificationTitle,
   requestNotificationPermission,
@@ -127,5 +129,24 @@ describe("Web Notifications API (D-02: no service worker, permission on a click 
     }
     vi.stubGlobal("window", { Notification: Throwing, focus: () => {} });
     expect(() => showOsNotification({ id: "n", title: "t", body: "b", onClick: () => {} })).not.toThrow();
+  });
+});
+
+describe("do-not-disturb presets", () => {
+  // Monday 6 October 2026, 15:20 local time.
+  const now = new Date(2026, 9, 6, 15, 20, 0);
+
+  it("30 minutes, 1 hour, 2 hours and tomorrow 09:00 (local)", () => {
+    expect(new Date(dndPresetUntil("30m", now)).getTime() - now.getTime()).toBe(30 * 60_000);
+    expect(new Date(dndPresetUntil("1h", now)).getTime() - now.getTime()).toBe(3_600_000);
+    expect(new Date(dndPresetUntil("2h", now)).getTime() - now.getTime()).toBe(7_200_000);
+    const t = new Date(dndPresetUntil("tomorrow", now));
+    expect([t.getDate(), t.getHours(), t.getMinutes()]).toEqual([7, 9, 0]);
+  });
+
+  it("describes the end: a time today, tomorrow, or a date", () => {
+    expect(formatDndUntil(new Date(2026, 9, 6, 16, 5).toISOString(), now)).toBe("16:05");
+    expect(formatDndUntil(new Date(2026, 9, 7, 9, 0).toISOString(), now)).toBe("tomorrow 09:00");
+    expect(formatDndUntil(new Date(2026, 9, 12, 9, 0).toISOString(), now)).toMatch(/12.*09:00/);
   });
 });

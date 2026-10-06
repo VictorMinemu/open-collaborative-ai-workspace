@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { badgeStyle, DEFAULT_NOTIFICATION_PREFS } from "@ocw/contracts";
+import { badgeStyle, DEFAULT_NOTIFICATION_PREFS, type ServerFrame } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
@@ -66,6 +66,15 @@ async function samRow(id: string): Promise<Json> {
   return list.channels.find((c: Json) => c.id === id);
 }
 
+/** The sidebar badge of a channel row (CHAT-09/10). */
+const styleOf = (row: Json) =>
+  badgeStyle({
+    level: row.notifyLevel,
+    muted: row.muted,
+    unreadCount: row.unreadCount,
+    mentionCount: row.mentionCount,
+  });
+
 async function channel(name: string, visibility: "public" | "private", joiners: TestClient[] = []) {
   const id = (await ok(ada.request("POST", "/api/v1/channels", { name, visibility }))).id as string;
   for (const j of joiners) await ok(j.request("POST", `/api/v1/channels/${id}/join`));
@@ -73,7 +82,8 @@ async function channel(name: string, visibility: "public" | "private", joiners: 
 }
 
 beforeAll(async () => {
-  stack = await startTestStack();
+  // A model provider so a personal bot can be created (its DM replies are the 04-09 open item).
+  stack = await startTestStack({ env: { OCW_MODEL_PROVIDER: "mock" } });
   su = new pg.Client({ connectionString: stack.db.superuserUrl });
   await su.connect();
 
@@ -140,7 +150,7 @@ describe("mute (CHAT-10 tracer)", () => {
     await post(ada, designId, "new icons are up");
     const row = await samRow(designId);
     expect(row).toMatchObject({ muted: true, notifyLevel: "default", mentionCount: 0 });
-    expect(badgeStyle(row as Parameters<typeof badgeStyle>[0])).toBe("none");
+    expect(styleOf(row)).toBe("none");
 
     const m = await post(ada, designId, "@sam can you check them?");
     expect(await createdFor(m.id)).toMatchObject({ popup: false, notification: { kind: "mention" } });
@@ -148,7 +158,7 @@ describe("mute (CHAT-10 tracer)", () => {
     expect(list.items.map((n: Json) => n.messageId)).toContain(m.id);
     const after = await samRow(designId);
     expect(after.mentionCount).toBe(1);
-    expect(badgeStyle(after as Parameters<typeof badgeStyle>[0])).toBe("mention");
+    expect(styleOf(after)).toBe("mention");
   });
 
   it("unmuting makes the next mention pop up", async () => {
@@ -182,5 +192,183 @@ describe("mute (CHAT-10 tracer)", () => {
     expect((await sam.request("PUT", "/api/v1/notification-prefs", { defaultLevel: "loud" })).status).toBe(
       400,
     );
+  });
+});
+
+/** Ephemeral frames Sam's `user:` stream carries while `fn` runs (they are never stored). */
+async function ephemeralFor(userId: string, fn: () => Promise<void>): Promise<Json[]> {
+  const frames: ServerFrame[] = [];
+  const off = await stack.built.core.realtime.listen(`user:${userId}`, (f) => frames.push(f));
+  try {
+    await fn();
+    await new Promise((r) => setTimeout(r, 400));
+  } finally {
+    await off();
+  }
+  return frames.filter((f) => f.op === "eph").map((f) => f as Json);
+}
+
+const prefs = (as: TestClient, body: unknown) => ok(as.request("PUT", "/api/v1/notification-prefs", body));
+const hourFromNow = () => new Date(Date.now() + 3_600_000).toISOString();
+
+describe("do not disturb, levels and level-all events (CHAT-10)", () => {
+  let room: string;
+  const fresh = async () => {
+    room = await channel(`room-${randomUUID().slice(0, 6)}`, "public", [sam]);
+    return room;
+  };
+
+  it("DND silences every new notification until it passes, and is announced to Sam's devices", async () => {
+    await fresh();
+    const until = hourFromNow();
+    expect(await prefs(sam, { dndUntil: until })).toMatchObject({ dndUntil: until });
+    expect((await events(samId, "notification_prefs.updated")).at(-1)).toMatchObject({
+      prefs: { dndUntil: until, defaultLevel: "mentions" },
+    });
+    expect(await ok(sam.request("GET", "/api/v1/notification-prefs"))).toMatchObject({ dndUntil: until });
+    const quiet = await post(ada, room, "@sam during focus time");
+    expect(await createdFor(quiet.id)).toMatchObject({ popup: false });
+    // A DM too: DND wins over every level.
+    const dm = await ok(ada.request("POST", "/api/v1/dms", { participants: [{ kind: "user", id: samId }] }));
+    const dmQuiet = await post(ada, dm.id, "ping");
+    expect(await createdFor(dmQuiet.id)).toMatchObject({ popup: false });
+
+    await prefs(sam, { dndUntil: new Date(Date.now() - 1_000).toISOString() });
+    const loud = await post(ada, room, "@sam focus time is over");
+    expect(await createdFor(loud.id)).toMatchObject({ popup: true });
+    await prefs(sam, { dndUntil: null });
+  });
+
+  it("mentions only: a dot badge; mentions, @channel and thread replies pop, plain messages do not", async () => {
+    await fresh();
+    expect(await ok(settings(sam, room, { level: "mentions" }))).toEqual({ level: "mentions", muted: false });
+    const eph = await ephemeralFor(samId, async () => {
+      await post(ada, room, "plain update");
+    });
+    expect(eph.filter((f) => f.type === "message.notify")).toEqual([]);
+    const row = await samRow(room);
+    expect(row).toMatchObject({ notifyLevel: "mentions", unreadCount: 1, mentionCount: 0 });
+    expect(styleOf(row)).toBe("dot");
+
+    const m = await post(ada, room, "@sam a mention");
+    expect(await createdFor(m.id)).toMatchObject({ popup: true });
+    const all = await post(ada, room, "@channel heads up");
+    expect(await createdFor(all.id)).toMatchObject({ popup: true, notification: { kind: "channel" } });
+    const root = await post(sam, room, "my question");
+    const reply = await post(ada, room, "an answer", root.id);
+    expect(await createdFor(reply.id)).toMatchObject({ popup: true, notification: { kind: "thread_reply" } });
+  });
+
+  it("nothing: never pops, but still records the row and counts the mention", async () => {
+    await fresh();
+    await ok(settings(sam, room, { level: "nothing" }));
+    const m = await post(ada, room, "@sam still counts");
+    expect(await createdFor(m.id)).toMatchObject({ popup: false });
+    const row = await samRow(room);
+    expect(row.mentionCount).toBe(1);
+    const list = await ok(sam.request("GET", "/api/v1/notifications?filter=mentions"));
+    expect(list.items.map((n: Json) => n.messageId)).toContain(m.id);
+  });
+
+  it("all: each plain top-level message from someone else is an ephemeral message.notify, never a stored event", async () => {
+    await fresh();
+    await ok(settings(sam, room, { level: "all" }));
+    let plain: Json = {};
+    let mention: Json = {};
+    const eph = await ephemeralFor(samId, async () => {
+      plain = await post(ada, room, "**ship** it today");
+      mention = await post(ada, room, "@sam and you review it");
+      const root = await post(sam, room, "my own message");
+      await post(ada, room, "a reply in a thread", root.id);
+    });
+    const notify = eph.filter((f) => f.type === "message.notify");
+    expect(notify).toHaveLength(1);
+    expect(notify[0]).toMatchObject({
+      topic: `user:${samId}`,
+      data: {
+        conversation: { id: room, kind: "channel", label: expect.stringContaining("room-") },
+        messageId: plain.id,
+        actor: { kind: "user", displayName: "Ada Lovelace" },
+        snippet: "ship it today",
+      },
+    });
+    // The mention got its own notification (and pops); no second, ephemeral one.
+    expect(await createdFor(mention.id)).toMatchObject({ popup: true });
+    const stored = await su.query(
+      "select count(*)::int as n from app.stream_events where type = 'message.notify'",
+    );
+    expect(stored.rows[0].n).toBe(0);
+  });
+
+  it("all: nothing while muted or in DND, and nothing for people who did not opt in", async () => {
+    await fresh();
+    await ok(settings(sam, room, { level: "all", muted: true }));
+    let eph = await ephemeralFor(samId, async () => {
+      await post(ada, room, "muted plain");
+    });
+    expect(eph.filter((f) => f.type === "message.notify")).toEqual([]);
+
+    await ok(settings(sam, room, { muted: false }));
+    await prefs(sam, { dndUntil: hourFromNow() });
+    eph = await ephemeralFor(samId, async () => {
+      await post(ada, room, "dnd plain");
+    });
+    expect(eph.filter((f) => f.type === "message.notify")).toEqual([]);
+    await prefs(sam, { dndUntil: null });
+
+    // Bob is in the channel on the default level (mentions): no message.notify for him.
+    await ok(bob.request("POST", `/api/v1/channels/${room}/join`));
+    const bobId = (await ok(bob.request("GET", "/api/v1/me"))).user.id as string;
+    eph = await ephemeralFor(bobId, async () => {
+      await post(ada, room, "for everyone");
+    });
+    expect(eph.filter((f) => f.type === "message.notify")).toEqual([]);
+  });
+
+  it("a default level of all makes channels on default behave as all", async () => {
+    await fresh();
+    expect(await prefs(sam, { defaultLevel: "all" })).toMatchObject({ defaultLevel: "all" });
+    let plain: Json = {};
+    const eph = await ephemeralFor(samId, async () => {
+      plain = await post(ada, room, "default is loud now");
+    });
+    expect(eph.filter((f) => f.type === "message.notify").map((f) => f.data.messageId)).toEqual([plain.id]);
+    await prefs(sam, { defaultLevel: "mentions" });
+  });
+
+  it("DMs on default always notify, whatever the default channel level", async () => {
+    await prefs(sam, { defaultLevel: "nothing" });
+    const dm = await ok(ada.request("POST", "/api/v1/dms", { participants: [{ kind: "user", id: samId }] }));
+    const m = await post(ada, dm.id, "are you around?");
+    expect(await createdFor(m.id)).toMatchObject({ popup: true, notification: { kind: "dm" } });
+    await prefs(sam, { defaultLevel: "mentions" });
+  });
+
+  it("a bot's replies in Sam's own bot DM stay quiet by default (still in the inbox); a mention or level all pops", async () => {
+    const created = await ok(sam.request("POST", "/api/v1/agents/personal", {}));
+    const botId = created.agent.id as string;
+    const dmId = created.dmId as string;
+    const reply = (body: string) =>
+      ok(
+        ada.request("POST", "/api/v1/test/chat/agent-reply", {
+          agentId: botId,
+          conversationId: dmId,
+          body,
+          idempotencyKey: randomUUID(),
+        }),
+      );
+    const quiet = await reply("Here is the summary you asked for.");
+    expect(await createdFor(quiet.messageId)).toMatchObject({
+      popup: false,
+      notification: { kind: "dm", actor: { kind: "agent", id: botId } },
+    });
+    const loud = await reply("@sam the build failed, you may want to look");
+    expect(await createdFor(loud.messageId)).toMatchObject({
+      popup: true,
+      notification: { kind: "mention" },
+    });
+    await ok(settings(sam, dmId, { level: "all" }));
+    const opted = await reply("Another update.");
+    expect(await createdFor(opted.messageId)).toMatchObject({ popup: true });
   });
 });

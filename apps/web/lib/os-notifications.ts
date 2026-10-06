@@ -84,3 +84,40 @@ export function osNotificationTitle(
 ): string {
   return conversation.kind === "dm" ? actor.displayName : `${actor.displayName} in ${conversation.label}`;
 }
+
+// ---------------------------------------------------------------- do not disturb (CHAT-10)
+
+export type DndPreset = "30m" | "1h" | "2h" | "tomorrow";
+
+export const DND_PRESETS: ReadonlyArray<{ id: DndPreset; label: string }> = [
+  { id: "30m", label: "30 minutes" },
+  { id: "1h", label: "1 hour" },
+  { id: "2h", label: "2 hours" },
+  { id: "tomorrow", label: "Until tomorrow, 09:00" },
+];
+
+/** When a preset ends, as an ISO instant ("tomorrow" is 09:00 tomorrow in the member's local time). */
+export function dndPresetUntil(preset: DndPreset, now = new Date()): string {
+  const minutes = { "30m": 30, "1h": 60, "2h": 120 } as const;
+  if (preset !== "tomorrow") return new Date(now.getTime() + minutes[preset] * 60_000).toISOString();
+  const t = new Date(now);
+  t.setDate(t.getDate() + 1);
+  t.setHours(9, 0, 0, 0);
+  return t.toISOString();
+}
+
+const hhmm = (d: Date) =>
+  `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+const sameDay = (a: Date, b: Date) =>
+  a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+
+/** "16:05", "tomorrow 09:00" or "Mon 12 Oct, 09:00" (local time). */
+export function formatDndUntil(iso: string, now = new Date()): string {
+  const d = new Date(iso);
+  if (sameDay(d, now)) return hhmm(d);
+  const tomorrow = new Date(now);
+  tomorrow.setDate(now.getDate() + 1);
+  if (sameDay(d, tomorrow)) return `tomorrow ${hhmm(d)}`;
+  const day = d.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+  return `${day}, ${hhmm(d)}`;
+}
