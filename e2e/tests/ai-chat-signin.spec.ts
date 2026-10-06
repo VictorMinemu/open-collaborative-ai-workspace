@@ -25,9 +25,24 @@ async function bothThemes(page: Page, name: string) {
   await page.emulateMedia({ colorScheme: "light" });
 }
 
-/** Routes the loopback callback like an unreachable page and records the address the browser landed on. */
+/**
+ * Records the http://127.0.0.1:1455 address the browser lands on after authorize, answering it like an unreachable
+ * page (nothing listens there, exactly as for a member). Playwright does not intercept the target of an HTTP redirect,
+ * so the fake authorize page's 302 is turned into a client-side `location.replace` (what a real login page does once
+ * the member approves); the loopback navigation is then routed here.
+ */
 async function captureLoopback(context: BrowserContext): Promise<() => string> {
   let landed = "";
+  await context.route(/\/siwc\/api\/accounts\/authorize\?/u, async (route) => {
+    const res = await route.fetch({ maxRedirects: 0 });
+    const location = res.headers().location;
+    if (res.status() !== 302 || !location) return route.fulfill({ response: res });
+    return route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: `<!doctype html><title>ChatGPT</title><script>location.replace(${JSON.stringify(location)})</script>`,
+    });
+  });
   await context.route(LOOPBACK, (route) => {
     landed = route.request().url();
     return route.fulfill({

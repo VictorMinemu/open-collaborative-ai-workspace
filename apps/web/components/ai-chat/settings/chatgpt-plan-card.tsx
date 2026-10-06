@@ -168,7 +168,7 @@ function Connected({ status }: { status: ChatgptPlanStatus }) {
         <ChatgptMark />
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <span className="font-medium text-sm">ChatGPT plan</span>
+            <span className="font-medium text-sm">ChatGPT</span>
             <span
               data-testid="chatgpt-plan-connected"
               className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-px font-medium text-[11.5px] text-emerald-700 dark:text-emerald-400"
@@ -237,7 +237,7 @@ export function ChatgptPlanCard() {
         <div className="flex min-w-0 flex-1 items-start gap-3.5 sm:items-center">
           <ChatgptMark />
           <div className="min-w-0">
-            <div className="font-medium text-sm">ChatGPT plan</div>
+            <div className="font-medium text-sm">ChatGPT</div>
             <p className="mt-0.5 text-muted-foreground text-sm leading-relaxed">{EXPLAINER}</p>
           </div>
         </div>
