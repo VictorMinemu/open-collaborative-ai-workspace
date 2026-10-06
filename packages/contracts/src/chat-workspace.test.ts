@@ -440,9 +440,9 @@ describe("search (04-01)", () => {
       lastActivityAt: "2026-10-06T10:05:00.000Z",
     };
     expect(SearchOverview.parse({ ...base, aiChats: [chat] }).aiChats).toEqual([chat]);
-    expect(SearchOverview.safeParse({ ...base, aiChats: Array.from({ length: 9 }, () => chat) }).success).toBe(
-      false,
-    );
+    expect(
+      SearchOverview.safeParse({ ...base, aiChats: Array.from({ length: 9 }, () => chat) }).success,
+    ).toBe(false);
     expect(SearchOverview.safeParse({ ...base, aiChats: [{ ...chat, title: 3 }] }).success).toBe(false);
   });
 

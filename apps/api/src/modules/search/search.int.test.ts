@@ -649,7 +649,12 @@ describe("AI chats are found by their owner alone (05-10, AICHAT-04, P-03, Pitfa
       label: "Quarterly kumquat roadmap",
       archived: false,
     });
-    expect(answer.author).toEqual({ kind: "agent", id: null, displayName: "Claude Sonnet 5.5", avatarUrl: null });
+    expect(answer.author).toEqual({
+      kind: "agent",
+      id: null,
+      displayName: "Claude Sonnet 5.5",
+      avatarUrl: null,
+    });
     const question = (r.hits as Json[]).find((h) => h.messageId === ai.question) as Json;
     expect(question.author).toMatchObject({ kind: "user", id: oliveId, displayName: "Olive Owner" });
     // Archived AI chats are found, like archived channels, and flagged.
