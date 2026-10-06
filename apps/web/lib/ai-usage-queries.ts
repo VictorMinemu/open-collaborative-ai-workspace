@@ -53,6 +53,18 @@ export function useAiUsageReport(days: UsageWindow, groupBy: UsageGrouping, enab
   });
 }
 
+/** The member's own usage over the last `days` UTC days, by model (nobody else's records). */
+export function useMyAiUsageReport(days: UsageWindow = 30, enabled = true) {
+  return useQuery({
+    enabled,
+    queryKey: aiUsageKeys.report("me", days, "model"),
+    queryFn: ({ signal }) =>
+      api.get(`/api/v1/me/ai-usage/report?days=${days}&groupBy=model`, { schema: AiUsageReport, signal }),
+    staleTime: 30_000,
+    retry: noRetryOn4xx,
+  });
+}
+
 export function useAiChatPolicy(enabled = true) {
   return useQuery({
     enabled,

@@ -133,8 +133,8 @@ const isTitles = (row: AiUsageReportRow) => row.key.endsWith(" · titles");
 const plural = (n: number, one: string, many = `${one}s`) =>
   `${n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
 
-/** Who pays for a model row (members: none). */
-function BackendTag({ backend }: { backend: AiUsageReportRow["backend"] }) {
+/** Who pays for a model row (members: none). Shared with the member's own usage card. */
+export function BackendTag({ backend }: { backend: AiUsageReportRow["backend"] }) {
   if (backend === "org_key") return <MeteredBadge />;
   if (backend === null) return null;
   return (

@@ -81,6 +81,9 @@ test.beforeAll(async () => {
     },
   });
   expect(res.ok(), `configure Anthropic: ${res.status()} ${await res.text()}`).toBe(true);
+  // The one-time ChatGPT welcome (05-07) is not what these tests look at.
+  const seen = await sam.post("/api/v1/me/model-credentials/chatgpt/welcome-seen", { data: {} });
+  expect(seen.ok(), `welcome-seen: ${seen.status()}`).toBe(true);
   await answer(sam, "Summarise the quarterly numbers", SONNET);
   await answer(sam, "And on my own plan?", PLAN);
 });
@@ -132,5 +135,46 @@ test("an admin sees AI chat usage by member and by model over 30 and 7 days", as
   await report.getByTestId("ai-usage-groupBy").getByRole("radio", { name: "By member" }).click();
   await expect(rowOf(report, SAM.name).getByTestId("ai-usage-cost")).toHaveText(COST);
 
+  await context.close();
+});
+
+test("a member sees their own usage today against the limits and over the last 30 days by model", async ({
+  browser,
+}, info) => {
+  const project = info.project.name;
+  const w = widthOf(project);
+  const { context, page } = await openAs(browser, SAM, project);
+  await page.goto(`${BASE_URL}/settings/ai-chat`);
+  const card = page.getByTestId("usage-card");
+  await expect(card.getByRole("heading", { name: "Usage" })).toBeVisible();
+
+  // Today: organization models against the daily limit, with tokens and what the organization pays.
+  const org = card.getByTestId("usage-today-org");
+  await expect(org.getByTestId("provider-metered")).toBeVisible();
+  await expect(org.getByTestId("usage-today-org-answers")).toHaveText(/^[1-9]\d* of 200 answers$/u);
+  await expect(org.getByRole("progressbar")).toBeVisible();
+  await expect(org.getByTestId("usage-today-org-detail")).toHaveText(
+    /^\d[\d.k]* in · \d[\d.k]* out · ~?\$\d[\d.]* billed to your organization$/u,
+  );
+  // Their own ChatGPT plan: counted, never billed.
+  const plan = card.getByTestId("usage-today-plan");
+  await expect(plan.getByTestId("usage-today-plan-answers")).toHaveText(/^[1-9]\d* answers?$/u);
+  await expect(plan).toContainText("Counted against your plan, not billed to your organization");
+  await expect(plan).not.toContainText("$");
+  await expect(card).toContainText(/Resets at \d{1,2}:\d{2}/u);
+
+  // Last 30 days, by model.
+  const rows = card.getByTestId("usage-30d-row");
+  await expect(rows.filter({ hasText: "Claude Sonnet 5.5" }).getByTestId("usage-30d-cost")).toHaveText(COST);
+  await expect(rows.filter({ hasText: "GPT-6 Astra" }).getByTestId("usage-30d-cost")).toHaveText(
+    "Not billed",
+  );
+  await expect(card.getByTestId("usage-30d-total")).toContainText("to your organization");
+
+  await card.evaluate((el) => {
+    const pane = el.closest(".overflow-y-auto");
+    if (pane) pane.scrollTop = pane.scrollHeight;
+  });
+  await bothThemes(page, `settings-ai-chat-usage-${w}`);
   await context.close();
 });
