@@ -13,7 +13,7 @@ import { GenerationError } from "./generation-error";
  * one shared Markdown renderer (no raw HTML, images as links, `safeUrl`), with a caret while they stream and a
  * quiet footer once done: `<model> · ChatGPT plan · <in> in · <out> out`. A failed answer keeps any partial text
  * and ends with a calm card instead of a spinner. A stopped or interrupted answer keeps its text and says so in the
- * footer ("Stopped" / "Interrupted"), quietly: it was cut short, not broken (05-06).
+ * line under it ("Stopped" / "Interrupted"), quietly: it was cut short, not broken (05-06).
  */
 export function AiMessage({ message, text }: { message: Message; text: string }) {
   if (message.authorKind !== "agent") {
@@ -46,6 +46,7 @@ export function AiMessage({ message, text }: { message: Message; text: string })
           <Markdown text={text} variant="document" streaming={streaming} className="text-[15px] leading-7" />
         ) : null}
       </div>
+      {streaming ? null : <CutShortLabel generation={message.generation} />}
       {message.status === "failed" ? <GenerationError code={message.generation?.errorCode ?? null} /> : null}
       {streaming ? (
         <span
@@ -90,7 +91,7 @@ const CUT_SHORT: Partial<
   },
 };
 
-/** "Stopped" / "Interrupted" before the model label of an answer that was cut short (text kept). */
+/** "Stopped" / "Interrupted" right under an answer that was cut short (its text is kept), above the footer. */
 function CutShortLabel({ generation }: { generation: AiGeneration | undefined }) {
   const state = generation ? CUT_SHORT[generation.status] : undefined;
   if (!state) return null;
@@ -98,7 +99,7 @@ function CutShortLabel({ generation }: { generation: AiGeneration | undefined })
   return (
     <span
       title={state.hint}
-      className="inline-flex shrink-0 items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 font-medium text-[11.5px] text-foreground/70"
+      className="inline-flex w-fit items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 font-medium text-[11.5px] text-foreground/70"
     >
       <Icon aria-hidden className={cn(Icon === Square ? "size-2.5 fill-current" : "size-3")} />
       <span data-testid="ai-generation-state">{state.label}</span>
@@ -111,7 +112,7 @@ function AnswerFooter({ text, generation }: { text: string; generation: AiGenera
   return (
     <div
       className={cn(
-        "flex min-h-7 min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[12px] text-muted-foreground",
+        "flex min-h-7 min-w-0 items-center gap-1.5 text-[12px] text-muted-foreground",
         // The copy button's padding sits outside the text column, so the label lines up with the answer.
         text && "-ml-1.5",
       )}
@@ -129,7 +130,6 @@ function AnswerFooter({ text, generation }: { text: string; generation: AiGenera
           </button>
         </Tooltip>
       ) : null}
-      <CutShortLabel generation={generation} />
       {generation ? (
         <span
           data-testid="ai-message-footer"
