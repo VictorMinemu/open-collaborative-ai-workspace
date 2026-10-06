@@ -5,6 +5,8 @@
 // which model and mode it "ran" on (`Model: <id>`, `Mode: <mode>`) so end-to-end tests can see a change land.
 // Full access (ADR-0012): offered only while the daemon's `allowFullAccess()` gate is open; a fullAccess turn
 // approves everything itself (no approval.requested), like the real runtimes' bypass modes.
+// OCW_RUNTIME_FAKE_ECHO=1 (renderer e2e only): the answer repeats the whole prompt, so a test can stream
+// arbitrary Markdown (fenced code, tables) through the real Work Zone pipeline.
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -154,6 +156,7 @@ const FAST_MODE_COST: Record<RuntimeId, string> = {
 export class FakeRuntime implements AgentRuntime {
   private readonly sessions = new Map<string, FakeSession>();
   private readonly allowFullAccess: () => boolean;
+  private readonly echoPrompt = process.env.OCW_RUNTIME_FAKE_ECHO === "1";
 
   constructor(
     readonly id: RuntimeId,
@@ -393,7 +396,8 @@ export class FakeRuntime implements AgentRuntime {
     }
     // P-07: the turn runs at most at the mode the server authorized for it.
     const mode = prompt.permissionMode ? minMode(s.mode, prompt.permissionMode) : s.mode;
-    const footer = `\n\nModel: ${s.settings.model}\nMode: ${mode}`;
+    const echo = this.echoPrompt ? `\n\n${prompt.text}` : "";
+    const footer = `${echo}\n\nModel: ${s.settings.model}\nMode: ${mode}`;
     this.emit(s, { type: "prompt.started", promptId: pid });
     this.emit(s, { type: "session.state", status: "running" });
     let isError = false;
