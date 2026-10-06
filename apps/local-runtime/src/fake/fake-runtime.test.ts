@@ -1,7 +1,13 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RuntimeCatalog, type SessionEvent } from "@ocw/contracts";
+import {
+  normalizeSessionTitle,
+  RuntimeCatalog,
+  SESSION_TITLE_MAX_CHARS,
+  SESSION_TITLE_MAX_WORDS,
+  type SessionEvent,
+} from "@ocw/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { enroll } from "../enroll.js";
 import { RuntimeError } from "../runtime.js";
@@ -238,5 +244,56 @@ describe("enroll", () => {
     await expect(enroll({ home: tmp(), serverUrl: "http://x", code: "AAAA-BBBB", fetchFn })).rejects.toThrow(
       "This pairing code expired",
     );
+  });
+});
+
+describe("FakeRuntime titles (03.2-12)", () => {
+  it("generateTitle is deterministic and returns a raw answer the daemon must normalize", async () => {
+    const rt = new FakeRuntime("claude-code", 1);
+    const req = (prompt: string) => ({ prompt, model: "haiku", signal: new AbortController().signal });
+    const en = "Please fix the login redirect bug on the settings page when the session expires";
+    expect(await rt.generateTitle(req(en))).toBe('"Fix login redirect bug settings."');
+    expect(await rt.generateTitle(req(en))).toBe('"Fix login redirect bug settings."');
+    // Five words would be 34 characters: cut on a word boundary within 32.
+    expect(
+      await rt.generateTitle(req("Por favor arregla el error de inicio de sesión en la página de ajustes")),
+    ).toBe('"Arregla error inicio sesión."');
+    expect(await rt.generateTitle(req("Add a dark mode toggle to the account settings page"))).toBe(
+      '"Add dark mode toggle account."',
+    );
+  });
+
+  it("generateTitle follows the title shape: 2-5 words, at most 32 characters, valid once normalized", async () => {
+    const rt = new FakeRuntime("codex", 1);
+    for (const prompt of [
+      "Please fix the login redirect bug on the settings page when the session expires",
+      "Investigate why the nightly export job sometimes writes duplicate rows into the analytics warehouse",
+      "Refactor the authentication middleware configuration loader",
+    ]) {
+      const raw = await rt.generateTitle({
+        prompt,
+        model: "gpt-6-luna",
+        signal: new AbortController().signal,
+      });
+      const text = raw.slice(1, -2); // drop the chatty quotes and period
+      expect(text.length, prompt).toBeLessThanOrEqual(SESSION_TITLE_MAX_CHARS);
+      expect(text.split(" ").length, prompt).toBeLessThanOrEqual(SESSION_TITLE_MAX_WORDS);
+      expect(normalizeSessionTitle(raw), prompt).toBe(text);
+    }
+  });
+
+  it("generateTitle is abortable", async () => {
+    const rt = new FakeRuntime("codex", 200);
+    const ac = new AbortController();
+    const pending = rt.generateTitle({ prompt: "Fix the login", model: "gpt-6-luna", signal: ac.signal });
+    ac.abort();
+    await expect(pending).rejects.toThrow(/aborted/i);
+  });
+
+  it("the codex fake catalog lists gpt-6-luna", async () => {
+    const codex = await new FakeRuntime("codex", 1).catalog();
+    const luna = codex.models.find((m) => m.id === "gpt-6-luna");
+    expect(luna).toMatchObject({ displayName: "GPT-6-Luna", defaultEffort: "medium", legacy: false });
+    expect(luna!.efforts.map((e) => e.value)).toEqual(["low", "medium", "high", "xhigh", "max"]);
   });
 });

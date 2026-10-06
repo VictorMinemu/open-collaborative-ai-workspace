@@ -24,6 +24,8 @@ import {
   SessionConfigurePayload,
   type SessionEvent,
   SessionStartPayload,
+  SessionTitlePayload,
+  TITLE_TIMEOUT_MS,
 } from "@ocw/contracts";
 import { ClaudeCodeRuntime } from "./claude/claude-runtime.js";
 import { CodexRuntime } from "./codex/codex-runtime.js";
@@ -47,6 +49,7 @@ import { changedFiles, ensureSessionWorktree, repoInfo, unifiedPatch } from "./g
 import { createLogger, errorMessage, type Logger } from "./logger.js";
 import type { AgentRuntime } from "./runtime.js";
 import { sanitizeEvent, sanitizeString, sanitizeValue } from "./sanitize.js";
+import { runTitle } from "./title.js";
 
 export const DAEMON_VERSION = "0.0.0";
 const DETECT_CACHE_MS = 60_000;
@@ -96,6 +99,8 @@ export interface DaemonOptions {
   >;
   /** Socket path override, or false to disable the control socket. */
   controlSocket?: string | false;
+  /** The daemon's own deadline for a `session.title` call (default TITLE_TIMEOUT_MS; lowered in tests). */
+  titleTimeoutMs?: number;
 }
 
 interface ActiveSession {
@@ -537,6 +542,9 @@ export class Daemon {
         case "session.configure":
           await this.configureSession(cmd);
           break;
+        case "session.title":
+          await this.sendTitle(cmd);
+          break;
       }
       this.ack(cmd.id);
     } catch (err) {
@@ -643,6 +651,35 @@ export class Daemon {
       this.sessions.delete(cmd.sessionId);
       throw err;
     }
+  }
+
+  /**
+   * `session.title` (D-18, P-15, P-19): the session runtime's adapter names the first prompt with its small model,
+   * outside the per-session chain (never delays a turn) and under the daemon's own timeout. A failure is only a
+   * failed ack (`"<code>: <detail>"`): never a session event, never a failed session.
+   */
+  private async sendTitle(cmd: CommandFrame): Promise<void> {
+    const payload = SessionTitlePayload.parse(cmd.payload ?? {});
+    const active = this.sessions.get(cmd.sessionId);
+    const roots = [
+      ...(this.rootsBySession.get(cmd.sessionId) ?? []),
+      this.home,
+      ...this.registry.list().flatMap((p) => [p.path, realpathOr(p.path)]),
+    ];
+    const title = await runTitle({
+      runtime: this.runtimes.get(payload.runtime),
+      payload,
+      roots,
+      timeoutMs: this.opts.titleTimeoutMs ?? TITLE_TIMEOUT_MS,
+      ...(active ? { sessionRuntime: active.runtime.id } : {}),
+    });
+    this.send({
+      type: "title.result",
+      requestId: cmd.id,
+      sessionId: cmd.sessionId,
+      title,
+      model: payload.model,
+    });
   }
 
   private async sendDiff(cmd: CommandFrame): Promise<void> {

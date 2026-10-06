@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 4
+open_count: 5
 waived_count: 0
 fixed_count: 14
-total_count: 18
-last_updated: 2026-10-06T00:14:50.629Z
+total_count: 19
+last_updated: 2026-10-06T02:17:25.305Z
 ---
 
 # Broken Windows Ledger
@@ -33,6 +33,7 @@ last_updated: 2026-10-06T00:14:50.629Z
 | 16 | 03.2 | unrun-verify | packages/contracts/src/runtime-controls/codex.ts |  | Codex Auto (approvalsReviewer auto_review) exposed but its review behaviour is not fixtured | open |  | 2026-10-05T21:04:47.745Z |  |
 | 17 | 03.2 | deviation | packages/realtime-client/src/client.ts |  | Fixed pre-existing resync cursor bug (org topics past REPLAY_LIMIT dropped live events); found by the 03.2-11 full e2e | open |  | 2026-10-06T00:14:50.556Z |  |
 | 18 | 03.2 | unrun-verify | .planning/phases/03.2-work-zone-session-controls/03.2-VALIDATION.md |  | Manual-only: real Full access turn (Claude relaunch with resume, Codex never+dangerFullAccess), resolved-model mapping, Codex Auto reviewer | open |  | 2026-10-06T00:14:50.629Z |  |
+| 19 | 03.2 | unrun-verify | apps/local-runtime/src/claude/title.ts |  | Claude title latency with thinking disabled not recorded (fixture recorded with thinking: 31 s); owner manual check | open |  | 2026-10-06T02:17:25.305Z |  |
 
 ````json
 [
@@ -250,6 +251,18 @@ last_updated: 2026-10-06T00:14:50.629Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-06T00:14:50.629Z",
+    "resolved_at": null
+  },
+  {
+    "id": 19,
+    "kind": "unrun-verify",
+    "phase": "03.2",
+    "file": "apps/local-runtime/src/claude/title.ts",
+    "line": null,
+    "description": "Claude title latency with thinking disabled not recorded (fixture recorded with thinking: 31 s); owner manual check",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T02:17:25.305Z",
     "resolved_at": null
   }
 ]

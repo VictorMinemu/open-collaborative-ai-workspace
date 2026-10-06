@@ -12,6 +12,19 @@ import type {
   SessionSettingsPatch,
 } from "@ocw/contracts";
 
+/**
+ * A one-shot title call (D-18, P-17): the session runtime's small model names the first prompt. Never the
+ * session's own query or thread, no tools, nothing saved to the runtime's history.
+ */
+export interface TitleRequest {
+  /** The start of the session's first prompt (at most `TITLE_PROMPT_MAX_CHARS`). */
+  prompt: string;
+  /** The small model to use (`TITLE_MODEL[runtime]`), already checked against this runtime's catalog. */
+  model: string;
+  /** Fired by the daemon's own timeout; the adapter stops the call and releases its process. */
+  signal: AbortSignal;
+}
+
 export interface RuntimeCapabilities {
   /** Adding input to the RUNNING turn (`steer()`). Claude Code: false (prompts queue). Codex: true. */
   supportsSteer: boolean;
@@ -86,6 +99,11 @@ export interface AgentRuntime {
    * no catalog (the web then shows no model choices, D-08).
    */
   catalog?(): Promise<RuntimeCatalog | null>;
+  /**
+   * Generate a short session title with a small model, isolated from every session (D-18). Returns the model's raw
+   * text; the daemon normalizes, sanitizes and validates it (`runTitle`). Absent = no automatic titles.
+   */
+  generateTitle?(req: TitleRequest): Promise<string>;
   /** Stop the session and release the runtime process. */
   stop(sessionId: string): Promise<void>;
   /** Stop every session (daemon shutdown). */

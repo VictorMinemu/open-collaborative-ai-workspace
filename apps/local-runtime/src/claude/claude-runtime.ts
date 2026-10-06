@@ -54,11 +54,13 @@ import {
   type RuntimeCapabilities,
   RuntimeError,
   type StartSessionOptions,
+  type TitleRequest,
 } from "../runtime.js";
 import { redact } from "../sanitize.js";
 import { collectClaudeCatalog, ONE_M_CONTEXT, runtimeModelId } from "./catalog.js";
 import { detectClaudeCode } from "./detect.js";
 import { ClaudeEventMapper } from "./mapper.js";
+import { generateClaudeTitle } from "./title.js";
 import { extractPaths, secretDenyReason, secretDenyRules, summarizeToolInput } from "./tool-policy.js";
 
 export const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
@@ -275,6 +277,23 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       this.catalogInFlight = null;
     });
     return this.catalogInFlight;
+  }
+
+  /**
+   * A session title from the small model (D-18): a separate one-shot query (claude/title.ts), never a session's
+   * own query, input queue or mapper. The init must report the alias or the catalog row's resolved model.
+   */
+  async generateTitle(req: TitleRequest): Promise<string> {
+    const catalog = await this.collectCatalog();
+    const row = catalog?.models.find((m) => m.id === req.model);
+    return generateClaudeTitle(this.queryFn, {
+      claudePath: this.claudePath,
+      env: childEnv(process.env, this.opts.useApiKey ?? false),
+      prompt: req.prompt,
+      model: req.model,
+      resolvedModel: row?.resolvedModel ?? null,
+      signal: req.signal,
+    });
   }
 
   hasSession(sessionId: string): boolean {

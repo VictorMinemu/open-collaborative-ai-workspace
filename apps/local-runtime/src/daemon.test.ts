@@ -21,7 +21,13 @@ import { controlRequest } from "./control-socket.js";
 import { Daemon } from "./daemon.js";
 import { FakeRuntime as ScriptedRuntime } from "./fake/fake-runtime.js";
 import { type Logger, silentLogger } from "./logger.js";
-import type { AgentRuntime, EventSink, RuntimeCapabilities, StartSessionOptions } from "./runtime.js";
+import type {
+  AgentRuntime,
+  EventSink,
+  RuntimeCapabilities,
+  StartSessionOptions,
+  TitleRequest,
+} from "./runtime.js";
 
 // Fake credential assembled at runtime so secret scanners do not flag the test.
 const LEAKY_KEY = ["sk", "ant", "api03", "abcdefghijklmnopqrstuvwxyz0123"].join("-");
@@ -52,6 +58,16 @@ class FakeRuntime implements AgentRuntime {
   readonly calls: string[] = [];
   configureDelayMs = 0;
   sinks = new Map<string, EventSink>();
+  /** Catalog rows besides `opus` (the title tests add `haiku`). */
+  extraModels: string[] = [];
+  /** The title call (03.2-12); default answers like a chatty small model. */
+  titleImpl: (req: TitleRequest) => Promise<string> = async () => '"Fix login redirect bug."';
+  readonly titleRequests: TitleRequest[] = [];
+  generateTitle(req: TitleRequest): Promise<string> {
+    this.calls.push(`title:${req.model}`);
+    this.titleRequests.push(req);
+    return this.titleImpl(req);
+  }
 
   async catalog(): Promise<RuntimeCatalog> {
     return {
@@ -72,6 +88,20 @@ class FakeRuntime implements AgentRuntime {
           fastMode: { supported: false, reason: null },
           supportsAutoMode: false,
         },
+        ...this.extraModels.map((id) => ({
+          id,
+          displayName: id,
+          description: null,
+          legacy: false,
+          isDefault: false,
+          badge: null,
+          efforts: [],
+          defaultEffort: null,
+          contextWindows: [],
+          defaultContextWindow: null,
+          fastMode: { supported: false, reason: null },
+          supportsAutoMode: false,
+        })),
       ],
       permissionModes: [...this.capabilities.supportsPermissionModes],
       fastModeCost: null,
@@ -855,5 +885,126 @@ describe("Full access: reloadConfig (the desktop menu / CLI path, D-02, P-12)", 
       ok: true,
       result: { fullAccessOptIn: true, fullAccessSource: "env" },
     });
+  });
+});
+
+describe("Automatic session titles (03.2-12, D-18, P-15, P-19)", () => {
+  const SID = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
+  const titleCmd = (id: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    kind: "session.title" as const,
+    sessionId: SID,
+    payload: {
+      runtime: "claude-code",
+      model: "haiku",
+      prompt: "Please fix the login redirect bug",
+      ...extra,
+    },
+  });
+
+  async function restartWithTitleTimeout(titleTimeoutMs: number) {
+    await daemon.stop();
+    daemon = await Daemon.create({
+      home,
+      env: {},
+      token: "device-token-123",
+      config: { serverUrl: server.url },
+      runtimes: [runtime],
+      logger: silentLogger,
+      controlSocket: socketPath(),
+      link: { backoffMinMs: 20, backoffMaxMs: 50, heartbeatMs: 60_000 },
+      titleTimeoutMs,
+    });
+  }
+
+  it("a session.title command answers with one title.result (normalized), then an ok ack", async () => {
+    runtime.extraModels = ["haiku"];
+    await daemon.start();
+    await server.frame("hello");
+    server.send(titleCmd("t1"));
+    const ack = await server.frame("ack", (f) => f.commandId === "t1");
+    expect(ack.ok).toBe(true);
+    const results = server.last.frames.filter((f) => f.type === "title.result");
+    expect(results).toEqual([
+      {
+        type: "title.result",
+        requestId: "t1",
+        sessionId: SID,
+        title: "Fix login redirect bug",
+        model: "haiku",
+      },
+    ]);
+    const frames = server.last.frames;
+    expect(frames.indexOf(results[0]!)).toBeLessThan(frames.indexOf(ack));
+    expect(runtime.titleRequests.map((r) => [r.model, r.prompt])).toEqual([
+      ["haiku", "Please fix the login redirect bug"],
+    ]);
+  });
+
+  it("a failure is a failed ack whose error starts with the code; no frame, no session event", async () => {
+    await daemon.start();
+    await server.frame("hello");
+    server.send(titleCmd("t2")); // haiku is not in this runtime's catalog
+    expect(await server.frame("ack", (f) => f.commandId === "t2")).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/^title_model_not_in_catalog: /),
+    });
+    runtime.extraModels = ["haiku"];
+    runtime.titleImpl = async () => {
+      throw new Error("model overloaded");
+    };
+    server.send(titleCmd("t3"));
+    expect(await server.frame("ack", (f) => f.commandId === "t3")).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/^title_failed: /),
+    });
+    runtime.titleImpl = async () => "Ok";
+    server.send(titleCmd("t4"));
+    expect(await server.frame("ack", (f) => f.commandId === "t4")).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/^title_invalid_shape: /),
+    });
+    const frames = server.last.frames;
+    expect(frames.filter((f) => f.type === "title.result")).toEqual([]);
+    expect(frames.filter((f) => f.type === "event")).toEqual([]);
+  });
+
+  it("a slow title never blocks the session: a later prompt runs and completes first, then the title times out", async () => {
+    await restartWithTitleTimeout(300);
+    runtime.extraModels = ["haiku"];
+    runtime.titleImpl = () => new Promise<string>(() => {});
+    const localId = await addProject();
+    await daemon.start();
+    await server.frame("hello");
+    server.send({ id: "s9", kind: "session.start", sessionId: SID, payload: { projectLocalId: localId } });
+    await server.frame("ack", (f) => f.commandId === "s9");
+    server.send(titleCmd("t5"));
+    server.send({ id: "p9", kind: "prompt", sessionId: SID, payload: { promptId: "pp9", text: "go" } });
+    const promptAck = await server.frame("ack", (f) => f.commandId === "p9");
+    expect(promptAck.ok).toBe(true);
+    const titleAck = await server.frame("ack", (f) => f.commandId === "t5");
+    expect(titleAck).toMatchObject({ ok: false, error: expect.stringMatching(/^title_timeout: /) });
+    const frames = server.last.frames;
+    expect(frames.indexOf(promptAck)).toBeLessThan(frames.indexOf(titleAck));
+    expect([...runtime.calls].sort()).toEqual(["prompt:pp9", "title:haiku"]);
+    expect(runtime.titleRequests[0]!.signal.aborted).toBe(true);
+    const events = frames.flatMap((f) => (f.type === "event" ? [f.event] : []));
+    expect(events.filter((e) => e.type === "session.error")).toEqual([]);
+    expect(events.filter((e) => e.type === "session.state" && e.status !== "idle")).toEqual([]);
+  });
+
+  it("a payload runtime other than the active session's runtime is refused before any call", async () => {
+    runtime.extraModels = ["haiku"];
+    const localId = await addProject();
+    await daemon.start();
+    await server.frame("hello");
+    server.send({ id: "s10", kind: "session.start", sessionId: SID, payload: { projectLocalId: localId } });
+    await server.frame("ack", (f) => f.commandId === "s10");
+    server.send(titleCmd("t6", { runtime: "codex", model: "gpt-6-luna" }));
+    expect(await server.frame("ack", (f) => f.commandId === "t6")).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/^title_runtime_mismatch: /),
+    });
+    expect(runtime.titleRequests).toEqual([]);
   });
 });

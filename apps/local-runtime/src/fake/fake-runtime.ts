@@ -17,7 +17,14 @@ import type {
   RuntimeInfo,
   SessionEvent,
 } from "@ocw/contracts";
-import { minMode, type RuntimeCatalog, type RuntimeModel, type SessionSettingsPatch } from "@ocw/contracts";
+import {
+  minMode,
+  type RuntimeCatalog,
+  type RuntimeModel,
+  SESSION_TITLE_MAX_CHARS,
+  SESSION_TITLE_MAX_WORDS,
+  type SessionSettingsPatch,
+} from "@ocw/contracts";
 import {
   type AgentRuntime,
   type EventSink,
@@ -25,6 +32,7 @@ import {
   type RuntimeCapabilities,
   RuntimeError,
   type StartSessionOptions,
+  type TitleRequest,
 } from "../runtime.js";
 
 interface FakeSettings {
@@ -99,6 +107,11 @@ const FAKE_MODELS: Record<RuntimeId, RuntimeModel[]> = {
       fastMode: { supported: true, reason: null },
       defaultContextWindow: null,
     }),
+    // The small model the codex title call uses (D-18).
+    fakeModel("gpt-6-luna", "GPT-6-Luna", {
+      fastMode: { supported: true, reason: null },
+      defaultContextWindow: null,
+    }),
     fakeModel("gpt-5.5", "GPT-5.5", {
       legacy: true,
       efforts: EFFORTS(["low", "medium", "high", "xhigh"]),
@@ -106,6 +119,31 @@ const FAKE_MODELS: Record<RuntimeId, RuntimeModel[]> = {
     }),
   ],
 };
+
+const POLITE_LEAD = /^(?:please|can you|could you|would you|por favor|puedes|podrías)\b[\s,]*/iu;
+const STOP_WORDS = new Set(
+  (
+    "a an the to on in of for when with and or my our this that is are " +
+    "el la los las un una de del en y o que con por para mi al"
+  ).split(" "),
+);
+
+/**
+ * The fake's deterministic "small model" (tests and demos only): the first line without a polite lead-in and
+ * English / Spanish stop words, at most 5 words and 32 characters cut on a word boundary (D-20), first letter
+ * upper. Returned quoted and with a period, like a chatty model, so the daemon's normalizer is exercised.
+ */
+export function fakeTitle(prompt: string): string {
+  const line = (prompt.split("\n").find((l) => l.trim()) ?? "").trim().replace(POLITE_LEAD, "");
+  const words = line
+    .split(/\s+/)
+    .map((w) => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ""))
+    .filter((w) => w && !STOP_WORDS.has(w.toLowerCase()))
+    .slice(0, SESSION_TITLE_MAX_WORDS);
+  while (words.length > 1 && words.join(" ").length > SESSION_TITLE_MAX_CHARS) words.pop();
+  const text = words.join(" ");
+  return `"${text.charAt(0).toUpperCase()}${text.slice(1)}."`;
+}
 
 /** D-11: what fast mode costs, in each runtime's terms. */
 const FAST_MODE_COST: Record<RuntimeId, string> = {
@@ -153,6 +191,23 @@ export class FakeRuntime implements AgentRuntime {
       fastModeCost: FAST_MODE_COST[this.id],
       collectedAt: new Date().toISOString(),
     };
+  }
+
+  /** A title "call": waits like a small-model turn (abortable), never touches a session (D-18). */
+  async generateTitle(req: TitleRequest): Promise<string> {
+    await new Promise<void>((resolve, reject) => {
+      if (req.signal.aborted) return reject(new Error("title call aborted"));
+      const timer = setTimeout(resolve, this.delayMs * 4);
+      req.signal.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          reject(new Error("title call aborted"));
+        },
+        { once: true },
+      );
+    });
+    return fakeTitle(req.prompt);
   }
 
   async configure(sessionId: string, patch: SessionSettingsPatch): Promise<void> {

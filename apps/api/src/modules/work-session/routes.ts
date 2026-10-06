@@ -66,6 +66,7 @@ import {
 import { knownModels, loadWorkZonePolicy, saveWorkZonePolicy } from "./policy";
 import { type SessionRow, type WorkSessionService, wsTopic } from "./service";
 import { runSessionCommand } from "./slash";
+import { heuristicTitle } from "./title";
 
 const SessionParams = z.object({ id: z.uuid() });
 const PromptParams = z.object({ id: z.uuid(), pid: z.uuid() });
@@ -385,7 +386,8 @@ export function registerWorkSessionRoutes(
         };
         const start = decideSettings(baseline, startPatch, body.runtime, ctx);
         if (!start.ok) throw settingsDenied(start.field, start.reason);
-        const title = body.title ?? firstLine(body.prompt) ?? `${p.name} · ${RUNTIME_LABEL[body.runtime]}`;
+        const title =
+          body.title ?? heuristicTitle(body.prompt) ?? `${p.name} · ${RUNTIME_LABEL[body.runtime]}`;
         const [conv] = await tx
           .insert(conversations)
           .values({
@@ -411,6 +413,8 @@ export function registerWorkSessionRoutes(
             branch: body.worktree ? null : p.defaultBranch,
             status: "provisioning",
             title,
+            // D-19, P-14: a typed title is never replaced; otherwise the first prompt may get an automatic one.
+            titleSource: body.title ? "user" : "heuristic",
             createdBy: auth.userId,
           })
           .returning();
@@ -474,6 +478,11 @@ export function registerWorkSessionRoutes(
       },
     });
     await svc.emitPrompt(tx, p!);
+    // D-18, P-18: the session's first prompt (not a slash command) asks its device for a short title, unless a
+    // user typed one. At most once: later prompts never ask.
+    if (pos === null && s.titleSource === "heuristic" && !slashDisposition(body, s.runtime)) {
+      await svc.requestTitle(tx, s, body, auth.clientKind);
+    }
     return p!;
   }
 
@@ -974,14 +983,4 @@ function assertNotSlashCommand(body: string, runtime: RuntimeId): void {
   if (disposition?.kind === "settings" || disposition?.kind === "refused") {
     throw new HttpError(400, "slash_command", "Send slash commands from the composer");
   }
-}
-
-function firstLine(text: string | undefined): string | undefined {
-  if (!text) return undefined;
-  const line = text
-    .split("\n")
-    .find((l) => l.trim())
-    ?.trim();
-  if (!line) return undefined;
-  return line.length > 80 ? `${line.slice(0, 77)}…` : line;
 }

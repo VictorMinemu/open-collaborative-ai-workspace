@@ -8,6 +8,10 @@ import {
   isFullAccessReport,
   onlyRelativePaths,
   type SessionEvent,
+  SessionTitle,
+  TITLE_PROMPT_MAX_CHARS,
+  TitleFailureCode,
+  type TitleResultFrame,
   type WorkApproval,
   type WorkPrompt,
   type WorkSession,
@@ -16,6 +20,7 @@ import {
   type WorkZonePolicy,
 } from "@ocw/contracts";
 import {
+  conversations,
   deviceCommands,
   devices,
   projects,
@@ -43,6 +48,7 @@ import {
   turnMode,
 } from "./controls";
 import { loadWorkZonePolicy } from "./policy";
+import { decideTitleRequest, heuristicTitle, loadTitleContext } from "./title";
 
 /** Why live sessions are re-checked (ADR-0012): a policy change, a member's access change, a device opt-out. */
 export type ReauthorizeReason = "policy" | "access_changed" | "device_opt_out";
@@ -144,6 +150,7 @@ export class WorkSessionService implements DeviceSessionHandler {
         branch: s.branch,
         status: s.status,
         title: s.title,
+        titleSource: s.titleSource,
         createdBy: s.createdBy,
         createdByName: dir.get(s.createdBy)?.displayName ?? null,
         queuedCount: q.get(s.id) ?? 0,
@@ -695,6 +702,16 @@ export class WorkSessionService implements DeviceSessionHandler {
     await this.deps.db.withTenant(this.sys(device), async (tx) => {
       const s = await this.lock(tx, sessionId);
       if (!s || s.deviceId !== device.deviceId) return;
+      if (cmd.kind === "session.title") {
+        // D-19: a title that never came is only audited; the session keeps its first line and is never failed,
+        // marked with an error or delayed.
+        if (!ok) {
+          const code = TitleFailureCode.safeParse((error ?? "").split(":")[0]?.trim());
+          const model = typeof cmd.payload.model === "string" ? cmd.payload.model : null;
+          await this.titleFailed(tx, device, s, code.success ? code.data : "title_failed", model, "error");
+        }
+        return;
+      }
       if (cmd.kind === "session.start") {
         if (!ok) {
           await this.failInFlight(tx, s, "The session could not start");
@@ -760,6 +777,111 @@ export class WorkSessionService implements DeviceSessionHandler {
           await this.tryDispatch(tx, s);
         }
       }
+    });
+  }
+
+  // ------------------------------------------------------------------ automatic titles (D-18 … D-20, ADR-0014)
+
+  /**
+   * Ask the session's device for a short title of its first prompt (P-18): only with the session runtime's own
+   * small model, when the device catalog lists it and the org policy allows it. A skip changes nothing: the
+   * session keeps its first-line title. The audit carries the prompt length, never its text.
+   */
+  async requestTitle(tx: Tx, s: SessionRow, prompt: string, clientKind: string | null): Promise<boolean> {
+    // A session created without a prompt still carries its placeholder: its first prompt's first line replaces
+    // it now (still `heuristic`, so the automatic title may follow). The caller emits the session.
+    const first = heuristicTitle(prompt);
+    if (first && first !== s.title) {
+      await tx
+        .update(workSessions)
+        .set({ title: first, updatedAt: sql`now()` })
+        .where(and(eq(workSessions.id, s.id), eq(workSessions.titleSource, "heuristic")));
+      await tx.update(conversations).set({ name: first }).where(eq(conversations.id, s.conversationId));
+      s.title = first;
+    }
+    const { catalog, policy } = await loadTitleContext(tx, s.deviceId, s.runtime);
+    const decision = decideTitleRequest({ runtime: s.runtime, catalog, policy });
+    if (!decision.ok) return false;
+    const text = prompt.slice(0, TITLE_PROMPT_MAX_CHARS);
+    await this.deps.hub.enqueue(tx, {
+      deviceId: s.deviceId,
+      workSessionId: s.id,
+      kind: "session.title",
+      payload: { runtime: s.runtime, model: decision.model, prompt: text },
+    });
+    await this.deps.audit.record(tx, {
+      action: "work_session.title_requested",
+      resourceType: "work_session",
+      resourceId: s.id,
+      sessionId: s.id,
+      deviceId: s.deviceId,
+      clientKind,
+      metadata: { runtime: s.runtime, model: decision.model, promptLength: text.length },
+    });
+    return true;
+  }
+
+  /**
+   * The device's answer to its own `session.title` command (the hub checked id, device and kind). Accepted only
+   * for this device's session, with the requested model and a valid `SessionTitle`; stored only while the title
+   * is still the heuristic one, so a typed title or an earlier automatic one is never replaced (D-19, D-20).
+   */
+  async onTitleResult(device: DeviceRef, cmd: DeviceCommandRow, frame: TitleResultFrame): Promise<void> {
+    const sessionId = cmd.workSessionId;
+    if (!sessionId || frame.sessionId !== sessionId) return;
+    await this.deps.db.withTenant(this.sys(device), async (tx) => {
+      const s = await this.lock(tx, sessionId);
+      if (!s || s.deviceId !== device.deviceId) return;
+      const requested = typeof cmd.payload.model === "string" ? cmd.payload.model : null;
+      const refuse = (reason: "model_mismatch" | "invalid_title") =>
+        this.titleFailed(tx, device, s, reason, requested, "denied");
+      if (frame.model !== requested) return refuse("model_mismatch");
+      if (!SessionTitle.safeParse(frame.title).success) return refuse("invalid_title");
+      const [row] = await tx
+        .update(workSessions)
+        .set({ title: frame.title, titleSource: "auto", updatedAt: sql`now()` })
+        .where(and(eq(workSessions.id, s.id), eq(workSessions.titleSource, "heuristic")))
+        .returning({ conversationId: workSessions.conversationId });
+      if (!row) return;
+      await tx
+        .update(conversations)
+        .set({ name: frame.title })
+        .where(eq(conversations.id, row.conversationId));
+      await this.deps.audit.record(tx, {
+        action: "work_session.title_generated",
+        resourceType: "work_session",
+        resourceId: s.id,
+        actorKind: "device",
+        actorId: device.deviceId,
+        deviceId: device.deviceId,
+        sessionId: s.id,
+        userId: null,
+        metadata: { model: requested, length: frame.title.length },
+      });
+      await this.emitSession(tx, s.id);
+    });
+  }
+
+  /** A title that was refused or never came: audited only; the session, its status and lastError are untouched. */
+  private async titleFailed(
+    tx: Tx,
+    device: DeviceRef,
+    s: SessionRow,
+    reason: string,
+    model: string | null,
+    result: "denied" | "error",
+  ): Promise<void> {
+    await this.deps.audit.record(tx, {
+      action: "work_session.title_failed",
+      resourceType: "work_session",
+      resourceId: s.id,
+      actorKind: "device",
+      actorId: device.deviceId,
+      deviceId: device.deviceId,
+      sessionId: s.id,
+      userId: null,
+      result,
+      metadata: { reason, model },
     });
   }
 

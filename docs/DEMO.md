@@ -92,6 +92,12 @@ Phase 03.2 (ADR-0012, ADR-0013). What each runtime offers, and why some options 
 3. **Share a device.** Owner › **Settings › Devices** › the device card: *Everyone in the organization* with a
    maximum mode, or *Add people or teams* with a mode each. Listed people start sessions on it without your
    acceptance and use your Claude / ChatGPT login (the card says whose). Removing someone stops their sessions.
+4. **Session titles** (ADR-0014). Start a session without typing a title: it first shows the first line of your
+   prompt, then, within a few seconds, a short title (2–5 words, at most 32 characters, the prompt's language)
+   for every controller, shown in full in the sidebar, the header and the browser tab. The device names it with its own runtime's small model on the
+   device owner's login: Claude Code uses Haiku, Codex uses GPT-6-Luna. A title you type is never replaced. When
+   the Work Zone policy leaves the small model out, or the call fails or takes longer than 20 s, the first line
+   stays and the session is not affected.
 
 **Owner check before relying on Full access** (never run by an agent): on an opted-in device, start a Claude Code
 session in Supervised, switch to Full access, ask for a file edit and a shell command: no approval prompt, the

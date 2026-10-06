@@ -25,6 +25,7 @@ import type { Readable, Writable } from "node:stream";
 import {
   type ApprovalDecision,
   DEFERRED_EFFORTS,
+  effortRank,
   minMode,
   PERMISSION_MODE_RANK,
   PermissionMode,
@@ -46,6 +47,7 @@ import {
   type RuntimeCapabilities,
   RuntimeError,
   type StartSessionOptions,
+  type TitleRequest,
 } from "../runtime.js";
 import { redact } from "../sanitize.js";
 import { collectCodexCatalog } from "./catalog.js";
@@ -73,6 +75,7 @@ import {
   summarizeItem,
 } from "./mapper.js";
 import { type CodexPolicyMode, codexModePolicy, isUnrestrictedCodexPolicy } from "./mode-policy.js";
+import { generateCodexTitle } from "./title.js";
 
 export const CODEX_APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
 /** How long a collected `model/list` catalog is reused. */
@@ -246,6 +249,26 @@ export class CodexRuntime implements AgentRuntime {
       this.log.warn("codex catalog unavailable", { error: redact(errorMessage(err)) });
       return null;
     }
+  }
+
+  /**
+   * A session title from the small model (D-18): an ephemeral read-only thread on its own short-lived app-server
+   * (codex/title.ts), never a session's thread, at the model's lowest catalog effort.
+   */
+  async generateTitle(req: TitleRequest): Promise<string> {
+    const catalog = await this.cachedOrCollect();
+    const row = catalog?.models.find((m) => m.id === req.model);
+    const effort =
+      [...(row?.efforts ?? [])].sort((a, b) => effortRank(a.value) - effortRank(b.value))[0]?.value ?? null;
+    const spawnFn: SpawnAppServer = this.opts.spawnAppServer ?? (({ cwd, env }) => this.spawnReal(cwd, env));
+    return generateCodexTitle(spawnFn, {
+      env: codexChildEnv(process.env, this.opts.useApiKey ?? false),
+      prompt: req.prompt,
+      model: req.model,
+      effort,
+      signal: req.signal,
+      ...(this.opts.onRpcMessage ? { onRpcMessage: this.opts.onRpcMessage } : {}),
+    });
   }
 
   async start(options: StartSessionOptions, sink: EventSink): Promise<void> {

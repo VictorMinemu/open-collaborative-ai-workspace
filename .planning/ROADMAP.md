@@ -198,7 +198,7 @@ Plans:
 
 **Goal**: Inside one Work Zone chat, a controller changes the model, the thinking level and the permission mode, and reaches every option Claude Code and Codex expose, from a composer that matches the reference layout (provider-grouped model picker, reasoning menu, permission menu). Every control is driven by what the runtime reports: an option is never shown as available unless the adapter has confirmed it
 **Mode:** mvp
-**Requirements**: WZC-01, WZC-02, WZC-03, WZC-04, WZC-05, WZC-06
+**Requirements**: WZC-01, WZC-02, WZC-03, WZC-04, WZC-05, WZC-06, WZC-07
 **Depends on:** Phase 03.1; pulls forward part of Phase 8 (device grains), Phase 9 (org-capped permission modes), Phase 10 (host acceptance) and Phase 11 (capability-driven controls)
 **Decisions:** ADR-0012 (owner, 2026-10-05): real Full access mode and shared devices
 **Reference:** `.planning/phases/03.2-work-zone-session-controls/reference/` (owner's screenshots, 2026-10-05)
@@ -210,8 +210,9 @@ Plans:
   4. A documented inventory lists every option of Claude Code (Agent SDK) and Codex (app-server) at the pinned versions with its status: exposed, deferred or impossible, and why. Each exposed option is reachable from the same chat (menus or slash commands), and nothing in the UI claims an option the inventory has not confirmed
   5. A device owner marks a device (e.g. a server hosting the harnesses) as *shared* with chosen members or units, each with a maximum permission mode; those people start and control sessions on it without the owner accepting each session or action, revoking someone stops their sessions, and the device settings show whose runtime subscription is used (ADR-0012)
   6. The whole session screen (sidebar, header, stream with turn summaries and changed-files card, agent-working bar, composer, worktree/branch footer — `reference/ref-4-layout.png`) and the composer menus match the reference screenshots at 1440 and 390 in light and dark (side-by-side review recorded in the phase), every change made by one controller shows live to the others, and the single execution authority is unchanged
+  7. A new session gets an automatic short title (2–5 words, ≤ 32 characters) that describes the request, generated from the first prompt by the session's runtime with a small model (Claude Code: Haiku; Codex: GPT-6-Luna) on the user's own subscription; if that model is unavailable or not allowed the first line of the prompt is kept, a title typed by the user is never replaced, and the title fits the sidebar, breadcrumb and tab at 1440 and 390
 
-**Plans:** 11 plans
+**Plans:** 12 plans
 **Research:** needed (Agent SDK `setModel` / `setPermissionMode` / effort and thinking options and model listing at the pinned version; `codex app-server` per-turn model, effort, approval policy and sandbox overrides and `model/list`; plan mode, fast mode and context window support; how to cap modes by org policy; research for cross-provider switching and multi-agent sessions is in `.planning/research/` as input for later phases)
 **UI hint**: yes
 
@@ -228,6 +229,7 @@ Plans:
 - [ ] 03.2-09-PLAN.md — Wave 4: reference composer — model picker, reasoning and permission menus (ref-1..3), mobile sheets, catalog-driven New session dialog
 - [ ] 03.2-10-PLAN.md — Wave 5: session screen layout per ref-4 — sidebar rows, breadcrumb header + Full access badge, turn summaries, changes card, agent bar, footer strip
 - [ ] 03.2-11-PLAN.md — Wave 6: documented inventory with parity tests, ADR-0013, AGENTS.md/DEMO.md, side-by-side reference review, phase gate
+- [ ] 03.2-12-PLAN.md — Wave 7: automatic session titles (WZC-07) — tracer: `title_source` migration, `session.title` → device → `title.result`, typed title kept, live in sidebar/breadcrumb/tab; Claude Code Haiku one-shot and Codex GPT-6-Luna ephemeral thread with one fixture each; fallbacks, `wz-title-*` fit screenshots, ADR-0014
 
 ### Phase 4: Chat
 
