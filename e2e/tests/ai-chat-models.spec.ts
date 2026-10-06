@@ -130,3 +130,50 @@ test("a member who opens the picker for the AI chat route of a new chat keeps th
   await expect(page.getByTestId("ai-model-chip")).toContainText("Claude Sonnet 5.5");
   await context.close();
 });
+
+test("Settings › Models labels org keys METERED and one allowed list governs AI chats live", async ({
+  browser,
+}, info) => {
+  const project = info.project.name;
+  const w = widthOf(project);
+  await configureAnthropic();
+  const adminUi = await openAs(browser, ADMIN, project);
+  const samUi = await openAs(browser, SAM, project);
+
+  // ---- Settings › Models: the billing is said where the keys are managed (P-11)
+  const page = adminUi.page;
+  await page.goto(`${BASE_URL}/settings/models`);
+  const anthropic = page.getByTestId("provider-anthropic");
+  await expect(anthropic.getByText("Connected")).toBeVisible();
+  for (const p of ["anthropic", "openai", "openrouter", "openai-compatible"]) {
+    const card = page.getByTestId(`provider-${p}`);
+    await expect(card.getByTestId("provider-metered")).toHaveText("METERED");
+    await expect(card).toContainText(
+      "Every AI chat and bot turn on this key is billed to your organization.",
+    );
+  }
+  await expect(anthropic.getByTestId("allowed-models-help")).toHaveText(
+    "These models are available to AI chats and bots.",
+  );
+  const codex = page.getByTestId("provider-openai-codex");
+  await expect(codex).toContainText(
+    "Used by bots only. AI chats use each member's own ChatGPT plan (Settings › AI chat).",
+  );
+  await expect(codex.getByTestId("provider-metered")).toHaveCount(0);
+  await expect(page.getByText(FAKE_ANTHROPIC_KEY)).toHaveCount(0);
+  await anthropic.scrollIntoViewIfNeeded();
+  await bothThemes(page, `settings-models-metered-${w}`);
+
+  // ---- Sam's open picker follows the admin's allowed list live (model_providers.updated)
+  await openNewAiChat(samUi.page);
+  const picker = await openPicker(samUi.page, project);
+  await expect(picker.getByTestId(`ai-model-${HAIKU_KEY}`)).toBeVisible();
+  await anthropic.getByTestId("allow-claude-haiku-4-5").click();
+  await expect(anthropic.getByTestId("allow-claude-haiku-4-5")).not.toBeChecked();
+  await expect(picker.getByTestId(`ai-model-${HAIKU_KEY}`)).toHaveCount(0, { timeout: 10_000 });
+  await expect(picker.getByTestId(`ai-model-${SONNET_KEY}`)).toBeVisible();
+
+  await adminUi.context.close();
+  await samUi.context.close();
+  await configureAnthropic();
+});
