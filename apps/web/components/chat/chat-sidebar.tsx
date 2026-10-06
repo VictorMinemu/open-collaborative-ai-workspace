@@ -6,10 +6,12 @@ import {
   EventTypes,
   type MessageCreatedEvent,
   type SaveUpdatedEvent,
+  type ThreadReadEvent,
+  type ThreadUpdatedEvent,
 } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
-import { useQueryClient } from "@tanstack/react-query";
-import { Bookmark, ChevronRight, MessageSquarePlus, Plus } from "lucide-react";
+import { type QueryClient, useQueryClient } from "@tanstack/react-query";
+import { ChevronRight, MessageSquarePlus, Plus } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
@@ -18,16 +20,27 @@ import { SectionSidebar, sectionItemClass } from "@/components/shell/section-sid
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
-import { applySaveUpdate, bumpDmLatest, bumpLatest, chatKeys, useChannels, useDms } from "@/lib/chat-queries";
+import {
+  applySaveUpdate,
+  applyThreadRead,
+  bumpDmLatest,
+  bumpLatest,
+  chatKeys,
+  isListedThread,
+  useChannels,
+  useDms,
+  useThreadList,
+} from "@/lib/chat-queries";
 import { usePermissionCheck } from "@/lib/permissions";
 import { useMe } from "@/lib/queries";
 import { useTopic } from "@/lib/realtime";
 import { cn } from "@/lib/utils";
-import { ChannelIcon } from "./channel-icon";
+import { ChannelIcon, isUnread } from "./channel-icon";
 import { CreateChannelDialog } from "./create-channel-dialog";
 import { NewDmDialog } from "./new-dm-dialog";
 import { GroupAvatars, PrincipalAvatar } from "./principal-avatar";
 import { SidebarSections } from "./sidebar-sections";
+import { SidebarViews } from "./sidebar-views";
 
 export { ChannelIcon, isUnread } from "./channel-icon";
 
@@ -41,7 +54,7 @@ function DmWatcher({ dm, meId }: { dm: DmSummary; meId: string }) {
       if (frame.op !== "ev" || frame.type !== EventTypes.messageCreated) return;
       const { message } = frame.data as MessageCreatedEvent;
       if (message.threadId) return;
-      bumpDmLatest(qc, dm.id, frame.seq, message.createdAt);
+      bumpDmLatest(qc, dm.id, frame.seq, message.createdAt, message.body);
       if (message.authorKind === "user" && message.authorId === meId) {
         qc.setQueryData(chatKeys.dms, (prev: { dms: DmSummary[] } | undefined) =>
           prev
@@ -60,6 +73,19 @@ function DmWatcher({ dm, meId }: { dm: DmSummary; meId: string }) {
   return null;
 }
 
+let threadsTimer: ReturnType<typeof setTimeout> | null = null;
+/**
+ * The Threads view refreshes from the frames the channel watchers already receive (Pitfall 13: no per-thread
+ * subscription): a `thread.updated` for a listed thread, or for a thread the member just took part in.
+ */
+function refreshThreadsSoon(qc: QueryClient) {
+  if (threadsTimer) clearTimeout(threadsTimer);
+  threadsTimer = setTimeout(() => {
+    threadsTimer = null;
+    void qc.invalidateQueries({ queryKey: chatKeys.threadList });
+  }, 400);
+}
+
 /** Watches one joined channel for new top-level messages so its unread dot updates live. */
 function ChannelWatcher({ channel, meId }: { channel: ChannelSummary; meId: string }) {
   const qc = useQueryClient();
@@ -67,10 +93,17 @@ function ChannelWatcher({ channel, meId }: { channel: ChannelSummary; meId: stri
   useTopic(
     `conv:${channel.id}`,
     (frame) => {
-      if (frame.op !== "ev" || frame.type !== EventTypes.messageCreated) return;
+      if (frame.op !== "ev") return;
+      if (frame.type === EventTypes.threadUpdated) {
+        const ev = frame.data as ThreadUpdatedEvent;
+        const mine = ev.replyParticipants?.some((p) => p.kind === "user" && p.id === meId);
+        if (mine || isListedThread(qc, ev.rootId)) refreshThreadsSoon(qc);
+        return;
+      }
+      if (frame.type !== EventTypes.messageCreated) return;
       const { message } = frame.data as MessageCreatedEvent;
       if (message.threadId) return;
-      bumpLatest(qc, channel.id, frame.seq, message.createdAt);
+      bumpLatest(qc, channel.id, frame.seq, message.createdAt, message.body);
       if (message.authorKind === "user" && message.authorId === meId) {
         // Own messages (from any device) never make a channel unread.
         qc.setQueryData(chatKeys.channels, (prev: { channels: ChannelSummary[] } | undefined) =>
@@ -115,6 +148,11 @@ function useChannelListSync(
   const onUserFrame = (frame: TopicFrame) => {
     if (frame.op === "ev" && frame.type === EventTypes.saveUpdated) {
       applySaveUpdate(qc, frame.data as SaveUpdatedEvent);
+      return;
+    }
+    // Read marks of threads (any of the member's tabs and devices) update the Threads view (P-04).
+    if (frame.op === "ev" && frame.type === EventTypes.threadRead) {
+      applyThreadRead(qc, frame.data as ThreadReadEvent);
       return;
     }
     onFrame(frame);
@@ -246,12 +284,12 @@ function DirectMessagesSection({ activeId, onNew }: { activeId: string | null; o
 export function ChatSidebar() {
   const params = useParams<{ channelId?: string; conversationId?: string }>();
   const pathname = usePathname();
-  const onSaved = pathname === "/chat/saved";
   const activeId = params.channelId ?? params.conversationId ?? null;
   const me = useMe({ enabled: false });
   const channels = useChannels();
   const dms = useDms();
   const can = usePermissionCheck();
+  const threads = useThreadList();
   const [creating, setCreating] = useState<{ unitId: string | null } | null>(null);
   const [browseOpen, setBrowseOpen] = useState(false);
   const [newDmOpen, setNewDmOpen] = useState(false);
@@ -266,6 +304,13 @@ export function ChatSidebar() {
   );
   const suggestedIds = new Set(suggested.map((c) => c.id));
   const others = list.filter((c) => !c.isMember && !suggestedIds.has(c.id));
+  // View badges: conversations with unread messages (All) and threads with unread replies (Threads).
+  const unreadAll =
+    joined.filter((c) => c.id !== activeId && isUnread(c)).length +
+    (dms.data?.dms ?? []).filter((d) => d.id !== activeId && d.latestMessageSeq > d.lastReadSeq).length;
+  const unreadThreads = (threads.data?.pages ?? [])
+    .flatMap((p) => p.threads)
+    .filter((t) => t.unreadReplies > 0).length;
   // The API decides every placement; the "+" per section only mirrors it (admins: any unit).
   const canPlace = (unitId: string | null) =>
     unitId === null || can("unit.manage") || memberUnitIds.has(unitId);
@@ -273,7 +318,7 @@ export function ChatSidebar() {
   return (
     <>
       <SectionSidebar
-        title="Channels"
+        title="Chat"
         actions={
           <Tooltip content="Create channel">
             <Button
@@ -288,18 +333,7 @@ export function ChatSidebar() {
           </Tooltip>
         }
       >
-        {/* Personal views. Plan 04-08 moves this into the views group. */}
-        <nav aria-label="Your views" className="mb-3 grid gap-px">
-          <Link
-            href="/chat/saved"
-            data-testid="saved-link"
-            aria-current={onSaved ? "page" : undefined}
-            className={sectionItemClass(onSaved)}
-          >
-            <Bookmark className={cn("size-4 shrink-0", onSaved ? "" : "text-muted-foreground")} />
-            <span className="truncate">Saved</span>
-          </Link>
-        </nav>
+        <SidebarViews activePath={pathname} counts={{ all: unreadAll, threads: unreadThreads }} />
         {channels.isPending ? (
           <div className="grid gap-1.5 px-2.5 pt-1">
             {[72, 56, 64].map((w) => (

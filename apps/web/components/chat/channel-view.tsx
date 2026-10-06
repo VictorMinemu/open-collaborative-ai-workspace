@@ -242,7 +242,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
         applyMessage(qc, message);
         if (message.authorKind !== "system") clear(message.authorKind, message.authorId);
         if (!message.threadId) {
-          bumpLatest(qc, channelId, message.seq, message.createdAt);
+          bumpLatest(qc, channelId, message.seq, message.createdAt, message.body);
           if (document.visibilityState === "visible") markRead(qc, channelId, message.seq);
         }
         return;

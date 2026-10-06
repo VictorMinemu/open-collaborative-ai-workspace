@@ -86,6 +86,7 @@ import {
   toMessage,
 } from "./service";
 import { registerChatTestRoutes } from "./test-routes";
+import { registerThreadRoutes } from "./threads";
 
 export { type ConversationAccess, createConversationAccess } from "./access";
 export {
@@ -100,6 +101,7 @@ export {
 } from "./dm";
 export { resolveMentions } from "./mentions";
 export { REPLY_MODE_PER_MINUTE, replyModeCandidates } from "./reply-mode";
+export { listThreadsFor } from "./threads";
 
 /** What the chat module hands to its route files (message actions, reactions, pins, saves). */
 export type ChatRouteCtx = MessageActionsContext;
@@ -1122,6 +1124,8 @@ export function createChatModule(core: Core): ApiModule {
       registerPinRoutes(app, routeCtx);
       // ---------------------------------------------------------------- personal saves (CHAT-13)
       registerSaveRoutes(app, routeCtx);
+      // ---------------------------------------------------------------- the Threads view (CHAT-02)
+      registerThreadRoutes(app, routeCtx);
 
       if (core.env.NODE_ENV === "test") registerChatTestRoutes(app, core);
     },

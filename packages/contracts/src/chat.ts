@@ -485,6 +485,8 @@ export const ThreadSummary = z.object({
   lastReplyAt: IsoDateTime.nullable(),
   unreadReplies: z.number().int().min(0).max(100),
   participants: z.array(MessageAuthor),
+  /** The newest live replies, oldest → newest (at most 3), for the Threads view card. */
+  lastReplies: z.array(Message).max(3).optional(),
 });
 export type ThreadSummary = z.infer<typeof ThreadSummary>;
 export const ThreadList = z.object({ threads: z.array(ThreadSummary), nextCursor: z.string().nullable() });

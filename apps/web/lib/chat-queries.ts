@@ -29,6 +29,8 @@ import {
   type ReactionUpdatedEvent,
   SavedList,
   type SaveUpdatedEvent,
+  ThreadList,
+  type ThreadReadEvent,
   type ThreadResponse,
   ThreadResponse as ThreadResponseSchema,
   type ThreadUpdatedEvent,
@@ -56,6 +58,8 @@ export const chatKeys = {
   pins: (convId: string) => ["chat", "pins", convId] as const,
   allMessages: ["chat", "messages"] as const,
   saved: ["chat", "saved"] as const,
+  /** The Threads view (CHAT-02); not under the `thread` prefix of single threads. */
+  threadList: ["chat", "thread-list"] as const,
   agents: ["chat", "agents"] as const,
   dms: ["chat", "dms"] as const,
 };
@@ -139,11 +143,20 @@ export function markRead(qc: QueryClient, id: string, seq: number) {
 }
 
 /** A new top-level message arrived on a channel the user is not looking at. */
-export function bumpLatest(qc: QueryClient, id: string, seq: number, createdAt: string) {
+/** The list preview of a message body, like the API's `lastMessagePreview` (one line, ≤ 140 chars). */
+export function previewOf(body: string): string | null {
+  return body.replace(/\s+/g, " ").trim().slice(0, 140) || null;
+}
+
+export function bumpLatest(qc: QueryClient, id: string, seq: number, createdAt: string, body?: string) {
   const list = qc.getQueryData<ChannelList>(chatKeys.channels);
   const ch = list?.channels.find((c) => c.id === id);
   if (!ch || ch.latestMessageSeq >= seq) return;
-  patchChannel(qc, id, { latestMessageSeq: seq, lastMessageAt: createdAt });
+  patchChannel(qc, id, {
+    latestMessageSeq: seq,
+    lastMessageAt: createdAt,
+    ...(body !== undefined ? { lastMessagePreview: previewOf(body) } : {}),
+  });
 }
 
 // ---------------------------------------------------------------- direct conversations (D-03)
@@ -211,10 +224,14 @@ export function useMarkConversationRead() {
 }
 
 /** A new top-level message arrived in a DM (sidebar unread dot). */
-export function bumpDmLatest(qc: QueryClient, id: string, seq: number, createdAt: string) {
+export function bumpDmLatest(qc: QueryClient, id: string, seq: number, createdAt: string, body?: string) {
   const dm = qc.getQueryData<DmList>(chatKeys.dms)?.dms.find((d) => d.id === id);
   if (!dm || dm.latestMessageSeq >= seq) return;
-  patchDm(qc, id, { latestMessageSeq: seq, lastMessageAt: createdAt });
+  patchDm(qc, id, {
+    latestMessageSeq: seq,
+    lastMessageAt: createdAt,
+    ...(body !== undefined ? { lastMessagePreview: previewOf(body) } : {}),
+  });
 }
 
 // ---------------------------------------------------------------- members & agents
@@ -700,4 +717,62 @@ export function applySaveUpdate(qc: QueryClient, ev: SaveUpdatedEvent) {
     );
   }
   void qc.invalidateQueries({ queryKey: chatKeys.saved });
+}
+
+// ---------------------------------------------------------------- the Threads view (CHAT-02)
+
+/** Threads the member started, replied to or was mentioned in, newest reply first, paged on `nextCursor`. */
+export function useThreadList() {
+  return useInfiniteQuery({
+    queryKey: chatKeys.threadList,
+    initialPageParam: null as string | null,
+    queryFn: ({ pageParam, signal }) =>
+      api.get(`/api/v1/threads?limit=30${pageParam ? `&cursor=${encodeURIComponent(pageParam)}` : ""}`, {
+        schema: ThreadList,
+        signal,
+      }),
+    getNextPageParam: (last) => last.nextCursor,
+    retry: retryUnlessClientError,
+    staleTime: 30_000,
+    refetchOnWindowFocus: true,
+  });
+}
+
+/** True when `rootId` is in the cached Threads list (the sidebar refreshes it only for those, Pitfall 13). */
+export function isListedThread(qc: QueryClient, rootId: string): boolean {
+  const data = qc.getQueryData<InfiniteData<ThreadList>>(chatKeys.threadList);
+  return data?.pages.some((p) => p.threads.some((t) => t.root.id === rootId)) ?? false;
+}
+
+function zeroUnread(qc: QueryClient, rootId: string) {
+  qc.setQueryData<InfiniteData<ThreadList>>(chatKeys.threadList, (prev) =>
+    prev
+      ? {
+          ...prev,
+          pages: prev.pages.map((p) => ({
+            ...p,
+            threads: p.threads.map((t) => (t.root.id === rootId ? { ...t, unreadReplies: 0 } : t)),
+          })),
+        }
+      : prev,
+  );
+}
+
+/** The highest seq this tab already sent per thread, so re-renders never repeat the POST. */
+const markedThreads = new Map<string, number>();
+
+/** Marks a thread read up to `seq` (the server keeps the greatest); the Threads list updates at once. */
+export function markThreadRead(qc: QueryClient, rootId: string, seq: number) {
+  if ((markedThreads.get(rootId) ?? -1) >= seq) return;
+  markedThreads.set(rootId, seq);
+  zeroUnread(qc, rootId);
+  void api.post(`/api/v1/threads/${rootId}/read`, { body: { seq }, schema: Ok }).catch(() => {
+    markedThreads.delete(rootId);
+  });
+}
+
+/** `thread.read` from the member's own `user:` stream (another tab or device read it). */
+export function applyThreadRead(qc: QueryClient, ev: ThreadReadEvent) {
+  zeroUnread(qc, ev.rootId);
+  void qc.invalidateQueries({ queryKey: chatKeys.threadList });
 }

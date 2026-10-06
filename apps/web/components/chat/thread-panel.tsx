@@ -1,13 +1,14 @@
 "use client";
 
 import type { ChannelSummary, Message } from "@ocw/contracts";
+import { useQueryClient } from "@tanstack/react-query";
 import { MessagesSquare, X } from "lucide-react";
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 import { toast } from "sonner";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useIsDesktop } from "@/hooks/use-media-query";
-import { useThread } from "@/lib/chat-queries";
+import { markThreadRead, useThread } from "@/lib/chat-queries";
 import { permalinkPath } from "@/lib/permalink";
 import { Composer, type MentionCandidate } from "./composer";
 import { MessageList, type PendingMessage } from "./message-list";
@@ -58,6 +59,19 @@ function ThreadBody({
   const threadTypers = typers.filter((t) => t.threadRootId === rootId);
   const scroll = useStickToBottom(`${replies.length}:${myPending.length}:${threadTypers.length}`, rootId);
   const participants = thread.data?.participants ?? [];
+  // CHAT-02: an open, visible thread is read up to its newest reply (the Threads view and other devices follow
+  // through `thread.read`); new replies arriving while it is open are read too.
+  const qc = useQueryClient();
+  const lastReplySeq = replies.reduce((max, r) => Math.max(max, r.seq), 0);
+  useEffect(() => {
+    if (!lastReplySeq) return;
+    const mark = () => {
+      if (document.visibilityState === "visible") markThreadRead(qc, rootId, lastReplySeq);
+    };
+    mark();
+    document.addEventListener("visibilitychange", mark);
+    return () => document.removeEventListener("visibilitychange", mark);
+  }, [qc, rootId, lastReplySeq]);
   // Centre the linked reply once it rendered; a deleted one is gone from the list (P-05), so say so instead.
   useCentreOnce(scroll, highlightId, highlightId);
   const onReplyHidden = useCallback(() => toast("This message was deleted"), []);

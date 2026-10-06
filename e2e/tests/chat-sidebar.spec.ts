@@ -167,3 +167,127 @@ test("channels are grouped by department; a new Product channel reaches Product 
   await samApi.dispose();
   await admin.dispose();
 });
+
+/** A team bot on the never-metered mock model (bots left by earlier runs with this name are deleted first). */
+async function freshTeamBot(admin: APIRequestContext, name: string): Promise<{ id: string }> {
+  const listed = (await (await admin.get("/api/v1/agents")).json()) as {
+    agents: Array<{ id: string; name: string }>;
+  };
+  for (const a of listed.agents.filter((x) => x.name === name)) {
+    expect((await admin.delete(`/api/v1/agents/${a.id}`)).ok()).toBe(true);
+  }
+  const res = await admin.post("/api/v1/agents", {
+    data: {
+      name,
+      description: "Keeps an eye on the sidebar.",
+      instructions: "Answer briefly.",
+      modelProvider: "mock",
+      modelId: "mock-1",
+    },
+  });
+  expect(res.ok(), "create team bot").toBe(true);
+  return (await res.json()) as { id: string };
+}
+
+async function postAs(api: APIRequestContext, conv: string, body: string, threadRootId?: string) {
+  const res = await api.post(`/api/v1/conversations/${conv}/messages`, {
+    data: { body, ...(threadRootId ? { threadRootId } : {}) },
+  });
+  expect(res.ok(), `post in ${conv}: ${res.status()}`).toBe(true);
+  return (await res.json()) as { id: string; seq: number };
+}
+
+test("the views: Threads with unread replies, All unread first with previews, AI Chats; a segmented row at 390", async ({
+  browser,
+}, info) => {
+  test.setTimeout(150_000);
+  const project = info.project.name;
+  const mobile = project === "mobile";
+  const size = mobile ? "390" : "1440";
+  const tag = `${project}-${Date.now().toString(36)}`;
+
+  const admin = await apiAs(ADMIN);
+  const samId = await ensureMember(admin, SAM, "developer");
+  const samApi = await apiAs(SAM);
+  const channel = await channelIn(admin, `views-${tag}`, null, [samApi]);
+  const root = await postAs(admin, channel, `Launch checklist for ${tag}: who owns the **release notes**?`);
+  await postAs(samApi, channel, "I can take the release notes.", root.id);
+  // A bot DM for AI Chats.
+  const bot = await freshTeamBot(admin, `Sidebar Scout ${project}`);
+  const botDm = await samApi.post("/api/v1/dms", { data: { participants: [{ kind: "agent", id: bot.id }] } });
+  expect(botDm.ok(), "bot DM").toBe(true);
+
+  const sam = await openAs(browser, SAM, project);
+
+  // ---- the views sit at the top of the sidebar: rows on desktop, a segmented row above the sections at 390
+  const list = await openSidebar(sam.page, mobile);
+  const views = sam.page.getByTestId(mobile ? "views-segmented" : "views-list").filter({ visible: true });
+  await expect(views).toBeVisible();
+  for (const id of ["view-all", "view-threads", "view-ai", "saved-link"]) {
+    await expect(views.getByTestId(id)).toBeVisible();
+  }
+  await expect(views.locator("a")).toHaveText([/All/, /Threads/, /AI Chats/, /Saved/]);
+  if (mobile) {
+    const rowBox = await views.boundingBox();
+    const firstSection = await list.locator('[data-testid="sidebar-section"]').first().boundingBox();
+    expect((rowBox?.y ?? 0) + (rowBox?.height ?? 0)).toBeLessThanOrEqual(firstSection?.y ?? 0);
+    await bothThemes(sam.page, "views-segmented-390");
+  }
+
+  // ---- Threads: the thread Sam replied in; the admin's reply arrives live as "1 new reply"
+  await views.getByTestId("view-threads").click();
+  await expect(sam.page).toHaveURL(/\/chat\/threads$/);
+  const card = sam.page.locator(`[data-testid="thread-card"][data-root-id="${root.id}"]`);
+  await expect(card).toBeVisible();
+  await expect(card.getByTestId("thread-unread")).toHaveCount(0);
+  await postAs(admin, channel, `Thanks! Draft due Friday (${tag}).`, root.id);
+  await expect(card.getByTestId("thread-unread")).toHaveText("1 new reply", { timeout: 5_000 });
+  await expect(card.getByTestId("thread-last-reply").last()).toContainText("Draft due Friday");
+  await bothThemes(sam.page, `views-threads-${size}`);
+
+  // ---- opening it in the thread panel reads it
+  await card.getByTestId("thread-open").click();
+  await expect(sam.page.getByTestId("thread-panel")).toBeVisible();
+  await expect(sam.page.getByTestId("thread-panel")).toContainText("Draft due Friday");
+  if (mobile) await sam.page.getByTestId("close-thread").click();
+  await openSidebar(sam.page, mobile);
+  await sam.page.getByTestId("view-threads").filter({ visible: true }).click();
+  await expect(card).toBeVisible();
+  await expect(card.getByTestId("thread-unread")).toHaveCount(0);
+
+  // ---- All: unread conversations first, each with its preview
+  await postAs(admin, channel, `Standup moved to 10:30 (${tag})`);
+  const adminDm = await admin.post("/api/v1/dms", { data: { participants: [{ kind: "user", id: samId }] } });
+  expect(adminDm.ok()).toBe(true);
+  const dmId = ((await adminDm.json()) as { id: string }).id;
+  await postAs(admin, dmId, `Quick question about ${tag}`);
+  await openSidebar(sam.page, mobile);
+  await sam.page.getByTestId("view-all").filter({ visible: true }).click();
+  await expect(sam.page).toHaveURL(/\/chat\/all$/);
+  const channelRow = sam.page.locator(`[data-testid="all-item"][data-conversation-id="${channel}"]`);
+  const dmRow = sam.page.locator(`[data-testid="all-item"][data-conversation-id="${dmId}"]`);
+  await expect(channelRow).toHaveAttribute("data-unread", "true");
+  await expect(channelRow.getByTestId("conversation-preview")).toHaveText(`Standup moved to 10:30 (${tag})`);
+  await expect(dmRow).toHaveAttribute("data-unread", "true");
+  await expect(dmRow.getByTestId("conversation-preview")).toHaveText(`Quick question about ${tag}`);
+  const flags = await sam.page
+    .getByTestId("all-item")
+    .evaluateAll((els) => els.map((e) => e.getAttribute("data-unread") === "true"));
+  const firstRead = flags.indexOf(false);
+  expect(firstRead === -1 || flags.slice(firstRead).every((f) => !f)).toBe(true);
+  await bothThemes(sam.page, `views-all-${size}`);
+
+  // ---- AI Chats: the bot DMs
+  await openSidebar(sam.page, mobile);
+  await sam.page.getByTestId("view-ai").filter({ visible: true }).click();
+  await expect(sam.page).toHaveURL(/\/chat\/ai$/);
+  const botRow = sam.page.getByTestId("ai-chat-item").filter({ hasText: `Sidebar Scout ${project}` });
+  await expect(botRow).toBeVisible();
+  await expect(botRow).toContainText("Team");
+  await expect(sam.page.getByTestId("ai-chat-item").filter({ hasText: "Quick question" })).toHaveCount(0);
+  await bothThemes(sam.page, `views-ai-${size}`);
+
+  await sam.context.close();
+  await samApi.dispose();
+  await admin.dispose();
+});
