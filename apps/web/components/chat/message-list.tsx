@@ -1,11 +1,24 @@
 "use client";
 
 import type { Message, MessageAuthor } from "@ocw/contracts";
-import { AlertCircle, MessageSquareReply, RotateCw } from "lucide-react";
-import { Fragment, memo, type ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { AlertCircle, RotateCw } from "lucide-react";
+import { Fragment, memo, type ReactNode, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
+import { Textarea } from "@/components/ui/textarea";
 import { Tooltip } from "@/components/ui/tooltip";
+import { errorMessage } from "@/lib/api";
+import { applyMessageUpdate, editMessage } from "@/lib/chat-queries";
 import { cn, relativeTime } from "@/lib/utils";
 import { Markdown } from "./markdown";
+import {
+  hasMessageActions,
+  type MessageActionSet,
+  MessageActionSheet,
+  MessageActions,
+} from "./message-actions";
 import { BotBadge, PrincipalAvatar } from "./principal-avatar";
 import { type Typer, TypingDots } from "./typing";
 
@@ -111,6 +124,94 @@ function ThreadSummary({
   );
 }
 
+/** Inline editor that replaces a message body (Enter saves, Shift+Enter is a newline, Escape cancels). */
+function MessageEditor({ message, onDone }: { message: Message; onDone: () => void }) {
+  const qc = useQueryClient();
+  const [value, setValue] = useState(message.body);
+  const [saving, setSaving] = useState(false);
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    // After a touch sheet closes it hands focus back to the row: take it on the next frame.
+    const raf = requestAnimationFrame(() => {
+      const el = ref.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, []);
+  const save = async () => {
+    const body = value.trim();
+    if (body === message.body.trim()) return onDone();
+    if (!body) {
+      toast.error("A message can't be empty. Delete it instead.");
+      return;
+    }
+    setSaving(true);
+    try {
+      applyMessageUpdate(qc, await editMessage(message.id, body));
+      onDone();
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div className="mt-1 grid gap-2" data-testid="message-editor">
+      <Textarea
+        ref={ref}
+        value={value}
+        aria-label="Edit message"
+        data-testid="edit-input"
+        disabled={saving}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            onDone();
+          } else if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+            e.preventDefault();
+            void save();
+          }
+        }}
+        className="max-h-72 min-h-11 resize-none bg-background text-[14.5px] [field-sizing:content]"
+      />
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" variant="outline" onClick={onDone} disabled={saving} data-testid="edit-cancel">
+          Cancel
+        </Button>
+        <Button size="sm" onClick={() => void save()} disabled={saving} data-testid="edit-save">
+          {saving ? <Spinner /> : null}
+          Save
+        </Button>
+        <span className="hidden text-muted-foreground text-xs sm:inline">
+          Escape to cancel · Enter to save
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/** "(edited)" after the body, with the edit time on hover. */
+function EditedMarker({ editedAt }: { editedAt: string }) {
+  return (
+    <Tooltip content={`Edited ${fullFmt.format(new Date(editedAt))}`}>
+      <span
+        // biome-ignore lint/a11y/noNoninteractiveTabindex: focusable so keyboard users can read the edit time
+        tabIndex={0}
+        data-testid="edited-marker"
+        className="ml-1 select-none rounded-sm text-[11.5px] text-muted-foreground outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40"
+      >
+        (edited)
+      </span>
+    </Tooltip>
+  );
+}
+
+const LONG_PRESS_MS = 450;
+const LONG_PRESS_SLOP_PX = 10;
+
 interface RowProps {
   message: Message;
   continuation: boolean;
@@ -118,6 +219,8 @@ interface RowProps {
   onOpenThread?: ((id: string) => void) | undefined;
   highlighted: boolean;
   showThreadSummary: boolean;
+  meId: string;
+  readOnly: boolean;
 }
 
 const MessageRow = memo(function MessageRow({
@@ -127,6 +230,8 @@ const MessageRow = memo(function MessageRow({
   onOpenThread,
   highlighted,
   showThreadSummary,
+  meId,
+  readOnly,
 }: RowProps) {
   const author = message.author ?? {
     kind: message.authorKind,
@@ -135,13 +240,68 @@ const MessageRow = memo(function MessageRow({
     avatarUrl: null,
   };
   const isBot = author.kind === "agent";
+  const [editing, setEditing] = useState(false);
+  const [sheetOpen, setSheetOpen] = useState(false);
+  // Mounted on the first long press only: one dialog root per row would be wasted on long lists.
+  const [sheetUsed, setSheetUsed] = useState(false);
+  const own = message.authorKind === "user" && !!meId && message.authorId === meId;
+  const actions: MessageActionSet = {
+    onReply: onOpenThread ? () => onOpenThread(message.id) : undefined,
+    onEdit: own && !readOnly && !message.deletedAt ? () => setEditing(true) : undefined,
+  };
+  const actionable = hasMessageActions(actions) && !editing;
+
+  // Touch: a long press opens the action sheet; a short tap keeps opening the thread.
+  const press = useRef<{ timer: number; x: number; y: number } | null>(null);
+  const longPressed = useRef(false);
+  const cancelPress = () => {
+    if (press.current) window.clearTimeout(press.current.timer);
+    press.current = null;
+  };
+  useEffect(
+    () => () => {
+      if (press.current) window.clearTimeout(press.current.timer);
+    },
+    [],
+  );
+
   return (
-    // biome-ignore lint/a11y/noStaticElementInteractions lint/a11y/useKeyWithClickEvents: touch-only shortcut; keyboard users get the "Reply in thread" button
+    // biome-ignore lint/a11y/noStaticElementInteractions lint/a11y/useKeyWithClickEvents: touch-only shortcuts; keyboard users get the toolbar buttons
     <div
       data-testid="message"
       data-message-id={message.id}
       data-author-kind={author.kind}
+      onPointerDown={(e) => {
+        if (e.pointerType !== "touch" || !actionable) return;
+        cancelPress();
+        longPressed.current = false;
+        press.current = {
+          x: e.clientX,
+          y: e.clientY,
+          timer: window.setTimeout(() => {
+            press.current = null;
+            longPressed.current = true;
+            setSheetUsed(true);
+            setSheetOpen(true);
+          }, LONG_PRESS_MS),
+        };
+      }}
+      onPointerMove={(e) => {
+        const p = press.current;
+        if (p && Math.hypot(e.clientX - p.x, e.clientY - p.y) > LONG_PRESS_SLOP_PX) cancelPress();
+      }}
+      onPointerUp={cancelPress}
+      onPointerCancel={cancelPress}
+      onContextMenu={(e) => {
+        // The long press owns the gesture on touch screens (no native callout over the sheet).
+        if (actionable && window.matchMedia("(hover: none)").matches) e.preventDefault();
+      }}
       onClick={(e) => {
+        if (longPressed.current) {
+          longPressed.current = false;
+          return;
+        }
+        if (editing) return;
         // Touch screens have no hover toolbar: tapping a message opens its thread (like Slack mobile).
         if (!onOpenThread || !window.matchMedia("(hover: none)").matches) return;
         if ((e.target as HTMLElement).closest("a, button, pre, code")) return;
@@ -149,9 +309,10 @@ const MessageRow = memo(function MessageRow({
         onOpenThread(message.id);
       }}
       className={cn(
-        "group relative flex gap-3 px-4 py-1 transition-colors hover:bg-muted/45 sm:px-5 dark:hover:bg-white/[0.025]",
+        "group relative flex gap-3 px-4 py-1 transition-colors hover:bg-muted/45 sm:px-5 dark:hover:bg-white/[0.025] [-webkit-touch-callout:none]",
         continuation ? "py-0.5" : "mt-2 pt-1.5",
         highlighted && "chat-flash",
+        (editing || sheetOpen) && "bg-muted/45 dark:bg-white/[0.025]",
       )}
     >
       <div className="w-9 shrink-0">
@@ -191,25 +352,29 @@ const MessageRow = memo(function MessageRow({
             </Tooltip>
           </div>
         )}
-        <Markdown body={message.body} />
+        {editing ? (
+          <MessageEditor message={message} onDone={() => setEditing(false)} />
+        ) : message.editedAt ? (
+          // The marker flows after the last paragraph ("…text (edited)") instead of on a line of its own.
+          <div className="[&>:first-child>p:last-child]:inline [&>:first-child]:inline">
+            <Markdown body={message.body} />
+            <EditedMarker editedAt={message.editedAt} />
+          </div>
+        ) : (
+          <Markdown body={message.body} />
+        )}
         {showThreadSummary && onOpenThread ? (
           <ThreadSummary message={message} typers={typers} onOpen={() => onOpenThread(message.id)} />
         ) : null}
       </div>
-      {onOpenThread ? (
-        <div className="pointer-events-none absolute -top-3.5 right-4 flex rounded-lg border bg-background p-0.5 opacity-0 shadow-sm transition-opacity group-focus-within:pointer-events-auto group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100 sm:right-5">
-          <Tooltip content="Reply in thread">
-            <button
-              type="button"
-              aria-label="Reply in thread"
-              data-testid="reply-in-thread"
-              onClick={() => onOpenThread(message.id)}
-              className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40"
-            >
-              <MessageSquareReply className="size-4" />
-            </button>
-          </Tooltip>
-        </div>
+      {actionable ? <MessageActions actions={actions} /> : null}
+      {sheetUsed && hasMessageActions(actions) ? (
+        <MessageActionSheet
+          message={message}
+          actions={actions}
+          open={sheetOpen}
+          onOpenChange={setSheetOpen}
+        />
       ) : null}
     </div>
   );
@@ -277,6 +442,7 @@ export function MessageList({
   intro,
   showThreadSummary = true,
   startDay,
+  readOnly = false,
 }: {
   messages: Message[];
   pending: PendingMessage[];
@@ -289,6 +455,8 @@ export function MessageList({
   showThreadSummary?: boolean;
   /** ISO date already shown above the list (thread root): no divider for messages of that same day. */
   startDay?: string;
+  /** Archived conversations: no edit (the API answers 410 anyway). */
+  readOnly?: boolean;
 }) {
   let prev: { key: string; at: number; day: string } | null = startDay
     ? { key: "", at: 0, day: new Date(startDay).toDateString() }
@@ -310,6 +478,8 @@ export function MessageList({
         onOpenThread={onOpenThread}
         highlighted={m.id === highlightId}
         showThreadSummary={showThreadSummary}
+        meId={me.id}
+        readOnly={readOnly}
       />,
     );
     // A message with a thread breaks the group so the next one shows its author again.

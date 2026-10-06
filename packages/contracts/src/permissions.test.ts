@@ -23,9 +23,37 @@ const id = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
 const now = 1_790_000_000;
 
 describe("permission vocabulary", () => {
-  it("has exactly the 44 agreed permissions", () => {
-    expect(Permission.options).toHaveLength(44);
-    expect(new Set(Permission.options).size).toBe(44);
+  it("has exactly the 48 agreed permissions", () => {
+    expect(Permission.options).toHaveLength(48);
+    expect(new Set(Permission.options).size).toBe(48);
+  });
+
+  it("Phase 4 chat permissions exist exactly as 04-01 defines them", () => {
+    expect(PERMISSION_SURFACE).toMatchObject({
+      "message.delete_any": "admin",
+      "channel.mention_all": "chat",
+      "attachment.upload": "chat",
+      "channel.update": "chat",
+    });
+    for (const role of OrgRole.options) {
+      expect(ROLE_PERMISSIONS[role], `${role}: channel.mention_all`).toContain("channel.mention_all");
+      expect(ROLE_PERMISSIONS[role], `${role}: attachment.upload`).toContain("attachment.upload");
+      for (const p of ["message.delete_any", "channel.update"] as const) {
+        if (role === "admin") expect(ROLE_PERMISSIONS[role], `${role}: ${p}`).toContain(p);
+        else expect(ROLE_PERMISSIONS[role], `${role}: ${p}`).not.toContain(p);
+      }
+    }
+    // Moderation is an admin power: an allow rule can never hand it to anyone else.
+    expect(NON_DELEGABLE_PERMISSIONS).toContain("message.delete_any");
+    expect(NON_DELEGABLE_PERMISSIONS).not.toContain("channel.mention_all");
+    for (const p of [
+      "message.delete_any",
+      "channel.mention_all",
+      "attachment.upload",
+      "channel.update",
+    ] as const) {
+      expect(PERMISSION_DESCRIPTIONS[p].length, p).toBeGreaterThan(10);
+    }
   });
 
   it("Phase 03.2 Work Zone control permissions exist exactly as P-06 defines them", () => {

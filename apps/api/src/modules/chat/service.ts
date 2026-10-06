@@ -439,6 +439,7 @@ export function toMessage(row: MessageRow, dir: Directory, replyParticipants?: M
     clientKind: (row.clientKind as Message["clientKind"]) ?? null,
     createdAt: iso(row.createdAt),
     editedAt: isoOrNull(row.editedAt),
+    deletedAt: isoOrNull(row.deletedAt),
     ...(replyParticipants ? { replyParticipants } : {}),
   };
 }

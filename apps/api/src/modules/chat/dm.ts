@@ -193,8 +193,9 @@ export async function listDms(tx: Tx, userId: string): Promise<DmSummary[]> {
     lastMessageAt: r.lastMessageAt === null ? null : iso(r.lastMessageAt),
   }));
   // Personal bots first, then by most recent activity (new DMs without messages by creation time).
+  const scopeOf = (d: DmSummary) => (d.counterpart.kind === "agent" ? d.counterpart.scope : "team");
   return out.sort((a, b) => {
-    if (a.counterpart.scope !== b.counterpart.scope) return a.counterpart.scope === "personal" ? -1 : 1;
+    if (scopeOf(a) !== scopeOf(b)) return scopeOf(a) === "personal" ? -1 : 1;
     const at = Date.parse(a.lastMessageAt ?? a.createdAt);
     const bt = Date.parse(b.lastMessageAt ?? b.createdAt);
     return bt - at;

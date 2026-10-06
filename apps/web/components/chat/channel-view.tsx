@@ -6,6 +6,7 @@ import {
   EphemeralTypes,
   EventTypes,
   type MessageCreatedEvent,
+  type MessageUpdatedEvent,
   type ThreadUpdatedEvent,
   type UserTypingEvent,
 } from "@ocw/contracts";
@@ -32,6 +33,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { api, errorMessage, isApiError } from "@/lib/api";
 import {
   applyMessage,
+  applyMessageUpdate,
   applyThreadUpdate,
   bumpLatest,
   chatKeys,
@@ -207,6 +209,10 @@ export function ChannelView({ channelId }: { channelId: string }) {
       }
       case EventTypes.threadUpdated:
         applyThreadUpdate(qc, channelId, frame.data as ThreadUpdatedEvent);
+        return;
+      case EventTypes.messageUpdated:
+        // An edit never moves the read cursor nor makes the channel unread.
+        applyMessageUpdate(qc, (frame.data as MessageUpdatedEvent).message);
         return;
       case EventTypes.conversationMemberAdded:
       case EventTypes.conversationMemberRemoved:
@@ -538,6 +544,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
                   onRetry={retry}
                   highlightId={threadId}
                   intro={intro}
+                  readOnly={!!channel.archivedAt}
                 />
               </div>
             )}

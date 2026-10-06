@@ -7,8 +7,10 @@ import {
   ChannelMemberList,
   ChannelSummary,
   type CreateChannelRequest,
+  type DmAgentCounterpart,
   type DmList,
   DmList as DmListSchema,
+  type DmSummary,
   IanaTimeZone,
   type Message,
   type MessagePage,
@@ -104,6 +106,13 @@ export function bumpLatest(qc: QueryClient, id: string, seq: number, createdAt: 
 }
 
 // ---------------------------------------------------------------- direct conversations (D-03)
+
+export type BotDm = DmSummary & { counterpart: DmAgentCounterpart };
+
+/** A DM with a bot (Phase 3.1); human and group DMs carry another counterpart kind. */
+export function isBotDm(d: DmSummary): d is BotDm {
+  return d.counterpart.kind === "agent";
+}
 
 /** The caller's DMs with bots (personal and team), for the sidebar's Bots section. */
 export function useDms() {
@@ -288,6 +297,45 @@ export function applyThreadUpdate(qc: QueryClient, channelId: string, ev: Thread
     prev ? { ...prev, messages: prev.messages.map(patch) } : prev,
   );
   qc.setQueryData<ThreadResponse>(chatKeys.thread(ev.rootId), (prev) =>
+    prev ? { ...prev, root: patch(prev.root) } : prev,
+  );
+}
+
+// ---------------------------------------------------------------- edit (CHAT-06)
+
+export function editMessage(id: string, body: string): Promise<Message> {
+  return api.patch(`/api/v1/messages/${id}`, { body: { body }, schema: MessageSchema });
+}
+
+/**
+ * Merges a changed message into a cached one. Realtime payloads omit viewer-specific fields (P-04), so the
+ * cached `reactions`, `pinned`, `saved`, `attachments` and the root's `replyParticipants` survive the update.
+ */
+function mergeMessage(prev: Message, next: Message): Message {
+  return {
+    ...prev,
+    ...next,
+    reactions: next.reactions ?? prev.reactions,
+    pinned: next.pinned ?? prev.pinned,
+    saved: next.saved ?? prev.saved,
+    attachments: next.attachments ?? prev.attachments,
+    replyParticipants: next.replyParticipants ?? prev.replyParticipants,
+  };
+}
+
+/** Applies an edited message (PATCH response or `message.updated`) to the page and thread caches. */
+export function applyMessageUpdate(qc: QueryClient, message: Message) {
+  const patch = (m: Message) => (m.id === message.id ? mergeMessage(m, message) : m);
+  if (message.threadId) {
+    qc.setQueryData<ThreadResponse>(chatKeys.thread(message.threadId), (prev) =>
+      prev ? { ...prev, replies: prev.replies.map(patch) } : prev,
+    );
+    return;
+  }
+  qc.setQueryData<MessagePage>(chatKeys.messages(message.conversationId), (prev) =>
+    prev ? { ...prev, messages: prev.messages.map(patch) } : prev,
+  );
+  qc.setQueryData<ThreadResponse>(chatKeys.thread(message.id), (prev) =>
     prev ? { ...prev, root: patch(prev.root) } : prev,
   );
 }

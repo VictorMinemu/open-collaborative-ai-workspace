@@ -53,6 +53,11 @@ export const Permission = z.enum([
   "work_session.configure",
   "device.full_access",
   "work_zone.manage",
+  // Phase 4 (04-01): chat moderation, broadcast mentions, attachments and channel settings.
+  "message.delete_any",
+  "channel.mention_all",
+  "attachment.upload",
+  "channel.update",
 ]);
 export type Permission = z.infer<typeof Permission>;
 
@@ -105,6 +110,10 @@ export const PERMISSION_SURFACE: Record<Permission, PermissionSurface> = {
   "work_session.configure": "workzone",
   "device.full_access": "workzone",
   "work_zone.manage": "admin",
+  "message.delete_any": "admin",
+  "channel.mention_all": "chat",
+  "attachment.upload": "chat",
+  "channel.update": "chat",
 };
 
 export const ROLE_SURFACES: Record<OrgRole, PermissionSurface[]> = {
@@ -126,6 +135,8 @@ const STANDARD: readonly Permission[] = [
   "bot.create_personal",
   "bot.internet",
   "bot.tool.use",
+  "channel.mention_all",
+  "attachment.upload",
 ];
 const DEVELOPER: readonly Permission[] = [
   ...STANDARD,
@@ -158,6 +169,8 @@ const ADMIN: readonly Permission[] = [
   "plugin.manage",
   "mcp.manage",
   "work_zone.manage",
+  "message.delete_any",
+  "channel.update",
 ];
 
 /**
@@ -319,6 +332,10 @@ export const PERMISSION_DESCRIPTIONS: Record<Permission, string> = {
   "work_session.configure": "Change a Work Zone session's model, reasoning and permission mode",
   "device.full_access": "Run Work Zone sessions in Full access on a device that allows it",
   "work_zone.manage": "Set the organization's Work Zone policy (modes, models, full access, fast mode)",
+  "message.delete_any": "Delete anyone's message in channels you can read (never in direct messages)",
+  "channel.mention_all": "Notify a whole channel with @channel or @here",
+  "attachment.upload": "Attach files and images to messages",
+  "channel.update": "Change any channel's topic and the team it is grouped under",
 };
 
 // ---------------------------------------------------------------- tokens (AUTH-06)

@@ -213,14 +213,19 @@ export const conversations = appSchema.table(
     archivedAt: ts("archived_at"),
     createdAt: createdAt(),
     /**
-     * Direct conversations only (D-03): `agent:<botId>|user:<userId>` for a human ↔ bot DM, unique per pair
-     * in the organization. Phase 4 extends the format for human pairs and groups.
+     * Direct conversations only (P-06, `dmKeyOf`): every member's `<kind>:<id>` sorted and joined by `|`, ids
+     * only. A bot DM keeps the 3.1 form `agent:<botId>|user:<userId>`; a human pair is `user:<a>|user:<b>`; a
+     * group lists every member. Unique per organization and kind (`dm` and `group` separately).
      */
     dmKey: text("dm_key"),
+    /** Channels only: the department, team or project the sidebar groups it under (CHAT-02); null = org. */
+    unitId: uuid("unit_id").references(() => orgUnits.id, { onDelete: "set null" }),
   },
   (t) => [
     index("conversations_org_kind_idx").on(t.organizationId, t.kind),
+    index("conversations_org_unit_idx").on(t.organizationId, t.unitId),
     uniqueIndex("conversations_org_dm_key_uq").on(t.organizationId, t.dmKey).where(sql`kind = 'dm'`),
+    uniqueIndex("conversations_org_group_key_uq").on(t.organizationId, t.dmKey).where(sql`kind = 'group'`),
     uniqueIndex("conversations_org_slug_uq")
       .on(t.organizationId, t.slug)
       .where(sql`kind = 'channel' and slug is not null`),
@@ -244,13 +249,27 @@ export const conversationMembers = appSchema.table(
       .default("member"),
     joinedAt: createdAt(),
     lastReadSeq: bigint("last_read_seq", { mode: "number" }).notNull().default(0),
+    /** Per-conversation notification level (CHAT-10); `default` follows the user's prefs and the kind. */
+    notifyLevel: text("notify_level", { enum: ["default", "all", "mentions", "nothing"] })
+      .notNull()
+      .default("default"),
+    muted: boolean("muted").notNull().default(false),
   },
   (t) => [
     primaryKey({ columns: [t.conversationId, t.memberKind, t.memberId] }),
     index("conversation_members_member_idx").on(t.organizationId, t.memberKind, t.memberId),
+    check(
+      "conversation_members_notify_level_check",
+      sql`${t.notifyLevel} in ('default','all','mentions','nothing')`,
+    ),
   ],
 );
 
+/**
+ * Messages. `search_tsv` (a STORED generated tsvector over `body`, three unaccented text search configurations)
+ * is hand-written in the chat_workspace migration and deliberately kept OUT of this schema: drizzle has no
+ * builder for it, and only the search module reads it, with raw SQL (D-04, ADR-0016).
+ */
 export const messages = appSchema.table(
   "messages",
   {
@@ -277,6 +296,9 @@ export const messages = appSchema.table(
     clientMessageId: text("client_message_id"),
     createdAt: createdAt(),
     editedAt: ts("edited_at"),
+    /** Tombstone (P-05): body '' and mentions [] once set; the prior body lives in message_versions. */
+    deletedAt: ts("deleted_at"),
+    deletedBy: uuid("deleted_by"),
   },
   (t) => [
     index("messages_conv_seq_idx").on(t.organizationId, t.conversationId, t.seq),
@@ -285,6 +307,211 @@ export const messages = appSchema.table(
     uniqueIndex("messages_author_client_msg_uq")
       .on(t.organizationId, t.authorKind, t.authorId, t.clientMessageId)
       .where(sql`client_message_id is not null`),
+  ],
+);
+
+// ---------------------------------------------------------------- chat workspace (Phase 4)
+
+/**
+ * Append-only history of message edits and deletes (CHAT-06): the body BEFORE each change. `post-migrate.sql`
+ * revokes UPDATE, DELETE and TRUNCATE from the app role, so history can only grow.
+ */
+export const messageVersions = appSchema.table(
+  "message_versions",
+  {
+    id: id(),
+    organizationId: orgId(),
+    messageId: uuid("message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    kind: text("kind", { enum: ["edit", "delete"] }).notNull(),
+    body: text("body").notNull(),
+    mentions: jsonb("mentions").$type<Array<{ kind: "user" | "agent"; id: string }>>().notNull().default([]),
+    editedByKind: text("edited_by_kind", { enum: ["user", "agent", "system"] }).notNull(),
+    editedBy: uuid("edited_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("message_versions_message_version_uq").on(t.messageId, t.version),
+    index("message_versions_org_message_idx").on(t.organizationId, t.messageId),
+    check("message_versions_kind_check", sql`${t.kind} in ('edit','delete')`),
+    check("message_versions_edited_by_kind_check", sql`${t.editedByKind} in ('user','agent','system')`),
+  ],
+);
+
+/** One row per (message, emoji, reactor) (CHAT-07). */
+export const messageReactions = appSchema.table(
+  "message_reactions",
+  {
+    organizationId: orgId(),
+    messageId: uuid("message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    conversationId: uuid("conversation_id").notNull(),
+    emoji: text("emoji").notNull(),
+    memberKind: text("member_kind", { enum: ["user", "agent"] }).notNull(),
+    memberId: uuid("member_id").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.messageId, t.emoji, t.memberKind, t.memberId] }),
+    index("message_reactions_org_conv_idx").on(t.organizationId, t.conversationId),
+    check("message_reactions_emoji_len_check", sql`char_length(${t.emoji}) <= 32`),
+    check("message_reactions_member_kind_check", sql`${t.memberKind} in ('user','agent')`),
+  ],
+);
+
+/** Pinned messages of a conversation (CHAT-13). */
+export const messagePins = appSchema.table(
+  "message_pins",
+  {
+    organizationId: orgId(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    pinnedBy: uuid("pinned_by").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [primaryKey({ columns: [t.conversationId, t.messageId] })],
+);
+
+/** Personal saved messages (CHAT-13). */
+export const messageSaves = appSchema.table(
+  "message_saves",
+  {
+    organizationId: orgId(),
+    userId: uuid("user_id").notNull(),
+    messageId: uuid("message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userId, t.messageId] }),
+    index("message_saves_org_user_idx").on(t.organizationId, t.userId, t.createdAt),
+  ],
+);
+
+/**
+ * In-app notifications (CHAT-08/09/10). Ids and the actor only, never a body or snippet (Pitfall 9): the inbox
+ * re-checks access and computes snippets at read time. One per (user, message): the strongest kind wins.
+ */
+export const notifications = appSchema.table(
+  "notifications",
+  {
+    id: id(),
+    organizationId: orgId(),
+    userId: uuid("user_id").notNull(),
+    kind: text("kind", { enum: ["mention", "channel", "here", "dm", "group_dm", "thread_reply"] }).notNull(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    threadRootId: uuid("thread_root_id"),
+    actorKind: text("actor_kind", { enum: ["user", "agent", "system"] }).notNull(),
+    actorId: uuid("actor_id"),
+    createdAt: createdAt(),
+    readAt: ts("read_at"),
+  },
+  (t) => [
+    uniqueIndex("notifications_user_message_uq").on(t.userId, t.messageId),
+    index("notifications_org_user_created_idx").on(t.organizationId, t.userId, t.createdAt),
+    index("notifications_unread_idx")
+      .on(t.organizationId, t.userId, t.conversationId)
+      .where(sql`read_at is null`),
+    check(
+      "notifications_kind_check",
+      sql`${t.kind} in ('mention','channel','here','dm','group_dm','thread_reply')`,
+    ),
+    check("notifications_actor_kind_check", sql`${t.actorKind} in ('user','agent','system')`),
+  ],
+);
+
+/** A user's notification preferences in one organization (CHAT-10); no row = DEFAULT_NOTIFICATION_PREFS. */
+export const notificationPrefs = appSchema.table(
+  "notification_prefs",
+  {
+    organizationId: orgId(),
+    userId: uuid("user_id").notNull(),
+    dndUntil: ts("dnd_until"),
+    desktopEnabled: boolean("desktop_enabled").notNull().default(true),
+    webEnabled: boolean("web_enabled").notNull().default(true),
+    defaultLevel: text("default_level", { enum: ["all", "mentions", "nothing"] })
+      .notNull()
+      .default("mentions"),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.organizationId, t.userId] }),
+    check("notification_prefs_default_level_check", sql`${t.defaultLevel} in ('all','mentions','nothing')`),
+  ],
+);
+
+/** Per-user read cursor of a thread (Threads view, CHAT-02). */
+export const threadReads = appSchema.table(
+  "thread_reads",
+  {
+    organizationId: orgId(),
+    userId: uuid("user_id").notNull(),
+    rootMessageId: uuid("root_message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    lastReadSeq: bigint("last_read_seq", { mode: "number" }).notNull().default(0),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.rootMessageId] })],
+);
+
+/**
+ * Message attachments (CHAT-12, D-03). Object keys derive from ids only (`org/<org>/conv/<conv>/att/<id>/…`);
+ * `filename` is sanitized display text. `pending` until the API verified the upload; swept when abandoned.
+ */
+export const attachments = appSchema.table(
+  "attachments",
+  {
+    id: id(),
+    organizationId: orgId(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id").references(() => messages.id, { onDelete: "set null" }),
+    uploaderId: uuid("uploader_id").notNull(),
+    filename: text("filename").notNull(),
+    /** What the browser declared (and the presigned PUT signed). */
+    declaredType: text("declared_type").notNull(),
+    /** What the API sniffed from the bytes. */
+    contentType: text("content_type"),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    sha256: text("sha256"),
+    status: text("status", { enum: ["pending", "ready", "rejected", "deleted"] })
+      .notNull()
+      .default("pending"),
+    /** Antivirus scanning is deferred (CONTEXT); the column keeps room for it. */
+    scanStatus: text("scan_status", { enum: ["not_scanned"] })
+      .notNull()
+      .default("not_scanned"),
+    width: integer("width"),
+    height: integer("height"),
+    hasRenditions: boolean("has_renditions").notNull().default(false),
+    createdAt: createdAt(),
+    completedAt: ts("completed_at"),
+    deletedAt: ts("deleted_at"),
+    purgedAt: ts("purged_at"),
+  },
+  (t) => [
+    index("attachments_org_conv_idx").on(t.organizationId, t.conversationId),
+    index("attachments_org_message_idx").on(t.organizationId, t.messageId),
+    index("attachments_sweep_idx")
+      .on(t.status, t.createdAt)
+      .where(sql`purged_at is null and status in ('pending','rejected','deleted')`),
+    check("attachments_status_check", sql`${t.status} in ('pending','ready','rejected','deleted')`),
+    check("attachments_scan_status_check", sql`${t.scanStatus} in ('not_scanned')`),
   ],
 );
 

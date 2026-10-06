@@ -37,6 +37,7 @@ import {
 import { authorOf, type Directory, loadDirectory } from "./directory";
 import { dmAgentOf, listDms } from "./dm";
 import { resolveMentions } from "./mentions";
+import { registerMessageActionRoutes } from "./message-actions";
 import { replyModeCandidates } from "./reply-mode";
 import {
   addMember,
@@ -684,6 +685,11 @@ export function createChatModule(core: Core): ApiModule {
             if (conv.kind === "dm" && req.body.threadRootId) {
               throw badRequest("Direct conversations have no threads", "dm_is_flat");
             }
+            // The contract accepts attachment-only posts; the upload pipeline (Plan 04-04) has not landed yet,
+            // so nothing may create an empty message in the meantime.
+            if (req.body.attachmentIds?.length || !req.body.body) {
+              throw badRequest("Attachments are not available yet", "attachments_unavailable");
+            }
             const dir = await loadDirectory(tx);
             const result = await postMessage(tx, deps, dir, {
               conv,
@@ -793,6 +799,20 @@ export function createChatModule(core: Core): ApiModule {
             };
           }),
       );
+
+      // ---------------------------------------------------------------- message actions (CHAT-06)
+      registerMessageActionRoutes(app, {
+        core,
+        deps,
+        perms,
+        readable: async (req, tx, conversationId) =>
+          readableChannel(
+            req,
+            tx,
+            await getConversation(tx, conversationId, MESSAGE_KINDS),
+            "Message not found",
+          ),
+      });
 
       if (core.env.NODE_ENV === "test") registerChatTestRoutes(app, core);
     },

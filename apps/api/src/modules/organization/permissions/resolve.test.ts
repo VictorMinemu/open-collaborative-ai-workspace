@@ -102,6 +102,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "work_session.configure": false,
     "device.full_access": false,
     "work_zone.manage": false,
+    "message.delete_any": false,
+    "channel.mention_all": true,
+    "attachment.upload": true,
+    "channel.update": false,
   },
   developer: {
     "org.read": true,
@@ -148,6 +152,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "work_session.configure": true,
     "device.full_access": false,
     "work_zone.manage": false,
+    "message.delete_any": false,
+    "channel.mention_all": true,
+    "attachment.upload": true,
+    "channel.update": false,
   },
   lead: {
     "org.read": true,
@@ -194,6 +202,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "work_session.configure": true,
     "device.full_access": false,
     "work_zone.manage": false,
+    "message.delete_any": false,
+    "channel.mention_all": true,
+    "attachment.upload": true,
+    "channel.update": false,
   },
   admin: {
     "org.read": true,
@@ -240,6 +252,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "work_session.configure": true,
     "device.full_access": false,
     "work_zone.manage": true,
+    "message.delete_any": true,
+    "channel.mention_all": true,
+    "attachment.upload": true,
+    "channel.update": true,
   },
 };
 
