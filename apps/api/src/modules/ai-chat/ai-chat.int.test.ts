@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { EventTypes } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { buildApp } from "../../app";
+import { createEnvFileSecretStore } from "../../lib/secret-store";
 import { TEST_SETUP_TOKEN, TestClient } from "../../testing";
 import { type AiStack, seedPlan, startAiStack, subscribeConv } from "../../testing-ai";
 import { invite } from "../../testing-workzone";
@@ -41,6 +43,8 @@ const FORBIDDEN = [
 ];
 
 const cid = () => `cm-${randomUUID()}`;
+/** Prompt text that must never reach a log line. */
+const MARKER = "zebra-quokka-confidential-merger";
 const errorOf = (r: { body: Record<string, unknown> | null }) => (r.body as Json | null)?.error as Json;
 
 async function ok(res: Promise<{ status: number; body: Record<string, unknown> | null }>, status = 200) {
@@ -391,5 +395,164 @@ describe("audit (ids, backend, provider and model only)", () => {
       const { values } = walk(row.metadata);
       expect(values.join(" ")).not.toMatch(/quarterly|idempotent|slow|Echo/u);
     }
+  });
+});
+
+describe("AI chats are private to their owner (P-03, T-05-02-03/04)", () => {
+  let samChat: string;
+
+  beforeAll(async () => {
+    const created = await ok(createChat(sam, `Summarize ${MARKER} for me`), 201);
+    samChat = created.chat.id;
+    await settled(created.generation.id);
+  });
+
+  it("Alex and the admin get 404 on every route of Sam's chat", async () => {
+    for (const who of [alex, admin]) {
+      const snap = await who.request("GET", `/api/v1/ai-chats/${samChat}`);
+      expect(snap.status).toBe(404);
+      expect(errorOf(snap).message).toBe("AI chat not found");
+      expect((await who.request("GET", `/api/v1/ai-chats/${samChat}/messages`)).status).toBe(404);
+      const post = await send(who, samChat, "let me in");
+      expect(post.status).toBe(404);
+      expect(JSON.stringify(snap.body)).not.toContain(MARKER);
+    }
+    // A missing id reads exactly the same.
+    const missing = await alex.request("GET", `/api/v1/ai-chats/${randomUUID()}`);
+    expect(missing.status).toBe(404);
+    expect(errorOf(missing).message).toBe("AI chat not found");
+  });
+
+  it("Alex and the admin cannot subscribe to conv:<samChat>; Sam can", async () => {
+    for (const who of [alex, admin]) {
+      const ws = await subscribeConv(stack.baseUrl, who, samChat);
+      expect(ws.outcome).toBe("error");
+      ws.close();
+    }
+    const own = await subscribeConv(stack.baseUrl, sam, samChat);
+    expect(own.outcome).toBe("subscribed");
+    own.close();
+  });
+
+  it("the generic chat routes never post into or read an AI chat, not even for its owner", async () => {
+    for (const who of [sam, admin]) {
+      const post = await who.request("POST", `/api/v1/conversations/${samChat}/messages`, { body: "sneaky" });
+      expect(post.status).toBe(404);
+      expect((await who.request("GET", `/api/v1/conversations/${samChat}/messages`)).status).toBe(404);
+    }
+    const sneaky = await su.query("select count(*)::int as n from app.messages where body = 'sneaky'");
+    expect(sneaky.rows[0].n).toBe(0);
+    // Sidebars stay unchanged: AI chats are not in the default readable kinds.
+    const dms = await ok(sam.request("GET", "/api/v1/dms"));
+    expect(JSON.stringify(dms)).not.toContain(samChat);
+  });
+
+  it("org B's admin gets 404 on Sam's chat and never sees org A's plan state", async () => {
+    const email = `eve-${randomUUID().slice(0, 8)}@example.test`;
+    const inv = await ok(admin.request("POST", "/api/v1/invitations", { email, role: "standard" }));
+    const eve = new TestClient(stack.baseUrl);
+    const accepted = await ok(
+      eve.request("POST", `/api/v1/invitations/${inv.id}/accept`, {
+        name: "Eve",
+        password: "eve-long-password-1",
+      }),
+    );
+    const eveId: string = accepted.user.id;
+    const orgB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil', $2)", [
+      orgB,
+      `evil-${orgB}`,
+    ]);
+    await su.query("delete from auth.member where user_id = $1", [eveId]);
+    await su.query("delete from app.org_members where user_id = $1", [eveId]);
+    await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
+      orgB,
+      eveId,
+    ]);
+    await su.query(
+      "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Eve', 'admin')",
+      [orgB, eveId],
+    );
+    await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, eveId]);
+    expect((await ok(eve.request("GET", "/api/v1/me/permissions"))).role).toBe("admin");
+
+    expect((await eve.request("GET", `/api/v1/ai-chats/${samChat}`)).status).toBe(404);
+    expect((await send(eve, samChat, "cross-tenant")).status).toBe(404);
+    const ws = await subscribeConv(stack.baseUrl, eve, samChat);
+    expect(ws.outcome).toBe("error");
+    ws.close();
+    const models = await ok(eve.request("GET", "/api/v1/ai-chat/models"));
+    expect(models.chatgptPlan.state).toBe("not_connected");
+    expect(models.models.every((m: Json) => !m.available)).toBe(true);
+    const status = await ok(eve.request("GET", "/api/v1/me/model-credentials/chatgpt"));
+    expect(status).toMatchObject({ state: "not_connected", email: null });
+  });
+
+  it("without the ChatGPT override (the production shape) the test seed route does not exist", async () => {
+    const env = { ...stack.env, OCW_CHATGPT_API_BASE_URL: null };
+    const built = await buildApp(env, { logger: false, secretStore: createEnvFileSecretStore({}) });
+    await built.app.listen({ host: "127.0.0.1", port: 0 });
+    try {
+      const addr = built.app.server.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      const other = new TestClient(`http://127.0.0.1:${port}`);
+      other.cookies = new Map(sam.cookies);
+      expect((await other.request("GET", "/api/v1/me/model-credentials/chatgpt")).status).toBe(200);
+      expect((await other.request("POST", "/api/v1/test/ai/chatgpt-plan", {})).status).toBe(404);
+      expect(built.authz.routes.has("POST /api/v1/test/ai/chatgpt-plan")).toBe(false);
+    } finally {
+      await built.close();
+    }
+    expect(stack.built.authz.routes.has("POST /api/v1/test/ai/chatgpt-plan")).toBe(true);
+  });
+});
+
+describe("provider failures finalize cleanly (Pitfall 5, P-10)", () => {
+  it("a mid-stream usage limit fails the generation, keeps the partial text and records usage", async () => {
+    const created = await ok(createChat(sam, "hello [[plan:usage_limit]]"), 201);
+    const g = await settled(created.generation.id);
+    expect(g).toMatchObject({ status: "failed", error_code: "usage_limit_exceeded" });
+    const msg = (await su.query("select * from app.messages where id = $1", [created.assistantMessage.id]))
+      .rows[0];
+    expect(msg.status).toBe("failed");
+    expect(msg.body.length).toBeGreaterThan(0);
+    expect("Echo: hello".startsWith(msg.body) || msg.body.startsWith("Echo")).toBe(true);
+    const usage = await su.query("select * from app.ai_usage_records where generation_id = $1", [g.id]);
+    expect(usage.rows).toHaveLength(1);
+    const line = stack.logs.find((l) => l.includes("ai generation failed"));
+    expect(line).toBeDefined();
+    const logged = JSON.parse(line as string);
+    expect(logged).toMatchObject({ code: "usage_limit_exceeded", provider: "chatgpt_plan" });
+    expect(line).not.toContain("hello");
+    // The member's plan is still connected: a usage limit is not a credential problem.
+    expect((await ok(sam.request("GET", "/api/v1/me/model-credentials/chatgpt"))).state).toBe("connected");
+  });
+
+  it("an invalid-user refusal fails the generation and moves the credential to needs_reconnect", async () => {
+    const created = await ok(createChat(sam, "hi [[plan:invalid_user]]"), 201);
+    const g = await settled(created.generation.id);
+    expect(g).toMatchObject({ status: "failed", error_code: "invalid_credential" });
+    expect((await ok(sam.request("GET", "/api/v1/me/model-credentials/chatgpt"))).state).toBe(
+      "needs_reconnect",
+    );
+    const refused = await createChat(sam, "again");
+    expect(refused.status).toBe(409);
+    expect(errorOf(refused)).toMatchObject({
+      code: "model_unavailable",
+      details: { reason: "needs_reconnect" },
+    });
+    await seedPlan(sam);
+    expect((await ok(sam.request("GET", "/api/v1/me/model-credentials/chatgpt"))).state).toBe("connected");
+  });
+});
+
+describe("logs (last: covers every turn above)", () => {
+  it("no API log line carries a token, a refresh token or prompt text (T-05-02-02)", () => {
+    expect(stack.logs.length).toBeGreaterThan(0);
+    const all = stack.logs.join("\n");
+    expect(all).not.toContain("fake-plan-");
+    expect(all).not.toContain("fake-refresh-");
+    expect(all).not.toContain(MARKER);
+    expect(all).not.toContain("quarterly offsite");
   });
 });

@@ -117,7 +117,7 @@ export function createConversationAccess(core: Core): ConversationAccess {
           visibility: r.visibility,
           archived: r.archivedAt !== null,
           viewerRole: r.role ?? null,
-          kind: r.kind === "group" ? "group" : r.kind === "channel" ? "channel" : "dm",
+          kind: r.kind === "group" || r.kind === "channel" || r.kind === "ai_chat" ? r.kind : "dm",
           // Unit-scoped rules apply to the unit's channels (CHAT-02, principle 6).
           unitPath: r.kind === "channel" ? (r.unitPath ?? []) : [],
         }),

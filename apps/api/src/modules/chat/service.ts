@@ -393,8 +393,12 @@ export async function channelFacts(
     visibility: channel.visibility,
     archived: channel.archivedAt !== null,
     viewerRole: membership?.role ?? null,
-    // Group DMs are direct conversations too: fixed membership, never moderated (D-01, D-06; state dm).
-    kind: channel.kind === "dm" || channel.kind === "group" ? channel.kind : "channel",
+    // Group DMs are direct conversations too: fixed membership, never moderated (D-01, D-06; state dm). An AI chat
+    // is private to its owner (state ai_chat, P-03).
+    kind:
+      channel.kind === "dm" || channel.kind === "group" || channel.kind === "ai_chat"
+        ? channel.kind
+        : "channel",
     // Unit-scoped rules apply to the unit's channels (CHAT-02, principle 6).
     unitPath: channel.kind === "channel" ? await unitPathOf(tx, channel.unitId) : [],
   };

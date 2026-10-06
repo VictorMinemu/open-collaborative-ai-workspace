@@ -937,6 +937,99 @@ describe("personal bots (D-01) and direct conversations (D-03)", () => {
   });
 });
 
+describe("AI chats (Phase 5, P-03): private, one owner, no membership, moderation or generic posting", () => {
+  const SAM = "u-sam";
+  const sam = user("standard", { id: SAM });
+  const alex = user("standard", { id: "u-alex" });
+  const admin = user("admin", { id: "u-admin" });
+  const own = channelResource({
+    visibility: "private",
+    archived: false,
+    viewerRole: "owner",
+    kind: "ai_chat",
+  });
+  const notMine = channelResource({
+    visibility: "private",
+    archived: false,
+    viewerRole: null,
+    kind: "ai_chat",
+  });
+
+  it("carries states ai_chat and private", () => {
+    expect(own.state.has("ai_chat")).toBe(true);
+    expect(own.state.has("private")).toBe(true);
+    expect(own.state.has("dm")).toBe(false);
+  });
+
+  it("the owner reads it and uses it (ai_chat.use, .web, .share)", () => {
+    expect(allowed(sam, own, "channel.read")).toBe(true);
+    for (const perm of ["ai_chat.use", "ai_chat.web", "ai_chat.share"] as const) {
+      expect(allowed(sam, own, perm), perm).toBe(true);
+    }
+  });
+
+  it("anyone else, admins included, cannot read it: hidden as a private channel", () => {
+    for (const who of [alex, admin]) {
+      expect(decide(who, notMine, [], "channel.read")).toEqual({
+        allowed: false,
+        denial: { permission: "channel.read", layer: "resource", reason: "private_channel" },
+      });
+    }
+  });
+
+  it("membership, archive, update, moderation, broadcast and generic posting are denied even for the owner", () => {
+    for (const perm of [
+      "channel.members.add",
+      "channel.members.remove",
+      "channel.archive",
+      "channel.update",
+      "message.delete_any",
+      "channel.mention_all",
+      "channel.post",
+    ] as const) {
+      // `own` is decided for whoever owns it: a standard owner and an admin owner (who holds every channel grant).
+      expect(decide(sam, own, [], perm).allowed, perm).toBe(false);
+      expect(decide(admin, own, [], perm), perm).toEqual({
+        allowed: false,
+        denial: { permission: perm, layer: "resource", reason: "ai_chat_private" },
+      });
+    }
+    for (const perm of [
+      "channel.post",
+      "channel.members.add",
+      "channel.archive",
+      "channel.update",
+    ] as const) {
+      expect(decide(sam, own, [], perm).denial, perm).toMatchObject({ reason: "ai_chat_private" });
+    }
+  });
+
+  it("ai_chat.* on a channel resource that is not an AI chat owned by the principal: not_ai_chat_owner", () => {
+    const channel = channelResource({ visibility: "public", archived: false, viewerRole: "owner" });
+    const dm = channelResource({ visibility: "private", archived: false, viewerRole: "owner", kind: "dm" });
+    for (const [who, r] of [
+      [alex, notMine],
+      [admin, notMine],
+      [sam, channel],
+      [sam, dm],
+    ] as const) {
+      for (const perm of ["ai_chat.use", "ai_chat.web", "ai_chat.share"] as const) {
+        expect(decide(who, r, [], perm)).toEqual({
+          allowed: false,
+          denial: { permission: perm, layer: "resource", reason: "not_ai_chat_owner" },
+        });
+      }
+    }
+  });
+
+  it("at organization scope ai_chat.use stays role-based (starting a new chat)", () => {
+    expect(allowed(sam, orgResource(), "ai_chat.use")).toBe(true);
+    const deny = rule({ subjectKind: "user", subjectId: SAM, permission: "ai_chat.use", effect: "deny" });
+    expect(allowed(sam, orgResource(), "ai_chat.use", [deny])).toBe(false);
+    expect(allowed(sam, own, "ai_chat.use", [deny])).toBe(false);
+  });
+});
+
 // ---------------------------------------------------------------- properties (fast-check)
 
 const UNITS = ["u0", "u1", "u2", "u3", "u4", "u5"] as const;
@@ -951,6 +1044,7 @@ const RELATIONS: Relation[] = [
   "inviter",
 ];
 const STATES: ResourceState[] = [
+  "ai_chat",
   "private",
   "archived",
   "revoked",
