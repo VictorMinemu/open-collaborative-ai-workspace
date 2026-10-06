@@ -94,3 +94,13 @@ export const SearchOverview = z.object({
   channels: z.array(SearchChannel).max(8),
 });
 export type SearchOverview = z.infer<typeof SearchOverview>;
+
+/** `?q=` of the overview, people and channels routes. */
+export const SearchTextQuery = z.object({ q: SearchQuery.shape.q });
+export type SearchTextQuery = z.infer<typeof SearchTextQuery>;
+
+export const SearchPeopleResult = z.object({ people: z.array(SearchPerson) });
+export type SearchPeopleResult = z.infer<typeof SearchPeopleResult>;
+
+export const SearchChannelsResult = z.object({ channels: z.array(SearchChannel) });
+export type SearchChannelsResult = z.infer<typeof SearchChannelsResult>;
