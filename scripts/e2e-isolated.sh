@@ -97,6 +97,12 @@ export OCW_E2E_BASE_URL="$OCW_PUBLIC_WEB_URL" OCW_E2E_API_URL="$OCW_PUBLIC_API_U
 # The marketplace and MCP specs: the API proxies the fake ClawHub; the simulated cell probes the fake MCP.
 export OCW_E2E_FAKE_URL="http://127.0.0.1:$FAKE_PORT" OCW_CLAWHUB_URL="${OCW_E2E_CLAWHUB_URL:-http://127.0.0.1:$FAKE_PORT}"
 export OCW_E2E_FAKE_MCP_TOKEN="e2e-mcp-token"
+# AI chats (Phase 5, P-08/P-12): the API's ChatGPT plan (Responses API + SIWC), mock backend and AI web search all
+# point at the fake. The bots' own SearXNG variable stays unset: bot-capabilities.spec expects that option disabled.
+export OCW_CHATGPT_API_BASE_URL="http://127.0.0.1:$FAKE_PORT/v1" OCW_CHATGPT_AUTH_BASE_URL="http://127.0.0.1:$FAKE_PORT/siwc"
+export OCW_AI_MOCK_BASE_URL="http://127.0.0.1:$FAKE_PORT/v1" OCW_AI_SEARXNG_URL="http://127.0.0.1:$FAKE_PORT"
+# The AI chat specs send many turns a minute as one member; production keeps 30/min/user.
+export OCW_AI_SEND_RATE_LIMIT_PER_MINUTE="${OCW_AI_SEND_RATE_LIMIT_PER_MINUTE:-600}"
 # Attachments: the harness's own Garage with fixed, loopback-only test credentials (never the demo's keys).
 export OCW_S3_PORT="$STORAGE_PORT" OCW_S3_ENDPOINT="http://127.0.0.1:$STORAGE_PORT" OCW_S3_PUBLIC_URL="http://127.0.0.1:$STORAGE_PORT"
 export OCW_S3_BUCKET=ocw-attachments OCW_S3_REGION=garage

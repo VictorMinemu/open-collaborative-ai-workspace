@@ -1,11 +1,11 @@
 "use client";
 
-import { Sparkles } from "lucide-react";
+import { Sparkles, SquarePen } from "lucide-react";
 import Link from "next/link";
 import { PersonalBotButton } from "@/components/bots/personal-bot-button";
 import { EmptyState } from "@/components/common/empty-state";
 import { PageHeader } from "@/components/shell/page-header";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { errorMessage } from "@/lib/api";
 import { isBotDm, useDms } from "@/lib/chat-queries";
@@ -15,7 +15,8 @@ import { ConversationAvatar, ConversationRow } from "./conversation-row";
 
 /**
  * `/chat/ai` (CHAT-02): conversations with an AI counterpart. In Phase 4 those are the bot DMs (personal bot
- * first, then by latest activity, as the sidebar orders them); Phase 5 adds AI chats to the same view.
+ * first, then by latest activity, as the sidebar orders them); Phase 5 adds "New chat" (a private AI chat, 05-03)
+ * and later lists the member's AI chats in the same view.
  */
 export function AiChatsView() {
   const dms = useDms();
@@ -27,13 +28,19 @@ export function AiChatsView() {
       <PageHeader
         title="AI Chats"
         icon={<Sparkles />}
-        description="Your private conversations with bots"
+        description="Your private conversations with AI models and bots"
         actions={
-          bots.length > 0 ? (
-            <Button variant="outline" size="sm" render={<Link href="/bots" />}>
-              Browse bots
-            </Button>
-          ) : undefined
+          <>
+            {bots.length > 0 ? (
+              <Button variant="outline" size="sm" render={<Link href="/bots" />}>
+                Browse bots
+              </Button>
+            ) : null}
+            <Link href="/chat/ai/new" data-testid="ai-new-chat" className={buttonVariants({ size: "sm" })}>
+              <SquarePen />
+              New chat
+            </Link>
+          </>
         }
       />
       <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
@@ -57,7 +64,7 @@ export function AiChatsView() {
           <EmptyState
             icon={Sparkles}
             title="No AI chats yet"
-            description="Message a bot from the Bots page, or create your own personal bot to chat with it privately."
+            description="Start a private chat with an AI model, message a bot from the Bots page, or create your own personal bot."
             className="min-h-full"
           >
             <PersonalBotButton variant="row" className="w-auto" />
