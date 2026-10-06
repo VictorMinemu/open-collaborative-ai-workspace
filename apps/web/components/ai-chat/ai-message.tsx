@@ -6,7 +6,7 @@ import { Markdown } from "@/components/markdown/markdown";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useCopy } from "@/hooks/use-copy";
 import { cn } from "@/lib/utils";
-import { GenerationError } from "./generation-error";
+import { GenerationError, markStreamed } from "./generation-error";
 
 /**
  * One turn of an AI chat (P-09): the member's turns are right-aligned bubbles; answers are full width through the
@@ -32,6 +32,8 @@ export function AiMessage({ message, text }: { message: Message; text: string })
   }
 
   const streaming = message.status === "streaming";
+  // A failure that follows a stream seen on this page arrived live (05-07: the usage-limit dialog opens once).
+  if (streaming) markStreamed(message.id);
   return (
     <div
       data-testid="ai-message"
@@ -45,7 +47,14 @@ export function AiMessage({ message, text }: { message: Message; text: string })
           <Markdown text={text} variant="document" streaming={streaming} className="text-[15px] leading-7" />
         ) : null}
       </div>
-      {message.status === "failed" ? <GenerationError code={message.generation?.errorCode ?? null} /> : null}
+      {message.status === "failed" ? (
+        <GenerationError
+          messageId={message.id}
+          chatKey={message.conversationId}
+          code={message.generation?.errorCode ?? null}
+          param={message.generation?.errorParam ?? null}
+        />
+      ) : null}
       {streaming ? (
         <span
           data-testid="ai-streaming-caret"
