@@ -3,7 +3,7 @@ import { EventTypes } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TEST_SETUP_TOKEN, TestClient } from "../../../testing";
-import { type AiStack, seedPlan, startAiStack, subscribeConv } from "../../../testing-ai";
+import { type AiStack, startAiStack, subscribeConv } from "../../../testing-ai";
 import { invite } from "../../../testing-workzone";
 
 /**
@@ -89,6 +89,19 @@ async function failingTurn(as: TestClient, chatId: string, body: string) {
 const planRows = (list: Json) => list.models.filter((m: Json) => m.group === "chatgpt_plan");
 const orgRows = (list: Json) => list.models.filter((m: Json) => m.group === "organization");
 
+/** Signs `as` in through the 05-05 flow against the fake SIWC server (start → authorize → complete). */
+async function reconnect(as: TestClient): Promise<Json> {
+  const start = await ok(as.request("POST", "/api/v1/me/model-credentials/chatgpt/start", {}));
+  const res = await fetch(start.authorizeUrl, { redirect: "manual" });
+  const location = res.headers.get("location") ?? "";
+  return ok(
+    as.request("POST", "/api/v1/me/model-credentials/chatgpt/complete", {
+      flowId: start.flowId,
+      redirectUrl: location,
+    }),
+  );
+}
+
 beforeAll(async () => {
   stack = await startAiStack();
   su = new pg.Client({ connectionString: stack.db.superuserUrl });
@@ -120,8 +133,9 @@ beforeAll(async () => {
       allowedModels: ["claude-sonnet-5-5"],
     }),
   );
-  await seedPlan(sam);
-  await seedPlan(alex);
+  // Both members connect through the real 05-05 flow against the fake SIWC server, so a later Reconnect works.
+  expect((await reconnect(sam)).state).toBe("connected");
+  expect((await reconnect(alex)).state).toBe("connected");
 });
 
 afterAll(async () => {
@@ -201,5 +215,136 @@ describe("a usage limit mid-answer keeps the partial text and never switches bil
     expect(stack.fake.requests("anthropic").length).toBeGreaterThan(0);
     expect(stack.fake.requests("responses")).toHaveLength(0);
     expect(res.generation.metered).toBe(true);
+  });
+});
+
+const stateAudits = async () =>
+  (
+    await su.query(
+      "select * from app.audit_events where action = 'ai_credential.state_changed' order by occurred_at",
+    )
+  ).rows as Json[];
+
+describe("every other plan state maps to one outcome and one credential state (D-02)", () => {
+  let alexChat: string;
+
+  it("not eligible (403 before streaming): failed user_not_eligible, empty body, credential not_eligible", async () => {
+    alexChat = await planChat(alex);
+    const { g, msg, responses, anthropic } = await failingTurn(alex, alexChat, "hi [[plan:not_eligible]]");
+    expect(g).toMatchObject({ status: "failed", error_code: "user_not_eligible", error_param: null });
+    expect(msg).toMatchObject({ status: "failed", body: "" });
+    expect(responses).toBe(1);
+    expect(anthropic).toBe(0);
+    expect((await credential(alexId))?.status).toBe("not_eligible");
+    expect((await ok(alex.request("GET", STATUS))).state).toBe("not_eligible");
+  });
+
+  it("the model list marks the plan unavailable (not_eligible) and defaults to the organization model", async () => {
+    const list = await ok(alex.request("GET", "/api/v1/ai-chat/models"));
+    const plan = planRows(list);
+    expect(plan.length).toBeGreaterThan(0);
+    expect(plan.every((m: Json) => !m.available && m.reason === "not_eligible")).toBe(true);
+    expect(list.defaultRef).toEqual(SONNET);
+    const refused = await send(alex, alexChat, "again on the plan");
+    expect(refused.status).toBe(409);
+    expect(errorOf(refused)).toMatchObject({
+      code: "model_unavailable",
+      details: { reason: "not_eligible" },
+    });
+  });
+
+  it("a reconnect through the sign-in flow returns the credential to connected", async () => {
+    const status = await reconnect(alex);
+    expect(status.state).toBe("connected");
+    expect((await credential(alexId))?.status).toBe("connected");
+    const list = await ok(alex.request("GET", "/api/v1/ai-chat/models"));
+    expect(list.defaultRef).toMatchObject({ backend: "chatgpt_plan" });
+  });
+
+  it("invalid user (401): failed invalid_credential, credential needs_reconnect, plan rows needs_reconnect", async () => {
+    const chatId = await planChat(sam);
+    const { g, responses, anthropic } = await failingTurn(sam, chatId, "hi [[plan:invalid_user]]");
+    expect(g).toMatchObject({ status: "failed", error_code: "invalid_credential" });
+    expect(responses).toBe(1);
+    expect(anthropic).toBe(0);
+    expect((await credential(samId))?.status).toBe("needs_reconnect");
+    const list = await ok(sam.request("GET", "/api/v1/ai-chat/models"));
+    expect(planRows(list).every((m: Json) => !m.available && m.reason === "needs_reconnect")).toBe(true);
+    expect(list.defaultRef).toEqual(SONNET);
+    // Reconnect (05-05 flow) brings the plan back.
+    expect((await reconnect(sam)).state).toBe("connected");
+  });
+
+  it("unavailable (503): failed usage_unavailable, the credential stays connected, no retry", async () => {
+    const chatId = await planChat(sam);
+    const { g, responses, anthropic } = await failingTurn(sam, chatId, "hi [[plan:unavailable]]");
+    expect(g).toMatchObject({ status: "failed", error_code: "usage_unavailable" });
+    expect(responses).toBe(1);
+    expect(anthropic).toBe(0);
+    expect((await credential(samId))?.status).toBe("connected");
+  });
+
+  it("unsupported capability (400): failed unsupported_capability with errorParam input_file", async () => {
+    const chatId = await planChat(sam);
+    const ws = await subscribeConv(stack.baseUrl, sam, chatId);
+    const { res, g } = await failingTurn(sam, chatId, "read this [[plan:unsupported:input_file]]");
+    expect(g).toMatchObject({
+      status: "failed",
+      error_code: "unsupported_capability",
+      error_param: "input_file",
+    });
+    await ws.waitFor(() =>
+      ws
+        .durable(EventTypes.messageUpdated)
+        .some((f) => (f.data as Json).message.id === res.assistantMessage.id),
+    );
+    const updated = ws
+      .durable(EventTypes.messageUpdated)
+      .find((f) => (f.data as Json).message.id === res.assistantMessage.id)?.data as Json;
+    expect(updated.message.generation).toMatchObject({
+      errorCode: "unsupported_capability",
+      errorParam: "input_file",
+    });
+    expect((await credential(samId))?.status).toBe("connected");
+    ws.close();
+  });
+
+  it("each credential transition is audited with {provider, state, reason} only", async () => {
+    const rows = await stateAudits();
+    expect(rows.map((r) => r.metadata)).toEqual([
+      { provider: "chatgpt_plan", state: "not_eligible", reason: "user_not_eligible" },
+      { provider: "chatgpt_plan", state: "needs_reconnect", reason: "invalid_credential" },
+    ]);
+    expect(rows.map((r) => r.user_id)).toEqual([alexId, samId]);
+    const text = JSON.stringify(rows);
+    expect(text).not.toContain("fake-plan-");
+    expect(text).not.toContain("fake-refresh-");
+    expect(text).not.toContain("[[plan:");
+    expect(text).not.toContain("hi ");
+  });
+});
+
+describe("welcome-seen (OpenAI UI rule: a one-time welcome after connecting)", () => {
+  it("marks the caller's own credential only and is idempotent", async () => {
+    expect((await ok(sam.request("GET", STATUS))).welcomeSeen).toBe(false);
+    const first = await ok(sam.request("POST", WELCOME_SEEN, {}));
+    expect(first).toMatchObject({ state: "connected", welcomeSeen: true });
+    const at = (await credential(samId))?.welcome_seen_at;
+    expect(at).toBeTruthy();
+    const again = await ok(sam.request("POST", WELCOME_SEEN, {}));
+    expect(again.welcomeSeen).toBe(true);
+    expect((await credential(samId))?.welcome_seen_at).toEqual(at);
+    // Alex's credential is untouched.
+    expect((await credential(alexId))?.welcome_seen_at).toBeNull();
+    expect((await ok(alex.request("GET", STATUS))).welcomeSeen).toBe(false);
+  });
+
+  it("a reconnect keeps the welcome seen; a member without a connection gets their status and no row", async () => {
+    await reconnect(sam);
+    expect((await ok(sam.request("GET", STATUS))).welcomeSeen).toBe(true);
+    const adminStatus = await ok(admin.request("POST", WELCOME_SEEN, {}));
+    expect(adminStatus).toMatchObject({ state: "not_connected", welcomeSeen: false });
+    const rows = await su.query("select count(*)::int as n from app.user_model_credentials");
+    expect(rows.rows[0].n).toBe(2);
   });
 });
