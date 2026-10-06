@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 34
+open_count: 39
 waived_count: 0
 fixed_count: 16
-total_count: 50
-last_updated: 2026-10-06T10:22:12.492Z
+total_count: 55
+last_updated: 2026-10-06T10:38:03.410Z
 ---
 
 # Broken Windows Ledger
@@ -65,6 +65,11 @@ last_updated: 2026-10-06T10:22:12.492Z
 | 48 | 04 | deviation | apps/web/components/chat/use-read-cursor.ts |  | Shared read-cursor hook (not in plan list): detached windows read only what they show, per-tab hold in sessionStorage, New messages divider on open | open |  | 2026-10-06T09:33:56.493Z |  |
 | 49 | 04 | deviation | apps/api/src/modules/artifact/attachments.ts |  | 04-12: attachment preview/large redirects send CORP cross-origin (Chromium treats IP:port as separate sites; helmet same-site blocked previews) | open |  | 2026-10-06T10:22:12.419Z |  |
 | 50 | 04 | deviation | apps/web/components/chat/dm-view.tsx |  | 04-12: DMs with a bot offer no attachments until bots can read files | open |  | 2026-10-06T10:22:12.492Z |  |
+| 51 | 04 | deviation | packages/contracts/src/notifications.ts |  | decideNotify optional actorKind: a bot's reply in a bot DM pops only on a mention or level all (04-09 open item) | open |  | 2026-10-06T10:38:03.132Z |  |
+| 52 | 04 | deviation | apps/web/components/chat/chat-sidebar.tsx |  | All view count and collapsed sections skip muted rows unless mentioned (same rule as the badge) | open |  | 2026-10-06T10:38:03.199Z |  |
+| 53 | 04 | deviation | apps/web/components/settings/account-nav.ts |  | Settings › Notifications linked as an Account section instead of settings-nav.ts | open |  | 2026-10-06T10:38:03.268Z |  |
+| 54 | 04 | deviation | apps/web/components/notifications/os-notifier.tsx |  | OsNotifier shares the sidebar's user: cursor (GET /channels userSeq), applies notification_prefs.updated app-wide, skips pop-ups older than 10 minutes | open |  | 2026-10-06T10:38:03.340Z |  |
+| 55 | 04 | deviation | apps/desktop/e2e/smoke.e2e.ts |  | Smoke bridge key list gains setBadgeCount plus a badge round trip (not in plan list) | open |  | 2026-10-06T10:38:03.410Z |  |
 
 ````json
 [
@@ -666,6 +671,66 @@ last_updated: 2026-10-06T10:22:12.492Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-06T10:22:12.492Z",
+    "resolved_at": null
+  },
+  {
+    "id": 51,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "packages/contracts/src/notifications.ts",
+    "line": null,
+    "description": "decideNotify optional actorKind: a bot's reply in a bot DM pops only on a mention or level all (04-09 open item)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T10:38:03.132Z",
+    "resolved_at": null
+  },
+  {
+    "id": 52,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/web/components/chat/chat-sidebar.tsx",
+    "line": null,
+    "description": "All view count and collapsed sections skip muted rows unless mentioned (same rule as the badge)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T10:38:03.199Z",
+    "resolved_at": null
+  },
+  {
+    "id": 53,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/web/components/settings/account-nav.ts",
+    "line": null,
+    "description": "Settings › Notifications linked as an Account section instead of settings-nav.ts",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T10:38:03.268Z",
+    "resolved_at": null
+  },
+  {
+    "id": 54,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/web/components/notifications/os-notifier.tsx",
+    "line": null,
+    "description": "OsNotifier shares the sidebar's user: cursor (GET /channels userSeq), applies notification_prefs.updated app-wide, skips pop-ups older than 10 minutes",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T10:38:03.340Z",
+    "resolved_at": null
+  },
+  {
+    "id": 55,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/desktop/e2e/smoke.e2e.ts",
+    "line": null,
+    "description": "Smoke bridge key list gains setBadgeCount plus a badge round trip (not in plan list)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T10:38:03.410Z",
     "resolved_at": null
   }
 ]
