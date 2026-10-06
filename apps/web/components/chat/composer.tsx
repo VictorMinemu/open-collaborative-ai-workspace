@@ -1,8 +1,9 @@
 "use client";
 
-import { MENTION_ALL_WARN_AT, mentionAllOf } from "@ocw/contracts";
-import { ArrowUp, AtSign, Megaphone } from "lucide-react";
+import { type Attachment, MENTION_ALL_WARN_AT, mentionAllOf } from "@ocw/contracts";
+import { ArrowUp, AtSign, Megaphone, Paperclip } from "lucide-react";
 import {
+  type ClipboardEvent,
   type KeyboardEvent,
   type ReactNode,
   type RefObject,
@@ -22,7 +23,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { useAttachmentsConfig } from "@/lib/attachment-queries";
 import { cn } from "@/lib/utils";
+import { AttachmentTray, useAttachmentQueue } from "./attachments/attachment-tray";
+import { formatBytes } from "./attachments/files";
 import { BotBadge, PrincipalAvatar } from "./principal-avatar";
 import type { DirEntry } from "./use-chat-directory";
 
@@ -43,6 +47,13 @@ const keyOf = (x: Suggestion) => (x.type === "special" ? `special:${x.s.handle}`
 export interface ComposerApi {
   /** Focus and start a mention (`@`) at the caret, opening the suggestions. */
   insertMention(): void;
+  /** Queue files for upload (a drop on the conversation pane); ignored when attachments are off. */
+  addFiles(files: File[]): void;
+}
+
+/** "Up to 10 files, 25 MB each": the limits line under the drop overlay. */
+export function attachmentLimitsHint(config: { maxBytes: number; maxPerMessage: number } | undefined) {
+  return config ? `Up to ${config.maxPerMessage} files, ${formatBytes(config.maxBytes)} each` : undefined;
 }
 
 const TOKEN_BEFORE_CARET = /(^|[\s([{,;:!?"'])@([a-zA-Z0-9._-]{0,40})$/;
@@ -65,6 +76,9 @@ function rank(c: MentionCandidate, q: string): number {
  * Message composer: autosizing textarea, Enter to send / Shift+Enter for a newline, `@` autocomplete over
  * channel members and org bots (bots outside the channel are added when mentioned) plus `@channel` / `@here` where
  * allowed, a confirmation before notifying more than MENTION_ALL_WARN_AT members, throttled typing signal.
+ * With a `conversationId` and storage enabled (CHAT-12, P-10), files attach through the paperclip (or a drop on the
+ * pane, through `apiRef.addFiles`); they upload at once, show progress in the tray, and a message can be sent with
+ * text, files or both once every upload finished.
  */
 export function Composer({
   placeholder,
@@ -79,10 +93,13 @@ export function Composer({
   mentions = true,
   specialMentions,
   memberCount,
+  conversationId,
+  attachments = true,
 }: {
   placeholder: string;
   candidates: MentionCandidate[];
-  onSend: (body: string) => void;
+  /** `attachmentIds` are the verified uploads (in tray order); `files` their DTOs, for the optimistic row. */
+  onSend: (body: string, attachmentIds: string[], files: Attachment[]) => void;
   onTyping?: () => void;
   disabled?: boolean;
   autoFocus?: boolean;
@@ -95,6 +112,10 @@ export function Composer({
   specialMentions?: SpecialMention[];
   /** Members of the conversation: above MENTION_ALL_WARN_AT, `@channel` / `@here` asks for confirmation. */
   memberCount?: number;
+  /** Where files are uploaded; without it the composer is text-only. */
+  conversationId?: string;
+  /** false hides the paperclip even when storage is on (e.g. a DM with a bot, which reads text only). */
+  attachments?: boolean;
 }) {
   const ref = useRef<HTMLTextAreaElement>(null);
   const [value, setValue] = useState("");
@@ -105,6 +126,11 @@ export function Composer({
   const pendingCaret = useRef<{ pos: number; detect: boolean } | null>(null);
 
   const [confirming, setConfirming] = useState<string | null>(null);
+
+  const filesConfig = useAttachmentsConfig();
+  const canAttach = !!conversationId && attachments && !disabled && filesConfig.data?.enabled === true;
+  const queue = useAttachmentQueue(conversationId ?? "", canAttach ? filesConfig.data : null);
+  const fileInput = useRef<HTMLInputElement>(null);
 
   const suggestions = useMemo<Suggestion[]>(() => {
     if (!query) return [];
@@ -163,7 +189,8 @@ export function Composer({
   };
 
   const commit = (body: string) => {
-    onSend(body);
+    onSend(body, queue.readyIds, queue.ready);
+    queue.reset();
     setValue("");
     setQuery(null);
     lastTyping.current = 0;
@@ -171,7 +198,7 @@ export function Composer({
 
   const send = () => {
     const body = value.trim();
-    if (!body || disabled) return;
+    if (!canSend) return;
     // Pitfall 6: notifying a whole channel is confirmed above MENTION_ALL_WARN_AT members (like Slack).
     if (specialMentions?.length && (memberCount ?? 0) > MENTION_ALL_WARN_AT && mentionAllOf(body)) {
       setQuery(null);
@@ -179,6 +206,19 @@ export function Composer({
       return;
     }
     commit(body);
+  };
+
+  /**
+   * Pasted files (a screenshot, an image copied from a page, files copied in the file manager) join the tray. The
+   * text of the paste still goes into the message, except a bare file name the system adds next to the file.
+   */
+  const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!canAttach) return;
+    const files = Array.from(e.clipboardData?.files ?? []);
+    if (files.length === 0) return;
+    const text = e.clipboardData.getData("text/plain").trim();
+    if (!text || files.some((f) => f.name === text)) e.preventDefault();
+    addFiles(files);
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -219,9 +259,17 @@ export function Composer({
     setValue(next);
   };
 
-  if (apiRef) apiRef.current = { insertMention: insertAt };
+  const addFiles = (files: File[]) => {
+    if (!canAttach || files.length === 0) return;
+    queue.add(files);
+    ref.current?.focus({ preventScroll: true });
+  };
 
-  const canSend = value.trim().length > 0 && !disabled;
+  if (apiRef) apiRef.current = { insertMention: insertAt, addFiles };
+
+  // Text, files or both; never while a file is still uploading or one failed (it must be removed or retried).
+  const canSend =
+    (value.trim().length > 0 || queue.readyIds.length > 0) && !disabled && !queue.busy && !queue.blocked;
 
   return (
     <div className="relative">
@@ -272,59 +320,89 @@ export function Composer({
 
       <div
         className={cn(
-          "flex items-end gap-1.5 rounded-xl border bg-background p-1.5 pl-3 shadow-xs transition-[border-color,box-shadow] dark:bg-input/20",
+          "rounded-xl border bg-background p-1.5 pl-3 shadow-xs transition-[border-color,box-shadow] dark:bg-input/20",
           "focus-within:border-ring/60 focus-within:ring-[3px] focus-within:ring-ring/15",
           disabled && "opacity-60",
         )}
       >
-        <textarea
-          ref={ref}
-          data-testid={testId}
-          rows={1}
-          value={value}
-          disabled={disabled}
-          placeholder={placeholder}
-          aria-label={placeholder}
-          onChange={(e) => {
-            setValue(e.target.value);
-            detect(e.target.value, e.target.selectionStart ?? e.target.value.length);
-            const now = Date.now();
-            if (onTyping && e.target.value && now - lastTyping.current > 3000) {
-              lastTyping.current = now;
-              onTyping();
-            }
-          }}
-          onSelect={(e) => detect(e.currentTarget.value, e.currentTarget.selectionStart ?? 0)}
-          onBlur={() => setTimeout(() => setQuery(null), 120)}
-          onKeyDown={onKeyDown}
-          className="scrollbar-thin max-h-60 min-h-8 flex-1 resize-none bg-transparent py-1.5 text-[14.5px] leading-[1.45] outline-none placeholder:text-muted-foreground/70 disabled:cursor-not-allowed"
-        />
-        {mentions ? (
+        {canAttach ? <AttachmentTray queue={queue} /> : null}
+        <div className="flex items-end gap-1.5">
+          <textarea
+            ref={ref}
+            data-testid={testId}
+            rows={1}
+            value={value}
+            disabled={disabled}
+            placeholder={placeholder}
+            aria-label={placeholder}
+            onChange={(e) => {
+              setValue(e.target.value);
+              detect(e.target.value, e.target.selectionStart ?? e.target.value.length);
+              const now = Date.now();
+              if (onTyping && e.target.value && now - lastTyping.current > 3000) {
+                lastTyping.current = now;
+                onTyping();
+              }
+            }}
+            onSelect={(e) => detect(e.currentTarget.value, e.currentTarget.selectionStart ?? 0)}
+            onBlur={() => setTimeout(() => setQuery(null), 120)}
+            onKeyDown={onKeyDown}
+            onPaste={onPaste}
+            className="scrollbar-thin max-h-60 min-h-8 flex-1 resize-none bg-transparent py-1.5 text-[14.5px] leading-[1.45] outline-none placeholder:text-muted-foreground/70 disabled:cursor-not-allowed"
+          />
+          {canAttach ? (
+            <>
+              <input
+                ref={fileInput}
+                type="file"
+                multiple
+                hidden
+                tabIndex={-1}
+                data-testid="attach-file"
+                onChange={(e) => {
+                  addFiles(Array.from(e.target.files ?? []));
+                  e.target.value = "";
+                }}
+              />
+              <button
+                type="button"
+                aria-label="Attach files"
+                title="Attach files"
+                data-testid="attach-button"
+                onClick={() => fileInput.current?.click()}
+                className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40"
+              >
+                <Paperclip className="size-4" />
+              </button>
+            </>
+          ) : null}
+          {mentions ? (
+            <button
+              type="button"
+              aria-label="Mention someone"
+              onClick={insertAt}
+              disabled={disabled}
+              className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40 disabled:opacity-50"
+            >
+              <AtSign className="size-4" />
+            </button>
+          ) : null}
           <button
             type="button"
-            aria-label="Mention someone"
-            onClick={insertAt}
-            disabled={disabled}
-            className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40 disabled:opacity-50"
+            aria-label="Send message"
+            data-testid={`${testId}-send`}
+            onClick={send}
+            disabled={!canSend}
+            className={cn(
+              "inline-flex size-8 shrink-0 items-center justify-center rounded-lg outline-none transition-[background-color,color,opacity] focus-visible:ring-[3px] focus-visible:ring-ring/40",
+              canSend
+                ? "bg-primary text-primary-foreground hover:bg-primary/90"
+                : "bg-muted text-muted-foreground",
+            )}
           >
-            <AtSign className="size-4" />
+            <ArrowUp className="size-4" strokeWidth={2.4} />
           </button>
-        ) : null}
-        <button
-          type="button"
-          aria-label="Send message"
-          data-testid={`${testId}-send`}
-          onClick={send}
-          disabled={!canSend}
-          className={cn(
-            "inline-flex size-8 shrink-0 items-center justify-center rounded-lg outline-none transition-[background-color,color,opacity] focus-visible:ring-[3px] focus-visible:ring-ring/40",
-            canSend
-              ? "bg-primary text-primary-foreground hover:bg-primary/90"
-              : "bg-muted text-muted-foreground",
-          )}
-        >
-          <ArrowUp className="size-4" strokeWidth={2.4} />
-        </button>
+        </div>
       </div>
       {footer}
 

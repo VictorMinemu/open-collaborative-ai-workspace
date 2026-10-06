@@ -75,6 +75,18 @@ const isNotFound = (err: unknown) => {
 };
 
 /** Null when storage is not configured (endpoint, key id and secret all required); attachments are then disabled. */
+/** Whether `createObjectStorage` would return a store (endpoint, key id and secret all set), without building one. */
+export function objectStorageConfigured(env: Env, secrets: SecretStore): boolean {
+  if (!env.OCW_S3_ENDPOINT || !env.OCW_S3_ACCESS_KEY_ID) return false;
+  try {
+    secrets.resolveSync({ provider: "env", key: "OCW_S3_SECRET_ACCESS_KEY" });
+    return true;
+  } catch (err) {
+    if (err instanceof MissingSecretError) return false;
+    throw err;
+  }
+}
+
 export function createObjectStorage(env: Env, secrets: SecretStore): ObjectStorage | null {
   const endpoint = env.OCW_S3_ENDPOINT;
   const publicUrl = env.OCW_S3_PUBLIC_URL ?? endpoint;

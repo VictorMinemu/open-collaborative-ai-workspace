@@ -11,7 +11,7 @@ import { createObjectStorage, type ObjectStorage } from "./storage";
 import { createAttachmentSweeper } from "./sweeper";
 
 export { type AttachmentRow, toAttachment } from "./model";
-export { attachmentKey, createObjectStorage, type ObjectStorage } from "./storage";
+export { attachmentKey, createObjectStorage, type ObjectStorage, objectStorageConfigured } from "./storage";
 export { type AttachmentSweeper, createAttachmentSweeper } from "./sweeper";
 
 const CORS_RETRY_MAX_MS = 60_000;

@@ -105,15 +105,7 @@ async function seed(label: string, convId: string): Promise<Seeded> {
   const word = `zq${label}${randomUUID()
     .slice(0, 8)
     .replace(/[0-9-]/g, "x")}`;
-  const m1 = await ok(
-    sam.request("POST", `/api/v1/conversations/${convId}/messages`, { body: `the ${word} plan is ready` }),
-  );
-  const m2 = await ok(
-    alex.request("POST", `/api/v1/conversations/${convId}/messages`, { body: "great, ship it" }),
-  );
-  await ok(alex.request("PUT", `/api/v1/messages/${m1.id}/reactions/${THUMBS}`));
-  await ok(sam.request("PUT", `/api/v1/conversations/${convId}/pins/${m1.id}`));
-  await ok(sam.request("PUT", `/api/v1/messages/${m1.id}/save`));
+  // The plan's file, uploaded first and attached on send (CHAT-12), so every participant may open it.
   const presign = await ok(
     sam.request("POST", `/api/v1/conversations/${convId}/attachments`, {
       filename: `${word}.png`,
@@ -124,8 +116,19 @@ async function seed(label: string, convId: string): Promise<Seeded> {
   const put = await fetch(presign.upload.url, { method: "PUT", headers: presign.upload.headers, body: PNG });
   expect(put.status).toBe(200);
   await ok(sam.request("POST", `/api/v1/attachments/${presign.attachment.id}/complete`));
-  // Linked to the message as Plan 04-12 will do on send, so every participant may open it.
-  await su.query("update app.attachments set message_id = $1 where id = $2", [m1.id, presign.attachment.id]);
+  const m1 = await ok(
+    sam.request("POST", `/api/v1/conversations/${convId}/messages`, {
+      body: `the ${word} plan is ready`,
+      attachmentIds: [presign.attachment.id],
+    }),
+  );
+  expect(m1.attachments.map((a: { id: string }) => a.id)).toEqual([presign.attachment.id]);
+  const m2 = await ok(
+    alex.request("POST", `/api/v1/conversations/${convId}/messages`, { body: "great, ship it" }),
+  );
+  await ok(alex.request("PUT", `/api/v1/messages/${m1.id}/reactions/${THUMBS}`));
+  await ok(sam.request("PUT", `/api/v1/conversations/${convId}/pins/${m1.id}`));
+  await ok(sam.request("PUT", `/api/v1/messages/${m1.id}/save`));
   return { label, convId, word, messageId: m1.id, replyId: m2.id, attachmentId: presign.attachment.id };
 }
 

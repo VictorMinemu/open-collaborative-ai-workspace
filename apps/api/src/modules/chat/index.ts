@@ -43,6 +43,7 @@ import { z } from "zod";
 import { type ApiModule, authOf, type Core, tenant } from "../../core";
 import type { AgentMention, ThreadContext } from "../../lib/chat-agent-bridge";
 import { badRequest, conflict, forbidden, gone, HttpError, notFound } from "../../lib/errors";
+import { objectStorageConfigured } from "../artifact";
 import {
   AuthzDeniedError,
   agentResource,
@@ -176,6 +177,8 @@ export function createChatModule(core: Core): ApiModule {
   const deps: ChatDeps = { audit: core.audit, realtime: core.realtime };
   const perms = createPermissionService(core);
   const access = createConversationAccess(core);
+  /** Object storage (ADR-0015) is optional: without it no file can be uploaded, so none can be attached (P-10). */
+  const storageConfigured = objectStorageConfigured(core.env, core.secretStore);
 
   /** The channel permissions the web needs per channel (header menu, composer, members panel, message actions). */
   const VIEWER_CAN = [
@@ -1059,10 +1062,9 @@ export function createChatModule(core: Core): ApiModule {
             if (isDirect(conv.kind) && req.body.threadRootId) {
               throw badRequest("Direct conversations have no threads", "dm_is_flat");
             }
-            // The contract accepts attachment-only posts; the upload pipeline (Plan 04-04) has not landed yet,
-            // so nothing may create an empty message in the meantime.
-            if (req.body.attachmentIds?.length || !req.body.body) {
-              throw badRequest("Attachments are not available yet", "attachments_unavailable");
+            // Files (CHAT-12) need object storage; without it nothing is linkable, so say why (P-10).
+            if (req.body.attachmentIds?.length && !storageConfigured) {
+              throw new HttpError(503, "attachments_disabled", "File attachments are not configured");
             }
             // @channel / @here (CHAT-08, Pitfall 6, P-11): channels only, deny-able, one per channel per minute.
             const mentionAll = conv.kind === "channel" ? mentionAllOf(req.body.body) : null;
@@ -1083,6 +1085,7 @@ export function createChatModule(core: Core): ApiModule {
               clientMessageId: req.body.clientMessageId,
               clientKind: auth.clientKind,
               sessionId: auth.sessionId,
+              attachmentIds: req.body.attachmentIds,
             });
             if (result.created) {
               // Observers (notifications, CHAT-08) in the message transaction, through the seam (no import).

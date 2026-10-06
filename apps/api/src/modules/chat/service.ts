@@ -22,6 +22,7 @@ import {
 } from "@ocw/db";
 import { and, asc, desc, eq, gt, inArray, isNull, lt, sql } from "drizzle-orm";
 import { badRequest, notFound } from "../../lib/errors";
+import { attachmentsForMessages, linkAttachments } from "../artifact";
 import type { AuditService } from "../audit";
 import type { ChannelFacts } from "../organization";
 import type { RealtimeService } from "../realtime";
@@ -588,17 +589,27 @@ export function toMessage(row: MessageRow, dir: Directory, replyParticipants?: M
   };
 }
 
+/** Adds `attachments` (ready files, upload order; one batched query) to message DTOs; tombstones get none (P-05). */
+export async function withAttachments(tx: Tx, list: Message[]): Promise<Message[]> {
+  const files = await attachmentsForMessages(
+    tx,
+    list.filter((m) => !m.deletedAt).map((m) => m.id),
+  );
+  return list.map((m) => ({ ...m, attachments: m.deletedAt ? [] : (files.get(m.id) ?? []) }));
+}
+
 /**
  * Adds the viewer-specific fields (P-04) to REST snapshots: `reactions` with `mine` for `viewerId`, `pinned` and
- * whether `viewerId` saved it.
- * Tombstones carry no reactions and no pin (P-05). Realtime payloads never go through here.
+ * whether `viewerId` saved it, plus the message's `attachments` (CHAT-12), so every page, thread, pin and saved
+ * list shows its files. Tombstones carry no reactions, no pin and no attachments (P-05). Realtime payloads never go
+ * through here (they carry `attachments` themselves).
  */
 export async function hydrateViewer(tx: Tx, list: Message[], viewerId: string): Promise<Message[]> {
   const live = list.filter((m) => !m.deletedAt).map((m) => m.id);
   const reactions = await reactionsFor(tx, live, viewerId);
   const pinned = await pinnedFor(tx, live);
   const saved = await savedFor(tx, live, viewerId);
-  return list.map((m) =>
+  return (await withAttachments(tx, list)).map((m) =>
     m.deletedAt
       ? { ...m, reactions: [], pinned: false, saved: false }
       : { ...m, reactions: reactions.get(m.id) ?? [], pinned: pinned.has(m.id), saved: saved.has(m.id) },
@@ -761,6 +772,11 @@ export interface PostInput {
   sessionId?: string | null;
   /** Agents may answer a reply id; it is normalised to its root instead of being refused. */
   lenientThreadRoot?: boolean;
+  /**
+   * Files the author uploaded to this conversation (CHAT-12), linked in this transaction before `message.created`
+   * is appended, so the event carries them. Any id that is not linkable rolls the post back (409).
+   */
+  attachmentIds?: string[] | undefined;
 }
 
 export interface PostResult {
@@ -799,7 +815,8 @@ export async function postMessage(
       .limit(1);
     if (existing) {
       const root = existing.threadId ? await getMessage(tx, existing.threadId) : null;
-      return { row: existing, message: toMessage(existing, dir), created: false, root };
+      const [message] = await withAttachments(tx, [toMessage(existing, dir)]);
+      return { row: existing, message: message!, created: false, root };
     }
   }
 
@@ -833,7 +850,18 @@ export async function postMessage(
     })
     .returning();
   if (!row) throw new Error("message insert returned no row");
-  const message = toMessage(row, dir, root ? undefined : []);
+  let message = toMessage(row, dir, root ? undefined : []);
+  if (input.attachmentIds?.length) {
+    await linkAttachments(tx, {
+      conversationId: conv.id,
+      messageId: row.id,
+      uploaderId: author.id,
+      ids: input.attachmentIds,
+    });
+    const [hydrated] = await withAttachments(tx, [message]);
+    if (!hydrated) throw new Error("message DTO missing");
+    message = hydrated;
+  }
   const seq = await deps.realtime.appendEvent(tx, topic, EventTypes.messageCreated, { message });
   if (seq !== nextSeq) throw new Error(`stream seq drift on ${topic}: expected ${nextSeq}, got ${seq}`);
 

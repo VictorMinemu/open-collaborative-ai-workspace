@@ -311,6 +311,11 @@ export function registerAttachmentRoutes(app: App, deps: AttachmentRoutesDeps): 
             disposition: dispositionFor(part, row.filename),
           });
         });
+        // The web app embeds these as <img> from its own origin. Helmet's `same-site` CORP blocks that wherever
+        // the web and the API are not same-site, e.g. a self-hosted install on an IP address with two ports
+        // (Chromium treats each IP:port as its own site). The 302 carries no body, the session cookie is
+        // SameSite=Lax (a cross-site page gets a 404 here), and the access check above runs on every request.
+        reply.header("cross-origin-resource-policy", "cross-origin");
         return redirect(reply, url);
       },
     );

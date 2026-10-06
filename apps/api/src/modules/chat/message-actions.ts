@@ -17,7 +17,15 @@ import { channelResource, type PermissionService } from "../organization";
 import type { ConversationAccess } from "./access";
 import { type Directory, loadDirectory } from "./directory";
 import { resolveMentions } from "./mentions";
-import { type ChatDeps, convTopic, iso, type MessageRow, replyParticipantsFor, toMessage } from "./service";
+import {
+  type ChatDeps,
+  convTopic,
+  iso,
+  type MessageRow,
+  replyParticipantsFor,
+  toMessage,
+  withAttachments,
+} from "./service";
 
 /**
  * Message actions (CHAT-06, D-01): edit and soft delete with an append-only version history. Every change locks
@@ -50,11 +58,20 @@ async function nextVersion(tx: Tx, messageId: string): Promise<number> {
   return Number(row?.n ?? 0) + 1;
 }
 
-/** The DTO of a message as the API returns it (thread roots carry their reply participants). */
+/**
+ * The DTO of a message as the API returns it: thread roots carry their reply participants, and every message its
+ * attachments (an edit keeps the files, CHAT-12).
+ */
 async function dtoOf(tx: Tx, row: MessageRow, dir: Directory): Promise<Message> {
-  if (row.threadId || row.replyCount === 0) return toMessage(row, dir, row.threadId ? undefined : []);
-  const participants = (await replyParticipantsFor(tx, [row.id], dir)).get(row.id) ?? [];
-  return toMessage(row, dir, participants);
+  const participants =
+    row.threadId || row.replyCount === 0
+      ? row.threadId
+        ? undefined
+        : []
+      : ((await replyParticipantsFor(tx, [row.id], dir)).get(row.id) ?? []);
+  const [dto] = await withAttachments(tx, [toMessage(row, dir, participants)]);
+  if (!dto) throw new Error("message DTO missing");
+  return dto;
 }
 
 /**
