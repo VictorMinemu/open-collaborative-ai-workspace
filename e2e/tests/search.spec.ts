@@ -166,14 +166,19 @@ test("palette People shows Sam and a bot (the bot opens its DM); Channels opens 
   const person = palette.locator(`[data-kind="person"][data-person-id="${samId}"]`);
   const bot = palette.locator(`[data-kind="person"][data-person-id="${botId}"]`);
   await expect(person).toBeVisible();
-  await expect(bot).toBeVisible();
-  await expect(bot).toContainText("BOT");
 
   // A person shows their card; back returns to the results.
   await person.click();
   await expect(palette.getByTestId("search-profile")).toContainText("Sam Lee");
   await palette.getByRole("button", { name: "Back to results" }).click();
+  await expect(person).toBeVisible();
+
+  // The bot is a person result too. "sam" alone matches more people than the overview shows on a shared stack
+  // (other specs create their own Sams), so narrow to the bot's name.
+  await palette.getByTestId("search-input").fill("");
+  await palette.getByTestId("search-input").pressSequentially("sammy", { delay: 30 });
   await expect(bot).toBeVisible();
+  await expect(bot).toContainText("BOT");
 
   // The bot opens its DM.
   await bot.click();

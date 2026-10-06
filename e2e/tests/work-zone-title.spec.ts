@@ -16,6 +16,13 @@ test.describe.configure({ mode: "serial" });
 const PROMPT = "Please fix the login redirect bug on the settings page when the session expires";
 const AUTO = "Fix login redirect bug settings";
 
+/**
+ * The tab title for a session: `<title> · Work Zone`, after the unread-mentions count that Phase 4 (04-11) puts in
+ * front of every tab title ("(2) …") when the viewer has unread mentions from other specs on the shared stack.
+ */
+const tabTitle = (title: string) =>
+  new RegExp(`^(\\(\\d+\\+?\\) )?${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} · Work Zone$`);
+
 async function signIn(page: Page) {
   await page.goto("/login");
   await page.getByLabel("Email").fill(ADMIN.email);
@@ -196,7 +203,7 @@ test("automatic title: the first prompt comes back as a short title, live for ev
     for (const p of pages) {
       await p.goto(`${BASE_URL}/work-zone/${id}`);
       await expect(p.getByTestId("session-title")).toHaveText(AUTO);
-      await expect(p).toHaveTitle(`${AUTO} · Work Zone`);
+      await expect(p).toHaveTitle(tabTitle(AUTO));
     }
 
     // ---- a typed title is never replaced, even after its first prompt completed
@@ -220,7 +227,7 @@ test("automatic title: the first prompt comes back as a short title, live for ev
     });
     await page.goto(`/work-zone/${typed}`);
     await expect(page.getByTestId("session-title")).toHaveText(`Typed ${tag}`);
-    await expect(page).toHaveTitle(`Typed ${tag} · Work Zone`);
+    await expect(page).toHaveTitle(tabTitle(`Typed ${tag}`));
   } finally {
     await sam?.context.close();
     await device?.stop();
@@ -271,7 +278,7 @@ test("a session created without a prompt takes its title from the first prompt s
       await expect(p.getByTestId("session-title")).toHaveText(FIRST, { timeout: 15_000 });
     for (const p of pages) {
       await expect(p.getByTestId("session-title")).toHaveText(AUTO_DARK, { timeout: 30_000 });
-      await expect(p).toHaveTitle(`${AUTO_DARK} · Work Zone`);
+      await expect(p).toHaveTitle(tabTitle(AUTO_DARK));
     }
     expect((await detail(adminApi, id)).session).toMatchObject({ title: AUTO_DARK, titleSource: "auto" });
   } finally {
@@ -343,7 +350,7 @@ test("fallback and fit: a policy without haiku keeps the first line; titles fit 
     await signIn(page);
     await page.goto(`/work-zone/${auto}`);
     await expect(page.getByTestId("session-title")).toHaveText(AUTO);
-    await expect(page).toHaveTitle(`${AUTO} · Work Zone`);
+    await expect(page).toHaveTitle(tabTitle(AUTO));
     const header = await measure(page, "session-title");
     expect(header.title).toBe(AUTO);
     expectNotTruncated(header, `the breadcrumb title is not truncated at ${tag}`);
