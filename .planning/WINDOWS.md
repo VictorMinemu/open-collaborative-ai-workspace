@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 25
+open_count: 29
 waived_count: 0
 fixed_count: 14
-total_count: 39
-last_updated: 2026-10-06T08:08:43.546Z
+total_count: 43
+last_updated: 2026-10-06T08:49:19.123Z
 ---
 
 # Broken Windows Ledger
@@ -54,6 +54,10 @@ last_updated: 2026-10-06T08:08:43.546Z
 | 37 | 04 | deviation | packages/contracts/src/chat.ts |  | Add-only ChannelUnit.pathNames, ChannelList.memberUnitIds, ThreadSummary.lastReplies | open |  | 2026-10-06T08:08:43.410Z |  |
 | 38 | 04 | deviation | apps/api/src/modules/agent-channel/index.ts |  | Agent channel resource carries the channel's unit path so unit-scoped rules reach bots | open |  | 2026-10-06T08:08:43.479Z |  |
 | 39 | 04 | deviation | apps/api/src/modules/chat/index.ts |  | conversation.updated with unitId re-decides live conv: subscriptions; #general cannot move; archived PATCH 410 | open |  | 2026-10-06T08:08:43.546Z |  |
+| 40 | 04 | deviation | apps/api/src/modules/notification/snippet.ts |  | Inbox snippets drop Markdown markup (plain one-line text, computed at read time); file not in plan list | open |  | 2026-10-06T08:49:18.908Z |  |
+| 41 | 04 | deviation | apps/api/src/modules/chat/index.ts |  | @channel/@here limit exempts client retries of an already-posted message; channel.mention_all added to viewerCan | open |  | 2026-10-06T08:49:18.977Z |  |
+| 42 | 04 | deviation | e2e/tests/chat-sidebar.spec.ts |  | View list assertion updated for Mentions (inserted second by plan) | open |  | 2026-10-06T08:49:19.050Z |  |
+| 43 | 04 | deviation | apps/api/src/modules/chat/dm-privacy.int.test.ts |  | Inbox privacy covered via list checks and a dedicated describe, not routesFor (GET /notifications is a 200 list) | open |  | 2026-10-06T08:49:19.123Z |  |
 
 ````json
 [
@@ -523,6 +527,54 @@ last_updated: 2026-10-06T08:08:43.546Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-06T08:08:43.546Z",
+    "resolved_at": null
+  },
+  {
+    "id": 40,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/api/src/modules/notification/snippet.ts",
+    "line": null,
+    "description": "Inbox snippets drop Markdown markup (plain one-line text, computed at read time); file not in plan list",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T08:49:18.908Z",
+    "resolved_at": null
+  },
+  {
+    "id": 41,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/api/src/modules/chat/index.ts",
+    "line": null,
+    "description": "@channel/@here limit exempts client retries of an already-posted message; channel.mention_all added to viewerCan",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T08:49:18.977Z",
+    "resolved_at": null
+  },
+  {
+    "id": 42,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "e2e/tests/chat-sidebar.spec.ts",
+    "line": null,
+    "description": "View list assertion updated for Mentions (inserted second by plan)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T08:49:19.050Z",
+    "resolved_at": null
+  },
+  {
+    "id": 43,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/api/src/modules/chat/dm-privacy.int.test.ts",
+    "line": null,
+    "description": "Inbox privacy covered via list checks and a dedicated describe, not routesFor (GET /notifications is a 200 list)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T08:49:19.123Z",
     "resolved_at": null
   }
 ]
