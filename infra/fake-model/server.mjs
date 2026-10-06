@@ -31,6 +31,8 @@
 //
 // Fake ClawHub (fake-clawhub.mjs): the marketplace's read-only `/api/v1/*` routes from fixtures/clawhub.
 //
+// Fake Sign in with ChatGPT (fake-siwc.mjs, 05-05): OIDC discovery, authorize, token, JWKS and revoke under `/siwc`.
+//
 // Env: PORT (default 18999), FAKE_MODEL_HOST (default 0.0.0.0), FAKE_MODEL_CAPTURE_DIR (optional: write each request body as JSON),
 // FAKE_MCP_TOKEN (optional: the fake MCP routes then require `Authorization: Bearer <token>`),
 // FAKE_CLAWHUB_ARTIFACT_DIR (optional: npm-pack tarballs the fake ClawHub serves, digests computed from them).
@@ -57,6 +59,14 @@ try {
 } catch (error) {
   if (error?.code !== "ERR_MODULE_NOT_FOUND") throw error;
   console.warn("fake-model: fake-clawhub.mjs not found, ClawHub routes disabled");
+}
+// And the fake Sign in with ChatGPT server (05-05).
+let createFakeSiwc = null;
+try {
+  ({ createFakeSiwc } = await import("./fake-siwc.mjs"));
+} catch (error) {
+  if (error?.code !== "ERR_MODULE_NOT_FOUND") throw error;
+  console.warn("fake-model: fake-siwc.mjs not found, /siwc routes disabled");
 }
 // And the fake Responses API (Phase 5).
 let fakeResponses = null;
@@ -551,11 +561,13 @@ export function createFakeModelServer(opts = {}) {
   };
   const mcp = createFakeMcp?.({ token: opts.mcpToken ?? process.env.FAKE_MCP_TOKEN ?? "" }) ?? null;
   const clawhub = createFakeClawhub?.({ artifactDir: opts.clawhubArtifactDir }) ?? null;
+  const siwc = createFakeSiwc?.() ?? null;
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     try {
       if (mcp?.(req, res, url)) return;
       if (clawhub?.(req, res, url)) return;
+      if (siwc?.(req, res, url)) return;
       if (req.method === "GET" && (url.pathname === "/health" || url.pathname === "/healthz"))
         return sendJson(res, 200, { ok: true });
       if (req.method === "GET" && url.pathname === "/v1/models") {

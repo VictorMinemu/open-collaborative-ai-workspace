@@ -6,6 +6,7 @@ COPY --chown=root:root infra/fake-model/server.mjs ./server.mjs
 COPY --chown=root:root infra/fake-model/fake-mcp.mjs ./fake-mcp.mjs
 COPY --chown=root:root infra/fake-model/fake-clawhub.mjs ./fake-clawhub.mjs
 COPY --chown=root:root infra/fake-model/fake-responses.mjs ./fake-responses.mjs
+COPY --chown=root:root infra/fake-model/fake-siwc.mjs ./fake-siwc.mjs
 COPY --chown=root:root infra/fake-model/fixtures/clawhub ./fixtures/clawhub
 USER node
 ENV PORT=18999
