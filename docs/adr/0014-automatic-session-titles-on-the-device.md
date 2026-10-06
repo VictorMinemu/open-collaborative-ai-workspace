@@ -6,6 +6,9 @@ Accepted (owner decision 2026-10-05, D-18 … D-20 in `.planning/phases/03.2-wor
 **Date:** 2026-10-05. Builds on [ADR-0013](0013-work-zone-session-settings-protocol.md) (Work Zone session settings
 protocol) and [ADR-0005](0005-local-runtime-daemon-process-model.md) (daemon process model); supersedes neither.
 
+**Amended in place 2026-10-05** (same phase, before this ADR was relied on anywhere else): the shape was tightened
+from 3–6 words / 48 characters to 2–5 words / 32 characters so a title fits a sidebar row in full (decision 4).
+
 ## Context
 
 A Work Zone session without a typed title used to show the first line of its first prompt, cut at 80 characters.
@@ -46,11 +49,14 @@ The two runtimes differ:
 
    The migration only adds this column (additive). The API stores an automatic title with one conditional update,
    `where title_source = 'heuristic'`, so a typed title or an earlier automatic title is never overwritten.
-4. **Shape (P-16).** 3–6 words in the prompt's language, sentence case, no quotes, markdown or trailing
-   punctuation, at most 48 characters, cut on a word boundary. Words are counted with `Intl.Segmenter`, so
-   languages written without spaces count correctly. Each side checks the title:
-   - The device runs `normalizeSessionTitle`. It then refuses any title that `contain()` / `redact()` would change
-     (`title_sanitized`: host paths and credential-like tokens are refused, never rewritten).
+4. **Shape (P-16).** 2–5 words in the prompt's language, sentence case, no quotes, markdown or trailing
+   punctuation, at most 32 characters, cut on a word boundary. 32 characters is what fits one Work Zone sidebar
+   row in full: the row has 219 px at 1440 (267 px in the 390 drawer); the longest recorded title, "Fix settings
+   page login redirect" (32 characters), measures 196 px. Words are counted with `Intl.Segmenter`, so languages
+   written without spaces count correctly. Each side checks the title:
+   - The device runs `normalizeSessionTitle`. It refuses any answer, and then any title, that `contain()` /
+     `redact()` would change (`title_sanitized`: host paths and credential-like tokens are refused, never
+     rewritten). The raw answer is checked first so the word-boundary cut cannot keep the head of a credential.
    - The API checks `SessionTitle` again: length, word count, no control characters, markup or home-directory
      paths, the session's own device, the same tenant (RLS) and the requested model.
 5. **When the API asks (P-18).** Only when all of these are true:
@@ -104,6 +110,11 @@ The two runtimes differ:
   thinking was turned off, also spent 3.7k thinking tokens in 31 s). A Codex turn took about 7 s at 0.160.0.
 - One fixture per runtime is recorded at the pinned versions (`claude-code-2.1.289.title.sdk.jsonl`,
   `codex-0.160.0.title.rpc.jsonl`). A runtime upgrade re-records them before its inventory row stays exposed.
+  Both were recorded under the earlier 3–6 word / 48-character instructions and were not re-recorded for the
+  amendment: their raw answers now normalize to "Redirección de login al expirar" (31 characters, from
+  "Redirección de login al expirar sesión") and "Fix settings page login redirect" (32, from "Fix settings page
+  login redirect bug"). The cut can leave a trailing function word ("al expirar"); the instructions ask the model
+  for 2–5 words, so a fresh answer should rarely need the cut.
 - The API refuses a title it cannot validate. A title out of shape costs a turn and is shown nowhere (audited as
   `invalid_title`).
 - On Codex, the owner's local hooks still run on the title thread. Their `hookPrompt` items are ignored, never

@@ -93,8 +93,8 @@ Phase 03.2 (ADR-0012, ADR-0013). What each runtime offers, and why some options 
    maximum mode, or *Add people or teams* with a mode each. Listed people start sessions on it without your
    acceptance and use your Claude / ChatGPT login (the card says whose). Removing someone stops their sessions.
 4. **Session titles** (ADR-0014). Start a session without typing a title: it first shows the first line of your
-   prompt, then, within a few seconds, a short title (3–6 words, the prompt's language) for every controller in
-   the sidebar, the header and the browser tab. The device names it with its own runtime's small model on the
+   prompt, then, within a few seconds, a short title (2–5 words, at most 32 characters, the prompt's language)
+   for every controller, shown in full in the sidebar, the header and the browser tab. The device names it with its own runtime's small model on the
    device owner's login: Claude Code uses Haiku, Codex uses GPT-6-Luna. A title you type is never replaced. When
    the Work Zone policy leaves the small model out, or the call fails or takes longer than 20 s, the first line
    stays and the session is not affected.
