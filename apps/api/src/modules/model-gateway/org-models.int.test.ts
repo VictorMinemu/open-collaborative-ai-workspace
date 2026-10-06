@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { estimateCostMicros, EventTypes } from "@ocw/contracts";
+import { EventTypes, estimateCostMicros } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "../../app";
@@ -213,6 +213,7 @@ describe("an admin's Anthropic key reaches a member's AI chat through its Secret
       backend: "org_key",
       provider: "anthropic",
       model_id: "claude-sonnet-5-5",
+      requester_user_id: samId,
       estimated: false,
       input_tokens: 100,
       output_tokens: final.message.body.length,
@@ -322,7 +323,10 @@ describe("each provider kind speaks its own wire API to the fake (P-04)", () => 
       modelId: "claude-opus-5-5",
     });
     expect(notAllowed.status).toBe(409);
-    expect(errorOf(notAllowed)).toMatchObject({ code: "model_unavailable", details: { reason: "not_allowed" } });
+    expect(errorOf(notAllowed)).toMatchObject({
+      code: "model_unavailable",
+      details: { reason: "not_allowed" },
+    });
     const codex = await createChat(sam, "x", {
       backend: "org_key",
       provider: "openai-codex",
@@ -334,7 +338,8 @@ describe("each provider kind speaks its own wire API to the fake (P-04)", () => 
 
   it("no key of any provider reaches a log line", () => {
     const logs = stack.logs.join("\n");
-    for (const k of [ANTHROPIC_KEY, OPENAI_KEY, OPENROUTER_KEY, COMPATIBLE_KEY]) expect(logs).not.toContain(k);
+    for (const k of [ANTHROPIC_KEY, OPENAI_KEY, OPENROUTER_KEY, COMPATIBLE_KEY])
+      expect(logs).not.toContain(k);
   });
 });
 

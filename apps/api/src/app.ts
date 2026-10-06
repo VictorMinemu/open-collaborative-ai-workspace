@@ -106,7 +106,7 @@ export async function buildApp(
   const audit = createAuditService();
   const realtime = createRealtimeService({ db, bus });
   const identity = new IdentityService(createAuth(env, authDb), authDb, env, realtime);
-  const secrets = createSecretsService({ key: encryptionKey, audit });
+  const secrets = createSecretsService({ key: encryptionKey, audit, store: secretStore });
   const chatAgent = createChatAgentBridge();
   const chatEvents = createChatEvents();
   // Organization-level online set (@here, CHAT-08): maintained by the realtime gateway, read by notifications.

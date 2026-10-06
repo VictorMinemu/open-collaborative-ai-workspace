@@ -1,28 +1,53 @@
 "use client";
 
-import type { AiModelOption } from "@ocw/contracts";
-import { ArrowUp, Sparkles } from "lucide-react";
+import { type AiModelOption, type ModelRef, modelRefKey } from "@ocw/contracts";
+import { ArrowUp } from "lucide-react";
 import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
+import { useAiChatModel } from "@/lib/ai-chat-model-store";
 import { cn } from "@/lib/utils";
+import { ModelPicker } from "./model-picker";
 import { PlanUsageLine } from "./plan-usage-line";
 
 /**
- * The AI chat composer (P-09): an auto-growing textarea (Enter sends, Shift+Enter is a new line), the model chip
- * and the send button, in the Work Zone composer card. The chip shows the model the next answer uses, read-only
- * until the picker lands (05-04). Plan models carry "Using ChatGPT plan · Manage usage" under the card (P-11).
+ * The model a chat falls back to: the first of `preferred` that is still available (the chat's last model, the
+ * member's default), else the list's default, else any available model.
+ */
+export function pickModel(
+  models: AiModelOption[] | undefined,
+  preferred: (ModelRef | null | undefined)[],
+): AiModelOption | null {
+  const list = models ?? [];
+  for (const ref of preferred) {
+    if (!ref) continue;
+    const found = list.find((m) => m.available && modelRefKey(m.ref) === modelRefKey(ref));
+    if (found) return found;
+  }
+  return list.find((m) => m.available && m.isDefault) ?? list.find((m) => m.available) ?? null;
+}
+
+/**
+ * The AI chat composer (P-09): an auto-growing textarea (Enter sends, Shift+Enter is a new line), the model picker
+ * chip and the send button, in the Work Zone composer card. The model is chosen per chat (`chatKey`) and per
+ * message: the selection survives sends and only ever applies to the next answer. Plan models carry "Using ChatGPT
+ * plan · Manage usage" under the card (P-11); organization models carry METERED on the chip.
  */
 export function AiComposer({
-  model,
+  chatKey,
+  models,
+  preferred,
   modelsLoading,
   busy,
   onSend,
   autoFocus,
   className,
 }: {
-  /** The model the next answer runs on, or null when none is available. */
-  model: AiModelOption | null;
+  /** The chat id, or "new" on `/chat/ai/new`. */
+  chatKey: string;
+  models: AiModelOption[] | undefined;
+  /** Fallbacks before the member picks: the chat's last model, then the member's default. */
+  preferred: (ModelRef | null | undefined)[];
   modelsLoading: boolean;
   /** An answer is being written: one generation per chat (Stop arrives in 05-06). */
   busy: boolean;
@@ -31,6 +56,10 @@ export function AiComposer({
   autoFocus?: boolean;
   className?: string;
 }) {
+  const fallback = pickModel(models, preferred);
+  const [selected, setSelected] = useAiChatModel(chatKey, fallback?.ref ?? null);
+  // A pick the admin has since removed (or that became unavailable) falls back instead of failing the send.
+  const model = pickModel(models, [selected, fallback?.ref]);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -95,14 +124,7 @@ export function AiComposer({
         />
         <div className="flex items-center gap-1.5 px-2 pb-2">
           {model ? (
-            <span
-              data-testid="ai-model-chip"
-              title={`${model.label} · ${model.providerLabel}`}
-              className="inline-flex h-8 min-w-0 items-center gap-1.5 rounded-lg px-2 text-[13px] text-foreground/85"
-            >
-              <Sparkles aria-hidden className="size-3.5 shrink-0 text-primary" />
-              <span className="truncate">{model.label}</span>
-            </span>
+            <ModelPicker chatKey={chatKey} value={model.ref} onChange={setSelected} />
           ) : modelsLoading ? (
             <span className="h-4 w-24 animate-pulse rounded bg-muted" />
           ) : null}

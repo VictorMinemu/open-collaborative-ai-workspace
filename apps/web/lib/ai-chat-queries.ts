@@ -5,15 +5,18 @@ import {
   AiChatSnapshot as AiChatSnapshotSchema,
   AiModelList,
   type CreateAiChatRequest,
+  EventTypes,
   type Message,
   type SendAiMessageRequest,
   SendAiMessageResponse,
+  topic,
 } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import { type AiChatState, displayText, initialAiChatState, reduceAiChat } from "./ai-chat-stream";
 import { api, isApiError } from "./api";
+import { useMe } from "./queries";
 import { useRealtimeStatus, useTopic } from "./realtime";
 
 /**
@@ -35,7 +38,20 @@ const GAP_REFETCH_TRIES = 3;
 /** A streaming answer with no frame for this long re-reads the snapshot (the server heartbeats every 10 s). */
 const STALL_REFETCH_MS = 10_000;
 
+/**
+ * The models the member may pick (`GET /ai-chat/models`). An admin's change in Settings › Models (a provider key, the
+ * allowed list) arrives as `model_providers.updated` on `org:<id>` and refetches the list live, so an open picker
+ * stops offering a model the admin just removed.
+ */
 export function useAiModels() {
+  const qc = useQueryClient();
+  const me = useMe({ enabled: false });
+  const orgId = me.data?.organization.id ?? null;
+  useTopic(orgId ? topic("org", orgId) : null, (frame) => {
+    if (frame.op === "ev" && frame.type === EventTypes.modelProvidersUpdated) {
+      void qc.invalidateQueries({ queryKey: aiKeys.models });
+    }
+  });
   return useQuery({
     queryKey: aiKeys.models,
     queryFn: () => api.get("/api/v1/ai-chat/models", { schema: AiModelList }),

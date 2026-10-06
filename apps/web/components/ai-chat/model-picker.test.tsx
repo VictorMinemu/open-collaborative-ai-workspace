@@ -12,7 +12,8 @@ import { ModelPickerList, reasonText } from "./model-picker";
 const caps = { vision: true, pdf: false, webSearch: "hosted" } as const;
 
 function option(ref: ModelRef, extra: Partial<AiModelOption> = {}): AiModelOption {
-  const group = ref.backend === "chatgpt_plan" ? "chatgpt_plan" : ref.backend === "org_key" ? "organization" : "mock";
+  const group =
+    ref.backend === "chatgpt_plan" ? "chatgpt_plan" : ref.backend === "org_key" ? "organization" : "mock";
   return {
     ref,
     label: ref.modelId,
