@@ -22,6 +22,7 @@ let sam: TestClient;
 let alex: TestClient;
 let eve: TestClient; // admin of another organization
 let orgId: string;
+let setupAdminId: string;
 let samId: string;
 let alexId: string;
 let helperId: string;
@@ -130,7 +131,8 @@ async function seed(label: string, convId: string): Promise<Seeded> {
 
 /**
  * Every Phase 4 route that can touch a direct conversation, as (method, path, body?) for one seeded
- * conversation. Plan 09 adds the inbox to this list.
+ * conversation. The inbox (Plan 09) is not a per-conversation route: `expectAbsentFromLists` covers
+ * `GET /notifications`, and "the inbox" cases below cover `POST /notifications/read`.
  */
 function routesFor(s: Seeded): Array<{
   name: string;
@@ -271,6 +273,13 @@ async function expectAbsentFromLists(client: TestClient, s: Seeded) {
   expect(inConv.hits, `${s.label}: search in`).toEqual([]);
   const overview = await ok(client.request("GET", `/api/v1/search?q=${s.word}`));
   expect(overview.messages, `${s.label}: overview`).toEqual([]);
+  // The inbox (CHAT-08): both filters, and the unread count, never come from someone else's conversation.
+  for (const filter of ["all", "mentions"]) {
+    const inbox = await ok(client.request("GET", `/api/v1/notifications?filter=${filter}`));
+    expect(JSON.stringify(inbox), `${s.label}: GET /notifications ${filter}`).not.toContain(s.convId);
+    expect(JSON.stringify(inbox), `${s.label}: GET /notifications ${filter}`).not.toContain(s.word);
+    expect(inbox.unreadCount, `${s.label}: inbox count ${filter}`).toBe(0);
+  }
   for (const q of ["sam", "alex", "helper", "lee"]) {
     const channels = await ok(client.request("GET", `/api/v1/search/channels?q=${q}`));
     expect(JSON.stringify(channels), `${s.label}: search channels ${q}`).not.toContain(s.convId);
@@ -321,6 +330,7 @@ beforeAll(async () => {
     }),
   );
   orgId = setup.organization.id;
+  setupAdminId = setup.user.id;
   [sam, samId] = await joinAs("sam@example.test", "Sam Lee");
   [alex, alexId] = await joinAs("alex@example.test", "Alex Kim");
   helperId = (
@@ -495,5 +505,54 @@ describe("the participants keep full access", () => {
       await ok(sam.request("PATCH", `/api/v1/messages/${s.messageId}`, { body: `the ${s.word} plan, v2` }));
       await ok(alex.request("DELETE", `/api/v1/messages/${s.replyId}`));
     }
+  });
+});
+
+describe("the inbox (CHAT-08, T-04-09-01/05)", () => {
+  it("participants are notified of each other's messages; outsiders' inboxes stay empty", async () => {
+    const alexInbox = await ok(alex.request("GET", "/api/v1/notifications?filter=all"));
+    const kinds = new Set(
+      (alexInbox.items as Json[])
+        .filter((n) => n.messageId === human.messageId || n.messageId === group.messageId)
+        .map((n) => n.kind),
+    );
+    expect(kinds).toEqual(new Set(["dm", "group_dm"]));
+    for (const outsider of [admin, eve]) {
+      const list = await ok(outsider.request("GET", "/api/v1/notifications?filter=all"));
+      expect(JSON.stringify(list)).not.toContain(human.convId);
+      expect(JSON.stringify(list)).not.toContain(group.convId);
+    }
+  });
+
+  it("marking someone else's notification read changes nothing (200, same count, no event)", async () => {
+    const [row] = (
+      await su.query(
+        "select id from app.notifications where user_id = $1 and message_id = $2 and read_at is null",
+        [alexId, human.messageId],
+      )
+    ).rows as Json[];
+    expect(row?.id).toBeTruthy();
+    const before = await ok(alex.request("GET", "/api/v1/notifications?filter=all"));
+    const events = async (userId: string) =>
+      Number(
+        (
+          await su.query(
+            "select count(*)::int as n from app.stream_events where stream_id = $1 and type = 'notification.read'",
+            [`user:${userId}`],
+          )
+        ).rows[0].n,
+      );
+    const adminEvents = await events(setupAdminId);
+    for (const outsider of [admin, eve]) {
+      await ok(outsider.request("POST", "/api/v1/notifications/read", { ids: [row?.id] }));
+      await ok(outsider.request("POST", "/api/v1/notifications/read", { all: true }));
+    }
+    const [after] = (await su.query("select read_at from app.notifications where id = $1", [row?.id]))
+      .rows as Json[];
+    expect(after?.read_at).toBeNull();
+    expect((await ok(alex.request("GET", "/api/v1/notifications?filter=all"))).unreadCount).toBe(
+      before.unreadCount,
+    );
+    expect(await events(setupAdminId)).toBe(adminEvents);
   });
 });

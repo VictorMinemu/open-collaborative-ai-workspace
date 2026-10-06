@@ -67,7 +67,13 @@ import { useMe } from "@/lib/queries";
 import { useRealtime, useTopic } from "@/lib/realtime";
 import { formatDate } from "@/lib/utils";
 import { ChannelIcon } from "./chat-sidebar";
-import { Composer, type ComposerApi, ComposerHint, type MentionCandidate } from "./composer";
+import {
+  Composer,
+  type ComposerApi,
+  ComposerHint,
+  type MentionCandidate,
+  type SpecialMention,
+} from "./composer";
 import { JumpToLatest } from "./jump-to-latest";
 import { MentionContext } from "./markdown";
 import { MembersDialog } from "./members-dialog";
@@ -103,6 +109,12 @@ function MessagesSkeleton() {
     </div>
   );
 }
+
+/** The broadcasts the channel composer offers (CHAT-08). */
+const SPECIAL_MENTIONS: SpecialMention[] = [
+  { handle: "channel", label: "@channel", description: "Notify everyone in this channel" },
+  { handle: "here", label: "@here", description: "Notify everyone online now" },
+];
 
 export function ChannelView({ channelId }: { channelId: string }) {
   const qc = useQueryClient();
@@ -483,6 +495,8 @@ export function ChannelView({ channelId }: { channelId: string }) {
     (channel.viewerCan?.includes("channel.update") ?? false) && !channel.isDefault && !channel.archivedAt;
   // Admins moderate channels they can read (D-01); the server re-decides every delete.
   const canModerate = channel.viewerCan?.includes("message.delete_any") ?? false;
+  // @channel / @here only where the server allows them (`channel.mention_all`, deny-able by rules).
+  const specialMentions = channel.viewerCan?.includes("channel.mention_all") ? SPECIAL_MENTIONS : undefined;
   const channelTypers = typers;
 
   const intro =
@@ -708,6 +722,8 @@ export function ChannelView({ channelId }: { channelId: string }) {
                 apiRef={composerApi}
                 autoFocus
                 footer={<ComposerHint />}
+                specialMentions={specialMentions}
+                memberCount={memberList.length || channel.memberCount}
               />
             )}
           </div>

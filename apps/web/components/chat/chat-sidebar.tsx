@@ -5,6 +5,8 @@ import {
   type DmSummary,
   EventTypes,
   type MessageCreatedEvent,
+  type NotificationCreatedEvent,
+  type NotificationReadEvent,
   type SaveUpdatedEvent,
   type ThreadReadEvent,
   type ThreadUpdatedEvent,
@@ -31,6 +33,12 @@ import {
   useDms,
   useThreadList,
 } from "@/lib/chat-queries";
+import {
+  applyNotificationCreated,
+  applyNotificationRead,
+  unreadOf,
+  useNotifications,
+} from "@/lib/notification-queries";
 import { usePermissionCheck } from "@/lib/permissions";
 import { useMe } from "@/lib/queries";
 import { useTopic } from "@/lib/realtime";
@@ -153,6 +161,18 @@ function useChannelListSync(
     // Read marks of threads (any of the member's tabs and devices) update the Threads view (P-04).
     if (frame.op === "ev" && frame.type === EventTypes.threadRead) {
       applyThreadRead(qc, frame.data as ThreadReadEvent);
+      return;
+    }
+    // The inbox (CHAT-08): new notifications and read marks from any tab or device. A mention or reply in a
+    // thread the Threads view does not list yet refreshes it too (no per-thread subscription, Pitfall 13).
+    if (frame.op === "ev" && frame.type === EventTypes.notificationCreated) {
+      const ev = frame.data as NotificationCreatedEvent;
+      applyNotificationCreated(qc, ev);
+      if (ev.notification.threadRootId) refreshThreadsSoon(qc);
+      return;
+    }
+    if (frame.op === "ev" && frame.type === EventTypes.notificationRead) {
+      applyNotificationRead(qc, frame.data as NotificationReadEvent);
       return;
     }
     onFrame(frame);
@@ -290,6 +310,7 @@ export function ChatSidebar() {
   const dms = useDms();
   const can = usePermissionCheck();
   const threads = useThreadList();
+  const mentions = useNotifications("mentions");
   const [creating, setCreating] = useState<{ unitId: string | null } | null>(null);
   const [browseOpen, setBrowseOpen] = useState(false);
   const [newDmOpen, setNewDmOpen] = useState(false);
@@ -333,7 +354,10 @@ export function ChatSidebar() {
           </Tooltip>
         }
       >
-        <SidebarViews activePath={pathname} counts={{ all: unreadAll, threads: unreadThreads }} />
+        <SidebarViews
+          activePath={pathname}
+          counts={{ all: unreadAll, mentions: unreadOf(mentions.data), threads: unreadThreads }}
+        />
         {channels.isPending ? (
           <div className="grid gap-1.5 px-2.5 pt-1">
             {[72, 56, 64].map((w) => (

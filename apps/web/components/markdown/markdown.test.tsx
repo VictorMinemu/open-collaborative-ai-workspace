@@ -144,6 +144,18 @@ describe("Markdown: mentions", () => {
     expect(html).not.toContain('data-testid="mention"');
   });
 
+  it("@channel and @here render as a broadcast chip without a directory entry; never inside code", () => {
+    const html = render(
+      "@channel deploy, @here too, @everyone and `@channel`",
+      {},
+      { handles: new Map(), myHandle: null },
+    );
+    expect(html.match(/data-testid="mention-all"/g)).toHaveLength(3);
+    expect(html).toMatch(/data-testid="mention-all"[^>]*>@channel</);
+    expect(html).toMatch(/data-testid="mention-all"[^>]*>@here</);
+    expect(html).not.toContain('data-testid="mention"');
+  });
+
   it("my own handle is highlighted differently", () => {
     const me = render("@sam", {}, { handles: new Map([["sam", SAM]]), myHandle: "sam" });
     const other = render("@sam");

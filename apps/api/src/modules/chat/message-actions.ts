@@ -211,12 +211,25 @@ export function registerMessageActionRoutes(app: App, ctx: MessageActionsContext
         if (message.deletedAt) throw conflict("This message was deleted", "message_deleted");
         const dir = await loadDirectory(tx);
         if (req.body.body === message.body) return dtoOf(tx, message, dir);
-        const { row } = await editMessage(tx, deps, dir, {
+        const { row, previousMentions } = await editMessage(tx, deps, dir, {
           message,
           body: req.body.body,
           editor: { kind: "user", id: auth.userId },
         });
-        return dtoOf(tx, row, dir);
+        const dto = await dtoOf(tx, row, dir);
+        // Observers (notifications) in the edit transaction: only people the edit newly mentions are notified,
+        // never @channel/@here and never a bot (Pitfall 8).
+        await core.chatEvents.messageEdited(tx, {
+          conv: {
+            id: conv.id,
+            kind: conv.kind === "dm" || conv.kind === "group" ? conv.kind : "channel",
+            organizationId: conv.organizationId,
+          },
+          message: dto,
+          editorId: auth.userId,
+          previousMentions,
+        });
+        return dto;
       }),
   );
 
