@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 46
+open_count: 47
 waived_count: 0
 fixed_count: 16
-total_count: 62
-last_updated: 2026-10-06T12:07:48.055Z
+total_count: 63
+last_updated: 2026-10-06T18:13:56.172Z
 ---
 
 # Broken Windows Ledger
@@ -77,6 +77,7 @@ last_updated: 2026-10-06T12:07:48.055Z
 | 60 | 04 | todo | apps/web/components/chat/message-list.tsx |  | 04-13 review: (edited) marker on its own line instead of inline | open |  | 2026-10-06T12:07:47.918Z |  |
 | 61 | 04 | todo | e2e/tests/attachments.spec.ts |  | 04-13 review: capture upload progress mid-flight with a throttled route | open |  | 2026-10-06T12:07:47.987Z |  |
 | 62 | 04 | unrun-verify | apps/desktop/src/main/index.ts |  | Signed-build notification click-to-focus and dock badge remain manual checks (Pitfall 11) | open |  | 2026-10-06T12:07:48.055Z |  |
+| 63 | 05 | deviation | e2e/tests/ai-chat-signin.spec.ts |  | Disconnect e2e asserts plan rows via GET /ai-chat/models, and signin.int 'org rows stay available' is vacuous until 05-04's picker and org keys merge; tighten both after the 05-04 merge | open |  | 2026-10-06T18:13:56.172Z |  |
 
 ````json
 [
@@ -822,6 +823,18 @@ last_updated: 2026-10-06T12:07:48.055Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-06T12:07:48.055Z",
+    "resolved_at": null
+  },
+  {
+    "id": 63,
+    "kind": "deviation",
+    "phase": "05",
+    "file": "e2e/tests/ai-chat-signin.spec.ts",
+    "line": null,
+    "description": "Disconnect e2e asserts plan rows via GET /ai-chat/models, and signin.int 'org rows stay available' is vacuous until 05-04's picker and org keys merge; tighten both after the 05-04 merge",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T18:13:56.172Z",
     "resolved_at": null
   }
 ]
