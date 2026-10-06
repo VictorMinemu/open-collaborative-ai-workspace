@@ -17,7 +17,7 @@ import {
   RotateCellTokenResponse,
   SubscriptionProviderParams,
 } from "@ocw/contracts";
-import { agentCredentials, conversationMembers, conversations, messages, type Tx } from "@ocw/db";
+import { agentCredentials, conversationMembers, conversations, messages, orgUnits, type Tx } from "@ocw/db";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { z } from "zod";
 import { type ApiModule, type App, authOf, type Core, tenant } from "../../core";
@@ -77,10 +77,15 @@ async function botChannelResource(
       ),
     )
     .limit(1);
+  // Unit-scoped rules apply to a unit's channels for bots too (CHAT-02, principle 6).
+  const [unit] = channel.unitId
+    ? await tx.select({ path: orgUnits.path }).from(orgUnits).where(eq(orgUnits.id, channel.unitId)).limit(1)
+    : [];
   return channelResource({
     visibility: channel.visibility,
     archived: channel.archivedAt !== null,
     viewerRole: m?.role ?? null,
+    unitPath: unit?.path ?? [],
   });
 }
 

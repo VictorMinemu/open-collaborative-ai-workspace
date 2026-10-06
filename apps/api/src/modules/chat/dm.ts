@@ -240,6 +240,10 @@ export async function listDms(tx: Tx, userId: string, opts: { ids?: string[] } =
         sql<number>`(select coalesce(max(s.last_seq), 0) from app.streams s where s.id = 'conv:' || ${conversations.id}::text)`.mapWith(
           Number,
         ),
+      // The sidebar's All view (CHAT-02): the latest live top-level message as one line of plain text.
+      lastMessagePreview: sql<
+        string | null
+      >`(select nullif(left(btrim(regexp_replace(m.body, '\\s+', ' ', 'g')), 140), '') from app.messages m where m.conversation_id = ${conversations.id} and m.thread_id is null and m.deleted_at is null order by m.seq desc limit 1)`,
     })
     .from(conversations)
     .innerJoin(
@@ -387,6 +391,7 @@ export async function listDms(tx: Tx, userId: string, opts: { ids?: string[] } =
       latestMessageSeq: r.latestMessageSeq,
       lastReadSeq: Number(r.lastReadSeq ?? 0),
       lastMessageAt: r.lastMessageAt === null ? null : iso(r.lastMessageAt),
+      lastMessagePreview: r.lastMessagePreview ?? null,
     });
   }
   // Personal bots first, then by most recent activity (new DMs without messages by creation time).

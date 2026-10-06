@@ -255,7 +255,7 @@ export function DmView({ conversationId }: { conversationId: string }) {
       void qc.invalidateQueries({ queryKey: capabilityKeys.memories(bot.id) });
     }
     if (!message.threadId) {
-      bumpDmLatest(qc, conversationId, message.seq, message.createdAt);
+      bumpDmLatest(qc, conversationId, message.seq, message.createdAt, message.body);
       if (document.visibilityState === "visible") markDmRead(qc, conversationId, message.seq);
     }
   };

@@ -16,7 +16,17 @@ import {
 } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Archive, AtSign, Hash, Lock, LogOut, MoreHorizontal, UserPlus, Users } from "lucide-react";
+import {
+  Archive,
+  AtSign,
+  FolderInput,
+  Hash,
+  Lock,
+  LogOut,
+  MoreHorizontal,
+  UserPlus,
+  Users,
+} from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -63,6 +73,7 @@ import { MentionContext } from "./markdown";
 import { MembersDialog } from "./members-dialog";
 import { MessageList, type PendingMessage } from "./message-list";
 import { MessageUnavailable } from "./message-unavailable";
+import { MoveChannelDialog } from "./move-channel-dialog";
 import { PinnedButton, PinnedSheet } from "./pinned-sheet";
 import { PrincipalAvatar } from "./principal-avatar";
 import { ThreadPanel } from "./thread-panel";
@@ -135,6 +146,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
   const { typers, touch, clear } = useTypers();
   const [pending, setPending] = useState<PendingMessage[]>([]);
   const [membersOpen, setMembersOpen] = useState(false);
+  const [moveOpen, setMoveOpen] = useState(false);
   const composerApi = useRef<ComposerApi | null>(null);
   const join = useChannelAction("join");
   const leave = useChannelAction("leave");
@@ -230,7 +242,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
         applyMessage(qc, message);
         if (message.authorKind !== "system") clear(message.authorKind, message.authorId);
         if (!message.threadId) {
-          bumpLatest(qc, channelId, message.seq, message.createdAt);
+          bumpLatest(qc, channelId, message.seq, message.createdAt, message.body);
           if (document.visibilityState === "visible") markRead(qc, channelId, message.seq);
         }
         return;
@@ -466,6 +478,9 @@ export function ChannelView({ channelId }: { channelId: string }) {
   const canPost = channel.isMember && !channel.archivedAt;
   // The server decides per channel (admin, or the channel owner): the menu only mirrors viewerCan.
   const canArchive = channel.viewerCan?.includes("channel.archive") ?? false;
+  // CHAT-02: the owner or an admin regroups the channel under another unit (#general stays organization-wide).
+  const canMove =
+    (channel.viewerCan?.includes("channel.update") ?? false) && !channel.isDefault && !channel.archivedAt;
   // Admins moderate channels they can read (D-01); the server re-decides every delete.
   const canModerate = channel.viewerCan?.includes("message.delete_any") ?? false;
   const channelTypers = typers;
@@ -545,6 +560,11 @@ export function ChannelView({ channelId }: { channelId: string }) {
                     <DropdownMenuItem onClick={() => setMembersOpen(true)}>
                       <Users /> Members and bots
                     </DropdownMenuItem>
+                    {canMove ? (
+                      <DropdownMenuItem data-testid="move-channel" onClick={() => setMoveOpen(true)}>
+                        <FolderInput /> Move to…
+                      </DropdownMenuItem>
+                    ) : null}
                     {channel.isMember && !channel.isDefault ? (
                       <DropdownMenuItem
                         onClick={() => {
@@ -719,6 +739,8 @@ export function ChannelView({ channelId }: { channelId: string }) {
           onOpenChange={setPinsOpen}
           canModerate={canArchive}
         />
+
+        {canMove ? <MoveChannelDialog channel={channel} open={moveOpen} onOpenChange={setMoveOpen} /> : null}
 
         <MembersDialog
           channel={channel}

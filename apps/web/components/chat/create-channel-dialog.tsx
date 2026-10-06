@@ -1,9 +1,9 @@
 "use client";
 
-import { CreateChannelRequest } from "@ocw/contracts";
-import { Globe, Hash, Lock } from "lucide-react";
+import { CreateChannelRequest, type OrgUnit } from "@ocw/contracts";
+import { Building2, Globe, Hash, Lock } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -15,9 +15,12 @@ import {
 } from "@/components/ui/dialog";
 import { describedBy, FormField } from "@/components/ui/form-field";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { errorMessage, isApiError } from "@/lib/api";
-import { useCreateChannel } from "@/lib/chat-queries";
+import { useChannels, useCreateChannel } from "@/lib/chat-queries";
+import { useUnits } from "@/lib/org-queries";
+import { usePermissionCheck } from "@/lib/permissions";
 import { useMe } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
@@ -33,32 +36,126 @@ export function toChannelName(raw: string): string {
     .slice(0, 80);
 }
 
+/** Select value of "the organization" (Base UI selects need a string). */
+export const ORG_UNIT_VALUE = "org";
+
+export interface PlaceableUnit {
+  id: string;
+  /** "Product" or "Product › Mobile". */
+  label: string;
+  depth: number;
+}
+
+/**
+ * The units the caller may place a channel in (CHAT-02): every unit for those who hold `unit.manage` (admins),
+ * otherwise the units on the paths of their own memberships. Mirrors the API's rule; the API decides.
+ */
+export function usePlaceableUnits(): PlaceableUnit[] {
+  const units = useUnits();
+  const channels = useChannels();
+  const can = usePermissionCheck();
+  const manage = can("unit.manage");
+  const mine = channels.data?.memberUnitIds;
+  return useMemo(() => {
+    const list: OrgUnit[] = units.data?.units ?? [];
+    const byId = new Map(list.map((u) => [u.id, u]));
+    const allowed = new Set(mine ?? []);
+    return list
+      .filter((u) => manage || allowed.has(u.id))
+      .map((u) => ({
+        id: u.id,
+        label: u.path.map((id) => byId.get(id)?.name ?? "…").join(" › "),
+        depth: u.path.length - 1,
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [units.data, mine, manage]);
+}
+
+/** "Belongs to": the organization or one of the units the caller may use (create and move dialogs). */
+export function ChannelUnitSelect({
+  value,
+  onChange,
+  units,
+  id,
+}: {
+  value: string | null;
+  onChange: (unitId: string | null) => void;
+  units: PlaceableUnit[];
+  id?: string;
+}) {
+  const me = useMe({ enabled: false });
+  const org = me.data?.organization.name ?? "Organization";
+  const items = [
+    { value: ORG_UNIT_VALUE, label: `${org} (everyone)` },
+    ...units.map((u) => ({ value: u.id, label: u.label })),
+  ];
+  return (
+    <Select
+      items={items}
+      value={value ?? ORG_UNIT_VALUE}
+      onValueChange={(v) => onChange(!v || v === ORG_UNIT_VALUE ? null : String(v))}
+    >
+      <SelectTrigger id={id} data-testid="channel-unit-select" aria-label="Belongs to" />
+      <SelectContent className="max-h-72 overflow-y-auto">
+        <SelectItem value={ORG_UNIT_VALUE}>
+          <span className="flex items-center gap-2">
+            <Building2 className="size-3.5 text-muted-foreground" />
+            {org} <span className="text-muted-foreground">(everyone)</span>
+          </span>
+        </SelectItem>
+        {units.map((u) => (
+          <SelectItem key={u.id} value={u.id} data-testid="channel-unit-option">
+            <span className="truncate" style={{ paddingLeft: `${Math.min(u.depth, 3) * 12}px` }}>
+              {u.label}
+            </span>
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
 export function CreateChannelDialog({
   open,
   onOpenChange,
+  defaultUnitId = null,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
+  /** Preselected "Belongs to" (a section's "+"). */
+  defaultUnitId?: string | null;
 }) {
   const router = useRouter();
   const me = useMe({ enabled: false });
   const create = useCreateChannel();
+  const placeable = usePlaceableUnits();
   const [name, setName] = useState("");
   const [topic, setTopic] = useState("");
   const [visibility, setVisibility] = useState<"public" | "private">("public");
+  const [unitId, setUnitId] = useState<string | null>(defaultUnitId);
   const [error, setError] = useState<string | undefined>();
+
+  useEffect(() => {
+    if (open) setUnitId(defaultUnitId);
+  }, [open, defaultUnitId]);
 
   const reset = () => {
     setName("");
     setTopic("");
     setVisibility("public");
+    setUnitId(defaultUnitId);
     setError(undefined);
     create.reset();
   };
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    const parsed = CreateChannelRequest.safeParse({ name: name.replace(/^-+|-+$/g, ""), topic, visibility });
+    const parsed = CreateChannelRequest.safeParse({
+      name: name.replace(/^-+|-+$/g, ""),
+      topic,
+      visibility,
+      unitId,
+    });
     if (!parsed.success) {
       setError(name ? "Use lowercase letters, numbers, - and _" : "Give the channel a name");
       return;
@@ -129,6 +226,15 @@ export function CreateChannelDialog({
               onChange={(e) => setTopic(e.target.value)}
             />
           </FormField>
+          {placeable.length > 0 || unitId !== null ? (
+            <FormField
+              id="channel-unit"
+              label="Belongs to"
+              hint="Groups the channel in the sidebar; that department's rules apply to it."
+            >
+              <ChannelUnitSelect id="channel-unit" value={unitId} onChange={setUnitId} units={placeable} />
+            </FormField>
+          ) : null}
           <fieldset className="grid gap-2">
             <legend className="mb-2 font-medium text-sm">Visibility</legend>
             <div className="grid gap-2 sm:grid-cols-2">

@@ -52,7 +52,7 @@ function decodeCursor(raw: string): z.infer<typeof Cursor> {
 }
 
 /** "#name" for channels; the other participants' names for direct conversations ("Ada, Sam and Claude"). */
-async function conversationRefs(
+export async function conversationRefs(
   tx: Tx,
   ids: string[],
   me: string,

@@ -18,7 +18,8 @@ export const RELATION_PERMISSIONS: Record<ResourceType, Partial<Record<Relation,
   unit: {},
   user: { self: ["account.manage"] },
   member: {},
-  channel: { owner: ["channel.archive", "channel.members.remove"] },
+  // CHAT-02: the owner moves the channel between units and edits its topic (`channel.update`).
+  channel: { owner: ["channel.archive", "channel.members.remove", "channel.update"] },
   channel_member: { owner: ["channel.members.remove"], self: ["channel.members.remove"] },
   // P-06: `device.full_access` is relation-only — the owner, or a member whose cap on the device is Full access.
   device: {
@@ -52,7 +53,13 @@ export interface Precondition {
 /** Permissions that use or configure one bot: owner-only on a personal bot (D-01). */
 const PERSONAL_BOT_GATED = new Set<Permission>(["bot.read", "bot.configure", "bot.internet", "bot.tool.use"]);
 /** Membership of a direct conversation is fixed at creation (D-03). */
-const DM_FIXED = new Set<Permission>(["channel.members.add", "channel.members.remove", "channel.archive"]);
+const DM_FIXED = new Set<Permission>([
+  "channel.members.add",
+  "channel.members.remove",
+  "channel.archive",
+  // Direct conversations never belong to a unit (CHAT-02).
+  "channel.update",
+]);
 
 const DEVICE_GATED = new Set<Permission>([
   "work_session.create",
@@ -175,6 +182,11 @@ export interface ChannelFacts {
    * moderation). Omitted = a channel.
    */
   kind?: "channel" | "dm" | "group";
+  /**
+   * The unit the channel belongs to, root → self (CHAT-02): unit-scoped allow and deny rules apply to the channels of
+   * that unit (principle 6). Omitted or [] = the organization (and every direct conversation).
+   */
+  unitPath?: readonly string[];
 }
 
 function channelRelations(c: ChannelFacts): Relation[] {
@@ -193,7 +205,7 @@ function channelState(c: ChannelFacts): ResourceState[] {
 }
 
 export function channelResource(c: ChannelFacts): ResourceFacts {
-  return facts("channel", channelRelations(c), channelState(c));
+  return facts("channel", channelRelations(c), channelState(c), c.unitPath ?? []);
 }
 
 export function channelMemberResource(c: ChannelFacts, targetIsViewer: boolean): ResourceFacts {
@@ -201,6 +213,7 @@ export function channelMemberResource(c: ChannelFacts, targetIsViewer: boolean):
     "channel_member",
     [...channelRelations(c), ...when(targetIsViewer, "self" as const)],
     channelState(c),
+    c.unitPath ?? [],
   );
 }
 

@@ -22,14 +22,23 @@ import {
   PostMessageRequest,
   pageCursorCount,
   ThreadResponse,
+  UpdateChannelRequest,
 } from "@ocw/contracts";
-import { conversationMembers, conversations, orgMembers, type TenantCtx, type Tx, tenantOf } from "@ocw/db";
+import {
+  conversationMembers,
+  conversations,
+  orgMembers,
+  orgUnits,
+  type TenantCtx,
+  type Tx,
+  tenantOf,
+} from "@ocw/db";
 import { and, eq, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { type ApiModule, authOf, type Core, tenant } from "../../core";
 import type { AgentMention, ThreadContext } from "../../lib/chat-agent-bridge";
-import { badRequest, conflict, gone, notFound } from "../../lib/errors";
+import { badRequest, conflict, forbidden, gone, notFound } from "../../lib/errors";
 import {
   AuthzDeniedError,
   agentResource,
@@ -68,6 +77,7 @@ import {
   listMessagesAfter,
   listMessagesAround,
   loadThread,
+  memberUnitIdsOf,
   notifyListChanged,
   type PostResult,
   postMessage,
@@ -76,6 +86,7 @@ import {
   toMessage,
 } from "./service";
 import { registerChatTestRoutes } from "./test-routes";
+import { registerThreadRoutes } from "./threads";
 
 export { type ConversationAccess, createConversationAccess } from "./access";
 export {
@@ -90,6 +101,7 @@ export {
 } from "./dm";
 export { resolveMentions } from "./mentions";
 export { REPLY_MODE_PER_MINUTE, replyModeCandidates } from "./reply-mode";
+export { listThreadsFor } from "./threads";
 
 /** What the chat module hands to its route files (message actions, reactions, pins, saves). */
 export type ChatRouteCtx = MessageActionsContext;
@@ -104,8 +116,35 @@ const zoneOf = (author: { clientTimeZone?: string }) =>
  */
 const MESSAGE_KINDS = ["channel", "dm", "group"] as const;
 
+/**
+ * The unit a channel is placed in (create or move, CHAT-02, T-04-08-01): it must exist in the tenant (another
+ * organization's unit is simply missing: 404 `unit_not_found`), and unless `mayManageUnits` (the resolver's
+ * `unit.manage` at organization scope) it must lie on the path of one of the caller's own units (403
+ * `unit_not_allowed`): a member of Product → Mobile may use Mobile or Product, never Finance.
+ */
+async function placeableUnit(
+  tx: Tx,
+  unitId: string,
+  userId: string,
+  mayManageUnits: boolean,
+): Promise<typeof orgUnits.$inferSelect> {
+  const [u] = await tx.select().from(orgUnits).where(eq(orgUnits.id, unitId)).limit(1);
+  if (!u) throw notFound("Unit not found", "unit_not_found");
+  if (mayManageUnits) return u;
+  if (!(await memberUnitIdsOf(tx, userId)).includes(u.id)) {
+    throw forbidden(
+      "You can only place a channel in your own department, team or project",
+      "unit_not_allowed",
+    );
+  }
+  return u;
+}
+
 /** Direct conversations (1:1 and group) are flat: no threads, bot replies at the top level (D-04, D-06). */
 const isDirect = (kind: string) => kind === "dm" || kind === "group";
+
+/** The `conv:` copy of `conversation.updated` when a channel moved to another unit (PATCH /channels/:id). */
+const ChannelMovedPayload = z.object({ conversationId: z.string(), unitId: z.string().nullable() });
 
 /** The `conv:` copy of `conversation.member_removed` (see removeMember). */
 const MemberRemovedPayload = z.object({
@@ -129,6 +168,7 @@ export function createChatModule(core: Core): ApiModule {
     "channel.members.remove",
     "channel.archive",
     "message.delete_any",
+    "channel.update",
   ] as const;
 
   async function withViewerCan(req: FastifyRequest, tx: Tx, row: ChannelRow): Promise<ChannelSummaryDto> {
@@ -176,6 +216,12 @@ export function createChatModule(core: Core): ApiModule {
     if (!parsed.success || parsed.data.member.kind !== "user") return null;
     return { userIds: [parsed.data.member.id], topics: [topic] };
   });
+
+  // A channel moved to another unit: unit-scoped rules may now hide it (or show it) to anyone subscribed, so every
+  // live subscription to its stream is re-decided by the authorizer above (CHAT-02, T-04-08-02).
+  core.realtime.registerSubscriptionInvalidator(EventTypes.conversationUpdated, (topic, payload) =>
+    topic.startsWith("conv:") && ChannelMovedPayload.safeParse(payload).success ? { topics: [topic] } : null,
+  );
 
   // ---------------------------------------------------------------- bridge: chat → agent-channel
   /**
@@ -534,6 +580,7 @@ export function createChatModule(core: Core): ApiModule {
               channels,
               orgSeq: await core.realtime.lastSeq(tx, `org:${auth.organizationId}`),
               userSeq: await core.realtime.lastSeq(tx, `user:${auth.userId}`),
+              memberUnitIds: await memberUnitIdsOf(tx, auth.userId),
             };
           }),
       );
@@ -549,6 +596,10 @@ export function createChatModule(core: Core): ApiModule {
           core.db.withTenant(tenant(req), async (tx) => {
             const auth = authOf(req);
             const { name, topic, visibility } = req.body;
+            // CHAT-02: the organization (null) or a unit on one of the caller's own paths (admins: any unit).
+            const unit = req.body.unitId
+              ? await placeableUnit(tx, req.body.unitId, auth.userId, await perms.can(req, tx, "unit.manage"))
+              : null;
             const [row] = await tx
               .insert(conversations)
               .values({
@@ -559,6 +610,7 @@ export function createChatModule(core: Core): ApiModule {
                 topic: topic || null,
                 visibility,
                 createdBy: auth.userId,
+                unitId: unit?.id ?? null,
               })
               .onConflictDoNothing()
               .returning();
@@ -575,7 +627,7 @@ export function createChatModule(core: Core): ApiModule {
               resourceType: "conversation",
               resourceId: row.id,
               sessionId: auth.sessionId,
-              metadata: { name, visibility },
+              metadata: { name, visibility, unitId: unit?.id ?? null },
             });
             await notifyListChanged(tx, deps, row, EventTypes.conversationCreated);
             return summaryOf(req, tx, row.id);
@@ -594,6 +646,68 @@ export function createChatModule(core: Core): ApiModule {
             const row = await channelRow(tx, req.params.id, authOf(req).userId);
             await perms.assertCan(req, tx, "channel.read", channelResource(row.facts), { hideAs404: true });
             return withViewerCan(req, tx, row);
+          }),
+      );
+
+      /**
+       * CHAT-02: move a channel to another unit (or back to the organization) and/or change its topic. The owner
+       * (relation) or an admin (`channel.update`); the target unit follows the placement rule of creation. Audited
+       * `channel.updated {from, to}`; `conversation.updated` on the channel and the sidebars' list topics.
+       */
+      app.patch(
+        "/channels/:id",
+        {
+          config: { authz: "user" },
+          preHandler: requireUser,
+          schema: { tags, params: IdParams, body: UpdateChannelRequest, response: { 200: ChannelSummary } },
+        },
+        async (req) =>
+          core.db.withTenant(tenant(req), async (tx) => {
+            const auth = authOf(req);
+            const { conv, facts } = await readableChannel(req, tx, await getChannel(tx, req.params.id));
+            await perms.assertCan(req, tx, "channel.update", channelResource(facts));
+            if (conv.archivedAt) throw gone("This channel is archived", "channel_archived");
+            const { unitId, topic } = req.body;
+            if (unitId !== undefined && unitId !== null && conv.slug === GENERAL_SLUG) {
+              throw badRequest("#general belongs to the whole organization", "default_channel");
+            }
+            const target =
+              unitId === undefined || unitId === null
+                ? null
+                : await placeableUnit(tx, unitId, auth.userId, await perms.can(req, tx, "unit.manage"));
+            const from: Record<string, string | null> = {};
+            const to: Record<string, string | null> = {};
+            if (unitId !== undefined && (target?.id ?? null) !== conv.unitId) {
+              from.unitId = conv.unitId;
+              to.unitId = target?.id ?? null;
+            }
+            const nextTopic = topic === undefined ? undefined : topic || null;
+            if (nextTopic !== undefined && nextTopic !== conv.topic) {
+              from.topic = conv.topic;
+              to.topic = nextTopic;
+            }
+            if (Object.keys(to).length > 0) {
+              await tx
+                .update(conversations)
+                .set({
+                  ...("unitId" in to ? { unitId: to.unitId } : {}),
+                  ...("topic" in to ? { topic: to.topic } : {}),
+                })
+                .where(eq(conversations.id, conv.id));
+              await core.audit.record(tx, {
+                action: "channel.updated",
+                resourceType: "conversation",
+                resourceId: conv.id,
+                sessionId: auth.sessionId,
+                metadata: { from, to },
+              });
+              await core.realtime.appendEvent(tx, convTopic(conv.id), EventTypes.conversationUpdated, {
+                conversationId: conv.id,
+                ...to,
+              });
+              await notifyListChanged(tx, deps, conv, EventTypes.conversationUpdated);
+            }
+            return summaryOf(req, tx, conv.id);
           }),
       );
 
@@ -1010,6 +1124,8 @@ export function createChatModule(core: Core): ApiModule {
       registerPinRoutes(app, routeCtx);
       // ---------------------------------------------------------------- personal saves (CHAT-13)
       registerSaveRoutes(app, routeCtx);
+      // ---------------------------------------------------------------- the Threads view (CHAT-02)
+      registerThreadRoutes(app, routeCtx);
 
       if (core.env.NODE_ENV === "test") registerChatTestRoutes(app, core);
     },

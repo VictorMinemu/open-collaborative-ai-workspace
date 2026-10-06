@@ -233,6 +233,8 @@ export const ChannelUnit = z.object({
   name: z.string(),
   kind: UnitKind,
   path: z.array(Id),
+  /** Names aligned with `path` (root → self): the sidebar section title and the team sub-label (CHAT-02). */
+  pathNames: z.array(z.string()).optional(),
 });
 export type ChannelUnit = z.infer<typeof ChannelUnit>;
 
@@ -276,6 +278,11 @@ export const ChannelList = z.object({
   /** Cursors for the sidebar's list-change subscriptions (`org:<id>` and `user:<id>`). */
   orgSeq: z.number().int().nonnegative().optional(),
   userSeq: z.number().int().nonnegative().optional(),
+  /**
+   * Every unit on the paths (root → self) of the caller's own unit memberships: the sidebar puts those departments
+   * first and the create dialog offers them as "Belongs to" (the API re-decides every placement).
+   */
+  memberUnitIds: z.array(Id).optional(),
 });
 export type ChannelList = z.infer<typeof ChannelList>;
 
@@ -478,6 +485,8 @@ export const ThreadSummary = z.object({
   lastReplyAt: IsoDateTime.nullable(),
   unreadReplies: z.number().int().min(0).max(100),
   participants: z.array(MessageAuthor),
+  /** The newest live replies, oldest → newest (at most 3), for the Threads view card. */
+  lastReplies: z.array(Message).max(3).optional(),
 });
 export type ThreadSummary = z.infer<typeof ThreadSummary>;
 export const ThreadList = z.object({ threads: z.array(ThreadSummary), nextCursor: z.string().nullable() });

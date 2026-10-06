@@ -1,4 +1,4 @@
-import { conversationMembers, conversations, type Tx } from "@ocw/db";
+import { conversationMembers, conversations, orgUnits, type Tx } from "@ocw/db";
 import { and, eq, inArray, isNull, or } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import type { Core } from "../../core";
@@ -86,12 +86,14 @@ export function createConversationAccess(core: Core): ConversationAccess {
           visibility: conversations.visibility,
           archivedAt: conversations.archivedAt,
           role: me.role,
+          unitPath: orgUnits.path,
         })
         .from(conversations)
         .leftJoin(
           me,
           and(eq(me.conversationId, conversations.id), eq(me.memberKind, "user"), eq(me.memberId, userId)),
         )
+        .leftJoin(orgUnits, eq(orgUnits.id, conversations.unitId))
         .where(
           and(
             inArray(conversations.kind, [...kinds]),
@@ -106,6 +108,8 @@ export function createConversationAccess(core: Core): ConversationAccess {
           archived: r.archivedAt !== null,
           viewerRole: r.role ?? null,
           kind: r.kind === "group" ? "group" : r.kind === "channel" ? "channel" : "dm",
+          // Unit-scoped rules apply to the unit's channels (CHAT-02, principle 6).
+          unitPath: r.kind === "channel" ? (r.unitPath ?? []) : [],
         }),
       );
       return allowed.map((r) => r.id);
