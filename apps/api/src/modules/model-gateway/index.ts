@@ -53,6 +53,7 @@ import { registerModelRoutes } from "./routes";
  */
 
 export { credentialOf, planStatusOf } from "./chatgpt-plan/credentials";
+export { chatgptPlanSeedEnabled } from "./chatgpt-plan/routes";
 export {
   type ClassifiedModelError,
   classify,

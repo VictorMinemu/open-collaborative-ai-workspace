@@ -26,7 +26,7 @@ import {
 } from "./dto";
 import { consumeGeneration, refuseOverLimit } from "./limits";
 import type { RunLoop } from "./run-loop";
-import { capOr429, resolveModelOr409 } from "./service";
+import { capOr429, refuseArchived, resolveModelOr409 } from "./service";
 import { backendClassOf } from "./usage";
 
 /**
@@ -154,6 +154,8 @@ export async function registerGenerationRoutes(
       const body = req.body;
       const out = await core.db.withTenant(tenant(req), async (tx) => {
         const conv = await ownedChat(req, tx, req.params.id);
+        // An archived chat opens read-only (05-10).
+        refuseArchived(conv);
         const topic = convTopic(conv.id);
         // Serializes with sends and other regenerates of this chat.
         await lockNextSeq(tx, topic);
