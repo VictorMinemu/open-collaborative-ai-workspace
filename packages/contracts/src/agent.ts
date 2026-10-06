@@ -349,6 +349,23 @@ export function modelLabel(provider: ModelProviderKind, modelId: string): string
 
 // ---------------------------------------------------------------- bots runtime (OpenClaw cell)
 
+/**
+ * Why a running cell does not run its `ocw` channel. `restart_loop_breaker`: OpenClaw (2026.9.7+) saw 3 or more
+ * unclean boots within 5 minutes (e.g. a starved Docker VM) and suppressed channel auto-start; the cell starts the
+ * channel itself after a back-off.
+ */
+export const CellRuntimePauseReason = z.enum(["restart_loop_breaker"]);
+export type CellRuntimePauseReason = z.infer<typeof CellRuntimePauseReason>;
+
+export const CellRuntimePause = z.object({
+  reason: CellRuntimePauseReason,
+  /** Short operator detail (e.g. "6 unclean restarts within 5 min"); never secrets. */
+  detail: z.string().max(300).nullable(),
+  /** When the cell starts the channel itself; null when nothing is scheduled. */
+  resumeAt: IsoDateTime.nullable(),
+});
+export type CellRuntimePause = z.infer<typeof CellRuntimePause>;
+
 export const AgentCellStatus = z.object({
   /** MVP 0: one cell per organization; the cell id is the organization id. */
   cellId: Id,
@@ -361,6 +378,8 @@ export const AgentCellStatus = z.object({
   envTokenConfigured: z.boolean(),
   /** A token created from the UI is active. */
   uiTokenCreatedAt: IsoDateTime.nullable(),
+  /** Set while the cell is up but its channel is paused (never while connected). */
+  paused: CellRuntimePause.extend({ since: IsoDateTime }).nullable(),
 });
 export type AgentCellStatus = z.infer<typeof AgentCellStatus>;
 

@@ -120,6 +120,27 @@ test("models → one-click bot → ready via the cell → add to channel", async
     await expect(page.getByTestId("cell-status")).toHaveAttribute("data-connected", "true");
     await shot(page, `bots-runtime-${tag}`);
 
+    // ---- Bots runtime: paused (OpenClaw's restart-loop breaker held the channel back; the cell says why)
+    await plugin.stop();
+    await expect(page.getByTestId("cell-status")).toHaveAttribute("data-connected", "false", {
+      timeout: 15_000,
+    });
+    const paused = {
+      reason: "restart_loop_breaker",
+      detail: "6 unclean restarts within 5 min",
+      resumeAt: new Date(Date.now() + 90_000).toISOString(),
+    };
+    expect((await plugin.request("POST", "/runtime", { paused })).status).toBe(200);
+    const status = page.getByTestId("cell-status");
+    await expect(status).toHaveAttribute("data-paused", "restart_loop_breaker");
+    await expect(status).toContainText("Paused");
+    await expect(status).toContainText("6 unclean restarts within 5 min");
+    await shot(page, `bots-runtime-paused-${tag}`);
+    // The channel starts again: its connection clears the pause.
+    await plugin.start();
+    await expect(status).toHaveAttribute("data-connected", "true", { timeout: 15_000 });
+    await expect(status).not.toHaveAttribute("data-paused", /.+/);
+
     // ---- Dark mode review shots
     await page.emulateMedia({ colorScheme: "dark" });
     await page.goto("/bots");

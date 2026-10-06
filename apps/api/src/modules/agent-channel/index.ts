@@ -6,6 +6,7 @@ import {
   AgentChannelPostMessage,
   AgentChannelPostMessageResponse,
   AgentChannelProviderAuthReport,
+  AgentChannelRuntimeReport,
   AgentChannelStatusReport,
   AgentChannelTyping,
   CellSnapshot,
@@ -436,6 +437,20 @@ export function createAgentChannelModule(core: Core): ApiModule {
             },
             async (req) => {
               await providerAuth.report(cellOf(req).organizationId, req.body);
+              return { ok: true as const };
+            },
+          );
+
+          // Why the cell runs without its channel (e.g. OpenClaw's restart-loop breaker): shown to cell managers
+          // instead of a bare "offline" until the cell's next connection.
+          scope.post(
+            "/runtime",
+            {
+              ...cellRoute,
+              schema: { tags, security: bearer, body: AgentChannelRuntimeReport, response: { 200: Ok } },
+            },
+            async (req) => {
+              await presence.reportRuntime(cellOf(req).organizationId, req.body.paused);
               return { ok: true as const };
             },
           );

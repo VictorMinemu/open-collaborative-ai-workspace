@@ -499,6 +499,72 @@ describe("cell sync + presence", () => {
   });
 });
 
+describe("cell runtime pause (OpenClaw restart-loop breaker)", () => {
+  const status = async () =>
+    (await call(admin, "GET", "/api/v1/agent-cell")).body as {
+      connected: boolean;
+      paused: { reason: string; detail: string | null; resumeAt: string | null; since: string } | null;
+    };
+
+  it("a running cell says why its channel is paused; its next connection clears it; other orgs never see it", async () => {
+    for (const p of plugins) await p.stop();
+    for (let i = 0; i < 50 && (await status()).connected; i++) await new Promise((r) => setTimeout(r, 100));
+    expect(await status()).toMatchObject({ connected: false, paused: null });
+
+    const p = plugin();
+    const resumeAt = new Date(Date.now() + 60_000).toISOString();
+    const paused = { reason: "restart_loop_breaker", detail: "6 unclean restarts within 5 min", resumeAt };
+    expect((await p.request("POST", "/runtime", { paused })).status).toBe(200);
+    const s = await status();
+    expect(s.paused).toMatchObject(paused);
+    expect(Date.parse(s.paused!.since)).toBeGreaterThan(Date.now() - 60_000);
+    // A developer has no cell.manage: the pause stays admin-only like the rest of the runtime status.
+    expect((await call(alex, "GET", "/api/v1/agent-cell")).status).toBe(403);
+
+    // A closed reason set and bounded detail.
+    expect((await p.request("POST", "/runtime", { paused: { ...paused, reason: "oom" } })).status).toBe(400);
+    expect(
+      (await p.request("POST", "/runtime", { paused: { ...paused, detail: "x".repeat(301) } })).status,
+    ).toBe(400);
+    expect(
+      (
+        await new FakeCellPlugin({ apiUrl: stack.baseUrl, token: "x".repeat(40) }).request(
+          "POST",
+          "/runtime",
+          { paused },
+        )
+      ).status,
+    ).toBe(401);
+
+    // Another organization's cell cannot pause (or unpause) this one.
+    const orgB = randomUUID();
+    const tokenB = `ocw_cell_${randomUUID()}${randomUUID()}`;
+    await su.query(
+      "insert into auth.organization (id, name, slug, created_at) values ($1, 'Paused', 'paused-b', now() + interval '1 day')",
+      [orgB],
+    );
+    await su.query(
+      "insert into app.agent_credentials (organization_id, kind, token_hash) values ($1, 'channel_plugin', $2)",
+      [orgB, sha256Hex(tokenB)],
+    );
+    expect((await plugin({ token: tokenB }).request("POST", "/runtime", { paused: null })).status).toBe(200);
+    expect((await status()).paused).toMatchObject(paused);
+
+    // The channel started: the cell's event stream connects and the pause is gone, also after it disconnects.
+    await p.start();
+    expect(await status()).toMatchObject({ connected: true, paused: null });
+    await p.stop();
+    for (let i = 0; i < 50 && (await status()).connected; i++) await new Promise((r) => setTimeout(r, 100));
+    expect(await status()).toMatchObject({ connected: false, paused: null });
+
+    // An explicit end of the pause clears it as well.
+    expect((await p.request("POST", "/runtime", { paused })).status).toBe(200);
+    expect((await status()).paused).not.toBeNull();
+    expect((await p.request("POST", "/runtime", { paused: null })).status).toBe(200);
+    expect((await status()).paused).toBeNull();
+  });
+});
+
 describe("mention → delivery → reply", () => {
   let rootId: string;
 

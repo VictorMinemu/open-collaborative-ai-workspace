@@ -1,5 +1,11 @@
 import { z } from "zod";
-import { AgentStatus, ModelProviderKind, ProviderAuthErrorCode, SubscriptionProviderKind } from "./agent";
+import {
+  AgentStatus,
+  CellRuntimePause,
+  ModelProviderKind,
+  ProviderAuthErrorCode,
+  SubscriptionProviderKind,
+} from "./agent";
 import { SearchProvider, TurnContext } from "./bot-capabilities";
 import { ConversationKind, Mention, MessageBody } from "./chat";
 import { Id, IsoDateTime, MemberKind, PrincipalKind } from "./common";
@@ -18,6 +24,7 @@ import { ServerFrame } from "./realtime";
  * `POST /provider-auth`; Phase 3.1 adds `POST /tool-calls` and `POST /tool-calls/:callId/result` (the tool
  * gate, 03.1-04), `POST /memories` (memory saves, 03.1-07), the MCP probe result (`AgentChannelMcpProbeResult`,
  * route wired by 03.1-10) and the marketplace plugin report (`AgentChannelPluginReport`, route wired by 03.1-12).
+ * `POST /runtime` (`AgentChannelRuntimeReport`) tells admins why a running cell has no channel connected.
  */
 
 export const AGENT_CHANNEL_PROTOCOL_VERSION = 1;
@@ -487,6 +494,13 @@ export const AgentChannelStatusReport = z.object({
   detail: z.string().max(500).optional(),
 });
 export type AgentChannelStatusReport = z.infer<typeof AgentChannelStatusReport>;
+
+/**
+ * `POST /agent-channel/v1/runtime`: the cell is up but its `ocw` channel is not running (`paused`), or no longer
+ * paused (`null`). The cell's next event-stream connection clears a pause too, and a pause expires on its own.
+ */
+export const AgentChannelRuntimeReport = z.object({ paused: CellRuntimePause.nullable() });
+export type AgentChannelRuntimeReport = z.infer<typeof AgentChannelRuntimeReport>;
 
 // ---------------------------------------------------------------- tool gate and memory (Phase 3.1, additive)
 
