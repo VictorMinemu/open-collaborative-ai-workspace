@@ -16,6 +16,7 @@ import type { RealtimeService } from "../realtime";
 import { authorOf, type Directory } from "./directory";
 import { pinnedFor } from "./pins";
 import { reactionsFor } from "./reactions";
+import { savedFor } from "./saves";
 
 /**
  * Chat domain logic. Every function runs inside the caller's `withTenant()` transaction, so RLS scopes all
@@ -449,17 +450,19 @@ export function toMessage(row: MessageRow, dir: Directory, replyParticipants?: M
 }
 
 /**
- * Adds the viewer-specific fields (P-04) to REST snapshots: `reactions` with `mine` for `viewerId` and `pinned`.
+ * Adds the viewer-specific fields (P-04) to REST snapshots: `reactions` with `mine` for `viewerId`, `pinned` and
+ * whether `viewerId` saved it.
  * Tombstones carry no reactions and no pin (P-05). Realtime payloads never go through here.
  */
 export async function hydrateViewer(tx: Tx, list: Message[], viewerId: string): Promise<Message[]> {
   const live = list.filter((m) => !m.deletedAt).map((m) => m.id);
   const reactions = await reactionsFor(tx, live, viewerId);
   const pinned = await pinnedFor(tx, live);
+  const saved = await savedFor(tx, live, viewerId);
   return list.map((m) =>
     m.deletedAt
-      ? { ...m, reactions: [], pinned: false }
-      : { ...m, reactions: reactions.get(m.id) ?? [], pinned: pinned.has(m.id) },
+      ? { ...m, reactions: [], pinned: false, saved: false }
+      : { ...m, reactions: reactions.get(m.id) ?? [], pinned: pinned.has(m.id), saved: saved.has(m.id) },
   );
 }
 

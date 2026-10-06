@@ -1,17 +1,32 @@
 "use client";
 
-import { type ChannelSummary, type DmSummary, EventTypes, type MessageCreatedEvent } from "@ocw/contracts";
+import {
+  type ChannelSummary,
+  type DmSummary,
+  EventTypes,
+  type MessageCreatedEvent,
+  type SaveUpdatedEvent,
+} from "@ocw/contracts";
+import type { TopicFrame } from "@ocw/realtime-client";
 import { useQueryClient } from "@tanstack/react-query";
-import { ChevronRight, Hash, Lock, Plus } from "lucide-react";
+import { Bookmark, ChevronRight, Hash, Lock, Plus } from "lucide-react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { PersonalBotButton } from "@/components/bots/personal-bot-button";
 import { SectionSidebar, sectionItemClass } from "@/components/shell/section-sidebar";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
-import { bumpDmLatest, bumpLatest, chatKeys, isBotDm, useChannels, useDms } from "@/lib/chat-queries";
+import {
+  applySaveUpdate,
+  bumpDmLatest,
+  bumpLatest,
+  chatKeys,
+  isBotDm,
+  useChannels,
+  useDms,
+} from "@/lib/chat-queries";
 import { useMe } from "@/lib/queries";
 import { useTopic } from "@/lib/realtime";
 import { cn } from "@/lib/utils";
@@ -114,11 +129,19 @@ function useChannelListSync(
       void qc.invalidateQueries({ queryKey: chatKeys.dms });
     }, 150);
   };
-  const onFrame = (frame: { op: string; type: string }) => {
+  const onFrame = (frame: TopicFrame) => {
     if (frame.type.startsWith("conversation.")) refetch();
   };
+  // The member's own stream also carries their private saves (P-04), from any of their devices.
+  const onUserFrame = (frame: TopicFrame) => {
+    if (frame.op === "ev" && frame.type === EventTypes.saveUpdated) {
+      applySaveUpdate(qc, frame.data as SaveUpdatedEvent);
+      return;
+    }
+    onFrame(frame);
+  };
   useTopic(orgId ? `org:${orgId}` : null, onFrame, cursors.org);
-  useTopic(userId ? `user:${userId}` : null, onFrame, cursors.user);
+  useTopic(userId ? `user:${userId}` : null, onUserFrame, cursors.user);
   useEffect(() => () => void (timer.current && clearTimeout(timer.current)), []);
 }
 
@@ -202,6 +225,8 @@ function BotsSection({ activeId }: { activeId: string | null }) {
 
 export function ChatSidebar() {
   const params = useParams<{ channelId?: string; conversationId?: string }>();
+  const pathname = usePathname();
+  const onSaved = pathname === "/chat/saved";
   const activeId = params.channelId ?? params.conversationId ?? null;
   const me = useMe({ enabled: false });
   const channels = useChannels();
@@ -231,6 +256,18 @@ export function ChatSidebar() {
           </Tooltip>
         }
       >
+        {/* Personal views. Plan 04-08 moves this into the views group. */}
+        <nav aria-label="Your views" className="mb-3 grid gap-px">
+          <Link
+            href="/chat/saved"
+            data-testid="saved-link"
+            aria-current={onSaved ? "page" : undefined}
+            className={sectionItemClass(onSaved)}
+          >
+            <Bookmark className={cn("size-4 shrink-0", onSaved ? "" : "text-muted-foreground")} />
+            <span className="truncate">Saved</span>
+          </Link>
+        </nav>
         {channels.isPending ? (
           <div className="grid gap-1.5 px-2.5 pt-1">
             {[72, 56, 64].map((w) => (

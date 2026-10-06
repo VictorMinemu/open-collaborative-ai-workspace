@@ -43,6 +43,7 @@ import { type MessageActionsContext, registerMessageActionRoutes } from "./messa
 import { registerPinRoutes } from "./pins";
 import { registerReactionRoutes } from "./reactions";
 import { replyModeCandidates } from "./reply-mode";
+import { registerSaveRoutes } from "./saves";
 import {
   addMember,
   type ChannelRow,
@@ -841,6 +842,8 @@ export function createChatModule(core: Core): ApiModule {
       registerReactionRoutes(app, routeCtx);
       // ---------------------------------------------------------------- pins (CHAT-13)
       registerPinRoutes(app, routeCtx);
+      // ---------------------------------------------------------------- personal saves (CHAT-13)
+      registerSaveRoutes(app, routeCtx);
 
       if (core.env.NODE_ENV === "test") registerChatTestRoutes(app, core);
     },

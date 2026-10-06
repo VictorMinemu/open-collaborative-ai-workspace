@@ -22,11 +22,20 @@ import {
   type PinUpdatedEvent,
   type ReactionSummary,
   type ReactionUpdatedEvent,
+  SavedList,
+  type SaveUpdatedEvent,
   type ThreadResponse,
   ThreadResponse as ThreadResponseSchema,
   type ThreadUpdatedEvent,
 } from "@ocw/contracts";
-import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type InfiniteData,
+  type QueryClient,
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { api, isApiError } from "./api";
 
 export const chatKeys = {
@@ -39,6 +48,8 @@ export const chatKeys = {
   thread: (rootId: string) => ["chat", "thread", rootId] as const,
   threads: ["chat", "thread"] as const,
   pins: (convId: string) => ["chat", "pins", convId] as const,
+  allMessages: ["chat", "messages"] as const,
+  saved: ["chat", "saved"] as const,
   agents: ["chat", "agents"] as const,
   dms: ["chat", "dms"] as const,
 };
@@ -584,4 +595,63 @@ export function applyPinUpdate(
     );
   }
   void qc.invalidateQueries({ queryKey: chatKeys.pins(ev.conversationId) });
+}
+
+// ---------------------------------------------------------------- personal saves (CHAT-13)
+
+/** The member's Saved list, newest first, paged on `nextCursor`. */
+export function useSaved() {
+  return useInfiniteQuery({
+    queryKey: chatKeys.saved,
+    initialPageParam: null as string | null,
+    queryFn: ({ pageParam, signal }) =>
+      api.get(`/api/v1/saved?limit=30${pageParam ? `&cursor=${encodeURIComponent(pageParam)}` : ""}`, {
+        schema: SavedList,
+        signal,
+      }),
+    getNextPageParam: (last) => last.nextCursor,
+    retry: retryUnlessClientError,
+    staleTime: 30_000,
+  });
+}
+
+export function saveMessage(messageId: string): Promise<{ ok: true }> {
+  return api.put(`/api/v1/messages/${messageId}/save`, { body: {}, schema: Ok });
+}
+
+export function unsaveMessage(messageId: string): Promise<{ ok: true }> {
+  return api.del(`/api/v1/messages/${messageId}/save`, { schema: Ok });
+}
+
+/**
+ * Applies `save.updated` (the member's own `user:` stream, any device) or a local save/unsave: the message's
+ * `saved` flag in every cached window, thread and pins list, then the Saved list (removed at once, refetched).
+ */
+export function applySaveUpdate(qc: QueryClient, ev: SaveUpdatedEvent) {
+  const one = (m: Message) => (m.id === ev.messageId ? { ...m, saved: ev.saved } : m);
+  qc.setQueriesData<MessagePage>({ queryKey: chatKeys.allMessages }, (prev) =>
+    prev?.messages.some((m) => m.id === ev.messageId) ? { ...prev, messages: prev.messages.map(one) } : prev,
+  );
+  qc.setQueriesData<ThreadResponse>({ queryKey: chatKeys.threads }, (prev) =>
+    prev && (prev.root.id === ev.messageId || prev.replies.some((r) => r.id === ev.messageId))
+      ? { ...prev, root: one(prev.root), replies: prev.replies.map(one) }
+      : prev,
+  );
+  qc.setQueriesData<PinnedMessageList>({ queryKey: ["chat", "pins"] }, (prev) =>
+    prev ? { pins: prev.pins.map((p) => ({ ...p, message: one(p.message) })) } : prev,
+  );
+  if (!ev.saved) {
+    qc.setQueryData<InfiniteData<SavedList>>(chatKeys.saved, (prev) =>
+      prev
+        ? {
+            ...prev,
+            pages: prev.pages.map((pg) => ({
+              ...pg,
+              items: pg.items.filter((i) => i.message.id !== ev.messageId),
+            })),
+          }
+        : prev,
+    );
+  }
+  void qc.invalidateQueries({ queryKey: chatKeys.saved });
 }

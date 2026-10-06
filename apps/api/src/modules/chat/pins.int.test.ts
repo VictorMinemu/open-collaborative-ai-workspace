@@ -330,3 +330,156 @@ describe("pins (CHAT-13)", () => {
     expect(n.rows[0].n).toBe(0);
   });
 });
+
+const save = (as: TestClient, id: string) => as.request("PUT", `/api/v1/messages/${id}/save`);
+const unsave = (as: TestClient, id: string) => as.request("DELETE", `/api/v1/messages/${id}/save`);
+const savedOf = async (as: TestClient, query = "") =>
+  (await ok(as.request("GET", `/api/v1/saved${query}`))) as { items: Json[]; nextCursor: string | null };
+
+describe("saves (CHAT-13, P-03)", () => {
+  it("PUT save: save.updated on user:<me> only, Saved lists it with its #channel label, page shows saved per viewer", async () => {
+    const msg = await post(alex, channelId, "Remember to rotate the API keys");
+    const convEventsBefore = (await events(`conv:${channelId}`, "save.updated")).length;
+    expect(await ok(save(sam, msg.id))).toEqual({ ok: true });
+    expect(await ok(save(sam, msg.id))).toEqual({ ok: true });
+    expect(await events(`user:${samId}`, "save.updated")).toEqual([{ messageId: msg.id, saved: true }]);
+    expect((await events(`conv:${channelId}`, "save.updated")).length).toBe(convEventsBefore);
+    expect(await events(`user:${adminId}`, "save.updated")).toEqual([]);
+
+    const list = await savedOf(sam);
+    expect(list.items).toHaveLength(1);
+    expect(list.items[0]).toMatchObject({
+      message: { id: msg.id, body: "Remember to rotate the API keys", saved: true },
+      conversation: { id: channelId, kind: "channel", name: "pins", label: "#pins", archived: false },
+    });
+    expect(list.items[0]?.savedAt).toEqual(expect.any(String));
+    expect(list.nextCursor).toBeNull();
+
+    expect((await pageOf(sam, channelId)).find((m) => m.id === msg.id)?.saved).toBe(true);
+    expect((await pageOf(alex, channelId)).find((m) => m.id === msg.id)?.saved).toBe(false);
+    // Saves are private: nobody else sees them, and nothing is audited.
+    expect((await savedOf(admin)).items).toEqual([]);
+    const audited = await su.query("select count(*)::int as n from app.audit_events where resource_id = $1", [
+      msg.id,
+    ]);
+    expect(audited.rows[0].n).toBe(0);
+
+    expect(await ok(unsave(sam, msg.id))).toEqual({ ok: true });
+    expect((await events(`user:${samId}`, "save.updated")).at(-1)).toEqual({
+      messageId: msg.id,
+      saved: false,
+    });
+    expect((await savedOf(sam)).items).toEqual([]);
+  });
+
+  it("pages newest first with a working cursor over 35 saves", async () => {
+    const page = (await ok(alex.request("POST", "/api/v1/channels", { name: "saves-many" }))).id;
+    await ok(admin.request("POST", `/api/v1/channels/${page}/join`));
+    const ids: string[] = [];
+    for (let n = 1; n <= 35; n++) {
+      const m = await post(alex, page, `note ${n}`);
+      ids.push(m.id);
+      await ok(save(admin, m.id));
+    }
+    const first = await savedOf(admin);
+    expect(first.items).toHaveLength(30);
+    expect(first.items[0]?.message.body).toBe("note 35");
+    expect(first.nextCursor).toEqual(expect.any(String));
+    const second = await savedOf(admin, `?cursor=${encodeURIComponent(first.nextCursor ?? "")}`);
+    expect(second.items.map((i) => i.message.body)).toEqual([
+      "note 5",
+      "note 4",
+      "note 3",
+      "note 2",
+      "note 1",
+    ]);
+    expect(second.nextCursor).toBeNull();
+    const seen = new Set([...first.items, ...second.items].map((i) => i.message.id));
+    expect(seen.size).toBe(35);
+    const small = await savedOf(admin, "?limit=10");
+    expect(small.items).toHaveLength(10);
+    expect((await admin.request("GET", "/api/v1/saved?cursor=not-a-cursor")).status).toBe(400);
+    for (const id of ids) await ok(unsave(admin, id));
+  });
+
+  it("only lists what the member can still read: removed from a private channel → gone; re-added → back", async () => {
+    const secret = (
+      await ok(admin.request("POST", "/api/v1/channels", { name: "saves-secret", visibility: "private" }))
+    ).id;
+    await ok(admin.request("POST", `/api/v1/channels/${secret}/members`, { kind: "user", id: samId }));
+    const msg = await post(admin, secret, "Q4 numbers draft");
+    await ok(save(sam, msg.id));
+    expect((await savedOf(sam)).items.map((i) => i.message.id)).toContain(msg.id);
+
+    await ok(admin.request("DELETE", `/api/v1/channels/${secret}/members/user/${samId}`));
+    expect((await savedOf(sam)).items.map((i) => i.message.id)).not.toContain(msg.id);
+    // And he can no longer save there: hidden = 404.
+    expect((await save(sam, msg.id)).status).toBe(404);
+
+    await ok(admin.request("POST", `/api/v1/channels/${secret}/members`, { kind: "user", id: samId }));
+    expect((await savedOf(sam)).items.map((i) => i.message.id)).toContain(msg.id);
+    await ok(unsave(sam, msg.id));
+  });
+
+  it("a deleted message disappears from Saved and cannot be saved again", async () => {
+    const msg = await post(sam, channelId, "draft I will delete");
+    await ok(save(sam, msg.id));
+    await ok(sam.request("DELETE", `/api/v1/messages/${msg.id}`));
+    expect((await savedOf(sam)).items.map((i) => i.message.id)).not.toContain(msg.id);
+    const r = await save(sam, msg.id);
+    expect(r.status).toBe(409);
+    expect(errorOf(r).code).toBe("message_deleted");
+    // Removing a stale save still works.
+    await ok(unsave(sam, msg.id));
+  });
+
+  it("a bot DM message is labelled with the bot's name; an archived channel's saves stay listed", async () => {
+    const dm = await botDm(alexId);
+    const reply = await stack.built.core.chatAgent.postAgentMessage(
+      { organizationId: orgId, userId: null },
+      {
+        agentId: archieId,
+        conversationId: dm,
+        threadRootId: null,
+        body: "Here you go",
+        idempotencyKey: "s1",
+      },
+    );
+    await ok(save(alex, reply.messageId));
+    const old = (await ok(alex.request("POST", "/api/v1/channels", { name: "saves-old" }))).id;
+    const kept = await post(alex, old, "keep this");
+    await ok(save(alex, kept.id));
+    await ok(admin.request("POST", `/api/v1/channels/${old}/archive`));
+
+    const items = (await savedOf(alex)).items;
+    expect(items.find((i) => i.message.id === reply.messageId)?.conversation).toMatchObject({
+      id: dm,
+      kind: "dm",
+      label: "Archie",
+    });
+    expect(items.find((i) => i.message.id === kept.id)?.conversation).toMatchObject({
+      label: "#saves-old",
+      archived: true,
+    });
+  });
+
+  it("saving in an unreadable conversation → 404; org B → 404", async () => {
+    const hidden = (
+      await ok(alex.request("POST", "/api/v1/channels", { name: "saves-hidden", visibility: "private" }))
+    ).id;
+    const msg = await post(alex, hidden, "not for Sam");
+    expect((await save(sam, msg.id)).status).toBe(404);
+    expect((await unsave(sam, msg.id)).status).toBe(404);
+    expect((await save(sam, randomUUID())).status).toBe(404);
+
+    const open = await post(alex, channelId, "org A only, saved by nobody");
+    const { client: eve, id: eveId } = await invite(`eve-${randomUUID().slice(0, 8)}@example.test`, "Eve");
+    await moveToOtherOrg(eve, eveId);
+    expect((await save(eve, open.id)).status).toBe(404);
+    expect((await savedOf(eve)).items).toEqual([]);
+    const n = await su.query("select count(*)::int as n from app.message_saves where message_id = $1", [
+      open.id,
+    ]);
+    expect(n.rows[0].n).toBe(0);
+  });
+});

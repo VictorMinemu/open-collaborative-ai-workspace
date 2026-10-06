@@ -2,6 +2,8 @@
 
 import type { Message } from "@ocw/contracts";
 import {
+  Bookmark,
+  BookmarkCheck,
   Link2,
   MessageSquareReply,
   MoreHorizontal,
@@ -56,10 +58,22 @@ export interface MessageActionSet {
   onPin?: (() => void) | undefined;
   /** Unpins it: the pinner, a channel moderator or any DM participant. */
   onUnpin?: (() => void) | undefined;
+  /** Toggles the viewer's private save (CHAT-13); `saved` says which way it goes. */
+  onToggleSave?: (() => void) | undefined;
+  saved?: boolean | undefined;
 }
 
 export const hasMessageActions = (a: MessageActionSet) =>
-  !!(a.onReply || a.onEdit || a.onDelete || a.onCopyLink || a.onReact || a.onPin || a.onUnpin);
+  !!(
+    a.onReply ||
+    a.onEdit ||
+    a.onDelete ||
+    a.onCopyLink ||
+    a.onReact ||
+    a.onPin ||
+    a.onUnpin ||
+    a.onToggleSave
+  );
 
 const toolbarButton =
   "inline-flex size-7 items-center justify-center rounded-md text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40 data-[popup-open]:bg-accent data-[popup-open]:text-foreground";
@@ -169,6 +183,20 @@ export function MessageActions({ actions }: { actions: MessageActionSet }) {
             className={toolbarButton}
           >
             <MessageSquareReply className="size-4" />
+          </button>
+        </Tooltip>
+      ) : null}
+      {actions.onToggleSave ? (
+        <Tooltip content={actions.saved ? "Remove from saved" : "Save for later"}>
+          <button
+            type="button"
+            aria-label={actions.saved ? "Remove from saved" : "Save for later"}
+            aria-pressed={!!actions.saved}
+            data-testid="save-message"
+            onClick={actions.onToggleSave}
+            className={cn(toolbarButton, actions.saved && "text-primary hover:text-primary")}
+          >
+            {actions.saved ? <BookmarkCheck className="size-4" /> : <Bookmark className="size-4" />}
           </button>
         </Tooltip>
       ) : null}
@@ -306,6 +334,14 @@ export function MessageActionSheet({
               label="Copy link"
               testId="copy-link"
               onClick={run(actions.onCopyLink)}
+            />
+          ) : null}
+          {actions.onToggleSave ? (
+            <SheetRow
+              icon={actions.saved ? <BookmarkCheck /> : <Bookmark />}
+              label={actions.saved ? "Remove from saved" : "Save for later"}
+              testId="save-message"
+              onClick={run(actions.onToggleSave)}
             />
           ) : null}
           {actions.onUnpin ? (

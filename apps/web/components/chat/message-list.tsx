@@ -2,7 +2,7 @@
 
 import type { Message, MessageAuthor } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, Pin, RotateCw, Trash2 } from "lucide-react";
+import { AlertCircle, Bookmark, Pin, RotateCw, Trash2 } from "lucide-react";
 import { Fragment, memo, type ReactNode, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -15,11 +15,14 @@ import {
   applyMessageDeleted,
   applyMessageUpdate,
   applyPinUpdate,
+  applySaveUpdate,
   deleteMessage,
   editMessage,
   pinMessage,
+  saveMessage,
   toggleReaction,
   unpinMessage,
+  unsaveMessage,
 } from "@/lib/chat-queries";
 import { cn, relativeTime } from "@/lib/utils";
 import { EmojiPicker } from "./emoji-picker";
@@ -310,7 +313,19 @@ const MessageRow = memo(function MessageRow({
       !deleted && message.pinned && (canUnpinAny || pinnedBy?.get(message.id) === meId)
         ? () => void setPin(false)
         : undefined,
+    // Saving is personal and works wherever the message is readable (archived conversations included).
+    onToggleSave: !deleted && meId ? () => void setSaved(!message.saved) : undefined,
+    saved: !!message.saved,
   };
+  async function setSaved(saved: boolean) {
+    try {
+      await (saved ? saveMessage : unsaveMessage)(message.id);
+      applySaveUpdate(qc, { messageId: message.id, saved });
+      toast.success(saved ? "Saved for later" : "Removed from saved");
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  }
   async function setPin(pinned: boolean) {
     try {
       await (pinned ? pinMessage : unpinMessage)(message.conversationId, message.id);
@@ -432,12 +447,21 @@ const MessageRow = memo(function MessageRow({
         )}
       </div>
       <div className="min-w-0 flex-1">
-        {message.pinned && !deleted ? (
-          <div
-            data-testid="pinned-label"
-            className="flex items-center gap-1 pb-0.5 font-medium text-[11.5px] text-amber-700 dark:text-amber-400"
-          >
-            <Pin className="size-3 -rotate-45" /> Pinned
+        {(message.pinned || message.saved) && !deleted ? (
+          <div className="flex items-center gap-2.5 pb-0.5 font-medium text-[11.5px]">
+            {message.pinned ? (
+              <span
+                data-testid="pinned-label"
+                className="flex items-center gap-1 text-amber-700 dark:text-amber-400"
+              >
+                <Pin className="size-3 -rotate-45" /> Pinned
+              </span>
+            ) : null}
+            {message.saved ? (
+              <span data-testid="saved-label" className="flex items-center gap-1 text-primary">
+                <Bookmark className="size-3 fill-current" /> Saved for later
+              </span>
+            ) : null}
           </div>
         ) : null}
         {continuation || deleted ? null : (

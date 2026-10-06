@@ -194,3 +194,61 @@ test("pins: a pin shows live in the other member's header; the sheet jumps to it
   await admin.dispose();
   await sam.dispose();
 });
+
+test("saves: a member saves a message, finds it in Saved, jumps to it and removes it", async ({
+  browser,
+}, info) => {
+  test.setTimeout(180_000);
+  const project = info.project.name;
+  const mobile = project === "mobile";
+  const size = mobile ? "390" : "1440";
+  const admin = await apiAs(ADMIN);
+  await ensureMember(admin, SAM, "developer");
+  const sam = await apiAs(SAM);
+  const channel = await freshChannel(admin, [sam], "saves");
+  const msg = await postAs(
+    admin,
+    channel.id,
+    "Q3 planning doc is ready: owners, dates and the open questions for Thursday's review.",
+  );
+  for (let n = 1; n <= 25; n++) await postAs(admin, channel.id, `Later update #${n}`);
+
+  const s = await openAs(browser, SAM, project);
+  await s.page.goto(`${BASE_URL}/chat/${channel.id}`);
+  const row = messageRow(s.page, msg.id);
+  await row.scrollIntoViewIfNeeded();
+
+  // ---- Sam saves it from the toolbar (desktop) or the long-press sheet (mobile)
+  const actions = await openMessageActions(s.page, msg.id, project);
+  await actions.getByTestId("save-message").click();
+  await expect(row.getByTestId("saved-label")).toBeVisible();
+
+  // ---- the sidebar's Saved link lists it with its channel
+  if (mobile) await s.page.getByTestId("mobile-nav-trigger").click();
+  await s.page.getByTestId("saved-link").click();
+  await expect(s.page).toHaveURL(/\/chat\/saved$/);
+  const item = s.page.getByTestId("saved-item");
+  await expect(item).toHaveCount(1);
+  await expect(item).toContainText("Q3 planning doc is ready");
+  await expect(item.getByTestId("saved-conversation")).toHaveText(`#${channel.name}`);
+  await bothThemes(s.page, `saved-view-${size}`);
+
+  // ---- Jump opens it in its channel, highlighted
+  await item.getByTestId("saved-jump").click();
+  await expect(s.page).toHaveURL(new RegExp(`/chat/${channel.id}\\?m=${msg.id}`));
+  await expect(row).toBeInViewport();
+  await expect(row).toHaveAttribute("data-highlighted", "true");
+  await expect(row.getByTestId("saved-label")).toBeVisible();
+
+  // ---- Remove empties the list
+  if (mobile) await s.page.getByTestId("mobile-nav-trigger").click();
+  await s.page.getByTestId("saved-link").click();
+  await expect(item).toHaveCount(1);
+  await item.getByTestId("saved-remove").click();
+  await expect(item).toHaveCount(0);
+  await expect(s.page.getByText("Nothing saved yet")).toBeVisible();
+
+  await s.context.close();
+  await admin.dispose();
+  await sam.dispose();
+});
