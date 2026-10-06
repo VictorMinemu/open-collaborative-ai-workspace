@@ -1,9 +1,11 @@
 import { type APIRequestContext, expect, type Page, test } from "@playwright/test";
-import { apiAs, ensureMember, openAs, SAM } from "../support/actors";
+import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import {
   answerText,
+  chatIdOf,
   lastAssistant,
   openNewAiChat,
+  persistedAnswer,
   seedPlan,
   sendAi,
   waitForLonger,
@@ -48,8 +50,12 @@ test("a ChatGPT-plan answer streams into the page and is still there after a rel
   const w = widthOf(project);
   const { context, page } = await openAs(browser, SAM, project);
 
+  await page.goto(`${BASE_URL}/chat/ai`);
+  await expect(page.getByTestId("ai-new-chat")).toBeVisible();
+  await bothThemes(page, `ai-chats-${w}`);
   await openNewAiChat(page);
   await expect(page.getByTestId("ai-model-chip")).toContainText("GPT-6 Astra");
+  await bothThemes(page, `ai-chat-new-${w}`);
   const usage = page.getByTestId("plan-usage-line");
   await expect(usage).toContainText("Using ChatGPT plan");
   const manage = usage.getByRole("link", { name: "Manage usage" });
@@ -86,6 +92,69 @@ test("a ChatGPT-plan answer streams into the page and is still there after a rel
   expect(await answerText(reloaded)).toBe(finalText);
   await expect(reloaded.getByTestId("ai-message-footer")).toHaveText(footerText);
   await expect(page.getByTestId("plan-usage-line")).toBeVisible();
+
+  await context.close();
+});
+
+test("a reload or a dropped connection mid-answer resumes the exact text", async ({ browser }, info) => {
+  const project = info.project.name;
+  const { context, page } = await openAs(browser, SAM, project);
+
+  // Reload mid-stream: the partial text is there at once and the stream continues to the persisted text.
+  await openNewAiChat(page);
+  await sendAi(page, "count to forty [[slow]]");
+  await expect(page).toHaveURL(/\/chat\/ai\/[0-9a-f-]{36}$/);
+  const chatId = chatIdOf(page);
+  await waitForLonger(lastAssistant(page), "Echo: count to forty 1 2".length);
+  await page.reload();
+  const resumed = lastAssistant(page);
+  await expect(resumed).toHaveAttribute("data-status", "streaming");
+  const partial = await waitForLonger(resumed, 0, 3_000);
+  await expect(resumed).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
+  const afterReload = await answerText(resumed);
+  expect(afterReload.startsWith(partial), `"${afterReload}" continues "${partial}"`).toBe(true);
+  expect(afterReload).toBe(await persistedAnswer(sam, chatId));
+  expect(afterReload).toMatch(/^Echo: count to forty 1 2 3 .* 39 40$/);
+
+  // Offline for 2 s mid-stream: back online, the answer ends with exactly the persisted text.
+  await sendAi(page, "count again [[slow]]");
+  const second = lastAssistant(page);
+  await expect(second).not.toHaveAttribute(
+    "data-message-id",
+    (await resumed.getAttribute("data-message-id")) ?? "",
+  );
+  await waitForLonger(second, "Echo: count again 1".length);
+  await context.setOffline(true);
+  await page.waitForTimeout(2_000);
+  await context.setOffline(false);
+  await expect(second).toHaveAttribute("data-status", "completed", { timeout: 30_000 });
+  const afterOffline = await answerText(second);
+  expect(afterOffline).toBe(await persistedAnswer(sam, chatId));
+  expect(afterOffline).toMatch(/^Echo: count again 1 2 3 .* 39 40$/);
+
+  await context.close();
+});
+
+test("a failed answer ends with a calm card instead of spinning", async ({ browser }, info) => {
+  const project = info.project.name;
+  const w = widthOf(project);
+  const { context, page } = await openAs(browser, SAM, project);
+
+  await openNewAiChat(page);
+  await sendAi(page, "hello [[plan:unavailable]]");
+  await expect(page).toHaveURL(/\/chat\/ai\/[0-9a-f-]{36}$/);
+  const answer = lastAssistant(page);
+  await expect(answer).toHaveAttribute("data-status", "failed", { timeout: 15_000 });
+  const card = answer.getByTestId("ai-generation-error");
+  await expect(card).toHaveText("This answer failed — ChatGPT is temporarily unavailable");
+  await expect(page.getByTestId("ai-streaming-caret")).toHaveCount(0);
+  await expect(answer.getByTestId("ai-message-footer")).toContainText("GPT-6 Astra · ChatGPT plan");
+  // The composer is ready for the next message.
+  await expect(page.getByTestId("ai-composer")).toBeEnabled();
+  await bothThemes(page, `ai-chat-failed-${w}`);
+
+  await page.reload();
+  await expect(lastAssistant(page).getByTestId("ai-generation-error")).toBeVisible();
 
   await context.close();
 });

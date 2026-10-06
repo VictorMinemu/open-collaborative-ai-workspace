@@ -13,12 +13,13 @@ export async function seedPlan(api: APIRequestContext): Promise<void> {
   expect(((await res.json()) as { state: string }).state).toBe("connected");
 }
 
-/** Opens `/chat/ai`, clicks New chat and waits for the empty AI chat with its composer. */
+/** Opens `/chat/ai`, clicks New chat and waits for the empty AI chat with its composer and model. */
 export async function openNewAiChat(page: Page): Promise<void> {
   await page.goto(`${BASE_URL}/chat/ai`);
   await page.getByTestId("ai-new-chat").click();
   await expect(page).toHaveURL(/\/chat\/ai\/new$/);
   await expect(page.getByTestId("ai-composer")).toBeVisible();
+  await expect(page.getByTestId("ai-model-chip")).toBeVisible();
 }
 
 /** Types `text` into the AI composer and sends it with Enter. */
