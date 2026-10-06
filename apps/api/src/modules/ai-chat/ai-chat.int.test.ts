@@ -234,8 +234,11 @@ describe("a plan turn streams over the WebSocket and persists with a usage recor
     const gen = (await su.query("select * from app.ai_generations where conversation_id = $1", [chatId]))
       .rows;
     expect(gen).toHaveLength(1);
-    const usage = (await su.query("select * from app.ai_usage_records where generation_id = $1", [gen[0].id]))
-      .rows;
+    const usage = (
+      await su.query("select * from app.ai_usage_records where generation_id = $1 and kind = 'chat'", [
+        gen[0].id,
+      ])
+    ).rows;
     expect(usage).toHaveLength(1);
     expect(usage[0]).toMatchObject({
       kind: "chat",
@@ -523,7 +526,10 @@ describe("provider failures finalize cleanly (Pitfall 5, P-10)", () => {
     expect(msg.status).toBe("failed");
     expect(msg.body.length).toBeGreaterThan(0);
     expect("Echo: hello".startsWith(msg.body) || msg.body.startsWith("Echo")).toBe(true);
-    const usage = await su.query("select * from app.ai_usage_records where generation_id = $1", [g.id]);
+    const usage = await su.query(
+      "select * from app.ai_usage_records where generation_id = $1 and kind = 'chat'",
+      [g.id],
+    );
     expect(usage.rows).toHaveLength(1);
     const line = stack.logs.find((l) => l.includes("ai generation failed"));
     expect(line).toBeDefined();

@@ -63,9 +63,10 @@ const versionsOf = async (messageId: string) =>
     .rows;
 const usageFor = async (messageId: string) =>
   (
-    await su.query("select * from app.ai_usage_records where message_id = $1 order by created_at", [
-      messageId,
-    ])
+    await su.query(
+      "select * from app.ai_usage_records where message_id = $1 and kind = 'chat' order by created_at",
+      [messageId],
+    )
   ).rows;
 const bodyOf = async (messageId: string) =>
   (await su.query("select body, status from app.messages where id = $1", [messageId])).rows[0] as Json;
