@@ -192,7 +192,7 @@ describe("Full access opt-in is read-only outside the main process (ADR-0012, P-
 });
 
 describe("ChatGPT loopback sign-in channels (05-07, T-05-07-04)", () => {
-  const token = "a".repeat(20) + "B-_" + "9".repeat(20);
+  const token = `${"a".repeat(20)}B-_${"9".repeat(20)}`;
 
   it("three channels exist under ocw:chatgpt-loopback-*", () => {
     expect(Channels.chatgptLoopbackPrepare).toBe("ocw:chatgpt-loopback-prepare");
