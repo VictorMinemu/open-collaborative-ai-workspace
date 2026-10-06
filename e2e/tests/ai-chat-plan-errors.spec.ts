@@ -301,3 +301,115 @@ test("an invalid sign-in offers Reconnect ChatGPT in the card and the picker, wh
   await expect(page.getByTestId("chatgpt-connect-dialog")).toBeVisible();
   await context.close();
 });
+
+/**
+ * The desktop app's preload (05-07), simulated: `window.ocwDesktop` with the three loopback functions. The test's Node
+ * side plays the main process: it "opens the system browser" by fetching the authorize URL and hands back the
+ * loopback address the fake sends it to, as the real one-shot 127.0.0.1 listener does (apps/desktop chatgpt-loopback).
+ * `gate` holds the callback until the test has checked the waiting state.
+ */
+async function fakeDesktop(page: Page, port: number) {
+  const calls = { opened: "", cancelled: 0 };
+  let release: (v: { ok: boolean; reason?: string }) => void = () => {};
+  const gate = new Promise<{ ok: boolean; reason?: string }>((r) => {
+    release = r;
+  });
+  await page.exposeFunction("__ocwLoopbackAwait", async (authorizeUrl: string) => {
+    calls.opened = authorizeUrl;
+    const verdict = await gate;
+    if (!verdict.ok) return { ok: false, reason: verdict.reason ?? "cancelled" };
+    const res = await fetch(authorizeUrl, { redirect: "manual" });
+    return { ok: true, redirectUrl: res.headers.get("location") ?? "" };
+  });
+  await page.exposeFunction("__ocwLoopbackCancel", () => {
+    calls.cancelled += 1;
+    release({ ok: false, reason: "cancelled" });
+  });
+  await page.addInitScript((p: number) => {
+    const w = window as unknown as Record<string, unknown> & {
+      __ocwLoopbackAwait(url: string): Promise<unknown>;
+      __ocwLoopbackCancel(): Promise<void>;
+    };
+    w.ocwDesktop = {
+      isDesktop: true,
+      platform: "darwin",
+      status: async () => ({
+        state: "online",
+        label: "Runtime online",
+        paired: true,
+        deviceName: "Mac",
+        projects: 0,
+      }),
+      addProject: async () => ({ ok: false, canceled: true }),
+      listProjects: async () => [],
+      onStatus: () => () => {},
+      chatgptLoopbackPrepare: async () => ({ flowToken: "t".repeat(43), port: p }),
+      chatgptLoopbackAwait: (_token: string, url: string) => w.__ocwLoopbackAwait(url),
+      chatgptLoopbackCancel: () => w.__ocwLoopbackCancel(),
+    };
+  }, port);
+  return { calls, release: (v: { ok: boolean; reason?: string } = { ok: true }) => release(v) };
+}
+
+test("in the desktop app Continue with ChatGPT completes without pasting", async ({ browser }, info) => {
+  const project = info.project.name;
+  const off = await sam.delete(STATUS);
+  expect(off.ok()).toBe(true);
+  const { context, page } = await openAs(browser, SAM, project);
+  const desktop = await fakeDesktop(page, 1456);
+
+  await page.goto(`${BASE_URL}/settings/ai-chat`);
+  await page.getByTestId("chatgpt-continue").click();
+  const dialog = page.getByTestId("chatgpt-connect-dialog");
+  await expect(dialog).toBeVisible();
+  // The paste step is never offered on the desktop path.
+  await expect(dialog.getByTestId("chatgpt-redirect-input")).toHaveCount(0);
+  await dialog.getByTestId("chatgpt-dialog-continue").click();
+  await expect(dialog.getByTestId("chatgpt-desktop-waiting")).toContainText(
+    "Waiting for ChatGPT in your browser",
+  );
+  await expect(dialog.getByTestId("chatgpt-redirect-input")).toHaveCount(0);
+  // The API built the redirect URI on the port the desktop listener bound.
+  await expect.poll(() => desktop.calls.opened).toContain("/siwc/api/accounts/authorize?");
+  expect(new URL(desktop.calls.opened).searchParams.get("redirect_uri")).toBe(
+    "http://127.0.0.1:1456/auth/callback",
+  );
+
+  desktop.release();
+  await expect(dialog).toBeHidden();
+  const welcome = page.getByTestId("chatgpt-welcome");
+  await expect(welcome).toBeVisible();
+  await welcome.getByTestId("chatgpt-welcome-done").click();
+  await expect(page.getByTestId("chatgpt-plan-card")).toHaveAttribute("data-state", "connected");
+  expect(desktop.calls.cancelled).toBe(0);
+  await context.close();
+});
+
+test("in the desktop app, cancelling the browser wait falls back to the paste steps", async ({
+  browser,
+}, info) => {
+  const project = info.project.name;
+  await sam.delete(STATUS);
+  const { context, page } = await openAs(browser, SAM, project);
+  const desktop = await fakeDesktop(page, 1455);
+  await page.goto(`${BASE_URL}/settings/ai-chat`);
+  await page.getByTestId("chatgpt-continue").click();
+  const dialog = page.getByTestId("chatgpt-connect-dialog");
+  await dialog.getByTestId("chatgpt-dialog-continue").click();
+  await expect(dialog.getByTestId("chatgpt-desktop-waiting")).toBeVisible();
+  await expect.poll(() => desktop.calls.opened).toContain("/siwc/api/accounts/authorize?");
+
+  await dialog.getByTestId("chatgpt-desktop-cancel").click();
+  expect(desktop.calls.cancelled).toBe(1);
+  // The same sign-in can still finish by pasting the address the browser landed on.
+  const input = dialog.getByTestId("chatgpt-redirect-input");
+  await expect(input).toBeVisible();
+  const res = await fetch(desktop.calls.opened, { redirect: "manual" });
+  await input.fill(res.headers.get("location") ?? "");
+  await dialog.getByTestId("chatgpt-connect-submit").click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByTestId("chatgpt-welcome")).toBeVisible();
+  await page.getByTestId("chatgpt-welcome-done").click();
+  await expect(page.getByTestId("chatgpt-plan-card")).toHaveAttribute("data-state", "connected");
+  await context.close();
+});
