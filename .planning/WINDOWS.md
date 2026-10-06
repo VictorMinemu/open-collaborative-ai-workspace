@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 29
+open_count: 34
 waived_count: 0
 fixed_count: 14
-total_count: 43
-last_updated: 2026-10-06T08:49:19.123Z
+total_count: 48
+last_updated: 2026-10-06T09:33:56.493Z
 ---
 
 # Broken Windows Ledger
@@ -58,6 +58,11 @@ last_updated: 2026-10-06T08:49:19.123Z
 | 41 | 04 | deviation | apps/api/src/modules/chat/index.ts |  | @channel/@here limit exempts client retries of an already-posted message; channel.mention_all added to viewerCan | open |  | 2026-10-06T08:49:18.977Z |  |
 | 42 | 04 | deviation | e2e/tests/chat-sidebar.spec.ts |  | View list assertion updated for Mentions (inserted second by plan) | open |  | 2026-10-06T08:49:19.050Z |  |
 | 43 | 04 | deviation | apps/api/src/modules/chat/dm-privacy.int.test.ts |  | Inbox privacy covered via list checks and a dedicated describe, not routesFor (GET /notifications is a 200 list) | open |  | 2026-10-06T08:49:19.123Z |  |
+| 44 | 04 | deviation | apps/api/src/modules/chat/index.ts |  | moveReadCursor locks the user: stream before counting so conversation.read never overtakes a notification; not_a_member on mark-unread for unjoined channels | open |  | 2026-10-06T09:33:56.215Z |  |
+| 45 | 04 | deviation | packages/contracts/src/notifications.ts |  | Add-only ConversationReadEvent.latestMessageSeq: clients refetch the snapshot when a conv: frame overtook the counts | open |  | 2026-10-06T09:33:56.287Z |  |
+| 46 | 04 | deviation | apps/api/src/modules/chat/threads.ts |  | Folded 04-08/04-09 items: ThreadList.unreadThreads over all pages; thread reads clear that thread's notifications | open |  | 2026-10-06T09:33:56.356Z |  |
+| 47 | 04 | deviation | apps/api/src/modules/chat/dm-privacy.int.test.ts |  | Fixture re-marks Alex's DM notification unread (reading the DM now reads it); privacy assertions unchanged | open |  | 2026-10-06T09:33:56.425Z |  |
+| 48 | 04 | deviation | apps/web/components/chat/use-read-cursor.ts |  | Shared read-cursor hook (not in plan list): detached windows read only what they show, per-tab hold in sessionStorage, New messages divider on open | open |  | 2026-10-06T09:33:56.493Z |  |
 
 ````json
 [
@@ -575,6 +580,66 @@ last_updated: 2026-10-06T08:49:19.123Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-06T08:49:19.123Z",
+    "resolved_at": null
+  },
+  {
+    "id": 44,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/api/src/modules/chat/index.ts",
+    "line": null,
+    "description": "moveReadCursor locks the user: stream before counting so conversation.read never overtakes a notification; not_a_member on mark-unread for unjoined channels",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T09:33:56.215Z",
+    "resolved_at": null
+  },
+  {
+    "id": 45,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "packages/contracts/src/notifications.ts",
+    "line": null,
+    "description": "Add-only ConversationReadEvent.latestMessageSeq: clients refetch the snapshot when a conv: frame overtook the counts",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T09:33:56.287Z",
+    "resolved_at": null
+  },
+  {
+    "id": 46,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/api/src/modules/chat/threads.ts",
+    "line": null,
+    "description": "Folded 04-08/04-09 items: ThreadList.unreadThreads over all pages; thread reads clear that thread's notifications",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T09:33:56.356Z",
+    "resolved_at": null
+  },
+  {
+    "id": 47,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/api/src/modules/chat/dm-privacy.int.test.ts",
+    "line": null,
+    "description": "Fixture re-marks Alex's DM notification unread (reading the DM now reads it); privacy assertions unchanged",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T09:33:56.425Z",
+    "resolved_at": null
+  },
+  {
+    "id": 48,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/web/components/chat/use-read-cursor.ts",
+    "line": null,
+    "description": "Shared read-cursor hook (not in plan list): detached windows read only what they show, per-tab hold in sessionStorage, New messages divider on open",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T09:33:56.493Z",
     "resolved_at": null
   }
 ]
