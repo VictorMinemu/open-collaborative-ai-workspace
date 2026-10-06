@@ -24,8 +24,10 @@ import {
   type GenerationRow,
   generationDto,
 } from "./dto";
+import { consumeGeneration, refuseOverLimit } from "./limits";
 import type { RunLoop } from "./run-loop";
 import { capOr429, resolveModelOr409 } from "./service";
+import { backendClassOf } from "./usage";
 
 /**
  * The generation lifecycle routes (05-06, D-05). Stop may land on any API instance: the route authorizes and
@@ -210,6 +212,10 @@ export async function registerGenerationRoutes(
         const resolved = await resolveModelOr409(gateway, tx, ref, auth.userId);
         const policy = await loadAiChatPolicy(tx);
         await capOr429(tx, auth.userId, policy.concurrentGenerationsPerUser);
+        // A regenerate is an answer too: it counts against the same daily cap (05-08), before anything changes.
+        const limit = { userId: auth.userId, backendClass: backendClassOf(resolved.ref.backend) };
+        const counted = await consumeGeneration(tx, { ...limit, policy });
+        if (!counted.ok) return { refused: await refuseOverLimit(core, tx, counted, limit) };
 
         // The replaced answer, append-only (T-05-06-03), before the message is reset.
         const [versions] = await tx
@@ -294,6 +300,8 @@ export async function registerGenerationRoutes(
         };
         return { response, start: gen };
       });
+      // The refusal's audit row is committed; the answer and its versions are untouched.
+      if ("refused" in out) throw out.refused;
       runLoop.start({ organizationId: out.start.organizationId, generationId: out.start.id });
       return reply.status(201).send(out.response);
     },

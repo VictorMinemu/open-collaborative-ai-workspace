@@ -43,13 +43,17 @@ import {
   generationDto,
   generationsFor,
 } from "./dto";
+import { consumeGeneration, refuseOverLimit } from "./limits";
 import type { RunLoop } from "./run-loop";
+import { backendClassOf } from "./usage";
 
 /**
  * AI chat sends (D-01, D-05, P-03, P-07): one tenant transaction decides `ai_chat.use`, resolves the model for the
  * REQUESTER (refusal → 409 `model_unavailable`), takes the per-user advisory lock and concurrency cap (429), inserts
  * the user message and the streaming assistant placeholder (each with the seq of its `message.created`) and a
- * `running` generation (one per conversation → 409). The run loop starts after commit.
+ * `running` generation (one per conversation → 409). The run loop starts after commit. Before anything is inserted,
+ * the answer is counted against the member's daily cap (05-08, `consumeGeneration`): at the cap the send is 429
+ * `daily_limit_reached` with the reset time, only its audit row commits and no model is ever called.
  */
 
 export interface AiChatDeps {
@@ -346,6 +350,9 @@ export function createAiChatService(deps: AiChatDeps) {
         const resolved = await resolveOr409(tx, body.model, auth.userId);
         const policy = await loadAiChatPolicy(tx);
         await capOr429(tx, auth.userId, policy.concurrentGenerationsPerUser);
+        const limit = { userId: auth.userId, backendClass: backendClassOf(resolved.ref.backend) };
+        const counted = await consumeGeneration(tx, { ...limit, policy });
+        if (!counted.ok) return { refused: await refuseOverLimit(core, tx, counted, limit) };
 
         const [conv] = await tx
           .insert(conversations)
@@ -380,6 +387,8 @@ export function createAiChatService(deps: AiChatDeps) {
         await auditSend(tx, "ai_chat.created", conv, turn.generation);
         return { response: { ...turn.turn, chat }, start: turn.generation };
       });
+      // The refusal's audit row is committed; nothing else was written.
+      if ("refused" in out) throw out.refused;
       if (out.start) runLoop.start({ organizationId: out.start.organizationId, generationId: out.start.id });
       return out.response;
     },
@@ -408,11 +417,16 @@ export function createAiChatService(deps: AiChatDeps) {
         }
         const policy = await loadAiChatPolicy(tx);
         await capOr429(tx, auth.userId, policy.concurrentGenerationsPerUser);
+        const limit = { userId: auth.userId, backendClass: backendClassOf(resolved.ref.backend) };
+        const counted = await consumeGeneration(tx, { ...limit, policy });
+        if (!counted.ok) return { refused: await refuseOverLimit(core, tx, counted, limit) };
         const turn = await insertTurn(req, tx, conv, body, resolved);
         const chat = await touchChat(tx, conv, body.model, body.tools);
         await auditSend(tx, "ai_chat.message.sent", conv, turn.generation);
         return { response: { ...turn.turn, chat }, start: turn.generation };
       });
+      // The refusal's audit row is committed; nothing else was written.
+      if ("refused" in out) throw out.refused;
       if (out.start) runLoop.start({ organizationId: out.start.organizationId, generationId: out.start.id });
       return out.response;
     },
