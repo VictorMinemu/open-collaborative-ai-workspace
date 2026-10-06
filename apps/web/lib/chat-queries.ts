@@ -18,6 +18,8 @@ import {
   MessagePage as MessagePageSchema,
   Message as MessageSchema,
   Ok,
+  PinnedMessageList,
+  type PinUpdatedEvent,
   type ReactionSummary,
   type ReactionUpdatedEvent,
   type ThreadResponse,
@@ -35,6 +37,8 @@ export const chatKeys = {
   /** A detached window around a permalink target; shares the `messages` prefix so updates reach both. */
   around: (id: string, anchorId: string) => ["chat", "messages", id, "around", anchorId] as const,
   thread: (rootId: string) => ["chat", "thread", rootId] as const,
+  threads: ["chat", "thread"] as const,
+  pins: (convId: string) => ["chat", "pins", convId] as const,
   agents: ["chat", "agents"] as const,
   dms: ["chat", "dms"] as const,
 };
@@ -533,4 +537,51 @@ export async function toggleReaction(qc: QueryClient, message: Message, emoji: s
     patchMessage(qc, at, (m) => withReaction(m, emoji, before));
     throw err;
   }
+}
+
+// ---------------------------------------------------------------- pins (CHAT-13)
+
+/** The pinned messages of a conversation, newest pin first. */
+export function usePins(convId: string, enabled = true) {
+  return useQuery({
+    enabled: enabled && !!convId,
+    queryKey: chatKeys.pins(convId),
+    queryFn: ({ signal }) =>
+      api.get(`/api/v1/conversations/${convId}/pins`, { schema: PinnedMessageList, signal }),
+    retry: retryUnlessClientError,
+    staleTime: 60_000,
+  });
+}
+
+export function pinMessage(convId: string, messageId: string): Promise<{ ok: true }> {
+  return api.put(`/api/v1/conversations/${convId}/pins/${messageId}`, { body: {}, schema: Ok });
+}
+
+export function unpinMessage(convId: string, messageId: string): Promise<{ ok: true }> {
+  return api.del(`/api/v1/conversations/${convId}/pins/${messageId}`, { schema: Ok });
+}
+
+/** Patches one message by id in every window of `convId` and in every cached thread (as root or reply). */
+function patchById(qc: QueryClient, convId: string, messageId: string, patch: (m: Message) => Message) {
+  const one = (m: Message) => (m.id === messageId ? patch(m) : m);
+  patchWindows(qc, convId, one);
+  qc.setQueriesData<ThreadResponse>({ queryKey: chatKeys.threads }, (prev) =>
+    prev && (prev.root.id === messageId || prev.replies.some((r) => r.id === messageId))
+      ? { ...prev, root: one(prev.root), replies: prev.replies.map(one) }
+      : prev,
+  );
+}
+
+/** Applies `pin.updated` (or a local pin/unpin): the message's `pinned` flag everywhere, then the pins list. */
+export function applyPinUpdate(
+  qc: QueryClient,
+  ev: Pick<PinUpdatedEvent, "conversationId" | "messageId" | "pinned">,
+) {
+  patchById(qc, ev.conversationId, ev.messageId, (m) => ({ ...m, pinned: ev.pinned }));
+  if (!ev.pinned) {
+    qc.setQueryData<PinnedMessageList>(chatKeys.pins(ev.conversationId), (prev) =>
+      prev ? { pins: prev.pins.filter((p) => p.message.id !== ev.messageId) } : prev,
+    );
+  }
+  void qc.invalidateQueries({ queryKey: chatKeys.pins(ev.conversationId) });
 }

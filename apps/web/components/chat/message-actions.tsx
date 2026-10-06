@@ -1,7 +1,16 @@
 "use client";
 
 import type { Message } from "@ocw/contracts";
-import { Link2, MessageSquareReply, MoreHorizontal, Pencil, SmilePlus, Trash2 } from "lucide-react";
+import {
+  Link2,
+  MessageSquareReply,
+  MoreHorizontal,
+  Pencil,
+  Pin,
+  PinOff,
+  SmilePlus,
+  Trash2,
+} from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -43,10 +52,14 @@ export interface MessageActionSet {
   onReact?: ((emoji: string) => void) | undefined;
   /** Opens the full picker from the touch sheet (the toolbar anchors its own picker). */
   onAddReaction?: (() => void) | undefined;
+  /** Pins the message to its conversation (CHAT-13): members who may post. */
+  onPin?: (() => void) | undefined;
+  /** Unpins it: the pinner, a channel moderator or any DM participant. */
+  onUnpin?: (() => void) | undefined;
 }
 
 export const hasMessageActions = (a: MessageActionSet) =>
-  !!(a.onReply || a.onEdit || a.onDelete || a.onCopyLink || a.onReact);
+  !!(a.onReply || a.onEdit || a.onDelete || a.onCopyLink || a.onReact || a.onPin || a.onUnpin);
 
 const toolbarButton =
   "inline-flex size-7 items-center justify-center rounded-md text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40 data-[popup-open]:bg-accent data-[popup-open]:text-foreground";
@@ -63,6 +76,18 @@ export function MessageActions({ actions }: { actions: MessageActionSet }) {
       node: (
         <DropdownMenuItem key="copy-link" onClick={actions.onCopyLink} data-testid="copy-link">
           <Link2 /> Copy link
+        </DropdownMenuItem>
+      ),
+    });
+  }
+  const togglePin = actions.onUnpin ?? actions.onPin;
+  if (togglePin) {
+    more.push({
+      key: "pin",
+      node: (
+        <DropdownMenuItem key="pin" onClick={togglePin} data-testid="pin-message">
+          {actions.onUnpin ? <PinOff /> : <Pin />}{" "}
+          {actions.onUnpin ? "Unpin from conversation" : "Pin to conversation"}
         </DropdownMenuItem>
       ),
     });
@@ -281,6 +306,21 @@ export function MessageActionSheet({
               label="Copy link"
               testId="copy-link"
               onClick={run(actions.onCopyLink)}
+            />
+          ) : null}
+          {actions.onUnpin ? (
+            <SheetRow
+              icon={<PinOff />}
+              label="Unpin from conversation"
+              testId="pin-message"
+              onClick={run(actions.onUnpin)}
+            />
+          ) : actions.onPin ? (
+            <SheetRow
+              icon={<Pin />}
+              label="Pin to conversation"
+              testId="pin-message"
+              onClick={run(actions.onPin)}
             />
           ) : null}
           {actions.onEdit ? (

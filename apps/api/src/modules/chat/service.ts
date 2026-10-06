@@ -14,6 +14,7 @@ import type { AuditService } from "../audit";
 import type { ChannelFacts } from "../organization";
 import type { RealtimeService } from "../realtime";
 import { authorOf, type Directory } from "./directory";
+import { pinnedFor } from "./pins";
 import { reactionsFor } from "./reactions";
 
 /**
@@ -448,13 +449,18 @@ export function toMessage(row: MessageRow, dir: Directory, replyParticipants?: M
 }
 
 /**
- * Adds the viewer-specific fields (P-04) to REST snapshots: `reactions` with `mine` for `viewerId`. Tombstones
- * carry none (P-05). Realtime payloads never go through here.
+ * Adds the viewer-specific fields (P-04) to REST snapshots: `reactions` with `mine` for `viewerId` and `pinned`.
+ * Tombstones carry no reactions and no pin (P-05). Realtime payloads never go through here.
  */
 export async function hydrateViewer(tx: Tx, list: Message[], viewerId: string): Promise<Message[]> {
   const live = list.filter((m) => !m.deletedAt).map((m) => m.id);
   const reactions = await reactionsFor(tx, live, viewerId);
-  return list.map((m) => ({ ...m, reactions: m.deletedAt ? [] : (reactions.get(m.id) ?? []) }));
+  const pinned = await pinnedFor(tx, live);
+  return list.map((m) =>
+    m.deletedAt
+      ? { ...m, reactions: [], pinned: false }
+      : { ...m, reactions: reactions.get(m.id) ?? [], pinned: pinned.has(m.id) },
+  );
 }
 
 /** Top-level messages of a channel, newest page first in the DB, returned oldest → newest. */

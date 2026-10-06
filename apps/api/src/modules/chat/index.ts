@@ -40,6 +40,7 @@ import { authorOf, type Directory, loadDirectory } from "./directory";
 import { dmAgentOf, listDms } from "./dm";
 import { resolveMentions } from "./mentions";
 import { type MessageActionsContext, registerMessageActionRoutes } from "./message-actions";
+import { registerPinRoutes } from "./pins";
 import { registerReactionRoutes } from "./reactions";
 import { replyModeCandidates } from "./reply-mode";
 import {
@@ -838,6 +839,8 @@ export function createChatModule(core: Core): ApiModule {
       registerMessageActionRoutes(app, routeCtx);
       // ---------------------------------------------------------------- reactions (CHAT-07)
       registerReactionRoutes(app, routeCtx);
+      // ---------------------------------------------------------------- pins (CHAT-13)
+      registerPinRoutes(app, routeCtx);
 
       if (core.env.NODE_ENV === "test") registerChatTestRoutes(app, core);
     },

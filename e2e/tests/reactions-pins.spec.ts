@@ -39,6 +39,18 @@ async function openPicker(page: Page, messageId: string, project: string): Promi
   return picker;
 }
 
+/** Picks a message action that lives in the More menu on desktop and in the long-press sheet on mobile. */
+async function chooseAction(page: Page, messageId: string, testId: string, project: string) {
+  const actions = await openMessageActions(page, messageId, project);
+  if (project === "mobile") {
+    await actions.getByTestId(testId).click();
+    await expect(page.getByTestId("message-sheet")).toBeHidden();
+  } else {
+    await actions.getByTestId("message-more").click();
+    await page.getByTestId("message-menu").getByTestId(testId).click();
+  }
+}
+
 test.describe.configure({ mode: "serial" });
 
 test("reactions: toolbar/sheet and picker reactions reach another member live, highlights per viewer", async ({
@@ -106,6 +118,76 @@ test("reactions: toolbar/sheet and picker reactions reach another member live, h
   await quickReact(a.page, reply.id, "✅", project);
   await expect(chip(replyOnSam, "✅")).toContainText("1", { timeout: 5_000 });
   await expect(chip(replyOnSam, "✅")).toHaveAttribute("data-mine", "false");
+
+  await a.context.close();
+  await s.context.close();
+  await admin.dispose();
+  await sam.dispose();
+});
+
+test("pins: a pin shows live in the other member's header; the sheet jumps to it; unpinning clears the count", async ({
+  browser,
+}, info) => {
+  test.setTimeout(180_000);
+  const project = info.project.name;
+  const size = project === "mobile" ? "390" : "1440";
+  const admin = await apiAs(ADMIN);
+  await ensureMember(admin, SAM, "developer");
+  const sam = await apiAs(SAM);
+  const channel = await freshChannel(admin, [sam], "pins");
+  const runbook = await postAs(
+    admin,
+    channel.id,
+    "**Incident runbook**: page the on-call, open #incidents, post updates every 30 min.",
+  );
+  for (let n = 1; n <= 30; n++) await postAs(sam, channel.id, `Standup note #${n}`);
+
+  const a = await openAs(browser, ADMIN, project);
+  const s = await openAs(browser, SAM, project);
+  await s.page.goto(`${BASE_URL}/chat/${channel.id}`);
+  await a.page.goto(`${BASE_URL}/chat/${channel.id}`);
+  await expect(s.page.getByTestId("channel-view")).toBeVisible();
+  await expect(s.page.getByTestId("pinned-button")).toHaveCount(0);
+
+  // ---- the admin scrolls up to the runbook and pins it from the message actions
+  const row = messageRow(a.page, runbook.id);
+  await row.scrollIntoViewIfNeeded();
+  await chooseAction(a.page, runbook.id, "pin-message", project);
+  await expect(row.getByTestId("pinned-label")).toBeVisible();
+
+  // ---- Sam's header shows the count live; the sheet lists the pin and jumps to it
+  const button = s.page.getByTestId("pinned-button");
+  await expect(button.getByTestId("pinned-count")).toHaveText("1", { timeout: 5_000 });
+  await button.click();
+  const sheet = s.page.getByTestId("pinned-sheet");
+  await expect(sheet).toBeVisible();
+  const item = sheet.getByTestId("pinned-item");
+  await expect(item).toHaveCount(1);
+  await expect(item).toContainText("Incident runbook");
+  await expect(item).toContainText("Pinned by Víctor Ruiz");
+  await bothThemes(s.page, `pins-sheet-${size}`);
+  await item.getByTestId("pinned-jump").click();
+  await expect(sheet).toBeHidden();
+  await expect(s.page).toHaveURL(new RegExp(`\\?m=${runbook.id}`));
+  const target = messageRow(s.page, runbook.id);
+  await expect(target).toBeInViewport();
+  await expect(target).toHaveAttribute("data-highlighted", "true");
+  await expect(target.getByTestId("pinned-label")).toBeVisible();
+  await bothThemes(s.page, `pins-jump-${size}`);
+
+  // ---- Sam is not the pinner nor a moderator: no unpin offered to him
+  await expect(item).toHaveCount(0);
+  await s.page.getByTestId("pinned-button").click();
+  await expect(sheet.getByTestId("pinned-item")).toHaveCount(1);
+  await expect(sheet.getByTestId("pinned-unpin")).toHaveCount(0);
+  await s.page.keyboard.press("Escape");
+  await expect(sheet).toBeHidden();
+
+  // ---- the admin unpins: Sam's count disappears live
+  await chooseAction(a.page, runbook.id, "pin-message", project);
+  await expect(row.getByTestId("pinned-label")).toHaveCount(0);
+  await expect(s.page.getByTestId("pinned-button")).toHaveCount(0, { timeout: 5_000 });
+  await expect(target.getByTestId("pinned-label")).toHaveCount(0);
 
   await a.context.close();
   await s.context.close();

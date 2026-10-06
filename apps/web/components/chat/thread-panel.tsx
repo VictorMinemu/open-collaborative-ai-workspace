@@ -30,6 +30,10 @@ interface ThreadPanelProps {
   onTyping: (threadRootId: string) => void;
   /** A permalink to a reply of this thread (`m` with `thread`): scrolled to and highlighted (CHAT-14). */
   highlightId?: string | null;
+  /** Channel moderators unpin anyone's pin. */
+  canUnpinAny?: boolean;
+  /** messageId → pinner id (the channel's pins list). */
+  pinnedBy?: ReadonlyMap<string, string>;
 }
 
 function ThreadBody({
@@ -45,6 +49,8 @@ function ThreadBody({
   onRetry,
   onTyping,
   highlightId = null,
+  canUnpinAny = false,
+  pinnedBy,
 }: ThreadPanelProps) {
   const thread = useThread(rootId);
   const replies = thread.data?.replies ?? [];
@@ -120,6 +126,8 @@ function ThreadBody({
               readOnly={!!channel.archivedAt}
               canDeleteAny={channel.viewerCan?.includes("message.delete_any") ?? false}
               canReact={canPost}
+              canUnpinAny={canUnpinAny}
+              {...(pinnedBy ? { pinnedBy } : {})}
               showTombstones
               anchorId={highlightId}
               linkFor={linkFor}
@@ -143,6 +151,8 @@ function ThreadBody({
               readOnly={!!channel.archivedAt}
               canDeleteAny={channel.viewerCan?.includes("message.delete_any") ?? false}
               canReact={canPost}
+              canUnpinAny={canUnpinAny}
+              {...(pinnedBy ? { pinnedBy } : {})}
               anchorId={highlightId}
               linkFor={linkFor}
               onAnchorHidden={onReplyHidden}

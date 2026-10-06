@@ -2,7 +2,7 @@
 
 import type { Message, MessageAuthor } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, RotateCw, Trash2 } from "lucide-react";
+import { AlertCircle, Pin, RotateCw, Trash2 } from "lucide-react";
 import { Fragment, memo, type ReactNode, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -14,9 +14,12 @@ import { errorMessage } from "@/lib/api";
 import {
   applyMessageDeleted,
   applyMessageUpdate,
+  applyPinUpdate,
   deleteMessage,
   editMessage,
+  pinMessage,
   toggleReaction,
+  unpinMessage,
 } from "@/lib/chat-queries";
 import { cn, relativeTime } from "@/lib/utils";
 import { EmojiPicker } from "./emoji-picker";
@@ -236,6 +239,10 @@ interface RowProps {
   canDeleteAny: boolean;
   /** The viewer may react (channel.post: a member of a live conversation). */
   canReact: boolean;
+  /** The viewer may unpin anyone's pin (channel moderators, every DM participant). */
+  canUnpinAny: boolean;
+  /** Who pinned each pinned message (from the pins list), so pinners can unpin their own. */
+  pinnedBy?: ReadonlyMap<string, string> | undefined;
   linkFor?: ((m: Message) => string) | undefined;
 }
 
@@ -251,6 +258,8 @@ const MessageRow = memo(function MessageRow({
   readOnly,
   canDeleteAny,
   canReact,
+  canUnpinAny,
+  pinnedBy,
   linkFor,
 }: RowProps) {
   const author = message.author ?? {
@@ -296,7 +305,21 @@ const MessageRow = memo(function MessageRow({
         : undefined,
     onReact: reactable ? react : undefined,
     onAddReaction: reactable ? () => setPickerOpen(true) : undefined,
+    onPin: reactable && !message.pinned ? () => void setPin(true) : undefined,
+    onUnpin:
+      !deleted && message.pinned && (canUnpinAny || pinnedBy?.get(message.id) === meId)
+        ? () => void setPin(false)
+        : undefined,
   };
+  async function setPin(pinned: boolean) {
+    try {
+      await (pinned ? pinMessage : unpinMessage)(message.conversationId, message.id);
+      applyPinUpdate(qc, { conversationId: message.conversationId, messageId: message.id, pinned });
+      toast.success(pinned ? "Pinned to this conversation" : "Unpinned");
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  }
   const confirmDelete = async () => {
     try {
       await deleteMessage(message.id);
@@ -378,6 +401,10 @@ const MessageRow = memo(function MessageRow({
         highlighted && "chat-flash",
         anchored && "chat-anchor",
         (editing || sheetOpen) && "bg-muted/45 dark:bg-white/[0.025]",
+        message.pinned &&
+          !deleted &&
+          !anchored &&
+          "bg-amber-50/70 hover:bg-amber-50 dark:bg-amber-400/[0.05] dark:hover:bg-amber-400/[0.07]",
       )}
     >
       <div className="w-9 shrink-0">
@@ -405,6 +432,14 @@ const MessageRow = memo(function MessageRow({
         )}
       </div>
       <div className="min-w-0 flex-1">
+        {message.pinned && !deleted ? (
+          <div
+            data-testid="pinned-label"
+            className="flex items-center gap-1 pb-0.5 font-medium text-[11.5px] text-amber-700 dark:text-amber-400"
+          >
+            <Pin className="size-3 -rotate-45" /> Pinned
+          </div>
+        ) : null}
         {continuation || deleted ? null : (
           <div className="flex items-baseline gap-1.5">
             <span className="truncate font-semibold text-[14.5px] leading-6" data-testid="message-author">
@@ -546,6 +581,8 @@ export function MessageList({
   readOnly = false,
   canDeleteAny = false,
   canReact,
+  canUnpinAny = false,
+  pinnedBy,
   showTombstones = false,
   anchorId,
   linkFor,
@@ -568,6 +605,10 @@ export function MessageList({
   canDeleteAny?: boolean;
   /** The viewer may add reactions (members of a live conversation); defaults to `!readOnly`. */
   canReact?: boolean;
+  /** The viewer may unpin anyone's pin (channel moderators; every participant of a direct conversation). */
+  canUnpinAny?: boolean;
+  /** messageId → pinner id, from the conversation's pins list. */
+  pinnedBy?: ReadonlyMap<string, string>;
   /** Show a deleted message as a tombstone even without replies (the thread panel's root). */
   showTombstones?: boolean;
   /** The permalink target to highlight (`data-highlighted`, CHAT-14). */
@@ -608,7 +649,9 @@ export function MessageList({
     const day = new Date(m.createdAt).toDateString();
     if (!prev || prev.day !== day)
       rows.push(<DayDivider key={`day-${m.id}`} label={dayLabel(m.createdAt)} />);
-    const continuation = !!prev && prev.day === day && prev.key === key && at - prev.at < GROUP_WINDOW_MS;
+    // A pinned message always shows its author under its "Pinned" label.
+    const continuation =
+      !m.pinned && !!prev && prev.day === day && prev.key === key && at - prev.at < GROUP_WINDOW_MS;
     rows.push(
       <MessageRow
         key={m.id}
@@ -623,6 +666,8 @@ export function MessageList({
         readOnly={readOnly}
         canDeleteAny={canDeleteAny}
         canReact={canReact ?? !readOnly}
+        canUnpinAny={canUnpinAny && !readOnly}
+        pinnedBy={pinnedBy}
         linkFor={linkFor}
       />,
     );
