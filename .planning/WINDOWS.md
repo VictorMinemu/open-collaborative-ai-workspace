@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 34
 waived_count: 0
-fixed_count: 14
-total_count: 48
-last_updated: 2026-10-06T09:33:56.493Z
+fixed_count: 16
+total_count: 50
+last_updated: 2026-10-06T10:22:12.492Z
 ---
 
 # Broken Windows Ledger
@@ -34,7 +34,7 @@ last_updated: 2026-10-06T09:33:56.493Z
 | 17 | 03.2 | deviation | packages/realtime-client/src/client.ts |  | Fixed pre-existing resync cursor bug (org topics past REPLAY_LIMIT dropped live events); found by the 03.2-11 full e2e | open |  | 2026-10-06T00:14:50.556Z |  |
 | 18 | 03.2 | unrun-verify | .planning/phases/03.2-work-zone-session-controls/03.2-VALIDATION.md |  | Manual-only: real Full access turn (Claude relaunch with resume, Codex never+dangerFullAccess), resolved-model mapping, Codex Auto reviewer | open |  | 2026-10-06T00:14:50.629Z |  |
 | 19 | 03.2 | unrun-verify | apps/local-runtime/src/claude/title.ts |  | Claude title latency with thinking disabled not recorded (fixture recorded with thinking: 31 s); owner manual check | open |  | 2026-10-06T02:17:25.305Z |  |
-| 20 | 04 | deviation | apps/api/src/modules/chat/index.ts |  | POST /conversations/:id/messages answers 400 attachments_unavailable for attachment-only posts until 04-04 wires uploads | open |  | 2026-10-06T04:56:06.542Z |  |
+| 20 | 04 | deviation | apps/api/src/modules/chat/index.ts |  | POST /conversations/:id/messages answers 400 attachments_unavailable for attachment-only posts until 04-04 wires uploads | fixed |  | 2026-10-06T04:56:06.542Z | 2026-10-06T10:22:12.272Z |
 | 21 | 04 | deviation | apps/api/src/modules/chat/access.ts |  | ConversationAccess boolean check is isReadable (plan said canRead; static guard bans that identifier); 04-09 must call isReadable | open |  | 2026-10-06T04:56:06.615Z |  |
 | 22 | 04 | deviation | apps/api/src/modules/chat/access.ts |  | Hidden conversations now 404 with the route's not-found message (identical to missing); was generic 'Not found' | open |  | 2026-10-06T05:27:09.545Z |  |
 | 23 | 04 | deviation | packages/contracts/src/chat.ts |  | Added PageQueryFields + pageCursorCount; messages route enforces one cursor after readable (400 invalid_page_query) | open |  | 2026-10-06T05:27:09.619Z |  |
@@ -48,7 +48,7 @@ last_updated: 2026-10-06T09:33:56.493Z
 | 31 | 04 | deviation | apps/api/src/modules/chat/saves.ts |  | GET /saved marks the request decided after access.readableIds (request-less filterFor) for the strict authz hook | open |  | 2026-10-06T06:20:53.784Z |  |
 | 32 | 04 | deviation | packages/contracts/src/chat.ts |  | CreateDmRequestFields (route body, max 32) so POST /dms answers too_many_participants after dedupe instead of validation_error | open |  | 2026-10-06T07:09:19.504Z |  |
 | 33 | 04 | deviation | apps/api/src/modules/chat/index.ts |  | GET /messages/:id/thread now serves DM and group roots to participants (was channel-only); outsiders still 404 | open |  | 2026-10-06T07:09:19.575Z |  |
-| 34 | 04 | deviation | apps/api/src/modules/chat/dm-privacy.int.test.ts |  | Privacy suite links attachments to messages via SQL until 04-12 wires attachments on send; Plan 09 adds the inbox route | open |  | 2026-10-06T07:09:19.644Z |  |
+| 34 | 04 | deviation | apps/api/src/modules/chat/dm-privacy.int.test.ts |  | Privacy suite links attachments to messages via SQL until 04-12 wires attachments on send; Plan 09 adds the inbox route | fixed |  | 2026-10-06T07:09:19.644Z | 2026-10-06T10:22:12.346Z |
 | 35 | 04 | deviation | apps/web/components/members/member-profile-sheet.tsx |  | Message action added to the member profile sheet (not in plan file list) | open |  | 2026-10-06T07:09:19.714Z |  |
 | 36 | 04 | deviation | apps/web/components/chat/chat-sidebar.tsx |  | Unit sections also list unjoined public channels of the member's own units (muted) so new department channels reach members live | open |  | 2026-10-06T08:08:43.342Z |  |
 | 37 | 04 | deviation | packages/contracts/src/chat.ts |  | Add-only ChannelUnit.pathNames, ChannelList.memberUnitIds, ThreadSummary.lastReplies | open |  | 2026-10-06T08:08:43.410Z |  |
@@ -63,6 +63,8 @@ last_updated: 2026-10-06T09:33:56.493Z
 | 46 | 04 | deviation | apps/api/src/modules/chat/threads.ts |  | Folded 04-08/04-09 items: ThreadList.unreadThreads over all pages; thread reads clear that thread's notifications | open |  | 2026-10-06T09:33:56.356Z |  |
 | 47 | 04 | deviation | apps/api/src/modules/chat/dm-privacy.int.test.ts |  | Fixture re-marks Alex's DM notification unread (reading the DM now reads it); privacy assertions unchanged | open |  | 2026-10-06T09:33:56.425Z |  |
 | 48 | 04 | deviation | apps/web/components/chat/use-read-cursor.ts |  | Shared read-cursor hook (not in plan list): detached windows read only what they show, per-tab hold in sessionStorage, New messages divider on open | open |  | 2026-10-06T09:33:56.493Z |  |
+| 49 | 04 | deviation | apps/api/src/modules/artifact/attachments.ts |  | 04-12: attachment preview/large redirects send CORP cross-origin (Chromium treats IP:port as separate sites; helmet same-site blocked previews) | open |  | 2026-10-06T10:22:12.419Z |  |
+| 50 | 04 | deviation | apps/web/components/chat/dm-view.tsx |  | 04-12: DMs with a bot offer no attachments until bots can read files | open |  | 2026-10-06T10:22:12.492Z |  |
 
 ````json
 [
@@ -301,10 +303,10 @@ last_updated: 2026-10-06T09:33:56.493Z
     "file": "apps/api/src/modules/chat/index.ts",
     "line": null,
     "description": "POST /conversations/:id/messages answers 400 attachments_unavailable for attachment-only posts until 04-04 wires uploads",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-06T04:56:06.542Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-06T10:22:12.272Z"
   },
   {
     "id": 21,
@@ -469,10 +471,10 @@ last_updated: 2026-10-06T09:33:56.493Z
     "file": "apps/api/src/modules/chat/dm-privacy.int.test.ts",
     "line": null,
     "description": "Privacy suite links attachments to messages via SQL until 04-12 wires attachments on send; Plan 09 adds the inbox route",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-06T07:09:19.644Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-06T10:22:12.346Z"
   },
   {
     "id": 35,
@@ -640,6 +642,30 @@ last_updated: 2026-10-06T09:33:56.493Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-06T09:33:56.493Z",
+    "resolved_at": null
+  },
+  {
+    "id": 49,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/api/src/modules/artifact/attachments.ts",
+    "line": null,
+    "description": "04-12: attachment preview/large redirects send CORP cross-origin (Chromium treats IP:port as separate sites; helmet same-site blocked previews)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T10:22:12.419Z",
+    "resolved_at": null
+  },
+  {
+    "id": 50,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/web/components/chat/dm-view.tsx",
+    "line": null,
+    "description": "04-12: DMs with a bot offer no attachments until bots can read files",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T10:22:12.492Z",
     "resolved_at": null
   }
 ]
