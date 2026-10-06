@@ -67,6 +67,31 @@ describe("FakeRuntime", () => {
     const done = await until(ev2, (e) => e.type === "prompt.completed");
     expect(done).toMatchObject({ interrupted: true });
   });
+
+  it("OCW_RUNTIME_FAKE_ECHO=1 repeats the whole prompt in the answer (renderer e2e); off by default", async () => {
+    const prompt = "Show the snippet\n\n```ts\nconst a = 1;\n```";
+    const answerOf = async (echo: boolean) => {
+      const prev = process.env.OCW_RUNTIME_FAKE_ECHO;
+      if (echo) process.env.OCW_RUNTIME_FAKE_ECHO = "1";
+      else delete process.env.OCW_RUNTIME_FAKE_ECHO;
+      try {
+        const events: SessionEvent[] = [];
+        const rt = new FakeRuntime("claude-code", 1);
+        await rt.start({ sessionId: "e1", cwd: tmp(), permissionMode: "plan" }, (e) => events.push(e));
+        await rt.prompt("e1", { promptId: "p1", text: prompt });
+        await until(events, (e) => e.type === "prompt.completed");
+        return events
+          .filter((e) => e.type === "assistant.message")
+          .map((e) => (e.type === "assistant.message" ? e.text : ""))
+          .join("\n");
+      } finally {
+        if (prev === undefined) delete process.env.OCW_RUNTIME_FAKE_ECHO;
+        else process.env.OCW_RUNTIME_FAKE_ECHO = prev;
+      }
+    };
+    expect(await answerOf(true)).toContain("```ts\nconst a = 1;\n```");
+    expect(await answerOf(false)).not.toContain("```");
+  });
 });
 
 describe("FakeRuntime settings (03.2-01, D-07, D-14)", () => {
