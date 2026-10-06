@@ -23,9 +23,23 @@ const id = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
 const now = 1_790_000_000;
 
 describe("permission vocabulary", () => {
-  it("has exactly the 48 agreed permissions", () => {
-    expect(Permission.options).toHaveLength(48);
-    expect(new Set(Permission.options).size).toBe(48);
+  it("has exactly the 52 agreed permissions", () => {
+    expect(Permission.options).toHaveLength(52);
+    expect(new Set(Permission.options).size).toBe(52);
+  });
+
+  it("Phase 5 AI chat permissions exist exactly as 05-01 defines them", () => {
+    const ai = ["ai_chat.use", "ai_chat.web", "ai_chat.share", "ai_chat.share.read"] as const;
+    for (const p of ai) {
+      expect(PERMISSION_SURFACE[p], p).toBe("chat");
+      expect(PERMISSION_DESCRIPTIONS[p].length, p).toBeGreaterThan(10);
+      // Every role holds them (STANDARD); explicit deny rules can still take them away (delegable).
+      for (const role of OrgRole.options) expect(ROLE_PERMISSIONS[role], `${role}: ${p}`).toContain(p);
+      expect(NON_DELEGABLE_PERMISSIONS).not.toContain(p);
+      expect(PermissionPattern.safeParse(p).success, p).toBe(true);
+    }
+    expect(PermissionPattern.safeParse("ai_chat.*").success).toBe(true);
+    expect(AGENT_PERMISSIONS).not.toContain("ai_chat.use");
   });
 
   it("Phase 4 chat permissions exist exactly as 04-01 defines them", () => {

@@ -19,6 +19,7 @@ import {
   DeviceToServerFrame,
   DmList,
   DmSummary,
+  EphemeralTypes,
   EventTypes,
   extractMentionHandles,
   IanaTimeZone,
@@ -589,5 +590,28 @@ describe("Phase 4 realtime event types (04-01)", () => {
     });
     const values = Object.values(EventTypes);
     expect(new Set(values).size).toBe(values.length);
+  });
+});
+
+describe("Phase 5 realtime event types (05-01)", () => {
+  it("adds ai_chat.updated and ai.delta and keeps every earlier value", () => {
+    expect(EventTypes.aiChatUpdated).toBe("ai_chat.updated");
+    expect(EphemeralTypes.aiDelta).toBe("ai.delta");
+    expect(EphemeralTypes).toMatchObject({
+      userTyping: "user.typing",
+      agentTyping: "agent.typing",
+      cellPresence: "cell.presence",
+      providerAuth: "provider.auth.updated",
+      assistantDelta: "assistant.delta",
+      messageNotify: "message.notify",
+    });
+    expect(EventTypes).toMatchObject({
+      messageCreated: "message.created",
+      messageUpdated: "message.updated",
+      notificationPrefsUpdated: "notification_prefs.updated",
+    });
+    for (const values of [Object.values(EventTypes), Object.values(EphemeralTypes)]) {
+      expect(new Set(values).size).toBe(values.length);
+    }
   });
 });
