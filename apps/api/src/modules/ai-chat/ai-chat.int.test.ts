@@ -122,16 +122,21 @@ afterAll(async () => {
 });
 
 describe("ChatGPT plan models (D-01, D-02)", () => {
-  it("before seeding Sam sees one unavailable plan row (not_connected) and no default", async () => {
+  it("before seeding Sam sees one unavailable plan row (not_connected); the default is not a plan model", async () => {
     const list = await ok(sam.request("GET", "/api/v1/ai-chat/models"));
     expect(list.chatgptPlan.state).toBe("not_connected");
-    expect(list.models).toHaveLength(1);
-    expect(list.models[0]).toMatchObject({
+    const plan = list.models.filter((m: Json) => m.group === "chatgpt_plan");
+    expect(plan).toHaveLength(1);
+    expect(plan[0]).toMatchObject({
       group: "chatgpt_plan",
       available: false,
       reason: "not_connected",
     });
-    expect(list.defaultRef).toBeNull();
+    // 05-04: with OCW_MODEL_PROVIDER=mock the mock backend is the only available model (no org key configured).
+    expect(list.models.filter((m: Json) => m.group !== "chatgpt_plan").map((m: Json) => m.group)).toEqual([
+      "mock",
+    ]);
+    expect(list.defaultRef).toEqual({ backend: "mock", provider: "mock", modelId: "mock-1" });
   });
 
   it("Sam seeds his plan: the two `list` models, connected, default on the plan; tokens sealed, never plaintext", async () => {
@@ -139,11 +144,10 @@ describe("ChatGPT plan models (D-01, D-02)", () => {
     expect(status).toMatchObject({ state: "connected", email: "sam@example.test" });
     const list = await ok(sam.request("GET", "/api/v1/ai-chat/models"));
     expect(list.chatgptPlan.state).toBe("connected");
-    expect(list.models.map((m: Json) => m.ref.modelId)).toEqual(["gpt-6-astra", "gpt-5.6-luna"]);
-    expect(list.models.map((m: Json) => m.label)).toEqual(["GPT-6 Astra", "GPT-5.6 Luna"]);
-    expect(list.models.every((m: Json) => m.available && !m.metered && m.group === "chatgpt_plan")).toBe(
-      true,
-    );
+    const plan = list.models.filter((m: Json) => m.group === "chatgpt_plan");
+    expect(plan.map((m: Json) => m.ref.modelId)).toEqual(["gpt-6-astra", "gpt-5.6-luna"]);
+    expect(plan.map((m: Json) => m.label)).toEqual(["GPT-6 Astra", "GPT-5.6 Luna"]);
+    expect(plan.every((m: Json) => m.available && !m.metered)).toBe(true);
     expect(list.defaultRef).toEqual(PLAN_MODEL);
     expect(JSON.stringify(list)).not.toContain("fake-plan-");
 
@@ -483,7 +487,9 @@ describe("AI chats are private to their owner (P-03, T-05-02-03/04)", () => {
     ws.close();
     const models = await ok(eve.request("GET", "/api/v1/ai-chat/models"));
     expect(models.chatgptPlan.state).toBe("not_connected");
-    expect(models.models.every((m: Json) => !m.available)).toBe(true);
+    expect(
+      models.models.filter((m: Json) => m.group === "chatgpt_plan").every((m: Json) => !m.available),
+    ).toBe(true);
     const status = await ok(eve.request("GET", "/api/v1/me/model-credentials/chatgpt"));
     expect(status).toMatchObject({ state: "not_connected", email: null });
   });

@@ -1,6 +1,6 @@
 "use client";
 
-import { type AiModelOption, type ModelRef, modelRefKey, type SendAiMessageResponse } from "@ocw/contracts";
+import type { AiModelOption, SendAiMessageResponse } from "@ocw/contracts";
 import { ChevronLeft, Lock, MessageCircleQuestion, SquarePen } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { EmptyState } from "@/components/common/empty-state";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { clearAiChatModel } from "@/lib/ai-chat-model-store";
 import {
   createAiChat,
   newClientMessageId,
@@ -30,19 +31,8 @@ export function AiChatView({ chatId }: { chatId: string | null }) {
   return chatId ? <ExistingChat chatId={chatId} /> : <NewChat />;
 }
 
-/** The model the next answer runs on: the chat's last model when still available, else the member's default. */
-function pickModel(
-  models: AiModelOption[] | undefined,
-  preferred: (ModelRef | null)[],
-): AiModelOption | null {
-  const list = models ?? [];
-  for (const ref of preferred) {
-    if (!ref) continue;
-    const found = list.find((m) => m.available && modelRefKey(m.ref) === modelRefKey(ref));
-    if (found) return found;
-  }
-  return list.find((m) => m.available && m.isDefault) ?? list.find((m) => m.available) ?? null;
-}
+/** The model-store key of `/chat/ai/new`. */
+const NEW_CHAT_KEY = "new";
 
 function sendFailed(err: unknown): never {
   toast.error("Couldn't send your message", { description: errorMessage(err) });
@@ -52,7 +42,6 @@ function sendFailed(err: unknown): never {
 function NewChat() {
   const router = useRouter();
   const models = useAiModels();
-  const model = pickModel(models.data?.models, [models.data?.defaultRef ?? null]);
 
   async function onSend(body: string, m: AiModelOption) {
     let res: SendAiMessageResponse;
@@ -62,6 +51,8 @@ function NewChat() {
       sendFailed(err);
     }
     primeAiChat(res);
+    // The created chat's lastModel carries the pick; the next New chat starts from the default again.
+    clearAiChatModel(NEW_CHAT_KEY);
     router.replace(`/chat/ai/${res.chat.id}`);
   }
 
@@ -77,7 +68,15 @@ function NewChat() {
             Only you can see this chat
           </p>
         </div>
-        <AiComposer model={model} modelsLoading={models.isPending} busy={false} onSend={onSend} autoFocus />
+        <AiComposer
+          chatKey={NEW_CHAT_KEY}
+          models={models.data?.models}
+          preferred={[models.data?.defaultRef]}
+          modelsLoading={models.isPending}
+          busy={false}
+          onSend={onSend}
+          autoFocus
+        />
       </div>
     </Frame>
   );
@@ -87,7 +86,6 @@ function ExistingChat({ chatId }: { chatId: string }) {
   const chat = useAiChat(chatId);
   const models = useAiModels();
   const detail = chat.snapshot?.chat;
-  const model = pickModel(models.data?.models, [detail?.lastModel ?? null, models.data?.defaultRef ?? null]);
   const busy = chat.messages.some((m) => m.status === "streaming");
 
   async function onSend(body: string, m: AiModelOption) {
@@ -150,7 +148,14 @@ function ExistingChat({ chatId }: { chatId: string }) {
   return (
     <Frame title={detail?.title ?? "New chat"}>
       <AiMessageList chatId={chatId} messages={chat.messages} textOf={chat.textOf} />
-      <AiComposer model={model} modelsLoading={models.isPending} busy={busy} onSend={onSend} />
+      <AiComposer
+        chatKey={chatId}
+        models={models.data?.models}
+        preferred={[detail?.lastModel, models.data?.defaultRef]}
+        modelsLoading={models.isPending}
+        busy={busy}
+        onSend={onSend}
+      />
     </Frame>
   );
 }

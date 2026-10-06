@@ -1,16 +1,24 @@
 import { createOpenAI } from "@ai-sdk/openai";
-import type {
-  AiModelList,
-  AiModelOption,
-  ChatgptPlanState,
-  ModelCaps,
-  ModelRef,
-  ModelUnavailableReason,
+import {
+  type AiChatPolicy,
+  type AiModelList,
+  type AiModelOption,
+  type ChatgptPlanState,
+  DEFAULT_MODEL,
+  isSubscriptionProvider,
+  MOCK_MODEL,
+  type ModelCaps,
+  type ModelRef,
+  type ModelUnavailableReason,
+  modelLabel,
+  providerShortLabel,
 } from "@ocw/contracts";
-import { aiUserPreferences, type Tx, userModelCredentials } from "@ocw/db";
+import { aiUserPreferences, modelProviders, type Tx, userModelCredentials } from "@ocw/db";
 import type { JSONValue, LanguageModel } from "ai";
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import type { ApiModule, App, Core } from "../../core";
+import { MissingSecretError } from "../../lib/secret-store";
+import { allowedModels } from "../agent";
 import {
   CatalogUnavailableError,
   DEFAULT_CHATGPT_API_BASE_URL,
@@ -27,13 +35,15 @@ import {
 import { registerChatgptPlanRoutes } from "./chatgpt-plan/routes";
 import { type ClassifiedModelError, classify, ModelUnavailableError } from "./errors";
 import { loadAiChatPolicy } from "./policy";
+import { mockLanguageModel, type OrgProviderKind, orgLanguageModel, orgModelCaps } from "./registry";
 import { registerModelRoutes } from "./routes";
 
 /**
  * Model Gateway (P-04): the ONLY module that imports `@ai-sdk/*` and the only place a `LanguageModel` is built,
  * always as a provider instance with an explicit key (never a "provider/model" string, which would route through
  * the metered Vercel AI Gateway). `chatgpt_plan` uses the REQUESTER's own credential only (D-01: never pooled);
- * `org_key` and `mock` arrive in 05-04.
+ * `org_key` uses an organization provider key, resolved only through its SecretReference (D-07, P-10) and governed
+ * by the same allowed-models list as bots (`allowedModels`); `mock` exists only with `OCW_MODEL_PROVIDER=mock`.
  */
 
 export { credentialOf, planStatusOf } from "./chatgpt-plan/credentials";
@@ -66,6 +76,26 @@ export interface ModelGateway {
 }
 
 const PLAN_PROVIDER_LABEL = "ChatGPT plan";
+const MOCK_LABEL = "Mock (E2E)";
+const MOCK_REF: ModelRef = { backend: "mock", provider: "mock", modelId: MOCK_MODEL.modelId };
+
+type ProviderRow = typeof modelProviders.$inferSelect;
+
+/** An API-key provider an AI chat may use as `org_key` (never the bots' subscription sign-in, P-14). */
+function isOrgKeyProvider(provider: string): provider is OrgProviderKind {
+  return provider !== "mock" && !isSubscriptionProvider(provider);
+}
+
+/** Why an org-key row cannot answer right now (null = it can). Mirrors the bots' `usable()` rule. */
+function orgRowReason(row: ProviderRow, policy: AiChatPolicy): ModelUnavailableReason | null {
+  if (!policy.orgKeysEnabled) return "org_keys_disabled";
+  if (!row.secretRef || (row.provider === "openai-compatible" && !row.baseUrl)) return "no_key";
+  if (!row.enabled) return "not_allowed";
+  return null;
+}
+
+const sameRef = (a: ModelRef, b: { backend: string; provider: string; modelId: string }) =>
+  a.backend === b.backend && a.provider === b.provider && a.modelId === b.modelId;
 /** The plan group's single row when the member has no usable plan (the picker shows the reason). */
 const PLAN_PLACEHOLDER: ModelRef = { backend: "chatgpt_plan", provider: "openai", modelId: "chatgpt" };
 
@@ -142,11 +172,95 @@ export function createModelGateway(core: Core, opts: { fetch?: typeof fetch } = 
     };
   }
 
+  async function resolveOrgKey(tx: Tx, ref: ModelRef): Promise<ResolvedModel> {
+    const policy = await loadAiChatPolicy(tx);
+    if (!policy.orgKeysEnabled) throw new ModelUnavailableError("org_keys_disabled");
+    const provider = ref.provider;
+    if (!isOrgKeyProvider(provider)) throw new ModelUnavailableError("not_allowed");
+    const [row] = await tx
+      .select()
+      .from(modelProviders)
+      .where(eq(modelProviders.provider, provider))
+      .limit(1);
+    if (!row) throw new ModelUnavailableError("no_key");
+    const reason = orgRowReason(row, policy);
+    if (reason) throw new ModelUnavailableError(reason);
+    // One allowed list for AI chats and bots (D-07): the very rule bots are checked against.
+    const allowed = await allowedModels(core, tx);
+    if (!allowed.some((m) => m.provider === provider && m.modelId === ref.modelId)) {
+      throw new ModelUnavailableError("not_allowed");
+    }
+    let apiKey: string;
+    try {
+      apiKey = await core.secrets.resolve(tx, row.secretRef as NonNullable<ProviderRow["secretRef"]>);
+    } catch (err) {
+      if (err instanceof MissingSecretError) throw new ModelUnavailableError("no_key");
+      throw err;
+    }
+    const built = orgLanguageModel({ provider, baseUrl: row.baseUrl }, apiKey, ref.modelId, {
+      fetch: fetchImpl,
+    });
+    return {
+      ref,
+      model: built.model,
+      label: modelLabel(provider, ref.modelId),
+      providerLabel: providerShortLabel(provider),
+      metered: true,
+      caps: orgModelCaps(provider, ref.modelId),
+      providerOptions: built.providerOptions,
+      maxRetries: 2,
+      allowsMaxOutputTokens: true,
+    };
+  }
+
+  function resolveMock(ref: ModelRef): ResolvedModel {
+    if (core.env.OCW_MODEL_PROVIDER !== "mock" || ref.modelId !== MOCK_MODEL.modelId) {
+      throw new ModelUnavailableError("not_allowed");
+    }
+    return {
+      ref,
+      model: mockLanguageModel(core.env.OCW_AI_MOCK_BASE_URL, { fetch: fetchImpl }),
+      label: MOCK_LABEL,
+      providerLabel: providerShortLabel("mock"),
+      metered: false,
+      caps: orgModelCaps("mock", ref.modelId),
+      providerOptions: {},
+      maxRetries: 0,
+      allowsMaxOutputTokens: true,
+    };
+  }
+
+  /** The `organization` group: every allowed model of every enabled API-key provider, available or with a reason. */
+  async function organizationModels(tx: Tx, policy: AiChatPolicy): Promise<AiModelOption[]> {
+    const rows = await tx.select().from(modelProviders).orderBy(asc(modelProviders.createdAt));
+    const out: AiModelOption[] = [];
+    for (const row of rows) {
+      const provider = row.provider;
+      if (!isOrgKeyProvider(provider) || !row.enabled) continue;
+      const reason = orgRowReason(row, policy);
+      for (const modelId of row.allowedModels) {
+        out.push({
+          ref: { backend: "org_key", provider, modelId },
+          label: modelLabel(provider, modelId),
+          providerLabel: providerShortLabel(provider),
+          group: "organization",
+          metered: true,
+          caps: orgModelCaps(provider, modelId),
+          available: reason === null,
+          reason,
+          isDefault: false,
+        });
+      }
+    }
+    return out;
+  }
+
   const gateway: ModelGateway = {
     classify,
 
     labelOf(ref) {
-      if (ref.backend === "mock") return "Mock (E2E)";
+      if (ref.backend === "mock") return MOCK_LABEL;
+      if (ref.backend === "org_key") return modelLabel(ref.provider, ref.modelId);
       return labels.get(ref.modelId) ?? ref.modelId;
     },
 
@@ -155,9 +269,9 @@ export function createModelGateway(core: Core, opts: { fetch?: typeof fetch } = 
         case "chatgpt_plan":
           return resolvePlan(tx, ref, requesterUserId);
         case "org_key":
+          return resolveOrgKey(tx, ref);
         case "mock":
-          // Organization keys and the E2E mock backend arrive in 05-04.
-          throw new ModelUnavailableError("not_allowed");
+          return resolveMock(ref);
       }
     },
 
@@ -197,16 +311,32 @@ export function createModelGateway(core: Core, opts: { fetch?: typeof fetch } = 
         if (!(err instanceof ModelUnavailableError)) throw err;
         models = [unavailable(err.reason)];
       }
+      models.push(...(await organizationModels(tx, policy)));
+      if (core.env.OCW_MODEL_PROVIDER === "mock") {
+        models.push({
+          ref: MOCK_REF,
+          label: MOCK_LABEL,
+          providerLabel: providerShortLabel("mock"),
+          group: "mock",
+          metered: false,
+          caps: orgModelCaps("mock", MOCK_MODEL.modelId),
+          available: true,
+          reason: null,
+          isDefault: false,
+        });
+      }
       const [prefs] = await tx
         .select({ defaultModel: aiUserPreferences.defaultModel })
         .from(aiUserPreferences)
         .where(eq(aiUserPreferences.userId, requesterUserId))
         .limit(1);
       const preferred = prefs?.defaultModel;
-      const sameRef = (a: ModelRef, b: { backend: string; provider: string; modelId: string }) =>
-        a.backend === b.backend && a.provider === b.provider && a.modelId === b.modelId;
+      const orgDefault = { backend: "org_key", ...DEFAULT_MODEL } as const;
+      // The member's preference, else their own plan, else the org's recommended model, else anything available.
       const def =
         (preferred && models.find((m) => m.available && sameRef(m.ref, preferred))) ??
+        models.find((m) => m.available && m.group === "chatgpt_plan") ??
+        models.find((m) => m.available && sameRef(m.ref, orgDefault)) ??
         models.find((m) => m.available) ??
         null;
       if (def) def.isDefault = true;
