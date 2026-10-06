@@ -59,11 +59,11 @@ test("personal bot: one click → private chat under Bots → answers without @m
   try {
     const { context, page } = await openAs(browser, SAM, project);
 
-    // ---- the Bots section offers one-click creation
+    // ---- Direct messages offers one-click personal bot creation
     if (mobile) await page.getByTestId("mobile-nav-trigger").click();
     const create = page.getByTestId("create-personal-bot");
     await expect(create).toBeVisible();
-    await expect(page.getByTestId("bots-section")).toContainText("Bots");
+    await expect(page.getByTestId("dm-section")).toContainText("Direct messages");
     await shot(page, `personal-bot-sidebar-empty-${tag}`);
     await create.click();
 
@@ -110,7 +110,7 @@ test("personal bot: one click → private chat under Bots → answers without @m
 
     const asAdmin = await openAs(browser, ADMIN, project);
     if (mobile) await asAdmin.page.getByTestId("mobile-nav-trigger").click();
-    await expect(asAdmin.page.getByTestId("bots-section")).toBeVisible();
+    await expect(asAdmin.page.getByTestId("dm-section")).toBeVisible();
     await expect(asAdmin.page.getByTestId("dm-link").filter({ hasText: "Sam's assistant" })).toHaveCount(0);
     await asAdmin.page.goto(`${BASE_URL}/chat/dm/${dmId}`);
     await expect(asAdmin.page.getByTestId("dm-missing")).toBeVisible();

@@ -6,10 +6,13 @@ import {
   ChannelSummary,
   type ChannelSummary as ChannelSummaryDto,
   CreateChannelRequest,
+  CreateDmRequestFields,
   DmList,
+  DmSummary,
   EphemeralTypes,
   EventTypes,
   IdParams,
+  MAX_GROUP_PARTICIPANTS,
   MarkReadRequest,
   MemberParams,
   Message,
@@ -20,7 +23,7 @@ import {
   pageCursorCount,
   ThreadResponse,
 } from "@ocw/contracts";
-import { conversationMembers, conversations, type TenantCtx, type Tx, tenantOf } from "@ocw/db";
+import { conversationMembers, conversations, orgMembers, type TenantCtx, type Tx, tenantOf } from "@ocw/db";
 import { and, eq, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -37,7 +40,7 @@ import {
 } from "../organization";
 import { createConversationAccess } from "./access";
 import { authorOf, type Directory, loadDirectory } from "./directory";
-import { dmAgentOf, listDms } from "./dm";
+import { dmAgentOf, ensureDm, ensureGroup, ensureHumanDm, listDms } from "./dm";
 import { resolveMentions } from "./mentions";
 import { type MessageActionsContext, registerMessageActionRoutes } from "./message-actions";
 import { registerPinRoutes } from "./pins";
@@ -75,7 +78,16 @@ import {
 import { registerChatTestRoutes } from "./test-routes";
 
 export { type ConversationAccess, createConversationAccess } from "./access";
-export { dmAgentOf, dmKey, ensureDm, listDms, setAgentDmsArchived } from "./dm";
+export {
+  dmAgentOf,
+  dmKey,
+  ensureDm,
+  ensureGroup,
+  ensureHumanDm,
+  groupLabel,
+  listDms,
+  setAgentDmsArchived,
+} from "./dm";
 export { resolveMentions } from "./mentions";
 export { REPLY_MODE_PER_MINUTE, replyModeCandidates } from "./reply-mode";
 
@@ -86,8 +98,14 @@ export type ChatRouteCtx = MessageActionsContext;
 const zoneOf = (author: { clientTimeZone?: string }) =>
   author.clientTimeZone ? { clientTimeZone: author.clientTimeZone } : {};
 
-/** Conversation kinds served by the message routes, read markers, the `conv:` topic and bot replies (D-03). */
-const MESSAGE_KINDS = ["channel", "dm"] as const;
+/**
+ * Conversation kinds served by the message routes, read markers, the `conv:` topic and bot replies (D-03,
+ * D-06: group DMs).
+ */
+const MESSAGE_KINDS = ["channel", "dm", "group"] as const;
+
+/** Direct conversations (1:1 and group) are flat: no threads, bot replies at the top level (D-04, D-06). */
+const isDirect = (kind: string) => kind === "dm" || kind === "group";
 
 /** The `conv:` copy of `conversation.member_removed` (see removeMember). */
 const MemberRemovedPayload = z.object({
@@ -290,6 +308,53 @@ export function createChatModule(core: Core): ApiModule {
     return bot.id;
   }
 
+  /**
+   * D-06: in a group DM a team bot answers only when @mentioned, never through reply mode `all`, and only if it
+   * is already a member (a mention never adds anyone: membership is fixed). Each addressed bot must be live
+   * and usable by the author (`bot.read`). One flat delivery (like a DM: whole-conversation history, top-level
+   * reply), inside the message transaction.
+   */
+  async function dispatchGroupMentions(
+    tx: Tx,
+    dir: Directory,
+    conv: ConversationRow,
+    result: PostResult,
+    author: { id: string; clientTimeZone?: string },
+  ): Promise<string[]> {
+    const agentIds: string[] = [];
+    for (const m of result.row.mentions) {
+      if (m.kind !== "agent" || agentIds.includes(m.id)) continue;
+      const bot = dir.agents.get(m.id);
+      if (!bot || bot.deleted || bot.status === "disabled" || bot.scope === "personal") continue;
+      if (!(await getMembership(tx, conv.id, "agent", bot.id))) continue;
+      const d = await perms.decide(
+        tx,
+        { kind: "user", userId: author.id },
+        "bot.read",
+        agentResource(
+          { scope: bot.scope ?? "team", ownerUserId: bot.ownerUserId ?? null, disabled: false },
+          author.id,
+        ),
+      );
+      if (d.allowed) agentIds.push(bot.id);
+    }
+    if (agentIds.length === 0) return [];
+    const mention: AgentMention = {
+      organizationId: conv.organizationId,
+      conversationId: conv.id,
+      threadRootId: result.row.id,
+      messageId: result.row.id,
+      agentIds,
+      author: { kind: "user", id: author.id, displayName: authorOf(dir, "user", author.id).displayName },
+      body: result.row.body,
+      createdAt: result.message.createdAt,
+      delivery: "dm",
+      ...zoneOf(author),
+    };
+    await core.chatAgent.emitAgentMention(tx, mention, tenantOf(tx).afterCommit);
+    return agentIds;
+  }
+
   core.chatAgent.providePostAgentMessage((ctx, input) =>
     core.db.withTenant(ctx, async (tx) => {
       const dir = await loadDirectory(tx);
@@ -298,8 +363,8 @@ export function createChatModule(core: Core): ApiModule {
       const conv = await getConversation(tx, input.conversationId, MESSAGE_KINDS);
       if (!conv) throw notFound("Conversation not found");
       if (conv.archivedAt) throw gone("This conversation is archived", "channel_archived");
-      // DMs are flat (D-04): a bot reply always lands at the top level.
-      const threadRootId = conv.kind === "dm" ? null : input.threadRootId;
+      // DMs and group DMs are flat (D-04, D-06): a bot reply always lands at the top level.
+      const threadRootId = isDirect(conv.kind) ? null : input.threadRootId;
       // The bot itself: enabled, a member, and not denied by a rule (agent principal gate + preconditions).
       const agentRes = channelResource(await channelFacts(tx, conv, { kind: "agent", id: agent.id }));
       const posting = await perms.decide(tx, { kind: "agent", agentId: agent.id }, "channel.post", agentRes);
@@ -382,6 +447,52 @@ export function createChatModule(core: Core): ApiModule {
       };
     }),
   );
+
+  /**
+   * One participant of `POST /dms` (D-06): an active member of this organization (RLS: another org's id is
+   * simply missing → 404), or a live bot the caller may use (`bot.read`, hidden as 404). Personal bots only
+   * ever live in their owner's 1:1 DM, never in a group (409 `personal_bot_dm_only`).
+   */
+  async function checkParticipant(
+    req: FastifyRequest,
+    tx: Tx,
+    dir: Directory,
+    p: { kind: "user" | "agent"; id: string },
+    group: boolean,
+  ): Promise<void> {
+    if (p.kind === "user") {
+      // Seeing who is in the organization is what lets a member pick someone to message.
+      await perms.assertCan(req, tx, "member.read");
+      const [m] = await tx
+        .select({ deactivatedAt: orgMembers.deactivatedAt })
+        .from(orgMembers)
+        .where(eq(orgMembers.userId, p.id))
+        .limit(1);
+      if (!m) throw notFound("Member not found");
+      if (m.deactivatedAt) throw badRequest("This member is deactivated", "member_deactivated");
+      return;
+    }
+    const bot = dir.agents.get(p.id);
+    if (!bot || bot.deleted) throw notFound("Bot not found");
+    await perms.assertCan(
+      req,
+      tx,
+      "bot.read",
+      agentResource(
+        {
+          scope: bot.scope ?? "team",
+          ownerUserId: bot.ownerUserId ?? null,
+          disabled: bot.status === "disabled",
+        },
+        authOf(req).userId,
+      ),
+      { hideAs404: true },
+    );
+    if (group && bot.scope === "personal") {
+      throw conflict("Personal bots only chat in their owner's private chat", "personal_bot_dm_only");
+    }
+    if (bot.status === "disabled") throw badRequest("This bot is disabled", "agent_disabled");
+  }
 
   core.chatAgent.provideAgentTyping(async (ctx: TenantCtx, agentId, conversationId, threadRootId) => {
     const data = await core.db.withTenant(ctx, async (tx): Promise<AgentTypingEvent | null> => {
@@ -712,7 +823,7 @@ export function createChatModule(core: Core): ApiModule {
             );
             if (conv.archivedAt) throw gone("This conversation is archived", "channel_archived");
             await perms.assertCan(req, tx, "channel.post", channelResource(facts));
-            if (conv.kind === "dm" && req.body.threadRootId) {
+            if (isDirect(conv.kind) && req.body.threadRootId) {
               throw badRequest("Direct conversations have no threads", "dm_is_flat");
             }
             // The contract accepts attachment-only posts; the upload pipeline (Plan 04-04) has not landed yet,
@@ -735,6 +846,7 @@ export function createChatModule(core: Core): ApiModule {
               // The zone only travels with this message's deliveries (turn context); it is never stored.
               const author = { id: auth.userId, clientTimeZone: req.body.clientTimeZone };
               if (conv.kind === "dm") await dispatchDmMessage(tx, dir, conv, result, author);
+              else if (conv.kind === "group") await dispatchGroupMentions(tx, dir, conv, result, author);
               else if ((await dispatchAgentMentions(tx, dir, result, author)).length === 0) {
                 await dispatchReplyMode(tx, dir, conv, result, author);
               }
@@ -760,11 +872,63 @@ export function createChatModule(core: Core): ApiModule {
               channelResource({
                 visibility: r.visibility,
                 archived: r.archivedAt !== null,
-                viewerRole: "owner",
-                kind: "dm",
+                viewerRole: "member",
+                kind: r.kind === "group" ? "group" : "dm",
               }),
             );
             return { dms, userSeq: await core.realtime.lastSeq(tx, `user:${auth.userId}`) };
+          }),
+      );
+
+      /**
+       * CHAT-04 (D-06): open a direct conversation with the given participants (the caller is implied and
+       * removed from the list). One person → their DM; one bot → the bot DM (`bot.read` decided, personal bots
+       * for their owner only); two or more → the group DM of exactly that set (≤ 9 with the caller, no personal
+       * bots). Insert-or-get, so it answers the existing conversation when there is one.
+       */
+      app.post(
+        "/dms",
+        {
+          config: { authz: "user" },
+          preHandler: requireUser,
+          schema: { tags, body: CreateDmRequestFields, response: { 200: DmSummary } },
+        },
+        async (req) =>
+          core.db.withTenant(tenant(req), async (tx) => {
+            const auth = authOf(req);
+            const seen = new Set<string>();
+            const others = req.body.participants.filter((p) => {
+              const key = `${p.kind}:${p.id.toLowerCase()}`;
+              if (seen.has(key) || (p.kind === "user" && p.id.toLowerCase() === auth.userId)) return false;
+              seen.add(key);
+              return true;
+            });
+            if (others.length === 0) throw badRequest("You cannot message yourself", "cannot_dm_self");
+            if (others.length > MAX_GROUP_PARTICIPANTS - 1) {
+              throw badRequest(
+                `A group can have at most ${MAX_GROUP_PARTICIPANTS} participants`,
+                "too_many_participants",
+              );
+            }
+            const dir = await loadDirectory(tx);
+            for (const p of others) await checkParticipant(req, tx, dir, p, others.length > 1);
+            let conv: ConversationRow;
+            const only = others[0];
+            if (others.length === 1 && only?.kind === "user") {
+              ({ conv } = await ensureHumanDm(tx, deps, { userId: auth.userId, otherUserId: only.id }));
+            } else if (others.length === 1 && only) {
+              ({ conv } = await ensureDm(tx, deps, { agentId: only.id, userId: auth.userId }));
+            } else {
+              ({ conv } = await ensureGroup(tx, deps, {
+                creatorId: auth.userId,
+                members: others.map((p) => ({ kind: p.kind, id: p.id })),
+              }));
+            }
+            // The caller reads what was opened (the resolver decides it, like every read).
+            await readableChannel(req, tx, conv, "Conversation not found");
+            const [summary] = await listDms(tx, auth.userId, { ids: [conv.id] });
+            if (!summary) throw notFound("Conversation not found");
+            return summary;
           }),
       );
 
@@ -808,10 +972,12 @@ export function createChatModule(core: Core): ApiModule {
           core.db.withTenant(tenant(req), async (tx) => {
             const thread = await loadThread(tx, req.params.id);
             if (!thread) throw notFound("Thread not found");
+            // Any conversation with messages, DMs and groups included (flat: a root with no replies); hidden =
+            // missing = 404 (D-01).
             await readableChannel(
               req,
               tx,
-              await getChannel(tx, thread.root.conversationId),
+              await getConversation(tx, thread.root.conversationId, MESSAGE_KINDS),
               "Thread not found",
             );
             const dir = await loadDirectory(tx);

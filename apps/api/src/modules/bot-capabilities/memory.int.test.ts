@@ -310,6 +310,46 @@ describe("memory is private by construction (D-10, T-03.1-07-01/03/04)", () => {
     expect(denied?.metadata).toEqual({ reason: "dm_only", chars: "Planted from a channel".length });
   });
 
+  it("a group DM with two humans and the bot: no memory offered, carried or saved (dm_only); the one-human DM still has it", async () => {
+    const group = await ok(
+      sam.request("POST", "/api/v1/dms", {
+        participants: [
+          { kind: "user", id: alexId },
+          { kind: "agent", id: teamBotId },
+        ],
+      }),
+    );
+    const ev = await say(sam, group.id, teamBotId, "@archie remember that I review on Fridays", [
+      { kind: "agent", id: teamBotId },
+    ]);
+    expect(ev.conversation.kind).toBe("group");
+    expect(ev.turn.tools).not.toContain("ocw_memory_save");
+    expect(ev.turn.memory).toEqual([]);
+    const r = await save(ev.eventId, "Planted from a group", teamBotId);
+    expect(r.status).toBe(409);
+    expect(codeOf(r)).toBe("dm_only");
+    expect((await rowsOf(teamBotId, samId)).map((x) => x.text)).not.toContain("Planted from a group");
+
+    // The same bot in Sam's own DM still remembers him.
+    const own = await say(sam, samTeamDm, teamBotId, "what do you know about me?");
+    expect(own.turn.tools).toContain("ocw_memory_save");
+    expect(own.turn.memory.map((i: Json) => i.text)).toContain("Reviews on Fridays");
+  });
+
+  it("a 1:1 DM that somehow holds a second human (tampered) carries no memory: exactly one human is required", async () => {
+    const human = await ok(
+      sam.request("POST", "/api/v1/dms", { participants: [{ kind: "user", id: alexId }] }),
+    );
+    await su.query(
+      "insert into app.conversation_members (conversation_id, organization_id, member_kind, member_id) values ($1, $2, 'agent', $3)",
+      [human.id, orgId, teamBotId],
+    );
+    const ev = await say(sam, human.id, teamBotId, "remember my desk number");
+    expect(ev.conversation.kind).toBe("dm");
+    expect(ev.turn.tools).not.toContain("ocw_memory_save");
+    expect(ev.turn.memory).toEqual([]);
+  });
+
   it("after untrusted web output on a DM turn, saving is 409 tainted", async () => {
     await ok(sam.request("PATCH", `/api/v1/agents/${samBotId}/capabilities`, { internet: true }));
     try {

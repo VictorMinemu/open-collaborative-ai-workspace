@@ -59,6 +59,45 @@ export function PrincipalAvatar({
   );
 }
 
+/** A group DM's stacked avatars (the first two members, the second offset), for DM rows and headers. */
+export function GroupAvatars({
+  members,
+  className,
+  large,
+}: {
+  members: ReadonlyArray<{ kind: "user" | "agent"; id: string; name: string; avatarUrl: string | null }>;
+  className?: string;
+  /** Header and intro sizes: larger initials. */
+  large?: boolean;
+}) {
+  const [a, b] = members;
+  const text = large ? "text-[10px] sm:text-xs" : "text-[8px]";
+  return (
+    <span className={cn("relative inline-flex size-5 shrink-0", className)} aria-hidden>
+      {a ? (
+        <PrincipalAvatar
+          kind={a.kind}
+          name={a.name}
+          avatarUrl={a.avatarUrl}
+          seed={a.id}
+          compact
+          className={cn("absolute top-0 left-0 size-[70%] ring-1 ring-background", text)}
+        />
+      ) : null}
+      {b ? (
+        <PrincipalAvatar
+          kind={b.kind}
+          name={b.name}
+          avatarUrl={b.avatarUrl}
+          seed={b.id}
+          compact
+          className={cn("absolute right-0 bottom-0 size-[70%] ring-1 ring-background", text)}
+        />
+      ) : null}
+    </span>
+  );
+}
+
 export function BotBadge({ className }: { className?: string }) {
   return (
     <span

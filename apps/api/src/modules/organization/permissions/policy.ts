@@ -170,8 +170,11 @@ export interface ChannelFacts {
   visibility: "public" | "private";
   archived: boolean;
   viewerRole: "owner" | "member" | null;
-  /** `dm` = a direct conversation, 1:1 or group (state `dm`: fixed membership, no moderation). Omitted = a channel. */
-  kind?: "channel" | "dm";
+  /**
+   * `dm` = a 1:1 direct conversation, `group` = a group DM (D-06); both carry state `dm` (fixed membership, no
+   * moderation). Omitted = a channel.
+   */
+  kind?: "channel" | "dm" | "group";
 }
 
 function channelRelations(c: ChannelFacts): Relation[] {
@@ -185,7 +188,7 @@ function channelState(c: ChannelFacts): ResourceState[] {
   return [
     ...when(c.visibility === "private", "private" as const),
     ...when(c.archived, "archived" as const),
-    ...when(c.kind === "dm", "dm" as const),
+    ...when(c.kind === "dm" || c.kind === "group", "dm" as const),
   ];
 }
 

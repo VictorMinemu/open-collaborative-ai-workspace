@@ -9,7 +9,7 @@ import {
 } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
 import { useQueryClient } from "@tanstack/react-query";
-import { Bookmark, ChevronRight, Hash, Lock, Plus } from "lucide-react";
+import { Bookmark, ChevronRight, Hash, Lock, MessageSquarePlus, Plus } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
@@ -18,20 +18,13 @@ import { SectionSidebar, sectionItemClass } from "@/components/shell/section-sid
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
-import {
-  applySaveUpdate,
-  bumpDmLatest,
-  bumpLatest,
-  chatKeys,
-  isBotDm,
-  useChannels,
-  useDms,
-} from "@/lib/chat-queries";
+import { applySaveUpdate, bumpDmLatest, bumpLatest, chatKeys, useChannels, useDms } from "@/lib/chat-queries";
 import { useMe } from "@/lib/queries";
 import { useTopic } from "@/lib/realtime";
 import { cn } from "@/lib/utils";
 import { CreateChannelDialog } from "./create-channel-dialog";
-import { PrincipalAvatar } from "./principal-avatar";
+import { NewDmDialog } from "./new-dm-dialog";
+import { GroupAvatars, PrincipalAvatar } from "./principal-avatar";
 
 export function ChannelIcon({
   channel,
@@ -163,60 +156,101 @@ function ListSync({
   return null;
 }
 
-/** "Bots" group under Channels: the caller's private chats with bots (personal first), one-click create. */
-function BotsSection({ activeId }: { activeId: string | null }) {
-  const dms = useDms();
-  const list = (dms.data?.dms ?? []).filter(isBotDm);
-  const hasPersonal = list.some((d) => d.counterpart.scope === "personal");
+/** One row of Direct messages: a bot (as in 3.1), a person or a group. */
+function DmRow({ d, active }: { d: DmSummary; active: boolean }) {
+  const unread = !active && d.latestMessageSeq > d.lastReadSeq;
+  const c = d.counterpart;
+  const label = c.name;
   return (
-    <section aria-labelledby="bots-heading" className="mt-5" data-testid="bots-section">
+    <Link
+      href={`/chat/dm/${d.id}`}
+      data-testid="dm-link"
+      data-dm-kind={c.kind}
+      {...(c.kind === "agent" ? { "data-bot-name": c.name } : {})}
+      data-unread={unread || undefined}
+      aria-current={active ? "page" : undefined}
+      className={cn(sectionItemClass(active), unread && "font-semibold text-foreground")}
+    >
+      {c.kind === "group" ? (
+        <GroupAvatars members={c.members} />
+      ) : (
+        <PrincipalAvatar
+          kind={c.kind}
+          name={c.name}
+          avatarUrl={c.avatarUrl}
+          seed={c.id}
+          compact
+          className="size-5 text-[11px]"
+        />
+      )}
+      <span className={cn("truncate", c.kind === "user" && c.deactivated && "text-muted-foreground")}>
+        {label}
+      </span>
+      {c.kind === "group" ? (
+        <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+          {c.members.length + 1}
+        </span>
+      ) : null}
+      {unread ? (
+        <>
+          <span className="sr-only">(unread)</span>
+          <span aria-hidden className="ml-auto size-2 shrink-0 rounded-full bg-primary" />
+        </>
+      ) : null}
+    </Link>
+  );
+}
+
+/**
+ * "Direct messages" under Channels (CHAT-04): the caller's private chats with bots (personal first), people
+ * and groups; "+" opens the New message picker; one-click personal bot creation while the caller has none.
+ */
+function DirectMessagesSection({ activeId, onNew }: { activeId: string | null; onNew: () => void }) {
+  const dms = useDms();
+  const list = dms.data?.dms ?? [];
+  const hasPersonal = list.some((d) => d.counterpart.kind === "agent" && d.counterpart.scope === "personal");
+  return (
+    <section aria-labelledby="dm-heading" className="mt-5" data-testid="dm-section">
       <div className="flex h-8 items-center justify-between gap-2 px-2">
         <h3
-          id="bots-heading"
+          id="dm-heading"
           className="truncate font-semibold text-[11.5px] text-muted-foreground uppercase tracking-wider"
         >
-          Bots
+          Direct messages
         </h3>
-        <PersonalBotButton variant="icon" />
+        <Tooltip content="New message">
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            aria-label="New message"
+            data-testid="new-dm"
+            onClick={onNew}
+          >
+            <Plus />
+          </Button>
+        </Tooltip>
       </div>
       {dms.isPending ? (
         <div className="grid gap-1.5 px-2.5 pt-1">
           <Skeleton className="h-5" style={{ width: "64%" }} />
         </div>
       ) : (
-        <nav aria-label="Bots" className="grid gap-px" data-testid="dm-list">
-          {list.map((d) => {
-            const active = d.id === activeId;
-            const unread = !active && d.latestMessageSeq > d.lastReadSeq;
-            return (
-              <Link
-                key={d.id}
-                href={`/chat/dm/${d.id}`}
-                data-testid="dm-link"
-                data-bot-name={d.counterpart.name}
-                data-unread={unread || undefined}
-                aria-current={active ? "page" : undefined}
-                className={cn(sectionItemClass(active), unread && "font-semibold text-foreground")}
-              >
-                <PrincipalAvatar
-                  kind="agent"
-                  name={d.counterpart.name}
-                  avatarUrl={d.counterpart.avatarUrl}
-                  seed={d.counterpart.id}
-                  compact
-                  className="size-5 text-[11px]"
-                />
-                <span className="truncate">{d.counterpart.name}</span>
-                {unread ? (
-                  <>
-                    <span className="sr-only">(unread)</span>
-                    <span aria-hidden className="ml-auto size-2 shrink-0 rounded-full bg-primary" />
-                  </>
-                ) : null}
-              </Link>
-            );
-          })}
+        <nav aria-label="Direct messages" className="grid gap-px" data-testid="dm-list">
+          {list.map((d) => (
+            <DmRow key={d.id} d={d} active={d.id === activeId} />
+          ))}
           {!hasPersonal ? <PersonalBotButton variant="row" /> : null}
+          <button
+            type="button"
+            onClick={onNew}
+            data-testid="new-dm-row"
+            className={cn(sectionItemClass(false), "text-muted-foreground")}
+          >
+            <span className="flex size-5 items-center justify-center rounded-[30%] bg-muted">
+              <MessageSquarePlus className="size-3" />
+            </span>
+            New message
+          </button>
         </nav>
       )}
     </section>
@@ -233,6 +267,7 @@ export function ChatSidebar() {
   const dms = useDms();
   const [creating, setCreating] = useState(false);
   const [browseOpen, setBrowseOpen] = useState(false);
+  const [newDmOpen, setNewDmOpen] = useState(false);
 
   const list = channels.data?.channels ?? [];
   const joined = list.filter((c) => c.isMember);
@@ -343,7 +378,7 @@ export function ChatSidebar() {
             </button>
           </nav>
         )}
-        <BotsSection activeId={activeId} />
+        <DirectMessagesSection activeId={activeId} onNew={() => setNewDmOpen(true)} />
       </SectionSidebar>
 
       {me.data && channels.data ? (
@@ -364,6 +399,7 @@ export function ChatSidebar() {
       ) : null}
 
       <CreateChannelDialog open={creating} onOpenChange={setCreating} />
+      <NewDmDialog open={newDmOpen} onOpenChange={setNewDmOpen} />
     </>
   );
 }

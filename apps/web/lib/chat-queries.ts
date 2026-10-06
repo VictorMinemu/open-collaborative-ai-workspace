@@ -7,10 +7,15 @@ import {
   ChannelMemberList,
   ChannelSummary,
   type CreateChannelRequest,
+  type CreateDmRequest,
   type DmAgentCounterpart,
+  type DmGroupCounterpart,
   type DmList,
   DmList as DmListSchema,
+  type DmParticipant,
   type DmSummary,
+  DmSummary as DmSummarySchema,
+  type DmUserCounterpart,
   IanaTimeZone,
   type Message,
   type MessageDeletedEvent,
@@ -134,7 +139,32 @@ export function isBotDm(d: DmSummary): d is BotDm {
   return d.counterpart.kind === "agent";
 }
 
-/** The caller's DMs with bots (personal and team), for the sidebar's Bots section. */
+export type HumanDm = DmSummary & { counterpart: DmUserCounterpart };
+export type GroupDm = DmSummary & { counterpart: DmGroupCounterpart };
+
+export function isHumanDm(d: DmSummary): d is HumanDm {
+  return d.counterpart.kind === "user";
+}
+
+export function isGroupDm(d: DmSummary): d is GroupDm {
+  return d.counterpart.kind === "group";
+}
+
+/**
+ * Opens (or finds) the direct conversation with `participants` (the caller is implied): one person or bot → a
+ * DM, two or more → a group DM (CHAT-04). The result lands in the sidebar's list right away.
+ */
+export async function createDm(qc: QueryClient, participants: DmParticipant[]): Promise<DmSummary> {
+  const body: CreateDmRequest = { participants };
+  const dm = await api.post("/api/v1/dms", { body, schema: DmSummarySchema });
+  qc.setQueryData<DmList>(chatKeys.dms, (prev) =>
+    prev ? { ...prev, dms: [dm, ...prev.dms.filter((d) => d.id !== dm.id)] } : prev,
+  );
+  void qc.invalidateQueries({ queryKey: chatKeys.dms });
+  return dm;
+}
+
+/** The caller's direct conversations: bots (personal and team), people and groups, for the sidebar. */
 export function useDms() {
   return useQuery({
     queryKey: chatKeys.dms,

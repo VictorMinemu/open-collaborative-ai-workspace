@@ -344,6 +344,16 @@ export const CreateDmRequest = z.object({
 export type CreateDmRequest = z.infer<typeof CreateDmRequest>;
 
 /**
+ * The route's body schema for `POST /dms`: the same shape with a looser bound, so a list over the group cap is
+ * answered with 400 `too_many_participants` (after self-removal and de-duplication) instead of a generic
+ * validation error. Clients build `CreateDmRequest`.
+ */
+export const CreateDmRequestFields = z.object({
+  participants: z.array(DmParticipant).min(1).max(32),
+});
+export type CreateDmRequestFields = z.infer<typeof CreateDmRequestFields>;
+
+/**
  * The stable key of a direct conversation (P-06, AGENTS principle 11): every member's `<kind>:<id>`, sorted and
  * de-duplicated, joined by `|`. A bot DM keeps the Phase 3.1 form `agent:<a>|user:<u>`.
  */

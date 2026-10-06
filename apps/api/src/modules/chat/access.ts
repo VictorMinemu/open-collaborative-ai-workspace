@@ -105,7 +105,7 @@ export function createConversationAccess(core: Core): ConversationAccess {
           visibility: r.visibility,
           archived: r.archivedAt !== null,
           viewerRole: r.role ?? null,
-          kind: r.kind === "channel" ? "channel" : "dm",
+          kind: r.kind === "group" ? "group" : r.kind === "channel" ? "channel" : "dm",
         }),
       );
       return allowed.map((r) => r.id);
