@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 14
+open_count: 17
 waived_count: 0
 fixed_count: 14
-total_count: 28
-last_updated: 2026-10-06T06:11:49.318Z
+total_count: 31
+last_updated: 2026-10-06T06:20:53.784Z
 ---
 
 # Broken Windows Ledger
@@ -43,6 +43,9 @@ last_updated: 2026-10-06T06:11:49.318Z
 | 26 | 04 | deviation | packages/db/sql/post-migrate.sql |  | app.due_attachment_sweeps takes p_now (default now()) in addition to p_limit, for the sweeper's injectable clock | open |  | 2026-10-06T05:31:09.529Z |  |
 | 27 | 04 | deviation | apps/api/src/config/env.ts |  | OCW_SEARCH_RATE_LIMIT_PER_MINUTE (default 30) added; e2e-isolated.sh raises it to 600 for specs | open |  | 2026-10-06T06:11:49.247Z |  |
 | 28 | 04 | deviation | apps/api/src/modules/search/index.ts |  | Search routes call markDecided after access.readableIds (request-less filterFor) and share one app.rateLimit handler | open |  | 2026-10-06T06:11:49.318Z |  |
+| 29 | 04 | deviation | apps/web/public/emojibase/README.md |  | Emoji picker data self-hosted (emojibase-data 17.0.0 en, vendored JSON) instead of frimousse's jsDelivr default | open |  | 2026-10-06T06:20:53.647Z |  |
+| 30 | 04 | deviation | apps/web/components/chat/message-actions.tsx |  | Hover toolbar hidden on hover:none devices; touch uses the long-press sheet only | open |  | 2026-10-06T06:20:53.716Z |  |
+| 31 | 04 | deviation | apps/api/src/modules/chat/saves.ts |  | GET /saved marks the request decided after access.readableIds (request-less filterFor) for the strict authz hook | open |  | 2026-10-06T06:20:53.784Z |  |
 
 ````json
 [
@@ -380,6 +383,42 @@ last_updated: 2026-10-06T06:11:49.318Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-06T06:11:49.318Z",
+    "resolved_at": null
+  },
+  {
+    "id": 29,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/web/public/emojibase/README.md",
+    "line": null,
+    "description": "Emoji picker data self-hosted (emojibase-data 17.0.0 en, vendored JSON) instead of frimousse's jsDelivr default",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T06:20:53.647Z",
+    "resolved_at": null
+  },
+  {
+    "id": 30,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/web/components/chat/message-actions.tsx",
+    "line": null,
+    "description": "Hover toolbar hidden on hover:none devices; touch uses the long-press sheet only",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T06:20:53.716Z",
+    "resolved_at": null
+  },
+  {
+    "id": 31,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "apps/api/src/modules/chat/saves.ts",
+    "line": null,
+    "description": "GET /saved marks the request decided after access.readableIds (request-less filterFor) for the strict authz hook",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-06T06:20:53.784Z",
     "resolved_at": null
   }
 ]
