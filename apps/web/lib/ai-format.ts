@@ -97,3 +97,32 @@ export function usageTitle(g: AiGeneration): string | undefined {
   if (u.estimated) parts.push("estimated counts");
   return parts.join(" · ");
 }
+
+/**
+ * When a daily cap resets, in the member's local time: "2:00 AM", or "2:00 AM tomorrow" when that is not today
+ * where they are (caps reset at 00:00 UTC).
+ */
+export function formatResetTime(resetsAt: string, now = new Date(), locale?: string): string {
+  const at = new Date(resetsAt);
+  const time = at.toLocaleTimeString(locale, { hour: "numeric", minute: "2-digit" });
+  return at.toDateString() === now.toDateString() ? time : `${time} tomorrow`;
+}
+
+/** The composer notice at a daily cap (05-08). */
+export function limitNoticeText(
+  limit: {
+    kind: "generations" | "cost";
+    backendClass: "org_key" | "chatgpt_plan";
+    max: number;
+    resetsAt: string;
+  },
+  now = new Date(),
+  locale?: string,
+): string {
+  const where = limit.backendClass === "org_key" ? "on organization models" : "on your ChatGPT plan here";
+  const used =
+    limit.kind === "cost"
+      ? `You've reached today's ${formatCostMicros(limit.max, false)} limit ${where}.`
+      : `You've used today's ${limit.max} ${limit.max === 1 ? "answer" : "answers"} ${where}.`;
+  return `${used} Resets at ${formatResetTime(limit.resetsAt, now, locale)}.`;
+}

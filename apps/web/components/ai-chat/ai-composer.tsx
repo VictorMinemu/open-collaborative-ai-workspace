@@ -1,11 +1,14 @@
 "use client";
 
 import { type AiModelOption, type ModelRef, modelRefKey } from "@ocw/contracts";
-import { ArrowUp, Square } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { ArrowUp, Gauge, Square } from "lucide-react";
 import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { useAiChatModel } from "@/lib/ai-chat-model-store";
+import { limitNoticeText } from "@/lib/ai-format";
+import { orgAnswersLeft, reachedLimit, refreshAiUsageToday, useAiUsageToday } from "@/lib/ai-usage-queries";
 import { cn } from "@/lib/utils";
 import { ModelPicker } from "./model-picker";
 import { PlanUsageLine } from "./plan-usage-line";
@@ -32,7 +35,10 @@ export function pickModel(
  * chip and the send button, in the Work Zone composer card. While an answer is being written the send button is
  * Stop (05-06, D-05: one generation per chat): the textarea keeps taking text, Enter does not send, Esc stops. The model is chosen per chat (`chatKey`) and per
  * message: the selection survives sends and only ever applies to the next answer. Plan models carry "Using ChatGPT
- * plan · Manage usage" under the card (P-11); organization models carry METERED on the chip.
+ * plan · Manage usage" under the card (P-11); organization models carry METERED on the chip. At a daily cap of the
+ * selected model's backend (05-08, D-06) a notice above the card says which cap and when it resets (local time) and,
+ * on organization models, offers the member's own ChatGPT plan when it is connected; the server stays the authority
+ * (a send at the cap is refused before any model call and keeps its text).
  */
 export function AiComposer({
   chatKey,
@@ -68,6 +74,15 @@ export function AiComposer({
   const [sending, setSending] = useState(false);
   const [stopping, setStopping] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
+  const qc = useQueryClient();
+  const today = useAiUsageToday();
+  const reached = model ? reachedLimit(today.data, model.ref.backend) : null;
+  const planModel =
+    reached?.backendClass === "org_key"
+      ? (models?.find((m) => m.available && m.group === "chatgpt_plan" && m.isDefault) ??
+        models?.find((m) => m.available && m.group === "chatgpt_plan") ??
+        null)
+      : null;
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: re-measure whenever the text changes
   useEffect(() => {
@@ -98,6 +113,8 @@ export function AiComposer({
       setText(body); // the caller reported the error; nothing typed is lost
     } finally {
       setSending(false);
+      // Counted (or refused at a cap): today's usage moved either way.
+      refreshAiUsageToday(qc);
       ref.current?.focus();
     }
   }
@@ -133,6 +150,34 @@ export function AiComposer({
         className,
       )}
     >
+      {reached ? (
+        <div
+          role="status"
+          data-testid="ai-limit-notice"
+          data-limit={reached.kind}
+          className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-2xl border border-amber-500/30 bg-amber-500/[0.07] px-3.5 py-2.5 text-[13px] leading-5 dark:border-amber-400/25 dark:bg-amber-400/[0.07]"
+        >
+          <span className="flex min-w-0 flex-1 basis-56 items-start gap-2">
+            <Gauge aria-hidden className="mt-0.5 size-4 shrink-0 text-amber-700 dark:text-amber-300" />
+            <span className="min-w-0 text-foreground/85">{limitNoticeText(reached)}</span>
+          </span>
+          {planModel ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              data-testid="ai-limit-use-plan"
+              onClick={() => {
+                setSelected(planModel.ref);
+                ref.current?.focus();
+              }}
+              className="ml-auto h-8 rounded-full bg-background"
+            >
+              Use your ChatGPT plan
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
       <div className="relative rounded-[22px] border bg-card shadow-[0_1px_2px_rgb(0_0_0/0.04),0_8px_24px_-12px_rgb(0_0_0/0.12)] transition-[border-color,box-shadow] focus-within:border-ring/50 dark:shadow-none">
         <textarea
           ref={ref}
@@ -182,6 +227,22 @@ export function AiComposer({
         </div>
       </div>
       {model?.group === "chatgpt_plan" ? <PlanUsageLine /> : null}
+      {model && model.ref.backend !== "chatgpt_plan" && !reached ? (
+        <OrgAnswersLeft left={orgAnswersLeft(today.data)} />
+      ) : null}
     </form>
+  );
+}
+
+/** "3 of 200 answers left today on organization models", only once the daily cap is close (05-08). */
+function OrgAnswersLeft({ left }: { left: { left: number; max: number } | null }) {
+  if (!left) return null;
+  return (
+    <p
+      data-testid="ai-org-answers-left"
+      className="px-3 text-center text-[11.5px] text-muted-foreground leading-5 tabular-nums"
+    >
+      {left.left} of {left.max} {left.max === 1 ? "answer" : "answers"} left today on organization models
+    </p>
   );
 }

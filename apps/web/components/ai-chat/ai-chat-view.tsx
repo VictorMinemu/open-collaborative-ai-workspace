@@ -18,7 +18,7 @@ import {
   useAiChat,
   useAiModels,
 } from "@/lib/ai-chat-queries";
-import { errorMessage } from "@/lib/api";
+import { errorMessage, isApiError } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { AiComposer } from "./ai-composer";
 import { AiMessageList } from "./ai-message-list";
@@ -36,7 +36,10 @@ export function AiChatView({ chatId }: { chatId: string | null }) {
 const NEW_CHAT_KEY = "new";
 
 function sendFailed(err: unknown): never {
-  toast.error("Couldn't send your message", { description: errorMessage(err) });
+  // At a daily cap the composer's notice explains it (which cap, when it resets); no toast on top.
+  if (!(isApiError(err) && err.code === "daily_limit_reached")) {
+    toast.error("Couldn't send your message", { description: errorMessage(err) });
+  }
   throw err;
 }
 

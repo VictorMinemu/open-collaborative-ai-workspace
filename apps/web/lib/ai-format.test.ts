@@ -1,6 +1,14 @@
 import type { AiGeneration, AiUsage } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
-import { footerLabel, formatCostMicros, formatTokens, formatUsage, usageTitle } from "./ai-format";
+import {
+  footerLabel,
+  formatCostMicros,
+  formatResetTime,
+  formatTokens,
+  formatUsage,
+  limitNoticeText,
+  usageTitle,
+} from "./ai-format";
 
 const usage = (u: Partial<AiUsage> = {}): AiUsage => ({
   inputTokens: 1234,
@@ -116,5 +124,31 @@ describe("footerLabel", () => {
       "1,234 input tokens · 340 output tokens · no price for this model",
     );
     expect(usageTitle(gen({ usage: null }))).toBeUndefined();
+  });
+});
+
+describe("limit notice", () => {
+  const now = new Date(2026, 9, 6, 15, 0); // local 15:00
+  it("names the cap and the local reset time", () => {
+    const resetsAt = new Date(2026, 9, 6, 23, 30).toISOString();
+    expect(
+      limitNoticeText({ kind: "generations", backendClass: "org_key", max: 1, resetsAt }, now, "en-US"),
+    ).toBe("You've used today's 1 answer on organization models. Resets at 11:30 PM.");
+    const tomorrow = new Date(2026, 9, 7, 2, 0).toISOString();
+    expect(
+      limitNoticeText(
+        { kind: "generations", backendClass: "chatgpt_plan", max: 20, resetsAt: tomorrow },
+        now,
+        "en-US",
+      ),
+    ).toBe("You've used today's 20 answers on your ChatGPT plan here. Resets at 2:00 AM tomorrow.");
+    expect(
+      limitNoticeText(
+        { kind: "cost", backendClass: "org_key", max: 5_000_000, resetsAt: tomorrow },
+        now,
+        "en-US",
+      ),
+    ).toBe("You've reached today's $5.00 limit on organization models. Resets at 2:00 AM tomorrow.");
+    expect(formatResetTime(tomorrow, now, "en-US")).toBe("2:00 AM tomorrow");
   });
 });
