@@ -111,6 +111,12 @@ export const PRECONDITIONS: readonly Precondition[] = [
       isChannel(r) && r.state.has("dm") ? { layer: "resource", reason: "direct_conversation" } : null,
   },
   {
+    // D-01: moderation never reaches a direct conversation (DMs and group DMs): no admin delete path there.
+    applies: (perm) => perm === "message.delete_any",
+    check: (_p, r) =>
+      isChannel(r) && r.state.has("dm") ? { layer: "resource", reason: "direct_conversation" } : null,
+  },
+  {
     // Role ceiling: an inviter never grants a role above what their own role may invite.
     applies: (perm) => perm === "invitation.create",
     check: (p, r) => {
@@ -164,7 +170,7 @@ export interface ChannelFacts {
   visibility: "public" | "private";
   archived: boolean;
   viewerRole: "owner" | "member" | null;
-  /** `dm` = a direct conversation (state `dm`: fixed membership). Omitted = a channel. */
+  /** `dm` = a direct conversation, 1:1 or group (state `dm`: fixed membership, no moderation). Omitted = a channel. */
   kind?: "channel" | "dm";
 }
 

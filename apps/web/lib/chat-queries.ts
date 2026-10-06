@@ -13,6 +13,7 @@ import {
   type DmSummary,
   IanaTimeZone,
   type Message,
+  type MessageDeletedEvent,
   type MessagePage,
   MessagePage as MessagePageSchema,
   Message as MessageSchema,
@@ -337,5 +338,43 @@ export function applyMessageUpdate(qc: QueryClient, message: Message) {
   );
   qc.setQueryData<ThreadResponse>(chatKeys.thread(message.id), (prev) =>
     prev ? { ...prev, root: patch(prev.root) } : prev,
+  );
+}
+
+// ---------------------------------------------------------------- delete (CHAT-06, P-05)
+
+export function deleteMessage(id: string): Promise<{ ok: true }> {
+  return api.del(`/api/v1/messages/${id}`, { schema: Ok });
+}
+
+/**
+ * Applies a delete (DELETE response or `message.deleted`) to the page and thread caches: the message becomes a
+ * tombstone (empty body, no reactions or attachments). The list hides it unless it still has replies.
+ */
+export function applyMessageDeleted(qc: QueryClient, ev: MessageDeletedEvent) {
+  const tomb = (m: Message): Message =>
+    m.id === ev.messageId
+      ? {
+          ...m,
+          body: "",
+          mentions: [],
+          deletedAt: ev.deletedAt,
+          replyCount: ev.replyCount,
+          reactions: [],
+          attachments: [],
+          pinned: false,
+        }
+      : m;
+  if (ev.threadId) {
+    qc.setQueryData<ThreadResponse>(chatKeys.thread(ev.threadId), (prev) =>
+      prev ? { ...prev, replies: prev.replies.map(tomb) } : prev,
+    );
+    return;
+  }
+  qc.setQueryData<MessagePage>(chatKeys.messages(ev.conversationId), (prev) =>
+    prev ? { ...prev, messages: prev.messages.map(tomb) } : prev,
+  );
+  qc.setQueryData<ThreadResponse>(chatKeys.thread(ev.messageId), (prev) =>
+    prev ? { ...prev, root: tomb(prev.root) } : prev,
   );
 }

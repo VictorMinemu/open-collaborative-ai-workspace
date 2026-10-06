@@ -59,6 +59,17 @@ export interface PermissionService {
     permission: Permission,
     toResource: (item: T) => ResourceFacts,
   ): Promise<T[]>;
+  /**
+   * Request-less `filter` for background and event-time decisions (readable sets, notifications): the
+   * principal's facts and the rules load once, then one in-memory decision per item.
+   */
+  filterFor<T>(
+    tx: Tx,
+    principal: PrincipalRef,
+    items: readonly T[],
+    permission: Permission,
+    toResource: (item: T) => ResourceFacts,
+  ): Promise<T[]>;
   /** The subset of `candidates` the caller holds on `resource` (drives per-resource `viewerCan`). */
   viewerCan(
     req: FastifyRequest,
@@ -210,6 +221,13 @@ export function createPermissionService(deps: PermissionDeps): PermissionService
       const p = await principalFacts(req, tx, ref);
       const rules = await requestRules(req, tx);
       markDecided(req);
+      return items.filter((item) => decideFacts(p, toResource(item), rules, permission).allowed);
+    },
+
+    async filterFor(tx, principal, items, permission, toResource) {
+      if (items.length === 0) return [];
+      const p = await loadPrincipalFacts(tx, principal);
+      const rules = await loadRules(tx);
       return items.filter((item) => decideFacts(p, toResource(item), rules, permission).allowed);
     },
 

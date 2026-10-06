@@ -2,7 +2,7 @@
 
 import type { Message, MessageAuthor } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, RotateCw } from "lucide-react";
+import { AlertCircle, RotateCw, Trash2 } from "lucide-react";
 import { Fragment, memo, type ReactNode, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -10,10 +10,11 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
-import { applyMessageUpdate, editMessage } from "@/lib/chat-queries";
+import { applyMessageDeleted, applyMessageUpdate, deleteMessage, editMessage } from "@/lib/chat-queries";
 import { cn, relativeTime } from "@/lib/utils";
 import { Markdown } from "./markdown";
 import {
+  DeleteMessageDialog,
   hasMessageActions,
   type MessageActionSet,
   MessageActionSheet,
@@ -221,6 +222,7 @@ interface RowProps {
   showThreadSummary: boolean;
   meId: string;
   readOnly: boolean;
+  canDeleteAny: boolean;
 }
 
 const MessageRow = memo(function MessageRow({
@@ -232,6 +234,7 @@ const MessageRow = memo(function MessageRow({
   showThreadSummary,
   meId,
   readOnly,
+  canDeleteAny,
 }: RowProps) {
   const author = message.author ?? {
     kind: message.authorKind,
@@ -244,10 +247,37 @@ const MessageRow = memo(function MessageRow({
   const [sheetOpen, setSheetOpen] = useState(false);
   // Mounted on the first long press only: one dialog root per row would be wasted on long lists.
   const [sheetUsed, setSheetUsed] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmUsed, setConfirmUsed] = useState(false);
+  const qc = useQueryClient();
+  const deleted = !!message.deletedAt;
   const own = message.authorKind === "user" && !!meId && message.authorId === meId;
+  const mutable = !readOnly && !deleted;
   const actions: MessageActionSet = {
     onReply: onOpenThread ? () => onOpenThread(message.id) : undefined,
-    onEdit: own && !readOnly && !message.deletedAt ? () => setEditing(true) : undefined,
+    onEdit: own && mutable ? () => setEditing(true) : undefined,
+    onDelete:
+      mutable && (own || canDeleteAny)
+        ? () => {
+            setConfirmUsed(true);
+            setConfirmOpen(true);
+          }
+        : undefined,
+  };
+  const confirmDelete = async () => {
+    try {
+      await deleteMessage(message.id);
+      setConfirmOpen(false);
+      applyMessageDeleted(qc, {
+        messageId: message.id,
+        conversationId: message.conversationId,
+        threadId: message.threadId,
+        deletedAt: new Date().toISOString(),
+        replyCount: message.replyCount,
+      });
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
   };
   const actionable = hasMessageActions(actions) && !editing;
 
@@ -316,7 +346,11 @@ const MessageRow = memo(function MessageRow({
       )}
     >
       <div className="w-9 shrink-0">
-        {continuation ? (
+        {deleted ? (
+          <div className="mt-0.5 flex size-9 items-center justify-center rounded-full border border-dashed text-muted-foreground/70">
+            <Trash2 className="size-4" />
+          </div>
+        ) : continuation ? (
           <Tooltip content={fullFmt.format(new Date(message.createdAt))}>
             <time
               dateTime={message.createdAt}
@@ -336,7 +370,7 @@ const MessageRow = memo(function MessageRow({
         )}
       </div>
       <div className="min-w-0 flex-1">
-        {continuation ? null : (
+        {continuation || deleted ? null : (
           <div className="flex items-baseline gap-1.5">
             <span className="truncate font-semibold text-[14.5px] leading-6" data-testid="message-author">
               {author.displayName}
@@ -352,7 +386,14 @@ const MessageRow = memo(function MessageRow({
             </Tooltip>
           </div>
         )}
-        {editing ? (
+        {deleted ? (
+          <p
+            data-testid="message-tombstone"
+            className="py-2 text-[14px] text-muted-foreground italic leading-5"
+          >
+            This message was deleted.
+          </p>
+        ) : editing ? (
           <MessageEditor message={message} onDone={() => setEditing(false)} />
         ) : message.editedAt ? (
           // The marker flows after the last paragraph ("…text (edited)") instead of on a line of its own.
@@ -374,6 +415,15 @@ const MessageRow = memo(function MessageRow({
           actions={actions}
           open={sheetOpen}
           onOpenChange={setSheetOpen}
+        />
+      ) : null}
+      {confirmUsed ? (
+        <DeleteMessageDialog
+          message={message}
+          moderated={!own}
+          open={confirmOpen}
+          onOpenChange={setConfirmOpen}
+          onConfirm={confirmDelete}
         />
       ) : null}
     </div>
@@ -443,6 +493,8 @@ export function MessageList({
   showThreadSummary = true,
   startDay,
   readOnly = false,
+  canDeleteAny = false,
+  showTombstones = false,
 }: {
   messages: Message[];
   pending: PendingMessage[];
@@ -455,15 +507,21 @@ export function MessageList({
   showThreadSummary?: boolean;
   /** ISO date already shown above the list (thread root): no divider for messages of that same day. */
   startDay?: string;
-  /** Archived conversations: no edit (the API answers 410 anyway). */
+  /** Archived conversations: no edit or delete (the API answers 410 anyway). */
   readOnly?: boolean;
+  /** The channel's `viewerCan` has `message.delete_any` (admins in channels; never in DMs). */
+  canDeleteAny?: boolean;
+  /** Show a deleted message as a tombstone even without replies (the thread panel's root). */
+  showTombstones?: boolean;
 }) {
   let prev: { key: string; at: number; day: string } | null = startDay
     ? { key: "", at: 0, day: new Date(startDay).toDateString() }
     : null;
   const rows: ReactNode[] = [];
   for (const m of messages) {
-    const key = authorKey(m.author, m);
+    // P-05: a deleted message disappears, unless its thread keeps it as a tombstone.
+    if (m.deletedAt && m.replyCount === 0 && !showTombstones) continue;
+    const key = m.deletedAt ? `deleted:${m.id}` : authorKey(m.author, m);
     const at = new Date(m.createdAt).getTime();
     const day = new Date(m.createdAt).toDateString();
     if (!prev || prev.day !== day)
@@ -480,6 +538,7 @@ export function MessageList({
         showThreadSummary={showThreadSummary}
         meId={me.id}
         readOnly={readOnly}
+        canDeleteAny={canDeleteAny}
       />,
     );
     // A message with a thread breaks the group so the next one shows its author again.

@@ -103,6 +103,8 @@ function ThreadBody({
               onRetry={onRetry}
               showThreadSummary={false}
               readOnly={!!channel.archivedAt}
+              canDeleteAny={channel.viewerCan?.includes("message.delete_any") ?? false}
+              showTombstones
             />
             <div className="flex items-center gap-3 px-4 py-1.5 sm:px-5" data-testid="thread-reply-count">
               <span className="text-muted-foreground text-xs">
@@ -121,6 +123,7 @@ function ThreadBody({
               onRetry={onRetry}
               showThreadSummary={false}
               readOnly={!!channel.archivedAt}
+              canDeleteAny={channel.viewerCan?.includes("message.delete_any") ?? false}
             />
           </>
         ) : null}

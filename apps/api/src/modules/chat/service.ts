@@ -55,7 +55,7 @@ export async function getChannel(tx: Tx, id: string): Promise<ConversationRow | 
 export async function getConversation(
   tx: Tx,
   id: string,
-  kinds: ReadonlyArray<"channel" | "dm">,
+  kinds: ReadonlyArray<"channel" | "dm" | "group">,
 ): Promise<ConversationRow | null> {
   const [row] = await tx
     .select()
@@ -251,7 +251,8 @@ export async function channelFacts(
     visibility: channel.visibility,
     archived: channel.archivedAt !== null,
     viewerRole: membership?.role ?? null,
-    kind: channel.kind === "dm" ? "dm" : "channel",
+    // Group DMs (Phase 4) are direct conversations too: fixed membership, never moderated (D-01, D-06).
+    kind: channel.kind === "dm" || channel.kind === "group" ? "dm" : "channel",
   };
 }
 
@@ -409,7 +410,8 @@ export async function replyParticipantsFor(
       last: sql<string>`max(${messages.createdAt})`,
     })
     .from(messages)
-    .where(inArray(messages.threadId, rootIds))
+    // Deleted replies no longer count as participation (P-05).
+    .where(and(inArray(messages.threadId, rootIds), isNull(messages.deletedAt)))
     .groupBy(messages.threadId, messages.authorKind, messages.authorId);
   const sorted = rows.sort((a, b) => new Date(b.last).getTime() - new Date(a.last).getTime());
   for (const r of sorted) {

@@ -114,7 +114,8 @@ export async function buildMentionEvents(
     await tx
       .select()
       .from(messages)
-      .where(and(threadFilter, ne(messages.id, mention.messageId)))
+      // Deleted text never reaches a model (Pitfall 8): tombstones are not history.
+      .where(and(threadFilter, ne(messages.id, mention.messageId), isNull(messages.deletedAt)))
       .orderBy(desc(messages.createdAt), desc(messages.seq))
       .limit(HISTORY_LIMIT)
   ).reverse();

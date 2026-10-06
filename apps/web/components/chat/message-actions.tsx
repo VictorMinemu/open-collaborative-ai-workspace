@@ -1,8 +1,17 @@
 "use client";
 
 import type { Message } from "@ocw/contracts";
-import { MessageSquareReply, MoreHorizontal, Pencil } from "lucide-react";
+import { MessageSquareReply, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 import { type ReactNode, useState } from "react";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -10,6 +19,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
+import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
@@ -21,9 +31,11 @@ import { cn } from "@/lib/utils";
 export interface MessageActionSet {
   onReply?: (() => void) | undefined;
   onEdit?: (() => void) | undefined;
+  /** Own messages, or anyone's when the channel's `viewerCan` has `message.delete_any` (never in DMs). */
+  onDelete?: (() => void) | undefined;
 }
 
-export const hasMessageActions = (a: MessageActionSet) => !!(a.onReply || a.onEdit);
+export const hasMessageActions = (a: MessageActionSet) => !!(a.onReply || a.onEdit || a.onDelete);
 
 const toolbarButton =
   "inline-flex size-7 items-center justify-center rounded-md text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40 data-[popup-open]:bg-accent data-[popup-open]:text-foreground";
@@ -38,6 +50,21 @@ export function MessageActions({ actions }: { actions: MessageActionSet }) {
       node: (
         <DropdownMenuItem key="edit" onClick={actions.onEdit}>
           <Pencil /> Edit message
+        </DropdownMenuItem>
+      ),
+    });
+  }
+  if (actions.onDelete) {
+    more.push({
+      key: "delete",
+      node: (
+        <DropdownMenuItem
+          key="delete"
+          variant="destructive"
+          onClick={actions.onDelete}
+          data-testid="delete-message"
+        >
+          <Trash2 /> Delete message
         </DropdownMenuItem>
       ),
     });
@@ -171,8 +198,73 @@ export function MessageActionSheet({
               onClick={run(actions.onEdit)}
             />
           ) : null}
+          {actions.onDelete ? (
+            <SheetRow
+              icon={<Trash2 />}
+              label="Delete message"
+              testId="delete-message"
+              onClick={run(actions.onDelete)}
+              destructive
+            />
+          ) : null}
         </div>
       </SheetContent>
     </Sheet>
+  );
+}
+
+/** Confirms a delete with a preview of the message; `moderated` = someone else's message (admin). */
+export function DeleteMessageDialog({
+  message,
+  moderated,
+  open,
+  onOpenChange,
+  onConfirm,
+}: {
+  message: Message;
+  moderated: boolean;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const preview = message.body.trim();
+  return (
+    <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
+      <DialogContent data-testid="confirm-delete">
+        <DialogHeader>
+          <DialogTitle>Delete message?</DialogTitle>
+          <DialogDescription>
+            {moderated
+              ? `This removes ${message.author?.displayName ?? "this person"}'s message for everyone. The deletion is recorded in the audit log.`
+              : "This removes the message for everyone in the conversation. It can't be undone."}
+          </DialogDescription>
+        </DialogHeader>
+        <blockquote className="line-clamp-4 whitespace-pre-wrap break-words rounded-lg border bg-muted/40 px-3.5 py-2.5 text-[14px] text-foreground/90">
+          {preview || "Attachment"}
+        </blockquote>
+        <DialogFooter>
+          <Button variant="outline" disabled={busy} onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button
+            variant="destructive"
+            disabled={busy}
+            data-testid="confirm-delete-submit"
+            onClick={async () => {
+              setBusy(true);
+              try {
+                await onConfirm();
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            {busy ? <Spinner /> : <Trash2 />}
+            Delete
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

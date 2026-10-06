@@ -289,3 +289,199 @@ describe("cross-tenant", () => {
     expect(leaked.rows[0].n).toBe(0);
   });
 });
+
+const del = (as: TestClient, id: string) => as.request("DELETE", `/api/v1/messages/${id}`);
+
+describe("DELETE /messages/:id (tombstones, D-01)", () => {
+  it("the author deletes: tombstone row, a delete version, message.deleted and an audit row without the body", async () => {
+    const msg = await post(alex, channelId, "ping @victor about the secret roadmap");
+    // Reactions and pins of the message go with it; its attachments are marked deleted.
+    await su.query(
+      "insert into app.message_reactions (organization_id, message_id, conversation_id, emoji, member_kind, member_id) values ($1, $2, $3, '👍', 'user', $4)",
+      [orgId, msg.id, channelId, adminId],
+    );
+    await su.query(
+      "insert into app.message_pins (organization_id, conversation_id, message_id, pinned_by) values ($1, $2, $3, $4)",
+      [orgId, channelId, msg.id, adminId],
+    );
+    await su.query(
+      "insert into app.attachments (organization_id, conversation_id, message_id, uploader_id, filename, declared_type, size_bytes, status) values ($1, $2, $3, $4, 'r.pdf', 'application/pdf', 10, 'ready')",
+      [orgId, channelId, msg.id, alexId],
+    );
+
+    expect(await ok(del(alex, msg.id))).toEqual({ ok: true });
+
+    const row = (await su.query("select * from app.messages where id = $1", [msg.id])).rows[0];
+    expect(row).toMatchObject({ body: "", mentions: [], deleted_by: alexId });
+    expect(row.deleted_at).toBeInstanceOf(Date);
+    const versions = await versionsOf(msg.id);
+    expect(versions).toHaveLength(1);
+    expect(versions[0]).toMatchObject({
+      version: 1,
+      kind: "delete",
+      body: "ping @victor about the secret roadmap",
+    });
+
+    const ev = await lastEvent(channelId, "message.deleted");
+    expect(ev).toMatchObject({ messageId: msg.id, conversationId: channelId, threadId: null, replyCount: 0 });
+    expect(ev?.deletedAt).toEqual(expect.any(String));
+    expect(await lastEvent(channelId, "pin.updated")).toMatchObject({ messageId: msg.id, pinned: false });
+
+    const rows = (await audit("message.deleted")).filter((r) => r.resource_id === msg.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].metadata).toEqual({
+      messageId: msg.id,
+      conversationId: channelId,
+      version: 1,
+      moderated: false,
+    });
+    expect(keysDeep(rows[0].metadata)).not.toContain("body");
+
+    expect(
+      (await su.query("select count(*)::int as n from app.message_reactions where message_id = $1", [msg.id]))
+        .rows[0].n,
+    ).toBe(0);
+    expect(
+      (await su.query("select count(*)::int as n from app.message_pins where message_id = $1", [msg.id]))
+        .rows[0].n,
+    ).toBe(0);
+    const att = (
+      await su.query("select status, deleted_at from app.attachments where message_id = $1", [msg.id])
+    ).rows[0];
+    expect(att.status).toBe("deleted");
+    expect(att.deleted_at).toBeInstanceOf(Date);
+
+    // The snapshot keeps a tombstone (the client hides it or shows "This message was deleted.").
+    const page = await ok(admin.request("GET", `/api/v1/conversations/${channelId}/messages`));
+    const tomb = page.messages.find((m: Json) => m.id === msg.id);
+    expect(tomb).toMatchObject({ body: "", mentions: [] });
+    expect(tomb.deletedAt).toEqual(expect.any(String));
+
+    // A deleted message can be neither edited nor deleted again.
+    const edited = await edit(alex, msg.id, "resurrect");
+    expect(edited.status).toBe(409);
+    expect(errorOf(edited).code).toBe("message_deleted");
+    expect((await del(alex, msg.id)).status).toBe(409);
+  });
+
+  it("an admin deletes someone else's message in a public channel (moderated), even without joining", async () => {
+    const lobby = (await ok(alex.request("POST", "/api/v1/channels", { name: "lobby-del" }))).id;
+    const msg = await post(alex, lobby, "spam spam spam");
+    expect(await ok(del(admin, msg.id))).toEqual({ ok: true });
+    const rows = (await audit("message.deleted")).filter((r) => r.resource_id === msg.id);
+    expect(rows[0].metadata).toEqual({
+      messageId: msg.id,
+      conversationId: lobby,
+      version: 1,
+      moderated: true,
+    });
+    expect(rows[0].actor_id).toBe(adminId);
+  });
+
+  it("a developer deleting someone else's message gets 403 message.delete_any; nothing changes", async () => {
+    const msg = await post(admin, channelId, "admin words");
+    const r = await del(alex, msg.id);
+    expect(r.status).toBe(403);
+    expect(errorOf(r).details).toMatchObject({ permission: "message.delete_any" });
+    expect(
+      (await su.query("select body, deleted_at from app.messages where id = $1", [msg.id])).rows[0],
+    ).toEqual({
+      body: "admin words",
+      deleted_at: null,
+    });
+  });
+
+  it("an admin who is not in a private channel gets 404", async () => {
+    const hidden = (
+      await ok(alex.request("POST", "/api/v1/channels", { name: "alex-only", visibility: "private" }))
+    ).id;
+    const msg = await post(alex, hidden, "between me and me");
+    const r = await del(admin, msg.id);
+    expect(r.status).toBe(404);
+    expect(errorOf(r).details).toBeUndefined();
+  });
+
+  it("in a bot DM the participant admin may delete their own message but never the bot's (direct_conversation)", async () => {
+    const dm = randomUUID();
+    await su.query(
+      "insert into app.conversations (id, organization_id, kind, visibility, dm_key, created_by) values ($1, $2, 'dm', 'private', $3, $4)",
+      [dm, orgId, `agent:${archieId}|user:${adminId}`, adminId],
+    );
+    await su.query(
+      `insert into app.conversation_members (conversation_id, organization_id, member_kind, member_id, role)
+       values ($1, $2, 'user', $3, 'owner'), ($1, $2, 'agent', $4, 'member')`,
+      [dm, orgId, adminId, archieId],
+    );
+    const mine = await post(admin, dm, "hello bot");
+    const reply = await stack.built.core.chatAgent.postAgentMessage(
+      { organizationId: orgId, userId: null },
+      {
+        agentId: archieId,
+        conversationId: dm,
+        threadRootId: null,
+        body: "hello human",
+        idempotencyKey: "dm-del-1",
+      },
+    );
+    const r = await del(admin, reply.messageId);
+    expect(r.status).toBe(403);
+    expect(errorOf(r).details).toMatchObject({
+      permission: "message.delete_any",
+      reason: "direct_conversation",
+    });
+    expect(await ok(del(admin, mine.id))).toEqual({ ok: true });
+    // Nobody else even learns the DM exists.
+    expect((await del(alex, reply.messageId)).status).toBe(404);
+  });
+
+  it("deleting a thread root keeps its thread; a deleted reply leaves the thread and the reply count", async () => {
+    const root = await post(admin, channelId, "root to delete");
+    const r1 = await post(alex, channelId, "reply one", { threadRootId: root.id });
+    await post(alex, channelId, "reply two", { threadRootId: root.id });
+    expect(await ok(del(admin, root.id))).toEqual({ ok: true });
+    expect(await lastEvent(channelId, "message.deleted")).toMatchObject({
+      messageId: root.id,
+      replyCount: 2,
+    });
+    const thread = await ok(alex.request("GET", `/api/v1/messages/${root.id}/thread`));
+    expect(thread.root).toMatchObject({ id: root.id, body: "", replyCount: 2 });
+    expect(thread.root.deletedAt).toEqual(expect.any(String));
+    expect(thread.replies.map((m: Json) => m.body)).toEqual(["reply one", "reply two"]);
+
+    expect(await ok(del(alex, r1.id))).toEqual({ ok: true });
+    expect(await lastEvent(channelId, "message.deleted")).toMatchObject({
+      messageId: r1.id,
+      threadId: root.id,
+      replyCount: 0,
+    });
+    expect(await lastEvent(channelId, "thread.updated")).toMatchObject({ rootId: root.id, replyCount: 1 });
+    const after = await ok(alex.request("GET", `/api/v1/messages/${root.id}/thread`));
+    expect(after.root.replyCount).toBe(1);
+  });
+
+  it("bots never see deleted text: thread context and the delivered history skip deleted messages", async () => {
+    const root = await post(admin, channelId, "release plan");
+    const secret = await post(alex, channelId, "TOP-SECRET-PASSWORD 1234", { threadRootId: root.id });
+    await post(alex, channelId, "a normal reply", { threadRootId: root.id });
+    await ok(del(alex, secret.id));
+
+    const ctx = await stack.built.core.chatAgent.getThreadContext(
+      { organizationId: orgId, userId: null },
+      channelId,
+      root.id,
+      50,
+    );
+    expect(ctx.history.map((h) => h.body)).toEqual(["release plan", "a normal reply"]);
+
+    const ask = await post(admin, channelId, "@archie summarize this thread", { threadRootId: root.id });
+    const delivered = await su.query(
+      "select payload from app.stream_events where stream_id = $1 and type = 'agent.mention.v1' order by seq desc limit 1",
+      [`cell:${orgId}`],
+    );
+    const payload = delivered.rows[0]?.payload as Json | undefined;
+    expect(payload?.message?.id).toBe(ask.id);
+    const bodies = (payload?.threadHistory ?? []).map((h: Json) => h.body ?? h.text ?? "");
+    expect(bodies.length).toBeGreaterThan(0);
+    expect(JSON.stringify(payload)).not.toContain("TOP-SECRET-PASSWORD");
+  });
+});
