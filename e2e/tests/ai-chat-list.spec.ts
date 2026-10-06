@@ -1,6 +1,7 @@
 import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
 import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import { chatIdOf, lastAssistant, openNewAiChat, seedPlan, sendAi } from "../support/ai-chat";
+import { ALEX } from "../support/chat";
 import { ADMIN, shot } from "./env";
 
 /**
@@ -232,4 +233,78 @@ test("/chat/ai groups the member's chats and lets them rename and archive", asyn
   await shot(page, `ai-chat-renamed-${w}`);
 
   await context.close();
+});
+
+/** A lowercase token unique to this run (letters only: titles and the full-text index keep it whole). */
+const uniqueWord = () =>
+  `zq${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`.replace(/[0-9]/g, (d) =>
+    String.fromCharCode(97 + Number(d)),
+  );
+
+async function openPalette(page: Page, project: string) {
+  if (project === "mobile") await page.getByTestId("open-search").click();
+  else await page.keyboard.press("ControlOrMeta+K");
+  const palette = page.getByTestId("search-palette");
+  await expect(palette).toBeVisible();
+  await expect(palette.getByTestId("search-input")).toBeFocused();
+  return palette;
+}
+
+test("search finds the member's own AI chats by title and text, and nobody else's", async ({
+  browser,
+}, info) => {
+  const project = info.project.name;
+  const w = widthOf(project);
+  const word = uniqueWord();
+  const chat = await apiChat(`Plan the ${word} tasting menu`);
+  expect(chat.title).toBe(`Plan the ${word}`);
+
+  const { context, page } = await openAs(browser, SAM, project);
+  let palette = await openPalette(page, project);
+  await palette.getByTestId("search-input").pressSequentially(word, { delay: 30 });
+  const entry = palette.locator(`[data-kind="ai_chat"][data-chat-id="${chat.id}"]`);
+  await expect(entry).toBeVisible();
+  await expect(entry).toContainText(chat.title);
+  await expect(entry).toContainText("Your AI chat · GPT-6 Astra");
+  await expect(palette.getByRole("group", { name: "AI chats" })).toBeVisible();
+  // The chat's messages are hits too, labelled with the chat title; the answer is by the model.
+  const hits = palette.locator('[data-kind="message"]').filter({ hasText: word });
+  await expect(hits.first()).toBeVisible();
+  await expect(hits.first()).toContainText(chat.title);
+  await expect(
+    palette.locator('[data-kind="message"]').filter({ hasText: "GPT-6 Astra" }).first(),
+  ).toBeVisible();
+  await bothThemes(page, `search-ai-chats-${w}`);
+  await entry.click();
+  await expect(page).toHaveURL(new RegExp(`/chat/ai/${chat.id}$`));
+  await expect(page.getByTestId("ai-chat-title")).toHaveText(chat.title);
+
+  // A message hit opens the chat too.
+  palette = await openPalette(page, project);
+  await palette.getByTestId("search-input").pressSequentially(`${word} tasting`, { delay: 30 });
+  await palette.locator('[data-kind="message"]').filter({ hasText: word }).first().click();
+  await expect(page).toHaveURL(new RegExp(`/chat/ai/${chat.id}$`));
+
+  // The results page lists the hits under the chat's title, linking to the chat.
+  await page.goto(`${BASE_URL}/search?q=${word}`);
+  const group = page.locator('[data-testid="search-page-group"][data-kind="ai_chat"]').first();
+  await expect(group).toContainText(chat.title);
+  await expect(group).toContainText("AI chat");
+  await expect(group.getByTestId("search-page-hit").first()).toHaveAttribute("href", `/chat/ai/${chat.id}`);
+  await shot(page, `search-ai-chats-results-${w}`);
+  await context.close();
+
+  // Alex searching the same word sees nothing of Sam's chat.
+  const admin = await apiAs(ADMIN);
+  await ensureMember(admin, ALEX, "developer");
+  await admin.dispose();
+  const alex = await openAs(browser, ALEX, project);
+  const theirs = await openPalette(alex.page, project);
+  await theirs.getByTestId("search-input").pressSequentially(word, { delay: 30 });
+  await expect(theirs.getByTestId("search-empty")).toBeVisible();
+  await expect(theirs.locator('[data-kind="ai_chat"]')).toHaveCount(0);
+  await expect(theirs).not.toContainText(chat.title);
+  await alex.page.goto(`${BASE_URL}/search?q=${word}`);
+  await expect(alex.page.getByTestId("search-results-empty")).toBeVisible();
+  await alex.context.close();
 });
