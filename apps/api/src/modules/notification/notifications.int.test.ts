@@ -508,3 +508,77 @@ describe("@channel and @here (CHAT-08, Pitfall 6, P-11)", () => {
     expect((await rowsFor(alexId, m.id)).map((r) => r.kind)).toEqual(["channel"]);
   });
 });
+
+describe("edits and lost access (Pitfalls 8 and 9, P-05)", () => {
+  it("an edit notifies only the members it newly mentions", async () => {
+    const ch = await channel(`edits-${randomUUID().slice(0, 6)}`, "public", [sam, alex]);
+    const m = await post(ada, ch, "hi");
+    expect(await rowsFor(samId, m.id)).toEqual([]);
+    await ok(ada.request("PATCH", `/api/v1/messages/${m.id}`, { body: "hi @sam" }));
+    expect((await rowsFor(samId, m.id)).map((r) => r.kind)).toEqual(["mention"]);
+    const samEvents = async () =>
+      (await events(samId, "notification.created")).filter((e) => e.notification.messageId === m.id);
+    expect(await samEvents()).toHaveLength(1);
+    expect((await samEvents())[0]?.notification.snippet).toBe("hi @sam");
+
+    await ok(ada.request("PATCH", `/api/v1/messages/${m.id}`, { body: "hi @sam @alex" }));
+    expect((await rowsFor(samId, m.id)).map((r) => r.kind)).toEqual(["mention"]);
+    expect(await samEvents()).toHaveLength(1);
+    expect((await rowsFor(alexId, m.id)).map((r) => r.kind)).toEqual(["mention"]);
+    // The snippet is computed from the current body.
+    const item = (await inbox(sam)).items.find((n: Json) => n.messageId === m.id);
+    expect(item?.snippet).toBe("hi @sam @alex");
+  });
+
+  it("an edit never notifies @channel or @here", async () => {
+    const ch = await channel(`edit-all-${randomUUID().slice(0, 6)}`, "public", [sam, alex]);
+    const m = await post(ada, ch, "deploy at noon");
+    await ok(ada.request("PATCH", `/api/v1/messages/${m.id}`, { body: "@channel deploy at noon" }));
+    await ok(ada.request("PATCH", `/api/v1/messages/${m.id}`, { body: "@here deploy at noon" }));
+    const n = (
+      await su.query("select count(*)::int as n from app.notifications where message_id = $1", [m.id])
+    ).rows[0].n;
+    expect(n).toBe(0);
+  });
+
+  it("losing access to a private channel hides its notifications (and the count); regaining it shows them again", async () => {
+    const secret = await channel(`secret-${randomUUID().slice(0, 6)}`, "private");
+    await ok(ada.request("POST", `/api/v1/channels/${secret}/members`, { kind: "user", id: samId }));
+    await ok(sam.request("POST", "/api/v1/notifications/read", { all: true }));
+    const m = await post(ada, secret, "@sam the board deck is ready");
+    const before = await inbox(sam);
+    expect(before.items.some((n: Json) => n.messageId === m.id)).toBe(true);
+    expect(before.unreadCount).toBe(1);
+
+    await ok(ada.request("DELETE", `/api/v1/channels/${secret}/members/user/${samId}`));
+    const after = await inbox(sam);
+    expect(after.items.some((n: Json) => n.messageId === m.id)).toBe(false);
+    expect(JSON.stringify(after)).not.toContain("board deck");
+    expect(after.unreadCount).toBe(0);
+    expect((await inbox(sam, "?filter=mentions")).unreadCount).toBe(0);
+    // The row itself is kept (ids only); only what Sam may read is listed.
+    expect(await rowsFor(samId, m.id)).toHaveLength(1);
+
+    await ok(ada.request("POST", `/api/v1/channels/${secret}/members`, { kind: "user", id: samId }));
+    const again = await inbox(sam);
+    expect(again.items.some((n: Json) => n.messageId === m.id)).toBe(true);
+    expect(again.unreadCount).toBe(1);
+  });
+
+  it("a removed member is no longer notified", async () => {
+    const secret = await channel(`gone-${randomUUID().slice(0, 6)}`, "private");
+    await ok(ada.request("POST", `/api/v1/channels/${secret}/members`, { kind: "user", id: alexId }));
+    await ok(ada.request("DELETE", `/api/v1/channels/${secret}/members/user/${alexId}`));
+    const m = await post(ada, secret, "@alex are you still here?");
+    expect(await rowsFor(alexId, m.id)).toEqual([]);
+  });
+
+  it("a deleted message's notification is no longer listed", async () => {
+    const m = await post(ada, generalId, "@sam temporary note");
+    expect((await inbox(sam)).items.some((n: Json) => n.messageId === m.id)).toBe(true);
+    await ok(ada.request("DELETE", `/api/v1/messages/${m.id}`));
+    const list = await inbox(sam);
+    expect(list.items.some((n: Json) => n.messageId === m.id)).toBe(false);
+    expect(JSON.stringify(list)).not.toContain("temporary note");
+  });
+});
