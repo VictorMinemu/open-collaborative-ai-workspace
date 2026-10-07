@@ -301,3 +301,222 @@ test("@deploy's card appears in a channel and goes from Running to Succeeded in 
     await alexApi.dispose();
   }
 });
+
+declare global {
+  interface Window {
+    __notes?: Array<{ title: string; body: string; tag: string }>;
+  }
+}
+
+/** Records the OS pop-ups the app asks for (as notification-prefs.spec): `window.Notification` → `window.__notes`. */
+function installRecorder() {
+  window.__notes = [];
+  class RecordingNotification {
+    static get permission(): NotificationPermission {
+      return "granted";
+    }
+    static async requestPermission(): Promise<NotificationPermission> {
+      return "granted";
+    }
+    onclick: (() => void) | null = null;
+    constructor(title: string, opts?: NotificationOptions) {
+      window.__notes?.push({ title, body: opts?.body ?? "", tag: opts?.tag ?? "" });
+    }
+    close() {}
+  }
+  Object.defineProperty(window, "Notification", {
+    value: RecordingNotification,
+    configurable: true,
+    writable: true,
+  });
+}
+
+test("Alex follows a card and is notified when it fails; Sam approves after confirming and everyone sees it; a view-only grantee is never offered Approve", async ({
+  browser,
+}, info) => {
+  test.setTimeout(240_000);
+  const project = info.project.name;
+  const mobile = project === "mobile";
+  const w = widthOf(project);
+  const victorApi = await apiAs(VICTOR);
+  const alexApi = await apiAs(ALEX);
+  const samApi = await apiAs(SAM);
+  const channel = await freshChannel(victorApi, [alexApi, samApi], "release");
+  await addBot(victorApi, channel.id, deployId);
+
+  const v = await openAs(browser, VICTOR, project);
+  const a = await openAs(browser, ALEX, project);
+  const s = await openAs(browser, SAM, project);
+  await a.context.addInitScript(installRecorder);
+  try {
+    await openChannel(
+      [
+        { page: v.page, userId: victorId },
+        { page: a.page, userId: alexId },
+        { page: s.page, userId: samId },
+      ],
+      channel.id,
+    );
+
+    // ---- Alex follows a running deploy; when @deploy marks it failed only Alex is notified
+    const deploy = await plugin.postCard({
+      agentId: deployId,
+      conversationId: channel.id,
+      threadRootId: null,
+      idempotencyKey: `e2e-card-${randomUUID()}`,
+      card: deployCard(),
+    });
+    const alexCard = cardIn(messageRow(a.page, deploy.messageId));
+    const follow = alexCard.getByTestId("agent-card-follow");
+    await expect(follow).toHaveText("Follow", { timeout: 10_000 });
+    await expect(follow).toHaveAttribute("aria-pressed", "false");
+    await follow.click();
+    await expect(follow).toHaveText("Following");
+    await expect(follow).toHaveAttribute("aria-pressed", "true");
+    // The server holds it (a fresh read says so), Víctor does not follow.
+    const alexRead = (await (await alexApi.get(`/api/v1/cards/${deploy.messageId}`)).json()) as {
+      following: boolean;
+    };
+    expect(alexRead.following).toBe(true);
+    await expect(cardIn(messageRow(v.page, deploy.messageId)).getByTestId("agent-card-follow")).toHaveText(
+      "Follow",
+    );
+
+    // Alex reads his inbox (another page, so the pop-up is not suppressed for the open conversation).
+    await a.page.goto(`${BASE_URL}/chat/mentions`);
+    await a.page.getByTestId("inbox-filter-all").click();
+    await plugin.patchCard(deploy.messageId, {
+      agentId: deployId,
+      patch: {
+        expectedVersion: 1,
+        status: "failed",
+        summary: "Deploy api v2.3 failed: health check timed out",
+      },
+    });
+    const item = a.page.locator(`[data-testid="inbox-item"][data-message-id="${deploy.messageId}"]`);
+    await expect(item).toBeVisible({ timeout: 10_000 });
+    await expect(item).toHaveAttribute("data-kind", "card_updated");
+    await expect(item.getByTestId("inbox-actor")).toHaveText(BOT_NAME);
+    await expect(item).toContainText("updated a card you follow");
+    await expect(item.getByTestId("inbox-snippet")).toContainText("Deploy api v2.3 failed");
+    if (!mobile) {
+      // The desktop project also gets the OS pop-up (the server decided popup; Alex is not looking at the channel).
+      await expect
+        .poll(
+          async () =>
+            (await a.page.evaluate(() => window.__notes ?? [])).some(
+              (n) =>
+                n.title.startsWith(`${BOT_NAME} in `) &&
+                n.body === "Deploy api v2.3 failed: health check timed out",
+            ),
+          { timeout: 10_000 },
+        )
+        .toBe(true);
+    }
+    await shot(a.page, `agent-card-followed-inbox-${w}`);
+    const victorNotes = (await (await victorApi.get("/api/v1/notifications?filter=all")).json()) as {
+      items: Array<{ messageId: string }>;
+    };
+    expect(victorNotes.items.some((n) => n.messageId === deploy.messageId)).toBe(false);
+    await expect(
+      cardIn(messageRow(v.page, deploy.messageId)).getByRole("status", { name: "Status: Failed" }),
+    ).toBeVisible();
+
+    // ---- an approval card: Sam approves after a confirmation that names it; every page shows the decision
+    await openChannel(
+      [
+        { page: a.page, userId: alexId },
+        { page: v.page, userId: victorId },
+      ],
+      channel.id,
+    );
+    const approval = await plugin.postCard({
+      agentId: deployId,
+      conversationId: channel.id,
+      threadRootId: null,
+      idempotencyKey: `e2e-card-${randomUUID()}`,
+      card: approvalCard(),
+    });
+    const samCard = cardIn(messageRow(s.page, approval.messageId));
+    await expect(samCard.getByTestId("agent-card-approve")).toHaveText("Approve", { timeout: 10_000 });
+    await expect(samCard.getByTestId("agent-card-deny")).toHaveText("Deny");
+    await expect(samCard.getByRole("status", { name: "Status: Pending" })).toBeVisible();
+    await samCard.getByTestId("agent-card-approve").click();
+    const confirm = s.page.getByTestId("agent-card-confirm");
+    await expect(confirm).toBeVisible();
+    await expect(confirm.getByRole("heading")).toHaveText("Approve “Deploy api v2.3”?");
+    // Nothing is decided until Sam confirms.
+    await expect(
+      cardIn(messageRow(v.page, approval.messageId)).getByTestId("agent-card-decision"),
+    ).toHaveCount(0);
+    await shot(s.page, `agent-card-approve-confirm-${w}`);
+    await confirm.getByTestId("agent-card-confirm-submit").click();
+    await expect(confirm).toBeHidden();
+    for (const p of [s.page, v.page, a.page]) {
+      const card = cardIn(messageRow(p, approval.messageId));
+      await expect(card.getByTestId("agent-card-decision")).toHaveText(/Approved by Sam Lee/, {
+        timeout: 5_000,
+      });
+      await expect(card.getByTestId("agent-card-approve")).toHaveCount(0);
+      await expect(card.getByTestId("agent-card-deny")).toHaveCount(0);
+    }
+    await bothThemes(s.page, `agent-card-approved-${w}`);
+
+    // The agent hears about it once, as Sam.
+    const ev = await plugin.waitFor(
+      (e) =>
+        e.type === "agent.card_action.v1" &&
+        (e.data as { cardAction?: { messageId?: string } }).cardAction?.messageId === approval.messageId,
+    );
+    expect((ev.data as unknown as { cardAction: { outcome: string } }).cardAction.outcome).toBe("approved");
+    expect((ev.data as unknown as { message: { text: string } }).message.text).toBe(
+      "Sam Lee approved “Deploy api v2.3”",
+    );
+
+    // Víctor has no buttons left; a forced decision is refused (one decision per card).
+    const forced = await victorApi.post(`/api/v1/cards/${approval.messageId}/decision`, {
+      data: { outcome: "denied" },
+    });
+    expect(forced.status()).toBe(409);
+    expect(((await forced.json()) as { error: { code: string } }).error.code).toBe("card_already_decided");
+
+    // ---- Open leads inside the app only (Work Zone)
+    const open = cardIn(messageRow(v.page, approval.messageId)).getByTestId("agent-card-open");
+    await expect(open).toHaveAttribute("href", "/work-zone");
+    await open.click();
+    await expect(v.page).toHaveURL(/\/work-zone(?:[/?#]|$)/);
+
+    // ---- in an AI chat: Alex ("Can chat") is offered Approve; Sam ("Can view") never is, and the API refuses him
+    const chatId = await aiChatWithDeploy(victorApi, deployId, { alexId, samId });
+    for (const p of [a.page, s.page]) {
+      await p.goto(`${BASE_URL}/chat/ai/${chatId}`);
+      await expect(p.locator('[data-testid="ai-message"]').first()).toBeVisible();
+    }
+    const inChat = await plugin.postCard({
+      agentId: deployId,
+      conversationId: chatId,
+      threadRootId: null,
+      idempotencyKey: `e2e-card-${randomUUID()}`,
+      card: approvalCard(),
+    });
+    const alexAi = cardIn(aiRow(a.page, inChat.messageId));
+    const samAi = cardIn(aiRow(s.page, inChat.messageId));
+    await expect(alexAi.getByTestId("agent-card-approve")).toBeVisible({ timeout: 10_000 });
+    await expect(samAi.getByTestId("agent-card-follow")).toBeVisible({ timeout: 10_000 });
+    await expect(samAi.getByTestId("agent-card-approve")).toHaveCount(0);
+    await expect(samAi.getByTestId("agent-card-deny")).toHaveCount(0);
+    await shot(s.page, `agent-card-view-only-${w}`);
+    const refused = await samApi.post(`/api/v1/cards/${inChat.messageId}/decision`, {
+      data: { outcome: "approved" },
+    });
+    expect(refused.status()).toBe(403);
+    expect(((await refused.json()) as { error: { code: string } }).error.code).toBe("ai_chat_view_only");
+  } finally {
+    await v.context.close();
+    await a.context.close();
+    await s.context.close();
+    await victorApi.dispose();
+    await alexApi.dispose();
+    await samApi.dispose();
+  }
+});
