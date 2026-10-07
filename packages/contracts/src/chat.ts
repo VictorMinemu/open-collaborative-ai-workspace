@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { AgentScope, AgentStatus } from "./agent";
-import { AiGeneration } from "./ai-generation";
+import { AgentCard } from "./agent-cards";
+import { AiAddressing, AiGeneration } from "./ai-generation";
 import { Attachment, MAX_ATTACHMENTS_PER_MESSAGE } from "./attachments";
 import { ClientKind, Id, IsoDateTime, isReservedHandle, MemberKind, PrincipalKind } from "./common";
 import { Permission, UnitKind } from "./permissions";
@@ -120,6 +121,10 @@ export const Message = z.object({
   saved: z.boolean().optional(),
   /** Assistant turns of AI chats only (Phase 5, P-13): the generation that produced this answer. */
   generation: AiGeneration.optional(),
+  /** Human messages of AI chats (Phase 6, P-08): whether the message asks the model and where that stands. */
+  aiAddressing: AiAddressing.optional(),
+  /** Agent Card messages (Phase 6, P-11): the typed card; `body` stays its plain-text summary. */
+  card: AgentCard.optional(),
 });
 export type Message = z.infer<typeof Message>;
 

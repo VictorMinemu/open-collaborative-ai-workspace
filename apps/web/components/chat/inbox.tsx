@@ -35,6 +35,8 @@ const KIND_LABEL: Record<Notification["kind"], string> = {
   dm: "sent you a message",
   group_dm: "wrote in a group",
   thread_reply: "replied in a thread",
+  ai_chat_shared: "shared an AI chat with you",
+  card_updated: "updated a card you follow",
 };
 
 const FILTERS: Array<{ id: NotificationFilter; label: string }> = [

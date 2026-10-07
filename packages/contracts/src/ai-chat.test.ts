@@ -1,27 +1,34 @@
 import { describe, expect, it } from "vitest";
 import {
+  AI_QUEUE_MAX,
+  AiChatListQuery,
   AiChatPolicy,
   AiChatShare,
   AiChatSnapshot,
   AiChatSummary,
   type AiDeltaEvent,
+  AiGrantSubject,
   AiModelList,
   AiMyUsageReportQuery,
+  AiPostedMessageResponse,
+  AiQueueState,
   AiUsageReport,
   AiUsageReportQuery,
   AiUsageToday,
   applyAiDelta,
   CHATGPT_MANAGE_USAGE_URL,
   ChatgptPlanStatus,
+  CreateAiChatGrantRequest,
   CreateAiChatRequest,
   DEFAULT_AI_CHAT_POLICY,
+  ModelUnavailableReason,
   SendAiMessageRequest,
   stitchAiSnapshot,
   UpdateAiChatPolicyRequest,
   UpdateAiChatRequest,
   UpdateAiUserPreferencesRequest,
 } from "./ai-chat";
-import { AiGeneration, ModelRef, modelRefKey } from "./ai-generation";
+import { AiAddressingStatus, AiGeneration, AiSkipReason, ModelRef, modelRefKey } from "./ai-generation";
 import { Message } from "./chat";
 
 const id = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
@@ -354,5 +361,127 @@ describe("usage report queries (05-09)", () => {
   it("a member's own report groups by model only", () => {
     expect(AiMyUsageReportQuery.parse({})).toEqual({ days: 30, groupBy: "model" });
     expect(AiMyUsageReportQuery.safeParse({ groupBy: "user" }).success).toBe(false);
+  });
+});
+
+describe("Phase 6 multiplayer AI chat contracts (06-01)", () => {
+  const other = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e62";
+  const phase5Summary = {
+    id,
+    title: "New chat",
+    titleSource: "heuristic",
+    lastModel: orgRef,
+    lastModelLabel: "Claude Sonnet 5.5",
+    archived: false,
+    generating: false,
+    createdAt: now,
+    lastActivityAt: now,
+  } as const;
+
+  it("AiGeneration parses with and without requesterUserId", () => {
+    expect(AiGeneration.parse(generation).requesterUserId).toBeUndefined();
+    expect(AiGeneration.parse({ ...generation, requesterUserId: other }).requesterUserId).toBe(other);
+    expect(AiGeneration.safeParse({ ...generation, requesterUserId: "nope" }).success).toBe(false);
+  });
+
+  it("AiGrantSubject names a user, a unit or the organization, nothing else", () => {
+    expect(AiGrantSubject.parse({ kind: "user", id })).toEqual({ kind: "user", id });
+    expect(AiGrantSubject.parse({ kind: "unit", id })).toEqual({ kind: "unit", id });
+    expect(AiGrantSubject.parse({ kind: "org" })).toEqual({ kind: "org" });
+    for (const bad of [{ kind: "org", id }, { kind: "user" }, { kind: "team", id }]) {
+      expect(AiGrantSubject.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it("CreateAiChatGrantRequest defaults the level to chat", () => {
+    expect(CreateAiChatGrantRequest.parse({ subject: { kind: "user", id } })).toEqual({
+      subject: { kind: "user", id },
+      level: "chat",
+    });
+    expect(CreateAiChatGrantRequest.parse({ subject: { kind: "org" }, level: "view" }).level).toBe("view");
+    expect(CreateAiChatGrantRequest.safeParse({ subject: { kind: "org" }, level: "owner" }).success).toBe(
+      false,
+    );
+  });
+
+  it("AiChatListQuery defaults the scope to mine and rejects unknown scopes", () => {
+    expect(AiChatListQuery.parse({}).scope).toBe("mine");
+    expect(AiChatListQuery.parse({ scope: "shared" }).scope).toBe("shared");
+    expect(AiChatListQuery.safeParse({ scope: "everyone" }).success).toBe(false);
+  });
+
+  it("SendAiMessageRequest accepts askAi and up to 50 mentions", () => {
+    const base = { clientMessageId: "client-0001", body: "Hi @sam", model: orgRef };
+    const mentions = (n: number) => Array.from({ length: n }, () => ({ kind: "user" as const, id }));
+    const ok = SendAiMessageRequest.parse({ ...base, askAi: false, mentions: mentions(50) });
+    expect(ok.askAi).toBe(false);
+    expect(ok.mentions).toHaveLength(50);
+    expect(SendAiMessageRequest.parse(base).askAi).toBeUndefined();
+    expect(SendAiMessageRequest.safeParse({ ...base, mentions: mentions(51) }).success).toBe(false);
+    expect(CreateAiChatRequest.parse({ ...base, askAi: true }).askAi).toBe(true);
+    // The refines are kept: an empty message is still refused.
+    expect(SendAiMessageRequest.safeParse({ ...base, body: "", askAi: true }).success).toBe(false);
+  });
+
+  it("Phase 5 summaries and snapshots (no new fields) still parse; the new optional fields parse", () => {
+    expect(AiChatSummary.parse(phase5Summary)).toEqual(phase5Summary);
+    const detail = {
+      ...phase5Summary,
+      settings: { instructions: "", usePersonalInstructions: true, tools: { web: false } },
+      tools: [{ key: "web", label: "Web search", enabled: false, available: true, reason: null }],
+      viewerCan: ["ai_chat.use"],
+    };
+    const snapshot = { chat: detail, messages: [message], hasMore: false, running: null, lastSeq: 3 };
+    expect(AiChatSnapshot.parse(snapshot).queue).toBeUndefined();
+    const shared = AiChatSummary.parse({
+      ...phase5Summary,
+      access: "chat",
+      owner: { kind: "user", id: other, displayName: "Ana" },
+      shared: true,
+      unreadCount: 3,
+    });
+    expect(shared.access).toBe("chat");
+    expect(AiChatSummary.safeParse({ ...phase5Summary, unreadCount: 101 }).success).toBe(false);
+    const queue = { running: null, pending: [{ messageId: msgA, authorId: other }] };
+    expect(AiChatSnapshot.parse({ ...snapshot, queue }).queue).toEqual(queue);
+  });
+
+  it("AiQueueState holds at most AI_QUEUE_MAX pending messages", () => {
+    const pending = (n: number) => Array.from({ length: n }, () => ({ messageId: msgA, authorId: other }));
+    expect(AI_QUEUE_MAX).toBe(10);
+    expect(AiQueueState.safeParse({ running: null, pending: pending(10) }).success).toBe(true);
+    expect(AiQueueState.safeParse({ running: null, pending: pending(11) }).success).toBe(false);
+    expect(
+      AiQueueState.parse({
+        running: { generationId: id, requesterUserId: other, respondingTo: [msgA, msgB] },
+        pending: [],
+      }).running?.respondingTo,
+    ).toEqual([msgA, msgB]);
+  });
+
+  it("AiPostedMessageResponse parses with every addressing status", () => {
+    for (const status of AiAddressingStatus.options) {
+      const addressing = {
+        addressed: status !== "not_addressed",
+        status,
+        skipReason: status === "skipped" ? "no_key" : null,
+        generationId: status === "answering" || status === "answered" ? id : null,
+      };
+      const r = AiPostedMessageResponse.parse({
+        chat: phase5Summary,
+        userMessage: { ...message, aiAddressing: addressing },
+        addressing,
+      });
+      expect(r.addressing.status, status).toBe(status);
+    }
+  });
+
+  it("every ModelUnavailableReason is also an AiSkipReason", () => {
+    for (const reason of ModelUnavailableReason.options) {
+      expect(AiSkipReason.options, reason).toContain(reason);
+    }
+    expect(AiSkipReason.options).toEqual(
+      expect.arrayContaining(["daily_limit_reached", "usage_unavailable", "concurrent_generations"]),
+    );
   });
 });

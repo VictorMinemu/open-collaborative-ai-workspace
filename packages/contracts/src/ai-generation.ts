@@ -97,5 +97,42 @@ export const AiGeneration = z.object({
   sourceDomains: z.array(z.string().max(253)).max(20),
   startedAt: IsoDateTime,
   finishedAt: IsoDateTime.nullable(),
+  /** Phase 6 (P-07): who asked, and so who pays. Filled from 06-02 on; absent on Phase 5 producers. */
+  requesterUserId: Id.optional(),
 });
 export type AiGeneration = z.infer<typeof AiGeneration>;
+
+// ---------------------------------------------------------------- Phase 6: addressing (P-07, P-08)
+
+/**
+ * Why an addressed message of a multiplayer AI chat was not answered (P-07: its author had no usable model; nobody
+ * else's plan or key is tried). A superset of `ModelUnavailableReason` (ai-chat.ts; a test keeps them aligned):
+ * it lives here so `chat.ts` can carry `Message.aiAddressing` without importing `ai-chat.ts`.
+ */
+export const AiSkipReason = z.enum([
+  "not_connected",
+  "needs_reconnect",
+  "not_eligible",
+  "plan_usage_disabled",
+  "plan_disabled_by_org",
+  "org_keys_disabled",
+  "no_key",
+  "not_allowed",
+  "not_in_catalog",
+  "daily_limit_reached",
+  "usage_unavailable",
+  "concurrent_generations",
+]);
+export type AiSkipReason = z.infer<typeof AiSkipReason>;
+
+export const AiAddressingStatus = z.enum(["not_addressed", "queued", "answering", "answered", "skipped"]);
+export type AiAddressingStatus = z.infer<typeof AiAddressingStatus>;
+
+/** Whether a human message of an AI chat asks the model, and where that request stands (D-05). */
+export const AiAddressing = z.object({
+  addressed: z.boolean(),
+  status: AiAddressingStatus,
+  skipReason: AiSkipReason.nullable(),
+  generationId: Id.nullable(),
+});
+export type AiAddressing = z.infer<typeof AiAddressing>;

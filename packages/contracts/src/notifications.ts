@@ -7,7 +7,17 @@ import { Id, IsoDateTime } from "./common";
  * re-checks access and computes the snippet at read time. The server decides `popup` once for every client.
  */
 
-export const NotificationKind = z.enum(["mention", "channel", "here", "dm", "group_dm", "thread_reply"]);
+export const NotificationKind = z.enum([
+  "mention",
+  "channel",
+  "here",
+  "dm",
+  "group_dm",
+  "thread_reply",
+  // Phase 6: an AI chat was shared with you (MULTI-01); a card you follow changed status (AGENT-04).
+  "ai_chat_shared",
+  "card_updated",
+]);
 export type NotificationKind = z.infer<typeof NotificationKind>;
 
 /** Strongest kind wins when one message notifies a user for several reasons. */
@@ -18,6 +28,8 @@ export const NOTIFICATION_KIND_RANK: Record<NotificationKind, number> = {
   channel: 3,
   here: 2,
   thread_reply: 1,
+  ai_chat_shared: 7,
+  card_updated: 0,
 };
 
 /** Kinds that count toward a conversation's `mentionCount`. */

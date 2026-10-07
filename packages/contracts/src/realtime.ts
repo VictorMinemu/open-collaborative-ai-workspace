@@ -167,6 +167,10 @@ export const EventTypes = {
   // Phase 5 (P-06). On `user:<owner>`: an AI chat's summary changed (title, last model, generating, archived).
   // Payload AiChatUpdatedEvent.
   aiChatUpdated: "ai_chat.updated",
+  // Phase 6 (P-08, P-09). On `conv:<id>` of an AI chat: the one-generation queue changed (AiQueueUpdatedEvent).
+  aiQueueUpdated: "ai.queue.updated",
+  // On `conv:<id>` and `user:<affected>`; ids only on `org:<id>` for unit/org grants (AiChatAccessChangedEvent).
+  aiChatAccessChanged: "ai_chat.access_changed",
 } as const;
 
 export const MemberUpdatedPayload = z.object({ userId: z.uuid(), changed: z.array(z.string()) });
