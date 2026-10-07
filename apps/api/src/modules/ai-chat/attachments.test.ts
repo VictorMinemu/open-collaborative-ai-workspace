@@ -141,7 +141,7 @@ describe("modelPartsFor (bytes from the store, inside the member's message)", ()
   it("a PDF is its original bytes for PDF models, a placeholder otherwise", async () => {
     const bytes = new TextEncoder().encode("%PDF-1.4 …");
     const { storage } = memoryStorage({ original: bytes });
-    expect(await modelPartsFor([pdf()], storage, ALL)).toEqual([
+    expect(await modelPartsFor([pdf({ sizeBytes: bytes.length })], storage, ALL)).toEqual([
       { type: "file", mediaType: "application/pdf", data: bytes, filename: "plan.pdf" },
     ]);
     const [placeholder] = await modelPartsFor([pdf()], storage, VISION_ONLY);
