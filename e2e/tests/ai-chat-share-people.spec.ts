@@ -96,6 +96,13 @@ async function search(people: Locator, text: string): Promise<Locator> {
   return people.getByTestId("ai-share-person-option");
 }
 
+/** Exactly the team "Backend" under Engineering among the picker's options. */
+function backendTeam(options: Locator): Locator {
+  return options
+    .filter({ has: options.page().getByText("Backend", { exact: true }) })
+    .filter({ hasText: "Engineering" });
+}
+
 /** Opens the level menu of one grant row (by its label) and picks an item. */
 async function grantAction(page: Page, people: Locator, label: string, item: string) {
   const row = people.getByTestId("ai-share-grant").filter({ hasText: label });
@@ -147,7 +154,8 @@ test("Víctor widens his chat from Alex to the Backend team, makes it view-only,
 
     // ---- the picker offers people, teams, departments and the whole organization.
     let options = await search(people, "Backend");
-    const backendOption = options.filter({ hasText: "Backend" }).first();
+    // Other specs (admin-org) leave teams named "Backend <suffix>" on the same stack: exactly Engineering › Backend.
+    const backendOption = backendTeam(options);
     await expect(backendOption).toHaveAttribute("data-subject-kind", "unit");
     await expect(backendOption).toContainText("Team");
     await expect(backendOption.getByTestId("ai-share-unit-icon")).toBeVisible();
@@ -160,7 +168,7 @@ test("Víctor widens his chat from Alex to the Backend team, makes it view-only,
 
     // ---- share with Backend at Can chat.
     options = await search(people, "Backend");
-    await options.filter({ hasText: "Backend" }).first().click();
+    await backendTeam(options).click();
     await people.getByRole("radio", { name: "Can chat" }).click();
     await people.getByTestId("ai-share-submit").click();
     const backendRow = people.getByTestId("ai-share-grant").filter({ hasText: "Backend" });

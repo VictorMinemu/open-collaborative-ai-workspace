@@ -94,6 +94,14 @@ async function freshBackend(admin: APIRequestContext): Promise<string> {
   return ((await res.json()) as { id: string }).id;
 }
 
+/** The picker option for exactly the team "Backend" under Engineering (never another spec's "Backend <suffix>"). */
+function backendTeamOption(people: Locator): Locator {
+  return people
+    .locator('[data-testid="ai-share-person-option"][data-subject-kind="unit"]')
+    .filter({ has: people.page().getByText("Backend", { exact: true }) })
+    .filter({ hasText: "Engineering" });
+}
+
 async function openShareDialog(page: Page): Promise<Locator> {
   await page.getByTestId("ai-chat-menu-button").click();
   await page.getByTestId("ai-chat-menu-share").filter({ visible: true }).click();
@@ -228,12 +236,8 @@ test("a Phase 6 day: private → shared with Alex → the Backend team reads →
     dialog = await openShareDialog(page);
     people = dialog.getByTestId("ai-share-people");
     await people.getByTestId("ai-share-person-input").fill("Backend");
-    await people
-      .getByTestId("ai-share-person-option")
-      .filter({ hasText: "Backend" })
-      .and(page.locator('[data-subject-kind="unit"]'))
-      .first()
-      .click();
+    // Other specs leave units named "Backend <suffix>" on the same stack: pick exactly Engineering › Backend.
+    await backendTeamOption(people).click();
     await people.getByRole("radio", { name: "Can view" }).click();
     await people.getByTestId("ai-share-submit").click();
     await expect(people.getByTestId("ai-share-grant").filter({ hasText: "Backend" })).toContainText(
