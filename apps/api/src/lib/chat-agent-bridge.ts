@@ -1,3 +1,4 @@
+import type { AgentCardInput } from "@ocw/contracts";
 import type { AfterCommit, TenantCtx, Tx } from "@ocw/db";
 
 /**
@@ -9,6 +10,9 @@ import type { AfterCommit, TenantCtx, Tx } from "@ocw/db";
  * - agent-channel registers the handler with `onAgentMention` and appends the delivery event in the
  *   same transaction (so a mention is never lost or delivered for a rolled-back message).
  * - chat provides `postAgentMessage` / `getThreadContext`; agent-channel calls them when OpenClaw replies.
+ * - Agent Cards (06-13, P-11): `postAgentMessage({card})` stores a card with the message; when a reader decides a card,
+ *   chat calls `emitCardAction` inside the decision transaction and agent-channel (its `onCardAction` handler) appends
+ *   the `agent.card_action.v1` delivery in the same transaction.
  */
 
 export interface PrincipalRef {
@@ -69,13 +73,31 @@ export interface PostAgentMessageInput {
    * confused-deputy rule). Optional: 02-10 passes it through from the Agent Channel API.
    */
   inReplyToMessageId?: string;
+  /**
+   * An Agent Card (06-13, P-11): `body` is its plain-text summary; the card row is inserted in the message transaction
+   * (version 1, this agent) and `message.created` carries it.
+   */
+  card?: AgentCardInput;
 }
+
+/** A reader's single decision on an Agent Card (06-13): delivered to the card's agent as `agent.card_action.v1`. */
+export interface CardAction {
+  messageId: string;
+  outcome: "approved" | "denied";
+  actorUserId: string;
+}
+
+export type CardActionHandler = (tx: Tx, action: CardAction, after: AfterCommit) => Promise<void>;
 
 export type MentionHandler = (tx: Tx, mention: AgentMention, after: AfterCommit) => Promise<void>;
 export type AgentPoster = (
   ctx: TenantCtx,
   input: PostAgentMessageInput,
-) => Promise<{ messageId: string; created: boolean }>;
+) => Promise<{
+  messageId: string;
+  created: boolean /** The card's current version, for card posts. */;
+  cardVersion?: number;
+}>;
 export type ThreadContextProvider = (
   ctx: TenantCtx,
   conversationId: string,
@@ -98,10 +120,13 @@ export interface ChatAgentBridge {
   getThreadContext: ThreadContextProvider;
   provideAgentTyping(fn: AgentTyping): void;
   agentTyping: AgentTyping;
+  onCardAction(handler: CardActionHandler): void;
+  emitCardAction(tx: Tx, action: CardAction, after: AfterCommit): Promise<void>;
 }
 
 export function createChatAgentBridge(): ChatAgentBridge {
   const handlers: MentionHandler[] = [];
+  const cardHandlers: CardActionHandler[] = [];
   let poster: AgentPoster | undefined;
   let context: ThreadContextProvider | undefined;
   let typing: AgentTyping | undefined;
@@ -131,6 +156,12 @@ export function createChatAgentBridge(): ChatAgentBridge {
     },
     async agentTyping(ctx, agentId, conversationId, threadRootId) {
       if (typing) await typing(ctx, agentId, conversationId, threadRootId);
+    },
+    onCardAction(h) {
+      cardHandlers.push(h);
+    },
+    async emitCardAction(tx, action, after) {
+      for (const h of cardHandlers) await h(tx, action, after);
     },
   };
 }

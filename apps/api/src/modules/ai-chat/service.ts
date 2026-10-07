@@ -12,6 +12,7 @@ import {
   type ConversationReadEvent,
   type CreateAiChatRequest,
   EventTypes,
+  type Message,
   type MessagePage,
   type ModelRef,
   type Permission,
@@ -55,6 +56,7 @@ import {
   type MessageRow,
   resolveMentions,
   unreadCountsFor,
+  withCards,
 } from "../chat";
 import {
   loadAiChatPolicy,
@@ -1241,7 +1243,7 @@ export function createAiChatService(deps: AiChatDeps) {
         const hasMore = rows.length > AI_SNAPSHOT_MESSAGES;
         const page = rows.slice(0, AI_SNAPSHOT_MESSAGES).reverse();
         const multiplayer = await isMultiplayer(tx, conv.id);
-        const list = await toDtos(tx, page, chat, multiplayer);
+        const list = await toDtos(tx, page, chat, multiplayer, authOf(req).userId);
         const [running] = await tx
           .select()
           .from(aiGenerations)
@@ -1293,7 +1295,7 @@ export function createAiChatService(deps: AiChatDeps) {
         const hasMore = rows.length > q.limit;
         const page = rows.slice(0, q.limit).reverse();
         return {
-          messages: await toDtos(tx, page, chat, await isMultiplayer(tx, conv.id)),
+          messages: await toDtos(tx, page, chat, await isMultiplayer(tx, conv.id), authOf(req).userId),
           nextBefore: hasMore ? (page[0]?.seq ?? null) : null,
           lastSeq: await core.realtime.lastSeq(tx, convTopic(conv.id)),
         };
@@ -1326,7 +1328,13 @@ export function createAiChatService(deps: AiChatDeps) {
     return changed;
   }
 
-  async function toDtos(tx: Tx, rows: MessageRow[], chat: AiChatRow, multiplayer: boolean) {
+  async function toDtos(
+    tx: Tx,
+    rows: MessageRow[],
+    chat: AiChatRow,
+    multiplayer: boolean,
+    viewerId: string,
+  ): Promise<Message[]> {
     const gens = await generationsFor(
       tx,
       rows.filter((r) => r.authorKind === "agent").map((r) => r.id),
@@ -1352,7 +1360,7 @@ export function createAiChatService(deps: AiChatDeps) {
           rows.filter((r) => r.authorKind === "user").map((r) => r.id),
         )
       : new Map<string, AiAddressing>();
-    return rows.map((r) => {
+    const list = rows.map((r) => {
       // The chat model's answers carry their generation; a persona's message (06-10) its directory entry.
       if (r.authorKind === "agent") return aiMessage(r, r.authorId ? dir : EMPTY_DIRECTORY, gens.get(r.id));
       const aiAddressing = addressing.get(r.id);
@@ -1361,6 +1369,8 @@ export function createAiChatService(deps: AiChatDeps) {
         ...(aiAddressing ? { aiAddressing } : {}),
       };
     });
+    // A persona's Agent Cards (06-13, P-11) with the viewer's fields.
+    return withCards(tx, list, viewerId);
   }
 }
 

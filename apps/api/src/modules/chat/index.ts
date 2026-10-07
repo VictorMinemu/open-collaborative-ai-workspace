@@ -53,6 +53,7 @@ import {
   createPermissionService,
 } from "../organization";
 import { createConversationAccess } from "./access";
+import { registerCardActionRoutes } from "./card-actions";
 import {
   agentFactsOf,
   authorOf,
@@ -104,6 +105,8 @@ import { registerChatTestRoutes } from "./test-routes";
 import { registerThreadRoutes } from "./threads";
 
 export { type ConversationAccess, createConversationAccess } from "./access";
+/** Agent Cards (06-13, P-11): the agent-channel module updates cards through `patchCard`; ai-chat adds them to snapshots. */
+export { type CardRow, cardMessageOf, cardOf, patchCard, withCards } from "./card-actions";
 export { agentFactsOf, authorOf, type Directory, type DirectoryEntry, loadDirectory } from "./directory";
 export {
   dmAgentOf,
@@ -596,9 +599,11 @@ export function createChatModule(core: Core): ApiModule {
         body: input.body,
         mentions: resolveMentions(input.body, dir),
         threadRootId,
-        clientMessageId: input.idempotencyKey,
+        // A card's key lives in its own namespace, so a card and a plain reply never collide on one key.
+        clientMessageId: input.card ? `card:${input.idempotencyKey}` : input.idempotencyKey,
         clientKind: "agent",
         lenientThreadRoot: true,
+        card: input.card,
       });
       if (result.created) {
         // Observers (notifications) in the same transaction; a bot is never a recipient, only an actor.
@@ -624,8 +629,31 @@ export function createChatModule(core: Core): ApiModule {
           clientKind: "agent",
           metadata: { conversationId: conv.id, threadRootId: result.root?.id ?? null },
         });
+        if (result.message.card) {
+          // Ids, kind and status only: never the title, the fields or the summary.
+          await core.audit.record(tx, {
+            action: "agent_card.posted",
+            resourceType: "message",
+            resourceId: result.row.id,
+            actorKind: "agent",
+            actorId: agent.id,
+            agentId: agent.id,
+            clientKind: "agent",
+            metadata: {
+              messageId: result.row.id,
+              conversationId: conv.id,
+              agentId: agent.id,
+              kind: result.message.card.kind,
+              status: result.message.card.status,
+            },
+          });
+        }
       }
-      return { messageId: result.row.id, created: result.created };
+      return {
+        messageId: result.row.id,
+        created: result.created,
+        ...(result.message.card ? { cardVersion: result.message.card.version } : {}),
+      };
     }),
   );
 
@@ -1339,6 +1367,8 @@ export function createChatModule(core: Core): ApiModule {
       registerSaveRoutes(app, routeCtx);
       // ---------------------------------------------------------------- the Threads view (CHAT-02)
       registerThreadRoutes(app, routeCtx);
+      // ---------------------------------------------------------------- Agent Cards (AGENT-04, P-11)
+      registerCardActionRoutes(app, routeCtx);
 
       if (core.env.NODE_ENV === "test") registerChatTestRoutes(app, core);
     },

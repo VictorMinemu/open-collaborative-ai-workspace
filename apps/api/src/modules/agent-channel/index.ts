@@ -18,18 +18,19 @@ import {
   RotateCellTokenResponse,
   SubscriptionProviderParams,
 } from "@ocw/contracts";
-import { agentCredentials, conversationMembers, conversations, messages, orgUnits, type Tx } from "@ocw/db";
+import { agentCredentials, conversationMembers, conversations, orgUnits, type Tx } from "@ocw/db";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { z } from "zod";
 import { type ApiModule, type App, authOf, type Core, tenant } from "../../core";
 import { randomToken, sha256Hex } from "../../lib/crypto";
-import { badRequest, HttpError, notFound } from "../../lib/errors";
+import { HttpError, notFound } from "../../lib/errors";
 import { applyCellStatus, cellAgents, cellProviders, cellSubscriptions, findAgent } from "../agent";
 import { cellAgentCapabilities, loadPolicy } from "../bot-capabilities";
 import { cellMcpServers } from "../mcp";
 import { channelResource, createPermissionService, type ResourceFacts } from "../organization";
 import { cellApprovedPlugins } from "../plugins";
 import { cellOf, createCellAuth } from "./auth";
+import { registerCardRoutes, resolveReplyTarget } from "./cards";
 import { registerCellGateway } from "./gateway";
 import { registerMcpCellRoutes } from "./mcp";
 import { registerMemoryRoutes } from "./memories";
@@ -332,40 +333,7 @@ export function createAgentChannelModule(
               const ctx = { organizationId: cell.organizationId, userId: null };
               const body = req.body;
 
-              const check = await core.db.withTenant(ctx, async (tx) => {
-                const conv = await getConversation(tx, body.conversationId);
-                let root: string | null = null;
-                if (body.threadRootMessageId) {
-                  const [m] = await tx
-                    .select({
-                      id: messages.id,
-                      threadId: messages.threadId,
-                      conversationId: messages.conversationId,
-                    })
-                    .from(messages)
-                    .where(eq(messages.id, body.threadRootMessageId));
-                  const inScope =
-                    m &&
-                    (m.conversationId === conv.id || (conv.kind === "thread" && conv.rootMessageId === m.id));
-                  if (!m || !inScope) {
-                    throw badRequest(
-                      "The thread root does not belong to this conversation",
-                      "invalid_thread_root",
-                    );
-                  }
-                  // Single-level threads: a reply's root is its thread root.
-                  root = m.threadId ?? m.id;
-                }
-                let triggeredBy: string | null = null;
-                if (body.inReplyToMessageId) {
-                  const [m] = await tx
-                    .select({ authorKind: messages.authorKind, authorId: messages.authorId })
-                    .from(messages)
-                    .where(eq(messages.id, body.inReplyToMessageId));
-                  if (m?.authorKind === "user") triggeredBy = m.authorId;
-                }
-                return { root, triggeredBy };
-              });
+              const check = await core.db.withTenant(ctx, (tx) => resolveReplyTarget(tx, body));
 
               let result: { messageId: string; created: boolean };
               try {
@@ -465,6 +433,8 @@ export function createAgentChannelModule(
             },
           );
 
+          // Agent Cards (AGENT-04, P-11): typed cards posted and updated in place by their agent.
+          registerCardRoutes(scope, { core });
           // The cell's tool gate (D-08): decision + caps + taint + audit for every gated tool call.
           registerToolCallRoutes(scope, core, perms);
           // The cell's memory tool (D-10): owner bound to the delivered turn, DM only, refused once tainted.

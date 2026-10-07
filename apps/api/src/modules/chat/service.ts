@@ -1,4 +1,5 @@
 import {
+  type AgentCardInput,
   type ChannelMember,
   type ChannelSummary,
   type ChannelUnit,
@@ -27,6 +28,7 @@ import { attachmentsForMessages, linkAttachments } from "../artifact";
 import type { AuditService } from "../audit";
 import type { ChannelFacts } from "../organization";
 import type { RealtimeService } from "../realtime";
+import { cardOf, insertCard, withCards } from "./card-actions";
 import { authorOf, type Directory } from "./directory";
 import { pinnedFor } from "./pins";
 import { reactionsFor } from "./reactions";
@@ -667,11 +669,13 @@ export async function hydrateViewer(tx: Tx, list: Message[], viewerId: string): 
   const reactions = await reactionsFor(tx, live, viewerId);
   const pinned = await pinnedFor(tx, live);
   const saved = await savedFor(tx, live, viewerId);
-  return (await withAttachments(tx, list)).map((m) =>
+  const hydrated = (await withAttachments(tx, list)).map((m) =>
     m.deletedAt
       ? { ...m, reactions: [], pinned: false, saved: false }
       : { ...m, reactions: reactions.get(m.id) ?? [], pinned: pinned.has(m.id), saved: saved.has(m.id) },
   );
+  // Agent Cards (P-11) with the viewer's fields (following, viewerCan).
+  return withCards(tx, hydrated, viewerId);
 }
 
 /** Top-level messages of a channel, newest page first in the DB, returned oldest → newest. */
@@ -835,6 +839,11 @@ export interface PostInput {
    * is appended, so the event carries them. Any id that is not linkable rolls the post back (409).
    */
   attachmentIds?: string[] | undefined;
+  /**
+   * An Agent Card (P-11, agents only): inserted with the message before `message.created` is appended, so the event
+   * carries it; `body` is its plain-text summary.
+   */
+  card?: AgentCardInput | undefined;
 }
 
 export interface PostResult {
@@ -874,7 +883,8 @@ export async function postMessage(
     if (existing) {
       const root = existing.threadId ? await getMessage(tx, existing.threadId) : null;
       const [message] = await withAttachments(tx, [toMessage(existing, dir)]);
-      return { row: existing, message: message!, created: false, root };
+      const card = await cardOf(tx, existing.id);
+      return { row: existing, message: card ? { ...message!, card } : message!, created: false, root };
     }
   }
 
@@ -919,6 +929,13 @@ export async function postMessage(
     const [hydrated] = await withAttachments(tx, [message]);
     if (!hydrated) throw new Error("message DTO missing");
     message = hydrated;
+  }
+  if (input.card) {
+    if (author.kind !== "agent") throw new Error("only agents post cards");
+    message = {
+      ...message,
+      card: await insertCard(tx, { message: row, agentId: author.id, input: input.card }),
+    };
   }
   const seq = await deps.realtime.appendEvent(tx, topic, EventTypes.messageCreated, { message });
   if (seq !== nextSeq) throw new Error(`stream seq drift on ${topic}: expected ${nextSeq}, got ${seq}`);

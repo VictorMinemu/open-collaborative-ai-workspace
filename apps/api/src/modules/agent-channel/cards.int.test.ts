@@ -430,9 +430,3 @@ describe("tenant isolation (Task 1)", () => {
     expect(after.version).toBe(card.version);
   });
 });
-
-// Kept referenced for Task 2 (follow / decision cases).
-void samId;
-void rileyId;
-void victorId;
-void riley;
