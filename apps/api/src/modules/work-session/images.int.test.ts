@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { type RuntimeCatalog, WS_AUTH_PROTOCOL_PREFIX, WS_PROTOCOL } from "@ocw/contracts";
 import pg from "pg";
@@ -48,6 +49,7 @@ let s3: S3Client;
 let admin: TestClient;
 let dana: TestClient;
 let orgId: string;
+let adminId: string;
 let danaId: string;
 let device: FakeDevice;
 let deviceId: string;
@@ -139,6 +141,7 @@ beforeAll(async () => {
     admin.request("POST", "/api/v1/setup", { token: TEST_SETUP_TOKEN, ...ADMIN, orgName: "Autofy Labs" }),
   );
   orgId = setup.organization.id;
+  adminId = setup.user.id;
   ({ client: dana, userId: danaId } = await invite(
     stack,
     admin,
@@ -387,5 +390,254 @@ describe("the model gate (D-05, P-08): images never go to a model that says it c
     expect(byId.get("gpt-6.1-sol")!.imageInput).toBe(true);
     expect(byId.get("gpt-6.1-text")!.imageInput).toBe(false);
     expect(byId.get("gpt-5.9")!.imageInput).toBeUndefined();
+  });
+});
+
+/** A client whose membership moved to a fresh organization B (the artifact suite's `otherOrgAdmin` pattern). */
+async function otherOrgAdmin(): Promise<{ client: TestClient; orgB: string }> {
+  const email = `eve-${randomUUID().slice(0, 8)}@example.test`;
+  const { client, userId } = await invite(stack, admin, email, "Eve", "admin");
+  const orgB = randomUUID();
+  await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil', $2)", [
+    orgB,
+    `evil-${orgB}`,
+  ]);
+  await su.query("delete from auth.member where user_id = $1", [userId]);
+  await su.query("delete from app.org_members where user_id = $1", [userId]);
+  await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
+    orgB,
+    userId,
+  ]);
+  await su.query(
+    "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Eve', 'admin')",
+    [orgB, userId],
+  );
+  await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, userId]);
+  return { client, orgB };
+}
+
+const queuedAudits = async (sid: string) =>
+  Number(
+    (
+      await su.query(
+        "select count(*)::int as n from app.audit_events where action = 'work_prompt.queued' and session_id = $1",
+        [sid],
+      )
+    ).rows[0].n,
+  );
+
+describe("access: only the session's controllers upload, only its readers see (D-03, P-04, WZ-IMG-04)", () => {
+  let riley: TestClient;
+  let pat: TestClient;
+  let eve: TestClient;
+  let sent: Json;
+  let unsent: Json;
+
+  beforeAll(async () => {
+    // Riley: a standard member (no Work Zone access at all). Pat: a developer who reads sessions but is denied
+    // `work_session.prompt` by a user rule. Eve: the admin of another organization.
+    ({ client: riley } = await invite(stack, admin, "riley@example.test", "Riley Park", "standard"));
+    let patId: string;
+    ({ client: pat, userId: patId } = await invite(stack, admin, "pat@example.test", "Pat Doe", "developer"));
+    await ok(
+      admin.request("POST", "/api/v1/permission-rules", {
+        subjectKind: "user",
+        subjectId: patId,
+        permission: "work_session.prompt",
+        effect: "deny",
+      }),
+    );
+    ({ client: eve } = await otherOrgAdmin());
+    sent = await upload(admin, sessionConv, "sent.jpg", "image/jpeg", jpeg);
+    const prompt = await ok(
+      admin.request("POST", `/api/v1/work-sessions/${sessionId}/prompts`, {
+        body: "and this one?",
+        attachmentIds: [sent.id],
+      }),
+    );
+    finish(await device.command("prompt", sessionId));
+    await eventually(async () => {
+      const r = await su.query("select status from app.work_prompts where id = $1", [prompt.id]);
+      return r.rows[0].status === "completed";
+    });
+    unsent = await upload(admin, sessionConv, "unsent.jpg", "image/jpeg", jpeg);
+  });
+
+  it("presign: another tenant's admin and a member without Work Zone access get 404", async () => {
+    for (const client of [eve, riley]) {
+      const res = await presign(client, sessionConv, "x.jpg", "image/jpeg", jpeg.length);
+      expect(res.status, JSON.stringify(res.body)).toBe(404);
+      expect(res.body).toEqual({ error: { code: "not_found", message: "Conversation not found" } });
+    }
+  });
+
+  it("presign: a member who reads the session but may not prompt it gets 403", async () => {
+    expect((await ok(pat.request("GET", `/api/v1/work-sessions/${sessionId}`))).session.id).toBe(sessionId);
+    const res = await presign(pat, sessionConv, "x.jpg", "image/jpeg", jpeg.length);
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+  });
+
+  it("presign: a PDF is 400 images_only; an archived session is 409 session_archived", async () => {
+    const pdf = await presign(admin, sessionConv, "spec.pdf", "application/pdf", 1000);
+    expect(pdf.status, JSON.stringify(pdf.body)).toBe(400);
+    expect(errorCode(pdf)).toBe("images_only");
+    expect((pdf.body!.error as Json).message).toBe(
+      "Only images (PNG, JPEG, GIF, WebP) can be attached to a Work Zone prompt",
+    );
+    const { id, conv } = await newSession({ title: "Archived" });
+    await ok(admin.request("POST", `/api/v1/work-sessions/${id}/archive`));
+    const archived = await presign(admin, conv, "x.jpg", "image/jpeg", jpeg.length);
+    expect(archived.status, JSON.stringify(archived.body)).toBe(409);
+    expect(errorCode(archived)).toBe("session_archived");
+  });
+
+  it("presign into a channel is unchanged: any declared type (the images-only rule is the session scope's)", async () => {
+    expect((await presign(admin, general, "spec.pdf", "application/pdf", 1000)).status).toBe(200);
+  });
+
+  it("previews, large and download of a sent image are 404 for a non-reader and for another tenant", async () => {
+    for (const path of ["preview", "large", "download"]) {
+      expect((await raw(admin, `/api/v1/attachments/${sent.id}/${path}`)).status, path).toBe(302);
+      expect((await raw(dana, `/api/v1/attachments/${sent.id}/${path}`)).status, path).toBe(302);
+      expect((await raw(riley, `/api/v1/attachments/${sent.id}/${path}`)).status, path).toBe(404);
+      expect((await raw(eve, `/api/v1/attachments/${sent.id}/${path}`)).status, path).toBe(404);
+    }
+  });
+
+  it("an unsent upload stays its uploader's own: 404 for Dana", async () => {
+    expect((await raw(admin, `/api/v1/attachments/${unsent.id}/preview`)).status).toBe(302);
+    expect((await raw(dana, `/api/v1/attachments/${unsent.id}/preview`)).status).toBe(404);
+    expect((await raw(dana, `/api/v1/attachments/${unsent.id}/download`)).status).toBe(404);
+  });
+});
+
+describe("linking: only the sender's own ready session images (D-03, P-05, T-06.1-01-01)", () => {
+  /** Refused ids by case; each must give the one 409 and leave no trace. */
+  const cases: Array<[string, () => Promise<string[]>]> = [];
+  let alreadyLinked: string;
+  /** Rows the refusals must leave unlinked. */
+  let untouched: string[] = [];
+
+  beforeAll(async () => {
+    const danas = await upload(dana, sessionConv, "dana.jpg", "image/jpeg", jpeg);
+    const other = await newSession({ title: "Other session" });
+    const elsewhere = await upload(admin, other.conv, "elsewhere.jpg", "image/jpeg", jpeg);
+    const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: "#f80" } })
+      .png()
+      .toBuffer();
+    const channel = await upload(admin, general, "channel.png", "image/png", png);
+    const pending = await ok(presign(admin, sessionConv, "pending.jpg", "image/jpeg", jpeg.length));
+    // Another tenant's row that matches everything else (Víctor as uploader, this session's conversation, a ready
+    // image with renditions): RLS must hide it.
+    const { orgB } = await otherOrgAdmin();
+    const foreign = randomUUID();
+    await su.query(
+      `insert into app.attachments (id, organization_id, conversation_id, uploader_id, filename, declared_type,
+         content_type, size_bytes, status, has_renditions, width, height)
+       values ($1, $2, $3, $4, 'b.png', 'image/png', 'image/png', 10, 'ready', true, 8, 8)`,
+      [foreign, orgB, sessionConv, adminId],
+    );
+    // A ready non-image of Víctor's in this session (the scope never presigns one; inserted to prove the link rule).
+    const pdf = randomUUID();
+    await su.query(
+      `insert into app.attachments (id, organization_id, conversation_id, uploader_id, filename, declared_type,
+         content_type, size_bytes, status, has_renditions)
+       values ($1, $2, $3, $4, 'spec.pdf', 'application/pdf', 'application/pdf', 10, 'ready', false)`,
+      [pdf, orgId, sessionConv, adminId],
+    );
+    const linked = await upload(admin, sessionConv, "linked.jpg", "image/jpeg", jpeg);
+    const first = await ok(
+      admin.request("POST", `/api/v1/work-sessions/${sessionId}/prompts`, {
+        body: "first use",
+        attachmentIds: [linked.id],
+      }),
+    );
+    finish(await device.command("prompt", sessionId));
+    await eventually(async () => {
+      const r = await su.query("select status from app.work_prompts where id = $1", [first.id]);
+      return r.rows[0].status === "completed";
+    });
+    alreadyLinked = linked.id;
+    const mine = await upload(admin, sessionConv, "mine.jpg", "image/jpeg", jpeg);
+    untouched = [mine.id, danas.id, elsewhere.id, channel.id, foreign, pending.attachment.id, pdf];
+    cases.push(
+      ["another member's image in the same session", async () => [danas.id]],
+      ["the sender's image in another session", async () => [elsewhere.id]],
+      ["the sender's image in a channel", async () => [channel.id]],
+      ["another tenant's id", async () => [foreign]],
+      ["an id already linked to an earlier prompt", async () => [alreadyLinked]],
+      ["a pending upload", async () => [pending.attachment.id]],
+      ["a non-image", async () => [pdf]],
+      ["the same id twice", async () => [mine.id, mine.id]],
+      ["a random uuid", async () => [randomUUID()]],
+      ["a good id next to a refused one", async () => [mine.id, danas.id]],
+    );
+  });
+
+  it("every refused id is the same 409 attachment_not_linkable; nothing is queued, sent or audited", async () => {
+    await eventually(async () => {
+      const r = await su.query("select status from app.work_sessions where id = $1", [sessionId]);
+      return r.rows[0].status === "idle";
+    });
+    const before = { prompts: await promptCount(sessionId), audits: await queuedAudits(sessionId) };
+    for (const [name, ids] of cases) {
+      const res = await admin.request("POST", `/api/v1/work-sessions/${sessionId}/prompts`, {
+        body: `refused: ${name}`,
+        attachmentIds: await ids(),
+      });
+      expect(res.status, name).toBe(409);
+      expect(res.body, name).toEqual({
+        error: {
+          code: "attachment_not_linkable",
+          message: "One or more attachments cannot be added to this prompt",
+        },
+      });
+    }
+    await sleep(200);
+    expect(await promptCount(sessionId)).toBe(before.prompts);
+    expect(await queuedAudits(sessionId)).toBe(before.audits);
+    expect(device.pending("prompt").filter((f) => (f as Cmd).sessionId === sessionId)).toEqual([]);
+    // The good id refused next to a bad one is still free (the transaction rolled back); nothing else got linked.
+    const free = await su.query(
+      "select id from app.attachments where id = any($1) and work_prompt_id is null",
+      [untouched],
+    );
+    expect(free.rows.map((r) => r.id).sort()).toEqual([...untouched].sort());
+  });
+
+  it("5 ids are refused by the schema (400)", async () => {
+    const res = await admin.request("POST", `/api/v1/work-sessions/${sessionId}/prompts`, {
+      body: "too many",
+      attachmentIds: [1, 2, 3, 4, 5].map(() => randomUUID()),
+    });
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("audit: ids and a count, never bytes (D-03, T-06.1-01-05, T-06.1-01-06)", () => {
+  it("work_prompt.queued records attachmentIds in request order and imageCount", async () => {
+    const a = await upload(admin, sessionConv, "a.jpg", "image/jpeg", jpeg);
+    const b = await upload(admin, sessionConv, "b.jpg", "image/jpeg", jpeg);
+    const prompt = await ok(
+      admin.request("POST", `/api/v1/work-sessions/${sessionId}/prompts`, {
+        body: "two images",
+        attachmentIds: [b.id, a.id],
+      }),
+    );
+    expect(prompt.attachments.map((x: Json) => x.id).sort()).toEqual([a.id, b.id].sort());
+    const audit = await su.query(
+      "select metadata from app.audit_events where action = 'work_prompt.queued' and resource_id = $1",
+      [prompt.id],
+    );
+    expect(audit.rows).toHaveLength(1);
+    expect(audit.rows[0].metadata).toMatchObject({ attachmentIds: [b.id, a.id], imageCount: 2 });
+    finish(await device.command("prompt", sessionId));
+  });
+
+  it("no audit row's metadata contains a base64 run", async () => {
+    const rows = await su.query("select action, metadata::text as m from app.audit_events");
+    expect(rows.rows.length).toBeGreaterThan(0);
+    const leaks = rows.rows.filter((r) => /[A-Za-z0-9+/]{200,}/.test(r.m)).map((r) => r.action);
+    expect(leaks).toEqual([]);
   });
 });
