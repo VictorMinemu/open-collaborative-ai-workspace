@@ -304,7 +304,7 @@ describe("the ai-eval workflow (label, weekly, dispatch; never on every PR)", ()
   /** The lines of a top-level key's block, up to the next top-level key (comments dropped). */
   const block = (text: string, key: string) => {
     const lines = text.split("\n").filter((l) => !l.trim().startsWith("#"));
-    const start = lines.findIndex((l) => l === `${key}:`);
+    const start = lines.indexOf(`${key}:`);
     if (start === -1) return "";
     const end = lines.findIndex((l, i) => i > start && /^\S/u.test(l));
     return lines.slice(start + 1, end === -1 ? undefined : end).join("\n");
@@ -340,7 +340,7 @@ describe("the ai-eval workflow (label, weekly, dispatch; never on every PR)", ()
     expect(text).toContain('echo "present=false" >> "$GITHUB_OUTPUT"');
     const runStep = text.slice(text.indexOf("- name: Multiplayer spoofing eval"));
     expect(runStep).toMatch(/if: steps\.key\.outputs\.present == 'true'/u);
-    expect(runStep).toContain("OCW_EVAL_API_KEY: ${{ secrets.OCW_EVAL_API_KEY }}");
+    expect(runStep).toMatch(/OCW_EVAL_API_KEY: \$\{\{ secrets\.OCW_EVAL_API_KEY \}\}/u);
     expect(runStep).toContain("OCW_EVAL_PROVIDER: openrouter");
     expect(runStep).toContain("OCW_EVAL_CONFIRM: metered");
     expect(runStep).toContain("pnpm --filter @ocw/api eval:multiplayer");
