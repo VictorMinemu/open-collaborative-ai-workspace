@@ -27,7 +27,7 @@ import { createEnvFileSecretStore, type SecretStore } from "./lib/secret-store";
 import { createAgentModule } from "./modules/agent";
 import { createAgentChannelModule } from "./modules/agent-channel";
 import { createAiChatModule } from "./modules/ai-chat";
-import { createArtifactModule } from "./modules/artifact";
+import { createArtifactModule, type ObjectStorage } from "./modules/artifact";
 import { createAuditService } from "./modules/audit";
 import { createBotCapabilitiesModule } from "./modules/bot-capabilities";
 import { createChatModule, createConversationAccess } from "./modules/chat";
@@ -52,6 +52,8 @@ export interface BuiltApp {
   authz: AuthzRegistry;
   /** The Device Link hub (tests reach its session handler, e.g. `onAccessChanged`). */
   deviceHub: DeviceHub;
+  /** Attachment object storage, null when unconfigured (tests count its calls, e.g. none on the prompt submit path). */
+  storage: ObjectStorage | null;
   close(): Promise<void>;
 }
 
@@ -62,6 +64,8 @@ export async function buildApp(
     logStream?: { write(msg: string): void };
     /** Test hook: resolve env/file SecretReferences from these values instead of process.env. */
     secretStore?: SecretStore;
+    /** Test hook: a lower Device Link frame limit (06.1-02); never read from the environment. */
+    deviceFrameMaxBytes?: number;
   } = {},
 ): Promise<BuiltApp> {
   const app = Fastify({
@@ -230,7 +234,11 @@ export async function buildApp(
   // ---------------------------------------------------------------- module registry
   // Add a module: implement apps/api/src/modules/<name>/index.ts and add ONE line here.
   // Modules are mounted under /api/v1 unless they set `prefix`.
-  const deviceModule = createDeviceModule(core); // B3: owns the Device Link hub used by work-session
+  // B3: owns the Device Link hub used by work-session.
+  const deviceModule = createDeviceModule(
+    core,
+    opts.deviceFrameMaxBytes ? { maxFrameBytes: opts.deviceFrameMaxBytes } : {},
+  );
   const modelGateway = createModelGateway(core); // Phase 5: the only place a LanguageModel is built (P-04)
   // Phase 4: attachments (ADR-0015); 06.1: a Work Zone session's images follow the session (P-04).
   const artifactModule = createArtifactModule(core, {
@@ -274,6 +282,7 @@ export async function buildApp(
     core,
     authz,
     deviceHub: deviceModule.hub,
+    storage: artifactModule.storage,
     async close() {
       await app.close();
       for (const m of modules) await m.close?.();

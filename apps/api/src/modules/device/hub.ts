@@ -2,12 +2,14 @@ import {
   type AckFrame,
   type CapabilitiesFrame,
   type CommandKind,
+  DEVICE_LINK_MAX_COMMAND_FRAME_BYTES,
   type DiffResultFrame,
   DiffResultFrame as DiffResultFrameSchema,
   type EventFrame,
   EventTypes,
   type HelloFrame,
   type ServerToDeviceFrame,
+  stripImageData,
   type TitleResultFrame,
 } from "@ocw/contracts";
 import { deviceCommands, devices, type TenantDb, type Tx, tenantOf } from "@ocw/db";
@@ -36,11 +38,16 @@ export interface DeviceSessionHandler {
   /** The device stayed disconnected past the grace period. */
   onOffline(device: DeviceRef): Promise<void>;
   onEvent(device: DeviceRef, frame: EventFrame): Promise<void>;
+  /**
+   * A command's outcome: the device's ack (`origin: "device"`), or the hub failing it before it was sent
+   * (`origin: "hub"`, 06.1: `error` is then the reason, e.g. `image_unavailable`; never device-supplied text).
+   */
   onCommandResult(
     device: DeviceRef,
     command: DeviceCommandRow,
     ok: boolean,
     error: string | null,
+    origin?: "device" | "hub",
   ): Promise<void>;
   /** A `diff.result` for a session's `diff.request` (also relayed to any waiting requester). */
   onDiffResult(device: DeviceRef, workSessionId: string, frame: DiffResultFrame): Promise<void>;
@@ -55,6 +62,34 @@ export interface DeviceSessionHandler {
     device: { deviceId: string; organizationId: string },
     reason: "policy" | "access_changed" | "device_opt_out",
   ): Promise<void>;
+  /**
+   * 06.1 (P-03), step 1 of a flush, INSIDE its transaction: database work only (e.g. which stored part of each image
+   * a prompt sends). Returns a plan for `hydrateCommand`, or undefined when the stored payload is sent as is.
+   */
+  prepareCommand?(tx: Tx, device: DeviceRef, command: DeviceCommandRow): Promise<unknown>;
+  /**
+   * 06.1 (P-03), step 2, AFTER the transaction committed (object storage reads and image work never hold a database
+   * transaction): the payload actually sent. Never written back. Throw `CommandUndeliverableError` to fail the
+   * command visibly instead of sending it.
+   */
+  hydrateCommand?(
+    device: DeviceRef,
+    command: DeviceCommandRow,
+    plan: unknown,
+  ): Promise<Record<string, unknown>>;
+}
+
+/**
+ * A command that cannot be delivered (06.1): marked `failed` with `reason` as its error and reported to
+ * `onCommandResult(…, false, reason)`; the link stays up. The message must never carry payload data.
+ */
+export class CommandUndeliverableError extends Error {
+  constructor(
+    readonly reason: string,
+    message = reason,
+  ) {
+    super(message);
+  }
 }
 
 export interface EnqueueCommand {
@@ -86,7 +121,25 @@ export interface DeviceHubOptions {
   log: FastifyBaseLogger;
   /** How long a device may stay disconnected before it is marked offline (default 10 s). */
   offlineGraceMs?: number;
+  /**
+   * The largest frame sent to a device (default DEVICE_LINK_MAX_COMMAND_FRAME_BYTES, the daemon's `maxPayload`).
+   * Tests only lower it; it is never read from the environment.
+   */
+  maxFrameBytes?: number;
 }
+
+/**
+ * 06.1 (P-01, Pitfall 2): whether a serialized frame fits `limit` UTF-8 bytes. A frame above the daemon's
+ * `maxPayload` closes the link (1009) and redelivery would loop, so the hub never sends one.
+ */
+export function frameFits(serialized: string, limit: number): boolean {
+  // A UTF-16 code unit is 1 to 3 UTF-8 bytes: decide without measuring when the length alone settles it.
+  if (serialized.length > limit) return false;
+  if (serialized.length * 3 <= limit) return true;
+  return Buffer.byteLength(serialized, "utf8") <= limit;
+}
+
+type SendResult = "sent" | "closed" | "too_large";
 
 /**
  * Device Link hub: owns the live device sockets of this API instance, the persistent command queue
@@ -99,9 +152,11 @@ export class DeviceHub {
   private readonly offlineTimers = new Map<string, NodeJS.Timeout>();
   private handler: DeviceSessionHandler | null = null;
   readonly offlineGraceMs: number;
+  private readonly maxFrameBytes: number;
 
   constructor(private readonly opts: DeviceHubOptions) {
     this.offlineGraceMs = opts.offlineGraceMs ?? 10_000;
+    this.maxFrameBytes = opts.maxFrameBytes ?? DEVICE_LINK_MAX_COMMAND_FRAME_BYTES;
   }
 
   setSessionHandler(handler: DeviceSessionHandler): void {
@@ -285,7 +340,8 @@ export class DeviceHub {
   async onAck(device: DeviceRef, frame: AckFrame): Promise<void> {
     if (!/^[0-9a-f-]{36}$/i.test(frame.commandId)) return;
     const ok = frame.ok !== false;
-    const error = ok ? null : (frame.error ?? "command failed").slice(0, 2000);
+    // P-11: an error may echo an image back (a data URL, a base64 run); it is stored and shown without it.
+    const error = ok ? null : stripImageData(frame.error ?? "command failed").slice(0, 2000);
     const row = await this.opts.db.withTenant(
       { organizationId: device.organizationId, userId: null },
       async (tx) => {
@@ -362,24 +418,46 @@ export class DeviceHub {
 
   // ------------------------------------------------------------------ internals
 
-  private send(socket: WebSocket, frame: ServerToDeviceFrame): boolean {
-    if (socket.readyState !== socket.OPEN) return false;
-    socket.send(JSON.stringify(frame));
-    return true;
+  /** Every frame to a device goes through here: serialized once and refused above `maxFrameBytes` (P-01). */
+  private send(socket: WebSocket, frame: ServerToDeviceFrame): SendResult {
+    if (socket.readyState !== socket.OPEN) return "closed";
+    const serialized = JSON.stringify(frame);
+    if (!frameFits(serialized, this.maxFrameBytes)) {
+      this.opts.log.warn(
+        {
+          type: frame.type,
+          ...(frame.type === "command" ? { commandId: frame.id, kind: frame.kind } : {}),
+          bytes: Buffer.byteLength(serialized, "utf8"),
+          limit: this.maxFrameBytes,
+        },
+        "device frame too large; not sent",
+      );
+      return "too_large";
+    }
+    socket.send(serialized);
+    return "sent";
   }
 
   private async publishControl(deviceId: string, msg: ControlMessage): Promise<void> {
     await this.opts.bus.publish(deviceChannel(deviceId), JSON.stringify(msg));
   }
 
-  /** Send pending (and, on reconnect, already-sent but unacked) commands in creation order. */
+  /**
+   * Send pending (and, on reconnect, already-sent but unacked) commands in creation order: select → hydrate → send →
+   * mark (06.1, P-03). The first transaction only selects the commands and lets the session handler prepare them
+   * (database work); hydration (object storage, image work) and sending happen after it committed; a second short
+   * transaction marks what was sent and what failed; failures reach the handler only after that commit.
+   */
   private flush(deviceId: string, includeSent: boolean): Promise<void> {
     const link = this.links.get(deviceId);
     if (!link) return Promise.resolve();
-    const run = async () => {
-      if (this.links.get(deviceId) !== link) return;
+    const none: DeviceCommandRow[] = [];
+    const run = async (): Promise<DeviceCommandRow[]> => {
+      if (this.links.get(deviceId) !== link) return none;
       const { device, socket } = link;
-      await this.opts.db.withTenant({ organizationId: device.organizationId, userId: null }, async (tx) => {
+      const tenant = { organizationId: device.organizationId, userId: null };
+      const handler = this.handler;
+      const batch = await this.opts.db.withTenant(tenant, async (tx) => {
         const rows = await tx
           .select()
           .from(deviceCommands)
@@ -391,30 +469,87 @@ export class DeviceHub {
           )
           .orderBy(asc(deviceCommands.createdAt), asc(deviceCommands.id))
           .limit(500);
-        const sent: string[] = [];
-        for (const row of rows) {
-          const ok = this.send(socket, {
-            type: "command",
-            id: row.id,
-            kind: row.kind,
-            sessionId: row.workSessionId ?? "00000000-0000-0000-0000-000000000000",
-            payload: row.payload,
-          });
-          if (!ok) break;
-          sent.push(row.id);
+        const out: Array<{ row: DeviceCommandRow; plan: unknown }> = [];
+        for (const row of rows) out.push({ row, plan: await handler?.prepareCommand?.(tx, device, row) });
+        return out;
+      });
+      if (batch.length === 0) return none;
+
+      const sent: string[] = [];
+      const failed: Array<{ id: string; reason: string }> = [];
+      for (const { row, plan } of batch) {
+        let payload = row.payload;
+        if (plan !== undefined && handler?.hydrateCommand) {
+          try {
+            payload = await handler.hydrateCommand(device, row, plan);
+          } catch (err) {
+            const reason = err instanceof CommandUndeliverableError ? err.reason : "command_unavailable";
+            // Ids and the reason only: an error from storage or image work never reaches the log with data.
+            this.opts.log.warn(
+              { commandId: row.id, kind: row.kind, reason },
+              "device command could not be prepared; failed",
+            );
+            failed.push({ id: row.id, reason });
+            continue;
+          }
         }
+        const result = this.send(socket, {
+          type: "command",
+          id: row.id,
+          kind: row.kind,
+          sessionId: row.workSessionId ?? "00000000-0000-0000-0000-000000000000",
+          payload,
+        });
+        if (result === "closed") break;
+        // Never resent: a frame over the limit would close the link and loop on redelivery.
+        if (result === "too_large") failed.push({ id: row.id, reason: "frame_too_large" });
+        else sent.push(row.id);
+      }
+      if (sent.length === 0 && failed.length === 0) return none;
+
+      return this.opts.db.withTenant(tenant, async (tx) => {
         if (sent.length > 0) {
           await tx
             .update(deviceCommands)
             .set({ status: "sent", sentAt: sql`now()` })
             .where(and(inArray(deviceCommands.id, sent), eq(deviceCommands.status, "pending")));
         }
+        const out: DeviceCommandRow[] = [];
+        for (const f of failed) {
+          const [row] = await tx
+            .update(deviceCommands)
+            .set({ status: "failed", error: f.reason, ackedAt: sql`now()` })
+            .where(and(eq(deviceCommands.id, f.id), inArray(deviceCommands.status, ["pending", "sent"])))
+            .returning();
+          if (row) out.push(row);
+        }
+        return out;
       });
     };
-    link.sending = link.sending.then(run, run).catch((err) => {
-      this.opts.log.error({ err }, "device command flush failed");
-    });
+    const done = link.sending.then(run, run);
+    link.sending = done.then(
+      () => undefined,
+      (err) => {
+        this.opts.log.error({ err }, "device command flush failed");
+      },
+    );
+    // Pitfall 8: failures reach the handler (which locks the session) only after the marking transaction committed,
+    // and outside this device's delivery chain: the handler may enqueue the next command, whose flush waits for it.
+    void done.then(
+      (failedRows) => this.reportUndelivered(link.device, failedRows),
+      () => {},
+    );
     return link.sending;
+  }
+
+  private async reportUndelivered(device: DeviceRef, rows: DeviceCommandRow[]): Promise<void> {
+    for (const row of rows) {
+      try {
+        await this.handler?.onCommandResult(device, row, false, row.error, "hub");
+      } catch (err) {
+        this.opts.log.error({ err, commandId: row.id }, "device command failure handling failed");
+      }
+    }
   }
 
   private async markOffline(device: DeviceRef, disconnectedAt: Date): Promise<void> {

@@ -52,3 +52,22 @@ export async function renderRenditions(source: Readable): Promise<Renditions> {
     throw err;
   }
 }
+
+/**
+ * 06.1-02: an image fit inside `maxEdge` × `maxEdge` in memory (never stored), with the renditions' settings:
+ * `limitInputPixels`, orientation applied, never enlarged, webp q82, no metadata. Used at dispatch on a `large.webp`
+ * rendition whose long edge is above the device limit.
+ */
+export async function fitImageWithin(bytes: Uint8Array, maxEdge: number): Promise<Uint8Array> {
+  try {
+    const out = await sharp(bytes, { limitInputPixels: MAX_INPUT_PIXELS, failOn: "error" })
+      .rotate()
+      .resize(maxEdge, maxEdge, { fit: "inside", withoutEnlargement: true })
+      .webp({ quality: 82 })
+      .toBuffer();
+    return new Uint8Array(out);
+  } catch (err) {
+    if (isPixelLimit(err)) throw new ImageTooLargeError("image exceeds the pixel limit");
+    throw err;
+  }
+}

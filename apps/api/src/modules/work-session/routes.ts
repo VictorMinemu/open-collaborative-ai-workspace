@@ -66,7 +66,7 @@ import {
   storedSettings,
 } from "./controls";
 import { sessionFacts as sharedSessionFacts } from "./facts";
-import { currentSessionModel, imagesNotSupported } from "./images";
+import { checkImageBudget, currentSessionModel, imagesNotSupported } from "./images";
 import { knownModels, loadWorkZonePolicy, saveWorkZonePolicy } from "./policy";
 import { type SessionRow, type WorkSessionService, wsTopic } from "./service";
 import { runSessionCommand } from "./slash";
@@ -467,6 +467,9 @@ export function registerWorkSessionRoutes(
       uploaderId: auth.userId,
       ids: [...attachmentIds],
     });
+    // WZ-IMG-02 (P-01, P-03): each image as sent fits 2 MiB, from the sizes recorded at upload (no storage call
+    // while the session row is locked); otherwise 400 image_too_large and the transaction rolls back.
+    checkImageBudget(images);
     await core.audit.record(tx, {
       action: "work_prompt.queued",
       resourceType: "work_prompt",

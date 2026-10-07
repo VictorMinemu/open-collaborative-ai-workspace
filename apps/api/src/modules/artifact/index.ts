@@ -6,7 +6,7 @@ import {
   WORK_PROMPT_MAX_IMAGES,
 } from "@ocw/contracts";
 import { attachments, type Tx } from "@ocw/db";
-import { and, asc, eq, inArray, isNull } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { ApiModule, App, Core } from "../../core";
 import { conflict } from "../../lib/errors";
 // Type-only: the chat module imports this module's helpers (Plan 04-12), so a runtime import would be a cycle.
@@ -18,6 +18,7 @@ import { createAttachmentSweeper } from "./sweeper";
 
 export type { AttachmentScope, AttachmentScopes, ScopedKind } from "./attachments";
 export { type AttachmentRow, toAttachment } from "./model";
+export { fitImageWithin } from "./renditions";
 export {
   type AttachmentPart,
   attachmentKey,
@@ -149,7 +150,14 @@ export async function linkWorkPromptAttachments(
     throw notLinkable("prompt");
   const linked = await tx
     .update(attachments)
-    .set({ workPromptId: input.workPromptId })
+    .set({
+      workPromptId: input.workPromptId,
+      // 06.1-02: request order is persisted (0-based), so the device and every list get the sender's order.
+      workPromptPosition: sql`array_position(array[${sql.join(
+        ids.map((id) => sql`${id}`),
+        sql`, `,
+      )}]::uuid[], ${attachments.id}) - 1`,
+    })
     .where(
       and(
         inArray(attachments.id, ids),
@@ -168,7 +176,14 @@ export async function linkWorkPromptAttachments(
   return linked.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
 }
 
-/** Ready attachments of the given Work Zone prompts, in upload order (06.1). */
+/** A prompt's images in request order (06.1-02), then upload order for rows linked without a position. */
+const workPromptOrder = [
+  sql`${attachments.workPromptPosition} asc nulls last`,
+  asc(attachments.createdAt),
+  asc(attachments.id),
+];
+
+/** Ready attachments of the given Work Zone prompts, in request order (06.1). */
 export async function attachmentsForWorkPrompts(
   tx: Tx,
   promptIds: string[],
@@ -179,7 +194,7 @@ export async function attachmentsForWorkPrompts(
     .select()
     .from(attachments)
     .where(and(inArray(attachments.workPromptId, promptIds), eq(attachments.status, "ready")))
-    .orderBy(asc(attachments.createdAt), asc(attachments.id));
+    .orderBy(...workPromptOrder);
   for (const row of rows) {
     const list = out.get(row.workPromptId!) ?? [];
     list.push(toAttachment(row));
@@ -188,13 +203,13 @@ export async function attachmentsForWorkPrompts(
   return out;
 }
 
-/** Ready attachment rows of one Work Zone prompt, in upload order (what its dispatch sends, 06.1-02). */
+/** Ready attachment rows of one Work Zone prompt, in request order (what its dispatch sends, 06.1-02). */
 export async function attachmentRowsForWorkPrompt(tx: Tx, promptId: string): Promise<AttachmentRow[]> {
   return tx
     .select()
     .from(attachments)
     .where(and(eq(attachments.workPromptId, promptId), eq(attachments.status, "ready")))
-    .orderBy(asc(attachments.createdAt), asc(attachments.id));
+    .orderBy(...workPromptOrder);
 }
 
 /** Ready attachments of the given messages, in upload order (deleted and pending ones never appear). */

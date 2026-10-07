@@ -10,6 +10,7 @@ import {
   jsonb,
   pgSchema,
   primaryKey,
+  smallint,
   text,
   timestamp,
   uniqueIndex,
@@ -497,6 +498,8 @@ export const attachments = appSchema.table(
     workPromptId: uuid("work_prompt_id").references((): AnyPgColumn => workPrompts.id, {
       onDelete: "set null",
     }),
+    /** 06.1-02: the image's place in its prompt's request order (0-based); what the device receives and lists show. */
+    workPromptPosition: smallint("work_prompt_position"),
     uploaderId: uuid("uploader_id").notNull(),
     filename: text("filename").notNull(),
     /** What the browser declared (and the presigned PUT signed). */
