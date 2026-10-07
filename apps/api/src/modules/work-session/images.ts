@@ -1,15 +1,26 @@
 import {
   EffectiveSessionSettings,
   INLINE_IMAGE_TYPES,
+  type PromptImage,
   type RuntimeCatalog,
   type RuntimeModel,
+  WORK_PROMPT_IMAGE_MAX_BYTES,
+  WORK_PROMPT_MAX_IMAGES,
 } from "@ocw/contracts";
 import { type Tx, workSessions } from "@ocw/db";
 import { eq } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { authOf, type Core } from "../../core";
 import { conflict, HttpError, notFound } from "../../lib/errors";
-import type { AttachmentScope } from "../artifact";
+import {
+  type AttachmentPart,
+  type AttachmentRow,
+  type AttachmentScope,
+  attachmentRowsForWorkPrompt,
+  type ObjectStorage,
+  readAttachmentBytes,
+} from "../artifact";
+import { CommandUndeliverableError, type DeviceCommandRow } from "../device";
 import { AuthzDeniedError, createPermissionService, type ResourceFacts } from "../organization";
 import { sessionFacts } from "./facts";
 
@@ -101,4 +112,88 @@ export function createWorkSessionAttachmentScope(core: Core): AttachmentScope {
       return { allowedTypes: INLINE_IMAGE_TYPES, typeMessage: IMAGES_ONLY_MESSAGE };
     },
   };
+}
+
+// ------------------------------------------------------------------ dispatch to the device (06.1-02, P-03)
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A prompt's image is gone (deleted, missing from storage, unreadable or over the cap): its prompt fails visibly. */
+export class ImageUnavailableError extends CommandUndeliverableError {
+  constructor() {
+    // Never the storage error's text: only this fixed reason reaches logs, the command row and the audit.
+    super("image_unavailable", "An attached image is no longer available");
+  }
+}
+
+/** What one image of a prompt command sends, chosen inside the flush transaction (database work only). */
+export interface PreparedImage {
+  row: AttachmentRow;
+  part: AttachmentPart;
+  mediaType: PromptImage["mediaType"];
+  resize: boolean;
+}
+
+/** The plan `hydratePromptImages` follows; `images: null` means an image of the prompt is no longer there. */
+export interface PromptImagesPlan {
+  images: PreparedImage[] | null;
+}
+
+/** The attachment ids a stored `prompt` command carries (ids only, request order), or none. */
+export function imageIdsOf(payload: Record<string, unknown>): string[] {
+  const ids = payload.imageAttachmentIds;
+  if (!Array.isArray(ids)) return [];
+  return ids
+    .filter((id): id is string => typeof id === "string" && UUID_RE.test(id))
+    .slice(0, WORK_PROMPT_MAX_IMAGES);
+}
+
+/**
+ * Step 1 of sending a prompt command, INSIDE the hub's flush transaction: reads the prompt's linked rows and picks
+ * each image's part. No storage call, no image work. Undefined for every other command and for a prompt without
+ * images (sent exactly as stored).
+ */
+export async function preparePromptImages(
+  tx: Tx,
+  command: DeviceCommandRow,
+): Promise<PromptImagesPlan | undefined> {
+  if (command.kind !== "prompt") return undefined;
+  const ids = imageIdsOf(command.payload);
+  if (ids.length === 0) return undefined;
+  const promptId = String(command.payload.promptId ?? "");
+  const rows = UUID_RE.test(promptId) ? await attachmentRowsForWorkPrompt(tx, promptId) : [];
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const images: PreparedImage[] = [];
+  for (const id of ids) {
+    const row = byId.get(id);
+    if (!row) return { images: null };
+    images.push({ row, part: "large.webp", mediaType: "image/webp", resize: false });
+  }
+  return { images };
+}
+
+/**
+ * Step 2, AFTER the flush transaction committed: reads each chosen part from object storage (capped at
+ * WORK_PROMPT_IMAGE_MAX_BYTES) and returns the payload to send, with `images` (base64) and without
+ * `imageAttachmentIds`. The result is never stored. Any failure is `ImageUnavailableError`.
+ */
+export async function hydratePromptImages(
+  storage: ObjectStorage | null,
+  command: DeviceCommandRow,
+  plan: PromptImagesPlan,
+): Promise<Record<string, unknown>> {
+  const { imageAttachmentIds: _ids, ...payload } = command.payload;
+  if (!plan.images || !storage) throw new ImageUnavailableError();
+  const images: PromptImage[] = [];
+  for (const image of plan.images) {
+    let bytes: Uint8Array;
+    try {
+      bytes = await readAttachmentBytes(storage, image.row, image.part, WORK_PROMPT_IMAGE_MAX_BYTES);
+    } catch {
+      throw new ImageUnavailableError();
+    }
+    if (bytes.length === 0 || bytes.length > WORK_PROMPT_IMAGE_MAX_BYTES) throw new ImageUnavailableError();
+    images.push({ mediaType: image.mediaType, dataBase64: Buffer.from(bytes).toString("base64") });
+  }
+  return { ...payload, images };
 }

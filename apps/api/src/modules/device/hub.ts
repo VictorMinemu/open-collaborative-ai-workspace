@@ -55,6 +55,34 @@ export interface DeviceSessionHandler {
     device: { deviceId: string; organizationId: string },
     reason: "policy" | "access_changed" | "device_opt_out",
   ): Promise<void>;
+  /**
+   * 06.1 (P-03), step 1 of a flush, INSIDE its transaction: database work only (e.g. which stored part of each image
+   * a prompt sends). Returns a plan for `hydrateCommand`, or undefined when the stored payload is sent as is.
+   */
+  prepareCommand?(tx: Tx, device: DeviceRef, command: DeviceCommandRow): Promise<unknown>;
+  /**
+   * 06.1 (P-03), step 2, AFTER the transaction committed (object storage reads and image work never hold a database
+   * transaction): the payload actually sent. Never written back. Throw `CommandUndeliverableError` to fail the
+   * command visibly instead of sending it.
+   */
+  hydrateCommand?(
+    device: DeviceRef,
+    command: DeviceCommandRow,
+    plan: unknown,
+  ): Promise<Record<string, unknown>>;
+}
+
+/**
+ * A command that cannot be delivered (06.1): marked `failed` with `reason` as its error and reported to
+ * `onCommandResult(…, false, reason)`; the link stays up. The message must never carry payload data.
+ */
+export class CommandUndeliverableError extends Error {
+  constructor(
+    readonly reason: string,
+    message = reason,
+  ) {
+    super(message);
+  }
 }
 
 export interface EnqueueCommand {
@@ -372,14 +400,21 @@ export class DeviceHub {
     await this.opts.bus.publish(deviceChannel(deviceId), JSON.stringify(msg));
   }
 
-  /** Send pending (and, on reconnect, already-sent but unacked) commands in creation order. */
+  /**
+   * Send pending (and, on reconnect, already-sent but unacked) commands in creation order: select → hydrate → send →
+   * mark (06.1, P-03). The first transaction only selects the commands and lets the session handler prepare them
+   * (database work); hydration (object storage, image work) and sending happen after it committed; a second short
+   * transaction marks what was sent and what failed; failures reach the handler only after that commit.
+   */
   private flush(deviceId: string, includeSent: boolean): Promise<void> {
     const link = this.links.get(deviceId);
     if (!link) return Promise.resolve();
     const run = async () => {
       if (this.links.get(deviceId) !== link) return;
       const { device, socket } = link;
-      await this.opts.db.withTenant({ organizationId: device.organizationId, userId: null }, async (tx) => {
+      const tenant = { organizationId: device.organizationId, userId: null };
+      const handler = this.handler;
+      const batch = await this.opts.db.withTenant(tenant, async (tx) => {
         const rows = await tx
           .select()
           .from(deviceCommands)
@@ -391,25 +426,62 @@ export class DeviceHub {
           )
           .orderBy(asc(deviceCommands.createdAt), asc(deviceCommands.id))
           .limit(500);
-        const sent: string[] = [];
-        for (const row of rows) {
-          const ok = this.send(socket, {
-            type: "command",
-            id: row.id,
-            kind: row.kind,
-            sessionId: row.workSessionId ?? "00000000-0000-0000-0000-000000000000",
-            payload: row.payload,
-          });
-          if (!ok) break;
-          sent.push(row.id);
+        const out: Array<{ row: DeviceCommandRow; plan: unknown }> = [];
+        for (const row of rows) out.push({ row, plan: await handler?.prepareCommand?.(tx, device, row) });
+        return out;
+      });
+      if (batch.length === 0) return;
+
+      const sent: string[] = [];
+      const failed: Array<{ id: string; reason: string }> = [];
+      for (const { row, plan } of batch) {
+        let payload = row.payload;
+        if (plan !== undefined && handler?.hydrateCommand) {
+          try {
+            payload = await handler.hydrateCommand(device, row, plan);
+          } catch (err) {
+            const reason = err instanceof CommandUndeliverableError ? err.reason : "command_unavailable";
+            // Ids and the reason only: an error from storage or image work never reaches the log with data.
+            this.opts.log.warn(
+              { commandId: row.id, kind: row.kind, reason },
+              "device command could not be prepared; failed",
+            );
+            failed.push({ id: row.id, reason });
+            continue;
+          }
         }
+        const ok = this.send(socket, {
+          type: "command",
+          id: row.id,
+          kind: row.kind,
+          sessionId: row.workSessionId ?? "00000000-0000-0000-0000-000000000000",
+          payload,
+        });
+        if (!ok) break;
+        sent.push(row.id);
+      }
+      if (sent.length === 0 && failed.length === 0) return;
+
+      const failedRows = await this.opts.db.withTenant(tenant, async (tx) => {
         if (sent.length > 0) {
           await tx
             .update(deviceCommands)
             .set({ status: "sent", sentAt: sql`now()` })
             .where(and(inArray(deviceCommands.id, sent), eq(deviceCommands.status, "pending")));
         }
+        const out: DeviceCommandRow[] = [];
+        for (const f of failed) {
+          const [row] = await tx
+            .update(deviceCommands)
+            .set({ status: "failed", error: f.reason, ackedAt: sql`now()` })
+            .where(and(eq(deviceCommands.id, f.id), inArray(deviceCommands.status, ["pending", "sent"])))
+            .returning();
+          if (row) out.push(row);
+        }
+        return out;
       });
+      // Pitfall 8: the handler locks the session; only after the marking transaction committed.
+      for (const row of failedRows) await handler?.onCommandResult(device, row, false, row.error);
     };
     link.sending = link.sending.then(run, run).catch((err) => {
       this.opts.log.error({ err }, "device command flush failed");

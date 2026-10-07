@@ -14,6 +14,7 @@ export {
 } from "./access";
 export { listGrants, loadGrants } from "./grants";
 export {
+  CommandUndeliverableError,
   type DeviceCommandRow,
   DeviceHub,
   type DeviceRef,

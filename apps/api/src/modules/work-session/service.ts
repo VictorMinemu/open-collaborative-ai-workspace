@@ -49,7 +49,12 @@ import {
   storedSettings,
   turnMode,
 } from "./controls";
-import { currentSessionModel } from "./images";
+import {
+  currentSessionModel,
+  hydratePromptImages,
+  type PromptImagesPlan,
+  preparePromptImages,
+} from "./images";
 import { loadWorkZonePolicy } from "./policy";
 import { decideTitleRequest, heuristicTitle, loadTitleContext } from "./title";
 
@@ -337,8 +342,9 @@ export class WorkSessionService implements DeviceSessionHandler {
       }
       // D-05, P-08: the model can change while an image prompt waits. A model that says it cannot read images never
       // gets the prompt without them: refused, audited, and the arbiter moves on.
+      const images = await attachmentRowsForWorkPrompt(tx, next.id);
       const current = currentSessionModel(author?.ctx.catalog ?? null, s);
-      if (current?.imageInput === false && (await attachmentRowsForWorkPrompt(tx, next.id)).length > 0) {
+      if (current?.imageInput === false && images.length > 0) {
         await this.refusePrompt(tx, s, next, "images_not_supported");
         continue;
       }
@@ -351,7 +357,13 @@ export class WorkSessionService implements DeviceSessionHandler {
         deviceId: s.deviceId,
         workSessionId: s.id,
         kind: "prompt",
-        payload: { promptId: next.id, text: next.body, permissionMode: mode },
+        // D-04, P-03: ids only. The hub reads the bytes after its flush transaction; nothing hydrated is stored.
+        payload: {
+          promptId: next.id,
+          text: next.body,
+          permissionMode: mode,
+          ...(images.length > 0 ? { imageAttachmentIds: images.map((a) => a.id) } : {}),
+        },
       });
       // D-04: every turn's effective mode is audited (actor = the prompt's author, device, session, org).
       await this.deps.audit.record(tx, {
@@ -368,6 +380,7 @@ export class WorkSessionService implements DeviceSessionHandler {
           effectiveMode: mode,
           capped: mode !== s.permissionMode,
           ...(mode === "fullAccess" ? { fullAccess: true } : {}),
+          ...(images.length > 0 ? { imageCount: images.length } : {}),
         },
       });
       await this.emitPrompt(tx, dispatched!);
@@ -714,6 +727,20 @@ export class WorkSessionService implements DeviceSessionHandler {
         }
       }
     });
+  }
+
+  /** 06.1-02 (P-03): a prompt's images, chosen inside the hub's flush transaction (database work only). */
+  async prepareCommand(tx: Tx, _device: DeviceRef, cmd: DeviceCommandRow): Promise<unknown> {
+    return preparePromptImages(tx, cmd);
+  }
+
+  /** 06.1-02 (P-03): the image bytes, read after the flush transaction committed; never stored. */
+  async hydrateCommand(
+    _device: DeviceRef,
+    cmd: DeviceCommandRow,
+    plan: unknown,
+  ): Promise<Record<string, unknown>> {
+    return hydratePromptImages(this.deps.storage ?? null, cmd, plan as PromptImagesPlan);
   }
 
   async onCommandResult(
