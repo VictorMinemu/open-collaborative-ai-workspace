@@ -238,14 +238,14 @@ test("Work Zone reasoning and permission menus (ref): only real options, reasons
     sam = await openAs(browser, SAM, info.project.name);
     await sam.page.goto(`${BASE_URL}/work-zone/${sessionId}`);
 
-    // ---- the bar of ref-1: model · reasoning · permission, attach (disabled, never faked) and send
+    // ---- the bar of ref-1: model · reasoning · permission, attach (images, 06.1) and send
     const reasoningChip = page.getByTestId("reasoning-chip");
     const permissionChip = page.getByTestId("permission-chip");
     await expect(reasoningChip).toHaveText(claudeEffort ? /Medium · 1M/ : /1M/, { timeout: 15_000 });
     await expect(permissionChip).toContainText("Plan");
     const attach = page.getByTestId("attach");
-    await expect(attach).toBeDisabled();
-    await expect(attach).toHaveAttribute("aria-label", /Attachments arrive with file uploads/);
+    await expect(attach).toBeEnabled();
+    await expect(attach).toHaveAttribute("aria-label", /Attach images/);
 
     // ---- reasoning menu (ref-2): sections, Default tag, fast mode disabled by the default policy with its cost
     await reasoningChip.click();

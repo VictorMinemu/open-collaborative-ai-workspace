@@ -221,6 +221,7 @@ function LoadedSession({ state, viewerCan }: { state: LiveSession; viewerCan: re
               session={session}
               queued={queued}
               canConfigure={viewerCan.includes("work_session.configure")}
+              canPrompt={viewerCan.includes("work_session.prompt")}
               above={
                 <AgentBar
                   session={session}
