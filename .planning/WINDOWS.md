@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 53
+open_count: 54
 waived_count: 0
 fixed_count: 16
-total_count: 69
-last_updated: 2026-10-07T05:51:33.668Z
+total_count: 70
+last_updated: 2026-10-07T10:45:46.645Z
 ---
 
 # Broken Windows Ledger
@@ -84,6 +84,7 @@ last_updated: 2026-10-07T05:51:33.668Z
 | 67 | 05 | unrun-verify | docs/adr/0017-sign-in-with-chatgpt-per-member.md |  | Owner manual check on the demo: real Sign in with ChatGPT by paste and from the desktop app, one plan turn with Stop, Business/Enterprise eligibility, visual review of 05-UI-REVIEW.md (05-VALIDATION manual rows) | open |  | 2026-10-07T05:51:33.527Z |  |
 | 68 | 05 | deviation | apps/api/src/modules/identity/authenticate.ts |  | Phase 1-4 routes run requireUser as preHandler: an anonymous malformed body gets 400 before 401 (AI routes fixed in 05-15; see 05 deferred-items.md) | open |  | 2026-10-07T05:51:33.597Z |  |
 | 69 | 05 | deviation | apps/api/src/app.ts |  | API request logs include query strings (search terms from GET /search?q=); add a serializer that redacts them (05 deferred-items.md) | open |  | 2026-10-07T05:51:33.668Z |  |
+| 70 | 06 | unrun-verify | apps/openclaw-channel/src/mention-mapper.ts |  | 06-10 ai_chat persona delivery (flat, per-mention session, withheld block, gate refusal) not yet proven in a real OpenClaw cell (CI cell-smoke unavailable) | open |  | 2026-10-07T10:45:46.645Z |  |
 
 ````json
 [
@@ -913,6 +914,18 @@ last_updated: 2026-10-07T05:51:33.668Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-07T05:51:33.668Z",
+    "resolved_at": null
+  },
+  {
+    "id": 70,
+    "kind": "unrun-verify",
+    "phase": "06",
+    "file": "apps/openclaw-channel/src/mention-mapper.ts",
+    "line": null,
+    "description": "06-10 ai_chat persona delivery (flat, per-mention session, withheld block, gate refusal) not yet proven in a real OpenClaw cell (CI cell-smoke unavailable)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T10:45:46.645Z",
     "resolved_at": null
   }
 ]
