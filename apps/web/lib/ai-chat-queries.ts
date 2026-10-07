@@ -248,6 +248,8 @@ export interface AiChatView {
   isPending: boolean;
   /** Answers rendered streaming now are live on this page (not a replay ahead of the first snapshot). */
   live: boolean;
+  /** This page sent or regenerated in the chat (New chat's first send lands here with it set). */
+  sentHere: boolean;
   error: unknown;
   notFound: boolean;
   refetch: () => void;
@@ -350,6 +352,7 @@ export function useAiChat(chatId: string): AiChatView {
     // page opened then shows `streaming` for a moment. Until a snapshot (or a send from this page) anchors the
     // state, nothing rendered counts as having streamed here (05-14: no usage-limit dialog again after a reload).
     live: sentHere.current || state.snapshot !== null || query.data !== undefined,
+    sentHere: sentHere.current,
     error: query.error,
     notFound: isApiError(query.error, 404),
     refetch: () => void refetch(),

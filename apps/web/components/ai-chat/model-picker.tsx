@@ -214,7 +214,10 @@ export function ModelPicker({
   onChange,
   disabled = false,
   trigger = "chip",
+  finalFocus,
 }: {
+  /** Where focus goes when the desktop popover closes (the composer in a chat); default the chip. */
+  finalFocus?: () => HTMLElement | null;
   chatKey: string;
   value: ModelRef | null;
   onChange: (ref: ModelRef) => void;
@@ -255,6 +258,7 @@ export function ModelPicker({
         open={open}
         onOpenChange={setOpen}
         className="w-[min(21rem,calc(100vw-1.5rem))]"
+        {...(finalFocus ? { finalFocus } : {})}
       >
         <ModelPickerList
           models={list}

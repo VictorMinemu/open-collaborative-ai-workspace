@@ -40,6 +40,10 @@ export function AiMessageList({
       ref={ref}
       onScroll={onScroll}
       data-testid="ai-message-list"
+      // Screen readers hear new turns politely; a streaming answer is aria-busy, so it is read once, when done.
+      role="log"
+      aria-live="polite"
+      aria-label="Conversation"
       className="scrollbar-thin min-h-0 flex-1 overflow-y-auto [mask-image:linear-gradient(to_bottom,transparent,black_16px)]"
     >
       <div className="mx-auto grid w-full max-w-3xl grid-cols-[minmax(0,1fr)] gap-7 px-4 pt-6 pb-8 sm:px-6 sm:pt-8">

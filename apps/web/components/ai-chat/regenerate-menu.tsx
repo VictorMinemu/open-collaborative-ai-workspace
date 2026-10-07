@@ -11,6 +11,7 @@ import { regenerate, useAiModels } from "@/lib/ai-chat-queries";
 import { refreshAiUsageToday } from "@/lib/ai-usage-queries";
 import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { composerElement } from "./ai-composer";
 import { ModelPickerList } from "./model-picker";
 
 /**
@@ -81,6 +82,7 @@ export function RegenerateMenu({
       open={open}
       onOpenChange={onOpenChange}
       className="w-[min(21rem,calc(100vw-1.5rem))]"
+      finalFocus={composerElement}
     >
       {view === "menu" ? (
         <div className="grid gap-0.5 py-0.5">

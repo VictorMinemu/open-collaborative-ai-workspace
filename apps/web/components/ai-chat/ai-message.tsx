@@ -59,6 +59,7 @@ export function AiMessage({
       data-role="assistant"
       data-status={message.status}
       data-message-id={message.id}
+      aria-busy={streaming}
       className="group/answer grid min-w-0 gap-1.5"
     >
       <div data-testid="ai-message-text" className={text ? "min-w-0" : "hidden"}>
@@ -79,8 +80,7 @@ export function AiMessage({
       {streaming ? (
         <span
           data-testid="ai-streaming-caret"
-          role="status"
-          aria-label="Writing the answer"
+          aria-hidden
           className="block size-2.5 animate-pulse rounded-full bg-foreground/70 motion-reduce:animate-none"
         />
       ) : (

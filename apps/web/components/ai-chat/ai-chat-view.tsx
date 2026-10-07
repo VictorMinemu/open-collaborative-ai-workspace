@@ -294,6 +294,8 @@ function ExistingChat({ chatId }: { chatId: string }) {
             onStop={runningId ? onStop : undefined}
             uploadTarget={chatId}
             apiRef={composer}
+            // Arriving from New chat's first send: the keyboard stays in the composer.
+            autoFocus={chat.sentHere}
           />
         )}
       </ChatDropZone>

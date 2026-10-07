@@ -54,6 +54,11 @@ export function pickModel(
   return list.find((m) => m.available && m.isDefault) ?? list.find((m) => m.available) ?? null;
 }
 
+/** The composer's textarea: menus around the chat hand focus back to it when they close (05-14). */
+export const AI_COMPOSER_ID = "ai-composer-input";
+export const composerElement = (): HTMLElement | null =>
+  typeof document === "undefined" ? null : document.getElementById(AI_COMPOSER_ID);
+
 /** The files a send carries (05-12): the verified uploads, in tray order. */
 export interface AiSendFiles {
   ids: string[];
@@ -233,6 +238,8 @@ export function AiComposer({
     } catch {
       setStopping(false); // the caller reported the error; Stop stays available
     }
+    // The Stop button gives way to Send: keep the keyboard in the composer, not on a removed button.
+    ref.current?.focus({ preventScroll: true });
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
@@ -292,6 +299,7 @@ export function AiComposer({
         ) : null}
         <textarea
           ref={ref}
+          id={AI_COMPOSER_ID}
           data-testid="ai-composer"
           rows={1}
           value={text}
@@ -306,7 +314,13 @@ export function AiComposer({
           className="block max-h-[240px] min-h-[56px] w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-[15px] leading-6 outline-none placeholder:text-muted-foreground/70 disabled:cursor-not-allowed"
         />
         <div className="flex min-w-0 items-center gap-1 px-2 pb-2">
-          <ToolsMenu chat={chat} model={model} value={tools} onChange={setTools} />
+          <ToolsMenu
+            chat={chat}
+            model={model}
+            value={tools}
+            onChange={setTools}
+            finalFocus={composerElement}
+          />
           {canAttach ? (
             <>
               <input
@@ -335,7 +349,12 @@ export function AiComposer({
           ) : null}
           {webActive ? <WebChip onRemove={() => setTools({ ...tools, web: false })} /> : null}
           {model ? (
-            <ModelPicker chatKey={chatKey} value={model.ref} onChange={setSelected} />
+            <ModelPicker
+              chatKey={chatKey}
+              value={model.ref}
+              onChange={setSelected}
+              finalFocus={composerElement}
+            />
           ) : modelsLoading ? (
             <span className="h-4 w-24 animate-pulse rounded bg-muted" />
           ) : null}

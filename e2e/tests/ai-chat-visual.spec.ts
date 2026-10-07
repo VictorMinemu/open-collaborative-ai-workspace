@@ -346,3 +346,105 @@ test("Settings › AI chat, and Settings › Models › AI chats and Usage", asy
   await review(page, "settings-models-usage", w);
   await owner.context.close();
 });
+
+/** The focused element shows a focus ring (Tailwind rings are box-shadows; outlines count too). */
+async function focusRingShown(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const el = document.activeElement;
+    if (!el || el === document.body) return false;
+    const s = getComputedStyle(el);
+    return s.boxShadow !== "none" || (s.outlineStyle !== "none" && s.outlineWidth !== "0px");
+  });
+}
+
+test("the chat works from the keyboard and streaming stays quiet for screen readers", async ({
+  browser,
+}, info) => {
+  test.setTimeout(90_000);
+  const project = info.project.name;
+  const mobile = project === "mobile";
+  const { context, page } = await openAs(browser, SAM, project);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+
+  // A fresh New chat is ready to type; a starter only fills the composer.
+  await openNewAiChat(page);
+  const composer = page.getByTestId("ai-composer");
+  await expect(composer).toBeFocused();
+  await page.getByTestId("ai-starter").filter({ hasText: "Draft an email" }).click();
+  await expect(composer).toHaveValue("Draft a short, friendly email to ");
+  await expect(composer).toBeFocused();
+  await expect(page).toHaveURL(/\/chat\/ai\/new$/u);
+
+  // Shift+Enter breaks a line; Enter would send.
+  await page.keyboard.type("the team");
+  await page.keyboard.press("Shift+Enter");
+  await page.keyboard.type("Thanks");
+  await expect(composer).toHaveValue("Draft a short, friendly email to the team\nThanks");
+
+  // Tab walks the composer's controls in order, each with a visible focus ring.
+  const order = ["ai-tools-button"];
+  if ((await page.getByTestId("ai-attach-button").count()) > 0) order.push("ai-attach-button");
+  order.push("ai-model-chip", "ai-send");
+  for (const id of order) {
+    await page.keyboard.press("Tab");
+    await expect(page.getByTestId(id)).toBeFocused();
+    await expect.poll(() => focusRingShown(page), { message: `${id} focus ring` }).toBe(true);
+  }
+  await expect(page.getByRole("button", { name: "Send" })).toBeFocused();
+
+  // Closing the model picker and the tools menu with Esc: back in the composer on a desktop (a phone's sheet hands
+  // focus back to its trigger, so the keyboard never pops up by itself).
+  for (const [trigger, surface] of [
+    ["ai-model-chip", "ai-model-picker"],
+    ["ai-tools-button", "ai-tools-menu"],
+  ] as const) {
+    await page.getByTestId(trigger).focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId(surface).filter({ visible: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId(surface)).toBeHidden();
+    await expect(page.getByTestId(mobile ? trigger : "ai-composer")).toBeFocused();
+  }
+
+  // Enter sends; the chat opens with the keyboard still in the composer.
+  await composer.fill("count to forty [[slow]]");
+  await composer.press("Enter");
+  await expect(page).toHaveURL(/\/chat\/ai\/[0-9a-f-]{36}$/u);
+  created.push(chatIdOf(page));
+  await expect(page.getByTestId("ai-composer")).toBeFocused();
+
+  // The conversation is a polite log; the streaming answer is busy (read once, when done), the caret is decoration
+  // and does not animate under reduced motion.
+  const log = page.getByRole("log", { name: "Conversation" });
+  await expect(log).toHaveAttribute("aria-live", "polite");
+  const answer = lastAssistant(page);
+  await expect(answer).toHaveAttribute("data-status", "streaming");
+  await expect(answer).toHaveAttribute("aria-busy", "true");
+  const caret = answer.getByTestId("ai-streaming-caret");
+  await expect(caret).toHaveAttribute("aria-hidden", "true");
+  expect(await caret.evaluate((el) => getComputedStyle(el).animationName)).toBe("none");
+  await waitForLonger(answer, "Echo: count to forty 1 2".length);
+
+  // Esc stops; the stopped answer is no longer busy and the keyboard stays in the composer.
+  await page.getByTestId("ai-composer").press("Escape");
+  await expect(answer).toHaveAttribute("data-status", "completed", { timeout: 5_000 });
+  await expect(answer.getByTestId("ai-generation-state")).toHaveText("Stopped");
+  await expect(answer).toHaveAttribute("aria-busy", "false");
+  await expect(page.getByTestId("ai-composer")).toBeFocused();
+
+  // After a send in the open chat, focus is back in the composer once the answer is accepted.
+  await sendAi(page, "and a short one");
+  const next = lastAssistant(page);
+  await expect(next).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
+  await expect(next).toHaveAttribute("aria-busy", "false");
+  await expect(page.getByTestId("ai-composer")).toBeFocused();
+
+  // The regenerate menu closes back to the composer on a desktop too.
+  await next.getByTestId("ai-regenerate").click();
+  await expect(page.getByTestId("ai-regenerate-menu").filter({ visible: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("ai-regenerate-menu")).toBeHidden();
+  if (!mobile) await expect(page.getByTestId("ai-composer")).toBeFocused();
+
+  await context.close();
+});

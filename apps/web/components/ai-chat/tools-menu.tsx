@@ -174,11 +174,14 @@ export function ToolsMenu({
   model,
   value,
   onChange,
+  finalFocus,
 }: {
   chat: AiChatDetail | null;
   model: AiModelOption | null;
   value: AiChatTools;
   onChange: (t: AiChatTools) => void;
+  /** Where focus goes when the desktop popover closes (the composer). */
+  finalFocus?: () => HTMLElement | null;
 }) {
   const [open, setOpen] = useState(false);
   const webReason = useWebReason(chat, model);
@@ -200,6 +203,7 @@ export function ToolsMenu({
       open={open}
       onOpenChange={setOpen}
       className="w-[min(22rem,calc(100vw-1.5rem))]"
+      {...(finalFocus ? { finalFocus } : {})}
     >
       <ToolsList value={value} onChange={onChange} webReason={webReason} model={model} />
     </ControlSurface>
