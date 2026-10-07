@@ -591,6 +591,30 @@ describe("follow: followers get card_updated when the status changes (Task 2)", 
     // Víctor (a member) can.
     expect((await follow(victor, hidden)).status).toBe(204);
   });
+
+  it("GET /cards/:messageId: the viewer's card (following, viewerCan) for a card that arrived live; 404 when hidden (06-15)", async () => {
+    const live = await newCard(backendId, approvalCard());
+    expect((await follow(alex, live)).status).toBe(204);
+    const mine = await ok(alex.request("GET", `/api/v1/cards/${live}`));
+    expect(AgentCard.parse(mine)).toMatchObject({
+      kind: "approval",
+      title: "Deploy api v2.3",
+      following: true,
+      viewerCan: ["follow", "decide"],
+      decision: null,
+    });
+    expect(await ok(sam.request("GET", `/api/v1/cards/${live}`))).toMatchObject({ following: false });
+    expect((await alex.request("GET", `/api/v1/cards/${randomUUID()}`)).status).toBe(404);
+    const priv = await ok(victor.request("POST", "/api/v1/channels", { name: "ops-2", visibility: "private" }));
+    await ok(victor.request("POST", `/api/v1/channels/${priv.id}/members`, { kind: "agent", id: deployId }));
+    const hidden = await newCard(priv.id as string, approvalCard());
+    expect((await sam.request("GET", `/api/v1/cards/${hidden}`)).status).toBe(404);
+    // A plain message is not a card.
+    const plain = await ok(
+      victor.request("POST", `/api/v1/conversations/${backendId}/messages`, { body: "no card here" }),
+    );
+    expect((await alex.request("GET", `/api/v1/cards/${(plain as Json).id}`)).status).toBe(404);
+  });
 });
 
 describe("decision: one audited, server-decided outcome, delivered to the agent (Task 2)", () => {
@@ -780,6 +804,8 @@ describe("decision: one audited, server-decided outcome, delivered to the agent 
       (await su.query("select decision from app.message_cards where message_id = $1", [viewOnly])).rows[0],
     ).toEqual({ decision: null });
     expect(await cardActionsOf(viewOnly)).toHaveLength(0);
+    // The single-card read (06-15) says the same.
+    expect((await ok(sam.request("GET", `/api/v1/cards/${viewOnly}`))).viewerCan).toEqual(["follow"]);
     // A `chat` grantee writes in the chat, so they may decide.
     expect((await decide(alex, viewOnly, "denied")).status).toBe(200);
   });
