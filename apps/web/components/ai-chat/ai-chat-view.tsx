@@ -2,7 +2,7 @@
 
 import type { AiChatTools, AiModelOption, SendAiMessageResponse } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
-import { Archive, Lock, MessageCircleQuestion } from "lucide-react";
+import { Archive, Lock, MessageCircleQuestion, SlidersHorizontal } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -19,13 +19,16 @@ import {
   stopGeneration,
   updateAiChat,
   useAiChat,
+  useAiChatSettingsLive,
   useAiChatSummary,
   useAiModels,
+  useAiPreferences,
 } from "@/lib/ai-chat-queries";
 import { errorMessage, isApiError } from "@/lib/api";
-import { AiChatHeader, AiChatPlainHeader } from "./ai-chat-header";
+import { AiChatHeader, AiChatMenuItem, AiChatPlainHeader } from "./ai-chat-header";
 import { AiComposer } from "./ai-composer";
 import { AiMessageList } from "./ai-message-list";
+import { ChatSettingsSheet } from "./chat-settings-sheet";
 
 /**
  * The AI chat screen (D-08, P-09) later plans extend: a borderless header, the centered conversation and a sticky
@@ -50,6 +53,8 @@ function sendFailed(err: unknown): never {
 function NewChat() {
   const router = useRouter();
   const models = useAiModels();
+  // The member's "Web search on by default" (05-11); the default model comes with the model list.
+  const prefs = useAiPreferences();
 
   async function onSend(body: string, m: AiModelOption, tools: AiChatTools) {
     let res: SendAiMessageResponse;
@@ -78,6 +83,7 @@ function NewChat() {
         </div>
         <AiComposer
           chatKey={NEW_CHAT_KEY}
+          initialTools={prefs.data ? { web: prefs.data.webDefault } : undefined}
           models={models.data?.models}
           preferred={[models.data?.defaultRef]}
           modelsLoading={models.isPending}
@@ -95,8 +101,11 @@ function ExistingChat({ chatId }: { chatId: string }) {
   const models = useAiModels();
   // A title generated or typed after the snapshot, or an archive, arrives live as the chat's latest summary.
   const live = useAiChatSummary(chatId);
+  // Settings saved in the chat settings sheet after the snapshot (05-11).
+  const liveSettings = useAiChatSettingsLive(chatId);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const snapshotChat = chat.snapshot?.chat;
-  const detail = snapshotChat && live ? { ...snapshotChat, ...live } : snapshotChat;
+  const detail = snapshotChat ? { ...snapshotChat, ...live, ...liveSettings } : snapshotChat;
   const writing = chat.messages.findLast((m) => m.authorKind === "agent" && m.status === "streaming");
   const busy = writing !== undefined;
   // The generation to stop: the streaming answer's, else the snapshot's running one.
@@ -172,7 +181,27 @@ function ExistingChat({ chatId }: { chatId: string }) {
   }
 
   return (
-    <Frame header={detail ? <AiChatHeader chat={detail} /> : <AiChatPlainHeader title="New chat" />}>
+    <Frame
+      header={
+        detail ? (
+          <AiChatHeader
+            chat={detail}
+            extraMenuItems={
+              <AiChatMenuItem
+                icon={<SlidersHorizontal />}
+                testId="ai-chat-menu-settings"
+                onSelect={() => setSettingsOpen(true)}
+              >
+                Chat settings
+              </AiChatMenuItem>
+            }
+          />
+        ) : (
+          <AiChatPlainHeader title="New chat" />
+        )
+      }
+    >
+      {detail ? <ChatSettingsSheet chat={detail} open={settingsOpen} onOpenChange={setSettingsOpen} /> : null}
       <AiMessageList
         chatId={chatId}
         messages={chat.messages}

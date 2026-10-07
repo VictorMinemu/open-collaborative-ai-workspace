@@ -7,6 +7,7 @@ import {
   AiChatSnapshot as AiChatSnapshotSchema,
   type AiChatSummary,
   AiModelList,
+  AiUserPreferences,
   type CreateAiChatRequest,
   EventTypes,
   type Message,
@@ -16,6 +17,7 @@ import {
   StopAiGenerationResponse,
   topic,
   type UpdateAiChatRequest,
+  type UpdateAiUserPreferencesRequest,
 } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
 import {
@@ -47,6 +49,10 @@ export const aiKeys = {
   list: (archived: boolean) => ["ai", "chats", archived ? "archived" : "recent"] as const,
   /** The latest summary of one chat seen live (`ai_chat.updated`, a rename): the header's title and archive state. */
   summary: (id: string) => ["ai", "summary", id] as const,
+  /** Settings and tool states of one chat after a PATCH (05-11): newer than its snapshot. */
+  settings: (id: string) => ["ai", "settings", id] as const,
+  /** The member's own defaults (05-11). */
+  preferences: ["ai", "preferences"] as const,
 };
 
 /** Rows per page of the chat list (the API's keyset cursor). */
@@ -113,16 +119,48 @@ export function useAiChatSummary(chatId: string): AiChatSummary | undefined {
   return q.data ?? undefined;
 }
 
-/** Rename and archive/unarchive (owner only); the answer updates every cache at once. */
+/** Rename, archive/unarchive and settings (owner only); the answer updates every cache at once. */
 export async function updateAiChat(
   qc: QueryClient,
   chatId: string,
   body: UpdateAiChatRequest,
 ): Promise<AiChatDetail> {
   const detail = await api.patch(`/api/v1/ai-chats/${chatId}`, { body, schema: AiChatDetail });
-  const { settings: _s, tools: _t, viewerCan: _v, ...summary } = detail;
+  const { settings, tools, viewerCan: _v, ...summary } = detail;
   applyAiChatUpdated(qc, summary);
+  qc.setQueryData(aiKeys.settings(chatId), { settings, tools });
   return detail;
+}
+
+/** The chat's settings and tool states saved after its snapshot (chat settings sheet), else undefined. */
+export function useAiChatSettingsLive(chatId: string): Pick<AiChatDetail, "settings" | "tools"> | undefined {
+  const q = useQuery<Pick<AiChatDetail, "settings" | "tools"> | null>({
+    queryKey: aiKeys.settings(chatId),
+    queryFn: () => null,
+    enabled: false,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+  return q.data ?? undefined;
+}
+
+/** The member's own AI chat defaults: personal instructions, default model, Web on new chats (05-11). */
+export function useAiPreferences() {
+  return useQuery({
+    queryKey: aiKeys.preferences,
+    queryFn: () => api.get("/api/v1/me/ai-preferences", { schema: AiUserPreferences }),
+    staleTime: 60_000,
+  });
+}
+
+/** Saves the member's defaults; the model list's default follows the new default model. */
+export async function saveAiPreferences(
+  qc: QueryClient,
+  body: UpdateAiUserPreferencesRequest,
+): Promise<AiUserPreferences> {
+  const saved = await api.put("/api/v1/me/ai-preferences", { body, schema: AiUserPreferences });
+  qc.setQueryData(aiKeys.preferences, saved);
+  void qc.invalidateQueries({ queryKey: aiKeys.models });
+  return saved;
 }
 
 const GAP_REFETCH_MS = 1_200;
