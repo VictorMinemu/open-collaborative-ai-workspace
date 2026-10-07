@@ -15,13 +15,14 @@ export function registerModelRoutes(app: App, core: Core, gateway: ModelGateway)
   const perms = createPermissionService(core);
   const manage = {
     config: { authz: "user" as const },
-    preHandler: [core.identity.requireUser, perms.requirePermission("provider.manage")],
+    onRequest: core.identity.requireUser,
+    preHandler: perms.requirePermission("provider.manage"),
   };
   app.get(
     "/ai-chat/models",
     {
       config: { authz: "user" },
-      preHandler: core.identity.requireUser,
+      onRequest: core.identity.requireUser,
       schema: { tags: ["ai-chat"], response: { 200: AiModelList } },
     },
     async (req) =>

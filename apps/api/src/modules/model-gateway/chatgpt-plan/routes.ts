@@ -112,7 +112,7 @@ export function registerChatgptPlanRoutes(app: App, core: Core): void {
     "/me/model-credentials/chatgpt",
     {
       config: { authz: "user" },
-      preHandler: core.identity.requireUser,
+      onRequest: core.identity.requireUser,
       schema: { tags, response: { 200: ChatgptPlanStatus } },
     },
     async (req) =>
@@ -127,7 +127,7 @@ export function registerChatgptPlanRoutes(app: App, core: Core): void {
     {
       config: { authz: "user" },
       logLevel: "info",
-      preHandler: core.identity.requireUser,
+      onRequest: core.identity.requireUser,
       schema: { tags, body: ChatgptSignInStartRequest, response: { 200: ChatgptSignInStartResponse } },
     },
     async (req) => {
@@ -176,7 +176,7 @@ export function registerChatgptPlanRoutes(app: App, core: Core): void {
     {
       config: { authz: "user" },
       logLevel: "info",
-      preHandler: core.identity.requireUser,
+      onRequest: core.identity.requireUser,
       schema: { tags, body: ChatgptSignInCompleteRequest, response: { 200: ChatgptPlanStatus } },
     },
     async (req) => {
@@ -285,7 +285,7 @@ export function registerChatgptPlanRoutes(app: App, core: Core): void {
     "/me/model-credentials/chatgpt/welcome-seen",
     {
       config: { authz: "user" },
-      preHandler: core.identity.requireUser,
+      onRequest: core.identity.requireUser,
       schema: { tags, response: { 200: ChatgptPlanStatus } },
     },
     async (req) =>
@@ -311,7 +311,7 @@ export function registerChatgptPlanRoutes(app: App, core: Core): void {
     {
       config: { authz: "user" },
       logLevel: "info",
-      preHandler: core.identity.requireUser,
+      onRequest: core.identity.requireUser,
       schema: { tags, response: { 200: ChatgptPlanStatus } },
     },
     async (req) =>
@@ -329,7 +329,7 @@ export function registerChatgptPlanRoutes(app: App, core: Core): void {
     "/test/ai/chatgpt-plan",
     {
       config: { authz: "user" },
-      preHandler: core.identity.requireUser,
+      onRequest: core.identity.requireUser,
       schema: {
         hide: true,
         tags: ["test"],

@@ -99,7 +99,7 @@ export async function registerGenerationRoutes(
     "/ai-chats/:id/generations/:gid/stop",
     {
       config: { authz: "user" },
-      preHandler: core.identity.requireUser,
+      onRequest: core.identity.requireUser,
       schema: { tags, params: AiGenerationParams, response: { 202: StopAiGenerationResponse } },
     },
     async (req, reply) => {
@@ -143,7 +143,8 @@ export async function registerGenerationRoutes(
     "/ai-chats/:id/regenerate",
     {
       config: { authz: "user" },
-      preHandler: [core.identity.requireUser, regenerateLimit],
+      onRequest: core.identity.requireUser,
+      preHandler: regenerateLimit,
       schema: {
         tags,
         params: IdParams,

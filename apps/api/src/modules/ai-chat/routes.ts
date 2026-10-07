@@ -24,7 +24,8 @@ const DRAFTS_PER_MINUTE = 30;
 
 /**
  * AI chat routes (owner only: every route resolves the chat through the readable set with `ai_chat` and decides
- * `ai_chat.use`; anyone else, admins included, gets 404). Sends share one per-user rate limit.
+ * `ai_chat.use`; anyone else, admins included, gets 404). Sends share one per-user rate limit. The session is checked
+ * on request (`onRequest`, before the body is parsed or validated), so an anonymous caller always gets 401 (05-15).
  */
 export function registerAiChatRoutes(app: App, core: Core, service: AiChatService): void {
   const tags = ["ai-chat"];
@@ -33,13 +34,13 @@ export function registerAiChatRoutes(app: App, core: Core, service: AiChatServic
     timeWindow: "1 minute",
     keyGenerator: (req: FastifyRequest) => `ai-send:${req.auth?.userId ?? req.ip}`,
   });
-  const send = [core.identity.requireUser, sendLimit];
 
   app.post(
     "/ai-chats",
     {
       config: { authz: "user" },
-      preHandler: send,
+      onRequest: core.identity.requireUser,
+      preHandler: sendLimit,
       schema: { tags, body: CreateAiChatRequest, response: { 201: SendAiMessageResponse } },
     },
     async (req, reply) => reply.status(201).send(await service.createChat(req, req.body)),
@@ -55,7 +56,8 @@ export function registerAiChatRoutes(app: App, core: Core, service: AiChatServic
     "/ai-chats/drafts",
     {
       config: { authz: "user" },
-      preHandler: [core.identity.requireUser, draftLimit],
+      onRequest: core.identity.requireUser,
+      preHandler: draftLimit,
       schema: { tags, response: { 201: AiChatSummary } },
     },
     async (req, reply) => reply.status(201).send(await service.createDraft(req)),
@@ -65,7 +67,8 @@ export function registerAiChatRoutes(app: App, core: Core, service: AiChatServic
     "/ai-chats/:id/messages",
     {
       config: { authz: "user" },
-      preHandler: send,
+      onRequest: core.identity.requireUser,
+      preHandler: sendLimit,
       schema: {
         tags,
         params: IdParams,
@@ -80,7 +83,7 @@ export function registerAiChatRoutes(app: App, core: Core, service: AiChatServic
     "/ai-chats",
     {
       config: { authz: "user" },
-      preHandler: core.identity.requireUser,
+      onRequest: core.identity.requireUser,
       schema: { tags, querystring: AiChatListQuery, response: { 200: AiChatList } },
     },
     async (req) => service.list(req, req.query),
@@ -90,7 +93,7 @@ export function registerAiChatRoutes(app: App, core: Core, service: AiChatServic
     "/ai-chats/:id",
     {
       config: { authz: "user" },
-      preHandler: core.identity.requireUser,
+      onRequest: core.identity.requireUser,
       schema: { tags, params: IdParams, body: UpdateAiChatRequest, response: { 200: AiChatDetail } },
     },
     async (req) => service.update(req, req.params.id, req.body),
@@ -102,7 +105,7 @@ export function registerAiChatRoutes(app: App, core: Core, service: AiChatServic
       "/test/ai/chats/:id/activity",
       {
         config: { authz: "user" },
-        preHandler: core.identity.requireUser,
+        onRequest: core.identity.requireUser,
         schema: {
           hide: true,
           tags: ["test"],
@@ -121,7 +124,7 @@ export function registerAiChatRoutes(app: App, core: Core, service: AiChatServic
     "/ai-chats/:id",
     {
       config: { authz: "user" },
-      preHandler: core.identity.requireUser,
+      onRequest: core.identity.requireUser,
       schema: { tags, params: IdParams, response: { 200: AiChatSnapshot } },
     },
     async (req) => service.snapshot(req, req.params.id),
@@ -131,7 +134,7 @@ export function registerAiChatRoutes(app: App, core: Core, service: AiChatServic
     "/ai-chats/:id/messages",
     {
       config: { authz: "user" },
-      preHandler: core.identity.requireUser,
+      onRequest: core.identity.requireUser,
       schema: {
         tags,
         params: IdParams,
