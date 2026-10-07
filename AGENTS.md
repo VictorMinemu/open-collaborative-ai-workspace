@@ -14,8 +14,8 @@ shared and controlled from the cloud) and **Agents** (persistent server-side age
 models, devices and audit.
 
 Authoritative spec: `docs/prd/PRD.md` (v1.0, English). Original draft: `docs/prd/archive/PRD-v0.3-es.md`.
-Decisions: `docs/adr/`. Planning and roadmap: `.planning/` (GSD). Built so far: phases 1–4 (API, web, desktop + Local Runtime,
-OpenClaw bots, MCP, marketplace, Work Zone controls, complete chat). Add packages only when a roadmap phase needs them.
+Decisions: `docs/adr/`. Planning and roadmap: `.planning/` (GSD). Built so far: phases 1–5 (API, web, desktop + Local Runtime,
+OpenClaw bots, MCP, marketplace, Work Zone controls, complete chat, AI chats). Add packages only when a phase needs them.
 
 ## Non-negotiable architectural principles
 
@@ -58,13 +58,13 @@ Taken from the PRD. Any design that violates one of these must be raised, not si
 | Database access | Drizzle ORM; RLS policies in schema; two DB roles (`migrator`, `app`); `withTenant()` is the only entrypoint | 0003, research |
 | Identity | better-auth embedded in the API (org, admin, jwt, device-authorization plugins); our own OrgUnit hierarchy on top | research |
 | Realtime | `@fastify/websocket` + Redis pub/sub; per-stream `seq` persisted in PostgreSQL, cursor replay | research |
-| AI layer | Vercel AI SDK 7 server-side; prompts assembled from persisted messages by one `buildModelMessages` | research |
+| AI layer | Vercel AI SDK 7 server-side, provider instances only; `modules/model-gateway` is the only `@ai-sdk/*` importer and resolves every `ModelRef`; one run loop; prompts only from persisted messages via `buildModelMessages`; one usage record per generation | 0018 |
+| ChatGPT plan (AI chats) | per-member Sign in with ChatGPT, tokens sealed per member, never pooled; Claude only via org keys (METERED) | 0017 |
 | Web | Next.js 16 + React; Tailwind + shadcn/ui (Base UI); TanStack Query + Zustand | PRD, research |
 | Desktop / mobile | Electron + bundled Vite renderer; Local Runtime daemon is a standalone process supervised by the app. Mobile (MVP7): Expo / React Native | PRD, 0005 |
 | Runtime adapters | Claude Code via Claude Agent SDK (streaming input, `canUseTool`); Codex via `codex app-server` JSON-RPC. Never scrape CLI stdout. Settings apply between turns; options come from the runtime-reported catalog, gated by `docs/workzone/runtime-controls-inventory.md` | research, 0013 |
 | Database / search | PostgreSQL only (MVP1). Chat search: STORED tsvector over three unaccented configs (simple, spanish, english) + GIN, `pg_trgm` for people/channels, always restricted to the resolver's readable set | 0003, 0016 |
-| Cache / pub-sub / presence | Redis | 0003 |
-| Event streaming / workflows | NATS JetStream and Temporal are **deferred**; do not add them yet | 0003 |
+| Cache / pub-sub / presence | Redis. Event streaming / workflows: NATS JetStream and Temporal are **deferred**; do not add them yet | 0003 |
 | Object storage | Garage (single node) in compose, used only through the S3 API; browsers upload/download via presigned URLs, the API is the only ACL | 0015 (supersedes MinIO in 0003) |
 | Markdown | One `<Markdown>` on streamdown + shiki for chat, bot output and Work Zone; no raw HTML, `safeUrl` links, images as links | 0016 |
 | Secrets | `SecretStore` abstraction: `env`/`file` provider by default, OpenBao as optional compose profile | 0003 |
@@ -79,11 +79,11 @@ Taken from the PRD. Any design that violates one of these must be raised, not si
 
 ## Monorepo layout
 
-`apps/`: `api` (Fastify control plane, one module per PRD service, e.g. `chat`, `notification`, `search`, `artifact`),
+`apps/`: `api` (Fastify control plane, one module per PRD service, e.g. `chat`, `ai-chat`, `model-gateway`, `artifact`),
 `web` (Next.js), `desktop` (Electron), `local-runtime` (daemon), `openclaw-channel` (OpenClaw plugin); later `mobile`.
 `packages/`: `contracts` (Zod schemas, event protocol, permissions; Apache 2.0), `db`, `realtime-client`, `config`;
 later `auth`, `runtime-adapters`, `ui`. `docs/`: `prd/` (PRD.md authoritative), `adr/` (`NNNN-kebab-title.md`).
-`infra/`: compose profiles, OpenClaw cell image, fakes (model, MCP, ClawHub), stdio MCP sandbox. `.planning/`: GSD.
+`infra/`: compose profiles, OpenClaw cell image, fakes (model, ChatGPT sign-in, SearXNG, MCP, ClawHub), stdio MCP sandbox. `.planning/`: GSD.
 
 ## Commands (canonical; keep them valid)
 
@@ -128,6 +128,7 @@ docker compose up       # full self-hosted stack
 
 - Never commit secrets, tokens, `.env` files or real credentials. Use `.env.example` with placeholders.
 - Never log absolute host paths, prompt contents with credentials, or provider API keys.
+- Never pass a string model id to the AI SDK; only `model-gateway` builds models (ADR-0018).
 - Never weaken a permission check, RLS policy or approval gate to make a test pass. A runtime's
   bypass mode (`bypassPermissions`, `danger-full-access`) is enabled only through ADR-0012's path (org
   policy ∩ device opt-in ∩ grain, server-checked, audited), never ad hoc.
@@ -145,8 +146,7 @@ docker compose up       # full self-hosted stack
   blocks in this file (they are delimited by `<!-- GSD:... -->` markers).
 - Branch from `main` as `feat/<phase-or-topic>`; open a PR; CI runs `pnpm verify`.
 - Before claiming anything is done: run the verification commands and show the output.
-- When you learn something a future agent needs every session, add it here (keep < 200 lines).
-  Task-specific procedures go to `docs/` or a skill, not here.
+- Add here what every future session needs (keep < 200 lines); task procedures go to `docs/` or a skill.
 
 <!-- GSD:workflow-start source:GSD defaults -->
 ## GSD Workflow Enforcement
