@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TEST_SETUP_TOKEN, TestClient } from "../../testing";
-import { type AiStack, seedPlan, startAiStack, withoutTitles } from "../../testing-ai";
+import { type AiStack, seedPlan, startAiStack, startSecondInstance, withoutTitles } from "../../testing-ai";
 import { invite } from "../../testing-workzone";
 
 /**
@@ -18,11 +18,15 @@ let admin: TestClient;
 let sam: TestClient;
 let alex: TestClient;
 let samId: string;
+let alexId: string;
 
 // biome-ignore lint/suspicious/noExplicitAny: loose JSON access keeps the assertions readable
 type Json = Record<string, any>;
 
 const PLAN_MODEL = { backend: "chatgpt_plan", provider: "openai", modelId: "gpt-6-astra" } as const;
+const MOCK_MODEL = { backend: "mock", provider: "mock", modelId: "mock-1" } as const;
+const SONNET = { backend: "org_key", provider: "anthropic", modelId: "claude-sonnet-5-5" } as const;
+const FAKE_KEY = "sk-ant-fake-05-11-not-secret";
 
 const cid = () => `cm-${randomUUID()}`;
 
@@ -64,6 +68,10 @@ const requestsSince = (kind: "responses" | "openai" | "anthropic", from: number)
 const count = (kind: "responses" | "openai" | "anthropic") => withoutTitles(stack.fake.requests(kind)).length;
 
 const toolTypes = (body: Json | null) => ((body?.tools ?? []) as Json[]).map((t) => t.type);
+/** Offered tool names (OpenAI function tools and Anthropic tools). */
+const toolNames = (body: Json | null) =>
+  ((body?.tools ?? []) as Json[]).map((t) => t.function?.name ?? t.name ?? t.type);
+const searchesSince = (from: number) => stack.fake.requests("search").slice(from);
 const stateOf = (detail: Json, key: string) => (detail.tools as Json[]).find((t) => t.key === key);
 const snapshot = (as: TestClient, chatId: string) => ok(as.request("GET", `/api/v1/ai-chats/${chatId}`));
 
@@ -82,7 +90,13 @@ beforeAll(async () => {
     }),
   );
   ({ client: sam, userId: samId } = await invite(stack, admin, "sam@example.test", "Sam Rivera", "standard"));
-  ({ client: alex } = await invite(stack, admin, "alex@example.test", "Alex Kim", "standard"));
+  ({ client: alex, userId: alexId } = await invite(
+    stack,
+    admin,
+    "alex@example.test",
+    "Alex Kim",
+    "standard",
+  ));
   await seedPlan(sam);
   await seedPlan(alex);
 });
@@ -189,6 +203,166 @@ describe("Web on a ChatGPT-plan model: the plan's hosted web search, with source
       available: false,
       enabled: false,
       reason: "not_supported_by_model",
+    });
+  });
+});
+
+describe("Web on organization keys and the mock: the self-hosted SearXNG tool (D-04, ADR-0010)", () => {
+  beforeAll(async () => {
+    await ok(
+      admin.request("POST", "/api/v1/model-providers", {
+        provider: "anthropic",
+        apiKey: FAKE_KEY,
+        baseUrl: stack.fake.baseUrl,
+        allowedModels: ["claude-sonnet-5-5"],
+      }),
+    );
+  });
+
+  it("a mock turn calls the fake SearXNG and answers from its result; the domain is recorded", async () => {
+    const before = count("openai");
+    const searches = stack.fake.requests("search").length;
+    const created = await ok(
+      createChat(sam, 'find it [[call web_search {"query":"ocw"}]]', {
+        model: MOCK_MODEL,
+        tools: { web: true },
+      }),
+      201,
+    );
+    const g = await settled(created.generation.id);
+    expect(g.status).toBe("completed");
+    const reqs = requestsSince("openai", before);
+    expect(toolNames(reqs[0]?.body as Json)).toEqual(["web_search"]);
+    expect(toolTypes(reqs[0]?.body as Json)).toEqual(["function"]);
+    const [search] = searchesSince(searches);
+    const url = new URL(`http://fake${search?.path ?? ""}`);
+    expect(url.pathname).toBe("/search");
+    expect(url.searchParams.get("q")).toBe("ocw");
+    expect(url.searchParams.get("format")).toBe("json");
+    // The tool result went back to the model labelled as untrusted, capped, and the model quoted it.
+    const last = reqs.at(-1)?.body as Json | undefined;
+    const toolMessage = (last?.messages as Json[] | undefined)?.find((m) => m.role === "tool");
+    expect(String(toolMessage?.content)).toMatch(/^Untrusted web search results/u);
+    const snap = await snapshot(sam, created.chat.id);
+    const answer = (snap.messages as Json[]).at(-1);
+    expect(answer?.body).toContain("Tool web_search said: Fake result for ocw");
+    expect(g.web_used).toBe(true);
+    expect(g.source_domains).toEqual(["example.com"]);
+    expect(stateOf(snap.chat, "web")).toMatchObject({ available: true, enabled: true });
+  });
+
+  it("an Anthropic org-key turn is offered the web_search function tool, never a provider-hosted search", async () => {
+    const before = count("anthropic");
+    const created = await ok(createChat(sam, "look it up", { model: SONNET, tools: { web: true } }), 201);
+    const g = await settled(created.generation.id);
+    expect(g.status).toBe("completed");
+    const [req] = requestsSince("anthropic", before);
+    const body = req?.body as Json | undefined;
+    const tools = (body?.tools ?? []) as Json[];
+    expect(tools.map((t) => t.name)).toEqual(["web_search"]);
+    // Anthropic's hosted (metered) search would be a typed server tool: none is ever sent on an org key.
+    expect(tools.some((t) => typeof t.type === "string" && t.type.startsWith("web_search"))).toBe(false);
+    expect(JSON.stringify(req?.body)).not.toContain("web_search_2");
+  });
+
+  it("a deny rule on ai_chat.web gives Sam `denied` (no tool is sent) while Alex keeps Web", async () => {
+    const rule = await ok(
+      admin.request("POST", "/api/v1/permission-rules", {
+        subjectKind: "user",
+        subjectId: samId,
+        permission: "ai_chat.web",
+        effect: "deny",
+      }),
+    );
+    try {
+      const mine = await ok(sam.request("GET", "/api/v1/ai-chat/models"));
+      expect(stateOf(mine, "web")).toMatchObject({ available: false, reason: "denied" });
+      const theirs = await ok(alex.request("GET", "/api/v1/ai-chat/models"));
+      expect(stateOf(theirs, "web")).toMatchObject({ available: true, reason: null });
+      // The rule names Sam alone.
+      expect(rule).toMatchObject({ subjectKind: "user", subjectId: samId, effect: "deny" });
+      expect(rule.subjectId).not.toBe(alexId);
+
+      const before = count("openai");
+      const created = await ok(
+        createChat(sam, 'denied [[call web_search {"query":"ocw"}]]', {
+          model: MOCK_MODEL,
+          tools: { web: true },
+        }),
+        201,
+      );
+      const g = await settled(created.generation.id);
+      expect(toolNames(requestsSince("openai", before)[0]?.body as Json)).toEqual([]);
+      expect(g.web_used).toBe(false);
+      const snap = await snapshot(sam, created.chat.id);
+      expect(stateOf(snap.chat, "web")).toMatchObject({ available: false, enabled: false, reason: "denied" });
+      const alexChat = await ok(createChat(alex, "hi", { model: MOCK_MODEL, tools: { web: true } }), 201);
+      await settled(alexChat.generation.id);
+      expect(stateOf((await snapshot(alex, alexChat.chat.id)).chat, "web")).toMatchObject({
+        available: true,
+      });
+    } finally {
+      await ok(admin.request("DELETE", `/api/v1/permission-rules/${rule.id}`));
+    }
+  });
+
+  it("the organization turning web search off gives everyone `disabled_by_org`", async () => {
+    await ok(admin.request("PUT", "/api/v1/ai-chat/policy", { webEnabled: false }));
+    try {
+      for (const who of [sam, alex]) {
+        const list = await ok(who.request("GET", "/api/v1/ai-chat/models"));
+        expect(stateOf(list, "web")).toMatchObject({ available: false, reason: "disabled_by_org" });
+      }
+      const before = count("responses");
+      const created = await ok(createChat(sam, "news [[web ocw release]]", { tools: { web: true } }), 201);
+      const g = await settled(created.generation.id);
+      expect(toolTypes(requestsSince("responses", before)[0]?.body as Json)).toEqual([]);
+      expect(g.web_used).toBe(false);
+      const snap = await snapshot(sam, created.chat.id);
+      expect(stateOf(snap.chat, "web")).toMatchObject({ available: false, reason: "disabled_by_org" });
+    } finally {
+      await ok(admin.request("PUT", "/api/v1/ai-chat/policy", { webEnabled: true }));
+    }
+  });
+
+  describe("an API instance without SearXNG (OCW_AI_SEARXNG_URL unset)", () => {
+    let second: Awaited<ReturnType<typeof startSecondInstance>>;
+    let samThere: TestClient;
+
+    beforeAll(async () => {
+      second = await startSecondInstance(stack, { OCW_AI_SEARXNG_URL: null, OCW_SEARXNG_URL: null });
+      samThere = new TestClient(second.baseUrl);
+      samThere.cookies = new Map(sam.cookies);
+    });
+    afterAll(async () => {
+      await second?.stop();
+    });
+
+    it("organization and mock models cannot search; the plan still can", async () => {
+      const list = await ok(samThere.request("GET", "/api/v1/ai-chat/models"));
+      const caps = (id: string) => (list.models as Json[]).find((m) => m.ref.modelId === id)?.caps.webSearch;
+      expect(caps("mock-1")).toBe("none");
+      expect(caps("claude-sonnet-5-5")).toBe("none");
+      expect(caps("gpt-5.6-luna")).toBe("hosted");
+    });
+
+    it("a mock chat with Web on says `search_not_configured` and its send carries no tool", async () => {
+      const before = count("openai");
+      const searches = stack.fake.requests("search").length;
+      const created = await ok(
+        createChat(samThere, 'nope [[call web_search {"query":"ocw"}]]', {
+          model: MOCK_MODEL,
+          tools: { web: true },
+        }),
+        201,
+      );
+      const g = await settled(created.generation.id);
+      expect(g.status).toBe("completed");
+      expect(toolNames(requestsSince("openai", before)[0]?.body as Json)).toEqual([]);
+      expect(searchesSince(searches)).toEqual([]);
+      expect(g.web_used).toBe(false);
+      const snap = await snapshot(samThere, created.chat.id);
+      expect(stateOf(snap.chat, "web")).toMatchObject({ available: false, reason: "search_not_configured" });
     });
   });
 });

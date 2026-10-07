@@ -31,7 +31,7 @@
 // bearers, the ChatGPT-plan catalog on `GET /v1/models`. Every route also honours `[[slow]]` (40 deltas 100 ms
 // apart) and appends ` [images:N]` when the last user message carries images.
 // `createFakeModelServer({ onRequest })` reports `{kind, path, headers, body}` for every model request
-// (kinds: models, responses, openai, anthropic).
+// (kinds: models, responses, openai, anthropic, and search for the fake SearXNG with its query string in `path`).
 //
 // Fake MCP server (fake-mcp.mjs): `/mcp` (streamable HTTP) and `/sse` + `/sse/messages` (HTTP+SSE), tools
 // `echo` (read-only) and `write_note` (destructive).
@@ -616,7 +616,10 @@ export function createFakeModelServer(opts = {}) {
           data: MODELS.map((id) => ({ id, object: "model", created: 0, owned_by: "ocw-fake" })),
         });
       }
-      if (req.method === "GET" && url.pathname === "/search") return fakeSearch(res, url);
+      if (req.method === "GET" && url.pathname === "/search") {
+        report("search", req, `${url.pathname}${url.search}`, null);
+        return fakeSearch(res, url);
+      }
       if (req.method === "POST" && url.pathname === "/v1/responses" && fakeResponses) {
         const body = await readBody(req);
         report("responses", req, url.pathname, body);
