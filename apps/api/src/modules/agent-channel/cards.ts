@@ -9,6 +9,7 @@ import { conversations, messages, type Tx } from "@ocw/db";
 import { eq } from "drizzle-orm";
 import type { App, Core } from "../../core";
 import { badRequest, HttpError, notFound } from "../../lib/errors";
+import { findAgent } from "../agent";
 import { patchCard } from "../chat";
 import { cellOf } from "./auth";
 
@@ -69,6 +70,15 @@ export async function resolveReplyTarget(
   return { root, triggeredBy };
 }
 
+/**
+ * The agent the cell acts as must be one of its own (the same check as `POST /typing`): the cell's organization is
+ * its tenant (one cell per organization), so RLS hides every other organization's bot; a deleted or unknown id is
+ * missing too. Runs first in both card routes, before anything about the conversation or the card is revealed.
+ */
+async function assertCellAgent(tx: Tx, agentId: string): Promise<void> {
+  if (!(await findAgent(tx, agentId))) throw notFound("Agent not found in this cell", "agent_not_found");
+}
+
 /** `chat_unavailable` when the chat module is not part of this server (the bridge has no poster). */
 function chatUnavailable(err: unknown): never {
   if (err instanceof Error && err.message.includes("has not provided")) {
@@ -95,12 +105,16 @@ export function registerCardRoutes(app: App, ctx: { core: Core }): void {
     async (req, reply) => {
       const cell = cellOf(req);
       const body = req.body;
-      const target = await core.db.withTenant({ organizationId: cell.organizationId, userId: null }, (tx) =>
-        resolveReplyTarget(tx, {
-          conversationId: body.conversationId,
-          threadRootMessageId: body.threadRootId,
-          inReplyToMessageId: body.inReplyToMessageId,
-        }),
+      const target = await core.db.withTenant(
+        { organizationId: cell.organizationId, userId: null },
+        async (tx) => {
+          await assertCellAgent(tx, body.agentId);
+          return resolveReplyTarget(tx, {
+            conversationId: body.conversationId,
+            threadRootMessageId: body.threadRootId,
+            inReplyToMessageId: body.inReplyToMessageId,
+          });
+        },
       );
       // Chat decides exactly as for a message (agent principal, membership, confused deputy, flat conversations),
       // stores the message and its card in one transaction and audits `agent_card.posted`.
@@ -139,7 +153,9 @@ export function registerCardRoutes(app: App, ctx: { core: Core }): void {
       const cell = cellOf(req);
       const { agentId, patch } = req.body;
       return core.db.withTenant({ organizationId: cell.organizationId, userId: null }, async (tx) => {
-        // RLS scopes the card to the cell's organization: another tenant's card is simply missing (404).
+        await assertCellAgent(tx, agentId);
+        // RLS scopes the card to the cell's organization: another tenant's card is simply missing (404); a card of
+        // another agent of this cell is 403 `not_card_author` (patchCard).
         const { after } = await patchCard(
           tx,
           { audit: core.audit, realtime: core.realtime },
