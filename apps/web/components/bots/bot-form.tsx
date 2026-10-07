@@ -381,7 +381,12 @@ export function PlacementFields({
               />
               <SelectContent>
                 {inScope.map((u) => (
-                  <SelectItem key={u.id} value={u.id}>
+                  <SelectItem
+                    key={u.id}
+                    value={u.id}
+                    data-testid="persona-unit-option"
+                    data-unit-name={u.name}
+                  >
                     <span className="flex w-full min-w-0 items-center justify-between gap-3">
                       <span className="truncate">{u.name}</span>
                       {u.path.length > 1 ? (

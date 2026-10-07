@@ -3,15 +3,20 @@ import { type Actor, apiAs, BASE_URL, ensureMember, openAs } from "../support/ac
 import { ADMIN, shot } from "./env";
 
 /**
- * 06-07 (AGENT-01, D-07): bots become scoped personas. The admin creates a Team persona for Backend with Riley as
- * owner; Riley (lead of Backend) sees New bot with only his units and creates one; Jo (Frontend) sees neither in the
- * gallery. In the detail, the persona shows "Team · Backend" and its owner; Riley reassigns the owner to Alex and
- * Alex sees it live; a viewer without bot.configure sees no editor; a Phase 1 bot shows "Organization" and keeps
+ * 06-07 (AGENT-01, D-07): bots become scoped personas. The admin creates a Team persona for Backend with Lena (the
+ * plan's Riley) as owner; Lena (lead of Backend) sees New bot with only her units and creates one; Jo (Frontend) sees
+ * neither in the gallery. In the detail, the persona shows "Team · Backend" and its owner; Lena reassigns the owner to
+ * Kai (the plan's Alex, a Backend member) and Kai sees it live; a viewer without bot.configure sees no editor; a Phase 1 bot shows "Organization" and keeps
  * its controls. No model is called (mock model; no cell needed).
  */
 
-const RILEY: Actor = { name: "Riley Park", email: "riley@ocw.test", password: "riley-e2e-password-123" };
-const ALEX: Actor = { name: "Alex Kim", email: "alex.kim@ocw.test", password: "alex-e2e-password-123" };
+// Names used by no other spec (the isolated e2e database is shared by every spec of a run).
+const RILEY: Actor = {
+  name: "Lena Ortega",
+  email: "lena.persona@ocw.test",
+  password: "lena-e2e-password-123",
+};
+const ALEX: Actor = { name: "Kai Moreno", email: "kai.persona@ocw.test", password: "kai-e2e-password-1234" };
 const JO: Actor = { name: "Jo Diaz", email: "jo.diaz@ocw.test", password: "jo-e2e-password-1234" };
 
 interface Unit {
@@ -48,6 +53,12 @@ async function openBots(page: Page) {
 }
 
 const cardOf = (page: Page, name: string) => page.getByTestId("bot-card").filter({ hasText: name }).first();
+/** A unit option of the persona unit picker, by unit name (options also show their parent trail). */
+const unitOption = (page: Page, name: string) =>
+  page.locator(`[data-testid="persona-unit-option"][data-unit-name="${name}"]`);
+/** A select option whose label is exactly `label`. */
+const option = (page: Page, label: string) =>
+  page.getByRole("option").filter({ has: page.getByText(label, { exact: true }) });
 
 test.describe.configure({ mode: "serial" });
 
@@ -84,7 +95,7 @@ test("personas: admin and lead create scoped personas; scope decides who sees th
   });
   expect(created.ok(), "Phase 1 bot").toBe(true);
 
-  // ---- the admin creates a Team persona for Backend, owned by Riley
+  // ---- the admin creates a Team persona for Backend, owned by Lena
   const a = await openAs(browser, ADMIN, project);
   await openBots(a.page);
   await a.page.getByTestId("new-bot").click();
@@ -101,12 +112,12 @@ test("personas: admin and lead create scoped personas; scope decides who sees th
   await placement.getByTestId("persona-scope-team").click();
   await placement.getByTestId("persona-unit").click();
   // The unit picker lists teams only.
-  await expect(a.page.getByRole("option", { name: /^Backend/ })).toBeVisible();
-  await expect(a.page.getByRole("option", { name: /^Frontend/ })).toBeVisible();
-  await expect(a.page.getByRole("option", { name: /^Engineering/ })).toHaveCount(0);
-  await a.page.getByRole("option", { name: /^Backend/ }).click();
+  await expect(unitOption(a.page, "Backend")).toBeVisible();
+  await expect(unitOption(a.page, "Frontend")).toBeVisible();
+  await expect(unitOption(a.page, "Engineering")).toHaveCount(0);
+  await unitOption(a.page, "Backend").click();
   await placement.getByTestId("persona-owner").click();
-  await a.page.getByRole("option", { name: /Riley Park/ }).click();
+  await option(a.page, "Lena Ortega").click();
   await expect(placement.getByTestId("persona-audience")).toContainText("Only members of Backend");
   await sheet.getByTestId("bot-name").fill(adminPersona);
   await sheet.getByTestId("bot-model").click();
@@ -127,7 +138,7 @@ test("personas: admin and lead create scoped personas; scope decides who sees th
   await a.page.keyboard.press("Escape");
   await expect(adminDetail).toBeHidden();
 
-  // ---- Riley (lead of Backend) sees New bot with only his units and creates one
+  // ---- Lena (lead of Backend) sees New bot with only her units and creates one
   const r = await openAs(browser, RILEY, project);
   await openBots(r.page);
   await r.page.getByTestId("new-bot").click();
@@ -138,17 +149,17 @@ test("personas: admin and lead create scoped personas; scope decides who sees th
   await expect(rPlacement.getByTestId("persona-scope-organization")).toBeDisabled();
   await expect(rPlacement.getByTestId("persona-scope-department")).toBeDisabled();
   await rPlacement.getByTestId("persona-unit").click();
-  await expect(r.page.getByRole("option", { name: /^Backend/ })).toBeVisible();
-  await expect(r.page.getByRole("option", { name: /^Frontend/ })).toHaveCount(0);
-  await r.page.getByRole("option", { name: /^Backend/ }).click();
-  await expect(rPlacement.getByTestId("persona-owner")).toContainText("Riley Park");
+  await expect(unitOption(r.page, "Backend")).toBeVisible();
+  await expect(unitOption(r.page, "Frontend")).toHaveCount(0);
+  await unitOption(r.page, "Backend").click();
+  await expect(rPlacement.getByTestId("persona-owner")).toContainText("Lena Ortega");
   await rSheet.getByTestId("bot-name").fill(rileyPersona);
   await rSheet.getByTestId("bot-model").click();
   await r.page.getByRole("option", { name: /Mock model/ }).click();
   await rSheet.getByTestId("create-bot").click();
   await expect(rSheet).toBeHidden();
   await expect(cardOf(r.page, rileyPersona).getByTestId("bot-scope")).toHaveText("Team · Backend");
-  // Riley sees the admin's Backend persona too (it is in his unit).
+  // Lena sees the admin's Backend persona too (it is in her unit).
   await expect(cardOf(r.page, adminPersona)).toBeVisible();
 
   // ---- Jo (Frontend) sees neither Backend persona; the Phase 1 bot is there
@@ -164,29 +175,29 @@ test("personas: admin and lead create scoped personas; scope decides who sees th
   await expect(adminCard).toBeVisible();
   await shot(a.page, `personas-gallery-admin-${tag}`);
 
-  // ---- Alex (Backend, standard) opens the persona: read-only, owner Riley
+  // ---- Kai (Backend, standard) opens the persona: read-only, owner Lena
   const x = await openAs(browser, ALEX, project);
   await openBots(x.page);
   await cardOf(x.page, adminPersona).getByRole("button", { name: adminPersona }).click();
   const alexDetail = x.page.getByTestId("bot-detail-sheet");
   await expect(alexDetail.getByTestId("bot-scope")).toHaveText("Team · Backend");
-  await expect(alexDetail.getByTestId("bot-owner")).toHaveText("Owner: Riley Park");
+  await expect(alexDetail.getByTestId("bot-owner")).toHaveText("Owner: Lena Ortega");
   await expect(alexDetail.getByTestId("persona-placement")).toHaveCount(0);
   await expect(alexDetail.getByTestId("save-bot")).toHaveCount(0);
 
-  // ---- Riley reassigns the owner to Alex in place
+  // ---- Lena reassigns the owner to Kai in place
   await cardOf(r.page, adminPersona).getByRole("button", { name: adminPersona }).click();
   const rDetail = r.page.getByTestId("bot-detail-sheet");
   await expect(rDetail.getByTestId("bot-scope")).toHaveText("Team · Backend");
-  await expect(rDetail.getByTestId("bot-owner")).toHaveText("Owner: Riley Park");
+  await expect(rDetail.getByTestId("bot-owner")).toHaveText("Owner: Lena Ortega");
   await bothThemes(r.page, `personas-detail-${tag}`);
   await rDetail.getByTestId("persona-owner").click();
-  await r.page.getByRole("option", { name: /Alex Kim/ }).click();
+  await option(r.page, "Kai Moreno").click();
   await rDetail.getByTestId("save-bot").click();
-  await expect(rDetail.getByTestId("bot-owner")).toHaveText("Owner: Alex Kim");
+  await expect(rDetail.getByTestId("bot-owner")).toHaveText("Owner: Kai Moreno");
 
-  // Alex sees the change without a reload (agent.updated on his user topic).
-  await expect(alexDetail.getByTestId("bot-owner")).toHaveText("Owner: Alex Kim", { timeout: 10_000 });
+  // Kai sees the change without a reload (agent.updated on his user topic).
+  await expect(alexDetail.getByTestId("bot-owner")).toHaveText("Owner: Kai Moreno", { timeout: 10_000 });
   await shot(x.page, `personas-detail-viewer-${tag}`);
 
   await x.context.close();
