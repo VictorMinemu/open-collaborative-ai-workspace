@@ -366,3 +366,124 @@ describe("Web on organization keys and the mock: the self-hosted SearXNG tool (D
     });
   });
 });
+
+/** Every key and string value at any depth of a JSON value. */
+function walk(v: unknown, out: string[] = []): string[] {
+  if (Array.isArray(v)) for (const x of v) walk(x, out);
+  else if (v && typeof v === "object") {
+    for (const [k, x] of Object.entries(v)) {
+      out.push(k);
+      walk(x, out);
+    }
+  } else if (typeof v === "string") out.push(v);
+  return out;
+}
+
+describe("personal and per-chat instructions, default model and Web default (AICHAT-05, PRD §113)", () => {
+  const PERSONAL = "Always answer in Spanish";
+  const CHAT = "Be brief";
+  let chatId: string;
+
+  it("PUT /me/ai-preferences saves the member's defaults; GET returns them; audit lists changed keys only", async () => {
+    const saved = await ok(
+      sam.request("PUT", "/api/v1/me/ai-preferences", {
+        instructions: PERSONAL,
+        webDefault: true,
+        defaultModel: MOCK_MODEL,
+      }),
+    );
+    expect(saved).toEqual({ instructions: PERSONAL, webDefault: true, defaultModel: MOCK_MODEL });
+    expect(await ok(sam.request("GET", "/api/v1/me/ai-preferences"))).toEqual(saved);
+    const rows = await audit("ai_preferences.updated");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].metadata).toEqual({ changed: ["defaultModel", "instructions", "webDefault"] });
+    expect(walk(rows[0].metadata).join(" ")).not.toContain(PERSONAL);
+  });
+
+  it("a new chat starts on the default model with Web on", async () => {
+    const list = await ok(sam.request("GET", "/api/v1/ai-chat/models"));
+    expect(list.defaultRef).toEqual(MOCK_MODEL);
+    const created = await ok(createChat(sam, "hello there", { model: MOCK_MODEL }), 201);
+    chatId = created.chat.id;
+    await settled(created.generation.id);
+    const snap = await snapshot(sam, chatId);
+    expect(snap.chat.settings).toEqual({
+      instructions: "",
+      usePersonalInstructions: true,
+      tools: { web: true },
+    });
+  });
+
+  it("chat instructions follow the preamble and the personal ones, in that order", async () => {
+    const patched = await ok(
+      sam.request("PATCH", `/api/v1/ai-chats/${chatId}`, { settings: { instructions: CHAT } }),
+    );
+    expect(patched.settings).toMatchObject({ instructions: CHAT, usePersonalInstructions: true });
+    const before = count("openai");
+    const sent = await ok(send(sam, chatId, "next one", { model: MOCK_MODEL }), 201);
+    await settled(sent.generation.id);
+    const body = JSON.stringify(requestsSince("openai", before)[0]?.body);
+    const preamble = body.indexOf("You are a helpful AI assistant");
+    const personal = body.indexOf(PERSONAL);
+    const chat = body.indexOf(CHAT);
+    expect(preamble).toBeGreaterThanOrEqual(0);
+    expect(personal).toBeGreaterThan(preamble);
+    expect(chat).toBeGreaterThan(personal);
+
+    const rows = await audit("ai_chat.settings_updated");
+    expect(rows.at(-1)?.metadata).toEqual({ conversationId: chatId, changed: ["instructions"] });
+    expect(walk(rows.map((r) => r.metadata)).join(" ")).not.toContain(CHAT);
+  });
+
+  it("'Also use my personal instructions' off keeps them out of the next request", async () => {
+    const patched = await ok(
+      sam.request("PATCH", `/api/v1/ai-chats/${chatId}`, { settings: { usePersonalInstructions: false } }),
+    );
+    expect(patched.settings.usePersonalInstructions).toBe(false);
+    const before = count("openai");
+    const sent = await ok(send(sam, chatId, "and again", { model: MOCK_MODEL }), 201);
+    await settled(sent.generation.id);
+    const body = JSON.stringify(requestsSince("openai", before)[0]?.body);
+    expect(body).not.toContain(PERSONAL);
+    expect(body).toContain(CHAT);
+    expect((await audit("ai_chat.settings_updated")).at(-1)?.metadata).toEqual({
+      conversationId: chatId,
+      changed: ["usePersonalInstructions"],
+    });
+  });
+
+  it("the chat's Web setting can be changed in its settings too", async () => {
+    const patched = await ok(
+      sam.request("PATCH", `/api/v1/ai-chats/${chatId}`, { settings: { tools: { web: false } } }),
+    );
+    expect(patched.settings.tools).toEqual({ web: false });
+    expect(stateOf(patched, "web")).toMatchObject({ enabled: false, available: true });
+  });
+
+  it("8,001 characters of instructions and an unavailable default model are refused", async () => {
+    const long = "x".repeat(8_001);
+    expect(
+      (await sam.request("PATCH", `/api/v1/ai-chats/${chatId}`, { settings: { instructions: long } })).status,
+    ).toBe(400);
+    expect((await sam.request("PUT", "/api/v1/me/ai-preferences", { instructions: long })).status).toBe(400);
+    const bad = await sam.request("PUT", "/api/v1/me/ai-preferences", {
+      defaultModel: { backend: "org_key", provider: "openai", modelId: "gpt-not-configured" },
+    });
+    expect(bad.status).toBe(400);
+    expect((bad.body as Json).error.code).toBe("model_unavailable");
+    expect((await ok(sam.request("GET", "/api/v1/me/ai-preferences"))).defaultModel).toEqual(MOCK_MODEL);
+  });
+
+  it("preferences are per caller, and another member cannot change Sam's chat (404)", async () => {
+    expect(await ok(alex.request("GET", "/api/v1/me/ai-preferences"))).toEqual({
+      instructions: "",
+      webDefault: false,
+      defaultModel: null,
+    });
+    const r = await alex.request("PATCH", `/api/v1/ai-chats/${chatId}`, {
+      settings: { instructions: "hijack" },
+    });
+    expect(r.status).toBe(404);
+    expect((await snapshot(sam, chatId)).chat.settings.instructions).toBe(CHAT);
+  });
+});
