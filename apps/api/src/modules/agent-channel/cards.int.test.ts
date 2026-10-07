@@ -605,7 +605,9 @@ describe("follow: followers get card_updated when the status changes (Task 2)", 
     });
     expect(await ok(sam.request("GET", `/api/v1/cards/${live}`))).toMatchObject({ following: false });
     expect((await alex.request("GET", `/api/v1/cards/${randomUUID()}`)).status).toBe(404);
-    const priv = await ok(victor.request("POST", "/api/v1/channels", { name: "ops-2", visibility: "private" }));
+    const priv = await ok(
+      victor.request("POST", "/api/v1/channels", { name: "ops-2", visibility: "private" }),
+    );
     await ok(victor.request("POST", `/api/v1/channels/${priv.id}/members`, { kind: "agent", id: deployId }));
     const hidden = await newCard(priv.id as string, approvalCard());
     expect((await sam.request("GET", `/api/v1/cards/${hidden}`)).status).toBe(404);
