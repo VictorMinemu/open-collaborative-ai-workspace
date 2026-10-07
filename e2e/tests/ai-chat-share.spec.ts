@@ -182,3 +182,42 @@ test("a signed-out browser opening a share link lands on the sign-in page", asyn
     await context.close();
   }
 });
+
+test("Sam revokes a link from the dialog and Alex's next load says it isn't available", async ({
+  browser,
+}, info) => {
+  test.setTimeout(120_000);
+  const w = widthOf(info.project.name);
+  const chatId = await chatWithTwoExchanges("Revocable plan");
+  const res = await sam.post(`/api/v1/ai-chats/${chatId}/shares`, { data: {} });
+  expect(res.status()).toBe(201);
+  const { id, path } = (await res.json()) as { id: string; path: string };
+  const owner = await openAs(browser, SAM, info.project.name);
+  const reader = await openAs(browser, ALEX, info.project.name);
+  try {
+    await reader.page.goto(`${BASE_URL}${path}`);
+    await expect(reader.page.getByTestId("ai-share-view")).toBeVisible();
+
+    const page = owner.page;
+    await page.goto(`${BASE_URL}/chat/ai/${chatId}`);
+    const dialog = await openShareDialog(page);
+    const link = dialog.locator(`[data-testid="ai-share-link"][data-share-id="${id}"]`);
+    await expect(link).toBeVisible();
+    await link.getByTestId("ai-share-revoke").click();
+    // A confirm step: nothing is revoked until Sam confirms.
+    await expect(link).not.toHaveAttribute("data-revoked", "true");
+    await link.getByTestId("ai-share-revoke-confirm").click();
+    await expect(link).toHaveAttribute("data-revoked", "true");
+    await expect(link.getByTestId("ai-share-revoked")).toHaveText("Revoked");
+    await expect(link.getByTestId("ai-share-copy")).toHaveCount(0);
+
+    await reader.page.reload();
+    await expect(reader.page.getByText("This link isn't available")).toBeVisible();
+    await expect(reader.page.getByTestId("ai-share-view")).toHaveCount(0);
+    await reader.page.mouse.move(0, 0);
+    await shot(reader.page, `ai-share-revoked-${w}`);
+  } finally {
+    await owner.context.close();
+    await reader.context.close();
+  }
+});

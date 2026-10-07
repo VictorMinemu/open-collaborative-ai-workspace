@@ -288,3 +288,50 @@ describe("never public, never across organizations (T-05-13-01, T-05-13-04)", ()
     expect(mine.shares.map((s: Json) => s.id)).toEqual([shareId]);
   });
 });
+
+describe("revoke (T-05-13-03): only the creator, at once, idempotent", () => {
+  it("Sam revokes his link: Alex's next read is the same 404 as a random id; the list shows it revoked", async () => {
+    const created = await ok(createChat(sam, "Short-lived share"), 201);
+    await settled(created.generation.id);
+    const chatId = created.chat.id;
+    const s = await ok(share(sam, chatId), 201);
+    expect((await view(alex, s.id)).status).toBe(200);
+    const missing = await view(alex, randomUUID());
+
+    // Alex cannot revoke Sam's link, nor can the admin.
+    expect((await alex.request("DELETE", `/api/v1/ai-shares/${s.id}`)).status).toBe(404);
+    expect((await admin.request("DELETE", `/api/v1/ai-shares/${s.id}`)).status).toBe(404);
+    expect((await view(alex, s.id)).status).toBe(200);
+
+    const revoked = await ok(sam.request("DELETE", `/api/v1/ai-shares/${s.id}`));
+    expect(revoked).toMatchObject({ id: s.id, chatId, messageCount: s.messageCount });
+    expect(typeof revoked.revokedAt).toBe("string");
+
+    const after = await view(alex, s.id);
+    expect(after.status).toBe(404);
+    expect(after.body).toEqual(missing.body);
+    // The owner too: a revoked link is gone for everyone.
+    expect((await view(sam, s.id)).status).toBe(404);
+
+    // Idempotent: the same answer, one audit row.
+    const again = await ok(sam.request("DELETE", `/api/v1/ai-shares/${s.id}`));
+    expect(again.revokedAt).toBe(revoked.revokedAt);
+    const audits = (
+      await su.query(
+        "select metadata from app.audit_events where action = 'ai_chat.share_revoked' and resource_id = $1",
+        [chatId],
+      )
+    ).rows;
+    expect(audits.map((a) => a.metadata)).toEqual([{ conversationId: chatId, shareId: s.id }]);
+
+    const list = await ok(sam.request("GET", `/api/v1/ai-chats/${chatId}/shares`));
+    expect(list.shares).toEqual([expect.objectContaining({ id: s.id, revokedAt: revoked.revokedAt })]);
+    // A random id is 404, never 500.
+    expect((await sam.request("DELETE", `/api/v1/ai-shares/${randomUUID()}`)).status).toBe(404);
+  });
+
+  it("an anonymous revoke is 401", async () => {
+    const anon = new TestClient(stack.baseUrl);
+    expect((await anon.request("DELETE", `/api/v1/ai-shares/${randomUUID()}`)).status).toBe(401);
+  });
+});
