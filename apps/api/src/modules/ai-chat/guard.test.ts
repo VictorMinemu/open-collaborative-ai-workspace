@@ -5,8 +5,9 @@ import { describe, expect, it } from "vitest";
 
 /**
  * Static guard (P-04, P-05, T-05-02-08): prompts are built only by `buildModelMessages`, models only by the model
- * gateway. `streamText` / `generateText` are imported from "ai" only in `ai-chat/run-loop.ts` and
- * `ai-chat/titles.ts` (05-10), and each of those reaches `buildModelMessages(` (directly or through `turn.ts`);
+ * gateway. `streamText` / `generateText` are imported from "ai" only in `ai-chat/run-loop.ts`,
+ * `ai-chat/titles.ts` (05-10) and the opt-in metered eval runner `eval/multiplayer/run.ts` (06-09, D-02), and each of
+ * those reaches `buildModelMessages(` (directly or through `turn.ts`);
  * `@ai-sdk/*` is imported only under `modules/model-gateway/`; nothing uses the Vercel AI Gateway
  * (`@ai-sdk/gateway`, `createGateway`, `gateway` from "ai"), and no API file hands the SDK a "provider/model"
  * string, which would route through that metered gateway.
@@ -15,9 +16,11 @@ import { describe, expect, it } from "vitest";
 const ROOT = fileURLToPath(new URL("../../../../../", import.meta.url));
 const API = join(ROOT, "apps/api/src");
 const SELF = "apps/api/src/modules/ai-chat/guard.test.ts";
+const EVAL_RUNNER = "apps/api/src/eval/multiplayer/run.ts";
 const MODEL_CALLERS = new Set([
   "apps/api/src/modules/ai-chat/run-loop.ts",
   "apps/api/src/modules/ai-chat/titles.ts",
+  EVAL_RUNNER,
 ]);
 
 function walk(dir: string, out: string[] = []): string[] {
@@ -78,7 +81,8 @@ describe("the guard's own patterns", () => {
 });
 
 describe("prompts and models stay behind their one door (P-04, P-05)", () => {
-  it("only run-loop.ts and titles.ts import streamText / generateText from ai", () => {
+  it("only run-loop.ts, titles.ts and the eval runner import streamText / generateText from ai", () => {
+    expect(MODEL_CALLERS.size).toBe(3);
     const offenders = sourceFiles()
       .filter((f) => importedNames(read(f), "ai").some((n) => MODEL_CALLS.has(n)))
       .map(rel)
@@ -105,6 +109,18 @@ describe("prompts and models stay behind their one door (P-04, P-05)", () => {
       const viaTurn = /from\s*["']\.\/turn["']/u.test(code) && /\bloadTurn\(/u.test(code);
       expect(direct || viaTurn, rel(f)).toBe(true);
     }
+  });
+
+  it("the eval runner builds its prompts with buildModelMessages and its model with the gateway's orgLanguageModel", () => {
+    const code = read(join(ROOT, EVAL_RUNNER));
+    expect(importedNames(code, "ai")).toContain("streamText");
+    expect(code).toContain("buildModelMessages(");
+    expect(code).toContain("SPOOF_CASES");
+    expect(code).toMatch(
+      /import\s*\{[^}]*\borgLanguageModel\b[^}]*\}\s*from\s*["']\.\.\/\.\.\/modules\/model-gateway["']/u,
+    );
+    expect(code).toContain("orgLanguageModel(");
+    expect(IMPORTS_AI_SDK.test(code)).toBe(false);
   });
 
   it("no file outside modules/model-gateway/ imports @ai-sdk/*", () => {

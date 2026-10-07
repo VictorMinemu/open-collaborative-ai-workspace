@@ -7,7 +7,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "dev": "node --env-file-if-exists=../../.env --watch-path=src --watch-path=../../packages --import tsx src/main.ts",
-    "start": "node --import tsx src/main.ts"
+    "start": "node --import tsx src/main.ts",
+    "eval:multiplayer": "node --import tsx src/eval/multiplayer/run.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "4.0.68",
