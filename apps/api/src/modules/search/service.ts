@@ -14,6 +14,8 @@ import type { Tx } from "@ocw/db";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { badRequest } from "../../lib/errors";
+import { ownerAuthor, sharedSql } from "../ai-chat";
+import { aiAccessSql } from "../chat";
 import { authorOf, type Directory } from "../chat/directory";
 
 /**
@@ -21,6 +23,8 @@ import { authorOf, type Directory } from "../chat/directory";
  * from the resolver (`access.readableIds`, P-03); SQL narrows to them and never decides visibility on its own.
  * RLS still scopes every statement to the tenant.
  */
+
+const EMPTY_DIR: Directory = { users: new Map(), agents: new Map(), byHandle: new Map() };
 
 /** Bound as ONE parameter (a uuid[] literal of resolver-produced ids), never spliced into the SQL text. */
 const uuidArray = (ids: readonly string[]) => sql`${`{${ids.join(",")}}`}::uuid[]`;
@@ -454,13 +458,23 @@ export async function searchChannels(
 // ---------------------------------------------------------------- AI chats (05-10)
 
 /**
- * The caller's own AI chats whose title matches `q` (05-10, AICHAT-04, P-03): only ids of the readable set (the
- * resolver keeps AI chats owner-only, admins included) and, narrowing further, chats the viewer owns. Same matching
- * as channels (contains, else trigram); live chats first, then title prefix, similarity and recent activity.
+ * The AI chats the caller can read whose title matches `q` (05-10, AICHAT-04; 06-04, P-03): exactly the ids of the
+ * readable set (the resolver: the owner and active grantees, person, unit or organization; admins included in the
+ * hidden rule), never a wider SQL decision. Each summary carries the viewer's access, the owner and `shared`, as in
+ * the AI chat list. Same matching as channels (contains, else trigram); live chats first, then title prefix,
+ * similarity and recent activity.
  */
 export async function searchAiChats(
   tx: Tx,
-  input: { readableIds: string[]; viewerId: string; q: string; limit: number; labelOf?: ModelLabelOf },
+  input: {
+    readableIds: string[];
+    viewerId: string;
+    q: string;
+    limit: number;
+    labelOf?: ModelLabelOf;
+    /** Owner names (the overview's directory); a missing owner reads "Former member". */
+    dir?: Directory;
+  },
 ): Promise<AiChatSummary[]> {
   const like = likeEscaped(input.q);
   if (!like || input.readableIds.length === 0) return [];
@@ -468,12 +482,14 @@ export async function searchAiChats(
     with p as (select app.unaccent(lower(${input.q.trim()})) as q, app.unaccent(${like}) as l),
     scored as (
       select c.id, c.name, c.archived_at, a.title_source, a.last_model, a.created_at, a.last_activity_at,
+             a.owner_user_id, ${aiAccessSql(sql`${input.viewerId}::uuid`, sql`c.id`)} as access,
+             ${sharedSql(sql`c.id`)} as shared,
              app.unaccent(lower(coalesce(c.name, ''))) as norm
       from app.conversations c join app.ai_chats a on a.conversation_id = c.id
       where c.kind = 'ai_chat' and c.id = any(${uuidArray(input.readableIds)})
-        and a.owner_user_id = ${input.viewerId}::uuid
     )
     select s.id, s.name, s.archived_at, s.title_source, s.last_model, s.created_at, s.last_activity_at,
+           s.owner_user_id, s.access, s.shared,
            exists (select 1 from app.ai_generations g where g.conversation_id = s.id and g.status = 'running') as generating,
            (s.norm like p.l || '%' escape '\\') as prefix,
            greatest(app.similarity(s.norm, p.q), app.word_similarity(p.q, s.norm)) as score
@@ -493,11 +509,18 @@ export async function searchAiChats(
       created_at: unknown;
       last_activity_at: unknown;
       generating: boolean;
+      owner_user_id: string;
+      access: AiChatSummary["access"] | null;
+      shared: boolean;
     }>
   ).map((r) => {
     const parsed = ModelRef.safeParse(r.last_model);
     const lastModel = parsed.success ? parsed.data : null;
     return {
+      // Rows are readable, so the access is set; "view" is only the type's floor.
+      access: r.access ?? "view",
+      owner: ownerAuthor(input.dir ?? EMPTY_DIR, r.owner_user_id),
+      shared: r.shared === true,
       id: r.id,
       title: r.name ?? "New chat",
       titleSource: r.title_source,

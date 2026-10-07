@@ -372,10 +372,30 @@ export async function channelRow(tx: Tx, id: string, userId: string): Promise<Ch
 }
 
 /**
+ * Whether the grant row aliased `ag` matches `userId` (P-03, D-03): a person grant names the user; a unit grant names
+ * any unit on the paths (root → self) of the user's unit memberships, so a department grant covers its teams and
+ * projects; an organization grant covers every active member. Shared by `aiAccessSql` and the send context
+ * (`matchingGrant`), so the two cannot drift.
+ */
+export function aiGrantMatchSql(userId: string | SQL | AnyPgColumn): SQL {
+  return sql`(
+    (ag.subject_kind = 'user' and ag.subject_id = ${userId})
+    or (ag.subject_kind = 'unit' and exists (
+          select 1 from app.unit_memberships um
+          join app.org_units ou on ou.id = um.unit_id and ou.organization_id = um.organization_id
+          where um.organization_id = ag.organization_id and um.user_id = ${userId}
+            and ag.subject_id = any(ou.path)))
+    or (ag.subject_kind = 'org' and exists (
+          select 1 from app.org_members om
+          where om.organization_id = ag.organization_id and om.user_id = ${userId} and om.deactivated_at is null))
+  )`;
+}
+
+/**
  * THE access level of a user to an AI chat (P-03), as one SQL expression: `'owner'` for `ai_chats.owner_user_id`,
- * else the best active grant that matches the user (`'chat'` beats `'view'`), else NULL. `channelFacts` and the
- * readable set both use it, so they cannot drift; `conversation_members` rows never enter it. 06-04 adds unit and
- * organization subjects here, and only here.
+ * else the best active grant that matches the user (`'chat'` beats `'view'`) through `aiGrantMatchSql` (person, unit
+ * subtree or organization subjects), else NULL. `channelFacts` and the readable set both use it, so they cannot
+ * drift; `conversation_members` rows never enter it.
  */
 export function aiAccessSql(userId: string | SQL | AnyPgColumn, conversationIdCol: SQL | AnyPgColumn): SQL {
   return sql`(case
@@ -383,10 +403,10 @@ export function aiAccessSql(userId: string | SQL | AnyPgColumn, conversationIdCo
                  where ac.conversation_id = ${conversationIdCol} and ac.owner_user_id = ${userId}) then 'owner'
     when exists (select 1 from app.ai_chat_grants ag
                  where ag.conversation_id = ${conversationIdCol} and ag.revoked_at is null
-                   and ag.subject_kind = 'user' and ag.subject_id = ${userId} and ag.level = 'chat') then 'chat'
+                   and ag.level = 'chat' and ${aiGrantMatchSql(userId)}) then 'chat'
     when exists (select 1 from app.ai_chat_grants ag
                  where ag.conversation_id = ${conversationIdCol} and ag.revoked_at is null
-                   and ag.subject_kind = 'user' and ag.subject_id = ${userId} and ag.level = 'view') then 'view'
+                   and ag.level = 'view' and ${aiGrantMatchSql(userId)}) then 'view'
   end)`;
 }
 

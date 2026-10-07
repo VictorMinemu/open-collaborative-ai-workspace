@@ -579,6 +579,7 @@ describe("AI chats are found by their owner alone (05-10, AICHAT-04, P-03, Pitfa
   let olive: TestClient;
   let oliveId: string;
   let alex: TestClient;
+  let alexId: string;
   let ada: TestClient;
   const ai = {} as Record<"chat" | "archived" | "question" | "answer" | "archivedLine", string>;
 
@@ -605,7 +606,7 @@ describe("AI chats are found by their owner alone (05-10, AICHAT-04, P-03, Pitfa
 
   beforeAll(async () => {
     [olive, oliveId] = await joinAs("olive@example.test", "Olive Owner", "standard");
-    [alex] = await joinAs("alex@example.test", "Alex Other", "standard");
+    [alex, alexId] = await joinAs("alex@example.test", "Alex Other", "standard");
     [ada] = await joinAs("ada@example.test", "Ada Admin", "admin");
     ai.chat = await aiChat("Quarterly kumquat roadmap", false);
     ai.archived = await aiChat("Old kumquat notes", true);
@@ -708,5 +709,78 @@ describe("AI chats are found by their owner alone (05-10, AICHAT-04, P-03, Pitfa
       ids.migration,
     ]);
     expect(r.aiChats ?? []).toEqual([]);
+  });
+
+  describe("search follows grants (06-04, P-03): grantees find a shared chat and its messages; nobody else does", () => {
+    let review: string;
+    let reviewLine: string;
+    let outsider: TestClient;
+    let grantId: string;
+
+    beforeAll(async () => {
+      [outsider] = await joinAs("nia@example.test", "Nia Nogrant", "standard");
+      review = await aiChat("Architecture review", false);
+      reviewLine = await rawMessage({
+        org: orgId,
+        conv: review,
+        authorKind: "user",
+        authorId: oliveId,
+        body: "The quokka ledger needs event sourcing",
+        seq: 1,
+      });
+      // The stream knows the raw row's seq, so the grant's notice line takes the next one.
+      await su.query("insert into app.streams (id, organization_id, last_seq) values ($1, $2, 1)", [
+        `conv:${review}`,
+        orgId,
+      ]);
+      const g = await ok(
+        olive.request("POST", `/api/v1/ai-chats/${review}/grants`, {
+          subject: { kind: "user", id: alexId },
+          level: "chat",
+        }),
+        201,
+      );
+      grantId = g.id;
+    });
+
+    it("Alex (chat grantee) finds the chat by title, with access chat and the owner, and its messages", async () => {
+      const overview = await ok(alex.request("GET", `/api/v1/search?${qs({ q: "architecture review" })}`));
+      expect(overview.aiChats).toEqual([
+        expect.objectContaining({
+          id: review,
+          title: "Architecture review",
+          access: "chat",
+          shared: true,
+          owner: expect.objectContaining({ kind: "user", id: oliveId, displayName: "Olive Owner" }),
+        }),
+      ]);
+      const r = await search(alex, { q: "quokka" });
+      expect(hitIds(r)).toEqual([reviewLine]);
+      expect((r.hits as Json[])[0]!.conversation).toMatchObject({
+        id: review,
+        kind: "ai_chat",
+        label: "Architecture review",
+      });
+    });
+
+    it("the owner's results are unchanged (access owner); a member without a grant and the admin find nothing", async () => {
+      const mine = await ok(olive.request("GET", `/api/v1/search?${qs({ q: "architecture review" })}`));
+      expect(mine.aiChats).toEqual([expect.objectContaining({ id: review, access: "owner", shared: true })]);
+      for (const as of [outsider, ada]) {
+        const overview = await ok(as.request("GET", `/api/v1/search?${qs({ q: "architecture review" })}`));
+        expect(overview.aiChats ?? []).toEqual([]);
+        expect((await search(as, { q: "quokka" })).hits).toEqual([]);
+        expect(JSON.stringify(overview)).not.toContain("Architecture review");
+      }
+    });
+
+    it("after the grant is revoked Alex finds neither the chat nor its messages", async () => {
+      expect((await olive.request("DELETE", `/api/v1/ai-chats/${review}/grants/${grantId}`)).status).toBe(
+        204,
+      );
+      const overview = await ok(alex.request("GET", `/api/v1/search?${qs({ q: "architecture review" })}`));
+      expect(overview.aiChats ?? []).toEqual([]);
+      expect((await search(alex, { q: "quokka" })).hits).toEqual([]);
+    });
   });
 });
