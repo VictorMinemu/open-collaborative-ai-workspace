@@ -93,15 +93,15 @@ SLICE-06…18 were added on 2026-10-04 after the code audit of the widened demo 
 
 ### Direct AI Chat (AICHAT)
 
-- [ ] **AICHAT-01**: Admin can configure organization-level model providers (API keys stored as `SecretReference` in the secret store) and an allowed-models list; personal API keys are not a supported path (PRD §54 thin slice)
-- [ ] **AICHAT-02**: User can create a private AI chat, pick a model from the allowed list, and switch model per message (PRD §14)
-- [ ] **AICHAT-03**: Responses stream in realtime to the author; user can stop generation (partial output persisted) and regenerate the last answer
-- [ ] **AICHAT-04**: AI chats get an auto-generated title and appear in a list the user can rename, archive and search
-- [ ] **AICHAT-05**: User can set custom instructions per chat and personal defaults
-- [ ] **AICHAT-06**: Tool toggles (Web, Company Knowledge, MCP, Skills) exist in the chat settings; only Web search is functional in this milestone, the rest are visibly disabled (PRD §14)
-- [ ] **AICHAT-07**: Every generation writes a usage record (model, provider, input/output tokens, cost estimate, requester) and the chat shows tokens per message
-- [ ] **AICHAT-08**: User can attach files/images to prompts for vision-capable models via the upload pipeline
-- [ ] **AICHAT-09**: User can create a read-only snapshot share link of an AI chat scoped to the organization (never public)
+- [x] **AICHAT-01**: Admin can configure organization-level model providers (API keys stored as `SecretReference` in the secret store) and an allowed-models list; personal API keys are not a supported path (PRD §54 thin slice)
+- [x] **AICHAT-02**: User can create a private AI chat, pick a model from the allowed list, and switch model per message (PRD §14)
+- [x] **AICHAT-03**: Responses stream in realtime to the author; user can stop generation (partial output persisted) and regenerate the last answer
+- [x] **AICHAT-04**: AI chats get an auto-generated title and appear in a list the user can rename, archive and search
+- [x] **AICHAT-05**: User can set custom instructions per chat and personal defaults
+- [x] **AICHAT-06**: Tool toggles (Web, Company Knowledge, MCP, Skills) exist in the chat settings; only Web search is functional in this milestone, the rest are visibly disabled (PRD §14)
+- [x] **AICHAT-07**: Every generation writes a usage record (model, provider, input/output tokens, cost estimate, requester) and the chat shows tokens per message
+- [x] **AICHAT-08**: User can attach files/images to prompts for vision-capable models via the upload pipeline
+- [x] **AICHAT-09**: User can create a read-only snapshot share link of an AI chat scoped to the organization (never public)
 
 ### Multiplayer AI Chat and Sharing (MULTI)
 
@@ -370,15 +370,15 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | CHAT-12 | Phase 4 | Delivered | Drag-and-drop, paste and picker uploads to Garage via presigned URLs, previews, lightbox, authorized download (ADR-0015): `attachments.int.test.ts`, `message-attachments.int.test.ts`; `attachments-api.spec.ts`, `attachments.spec.ts`, `chat-day.spec.ts` |
 | CHAT-13 | Phase 4 | Delivered | Pins per conversation, personal Saved view, copy link to messages and thread replies: `pins.int.test.ts`, `permalink.int.test.ts`; `reactions-pins.spec.ts`, `permalinks.spec.ts`, `chat-day.spec.ts` |
 | CHAT-14 | Phase 4 | Delivered | Cursor pagination plus detached permalink windows with Jump to latest: `permalink.int.test.ts`; `permalinks.spec.ts`, `search.spec.ts` |
-| AICHAT-01 | Phase 5 | Partial | Provider settings for bots (SLICE-09); keys in `app.secrets`, not `SecretReference`; no AI chats |
-| AICHAT-02 | Phase 5 | Pending | No AI chat surface |
-| AICHAT-03 | Phase 5 | Pending | No AI chat surface |
-| AICHAT-04 | Phase 5 | Pending | No AI chat surface |
-| AICHAT-05 | Phase 5 | Pending | No AI chat surface |
-| AICHAT-06 | Phase 5 | Pending | No AI chat surface |
-| AICHAT-07 | Phase 5 | Pending | No usage records (Work Zone shows tokens per turn only) |
-| AICHAT-08 | Phase 5 | Pending | No AI chat surface |
-| AICHAT-09 | Phase 5 | Pending | No AI chat surface |
+| AICHAT-01 | Phase 5 | Delivered | Org provider keys are `SecretReference`s read only through `secrets.resolve` (idempotent backfill with a documented rollback), one allowed list for AI chats and bots, METERED everywhere, no personal key route (ADR-0018, 05-01/05-04): `secret-ref-migration.int.test.ts`, `providers-secret-ref.int.test.ts`, `org-models.int.test.ts`, `security.int.test.ts`; `ai-chat-models.spec.ts`, `ai-chat-day.spec.ts` |
+| AICHAT-02 | Phase 5 | Delivered | Private owner-only AI chats, picker over the allowed list, per-message switch across the member's own ChatGPT plan (ADR-0017), org keys and the mock (05-02…05-07): `ai-chat.int.test.ts`, `org-models.int.test.ts`, `oauth.test.ts`, `signin.int.test.ts`, `plan-errors.int.test.ts`; `ai-chat.spec.ts`, `ai-chat-models.spec.ts`, `ai-chat-signin.spec.ts`, `ai-chat-plan-errors.spec.ts`, `ai-chat-day.spec.ts`. Real Sign in with ChatGPT is the owner's manual check (05-VALIDATION) |
+| AICHAT-03 | Phase 5 | Delivered | WS offset deltas + one durable final message, reload resume, cross-instance Stop keeping the partial text, 409 one-generation gate, sweeper, regenerate with versions (05-03/05-06): `ai-chat.int.test.ts`, `stop.int.test.ts`, `regenerate.int.test.ts`, `ai-chat-stream.test.ts`; `ai-chat-stop.spec.ts`, `ai-chat-day.spec.ts` |
+| AICHAT-04 | Phase 5 | Delivered | Auto titles on the chat's own backend (ADR-0014 rules), list with rename/archive, owner-only search and ⌘K (05-10): `titles.int.test.ts`, `list.int.test.ts`, `search.int.test.ts`; `ai-chat-list.spec.ts`, `ai-chat-day.spec.ts` |
+| AICHAT-05 | Phase 5 | Delivered | Personal defaults and per-chat instructions in a fixed labelled order, personal dropped with a second human (05-11): `build-model-messages.test.ts`, `tools.int.test.ts`; `ai-chat-tools.spec.ts` |
+| AICHAT-06 | Phase 5 | Delivered | Four toggles; Web on the plan's hosted search or the self-hosted SearXNG on org keys, disabled reasons; the other three "Not available yet" (05-11): `web-tools.test.ts`, `tools.int.test.ts`; `ai-chat-tools.spec.ts`, `ai-chat-day.spec.ts` |
+| AICHAT-07 | Phase 5 | Delivered | One append-only usage record per generation (every outcome), sourced prices, tokens/cost per answer, daily caps, member and admin reports (05-08/05-09): `model-prices.test.ts`, `usage.int.test.ts`, `usage-reports.int.test.ts`, `ai-format.test.ts`; `ai-chat-usage.spec.ts`, `ai-chat-usage-reports.spec.ts`, `ai-chat-day.spec.ts` |
+| AICHAT-08 | Phase 5 | Delivered | Images, PDFs and small text files through the Phase 4 pipeline, bytes read by the API, gated by model capability, untrusted labelling (05-12): `attachments.test.ts`, `attachments.int.test.ts`, `attachment-gate.test.ts`; `ai-chat-attachments.spec.ts`, `ai-chat-day.spec.ts` |
+| AICHAT-09 | Phase 5 | Delivered | Immutable snapshot readable only when signed in to the same organization, revoke, share-scoped files, anonymous 401 (05-13): `shares.int.test.ts`, `security.int.test.ts`; `ai-chat-share.spec.ts`, `ai-chat-day.spec.ts` |
 | MULTI-01 | Phase 6 | Pending | No AI chat sharing |
 | MULTI-02 | Phase 6 | Partial | Humans + bots live in channel threads (SLICE-12); no multi-human AI chat |
 | MULTI-03 | Phase 6 | Partial | Structured sender/roster to bots (SLICE-12); OpenClaw still renders `sender: body` history |
@@ -461,7 +461,8 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 - Superseded (not mapped): 5 (SLICE-01…04, DEV-07)
 - Active, mapped to phases: 135
 - Unmapped active requirements: 0 ✓
-- Status: 42 Delivered, 48 Partial, 45 Pending, 5 Superseded
+- Status (recounted from the table on 2026-10-07, 147 rows incl. the Phase 3.x additions): 75 Delivered, 36 Partial,
+  31 Pending, 5 Superseded
 
 Phase assignment follows `.planning/ROADMAP.md`. DESK-06 and DESK-07 live in Phase 11 (Work Zone UI)
 rather than Phase 9 because they require a WorkSession to be observable.
@@ -475,4 +476,4 @@ today; every later phase still audits the sensitive actions it introduces.
 
 ---
 *Requirements defined: 2026-09-10*
-*Last updated: 2026-10-06 after Phase 4 (CHAT-02, CHAT-04…14 delivered). Previously: 2026-10-04 after the Phase 1 code audit (Restructure 2026-10-04: SLICE-06…18 added, SLICE-01…04 and DEV-07 superseded, traceability re-mapped)*
+*Last updated: 2026-10-07 after Phase 5 (AICHAT-01…09 delivered). Previously: 2026-10-06 after Phase 4 (CHAT-02, CHAT-04…14 delivered); before that: 2026-10-04 after the Phase 1 code audit (Restructure 2026-10-04: SLICE-06…18 added, SLICE-01…04 and DEV-07 superseded, traceability re-mapped)*

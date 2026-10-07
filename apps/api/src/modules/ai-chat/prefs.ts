@@ -39,7 +39,7 @@ export function registerPreferenceRoutes(app: App, ctx: { core: Core; gateway: M
     "/me/ai-preferences",
     {
       config: { authz: "user" },
-      preHandler: core.identity.requireUser,
+      onRequest: core.identity.requireUser,
       schema: { tags, response: { 200: AiUserPreferences } },
     },
     async (req) =>
@@ -53,7 +53,7 @@ export function registerPreferenceRoutes(app: App, ctx: { core: Core; gateway: M
     "/me/ai-preferences",
     {
       config: { authz: "user" },
-      preHandler: core.identity.requireUser,
+      onRequest: core.identity.requireUser,
       schema: { tags, body: UpdateAiUserPreferencesRequest, response: { 200: AiUserPreferences } },
     },
     async (req) =>

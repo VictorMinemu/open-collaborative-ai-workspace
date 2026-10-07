@@ -33,7 +33,7 @@ export function registerUsageRoutes(app: App, ctx: { core: Core }): void {
     "/me/ai-usage/today",
     {
       config: { authz: "user" },
-      preHandler: core.identity.requireUser,
+      onRequest: core.identity.requireUser,
       schema: { tags: ["ai-chat"], response: { 200: AiUsageToday } },
     },
     async (req) =>
@@ -47,7 +47,7 @@ export function registerUsageRoutes(app: App, ctx: { core: Core }): void {
     "/me/ai-usage/report",
     {
       config: { authz: "user" },
-      preHandler: core.identity.requireUser,
+      onRequest: core.identity.requireUser,
       schema: { tags: ["ai-chat"], querystring: AiMyUsageReportQuery, response: { 200: AiUsageReport } },
     },
     async (req) => {
@@ -63,7 +63,8 @@ export function registerUsageRoutes(app: App, ctx: { core: Core }): void {
     "/ai-usage/report",
     {
       config: { authz: "user" },
-      preHandler: [core.identity.requireUser, perms.requirePermission("provider.manage")],
+      onRequest: core.identity.requireUser,
+      preHandler: perms.requirePermission("provider.manage"),
       schema: { tags: ["ai-chat"], querystring: AiUsageReportQuery, response: { 200: AiUsageReport } },
     },
     async (req) => {

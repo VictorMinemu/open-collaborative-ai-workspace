@@ -233,7 +233,8 @@ export function registerShareRoutes(app: App, deps: ShareRoutesDeps): void {
     "/ai-chats/:id/shares",
     {
       config: { authz: "user" },
-      preHandler: [core.identity.requireUser, createLimit],
+      onRequest: core.identity.requireUser,
+      preHandler: createLimit,
       schema: { tags, params: IdParams, response: { 201: AiChatShare } },
     },
     async (req, reply) => {
@@ -273,7 +274,7 @@ export function registerShareRoutes(app: App, deps: ShareRoutesDeps): void {
     "/ai-chats/:id/shares",
     {
       config: { authz: "user" },
-      preHandler: core.identity.requireUser,
+      onRequest: core.identity.requireUser,
       schema: { tags, params: IdParams, response: { 200: AiChatShareList } },
     },
     async (req) => {
@@ -296,7 +297,7 @@ export function registerShareRoutes(app: App, deps: ShareRoutesDeps): void {
     "/ai-shares/:shareId",
     {
       config: { authz: "user" },
-      preHandler: core.identity.requireUser,
+      onRequest: core.identity.requireUser,
       schema: { tags, params: ShareParams, response: { 200: AiChatShare } },
     },
     async (req) => {
@@ -340,7 +341,7 @@ export function registerShareRoutes(app: App, deps: ShareRoutesDeps): void {
     "/ai-shares/:shareId",
     {
       config: { authz: "user" },
-      preHandler: core.identity.requireUser,
+      onRequest: core.identity.requireUser,
       schema: { tags, params: ShareParams, response: { 200: AiShareView } },
     },
     async (req): Promise<AiShareView> =>
@@ -395,7 +396,7 @@ export function registerShareRoutes(app: App, deps: ShareRoutesDeps): void {
       `/ai-shares/:shareId/attachments/:attachmentId/${path}`,
       {
         config: { authz: "user" },
-        preHandler: core.identity.requireUser,
+        onRequest: core.identity.requireUser,
         schema: { tags, params: ShareAttachmentParams },
       },
       async (req, reply) => {

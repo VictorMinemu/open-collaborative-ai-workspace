@@ -2,9 +2,10 @@
 
 ## Status
 
-Proposed (owner decisions D-01, D-02 and D-03 in `.planning/phases/05-direct-ai-chat/05-CONTEXT.md`; plan 05-15
-accepts it after the Phase 5 gate and the owner's manual sign-in check).
-**Date:** 2026-10-06. Complements [ADR-0006](0006-subscription-sign-in-inside-the-cell.md), which stays in force for
+Accepted 2026-10-07 at the Phase 5 gate (05-15), on owner decisions D-01, D-02 and D-03 in
+`.planning/phases/05-direct-ai-chat/05-CONTEXT.md`. The real sign-in against OpenAI is the owner's manual check
+(see Validation); if it fails, a new ADR supersedes the affected decision.
+**Date:** 2026-10-06 (proposed), 2026-10-07 (accepted). Complements [ADR-0006](0006-subscription-sign-in-inside-the-cell.md), which stays in force for
 bots; supersedes nothing.
 
 ## Context
@@ -84,7 +85,7 @@ member's **own ChatGPT plan by default**, bring-your-own and never pooled, and o
   refresh-race handling (decision 6) and the guarantees in decision 5. Both are covered by integration tests: a
   scan of every text and jsonb column, log scans, two racing sends that refresh once, and another member's flow
   that 404s.
-- **NEEDS VALIDATION, owner's manual check in 05-15:**
+- **Open until the owner's manual check (Validation below):**
   - whether OpenAI accepts the paste relay of the loopback redirect (the docs require a loopback redirect and say
     nothing against relaying it);
   - whether ChatGPT Business and Enterprise seats are eligible (`subscription_sharing_user_not_eligible` is
@@ -109,3 +110,21 @@ member's **own ChatGPT plan by default**, bring-your-own and never pooled, and o
 - **Tests never reach OpenAI.** `infra/fake-model/fake-siwc.mjs` implements discovery, authorize, token (PKCE,
   rotation, reuse detection), JWKS and revocation, with test-only scenario and stats endpoints. The isolated e2e
   harness points `OCW_CHATGPT_AUTH_BASE_URL` at it.
+
+## Validation
+
+- **Proven against the fakes** (`infra/fake-model/fake-siwc.mjs`, the fake Responses API), with no real OpenAI call:
+  the paste flow end to end in the browser at 1440 and 390 (`e2e/tests/ai-chat-signin.spec.ts`,
+  `e2e/tests/ai-chat-day.spec.ts`); PKCE, state, nonce and ID-token checks (`chatgpt-plan/oauth.test.ts`); the
+  single-use flow bound to its member, serialized refresh under racing sends, terminal versus transient errors and
+  revoke on disconnect (`chatgpt-plan/signin.int.test.ts`); plan errors, `not_eligible` fallback and reconnect
+  (`chatgpt-plan/plan-errors.int.test.ts`, `e2e/tests/ai-chat-plan-errors.spec.ts`); the desktop listener
+  (`apps/desktop/src/main/chatgpt-loopback.test.ts`, plus the simulated preload in the plan-errors e2e). The Phase 5
+  sweep (`ai-chat/security.int.test.ts`) finds no access or refresh token, authorization code, PKCE verifier or
+  pasted address in any response, WS frame, audit row, log line or database text column.
+- **Owner's manual check on the demo** (never run by an executor; outcome recorded in
+  `.planning/phases/05-direct-ai-chat/05-VALIDATION.md`): (1) Settings › AI chat › Continue with ChatGPT with an own
+  Plus/Pro account, paste the 127.0.0.1 address → Connected; (2) in the desktop app, Disconnect and reconnect without
+  pasting; (3) one AI chat turn on a plan model streams, Stop keeps the partial text, the footer says "ChatGPT plan";
+  (4) if a Business/Enterprise seat is available, connect it and note `connected` or `not_eligible`. Items (1), (2)
+  and (4) settle the three open points above.
