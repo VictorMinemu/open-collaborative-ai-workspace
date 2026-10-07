@@ -258,6 +258,9 @@ export async function exchangeCode(
       code_verifier: i.verifier,
       redirect_uri: i.redirectUri,
       client_id: i.clientId,
+      // SIWC sign-in step 3: the exchange repeats the authorize request's resource (RFC 8707); without it the real
+      // token endpoint answers invalid_grant.
+      resource: CHATGPT_RESOURCE,
     },
     fetchFn,
   );

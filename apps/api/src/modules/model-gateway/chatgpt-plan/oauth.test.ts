@@ -310,6 +310,7 @@ describe("token endpoint errors", () => {
       code_verifier: "v-1",
       redirect_uri: "http://127.0.0.1:1455/auth/callback",
       client_id: "oaiapp_1",
+      resource: CHATGPT_RESOURCE,
     });
     const malformed = vi.fn(async () => json(200, { token_type: "Bearer" }));
     await expect(
