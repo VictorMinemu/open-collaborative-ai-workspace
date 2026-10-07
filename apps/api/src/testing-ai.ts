@@ -178,14 +178,21 @@ export async function subscribeTopic(
   };
 }
 
-/** A second API process on the stack's database and Redis (stop fan-out, sweeper: 05-06). */
+/**
+ * A second API process on the stack's database and Redis (stop fan-out, sweeper: 05-06). `env` overrides parsed
+ * settings of that process only (05-11: an instance without SearXNG, on the same data).
+ */
 export async function startSecondInstance(
   stack: TestStack,
+  env: Partial<TestStack["env"]> = {},
 ): Promise<{ built: BuiltApp; baseUrl: string; stop(): Promise<void> }> {
-  const built = await buildApp(stack.env, {
-    logger: false,
-    secretStore: createEnvFileSecretStore({ ...process.env }),
-  });
+  const built = await buildApp(
+    { ...stack.env, ...env },
+    {
+      logger: false,
+      secretStore: createEnvFileSecretStore({ ...process.env }),
+    },
+  );
   await built.app.listen({ host: "127.0.0.1", port: 0 });
   const { port } = built.app.server.address() as AddressInfo;
   return { built, baseUrl: `http://127.0.0.1:${port}`, stop: () => built.close() };

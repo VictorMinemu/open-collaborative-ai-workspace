@@ -39,16 +39,20 @@ import {
   type AiChatRow,
   aiMessage,
   chatDetail,
+  chatSettings,
   chatSummary,
   directoryOf,
   EMPTY_DIRECTORY,
   type GenerationRow,
   generationDto,
   generationsFor,
+  parseModelRef,
 } from "./dto";
 import { consumeGeneration, refuseOverLimit } from "./limits";
+import { loadPreferences } from "./prefs";
 import type { RunLoop } from "./run-loop";
 import { heuristicTitle } from "./titles";
+import { toolStates } from "./tools-state";
 import { backendClassOf } from "./usage";
 
 /**
@@ -136,6 +140,26 @@ export function createAiChatService(deps: AiChatDeps) {
   const { core, gateway, runLoop, access, perms } = deps;
 
   const resolveOr409 = (tx: Tx, ref: ModelRef, userId: string) => resolveModelOr409(gateway, tx, ref, userId);
+
+  /** The chat detail its owner sees: settings, the tool toggles for the chat's last model (05-11), viewerCan. */
+  async function detailOf(
+    req: FastifyRequest,
+    tx: Tx,
+    summary: AiChatSummary,
+    chat: AiChatRow,
+    facts: Parameters<typeof channelResource>[0],
+  ): Promise<AiChatDetail> {
+    const tools = await toolStates(tx, {
+      userId: chat.ownerUserId,
+      policy: await loadAiChatPolicy(tx),
+      perms,
+      gateway,
+      chat: chatSettings(chat),
+      model: parseModelRef(chat.lastModel),
+    });
+    const viewerCan = await perms.viewerCan(req, tx, channelResource(facts), VIEWER_CAN);
+    return chatDetail(summary, chat, tools, viewerCan);
+  }
 
   async function isGenerating(tx: Tx, conversationId: string): Promise<boolean> {
     const [row] = await tx
@@ -391,7 +415,9 @@ export function createAiChatService(deps: AiChatDeps) {
           titleSource: "heuristic",
           instructions: body.settings?.instructions ?? "",
           usePersonalInstructions: body.settings?.usePersonalInstructions ?? true,
-          tools: body.tools ?? body.settings?.tools ?? { web: false },
+          // The member's "Web on by default" applies when the first send says nothing (05-11).
+          tools: body.tools ??
+            body.settings?.tools ?? { web: (await loadPreferences(tx, auth.userId)).webDefault },
           lastModel: body.model,
         });
         const turn = await insertTurn(req, tx, conv, body, resolved);
@@ -505,12 +531,10 @@ export function createAiChatService(deps: AiChatDeps) {
      * Rename and archive/unarchive (05-10, owner only, hidden = 404). A typed title becomes `title_source = 'user'`
      * and is never replaced by a generated one; archive is the conversation's `archived_at`. Each real change is
      * audited (`ai_chat.renamed` carries the id only, never the title) and announced as `ai_chat.updated`.
-     * Settings (instructions, tools) arrive with 05-11 and are refused until then.
+     * Settings (05-11): instructions (≤ AI_INSTRUCTIONS_MAX, by the schema), "Also use my personal instructions" and the
+     * chat's tools; `ai_chat.settings_updated` lists the changed keys only.
      */
     async update(req: FastifyRequest, chatId: string, body: UpdateAiChatRequest): Promise<AiChatDetail> {
-      if (body.settings !== undefined) {
-        throw badRequest("Chat settings cannot be changed yet", "settings_unavailable");
-      }
       return core.db.withTenant(tenant(req), async (tx) => {
         const { conv, facts } = await ownedChat(req, tx, chatId);
         const { chat } = await loadChat(tx, conv.id);
@@ -541,6 +565,18 @@ export function createAiChatService(deps: AiChatDeps) {
             metadata: { conversationId: conv.id },
           });
         }
+        if (body.settings !== undefined) {
+          const changed = await updateSettings(tx, chat, body.settings, at);
+          if (changed.length > 0) {
+            // Changed keys only: instructions are the member's own text (T-05-11-05).
+            await core.audit.record(tx, {
+              action: "ai_chat.settings_updated",
+              resourceType: "ai_chat",
+              resourceId: conv.id,
+              metadata: { conversationId: conv.id, changed },
+            });
+          }
+        }
         const fresh = await loadChat(tx, conv.id);
         const summary = chatSummary(fresh.conv, fresh.chat, {
           generating: await isGenerating(tx, conv.id),
@@ -551,9 +587,7 @@ export function createAiChatService(deps: AiChatDeps) {
             chat: summary,
           });
         }
-        const policy = await loadAiChatPolicy(tx);
-        const viewerCan = await perms.viewerCan(req, tx, channelResource(facts), VIEWER_CAN);
-        return chatDetail(summary, fresh.chat, policy, viewerCan);
+        return detailOf(req, tx, summary, fresh.chat, facts);
       });
     },
 
@@ -591,11 +625,9 @@ export function createAiChatService(deps: AiChatDeps) {
           .from(aiGenerations)
           .where(and(eq(aiGenerations.conversationId, conv.id), eq(aiGenerations.status, "running")))
           .limit(1);
-        const policy = await loadAiChatPolicy(tx);
-        const viewerCan = await perms.viewerCan(req, tx, channelResource(facts), VIEWER_CAN);
         const summary = chatSummary(conv, chat, { generating: running !== undefined, gateway });
         return {
-          chat: chatDetail(summary, chat, policy, viewerCan),
+          chat: await detailOf(req, tx, summary, chat, facts),
           messages: list,
           hasMore,
           running: running
@@ -640,6 +672,31 @@ export function createAiChatService(deps: AiChatDeps) {
       });
     },
   };
+
+  /** Applies a settings patch (05-11); returns the keys that actually changed, sorted. */
+  async function updateSettings(
+    tx: Tx,
+    chat: AiChatRow,
+    patch: NonNullable<UpdateAiChatRequest["settings"]>,
+    at: string,
+  ): Promise<string[]> {
+    const before = chatSettings(chat);
+    const next = {
+      instructions: patch.instructions ?? before.instructions,
+      usePersonalInstructions: patch.usePersonalInstructions ?? before.usePersonalInstructions,
+      tools: patch.tools ?? before.tools,
+    };
+    const changed = (Object.keys(next) as Array<keyof typeof next>)
+      .filter((k) => JSON.stringify(before[k]) !== JSON.stringify(next[k]))
+      .sort();
+    if (changed.length > 0) {
+      await tx
+        .update(aiChats)
+        .set({ ...next, updatedAt: at })
+        .where(eq(aiChats.conversationId, chat.conversationId));
+    }
+    return changed;
+  }
 
   async function toDtos(tx: Tx, rows: MessageRow[], chat: AiChatRow) {
     const gens = await generationsFor(

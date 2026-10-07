@@ -1,10 +1,8 @@
 import {
   type AiChatDetail,
-  type AiChatPolicy,
   type AiChatSettings,
   type AiChatSummary,
   type AiGeneration,
-  type AiToolKey,
   type AiToolState,
   type AiUsage,
   type Message,
@@ -51,13 +49,6 @@ export async function directoryOf(tx: Tx, userIds: string[]): Promise<Directory>
   return dir;
 }
 
-const TOOL_LABELS: Record<AiToolKey, string> = {
-  web: "Web search",
-  companyKnowledge: "Company knowledge",
-  mcp: "MCP",
-  skills: "Skills",
-};
-
 export function parseModelRef(v: unknown): ModelRef | null {
   const parsed = ModelRef.safeParse(v);
   return parsed.success ? parsed.data : null;
@@ -90,32 +81,14 @@ export function chatSettings(chat: AiChatRow): AiChatSettings {
   };
 }
 
-/** Web reflects the chat setting (05-11 computes availability per backend); the other three are not built yet. */
-export function chatTools(chat: AiChatRow, policy: AiChatPolicy): AiToolState[] {
-  const web: AiToolState = {
-    key: "web",
-    label: TOOL_LABELS.web,
-    enabled: chat.tools?.web === true && policy.webEnabled,
-    available: policy.webEnabled,
-    reason: policy.webEnabled ? null : "disabled_by_org",
-  };
-  const later = (key: AiToolKey): AiToolState => ({
-    key,
-    label: TOOL_LABELS[key],
-    enabled: false,
-    available: false,
-    reason: "not_available_yet",
-  });
-  return [web, later("companyKnowledge"), later("mcp"), later("skills")];
-}
-
+/** `tools` comes from `toolStates` (tools-state.ts, 05-11): availability depends on policy, permission and model. */
 export function chatDetail(
   summary: AiChatSummary,
   chat: AiChatRow,
-  policy: AiChatPolicy,
+  tools: AiToolState[],
   viewerCan: Permission[],
 ): AiChatDetail {
-  return { ...summary, settings: chatSettings(chat), tools: chatTools(chat, policy), viewerCan };
+  return { ...summary, settings: chatSettings(chat), tools, viewerCan };
 }
 
 export function usageDto(u: UsageRow): AiUsage {

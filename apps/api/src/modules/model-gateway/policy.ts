@@ -1,5 +1,11 @@
-import { type AiChatPolicy, DEFAULT_AI_CHAT_POLICY, type UpdateAiChatPolicyRequest } from "@ocw/contracts";
+import {
+  type AiChatPolicy,
+  type AiToolUnavailableReason,
+  DEFAULT_AI_CHAT_POLICY,
+  type UpdateAiChatPolicyRequest,
+} from "@ocw/contracts";
 import { aiChatPolicies, type Tx, tenantOf } from "@ocw/db";
+import { orgResource, type PermissionService } from "../organization";
 
 /** The organization's AI chat policy (one row per org; absent = `DEFAULT_AI_CHAT_POLICY`). */
 export async function loadAiChatPolicy(tx: Tx): Promise<AiChatPolicy> {
@@ -45,4 +51,20 @@ export async function saveAiChatPolicy(
     .values({ organizationId: tenantOf(tx).organizationId, ...values })
     .onConflictDoUpdate({ target: aiChatPolicies.organizationId, set: values });
   return { policy: await loadAiChatPolicy(tx), changed };
+}
+
+/**
+ * Web search in AI chats before any model is considered (05-11, AICHAT-06): the organization turned it off
+ * (`disabled_by_org`), or the resolver denies `ai_chat.web` to this member (`denied`: an explicit deny wins,
+ * principle 6); null when both allow it. Model support is the caller's second check (`caps.webSearch`).
+ */
+export async function webPolicyReason(
+  tx: Tx,
+  perms: PermissionService,
+  userId: string,
+  policy: AiChatPolicy,
+): Promise<Extract<AiToolUnavailableReason, "disabled_by_org" | "denied"> | null> {
+  if (!policy.webEnabled) return "disabled_by_org";
+  const decision = await perms.decide(tx, { kind: "user", userId }, "ai_chat.web", orgResource());
+  return decision.allowed ? null : "denied";
 }

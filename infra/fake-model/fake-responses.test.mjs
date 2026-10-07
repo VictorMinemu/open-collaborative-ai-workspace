@@ -373,3 +373,67 @@ describe("title requests (05-10): instructions asking for a short title answer `
     assert.ok(Date.now() - started >= 3_000, "slow title replies take seconds");
   });
 });
+
+describe("hosted web search (05-11): `[[web <q>]]` with a `web_search` tool offered", () => {
+  const URL_OF = "https://example.com/ocw-fake/ocw-release";
+
+  it("streams a web_search_call item, then text carrying a url_citation annotation to the fake result", async () => {
+    const res = await post(
+      "/v1/responses",
+      planBody("latest news [[web ocw release]]", {
+        tools: [{ type: "web_search" }],
+        include: ["web_search_call.action.sources"],
+      }),
+    );
+    assert.equal(res.status, 200);
+    const events = await sse(res);
+    const added = events.filter((e) => e.data.type === "response.output_item.added").map((e) => e.data);
+    const done = events.filter((e) => e.data.type === "response.output_item.done").map((e) => e.data);
+    assert.equal(added[0].item.type, "web_search_call");
+    assert.equal(added[0].output_index, 0);
+    const call = done.find((d) => d.item.type === "web_search_call");
+    assert.equal(call.item.status, "completed");
+    assert.deepEqual(call.item.action, {
+      type: "search",
+      query: "ocw release",
+      sources: [{ type: "url", url: URL_OF }],
+    });
+    // The message is the second output item, its text cites the result.
+    const message = done.find((d) => d.item.type === "message");
+    assert.equal(message.output_index, 1);
+    const text = deltasOf(events).join("");
+    assert.match(text, /^Echo: latest news/u);
+    assert.ok(text.includes(URL_OF), "the text links the cited page");
+    const annotation = events.find((e) => e.data.type === "response.output_text.annotation.added")?.data;
+    assert.ok(annotation, "an annotation event");
+    assert.equal(annotation.output_index, 1);
+    assert.equal(annotation.annotation.type, "url_citation");
+    assert.equal(annotation.annotation.url, URL_OF);
+    assert.equal(annotation.annotation.title, "Fake result for ocw release");
+    assert.equal(
+      text.slice(annotation.annotation.start_index, annotation.annotation.end_index).includes(URL_OF),
+      true,
+      "start/end index cover the inline citation",
+    );
+    assert.deepEqual(message.item.content[0].annotations, [annotation.annotation]);
+    const completed = events.at(-1).data.response;
+    assert.deepEqual(
+      completed.output.map((o) => o.type),
+      ["web_search_call", "message"],
+    );
+  });
+
+  it("without the tool the directive does nothing: a plain echo, no search item, no annotation", async () => {
+    const res = await post("/v1/responses", planBody("latest news [[web ocw release]]"));
+    const events = await sse(res);
+    assert.equal(deltasOf(events).join(""), "Echo: latest news");
+    assert.equal(
+      events.some((e) => e.data.item?.type === "web_search_call"),
+      false,
+    );
+    assert.equal(
+      events.some((e) => e.data.type === "response.output_text.annotation.added"),
+      false,
+    );
+  });
+});

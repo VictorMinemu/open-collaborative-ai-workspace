@@ -6,6 +6,7 @@ import {
   type PersistedTurn,
   TITLE_INSTRUCTIONS,
   titleUserMessage,
+  WEB_NOTE,
 } from "./build-model-messages";
 
 /**
@@ -75,6 +76,47 @@ describe("instructions", () => {
       expect(out.instructions).not.toContain("Answer in Spanish.");
       expect(out.instructions).toContain("Be terse.");
     }
+  });
+
+  it("empty or blank sections are omitted (no empty labelled block)", () => {
+    const out = buildModelMessages(
+      input([turn("user", "Hi")], {
+        personalInstructions: "   \n ",
+        chat: { instructions: "  ", usePersonalInstructions: true, humanMembers: 1 },
+      }),
+    );
+    expect(out.instructions).not.toContain("user-authored preferences");
+    expect(out.instructions).not.toContain("<personal_instructions>");
+    expect(out.instructions).not.toContain("<chat_instructions>");
+  });
+
+  it("each section names whose preferences it holds: the member's own, then this chat's", () => {
+    const out = buildModelMessages(
+      input([turn("user", "Hi")], {
+        personalInstructions: "Answer in Spanish.",
+        chat: { instructions: "Be terse.", usePersonalInstructions: true, humanMembers: 1 },
+      }),
+    );
+    expect(out.instructions).toContain("The user's personal instructions (user-authored preferences");
+    expect(out.instructions).toContain("Instructions for this chat (user-authored preferences");
+    expect(out.instructions).toContain("do not conflict with the rules above");
+  });
+
+  it("the web note appears only when a search tool is attached, with the platform rules before the preferences (05-11)", () => {
+    const rows = [turn("user", "Hi")];
+    const over = {
+      personalInstructions: "Answer in Spanish.",
+      chat: { instructions: "Be terse.", usePersonalInstructions: true, humanMembers: 1 },
+    };
+    expect(buildModelMessages(input(rows, over)).instructions).not.toContain(WEB_NOTE);
+    expect(buildModelMessages(input(rows, { ...over, webSearch: false })).instructions).not.toContain(
+      WEB_NOTE,
+    );
+    const on = buildModelMessages(input(rows, { ...over, webSearch: true })).instructions;
+    expect(on).toContain(WEB_NOTE);
+    expect(WEB_NOTE).toMatch(/untrusted/u);
+    expect(on.indexOf(WEB_NOTE)).toBeGreaterThan(on.indexOf("You are chatting with"));
+    expect(on.indexOf(WEB_NOTE)).toBeLessThan(on.indexOf("Answer in Spanish."));
   });
 
   it("a user-authored block cannot close its own delimiter", () => {
