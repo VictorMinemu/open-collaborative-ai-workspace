@@ -7,7 +7,7 @@ import {
   test,
 } from "@playwright/test";
 import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
-import { bothThemes, mockup } from "../support/files";
+import { bothThemes, dropFiles, type FileSpec, mockup, pasteFiles } from "../support/files";
 import { type FakeDeviceHandle, startFakeDevice } from "../support/work-zone-device";
 import { ADMIN } from "./env";
 
@@ -170,6 +170,229 @@ test("Work Zone images: a pasted screenshot reaches the device and every control
     await bothThemes(sam.page, `wz-images-lightbox-${tag}`);
     await sam.page.keyboard.press("Escape");
     await expect(lightbox).toBeHidden();
+  } finally {
+    await teardown(s);
+  }
+});
+
+/** A minimal one-page PDF (the server sniffs the %PDF magic; the composer must refuse it before any upload). */
+const PDF = Buffer.from(
+  "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj 2 0 obj<</Type/Pages/Kids[]/Count 0>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n",
+);
+
+const image = (name: string, hue: [number, number, number]): FileSpec => ({
+  name,
+  type: "image/png",
+  bytes: mockup(640, 400, hue),
+});
+
+/** Adds files the way the device does: a drop on the session pane on desktop, the paperclip's picker on a phone. */
+async function addFiles(page: Page, files: FileSpec[], mobile: boolean) {
+  if (mobile) {
+    await page
+      .getByTestId("attach-file")
+      .setInputFiles(files.map((f) => ({ name: f.name, mimeType: f.type, buffer: f.bytes })));
+  } else {
+    await dropFiles(page, files);
+  }
+}
+
+/** Opens the Queue: the side panel on a wide screen, the sheet on a phone. */
+async function openQueue(page: Page, mobile: boolean) {
+  await page.getByTestId(mobile ? "open-queue" : "tab-queue").click();
+  await expect(page.getByTestId("queue-panel")).toBeVisible();
+}
+
+test("Work Zone images: drop or pick, refusals in place, the fifth image, queued thumbnails for everyone, no images with a / command", async ({
+  page,
+  browser,
+}, info) => {
+  test.setTimeout(300_000);
+  const mobile = info.project.name === "mobile";
+  const tag = mobile ? "390" : "1440";
+  const s: Setup = { adminApi: await apiAs(ADMIN), device: null, sessionId: null, sam: null };
+  // Every presign the composer makes: a refused file must never reach the upload routes.
+  const presigned: string[] = [];
+  page.on("request", (req) => {
+    if (req.method() === "POST" && /\/api\/v1\/conversations\/[0-9a-f-]{36}\/attachments$/.test(req.url())) {
+      presigned.push(req.postData() ?? "");
+    }
+  });
+  try {
+    // Supervised: the fake asks before writing, so a turn waits on the approval while the next prompt is queued.
+    await openSession(page, browser, info.project.name, s, {
+      name: `img-queue-${tag}`,
+      runtime: "claude-code",
+      mode: "default",
+    });
+    const sam = s.sam!;
+    const form = page.getByTestId("composer-form");
+    const composer = page.getByTestId("composer");
+    const send = page.getByTestId("send-prompt");
+    const items = form.getByTestId("attachment-item");
+
+    // ---- a turn runs (it waits for the approval)
+    await composer.fill("Add a short CONTRIBUTING guide for new teammates");
+    await send.click();
+    const banner = page.getByTestId("approval-banner");
+    await expect(banner).toBeVisible({ timeout: 30_000 });
+
+    // ---- two images and a PDF: the images upload, the PDF is refused in the tray with the reason
+    await addFiles(
+      page,
+      [
+        image("header.png", [79, 70, 229]),
+        image("footer.png", [16, 185, 129]),
+        { name: "notes.pdf", type: "application/pdf", bytes: PDF },
+      ],
+      mobile,
+    );
+    await expect(items).toHaveCount(3);
+    const pdf = items.filter({ hasText: "notes.pdf" });
+    await expect(pdf).toHaveAttribute("data-status", "error");
+    await expect(pdf.getByTestId("attachment-error")).toHaveText(
+      "Only images (PNG, JPEG, GIF, WebP) can be sent to a session",
+    );
+    await expect(items.and(page.locator('[data-status="ready"]'))).toHaveCount(2, { timeout: 20_000 });
+    expect(presigned.some((body) => body.includes("notes.pdf"))).toBe(false);
+    // The chip clamps its reason; the line under the card says it in full.
+    await expect(page.getByTestId("composer-hint")).toContainText(
+      "notes.pdf: Only images (PNG, JPEG, GIF, WebP) can be sent to a session",
+    );
+    expect(presigned).toHaveLength(2);
+    await composer.fill("Match the spacing of these two mockups");
+    await expect(send).toBeDisabled();
+    await bothThemes(page, `wz-images-refused-${tag}`);
+
+    // ---- removing the PDF enables Send
+    await pdf.getByTestId("attachment-remove").click();
+    await expect(items).toHaveCount(2);
+    await expect(send).toBeEnabled();
+
+    // ---- a fifth image is refused in place ("Up to 4 images per prompt"); removing the extras keeps the first two
+    await addFiles(
+      page,
+      [
+        image("third.png", [245, 158, 11]),
+        image("fourth.png", [14, 165, 233]),
+        image("fifth.png", [244, 63, 94]),
+      ],
+      mobile,
+    );
+    await expect(items).toHaveCount(5);
+    const fifth = items.filter({ hasText: "fifth.png" });
+    await expect(fifth.getByTestId("attachment-error")).toHaveText("Up to 4 images per prompt");
+    await expect(send).toBeDisabled();
+    expect(presigned.some((body) => body.includes("fifth.png"))).toBe(false);
+    await expect(page.getByTestId("composer-hint")).toContainText("fifth.png: Up to 4 images per prompt");
+    await expect(items.and(page.locator('[data-status="ready"]'))).toHaveCount(4, { timeout: 20_000 });
+    for (const name of ["fifth.png", "fourth.png", "third.png"]) {
+      await items
+        .filter({ has: page.locator(`[alt="${name}"], [title="${name}"]`) })
+        .first()
+        .getByTestId("attachment-remove")
+        .click();
+    }
+    await expect(items).toHaveCount(2);
+    await expect(send).toBeEnabled();
+    await bothThemes(page, `wz-images-composer-${tag}`);
+
+    // ---- queued while the turn runs: the queue shows both thumbnails, for Víctor and for Sam
+    await send.click();
+    await expect(items).toHaveCount(0);
+    await openQueue(page, mobile);
+    const queued = page.getByTestId("queued-prompt").filter({ hasText: "Match the spacing" });
+    const thumbs = queued.getByTestId("prompt-thumb");
+    await expect(thumbs).toHaveCount(2, { timeout: 10_000 });
+    await expect(thumbs.nth(0)).toHaveAttribute("alt", "header.png");
+    await expect(thumbs.nth(1)).toHaveAttribute("alt", "footer.png");
+    for (const i of [0, 1]) await expectLoaded(thumbs.nth(i));
+    // The "Queued #1" toast sits over the panel for a few seconds (and waits while hovered: on a phone the pointer
+    // rests on the header's Queue button under it): shoot the queue once it has gone.
+    await page.mouse.move(8, page.viewportSize()!.height - 8);
+    await expect(page.getByText("Queued #1")).toBeHidden({ timeout: 15_000 });
+    await bothThemes(page, `wz-images-queue-${tag}`);
+    await openQueue(sam.page, mobile);
+    const samThumbs = sam.page
+      .getByTestId("queued-prompt")
+      .filter({ hasText: "Match the spacing" })
+      .getByTestId("prompt-thumb");
+    await expect(samThumbs).toHaveCount(2, { timeout: 10_000 });
+    for (const i of [0, 1]) await expectLoaded(samThumbs.nth(i));
+    if (mobile) await page.keyboard.press("Escape");
+    await expect(page.getByTestId("queue-panel")).toBeVisible({ visible: !mobile });
+
+    // ---- the turn goes on; the queued prompt runs and the device lists both images
+    await banner.getByTestId("approve-once").click();
+    // The first turn ends, the queued prompt starts and asks too (its bubble shows once it is dispatched).
+    await expect(page.getByTestId("prompt-bubble").filter({ hasText: "Match the spacing" })).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(banner).toBeVisible({ timeout: 30_000 });
+    await banner.getByTestId("approve-once").click();
+    await expect(page.getByTestId("assistant-message").last()).toContainText(
+      "Images: 2 (image/png, image/png)",
+      {
+        timeout: 30_000,
+      },
+    );
+    await expect(
+      page
+        .getByTestId("prompt-bubble")
+        .filter({ hasText: "Match the spacing" })
+        .getByTestId("attachment-image"),
+    ).toHaveCount(2);
+    await expect(page.getByTestId("session-view")).toHaveAttribute("data-status", "idle", {
+      timeout: 30_000,
+    });
+
+    // ---- a / command never takes images: Send waits and says why
+    await pasteFiles(composer, [image("palette.png", [99, 102, 241])]);
+    await expect(items).toHaveCount(1);
+    await expect(items.first()).toHaveAttribute("data-status", "ready", { timeout: 20_000 });
+    await composer.fill("/model sonnet");
+    await expect(send).toBeDisabled();
+    await expect(page.getByTestId("composer-hint")).toContainText("Images can't be sent with a / command");
+    await expect(send).toHaveAttribute("title", "Images can't be sent with a / command");
+    await bothThemes(page, `wz-images-slash-${tag}`);
+    await composer.fill("Use this palette for the guide");
+    await expect(send).toBeEnabled();
+  } finally {
+    await teardown(s);
+  }
+});
+
+test("Work Zone images: a Codex session takes a pasted image and its reply lists it", async ({
+  page,
+  browser,
+}, info) => {
+  test.setTimeout(240_000);
+  const tag = info.project.name === "mobile" ? "390" : "1440";
+  const s: Setup = { adminApi: await apiAs(ADMIN), device: null, sessionId: null, sam: null };
+  try {
+    await openSession(page, browser, info.project.name, s, {
+      name: `img-codex-${tag}`,
+      runtime: "codex",
+      mode: "plan",
+    });
+    const composer = page.getByTestId("composer");
+    await pasteFiles(composer, [image("screen.png", [16, 185, 129])]);
+    const item = page.getByTestId("composer-form").getByTestId("attachment-item");
+    await expect(item).toHaveAttribute("data-status", "ready", { timeout: 20_000 });
+    await composer.fill("Why does this layout overflow?");
+    await page.getByTestId("send-prompt").click();
+    await expect(page.getByTestId("assistant-message").last()).toContainText("Images: 1 (image/png)", {
+      timeout: 30_000,
+    });
+    const bubble = page.getByTestId("prompt-bubble").filter({ hasText: "Why does this layout overflow?" });
+    await expectLoaded(bubble.getByTestId("attachment-image"));
+    await expect(
+      s
+        .sam!.page.getByTestId("prompt-bubble")
+        .filter({ hasText: "Why does this layout overflow?" })
+        .getByTestId("attachment-image"),
+    ).toHaveCount(1, { timeout: 10_000 });
+    await bothThemes(page, `wz-images-codex-${tag}`);
   } finally {
     await teardown(s);
   }
