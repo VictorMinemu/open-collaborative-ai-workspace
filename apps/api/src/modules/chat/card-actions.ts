@@ -277,7 +277,8 @@ export function registerCardActionRoutes(app: App, ctx: ChatRouteCtx): void {
   const { core, deps, access, perms } = ctx;
   decider = perms;
   const tags = ["chat"];
-  const user = { config: { authz: "user" as const }, preHandler: core.identity.requireUser };
+  // `onRequest`, as every AI chat route: an anonymous caller gets 401 before the body is validated (06-16 sweep).
+  const user = { config: { authz: "user" as const }, onRequest: core.identity.requireUser };
 
   /** The card, its message and the caller's facts on its conversation; 404 when missing or not readable. */
   async function readableCard(req: FastifyRequest, tx: Tx, messageId: string, lock = false) {
