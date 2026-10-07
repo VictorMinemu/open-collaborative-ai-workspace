@@ -1,12 +1,18 @@
 "use client";
 
 import { Menu } from "@base-ui/react/menu";
-import type { Permission, WorkSession, WorkSessionChanges } from "@ocw/contracts";
+import {
+  type Permission,
+  WORK_PROMPT_MAX_IMAGES,
+  type WorkSession,
+  type WorkSessionChanges,
+} from "@ocw/contracts";
 import { Archive, ArrowLeft, FileDiff, ListOrdered, Lock, MoreHorizontal, SearchX, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { DropZone } from "@/components/chat/attachments/drop-zone";
 import { EmptyState } from "@/components/common/empty-state";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
 import { PresenceStack, usePresentPeople } from "@/components/presence/presence-stack";
@@ -20,6 +26,7 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useToastClearance } from "@/hooks/use-toast-clearance";
 import { errorMessage, isApiError } from "@/lib/api";
+import { useAttachmentsConfig } from "@/lib/attachment-queries";
 import { useMe, useMembers } from "@/lib/queries";
 import { type LiveSession, useLiveSession } from "@/lib/use-live-session";
 import { cn } from "@/lib/utils";
@@ -28,7 +35,7 @@ import { AgentBar } from "./agent-bar";
 import { ApprovalBanner } from "./approval-banner";
 import { ChangesCard } from "./changes-card";
 import { ChangesPanel } from "./changes-panel";
-import { Composer } from "./composer";
+import { Composer, type ComposerApi } from "./composer";
 import { EventStream } from "./event-stream";
 import { FullAccessBadge } from "./full-access-badge";
 import { RUNTIMES, StatusChip, StatusDot } from "./meta";
@@ -123,6 +130,11 @@ function LoadedSession({ state, viewerCan }: { state: LiveSession; viewerCan: re
   // the approval banner's decisions (a hovered toast never times out, so it kept "Allow for session" covered).
   const dock = useRef<HTMLDivElement>(null);
   useToastClearance(dock);
+  // Images dropped on the session pane go to the composer's tray (06.1); off where the paperclip is hidden.
+  const composer = useRef<ComposerApi | null>(null);
+  const filesConfig = useAttachmentsConfig();
+  const canPrompt = viewerCan.includes("work_session.prompt");
+  const canDrop = filesConfig.data?.enabled === true && canPrompt && session.status !== "archived";
 
   const setPanel = useCallback((t: PanelTab | null) => {
     setPanelState(t);
@@ -184,7 +196,13 @@ function LoadedSession({ state, viewerCan }: { state: LiveSession; viewerCan: re
         canArchive={viewerCan.includes("work_session.archive")}
       />
       <div className="flex min-h-0 flex-1">
-        <div className="flex min-w-0 flex-1 flex-col">
+        <DropZone
+          conversationLabel={session.title}
+          enabled={canDrop}
+          hint={`Images only · up to ${WORK_PROMPT_MAX_IMAGES}`}
+          onFiles={(files) => composer.current?.addFiles(files)}
+          className="min-w-0"
+        >
           <div
             ref={scroller}
             onScroll={(e) => {
@@ -221,6 +239,8 @@ function LoadedSession({ state, viewerCan }: { state: LiveSession; viewerCan: re
               session={session}
               queued={queued}
               canConfigure={viewerCan.includes("work_session.configure")}
+              canPrompt={canPrompt}
+              apiRef={composer}
               above={
                 <AgentBar
                   session={session}
@@ -237,7 +257,7 @@ function LoadedSession({ state, viewerCan }: { state: LiveSession; viewerCan: re
               below={<SessionFooter session={session} />}
             />
           </div>
-        </div>
+        </DropZone>
         {wide && panel ? (
           <aside
             className="flex w-[380px] shrink-0 flex-col border-l bg-sidebar/30"

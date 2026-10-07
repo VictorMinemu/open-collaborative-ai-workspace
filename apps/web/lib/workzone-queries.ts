@@ -2,6 +2,7 @@
 
 import {
   CreateEnrollmentResponse,
+  type CreatePromptRequest,
   type CreateWorkSessionRequest,
   DeviceList,
   EventTypes,
@@ -113,10 +114,14 @@ export function useCreateWorkSession() {
   });
 }
 
+/** Queues a prompt; `attachmentIds` are the session composer's uploaded images (06.1), in tray order. */
 export function useQueuePrompt(sessionId: string) {
   return useMutation({
-    mutationFn: (body: string) =>
-      api.post(`/api/v1/work-sessions/${sessionId}/prompts`, { body: { body }, schema: WorkPrompt }),
+    mutationFn: ({ body, attachmentIds }: CreatePromptRequest) =>
+      api.post(`/api/v1/work-sessions/${sessionId}/prompts`, {
+        body: attachmentIds?.length ? { body, attachmentIds } : { body },
+        schema: WorkPrompt,
+      }),
   });
 }
 

@@ -50,6 +50,18 @@ export interface AttachmentQueue {
   reset(): void;
 }
 
+/** Optional per-destination rules (06.1: a Work Zone session takes images only, four per prompt). */
+export interface AttachmentQueueOptions {
+  /**
+   * Why the destination refuses `file` before anything is uploaded, or null. `accepted` counts the files already in
+   * the tray (and earlier in the same batch) that were not refused. A refused file joins the tray as an error that
+   * cannot be retried, so the reason shows in place, and it is never uploaded.
+   */
+  precheck?: (file: File, accepted: number) => string | null;
+  /** The toast when files beyond `maxPerMessage` are dropped (default: the Phase 4 sentence). */
+  tooManyText?: string;
+}
+
 const INLINE = new Set<string>(INLINE_IMAGE_TYPES);
 const isAbort = (err: unknown) => err instanceof DOMException && err.name === "AbortError";
 let seq = 0;
@@ -60,11 +72,18 @@ let seq = 0;
  * conversation or unmounting cancels running uploads and frees the local thumbnails. The target may be a function
  * that resolves the conversation on the first upload (05-12: a New AI chat's draft); keep it stable.
  */
-export function useAttachmentQueue(conversationId: UploadTarget, limits?: Limits | null): AttachmentQueue {
+export function useAttachmentQueue(
+  conversationId: UploadTarget,
+  limits?: Limits | null,
+  options?: AttachmentQueueOptions,
+): AttachmentQueue {
   const [items, setItems] = useState<QueueItem[]>([]);
   const itemsRef = useRef(items);
   itemsRef.current = items;
   const handles = useRef(new Map<string, UploadHandle>());
+  // The latest rules, read at `add` time (callers pass a fresh object or closure on every render).
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
 
   const patch = useCallback((localId: string, next: Partial<QueueItem>) => {
     setItems((prev) => prev.map((i) => (i.localId === localId ? { ...i, ...next } : i)));
@@ -100,9 +119,16 @@ export function useAttachmentQueue(conversationId: UploadTarget, limits?: Limits
     (files: File[]) => {
       if (!limits || files.length === 0) return;
       const { accepted, dropped } = screenFiles(files, limits, itemsRef.current.length);
-      if (dropped > 0) toast.error(`You can attach up to ${limits.maxPerMessage} files to a message`);
-      const added = accepted.map(({ file, error }): QueueItem => {
+      const { precheck, tooManyText } = optionsRef.current ?? {};
+      if (dropped > 0) {
+        toast.error(tooManyText ?? `You can attach up to ${limits.maxPerMessage} files to a message`);
+      }
+      // Retryable failures are real uploads that may still go: they keep their place.
+      let kept = itemsRef.current.filter((i) => i.status !== "error" || i.retryable).length;
+      const added = accepted.map(({ file, error: screened }): QueueItem => {
         const contentType = contentTypeOf(file);
+        const error = screened ?? precheck?.(file, kept) ?? null;
+        if (!error) kept++;
         return {
           localId: `f${++seq}`,
           file,
@@ -323,7 +349,11 @@ function TrayItem({
           {middleEllipsis(item.name, 28)}
         </p>
         {failed ? (
-          <p data-testid="attachment-error" className="line-clamp-2 text-[11.5px] text-destructive leading-4">
+          <p
+            data-testid="attachment-error"
+            title={item.error ?? refusal ?? undefined}
+            className="line-clamp-2 text-[11.5px] text-destructive leading-4"
+          >
             {item.error ?? refusal}
           </p>
         ) : (
