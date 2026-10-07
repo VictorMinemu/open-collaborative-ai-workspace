@@ -130,6 +130,17 @@ export const PRECONDITIONS: readonly Precondition[] = [
     },
   },
   {
+    // Deciding an Agent Card is a write (P-11): in an AI chat it needs the owner or a `chat` grant, as sending does.
+    // A `view` grantee reads and follows only. Channels, DMs and organization scope stay role-based.
+    applies: (perm) => perm === "agent_card.approve",
+    check: (_p, r) => {
+      if (!isChannel(r) || !r.state.has("ai_chat") || r.relations.has("member")) return null;
+      return r.relations.has("grantee")
+        ? { layer: "resource", reason: "ai_chat_view_only" }
+        : { layer: "resource", reason: "not_ai_chat_owner" };
+    },
+  },
+  {
     // Managing and sharing a concrete AI chat stay with its owner, whatever grant anyone else holds.
     applies: (perm) => AI_CHAT_OWNER_ONLY.has(perm),
     check: (_p, r) =>

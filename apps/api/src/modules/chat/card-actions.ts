@@ -100,7 +100,8 @@ export function decisionBlock(
 /**
  * Adds `card` to every live message that has one (P-05: tombstones carry none) with the viewer's fields: `following`
  * and `viewerCan` (`follow` for any reader, which the list's caller already is; `decide` when the card allows it and
- * the resolver grants `agent_card.approve` in that conversation). One query for the cards, one for the follows.
+ * the resolver grants `agent_card.approve` in that conversation, never to a `view` grantee of an AI chat). One query
+ * for the cards, one for the follows.
  */
 export async function withCards(tx: Tx, list: Message[], viewerId: string | null): Promise<Message[]> {
   const live = list.filter((m) => !m.deletedAt).map((m) => m.id);
@@ -332,7 +333,8 @@ export function registerCardActionRoutes(app: App, ctx: ChatRouteCtx): void {
 
   /**
    * One decision per card, decided by the server (the client only says approved or denied): the caller reads the
-   * conversation (404), holds `agent_card.approve` there (403, deny rules win), the card has an approve action (409
+   * conversation (404), holds `agent_card.approve` there (403, deny rules win; in an AI chat only the owner or a `chat`
+   * grantee holds it, a `view` grantee is 403 `ai_chat_view_only`), the card has an approve action (409
    * `card_not_decidable`), names the caller when it names approvers (403 `not_card_approver`) and is not decided yet
    * (409 `card_already_decided`, also for a concurrent loser of the conditional update). Every reader gets
    * `message.updated`, the decision is audited (ids and outcome) and the agent receives `agent.card_action.v1`.
