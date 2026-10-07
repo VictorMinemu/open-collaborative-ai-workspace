@@ -2,8 +2,10 @@
 // short-lived device JWT fetched before every connect (`getAccessToken`), or the raw device token when no
 // token source is given. The daemon never listens on a TCP port. Frames produced while offline go to an in-memory append
 // log and are replayed, in order, after the next successful connect.
+// Server → device frames are capped at `DEVICE_LINK_MAX_COMMAND_FRAME_BYTES` (06.1, P-01): a larger one closes the
+// socket with 1009 and the link reconnects; the API's hub refuses to send anything above the same limit.
 
-import { CommandFrame, type DeviceToServerFrame } from "@ocw/contracts";
+import { CommandFrame, DEVICE_LINK_MAX_COMMAND_FRAME_BYTES, type DeviceToServerFrame } from "@ocw/contracts";
 import WebSocket from "ws";
 import { errorMessage, type Logger, silentLogger } from "./logger.js";
 
@@ -25,6 +27,8 @@ export interface DeviceLinkOptions {
   backoffMinMs?: number;
   backoffMaxMs?: number;
   maxOfflineFrames?: number;
+  /** Largest server message accepted, in bytes. Default (and production value): `DEVICE_LINK_MAX_COMMAND_FRAME_BYTES`. */
+  maxPayload?: number;
   /** Injection point for tests. */
   createSocket?: (url: string, headers: Record<string, string>) => WebSocket;
 }
@@ -137,7 +141,12 @@ export class DeviceLink {
     try {
       ws = this.opts.createSocket
         ? this.opts.createSocket(this.opts.url, headers)
-        : new WebSocket(this.opts.url, { headers, handshakeTimeout: 10_000, perMessageDeflate: false });
+        : new WebSocket(this.opts.url, {
+            headers,
+            handshakeTimeout: 10_000,
+            perMessageDeflate: false,
+            maxPayload: this.opts.maxPayload ?? DEVICE_LINK_MAX_COMMAND_FRAME_BYTES,
+          });
     } catch (err) {
       this.log.error("cannot create websocket", { error: errorMessage(err) });
       this.scheduleReconnect();
