@@ -172,6 +172,9 @@ test("palette People shows Sam and a bot (the bot opens its DM); Channels opens 
   await expect(palette.getByTestId("search-profile")).toContainText("Sam Lee");
   await palette.getByRole("button", { name: "Back to results" }).click();
   await expect(person).toBeVisible();
+  // Back returns the keyboard to the search field. Without it the dialog's focus restore re-focuses the popup
+  // a frame later and can swallow the next keystrokes (seen on a loaded full run, 06.1-05).
+  await expect(palette.getByTestId("search-input")).toBeFocused();
 
   // The bot is a person result too. "sam" alone matches more people than the overview shows on a shared stack
   // (other specs create their own Sams), so narrow to the bot's name.
