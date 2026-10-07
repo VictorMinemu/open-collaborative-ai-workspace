@@ -220,3 +220,33 @@ describe("tracer: a linked image reaches the device as base64 while the database
     await finish(main, cmd);
   });
 });
+
+const solid = (width: number, height: number, hex: string) =>
+  sharp({ create: { width, height, channels: 3, background: hex } });
+
+describe("request order: a prompt's images go in the order the sender listed them (D-02)", () => {
+  it("four images listed out of upload order arrive in request order, and the prompt lists them so", async () => {
+    const colors = ["#e11", "#1e1", "#11e", "#ee1"];
+    const atts: Json[] = [];
+    for (const [i, c] of colors.entries()) {
+      atts.push(
+        await upload(main, `shot-${i}.jpg`, "image/jpeg", await solid(320, 200, c).jpeg().toBuffer()),
+      );
+    }
+    const order = [atts[2]!.id, atts[0]!.id, atts[3]!.id, atts[1]!.id];
+    const prompt = await ok(submit(main, "compare these", order));
+    expect(prompt.attachments.map((a: Json) => a.id)).toEqual(order);
+
+    const cmd = (await main.device.command("prompt", main.sessionId)) as Cmd;
+    expect((await commandRow(main, cmd.id)).payload.imageAttachmentIds).toEqual(order);
+    const got = received(cmd).map((i) => sha(i.bytes));
+    const want: string[] = [];
+    for (const id of order) want.push(sha(await stored(main, id, "large.webp")));
+    expect(got).toEqual(want);
+
+    const detail = await ok(main.admin.request("GET", `/api/v1/work-sessions/${main.sessionId}`));
+    const listed = (detail.prompts as Json[]).find((p) => p.id === prompt.id)!;
+    expect(listed.attachments.map((a: Json) => a.id)).toEqual(order);
+    await finish(main, cmd);
+  });
+});
