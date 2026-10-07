@@ -113,7 +113,13 @@ describe("provider_secret_refs data migration", () => {
     const backfill = dirs.indexOf(migrationDir("_provider_secret_refs"));
     expect(schema).toBeGreaterThanOrEqual(0);
     expect(backfill).toBeGreaterThan(schema);
-    expect(backfill).toBe(dirs.length - 1);
+    // The data migration runs right after the schema migration that adds the column (was "is the newest
+    // migration", true only until Phase 6 added 20261007073058_multiplayer_ai, which never touches model_providers).
+    expect(backfill).toBe(schema + 1);
+    for (const later of dirs.slice(backfill + 1)) {
+      const laterSql = readFileSync(join(MIGRATIONS_DIR, later, "migration.sql"), "utf8");
+      expect(laterSql, later).not.toMatch(/model_providers|secret_ref/);
+    }
     const sql = migrationSql("_provider_secret_refs");
     expect(sql).toContain("secret_id is not null");
     expect(sql).toContain("secret_ref is null");
