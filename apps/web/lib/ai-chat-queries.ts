@@ -1,18 +1,23 @@
 "use client";
 
 import {
+  type AgentTypingEvent,
   type AiChatAccessChangedEvent,
   AiChatDetail,
   AiChatList,
   type AiChatListScope,
+  AiChatParticipants,
   type AiChatSnapshot,
   AiChatSnapshot as AiChatSnapshotSchema,
   type AiChatSummary,
   AiChatSummary as AiChatSummarySchema,
   AiModelList,
+  AiPostedMessageResponse,
+  type AiQueueState,
   AiUserPreferences,
   type ConversationReadEvent,
   type CreateAiChatRequest,
+  EphemeralTypes,
   EventTypes,
   type Message,
   type Notification,
@@ -23,6 +28,7 @@ import {
   topic,
   type UpdateAiChatRequest,
   type UpdateAiUserPreferencesRequest,
+  type UserTypingEvent,
 } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
 import {
@@ -32,11 +38,12 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useCallback, useEffect, useReducer, useRef } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { type Typer, useTypers } from "@/components/chat/typing";
 import { type AiChatState, displayText, initialAiChatState, reduceAiChat } from "./ai-chat-stream";
 import { api, isApiError } from "./api";
 import { useMe } from "./queries";
-import { useRealtimeStatus, useTopic } from "./realtime";
+import { useRealtime, useRealtimeStatus, useTopic } from "./realtime";
 
 /**
  * AI chat data (P-06). The page subscribes to `conv:<id>` FIRST and only then loads the snapshot; `onFrame` feeds
@@ -60,6 +67,8 @@ export const aiKeys = {
   settings: (id: string) => ["ai", "settings", id] as const,
   /** The member's own defaults (05-11). */
   preferences: ["ai", "preferences"] as const,
+  /** Who takes part in a chat (06-10): the @ suggestions and the names of typing people (06-11). */
+  participants: (id: string) => ["ai", "participants", id] as const,
 };
 
 /** Rows per page of the chat list (the API's keyset cursor). */
@@ -277,6 +286,8 @@ export async function saveAiPreferences(
 }
 
 const GAP_REFETCH_MS = 1_200;
+/** Typing frames at most this often (the Phase 4 composer's throttle; the line expires 5 s after the last one). */
+const TYPING_THROTTLE_MS = 3_000;
 const GAP_REFETCH_TRIES = 3;
 /** A streaming answer with no frame for this long re-reads the snapshot (the server heartbeats every 10 s). */
 const STALL_REFETCH_MS = 10_000;
@@ -314,8 +325,50 @@ export function createAiDraft(): Promise<AiChatSummary> {
   return api.post("/api/v1/ai-chats/drafts", { body: {}, schema: AiChatSummarySchema });
 }
 
-export function sendAiMessage(chatId: string, body: SendAiMessageRequest): Promise<SendAiMessageResponse> {
-  return api.post(`/api/v1/ai-chats/${chatId}/messages`, { body, schema: SendAiMessageResponse });
+/** What a send answers: 201 with the answer that starts now, or 202 with the posted message (06-06). */
+export type AiSendResult = SendAiMessageResponse | AiPostedMessageResponse;
+
+/** The send was posted without an answer starting now (202: queued, not for the AI, or skipped). */
+export function isPosted(r: AiSendResult): r is AiPostedMessageResponse {
+  return "addressing" in r;
+}
+
+const SendResultSchema = {
+  parse(v: unknown): AiSendResult {
+    return typeof v === "object" && v !== null && "assistantMessage" in v
+      ? SendAiMessageResponse.parse(v)
+      : AiPostedMessageResponse.parse(v);
+  },
+};
+
+/**
+ * Sends a message (P-07). Solo chats answer 201 and stream as in Phase 5. A multiplayer chat (06-06) answers 201 when
+ * the answer starts now, else 202 with the posted message; `askAi` (06-11, P-08) is forwarded only there — a solo
+ * send is the Phase 5 request, unchanged.
+ */
+export function sendAiMessage(
+  chatId: string,
+  body: SendAiMessageRequest,
+  opts: { multiplayer?: boolean } = {},
+): Promise<AiSendResult> {
+  const { askAi, ...rest } = body;
+  const payload = opts.multiplayer && askAi !== undefined ? { ...rest, askAi } : rest;
+  return api.post(`/api/v1/ai-chats/${chatId}/messages`, { body: payload, schema: SendResultSchema });
+}
+
+/**
+ * Who takes part in a chat (06-10, `channel.read`): the owner, the people who can read it, its member agents. The @
+ * suggestions of the composer and the names of people typing (06-11) come from here; refetched when access changes.
+ */
+export function useAiParticipants(chatId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: aiKeys.participants(chatId),
+    queryFn: ({ signal }) =>
+      api.get(`/api/v1/ai-chats/${chatId}/participants`, { schema: AiChatParticipants, signal }),
+    enabled,
+    staleTime: 30_000,
+    retry: (n, err) => !(isApiError(err) && err.status >= 400 && err.status < 500) && n < 2,
+  });
 }
 
 /**
@@ -357,6 +410,16 @@ export interface AiChatView {
   textOf: (m: Message) => string;
   /** Applies a send answered by the API (both turns show before their events arrive). */
   applySent: (r: SendAiMessageResponse) => void;
+  /** Applies a 202 multiplayer send (06-11): the posted message joins the list with its addressing. */
+  applyPosted: (r: AiPostedMessageResponse) => void;
+  /** The one-generation queue of a multiplayer chat (06-11); null in solo chats. */
+  queue: AiQueueState | null;
+  /** People and agents typing in the chat now (06-11), never the viewer. */
+  typers: Typer[];
+  /** Tells the others the viewer is typing (throttled like the Phase 4 composer). */
+  sendTyping: () => void;
+  /** The viewer lost access while the chat was open (06-11): nothing of it may stay on screen. */
+  lost: boolean;
   isPending: boolean;
   /** Answers rendered streaming now are live on this page (not a replay ahead of the first snapshot). */
   live: boolean;
@@ -382,13 +445,49 @@ export function useAiChat(chatId: string): AiChatView {
   //    gives the replay cursor; otherwise the server replays the chat's events, which the reducer dedupes by seq.
   const cursor = useRef(qc.getQueryData<AiChatSnapshot>(aiKeys.chat(chatId))?.lastSeq);
   const lastFrameAt = useRef(Date.now());
-  const onFrame = useCallback((frame: TopicFrame) => {
-    lastFrameAt.current = Date.now();
-    dispatch({ kind: "frame", frame });
-  }, []);
+  const me = useMe({ enabled: false });
+  const meId = me.data?.user.id ?? null;
+  const meRef = useRef(meId);
+  meRef.current = meId;
+  // Names of people typing: the chat's authors and its participants (06-11).
+  const nameRef = useRef<(userId: string) => string>(() => "Someone");
+  const { typers, touch, clear } = useTypers();
   // A `resync` (too many events to replay) re-reads the snapshot; the query is declared below.
   const resync = useRef<() => void>(() => {});
-  useTopic(`conv:${chatId}`, onFrame, cursor.current, () => resync.current());
+  const onFrame = useCallback(
+    (frame: TopicFrame) => {
+      lastFrameAt.current = Date.now();
+      if (frame.op === "eph") {
+        if (frame.type === EphemeralTypes.userTyping) {
+          const d = frame.data as UserTypingEvent;
+          if (d.userId && d.userId !== meRef.current) {
+            touch({ kind: "user", id: d.userId, name: nameRef.current(d.userId), threadRootId: null });
+          }
+          return;
+        }
+        if (frame.type === EphemeralTypes.agentTyping) {
+          const d = frame.data as AgentTypingEvent;
+          touch({ kind: "agent", id: d.agentId, name: d.displayName, threadRootId: null });
+          return;
+        }
+      } else if (frame.type === EventTypes.messageCreated) {
+        const m = (frame.data as { message?: Message }).message;
+        // A message from someone typing: they are done.
+        if (m && m.authorKind !== "system") clear(m.authorKind, m.authorId);
+      } else if (frame.type === EventTypes.aiChatAccessChanged) {
+        // Someone's access changed (P-09): re-read what this viewer may do (composer vs read-only); a 404 means they
+        // lost the chat. The participants follow.
+        resync.current();
+        void qc.invalidateQueries({ queryKey: aiKeys.participants(chatId) });
+      }
+      dispatch({ kind: "frame", frame });
+    },
+    [touch, clear, qc, chatId],
+  );
+  // The server dropped the stream because the viewer lost access (RT-01, ADR-0009).
+  const [revoked, setRevoked] = useState(false);
+  const onRevoked = useCallback(() => setRevoked(true), []);
+  useTopic(`conv:${chatId}`, onFrame, cursor.current, () => resync.current(), { onRevoked });
 
   // 2. Then the snapshot. Every snapshot (first load, gap refetch, reconnect) is stitched with what streamed.
   const query = useQuery({
@@ -453,10 +552,41 @@ export function useAiChat(chatId: string): AiChatView {
   const latestSeq = state.messages.reduce((max, m) => (m.threadId === null && m.seq > max ? m.seq : max), 0);
   useAiChatReadMarker(chatId, shared, latestSeq);
 
+  // 7. Typing (06-11): names from the chat's authors, then its participants.
+  const multiplayer = shared || state.queue !== null;
+  const participants = useAiParticipants(chatId, multiplayer && !revoked);
+  const names = useMemo(() => {
+    const out = new Map<string, string>();
+    for (const p of participants.data?.participants ?? []) out.set(p.id, p.displayName);
+    for (const m of state.messages) if (m.authorId && m.author) out.set(m.authorId, m.author.displayName);
+    return out;
+  }, [participants.data, state.messages]);
+  nameRef.current = (id) => names.get(id) ?? "Someone";
+  const realtime = useRealtime();
+  const lastTyping = useRef(0);
+  const sendTyping = useCallback(() => {
+    const now = Date.now();
+    if (now - lastTyping.current < TYPING_THROTTLE_MS) return;
+    lastTyping.current = now;
+    realtime?.sendEphemeral(`conv:${chatId}`, EphemeralTypes.userTyping, { threadRootId: null });
+  }, [realtime, chatId]);
+
+  // 8. Lost access (06-11): the stream was revoked, or a re-read of a chat this page had loaded answers 404.
+  const hadSnapshot = state.snapshot !== null;
+  const lost = revoked || (hadSnapshot && isApiError(query.error, 404));
+  useEffect(() => {
+    if (lost) qc.removeQueries({ queryKey: aiKeys.chat(chatId) });
+  }, [lost, qc, chatId]);
+
   const textOf = useCallback((m: Message) => displayText(state, m), [state]);
   const applySent = useCallback((r: SendAiMessageResponse) => {
     sentHere.current = true;
+    lastTyping.current = 0;
     dispatch({ kind: "sent", response: r });
+  }, []);
+  const applyPosted = useCallback((r: AiPostedMessageResponse) => {
+    lastTyping.current = 0;
+    dispatch({ kind: "posted", response: r });
   }, []);
 
   return {
@@ -465,6 +595,11 @@ export function useAiChat(chatId: string): AiChatView {
     streamingText: state.streaming,
     textOf,
     applySent,
+    applyPosted,
+    queue: state.queue,
+    typers: typers.filter((t) => t.kind === "agent" || t.id !== meId),
+    sendTyping,
+    lost,
     isPending: query.isPending && state.messages.length === 0,
     // A fresh page replays the chat's durable events before its snapshot lands: an answer that ended before the
     // page opened then shows `streaming` for a moment. Until a snapshot (or a send from this page) anchors the

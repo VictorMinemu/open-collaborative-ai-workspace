@@ -221,41 +221,35 @@ describe("queueText (D-05)", () => {
     j: "Jo Diaz",
   };
   const nameOf = (id: string) => names[id] ?? "Someone";
-  const authors: Record<string, string> = { m1: "v", m2: "a", m3: "s", m4: "r", m5: "j", m6: "a" };
-  const authorOf = (id: string) => authors[id] ?? null;
+  // `respondingTo` holds the authors (user ids) the running turn answers (06-06).
   const running = (requester: string, respondingTo: string[]) => ({
     generationId: "g",
     requesterUserId: requester,
     respondingTo,
   });
-  const pending = (...ids: string[]) =>
-    ids.map((messageId) => ({ messageId, authorId: authors[messageId] ?? "" }));
+  const pending = (...authors: string[]) => authors.map((authorId, i) => ({ messageId: `m${i}`, authorId }));
 
   it("says whom the AI is answering and who is next, requesters first, each name once", () => {
-    expect(queueText({ running: running("v", ["m1"]), pending: [] }, nameOf, authorOf)).toBe(
+    expect(queueText({ running: running("v", ["v"]), pending: [] }, nameOf)).toBe(
       "AI is answering Víctor Ruiz",
     );
-    expect(queueText({ running: running("v", ["m1"]), pending: pending("m2") }, nameOf, authorOf)).toBe(
+    expect(queueText({ running: running("v", ["v"]), pending: pending("a") }, nameOf)).toBe(
       "AI is answering Víctor Ruiz · Alex Kim is next",
     );
-    expect(
-      queueText({ running: running("v", ["m1"]), pending: pending("m2", "m3", "m6") }, nameOf, authorOf),
-    ).toBe("AI is answering Víctor Ruiz · Alex Kim and Sam Lee are next");
-    expect(queueText({ running: running("a", ["m3", "m2"]), pending: [] }, nameOf, authorOf)).toBe(
+    expect(queueText({ running: running("v", ["v"]), pending: pending("a", "s", "a") }, nameOf)).toBe(
+      "AI is answering Víctor Ruiz · Alex Kim and Sam Lee are next",
+    );
+    expect(queueText({ running: running("a", ["s", "a"]), pending: [] }, nameOf)).toBe(
       "AI is answering Alex Kim and Sam Lee",
     );
-    expect(
-      queueText(
-        { running: running("v", ["m1"]), pending: pending("m2", "m3", "m4", "m5") },
-        nameOf,
-        authorOf,
-      ),
-    ).toBe("AI is answering Víctor Ruiz · Alex Kim, Sam Lee and 2 others are next");
+    expect(queueText({ running: running("v", ["v"]), pending: pending("a", "s", "r", "j") }, nameOf)).toBe(
+      "AI is answering Víctor Ruiz · Alex Kim, Sam Lee and 2 others are next",
+    );
   });
 
   it("is null when idle and empty; a waiting queue says who is next", () => {
-    expect(queueText({ running: null, pending: [] }, nameOf, authorOf)).toBeNull();
-    expect(queueText({ running: null, pending: pending("m2") }, nameOf, authorOf)).toBe(
+    expect(queueText({ running: null, pending: [] }, nameOf)).toBeNull();
+    expect(queueText({ running: null, pending: pending("a") }, nameOf)).toBe(
       "Waiting for the AI · Alex Kim is next",
     );
   });

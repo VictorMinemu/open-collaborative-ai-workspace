@@ -99,6 +99,7 @@ export function AiComposer({
   busy,
   onSend,
   onStop,
+  onTyping,
   autoFocus,
   className,
   chat = null,
@@ -124,6 +125,8 @@ export function AiComposer({
   busy: boolean;
   /** Stops the answer being written (absent while the chat has none to stop). */
   onStop?: () => Promise<void>;
+  /** The member is typing (06-11, multiplayer chats only; throttled by the caller). */
+  onTyping?: () => void;
   /** Resolves once the API accepted the send; rejects to keep the text and the files. */
   onSend: (text: string, model: AiModelOption, tools: AiChatTools, files: AiSendFiles) => Promise<void>;
   autoFocus?: boolean;
@@ -306,7 +309,10 @@ export function AiComposer({
           // biome-ignore lint/a11y/noAutofocus: a new chat opens ready to type, like ChatGPT and Claude.ai
           autoFocus={autoFocus}
           disabled={noModel}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            setText(e.target.value);
+            if (e.target.value) onTyping?.();
+          }}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
           placeholder={noModel ? "No model is available to you yet" : "Ask anything"}

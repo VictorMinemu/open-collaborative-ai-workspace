@@ -2,13 +2,14 @@
 
 import type { AiChatTools, AiModelOption, SendAiMessageResponse } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
-import { Archive, Eye, MessageCircleQuestion, Share2, SlidersHorizontal } from "lucide-react";
+import { Archive, Eye, Lock, MessageCircleQuestion, Share2, SlidersHorizontal } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DropZone } from "@/components/chat/attachments/drop-zone";
 import { attachmentLimitsHint } from "@/components/chat/composer";
+import { TypingIndicator } from "@/components/chat/typing";
 import { EmptyState } from "@/components/common/empty-state";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -16,6 +17,7 @@ import { clearAiChatModel } from "@/lib/ai-chat-model-store";
 import {
   createAiChat,
   createAiDraft,
+  isPosted,
   newClientMessageId,
   primeAiChat,
   sendAiMessage,
@@ -25,6 +27,7 @@ import {
   useAiChatSettingsLive,
   useAiChatSummary,
   useAiModels,
+  useAiParticipants,
   useAiPreferences,
 } from "@/lib/ai-chat-queries";
 import { errorMessage, isApiError } from "@/lib/api";
@@ -36,6 +39,7 @@ import { AiEmptyState } from "./ai-empty-state";
 import { AiChatPeopleContext } from "./ai-message";
 import { AiMessageList } from "./ai-message-list";
 import { ChatSettingsSheet } from "./chat-settings-sheet";
+import { QueueChip } from "./queue-chip";
 import { ShareDialog } from "./share-dialog";
 
 /**
@@ -105,20 +109,26 @@ function NewChat() {
   }, []);
 
   async function onSend(body: string, m: AiModelOption, tools: AiChatTools, files: AiSendFiles) {
-    let res: SendAiMessageResponse;
+    let res: SendAiMessageResponse | null;
+    let chatId: string;
     try {
       const base = { clientMessageId: newClientMessageId(), body, model: m.ref, tools };
-      res =
-        draft.current || files.ids.length > 0
-          ? await sendAiMessage(await ensureDraft(), { ...base, attachmentIds: files.ids })
-          : await createAiChat(base);
+      if (draft.current || files.ids.length > 0) {
+        // A draft is the member's own solo chat: always 201 (the 202 of a shared chat cannot happen here).
+        const sent = await sendAiMessage(await ensureDraft(), { ...base, attachmentIds: files.ids });
+        res = isPosted(sent) ? null : sent;
+        chatId = sent.chat.id;
+      } else {
+        res = await createAiChat(base);
+        chatId = res.chat.id;
+      }
     } catch (err) {
       sendFailed(err);
     }
-    primeAiChat(res);
+    if (res) primeAiChat(res);
     // The created chat's lastModel carries the pick; the next New chat starts from the default again.
     clearAiChatModel(NEW_CHAT_KEY);
-    router.replace(`/chat/ai/${res.chat.id}`);
+    router.replace(`/chat/ai/${chatId}`);
   }
 
   return (
@@ -159,12 +169,23 @@ function ExistingChat({ chatId }: { chatId: string }) {
   const composer = useRef<AiComposerApi | null>(null);
   const snapshotChat = chat.snapshot?.chat;
   const detail = snapshotChat ? { ...snapshotChat, ...live, ...liveSettings } : snapshotChat;
-  const writing = chat.messages.findLast((m) => m.authorKind === "agent" && m.status === "streaming");
+  const writing = chat.messages.findLast(
+    (m) => m.authorKind === "agent" && m.authorId === null && m.status === "streaming",
+  );
   const busy = writing !== undefined;
-  // The generation to stop: the streaming answer's, else the snapshot's running one.
+  // The chat takes turns among several people (06-11): shared, or the server keeps a queue for it (P-08).
+  const multiplayer = detail?.shared === true || chat.queue !== null;
+  // The generation to stop: the queue's running one (multiplayer), else the streaming answer's, else the snapshot's.
   const runningId =
+    (multiplayer ? chat.queue?.running?.generationId : undefined) ??
     writing?.generation?.id ??
     (chat.snapshot?.running?.messageId === writing?.id ? chat.snapshot?.running?.generationId : undefined);
+  const viewerId = me.data?.user.id ?? null;
+  const participants = useAiParticipants(chatId, multiplayer && !chat.lost);
+  const names = new Map<string, string>();
+  for (const p of participants.data?.participants ?? []) names.set(p.id, p.displayName);
+  for (const m of chat.messages) if (m.authorId && m.author) names.set(m.authorId, m.author.displayName);
+  const nameOf = (id: string) => names.get(id) ?? null;
 
   async function onStop() {
     if (!runningId) return;
@@ -176,20 +197,47 @@ function ExistingChat({ chatId }: { chatId: string }) {
     }
   }
 
-  async function onSend(body: string, m: AiModelOption, tools: AiChatTools, files: AiSendFiles) {
+  async function onSend(
+    body: string,
+    m: AiModelOption,
+    tools: AiChatTools,
+    files: AiSendFiles,
+    askAi?: boolean,
+  ) {
     try {
-      chat.applySent(
-        await sendAiMessage(chatId, {
+      const res = await sendAiMessage(
+        chatId,
+        {
           clientMessageId: newClientMessageId(),
           body,
           model: m.ref,
           tools,
           ...(files.ids.length > 0 ? { attachmentIds: files.ids } : {}),
-        }),
+          ...(askAi !== undefined ? { askAi } : {}),
+        },
+        { multiplayer },
       );
+      if (isPosted(res)) chat.applyPosted(res);
+      else chat.applySent(res);
     } catch (err) {
       sendFailed(err);
     }
+  }
+
+  if (chat.lost) {
+    return (
+      <Frame title="AI chat">
+        <EmptyState
+          icon={Lock}
+          title="You no longer have access to this chat."
+          description="Its owner changed who can see it. Ask them if you need it back."
+        >
+          <Link href="/chat/ai" className={buttonVariants({ variant: "outline" })} data-testid="ai-lost-back">
+            Back to AI chats
+          </Link>
+        </EmptyState>
+      </Frame>
+    );
   }
 
   if (chat.notFound) {
@@ -244,7 +292,9 @@ function ExistingChat({ chatId }: { chatId: string }) {
   const canShare = detail?.viewerCan.includes("ai_chat.share") ?? false;
   // A view grant reads only (P-04): no composer, no files, no regenerate. Until the detail loads, Phase 5 behaviour.
   const canUse = detail ? detail.viewerCan.includes("ai_chat.use") : true;
-  const people = { viewerId: me.data?.user.id ?? null, shared: detail?.shared === true };
+  const people = { viewerId, shared: detail?.shared === true, multiplayer, nameOf };
+  // Stop belongs to the running request's author and to whoever manages the chat (06-06; the API enforces it too).
+  const canStop = canManage || (!!viewerId && chat.queue?.running?.requesterUserId === viewerId);
   // D-01 / T-06-03-01: a grantee starts on their own default model, never on the owner's last one (that may be the
   // owner's plan); the owner keeps the Phase 5 rule (the chat's last model first).
   const grantee = detail?.access !== undefined && detail.access !== "owner";
@@ -306,9 +356,30 @@ function ExistingChat({ chatId }: { chatId: string }) {
             messages={chat.messages}
             textOf={chat.textOf}
             onRegenerated={canUse ? chat.applySent : undefined}
+            // 06-03 deferred / 06-06: in a multiplayer chat only the answer's requester or a manager may regenerate.
+            canRegenerate={
+              multiplayer
+                ? (a) => canManage || (!!viewerId && a.generation?.requesterUserId === viewerId)
+                : undefined
+            }
+            regenerateBlocked={multiplayer && (chat.queue?.pending.length ?? 0) > 0}
             live={chat.live}
           />
         </AiChatPeopleContext.Provider>
+        {multiplayer ? (
+          <div className="mx-auto w-full max-w-3xl sm:px-2">
+            <TypingIndicator typers={chat.typers} />
+          </div>
+        ) : null}
+        {multiplayer && chat.queue && !detail?.archived ? (
+          <QueueChip
+            queue={chat.queue}
+            names={(id) => nameOf(id) ?? "Someone"}
+            viewerId={viewerId}
+            canStop={canStop}
+            onStop={onStop}
+          />
+        ) : null}
         {detail?.archived ? (
           <ArchivedNotice chatId={chatId} canUnarchive={canManage} />
         ) : !canUse ? (
@@ -321,9 +392,11 @@ function ExistingChat({ chatId }: { chatId: string }) {
             models={models.data?.models}
             preferred={preferred}
             modelsLoading={models.isPending}
-            busy={busy}
+            // Multiplayer (06-11, D-05): Send stays while an answer runs (the server queues); Stop is in the chip.
+            busy={multiplayer ? false : busy}
             onSend={onSend}
-            onStop={runningId ? onStop : undefined}
+            onStop={!multiplayer && runningId ? onStop : undefined}
+            onTyping={multiplayer ? chat.sendTyping : undefined}
             uploadTarget={chatId}
             apiRef={composer}
             // Arriving from New chat's first send: the keyboard stays in the composer.

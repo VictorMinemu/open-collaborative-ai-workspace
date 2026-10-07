@@ -1,9 +1,9 @@
 import type {
   AiChatSnapshot,
   AiDeltaEvent,
+  AiGeneration,
   AiPostedMessageResponse,
   AiQueueState,
-  AiGeneration,
   Message,
   SendAiMessageResponse,
 } from "@ocw/contracts";
@@ -426,7 +426,7 @@ describe("reduceAiChat: multiplayer queue and addressing (06-11)", () => {
     data: { conversationId: CHAT, ...q },
   });
   const runningA: AiQueueState = {
-    running: { generationId: GEN_A, requesterUserId: VICTOR, respondingTo: [ASK] },
+    running: { generationId: GEN_A, requesterUserId: VICTOR, respondingTo: [VICTOR] },
     pending: [],
   };
   const withAlex: AiQueueState = { ...runningA, pending: [{ messageId: ALEX_MSG, authorId: ALEX }] };
@@ -438,7 +438,7 @@ describe("reduceAiChat: multiplayer queue and addressing (06-11)", () => {
     ],
   };
   const runningB: AiQueueState = {
-    running: { generationId: GEN_B, requesterUserId: ALEX, respondingTo: [ALEX_MSG, SAM_MSG] },
+    running: { generationId: GEN_B, requesterUserId: ALEX, respondingTo: [ALEX, SAM] },
     pending: [],
   };
   const multiplayer = (messages: Message[], lastSeq: number, queue: AiQueueState) =>
