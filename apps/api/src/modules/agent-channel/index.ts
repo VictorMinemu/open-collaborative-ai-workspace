@@ -12,6 +12,7 @@ import {
   CellSnapshot,
   cellTopic,
   IdParams,
+  type ModelRef,
   Ok,
   ProviderAuthStatus,
   RotateCellTokenResponse,
@@ -94,7 +95,11 @@ async function botChannelResource(
  * token, `/agent-channel/v1/*`), plus the admin cell controls under `/api/v1/agent-cell*` (cookie session).
  * Contract: `.planning/phases/01-mvp-0-multiplayer-ai-chat-slice/01-AGENT-CHANNEL-API.md`.
  */
-export function createAgentChannelModule(core: Core): ApiModule {
+export function createAgentChannelModule(
+  core: Core,
+  /** The chat model's display label (06-10: a persona's AI chat history names it "AI assistant (<model>)"). */
+  opts: { modelLabel?: (ref: ModelRef) => string } = {},
+): ApiModule {
   const auth = createCellAuth(core);
   const presence = createCellPresence(core);
   const perms = createPermissionService(core);
@@ -108,7 +113,7 @@ export function createAgentChannelModule(core: Core): ApiModule {
   /** Every Agent Channel route: the authenticated cell principal must hold `cell.sync`. */
   const cellRoute = { config: { authz: "cell" as const } };
   const providerAuth = createProviderAuth(core, presence);
-  registerMentionHandler(core);
+  registerMentionHandler(core, { modelLabel: opts.modelLabel });
 
   async function uiTokenCreatedAt(tx: Tx): Promise<string | null> {
     const [row] = await tx

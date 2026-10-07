@@ -85,6 +85,13 @@ export const TurnMemoryItem = z.object({ id: Id, text: z.string(), createdAt: z.
  * `agent.mention.v1.turn`: exactly what this bot may do for this human on this turn (decided by the API).
  * A mention without it runs with no tools (fail closed, `EMPTY_TURN`).
  */
+/**
+ * One tool the API did not offer on this turn of a shared AI chat, and why (06-10). Informational: the reason stays a
+ * string so a newer API reason never invalidates the turn.
+ */
+export const TurnWithheld = z.object({ tool: z.string().max(200), reason: z.string().max(64) });
+export type TurnWithheld = z.infer<typeof TurnWithheld>;
+
 export const TurnContext = z.object({
   tools: z.array(z.string()),
   toolFlags: z.record(z.string(), TurnToolFlags).default({}),
@@ -92,6 +99,8 @@ export const TurnContext = z.object({
   now: TurnNow.nullable().default(null),
   maxToolCalls: z.number().int().nonnegative(),
   maxWebCalls: z.number().int().nonnegative(),
+  /** AI chats only (06-10). Never enables a tool; an invalid list is dropped, the turn is kept. */
+  withheld: z.array(TurnWithheld).max(64).optional().catch(undefined),
 });
 export type TurnContext = z.infer<typeof TurnContext>;
 
@@ -111,6 +120,10 @@ export const AgentMentionEvent = z.object({
   organizationId: Id,
   cellId: Id,
   agent: z.object({ id: Id, handle: z.string(), displayName: z.string() }),
+  /**
+   * `kind`: `channel`, `thread`, `dm`, `group` or `ai_chat` (06-10: a persona in a shared AI chat, answered flat like a
+   * DM). Kept a string so a newer API never makes an older plugin drop the event.
+   */
   conversation: z.object({ id: Id, kind: z.string(), name: z.string().nullable() }),
   /** Root = the mention itself when posted at channel level. Reply goes into this thread. */
   thread: z.object({ rootMessageId: Id }),

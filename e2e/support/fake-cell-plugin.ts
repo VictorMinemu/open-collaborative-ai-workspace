@@ -238,8 +238,9 @@ export class FakeCellPlugin {
   }
 
   async reply(m: MentionPayload, text: string) {
-    // Direct conversations are flat (D-04): like apps/openclaw-channel, reply and type with no thread root.
-    const threadRootMessageId = m.conversation.kind === "dm" ? null : m.thread.rootMessageId;
+    // DMs and AI chats are flat (D-04, P-10): like apps/openclaw-channel, reply and type with no thread root.
+    const flat = m.conversation.kind === "dm" || m.conversation.kind === "ai_chat";
+    const threadRootMessageId = flat ? null : m.thread.rootMessageId;
     await this.request("POST", "/typing", {
       agentId: m.agent.id,
       conversationId: m.conversation.id,

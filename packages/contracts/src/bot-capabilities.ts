@@ -254,6 +254,14 @@ export type TurnToolFlags = z.infer<typeof TurnToolFlags>;
  * `agent.mention.v1.turn`: exactly what this bot may do for this human on this turn. A plugin that receives
  * no `turn` runs with no tools (fail closed).
  */
+/**
+ * Why a tool the bot could use is not offered on this turn of a shared AI chat (06-10, D-06): `not_every_participant` (a
+ * joined human may not use it), `shared_with_group` (a team, department or the organization holds a grant, so the readers
+ * are not a list) or `denied_for_you` (the asking human may not use it).
+ */
+export const TurnWithheldReason = z.enum(["not_every_participant", "shared_with_group", "denied_for_you"]);
+export type TurnWithheldReason = z.infer<typeof TurnWithheldReason>;
+
 export const TurnContext = z.object({
   tools: z.array(z.string()).max(64),
   toolFlags: z.record(z.string(), TurnToolFlags),
@@ -261,6 +269,11 @@ export const TurnContext = z.object({
   now: TurnNow.nullable(),
   maxToolCalls: z.number().int(),
   maxWebCalls: z.number().int(),
+  /** AI chat deliveries only (06-10): what was withheld and why, so the persona can say so. Never enables a tool. */
+  withheld: z
+    .array(z.object({ tool: z.string(), reason: TurnWithheldReason }))
+    .max(64)
+    .optional(),
 });
 export type TurnContext = z.infer<typeof TurnContext>;
 
