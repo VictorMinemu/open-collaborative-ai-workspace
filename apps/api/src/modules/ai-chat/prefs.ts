@@ -18,7 +18,11 @@ const KEYS = ["instructions", "defaultModel", "webDefault"] as const;
 
 /** The caller's preferences (defaults when never saved). */
 export async function loadPreferences(tx: Tx, userId: string): Promise<AiUserPreferences> {
-  const [row] = await tx.select().from(aiUserPreferences).where(eq(aiUserPreferences.userId, userId)).limit(1);
+  const [row] = await tx
+    .select()
+    .from(aiUserPreferences)
+    .where(eq(aiUserPreferences.userId, userId))
+    .limit(1);
   return {
     instructions: row?.instructions ?? "",
     defaultModel: parseModelRef(row?.defaultModel),
@@ -83,7 +87,10 @@ export function registerPreferenceRoutes(app: App, ctx: { core: Core; gateway: M
         await tx
           .insert(aiUserPreferences)
           .values({ organizationId: tenantOf(tx).organizationId, userId: auth.userId, ...values })
-          .onConflictDoUpdate({ target: [aiUserPreferences.organizationId, aiUserPreferences.userId], set: values });
+          .onConflictDoUpdate({
+            target: [aiUserPreferences.organizationId, aiUserPreferences.userId],
+            set: values,
+          });
         await core.audit.record(tx, {
           action: "ai_preferences.updated",
           resourceType: "ai_user_preferences",

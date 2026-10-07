@@ -49,8 +49,8 @@ import {
   parseModelRef,
 } from "./dto";
 import { consumeGeneration, refuseOverLimit } from "./limits";
-import type { RunLoop } from "./run-loop";
 import { loadPreferences } from "./prefs";
+import type { RunLoop } from "./run-loop";
 import { heuristicTitle } from "./titles";
 import { toolStates } from "./tools-state";
 import { backendClassOf } from "./usage";
@@ -532,7 +532,7 @@ export function createAiChatService(deps: AiChatDeps) {
      * and is never replaced by a generated one; archive is the conversation's `archived_at`. Each real change is
      * audited (`ai_chat.renamed` carries the id only, never the title) and announced as `ai_chat.updated`.
      * Settings (05-11): instructions (≤ AI_INSTRUCTIONS_MAX, by the schema), "Also use my personal instructions" and the
- * chat's tools; `ai_chat.settings_updated` lists the changed keys only.
+     * chat's tools; `ai_chat.settings_updated` lists the changed keys only.
      */
     async update(req: FastifyRequest, chatId: string, body: UpdateAiChatRequest): Promise<AiChatDetail> {
       return core.db.withTenant(tenant(req), async (tx) => {
