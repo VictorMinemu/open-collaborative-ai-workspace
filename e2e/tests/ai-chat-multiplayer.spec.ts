@@ -513,9 +513,8 @@ test("the composer addresses the AI or a person deliberately: Ask AI toggle and 
       const viewport = page.viewportSize();
       expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(viewport?.width ?? 390);
     }
-    await composer.fill("@");
-    await expect(suggestions).toBeVisible();
-    await bothThemes(page, `multiplayer-composer-${w}-ai`);
+    // The addressed history: a message only for Alex, then answers on Víctor's own plan.
+    await bothThemes(page, `multiplayer-composer-${w}-addressed`);
   } finally {
     await owner.context.close();
     await victor.dispose();

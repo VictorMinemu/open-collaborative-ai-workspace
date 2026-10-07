@@ -1,15 +1,16 @@
 "use client";
 
-import type { AiChatTools, AiModelOption, SendAiMessageResponse } from "@ocw/contracts";
+import type { AiChatTools, AiModelOption, AiParticipant, SendAiMessageResponse } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
 import { Archive, Eye, Lock, MessageCircleQuestion, Share2, SlidersHorizontal } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DropZone } from "@/components/chat/attachments/drop-zone";
-import { attachmentLimitsHint } from "@/components/chat/composer";
+import { attachmentLimitsHint, type MentionCandidate } from "@/components/chat/composer";
 import { TypingIndicator } from "@/components/chat/typing";
+import { dirKey, useOrgDirectory } from "@/components/chat/use-chat-directory";
 import { EmptyState } from "@/components/common/empty-state";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -385,7 +386,7 @@ function ExistingChat({ chatId }: { chatId: string }) {
         ) : !canUse ? (
           <ViewOnlyNotice owner={detail?.owner?.displayName ?? "the owner"} />
         ) : (
-          <AiComposer
+          <ChatComposer
             chatKey={chatId}
             chat={detail ?? null}
             initialTools={detail?.settings.tools}
@@ -398,6 +399,9 @@ function ExistingChat({ chatId }: { chatId: string }) {
             onStop={!multiplayer && runningId ? onStop : undefined}
             onTyping={multiplayer ? chat.sendTyping : undefined}
             uploadTarget={chatId}
+            multiplayer={multiplayer}
+            participants={participants.data?.participants}
+            viewerId={viewerId}
             apiRef={composer}
             // Arriving from New chat's first send: the keyboard stays in the composer.
             autoFocus={chat.sentHere}
@@ -406,6 +410,54 @@ function ExistingChat({ chatId }: { chatId: string }) {
       </ChatDropZone>
     </Frame>
   );
+}
+
+type AiComposerProps = React.ComponentProps<typeof AiComposer>;
+
+/**
+ * The composer of an open chat: solo chats get the Phase 5 composer untouched; a multiplayer chat (06-11) adds the Ask
+ * AI toggle and @ suggestions over its participants (06-10 `/participants`, never the viewer), with handles from the
+ * org directory (people) or the agent itself.
+ */
+function ChatComposer({
+  multiplayer,
+  participants,
+  viewerId,
+  ...props
+}: AiComposerProps & {
+  multiplayer: boolean;
+  participants: AiParticipant[] | undefined;
+  viewerId: string | null;
+}) {
+  if (!multiplayer) return <AiComposer {...props} />;
+  return <MultiplayerComposer {...props} participants={participants} viewerId={viewerId} />;
+}
+
+function MultiplayerComposer({
+  participants,
+  viewerId,
+  ...props
+}: AiComposerProps & { participants: AiParticipant[] | undefined; viewerId: string | null }) {
+  const directory = useOrgDirectory();
+  const candidates = useMemo(() => {
+    const out: MentionCandidate[] = [];
+    for (const p of participants ?? []) {
+      if (p.kind === "user" && p.id === viewerId) continue;
+      const handle = p.handle ?? directory.byKey.get(dirKey(p.kind, p.id))?.handle;
+      if (!handle) continue;
+      out.push({
+        kind: p.kind,
+        id: p.id,
+        displayName: p.displayName,
+        handle,
+        avatarUrl: p.avatarUrl,
+        subtitle: null,
+        inChannel: true,
+      });
+    }
+    return out;
+  }, [participants, viewerId, directory.byKey]);
+  return <AiComposer {...props} multiplayer mentionCandidates={candidates} />;
 }
 
 /** A view grant (06-03, P-04): the composer's place says the chat is read-only and whom to ask for more. */
