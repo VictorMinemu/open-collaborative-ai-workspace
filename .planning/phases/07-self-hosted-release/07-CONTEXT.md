@@ -53,6 +53,27 @@ and MVP 2 work are Phase 8+.
 - **D-11: Never disturb the running demo** (compose project `t3code-81d72154`, ports 3000/4000, `ocw-demo-*`,
   `~/.ocw-demo`, the `ocw` DB). All phase tests use their own compose projects, ports and volumes, and clean them up.
 
+### Orchestrator decisions after research (2026-10-08)
+- **D-12: CI system.** Owner chose a self-hosted open-source CI (Woodpecker CI on their Hetzner server via Portainer,
+  posting statuses to GitHub PRs). Its pipeline config is a separate task outside this phase's plans. Phase 7 plans
+  do **not** touch `.github/workflows/**`, `.woodpecker/**` or `infra/ci-runner/**`; they deliver every check as a
+  local entry point (`pnpm` script / `scripts/`) and list the exact commands in the gate SUMMARY so the CI task can
+  wire them. "In CI" success criteria are met by those commands plus the local gate until the CI is live.
+- **D-13: No secret is ever printed.** `ocw setup` (and `setup:env`) report which secrets were written and where,
+  never their values (fix the current token print; update its tests).
+- **D-14: `@anthropic-ai/claude-agent-sdk` license.** The license checker allows it only through an explicit,
+  documented exception (one entry, with the reason: Work Zone Claude Code adapter in the Local Runtime), flagged in
+  ADR-0021 as **pending owner/legal confirmation** for distribution. Do not remove or replace the dependency.
+- **D-15: CODEOWNERS** file only (owner @VictorMinemu); do not enable "require code owner review" (single owner would
+  block self-merge).
+- **D-16: OpenBao** holds the API-only secrets (research proposal: the 4 used only by the API); the rest stay env/file.
+- **D-17: Release.** Tag `v0.1.0` when the phase closes (orchestrator, after merge).
+- **D-18: Research proposals accepted:** `OCW_IMAGE_TAG` + 34xx ports for gate stacks (never overwrite `:local` images
+  the demo uses); `OCW_TRUST_PROXY` (default false, `1` behind Caddy); N-1 = Phase 5 merge `3bbcbd9` with a committed
+  golden dump; schema check by migration names/hashes vs `drizzle.__drizzle_migrations`; new Scenario B spec on the
+  org mock model (no `/api/v1/test/*` routes in production images); full-database dump/restore as `ocw_migrator`;
+  OTel redaction (no query strings, no executable paths/args, AI SDK telemetry never records prompts).
+
 ### Claude's Discretion
 - CLI implementation details, profile names, exact tool choices for license checking, how "N-1" is pinned, plan split.
 
