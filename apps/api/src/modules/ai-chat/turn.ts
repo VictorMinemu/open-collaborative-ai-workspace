@@ -15,6 +15,7 @@ import type { PermissionService } from "../organization";
 import { buildModelMessages, type ModelFilePart, type PersistedTurn } from "./build-model-messages";
 import type { GenerationRow } from "./dto";
 import { webAllowed } from "./tools-state";
+import { searxngWebSearchTool } from "./web-tools";
 
 /**
  * The seam between persisted state and the model call: persisted rows (seq order, before the answer being
@@ -39,6 +40,10 @@ export interface Turn {
 export interface TurnTools {
   resolved: ResolvedModel;
   perms: PermissionService;
+  /** `OCW_AI_SEARXNG_URL` (operator configuration); null = organization and mock models cannot search. */
+  searxngUrl: string | null;
+  /** The result domains of each SearXNG search this answer ran. */
+  onSearch(domains: string[]): void;
 }
 
 /** The tools of this turn, or null when Web is off, not allowed or not supported here. */
@@ -62,7 +67,9 @@ async function webTools(
   if (resolved.ref.backend === "chatgpt_plan") {
     return resolved.hostedTools.web_search ? { web_search: resolved.hostedTools.web_search } : null;
   }
-  return null;
+  // Organization keys and the mock: the self-hosted SearXNG only, never a provider-hosted (metered) search (D-04).
+  if (!t.searxngUrl) return null;
+  return { web_search: searxngWebSearchTool({ baseUrl: t.searxngUrl, onSearch: t.onSearch }) };
 }
 
 export async function loadTurn(

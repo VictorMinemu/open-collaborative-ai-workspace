@@ -29,6 +29,7 @@ import { createPermissionService } from "../organization";
 import { aiMessage, chatSummary, EMPTY_DIRECTORY, type GenerationRow, generationDto } from "./dto";
 import { loadTurn, type Turn } from "./turn";
 import { type ReportedUsage, recordUsage } from "./usage";
+import { sourceDomain } from "./web-tools";
 
 /**
  * One run loop for every backend (P-06, P-07): `streamText` on the gateway's provider instance with the prompt
@@ -85,18 +86,6 @@ export interface WebActivity {
   domains: string[];
 }
 
-/** The hostname of a URL a source points at (lowercased, `www.` dropped), or null when it is not http(s). */
-export function sourceDomain(url: string): string | null {
-  try {
-    const u = new URL(url);
-    if (u.protocol !== "https:" && u.protocol !== "http:") return null;
-    const host = u.hostname.toLowerCase().replace(/^www\./u, "");
-    return host && host.length <= 253 ? host : null;
-  } catch {
-    return null;
-  }
-}
-
 /** Collects the domains (≤ 20, first seen first) and searches of one answer. */
 export function webCollector() {
   const domains = new Set<string>();
@@ -105,6 +94,9 @@ export function webCollector() {
     addUrl(url: string) {
       const d = sourceDomain(url);
       if (d && domains.size < SOURCE_DOMAINS_MAX) domains.add(d);
+    },
+    addDomain(d: string) {
+      if (domains.size < SOURCE_DOMAINS_MAX) domains.add(d);
     },
     addSearch() {
       searches++;
@@ -185,7 +177,11 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
   const listeners: AfterFinalize[] = [];
   const perms = createPermissionService(core);
 
-  async function prepare(organizationId: string, generationId: string) {
+  async function prepare(
+    organizationId: string,
+    generationId: string,
+    onSearch: (domains: string[]) => void,
+  ) {
     const orgName = (await core.identity.organizationName(organizationId)) ?? "your organization";
     return core.db.withTenant({ organizationId }, async (tx) => {
       const [gen] = await tx.select().from(aiGenerations).where(eq(aiGenerations.id, generationId)).limit(1);
@@ -203,7 +199,12 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
         throw err;
       }
       // Tools are decided here, per turn, for the requester and the resolved model (05-11).
-      const turn = await loadTurn(tx, gen, { orgName, now: now(), policy, tools: { resolved, perms } });
+      const turn = await loadTurn(tx, gen, {
+        orgName,
+        now: now(),
+        policy,
+        tools: { resolved, perms, searxngUrl: core.env.OCW_AI_SEARXNG_URL, onSearch },
+      });
       return { gen, turn, ref, resolved };
     });
   }
@@ -315,7 +316,10 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
   }
 
   async function run(job: { organizationId: string; generationId: string }, entry: Active): Promise<void> {
-    const prep = await prepare(job.organizationId, job.generationId);
+    const web = webCollector();
+    const prep = await prepare(job.organizationId, job.generationId, (domains) => {
+      for (const d of domains) web.addDomain(d);
+    });
     if (!prep) return;
     const { gen, turn, ref } = prep;
     entry.prepared = { gen, ref, turn };
@@ -410,7 +414,6 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
     /** Usage of the steps that finished before an abort (Pitfall 3); null when none did. */
     let stepUsage: ReportedUsage | null = null;
     let finishReason: string | null = null;
-    const web = webCollector();
     try {
       const result = streamText({
         model: resolved.model,
