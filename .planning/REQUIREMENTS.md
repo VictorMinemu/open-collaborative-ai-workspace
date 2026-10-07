@@ -144,6 +144,13 @@ SLICE-06…18 were added on 2026-10-04 after the code audit of the widened demo 
 - [ ] **WZC-06**: A documented inventory lists every Claude Code (Agent SDK) and Codex (app-server) session option at the pinned versions as exposed, deferred or impossible with the reason; the composer matches the owner's reference screenshots at 1440 and 390 in light and dark, and never claims an option the inventory has not confirmed
 - [ ] **WZC-07**: Each Work Zone session gets an automatic short title (2–5 words, ≤ 32 characters) generated from its first prompt by the session's own runtime with a small model (Claude Code: Haiku; Codex: GPT-6-Luna) on the user's subscription; it falls back to the prompt's first line when the model is unavailable or not allowed, never overwrites a title the user typed, shows live to every controller and fits the sidebar, breadcrumb and tab at 1440 and 390
 
+### Work Zone Image Attachments (WZ-IMG) — added 2026-10-07 by the owner
+
+- [x] **WZ-IMG-01**: Paste (Ctrl/Cmd+V), drop or attach (paperclip) a PNG, JPEG, GIF or WebP in the Work Zone composer: a removable thumbnail with upload progress and errors shows before sending, Send waits for the uploads, and sending queues the prompt with its images; at 1440 and 390, light and dark
+- [x] **WZ-IMG-02**: The prompt route accepts attachment ids with a prompt only when the sender uploaded them into the session, in the same organization, as an allowed image type, within the device-link size budget (up to 4 images, each at most 2 MB as sent) and for a model that can read images; anything else is refused with a clear error, cross-tenant and other-user ids fail like missing ones, and the audit records ids and counts, never bytes
+- [x] **WZ-IMG-03**: The session's device receives the images with the prompt, and the Claude Code and Codex adapters pass them to the runtime in its native input shape (Claude image blocks; Codex image data URLs on start and steer); a runtime or model without image input refuses visibly instead of dropping them, and no image data reaches acks, logs, errors or the database
+- [x] **WZ-IMG-04**: The session stream and the queue show the images sent with each prompt to every controller (open full size), live; non-controllers and other tenants cannot load them; the runtime controls inventory lists composer attachments as exposed (images only)
+
 ### Self-hosted Release (SELF)
 
 - [ ] **SELF-01**: `git clone` + `pnpm ocw setup` + `docker compose up` yields a working MVP1 instance; OpenBao and observability (Prometheus, Grafana, Loki, Tempo) are optional compose profiles (ADR-0003 amended)
@@ -215,7 +222,7 @@ SLICE-06…18 were added on 2026-10-04 after the code audit of the widened demo 
 - [ ] **WZUI-05**: Queue panel with drag reorder, edit, remove, run next and priority, showing author of each prompt
 - [ ] **WZUI-06**: Changes panel with changed-files list and unified/side-by-side diff; read-only terminal output panel; Activity, Files, Context and People panels (PRD §29)
 - [ ] **WZUI-07**: Session header with host, runtime, model, branch, presence avatars, Share and Queue controls (PRD §30)
-- [ ] **WZUI-08**: `@file` mentions in the composer with autocomplete from the host's registered project file list (relative paths), and image attachments
+- [ ] **WZUI-08**: `@file` mentions in the composer with autocomplete from the host's registered project file list (relative paths), and image attachments (the image part is delivered by WZ-IMG-01, Phase 06.1; the `@file` part stays open)
 - [ ] **WZUI-09**: Context/usage indicator (tokens, context window, cost) per session
 - [x] **WZUI-10**: Web client renders Work Zone sessions read-only (view stream, diff, queue) with the same permission checks (PRD §10.2 remote Work Zones, read-only slice)
 
@@ -357,6 +364,10 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | WZC-05 | Phase 3.2 | Pending | New (owner request 2026-10-05: Work Zone session controls, ADR-0012) |
 | WZC-06 | Phase 3.2 | Pending | New (owner request 2026-10-05: Work Zone session controls, ADR-0012) |
 | WZC-07 | Phase 3.2 | Pending | New (owner request 2026-10-05: automatic session titles with Haiku / GPT-6-Luna) |
+| WZ-IMG-01 | Phase 06.1 | Complete | New (owner request 2026-10-07): plans 06.1-04 (composer paste/drop/paperclip, tray), 06.1-05 (gate); `work-zone-images.spec.ts`, `image-gate.test.ts` |
+| WZ-IMG-02 | Phase 06.1 | Complete | New (owner request 2026-10-07): plans 06.1-01 (link, access, model gate, audit), 06.1-02 (budget, dispatch gate), 06.1-05 (gate); `images.int.test.ts`, `images.test.ts`, `images-dispatch.int.test.ts` |
+| WZ-IMG-03 | Phase 06.1 | Complete | New (owner request 2026-10-07): plans 06.1-02 (dispatch, frame guard, leak scan), 06.1-03 (daemon, Claude/Codex adapters), 06.1-04 (`Images: N` e2e), 06.1-05 (gate); `images-dispatch.int.test.ts`, `daemon.test.ts`, `claude-runtime.test.ts`, `codex-runtime.test.ts`; real runtimes: owner check `human_needed` |
+| WZ-IMG-04 | Phase 06.1 | Complete | New (owner request 2026-10-07): plans 06.1-01 (read scope), 06.1-04 (stream and queue), 06.1-05 (inventory row exposed, gate); `images.int.test.ts`, `work-zone-images.spec.ts`, `runtime-controls.test.ts` |
 | CHAT-02 | Phase 4 | Delivered | Sections per department/team (collapsible) and views All, Mentions, Threads, AI Chats, Saved: `sidebar.int.test.ts`, `threads.int.test.ts`; `chat-sidebar.spec.ts`, `chat-day.spec.ts` |
 | CHAT-03 | Phase 1 | Delivered | `chat.int.test.ts` "thread replies update the root and refuse nesting"; `chat.spec.ts` reply count + participants |
 | CHAT-04 | Phase 4 | Delivered | Human DMs, group and mixed DMs up to 9 (fixed membership, bots mention-only): `dm.int.test.ts`, `group-dm.int.test.ts`, `dm-privacy.int.test.ts`; `dms.spec.ts`, `chat-day.spec.ts` |
@@ -445,7 +456,7 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | WZUI-05 | Phase 11 | Partial | Drag/arrow reorder, edit, remove, author (SLICE-15); no run next or priority |
 | WZUI-06 | Phase 11 | Partial | Changed files + unified diff (SLICE-15); no side-by-side, terminal or other panels |
 | WZUI-07 | Phase 11 | Partial | Host, runtime, model, branch, participants, Queue (SLICE-15); no live presence or Share |
-| WZUI-08 | Phase 11 | Pending | No @file or image attachments |
+| WZUI-08 | Phase 11 | Pending | Image attachments delivered by WZ-IMG-01 (Phase 06.1); no @file mentions |
 | WZUI-09 | Phase 11 | Partial | Tokens per turn only (SLICE-15) |
 | WZUI-10 | Phase 1 | Delivered | `work-zone.spec.ts`: the web drives the whole session (beyond read-only) under the same server checks |
 | ART-01 | Phase 12 | Pending | No artifact pipeline |
@@ -463,6 +474,7 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 - Unmapped active requirements: 0 ✓
 - Status (recounted from the table on 2026-10-07 after Phase 6, 147 rows incl. the Phase 3.x additions): 86 Delivered,
   31 Partial, 25 Pending, 5 Superseded
+- Phase 06.1 (2026-10-07) adds WZ-IMG-01…04 (owner request), all Complete: 151 rows
 
 Phase assignment follows `.planning/ROADMAP.md`. DESK-06 and DESK-07 live in Phase 11 (Work Zone UI)
 rather than Phase 9 because they require a WorkSession to be observable.
