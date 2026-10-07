@@ -295,9 +295,8 @@ export function AgentCardView({
             ))}
           </dl>
         ) : null}
-        {card.decision ? <DecisionLine decision={card.decision} /> : null}
       </div>
-      {hasActions ? (
+      {hasActions || card.decision ? (
         <div
           data-testid="agent-card-actions"
           className="flex flex-wrap items-center gap-2 border-t bg-muted/35 px-3.5 py-2.5 dark:bg-white/[0.02]"
@@ -332,6 +331,12 @@ export function AgentCardView({
                 approveLabel={approveAction.label}
                 denyLabel={approveAction.denyLabel ?? "Deny"}
               />
+            </span>
+          ) : null}
+          {/* The decision takes the place of Approve / Deny, so deciding never makes the card jump. */}
+          {card.decision ? (
+            <span className="min-w-0 basis-full @[26rem]:ml-auto @[26rem]:basis-auto">
+              <DecisionLine decision={card.decision} />
             </span>
           ) : null}
         </div>
