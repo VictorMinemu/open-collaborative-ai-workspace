@@ -11,8 +11,15 @@ import { and, asc, desc, eq, isNull } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { type App, authOf, type Core, tenant } from "../../core";
-import { conflict, notFound } from "../../lib/errors";
-import { attachmentRowsForMessages, toAttachment } from "../artifact";
+import { conflict, HttpError, notFound } from "../../lib/errors";
+import {
+  type AttachmentPart,
+  attachmentRowsByIds,
+  attachmentRowsForMessages,
+  type ObjectStorage,
+  presignAttachmentPart,
+  toAttachment,
+} from "../artifact";
 import { createConversationAccess, iso } from "../chat";
 import type { ModelGateway } from "../model-gateway";
 import { AuthzDeniedError, channelResource, createPermissionService, orgResource } from "../organization";
@@ -174,10 +181,14 @@ export function shareAttachmentDto(shareId: string, a: StoredAttachment): AiShar
 export interface ShareRoutesDeps {
   core: Core;
   gateway: ModelGateway;
+  /** Where the snapshot's files live (ADR-0015); null = attachments are not configured. */
+  storage: ObjectStorage | null;
 }
 
 /** What every share route answers for a share the caller may not see (missing, revoked, other org, denied). */
 export const shareHidden = () => notFound(SHARE_NOT_FOUND);
+/** A file that is not part of the snapshot (or no longer ready). */
+const fileHidden = () => notFound("Attachment not found");
 
 /**
  * The live share the caller may read, or the one 404: a session of the share's organization (RLS), the reader's
@@ -204,7 +215,7 @@ export async function readableShare(
 }
 
 export function registerShareRoutes(app: App, deps: ShareRoutesDeps): void {
-  const { core, gateway } = deps;
+  const { core, gateway, storage } = deps;
   const access = createConversationAccess(core);
   const perms = createPermissionService(core);
   const tags = ["ai-chat"];
@@ -369,4 +380,48 @@ export function registerShareRoutes(app: App, deps: ShareRoutesDeps): void {
         };
       }),
   );
+
+  // The snapshot's files, through the share only (ADR-0015): the share must be readable (the same rules and the same
+  // 404 as the view), the id must be in its `attachment_ids` allow-list and the file still `ready` in that chat. The
+  // AI chat's own attachment routes stay owner-only. Renditions are not audited (one per image per view, as in
+  // Phase 4); the original is, with the share id.
+  const ShareAttachmentParams = z.object({ shareId: z.uuid(), attachmentId: z.uuid() });
+  for (const [path, part] of [
+    ["preview", "thumb.webp"],
+    ["large", "large.webp"],
+    ["download", "original"],
+  ] as const satisfies ReadonlyArray<readonly [string, AttachmentPart]>) {
+    app.get(
+      `/ai-shares/:shareId/attachments/:attachmentId/${path}`,
+      {
+        config: { authz: "user" },
+        preHandler: core.identity.requireUser,
+        schema: { tags, params: ShareAttachmentParams },
+      },
+      async (req, reply) => {
+        if (!storage) throw new HttpError(503, "attachments_disabled", "File attachments are not configured");
+        const url = await core.db.withTenant(tenant(req), async (tx) => {
+          const share = await readableShare(req, tx, perms, req.params.shareId);
+          const { attachmentId } = req.params;
+          if (!share.attachmentIds.includes(attachmentId)) throw fileHidden();
+          const [row] = await attachmentRowsByIds(tx, [attachmentId]);
+          if (row?.status !== "ready" || row.conversationId !== share.conversationId) throw fileHidden();
+          if (part !== "original" && !toAttachment(row).isImage) throw fileHidden();
+          if (part === "original") {
+            await core.audit.record(tx, {
+              action: "attachment.downloaded",
+              resourceType: "attachment",
+              resourceId: row.id,
+              metadata: { attachmentId: row.id, conversationId: row.conversationId, shareId: share.id },
+            });
+          }
+          return presignAttachmentPart(storage, row, part);
+        });
+        // Same headers as the chat's routes: the redirect is never cached, and the web app embeds renditions as
+        // <img> from its own origin (see artifact/attachments.ts on the CORP header).
+        if (part !== "original") reply.header("cross-origin-resource-policy", "cross-origin");
+        return reply.header("cache-control", "private, no-store").redirect(url, 302);
+      },
+    );
+  }
 }

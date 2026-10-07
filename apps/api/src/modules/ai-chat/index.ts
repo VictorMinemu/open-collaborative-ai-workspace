@@ -67,7 +67,7 @@ export function createAiChatModule(
       // Today's usage (05-08); 05-09 adds the reports to usage-routes.ts, never here.
       registerUsageRoutes(app, { core });
       // Read-only snapshot share links (05-13, AICHAT-09): signed-in members of the organization only.
-      registerShareRoutes(app, { core, gateway: deps.gateway });
+      registerShareRoutes(app, { core, gateway: deps.gateway, storage: deps.storage ?? null });
       unsubscribeAbort = await registerGenerationRoutes(app, { core, gateway: deps.gateway, runLoop });
       sweeper.start();
     },

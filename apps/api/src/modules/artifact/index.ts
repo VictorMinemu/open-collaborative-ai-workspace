@@ -6,7 +6,7 @@ import type { ApiModule, App, Core } from "../../core";
 import { conflict } from "../../lib/errors";
 // Type-only: the chat module imports this module's helpers (Plan 04-12), so a runtime import would be a cycle.
 import type { ConversationAccess } from "../chat/access";
-import { registerAttachmentRoutes } from "./attachments";
+import { presignPart, registerAttachmentRoutes } from "./attachments";
 import { type AttachmentRow, toAttachment } from "./model";
 import { type AttachmentPart, attachmentKey, createObjectStorage, type ObjectStorage } from "./storage";
 import { createAttachmentSweeper } from "./sweeper";
@@ -218,4 +218,23 @@ export async function readAttachmentBytes(
     stream.destroy();
   }
   return new Uint8Array(Buffer.concat(chunks, total));
+}
+
+/**
+ * A presigned GET for one part of an attachment the caller was already authorized for (05-13: the AI chat share
+ * routes). Same TTL, type and disposition as the Phase 4 routes; never log the URL (a bearer credential).
+ */
+export async function presignAttachmentPart(
+  storage: ObjectStorage,
+  row: AttachmentRow,
+  part: AttachmentPart,
+): Promise<string> {
+  return presignPart(storage, row, part);
+}
+
+/** Attachment rows by id under the caller's tenant (RLS); missing ids are simply absent. */
+export async function attachmentRowsByIds(tx: Tx, ids: string[]): Promise<AttachmentRow[]> {
+  const unique = [...new Set(ids)];
+  if (unique.length === 0) return [];
+  return tx.select().from(attachments).where(inArray(attachments.id, unique));
 }
