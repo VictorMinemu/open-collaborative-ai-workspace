@@ -1,11 +1,11 @@
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
-import { WS_AUTH_PROTOCOL_PREFIX, WS_PROTOCOL } from "@ocw/contracts";
+import { type RuntimeCatalog, WS_AUTH_PROTOCOL_PREFIX, WS_PROTOCOL } from "@ocw/contracts";
 import pg from "pg";
 import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack, WEB_ORIGIN } from "../../testing";
-import { eventually, type FakeDevice } from "../../testing-device";
+import { eventually, type FakeDevice, type Frame, sleep } from "../../testing-device";
 import { startTestStorage, TEST_BUCKET, type TestStorage } from "../../testing-storage";
 import {
   CLAUDE_CATALOG,
@@ -13,6 +13,7 @@ import {
   connectWithProject,
   errorCode,
   invite,
+  model,
   pairDevice,
   startSession,
 } from "../../testing-workzone";
@@ -28,6 +29,17 @@ const ADMIN = { name: "Víctor Ruiz", email: "victor@example.test", password: "c
 
 // biome-ignore lint/suspicious/noExplicitAny: loose JSON access keeps the assertions readable
 type Json = Record<string, any>;
+type Cmd = Frame & { id: string; payload: Record<string, unknown>; sessionId: string };
+
+/** The Codex catalog this suite's device reports (P-08): one model that reads images, one that does not, one unknown. */
+const CODEX: RuntimeCatalog = {
+  ...CODEX_CATALOG,
+  models: [
+    model("gpt-6.1-sol", "GPT-6.1 Sol", { isDefault: true, imageInput: true }),
+    model("gpt-6.1-text", "GPT-6.1 Text", { imageInput: false }),
+    model("gpt-5.9", "GPT-5.9"),
+  ],
+};
 
 let storage: TestStorage;
 let stack: TestStack;
@@ -140,11 +152,19 @@ beforeAll(async () => {
     localId: "lp_ocw",
     name: "ocw",
   }));
-  device.capabilities([CLAUDE_CATALOG, CODEX_CATALOG], false);
+  device.capabilities([CLAUDE_CATALOG, CODEX], false);
   await eventually(async () => {
     const r = await su.query("select runtime_catalog from app.devices where id = $1", [deviceId]);
     return (r.rows[0].runtime_catalog as unknown[]).length === 2;
   });
+  // The test device's hello reports Codex signed out; this suite runs Codex sessions too.
+  await su.query(
+    `update app.devices set runtime_info = (
+       select jsonb_agg(case when r->>'id' = 'codex' then r || '{"loggedIn": true}'::jsonb else r end)
+       from jsonb_array_elements(runtime_info) r)
+     where id = $1`,
+    [deviceId],
+  );
   await ok(
     admin.request("PUT", `/api/v1/devices/${deviceId}/grants/user/${danaId}`, { maxMode: "acceptEdits" }),
   );
@@ -253,5 +273,119 @@ describe("tracer: an image uploaded into a session joins a prompt every controll
         }),
       ),
     ).toBe("attachment_not_linkable");
+  });
+});
+
+/** Ack a dispatched prompt and complete its turn on the device. */
+function finish(cmd: Cmd) {
+  device.ack(cmd.id);
+  const promptId = cmd.payload.promptId as string;
+  device.event(cmd.sessionId, { type: "prompt.started", promptId });
+  device.event(cmd.sessionId, {
+    type: "prompt.completed",
+    promptId,
+    usage: { inputTokens: 1, outputTokens: 1 },
+  });
+}
+
+async function newSession(body: Json): Promise<{ id: string; conv: string }> {
+  const id = await startSession(admin, device, projectId, body);
+  const conv = (await ok(admin.request("GET", `/api/v1/work-sessions/${id}`))).session.conversationId;
+  return { id, conv };
+}
+
+const promptCount = async (sid: string) =>
+  Number(
+    (await su.query("select count(*)::int as n from app.work_prompts where work_session_id = $1", [sid]))
+      .rows[0].n,
+  );
+
+describe("the model gate (D-05, P-08): images never go to a model that says it cannot read them", () => {
+  it("a Codex session on a text-only model refuses images at submit with 400 images_not_supported", async () => {
+    const { id, conv } = await newSession({ runtime: "codex", model: "gpt-6.1-text", title: "Text only" });
+    const att = await upload(admin, conv, "photo.jpg", "image/jpeg", jpeg);
+    const res = await admin.request("POST", `/api/v1/work-sessions/${id}/prompts`, {
+      body: "what is this?",
+      attachmentIds: [att.id],
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(400);
+    expect(errorCode(res)).toBe("images_not_supported");
+    expect((res.body!.error as Json).message).toBe("GPT-6.1 Text can't read images");
+    expect(await promptCount(id)).toBe(0);
+    const row = (await su.query("select work_prompt_id from app.attachments where id = $1", [att.id]))
+      .rows[0];
+    expect(row.work_prompt_id).toBeNull();
+    // Text alone still goes.
+    await ok(admin.request("POST", `/api/v1/work-sessions/${id}/prompts`, { body: "just text" }));
+    finish(await device.command("prompt", id));
+  });
+
+  it("a model whose image support is unknown (imageInput absent) is accepted", async () => {
+    const { id, conv } = await newSession({ runtime: "codex", model: "gpt-5.9", title: "Unknown" });
+    const att = await upload(admin, conv, "photo.jpg", "image/jpeg", jpeg);
+    const prompt = await ok(
+      admin.request("POST", `/api/v1/work-sessions/${id}/prompts`, {
+        body: "what is this?",
+        attachmentIds: [att.id],
+      }),
+    );
+    expect(prompt.attachments.map((a: Json) => a.id)).toEqual([att.id]);
+    const cmd = await device.command("prompt", id);
+    expect(cmd.payload.promptId).toBe(prompt.id);
+    finish(cmd);
+  });
+
+  it("a queued image prompt whose model changed to a text-only one is refused at dispatch, audited, never sent", async () => {
+    const { id, conv } = await newSession({ runtime: "codex", title: "Switch" });
+    const first = await ok(admin.request("POST", `/api/v1/work-sessions/${id}/prompts`, { body: "first" }));
+    const firstCmd = await device.command("prompt", id);
+    expect(firstCmd.payload.promptId).toBe(first.id);
+
+    const att = await upload(admin, conv, "photo.jpg", "image/jpeg", jpeg);
+    const withImage = await ok(
+      admin.request("POST", `/api/v1/work-sessions/${id}/prompts`, {
+        body: "look at this",
+        attachmentIds: [att.id],
+      }),
+    );
+    expect(withImage.status).toBe("queued");
+    await ok(admin.request("PATCH", `/api/v1/work-sessions/${id}/settings`, { model: "gpt-6.1-text" }));
+    const third = await ok(admin.request("POST", `/api/v1/work-sessions/${id}/prompts`, { body: "third" }));
+
+    finish(firstCmd);
+    const next = await device.command("prompt", id);
+    expect(next.payload.promptId).toBe(third.id);
+    await sleep(150);
+    expect(device.pending("prompt").filter((f) => (f as Cmd).payload.promptId === withImage.id)).toEqual([]);
+
+    const detail = await ok(admin.request("GET", `/api/v1/work-sessions/${id}`));
+    const refused = (detail.prompts as Json[]).find((p) => p.id === withImage.id)!;
+    expect(refused.status).toBe("failed");
+    expect(refused.attachments.map((a: Json) => a.id)).toEqual([att.id]);
+    const audit = await su.query(
+      "select result, metadata from app.audit_events where action = 'work_prompt.refused' and resource_id = $1",
+      [withImage.id],
+    );
+    expect(audit.rows).toEqual([
+      expect.objectContaining({
+        result: "denied",
+        metadata: expect.objectContaining({ promptId: withImage.id, reason: "images_not_supported" }),
+      }),
+    ]);
+    const cmds = await su.query(
+      "select count(*)::int as n from app.device_commands where kind = 'prompt' and payload->>'promptId' = $1",
+      [withImage.id],
+    );
+    expect(cmds.rows[0].n).toBe(0);
+    finish(next);
+  });
+
+  it("GET /controls exposes imageInput on each model as the device reported it", async () => {
+    const { id } = await newSession({ runtime: "codex", title: "Controls" });
+    const c = await ok(admin.request("GET", `/api/v1/work-sessions/${id}/controls`));
+    const byId = new Map((c.models as Json[]).map((m) => [m.id, m]));
+    expect(byId.get("gpt-6.1-sol")!.imageInput).toBe(true);
+    expect(byId.get("gpt-6.1-text")!.imageInput).toBe(false);
+    expect(byId.get("gpt-5.9")!.imageInput).toBeUndefined();
   });
 });

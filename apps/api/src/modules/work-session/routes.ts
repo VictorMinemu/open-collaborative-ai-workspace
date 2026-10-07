@@ -58,6 +58,7 @@ import {
   buildRuntimeControls,
   buildSessionControls,
   type ControlsContext,
+  catalogFor,
   decideSettings,
   highestAvailableMode,
   pickSettings,
@@ -65,6 +66,7 @@ import {
   storedSettings,
 } from "./controls";
 import { sessionFacts as sharedSessionFacts } from "./facts";
+import { currentSessionModel, imagesNotSupported } from "./images";
 import { knownModels, loadWorkZonePolicy, saveWorkZonePolicy } from "./policy";
 import { type SessionRow, type WorkSessionService, wsTopic } from "./service";
 import { runSessionCommand } from "./slash";
@@ -576,6 +578,15 @@ export function registerWorkSessionRoutes(
     const auth = authOf(req);
     if (s.status === "archived") throw conflict("This session is archived", "session_archived");
     assertNotSlashCommand(body, s.runtime);
+    if (attachmentIds.length > 0) {
+      // D-05, P-08: a model that says it cannot read images is refused before anything is queued or linked.
+      const [d] = await tx
+        .select({ catalog: devices.runtimeCatalog })
+        .from(devices)
+        .where(eq(devices.id, s.deviceId));
+      const current = currentSessionModel(catalogFor(d?.catalog, s.runtime), s);
+      if (current?.imageInput === false) throw imagesNotSupported(current);
+    }
     await joinConversation(tx, auth, s);
     const p = await queuePrompt(tx, auth, s, body, attachmentIds);
     if (s.status === "failed" || s.status === "completed") await svc.restart(tx, s);

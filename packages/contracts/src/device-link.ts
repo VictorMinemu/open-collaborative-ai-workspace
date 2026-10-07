@@ -207,16 +207,38 @@ export type SessionStartPayload = z.infer<typeof SessionStartPayload>;
  * (decoded bytes), so a prompt frame stays near 11 MiB of base64 + text, a third of the command frame limit.
  */
 export const WORK_PROMPT_MAX_IMAGES = 4;
+/** Decoded bytes actually sent per image (the original or its rendition, P-02). */
+export const WORK_PROMPT_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
+/**
+ * The largest server → device frame (P-01): the daemon's WebSocket `maxPayload` and the hub's guard on every outbound
+ * frame. A frame above the daemon's limit closes the link (1009) and redelivery would loop, so neither side exceeds it.
+ */
+export const DEVICE_LINK_MAX_COMMAND_FRAME_BYTES = 32 * 1024 * 1024;
+const IMAGE_BASE64_MAX_CHARS = Math.ceil(WORK_PROMPT_IMAGE_MAX_BYTES / 3) * 4;
 
 export const PromptImage = z.object({
   mediaType: z.enum(["image/png", "image/jpeg", "image/gif", "image/webp"]),
-  dataBase64: z.string(),
+  dataBase64: z.string().min(1).max(IMAGE_BASE64_MAX_CHARS),
 });
+export type PromptImage = z.infer<typeof PromptImage>;
+
+const IMAGE_DATA_REMOVED = "[image data removed]";
+const DATA_URL = /data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=_-]*/gi;
+const BASE64_RUN = /[A-Za-z0-9+/_-]{200,}={0,2}/g;
+
+/**
+ * Removes image bytes from text that may be logged, stored or shown (P-11): base64 data URLs and any base64 run of
+ * 200 characters or more become `[image data removed]`. Hashes (64 hex chars) and ordinary text are kept. Used on
+ * ack errors, command-failure logs and `session.error` messages, which a runtime may echo an image into.
+ */
+export function stripImageData(text: string): string {
+  return text.replace(DATA_URL, IMAGE_DATA_REMOVED).replace(BASE64_RUN, IMAGE_DATA_REMOVED);
+}
 
 export const PromptPayload = z.object({
   promptId: z.string().min(1).max(128),
   text: z.string(),
-  images: z.array(PromptImage).optional(),
+  images: z.array(PromptImage).max(WORK_PROMPT_MAX_IMAGES).optional(),
   /** `steer` adds the input to the running turn when the runtime supports it (Codex); otherwise queued. */
   delivery: z.enum(["queue", "steer"]).optional(),
   /**
