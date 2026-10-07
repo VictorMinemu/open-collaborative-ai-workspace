@@ -50,6 +50,7 @@ function toRuntimeModel(m: Model): RuntimeModel {
     defaultContextWindow: null,
     fastMode: { supported: fast, reason: fast ? null : "not_offered" },
     supportsAutoMode: true, // approvalsReviewer auto_review is a thread setting, not per model
+    imageInput: m.inputModalities.includes("image"), // 06.1 (P-08): the API refuses images for a text-only model
   };
 }
 

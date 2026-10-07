@@ -8,6 +8,8 @@ import { summarizeToolInput } from "./tool-policy.js";
 
 export const TOOL_OUTPUT_MAX_BYTES = 4 * 1024;
 export const RAW_DATA_MAX_BYTES = 4 * 1024;
+/** The `session.error` prefix for a turn that failed on an attached image (SDK `terminal_reason: "image_error"`). */
+export const IMAGE_ERROR_MESSAGE = "Claude Code could not read an attached image";
 
 type Loose = Record<string, unknown>;
 
@@ -246,9 +248,13 @@ export class ClaudeEventMapper {
       const errors = Array.isArray(msg.errors)
         ? msg.errors.filter((e): e is string => typeof e === "string")
         : [];
-      const detail =
-        errors.join("; ") || (typeof msg.result === "string" ? msg.result : "") || String(msg.subtype);
-      out.push({ type: "session.error", message: detail });
+      const detail = errors.join("; ") || (typeof msg.result === "string" ? msg.result : "");
+      // 06.1 (D-05): an image the runtime could not read fails the prompt with a readable cause, never silently.
+      const message =
+        msg.terminal_reason === "image_error"
+          ? `${IMAGE_ERROR_MESSAGE}${detail ? `: ${detail}` : ""}`
+          : detail || String(msg.subtype);
+      out.push({ type: "session.error", message });
     }
     // total_cost_usd is cumulative across turns in streaming-input sessions; report the delta.
     const cumulative =

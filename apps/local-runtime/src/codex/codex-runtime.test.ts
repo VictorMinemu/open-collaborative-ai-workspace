@@ -3,11 +3,15 @@ import { mkdtempSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import type { PermissionMode, SessionEvent } from "@ocw/contracts";
+import { type PermissionMode, type SessionEvent, stripImageData } from "@ocw/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { RuntimeError } from "../runtime.js";
 import { type AppServerProcess, CodexRuntime, codexChildEnv } from "./codex-runtime.js";
 import { parseCodexLogin } from "./detect.js";
+import type { ItemStartedNotification } from "./generated/v2/ItemStartedNotification.js";
+import type { TurnStartParams } from "./generated/v2/TurnStartParams.js";
+import type { TurnSteerParams } from "./generated/v2/TurnSteerParams.js";
+import type { UserInput } from "./generated/v2/UserInput.js";
 
 type Msg = {
   id?: number | string;
@@ -608,11 +612,13 @@ interface RpcLine {
 const FIXTURE_DIR = join(import.meta.dirname, "__fixtures__");
 const FIXTURE_ROOT = "/tmp/ocw-fixture-repo";
 
+/** Only lines with `dir` are exchanged messages; a synthetic fixture's leading `{"note": …}` record is skipped. */
 function loadFixture(name: string): RpcLine[] {
   return readFileSync(join(FIXTURE_DIR, name), "utf8")
     .split("\n")
     .filter(Boolean)
-    .map((l) => JSON.parse(l) as RpcLine);
+    .map((l) => JSON.parse(l) as Partial<RpcLine>)
+    .filter((l): l is RpcLine => l.dir === "in" || l.dir === "out");
 }
 
 /**
@@ -738,6 +744,178 @@ describe("CodexRuntime — recorded Supervised write (codex-cli 0.160.0, read-on
     );
     expect(approvedWrites).toEqual([]);
     expect(events.at(-1)?.type === "prompt.completed" || types.includes("prompt.completed")).toBe(true);
+  });
+});
+
+// ------------------------------------------------------------------------------------------------
+// Prompt images at codex app-server 0.160.0 (06.1-03, D-05, D-07, P-07). No real Codex runs: the FakeAppServer
+// records what the adapter sends, and the replay below is a SYNTHETIC fixture built from generated/ (not recorded).
+
+const PNG =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+const WEBP = "UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==";
+const imageInput = (mediaType: string, data: string) =>
+  ({ type: "image", url: `data:${mediaType};base64,${data}` }) satisfies UserInput;
+const textInput = (text: string) => ({ type: "text", text, text_elements: [] }) satisfies UserInput;
+const IMAGES = [
+  { mediaType: "image/png" as const, dataBase64: PNG },
+  { mediaType: "image/webp" as const, dataBase64: WEBP },
+];
+
+/** Answers `turn/start` with a JSON-RPC error that echoes the request input, as a picky server might. */
+class RejectingAppServer extends FakeAppServer {
+  protected override handleExtra(m: Msg): boolean {
+    if (m.method !== "turn/start") return false;
+    this.send({
+      id: m.id,
+      error: {
+        code: -32602,
+        message: `invalid input: ${JSON.stringify((m.params as { input?: unknown }).input)}`,
+      },
+    });
+    return true;
+  }
+}
+
+describe("CodexRuntime — prompt images (06.1-03)", () => {
+  it("says it can take images", () => {
+    expect(setup().runtime.capabilities.supportsImages).toBe(true);
+  });
+
+  it("turn/start carries one data-URL image item per image, in order, before the text item", async () => {
+    const { start, runtime } = setup();
+    const server = await start();
+    await runtime.prompt("s1", { promptId: "p1", text: "what changed?", images: IMAGES });
+    await wait(10);
+    const params = turnStarts(server)[0]?.params as TurnStartParams | undefined;
+    const input: UserInput[] = [
+      imageInput("image/png", PNG),
+      imageInput("image/webp", WEBP),
+      textInput("what changed?"),
+    ];
+    expect(params?.input).toStrictEqual(input);
+    expect(params?.threadId).toBe("thread-1");
+    // Never the path-based variant: the daemon writes no image to disk (P-11, Pitfall 6).
+    expect(JSON.stringify(server.received)).not.toContain("localImage");
+    expect(JSON.stringify(params?.input)).not.toMatch(/"path"|"fileId"/);
+  });
+
+  it("a steered prompt with an image goes into turn/steer with the same item shapes and expectedTurnId (D-07, P-07)", async () => {
+    const { start, runtime, events } = setup();
+    const server = await start();
+    await runtime.prompt("s1", { promptId: "p1", text: "start" });
+    await wait(10);
+    await runtime.steer("s1", { promptId: "p2", text: "and look at this", images: [IMAGES[0]!] });
+    await wait(10);
+    const steer = server.received.find((m) => m.method === "turn/steer")?.params;
+    const expected: TurnSteerParams = {
+      threadId: "thread-1",
+      input: [imageInput("image/png", PNG), textInput("and look at this")],
+      expectedTurnId: "turn-1",
+    };
+    expect(steer).toStrictEqual(expected);
+    expect(server.received.filter((m) => m.method === "turn/start")).toHaveLength(1);
+    expect(JSON.stringify(server.received)).not.toContain("localImage");
+    server.completeTurn();
+    await wait(10);
+    expect(
+      events.filter((e) => e.type === "prompt.completed").map((e) => (e as { promptId: string }).promptId),
+    ).toEqual(["p1", "p2"]);
+  });
+
+  it("a turn/start error for an image prompt fails the prompt visibly; stripImageData leaves no base64 in it", async () => {
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ocw-codex-img-")));
+    const events: SessionEvent[] = [];
+    const runtime = new CodexRuntime({
+      codexPath: "/usr/local/bin/codex",
+      spawnAppServer: ({ env }) => new RejectingAppServer(env),
+    });
+    await runtime.start({ sessionId: "s1", cwd, permissionMode: "default" }, (e) => events.push(e));
+    await runtime.prompt("s1", { promptId: "p1", text: "look", images: IMAGES });
+    await wait(10);
+    const error = events.find((e) => e.type === "session.error");
+    const message = error?.type === "session.error" ? error.message : "";
+    expect(message).toMatch(/^turn\/start failed: invalid input/);
+    // The adapter's raw error echoes the input; the daemon strips it before anything leaves the device (P-11).
+    const stripped = stripImageData(message);
+    expect(stripped).not.toContain(";base64,");
+    expect(stripped).not.toContain(PNG.slice(0, 40));
+    expect(stripped).not.toContain(WEBP.slice(0, 40));
+    expect(events.find((e) => e.type === "prompt.completed")).toMatchObject({
+      promptId: "p1",
+      isError: true,
+    });
+  });
+});
+
+describe("CodexRuntime — synthetic image turn (built from generated/ at codex-cli 0.160.0, not recorded)", () => {
+  const FILE = "codex-0.160.0.image-turn.synthetic.rpc.jsonl";
+  const lines = loadFixture(FILE);
+  const out = (method: string) => lines.filter((l) => l.dir === "out" && l.msg.method === method);
+
+  it("is marked synthetic on its first line, which loadFixture skips", () => {
+    const first = readFileSync(join(FIXTURE_DIR, FILE), "utf8").split("\n", 1)[0] ?? "";
+    expect(JSON.parse(first)).toMatchObject({ note: expect.stringContaining("synthetic") });
+    expect(lines.every((l) => l.dir === "in" || l.dir === "out")).toBe(true);
+  });
+
+  it("its userMessage items echo the image input, shaped like the generated types", () => {
+    const params = out("turn/start")[0]?.msg.params as TurnStartParams;
+    const started = lines.find(
+      (l) =>
+        l.msg.method === "item/started" &&
+        (l.msg.params as ItemStartedNotification).item.type === "userMessage",
+    )?.msg.params as ItemStartedNotification;
+    const item = started.item;
+    expect(item.type).toBe("userMessage");
+    if (item.type !== "userMessage") throw new Error("unreachable");
+    expect(item.content).toStrictEqual(params.input);
+    expect(params.input).toStrictEqual([
+      imageInput("image/png", PNG),
+      textInput("What does this screenshot show?"),
+    ]);
+  });
+
+  it("replays through the adapter: the same requests, the reply and prompt.completed, and no image data in any event", async () => {
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ocw-codex-img-replay-")));
+    let server: ReplayAppServer | null = null;
+    const events: SessionEvent[] = [];
+    const runtime = new CodexRuntime({
+      spawnAppServer: () => {
+        server = new ReplayAppServer(lines);
+        return server;
+      },
+    });
+    const completed = new Promise<void>((resolve) => {
+      void runtime
+        .start({ sessionId: "img-session", cwd, permissionMode: "default" }, (ev) => {
+          events.push(ev);
+          if (ev.type === "prompt.completed") resolve();
+        })
+        .then(() =>
+          runtime.prompt("img-session", {
+            promptId: "prompt-img",
+            text: "What does this screenshot show?",
+            images: [{ mediaType: "image/png", dataBase64: PNG }],
+          }),
+        );
+    });
+    await completed;
+    const replay = server as unknown as ReplayAppServer;
+    expect(replay.sent.filter((m) => m.method).map((m) => m.method)).toEqual(
+      lines.filter((l) => l.dir === "out" && l.msg.method).map((l) => l.msg.method),
+    );
+    expect(replay.sent.find((m) => m.method === "turn/start")?.params).toEqual({
+      ...out("turn/start")[0]?.msg.params,
+      sandboxPolicy: expect.any(Object),
+    });
+    expect(events.find((e) => e.type === "assistant.message")).toMatchObject({ text: "A single pixel." });
+    expect(events.find((e) => e.type === "prompt.completed")).toMatchObject({ promptId: "prompt-img" });
+    expect(events.find((e) => e.type === "prompt.completed")).not.toHaveProperty("isError");
+    const json = JSON.stringify(events);
+    expect(json).not.toContain(";base64,");
+    expect(json).not.toContain(PNG.slice(0, 40));
+    expect(events.some((e) => e.type === "runtime.raw")).toBe(false);
   });
 });
 
