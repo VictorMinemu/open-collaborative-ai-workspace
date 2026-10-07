@@ -174,6 +174,50 @@ describe("FakeRuntime settings (03.2-01, D-07, D-14)", () => {
   });
 });
 
+describe("FakeRuntime images (06.1-03, P-10)", () => {
+  const PNG =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+  async function reply(
+    rt: FakeRuntime,
+    prompt: Parameters<FakeRuntime["prompt"]>[1],
+    mode: "plan" | "acceptEdits",
+  ) {
+    const cwd = tmp();
+    writeFileSync(join(cwd, "README.md"), "# Demo\n");
+    const events: SessionEvent[] = [];
+    await rt.start({ sessionId: prompt.promptId, cwd, permissionMode: mode }, (e) => events.push(e));
+    await rt.prompt(prompt.promptId, prompt);
+    await until(events, (e) => e.type === "prompt.completed");
+    return events.flatMap((e) => (e.type === "assistant.message" ? [e.text] : [])).at(-1) ?? "";
+  }
+
+  it("says it can take images", () => {
+    expect(new FakeRuntime("claude-code", 1).capabilities.supportsImages).toBe(true);
+    expect(new FakeRuntime("codex", 1).capabilities.supportsImages).toBe(true);
+  });
+
+  it("the turn footer lists the image count and media types in order, after the Mode: line", async () => {
+    const rt = new FakeRuntime("codex", 1);
+    const images = [
+      { mediaType: "image/jpeg" as const, dataBase64: PNG },
+      { mediaType: "image/png" as const, dataBase64: PNG },
+      { mediaType: "image/gif" as const, dataBase64: PNG },
+    ];
+    for (const mode of ["plan", "acceptEdits"] as const) {
+      const text = await reply(rt, { promptId: `img-${mode}`, text: "look", images }, mode);
+      expect(text.trimEnd()).toMatch(/\nMode: [a-zA-Z]+\nImages: 3 \(image\/jpeg, image\/png, image\/gif\)$/);
+      expect(text).not.toContain(PNG);
+    }
+  });
+
+  it("a prompt without images has no Images: line", async () => {
+    const rt = new FakeRuntime("claude-code", 1);
+    expect(await reply(rt, { promptId: "noimg", text: "look", images: [] }, "plan")).not.toContain("Images:");
+    expect(await reply(rt, { promptId: "noimg2", text: "look" }, "plan")).not.toContain("Images:");
+  });
+});
+
 describe("FakeRuntime Full access (ADR-0012, D-01)", () => {
   it("offers fullAccess only while the device gate allows it", async () => {
     let allowed = false;

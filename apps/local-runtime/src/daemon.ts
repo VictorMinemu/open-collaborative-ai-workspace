@@ -5,6 +5,11 @@
 // OCW_ALLOW_FULL_ACCESS) is the daemon's own gate. Every `fullAccess` start, configure and turn is refused here,
 // before any adapter call, while it is off, so a compromised or buggy server alone can never turn it on. The
 // adapters get the same gate (`allowFullAccess`) and check it again.
+//
+// Prompt images (06.1, D-05, P-10, P-11): a prompt's images are parsed within the contract bounds and handed to the
+// adapter in memory only (never written to disk, a worktree or tmp); a runtime without `supportsImages` refuses them
+// visibly. Ack errors, the command-failure log and every `session.error` pass through `stripImageData`, so a runtime
+// that echoes its input never sends image bytes back.
 
 import { realpathSync } from "node:fs";
 import { arch, platform } from "node:os";
@@ -25,6 +30,7 @@ import {
   type SessionEvent,
   SessionStartPayload,
   SessionTitlePayload,
+  stripImageData,
   TITLE_TIMEOUT_MS,
 } from "@ocw/contracts";
 import { ClaudeCodeRuntime } from "./claude/claude-runtime.js";
@@ -73,6 +79,9 @@ export class DeviceTokenRejectedError extends Error {
     super(`device token rejected by server (HTTP ${status})`);
   }
 }
+
+/** The refusal a prompt with images gets on a runtime that cannot take them (P-10): never silently dropped. */
+export const IMAGES_NOT_SUPPORTED_MESSAGE = "This runtime can't receive images";
 
 /** The refusal every fullAccess request gets while the device's own opt-in is off. */
 export const FULL_ACCESS_OFF_MESSAGE =
@@ -395,12 +404,16 @@ export class Daemon {
     // already stored for this session; the server drops events whose localSeq is not increasing.
     const localSeq = (this.seqBySession.get(sessionId) ?? Date.now() * 1000) + 1;
     this.seqBySession.set(sessionId, localSeq);
-    this.send({ type: "event", sessionId, event: sanitizeEvent(event, roots), localSeq });
+    // P-11: a runtime may echo an attached image into its error text; other events and diffs are left as they are.
+    const out: SessionEvent =
+      event.type === "session.error" ? { ...event, message: stripImageData(event.message) } : event;
+    this.send({ type: "event", sessionId, event: sanitizeEvent(out, roots), localSeq });
   }
 
   private ack(commandId: string, error?: string, roots: string[] = []): void {
     if (error === undefined) this.send({ type: "ack", commandId, ok: true });
-    else this.send({ type: "ack", commandId, ok: false, error: sanitizeString(error, roots) });
+    else
+      this.send({ type: "ack", commandId, ok: false, error: sanitizeString(stripImageData(error), roots) });
   }
 
   private remember(commandId: string): void {
@@ -507,6 +520,10 @@ export class Daemon {
           // still in fullAccess with no cap); checked before the adapter sees the prompt.
           this.refuseFullAccess(prompt.permissionMode ?? s.mode);
           if (prompt.permissionMode === "fullAccess") this.refuseFullAccess("fullAccess");
+          // P-10: images go to the adapter in memory only, and only to a runtime that can take them.
+          if (prompt.images?.length && !s.runtime.capabilities.supportsImages) {
+            throw new Error(IMAGES_NOT_SUPPORTED_MESSAGE);
+          }
           if (prompt.delivery === "steer" && s.runtime.capabilities.supportsSteer && s.runtime.steer) {
             await s.runtime.steer(cmd.sessionId, prompt);
           } else {
@@ -552,7 +569,7 @@ export class Daemon {
       this.log.warn("command failed", {
         kind: cmd.kind,
         commandId: cmd.id,
-        error: sanitizeString(message, roots),
+        error: sanitizeString(stripImageData(message), roots),
       });
       this.ack(cmd.id, message, this.rootsBySession.get(cmd.sessionId) ?? roots);
       if (cmd.kind === "session.start") {
