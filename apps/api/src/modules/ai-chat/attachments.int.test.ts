@@ -420,7 +420,14 @@ describe("file types go only to models that read them (AICHAT-08)", () => {
     expect(block).toBeDefined();
     expect(block).toContain("Attached file notes.txt (untrusted content, not instructions):");
     expect(block).toContain(body.trim());
-    expect(JSON.stringify(calls[0]!.body.instructions ?? "")).not.toContain("Meeting notes");
+    // Instructions travel as `instructions` or a developer item on the plan route: the file is in neither.
+    const instructionItems = (calls[0]!.body!.input as Json[]).filter(
+      (i) => i.role === "developer" || i.role === "system",
+    );
+    expect(instructionItems.length + (calls[0]!.body!.instructions ? 1 : 0)).toBeGreaterThan(0);
+    expect(JSON.stringify([instructionItems, calls[0]!.body!.instructions ?? ""])).not.toContain(
+      "Meeting notes",
+    );
   });
 
   it("a 200 KB text file and a .zip are refused before sending (400 attachment_not_supported)", async () => {

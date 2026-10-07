@@ -43,6 +43,7 @@ import {
   type ResolvedModel,
 } from "../model-gateway";
 import { channelResource, orgResource, type PermissionService } from "../organization";
+import { assertReadableBy } from "./attachments";
 import {
   type AiChatRow,
   aiMessage,
@@ -472,6 +473,8 @@ export function createAiChatService(deps: AiChatDeps) {
           uploaderId: auth.userId,
           ids: body.attachmentIds ?? [],
         });
+        // Nothing the selected model cannot read is ever sent (400 attachment_not_supported, nothing written).
+        assertReadableBy(files, resolved.caps, resolved.label);
         if (await isGenerating(tx, conv.id)) {
           throw conflict("An answer is still being generated in this chat", "generation_in_progress");
         }

@@ -17,6 +17,7 @@ import { attachmentsForMessages } from "../artifact";
 import { convTopic, createConversationAccess, lockNextSeq } from "../chat";
 import { loadAiChatPolicy, type ModelGateway } from "../model-gateway";
 import { channelResource, createPermissionService } from "../organization";
+import { assertMessageReadableBy } from "./attachments";
 import {
   aiMessage,
   chatSummary,
@@ -213,6 +214,8 @@ export async function registerGenerationRoutes(
           body.model ??
           ({ backend: prev.backend, provider: prev.provider, modelId: prev.modelId } as ModelRef);
         const resolved = await resolveModelOr409(gateway, tx, ref, auth.userId);
+        // The question's files must be readable by the model that answers again (05-12).
+        await assertMessageReadableBy(tx, userRow.id, resolved.caps, resolved.label);
         const policy = await loadAiChatPolicy(tx);
         await capOr429(tx, auth.userId, policy.concurrentGenerationsPerUser);
         // A regenerate is an answer too: it counts against the same daily cap (05-08), before anything changes.
