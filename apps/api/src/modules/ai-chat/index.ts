@@ -9,6 +9,7 @@ import { registerPreferenceRoutes } from "./prefs";
 import { registerAiChatRoutes } from "./routes";
 import { createRunLoop } from "./run-loop";
 import { createAiChatService } from "./service";
+import { registerShareRoutes } from "./shares";
 import { createGenerationSweeper } from "./sweeper";
 import { createTitler } from "./titles";
 import { registerUsageRoutes } from "./usage-routes";
@@ -28,6 +29,7 @@ export { ABORT_CHANNEL } from "./generations";
 export { consumeGeneration, usageToday } from "./limits";
 export { loadPreferences, registerPreferenceRoutes } from "./prefs";
 export { type AfterFinalize, createRunLoop, type RunLoop } from "./run-loop";
+export { registerShareRoutes, snapshotOf } from "./shares";
 export { createGenerationSweeper, type GenerationSweeper } from "./sweeper";
 export { createTitler, heuristicTitle, pickTitleModel, type Titler } from "./titles";
 export { toolStates, webAllowed } from "./tools-state";
@@ -64,6 +66,8 @@ export function createAiChatModule(
       registerPreferenceRoutes(app, { core, gateway: deps.gateway });
       // Today's usage (05-08); 05-09 adds the reports to usage-routes.ts, never here.
       registerUsageRoutes(app, { core });
+      // Read-only snapshot share links (05-13, AICHAT-09): signed-in members of the organization only.
+      registerShareRoutes(app, { core, gateway: deps.gateway });
       unsubscribeAbort = await registerGenerationRoutes(app, { core, gateway: deps.gateway, runLoop });
       sweeper.start();
     },

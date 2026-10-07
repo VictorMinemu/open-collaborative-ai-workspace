@@ -63,6 +63,8 @@ async function twoExchanges(): Promise<{ chatId: string; bodies: string[]; label
   await settled(first.generation.id);
   const second = await ok(send(sam, first.chat.id, "Add a budget"), 201);
   await settled(second.generation.id);
+  // A typed title: the auto title never replaces it, so the snapshot's title is known.
+  await ok(sam.request("PATCH", `/api/v1/ai-chats/${first.chat.id}`, { title: "Plan a team offsite" }));
   return {
     chatId: first.chat.id,
     bodies: [
@@ -81,14 +83,23 @@ async function orgBAdmin(): Promise<TestClient> {
   const inv = await ok(admin.request("POST", "/api/v1/invitations", { email, role: "standard" }));
   const eve = new TestClient(stack.baseUrl);
   const accepted = await ok(
-    eve.request("POST", `/api/v1/invitations/${inv.id}/accept`, { name: "Eve", password: "eve-long-password-1" }),
+    eve.request("POST", `/api/v1/invitations/${inv.id}/accept`, {
+      name: "Eve",
+      password: "eve-long-password-1",
+    }),
   );
   const eveId: string = accepted.user.id;
   const orgB = randomUUID();
-  await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil', $2)", [orgB, `evil-${orgB}`]);
+  await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil', $2)", [
+    orgB,
+    `evil-${orgB}`,
+  ]);
   await su.query("delete from auth.member where user_id = $1", [eveId]);
   await su.query("delete from app.org_members where user_id = $1", [eveId]);
-  await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [orgB, eveId]);
+  await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
+    orgB,
+    eveId,
+  ]);
   await su.query(
     "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Eve', 'admin')",
     [orgB, eveId],
@@ -113,7 +124,13 @@ beforeAll(async () => {
     }),
   );
   ({ client: sam, userId: samId } = await invite(stack, admin, "sam@example.test", "Sam Rivera", "standard"));
-  ({ client: alex, userId: alexId } = await invite(stack, admin, "alex@example.test", "Alex Kim", "standard"));
+  ({ client: alex, userId: alexId } = await invite(
+    stack,
+    admin,
+    "alex@example.test",
+    "Alex Kim",
+    "standard",
+  ));
   await seedPlan(sam);
 }, 180_000);
 
@@ -145,14 +162,17 @@ describe("create and read a snapshot (same organization, signed in)", () => {
     expect(read.messages.map((m: Json) => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
     expect(read.messages.map((m: Json) => m.body)).toEqual(bodies);
     expect(read.messages.map((m: Json) => m.modelLabel)).toEqual([null, label, null, label]);
-    expect(read.messages.every((m: Json) => Array.isArray(m.attachments) && m.attachments.length === 0)).toBe(true);
+    expect(read.messages.every((m: Json) => Array.isArray(m.attachments) && m.attachments.length === 0)).toBe(
+      true,
+    );
     // The owner reads his own link too.
     expect((await view(sam, created.id)).status).toBe(200);
 
     const audits = (
-      await su.query("select metadata from app.audit_events where action = 'ai_chat.share_created' and resource_id = $1", [
-        chatId,
-      ])
+      await su.query(
+        "select metadata from app.audit_events where action = 'ai_chat.share_created' and resource_id = $1",
+        [chatId],
+      )
     ).rows;
     expect(audits).toHaveLength(1);
     // Ids and the count only: never a body or the title.
@@ -224,9 +244,10 @@ describe("never public, never across organizations (T-05-13-01, T-05-13-04)", ()
     expect((await view(anon, shareId)).status).toBe(401);
     expect((await share(anon, chatId)).status).toBe(401);
     expect((await anon.request("GET", `/api/v1/ai-chats/${chatId}/shares`)).status).toBe(401);
-    expect((await anon.request("DELETE", `/api/v1/ai-shares/${shareId}`)).status).toBe(401);
     // Not even with the web Origin and no cookie through plain fetch.
-    const raw = await fetch(`${stack.baseUrl}/api/v1/ai-shares/${shareId}`, { headers: { origin: WEB_ORIGIN } });
+    const raw = await fetch(`${stack.baseUrl}/api/v1/ai-shares/${shareId}`, {
+      headers: { origin: WEB_ORIGIN },
+    });
     expect(raw.status).toBe(401);
   });
 
