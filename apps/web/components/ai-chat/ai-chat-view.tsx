@@ -282,6 +282,7 @@ function ExistingChat({ chatId }: { chatId: string }) {
           messages={chat.messages}
           textOf={chat.textOf}
           onRegenerated={chat.applySent}
+          live={chat.live}
         />
         {detail?.archived ? (
           <ArchivedNotice chatId={chatId} />

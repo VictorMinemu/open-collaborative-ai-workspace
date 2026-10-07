@@ -14,8 +14,11 @@ export function AiMessageList({
   messages,
   textOf,
   onRegenerated,
+  live = true,
 }: {
   chatId: string;
+  /** Streaming answers rendered now are live here (false while a fresh page only replays history). */
+  live?: boolean;
   messages: Message[];
   textOf: (m: Message) => string;
   /** Applies a regenerate answered by the API (05-06). */
@@ -45,6 +48,7 @@ export function AiMessageList({
             key={m.id}
             message={m}
             text={textOf(m)}
+            live={live}
             regenerate={
               onRegenerated && m.id === regenerableId
                 ? { chatId, disabled: writing, onRegenerated }

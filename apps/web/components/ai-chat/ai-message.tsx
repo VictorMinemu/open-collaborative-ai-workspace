@@ -37,16 +37,19 @@ export function AiMessage({
   message,
   text,
   regenerate,
+  live = true,
 }: {
   message: Message;
   text: string;
   regenerate?: AnswerRegenerate | undefined;
+  /** A streaming render counts as live (false for a replay ahead of the page's first snapshot). */
+  live?: boolean;
 }) {
   if (message.authorKind !== "agent") return <UserTurn message={message} text={text} />;
 
   const streaming = message.status === "streaming";
   // A failure that follows a stream seen on this page arrived live (05-07: the usage-limit dialog opens once).
-  if (streaming) markStreamed(message.id);
+  if (streaming && live) markStreamed(message.id);
   return (
     <div
       data-testid="ai-message"
