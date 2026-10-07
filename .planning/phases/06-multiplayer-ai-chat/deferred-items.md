@@ -10,3 +10,12 @@
 - **Regenerate is offered to every `ai_chat.use` viewer on the last answer.** The API refuses a grantee who is not the
   owner or the latest requester (403 `not_answer_requester`, 06-02); the menu could hide itself using
   `generation.requesterUserId`. Left to the queue/regenerate UI work (06-06/06-11).
+
+## From 06-08 (out of scope: not caused by 06-08)
+
+- **`grants.int.test.ts` › "after every grant is revoked › the owner's next turn still attributes former grantees'
+  messages and sends are solo again (409 while generating)" fails on the merged branch.** It asserts that notice lines
+  never reach the model (`not.toContain("shared this chat with")`), written by 06-04; 06-05 then made notices newer
+  than the last kept answer part of `<turn_context>` (`<notice>…</notice>`). The two merged plans disagree; 06-08 does
+  not touch prompt building (turn.ts / build-model-messages.ts). One of the two must be updated by the plan that owns
+  the prompt rule (the assertion, if 06-05's notices are the intended behaviour).
