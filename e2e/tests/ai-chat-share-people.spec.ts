@@ -193,6 +193,7 @@ test("Víctor widens his chat from Alex to the Backend team, makes it view-only,
     const confirm = people.getByTestId("ai-share-org-confirm");
     await expect(confirm).toContainText(`Everyone in ${ADMIN.orgName} will see this whole conversation`);
     await page.mouse.move(0, 0);
+    await expect(page.locator("[data-sonner-toast]")).toHaveCount(0, { timeout: 10_000 });
     await shot(page, `share-org-confirm-${w}`);
     await confirm.getByTestId("ai-share-org-cancel").click();
     await expect(confirm).toHaveCount(0);

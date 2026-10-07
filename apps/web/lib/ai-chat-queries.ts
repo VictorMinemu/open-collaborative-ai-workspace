@@ -487,7 +487,9 @@ export function useAiChat(chatId: string): AiChatView {
   // The server dropped the stream because the viewer lost access (RT-01, ADR-0009).
   const [revoked, setRevoked] = useState(false);
   const onRevoked = useCallback(() => setRevoked(true), []);
-  useTopic(`conv:${chatId}`, onFrame, cursor.current, () => resync.current(), { onRevoked });
+  // `presence`: this page shows the chat, so the viewer counts as here (RT-04); the participants header shows who is
+  // here in a shared chat (06-12). Always on, so sharing never re-subscribes the stream.
+  useTopic(`conv:${chatId}`, onFrame, cursor.current, () => resync.current(), { onRevoked, presence: true });
 
   // 2. Then the snapshot. Every snapshot (first load, gap refetch, reconnect) is stitched with what streamed.
   const query = useQuery({

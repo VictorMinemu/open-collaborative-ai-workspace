@@ -40,6 +40,7 @@ import { AiEmptyState } from "./ai-empty-state";
 import { AiChatPeopleContext } from "./ai-message";
 import { AiMessageList } from "./ai-message-list";
 import { ChatSettingsSheet } from "./chat-settings-sheet";
+import { AiChatParticipants } from "./participants";
 import { QueueChip } from "./queue-chip";
 import { ShareDialog } from "./share-dialog";
 
@@ -308,6 +309,14 @@ function ExistingChat({ chatId }: { chatId: string }) {
           <AiChatHeader
             chat={detail}
             viewerCan={detail.viewerCan}
+            participants={
+              <AiChatParticipants
+                chatId={chatId}
+                canManage={canManage}
+                enabled={multiplayer}
+                onManageAccess={canShare ? () => setShareOpen(true) : undefined}
+              />
+            }
             extraMenuItems={
               canManage || canShare ? (
                 <>

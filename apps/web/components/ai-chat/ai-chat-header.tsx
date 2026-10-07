@@ -255,16 +255,20 @@ export function AiChatTitleInput({
 
 /**
  * The header of an open chat. `viewerCan` (the server's decisions, 06-03) hides what the viewer may not do: a grantee
- * gets no rename and no menu at all when nothing in it is theirs (`extraMenuItems` null).
+ * gets no rename and no menu at all when nothing in it is theirs (`extraMenuItems` null). A shared chat shows its
+ * participants (presence and how widely it is shared, 06-12) before the menu.
  */
 export function AiChatHeader({
   chat,
   viewerCan,
   extraMenuItems,
+  participants,
 }: {
   chat: AiChatSummary;
   viewerCan?: readonly Permission[] | undefined;
   extraMenuItems?: ReactNode;
+  /** Who is in a shared chat and how widely it is shared (06-12, `AiChatParticipants`), beside the title. */
+  participants?: ReactNode;
 }) {
   const [editing, setEditing] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -321,6 +325,7 @@ export function AiChatHeader({
           ) : null}
         </div>
       )}
+      {participants}
       {hasMenu ? (
         <AiChatMenu
           open={menuOpen}
