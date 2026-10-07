@@ -4,6 +4,7 @@ import { createConversationAccess } from "../chat";
 import type { ModelGateway } from "../model-gateway";
 import { createPermissionService } from "../organization";
 import { registerGenerationRoutes } from "./generations";
+import { registerPreferenceRoutes } from "./prefs";
 import { registerAiChatRoutes } from "./routes";
 import { createRunLoop } from "./run-loop";
 import { createAiChatService } from "./service";
@@ -18,9 +19,12 @@ import { registerUsageRoutes } from "./usage-routes";
 export { type BuildInput, type BuiltPrompt, buildModelMessages } from "./build-model-messages";
 export { ABORT_CHANNEL } from "./generations";
 export { consumeGeneration, usageToday } from "./limits";
+export { loadPreferences, registerPreferenceRoutes } from "./prefs";
 export { type AfterFinalize, createRunLoop, type RunLoop } from "./run-loop";
 export { createGenerationSweeper, type GenerationSweeper } from "./sweeper";
 export { createTitler, heuristicTitle, pickTitleModel, type Titler } from "./titles";
+export { toolStates, webAllowed } from "./tools-state";
+export { searxngWebSearchTool } from "./web-tools";
 
 export function createAiChatModule(core: Core, deps: { gateway: ModelGateway }): ApiModule {
   const runLoop = createRunLoop(core, { gateway: deps.gateway });
@@ -45,6 +49,8 @@ export function createAiChatModule(core: Core, deps: { gateway: ModelGateway }):
     name: "ai-chat",
     async register(app: App) {
       registerAiChatRoutes(app, core, service);
+      // The member's own defaults: personal instructions, default model, Web on new chats (05-11).
+      registerPreferenceRoutes(app, { core, gateway: deps.gateway });
       // Today's usage (05-08); 05-09 adds the reports to usage-routes.ts, never here.
       registerUsageRoutes(app, { core });
       unsubscribeAbort = await registerGenerationRoutes(app, { core, gateway: deps.gateway, runLoop });
