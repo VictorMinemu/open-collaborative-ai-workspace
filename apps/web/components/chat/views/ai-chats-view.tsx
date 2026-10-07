@@ -14,10 +14,11 @@ import { Spinner } from "@/components/ui/spinner";
 import { useSheetSurface } from "@/components/work-zone/control-surface";
 import { shortAgo } from "@/components/work-zone/session-sidebar";
 import { groupAiChats } from "@/lib/ai-chat-groups";
-import { useAiChats } from "@/lib/ai-chat-queries";
+import { useAiChats, useSharedAiChats } from "@/lib/ai-chat-queries";
 import { errorMessage } from "@/lib/api";
 import { type BotDm, isBotDm, useDms } from "@/lib/chat-queries";
 import { cn, formatDate } from "@/lib/utils";
+import { ConversationBadge } from "../conversation-badge";
 import { PrincipalAvatar } from "../principal-avatar";
 import { useMinuteClock } from "./all-view";
 import { ConversationAvatar, ConversationRow } from "./conversation-row";
@@ -25,7 +26,8 @@ import { ConversationAvatar, ConversationRow } from "./conversation-row";
 /**
  * `/chat/ai` (CHAT-02, AICHAT-04): the member's AI chats home. "New chat", the member's private AI chats grouped
  * Today / Previous 7 days / Older (local time) with Rename and Archive per row (a menu on a desktop, a sheet — also
- * on long-press — at 390), the archived ones apart, and below them the bot DMs under "Bots" exactly as before.
+ * on long-press — at 390), the archived ones apart, then "Shared with me" (06-12, MULTI-01: chats other members shared
+ * in place, with the owner's name and the unread count), and below them the bot DMs under "Bots" exactly as before.
  */
 export function AiChatsView() {
   const [archived, setArchived] = useState(false);
@@ -35,8 +37,16 @@ export function AiChatsView() {
   const bots = (dms.data?.dms ?? []).filter(isBotDm);
   const list = useMemo(() => (chats.data?.pages ?? []).flatMap((p) => p.chats), [chats.data]);
   const groups = useMemo(() => groupAiChats(list, now), [list, now]);
+  const sharedQuery = useSharedAiChats();
+  const shared = useMemo(() => (sharedQuery.data?.pages ?? []).flatMap((p) => p.chats), [sharedQuery.data]);
   const nothingAtAll =
-    !archived && !chats.isPending && list.length === 0 && !dms.isPending && bots.length === 0;
+    !archived &&
+    !chats.isPending &&
+    list.length === 0 &&
+    !dms.isPending &&
+    bots.length === 0 &&
+    !sharedQuery.isPending &&
+    shared.length === 0;
 
   return (
     <div className="flex min-w-0 flex-1 flex-col" data-testid="ai-chats-view">
@@ -85,6 +95,7 @@ export function AiChatsView() {
               <ListToggle archived={archived} onChange={setArchived} />
             </div>
             <ChatList archived={archived} query={chats} groups={groups} now={now} empty={list.length === 0} />
+            {!archived ? <SharedWithMe query={sharedQuery} chats={shared} now={now} /> : null}
             {!archived ? <BotsList dms={dms} bots={bots} now={now} /> : null}
           </div>
         )}
@@ -318,6 +329,111 @@ function AiChatRow({ chat, now }: { chat: AiChatSummary; now: number }) {
         <AiChatStandardItems chat={chat} onRename={() => setEditing(true)} />
       </AiChatMenu>
     </div>
+  );
+}
+
+/**
+ * "Shared with me" (06-12, MULTI-01): AI chats other members shared in place with the member (a person, team,
+ * department or organization grant), newest activity first, each with its owner and the unread count of the chats the
+ * member takes part in (06-08). Only when there is one. Owner-only actions are not offered here: the chat decides.
+ */
+function SharedWithMe({
+  query,
+  chats,
+  now,
+}: {
+  query: ReturnType<typeof useSharedAiChats>;
+  chats: AiChatSummary[];
+  now: number;
+}) {
+  if (chats.length === 0) return null;
+  return (
+    <section data-testid="ai-chats-shared" aria-labelledby="ai-shared-heading" className="mt-5">
+      <div className="flex items-center justify-between gap-2 px-1 pb-1 sm:px-2">
+        <h2 id="ai-shared-heading" className="font-semibold text-[13px] text-muted-foreground">
+          Shared with me
+        </h2>
+      </div>
+      <div className="grid grid-cols-1 gap-px">
+        {chats.map((c) => {
+          const unread = c.unreadCount ?? 0;
+          const owner = c.owner;
+          return (
+            <div
+              key={c.id}
+              data-testid="ai-chat-shared-row"
+              data-chat-id={c.id}
+              data-unread={unread > 0 || undefined}
+              className="flex min-w-0 items-center rounded-lg transition-colors hover:bg-accent/60"
+            >
+              <Link
+                href={`/chat/ai/${c.id}`}
+                className="flex min-w-0 flex-1 items-center gap-3 rounded-lg px-3 py-2.5 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40"
+              >
+                <span className="relative shrink-0">
+                  <PrincipalAvatar
+                    kind="user"
+                    name={owner?.displayName ?? "Owner"}
+                    avatarUrl={owner?.avatarUrl ?? null}
+                    seed={owner?.id ?? c.id}
+                    className="size-9"
+                  />
+                  <span className="absolute -right-1 -bottom-1 flex size-[18px] items-center justify-center rounded-full bg-brand-soft text-brand-soft-foreground ring-2 ring-background">
+                    <Sparkles aria-hidden className="size-2.5" />
+                  </span>
+                </span>
+                <span className="grid min-w-0 flex-1 gap-0.5">
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span
+                      className={cn(
+                        "min-w-0 truncate font-medium text-[14.5px] text-foreground/90",
+                        unread > 0 && "font-semibold text-foreground",
+                      )}
+                    >
+                      {c.title}
+                    </span>
+                    <time
+                      dateTime={c.lastActivityAt}
+                      title={formatDate(c.lastActivityAt)}
+                      className="ml-auto shrink-0 pl-2 text-[12px] text-muted-foreground tabular-nums"
+                    >
+                      {shortAgo(c.lastActivityAt, now)}
+                    </time>
+                  </span>
+                  <span className="flex min-w-0 items-center gap-1.5 text-[12.5px] text-muted-foreground">
+                    <span data-testid="ai-chat-shared-owner" className="min-w-0 truncate">
+                      {owner ? `${owner.displayName}'s chat` : "Shared chat"}
+                      {c.access === "view" ? " · Can view" : ""}
+                    </span>
+                    {unread > 0 ? (
+                      <ConversationBadge
+                        level="default"
+                        muted={false}
+                        unreadCount={unread}
+                        mentionCount={0}
+                      />
+                    ) : null}
+                  </span>
+                </span>
+              </Link>
+            </div>
+          );
+        })}
+      </div>
+      {query.hasNextPage ? (
+        <div className="flex justify-center pt-1">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={query.isFetchingNextPage}
+            onClick={() => void query.fetchNextPage()}
+          >
+            {query.isFetchingNextPage ? <Spinner /> : null}
+            Load more
+          </Button>
+        </div>
+      ) : null}
+    </section>
   );
 }
 

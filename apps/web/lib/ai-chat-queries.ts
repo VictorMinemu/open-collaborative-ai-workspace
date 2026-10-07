@@ -474,6 +474,12 @@ export function useAiChat(chatId: string): AiChatView {
         const m = (frame.data as { message?: Message }).message;
         // A message from someone typing: they are done.
         if (m && m.authorKind !== "system") clear(m.authorKind, m.authorId);
+      } else if (
+        frame.type === EventTypes.conversationMemberAdded ||
+        frame.type === EventTypes.conversationMemberRemoved
+      ) {
+        // Someone joined or left, or the owner added or removed an agent (06-12): the participants follow live.
+        void qc.invalidateQueries({ queryKey: aiKeys.participants(chatId) });
       } else if (frame.type === EventTypes.aiChatAccessChanged) {
         // Someone's access changed (P-09): re-read what this viewer may do (composer vs read-only); a 404 means they
         // lost the chat. The participants follow.
@@ -487,7 +493,9 @@ export function useAiChat(chatId: string): AiChatView {
   // The server dropped the stream because the viewer lost access (RT-01, ADR-0009).
   const [revoked, setRevoked] = useState(false);
   const onRevoked = useCallback(() => setRevoked(true), []);
-  useTopic(`conv:${chatId}`, onFrame, cursor.current, () => resync.current(), { onRevoked });
+  // `presence`: this page shows the chat, so the viewer counts as here (RT-04); the participants header shows who is
+  // here in a shared chat (06-12). Always on, so sharing never re-subscribes the stream.
+  useTopic(`conv:${chatId}`, onFrame, cursor.current, () => resync.current(), { onRevoked, presence: true });
 
   // 2. Then the snapshot. Every snapshot (first load, gap refetch, reconnect) is stitched with what streamed.
   const query = useQuery({

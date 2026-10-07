@@ -189,8 +189,10 @@ async function participantsOf(
     access: id === ownerUserId ? "owner" : (access.get(id) ?? null),
   });
   // Owner first, then the other humans by name, then agents by handle: the same list whoever asks.
+  // Only people who can read the chat now: a participation row outlives a lost unit membership (06-04), and someone
+  // removed from the granted team must leave the roster at once (06-12). Their messages stay attributed.
   const others = members
-    .filter((m) => m.kind === "user" && m.id !== ownerUserId)
+    .filter((m) => m.kind === "user" && m.id !== ownerUserId && m.access !== null)
     .map((m) => human(m.id))
     .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
   const roster: PromptParticipant[] = [
@@ -221,8 +223,10 @@ async function participantsOf(
   const respondingTo = (respondingIds.length ? respondingIds : [generation.requesterUserId]).map(human);
 
   const humanMembers = members.filter((m) => m.kind === "user").length;
+  // D-06 (06-12): a persona reads the whole chat, so an agent member counts as sharing (no personal instructions).
+  const shared = grant !== undefined || humanMembers > 1 || memberAgentIds.length > 0;
   return {
-    participants: { roster, respondingTo, shared: grant !== undefined || humanMembers > 1 },
+    participants: { roster, respondingTo, shared },
     names,
     agentsById,
   };

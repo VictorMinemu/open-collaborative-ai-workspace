@@ -70,6 +70,8 @@ export interface MentionPayload {
     tools: string[];
     memory?: Array<{ id: string; text: string; createdAt: string }>;
     now?: { iso: string; timeZone: string; local: string } | null;
+    /** AI chat deliveries (06-10): tools withheld from this turn and why. */
+    withheld?: Array<{ tool: string; reason: string }>;
   };
 }
 
@@ -180,6 +182,8 @@ export function identityReply(m: MentionPayload): string {
 export class FakeCellPlugin {
   readonly events: FakeCellEvent[] = [];
   readonly replies: Array<{ messageId: string; created: boolean; mention: MentionPayload }> = [];
+  /** Every `POST /tool-calls` this fake cell made (06-12: a withheld tool never reaches the gate). */
+  readonly toolCallRequests: Array<{ eventId: string; tool: string }> = [];
   snapshot: FakeCellSnapshot | null = null;
   lastSeq = 0;
   /** Subscription credentials this fake cell "holds" (provider → account), like OpenClaw's auth store. */
@@ -372,7 +376,15 @@ export class FakeCellPlugin {
     for (const call of calls) {
       const name = offered.find((t) => t === call.tool || t.endsWith(`__${call.tool}`));
       if (!name) {
-        lines.push(`Tool ${call.tool}: not offered`);
+        // Like apps/openclaw-channel's "Tools withheld in this conversation" block (06-10): say why, for whom.
+        const withheld = m.turn?.withheld?.find(
+          (w) => w.tool === call.tool || w.tool.endsWith(`__${call.tool}`),
+        );
+        lines.push(
+          withheld
+            ? `Tool ${call.tool}: not available for ${m.message.author.displayName} (${withheld.reason})`
+            : `Tool ${call.tool}: not offered`,
+        );
         continue;
       }
       if (name === "ocw_memory_save") {
@@ -391,6 +403,7 @@ export class FakeCellPlugin {
       const params: { query?: string; url?: string } = {};
       if (typeof call.args.query === "string") params.query = call.args.query;
       if (typeof call.args.url === "string") params.url = call.args.url;
+      this.toolCallRequests.push({ eventId: m.eventId, tool: name });
       const res = await this.request<{ callId?: string; allowed?: boolean; reason?: string | null }>(
         "POST",
         "/tool-calls",

@@ -2,7 +2,7 @@
 
 import type { AiChatTools, AiModelOption, AiParticipant, SendAiMessageResponse } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
-import { Archive, Eye, Lock, MessageCircleQuestion, Share2, SlidersHorizontal } from "lucide-react";
+import { Archive, Bot, Eye, Lock, MessageCircleQuestion, Share2, SlidersHorizontal } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useMemo, useRef, useState } from "react";
@@ -34,12 +34,14 @@ import {
 import { errorMessage, isApiError } from "@/lib/api";
 import { useAttachmentsConfig } from "@/lib/attachment-queries";
 import { useMe } from "@/lib/queries";
+import { AddAgentDialog } from "./add-agent-dialog";
 import { AiChatHeader, AiChatMenuItem, AiChatPlainHeader } from "./ai-chat-header";
 import { AiComposer, type AiComposerApi, type AiSendFiles } from "./ai-composer";
 import { AiEmptyState } from "./ai-empty-state";
 import { AiChatPeopleContext } from "./ai-message";
 import { AiMessageList } from "./ai-message-list";
 import { ChatSettingsSheet } from "./chat-settings-sheet";
+import { AiChatParticipants } from "./participants";
 import { QueueChip } from "./queue-chip";
 import { ShareDialog } from "./share-dialog";
 
@@ -167,6 +169,7 @@ function ExistingChat({ chatId }: { chatId: string }) {
   const liveSettings = useAiChatSettingsLive(chatId);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
+  const [addAgentOpen, setAddAgentOpen] = useState(false);
   const composer = useRef<AiComposerApi | null>(null);
   const snapshotChat = chat.snapshot?.chat;
   const detail = snapshotChat ? { ...snapshotChat, ...live, ...liveSettings } : snapshotChat;
@@ -308,9 +311,28 @@ function ExistingChat({ chatId }: { chatId: string }) {
           <AiChatHeader
             chat={detail}
             viewerCan={detail.viewerCan}
+            participants={
+              <AiChatParticipants
+                chatId={chatId}
+                canManage={canManage}
+                enabled={multiplayer}
+                onManageAccess={canShare ? () => setShareOpen(true) : undefined}
+                onAddAgent={canManage && !detail.archived ? () => setAddAgentOpen(true) : undefined}
+              />
+            }
             extraMenuItems={
               canManage || canShare ? (
                 <>
+                  {/* Agents join from here too while the chat is still private (06-12, AGENT-02). */}
+                  {canManage && !detail.archived ? (
+                    <AiChatMenuItem
+                      icon={<Bot />}
+                      testId="ai-chat-menu-add-agent"
+                      onSelect={() => setAddAgentOpen(true)}
+                    >
+                      Add an agent
+                    </AiChatMenuItem>
+                  ) : null}
                   {canManage ? (
                     <AiChatMenuItem
                       icon={<SlidersHorizontal />}
@@ -349,6 +371,9 @@ function ExistingChat({ chatId }: { chatId: string }) {
           onOpenChange={setShareOpen}
           viewerCan={detail.viewerCan}
         />
+      ) : null}
+      {detail && canManage ? (
+        <AddAgentDialog chatId={chatId} open={addAgentOpen} onOpenChange={setAddAgentOpen} />
       ) : null}
       <ChatDropZone enabled={!detail?.archived && canUse} composer={composer}>
         <AiChatPeopleContext.Provider value={people}>

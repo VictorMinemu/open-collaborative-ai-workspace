@@ -540,3 +540,39 @@ describe("tools in a shared chat = persona ∩ asker ∩ every participant; with
     expect(ev.turn.withheld).toEqual([]);
   });
 });
+
+describe("an agent persona in an AI chat counts as sharing it (D-06, orchestrator decision in 06-12)", () => {
+  it("the owner's personal instructions shape a solo chat, and stop the moment a persona joins it", async () => {
+    await ok(
+      victor.request("PUT", "/api/v1/me/ai-preferences", { instructions: "Always answer in pirate speak." }),
+    );
+    try {
+      stack.fake.reset();
+      const created = await ok(createChat(victor, "Plan the schema migration"), 201);
+      const chatId = (created.chat as Json).id as string;
+      await settled((created.generation as Json).id as string);
+      // Solo (Phase 5): the owner's own instructions are used.
+      expect(JSON.stringify(withoutTitles(stack.fake.requests("responses")).at(-1)?.body ?? {})).toContain(
+        "pirate",
+      );
+      expect((created.chat as Json).shared).not.toBe(true);
+
+      await ok(addAgent(victor, chatId, backendId), 201);
+      // The chat now reads as shared everywhere the platform says so (summary, snapshot).
+      const snap = await ok(victor.request("GET", `/api/v1/ai-chats/${chatId}`));
+      expect((snap.chat as Json).shared).toBe(true);
+      const listed = await ok(victor.request("GET", "/api/v1/ai-chats?limit=50"));
+      expect((listed.chats as Json[]).find((c) => c.id === chatId)?.shared).toBe(true);
+
+      stack.fake.reset();
+      const r = await ok(send(victor, chatId, "What next?", { askAi: true }), 201);
+      await settled((r.generation as Json).id as string);
+      const body = JSON.stringify(withoutTitles(stack.fake.requests("responses")).at(-1)?.body ?? {});
+      expect(body).toContain("<participants>");
+      expect(body).not.toContain("pirate");
+      expect(body).not.toContain("personal_instructions");
+    } finally {
+      await ok(victor.request("PUT", "/api/v1/me/ai-preferences", { instructions: "" }));
+    }
+  });
+});

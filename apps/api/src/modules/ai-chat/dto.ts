@@ -92,12 +92,15 @@ export async function directoryOf(tx: Tx, userIds: string[], agentIds: string[] 
 }
 
 /**
- * P-05 `shared` as SQL: any active grant or more than one human member. Personal instructions are never used in a
- * shared chat (D-06), from the moment it is shared.
+ * P-05 `shared` as SQL: any active grant, more than one human member, or any agent member (06-12: a persona reads the
+ * whole chat, so adding one counts as sharing for D-06). Personal instructions are never used in a shared chat (D-06),
+ * from the moment it is shared.
  */
 export function sharedSql(conversationIdCol: SQL | AnyPgColumn): SQL {
   return sql`(exists (select 1 from app.ai_chat_grants sg
                       where sg.conversation_id = ${conversationIdCol} and sg.revoked_at is null)
+           or exists (select 1 from app.conversation_members sa
+                      where sa.conversation_id = ${conversationIdCol} and sa.member_kind = 'agent')
            or (select count(*) from app.conversation_members sm
                 where sm.conversation_id = ${conversationIdCol} and sm.member_kind = 'user') > 1)`;
 }
@@ -119,7 +122,7 @@ export async function readUpTo(tx: Tx, conversationId: string, userId: string, s
     );
 }
 
-/** P-05 for one chat. */
+/** P-05 for one chat (`sharedSql`). */
 export async function isShared(tx: Tx, conversationId: string): Promise<boolean> {
   const [grant] = await tx
     .select({ id: aiChatGrants.id })
@@ -127,13 +130,13 @@ export async function isShared(tx: Tx, conversationId: string): Promise<boolean>
     .where(and(eq(aiChatGrants.conversationId, conversationId), isNull(aiChatGrants.revokedAt)))
     .limit(1);
   if (grant) return true;
-  const humans = await tx
-    .select({ id: conversationMembers.memberId })
+  const members = await tx
+    .select({ kind: conversationMembers.memberKind })
     .from(conversationMembers)
-    .where(
-      and(eq(conversationMembers.conversationId, conversationId), eq(conversationMembers.memberKind, "user")),
-    );
-  return humans.length > 1;
+    .where(eq(conversationMembers.conversationId, conversationId));
+  // An agent persona reads the whole chat: it counts as sharing (D-06, 06-12).
+  if (members.some((m) => m.kind === "agent")) return true;
+  return members.filter((m) => m.kind === "user").length > 1;
 }
 
 /**

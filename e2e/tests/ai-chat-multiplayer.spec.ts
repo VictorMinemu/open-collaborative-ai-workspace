@@ -501,8 +501,9 @@ test("the composer addresses the AI or a person deliberately: Ask AI toggle and 
     // A mention turns it off, and it can be switched back on by hand before sending.
     await sendAiAs(page, "@alex what do you think?", { askAi: true });
     await expect(answers).toHaveCount(4, { timeout: 15_000 });
-    expect(await answerText(answers.last())).toContain("Echo: @alex what do you think?");
+    // Read the text once the answer completed (right after it appears it may still be an empty streaming turn).
     await expect(answers.last()).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
+    expect(await answerText(answers.last())).toContain("Echo: @alex what do you think?");
 
     // At 390 the toggle sits in the toolbar without overflow.
     if (mobile) {
