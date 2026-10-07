@@ -768,3 +768,145 @@ describe("decision: one audited, server-decided outcome, delivered to the agent 
     await sleep(200);
   });
 });
+
+// ---------------------------------------------------------------- 06-14: the persona's ocw_agent_card tool
+
+describe("06-14: every delivered turn offers ocw_agent_card, gated like any tool, bound to the turn's conversation", () => {
+  const CARD_FLAGS = { untrustedOutput: false, sideEffecting: false };
+
+  const mentionsOf = async (messageId: string) =>
+    (
+      await su.query(
+        "select payload from app.stream_events where stream_id = $1 and type = 'agent.mention.v1' and payload->'message'->>'id' = $2 order by seq",
+        [`cell:${orgId}`, messageId],
+      )
+    ).rows.map((r) => r.payload as Json);
+
+  async function deliveredFor(messageId: string): Promise<Json> {
+    for (let i = 0; i < 100; i++) {
+      const [ev] = await mentionsOf(messageId);
+      if (ev) return ev;
+      await sleep(50);
+    }
+    throw new Error(`no agent.mention.v1 for ${messageId}`);
+  }
+
+  const gate = (eventId: string, agentId = deployId) =>
+    cell.request<Json>("POST", "/tool-calls", { eventId, agentId, tool: "ocw_agent_card", params: {} });
+
+  let channelEvent: Json;
+
+  it("a channel mention, a DM and an AI chat mention each list ocw_agent_card with flags {false, false}", async () => {
+    const inChannel = await ok(
+      victor.request("POST", `/api/v1/conversations/${backendId}/messages`, {
+        body: "@deploy post the release card",
+        mentions: [{ kind: "agent", id: deployId }],
+      }),
+    );
+    channelEvent = await deliveredFor(inChannel.id as string);
+
+    const dm = await ok(
+      alex.request("POST", "/api/v1/dms", { participants: [{ kind: "agent", id: deployId }] }),
+    );
+    const inDm = await ok(
+      alex.request("POST", `/api/v1/conversations/${dm.id}/messages`, { body: "card please" }),
+    );
+    const dmEvent = await deliveredFor(inDm.id as string);
+
+    const created = await ok(
+      victor.request("POST", "/api/v1/ai-chats", {
+        clientMessageId: cid(),
+        body: "Release planning",
+        model: PLAN_MODEL,
+      }),
+      201,
+    );
+    const chatId = (created.chat as Json).id as string;
+    await ok(victor.request("POST", `/api/v1/ai-chats/${chatId}/agents`, { agentId: deployId }), 201);
+    const sent = await victor.request("POST", `/api/v1/ai-chats/${chatId}/messages`, {
+      clientMessageId: cid(),
+      body: "@deploy track this release",
+      model: PLAN_MODEL,
+    });
+    expect([201, 202]).toContain(sent.status);
+    const aiEvent = await deliveredFor(((sent.body as Json).userMessage as Json).id as string);
+
+    for (const [ev, kind] of [
+      [channelEvent, "channel"],
+      [dmEvent, "dm"],
+      [aiEvent, "ai_chat"],
+    ] as const) {
+      expect(ev.conversation.kind, kind).toBe(kind);
+      expect(ev.turn.tools, kind).toContain("ocw_agent_card");
+      expect(ev.turn.toolFlags.ocw_agent_card, kind).toEqual(CARD_FLAGS);
+      const row = (
+        await su.query("select tools, tool_flags from app.agent_turns where event_id = $1", [ev.eventId])
+      ).rows[0];
+      expect(row.tools, kind).toContain("ocw_agent_card");
+      expect(row.tool_flags.ocw_agent_card, kind).toEqual(CARD_FLAGS);
+    }
+  });
+
+  it("GET /cell lists ocw_agent_card among the bot's possible tools (its alsoAllow)", async () => {
+    const snap = await cell.fetchCell();
+    const bot = (snap.agents as unknown as Json[]).find((a) => a.id === deployId) as Json;
+    expect(bot.capabilities.tools).toContain("ocw_agent_card");
+  });
+
+  it("the tool gate allows it on the delivered turn (audited as a builtin) and refuses a forged turn id", async () => {
+    const allowed = await gate(channelEvent.eventId as string);
+    expect(allowed.status).toBe(200);
+    expect(allowed.body).toMatchObject({ allowed: true, reason: null });
+    const audit = (await audits("bot.tool_call")).find(
+      (a) => a.metadata?.tool === "ocw_agent_card" && a.metadata?.reason === null,
+    ) as Json;
+    expect(audit).toMatchObject({
+      actor_kind: "agent",
+      actor_id: deployId,
+      metadata: { sourceKind: "builtin", tool: "ocw_agent_card" },
+    });
+
+    const forged = await gate(randomUUID());
+    expect(forged.body).toMatchObject({ allowed: false, reason: "unknown_turn" });
+    // Another bot of the cell cannot use this turn either.
+    expect((await gate(channelEvent.eventId as string, otherId)).body).toMatchObject({
+      allowed: false,
+      reason: "unknown_turn",
+    });
+  });
+
+  it("a card the cell posts with the turn's ids lands in that conversation and thread", async () => {
+    const res = await postCard(
+      channelEvent.conversation.id as string,
+      deployCard({ title: "Release v2.5" }),
+      {
+        threadRootId: channelEvent.thread.rootMessageId,
+        inReplyToMessageId: channelEvent.message.id,
+        idempotencyKey: `${channelEvent.eventId}:card:0`,
+      },
+    );
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    const row = (
+      await su.query("select conversation_id, thread_id, author_id from app.messages where id = $1", [
+        res.body.messageId,
+      ])
+    ).rows[0];
+    expect(row).toEqual({
+      conversation_id: backendId,
+      thread_id: channelEvent.thread.rootMessageId,
+      author_id: deployId,
+    });
+  });
+
+  it("a decision's agent.card_action.v1 turn offers ocw_agent_card too, so the persona can update its card", async () => {
+    const approval = await newCard(backendId, approvalCard());
+    expect((await decide(alex, approval)).status).toBe(200);
+    let ev: Json | undefined;
+    for (let i = 0; i < 100 && !ev; i++) {
+      ev = (await cardActionsOf(approval))[0]?.payload;
+      if (!ev) await sleep(50);
+    }
+    expect(ev?.turn.tools).toContain("ocw_agent_card");
+    expect(ev?.turn.toolFlags.ocw_agent_card).toEqual(CARD_FLAGS);
+  });
+});

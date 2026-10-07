@@ -5,7 +5,7 @@
   "categories": ["channels"],
   "channels": ["ocw"],
   "contracts": {
-    "tools": ["ocw_memory_save"]
+    "tools": ["ocw_memory_save", "ocw_agent_card"]
   },
   "activation": {
     "onStartup": true

@@ -339,6 +339,9 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
         eventId: m.eventId,
         agentId: m.ocwAgentId,
         conversationId: m.conversationId,
+        // The reply target, so `ocw_agent_card` can only post where this turn answers (06-14).
+        threadRootId: m.threadRootId,
+        messageId: m.messageId,
         turn: { ...m.turn, tools: allowed },
       },
       signal,

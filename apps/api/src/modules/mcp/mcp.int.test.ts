@@ -670,7 +670,7 @@ describe("probe results become policy-capped bot capabilities (BOT-10, SC6)", ()
     const mention = [{ kind: "agent", id: teamBotId }];
     const first = await say(admin, channelId, "@scribe note this", mention);
     const turn = await turnFor(teamBotId, first);
-    expect(turn.tools).toEqual([noteName]);
+    expect(turn.tools).toEqual(["ocw_agent_card", noteName]);
     expect(turn.toolFlags[noteName]).toEqual({ untrustedOutput: true, sideEffecting: true });
 
     await ok(admin.request("PATCH", `/api/v1/mcp-servers/${notes.id}`, { trustedChaining: true }));

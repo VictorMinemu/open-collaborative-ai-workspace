@@ -389,6 +389,90 @@ describe("mention → dispatch → reply", () => {
   });
 });
 
+describe("agent.card_action.v1 → dispatch → reply (06-14)", () => {
+  const cardActionData = (over: Record<string, unknown> = {}) => ({
+    ...mention(40, {
+      message: {
+        id: "card-msg-1",
+        text: "Sam Lee approved “Deploy api v2.3”",
+        createdAt: "2026-10-07T10:00:00.000Z",
+        author: { kind: "user", id: "u-sam", displayName: "Sam Lee" },
+        mentions: [{ kind: "agent", id: ARCHIE.id }],
+      },
+    }),
+    cardAction: { messageId: "card-msg-1", kind: "approval", title: "Deploy api v2.3", outcome: "approved" },
+    ...over,
+  });
+
+  it("dispatches through the mention path: typing, the card's thread, the deciding human as sender", async () => {
+    startPlugin();
+    await api.waitFor(() => api.openSockets() === 1);
+    api.publish("agent.card_action.v1", cardActionData());
+    await api.waitFor(() => api.messages.length === 1);
+    expect(api.messages[0]).toMatchObject({
+      agentId: ARCHIE.id,
+      conversationId: "conv-1",
+      threadRootMessageId: "root-1",
+      inReplyToMessageId: "card-msg-1",
+      text: "Hi Sam Lee!",
+      idempotencyKey: "evt:evt-40",
+    });
+    expect(port.dispatched[0]?.body).toBe("Sam Lee approved “Deploy api v2.3”");
+    expect(port.dispatched[0]?.contextBlocks.map((b) => b.type)).toContain("card_action");
+    await api.waitFor(() => api.typing.some((t) => t.typing === false));
+    expect(api.typing[0]).toMatchObject({
+      conversationId: "conv-1",
+      threadRootMessageId: "root-1",
+      typing: true,
+    });
+  });
+
+  /** What the server puts on every stored event (the fake API's `publish` adds them on the wire). */
+  const frameFields = (seq: number) => ({
+    seq,
+    type: "agent.card_action.v1",
+    organizationId: "org-1",
+    cellId: "org-1",
+  });
+
+  it("an invalid card action is skipped with a warning carrying the seq and field path only; later events flow", async () => {
+    const logs: string[] = [];
+    const client = createAgentChannelClient({ apiUrl: api.url, token: () => api.token });
+    const bridge = createBridge({
+      client,
+      port,
+      signal: new AbortController().signal,
+      log: { info: (m) => logs.push(m), warn: (m) => logs.push(m), error: (m) => logs.push(m) },
+      typingIntervalMs: 50,
+      retryDelayMs: 10,
+    });
+    await bridge.refreshCell();
+    await bridge.handleFrame({
+      seq: 41,
+      type: "agent.card_action.v1",
+      data: {
+        ...frameFields(41),
+        ...cardActionData({
+          eventId: "evt-41",
+          cardAction: { messageId: "card-msg-1", kind: "approval", title: "SECRET TITLE", outcome: "maybe" },
+        }),
+      },
+    });
+    expect(port.dispatched).toEqual([]);
+    const warning = logs.find((l) => l.includes("seq=41")) ?? "";
+    expect(warning).toContain("cardAction.outcome");
+    expect(warning).not.toContain("SECRET");
+    expect(warning).not.toContain("maybe");
+    await bridge.handleFrame({
+      seq: 42,
+      type: "agent.card_action.v1",
+      data: { ...frameFields(42), ...cardActionData({ eventId: "evt-42" }) },
+    });
+    expect(port.dispatched).toHaveLength(1);
+    expect(api.messages.map((m) => m.idempotencyKey)).toEqual(["evt:evt-42"]);
+  });
+});
+
 describe("subscription, cursor replay and reconnect", () => {
   it("starts LIVE from the snapshot lastSeq when no cursor exists (never re-answers old mentions)", async () => {
     api.publishMention(mention(9)); // happened before this cell ever ran
@@ -649,6 +733,34 @@ describe("real port dispatch: per-turn tool cap and active turn (D-08)", () => {
     expect(extra.ChannelStructuredContext.map((b) => b.label)).toContain("Current time for Víctor");
   });
 
+  it("the active turn carries the reply target (conversation, thread, asked message) the card tool binds to (06-14)", async () => {
+    const guard = createToolGuard({ client: () => null });
+    let during: Record<string, unknown> | undefined;
+    const { runtime } = fakeRuntime((params) => {
+      const t = guard.activeTurn((params.route as { sessionKey: string }).sessionKey);
+      during = t
+        ? { conversationId: t.conversationId, threadRootId: t.threadRootId, messageId: t.messageId }
+        : {};
+    });
+    const p = createOpenClawPort({ runtime, accountId: "default", cfg: {}, guard });
+    await p.dispatchMention(
+      mapMention(event({ turn: TURN } as never), ARCHIE),
+      async () => {},
+      new AbortController().signal,
+    );
+    expect(during).toEqual({ conversationId: "conv-1", threadRootId: "root-1", messageId: "msg-1" });
+    const dm = mapMention(
+      event({
+        conversation: { id: "dm-1", kind: "dm", name: null },
+        thread: { rootMessageId: "msg-1" },
+        turn: TURN,
+      } as never),
+      ARCHIE,
+    );
+    await p.dispatchMention(dm, async () => {}, new AbortController().signal);
+    expect(during).toEqual({ conversationId: "dm-1", threadRootId: null, messageId: "msg-1" });
+  });
+
   it("serialises two turns of the same session; the turn ends even when the dispatch throws", async () => {
     const guard = createToolGuard({ client: () => null });
     let running = 0;
@@ -743,14 +855,14 @@ describe("tool gate against the fake Agent Channel API (HTTP)", () => {
 describe("memory tool (D-10): manifest, registration and the fake API", () => {
   const MEMORY = { untrustedOutput: false, sideEffecting: true };
 
-  it("the manifest declares ocw_memory_save in contracts.tools (OpenClaw discovers tool ownership there)", () => {
+  it("the manifest declares ocw_memory_save and ocw_agent_card in contracts.tools (OpenClaw discovers tool ownership there)", () => {
     const manifest = JSON.parse(
       readFileSync(path.join(import.meta.dirname, "..", "openclaw.plugin.json"), "utf8"),
     ) as { contracts?: { tools?: string[] } };
-    expect(manifest.contracts?.tools).toEqual(["ocw_memory_save"]);
+    expect(manifest.contracts?.tools).toEqual(["ocw_memory_save", "ocw_agent_card"]);
   });
 
-  it("registerFull registers ocw_memory_save (+ the breaker guard on gateway_start); the gate hooks come from registerCapabilities", () => {
+  it("registerFull registers ocw_memory_save and ocw_agent_card (+ the breaker guard on gateway_start); the gate hooks come from registerCapabilities", () => {
     const hooks: string[] = [];
     const tools: Array<{ opts: { name: string } }> = [];
     const pluginApi = {
@@ -760,10 +872,10 @@ describe("memory tool (D-10): manifest, registration and the fake API", () => {
     const guard = createToolGuard({ client: () => null });
     registerFull(pluginApi as never, guard);
     expect(hooks).toEqual(["gateway_start"]);
-    expect(tools.map((t) => t.opts.name)).toEqual(["ocw_memory_save"]);
+    expect(tools.map((t) => t.opts.name)).toEqual(["ocw_memory_save", "ocw_agent_card"]);
     registerCapabilities(pluginApi as never, guard);
     expect(hooks).toEqual(["gateway_start", "before_tool_call", "after_tool_call"]);
-    expect(tools).toHaveLength(1);
+    expect(tools).toHaveLength(2);
   });
 
   it("a save in an active DM turn reaches POST /memories with the event, the bot and the text only", async () => {

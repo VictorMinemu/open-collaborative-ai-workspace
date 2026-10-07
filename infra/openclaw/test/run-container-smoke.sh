@@ -16,12 +16,15 @@
 # Scenario sandbox (03.1-14 / D-13): a vetted stdio MCP server runs only in the hardened `ocw-mcp-sandbox` sidecar; the
 # cell sees it as a remote streamable-HTTP server on an internal network shared with the sidecar alone, probes it and a
 # bot calls its `echo` tool through the gate, while no third-party MCP code runs inside the gateway container.
+# Scenario card (06-14 / AGENT-04): a turn offering `ocw_agent_card` posts a typed card through the gate and
+# `POST /cards`, bound to the turn's conversation, thread and message; an `agent.card_action.v1` (approval) reaches the
+# persona as a turn in the same thread, which updates the card with the version it saw (`PATCH /cards/:id`).
 # Scenario breaker (stability 2026-10-06): SIGKILLed boots trip OpenClaw's restart-loop breaker, which refuses the ocw
 # channel's automatic start; the plugin reports the pause to the API and starts the channel itself after its back-off.
 #
 # Usage (repo root):  infra/openclaw/test/run-container-smoke.sh [--keep]
 #   SMOKE_ONLY=<comma list>  run only these scenarios (unset = all): mention, signin, dm, capabilities,
-#                            dm-isolation, memory, mcp, marketplace, breaker
+#                            dm-isolation, memory, card, mcp, marketplace, breaker
 #                            and sandbox (runs when it is listed, with SMOKE_BUILD=1, or when ocw-mcp-sandbox:local
 #                            exists; otherwise it prints "SKIP sandbox (image not built)")
 #   FAKE_MODEL_DEBUG=1       the fake model logs a preview of each tool-offering request (off by default)
@@ -217,7 +220,7 @@ docker run -d --name "${P}-api" "${OOM[@]}" --network "$NET" --network-alias api
   -e FAKE_BOT_ID=0199a6f0-0000-7000-8000-00000000a001 \
   -e FAKE_CELL_ID=0199a6f0-0000-7000-8000-0000000000c0 \
   -e FAKE_MODEL_BASE_URL=http://fake-model:18999/v1 \
-  -e FAKE_AGENT_TOOLS="web_search,web_fetch,ocw_memory_save,${MCP_SAFE}__echo,${MCP_SAFE}__write_note,ocw_echo${SBX_TOOLS:-}" \
+  -e FAKE_AGENT_TOOLS="web_search,web_fetch,ocw_memory_save,ocw_agent_card,${MCP_SAFE}__echo,${MCP_SAFE}__write_note,ocw_echo${SBX_TOOLS:-}" \
   -e FAKE_MCP_SERVERS="$(mcp_servers_json '["echo"]')" \
   -e FAKE_WEB_SEARCH_PROVIDER=searxng \
   node:24.21.0-bookworm-slim node /plugin/src/testing/run-fake-api.ts >/dev/null
@@ -278,11 +281,12 @@ api_exec() { docker exec -i "${P}-api" node --input-type=module -e "$1"; }
 
 # Publishes a fixture event through the fake Agent Channel API, then waits until a reply answering
 # `$2` (inReplyToMessageId) is stored and typing for its conversation switched off; prints the state.
+# `$3` (optional): the test route, `/__test/mention` (a mention body) or `/__test/event` (a `{type, data}` body).
 inject_and_wait() {
-  local fixture="$1" reply_to="$2" state=""
+  local fixture="$1" reply_to="$2" route="${3:-/__test/mention}" state=""
   api_exec "
 const body = await new Response(process.stdin).text();
-const r = await fetch('http://127.0.0.1:4000/__test/mention', { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+const r = await fetch('http://127.0.0.1:4000$route', { method: 'POST', headers: { 'content-type': 'application/json' }, body });
 console.log('   published seq', (await r.json()).seq);
 " <"$fixture" >&2
   for i in $(seq 1 90); do
@@ -419,6 +423,74 @@ LEAKED="$(docker exec "${P}-model" sh -c "grep -L '0199a6f0-0000-7000-8000-00000
 echo "   notes      : $NOTE_FILES model request(s) of this DM carry the note, $LEAKED other request(s) do"
 if [[ "$NOTE_FILES" -lt 1 ]]; then echo "FAIL: the turn's notes did not reach the model"; exit 1; fi
 if [[ "$LEAKED" -ne 0 ]]; then echo "FAIL: the note reached a model request of another conversation"; exit 1; fi
+fi
+
+if want card; then
+echo "== [card] a channel turn offering ocw_agent_card: the model posts a card through the gate and POST /cards"
+STATE="$(inject_and_wait "$ROOT/infra/openclaw/test/mention-card.json" 0199a6f0-0000-7000-8000-00000000d061)"
+CARD_ID="$(echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d061");
+if (!m) { console.error("FAIL: no reply to the card mention"); process.exit(1); }
+const cards = (s.cards ?? []).filter((c) => c.idempotencyKey.startsWith("0199a6f0-0000-7000-8000-00000000e006:"));
+const gated = s.toolCalls.filter((c) => c.eventId === "0199a6f0-0000-7000-8000-00000000e006");
+console.error("   reply      :", m.text);
+console.error("   cards      :", JSON.stringify(cards.map(({ conversationId, threadRootId, inReplyToMessageId, idempotencyKey, card }) => ({ conversationId, threadRootId, inReplyToMessageId, idempotencyKey, kind: card.kind, title: card.title }))));
+console.error("   tool calls :", JSON.stringify(gated.map((c) => ({ tool: c.tool, params: c.params, allowed: c.allowed }))));
+const c = cards[0];
+const ok =
+  m.text.includes("Tool ocw_agent_card said: Card posted.") &&
+  /\[tools: 1 \| ocw_agent_card\]/.test(m.text) &&
+  cards.length === 1 && c.agentId === "0199a6f0-0000-7000-8000-00000000a001" &&
+  c.conversationId === "0199a6f0-0000-7000-8000-00000000c001" &&
+  c.threadRootId === "0199a6f0-0000-7000-8000-00000000d060" &&
+  c.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d061" &&
+  c.idempotencyKey === "0199a6f0-0000-7000-8000-00000000e006:card:0" &&
+  c.card.kind === "deployment" && c.card.title === "Deploy api v2.3" && c.card.actions.length === 3 &&
+  // Gated like every tool: asked once, allowed, only the query/url params travel (none here).
+  gated.length === 1 && gated[0].tool === "ocw_agent_card" && gated[0].allowed === true &&
+  Object.keys(gated[0].params).length === 0;
+if (!ok) { console.error("FAIL: expected one gated ocw_agent_card that posts one card bound to the turn"); process.exit(1); }
+console.log(c.messageId);
+')"
+echo "== [card] agent.card_action.v1 (Sam approved): a turn in the card's thread that updates the card"
+ACTION="$SECRETS/card-action.json"
+CARD_ID="$CARD_ID" node -e '
+const e = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+const id = process.env.CARD_ID;
+e.eventId = "0199a6f0-0000-7000-8000-00000000e007";
+// The real API sends the server sentence only; the directive drives the fake model (update with the id it got).
+const update = JSON.stringify({ action: "update", cardId: id, patch: { status: "succeeded" } });
+e.message = {
+  ...e.message,
+  id,
+  text: `Sam Lee approved “Deploy api v2.3” [[call ocw_agent_card ${update}]]`,
+  author: { kind: "user", id: "0199a6f0-0000-7000-8000-0000000000f3", displayName: "Sam Lee" },
+};
+e.cardAction = { messageId: id, kind: "deployment", title: "Deploy api v2.3", outcome: "approved" };
+require("fs").writeFileSync(process.argv[2], JSON.stringify({ type: "agent.card_action.v1", data: e }));
+' "$ROOT/infra/openclaw/test/mention-card.json" "$ACTION"
+STATE="$(inject_and_wait "$ACTION" "$CARD_ID" /__test/event)"
+echo "$STATE" | CARD_ID="$CARD_ID" node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const id = process.env.CARD_ID;
+const m = s.messages.find((x) => x.inReplyToMessageId === id);
+if (!m) { console.log("FAIL: no reply to the card action"); process.exit(1); }
+const patches = (s.cardPatches ?? []).filter((p) => p.messageId === id);
+const gated = s.toolCalls.filter((c) => c.eventId === "0199a6f0-0000-7000-8000-00000000e007");
+console.log("   reply      :", m.text);
+console.log("   thread     :", m.threadRootMessageId, "idempotency", m.idempotencyKey);
+console.log("   patches    :", JSON.stringify(patches.map(({ agentId, patch, status }) => ({ agentId, patch, status }))));
+const ok =
+  m.text.includes("Tool ocw_agent_card said: Card updated.") &&
+  m.threadRootMessageId === "0199a6f0-0000-7000-8000-00000000d060" &&
+  m.idempotencyKey === "evt:0199a6f0-0000-7000-8000-00000000e007" &&
+  patches.length === 1 && patches[0].status === 200 &&
+  patches[0].agentId === "0199a6f0-0000-7000-8000-00000000a001" &&
+  patches[0].patch.expectedVersion === 1 && patches[0].patch.status === "succeeded" &&
+  gated.length === 1 && gated[0].allowed === true;
+if (!ok) { console.log("FAIL: expected the card action as a turn in the thread and one versioned PATCH /cards"); process.exit(1); }
+'
 fi
 
 if want mcp; then

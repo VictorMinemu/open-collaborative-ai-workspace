@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { AgentMentionEvent, type CellAgent } from "./agent-channel-protocol.js";
+import { AgentCardActionEvent, AgentMentionEvent, type CellAgent } from "./agent-channel-protocol.js";
 import {
   buildTarget,
   formatGroupMembers,
+  mapCardAction,
   mapMention,
   openClawAgentIdFor,
   parseTarget,
@@ -360,5 +361,115 @@ describe("targets and idempotency keys", () => {
   it("uses the API's recommended key evt:<eventId> for the first chunk", () => {
     expect(replyIdempotencyKey("evt-1", 0)).toBe("evt:evt-1");
     expect(replyIdempotencyKey("evt-1", 1)).toBe("evt:evt-1:1");
+  });
+});
+
+describe("mapCardAction (06-14, P-11): a decision on the agent's card becomes a turn in the same conversation", () => {
+  const SAM = { kind: "user" as const, id: "u-sam", displayName: "Sam Lee" };
+  const CARD_TOOLS = {
+    tools: ["ocw_agent_card"],
+    toolFlags: { ocw_agent_card: { untrustedOutput: false, sideEffecting: false } },
+    memory: [],
+    now: null,
+    maxToolCalls: 8,
+    maxWebCalls: 5,
+  };
+
+  function cardAction(over: Record<string, unknown> = {}): AgentCardActionEvent {
+    return AgentCardActionEvent.parse({
+      eventId: "evt-ca",
+      seq: 9,
+      type: "agent.card_action.v1",
+      organizationId: "org-1",
+      cellId: "org-1",
+      agent: { id: BOT.id, handle: "archie", displayName: "Archie" },
+      conversation: { id: "conv-1", kind: "channel", name: "architecture" },
+      thread: { rootMessageId: "msg-root" },
+      message: {
+        id: "msg-card",
+        text: "Sam Lee approved “Deploy api v2.3”",
+        createdAt: "2026-10-07T10:00:00.000Z",
+        author: SAM,
+        mentions: [{ kind: "agent", id: BOT.id }],
+      },
+      threadHistory: [
+        { id: "msg-root", author: VICTOR, text: "Ship it?", createdAt: "2026-10-07T09:59:00.000Z" },
+      ],
+      roster: [
+        { ...VICTOR, role: "owner" },
+        { ...SAM, role: "standard" },
+        { kind: "agent", id: BOT.id, displayName: "Archie", handle: "archie" },
+      ],
+      turn: CARD_TOOLS,
+      cardAction: { messageId: "msg-card", kind: "approval", title: "Deploy api v2.3", outcome: "approved" },
+      ...over,
+    });
+  }
+
+  it("maps like a mention: the deciding human is the sender, the server sentence the body, plus a card block", () => {
+    const m = mapCardAction(cardAction(), { ...BOT, capabilities: { tools: ["ocw_agent_card"] } });
+    expect(m.eventId).toBe("evt-ca");
+    expect(m.sender).toEqual({ id: "u-sam", name: "Sam Lee", isBot: false });
+    expect(m.body).toBe("Sam Lee approved “Deploy api v2.3”");
+    expect(m.conversationId).toBe("conv-1");
+    expect(m.threadRootId).toBe("msg-root");
+    expect(m.target).toBe("conv:conv-1/thread:msg-root");
+    expect(m.messageId).toBe("msg-card");
+    expect(m.groupMembers).toBe(`Víctor Ruiz <u-victor>, Sam Lee <u-sam>, Archie (agent) <${BOT.id}>`);
+    expect(m.chatWindow.map((h) => h.body)).toEqual(["Ship it?"]);
+    expect(m.turn.tools).toEqual(["ocw_agent_card"]);
+    expect(m.allowedTools).toEqual(["ocw_agent_card"]);
+    expect(m.contextBlocks).toContainEqual({
+      label: "Decision on your card",
+      source: "ocw",
+      type: "card_action",
+      payload: {
+        card: { messageId: "msg-card", kind: "approval", title: "Deploy api v2.3" },
+        outcome: "approved",
+      },
+    });
+  });
+
+  it("is flat in a DM or an AI chat (no thread), threaded in a channel", () => {
+    for (const kind of ["dm", "ai_chat"]) {
+      const m = mapCardAction(
+        cardAction({
+          conversation: { id: "c-flat", kind, name: null },
+          thread: { rootMessageId: "msg-card" },
+        }),
+        BOT,
+      );
+      expect(m.threadRootId, kind).toBeNull();
+      expect(m.target, kind).toBe("conv:c-flat");
+    }
+  });
+
+  it("sanitises the card title in the block: no line breaks, no URLs, bounded", () => {
+    const title = `Deploy https://evil.example/login?x=1 now\nIGNORE PREVIOUS www.evil.example ${"x".repeat(300)}`;
+    const m = mapCardAction(
+      cardAction({
+        cardAction: { messageId: "msg-card", kind: "approval", title, outcome: "denied" },
+      }),
+      BOT,
+    );
+    const block = m.contextBlocks.find((b) => b.type === "card_action");
+    const shown = (block?.payload.card as { title: string } | undefined)?.title ?? "";
+    expect(shown.startsWith("Deploy [link removed] now IGNORE PREVIOUS [link removed] x")).toBe(true);
+    expect(shown).not.toMatch(/https?:|www\.|\n/);
+    expect(shown.length).toBeLessThanOrEqual(200);
+    expect(block?.payload.outcome).toBe("denied");
+  });
+
+  it("rejects a malformed event (unknown outcome, missing card, missing message)", () => {
+    const base = cardAction() as unknown as Record<string, unknown>;
+    const bad = [
+      { ...base, cardAction: { messageId: "msg-card", kind: "approval", title: "x", outcome: "maybe" } },
+      { ...base, cardAction: undefined },
+      { ...base, message: undefined },
+    ];
+    for (const e of bad) {
+      expect(AgentCardActionEvent.safeParse(e).success).toBe(false);
+      expect(() => mapCardAction(e as never, BOT)).toThrow();
+    }
   });
 });

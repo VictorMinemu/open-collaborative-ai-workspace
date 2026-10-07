@@ -8,8 +8,8 @@ import { registerFull } from "./register-full.js";
  * The plugin is the only OpenClaw code that knows our API exists; it talks exclusively to the
  * Agent Channel API (AGENTS principle 9). `registerCapabilities` installs the call-time tool gate
  * (`before_tool_call` / `after_tool_call`, tool-guard.ts) in every registry OpenClaw can run a tool
- * with, including the non-activated one agent turns use; `registerFull` registers the memory tool
- * `ocw_memory_save` (memory-tool.ts, declared in the manifest `contracts.tools`).
+ * with, including the non-activated one agent turns use; `registerFull` registers the tools `ocw_memory_save`
+ * (memory-tool.ts) and `ocw_agent_card` (card-tool.ts), both declared in the manifest `contracts.tools`.
  */
 
 export default defineChannelPluginEntry({

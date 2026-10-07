@@ -1,0 +1,77 @@
+{
+  "eventId": "0199a6f0-0000-7000-8000-00000000e006",
+  "agent": {
+    "id": "0199a6f0-0000-7000-8000-00000000a001",
+    "handle": "archie",
+    "displayName": "Archie"
+  },
+  "conversation": {
+    "id": "0199a6f0-0000-7000-8000-00000000c001",
+    "kind": "channel",
+    "name": "architecture"
+  },
+  "thread": {
+    "rootMessageId": "0199a6f0-0000-7000-8000-00000000d060"
+  },
+  "message": {
+    "id": "0199a6f0-0000-7000-8000-00000000d061",
+    "text": "@archie post the deploy card [[call ocw_agent_card {\"action\":\"create\",\"card\":{\"kind\":\"deployment\",\"title\":\"Deploy api v2.3\",\"fields\":[{\"label\":\"Environment\",\"value\":\"production\"}],\"status\":\"running\",\"actions\":[{\"kind\":\"open\",\"label\":\"Open\",\"target\":\"/work-zone\"},{\"kind\":\"follow\",\"label\":\"Follow\"},{\"kind\":\"approve\",\"label\":\"Approve\",\"denyLabel\":\"Deny\"}],\"summary\":\"Deploying api v2.3 to production\"}}]]",
+    "createdAt": "2026-10-07T10:00:01.000Z",
+    "author": {
+      "kind": "user",
+      "id": "0199a6f0-0000-7000-8000-0000000000f1",
+      "displayName": "Víctor Ruiz"
+    },
+    "mentions": [
+      {
+        "kind": "agent",
+        "id": "0199a6f0-0000-7000-8000-00000000a001"
+      }
+    ]
+  },
+  "threadHistory": [
+    {
+      "id": "0199a6f0-0000-7000-8000-00000000d060",
+      "author": {
+        "kind": "user",
+        "id": "0199a6f0-0000-7000-8000-0000000000f1",
+        "displayName": "Víctor Ruiz"
+      },
+      "text": "Deploying api v2.3 today.",
+      "createdAt": "2026-10-07T10:00:00.000Z"
+    }
+  ],
+  "roster": [
+    {
+      "kind": "user",
+      "id": "0199a6f0-0000-7000-8000-0000000000f1",
+      "displayName": "Víctor Ruiz",
+      "role": "owner"
+    },
+    {
+      "kind": "user",
+      "id": "0199a6f0-0000-7000-8000-0000000000f3",
+      "displayName": "Sam Lee",
+      "role": "standard"
+    },
+    {
+      "kind": "agent",
+      "id": "0199a6f0-0000-7000-8000-00000000a001",
+      "displayName": "Archie",
+      "handle": "archie"
+    }
+  ],
+  "turn": {
+    "tools": ["ocw_agent_card"],
+    "toolFlags": {
+      "ocw_agent_card": {
+        "untrustedOutput": false,
+        "sideEffecting": false
+      }
+    },
+    "memory": [],
+    "now": null,
+    "maxToolCalls": 8,
+    "maxWebCalls": 5
+  }
+}

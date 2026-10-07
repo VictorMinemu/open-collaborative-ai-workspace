@@ -16,6 +16,9 @@
  *   POST /agent-channel/v1/tool-calls/:id/result  records the outcome
  *   POST /agent-channel/v1/memories       records the note (dedupes exact text per event's bot; 409 for
  *                                          events listed in `refuseMemoryEvents`)
+ *   POST /agent-channel/v1/cards          records the card (`cards`; idempotent on agentId + idempotencyKey, version 1)
+ *   PATCH /agent-channel/v1/cards/:id     posting agent only (403), expectedVersion must match (409
+ *                                          card_version_conflict); records the patch (`cardPatches`)
  *   POST /agent-channel/v1/mcp/probe-results  records the probe report (`mcpProbes`)
  *   POST /agent-channel/v1/plugins/report     records the report (`pluginReports`) and moves the row's status
  *   POST /agent-channel/v1/plugins/verify-install  approves only a row `installing` with the same package, version
@@ -30,7 +33,9 @@ import { type WebSocket, WebSocketServer } from "ws";
 import type {
   AgentChannelMcpProbeResult,
   AgentChannelMemorySave,
+  AgentChannelPatchCard,
   AgentChannelPluginReport,
+  AgentChannelPostCard,
   AgentChannelPostMessage,
   AgentChannelProviderAuthReport,
   AgentChannelRuntimeReport,
@@ -54,6 +59,8 @@ export type MentionInput = Omit<AgentMentionEvent, "seq" | "type" | "organizatio
 export type StoredToolCall = AgentChannelToolCallRequest & { callId: string; allowed: boolean };
 export type StoredToolResult = AgentChannelToolCallResult & { callId: string };
 export type StoredMemory = AgentChannelMemorySave & { memoryId: string; created: boolean };
+export type StoredCard = AgentChannelPostCard & { messageId: string; version: number };
+export type StoredCardPatch = AgentChannelPatchCard & { messageId: string; status: number };
 export type VerifyCall = {
   packageName: string;
   version: string;
@@ -82,6 +89,10 @@ export type FakeAgentChannelApi = {
   memories: StoredMemory[];
   /** Event ids whose memory saves the fake API refuses with 409 `tainted`. */
   refuseMemoryEvents: Set<string>;
+  /** Every card stored by POST /cards (idempotent retries are not stored twice); `version` follows the patches. */
+  cards: StoredCard[];
+  /** Every PATCH /cards/:id attempt with the status it got. */
+  cardPatches: StoredCardPatch[];
   /** Snapshot `mcpServers` (header values included, as the real API sends them); `[]` = none. */
   mcpServers: CellMcpServer[];
   /** Every POST /mcp/probe-results, in order. */
@@ -190,6 +201,8 @@ export async function startFakeAgentChannelApi(
     toolResults: [] as StoredToolResult[],
     memories: [] as StoredMemory[],
     refuseMemoryEvents: new Set<string>(),
+    cards: [] as StoredCard[],
+    cardPatches: [] as StoredCardPatch[],
     mcpServers: opts.mcpServers ?? ([] as CellMcpServer[]),
     mcpProbes: [] as AgentChannelMcpProbeResult[],
     cellReads: 0,
@@ -253,6 +266,8 @@ export async function startFakeAgentChannelApi(
             toolCalls: state.toolCalls,
             toolResults: state.toolResults,
             memories: state.memories,
+            cards: state.cards,
+            cardPatches: state.cardPatches,
             mcpProbes: state.mcpProbes,
             cellReads: state.cellReads,
             plugins: state.plugins,
@@ -415,6 +430,49 @@ export async function startFakeAgentChannelApi(
         state.memories.push(stored);
         return json(res, 200, { memoryId: stored.memoryId, created: stored.created });
       }
+      if (req.method === "POST" && route === "/cards") {
+        const body = (await readJson(req)) as AgentChannelPostCard;
+        if (
+          !body.agentId ||
+          !body.conversationId ||
+          !("threadRootId" in body) ||
+          typeof body.idempotencyKey !== "string" ||
+          body.idempotencyKey.length < 8 ||
+          !body.card?.summary
+        ) {
+          return json(res, 400, { error: { code: "bad_request" } });
+        }
+        if (!state.agents.some((a) => a.id === body.agentId)) {
+          return json(res, 404, { error: { code: "agent_not_found" } });
+        }
+        const same = state.cards.find(
+          (c) => c.agentId === body.agentId && c.idempotencyKey === body.idempotencyKey,
+        );
+        if (same) return json(res, 200, { messageId: same.messageId, created: false, version: same.version });
+        const stored: StoredCard = { ...body, messageId: randomUUID(), version: 1 };
+        state.cards.push(stored);
+        return json(res, 201, { messageId: stored.messageId, created: true, version: 1 });
+      }
+      const cardMatch = /^\/cards\/([^/]+)$/u.exec(route);
+      if (req.method === "PATCH" && cardMatch?.[1]) {
+        const messageId = decodeURIComponent(cardMatch[1]);
+        const body = (await readJson(req)) as AgentChannelPatchCard;
+        const card = state.cards.find((c) => c.messageId === messageId);
+        const status = !card
+          ? 404
+          : card.agentId !== body.agentId
+            ? 403
+            : card.version !== body.patch?.expectedVersion
+              ? 409
+              : 200;
+        state.cardPatches.push({ ...body, messageId, status });
+        if (status === 404) return json(res, 404, { error: { code: "card_not_found" } });
+        if (status === 403) return json(res, 403, { error: { code: "not_card_author" } });
+        if (status === 409) return json(res, 409, { error: { code: "card_version_conflict" } });
+        const c = card as StoredCard;
+        c.version++;
+        return json(res, 200, { messageId, version: c.version });
+      }
       if (req.method === "POST" && route === "/typing") {
         state.typing.push((await readJson(req)) as AgentChannelTyping);
         return json(res, 200, { ok: true });
@@ -535,6 +593,12 @@ export async function startFakeAgentChannelApi(
     },
     get refuseMemoryEvents() {
       return state.refuseMemoryEvents;
+    },
+    get cards() {
+      return state.cards;
+    },
+    get cardPatches() {
+      return state.cardPatches;
     },
     get mcpServers() {
       return state.mcpServers;

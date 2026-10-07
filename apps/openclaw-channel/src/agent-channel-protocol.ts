@@ -16,6 +16,9 @@
  *   POST /tool-calls/:id/result ← AgentChannelToolCallResult (outcome only, never content)
  *   POST /memories             ← AgentChannelMemorySave → AgentChannelMemorySaveResponse (ocw_memory_save;
  *                                owner = the human of the delivered turn; 404/409 with the refusal code)
+ *   POST /cards                ← AgentChannelPostCard → AgentChannelPostCardResponse (ocw_agent_card, 06-14)
+ *   PATCH /cards/:messageId    ← AgentChannelPatchCard → AgentChannelPatchCardResponse (posting agent only,
+ *                                optimistic version: 409 card_version_conflict)
  *   POST /mcp/probe-results    ← AgentChannelMcpProbeResult (the tools an `mcp.probe` discovered; D-13)
  *   POST /plugins/report       ← AgentChannelPluginReport (a marketplace install / uninstall outcome; D-14)
  *   POST /plugins/verify-install, GET /plugins: used by infra/openclaw (install gate, boot render), not here
@@ -39,6 +42,8 @@ export const AgentChannelEventTypes = {
   pluginInstall: "plugin.install.v1",
   /** Phase 3.1 (D-14): remove a marketplace plugin from the cell. */
   pluginUninstall: "plugin.uninstall.v1",
+  /** Phase 6 (AGENT-04, P-11): a reader approved or denied one of the agent's Agent Cards. */
+  cardAction: "agent.card_action.v1",
 } as const;
 export const cellTopic = (cellId: string) => `cell:${cellId}`;
 
@@ -141,6 +146,22 @@ export const AgentMentionEvent = z.object({
   turn: TurnContext.optional().catch(undefined),
 });
 export type AgentMentionEvent = z.infer<typeof AgentMentionEvent>;
+
+/**
+ * `agent.card_action.v1` (06-13/06-14, P-11): built by the API like a mention of the agent on the card's message;
+ * `message.text` is the server sentence "<actor> approved|denied “<title>”", `message.author` the deciding human and
+ * `turn` is computed for that human. `cardAction.kind` stays a string so a newer card kind never drops the event.
+ */
+export const AgentCardActionEvent = AgentMentionEvent.omit({ type: true }).extend({
+  type: z.literal(AgentChannelEventTypes.cardAction),
+  cardAction: z.object({
+    messageId: Id,
+    kind: z.string().max(64),
+    title: z.string().max(400),
+    outcome: z.enum(["approved", "denied"]),
+  }),
+});
+export type AgentCardActionEvent = z.infer<typeof AgentCardActionEvent>;
 
 export const CellConfigChangedEvent = z.object({
   type: z.literal(AgentChannelEventTypes.configChanged),
@@ -389,6 +410,136 @@ export type AgentChannelMemorySave = { eventId: string; agentId: string; text: s
 
 export const AgentChannelMemorySaveResponse = z.object({ memoryId: z.string().min(1), created: z.boolean() });
 export type AgentChannelMemorySaveResponse = z.infer<typeof AgentChannelMemorySaveResponse>;
+
+// ---------------------------------------------------------------- Agent Cards (06-14, mirror of contracts/agent-cards.ts)
+
+export const AGENT_CARD_TITLE_MAX = 200;
+export const AGENT_CARD_FIELDS_MAX = 12;
+export const AGENT_CARD_ACTIONS_MAX = 4;
+export const AGENT_CARD_SUMMARY_MAX = 2_000;
+const AGENT_CARD_ROUTE_MAX = 512;
+export const AGENT_CARD_KINDS = [
+  "work_zone",
+  "approval",
+  "report",
+  "artifact",
+  "automation",
+  "deployment",
+  "pr",
+  "generic",
+] as const;
+export const AGENT_CARD_STATUSES = [
+  "info",
+  "pending",
+  "running",
+  "succeeded",
+  "failed",
+  "cancelled",
+] as const;
+/** The app areas an Open action may lead to (never an external URL). */
+export const AGENT_CARD_ROUTE_PREFIXES = [
+  "/chat",
+  "/work-zone",
+  "/bots",
+  "/settings",
+  "/search",
+  "/share",
+] as const;
+
+function hasControlCharacter(v: string): boolean {
+  for (let i = 0; i < v.length; i++) {
+    const c = v.charCodeAt(i);
+    if (c <= 0x1f || (c >= 0x7f && c <= 0x9f)) return true;
+  }
+  return false;
+}
+
+/** Same rule as `isAgentCardRoute` in packages/contracts/src/agent-cards.ts (parity test in card-tool.test.ts). */
+export function isAgentCardRoute(v: string): boolean {
+  if (v.length > AGENT_CARD_ROUTE_MAX || hasControlCharacter(v)) return false;
+  if (v.includes("\\") || v.includes("//")) return false;
+  const prefixed = AGENT_CARD_ROUTE_PREFIXES.some(
+    (p) => v.startsWith(p) && (v.length === p.length || ["/", "?", "#"].includes(v.charAt(p.length))),
+  );
+  if (!prefixed) return false;
+  const path = v.split(/[?#]/, 1)[0] ?? "";
+  return path.split("/").every((segment) => {
+    const s = segment.replace(/%2e/gi, ".");
+    return s !== "." && s !== "..";
+  });
+}
+
+export const AgentCardKind = z.enum(AGENT_CARD_KINDS);
+export const AgentCardStatus = z.enum(AGENT_CARD_STATUSES);
+export const AgentCardField = z.object({
+  label: z.string().trim().min(1).max(60),
+  value: z.string().trim().min(1).max(500),
+});
+const ActionLabel = z.string().trim().min(1).max(40);
+export const AgentCardRoute = z
+  .string()
+  .max(AGENT_CARD_ROUTE_MAX)
+  .refine(isAgentCardRoute, { message: "must be an internal app route" });
+export const AgentCardAction = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("open"), label: ActionLabel, target: AgentCardRoute }),
+  z.object({ kind: z.literal("follow"), label: ActionLabel }),
+  z.object({
+    kind: z.literal("approve"),
+    label: ActionLabel,
+    denyLabel: ActionLabel.optional(),
+    approverIds: z.array(Id).max(20).optional(),
+  }),
+]);
+export const AgentCardTitle = z.string().trim().min(1).max(AGENT_CARD_TITLE_MAX);
+export const AgentCardFields = z.array(AgentCardField).max(AGENT_CARD_FIELDS_MAX);
+export const AgentCardSummary = z.string().trim().min(1).max(AGENT_CARD_SUMMARY_MAX);
+
+/** What an agent posts; `summary` becomes the plain-text message body. */
+export const AgentCardInput = z.object({
+  kind: AgentCardKind,
+  title: AgentCardTitle,
+  fields: AgentCardFields,
+  status: AgentCardStatus,
+  actions: z
+    .array(AgentCardAction)
+    .max(AGENT_CARD_ACTIONS_MAX)
+    .refine((actions) => new Set(actions.map((a) => a.kind)).size === actions.length, {
+      message: "at most one action of each kind",
+    }),
+  summary: AgentCardSummary,
+});
+export type AgentCardInput = z.infer<typeof AgentCardInput>;
+
+export type AgentCardPatch = {
+  expectedVersion: number;
+  status?: (typeof AGENT_CARD_STATUSES)[number];
+  title?: string;
+  fields?: Array<{ label: string; value: string }>;
+  summary?: string;
+};
+
+/** POST /cards: where the card lands comes from the delivered turn, never from model output. */
+export type AgentChannelPostCard = {
+  agentId: string;
+  conversationId: string;
+  threadRootId: string | null;
+  inReplyToMessageId?: string;
+  /** 8..128 chars; the server dedupes on (agentId, `card:<key>`). */
+  idempotencyKey: string;
+  card: AgentCardInput;
+};
+
+export const AgentChannelPostCardResponse = z
+  .object({ messageId: Id, created: z.boolean(), version: z.number().int() })
+  .passthrough();
+export type AgentChannelPostCardResponse = z.infer<typeof AgentChannelPostCardResponse>;
+
+export type AgentChannelPatchCard = { agentId: string; patch: AgentCardPatch };
+
+export const AgentChannelPatchCardResponse = z
+  .object({ messageId: Id, version: z.number().int() })
+  .passthrough();
+export type AgentChannelPatchCardResponse = z.infer<typeof AgentChannelPatchCardResponse>;
 
 /** `mcp.probe`: an admin registered or changed an MCP server; the cell lists its tools (D-13). */
 export const McpProbeEvent = z.object({
