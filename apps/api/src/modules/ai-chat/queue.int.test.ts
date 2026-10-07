@@ -8,10 +8,14 @@ import {
   type ConvSubscription,
   seedPlan,
   startAiStack,
+  startSecondInstance,
   subscribeConv,
   withoutTitles,
 } from "../../testing-ai";
 import { invite } from "../../testing-workzone";
+import { createModelGateway } from "../model-gateway";
+import { createRunLoop } from "./run-loop";
+import { createGenerationSweeper } from "./sweeper";
 
 /**
  * One generation per conversation in shared AI chats (06-06, MULTI-04, D-01, D-05, P-07, P-08): a message answers
@@ -58,6 +62,8 @@ const send = (as: TestClient, id: string, body: string, extra: Json = {}) =>
   });
 const stop = (as: TestClient, id: string, generationId: string) =>
   as.request("POST", `/api/v1/ai-chats/${id}/generations/${generationId}/stop`, {});
+const regenerate = (as: TestClient, id: string) =>
+  as.request("POST", `/api/v1/ai-chats/${id}/regenerate`, {});
 
 async function settled(generationId: string, timeoutMs = 20_000): Promise<Json> {
   const until = Date.now() + timeoutMs;
@@ -473,5 +479,144 @@ describe("tracer: Alex asks while Víctor's answer streams; his message queues a
     expect(snap).not.toHaveProperty("queue");
     await ok(stop(sam, soloId, slow.generation.id), 202);
     await settled(slow.generation.id);
+  });
+});
+
+/** A sweeper of a run loop that holds nothing (like an instance that just started). */
+function freshSweeper() {
+  const core = stack.built.core;
+  const gateway = createModelGateway(core);
+  const runLoop = createRunLoop(core, { gateway });
+  return createGenerationSweeper(core, { runLoop, gateway });
+}
+
+/** A pending addressed message planted with the superuser, as if its process died before starting the turn. */
+async function plantPending(authorId: string, body: string): Promise<string> {
+  const bumped = await su.query(
+    "update app.streams set last_seq = last_seq + 1 where id = $1 returning last_seq",
+    [`conv:${chatId}`],
+  );
+  const seq = Number(bumped.rows[0].last_seq);
+  const msg = await su.query(
+    `insert into app.messages (organization_id, conversation_id, seq, author_kind, author_id, body)
+     values ($1, $2, $3, 'user', $4, $5) returning id`,
+    [orgId, chatId, seq, authorId, body],
+  );
+  const id = msg.rows[0].id as string;
+  await su.query(
+    `insert into app.ai_message_context (message_id, organization_id, conversation_id, author_kind, access, level,
+       addressed, model, shared)
+     values ($1, $2, $3, 'user', 'grant', 'chat', true, $4, true)`,
+    [id, orgId, chatId, JSON.stringify(PLAN_MODEL)],
+  );
+  return id;
+}
+
+describe("the queue survives stops, crashes and other instances; regenerate waits for it (P-08)", () => {
+  it("Víctor stops his own answer while Alex is queued: stopped, and Alex's turn starts at once; Sam may not stop it", async () => {
+    const v = await slowQuestion();
+    const alexMsg = (await ok(send(alex, chatId, "Queued behind a stop"), 202)).userMessage.id as string;
+    const bySam = await stop(sam, chatId, v.generation.id);
+    expect(bySam.status).toBe(403);
+    expect(errorOf(bySam).code).toBe("not_generation_requester");
+    await ok(stop(victor, chatId, v.generation.id), 202);
+    expect((await settled(v.generation.id)).status).toBe("stopped");
+    const ctx = await contextOf(alexMsg);
+    expect(ctx.answered_by_generation_id).not.toBeNull();
+    const g = await generationRow(ctx.answered_by_generation_id);
+    expect(g.requester_user_id).toBe(alexId);
+    expect((await settled(g.id)).status).toBe("completed");
+  });
+
+  it("regenerate with a pending queue is 409 queue_pending; once the queue drains it works", async () => {
+    const v = await slowQuestion();
+    const alexMsg = (await ok(send(alex, chatId, "Do not jump me"), 202)).userMessage.id as string;
+    const refused = await regenerate(victor, chatId);
+    expect(refused.status).toBe(409);
+    expect(errorOf(refused).code).toBe("queue_pending");
+    await settled(v.generation.id);
+    const g = await generationRow((await contextOf(alexMsg)).answered_by_generation_id);
+    await settled(g.id);
+    const again = await ok(regenerate(alex, chatId), 201);
+    expect(again.generation.requesterUserId).toBe(alexId);
+    await settled(again.generation.id);
+  });
+
+  it("a pending queue left idle by a crash is started by one sweeper tick, on its author's plan", async () => {
+    expect(await runningIn(chatId)).toEqual([]);
+    const msg = await plantPending(samId, "Planted before a crash");
+    stack.fake.reset();
+    const sweeper = freshSweeper();
+    let started: string | null = null;
+    for (let i = 0; i < 3 && !started; i++) {
+      await sweeper.runOnce();
+      started = (await contextOf(msg)).answered_by_generation_id;
+    }
+    expect(started).not.toBeNull();
+    const g = await generationRow(started!);
+    expect(g.requester_user_id).toBe(samId);
+    expect((await settled(g.id)).status).toBe("completed");
+    const [call] = withoutTitles(stack.fake.requests("responses"));
+    expect(call!.headers.authorization).toMatch(new RegExp(`^Bearer fake-plan-${samId}-`));
+  });
+
+  it("the sweeper never starts a second generation while one runs; the partial unique index is the backstop", async () => {
+    const v = await slowQuestion();
+    const msg = await plantPending(alexId, "Planted while running");
+    await freshSweeper().runOnce();
+    const live = await runningIn(chatId);
+    expect(live.map((g) => g.id)).toEqual([v.generation.id]);
+    expect((await contextOf(msg)).answered_by_generation_id).toBeNull();
+
+    const dup = await su
+      .query(
+        `insert into app.ai_generations (organization_id, conversation_id, user_message_id, assistant_message_id,
+           requester_user_id, backend, provider, model_id, attempt, status, partial_text, instance_id)
+         values ($1, $2, $3, $4, $5, 'chatgpt_plan', 'openai', 'gpt-6-astra', 2, 'running', '', 'planted')`,
+        [orgId, chatId, msg, v.assistantMessage.id, alexId],
+      )
+      .then(
+        () => null,
+        (err: { code?: string }) => err.code,
+      );
+    expect(dup).toBe("23505");
+    await settled(v.generation.id);
+    const g = await generationRow((await contextOf(msg)).answered_by_generation_id);
+    expect(g.requester_user_id).toBe(alexId);
+    await settled(g.id);
+  });
+
+  it("two instances: an answer streamed by B finalizes there and B starts the queued turn; A's subscriber gets its deltas", async () => {
+    const second = await startSecondInstance(stack);
+    try {
+      const victorB = new TestClient(second.baseUrl);
+      victorB.cookies = victor.cookies;
+      const v = await ok(send(victorB, chatId, "From instance B [[slow]]"), 201);
+      await streaming(v.generation.id);
+      const alexMsg = (await ok(send(alex, chatId, "Queued on A"), 202)).userMessage.id as string;
+      const onB = (await generationRow(v.generation.id)).instance_id as string;
+      await settled(v.generation.id);
+      const g = await generationRow((await contextOf(alexMsg)).answered_by_generation_id);
+      expect(g.requester_user_id).toBe(alexId);
+      expect(g.instance_id).toBe(onB);
+      expect((await settled(g.id)).status).toBe("completed");
+      await alexConv.waitFor(() => alexConv.deltas().some((d) => d.generationId === g.id));
+    } finally {
+      await second.stop();
+    }
+  });
+
+  it("app.pending_ai_queues returns ids only, is not executable by PUBLIC and is executable by ocw_app", async () => {
+    const res = await su.query("select * from app.pending_ai_queues(10)");
+    expect(res.fields.map((f) => f.name)).toEqual(["organization_id", "conversation_id"]);
+    const priv = (
+      await su.query(
+        `select has_function_privilege('public', 'app.pending_ai_queues(integer)', 'execute') as pub,
+                has_function_privilege('ocw_app', 'app.pending_ai_queues(integer)', 'execute') as app,
+                p.prosecdef as definer
+           from pg_proc p where p.oid = 'app.pending_ai_queues(integer)'::regprocedure`,
+      )
+    ).rows[0];
+    expect(priv).toEqual({ pub: false, app: true, definer: true });
   });
 });

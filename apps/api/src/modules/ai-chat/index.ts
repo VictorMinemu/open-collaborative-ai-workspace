@@ -61,7 +61,7 @@ export function createAiChatModule(
     perms: createPermissionService(core),
   });
   // Finalizes answers whose API process died (stale heartbeat), one process at a time (D-05).
-  const sweeper = createGenerationSweeper(core, { runLoop });
+  const sweeper = createGenerationSweeper(core, { runLoop, gateway: deps.gateway });
   let unsubscribeAbort: (() => Promise<void>) | null = null;
   return {
     name: "ai-chat",

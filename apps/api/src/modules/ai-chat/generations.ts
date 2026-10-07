@@ -28,6 +28,7 @@ import {
   viewOf,
 } from "./dto";
 import { consumeGeneration, refuseOverLimit } from "./limits";
+import { isMultiplayer, pendingCount } from "./queue";
 import type { RunLoop } from "./run-loop";
 import { capOr429, createChatGuards, refuseArchived, resolveModelOr409 } from "./service";
 import { backendClassOf } from "./usage";
@@ -173,6 +174,10 @@ export async function registerGenerationRoutes(
         const topic = convTopic(conv.id);
         // Serializes with sends and other regenerates of this chat.
         await lockNextSeq(tx, topic);
+        // Shared chats (06-06, P-08): queued messages are answered first; regenerate cannot jump the queue.
+        if ((await isMultiplayer(tx, conv.id)) && (await pendingCount(tx, conv.id)) > 0) {
+          throw conflict("Queued messages are answered first", "queue_pending");
+        }
         const [busy] = await tx
           .select({ id: aiGenerations.id })
           .from(aiGenerations)
