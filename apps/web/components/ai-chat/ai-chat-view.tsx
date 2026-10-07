@@ -2,7 +2,7 @@
 
 import type { AiChatTools, AiModelOption, SendAiMessageResponse } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
-import { Archive, Lock, MessageCircleQuestion, Share2, SlidersHorizontal } from "lucide-react";
+import { Archive, MessageCircleQuestion, Share2, SlidersHorizontal } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useRef, useState } from "react";
@@ -31,6 +31,7 @@ import { errorMessage, isApiError } from "@/lib/api";
 import { useAttachmentsConfig } from "@/lib/attachment-queries";
 import { AiChatHeader, AiChatMenuItem, AiChatPlainHeader } from "./ai-chat-header";
 import { AiComposer, type AiComposerApi, type AiSendFiles } from "./ai-composer";
+import { AiEmptyState } from "./ai-empty-state";
 import { AiMessageList } from "./ai-message-list";
 import { ChatSettingsSheet } from "./chat-settings-sheet";
 import { ShareDialog } from "./share-dialog";
@@ -121,29 +122,23 @@ function NewChat() {
   return (
     <Frame title="New chat">
       <ChatDropZone enabled={!!models.data} composer={composer}>
-        <div className="flex min-h-0 flex-1 flex-col sm:justify-center sm:pb-[12vh]">
-          <div className="flex flex-1 flex-col items-center justify-center px-6 pb-6 text-center sm:flex-none">
-            <h2 className="text-balance font-semibold text-[22px] tracking-tight sm:text-[26px]">
-              What can I help with?
-            </h2>
-            <p className="mt-1.5 flex items-center gap-1.5 text-[13px] text-muted-foreground">
-              <Lock aria-hidden className="size-3.5" />
-              Only you can see this chat
-            </p>
-          </div>
-          <AiComposer
-            chatKey={NEW_CHAT_KEY}
-            initialTools={prefs.data ? { web: prefs.data.webDefault } : undefined}
-            models={models.data?.models}
-            preferred={[models.data?.defaultRef]}
-            modelsLoading={models.isPending}
-            busy={false}
-            onSend={onSend}
-            uploadTarget={ensureDraft}
-            apiRef={composer}
-            autoFocus
-          />
-        </div>
+        <AiEmptyState
+          onPick={(prompt) => composer.current?.fill(prompt)}
+          composer={
+            <AiComposer
+              chatKey={NEW_CHAT_KEY}
+              initialTools={prefs.data ? { web: prefs.data.webDefault } : undefined}
+              models={models.data?.models}
+              preferred={[models.data?.defaultRef]}
+              modelsLoading={models.isPending}
+              busy={false}
+              onSend={onSend}
+              uploadTarget={ensureDraft}
+              apiRef={composer}
+              autoFocus
+            />
+          }
+        />
       </ChatDropZone>
     </Frame>
   );
@@ -282,6 +277,7 @@ function ExistingChat({ chatId }: { chatId: string }) {
           messages={chat.messages}
           textOf={chat.textOf}
           onRegenerated={chat.applySent}
+          live={chat.live}
         />
         {detail?.archived ? (
           <ArchivedNotice chatId={chatId} />
@@ -298,6 +294,8 @@ function ExistingChat({ chatId }: { chatId: string }) {
             onStop={runningId ? onStop : undefined}
             uploadTarget={chatId}
             apiRef={composer}
+            // Arriving from New chat's first send: the keyboard stays in the composer.
+            autoFocus={chat.sentHere}
           />
         )}
       </ChatDropZone>

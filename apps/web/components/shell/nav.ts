@@ -15,10 +15,12 @@ export interface NavItem {
   secondary?: boolean;
   /** Shown only to callers holding this organization-scope permission (decided by the API). */
   permission?: Permission;
+  /** Other path prefixes that belong to this section (e.g. a shared AI chat reads inside Chat). */
+  also?: readonly `/${string}`[];
 }
 
 export const NAV_ITEMS: readonly NavItem[] = [
-  { id: "chat", label: "Chat", href: "/chat", icon: MessagesSquare },
+  { id: "chat", label: "Chat", href: "/chat", icon: MessagesSquare, also: ["/share/ai"] },
   { id: "bots", label: "Bots", href: "/bots", icon: Bot, permission: "bot.read" },
   {
     id: "work-zone",
@@ -30,8 +32,10 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { id: "settings", label: "Settings", href: "/settings", icon: Settings, secondary: true },
 ];
 
+const under = (pathname: string, prefix: string) => pathname === prefix || pathname.startsWith(`${prefix}/`);
+
 export function isActive(item: NavItem, pathname: string): boolean {
-  return pathname === item.href || pathname.startsWith(`${item.href}/`);
+  return under(pathname, item.href) || (item.also ?? []).some((p) => under(pathname, p));
 }
 
 export function activeItem(pathname: string): NavItem | undefined {

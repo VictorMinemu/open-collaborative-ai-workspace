@@ -52,7 +52,7 @@ export function MeteredBadge({ className }: { className?: string }) {
       data-testid="ai-model-metered"
       title="Billed to your organization"
       className={cn(
-        "inline-flex h-[18px] shrink-0 items-center rounded-[5px] border border-amber-500/35 bg-amber-500/10 px-1 font-semibold text-[10px] text-amber-700 leading-none tracking-wide dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-300",
+        "inline-flex h-[18px] shrink-0 items-center rounded-[5px] border border-amber-600/40 px-1 font-semibold text-[10px] text-amber-700 leading-none tracking-wide dark:border-amber-400/35 dark:text-amber-300/90",
         className,
       )}
     >
@@ -214,7 +214,10 @@ export function ModelPicker({
   onChange,
   disabled = false,
   trigger = "chip",
+  finalFocus,
 }: {
+  /** Where focus goes when the desktop popover closes (the composer in a chat); default the chip. */
+  finalFocus?: () => HTMLElement | null;
   chatKey: string;
   value: ModelRef | null;
   onChange: (ref: ModelRef) => void;
@@ -255,6 +258,7 @@ export function ModelPicker({
         open={open}
         onOpenChange={setOpen}
         className="w-[min(21rem,calc(100vw-1.5rem))]"
+        {...(finalFocus ? { finalFocus } : {})}
       >
         <ModelPickerList
           models={list}

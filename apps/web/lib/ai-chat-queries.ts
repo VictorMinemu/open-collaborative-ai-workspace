@@ -246,6 +246,10 @@ export interface AiChatView {
   /** Applies a send answered by the API (both turns show before their events arrive). */
   applySent: (r: SendAiMessageResponse) => void;
   isPending: boolean;
+  /** Answers rendered streaming now are live on this page (not a replay ahead of the first snapshot). */
+  live: boolean;
+  /** This page sent or regenerated in the chat (New chat's first send lands here with it set). */
+  sentHere: boolean;
   error: unknown;
   notFound: boolean;
   refetch: () => void;
@@ -253,9 +257,12 @@ export interface AiChatView {
 
 export function useAiChat(chatId: string): AiChatView {
   const qc = useQueryClient();
+  // This page sent (or regenerated) in the chat: what streams next is live, even before the first snapshot.
+  const sentHere = useRef(false);
   const [state, dispatch] = useReducer(reduceAiChat, chatId, (id): AiChatState => {
     const primed = handoff.get(id);
     handoff.delete(id);
+    if (primed) sentHere.current = true;
     return initialAiChatState(id, primed);
   });
 
@@ -329,7 +336,10 @@ export function useAiChat(chatId: string): AiChatView {
   }, [status, refetch]);
 
   const textOf = useCallback((m: Message) => displayText(state, m), [state]);
-  const applySent = useCallback((r: SendAiMessageResponse) => dispatch({ kind: "sent", response: r }), []);
+  const applySent = useCallback((r: SendAiMessageResponse) => {
+    sentHere.current = true;
+    dispatch({ kind: "sent", response: r });
+  }, []);
 
   return {
     snapshot: state.snapshot ?? query.data,
@@ -338,6 +348,11 @@ export function useAiChat(chatId: string): AiChatView {
     textOf,
     applySent,
     isPending: query.isPending && state.messages.length === 0,
+    // A fresh page replays the chat's durable events before its snapshot lands: an answer that ended before the
+    // page opened then shows `streaming` for a moment. Until a snapshot (or a send from this page) anchors the
+    // state, nothing rendered counts as having streamed here (05-14: no usage-limit dialog again after a reload).
+    live: sentHere.current || state.snapshot !== null || query.data !== undefined,
+    sentHere: sentHere.current,
     error: query.error,
     notFound: isApiError(query.error, 404),
     refetch: () => void refetch(),

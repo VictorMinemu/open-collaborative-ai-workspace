@@ -26,7 +26,7 @@ export function MeteredBadge({ className }: { className?: string }) {
       data-testid="provider-metered"
       title="Billed to your organization"
       className={cn(
-        "inline-flex h-[18px] shrink-0 items-center rounded-[5px] border border-amber-500/35 bg-amber-500/10 px-1 font-semibold text-[10px] text-amber-700 leading-none tracking-wide dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-300",
+        "inline-flex h-[18px] shrink-0 items-center rounded-[5px] border border-amber-600/40 px-1 font-semibold text-[10px] text-amber-700 leading-none tracking-wide dark:border-amber-400/35 dark:text-amber-300/90",
         className,
       )}
     >

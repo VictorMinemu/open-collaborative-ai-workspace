@@ -86,6 +86,23 @@ async function setActivity(id: string, daysAgo: number) {
 
 const row = (page: Page, id: string) => page.locator(`[data-testid="ai-chat-row"][data-chat-id="${id}"]`);
 
+/**
+ * Brings a chat's row into the list: the list pages by 30, and on a shared stack (other specs, `--repeat-each`) more
+ * recent chats can push an older one past the first page, so "Load more" is pressed until it shows.
+ */
+async function reveal(page: Page, id: string) {
+  const rows = page.getByTestId("ai-chat-row");
+  await expect(rows.first()).toBeVisible();
+  const target = row(page, id);
+  const more = page.getByTestId("ai-chats-more");
+  while ((await target.count()) === 0 && (await more.count()) > 0) {
+    const before = await rows.count();
+    await more.click();
+    await expect.poll(() => rows.count()).toBeGreaterThan(before);
+  }
+  await expect(target).toBeVisible();
+}
+
 test("the first answer titles the chat live in the header and the sidebar", async ({ browser }, info) => {
   const project = info.project.name;
   const mobile = project === "mobile";
@@ -154,6 +171,7 @@ test("/chat/ai groups the member's chats and lets them rename and archive", asyn
   await page.goto(`${BASE_URL}/chat/ai`);
   await expect(page.getByTestId("ai-new-chat")).toBeVisible();
   const group = (key: string) => page.locator(`[data-testid="ai-chat-group"][data-group="${key}"]`);
+  await reveal(page, older.id);
   await expect(group("today").locator(`[data-chat-id="${today.id}"]`)).toBeVisible();
   await expect(group("week").locator(`[data-chat-id="${week.id}"]`)).toBeVisible();
   await expect(group("older").locator(`[data-chat-id="${older.id}"]`)).toBeVisible();
@@ -192,7 +210,7 @@ test("/chat/ai groups the member's chats and lets them rename and archive", asyn
   await (await rowMenu(older.id)).getByTestId("ai-chat-menu-archive").click();
   await expect(row(page, older.id)).toHaveCount(0);
   await page.getByTestId("ai-chats-archived").click();
-  await expect(row(page, older.id)).toBeVisible();
+  await reveal(page, older.id);
   await expect(row(page, today.id)).toHaveCount(0);
 
   // An archived chat opens read-only until it is unarchived.
@@ -209,6 +227,8 @@ test("/chat/ai groups the member's chats and lets them rename and archive", asyn
 
   // Rename inline from the header: click the title, type, Enter. The sidebar follows live.
   await page.goto(`${BASE_URL}/chat/ai/${today.id}`);
+  // The loading header has a plain title in the same place: click the chat's own (renamable) title once it loaded.
+  await expect(page.getByTestId("ai-chat-title")).toHaveText(today.title);
   await page.getByTestId("ai-chat-title").click();
   const input = page.getByTestId("ai-chat-title-input");
   await expect(input).toBeFocused();
