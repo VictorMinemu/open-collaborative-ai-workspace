@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 48
+open_count: 49
 waived_count: 0
 fixed_count: 16
-total_count: 64
-last_updated: 2026-10-06T18:58:18.983Z
+total_count: 65
+last_updated: 2026-10-07T01:48:18.761Z
 ---
 
 # Broken Windows Ledger
@@ -79,6 +79,7 @@ last_updated: 2026-10-06T18:58:18.983Z
 | 62 | 04 | unrun-verify | apps/desktop/src/main/index.ts |  | Signed-build notification click-to-focus and dock badge remain manual checks (Pitfall 11) | open |  | 2026-10-06T12:07:48.055Z |  |
 | 63 | 05 | deviation | e2e/tests/ai-chat-signin.spec.ts |  | Disconnect e2e asserts plan rows via GET /ai-chat/models, and signin.int 'org rows stay available' is vacuous until 05-04's picker and org keys merge; tighten both after the 05-04 merge | open |  | 2026-10-06T18:13:56.172Z |  |
 | 64 | 05 | unrun-verify | apps/desktop/src/main/chatgpt-loopback.ts |  | Real desktop build: Continue with ChatGPT through the system browser and the 127.0.0.1 listener against auth.openai.com (human-check, 05-15 owner check) | open |  | 2026-10-06T18:58:18.983Z |  |
+| 65 | 05 | deviation | apps/api/src/modules/ai-chat/service.ts |  | 05-12: abandoned AI chat drafts remain as hidden empty chats (no sweeper); their unsent uploads are swept after 24 h | open |  | 2026-10-07T01:48:18.761Z |  |
 
 ````json
 [
@@ -848,6 +849,18 @@ last_updated: 2026-10-06T18:58:18.983Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-06T18:58:18.983Z",
+    "resolved_at": null
+  },
+  {
+    "id": 65,
+    "kind": "deviation",
+    "phase": "05",
+    "file": "apps/api/src/modules/ai-chat/service.ts",
+    "line": null,
+    "description": "05-12: abandoned AI chat drafts remain as hidden empty chats (no sweeper); their unsent uploads are swept after 24 h",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T01:48:18.761Z",
     "resolved_at": null
   }
 ]
