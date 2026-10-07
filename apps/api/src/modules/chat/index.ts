@@ -111,14 +111,24 @@ export {
 export { resolveMentions } from "./mentions";
 export { REPLY_MODE_PER_MINUTE, replyModeCandidates } from "./reply-mode";
 export { conversationRefs } from "./saves";
-/** For the ai-chat module (Phase 5): stream seq allocation and the message DTO it shares with chat. */
+/**
+ * For the ai-chat module (Phase 5): stream seq allocation and the message DTO it shares with chat. Phase 6 (P-03, P-09):
+ * the access expression of AI chats and the participation helpers.
+ */
 export {
+  type AiAccess,
+  addMember,
+  aiAccessOf,
+  aiAccessSql,
   type ConversationRow,
   convTopic,
+  getMembership,
   iso,
   lockNextSeq,
   type MessageRow,
+  removeMember,
   toMessage,
+  unreadCountsFor,
 } from "./service";
 export { listThreadsFor } from "./threads";
 

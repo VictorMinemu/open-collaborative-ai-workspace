@@ -5,6 +5,7 @@ import { createConversationAccess } from "../chat";
 import type { ModelGateway } from "../model-gateway";
 import { createPermissionService } from "../organization";
 import { registerGenerationRoutes } from "./generations";
+import { registerGrantRoutes } from "./grants";
 import { registerPreferenceRoutes } from "./prefs";
 import { registerAiChatRoutes } from "./routes";
 import { createRunLoop } from "./run-loop";
@@ -26,6 +27,7 @@ export {
  */
 export { type BuildInput, type BuiltPrompt, buildModelMessages } from "./build-model-messages";
 export { ABORT_CHANNEL } from "./generations";
+export { registerGrantRoutes } from "./grants";
 export { consumeGeneration, usageToday } from "./limits";
 export { loadPreferences, registerPreferenceRoutes } from "./prefs";
 export { type AfterFinalize, createRunLoop, type RunLoop } from "./run-loop";
@@ -68,6 +70,8 @@ export function createAiChatModule(
       registerUsageRoutes(app, { core });
       // Read-only snapshot share links (05-13, AICHAT-09): signed-in members of the organization only.
       registerShareRoutes(app, { core, gateway: deps.gateway, storage: deps.storage ?? null });
+      // Sharing in place (Phase 6, D-03): grants on the same conversation, owner only.
+      registerGrantRoutes(app, { core, gateway: deps.gateway });
       unsubscribeAbort = await registerGenerationRoutes(app, { core, gateway: deps.gateway, runLoop });
       sweeper.start();
     },

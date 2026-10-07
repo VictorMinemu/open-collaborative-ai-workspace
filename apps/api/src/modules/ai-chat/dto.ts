@@ -1,4 +1,5 @@
 import {
+  type AiChatAccess,
   type AiChatDetail,
   type AiChatSettings,
   type AiChatSummary,
@@ -7,12 +8,23 @@ import {
   type AiUsage,
   type Attachment,
   type Message,
+  type MessageAuthor,
   ModelRef,
   type Permission,
 } from "@ocw/contracts";
-import { type aiChats, aiGenerations, aiUsageRecords, orgMembers, type Tx } from "@ocw/db";
-import { and, desc, eq, inArray } from "drizzle-orm";
-import { type ConversationRow, type Directory, iso, type MessageRow, toMessage } from "../chat";
+import {
+  agents,
+  aiChatGrants,
+  type aiChats,
+  aiGenerations,
+  aiUsageRecords,
+  conversationMembers,
+  orgMembers,
+  type Tx,
+} from "@ocw/db";
+import { and, desc, eq, inArray, isNull, type SQL, sql } from "drizzle-orm";
+import type { AnyPgColumn } from "drizzle-orm/pg-core";
+import { aiAccessOf, type ConversationRow, type Directory, iso, type MessageRow, toMessage } from "../chat";
 import type { ModelGateway } from "../model-gateway";
 
 /** DTOs of the AI chat module (P-13): assistant turns are `agent` messages with no author id and a generation. */
@@ -26,9 +38,24 @@ export const DEFAULT_CHAT_TITLE = "New chat";
 /** Assistant turns resolve their author from the generation, never the directory. */
 export const EMPTY_DIRECTORY: Directory = { users: new Map(), agents: new Map(), byHandle: new Map() };
 
-/** A directory of just these members (user turns of one AI chat: its owner). */
-export async function directoryOf(tx: Tx, userIds: string[]): Promise<Directory> {
+/** A directory of just these members (the human authors of one AI chat's messages). */
+export async function directoryOf(tx: Tx, userIds: string[], agentIds: string[] = []): Promise<Directory> {
   const dir: Directory = { users: new Map(), agents: new Map(), byHandle: new Map() };
+  if (agentIds.length > 0) {
+    const bots = await tx
+      .select({ id: agents.id, name: agents.name, username: agents.username, avatarUrl: agents.avatarUrl })
+      .from(agents)
+      .where(inArray(agents.id, [...new Set(agentIds)]));
+    for (const b of bots) {
+      dir.agents.set(b.id, {
+        kind: "agent",
+        id: b.id,
+        displayName: b.name,
+        handle: b.username,
+        avatarUrl: b.avatarUrl,
+      });
+    }
+  }
   if (userIds.length === 0) return dir;
   const rows = await tx
     .select({
@@ -37,7 +64,7 @@ export async function directoryOf(tx: Tx, userIds: string[]): Promise<Directory>
       avatarUrl: orgMembers.avatarUrl,
     })
     .from(orgMembers)
-    .where(inArray(orgMembers.userId, userIds));
+    .where(inArray(orgMembers.userId, [...new Set(userIds)]));
   for (const r of rows) {
     dir.users.set(r.userId, {
       kind: "user",
@@ -50,6 +77,87 @@ export async function directoryOf(tx: Tx, userIds: string[]): Promise<Directory>
   return dir;
 }
 
+/**
+ * P-05 `shared` as SQL: any active grant or more than one human member. Personal instructions are never used in a
+ * shared chat (D-06), from the moment it is shared.
+ */
+export function sharedSql(conversationIdCol: SQL | AnyPgColumn): SQL {
+  return sql`(exists (select 1 from app.ai_chat_grants sg
+                      where sg.conversation_id = ${conversationIdCol} and sg.revoked_at is null)
+           or (select count(*) from app.conversation_members sm
+                where sm.conversation_id = ${conversationIdCol} and sm.member_kind = 'user') > 1)`;
+}
+
+/** P-05 for one chat. */
+export async function isShared(tx: Tx, conversationId: string): Promise<boolean> {
+  const [grant] = await tx
+    .select({ id: aiChatGrants.id })
+    .from(aiChatGrants)
+    .where(and(eq(aiChatGrants.conversationId, conversationId), isNull(aiChatGrants.revokedAt)))
+    .limit(1);
+  if (grant) return true;
+  const humans = await tx
+    .select({ id: conversationMembers.memberId })
+    .from(conversationMembers)
+    .where(
+      and(eq(conversationMembers.conversationId, conversationId), eq(conversationMembers.memberKind, "user")),
+    );
+  return humans.length > 1;
+}
+
+/**
+ * The active person grant of `userId` on a chat (`chat` beats `view`), or null. 06-04 extends the match to unit and
+ * organization subjects, in step with `aiAccessSql`.
+ */
+export async function matchingGrant(
+  tx: Tx,
+  conversationId: string,
+  userId: string,
+): Promise<{ id: string; level: "chat" | "view" } | null> {
+  const rows = await tx
+    .select({ id: aiChatGrants.id, level: aiChatGrants.level })
+    .from(aiChatGrants)
+    .where(
+      and(
+        eq(aiChatGrants.conversationId, conversationId),
+        isNull(aiChatGrants.revokedAt),
+        eq(aiChatGrants.subjectKind, "user"),
+        eq(aiChatGrants.subjectId, userId),
+      ),
+    );
+  return rows.find((r) => r.level === "chat") ?? rows[0] ?? null;
+}
+
+/** How one viewer sees a chat (Phase 6 summary fields): their access, the owner and whether it is shared. */
+export interface ChatView {
+  access: AiChatAccess;
+  owner: MessageAuthor;
+  shared: boolean;
+}
+
+/** The owner as a message author (a former member keeps a neutral name). */
+export function ownerAuthor(dir: Directory, ownerUserId: string): MessageAuthor {
+  const e = dir.users.get(ownerUserId);
+  return {
+    kind: "user",
+    id: ownerUserId,
+    displayName: e?.displayName ?? "Former member",
+    avatarUrl: e?.avatarUrl ?? null,
+  };
+}
+
+/** The `ChatView` of `viewerId` (null access = the viewer cannot read it; callers only ask for readable chats). */
+export async function viewOf(tx: Tx, chat: AiChatRow, viewerId: string): Promise<ChatView | null> {
+  const access = await aiAccessOf(tx, viewerId, chat.conversationId);
+  if (access === null) return null;
+  const dir = await directoryOf(tx, [chat.ownerUserId]);
+  return {
+    access,
+    owner: ownerAuthor(dir, chat.ownerUserId),
+    shared: await isShared(tx, chat.conversationId),
+  };
+}
+
 export function parseModelRef(v: unknown): ModelRef | null {
   const parsed = ModelRef.safeParse(v);
   return parsed.success ? parsed.data : null;
@@ -58,10 +166,11 @@ export function parseModelRef(v: unknown): ModelRef | null {
 export function chatSummary(
   conv: ConversationRow,
   chat: AiChatRow,
-  opts: { generating: boolean; gateway: ModelGateway },
+  opts: { generating: boolean; gateway: ModelGateway; view?: ChatView | null },
 ): AiChatSummary {
   const lastModel = parseModelRef(chat.lastModel);
   return {
+    ...(opts.view ? { access: opts.view.access, owner: opts.view.owner, shared: opts.view.shared } : {}),
     id: conv.id,
     title: conv.name ?? DEFAULT_CHAT_TITLE,
     titleSource: chat.titleSource,
@@ -119,6 +228,8 @@ export function generationDto(
     modelLabel: gateway.labelOf(ref),
     metered: g.backend === "org_key",
     attempt: g.attempt,
+    // Who asked, and so who pays (D-01, P-07).
+    requesterUserId: g.requesterUserId,
     errorCode: (g.errorCode as AiGeneration["errorCode"]) ?? null,
     errorParam: g.errorParam,
     usage: usage ? ("generationId" in usage ? usageDto(usage) : usage) : null,

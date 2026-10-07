@@ -15,8 +15,16 @@ import {
   type SendAiMessageResponse,
   type UpdateAiChatRequest,
 } from "@ocw/contracts";
-import { aiChats, aiGenerations, conversationMembers, conversations, messages, type Tx } from "@ocw/db";
-import { and, desc, eq, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
+import {
+  aiChats,
+  aiGenerations,
+  aiMessageContext,
+  conversationMembers,
+  conversations,
+  messages,
+  type Tx,
+} from "@ocw/db";
+import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { authOf, type Core, tenant } from "../../core";
@@ -29,9 +37,12 @@ import {
   notLinkable,
 } from "../artifact";
 import {
+  addMember,
+  aiAccessSql,
   type ConversationAccess,
   type ConversationRow,
   convTopic,
+  getMembership,
   lockNextSeq,
   type MessageRow,
 } from "../chat";
@@ -42,11 +53,18 @@ import {
   PlanTokenUnavailableError,
   type ResolvedModel,
 } from "../model-gateway";
-import { channelResource, orgResource, type PermissionService } from "../organization";
+import {
+  AuthzDeniedError,
+  type ChannelFacts,
+  channelResource,
+  orgResource,
+  type PermissionService,
+} from "../organization";
 import { assertReadableBy } from "./attachments";
 import {
   type AiChatRow,
   aiMessage,
+  type ChatView,
   chatDetail,
   chatSettings,
   chatSummary,
@@ -55,7 +73,12 @@ import {
   type GenerationRow,
   generationDto,
   generationsFor,
+  isShared,
+  matchingGrant,
+  ownerAuthor,
   parseModelRef,
+  sharedSql,
+  viewOf,
 } from "./dto";
 import { consumeGeneration, refuseOverLimit } from "./limits";
 import { loadPreferences } from "./prefs";
@@ -81,8 +104,69 @@ export interface AiChatDeps {
   perms: PermissionService;
 }
 
-const VIEWER_CAN: readonly Permission[] = ["ai_chat.use", "ai_chat.web", "ai_chat.share"];
+const VIEWER_CAN: readonly Permission[] = ["ai_chat.use", "ai_chat.web", "ai_chat.manage", "ai_chat.share"];
 const NOT_FOUND = "AI chat not found";
+
+/** A hidden denial reads exactly like a missing chat (same status, code and message). */
+function asMissing(err: unknown): unknown {
+  return err instanceof AuthzDeniedError && err.hidden
+    ? new AuthzDeniedError(err.denial, { hideAs404: true, message: NOT_FOUND })
+    : err;
+}
+
+/**
+ * The three ways a route reaches one AI chat (P-04, P-07). Anyone who cannot read it, admins included, gets the same
+ * 404 as a missing chat.
+ * - `readableChat`: `channel.read` (owner or any grant): snapshot, page, grants and links are decided after it.
+ * - `writableChat`: `ai_chat.use` (owner or a `chat` grant): sends. A `view` grantee is told 403 `ai_chat_view_only`;
+ *   every other denial stays a 404, as in Phase 5.
+ * - `managedChat`: `ai_chat.manage` (the owner): rename, archive, settings.
+ */
+export function createChatGuards(access: ConversationAccess, perms: PermissionService) {
+  const readableChat = (req: FastifyRequest, tx: Tx, chatId: string) =>
+    access.readable(req, tx, chatId, { kinds: ["ai_chat"], notFoundMessage: NOT_FOUND });
+
+  async function assertOn(
+    req: FastifyRequest,
+    tx: Tx,
+    permission: Permission,
+    facts: ChannelFacts,
+    visible: (reason: string) => boolean = () => false,
+  ): Promise<void> {
+    try {
+      await perms.assertCan(req, tx, permission, channelResource(facts));
+    } catch (err) {
+      if (err instanceof AuthzDeniedError && !visible(err.denial.reason)) {
+        throw new AuthzDeniedError(err.denial, { hideAs404: true, message: NOT_FOUND });
+      }
+      throw asMissing(err);
+    }
+  }
+
+  return {
+    readableChat,
+    /** Decides `permission` on a chat the caller can read: hidden as the chat's 404 unless `visible(reason)`. */
+    assertOn,
+    async writableChat(req: FastifyRequest, tx: Tx, chatId: string) {
+      const out = await readableChat(req, tx, chatId);
+      await assertOn(req, tx, "ai_chat.use", out.facts, (reason) => reason === "ai_chat_view_only");
+      return out;
+    },
+    async managedChat(req: FastifyRequest, tx: Tx, chatId: string) {
+      const out = await readableChat(req, tx, chatId);
+      await assertOn(req, tx, "ai_chat.manage", out.facts);
+      return out;
+    },
+  };
+}
+
+/** How the sender reached the chat (MULTI-02): the owner, or a grant (its id and level). */
+interface SendContext {
+  access: { access: "owner" | "grant"; grantId: string | null; level: "owner" | "chat" };
+  /** The chat's effective tools for this message. */
+  tools: { web: boolean };
+  shared: boolean;
+}
 
 /** 410 on anything that would write a turn into an archived chat (05-10): it opens read-only until unarchived. */
 export function refuseArchived(conv: ConversationRow): void {
@@ -147,6 +231,8 @@ export async function capOr429(tx: Tx, userId: string, cap: number): Promise<voi
 
 export function createAiChatService(deps: AiChatDeps) {
   const { core, gateway, runLoop, access, perms } = deps;
+  const guards = createChatGuards(access, perms);
+  const chatDeps = { audit: core.audit, realtime: core.realtime };
 
   const resolveOr409 = (tx: Tx, ref: ModelRef, userId: string) => resolveModelOr409(gateway, tx, ref, userId);
 
@@ -159,7 +245,8 @@ export function createAiChatService(deps: AiChatDeps) {
     facts: Parameters<typeof channelResource>[0],
   ): Promise<AiChatDetail> {
     const tools = await toolStates(tx, {
-      userId: chat.ownerUserId,
+      // The viewer's own tool availability (P-07: whoever sends uses their own permissions and model).
+      userId: authOf(req).userId,
       policy: await loadAiChatPolicy(tx),
       perms,
       gateway,
@@ -209,8 +296,9 @@ export function createAiChatService(deps: AiChatDeps) {
     const { conv, chat } = await loadChat(tx, userRow.conversationId);
     const dir = await directoryOf(tx, [userRow.authorId ?? ""]);
     const files = await attachmentsForMessages(tx, [userRow.id]);
+    const view = userRow.authorId ? await viewOf(tx, chat, userRow.authorId) : null;
     return {
-      chat: chatSummary(conv, chat, { generating: await isGenerating(tx, conv.id), gateway }),
+      chat: chatSummary(conv, chat, { generating: await isGenerating(tx, conv.id), gateway, view }),
       userMessage: aiMessage(userRow, dir, undefined, files.get(userRow.id) ?? []),
       assistantMessage: aiMessage(assistant, EMPTY_DIRECTORY, generation),
       generation,
@@ -240,7 +328,8 @@ export function createAiChatService(deps: AiChatDeps) {
     conv: ConversationRow,
     body: SendAiMessageRequest,
     resolved: ResolvedModel,
-    files: AttachmentRow[] = [],
+    files: AttachmentRow[],
+    context: SendContext,
   ): Promise<{ turn: Omit<SendAiMessageResponse, "chat">; generation: GenerationRow }> {
     const auth = authOf(req);
     const topic = convTopic(conv.id);
@@ -320,6 +409,22 @@ export function createAiChatService(deps: AiChatDeps) {
       throw err;
     }
     if (!genRow) throw new Error("generation insert returned no row");
+    // MULTI-02: who sent it, through which access, with which model and tools, and which generation answers it.
+    // Client kind and session are on the message row itself.
+    await tx.insert(aiMessageContext).values({
+      messageId: userRow.id,
+      organizationId: conv.organizationId,
+      conversationId: conv.id,
+      authorKind: "user",
+      access: context.access.access,
+      grantId: context.access.grantId,
+      level: context.access.level,
+      addressed: true,
+      answeredByGenerationId: genRow.id,
+      model: body.model,
+      tools: context.tools,
+      shared: context.shared,
+    });
     const generation = generationDto(genRow, null, gateway);
     const assistantMessage = aiMessage(assistantRow, EMPTY_DIRECTORY, generation);
     const s2 = await core.realtime.appendEvent(tx, topic, EventTypes.messageCreated, {
@@ -330,11 +435,16 @@ export function createAiChatService(deps: AiChatDeps) {
     return { turn: { userMessage, assistantMessage, generation }, generation: genRow };
   }
 
+  /**
+   * Bumps the chat after a send and tells the owner's sidebar (`ai_chat.updated`, the owner's view); a grantee who
+   * sent gets their own view on their topic. Returns the sender's view.
+   */
   async function touchChat(
     tx: Tx,
     conv: ConversationRow,
     ref: ModelRef,
     tools: { web: boolean } | undefined,
+    sender: { userId: string; access: "owner" | "chat" | "view"; shared: boolean },
   ): Promise<AiChatSummary> {
     const at = new Date().toISOString();
     const [chat] = await tx
@@ -343,11 +453,20 @@ export function createAiChatService(deps: AiChatDeps) {
       .where(eq(aiChats.conversationId, conv.id))
       .returning();
     if (!chat) throw notFound(NOT_FOUND);
-    const summary = chatSummary(conv, chat, { generating: true, gateway });
+    const owner = ownerAuthor(await directoryOf(tx, [chat.ownerUserId]), chat.ownerUserId);
+    const ownerView: ChatView = { access: "owner", owner, shared: sender.shared };
+    const summary = chatSummary(conv, chat, { generating: true, gateway, view: ownerView });
     await core.realtime.appendEvent(tx, `user:${chat.ownerUserId}`, EventTypes.aiChatUpdated, {
       chat: summary,
     });
-    return summary;
+    if (sender.userId === chat.ownerUserId) return summary;
+    const mine = chatSummary(conv, chat, {
+      generating: true,
+      gateway,
+      view: { access: sender.access, owner, shared: sender.shared },
+    });
+    await core.realtime.appendEvent(tx, `user:${sender.userId}`, EventTypes.aiChatUpdated, { chat: mine });
+    return mine;
   }
 
   async function auditSend(
@@ -372,15 +491,7 @@ export function createAiChatService(deps: AiChatDeps) {
     });
   }
 
-  /** The chat if the caller owns it (hidden = 404 for everyone else, admins included). */
-  async function ownedChat(req: FastifyRequest, tx: Tx, chatId: string) {
-    const { conv, facts } = await access.readable(req, tx, chatId, {
-      kinds: ["ai_chat"],
-      notFoundMessage: NOT_FOUND,
-    });
-    await perms.assertCan(req, tx, "ai_chat.use", channelResource(facts), { hideAs404: true });
-    return { conv, facts };
-  }
+  const OWNER_CONTEXT: SendContext["access"] = { access: "owner", grantId: null, level: "owner" };
 
   return {
     async createChat(req: FastifyRequest, body: CreateAiChatRequest): Promise<SendAiMessageResponse> {
@@ -425,6 +536,9 @@ export function createAiChatService(deps: AiChatDeps) {
           memberId: auth.userId,
           role: "owner",
         });
+        // The member's "Web on by default" applies when the first send says nothing (05-11).
+        const tools = body.tools ??
+          body.settings?.tools ?? { web: (await loadPreferences(tx, auth.userId)).webDefault };
         await tx.insert(aiChats).values({
           conversationId: conv.id,
           organizationId: auth.organizationId,
@@ -432,13 +546,19 @@ export function createAiChatService(deps: AiChatDeps) {
           titleSource: "heuristic",
           instructions: body.settings?.instructions ?? "",
           usePersonalInstructions: body.settings?.usePersonalInstructions ?? true,
-          // The member's "Web on by default" applies when the first send says nothing (05-11).
-          tools: body.tools ??
-            body.settings?.tools ?? { web: (await loadPreferences(tx, auth.userId)).webDefault },
+          tools,
           lastModel: body.model,
         });
-        const turn = await insertTurn(req, tx, conv, body, resolved);
-        const chat = await touchChat(tx, conv, body.model, undefined);
+        const turn = await insertTurn(req, tx, conv, body, resolved, [], {
+          access: OWNER_CONTEXT,
+          tools: { web: tools.web === true },
+          shared: false,
+        });
+        const chat = await touchChat(tx, conv, body.model, undefined, {
+          userId: auth.userId,
+          access: "owner",
+          shared: false,
+        });
         await auditSend(tx, "ai_chat.created", conv, turn.generation);
         return { response: { ...turn.turn, chat }, start: turn.generation };
       });
@@ -455,7 +575,7 @@ export function createAiChatService(deps: AiChatDeps) {
     ): Promise<SendAiMessageResponse> {
       const auth = authOf(req);
       const out = await core.db.withTenant(tenant(req), async (tx) => {
-        let { conv } = await ownedChat(req, tx, chatId);
+        let { conv, facts } = await guards.writableChat(req, tx, chatId);
         // Serializes sends on this chat, which also makes the retry check below race-free.
         await lockNextSeq(tx, convTopic(conv.id));
         const retried = await ownSend(tx, auth.userId, body.clientMessageId);
@@ -493,8 +613,37 @@ export function createAiChatService(deps: AiChatDeps) {
             .returning();
           if (named) conv = named;
         }
-        const turn = await insertTurn(req, tx, conv, body, resolved, files);
-        const chat = await touchChat(tx, conv, body.model, body.tools);
+        const { chat: current } = await loadChat(tx, conv.id);
+        // The sticky Web state is a chat setting: only its manager (the owner) changes it by sending (P-04).
+        const manages = await perms.can(req, tx, "ai_chat.manage", channelResource(facts));
+        const sticky = manages ? body.tools : undefined;
+        const viewerAccess = facts.aiAccess ?? (current.ownerUserId === auth.userId ? "owner" : null);
+        let sendAccess = OWNER_CONTEXT;
+        if (viewerAccess !== "owner") {
+          const g = await matchingGrant(tx, conv.id, auth.userId);
+          sendAccess = { access: "grant", grantId: g?.id ?? null, level: "chat" };
+        }
+        // P-09: whoever writes takes part (roster, unread); a person grantee already has the row from the grant.
+        if (!(await getMembership(tx, conv.id, "user", auth.userId))) {
+          await addMember(
+            tx,
+            chatDeps,
+            conv,
+            { kind: "user", id: auth.userId },
+            { role: "member", reason: "ai_chat_post" },
+          );
+        }
+        const shared = await isShared(tx, conv.id);
+        const turn = await insertTurn(req, tx, conv, body, resolved, files, {
+          access: sendAccess,
+          tools: { web: (sticky ?? chatSettings(current).tools).web === true },
+          shared,
+        });
+        const chat = await touchChat(tx, conv, body.model, sticky, {
+          userId: auth.userId,
+          access: viewerAccess === "owner" ? "owner" : "chat",
+          shared,
+        });
         await auditSend(tx, "ai_chat.message.sent", conv, turn.generation);
         return { response: { ...turn.turn, chat }, start: turn.generation };
       });
@@ -565,20 +714,33 @@ export function createAiChatService(deps: AiChatDeps) {
       const auth = authOf(req);
       return core.db.withTenant(tenant(req), async (tx) => {
         const cursor = q.cursor ? decodeListCursor(q.cursor) : null;
-        if (!(await perms.can(req, tx, "ai_chat.use"))) return { chats: [], nextCursor: null };
+        // `mine` is the Phase 5 list: a member without `ai_chat.use` has none. Chats shared with the caller are read
+        // through their grant (`channel.read`), decided per chat by the readable set below.
+        const mayUse = await perms.can(req, tx, "ai_chat.use");
+        if (q.scope === "mine" && !mayUse) return { chats: [], nextCursor: null };
         const readable = await access.readableIds(tx, auth.userId, {
           kinds: ["ai_chat"],
           includeArchived: true,
         });
         if (readable.length === 0) return { chats: [], nextCursor: null };
         const rows = await tx
-          .select({ conv: conversations, chat: aiChats, at: sql<string>`${aiChats.lastActivityAt}::text` })
+          .select({
+            conv: conversations,
+            chat: aiChats,
+            at: sql<string>`${aiChats.lastActivityAt}::text`,
+            access: aiAccessSql(auth.userId, aiChats.conversationId).mapWith(String),
+            shared: sharedSql(aiChats.conversationId).mapWith(Boolean),
+          })
           .from(aiChats)
           .innerJoin(conversations, eq(conversations.id, aiChats.conversationId))
           .where(
             and(
               inArray(aiChats.conversationId, readable),
-              eq(aiChats.ownerUserId, auth.userId),
+              q.scope === "mine"
+                ? eq(aiChats.ownerUserId, auth.userId)
+                : q.scope === "shared"
+                  ? ne(aiChats.ownerUserId, auth.userId)
+                  : undefined,
               q.archived ? isNotNull(conversations.archivedAt) : isNull(conversations.archivedAt),
               // A draft (05-12) is listed from its first message on.
               sql`exists (select 1 from ${messages} where ${messages.conversationId} = ${aiChats.conversationId})`,
@@ -604,10 +766,22 @@ export function createAiChatService(deps: AiChatDeps) {
               .where(and(inArray(aiGenerations.conversationId, ids), eq(aiGenerations.status, "running")))
           : [];
         const generating = new Set(live.map((g) => g.id));
+        const owners = await directoryOf(
+          tx,
+          page.map((r) => r.chat.ownerUserId),
+        );
         const last = page.at(-1);
         return {
           chats: page.map((r) =>
-            chatSummary(r.conv, r.chat, { generating: generating.has(r.conv.id), gateway }),
+            chatSummary(r.conv, r.chat, {
+              generating: generating.has(r.conv.id),
+              gateway,
+              view: {
+                access: (r.access as ChatView["access"] | null) ?? "view",
+                owner: ownerAuthor(owners, r.chat.ownerUserId),
+                shared: r.shared,
+              },
+            }),
           ),
           nextCursor:
             rows.length > q.limit && last ? encodeListCursor({ t: last.at, i: last.conv.id }) : null,
@@ -624,7 +798,7 @@ export function createAiChatService(deps: AiChatDeps) {
      */
     async update(req: FastifyRequest, chatId: string, body: UpdateAiChatRequest): Promise<AiChatDetail> {
       return core.db.withTenant(tenant(req), async (tx) => {
-        const { conv, facts } = await ownedChat(req, tx, chatId);
+        const { conv, facts } = await guards.managedChat(req, tx, chatId);
         const { chat } = await loadChat(tx, conv.id);
         const at = new Date().toISOString();
         const audits: Array<"ai_chat.renamed" | "ai_chat.archived" | "ai_chat.unarchived"> = [];
@@ -669,6 +843,7 @@ export function createAiChatService(deps: AiChatDeps) {
         const summary = chatSummary(fresh.conv, fresh.chat, {
           generating: await isGenerating(tx, conv.id),
           gateway,
+          view: await viewOf(tx, fresh.chat, fresh.chat.ownerUserId),
         });
         if (audits.length > 0) {
           await core.realtime.appendEvent(tx, `user:${fresh.chat.ownerUserId}`, EventTypes.aiChatUpdated, {
@@ -685,14 +860,14 @@ export function createAiChatService(deps: AiChatDeps) {
      */
     async setActivityForTest(req: FastifyRequest, chatId: string, lastActivityAt: string): Promise<void> {
       await core.db.withTenant(tenant(req), async (tx) => {
-        const { conv } = await ownedChat(req, tx, chatId);
+        const { conv } = await guards.managedChat(req, tx, chatId);
         await tx.update(aiChats).set({ lastActivityAt }).where(eq(aiChats.conversationId, conv.id));
       });
     },
 
     async snapshot(req: FastifyRequest, chatId: string): Promise<AiChatSnapshot> {
       return core.db.withTenant(tenant(req), async (tx) => {
-        const { conv, facts } = await ownedChat(req, tx, chatId);
+        const { conv, facts } = await guards.readableChat(req, tx, chatId);
         // The cursor is read FIRST: every later statement of this (READ COMMITTED) transaction sees at least the
         // state of `lastSeq`, so replaying the events after it only moves the client forward. Read last, a
         // generation finalized between the reads came back `streaming` under a cursor that already covered its
@@ -713,7 +888,11 @@ export function createAiChatService(deps: AiChatDeps) {
           .from(aiGenerations)
           .where(and(eq(aiGenerations.conversationId, conv.id), eq(aiGenerations.status, "running")))
           .limit(1);
-        const summary = chatSummary(conv, chat, { generating: running !== undefined, gateway });
+        const summary = chatSummary(conv, chat, {
+          generating: running !== undefined,
+          gateway,
+          view: await viewOf(tx, chat, authOf(req).userId),
+        });
         return {
           chat: await detailOf(req, tx, summary, chat, facts),
           messages: list,
@@ -736,7 +915,7 @@ export function createAiChatService(deps: AiChatDeps) {
       q: { before?: number; limit: number },
     ): Promise<MessagePage> {
       return core.db.withTenant(tenant(req), async (tx) => {
-        const { conv } = await ownedChat(req, tx, chatId);
+        const { conv } = await guards.readableChat(req, tx, chatId);
         const { chat } = await loadChat(tx, conv.id);
         const rows = await tx
           .select()
@@ -792,7 +971,15 @@ export function createAiChatService(deps: AiChatDeps) {
       rows.filter((r) => r.authorKind === "agent").map((r) => r.id),
       gateway,
     );
-    const dir = await directoryOf(tx, [chat.ownerUserId]);
+    // Every human author (a shared chat has several) and every persona author (06-05), plus the owner.
+    const dir = await directoryOf(
+      tx,
+      [
+        chat.ownerUserId,
+        ...rows.filter((r) => r.authorKind === "user" && r.authorId).map((r) => r.authorId as string),
+      ],
+      rows.filter((r) => r.authorKind === "agent" && r.authorId).map((r) => r.authorId as string),
+    );
     const files = await attachmentsForMessages(
       tx,
       rows.filter((r) => r.authorKind === "user").map((r) => r.id),

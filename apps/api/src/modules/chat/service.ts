@@ -20,7 +20,8 @@ import {
   tenantOf,
   unitMemberships,
 } from "@ocw/db";
-import { and, asc, desc, eq, gt, inArray, isNull, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lt, type SQL, sql } from "drizzle-orm";
+import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import { badRequest, notFound } from "../../lib/errors";
 import { attachmentsForMessages, linkAttachments } from "../artifact";
 import type { AuditService } from "../audit";
@@ -371,6 +372,33 @@ export async function channelRow(tx: Tx, id: string, userId: string): Promise<Ch
 }
 
 /**
+ * THE access level of a user to an AI chat (P-03), as one SQL expression: `'owner'` for `ai_chats.owner_user_id`,
+ * else the best active grant that matches the user (`'chat'` beats `'view'`), else NULL. `channelFacts` and the
+ * readable set both use it, so they cannot drift; `conversation_members` rows never enter it. 06-04 adds unit and
+ * organization subjects here, and only here.
+ */
+export function aiAccessSql(userId: string | SQL | AnyPgColumn, conversationIdCol: SQL | AnyPgColumn): SQL {
+  return sql`(case
+    when exists (select 1 from app.ai_chats ac
+                 where ac.conversation_id = ${conversationIdCol} and ac.owner_user_id = ${userId}) then 'owner'
+    when exists (select 1 from app.ai_chat_grants ag
+                 where ag.conversation_id = ${conversationIdCol} and ag.revoked_at is null
+                   and ag.subject_kind = 'user' and ag.subject_id = ${userId} and ag.level = 'chat') then 'chat'
+    when exists (select 1 from app.ai_chat_grants ag
+                 where ag.conversation_id = ${conversationIdCol} and ag.revoked_at is null
+                   and ag.subject_kind = 'user' and ag.subject_id = ${userId} and ag.level = 'view') then 'view'
+  end)`;
+}
+
+export type AiAccess = "owner" | "chat" | "view" | null;
+
+/** `aiAccessSql` for one user and one AI chat. */
+export async function aiAccessOf(tx: Tx, userId: string, conversationId: string): Promise<AiAccess> {
+  const res = await tx.execute(sql`select ${aiAccessSql(userId, sql`${conversationId}::uuid`)} as access`);
+  return ((res.rows[0] as { access: AiAccess } | undefined)?.access ?? null) as AiAccess;
+}
+
+/**
  * The input of `channelResource` for one member (user or agent) of `conv`: visibility, archived state and
  * the member's role. A thread conversation is judged on its parent channel.
  */
@@ -393,6 +421,10 @@ export async function channelFacts(
     visibility: channel.visibility,
     archived: channel.archivedAt !== null,
     viewerRole: membership?.role ?? null,
+    // P-03: a human's access to an AI chat comes from its owner and grants only; agents keep their member row.
+    ...(channel.kind === "ai_chat" && member.kind === "user"
+      ? { aiAccess: await aiAccessOf(tx, member.id, channel.id) }
+      : {}),
     // Group DMs are direct conversations too: fixed membership, never moderated (D-01, D-06; state dm). An AI chat
     // is private to its owner (state ai_chat, P-03).
     kind:
