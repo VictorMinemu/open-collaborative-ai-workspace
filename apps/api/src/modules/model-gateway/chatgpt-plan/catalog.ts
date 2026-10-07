@@ -30,29 +30,31 @@ const CACHE_TTL_SECONDS = 3_600;
 const FETCH_TIMEOUT_MS = 10_000;
 export const DEFAULT_CHATGPT_API_BASE_URL = "https://api.openai.com/v1";
 
+const CatalogEntry = z
+  .object({
+    slug: z.string().min(1).max(200).optional(),
+    id: z.string().min(1).max(200).optional(),
+    display_name: z.string().min(1).max(200).optional(),
+    visibility: z.string().optional(),
+    input_modalities: z.array(z.string().max(40)).max(20).optional().catch(undefined),
+  })
+  .loose();
+
 /**
- * Tolerant: `slug ?? id`, `display_name ?? slug`, `visibility` defaults to "list", `input_modalities` kept when it is
- * a list of strings; unknown fields ignored.
+ * The documented SIWC shape is a top-level `models` array (`.models[] | select(.visibility == "list")`); a `data`
+ * array is still read. Tolerant: `slug ?? id`, `display_name ?? slug`, `visibility` defaults to "list",
+ * `input_modalities` kept when it is a list of strings; unknown fields ignored.
  */
-const CatalogResponse = z.object({
-  data: z.array(
-    z
-      .object({
-        slug: z.string().min(1).max(200).optional(),
-        id: z.string().min(1).max(200).optional(),
-        display_name: z.string().min(1).max(200).optional(),
-        visibility: z.string().optional(),
-        input_modalities: z.array(z.string().max(40)).max(20).optional().catch(undefined),
-      })
-      .loose(),
-  ),
-});
+const CatalogResponse = z.union([
+  z.object({ models: z.array(CatalogEntry) }).transform((r) => r.models),
+  z.object({ data: z.array(CatalogEntry) }).transform((r) => r.data),
+]);
 
 export function parsePlanCatalog(json: unknown): PlanModel[] {
   const parsed = CatalogResponse.safeParse(json);
   if (!parsed.success) return [];
   const out: PlanModel[] = [];
-  for (const m of parsed.data.data) {
+  for (const m of parsed.data) {
     const slug = m.slug ?? m.id;
     if (!slug || (m.visibility ?? "list") !== "list") continue;
     if (out.some((x) => x.slug === slug)) continue;
@@ -111,6 +113,11 @@ export async function planCatalog(
   if (res.status === 401 || res.status === 403) throw new ModelUnavailableError("needs_reconnect");
   if (!res.ok) throw new CatalogUnavailableError(res.status);
   const models = parsePlanCatalog(await res.json().catch(() => null));
+  // An empty catalog is never cached: it most likely means a response shape this parser does not know.
+  if (models.length === 0) {
+    core.log.warn({ provider: "chatgpt_plan" }, "chatgpt plan catalog returned no listable models");
+    return models;
+  }
   await core.bus.pub.set(key, JSON.stringify(models), { EX: CACHE_TTL_SECONDS }).catch(() => null);
   return models;
 }
