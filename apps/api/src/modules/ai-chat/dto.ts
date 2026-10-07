@@ -9,6 +9,7 @@ import {
   type AiToolState,
   type AiUsage,
   type Attachment,
+  EventTypes,
   type Message,
   type MessageAuthor,
   ModelRef,
@@ -27,6 +28,7 @@ import {
 } from "@ocw/db";
 import { and, desc, eq, inArray, isNull, type SQL, sql } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
+import type { Core } from "../../core";
 import {
   aiAccessOf,
   aiGrantMatchSql,
@@ -35,6 +37,7 @@ import {
   iso,
   type MessageRow,
   toMessage,
+  unreadCountsFor,
 } from "../chat";
 import type { ModelGateway } from "../model-gateway";
 
@@ -207,6 +210,54 @@ export function chatSummary(
     createdAt: iso(chat.createdAt),
     lastActivityAt: iso(chat.lastActivityAt),
   };
+}
+
+/**
+ * `ai_chat.updated` for everyone whose sidebar shows the chat (06-08, P-09): a solo chat tells its owner exactly as in
+ * Phase 5; a shared chat tells the owner (access `owner`) and every human participant and active person grantee with
+ * their own access, `shared`, the owner and their own unread count. People who lost the chat (no access now) and
+ * unit or organization grantees who never joined hear nothing. Summaries never carry settings (owner-only, T-06-08-02).
+ * Returns the summary each recipient got.
+ */
+export async function emitChatUpdated(
+  core: Core,
+  tx: Tx,
+  conv: ConversationRow,
+  chat: AiChatRow,
+  opts: { generating: boolean; gateway: ModelGateway },
+): Promise<Map<string, AiChatSummary>> {
+  const out = new Map<string, AiChatSummary>();
+  const owner = chat.ownerUserId;
+  if (!(await isShared(tx, conv.id))) {
+    const summary = chatSummary(conv, chat, opts);
+    await core.realtime.appendEvent(tx, `user:${owner}`, EventTypes.aiChatUpdated, { chat: summary });
+    out.set(owner, summary);
+    return out;
+  }
+  const res = await tx.execute(sql`
+    select cm.member_id as id from app.conversation_members cm
+    where cm.conversation_id = ${conv.id}::uuid and cm.member_kind = 'user'
+    union
+    select g.subject_id from app.ai_chat_grants g
+    where g.conversation_id = ${conv.id}::uuid and g.subject_kind = 'user' and g.revoked_at is null`);
+  const ids = [owner, ...(res.rows as Array<{ id: string }>).map((r) => r.id).filter((id) => id !== owner)];
+  const ownerView = ownerAuthor(await directoryOf(tx, [owner]), owner);
+  // One summary per distinct access; only the unread count differs per person.
+  const byAccess = new Map<AiChatAccess, AiChatSummary>();
+  for (const id of ids) {
+    const access = id === owner ? "owner" : await aiAccessOf(tx, id, conv.id);
+    if (access === null) continue;
+    let base = byAccess.get(access);
+    if (!base) {
+      base = chatSummary(conv, chat, { ...opts, view: { access, owner: ownerView, shared: true } });
+      byAccess.set(access, base);
+    }
+    const counts = (await unreadCountsFor(tx, id, [conv.id])).get(conv.id);
+    const summary = counts ? { ...base, unreadCount: counts.unreadCount } : base;
+    await core.realtime.appendEvent(tx, `user:${id}`, EventTypes.aiChatUpdated, { chat: summary });
+    out.set(id, summary);
+  }
+  return out;
 }
 
 export function chatSettings(chat: AiChatRow): AiChatSettings {

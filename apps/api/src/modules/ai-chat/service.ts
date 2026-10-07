@@ -78,6 +78,7 @@ import {
   chatSummary,
   directoryOf,
   EMPTY_DIRECTORY,
+  emitChatUpdated,
   type GenerationRow,
   generationDto,
   generationsFor,
@@ -451,8 +452,8 @@ export function createAiChatService(deps: AiChatDeps) {
   }
 
   /**
-   * Bumps the chat after a send and tells the owner's sidebar (`ai_chat.updated`, the owner's view); a grantee who
-   * sent gets their own view on their topic. Returns the sender's view.
+   * Bumps the chat after a send and tells every sidebar that shows it (`emitChatUpdated`, 06-08): the owner's view, and
+   * in a shared chat every participant's own view. Returns the sender's view.
    */
   async function touchChat(
     tx: Tx,
@@ -474,20 +475,16 @@ export function createAiChatService(deps: AiChatDeps) {
       .where(eq(aiChats.conversationId, conv.id))
       .returning();
     if (!chat) throw notFound(NOT_FOUND);
+    const heard = await emitChatUpdated(core, tx, conv, chat, { generating, gateway });
+    const mine = heard.get(sender.userId);
+    // A shared chat's summary already has the sender's view; a solo chat's send answers with the owner's view.
+    if (mine?.access !== undefined) return mine;
     const owner = ownerAuthor(await directoryOf(tx, [chat.ownerUserId]), chat.ownerUserId);
-    const ownerView: ChatView = { access: "owner", owner, shared: sender.shared };
-    const summary = chatSummary(conv, chat, { generating, gateway, view: ownerView });
-    await core.realtime.appendEvent(tx, `user:${chat.ownerUserId}`, EventTypes.aiChatUpdated, {
-      chat: summary,
-    });
-    if (sender.userId === chat.ownerUserId) return summary;
-    const mine = chatSummary(conv, chat, {
+    return chatSummary(conv, chat, {
       generating,
       gateway,
       view: { access: sender.access, owner, shared: sender.shared },
     });
-    await core.realtime.appendEvent(tx, `user:${sender.userId}`, EventTypes.aiChatUpdated, { chat: mine });
-    return mine;
   }
 
   /** The newest message seq of a chat (0 when empty). */
@@ -1151,9 +1148,11 @@ export function createAiChatService(deps: AiChatDeps) {
           gateway,
           view: await viewOf(tx, fresh.chat, fresh.chat.ownerUserId),
         });
+        // A rename or an archive reaches every participant's sidebar, each with their own view (06-08).
         if (audits.length > 0) {
-          await core.realtime.appendEvent(tx, `user:${fresh.chat.ownerUserId}`, EventTypes.aiChatUpdated, {
-            chat: summary,
+          await emitChatUpdated(core, tx, fresh.conv, fresh.chat, {
+            generating: summary.generating,
+            gateway,
           });
         }
         return detailOf(req, tx, summary, fresh.chat, facts);

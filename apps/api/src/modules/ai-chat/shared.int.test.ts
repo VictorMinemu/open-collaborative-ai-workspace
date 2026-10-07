@@ -393,3 +393,104 @@ describe("tracer: Víctor shares with Alex — notification, Shared with me, unr
     alexUser.close();
   });
 });
+
+describe("every participant's sidebar follows the shared chat live, each with their own access", () => {
+  let chatId: string;
+  let victorUser: ConvSubscription;
+  let alexUser: ConvSubscription;
+  let samUser: ConvSubscription;
+  let rileyUser: ConvSubscription;
+  const SUMMARY_ONLY = ["settings", "tools", "viewerCan", "instructions", "usePersonalInstructions"];
+
+  /** Waits until each subscription holds an update of the chat matching `pred`; returns the latest per person. */
+  async function everyoneHears(pred: (c: Json) => boolean): Promise<Json[]> {
+    const subs = [victorUser, alexUser, samUser];
+    for (const s of subs) await s.waitFor(() => updatesOf(s, chatId).some(pred), 15_000);
+    return subs.map((s) => updatesOf(s, chatId).filter(pred).at(-1) as Json);
+  }
+
+  it("setup: a draft shared with Alex, Sam (by name) and Backend (Riley never joins); Víctor asks first", async () => {
+    chatId = (await ok(victor.request("POST", "/api/v1/ai-chats/drafts", {}), 201)).id;
+    await ok(grant(victor, chatId, { kind: "user", id: alexId }), 201);
+    await ok(grant(victor, chatId, { kind: "user", id: samId }), 201);
+    await ok(grant(victor, chatId, { kind: "unit", id: backendUnit }), 201);
+    victorUser = await subscribeTopic(stack.baseUrl, victor, `user:${victorId}`);
+    alexUser = await subscribeTopic(stack.baseUrl, alex, `user:${alexId}`);
+    samUser = await subscribeTopic(stack.baseUrl, sam, `user:${samId}`);
+    rileyUser = await subscribeTopic(stack.baseUrl, riley, `user:${rileyId}`);
+    const first = await ok(send(victor, chatId, "Plan the quarterly offsite agenda"), 201);
+    await settled(first.generation.id);
+  });
+
+  it("the auto title reaches all three", async () => {
+    const [v, a, s] = await everyoneHears((c) => c.titleSource === "auto");
+    expect(v).toMatchObject({ access: "owner", shared: true, owner: { id: victorId } });
+    expect(a).toMatchObject({ access: "chat", shared: true, owner: { id: victorId } });
+    expect(s).toMatchObject({ access: "chat", shared: true, owner: { id: victorId } });
+    expect(new Set([v!.title, a!.title, s!.title]).size).toBe(1);
+  });
+
+  it("Alex asks: generating true for Víctor (owner), Alex and Sam (chat), then false at finalize", async () => {
+    const mark = updatesOf(victorUser, chatId).length;
+    const res = await ok(send(alex, chatId, "What should day two look like?"), 201);
+    const started = await everyoneHears((c) => c.generating === true && c.lastActivityAt !== undefined);
+    expect(started.map((c) => c.access)).toEqual(["owner", "chat", "chat"]);
+    await settled(res.generation.id);
+    await idle(chatId);
+    const [v, a, s] = await everyoneHears((c) => c.generating === false);
+    expect([v!.access, a!.access, s!.access]).toEqual(["owner", "chat", "chat"]);
+    // The last update each person heard says nothing runs any more.
+    for (const sub of [victorUser, alexUser, samUser]) {
+      await sub.waitFor(() => updatesOf(sub, chatId).at(-1)?.generating === false, 15_000);
+    }
+    expect(updatesOf(victorUser, chatId).length).toBeGreaterThan(mark);
+    // Alex and Sam count the answer (and Víctor's view keeps its own count): unread is per recipient.
+    expect(updatesOf(samUser, chatId).at(-1)!.unreadCount).toBeGreaterThan(0);
+  });
+
+  it("a rename by Víctor reaches all three", async () => {
+    await ok(victor.request("PATCH", `/api/v1/ai-chats/${chatId}`, { title: "Offsite, final plan" }));
+    const heard = await everyoneHears((c) => c.title === "Offsite, final plan" && c.titleSource === "user");
+    expect(heard.map((c) => c.access)).toEqual(["owner", "chat", "chat"]);
+  });
+
+  it("a regenerate reaches all three (generating again)", async () => {
+    const before = [victorUser, alexUser, samUser].map((s) => updatesOf(s, chatId).length);
+    const res = await ok(victor.request("POST", `/api/v1/ai-chats/${chatId}/regenerate`, {}), 201);
+    await settled(res.generation.id);
+    const subs = [victorUser, alexUser, samUser];
+    for (const [i, s] of subs.entries()) {
+      await s.waitFor(
+        () =>
+          updatesOf(s, chatId)
+            .slice(before[i])
+            .some((c) => c.generating === true),
+        15_000,
+      );
+    }
+  });
+
+  it("no summary carries owner-only settings; Riley (Backend, never joined) heard nothing", async () => {
+    for (const s of [victorUser, alexUser, samUser]) {
+      for (const c of updatesOf(s, chatId)) for (const key of SUMMARY_ONLY) expect(c).not.toHaveProperty(key);
+    }
+    await sleep(300);
+    expect(updatesOf(rileyUser, chatId)).toEqual([]);
+  });
+
+  it("a solo chat still emits only to its owner, with the Phase 5 payload", async () => {
+    const solo = await ok(createChat(victor, "Just for me: draft the budget"), 201);
+    await settled(solo.generation.id);
+    await victorUser.waitFor(
+      () => updatesOf(victorUser, solo.chat.id).some((c) => c.generating === false),
+      15_000,
+    );
+    for (const c of updatesOf(victorUser, solo.chat.id)) {
+      expect(c).not.toHaveProperty("access");
+      expect(c).not.toHaveProperty("unreadCount");
+    }
+    await sleep(300);
+    for (const s of [alexUser, samUser, rileyUser]) expect(updatesOf(s, solo.chat.id)).toEqual([]);
+    for (const s of [victorUser, alexUser, samUser, rileyUser]) s.close();
+  });
+});
