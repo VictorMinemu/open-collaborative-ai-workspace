@@ -9,7 +9,16 @@ export type RedisClient = ReturnType<typeof makeClient>;
  * in PostgreSQL and clients recover gaps by seq replay.
  */
 export class RedisBus {
-  private readonly listeners = new Map<string, Set<(message: string) => void>>();
+  /**
+   * One entry per subscribed channel: its local listeners and the single dispatcher registered with node-redis.
+   * The dispatcher is passed back on unsubscribe so node-redis marks the channel as unsubscribing; a subscribe that
+   * arrives before the UNSUBSCRIBE reply then issues its own SUBSCRIBE. A bare `unsubscribe(channel)` would instead
+   * let that subscribe join the leaving channel and lose its listener when the reply arrives (06.1-05).
+   */
+  private readonly channels = new Map<
+    string,
+    { listeners: Set<(message: string) => void>; dispatch: (message: string) => void }
+  >();
   private constructor(
     readonly pub: RedisClient,
     private readonly sub: RedisClient,
@@ -30,24 +39,35 @@ export class RedisBus {
   }
 
   async subscribe(channel: string, listener: (message: string) => void): Promise<() => Promise<void>> {
-    let set = this.listeners.get(channel);
-    if (!set) {
-      set = new Set();
-      this.listeners.set(channel, set);
-      const current = set;
-      await this.sub.subscribe(channel, (msg) => {
-        for (const l of current) l(msg);
-      });
+    let entry = this.channels.get(channel);
+    const created = !entry;
+    if (!entry) {
+      const listeners = new Set<(message: string) => void>();
+      entry = {
+        listeners,
+        dispatch: (msg) => {
+          for (const l of listeners) l(msg);
+        },
+      };
+      this.channels.set(channel, entry);
     }
-    set.add(listener);
-    return async () => {
-      const s = this.listeners.get(channel);
-      if (!s) return;
-      s.delete(listener);
-      if (s.size === 0) {
-        this.listeners.delete(channel);
-        await this.sub.unsubscribe(channel).catch(() => {});
+    // Added before the SUBSCRIBE round trip, so the entry is never empty while it is live.
+    entry.listeners.add(listener);
+    const mine = entry;
+    if (created) {
+      try {
+        await this.sub.subscribe(channel, mine.dispatch);
+      } catch (err) {
+        // A failed SUBSCRIBE must not leave an entry that later subscribers would join without a subscription.
+        if (this.channels.get(channel) === mine) this.channels.delete(channel);
+        throw err;
       }
+    }
+    return async () => {
+      if (!mine.listeners.delete(listener)) return; // already stopped
+      if (mine.listeners.size > 0 || this.channels.get(channel) !== mine) return;
+      this.channels.delete(channel);
+      await this.sub.unsubscribe(channel, mine.dispatch).catch(() => {});
     };
   }
 
