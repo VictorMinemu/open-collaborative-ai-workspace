@@ -27,7 +27,7 @@ import { createEnvFileSecretStore, type SecretStore } from "./lib/secret-store";
 import { createAgentModule } from "./modules/agent";
 import { createAgentChannelModule } from "./modules/agent-channel";
 import { createAiChatModule } from "./modules/ai-chat";
-import { createArtifactModule } from "./modules/artifact";
+import { createArtifactModule, type ObjectStorage } from "./modules/artifact";
 import { createAuditService } from "./modules/audit";
 import { createBotCapabilitiesModule } from "./modules/bot-capabilities";
 import { createChatModule, createConversationAccess } from "./modules/chat";
@@ -52,6 +52,8 @@ export interface BuiltApp {
   authz: AuthzRegistry;
   /** The Device Link hub (tests reach its session handler, e.g. `onAccessChanged`). */
   deviceHub: DeviceHub;
+  /** Attachment object storage, null when unconfigured (tests count its calls, e.g. none on the prompt submit path). */
+  storage: ObjectStorage | null;
   close(): Promise<void>;
 }
 
@@ -274,6 +276,7 @@ export async function buildApp(
     core,
     authz,
     deviceHub: deviceModule.hub,
+    storage: artifactModule.storage,
     async close() {
       await app.close();
       for (const m of modules) await m.close?.();

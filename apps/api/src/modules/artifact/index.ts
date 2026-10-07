@@ -18,6 +18,7 @@ import { createAttachmentSweeper } from "./sweeper";
 
 export type { AttachmentScope, AttachmentScopes, ScopedKind } from "./attachments";
 export { type AttachmentRow, toAttachment } from "./model";
+export { fitImageWithin } from "./renditions";
 export {
   type AttachmentPart,
   attachmentKey,

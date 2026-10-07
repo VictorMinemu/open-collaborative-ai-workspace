@@ -36,11 +36,16 @@ export interface DeviceSessionHandler {
   /** The device stayed disconnected past the grace period. */
   onOffline(device: DeviceRef): Promise<void>;
   onEvent(device: DeviceRef, frame: EventFrame): Promise<void>;
+  /**
+   * A command's outcome: the device's ack (`origin: "device"`), or the hub failing it before it was sent
+   * (`origin: "hub"`, 06.1: `error` is then the reason, e.g. `image_unavailable`; never device-supplied text).
+   */
   onCommandResult(
     device: DeviceRef,
     command: DeviceCommandRow,
     ok: boolean,
     error: string | null,
+    origin?: "device" | "hub",
   ): Promise<void>;
   /** A `diff.result` for a session's `diff.request` (also relayed to any waiting requester). */
   onDiffResult(device: DeviceRef, workSessionId: string, frame: DiffResultFrame): Promise<void>;
@@ -409,8 +414,9 @@ export class DeviceHub {
   private flush(deviceId: string, includeSent: boolean): Promise<void> {
     const link = this.links.get(deviceId);
     if (!link) return Promise.resolve();
-    const run = async () => {
-      if (this.links.get(deviceId) !== link) return;
+    const none: DeviceCommandRow[] = [];
+    const run = async (): Promise<DeviceCommandRow[]> => {
+      if (this.links.get(deviceId) !== link) return none;
       const { device, socket } = link;
       const tenant = { organizationId: device.organizationId, userId: null };
       const handler = this.handler;
@@ -430,7 +436,7 @@ export class DeviceHub {
         for (const row of rows) out.push({ row, plan: await handler?.prepareCommand?.(tx, device, row) });
         return out;
       });
-      if (batch.length === 0) return;
+      if (batch.length === 0) return none;
 
       const sent: string[] = [];
       const failed: Array<{ id: string; reason: string }> = [];
@@ -460,9 +466,9 @@ export class DeviceHub {
         if (!ok) break;
         sent.push(row.id);
       }
-      if (sent.length === 0 && failed.length === 0) return;
+      if (sent.length === 0 && failed.length === 0) return none;
 
-      const failedRows = await this.opts.db.withTenant(tenant, async (tx) => {
+      return this.opts.db.withTenant(tenant, async (tx) => {
         if (sent.length > 0) {
           await tx
             .update(deviceCommands)
@@ -480,13 +486,31 @@ export class DeviceHub {
         }
         return out;
       });
-      // Pitfall 8: the handler locks the session; only after the marking transaction committed.
-      for (const row of failedRows) await handler?.onCommandResult(device, row, false, row.error);
     };
-    link.sending = link.sending.then(run, run).catch((err) => {
-      this.opts.log.error({ err }, "device command flush failed");
-    });
+    const done = link.sending.then(run, run);
+    link.sending = done.then(
+      () => undefined,
+      (err) => {
+        this.opts.log.error({ err }, "device command flush failed");
+      },
+    );
+    // Pitfall 8: failures reach the handler (which locks the session) only after the marking transaction committed,
+    // and outside this device's delivery chain: the handler may enqueue the next command, whose flush waits for it.
+    void done.then(
+      (failedRows) => this.reportUndelivered(link.device, failedRows),
+      () => {},
+    );
     return link.sending;
+  }
+
+  private async reportUndelivered(device: DeviceRef, rows: DeviceCommandRow[]): Promise<void> {
+    for (const row of rows) {
+      try {
+        await this.handler?.onCommandResult(device, row, false, row.error, "hub");
+      } catch (err) {
+        this.opts.log.error({ err, commandId: row.id }, "device command failure handling failed");
+      }
+    }
   }
 
   private async markOffline(device: DeviceRef, disconnectedAt: Date): Promise<void> {

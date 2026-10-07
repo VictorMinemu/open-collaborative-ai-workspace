@@ -1,8 +1,8 @@
-import { createHash } from "node:crypto";
-import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { createHash, randomBytes } from "node:crypto";
+import { DeleteObjectCommand, GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import pg from "pg";
 import sharp from "sharp";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { eventually, type FakeDevice, type Frame } from "../../testing-device";
 import { startTestStorage, TEST_BUCKET, type TestStorage } from "../../testing-storage";
@@ -248,5 +248,160 @@ describe("request order: a prompt's images go in the order the sender listed the
     const listed = (detail.prompts as Json[]).find((p) => p.id === prompt.id)!;
     expect(listed.attachments.map((a: Json) => a.id)).toEqual(order);
     await finish(main, cmd);
+  });
+});
+
+/** Counts every object storage call the API makes until `restore()` (the submit path must make none). */
+function spyStorage(ctx: Ctx) {
+  const store = ctx.stack.built.storage!;
+  const methods = ["stream", "head", "rangeGet", "presignGet", "presignPut", "put", "remove"] as const;
+  const spies = methods.map((m) => vi.spyOn(store, m));
+  return {
+    count: () => spies.reduce((n, s) => n + s.mock.calls.length, 0),
+    restore: () => {
+      for (const s of spies) s.mockRestore();
+    },
+  };
+}
+
+const promptCount = async (ctx: Ctx) =>
+  Number(
+    (
+      await ctx.su.query("select count(*)::int as n from app.work_prompts where work_session_id = $1", [
+        ctx.sessionId,
+      ])
+    ).rows[0].n,
+  );
+
+/** A PNG of `width`×`height` whose low-entropy noise keeps it between a few hundred KB and 1 MiB at 1400×900. */
+async function noisyPng(width: number, height: number): Promise<Buffer> {
+  const raw = randomBytes(width * height * 3);
+  for (let i = 0; i < raw.length; i++) raw[i]! &= i % 3 === 0 ? 0x03 : 0x01;
+  return sharp(raw, { raw: { width, height, channels: 3 } })
+    .png()
+    .toBuffer();
+}
+
+describe("the bytes sent are the right ones and bounded (P-02): small PNG original, else a ≤ 2000 px rendition", () => {
+  it("a 1400×900 PNG under 1 MiB reaches the device as the original image/png", async () => {
+    const png = await noisyPng(1400, 900);
+    expect(png.length).toBeGreaterThan(512 * 1024);
+    expect(png.length).toBeLessThanOrEqual(1024 * 1024);
+    const att = await upload(main, "screenshot.png", "image/png", png);
+    await ok(submit(main, "read the error in this screenshot", [att.id]));
+    const cmd = (await main.device.command("prompt", main.sessionId)) as Cmd;
+    const [image] = received(cmd);
+    expect(image!.mediaType).toBe("image/png");
+    expect(sha(image!.bytes)).toBe(sha(png));
+    await finish(main, cmd);
+  });
+
+  it("a 2400×1500 PNG reaches the device as image/webp with a long edge of 2000", async () => {
+    const png = await solid(2400, 1500, "#246").png().toBuffer();
+    const att = await upload(main, "wide.png", "image/png", png);
+    await ok(submit(main, "and this wide one", [att.id]));
+    const cmd = (await main.device.command("prompt", main.sessionId)) as Cmd;
+    const [image] = received(cmd);
+    expect(image!.mediaType).toBe("image/webp");
+    const meta = await sharp(image!.bytes).metadata();
+    expect([meta.format, meta.width, meta.height]).toEqual(["webp", 2000, 1250]);
+    await finish(main, cmd);
+  });
+});
+
+describe("the budget is checked at submit from recorded sizes, without a storage call (WZ-IMG-02, P-01, P-03)", () => {
+  it("an image whose chosen part is over 2 MiB is 400 image_too_large; nothing is queued or linked", async () => {
+    const att = await upload(main, "huge.jpg", "image/jpeg", jpeg);
+    // The recorded rendition size is what the budget reads (no storage call while the session row is locked).
+    await main.su.query("update app.attachments set large_bytes = $2 where id = $1", [
+      att.id,
+      3 * 1024 * 1024,
+    ]);
+    const before = await promptCount(main);
+    const spy = spyStorage(main);
+    try {
+      const res = await submit(main, "too big", [att.id]);
+      expect(res.status, JSON.stringify(res.body)).toBe(400);
+      expect(res.body!.error).toMatchObject({
+        code: "image_too_large",
+        message: "huge.jpg is 3.0 MB after resizing; images can be at most 2 MB",
+      });
+      expect(spy.count()).toBe(0);
+    } finally {
+      spy.restore();
+    }
+    expect(await promptCount(main)).toBe(before);
+    const row = (await main.su.query("select work_prompt_id from app.attachments where id = $1", [att.id]))
+      .rows[0];
+    expect(row.work_prompt_id).toBeNull();
+  });
+});
+
+describe("a vanished image fails its prompt visibly; the link stays up and the queue moves on (P-03, Pitfall 8)", () => {
+  it("the device gets no frame for it; failed, idle with lastError, audited image_unavailable; the next prompt runs", async () => {
+    const first = await ok(submit(main, "first"));
+    const firstCmd = (await main.device.command("prompt", main.sessionId)) as Cmd;
+    expect(firstCmd.payload.promptId).toBe(first.id);
+
+    const att = await upload(main, "gone.jpg", "image/jpeg", jpeg);
+    const spy = spyStorage(main);
+    let withImage: Json;
+    try {
+      // Queued behind a running turn: the accepted submit makes no storage call either.
+      withImage = await ok(submit(main, "look at this", [att.id]));
+      expect(withImage.status).toBe("queued");
+      expect(spy.count()).toBe(0);
+    } finally {
+      spy.restore();
+    }
+    const third = await ok(submit(main, "third"));
+    await s3.send(
+      new DeleteObjectCommand({
+        Bucket: TEST_BUCKET,
+        Key: attachmentKey(main.orgId, main.conv, att.id, "large.webp"),
+      }),
+    );
+
+    main.device.ack(firstCmd.id);
+    main.device.event(main.sessionId, { type: "prompt.started", promptId: first.id });
+    main.device.event(main.sessionId, {
+      type: "prompt.completed",
+      promptId: first.id,
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    const next = (await main.device.command("prompt", main.sessionId)) as Cmd;
+    expect(next.payload.promptId).toBe(third.id);
+    expect(main.device.pending("prompt").filter((f) => (f as Cmd).payload.promptId === withImage.id)).toEqual(
+      [],
+    );
+    expect(main.device.closed).toBe(false);
+
+    const cmds = await main.su.query(
+      "select status, error from app.device_commands where kind = 'prompt' and payload->>'promptId' = $1",
+      [withImage.id],
+    );
+    expect(cmds.rows).toEqual([{ status: "failed", error: "image_unavailable" }]);
+    const p = await main.su.query("select status from app.work_prompts where id = $1", [withImage.id]);
+    expect(p.rows[0].status).toBe("failed");
+    const s = await main.su.query("select last_error from app.work_sessions where id = $1", [main.sessionId]);
+    expect(s.rows[0].last_error).toBe("An attached image is no longer available");
+    const audit = await main.su.query(
+      "select result, metadata from app.audit_events where action = 'work_prompt.refused' and resource_id = $1",
+      [withImage.id],
+    );
+    expect(audit.rows).toEqual([
+      expect.objectContaining({
+        result: "error",
+        metadata: expect.objectContaining({ promptId: withImage.id, reason: "image_unavailable" }),
+      }),
+    ]);
+    // The session went idle with the error before the next prompt was dispatched.
+    const idle = await main.su.query(
+      `select payload from app.stream_events where stream_id = $1 and type = 'work_session.updated'
+         and payload->>'status' = 'idle' and payload->>'lastError' = $2`,
+      [`ws:${main.sessionId}`, "An attached image is no longer available"],
+    );
+    expect(idle.rows.length).toBeGreaterThan(0);
+    await finish(main, next);
   });
 });

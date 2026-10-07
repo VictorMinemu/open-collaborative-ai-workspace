@@ -64,6 +64,13 @@ export type ReauthorizeReason = "policy" | "access_changed" | "device_opt_out";
 const UNAUTHORIZED_MODE_ERROR =
   "The device reported Full access without authorization; the session was stopped";
 
+/** 06.1-02: why the hub failed a prompt before sending it, and the plain text the session shows. */
+type UndeliveredReason = "image_unavailable" | "frame_too_large";
+const UNDELIVERED_PROMPT = new Map<string, string>([
+  ["image_unavailable", "An attached image is no longer available"],
+  ["frame_too_large", "The images are too large to send to the device"],
+]);
+
 export type SessionRow = typeof workSessions.$inferSelect;
 type PromptRow = typeof workPrompts.$inferSelect;
 type ApprovalRow = typeof workApprovals.$inferSelect;
@@ -748,6 +755,7 @@ export class WorkSessionService implements DeviceSessionHandler {
     cmd: DeviceCommandRow,
     ok: boolean,
     error: string | null,
+    origin: "device" | "hub" = "device",
   ): Promise<void> {
     if (!cmd.workSessionId) return;
     const sessionId = cmd.workSessionId;
@@ -807,6 +815,11 @@ export class WorkSessionService implements DeviceSessionHandler {
       if (cmd.kind === "prompt" && !ok) {
         const promptId = String((cmd.payload as { promptId?: unknown }).promptId ?? "");
         if (!UUID_RE.test(promptId)) return;
+        const undelivered = origin === "hub" ? UNDELIVERED_PROMPT.get(error ?? "") : undefined;
+        if (undelivered) {
+          await this.promptUndelivered(tx, s, promptId, error as UndeliveredReason, undelivered);
+          return;
+        }
         if (/not active/i.test(error ?? "") && s.status !== "archived") {
           // Daemon restarted and lost the runtime: put the prompt back at the head and re-attach.
           const [p] = await tx
@@ -830,6 +843,41 @@ export class WorkSessionService implements DeviceSessionHandler {
         }
       }
     });
+  }
+
+  /**
+   * 06.1-02 (P-03, Pitfall 8): the hub could not send a prompt (an image is gone, or the frame is too large). Called
+   * after the hub's marking transaction committed, with the session LOCKED: the prompt fails, the refusal is audited
+   * with its reason, the session goes idle with a plain `lastError`, and the arbiter moves on.
+   */
+  private async promptUndelivered(
+    tx: Tx,
+    s: SessionRow,
+    promptId: string,
+    reason: UndeliveredReason,
+    message: string,
+  ): Promise<void> {
+    const [p] = await tx
+      .update(workPrompts)
+      .set({ status: "failed", completedAt: sql`now()` })
+      .where(and(eq(workPrompts.id, promptId), inArray(workPrompts.status, IN_FLIGHT)))
+      .returning();
+    if (!p) return;
+    await this.deps.audit.record(tx, {
+      action: "work_prompt.refused",
+      resourceType: "work_prompt",
+      resourceId: p.id,
+      userId: p.authorUserId,
+      deviceId: s.deviceId,
+      sessionId: s.id,
+      result: "error",
+      metadata: { promptId: p.id, authorUserId: p.authorUserId, requestedMode: s.permissionMode, reason },
+    });
+    await this.emitPrompt(tx, p);
+    if (s.status === "running") {
+      await this.setStatus(tx, s, "idle", { lastError: message });
+      await this.tryDispatch(tx, s);
+    }
   }
 
   // ------------------------------------------------------------------ automatic titles (D-18 … D-20, ADR-0014)

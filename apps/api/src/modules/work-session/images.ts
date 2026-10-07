@@ -17,6 +17,7 @@ import {
   type AttachmentRow,
   type AttachmentScope,
   attachmentRowsForWorkPrompt,
+  fitImageWithin,
   type ObjectStorage,
   readAttachmentBytes,
 } from "../artifact";
@@ -118,6 +119,84 @@ export function createWorkSessionAttachmentScope(core: Core): AttachmentScope {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * The longest edge sent to a runtime (06.1 RESEARCH Q2): Anthropic rejects requests with more than 20 images unless
+ * every image is at most 2000 px on both sides, and a session's history accumulates images turn after turn.
+ */
+export const DEVICE_IMAGE_MAX_EDGE = 2000;
+/** A PNG original at most this large (and at most DEVICE_IMAGE_MAX_EDGE on both sides) goes as is (P-02). */
+export const PNG_ORIGINAL_MAX_BYTES = 1024 * 1024;
+
+type ImageFacts = Pick<
+  AttachmentRow,
+  "id" | "filename" | "contentType" | "sizeBytes" | "width" | "height" | "largeBytes"
+>;
+
+/** Which stored part of an image goes to the device, its type, whether it is resized, and its recorded size. */
+export interface ImagePartChoice {
+  part: "original" | "large.webp";
+  mediaType: PromptImage["mediaType"];
+  resize: boolean;
+  /** Recorded size of the chosen part (`size_bytes` / `large_bytes`); null when it was never recorded. */
+  bytes: number | null;
+}
+
+/**
+ * P-02: a PNG of at most PNG_ORIGINAL_MAX_BYTES whose oriented width and height are both at most
+ * DEVICE_IMAGE_MAX_EDGE goes as the original PNG (clipboard screenshots: lossless text, no camera metadata).
+ * Everything else goes as the `large.webp` rendition, resized at dispatch when the original's long edge is above
+ * DEVICE_IMAGE_MAX_EDGE (the rendition is 2048 px).
+ *
+ * Recorded deviation from D-04 ("keep the original type when small") for non-PNG images: EXIF/GPS privacy and
+ * single-frame GIF. A JPEG or WebP original can carry camera EXIF/GPS (the rendition strips it), and a GIF must reach
+ * the runtimes as a single frame (OpenAI accepts only non-animated GIFs; the rendition is the first frame).
+ */
+export function chooseImagePart(row: ImageFacts): ImagePartChoice {
+  const known = row.width != null && row.height != null;
+  const longEdge = known ? Math.max(row.width!, row.height!) : Number.POSITIVE_INFINITY;
+  if (
+    row.contentType === "image/png" &&
+    row.sizeBytes <= PNG_ORIGINAL_MAX_BYTES &&
+    longEdge <= DEVICE_IMAGE_MAX_EDGE
+  ) {
+    return { part: "original", mediaType: "image/png", resize: false, bytes: row.sizeBytes };
+  }
+  return {
+    part: "large.webp",
+    mediaType: "image/webp",
+    resize: longEdge > DEVICE_IMAGE_MAX_EDGE,
+    bytes: row.largeBytes ?? null,
+  };
+}
+
+const MB = 1024 * 1024;
+
+/**
+ * WZ-IMG-02 (P-01, P-03): every image's chosen part fits WORK_PROMPT_IMAGE_MAX_BYTES, judged from the sizes recorded
+ * at upload (`size_bytes`, `large_bytes`). Runs in the submit transaction with no storage call and no image work, so
+ * nothing slow happens while the session row is locked. Otherwise 400 `image_too_large`.
+ */
+export function checkImageBudget(rows: ImageFacts[]): void {
+  const limit = `images can be at most ${WORK_PROMPT_IMAGE_MAX_BYTES / MB} MB`;
+  for (const row of rows) {
+    const { bytes } = chooseImagePart(row);
+    if (bytes === null) {
+      throw new HttpError(400, "image_too_large", `${row.filename} has no recorded size; ${limit}`, {
+        attachmentId: row.id,
+        maxBytes: WORK_PROMPT_IMAGE_MAX_BYTES,
+      });
+    }
+    if (bytes > WORK_PROMPT_IMAGE_MAX_BYTES) {
+      throw new HttpError(
+        400,
+        "image_too_large",
+        `${row.filename} is ${(bytes / MB).toFixed(1)} MB after resizing; ${limit}`,
+        { attachmentId: row.id, bytes, maxBytes: WORK_PROMPT_IMAGE_MAX_BYTES },
+      );
+    }
+  }
+}
+
 /** A prompt's image is gone (deleted, missing from storage, unreadable or over the cap): its prompt fails visibly. */
 export class ImageUnavailableError extends CommandUndeliverableError {
   constructor() {
@@ -167,14 +246,15 @@ export async function preparePromptImages(
   for (const id of ids) {
     const row = byId.get(id);
     if (!row) return { images: null };
-    images.push({ row, part: "large.webp", mediaType: "image/webp", resize: false });
+    const { part, mediaType, resize } = chooseImagePart(row);
+    images.push({ row, part, mediaType, resize });
   }
   return { images };
 }
 
 /**
  * Step 2, AFTER the flush transaction committed: reads each chosen part from object storage (capped at
- * WORK_PROMPT_IMAGE_MAX_BYTES) and returns the payload to send, with `images` (base64) and without
+ * WORK_PROMPT_IMAGE_MAX_BYTES), fits it within DEVICE_IMAGE_MAX_EDGE when needed, and returns the payload to send, with `images` (base64) and without
  * `imageAttachmentIds`. The result is never stored. Any failure is `ImageUnavailableError`.
  */
 export async function hydratePromptImages(
@@ -189,6 +269,7 @@ export async function hydratePromptImages(
     let bytes: Uint8Array;
     try {
       bytes = await readAttachmentBytes(storage, image.row, image.part, WORK_PROMPT_IMAGE_MAX_BYTES);
+      if (image.resize) bytes = await fitImageWithin(bytes, DEVICE_IMAGE_MAX_EDGE);
     } catch {
       throw new ImageUnavailableError();
     }
