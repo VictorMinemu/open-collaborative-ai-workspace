@@ -1,13 +1,14 @@
 "use client";
 
-import { ChevronRight, MessageCircle, SquarePen } from "lucide-react";
+import type { AiChatSummary } from "@ocw/contracts";
+import { ChevronRight, MessageCircle, MessagesSquare, SquarePen } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { sectionItemClass } from "@/components/shell/section-sidebar";
 import { buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
-import { useAiChats } from "@/lib/ai-chat-queries";
+import { useAiChats, useSharedAiChats } from "@/lib/ai-chat-queries";
 import { cn } from "@/lib/utils";
 
 /** Rows the sidebar shows; the rest are one click away on /chat/ai. */
@@ -19,12 +20,16 @@ const ACTIVE_RE = /^\/chat\/ai\/([0-9a-f-]{36})(?:[/?#]|$)/u;
  * "AI chats" in the chat sidebar (05-10, AICHAT-04), under the views: the member's five most recent chats (only they
  * ever see them), "New chat" and "See all". Live: a new chat, a generated title, a rename or an archive arrive as
  * `ai_chat.updated` on the member's `user:` topic (the sidebar's ListSync applies them to the same list cache).
+ * Under them, "Shared with me" (06-03): up to five chats other members shared in place, each with its owner's name;
+ * only when there is one. A new grant arrives live on the same topic.
  */
 export function AiChatsSection() {
   const pathname = usePathname();
   const list = useAiChats(false);
   const all = (list.data?.pages ?? []).flatMap((p) => p.chats);
   const chats = all.slice(0, SIDEBAR_CHATS);
+  const sharedList = useSharedAiChats();
+  const shared = (sharedList.data?.pages ?? []).flatMap((p) => p.chats).slice(0, SIDEBAR_CHATS);
   const activeId = ACTIVE_RE.exec(pathname)?.[1] ?? null;
 
   return (
@@ -100,6 +105,54 @@ export function AiChatsSection() {
           )}
         </nav>
       )}
+      {shared.length > 0 ? <SharedWithMe chats={shared} activeId={activeId} /> : null}
     </section>
+  );
+}
+
+/** Chats shared with the member: the title, and whose chat it is on a second, quieter line. */
+function SharedWithMe({ chats, activeId }: { chats: AiChatSummary[]; activeId: string | null }) {
+  return (
+    <div data-testid="sidebar-ai-shared" className="mt-2">
+      <h4
+        id="ai-shared-heading"
+        className="flex h-7 items-center px-2.5 font-medium text-[12px] text-muted-foreground"
+      >
+        Shared with me
+      </h4>
+      <nav aria-labelledby="ai-shared-heading" className="grid grid-cols-1 gap-px">
+        {chats.map((c) => {
+          const active = c.id === activeId;
+          return (
+            <Link
+              key={c.id}
+              href={`/chat/ai/${c.id}`}
+              data-testid="sidebar-ai-shared-chat"
+              data-chat-id={c.id}
+              aria-current={active ? "page" : undefined}
+              className={cn(sectionItemClass(active), "h-auto min-h-8 items-start py-1.5")}
+            >
+              <MessagesSquare
+                aria-hidden
+                className={cn("mt-0.5 size-4 shrink-0", active ? "" : "text-muted-foreground")}
+              />
+              <span className="grid min-w-0 flex-1 leading-tight">
+                <span className="truncate">{c.title}</span>
+                {c.owner ? (
+                  <span className="truncate font-normal text-[12px] text-muted-foreground">
+                    {c.owner.displayName}
+                  </span>
+                ) : null}
+              </span>
+              {c.generating ? (
+                <span className="mt-1.5 ml-auto size-1.5 shrink-0 animate-pulse rounded-full bg-primary">
+                  <span className="sr-only">Answering</span>
+                </span>
+              ) : null}
+            </Link>
+          );
+        })}
+      </nav>
+    </div>
   );
 }

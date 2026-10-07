@@ -2,9 +2,10 @@
 
 import type { AiGeneration, Message, SendAiMessageResponse } from "@ocw/contracts";
 import { Check, Copy, Globe, Square, Unplug } from "lucide-react";
-import { Fragment, type ReactNode, useState } from "react";
+import { createContext, Fragment, type ReactNode, useContext, useState } from "react";
 import { MessageAttachments } from "@/components/chat/attachments/attachment-grid";
 import { Lightbox } from "@/components/chat/attachments/lightbox";
+import { PrincipalAvatar } from "@/components/chat/principal-avatar";
 import { Markdown } from "@/components/markdown/markdown";
 import { safeUrl } from "@/components/markdown/safe-url";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -14,6 +15,18 @@ import { sourceLinks } from "@/lib/ai-tools";
 import { cn } from "@/lib/utils";
 import { GenerationError, markStreamed } from "./generation-error";
 import { RegenerateMenu } from "./regenerate-menu";
+
+/**
+ * Who is reading and whether the chat is shared (06-03, MULTI-01). In a shared chat every human turn shows its
+ * author's avatar and name; other people's turns sit on the left, the reader's own stay on the right. A private chat
+ * (Phase 5) renders exactly as before.
+ */
+export interface AiChatPeople {
+  viewerId: string | null;
+  shared: boolean;
+}
+
+export const AiChatPeopleContext = createContext<AiChatPeople>({ viewerId: null, shared: false });
 
 /** Regenerate on the chat's last answer only (05-06). */
 export interface AnswerRegenerate {
@@ -48,6 +61,7 @@ export function AiMessage({
   /** A streaming render counts as live (false for a replay ahead of the page's first snapshot). */
   live?: boolean;
 }) {
+  if (message.authorKind === "system") return <NoticeRow message={message} text={text} />;
   if (message.authorKind !== "agent") return <UserTurn message={message} text={text} />;
 
   const streaming = message.status === "streaming";
@@ -105,25 +119,72 @@ export function AiMessage({
 }
 
 /**
+ * A notice of the platform (06-05: an access change, someone joined): a quiet centered line, no bubble, no actions.
+ */
+function NoticeRow({ message, text }: { message: Message; text: string }) {
+  return (
+    <div
+      data-testid="ai-notice"
+      data-role="notice"
+      data-message-id={message.id}
+      className="-my-3 flex justify-center px-4"
+    >
+      <p className="max-w-md text-balance text-center text-[12.5px] text-muted-foreground leading-5">
+        {text}
+      </p>
+    </div>
+  );
+}
+
+/**
  * The member's turn: its files (05-12) right-aligned above the bubble, as in chat — image previews (the API's webp
- * renditions, opening the lightbox) and file cards — then the text, when there is any.
+ * renditions, opening the lightbox) and file cards — then the text, when there is any. In a shared chat (06-03) the
+ * author's avatar and name sit above the turn, and other people's turns align left.
  */
 function UserTurn({ message, text }: { message: Message; text: string }) {
   const [lightbox, setLightbox] = useState<number | null>(null);
+  const people = useContext(AiChatPeopleContext);
   const files = message.attachments ?? [];
   const images = files.filter((a) => a.isImage && a.previewUrl);
+  const mine = people.viewerId === null || message.authorId === people.viewerId;
+  const attributed = people.shared || !mine;
+  const name = message.author?.displayName ?? "Former member";
   return (
     <div
       data-testid="ai-message"
       data-role="user"
       data-status={message.status}
       data-message-id={message.id}
-      className="flex flex-col items-end gap-1.5 pl-10 sm:pl-24"
+      data-author-id={message.authorId ?? undefined}
+      className={cn(
+        "flex flex-col gap-1.5",
+        mine ? "items-end pl-10 sm:pl-24" : "items-start pr-10 sm:pr-24",
+      )}
     >
+      {attributed ? (
+        <div className={cn("flex min-w-0 max-w-full items-center gap-2", mine && "flex-row-reverse")}>
+          <span data-testid="ai-message-avatar" className="inline-flex shrink-0">
+            <PrincipalAvatar
+              kind="user"
+              name={name}
+              avatarUrl={message.author?.avatarUrl}
+              seed={message.authorId}
+              compact
+              className="size-5 text-[10px]"
+            />
+          </span>
+          <span
+            data-testid="ai-message-author"
+            className="truncate font-medium text-[12.5px] text-foreground/80"
+          >
+            {name}
+          </span>
+        </div>
+      ) : null}
       {files.length > 0 ? (
-        <div className="flex w-full justify-end">
+        <div className={cn("flex w-full", mine ? "justify-end" : "justify-start")}>
           {/* Shrinks to the column on phones so a wide preview never overflows the turn. */}
-          <div className="min-w-0 max-w-full [&>div]:mt-0 [&>div]:items-end">
+          <div className={cn("min-w-0 max-w-full [&>div]:mt-0", mine && "[&>div]:items-end")}>
             <MessageAttachments attachments={files} onOpenImage={setLightbox} />
           </div>
         </div>

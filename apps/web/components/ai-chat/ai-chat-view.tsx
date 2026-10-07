@@ -29,9 +29,11 @@ import {
 } from "@/lib/ai-chat-queries";
 import { errorMessage, isApiError } from "@/lib/api";
 import { useAttachmentsConfig } from "@/lib/attachment-queries";
+import { useMe } from "@/lib/queries";
 import { AiChatHeader, AiChatMenuItem, AiChatPlainHeader } from "./ai-chat-header";
 import { AiComposer, type AiComposerApi, type AiSendFiles } from "./ai-composer";
 import { AiEmptyState } from "./ai-empty-state";
+import { AiChatPeopleContext } from "./ai-message";
 import { AiMessageList } from "./ai-message-list";
 import { ChatSettingsSheet } from "./chat-settings-sheet";
 import { ShareDialog } from "./share-dialog";
@@ -147,6 +149,7 @@ function NewChat() {
 function ExistingChat({ chatId }: { chatId: string }) {
   const chat = useAiChat(chatId);
   const models = useAiModels();
+  const me = useMe();
   // A title generated or typed after the snapshot, or an archive, arrives live as the chat's latest summary.
   const live = useAiChatSummary(chatId);
   // Settings saved in the chat settings sheet after the snapshot (05-11).
@@ -236,32 +239,42 @@ function ExistingChat({ chatId }: { chatId: string }) {
     );
   }
 
+  // Owner-only actions follow the server's decisions for this viewer (P-04): a grantee sees none of them.
+  const canManage = detail?.viewerCan.includes("ai_chat.manage") ?? false;
+  const canShare = detail?.viewerCan.includes("ai_chat.share") ?? false;
+  const people = { viewerId: me.data?.user.id ?? null, shared: detail?.shared === true };
+
   return (
     <Frame
       header={
         detail ? (
           <AiChatHeader
             chat={detail}
+            viewerCan={detail.viewerCan}
             extraMenuItems={
-              <>
-                <AiChatMenuItem
-                  icon={<SlidersHorizontal />}
-                  testId="ai-chat-menu-settings"
-                  onSelect={() => setSettingsOpen(true)}
-                >
-                  Chat settings
-                </AiChatMenuItem>
-                {/* A read-only snapshot link for colleagues in the organization (05-13), owner with ai_chat.share. */}
-                {detail.viewerCan.includes("ai_chat.share") ? (
-                  <AiChatMenuItem
-                    icon={<Share2 />}
-                    testId="ai-chat-menu-share"
-                    onSelect={() => setShareOpen(true)}
-                  >
-                    Share
-                  </AiChatMenuItem>
-                ) : null}
-              </>
+              canManage || canShare ? (
+                <>
+                  {canManage ? (
+                    <AiChatMenuItem
+                      icon={<SlidersHorizontal />}
+                      testId="ai-chat-menu-settings"
+                      onSelect={() => setSettingsOpen(true)}
+                    >
+                      Chat settings
+                    </AiChatMenuItem>
+                  ) : null}
+                  {/* People and a read-only snapshot link (05-13, 06-03), owner with ai_chat.share. */}
+                  {canShare ? (
+                    <AiChatMenuItem
+                      icon={<Share2 />}
+                      testId="ai-chat-menu-share"
+                      onSelect={() => setShareOpen(true)}
+                    >
+                      Share
+                    </AiChatMenuItem>
+                  ) : null}
+                </>
+              ) : null
             }
           />
         ) : (
@@ -269,16 +282,27 @@ function ExistingChat({ chatId }: { chatId: string }) {
         )
       }
     >
-      {detail ? <ChatSettingsSheet chat={detail} open={settingsOpen} onOpenChange={setSettingsOpen} /> : null}
-      {detail ? <ShareDialog chatId={chatId} open={shareOpen} onOpenChange={setShareOpen} /> : null}
-      <ChatDropZone enabled={!detail?.archived} composer={composer}>
-        <AiMessageList
+      {detail && canManage ? (
+        <ChatSettingsSheet chat={detail} open={settingsOpen} onOpenChange={setSettingsOpen} />
+      ) : null}
+      {detail && canShare ? (
+        <ShareDialog
           chatId={chatId}
-          messages={chat.messages}
-          textOf={chat.textOf}
-          onRegenerated={chat.applySent}
-          live={chat.live}
+          open={shareOpen}
+          onOpenChange={setShareOpen}
+          viewerCan={detail.viewerCan}
         />
+      ) : null}
+      <ChatDropZone enabled={!detail?.archived} composer={composer}>
+        <AiChatPeopleContext.Provider value={people}>
+          <AiMessageList
+            chatId={chatId}
+            messages={chat.messages}
+            textOf={chat.textOf}
+            onRegenerated={chat.applySent}
+            live={chat.live}
+          />
+        </AiChatPeopleContext.Provider>
         {detail?.archived ? (
           <ArchivedNotice chatId={chatId} />
         ) : (

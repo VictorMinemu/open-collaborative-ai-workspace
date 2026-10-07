@@ -3,6 +3,7 @@
 import {
   AiChatDetail,
   AiChatList,
+  type AiChatListScope,
   type AiChatSnapshot,
   AiChatSnapshot as AiChatSnapshotSchema,
   type AiChatSummary,
@@ -48,6 +49,8 @@ export const aiKeys = {
   chat: (id: string) => ["ai", "chat", id] as const,
   /** The member's chat list (05-10): the recent one (sidebar and /chat/ai) or the archived one. */
   list: (archived: boolean) => ["ai", "chats", archived ? "archived" : "recent"] as const,
+  /** Chats other members shared with the viewer (06-03, `scope=shared`), not archived. */
+  shared: ["ai", "chats", "shared"] as const,
   /** The latest summary of one chat seen live (`ai_chat.updated`, a rename): the header's title and archive state. */
   summary: (id: string) => ["ai", "summary", id] as const,
   /** Settings and tool states of one chat after a PATCH (05-11): newer than its snapshot. */
@@ -64,11 +67,16 @@ const LIST_PAGE = 30;
  * by `applyAiChatUpdated` (the sidebar's `user:` topic), so a new chat, a generated title, a rename or an archive
  * moves rows without a refetch.
  */
-export function useAiChats(archived = false, opts: { enabled?: boolean } = {}) {
+export function useAiChats(
+  archived = false,
+  opts: { enabled?: boolean; scope?: Exclude<AiChatListScope, "all"> } = {},
+) {
+  const scope = opts.scope ?? "mine";
   return useInfiniteQuery({
-    queryKey: aiKeys.list(archived),
+    queryKey: scope === "shared" ? aiKeys.shared : aiKeys.list(archived),
     queryFn: ({ pageParam, signal }) => {
       const p = new URLSearchParams({ limit: String(LIST_PAGE), archived: String(archived) });
+      if (scope !== "mine") p.set("scope", scope);
       if (pageParam) p.set("cursor", pageParam);
       return api.get(`/api/v1/ai-chats?${p.toString()}`, { schema: AiChatList, signal });
     },
@@ -79,6 +87,14 @@ export function useAiChats(archived = false, opts: { enabled?: boolean } = {}) {
   });
 }
 
+/**
+ * AI chats other members shared with the viewer (06-03, MULTI-01): newest activity first. A new grant arrives live as
+ * `ai_chat.updated` with the viewer's access, which `applyAiChatUpdated` routes here, never to the viewer's own list.
+ */
+export function useSharedAiChats(opts: { enabled?: boolean } = {}) {
+  return useAiChats(false, { ...opts, scope: "shared" });
+}
+
 type ListData = InfiniteData<AiChatList, string | null>;
 
 const newestFirst = (a: AiChatSummary, b: AiChatSummary) =>
@@ -86,16 +102,22 @@ const newestFirst = (a: AiChatSummary, b: AiChatSummary) =>
 
 /**
  * Applies a chat summary from `ai_chat.updated` (or a PATCH answer) to every cache that shows it: the chat's live
- * summary, and both lists (removed from the one it no longer belongs to, inserted or moved in the other; loaded rows
+ * summary, and the lists (removed from the ones it no longer belongs to, inserted or moved in its own; loaded rows
  * are re-sorted onto the first page so the next page's cursor stays valid).
  */
 export function applyAiChatUpdated(qc: QueryClient, chat: AiChatSummary): void {
   qc.setQueryData(aiKeys.summary(chat.id), chat);
-  for (const archived of [false, true]) {
-    qc.setQueryData<ListData>(aiKeys.list(archived), (prev) => {
+  // Phase 6: a chat someone shared with the viewer belongs to "Shared with me" only (absent access = owner).
+  const sharedWithMe = chat.access !== undefined && chat.access !== "owner";
+  const lists: Array<{ key: readonly unknown[]; belongs: boolean }> = [
+    { key: aiKeys.list(false), belongs: !sharedWithMe && !chat.archived },
+    { key: aiKeys.list(true), belongs: !sharedWithMe && chat.archived },
+    { key: aiKeys.shared, belongs: sharedWithMe && !chat.archived },
+  ];
+  for (const { key, belongs } of lists) {
+    qc.setQueryData<ListData>(key, (prev) => {
       if (!prev) return prev;
       const rest = prev.pages.flatMap((p) => p.chats).filter((c) => c.id !== chat.id);
-      const belongs = chat.archived === archived;
       const last = prev.pages.at(-1);
       const tail = rest.at(-1);
       // Older than everything loaded while more pages exist: it arrives with paging.
