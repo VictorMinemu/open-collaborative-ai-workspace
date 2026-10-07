@@ -218,8 +218,18 @@ describe("messages", () => {
 
   it("two images on one user row: [text, file, file] in upload order (05-12)", () => {
     const q = turn("user", "Compare these");
-    const a = { type: "file" as const, mediaType: "image/webp", data: new Uint8Array([1]), filename: "a.png" };
-    const b = { type: "file" as const, mediaType: "image/webp", data: new Uint8Array([2]), filename: "b.png" };
+    const a = {
+      type: "file" as const,
+      mediaType: "image/webp",
+      data: new Uint8Array([1]),
+      filename: "a.png",
+    };
+    const b = {
+      type: "file" as const,
+      mediaType: "image/webp",
+      data: new Uint8Array([2]),
+      filename: "b.png",
+    };
     const out = buildModelMessages(input([q], { attachments: new Map([[q.id, [a, b]]]) }));
     expect(out.messages).toEqual([
       { role: "user", content: [{ type: "text", text: "Compare these" }, a, b] },
