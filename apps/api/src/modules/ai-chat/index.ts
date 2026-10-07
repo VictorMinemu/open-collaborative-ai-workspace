@@ -26,6 +26,8 @@ export {
  * the realtime WebSocket and persisted with a usage record, under daily per-member caps (05-08). Prompts come only from `buildModelMessages`.
  */
 export { type BuildInput, type BuiltPrompt, buildModelMessages } from "./build-model-messages";
+/** For search (06-04): how a viewer sees a chat, with the same helpers as the AI chat list. */
+export { ownerAuthor, sharedSql } from "./dto";
 export { ABORT_CHANNEL } from "./generations";
 export { registerGrantRoutes } from "./grants";
 export { consumeGeneration, usageToday } from "./limits";

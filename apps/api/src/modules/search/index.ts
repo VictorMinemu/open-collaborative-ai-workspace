@@ -32,8 +32,8 @@ export {
 } from "./service";
 
 /**
- * Every kind a member can search (P-03): AI chats join the readable set here; the resolver keeps each one its
- * owner's alone (admins included), SQL only narrows.
+ * Every kind a member can search (P-03): AI chats join the readable set here; the resolver keeps each one to its
+ * owner and grantees (admins included in the hidden rule), SQL only narrows.
  */
 const SEARCH_KINDS = ["channel", "dm", "group", "ai_chat"] as const;
 
@@ -148,6 +148,7 @@ export function createSearchModule(core: Core, deps: { modelLabel?: ModelLabelOf
               q,
               limit: OVERVIEW_LIMIT,
               labelOf,
+              dir,
             });
             return { messages: messages.hits, people, channels, aiChats };
           }),
