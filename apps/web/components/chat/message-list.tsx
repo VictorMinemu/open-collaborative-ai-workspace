@@ -25,6 +25,7 @@ import {
   unsaveMessage,
 } from "@/lib/chat-queries";
 import { cn, relativeTime } from "@/lib/utils";
+import { AgentCardView } from "./agent-card";
 import { MessageAttachments } from "./attachments/attachment-grid";
 import { Lightbox } from "./attachments/lightbox";
 import { EmojiPicker } from "./emoji-picker";
@@ -512,6 +513,9 @@ const MessageRow = memo(function MessageRow({
           >
             This message was deleted.
           </p>
+        ) : message.card ? (
+          // An Agent Card (06-15): the body is its summary, given to screen readers by the card (never twice).
+          <AgentCardView messageId={message.id} card={message.card} summary={message.body} />
         ) : editing ? (
           <MessageEditor message={message} onDone={() => setEditing(false)} />
         ) : message.editedAt ? (

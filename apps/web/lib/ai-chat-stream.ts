@@ -15,6 +15,7 @@ import {
   stitchAiSnapshot,
 } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
+import { mergeCard } from "./agent-cards";
 
 /**
  * The live state of one AI chat (P-06), kept pure so it is unit-tested apart from React. Durable frames
@@ -100,12 +101,18 @@ function mergeAddressing(held: Message | undefined, incoming: Message): Message 
   return incoming;
 }
 
+/** A persona's Agent Card (06-15): a realtime copy (no viewer fields, P-04) keeps the held viewer fields. */
+function mergeCardOf(held: Message | undefined, incoming: Message): Message {
+  if (!incoming.card) return incoming;
+  return { ...incoming, card: mergeCard(held?.card, incoming.card) };
+}
+
 /** Insert or replace by id, keeping seq order. */
 function upsert(list: Message[], m: Message): Message[] {
   const i = list.findIndex((x) => x.id === m.id);
   if (i < 0) return [...list, m].sort(bySeq);
   const next = list.slice();
-  next[i] = mergeAddressing(list[i], m);
+  next[i] = mergeCardOf(list[i], mergeAddressing(list[i], m));
   return next;
 }
 

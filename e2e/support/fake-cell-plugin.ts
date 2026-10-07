@@ -259,6 +259,35 @@ export class FakeCellPlugin {
     return res.body;
   }
 
+  /**
+   * Posts a typed Agent Card (06-13, `POST /agent-channel/v1/cards`) as `input.agentId`, like the real plugin's card
+   * tool: the card lands where the agent may post; 201 when created, 200 on an idempotent retry.
+   */
+  async postCard(input: {
+    agentId: string;
+    conversationId: string;
+    threadRootId: string | null;
+    inReplyToMessageId?: string;
+    idempotencyKey: string;
+    card: Record<string, unknown>;
+  }): Promise<{ messageId: string; version: number }> {
+    const res = await this.request<{ messageId: string; version: number }>("POST", "/cards", input);
+    if (res.status !== 201 && res.status !== 200) {
+      throw new Error(`POST /cards → ${res.status} ${JSON.stringify(res.body)}`);
+    }
+    return { messageId: res.body.messageId, version: res.body.version };
+  }
+
+  /** Updates one of its cards in place (`PATCH /agent-channel/v1/cards/:messageId`, optimistic version). */
+  async patchCard(
+    messageId: string,
+    body: { agentId: string; patch: Record<string, unknown> & { expectedVersion: number } },
+  ): Promise<{ version: number }> {
+    const res = await this.request<{ version: number }>("PATCH", `/cards/${messageId}`, body);
+    if (res.status !== 200) throw new Error(`PATCH /cards → ${res.status} ${JSON.stringify(res.body)}`);
+    return { version: res.body.version };
+  }
+
   async start(): Promise<void> {
     if (this.opts.autoAck) await this.ackAll();
     else await this.fetchCell();

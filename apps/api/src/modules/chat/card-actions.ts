@@ -100,7 +100,8 @@ export function decisionBlock(
 /**
  * Adds `card` to every live message that has one (P-05: tombstones carry none) with the viewer's fields: `following`
  * and `viewerCan` (`follow` for any reader, which the list's caller already is; `decide` when the card allows it and
- * the resolver grants `agent_card.approve` in that conversation). One query for the cards, one for the follows.
+ * the resolver grants `agent_card.approve` in that conversation, never to a `view` grantee of an AI chat). One query
+ * for the cards, one for the follows.
  */
 export async function withCards(tx: Tx, list: Message[], viewerId: string | null): Promise<Message[]> {
   const live = list.filter((m) => !m.deletedAt).map((m) => m.id);
@@ -292,6 +293,23 @@ export function registerCardActionRoutes(app: App, ctx: ChatRouteCtx): void {
     return { card, conv, facts, message };
   }
 
+  /**
+   * One card as the caller sees it (06-15): realtime events carry cards without viewer fields (P-04), so a page that
+   * got a card live reads `following` and `viewerCan` here. Same readable check as the other routes (hidden = 404).
+   */
+  app.get(
+    "/cards/:messageId",
+    { ...user, schema: { tags, params: AgentCardParams, response: { 200: AgentCard } } },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const { message } = await readableCard(req, tx, req.params.messageId);
+        const dto = await cardMessageOf(tx, message, await loadDirectory(tx));
+        const [shown] = await withCards(tx, [dto], authOf(req).userId);
+        if (!shown?.card) throw notFound(CARD_NOT_FOUND);
+        return shown.card;
+      }),
+  );
+
   app.post(
     "/cards/:messageId/follow",
     { ...user, schema: { tags, params: AgentCardParams } },
@@ -332,7 +350,8 @@ export function registerCardActionRoutes(app: App, ctx: ChatRouteCtx): void {
 
   /**
    * One decision per card, decided by the server (the client only says approved or denied): the caller reads the
-   * conversation (404), holds `agent_card.approve` there (403, deny rules win), the card has an approve action (409
+   * conversation (404), holds `agent_card.approve` there (403, deny rules win; in an AI chat only the owner or a `chat`
+   * grantee holds it, a `view` grantee is 403 `ai_chat_view_only`), the card has an approve action (409
    * `card_not_decidable`), names the caller when it names approvers (403 `not_card_approver`) and is not decided yet
    * (409 `card_already_decided`, also for a concurrent loser of the conditional update). Every reader gets
    * `message.updated`, the decision is audited (ids and outcome) and the agent receives `agent.card_action.v1`.
