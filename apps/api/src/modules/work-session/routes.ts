@@ -44,6 +44,7 @@ import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { type App, type AuthContext, authOf, type Core, tenant } from "../../core";
 import { conflict, HttpError, notFound } from "../../lib/errors";
+import { linkWorkPromptAttachments } from "../artifact";
 import { type DeviceAccess, type DeviceHub, deviceFacts, loadDeviceAccess } from "../device";
 import {
   AuthzDeniedError,
@@ -63,6 +64,7 @@ import {
   requestedSettings,
   storedSettings,
 } from "./controls";
+import { sessionFacts as sharedSessionFacts } from "./facts";
 import { knownModels, loadWorkZonePolicy, saveWorkZonePolicy } from "./policy";
 import { type SessionRow, type WorkSessionService, wsTopic } from "./service";
 import { runSessionCommand } from "./slash";
@@ -159,25 +161,13 @@ export function registerWorkSessionRoutes(
    * Resolver facts for a session: the caller's relations (creator, device owner), the Device layer
    * (revoked device) and, for approvals, the tool the request would run (Tool layer).
    */
-  async function sessionFacts(
+  function sessionFacts(
     tx: Tx,
     auth: AuthContext,
     s: Pick<SessionRow, "createdBy" | "deviceId">,
     tool?: string,
   ): Promise<ResourceFacts> {
-    const [d] = await tx
-      .select({ owner: devices.ownerUserId, revokedAt: devices.revokedAt })
-      .from(devices)
-      .where(eq(devices.id, s.deviceId));
-    return workSessionResource(
-      {
-        createdBy: s.createdBy,
-        deviceOwnerUserId: d?.owner ?? null,
-        deviceRevoked: !d || d.revokedAt !== null,
-        tool: tool ?? null,
-      },
-      auth.userId,
-    );
+    return sharedSessionFacts(tx, auth.userId, s, tool);
   }
 
   /**
@@ -445,7 +435,13 @@ export function registerWorkSessionRoutes(
       }),
   );
 
-  async function queuePrompt(tx: Tx, auth: AuthContext, s: SessionRow, body: string) {
+  async function queuePrompt(
+    tx: Tx,
+    auth: AuthContext,
+    s: SessionRow,
+    body: string,
+    attachmentIds: readonly string[] = [],
+  ) {
     const [{ pos } = { pos: 0 }] = await tx
       .select({ pos: max(workPrompts.position) })
       .from(workPrompts)
@@ -461,6 +457,14 @@ export function registerWorkSessionRoutes(
         position: Number(pos ?? 0) + 1,
       })
       .returning();
+    // 06.1 (P-05): the sender's own ready images of this session's conversation, or one uniform 409 (the whole
+    // transaction rolls back: nothing is queued, sent or audited).
+    const images = await linkWorkPromptAttachments(tx, {
+      conversationId: s.conversationId,
+      workPromptId: p!.id,
+      uploaderId: auth.userId,
+      ids: [...attachmentIds],
+    });
     await core.audit.record(tx, {
       action: "work_prompt.queued",
       resourceType: "work_prompt",
@@ -475,6 +479,8 @@ export function registerWorkSessionRoutes(
         executionDeviceId: s.deviceId,
         workSessionId: s.id,
         length: body.length,
+        // Ids and a count only, never bytes (D-03).
+        ...(images.length > 0 ? { attachmentIds: images.map((a) => a.id), imageCount: images.length } : {}),
       },
     });
     await svc.emitPrompt(tx, p!);
@@ -560,12 +566,18 @@ export function registerWorkSessionRoutes(
    * Queue a prompt from the caller and dispatch it (or restart a finished session). Call with the session LOCKED
    * and `work_session.prompt` asserted.
    */
-  async function submitPrompt(req: FastifyRequest, tx: Tx, s: SessionRow, body: string): Promise<WorkPrompt> {
+  async function submitPrompt(
+    req: FastifyRequest,
+    tx: Tx,
+    s: SessionRow,
+    body: string,
+    attachmentIds: readonly string[] = [],
+  ): Promise<WorkPrompt> {
     const auth = authOf(req);
     if (s.status === "archived") throw conflict("This session is archived", "session_archived");
     assertNotSlashCommand(body, s.runtime);
     await joinConversation(tx, auth, s);
-    const p = await queuePrompt(tx, auth, s, body);
+    const p = await queuePrompt(tx, auth, s, body, attachmentIds);
     if (s.status === "failed" || s.status === "completed") await svc.restart(tx, s);
     else await svc.tryDispatch(tx, s);
     await svc.emitSession(tx, s.id);
@@ -622,7 +634,7 @@ export function registerWorkSessionRoutes(
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
         const s = await lockedFor(req, tx, req.params.id, "work_session.prompt");
-        return submitPrompt(req, tx, s, req.body.body);
+        return submitPrompt(req, tx, s, req.body.body, req.body.attachmentIds ?? []);
       }),
   );
 

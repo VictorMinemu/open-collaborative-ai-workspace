@@ -202,6 +202,12 @@ export const SessionStartPayload = z.object({
 });
 export type SessionStartPayload = z.infer<typeof SessionStartPayload>;
 
+/**
+ * Phase 06.1 (P-01): images on a Work Zone prompt. At most 4 per prompt, each at most 2 MiB as sent to the device
+ * (decoded bytes), so a prompt frame stays near 11 MiB of base64 + text, a third of the command frame limit.
+ */
+export const WORK_PROMPT_MAX_IMAGES = 4;
+
 export const PromptImage = z.object({
   mediaType: z.enum(["image/png", "image/jpeg", "image/gif", "image/webp"]),
   dataBase64: z.string(),

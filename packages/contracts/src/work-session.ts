@@ -1,6 +1,7 @@
 import { z } from "zod";
+import { Attachment } from "./attachments";
 import { Id, IsoDateTime } from "./common";
-import { DiffFile } from "./device-link";
+import { DiffFile, WORK_PROMPT_MAX_IMAGES } from "./device-link";
 import { Permission } from "./permissions";
 import {
   ApprovalOutcome,
@@ -93,6 +94,11 @@ export const WorkPrompt = z.object({
   createdAt: IsoDateTime,
   dispatchedAt: IsoDateTime.nullable(),
   completedAt: IsoDateTime.nullable(),
+  /**
+   * Phase 06.1: the images sent with the prompt (previews re-check the session's read access). Defaults to `[]`
+   * so `prompt.updated` events persisted before 06.1 still parse.
+   */
+  attachments: z.array(Attachment).default([]),
 });
 export type WorkPrompt = z.infer<typeof WorkPrompt>;
 
@@ -109,7 +115,15 @@ export const SessionCommandResult = z.object({
 });
 export type SessionCommandResult = z.infer<typeof SessionCommandResult>;
 
-export const CreatePromptRequest = z.object({ body: z.string().trim().min(1).max(50_000) });
+export const CreatePromptRequest = z.object({
+  /** Required even with images (P-06): titles, slash detection, the queue and the audit key off the text. */
+  body: z.string().trim().min(1).max(50_000),
+  /**
+   * Phase 06.1 (D-02): images the sender uploaded into the session's conversation through the attachment routes,
+   * in the order they go to the runtime.
+   */
+  attachmentIds: z.array(Id).max(WORK_PROMPT_MAX_IMAGES).optional(),
+});
 export type CreatePromptRequest = z.infer<typeof CreatePromptRequest>;
 
 /** Edit, move (0-based index among queued prompts) or cancel a prompt while it is still queued. */

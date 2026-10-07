@@ -1,4 +1,5 @@
 import {
+  type Attachment,
   type DiffResultFrame,
   DiffStat,
   EffectiveSessionSettings,
@@ -33,6 +34,7 @@ import {
 } from "@ocw/db";
 import { and, asc, count, desc, eq, inArray, min, type SQL, sql } from "drizzle-orm";
 import type { FastifyBaseLogger } from "fastify";
+import { attachmentsForWorkPrompts, type ObjectStorage } from "../artifact";
 import type { AuditService } from "../audit";
 import type { DeviceCommandRow, DeviceHub, DeviceRef, DeviceSessionHandler } from "../device";
 import { memberDirectory, type PermissionService } from "../organization";
@@ -83,6 +85,8 @@ export interface WorkSessionDeps {
   log: FastifyBaseLogger;
   /** The resolver: the per-turn author cap includes the author's `device.full_access` grain (P-07). */
   perms: PermissionService;
+  /** Attachment storage (06.1): a prompt's image bytes are read from it at dispatch; null = not configured. */
+  storage?: ObjectStorage | null;
 }
 
 /**
@@ -185,7 +189,11 @@ export class WorkSessionService implements DeviceSessionHandler {
         .orderBy(asc(workPrompts.position), asc(workPrompts.createdAt)),
       memberDirectory(tx),
     ]);
-    return rows.map((r) => toPrompt(r, dir.get(r.authorUserId)?.displayName ?? null));
+    const images = await attachmentsForWorkPrompts(
+      tx,
+      rows.map((r) => r.id),
+    );
+    return rows.map((r) => toPrompt(r, dir.get(r.authorUserId)?.displayName ?? null, images.get(r.id) ?? []));
   }
 
   async approvals(tx: Tx, sessionId: string): Promise<WorkApproval[]> {
@@ -217,12 +225,12 @@ export class WorkSessionService implements DeviceSessionHandler {
   }
 
   async emitPrompt(tx: Tx, row: PromptRow): Promise<void> {
-    const dir = await memberDirectory(tx);
+    const [dir, images] = await Promise.all([memberDirectory(tx), attachmentsForWorkPrompts(tx, [row.id])]);
     await this.deps.realtime.appendEvent(
       tx,
       wsTopic(row.workSessionId),
       EventTypes.promptUpdated,
-      toPrompt(row, dir.get(row.authorUserId)?.displayName ?? null),
+      toPrompt(row, dir.get(row.authorUserId)?.displayName ?? null, images.get(row.id) ?? []),
     );
   }
 
@@ -1174,7 +1182,11 @@ export function normalizeEvent(ev: SessionEvent): SessionEvent {
   return ev;
 }
 
-export function toPrompt(r: PromptRow, authorName: string | null): WorkPrompt {
+export function toPrompt(
+  r: PromptRow,
+  authorName: string | null,
+  attachments: Attachment[] = [],
+): WorkPrompt {
   return {
     id: r.id,
     workSessionId: r.workSessionId,
@@ -1187,6 +1199,7 @@ export function toPrompt(r: PromptRow, authorName: string | null): WorkPrompt {
     createdAt: new Date(r.createdAt).toISOString(),
     dispatchedAt: iso(r.dispatchedAt),
     completedAt: iso(r.completedAt),
+    attachments,
   };
 }
 

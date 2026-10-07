@@ -1,11 +1,13 @@
 import { devices, workSessions } from "@ocw/db";
 import { eq } from "drizzle-orm";
 import type { ApiModule, Core } from "../../core";
+import type { ObjectStorage } from "../artifact";
 import type { DeviceHub } from "../device";
 import { createPermissionService, workSessionResource } from "../organization";
 import { registerWorkSessionRoutes } from "./routes";
 import { WorkSessionService } from "./service";
 
+export { createWorkSessionAttachmentScope } from "./images";
 export { loadWorkZonePolicy } from "./policy";
 export { ACTIVE_STATES, type ReauthorizeReason, WorkSessionService, wsTopic } from "./service";
 
@@ -14,7 +16,11 @@ export { ACTIVE_STATES, type ReauthorizeReason, WorkSessionService, wsTopic } fr
  * arbiter (one execution authority), approvals, interrupt, diff relay, and ingestion of Unified Session
  * Event Protocol events from the Device Link (it is the device hub's session handler).
  */
-export function createWorkSessionModule(core: Core, hub: DeviceHub): ApiModule {
+export function createWorkSessionModule(
+  core: Core,
+  hub: DeviceHub,
+  deps: { storage?: ObjectStorage | null } = {},
+): ApiModule {
   const perms = createPermissionService(core);
   const service = new WorkSessionService({
     db: core.db,
@@ -23,6 +29,7 @@ export function createWorkSessionModule(core: Core, hub: DeviceHub): ApiModule {
     hub,
     log: core.log,
     perms,
+    storage: deps.storage ?? null,
   });
   hub.setSessionHandler(service);
 

@@ -41,7 +41,7 @@ import { createPluginsModule } from "./modules/plugins";
 import { createOnlineSet, createRealtimeModule, createRealtimeService } from "./modules/realtime";
 import { createSearchModule } from "./modules/search";
 import { createSecretsModule, createSecretsService } from "./modules/secrets";
-import { createWorkSessionModule } from "./modules/work-session";
+import { createWorkSessionAttachmentScope, createWorkSessionModule } from "./modules/work-session";
 
 export const API_VERSION = "0.1.0";
 
@@ -232,7 +232,11 @@ export async function buildApp(
   // Modules are mounted under /api/v1 unless they set `prefix`.
   const deviceModule = createDeviceModule(core); // B3: owns the Device Link hub used by work-session
   const modelGateway = createModelGateway(core); // Phase 5: the only place a LanguageModel is built (P-04)
-  const artifactModule = createArtifactModule(core, { access: createConversationAccess(core) }); // Phase 4: attachments (ADR-0015)
+  // Phase 4: attachments (ADR-0015); 06.1: a Work Zone session's images follow the session (P-04).
+  const artifactModule = createArtifactModule(core, {
+    access: createConversationAccess(core),
+    scopes: { work_session: createWorkSessionAttachmentScope(core) },
+  });
   const modules: ApiModule[] = [
     createIdentityModule({
       identity,
@@ -257,7 +261,7 @@ export async function buildApp(
     createPluginsModule(core), // Phase 3.1: OpenClaw Marketplace (D-14)
     createAgentChannelModule(core, { modelLabel: (ref) => modelGateway.labelOf(ref) }), // B2; 06-10: model labels in persona history
     deviceModule, // B3
-    createWorkSessionModule(core, deviceModule.hub), // B3
+    createWorkSessionModule(core, deviceModule.hub, { storage: artifactModule.storage }), // B3; 06.1: image bytes
   ];
   for (const m of modules) {
     await app.register(async (scope) => m.register(scope as unknown as App), {
