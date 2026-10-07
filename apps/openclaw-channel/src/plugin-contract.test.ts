@@ -389,6 +389,79 @@ describe("mention → dispatch → reply", () => {
   });
 });
 
+describe("agent.card_action.v1 → dispatch → reply (06-14)", () => {
+  const cardActionData = (over: Record<string, unknown> = {}) => ({
+    ...mention(40, {
+      message: {
+        id: "card-msg-1",
+        text: "Sam Lee approved “Deploy api v2.3”",
+        createdAt: "2026-10-07T10:00:00.000Z",
+        author: { kind: "user", id: "u-sam", displayName: "Sam Lee" },
+        mentions: [{ kind: "agent", id: ARCHIE.id }],
+      },
+    }),
+    cardAction: { messageId: "card-msg-1", kind: "approval", title: "Deploy api v2.3", outcome: "approved" },
+    ...over,
+  });
+
+  it("dispatches through the mention path: typing, the card's thread, the deciding human as sender", async () => {
+    startPlugin();
+    await api.waitFor(() => api.openSockets() === 1);
+    api.publish("agent.card_action.v1", cardActionData());
+    await api.waitFor(() => api.messages.length === 1);
+    expect(api.messages[0]).toMatchObject({
+      agentId: ARCHIE.id,
+      conversationId: "conv-1",
+      threadRootMessageId: "root-1",
+      inReplyToMessageId: "card-msg-1",
+      text: "Hi Sam Lee!",
+      idempotencyKey: "evt:evt-40",
+    });
+    expect(port.dispatched[0]?.body).toBe("Sam Lee approved “Deploy api v2.3”");
+    expect(port.dispatched[0]?.contextBlocks.map((b) => b.type)).toContain("card_action");
+    await api.waitFor(() => api.typing.some((t) => t.typing === false));
+    expect(api.typing[0]).toMatchObject({
+      conversationId: "conv-1",
+      threadRootMessageId: "root-1",
+      typing: true,
+    });
+  });
+
+  it("an invalid card action is skipped with a warning carrying the seq and field path only; later events flow", async () => {
+    const logs: string[] = [];
+    const client = createAgentChannelClient({ apiUrl: api.url, token: () => api.token });
+    const bridge = createBridge({
+      client,
+      port,
+      signal: new AbortController().signal,
+      log: { info: (m) => logs.push(m), warn: (m) => logs.push(m), error: (m) => logs.push(m) },
+      typingIntervalMs: 50,
+      retryDelayMs: 10,
+    });
+    await bridge.refreshCell();
+    await bridge.handleFrame({
+      seq: 41,
+      type: "agent.card_action.v1",
+      data: cardActionData({
+        eventId: "evt-41",
+        cardAction: { messageId: "card-msg-1", kind: "approval", title: "SECRET TITLE", outcome: "maybe" },
+      }),
+    });
+    expect(port.dispatched).toEqual([]);
+    const warning = logs.find((l) => l.includes("seq=41")) ?? "";
+    expect(warning).toContain("cardAction.outcome");
+    expect(warning).not.toContain("SECRET");
+    expect(warning).not.toContain("maybe");
+    await bridge.handleFrame({
+      seq: 42,
+      type: "agent.card_action.v1",
+      data: cardActionData({ eventId: "evt-42" }),
+    });
+    expect(port.dispatched).toHaveLength(1);
+    expect(api.messages.map((m) => m.idempotencyKey)).toEqual(["evt:evt-42"]);
+  });
+});
+
 describe("subscription, cursor replay and reconnect", () => {
   it("starts LIVE from the snapshot lastSeq when no cursor exists (never re-answers old mentions)", async () => {
     api.publishMention(mention(9)); // happened before this cell ever ran
