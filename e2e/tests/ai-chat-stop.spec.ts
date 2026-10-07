@@ -140,7 +140,8 @@ test("the last answer regenerates on the same model, then with another model", a
   await sendAi(page, "first question");
   await expect(page).toHaveURL(/\/chat\/ai\/[0-9a-f-]{36}$/);
   await expect(lastAssistant(page)).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
-  await sendAi(page, "second question");
+  // A slow answer (about four seconds), so each regenerate is seen streaming before it completes.
+  await sendAi(page, "second question [[slow]]");
   const answers = page.locator('[data-testid="ai-message"][data-role="assistant"]');
   await expect(answers).toHaveCount(2);
   const answer = answers.last();
