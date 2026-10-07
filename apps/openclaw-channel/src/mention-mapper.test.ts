@@ -174,6 +174,86 @@ describe("direct conversations (D-04)", () => {
   });
 });
 
+describe("AI chats (06-10, D-07, P-10)", () => {
+  const SYSTEM_MODEL = { kind: "system" as const, id: "chat-1", displayName: "AI assistant (GPT-6 Astra)" };
+  const aiChat = (over: Partial<AgentMentionEvent> = {}) =>
+    mention({
+      conversation: { id: "chat-1", kind: "ai_chat", name: "Invoice <schema>, v2" },
+      thread: { rootMessageId: "msg-9" },
+      message: {
+        id: "msg-9",
+        text: "@archie check the schema",
+        createdAt: "2026-10-07T10:00:09.000Z",
+        author: ALEX,
+        mentions: [{ kind: "agent", id: BOT.id }],
+      },
+      threadHistory: [
+        { id: "msg-1", author: VICTOR, text: "Plan the migration", createdAt: "2026-10-07T10:00:01.000Z" },
+        { id: "msg-2", author: SYSTEM_MODEL, text: "Here is a plan…", createdAt: "2026-10-07T10:00:02.000Z" },
+      ],
+      roster: [
+        { ...VICTOR, role: "admin" },
+        { ...ALEX, role: "developer" },
+        { kind: "agent", id: BOT.id, displayName: "Archie", handle: "archie" },
+      ],
+      ...over,
+    });
+  const turn = {
+    tools: [],
+    toolFlags: {},
+    memory: [{ id: "m1", text: "Prefers short answers", createdAt: "2026-10-01T00:00:00.000Z" }],
+    now: null,
+    maxToolCalls: 8,
+    maxWebCalls: 5,
+  };
+
+  it("maps an ai_chat event to a flat target, a multi-participant kind and an AI chat label", () => {
+    const m = mapMention(aiChat(), BOT);
+    expect(m.threadRootId).toBeNull();
+    expect(m.target).toBe("conv:chat-1");
+    expect(m.conversationKind).toBe("channel");
+    expect(m.conversationLabel).toBe("AI chat “Invoice schema v2”");
+    expect(m.historyLabel).toBe("Conversation history");
+    expect(m.personaPrompt).toContain("shared AI chat");
+    expect(m.personaPrompt).not.toContain("private direct conversation");
+    // The chat model is attributed as its own principal, never as a person.
+    expect(m.chatWindow[1]).toMatchObject({ sender: "AI assistant (GPT-6 Astra) <chat-1>", sender_id: "chat-1" });
+  });
+
+  it("one isolated OpenClaw session per mention: no transcript is shared between askers of a shared chat", () => {
+    const base = "agent:ocw-0199a000-aaaa:ocw:channel:chat-1";
+    expect(sessionKeyFor(base, mapMention(aiChat(), BOT))).toBe(`${base}:thread:msg-9`);
+  });
+
+  it("never renders DM notes in an AI chat, even if a turn carried some", () => {
+    const m = mapMention(aiChat({ turn } as never), BOT);
+    expect(m.contextBlocks.some((b) => b.type === "notes")).toBe(false);
+  });
+
+  it("dm and group mapping are unchanged", () => {
+    const dm = mapMention(
+      mention({ conversation: { id: "dm-1", kind: "dm", name: null }, thread: { rootMessageId: "msg-3" } }),
+      BOT,
+    );
+    expect([dm.threadRootId, dm.target, dm.conversationKind, dm.historyLabel]).toEqual([
+      null,
+      "conv:dm-1",
+      "dm",
+      "Conversation history",
+    ]);
+    const group = mapMention(
+      mention({ conversation: { id: "g-1", kind: "group", name: null }, thread: { rootMessageId: "msg-3" } }),
+      BOT,
+    );
+    expect([group.threadRootId, group.target, group.conversationKind, group.historyLabel]).toEqual([
+      "msg-3",
+      "conv:g-1/thread:msg-3",
+      "channel",
+      "Thread history",
+    ]);
+  });
+});
+
 describe("per-turn tools and context (D-07, D-08)", () => {
   const WEB = { untrustedOutput: true, sideEffecting: false };
   const turn = {
