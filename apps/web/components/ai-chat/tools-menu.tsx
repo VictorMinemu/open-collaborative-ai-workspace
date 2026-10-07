@@ -85,7 +85,14 @@ export function ToolsList({
             }}
             note={
               reason ? (
-                <span data-testid="ai-tool-reason" className="text-amber-700 dark:text-amber-300/90">
+                <span
+                  data-testid="ai-tool-reason"
+                  className={
+                    reason === "not_available_yet"
+                      ? "text-muted-foreground"
+                      : "text-amber-700 dark:text-amber-300/90"
+                  }
+                >
                   {TOOL_REASON_TEXT[reason]}
                 </span>
               ) : key === "web" ? (

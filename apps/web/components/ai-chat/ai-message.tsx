@@ -38,10 +38,13 @@ export function AiMessage({
   text,
   regenerate,
   live = true,
+  last = true,
 }: {
   message: Message;
   text: string;
   regenerate?: AnswerRegenerate | undefined;
+  /** The chat's latest answer keeps its actions in view; earlier ones show them on hover or focus (pointer only). */
+  last?: boolean;
   /** A streaming render counts as live (false for a replay ahead of the page's first snapshot). */
   live?: boolean;
 }) {
@@ -78,12 +81,13 @@ export function AiMessage({
           data-testid="ai-streaming-caret"
           role="status"
           aria-label="Writing the answer"
-          className="block size-3 animate-pulse rounded-full bg-foreground/80"
+          className="block size-2.5 animate-pulse rounded-full bg-foreground/70 motion-reduce:animate-none"
         />
       ) : (
         <AnswerFooter
           text={text}
           generation={message.generation}
+          reveal={!last}
           actions={
             regenerate ? (
               <RegenerateMenu
@@ -197,10 +201,13 @@ function AnswerFooter({
   text,
   generation,
   actions,
+  reveal,
 }: {
   text: string;
   generation: AiGeneration | undefined;
   actions: ReactNode;
+  /** Actions appear on hover or focus of the answer (mouse and trackpad only; always shown on touch). */
+  reveal: boolean;
 }) {
   const { copy, copied } = useCopy();
   return (
@@ -211,20 +218,25 @@ function AnswerFooter({
         (text || actions) && "-ml-1.5",
       )}
     >
-      {text ? (
-        <Tooltip content={copied ? "Copied" : "Copy answer"}>
-          <button
-            type="button"
-            data-testid="ai-copy-answer"
-            aria-label="Copy answer"
-            onClick={() => void copy(text)}
-            className="inline-flex size-7 shrink-0 items-center justify-center rounded-md outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/30"
-          >
-            {copied ? <Check className="size-3.5 text-success" /> : <Copy className="size-3.5" />}
-          </button>
-        </Tooltip>
-      ) : null}
-      {actions}
+      <span
+        className="ai-answer-actions flex shrink-0 items-center gap-1.5"
+        data-reveal={reveal || undefined}
+      >
+        {text ? (
+          <Tooltip content={copied ? "Copied" : "Copy answer"}>
+            <button
+              type="button"
+              data-testid="ai-copy-answer"
+              aria-label="Copy answer"
+              onClick={() => void copy(text)}
+              className="inline-flex size-7 shrink-0 items-center justify-center rounded-md outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/30"
+            >
+              {copied ? <Check className="size-3.5 text-success" /> : <Copy className="size-3.5" />}
+            </button>
+          </Tooltip>
+        ) : null}
+        {actions}
+      </span>
       {generation ? (
         <span
           data-testid="ai-message-footer"

@@ -18,6 +18,7 @@ import { useAiChats } from "@/lib/ai-chat-queries";
 import { errorMessage } from "@/lib/api";
 import { type BotDm, isBotDm, useDms } from "@/lib/chat-queries";
 import { cn, formatDate } from "@/lib/utils";
+import { PrincipalAvatar } from "../principal-avatar";
 import { useMinuteClock } from "./all-view";
 import { ConversationAvatar, ConversationRow } from "./conversation-row";
 
@@ -76,6 +77,7 @@ export function AiChatsView() {
           </EmptyState>
         ) : (
           <div className="mx-auto grid w-full max-w-3xl grid-cols-1 gap-1 p-2 pb-8 sm:p-4 sm:pb-10">
+            {!archived ? <BotsStrip bots={bots} /> : null}
             <div className="flex items-center justify-between gap-2 px-1 pt-1 pb-1 sm:px-2">
               <h2 className="font-semibold text-[13px] text-muted-foreground">
                 {archived ? "Archived chats" : "Your chats"}
@@ -316,6 +318,44 @@ function AiChatRow({ chat, now }: { chat: AiChatSummary; now: number }) {
         <AiChatStandardItems chat={chat} onRename={() => setEditing(true)} />
       </AiChatMenu>
     </div>
+  );
+}
+
+/**
+ * The member's bots one tap away above their chats (05-14): the full Bots list (previews, unread) stays below the
+ * chats, which page by 30, so a long chat history no longer hides the bots. A quiet scrollable row of pills.
+ */
+function BotsStrip({ bots }: { bots: BotDm[] }) {
+  if (bots.length === 0) return null;
+  return (
+    <nav
+      aria-label="Your bots"
+      data-testid="ai-bots-strip"
+      className="-mx-2 mb-2 flex gap-1.5 overflow-x-auto px-3 pt-1 pb-1 [scrollbar-width:none] sm:mx-0 sm:px-2"
+    >
+      {bots.map((d) => (
+        <Link
+          key={d.id}
+          href={`/chat/dm/${d.id}`}
+          data-testid="ai-bots-strip-item"
+          className="inline-flex h-9 max-w-[14rem] shrink-0 items-center gap-2 rounded-full border bg-card pr-3.5 pl-1 text-[13px] text-foreground/85 outline-none transition-colors hover:bg-accent/60 focus-visible:ring-[3px] focus-visible:ring-ring/30"
+        >
+          <PrincipalAvatar
+            kind={d.counterpart.kind}
+            name={d.counterpart.name}
+            avatarUrl={d.counterpart.avatarUrl}
+            seed={d.counterpart.id}
+            className="size-7"
+          />
+          <span className="truncate">{d.counterpart.name}</span>
+          {d.latestMessageSeq > d.lastReadSeq ? (
+            <span className="size-1.5 shrink-0 rounded-full bg-primary">
+              <span className="sr-only">Unread</span>
+            </span>
+          ) : null}
+        </Link>
+      ))}
+    </nav>
   );
 }
 

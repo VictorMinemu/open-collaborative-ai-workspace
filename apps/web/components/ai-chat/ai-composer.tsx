@@ -63,6 +63,8 @@ export interface AiSendFiles {
 /** What the AI chat pane can hand the composer (a drop on the conversation, 05-12). */
 export interface AiComposerApi {
   addFiles(files: File[]): void;
+  /** Puts `text` in the composer (a New chat starter, 05-14) and focuses it with the caret at the end. */
+  fill(text: string): void;
 }
 
 /** Whether this member can attach files at all (storage configured and reachable, `attachment.upload`). */
@@ -182,7 +184,16 @@ export function AiComposer({
     queue.add(files);
     ref.current?.focus({ preventScroll: true });
   }
-  if (apiRef) apiRef.current = { addFiles };
+  function fill(next: string) {
+    setText(next);
+    requestAnimationFrame(() => {
+      const el = ref.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(next.length, next.length);
+    });
+  }
+  if (apiRef) apiRef.current = { addFiles, fill };
 
   /** Pasted files (a screenshot) join the tray; the text of the paste still goes into the message. */
   function onPaste(e: ClipboardEvent<HTMLTextAreaElement>) {

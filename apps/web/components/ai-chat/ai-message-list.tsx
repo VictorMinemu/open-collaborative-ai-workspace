@@ -49,6 +49,7 @@ export function AiMessageList({
             message={m}
             text={textOf(m)}
             live={live}
+            last={m.id === last?.id}
             regenerate={
               onRegenerated && m.id === regenerableId
                 ? { chatId, disabled: writing, onRegenerated }

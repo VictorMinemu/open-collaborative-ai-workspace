@@ -213,11 +213,11 @@ export function GenerationError({
 
   const useOrgButton = org ? (
     <Button
-      variant="ghost"
+      variant="link"
       size="sm"
       onClick={useOrg}
       data-testid="ai-error-use-org"
-      className="h-8 text-foreground"
+      className="h-8 px-1.5 font-medium"
     >
       Use an organization model
     </Button>
@@ -266,7 +266,7 @@ export function GenerationError({
           {generationErrorText(code, param)}
         </span>
       </div>
-      {actions ? <div className="flex flex-wrap items-center gap-1.5 pl-6">{actions}</div> : null}
+      {actions ? <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pl-6">{actions}</div> : null}
       {usageLimit ? (
         <UsageLimitDialog open={dialogOpen} onOpenChange={setDialogOpen} org={org} onUseOrg={useOrg} />
       ) : null}

@@ -445,9 +445,10 @@ function TextField({
   const id = useId();
   return (
     <div className="grid content-start gap-1.5">
-      <label htmlFor={id} className="flex flex-wrap items-center gap-1.5 font-medium text-sm">
+      {/* The badge follows the label's last word: a long label never leaves it alone on a line. */}
+      <label htmlFor={id} className="font-medium text-sm leading-5">
         {label}
-        {metered ? <MeteredBadge /> : null}
+        {metered ? <MeteredBadge className="ml-1.5 align-[1px]" /> : null}
       </label>
       <div className="relative">
         {prefix ? (

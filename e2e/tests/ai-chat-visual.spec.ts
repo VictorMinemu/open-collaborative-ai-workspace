@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { type APIRequestContext, expect, type Page, test } from "@playwright/test";
 import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import { chatIdOf, lastAssistant, openNewAiChat, seedPlan, sendAi, waitForLonger } from "../support/ai-chat";
+import { freshTeamBot } from "../support/bot-tools";
 import { ALEX } from "../support/chat";
 import { ADMIN, shot } from "./env";
 
@@ -101,6 +102,9 @@ async function invariants(page: Page, w: string, screen: string, checks: Checks)
 
 /** One theme of one screen: invariants, then the capture. */
 async function capture(page: Page, screen: string, w: string, theme: Theme, checks: Checks = {}) {
+  // The pointer rests on an empty edge of the pane, so no hover state is captured by accident.
+  const viewport = page.viewportSize();
+  if (viewport && w === "1440") await page.mouse.move(viewport.width - 4, Math.round(viewport.height / 2));
   await page.emulateMedia({ colorScheme: theme });
   await invariants(page, w, `${screen} (${theme})`, checks);
   await shot(page, `review-${screen}-${w}${theme === "dark" ? "-dark" : ""}`);
@@ -144,6 +148,10 @@ test.beforeAll(async () => {
     },
   });
   expect(res.ok(), `configure Anthropic: ${res.status()}`).toBe(true);
+  // A bot DM, so /chat/ai shows the member's bots next to their chats.
+  const bot = await freshTeamBot(admin, "Review Scout");
+  const dm = await sam.post("/api/v1/dms", { data: { participants: [{ kind: "agent", id: bot }] } });
+  expect(dm.ok(), `bot DM: ${dm.status()}`).toBe(true);
 });
 
 /** Later specs share Sam's chat list (it pages at 30): archive what this spec made. */
@@ -164,6 +172,7 @@ test("new chat, streaming, stopped and finished answers, with the composer's men
 
   // New chat: the calm empty state with the composer.
   await openNewAiChat(page);
+  await expect(page.getByTestId("ai-starter")).toHaveCount(4);
   await review(page, "new-chat", w, { composer: true, buttons: ["Send", "Tools", /^Model: /u] });
 
   // Streaming, then Stopped, once per theme (a slow answer lasts about four seconds).
@@ -249,6 +258,7 @@ test("new chat, streaming, stopped and finished answers, with the composer's men
   // The AI chats list, and the sidebar section (the drawer at 390).
   await page.goto(`${BASE_URL}/chat/ai`);
   await expect(page.getByTestId("ai-chat-row").first()).toBeVisible();
+  await expect(page.getByTestId("ai-bots-strip")).toContainText("Review Scout");
   await review(page, "ai-chats-list", w);
   if (mobile) await page.getByTestId("mobile-nav-trigger").click();
   await expect(page.getByTestId("sidebar-ai-chats").filter({ visible: true }).first()).toBeVisible();
