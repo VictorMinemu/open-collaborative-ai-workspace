@@ -1,5 +1,6 @@
 import { tenantOf } from "@ocw/db";
 import type { ApiModule, App, Core } from "../../core";
+import type { ObjectStorage } from "../artifact";
 import { createConversationAccess } from "../chat";
 import type { ModelGateway } from "../model-gateway";
 import { createPermissionService } from "../organization";
@@ -12,6 +13,12 @@ import { createGenerationSweeper } from "./sweeper";
 import { createTitler } from "./titles";
 import { registerUsageRoutes } from "./usage-routes";
 
+export {
+  AI_IMAGE_ORIGINAL_MAX_BYTES,
+  aiAttachmentKind,
+  attachmentPartsFor,
+  modelPartsFor,
+} from "./attachments";
 /**
  * Direct AI chat (Phase 5, AICHAT-02/03/07): private chats with one owner, answers streamed by one run loop over
  * the realtime WebSocket and persisted with a usage record, under daily per-member caps (05-08). Prompts come only from `buildModelMessages`.
@@ -26,8 +33,12 @@ export { createTitler, heuristicTitle, pickTitleModel, type Titler } from "./tit
 export { toolStates, webAllowed } from "./tools-state";
 export { searxngWebSearchTool } from "./web-tools";
 
-export function createAiChatModule(core: Core, deps: { gateway: ModelGateway }): ApiModule {
-  const runLoop = createRunLoop(core, { gateway: deps.gateway });
+export function createAiChatModule(
+  core: Core,
+  /** `storage`: where attachment bytes are read for the model (05-12); null = attachments are not configured. */
+  deps: { gateway: ModelGateway; storage?: ObjectStorage | null },
+): ApiModule {
+  const runLoop = createRunLoop(core, { gateway: deps.gateway, storage: deps.storage ?? null });
   // Auto titles (05-10): the hook only schedules, after the finalize commits; the call runs in its own transactions.
   const titler = createTitler(core, { gateway: deps.gateway, timeoutMs: core.env.OCW_AI_TITLE_TIMEOUT_MS });
   runLoop.onAfterFinalize(async (tx, done) => {

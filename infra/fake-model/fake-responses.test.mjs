@@ -187,7 +187,12 @@ describe("GET /v1/models", () => {
     assert.deepEqual(planCatalog(), {
       data: [
         { slug: "gpt-6-astra", display_name: "GPT-6 Astra", visibility: "list" },
-        { slug: "gpt-5.6-luna", display_name: "GPT-5.6 Luna", visibility: "list" },
+        {
+          slug: "gpt-5.6-luna",
+          display_name: "GPT-5.6 Luna",
+          visibility: "list",
+          input_modalities: ["text", "image"],
+        },
         { slug: "gpt-internal", visibility: "hide" },
       ],
     });
@@ -276,6 +281,72 @@ describe("chat completions and Anthropic honour [[slow]] and count images", () =
       .filter((d) => d.type === "content_block_delta");
     assert.equal(deltas.length, 40);
     assert.match(deltas.map((d) => d.delta.text).join(""), /\[images:1\]/);
+  });
+});
+
+describe("chat completions and Anthropic count file parts (05-12)", () => {
+  const streamedText = (text) =>
+    text
+      .split("\n\n")
+      .map((b) =>
+        b
+          .split("\n")
+          .find((l) => l.startsWith("data: {"))
+          ?.slice(6),
+      )
+      .filter(Boolean)
+      .map((d) => JSON.parse(d))
+      .map((d) => d.choices?.[0]?.delta?.content ?? (d.type === "content_block_delta" ? d.delta.text : ""))
+      .join("");
+
+  it("chat completions: a `file` part adds [files:1]", async () => {
+    const res = await post(
+      "/v1/chat/completions",
+      {
+        model: "mock-1",
+        stream: true,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "read" },
+              {
+                type: "file",
+                file: { filename: "a.pdf", file_data: "data:application/pdf;base64,JVBERg==" },
+              },
+            ],
+          },
+        ],
+      },
+      "Bearer x",
+    );
+    assert.match(streamedText(await res.text()), / \[files:1\]$/);
+  });
+
+  it("anthropic: a `document` block adds [files:1] after any images", async () => {
+    const res = await post(
+      "/v1/messages",
+      {
+        model: "claude-sonnet-5-5",
+        stream: true,
+        max_tokens: 100,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "read" },
+              { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+              {
+                type: "document",
+                source: { type: "base64", media_type: "application/pdf", data: "JVBERg==" },
+              },
+            ],
+          },
+        ],
+      },
+      "Bearer x",
+    );
+    assert.match(streamedText(await res.text()), / \[images:1\] \[files:1\]$/);
   });
 });
 

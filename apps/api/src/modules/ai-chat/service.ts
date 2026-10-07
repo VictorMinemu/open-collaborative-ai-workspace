@@ -5,6 +5,7 @@ import {
   type AiChatListQuery,
   type AiChatSnapshot,
   type AiChatSummary,
+  type Attachment,
   type CreateAiChatRequest,
   EventTypes,
   type MessagePage,
@@ -21,6 +22,13 @@ import { z } from "zod";
 import { authOf, type Core, tenant } from "../../core";
 import { badRequest, conflict, HttpError, notFound } from "../../lib/errors";
 import {
+  type AttachmentRow,
+  attachmentsForMessages,
+  linkAttachments,
+  linkableAttachments,
+  notLinkable,
+} from "../artifact";
+import {
   type ConversationAccess,
   type ConversationRow,
   convTopic,
@@ -35,6 +43,7 @@ import {
   type ResolvedModel,
 } from "../model-gateway";
 import { channelResource, orgResource, type PermissionService } from "../organization";
+import { assertReadableBy } from "./attachments";
 import {
   type AiChatRow,
   aiMessage,
@@ -199,9 +208,10 @@ export function createAiChatService(deps: AiChatDeps) {
     if (!generation) throw new Error("generation projection missing");
     const { conv, chat } = await loadChat(tx, userRow.conversationId);
     const dir = await directoryOf(tx, [userRow.authorId ?? ""]);
+    const files = await attachmentsForMessages(tx, [userRow.id]);
     return {
       chat: chatSummary(conv, chat, { generating: await isGenerating(tx, conv.id), gateway }),
-      userMessage: aiMessage(userRow, dir),
+      userMessage: aiMessage(userRow, dir, undefined, files.get(userRow.id) ?? []),
       assistantMessage: aiMessage(assistant, EMPTY_DIRECTORY, generation),
       generation,
     };
@@ -230,6 +240,7 @@ export function createAiChatService(deps: AiChatDeps) {
     conv: ConversationRow,
     body: SendAiMessageRequest,
     resolved: ResolvedModel,
+    files: AttachmentRow[] = [],
   ): Promise<{ turn: Omit<SendAiMessageResponse, "chat">; generation: GenerationRow }> {
     const auth = authOf(req);
     const topic = convTopic(conv.id);
@@ -253,8 +264,19 @@ export function createAiChatService(deps: AiChatDeps) {
       })
       .returning();
     if (!userRow) throw new Error("user message insert returned no row");
+    // The files join the message in this transaction, before its message.created (05-12): a refusal rolls it back.
+    let attached: Attachment[] = [];
+    if (files.length > 0) {
+      await linkAttachments(tx, {
+        conversationId: conv.id,
+        messageId: userRow.id,
+        uploaderId: auth.userId,
+        ids: files.map((f) => f.id),
+      });
+      attached = (await attachmentsForMessages(tx, [userRow.id])).get(userRow.id) ?? [];
+    }
     const dir = await directoryOf(tx, [auth.userId]);
-    const userMessage = aiMessage(userRow, dir);
+    const userMessage = aiMessage(userRow, dir, undefined, attached);
     const s1 = await core.realtime.appendEvent(tx, topic, EventTypes.messageCreated, {
       message: userMessage,
     });
@@ -350,12 +372,6 @@ export function createAiChatService(deps: AiChatDeps) {
     });
   }
 
-  function refuseAttachments(body: SendAiMessageRequest): void {
-    // Files in AI chats arrive in 05-12 (vision through the Phase 4 upload pipeline).
-    if (body.attachmentIds?.length)
-      throw badRequest("Attachments are not available in AI chats yet", "attachments_unavailable");
-  }
-
   /** The chat if the caller owns it (hidden = 404 for everyone else, admins included). */
   async function ownedChat(req: FastifyRequest, tx: Tx, chatId: string) {
     const { conv, facts } = await access.readable(req, tx, chatId, {
@@ -368,10 +384,11 @@ export function createAiChatService(deps: AiChatDeps) {
 
   return {
     async createChat(req: FastifyRequest, body: CreateAiChatRequest): Promise<SendAiMessageResponse> {
-      refuseAttachments(body);
       const auth = authOf(req);
       const out = await core.db.withTenant(tenant(req), async (tx) => {
         await perms.assertCan(req, tx, "ai_chat.use", orgResource());
+        // Files are uploaded into an existing chat (a draft, `POST /ai-chats/drafts`): none can belong to this one.
+        if (body.attachmentIds?.length) throw notLinkable();
         const retried = await ownSend(tx, auth.userId, body.clientMessageId);
         if (retried) {
           const [conv] = await tx
@@ -436,10 +453,9 @@ export function createAiChatService(deps: AiChatDeps) {
       chatId: string,
       body: SendAiMessageRequest,
     ): Promise<SendAiMessageResponse> {
-      refuseAttachments(body);
       const auth = authOf(req);
       const out = await core.db.withTenant(tenant(req), async (tx) => {
-        const { conv } = await ownedChat(req, tx, chatId);
+        let { conv } = await ownedChat(req, tx, chatId);
         // Serializes sends on this chat, which also makes the retry check below race-free.
         await lockNextSeq(tx, convTopic(conv.id));
         const retried = await ownSend(tx, auth.userId, body.clientMessageId);
@@ -451,6 +467,14 @@ export function createAiChatService(deps: AiChatDeps) {
         }
         refuseArchived(conv);
         const resolved = await resolveOr409(tx, body.model, auth.userId);
+        // Only the sender's own ready, unlinked uploads of this chat (409 otherwise, before anything else).
+        const files = await linkableAttachments(tx, {
+          conversationId: conv.id,
+          uploaderId: auth.userId,
+          ids: body.attachmentIds ?? [],
+        });
+        // Nothing the selected model cannot read is ever sent (400 attachment_not_supported, nothing written).
+        assertReadableBy(files, resolved.caps, resolved.label);
         if (await isGenerating(tx, conv.id)) {
           throw conflict("An answer is still being generated in this chat", "generation_in_progress");
         }
@@ -459,7 +483,17 @@ export function createAiChatService(deps: AiChatDeps) {
         const limit = { userId: auth.userId, backendClass: backendClassOf(resolved.ref.backend) };
         const counted = await consumeGeneration(tx, { ...limit, policy });
         if (!counted.ok) return { refused: await refuseOverLimit(core, tx, counted, limit) };
-        const turn = await insertTurn(req, tx, conv, body, resolved);
+        // A draft's first message names it, as a new chat's would (the auto title replaces this later).
+        if (conv.name === null) {
+          const name = heuristicTitle(body.body || (files[0]?.filename ?? ""));
+          const [named] = await tx
+            .update(conversations)
+            .set({ name })
+            .where(and(eq(conversations.id, conv.id), isNull(conversations.name)))
+            .returning();
+          if (named) conv = named;
+        }
+        const turn = await insertTurn(req, tx, conv, body, resolved, files);
         const chat = await touchChat(tx, conv, body.model, body.tools);
         await auditSend(tx, "ai_chat.message.sent", conv, turn.generation);
         return { response: { ...turn.turn, chat }, start: turn.generation };
@@ -468,6 +502,58 @@ export function createAiChatService(deps: AiChatDeps) {
       if ("refused" in out) throw out.refused;
       if (out.start) runLoop.start({ organizationId: out.start.organizationId, generationId: out.start.id });
       return out.response;
+    },
+
+    /**
+     * An empty AI chat to upload files into before the first message (05-12): owner-only like any AI chat, titled
+     * "New chat", audited `ai_chat.created {draft: true}`. It stays out of `GET /ai-chats` (and so out of every list)
+     * until its first message; an abandoned draft is never shown, and its unsent uploads are swept with every other
+     * unlinked upload.
+     */
+    async createDraft(req: FastifyRequest): Promise<AiChatSummary> {
+      const auth = authOf(req);
+      return core.db.withTenant(tenant(req), async (tx) => {
+        await perms.assertCan(req, tx, "ai_chat.use", orgResource());
+        const [conv] = await tx
+          .insert(conversations)
+          .values({
+            organizationId: auth.organizationId,
+            kind: "ai_chat",
+            visibility: "private",
+            name: null,
+            createdBy: auth.userId,
+          })
+          .returning();
+        if (!conv) throw new Error("conversation insert returned no row");
+        await tx.insert(conversationMembers).values({
+          conversationId: conv.id,
+          organizationId: auth.organizationId,
+          memberKind: "user",
+          memberId: auth.userId,
+          role: "owner",
+        });
+        const [chat] = await tx
+          .insert(aiChats)
+          .values({
+            conversationId: conv.id,
+            organizationId: auth.organizationId,
+            ownerUserId: auth.userId,
+            titleSource: "heuristic",
+            instructions: "",
+            usePersonalInstructions: true,
+            tools: { web: (await loadPreferences(tx, auth.userId)).webDefault },
+            lastModel: null,
+          })
+          .returning();
+        if (!chat) throw new Error("ai chat insert returned no row");
+        await core.audit.record(tx, {
+          action: "ai_chat.created",
+          resourceType: "ai_chat",
+          resourceId: conv.id,
+          metadata: { conversationId: conv.id, draft: true },
+        });
+        return chatSummary(conv, chat, { generating: false, gateway });
+      });
     },
 
     /**
@@ -494,6 +580,8 @@ export function createAiChatService(deps: AiChatDeps) {
               inArray(aiChats.conversationId, readable),
               eq(aiChats.ownerUserId, auth.userId),
               q.archived ? isNotNull(conversations.archivedAt) : isNull(conversations.archivedAt),
+              // A draft (05-12) is listed from its first message on.
+              sql`exists (select 1 from ${messages} where ${messages.conversationId} = ${aiChats.conversationId})`,
               cursor
                 ? or(
                     sql`${aiChats.lastActivityAt} < ${cursor.t}::timestamptz`,
@@ -705,8 +793,14 @@ export function createAiChatService(deps: AiChatDeps) {
       gateway,
     );
     const dir = await directoryOf(tx, [chat.ownerUserId]);
+    const files = await attachmentsForMessages(
+      tx,
+      rows.filter((r) => r.authorKind === "user").map((r) => r.id),
+    );
     return rows.map((r) =>
-      r.authorKind === "agent" ? aiMessage(r, EMPTY_DIRECTORY, gens.get(r.id)) : aiMessage(r, dir),
+      r.authorKind === "agent"
+        ? aiMessage(r, EMPTY_DIRECTORY, gens.get(r.id))
+        : aiMessage(r, dir, undefined, files.get(r.id) ?? []),
     );
   }
 }

@@ -122,9 +122,20 @@ const sameRef = (a: ModelRef, b: { backend: string; provider: string; modelId: s
 /** The plan group's single row when the member has no usable plan (the picker shows the reason). */
 const PLAN_PLACEHOLDER: ModelRef = { backend: "chatgpt_plan", provider: "openai", modelId: "chatgpt" };
 
-/** Conservative capabilities: vision on gpt-5 and gpt-6 slugs; PDFs arrive in 05-12; hosted web search. */
-export function planCaps(slug: string): ModelCaps {
-  return { vision: /^gpt-[56]/u.test(slug), pdf: false, webSearch: "hosted" };
+/**
+ * Capabilities of a plan model (05-12): the catalog's `input_modalities` when it lists them ("image" = vision, "file"
+ * = PDFs), else a conservative allowlist (gpt-5* and gpt-6* read images and PDFs); hosted web search.
+ */
+export function planCaps(slug: string, inputModalities?: string[]): ModelCaps {
+  if (inputModalities) {
+    return {
+      vision: inputModalities.includes("image"),
+      pdf: inputModalities.includes("file"),
+      webSearch: "hosted",
+    };
+  }
+  const known = /^gpt-[56]/u.test(slug);
+  return { vision: known, pdf: known, webSearch: "hosted" };
 }
 
 /** A plan model refused hosted web search for this credential (05-11): no web search on it for a day. */
@@ -161,12 +172,15 @@ export function createModelGateway(core: Core, opts: { fetch?: typeof fetch } = 
     });
     return out;
   }
-  const planCapsFor = (slug: string, refused: Set<string>): ModelCaps => {
-    const caps = planCaps(slug);
+  const planCapsFor = (slug: string, refused: Set<string>, inputModalities?: string[]): ModelCaps => {
+    const caps = planCaps(slug, inputModalities);
     return refused.has(slug) ? { ...caps, webSearch: "none" } : caps;
   };
   /** Catalog labels seen by this process (labels only; the catalog itself is cached per credential in Redis). */
   const labels = new Map<string, string>();
+  /** The catalog's input modalities of a plan model, when the catalog listed them (05-12). */
+  const modalitiesIn = (catalog: PlanModel[] | null | undefined, slug: string) =>
+    catalog?.find((m) => m.slug === slug)?.inputModalities;
 
   async function catalogOf(row: CredentialRow, token: string): Promise<PlanModel[] | null> {
     try {
@@ -209,7 +223,11 @@ export function createModelGateway(core: Core, opts: { fetch?: typeof fetch } = 
       name: "chatgpt-plan",
       fetch: fetchImpl,
     });
-    const caps = planCapsFor(ref.modelId, await planSearchRefused(row.id, [ref.modelId]));
+    const caps = planCapsFor(
+      ref.modelId,
+      await planSearchRefused(row.id, [ref.modelId]),
+      modalitiesIn(catalog ?? (await cachedPlanCatalog(core, row.id)), ref.modelId),
+    );
     return {
       ref,
       model: provider.responses(ref.modelId),
@@ -371,7 +389,7 @@ export function createModelGateway(core: Core, opts: { fetch?: typeof fetch } = 
             providerLabel: PLAN_PROVIDER_LABEL,
             group: "chatgpt_plan",
             metered: false,
-            caps: planCapsFor(m.slug, refused),
+            caps: planCapsFor(m.slug, refused, m.inputModalities),
             available: true,
             reason: null,
             isDefault: false,
@@ -416,7 +434,12 @@ export function createModelGateway(core: Core, opts: { fetch?: typeof fetch } = 
     async capsOf(tx, ref, requesterUserId) {
       if (ref.backend !== "chatgpt_plan") return orgCaps(ref.provider, ref.modelId);
       const row = await credentialOf(tx, requesterUserId);
-      return planCapsFor(ref.modelId, await planSearchRefused(row?.id, [ref.modelId]));
+      const cached = row ? await cachedPlanCatalog(core, row.id) : null;
+      return planCapsFor(
+        ref.modelId,
+        await planSearchRefused(row?.id, [ref.modelId]),
+        modalitiesIn(cached, ref.modelId),
+      );
     },
 
     async reportFailure(tx, ref, requesterUserId, e) {

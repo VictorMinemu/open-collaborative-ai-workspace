@@ -29,7 +29,7 @@
 //
 // Fake OpenAI Responses API (fake-responses.mjs, Phase 5): `POST /v1/responses` (SSE) and, for `fake-plan-…`
 // bearers, the ChatGPT-plan catalog on `GET /v1/models`. Every route also honours `[[slow]]` (40 deltas 100 ms
-// apart) and appends ` [images:N]` when the last user message carries images.
+// apart) and appends ` [images:N]` / ` [files:N]` when the last user message carries images / files (PDFs).
 // `createFakeModelServer({ onRequest })` reports `{kind, path, headers, body}` for every model request
 // (kinds: models, responses, openai, anthropic, and search for the fake SearXNG with its query string in `path`).
 //
@@ -415,16 +415,24 @@ function imageCount(message) {
     : 0;
 }
 
-/** The last user message's slow flag and image suffix. */
+/** File parts of a message's content (OpenAI chat `file`, Anthropic `document`), e.g. PDFs (05-12). */
+function fileCount(message) {
+  return Array.isArray(message?.content)
+    ? message.content.filter((p) => p?.type === "file" || p?.type === "document").length
+    : 0;
+}
+
+/** The last user message's slow flag and ` [images:N]` / ` [files:N]` suffix. */
 function turnFlags(messages) {
   const lastUser = [...messages].reverse().find((m) => m.role === "user");
   const images = imageCount(lastUser);
+  const files = fileCount(lastUser);
   const text = contentText(lastUser?.content);
   return {
     slow: SLOW_RE.test(text),
     cacheRead: Number(CACHE_RE.exec(text)?.[1] ?? 0),
     httpStatus: Number(HTTP_RE.exec(text)?.[1] ?? 0),
-    suffix: images > 0 ? ` [images:${images}]` : "",
+    suffix: `${images > 0 ? ` [images:${images}]` : ""}${files > 0 ? ` [files:${files}]` : ""}`,
   };
 }
 

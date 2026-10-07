@@ -16,6 +16,7 @@ import { aiChats, aiGenerations, conversations, messages, type Tx } from "@ocw/d
 import { streamText } from "ai";
 import { and, eq, lt, ne, sql } from "drizzle-orm";
 import type { Core } from "../../core";
+import type { ObjectStorage } from "../artifact";
 import { convTopic } from "../chat";
 import {
   type ClassifiedModelError,
@@ -170,7 +171,15 @@ function addUsage(
 const unavailableCode = (e: ModelUnavailableError): AiErrorCode =>
   e.reason === "not_connected" ? "not_connected" : "model_unavailable";
 
-export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: () => Date }): RunLoop {
+export function createRunLoop(
+  core: Core,
+  deps: {
+    gateway: ModelGateway;
+    now?: () => Date;
+    /** Where attachment bytes are read for the model (05-12); null = attachments are not configured. */
+    storage?: ObjectStorage | null;
+  },
+): RunLoop {
   const instanceId = randomUUID();
   const now = deps.now ?? (() => new Date());
   const active = new Map<string, Active>();
@@ -204,6 +213,8 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
         now: now(),
         policy,
         tools: { resolved, perms, searxngUrl: core.env.OCW_AI_SEARXNG_URL, onSearch },
+        // Attachment bytes for what this model reads (05-12): read here, inline in the request, never a URL.
+        files: { storage: deps.storage ?? null, caps: resolved.caps },
       });
       return { gen, turn, ref, resolved };
     });

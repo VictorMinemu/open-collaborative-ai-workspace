@@ -15,7 +15,7 @@ import { and, eq } from "drizzle-orm";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { type App, authOf, type Core, tenant } from "../../core";
 import { conflict, gone, HttpError, notFound } from "../../lib/errors";
-import type { ConversationAccess } from "../chat/access";
+import type { ConversationAccess, ReadableKind } from "../chat/access";
 import { channelResource, createPermissionService } from "../organization";
 import { dispositionFor } from "./disposition";
 import { type AttachmentRow, toAttachment } from "./model";
@@ -42,6 +42,13 @@ const disabled = () => new HttpError(503, "attachments_disabled", "File attachme
 const unavailable = () => new HttpError(503, "storage_unavailable", "File storage is unavailable, try again");
 const hidden = () => notFound("Attachment not found");
 const NO_STORE = "private, no-store";
+
+/**
+ * Attachments live in channels, DMs, groups and (05-12) the owner's AI chats. `ai_chat` is never a default readable
+ * kind (P-03): asking for it here keeps an AI chat's files exactly as private as the chat (its owner only, admins
+ * included in the hidden-as-404 rule).
+ */
+const KINDS: readonly ReadableKind[] = ["channel", "dm", "group", "ai_chat"];
 
 async function loadRow(tx: Tx, id: string): Promise<AttachmentRow | null> {
   const [row] = await tx.select().from(attachments).where(eq(attachments.id, id)).limit(1);
@@ -110,9 +117,15 @@ export function registerAttachmentRoutes(app: App, deps: AttachmentRoutesDeps): 
       if (!storage) throw disabled();
       const auth = authOf(req);
       const row = await core.db.withTenant(tenant(req), async (tx) => {
-        const { conv, facts } = await access.readable(req, tx, req.params.id);
+        const { conv, facts } = await access.readable(req, tx, req.params.id, { kinds: KINDS });
         if (conv.archivedAt) throw gone("This conversation is archived", "channel_archived");
-        await perms.assertCan(req, tx, "channel.post", channelResource(facts));
+        // Nobody posts into an AI chat through the channel permissions (`ai_chat_private`): its owner writes there
+        // under `ai_chat.use`, decided on the chat itself (owner only, hidden = 404 like the chat's own routes).
+        if (conv.kind === "ai_chat") {
+          await perms.assertCan(req, tx, "ai_chat.use", channelResource(facts), { hideAs404: true });
+        } else {
+          await perms.assertCan(req, tx, "channel.post", channelResource(facts));
+        }
         await perms.assertCan(req, tx, "attachment.upload", channelResource(facts));
         if (req.body.size > maxBytes) {
           throw new HttpError(400, "too_large", `Files can be at most ${maxBytes} bytes`, { maxBytes });
@@ -155,7 +168,10 @@ export function registerAttachmentRoutes(app: App, deps: AttachmentRoutesDeps): 
       const row = await core.db.withTenant(ctx, async (tx) => {
         const r = await loadRow(tx, req.params.id);
         if (!r || r.uploaderId !== auth.userId) throw hidden();
-        await access.readable(req, tx, r.conversationId, { notFoundMessage: "Attachment not found" });
+        await access.readable(req, tx, r.conversationId, {
+          kinds: KINDS,
+          notFoundMessage: "Attachment not found",
+        });
         return r;
       });
       if (row.status === "ready") return toAttachment(row); // idempotent retry
@@ -250,7 +266,10 @@ export function registerAttachmentRoutes(app: App, deps: AttachmentRoutesDeps): 
   async function visible(req: FastifyRequest, tx: Tx, id: string): Promise<AttachmentRow> {
     const row = await loadRow(tx, id);
     if (row?.status !== "ready") throw hidden();
-    await access.readable(req, tx, row.conversationId, { notFoundMessage: "Attachment not found" });
+    await access.readable(req, tx, row.conversationId, {
+      kinds: KINDS,
+      notFoundMessage: "Attachment not found",
+    });
     if (row.messageId) {
       const [msg] = await tx
         .select({ deletedAt: messages.deletedAt })

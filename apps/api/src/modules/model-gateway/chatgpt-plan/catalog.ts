@@ -10,13 +10,30 @@ import { type CredentialRow, catalogCacheKey } from "./credentials";
 export interface PlanModel {
   slug: string;
   label: string;
+  /**
+   * What the model accepts as input when the catalog says so (05-12, e.g. `["text", "image", "file"]`): "image" =
+   * vision, "file" = PDFs. Absent = unknown; the conservative allowlist applies (`planCaps`).
+   */
+  inputModalities?: string[];
 }
+
+/** The cached catalog's shape (Redis); the modalities are optional so caches written before 05-12 still parse. */
+const CachedCatalog = z.array(
+  z.object({
+    slug: z.string(),
+    label: z.string(),
+    inputModalities: z.array(z.string().max(40)).max(20).optional(),
+  }),
+);
 
 const CACHE_TTL_SECONDS = 3_600;
 const FETCH_TIMEOUT_MS = 10_000;
 export const DEFAULT_CHATGPT_API_BASE_URL = "https://api.openai.com/v1";
 
-/** Tolerant: `slug ?? id`, `display_name ?? slug`, `visibility` defaults to "list"; unknown fields ignored. */
+/**
+ * Tolerant: `slug ?? id`, `display_name ?? slug`, `visibility` defaults to "list", `input_modalities` kept when it is
+ * a list of strings; unknown fields ignored.
+ */
 const CatalogResponse = z.object({
   data: z.array(
     z
@@ -25,6 +42,7 @@ const CatalogResponse = z.object({
         id: z.string().min(1).max(200).optional(),
         display_name: z.string().min(1).max(200).optional(),
         visibility: z.string().optional(),
+        input_modalities: z.array(z.string().max(40)).max(20).optional().catch(undefined),
       })
       .loose(),
   ),
@@ -38,7 +56,11 @@ export function parsePlanCatalog(json: unknown): PlanModel[] {
     const slug = m.slug ?? m.id;
     if (!slug || (m.visibility ?? "list") !== "list") continue;
     if (out.some((x) => x.slug === slug)) continue;
-    out.push({ slug, label: m.display_name ?? slug });
+    out.push({
+      slug,
+      label: m.display_name ?? slug,
+      ...(m.input_modalities ? { inputModalities: m.input_modalities.map((x) => x.toLowerCase()) } : {}),
+    });
   }
   return out;
 }
@@ -55,7 +77,7 @@ export async function cachedPlanCatalog(core: Core, credentialId: string): Promi
   const cached = await core.bus.pub.get(catalogCacheKey(credentialId)).catch(() => null);
   if (!cached) return null;
   try {
-    return z.array(z.object({ slug: z.string(), label: z.string() })).parse(JSON.parse(cached));
+    return CachedCatalog.parse(JSON.parse(cached));
   } catch {
     return null;
   }
@@ -71,7 +93,7 @@ export async function planCatalog(
   const cached = await core.bus.pub.get(key).catch(() => null);
   if (cached) {
     try {
-      return z.array(z.object({ slug: z.string(), label: z.string() })).parse(JSON.parse(cached));
+      return CachedCatalog.parse(JSON.parse(cached));
     } catch {
       /* refetch */
     }

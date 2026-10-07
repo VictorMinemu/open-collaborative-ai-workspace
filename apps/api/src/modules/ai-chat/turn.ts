@@ -1,4 +1,4 @@
-import { AI_MAX_STEPS, type AiChatPolicy, type AiGenerationStatus } from "@ocw/contracts";
+import { AI_MAX_STEPS, type AiChatPolicy, type AiGenerationStatus, type ModelCaps } from "@ocw/contracts";
 import {
   aiChats,
   aiGenerations,
@@ -10,17 +10,23 @@ import {
 } from "@ocw/db";
 import { type ModelMessage, type StopCondition, stepCountIs, type ToolSet } from "ai";
 import { and, asc, desc, eq, inArray, isNull, lt } from "drizzle-orm";
+import type { ObjectStorage } from "../artifact";
 import type { ResolvedModel } from "../model-gateway";
 import type { PermissionService } from "../organization";
-import { buildModelMessages, type ModelFilePart, type PersistedTurn } from "./build-model-messages";
+import { attachmentPartsFor } from "./attachments";
+import { buildModelMessages, type PersistedTurn } from "./build-model-messages";
 import type { GenerationRow } from "./dto";
 import { webAllowed } from "./tools-state";
 import { searxngWebSearchTool } from "./web-tools";
 
 /**
  * The seam between persisted state and the model call: persisted rows (seq order, before the answer being
- * generated), chat settings, the requester's preferences and the viewer → `buildModelMessages`. 05-12 adds
- * attachments here; nothing else assembles a prompt (P-05).
+ * generated), chat settings, the requester's preferences, the viewer and the user messages' files →
+ * `buildModelMessages`; nothing else assembles a prompt (P-05).
+ *
+ * Files (05-12): the bytes of each user message's attachments are read from the store here, for the resolved
+ * model's caps (`attachmentPartsFor`), and travel as file/text parts of that message only. Without `files` (an
+ * estimate for a turn that never reached a model) they count as zero-byte parts.
  *
  * Tools (05-11, D-04): when the chat has Web on and `webAllowed` holds for the requester and the resolved model
  * (policy, `ai_chat.web`, the model's search support), the plan backend gets its hosted `web_search` and organization
@@ -35,6 +41,18 @@ export interface Turn {
   stopWhen: StopCondition<ToolSet> | undefined;
   truncated: boolean;
 }
+
+/** Where the turn reads attachment bytes and what the model can read (05-12). */
+export interface TurnFiles {
+  storage: ObjectStorage | null;
+  caps: ModelCaps;
+}
+
+/** Estimates only: every attachment counts as a part, no byte is read. */
+const ESTIMATE_FILES: TurnFiles = {
+  storage: null,
+  caps: { vision: true, pdf: true, webSearch: "none" },
+};
 
 /** What the turn needs to attach tools: the requester's resolved model and the resolver (absent = no tools). */
 export interface TurnTools {
@@ -75,7 +93,7 @@ async function webTools(
 export async function loadTurn(
   tx: Tx,
   generation: GenerationRow,
-  ctx: { orgName: string; now: Date; policy: AiChatPolicy; tools?: TurnTools },
+  ctx: { orgName: string; now: Date; policy: AiChatPolicy; tools?: TurnTools; files?: TurnFiles },
 ): Promise<Turn> {
   const [assistant] = await tx
     .select({ seq: messages.seq })
@@ -149,6 +167,13 @@ export async function loadTurn(
     );
 
   const tools = await webTools(tx, generation, chat.tools?.web === true, ctx.policy, ctx.tools);
+  const files = ctx.files ?? ESTIMATE_FILES;
+  const attachments = await attachmentPartsFor(
+    tx,
+    turns.filter((t) => t.role === "user" && !t.deleted).map((t) => t.id),
+    files.storage,
+    files.caps,
+  );
   const built = buildModelMessages({
     purpose: "chat",
     webSearch: tools !== null,
@@ -160,7 +185,7 @@ export async function loadTurn(
       humanMembers: humans.length,
     },
     personalInstructions: prefs?.instructions ?? "",
-    attachments: new Map<string, ModelFilePart[]>(),
+    attachments,
     maxContextTokens: ctx.policy.maxContextTokens,
   });
   return tools

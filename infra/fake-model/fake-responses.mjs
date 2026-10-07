@@ -49,12 +49,18 @@ export const PLAN_FORBIDDEN_KEYS = [
 export const SLOW_DELTAS = 40;
 export const SLOW_INTERVAL_MS = 100;
 
-/** The `GET /v1/models` catalog a ChatGPT-plan token sees. */
+/** The `GET /v1/models` catalog a ChatGPT-plan token sees (Astra lists no modalities: the API's allowlist applies). */
 export function planCatalog() {
   return {
     data: [
       { slug: "gpt-6-astra", display_name: "GPT-6 Astra", visibility: "list" },
-      { slug: "gpt-5.6-luna", display_name: "GPT-5.6 Luna", visibility: "list" },
+      // Luna lists its input modalities (05-12): images, no files, so the API offers it no PDFs.
+      {
+        slug: "gpt-5.6-luna",
+        display_name: "GPT-5.6 Luna",
+        visibility: "list",
+        input_modalities: ["text", "image"],
+      },
       { slug: "gpt-internal", visibility: "hide" },
     ],
   };

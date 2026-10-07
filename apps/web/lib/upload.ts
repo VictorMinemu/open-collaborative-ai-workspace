@@ -47,14 +47,22 @@ function put(
   });
 }
 
+/**
+ * Where a file is uploaded: a conversation id, or (05-12) a function that yields one once it exists — a New AI chat
+ * creates its draft on the first attached file.
+ */
+export type UploadTarget = string | (() => Promise<string>);
+
 export function uploadAttachment(
-  conversationId: string,
+  target: UploadTarget,
   file: File,
   onProgress: (fraction: number) => void,
 ): UploadHandle {
   const controller = new AbortController();
   const { signal } = controller;
   const promise = (async () => {
+    const conversationId = typeof target === "string" ? target : await target();
+    if (signal.aborted) throw abortError();
     const presigned = await api.post(`/api/v1/conversations/${conversationId}/attachments`, {
       body: { filename: file.name || "file", contentType: contentTypeOf(file), size: file.size },
       schema: PresignUploadResponse,
