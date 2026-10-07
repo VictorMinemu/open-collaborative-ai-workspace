@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 63
+open_count: 64
 waived_count: 0
-fixed_count: 16
-total_count: 79
-last_updated: 2026-10-07T17:48:58.298Z
+fixed_count: 17
+total_count: 81
+last_updated: 2026-10-07T18:10:28.587Z
 ---
 
 # Broken Windows Ledger
@@ -91,9 +91,11 @@ last_updated: 2026-10-07T17:48:58.298Z
 | 74 | 06 | deviation | apps/api/src/modules/chat/index.ts |  | Phase 4 chat routes authenticate in preHandler: anonymous malformed bodies get 400 before 401 (card routes fixed in 06-16) | open |  | 2026-10-07T15:33:04.922Z |  |
 | 75 | 06 | deviation | apps/web/components/bots/add-to-channel-dialog.tsx |  | Add to channel lists channels where the caller gets 403; bots.spec now picks #general | open |  | 2026-10-07T15:33:04.995Z |  |
 | 76 | 06.1 | deviation | apps/api/src/modules/work-session/images.int.test.ts |  | attachment_not_linkable acceptance grep is 3 (<6); rejection matrix is table-driven | open |  | 2026-10-07T17:14:33.250Z |  |
-| 77 | 06.1 | deviation | packages/contracts/src/work-session.ts |  | WorkPrompt.attachments is in upload order, not request order; 06.1-02 must dispatch in request order | open |  | 2026-10-07T17:14:33.320Z |  |
+| 77 | 06.1 | deviation | packages/contracts/src/work-session.ts |  | WorkPrompt.attachments is in upload order, not request order; 06.1-02 must dispatch in request order | fixed |  | 2026-10-07T17:14:33.320Z | 2026-10-07T18:10:28.424Z |
 | 78 | 06.1 | deviation | apps/local-runtime/src/codex/codex-runtime.ts |  | Codex turn/start error surfaces as session.error + failed prompt.completed, not a prompt() rejection (plan said reject) | open |  | 2026-10-07T17:48:58.224Z |  |
 | 79 | 06.1 | deviation | apps/local-runtime/src/codex |  | Synthetic Codex image fixture reuses recorded initialize/thread/start lines | open |  | 2026-10-07T17:48:58.298Z |  |
+| 80 | 06.1 | deviation | packages/db |  | 06.1-02 added migration work_prompt_image_order outside its files_modified (needed for request order) | open |  | 2026-10-07T18:10:28.511Z |  |
+| 81 | 06.1 | unmet-truth | apps/api/src/modules/work-session/turn-mode.int.test.ts |  | One standalone turn-mode.int run failed in beforeAll with no captured cause; 9 reruns passed (unconfirmed flake) | open |  | 2026-10-07T18:10:28.587Z |  |
 
 ````json
 [
@@ -1016,10 +1018,10 @@ last_updated: 2026-10-07T17:48:58.298Z
     "file": "packages/contracts/src/work-session.ts",
     "line": null,
     "description": "WorkPrompt.attachments is in upload order, not request order; 06.1-02 must dispatch in request order",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-07T17:14:33.320Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-07T18:10:28.424Z"
   },
   {
     "id": 78,
@@ -1043,6 +1045,30 @@ last_updated: 2026-10-07T17:48:58.298Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-07T17:48:58.298Z",
+    "resolved_at": null
+  },
+  {
+    "id": 80,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": "packages/db",
+    "line": null,
+    "description": "06.1-02 added migration work_prompt_image_order outside its files_modified (needed for request order)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T18:10:28.511Z",
+    "resolved_at": null
+  },
+  {
+    "id": 81,
+    "kind": "unmet-truth",
+    "phase": "06.1",
+    "file": "apps/api/src/modules/work-session/turn-mode.int.test.ts",
+    "line": null,
+    "description": "One standalone turn-mode.int run failed in beforeAll with no captured cause; 9 reruns passed (unconfirmed flake)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T18:10:28.587Z",
     "resolved_at": null
   }
 ]
