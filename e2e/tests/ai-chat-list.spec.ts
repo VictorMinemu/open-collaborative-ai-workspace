@@ -15,8 +15,10 @@ test.describe.configure({ mode: "serial" });
 const PLAN = { backend: "chatgpt_plan", provider: "openai", modelId: "gpt-6-astra" } as const;
 const widthOf = (project: string) => (project === "mobile" ? "390" : "1440");
 /** A single word unique to this run and project (titles keep it as typed). */
+// Always contains a digit: the title normalizer keeps mixed-case tokens with digits as written, but would
+// sentence-case a purely alphabetic tag (Date.now() in base 36 sometimes has no digit).
 const tagOf = (project: string) =>
-  `Zq${project === "mobile" ? "m" : "d"}${Date.now().toString(36).slice(-5)}`;
+  `Zq${project === "mobile" ? "m" : "d"}7${Date.now().toString(36).slice(-5)}`;
 
 async function bothThemes(page: Page, name: string) {
   await shot(page, name);
