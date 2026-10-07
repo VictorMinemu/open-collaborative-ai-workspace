@@ -19,7 +19,11 @@ import {
   useRef,
   useState,
 } from "react";
-import { AttachmentTray, useAttachmentQueue } from "@/components/chat/attachments/attachment-tray";
+import {
+  AttachmentTray,
+  type QueueItem,
+  useAttachmentQueue,
+} from "@/components/chat/attachments/attachment-tray";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { useAiChatModel } from "@/lib/ai-chat-model-store";
@@ -28,6 +32,7 @@ import { orgAnswersLeft, reachedLimit, refreshAiUsageToday, useAiUsageToday } fr
 import { useAttachmentsConfig } from "@/lib/attachment-queries";
 import type { UploadTarget } from "@/lib/upload";
 import { cn } from "@/lib/utils";
+import { attachmentGate, readableSummary } from "./attachment-gate";
 import { ModelPicker } from "./model-picker";
 import { PlanUsageLine } from "./plan-usage-line";
 import { ToolsMenu, useWebReason, WebChip } from "./tools-menu";
@@ -161,9 +166,16 @@ export function AiComposer({
   const canAttach = uploadTarget !== null && filesConfig.data?.enabled === true && !noModel;
   const queue = useAttachmentQueue(uploadTarget ?? "", canAttach ? filesConfig.data : null);
   const fileInput = useRef<HTMLInputElement>(null);
+  // What the selected model can't read is marked in the tray with the reason, re-checked whenever the model changes
+  // (05-12); the API refuses the same files (400 attachment_not_supported), it stays the authority.
+  const refusalOf = (item: QueueItem): string | null => {
+    const gate = attachmentGate(model, { contentType: item.contentType, size: item.size });
+    return gate.ok ? null : gate.reason;
+  };
+  const refused = queue.items.some((i) => i.status !== "error" && refusalOf(i) !== null);
   const hasContent = text.trim().length > 0 || queue.readyIds.length > 0;
-  // Never while a file is still uploading or one failed (it must be removed or retried first).
-  const canSend = hasContent && !!model && !busy && !sending && !queue.busy && !queue.blocked;
+  // Never while a file is still uploading, failed, or can't go to this model (remove it, retry it or switch models).
+  const canSend = hasContent && !!model && !busy && !sending && !queue.busy && !queue.blocked && !refused;
 
   function addFiles(files: File[]) {
     if (!canAttach || files.length === 0) return;
@@ -264,7 +276,7 @@ export function AiComposer({
       <div className="relative rounded-[22px] border bg-card shadow-[0_1px_2px_rgb(0_0_0/0.04),0_8px_24px_-12px_rgb(0_0_0/0.12)] transition-[border-color,box-shadow] focus-within:border-ring/50 dark:shadow-none">
         {canAttach && queue.items.length > 0 ? (
           <div className="px-3 pt-3">
-            <AttachmentTray queue={queue} />
+            <AttachmentTray queue={queue} refusalOf={refusalOf} />
           </div>
         ) : null}
         <textarea
@@ -300,8 +312,8 @@ export function AiComposer({
               />
               <button
                 type="button"
-                aria-label="Attach files"
-                title="Attach files"
+                aria-label={`Attach files. ${readableSummary(model)}`}
+                title={readableSummary(model)}
                 data-testid="ai-attach-button"
                 onClick={() => fileInput.current?.click()}
                 className="inline-flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/30"
