@@ -2,7 +2,9 @@
 
 import type { AiGeneration, Message, SendAiMessageResponse } from "@ocw/contracts";
 import { Check, Copy, Globe, Square, Unplug } from "lucide-react";
-import { Fragment, type ReactNode } from "react";
+import { Fragment, type ReactNode, useState } from "react";
+import { MessageAttachments } from "@/components/chat/attachments/attachment-grid";
+import { Lightbox } from "@/components/chat/attachments/lightbox";
 import { Markdown } from "@/components/markdown/markdown";
 import { safeUrl } from "@/components/markdown/safe-url";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -40,21 +42,7 @@ export function AiMessage({
   text: string;
   regenerate?: AnswerRegenerate | undefined;
 }) {
-  if (message.authorKind !== "agent") {
-    return (
-      <div
-        data-testid="ai-message"
-        data-role="user"
-        data-status={message.status}
-        data-message-id={message.id}
-        className="flex justify-end pl-10 sm:pl-24"
-      >
-        <div className="max-w-full whitespace-pre-wrap break-words rounded-[20px] bg-muted px-4 py-2.5 text-[15px] leading-6">
-          {text}
-        </div>
-      </div>
-    );
-  }
+  if (message.authorKind !== "agent") return <UserTurn message={message} text={text} />;
 
   const streaming = message.status === "streaming";
   // A failure that follows a stream seen on this page arrived live (05-07: the usage-limit dialog opens once).
@@ -105,6 +93,42 @@ export function AiMessage({
           }
         />
       )}
+    </div>
+  );
+}
+
+/**
+ * The member's turn: its files (05-12) right-aligned above the bubble, as in chat — image previews (the API's webp
+ * renditions, opening the lightbox) and file cards — then the text, when there is any.
+ */
+function UserTurn({ message, text }: { message: Message; text: string }) {
+  const [lightbox, setLightbox] = useState<number | null>(null);
+  const files = message.attachments ?? [];
+  const images = files.filter((a) => a.isImage && a.previewUrl);
+  return (
+    <div
+      data-testid="ai-message"
+      data-role="user"
+      data-status={message.status}
+      data-message-id={message.id}
+      className="flex flex-col items-end gap-1.5 pl-10 sm:pl-24"
+    >
+      {files.length > 0 ? (
+        <div className="flex w-full justify-end">
+          {/* Shrinks to the column on phones so a wide preview never overflows the turn. */}
+          <div className="min-w-0 max-w-full [&>div]:mt-0 [&>div]:items-end">
+            <MessageAttachments attachments={files} onOpenImage={setLightbox} />
+          </div>
+        </div>
+      ) : null}
+      {text ? (
+        <div className="max-w-full whitespace-pre-wrap break-words rounded-[20px] bg-muted px-4 py-2.5 text-[15px] leading-6">
+          {text}
+        </div>
+      ) : null}
+      {lightbox !== null ? (
+        <Lightbox images={images} index={lightbox} onClose={() => setLightbox(null)} />
+      ) : null}
     </div>
   );
 }

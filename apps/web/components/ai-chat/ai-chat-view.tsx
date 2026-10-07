@@ -5,14 +5,17 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Archive, Lock, MessageCircleQuestion, SlidersHorizontal } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { toast } from "sonner";
+import { DropZone } from "@/components/chat/attachments/drop-zone";
+import { attachmentLimitsHint } from "@/components/chat/composer";
 import { EmptyState } from "@/components/common/empty-state";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { clearAiChatModel } from "@/lib/ai-chat-model-store";
 import {
   createAiChat,
+  createAiDraft,
   newClientMessageId,
   primeAiChat,
   sendAiMessage,
@@ -25,8 +28,9 @@ import {
   useAiPreferences,
 } from "@/lib/ai-chat-queries";
 import { errorMessage, isApiError } from "@/lib/api";
+import { useAttachmentsConfig } from "@/lib/attachment-queries";
 import { AiChatHeader, AiChatMenuItem, AiChatPlainHeader } from "./ai-chat-header";
-import { AiComposer } from "./ai-composer";
+import { AiComposer, type AiComposerApi, type AiSendFiles } from "./ai-composer";
 import { AiMessageList } from "./ai-message-list";
 import { ChatSettingsSheet } from "./chat-settings-sheet";
 
@@ -50,16 +54,60 @@ function sendFailed(err: unknown): never {
   throw err;
 }
 
+/**
+ * Files on the conversation pane (05-12): a drop hands them to the composer, which uploads them into the chat. A
+ * plain wrapper while attachments are off.
+ */
+function ChatDropZone({
+  enabled,
+  composer,
+  children,
+}: {
+  enabled: boolean;
+  composer: React.RefObject<AiComposerApi | null>;
+  children: React.ReactNode;
+}) {
+  const config = useAttachmentsConfig();
+  return (
+    <DropZone
+      conversationLabel="this chat"
+      enabled={enabled && config.data?.enabled === true}
+      hint={attachmentLimitsHint(config.data)}
+      onFiles={(files) => composer.current?.addFiles(files)}
+    >
+      {children}
+    </DropZone>
+  );
+}
+
 function NewChat() {
   const router = useRouter();
   const models = useAiModels();
   // The member's "Web search on by default" (05-11); the default model comes with the model list.
   const prefs = useAiPreferences();
+  const composer = useRef<AiComposerApi | null>(null);
+  // Files need a conversation before the first message (05-12): the first attached file creates a draft chat,
+  // which the send then turns into this chat (it is listed from its first message on).
+  const draft = useRef<Promise<string> | null>(null);
+  const ensureDraft = useCallback((): Promise<string> => {
+    draft.current ??= createAiDraft().then(
+      (chat) => chat.id,
+      (err) => {
+        draft.current = null;
+        throw err;
+      },
+    );
+    return draft.current;
+  }, []);
 
-  async function onSend(body: string, m: AiModelOption, tools: AiChatTools) {
+  async function onSend(body: string, m: AiModelOption, tools: AiChatTools, files: AiSendFiles) {
     let res: SendAiMessageResponse;
     try {
-      res = await createAiChat({ clientMessageId: newClientMessageId(), body, model: m.ref, tools });
+      const base = { clientMessageId: newClientMessageId(), body, model: m.ref, tools };
+      res =
+        draft.current || files.ids.length > 0
+          ? await sendAiMessage(await ensureDraft(), { ...base, attachmentIds: files.ids })
+          : await createAiChat(base);
     } catch (err) {
       sendFailed(err);
     }
@@ -71,27 +119,31 @@ function NewChat() {
 
   return (
     <Frame title="New chat">
-      <div className="flex min-h-0 flex-1 flex-col sm:justify-center sm:pb-[12vh]">
-        <div className="flex flex-1 flex-col items-center justify-center px-6 pb-6 text-center sm:flex-none">
-          <h2 className="text-balance font-semibold text-[22px] tracking-tight sm:text-[26px]">
-            What can I help with?
-          </h2>
-          <p className="mt-1.5 flex items-center gap-1.5 text-[13px] text-muted-foreground">
-            <Lock aria-hidden className="size-3.5" />
-            Only you can see this chat
-          </p>
+      <ChatDropZone enabled={!!models.data} composer={composer}>
+        <div className="flex min-h-0 flex-1 flex-col sm:justify-center sm:pb-[12vh]">
+          <div className="flex flex-1 flex-col items-center justify-center px-6 pb-6 text-center sm:flex-none">
+            <h2 className="text-balance font-semibold text-[22px] tracking-tight sm:text-[26px]">
+              What can I help with?
+            </h2>
+            <p className="mt-1.5 flex items-center gap-1.5 text-[13px] text-muted-foreground">
+              <Lock aria-hidden className="size-3.5" />
+              Only you can see this chat
+            </p>
+          </div>
+          <AiComposer
+            chatKey={NEW_CHAT_KEY}
+            initialTools={prefs.data ? { web: prefs.data.webDefault } : undefined}
+            models={models.data?.models}
+            preferred={[models.data?.defaultRef]}
+            modelsLoading={models.isPending}
+            busy={false}
+            onSend={onSend}
+            uploadTarget={ensureDraft}
+            apiRef={composer}
+            autoFocus
+          />
         </div>
-        <AiComposer
-          chatKey={NEW_CHAT_KEY}
-          initialTools={prefs.data ? { web: prefs.data.webDefault } : undefined}
-          models={models.data?.models}
-          preferred={[models.data?.defaultRef]}
-          modelsLoading={models.isPending}
-          busy={false}
-          onSend={onSend}
-          autoFocus
-        />
-      </div>
+      </ChatDropZone>
     </Frame>
   );
 }
@@ -104,6 +156,7 @@ function ExistingChat({ chatId }: { chatId: string }) {
   // Settings saved in the chat settings sheet after the snapshot (05-11).
   const liveSettings = useAiChatSettingsLive(chatId);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const composer = useRef<AiComposerApi | null>(null);
   const snapshotChat = chat.snapshot?.chat;
   const detail = snapshotChat ? { ...snapshotChat, ...live, ...liveSettings } : snapshotChat;
   const writing = chat.messages.findLast((m) => m.authorKind === "agent" && m.status === "streaming");
@@ -123,10 +176,16 @@ function ExistingChat({ chatId }: { chatId: string }) {
     }
   }
 
-  async function onSend(body: string, m: AiModelOption, tools: AiChatTools) {
+  async function onSend(body: string, m: AiModelOption, tools: AiChatTools, files: AiSendFiles) {
     try {
       chat.applySent(
-        await sendAiMessage(chatId, { clientMessageId: newClientMessageId(), body, model: m.ref, tools }),
+        await sendAiMessage(chatId, {
+          clientMessageId: newClientMessageId(),
+          body,
+          model: m.ref,
+          tools,
+          ...(files.ids.length > 0 ? { attachmentIds: files.ids } : {}),
+        }),
       );
     } catch (err) {
       sendFailed(err);
@@ -202,27 +261,31 @@ function ExistingChat({ chatId }: { chatId: string }) {
       }
     >
       {detail ? <ChatSettingsSheet chat={detail} open={settingsOpen} onOpenChange={setSettingsOpen} /> : null}
-      <AiMessageList
-        chatId={chatId}
-        messages={chat.messages}
-        textOf={chat.textOf}
-        onRegenerated={chat.applySent}
-      />
-      {detail?.archived ? (
-        <ArchivedNotice chatId={chatId} />
-      ) : (
-        <AiComposer
-          chatKey={chatId}
-          chat={detail ?? null}
-          initialTools={detail?.settings.tools}
-          models={models.data?.models}
-          preferred={[detail?.lastModel, models.data?.defaultRef]}
-          modelsLoading={models.isPending}
-          busy={busy}
-          onSend={onSend}
-          onStop={runningId ? onStop : undefined}
+      <ChatDropZone enabled={!detail?.archived} composer={composer}>
+        <AiMessageList
+          chatId={chatId}
+          messages={chat.messages}
+          textOf={chat.textOf}
+          onRegenerated={chat.applySent}
         />
-      )}
+        {detail?.archived ? (
+          <ArchivedNotice chatId={chatId} />
+        ) : (
+          <AiComposer
+            chatKey={chatId}
+            chat={detail ?? null}
+            initialTools={detail?.settings.tools}
+            models={models.data?.models}
+            preferred={[detail?.lastModel, models.data?.defaultRef]}
+            modelsLoading={models.isPending}
+            busy={busy}
+            onSend={onSend}
+            onStop={runningId ? onStop : undefined}
+            uploadTarget={chatId}
+            apiRef={composer}
+          />
+        )}
+      </ChatDropZone>
     </Frame>
   );
 }

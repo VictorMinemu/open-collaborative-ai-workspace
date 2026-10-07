@@ -6,6 +6,7 @@ import {
   type AiChatSnapshot,
   AiChatSnapshot as AiChatSnapshotSchema,
   type AiChatSummary,
+  AiChatSummary as AiChatSummarySchema,
   AiModelList,
   AiUserPreferences,
   type CreateAiChatRequest,
@@ -191,6 +192,14 @@ export function useAiModels() {
 
 export function createAiChat(body: CreateAiChatRequest): Promise<SendAiMessageResponse> {
   return api.post("/api/v1/ai-chats", { body, schema: SendAiMessageResponse });
+}
+
+/**
+ * An empty AI chat to upload files into before the first message (05-12): New chat creates one when the member
+ * attaches the first file; it stays out of every list until its first message.
+ */
+export function createAiDraft(): Promise<AiChatSummary> {
+  return api.post("/api/v1/ai-chats/drafts", { body: {}, schema: AiChatSummarySchema });
 }
 
 export function sendAiMessage(chatId: string, body: SendAiMessageRequest): Promise<SendAiMessageResponse> {

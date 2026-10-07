@@ -4,17 +4,29 @@ import {
   type AiChatDetail,
   type AiChatTools,
   type AiModelOption,
+  type Attachment,
   type ModelRef,
   modelRefKey,
 } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowUp, Gauge, Square } from "lucide-react";
-import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
+import { ArrowUp, Gauge, Paperclip, Square } from "lucide-react";
+import {
+  type ClipboardEvent,
+  type FormEvent,
+  type KeyboardEvent,
+  type RefObject,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import { AttachmentTray, useAttachmentQueue } from "@/components/chat/attachments/attachment-tray";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { useAiChatModel } from "@/lib/ai-chat-model-store";
 import { limitNoticeText } from "@/lib/ai-format";
 import { orgAnswersLeft, reachedLimit, refreshAiUsageToday, useAiUsageToday } from "@/lib/ai-usage-queries";
+import { useAttachmentsConfig } from "@/lib/attachment-queries";
+import type { UploadTarget } from "@/lib/upload";
 import { cn } from "@/lib/utils";
 import { ModelPicker } from "./model-picker";
 import { PlanUsageLine } from "./plan-usage-line";
@@ -37,6 +49,22 @@ export function pickModel(
   return list.find((m) => m.available && m.isDefault) ?? list.find((m) => m.available) ?? null;
 }
 
+/** The files a send carries (05-12): the verified uploads, in tray order. */
+export interface AiSendFiles {
+  ids: string[];
+  attachments: Attachment[];
+}
+
+/** What the AI chat pane can hand the composer (a drop on the conversation, 05-12). */
+export interface AiComposerApi {
+  addFiles(files: File[]): void;
+}
+
+/** Whether this member can attach files at all (storage configured and reachable, `attachment.upload`). */
+export function useAiAttachmentsEnabled(): boolean {
+  return useAttachmentsConfig().data?.enabled === true;
+}
+
 /**
  * The AI chat composer (P-09): an auto-growing textarea (Enter sends, Shift+Enter is a new line), the model picker
  * chip and the send button, in the Work Zone composer card. While an answer is being written the send button is
@@ -47,7 +75,9 @@ export function pickModel(
  * on organization models, offers the member's own ChatGPT plan when it is connected; the server stays the authority
  * (a send at the cap is refused before any model call and keeps its text). The "+" button opens the tools (05-11):
  * Web is the next answer's choice (sticky per chat on the server), shown as an active "Web" chip while it is on and
- * usable with the selected model.
+ * usable with the selected model. Files (05-12): the paperclip, a paste or a drop on the pane (`apiRef`) put files in
+ * the tray above the text, where they upload at once through the Phase 4 pipeline into `uploadTarget` (the chat, or
+ * on New chat a draft created on the first file); a message can be text, files or both once every upload finished.
  */
 export function AiComposer({
   chatKey,
@@ -61,7 +91,13 @@ export function AiComposer({
   className,
   chat = null,
   initialTools = { web: false },
+  uploadTarget = null,
+  apiRef,
 }: {
+  /** Where files upload (the chat id, or a stable function creating New chat's draft); null = text only. */
+  uploadTarget?: UploadTarget | null;
+  /** Receives `addFiles` for drops on the conversation pane. */
+  apiRef?: RefObject<AiComposerApi | null>;
   /** The chat id, or "new" on `/chat/ai/new`. */
   chatKey: string;
   /** The open chat (its tool states and settings), null on `/chat/ai/new`. */
@@ -76,8 +112,8 @@ export function AiComposer({
   busy: boolean;
   /** Stops the answer being written (absent while the chat has none to stop). */
   onStop?: () => Promise<void>;
-  /** Resolves once the API accepted the send; rejects to keep the text. */
-  onSend: (text: string, model: AiModelOption, tools: AiChatTools) => Promise<void>;
+  /** Resolves once the API accepted the send; rejects to keep the text and the files. */
+  onSend: (text: string, model: AiModelOption, tools: AiChatTools, files: AiSendFiles) => Promise<void>;
   autoFocus?: boolean;
   className?: string;
 }) {
@@ -121,18 +157,43 @@ export function AiComposer({
 
   const noModel = !model && !modelsLoading;
   const showStop = busy && !!onStop;
-  const canSend = text.trim().length > 0 && !!model && !busy && !sending;
+  const filesConfig = useAttachmentsConfig();
+  const canAttach = uploadTarget !== null && filesConfig.data?.enabled === true && !noModel;
+  const queue = useAttachmentQueue(uploadTarget ?? "", canAttach ? filesConfig.data : null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const hasContent = text.trim().length > 0 || queue.readyIds.length > 0;
+  // Never while a file is still uploading or one failed (it must be removed or retried first).
+  const canSend = hasContent && !!model && !busy && !sending && !queue.busy && !queue.blocked;
+
+  function addFiles(files: File[]) {
+    if (!canAttach || files.length === 0) return;
+    queue.add(files);
+    ref.current?.focus({ preventScroll: true });
+  }
+  if (apiRef) apiRef.current = { addFiles };
+
+  /** Pasted files (a screenshot) join the tray; the text of the paste still goes into the message. */
+  function onPaste(e: ClipboardEvent<HTMLTextAreaElement>) {
+    if (!canAttach) return;
+    const files = Array.from(e.clipboardData?.files ?? []);
+    if (files.length === 0) return;
+    const pasted = e.clipboardData.getData("text/plain").trim();
+    if (!pasted || files.some((f) => f.name === pasted)) e.preventDefault();
+    addFiles(files);
+  }
 
   async function submit(e?: FormEvent) {
     e?.preventDefault();
     const body = text.trim();
-    if (!body || !model || busy || sending) return;
+    if (!canSend || !model) return;
+    const files: AiSendFiles = { ids: queue.readyIds, attachments: queue.ready };
     setSending(true);
     setText("");
     try {
-      await onSend(body, model, tools);
+      await onSend(body, model, tools, files);
+      queue.reset();
     } catch {
-      setText(body); // the caller reported the error; nothing typed is lost
+      setText(body); // the caller reported the error; nothing typed or attached is lost
     } finally {
       setSending(false);
       // Counted (or refused at a cap): today's usage moved either way.
@@ -201,6 +262,11 @@ export function AiComposer({
         </div>
       ) : null}
       <div className="relative rounded-[22px] border bg-card shadow-[0_1px_2px_rgb(0_0_0/0.04),0_8px_24px_-12px_rgb(0_0_0/0.12)] transition-[border-color,box-shadow] focus-within:border-ring/50 dark:shadow-none">
+        {canAttach && queue.items.length > 0 ? (
+          <div className="px-3 pt-3">
+            <AttachmentTray queue={queue} />
+          </div>
+        ) : null}
         <textarea
           ref={ref}
           data-testid="ai-composer"
@@ -211,12 +277,39 @@ export function AiComposer({
           disabled={noModel}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
+          onPaste={onPaste}
           placeholder={noModel ? "No model is available to you yet" : "Ask anything"}
           aria-label="Message"
           className="block max-h-[240px] min-h-[56px] w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-[15px] leading-6 outline-none placeholder:text-muted-foreground/70 disabled:cursor-not-allowed"
         />
         <div className="flex min-w-0 items-center gap-1 px-2 pb-2">
           <ToolsMenu chat={chat} model={model} value={tools} onChange={setTools} />
+          {canAttach ? (
+            <>
+              <input
+                ref={fileInput}
+                type="file"
+                multiple
+                hidden
+                tabIndex={-1}
+                data-testid="ai-attach-file"
+                onChange={(e) => {
+                  addFiles(Array.from(e.target.files ?? []));
+                  e.target.value = "";
+                }}
+              />
+              <button
+                type="button"
+                aria-label="Attach files"
+                title="Attach files"
+                data-testid="ai-attach-button"
+                onClick={() => fileInput.current?.click()}
+                className="inline-flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/30"
+              >
+                <Paperclip aria-hidden className="size-[18px]" />
+              </button>
+            </>
+          ) : null}
           {webActive ? <WebChip onRemove={() => setTools({ ...tools, web: false })} /> : null}
           {model ? (
             <ModelPicker chatKey={chatKey} value={model.ref} onChange={setSelected} />
