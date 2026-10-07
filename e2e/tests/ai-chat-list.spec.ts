@@ -172,6 +172,11 @@ test("/chat/ai groups the member's chats and lets them rename and archive", asyn
   await expect(page.getByTestId("ai-new-chat")).toBeVisible();
   const group = (key: string) => page.locator(`[data-testid="ai-chat-group"][data-group="${key}"]`);
   await reveal(page, older.id);
+  // Nothing on the page reaches past its width: a phone would zoom the whole page out (05-15: an sr-only "Unread"
+  // in the bots row escaped the row's scroll clip when the member had many bots, and the sheets stopped taking taps).
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth),
+  ).toBeLessThanOrEqual(0);
   await expect(group("today").locator(`[data-chat-id="${today.id}"]`)).toBeVisible();
   await expect(group("week").locator(`[data-chat-id="${week.id}"]`)).toBeVisible();
   await expect(group("older").locator(`[data-chat-id="${older.id}"]`)).toBeVisible();
