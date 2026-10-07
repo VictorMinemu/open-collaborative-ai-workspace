@@ -1,8 +1,11 @@
 "use client";
 
-import type { AiShareMessage, AiShareView as AiShareViewData } from "@ocw/contracts";
+import type { AiShareMessage, AiShareView as AiShareViewData, Attachment } from "@ocw/contracts";
 import { Camera, Eye, Link2Off, MessageCircleQuestion } from "lucide-react";
 import Link from "next/link";
+import { useState } from "react";
+import { MessageAttachments } from "@/components/chat/attachments/attachment-grid";
+import { Lightbox } from "@/components/chat/attachments/lightbox";
 import { EmptyState } from "@/components/common/empty-state";
 import { Markdown } from "@/components/markdown/markdown";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -92,7 +95,7 @@ function Snapshot({ data }: { data: AiShareViewData }) {
             </div>
           </div>
           {data.messages.map((m) => (
-            <Turn key={`${m.role}-${m.createdAt}`} message={m} />
+            <Turn key={`${m.role}-${m.createdAt}`} shareId={data.id} message={m} />
           ))}
         </div>
       </div>
@@ -100,22 +103,35 @@ function Snapshot({ data }: { data: AiShareViewData }) {
   );
 }
 
-function Turn({ message }: { message: AiShareMessage }) {
-  if (message.role === "user") {
-    return (
-      <div
-        data-testid="ai-share-message"
-        data-role="user"
-        className="flex flex-col items-end gap-1.5 pl-10 sm:pl-24"
-      >
-        {message.body ? (
-          <div className="max-w-full whitespace-pre-wrap break-words rounded-[20px] bg-muted px-4 py-2.5 text-[15px] leading-6">
-            {message.body}
-          </div>
-        ) : null}
-      </div>
-    );
-  }
+/**
+ * A snapshot file in the shape the Phase 4 grid, file card and lightbox render. Every URL is the share's own
+ * (`/api/v1/ai-shares/<id>/attachments/<attId>/…`): the chat's attachment routes stay owner-only.
+ */
+function asAttachment(
+  shareId: string,
+  message: AiShareMessage,
+  a: AiShareMessage["attachments"][number],
+): Attachment {
+  return {
+    id: a.id,
+    conversationId: shareId,
+    messageId: null,
+    filename: a.filename,
+    contentType: a.contentType,
+    size: a.size,
+    status: "ready",
+    isImage: a.isImage,
+    width: a.width,
+    height: a.height,
+    previewUrl: a.previewUrl,
+    largeUrl: a.largeUrl,
+    downloadUrl: a.downloadUrl,
+    createdAt: message.createdAt,
+  };
+}
+
+function Turn({ shareId, message }: { shareId: string; message: AiShareMessage }) {
+  if (message.role === "user") return <UserTurn shareId={shareId} message={message} />;
   return (
     <div data-testid="ai-share-message" data-role="assistant" className="grid min-w-0 gap-1.5">
       <div data-testid="ai-share-message-text" className="min-w-0">
@@ -123,6 +139,36 @@ function Turn({ message }: { message: AiShareMessage }) {
       </div>
       {message.modelLabel ? (
         <span className="text-[12px] text-muted-foreground leading-[18px]">{message.modelLabel}</span>
+      ) : null}
+    </div>
+  );
+}
+
+/** The member's turn: its files right-aligned above the bubble (previews open the lightbox), as in the chat. */
+function UserTurn({ shareId, message }: { shareId: string; message: AiShareMessage }) {
+  const [lightbox, setLightbox] = useState<number | null>(null);
+  const files = message.attachments.map((a) => asAttachment(shareId, message, a));
+  const images = files.filter((a) => a.isImage && a.previewUrl);
+  return (
+    <div
+      data-testid="ai-share-message"
+      data-role="user"
+      className="flex flex-col items-end gap-1.5 pl-10 sm:pl-24"
+    >
+      {files.length > 0 ? (
+        <div className="flex w-full justify-end">
+          <div className="min-w-0 max-w-full [&>div]:mt-0 [&>div]:items-end">
+            <MessageAttachments attachments={files} onOpenImage={setLightbox} />
+          </div>
+        </div>
+      ) : null}
+      {lightbox !== null ? (
+        <Lightbox images={images} index={lightbox} onClose={() => setLightbox(null)} />
+      ) : null}
+      {message.body ? (
+        <div className="max-w-full whitespace-pre-wrap break-words rounded-[20px] bg-muted px-4 py-2.5 text-[15px] leading-6">
+          {message.body}
+        </div>
       ) : null}
     </div>
   );
