@@ -2,7 +2,7 @@
 
 import type { AiChatTools, AiModelOption, SendAiMessageResponse } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
-import { Archive, Lock, MessageCircleQuestion, SlidersHorizontal } from "lucide-react";
+import { Archive, Lock, MessageCircleQuestion, Share2, SlidersHorizontal } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useRef, useState } from "react";
@@ -33,6 +33,7 @@ import { AiChatHeader, AiChatMenuItem, AiChatPlainHeader } from "./ai-chat-heade
 import { AiComposer, type AiComposerApi, type AiSendFiles } from "./ai-composer";
 import { AiMessageList } from "./ai-message-list";
 import { ChatSettingsSheet } from "./chat-settings-sheet";
+import { ShareDialog } from "./share-dialog";
 
 /**
  * The AI chat screen (D-08, P-09) later plans extend: a borderless header, the centered conversation and a sticky
@@ -156,6 +157,7 @@ function ExistingChat({ chatId }: { chatId: string }) {
   // Settings saved in the chat settings sheet after the snapshot (05-11).
   const liveSettings = useAiChatSettingsLive(chatId);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const composer = useRef<AiComposerApi | null>(null);
   const snapshotChat = chat.snapshot?.chat;
   const detail = snapshotChat ? { ...snapshotChat, ...live, ...liveSettings } : snapshotChat;
@@ -246,13 +248,25 @@ function ExistingChat({ chatId }: { chatId: string }) {
           <AiChatHeader
             chat={detail}
             extraMenuItems={
-              <AiChatMenuItem
-                icon={<SlidersHorizontal />}
-                testId="ai-chat-menu-settings"
-                onSelect={() => setSettingsOpen(true)}
-              >
-                Chat settings
-              </AiChatMenuItem>
+              <>
+                <AiChatMenuItem
+                  icon={<SlidersHorizontal />}
+                  testId="ai-chat-menu-settings"
+                  onSelect={() => setSettingsOpen(true)}
+                >
+                  Chat settings
+                </AiChatMenuItem>
+                {/* A read-only snapshot link for colleagues in the organization (05-13), owner with ai_chat.share. */}
+                {detail.viewerCan.includes("ai_chat.share") ? (
+                  <AiChatMenuItem
+                    icon={<Share2 />}
+                    testId="ai-chat-menu-share"
+                    onSelect={() => setShareOpen(true)}
+                  >
+                    Share
+                  </AiChatMenuItem>
+                ) : null}
+              </>
             }
           />
         ) : (
@@ -261,6 +275,7 @@ function ExistingChat({ chatId }: { chatId: string }) {
       }
     >
       {detail ? <ChatSettingsSheet chat={detail} open={settingsOpen} onOpenChange={setSettingsOpen} /> : null}
+      {detail ? <ShareDialog chatId={chatId} open={shareOpen} onOpenChange={setShareOpen} /> : null}
       <ChatDropZone enabled={!detail?.archived} composer={composer}>
         <AiMessageList
           chatId={chatId}
