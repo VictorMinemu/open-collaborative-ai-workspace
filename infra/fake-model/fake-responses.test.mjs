@@ -111,6 +111,16 @@ describe("POST /v1/responses (stream)", () => {
     assert.equal(events.at(-1).data.type, "response.completed");
   });
 
+  it("[[slow:N]] paces the same 40 deltas over about N seconds (multiplayer queue specs, 06-11)", async () => {
+    const started = Date.now();
+    const events = await sse(await post("/v1/responses", planBody("go [[slow:6]]")));
+    const deltas = deltasOf(events);
+    assert.equal(deltas.length, 40);
+    assert.equal(deltas.join(""), `Echo: go${Array.from({ length: 40 }, (_, i) => ` ${i + 1}`).join("")}`);
+    assert.ok(Date.now() - started >= 5_500, "about 6 s in total");
+    assert.equal(events.at(-1).data.type, "response.completed");
+  });
+
   it("[[plan:usage_limit]] streams 3 deltas then response.failed with the SIWC code", async () => {
     const events = await sse(await post("/v1/responses", planBody("hi [[plan:usage_limit]]")));
     assert.equal(deltasOf(events).length, 3);
