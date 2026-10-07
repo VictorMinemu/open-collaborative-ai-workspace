@@ -7,6 +7,7 @@ import { createPermissionService } from "../organization";
 import { registerGenerationRoutes } from "./generations";
 import { registerGrantRoutes } from "./grants";
 import { registerPreferenceRoutes } from "./prefs";
+import { registerQueue } from "./queue";
 import { registerAiChatRoutes } from "./routes";
 import { createRunLoop } from "./run-loop";
 import { createAiChatService } from "./service";
@@ -50,6 +51,8 @@ export function createAiChatModule(
     const { organizationId, afterCommit } = tenantOf(tx);
     afterCommit(() => titler.schedule(organizationId, done.chatId, done.generation.id));
   });
+  // Shared chats (06-06, P-08): whatever ended the answer, the next queued turn starts in the same finalize.
+  registerQueue({ core, gateway: deps.gateway, runLoop });
   const service = createAiChatService({
     core,
     gateway: deps.gateway,

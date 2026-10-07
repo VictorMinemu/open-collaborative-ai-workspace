@@ -139,8 +139,13 @@ export async function refuseOverLimit(
   tx: Tx,
   r: Extract<ConsumeResult, { ok: false }>,
   i: { userId: string; backendClass: BackendClass },
+  /** A turn started by the platform (the 06-06 queue) is audited for its requester, not the transaction's user. */
+  actor?: { userId: string },
 ): Promise<HttpError> {
   await core.audit.record(tx, {
+    ...(actor
+      ? { actorKind: "system" as const, userId: actor.userId, sessionId: null, clientKind: null }
+      : {}),
     action: "ai_chat.limit_reached",
     resourceType: "ai_usage",
     resourceId: i.userId,
