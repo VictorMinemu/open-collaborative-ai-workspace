@@ -1,7 +1,8 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createFakeModelServer, type FakeModelRequest } from "../../../../../infra/fake-model/server.mjs";
 import { SPOOF_CASES } from "../../modules/ai-chat/spoof-cases";
@@ -292,5 +293,69 @@ describe("runEval against the in-process fake model", () => {
     expect(JSON.stringify(report)).not.toContain("Invalid key");
     expect(logs.join("\n")).toContain("invalid_credential");
     expect(logs.join("\n")).not.toContain(KEY);
+  });
+});
+
+describe("the ai-eval workflow (label, weekly, dispatch; never on every PR)", () => {
+  const ROOT = fileURLToPath(new URL("../../../../../", import.meta.url));
+  const WORKFLOWS = join(ROOT, ".github/workflows");
+  const FILE = join(WORKFLOWS, "ai-eval.yml");
+  const yaml = () => readFileSync(FILE, "utf8");
+  /** The lines of a top-level key's block, up to the next top-level key (comments dropped). */
+  const block = (text: string, key: string) => {
+    const lines = text.split("\n").filter((l) => !l.trim().startsWith("#"));
+    const start = lines.findIndex((l) => l === `${key}:`);
+    if (start === -1) return "";
+    const end = lines.findIndex((l, i) => i > start && /^\S/u.test(l));
+    return lines.slice(start + 1, end === -1 ? undefined : end).join("\n");
+  };
+
+  it("exists and triggers only on a labeled PR, a weekly schedule and a manual dispatch", () => {
+    expect(existsSync(FILE)).toBe(true);
+    const on = block(yaml(), "on");
+    const triggers = on
+      .split("\n")
+      .filter((l) => /^ {2}\S/u.test(l))
+      .map((l) => l.trim().replace(/:.*$/u, ""));
+    expect(triggers).toEqual(["pull_request", "schedule", "workflow_dispatch"]);
+    expect(on).toMatch(/pull_request:\n\s+types: \[labeled\]\n/u);
+    expect(on).toMatch(/schedule:\n\s+- cron: "0 6 \* \* 1"/u);
+    expect(on).not.toMatch(/\bpush\b|pull_request_target/u);
+  });
+
+  it("runs the job only for the ai-eval label, the schedule or a dispatch", () => {
+    const text = yaml();
+    const ifLine = text.split("\n").find((l) => /^ {4}if:/u.test(l)) ?? "";
+    expect(ifLine).toContain("github.event.label.name == 'ai-eval'");
+    expect(ifLine).toContain("github.event_name == 'schedule'");
+    expect(ifLine).toContain("github.event_name == 'workflow_dispatch'");
+  });
+
+  it("is read-only, skips without the secret, confirms the metered run and uploads the report", () => {
+    const text = yaml();
+    expect(block(text, "permissions").trim()).toBe("contents: read");
+    // A guard step reports whether the secret exists; every later step is conditioned on it.
+    expect(text).toMatch(/id: key\n/u);
+    expect(text).toMatch(/if \[ -z "\$OCW_EVAL_API_KEY" \]/u);
+    expect(text).toContain('echo "present=false" >> "$GITHUB_OUTPUT"');
+    const runStep = text.slice(text.indexOf("- name: Multiplayer spoofing eval"));
+    expect(runStep).toMatch(/if: steps\.key\.outputs\.present == 'true'/u);
+    expect(runStep).toContain("OCW_EVAL_API_KEY: ${{ secrets.OCW_EVAL_API_KEY }}");
+    expect(runStep).toContain("OCW_EVAL_PROVIDER: openrouter");
+    expect(runStep).toContain("OCW_EVAL_CONFIRM: metered");
+    expect(runStep).toContain("pnpm --filter @ocw/api eval:multiplayer");
+    expect(text).toMatch(/actions\/upload-artifact@v\d+[\s\S]*path: apps\/api\/eval-out/u);
+    // Secrets by name only: no literal key in the file.
+    expect(text).not.toMatch(/sk-[A-Za-z0-9-]{8,}|OCW_EVAL_API_KEY: ["'][^$]/u);
+    expect(text.match(/secrets\.\w+/gu)?.every((s) => s === "secrets.OCW_EVAL_API_KEY")).toBe(true);
+  });
+
+  it("no other workflow and no root script runs the metered eval", () => {
+    const others = readdirSync(WORKFLOWS)
+      .filter((f) => f !== "ai-eval.yml")
+      .filter((f) => /eval:multiplayer|OCW_EVAL_CONFIRM/u.test(readFileSync(join(WORKFLOWS, f), "utf8")));
+    expect(others).toEqual([]);
+    const rootPkg = readFileSync(join(ROOT, "package.json"), "utf8");
+    expect(rootPkg).not.toMatch(/eval:multiplayer|OCW_EVAL_CONFIRM/u);
   });
 });
