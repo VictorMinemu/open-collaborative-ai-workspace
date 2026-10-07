@@ -349,11 +349,14 @@ Plans:
   2. The prompt route accepts only attachments the sender uploaded in the same organization, of an allowed image type, within the device-link size budget; anything else is refused with a clear error, and cross-tenant attempts fail (integration test)
   3. The device adapters receive the images and pass them to Claude Code and Codex in their native input shape (adapter tests); a runtime/model without image input refuses visibly instead of dropping them
   4. The session stream shows the images sent with each prompt to every controller; the inventory row for composer attachments is updated from deferred to shipped
-**Plans:** 0 plans
+**Plans:** 4 plans in 4 waves (research and planner decisions P-01 … P-13: `06.1-RESEARCH.md`, `06.1-01-PLAN.md`; owner decisions D-01 … D-08 in `06.1-CONTEXT.md`)
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 06.1 to break down)
+- [ ] 06.1-01-PLAN.md — Wave 1: contracts, `*_work_prompt_images` migration and API — Phase 4 upload into the session (scope delegate), prompt link, ids-only dispatch hydrated at send, 4 × 2 MiB budget and 32 MiB frame guard, model gate, tenant isolation and leak scan (Garage + FakeDevice)
+- [ ] 06.1-02-PLAN.md — Wave 2: device and adapters — pinned `maxPayload`, refusal without image support, no image data in acks/logs, fake runtime images, Claude/Codex image input tests (start and steer), Codex `imageInput`
+- [ ] 06.1-03-PLAN.md — Wave 3: web — paste, drop and paperclip with tray, prompt bubble and queue thumbnails for every controller, refusals and model gate, e2e at 1440/390 light/dark, inventory row exposed (D-08)
+- [ ] 06.1-04-PLAN.md — Wave 4: phase gate — full local regression, DEMO.md and WZ-IMG traceability, owner's real-runtime check
 
 ### Phase 7: Self-hosted Release
 
