@@ -59,7 +59,8 @@ export const SLOW_INTERVAL_MS = 100;
 /** The `GET /v1/models` catalog a ChatGPT-plan token sees (Astra lists no modalities: the API's allowlist applies). */
 export function planCatalog() {
   return {
-    data: [
+    // The documented SIWC shape: a top-level `models` array, not the OpenAI `data` list.
+    models: [
       { slug: "gpt-6-astra", display_name: "GPT-6 Astra", visibility: "list" },
       // Luna lists its input modalities (05-12): images, no files, so the API offers it no PDFs.
       {
