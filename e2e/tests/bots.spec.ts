@@ -107,8 +107,13 @@ test("models → one-click bot → ready via the cell → add to channel", async
     await expect(dialog).toBeVisible();
     await shot(page, `bots-add-to-channel-${tag}`);
     const hasChat = (await page.request.get(`${API_URL}/api/v1/channels`)).status() === 200;
-    if (hasChat && (await dialog.getByTestId("channel-option").count()) > 0) {
-      await dialog.getByTestId("channel-option").first().click();
+    // #general: the admin is a member there (other specs' channels may be ones the admin cannot add bots to).
+    const general = dialog
+      .getByTestId("channel-option")
+      .filter({ has: page.getByText("general", { exact: true }) });
+    if (hasChat) await expect(dialog.getByTestId("channel-option").first()).toBeVisible();
+    if (hasChat && (await general.count()) > 0) {
+      await general.first().click();
       await dialog.getByTestId("confirm-add-to-channel").click();
       await expect(dialog).toBeHidden();
     } else {

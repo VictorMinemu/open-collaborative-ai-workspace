@@ -135,17 +135,18 @@ function DecisionLine({ decision }: { decision: NonNullable<AgentCard["decision"
       data-testid="agent-card-decision"
       data-outcome={decision.outcome}
       className={cn(
-        "flex min-w-0 items-center gap-1.5 font-medium text-[13px]",
+        "flex min-w-0 items-start gap-1.5 font-medium text-[13px] leading-5",
         approved ? "text-emerald-800 dark:text-emerald-300" : "text-red-800 dark:text-red-300",
       )}
     >
-      <Icon className="size-4 shrink-0" aria-hidden />
-      <span className="min-w-0 truncate">
-        {approved ? "Approved" : "Denied"} by {decision.by.displayName}
+      <Icon className="mt-0.5 size-4 shrink-0" aria-hidden />
+      {/* Wraps rather than truncates: at 390 a long name never hides who decided (06-16 review). */}
+      <span className="min-w-0 break-words">
+        {approved ? "Approved" : "Denied"} by {decision.by.displayName}{" "}
+        <time dateTime={decision.at} className="whitespace-nowrap font-normal text-muted-foreground text-xs">
+          · {decidedFmt.format(new Date(decision.at))}
+        </time>
       </span>
-      <time dateTime={decision.at} className="shrink-0 font-normal text-muted-foreground text-xs">
-        · {decidedFmt.format(new Date(decision.at))}
-      </time>
     </p>
   );
 }

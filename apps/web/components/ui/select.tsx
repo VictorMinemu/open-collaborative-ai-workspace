@@ -41,7 +41,7 @@ export function SelectContent({
       <SelectPrimitive.Positioner className="z-50 outline-none" sideOffset={4} alignItemWithTrigger={false}>
         <SelectPrimitive.Popup
           className={cn(
-            "min-w-(--anchor-width) origin-(--transform-origin) overflow-hidden rounded-lg border bg-popover p-1 text-popover-foreground shadow-lg shadow-black/5 outline-none dark:shadow-black/40",
+            "max-h-(--available-height) min-w-(--anchor-width) origin-(--transform-origin) overflow-y-auto rounded-lg border bg-popover p-1 text-popover-foreground shadow-lg shadow-black/5 outline-none dark:shadow-black/40",
             "transition-[transform,scale,opacity] duration-150 data-ending-style:scale-95 data-starting-style:scale-95 data-ending-style:opacity-0 data-starting-style:opacity-0",
             className,
           )}

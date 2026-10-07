@@ -14,8 +14,8 @@ shared and controlled from the cloud) and **Agents** (persistent server-side age
 models, devices and audit.
 
 Authoritative spec: `docs/prd/PRD.md` (v1.0, English). Original draft: `docs/prd/archive/PRD-v0.3-es.md`.
-Decisions: `docs/adr/`. Planning and roadmap: `.planning/` (GSD). Built so far: phases 1–5 (API, web, desktop + Local Runtime,
-OpenClaw bots, MCP, marketplace, Work Zone controls, complete chat, AI chats). Add packages only when a phase needs them.
+Decisions: `docs/adr/`. Planning: `.planning/` (GSD). Built so far: phases 1–6 (API, web, desktop + Local Runtime, OpenClaw
+bots, MCP, marketplace, Work Zone controls, chat, AI chats, multiplayer AI chats, personas, Agent Cards). Add packages only when needed.
 
 ## Non-negotiable architectural principles
 
@@ -60,6 +60,8 @@ Taken from the PRD. Any design that violates one of these must be raised, not si
 | Realtime | `@fastify/websocket` + Redis pub/sub; per-stream `seq` persisted in PostgreSQL, cursor replay | research |
 | AI layer | Vercel AI SDK 7 server-side, provider instances only; `modules/model-gateway` is the only `@ai-sdk/*` importer and resolves every `ModelRef`; one run loop; prompts only from persisted messages via `buildModelMessages`; one usage record per generation | 0018 |
 | ChatGPT plan (AI chats) | per-member Sign in with ChatGPT, tokens sealed per member, never pooled; Claude only via org keys (METERED) | 0017 |
+| Multiplayer AI chats | grants on the same chat, decided only in the resolver (`aiAccessSql`); attributed prompt blocks; one generation, derived queue; the asker pays | 0019 |
+| Agent personas and cards | unit-scoped personas with lead rights; in AI chats only through OpenClaw; typed Agent Cards via the Agent Channel API | 0020 |
 | Web | Next.js 16 + React; Tailwind + shadcn/ui (Base UI); TanStack Query + Zustand | PRD, research |
 | Desktop / mobile | Electron + bundled Vite renderer; Local Runtime daemon is a standalone process supervised by the app. Mobile (MVP7): Expo / React Native | PRD, 0005 |
 | Runtime adapters | Claude Code via Claude Agent SDK (streaming input, `canUseTool`); Codex via `codex app-server` JSON-RPC. Never scrape CLI stdout. Settings apply between turns; options come from the runtime-reported catalog, gated by `docs/workzone/runtime-controls-inventory.md` | research, 0013 |
@@ -100,29 +102,26 @@ docker compose up       # full self-hosted stack
 ## Conventions
 
 - **English** for code, comments, docs, commits and PRs. The PRD archive is the only Spanish file.
-- **Conventional Commits**: `feat(scope):`, `fix(scope):`, `docs:`, `chore:`, `refactor:`, `test:`.
-  Scope = app or package name (`api`, `web`, `contracts`, …). Small, atomic commits.
-- **ADRs** for every architectural or stack decision: `docs/adr/NNNN-kebab-title.md`, sections
-  Status / Date / Context / Decision / Consequences. Never edit an accepted ADR; supersede it.
-- **PRD is authoritative.** If code and PRD disagree, either fix the code or propose a PRD change
-  in a PR that touches `docs/prd/PRD.md` explicitly. Do not drift silently.
-- **Modules, not microservices.** In `apps/api`, each PRD service (Identity, Organization, Chat,
-  Realtime, Work Session, Device Relay, Model Gateway, Agent, Automation, Skills, MCP, Policy,
-  Artifact, Audit, Notification, Federation) is a folder with a public `index.ts`; modules import
-  each other only through those public interfaces.
-- **Contracts first.** Shared types and event schemas go in `packages/contracts` as Zod schemas;
-  apps derive TypeScript types from them. No duplicated DTOs.
-- **Tests:** unit tests colocated as `*.test.ts`; integration tests hit a real PostgreSQL (ephemeral
-  container), never mocks of the database. Write the failing test before the fix.
+- **Conventional Commits** (`feat(api):`, `fix(web):`, `docs:`, `chore:`, `refactor:`, `test:`), scope = app or package; small, atomic.
+- **ADRs** for every architectural or stack decision (`docs/adr/NNNN-kebab-title.md`: Status / Date / Context / Decision /
+  Consequences). Never edit an accepted ADR; supersede it.
+- **PRD is authoritative.** If code and PRD disagree, fix the code or change `docs/prd/PRD.md` explicitly in a PR; never drift.
+- **Modules, not microservices.** In `apps/api`, each PRD service (Identity, Organization, Chat, Realtime, Work Session,
+  Device Relay, Model Gateway, Agent, Automation, Skills, MCP, Policy, Artifact, Audit, Notification, Federation) is a
+  folder with a public `index.ts`; modules import each other only through those public interfaces.
+- **Contracts first.** Shared types and event schemas are Zod schemas in `packages/contracts`; apps derive types. No duplicated DTOs.
+- **Tests:** colocated `*.test.ts`; integration tests hit a real ephemeral PostgreSQL, never DB mocks. Failing test first.
 - **No `any`, no `@ts-ignore`** without a comment explaining why and an issue link.
-- **Tenant isolation is a test target**, not an assumption: every query path that touches
-  organization-scoped data must have a test proving cross-tenant access fails. The app connects as
-  the `app` role (no RLS bypass); tenant context is set with transaction-scoped `set_config`.
-- **Participant identity in multi-human AI chats is structural** (server-generated attributed blocks,
-  roster in the system prompt), never a plain-text `Name:` prefix. One generation per conversation.
-- **Adapters normalise at the edge.** Runtime events are mapped to the Unified Session Event Protocol
-  on the device; unknown events are forwarded as `runtime.raw`; `contain()`/`redact()` run on every
-  outbound field. Adapters are tested against recorded fixtures per pinned runtime version.
+- **Tenant isolation is a test target**: every query path on organization-scoped data has a test proving cross-tenant
+  access fails. The app connects as the `app` role (no RLS bypass); tenant context is a transaction-scoped `set_config`.
+- **Multiplayer AI chats (ADR-0019).** Participant identity is structural (roster + server-generated attributed blocks),
+  never a plain-text `Name:` prefix or a mid-conversation system message. Grants decide access (resolver only); member
+  rows only participate. One generation per conversation; the asker pays (coalesced: the first waiting author), never the
+  owner's plan. No personal instructions or memory once shared. The metered spoofing eval (`eval:multiplayer`) is opt-in only.
+- **Agents act through the Agent Channel API (ADR-0020):** personas answer in AI chats via OpenClaw only; cards are
+  posted and updated only by their agent there; a card decision is one audited server-side call.
+- **Adapters normalise at the edge.** Runtime events map to the Unified Session Event Protocol on the device; unknown ones
+  go as `runtime.raw`; `contain()`/`redact()` run on every outbound field; fixtures per pinned runtime version.
 
 ## Security and privacy rules for agents
 

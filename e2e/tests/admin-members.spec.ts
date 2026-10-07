@@ -107,8 +107,10 @@ async function placeInUnits(userId: string, leadsTeam: boolean) {
   }
 }
 
-async function openRowMenu(page: Page, name: string) {
-  await page.getByRole("button", { name: `Actions for ${name}`, exact: true }).click();
+async function openRowMenu(page: Page, name: string, email?: string) {
+  // Other specs add a second "Víctor Ruiz" (victor@ocw.test): the e-mail picks the right row when given.
+  const scope = email ? rowOf(page, email) : page;
+  await scope.getByRole("button", { name: `Actions for ${name}`, exact: true }).click();
 }
 
 async function onlyActiveAdmin(): Promise<boolean> {
@@ -223,9 +225,9 @@ test("an admin changes a teammate's role and the teammate's UI follows", async (
   // ---- the only admin cannot demote themselves: the server's message, and the select reverts
   if (await onlyActiveAdmin()) {
     await openMembers(a);
-    await pickRole(a, ADMIN.name, "Developer");
+    await pickRole(a, ADMIN.email, "Developer");
     await expect(a.getByText(/at least one active admin/i)).toBeVisible();
-    await expect(rowOf(a, ADMIN.name).getByTestId("member-role-select")).toHaveText(/Organization Admin/);
+    await expect(rowOf(a, ADMIN.email).getByTestId("member-role-select")).toHaveText(/Organization Admin/);
   }
 
   await a.context().close();
@@ -357,7 +359,7 @@ test("admins deactivate, reactivate and issue one-time reset links; never on the
   await again.dispose();
 
   // ---- no admin actions on your own row
-  await openRowMenu(a, ADMIN.name);
+  await openRowMenu(a, ADMIN.name, ADMIN.email);
   await expect(a.getByRole("menuitem", { name: "View profile" })).toBeVisible();
   await expect(a.getByRole("menuitem")).toHaveCount(1);
   await a.keyboard.press("Escape");

@@ -105,21 +105,21 @@ SLICE-06…18 were added on 2026-10-04 after the code audit of the widened demo 
 
 ### Multiplayer AI Chat and Sharing (MULTI)
 
-- [ ] **MULTI-01**: Owner can share an AI chat in place with a person, team, department or organization; sharing is a grant on the same conversation, never a copy, and the share dialog states exactly what becomes visible (PRD §16)
-- [ ] **MULTI-02**: Several humans and the model participate in one conversation in realtime; every message records author, timestamp, device, context and permissions (PRD §15)
-- [ ] **MULTI-03**: The model receives structural participant identity (roster in the system prompt, server-generated attributed message blocks, consecutive human messages merged) and never plain-text name prefixes that a participant could spoof
-- [ ] **MULTI-04**: The model responds when @mentioned or when addressed while idle; at most one generation runs per conversation, with queued or coalesced follow-ups visible to all participants
-- [ ] **MULTI-05**: Tools invoked in a shared chat run with the intersection of the agent's permissions and the triggering human's permissions; retrieved content must be authorised for every participant or the model explains that it was withheld (decided 2026-09-10)
-- [ ] **MULTI-06**: User-private context and personal memory are never injected into a conversation with more than one human participant (PRD §78)
-- [ ] **MULTI-07**: An automated three-participant evaluation fixture verifies correct addressing and refusal of a spoofed authority claim, and runs in CI
-- [ ] **MULTI-08**: Acceptance Scenario B steps 1–4 (create private chat, share with a colleague, both write in realtime, model distinguishes both) pass end to end (PRD §108)
+- [x] **MULTI-01**: Owner can share an AI chat in place with a person, team, department or organization; sharing is a grant on the same conversation, never a copy, and the share dialog states exactly what becomes visible (PRD §16)
+- [x] **MULTI-02**: Several humans and the model participate in one conversation in realtime; every message records author, timestamp, device, context and permissions (PRD §15)
+- [x] **MULTI-03**: The model receives structural participant identity (roster in the system prompt, server-generated attributed message blocks, consecutive human messages merged) and never plain-text name prefixes that a participant could spoof
+- [x] **MULTI-04**: The model responds when @mentioned or when addressed while idle; at most one generation runs per conversation, with queued or coalesced follow-ups visible to all participants
+- [x] **MULTI-05**: Tools invoked in a shared chat run with the intersection of the agent's permissions and the triggering human's permissions; retrieved content must be authorised for every participant or the model explains that it was withheld (decided 2026-09-10)
+- [x] **MULTI-06**: User-private context and personal memory are never injected into a conversation with more than one human participant (PRD §78)
+- [x] **MULTI-07**: An automated three-participant evaluation fixture verifies correct addressing and refusal of a spoofed authority claim, and runs in CI
+- [x] **MULTI-08**: Acceptance Scenario B steps 1–4 (create private chat, share with a colleague, both write in realtime, model distinguishes both) pass end to end (PRD §108)
 
 ### Agents in Conversations (AGENT)
 
-- [ ] **AGENT-01**: Admin or Team Lead can create an agent persona (name, username, avatar, description, model, instructions, tools, scope org/department/team/project/personal, owner) that is a first-class principal (PRD §5.4, §64 subset)
-- [ ] **AGENT-02**: Agents can be members of channels, DMs and AI chats and appear in the sidebar and member lists like humans (PRD §5.4)
+- [x] **AGENT-01**: Admin or Team Lead can create an agent persona (name, username, avatar, description, model, instructions, tools, scope org/department/team/project/personal, owner) that is a first-class principal (PRD §5.4, §64 subset)
+- [x] **AGENT-02**: Agents can be members of channels, DMs and AI chats and appear in the sidebar and member lists like humans (PRD §5.4)
 - [x] **AGENT-03**: When mentioned in a channel or thread, the agent replies in that thread with the thread's context, attributed as the agent, within its permissions
-- [ ] **AGENT-04**: A typed Agent Card message block (kind, title, fields, status, actions such as Open / Follow / Approve) renders in channels and threads and updates in place (PRD §18)
+- [x] **AGENT-04**: A typed Agent Card message block (kind, title, fields, status, actions such as Open / Follow / Approve) renders in channels and threads and updates in place (PRD §18)
 
 ### Personal Bots and Bot Capabilities (BOT) — added 2026-10-04 by the owner
 
@@ -379,18 +379,18 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | AICHAT-07 | Phase 5 | Delivered | One append-only usage record per generation (every outcome), sourced prices, tokens/cost per answer, daily caps, member and admin reports (05-08/05-09): `model-prices.test.ts`, `usage.int.test.ts`, `usage-reports.int.test.ts`, `ai-format.test.ts`; `ai-chat-usage.spec.ts`, `ai-chat-usage-reports.spec.ts`, `ai-chat-day.spec.ts` |
 | AICHAT-08 | Phase 5 | Delivered | Images, PDFs and small text files through the Phase 4 pipeline, bytes read by the API, gated by model capability, untrusted labelling (05-12): `attachments.test.ts`, `attachments.int.test.ts`, `attachment-gate.test.ts`; `ai-chat-attachments.spec.ts`, `ai-chat-day.spec.ts` |
 | AICHAT-09 | Phase 5 | Delivered | Immutable snapshot readable only when signed in to the same organization, revoke, share-scoped files, anonymous 401 (05-13): `shares.int.test.ts`, `security.int.test.ts`; `ai-chat-share.spec.ts`, `ai-chat-day.spec.ts` |
-| MULTI-01 | Phase 6 | Pending | No AI chat sharing |
-| MULTI-02 | Phase 6 | Partial | Humans + bots live in channel threads (SLICE-12); no multi-human AI chat |
-| MULTI-03 | Phase 6 | Partial | Structured sender/roster to bots (SLICE-12); OpenClaw still renders `sender: body` history |
-| MULTI-04 | Phase 6 | Partial | One reply per mention (SLICE-12); no addressed-while-idle, no per-conversation generation queue |
-| MULTI-05 | Phase 6 | Pending | Bots have no tools |
-| MULTI-06 | Phase 6 | Pending | No personal memory exists yet |
-| MULTI-07 | Phase 6 | Pending | No eval fixture |
-| MULTI-08 | Phase 6 | Pending | Needs AI chat (Phase 5) and sharing |
-| AGENT-01 | Phase 6 | Partial | One-click bots, admin only, no tools or scope (SLICE-10) |
-| AGENT-02 | Phase 6 | Partial | Bots are channel members and listed (SLICE-10); no DMs or AI chats |
+| MULTI-01 | Phase 6 | Delivered | Grants on the same chat (person/unit/org, Can chat/Can view) decided only by `aiAccessSql`, live revoke, notices, inbox, Shared with me, P-13 disclosure (ADR-0019, 06-01/02/03/04/08/12): `multiplayer.int.test.ts`, `grants.int.test.ts`, `shared.int.test.ts`, `security.int.test.ts`; `ai-chat-multiplayer.spec.ts`, `ai-chat-share-people.spec.ts`, `ai-chat-shared-inbox.spec.ts`, `ai-chat-multiplayer-day.spec.ts` |
+| MULTI-02 | Phase 6 | Delivered | Several humans + the model live; `ai_message_context` per message (author, access, grant, level, model, tools, shared, answering generation); typing, presence, per-recipient lists (06-01/02/08/11): `multiplayer.int.test.ts`, `shared.int.test.ts`, `rls-isolation.int.test.ts`; `ai-chat-multiplayer.spec.ts`, `ai-chat-multiplayer-day.spec.ts` |
+| MULTI-03 | Phase 6 | Delivered | Roster in the instructions, server-generated attributed blocks, merged user turns, persona blocks, `<turn_context>`; no mid-conversation system message; solo prompts byte-identical (06-02/05): `build-model-messages.test.ts`, `guard.test.ts`, `prompt-matrix.int.test.ts`, `attribution.test.mjs` |
+| MULTI-04 | Phase 6 | Delivered | Ask AI / mentions decide addressing; one generation; queue derived from `ai_message_context`, coalesced turn billed to the first waiting author, visible queue chip (06-06/11): `queue.int.test.ts`, `stop.int.test.ts`, `regenerate.int.test.ts`, `ai-chat-stream.test.ts`; `ai-chat-multiplayer.spec.ts`, `ai-chat-multiplayer-day.spec.ts` |
+| MULTI-05 | Phase 6 | Delivered | Web follows the asker; scoped tools only when every reader may use them and never with a unit/org grant; gate re-decides at call time; withheld explained (06-05/10): `prompt-matrix.int.test.ts`, `tools.int.test.ts`, `ai-chat-delivery.int.test.ts`, `mention-mapper.test.ts`; `ai-chat-agents.spec.ts` |
+| MULTI-06 | Phase 6 | Delivered | No personal instructions once shared (a grant, a second human or a persona: D-06), never memory in AI chats; leak sweep over model requests, cell deliveries, frames, responses and columns (06-02/10/12/16): `build-model-messages.test.ts`, `multiplayer.int.test.ts`, `ai-chat-delivery.int.test.ts`, `security.int.test.ts` |
+| MULTI-07 | Phase 6 | Delivered (fixture + opt-in run) | Six three-participant cases run free on every test run; opt-in metered `eval:multiplayer` (dry run, confirmation, key never printed) and `ai-eval.yml` on label/weekly/dispatch (06-05/09): `spoof-cases.ts`, `build-model-messages.test.ts`, `eval/multiplayer/eval.test.ts`. The owner's metered run is deferred (`human_needed`, 06-VALIDATION); the CI run awaits Actions billing |
+| MULTI-08 | Phase 6 | Delivered | Scenario B 1–4 with the mock model at 1440 and 390, and a fresh-stack Phase 6 day (06-03/11/16): `ai-chat-multiplayer.spec.ts`, `ai-chat-multiplayer-day.spec.ts` |
+| AGENT-01 | Phase 6 | Delivered | Personas scoped to organization/department/team/project/personal with an owner and tools; admins anywhere, unit leads in their subtree; unit visibility; unit deletion guard (ADR-0020, 06-01/07): `personas.int.test.ts`, `resolve.test.ts`; `agent-personas.spec.ts` |
+| AGENT-02 | Phase 6 | Delivered | Agents in channels, DMs, group DMs and AI chats (added by the owner, answer through OpenClaw, flat), in member and participant lists (06-10/12): `ai-chat-delivery.int.test.ts`, `team-dm.int.test.ts`, `group-dm.int.test.ts`; `ai-chat-agents.spec.ts`, `ai-chat-multiplayer-day.spec.ts`. Real OpenClaw cell proof pending (CI billing) |
 | AGENT-03 | Phase 1 | Delivered | `chat.int.test.ts` "an agent mention auto-adds the bot and calls the bridge once, in the thread"; `agent-channel.int.test.ts` mention → reply; `bots.spec.ts` threaded reply |
-| AGENT-04 | Phase 6 | Pending | No Agent Cards |
+| AGENT-04 | Phase 6 | Delivered | Typed cards in their own table, updated in place by the posting agent only, Open (internal routes) / Follow / one audited Approve, `ocw_agent_card` tool, card-action turns, one renderer (ADR-0020, 06-13/14/15): `cards.int.test.ts`, `card-tool.test.ts`, `agent-card.test.tsx`; `agent-cards.spec.ts`, `ai-chat-multiplayer-day.spec.ts` |
 | SELF-01 | Phase 7 | Partial | Compose + `pnpm setup:env` + `pnpm demo:up`; no `pnpm ocw setup`, no OpenBao/observability profiles |
 | SELF-02 | Phase 7 | Partial | env / `*_FILE` inputs, fail-fast, env/file `SecretStore`; no OpenBao provider |
 | SELF-03 | Phase 7 | Partial | One-shot `migrate` service; API does not refuse on schema mismatch; no upgrade test |
@@ -461,8 +461,8 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 - Superseded (not mapped): 5 (SLICE-01…04, DEV-07)
 - Active, mapped to phases: 135
 - Unmapped active requirements: 0 ✓
-- Status (recounted from the table on 2026-10-07, 147 rows incl. the Phase 3.x additions): 75 Delivered, 36 Partial,
-  31 Pending, 5 Superseded
+- Status (recounted from the table on 2026-10-07 after Phase 6, 147 rows incl. the Phase 3.x additions): 86 Delivered,
+  31 Partial, 25 Pending, 5 Superseded
 
 Phase assignment follows `.planning/ROADMAP.md`. DESK-06 and DESK-07 live in Phase 11 (Work Zone UI)
 rather than Phase 9 because they require a WorkSession to be observable.
@@ -476,4 +476,4 @@ today; every later phase still audits the sensitive actions it introduces.
 
 ---
 *Requirements defined: 2026-09-10*
-*Last updated: 2026-10-07 after Phase 5 (AICHAT-01…09 delivered). Previously: 2026-10-06 after Phase 4 (CHAT-02, CHAT-04…14 delivered); before that: 2026-10-04 after the Phase 1 code audit (Restructure 2026-10-04: SLICE-06…18 added, SLICE-01…04 and DEV-07 superseded, traceability re-mapped)*
+*Last updated: 2026-10-07 after Phase 6 (MULTI-01…08, AGENT-01/02/04 delivered; MULTI-07's metered run deferred to the owner). Previously: 2026-10-07 after Phase 5 (AICHAT-01…09 delivered); before that: 2026-10-06 after Phase 4 (CHAT-02, CHAT-04…14 delivered); before that: 2026-10-04 after the Phase 1 code audit (Restructure 2026-10-04: SLICE-06…18 added, SLICE-01…04 and DEV-07 superseded, traceability re-mapped)*

@@ -27,3 +27,17 @@
   lines never reach the model; 06-05 then made notices newer than the last kept answer `<notice>` lines of the
   `<turn_context>`, as P-09 specifies. The assertion now checks that notice text never appears outside `<notice>`
   lines (never as a message), which keeps 06-04's intent under P-09. `pnpm verify` needed it green.
+
+## From 06-16 (out of scope: Phase 4 chat routes)
+
+- **Phase 4 chat routes authenticate in `preHandler`, after body validation.** `apps/api/src/modules/chat/index.ts`
+  registers its routes with `preHandler: requireUser`, so an anonymous request with a malformed body gets 400 (schema
+  validation) instead of 401. Nothing is read or written, and a well-formed anonymous request still gets 401. The
+  Phase 6 card routes in `chat/card-actions.ts` had the same shape and were fixed in 06-16 (`onRequest`, proven by the
+  anonymous sweep in `ai-chat/security.int.test.ts`). Fix for the rest: move `requireUser` to `onRequest` in
+  `chat/index.ts` and extend an OpenAPI-driven anonymous sweep to `/api/v1/conversations*`, `/channels*`, `/dms*`.
+- **Bots › Add to channel offers channels the caller cannot add a bot to.** The dialog lists every visible channel; for
+  a channel the admin is not a member of (here 06-15's `backend-*`, created by another admin) `POST
+  /channels/:id/members` answers 403 and the dialog stays open with an error toast. `bots.spec.ts` picked the first
+  channel, so 06-15's channel name made it fail in the full run; 06-16 makes the spec pick `#general`. Product fix
+  (Phase 1/4 surface): list only channels where the caller may add members, or say why a channel is disabled.
