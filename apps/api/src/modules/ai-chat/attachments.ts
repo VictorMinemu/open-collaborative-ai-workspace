@@ -11,9 +11,9 @@ import {
 import type { ModelFilePart } from "./build-model-messages";
 
 /**
- * Files in AI chats (05-12, AICHAT-08). Attachments arrive through the Phase 4 pipeline (presign → store → sniff →
- * renditions); at generation time the API reads their bytes from the store and hands them to the model INSIDE the
- * member's own message: no storage URL, presigned or internal, is ever produced here or sent to a provider
+ * Files in AI chats (05-12, AICHAT-08). Attachments arrive through the Phase 4 upload pipeline (upload → store →
+ * sniff → renditions); at generation time the API reads their bytes from the store and hands them to the model INSIDE
+ * the member's own message: no storage URL, signed or internal, is ever produced here or sent to a provider
  * (ADR-0015, T-05-12-01). File content is untrusted input (T-05-12-06): it never reaches the instructions and is
  * never turned into a tool call by the API.
  */
