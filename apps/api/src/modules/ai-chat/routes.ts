@@ -4,6 +4,7 @@ import {
   AiChatListQuery,
   AiChatSnapshot,
   AiChatSummary,
+  AiPostedMessageResponse,
   CreateAiChatRequest,
   IdParams,
   IsoDateTime,
@@ -73,10 +74,14 @@ export function registerAiChatRoutes(app: App, core: Core, service: AiChatServic
         tags,
         params: IdParams,
         body: SendAiMessageRequest,
-        response: { 201: SendAiMessageResponse },
+        // 201: an answer started for this message; 202 (shared chats, 06-06): posted, queued or skipped.
+        response: { 201: SendAiMessageResponse, 202: AiPostedMessageResponse },
       },
     },
-    async (req, reply) => reply.status(201).send(await service.sendMessage(req, req.params.id, req.body)),
+    async (req, reply) => {
+      const out = await service.sendMessage(req, req.params.id, req.body);
+      return reply.status(out.status).send(out.body);
+    },
   );
 
   app.get(

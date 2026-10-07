@@ -112,3 +112,24 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $f
 $fn$;
 REVOKE ALL ON FUNCTION app.stale_ai_generations(integer, timestamptz) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.stale_ai_generations(integer, timestamptz) TO ocw_app;
+
+-- AI chat queue pickup (Plan 06-06, P-08): conversations with an addressed, unanswered, unskipped message and no
+-- running generation (a crash between a finalize and the next start, or a requester at the concurrency cap). Ids
+-- only; the sweeper starts each queue inside that organization's withTenant() transaction, under the stream lock.
+CREATE OR REPLACE FUNCTION app.pending_ai_queues(p_limit integer)
+RETURNS TABLE (organization_id uuid, conversation_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT c.organization_id, c.conversation_id
+  FROM app.ai_message_context c
+  JOIN app.messages m ON m.id = c.message_id AND m.deleted_at IS NULL
+  JOIN app.conversations conv ON conv.id = c.conversation_id AND conv.archived_at IS NULL
+  WHERE c.author_kind = 'user' AND c.addressed AND c.answered_by_generation_id IS NULL AND c.skip_reason IS NULL
+    AND NOT EXISTS (
+      SELECT 1 FROM app.ai_generations g WHERE g.conversation_id = c.conversation_id AND g.status = 'running'
+    )
+  GROUP BY c.organization_id, c.conversation_id
+  ORDER BY min(c.created_at)
+  LIMIT least(greatest(p_limit, 1), 1000)
+$fn$;
+REVOKE ALL ON FUNCTION app.pending_ai_queues(integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.pending_ai_queues(integer) TO ocw_app;

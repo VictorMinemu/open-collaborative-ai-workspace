@@ -1,9 +1,11 @@
 import {
+  type AiAddressing,
   type AiChatAccess,
   type AiChatDetail,
   type AiChatSettings,
   type AiChatSummary,
   type AiGeneration,
+  type AiSkipReason,
   type AiToolState,
   type AiUsage,
   type Attachment,
@@ -17,6 +19,7 @@ import {
   aiChatGrants,
   type aiChats,
   aiGenerations,
+  aiMessageContext,
   aiUsageRecords,
   conversationMembers,
   orgMembers,
@@ -291,5 +294,43 @@ export async function generationsFor(
     : [];
   const byGen = new Map(usage.map((u) => [u.generationId, u]));
   for (const [messageId, g] of latest) out.set(messageId, generationDto(g, byGen.get(g.id) ?? null, gateway));
+  return out;
+}
+
+/**
+ * Where each human message of a multiplayer chat stands (06-06, D-05): not addressed, queued, answering (its
+ * generation runs), answered, or skipped with the reason. Messages without a context row (before Phase 6) are absent.
+ */
+export async function addressingFor(tx: Tx, messageIds: string[]): Promise<Map<string, AiAddressing>> {
+  const out = new Map<string, AiAddressing>();
+  if (messageIds.length === 0) return out;
+  const rows = await tx
+    .select({
+      messageId: aiMessageContext.messageId,
+      addressed: aiMessageContext.addressed,
+      skipReason: aiMessageContext.skipReason,
+      generationId: aiMessageContext.answeredByGenerationId,
+      status: aiGenerations.status,
+    })
+    .from(aiMessageContext)
+    .leftJoin(aiGenerations, eq(aiGenerations.id, aiMessageContext.answeredByGenerationId))
+    .where(inArray(aiMessageContext.messageId, messageIds));
+  for (const r of rows) {
+    const status: AiAddressing["status"] = !r.addressed
+      ? "not_addressed"
+      : r.skipReason !== null
+        ? "skipped"
+        : r.generationId === null
+          ? "queued"
+          : r.status === "running"
+            ? "answering"
+            : "answered";
+    out.set(r.messageId, {
+      addressed: r.addressed,
+      status,
+      skipReason: (r.skipReason as AiSkipReason | null) ?? null,
+      generationId: r.generationId,
+    });
+  }
   return out;
 }

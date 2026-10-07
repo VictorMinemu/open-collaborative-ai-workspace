@@ -1,10 +1,13 @@
 import {
+  AI_QUEUE_MAX,
   AI_SNAPSHOT_MESSAGES,
+  type AiAddressing,
   type AiChatDetail,
   type AiChatList,
   type AiChatListQuery,
   type AiChatSnapshot,
   type AiChatSummary,
+  type AiPostedMessageResponse,
   type Attachment,
   type CreateAiChatRequest,
   EventTypes,
@@ -43,8 +46,10 @@ import {
   type ConversationRow,
   convTopic,
   getMembership,
+  loadDirectory,
   lockNextSeq,
   type MessageRow,
+  resolveMentions,
 } from "../chat";
 import {
   loadAiChatPolicy,
@@ -63,6 +68,7 @@ import {
 import { assertReadableBy } from "./attachments";
 import {
   type AiChatRow,
+  addressingFor,
   aiMessage,
   type ChatView,
   chatDetail,
@@ -82,6 +88,7 @@ import {
 } from "./dto";
 import { consumeGeneration, refuseOverLimit } from "./limits";
 import { loadPreferences } from "./prefs";
+import { addressedOf, isMultiplayer, pendingCount, publishQueue, queueState, startNext } from "./queue";
 import type { RunLoop } from "./run-loop";
 import { heuristicTitle } from "./titles";
 import { toolStates } from "./tools-state";
@@ -95,6 +102,11 @@ import { backendClassOf } from "./usage";
  * the answer is counted against the member's daily cap (05-08, `consumeGeneration`): at the cap the send is 429
  * `daily_limit_reached` with the reset time, only its audit row commits and no model is ever called.
  */
+
+/** A send answers 201 when an answer started for it now; a multiplayer chat answers 202 otherwise (06-06). */
+export type SendOutcome =
+  | { status: 201; body: SendAiMessageResponse }
+  | { status: 202; body: AiPostedMessageResponse };
 
 export interface AiChatDeps {
   core: Core;
@@ -442,26 +454,32 @@ export function createAiChatService(deps: AiChatDeps) {
   async function touchChat(
     tx: Tx,
     conv: ConversationRow,
-    ref: ModelRef,
+    ref: ModelRef | undefined,
     tools: { web: boolean } | undefined,
     sender: { userId: string; access: "owner" | "chat" | "view"; shared: boolean },
+    generating = true,
   ): Promise<AiChatSummary> {
     const at = new Date().toISOString();
     const [chat] = await tx
       .update(aiChats)
-      .set({ lastModel: ref, lastActivityAt: at, updatedAt: at, ...(tools ? { tools } : {}) })
+      .set({
+        ...(ref ? { lastModel: ref } : {}),
+        lastActivityAt: at,
+        updatedAt: at,
+        ...(tools ? { tools } : {}),
+      })
       .where(eq(aiChats.conversationId, conv.id))
       .returning();
     if (!chat) throw notFound(NOT_FOUND);
     const owner = ownerAuthor(await directoryOf(tx, [chat.ownerUserId]), chat.ownerUserId);
     const ownerView: ChatView = { access: "owner", owner, shared: sender.shared };
-    const summary = chatSummary(conv, chat, { generating: true, gateway, view: ownerView });
+    const summary = chatSummary(conv, chat, { generating, gateway, view: ownerView });
     await core.realtime.appendEvent(tx, `user:${chat.ownerUserId}`, EventTypes.aiChatUpdated, {
       chat: summary,
     });
     if (sender.userId === chat.ownerUserId) return summary;
     const mine = chatSummary(conv, chat, {
-      generating: true,
+      generating,
       gateway,
       view: { access: sender.access, owner, shared: sender.shared },
     });
@@ -492,6 +510,236 @@ export function createAiChatService(deps: AiChatDeps) {
   }
 
   const OWNER_CONTEXT: SendContext["access"] = { access: "owner", grantId: null, level: "owner" };
+
+  /**
+   * What every send of a non-retried message settles before inserting it: a draft's name, the sticky Web state (owner
+   * only), how the sender reached the chat and their participation row, and whether the chat is shared.
+   */
+  async function prepareSend(
+    req: FastifyRequest,
+    tx: Tx,
+    conv: ConversationRow,
+    facts: ChannelFacts,
+    body: SendAiMessageRequest,
+    files: AttachmentRow[],
+  ) {
+    const auth = authOf(req);
+    // A draft's first message names it, as a new chat's would (the auto title replaces this later).
+    if (conv.name === null) {
+      const name = heuristicTitle(body.body || (files[0]?.filename ?? ""));
+      const [named] = await tx
+        .update(conversations)
+        .set({ name })
+        .where(and(eq(conversations.id, conv.id), isNull(conversations.name)))
+        .returning();
+      if (named) conv = named;
+    }
+    const { chat: current } = await loadChat(tx, conv.id);
+    // The sticky Web state is a chat setting: only its manager (the owner) changes it by sending (P-04).
+    const manages = await perms.can(req, tx, "ai_chat.manage", channelResource(facts));
+    const sticky = manages ? body.tools : undefined;
+    const viewerAccess = facts.aiAccess ?? (current.ownerUserId === auth.userId ? "owner" : null);
+    let sendAccess = OWNER_CONTEXT;
+    if (viewerAccess !== "owner") {
+      const g = await matchingGrant(tx, conv.id, auth.userId);
+      sendAccess = { access: "grant", grantId: g?.id ?? null, level: "chat" };
+    }
+    // P-09: whoever writes takes part (roster, unread); a person grantee already has the row from the grant.
+    if (!(await getMembership(tx, conv.id, "user", auth.userId))) {
+      await addMember(
+        tx,
+        chatDeps,
+        conv,
+        { kind: "user", id: auth.userId },
+        { role: "member", reason: "ai_chat_post" },
+      );
+    }
+    const shared = await isShared(tx, conv.id);
+    return { conv, current, sticky, viewerAccess, sendAccess, shared };
+  }
+
+  /** The sender's own model for an addressed message, or null when it is refused (the queue then skips it). */
+  async function senderModel(tx: Tx, ref: ModelRef, userId: string): Promise<ResolvedModel | null> {
+    try {
+      return await gateway.resolve(tx, ref, userId);
+    } catch (err) {
+      if (err instanceof ModelUnavailableError || err instanceof PlanTokenUnavailableError) return null;
+      throw err;
+    }
+  }
+
+  /** A human message of a multiplayer chat as everyone sees it: its files and where its request stands. */
+  async function sharedUserMessage(tx: Tx, row: MessageRow) {
+    const dir = await directoryOf(tx, [row.authorId ?? ""]);
+    const files = (await attachmentsForMessages(tx, [row.id])).get(row.id) ?? [];
+    const aiAddressing = (await addressingFor(tx, [row.id])).get(row.id);
+    return { ...aiMessage(row, dir, undefined, files), ...(aiAddressing ? { aiAddressing } : {}) };
+  }
+
+  /**
+   * 201 when `gen` started now and answers this message (it is one of the messages its turn answers), else 202 with
+   * the message's addressing (queued, not addressed, skipped with the reason, or already answering for a retry).
+   */
+  async function sharedOutcome(
+    tx: Tx,
+    row: MessageRow,
+    chat: AiChatSummary,
+    gen: GenerationRow | null,
+  ): Promise<SendOutcome> {
+    const userMessage = await sharedUserMessage(tx, row);
+    const addressing: AiAddressing = userMessage.aiAddressing ?? {
+      addressed: false,
+      status: "not_addressed",
+      skipReason: null,
+      generationId: null,
+    };
+    if (gen && addressing.generationId === gen.id) {
+      const [assistant] = await tx
+        .select()
+        .from(messages)
+        .where(eq(messages.id, gen.assistantMessageId))
+        .limit(1);
+      if (!assistant) throw new Error("assistant message missing");
+      const generation = generationDto(gen, null, gateway);
+      return {
+        status: 201,
+        body: {
+          chat,
+          userMessage,
+          assistantMessage: aiMessage(assistant, EMPTY_DIRECTORY, generation),
+          generation,
+        },
+      };
+    }
+    return { status: 202, body: { chat, userMessage, addressing } };
+  }
+
+  /** A retried send in a multiplayer chat: the answer it started (201), or where it stands now (202). */
+  async function retriedShared(tx: Tx, row: MessageRow): Promise<SendOutcome> {
+    const [own] = await tx
+      .select({ id: aiGenerations.id })
+      .from(aiGenerations)
+      .where(eq(aiGenerations.userMessageId, row.id))
+      .limit(1);
+    if (own) {
+      const response = await responseFor(tx, row);
+      return { status: 201, body: { ...response, userMessage: await sharedUserMessage(tx, row) } };
+    }
+    const { conv, chat } = await loadChat(tx, row.conversationId);
+    const summary = chatSummary(conv, chat, {
+      generating: await isGenerating(tx, conv.id),
+      gateway,
+      view: row.authorId ? await viewOf(tx, chat, row.authorId) : null,
+    });
+    return sharedOutcome(tx, row, summary, null);
+  }
+
+  /**
+   * A send in a multiplayer chat (06-06, D-05, P-07, P-08): never 409. The message is persisted and broadcast with its
+   * server-resolved mentions; it is addressed when `askAi` says so or, absent, when it mentions nobody. An addressed
+   * message joins the queue (429 `ai_queue_full` at `AI_QUEUE_MAX` waiting, nothing written) and `startNext` answers
+   * it now when nothing runs, on the first waiting author's own model; otherwise it waits, visible to everyone.
+   */
+  async function sendShared(
+    req: FastifyRequest,
+    tx: Tx,
+    conv: ConversationRow,
+    facts: ChannelFacts,
+    body: SendAiMessageRequest,
+  ): Promise<SendOutcome> {
+    const auth = authOf(req);
+    // Only the sender's own ready, unlinked uploads of this chat (409 otherwise, before anything else).
+    const files = await linkableAttachments(tx, {
+      conversationId: conv.id,
+      uploaderId: auth.userId,
+      ids: body.attachmentIds ?? [],
+    });
+    // Server-derived, exactly like a channel post: the request's own `mentions` never decide anything.
+    const mentions = resolveMentions(body.body, await loadDirectory(tx));
+    const addressed = addressedOf(body.askAi, mentions);
+    if (addressed) {
+      // Files the sender's model cannot read are refused as in Phase 5; a refused model is skipped by the queue.
+      const resolved = await senderModel(tx, body.model, auth.userId);
+      if (resolved) assertReadableBy(files, resolved.caps, resolved.label);
+      if ((await pendingCount(tx, conv.id)) >= AI_QUEUE_MAX) {
+        throw new HttpError(429, "ai_queue_full", `At most ${AI_QUEUE_MAX} messages can wait for an answer`);
+      }
+    }
+    const prepared = await prepareSend(req, tx, conv, facts, body, files);
+    const { current, sticky, viewerAccess, sendAccess, shared } = prepared;
+    const topic = convTopic(prepared.conv.id);
+    const seq = await lockNextSeq(tx, topic);
+    const [row] = await tx
+      .insert(messages)
+      .values({
+        organizationId: conv.organizationId,
+        conversationId: conv.id,
+        seq,
+        authorKind: "user",
+        authorId: auth.userId,
+        body: body.body,
+        mentions,
+        clientKind: auth.clientKind,
+        sessionId: auth.sessionId,
+        clientMessageId: body.clientMessageId,
+      })
+      .returning();
+    if (!row) throw new Error("user message insert returned no row");
+    if (files.length > 0) {
+      await linkAttachments(tx, {
+        conversationId: conv.id,
+        messageId: row.id,
+        uploaderId: auth.userId,
+        ids: files.map((f) => f.id),
+      });
+    }
+    await tx.insert(aiMessageContext).values({
+      messageId: row.id,
+      organizationId: conv.organizationId,
+      conversationId: conv.id,
+      authorKind: "user",
+      access: sendAccess.access,
+      grantId: sendAccess.grantId,
+      level: sendAccess.level,
+      addressed,
+      answeredByGenerationId: null,
+      model: body.model,
+      tools: { web: (sticky ?? chatSettings(current).tools).web === true },
+      shared,
+    });
+    const s = await core.realtime.appendEvent(tx, topic, EventTypes.messageCreated, {
+      message: await sharedUserMessage(tx, row),
+    });
+    if (s !== seq) throw new Error(`stream seq drift on ${topic}: expected ${seq}, got ${s}`);
+
+    let started: GenerationRow | null = null;
+    if (addressed) {
+      started = await startNext({ core, gateway, runLoop }, tx, conv.id, { publish: false });
+      await publishQueue(core, tx, conv.id);
+    }
+    const chat = await touchChat(
+      tx,
+      prepared.conv,
+      addressed ? body.model : undefined,
+      sticky,
+      { userId: auth.userId, access: viewerAccess === "owner" ? "owner" : "chat", shared },
+      await isGenerating(tx, conv.id),
+    );
+    const outcome = await sharedOutcome(tx, row, chat, started);
+    // Ids only (T-05-02-02): the message, whether it asked the model and the answer it started, if any.
+    await core.audit.record(tx, {
+      action: "ai_chat.message.sent",
+      resourceType: "ai_chat",
+      resourceId: conv.id,
+      metadata: {
+        conversationId: conv.id,
+        messageId: row.id,
+        addressed,
+        generationId: outcome.status === 201 ? outcome.body.generation.id : null,
+      },
+    });
+    return outcome;
+  }
 
   return {
     async createChat(req: FastifyRequest, body: CreateAiChatRequest): Promise<SendAiMessageResponse> {
@@ -568,24 +816,24 @@ export function createAiChatService(deps: AiChatDeps) {
       return out.response;
     },
 
-    async sendMessage(
-      req: FastifyRequest,
-      chatId: string,
-      body: SendAiMessageRequest,
-    ): Promise<SendAiMessageResponse> {
+    async sendMessage(req: FastifyRequest, chatId: string, body: SendAiMessageRequest): Promise<SendOutcome> {
       const auth = authOf(req);
       const out = await core.db.withTenant(tenant(req), async (tx) => {
         let { conv, facts } = await guards.writableChat(req, tx, chatId);
         // Serializes sends on this chat, which also makes the retry check below race-free.
         await lockNextSeq(tx, convTopic(conv.id));
+        const multiplayer = await isMultiplayer(tx, conv.id);
         const retried = await ownSend(tx, auth.userId, body.clientMessageId);
         if (retried) {
           if (retried.conversationId !== conv.id) {
             throw conflict("clientMessageId already used", "client_message_id_reused");
           }
+          if (multiplayer) return { outcome: await retriedShared(tx, retried), start: null };
           return { response: await responseFor(tx, retried), start: null };
         }
         refuseArchived(conv);
+        // A shared chat (06-06): the message is always posted; the queue decides whether and when it is answered.
+        if (multiplayer) return { outcome: await sendShared(req, tx, conv, facts, body), start: null };
         const resolved = await resolveOr409(tx, body.model, auth.userId);
         // Only the sender's own ready, unlinked uploads of this chat (409 otherwise, before anything else).
         const files = await linkableAttachments(tx, {
@@ -603,37 +851,9 @@ export function createAiChatService(deps: AiChatDeps) {
         const limit = { userId: auth.userId, backendClass: backendClassOf(resolved.ref.backend) };
         const counted = await consumeGeneration(tx, { ...limit, policy });
         if (!counted.ok) return { refused: await refuseOverLimit(core, tx, counted, limit) };
-        // A draft's first message names it, as a new chat's would (the auto title replaces this later).
-        if (conv.name === null) {
-          const name = heuristicTitle(body.body || (files[0]?.filename ?? ""));
-          const [named] = await tx
-            .update(conversations)
-            .set({ name })
-            .where(and(eq(conversations.id, conv.id), isNull(conversations.name)))
-            .returning();
-          if (named) conv = named;
-        }
-        const { chat: current } = await loadChat(tx, conv.id);
-        // The sticky Web state is a chat setting: only its manager (the owner) changes it by sending (P-04).
-        const manages = await perms.can(req, tx, "ai_chat.manage", channelResource(facts));
-        const sticky = manages ? body.tools : undefined;
-        const viewerAccess = facts.aiAccess ?? (current.ownerUserId === auth.userId ? "owner" : null);
-        let sendAccess = OWNER_CONTEXT;
-        if (viewerAccess !== "owner") {
-          const g = await matchingGrant(tx, conv.id, auth.userId);
-          sendAccess = { access: "grant", grantId: g?.id ?? null, level: "chat" };
-        }
-        // P-09: whoever writes takes part (roster, unread); a person grantee already has the row from the grant.
-        if (!(await getMembership(tx, conv.id, "user", auth.userId))) {
-          await addMember(
-            tx,
-            chatDeps,
-            conv,
-            { kind: "user", id: auth.userId },
-            { role: "member", reason: "ai_chat_post" },
-          );
-        }
-        const shared = await isShared(tx, conv.id);
+        const prepared = await prepareSend(req, tx, conv, facts, body, files);
+        conv = prepared.conv;
+        const { current, sticky, viewerAccess, sendAccess, shared } = prepared;
         const turn = await insertTurn(req, tx, conv, body, resolved, files, {
           access: sendAccess,
           tools: { web: (sticky ?? chatSettings(current).tools).web === true },
@@ -649,8 +869,9 @@ export function createAiChatService(deps: AiChatDeps) {
       });
       // The refusal's audit row is committed; nothing else was written.
       if ("refused" in out) throw out.refused;
+      if ("outcome" in out && out.outcome) return out.outcome;
       if (out.start) runLoop.start({ organizationId: out.start.organizationId, generationId: out.start.id });
-      return out.response;
+      return { status: 201, body: out.response };
     },
 
     /**
@@ -882,7 +1103,8 @@ export function createAiChatService(deps: AiChatDeps) {
           .limit(AI_SNAPSHOT_MESSAGES + 1);
         const hasMore = rows.length > AI_SNAPSHOT_MESSAGES;
         const page = rows.slice(0, AI_SNAPSHOT_MESSAGES).reverse();
-        const list = await toDtos(tx, page, chat);
+        const multiplayer = await isMultiplayer(tx, conv.id);
+        const list = await toDtos(tx, page, chat, multiplayer);
         const [running] = await tx
           .select()
           .from(aiGenerations)
@@ -905,6 +1127,8 @@ export function createAiChatService(deps: AiChatDeps) {
               }
             : null,
           lastSeq,
+          // The one-generation queue of a shared chat (P-08); solo snapshots keep the Phase 5 shape.
+          ...(multiplayer ? { queue: await queueState(tx, conv.id) } : {}),
         };
       });
     },
@@ -932,7 +1156,7 @@ export function createAiChatService(deps: AiChatDeps) {
         const hasMore = rows.length > q.limit;
         const page = rows.slice(0, q.limit).reverse();
         return {
-          messages: await toDtos(tx, page, chat),
+          messages: await toDtos(tx, page, chat, await isMultiplayer(tx, conv.id)),
           nextBefore: hasMore ? (page[0]?.seq ?? null) : null,
           lastSeq: await core.realtime.lastSeq(tx, convTopic(conv.id)),
         };
@@ -965,7 +1189,7 @@ export function createAiChatService(deps: AiChatDeps) {
     return changed;
   }
 
-  async function toDtos(tx: Tx, rows: MessageRow[], chat: AiChatRow) {
+  async function toDtos(tx: Tx, rows: MessageRow[], chat: AiChatRow, multiplayer: boolean) {
     const gens = await generationsFor(
       tx,
       rows.filter((r) => r.authorKind === "agent").map((r) => r.id),
@@ -984,11 +1208,21 @@ export function createAiChatService(deps: AiChatDeps) {
       tx,
       rows.filter((r) => r.authorKind === "user").map((r) => r.id),
     );
-    return rows.map((r) =>
-      r.authorKind === "agent"
-        ? aiMessage(r, EMPTY_DIRECTORY, gens.get(r.id))
-        : aiMessage(r, dir, undefined, files.get(r.id) ?? []),
-    );
+    // Where each human request stands (06-06): shared chats only, so solo pages keep the Phase 5 shape.
+    const addressing = multiplayer
+      ? await addressingFor(
+          tx,
+          rows.filter((r) => r.authorKind === "user").map((r) => r.id),
+        )
+      : new Map<string, AiAddressing>();
+    return rows.map((r) => {
+      if (r.authorKind === "agent") return aiMessage(r, EMPTY_DIRECTORY, gens.get(r.id));
+      const aiAddressing = addressing.get(r.id);
+      return {
+        ...aiMessage(r, dir, undefined, files.get(r.id) ?? []),
+        ...(aiAddressing ? { aiAddressing } : {}),
+      };
+    });
   }
 }
 
