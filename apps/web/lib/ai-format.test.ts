@@ -2,11 +2,14 @@ import type { AiGeneration, AiUsage } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
 import {
   footerLabel,
+  footerParts,
   formatCostMicros,
   formatResetTime,
   formatTokens,
   formatUsage,
   limitNoticeText,
+  payerLabel,
+  queueText,
   usageTitle,
 } from "./ai-format";
 
@@ -150,5 +153,110 @@ describe("limit notice", () => {
       ),
     ).toBe("You've reached today's $5.00 limit on organization models. Resets at 2:00 AM tomorrow.");
     expect(formatResetTime(tomorrow, now, "en-US")).toBe("2:00 AM tomorrow");
+  });
+});
+
+// ---------------------------------------------------------------- Phase 6: who an answer was for, who paid (06-11)
+
+describe("payerLabel (D-01)", () => {
+  const ALEX = "00000000-0000-4000-8000-0000000000a1";
+  const VIEWER = "00000000-0000-4000-8000-0000000000b2";
+  const plan = gen({
+    backend: "chatgpt_plan",
+    provider: "openai",
+    modelLabel: "GPT-6 Astra",
+    metered: false,
+  });
+
+  it("names the requester and their own plan, or METERED on an organization model", () => {
+    expect(payerLabel({ ...plan, requesterUserId: ALEX }, "Alex Kim", VIEWER)).toBe(
+      "for Alex Kim · Alex's ChatGPT plan",
+    );
+    expect(payerLabel(gen({ requesterUserId: ALEX }), "Alex Kim", VIEWER)).toBe("for Alex Kim · METERED");
+    expect(
+      payerLabel(
+        gen({ backend: "mock", provider: "mock", metered: false, requesterUserId: ALEX }),
+        "Alex Kim",
+        VIEWER,
+      ),
+    ).toBe("for Alex Kim · not metered");
+    expect(payerLabel({ ...plan, requesterUserId: ALEX }, "Víctor Ruiz", VIEWER)).toBe(
+      "for Víctor Ruiz · Víctor's ChatGPT plan",
+    );
+  });
+
+  it("speaks to the viewer when they asked", () => {
+    expect(payerLabel({ ...plan, requesterUserId: VIEWER }, "Sam Lee", VIEWER)).toBe(
+      "for you · your ChatGPT plan",
+    );
+    expect(payerLabel(gen({ requesterUserId: VIEWER }), "Sam Lee", VIEWER)).toBe("for you · METERED");
+  });
+
+  it("is null for Phase 5 rows (no requester) and in solo chats (no requester name)", () => {
+    expect(payerLabel(plan, "Alex Kim", VIEWER)).toBeNull();
+    expect(payerLabel({ ...plan, requesterUserId: ALEX }, null, VIEWER)).toBeNull();
+  });
+
+  it("the multiplayer footer ends with the payer instead of the backend label", () => {
+    const g = { ...plan, requesterUserId: ALEX, usage: usage({ costMicrosUsd: null, priceRef: null }) };
+    expect(footerParts(g, payerLabel(g, "Alex Kim", VIEWER)).join(" · ")).toBe(
+      "1.2k in · 340 out · GPT-6 Astra · for Alex Kim · Alex's ChatGPT plan",
+    );
+    const metered = gen({ requesterUserId: ALEX });
+    expect(footerParts(metered, payerLabel(metered, "Alex Kim", VIEWER)).join(" · ")).toBe(
+      "1.2k in · 340 out · $0.004 · Claude Sonnet 5.5 · for Alex Kim · METERED",
+    );
+    // Solo: the Phase 5 footer, unchanged.
+    expect(footerParts(g, null).join(" · ")).toBe(footerLabel(g));
+    expect(footerLabel(g)).toBe("1.2k in · 340 out · GPT-6 Astra · ChatGPT plan");
+  });
+});
+
+describe("queueText (D-05)", () => {
+  const names: Record<string, string> = {
+    v: "Víctor Ruiz",
+    a: "Alex Kim",
+    s: "Sam Lee",
+    r: "Riley Park",
+    j: "Jo Diaz",
+  };
+  const nameOf = (id: string) => names[id] ?? "Someone";
+  const authors: Record<string, string> = { m1: "v", m2: "a", m3: "s", m4: "r", m5: "j", m6: "a" };
+  const authorOf = (id: string) => authors[id] ?? null;
+  const running = (requester: string, respondingTo: string[]) => ({
+    generationId: "g",
+    requesterUserId: requester,
+    respondingTo,
+  });
+  const pending = (...ids: string[]) =>
+    ids.map((messageId) => ({ messageId, authorId: authors[messageId] ?? "" }));
+
+  it("says whom the AI is answering and who is next, requesters first, each name once", () => {
+    expect(queueText({ running: running("v", ["m1"]), pending: [] }, nameOf, authorOf)).toBe(
+      "AI is answering Víctor Ruiz",
+    );
+    expect(queueText({ running: running("v", ["m1"]), pending: pending("m2") }, nameOf, authorOf)).toBe(
+      "AI is answering Víctor Ruiz · Alex Kim is next",
+    );
+    expect(
+      queueText({ running: running("v", ["m1"]), pending: pending("m2", "m3", "m6") }, nameOf, authorOf),
+    ).toBe("AI is answering Víctor Ruiz · Alex Kim and Sam Lee are next");
+    expect(queueText({ running: running("a", ["m3", "m2"]), pending: [] }, nameOf, authorOf)).toBe(
+      "AI is answering Alex Kim and Sam Lee",
+    );
+    expect(
+      queueText(
+        { running: running("v", ["m1"]), pending: pending("m2", "m3", "m4", "m5") },
+        nameOf,
+        authorOf,
+      ),
+    ).toBe("AI is answering Víctor Ruiz · Alex Kim, Sam Lee and 2 others are next");
+  });
+
+  it("is null when idle and empty; a waiting queue says who is next", () => {
+    expect(queueText({ running: null, pending: [] }, nameOf, authorOf)).toBeNull();
+    expect(queueText({ running: null, pending: pending("m2") }, nameOf, authorOf)).toBe(
+      "Waiting for the AI · Alex Kim is next",
+    );
   });
 });
