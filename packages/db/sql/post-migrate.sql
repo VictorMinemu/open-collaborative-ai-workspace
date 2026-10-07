@@ -16,6 +16,8 @@ REVOKE UPDATE, DELETE, TRUNCATE ON app.audit_events FROM ocw_app;
 REVOKE UPDATE, DELETE, TRUNCATE ON app.stream_events FROM ocw_app;
 -- Message edit/delete history (CHAT-06): the app role may only add versions, never rewrite them.
 REVOKE UPDATE, DELETE, TRUNCATE ON app.message_versions FROM ocw_app;
+-- AI chat usage (Phase 5, D-06 / AICHAT-07): one immutable record per generation; never rewritten or erased.
+REVOKE UPDATE, DELETE, TRUNCATE ON app.ai_usage_records FROM ocw_app;
 
 -- Identity plane writes its audit rows and the org_members projection in the same transaction.
 GRANT SELECT, INSERT ON app.audit_events TO ocw_auth;
@@ -96,3 +98,17 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $f
 $fn$;
 REVOKE ALL ON FUNCTION app.due_attachment_sweeps(integer, timestamptz) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.due_attachment_sweeps(integer, timestamptz) TO ocw_app;
+
+-- AI generation sweeper (Plan 05-06, D-05): running generations whose heartbeat is older than p_before (their API
+-- process died or stalled). Ids only; the sweeper re-checks and finalizes each row as `interrupted` inside its own
+-- organization's withTenant() transaction.
+CREATE OR REPLACE FUNCTION app.stale_ai_generations(p_limit integer, p_before timestamptz)
+RETURNS TABLE (id uuid, organization_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT g.id, g.organization_id FROM app.ai_generations g
+  WHERE g.status = 'running' AND g.heartbeat_at < p_before
+  ORDER BY g.heartbeat_at
+  LIMIT least(greatest(p_limit, 1), 1000)
+$fn$;
+REVOKE ALL ON FUNCTION app.stale_ai_generations(integer, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.stale_ai_generations(integer, timestamptz) TO ocw_app;

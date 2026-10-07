@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AiChatSummary } from "./ai-chat";
 import { ConversationRef, MessageAuthor, Visibility } from "./chat";
 import { Id, IsoDateTime, MemberKind } from "./common";
 
@@ -92,6 +93,8 @@ export const SearchOverview = z.object({
   messages: z.array(SearchMessageHit).max(8),
   people: z.array(SearchPerson).max(8),
   channels: z.array(SearchChannel).max(8),
+  /** The caller's own AI chats whose title matches (05-10, AICHAT-04): owner only, archived ones flagged. */
+  aiChats: z.array(AiChatSummary).max(8).optional(),
 });
 export type SearchOverview = z.infer<typeof SearchOverview>;
 

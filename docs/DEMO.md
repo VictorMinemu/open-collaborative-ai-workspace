@@ -258,6 +258,58 @@ Do not use `pnpm setup:env --force` to upgrade: it rotates every secret, databas
    the message highlighted, with *Jump to latest*). Edit and delete your own messages; "(edited)" shows for
    everyone, live.
 
+## AI chats (Phase 5)
+
+Phase 5 (ADR-0017, ADR-0018). A private ChatGPT/Claude.ai-style assistant for every member: **Chat › AI Chats ›
+New chat** (or the pencil next to *AI chats* in the sidebar). Nobody else sees a member's AI chats, admins included.
+`pnpm demo:up` applies the Phase 5 migrations (the existing Anthropic key moves onto a `SecretReference` by itself).
+
+1. **Your own ChatGPT plan (the default).** Settings › **AI chat** › **Continue with ChatGPT** (again in the dialog) opens
+   OpenAI's sign-in in a new tab. Sign in with your own Plus or Pro account and approve. The tab then lands on an
+   unreachable `http://127.0.0.1:1455/auth/callback?…` page: that is expected. Copy that whole address, paste it
+   into the dialog and press *Connect*. The card shows **Connected · <your email> · <plan>**, and a one-time welcome
+   explains that usage counts against **your** plan, never the organization's bill. In the **desktop app** the same
+   button needs no paste: the app catches the `127.0.0.1` callback itself for one sign-in (5-minute limit;
+   *Paste the address instead* falls back to the paste step). Each member connects their own plan; tokens are
+   sealed for that member and never shared. *Manage usage* opens `chatgpt.com/settings/usage`; *Disconnect* revokes
+   the tokens at OpenAI. A ChatGPT account that is not eligible (some Business/Enterprise seats) falls back to
+   organization models with the reason in the model picker.
+2. **Organization models (METERED).** Admin › Settings › **Models**: an **Anthropic** or **OpenRouter** key (the
+   demo seed adds Anthropic when run with `ANTHROPIC_API_KEY`). Its allowed models appear in every member's picker
+   under *Organization models · METERED · billed to your organization*; the answer footer shows tokens and the
+   estimated cost (`1.2k in · 340 out · $0.004 · Claude Sonnet 5.5 · METERED`). The same allowed list governs bots.
+   Claude is only available this way: Anthropic does not allow third-party apps to use Claude Pro/Max logins.
+3. **In a chat.** Pick the model per message (chip under the composer). **Stop** (or Esc) keeps the text so far;
+   the last answer's **Regenerate** offers *Regenerate with…* another model. The first answer names the chat;
+   rename, archive and **Chat settings** (instructions for this chat) are in the header menu, and Settings › AI
+   chat › Preferences holds personal instructions, the default model and *Web on by default*. The paperclip (or
+   paste/drop) attaches images, PDFs and small text files when the selected model can read them. ⌘K finds your
+   own AI chats by title and text.
+4. **Web.** The composer's **+** menu: Web, Company knowledge, MCP and Skills (the last three say *Not available
+   yet*). On your ChatGPT plan Web uses the plan's own search and answers show source chips. On organization models
+   Web uses a self-hosted **SearXNG**, which the native demo cannot reach (it lives only on the compose network), so
+   there the menu says *Web search needs the search service (SearXNG)*. On the full `docker compose` stack:
+   `OCW_SEARXNG_URL=http://searxng:8080 OCW_SEARXNG_SECRET=$(openssl rand -hex 32) docker compose --profile search up -d`
+   (`OCW_AI_SEARXNG_URL` overrides it for AI chats only). Admins can turn Web off in Settings › Models › AI chats.
+5. **Limits and usage.** Admin › Settings › Models › **AI chats**: who pays, daily limits per member (organization
+   models: answers and dollars; ChatGPT plans: optional), the allowed plan models and the title models; **Usage**
+   below shows 7/30/90 days by member or by model, with costs. A member sees their own today and last 30 days in
+   Settings › AI chat › **Usage**; at the limit the composer says when it resets and offers their own plan.
+6. **Share.** Header menu › **Share** → *Create link* → *Copy*. Anyone **signed in to the same organization** reads
+   a frozen, read-only snapshot at `/share/ai/<id>` (later messages are not included); it is never public, a
+   signed-out browser goes to sign-in, and *Revoke* makes the link answer "This link isn't available".
+
+**Owner check before relying on the ChatGPT plan** (never run by an agent; record the result in
+`.planning/phases/05-direct-ai-chat/05-VALIDATION.md` › Manual-Only Verifications):
+
+1. Settings › AI chat › Continue with ChatGPT with your own Plus/Pro account, paste the `127.0.0.1` address →
+   *Connected*.
+2. In the desktop app, Disconnect and reconnect **without** pasting.
+3. One AI chat turn on a plan model streams; **Stop** keeps the partial text; the footer says "ChatGPT plan".
+4. If a Business/Enterprise seat is available, connect it and note *Connected* or *not eligible* (it must fall back
+   to organization models).
+5. Review `.planning/phases/05-direct-ai-chat/05-UI-REVIEW.md` and the `review-*` screenshots.
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -273,6 +325,9 @@ Do not use `pnpm setup:env --force` to upgrade: it rotates every secret, databas
 | Settings › Members shows no role select or no Organization page | you are not signed in as an Organization Admin (only `victor@` is one) |
 | After changing `BETTER_AUTH_SECRET` the web stays offline or the API logs "Failed to decrypt private key" | delete the `auth.jwks` rows and restart the API (see [Account and access](#account-and-access)) |
 | Cell crash-loops with "Another Gateway owner lease" | it was killed hard: `docker rm -f ocw-demo-openclaw && docker volume rm ocw-demo-openclaw-state && pnpm demo:up` |
+| AI chat dialog: "Paste the full address that starts with http://127.0.0.1." | copy the whole address bar of the unreachable `127.0.0.1` tab (not `localhost`), within 10 minutes of *Continue* |
+| AI chat: no ChatGPT models, or "Reconnect ChatGPT" | Settings › AI chat: connect (or reconnect) your own plan; "not eligible" accounts use organization models |
+| AI chat on Claude: Web says it needs the search service | SearXNG is not reachable from the API; see [AI chats](#ai-chats-phase-5) › Web |
 
 ## Known limits (MVP 0)
 

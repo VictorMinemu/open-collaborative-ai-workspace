@@ -40,7 +40,9 @@ export type ResourceState =
   | "personal"
   | "disabled"
   /** Channel resources: a direct conversation (fixed membership). */
-  | "dm";
+  | "dm"
+  /** Channel resources: a private AI chat with one owner (Phase 5, P-03). */
+  | "ai_chat";
 export type ResourceType =
   | "organization"
   | "unit"

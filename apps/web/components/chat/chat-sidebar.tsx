@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  type AiChatUpdatedEvent,
   type ChannelSummary,
   type ConversationReadEvent,
   type DmSummary,
@@ -24,6 +25,7 @@ import { SectionSidebar, sectionItemClass } from "@/components/shell/section-sid
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
+import { applyAiChatUpdated } from "@/lib/ai-chat-queries";
 import {
   applyConversationRead,
   applySaveUpdate,
@@ -52,6 +54,7 @@ import { usePermissionCheck } from "@/lib/permissions";
 import { useMe } from "@/lib/queries";
 import { useTopic } from "@/lib/realtime";
 import { cn } from "@/lib/utils";
+import { AiChatsSection } from "./ai-chats-section";
 import { ChannelIcon, isUnread } from "./channel-icon";
 import { ConversationBadge } from "./conversation-badge";
 import { CreateChannelDialog } from "./create-channel-dialog";
@@ -209,6 +212,11 @@ function useChannelListSync(
     }
     if (frame.op === "ev" && frame.type === EventTypes.notificationRead) {
       applyNotificationRead(qc, frame.data as NotificationReadEvent);
+      return;
+    }
+    // The member's own AI chats (05-10): created, titled, renamed, archived, answering — from any tab or device.
+    if (frame.op === "ev" && frame.type === EventTypes.aiChatUpdated) {
+      applyAiChatUpdated(qc, (frame.data as AiChatUpdatedEvent).chat);
       return;
     }
     // Read and mark-unread from any of the member's tabs and devices (CHAT-09, Pitfall 2).
@@ -405,6 +413,7 @@ export function ChatSidebar() {
           activePath={pathname}
           counts={{ all: unreadAll, mentions: unreadOf(mentions.data), threads: unreadThreads }}
         />
+        <AiChatsSection />
         {channels.isPending ? (
           <div className="grid gap-1.5 px-2.5 pt-1">
             {[72, 56, 64].map((w) => (

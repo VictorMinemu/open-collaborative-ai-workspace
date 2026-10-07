@@ -154,8 +154,12 @@ export function createAgentModule(core: Core): ApiModule {
             }
             const allowed = [...new Set(body.allowedModels.map((m) => m.trim()))];
 
+            // The key lives behind a SecretReference (D-07); `secret_id` mirrors a `db` reference only so the
+            // documented rollback of the 05-01 backfill stays possible. Nothing reads `secret_id` for resolution.
+            let secretRef = existing?.secretRef ?? null;
             let secretId = existing?.secretId ?? null;
             let hint = existing?.keyHint ?? null;
+            const oldRef = body.apiKey ? secretRef : null;
             const oldSecretId = body.apiKey ? secretId : null;
             if (body.apiKey) {
               secretId = await core.secrets.put(tx, {
@@ -164,10 +168,12 @@ export function createAgentModule(core: Core): ApiModule {
                 provider: body.provider,
                 value: body.apiKey,
               });
+              secretRef = { provider: "db", secretId, organizationId: auth.organizationId };
               hint = keyHint(body.apiKey);
             }
             const now = new Date().toISOString();
             const values = {
+              secretRef,
               secretId,
               keyHint: hint,
               baseUrl,
@@ -186,7 +192,10 @@ export function createAgentModule(core: Core): ApiModule {
                   .values({ organizationId: auth.organizationId, provider: body.provider, ...values })
                   .returning();
             if (!row) throw new Error("model provider upsert failed");
-            if (oldSecretId && oldSecretId !== secretId) await core.secrets.remove(tx, oldSecretId);
+            // A replaced key's sealed row goes away (whether it was referenced by `secret_ref`, `secret_id` or both).
+            for (const stale of new Set([oldRef?.provider === "db" ? oldRef.secretId : null, oldSecretId])) {
+              if (stale && stale !== secretId) await core.secrets.remove(tx, stale);
+            }
 
             await core.audit.record(tx, {
               action: existing ? "model_provider.updated" : "model_provider.created",
@@ -228,7 +237,12 @@ export function createAgentModule(core: Core): ApiModule {
               .where(eq(modelProviders.provider, req.params.provider))
               .returning();
             if (!row) throw notFound("Provider not configured");
-            if (row.secretId) await core.secrets.remove(tx, row.secretId);
+            for (const stale of new Set([
+              row.secretRef?.provider === "db" ? row.secretRef.secretId : null,
+              row.secretId,
+            ])) {
+              if (stale) await core.secrets.remove(tx, stale);
+            }
             const subscription = isSubscriptionProvider(row.provider);
             await core.audit.record(tx, {
               action: subscription ? "model_provider.disconnected" : "model_provider.deleted",

@@ -81,3 +81,72 @@ describe("object storage (OCW_S3_*, P-10)", () => {
     expect(() => loadEnv({ ...base, OCW_S3_ENDPOINT: "not a url" })).toThrow(EnvError);
   });
 });
+
+describe("AI chat variables (P-12)", () => {
+  const base = {
+    DATABASE_URL: "postgres://app:x@localhost:5432/ocw",
+    AUTH_DATABASE_URL: "postgres://auth:x@localhost:5432/ocw",
+    REDIS_URL: "redis://localhost:6379",
+    BETTER_AUTH_SECRET: "b".repeat(32),
+    OCW_SETUP_TOKEN: "s".repeat(16),
+    OCW_ENCRYPTION_KEY: "a".repeat(64),
+  };
+
+  it("defaults: no ChatGPT overrides, AI mock/SearXNG follow the cell-facing values, 30 sends per minute", () => {
+    const env = loadEnv(base);
+    expect(env.OCW_CHATGPT_API_BASE_URL).toBeNull();
+    expect(env.OCW_CHATGPT_AUTH_BASE_URL).toBeNull();
+    expect(env.OCW_AI_MOCK_BASE_URL).toBe("http://fake-model:18999/v1");
+    expect(env.OCW_AI_SEARXNG_URL).toBeNull();
+    expect(env.OCW_AI_SEND_RATE_LIMIT_PER_MINUTE).toBe(30);
+    expect(env.OCW_AI_TITLE_TIMEOUT_MS).toBe(20_000);
+  });
+
+  it("AI mock and SearXNG fall back to OCW_MOCK_MODEL_BASE_URL and OCW_SEARXNG_URL; empty means unset", () => {
+    const env = loadEnv({
+      ...base,
+      OCW_MOCK_MODEL_BASE_URL: "http://fake:1/v1",
+      OCW_SEARXNG_URL: "http://searxng:8080",
+      OCW_CHATGPT_API_BASE_URL: "",
+      OCW_AI_MOCK_BASE_URL: "",
+      OCW_AI_SEARXNG_URL: "",
+    });
+    expect(env.OCW_AI_MOCK_BASE_URL).toBe("http://fake:1/v1");
+    expect(env.OCW_AI_SEARXNG_URL).toBe("http://searxng:8080");
+    expect(env.OCW_CHATGPT_API_BASE_URL).toBeNull();
+  });
+
+  it("explicit values win over the fallbacks", () => {
+    const env = loadEnv({
+      ...base,
+      OCW_CHATGPT_API_BASE_URL: "http://127.0.0.1:4291/v1",
+      OCW_CHATGPT_AUTH_BASE_URL: "http://127.0.0.1:4291",
+      OCW_AI_MOCK_BASE_URL: "http://127.0.0.1:4291/v1",
+      OCW_AI_SEARXNG_URL: "http://127.0.0.1:4291",
+      OCW_AI_SEND_RATE_LIMIT_PER_MINUTE: "600",
+      OCW_AI_TITLE_TIMEOUT_MS: "1500",
+    });
+    expect(env.OCW_CHATGPT_API_BASE_URL).toBe("http://127.0.0.1:4291/v1");
+    expect(env.OCW_CHATGPT_AUTH_BASE_URL).toBe("http://127.0.0.1:4291");
+    expect(env.OCW_AI_MOCK_BASE_URL).toBe("http://127.0.0.1:4291/v1");
+    expect(env.OCW_AI_SEARXNG_URL).toBe("http://127.0.0.1:4291");
+    expect(env.OCW_AI_SEND_RATE_LIMIT_PER_MINUTE).toBe(600);
+    expect(env.OCW_AI_TITLE_TIMEOUT_MS).toBe(1_500);
+  });
+
+  it("rejects a bad URL and an out-of-range send limit", () => {
+    expect(() => loadEnv({ ...base, OCW_CHATGPT_API_BASE_URL: "not a url" })).toThrow(EnvError);
+    expect(() => loadEnv({ ...base, OCW_AI_SEND_RATE_LIMIT_PER_MINUTE: "0" })).toThrow(EnvError);
+    expect(() => loadEnv({ ...base, OCW_AI_SEND_RATE_LIMIT_PER_MINUTE: "10001" })).toThrow(EnvError);
+  });
+
+  it("production refuses either ChatGPT override (test-only, T-05-02-07)", () => {
+    for (const name of ["OCW_CHATGPT_API_BASE_URL", "OCW_CHATGPT_AUTH_BASE_URL"]) {
+      expect(() => loadEnv({ ...base, NODE_ENV: "production", [name]: "http://127.0.0.1:1" })).toThrow(
+        new RegExp(name),
+      );
+      expect(loadEnv({ ...base, NODE_ENV: "development", [name]: "http://127.0.0.1:1" })).toBeTruthy();
+    }
+    expect(loadEnv({ ...base, NODE_ENV: "production" }).OCW_CHATGPT_API_BASE_URL).toBeNull();
+  });
+});

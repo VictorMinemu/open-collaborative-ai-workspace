@@ -40,3 +40,21 @@
   box-shadow: inset 3px 0 0 var(--primary);
   animation: chat-anchor-flash 2.5s ease-out;
 }
+
+/* AI chat answers (05-14): the actions of earlier answers show on hover or keyboard focus, on pointer devices only. */
+@media (hover: hover) and (pointer: fine) {
+  .ai-answer-actions[data-reveal] {
+    opacity: 0;
+    transition: opacity 150ms ease-out;
+  }
+  [data-testid="ai-message"]:hover .ai-answer-actions[data-reveal],
+  .ai-answer-actions[data-reveal]:focus-within,
+  .ai-answer-actions[data-reveal]:has([data-popup-open]) {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ai-answer-actions {
+    transition: none;
+  }
+}

@@ -18,12 +18,27 @@
 // `Tool <tool> not offered`. Once every directive has a result the reply is one line per directive,
 // `Tool <tool> said: <first 200 chars of the result>`, plus the `[tools: …]` suffix.
 //
+// Anthropic usage and failure directives (05-08, metering tests), in the last user message:
+//   [[cache:N]]   the response reports N cache-read input tokens (`cache_read_input_tokens`) besides input_tokens 100
+//   [[http:NNN]]  the request fails with HTTP NNN (an Anthropic `api_error` body) before any streaming
+//
+// Title requests (05-10, fake-responses.mjs `titleReply`): a system/developer message (chat completions) or `system`
+// (Anthropic) asking for a "short title" answers `Title: <first three words of the user text>` ([[title:<text>]] forces it).
+//
 // Fake SearXNG: `GET /search?q=<query>&format=json` returns one deterministic result.
+//
+// Fake OpenAI Responses API (fake-responses.mjs, Phase 5): `POST /v1/responses` (SSE) and, for `fake-plan-…`
+// bearers, the ChatGPT-plan catalog on `GET /v1/models`. Every route also honours `[[slow]]` (40 deltas 100 ms
+// apart) and appends ` [images:N]` / ` [files:N]` when the last user message carries images / files (PDFs).
+// `createFakeModelServer({ onRequest })` reports `{kind, path, headers, body}` for every model request
+// (kinds: models, responses, openai, anthropic, and search for the fake SearXNG with its query string in `path`).
 //
 // Fake MCP server (fake-mcp.mjs): `/mcp` (streamable HTTP) and `/sse` + `/sse/messages` (HTTP+SSE), tools
 // `echo` (read-only) and `write_note` (destructive).
 //
 // Fake ClawHub (fake-clawhub.mjs): the marketplace's read-only `/api/v1/*` routes from fixtures/clawhub.
+//
+// Fake Sign in with ChatGPT (fake-siwc.mjs, 05-05): OIDC discovery, authorize, token, JWKS and revoke under `/siwc`.
 //
 // Env: PORT (default 18999), FAKE_MODEL_HOST (default 0.0.0.0), FAKE_MODEL_CAPTURE_DIR (optional: write each request body as JSON),
 // FAKE_MCP_TOKEN (optional: the fake MCP routes then require `Authorization: Bearer <token>`),
@@ -51,6 +66,22 @@ try {
 } catch (error) {
   if (error?.code !== "ERR_MODULE_NOT_FOUND") throw error;
   console.warn("fake-model: fake-clawhub.mjs not found, ClawHub routes disabled");
+}
+// And the fake Sign in with ChatGPT server (05-05).
+let createFakeSiwc = null;
+try {
+  ({ createFakeSiwc } = await import("./fake-siwc.mjs"));
+} catch (error) {
+  if (error?.code !== "ERR_MODULE_NOT_FOUND") throw error;
+  console.warn("fake-model: fake-siwc.mjs not found, /siwc routes disabled");
+}
+// And the fake Responses API (Phase 5).
+let fakeResponses = null;
+try {
+  fakeResponses = await import("./fake-responses.mjs");
+} catch (error) {
+  if (error?.code !== "ERR_MODULE_NOT_FOUND") throw error;
+  console.warn("fake-model: fake-responses.mjs not found, /v1/responses disabled");
 }
 
 const PORT = Number(process.env.PORT ?? 18999);
@@ -353,6 +384,12 @@ function sendJson(res, status, obj) {
   res.end(JSON.stringify(obj));
 }
 
+/** The title reply when the instructions ask for a short title (05-10), else null. */
+function titleOf(instructionTexts, lastUserText) {
+  if (!fakeResponses?.isTitleRequest(instructionTexts)) return null;
+  return fakeResponses.titleReply(lastUserText);
+}
+
 /** Splits the reply into a few deltas so streaming code paths are exercised. */
 function deltas(text) {
   const words = text.split(/(\s+)/u);
@@ -361,14 +398,58 @@ function deltas(text) {
   return out;
 }
 
-function openAIChat(res, body) {
+const SLOW_RE = /\[\[slow\]\]/u;
+const CACHE_RE = /\[\[cache:(\d{1,9})\]\]/u;
+const HTTP_RE = /\[\[http:([45]\d\d)\]\]/u;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** `[[slow]]`: the reply (with " 1"), then " 2" … " 40", 100 ms apart (same contract as fake-responses.mjs). */
+function slowPieces(reply) {
+  return Array.from({ length: 40 }, (_, i) => (i === 0 ? `${reply} 1` : ` ${i + 1}`));
+}
+
+/** Image parts of a message's content (OpenAI `image_url`, Anthropic `image`). */
+function imageCount(message) {
+  return Array.isArray(message?.content)
+    ? message.content.filter((p) => p?.type === "image_url" || p?.type === "image").length
+    : 0;
+}
+
+/** File parts of a message's content (OpenAI chat `file`, Anthropic `document`), e.g. PDFs (05-12). */
+function fileCount(message) {
+  return Array.isArray(message?.content)
+    ? message.content.filter((p) => p?.type === "file" || p?.type === "document").length
+    : 0;
+}
+
+/** The last user message's slow flag and ` [images:N]` / ` [files:N]` suffix. */
+function turnFlags(messages) {
+  const lastUser = [...messages].reverse().find((m) => m.role === "user");
+  const images = imageCount(lastUser);
+  const files = fileCount(lastUser);
+  const text = contentText(lastUser?.content);
+  return {
+    slow: SLOW_RE.test(text),
+    cacheRead: Number(CACHE_RE.exec(text)?.[1] ?? 0),
+    httpStatus: Number(HTTP_RE.exec(text)?.[1] ?? 0),
+    suffix: `${images > 0 ? ` [images:${images}]` : ""}${files > 0 ? ` [files:${files}]` : ""}`,
+  };
+}
+
+async function openAIChat(res, body) {
   capture("openai", body);
   const offered = offeredToolNames(body);
   const toolCount = Array.isArray(body.tools) ? body.tools.length : 0;
   const messages = Array.isArray(body.messages) ? body.messages : [];
   const step = planToolStep(messages, offered);
   if (step?.call) return openAIToolCall(res, body, step.call);
-  const reply = step?.reply ?? composeReply(promptFromOpenAI(body).all, toolCount, offered);
+  const flags = turnFlags(messages);
+  const title = titleOf(
+    messages.filter((m) => m.role === "system" || m.role === "developer").map((m) => contentText(m.content)),
+    promptFromOpenAI(body).lastUser,
+  );
+  const reply =
+    title ?? `${step?.reply ?? composeReply(promptFromOpenAI(body).all, toolCount, offered)}${flags.suffix}`;
   const id = `chatcmpl-fake-${counter}`;
   const model = body.model ?? MODELS[0];
   const created = Math.floor(Date.now() / 1000);
@@ -390,7 +471,12 @@ function openAIChat(res, body) {
       `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: finish }], ...extra })}\n\n`,
     );
   chunk({ role: "assistant", content: "" });
-  for (const piece of deltas(reply)) chunk({ content: piece });
+  if (title && flags.slow) await sleep(4_000);
+  const slowNow = flags.slow && !title;
+  for (const piece of slowNow ? slowPieces(reply) : deltas(reply)) {
+    chunk({ content: piece });
+    if (slowNow) await sleep(100);
+  }
   chunk({}, "stop");
   res.write(
     `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model, choices: [], usage })}\n\n`,
@@ -444,13 +530,25 @@ function openAIToolCall(res, body, call) {
   res.end();
 }
 
-function anthropicMessages(res, body) {
+async function anthropicMessages(res, body) {
   capture("anthropic", body);
   const toolCount = Array.isArray(body.tools) ? body.tools.length : 0;
-  const reply = composeReply(promptFromAnthropic(body).all, toolCount, offeredToolNames(body));
+  const flags = turnFlags(Array.isArray(body.messages) ? body.messages : []);
+  if (flags.httpStatus) {
+    sendJson(res, flags.httpStatus, {
+      type: "error",
+      error: { type: "api_error", message: `fake failure ${flags.httpStatus}` },
+    });
+    return;
+  }
+  const title = titleOf([contentText(body.system)], promptFromAnthropic(body).lastUser);
+  const reply =
+    title ??
+    `${composeReply(promptFromAnthropic(body).all, toolCount, offeredToolNames(body))}${flags.suffix}`;
   const id = `msg_fake_${counter}`;
   const model = body.model ?? MODELS[0];
-  const usage = { input_tokens: 100, output_tokens: reply.length };
+  const cache = flags.cacheRead ? { cache_read_input_tokens: flags.cacheRead } : {};
+  const usage = { input_tokens: 100, output_tokens: reply.length, ...cache };
   if (!body.stream) {
     sendJson(res, 200, {
       id,
@@ -476,12 +574,16 @@ function anthropicMessages(res, body) {
       content: [],
       stop_reason: null,
       stop_sequence: null,
-      usage: { input_tokens: 100, output_tokens: 0 },
+      usage: { input_tokens: 100, output_tokens: 0, ...cache },
     },
   });
   ev("content_block_start", { index: 0, content_block: { type: "text", text: "" } });
-  for (const piece of deltas(reply))
+  if (title && flags.slow) await sleep(4_000);
+  const slowNow = flags.slow && !title;
+  for (const piece of slowNow ? slowPieces(reply) : deltas(reply)) {
     ev("content_block_delta", { index: 0, delta: { type: "text_delta", text: piece } });
+    if (slowNow) await sleep(100);
+  }
   ev("content_block_stop", { index: 0 });
   ev("message_delta", {
     delta: { stop_reason: "end_turn", stop_sequence: null },
@@ -493,31 +595,58 @@ function anthropicMessages(res, body) {
 
 /**
  * `opts.mcpToken` overrides `FAKE_MCP_TOKEN` (empty = no token); `opts.clawhubArtifactDir` overrides
- * `FAKE_CLAWHUB_ARTIFACT_DIR`.
+ * `FAKE_CLAWHUB_ARTIFACT_DIR`; `opts.onRequest({kind, path, headers, body})` sees every model request.
  */
 export function createFakeModelServer(opts = {}) {
+  const report = (kind, req, path, body) => {
+    try {
+      opts.onRequest?.({ kind, path, headers: { ...req.headers }, body });
+    } catch {
+      /* a test hook never breaks the fake */
+    }
+  };
   const mcp = createFakeMcp?.({ token: opts.mcpToken ?? process.env.FAKE_MCP_TOKEN ?? "" }) ?? null;
   const clawhub = createFakeClawhub?.({ artifactDir: opts.clawhubArtifactDir }) ?? null;
+  const siwc = createFakeSiwc?.() ?? null;
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     try {
       if (mcp?.(req, res, url)) return;
       if (clawhub?.(req, res, url)) return;
+      if (siwc?.(req, res, url)) return;
       if (req.method === "GET" && (url.pathname === "/health" || url.pathname === "/healthz"))
         return sendJson(res, 200, { ok: true });
       if (req.method === "GET" && url.pathname === "/v1/models") {
+        report("models", req, url.pathname, null);
+        if (fakeResponses?.isPlanBearer(req.headers)) return sendJson(res, 200, fakeResponses.planCatalog());
         return sendJson(res, 200, {
           object: "list",
           data: MODELS.map((id) => ({ id, object: "model", created: 0, owned_by: "ocw-fake" })),
         });
       }
-      if (req.method === "GET" && url.pathname === "/search") return fakeSearch(res, url);
-      if (req.method === "POST" && url.pathname === "/v1/chat/completions")
-        return openAIChat(res, await readBody(req));
-      if (req.method === "POST" && url.pathname === "/v1/messages")
-        return anthropicMessages(res, await readBody(req));
+      if (req.method === "GET" && url.pathname === "/search") {
+        report("search", req, `${url.pathname}${url.search}`, null);
+        return fakeSearch(res, url);
+      }
+      if (req.method === "POST" && url.pathname === "/v1/responses" && fakeResponses) {
+        const body = await readBody(req);
+        report("responses", req, url.pathname, body);
+        return await fakeResponses.handleResponses(req, res, body);
+      }
+      if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
+        const body = await readBody(req);
+        report("openai", req, url.pathname, body);
+        return await openAIChat(res, body);
+      }
+      if (req.method === "POST" && url.pathname === "/v1/messages") {
+        const body = await readBody(req);
+        report("anthropic", req, url.pathname, body);
+        return await anthropicMessages(res, body);
+      }
       sendJson(res, 404, { error: { message: `fake-model: no route ${req.method} ${url.pathname}` } });
     } catch (error) {
+      // A streaming handler fails after its headers went out: just end the stream.
+      if (res.headersSent) return void res.end();
       sendJson(res, 400, {
         error: { message: `fake-model: ${error instanceof Error ? error.message : String(error)}` },
       });

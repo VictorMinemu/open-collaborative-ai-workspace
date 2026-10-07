@@ -1,3 +1,4 @@
+import type { Readable } from "node:stream";
 import { type Attachment, MAX_ATTACHMENTS_PER_MESSAGE } from "@ocw/contracts";
 import { attachments, type Tx } from "@ocw/db";
 import { and, asc, eq, inArray, isNull } from "drizzle-orm";
@@ -5,13 +6,19 @@ import type { ApiModule, App, Core } from "../../core";
 import { conflict } from "../../lib/errors";
 // Type-only: the chat module imports this module's helpers (Plan 04-12), so a runtime import would be a cycle.
 import type { ConversationAccess } from "../chat/access";
-import { registerAttachmentRoutes } from "./attachments";
-import { toAttachment } from "./model";
-import { createObjectStorage, type ObjectStorage } from "./storage";
+import { presignPart, registerAttachmentRoutes } from "./attachments";
+import { type AttachmentRow, toAttachment } from "./model";
+import { type AttachmentPart, attachmentKey, createObjectStorage, type ObjectStorage } from "./storage";
 import { createAttachmentSweeper } from "./sweeper";
 
 export { type AttachmentRow, toAttachment } from "./model";
-export { attachmentKey, createObjectStorage, type ObjectStorage, objectStorageConfigured } from "./storage";
+export {
+  type AttachmentPart,
+  attachmentKey,
+  createObjectStorage,
+  type ObjectStorage,
+  objectStorageConfigured,
+} from "./storage";
 export { type AttachmentSweeper, createAttachmentSweeper } from "./sweeper";
 
 const CORS_RETRY_MAX_MS = 60_000;
@@ -80,7 +87,8 @@ export function createArtifactModule(
   };
 }
 
-const notLinkable = () =>
+/** 409 `attachment_not_linkable`: the one refusal for any file that cannot join a message (never says why). */
+export const notLinkable = () =>
   conflict("One or more attachments cannot be added to this message", "attachment_not_linkable");
 
 /**
@@ -129,4 +137,104 @@ export async function attachmentsForMessages(
     out.set(row.messageId!, list);
   }
   return out;
+}
+
+/**
+ * The rows `linkAttachments` would accept for this message (05-12): the uploader's own `ready`, unlinked files of
+ * this conversation. Anything else among `ids` is 409 `attachment_not_linkable`, before the caller looks at a single
+ * row, so a refused id never reveals what kind of file it is.
+ */
+export async function linkableAttachments(
+  tx: Tx,
+  input: { conversationId: string; uploaderId: string; ids: string[] },
+): Promise<AttachmentRow[]> {
+  const ids = [...new Set(input.ids)];
+  if (ids.length === 0) return [];
+  if (input.ids.length > MAX_ATTACHMENTS_PER_MESSAGE || ids.length !== input.ids.length) throw notLinkable();
+  const rows = await tx
+    .select()
+    .from(attachments)
+    .where(
+      and(
+        inArray(attachments.id, ids),
+        eq(attachments.conversationId, input.conversationId),
+        eq(attachments.uploaderId, input.uploaderId),
+        eq(attachments.status, "ready"),
+        isNull(attachments.messageId),
+      ),
+    );
+  if (rows.length !== ids.length) throw notLinkable();
+  const order = new Map(input.ids.map((id, i) => [id, i]));
+  return rows.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+}
+
+/** Ready attachment rows of the given messages, in upload order (what a model turn reads, 05-12). */
+export async function attachmentRowsForMessages(
+  tx: Tx,
+  messageIds: string[],
+): Promise<Map<string, AttachmentRow[]>> {
+  const out = new Map<string, AttachmentRow[]>();
+  if (messageIds.length === 0) return out;
+  const rows = await tx
+    .select()
+    .from(attachments)
+    .where(and(inArray(attachments.messageId, messageIds), eq(attachments.status, "ready")))
+    .orderBy(asc(attachments.createdAt), asc(attachments.id));
+  for (const row of rows) {
+    const list = out.get(row.messageId!) ?? [];
+    list.push(row);
+    out.set(row.messageId!, list);
+  }
+  return out;
+}
+
+/** The object is larger than the caller's cap: it is never buffered past it. */
+export class AttachmentTooLargeError extends Error {}
+
+/**
+ * The bytes of one stored part of an attachment, read server-side from the store (never a URL: the bytes travel
+ * inside the caller's request, ADR-0015), at most `maxBytes` (larger → `AttachmentTooLargeError`, the stream is
+ * destroyed at once).
+ */
+export async function readAttachmentBytes(
+  storage: ObjectStorage,
+  row: AttachmentRow,
+  part: AttachmentPart,
+  maxBytes: number,
+): Promise<Uint8Array> {
+  const stream: Readable = await storage.stream(
+    attachmentKey(row.organizationId, row.conversationId, row.id, part),
+  );
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for await (const chunk of stream) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+      total += buf.length;
+      if (total > maxBytes) throw new AttachmentTooLargeError("attachment larger than the cap");
+      chunks.push(buf);
+    }
+  } finally {
+    stream.destroy();
+  }
+  return new Uint8Array(Buffer.concat(chunks, total));
+}
+
+/**
+ * A presigned GET for one part of an attachment the caller was already authorized for (05-13: the AI chat share
+ * routes). Same TTL, type and disposition as the Phase 4 routes; never log the URL (a bearer credential).
+ */
+export async function presignAttachmentPart(
+  storage: ObjectStorage,
+  row: AttachmentRow,
+  part: AttachmentPart,
+): Promise<string> {
+  return presignPart(storage, row, part);
+}
+
+/** Attachment rows by id under the caller's tenant (RLS); missing ids are simply absent. */
+export async function attachmentRowsByIds(tx: Tx, ids: string[]): Promise<AttachmentRow[]> {
+  const unique = [...new Set(ids)];
+  if (unique.length === 0) return [];
+  return tx.select().from(attachments).where(inArray(attachments.id, unique));
 }

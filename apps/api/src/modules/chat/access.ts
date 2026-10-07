@@ -18,7 +18,12 @@ import { type ConversationRow, channelFacts, getConversation } from "./service";
  * threads, unread) pass `readableIds` to their queries; event-time decisions use `isReadable`.
  */
 
-export type ReadableKind = "channel" | "dm" | "group";
+/**
+ * `ai_chat` (P-03) is readable only by callers that ask for it (the ai-chat module, the `conv:` topic, search and
+ * attachments later): the default set stays channel/dm/group, so sidebars, unread, inbox, threads and saves never
+ * see an AI chat.
+ */
+export type ReadableKind = "channel" | "dm" | "group" | "ai_chat";
 const ALL_KINDS: readonly ReadableKind[] = ["channel", "dm", "group"];
 
 export interface ConversationAccess {
@@ -46,7 +51,12 @@ export interface ConversationAccess {
    * Boolean form for event-time decisions (notifications, WS). The plan named it "can-read"; that identifier
    * belongs to a deleted pre-resolver helper and the static guard (guard.test.ts) refuses it.
    */
-  isReadable(tx: Tx, userId: string, conversationId: string): Promise<boolean>;
+  isReadable(
+    tx: Tx,
+    userId: string,
+    conversationId: string,
+    opts?: { kinds?: readonly ReadableKind[] },
+  ): Promise<boolean>;
 }
 
 export function createConversationAccess(core: Core): ConversationAccess {
@@ -107,7 +117,7 @@ export function createConversationAccess(core: Core): ConversationAccess {
           visibility: r.visibility,
           archived: r.archivedAt !== null,
           viewerRole: r.role ?? null,
-          kind: r.kind === "group" ? "group" : r.kind === "channel" ? "channel" : "dm",
+          kind: r.kind === "group" || r.kind === "channel" || r.kind === "ai_chat" ? r.kind : "dm",
           // Unit-scoped rules apply to the unit's channels (CHAT-02, principle 6).
           unitPath: r.kind === "channel" ? (r.unitPath ?? []) : [],
         }),
@@ -115,8 +125,8 @@ export function createConversationAccess(core: Core): ConversationAccess {
       return allowed.map((r) => r.id);
     },
 
-    async isReadable(tx, userId, conversationId) {
-      const conv = await getConversation(tx, conversationId, ALL_KINDS);
+    async isReadable(tx, userId, conversationId, opts = {}) {
+      const conv = await getConversation(tx, conversationId, opts.kinds ?? ALL_KINDS);
       if (!conv) return false;
       const facts = await channelFacts(tx, conv, { kind: "user", id: userId });
       const d = await perms.decide(tx, { kind: "user", userId }, "channel.read", channelResource(facts));

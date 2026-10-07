@@ -325,7 +325,8 @@ export const messageVersions = appSchema.table(
       .notNull()
       .references(() => messages.id, { onDelete: "cascade" }),
     version: integer("version").notNull(),
-    kind: text("kind", { enum: ["edit", "delete"] }).notNull(),
+    /** `regenerate` (Phase 5): the assistant answer replaced by a regeneration, kept append-only. */
+    kind: text("kind", { enum: ["edit", "delete", "regenerate"] }).notNull(),
     body: text("body").notNull(),
     mentions: jsonb("mentions").$type<Array<{ kind: "user" | "agent"; id: string }>>().notNull().default([]),
     editedByKind: text("edited_by_kind", { enum: ["user", "agent", "system"] }).notNull(),
@@ -335,7 +336,7 @@ export const messageVersions = appSchema.table(
   (t) => [
     uniqueIndex("message_versions_message_version_uq").on(t.messageId, t.version),
     index("message_versions_org_message_idx").on(t.organizationId, t.messageId),
-    check("message_versions_kind_check", sql`${t.kind} in ('edit','delete')`),
+    check("message_versions_kind_check", sql`${t.kind} in ('edit','delete','regenerate')`),
     check("message_versions_edited_by_kind_check", sql`${t.editedByKind} in ('user','agent','system')`),
   ],
 );
@@ -832,7 +833,11 @@ export const secrets = appSchema.table(
     id: id(),
     organizationId: orgId(),
     name: text("name").notNull(),
-    kind: text("kind", { enum: ["provider_api_key", "mcp_credential"] }).notNull(),
+    /**
+     * `user_model_credential` (Phase 5): a member's ChatGPT plan token bundle, sealed with AAD
+     * `<orgId>:<userId>:chatgpt_plan` and referenced by `user_model_credentials.secret_id` (never pooled, D-01).
+     */
+    kind: text("kind", { enum: ["provider_api_key", "mcp_credential", "user_model_credential"] }).notNull(),
     provider: text("provider"),
     ciphertext: text("ciphertext").notNull(),
     iv: text("iv").notNull(),
@@ -851,7 +856,21 @@ export const modelProviders = appSchema.table(
     provider: text("provider", {
       enum: ["anthropic", "openai", "openrouter", "openai-compatible", "openai-codex", "mock"],
     }).notNull(),
+    /**
+     * Legacy pointer to the sealed key. Kept through Phase 5 so the `provider_secret_refs` backfill can be rolled
+     * back; dropped by the follow-up in .planning/todos/pending/2026-10-06-drop-model-providers-secret-id.md.
+     */
     secretId: uuid("secret_id").references(() => secrets.id, { onDelete: "set null" }),
+    /**
+     * Where the provider key lives (D-07, AGENTS principle 8): a `SecretReference`. UI-entered keys are
+     * `{provider: "db", secretId, organizationId}` (the sealed row in app.secrets); operators may point at `env`
+     * or `file`. Keys are resolved only through the secrets module. Null = no key.
+     */
+    secretRef: jsonb("secret_ref").$type<
+      | { provider: "env"; key: string }
+      | { provider: "file"; path: string }
+      | { provider: "db"; secretId: string; organizationId: string }
+    >(),
     /** Last 4 chars of the API key, for display only. */
     keyHint: text("key_hint"),
     /** Required for openai-compatible; optional override otherwise. */
@@ -1144,4 +1163,234 @@ export const deviceCommands = appSchema.table(
     ackedAt: ts("acked_at"),
   },
   (t) => [index("device_commands_device_status_idx").on(t.organizationId, t.deviceId, t.status, t.createdAt)],
+);
+
+// ---------------------------------------------------------------- direct AI chat (Phase 5)
+
+/**
+ * One row per AI chat (1:1 with an `ai_chat` conversation: private, exactly one `conversation_members` row with
+ * role `owner`). Title and archive state live on the conversation (`name`, `archived_at`).
+ */
+export const aiChats = appSchema.table(
+  "ai_chats",
+  {
+    conversationId: uuid("conversation_id")
+      .primaryKey()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    organizationId: orgId(),
+    ownerUserId: uuid("owner_user_id").notNull(),
+    /** ADR-0014 semantics: `user` (renamed), `heuristic` (first words), `auto` (model-generated). */
+    titleSource: text("title_source", { enum: ["user", "heuristic", "auto"] })
+      .notNull()
+      .default("heuristic"),
+    instructions: text("instructions").notNull().default(""),
+    usePersonalInstructions: boolean("use_personal_instructions").notNull().default(true),
+    tools: jsonb("tools").$type<{ web: boolean }>().notNull().default({ web: false }),
+    /** The `ModelRef` of the last turn. */
+    lastModel: jsonb("last_model").$type<{ backend: string; provider: string; modelId: string }>(),
+    lastActivityAt: ts("last_activity_at").notNull().defaultNow(),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ai_chats_owner_activity_idx").on(t.organizationId, t.ownerUserId, t.lastActivityAt),
+    check("ai_chats_title_source_check", sql`${t.titleSource} in ('user','heuristic','auto')`),
+    check("ai_chats_instructions_len_check", sql`char_length(${t.instructions}) <= 8000`),
+  ],
+);
+
+/** A member's personal AI chat preferences (instructions, default model, web search default). */
+export const aiUserPreferences = appSchema.table(
+  "ai_user_preferences",
+  {
+    organizationId: orgId(),
+    userId: uuid("user_id").notNull(),
+    instructions: text("instructions").notNull().default(""),
+    defaultModel: jsonb("default_model").$type<{ backend: string; provider: string; modelId: string }>(),
+    webDefault: boolean("web_default").notNull().default(false),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.organizationId, t.userId] }),
+    check("ai_user_preferences_instructions_len_check", sql`char_length(${t.instructions}) <= 8000`),
+  ],
+);
+
+/**
+ * One row per assistant answer attempt (P-07). At most one `running` generation per conversation
+ * (`ai_generations_one_running_uq`, inserted in the send transaction → 409). Partial text is flushed here, never
+ * to `messages.body`; `instance_id` names the API process holding the AbortController.
+ */
+export const aiGenerations = appSchema.table(
+  "ai_generations",
+  {
+    id: id(),
+    organizationId: orgId(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    userMessageId: uuid("user_message_id"),
+    assistantMessageId: uuid("assistant_message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    requesterUserId: uuid("requester_user_id").notNull(),
+    backend: text("backend", { enum: ["chatgpt_plan", "org_key", "mock"] }).notNull(),
+    provider: text("provider").notNull(),
+    modelId: text("model_id").notNull(),
+    attempt: integer("attempt").notNull().default(1),
+    status: text("status", { enum: ["running", "completed", "stopped", "failed", "interrupted"] })
+      .notNull()
+      .default("running"),
+    errorCode: text("error_code"),
+    errorParam: text("error_param"),
+    finishReason: text("finish_reason"),
+    partialText: text("partial_text").notNull().default(""),
+    instanceId: text("instance_id").notNull(),
+    heartbeatAt: ts("heartbeat_at").notNull().defaultNow(),
+    webUsed: boolean("web_used").notNull().default(false),
+    sourceDomains: text("source_domains").array().notNull().default(sql`'{}'::text[]`),
+    truncated: boolean("truncated").notNull().default(false),
+    startedAt: ts("started_at").notNull().defaultNow(),
+    finishedAt: ts("finished_at"),
+  },
+  (t) => [
+    uniqueIndex("ai_generations_one_running_uq").on(t.conversationId).where(sql`status = 'running'`),
+    index("ai_generations_requester_started_idx").on(t.organizationId, t.requesterUserId, t.startedAt),
+    index("ai_generations_assistant_message_idx").on(t.organizationId, t.assistantMessageId),
+    index("ai_generations_heartbeat_idx").on(t.heartbeatAt).where(sql`status = 'running'`),
+    check("ai_generations_backend_check", sql`${t.backend} in ('chatgpt_plan','org_key','mock')`),
+    check(
+      "ai_generations_status_check",
+      sql`${t.status} in ('running','completed','stopped','failed','interrupted')`,
+    ),
+  ],
+);
+
+/**
+ * Append-only usage store (D-06, AICHAT-07): one immutable record per generation and kind. Ids only, like
+ * audit_events (no foreign key but the organization), so usage survives deleted chats. `post-migrate.sql` revokes
+ * UPDATE, DELETE and TRUNCATE from the app role. Never holds prompt or answer text.
+ */
+export const aiUsageRecords = appSchema.table(
+  "ai_usage_records",
+  {
+    id: id(),
+    organizationId: orgId(),
+    generationId: uuid("generation_id").notNull(),
+    kind: text("kind", { enum: ["chat", "title"] }).notNull(),
+    requesterUserId: uuid("requester_user_id").notNull(),
+    conversationId: uuid("conversation_id").notNull(),
+    messageId: uuid("message_id"),
+    backend: text("backend").notNull(),
+    provider: text("provider").notNull(),
+    modelId: text("model_id").notNull(),
+    inputTokens: integer("input_tokens").notNull(),
+    outputTokens: integer("output_tokens").notNull(),
+    cachedInputTokens: integer("cached_input_tokens"),
+    reasoningTokens: integer("reasoning_tokens"),
+    estimated: boolean("estimated").notNull().default(false),
+    costMicrosUsd: bigint("cost_micros_usd", { mode: "number" }),
+    priceRef: text("price_ref"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("ai_usage_records_generation_kind_uq").on(t.generationId, t.kind),
+    index("ai_usage_records_org_time_idx").on(t.organizationId, t.createdAt),
+    index("ai_usage_records_requester_time_idx").on(t.organizationId, t.requesterUserId, t.createdAt),
+    check("ai_usage_records_kind_check", sql`${t.kind} in ('chat','title')`),
+  ],
+);
+
+/** Per member, UTC day and backend class: the counters daily caps are enforced on (Phase 3.1 pattern). */
+export const aiUsageDaily = appSchema.table(
+  "ai_usage_daily",
+  {
+    organizationId: orgId(),
+    userId: uuid("user_id").notNull(),
+    day: date("day", { mode: "string" }).notNull(),
+    backendClass: text("backend_class", { enum: ["org_key", "chatgpt_plan"] }).notNull(),
+    generations: integer("generations").notNull().default(0),
+    inputTokens: bigint("input_tokens", { mode: "number" }).notNull().default(0),
+    outputTokens: bigint("output_tokens", { mode: "number" }).notNull().default(0),
+    costMicrosUsd: bigint("cost_micros_usd", { mode: "number" }).notNull().default(0),
+  },
+  (t) => [
+    primaryKey({ columns: [t.organizationId, t.userId, t.day, t.backendClass] }),
+    check("ai_usage_daily_backend_class_check", sql`${t.backendClass} in ('org_key','chatgpt_plan')`),
+  ],
+);
+
+/** One row per organization (absent = `DEFAULT_AI_CHAT_POLICY`); columns mirror `AiChatPolicy`. */
+export const aiChatPolicies = appSchema.table("ai_chat_policies", {
+  organizationId: orgId().primaryKey(),
+  chatgptPlanEnabled: boolean("chatgpt_plan_enabled").notNull().default(true),
+  orgKeysEnabled: boolean("org_keys_enabled").notNull().default(true),
+  /** Empty = every model the plan offers. */
+  planAllowedModels: text("plan_allowed_models").array().notNull().default(sql`'{}'::text[]`),
+  orgKeyDailyGenerations: integer("org_key_daily_generations").default(200),
+  orgKeyDailyCostMicros: bigint("org_key_daily_cost_micros", { mode: "number" }),
+  planDailyGenerations: integer("plan_daily_generations"),
+  concurrentGenerationsPerUser: integer("concurrent_generations_per_user").notNull().default(3),
+  maxContextTokens: integer("max_context_tokens").notNull().default(64_000),
+  webEnabled: boolean("web_enabled").notNull().default(true),
+  titleModels: jsonb("title_models").$type<Record<string, string>>().notNull().default({}),
+  /** The opaque `ext_agent_host_id` sent with ChatGPT plan requests, generated once (05-05). */
+  chatgptHostId: text("chatgpt_host_id"),
+  updatedBy: uuid("updated_by"),
+  updatedAt: ts("updated_at").notNull().defaultNow(),
+});
+
+/**
+ * A member's own model sign-in (D-01: never pooled). Tokens live sealed in app.secrets (kind
+ * `user_model_credential`); this row holds identity metadata and status only.
+ */
+export const userModelCredentials = appSchema.table(
+  "user_model_credentials",
+  {
+    id: id(),
+    organizationId: orgId(),
+    userId: uuid("user_id").notNull(),
+    provider: text("provider", { enum: ["chatgpt_plan"] }).notNull(),
+    secretId: uuid("secret_id").references(() => secrets.id, { onDelete: "set null" }),
+    issuedClientId: text("issued_client_id"),
+    subject: text("subject"),
+    email: text("email"),
+    planType: text("plan_type"),
+    scopes: text("scopes").array().notNull().default(sql`'{}'::text[]`),
+    accessExpiresAt: ts("access_expires_at"),
+    status: text("status", {
+      enum: ["connected", "needs_reconnect", "not_eligible", "plan_usage_disabled"],
+    }).notNull(),
+    lastError: text("last_error"),
+    welcomeSeenAt: ts("welcome_seen_at"),
+    connectedAt: ts("connected_at").notNull().defaultNow(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("user_model_credentials_org_user_provider_uq").on(t.organizationId, t.userId, t.provider),
+    check("user_model_credentials_provider_check", sql`${t.provider} in ('chatgpt_plan')`),
+    check(
+      "user_model_credentials_status_check",
+      sql`${t.status} in ('connected','needs_reconnect','not_eligible','plan_usage_disabled')`,
+    ),
+  ],
+);
+
+/** Read-only snapshot share links of an AI chat (AICHAT-09): the snapshot is frozen at creation. */
+export const aiChatShares = appSchema.table(
+  "ai_chat_shares",
+  {
+    id: id(),
+    organizationId: orgId(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    createdBy: uuid("created_by").notNull(),
+    title: text("title").notNull(),
+    snapshot: jsonb("snapshot").$type<Record<string, unknown>>().notNull(),
+    attachmentIds: uuid("attachment_ids").array().notNull().default(sql`'{}'::uuid[]`),
+    createdAt: createdAt(),
+    revokedAt: ts("revoked_at"),
+  },
+  (t) => [index("ai_chat_shares_conversation_idx").on(t.organizationId, t.conversationId)],
 );

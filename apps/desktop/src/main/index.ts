@@ -30,6 +30,8 @@ import { Channels } from "../shared/channels";
 import {
   AddProjectArgs,
   type AddProjectResult,
+  ChatgptLoopbackAwaitArgs,
+  ChatgptLoopbackCancelArgs,
   CheckServerArgs,
   DaemonStatusPayload,
   type DesktopStatus,
@@ -45,6 +47,12 @@ import {
 import { ProjectPathError, validateProjectDir } from "../shared/project-path";
 import { type DaemonProcessState, deriveStatus, sameStatus } from "../shared/status";
 import { deriveApiUrl, normalizeServerUrl, UrlError } from "../shared/urls";
+import {
+  awaitChatgptCallback,
+  cancelAllChatgptLoopbacks,
+  cancelChatgptLoopback,
+  prepareChatgptLoopback,
+} from "./chatgpt-loopback";
 import { ConfigStore } from "./config-store";
 import { ControlError, controlRequest, controlSocketPath } from "./control-client";
 import { buildDaemonEnv, ocwHomeDir, resolveDaemonCommand } from "./daemon-launch";
@@ -336,6 +344,8 @@ function openMain(): void {
   });
   win.on("closed", () => {
     if (mainWindow === win) mainWindow = null;
+    // The page waiting for a ChatGPT sign-in is gone: free the loopback port now, not in 5 minutes.
+    cancelAllChatgptLoopbacks();
   });
   void win.loadURL(url);
 }
@@ -373,6 +383,20 @@ function registerIpc(): void {
   // a validated integer, and nothing else reachable through it.
   handle(Channels.setBadgeCount, fromWeb, (arg) => {
     app.setBadgeCount(parseArgs(SetBadgeCountArgs, arg));
+  });
+  // 05-07 "Sign in with ChatGPT" without pasting (T-05-07-03/04): trusted web sender only; the one-shot listener binds
+  // 127.0.0.1, serves one callback and closes (chatgpt-loopback.ts). Dev builds may open the e2e fake's
+  // http://127.0.0.1 authorize page; packaged builds open https only.
+  handle(Channels.chatgptLoopbackPrepare, fromWeb, (arg) => {
+    parseArgs(NoArgs, arg);
+    return prepareChatgptLoopback({ allowLoopbackAuthorize: !app.isPackaged });
+  });
+  handle(Channels.chatgptLoopbackAwait, fromWeb, (arg) => {
+    const { flowToken, authorizeUrl } = parseArgs(ChatgptLoopbackAwaitArgs, arg);
+    return awaitChatgptCallback(flowToken, authorizeUrl, (url) => shell.openExternal(url));
+  });
+  handle(Channels.chatgptLoopbackCancel, fromWeb, (arg) => {
+    cancelChatgptLoopback(parseArgs(ChatgptLoopbackCancelArgs, arg).flowToken);
   });
 
   // window.ocwOnboarding
@@ -686,6 +710,7 @@ async function main(): Promise<void> {
     if (process.platform !== "darwin") app.quit();
   });
   app.on("before-quit", (event) => {
+    cancelAllChatgptLoopbacks();
     if (cleanedUp) return;
     event.preventDefault();
     if (quitting) return;

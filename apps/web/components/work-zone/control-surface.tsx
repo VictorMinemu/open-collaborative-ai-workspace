@@ -57,6 +57,7 @@ export function ControlSurface({
   className,
   sheetClassName,
   initialFocus,
+  finalFocus,
 }: {
   trigger: ReactElement;
   title: string;
@@ -70,6 +71,11 @@ export function ControlSurface({
   /** Sheet body (phone). */
   sheetClassName?: string;
   initialFocus?: RefObject<HTMLElement | null>;
+  /**
+   * Where focus goes when the desktop popover closes (default: back to the trigger). Phone sheets always return to
+   * the trigger, so closing one never pops the keyboard.
+   */
+  finalFocus?: () => HTMLElement | null;
 }) {
   const sheet = useSheetSurface();
 
@@ -109,6 +115,7 @@ export function ControlSurface({
             data-surface="popover"
             aria-label={title}
             initialFocus={initialFocus ?? true}
+            {...(finalFocus ? { finalFocus } : {})}
             onKeyDown={moveSurfaceFocus}
             className={cn(
               "max-h-[min(70vh,34rem)] origin-(--transform-origin) overflow-y-auto rounded-2xl border bg-popover p-1.5 text-popover-foreground shadow-xl shadow-black/8 outline-none dark:shadow-black/50",

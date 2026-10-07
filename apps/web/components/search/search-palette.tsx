@@ -1,7 +1,7 @@
 "use client";
 
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
-import type { SearchChannel, SearchMessageHit, SearchPerson } from "@ocw/contracts";
+import type { AiChatSummary, SearchChannel, SearchMessageHit, SearchPerson } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
@@ -13,6 +13,7 @@ import {
   MessageCircle,
   MessageSquareText,
   Search,
+  Sparkles,
   X,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -98,7 +99,8 @@ type Item =
   | { key: string; type: "recent"; query: string }
   | { key: string; type: "message"; hit: SearchMessageHit }
   | { key: string; type: "person"; person: SearchPerson }
-  | { key: string; type: "channel"; channel: SearchChannel };
+  | { key: string; type: "channel"; channel: SearchChannel }
+  | { key: string; type: "aiChat"; chat: AiChatSummary };
 
 const optionId = (base: string, key: string) => `${base}-${key.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 
@@ -170,6 +172,8 @@ function PaletteBody({ initialQuery, onClose }: { initialQuery: string; onClose:
         person,
       })),
       ...data.channels.map((channel) => ({ key: `c:${channel.id}`, type: "channel" as const, channel })),
+      // The member's own AI chats (05-10): only ever theirs, after the shared results.
+      ...(data.aiChats ?? []).map((chat) => ({ key: `a:${chat.id}`, type: "aiChat" as const, chat })),
     ];
   }, [q, recent, data]);
 
@@ -202,6 +206,10 @@ function PaletteBody({ initialQuery, onClose }: { initialQuery: string; onClose:
           return;
         case "message": {
           const c = item.hit.conversation;
+          if (c.kind === "ai_chat") {
+            go(`/chat/ai/${c.id}`);
+            return;
+          }
           const kind = c.kind === "channel" ? "channel" : isDirect(c.kind) ? c.kind : null;
           if (!kind) return;
           go(permalinkPath({ id: c.id, kind }, item.hit.messageId, item.hit.threadRootId));
@@ -209,6 +217,9 @@ function PaletteBody({ initialQuery, onClose }: { initialQuery: string; onClose:
         }
         case "channel":
           go(`/chat/${item.channel.id}`);
+          return;
+        case "aiChat":
+          go(`/chat/ai/${item.chat.id}`);
           return;
         case "person":
           if (item.person.kind === "agent") {
@@ -250,6 +261,7 @@ function PaletteBody({ initialQuery, onClose }: { initialQuery: string; onClose:
         { title: "Messages", type: "message" },
         { title: "People", type: "person" },
         { title: "Channels", type: "channel" },
+        { title: "AI chats", type: "aiChat" },
       ]
     : [{ title: "Recent searches", type: "recent" }];
   const activeKey = items[active]?.key;
@@ -501,8 +513,19 @@ function Row({
       const c = hit.conversation;
       return (
         <div {...common} data-testid="search-result" data-kind="message" data-message-id={hit.messageId}>
-          <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-            <MessageSquareText className="size-4" aria-hidden />
+          <span
+            className={cn(
+              "mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md",
+              c.kind === "ai_chat"
+                ? "bg-brand-soft text-brand-soft-foreground"
+                : "bg-muted text-muted-foreground",
+            )}
+          >
+            {c.kind === "ai_chat" ? (
+              <Sparkles className="size-4" aria-hidden />
+            ) : (
+              <MessageSquareText className="size-4" aria-hidden />
+            )}
           </span>
           <span className="min-w-0 flex-1">
             <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground text-xs">
@@ -544,6 +567,28 @@ function Row({
             {person.subtitle ? (
               <span className="block truncate text-muted-foreground text-xs">{person.subtitle}</span>
             ) : null}
+          </span>
+        </div>
+      );
+    }
+    case "aiChat": {
+      const { chat } = item;
+      return (
+        <div {...common} data-testid="search-result" data-kind="ai_chat" data-chat-id={chat.id}>
+          <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md bg-brand-soft text-brand-soft-foreground">
+            <Sparkles className="size-4" aria-hidden />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="flex items-center gap-1.5">
+              <span className="truncate font-medium text-sm">{chat.title}</span>
+              {chat.archived ? (
+                <span className="shrink-0 rounded bg-muted px-1 text-[10px]">archived</span>
+              ) : null}
+            </span>
+            <span className="block truncate text-muted-foreground text-xs">
+              Your AI chat{chat.lastModelLabel ? ` · ${chat.lastModelLabel}` : ""} ·{" "}
+              {relativeTime(chat.lastActivityAt)}
+            </span>
           </span>
         </div>
       );

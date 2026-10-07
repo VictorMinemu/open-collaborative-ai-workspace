@@ -26,6 +26,7 @@ import { RedisBus } from "./lib/redis";
 import { createEnvFileSecretStore, type SecretStore } from "./lib/secret-store";
 import { createAgentModule } from "./modules/agent";
 import { createAgentChannelModule } from "./modules/agent-channel";
+import { createAiChatModule } from "./modules/ai-chat";
 import { createArtifactModule } from "./modules/artifact";
 import { createAuditService } from "./modules/audit";
 import { createBotCapabilitiesModule } from "./modules/bot-capabilities";
@@ -33,6 +34,7 @@ import { createChatModule, createConversationAccess } from "./modules/chat";
 import { createDeviceModule, type DeviceHub } from "./modules/device";
 import { createAuth, createIdentityModule, IdentityService } from "./modules/identity";
 import { createMcpModule } from "./modules/mcp";
+import { createModelGateway, createModelGatewayModule } from "./modules/model-gateway";
 import { createNotificationModule } from "./modules/notification";
 import { AuthzDeniedError, createOrganizationModule, recordAuthzDenial } from "./modules/organization";
 import { createPluginsModule } from "./modules/plugins";
@@ -104,7 +106,7 @@ export async function buildApp(
   const audit = createAuditService();
   const realtime = createRealtimeService({ db, bus });
   const identity = new IdentityService(createAuth(env, authDb), authDb, env, realtime);
-  const secrets = createSecretsService({ key: encryptionKey, audit });
+  const secrets = createSecretsService({ key: encryptionKey, audit, store: secretStore });
   const chatAgent = createChatAgentBridge();
   const chatEvents = createChatEvents();
   // Organization-level online set (@here, CHAT-08): maintained by the realtime gateway, read by notifications.
@@ -229,6 +231,8 @@ export async function buildApp(
   // Add a module: implement apps/api/src/modules/<name>/index.ts and add ONE line here.
   // Modules are mounted under /api/v1 unless they set `prefix`.
   const deviceModule = createDeviceModule(core); // B3: owns the Device Link hub used by work-session
+  const modelGateway = createModelGateway(core); // Phase 5: the only place a LanguageModel is built (P-04)
+  const artifactModule = createArtifactModule(core, { access: createConversationAccess(core) }); // Phase 4: attachments (ADR-0015)
   const modules: ApiModule[] = [
     createIdentityModule({
       identity,
@@ -243,8 +247,10 @@ export async function buildApp(
     createSecretsModule(),
     createChatModule(core), // B1
     createNotificationModule(core, { online }), // Phase 4: mentions, DMs, threads, @channel/@here (CHAT-08)
-    createArtifactModule(core, { access: createConversationAccess(core) }), // Phase 4: attachments (ADR-0015)
-    createSearchModule(core), // Phase 4: full-text search (CHAT-11, D-04)
+    artifactModule,
+    createSearchModule(core, { modelLabel: (ref) => modelGateway.labelOf(ref) }), // Phase 4: full-text search (CHAT-11, D-04); AI chats of their owner (05-10)
+    createModelGatewayModule(core, modelGateway), // Phase 5: AI chat models and ChatGPT plan status
+    createAiChatModule(core, { gateway: modelGateway, storage: artifactModule.storage }), // Phase 5: direct AI chat (AICHAT-02/03/07/08)
     createAgentModule(core), // B2
     createBotCapabilitiesModule(core), // Phase 3.1: capabilities, bot policy, governance
     createMcpModule(core), // Phase 3.1: MCP server registry (D-13)

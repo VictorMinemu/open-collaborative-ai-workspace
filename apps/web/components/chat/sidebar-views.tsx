@@ -21,6 +21,10 @@ export const CHAT_VIEWS: ReadonlyArray<{ id: ChatViewId; label: string; href: st
   { id: "saved", label: "Saved", href: "/chat/saved", icon: Bookmark },
 ];
 
+/** AI Chats stays selected inside an AI chat (`/chat/ai/new`, `/chat/ai/<id>`, 05-03); the others match exactly. */
+const isActive = (v: (typeof CHAT_VIEWS)[number], path: string) =>
+  path === v.href || (v.id === "ai" && path.startsWith(`${v.href}/`));
+
 /** `saved-link` is kept for the Saved entry (04-05 specs); the others are `view-<id>`. */
 const testIdOf = (id: ChatViewId) => (id === "saved" ? "saved-link" : `view-${id}`);
 
@@ -55,7 +59,7 @@ export function SidebarViews({
         className="-mx-2 mb-3 flex gap-1.5 overflow-x-auto pr-8 pb-0.5 pl-2 [mask-image:linear-gradient(to_right,black_88%,transparent)] [scrollbar-width:none]"
       >
         {CHAT_VIEWS.map((v) => {
-          const active = activePath === v.href;
+          const active = isActive(v, activePath);
           const n = counts[v.id] ?? 0;
           return (
             <Link
@@ -93,7 +97,7 @@ export function SidebarViews({
   return (
     <nav aria-label="Views" data-testid="views-list" className="mb-3 grid grid-cols-1 gap-px">
       {CHAT_VIEWS.map((v) => {
-        const active = activePath === v.href;
+        const active = isActive(v, activePath);
         const n = counts[v.id] ?? 0;
         return (
           <Link

@@ -286,7 +286,7 @@ export const MODEL_PROVIDER_CATALOG: readonly ProviderCatalogEntry[] = [
     keyUrl: "https://openrouter.ai/keys",
     models: [
       {
-        id: "anthropic/claude-sonnet-5-5",
+        id: "anthropic/claude-sonnet-5.5",
         label: "Claude Sonnet 5.5",
         hint: "via OpenRouter",
         preselected: true,

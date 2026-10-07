@@ -31,7 +31,7 @@ import { errorMessage } from "@/lib/api";
 import { useBotsRealtime, useDeleteProvider, useModelProviders, useUpsertProvider } from "@/lib/bots-queries";
 import { useCan, usePermissions } from "@/lib/permissions";
 import { cn, relativeTime } from "@/lib/utils";
-import { AllowedModels, ProviderMark } from "./provider-bits";
+import { AllowedModels, MeteredBadge, ProviderMark } from "./provider-bits";
 import { SubscriptionCard } from "./subscription-card";
 
 export function ModelsSettings() {
@@ -64,7 +64,8 @@ export function ModelsSettings() {
         <div>
           <h2 className="font-semibold text-[15px] tracking-tight">Model providers</h2>
           <p className="mt-0.5 max-w-xl text-muted-foreground text-sm">
-            Bots run on the models you allow here: an API key, or your own ChatGPT subscription.
+            Bots and AI chats run on the models you allow here: an API key, or your own ChatGPT subscription
+            for bots.
           </p>
         </div>
         {providers.data ? (
@@ -80,8 +81,8 @@ export function ModelsSettings() {
           <p>
             <span className="font-medium">Mock model enabled.</span>{" "}
             <span className="text-muted-foreground">
-              <code className="font-mono text-xs">fake/mock-1</code> is available to bots for testing; it
-              never calls a paid model.
+              <code className="font-mono text-xs">fake/mock-1</code> is available to bots and AI chats for
+              testing; it never calls a paid model.
             </span>
           </p>
         </div>
@@ -123,8 +124,8 @@ export function ModelsSettings() {
 
       <p className="flex items-center gap-1.5 text-muted-foreground text-xs">
         <ShieldCheck className="size-3.5" />
-        Keys are stored AES-256-GCM encrypted and only delivered to your own OpenClaw runtime. Subscription
-        sign-ins stay inside that runtime.
+        Keys are stored AES-256-GCM encrypted, used by this server for AI chats and delivered only to your own
+        OpenClaw runtime for bots. Subscription sign-ins stay inside that runtime.
       </p>
 
       <ConnectDialog
@@ -200,6 +201,7 @@ function ProviderCard({
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="font-semibold text-[15px] tracking-tight">{entry.label}</h3>
+            <MeteredBadge />
             {configured ? (
               provider?.enabled ? (
                 <Badge variant="success">Connected</Badge>
@@ -211,6 +213,9 @@ function ProviderCard({
             )}
           </div>
           <p className="mt-0.5 text-muted-foreground text-sm">{entry.description}</p>
+          <p data-testid="provider-billing" className="mt-0.5 text-muted-foreground text-xs">
+            Every AI chat and bot turn on this key is billed to your organization.
+          </p>
         </div>
         {configured ? (
           <div className="flex items-center gap-2">

@@ -16,6 +16,25 @@ const MARKS: Record<string, { className: string; text: string }> = {
   "openai-codex": { className: "bg-[#10a37f] text-white text-[11px] tracking-tight", text: "GPT" },
 };
 
+/**
+ * The METERED label of an API-key provider (P-11): every AI chat and bot turn on an organization key is billed to
+ * the organization. Same look as the AI chat model picker's badge.
+ */
+export function MeteredBadge({ className }: { className?: string }) {
+  return (
+    <span
+      data-testid="provider-metered"
+      title="Billed to your organization"
+      className={cn(
+        "inline-flex h-[18px] shrink-0 items-center rounded-[5px] border border-amber-600/40 px-1 font-semibold text-[10px] text-amber-700 leading-none tracking-wide dark:border-amber-400/35 dark:text-amber-300/90",
+        className,
+      )}
+    >
+      METERED
+    </span>
+  );
+}
+
 export function ProviderMark({ provider }: { provider: string }) {
   const m = MARKS[provider] ?? { className: "bg-muted", text: "?" };
   return (
@@ -64,6 +83,11 @@ export function AllowedModels({
     <div className="grid gap-1.5">
       <span className="font-medium text-[11px] text-muted-foreground uppercase tracking-wider">
         Allowed models
+      </span>
+      <span data-testid="allowed-models-help" className="-mt-1 text-muted-foreground text-xs">
+        {entry.authMode === "subscription"
+          ? "These models are available to bots."
+          : "These models are available to AI chats and bots."}
       </span>
       <ul className="grid gap-1 sm:grid-cols-2">
         {entry.models.map((m) => (

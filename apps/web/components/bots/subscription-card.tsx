@@ -178,6 +178,9 @@ export function SubscriptionCard({
             {badge}
           </div>
           <p className="mt-0.5 text-muted-foreground text-sm">{entry.description}</p>
+          <p data-testid="subscription-scope" className="mt-0.5 text-muted-foreground text-xs">
+            Used by bots only. AI chats use each member's own ChatGPT plan (Settings › AI chat).
+          </p>
         </div>
         {connected ? (
           <div className="flex items-center gap-2 text-muted-foreground text-xs">

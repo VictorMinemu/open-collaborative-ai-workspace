@@ -19,6 +19,7 @@ import {
 import { agents, modelProviders, type Tx, tenantOf } from "@ocw/db";
 import { and, asc, eq, inArray, isNull } from "drizzle-orm";
 import type { Core } from "../../core";
+import { MissingSecretError } from "../../lib/secret-store";
 import {
   modelRef,
   OPENCLAW_PROVIDER_ID,
@@ -61,8 +62,8 @@ export function toProviderDto(r: ProviderRow): ModelProvider {
     baseUrl: r.baseUrl,
     allowedModels: r.allowedModels,
     enabled: r.enabled,
-    hasKey: r.secretId !== null,
-    keyHint: r.secretId ? r.keyHint : null,
+    hasKey: r.secretRef !== null,
+    keyHint: r.secretRef ? r.keyHint : null,
     account:
       subscription && r.account
         ? {
@@ -112,10 +113,10 @@ export async function agentDirectory(
  * subscription whose cell lost its credentials stays usable here (bots keep their model) and the cell
  * reports those bots as `error` until an admin reconnects.
  */
-function usable(p: ProviderRow) {
+export function usable(p: ProviderRow) {
   if (!p.enabled) return false;
   if (isSubscriptionProvider(p.provider)) return p.account !== null;
-  return p.secretId !== null && (p.provider !== "openai-compatible" || !!p.baseUrl);
+  return p.secretRef !== null && (p.provider !== "openai-compatible" || !!p.baseUrl);
 }
 
 /** Models a bot may use: enabled providers with a key, plus the mock model when the operator enabled it. */
@@ -224,13 +225,23 @@ export async function cellProviders(core: Core, tx: Tx): Promise<CellProvider[]>
     // Subscriptions have no key to deliver: see cellSubscriptions().
     if (isSubscriptionProvider(p.provider)) continue;
     const baseUrl = resolveBaseUrl(p.provider, p.baseUrl, core.env.OCW_MOCK_MODEL_BASE_URL);
-    if (!baseUrl || !p.secretId) continue;
+    if (!baseUrl || !p.secretRef) continue;
+    let apiKey: string;
+    try {
+      // Only through the reference (D-07, P-10): `secret_id` is never read for resolution.
+      apiKey = await core.secrets.resolve(tx, p.secretRef);
+    } catch (err) {
+      if (!(err instanceof MissingSecretError)) throw err;
+      // A dangling reference (operator env unset, foreign org) leaves the provider out; never the reason's value.
+      core.log.warn({ provider: p.provider, ref: p.secretRef.provider }, "provider key reference unresolved");
+      continue;
+    }
     out.push({
       id: OPENCLAW_PROVIDER_ID[p.provider],
       kind: p.provider,
       api: PROVIDER_API[p.provider],
       baseUrl,
-      apiKey: await core.secrets.reveal(tx, p.secretId),
+      apiKey,
       models: p.allowedModels,
     });
   }

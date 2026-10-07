@@ -23,6 +23,17 @@ const api = Object.freeze({
   /** Dock/taskbar badge = unread mentions (0 clears). Whole numbers only; the main process validates again. */
   setBadgeCount: (count: unknown): Promise<void> =>
     Number.isInteger(count) ? ipcRenderer.invoke(Channels.setBadgeCount, count) : Promise.resolve(),
+  /** ChatGPT sign-in without pasting (05-07): a one-shot 127.0.0.1 listener in the main process. */
+  chatgptLoopbackPrepare: (): Promise<unknown> => ipcRenderer.invoke(Channels.chatgptLoopbackPrepare),
+  /** Opens the authorize page in the system browser; resolves with the loopback URL (or why it did not). */
+  chatgptLoopbackAwait: (flowToken: unknown, authorizeUrl: unknown): Promise<unknown> =>
+    typeof flowToken === "string" && typeof authorizeUrl === "string"
+      ? ipcRenderer.invoke(Channels.chatgptLoopbackAwait, { flowToken, authorizeUrl })
+      : Promise.reject(new TypeError("chatgptLoopbackAwait expects two strings")),
+  chatgptLoopbackCancel: (flowToken: unknown): Promise<void> =>
+    typeof flowToken === "string"
+      ? ipcRenderer.invoke(Channels.chatgptLoopbackCancel, { flowToken })
+      : Promise.resolve(),
   /** Subscribe to status changes; returns an unsubscribe function. */
   onStatus: (callback: Listener): (() => void) => {
     if (typeof callback !== "function") throw new TypeError("onStatus expects a function");

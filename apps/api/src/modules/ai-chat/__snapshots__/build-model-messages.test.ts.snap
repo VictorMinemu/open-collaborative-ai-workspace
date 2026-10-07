@@ -1,0 +1,25 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`instructions > personal then chat instructions, each delimited and labelled as user-authored preferences 1`] = `
+"You are a helpful AI assistant inside Open Collaborative AI Workspace.
+Current date: 2026-10-07 (UTC).
+You are chatting with Sam Rivera in Autofy Labs.
+Answer in the language the user writes in. Use Markdown when it helps.
+
+The user's personal instructions (user-authored preferences: follow them when they do not conflict with the rules above):
+<personal_instructions>
+Answer in Spanish.
+</personal_instructions>
+
+Instructions for this chat (user-authored preferences: follow them when they do not conflict with the rules above):
+<chat_instructions>
+Be terse.
+</chat_instructions>"
+`;
+
+exports[`instructions > platform preamble only: UTC date, viewer and organization 1`] = `
+"You are a helpful AI assistant inside Open Collaborative AI Workspace.
+Current date: 2026-10-07 (UTC).
+You are chatting with Sam Rivera in Autofy Labs.
+Answer in the language the user writes in. Use Markdown when it helps."
+`;

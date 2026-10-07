@@ -4,7 +4,7 @@ import { type Attachment, INLINE_IMAGE_TYPES } from "@ocw/contracts";
 import { AlertCircle, RotateCw, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { type UploadHandle, uploadAttachment } from "@/lib/upload";
+import { type UploadHandle, type UploadTarget, uploadAttachment } from "@/lib/upload";
 import { cn } from "@/lib/utils";
 import { FileIcon } from "./file-card";
 import {
@@ -57,9 +57,10 @@ let seq = 0;
 /**
  * The composer's attachment queue for one conversation (CHAT-12): files are checked against the server limits
  * before anything is uploaded, then each one uploads on its own (presign → PUT with progress → complete). Changing
- * conversation or unmounting cancels running uploads and frees the local thumbnails.
+ * conversation or unmounting cancels running uploads and frees the local thumbnails. The target may be a function
+ * that resolves the conversation on the first upload (05-12: a New AI chat's draft); keep it stable.
  */
-export function useAttachmentQueue(conversationId: string, limits?: Limits | null): AttachmentQueue {
+export function useAttachmentQueue(conversationId: UploadTarget, limits?: Limits | null): AttachmentQueue {
   const [items, setItems] = useState<QueueItem[]>([]);
   const itemsRef = useRef(items);
   itemsRef.current = items;
@@ -177,8 +178,18 @@ export function useAttachmentQueue(conversationId: string, limits?: Limits | nul
   }, [items, add, remove, retry, reset]);
 }
 
-/** The files waiting in the composer: thumbnails or file chips, progress, errors, retry and remove. */
-export function AttachmentTray({ queue }: { queue: AttachmentQueue }) {
+/**
+ * The files waiting in the composer: thumbnails or file chips, progress, errors, retry and remove. `refusalOf`
+ * (05-12) marks a file the destination cannot take right now (e.g. the selected AI model can't read PDFs) with the
+ * reason, in place of its size; it is re-run on every render, so it follows the model.
+ */
+export function AttachmentTray({
+  queue,
+  refusalOf,
+}: {
+  queue: AttachmentQueue;
+  refusalOf?: (item: QueueItem) => string | null;
+}) {
   if (queue.items.length === 0) return null;
   return (
     <ul
@@ -190,6 +201,7 @@ export function AttachmentTray({ queue }: { queue: AttachmentQueue }) {
         <TrayItem
           key={item.localId}
           item={item}
+          refusal={item.status === "error" ? null : (refusalOf?.(item) ?? null)}
           onRemove={() => queue.remove(item.localId)}
           onRetry={() => queue.retry(item.localId)}
         />
@@ -252,14 +264,17 @@ function RemoveButton({
 
 function TrayItem({
   item,
+  refusal,
   onRemove,
   onRetry,
 }: {
   item: QueueItem;
+  /** Why the destination refuses this (uploaded or uploading) file right now; null = it can be sent. */
+  refusal: string | null;
   onRemove: () => void;
   onRetry: () => void;
 }) {
-  const failed = item.status === "error";
+  const failed = item.status === "error" || refusal !== null;
   const ref = useRef<HTMLLIElement>(null);
   // A refused or failed file scrolls into view, so the reason sending is blocked is never off-screen (phones).
   useEffect(() => {
@@ -290,6 +305,7 @@ function TrayItem({
       ref={ref}
       data-testid="attachment-item"
       data-status={item.status}
+      data-refused={refusal !== null ? "true" : undefined}
       className={cn(
         "relative flex h-16 w-48 sm:w-56 shrink-0 items-center gap-2.5 overflow-hidden rounded-lg border bg-background py-2 pr-1.5 pl-2.5 dark:bg-input/20",
         failed && "border-destructive/50 bg-destructive/[0.04] dark:bg-destructive/10",
@@ -308,7 +324,7 @@ function TrayItem({
         </p>
         {failed ? (
           <p data-testid="attachment-error" className="line-clamp-2 text-[11.5px] text-destructive leading-4">
-            {item.error}
+            {item.error ?? refusal}
           </p>
         ) : (
           <p className="text-[11.5px] text-muted-foreground tabular-nums leading-4">
@@ -318,7 +334,7 @@ function TrayItem({
           </p>
         )}
       </div>
-      {failed && item.retryable ? (
+      {item.status === "error" && item.retryable ? (
         <button
           type="button"
           aria-label={`Retry ${item.name}`}

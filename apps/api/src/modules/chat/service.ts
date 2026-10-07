@@ -66,12 +66,13 @@ export async function getChannel(tx: Tx, id: string): Promise<ConversationRow | 
 
 /**
  * A conversation of one of `kinds` (D-03: message routes, read markers, the `conv:` topic and the agent reply
- * path accept `channel | dm`; `/channels/*` routes stay channel-only through `getChannel`).
+ * path accept `channel | dm`; `/channels/*` routes stay channel-only through `getChannel`; the `conv:` topic and
+ * the ai-chat module also pass `ai_chat`, P-03).
  */
 export async function getConversation(
   tx: Tx,
   id: string,
-  kinds: ReadonlyArray<"channel" | "dm" | "group">,
+  kinds: ReadonlyArray<"channel" | "dm" | "group" | "ai_chat">,
 ): Promise<ConversationRow | null> {
   const [row] = await tx
     .select()
@@ -392,8 +393,12 @@ export async function channelFacts(
     visibility: channel.visibility,
     archived: channel.archivedAt !== null,
     viewerRole: membership?.role ?? null,
-    // Group DMs are direct conversations too: fixed membership, never moderated (D-01, D-06; state dm).
-    kind: channel.kind === "dm" || channel.kind === "group" ? channel.kind : "channel",
+    // Group DMs are direct conversations too: fixed membership, never moderated (D-01, D-06; state dm). An AI chat
+    // is private to its owner (state ai_chat, P-03).
+    kind:
+      channel.kind === "dm" || channel.kind === "group" || channel.kind === "ai_chat"
+        ? channel.kind
+        : "channel",
     // Unit-scoped rules apply to the unit's channels (CHAT-02, principle 6).
     unitPath: channel.kind === "channel" ? await unitPathOf(tx, channel.unitId) : [],
   };
