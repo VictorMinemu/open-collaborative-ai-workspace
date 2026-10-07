@@ -1,14 +1,17 @@
 import {
-  type AgentCard,
+  AgentCard,
   type AgentCardAction,
+  AgentCardDecisionRequest,
   type AgentCardInput,
+  AgentCardParams,
   type AgentCardPatch,
   EventTypes,
   type Message,
 } from "@ocw/contracts";
 import { conversations, messageCardFollows, messageCards, messages, type Tx } from "@ocw/db";
-import { and, eq, inArray, sql } from "drizzle-orm";
-import type { App } from "../../core";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import type { FastifyRequest } from "fastify";
+import { type App, authOf, tenant } from "../../core";
 import { conflict, forbidden, gone, notFound } from "../../lib/errors";
 import { channelResource, type PermissionService } from "../organization";
 import { authorOf, type Directory, loadDirectory } from "./directory";
@@ -262,7 +265,128 @@ export async function patchCard(
   return { before, after, message: dto };
 }
 
-/** Human card routes under `/api/v1` (follow, decision); also wires the resolver behind `withCards`. */
-export function registerCardActionRoutes(_app: App, ctx: ChatRouteCtx): void {
-  decider = ctx.perms;
+const CARD_NOT_FOUND = "Card not found";
+
+/**
+ * Human card routes under `/api/v1` (P-11): follow / unfollow and the single decision. Every route reads the card's
+ * conversation through the readable set first (hidden = missing = 404, also for a tombstoned message); nobody but the
+ * posting agent ever edits a card. Also wires the resolver behind `withCards`.
+ */
+export function registerCardActionRoutes(app: App, ctx: ChatRouteCtx): void {
+  const { core, deps, access, perms } = ctx;
+  decider = perms;
+  const tags = ["chat"];
+  const user = { config: { authz: "user" as const }, preHandler: core.identity.requireUser };
+
+  /** The card, its message and the caller's facts on its conversation; 404 when missing or not readable. */
+  async function readableCard(req: FastifyRequest, tx: Tx, messageId: string, lock = false) {
+    const query = tx.select().from(messageCards).where(eq(messageCards.messageId, messageId)).limit(1);
+    const [card] = lock ? await query.for("update") : await query;
+    if (!card) throw notFound(CARD_NOT_FOUND);
+    const { conv, facts } = await access.readable(req, tx, card.conversationId, {
+      kinds: CARD_KINDS,
+      notFoundMessage: CARD_NOT_FOUND,
+    });
+    const [message] = await tx.select().from(messages).where(eq(messages.id, card.messageId)).limit(1);
+    if (!message || message.deletedAt) throw notFound(CARD_NOT_FOUND);
+    return { card, conv, facts, message };
+  }
+
+  app.post(
+    "/cards/:messageId/follow",
+    { ...user, schema: { tags, params: AgentCardParams } },
+    async (req, reply) => {
+      await core.db.withTenant(tenant(req), async (tx) => {
+        const { card } = await readableCard(req, tx, req.params.messageId);
+        await tx
+          .insert(messageCardFollows)
+          .values({
+            organizationId: card.organizationId,
+            messageId: card.messageId,
+            userId: authOf(req).userId,
+          })
+          .onConflictDoNothing();
+      });
+      return reply.status(204).send();
+    },
+  );
+
+  app.delete(
+    "/cards/:messageId/follow",
+    { ...user, schema: { tags, params: AgentCardParams } },
+    async (req, reply) => {
+      await core.db.withTenant(tenant(req), async (tx) => {
+        const { card } = await readableCard(req, tx, req.params.messageId);
+        await tx
+          .delete(messageCardFollows)
+          .where(
+            and(
+              eq(messageCardFollows.messageId, card.messageId),
+              eq(messageCardFollows.userId, authOf(req).userId),
+            ),
+          );
+      });
+      return reply.status(204).send();
+    },
+  );
+
+  /**
+   * One decision per card, decided by the server (the client only says approved or denied): the caller reads the
+   * conversation (404), holds `agent_card.approve` there (403, deny rules win), the card has an approve action (409
+   * `card_not_decidable`), names the caller when it names approvers (403 `not_card_approver`) and is not decided yet
+   * (409 `card_already_decided`, also for a concurrent loser of the conditional update). Every reader gets
+   * `message.updated`, the decision is audited (ids and outcome) and the agent receives `agent.card_action.v1`.
+   */
+  app.post(
+    "/cards/:messageId/decision",
+    {
+      ...user,
+      schema: { tags, params: AgentCardParams, body: AgentCardDecisionRequest, response: { 200: AgentCard } },
+    },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx, after) => {
+        const userId = authOf(req).userId;
+        const { outcome } = req.body;
+        const { card, conv, facts, message } = await readableCard(req, tx, req.params.messageId, true);
+        if (conv.archivedAt) throw gone("This conversation is archived", "channel_archived");
+        await perms.assertCan(req, tx, "agent_card.approve", channelResource(facts));
+        const block = decisionBlock(card, userId);
+        if (block === "card_not_decidable") throw conflict("This card has nothing to decide", block);
+        if (block === "not_card_approver")
+          throw forbidden("Only the approvers named on this card can decide", block);
+        if (block === "card_already_decided") throw conflict("This card was already decided", block);
+        const [decided] = await tx
+          .update(messageCards)
+          .set({ decision: outcome, decidedBy: userId, decidedAt: sql`now()`, updatedAt: sql`now()` })
+          .where(and(eq(messageCards.messageId, card.messageId), isNull(messageCards.decision)))
+          .returning();
+        if (!decided) throw conflict("This card was already decided", "card_already_decided");
+
+        const dto = await cardMessageOf(tx, message, await loadDirectory(tx));
+        await deps.realtime.appendEvent(tx, convTopic(message.conversationId), EventTypes.messageUpdated, {
+          message: dto,
+        });
+        await core.audit.record(tx, {
+          action: "agent_card.decided",
+          resourceType: "message",
+          resourceId: card.messageId,
+          agentId: card.agentId,
+          metadata: {
+            messageId: card.messageId,
+            conversationId: card.conversationId,
+            agentId: card.agentId,
+            outcome,
+          },
+        });
+        // The agent hears about it through agent-channel (the bridge), in this transaction.
+        await core.chatAgent.emitCardAction(
+          tx,
+          { messageId: card.messageId, outcome, actorUserId: userId },
+          after,
+        );
+        const [shown] = await withCards(tx, [dto], userId);
+        if (!shown?.card) throw new Error("decided card missing");
+        return shown.card;
+      }),
+  );
 }

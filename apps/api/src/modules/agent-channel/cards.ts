@@ -1,17 +1,33 @@
 import {
+  type AgentCardActionEvent,
   AgentCardParams,
+  AgentChannelEventTypes,
   AgentChannelPatchCard,
   AgentChannelPatchCardResponse,
   AgentChannelPostCard,
   AgentChannelPostCardResponse,
+  cellTopic,
+  type ModelRef,
 } from "@ocw/contracts";
-import { conversations, messages, type Tx } from "@ocw/db";
+import {
+  type AfterCommit,
+  conversations,
+  messageCardFollows,
+  messageCards,
+  messages,
+  type Tx,
+  tenantOf,
+} from "@ocw/db";
 import { eq } from "drizzle-orm";
 import type { App, Core } from "../../core";
+import type { AgentMention, CardAction } from "../../lib/chat-agent-bridge";
 import { badRequest, HttpError, notFound } from "../../lib/errors";
 import { findAgent } from "../agent";
-import { patchCard } from "../chat";
+import { createConversationAccess, patchCard } from "../chat";
+import { notifyUsers } from "../notification";
+import { createPermissionService, memberDirectory, type PermissionService } from "../organization";
 import { cellOf } from "./auth";
+import { buildMentionEvents } from "./mentions";
 
 /**
  * Agent Cards on the Agent Channel API (AGENT-04, D-07, P-11). The cell posts a typed card where its agent may post a
@@ -87,9 +103,87 @@ function chatUnavailable(err: unknown): never {
   throw err;
 }
 
+/** Stored payload; `seq` is injected by the gateway when the frame is sent. */
+type StoredCardAction = Omit<AgentCardActionEvent, "seq">;
+
+/**
+ * Delivers a reader's decision to the card's agent (P-11), inside the decision transaction: the event is built like a
+ * mention of the agent on the card's message (`buildMentionEvents`: live member agent, attributed history, roster,
+ * `turnPolicy` for the deciding human, so daily limits apply) with the deciding human as author and the server sentence
+ * "<actor> approved|denied “<title>”" as text, in the card's thread (flat where the conversation is flat), then appended
+ * to `cell:<org>` as `agent.card_action.v1`. No event when none is produced (disabled agent, daily limit): the decision
+ * stands either way.
+ */
+export async function emitCardAction(
+  core: Core,
+  tx: Tx,
+  a: CardAction,
+  opts: {
+    after?: AfterCommit;
+    perms?: PermissionService;
+    modelLabel?: ((ref: ModelRef) => string) | undefined;
+  } = {},
+): Promise<void> {
+  const [card] = await tx.select().from(messageCards).where(eq(messageCards.messageId, a.messageId)).limit(1);
+  if (!card) return;
+  const [message] = await tx.select().from(messages).where(eq(messages.id, a.messageId)).limit(1);
+  if (!message) return;
+  const [conv] = await tx
+    .select()
+    .from(conversations)
+    .where(eq(conversations.id, message.conversationId))
+    .limit(1);
+  if (!conv) return;
+  const { organizationId } = tenantOf(tx);
+  const name = (await memberDirectory(tx)).get(a.actorUserId)?.displayName ?? "Former member";
+  const flat = conv.kind === "dm" || conv.kind === "group" || conv.kind === "ai_chat";
+  const mention: AgentMention = {
+    organizationId,
+    conversationId: conv.id,
+    threadRootId: flat ? message.id : (message.threadId ?? message.id),
+    messageId: message.id,
+    agentIds: [card.agentId],
+    author: { kind: "user", id: a.actorUserId, displayName: name },
+    body: `${name} ${a.outcome} “${card.title}”`,
+    createdAt: new Date().toISOString(),
+    delivery: flat ? "dm" : "thread",
+  };
+  const events = await buildMentionEvents(tx, mention, {
+    core,
+    perms: opts.perms ?? createPermissionService(core),
+    ...(opts.after ? { after: opts.after } : {}),
+    modelLabel: opts.modelLabel,
+  });
+  for (const ev of events) {
+    const payload: StoredCardAction = {
+      ...ev,
+      type: AgentChannelEventTypes.cardAction,
+      cardAction: { messageId: card.messageId, kind: card.kind, title: card.title, outcome: a.outcome },
+    };
+    await core.realtime.appendEvent(
+      tx,
+      cellTopic(organizationId),
+      AgentChannelEventTypes.cardAction,
+      payload,
+      {
+        actorUserId: a.actorUserId,
+      },
+    );
+  }
+}
+
+/** Registers the chat → agent-channel card decision handler (the bridge keeps chat from importing this module). */
+export function registerCardActionHandler(
+  core: Core,
+  opts: { perms: PermissionService; modelLabel?: ((ref: ModelRef) => string) | undefined },
+): void {
+  core.chatAgent.onCardAction((tx, action, after) => emitCardAction(core, tx, action, { ...opts, after }));
+}
+
 /** Registers `POST /cards` and `PATCH /cards/:messageId` on the bearer-authenticated Agent Channel scope. */
 export function registerCardRoutes(app: App, ctx: { core: Core }): void {
   const { core } = ctx;
+  const access = createConversationAccess(core);
 
   app.post(
     "/cards",
@@ -156,7 +250,7 @@ export function registerCardRoutes(app: App, ctx: { core: Core }): void {
         await assertCellAgent(tx, agentId);
         // RLS scopes the card to the cell's organization: another tenant's card is simply missing (404); a card of
         // another agent of this cell is 403 `not_card_author` (patchCard).
-        const { after } = await patchCard(
+        const { before, after } = await patchCard(
           tx,
           { audit: core.audit, realtime: core.realtime },
           { messageId: req.params.messageId, agentId, patch },
@@ -178,6 +272,24 @@ export function registerCardRoutes(app: App, ctx: { core: Core }): void {
             version: after.version,
           },
         });
+        // Followers hear about status changes only (a fields, title or summary change notifies nobody).
+        if (before.status !== after.status) {
+          const followers = await tx
+            .select({ userId: messageCardFollows.userId })
+            .from(messageCardFollows)
+            .where(eq(messageCardFollows.messageId, after.messageId));
+          await notifyUsers(
+            tx,
+            { core, access },
+            {
+              kind: "card_updated",
+              conversationId: after.conversationId,
+              messageId: after.messageId,
+              actor: { kind: "agent", id: agentId },
+              userIds: followers.map((f) => f.userId),
+            },
+          );
+        }
         return { messageId: after.messageId, version: after.version };
       });
     },

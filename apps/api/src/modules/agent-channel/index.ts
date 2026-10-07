@@ -30,7 +30,7 @@ import { cellMcpServers } from "../mcp";
 import { channelResource, createPermissionService, type ResourceFacts } from "../organization";
 import { cellApprovedPlugins } from "../plugins";
 import { cellOf, createCellAuth } from "./auth";
-import { registerCardRoutes, resolveReplyTarget } from "./cards";
+import { registerCardActionHandler, registerCardRoutes, resolveReplyTarget } from "./cards";
 import { registerCellGateway } from "./gateway";
 import { registerMcpCellRoutes } from "./mcp";
 import { registerMemoryRoutes } from "./memories";
@@ -40,6 +40,7 @@ import { createCellPresence } from "./presence";
 import { createProviderAuth } from "./provider-auth";
 import { registerToolCallRoutes } from "./tool-calls";
 
+export { emitCardAction } from "./cards";
 export { buildMentionEvents } from "./mentions";
 
 const tags = ["agent-channel"];
@@ -115,6 +116,8 @@ export function createAgentChannelModule(
   const cellRoute = { config: { authz: "cell" as const } };
   const providerAuth = createProviderAuth(core, presence);
   registerMentionHandler(core, { modelLabel: opts.modelLabel });
+  // Agent Cards (P-11): a reader's decision reaches the card's agent as `agent.card_action.v1`.
+  registerCardActionHandler(core, { perms, modelLabel: opts.modelLabel });
 
   async function uiTokenCreatedAt(tx: Tx): Promise<string | null> {
     const [row] = await tx
