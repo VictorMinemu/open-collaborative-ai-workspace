@@ -68,10 +68,22 @@ function upsertAgent(qc: QueryClient, incoming: Agent) {
     const agents = current
       ? prev.agents.map((a) => (a.id === agent.id ? agent : a))
       : [...prev.agents, agent];
-    return { agents: agents.sort((a, b) => a.name.localeCompare(b.name)) };
+    return { ...prev, agents: agents.sort((a, b) => a.name.localeCompare(b.name)) };
   });
   // A bot first seen over realtime: ask the API what this viewer may do with it.
   if (unknown) void qc.invalidateQueries({ queryKey: botKeys.agents });
+}
+
+/**
+ * Where the caller may create a shared persona (AGENT-01), from `GET /agents`: the organization (`bot.manage`) and
+ * the units where the API allows `bot.manage_unit` (admins: all; unit leads: the subtrees they lead).
+ */
+export function useCreateTargets(): { organization: boolean; unitIds: string[]; any: boolean } {
+  const agents = useAgents();
+  const create = agents.data?.create;
+  const organization = create?.organization ?? false;
+  const unitIds = create?.unitIds ?? [];
+  return { organization, unitIds, any: organization || unitIds.length > 0 };
 }
 
 export function useCreateAgent() {
@@ -124,7 +136,7 @@ export function useDeleteAgent() {
     mutationFn: (id: string) => api.del(`/api/v1/agents/${id}`, { schema: Ok }),
     onSuccess: (_ok, id) =>
       qc.setQueryData<AgentList>(botKeys.agents, (prev) =>
-        prev ? { agents: prev.agents.filter((a) => a.id !== id) } : prev,
+        prev ? { ...prev, agents: prev.agents.filter((a) => a.id !== id) } : prev,
       ),
   });
 }
@@ -296,6 +308,11 @@ export function useBotsRealtime() {
     }
     if (frame.op !== "ev") return;
     if (onAgentEvent(qc, frame.type, frame.data)) return;
+    // Unit memberships and leads decide who sees a unit persona and where one may be created (AGENT-01).
+    if (frame.type === EventTypes.unitsUpdated) {
+      void qc.invalidateQueries({ queryKey: botKeys.agents });
+      return;
+    }
     if (frame.type === EventTypes.modelProvidersUpdated) {
       void qc.invalidateQueries({ queryKey: botKeys.models });
       void qc.invalidateQueries({ queryKey: botKeys.providers });
@@ -314,7 +331,7 @@ function onAgentEvent(qc: QueryClient, type: string, data: unknown): boolean {
   if (type === EventTypes.agentDeleted) {
     const id = (data as { id?: string } | null)?.id;
     qc.setQueryData<AgentList>(botKeys.agents, (prev) =>
-      prev ? { agents: prev.agents.filter((a) => a.id !== id) } : prev,
+      prev ? { ...prev, agents: prev.agents.filter((a) => a.id !== id) } : prev,
     );
     return true;
   }

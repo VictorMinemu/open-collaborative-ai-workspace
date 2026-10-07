@@ -777,6 +777,125 @@ describe("channels in units (CHAT-02, 04-08)", () => {
   });
 });
 
+describe("unit personas (Phase 6, AGENT-01, P-04)", () => {
+  const ENG = "unit-eng";
+  const BACKEND = "unit-backend";
+  const PAYMENTS = "unit-payments";
+  const FRONTEND = "unit-frontend";
+  const RILEY = "u-riley";
+  const ALEX = "u-alex";
+  const JO = "u-jo";
+  const OWNER = "u-owner";
+  // Riley has the standard role: every bot right below comes from leading Backend.
+  const riley = user("standard", {
+    id: RILEY,
+    memberUnitPaths: [[ENG, BACKEND]],
+    leadOfUnitIds: new Set([BACKEND]),
+  });
+  const alex = user("standard", { id: ALEX, memberUnitPaths: [[ENG, BACKEND]] });
+  const payments = user("standard", { id: "u-pay", memberUnitPaths: [[ENG, BACKEND, PAYMENTS]] });
+  const jo = user("standard", { id: JO, memberUnitPaths: [[ENG, FRONTEND]] });
+  const admin = user("admin", { id: "u-admin" });
+  const persona = {
+    scope: "team" as const,
+    ownerUserId: null,
+    disabled: false,
+    unitPath: [ENG, BACKEND],
+  };
+
+  it("a lead of Backend gets bot.manage_unit on Backend and its child Payments, not on Frontend", () => {
+    expect(allowed(riley, unitResource({ id: BACKEND, path: [ENG, BACKEND] }), "bot.manage_unit")).toBe(true);
+    expect(
+      allowed(riley, unitResource({ id: PAYMENTS, path: [ENG, BACKEND, PAYMENTS] }), "bot.manage_unit"),
+    ).toBe(true);
+    expect(allowed(riley, unitResource({ id: FRONTEND, path: [ENG, FRONTEND] }), "bot.manage_unit")).toBe(
+      false,
+    );
+    expect(allowed(riley, unitResource({ id: ENG, path: [ENG] }), "bot.manage_unit")).toBe(false);
+    expect(allowed(riley, orgResource(), "bot.manage_unit")).toBe(false);
+    expect(allowed(riley, orgResource(), "bot.manage")).toBe(false);
+  });
+
+  it("the unit path rides on the agent resource with state unit_scoped (organization personas carry none)", () => {
+    const r = agentResource(persona, RILEY);
+    expect(r.unitPath).toEqual([ENG, BACKEND]);
+    expect(r.state.has("unit_scoped")).toBe(true);
+    const org = agentResource({ ...persona, unitPath: [] }, RILEY);
+    expect(org.unitPath).toEqual([]);
+    expect(org.state.has("unit_scoped")).toBe(false);
+    expect(agentResource({ scope: "team", ownerUserId: null, disabled: false }, RILEY).unitPath).toEqual([]);
+  });
+
+  it("the lead configures and governs the persona of the unit they lead", () => {
+    const r = agentResource(persona, RILEY);
+    expect(allowed(riley, r, "bot.read")).toBe(true);
+    expect(allowed(riley, r, "bot.configure")).toBe(true);
+    expect(allowed(riley, r, "bot.manage_unit")).toBe(true);
+    expect(allowed(riley, r, "bot.manage")).toBe(false);
+  });
+
+  it("a standard member of Backend (or a sub-unit) reads it but does not configure it", () => {
+    for (const m of [alex, payments]) {
+      const r = agentResource(persona, m.id);
+      expect(allowed(m, r, "bot.read")).toBe(true);
+      expect(allowed(m, r, "bot.configure")).toBe(false);
+    }
+  });
+
+  it("a member of Frontend is denied bot.read with unit_agent, even with an allow rule", () => {
+    const r = agentResource(persona, JO);
+    expect(decide(jo, r, [], "bot.read")).toEqual({
+      allowed: false,
+      denial: { permission: "bot.read", layer: "resource", reason: "unit_agent" },
+    });
+    const allowAll = rule({ subjectKind: "user", subjectId: JO, permission: "bot.*", effect: "allow" });
+    expect(decide(jo, r, [allowAll], "bot.read").denial).toMatchObject({ reason: "unit_agent" });
+    expect(allowed(jo, r, "bot.configure")).toBe(false);
+    // A member of no unit at all is denied the same way.
+    expect(
+      decide(user("developer", { id: "u-x" }), agentResource(persona, "u-x"), [], "bot.read").denial,
+    ).toMatchObject({ reason: "unit_agent" });
+  });
+
+  it("a lead of an ancestor unit sees and configures the personas of its subtree", () => {
+    const engLead = user("lead", { id: "u-eng", leadOfUnitIds: new Set([ENG]), memberUnitPaths: [[ENG]] });
+    const r = agentResource(persona, "u-eng");
+    expect(allowed(engLead, r, "bot.read")).toBe(true);
+    expect(allowed(engLead, r, "bot.configure")).toBe(true);
+  });
+
+  it("an admin keeps bot.read, bot.configure and bot.manage on any unit persona", () => {
+    const r = agentResource(persona, "u-admin");
+    expect(allowed(admin, r, "bot.read")).toBe(true);
+    expect(allowed(admin, r, "bot.configure")).toBe(true);
+    expect(allowed(admin, r, "bot.manage")).toBe(true);
+    expect(allowed(admin, r, "bot.manage_unit")).toBe(true);
+  });
+
+  it("the owner of a shared persona reads and configures it through the relation, wherever they sit", () => {
+    const owned = { ...persona, ownerUserId: OWNER };
+    const owner = user("standard", { id: OWNER, memberUnitPaths: [[ENG, FRONTEND]] });
+    const r = agentResource(owned, OWNER);
+    expect(r.relations.has("owner")).toBe(true);
+    expect(allowed(owner, r, "bot.read")).toBe(true);
+    expect(allowed(owner, r, "bot.configure")).toBe(true);
+    expect(allowed(owner, r, "bot.manage_unit")).toBe(false);
+    // An organization persona with an owner: the owner configures it too.
+    const orgOwned = agentResource({ scope: "team", ownerUserId: OWNER, disabled: false }, OWNER);
+    expect(allowed(owner, orgOwned, "bot.configure")).toBe(true);
+    expect(allowed(owner, orgOwned, "bot.manage")).toBe(false);
+  });
+
+  it("a deny scoped to Backend reaches the persona of Backend for every member", () => {
+    const deny = rule({ id: "deny-b", scopeUnitId: BACKEND, permission: "bot.configure", effect: "deny" });
+    expect(decide(riley, agentResource(persona, RILEY), [deny], "bot.configure").denial).toMatchObject({
+      layer: "unit",
+      reason: "denied_by_rule",
+      unitId: BACKEND,
+    });
+  });
+});
+
 describe("personal bots (D-01) and direct conversations (D-03)", () => {
   const SAM = "u-sam";
   const ALEX = "u-alex";
@@ -1203,6 +1322,7 @@ const STATES: ResourceState[] = [
   "personal",
   "disabled",
   "dm",
+  "unit_scoped",
 ];
 const TYPES: ResourceType[] = [
   "organization",

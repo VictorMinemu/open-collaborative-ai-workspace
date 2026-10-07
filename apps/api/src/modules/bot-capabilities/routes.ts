@@ -19,7 +19,7 @@ import {
   UpdateBotCapabilitiesRequest,
   UpdateBotPolicyRequest,
 } from "@ocw/contracts";
-import { agents, orgMembers, type Tx, tenantOf } from "@ocw/db";
+import { agents, orgMembers, orgUnits, type Tx, tenantOf } from "@ocw/db";
 import { and, asc, eq, isNull } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -120,11 +120,23 @@ export async function notifyCellConfig(
 
 // ---------------------------------------------------------------- the effective view
 
-export const botFacts = (row: AgentRow) => ({
+export const botFacts = (row: AgentRow, unitPath: readonly string[] = []) => ({
   scope: row.scope,
   ownerUserId: row.ownerUserId,
   disabled: row.status === "disabled",
+  unitPath,
 });
+
+/** `botFacts` with the unit path of a unit persona loaded (AGENT-01): unit rules and unit leads apply to it. */
+export async function loadBotFacts(tx: Tx, row: AgentRow) {
+  if (!row.unitId) return botFacts(row);
+  const [u] = await tx
+    .select({ path: orgUnits.path })
+    .from(orgUnits)
+    .where(eq(orgUnits.id, row.unitId))
+    .limit(1);
+  return botFacts(row, u?.path ?? []);
+}
 
 /**
  * The bot as the human side of a decision sees it. A live bot is judged as itself acting for the caller
@@ -142,7 +154,7 @@ async function capabilityView(
   row: AgentRow,
 ): Promise<BotCapabilityView> {
   const caller = authOf(req).userId;
-  const resource = agentResource(botFacts(row), caller);
+  const resource = agentResource(await loadBotFacts(tx, row), caller);
   const as = humanSide(row, caller);
   const caps = readCapabilities(row);
   const policy = await loadPolicy(tx);
@@ -190,7 +202,7 @@ async function capabilityView(
 async function configurableBot(perms: PermissionService, req: FastifyRequest, tx: Tx, id: string) {
   const row = await findBot(tx, id);
   if (!row) throw notFound("Bot not found", "agent_not_found");
-  const resource = agentResource(botFacts(row), authOf(req).userId);
+  const resource = agentResource(await loadBotFacts(tx, row), authOf(req).userId);
   await perms.assertCan(req, tx, "bot.read", resource, { hideAs404: true });
   await perms.assertCan(req, tx, "bot.configure", resource);
   return row;
@@ -203,7 +215,7 @@ async function configurableBot(perms: PermissionService, req: FastifyRequest, tx
 async function memoryBot(perms: PermissionService, req: FastifyRequest, tx: Tx, id: string) {
   const row = await findBot(tx, id);
   if (!row) throw notFound("Bot not found", "agent_not_found");
-  const resource = agentResource(botFacts(row), authOf(req).userId);
+  const resource = agentResource(await loadBotFacts(tx, row), authOf(req).userId);
   await perms.assertCan(req, tx, "bot.read", resource, { hideAs404: true });
   return row;
 }

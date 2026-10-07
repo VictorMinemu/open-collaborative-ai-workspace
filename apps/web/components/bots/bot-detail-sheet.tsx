@@ -4,25 +4,38 @@ import { type Agent, modelLabel, UpdateAgentRequest } from "@ocw/contracts";
 import { AlertTriangle, Hash, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { UserAvatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { errorMessage, isApiError } from "@/lib/api";
-import { useDeleteAgent, useModels, useUpdateAgent } from "@/lib/bots-queries";
+import { useCreateTargets, useDeleteAgent, useModels, useUpdateAgent } from "@/lib/bots-queries";
 import { validate } from "@/lib/form";
+import { useUnits } from "@/lib/org-queries";
+import { useMembers } from "@/lib/queries";
 import { formatDate } from "@/lib/utils";
-import { BotAvatar, botAbilities, ModelChip, StatusChip } from "./bot-bits";
+import { BotAvatar, botAbilities, ModelChip, ScopeBadge, StatusChip } from "./bot-bits";
 import { canMessage, MessageBotButton, PersonalBadge } from "./bot-card";
 import {
   BotForm,
   type BotFormErrors,
   type BotFormValues,
   modelKey,
+  PlacementFields,
+  type PlacementValues,
   SheetSection,
   splitModelKey,
 } from "./bot-form";
 import { CapabilitiesPanel } from "./capabilities-panel";
+
+function toPlacement(a: Agent): PlacementValues {
+  return {
+    scope: a.unit?.kind ?? "organization",
+    unitId: a.unitId ?? "",
+    ownerUserId: a.ownerUserId ?? "",
+  };
+}
 
 function toValues(a: Agent): BotFormValues {
   return {
@@ -56,7 +69,11 @@ export function BotDetailSheet({
   const models = useModels();
   const update = useUpdateAgent();
   const remove = useDeleteAgent();
+  const where = useCreateTargets();
+  const units = useUnits();
+  const members = useMembers();
   const [values, setValues] = useState<BotFormValues | null>(agent ? toValues(agent) : null);
+  const [placement, setPlacement] = useState<PlacementValues | null>(agent ? toPlacement(agent) : null);
   const [errors, setErrors] = useState<BotFormErrors>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
   const agentId = agent?.id;
@@ -65,6 +82,7 @@ export function BotDetailSheet({
   // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on the bot id on purpose
   useEffect(() => {
     setValues(agent ? toValues(agent) : null);
+    setPlacement(agent ? toPlacement(agent) : null);
     setErrors({});
     setConfirmDelete(false);
   }, [agentId]);
@@ -89,7 +107,22 @@ export function BotDetailSheet({
     !!agent.statusMessage &&
     !(agent.viewerCan ?? []).includes("bot.manage");
   const original = toValues(agent);
-  const dirty = (Object.keys(values) as Array<keyof BotFormValues>).some((k) => values[k] !== original[k]);
+  const originalPlacement = toPlacement(agent);
+  const place = placement ?? originalPlacement;
+  const unitMoved = place.unitId !== originalPlacement.unitId;
+  const ownerChanged = place.ownerUserId !== originalPlacement.ownerUserId;
+  const dirty =
+    (Object.keys(values) as Array<keyof BotFormValues>).some((k) => values[k] !== original[k]) ||
+    (!personal && (unitMoved || ownerChanged));
+  // Shared personas (AGENT-01): moving is offered only where the caller may take it from and put it.
+  const allUnits = units.data?.units ?? [];
+  const memberList = members.data?.members ?? [];
+  const canMove = agent.unitId ? where.unitIds.includes(agent.unitId) : where.organization;
+  const targets = allUnits.filter((u) => where.unitIds.includes(u.id) || u.id === agent.unitId);
+  const owner = agent.ownerUserId ? memberList.find((m) => m.userId === agent.ownerUserId) : undefined;
+  const ownerName = agent.ownerUserId
+    ? (owner?.displayName ?? (members.isSuccess ? "Former member" : null))
+    : null;
   // Keep the bot's current model selectable even if it left the allowed list.
   const available = models.data?.models ?? [];
   const modelOptions = available.some(
@@ -109,6 +142,7 @@ export function BotDetailSheet({
   async function save() {
     if (!agent || !values) return;
     const { provider, modelId } = splitModelKey(values.model);
+    if (!personal && place.scope !== "organization" && !place.unitId) return;
     const result = validate(UpdateAgentRequest, {
       name: values.name,
       username: values.username,
@@ -117,7 +151,10 @@ export function BotDetailSheet({
       instructions: values.instructions,
       modelProvider: provider,
       modelId,
-    });
+      // Only what changed: a move needs rights on both places, an owner change `bot.configure`.
+      ...(!personal && unitMoved ? { unitId: place.unitId || null } : {}),
+      ...(!personal && ownerChanged ? { ownerUserId: place.ownerUserId || null } : {}),
+    } as Record<string, unknown>);
     if (result.errors) {
       const e = result.errors as Record<string, string>;
       setErrors({ name: e.name, username: e.username, avatar: e.avatarUrl, instructions: e.instructions });
@@ -175,8 +212,24 @@ export function BotDetailSheet({
             <div className="mt-2 flex flex-wrap items-center gap-1.5">
               <StatusChip status={agent.status} message={agent.statusMessage} />
               <ModelChip provider={agent.modelProvider} modelId={agent.modelId} />
-              {personal ? <PersonalBadge /> : null}
+              {personal ? <PersonalBadge /> : <ScopeBadge agent={agent} className="h-6 px-2 text-[11.5px]" />}
             </div>
+            {!personal && ownerName ? (
+              <p
+                className="mt-2 flex min-w-0 items-center gap-1.5 text-[12.5px] text-muted-foreground"
+                data-testid="bot-owner-row"
+              >
+                <UserAvatar
+                  name={ownerName}
+                  src={owner?.avatarUrl}
+                  seed={agent.ownerUserId}
+                  className="size-5 text-[9px]"
+                />
+                <span className="truncate" data-testid="bot-owner">
+                  Owner: {ownerName}
+                </span>
+              </p>
+            ) : null}
             {!inDm && canMessage(agent) ? <MessageBotButton agent={agent} className="mt-3" /> : null}
           </div>
         </div>
@@ -193,6 +246,21 @@ export function BotDetailSheet({
                 <p className="mt-0.5 text-muted-foreground">{agent.statusMessage}</p>
               </div>
             </div>
+          ) : null}
+
+          {!personal && canEdit ? (
+            <SheetSection title="Who can use it">
+              <PlacementFields
+                idPrefix={`bot-${agent.id}`}
+                value={place}
+                onChange={(patch) => setPlacement((p) => ({ ...(p ?? originalPlacement), ...patch }))}
+                targets={targets}
+                allUnits={allUnits}
+                allowOrganization={where.organization || !agent.unitId}
+                members={memberList}
+                canMove={canMove}
+              />
+            </SheetSection>
           ) : null}
 
           {canConfigure ? (

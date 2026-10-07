@@ -9,7 +9,7 @@ import { ServerUnreachable } from "@/components/common/server-unreachable";
 import { PageHeader } from "@/components/shell/page-header";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useAgents, useBotsRealtime, useCellStatus, useModels } from "@/lib/bots-queries";
+import { useAgents, useBotsRealtime, useCellStatus, useCreateTargets, useModels } from "@/lib/bots-queries";
 import { useCan } from "@/lib/permissions";
 import { AddToChannelDialog } from "./add-to-channel-dialog";
 import { BotCard } from "./bot-card";
@@ -18,7 +18,8 @@ import { NewBotSheet, NoModels } from "./new-bot-sheet";
 
 export function BotsGallery() {
   useBotsRealtime();
-  const canManage = useCan("bot.manage");
+  // Admins create anywhere; unit leads in the units they lead (AGENT-01): the API's create hint decides.
+  const canCreate = useCreateTargets().any;
   const canManageCell = useCan("cell.manage");
   const canManageProviders = useCan("provider.manage");
   const agents = useAgents();
@@ -48,7 +49,7 @@ export function BotsGallery() {
         description="Teammates with their own identity. Message them privately or mention them in any channel."
         icon={<Bot />}
         actions={
-          canManage ? (
+          canCreate ? (
             <Button size="sm" onClick={() => setCreating(true)} data-testid="new-bot">
               <Plus /> New bot
             </Button>
@@ -110,12 +111,14 @@ export function BotsGallery() {
               title="Create your first bot"
               description="Bots are teammates with their own identity and permissions. Add them to channels and mention them like anyone else."
             >
-              {canManage ? (
+              {canCreate ? (
                 <Button onClick={() => setCreating(true)} data-testid="new-bot-empty">
                   <Plus /> New bot
                 </Button>
               ) : (
-                <p className="text-muted-foreground text-sm">Ask a workspace admin to create one.</p>
+                <p className="text-muted-foreground text-sm">
+                  Ask a workspace admin or your team lead to create one.
+                </p>
               )}
             </EmptyState>
           )
@@ -130,7 +133,7 @@ export function BotsGallery() {
                 onAddToChannel={() => setChannelFor(a)}
               />
             ))}
-            {canManage ? (
+            {canCreate ? (
               <button
                 type="button"
                 onClick={() => setCreating(true)}
