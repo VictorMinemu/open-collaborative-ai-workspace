@@ -96,10 +96,11 @@ export function threadSessionKey(base: string, threadRootId: string): string {
 /**
  * The OpenClaw session of a delivery: one per (bot, thread) in channels; one per (bot, conversation) in a
  * direct conversation (D-04: the base key is already per conversation, so two humans' DMs with the same bot
- * never share a session — OpenClaw's `dmScope: main` would merge them, Pitfall 2).
+ * never share a session — OpenClaw's `dmScope: main` would merge them, Pitfall 2); one per mention in an AI chat
+ * (06-10: a shared chat's askers never reuse each other's transcript, tool results included).
  */
-export function sessionKeyFor(base: string, m: Pick<MappedMention, "threadRootId">): string {
-  return m.threadRootId ? threadSessionKey(base, m.threadRootId) : base;
+export function sessionKeyFor(base: string, m: Pick<MappedMention, "sessionThreadId">): string {
+  return m.sessionThreadId ? threadSessionKey(base, m.sessionThreadId) : base;
 }
 
 export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {

@@ -7,6 +7,7 @@ import {
   type AgentMentionEvent,
   cellTopic,
   type Mention,
+  type ModelRef,
 } from "@ocw/contracts";
 import {
   type AfterCommit,
@@ -21,6 +22,7 @@ import { and, desc, eq, inArray, isNull, ne, or } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
 import { agentDirectory } from "../agent";
+import { answerModelsOf, participantsOf } from "../ai-chat";
 import {
   claimChannelNotice,
   effectiveCapabilities,
@@ -49,10 +51,10 @@ const toIso = (v: string) => new Date(v).toISOString();
  * effective `turn` for this bot and this human (D-07), recorded in `agent_turns` in the same transaction.
  * A bot at its daily limit gets no event; it answers with a notice posted after commit (D-11).
  */
-export function registerMentionHandler(core: Core) {
+export function registerMentionHandler(core: Core, opts: { modelLabel?: (ref: ModelRef) => string } = {}) {
   const perms = createPermissionService(core);
   core.chatAgent.onAgentMention(async (tx, mention, after) => {
-    const events = await buildMentionEvents(tx, mention, { core, perms, after });
+    const events = await buildMentionEvents(tx, mention, { core, perms, after, modelLabel: opts.modelLabel });
     const { organizationId } = tenantOf(tx);
     for (const ev of events) {
       await core.realtime.appendEvent(tx, cellTopic(organizationId), AgentChannelEventTypes.mention, ev, {
@@ -65,7 +67,13 @@ export function registerMentionHandler(core: Core) {
 export async function buildMentionEvents(
   tx: Tx,
   mention: AgentMention,
-  deps: { core: Core; perms: PermissionService; after?: AfterCommit },
+  deps: {
+    core: Core;
+    perms: PermissionService;
+    after?: AfterCommit;
+    /** The chat model's label in an AI chat's history (06-10); absent = "AI assistant". */
+    modelLabel?: ((ref: ModelRef) => string) | undefined;
+  },
 ): Promise<StoredMention[]> {
   // MVP 0: only human-authored mentions reach the cell (no agent ↔ agent loops).
   if (mention.author.kind !== "user") return [];
@@ -100,11 +108,12 @@ export async function buildMentionEvents(
   const delivered = replyMode ? await replyModeGate(tx, deps.core, mention, conv, targets) : targets;
   if (delivered.length === 0) return [];
 
-  // ---- history (current message excluded), oldest first: the thread, or the whole DM / group DM (D-04, D-06,
-  // flat)
+  // ---- history (current message excluded), oldest first: the thread, or the whole DM / group DM / AI chat (D-04,
+  // D-06, P-10: flat)
   const root = mention.threadRootId;
+  const aiChat = conv.kind === "ai_chat";
   const threadFilter =
-    conv.kind === "dm" || conv.kind === "group"
+    conv.kind === "dm" || conv.kind === "group" || aiChat
       ? eq(messages.conversationId, conv.id)
       : or(
           eq(messages.id, root),
@@ -137,17 +146,50 @@ export async function buildMentionEvents(
     return { kind, id, displayName: "System" };
   };
 
+  // P-10: in an AI chat the chat model's answers (agent rows without an author) are a principal of their own, named
+  // after the model that wrote them; never a person, never a bot of the directory.
+  const answerModels = aiChat
+    ? await answerModelsOf(
+        tx,
+        historyRows.filter((m) => m.authorKind === "agent" && !m.authorId).map((m) => m.id),
+      )
+    : new Map<string, ModelRef>();
+  const modelAuthor = (messageId: string): AgentChannelAuthor => {
+    const ref = answerModels.get(messageId);
+    const label = ref && deps.modelLabel ? deps.modelLabel(ref) : null;
+    return { kind: "system", id: conv.id, displayName: label ? `AI assistant (${label})` : "AI assistant" };
+  };
+
   const threadHistory: AgentChannelHistoryEntry[] = [];
   for (const m of historyRows) {
-    const author = authorOf(m.authorKind, m.authorId);
+    const modelAnswer = aiChat && m.authorKind === "agent" && !m.authorId;
+    // An answer still streaming (or that never produced text) has nothing to show yet.
+    if (modelAnswer && m.body.trim() === "") continue;
+    const author = modelAnswer ? modelAuthor(m.id) : authorOf(m.authorKind, m.authorId);
     if (!author) continue;
     threadHistory.push({ id: m.id, author, text: m.body, createdAt: toIso(m.createdAt) });
   }
 
-  // ---- roster: conversation members (users with org role, agents with handle) + the author
+  // ---- roster: conversation members (users with org role, agents with handle) + the author. An AI chat's roster is
+  // its participants (P-09: owner and the humans who can still read it, then member agents).
   const roster: AgentChannelRosterEntry[] = [];
   const seen = new Set<string>();
-  for (const m of memberRows) {
+  if (aiChat) {
+    for (const p of await participantsOf(tx, conv.id)) {
+      seen.add(`${p.kind}:${p.id}`);
+      roster.push(
+        p.kind === "user"
+          ? { kind: "user", id: p.id, displayName: p.displayName, ...(p.orgRole ? { role: p.orgRole } : {}) }
+          : {
+              kind: "agent",
+              id: p.id,
+              displayName: p.displayName,
+              ...(p.handle ? { handle: p.handle } : {}),
+            },
+      );
+    }
+  }
+  for (const m of aiChat ? [] : memberRows) {
     const key = `${m.memberKind}:${m.memberId}`;
     if (seen.has(key)) continue;
     seen.add(key);

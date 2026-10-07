@@ -217,7 +217,10 @@ describe("AI chats (06-10, D-07, P-10)", () => {
     expect(m.personaPrompt).toContain("shared AI chat");
     expect(m.personaPrompt).not.toContain("private direct conversation");
     // The chat model is attributed as its own principal, never as a person.
-    expect(m.chatWindow[1]).toMatchObject({ sender: "AI assistant (GPT-6 Astra) <chat-1>", sender_id: "chat-1" });
+    expect(m.chatWindow[1]).toMatchObject({
+      sender: "AI assistant (GPT-6 Astra) <chat-1>",
+      sender_id: "chat-1",
+    });
   });
 
   it("one isolated OpenClaw session per mention: no transcript is shared between askers of a shared chat", () => {

@@ -366,6 +366,31 @@ export async function generationsFor(
 }
 
 /**
+ * The model behind each assistant message (its latest attempt), for callers outside this module that label the chat
+ * model's answers without the gateway's DTOs (06-10: persona history attributes them to "AI assistant (<model>)").
+ */
+export async function answerModelsOf(tx: Tx, assistantMessageIds: string[]): Promise<Map<string, ModelRef>> {
+  const out = new Map<string, ModelRef>();
+  if (assistantMessageIds.length === 0) return out;
+  const gens = await tx
+    .select({
+      messageId: aiGenerations.assistantMessageId,
+      backend: aiGenerations.backend,
+      provider: aiGenerations.provider,
+      modelId: aiGenerations.modelId,
+    })
+    .from(aiGenerations)
+    .where(inArray(aiGenerations.assistantMessageId, assistantMessageIds))
+    .orderBy(desc(aiGenerations.attempt), desc(aiGenerations.startedAt));
+  for (const g of gens) {
+    if (out.has(g.messageId)) continue;
+    const ref = parseModelRef({ backend: g.backend, provider: g.provider, modelId: g.modelId });
+    if (ref) out.set(g.messageId, ref);
+  }
+  return out;
+}
+
+/**
  * Where each human message of a multiplayer chat stands (06-06, D-05): not addressed, queued, answering (its
  * generation runs), answered, or skipped with the reason. Messages without a context row (before Phase 6) are absent.
  */

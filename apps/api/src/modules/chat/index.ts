@@ -104,7 +104,7 @@ import { registerChatTestRoutes } from "./test-routes";
 import { registerThreadRoutes } from "./threads";
 
 export { type ConversationAccess, createConversationAccess } from "./access";
-export { authorOf, type Directory, loadDirectory } from "./directory";
+export { agentFactsOf, authorOf, type Directory, type DirectoryEntry, loadDirectory } from "./directory";
 export {
   dmAgentOf,
   dmKey,
@@ -152,6 +152,8 @@ const zoneOf = (author: { clientTimeZone?: string }) =>
  * D-06: group DMs).
  */
 const MESSAGE_KINDS = ["channel", "dm", "group"] as const;
+/** Kinds a bot reply may land in (P-10): the message kinds plus AI chats whose owner added the persona. */
+const AGENT_POST_KINDS = [...MESSAGE_KINDS, "ai_chat"] as const;
 /** Kinds whose `conv:<id>` stream a reader may subscribe to: the message kinds plus AI chats (P-03, owner only). */
 const CONV_TOPIC_KINDS = ["channel", "dm", "group", "ai_chat"] as const;
 
@@ -186,8 +188,11 @@ async function placeableUnit(
 const messageKindOf = (conv: ConversationRow): (typeof MESSAGE_KINDS)[number] =>
   conv.kind === "dm" || conv.kind === "group" ? conv.kind : "channel";
 
-/** Direct conversations (1:1 and group) are flat: no threads, bot replies at the top level (D-04, D-06). */
-const isDirect = (kind: string) => kind === "dm" || kind === "group";
+/**
+ * Flat conversations: no threads, bot replies at the top level. Direct conversations (1:1 and group, D-04, D-06) and
+ * AI chats (P-10; the generic message routes never load them).
+ */
+const isDirect = (kind: string) => kind === "dm" || kind === "group" || kind === "ai_chat";
 
 /** The `conv:` copy of `conversation.updated` when a channel moved to another unit (PATCH /channels/:id). */
 const ChannelMovedPayload = z.object({ conversationId: z.string(), unitId: z.string().nullable() });
@@ -554,10 +559,10 @@ export function createChatModule(core: Core): ApiModule {
       const dir = await loadDirectory(tx);
       const agent = dir.agents.get(input.agentId);
       if (!agent) throw notFound("Agent not found", "agent_not_found");
-      const conv = await getConversation(tx, input.conversationId, MESSAGE_KINDS);
+      const conv = await getConversation(tx, input.conversationId, AGENT_POST_KINDS);
       if (!conv) throw notFound("Conversation not found");
       if (conv.archivedAt) throw gone("This conversation is archived", "channel_archived");
-      // DMs and group DMs are flat (D-04, D-06): a bot reply always lands at the top level.
+      // DMs, group DMs and AI chats are flat (D-04, D-06, P-10): a bot reply always lands at the top level.
       const threadRootId = isDirect(conv.kind) ? null : input.threadRootId;
       // The bot itself: enabled, a member, and not denied by a rule (agent principal gate + preconditions).
       const agentRes = channelResource(await channelFacts(tx, conv, { kind: "agent", id: agent.id }));
@@ -598,7 +603,11 @@ export function createChatModule(core: Core): ApiModule {
       if (result.created) {
         // Observers (notifications) in the same transaction; a bot is never a recipient, only an actor.
         await core.chatEvents.messagePosted(tx, {
-          conv: { id: conv.id, kind: messageKindOf(conv), organizationId: conv.organizationId },
+          conv: {
+            id: conv.id,
+            kind: conv.kind === "ai_chat" ? "ai_chat" : messageKindOf(conv),
+            organizationId: conv.organizationId,
+          },
           message: result.message,
           author: { kind: "agent", id: agent.id },
           mentions: result.row.mentions,

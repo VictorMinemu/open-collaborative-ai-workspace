@@ -253,6 +253,29 @@ describe("mention → dispatch → reply", () => {
     });
   });
 
+  it("an AI chat mention is answered flat, like a DM, but each mention is its own session (06-10)", async () => {
+    startPlugin();
+    await api.waitFor(() => api.openSockets() === 1);
+    const aiChat = (n: number) =>
+      mention(n, {
+        conversation: { id: "chat-1", kind: "ai_chat", name: "Invoices" },
+        thread: { rootMessageId: `msg-${n}` },
+      });
+    api.publishMention(aiChat(3));
+    api.publishMention(aiChat(4));
+    await api.waitFor(() => api.messages.length === 2);
+    for (const posted of api.messages) {
+      expect(posted).toMatchObject({ conversationId: "chat-1", threadRootMessageId: null });
+    }
+    expect(port.dispatched.map((m) => [m.threadRootId, m.target, m.sessionThreadId])).toEqual([
+      [null, "conv:chat-1", "msg-3"],
+      [null, "conv:chat-1", "msg-4"],
+    ]);
+    expect(port.dispatched[0]?.conversationLabel).toBe("AI chat “Invoices”");
+    await api.waitFor(() => api.typing.some((t) => t.typing === false));
+    expect(api.typing.every((t) => t.threadRootMessageId === null)).toBe(true);
+  });
+
   it("posts multi-part replies in order with distinct keys", async () => {
     port.reply = () => ["part one", "part two"];
     startPlugin();

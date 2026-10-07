@@ -255,7 +255,7 @@ export async function buildApp(
     createBotCapabilitiesModule(core), // Phase 3.1: capabilities, bot policy, governance
     createMcpModule(core), // Phase 3.1: MCP server registry (D-13)
     createPluginsModule(core), // Phase 3.1: OpenClaw Marketplace (D-14)
-    createAgentChannelModule(core), // B2
+    createAgentChannelModule(core, { modelLabel: (ref) => modelGateway.labelOf(ref) }), // B2; 06-10: model labels in persona history
     deviceModule, // B3
     createWorkSessionModule(core, deviceModule.hub), // B3
   ];

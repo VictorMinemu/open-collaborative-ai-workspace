@@ -111,6 +111,10 @@ export const AgentMentionEvent = z.object({
   organizationId: Id,
   cellId: Id,
   agent: z.object({ id: Id, handle: z.string(), displayName: z.string() }),
+  /**
+   * `kind`: `channel`, `thread`, `dm`, `group` or `ai_chat` (06-10: a persona in a shared AI chat, answered flat like a
+   * DM). Kept a string so a newer API never makes an older plugin drop the event.
+   */
   conversation: z.object({ id: Id, kind: z.string(), name: z.string().nullable() }),
   /** Root = the mention itself when posted at channel level. Reply goes into this thread. */
   thread: z.object({ rootMessageId: Id }),

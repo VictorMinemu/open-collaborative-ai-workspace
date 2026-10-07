@@ -110,8 +110,13 @@ export const PRECONDITIONS: readonly Precondition[] = [
   },
   {
     applies: (perm) => AI_CHAT_FIXED.has(perm),
-    check: (_p, r) =>
-      isChannel(r) && r.state.has("ai_chat") ? { layer: "resource", reason: "ai_chat_private" } : null,
+    check: (p, r, perm) => {
+      if (!isChannel(r) || !r.state.has("ai_chat")) return null;
+      // P-10: a persona the owner added (an agent principal with the `member` relation) posts its replies through the
+      // Agent Channel API; humans keep writing only through the ai-chat routes (`ai_chat.use`).
+      if (perm === "channel.post" && p.kind === "agent" && r.relations.has("member")) return null;
+      return { layer: "resource", reason: "ai_chat_private" };
+    },
   },
   {
     // On a concrete conversation, writing needs an AI chat the principal owns or holds a `chat` grant on; at

@@ -257,9 +257,9 @@ describe("tracer: Víctor adds @backend to his shared chat, Alex mentions it, th
       [victorMessageId, { kind: "user", id: victorId, displayName: "Víctor Ruiz" }],
       [answerId, { kind: "system", id: chatId, displayName: `AI assistant (${modelLabel})` }],
     ]);
-    expect(
-      delivered.roster.map((r: Json) => `${r.kind}:${r.id}`).sort(),
-    ).toEqual([`agent:${backendId}`, `user:${alexId}`, `user:${victorId}`].sort());
+    expect(delivered.roster.map((r: Json) => `${r.kind}:${r.id}`).sort()).toEqual(
+      [`agent:${backendId}`, `user:${alexId}`, `user:${victorId}`].sort(),
+    );
     // A message that only addresses a persona never calls the chat model.
     await sleep(300);
     expect(withoutTitles(stack.fake.requests("responses")).length).toBe(before);
@@ -290,7 +290,7 @@ describe("tracer: Víctor adds @backend to his shared chat, Alex mentions it, th
 
     // A retry with the same idempotency key creates nothing new.
     const again = await p.reply(delivered, "Schema looks fine; add an index on invoice_id.");
-    expect(again).toEqual({ messageId: reply.messageId, created: false });
+    expect(again).toMatchObject({ messageId: reply.messageId, created: false, threadRootMessageId: null });
     // A reply that names a thread root is still flat: AI chats have no threads.
     const rooted = await p.request<Json>("POST", "/messages", {
       agentId: backendId,
@@ -301,8 +301,9 @@ describe("tracer: Víctor adds @backend to his shared chat, Alex mentions it, th
       idempotencyKey: `evt:${delivered.eventId}:1`,
     });
     expect(rooted.status).toBe(200);
-    const rootedRow = (await su.query("select thread_id from app.messages where id = $1", [rooted.body.messageId]))
-      .rows[0];
+    const rootedRow = (
+      await su.query("select thread_id from app.messages where id = $1", [rooted.body.messageId])
+    ).rows[0];
     expect(rootedRow.thread_id).toBeNull();
   });
 

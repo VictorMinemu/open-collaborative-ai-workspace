@@ -27,6 +27,7 @@ import {
   conversations,
   messages,
   type Tx,
+  tenantOf,
 } from "@ocw/db";
 import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
@@ -42,10 +43,12 @@ import {
 } from "../artifact";
 import {
   addMember,
+  agentFactsOf,
   aiAccessSql,
   type ConversationAccess,
   type ConversationRow,
   convTopic,
+  type Directory,
   getMembership,
   loadDirectory,
   lockNextSeq,
@@ -62,6 +65,7 @@ import {
 } from "../model-gateway";
 import {
   AuthzDeniedError,
+  agentResource,
   type ChannelFacts,
   channelResource,
   orgResource,
@@ -652,6 +656,52 @@ export function createAiChatService(deps: AiChatDeps) {
   }
 
   /**
+   * Agents in AI chats (06-10, D-07, P-10): every @mentioned persona that is a member of the chat, live, not personal and
+   * visible to the author (`bot.read`) gets ONE flat delivery through the Agent Channel API (`delivery: "dm"`: the whole
+   * chat as history, a top-level reply), inside the send transaction, so it is delivered iff the message commits. The
+   * chat model never answers through OpenClaw and a persona never answers through the chat model.
+   */
+  async function dispatchPersonas(
+    tx: Tx,
+    conv: ConversationRow,
+    row: MessageRow,
+    createdAt: string,
+    dir: Directory,
+    authorId: string,
+  ): Promise<void> {
+    const agentIds: string[] = [];
+    for (const m of row.mentions) {
+      if (m.kind !== "agent" || agentIds.includes(m.id)) continue;
+      const bot = dir.agents.get(m.id);
+      if (!bot || bot.deleted || bot.status === "disabled" || bot.scope === "personal") continue;
+      if (!(await getMembership(tx, conv.id, "agent", bot.id))) continue;
+      const reads = await perms.decide(
+        tx,
+        { kind: "user", userId: authorId },
+        "bot.read",
+        agentResource({ ...agentFactsOf(bot), disabled: false }, authorId),
+      );
+      if (reads.allowed) agentIds.push(bot.id);
+    }
+    if (agentIds.length === 0) return;
+    await core.chatAgent.emitAgentMention(
+      tx,
+      {
+        organizationId: conv.organizationId,
+        conversationId: conv.id,
+        threadRootId: row.id,
+        messageId: row.id,
+        agentIds,
+        author: { kind: "user", id: authorId, displayName: dir.users.get(authorId)?.displayName ?? "Member" },
+        body: row.body,
+        createdAt,
+        delivery: "dm",
+      },
+      tenantOf(tx).afterCommit,
+    );
+  }
+
+  /**
    * A send in a multiplayer chat (06-06, D-05, P-07, P-08): never 409. The message is persisted and broadcast with its
    * server-resolved mentions; it is addressed when `askAi` says so or, absent, when it mentions nobody. An addressed
    * message joins the queue (429 `ai_queue_full` at `AI_QUEUE_MAX` waiting, nothing written) and `startNext` answers
@@ -672,7 +722,8 @@ export function createAiChatService(deps: AiChatDeps) {
       ids: body.attachmentIds ?? [],
     });
     // Server-derived, exactly like a channel post: the request's own `mentions` never decide anything.
-    const mentions = resolveMentions(body.body, await loadDirectory(tx));
+    const dir = await loadDirectory(tx);
+    const mentions = resolveMentions(body.body, dir);
     const addressed = addressedOf(body.askAi, mentions);
     if (addressed) {
       // Files the sender's model cannot read are refused as in Phase 5; a refused model is skipped by the queue.
@@ -737,6 +788,8 @@ export function createAiChatService(deps: AiChatDeps) {
       mentionAll: null,
       threadRootId: null,
     });
+    // 06-10: the personas it mentions answer through OpenClaw, independently of the model's queue.
+    await dispatchPersonas(tx, conv, row, posted.createdAt, dir, auth.userId);
 
     let started: GenerationRow | null = null;
     if (addressed) {
@@ -1300,7 +1353,8 @@ export function createAiChatService(deps: AiChatDeps) {
         )
       : new Map<string, AiAddressing>();
     return rows.map((r) => {
-      if (r.authorKind === "agent") return aiMessage(r, EMPTY_DIRECTORY, gens.get(r.id));
+      // The chat model's answers carry their generation; a persona's message (06-10) its directory entry.
+      if (r.authorKind === "agent") return aiMessage(r, r.authorId ? dir : EMPTY_DIRECTORY, gens.get(r.id));
       const aiAddressing = addressing.get(r.id);
       return {
         ...aiMessage(r, dir, undefined, files.get(r.id) ?? []),
