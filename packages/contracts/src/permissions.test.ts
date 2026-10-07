@@ -8,6 +8,7 @@ import {
   DEVICE_TOKEN_AUDIENCE,
   DeviceTokenClaims,
   INVITABLE_ROLES,
+  LEAD_PERMISSIONS,
   NON_DELEGABLE_PERMISSIONS,
   PERMISSION_DESCRIPTIONS,
   PERMISSION_SURFACE,
@@ -23,9 +24,43 @@ const id = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
 const now = 1_790_000_000;
 
 describe("permission vocabulary", () => {
-  it("has exactly the 52 agreed permissions", () => {
-    expect(Permission.options).toHaveLength(52);
-    expect(new Set(Permission.options).size).toBe(52);
+  it("has exactly the 55 agreed permissions", () => {
+    expect(Permission.options).toHaveLength(55);
+    expect(new Set(Permission.options).size).toBe(55);
+  });
+
+  it("Phase 6 permissions exist exactly as 06-01 defines them (P-04)", () => {
+    expect(PERMISSION_SURFACE).toMatchObject({
+      "ai_chat.manage": "chat",
+      "bot.manage_unit": "team",
+      "agent_card.approve": "chat",
+    });
+    for (const role of OrgRole.options) {
+      // STANDARD holds them, so every role does; deny rules can still take them away (delegable).
+      expect(ROLE_PERMISSIONS[role], `${role}: ai_chat.manage`).toContain("ai_chat.manage");
+      expect(ROLE_PERMISSIONS[role], `${role}: agent_card.approve`).toContain("agent_card.approve");
+      if (role === "admin") expect(ROLE_PERMISSIONS[role]).toContain("bot.manage_unit");
+      else expect(ROLE_PERMISSIONS[role], role).not.toContain("bot.manage_unit");
+    }
+    expect(LEAD_PERMISSIONS).toEqual(["unit.members.manage", "bot.manage_unit", "bot.configure"]);
+    for (const p of ["ai_chat.manage", "bot.manage_unit", "agent_card.approve"] as const) {
+      expect(NON_DELEGABLE_PERMISSIONS, p).not.toContain(p);
+      expect(PERMISSION_DESCRIPTIONS[p].length, p).toBeGreaterThan(10);
+      expect(PermissionPattern.safeParse(p).success, p).toBe(true);
+    }
+    expect(PERMISSION_DESCRIPTIONS["ai_chat.manage"]).toBe(
+      "Rename, archive and change the settings of AI chats you own",
+    );
+    expect(PERMISSION_DESCRIPTIONS["bot.manage_unit"]).toBe(
+      "Create and manage the bots of the units you lead",
+    );
+    expect(PERMISSION_DESCRIPTIONS["agent_card.approve"]).toBe(
+      "Approve or deny what an agent asks for in a card",
+    );
+    expect(PERMISSION_DESCRIPTIONS["ai_chat.share"]).toBe(
+      "Share your AI chats with people, teams or the organization, and create read-only links",
+    );
+    expect(AGENT_PERMISSIONS).not.toContain("agent_card.approve");
   });
 
   it("Phase 5 AI chat permissions exist exactly as 05-01 defines them", () => {

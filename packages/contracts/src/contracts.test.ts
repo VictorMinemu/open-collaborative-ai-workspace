@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   AddUnitMemberRequest,
+  AGENT_CARD_ROUTE_PREFIXES,
   Agent,
+  AgentCard,
+  AgentCardPatch,
+  AgentCardRoute,
   AgentCellStatus,
   AgentChannelRuntimeReport,
   AuthCapabilities,
@@ -25,8 +29,12 @@ import {
   IanaTimeZone,
   Invitation,
   isPresenceTopic,
+  MENTION_KINDS,
   MemberDetailList,
+  Message,
   MoveUnitRequest,
+  NOTIFICATION_KIND_RANK,
+  NotificationKind,
   onlyRelativePaths,
   PasswordResetLink,
   PostMessageRequest,
@@ -613,5 +621,155 @@ describe("Phase 5 realtime event types (05-01)", () => {
     for (const values of [Object.values(EventTypes), Object.values(EphemeralTypes)]) {
       expect(new Set(values).size).toBe(values.length);
     }
+  });
+});
+
+describe("Phase 6 Agent Cards, message fields, event types and notification kinds (06-01)", () => {
+  const now = "2026-10-07T10:00:00.000Z";
+  const card = {
+    kind: "approval",
+    title: "Deploy web to production",
+    fields: [{ label: "Environment", value: "production" }],
+    status: "pending",
+    actions: [
+      { kind: "open", label: "Open", target: `/chat/ai/${id}` },
+      { kind: "follow", label: "Follow" },
+      { kind: "approve", label: "Approve", denyLabel: "Deny", approverIds: [id] },
+    ],
+    version: 1,
+    decision: null,
+    updatedAt: now,
+  } as const;
+
+  it("AgentCardRoute accepts internal app routes only", () => {
+    expect(AGENT_CARD_ROUTE_PREFIXES).toEqual([
+      "/chat",
+      "/work-zone",
+      "/bots",
+      "/settings",
+      "/search",
+      "/share",
+    ]);
+    for (const ok of [`/chat/ai/${id}`, "/work-zone", `/bots/${id}?tab=tools`, "/settings#models"]) {
+      expect(AgentCardRoute.safeParse(ok).success, ok).toBe(true);
+    }
+    for (const bad of [
+      "https://evil.example",
+      "//evil.example",
+      "/\\evil",
+      "javascript:alert(1)",
+      "/chat/../admin",
+      "/chat/./x",
+      "/chatx",
+      "/admin",
+      "/chat\nx",
+      "/chat\u0000",
+      `/chat/${"a".repeat(507)}`,
+    ]) {
+      expect(AgentCardRoute.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+    // 512 characters is the ceiling.
+    expect(`/chat/${"a".repeat(506)}`).toHaveLength(512);
+    expect(AgentCardRoute.safeParse(`/chat/${"a".repeat(506)}`).success).toBe(true);
+  });
+
+  it("AgentCard bounds fields, title and actions, one action of each kind, internal Open targets", () => {
+    expect(AgentCard.parse(card).actions).toHaveLength(3);
+    const field = { label: "k", value: "v" };
+    expect(AgentCard.safeParse({ ...card, fields: Array(13).fill(field) }).success).toBe(false);
+    expect(AgentCard.safeParse({ ...card, fields: Array(12).fill(field) }).success).toBe(true);
+    expect(AgentCard.safeParse({ ...card, title: "x".repeat(201) }).success).toBe(false);
+    const follow = { kind: "follow", label: "Follow" } as const;
+    expect(
+      AgentCard.safeParse({
+        ...card,
+        actions: [
+          { kind: "open", label: "Open", target: "/chat" },
+          follow,
+          { kind: "approve", label: "Approve" },
+          { kind: "open", label: "Open 2", target: "/bots" },
+          follow,
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      AgentCard.safeParse({
+        ...card,
+        actions: [
+          { kind: "approve", label: "Approve" },
+          { kind: "approve", label: "Ship" },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      AgentCard.safeParse({
+        ...card,
+        actions: [{ kind: "open", label: "Open", target: "https://evil.example" }],
+      }).success,
+    ).toBe(false);
+    expect(
+      AgentCard.parse({
+        ...card,
+        decision: { outcome: "approved", by: { kind: "user", id, displayName: "Ana" }, at: now },
+        following: true,
+        viewerCan: ["follow", "decide"],
+      }).decision?.outcome,
+    ).toBe("approved");
+  });
+
+  it("AgentCardPatch needs at least one change", () => {
+    expect(AgentCardPatch.safeParse({ expectedVersion: 1 }).success).toBe(false);
+    expect(AgentCardPatch.parse({ expectedVersion: 1, status: "succeeded" }).status).toBe("succeeded");
+  });
+
+  it("Message parses with and without card and aiAddressing", () => {
+    const message = {
+      id,
+      organizationId: id,
+      conversationId: id,
+      seq: 1,
+      authorKind: "agent",
+      authorId: id,
+      body: "Deploy web to production: pending",
+      mentions: [],
+      status: "sent",
+      threadId: null,
+      replyCount: 0,
+      lastReplyAt: null,
+      clientKind: null,
+      createdAt: now,
+      editedAt: null,
+    } as const;
+    const plain = Message.parse(message);
+    expect(plain.card).toBeUndefined();
+    expect(plain.aiAddressing).toBeUndefined();
+    const full = Message.parse({
+      ...message,
+      card,
+      aiAddressing: { addressed: true, status: "queued", skipReason: null, generationId: null },
+    });
+    expect(full.card?.title).toBe(card.title);
+    expect(full.aiAddressing?.status).toBe("queued");
+  });
+
+  it("EventTypes adds the two Phase 6 durable types and keeps every earlier value", () => {
+    expect(EventTypes.aiQueueUpdated).toBe("ai.queue.updated");
+    expect(EventTypes.aiChatAccessChanged).toBe("ai_chat.access_changed");
+    expect(EventTypes).toMatchObject({
+      messageCreated: "message.created",
+      messageUpdated: "message.updated",
+      conversationMemberRemoved: "conversation.member_removed",
+      notificationCreated: "notification.created",
+      aiChatUpdated: "ai_chat.updated",
+    });
+    const values = Object.values(EventTypes);
+    expect(new Set(values).size).toBe(values.length);
+  });
+
+  it("NotificationKind adds ai_chat_shared and card_updated with ranks; mention kinds unchanged", () => {
+    expect(NotificationKind.options).toEqual(expect.arrayContaining(["ai_chat_shared", "card_updated"]));
+    expect(NOTIFICATION_KIND_RANK.ai_chat_shared).toBe(7);
+    expect(NOTIFICATION_KIND_RANK.card_updated).toBe(0);
+    expect(MENTION_KINDS).toEqual(["mention", "channel", "here", "dm", "group_dm"]);
   });
 });

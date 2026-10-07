@@ -252,8 +252,9 @@ describe("emoji reactions (04-01)", () => {
 });
 
 describe("notifications (04-01)", () => {
-  it("ranks kinds with mention strongest", () => {
-    expect(NotificationKind.options).toEqual([
+  it("ranks message kinds with mention strongest", () => {
+    // Phase 6 (06-01) appends ai_chat_shared and card_updated (add only); the Phase 4 kinds and ranks are unchanged.
+    expect(NotificationKind.options.slice(0, 6)).toEqual([
       "mention",
       "channel",
       "here",
@@ -261,7 +262,7 @@ describe("notifications (04-01)", () => {
       "group_dm",
       "thread_reply",
     ]);
-    expect(NOTIFICATION_KIND_RANK).toEqual({
+    expect(NOTIFICATION_KIND_RANK).toMatchObject({
       mention: 6,
       dm: 5,
       group_dm: 4,

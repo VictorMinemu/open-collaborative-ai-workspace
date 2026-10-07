@@ -1,4 +1,5 @@
 export * from "./agent";
+export * from "./agent-cards";
 export * from "./agent-channel";
 export * from "./ai-chat";
 export * from "./ai-generation";

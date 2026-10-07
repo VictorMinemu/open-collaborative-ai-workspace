@@ -1,10 +1,11 @@
 import { z } from "zod";
 import { ModelId } from "./agent";
-import { AiBackend, AiGeneration, ModelRef } from "./ai-generation";
+import { AiAddressing, AiBackend, AiGeneration, ModelRef } from "./ai-generation";
 import { MAX_ATTACHMENTS_PER_MESSAGE } from "./attachments";
-import { CursorQuery, Message, MessageAuthor } from "./chat";
-import { Id, IsoDateTime } from "./common";
-import { Permission } from "./permissions";
+import { CursorQuery, Mention, Message, MessageAuthor } from "./chat";
+import { Id, IsoDateTime, MemberKind, OrgRole } from "./common";
+import { UNREAD_CAP } from "./notifications";
+import { Permission, UnitKind } from "./permissions";
 import { TitleSource } from "./session-title";
 
 /**
@@ -30,6 +31,10 @@ export const AI_MAX_SEARCHES_PER_TURN = 5;
 export const AI_MAX_FETCHES_PER_TURN = 3;
 export const AI_MAX_STEPS = 6;
 export const AI_TEXT_INLINE_MAX_BYTES = 100 * 1024;
+/** Phase 6 (P-08): addressed, unanswered messages one multiplayer AI chat may hold waiting (429 `ai_queue_full`). */
+export const AI_QUEUE_MAX = 10;
+/** Phase 6 (D-03): active grants one AI chat may hold. */
+export const AI_GRANTS_MAX = 200;
 
 // ---------------------------------------------------------------- models
 
@@ -191,6 +196,95 @@ export const AiChatSettings = z.object({
 });
 export type AiChatSettings = z.infer<typeof AiChatSettings>;
 
+// ---------------------------------------------------------------- Phase 6: sharing in place (D-03, P-03 … P-05)
+
+/** What a grant lets its subject do: `chat` = write and address the model, `view` = read only. */
+export const AiGrantLevel = z.enum(["chat", "view"]);
+export type AiGrantLevel = z.infer<typeof AiGrantLevel>;
+
+/** A viewer's access to an AI chat: its owner, or the strongest grant that matches them. */
+export const AiChatAccess = z.enum(["owner", "chat", "view"]);
+export type AiChatAccess = z.infer<typeof AiChatAccess>;
+
+/** Who a grant is for: one person, one unit (and so its subtree) or the whole organization. */
+export const AiGrantSubject = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("user"), id: Id }).strict(),
+  z.object({ kind: z.literal("unit"), id: Id }).strict(),
+  z.object({ kind: z.literal("org") }).strict(),
+]);
+export type AiGrantSubject = z.infer<typeof AiGrantSubject>;
+
+export const AiChatGrant = z.object({
+  id: Id,
+  chatId: Id,
+  subject: AiGrantSubject,
+  label: z.string(),
+  unitKind: UnitKind.nullable(),
+  level: AiGrantLevel,
+  grantedBy: MessageAuthor,
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type AiChatGrant = z.infer<typeof AiChatGrant>;
+
+export const AiChatGrantList = z.object({ grants: z.array(AiChatGrant) });
+export type AiChatGrantList = z.infer<typeof AiChatGrantList>;
+
+export const CreateAiChatGrantRequest = z.object({
+  subject: AiGrantSubject,
+  level: AiGrantLevel.default("chat"),
+});
+export type CreateAiChatGrantRequest = z.infer<typeof CreateAiChatGrantRequest>;
+
+export const UpdateAiChatGrantRequest = z.object({ level: AiGrantLevel });
+export type UpdateAiChatGrantRequest = z.infer<typeof UpdateAiChatGrantRequest>;
+
+/** `/ai-chats/:id/grants/:grantId` path parameters. */
+export const AiGrantParams = z.object({ id: Id, grantId: Id });
+export type AiGrantParams = z.infer<typeof AiGrantParams>;
+
+export const AiParticipant = z.object({
+  kind: MemberKind,
+  id: Id,
+  displayName: z.string(),
+  avatarUrl: z.string().nullable(),
+  access: z.enum(["owner", "chat", "view", "agent"]),
+  orgRole: OrgRole.nullable(),
+  handle: z.string().nullable(),
+});
+export type AiParticipant = z.infer<typeof AiParticipant>;
+
+/** `audience` = `units`/`organization` when a unit or organization grant makes the audience unbounded. */
+export const AiChatParticipants = z.object({
+  participants: z.array(AiParticipant),
+  audience: z.enum(["listed", "units", "organization"]),
+});
+export type AiChatParticipants = z.infer<typeof AiChatParticipants>;
+
+export const AddAiChatAgentRequest = z.object({ agentId: Id });
+export type AddAiChatAgentRequest = z.infer<typeof AddAiChatAgentRequest>;
+
+/** `/ai-chats/:id/agents/:agentId` path parameters. */
+export const AiAgentParams = z.object({ id: Id, agentId: Id });
+export type AiAgentParams = z.infer<typeof AiAgentParams>;
+
+/** `mine` = the Phase 5 list (chats the caller owns); `shared` = chats shared with the caller; `all` = both. */
+export const AiChatListScope = z.enum(["mine", "shared", "all"]);
+export type AiChatListScope = z.infer<typeof AiChatListScope>;
+
+/** The one-generation queue of a multiplayer AI chat (P-08), derived from the per-message context. */
+export const AiQueueState = z.object({
+  running: z
+    .object({
+      generationId: Id,
+      requesterUserId: Id,
+      respondingTo: z.array(Id).max(AI_QUEUE_MAX + 1),
+    })
+    .nullable(),
+  pending: z.array(z.object({ messageId: Id, authorId: Id })).max(AI_QUEUE_MAX),
+});
+export type AiQueueState = z.infer<typeof AiQueueState>;
+
 // ---------------------------------------------------------------- chats
 
 export const AiChatSummary = z.object({
@@ -204,6 +298,13 @@ export const AiChatSummary = z.object({
   generating: z.boolean(),
   createdAt: IsoDateTime,
   lastActivityAt: IsoDateTime,
+  /** Phase 6: the viewer's access (absent = owner, Phase 5 producers). */
+  access: AiChatAccess.optional(),
+  /** Phase 6: the chat's owner, for chats shared with the viewer. */
+  owner: MessageAuthor.optional(),
+  /** Phase 6 (P-05): any active grant or more than one human member. */
+  shared: z.boolean().optional(),
+  unreadCount: z.number().int().min(0).max(UNREAD_CAP).optional(),
 });
 export type AiChatSummary = z.infer<typeof AiChatSummary>;
 
@@ -224,6 +325,8 @@ export const AiChatSnapshot = z.object({
   hasMore: z.boolean(),
   running: AiRunning.nullable(),
   lastSeq: z.number().int().nonnegative(),
+  /** Phase 6 (P-08): multiplayer chats only. */
+  queue: AiQueueState.optional(),
 });
 export type AiChatSnapshot = z.infer<typeof AiChatSnapshot>;
 
@@ -232,6 +335,7 @@ export const AiChatListQuery = CursorQuery.extend({
     .enum(["false", "true"])
     .default("false")
     .transform((v) => v === "true"),
+  scope: AiChatListScope.default("mine"),
 });
 export type AiChatListQuery = z.infer<typeof AiChatListQuery>;
 
@@ -251,6 +355,12 @@ const SendAiMessageFields = z.object({
   model: ModelRef,
   attachmentIds: z.array(Id).max(MAX_ATTACHMENTS_PER_MESSAGE).optional(),
   tools: AiChatTools.optional(),
+  /**
+   * Phase 6 (P-08): whether this message asks the model. Absent = true when it mentions nobody, false when it
+   * mentions only people or agents; an explicit value wins.
+   */
+  askAi: z.boolean().optional(),
+  mentions: z.array(Mention).max(50).optional(),
 });
 
 export const SendAiMessageRequest = SendAiMessageFields.refine(hasContent, {
@@ -271,6 +381,18 @@ export const SendAiMessageResponse = z.object({
   generation: AiGeneration,
 });
 export type SendAiMessageResponse = z.infer<typeof SendAiMessageResponse>;
+
+/** 202 from `POST /ai-chats/:id/messages` when no answer starts now (queued, not addressed, or skipped). */
+export const AiPostedMessageResponse = z.object({
+  chat: AiChatSummary,
+  userMessage: Message,
+  addressing: AiAddressing,
+});
+export type AiPostedMessageResponse = z.infer<typeof AiPostedMessageResponse>;
+
+/** `POST /ai-chats/:id/read` (Phase 6): the viewer read up to `seq`. */
+export const MarkAiChatReadRequest = z.object({ seq: z.number().int().nonnegative() });
+export type MarkAiChatReadRequest = z.infer<typeof MarkAiChatReadRequest>;
 
 const atLeastOneKey = (v: Record<string, unknown>) => Object.values(v).some((x) => x !== undefined);
 const NOTHING_TO_UPDATE = { message: "nothing to update" } as const;
@@ -314,6 +436,17 @@ export type AiDeltaEvent = z.infer<typeof AiDeltaEvent>;
 /** Durable `ai_chat.updated` on `user:<owner>`. */
 export const AiChatUpdatedEvent = z.object({ chat: AiChatSummary });
 export type AiChatUpdatedEvent = z.infer<typeof AiChatUpdatedEvent>;
+
+/** Durable `ai.queue.updated` on `conv:<id>` (P-08). */
+export const AiQueueUpdatedEvent = AiQueueState.extend({ conversationId: Id });
+export type AiQueueUpdatedEvent = z.infer<typeof AiQueueUpdatedEvent>;
+
+/**
+ * Durable `ai_chat.access_changed` (P-09) on `conv:<id>` and `user:<affected>`; ids only on `org:<id>` for unit and
+ * organization grants (`access` null there). Subscribers re-decide; null = the viewer lost access.
+ */
+export const AiChatAccessChangedEvent = z.object({ conversationId: Id, access: AiChatAccess.nullable() });
+export type AiChatAccessChangedEvent = z.infer<typeof AiChatAccessChangedEvent>;
 
 export type AiDeltaResult = { kind: "applied"; text: string } | { kind: "duplicate" } | { kind: "gap" };
 
