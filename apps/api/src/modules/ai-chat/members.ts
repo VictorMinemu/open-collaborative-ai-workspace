@@ -7,7 +7,7 @@ import {
   IdParams,
 } from "@ocw/contracts";
 import { aiChatGrants, aiChats, aiGenerations, conversationMembers, conversations, type Tx } from "@ocw/db";
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { type App, authOf, type Core, tenant } from "../../core";
 import { badRequest, notFound } from "../../lib/errors";
@@ -15,6 +15,7 @@ import {
   addMember,
   agentFactsOf,
   aiAccessOf,
+  aiAccessSql,
   type ConversationRow,
   createConversationAccess,
   type DirectoryEntry,
@@ -189,6 +190,55 @@ export function registerPersonaActivity(core: Core, gateway: ModelGateway): void
   });
 }
 
+/** At most this many readers who never joined are listed beside the participants (an organization can be large). */
+const UNJOINED_READERS_MAX = 200;
+
+/**
+ * Who is in an AI chat as its readers see it (`GET /participants`, 06-12): the participants of `participantsOf`, plus,
+ * when a unit or the organization holds a grant, the active members it covers who never opened or wrote in the chat
+ * (they have no participation row yet, P-09). They can read it, so they are people of the chat: the participants list
+ * and the @ suggestions name them. The persona roster (`participantsOf`) stays the joined people only.
+ */
+async function chatPeopleOf(tx: Tx, conversationId: string): Promise<AiChatParticipants> {
+  const participants = await participantsOf(tx, conversationId);
+  const audience = await audienceKind(tx, conversationId);
+  if (audience === "listed") return { participants, audience };
+  const humans = participants.filter((p) => p.kind === "user");
+  const known = new Set(humans.map((p) => p.id));
+  const access = aiAccessSql(sql`om.user_id`, sql`${conversationId}::uuid`);
+  const res = await tx.execute(sql`
+    select om.user_id as id, om.display_name as name, om.avatar_url as avatar, om.role as role, ${access} as access
+      from app.org_members om
+     where om.deactivated_at is null and ${access} is not null
+     order by om.display_name, om.user_id
+     limit ${UNJOINED_READERS_MAX + known.size}`);
+  type Row = {
+    id: string;
+    name: string;
+    avatar: string | null;
+    role: AiParticipant["orgRole"];
+    access: string;
+  };
+  const readers: AiParticipant[] = (res.rows as Row[])
+    .filter((r) => !known.has(r.id) && (r.access === "chat" || r.access === "view"))
+    .slice(0, UNJOINED_READERS_MAX)
+    .map((r) => ({
+      kind: "user",
+      id: r.id,
+      displayName: r.name,
+      avatarUrl: r.avatar,
+      access: r.access as "chat" | "view",
+      orgRole: r.role,
+      handle: null,
+    }));
+  const [owner, ...others] = humans;
+  const people = [...others, ...readers].sort(
+    (a, b) => a.displayName.localeCompare(b.displayName) || a.id.localeCompare(b.id),
+  );
+  const agents = participants.filter((p) => p.kind === "agent");
+  return { participants: [...(owner ? [owner] : []), ...people, ...agents], audience };
+}
+
 export function registerMemberRoutes(app: App, ctx: { core: Core }): void {
   const { core } = ctx;
   const perms = createPermissionService(core);
@@ -231,7 +281,7 @@ export function registerMemberRoutes(app: App, ctx: { core: Core }): void {
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
         const { conv } = await guards.readableChat(req, tx, req.params.id);
-        return { participants: await participantsOf(tx, conv.id), audience: await audienceKind(tx, conv.id) };
+        return chatPeopleOf(tx, conv.id);
       }),
   );
 
