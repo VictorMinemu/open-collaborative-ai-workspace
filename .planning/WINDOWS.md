@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 50
+open_count: 53
 waived_count: 0
 fixed_count: 16
-total_count: 66
-last_updated: 2026-10-07T02:35:52.102Z
+total_count: 69
+last_updated: 2026-10-07T05:51:33.668Z
 ---
 
 # Broken Windows Ledger
@@ -81,6 +81,9 @@ last_updated: 2026-10-07T02:35:52.102Z
 | 64 | 05 | unrun-verify | apps/desktop/src/main/chatgpt-loopback.ts |  | Real desktop build: Continue with ChatGPT through the system browser and the 127.0.0.1 listener against auth.openai.com (human-check, 05-15 owner check) | open |  | 2026-10-06T18:58:18.983Z |  |
 | 65 | 05 | deviation | apps/api/src/modules/ai-chat/service.ts |  | 05-12: abandoned AI chat drafts remain as hidden empty chats (no sweeper); their unsent uploads are swept after 24 h | open |  | 2026-10-07T01:48:18.761Z |  |
 | 66 | 05 | deviation | apps/api/src/modules/ai-chat/shares.ts |  | 05-13: every share view writes an ai_chat.share_viewed audit row (no dedupe window) | open |  | 2026-10-07T02:35:52.102Z |  |
+| 67 | 05 | unrun-verify | docs/adr/0017-sign-in-with-chatgpt-per-member.md |  | Owner manual check on the demo: real Sign in with ChatGPT by paste and from the desktop app, one plan turn with Stop, Business/Enterprise eligibility, visual review of 05-UI-REVIEW.md (05-VALIDATION manual rows) | open |  | 2026-10-07T05:51:33.527Z |  |
+| 68 | 05 | deviation | apps/api/src/modules/identity/authenticate.ts |  | Phase 1-4 routes run requireUser as preHandler: an anonymous malformed body gets 400 before 401 (AI routes fixed in 05-15; see 05 deferred-items.md) | open |  | 2026-10-07T05:51:33.597Z |  |
+| 69 | 05 | deviation | apps/api/src/app.ts |  | API request logs include query strings (search terms from GET /search?q=); add a serializer that redacts them (05 deferred-items.md) | open |  | 2026-10-07T05:51:33.668Z |  |
 
 ````json
 [
@@ -874,6 +877,42 @@ last_updated: 2026-10-07T02:35:52.102Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-07T02:35:52.102Z",
+    "resolved_at": null
+  },
+  {
+    "id": 67,
+    "kind": "unrun-verify",
+    "phase": "05",
+    "file": "docs/adr/0017-sign-in-with-chatgpt-per-member.md",
+    "line": null,
+    "description": "Owner manual check on the demo: real Sign in with ChatGPT by paste and from the desktop app, one plan turn with Stop, Business/Enterprise eligibility, visual review of 05-UI-REVIEW.md (05-VALIDATION manual rows)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T05:51:33.527Z",
+    "resolved_at": null
+  },
+  {
+    "id": 68,
+    "kind": "deviation",
+    "phase": "05",
+    "file": "apps/api/src/modules/identity/authenticate.ts",
+    "line": null,
+    "description": "Phase 1-4 routes run requireUser as preHandler: an anonymous malformed body gets 400 before 401 (AI routes fixed in 05-15; see 05 deferred-items.md)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T05:51:33.597Z",
+    "resolved_at": null
+  },
+  {
+    "id": 69,
+    "kind": "deviation",
+    "phase": "05",
+    "file": "apps/api/src/app.ts",
+    "line": null,
+    "description": "API request logs include query strings (search terms from GET /search?q=); add a serializer that redacts them (05 deferred-items.md)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T05:51:33.668Z",
     "resolved_at": null
   }
 ]
