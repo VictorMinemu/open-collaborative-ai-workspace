@@ -15,7 +15,7 @@ import { type CatalogSource, effectiveCapabilities, effectiveTools, readCapabili
 import { loadAllGrants, loadCatalog, loadGrants } from "./catalog";
 import { loadTurnMemory } from "./memory";
 import { internetConfigured, loadPolicy, type SearchEnv } from "./policy";
-import { botFacts, findBot } from "./routes";
+import { findBot, loadBotFacts } from "./routes";
 import { consumeTurn, effectiveDailyLimit, limitNotice } from "./usage";
 
 /**
@@ -97,7 +97,7 @@ async function computeTurn(
   const caps = readCapabilities(row);
   const policy = await loadPolicy(tx);
   const configured = await internetConfigured(tx, env, policy);
-  const resource = agentResource(botFacts(row), p.humanUserId);
+  const resource = agentResource(await loadBotFacts(tx, row), p.humanUserId);
   const as: PrincipalRef = { kind: "agent", agentId: row.id, onBehalfOfUserId: p.humanUserId };
   const internet = (await perms.decide(tx, as, "bot.internet", resource)).allowed;
   const effective = effectiveCapabilities({

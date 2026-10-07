@@ -29,7 +29,6 @@ let admin: TestClient;
 let riley: TestClient;
 let alex: TestClient;
 let jo: TestClient;
-let sam: TestClient;
 let orgId: string;
 let adminId: string;
 let rileyId: string;
@@ -110,7 +109,7 @@ beforeAll(async () => {
   [riley, rileyId] = await joinAs("riley@example.test", "Riley Park", "lead");
   [alex, alexId] = await joinAs("alex@example.test", "Alex Kim", "standard");
   [jo, joId] = await joinAs("jo@example.test", "Jo Diaz", "standard");
-  [sam, samId] = await joinAs("sam@example.test", "Sam Lee", "standard");
+  [, samId] = await joinAs("sam@example.test", "Sam Lee", "standard");
 
   eng = await unit("department", "Engineering", null);
   backend = await unit("team", "Backend", eng);
@@ -157,7 +156,9 @@ afterAll(async () => {
 
 describe("creating personas: admins anywhere, leads only in the units they lead", () => {
   it("Riley (lead of Backend) creates @deploy-helper in Backend with himself as owner", async () => {
-    const created = await ok(riley.request("POST", "/api/v1/agents", persona({ unitId: backend, ownerUserId: rileyId })));
+    const created = await ok(
+      riley.request("POST", "/api/v1/agents", persona({ unitId: backend, ownerUserId: rileyId })),
+    );
     expect(created).toMatchObject({
       username: "deploy-helper",
       scope: "team",
@@ -166,7 +167,9 @@ describe("creating personas: admins anywhere, leads only in the units they lead"
       ownerUserId: rileyId,
     });
     personaId = created.id;
-    expect(created.viewerCan).toEqual(expect.arrayContaining(["bot.read", "bot.configure", "bot.manage_unit"]));
+    expect(created.viewerCan).toEqual(
+      expect.arrayContaining(["bot.read", "bot.configure", "bot.manage_unit"]),
+    );
     // Ids only in the audit row (T-06-07-05).
     const audit = await su.query(
       "select user_id, metadata from app.audit_events where action = 'agent.created' and resource_id = $1",
@@ -179,7 +182,13 @@ describe("creating personas: admins anywhere, leads only in the units they lead"
   });
 
   it("a unit persona defaults its owner to the creator", async () => {
-    const p = await ok(riley.request("POST", "/api/v1/agents", persona({ name: "Pay bot", username: "pay-bot", unitId: payments })));
+    const p = await ok(
+      riley.request(
+        "POST",
+        "/api/v1/agents",
+        persona({ name: "Pay bot", username: "pay-bot", unitId: payments }),
+      ),
+    );
     expect(p).toMatchObject({ unitId: payments, unit: { kind: "project" }, ownerUserId: rileyId });
     await ok(admin.request("DELETE", `/api/v1/agents/${p.id}`));
   });
@@ -198,25 +207,44 @@ describe("creating personas: admins anywhere, leads only in the units they lead"
 
   it("the admin creates an organization persona with an owner and a department persona", async () => {
     const org = await ok(
-      admin.request("POST", "/api/v1/agents", persona({ name: "Concierge", username: "concierge", ownerUserId: samId })),
+      admin.request(
+        "POST",
+        "/api/v1/agents",
+        persona({ name: "Concierge", username: "concierge", ownerUserId: samId }),
+      ),
     );
     expect(org).toMatchObject({ unitId: null, unit: null, ownerUserId: samId, scope: "team" });
     const dept = await ok(
-      admin.request("POST", "/api/v1/agents", persona({ name: "Eng guide", username: "eng-guide", unitId: eng })),
+      admin.request(
+        "POST",
+        "/api/v1/agents",
+        persona({ name: "Eng guide", username: "eng-guide", unitId: eng }),
+      ),
     );
     expect(dept).toMatchObject({ unitId: eng, unit: { name: "Engineering", kind: "department" } });
     // Organization personas have no owner by default.
-    const plain = await ok(admin.request("POST", "/api/v1/agents", persona({ name: "Plain", username: "plain" })));
+    const plain = await ok(
+      admin.request("POST", "/api/v1/agents", persona({ name: "Plain", username: "plain" })),
+    );
     expect(plain.ownerUserId).toBeNull();
   });
 
   it("the owner must be an active member of this organization (404), the unit must exist in it (404)", async () => {
     expect(
-      (await fails(admin.request("POST", "/api/v1/agents", persona({ username: "x1", ownerUserId: randomUUID() })), 404))
-        .code,
+      (
+        await fails(
+          admin.request("POST", "/api/v1/agents", persona({ username: "x1", ownerUserId: randomUUID() })),
+          404,
+        )
+      ).code,
     ).toBe("owner_not_found");
     expect(
-      (await fails(admin.request("POST", "/api/v1/agents", persona({ username: "x2", unitId: randomUUID() })), 404)).code,
+      (
+        await fails(
+          admin.request("POST", "/api/v1/agents", persona({ username: "x2", unitId: randomUUID() })),
+          404,
+        )
+      ).code,
     ).toBe("unit_not_found");
   });
 
@@ -224,8 +252,14 @@ describe("creating personas: admins anywhere, leads only in the units they lead"
     const orgB = randomUUID();
     const userB = randomUUID();
     const unitB = randomUUID();
-    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil', $2)", [orgB, `evil-${orgB}`]);
-    await su.query("insert into auth.user (id, name, email) values ($1, 'Eve', $2)", [userB, `${userB}@evil.test`]);
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil', $2)", [
+      orgB,
+      `evil-${orgB}`,
+    ]);
+    await su.query("insert into auth.user (id, name, email) values ($1, 'Eve', $2)", [
+      userB,
+      `${userB}@evil.test`,
+    ]);
     await su.query(
       "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Eve', 'admin')",
       [orgB, userB],
@@ -235,10 +269,16 @@ describe("creating personas: admins anywhere, leads only in the units they lead"
       [unitB, orgB, `{${unitB}}`],
     );
     expect(
-      (await fails(admin.request("POST", "/api/v1/agents", persona({ username: "x3", unitId: unitB })), 404)).code,
+      (await fails(admin.request("POST", "/api/v1/agents", persona({ username: "x3", unitId: unitB })), 404))
+        .code,
     ).toBe("unit_not_found");
     expect(
-      (await fails(admin.request("POST", "/api/v1/agents", persona({ username: "x4", ownerUserId: userB })), 404)).code,
+      (
+        await fails(
+          admin.request("POST", "/api/v1/agents", persona({ username: "x4", ownerUserId: userB })),
+          404,
+        )
+      ).code,
     ).toBe("owner_not_found");
     await fails(admin.request("PATCH", `/api/v1/agents/${personaId}`, { unitId: unitB }), 404);
     const stored = await su.query("select count(*)::int as n from app.agents where unit_id = $1", [unitB]);
@@ -301,7 +341,9 @@ describe("lead configuration through the Phase 3.1 routes", () => {
   });
 
   it("Riley edits the persona's profile; Alex cannot; Riley cannot touch Archie", async () => {
-    const r = await ok(riley.request("PATCH", `/api/v1/agents/${personaId}`, { description: "Ships Backend" }));
+    const r = await ok(
+      riley.request("PATCH", `/api/v1/agents/${personaId}`, { description: "Ships Backend" }),
+    );
     expect(r.description).toBe("Ships Backend");
     await fails(alex.request("PATCH", `/api/v1/agents/${personaId}`, { description: "x" }), 403);
     await fails(jo.request("PATCH", `/api/v1/agents/${personaId}`, { description: "x" }), 404);
@@ -316,7 +358,9 @@ describe("lead configuration through the Phase 3.1 routes", () => {
     expect(
       (await ok(riley.request("PATCH", `/api/v1/agents/${personaId}`, { unitId: payments }))).unit,
     ).toMatchObject({ id: payments, kind: "project" });
-    expect((await ok(riley.request("PATCH", `/api/v1/agents/${personaId}`, { unitId: backend }))).unitId).toBe(backend);
+    expect(
+      (await ok(riley.request("PATCH", `/api/v1/agents/${personaId}`, { unitId: backend }))).unitId,
+    ).toBe(backend);
     const moved = await ok(admin.request("PATCH", `/api/v1/agents/${personaId}`, { unitId: null }));
     expect(moved).toMatchObject({ unitId: null, unit: null });
     expect(await usernamesOf(jo)).toContain("deploy-helper");
@@ -328,13 +372,18 @@ describe("lead configuration through the Phase 3.1 routes", () => {
       "select metadata from app.audit_events where action = 'agent.updated' and resource_id = $1 order by occurred_at desc limit 1",
       [personaId],
     );
-    expect(audit.rows[0].metadata).toMatchObject({ unitId: backend, changed: expect.arrayContaining(["unitId"]) });
+    expect(audit.rows[0].metadata).toMatchObject({
+      unitId: backend,
+      changed: expect.arrayContaining(["unitId"]),
+    });
   });
 });
 
 describe("mentions follow visibility", () => {
   it("Jo's @deploy-helper in #ops is not delivered (and does not add it); Alex's is", async () => {
-    const joMsg = await ok(jo.request("POST", `/api/v1/conversations/${opsId}/messages`, { body: "@deploy-helper status?" }));
+    const joMsg = await ok(
+      jo.request("POST", `/api/v1/conversations/${opsId}/messages`, { body: "@deploy-helper status?" }),
+    );
     expect(await mentionsOf(joMsg.id)).toEqual([]);
     const members = await su.query(
       "select count(*)::int as n from app.conversation_members where conversation_id = $1 and member_id = $2",
@@ -348,20 +397,28 @@ describe("mentions follow visibility", () => {
     expect(delivered).toHaveLength(1);
     expect(delivered[0]?.agent.id).toBe(personaId);
     // Now a member of #ops, it still answers only those who may see it.
-    const again = await ok(jo.request("POST", `/api/v1/conversations/${opsId}/messages`, { body: "@deploy-helper hi" }));
+    const again = await ok(
+      jo.request("POST", `/api/v1/conversations/${opsId}/messages`, { body: "@deploy-helper hi" }),
+    );
     expect(await mentionsOf(again.id)).toEqual([]);
   });
 
   it("Jo cannot add it to a channel she owns (404)", async () => {
-    const mine = (await ok(jo.request("POST", "/api/v1/channels", { name: "jo-room", visibility: "public" }))).id;
-    await fails(jo.request("POST", `/api/v1/channels/${mine}/members`, { kind: "agent", id: personaId }), 404);
+    const mine = (await ok(jo.request("POST", "/api/v1/channels", { name: "jo-room", visibility: "public" })))
+      .id;
+    await fails(
+      jo.request("POST", `/api/v1/channels/${mine}/members`, { kind: "agent", id: personaId }),
+      404,
+    );
   });
 });
 
 describe("unit deletion and personal bots", () => {
   it("deleting Backend while it has a persona → 409 unit_has_bots", async () => {
     const tmp = await unit("team", "Tmp", eng);
-    const p = await ok(admin.request("POST", "/api/v1/agents", persona({ name: "Tmp bot", username: "tmp-bot", unitId: tmp })));
+    const p = await ok(
+      admin.request("POST", "/api/v1/agents", persona({ name: "Tmp bot", username: "tmp-bot", unitId: tmp })),
+    );
     expect((await fails(admin.request("DELETE", `/api/v1/units/${tmp}`), 409)).code).toBe("unit_has_bots");
     // A deleted persona no longer blocks it (its unit reference is released).
     await ok(admin.request("DELETE", `/api/v1/agents/${p.id}`));
@@ -398,12 +455,18 @@ describe("ownership (Task 2)", () => {
 
   it("a deactivated owner leaves the persona working for others; the admin reassigns it", async () => {
     const org = await ok(
-      admin.request("POST", "/api/v1/agents", persona({ name: "Owned", username: "owned", unitId: backend, ownerUserId: samId })),
+      admin.request(
+        "POST",
+        "/api/v1/agents",
+        persona({ name: "Owned", username: "owned", unitId: backend, ownerUserId: samId }),
+      ),
     );
     await su.query("update app.org_members set deactivated_at = now() where user_id = $1", [samId]);
     try {
       expect(await usernamesOf(alex)).toContain("owned");
-      const msg = await ok(alex.request("POST", `/api/v1/conversations/${opsId}/messages`, { body: "@owned ping" }));
+      const msg = await ok(
+        alex.request("POST", `/api/v1/conversations/${opsId}/messages`, { body: "@owned ping" }),
+      );
       expect(await mentionsOf(msg.id)).toHaveLength(1);
       await fails(admin.request("PATCH", `/api/v1/agents/${org.id}`, { ownerUserId: samId }), 404);
       const re = await ok(admin.request("PATCH", `/api/v1/agents/${org.id}`, { ownerUserId: rileyId }));

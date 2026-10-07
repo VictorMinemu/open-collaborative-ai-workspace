@@ -53,7 +53,14 @@ import {
   createPermissionService,
 } from "../organization";
 import { createConversationAccess } from "./access";
-import { authorOf, type Directory, loadDirectory } from "./directory";
+import {
+  agentFactsOf,
+  authorOf,
+  type Directory,
+  type DirectoryEntry,
+  isUnitPersona,
+  loadDirectory,
+} from "./directory";
 import { dmAgentOf, ensureDm, ensureGroup, ensureHumanDm, listDms } from "./dm";
 import { resolveMentions } from "./mentions";
 import { type MessageActionsContext, registerMessageActionRoutes } from "./message-actions";
@@ -385,6 +392,8 @@ export function createChatModule(core: Core): ApiModule {
       if (!agent || agent.status === "disabled") continue;
       // A personal bot lives only in its owner's DM (D-01): never auto-added to, or asked in, a channel.
       if (agent.scope === "personal") continue;
+      // A unit persona answers only who may see it (AGENT-01, T-06-07-02): never added or asked by anyone else.
+      if (isUnitPersona(agent) && !(await authorReads(tx, agent, author.id))) continue;
       if (!(await getMembership(tx, conv.id, "agent", agent.id))) {
         authorRes ??= channelResource(await channelFacts(tx, conv, { kind: "user", id: author.id }));
         const d = await perms.decide(
@@ -415,6 +424,17 @@ export function createChatModule(core: Core): ApiModule {
     return agentIds;
   }
 
+  /** The human may see (and so mention or be answered by) this bot: `bot.read` on its agent resource. */
+  async function authorReads(tx: Tx, bot: DirectoryEntry, userId: string) {
+    const d = await perms.decide(
+      tx,
+      { kind: "user", userId },
+      "bot.read",
+      agentResource({ ...agentFactsOf(bot), disabled: false }, userId),
+    );
+    return d.allowed;
+  }
+
   /**
    * D-12: a human message that addressed no bot goes to the team bots of this conversation whose reply mode
    * is `all`, in the message's thread (the message itself, or its root for a thread reply). One
@@ -428,12 +448,19 @@ export function createChatModule(core: Core): ApiModule {
     result: PostResult,
     author: { id: string; clientTimeZone?: string },
   ): Promise<string[]> {
-    const agentIds = await replyModeCandidates(tx, dir, {
+    const candidates = await replyModeCandidates(tx, dir, {
       conversationId: conv.id,
       parentConversationId: conv.parentConversationId,
       authorKind: "user",
       mentions: result.row.mentions,
     });
+    // A unit persona follows only the humans who may see it (AGENT-01).
+    const agentIds: string[] = [];
+    for (const id of candidates) {
+      const bot = dir.agents.get(id);
+      if (bot && isUnitPersona(bot) && !(await authorReads(tx, bot, author.id))) continue;
+      agentIds.push(id);
+    }
     if (agentIds.length === 0) return [];
     const mention: AgentMention = {
       organizationId: conv.organizationId,
@@ -467,16 +494,7 @@ export function createChatModule(core: Core): ApiModule {
     const botId = await dmAgentOf(tx, conv.id);
     const bot = botId ? dir.agents.get(botId) : undefined;
     if (!bot || bot.deleted || bot.status === "disabled") return null;
-    const d = await perms.decide(
-      tx,
-      { kind: "user", userId: author.id },
-      "bot.read",
-      agentResource(
-        { scope: bot.scope ?? "team", ownerUserId: bot.ownerUserId ?? null, disabled: false },
-        author.id,
-      ),
-    );
-    if (!d.allowed) return null;
+    if (!(await authorReads(tx, bot, author.id))) return null;
     const mention: AgentMention = {
       organizationId: conv.organizationId,
       conversationId: conv.id,
@@ -512,16 +530,7 @@ export function createChatModule(core: Core): ApiModule {
       const bot = dir.agents.get(m.id);
       if (!bot || bot.deleted || bot.status === "disabled" || bot.scope === "personal") continue;
       if (!(await getMembership(tx, conv.id, "agent", bot.id))) continue;
-      const d = await perms.decide(
-        tx,
-        { kind: "user", userId: author.id },
-        "bot.read",
-        agentResource(
-          { scope: bot.scope ?? "team", ownerUserId: bot.ownerUserId ?? null, disabled: false },
-          author.id,
-        ),
-      );
-      if (d.allowed) agentIds.push(bot.id);
+      if (await authorReads(tx, bot, author.id)) agentIds.push(bot.id);
     }
     if (agentIds.length === 0) return [];
     const mention: AgentMention = {
@@ -668,20 +677,9 @@ export function createChatModule(core: Core): ApiModule {
     }
     const bot = dir.agents.get(p.id);
     if (!bot || bot.deleted) throw notFound("Bot not found");
-    await perms.assertCan(
-      req,
-      tx,
-      "bot.read",
-      agentResource(
-        {
-          scope: bot.scope ?? "team",
-          ownerUserId: bot.ownerUserId ?? null,
-          disabled: bot.status === "disabled",
-        },
-        authOf(req).userId,
-      ),
-      { hideAs404: true },
-    );
+    await perms.assertCan(req, tx, "bot.read", agentResource(agentFactsOf(bot), authOf(req).userId), {
+      hideAs404: true,
+    });
     if (group && bot.scope === "personal") {
       throw conflict("Personal bots only chat in their owner's private chat", "personal_bot_dm_only");
     }
@@ -989,6 +987,18 @@ export function createChatModule(core: Core): ApiModule {
             const target =
               req.body.kind === "agent" ? dir.agents.get(req.body.id) : dir.users.get(req.body.id);
             if (!target) throw notFound(req.body.kind === "agent" ? "Bot not found" : "Member not found");
+            // A unit persona joins a channel only through someone who may see it (AGENT-01).
+            if (isUnitPersona(target)) {
+              await perms.assertCan(
+                req,
+                tx,
+                "bot.read",
+                agentResource(agentFactsOf(target), authOf(req).userId),
+                {
+                  hideAs404: true,
+                },
+              );
+            }
             if (target.scope === "personal") {
               throw conflict("Personal bots only chat in their owner's private chat", "personal_bot_dm_only");
             }

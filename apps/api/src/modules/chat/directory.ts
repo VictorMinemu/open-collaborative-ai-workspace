@@ -1,5 +1,6 @@
 import { type MessageAuthor, type OrgRole, userHandle } from "@ocw/contracts";
-import { agents, orgMembers, type Tx } from "@ocw/db";
+import { agents, orgMembers, orgUnits, type Tx } from "@ocw/db";
+import { eq } from "drizzle-orm";
 
 /** Display info for every principal of the org (humans from org_members, agents from agents). */
 export interface DirectoryEntry {
@@ -15,6 +16,8 @@ export interface DirectoryEntry {
   /** Agents only (D-01): personal bots belong to `ownerUserId`. */
   scope?: "team" | "personal";
   ownerUserId?: string | null;
+  /** Agents only (AGENT-01): the path of a unit persona's unit, root → self ([] = the organization). */
+  unitPath?: readonly string[];
   /** Agents only: soft-deleted bots keep resolving as authors. */
   deleted?: boolean;
 }
@@ -51,8 +54,10 @@ export async function loadDirectory(tx: Tx): Promise<Directory> {
         deletedAt: agents.deletedAt,
         scope: agents.scope,
         ownerUserId: agents.ownerUserId,
+        unitPath: orgUnits.path,
       })
-      .from(agents),
+      .from(agents)
+      .leftJoin(orgUnits, eq(orgUnits.id, agents.unitId)),
   ]);
   const users = new Map<string, DirectoryEntry>();
   const agentMap = new Map<string, DirectoryEntry>();
@@ -79,6 +84,7 @@ export async function loadDirectory(tx: Tx): Promise<Directory> {
       status: a.status,
       scope: a.scope,
       ownerUserId: a.ownerUserId,
+      unitPath: a.unitPath ?? [],
       deleted: a.deletedAt !== null,
     };
     agentMap.set(e.id, e);
@@ -88,6 +94,19 @@ export async function loadDirectory(tx: Tx): Promise<Directory> {
   }
   return { users, agents: agentMap, byHandle };
 }
+
+/** Resolver facts of a directory agent (D-01, AGENT-01). */
+export function agentFactsOf(e: DirectoryEntry) {
+  return {
+    scope: e.scope ?? ("team" as const),
+    ownerUserId: e.ownerUserId ?? null,
+    disabled: e.status === "disabled",
+    unitPath: e.unitPath ?? [],
+  };
+}
+
+/** A department, team or project persona (AGENT-01): seen and mentioned only by who may `bot.read` it. */
+export const isUnitPersona = (e: DirectoryEntry) => e.kind === "agent" && (e.unitPath?.length ?? 0) > 0;
 
 export function authorOf(
   dir: Directory,
