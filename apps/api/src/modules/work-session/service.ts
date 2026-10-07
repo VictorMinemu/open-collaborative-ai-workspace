@@ -1,4 +1,5 @@
 import {
+  type Attachment,
   type DiffResultFrame,
   DiffStat,
   EffectiveSessionSettings,
@@ -33,6 +34,7 @@ import {
 } from "@ocw/db";
 import { and, asc, count, desc, eq, inArray, min, type SQL, sql } from "drizzle-orm";
 import type { FastifyBaseLogger } from "fastify";
+import { attachmentRowsForWorkPrompt, attachmentsForWorkPrompts, type ObjectStorage } from "../artifact";
 import type { AuditService } from "../audit";
 import type { DeviceCommandRow, DeviceHub, DeviceRef, DeviceSessionHandler } from "../device";
 import { memberDirectory, type PermissionService } from "../organization";
@@ -47,6 +49,12 @@ import {
   storedSettings,
   turnMode,
 } from "./controls";
+import {
+  currentSessionModel,
+  hydratePromptImages,
+  type PromptImagesPlan,
+  preparePromptImages,
+} from "./images";
 import { loadWorkZonePolicy } from "./policy";
 import { decideTitleRequest, heuristicTitle, loadTitleContext } from "./title";
 
@@ -55,6 +63,13 @@ export type ReauthorizeReason = "policy" | "access_changed" | "device_opt_out";
 
 const UNAUTHORIZED_MODE_ERROR =
   "The device reported Full access without authorization; the session was stopped";
+
+/** 06.1-02: why the hub failed a prompt before sending it, and the plain text the session shows. */
+type UndeliveredReason = "image_unavailable" | "frame_too_large";
+const UNDELIVERED_PROMPT = new Map<string, string>([
+  ["image_unavailable", "An attached image is no longer available"],
+  ["frame_too_large", "The images are too large to send to the device"],
+]);
 
 export type SessionRow = typeof workSessions.$inferSelect;
 type PromptRow = typeof workPrompts.$inferSelect;
@@ -83,6 +98,8 @@ export interface WorkSessionDeps {
   log: FastifyBaseLogger;
   /** The resolver: the per-turn author cap includes the author's `device.full_access` grain (P-07). */
   perms: PermissionService;
+  /** Attachment storage (06.1): a prompt's image bytes are read from it at dispatch; null = not configured. */
+  storage?: ObjectStorage | null;
 }
 
 /**
@@ -185,7 +202,11 @@ export class WorkSessionService implements DeviceSessionHandler {
         .orderBy(asc(workPrompts.position), asc(workPrompts.createdAt)),
       memberDirectory(tx),
     ]);
-    return rows.map((r) => toPrompt(r, dir.get(r.authorUserId)?.displayName ?? null));
+    const images = await attachmentsForWorkPrompts(
+      tx,
+      rows.map((r) => r.id),
+    );
+    return rows.map((r) => toPrompt(r, dir.get(r.authorUserId)?.displayName ?? null, images.get(r.id) ?? []));
   }
 
   async approvals(tx: Tx, sessionId: string): Promise<WorkApproval[]> {
@@ -217,12 +238,12 @@ export class WorkSessionService implements DeviceSessionHandler {
   }
 
   async emitPrompt(tx: Tx, row: PromptRow): Promise<void> {
-    const dir = await memberDirectory(tx);
+    const [dir, images] = await Promise.all([memberDirectory(tx), attachmentsForWorkPrompts(tx, [row.id])]);
     await this.deps.realtime.appendEvent(
       tx,
       wsTopic(row.workSessionId),
       EventTypes.promptUpdated,
-      toPrompt(row, dir.get(row.authorUserId)?.displayName ?? null),
+      toPrompt(row, dir.get(row.authorUserId)?.displayName ?? null, images.get(row.id) ?? []),
     );
   }
 
@@ -322,7 +343,16 @@ export class WorkSessionService implements DeviceSessionHandler {
       const cap = author ? highestAvailableMode(author.ctx, s.model, s.permissionMode) : null;
       const mode = turnMode(s.permissionMode, cap);
       if (mode === null) {
-        await this.refusePrompt(tx, s, next, author?.revoked === true && author.cap === null);
+        const revoked = author?.revoked === true && author.cap === null;
+        await this.refusePrompt(tx, s, next, revoked ? "access_revoked" : "mode_not_allowed");
+        continue;
+      }
+      // D-05, P-08: the model can change while an image prompt waits. A model that says it cannot read images never
+      // gets the prompt without them: refused, audited, and the arbiter moves on.
+      const images = await attachmentRowsForWorkPrompt(tx, next.id);
+      const current = currentSessionModel(author?.ctx.catalog ?? null, s);
+      if (current?.imageInput === false && images.length > 0) {
+        await this.refusePrompt(tx, s, next, "images_not_supported");
         continue;
       }
       const [dispatched] = await tx
@@ -334,7 +364,13 @@ export class WorkSessionService implements DeviceSessionHandler {
         deviceId: s.deviceId,
         workSessionId: s.id,
         kind: "prompt",
-        payload: { promptId: next.id, text: next.body, permissionMode: mode },
+        // D-04, P-03: ids only. The hub reads the bytes after its flush transaction; nothing hydrated is stored.
+        payload: {
+          promptId: next.id,
+          text: next.body,
+          permissionMode: mode,
+          ...(images.length > 0 ? { imageAttachmentIds: images.map((a) => a.id) } : {}),
+        },
       });
       // D-04: every turn's effective mode is audited (actor = the prompt's author, device, session, org).
       await this.deps.audit.record(tx, {
@@ -351,6 +387,7 @@ export class WorkSessionService implements DeviceSessionHandler {
           effectiveMode: mode,
           capped: mode !== s.permissionMode,
           ...(mode === "fullAccess" ? { fullAccess: true } : {}),
+          ...(images.length > 0 ? { imageCount: images.length } : {}),
         },
       });
       await this.emitPrompt(tx, dispatched!);
@@ -359,8 +396,16 @@ export class WorkSessionService implements DeviceSessionHandler {
     }
   }
 
-  /** A turn its author may not run (P-07): failed, audited, never sent; the arbiter moves to the next prompt. */
-  private async refusePrompt(tx: Tx, s: SessionRow, p: PromptRow, revoked: boolean): Promise<void> {
+  /**
+   * A turn that may not run (P-07: its author's access; 06.1 P-08: images for a model that cannot read them): failed,
+   * audited, never sent; the arbiter moves to the next prompt.
+   */
+  private async refusePrompt(
+    tx: Tx,
+    s: SessionRow,
+    p: PromptRow,
+    reason: "access_revoked" | "mode_not_allowed" | "images_not_supported",
+  ): Promise<void> {
     const [row] = await tx
       .update(workPrompts)
       .set({ status: "failed", completedAt: sql`now()` })
@@ -378,7 +423,7 @@ export class WorkSessionService implements DeviceSessionHandler {
         promptId: p.id,
         authorUserId: p.authorUserId,
         requestedMode: s.permissionMode,
-        reason: revoked ? "access_revoked" : "mode_not_allowed",
+        reason,
       },
     });
     if (row) await this.emitPrompt(tx, row);
@@ -691,11 +736,26 @@ export class WorkSessionService implements DeviceSessionHandler {
     });
   }
 
+  /** 06.1-02 (P-03): a prompt's images, chosen inside the hub's flush transaction (database work only). */
+  async prepareCommand(tx: Tx, _device: DeviceRef, cmd: DeviceCommandRow): Promise<unknown> {
+    return preparePromptImages(tx, cmd);
+  }
+
+  /** 06.1-02 (P-03): the image bytes, read after the flush transaction committed; never stored. */
+  async hydrateCommand(
+    _device: DeviceRef,
+    cmd: DeviceCommandRow,
+    plan: unknown,
+  ): Promise<Record<string, unknown>> {
+    return hydratePromptImages(this.deps.storage ?? null, cmd, plan as PromptImagesPlan);
+  }
+
   async onCommandResult(
     device: DeviceRef,
     cmd: DeviceCommandRow,
     ok: boolean,
     error: string | null,
+    origin: "device" | "hub" = "device",
   ): Promise<void> {
     if (!cmd.workSessionId) return;
     const sessionId = cmd.workSessionId;
@@ -755,6 +815,11 @@ export class WorkSessionService implements DeviceSessionHandler {
       if (cmd.kind === "prompt" && !ok) {
         const promptId = String((cmd.payload as { promptId?: unknown }).promptId ?? "");
         if (!UUID_RE.test(promptId)) return;
+        const undelivered = origin === "hub" ? UNDELIVERED_PROMPT.get(error ?? "") : undefined;
+        if (undelivered) {
+          await this.promptUndelivered(tx, s, promptId, error as UndeliveredReason, undelivered);
+          return;
+        }
         if (/not active/i.test(error ?? "") && s.status !== "archived") {
           // Daemon restarted and lost the runtime: put the prompt back at the head and re-attach.
           const [p] = await tx
@@ -778,6 +843,41 @@ export class WorkSessionService implements DeviceSessionHandler {
         }
       }
     });
+  }
+
+  /**
+   * 06.1-02 (P-03, Pitfall 8): the hub could not send a prompt (an image is gone, or the frame is too large). Called
+   * after the hub's marking transaction committed, with the session LOCKED: the prompt fails, the refusal is audited
+   * with its reason, the session goes idle with a plain `lastError`, and the arbiter moves on.
+   */
+  private async promptUndelivered(
+    tx: Tx,
+    s: SessionRow,
+    promptId: string,
+    reason: UndeliveredReason,
+    message: string,
+  ): Promise<void> {
+    const [p] = await tx
+      .update(workPrompts)
+      .set({ status: "failed", completedAt: sql`now()` })
+      .where(and(eq(workPrompts.id, promptId), inArray(workPrompts.status, IN_FLIGHT)))
+      .returning();
+    if (!p) return;
+    await this.deps.audit.record(tx, {
+      action: "work_prompt.refused",
+      resourceType: "work_prompt",
+      resourceId: p.id,
+      userId: p.authorUserId,
+      deviceId: s.deviceId,
+      sessionId: s.id,
+      result: "error",
+      metadata: { promptId: p.id, authorUserId: p.authorUserId, requestedMode: s.permissionMode, reason },
+    });
+    await this.emitPrompt(tx, p);
+    if (s.status === "running") {
+      await this.setStatus(tx, s, "idle", { lastError: message });
+      await this.tryDispatch(tx, s);
+    }
   }
 
   // ------------------------------------------------------------------ automatic titles (D-18 … D-20, ADR-0014)
@@ -1174,7 +1274,11 @@ export function normalizeEvent(ev: SessionEvent): SessionEvent {
   return ev;
 }
 
-export function toPrompt(r: PromptRow, authorName: string | null): WorkPrompt {
+export function toPrompt(
+  r: PromptRow,
+  authorName: string | null,
+  attachments: Attachment[] = [],
+): WorkPrompt {
   return {
     id: r.id,
     workSessionId: r.workSessionId,
@@ -1187,6 +1291,7 @@ export function toPrompt(r: PromptRow, authorName: string | null): WorkPrompt {
     createdAt: new Date(r.createdAt).toISOString(),
     dispatchedAt: iso(r.dispatchedAt),
     completedAt: iso(r.completedAt),
+    attachments,
   };
 }
 

@@ -1,0 +1,1 @@
+ALTER TABLE "app"."attachments" ADD COLUMN "work_prompt_position" smallint;

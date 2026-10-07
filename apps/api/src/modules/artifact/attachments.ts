@@ -10,7 +10,7 @@ import {
   PresignUploadResponse,
   sanitizeFilename,
 } from "@ocw/contracts";
-import { attachments, messages, type Tx, tenantOf } from "@ocw/db";
+import { attachments, conversations, messages, type Tx, tenantOf } from "@ocw/db";
 import { and, eq } from "drizzle-orm";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { type App, authOf, type Core, tenant } from "../../core";
@@ -30,9 +30,36 @@ export const GET_TTL_SECONDS = 60;
 /** P-11: presigns per user per minute. */
 export const PRESIGN_PER_MINUTE = 60;
 
+/** Conversation kinds whose attachment access another module decides (06.1, P-04). */
+export type ScopedKind = "work_session";
+
+/**
+ * Who may upload into and read the attachments of one conversation kind, decided by the module that owns it (06.1,
+ * P-04: a Work Zone session's conversation is the session's, not a channel). Everything else in the routes (size and
+ * rate limits, sniffing, renditions, audit, redirects) stays the Phase 4 pipeline.
+ */
+export interface AttachmentScope {
+  /**
+   * The caller may upload into this conversation: throws 404 (hidden reads exactly like missing, with
+   * `notFoundMessage`), 403 or 409. Returns the declared types it accepts and the refusal text for any other type.
+   */
+  assertUpload(
+    req: FastifyRequest,
+    tx: Tx,
+    conversationId: string,
+    notFoundMessage: string,
+  ): Promise<{ allowedTypes: readonly string[]; typeMessage: string }>;
+  /** The caller may read this conversation's attachments: throws 404 (with `notFoundMessage`) otherwise. */
+  assertRead(req: FastifyRequest, tx: Tx, conversationId: string, notFoundMessage: string): Promise<void>;
+}
+
+export type AttachmentScopes = Partial<Record<ScopedKind, AttachmentScope>>;
+
 export interface AttachmentRoutesDeps {
   core: Core;
   access: ConversationAccess;
+  /** 06.1: per conversation kind, the module that decides upload and read (wired in app.ts). */
+  scopes?: AttachmentScopes;
   storage: ObjectStorage | null;
   /** Storage reachability for `GET /attachments/config` (Garage may still be starting). */
   storageStatus(): Promise<"ok" | "unavailable">;
@@ -77,6 +104,26 @@ export function presignPart(
 
 export function registerAttachmentRoutes(app: App, deps: AttachmentRoutesDeps): void {
   const { core, access, storage } = deps;
+  const scopes = deps.scopes ?? {};
+  const scoped = Object.keys(scopes).length > 0;
+
+  /** The scope deciding this conversation (looked up under RLS: another tenant's conversation has none). */
+  async function scopeOf(tx: Tx, conversationId: string): Promise<AttachmentScope | null> {
+    if (!scoped) return null;
+    const [conv] = await tx
+      .select({ kind: conversations.kind })
+      .from(conversations)
+      .where(eq(conversations.id, conversationId))
+      .limit(1);
+    return conv ? (scopes[conv.kind as ScopedKind] ?? null) : null;
+  }
+
+  /** The caller may read the conversation's attachments: its scope decides, else the readable set (hidden = 404). */
+  async function assertReadable(req: FastifyRequest, tx: Tx, conversationId: string): Promise<void> {
+    const scope = await scopeOf(tx, conversationId);
+    if (scope) return scope.assertRead(req, tx, conversationId, "Attachment not found");
+    await access.readable(req, tx, conversationId, { kinds: KINDS, notFoundMessage: "Attachment not found" });
+  }
   const perms = createPermissionService(core);
   const requireUser = core.identity.requireUser;
   const tags = ["attachments"];
@@ -133,7 +180,38 @@ export function registerAttachmentRoutes(app: App, deps: AttachmentRoutesDeps): 
     async (req) => {
       if (!storage) throw disabled();
       const auth = authOf(req);
+      /** The `pending` row, after the size limit (the same for every kind). */
+      async function insertPending(tx: Tx, conversationId: string): Promise<AttachmentRow> {
+        if (req.body.size > maxBytes) {
+          throw new HttpError(400, "too_large", `Files can be at most ${maxBytes} bytes`, { maxBytes });
+        }
+        const [inserted] = await tx
+          .insert(attachments)
+          .values({
+            organizationId: tenantOf(tx).organizationId,
+            conversationId,
+            uploaderId: auth.userId,
+            filename: sanitizeFilename(req.body.filename),
+            declaredType: req.body.contentType,
+            sizeBytes: req.body.size,
+          })
+          .returning();
+        return inserted!;
+      }
       const row = await core.db.withTenant(tenant(req), async (tx) => {
+        const scope = await scopeOf(tx, req.params.id);
+        if (scope) {
+          const { allowedTypes, typeMessage } = await scope.assertUpload(
+            req,
+            tx,
+            req.params.id,
+            "Conversation not found",
+          );
+          if (!allowedTypes.includes(req.body.contentType)) {
+            throw new HttpError(400, "images_only", typeMessage, { allowedTypes });
+          }
+          return insertPending(tx, req.params.id);
+        }
         const { conv, facts } = await access.readable(req, tx, req.params.id, { kinds: KINDS });
         if (conv.archivedAt) throw gone("This conversation is archived", "channel_archived");
         // Nobody posts into an AI chat through the channel permissions (`ai_chat_private`): its owner and `chat`
@@ -152,21 +230,7 @@ export function registerAttachmentRoutes(app: App, deps: AttachmentRoutesDeps): 
           await perms.assertCan(req, tx, "channel.post", channelResource(facts));
         }
         await perms.assertCan(req, tx, "attachment.upload", channelResource(facts));
-        if (req.body.size > maxBytes) {
-          throw new HttpError(400, "too_large", `Files can be at most ${maxBytes} bytes`, { maxBytes });
-        }
-        const [inserted] = await tx
-          .insert(attachments)
-          .values({
-            organizationId: tenantOf(tx).organizationId,
-            conversationId: conv.id,
-            uploaderId: auth.userId,
-            filename: sanitizeFilename(req.body.filename),
-            declaredType: req.body.contentType,
-            sizeBytes: req.body.size,
-          })
-          .returning();
-        return inserted!;
+        return insertPending(tx, conv.id);
       });
       const upload = await storage.presignPut(
         keyOf(row, "original"),
@@ -193,10 +257,7 @@ export function registerAttachmentRoutes(app: App, deps: AttachmentRoutesDeps): 
       const row = await core.db.withTenant(ctx, async (tx) => {
         const r = await loadRow(tx, req.params.id);
         if (!r || r.uploaderId !== auth.userId) throw hidden();
-        await access.readable(req, tx, r.conversationId, {
-          kinds: KINDS,
-          notFoundMessage: "Attachment not found",
-        });
+        await assertReadable(req, tx, r.conversationId);
         return r;
       });
       if (row.status === "ready") return toAttachment(row); // idempotent retry
@@ -249,6 +310,8 @@ export function registerAttachmentRoutes(app: App, deps: AttachmentRoutesDeps): 
             contentType: sniffed.contentType,
             sha256,
             hasRenditions: renditions !== null,
+            // 06.1: the size of the rendition a Work Zone prompt may send, so its budget needs no storage call.
+            largeBytes: renditions?.parts.find((p) => p.part === "large.webp")?.body.length ?? null,
             width: renditions?.width ?? null,
             height: renditions?.height ?? null,
             completedAt: new Date().toISOString(),
@@ -285,17 +348,17 @@ export function registerAttachmentRoutes(app: App, deps: AttachmentRoutesDeps): 
   );
 
   /**
-   * The attachment when the caller may see it: readable conversation (hidden = 404), `ready`, and either linked
-   * to a live message or still the caller's own unlinked upload.
+   * The attachment when the caller may see it: readable conversation (hidden = 404; its scope decides for a scoped
+   * kind), `ready`, and either linked to a live message, linked to a Work Zone prompt (every reader of the session,
+   * 06.1) or still the caller's own unlinked upload.
    */
   async function visible(req: FastifyRequest, tx: Tx, id: string): Promise<AttachmentRow> {
     const row = await loadRow(tx, id);
     if (row?.status !== "ready") throw hidden();
-    await access.readable(req, tx, row.conversationId, {
-      kinds: KINDS,
-      notFoundMessage: "Attachment not found",
-    });
-    if (row.messageId) {
+    await assertReadable(req, tx, row.conversationId);
+    if (row.workPromptId) {
+      // Sent with a prompt: the session's readers see it (the scope above decided).
+    } else if (row.messageId) {
       const [msg] = await tx
         .select({ deletedAt: messages.deletedAt })
         .from(messages)

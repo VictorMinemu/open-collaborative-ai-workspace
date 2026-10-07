@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 59
+open_count: 70
 waived_count: 0
-fixed_count: 16
-total_count: 75
-last_updated: 2026-10-07T15:33:04.995Z
+fixed_count: 17
+total_count: 87
+last_updated: 2026-10-07T21:32:00.531Z
 ---
 
 # Broken Windows Ledger
@@ -90,6 +90,18 @@ last_updated: 2026-10-07T15:33:04.995Z
 | 73 | 06 | unrun-verify | .planning/phases/06-multiplayer-ai-chat/06-16-PLAN.md |  | 06-16 Task 3: metered spoofing eval and OpenAI ChatGPT-plan terms check not run (eval deferred, human_needed) | open |  | 2026-10-07T15:33:04.842Z |  |
 | 74 | 06 | deviation | apps/api/src/modules/chat/index.ts |  | Phase 4 chat routes authenticate in preHandler: anonymous malformed bodies get 400 before 401 (card routes fixed in 06-16) | open |  | 2026-10-07T15:33:04.922Z |  |
 | 75 | 06 | deviation | apps/web/components/bots/add-to-channel-dialog.tsx |  | Add to channel lists channels where the caller gets 403; bots.spec now picks #general | open |  | 2026-10-07T15:33:04.995Z |  |
+| 76 | 06.1 | deviation | apps/api/src/modules/work-session/images.int.test.ts |  | attachment_not_linkable acceptance grep is 3 (<6); rejection matrix is table-driven | open |  | 2026-10-07T17:14:33.250Z |  |
+| 77 | 06.1 | deviation | packages/contracts/src/work-session.ts |  | WorkPrompt.attachments is in upload order, not request order; 06.1-02 must dispatch in request order | fixed |  | 2026-10-07T17:14:33.320Z | 2026-10-07T18:10:28.424Z |
+| 78 | 06.1 | deviation | apps/local-runtime/src/codex/codex-runtime.ts |  | Codex turn/start error surfaces as session.error + failed prompt.completed, not a prompt() rejection (plan said reject) | open |  | 2026-10-07T17:48:58.224Z |  |
+| 79 | 06.1 | deviation | apps/local-runtime/src/codex |  | Synthetic Codex image fixture reuses recorded initialize/thread/start lines | open |  | 2026-10-07T17:48:58.298Z |  |
+| 80 | 06.1 | deviation | packages/db |  | 06.1-02 added migration work_prompt_image_order outside its files_modified (needed for request order) | open |  | 2026-10-07T18:10:28.511Z |  |
+| 81 | 06.1 | unmet-truth | apps/api/src/modules/work-session/turn-mode.int.test.ts |  | One standalone turn-mode.int run failed in beforeAll with no captured cause; 9 reruns passed (unconfirmed flake) | open |  | 2026-10-07T18:10:28.587Z |  |
+| 82 | 06.1 | deviation | e2e/tests/work-zone-images.spec.ts |  | Task 2 e2e written before implementation but not run red on its own | open |  | 2026-10-07T19:02:07.423Z |  |
+| 83 | 06.1 | unrun-verify | apps/web/components/work-zone/composer.tsx |  | Real Ctrl+V on a non-macOS host not run (paste event is key-agnostic) | open |  | 2026-10-07T19:02:07.493Z |  |
+| 84 | 06.1 | deviation | apps/web/components/chat/attachment-grid.tsx |  | attachment-grid.tsx changed outside files_modified (optional className) | open |  | 2026-10-07T19:02:07.565Z |  |
+| 85 | 06.1 | unrun-verify | .planning/phases/06.1-work-zone-image-attachments/06.1-05-PLAN.md |  | 06.1-05 Task 3 real-runtime image check (Claude Code, Codex) deferred, human_needed | open |  | 2026-10-07T21:32:00.387Z |  |
+| 86 | 06.1 | deviation | apps/api/src/lib/redis.ts |  | Gate fixed a Phase 1 realtime subscribe/unsubscribe race outside files_modified (redis.int.test.ts) | open |  | 2026-10-07T21:32:00.457Z |  |
+| 87 | 06.1 | deviation | apps/web/components/search/search-palette.tsx |  | Gate fixed a Phase 4 search palette focus defect outside files_modified | open |  | 2026-10-07T21:32:00.531Z |  |
 
 ````json
 [
@@ -991,6 +1003,150 @@ last_updated: 2026-10-07T15:33:04.995Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-07T15:33:04.995Z",
+    "resolved_at": null
+  },
+  {
+    "id": 76,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": "apps/api/src/modules/work-session/images.int.test.ts",
+    "line": null,
+    "description": "attachment_not_linkable acceptance grep is 3 (<6); rejection matrix is table-driven",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T17:14:33.250Z",
+    "resolved_at": null
+  },
+  {
+    "id": 77,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": "packages/contracts/src/work-session.ts",
+    "line": null,
+    "description": "WorkPrompt.attachments is in upload order, not request order; 06.1-02 must dispatch in request order",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-07T17:14:33.320Z",
+    "resolved_at": "2026-10-07T18:10:28.424Z"
+  },
+  {
+    "id": 78,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": "apps/local-runtime/src/codex/codex-runtime.ts",
+    "line": null,
+    "description": "Codex turn/start error surfaces as session.error + failed prompt.completed, not a prompt() rejection (plan said reject)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T17:48:58.224Z",
+    "resolved_at": null
+  },
+  {
+    "id": 79,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": "apps/local-runtime/src/codex",
+    "line": null,
+    "description": "Synthetic Codex image fixture reuses recorded initialize/thread/start lines",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T17:48:58.298Z",
+    "resolved_at": null
+  },
+  {
+    "id": 80,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": "packages/db",
+    "line": null,
+    "description": "06.1-02 added migration work_prompt_image_order outside its files_modified (needed for request order)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T18:10:28.511Z",
+    "resolved_at": null
+  },
+  {
+    "id": 81,
+    "kind": "unmet-truth",
+    "phase": "06.1",
+    "file": "apps/api/src/modules/work-session/turn-mode.int.test.ts",
+    "line": null,
+    "description": "One standalone turn-mode.int run failed in beforeAll with no captured cause; 9 reruns passed (unconfirmed flake)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T18:10:28.587Z",
+    "resolved_at": null
+  },
+  {
+    "id": 82,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": "e2e/tests/work-zone-images.spec.ts",
+    "line": null,
+    "description": "Task 2 e2e written before implementation but not run red on its own",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T19:02:07.423Z",
+    "resolved_at": null
+  },
+  {
+    "id": 83,
+    "kind": "unrun-verify",
+    "phase": "06.1",
+    "file": "apps/web/components/work-zone/composer.tsx",
+    "line": null,
+    "description": "Real Ctrl+V on a non-macOS host not run (paste event is key-agnostic)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T19:02:07.493Z",
+    "resolved_at": null
+  },
+  {
+    "id": 84,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": "apps/web/components/chat/attachment-grid.tsx",
+    "line": null,
+    "description": "attachment-grid.tsx changed outside files_modified (optional className)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T19:02:07.565Z",
+    "resolved_at": null
+  },
+  {
+    "id": 85,
+    "kind": "unrun-verify",
+    "phase": "06.1",
+    "file": ".planning/phases/06.1-work-zone-image-attachments/06.1-05-PLAN.md",
+    "line": null,
+    "description": "06.1-05 Task 3 real-runtime image check (Claude Code, Codex) deferred, human_needed",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T21:32:00.387Z",
+    "resolved_at": null
+  },
+  {
+    "id": 86,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": "apps/api/src/lib/redis.ts",
+    "line": null,
+    "description": "Gate fixed a Phase 1 realtime subscribe/unsubscribe race outside files_modified (redis.int.test.ts)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T21:32:00.457Z",
+    "resolved_at": null
+  },
+  {
+    "id": 87,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": "apps/web/components/search/search-palette.tsx",
+    "line": null,
+    "description": "Gate fixed a Phase 4 search palette focus defect outside files_modified",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T21:32:00.531Z",
     "resolved_at": null
   }
 ]

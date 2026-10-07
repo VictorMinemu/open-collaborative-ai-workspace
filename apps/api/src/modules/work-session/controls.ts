@@ -124,6 +124,8 @@ function modelControl(m: RuntimeModel, runtime: RuntimeId, ctx: ControlsContext)
       supported: m.fastMode.supported,
     },
     supportsAutoMode: m.supportsAutoMode,
+    // 06.1 (P-08): passthrough; absent = the runtime did not say (unknown, allowed).
+    ...(m.imageInput !== undefined ? { imageInput: m.imageInput } : {}),
   };
 }
 

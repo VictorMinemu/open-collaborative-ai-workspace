@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { errorMessage } from "@/lib/api";
+import { useRuntimeConfig } from "@/lib/config";
 import { cn, relativeTime } from "@/lib/utils";
 import { useUpdatePrompt } from "@/lib/workzone-queries";
 
@@ -43,6 +44,7 @@ export function QueuePanel({ sessionId, prompts }: { sessionId: string; prompts:
           </p>
           <PromptMeta p={current} />
           <p className="mt-1.5 line-clamp-3 whitespace-pre-wrap text-[13px]">{current.body}</p>
+          <PromptThumbs p={current} />
         </div>
       ) : null}
 
@@ -112,6 +114,38 @@ function PromptMeta({ p }: { p: WorkPrompt }) {
       <span className="truncate font-medium text-foreground/80">{name}</span>
       <span>· {relativeTime(p.createdAt)}</span>
     </span>
+  );
+}
+
+/**
+ * A prompt's images in the queue (06.1, WZ-IMG-04): small square previews (the API's webp preview, never the original),
+ * in send order, for every controller.
+ */
+function PromptThumbs({ p }: { p: WorkPrompt }) {
+  const { apiUrl } = useRuntimeConfig();
+  const images = p.attachments.filter((a) => a.isImage && a.previewUrl);
+  if (images.length === 0) return null;
+  return (
+    <ul
+      className="mt-2 flex flex-wrap gap-1.5"
+      aria-label={`${images.length} attached image${images.length === 1 ? "" : "s"}`}
+    >
+      {images.map((a) => (
+        <li key={a.id} className="size-11 shrink-0 overflow-hidden rounded-md border bg-muted">
+          {/* biome-ignore lint/performance/noImgElement: an authorized API redirect to a short-lived URL */}
+          <img
+            src={`${apiUrl}${a.previewUrl}`}
+            alt={a.filename}
+            title={a.filename}
+            loading="lazy"
+            decoding="async"
+            draggable={false}
+            data-testid="prompt-thumb"
+            className="size-full object-cover"
+          />
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -213,7 +247,10 @@ function QueuedItem({
             </div>
           </form>
         ) : (
-          <p className="mt-1 line-clamp-4 whitespace-pre-wrap break-words text-[13px]">{p.body}</p>
+          <>
+            <p className="mt-1 line-clamp-4 whitespace-pre-wrap break-words text-[13px]">{p.body}</p>
+            <PromptThumbs p={p} />
+          </>
         )}
       </div>
     </div>

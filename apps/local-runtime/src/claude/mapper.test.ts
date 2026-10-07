@@ -1,6 +1,12 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type {
+  SDKMessage,
+  SDKResultError,
+  SDKUserMessage,
+  SDKUserMessageReplay,
+} from "@anthropic-ai/claude-agent-sdk";
+import type { ImageBlockParam, ToolResultBlockParam } from "@anthropic-ai/sdk/resources/messages";
 import type { SessionEvent } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
 import { sanitizeEvent } from "../sanitize.js";
@@ -274,5 +280,120 @@ describe("ClaudeEventMapper — hand-written cases", () => {
       }),
     ]);
     expect(events).toEqual([]);
+  });
+});
+
+describe("ClaudeEventMapper — prompt images (06.1-03, D-05, P-11)", () => {
+  /** A synthetic base64 run standing in for an image (nothing is decoded). */
+  const DATA = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB".repeat(12);
+  const image = {
+    type: "image",
+    source: { type: "base64", media_type: "image/png", data: DATA },
+  } satisfies ImageBlockParam;
+  const leaks = (events: SessionEvent[]) => {
+    const json = JSON.stringify(events);
+    return json.includes(";base64,") || json.includes(DATA.slice(0, 40));
+  };
+
+  it("a user message echoing image blocks (replayed or not) produces no event, in particular no runtime.raw", () => {
+    const echo: SDKUserMessage = {
+      type: "user",
+      message: { role: "user", content: [image, { type: "text", text: "what is this?" }] },
+      parent_tool_use_id: null,
+    };
+    const replay: SDKUserMessageReplay = {
+      ...echo,
+      uuid: "00000000-0000-4000-8000-000000000001",
+      session_id: "rt-session",
+      isReplay: true,
+    };
+    const dataUrlEcho: SDKUserMessage = {
+      ...echo,
+      message: {
+        role: "user",
+        content: [{ type: "text", text: `data:image/png;base64,${DATA}` }],
+      },
+    };
+    const events = run([echo, replay, dataUrlEcho] as SDKMessage[]);
+    expect(events).toEqual([]);
+    expect(leaks(events)).toBe(false);
+  });
+
+  it("a tool_result holding an image block becomes a tool.completed whose output says [image], without the bytes", () => {
+    const toolResult = {
+      type: "tool_result",
+      tool_use_id: "t-img",
+      content: [image, { type: "text", text: "screenshot taken" }],
+    } satisfies ToolResultBlockParam;
+    const events = run([
+      sdk({
+        type: "assistant",
+        parent_tool_use_id: null,
+        message: {
+          id: "m-img",
+          content: [{ type: "tool_use", id: "t-img", name: "mcp__browser__screenshot", input: {} }],
+        },
+      }),
+      {
+        type: "user",
+        message: { role: "user", content: [toolResult] },
+        parent_tool_use_id: null,
+      } as SDKMessage,
+    ]);
+    const done = events.find((e) => e.type === "tool.completed");
+    expect(done).toMatchObject({ type: "tool.completed", toolUseId: "t-img", ok: true });
+    expect((done as { output?: string }).output).toBe("[image]\nscreenshot taken");
+    expect(leaks(events)).toBe(false);
+  });
+
+  it("an image_error result names the cause, then fails the prompt", () => {
+    const imageError: Pick<
+      SDKResultError,
+      | "type"
+      | "subtype"
+      | "is_error"
+      | "errors"
+      | "terminal_reason"
+      | "total_cost_usd"
+      | "num_turns"
+      | "session_id"
+    > = {
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      errors: ["Could not process image"],
+      terminal_reason: "image_error",
+      total_cost_usd: 0,
+      num_turns: 1,
+      session_id: "rt-session",
+    };
+    const events = run([sdk(imageError)]);
+    expect(events).toMatchObject([
+      {
+        type: "session.error",
+        message: "Claude Code could not read an attached image: Could not process image",
+      },
+      { type: "prompt.completed", promptId: "prompt-1", isError: true },
+    ]);
+    const bare = run([sdk({ ...imageError, errors: [] })]);
+    expect(bare[0]).toMatchObject({
+      type: "session.error",
+      message: expect.stringMatching(/^Claude Code could not read an attached image/),
+    });
+  });
+
+  it("other error results keep their messages", () => {
+    const events = run([
+      sdk({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        errors: ["API error"],
+        terminal_reason: "api_error",
+        total_cost_usd: 0,
+        usage: {},
+      }),
+    ]);
+    expect(events[0]).toEqual({ type: "session.error", message: "API error" });
   });
 });

@@ -72,6 +72,11 @@ describe("buildCodexCatalog — over model/list recorded at codex-cli 0.160.0", 
     // The recording has a model without tiers (Daybreak): fast mode is not supported there.
     expect(catalog.models.some((m) => !m.fastMode.supported)).toBe(true);
   });
+
+  it("every recorded model reads images: imageInput from inputModalities (06.1, P-08)", () => {
+    expect(recorded.data.every((m) => m.inputModalities.includes("image"))).toBe(true);
+    for (const m of catalog.models) expect(m.imageInput).toBe(true);
+  });
 });
 
 describe("buildCodexCatalog — rows the recording does not have", () => {
@@ -84,6 +89,22 @@ describe("buildCodexCatalog — rows the recording does not have", () => {
     expect(catalog.models.map((m) => m.id)).toEqual(["visible", "old"]);
     expect(catalog.models.find((m) => m.id === "old")?.legacy).toBe(true);
     expect(catalog.models.find((m) => m.id === "visible")?.legacy).toBe(false);
+  });
+
+  it("a text-only model reports imageInput false (06.1, P-08)", () => {
+    const models = build([
+      synthetic({ id: "text-only", inputModalities: ["text"] }),
+      synthetic({ id: "with-audio", inputModalities: ["text", "audio"], isDefault: false }),
+      synthetic({ id: "vision", inputModalities: ["text", "image"], isDefault: false }),
+    ]).models;
+    expect(models.map((m) => [m.id, m.imageInput])).toEqual([
+      ["text-only", false],
+      ["with-audio", false],
+      ["vision", true],
+    ]);
+    expect(
+      RuntimeCatalog.parse(build([synthetic({ inputModalities: ["text"] })])).models[0]?.imageInput,
+    ).toBe(false);
   });
 
   it("a default effort the platform does not offer (ultra) becomes null", () => {

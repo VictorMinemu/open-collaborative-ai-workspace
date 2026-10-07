@@ -338,6 +338,27 @@ Plans:
 **Research:** needed (prompt assembly for the AI chat run loop across Anthropic / OpenAI / Google / openai-compatible — alternation rules, mid-conversation system messages, prompt caching; whether bots in shared AI chats answer through OpenClaw or the AI SDK loop; the participant-spoofing eval fixture and its metered-model budget)
 **UI hint**: yes
 
+### Phase 06.1: Work Zone image attachments (INSERTED)
+
+**Goal**: A controller pastes (Ctrl/Cmd+V), drops or attaches images in the Work Zone composer and the session's runtime (Claude Code or Codex) receives them with the prompt; everyone in the session sees the sent images in the stream. Reuses the Phase 4 attachment pipeline (Garage, presigned upload, sniffing, renditions); the API is the only ACL and forwards bytes to the device as `PromptPayload.images`.
+**Requirements**: WZ-IMG-01 (paste/drop/attach with previews), WZ-IMG-02 (API accepts attachment ids with a prompt; access, tenant, type and size checked; audited), WZ-IMG-03 (device receives the images; both adapters pass them to the runtime), WZ-IMG-04 (stream shows sent images to every controller)
+**Depends on:** Phase 6
+**Reason:** owner, 2026-10-07: "no puedo pegar imágenes en Work Zone con Ctrl+V" — diagnosed as not built (inventory row "Composer: attachments | deferred"); owner: "haz el arreglo recomendado".
+**Success Criteria** (what must be TRUE):
+  1. Pasting, dropping or picking a PNG/JPEG/GIF/WebP in the Work Zone composer shows a removable thumbnail; sending queues the prompt with its images; at 1440 and 390, light and dark
+  2. The prompt route accepts only attachments the sender uploaded in the same organization, of an allowed image type, within the device-link size budget; anything else is refused with a clear error, and cross-tenant attempts fail (integration test)
+  3. The device adapters receive the images and pass them to Claude Code and Codex in their native input shape (adapter tests); a runtime/model without image input refuses visibly instead of dropping them
+  4. The session stream shows the images sent with each prompt to every controller; the inventory row for composer attachments is updated from deferred to shipped
+**Plans:** 5 plans in 4 waves (research and planner decisions P-01 … P-13: `06.1-RESEARCH.md`, `06.1-01-PLAN.md`; owner decisions D-01 … D-08 in `06.1-CONTEXT.md`)
+
+Plans:
+
+- [ ] 06.1-01-PLAN.md — Wave 1: contracts, `*_work_prompt_images` migration and the link — Phase 4 upload into the session (scope delegate), prompt ↔ image link, `WorkPrompt.attachments` for every controller, model gate at submit and dispatch, tenant isolation and refusal matrix (Garage)
+- [ ] 06.1-02-PLAN.md — Wave 2: dispatch — ids-only prompt commands, flush select → hydrate (outside the transaction) → send → mark, small-PNG original or ≤ 2000 px rendition, 2 MiB budget from recorded sizes, frame guard on every outbound frame, leak scan (FakeDevice)
+- [ ] 06.1-03-PLAN.md — Wave 2 (parallel): device and adapters — pinned `maxPayload`, refusal without image support, no image data in acks/logs, fake runtime images, Claude/Codex image input tests (start and steer, replay leak), Codex `imageInput`
+- [ ] 06.1-04-PLAN.md — Wave 3: web — paste, drop and paperclip with tray, prompt bubble and queue thumbnails for every controller, refusals and model gate, e2e at 1440/390 light/dark
+- [ ] 06.1-05-PLAN.md — Wave 4: phase gate — inventory row exposed (D-08), full local regression, DEMO.md and WZ-IMG traceability, owner's real-runtime check
+
 ### Phase 7: Self-hosted Release
 
 **Goal**: Any engineering team can install, upgrade, back up, observe and expose an MVP 1 instance with one command each, and the MVP 1 acceptance scenario runs against that exact stack in CI — the milestone gate for Autofy's own engineers as first customer

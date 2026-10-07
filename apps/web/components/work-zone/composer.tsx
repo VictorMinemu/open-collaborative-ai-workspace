@@ -1,35 +1,86 @@
 "use client";
 
-import type { WorkSession } from "@ocw/contracts";
+import { INLINE_IMAGE_TYPES, WORK_PROMPT_MAX_IMAGES, type WorkSession } from "@ocw/contracts";
 import { ArrowUp, ListPlus, Paperclip } from "lucide-react";
-import { type FormEvent, type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import {
+  type ClipboardEvent,
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+  type RefObject,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
+import {
+  AttachmentTray,
+  type QueueItem,
+  useAttachmentQueue,
+} from "@/components/chat/attachments/attachment-tray";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
+import { useAttachmentsConfig } from "@/lib/attachment-queries";
+import { cn } from "@/lib/utils";
 import { useQueuePrompt, useSessionCommand, useSessionControls } from "@/lib/workzone-queries";
 import { useSheetSurface } from "./control-surface";
+import { imageGate, SLASH_REASON } from "./image-gate";
 import { RUNTIMES } from "./meta";
-import { ModelPicker } from "./model-picker";
+import { currentModelControl, ModelPicker } from "./model-picker";
 import { PermissionMenu } from "./permission-menu";
 import { ReasoningMenu } from "./reasoning-menu";
 
 /** Thin divider between the composer chips (ref-1). */
 const ChipDivider = () => <span aria-hidden className="mx-0.5 h-4 w-px shrink-0 bg-border" />;
 
-/** Adds prompts to the session's SHARED queue; they run one at a time on the host device. */
+/** What the paperclip's picker offers (06.1): the four image types a runtime reads. */
+const IMAGE_ACCEPT = INLINE_IMAGE_TYPES.join(",");
+const ATTACH_HINT = `Attach images · PNG, JPEG, GIF or WebP, up to ${WORK_PROMPT_MAX_IMAGES}`;
+const TOO_MANY = `Up to ${WORK_PROMPT_MAX_IMAGES} images per prompt`;
+/** How many files the tray shows at once: four images plus room to show what was refused, and why. */
+const TRAY_MAX = WORK_PROMPT_MAX_IMAGES * 2;
+
+/** What the session pane can hand the composer (a drop on it, 06.1). */
+export interface ComposerApi {
+  addFiles(files: File[]): void;
+}
+
+/** The files of a paste: clipboard file items (an OS screenshot is an `image/png` item), else `files`. */
+function pastedFiles(data: DataTransfer | null): File[] {
+  if (!data) return [];
+  const fromItems = Array.from(data.items ?? [])
+    .filter((i) => i.kind === "file")
+    .map((i) => i.getAsFile())
+    .filter((f): f is File => f !== null);
+  return fromItems.length > 0 ? fromItems : Array.from(data.files ?? []);
+}
+
+/**
+ * Adds prompts to the session's SHARED queue; they run one at a time on the host device. Images (06.1, D-06): a paste
+ * (Ctrl/Cmd+V), a drop on the session pane or the paperclip put them in the tray above the text, where they upload at
+ * once through the Phase 4 pipeline into the session's conversation; Send waits until every upload is ready and posts
+ * their ids with the prompt.
+ */
 export function Composer({
   session,
   queued,
   canConfigure = true,
+  canPrompt = true,
+  apiRef,
   above,
   below,
 }: {
+  /** Receives `addFiles` for drops on the session pane. */
+  apiRef?: RefObject<ComposerApi | null>;
   session: WorkSession;
   queued: number;
   /** The viewer may change the session's settings (`work_session.configure`). */
   canConfigure?: boolean;
+  /** The viewer may prompt the session (`work_session.prompt`): attaching images needs it too. */
+  canPrompt?: boolean;
   /** Attached on top of the card (ref-4 agent bar). */
   above?: ReactNode;
   /** Attached under the card (ref-4 footer strip). */
@@ -46,6 +97,48 @@ export function Composer({
     busy || session.status === "provisioning" || session.status === "host_offline" || queued > 0;
   const archived = session.status === "archived";
   const sending = queue.isPending || command.isPending;
+  // Phase 4 rule: storage not configured (or `attachment.upload` refused) hides the paperclip; the API decides again.
+  const filesConfig = useAttachmentsConfig();
+  const attachable = filesConfig.data?.enabled === true && canPrompt;
+  const canAttach = attachable && !archived;
+  const maxBytes = filesConfig.data?.maxBytes;
+  const limits = useMemo(
+    () => (canAttach && maxBytes ? { maxBytes, maxPerMessage: TRAY_MAX } : null),
+    [canAttach, maxBytes],
+  );
+  // The API refuses the same cases (images_only, images_not_supported, the slash guard); this only says why early.
+  const model = currentModelControl(session, controls.data);
+  const sessionGate = imageGate({ model });
+  const tray = useAttachmentQueue(session.conversationId, limits, {
+    tooManyText: TOO_MANY,
+    precheck: (file, accepted) => {
+      const gate = imageGate({ model, file: { contentType: file.type } });
+      if (!gate.ok) return gate.reason;
+      return accepted >= WORK_PROMPT_MAX_IMAGES ? TOO_MANY : null;
+    },
+  });
+  // Re-run on every render: an image in the tray is marked refused when the model changes to one that can't read it.
+  const refusalOf = (item: QueueItem): string | null => {
+    const gate = imageGate({ model, file: { contentType: item.contentType } });
+    return gate.ok ? null : gate.reason;
+  };
+  const refused = tray.items.some((i) => i.status !== "error" && refusalOf(i) !== null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const uploading = tray.busy || tray.blocked || refused;
+  // D-13 / P-06: a `/command` goes to the session controls and never carries images.
+  const slashWithImages = text.trimStart().startsWith("/") && tray.items.length > 0;
+  // The tray's chips clamp their reason; the hint under the card says it in full (390 included).
+  const firstRefusal = tray.items
+    .map((i) => ({ name: i.name, reason: i.status === "error" ? i.error : refusalOf(i) }))
+    .find((r) => r.reason);
+  const trayProblem = firstRefusal ? `${firstRefusal.name}: ${firstRefusal.reason}` : null;
+  const sendBlockedReason = slashWithImages
+    ? SLASH_REASON
+    : tray.busy
+      ? "Waiting for the images to upload"
+      : tray.blocked || refused
+        ? "Remove the images that can't be sent"
+        : undefined;
   // A `/command` never joins the queue (D-13): the button says Queue only for a prompt that will wait.
   const queueLabel = willQueue && !text.trimStart().startsWith("/");
 
@@ -59,7 +152,7 @@ export function Composer({
   async function submit(e?: FormEvent) {
     e?.preventDefault();
     const body = text.trim();
-    if (!body || sending) return;
+    if (!body || sending || uploading || slashWithImages) return;
     try {
       // D-13: a leading `/command` goes to the session controls on the server, never to the queue raw.
       if (body.startsWith("/")) {
@@ -69,12 +162,34 @@ export function Composer({
         else toast.success(result.notice);
         return;
       }
-      await queue.mutateAsync(body);
+      await queue.mutateAsync({ body, attachmentIds: tray.readyIds });
       setText("");
+      tray.reset();
       if (willQueue) toast.success(`Queued #${queued + 1}`, { description: "Runs after the current turn" });
     } catch (err) {
       toast.error(errorMessage(err));
     }
+  }
+
+  function addFiles(files: File[]) {
+    if (!canAttach || files.length === 0) return;
+    if (!sessionGate.ok) {
+      toast.error(sessionGate.reason);
+      return;
+    }
+    tray.add(files);
+    ref.current?.focus({ preventScroll: true });
+  }
+  if (apiRef) apiRef.current = { addFiles };
+
+  /** Pasted images (a screenshot) join the tray; the text of the paste still goes into the prompt. */
+  function onPaste(e: ClipboardEvent<HTMLTextAreaElement>) {
+    if (!canAttach) return;
+    const files = pastedFiles(e.clipboardData);
+    if (files.length === 0) return;
+    const pasted = e.clipboardData.getData("text/plain").trim();
+    if (!pasted || files.some((f) => f.name === pasted)) e.preventDefault();
+    addFiles(files);
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
@@ -85,8 +200,10 @@ export function Composer({
   }
 
   // Where the prompt runs is in the footer strip (ref-4); the hint line only appears when something is notable.
-  const hint =
-    session.status === "host_offline"
+  const problem = slashWithImages ? SLASH_REASON : trayProblem;
+  const hint = problem
+    ? problem
+    : session.status === "host_offline"
       ? `${session.deviceName} is offline — prompts wait in the queue`
       : willQueue
         ? `Will run after the current turn · #${queued + 1} in queue`
@@ -112,6 +229,11 @@ export function Composer({
     >
       {above}
       <div className="relative rounded-[22px] border bg-card shadow-[0_1px_2px_rgb(0_0_0/0.04),0_8px_24px_-12px_rgb(0_0_0/0.12)] transition-[border-color,box-shadow] focus-within:border-ring/50 dark:shadow-none">
+        {canAttach && tray.items.length > 0 ? (
+          <div className="px-3 pt-3">
+            <AttachmentTray queue={tray} refusalOf={refusalOf} />
+          </div>
+        ) : null}
         <textarea
           ref={ref}
           data-testid="composer"
@@ -120,6 +242,7 @@ export function Composer({
           disabled={archived}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
+          onPaste={onPaste}
           placeholder={archived ? "This session is archived" : `Ask ${RUNTIMES[session.runtime].label} to…`}
           aria-label="Prompt"
           className="block max-h-[220px] min-h-[56px] w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-[14px] outline-none placeholder:text-muted-foreground/70"
@@ -159,27 +282,45 @@ export function Composer({
           ) : null}
           <div className="ml-auto flex shrink-0 items-center gap-1.5">
             {session.settings.pending && !phone ? pendingMarker : null}
-            {/* Attachments are deferred in the inventory (ui.composer.attach): shown, disabled, never faked. */}
-            <Tooltip content="Attachments arrive with file uploads">
-              <span className="inline-flex">
-                <Button
-                  type="button"
-                  size="icon"
-                  variant="ghost"
-                  disabled
-                  data-testid="attach"
-                  aria-label="Attach files (Attachments arrive with file uploads)"
-                  className="rounded-full text-muted-foreground disabled:opacity-45"
-                >
-                  <Paperclip className="size-[18px]" />
-                </Button>
-              </span>
-            </Tooltip>
+            {attachable ? (
+              <>
+                <input
+                  ref={fileInput}
+                  type="file"
+                  accept={IMAGE_ACCEPT}
+                  multiple
+                  hidden
+                  tabIndex={-1}
+                  data-testid="attach-file"
+                  onChange={(e) => {
+                    addFiles(Array.from(e.target.files ?? []));
+                    e.target.value = "";
+                  }}
+                />
+                <Tooltip content={sessionGate.ok ? ATTACH_HINT : sessionGate.reason}>
+                  <span className="inline-flex">
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      disabled={!canAttach || !sessionGate.ok}
+                      data-testid="attach"
+                      aria-label={sessionGate.ok ? ATTACH_HINT : `Attach images (${sessionGate.reason})`}
+                      onClick={() => fileInput.current?.click()}
+                      className="rounded-full text-muted-foreground hover:text-foreground disabled:opacity-45"
+                    >
+                      <Paperclip className="size-[18px]" />
+                    </Button>
+                  </span>
+                </Tooltip>
+              </>
+            ) : null}
             {/* Stop lives in the agent bar above the card (ref-4): same `interrupt` mutation and test id. */}
             <Button
               type="submit"
               size={queueLabel ? "default" : "icon"}
-              disabled={!text.trim() || sending || archived}
+              disabled={!text.trim() || sending || archived || uploading || slashWithImages}
+              title={sendBlockedReason}
               aria-label={queueLabel ? "Add to queue" : "Send"}
               data-testid="send-prompt"
               className="rounded-full"
@@ -197,7 +338,14 @@ export function Composer({
           className="flex min-w-0 items-center gap-2 px-3 pt-1.5 text-[11.5px] text-muted-foreground"
         >
           {showPending ? pendingMarker : null}
-          {hint ? <span className="truncate">{hint}</span> : null}
+          {hint ? (
+            <span
+              data-problem={problem ? "true" : undefined}
+              className={cn(problem ? "min-w-0 break-words text-destructive" : "truncate")}
+            >
+              {hint}
+            </span>
+          ) : null}
         </p>
       ) : null}
     </form>

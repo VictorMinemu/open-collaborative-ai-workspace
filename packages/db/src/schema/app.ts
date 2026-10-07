@@ -10,6 +10,7 @@ import {
   jsonb,
   pgSchema,
   primaryKey,
+  smallint,
   text,
   timestamp,
   uniqueIndex,
@@ -493,6 +494,12 @@ export const attachments = appSchema.table(
       .notNull()
       .references(() => conversations.id, { onDelete: "cascade" }),
     messageId: uuid("message_id").references(() => messages.id, { onDelete: "set null" }),
+    /** Phase 06.1 (P-05): the Work Zone prompt the image was sent with; never set together with `messageId`. */
+    workPromptId: uuid("work_prompt_id").references((): AnyPgColumn => workPrompts.id, {
+      onDelete: "set null",
+    }),
+    /** 06.1-02: the image's place in its prompt's request order (0-based); what the device receives and lists show. */
+    workPromptPosition: smallint("work_prompt_position"),
     uploaderId: uuid("uploader_id").notNull(),
     filename: text("filename").notNull(),
     /** What the browser declared (and the presigned PUT signed). */
@@ -511,6 +518,8 @@ export const attachments = appSchema.table(
     width: integer("width"),
     height: integer("height"),
     hasRenditions: boolean("has_renditions").notNull().default(false),
+    /** Byte size of the stored `large.webp` rendition, recorded by `complete` (06.1: the prompt budget, no storage call). */
+    largeBytes: integer("large_bytes"),
     createdAt: createdAt(),
     completedAt: ts("completed_at"),
     deletedAt: ts("deleted_at"),
@@ -519,11 +528,13 @@ export const attachments = appSchema.table(
   (t) => [
     index("attachments_org_conv_idx").on(t.organizationId, t.conversationId),
     index("attachments_org_message_idx").on(t.organizationId, t.messageId),
+    index("attachments_org_work_prompt_idx").on(t.organizationId, t.workPromptId),
     index("attachments_sweep_idx")
       .on(t.status, t.createdAt)
       .where(sql`purged_at is null and status in ('pending','rejected','deleted')`),
     check("attachments_status_check", sql`${t.status} in ('pending','ready','rejected','deleted')`),
     check("attachments_scan_status_check", sql`${t.scanStatus} in ('not_scanned')`),
+    check("attachments_one_link_check", sql`${t.messageId} is null or ${t.workPromptId} is null`),
   ],
 );
 
@@ -1093,6 +1104,8 @@ export const workSessions = appSchema.table(
   },
   (t) => [
     index("work_sessions_org_idx").on(t.organizationId, t.projectId),
+    // 06.1: attachment routes find the session of a `work_session` conversation on every preview.
+    index("work_sessions_conversation_idx").on(t.organizationId, t.conversationId),
     modeCheck("work_sessions_permission_mode_ck", t.permissionMode),
     check("work_sessions_title_source_ck", sql`${t.titleSource} in ('user','heuristic','auto')`),
   ],

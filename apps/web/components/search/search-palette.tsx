@@ -330,7 +330,16 @@ function PaletteBody({ initialQuery, onClose }: { initialQuery: string; onClose:
         )}
       >
         {profile ? (
-          <ProfileCard person={profile} onBack={() => setProfile(null)} onMessage={go} />
+          <ProfileCard
+            person={profile}
+            onBack={() => {
+              // Move focus to the field before the Back button unmounts: otherwise the dialog restores focus to
+              // the popup (again on the next frame) and the next keystrokes are lost.
+              inputRef.current?.focus();
+              setProfile(null);
+            }}
+            onMessage={go}
+          />
         ) : overview.isError && q.trim() ? (
           <p className="px-3 py-8 text-center text-muted-foreground text-sm">
             {searchErrorMessage(overview.error)}

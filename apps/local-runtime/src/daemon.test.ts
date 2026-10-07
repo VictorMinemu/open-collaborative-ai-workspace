@@ -46,9 +46,13 @@ class FakeRuntime implements AgentRuntime {
         "plan",
         ...(this.allowFullAccess() ? (["fullAccess"] as const) : []),
       ],
-      supportsImages: false,
+      supportsImages: this.supportsImages,
     };
   }
+  /** 06.1-03: whether this stub says it can take images (the daemon refuses image prompts otherwise). */
+  supportsImages = false;
+  /** When set, `prompt()` rejects with this message (a runtime error echoing its input). */
+  promptError: string | null = null;
   interrupts: string[] = [];
   readonly started: StartSessionOptions[] = [];
   readonly resolved: Array<[string, ApprovalDecision]> = [];
@@ -128,6 +132,7 @@ class FakeRuntime implements AgentRuntime {
   async prompt(sessionId: string, p: PromptPayload): Promise<void> {
     this.calls.push(`prompt:${p.promptId}`);
     this.prompts.push(p);
+    if (this.promptError !== null) throw new Error(this.promptError);
     const sink = this.sinks.get(sessionId);
     const cwd = this.started.find((s) => s.sessionId === sessionId)?.cwd ?? "";
     sink?.({ type: "prompt.started", promptId: p.promptId });
@@ -1006,5 +1011,174 @@ describe("Automatic session titles (03.2-12, D-18, P-15, P-19)", () => {
       error: expect.stringMatching(/^title_runtime_mismatch: /),
     });
     expect(runtime.titleRequests).toEqual([]);
+  });
+});
+
+describe("Prompt images (06.1-03, D-05, P-01, P-10, P-11)", () => {
+  /** 1×1 PNG and 1×1 lossless WebP. */
+  const PNG =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+  const WEBP = "UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==";
+  /** 300 base64 characters, as a runtime might echo an image back in an error. */
+  const LONG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB".repeat(10).slice(0, 300);
+
+  async function startSession(sessionId: string, permissionMode = "acceptEdits"): Promise<void> {
+    const localId = await addProject();
+    await daemon.start();
+    await server.frame("hello");
+    server.send({
+      id: `start-${sessionId}`,
+      kind: "session.start",
+      sessionId,
+      payload: { projectLocalId: localId, permissionMode },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === `start-${sessionId}`)).toMatchObject({
+      ok: true,
+    });
+  }
+
+  it("the fake runtime receives the images through the real daemon and says so in its reply", async () => {
+    await daemon.stop();
+    daemon = await Daemon.create({
+      home,
+      env: {},
+      token: "device-token-123",
+      config: { serverUrl: server.url },
+      runtimes: [new ScriptedRuntime("claude-code", 1)],
+      logger: silentLogger,
+      controlSocket: socketPath(),
+      link: { backoffMinMs: 20, backoffMaxMs: 50, heartbeatMs: 60_000 },
+    });
+    await startSession("wi1", "plan");
+    server.send({
+      id: "pi1",
+      kind: "prompt",
+      sessionId: "wi1",
+      payload: {
+        promptId: "ppi1",
+        text: "what is in these screenshots?",
+        images: [
+          { mediaType: "image/png", dataBase64: PNG },
+          { mediaType: "image/webp", dataBase64: WEBP },
+        ],
+      },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "pi1")).toMatchObject({ ok: true });
+    const reply = await server.frame(
+      "event",
+      (f) => f.sessionId === "wi1" && f.event.type === "assistant.message" && f.event.text.includes("Mode:"),
+    );
+    const text = reply.event.type === "assistant.message" ? reply.event.text : "";
+    expect(text.trimEnd().endsWith("Mode: plan\nImages: 2 (image/png, image/webp)")).toBe(true);
+    await server.frame("event", (f) => f.sessionId === "wi1" && f.event.type === "prompt.completed");
+
+    server.send({
+      id: "pi2",
+      kind: "prompt",
+      sessionId: "wi1",
+      payload: { promptId: "ppi2", text: "and now?" },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "pi2")).toMatchObject({ ok: true });
+    const plain = await server.frame(
+      "event",
+      (f) =>
+        f.sessionId === "wi1" &&
+        f.event.type === "assistant.message" &&
+        f.event.messageId.startsWith("ppi2") &&
+        f.event.text.includes("Mode:"),
+    );
+    expect(plain.event.type === "assistant.message" ? plain.event.text : "").not.toContain("Images:");
+    // Nothing the daemon sent back carries the image bytes.
+    expect(JSON.stringify(server.last.frames)).not.toContain(PNG);
+    expect(JSON.stringify(server.last.frames)).not.toContain(WEBP);
+  });
+
+  it("a runtime that cannot take images refuses the prompt visibly; the runtime is never called", async () => {
+    await startSession("wi2");
+    server.send({
+      id: "pi3",
+      kind: "prompt",
+      sessionId: "wi2",
+      payload: { promptId: "ppi3", text: "look", images: [{ mediaType: "image/png", dataBase64: PNG }] },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "pi3")).toEqual({
+      type: "ack",
+      commandId: "pi3",
+      ok: false,
+      error: "This runtime can't receive images",
+    });
+    expect(runtime.prompts).toEqual([]);
+    // Without images the same runtime still runs prompts.
+    server.send({ id: "pi4", kind: "prompt", sessionId: "wi2", payload: { promptId: "ppi4", text: "go" } });
+    expect(await server.frame("ack", (f) => f.commandId === "pi4")).toMatchObject({ ok: true });
+    expect(runtime.prompts.map((p) => p.promptId)).toEqual(["ppi4"]);
+  });
+
+  it("a payload outside the contract bounds (5 images, an SVG) is refused before any runtime call", async () => {
+    runtime.supportsImages = true;
+    await startSession("wi3");
+    const five = Array.from({ length: 5 }, () => ({ mediaType: "image/png", dataBase64: PNG }));
+    server.send({
+      id: "pi5",
+      kind: "prompt",
+      sessionId: "wi3",
+      payload: { promptId: "ppi5", text: "five", images: five },
+    });
+    server.send({
+      id: "pi6",
+      kind: "prompt",
+      sessionId: "wi3",
+      payload: {
+        promptId: "ppi6",
+        text: "svg",
+        images: [{ mediaType: "image/svg+xml", dataBase64: "PHN2Zz48L3N2Zz4=" }],
+      },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "pi5")).toMatchObject({ ok: false });
+    expect(await server.frame("ack", (f) => f.commandId === "pi6")).toMatchObject({ ok: false });
+    expect(runtime.prompts).toEqual([]);
+  });
+
+  it("a runtime error echoing image data reaches neither the ack nor the log", async () => {
+    const logger = captureLogger();
+    await daemonWith(logger);
+    runtime.supportsImages = true;
+    runtime.promptError = `bad input data:image/png;base64,${LONG_BASE64}`;
+    await startSession("wi4");
+    server.send({
+      id: "pi7",
+      kind: "prompt",
+      sessionId: "wi4",
+      payload: { promptId: "ppi7", text: "look", images: [{ mediaType: "image/png", dataBase64: PNG }] },
+    });
+    const ack = await server.frame("ack", (f) => f.commandId === "pi7");
+    expect(ack).toMatchObject({ ok: false, error: expect.stringContaining("bad input") });
+    const warning = logger.lines.find((l) => l.includes("command failed")) ?? "";
+    expect(warning).toContain("bad input");
+    for (const text of [ack.ok ? "" : (ack.error ?? ""), warning]) {
+      expect(text).not.toContain(";base64,");
+      expect(text).not.toContain(LONG_BASE64);
+      expect(text).not.toContain(LONG_BASE64.slice(0, 64));
+    }
+  });
+
+  it("a session.error carrying a data URL leaves the device without it; a diff patch is unchanged", async () => {
+    await startSession("wi5");
+    runtime.emit("wi5", {
+      type: "session.error",
+      message: `Claude Code could not read an attached image: data:image/png;base64,${LONG_BASE64}`,
+    });
+    const err = await server.frame("event", (f) => f.sessionId === "wi5" && f.event.type === "session.error");
+    const message = err.event.type === "session.error" ? err.event.message : "";
+    expect(message).toContain("Claude Code could not read an attached image");
+    expect(message).not.toContain(";base64,");
+    expect(message).not.toContain(LONG_BASE64.slice(0, 64));
+
+    const dataUrl = `data:image/png;base64,${PNG}`;
+    writeFileSync(join(project, "inline.md"), `![dot](${dataUrl})\n`);
+    const localId = daemon.registry.list()[0]!.localId;
+    server.send({ id: "di1", kind: "diff.request", sessionId: "wi5", payload: { projectLocalId: localId } });
+    const diff = await server.frame("diff.result", (f) => f.requestId === "di1");
+    expect(diff.patch).toContain(dataUrl);
   });
 });

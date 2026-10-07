@@ -7,6 +7,9 @@
 // approves everything itself (no approval.requested), like the real runtimes' bypass modes.
 // OCW_RUNTIME_FAKE_ECHO=1 (renderer e2e only): the answer repeats the whole prompt, so a test can stream
 // arbitrary Markdown (fenced code, tables) through the real Work Zone pipeline.
+// Images (06.1, P-10): it takes images (`supportsImages: true`) and, when a prompt carries some, its footer gains
+// `Images: <n> (<mediaType>, …)` after the `Mode:` line, so end-to-end tests can see they arrived. It never looks at
+// the bytes and never writes them anywhere.
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -177,7 +180,7 @@ export class FakeRuntime implements AgentRuntime {
         "auto",
         ...(this.allowFullAccess() ? (["fullAccess"] as const) : []),
       ],
-      supportsImages: false,
+      supportsImages: true,
     };
   }
 
@@ -397,7 +400,10 @@ export class FakeRuntime implements AgentRuntime {
     // P-07: the turn runs at most at the mode the server authorized for it.
     const mode = prompt.permissionMode ? minMode(s.mode, prompt.permissionMode) : s.mode;
     const echo = this.echoPrompt ? `\n\n${prompt.text}` : "";
-    const footer = `${echo}\n\nModel: ${s.settings.model}\nMode: ${mode}`;
+    const images = prompt.images?.length
+      ? `\nImages: ${prompt.images.length} (${prompt.images.map((i) => i.mediaType).join(", ")})`
+      : "";
+    const footer = `${echo}\n\nModel: ${s.settings.model}\nMode: ${mode}${images}`;
     this.emit(s, { type: "prompt.started", promptId: pid });
     this.emit(s, { type: "session.state", status: "running" });
     let isError = false;

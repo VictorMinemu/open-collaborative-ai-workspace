@@ -8,6 +8,7 @@ import type {
   SDKMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
+import type { ImageBlockParam, TextBlockParam } from "@anthropic-ai/sdk/resources/messages";
 import type { PermissionMode, RuntimeInfo, SessionEvent } from "@ocw/contracts";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AsyncQueue } from "../async-queue.js";
@@ -382,6 +383,64 @@ const settingsEvents = (events: SessionEvent[]) =>
     (e): e is Extract<SessionEvent, { type: "session.settings" }> => e.type === "session.settings",
   );
 
+describe("ClaudeCodeRuntime — prompt images at Agent SDK 0.3.282 (06.1-03, D-05)", () => {
+  const PNG =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+  const WEBP = "UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==";
+
+  it("says it can take images", () => {
+    expect(setup().runtime.capabilities.supportsImages).toBe(true);
+  });
+
+  it("pushes one SDKUserMessage with base64 image blocks before the text, in order, with no filename", async () => {
+    const { start, runtime } = setup();
+    const q = await start();
+    await runtime.prompt("s1", {
+      promptId: "p1",
+      text: "what changed in these screenshots?",
+      images: [
+        { mediaType: "image/png", dataBase64: PNG },
+        { mediaType: "image/webp", dataBase64: WEBP },
+      ],
+    });
+    await tick();
+    // Typed against the installed SDK: a shape change in SDKUserMessage / ImageBlockParam fails typecheck here.
+    const png = {
+      type: "image",
+      source: { type: "base64", media_type: "image/png", data: PNG },
+    } satisfies ImageBlockParam;
+    const webp = {
+      type: "image",
+      source: { type: "base64", media_type: "image/webp", data: WEBP },
+    } satisfies ImageBlockParam;
+    const text = { type: "text", text: "what changed in these screenshots?" } satisfies TextBlockParam;
+    const expected: SDKUserMessage = {
+      type: "user",
+      message: { role: "user", content: [png, webp, text] },
+      parent_tool_use_id: null,
+    };
+    expect(q.prompts).toHaveLength(1);
+    expect(q.prompts[0]).toStrictEqual(expected);
+    expect(JSON.stringify(q.prompts[0])).not.toMatch(/name|path|"url"|file/i);
+  });
+
+  it("a prompt without images still pushes plain string content", async () => {
+    const { start, runtime } = setup();
+    const q = await start();
+    await runtime.prompt("s1", { promptId: "p1", text: "just text" });
+    await runtime.prompt("s1", { promptId: "p2", text: "empty list", images: [] });
+    await tick();
+    expect(q.prompts[0]).toStrictEqual({
+      type: "user",
+      message: { role: "user", content: "just text" },
+      parent_tool_use_id: null,
+    });
+    q.emit(result());
+    await settle();
+    expect(q.prompts[1]?.message.content).toBe("empty list");
+  });
+});
+
 describe("ClaudeCodeRuntime — settings between turns (D-07, D-14)", () => {
   it("applies a model change at once while idle and reports it", async () => {
     const { start, runtime, events } = setup();
@@ -533,6 +592,8 @@ describe("ClaudeCodeRuntime — catalog() (no turn, D-08 … D-11)", () => {
       defaultContextWindow: 200_000,
     });
     expect(byId.get("haiku")).toMatchObject({ contextWindows: [], defaultContextWindow: 200_000 });
+    // 06.1 (P-08): the SDK's ModelInfo has no modality field, so image input stays unknown (allowed).
+    for (const m of catalog?.models ?? []) expect(m).not.toHaveProperty("imageInput");
   });
 
   it("a failing probe yields a catalog without context windows instead of failing", async () => {

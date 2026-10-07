@@ -140,7 +140,7 @@ Never edit the text between the markers by hand: the next `--write` replaces it 
 | Stream: 'N changed files +a −b · Open diff' card | exposed | diff.result after every turn, rolled up by top-level folder (Plan 10) | apps/web/components/work-zone/changes-card.tsx data-testid="changes-card" / "open-diff"; work_session.changes |
 | Floating agent bar (N agent working · View · Stop) | exposed | One agent per session today: status + interrupt (Plan 10) | apps/web/components/work-zone/agent-bar.tsx data-testid="agent-bar" / "interrupt"; POST /work-sessions/:id/interrupt |
 | Composer: model / reasoning / permission chips | exposed | Driven by GET /work-sessions/:id/controls (Plans 01, 09) | apps/web/components/work-zone/composer.tsx data-testid="composer-controls"; reference/ref-1.png, ref-2.png, ref-3.png |
-| Composer: attachments | deferred | Needs file uploads, Phase 4 (prompt images are not wired end to end yet) | reference/ref-4-layout.png; PromptPayload.images (device side only) |
+| Composer: attachments | exposed | Images only (PNG, JPEG, GIF, WebP) by paste, drop or the paperclip, through the Phase 4 upload pipeline; other files are not sent (the runtime reads the repo itself) (Phase 06.1) | apps/web/components/work-zone/composer.tsx data-testid="attach"; e2e/tests/work-zone-images.spec.ts; PromptPayload.images |
 | Footer strip (worktree, diff stat, branch) | exposed | Worktree flag, device, branch and diff stat exist (Plan 10) | apps/web/components/work-zone/session-footer.tsx data-testid="session-footer" |
 | Turn minimap rail | deferred | Turn navigation rail; deferred until long-session navigation is planned | reference/ref-4-layout.png |
 

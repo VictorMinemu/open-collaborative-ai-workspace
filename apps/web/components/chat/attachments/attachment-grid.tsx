@@ -21,16 +21,19 @@ const SINGLE_MAX_H = 360;
 export function MessageAttachments({
   attachments,
   onOpenImage,
+  className,
 }: {
   attachments: Attachment[] | undefined;
   onOpenImage: (index: number) => void;
+  /** Extra classes for the column (e.g. `items-end` for a right-aligned Work Zone prompt, 06.1). */
+  className?: string;
 }) {
   const list = attachments ?? [];
   if (list.length === 0) return null;
   const images = list.filter((a) => a.isImage && a.previewUrl);
   const files = list.filter((a) => !(a.isImage && a.previewUrl));
   return (
-    <div className="mt-1.5 flex flex-col gap-1.5" data-testid="message-attachments">
+    <div className={cn("mt-1.5 flex flex-col gap-1.5", className)} data-testid="message-attachments">
       {images.length === 1 && images[0] ? (
         <SingleImage image={images[0]} onOpen={() => onOpenImage(0)} />
       ) : images.length > 1 ? (

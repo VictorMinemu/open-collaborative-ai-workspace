@@ -98,6 +98,18 @@ Phase 03.2 (ADR-0012, ADR-0013). What each runtime offers, and why some options 
    device owner's login: Claude Code uses Haiku, Codex uses GPT-6-Luna. A title you type is never replaced. When
    the Work Zone policy leaves the small model out, or the call fails or takes longer than 20 s, the first line
    stays and the session is not affected.
+5. **Images in prompts** (Phase 06.1). In a session, paste a screenshot (Ctrl/Cmd+V), drop images on the session or
+   use the paperclip. Only PNG, JPEG, GIF and WebP are accepted (other files are refused in place and never
+   uploaded; the runtime reads the repo itself). Up to 4 images per prompt, each at most 2 MB as sent: a small PNG
+   screenshot (up to 1 MB and 2000 px) goes as it is, everything else as an EXIF-free copy of at most 2000 px.
+   A text is required with the images, and Send waits until every upload has finished. Every controller sees the
+   images on the prompt in the stream and in the queue, and opens them full size. A model that can't read images
+   is refused before anything is sent: Codex reports it per model, so the paperclip is disabled with the reason;
+   Claude Code reports nothing, so if it ever happens the turn fails with "Claude Code could not read an attached
+   image". Images come from the session composer, not from the New session dialog's first prompt.
+   Scope: the daemon never writes images to disk, a worktree or tmp; the runtime's own transcript persistence
+   (Claude `~/.claude/projects/*.jsonl`, Codex rollouts) is out of scope. That history stays on the device
+   owner's machine, like the prompt text.
 
 **Owner check before relying on Full access** (never run by an agent): on an opted-in device, start a Claude Code
 session in Supervised, switch to Full access, ask for a file edit and a shell command: no approval prompt, the
@@ -105,6 +117,22 @@ badge is visible, and `app.audit_events` has `work_session.full_access_entered` 
 Switch back to Supervised and send another prompt: it asks again and the conversation continued (Claude relaunches
 with `resume` when entering or leaving Full access). Repeat with Codex. Also check the model chip shows the alias
 row (e.g. *Sonnet*) for the model the runtime reports.
+
+**Owner check: images on real runtimes** (never run by an agent; the automated tests use a fake runtime and
+synthetic fixtures). On a stack running this branch, with your desktop app connected to it:
+
+1. Open a Claude Code session, paste a screenshot (Cmd/Ctrl+V), type "Describe this image in one sentence" and
+   send. The thumbnail shows in the composer, then on the prompt in the stream, and the answer describes the
+   screenshot.
+2. Repeat in a Codex session. If the model chip offers a model that can't read images, the paperclip is disabled
+   with the reason.
+3. Open the session as a second controller (a member the device is shared with): the image is on the prompt and
+   opens full size.
+4. In `app.audit_events`, the `work_prompt.queued` row has `imageCount: 1` and the attachment ids, and no image
+   data:
+   `select action, metadata from app.audit_events where action = 'work_prompt.queued' order by occurred_at desc limit 2;`
+
+If a runtime fails, note the runtime, the model and the message shown in the session.
 
 ## Presence and live access
 

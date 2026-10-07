@@ -20,6 +20,8 @@ import {
   X,
 } from "lucide-react";
 import { type ReactNode, useState } from "react";
+import { MessageAttachments } from "@/components/chat/attachments/attachment-grid";
+import { Lightbox } from "@/components/chat/attachments/lightbox";
 import { UserAvatar } from "@/components/ui/avatar";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -362,30 +364,50 @@ function MessageFooter({ item }: { item: Extract<Item, { kind: "assistant" }> })
   );
 }
 
+/**
+ * A prompt in the stream: author, time and text, with its images above the text (06.1, WZ-IMG-04) as in Phase 4
+ * messages, right-aligned; a click opens the large rendition. Every controller gets the same bubble live.
+ */
+function PromptBubble({ item, session }: { item: Extract<Item, { kind: "prompt" }>; session: WorkSession }) {
+  const [open, setOpen] = useState<number | null>(null);
+  const p = item.prompt;
+  const name = p?.authorName ?? "Someone";
+  const attachments = p?.attachments ?? [];
+  const images = attachments.filter((a) => a.isImage && a.previewUrl);
+  // Multiplayer attribution stays on every prompt (an intentional difference from ref-4).
+  return (
+    <div className="flex flex-col items-end gap-1.5 pl-8 sm:pl-20" data-testid="prompt-bubble">
+      <p className="flex items-center gap-1.5 text-muted-foreground text-xs">
+        {item.pending ? (
+          <span className="inline-flex items-center gap-1">
+            <Spinner className="size-3" /> sending to {session.deviceName}
+          </span>
+        ) : null}
+        {p ? <span className="tabular-nums">{hhmm(p.createdAt)}</span> : null}
+        <span className="font-medium text-foreground">{name}</span>
+        <UserAvatar name={name} seed={p?.authorUserId} className="size-5 text-[9px]" />
+      </p>
+      {attachments.length > 0 ? (
+        <MessageAttachments
+          attachments={attachments}
+          onOpenImage={setOpen}
+          className="mt-0 w-full items-end"
+        />
+      ) : null}
+      <div className="max-w-full whitespace-pre-wrap break-words rounded-2xl bg-muted px-3.5 py-2.5 text-[14.5px] leading-relaxed">
+        {p?.body ?? "…"}
+      </div>
+      {open !== null && images.length > 0 ? (
+        <Lightbox images={images} index={open} onClose={() => setOpen(null)} />
+      ) : null}
+    </div>
+  );
+}
+
 function StreamItem({ item, session }: { item: Item; session: WorkSession }) {
   switch (item.kind) {
-    case "prompt": {
-      const p = item.prompt;
-      const name = p?.authorName ?? "Someone";
-      // Multiplayer attribution stays on every prompt (an intentional difference from ref-4).
-      return (
-        <div className="flex flex-col items-end gap-1.5 pl-8 sm:pl-20" data-testid="prompt-bubble">
-          <p className="flex items-center gap-1.5 text-muted-foreground text-xs">
-            {item.pending ? (
-              <span className="inline-flex items-center gap-1">
-                <Spinner className="size-3" /> sending to {session.deviceName}
-              </span>
-            ) : null}
-            {p ? <span className="tabular-nums">{hhmm(p.createdAt)}</span> : null}
-            <span className="font-medium text-foreground">{name}</span>
-            <UserAvatar name={name} seed={p?.authorUserId} className="size-5 text-[9px]" />
-          </p>
-          <div className="max-w-full whitespace-pre-wrap break-words rounded-2xl bg-muted px-3.5 py-2.5 text-[14.5px] leading-relaxed">
-            {p?.body ?? "…"}
-          </div>
-        </div>
-      );
-    }
+    case "prompt":
+      return <PromptBubble item={item} session={session} />;
     case "assistant":
       return (
         <div className="min-w-0 text-[14.5px]" data-testid="assistant-message">
