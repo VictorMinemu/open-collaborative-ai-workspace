@@ -61,6 +61,8 @@ export {
   PlanTokenUnavailableError,
 } from "./errors";
 export { loadAiChatPolicy, webPolicyReason } from "./policy";
+/** For the opt-in metered eval (06-09): the same provider instance an organization key gets, never a model string. */
+export { type OrgProviderKind, orgLanguageModel } from "./registry";
 
 export interface ResolvedModel {
   ref: ModelRef;

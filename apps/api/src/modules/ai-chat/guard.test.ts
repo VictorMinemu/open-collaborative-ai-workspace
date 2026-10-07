@@ -116,7 +116,9 @@ describe("prompts and models stay behind their one door (P-04, P-05)", () => {
     expect(importedNames(code, "ai")).toContain("streamText");
     expect(code).toContain("buildModelMessages(");
     expect(code).toContain("SPOOF_CASES");
-    expect(code).toMatch(/import\s*\{[^}]*\borgLanguageModel\b[^}]*\}\s*from\s*["']\.\.\/\.\.\/modules\/model-gateway["']/u);
+    expect(code).toMatch(
+      /import\s*\{[^}]*\borgLanguageModel\b[^}]*\}\s*from\s*["']\.\.\/\.\.\/modules\/model-gateway["']/u,
+    );
     expect(code).toContain("orgLanguageModel(");
     expect(IMPORTS_AI_SDK.test(code)).toBe(false);
   });

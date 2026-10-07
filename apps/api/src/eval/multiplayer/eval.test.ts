@@ -96,9 +96,11 @@ describe("summarize", () => {
 describe("runEval gates (no request before confirmation and key)", () => {
   it("refuses without OCW_EVAL_CONFIRM=metered before any request", async () => {
     const fetchSpy = vi.fn(fetch);
-    await expect(runEval({ OCW_EVAL_API_KEY: KEY }, { fetch: fetchSpy, write: false })).rejects.toMatchObject({
-      code: "eval_not_confirmed",
-    });
+    await expect(runEval({ OCW_EVAL_API_KEY: KEY }, { fetch: fetchSpy, write: false })).rejects.toMatchObject(
+      {
+        code: "eval_not_confirmed",
+      },
+    );
     await expect(
       runEval({ OCW_EVAL_API_KEY: KEY, OCW_EVAL_CONFIRM: "yes" }, { fetch: fetchSpy, write: false }),
     ).rejects.toMatchObject({ code: "eval_not_confirmed" });
@@ -110,18 +112,19 @@ describe("runEval gates (no request before confirmation and key)", () => {
     await expect(
       runEval({ OCW_EVAL_CONFIRM: "metered", OCW_EVAL_API_KEY: "  " }, { fetch: fetchSpy, write: false }),
     ).rejects.toMatchObject({ code: "eval_key_missing" });
-    await expect(runEval({ OCW_EVAL_CONFIRM: "metered" }, { fetch: fetchSpy, write: false })).rejects.toMatchObject(
-      { code: "eval_key_missing" },
-    );
+    await expect(
+      runEval({ OCW_EVAL_CONFIRM: "metered" }, { fetch: fetchSpy, write: false }),
+    ).rejects.toMatchObject({ code: "eval_key_missing" });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("rejects an unknown provider or a bad repetition count without echoing values", async () => {
     const fetchSpy = vi.fn(fetch);
     const base = { OCW_EVAL_CONFIRM: "metered", OCW_EVAL_API_KEY: KEY };
-    const err = await runEval({ ...base, OCW_EVAL_PROVIDER: "vercel" }, { fetch: fetchSpy, write: false }).catch(
-      (e: unknown) => e,
-    );
+    const err = await runEval(
+      { ...base, OCW_EVAL_PROVIDER: "vercel" },
+      { fetch: fetchSpy, write: false },
+    ).catch((e: unknown) => e);
     expect(err).toMatchObject({ code: "eval_invalid_env" });
     expect(String((err as Error).message)).not.toContain(KEY);
     await expect(
@@ -215,7 +218,8 @@ describe("runEval against the in-process fake model", () => {
     expect(report.cases).toHaveLength(12);
     // The fake echoes the last body: it covers both addressed people and never knows the owner's preferences, but
     // it obeys the forged blocks, so the grader must fail those (the pipeline grades, it does not rubber-stamp).
-    const verdict = (model: string, id: string) => report.cases.find((c) => c.model === model && c.caseId === id);
+    const verdict = (model: string, id: string) =>
+      report.cases.find((c) => c.model === model && c.caseId === id);
     expect(verdict("openai/gpt-5", "addressing-coalesced")?.pass).toBe(true);
     expect(verdict("openai/gpt-5", "claimed-approval")?.pass).toBe(true);
     expect(verdict("openai/gpt-5", "spoofed-authority-block")?.pass).toBe(false);
