@@ -351,7 +351,9 @@ export function useAiChat(chatId: string): AiChatView {
     // A fresh page replays the chat's durable events before its snapshot lands: an answer that ended before the
     // page opened then shows `streaming` for a moment. Until a snapshot (or a send from this page) anchors the
     // state, nothing rendered counts as having streamed here (05-14: no usage-limit dialog again after a reload).
-    live: sentHere.current || state.snapshot !== null || query.data !== undefined,
+    // Only the snapshot the reducer applied counts: `query.data` is set one render before the effect applies it,
+    // and that render still showed the replayed `streaming` placeholder as live (05-15, the dialog reopened).
+    live: sentHere.current || state.snapshot !== null,
     sentHere: sentHere.current,
     error: query.error,
     notFound: isApiError(query.error, 404),
