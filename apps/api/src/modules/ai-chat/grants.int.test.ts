@@ -602,9 +602,10 @@ describe("after every grant is revoked", () => {
     const all = input.map(textOf).join("\n");
     expect(all).toContain(`<message from="Riley Park" user_id="${rileyId}"`);
     expect(all).toContain("Use double-entry bookkeeping");
-    // Notice lines never reach the model.
-    expect(all).not.toContain("shared this chat with");
-    expect(all).not.toContain("removed access for");
+    // Notice lines never reach the model as a message: only as `<notice>` lines of the turn context (P-09, 06-05).
+    const outsideNotices = all.replace(/<notice>[^<]*<\/notice>/gu, "");
+    expect(outsideNotices).not.toContain("shared this chat with");
+    expect(outsideNotices).not.toContain("removed access for");
 
     // Every notice of this chat, in order.
     expect((await notices(chatId)).map((n) => n.body)).toEqual([
