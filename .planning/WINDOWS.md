@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 67
+open_count: 70
 waived_count: 0
 fixed_count: 17
-total_count: 84
-last_updated: 2026-10-07T19:02:07.565Z
+total_count: 87
+last_updated: 2026-10-07T21:32:00.531Z
 ---
 
 # Broken Windows Ledger
@@ -99,6 +99,9 @@ last_updated: 2026-10-07T19:02:07.565Z
 | 82 | 06.1 | deviation | e2e/tests/work-zone-images.spec.ts |  | Task 2 e2e written before implementation but not run red on its own | open |  | 2026-10-07T19:02:07.423Z |  |
 | 83 | 06.1 | unrun-verify | apps/web/components/work-zone/composer.tsx |  | Real Ctrl+V on a non-macOS host not run (paste event is key-agnostic) | open |  | 2026-10-07T19:02:07.493Z |  |
 | 84 | 06.1 | deviation | apps/web/components/chat/attachment-grid.tsx |  | attachment-grid.tsx changed outside files_modified (optional className) | open |  | 2026-10-07T19:02:07.565Z |  |
+| 85 | 06.1 | unrun-verify | .planning/phases/06.1-work-zone-image-attachments/06.1-05-PLAN.md |  | 06.1-05 Task 3 real-runtime image check (Claude Code, Codex) deferred, human_needed | open |  | 2026-10-07T21:32:00.387Z |  |
+| 86 | 06.1 | deviation | apps/api/src/lib/redis.ts |  | Gate fixed a Phase 1 realtime subscribe/unsubscribe race outside files_modified (redis.int.test.ts) | open |  | 2026-10-07T21:32:00.457Z |  |
+| 87 | 06.1 | deviation | apps/web/components/search/search-palette.tsx |  | Gate fixed a Phase 4 search palette focus defect outside files_modified | open |  | 2026-10-07T21:32:00.531Z |  |
 
 ````json
 [
@@ -1108,6 +1111,42 @@ last_updated: 2026-10-07T19:02:07.565Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-07T19:02:07.565Z",
+    "resolved_at": null
+  },
+  {
+    "id": 85,
+    "kind": "unrun-verify",
+    "phase": "06.1",
+    "file": ".planning/phases/06.1-work-zone-image-attachments/06.1-05-PLAN.md",
+    "line": null,
+    "description": "06.1-05 Task 3 real-runtime image check (Claude Code, Codex) deferred, human_needed",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T21:32:00.387Z",
+    "resolved_at": null
+  },
+  {
+    "id": 86,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": "apps/api/src/lib/redis.ts",
+    "line": null,
+    "description": "Gate fixed a Phase 1 realtime subscribe/unsubscribe race outside files_modified (redis.int.test.ts)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T21:32:00.457Z",
+    "resolved_at": null
+  },
+  {
+    "id": 87,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": "apps/web/components/search/search-palette.tsx",
+    "line": null,
+    "description": "Gate fixed a Phase 4 search palette focus defect outside files_modified",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T21:32:00.531Z",
     "resolved_at": null
   }
 ]
