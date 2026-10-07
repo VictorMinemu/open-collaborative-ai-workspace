@@ -129,3 +129,55 @@ describe("prompts and models stay behind their one door (P-04, P-05)", () => {
     expect(offenders).toEqual([]);
   });
 });
+
+/** Code lines only: `//` lines and the inside of block comments are ignored. */
+export function codeLines(code: string): string {
+  return code
+    .replace(/\/\*[\s\S]*?\*\//gu, "")
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("//"))
+    .join("\n");
+}
+
+/**
+ * A template literal that prints a name-like value, a colon and then the body: `${author.name}: ${r.body}` (with or
+ * without a newline between). AGENTS.md: participant identity is structural, never a plain-text `Name:` prefix.
+ */
+const NAME_COLON_BODY =
+  /\$\{[^}]*\b(?:name|Name|displayName|author|from|who|sender)\w*\b[^}]*\}\s*:\s*(?:\\n)?\s*\$\{[^}]*\b(?:body|text|content|message)\w*\b[^}]*\}/u;
+/** A message object with the system role: `role: "system"`. */
+const SYSTEM_ROLE_MESSAGE = /\brole\s*:\s*["'`]system["'`]/u;
+
+describe("participant identity stays structural (06-05, AGENTS.md, D-04)", () => {
+  const AI_CHAT = join(API, "modules/ai-chat");
+  const BUILDER = "apps/api/src/modules/ai-chat/build-model-messages.ts";
+
+  it("the patterns catch what they must and nothing else", () => {
+    // Source snippets are written with `#{` for `${` so they stay plain strings here.
+    const src = (s: string) => s.replaceAll("#{", "$" + "{");
+    expect(NAME_COLON_BODY.test(src("`#{author.name}: #{r.body}`"))).toBe(true);
+    expect(NAME_COLON_BODY.test(src("`#{promptName(a.name)}:\\n#{neutralise(r.body)}`"))).toBe(true);
+    expect(NAME_COLON_BODY.test(src("`#{displayName}: #{text}`"))).toBe(true);
+    expect(
+      NAME_COLON_BODY.test(src('`<message from="#{promptName(a.name)}">\\n#{neutralise(r.body)}`')),
+    ).toBe(false);
+    expect(NAME_COLON_BODY.test(src("`#{label} (user-authored preferences: follow them`"))).toBe(false);
+    expect(SYSTEM_ROLE_MESSAGE.test('{ role: "system", content: x }')).toBe(true);
+    expect(SYSTEM_ROLE_MESSAGE.test('m.role === "system"')).toBe(false);
+    expect(codeLines('// role: "system"\n/* role: "system" */\nconst a = 1;')).not.toMatch(
+      SYSTEM_ROLE_MESSAGE,
+    );
+  });
+
+  it("build-model-messages.ts has no template that prints a name, a colon and a body", () => {
+    expect(codeLines(read(join(ROOT, BUILDER)))).not.toMatch(NAME_COLON_BODY);
+  });
+
+  it("no file under modules/ai-chat/ other than build-model-messages.ts builds a system-role message", () => {
+    const offenders = walk(AI_CHAT)
+      .map(rel)
+      .filter((r) => r !== BUILDER && r !== SELF)
+      .filter((r) => SYSTEM_ROLE_MESSAGE.test(codeLines(read(join(ROOT, r)))));
+    expect(offenders).toEqual([]);
+  });
+});

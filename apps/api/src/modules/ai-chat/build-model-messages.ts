@@ -22,8 +22,15 @@ export interface PersistedTurn {
    * Phase 6 (P-06): who wrote a user row and when. Only the multiplayer format reads them; a solo prompt ignores them
    * (Phase 5 output, byte for byte).
    */
-  author?: { kind: "user" | "agent"; id: string; name: string } | null;
+  author?: { kind: "user" | "agent"; id: string; name: string; handle?: string | null } | null;
   at?: string;
+  /**
+   * 06-05: `notice` = a system row of the chat (an access change written by 06-04). The multiplayer format puts the
+   * notices newer than the last kept answer into the trailing `<turn_context>`; the solo format ignores them. A user
+   * row whose author is an agent is a persona row (06-10): an attributed block inside a user turn, never an answer
+   * of the chat's model. Default `message`.
+   */
+  kind?: "message" | "notice";
 }
 
 /** One participant of a multiplayer AI chat as the prompt lists it (P-06). */
@@ -59,7 +66,13 @@ export interface BuildInput {
    * `respondingTo` = the people this turn answers, `shared` = any active grant or more than one human member (then
    * personal instructions are never used, D-06). Absent = solo: the Phase 5 output, byte for byte.
    */
-  participants?: { roster: PromptParticipant[]; respondingTo: PromptParticipant[]; shared: boolean };
+  participants?: {
+    roster: PromptParticipant[];
+    respondingTo: PromptParticipant[];
+    shared: boolean;
+    /** D-06: tools the chat has on that this turn does not carry, and why (the model can then explain). */
+    withheld?: Array<{ tool: string; reason: string }>;
+  };
 }
 
 export interface BuiltPrompt {
@@ -189,21 +202,58 @@ function multiplayerInstructions(
   return parts.join("\n\n");
 }
 
-/** One human row as a server-generated block: attributes from the platform, the body neutralised. */
+/** How an author is named in the prompt: a person by display name, a persona by its @handle. */
+function authorName(a: NonNullable<PersistedTurn["author"]> | null | undefined): string {
+  if (!a) return "unknown";
+  return a.kind === "agent" ? `@${promptName(a.handle ?? a.name)}` : promptName(a.name);
+}
+
+/** One user-side row (a human or a persona) as a server-generated block: attributes from the platform, body neutralised. */
 function messageBlock(r: PersistedTurn): string {
   const a = r.author;
-  const from = `from="${promptName(a?.name ?? "unknown")}"`;
+  const from = `from="${authorName(a)}"`;
   const who = a ? (a.kind === "agent" ? ` agent_id="${a.id}" kind="agent"` : ` user_id="${a.id}"`) : "";
   const at = r.at ? ` at="${isoSeconds(r.at)}"` : "";
   return `<message ${from}${who}${at}>\n${neutralise(r.body)}\n</message>`;
 }
 
-function turnContext(respondingTo: PromptParticipant[]): string {
-  const lines = respondingTo.map((p) =>
+/** A file name as an attribute value: no quote, angle bracket, backtick or line break (so no tag can open), bounded. */
+function fileAttr(name: string | undefined): string {
+  const cleaned = (name ?? "")
+    .replace(/[\r\n\t]+/gu, " ")
+    .replace(/[<>"`]/gu, "")
+    .trim()
+    .slice(0, 120);
+  return cleaned || "file";
+}
+
+/**
+ * The label that keeps a file with its author (P-06). File parts carry their name; an inlined text file or a
+ * placeholder is a text part that already names its file, so its label carries the author only.
+ */
+function attachmentLabel(r: PersistedTurn, part: ModelFilePart): string {
+  const from = `from="${authorName(r.author)}"`;
+  return part.type === "file"
+    ? `<attachment ${from} name="${fileAttr(part.filename)}"/>`
+    : `<attachment ${from}/>`;
+}
+
+/** File content and names are untrusted too: a text part or a file name cannot open or close a reserved tag. */
+function safePart(part: ModelFilePart): ModelFilePart {
+  if (part.type === "text") return { ...part, text: neutralise(part.text) };
+  return part.filename === undefined ? part : { ...part, filename: fileAttr(part.filename) };
+}
+
+function turnContext(participants: NonNullable<BuildInput["participants"]>, notices: string[]): string {
+  const lines = participants.respondingTo.map((p) =>
     p.kind === "agent"
       ? `<responding_to name="@${promptName(p.handle ?? p.name)}" agent_id="${p.id}"/>`
       : `<responding_to name="${promptName(p.name)}" user_id="${p.id}"/>`,
   );
+  for (const n of notices) lines.push(`<notice>${neutralise(n.trim())}</notice>`);
+  for (const w of participants.withheld ?? []) {
+    lines.push(`<withheld tool="${promptName(w.tool)}" reason="${promptName(w.reason)}"/>`);
+  }
   return ["<turn_context>", ...lines, "</turn_context>"].join("\n");
 }
 
@@ -236,22 +286,32 @@ function multiplayerMessages(
   participants: NonNullable<BuildInput["participants"]>,
 ): ModelMessage[] {
   const drafts: MultiDraft[] = [];
+  // Access changes since the last answer the model gave (D-04): older ones are history it already answered after.
+  let notices: string[] = [];
   for (const r of input.rows) {
     if (r.deleted) continue;
+    if (r.kind === "notice") {
+      if (r.body.trim()) notices.push(r.body);
+      continue;
+    }
     if (r.role === "assistant" && !keepAssistant(r)) continue;
     const prev = drafts.at(-1);
     if (r.role === "user") {
       const files = input.attachments.get(r.id) ?? [];
       if (r.body.trim().length === 0 && files.length === 0) continue;
-      const parts: Part[] = [messageBlock(r), ...files];
+      const parts: Part[] = [messageBlock(r)];
+      for (const f of files) parts.push(attachmentLabel(r, f), safePart(f));
       if (prev?.role === "user") prev.parts.push(...parts);
       else drafts.push({ role: "user", parts });
-    } else if (prev?.role === "assistant") prev.text.push(r.body);
-    else drafts.push({ role: "assistant", text: [r.body] });
+    } else {
+      notices = [];
+      if (prev?.role === "assistant") prev.text.push(r.body);
+      else drafts.push({ role: "assistant", text: [r.body] });
+    }
   }
   while (drafts[0]?.role === "assistant") drafts.shift();
   // The trailing turn context closes the last user message (never a mid-conversation system message, D-04).
-  const context = turnContext(participants.respondingTo);
+  const context = turnContext(participants, notices);
   const last = drafts.at(-1);
   if (last?.role === "user") last.parts.push(context);
   else drafts.push({ role: "user", parts: [context] });
@@ -340,7 +400,7 @@ export function buildModelMessages(input: BuildInput): BuiltPrompt {
 
   const drafts: Draft[] = [];
   for (const r of input.rows) {
-    if (r.deleted) continue;
+    if (r.deleted || r.kind === "notice") continue;
     if (r.role === "assistant" && !keepAssistant(r)) continue;
     const prev = drafts.at(-1);
     if (r.role === "user") {
