@@ -1,32 +1,39 @@
 "use client";
 
 import type { AiParticipant } from "@ocw/contracts";
-import { Globe, Lock, Share2, Users } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { Bot, Globe, Lock, Share2, UserMinus, Users } from "lucide-react";
 import { type ReactNode, useCallback, useMemo, useState } from "react";
+import { toast } from "sonner";
 import { BotBadge, PrincipalAvatar } from "@/components/chat/principal-avatar";
 import { PresenceAvatar, PresenceStack, usePresentPeople } from "@/components/presence/presence-stack";
+import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTitle, PopoverTrigger } from "@/components/ui/popover";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import { Spinner } from "@/components/ui/spinner";
 import { useSheetSurface } from "@/components/work-zone/control-surface";
 import { accessLabel, audienceScope, audienceSummary } from "@/lib/ai-audience";
-import { useAiChatGrants, useAiChatParticipants } from "@/lib/ai-grant-queries";
+import { removeAiChatAgent, useAiChatGrants, useAiChatParticipants } from "@/lib/ai-grant-queries";
+import { errorMessage } from "@/lib/api";
 import { useMe } from "@/lib/queries";
 import { cn } from "@/lib/utils";
+
+const SHARED_WITH = "Shared with ";
 
 /**
  * Who is in an AI chat (06-12, MULTI-01, AGENT-02, D-07, D-08), next to the title: the people here now (Phase 4 presence
  * stack) and a chip saying how widely the chat is shared ("Shared with Backend"). The chip opens the participants list
  * (a popover on a desktop, a bottom sheet at 390): every person with their access (Owner / Can chat / Can view), then
  * the agents. Everything comes from `GET /participants` (and, for the owner, the grants); `canManage` is the server's
- * `ai_chat.manage` for the viewer and only shows the owner's actions.
+ * `ai_chat.manage` for the viewer and only shows the owner's actions: add an agent, remove one (confirmed), manage
+ * access. The server enforces the same rules (06-10 routes).
  */
-const SHARED_WITH = "Shared with ";
-
 export function AiChatParticipants({
   chatId,
   canManage,
   enabled = true,
   onManageAccess,
+  onAddAgent,
 }: {
   chatId: string;
   canManage: boolean;
@@ -34,7 +41,10 @@ export function AiChatParticipants({
   enabled?: boolean;
   /** The owner's way to the share dialog (people and teams). */
   onManageAccess?: (() => void) | undefined;
+  /** The owner's "Add an agent" (the caller hosts `AddAgentDialog`). */
+  onAddAgent?: (() => void) | undefined;
 }) {
+  const qc = useQueryClient();
   const me = useMe();
   const viewerId = me.data?.user.id ?? null;
   const orgName = me.data?.organization.name ?? "your organization";
@@ -104,20 +114,46 @@ export function AiChatParticipants({
       presentIds={new Map(present.map((p) => [p.userId, p.state]))}
       viewerId={viewerId}
       scope={scope}
+      onRemoveAgent={
+        canManage
+          ? async (agent) => {
+              try {
+                await removeAiChatAgent(qc, chatId, agent.id);
+                toast.success(`Removed @${agent.handle ?? agent.displayName} from this chat`);
+              } catch (err) {
+                toast.error("Couldn't remove the agent", { description: errorMessage(err) });
+              }
+            }
+          : undefined
+      }
       footer={
-        canManage && onManageAccess ? (
-          <button
-            type="button"
-            data-testid="ai-chat-manage-access"
-            onClick={() => {
-              setOpen(false);
-              onManageAccess();
-            }}
-            className="flex h-10 w-full items-center gap-2.5 rounded-lg px-2 text-left font-medium text-[13.5px] outline-none transition-colors hover:bg-accent focus-visible:ring-[3px] focus-visible:ring-ring/30 [&_svg]:size-4 [&_svg]:text-muted-foreground"
-          >
-            <Share2 />
-            Manage access
-          </button>
+        canManage && (onAddAgent || onManageAccess) ? (
+          <>
+            {onAddAgent ? (
+              <FooterAction
+                testId="ai-chat-add-agent"
+                icon={<Bot />}
+                onClick={() => {
+                  setOpen(false);
+                  onAddAgent();
+                }}
+              >
+                Add an agent
+              </FooterAction>
+            ) : null}
+            {onManageAccess ? (
+              <FooterAction
+                testId="ai-chat-manage-access"
+                icon={<Share2 />}
+                onClick={() => {
+                  setOpen(false);
+                  onManageAccess();
+                }}
+              >
+                Manage access
+              </FooterAction>
+            ) : null}
+          </>
         ) : null
       }
     />
@@ -157,6 +193,105 @@ export function AiChatParticipants({
   );
 }
 
+function FooterAction({
+  testId,
+  icon,
+  onClick,
+  children,
+}: {
+  testId: string;
+  icon: ReactNode;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      data-testid={testId}
+      onClick={onClick}
+      className="flex h-10 w-full items-center gap-2.5 rounded-lg px-2 text-left font-medium text-[13.5px] outline-none transition-colors hover:bg-accent focus-visible:ring-[3px] focus-visible:ring-ring/30 [&_svg]:size-4 [&_svg]:text-muted-foreground"
+    >
+      {icon}
+      {children}
+    </button>
+  );
+}
+
+/** One agent of the list; the owner may remove it after a confirmation in place. */
+function AgentRow({
+  agent,
+  onRemove,
+}: {
+  agent: AiParticipant;
+  onRemove?: ((agent: AiParticipant) => Promise<void>) | undefined;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const handle = agent.handle ?? agent.displayName;
+  return (
+    <div data-testid="ai-chat-participant" data-kind="agent" data-id={agent.id} className="grid gap-1">
+      <div className="flex min-h-10 items-center gap-2.5 rounded-lg px-2 py-1">
+        <PrincipalAvatar
+          kind="agent"
+          name={agent.displayName}
+          avatarUrl={agent.avatarUrl}
+          seed={agent.id}
+          className="size-7"
+        />
+        <span className="grid min-w-0 flex-1 leading-tight">
+          <span className="flex min-w-0 items-center gap-1.5">
+            <span className="truncate font-medium text-[13.5px]">{agent.displayName}</span>
+            <BotBadge />
+          </span>
+          <span className="truncate text-[12px] text-muted-foreground">@{handle}</span>
+        </span>
+        {onRemove && !confirming ? (
+          <button
+            type="button"
+            data-testid="ai-chat-remove-agent"
+            aria-label={`Remove @${handle} from this chat`}
+            onClick={() => setConfirming(true)}
+            className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-2 font-medium text-[12.5px] text-muted-foreground outline-none transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:ring-[3px] focus-visible:ring-ring/30"
+          >
+            <UserMinus className="size-3.5" />
+            Remove
+          </button>
+        ) : (
+          <span className="shrink-0 text-[12px] text-muted-foreground">{accessLabel(agent.access)}</span>
+        )}
+      </div>
+      {onRemove && confirming ? (
+        <div className="mx-2 mb-1 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg bg-destructive/[0.06] px-2.5 py-2">
+          <p className="min-w-0 flex-1 text-[12.5px] leading-snug">
+            Remove <span className="font-medium">@{handle}</span>? It stops answering here.
+          </p>
+          <div className="flex shrink-0 gap-1.5">
+            <Button variant="ghost" size="sm" onClick={() => setConfirming(false)} disabled={busy}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              data-testid="ai-chat-remove-agent-confirm"
+              disabled={busy}
+              onClick={() => {
+                setBusy(true);
+                void onRemove(agent).finally(() => {
+                  setBusy(false);
+                  setConfirming(false);
+                });
+              }}
+            >
+              {busy ? <Spinner /> : null}
+              Remove
+            </Button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ParticipantList({
   people,
   agents,
@@ -164,6 +299,7 @@ function ParticipantList({
   viewerId,
   scope,
   footer,
+  onRemoveAgent,
 }: {
   people: AiParticipant[];
   agents: AiParticipant[];
@@ -171,6 +307,7 @@ function ParticipantList({
   viewerId: string | null;
   scope: string;
   footer: ReactNode;
+  onRemoveAgent?: ((agent: AiParticipant) => Promise<void>) | undefined;
 }) {
   return (
     <div className="grid gap-2 pt-1">
@@ -235,30 +372,7 @@ function ParticipantList({
             Agents · {agents.length}
           </h4>
           {agents.map((a) => (
-            <div
-              key={a.id}
-              data-testid="ai-chat-participant"
-              data-kind="agent"
-              data-id={a.id}
-              className="flex min-h-10 items-center gap-2.5 rounded-lg px-2 py-1"
-            >
-              <PrincipalAvatar
-                kind="agent"
-                name={a.displayName}
-                avatarUrl={a.avatarUrl}
-                seed={a.id}
-                className="size-7"
-              />
-              <span className="grid min-w-0 flex-1 leading-tight">
-                <span className="flex min-w-0 items-center gap-1.5">
-                  <span className="truncate font-medium text-[13.5px]">{a.displayName}</span>
-                  <BotBadge />
-                </span>
-                {a.handle ? (
-                  <span className="truncate text-[12px] text-muted-foreground">@{a.handle}</span>
-                ) : null}
-              </span>
-            </div>
+            <AgentRow key={a.id} agent={a} onRemove={onRemoveAgent} />
           ))}
         </section>
       ) : null}

@@ -178,6 +178,8 @@ test("Víctor adds @backend from the participants list; Alex's @mention gets its
     );
     await expect(agentRow).toContainText("@backend");
     await expect(agentRow.getByTestId("bot-badge")).toBeVisible();
+    await expect(agentRow.getByTestId("ai-chat-remove-agent")).toBeVisible();
+    await bothThemes(page, `ai-chat-agent-participants-${w}`);
     await page.keyboard.press("Escape");
 
     // Alex is not the owner: no add or remove controls.
@@ -194,7 +196,10 @@ test("Víctor adds @backend from the participants list; Alex's @mention gets its
     const composer = alex.getByTestId("ai-composer");
     await composer.click();
     await composer.pressSequentially("@back");
-    const suggestion = alex.getByTestId("ai-mention-option").filter({ hasText: "@backend" });
+    // The handle shows after an @ icon: the option reads "Backend BOT backend".
+    const suggestion = alex
+      .locator('[data-testid="ai-mention-option"][data-kind="agent"]')
+      .filter({ hasText: "backend" });
     await expect(suggestion).toBeVisible();
     await expect(suggestion.getByTestId("bot-badge")).toBeVisible();
     await suggestion.click();
