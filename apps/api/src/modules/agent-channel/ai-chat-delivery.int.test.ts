@@ -355,3 +355,188 @@ describe("tracer: Víctor adds @backend to his shared chat, Alex mentions it, th
     expect((participants.participants as Json[]).some((x) => x.id === backendId)).toBe(false);
   });
 });
+
+describe("tools in a shared chat = persona ∩ asker ∩ every participant; withheld explained; no memory (Task 2)", () => {
+  let chatId: string;
+  let serverId: string;
+  let echoName: string;
+
+  async function cellCall(method: "GET" | "POST", path: string, body?: unknown) {
+    const res = await fetch(`${stack.baseUrl}/agent-channel/v1${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${CELL_TOKEN}`,
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    return { status: res.status, body: (await res.json()) as Json };
+  }
+
+  /** Superuser-inserted permission rule on a user; returns its removal. */
+  async function deny(userId: string, permission: string) {
+    const id = randomUUID();
+    await su.query(
+      `insert into app.permission_rules (id, organization_id, subject_kind, subject_id, permission, effect)
+       values ($1, $2, 'user', $3, $4, 'deny')`,
+      [id, orgId, userId, permission],
+    );
+    return async () => {
+      await su.query("delete from app.permission_rules where id = $1", [id]);
+    };
+  }
+
+  /** `who` mentions @backend in `chat`; returns the single delivered event. */
+  async function ask(who: TestClient, chat: string, text = "@backend look it up"): Promise<Json> {
+    const r = await send(who, chat, text);
+    expect([201, 202]).toContain(r.status);
+    const id = ((r.body as Json).userMessage as Json).id as string;
+    const events = await deliveriesOf(id);
+    expect(events).toHaveLength(1);
+    return events[0] as Json;
+  }
+
+  beforeAll(async () => {
+    const server = await ok(
+      victor.request("POST", "/api/v1/mcp-servers", {
+        name: "Notes",
+        transport: "streamable-http",
+        url: "http://fake-model:18999/mcp",
+        headers: [],
+        personalAllowed: false,
+      }),
+    );
+    serverId = server.id as string;
+    echoName = `${server.safeName as string}__echo`;
+    const probes = (
+      await su.query(
+        "select payload from app.stream_events where stream_id = $1 and type = 'mcp.probe' order by seq",
+        [`cell:${orgId}`],
+      )
+    ).rows.map((r) => r.payload as Json);
+    const probeId = probes.filter((x) => x.serverId === serverId).at(-1)?.probeId as string;
+    const probed = await cellCall("POST", "/mcp/probe-results", {
+      probeId,
+      serverId,
+      ok: true,
+      tools: [
+        {
+          name: "echo",
+          title: "Echo",
+          description: "Echo the given text back. Read-only.",
+          annotations: { readOnlyHint: true, destructiveHint: false },
+        },
+      ],
+    });
+    expect(probed.status).toBe(200);
+    await ok(
+      victor.request("PATCH", `/api/v1/agents/${backendId}/capabilities`, {
+        internet: true,
+        memory: true,
+        tools: [{ sourceKind: "mcp", sourceId: serverId, tool: echoName }],
+      }),
+    );
+    // Notes the persona keeps about Alex and Víctor in their own DMs: they must never reach an AI chat.
+    for (const userId of [alexId, victorId]) {
+      await su.query(
+        "insert into app.agent_memories (id, organization_id, agent_id, user_id, text) values ($1, $2, $3, $4, $5)",
+        [randomUUID(), orgId, backendId, userId, "Prefers terse answers"],
+      );
+    }
+    const created = await ok(createChat(victor, "Look up the invoice API"), 201);
+    chatId = (created.chat as Json).id as string;
+    await settled((created.generation as Json).id as string);
+    await ok(grant(victor, chatId, { kind: "user", id: alexId }), 201);
+    await ok(addAgent(victor, chatId, backendId), 201);
+  });
+
+  it("both Víctor and Alex may use the tool: the turn holds web and the MCP tool, nothing withheld, no memory", async () => {
+    // Memory is effective for this persona (its DMs would offer it), so its absence below is the AI chat rule.
+    const cellAgent = ((await cellCall("GET", "/cell")).body.agents as Json[]).find(
+      (a) => a.id === backendId,
+    );
+    expect(cellAgent?.capabilities.tools).toContain("ocw_memory_save");
+
+    const ev = await ask(alex, chatId);
+    expect(ev.turn.tools).toEqual(expect.arrayContaining(["web_search", "web_fetch", echoName]));
+    expect(ev.turn.tools).not.toContain("ocw_memory_save");
+    expect(ev.turn.memory).toEqual([]);
+    expect(ev.turn.withheld).toEqual([]);
+  });
+
+  it("a deny for Víctor (a participant, not the asker) withholds the MCP tool from Alex's turn; the gate refuses it", async () => {
+    const undo = await deny(victorId, "bot.tool.use");
+    try {
+      const ev = await ask(alex, chatId);
+      expect(ev.turn.tools).toEqual(expect.arrayContaining(["web_search", "web_fetch"]));
+      expect(ev.turn.tools).not.toContain(echoName);
+      expect(ev.turn.withheld).toEqual([{ tool: echoName, reason: "not_every_participant" }]);
+      const call = await cellCall("POST", "/tool-calls", {
+        eventId: ev.eventId,
+        agentId: backendId,
+        tool: echoName,
+        params: {},
+      });
+      expect(call.body).toMatchObject({ allowed: false, reason: "not_in_turn" });
+      const audit = (await audits("bot.tool_call")).at(-1);
+      expect(audit?.metadata).toMatchObject({ tool: echoName, reason: "not_in_turn" });
+    } finally {
+      await undo();
+    }
+  });
+
+  it("a deny for Alex himself withholds it as denied_for_you", async () => {
+    const undo = await deny(alexId, "bot.tool.use");
+    try {
+      const ev = await ask(alex, chatId);
+      expect(ev.turn.tools).not.toContain(echoName);
+      expect(ev.turn.tools).toEqual(expect.arrayContaining(["web_search", "web_fetch"]));
+      expect(ev.turn.withheld).toEqual([{ tool: echoName, reason: "denied_for_you" }]);
+    } finally {
+      await undo();
+    }
+  });
+
+  it("once a team holds a grant the MCP tool is withheld (shared_with_group), even mid-turn at the gate", async () => {
+    // Delivered while the audience is listed: the tool is in the turn.
+    const before = await ask(alex, chatId);
+    expect(before.turn.tools).toContain(echoName);
+    const g = await ok(grant(victor, chatId, { kind: "unit", id: backendUnit }), 201);
+    try {
+      // The gate re-decides with the current audience: the earlier turn may not use it any more.
+      const call = await cellCall("POST", "/tool-calls", {
+        eventId: before.eventId,
+        agentId: backendId,
+        tool: echoName,
+        params: {},
+      });
+      expect(call.body).toMatchObject({ allowed: false, reason: "policy_changed" });
+
+      const ev = await ask(alex, chatId);
+      expect(ev.turn.tools).not.toContain(echoName);
+      expect(ev.turn.tools).toEqual(expect.arrayContaining(["web_search", "web_fetch"]));
+      expect(ev.turn.withheld).toEqual([{ tool: echoName, reason: "shared_with_group" }]);
+      // Riley reaches the chat through the team grant; his turn is decided the same way.
+      const rileyEv = await ask(riley, chatId);
+      expect(rileyEv.message.author.id).toBe(rileyId);
+      expect(rileyEv.turn.withheld).toEqual([{ tool: echoName, reason: "shared_with_group" }]);
+      expect(rileyEv.turn.memory).toEqual([]);
+    } finally {
+      const revoked = await victor.request("DELETE", `/api/v1/ai-chats/${chatId}/grants/${g.id as string}`);
+      expect(revoked.status).toBe(204);
+    }
+  });
+
+  it("a solo chat (owner + persona only) still carries no memory and never offers ocw_memory_save", async () => {
+    const created = await ok(createChat(victor, "Just me and the bot"), 201);
+    const solo = (created.chat as Json).id as string;
+    await settled((created.generation as Json).id as string);
+    await ok(addAgent(victor, solo, backendId), 201);
+    const ev = await ask(victor, solo);
+    expect(ev.conversation.kind).toBe("ai_chat");
+    expect(ev.turn.memory).toEqual([]);
+    expect(ev.turn.tools).not.toContain("ocw_memory_save");
+    expect(ev.turn.tools).toEqual(expect.arrayContaining(["web_search", "web_fetch", echoName]));
+    expect(ev.turn.withheld).toEqual([]);
+  });
+});
