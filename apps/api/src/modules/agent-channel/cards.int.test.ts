@@ -397,9 +397,14 @@ describe("cards land wherever the agent posts (Task 1)", () => {
   });
 });
 
-describe("tenant isolation (Task 1)", () => {
-  it("an org-B cell token cannot post or patch into org A (404)", async () => {
-    const orgB = randomUUID();
+describe("tenant isolation and agent ownership (Task 1, security review)", () => {
+  let orgB: string;
+  let b: FakeCellPlugin;
+  let foreignAgentId: string;
+  let card: { message_id: string; version: number };
+
+  beforeAll(async () => {
+    orgB = randomUUID();
     const tokenB = `ocw_cell_${randomUUID()}${randomUUID()}`;
     await su.query(
       "insert into auth.organization (id, name, slug, created_at) values ($1, 'Other Org', $2, now())",
@@ -409,14 +414,33 @@ describe("tenant isolation (Task 1)", () => {
       "insert into app.agent_credentials (organization_id, kind, token_hash) values ($1, 'channel_plugin', $2)",
       [orgB, sha256Hex(tokenB)],
     );
-    const b = newCell(tokenB);
-    const card = (
-      await su.query("select message_id, version from app.message_cards where organization_id = $1 limit 1", [
-        orgId,
-      ])
+    // A bot of org B (served by org B's cell).
+    foreignAgentId = randomUUID();
+    await su.query(
+      `insert into app.agents (id, organization_id, name, username, instructions, model_provider, model_id, status)
+       values ($1, $2, 'Intruder', 'intruder', 'x', 'mock', 'mock-1', 'ready')`,
+      [foreignAgentId, orgB],
+    );
+    b = newCell(tokenB);
+    card = (
+      await su.query(
+        "select message_id, version from app.message_cards where organization_id = $1 and agent_id = $2 limit 1",
+        [orgId, deployId],
+      )
     ).rows[0] as { message_id: string; version: number };
+  });
+
+  const unchanged = async () => {
+    const after = (
+      await su.query("select version, status from app.message_cards where message_id = $1", [card.message_id])
+    ).rows[0];
+    expect(after.version).toBe(card.version);
+  };
+
+  it("an org-B cell token cannot post or patch into org A, even naming org A's agent (404 agent_not_found)", async () => {
     const posted = await postCard(backendId, deployCard(), {}, b);
     expect(posted.status).toBe(404);
+    expect(errorCode(posted)).toBe("agent_not_found");
     const patched = await patchCard(
       card.message_id,
       { expectedVersion: card.version, status: "failed" },
@@ -424,9 +448,49 @@ describe("tenant isolation (Task 1)", () => {
       b,
     );
     expect(patched.status).toBe(404);
-    const after = (
-      await su.query("select version from app.message_cards where message_id = $1", [card.message_id])
-    ).rows[0];
-    expect(after.version).toBe(card.version);
+    expect(errorCode(patched)).toBe("agent_not_found");
+    // Its own bot does not reach org A's conversation or card either.
+    const ownPost = await postCard(backendId, deployCard(), { agentId: foreignAgentId }, b);
+    expect(ownPost.status).toBe(404);
+    const ownPatch = await patchCard(
+      card.message_id,
+      { expectedVersion: card.version, status: "failed" },
+      foreignAgentId,
+      b,
+    );
+    expect(ownPatch.status).toBe(404);
+    expect(errorCode(ownPatch)).toBe("card_not_found");
+    await unchanged();
+  });
+
+  it("org A's cell cannot act as another cell's (org B's) agent or an unknown agent (404 agent_not_found)", async () => {
+    for (const agentId of [foreignAgentId, randomUUID()]) {
+      const posted = await postCard(backendId, deployCard(), { agentId });
+      expect(posted.status).toBe(404);
+      expect(errorCode(posted)).toBe("agent_not_found");
+      const patched = await patchCard(
+        card.message_id,
+        { expectedVersion: card.version, status: "failed" },
+        agentId,
+      );
+      expect(patched.status).toBe(404);
+      expect(errorCode(patched)).toBe("agent_not_found");
+    }
+    const n = (
+      await su.query("select count(*)::int as n from app.message_cards where agent_id = $1", [foreignAgentId])
+    ).rows[0].n;
+    expect(n).toBe(0);
+    await unchanged();
+  });
+
+  it("a card of a different agent of the same cell is refused (403 not_card_author)", async () => {
+    const patched = await patchCard(
+      card.message_id,
+      { expectedVersion: card.version, status: "failed" },
+      otherId,
+    );
+    expect(patched.status).toBe(403);
+    expect(errorCode(patched)).toBe("not_card_author");
+    await unchanged();
   });
 });
