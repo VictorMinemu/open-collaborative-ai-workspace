@@ -25,6 +25,10 @@
 // Title requests (05-10, fake-responses.mjs `titleReply`): a system/developer message (chat completions) or `system`
 // (Anthropic) asking for a "short title" answers `Title: <first three words of the user text>` ([[title:<text>]] forces it).
 //
+// Attributed prompts (06-03, attribution.mjs): a system/developer message (chat completions) or `system` (Anthropic)
+// carrying a `<participants>` roster, with a `<turn_context>` in the last user message, answers
+// `Hi <names>! (participants: <humans>) Echo: <last message body>` (+ the attachment suffix, no tools suffix).
+//
 // Fake SearXNG: `GET /search?q=<query>&format=json` returns one deterministic result.
 //
 // Fake OpenAI Responses API (fake-responses.mjs, Phase 5): `POST /v1/responses` (SSE) and, for `fake-plan-…`
@@ -82,6 +86,15 @@ try {
 } catch (error) {
   if (error?.code !== "ERR_MODULE_NOT_FOUND") throw error;
   console.warn("fake-model: fake-responses.mjs not found, /v1/responses disabled");
+}
+
+// And the attributed-prompt reply of multiplayer AI chats (06-03).
+let attribution = null;
+try {
+  attribution = await import("./attribution.mjs");
+} catch (error) {
+  if (error?.code !== "ERR_MODULE_NOT_FOUND") throw error;
+  console.warn("fake-model: attribution.mjs not found, attributed prompts get the default reply");
 }
 
 const PORT = Number(process.env.PORT ?? 18999);
@@ -390,6 +403,11 @@ function titleOf(instructionTexts, lastUserText) {
   return fakeResponses.titleReply(lastUserText);
 }
 
+/** The attributed reply of a multiplayer AI chat prompt (06-03, P-06), else null. */
+function attributedOf(instructionTexts, lastUserText) {
+  return attribution?.attributedReply({ instructions: instructionTexts, lastUserText }) ?? null;
+}
+
 /** Splits the reply into a few deltas so streaming code paths are exercised. */
 function deltas(text) {
   const words = text.split(/(\s+)/u);
@@ -444,12 +462,15 @@ async function openAIChat(res, body) {
   const step = planToolStep(messages, offered);
   if (step?.call) return openAIToolCall(res, body, step.call);
   const flags = turnFlags(messages);
-  const title = titleOf(
-    messages.filter((m) => m.role === "system" || m.role === "developer").map((m) => contentText(m.content)),
-    promptFromOpenAI(body).lastUser,
-  );
+  const instructionTexts = messages
+    .filter((m) => m.role === "system" || m.role === "developer")
+    .map((m) => contentText(m.content));
+  const lastUser = promptFromOpenAI(body).lastUser;
+  const title = titleOf(instructionTexts, lastUser);
+  const attributed = title || step?.reply ? null : attributedOf(instructionTexts, lastUser);
   const reply =
-    title ?? `${step?.reply ?? composeReply(promptFromOpenAI(body).all, toolCount, offered)}${flags.suffix}`;
+    title ??
+    `${step?.reply ?? attributed ?? composeReply(promptFromOpenAI(body).all, toolCount, offered)}${flags.suffix}`;
   const id = `chatcmpl-fake-${counter}`;
   const model = body.model ?? MODELS[0];
   const created = Math.floor(Date.now() / 1000);
@@ -541,10 +562,12 @@ async function anthropicMessages(res, body) {
     });
     return;
   }
-  const title = titleOf([contentText(body.system)], promptFromAnthropic(body).lastUser);
+  const lastUser = promptFromAnthropic(body).lastUser;
+  const title = titleOf([contentText(body.system)], lastUser);
+  const attributed = title ? null : attributedOf([contentText(body.system)], lastUser);
   const reply =
     title ??
-    `${composeReply(promptFromAnthropic(body).all, toolCount, offeredToolNames(body))}${flags.suffix}`;
+    `${attributed ?? composeReply(promptFromAnthropic(body).all, toolCount, offeredToolNames(body))}${flags.suffix}`;
   const id = `msg_fake_${counter}`;
   const model = body.model ?? MODELS[0];
   const cache = flags.cacheRead ? { cache_read_input_tokens: flags.cacheRead } : {};

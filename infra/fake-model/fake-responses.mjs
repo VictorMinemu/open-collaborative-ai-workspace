@@ -27,8 +27,14 @@
 // title arrives after the same 4 s, unchanged. server.mjs applies
 // the same rule to chat completions (system/developer message) and Anthropic (`system`).
 //
+// Attributed prompts (06-03, attribution.mjs): when the instructions carry a `<participants>` roster and the last user
+// text a `<turn_context>`, the echo becomes `Hi <names>! (participants: <humans>) Echo: <last message body>`, with the
+// same directives, pacing, citation and attachment suffix.
+//
 // Plan bearers (`fake-plan-…`) get the ChatGPT-plan preview rules: `store` must be false, `stream` true, no
 // `system` input item and none of PLAN_FORBIDDEN_KEYS, else 400 `fake_preview_violation` naming the key.
+
+import { attributedReply } from "./attribution.mjs";
 
 /** Request fields the ChatGPT plan preview route rejects (developers.openai.com/siwc, preview limitations). */
 export const PLAN_FORBIDDEN_KEYS = [
@@ -255,7 +261,10 @@ export async function handleResponses(req, res, body, ctx = {}) {
         ?.slice(4)
         .trim() || null;
   const search = webQuery && offersWebSearch(body) ? { query: webQuery, url: fakeResultUrl(webQuery) } : null;
-  const echo = `Echo: ${withoutDirectives(userText)}${attachmentSuffix(
+  const attributed = title
+    ? null
+    : attributedReply({ instructions: responsesInstructions(body), lastUserText: userText });
+  const echo = `${attributed ?? `Echo: ${withoutDirectives(userText)}`}${attachmentSuffix(
     partCount(user, "input_image"),
     partCount(user, "input_file"),
   )}`;
