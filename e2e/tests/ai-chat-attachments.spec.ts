@@ -1,7 +1,7 @@
 import { crc32, deflateSync } from "node:zlib";
 import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
 import { apiAs, ensureMember, openAs, SAM } from "../support/actors";
-import { lastAssistant, openNewAiChat, seedPlan } from "../support/ai-chat";
+import { chatIdOf, lastAssistant, openNewAiChat, seedPlan } from "../support/ai-chat";
 import { ALEX } from "../support/chat";
 import { ADMIN, shot } from "./env";
 
@@ -113,7 +113,14 @@ test.beforeAll(async () => {
   await sam.post("/api/v1/me/model-credentials/chatgpt/welcome-seen", { data: {} });
 });
 
+/**
+ * Later specs share Sam and the organization: archive the chats made here (the AI chat list pages at 30, and
+ * ai-chat-list expects its own "older" chat on the first page) and drop the text-only provider added for gating.
+ */
+const created: string[] = [];
 test.afterAll(async () => {
+  for (const id of created) await sam?.patch(`/api/v1/ai-chats/${id}`, { data: { archived: true } });
+  await admin?.delete("/api/v1/model-providers/openai-compatible");
   await alex?.dispose();
   await sam?.dispose();
   await admin?.dispose();
@@ -142,6 +149,7 @@ test("an image attached with the paperclip reaches the vision model and shows in
 
     await page.getByTestId("ai-send").click();
     await expect(page).toHaveURL(/\/chat\/ai\/[0-9a-f-]{36}$/u);
+    created.push(chatIdOf(page));
     const answer = lastAssistant(page);
     await expect(answer).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
     await expect(answer.getByTestId("ai-message-text")).toHaveText(/\[images:1\]$/u);
@@ -202,7 +210,8 @@ test("the composer only takes what the selected model reads: a PDF is refused on
       provider: "anthropic",
       apiKey: "sk-ant-e2e-fake-key-not-real-0512",
       baseUrl: FAKE_URL,
-      allowedModels: ["claude-sonnet-5-5"],
+      // The same allowed set ai-chat-models uses: later specs expect Haiku to be the org-key title model.
+      allowedModels: ["claude-sonnet-5-5", "claude-haiku-4-5"],
       enabled: true,
     },
     {
@@ -248,6 +257,7 @@ test("the composer only takes what the selected model reads: a PDF is refused on
     await expect(page.getByTestId("ai-send")).toBeEnabled();
     await page.getByTestId("ai-send").click();
     await expect(page).toHaveURL(/\/chat\/ai\/[0-9a-f-]{36}$/u);
+    created.push(chatIdOf(page));
     const answer = lastAssistant(page);
     await expect(answer).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
     await expect(answer.getByTestId("ai-message-text")).toHaveText(/\[files:1\]$/u);
