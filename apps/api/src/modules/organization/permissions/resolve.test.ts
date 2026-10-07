@@ -1295,6 +1295,22 @@ describe("AI chat grants (Phase 6, P-03/P-04): access from owner ∪ grants, man
     }
   });
 
+  it("agent_card.approve in an AI chat needs write access: owner and chat grantee yes, view grantee ai_chat_view_only (security fix)", () => {
+    expect(allowed(victor, owner, "agent_card.approve")).toBe(true);
+    expect(allowed(alex, chatGrant, "agent_card.approve")).toBe(true);
+    expect(decide(alex, viewGrant, [], "agent_card.approve")).toEqual({
+      allowed: false,
+      denial: { permission: "agent_card.approve", layer: "resource", reason: "ai_chat_view_only" },
+    });
+    expect(decide(sam, none, [], "agent_card.approve").allowed).toBe(false);
+    // Channels, DMs and organization scope are unchanged (role-based).
+    const channel = channelResource({ visibility: "public", archived: false, viewerRole: "member" });
+    const dm = channelResource({ visibility: "private", archived: false, viewerRole: "member", kind: "dm" });
+    expect(allowed(sam, channel, "agent_card.approve")).toBe(true);
+    expect(allowed(sam, dm, "agent_card.approve")).toBe(true);
+    expect(allowed(sam, orgResource(), "agent_card.approve")).toBe(true);
+  });
+
   it("ai_chat.manage at organization scope stays role-based", () => {
     expect(allowed(sam, orgResource(), "ai_chat.manage")).toBe(true);
   });
