@@ -55,6 +55,8 @@ const StoredMessage = z.object({
 });
 type StoredMessage = z.infer<typeof StoredMessage>;
 
+const ShareParams = z.object({ shareId: z.uuid() });
+
 /** `ai_chat_shares.snapshot`: written once at creation, never updated. */
 const StoredSnapshot = z.object({ v: z.literal(1), messages: z.array(StoredMessage) });
 
@@ -277,12 +279,58 @@ export function registerShareRoutes(app: App, deps: ShareRoutesDeps): void {
     },
   );
 
+  // Revoke (creator only; anyone else, admins included, 404). Takes effect at once: every read checks `revoked_at`.
+  // Idempotent: a second call answers the same share and audits nothing.
+  app.delete(
+    "/ai-shares/:shareId",
+    {
+      config: { authz: "user" },
+      preHandler: core.identity.requireUser,
+      schema: { tags, params: ShareParams, response: { 200: AiChatShare } },
+    },
+    async (req) => {
+      const auth = authOf(req);
+      return core.db.withTenant(tenant(req), async (tx) => {
+        const [row] = await tx
+          .select()
+          .from(aiChatShares)
+          .where(and(eq(aiChatShares.id, req.params.shareId), eq(aiChatShares.createdBy, auth.userId)))
+          .limit(1);
+        if (!row) throw shareHidden();
+        // The creator's own chat (the resolver decides on it, owner only); revoking needs no share permission, so
+        // a member whose `ai_chat.share` was taken away can still withdraw what they shared.
+        await access.readable(req, tx, row.conversationId, {
+          kinds: ["ai_chat"],
+          notFoundMessage: SHARE_NOT_FOUND,
+        });
+        if (row.revokedAt !== null) return shareDto(row);
+        const [revoked] = await tx
+          .update(aiChatShares)
+          .set({ revokedAt: new Date().toISOString() })
+          .where(and(eq(aiChatShares.id, row.id), isNull(aiChatShares.revokedAt)))
+          .returning();
+        // A concurrent revoke won: answer its row, audit once.
+        if (!revoked) {
+          const [current] = await tx.select().from(aiChatShares).where(eq(aiChatShares.id, row.id)).limit(1);
+          return shareDto(current ?? row);
+        }
+        await core.audit.record(tx, {
+          action: "ai_chat.share_revoked",
+          resourceType: "ai_chat",
+          resourceId: row.conversationId,
+          metadata: { conversationId: row.conversationId, shareId: row.id },
+        });
+        return shareDto(revoked);
+      });
+    },
+  );
+
   app.get(
     "/ai-shares/:shareId",
     {
       config: { authz: "user" },
       preHandler: core.identity.requireUser,
-      schema: { tags, params: z.object({ shareId: z.uuid() }), response: { 200: AiShareView } },
+      schema: { tags, params: ShareParams, response: { 200: AiShareView } },
     },
     async (req): Promise<AiShareView> =>
       core.db.withTenant(tenant(req), async (tx) => {

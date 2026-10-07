@@ -50,3 +50,13 @@ export function useAiShare(shareId: string) {
   });
   return { ...q, notFound: isApiError(q.error, 404) };
 }
+
+/** Revokes one of the owner's links: it reads as not available at once; the list keeps it, marked revoked. */
+export async function revokeAiShare(qc: QueryClient, chatId: string, shareId: string): Promise<AiChatShare> {
+  const share = await api.del(`/api/v1/ai-shares/${shareId}`, { schema: AiChatShare });
+  qc.setQueryData<AiChatShareList>(shareKeys.list(chatId), (old) => ({
+    shares: (old?.shares ?? [share]).map((s) => (s.id === share.id ? share : s)),
+  }));
+  qc.removeQueries({ queryKey: shareKeys.view(shareId) });
+  return share;
+}

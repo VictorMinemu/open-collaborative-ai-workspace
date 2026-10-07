@@ -2,14 +2,14 @@
 
 import type { AiChatShare } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
-import { Check, Copy, Link2, Lock } from "lucide-react";
+import { Check, Copy, Link2, Link2Off, Lock } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { useCopy } from "@/hooks/use-copy";
-import { createAiShare, shareUrl, useAiChatShares } from "@/lib/ai-share-queries";
+import { createAiShare, revokeAiShare, shareUrl, useAiChatShares } from "@/lib/ai-share-queries";
 import { errorMessage } from "@/lib/api";
 import { useMe } from "@/lib/queries";
 import { cn } from "@/lib/utils";
@@ -47,6 +47,8 @@ export function ShareDialog({
     }
   }
 
+  // The link just made, kept current from the list (a revoke updates it there).
+  const current = fresh ? (shares.data?.shares.find((s) => s.id === fresh.id) ?? fresh) : null;
   const others = (shares.data?.shares ?? []).filter((s) => s.id !== fresh?.id);
 
   return (
@@ -73,8 +75,8 @@ export function ShareDialog({
           </p>
         </div>
 
-        {fresh ? (
-          <LinkRow share={fresh} highlight />
+        {current ? (
+          <LinkRow chatId={chatId} share={current} highlight />
         ) : (
           <Button
             data-testid="ai-share-create"
@@ -89,11 +91,13 @@ export function ShareDialog({
 
         {others.length > 0 ? (
           <section className="grid gap-1.5" data-testid="ai-share-list">
-            <h3 className="font-medium text-[12.5px] text-muted-foreground">Earlier links</h3>
+            <h3 className="font-medium text-[12.5px] text-muted-foreground">
+              {current ? "Earlier links" : "Links to this chat"}
+            </h3>
             <ul className="grid gap-1.5">
               {others.map((s) => (
                 <li key={s.id}>
-                  <LinkRow share={s} />
+                  <LinkRow chatId={chatId} share={s} />
                 </li>
               ))}
             </ul>
@@ -107,11 +111,40 @@ export function ShareDialog({
 const when = (iso: string) =>
   new Date(iso).toLocaleString("en", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 
-/** One link: its URL (read-only, selectable), when it was taken and how many messages it holds, and Copy. */
-function LinkRow({ share, highlight = false }: { share: AiChatShare; highlight?: boolean }) {
+/**
+ * One link: its URL (read-only, selectable), when it was taken and how many messages it holds, Copy and Revoke.
+ * Revoke asks once, in place; a revoked link stays listed, struck through, with nothing left to copy.
+ */
+function LinkRow({
+  chatId,
+  share,
+  highlight = false,
+}: {
+  chatId: string;
+  share: AiChatShare;
+  highlight?: boolean;
+}) {
+  const qc = useQueryClient();
   const { copy, copied } = useCopy();
+  const [confirming, setConfirming] = useState(false);
+  const [revoking, setRevoking] = useState(false);
   const url = shareUrl(share.path);
   const revoked = share.revokedAt !== null;
+
+  async function revoke() {
+    if (revoking) return;
+    setRevoking(true);
+    try {
+      await revokeAiShare(qc, chatId, share.id);
+      setConfirming(false);
+      toast.success("Link revoked");
+    } catch (err) {
+      toast.error("Couldn't revoke the link", { description: errorMessage(err) });
+    } finally {
+      setRevoking(false);
+    }
+  }
+
   return (
     <div
       data-testid="ai-share-link"
@@ -152,21 +185,60 @@ function LinkRow({ share, highlight = false }: { share: AiChatShare; highlight?:
           </Button>
         )}
       </div>
-      <p className="flex flex-wrap items-center gap-x-1.5 text-[12px] text-muted-foreground">
-        <span>{when(share.createdAt)}</span>
-        <span aria-hidden>·</span>
-        <span>
-          {share.messageCount} {share.messageCount === 1 ? "message" : "messages"}
-        </span>
-        {revoked ? (
-          <>
+      {confirming && !revoked ? (
+        <div
+          data-testid="ai-share-revoke-confirmation"
+          className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg bg-destructive/[0.06] px-2.5 py-2"
+        >
+          <p className="min-w-0 flex-1 text-[12.5px] leading-snug">
+            Revoke this link? Anyone who opens it will see that it isn't available.
+          </p>
+          <div className="flex shrink-0 gap-1.5">
+            <Button variant="ghost" size="sm" onClick={() => setConfirming(false)} disabled={revoking}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              data-testid="ai-share-revoke-confirm"
+              onClick={() => void revoke()}
+              disabled={revoking}
+            >
+              {revoking ? <Spinner /> : null}
+              Revoke link
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex min-h-7 items-center gap-2">
+          <p className="flex min-w-0 flex-1 flex-wrap items-center gap-x-1.5 text-[12px] text-muted-foreground">
+            <span>{when(share.createdAt)}</span>
             <span aria-hidden>·</span>
-            <span data-testid="ai-share-revoked" className="font-medium text-foreground/70">
-              Revoked
+            <span>
+              {share.messageCount} {share.messageCount === 1 ? "message" : "messages"}
             </span>
-          </>
-        ) : null}
-      </p>
+            {revoked ? (
+              <>
+                <span aria-hidden>·</span>
+                <span data-testid="ai-share-revoked" className="font-medium text-foreground/70">
+                  Revoked
+                </span>
+              </>
+            ) : null}
+          </p>
+          {revoked ? null : (
+            <button
+              type="button"
+              data-testid="ai-share-revoke"
+              onClick={() => setConfirming(true)}
+              className="-mr-1 inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-2 font-medium text-[12.5px] text-muted-foreground outline-none transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:ring-[3px] focus-visible:ring-ring/30"
+            >
+              <Link2Off className="size-3.5" />
+              Revoke
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
