@@ -315,7 +315,26 @@ Plans:
   4. A three-participant evaluation fixture verifies correct addressing and refusal of a spoofed authority claim; because it calls a metered model it runs in CI on a schedule or behind an explicit PR label, never on every PR
   5. Admin or Team Lead creates an agent persona that extends the Phase 1 one-click bots with tools, a scope (org/department/team/project/personal) and an owner; agents are members of DMs and AI chats as well as channels, and post typed Agent Cards (kind, title, fields, status, Open / Follow / Approve actions) that update in place (in-thread replies on mention already ship from Phase 1)
 
-**Plans**: TBD
+**Plans:** 16 plans in 8 waves (validation strategy: `06-VALIDATION.md`; owner decisions D-01 … D-08 in `06-CONTEXT.md`, planner decisions P-01 … P-16 in `06-01-PLAN.md`)
+
+Plans:
+
+- [ ] 06-01-PLAN.md — Wave 1 [BLOCKING]: every Phase 6 contract and the single migration (`*_multiplayer_ai`: grants, message context, Agent Cards, follows, `agents.unit_id`, notification kinds) proven on fresh PostgreSQL under tenant RLS
+- [ ] 06-02-PLAN.md — Wave 2: API tracer — Víctor shares his AI chat with Alex in place; Alex reads, subscribes and writes; the model answers Alex on Alex's plan with roster + attributed blocks; owner-only management and solo chats unchanged
+- [ ] 06-03-PLAN.md — Wave 3: browser tracer — Scenario B steps 1–4 at 1440/390 (share dialog with disclosure, "Shared with me", author names), fake model replies from attributed prompts
+- [ ] 06-04-PLAN.md — Wave 3: grants complete — team/department/organization subjects, levels, live revocation, notice rows, search and files follow grants
+- [ ] 06-05-PLAN.md — Wave 3: prompt builder complete — persona blocks, file labels, notices, withheld tools, six spoof cases as free fixtures, provider wire matrix (plan, OpenAI, Anthropic, openai-compatible)
+- [ ] 06-06-PLAN.md — Wave 3: one-generation arbiter — addressing, message-derived queue, coalesced turns billed to the first waiting author, skips, sweeper pickup
+- [ ] 06-07-PLAN.md — Wave 3: agent personas — scope (org/department/team/project/personal), owner, Team Lead creation and configuration, unit visibility, Bots UI
+- [ ] 06-08-PLAN.md — Wave 4: shared chats in the sidebar, unread, inbox and notifications (direct shares, mentions), per-recipient live summaries
+- [ ] 06-09-PLAN.md — Wave 4: three-participant spoofing/addressing eval — deterministic grader, opt-in local metered runner, label/weekly workflow (never every PR)
+- [ ] 06-10-PLAN.md — Wave 5: agents in AI chats through OpenClaw — members API, flat deliveries with attributed history, audience-aware tool intersection, no memory
+- [ ] 06-11-PLAN.md — Wave 6: live multiplayer UI — typing, Ask AI and @ suggestions, queue chip with requester-only Stop, addressing states, payer labels
+- [ ] 06-12-PLAN.md — Wave 7: share UI complete (teams, departments, organization, levels, removal) + participants with presence + add/remove agents
+- [ ] 06-13-PLAN.md — Wave 6: Agent Cards API — post/update through the Agent Channel API, in-place updates, follow notifications, single audited decisions delivered to the agent
+- [ ] 06-14-PLAN.md — Wave 7: `ocw_agent_card` cell tool and card-decision turns in the OpenClaw plugin
+- [ ] 06-15-PLAN.md — Wave 7: Agent Card renderer in channels, threads, DMs and AI chats with Follow and Approve
+- [ ] 06-16-PLAN.md — Wave 8: phase gate — fresh-stack day, leak/access sweep, ADR-0019 + ADR-0020, AGENTS.md/DEMO.md/traceability, validation sign-off, owner's metered eval and OpenAI terms check
 **Research:** needed (prompt assembly for the AI chat run loop across Anthropic / OpenAI / Google / openai-compatible — alternation rules, mid-conversation system messages, prompt caching; whether bots in shared AI chats answer through OpenClaw or the AI SDK loop; the participant-spoofing eval fixture and its metered-model budget)
 **UI hint**: yes
 
