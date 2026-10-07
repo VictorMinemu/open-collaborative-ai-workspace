@@ -144,11 +144,7 @@ function SharedWithMe({ chats, activeId }: { chats: AiChatSummary[]; activeId: s
                   </span>
                 ) : null}
               </span>
-              {c.generating ? (
-                <span className="mt-1.5 ml-auto size-1.5 shrink-0 animate-pulse rounded-full bg-primary">
-                  <span className="sr-only">Answering</span>
-                </span>
-              ) : null}
+              {/* No "Answering" dot here: only the owner's topic hears when an answer ends (deferred-items). */}
             </Link>
           );
         })}

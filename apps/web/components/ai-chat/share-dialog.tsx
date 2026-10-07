@@ -60,11 +60,11 @@ export function ShareDialog({
         if (!next) setResetKey((k) => k + 1);
       }}
     >
-      <DialogContent data-testid="ai-share-dialog" className="gap-5 sm:max-w-lg">
+      <DialogContent data-testid="ai-share-dialog" className="gap-5 sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>Share this chat</DialogTitle>
           <DialogDescription className="text-[13.5px] leading-snug">
-            Bring colleagues into this conversation, or send a read-only copy of it.
+            Bring colleagues into this conversation, or send a read-only copy.
           </DialogDescription>
         </DialogHeader>
         {canShare ? <PeopleSection key={`people-${resetKey}`} chatId={chatId} open={open} /> : null}
@@ -177,7 +177,7 @@ function PeopleSection({ chatId, open }: { chatId: string; open: boolean }) {
       >
         <div>
           <p className="font-medium text-foreground/85">They will see:</p>
-          <ul className="mt-1 grid list-disc gap-0.5 pl-4 marker:text-muted-foreground/60">
+          <ul className="mt-1 grid list-disc gap-x-6 gap-y-0.5 pl-4 marker:text-muted-foreground/60 sm:grid-cols-2">
             {VISIBLE.map((item) => (
               <li key={item}>{item}</li>
             ))}
@@ -203,7 +203,6 @@ function PeopleSection({ chatId, open }: { chatId: string; open: boolean }) {
               id={me.data.user.id}
               name={me.data.user.name}
               avatarUrl={me.data.user.image}
-              detail={me.data.user.email}
               level="Owner"
               you
             />
@@ -222,22 +221,13 @@ function PeopleSection({ chatId, open }: { chatId: string; open: boolean }) {
 
 function GrantRow({ grant }: { grant: AiChatGrant }) {
   const id = grant.subject.kind === "user" ? grant.subject.id : grant.id;
-  return (
-    <AccessRow
-      testId="ai-share-grant"
-      id={id}
-      name={grant.label}
-      detail={`Shared by ${grant.grantedBy.displayName}`}
-      level={levelLabel(grant.level)}
-    />
-  );
+  return <AccessRow testId="ai-share-grant" id={id} name={grant.label} level={levelLabel(grant.level)} />;
 }
 
 function AccessRow({
   id,
   name,
   avatarUrl,
-  detail,
   level,
   you = false,
   testId,
@@ -245,20 +235,16 @@ function AccessRow({
   id: string;
   name: string;
   avatarUrl?: string | null;
-  detail: string;
   level: string;
   you?: boolean;
   testId?: string;
 }) {
   return (
-    <li data-testid={testId} className="flex min-h-11 items-center gap-2.5 rounded-lg px-1 py-1">
-      <PrincipalAvatar kind="user" name={name} avatarUrl={avatarUrl} seed={id} className="size-8" />
-      <span className="grid min-w-0 flex-1 leading-tight">
-        <span className="truncate font-medium text-[13.5px]">
-          {name}
-          {you ? <span className="font-normal text-muted-foreground"> (you)</span> : null}
-        </span>
-        <span className="truncate text-[12px] text-muted-foreground">{detail}</span>
+    <li data-testid={testId} className="flex min-h-10 items-center gap-2.5 rounded-lg px-1 py-1">
+      <PrincipalAvatar kind="user" name={name} avatarUrl={avatarUrl} seed={id} className="size-7" />
+      <span className="min-w-0 flex-1 truncate font-medium text-[13.5px]">
+        {name}
+        {you ? <span className="font-normal text-muted-foreground"> (you)</span> : null}
       </span>
       <span className="shrink-0 text-[12.5px] text-muted-foreground">{level}</span>
     </li>

@@ -270,6 +270,8 @@ export function AiChatHeader({
   const [menuOpen, setMenuOpen] = useState(false);
   const canManage = !viewerCan || viewerCan.includes("ai_chat.manage");
   const hasMenu = canManage || !!extraMenuItems;
+  // A chat someone shared with the viewer says whose it is (06-03); the owner's own header is unchanged.
+  const sharedBy = chat.access !== undefined && chat.access !== "owner" ? chat.owner?.displayName : undefined;
 
   return (
     <header
@@ -280,34 +282,44 @@ export function AiChatHeader({
       {editing && canManage ? (
         <AiChatTitleInput chat={chat} onDone={() => setEditing(false)} className="mx-1" />
       ) : (
-        <h1 className="flex min-w-0 flex-1 items-center">
-          {canManage ? (
-            <button
-              type="button"
-              data-testid="ai-chat-title"
-              title="Rename"
-              onClick={() => setEditing(true)}
-              className="min-w-0 truncate rounded-md px-1 py-0.5 text-left font-medium text-[14px] tracking-tight outline-none transition-colors hover:bg-accent/60 focus-visible:ring-[3px] focus-visible:ring-ring/30 sm:text-[15px]"
+        <div className="flex min-w-0 flex-1 flex-col justify-center">
+          <h1 className="flex min-w-0 items-center">
+            {canManage ? (
+              <button
+                type="button"
+                data-testid="ai-chat-title"
+                title="Rename"
+                onClick={() => setEditing(true)}
+                className="min-w-0 truncate rounded-md px-1 py-0.5 text-left font-medium text-[14px] tracking-tight outline-none transition-colors hover:bg-accent/60 focus-visible:ring-[3px] focus-visible:ring-ring/30 sm:text-[15px]"
+              >
+                {chat.title}
+              </button>
+            ) : (
+              <span
+                data-testid="ai-chat-title"
+                className="min-w-0 truncate px-1 py-0.5 font-medium text-[14px] tracking-tight sm:text-[15px]"
+              >
+                {chat.title}
+              </span>
+            )}
+            {chat.archived ? (
+              <span
+                data-testid="ai-chat-archived-badge"
+                className="ml-1.5 shrink-0 rounded-[4px] bg-muted px-1.5 py-px font-medium text-[11px] text-muted-foreground"
+              >
+                Archived
+              </span>
+            ) : null}
+          </h1>
+          {sharedBy ? (
+            <p
+              data-testid="ai-chat-shared-by"
+              className="-mt-0.5 truncate px-1 text-[11.5px] text-muted-foreground leading-4"
             >
-              {chat.title}
-            </button>
-          ) : (
-            <span
-              data-testid="ai-chat-title"
-              className="min-w-0 truncate px-1 py-0.5 font-medium text-[14px] tracking-tight sm:text-[15px]"
-            >
-              {chat.title}
-            </span>
-          )}
-          {chat.archived ? (
-            <span
-              data-testid="ai-chat-archived-badge"
-              className="ml-1.5 shrink-0 rounded-[4px] bg-muted px-1.5 py-px font-medium text-[11px] text-muted-foreground"
-            >
-              Archived
-            </span>
+              Shared by {sharedBy}
+            </p>
           ) : null}
-        </h1>
+        </div>
       )}
       {hasMenu ? (
         <AiChatMenu

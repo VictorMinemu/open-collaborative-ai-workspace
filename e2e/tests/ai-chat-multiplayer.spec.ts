@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { type APIRequestContext, expect, type Page, test } from "@playwright/test";
-import { apiAs, ensureMember, openAs } from "../support/actors";
+import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import {
   answerText,
   chatIdOf,
@@ -155,10 +156,123 @@ test("Scenario B 1–4: Víctor shares a private chat with Alex, both write and 
     await expect(humanTurn(alex, VICTOR.name)).toHaveCount(2);
     await expect(humanTurn(alex, ALEX.name)).toHaveCount(1);
 
+    await expect(page.locator("[data-sonner-toast]")).toHaveCount(0, { timeout: 10_000 });
     await bothThemes(page, `multiplayer-two-people-${w}`);
     await bothThemes(alex, `multiplayer-two-people-${w}-alex`);
   } finally {
     await owner.context.close();
     await grantee.context.close();
+  }
+});
+
+const PLAN = (modelId: string) => ({ backend: "chatgpt_plan", provider: "openai", modelId }) as const;
+const MOCK_KEY = "mock:mock/mock-1";
+
+/** Waits until the chat's latest answer is no longer streaming. */
+async function settled(api: APIRequestContext, chatId: string) {
+  await expect
+    .poll(
+      async () => {
+        const snap = (await (await api.get(`/api/v1/ai-chats/${chatId}`)).json()) as {
+          messages: Array<{ authorKind: string; status: string }>;
+        };
+        return snap.messages.filter((m) => m.authorKind === "agent").at(-1)?.status;
+      },
+      { timeout: 15_000 },
+    )
+    .toBe("completed");
+}
+
+async function grant(api: APIRequestContext, chatId: string, userId: string, level: "chat" | "view") {
+  const res = await api.post(`/api/v1/ai-chats/${chatId}/grants`, {
+    data: { subject: { kind: "user", id: userId }, level },
+  });
+  expect(res.ok(), `grant ${level}: ${res.status()}`).toBe(true);
+}
+
+test("grantees get safe defaults: their own model, read-only for Can view, no owner-only actions", async ({
+  browser,
+}, info) => {
+  test.setTimeout(180_000);
+  const project = info.project.name;
+  const mobile = project === "mobile";
+  const w = widthOf(project);
+  const alexId = await ensureMember(admin, ALEX, "developer");
+  const samId = await ensureMember(admin, SAM, "developer");
+  // Víctor's chat last ran on his plan's GPT-5.6 Luna; Alex can chat, Sam can view.
+  const victor = await apiAs(VICTOR);
+  const created = await victor.post("/api/v1/ai-chats", {
+    data: { clientMessageId: `cm-${randomUUID()}`, body: "Plan the data model", model: PLAN("gpt-5.6-luna") },
+  });
+  expect(created.ok(), `create chat: ${created.status()}`).toBe(true);
+  const chatId = ((await created.json()) as { chat: { id: string } }).chat.id;
+  await settled(victor, chatId);
+  await grant(victor, chatId, alexId, "chat");
+  await grant(victor, chatId, samId, "view");
+
+  const viewer = await openAs(browser, SAM, project);
+  const grantee = await openAs(browser, ALEX, project);
+  const owner = await openAs(browser, VICTOR, project);
+  try {
+    // Sam (Can view) reads the chat: no composer, a notice saying whom to ask, no owner-only actions.
+    const sam = viewer.page;
+    await sam.goto(`${BASE_URL}/chat/ai/${chatId}`);
+    await expect(humanTurn(sam, VICTOR.name)).toContainText("Plan the data model");
+    await expect(lastAssistant(sam)).toHaveAttribute("data-status", "completed");
+    await expect(sam.getByTestId("ai-composer")).toHaveCount(0);
+    await expect(sam.getByTestId("ai-view-only-notice")).toHaveText(
+      `You can view this chat. Ask ${VICTOR.name} for chat access to write.`,
+    );
+    await expect(sam.getByTestId("ai-chat-shared-by")).toHaveText(`Shared by ${VICTOR.name}`);
+    await expect(sam.getByTestId("ai-chat-menu-button")).toHaveCount(0);
+    await expect(sam.getByTestId("ai-regenerate-menu")).toHaveCount(0);
+    await bothThemes(sam, `multiplayer-view-only-${w}`);
+
+    // Alex (Can chat) starts on his own default model (his plan's GPT-6 Astra), never Víctor's last one.
+    const alex = grantee.page;
+    await alex.goto(`${BASE_URL}/chat/ai/${chatId}`);
+    const chip = alex.getByTestId("ai-model-chip");
+    await expect(chip).toContainText("GPT-6 Astra");
+    await expect(chip).not.toContainText("Luna");
+    await expect(alex.getByTestId("ai-chat-shared-by")).toHaveText(`Shared by ${VICTOR.name}`);
+    // He picks the harness mock model for this chat; it answers him by name and the chip keeps it.
+    await chip.click();
+    const picker = alex.getByTestId("ai-model-picker");
+    await expect(picker).toBeVisible();
+    await picker.getByTestId(`ai-model-${MOCK_KEY}`).click();
+    await expect(picker).toBeHidden();
+    await expect(chip).toContainText("Mock (E2E)");
+    await sendAi(alex, "Is the mock fine?");
+    expect(await answerAt(alex, 2)).toBe(
+      `Hi ${ALEX.name}! (participants: ${ALEX.name}, ${SAM.name}, ${VICTOR.name}) Echo: Is the mock fine?`,
+    );
+    await expect(lastAssistant(alex).getByTestId("ai-message-footer")).toContainText("Mock (E2E)");
+    await expect(chip).toContainText("Mock (E2E)");
+
+    // The owner's dialog on a phone: a bottom sheet that scrolls to the whole disclosure, Share within reach.
+    const page = owner.page;
+    await page.goto(`${BASE_URL}/chat/ai/${chatId}`);
+    await expect(page.getByTestId("ai-chat-shared-by")).toHaveCount(0);
+    const dialog = await openShareDialog(page);
+    const people = dialog.getByTestId("ai-share-people");
+    await expect(people.getByTestId("ai-share-grant")).toHaveCount(2);
+    await expect(people.getByTestId("ai-share-grant").filter({ hasText: SAM.name })).toContainText(
+      "Can view",
+    );
+    if (mobile) {
+      const box = await dialog.boundingBox();
+      expect(box, "dialog box").toBeTruthy();
+      const viewport = page.viewportSize();
+      expect(Math.round((box?.y ?? 0) + (box?.height ?? 0))).toBe(viewport?.height);
+    }
+    await expect(people.getByTestId("ai-share-submit")).toBeInViewport();
+    await people.getByTestId("ai-share-billing").scrollIntoViewIfNeeded();
+    await expect(people.getByTestId("ai-share-disclosure")).toBeInViewport({ ratio: 1 });
+    await bothThemes(page, `multiplayer-share-dialog-disclosure-${w}`);
+  } finally {
+    await viewer.context.close();
+    await grantee.context.close();
+    await owner.context.close();
+    await victor.dispose();
   }
 });
