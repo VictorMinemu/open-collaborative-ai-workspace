@@ -10,7 +10,7 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { useOpenDm } from "@/lib/bots-queries";
 import { cn } from "@/lib/utils";
-import { BotAvatar, ModelChip, StatusChip } from "./bot-bits";
+import { BotAvatar, ModelChip, ScopeBadge, StatusChip } from "./bot-bits";
 
 /** Marks the caller's own personal bot (D-01): nobody else can see it. */
 export function PersonalBadge({ className }: { className?: string }) {
@@ -97,6 +97,8 @@ export function BotCard({
             <span className="truncate font-mono text-[12px] text-muted-foreground">@{agent.username}</span>
             {agent.scope === "personal" ? <PersonalBadge /> : null}
           </p>
+          {/* Unit personas show where they belong (AGENT-01); organization bots keep the Phase 1 card. */}
+          {agent.unitId ? <ScopeBadge agent={agent} className="mt-1.5 max-w-full" /> : null}
         </div>
         <StatusChip status={agent.status} message={agent.statusMessage} className="relative" />
       </div>
@@ -105,7 +107,7 @@ export function BotCard({
         {agent.description || agent.instructions}
       </p>
 
-      <div className="mt-4 flex items-center gap-2">
+      <div className="mt-auto flex items-center gap-2 pt-4">
         <ModelChip provider={agent.modelProvider} modelId={agent.modelId} className="mr-auto min-w-0" />
         {agent.scope === "team" ? (
           <Tooltip content="Add to channel">

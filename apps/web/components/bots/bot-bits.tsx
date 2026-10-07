@@ -1,7 +1,8 @@
 "use client";
 
 import { type Agent, type AgentStatus, type ModelProviderKind, modelLabel } from "@ocw/contracts";
-import { Cpu } from "lucide-react";
+import { Cpu, Globe } from "lucide-react";
+import { UNIT_KIND_ICON, UNIT_KIND_LABEL } from "@/components/members/unit-chip";
 import { toneFor } from "@/components/ui/avatar";
 import { Tooltip } from "@/components/ui/tooltip";
 import { cn, initials } from "@/lib/utils";
@@ -123,12 +124,36 @@ export function ModelChip({
 }
 
 /**
- * What the caller may do with one bot, from the API's per-bot `viewerCan` (never the org-wide role): a team bot
- * is edited with `bot.manage`; a personal bot only by its owner (`bot.configure`), while an admin may still
- * switch it off or delete it (`bot.manage`, governance) without seeing inside.
+ * What the caller may do with one bot, from the API's per-bot `viewerCan` (never the org-wide role). Profile edits
+ * need `bot.configure` (a personal bot's owner; on a shared persona its owner, admins and leads of its unit path).
+ * Governance (enable, delete): a personal bot's owner or an admin (`bot.manage`, without seeing inside); an
+ * organization persona `bot.manage`; a unit persona `bot.manage_unit` (admins and its unit leads, AGENT-01).
  */
 export function botAbilities(agent: Agent): { edit: boolean; govern: boolean } {
   const can = new Set(agent.viewerCan ?? []);
-  const edit = agent.scope === "personal" ? can.has("bot.configure") : can.has("bot.manage");
-  return { edit, govern: edit || can.has("bot.manage") };
+  const edit = can.has("bot.configure");
+  if (agent.scope === "personal") return { edit, govern: edit || can.has("bot.manage") };
+  return { edit, govern: agent.unitId ? can.has("bot.manage_unit") : can.has("bot.manage") };
+}
+
+/** Scope of a shared persona: "Organization" or "<Kind> · <unit name>" (AGENT-01); nothing for personal bots. */
+export function ScopeBadge({ agent, className }: { agent: Agent; className?: string }) {
+  if (agent.scope === "personal") return null;
+  const unit = agent.unit ?? null;
+  const Icon = unit ? UNIT_KIND_ICON[unit.kind] : Globe;
+  const label = unit ? `${UNIT_KIND_LABEL[unit.kind]} · ${unit.name}` : "Organization";
+  return (
+    <span
+      data-testid="bot-scope"
+      data-scope={unit?.kind ?? "organization"}
+      title={label}
+      className={cn(
+        "inline-flex h-5 min-w-0 max-w-full shrink items-center gap-1 rounded-full border bg-background px-1.5 text-[11px] text-muted-foreground",
+        className,
+      )}
+    >
+      <Icon className="size-2.5 shrink-0" aria-hidden />
+      <span className="truncate">{label}</span>
+    </span>
+  );
 }
