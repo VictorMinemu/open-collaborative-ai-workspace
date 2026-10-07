@@ -138,7 +138,7 @@ describe("runtime controls inventory (WZC-06, P-09)", () => {
   });
 
   it("lists every D-17 layout element, deferring those that need new data", () => {
-    for (const k of ["ui.stream.subagents", "ui.header.actions", "ui.composer.attach", "ui.minimap"]) {
+    for (const k of ["ui.stream.subagents", "ui.header.actions", "ui.minimap"]) {
       expect(controlStatus("workzone-ui", k), k).toBe("deferred");
     }
     for (const k of [
@@ -151,6 +151,7 @@ describe("runtime controls inventory (WZC-06, P-09)", () => {
       "ui.stream.changes-card",
       "ui.agent-bar",
       "ui.composer.chips",
+      "ui.composer.attach",
       "ui.footer.strip",
     ]) {
       expect(isExposed("workzone-ui", k), k).toBe(true);
@@ -173,7 +174,7 @@ describe("runtime controls inventory (WZC-06, P-09)", () => {
     const reason = (k: string) => rows("workzone-ui").find((r) => r.uiKey === k)?.reason ?? "";
     expect(reason("ui.stream.subagents")).toMatch(/sub-agent events/i);
     expect(reason("ui.header.actions")).toMatch(/git and editor integration/);
-    expect(reason("ui.composer.attach")).toMatch(/file uploads/i);
+    expect(reason("ui.composer.attach")).toMatch(/^Images only \(PNG, JPEG, GIF, WebP\)/);
     expect(reason("ui.minimap")).toMatch(/turn navigation rail/i);
   });
 
