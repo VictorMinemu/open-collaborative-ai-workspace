@@ -458,11 +458,9 @@ describe("tracer: Víctor shares his AI chat in place with Alex, who reads, subs
     expect(answers.map((m: Json) => m.generation.requesterUserId)).toEqual([victorId, alexId, victorId]);
   });
 
-  it("grant validation: unit/org subjects 400, the owner 400, a stranger or another org's user 404, a non-owner 404", async () => {
-    expect(errorOf(await grant(victor, chatId, { kind: "org" })).code).toBe("grant_subject_unsupported");
-    expect(errorOf(await grant(victor, chatId, { kind: "unit", id: randomUUID() })).code).toBe(
-      "grant_subject_unsupported",
-    );
+  it("grant validation: an unknown unit 404, the owner 400, a stranger or another org's user 404, a non-owner 404", async () => {
+    // Unit and organization subjects are 06-04's (grants.int); an unknown unit is simply missing.
+    expect((await grant(victor, chatId, { kind: "unit", id: randomUUID() })).status).toBe(404);
     expect(errorOf(await grant(victor, chatId, { kind: "user", id: victorId })).code).toBe("grant_to_owner");
     const stranger = await grant(victor, chatId, { kind: "user", id: randomUUID() });
     expect(stranger.status).toBe(404);

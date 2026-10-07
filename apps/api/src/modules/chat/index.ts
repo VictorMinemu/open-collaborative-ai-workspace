@@ -120,6 +120,7 @@ export {
   addMember,
   aiAccessOf,
   aiAccessSql,
+  aiGrantMatchSql,
   type ConversationRow,
   convTopic,
   getMembership,

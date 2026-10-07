@@ -24,7 +24,15 @@ import {
 } from "@ocw/db";
 import { and, desc, eq, inArray, isNull, type SQL, sql } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
-import { aiAccessOf, type ConversationRow, type Directory, iso, type MessageRow, toMessage } from "../chat";
+import {
+  aiAccessOf,
+  aiGrantMatchSql,
+  type ConversationRow,
+  type Directory,
+  iso,
+  type MessageRow,
+  toMessage,
+} from "../chat";
 import type { ModelGateway } from "../model-gateway";
 
 /** DTOs of the AI chat module (P-13): assistant turns are `agent` messages with no author id and a generation. */
@@ -106,26 +114,24 @@ export async function isShared(tx: Tx, conversationId: string): Promise<boolean>
 }
 
 /**
- * The active person grant of `userId` on a chat (`chat` beats `view`), or null. 06-04 extends the match to unit and
- * organization subjects, in step with `aiAccessSql`.
+ * The active grant through which `userId` reaches a chat, or null: the same match as `aiAccessSql`
+ * (`aiGrantMatchSql`: person, unit subtree or organization). `chat` beats `view`; among equals the most specific
+ * subject (person, then unit, then organization), then the oldest.
  */
 export async function matchingGrant(
   tx: Tx,
   conversationId: string,
   userId: string,
 ): Promise<{ id: string; level: "chat" | "view" } | null> {
-  const rows = await tx
-    .select({ id: aiChatGrants.id, level: aiChatGrants.level })
-    .from(aiChatGrants)
-    .where(
-      and(
-        eq(aiChatGrants.conversationId, conversationId),
-        isNull(aiChatGrants.revokedAt),
-        eq(aiChatGrants.subjectKind, "user"),
-        eq(aiChatGrants.subjectId, userId),
-      ),
-    );
-  return rows.find((r) => r.level === "chat") ?? rows[0] ?? null;
+  const res = await tx.execute(sql`
+    select ag.id, ag.level from app.ai_chat_grants ag
+    where ag.conversation_id = ${conversationId}::uuid and ag.revoked_at is null
+      and ${aiGrantMatchSql(sql`${userId}::uuid`)}
+    order by (ag.level = 'chat') desc,
+             case ag.subject_kind when 'user' then 0 when 'unit' then 1 else 2 end,
+             ag.created_at, ag.id
+    limit 1`);
+  return (res.rows[0] as { id: string; level: "chat" | "view" } | undefined) ?? null;
 }
 
 /** How one viewer sees a chat (Phase 6 summary fields): their access, the owner and whether it is shared. */
