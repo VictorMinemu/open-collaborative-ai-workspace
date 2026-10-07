@@ -307,7 +307,11 @@ test("admin: Settings › Bot policy turns internet off for personal bots; the o
     expect(sent.ok(), "post in the team bot DM").toBe(true);
     const teamReply = () => plugin.replies.slice(before).find((r) => r.mention.conversation.id === teamDm);
     await plugin.waitUntil(() => teamReply() !== undefined);
-    expect([...(teamReply()?.mention.turn?.tools ?? [])].sort()).toEqual(["ocw_agent_card", "web_fetch", "web_search"]);
+    expect([...(teamReply()?.mention.turn?.tools ?? [])].sort()).toEqual([
+      "ocw_agent_card",
+      "web_fetch",
+      "web_search",
+    ]);
     await sam.context.close();
 
     // ---- governance: disable asks for confirmation, then the row reads Disabled
