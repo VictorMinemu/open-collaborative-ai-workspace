@@ -576,3 +576,71 @@ describe("reduceAiChat: multiplayer queue and addressing (06-11)", () => {
     expect(s.queue).toBeNull();
   });
 });
+
+describe("reduceAiChat: Agent Cards of personas (06-15)", () => {
+  const CARD_MSG = "1a2b3c4d-0000-4000-8000-000000000009";
+  const AGENT = "1a2b3c4d-0000-4000-8000-00000000000a";
+  const SAM = "1a2b3c4d-0000-4000-8000-00000000000b";
+  const card = (over: Partial<NonNullable<Message["card"]>> = {}): NonNullable<Message["card"]> => ({
+    kind: "approval",
+    title: "Deploy api v2.3",
+    fields: [],
+    status: "pending",
+    actions: [{ kind: "approve", label: "Approve" }],
+    version: 1,
+    decision: null,
+    updatedAt: AT,
+    ...over,
+  });
+  const personaCard = (c: NonNullable<Message["card"]>) =>
+    message({
+      id: CARD_MSG,
+      seq: 3,
+      authorKind: "agent",
+      authorId: AGENT,
+      body: "Approve the deploy?",
+      card: c,
+    });
+
+  it("a realtime update (no viewer fields) changes the card in place and keeps the viewer's following and viewerCan", () => {
+    let s = reduceAiChat(initialAiChatState(CHAT), {
+      kind: "snapshot",
+      snapshot: snapshot(
+        [userMsg, personaCard(card({ following: true, viewerCan: ["follow", "decide"] }))],
+        3,
+        null,
+      ),
+    });
+    s = run(s, durable(4, "message.updated", personaCard(card({ status: "running", version: 2 }))));
+    const shown = s.messages.find((m) => m.id === CARD_MSG)?.card;
+    expect(s.messages.filter((m) => m.id === CARD_MSG)).toHaveLength(1);
+    expect(shown).toMatchObject({
+      status: "running",
+      version: 2,
+      following: true,
+      viewerCan: ["follow", "decide"],
+    });
+  });
+
+  it("a decision someone else took removes decide from the viewer's capabilities", () => {
+    let s = reduceAiChat(initialAiChatState(CHAT), {
+      kind: "snapshot",
+      snapshot: snapshot(
+        [userMsg, personaCard(card({ following: false, viewerCan: ["follow", "decide"] }))],
+        3,
+        null,
+      ),
+    });
+    const decision = {
+      outcome: "approved" as const,
+      by: { kind: "user" as const, id: SAM, displayName: "Sam Lee" },
+      at: AT,
+    };
+    s = run(s, durable(4, "message.updated", personaCard(card({ decision }))));
+    expect(s.messages.find((m) => m.id === CARD_MSG)?.card).toMatchObject({
+      decision: { outcome: "approved" },
+      following: false,
+      viewerCan: ["follow"],
+    });
+  });
+});
