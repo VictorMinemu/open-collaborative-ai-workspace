@@ -3,6 +3,7 @@ import sharp from "sharp";
 import { describe, expect, it } from "vitest";
 import { HttpError } from "../../lib/errors";
 import { fitImageWithin } from "../artifact";
+import { frameFits } from "../device";
 import { checkImageBudget, chooseImagePart, DEVICE_IMAGE_MAX_EDGE, PNG_ORIGINAL_MAX_BYTES } from "./images";
 
 const KB = 1024;
@@ -135,5 +136,21 @@ describe("fitImageWithin: the dispatch-time resize (no metadata, pixel limit)", 
   it("a 1200×800 webp keeps its size", async () => {
     const meta = await sharp(await fitImageWithin(await webp(1200, 800), 2000)).metadata();
     expect([meta.width, meta.height]).toEqual([1200, 800]);
+  });
+});
+
+describe("frameFits (P-01): every outbound Device Link frame is measured in UTF-8 bytes", () => {
+  it("is true at exactly the limit and false one byte over", () => {
+    expect(frameFits("x".repeat(64), 64)).toBe(true);
+    expect(frameFits("x".repeat(65), 64)).toBe(false);
+  });
+
+  it("measures multi-byte characters in bytes, not string length", () => {
+    // "é" is 2 bytes and "😀" 4 bytes (2 UTF-16 units) in UTF-8.
+    expect(frameFits("é".repeat(32), 64)).toBe(true);
+    expect(frameFits("é".repeat(33), 64)).toBe(false);
+    expect(frameFits("😀".repeat(16), 64)).toBe(true);
+    expect(frameFits(`${"😀".repeat(16)}x`, 64)).toBe(false);
+    expect(frameFits("€".repeat(22), 64)).toBe(false);
   });
 });

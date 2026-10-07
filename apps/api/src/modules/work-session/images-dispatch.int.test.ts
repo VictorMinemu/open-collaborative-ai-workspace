@@ -38,6 +38,8 @@ interface Ctx {
   conv: string;
 }
 let main: Ctx;
+/** A second stack whose hub refuses frames above 64 KiB (test-only option, never an environment variable). */
+let small: Ctx;
 
 async function ok(res: Promise<{ status: number; body: Record<string, unknown> | null }>, status = 200) {
   const r = await res;
@@ -46,10 +48,11 @@ async function ok(res: Promise<{ status: number; body: Record<string, unknown> |
 }
 
 /** A stack with Víctor, his paired device (Claude Code catalog) and one idle Claude Code session. */
-async function boot(): Promise<Ctx> {
+async function boot(opts: { deviceFrameMaxBytes?: number } = {}): Promise<Ctx> {
   const stack = await startTestStack({
     env: { ...storage.env, LOG_LEVEL: "debug" },
     logStream: { write: (m) => void logs.push(m) },
+    ...opts,
   });
   const su = new pg.Client({ connectionString: stack.db.superuserUrl });
   await su.connect();
@@ -145,6 +148,8 @@ const commandRow = async (ctx: Ctx, id: string) =>
 
 /** The base64 the FakeDevice received in this file (the leak scan looks for each one's first 64 characters). */
 const sentBase64: string[] = [];
+/** Base64 the API built but never sent (a frame over the limit); scanned too. */
+const hydrated: string[] = [];
 function received(cmd: Cmd): Array<{ mediaType: string; bytes: Buffer }> {
   return ((cmd.payload.images ?? []) as Json[]).map((i) => {
     sentBase64.push(i.dataBase64);
@@ -174,6 +179,7 @@ beforeAll(async () => {
 }, 240_000);
 
 afterAll(async () => {
+  await shutdown(small);
   await shutdown(main);
   s3?.destroy();
   await storage?.stop();
@@ -403,5 +409,130 @@ describe("a vanished image fails its prompt visibly; the link stays up and the q
     );
     expect(idle.rows.length).toBeGreaterThan(0);
     await finish(main, next);
+  });
+});
+
+describe("frame guard (P-01, Pitfall 2): no frame above the limit is ever sent; the link stays up", () => {
+  beforeAll(async () => {
+    // Its welcome frame went out under the same guard (boot waits for it).
+    small = await boot({ deviceFrameMaxBytes: 64 * 1024 });
+  }, 240_000);
+
+  const enqueue = (ctx: Ctx, kind: "session.configure" | "diff.request", payload: Json) =>
+    ctx.stack.built.core.db.withTenant({ organizationId: ctx.orgId, userId: null }, (tx) =>
+      ctx.stack.built.deviceHub.enqueue(tx, {
+        deviceId: ctx.deviceId,
+        workSessionId: ctx.sessionId,
+        kind,
+        payload,
+      }),
+    );
+
+  it("a 100 KiB session.configure is never delivered, fails with frame_too_large, and the next command goes", async () => {
+    const big = await enqueue(small, "session.configure", {
+      settings: {},
+      reason: "user",
+      pad: "x".repeat(100 * 1024),
+    });
+    const diff = await enqueue(small, "diff.request", {});
+    const delivered = (await small.device.command("diff.request", small.sessionId)) as Cmd;
+    expect(delivered.id).toBe(diff);
+    expect(small.device.pending("session.configure").filter((f) => (f as Cmd).id === big)).toEqual([]);
+    expect((await commandRow(small, big)).status).toBe("failed");
+    expect((await commandRow(small, big)).error).toBe("frame_too_large");
+    expect(small.device.closed).toBe(false);
+    small.device.ack(delivered.id);
+  });
+
+  it("an image prompt whose frame is too large fails visibly (frame_too_large) and the next prompt runs", async () => {
+    const png = await sharp(randomBytes(300 * 300 * 3), { raw: { width: 300, height: 300, channels: 3 } })
+      .png()
+      .toBuffer();
+    hydrated.push(png.toString("base64"));
+    const first = await ok(submit(small, "first"));
+    const firstCmd = (await small.device.command("prompt", small.sessionId)) as Cmd;
+    expect(firstCmd.payload.promptId).toBe(first.id);
+    const att = await upload(small, "noise.png", "image/png", png);
+    const withImage = await ok(submit(small, "too big for this link", [att.id]));
+    const third = await ok(submit(small, "third"));
+
+    small.device.ack(firstCmd.id);
+    small.device.event(small.sessionId, { type: "prompt.started", promptId: first.id });
+    small.device.event(small.sessionId, {
+      type: "prompt.completed",
+      promptId: first.id,
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    const next = (await small.device.command("prompt", small.sessionId)) as Cmd;
+    expect(next.payload.promptId).toBe(third.id);
+    expect(
+      small.device.pending("prompt").filter((f) => (f as Cmd).payload.promptId === withImage.id),
+    ).toEqual([]);
+    expect(small.device.closed).toBe(false);
+
+    const cmds = await small.su.query(
+      "select status, error from app.device_commands where kind = 'prompt' and payload->>'promptId' = $1",
+      [withImage.id],
+    );
+    expect(cmds.rows).toEqual([{ status: "failed", error: "frame_too_large" }]);
+    const s = await small.su.query("select last_error from app.work_sessions where id = $1", [
+      small.sessionId,
+    ]);
+    expect(s.rows[0].last_error).toBe("The images are too large to send to the device");
+    const audit = await small.su.query(
+      "select result, metadata from app.audit_events where action = 'work_prompt.refused' and resource_id = $1",
+      [withImage.id],
+    );
+    expect(audit.rows).toEqual([
+      expect.objectContaining({
+        result: "error",
+        metadata: expect.objectContaining({ promptId: withImage.id, reason: "frame_too_large" }),
+      }),
+    ]);
+    await finish(small, next);
+  });
+});
+
+describe("leak scan (D-04, P-11): image bytes live only in object storage", () => {
+  it("an ack error echoing a data URL is stored without the data", async () => {
+    const data = randomBytes(225).toString("base64");
+    expect(data).toHaveLength(300);
+    await ok(submit(main, "this one fails on the device"));
+    const cmd = (await main.device.command("prompt", main.sessionId)) as Cmd;
+    main.device.ack(cmd.id, false, `bad image data:image/png;base64,${data}`);
+    const row = await eventually(async () => {
+      const r = await commandRow(main, cmd.id);
+      return r.status === "failed" ? r : undefined;
+    });
+    expect(row.error).toBe("bad image [image data removed]");
+    const s = await eventually(async () => {
+      const r = await main.su.query("select status, last_error from app.work_sessions where id = $1", [
+        main.sessionId,
+      ]);
+      return r.rows[0].status === "idle" ? r.rows[0] : undefined;
+    });
+    expect(s.last_error).toBe("bad image [image data removed]");
+  });
+
+  it("no log line, command payload or error, audit metadata, stream event or session error holds image data", async () => {
+    const needles = [...sentBase64, ...hydrated].map((b) => b.slice(0, 64));
+    expect(sentBase64.length).toBeGreaterThanOrEqual(7);
+    const leaks = (where: string, texts: string[]) =>
+      texts.flatMap((t, i) =>
+        t.includes(";base64,") || needles.some((n) => t.includes(n)) ? [`${where}#${i}`] : [],
+      );
+    const found: string[] = [...leaks("log", logs)];
+    expect(logs.length).toBeGreaterThan(0);
+    for (const ctx of [main, small]) {
+      const q = async (sql: string) => (await ctx.su.query(sql)).rows.map((r) => String(r.t ?? ""));
+      found.push(
+        ...leaks("device_commands.payload", await q("select payload::text as t from app.device_commands")),
+        ...leaks("device_commands.error", await q("select error as t from app.device_commands")),
+        ...leaks("audit_events.metadata", await q("select metadata::text as t from app.audit_events")),
+        ...leaks("stream_events.payload", await q("select payload::text as t from app.stream_events")),
+        ...leaks("work_sessions.last_error", await q("select last_error as t from app.work_sessions")),
+      );
+    }
+    expect(found).toEqual([]);
   });
 });

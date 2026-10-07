@@ -20,6 +20,7 @@ export {
   type DeviceRef,
   type DeviceSessionHandler,
   type EnqueueCommand,
+  frameFits,
 } from "./hub";
 export { looksAbsolute, sanitizeAnnouncements } from "./link";
 export { deviceFacts, normalizePairingCode, toDevice } from "./routes";
@@ -34,7 +35,7 @@ export interface DeviceModule extends ApiModule {
  * devices list/rename/share/revoke, projects announced by devices, and the Device Link `GET /runtime/ws`
  * (mounted at the root).
  */
-export function createDeviceModule(core: Core): DeviceModule {
+export function createDeviceModule(core: Core, opts: { maxFrameBytes?: number } = {}): DeviceModule {
   const graceEnv = Number(process.env.OCW_DEVICE_OFFLINE_GRACE_MS);
   const hub = new DeviceHub({
     db: core.db,
@@ -42,6 +43,7 @@ export function createDeviceModule(core: Core): DeviceModule {
     realtime: core.realtime,
     log: core.log,
     ...(Number.isFinite(graceEnv) && graceEnv > 0 ? { offlineGraceMs: graceEnv } : {}),
+    ...(opts.maxFrameBytes ? { maxFrameBytes: opts.maxFrameBytes } : {}),
   });
   return {
     name: "device",

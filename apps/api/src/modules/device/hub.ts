@@ -2,12 +2,14 @@ import {
   type AckFrame,
   type CapabilitiesFrame,
   type CommandKind,
+  DEVICE_LINK_MAX_COMMAND_FRAME_BYTES,
   type DiffResultFrame,
   DiffResultFrame as DiffResultFrameSchema,
   type EventFrame,
   EventTypes,
   type HelloFrame,
   type ServerToDeviceFrame,
+  stripImageData,
   type TitleResultFrame,
 } from "@ocw/contracts";
 import { deviceCommands, devices, type TenantDb, type Tx, tenantOf } from "@ocw/db";
@@ -119,7 +121,25 @@ export interface DeviceHubOptions {
   log: FastifyBaseLogger;
   /** How long a device may stay disconnected before it is marked offline (default 10 s). */
   offlineGraceMs?: number;
+  /**
+   * The largest frame sent to a device (default DEVICE_LINK_MAX_COMMAND_FRAME_BYTES, the daemon's `maxPayload`).
+   * Tests only lower it; it is never read from the environment.
+   */
+  maxFrameBytes?: number;
 }
+
+/**
+ * 06.1 (P-01, Pitfall 2): whether a serialized frame fits `limit` UTF-8 bytes. A frame above the daemon's
+ * `maxPayload` closes the link (1009) and redelivery would loop, so the hub never sends one.
+ */
+export function frameFits(serialized: string, limit: number): boolean {
+  // A UTF-16 code unit is 1 to 3 UTF-8 bytes: decide without measuring when the length alone settles it.
+  if (serialized.length > limit) return false;
+  if (serialized.length * 3 <= limit) return true;
+  return Buffer.byteLength(serialized, "utf8") <= limit;
+}
+
+type SendResult = "sent" | "closed" | "too_large";
 
 /**
  * Device Link hub: owns the live device sockets of this API instance, the persistent command queue
@@ -132,9 +152,11 @@ export class DeviceHub {
   private readonly offlineTimers = new Map<string, NodeJS.Timeout>();
   private handler: DeviceSessionHandler | null = null;
   readonly offlineGraceMs: number;
+  private readonly maxFrameBytes: number;
 
   constructor(private readonly opts: DeviceHubOptions) {
     this.offlineGraceMs = opts.offlineGraceMs ?? 10_000;
+    this.maxFrameBytes = opts.maxFrameBytes ?? DEVICE_LINK_MAX_COMMAND_FRAME_BYTES;
   }
 
   setSessionHandler(handler: DeviceSessionHandler): void {
@@ -318,7 +340,8 @@ export class DeviceHub {
   async onAck(device: DeviceRef, frame: AckFrame): Promise<void> {
     if (!/^[0-9a-f-]{36}$/i.test(frame.commandId)) return;
     const ok = frame.ok !== false;
-    const error = ok ? null : (frame.error ?? "command failed").slice(0, 2000);
+    // P-11: an error may echo an image back (a data URL, a base64 run); it is stored and shown without it.
+    const error = ok ? null : stripImageData(frame.error ?? "command failed").slice(0, 2000);
     const row = await this.opts.db.withTenant(
       { organizationId: device.organizationId, userId: null },
       async (tx) => {
@@ -395,10 +418,24 @@ export class DeviceHub {
 
   // ------------------------------------------------------------------ internals
 
-  private send(socket: WebSocket, frame: ServerToDeviceFrame): boolean {
-    if (socket.readyState !== socket.OPEN) return false;
-    socket.send(JSON.stringify(frame));
-    return true;
+  /** Every frame to a device goes through here: serialized once and refused above `maxFrameBytes` (P-01). */
+  private send(socket: WebSocket, frame: ServerToDeviceFrame): SendResult {
+    if (socket.readyState !== socket.OPEN) return "closed";
+    const serialized = JSON.stringify(frame);
+    if (!frameFits(serialized, this.maxFrameBytes)) {
+      this.opts.log.warn(
+        {
+          type: frame.type,
+          ...(frame.type === "command" ? { commandId: frame.id, kind: frame.kind } : {}),
+          bytes: Buffer.byteLength(serialized, "utf8"),
+          limit: this.maxFrameBytes,
+        },
+        "device frame too large; not sent",
+      );
+      return "too_large";
+    }
+    socket.send(serialized);
+    return "sent";
   }
 
   private async publishControl(deviceId: string, msg: ControlMessage): Promise<void> {
@@ -456,15 +493,17 @@ export class DeviceHub {
             continue;
           }
         }
-        const ok = this.send(socket, {
+        const result = this.send(socket, {
           type: "command",
           id: row.id,
           kind: row.kind,
           sessionId: row.workSessionId ?? "00000000-0000-0000-0000-000000000000",
           payload,
         });
-        if (!ok) break;
-        sent.push(row.id);
+        if (result === "closed") break;
+        // Never resent: a frame over the limit would close the link and loop on redelivery.
+        if (result === "too_large") failed.push({ id: row.id, reason: "frame_too_large" });
+        else sent.push(row.id);
       }
       if (sent.length === 0 && failed.length === 0) return none;
 

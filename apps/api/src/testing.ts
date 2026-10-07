@@ -24,6 +24,8 @@ export async function startTestStack(
     env?: Record<string, string>;
     /** Capture API log lines (enables the logger at LOG_LEVEL, default silent). */
     logStream?: { write(msg: string): void };
+    /** A lower Device Link frame limit for this stack (06.1-02 frame guard tests). */
+    deviceFrameMaxBytes?: number;
   } = {},
 ): Promise<TestStack> {
   const [db, redis] = await Promise.all([startTestDatabase(), new RedisContainer("redis:8").start()]);
@@ -43,12 +45,11 @@ export async function startTestStack(
   const env = loadEnv(source);
   // SecretReferences (env provider) resolve against the same values, e.g. OCW_S3_SECRET_ACCESS_KEY.
   const secretStore = createEnvFileSecretStore({ ...process.env, ...source });
-  const built = await buildApp(
-    env,
-    opts.logStream
-      ? { logger: true, logStream: opts.logStream, secretStore }
-      : { logger: false, secretStore },
-  );
+  const built = await buildApp(env, {
+    ...(opts.logStream ? { logger: true, logStream: opts.logStream } : { logger: false }),
+    secretStore,
+    ...(opts.deviceFrameMaxBytes ? { deviceFrameMaxBytes: opts.deviceFrameMaxBytes } : {}),
+  });
   await built.app.listen({ host: "127.0.0.1", port: 0 });
   const addr = built.app.server.address();
   const port = typeof addr === "object" && addr ? addr.port : 0;
