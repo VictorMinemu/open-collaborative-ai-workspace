@@ -526,6 +526,38 @@ describe("organization grants, overlapping grants and unit membership changes", 
     await addToUnit(unit.backend, rileyId);
     expect(await readStatus(riley)).toBe(200);
   });
+
+  it("GET /participants lists the unit's readers who never opened the chat, with their access (06-12)", async () => {
+    // Riley and Robin read through the Backend grant but hold no participation row: they are still people of the
+    // chat (the participants list, the @ suggestions). Sam and Jo cannot read it and are never listed.
+    const res = await ok(riley.request("GET", `/api/v1/ai-chats/${chatId}/participants`));
+    expect(res.audience).toBe("units");
+    const people = (res.participants as Json[]).filter((p) => p.kind === "user");
+    expect(people[0]).toMatchObject({ id: victorId, access: "owner" });
+    expect(people.map((p) => [p.displayName, p.access])).toEqual([
+      ["Víctor Ruiz", "owner"],
+      ["Riley Park", "chat"],
+      ["Robin Lee", "chat"],
+    ]);
+    expect(people.some((p) => p.id === samId)).toBe(false);
+  });
+
+  it("someone removed from the team leaves the model's roster at once, though they once wrote (06-04 open item)", async () => {
+    const wrote = await ok(send(riley, chatId, "Riley was here"), 201);
+    await settled(wrote.generation.id);
+    await ok(victor.request("DELETE", `/api/v1/units/${unit.backend}/members/${rileyId}`));
+    stack.fake.reset();
+    const res = await ok(send(victor, chatId, "Who is in this chat?"), 201);
+    await settled(res.generation.id);
+    const [call] = withoutTitles(stack.fake.requests("responses"));
+    const all = JSON.stringify(call?.body ?? {});
+    const roster = /<participants>([\s\S]*?)<\/participants>/u.exec(all)?.[1] ?? "";
+    expect(roster).toContain(`user_id=\\"${victorId}\\"`);
+    expect(roster).not.toContain(rileyId);
+    // His message stays attributed to him.
+    expect(all).toContain(`<message from=\\"Riley Park\\" user_id=\\"${rileyId}\\"`);
+    await addToUnit(unit.backend, rileyId);
+  });
 });
 
 describe("person grants, management is owner-only, cross-tenant 404", () => {
