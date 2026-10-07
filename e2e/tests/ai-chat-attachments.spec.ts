@@ -173,3 +173,89 @@ test("an image attached with the paperclip reaches the vision model and shows in
     await context.close();
   }
 });
+
+/** A minimal PDF (enough for magic-byte sniffing: the API keeps application/pdf). */
+const PDF = Buffer.from(
+  "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Count 0/Kids[]>>endobj\n" +
+    "trailer<</Root 1 0 R>>\n%%EOF\n",
+);
+const SONNET_KEY = "org_key:anthropic/claude-sonnet-5-5";
+const LLAMA_KEY = "org_key:openai-compatible/llama-4-70b";
+
+/** Opens the composer's model picker and picks `key` (popover on desktop, bottom sheet on a phone). */
+async function pickModel(page: Page, key: string) {
+  await page.getByTestId("ai-model-chip").click();
+  const picker = page.getByTestId("ai-model-picker");
+  await expect(picker).toBeVisible();
+  await picker.getByTestId(`ai-model-${key}`).click();
+  await expect(picker).toBeHidden();
+}
+
+test("the composer only takes what the selected model reads: a PDF is refused on a text model and sends on Claude", async ({
+  browser,
+}, info) => {
+  test.setTimeout(120_000);
+  const w = widthOf(info.project.name);
+  // An admin's Anthropic key and an OpenAI-compatible server whose model reads text only, both on the fake.
+  for (const data of [
+    {
+      provider: "anthropic",
+      apiKey: "sk-ant-e2e-fake-key-not-real-0512",
+      baseUrl: FAKE_URL,
+      allowedModels: ["claude-sonnet-5-5"],
+      enabled: true,
+    },
+    {
+      provider: "openai-compatible",
+      apiKey: "sk-compat-e2e-fake-0512",
+      baseUrl: `${FAKE_URL}/v1`,
+      allowedModels: ["llama-4-70b"],
+      enabled: true,
+    },
+  ]) {
+    const res = await admin.post("/api/v1/model-providers", { data });
+    expect(res.ok(), `configure ${data.provider}: ${res.status()} ${await res.text()}`).toBe(true);
+  }
+  const { context, page } = await openAs(browser, SAM, info.project.name);
+  try {
+    await openNewAiChat(page);
+    await pickModel(page, LLAMA_KEY);
+    await expect(page.getByTestId("ai-model-chip")).toContainText("llama-4-70b");
+    await expect(page.getByTestId("ai-attach-button")).toHaveAttribute(
+      "title",
+      "llama-4-70b reads text files only",
+    );
+
+    await attachWithPaperclip(page, [{ name: "offsite-plan.pdf", type: "application/pdf", bytes: PDF }]);
+    const item = page.getByTestId("attachment-tray").getByTestId("attachment-item");
+    await expect(item).toHaveCount(1);
+    await expect(item).toHaveAttribute("data-refused", "true");
+    await expect(item.getByTestId("attachment-error")).toHaveText("llama-4-70b can't read PDFs");
+    await page.getByTestId("ai-composer").fill("Summarise the plan");
+    await expect(page.getByTestId("ai-send")).toBeDisabled();
+    await page.mouse.move(0, 0);
+    await bothThemes(page, `ai-chat-attach-refused-${w}`);
+
+    // A file already in the tray is checked again when the model changes.
+    await pickModel(page, SONNET_KEY);
+    await expect(item).not.toHaveAttribute("data-refused", "true");
+    await expect(item).toHaveAttribute("data-status", "ready", { timeout: 15_000 });
+    await expect(item.getByTestId("attachment-error")).toHaveCount(0);
+    await expect(page.getByTestId("ai-attach-button")).toHaveAttribute(
+      "title",
+      "Claude Sonnet 5.5 reads images, PDFs and text files",
+    );
+    await expect(page.getByTestId("ai-send")).toBeEnabled();
+    await page.getByTestId("ai-send").click();
+    await expect(page).toHaveURL(/\/chat\/ai\/[0-9a-f-]{36}$/u);
+    const answer = lastAssistant(page);
+    await expect(answer).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
+    await expect(answer.getByTestId("ai-message-text")).toHaveText(/\[files:1\]$/u);
+    const user = page.locator('[data-testid="ai-message"][data-role="user"]').last();
+    await expect(user.getByTestId("file-card")).toContainText("offsite-plan.pdf");
+    await page.mouse.move(0, 0);
+    await bothThemes(page, `ai-chat-pdf-sent-${w}`);
+  } finally {
+    await context.close();
+  }
+});
