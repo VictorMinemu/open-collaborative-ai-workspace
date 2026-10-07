@@ -1,16 +1,22 @@
 import type { Readable } from "node:stream";
-import { type Attachment, MAX_ATTACHMENTS_PER_MESSAGE } from "@ocw/contracts";
+import {
+  type Attachment,
+  INLINE_IMAGE_TYPES,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+  WORK_PROMPT_MAX_IMAGES,
+} from "@ocw/contracts";
 import { attachments, type Tx } from "@ocw/db";
 import { and, asc, eq, inArray, isNull } from "drizzle-orm";
 import type { ApiModule, App, Core } from "../../core";
 import { conflict } from "../../lib/errors";
 // Type-only: the chat module imports this module's helpers (Plan 04-12), so a runtime import would be a cycle.
 import type { ConversationAccess } from "../chat/access";
-import { presignPart, registerAttachmentRoutes } from "./attachments";
+import { type AttachmentScopes, presignPart, registerAttachmentRoutes } from "./attachments";
 import { type AttachmentRow, toAttachment } from "./model";
 import { type AttachmentPart, attachmentKey, createObjectStorage, type ObjectStorage } from "./storage";
 import { createAttachmentSweeper } from "./sweeper";
 
+export type { AttachmentScope, AttachmentScopes, ScopedKind } from "./attachments";
 export { type AttachmentRow, toAttachment } from "./model";
 export {
   type AttachmentPart,
@@ -32,7 +38,7 @@ const STATUS_WAIT_MS = 3_000;
  */
 export function createArtifactModule(
   core: Core,
-  deps: { access: ConversationAccess },
+  deps: { access: ConversationAccess; scopes?: AttachmentScopes },
 ): ApiModule & { storage: ObjectStorage | null } {
   const storage = createObjectStorage(core.env, core.secretStore);
   const sweeper = storage ? createAttachmentSweeper(core, storage) : null;
@@ -75,7 +81,13 @@ export function createArtifactModule(
     name: "artifact",
     storage,
     register(app: App) {
-      registerAttachmentRoutes(app, { core, access: deps.access, storage, storageStatus });
+      registerAttachmentRoutes(app, {
+        core,
+        access: deps.access,
+        storage,
+        storageStatus,
+        ...(deps.scopes ? { scopes: deps.scopes } : {}),
+      });
       void configure();
       sweeper?.start();
     },
@@ -88,8 +100,8 @@ export function createArtifactModule(
 }
 
 /** 409 `attachment_not_linkable`: the one refusal for any file that cannot join a message (never says why). */
-export const notLinkable = () =>
-  conflict("One or more attachments cannot be added to this message", "attachment_not_linkable");
+export const notLinkable = (target: "message" | "prompt" = "message") =>
+  conflict(`One or more attachments cannot be added to this ${target}`, "attachment_not_linkable");
 
 /**
  * Links uploaded files to a new message in the message's transaction. Every id must be the uploader's, in the
@@ -113,10 +125,76 @@ export async function linkAttachments(
         eq(attachments.uploaderId, input.uploaderId),
         eq(attachments.status, "ready"),
         isNull(attachments.messageId),
+        isNull(attachments.workPromptId),
       ),
     )
     .returning({ id: attachments.id });
   if (linked.length !== ids.length) throw notLinkable();
+}
+
+/**
+ * Links images to a new Work Zone prompt in the prompt's transaction (06.1, P-05): the Phase 4 rule (every id the
+ * uploader's, in the session's conversation, `ready`, not linked to a message or a prompt yet, no duplicates) plus a
+ * sniffed inline image with renditions, at most WORK_PROMPT_MAX_IMAGES. Anything else, including another tenant's id
+ * (invisible under RLS), is the one 409 `attachment_not_linkable` and the caller's transaction rolls back. Returns
+ * the rows in request order.
+ */
+export async function linkWorkPromptAttachments(
+  tx: Tx,
+  input: { conversationId: string; workPromptId: string; uploaderId: string; ids: string[] },
+): Promise<AttachmentRow[]> {
+  const ids = [...new Set(input.ids)];
+  if (ids.length === 0) return [];
+  if (input.ids.length > WORK_PROMPT_MAX_IMAGES || ids.length !== input.ids.length)
+    throw notLinkable("prompt");
+  const linked = await tx
+    .update(attachments)
+    .set({ workPromptId: input.workPromptId })
+    .where(
+      and(
+        inArray(attachments.id, ids),
+        eq(attachments.conversationId, input.conversationId),
+        eq(attachments.uploaderId, input.uploaderId),
+        eq(attachments.status, "ready"),
+        isNull(attachments.messageId),
+        isNull(attachments.workPromptId),
+        eq(attachments.hasRenditions, true),
+        inArray(attachments.contentType, [...INLINE_IMAGE_TYPES]),
+      ),
+    )
+    .returning();
+  if (linked.length !== ids.length) throw notLinkable("prompt");
+  const order = new Map(input.ids.map((id, i) => [id, i]));
+  return linked.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+}
+
+/** Ready attachments of the given Work Zone prompts, in upload order (06.1). */
+export async function attachmentsForWorkPrompts(
+  tx: Tx,
+  promptIds: string[],
+): Promise<Map<string, Attachment[]>> {
+  const out = new Map<string, Attachment[]>();
+  if (promptIds.length === 0) return out;
+  const rows = await tx
+    .select()
+    .from(attachments)
+    .where(and(inArray(attachments.workPromptId, promptIds), eq(attachments.status, "ready")))
+    .orderBy(asc(attachments.createdAt), asc(attachments.id));
+  for (const row of rows) {
+    const list = out.get(row.workPromptId!) ?? [];
+    list.push(toAttachment(row));
+    out.set(row.workPromptId!, list);
+  }
+  return out;
+}
+
+/** Ready attachment rows of one Work Zone prompt, in upload order (what its dispatch sends, 06.1-02). */
+export async function attachmentRowsForWorkPrompt(tx: Tx, promptId: string): Promise<AttachmentRow[]> {
+  return tx
+    .select()
+    .from(attachments)
+    .where(and(eq(attachments.workPromptId, promptId), eq(attachments.status, "ready")))
+    .orderBy(asc(attachments.createdAt), asc(attachments.id));
 }
 
 /** Ready attachments of the given messages, in upload order (deleted and pending ones never appear). */
@@ -161,6 +239,7 @@ export async function linkableAttachments(
         eq(attachments.uploaderId, input.uploaderId),
         eq(attachments.status, "ready"),
         isNull(attachments.messageId),
+        isNull(attachments.workPromptId),
       ),
     );
   if (rows.length !== ids.length) throw notLinkable();

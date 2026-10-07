@@ -121,6 +121,11 @@ export const RuntimeModel = z.object({
   defaultContextWindow: ContextWindow.nullable(),
   fastMode: z.object({ supported: z.boolean(), reason: z.string().max(64).nullable() }),
   supportsAutoMode: z.boolean(),
+  /**
+   * 06.1 (P-08): whether the model reads images, when the runtime says (Codex `inputModalities`). Absent = unknown
+   * (Claude, older daemons): images are allowed and a runtime refusal fails the turn visibly.
+   */
+  imageInput: z.boolean().optional(),
 });
 export type RuntimeModel = z.infer<typeof RuntimeModel>;
 
@@ -191,6 +196,7 @@ export const ModelControl = ControlOption.extend({
   defaultContextWindow: ContextWindow.nullable(),
   fastMode: FastModeControl,
   supportsAutoMode: z.boolean(),
+  imageInput: RuntimeModel.shape.imageInput,
 });
 export type ModelControl = z.infer<typeof ModelControl>;
 
