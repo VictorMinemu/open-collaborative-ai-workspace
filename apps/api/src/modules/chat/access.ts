@@ -1,5 +1,5 @@
 import { conversationMembers, conversations, orgUnits, type Tx } from "@ocw/db";
-import { and, eq, inArray, isNull, or } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import type { Core } from "../../core";
 import { notFound } from "../../lib/errors";
@@ -9,7 +9,7 @@ import {
   channelResource,
   createPermissionService,
 } from "../organization";
-import { type ConversationRow, channelFacts, getConversation } from "./service";
+import { type AiAccess, aiAccessSql, type ConversationRow, channelFacts, getConversation } from "./service";
 
 /**
  * The readable set (P-03): the ONLY place any module decides which conversations a user may read. The permission
@@ -89,6 +89,11 @@ export function createConversationAccess(core: Core): ConversationAccess {
     async readableIds(tx, userId, opts = {}) {
       const kinds = opts.kinds ?? ALL_KINDS;
       const me = conversationMembers;
+      // P-03: an AI chat's candidates come from its owner and active grants, never from membership rows.
+      const aiAccess = sql<AiAccess>`case when ${conversations.kind} = 'ai_chat' then ${aiAccessSql(
+        userId,
+        conversations.id,
+      )} end`;
       const rows = await tx
         .select({
           id: conversations.id,
@@ -97,6 +102,7 @@ export function createConversationAccess(core: Core): ConversationAccess {
           archivedAt: conversations.archivedAt,
           role: me.role,
           unitPath: orgUnits.path,
+          aiAccess,
         })
         .from(conversations)
         .leftJoin(
@@ -108,8 +114,13 @@ export function createConversationAccess(core: Core): ConversationAccess {
           and(
             inArray(conversations.kind, [...kinds]),
             opts.includeArchived ? undefined : isNull(conversations.archivedAt),
-            // Narrowing only: a direct conversation is a candidate for its members alone.
-            or(eq(conversations.kind, "channel"), eq(me.memberId, userId)),
+            // Narrowing only: a direct conversation is a candidate for its members alone; an AI chat for its owner
+            // and grantees alone (P-03).
+            or(
+              eq(conversations.kind, "channel"),
+              and(ne(conversations.kind, "ai_chat"), eq(me.memberId, userId)),
+              and(eq(conversations.kind, "ai_chat"), isNotNull(aiAccess)),
+            ),
           ),
         );
       const allowed = await perms.filterFor(tx, { kind: "user", userId }, rows, "channel.read", (r) =>
@@ -118,6 +129,7 @@ export function createConversationAccess(core: Core): ConversationAccess {
           archived: r.archivedAt !== null,
           viewerRole: r.role ?? null,
           kind: r.kind === "group" || r.kind === "channel" || r.kind === "ai_chat" ? r.kind : "dm",
+          ...(r.kind === "ai_chat" ? { aiAccess: r.aiAccess ?? null } : {}),
           // Unit-scoped rules apply to the unit's channels (CHAT-02, principle 6).
           unitPath: r.kind === "channel" ? (r.unitPath ?? []) : [],
         }),

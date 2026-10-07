@@ -22,8 +22,9 @@ import {
 } from "../artifact";
 import { createConversationAccess, iso } from "../chat";
 import type { ModelGateway } from "../model-gateway";
-import { AuthzDeniedError, channelResource, createPermissionService, orgResource } from "../organization";
+import { AuthzDeniedError, createPermissionService, orgResource } from "../organization";
 import { DEFAULT_CHAT_TITLE, generationsFor } from "./dto";
+import { createChatGuards } from "./service";
 
 /**
  * Read-only snapshot share links of an AI chat (05-13, AICHAT-09, Pattern 8). The owner freezes the visible
@@ -225,9 +226,16 @@ export function registerShareRoutes(app: App, deps: ShareRoutesDeps): void {
     keyGenerator: (req: FastifyRequest) => `ai-share:${req.auth?.userId ?? req.ip}`,
   });
 
-  /** The caller's own AI chat (readable set with `ai_chat` is owner-only; everyone else, admins included, 404). */
-  const ownedChat = (req: FastifyRequest, tx: Tx, chatId: string) =>
-    access.readable(req, tx, chatId, { kinds: ["ai_chat"], notFoundMessage: CHAT_NOT_FOUND });
+  const guards = createChatGuards(access, perms);
+  /**
+   * The chat whose links the caller manages: readable (hidden 404), then `ai_chat.share` (Phase 6, P-04): only the
+   * owner creates or lists snapshot links; a grantee gets the same 404 and learns nothing about them.
+   */
+  async function sharedChat(req: FastifyRequest, tx: Tx, chatId: string) {
+    const out = await guards.readableChat(req, tx, chatId);
+    await guards.assertOn(req, tx, "ai_chat.share", out.facts);
+    return out;
+  }
 
   app.post(
     "/ai-chats/:id/shares",
@@ -240,8 +248,7 @@ export function registerShareRoutes(app: App, deps: ShareRoutesDeps): void {
     async (req, reply) => {
       const auth = authOf(req);
       const dto = await core.db.withTenant(tenant(req), async (tx) => {
-        const { conv, facts } = await ownedChat(req, tx, req.params.id);
-        await perms.assertCan(req, tx, "ai_chat.share", channelResource(facts), { hideAs404: true });
+        const { conv } = await sharedChat(req, tx, req.params.id);
         const snap = await snapshotOf(tx, conv.id, gateway);
         if (snap.messages.length === 0)
           throw conflict("There is nothing to share in this chat yet", "share_empty");
@@ -280,7 +287,7 @@ export function registerShareRoutes(app: App, deps: ShareRoutesDeps): void {
     async (req) => {
       const auth = authOf(req);
       return core.db.withTenant(tenant(req), async (tx) => {
-        const { conv } = await ownedChat(req, tx, req.params.id);
+        const { conv } = await sharedChat(req, tx, req.params.id);
         const rows = await tx
           .select()
           .from(aiChatShares)

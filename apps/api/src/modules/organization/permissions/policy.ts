@@ -75,8 +75,13 @@ const AI_CHAT_FIXED = new Set<Permission>([
   "channel.mention_all",
   "channel.post",
 ]);
-/** Permissions that act on one AI chat: owner-only when decided on a channel resource. */
-const AI_CHAT_OWNED = new Set<Permission>(["ai_chat.use", "ai_chat.web", "ai_chat.share"]);
+/**
+ * Writing in one AI chat (P-04): the owner or a `chat` grantee (relation `member`); a `view` grantee (relation
+ * `grantee`) is told `ai_chat_view_only`.
+ */
+const AI_CHAT_WRITE = new Set<Permission>(["ai_chat.use", "ai_chat.web"]);
+/** Managing one AI chat (rename, archive, settings) and sharing it (grants, snapshot links): the owner only (P-04). */
+const AI_CHAT_OWNER_ONLY = new Set<Permission>(["ai_chat.manage", "ai_chat.share"]);
 
 const DEVICE_GATED = new Set<Permission>([
   "work_session.create",
@@ -97,6 +102,8 @@ export const PRECONDITIONS: readonly Precondition[] = [
     applies: (perm) => perm === "channel.read",
     check: (p, r) => {
       if (!isChannel(r) || r.relations.has("member")) return null;
+      // A `view` grant reads an AI chat without taking part in it (P-04).
+      if (r.state.has("ai_chat") && r.relations.has("grantee")) return null;
       if (p.kind === "agent") return notMember(p);
       return r.state.has("private") ? { layer: "resource", reason: "private_channel" } : null;
     },
@@ -107,9 +114,19 @@ export const PRECONDITIONS: readonly Precondition[] = [
       isChannel(r) && r.state.has("ai_chat") ? { layer: "resource", reason: "ai_chat_private" } : null,
   },
   {
-    // On a concrete conversation, ai_chat.* needs an AI chat the principal owns; at organization scope (a new
-    // chat) the role decides.
-    applies: (perm) => AI_CHAT_OWNED.has(perm),
+    // On a concrete conversation, writing needs an AI chat the principal owns or holds a `chat` grant on; at
+    // organization scope (a new chat) the role decides.
+    applies: (perm) => AI_CHAT_WRITE.has(perm),
+    check: (_p, r) => {
+      if (!isChannel(r) || (r.state.has("ai_chat") && r.relations.has("member"))) return null;
+      return r.state.has("ai_chat") && r.relations.has("grantee")
+        ? { layer: "resource", reason: "ai_chat_view_only" }
+        : { layer: "resource", reason: "not_ai_chat_owner" };
+    },
+  },
+  {
+    // Managing and sharing a concrete AI chat stay with its owner, whatever grant anyone else holds.
+    applies: (perm) => AI_CHAT_OWNER_ONLY.has(perm),
     check: (_p, r) =>
       isChannel(r) && !(r.state.has("ai_chat") && r.relations.has("owner"))
         ? { layer: "resource", reason: "not_ai_chat_owner" }
@@ -214,6 +231,12 @@ export interface ChannelFacts {
    */
   kind?: "channel" | "dm" | "group" | "ai_chat";
   /**
+   * AI chats and user principals only (P-03): the viewer's access from `ai_chats.owner_user_id` and active grants
+   * (`aiAccessSql`). When set, it alone decides the relations: a human's `conversation_members` row never confers
+   * access to an AI chat. Omitted (agents, other kinds, Phase 5 callers) = relations from `viewerRole`.
+   */
+  aiAccess?: "owner" | "chat" | "view" | null;
+  /**
    * The unit the channel belongs to, root → self (CHAT-02): unit-scoped allow and deny rules apply to the channels of
    * that unit (principle 6). Omitted or [] = the organization (and every direct conversation).
    */
@@ -221,6 +244,18 @@ export interface ChannelFacts {
 }
 
 function channelRelations(c: ChannelFacts): Relation[] {
+  if (c.kind === "ai_chat" && c.aiAccess !== undefined) {
+    switch (c.aiAccess) {
+      case "owner":
+        return ["member", "owner"];
+      case "chat":
+        return ["member"];
+      case "view":
+        return ["grantee"];
+      default:
+        return [];
+    }
+  }
   return [
     ...when(c.viewerRole !== null, "member" as const),
     ...when(c.viewerRole === "owner", "owner" as const),
