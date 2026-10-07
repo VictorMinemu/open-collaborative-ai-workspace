@@ -427,6 +427,14 @@ describe("agent.card_action.v1 → dispatch → reply (06-14)", () => {
     });
   });
 
+  /** What the server puts on every stored event (the fake API's `publish` adds them on the wire). */
+  const frameFields = (seq: number) => ({
+    seq,
+    type: "agent.card_action.v1",
+    organizationId: "org-1",
+    cellId: "org-1",
+  });
+
   it("an invalid card action is skipped with a warning carrying the seq and field path only; later events flow", async () => {
     const logs: string[] = [];
     const client = createAgentChannelClient({ apiUrl: api.url, token: () => api.token });
@@ -442,10 +450,13 @@ describe("agent.card_action.v1 → dispatch → reply (06-14)", () => {
     await bridge.handleFrame({
       seq: 41,
       type: "agent.card_action.v1",
-      data: cardActionData({
-        eventId: "evt-41",
-        cardAction: { messageId: "card-msg-1", kind: "approval", title: "SECRET TITLE", outcome: "maybe" },
-      }),
+      data: {
+        ...frameFields(41),
+        ...cardActionData({
+          eventId: "evt-41",
+          cardAction: { messageId: "card-msg-1", kind: "approval", title: "SECRET TITLE", outcome: "maybe" },
+        }),
+      },
     });
     expect(port.dispatched).toEqual([]);
     const warning = logs.find((l) => l.includes("seq=41")) ?? "";
@@ -455,7 +466,7 @@ describe("agent.card_action.v1 → dispatch → reply (06-14)", () => {
     await bridge.handleFrame({
       seq: 42,
       type: "agent.card_action.v1",
-      data: cardActionData({ eventId: "evt-42" }),
+      data: { ...frameFields(42), ...cardActionData({ eventId: "evt-42" }) },
     });
     expect(port.dispatched).toHaveLength(1);
     expect(api.messages.map((m) => m.idempotencyKey)).toEqual(["evt:evt-42"]);

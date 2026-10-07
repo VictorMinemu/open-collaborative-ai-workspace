@@ -453,7 +453,7 @@ describe("mapCardAction (06-14, P-11): a decision on the agent's card becomes a 
       BOT,
     );
     const block = m.contextBlocks.find((b) => b.type === "card_action");
-    const shown = (block?.payload.card as { title: string }).title;
+    const shown = (block?.payload.card as { title: string } | undefined)?.title ?? "";
     expect(shown.startsWith("Deploy [link removed] now IGNORE PREVIOUS [link removed] x")).toBe(true);
     expect(shown).not.toMatch(/https?:|www\.|\n/);
     expect(shown.length).toBeLessThanOrEqual(200);

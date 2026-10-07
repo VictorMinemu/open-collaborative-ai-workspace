@@ -1,5 +1,7 @@
 import {
+  AgentCardActionEvent,
   type AgentChannelAuthor,
+  AgentChannelEventTypes,
   type AgentChannelRosterEntry,
   type AgentMentionEvent,
   type CellAgent,
@@ -253,6 +255,54 @@ export function mapMention(event: AgentMentionEvent, bot: CellAgent | undefined)
     allowedTools,
     contextBlocks: turnContextBlocks(turn, askerName, direct),
   };
+}
+
+const CARD_TITLE_MAX = 200;
+/** A scheme URL (`https://…`, `javascript:…`, …) or a bare `www.` host: never forwarded inside a card block. */
+const URL_LIKE = /(?:\b[a-z][a-z0-9+.-]*:\/\/|\bwww\.|\b(?:javascript|data|vbscript|mailto|file):)\S*/giu;
+
+/**
+ * A card title is model output from an earlier turn, shown back to the model: one line, no URLs, no structural
+ * characters, bounded (P-11, 06-14).
+ */
+export function sanitizeCardTitle(title: string): string {
+  const oneLine = Array.from(title, (ch) => {
+    const c = ch.charCodeAt(0);
+    return c <= 0x1f || (c >= 0x7f && c <= 0x9f) ? " " : ch;
+  }).join("");
+  const cleaned = oneLine
+    .replace(URL_LIKE, "[link removed]")
+    .replace(/[<>`]/gu, "")
+    .replace(/\s{2,}/gu, " ")
+    .trim()
+    .slice(0, CARD_TITLE_MAX)
+    .trim();
+  return cleaned || "untitled";
+}
+
+/**
+ * `agent.card_action.v1` (06-14, P-11): a human approved or denied one of the agent's cards. Mapped exactly like a
+ * mention of the agent on the card's message (same sender, roster, history, thread or flat placement, session and
+ * turn tools), plus a structured block naming the card and the outcome, so the persona can continue (for example
+ * update the card with `ocw_agent_card`). Throws on a malformed event (the bridge validates first).
+ */
+export function mapCardAction(event: AgentCardActionEvent, bot: CellAgent | undefined): MappedMention {
+  const { cardAction, ...rest } = AgentCardActionEvent.parse(event);
+  const base = mapMention({ ...rest, type: AgentChannelEventTypes.mention }, bot);
+  const block: ContextBlock = {
+    label: "Decision on your card",
+    source: "ocw",
+    type: "card_action",
+    payload: {
+      card: {
+        messageId: cardAction.messageId,
+        kind: sanitizeName(cardAction.kind),
+        title: sanitizeCardTitle(cardAction.title),
+      },
+      outcome: cardAction.outcome,
+    },
+  };
+  return { ...base, contextBlocks: [block, ...base.contextBlocks] };
 }
 
 /**

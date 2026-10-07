@@ -1,4 +1,6 @@
 import {
+  AgentCardActionEvent,
+  type AgentCardActionEvent as AgentCardActionEventType,
   AgentChannelEventTypes,
   AgentMentionEvent,
   type AgentMentionEvent as AgentMentionEventType,
@@ -15,7 +17,7 @@ import type { AgentChannelClient } from "./api-client.js";
 import { sleep } from "./backoff.js";
 import type { DurableFrame, EventStreamLogger } from "./event-stream.js";
 import { handleMcpProbe, type probeMcpServer } from "./mcp-probe.js";
-import { type MappedMention, mapMention, replyIdempotencyKey } from "./mention-mapper.js";
+import { type MappedMention, mapCardAction, mapMention, replyIdempotencyKey } from "./mention-mapper.js";
 import type { PluginInstaller } from "./plugin-installer.js";
 import type { AgentProvisioningResult } from "./reconciler.js";
 import type { SubscriptionAuth } from "./subscription-auth.js";
@@ -187,20 +189,33 @@ export function createBridge(opts: BridgeOptions) {
   }
 
   async function handleMention(event: AgentMentionEventType): Promise<void> {
+    await runTurn(event, "mention", (agent) => mapMention(event, agent));
+  }
+
+  /** A decision on one of the agent's cards (06-14, P-11): a turn exactly like a mention of the agent on its card. */
+  async function handleCardAction(event: AgentCardActionEventType): Promise<void> {
+    await runTurn(event, "card action", (agent) => mapCardAction(event, agent));
+  }
+
+  async function runTurn(
+    event: { eventId: string; agent: { id: string } },
+    label: string,
+    map: (agent: CellAgent) => MappedMention,
+  ): Promise<void> {
     let agent = agents.get(event.agent.id);
     if (!agent) {
       await refreshCell();
       agent = agents.get(event.agent.id);
     }
     if (!agent) {
-      log.warn?.(`mention ${event.eventId} for unknown agent ${event.agent.id}; skipped`);
+      log.warn?.(`${label} ${event.eventId} for unknown agent ${event.agent.id}; skipped`);
       return;
     }
     if (agent.status === "disabled") {
-      log.info?.(`mention ${event.eventId} for disabled agent ${agent.id}; skipped`);
+      log.info?.(`${label} ${event.eventId} for disabled agent ${agent.id}; skipped`);
       return;
     }
-    const mention = mapMention(event, agent);
+    const mention = map(agent);
     let index = 0;
     const post = async (text: string) => {
       for (const chunk of chunkText(text, maxReplyChars)) {
@@ -246,7 +261,7 @@ export function createBridge(opts: BridgeOptions) {
           if (index > 0 || opts.signal.aborted || attempt >= dispatchAttempts) throw error;
           if (error instanceof TerminalTurnError) throw error;
           log.warn?.(
-            `mention ${event.eventId}: turn attempt ${attempt} failed (${error instanceof Error ? error.message : String(error)}); retrying`,
+            `${label} ${event.eventId}: turn attempt ${attempt} failed (${error instanceof Error ? error.message : String(error)}); retrying`,
           );
           await sleep(retryDelayMs * attempt, opts.signal);
         }
@@ -254,7 +269,7 @@ export function createBridge(opts: BridgeOptions) {
     } catch (error) {
       if (opts.signal.aborted) throw error; // stopping: leave the event for the successor to replay
       log.error?.(
-        `mention ${event.eventId}: turn failed: ${error instanceof Error ? error.message : String(error)}`,
+        `${label} ${event.eventId}: turn failed: ${error instanceof Error ? error.message : String(error)}`,
       );
       if (index === 0) {
         await opts.client
@@ -287,6 +302,18 @@ export function createBridge(opts: BridgeOptions) {
           return;
         }
         await handleMention(parsed.data);
+        return;
+      }
+      case AgentChannelEventTypes.cardAction: {
+        // Untrusted until parsed; the warning names the seq and the field path only (never values such as titles).
+        const parsed = AgentCardActionEvent.safeParse(frame.data);
+        if (!parsed.success) {
+          log.warn?.(
+            `seq=${frame.seq}: invalid ${frame.type} payload; skipped (${parsed.error.issues[0]?.path.join(".") || "?"})`,
+          );
+          return;
+        }
+        await handleCardAction(parsed.data);
         return;
       }
       case AgentChannelEventTypes.configChanged:
@@ -372,5 +399,12 @@ export function createBridge(opts: BridgeOptions) {
     }
   }
 
-  return { refreshCell, handleFrame, handleMention, agents, snapshot: () => lastSnapshot };
+  return {
+    refreshCell,
+    handleFrame,
+    handleMention,
+    handleCardAction,
+    agents,
+    snapshot: () => lastSnapshot,
+  };
 }
