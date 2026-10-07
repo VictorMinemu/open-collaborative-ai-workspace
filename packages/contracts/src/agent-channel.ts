@@ -6,6 +6,7 @@ import {
   ProviderAuthErrorCode,
   SubscriptionProviderKind,
 } from "./agent";
+import { AgentCardInput, AgentCardKind, AgentCardPatch } from "./agent-cards";
 import { SearchProvider, TurnContext } from "./bot-capabilities";
 import { ConversationKind, Mention, MessageBody } from "./chat";
 import { Id, IsoDateTime, MemberKind, PrincipalKind } from "./common";
@@ -46,6 +47,8 @@ export const AgentChannelEventTypes = {
   pluginInstall: "plugin.install.v1",
   /** Phase 3.1 (D-14): remove an installed marketplace plugin from the cell. */
   pluginUninstall: "plugin.uninstall.v1",
+  /** Phase 6 (AGENT-04, P-11): a reader decided one of this agent's Agent Cards. */
+  cardAction: "agent.card_action.v1",
 } as const;
 
 const UUID_RE = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
@@ -109,6 +112,22 @@ export const AgentMentionEvent = z.object({
   turn: TurnContext.optional(),
 });
 export type AgentMentionEvent = z.infer<typeof AgentMentionEvent>;
+
+/**
+ * Phase 6 (AGENT-04, P-11): a reader approved or denied one of the agent's cards. Built like a mention of the agent on
+ * the card's message: `message.text` is the server sentence "<actor> approved|denied “<title>”" and `message.author` the
+ * deciding human (server-resolved), `turn` is computed for that human. Older plugins skip the unknown type.
+ */
+export const AgentCardActionEvent = AgentMentionEvent.omit({ type: true }).extend({
+  type: z.literal(AgentChannelEventTypes.cardAction),
+  cardAction: z.object({
+    messageId: Id,
+    kind: AgentCardKind,
+    title: z.string(),
+    outcome: z.enum(["approved", "denied"]),
+  }),
+});
+export type AgentCardActionEvent = z.infer<typeof AgentCardActionEvent>;
 
 export const CellConfigChangedEvent = z.object({
   type: z.literal(AgentChannelEventTypes.configChanged),
@@ -479,6 +498,36 @@ export const AgentChannelPostMessageResponse = z.object({
   threadRootMessageId: Id.nullable(),
 });
 export type AgentChannelPostMessageResponse = z.infer<typeof AgentChannelPostMessageResponse>;
+
+// ---------------------------------------------------------------- Agent Cards (Phase 6, AGENT-04, P-11, additive)
+
+/**
+ * `POST /agent-channel/v1/cards`: the agent posts a typed card where it may post a message (same rules as
+ * `POST /messages`); `card.summary` becomes the plain-text message body. 201 when created, 200 on an idempotent retry.
+ */
+export const AgentChannelPostCard = z.object({
+  agentId: Id,
+  conversationId: Id,
+  threadRootId: Id.nullable(),
+  inReplyToMessageId: Id.optional(),
+  idempotencyKey: z.string().min(8).max(128),
+  card: AgentCardInput,
+});
+export type AgentChannelPostCard = z.infer<typeof AgentChannelPostCard>;
+
+export const AgentChannelPostCardResponse = z.object({
+  messageId: Id,
+  created: z.boolean(),
+  version: z.number().int(),
+});
+export type AgentChannelPostCardResponse = z.infer<typeof AgentChannelPostCardResponse>;
+
+/** `PATCH /agent-channel/v1/cards/:messageId`: only the posting agent, naming the version it saw. */
+export const AgentChannelPatchCard = z.object({ agentId: Id, patch: AgentCardPatch });
+export type AgentChannelPatchCard = z.infer<typeof AgentChannelPatchCard>;
+
+export const AgentChannelPatchCardResponse = z.object({ messageId: Id, version: z.number().int() });
+export type AgentChannelPatchCardResponse = z.infer<typeof AgentChannelPatchCardResponse>;
 
 export const AgentChannelTyping = z.object({
   agentId: Id,
