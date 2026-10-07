@@ -33,7 +33,8 @@ export const notifKeys = {
   prefs: ["notification-prefs"] as const,
 };
 
-const MENTIONS_FILTER = new Set<Notification["kind"]>(["mention", "channel", "here"]);
+/** The API's `MENTIONS_FILTER_KINDS` (06-08: a chat shared with the member by name counts as addressed to them). */
+const MENTIONS_FILTER = new Set<Notification["kind"]>(["mention", "channel", "here", "ai_chat_shared"]);
 const FILTERS: NotificationFilter[] = ["all", "mentions"];
 const matches = (filter: NotificationFilter, n: Notification) =>
   filter === "all" || MENTIONS_FILTER.has(n.kind);

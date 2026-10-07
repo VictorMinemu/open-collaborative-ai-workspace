@@ -61,7 +61,8 @@ export async function conversationRefs(
   const out = new Map<string, ConversationRef>();
   if (ids.length === 0) return out;
   const convs = await tx.select().from(conversations).where(inArray(conversations.id, ids));
-  const direct = convs.filter((c) => c.kind !== "channel").map((c) => c.id);
+  // An AI chat's label is its title (06-08), the same for everyone: only DMs and groups name their members.
+  const direct = convs.filter((c) => c.kind !== "channel" && c.kind !== "ai_chat").map((c) => c.id);
   const members =
     direct.length === 0
       ? []
@@ -76,7 +77,8 @@ export async function conversationRefs(
           .orderBy(conversationMembers.joinedAt);
   for (const c of convs) {
     let label = `#${c.name ?? "channel"}`;
-    if (c.kind !== "channel") {
+    if (c.kind === "ai_chat") label = c.name ?? "New chat";
+    else if (c.kind !== "channel") {
       const names = members
         .filter((m) => m.conversationId === c.id && !(m.kind === "user" && m.id === me))
         .map(

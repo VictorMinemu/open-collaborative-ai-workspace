@@ -41,8 +41,17 @@ import {
   removeMember,
 } from "../chat";
 import type { ModelGateway } from "../model-gateway";
+import { notifyUsers } from "../notification";
 import { createPermissionService } from "../organization";
-import { type AiChatRow, aiMessage, chatSummary, directoryOf, EMPTY_DIRECTORY, ownerAuthor } from "./dto";
+import {
+  type AiChatRow,
+  aiMessage,
+  chatSummary,
+  directoryOf,
+  EMPTY_DIRECTORY,
+  ownerAuthor,
+  readUpTo,
+} from "./dto";
 import { createChatGuards } from "./service";
 
 /**
@@ -215,6 +224,7 @@ export function registerGrantRoutes(app: App, ctx: { core: Core; gateway: ModelG
   const access = createConversationAccess(core);
   const guards = createChatGuards(access, perms);
   const chatDeps = { audit: core.audit, realtime: core.realtime };
+  const notifyDeps = { core, access };
   const tags = ["ai-chat"];
   const grantLimit = app.rateLimit({
     max: GRANTS_PER_MINUTE,
@@ -289,15 +299,18 @@ export function registerGrantRoutes(app: App, ctx: { core: Core; gateway: ModelG
     chat: AiChatRow,
     row: GrantRow,
     action: NoticeAction,
-  ): Promise<void> {
+  ): Promise<MessageRow> {
     if (action !== "granted") await redecideParticipants(tx, conv, chat);
     const actorId = authOf(req).userId;
     const actor = (await directoryOf(tx, [actorId])).users.get(actorId)?.displayName ?? "Former member";
     const { label } = (await subjectLabeller(core, tx, [row]))(row);
-    await postNotice(core, tx, conv, {
+    const notice = await postNotice(core, tx, conv, {
       body: noticeOf(action, actor, label, action === "revoked" ? null : row.level),
       mentions: row.subjectKind === "user" && row.subjectId ? [{ kind: "user", id: row.subjectId }] : [],
     });
+    // 06-08: the owner is acting in the chat, so everything up to this change is read for them (their shared chat's
+    // badge starts from here, not from the solo history they never had to mark read).
+    await readUpTo(tx, conv.id, chat.ownerUserId, notice.seq);
 
     if (row.subjectKind === "user" && row.subjectId) {
       const subjectId = row.subjectId;
@@ -320,7 +333,7 @@ export function registerGrantRoutes(app: App, ctx: { core: Core; gateway: ModelG
           }),
         });
       }
-      return;
+      return notice;
     }
     const payload = { conversationId: conv.id, access: null };
     await core.realtime.appendEvent(tx, convTopic(conv.id), EventTypes.aiChatAccessChanged, payload);
@@ -330,6 +343,7 @@ export function registerGrantRoutes(app: App, ctx: { core: Core; gateway: ModelG
       EventTypes.aiChatAccessChanged,
       payload,
     );
+    return notice;
   }
 
   /** A level change of an active grant: updated in place, audited `{from, to}`, then `afterChange`. */
@@ -439,22 +453,35 @@ export function registerGrantRoutes(app: App, ctx: { core: Core; gateway: ModelG
         if (!row) throw new Error("grant insert returned no row");
         // P-09: a person takes part from now on (roster, unread); the row never decides their access. Units and the
         // organization get no rows (no flood, research pitfall 6): their members join when they write.
-        if (subject.kind === "user") {
-          await addMember(
+        const joined =
+          subject.kind === "user" &&
+          (await addMember(
             tx,
             chatDeps,
             conv,
             { kind: "user", id: subject.id },
             { role: "member", reason: "ai_chat_grant" },
-          );
-        }
+          ));
         await core.audit.record(tx, {
           action: "ai_chat.grant_created",
           resourceType: "ai_chat",
           resourceId: conv.id,
           metadata: { ...auditIds(row), level },
         });
-        await afterChange(req, tx, conv, chat, row, "granted");
+        const notice = await afterChange(req, tx, conv, chat, row, "granted");
+        if (subject.kind === "user") {
+          // 06-08 (MULTI-01): a new participant's unread starts after the notice (the history is not "new" to them);
+          // the share itself reaches them as one `ai_chat_shared` notification on that notice. Units and the
+          // organization never fan out per member (research pitfall 6), and a level change notifies nobody.
+          if (joined) await readUpTo(tx, conv.id, subject.id, notice.seq);
+          await notifyUsers(tx, notifyDeps, {
+            kind: "ai_chat_shared",
+            conversationId: conv.id,
+            messageId: notice.id,
+            actor: { kind: "user", id: auth.userId },
+            userIds: [subject.id],
+          });
+        }
         return { status: 201 as const, dto: await grantDto(core, tx, row) };
       });
       return reply.status(out.status).send(out.dto);

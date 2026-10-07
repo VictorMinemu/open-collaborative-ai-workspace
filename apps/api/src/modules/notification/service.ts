@@ -15,6 +15,7 @@ import {
 } from "@ocw/contracts";
 import {
   conversationMembers,
+  conversations,
   messages,
   notificationPrefs,
   notifications,
@@ -38,12 +39,28 @@ import { snippetOf } from "./snippet";
  * stream (P-04) with `popup` decided once by the server from the recipient's preferences.
  */
 
-/** The inbox's Mentions filter (the Mentions view, CHAT-08). */
+/**
+ * The inbox's Mentions filter (the Mentions view, CHAT-08). 06-08: a chat shared with you by name is addressed to you
+ * like a mention, so it is listed there too.
+ */
 export const MENTIONS_FILTER_KINDS = [
   "mention",
   "channel",
   "here",
+  "ai_chat_shared",
 ] as const satisfies readonly NotificationKind[];
+
+/**
+ * Conversation kinds whose notifications exist (06-08: AI chats too). The inbox, its unread count and every
+ * recipient check use the readable set with these kinds, so an AI chat's notifications show only while it is readable.
+ */
+export const NOTIFIABLE_KINDS = ["channel", "dm", "group", "ai_chat"] as const;
+
+/** What the notification writers need outside the module's own service (`notifyUsers`, 06-08). */
+export interface NotificationDeps {
+  core: Core;
+  access: ConversationAccess;
+}
 
 /** Kinds ordered weakest → strongest; SQL compares positions to keep the strongest kind on a conflict. */
 const RANKED = (Object.keys(NOTIFICATION_KIND_RANK) as NotificationKind[]).sort(
@@ -88,6 +105,177 @@ interface Target {
   recipients: Map<string, NotificationKind>;
 }
 
+/** Recipients that are active members who may read the conversation now (the resolver decides, P-03). */
+async function eligible(
+  tx: Tx,
+  deps: NotificationDeps,
+  conversationId: string,
+  ids: string[],
+): Promise<string[]> {
+  if (ids.length === 0) return [];
+  const active = new Set(
+    (
+      await tx
+        .select({ id: orgMembers.userId })
+        .from(orgMembers)
+        .where(and(inArray(orgMembers.userId, ids), isNull(orgMembers.deactivatedAt)))
+    ).map((r) => r.id),
+  );
+  const out: string[] = [];
+  for (const id of ids) {
+    if (active.has(id) && (await deps.access.isReadable(tx, id, conversationId, { kinds: NOTIFIABLE_KINDS })))
+      out.push(id);
+  }
+  return out;
+}
+
+async function deliver(tx: Tx, deps: NotificationDeps, t: Target): Promise<void> {
+  const { core } = deps;
+  const ids = await eligible(tx, deps, t.conv.id, [...t.recipients.keys()]);
+  if (ids.length === 0) return;
+  const values = ids.map(
+    (id) =>
+      sql`(${t.conv.organizationId}::uuid, ${id}::uuid, ${t.recipients.get(id)}, ${t.conv.id}::uuid, ${t.messageId}::uuid, ${t.threadRootId}::uuid, ${t.actor.kind}, ${t.actor.id}::uuid)`,
+  );
+  // One row per (user, message): a stronger reason upgrades the row and makes it unread again; a weaker or equal
+  // one changes nothing (and announces nothing).
+  const res = await tx.execute(sql`
+    insert into app.notifications
+      (organization_id, user_id, kind, conversation_id, message_id, thread_root_id, actor_kind, actor_id)
+    values ${sql.join(values, sql`, `)}
+    on conflict (user_id, message_id) do update set kind = excluded.kind, read_at = null
+      where array_position(${RANK_ARRAY}, excluded.kind) > array_position(${RANK_ARRAY}, app.notifications.kind)
+    returning id, user_id, kind, created_at`);
+  const rows = res.rows as Array<{
+    id: string;
+    user_id: string;
+    kind: NotificationKind;
+    created_at: unknown;
+  }>;
+  if (rows.length === 0) return;
+
+  const userIds = rows.map((r) => r.user_id);
+  const prefs = new Map(
+    (await tx.select().from(notificationPrefs).where(inArray(notificationPrefs.userId, userIds))).map((p) => [
+      p.userId,
+      p,
+    ]),
+  );
+  const memberships = new Map(
+    (
+      await tx
+        .select({
+          id: conversationMembers.memberId,
+          level: conversationMembers.notifyLevel,
+          muted: conversationMembers.muted,
+        })
+        .from(conversationMembers)
+        .where(
+          and(
+            eq(conversationMembers.conversationId, t.conv.id),
+            eq(conversationMembers.memberKind, "user"),
+            inArray(conversationMembers.memberId, userIds),
+          ),
+        )
+    ).map((m) => [m.id, m]),
+  );
+  const dir = await loadDirectory(tx);
+  // A channel's label (and an AI chat's title) is the same for everyone; a DM's or group's names the others, so it
+  // is per recipient.
+  let channelRef: ConversationRef | undefined;
+  const refFor = async (userId: string): Promise<ConversationRef | undefined> => {
+    if (t.conv.kind === "channel" || t.conv.kind === "ai_chat") {
+      channelRef ??= (await conversationRefs(tx, [t.conv.id], userId, dir)).get(t.conv.id);
+      return channelRef;
+    }
+    return (await conversationRefs(tx, [t.conv.id], userId, dir)).get(t.conv.id);
+  };
+  const snippet = snippetOf(t.body);
+  const now = Date.now();
+
+  for (const r of rows) {
+    const conversation = await refFor(r.user_id);
+    if (!conversation) continue;
+    const p = prefs.get(r.user_id);
+    const m = memberships.get(r.user_id);
+    const { popup } = decideNotify({
+      event: r.kind,
+      // An AI chat follows the direct-conversation default ("all"): only addressed kinds ever reach it.
+      conversationKind: t.conv.kind === "ai_chat" ? "group" : t.conv.kind,
+      level: (m?.level ?? "default") as ConversationNotifyLevel,
+      defaultLevel: p?.defaultLevel ?? DEFAULT_NOTIFICATION_PREFS.defaultLevel,
+      muted: m?.muted ?? false,
+      dndActive: p?.dndUntil ? new Date(p.dndUntil).getTime() > now : false,
+      actorKind: t.actor.kind,
+    });
+    const notification: Notification = {
+      id: r.id,
+      kind: r.kind,
+      conversation,
+      messageId: t.messageId,
+      threadRootId: t.threadRootId,
+      actor: t.actor,
+      snippet,
+      createdAt: iso(r.created_at),
+      readAt: null,
+    };
+    const ev: NotificationCreatedEvent = { notification, popup };
+    await core.realtime.appendEvent(tx, `user:${r.user_id}`, EventTypes.notificationCreated, ev);
+  }
+}
+
+/**
+ * Notifies named users about one message of a conversation (06-08): an AI chat shared with them by name
+ * (`ai_chat_shared`, the grant's notice row), a mention inside a shared AI chat (`mention`), a card they follow (later
+ * plans). Recipients are decided here, never by the caller's list alone: each must be an active member who can read
+ * the conversation now (the readable set with AI chats, P-03), and never the actor. One row per (user, message), the
+ * strongest kind wins (`deliver`), ids and the actor only (Pitfall 9), announced as `notification.created` on
+ * `user:<id>`.
+ */
+export async function notifyUsers(
+  tx: Tx,
+  deps: NotificationDeps,
+  n: {
+    kind: NotificationKind;
+    conversationId: string;
+    messageId: string;
+    actor: { kind: "user" | "agent" | "system"; id: string | null };
+    userIds: string[];
+  },
+): Promise<void> {
+  const recipients = new Map<string, NotificationKind>();
+  for (const id of n.userIds) {
+    if (n.actor.kind !== "system" && id === n.actor.id) continue;
+    recipients.set(id, n.kind);
+  }
+  if (recipients.size === 0) return;
+  const [row] = await tx
+    .select({
+      body: messages.body,
+      threadId: messages.threadId,
+      kind: conversations.kind,
+      organizationId: conversations.organizationId,
+    })
+    .from(messages)
+    .innerJoin(conversations, eq(conversations.id, messages.conversationId))
+    .where(and(eq(messages.id, n.messageId), eq(messages.conversationId, n.conversationId)))
+    .limit(1);
+  if (!row) return;
+  const dir = await loadDirectory(tx);
+  await deliver(tx, deps, {
+    conv: {
+      id: n.conversationId,
+      kind: row.kind === "ai_chat" || row.kind === "channel" || row.kind === "group" ? row.kind : "dm",
+      organizationId: row.organizationId,
+    },
+    messageId: n.messageId,
+    body: row.body,
+    threadRootId: row.threadId,
+    actor: authorOf(dir, n.actor.kind, n.actor.id),
+    recipients,
+  });
+}
+
 export interface NotificationService {
   onPosted(tx: Tx, input: MessagePostedInput): Promise<void>;
   onEdited(tx: Tx, input: MessageEditedInput): Promise<void>;
@@ -102,6 +290,7 @@ export function createNotificationService(
   core: Core,
   deps: { online: OnlineSet; access: ConversationAccess },
 ): NotificationService {
+  const nd: NotificationDeps = { core, access: deps.access };
   async function humanMemberIds(tx: Tx, conversationId: string): Promise<string[]> {
     const rows = await tx
       .select({ id: conversationMembers.memberId })
@@ -136,115 +325,6 @@ export function createNotificationService(
     const out = replies.flatMap((r) => (r.id ? [r.id] : []));
     if (root?.kind === "user" && root.id) out.unshift(root.id);
     return out;
-  }
-
-  /** Recipients that are active members who may read the conversation now (the resolver decides, P-03). */
-  async function eligible(tx: Tx, conversationId: string, ids: string[]): Promise<string[]> {
-    if (ids.length === 0) return [];
-    const active = new Set(
-      (
-        await tx
-          .select({ id: orgMembers.userId })
-          .from(orgMembers)
-          .where(and(inArray(orgMembers.userId, ids), isNull(orgMembers.deactivatedAt)))
-      ).map((r) => r.id),
-    );
-    const out: string[] = [];
-    for (const id of ids) {
-      if (active.has(id) && (await deps.access.isReadable(tx, id, conversationId))) out.push(id);
-    }
-    return out;
-  }
-
-  async function deliver(tx: Tx, t: Target): Promise<void> {
-    const ids = await eligible(tx, t.conv.id, [...t.recipients.keys()]);
-    if (ids.length === 0) return;
-    const values = ids.map(
-      (id) =>
-        sql`(${t.conv.organizationId}::uuid, ${id}::uuid, ${t.recipients.get(id)}, ${t.conv.id}::uuid, ${t.messageId}::uuid, ${t.threadRootId}::uuid, ${t.actor.kind}, ${t.actor.id}::uuid)`,
-    );
-    // One row per (user, message): a stronger reason upgrades the row and makes it unread again; a weaker or equal
-    // one changes nothing (and announces nothing).
-    const res = await tx.execute(sql`
-      insert into app.notifications
-        (organization_id, user_id, kind, conversation_id, message_id, thread_root_id, actor_kind, actor_id)
-      values ${sql.join(values, sql`, `)}
-      on conflict (user_id, message_id) do update set kind = excluded.kind, read_at = null
-        where array_position(${RANK_ARRAY}, excluded.kind) > array_position(${RANK_ARRAY}, app.notifications.kind)
-      returning id, user_id, kind, created_at`);
-    const rows = res.rows as Array<{
-      id: string;
-      user_id: string;
-      kind: NotificationKind;
-      created_at: unknown;
-    }>;
-    if (rows.length === 0) return;
-
-    const userIds = rows.map((r) => r.user_id);
-    const prefs = new Map(
-      (await tx.select().from(notificationPrefs).where(inArray(notificationPrefs.userId, userIds))).map(
-        (p) => [p.userId, p],
-      ),
-    );
-    const memberships = new Map(
-      (
-        await tx
-          .select({
-            id: conversationMembers.memberId,
-            level: conversationMembers.notifyLevel,
-            muted: conversationMembers.muted,
-          })
-          .from(conversationMembers)
-          .where(
-            and(
-              eq(conversationMembers.conversationId, t.conv.id),
-              eq(conversationMembers.memberKind, "user"),
-              inArray(conversationMembers.memberId, userIds),
-            ),
-          )
-      ).map((m) => [m.id, m]),
-    );
-    const dir = await loadDirectory(tx);
-    // A channel's label is the same for everyone; a DM's or group's names the others, so it is per recipient.
-    let channelRef: ConversationRef | undefined;
-    const refFor = async (userId: string): Promise<ConversationRef | undefined> => {
-      if (t.conv.kind === "channel") {
-        channelRef ??= (await conversationRefs(tx, [t.conv.id], userId, dir)).get(t.conv.id);
-        return channelRef;
-      }
-      return (await conversationRefs(tx, [t.conv.id], userId, dir)).get(t.conv.id);
-    };
-    const snippet = snippetOf(t.body);
-    const now = Date.now();
-
-    for (const r of rows) {
-      const conversation = await refFor(r.user_id);
-      if (!conversation) continue;
-      const p = prefs.get(r.user_id);
-      const m = memberships.get(r.user_id);
-      const { popup } = decideNotify({
-        event: r.kind,
-        conversationKind: t.conv.kind,
-        level: (m?.level ?? "default") as ConversationNotifyLevel,
-        defaultLevel: p?.defaultLevel ?? DEFAULT_NOTIFICATION_PREFS.defaultLevel,
-        muted: m?.muted ?? false,
-        dndActive: p?.dndUntil ? new Date(p.dndUntil).getTime() > now : false,
-        actorKind: t.actor.kind,
-      });
-      const notification: Notification = {
-        id: r.id,
-        kind: r.kind,
-        conversation,
-        messageId: t.messageId,
-        threadRootId: t.threadRootId,
-        actor: t.actor,
-        snippet,
-        createdAt: iso(r.created_at),
-        readAt: null,
-      };
-      const ev: NotificationCreatedEvent = { notification, popup };
-      await core.realtime.appendEvent(tx, `user:${r.user_id}`, EventTypes.notificationCreated, ev);
-    }
   }
 
   /**
@@ -298,7 +378,7 @@ export function createNotificationService(
           }).popup,
       )
       .map((c) => c.id);
-    const ids = await eligible(tx, conv.id, wanted);
+    const ids = await eligible(tx, nd, conv.id, wanted);
     if (ids.length === 0) return;
     // A channel's label is the same for every member.
     const conversation = (
@@ -320,6 +400,17 @@ export function createNotificationService(
   return {
     async onPosted(tx, input) {
       const { conv, message } = input;
+      // A shared AI chat (06-08): its mentioned humans who can read it, nothing else (no @channel, DM or thread rules).
+      if (conv.kind === "ai_chat") {
+        await notifyUsers(tx, nd, {
+          kind: "mention",
+          conversationId: conv.id,
+          messageId: message.id,
+          actor: input.author,
+          userIds: input.mentions.filter((m) => m.kind === "user").map((m) => m.id),
+        });
+        return;
+      }
       const threadRootId = input.threadRootId;
       const dir = await loadDirectory(tx);
       const recipients = computeRecipients({
@@ -337,7 +428,7 @@ export function createNotificationService(
       });
       const actor = message.author ?? authorOf(dir, input.author.kind, input.author.id);
       if (recipients.size > 0) {
-        await deliver(tx, {
+        await deliver(tx, nd, {
           conv,
           messageId: message.id,
           body: message.body,
@@ -371,7 +462,7 @@ export function createNotificationService(
       const unreadCount = await unreadCountFor(
         tx,
         input.userId,
-        await deps.access.readableIds(tx, input.userId),
+        await deps.access.readableIds(tx, input.userId, { kinds: NOTIFIABLE_KINDS }),
         "all",
       );
       for (let i = 0; i < ids.length; i += READ_EVENT_IDS) {
@@ -390,7 +481,7 @@ export function createNotificationService(
       }
       if (recipients.size === 0) return;
       const dir = await loadDirectory(tx);
-      await deliver(tx, {
+      await deliver(tx, nd, {
         conv: input.conv,
         messageId: input.message.id,
         body: input.message.body,

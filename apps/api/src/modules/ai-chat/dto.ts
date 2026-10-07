@@ -99,6 +99,23 @@ export function sharedSql(conversationIdCol: SQL | AnyPgColumn): SQL {
                 where sm.conversation_id = ${conversationIdCol} and sm.member_kind = 'user') > 1)`;
 }
 
+/**
+ * Moves `userId`'s read cursor of a chat forward to `seq`, never back (06-08). Without a participation row nothing
+ * happens. Joining participants start here, so a chat's history is not "unread" to someone who just arrived.
+ */
+export async function readUpTo(tx: Tx, conversationId: string, userId: string, seq: number): Promise<void> {
+  await tx
+    .update(conversationMembers)
+    .set({ lastReadSeq: sql`greatest(${conversationMembers.lastReadSeq}, ${seq})` })
+    .where(
+      and(
+        eq(conversationMembers.conversationId, conversationId),
+        eq(conversationMembers.memberKind, "user"),
+        eq(conversationMembers.memberId, userId),
+      ),
+    );
+}
+
 /** P-05 for one chat. */
 export async function isShared(tx: Tx, conversationId: string): Promise<boolean> {
   const [grant] = await tx

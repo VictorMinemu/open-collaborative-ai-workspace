@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  type AiChatAccessChangedEvent,
   AiChatDetail,
   AiChatList,
   type AiChatListScope,
@@ -10,9 +11,11 @@ import {
   AiChatSummary as AiChatSummarySchema,
   AiModelList,
   AiUserPreferences,
+  type ConversationReadEvent,
   type CreateAiChatRequest,
   EventTypes,
   type Message,
+  type Notification,
   type RegenerateRequest,
   type SendAiMessageRequest,
   SendAiMessageResponse,
@@ -129,6 +132,93 @@ export function applyAiChatUpdated(qc: QueryClient, chat: AiChatSummary): void {
       };
     });
   }
+}
+
+/** Patches one chat's row in every list cache that holds it (no move, no insert). */
+function patchListedChat(qc: QueryClient, chatId: string, patch: (c: AiChatSummary) => AiChatSummary): void {
+  for (const key of [aiKeys.list(false), aiKeys.list(true), aiKeys.shared]) {
+    qc.setQueryData<ListData>(key, (prev) =>
+      prev?.pages.some((p) => p.chats.some((c) => c.id === chatId))
+        ? {
+            ...prev,
+            pages: prev.pages.map((p) => ({
+              ...p,
+              chats: p.chats.map((c) => (c.id === chatId ? patch(c) : c)),
+            })),
+          }
+        : prev,
+    );
+  }
+}
+
+/**
+ * `conversation.read` of a shared AI chat from any of the member's tabs or devices (06-08): the unread count as the
+ * server computed it. Rows without a count (solo chats, chats the member has not joined) keep none.
+ */
+export function applyAiChatRead(qc: QueryClient, ev: ConversationReadEvent): void {
+  patchListedChat(qc, ev.conversationId, (c) =>
+    c.unreadCount === undefined && !c.shared ? c : { ...c, unreadCount: ev.unreadCount },
+  );
+}
+
+/**
+ * `ai_chat.access_changed` on the member's `user:` topic (06-08, T-06-08-01): a chat the member lost leaves "Shared
+ * with me" at once; a new or changed access arrives with its own `ai_chat.updated`.
+ */
+export function applyAiChatAccessChanged(qc: QueryClient, ev: AiChatAccessChangedEvent): void {
+  if (ev.access !== null) return;
+  qc.setQueryData<ListData>(aiKeys.shared, (prev) =>
+    prev
+      ? {
+          ...prev,
+          pages: prev.pages.map((p) => ({ ...p, chats: p.chats.filter((c) => c.id !== ev.conversationId) })),
+        }
+      : prev,
+  );
+}
+
+/** A chat shared with the member by name (`ai_chat_shared`): "Shared with me" refetches its counts and order. */
+export function applyAiChatNotification(qc: QueryClient, n: Notification): void {
+  if (n.kind === "ai_chat_shared") void qc.invalidateQueries({ queryKey: aiKeys.shared });
+}
+
+/** The newest seq this tab asked the server to mark read, per chat (the server keeps the greatest anyway). */
+const readSent = new Map<string, number>();
+
+/**
+ * Marks a shared AI chat read up to `seq` (06-08, like a channel): the badge clears at once and the server moves the
+ * cursor forward only, clears the notifications it covers and tells the member's other tabs and devices.
+ */
+export function markAiChatRead(qc: QueryClient, chatId: string, seq: number): void {
+  if ((readSent.get(chatId) ?? -1) >= seq) return;
+  readSent.set(chatId, seq);
+  patchListedChat(qc, chatId, (c) => (c.unreadCount ? { ...c, unreadCount: 0 } : c));
+  void api.post(`/api/v1/ai-chats/${chatId}/read`, { body: { seq } }).catch(() => {
+    readSent.delete(chatId);
+  });
+}
+
+/** Debounce of the open chat's read marker: a burst of frames is one request. */
+const READ_DEBOUNCE_MS = 400;
+
+/**
+ * The open shared chat is read while the tab is visible (06-08, P-09): debounced on its newest message seq. Solo
+ * chats are never marked (they keep no badge, Phase 5 unchanged).
+ */
+function useAiChatReadMarker(chatId: string, shared: boolean, latestSeq: number): void {
+  const qc = useQueryClient();
+  useEffect(() => {
+    if (!shared || latestSeq <= 0) return;
+    const mark = () => {
+      if (document.visibilityState === "visible") markAiChatRead(qc, chatId, latestSeq);
+    };
+    const t = setTimeout(mark, READ_DEBOUNCE_MS);
+    document.addEventListener("visibilitychange", mark);
+    return () => {
+      clearTimeout(t);
+      document.removeEventListener("visibilitychange", mark);
+    };
+  }, [qc, chatId, shared, latestSeq]);
 }
 
 /** The live summary of a chat when one arrived after its snapshot (title, archive), else undefined. */
@@ -356,6 +446,12 @@ export function useAiChat(chatId: string): AiChatView {
       void refetch();
     }
   }, [status, refetch]);
+
+  // 6. A shared chat on screen is read (06-08): its badge clears here and on the member's other devices.
+  const live = useAiChatSummary(chatId);
+  const shared = (live?.shared ?? state.snapshot?.chat.shared ?? query.data?.chat.shared) === true;
+  const latestSeq = state.messages.reduce((max, m) => (m.threadId === null && m.seq > max ? m.seq : max), 0);
+  useAiChatReadMarker(chatId, shared, latestSeq);
 
   const textOf = useCallback((m: Message) => displayText(state, m), [state]);
   const applySent = useCallback((r: SendAiMessageResponse) => {
