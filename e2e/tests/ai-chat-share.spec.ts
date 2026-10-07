@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { crc32, deflateSync } from "node:zlib";
 import { type APIRequestContext, expect, type Page, test } from "@playwright/test";
 import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import { seedPlan } from "../support/ai-chat";
@@ -46,9 +47,14 @@ async function settled(chatId: string) {
     .toBe("completed");
 }
 
-async function sendAs(chatId: string, body: string) {
+async function sendAs(chatId: string, body: string, attachmentIds: string[] = []) {
   const res = await sam.post(`/api/v1/ai-chats/${chatId}/messages`, {
-    data: { clientMessageId: `cm-${randomUUID()}`, body, model: PLAN_MODEL },
+    data: {
+      clientMessageId: `cm-${randomUUID()}`,
+      body,
+      model: PLAN_MODEL,
+      ...(attachmentIds.length > 0 ? { attachmentIds } : {}),
+    },
   });
   expect(res.ok(), `send: ${res.status()}`).toBe(true);
   await settled(chatId);
@@ -218,6 +224,99 @@ test("Sam revokes a link from the dialog and Alex's next load says it isn't avai
     await shot(reader.page, `ai-share-revoked-${w}`);
   } finally {
     await owner.context.close();
+    await reader.context.close();
+  }
+});
+
+/** A small RGB PNG (a soft gradient with a bar), enough for sniffing and real renditions. */
+function png(width = 640, height = 400): Buffer {
+  const chunk = (type: string, data: Buffer) => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length);
+    const td = Buffer.concat([Buffer.from(type), data]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(td));
+    return Buffer.concat([len, td, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 2;
+  const raw = Buffer.alloc((width * 3 + 1) * height);
+  for (let y = 0; y < height; y++) {
+    const row = y * (width * 3 + 1);
+    for (let x = 0; x < width; x++) {
+      const bar = x > width * 0.3 && x < width * 0.7 && y > height * 0.35 && y < height * 0.75;
+      const t = (x / width + y / height) / 2;
+      raw[row + 1 + x * 3] = bar ? 79 : Math.round(240 - 30 * t);
+      raw[row + 2 + x * 3] = bar ? 70 : Math.round(244 - 20 * t);
+      raw[row + 3 + x * 3] = bar ? 229 : 252;
+    }
+  }
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", ihdr),
+    chunk("IDAT", deflateSync(raw)),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+test("Alex sees the shared image through the share and opens it in the lightbox", async ({
+  browser,
+}, info) => {
+  test.setTimeout(120_000);
+  const w = widthOf(info.project.name);
+  // Sam's chat with an image: a draft to upload into, presign → PUT to the harness Garage → complete → send.
+  const draft = await sam.post("/api/v1/ai-chats/drafts", { data: {} });
+  expect(draft.status()).toBe(201);
+  const chatId = ((await draft.json()) as { id: string }).id;
+  created.push(chatId);
+  const bytes = png();
+  const presign = await sam.post(`/api/v1/conversations/${chatId}/attachments`, {
+    data: { filename: "venue-floorplan.png", contentType: "image/png", size: bytes.length },
+  });
+  expect(presign.ok(), `presign: ${presign.status()}`).toBe(true);
+  const p = (await presign.json()) as {
+    attachment: { id: string };
+    upload: { url: string; headers: Record<string, string> };
+  };
+  const put = await fetch(p.upload.url, { method: "PUT", headers: p.upload.headers, body: bytes });
+  expect(put.status).toBe(200);
+  expect((await sam.post(`/api/v1/attachments/${p.attachment.id}/complete`)).ok()).toBe(true);
+  await sendAs(chatId, "Which room fits twelve people?", [p.attachment.id]);
+  const res = await sam.post(`/api/v1/ai-chats/${chatId}/shares`, { data: {} });
+  expect(res.status()).toBe(201);
+  const { path, id } = (await res.json()) as { path: string; id: string };
+
+  const reader = await openAs(browser, ALEX, info.project.name);
+  try {
+    const page = reader.page;
+    await page.goto(`${BASE_URL}${path}`);
+    const view = page.getByTestId("ai-share-view");
+    await expect(view).toBeVisible();
+    const preview = view.getByTestId("attachment-image");
+    await expect(preview).toBeVisible();
+    // Share-scoped: the image comes through this share, never the chat's own attachment route.
+    expect(await preview.getAttribute("src")).toContain(
+      `/api/v1/ai-shares/${id}/attachments/${p.attachment.id}/preview`,
+    );
+    await expect
+      .poll(() => preview.evaluate((el) => (el as HTMLImageElement).naturalWidth), { timeout: 10_000 })
+      .toBeGreaterThan(0);
+    await page.mouse.move(0, 0);
+    await shot(page, `ai-share-image-${w}`);
+
+    await view.getByTestId("attachment-tile").first().click();
+    const lightbox = page.getByTestId("lightbox");
+    await expect(lightbox).toBeVisible();
+    const large = lightbox.getByTestId("lightbox-image");
+    await expect
+      .poll(() => large.evaluate((el) => (el as HTMLImageElement).naturalWidth), { timeout: 10_000 })
+      .toBeGreaterThan(0);
+    await page.keyboard.press("Escape");
+    await expect(lightbox).toBeHidden();
+  } finally {
     await reader.context.close();
   }
 });

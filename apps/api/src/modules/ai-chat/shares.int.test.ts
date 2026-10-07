@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
+import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TEST_SETUP_TOKEN, TestClient, WEB_ORIGIN } from "../../testing";
 import { type AiStack, seedPlan, startAiStack } from "../../testing-ai";
+import { startTestStorage, type TestStorage } from "../../testing-storage";
 import { invite } from "../../testing-workzone";
 
 /**
@@ -13,6 +15,7 @@ import { invite } from "../../testing-workzone";
  * read as the same 404. Real PostgreSQL + Redis, the in-process fake model.
  */
 
+let storage: TestStorage;
 let stack: AiStack;
 let su: pg.Client;
 let admin: TestClient;
@@ -110,7 +113,9 @@ async function orgBAdmin(): Promise<TestClient> {
 }
 
 beforeAll(async () => {
-  stack = await startAiStack();
+  // Garage for the share-scoped file routes (ADR-0015); every other case ignores it.
+  storage = await startTestStorage();
+  stack = await startAiStack({ env: storage.env });
   su = new pg.Client({ connectionString: stack.db.superuserUrl });
   await su.connect();
   admin = new TestClient(stack.baseUrl);
@@ -137,6 +142,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await su?.end();
   await stack?.stop();
+  await storage?.stop();
 });
 
 describe("create and read a snapshot (same organization, signed in)", () => {
@@ -333,5 +339,160 @@ describe("revoke (T-05-13-03): only the creator, at once, idempotent", () => {
   it("an anonymous revoke is 401", async () => {
     const anon = new TestClient(stack.baseUrl);
     expect((await anon.request("DELETE", `/api/v1/ai-shares/${randomUUID()}`)).status).toBe(401);
+  });
+});
+
+describe("images in a snapshot: through the share only, and only the snapshot's own files (T-05-13-02)", () => {
+  /** A request that does not follow redirects (file routes answer 302 to a presigned URL). */
+  const raw = (client: TestClient, path: string) =>
+    fetch(`${stack.baseUrl}${path}`, {
+      redirect: "manual",
+      headers: { origin: WEB_ORIGIN, cookie: client.cookieHeader },
+    });
+
+  const png = () =>
+    sharp({ create: { width: 320, height: 200, channels: 3, background: { r: 30, g: 90, b: 160 } } })
+      .png()
+      .toBuffer();
+
+  /** presign → PUT straight to Garage → complete: the attachment DTO. */
+  async function upload(as: TestClient, conv: string, filename: string): Promise<Json> {
+    const bytes = await png();
+    const p = await ok(
+      as.request("POST", `/api/v1/conversations/${conv}/attachments`, {
+        filename,
+        contentType: "image/png",
+        size: bytes.length,
+      }),
+    );
+    const put = await fetch(p.upload.url, { method: "PUT", headers: p.upload.headers, body: bytes });
+    expect(put.status).toBe(200);
+    return ok(as.request("POST", `/api/v1/attachments/${p.attachment.id}/complete`));
+  }
+
+  async function sendWithFile(chatId: string, body: string, fileId: string) {
+    const res = await ok(
+      sam.request("POST", `/api/v1/ai-chats/${chatId}/messages`, {
+        clientMessageId: cid(),
+        body,
+        model: PLAN_MODEL,
+        attachmentIds: [fileId],
+      }),
+      201,
+    );
+    await settled(res.generation.id);
+  }
+
+  let chatId: string;
+  let shareId: string;
+  let inSnapshot: Json;
+  let later: Json;
+
+  beforeAll(async () => {
+    for (let i = 0; i < 100; i++) {
+      const cfg = await ok(sam.request("GET", "/api/v1/attachments/config"));
+      if (cfg.enabled) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const draft = await ok(sam.request("POST", "/api/v1/ai-chats/drafts", {}), 201);
+    chatId = draft.id;
+    inSnapshot = await upload(sam, chatId, "q3-chart.png");
+    await sendWithFile(chatId, "what does this chart show?", inSnapshot.id);
+    shareId = (await ok(share(sam, chatId), 201)).id;
+    // Sent after the snapshot, in the same chat and by the same owner: never reachable through it.
+    later = await upload(sam, chatId, "later.png");
+    await sendWithFile(chatId, "and this one?", later.id);
+  }, 120_000);
+
+  it("the snapshot lists the image with share-scoped URLs only", async () => {
+    const read = await ok(view(alex, shareId));
+    const [user] = read.messages;
+    const base = `/api/v1/ai-shares/${shareId}/attachments/${inSnapshot.id}`;
+    expect(user.attachments).toEqual([
+      {
+        id: inSnapshot.id,
+        filename: "q3-chart.png",
+        contentType: "image/png",
+        size: inSnapshot.size,
+        isImage: true,
+        width: 320,
+        height: 200,
+        previewUrl: `${base}/preview`,
+        largeUrl: `${base}/large`,
+        downloadUrl: `${base}/download`,
+      },
+    ]);
+    expect(JSON.stringify(read)).not.toContain("/api/v1/attachments/");
+    expect(JSON.stringify(read)).not.toContain(later.id);
+    const row = (await su.query("select attachment_ids from app.ai_chat_shares where id = $1", [shareId]))
+      .rows[0];
+    expect(row.attachment_ids).toEqual([inSnapshot.id]);
+  });
+
+  it("Alex gets the renditions through the share (302, no-store, CORP) while the chat route stays 404", async () => {
+    for (const [path, part] of [
+      ["preview", "thumb.webp"],
+      ["large", "large.webp"],
+    ] as const) {
+      const r = await raw(alex, `/api/v1/ai-shares/${shareId}/attachments/${inSnapshot.id}/${path}`);
+      expect(r.status).toBe(302);
+      expect(r.headers.get("location")).toContain(`/att/${inSnapshot.id}/${part}`);
+      expect(r.headers.get("cache-control")).toBe("private, no-store");
+      expect(r.headers.get("cross-origin-resource-policy")).toBe("cross-origin");
+      const img = await fetch(r.headers.get("location") as string);
+      expect(img.status).toBe(200);
+      expect(img.headers.get("content-type")).toBe("image/webp");
+    }
+    // The chat itself stays private: the Phase 4 routes do not open up for Alex.
+    for (const path of ["preview", "large", "download"]) {
+      expect((await raw(alex, `/api/v1/attachments/${inSnapshot.id}/${path}`)).status).toBe(404);
+    }
+  });
+
+  it("a file of Sam's that is not in this snapshot is 404 through the share", async () => {
+    for (const path of ["preview", "large", "download"]) {
+      expect((await raw(alex, `/api/v1/ai-shares/${shareId}/attachments/${later.id}/${path}`)).status).toBe(
+        404,
+      );
+      expect(
+        (await raw(alex, `/api/v1/ai-shares/${shareId}/attachments/${randomUUID()}/${path}`)).status,
+      ).toBe(404);
+    }
+    // Sam's own chat route still serves it to Sam (Phase 4 behaviour unchanged).
+    expect((await raw(sam, `/api/v1/attachments/${later.id}/preview`)).status).toBe(302);
+  });
+
+  it("the download is audited with the share id; anonymous and other-org readers get nothing", async () => {
+    const r = await raw(alex, `/api/v1/ai-shares/${shareId}/attachments/${inSnapshot.id}/download`);
+    expect(r.status).toBe(302);
+    expect(r.headers.get("location")).toContain(`/att/${inSnapshot.id}/original`);
+    const audits = (
+      await su.query(
+        "select metadata from app.audit_events where action = 'attachment.downloaded' and resource_id = $1",
+        [inSnapshot.id],
+      )
+    ).rows;
+    expect(audits.map((a) => a.metadata)).toContainEqual({
+      attachmentId: inSnapshot.id,
+      conversationId: chatId,
+      shareId,
+    });
+    const anon = new TestClient(stack.baseUrl);
+    expect(
+      (await raw(anon, `/api/v1/ai-shares/${shareId}/attachments/${inSnapshot.id}/preview`)).status,
+    ).toBe(401);
+    const eve = await orgBAdmin();
+    expect((await raw(eve, `/api/v1/ai-shares/${shareId}/attachments/${inSnapshot.id}/preview`)).status).toBe(
+      404,
+    );
+  });
+
+  it("after revoke every file route of the share is 404", async () => {
+    await ok(sam.request("DELETE", `/api/v1/ai-shares/${shareId}`));
+    for (const path of ["preview", "large", "download"]) {
+      expect(
+        (await raw(alex, `/api/v1/ai-shares/${shareId}/attachments/${inSnapshot.id}/${path}`)).status,
+      ).toBe(404);
+    }
   });
 });
