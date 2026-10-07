@@ -135,6 +135,7 @@ export function createFakeSiwc() {
       challenge: q.get("code_challenge"),
       nonce: q.get("nonce"),
       scope,
+      resource: q.get("resource"),
       exp: Date.now() + CODE_TTL_MS,
       used: false,
     });
@@ -156,6 +157,8 @@ export function createFakeSiwc() {
       code.used = true;
       if (f.get("client_id") !== code.clientId) return err("invalid_client", 401);
       if (f.get("redirect_uri") !== code.redirectUri) return err("invalid_grant");
+      // The real server binds the code to the authorize request's resource (SIWC sign-in step 3).
+      if (f.get("resource") !== code.resource) return err("invalid_grant");
       const verifier = f.get("code_verifier") ?? "";
       const challenge = createHash("sha256").update(verifier).digest("base64url");
       if (!verifier || challenge !== code.challenge) return err("invalid_grant");
@@ -171,6 +174,7 @@ export function createFakeSiwc() {
       if (!rt || rt.state === "revoked") return err("invalid_grant");
       if (rt.state === "rotated") return err("refresh_token_reused");
       if (f.get("client_id") !== rt.clientId) return err("invalid_client", 401);
+      if (f.get("resource") !== "https://api.openai.com/v1") return err("invalid_grant");
       rt.state = "rotated";
       const out = issue(issuer, { clientId: rt.clientId, scope: rt.scope, nonce: null });
       return send(res, 200, out);
