@@ -3,12 +3,14 @@ import { type APIRequestContext, expect, type Page, test } from "@playwright/tes
 import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import {
   answerText,
+  askAiToggle,
   chatIdOf,
   humanTurn,
   lastAssistant,
   openNewAiChat,
   seedPlan,
   sendAi,
+  sendAiAs,
   shareWith,
   VICTOR,
 } from "../support/ai-chat";
@@ -405,6 +407,117 @@ test("Scenario B 3–4 live: typing, the visible queue, one coalesced answer say
     await owner.context.close();
     await grantee.context.close();
     await third.context.close();
+    await victor.dispose();
+  }
+});
+
+test("the composer addresses the AI or a person deliberately: Ask AI toggle and @ suggestions", async ({
+  browser,
+}, info) => {
+  test.setTimeout(180_000);
+  const project = info.project.name;
+  const mobile = project === "mobile";
+  const w = widthOf(project);
+  const alexId = await ensureMember(admin, ALEX, "developer");
+  const victor = await apiAs(VICTOR);
+  const created = await victor.post("/api/v1/ai-chats", {
+    data: {
+      clientMessageId: `cm-${randomUUID()}`,
+      body: `Draft the launch note ${randomUUID().slice(0, 8)}`,
+      model: PLAN("gpt-6-astra"),
+    },
+  });
+  expect(created.ok(), `create chat: ${created.status()}`).toBe(true);
+  const chatId = ((await created.json()) as { chat: { id: string } }).chat.id;
+  await settled(victor, chatId);
+
+  const owner = await openAs(browser, VICTOR, project);
+  try {
+    const page = owner.page;
+    const composer = page.getByTestId("ai-composer");
+    const answers = page.locator('[data-testid="ai-message"][data-role="assistant"]');
+    const suggestions = page.getByTestId("ai-mention-suggestions");
+
+    // A solo chat keeps the Phase 5 composer: no toggle, no @ suggestions, Send as before.
+    await page.goto(`${BASE_URL}/chat/ai/${chatId}`);
+    await expect(composer).toBeVisible();
+    await expect(answers).toHaveCount(1);
+    await composer.fill("Ping @");
+    await expect(suggestions).toHaveCount(0);
+    await expect(askAiToggle(page)).toHaveCount(0);
+    await composer.fill("");
+    await sendAi(page, "Still solo");
+    await expect(answers).toHaveCount(2);
+    await expect(answers.last()).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
+
+    // Shared with Alex: "Ask AI" is on by default.
+    await grant(victor, chatId, alexId, "chat");
+    await page.reload();
+    const toggle = askAiToggle(page);
+    await expect(toggle).toBeVisible();
+    await expect(toggle).toHaveAttribute("aria-pressed", "true");
+    await expect(toggle).toHaveText("Ask AI");
+
+    // "@" opens the suggestions: AI first, then the participants (never the viewer), filtered as you type.
+    await composer.fill("Hey @");
+    await expect(suggestions).toBeVisible();
+    const options = suggestions.getByTestId("ai-mention-option");
+    await expect(options.first()).toHaveAttribute("data-kind", "ai");
+    await expect(options.first()).toContainText("AI");
+    await expect(options.filter({ hasText: ALEX.name })).toHaveAttribute("data-kind", "user");
+    await expect(options.filter({ hasText: ALEX.name }).getByTestId("ai-mention-avatar")).toBeVisible();
+    await expect(options.filter({ hasText: VICTOR.name })).toHaveCount(0);
+    await bothThemes(page, `multiplayer-composer-${w}`);
+    await composer.press("a");
+    await composer.press("l");
+    await expect(options).toHaveCount(1);
+    await expect(options.first()).toContainText(ALEX.name);
+
+    // Choosing a person (keyboard) inserts their handle and turns Ask AI off: the message is not sent to the AI.
+    await composer.press("Enter");
+    await expect(suggestions).toBeHidden();
+    await expect(composer).toHaveValue("Hey @alex ");
+    await expect(toggle).toHaveAttribute("aria-pressed", "false");
+    await composer.pressSequentially("can you check the dates?");
+    await composer.press("Enter");
+    await expect(composer).toHaveValue("");
+    const forAlex = humanTurn(page, VICTOR.name).last();
+    await expect(forAlex).toContainText("Hey @alex can you check the dates?");
+    await expect(forAlex.getByTestId("ai-addressing")).toHaveText("Not sent to AI");
+    await page.waitForTimeout(1_500);
+    await expect(answers).toHaveCount(2);
+    await expect(toggle).toHaveAttribute("aria-pressed", "true");
+
+    // Choosing "AI" turns Ask AI on and leaves no "@AI" text.
+    await composer.fill("@");
+    await options.first().click();
+    await expect(composer).toHaveValue("");
+    await expect(toggle).toHaveAttribute("aria-pressed", "true");
+    await composer.pressSequentially("Summarize the plan");
+    await composer.press("Enter");
+    await expect(answers).toHaveCount(3, { timeout: 15_000 });
+    await expect(answers.last()).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
+
+    // A mention turns it off, and it can be switched back on by hand before sending.
+    await sendAiAs(page, "@alex what do you think?", { askAi: true });
+    await expect(answers).toHaveCount(4, { timeout: 15_000 });
+    expect(await answerText(answers.last())).toContain("Echo: @alex what do you think?");
+    await expect(answers.last()).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
+
+    // At 390 the toggle sits in the toolbar without overflow.
+    if (mobile) {
+      const form = page.getByTestId("ai-composer-form");
+      const fits = await form.evaluate((el) => el.scrollWidth <= el.clientWidth);
+      expect(fits, "composer has no horizontal overflow").toBe(true);
+      const box = await toggle.boundingBox();
+      const viewport = page.viewportSize();
+      expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(viewport?.width ?? 390);
+    }
+    await composer.fill("@");
+    await expect(suggestions).toBeVisible();
+    await bothThemes(page, `multiplayer-composer-${w}-ai`);
+  } finally {
+    await owner.context.close();
     await victor.dispose();
   }
 });
