@@ -1,6 +1,5 @@
 import {
   type AiChatPolicy,
-  EventTypes,
   type ModelProviderKind,
   type ModelRef,
   normalizeSessionTitle,
@@ -21,7 +20,7 @@ import {
   type ResolvedModel,
 } from "../model-gateway";
 import { buildModelMessages, type PersistedTurn } from "./build-model-messages";
-import { chatSummary, DEFAULT_CHAT_TITLE, type GenerationRow } from "./dto";
+import { DEFAULT_CHAT_TITLE, emitChatUpdated, type GenerationRow } from "./dto";
 import { type ReportedUsage, recordUsage } from "./usage";
 
 /**
@@ -282,9 +281,8 @@ export function createTitler(core: Core, deps: { gateway: ModelGateway; timeoutM
         .from(aiGenerations)
         .where(and(eq(aiGenerations.conversationId, chatId), eq(aiGenerations.status, "running")))
         .limit(1);
-      await core.realtime.appendEvent(tx, `user:${chat.ownerUserId}`, EventTypes.aiChatUpdated, {
-        chat: chatSummary(conv, chat, { generating: live !== undefined, gateway: deps.gateway }),
-      });
+      // The new title reaches every participant's sidebar, each with their own view (06-08).
+      await emitChatUpdated(core, tx, conv, chat, { generating: live !== undefined, gateway: deps.gateway });
     });
   }
 

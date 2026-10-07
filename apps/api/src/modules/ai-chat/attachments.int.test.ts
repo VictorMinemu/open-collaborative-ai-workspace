@@ -525,3 +525,57 @@ describe("attachment content is untrusted and cannot trigger tools (T-05-12-06, 
     expect(stack.fake.requests("search").length).toBeLessThanOrEqual(5);
   });
 });
+
+describe("files follow grants (06-04, P-03): grantees open them, view grantees cannot upload, nobody else sees them", () => {
+  it("Alex (chat) previews, downloads and uploads; Sam (view) downloads but cannot upload; the admin and revoked grantees get 404", async () => {
+    const { client: ada } = await invite(stack, admin, "ada@example.test", "Ada Admin", "admin");
+    const alexId = ((await ok(alex.request("GET", "/api/v1/me"))).user as Json).id as string;
+    await seedPlan(admin);
+    const d = await draft(admin);
+    const att = await upload(admin, d.id, "board.png", "image/png", await samplePng());
+    await turn(admin, d.id, "what is on the whiteboard?", { attachmentIds: [att.id] });
+
+    // Before any grant: Sam and the admin (Ada) see nothing.
+    for (const other of [sam, ada]) {
+      for (const path of ["download", "preview"]) {
+        expect((await raw(other, `/api/v1/attachments/${att.id}/${path}`)).status).toBe(404);
+      }
+      expect((await presign(other, d.id, "x.png", "image/png", 10)).status).toBe(404);
+    }
+
+    const grantFor = (subjectId: string, level: "chat" | "view") =>
+      ok(
+        admin.request("POST", `/api/v1/ai-chats/${d.id}/grants`, {
+          subject: { kind: "user", id: subjectId },
+          level,
+        }),
+        201,
+      );
+    const alexGrant = await grantFor(alexId, "chat");
+    await grantFor(samId, "view");
+
+    for (const path of ["download", "preview", "large"]) {
+      expect((await raw(alex, `/api/v1/attachments/${att.id}/${path}`)).status).toBe(302);
+    }
+    const own = await upload(alex, d.id, "notes.png", "image/png", await samplePng());
+    expect(own).toMatchObject({ status: "ready", conversationId: d.id, messageId: null });
+
+    expect((await raw(sam, `/api/v1/attachments/${att.id}/download`)).status).toBe(302);
+    const refused = await presign(sam, d.id, "mine.png", "image/png", 10);
+    expect(refused.status).toBe(403);
+    expect(errorOf(refused).code).toBe("ai_chat_view_only");
+
+    for (const path of ["download", "preview"]) {
+      expect((await raw(ada, `/api/v1/attachments/${att.id}/${path}`)).status).toBe(404);
+    }
+    expect((await presign(ada, d.id, "x.png", "image/png", 10)).status).toBe(404);
+
+    expect((await admin.request("DELETE", `/api/v1/ai-chats/${d.id}/grants/${alexGrant.id}`)).status).toBe(
+      204,
+    );
+    for (const path of ["download", "preview"]) {
+      expect((await raw(alex, `/api/v1/attachments/${att.id}/${path}`)).status).toBe(404);
+    }
+    expect((await presign(alex, d.id, "x.png", "image/png", 10)).status).toBe(404);
+  });
+});

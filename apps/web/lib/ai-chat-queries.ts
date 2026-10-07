@@ -1,17 +1,26 @@
 "use client";
 
 import {
+  type AgentTypingEvent,
+  type AiChatAccessChangedEvent,
   AiChatDetail,
   AiChatList,
+  type AiChatListScope,
+  AiChatParticipants,
   type AiChatSnapshot,
   AiChatSnapshot as AiChatSnapshotSchema,
   type AiChatSummary,
   AiChatSummary as AiChatSummarySchema,
   AiModelList,
+  AiPostedMessageResponse,
+  type AiQueueState,
   AiUserPreferences,
+  type ConversationReadEvent,
   type CreateAiChatRequest,
+  EphemeralTypes,
   EventTypes,
   type Message,
+  type Notification,
   type RegenerateRequest,
   type SendAiMessageRequest,
   SendAiMessageResponse,
@@ -19,6 +28,7 @@ import {
   topic,
   type UpdateAiChatRequest,
   type UpdateAiUserPreferencesRequest,
+  type UserTypingEvent,
 } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
 import {
@@ -28,11 +38,12 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useCallback, useEffect, useReducer, useRef } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { type Typer, useTypers } from "@/components/chat/typing";
 import { type AiChatState, displayText, initialAiChatState, reduceAiChat } from "./ai-chat-stream";
 import { api, isApiError } from "./api";
 import { useMe } from "./queries";
-import { useRealtimeStatus, useTopic } from "./realtime";
+import { useRealtime, useRealtimeStatus, useTopic } from "./realtime";
 
 /**
  * AI chat data (P-06). The page subscribes to `conv:<id>` FIRST and only then loads the snapshot; `onFrame` feeds
@@ -48,12 +59,16 @@ export const aiKeys = {
   chat: (id: string) => ["ai", "chat", id] as const,
   /** The member's chat list (05-10): the recent one (sidebar and /chat/ai) or the archived one. */
   list: (archived: boolean) => ["ai", "chats", archived ? "archived" : "recent"] as const,
+  /** Chats other members shared with the viewer (06-03, `scope=shared`), not archived. */
+  shared: ["ai", "chats", "shared"] as const,
   /** The latest summary of one chat seen live (`ai_chat.updated`, a rename): the header's title and archive state. */
   summary: (id: string) => ["ai", "summary", id] as const,
   /** Settings and tool states of one chat after a PATCH (05-11): newer than its snapshot. */
   settings: (id: string) => ["ai", "settings", id] as const,
   /** The member's own defaults (05-11). */
   preferences: ["ai", "preferences"] as const,
+  /** Who takes part in a chat (06-10): the @ suggestions and the names of typing people (06-11). */
+  participants: (id: string) => ["ai", "participants", id] as const,
 };
 
 /** Rows per page of the chat list (the API's keyset cursor). */
@@ -64,11 +79,16 @@ const LIST_PAGE = 30;
  * by `applyAiChatUpdated` (the sidebar's `user:` topic), so a new chat, a generated title, a rename or an archive
  * moves rows without a refetch.
  */
-export function useAiChats(archived = false, opts: { enabled?: boolean } = {}) {
+export function useAiChats(
+  archived = false,
+  opts: { enabled?: boolean; scope?: Exclude<AiChatListScope, "all"> } = {},
+) {
+  const scope = opts.scope ?? "mine";
   return useInfiniteQuery({
-    queryKey: aiKeys.list(archived),
+    queryKey: scope === "shared" ? aiKeys.shared : aiKeys.list(archived),
     queryFn: ({ pageParam, signal }) => {
       const p = new URLSearchParams({ limit: String(LIST_PAGE), archived: String(archived) });
+      if (scope !== "mine") p.set("scope", scope);
       if (pageParam) p.set("cursor", pageParam);
       return api.get(`/api/v1/ai-chats?${p.toString()}`, { schema: AiChatList, signal });
     },
@@ -79,6 +99,14 @@ export function useAiChats(archived = false, opts: { enabled?: boolean } = {}) {
   });
 }
 
+/**
+ * AI chats other members shared with the viewer (06-03, MULTI-01): newest activity first. A new grant arrives live as
+ * `ai_chat.updated` with the viewer's access, which `applyAiChatUpdated` routes here, never to the viewer's own list.
+ */
+export function useSharedAiChats(opts: { enabled?: boolean } = {}) {
+  return useAiChats(false, { ...opts, scope: "shared" });
+}
+
 type ListData = InfiniteData<AiChatList, string | null>;
 
 const newestFirst = (a: AiChatSummary, b: AiChatSummary) =>
@@ -86,16 +114,22 @@ const newestFirst = (a: AiChatSummary, b: AiChatSummary) =>
 
 /**
  * Applies a chat summary from `ai_chat.updated` (or a PATCH answer) to every cache that shows it: the chat's live
- * summary, and both lists (removed from the one it no longer belongs to, inserted or moved in the other; loaded rows
+ * summary, and the lists (removed from the ones it no longer belongs to, inserted or moved in its own; loaded rows
  * are re-sorted onto the first page so the next page's cursor stays valid).
  */
 export function applyAiChatUpdated(qc: QueryClient, chat: AiChatSummary): void {
   qc.setQueryData(aiKeys.summary(chat.id), chat);
-  for (const archived of [false, true]) {
-    qc.setQueryData<ListData>(aiKeys.list(archived), (prev) => {
+  // Phase 6: a chat someone shared with the viewer belongs to "Shared with me" only (absent access = owner).
+  const sharedWithMe = chat.access !== undefined && chat.access !== "owner";
+  const lists: Array<{ key: readonly unknown[]; belongs: boolean }> = [
+    { key: aiKeys.list(false), belongs: !sharedWithMe && !chat.archived },
+    { key: aiKeys.list(true), belongs: !sharedWithMe && chat.archived },
+    { key: aiKeys.shared, belongs: sharedWithMe && !chat.archived },
+  ];
+  for (const { key, belongs } of lists) {
+    qc.setQueryData<ListData>(key, (prev) => {
       if (!prev) return prev;
       const rest = prev.pages.flatMap((p) => p.chats).filter((c) => c.id !== chat.id);
-      const belongs = chat.archived === archived;
       const last = prev.pages.at(-1);
       const tail = rest.at(-1);
       // Older than everything loaded while more pages exist: it arrives with paging.
@@ -107,6 +141,93 @@ export function applyAiChatUpdated(qc: QueryClient, chat: AiChatSummary): void {
       };
     });
   }
+}
+
+/** Patches one chat's row in every list cache that holds it (no move, no insert). */
+function patchListedChat(qc: QueryClient, chatId: string, patch: (c: AiChatSummary) => AiChatSummary): void {
+  for (const key of [aiKeys.list(false), aiKeys.list(true), aiKeys.shared]) {
+    qc.setQueryData<ListData>(key, (prev) =>
+      prev?.pages.some((p) => p.chats.some((c) => c.id === chatId))
+        ? {
+            ...prev,
+            pages: prev.pages.map((p) => ({
+              ...p,
+              chats: p.chats.map((c) => (c.id === chatId ? patch(c) : c)),
+            })),
+          }
+        : prev,
+    );
+  }
+}
+
+/**
+ * `conversation.read` of a shared AI chat from any of the member's tabs or devices (06-08): the unread count as the
+ * server computed it. Rows without a count (solo chats, chats the member has not joined) keep none.
+ */
+export function applyAiChatRead(qc: QueryClient, ev: ConversationReadEvent): void {
+  patchListedChat(qc, ev.conversationId, (c) =>
+    c.unreadCount === undefined && !c.shared ? c : { ...c, unreadCount: ev.unreadCount },
+  );
+}
+
+/**
+ * `ai_chat.access_changed` on the member's `user:` topic (06-08, T-06-08-01): a chat the member lost leaves "Shared
+ * with me" at once; a new or changed access arrives with its own `ai_chat.updated`.
+ */
+export function applyAiChatAccessChanged(qc: QueryClient, ev: AiChatAccessChangedEvent): void {
+  if (ev.access !== null) return;
+  qc.setQueryData<ListData>(aiKeys.shared, (prev) =>
+    prev
+      ? {
+          ...prev,
+          pages: prev.pages.map((p) => ({ ...p, chats: p.chats.filter((c) => c.id !== ev.conversationId) })),
+        }
+      : prev,
+  );
+}
+
+/** A chat shared with the member by name (`ai_chat_shared`): "Shared with me" refetches its counts and order. */
+export function applyAiChatNotification(qc: QueryClient, n: Notification): void {
+  if (n.kind === "ai_chat_shared") void qc.invalidateQueries({ queryKey: aiKeys.shared });
+}
+
+/** The newest seq this tab asked the server to mark read, per chat (the server keeps the greatest anyway). */
+const readSent = new Map<string, number>();
+
+/**
+ * Marks a shared AI chat read up to `seq` (06-08, like a channel): the badge clears at once and the server moves the
+ * cursor forward only, clears the notifications it covers and tells the member's other tabs and devices.
+ */
+export function markAiChatRead(qc: QueryClient, chatId: string, seq: number): void {
+  if ((readSent.get(chatId) ?? -1) >= seq) return;
+  readSent.set(chatId, seq);
+  patchListedChat(qc, chatId, (c) => (c.unreadCount ? { ...c, unreadCount: 0 } : c));
+  void api.post(`/api/v1/ai-chats/${chatId}/read`, { body: { seq } }).catch(() => {
+    readSent.delete(chatId);
+  });
+}
+
+/** Debounce of the open chat's read marker: a burst of frames is one request. */
+const READ_DEBOUNCE_MS = 400;
+
+/**
+ * The open shared chat is read while the tab is visible (06-08, P-09): debounced on its newest message seq. Solo
+ * chats are never marked (they keep no badge, Phase 5 unchanged).
+ */
+function useAiChatReadMarker(chatId: string, shared: boolean, latestSeq: number): void {
+  const qc = useQueryClient();
+  useEffect(() => {
+    if (!shared || latestSeq <= 0) return;
+    const mark = () => {
+      if (document.visibilityState === "visible") markAiChatRead(qc, chatId, latestSeq);
+    };
+    const t = setTimeout(mark, READ_DEBOUNCE_MS);
+    document.addEventListener("visibilitychange", mark);
+    return () => {
+      clearTimeout(t);
+      document.removeEventListener("visibilitychange", mark);
+    };
+  }, [qc, chatId, shared, latestSeq]);
 }
 
 /** The live summary of a chat when one arrived after its snapshot (title, archive), else undefined. */
@@ -165,6 +286,8 @@ export async function saveAiPreferences(
 }
 
 const GAP_REFETCH_MS = 1_200;
+/** Typing frames at most this often (the Phase 4 composer's throttle; the line expires 5 s after the last one). */
+const TYPING_THROTTLE_MS = 3_000;
 const GAP_REFETCH_TRIES = 3;
 /** A streaming answer with no frame for this long re-reads the snapshot (the server heartbeats every 10 s). */
 const STALL_REFETCH_MS = 10_000;
@@ -202,8 +325,50 @@ export function createAiDraft(): Promise<AiChatSummary> {
   return api.post("/api/v1/ai-chats/drafts", { body: {}, schema: AiChatSummarySchema });
 }
 
-export function sendAiMessage(chatId: string, body: SendAiMessageRequest): Promise<SendAiMessageResponse> {
-  return api.post(`/api/v1/ai-chats/${chatId}/messages`, { body, schema: SendAiMessageResponse });
+/** What a send answers: 201 with the answer that starts now, or 202 with the posted message (06-06). */
+export type AiSendResult = SendAiMessageResponse | AiPostedMessageResponse;
+
+/** The send was posted without an answer starting now (202: queued, not for the AI, or skipped). */
+export function isPosted(r: AiSendResult): r is AiPostedMessageResponse {
+  return "addressing" in r;
+}
+
+const SendResultSchema = {
+  parse(v: unknown): AiSendResult {
+    return typeof v === "object" && v !== null && "assistantMessage" in v
+      ? SendAiMessageResponse.parse(v)
+      : AiPostedMessageResponse.parse(v);
+  },
+};
+
+/**
+ * Sends a message (P-07). Solo chats answer 201 and stream as in Phase 5. A multiplayer chat (06-06) answers 201 when
+ * the answer starts now, else 202 with the posted message; `askAi` (06-11, P-08) is forwarded only there — a solo
+ * send is the Phase 5 request, unchanged.
+ */
+export function sendAiMessage(
+  chatId: string,
+  body: SendAiMessageRequest,
+  opts: { multiplayer?: boolean } = {},
+): Promise<AiSendResult> {
+  const { askAi, ...rest } = body;
+  const payload = opts.multiplayer && askAi !== undefined ? { ...rest, askAi } : rest;
+  return api.post(`/api/v1/ai-chats/${chatId}/messages`, { body: payload, schema: SendResultSchema });
+}
+
+/**
+ * Who takes part in a chat (06-10, `channel.read`): the owner, the people who can read it, its member agents. The @
+ * suggestions of the composer and the names of people typing (06-11) come from here; refetched when access changes.
+ */
+export function useAiParticipants(chatId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: aiKeys.participants(chatId),
+    queryFn: ({ signal }) =>
+      api.get(`/api/v1/ai-chats/${chatId}/participants`, { schema: AiChatParticipants, signal }),
+    enabled,
+    staleTime: 30_000,
+    retry: (n, err) => !(isApiError(err) && err.status >= 400 && err.status < 500) && n < 2,
+  });
 }
 
 /**
@@ -245,6 +410,16 @@ export interface AiChatView {
   textOf: (m: Message) => string;
   /** Applies a send answered by the API (both turns show before their events arrive). */
   applySent: (r: SendAiMessageResponse) => void;
+  /** Applies a 202 multiplayer send (06-11): the posted message joins the list with its addressing. */
+  applyPosted: (r: AiPostedMessageResponse) => void;
+  /** The one-generation queue of a multiplayer chat (06-11); null in solo chats. */
+  queue: AiQueueState | null;
+  /** People and agents typing in the chat now (06-11), never the viewer. */
+  typers: Typer[];
+  /** Tells the others the viewer is typing (throttled like the Phase 4 composer). */
+  sendTyping: () => void;
+  /** The viewer lost access while the chat was open (06-11): nothing of it may stay on screen. */
+  lost: boolean;
   isPending: boolean;
   /** Answers rendered streaming now are live on this page (not a replay ahead of the first snapshot). */
   live: boolean;
@@ -270,13 +445,57 @@ export function useAiChat(chatId: string): AiChatView {
   //    gives the replay cursor; otherwise the server replays the chat's events, which the reducer dedupes by seq.
   const cursor = useRef(qc.getQueryData<AiChatSnapshot>(aiKeys.chat(chatId))?.lastSeq);
   const lastFrameAt = useRef(Date.now());
-  const onFrame = useCallback((frame: TopicFrame) => {
-    lastFrameAt.current = Date.now();
-    dispatch({ kind: "frame", frame });
-  }, []);
+  const me = useMe({ enabled: false });
+  const meId = me.data?.user.id ?? null;
+  const meRef = useRef(meId);
+  meRef.current = meId;
+  // Names of people typing: the chat's authors and its participants (06-11).
+  const nameRef = useRef<(userId: string) => string>(() => "Someone");
+  const { typers, touch, clear } = useTypers();
   // A `resync` (too many events to replay) re-reads the snapshot; the query is declared below.
   const resync = useRef<() => void>(() => {});
-  useTopic(`conv:${chatId}`, onFrame, cursor.current, () => resync.current());
+  const onFrame = useCallback(
+    (frame: TopicFrame) => {
+      lastFrameAt.current = Date.now();
+      if (frame.op === "eph") {
+        if (frame.type === EphemeralTypes.userTyping) {
+          const d = frame.data as UserTypingEvent;
+          if (d.userId && d.userId !== meRef.current) {
+            touch({ kind: "user", id: d.userId, name: nameRef.current(d.userId), threadRootId: null });
+          }
+          return;
+        }
+        if (frame.type === EphemeralTypes.agentTyping) {
+          const d = frame.data as AgentTypingEvent;
+          touch({ kind: "agent", id: d.agentId, name: d.displayName, threadRootId: null });
+          return;
+        }
+      } else if (frame.type === EventTypes.messageCreated) {
+        const m = (frame.data as { message?: Message }).message;
+        // A message from someone typing: they are done.
+        if (m && m.authorKind !== "system") clear(m.authorKind, m.authorId);
+      } else if (
+        frame.type === EventTypes.conversationMemberAdded ||
+        frame.type === EventTypes.conversationMemberRemoved
+      ) {
+        // Someone joined or left, or the owner added or removed an agent (06-12): the participants follow live.
+        void qc.invalidateQueries({ queryKey: aiKeys.participants(chatId) });
+      } else if (frame.type === EventTypes.aiChatAccessChanged) {
+        // Someone's access changed (P-09): re-read what this viewer may do (composer vs read-only); a 404 means they
+        // lost the chat. The participants follow.
+        resync.current();
+        void qc.invalidateQueries({ queryKey: aiKeys.participants(chatId) });
+      }
+      dispatch({ kind: "frame", frame });
+    },
+    [touch, clear, qc, chatId],
+  );
+  // The server dropped the stream because the viewer lost access (RT-01, ADR-0009).
+  const [revoked, setRevoked] = useState(false);
+  const onRevoked = useCallback(() => setRevoked(true), []);
+  // `presence`: this page shows the chat, so the viewer counts as here (RT-04); the participants header shows who is
+  // here in a shared chat (06-12). Always on, so sharing never re-subscribes the stream.
+  useTopic(`conv:${chatId}`, onFrame, cursor.current, () => resync.current(), { onRevoked, presence: true });
 
   // 2. Then the snapshot. Every snapshot (first load, gap refetch, reconnect) is stitched with what streamed.
   const query = useQuery({
@@ -335,10 +554,47 @@ export function useAiChat(chatId: string): AiChatView {
     }
   }, [status, refetch]);
 
+  // 6. A shared chat on screen is read (06-08): its badge clears here and on the member's other devices.
+  const live = useAiChatSummary(chatId);
+  const shared = (live?.shared ?? state.snapshot?.chat.shared ?? query.data?.chat.shared) === true;
+  const latestSeq = state.messages.reduce((max, m) => (m.threadId === null && m.seq > max ? m.seq : max), 0);
+  useAiChatReadMarker(chatId, shared, latestSeq);
+
+  // 7. Typing (06-11): names from the chat's authors, then its participants.
+  const multiplayer = shared || state.queue !== null;
+  const participants = useAiParticipants(chatId, multiplayer && !revoked);
+  const names = useMemo(() => {
+    const out = new Map<string, string>();
+    for (const p of participants.data?.participants ?? []) out.set(p.id, p.displayName);
+    for (const m of state.messages) if (m.authorId && m.author) out.set(m.authorId, m.author.displayName);
+    return out;
+  }, [participants.data, state.messages]);
+  nameRef.current = (id) => names.get(id) ?? "Someone";
+  const realtime = useRealtime();
+  const lastTyping = useRef(0);
+  const sendTyping = useCallback(() => {
+    const now = Date.now();
+    if (now - lastTyping.current < TYPING_THROTTLE_MS) return;
+    lastTyping.current = now;
+    realtime?.sendEphemeral(`conv:${chatId}`, EphemeralTypes.userTyping, { threadRootId: null });
+  }, [realtime, chatId]);
+
+  // 8. Lost access (06-11): the stream was revoked, or a re-read of a chat this page had loaded answers 404.
+  const hadSnapshot = state.snapshot !== null;
+  const lost = revoked || (hadSnapshot && isApiError(query.error, 404));
+  useEffect(() => {
+    if (lost) qc.removeQueries({ queryKey: aiKeys.chat(chatId) });
+  }, [lost, qc, chatId]);
+
   const textOf = useCallback((m: Message) => displayText(state, m), [state]);
   const applySent = useCallback((r: SendAiMessageResponse) => {
     sentHere.current = true;
+    lastTyping.current = 0;
     dispatch({ kind: "sent", response: r });
+  }, []);
+  const applyPosted = useCallback((r: AiPostedMessageResponse) => {
+    lastTyping.current = 0;
+    dispatch({ kind: "posted", response: r });
   }, []);
 
   return {
@@ -347,6 +603,11 @@ export function useAiChat(chatId: string): AiChatView {
     streamingText: state.streaming,
     textOf,
     applySent,
+    applyPosted,
+    queue: state.queue,
+    typers: typers.filter((t) => t.kind === "agent" || t.id !== meId),
+    sendTyping,
+    lost,
     isPending: query.isPending && state.messages.length === 0,
     // A fresh page replays the chat's durable events before its snapshot lands: an answer that ended before the
     // page opened then shows `streaming` for a moment. Until a snapshot (or a send from this page) anchors the

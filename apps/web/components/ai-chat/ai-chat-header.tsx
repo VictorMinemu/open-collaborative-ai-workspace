@@ -1,7 +1,7 @@
 "use client";
 
 import { Menu } from "@base-ui/react/menu";
-import { AI_CHAT_TITLE_MAX, type AiChatSummary } from "@ocw/contracts";
+import { AI_CHAT_TITLE_MAX, type AiChatSummary, type Permission } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
 import { Archive, ArchiveRestore, ChevronLeft, Ellipsis, Pencil, SquarePen } from "lucide-react";
 import Link from "next/link";
@@ -127,8 +127,19 @@ export function AiChatMenu({
   );
 }
 
-/** Rename and Archive/Unarchive, shared by the header and the list rows. */
-export function AiChatStandardItems({ chat, onRename }: { chat: AiChatSummary; onRename: () => void }) {
+/**
+ * Rename and Archive/Unarchive, shared by the header and the list rows. Both need `ai_chat.manage` (owner only, P-04):
+ * `viewerCan` is the server's decision for the viewer; absent (the member's own list rows) means their own chat.
+ */
+export function AiChatStandardItems({
+  chat,
+  onRename,
+  viewerCan,
+}: {
+  chat: AiChatSummary;
+  onRename: () => void;
+  viewerCan?: readonly Permission[] | undefined;
+}) {
   const qc = useQueryClient();
   const setArchived = async (archived: boolean) => {
     try {
@@ -140,6 +151,7 @@ export function AiChatStandardItems({ chat, onRename }: { chat: AiChatSummary; o
       });
     }
   };
+  if (viewerCan && !viewerCan.includes("ai_chat.manage")) return null;
   return (
     <>
       <AiChatMenuItem icon={<Pencil />} testId="ai-chat-menu-rename" onSelect={onRename}>
@@ -241,9 +253,29 @@ export function AiChatTitleInput({
 
 // ---------------------------------------------------------------- header
 
-export function AiChatHeader({ chat, extraMenuItems }: { chat: AiChatSummary; extraMenuItems?: ReactNode }) {
+/**
+ * The header of an open chat. `viewerCan` (the server's decisions, 06-03) hides what the viewer may not do: a grantee
+ * gets no rename and no menu at all when nothing in it is theirs (`extraMenuItems` null). A shared chat shows its
+ * participants (presence and how widely it is shared, 06-12) before the menu.
+ */
+export function AiChatHeader({
+  chat,
+  viewerCan,
+  extraMenuItems,
+  participants,
+}: {
+  chat: AiChatSummary;
+  viewerCan?: readonly Permission[] | undefined;
+  extraMenuItems?: ReactNode;
+  /** Who is in a shared chat and how widely it is shared (06-12, `AiChatParticipants`), beside the title. */
+  participants?: ReactNode;
+}) {
   const [editing, setEditing] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const canManage = !viewerCan || viewerCan.includes("ai_chat.manage");
+  const hasMenu = canManage || !!extraMenuItems;
+  // A chat someone shared with the viewer says whose it is (06-03); the owner's own header is unchanged.
+  const sharedBy = chat.access !== undefined && chat.access !== "owner" ? chat.owner?.displayName : undefined;
 
   return (
     <header
@@ -251,52 +283,74 @@ export function AiChatHeader({ chat, extraMenuItems }: { chat: AiChatSummary; ex
       data-testid="ai-chat-header"
     >
       <BackToChats />
-      {editing ? (
+      {editing && canManage ? (
         <AiChatTitleInput chat={chat} onDone={() => setEditing(false)} className="mx-1" />
       ) : (
-        <h1 className="flex min-w-0 flex-1 items-center">
-          <button
-            type="button"
-            data-testid="ai-chat-title"
-            title="Rename"
-            onClick={() => setEditing(true)}
-            className="min-w-0 truncate rounded-md px-1 py-0.5 text-left font-medium text-[14px] tracking-tight outline-none transition-colors hover:bg-accent/60 focus-visible:ring-[3px] focus-visible:ring-ring/30 sm:text-[15px]"
-          >
-            {chat.title}
-          </button>
-          {chat.archived ? (
-            <span
-              data-testid="ai-chat-archived-badge"
-              className="ml-1.5 shrink-0 rounded-[4px] bg-muted px-1.5 py-px font-medium text-[11px] text-muted-foreground"
-            >
-              Archived
-            </span>
-          ) : null}
-        </h1>
-      )}
-      <AiChatMenu
-        open={menuOpen}
-        onOpenChange={setMenuOpen}
-        title={chat.title}
-        testId="ai-chat-menu"
-        trigger={
-          <button
-            type="button"
-            aria-label="Chat options"
-            title="Chat options"
-            data-testid="ai-chat-menu-button"
-            className={cn(
-              buttonVariants({ variant: "ghost", size: "icon-sm" }),
-              "text-muted-foreground data-popup-open:bg-accent",
+        <div className="flex min-w-0 flex-1 flex-col justify-center">
+          <h1 className="flex min-w-0 items-center">
+            {canManage ? (
+              <button
+                type="button"
+                data-testid="ai-chat-title"
+                title="Rename"
+                onClick={() => setEditing(true)}
+                className="min-w-0 truncate rounded-md px-1 py-0.5 text-left font-medium text-[14px] tracking-tight outline-none transition-colors hover:bg-accent/60 focus-visible:ring-[3px] focus-visible:ring-ring/30 sm:text-[15px]"
+              >
+                {chat.title}
+              </button>
+            ) : (
+              <span
+                data-testid="ai-chat-title"
+                className="min-w-0 truncate px-1 py-0.5 font-medium text-[14px] tracking-tight sm:text-[15px]"
+              >
+                {chat.title}
+              </span>
             )}
-          >
-            <Ellipsis />
-          </button>
-        }
-      >
-        <AiChatStandardItems chat={chat} onRename={() => setEditing(true)} />
-        {extraMenuItems}
-      </AiChatMenu>
+            {chat.archived ? (
+              <span
+                data-testid="ai-chat-archived-badge"
+                className="ml-1.5 shrink-0 rounded-[4px] bg-muted px-1.5 py-px font-medium text-[11px] text-muted-foreground"
+              >
+                Archived
+              </span>
+            ) : null}
+          </h1>
+          {sharedBy ? (
+            <p
+              data-testid="ai-chat-shared-by"
+              className="-mt-0.5 truncate px-1 text-[11.5px] text-muted-foreground leading-4"
+            >
+              Shared by {sharedBy}
+            </p>
+          ) : null}
+        </div>
+      )}
+      {participants}
+      {hasMenu ? (
+        <AiChatMenu
+          open={menuOpen}
+          onOpenChange={setMenuOpen}
+          title={chat.title}
+          testId="ai-chat-menu"
+          trigger={
+            <button
+              type="button"
+              aria-label="Chat options"
+              title="Chat options"
+              data-testid="ai-chat-menu-button"
+              className={cn(
+                buttonVariants({ variant: "ghost", size: "icon-sm" }),
+                "text-muted-foreground data-popup-open:bg-accent",
+              )}
+            >
+              <Ellipsis />
+            </button>
+          }
+        >
+          <AiChatStandardItems chat={chat} viewerCan={viewerCan} onRename={() => setEditing(true)} />
+          {extraMenuItems}
+        </AiChatMenu>
+      ) : null}
       <NewChatLink />
     </header>
   );

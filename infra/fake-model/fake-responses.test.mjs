@@ -111,6 +111,16 @@ describe("POST /v1/responses (stream)", () => {
     assert.equal(events.at(-1).data.type, "response.completed");
   });
 
+  it("[[slow:N]] paces the same 40 deltas over about N seconds (multiplayer queue specs, 06-11)", async () => {
+    const started = Date.now();
+    const events = await sse(await post("/v1/responses", planBody("go [[slow:6]]")));
+    const deltas = deltasOf(events);
+    assert.equal(deltas.length, 40);
+    assert.equal(deltas.join(""), `Echo: go${Array.from({ length: 40 }, (_, i) => ` ${i + 1}`).join("")}`);
+    assert.ok(Date.now() - started >= 5_500, "about 6 s in total");
+    assert.equal(events.at(-1).data.type, "response.completed");
+  });
+
   it("[[plan:usage_limit]] streams 3 deltas then response.failed with the SIWC code", async () => {
     const events = await sse(await post("/v1/responses", planBody("hi [[plan:usage_limit]]")));
     assert.equal(deltasOf(events).length, 3);
@@ -506,5 +516,140 @@ describe("hosted web search (05-11): `[[web <q>]]` with a `web_search` tool offe
       events.some((e) => e.data.type === "response.output_text.annotation.added"),
       false,
     );
+  });
+});
+
+describe("attributed prompts (06-03, P-06): every route answers the people in <turn_context> by name", () => {
+  const INSTRUCTIONS = [
+    "You are a helpful AI assistant inside Open Collaborative AI Workspace.",
+    "This is a shared conversation in Autofy Labs: each person's messages arrive in <message> blocks.",
+    "<participants>",
+    '- name="Víctor Ruiz" user_id="u1" role="admin" access="owner"',
+    '- name="Alex Kim" user_id="u2" role="developer" access="chat"',
+    '- name="@backend" agent_id="a1" kind="agent" display="Backend Bot"',
+    "</participants>",
+  ].join("\n");
+  const turn = (body) =>
+    [
+      '<message from="Víctor Ruiz" user_id="u1" at="2026-10-07T10:00:00Z">\nPropose an architecture\n</message>',
+      `<message from="Alex Kim" user_id="u2" at="2026-10-07T10:01:00Z">\n${body}\n</message>`,
+      '<turn_context>\n<responding_to name="Alex Kim" user_id="u2"/>\n</turn_context>',
+    ].join("\n\n");
+  const EXPECTED = "Hi Alex Kim! (participants: Alex Kim, Víctor Ruiz) Echo: But we need multi-tenancy";
+  const dataOf = (text) =>
+    text
+      .split("\n\n")
+      .map((b) =>
+        b
+          .split("\n")
+          .find((l) => l.startsWith("data: "))
+          ?.slice(6),
+      )
+      .filter((d) => d && d !== "[DONE]")
+      .map((d) => JSON.parse(d));
+
+  it("responses (plan bearer, developer item): the attributed reply with the attachment suffix", async () => {
+    const res = await post("/v1/responses", {
+      model: "gpt-6-astra",
+      input: [
+        { role: "developer", content: INSTRUCTIONS },
+        {
+          role: "user",
+          content: [
+            { type: "input_text", text: turn("But we need multi-tenancy") },
+            { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+          ],
+        },
+      ],
+      store: false,
+      stream: true,
+    });
+    assert.equal(res.status, 200);
+    assert.equal(deltasOf(await sse(res)).join(""), `${EXPECTED} [images:1]`);
+  });
+
+  it("responses: [[slow]] paces the attributed reply over 40 deltas, directive stripped", async () => {
+    const res = await post("/v1/responses", {
+      model: "gpt-6-astra",
+      instructions: INSTRUCTIONS,
+      input: [
+        { role: "user", content: [{ type: "input_text", text: turn("But we need multi-tenancy [[slow]]") }] },
+      ],
+      store: false,
+      stream: true,
+    });
+    const deltas = deltasOf(await sse(res));
+    assert.equal(deltas.length, 40);
+    assert.equal(deltas[0], `${EXPECTED} 1`);
+  });
+
+  it("chat completions (system message): the attributed reply, no OpenClaw greeting or tools suffix", async () => {
+    const res = await post(
+      "/v1/chat/completions",
+      {
+        model: "mock-1",
+        stream: true,
+        messages: [
+          { role: "system", content: INSTRUCTIONS },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: turn("But we need multi-tenancy") },
+              { type: "file", file: { filename: "a.pdf", file_data: "data:application/pdf;base64,AAAA" } },
+            ],
+          },
+        ],
+      },
+      "Bearer x",
+    );
+    const content = dataOf(await res.text())
+      .map((c) => c.choices?.[0]?.delta?.content ?? "")
+      .join("");
+    assert.equal(content, `${EXPECTED} [files:1]`);
+  });
+
+  it("anthropic (system): the attributed reply; a solo prompt keeps the Phase 5 reply", async () => {
+    const body = (system, text) => ({
+      model: "claude-haiku-4-5",
+      stream: true,
+      max_tokens: 100,
+      system: [{ type: "text", text: system }],
+      messages: [{ role: "user", content: [{ type: "text", text }] }],
+    });
+    const textOf = async (res) =>
+      dataOf(await res.text())
+        .filter((d) => d.type === "content_block_delta")
+        .map((d) => d.delta.text)
+        .join("");
+    assert.equal(
+      await textOf(
+        await post("/v1/messages", body(INSTRUCTIONS, turn("But we need multi-tenancy")), "Bearer x"),
+      ),
+      EXPECTED,
+    );
+    assert.equal(
+      await textOf(await post("/v1/messages", body("You are chatting with Sam.", "Hello"), "Bearer x")),
+      "Hi there! [tools: 0]",
+    );
+  });
+
+  it("solo prompts keep their Phase 5 replies on responses and chat completions", async () => {
+    const solo = await post("/v1/responses", planBody("Propose an architecture"));
+    assert.equal(deltasOf(await sse(solo)).join(""), "Echo: Propose an architecture");
+    // Roster without a turn context (or the reverse) is not an attributed prompt.
+    const half = await post("/v1/responses", {
+      model: "gpt-6-astra",
+      instructions: INSTRUCTIONS,
+      input: [{ role: "user", content: [{ type: "input_text", text: "Propose an architecture" }] }],
+      store: false,
+      stream: true,
+    });
+    assert.equal(deltasOf(await sse(half)).join(""), "Echo: Propose an architecture");
+    const chat = await post(
+      "/v1/chat/completions",
+      { model: "mock-1", stream: false, messages: [{ role: "user", content: turn("x") }] },
+      "Bearer x",
+    );
+    assert.equal((await chat.json()).choices[0].message.content, "Hi there! [tools: 0]");
   });
 });

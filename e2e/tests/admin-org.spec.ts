@@ -59,8 +59,17 @@ async function unitByName(api: APIRequestContext, name: string): Promise<ApiUnit
   return unit as ApiUnit;
 }
 
-/** Deepest first, so no delete hits unit_has_children. */
+/**
+ * Deepest first, so no delete hits unit_has_children. Personas scoped to a unit (agent-personas.spec) belong to the
+ * hierarchy this spec owns: they go first, or the delete answers 409 unit_has_bots.
+ */
 async function clearUnits(admin: APIRequestContext) {
+  const { agents } = (await (await admin.get("/api/v1/agents")).json()) as {
+    agents: Array<{ id: string; unitId?: string | null }>;
+  };
+  for (const a of agents.filter((x) => x.unitId)) {
+    expect((await admin.delete(`/api/v1/agents/${a.id}`)).ok(), `delete unit persona ${a.id}`).toBe(true);
+  }
   const units = (await listUnits(admin)).sort((a, b) => b.path.length - a.path.length);
   for (const u of units) expect((await admin.delete(`/api/v1/units/${u.id}`)).ok()).toBe(true);
 }
@@ -299,7 +308,8 @@ test("admin renames, moves, deletes and staffs units; a Team Lead staffs only th
   await expect(addDialog.getByTestId("add-person").filter({ hasText: LENA.name })).toBeVisible();
   await expect(addDialog.getByTestId("add-person").filter({ hasText: ALEX.name })).toBeVisible();
   await review(page, `org-add-people-${project}`);
-  await addDialog.getByTestId("add-people-search").fill("lena");
+  // agent-personas.spec adds a "Lena Ortega" to the same stack: search by the whole name so one person matches.
+  await addDialog.getByTestId("add-people-search").fill(LENA.name.toLowerCase());
   await expect(addDialog.getByTestId("add-person")).toHaveCount(1);
   await addDialog.getByTestId("add-person").filter({ hasText: LENA.name }).click();
   await expect(addDialog.getByText(/^No one matches/)).toBeVisible();

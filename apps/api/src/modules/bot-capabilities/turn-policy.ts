@@ -15,7 +15,7 @@ import { type CatalogSource, effectiveCapabilities, effectiveTools, readCapabili
 import { loadAllGrants, loadCatalog, loadGrants } from "./catalog";
 import { loadTurnMemory } from "./memory";
 import { internetConfigured, loadPolicy, type SearchEnv } from "./policy";
-import { botFacts, findBot } from "./routes";
+import { findBot, loadBotFacts } from "./routes";
 import { consumeTurn, effectiveDailyLimit, limitNotice } from "./usage";
 
 /**
@@ -27,11 +27,28 @@ import { consumeTurn, effectiveDailyLimit, limitNotice } from "./usage";
 
 type TurnTools = { tools: string[]; toolFlags: Record<string, TurnToolFlags> };
 
+/**
+ * Who reads a persona's answer in a shared AI chat (06-10, D-06, P-10): the joined humans who can read it, and whether a
+ * team, department or the organization holds a grant (`unbounded`: the readers are not a list). Given only for AI chat
+ * deliveries; channels and DMs pass none and keep their Phase 3.1 turn.
+ */
+export interface TurnAudience {
+  userIds: readonly string[];
+  unbounded: boolean;
+}
+
+type Withheld = NonNullable<TurnContext["withheld"]>;
+
 /** Maximum tools per turn (`TurnContext.tools`). */
 const MAX_TURN_TOOLS = 64;
 
 const WEB_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: false };
 const MEMORY_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
+/**
+ * `ocw_agent_card` (06-14, D-07): its output is the API's own answer (trusted) and it only posts into the turn's own
+ * conversation, as the reply itself does, so it stays usable after the turn read untrusted content.
+ */
+const CARD_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: false };
 
 /**
  * Flags of a catalog tool (D-08 taint rule). Every MCP / plugin output is untrusted. MCP tools are
@@ -65,6 +82,8 @@ function assemble(
   if (effective.memory.effective && (conversationKind === null || conversationKind === "dm")) {
     add(BUILTIN_TOOLS.memorySave, MEMORY_FLAGS);
   }
+  // Agent Cards (06-14, P-11): every delivered turn, wherever the bot may reply (the card routes re-check posting).
+  add(BUILTIN_TOOLS.agentCard, CARD_FLAGS);
   for (const source of catalog) {
     for (const t of source.tools) {
       if (effectiveToolNames.has(`${source.sourceKind}:${source.sourceId}:${t.name}`)) {
@@ -83,13 +102,22 @@ interface ComputedTurn extends TurnTools {
   /** The bot's display name and the daily limit that applies today (D-11). */
   botName: string;
   dailyLimit: number;
+  /** With an audience only: the tools this turn does not offer, and why (06-10). */
+  withheld: Withheld;
 }
 
+/**
+ * The tools of one turn. Agent ∩ asking human, as always. With an `audience` (a shared AI chat, D-06): web tools follow
+ * the asker (they reach only public pages), and every catalog tool (MCP servers, plugins: scoped data) is kept only when
+ * no unit or organization grant makes the readers unbounded AND `bot.tool.use` is allowed for EVERY listed reader, the
+ * agent acting on behalf of each; anything dropped is listed in `withheld`.
+ */
 async function computeTurn(
   tx: Tx,
   perms: PermissionService,
   p: { agentId: string; humanUserId: string; conversationKind: string },
   env: SearchEnv,
+  audience?: TurnAudience | null,
 ): Promise<ComputedTurn | null> {
   const row = await findBot(tx, p.agentId);
   // A disabled bot does nothing for anyone (deliveries skip it; the tool gate refuses).
@@ -97,7 +125,8 @@ async function computeTurn(
   const caps = readCapabilities(row);
   const policy = await loadPolicy(tx);
   const configured = await internetConfigured(tx, env, policy);
-  const resource = agentResource(botFacts(row), p.humanUserId);
+  const facts = await loadBotFacts(tx, row);
+  const resource = agentResource(facts, p.humanUserId);
   const as: PrincipalRef = { kind: "agent", agentId: row.id, onBehalfOfUserId: p.humanUserId };
   const internet = (await perms.decide(tx, as, "bot.internet", resource)).allowed;
   const effective = effectiveCapabilities({
@@ -119,15 +148,53 @@ async function computeTurn(
     grants,
     humanToolAllowed: () => null,
   }).filter((t) => t.effective);
+  const withheld: Withheld = [];
+  const withhold = (tool: string, reason: Withheld[number]["reason"]) => {
+    if (withheld.length < MAX_TURN_TOOLS && !withheld.some((w) => w.tool === tool)) {
+      withheld.push({ tool, reason });
+    }
+  };
+  // Web is off for this asker only (their own permission), not for the bot: say so in a shared chat.
+  if (audience && effective.internet.enabled && effective.internet.reason === "denied_for_you") {
+    withhold(BUILTIN_TOOLS.webSearch, "denied_for_you");
+    withhold(BUILTIN_TOOLS.webFetch, "denied_for_you");
+  }
+  const others = audience ? [...new Set(audience.userIds)].filter((id) => id !== p.humanUserId) : [];
+  /** `bot.tool.use` for every other reader of the chat, the agent acting on behalf of each (fail closed). */
+  const everyoneMay = async (tool: string) => {
+    for (const userId of others) {
+      const d = await perms.decide(
+        tx,
+        { kind: "agent", agentId: row.id, onBehalfOfUserId: userId },
+        "bot.tool.use",
+        { ...agentResource(facts, userId), tool },
+      );
+      if (!d.allowed) return false;
+    }
+    return true;
+  };
   const allowed = new Set<string>();
   for (const t of candidates) {
     const d = await perms.decide(tx, as, "bot.tool.use", { ...resource, tool: t.tool });
-    if (d.allowed) allowed.add(toolKey(t));
+    if (!d.allowed) {
+      if (audience) withhold(t.tool, "denied_for_you");
+      continue;
+    }
+    if (audience?.unbounded) {
+      withhold(t.tool, "shared_with_group");
+      continue;
+    }
+    if (audience && !(await everyoneMay(t.tool))) {
+      withhold(t.tool, "not_every_participant");
+      continue;
+    }
+    allowed.add(toolKey(t));
   }
   return {
     effective,
     botName: row.name,
     dailyLimit: effectiveDailyLimit(row.scope, caps, policy),
+    withheld,
     ...assemble(effective, p.conversationKind, catalog, allowed),
   };
 }
@@ -141,8 +208,10 @@ export async function currentTurnTools(
   perms: PermissionService,
   p: { agentId: string; humanUserId: string; conversationKind: string },
   env: SearchEnv,
+  /** The AI chat's current audience (06-10): the gate re-decides scoped tools with today's readers. */
+  audience?: TurnAudience | null,
 ): Promise<TurnTools> {
-  const turn = await computeTurn(tx, perms, p, env);
+  const turn = await computeTurn(tx, perms, p, env, audience);
   return turn ? { tools: turn.tools, toolFlags: turn.toolFlags } : { tools: [], toolFlags: {} };
 }
 
@@ -211,10 +280,18 @@ export async function turnPolicy(
     eventId: string;
     clientTimeZone?: string | null;
   },
+  /** AI chat deliveries only (06-10): the chat's readers, for scoped tools and `turn.withheld`. */
+  opts: { audience?: TurnAudience | null } = {},
 ): Promise<TurnDecision> {
   // The kind the capability rules see: a "dm" shared by two or more humans is not a private chat (no memory).
   const scopeKind = await memoryScopeKind(tx, p.conversationId, p.conversationKind);
-  const computed = await computeTurn(tx, perms, { ...p, conversationKind: scopeKind }, core.env);
+  const computed = await computeTurn(
+    tx,
+    perms,
+    { ...p, conversationKind: scopeKind },
+    core.env,
+    opts.audience,
+  );
   if (!computed) return { deliver: false, reason: "unavailable", notice: null };
 
   // Metering (D-11): one conditional upsert counts this turn, before anything is built or recorded. At the
@@ -229,8 +306,8 @@ export async function turnPolicy(
     };
   }
 
-  // Memory (D-10, D-06): only in this human's DM with the bot (one human member), and only while memory is
-  // effective (the same decision that offers `ocw_memory_save`). Every other turn carries none.
+  // Memory (D-10, D-06, MULTI-06): only in this human's DM with the bot (one human member), and only while memory is
+  // effective (the same decision that offers `ocw_memory_save`). Every other turn carries none, AI chats included.
   const memory: TurnContext["memory"] =
     scopeKind === "dm" && computed.effective.memory.effective
       ? await loadTurnMemory(tx, p.agentId, p.humanUserId)
@@ -243,6 +320,8 @@ export async function turnPolicy(
     now: computed.effective.dateTime.effective ? turnNow(p.clientTimeZone) : null,
     maxToolCalls: MAX_TOOL_CALLS_PER_TURN,
     maxWebCalls: MAX_WEB_CALLS_PER_TURN,
+    // The persona can tell people what it could not use here and why (06-10); never a reason to enable anything.
+    ...(opts.audience ? { withheld: computed.withheld } : {}),
   };
   await tx.insert(agentTurns).values({
     eventId: p.eventId,

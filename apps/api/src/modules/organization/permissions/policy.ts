@@ -75,8 +75,13 @@ const AI_CHAT_FIXED = new Set<Permission>([
   "channel.mention_all",
   "channel.post",
 ]);
-/** Permissions that act on one AI chat: owner-only when decided on a channel resource. */
-const AI_CHAT_OWNED = new Set<Permission>(["ai_chat.use", "ai_chat.web", "ai_chat.share"]);
+/**
+ * Writing in one AI chat (P-04): the owner or a `chat` grantee (relation `member`); a `view` grantee (relation
+ * `grantee`) is told `ai_chat_view_only`.
+ */
+const AI_CHAT_WRITE = new Set<Permission>(["ai_chat.use", "ai_chat.web"]);
+/** Managing one AI chat (rename, archive, settings) and sharing it (grants, snapshot links): the owner only (P-04). */
+const AI_CHAT_OWNER_ONLY = new Set<Permission>(["ai_chat.manage", "ai_chat.share"]);
 
 const DEVICE_GATED = new Set<Permission>([
   "work_session.create",
@@ -97,19 +102,47 @@ export const PRECONDITIONS: readonly Precondition[] = [
     applies: (perm) => perm === "channel.read",
     check: (p, r) => {
       if (!isChannel(r) || r.relations.has("member")) return null;
+      // A `view` grant reads an AI chat without taking part in it (P-04).
+      if (r.state.has("ai_chat") && r.relations.has("grantee")) return null;
       if (p.kind === "agent") return notMember(p);
       return r.state.has("private") ? { layer: "resource", reason: "private_channel" } : null;
     },
   },
   {
     applies: (perm) => AI_CHAT_FIXED.has(perm),
-    check: (_p, r) =>
-      isChannel(r) && r.state.has("ai_chat") ? { layer: "resource", reason: "ai_chat_private" } : null,
+    check: (p, r, perm) => {
+      if (!isChannel(r) || !r.state.has("ai_chat")) return null;
+      // P-10: a persona the owner added (an agent principal with the `member` relation) posts its replies through the
+      // Agent Channel API; humans keep writing only through the ai-chat routes (`ai_chat.use`).
+      if (perm === "channel.post" && p.kind === "agent" && r.relations.has("member")) return null;
+      return { layer: "resource", reason: "ai_chat_private" };
+    },
   },
   {
-    // On a concrete conversation, ai_chat.* needs an AI chat the principal owns; at organization scope (a new
-    // chat) the role decides.
-    applies: (perm) => AI_CHAT_OWNED.has(perm),
+    // On a concrete conversation, writing needs an AI chat the principal owns or holds a `chat` grant on; at
+    // organization scope (a new chat) the role decides.
+    applies: (perm) => AI_CHAT_WRITE.has(perm),
+    check: (_p, r) => {
+      if (!isChannel(r) || (r.state.has("ai_chat") && r.relations.has("member"))) return null;
+      return r.state.has("ai_chat") && r.relations.has("grantee")
+        ? { layer: "resource", reason: "ai_chat_view_only" }
+        : { layer: "resource", reason: "not_ai_chat_owner" };
+    },
+  },
+  {
+    // Deciding an Agent Card is a write (P-11): in an AI chat it needs the owner or a `chat` grant, as sending does.
+    // A `view` grantee reads and follows only. Channels, DMs and organization scope stay role-based.
+    applies: (perm) => perm === "agent_card.approve",
+    check: (_p, r) => {
+      if (!isChannel(r) || !r.state.has("ai_chat") || r.relations.has("member")) return null;
+      return r.relations.has("grantee")
+        ? { layer: "resource", reason: "ai_chat_view_only" }
+        : { layer: "resource", reason: "not_ai_chat_owner" };
+    },
+  },
+  {
+    // Managing and sharing a concrete AI chat stay with its owner, whatever grant anyone else holds.
+    applies: (perm) => AI_CHAT_OWNER_ONLY.has(perm),
     check: (_p, r) =>
       isChannel(r) && !(r.state.has("ai_chat") && r.relations.has("owner"))
         ? { layer: "resource", reason: "not_ai_chat_owner" }
@@ -140,6 +173,19 @@ export const PRECONDITIONS: readonly Precondition[] = [
       return r.state.has("personal") && !r.relations.has("owner")
         ? { layer: "resource", reason: "personal_bot" }
         : null;
+    },
+  },
+  {
+    // Unit personas (AGENT-01, P-04): seen and mentioned by the members of the persona's unit subtree, the leads of
+    // any unit on its path, its owner and admins. Nobody else learns it exists, whatever rule allows `bot.read`.
+    applies: (perm) => perm === "bot.read",
+    check: (p, r) => {
+      if (r.type !== "agent" || p.kind !== "user" || !r.state.has("unit_scoped")) return null;
+      if (r.relations.has("owner") || p.orgRole === "admin") return null;
+      const unitId = r.unitPath[r.unitPath.length - 1];
+      if (unitId !== undefined && p.memberUnitPaths.some((path) => path.includes(unitId))) return null;
+      if (r.unitPath.some((u) => p.leadOfUnitIds.has(u))) return null;
+      return { layer: "resource", reason: "unit_agent" };
     },
   },
   {
@@ -214,6 +260,12 @@ export interface ChannelFacts {
    */
   kind?: "channel" | "dm" | "group" | "ai_chat";
   /**
+   * AI chats and user principals only (P-03): the viewer's access from `ai_chats.owner_user_id` and active grants
+   * (`aiAccessSql`). When set, it alone decides the relations: a human's `conversation_members` row never confers
+   * access to an AI chat. Omitted (agents, other kinds, Phase 5 callers) = relations from `viewerRole`.
+   */
+  aiAccess?: "owner" | "chat" | "view" | null;
+  /**
    * The unit the channel belongs to, root → self (CHAT-02): unit-scoped allow and deny rules apply to the channels of
    * that unit (principle 6). Omitted or [] = the organization (and every direct conversation).
    */
@@ -221,6 +273,18 @@ export interface ChannelFacts {
 }
 
 function channelRelations(c: ChannelFacts): Relation[] {
+  if (c.kind === "ai_chat" && c.aiAccess !== undefined) {
+    switch (c.aiAccess) {
+      case "owner":
+        return ["member", "owner"];
+      case "chat":
+        return ["member"];
+      case "view":
+        return ["grantee"];
+      default:
+        return [];
+    }
+  }
   return [
     ...when(c.viewerRole !== null, "member" as const),
     ...when(c.viewerRole === "owner", "owner" as const),
@@ -312,16 +376,30 @@ export interface AgentFacts {
   scope: "team" | "personal";
   ownerUserId: string | null;
   disabled: boolean;
+  /**
+   * AGENT-01: the path (root → self) of the unit a shared persona belongs to; omitted or [] = the organization.
+   * Unit-scoped rules and unit leads (`LEAD_PERMISSIONS`) then apply to the persona.
+   */
+  unitPath?: readonly string[];
 }
 
-/** A bot as a resource: `owner` relation for its owner; states `personal` and `disabled`. */
+/**
+ * A bot as a resource: `owner` relation for its owner; states `personal`, `disabled` and `unit_scoped` (a
+ * department, team or project persona, whose unit path the resource carries).
+ */
 export function agentResource(a: AgentFacts, principalUserId: string | null): ResourceFacts {
+  const unitPath = a.unitPath ?? [];
   return facts(
     "agent",
     when(
       principalUserId !== null && a.ownerUserId !== null && a.ownerUserId === principalUserId,
       "owner" as const,
     ),
-    [...when(a.scope === "personal", "personal" as const), ...when(a.disabled, "disabled" as const)],
+    [
+      ...when(a.scope === "personal", "personal" as const),
+      ...when(a.disabled, "disabled" as const),
+      ...when(unitPath.length > 0, "unit_scoped" as const),
+    ],
+    unitPath,
   );
 }

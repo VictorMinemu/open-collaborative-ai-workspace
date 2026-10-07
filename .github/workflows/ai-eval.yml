@@ -1,0 +1,70 @@
+name: AI eval (metered)
+
+# The three-participant addressing / spoofing eval of multiplayer AI chats (MULTI-07, D-02) on REAL models. It spends
+# money with the OCW_EVAL_API_KEY secret (an OpenRouter key, about $0.15-0.40 per run), so it never runs on ordinary
+# pushes or pull requests: add the `ai-eval` label to a pull request (remove and re-add it to run again), wait for the
+# weekly run, or dispatch it once this file is on the default branch. Without the secret the job ends successfully
+# with a notice and calls nothing. The same run works locally: see apps/api/src/eval/multiplayer/run.ts.
+on:
+  pull_request:
+    types: [labeled]
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ai-eval-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  eval:
+    name: multiplayer spoofing eval (real models, metered)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event.label.name == 'ai-eval'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # Forks and repositories without the secret skip everything below (nothing is installed, called or billed).
+      - name: Eval key present
+        id: key
+        env:
+          OCW_EVAL_API_KEY: ${{ secrets.OCW_EVAL_API_KEY }}
+        run: |
+          if [ -z "$OCW_EVAL_API_KEY" ]; then
+            echo "::notice title=AI eval skipped::OCW_EVAL_API_KEY is not set; nothing was run or billed."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v7
+        if: steps.key.outputs.present == 'true'
+      - uses: actions/setup-node@v7
+        if: steps.key.outputs.present == 'true'
+        with:
+          node-version-file: .nvmrc
+      - run: corepack enable
+        if: steps.key.outputs.present == 'true'
+      - run: pnpm install --frozen-lockfile
+        if: steps.key.outputs.present == 'true'
+      - name: Plan and estimated cost (dry run, no request)
+        if: steps.key.outputs.present == 'true'
+        env:
+          OCW_EVAL_PROVIDER: openrouter
+          OCW_EVAL_DRY_RUN: "1"
+        run: pnpm --filter @ocw/api eval:multiplayer
+      - name: Multiplayer spoofing eval
+        if: steps.key.outputs.present == 'true'
+        env:
+          OCW_EVAL_API_KEY: ${{ secrets.OCW_EVAL_API_KEY }}
+          OCW_EVAL_PROVIDER: openrouter
+          OCW_EVAL_CONFIRM: metered
+        run: pnpm --filter @ocw/api eval:multiplayer
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.key.outputs.present == 'true'
+        with:
+          name: ai-eval
+          path: apps/api/eval-out
+          if-no-files-found: warn
+          retention-days: 30

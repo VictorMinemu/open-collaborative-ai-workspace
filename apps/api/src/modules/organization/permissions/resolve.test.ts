@@ -110,6 +110,9 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "ai_chat.web": true,
     "ai_chat.share": true,
     "ai_chat.share.read": true,
+    "ai_chat.manage": true,
+    "bot.manage_unit": false,
+    "agent_card.approve": true,
   },
   developer: {
     "org.read": true,
@@ -164,6 +167,9 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "ai_chat.web": true,
     "ai_chat.share": true,
     "ai_chat.share.read": true,
+    "ai_chat.manage": true,
+    "bot.manage_unit": false,
+    "agent_card.approve": true,
   },
   lead: {
     "org.read": true,
@@ -218,6 +224,9 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "ai_chat.web": true,
     "ai_chat.share": true,
     "ai_chat.share.read": true,
+    "ai_chat.manage": true,
+    "bot.manage_unit": false,
+    "agent_card.approve": true,
   },
   admin: {
     "org.read": true,
@@ -272,6 +281,9 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "ai_chat.web": true,
     "ai_chat.share": true,
     "ai_chat.share.read": true,
+    "ai_chat.manage": true,
+    "bot.manage_unit": true,
+    "agent_card.approve": true,
   },
 };
 
@@ -765,6 +777,125 @@ describe("channels in units (CHAT-02, 04-08)", () => {
   });
 });
 
+describe("unit personas (Phase 6, AGENT-01, P-04)", () => {
+  const ENG = "unit-eng";
+  const BACKEND = "unit-backend";
+  const PAYMENTS = "unit-payments";
+  const FRONTEND = "unit-frontend";
+  const RILEY = "u-riley";
+  const ALEX = "u-alex";
+  const JO = "u-jo";
+  const OWNER = "u-owner";
+  // Riley has the standard role: every bot right below comes from leading Backend.
+  const riley = user("standard", {
+    id: RILEY,
+    memberUnitPaths: [[ENG, BACKEND]],
+    leadOfUnitIds: new Set([BACKEND]),
+  });
+  const alex = user("standard", { id: ALEX, memberUnitPaths: [[ENG, BACKEND]] });
+  const payments = user("standard", { id: "u-pay", memberUnitPaths: [[ENG, BACKEND, PAYMENTS]] });
+  const jo = user("standard", { id: JO, memberUnitPaths: [[ENG, FRONTEND]] });
+  const admin = user("admin", { id: "u-admin" });
+  const persona = {
+    scope: "team" as const,
+    ownerUserId: null,
+    disabled: false,
+    unitPath: [ENG, BACKEND],
+  };
+
+  it("a lead of Backend gets bot.manage_unit on Backend and its child Payments, not on Frontend", () => {
+    expect(allowed(riley, unitResource({ id: BACKEND, path: [ENG, BACKEND] }), "bot.manage_unit")).toBe(true);
+    expect(
+      allowed(riley, unitResource({ id: PAYMENTS, path: [ENG, BACKEND, PAYMENTS] }), "bot.manage_unit"),
+    ).toBe(true);
+    expect(allowed(riley, unitResource({ id: FRONTEND, path: [ENG, FRONTEND] }), "bot.manage_unit")).toBe(
+      false,
+    );
+    expect(allowed(riley, unitResource({ id: ENG, path: [ENG] }), "bot.manage_unit")).toBe(false);
+    expect(allowed(riley, orgResource(), "bot.manage_unit")).toBe(false);
+    expect(allowed(riley, orgResource(), "bot.manage")).toBe(false);
+  });
+
+  it("the unit path rides on the agent resource with state unit_scoped (organization personas carry none)", () => {
+    const r = agentResource(persona, RILEY);
+    expect(r.unitPath).toEqual([ENG, BACKEND]);
+    expect(r.state.has("unit_scoped")).toBe(true);
+    const org = agentResource({ ...persona, unitPath: [] }, RILEY);
+    expect(org.unitPath).toEqual([]);
+    expect(org.state.has("unit_scoped")).toBe(false);
+    expect(agentResource({ scope: "team", ownerUserId: null, disabled: false }, RILEY).unitPath).toEqual([]);
+  });
+
+  it("the lead configures and governs the persona of the unit they lead", () => {
+    const r = agentResource(persona, RILEY);
+    expect(allowed(riley, r, "bot.read")).toBe(true);
+    expect(allowed(riley, r, "bot.configure")).toBe(true);
+    expect(allowed(riley, r, "bot.manage_unit")).toBe(true);
+    expect(allowed(riley, r, "bot.manage")).toBe(false);
+  });
+
+  it("a standard member of Backend (or a sub-unit) reads it but does not configure it", () => {
+    for (const m of [alex, payments]) {
+      const r = agentResource(persona, m.id);
+      expect(allowed(m, r, "bot.read")).toBe(true);
+      expect(allowed(m, r, "bot.configure")).toBe(false);
+    }
+  });
+
+  it("a member of Frontend is denied bot.read with unit_agent, even with an allow rule", () => {
+    const r = agentResource(persona, JO);
+    expect(decide(jo, r, [], "bot.read")).toEqual({
+      allowed: false,
+      denial: { permission: "bot.read", layer: "resource", reason: "unit_agent" },
+    });
+    const allowAll = rule({ subjectKind: "user", subjectId: JO, permission: "bot.*", effect: "allow" });
+    expect(decide(jo, r, [allowAll], "bot.read").denial).toMatchObject({ reason: "unit_agent" });
+    expect(allowed(jo, r, "bot.configure")).toBe(false);
+    // A member of no unit at all is denied the same way.
+    expect(
+      decide(user("developer", { id: "u-x" }), agentResource(persona, "u-x"), [], "bot.read").denial,
+    ).toMatchObject({ reason: "unit_agent" });
+  });
+
+  it("a lead of an ancestor unit sees and configures the personas of its subtree", () => {
+    const engLead = user("lead", { id: "u-eng", leadOfUnitIds: new Set([ENG]), memberUnitPaths: [[ENG]] });
+    const r = agentResource(persona, "u-eng");
+    expect(allowed(engLead, r, "bot.read")).toBe(true);
+    expect(allowed(engLead, r, "bot.configure")).toBe(true);
+  });
+
+  it("an admin keeps bot.read, bot.configure and bot.manage on any unit persona", () => {
+    const r = agentResource(persona, "u-admin");
+    expect(allowed(admin, r, "bot.read")).toBe(true);
+    expect(allowed(admin, r, "bot.configure")).toBe(true);
+    expect(allowed(admin, r, "bot.manage")).toBe(true);
+    expect(allowed(admin, r, "bot.manage_unit")).toBe(true);
+  });
+
+  it("the owner of a shared persona reads and configures it through the relation, wherever they sit", () => {
+    const owned = { ...persona, ownerUserId: OWNER };
+    const owner = user("standard", { id: OWNER, memberUnitPaths: [[ENG, FRONTEND]] });
+    const r = agentResource(owned, OWNER);
+    expect(r.relations.has("owner")).toBe(true);
+    expect(allowed(owner, r, "bot.read")).toBe(true);
+    expect(allowed(owner, r, "bot.configure")).toBe(true);
+    expect(allowed(owner, r, "bot.manage_unit")).toBe(false);
+    // An organization persona with an owner: the owner configures it too.
+    const orgOwned = agentResource({ scope: "team", ownerUserId: OWNER, disabled: false }, OWNER);
+    expect(allowed(owner, orgOwned, "bot.configure")).toBe(true);
+    expect(allowed(owner, orgOwned, "bot.manage")).toBe(false);
+  });
+
+  it("a deny scoped to Backend reaches the persona of Backend for every member", () => {
+    const deny = rule({ id: "deny-b", scopeUnitId: BACKEND, permission: "bot.configure", effect: "deny" });
+    expect(decide(riley, agentResource(persona, RILEY), [deny], "bot.configure").denial).toMatchObject({
+      layer: "unit",
+      reason: "denied_by_rule",
+      unitId: BACKEND,
+    });
+  });
+});
+
 describe("personal bots (D-01) and direct conversations (D-03)", () => {
   const SAM = "u-sam";
   const ALEX = "u-alex";
@@ -1030,6 +1161,161 @@ describe("AI chats (Phase 5, P-03): private, one owner, no membership, moderatio
   });
 });
 
+describe("AI chat grants (Phase 6, P-03/P-04): access from owner ∪ grants, management owner-only", () => {
+  const VICTOR = "u-victor";
+  const victor = user("admin", { id: VICTOR });
+  const alex = user("developer", { id: "u-alex" });
+  const sam = user("standard", { id: "u-sam" });
+  const admin = user("admin", { id: "u-admin" });
+  const ai = (aiAccess: "owner" | "chat" | "view" | null, viewerRole: "owner" | "member" | null = null) =>
+    channelResource({ visibility: "private", archived: false, viewerRole, kind: "ai_chat", aiAccess });
+  const owner = ai("owner", "owner");
+  const chatGrant = ai("chat", "member");
+  const viewGrant = ai("view", "member");
+  const none = ai(null);
+
+  it("relations come from aiAccess: owner → owner + member, chat → member, view → grantee, null → none", () => {
+    expect([...owner.relations].sort()).toEqual(["member", "owner"]);
+    expect([...chatGrant.relations]).toEqual(["member"]);
+    expect([...viewGrant.relations]).toEqual(["grantee"]);
+    expect([...none.relations]).toEqual([]);
+  });
+
+  it("a stale conversation_members row never confers access to a human (T-06-02-06)", () => {
+    const stale = ai(null, "member");
+    expect(stale.relations.size).toBe(0);
+    expect(decide(sam, stale, [], "channel.read")).toEqual({
+      allowed: false,
+      denial: { permission: "channel.read", layer: "resource", reason: "private_channel" },
+    });
+    expect(ai(null, "owner").relations.size).toBe(0);
+  });
+
+  it("the owner reads, uses, searches the web, manages and shares", () => {
+    for (const perm of [
+      "channel.read",
+      "ai_chat.use",
+      "ai_chat.web",
+      "ai_chat.manage",
+      "ai_chat.share",
+    ] as const) {
+      expect(allowed(victor, owner, perm), perm).toBe(true);
+      expect(allowed(sam, owner, perm), perm).toBe(true);
+    }
+  });
+
+  it("a chat grantee reads, uses and searches the web; manage and share are denied not_ai_chat_owner", () => {
+    for (const perm of ["channel.read", "ai_chat.use", "ai_chat.web"] as const) {
+      expect(allowed(alex, chatGrant, perm), perm).toBe(true);
+    }
+    for (const perm of ["ai_chat.manage", "ai_chat.share"] as const) {
+      expect(decide(alex, chatGrant, [], perm)).toEqual({
+        allowed: false,
+        denial: { permission: perm, layer: "resource", reason: "not_ai_chat_owner" },
+      });
+    }
+  });
+
+  it("a view grantee reads; use and web are ai_chat_view_only; manage and share not_ai_chat_owner", () => {
+    expect(allowed(alex, viewGrant, "channel.read")).toBe(true);
+    for (const perm of ["ai_chat.use", "ai_chat.web"] as const) {
+      expect(decide(alex, viewGrant, [], perm)).toEqual({
+        allowed: false,
+        denial: { permission: perm, layer: "resource", reason: "ai_chat_view_only" },
+      });
+    }
+    for (const perm of ["ai_chat.manage", "ai_chat.share"] as const) {
+      expect(decide(alex, viewGrant, [], perm).denial).toMatchObject({ reason: "not_ai_chat_owner" });
+    }
+  });
+
+  it("no relation, the admin included: read is hidden (private_channel), everything else denied", () => {
+    for (const who of [admin, sam]) {
+      expect(decide(who, none, [], "channel.read").denial).toMatchObject({ reason: "private_channel" });
+      for (const perm of ["ai_chat.use", "ai_chat.web", "ai_chat.manage", "ai_chat.share"] as const) {
+        expect(decide(who, none, [], perm).denial, perm).toMatchObject({ reason: "not_ai_chat_owner" });
+      }
+    }
+  });
+
+  it("an agent principal keeps the member relation of its row and reads the chat", () => {
+    const agent: PrincipalFacts = {
+      kind: "agent",
+      id: "a-1",
+      orgRole: null,
+      deactivated: false,
+      memberUnitPaths: [],
+      leadOfUnitIds: new Set(),
+    };
+    const asMember = channelResource({
+      visibility: "private",
+      archived: false,
+      viewerRole: "member",
+      kind: "ai_chat",
+    });
+    expect(allowed(agent, asMember, "channel.read")).toBe(true);
+    const notMember = channelResource({
+      visibility: "private",
+      archived: false,
+      viewerRole: null,
+      kind: "ai_chat",
+    });
+    expect(decide(agent, notMember, [], "channel.read").denial).toMatchObject({ reason: "agent_not_member" });
+  });
+
+  it("a deny rule on ai_chat.use beats a chat grant (and the owner)", () => {
+    const deny = rule({
+      subjectKind: "user",
+      subjectId: "u-alex",
+      permission: "ai_chat.use",
+      effect: "deny",
+    });
+    expect(decide(alex, chatGrant, [deny], "ai_chat.use").denial).toMatchObject({ reason: "denied_by_rule" });
+    expect(allowed(alex, chatGrant, "channel.read", [deny])).toBe(true);
+  });
+
+  it("the Phase 5 fixed denials still hold for the owner and every grantee", () => {
+    for (const perm of [
+      "channel.members.add",
+      "channel.members.remove",
+      "channel.archive",
+      "channel.update",
+      "message.delete_any",
+      "channel.mention_all",
+      "channel.post",
+    ] as const) {
+      for (const [who, r] of [
+        [victor, owner],
+        [alex, chatGrant],
+        [alex, viewGrant],
+      ] as const) {
+        expect(decide(who, r, [], perm).allowed, perm).toBe(false);
+      }
+      expect(decide(victor, owner, [], perm).denial, perm).toMatchObject({ reason: "ai_chat_private" });
+    }
+  });
+
+  it("agent_card.approve in an AI chat needs write access: owner and chat grantee yes, view grantee ai_chat_view_only (security fix)", () => {
+    expect(allowed(victor, owner, "agent_card.approve")).toBe(true);
+    expect(allowed(alex, chatGrant, "agent_card.approve")).toBe(true);
+    expect(decide(alex, viewGrant, [], "agent_card.approve")).toEqual({
+      allowed: false,
+      denial: { permission: "agent_card.approve", layer: "resource", reason: "ai_chat_view_only" },
+    });
+    expect(decide(sam, none, [], "agent_card.approve").allowed).toBe(false);
+    // Channels, DMs and organization scope are unchanged (role-based).
+    const channel = channelResource({ visibility: "public", archived: false, viewerRole: "member" });
+    const dm = channelResource({ visibility: "private", archived: false, viewerRole: "member", kind: "dm" });
+    expect(allowed(sam, channel, "agent_card.approve")).toBe(true);
+    expect(allowed(sam, dm, "agent_card.approve")).toBe(true);
+    expect(allowed(sam, orgResource(), "agent_card.approve")).toBe(true);
+  });
+
+  it("ai_chat.manage at organization scope stays role-based", () => {
+    expect(allowed(sam, orgResource(), "ai_chat.manage")).toBe(true);
+  });
+});
+
 // ---------------------------------------------------------------- properties (fast-check)
 
 const UNITS = ["u0", "u1", "u2", "u3", "u4", "u5"] as const;
@@ -1052,6 +1338,7 @@ const STATES: ResourceState[] = [
   "personal",
   "disabled",
   "dm",
+  "unit_scoped",
 ];
 const TYPES: ResourceType[] = [
   "organization",

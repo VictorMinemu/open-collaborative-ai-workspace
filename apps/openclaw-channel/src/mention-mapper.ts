@@ -1,5 +1,7 @@
 import {
+  AgentCardActionEvent,
   type AgentChannelAuthor,
+  AgentChannelEventTypes,
   type AgentChannelRosterEntry,
   type AgentMentionEvent,
   type CellAgent,
@@ -56,13 +58,15 @@ export function parseTarget(raw: string): { conversationId: string; threadRootId
 
 export function buildPersonaPrompt(
   bot: Pick<CellAgent, "displayName" | "handle" | "instructions"> & { description?: string | null },
-  opts: { direct?: boolean } = {},
+  opts: { direct?: boolean; aiChat?: boolean } = {},
 ): string {
   const lines = [
     `You are ${sanitizeName(bot.displayName)} (@${bot.handle}), an AI agent that is a member of this team workspace.`,
     opts.direct
       ? "You are in a private direct conversation with one person, given to you as structured context; earlier messages of this conversation are your history."
-      : "You are replying inside a chat thread where several humans may participate. The sender of the current message and the thread participants are given to you as structured context; address people by name when helpful.",
+      : opts.aiChat
+        ? "You are a participant in a shared AI chat where several people and an AI assistant write. The sender of the current message, the participants and the earlier messages (each attributed to its author) are given to you as structured context; address people by name when helpful."
+        : "You are replying inside a chat thread where several humans may participate. The sender of the current message and the thread participants are given to you as structured context; address people by name when helpful.",
     "Reply with plain Markdown text only. Keep replies concise unless asked for detail.",
   ];
   const description = bot.description?.trim();
@@ -84,9 +88,15 @@ export type MappedMention = {
   conversationKind: "dm" | "channel";
   /**
    * The thread every reply must land in (the mention itself when posted top-level); null in a direct
-   * conversation, where replies are flat.
+   * conversation or an AI chat, where replies are flat.
    */
   threadRootId: string | null;
+  /**
+   * The OpenClaw session of this turn below the per-conversation base key (`sessionKeyFor`): the thread in a channel,
+   * none in a DM (one session per DM), and the mention itself in an AI chat (06-10): every turn starts from the
+   * attributed chat history only, so one asker's tool results never sit in a transcript another asker's turn reuses.
+   */
+  sessionThreadId: string | null;
   target: string;
   messageId: string;
   timestampMs: number | undefined;
@@ -119,8 +129,34 @@ export type MappedMention = {
   contextBlocks: ContextBlock[];
 };
 
+/** Why a tool was withheld, in words the persona can repeat (06-10, D-06). Unknown reasons stay neutral. */
+function withheldReason(reason: string, askerName: string): string {
+  switch (reason) {
+    case "not_every_participant":
+      return "not everyone in this conversation may use it";
+    case "shared_with_group":
+      return "this chat is shared with a team, a department or the whole organization";
+    case "denied_for_you":
+      return `${askerName} may not use it`;
+    default:
+      return "not available in this conversation";
+  }
+}
+
 function turnContextBlocks(turn: TurnContext, askerName: string, direct: boolean): ContextBlock[] {
   const blocks: ContextBlock[] = [];
+  // Data, not instructions: the persona can say what it could not use here and why (it never gets the tool).
+  const withheld = turn.withheld ?? [];
+  if (withheld.length > 0) {
+    blocks.push({
+      label: "Tools withheld in this conversation",
+      source: "ocw",
+      type: "withheld_tools",
+      payload: {
+        withheld: withheld.map((w) => `${sanitizeName(w.tool)} — ${withheldReason(w.reason, askerName)}`),
+      },
+    });
+  }
   if (turn.now) {
     blocks.push({
       label: `Current time for ${askerName}`,
@@ -147,10 +183,14 @@ function parseTime(value: string | undefined): number | undefined {
   return Number.isFinite(ms) ? ms : undefined;
 }
 
+/** The AI chat conversation kind (06-10, P-10): flat like a DM, several participants like a channel. */
+const AI_CHAT = "ai_chat";
+
 export function mapMention(event: AgentMentionEvent, bot: CellAgent | undefined): MappedMention {
   const direct = event.conversation.kind === "dm";
-  // In a DM `thread.rootMessageId` is the message itself (schema unchanged); the reply is flat.
-  const threadRootId = direct ? null : event.thread.rootMessageId;
+  const aiChat = event.conversation.kind === AI_CHAT;
+  // In a DM or an AI chat `thread.rootMessageId` is the message itself (schema unchanged); the reply is flat.
+  const threadRootId = direct || aiChat ? null : event.thread.rootMessageId;
   const author = event.message.author;
   const turn = event.turn ?? EMPTY_TURN;
   const agentTools = bot?.capabilities?.tools ?? [];
@@ -171,6 +211,7 @@ export function mapMention(event: AgentMentionEvent, bot: CellAgent | undefined)
     conversationId: event.conversation.id,
     conversationKind: direct ? "dm" : "channel",
     threadRootId,
+    sessionThreadId: aiChat ? event.message.id : threadRootId,
     target: buildTarget(event.conversation.id, threadRootId),
     messageId: event.message.id,
     timestampMs: parseTime(event.message.createdAt),
@@ -181,13 +222,17 @@ export function mapMention(event: AgentMentionEvent, bot: CellAgent | undefined)
     },
     conversationLabel: direct
       ? `Direct chat with ${sanitizeName(author.displayName)}`
-      : event.conversation.name
-        ? `#${sanitizeName(event.conversation.name)}`
-        : event.conversation.id,
+      : aiChat
+        ? event.conversation.name
+          ? `AI chat “${sanitizeName(event.conversation.name).replace(/[“”"]/gu, "")}”`
+          : "AI chat"
+        : event.conversation.name
+          ? `#${sanitizeName(event.conversation.name)}`
+          : event.conversation.id,
     groupMembers: formatGroupMembers(event.roster),
     mentionedUserIds: event.message.mentions.filter((m) => m.kind === "user").map((m) => m.id),
     body: event.message.text,
-    historyLabel: direct ? "Conversation history" : "Thread history",
+    historyLabel: direct || aiChat ? "Conversation history" : "Thread history",
     chatWindow: history.map((h) => ({
       message_id: h.id,
       sender: h.sender,
@@ -203,13 +248,61 @@ export function mapMention(event: AgentMentionEvent, bot: CellAgent | undefined)
     })),
     personaPrompt: buildPersonaPrompt(
       bot ?? { displayName: event.agent.displayName, handle: event.agent.handle, instructions: "" },
-      { direct },
+      { direct, aiChat },
     ),
     turn,
     agentTools,
     allowedTools,
     contextBlocks: turnContextBlocks(turn, askerName, direct),
   };
+}
+
+const CARD_TITLE_MAX = 200;
+/** A scheme URL (`https://…`, `javascript:…`, …) or a bare `www.` host: never forwarded inside a card block. */
+const URL_LIKE = /(?:\b[a-z][a-z0-9+.-]*:\/\/|\bwww\.|\b(?:javascript|data|vbscript|mailto|file):)\S*/giu;
+
+/**
+ * A card title is model output from an earlier turn, shown back to the model: one line, no URLs, no structural
+ * characters, bounded (P-11, 06-14).
+ */
+export function sanitizeCardTitle(title: string): string {
+  const oneLine = Array.from(title, (ch) => {
+    const c = ch.charCodeAt(0);
+    return c <= 0x1f || (c >= 0x7f && c <= 0x9f) ? " " : ch;
+  }).join("");
+  const cleaned = oneLine
+    .replace(URL_LIKE, "[link removed]")
+    .replace(/[<>`]/gu, "")
+    .replace(/\s{2,}/gu, " ")
+    .trim()
+    .slice(0, CARD_TITLE_MAX)
+    .trim();
+  return cleaned || "untitled";
+}
+
+/**
+ * `agent.card_action.v1` (06-14, P-11): a human approved or denied one of the agent's cards. Mapped exactly like a
+ * mention of the agent on the card's message (same sender, roster, history, thread or flat placement, session and
+ * turn tools), plus a structured block naming the card and the outcome, so the persona can continue (for example
+ * update the card with `ocw_agent_card`). Throws on a malformed event (the bridge validates first).
+ */
+export function mapCardAction(event: AgentCardActionEvent, bot: CellAgent | undefined): MappedMention {
+  const { cardAction, ...rest } = AgentCardActionEvent.parse(event);
+  const base = mapMention({ ...rest, type: AgentChannelEventTypes.mention }, bot);
+  const block: ContextBlock = {
+    label: "Decision on your card",
+    source: "ocw",
+    type: "card_action",
+    payload: {
+      card: {
+        messageId: cardAction.messageId,
+        kind: sanitizeName(cardAction.kind),
+        title: sanitizeCardTitle(cardAction.title),
+      },
+      outcome: cardAction.outcome,
+    },
+  };
+  return { ...base, contextBlocks: [block, ...base.contextBlocks] };
 }
 
 /**

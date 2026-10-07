@@ -9,12 +9,23 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { Spinner } from "@/components/ui/spinner";
 import { errorMessage, isApiError } from "@/lib/api";
-import { useCreateAgent, useModels } from "@/lib/bots-queries";
+import { useCreateAgent, useCreateTargets, useModels } from "@/lib/bots-queries";
 import { validate } from "@/lib/form";
+import { useUnits } from "@/lib/org-queries";
 import { useCan } from "@/lib/permissions";
+import { useMe, useMembers } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { BotAvatar } from "./bot-bits";
-import { BotForm, type BotFormErrors, type BotFormValues, modelKey, splitModelKey } from "./bot-form";
+import {
+  BotForm,
+  type BotFormErrors,
+  type BotFormValues,
+  modelKey,
+  PlacementFields,
+  type PlacementValues,
+  SheetSection,
+  splitModelKey,
+} from "./bot-form";
 import { BOT_PRESETS, type BotPreset } from "./presets";
 
 const EMPTY: BotFormValues = {
@@ -38,17 +49,35 @@ export function NewBotSheet({
   const models = useModels();
   const create = useCreateAgent();
   const canManageProviders = useCan("provider.manage");
+  const where = useCreateTargets();
+  const units = useUnits();
+  const members = useMembers();
+  const me = useMe({ enabled: false });
   const [step, setStep] = useState<"template" | "details">("template");
   const [values, setValues] = useState<BotFormValues>(EMPTY);
   const [errors, setErrors] = useState<BotFormErrors>({});
+  const [placement, setPlacement] = useState<PlacementValues | null>(null);
+  const [placementError, setPlacementError] = useState<string | undefined>();
   const [usernameTouched, setUsernameTouched] = useState(false);
   const available = models.data?.models ?? [];
   const defaultModel = available.find((m) => m.isDefault) ?? available[0];
+  const allUnits = units.data?.units ?? [];
+  const targets = allUnits.filter((u) => where.unitIds.includes(u.id));
+  const myId = me.data?.user.id ?? "";
+
+  /** Organization when the caller may create there, else the first unit they lead (owner: themselves). */
+  function initialPlacement(): PlacementValues {
+    if (where.organization) return { scope: "organization", unitId: "", ownerUserId: "" };
+    const first = targets[0];
+    return { scope: first?.kind ?? "team", unitId: first?.id ?? "", ownerUserId: myId };
+  }
 
   function reset() {
     setStep("template");
     setValues(EMPTY);
     setErrors({});
+    setPlacement(null);
+    setPlacementError(undefined);
     setUsernameTouched(false);
   }
 
@@ -67,6 +96,11 @@ export function NewBotSheet({
   }
 
   async function submit() {
+    const place = placement ?? initialPlacement();
+    if (place.scope !== "organization" && !place.unitId) {
+      setPlacementError(`Choose a ${place.scope}`);
+      return;
+    }
     const { provider, modelId } = values.model ? splitModelKey(values.model) : { provider: "", modelId: "" };
     const result = validate(CreateAgentRequest, {
       name: values.name,
@@ -76,6 +110,8 @@ export function NewBotSheet({
       instructions: values.instructions,
       modelProvider: provider || undefined,
       modelId: modelId || undefined,
+      ...(place.scope !== "organization" ? { unitId: place.unitId } : {}),
+      ...(place.ownerUserId ? { ownerUserId: place.ownerUserId } : {}),
     } as Record<string, unknown>);
     if (result.errors) {
       const e = result.errors as Record<string, string>;
@@ -100,7 +136,9 @@ export function NewBotSheet({
     } catch (err) {
       if (isApiError(err, 409)) setErrors({ username: "This handle is already taken" });
       else if (isApiError(err) && err.code === "model_not_allowed") setErrors({ model: err.message });
-      else toast.error("Could not create the bot", { description: errorMessage(err) });
+      else if (isApiError(err, 403) || (isApiError(err) && err.code === "unit_not_found")) {
+        setPlacementError("You cannot create bots there");
+      } else toast.error("Could not create the bot", { description: errorMessage(err) });
     }
   }
 
@@ -188,22 +226,41 @@ export function NewBotSheet({
               </ol>
             </div>
           ) : (
-            <BotForm
-              idPrefix="new-bot"
-              values={values}
-              errors={errors}
-              models={available}
-              onChange={(patch) => {
-                setValues((v) => ({ ...v, ...patch }));
-                setErrors((e) => {
-                  const next = { ...e };
-                  for (const k of Object.keys(patch)) delete next[k as keyof BotFormValues];
-                  return next;
-                });
-              }}
-              usernameTouched={usernameTouched}
-              onUsernameTouched={() => setUsernameTouched(true)}
-            />
+            <div className="grid gap-7">
+              <SheetSection title="Who can use it">
+                <PlacementFields
+                  idPrefix="new-bot"
+                  value={placement ?? initialPlacement()}
+                  onChange={(patch) => {
+                    setPlacement((p) => ({ ...(p ?? initialPlacement()), ...patch }));
+                    setPlacementError(undefined);
+                  }}
+                  targets={targets}
+                  allUnits={allUnits}
+                  allowOrganization={where.organization}
+                  members={members.data?.members ?? []}
+                  error={placementError}
+                />
+              </SheetSection>
+              <SheetSection title="Profile & behaviour">
+                <BotForm
+                  idPrefix="new-bot"
+                  values={values}
+                  errors={errors}
+                  models={available}
+                  onChange={(patch) => {
+                    setValues((v) => ({ ...v, ...patch }));
+                    setErrors((e) => {
+                      const next = { ...e };
+                      for (const k of Object.keys(patch)) delete next[k as keyof BotFormValues];
+                      return next;
+                    });
+                  }}
+                  usernameTouched={usernameTouched}
+                  onUsernameTouched={() => setUsernameTouched(true)}
+                />
+              </SheetSection>
+            </div>
           )}
         </div>
 

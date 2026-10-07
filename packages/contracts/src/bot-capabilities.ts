@@ -254,6 +254,14 @@ export type TurnToolFlags = z.infer<typeof TurnToolFlags>;
  * `agent.mention.v1.turn`: exactly what this bot may do for this human on this turn. A plugin that receives
  * no `turn` runs with no tools (fail closed).
  */
+/**
+ * Why a tool the bot could use is not offered on this turn of a shared AI chat (06-10, D-06): `not_every_participant` (a
+ * joined human may not use it), `shared_with_group` (a team, department or the organization holds a grant, so the readers
+ * are not a list) or `denied_for_you` (the asking human may not use it).
+ */
+export const TurnWithheldReason = z.enum(["not_every_participant", "shared_with_group", "denied_for_you"]);
+export type TurnWithheldReason = z.infer<typeof TurnWithheldReason>;
+
 export const TurnContext = z.object({
   tools: z.array(z.string()).max(64),
   toolFlags: z.record(z.string(), TurnToolFlags),
@@ -261,6 +269,11 @@ export const TurnContext = z.object({
   now: TurnNow.nullable(),
   maxToolCalls: z.number().int(),
   maxWebCalls: z.number().int(),
+  /** AI chat deliveries only (06-10): what was withheld and why, so the persona can say so. Never enables a tool. */
+  withheld: z
+    .array(z.object({ tool: z.string(), reason: TurnWithheldReason }))
+    .max(64)
+    .optional(),
 });
 export type TurnContext = z.infer<typeof TurnContext>;
 
@@ -269,6 +282,8 @@ export const BUILTIN_TOOLS = {
   webSearch: "web_search",
   webFetch: "web_fetch",
   memorySave: "ocw_memory_save",
+  /** Phase 6 (AGENT-04, D-07): the persona posts or updates an Agent Card in the conversation of the turn. */
+  agentCard: "ocw_agent_card",
 } as const;
 
 export const MAX_TOOL_CALLS_PER_TURN = 8;
@@ -376,7 +391,7 @@ function words(name: string): string[] {
  * True for tool names that must never become effective, whatever a source declares: the exact core list,
  * every `group:*`, and word patterns for shell/exec/spawn/process/terminal, filesystem write/edit/delete/move,
  * browser/computer/canvas/screen control, gateway/node/config administration and outbound messaging. Never
- * true for the three `BUILTIN_TOOLS`.
+ * true for the `BUILTIN_TOOLS`.
  */
 export function isDangerousToolName(name: string): boolean {
   const lower = name.trim().toLowerCase();

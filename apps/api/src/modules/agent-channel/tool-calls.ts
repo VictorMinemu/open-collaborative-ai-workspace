@@ -16,6 +16,7 @@ import { and, eq, lt, type SQL, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { App, Core } from "../../core";
 import { notFound } from "../../lib/errors";
+import { audienceOf } from "../ai-chat";
 import { currentTurnTools, loadCatalog, loadPolicy } from "../bot-capabilities";
 import type { PermissionService } from "../organization";
 import { type CellPrincipal, cellOf } from "./auth";
@@ -140,12 +141,14 @@ export function registerToolCallRoutes(scope: App, core: Core, perms: Permission
           reason = "not_in_turn";
         } else {
           // Re-decided now, for the human the turn was delivered to: a policy, toggle or rule change bites
-          // between delivery and the call.
+          // between delivery and the call. In an AI chat, with today's readers too (06-10: a team grant or a
+          // participant's deny added mid-turn withdraws a scoped tool).
           const now = await currentTurnTools(
             tx,
             perms,
             { agentId: turn.agentId, humanUserId: turn.userId, conversationKind: turn.conversationKind },
             core.env,
+            turn.conversationKind === "ai_chat" ? await audienceOf(tx, turn.conversationId) : null,
           );
           const current = now.toolFlags[body.tool];
           if (!now.tools.includes(body.tool) || !current) {

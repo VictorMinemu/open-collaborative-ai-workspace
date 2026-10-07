@@ -232,7 +232,9 @@ changes never need an image rebuild. Scenarios (`SMOKE_ONLY=<comma list>`): `men
 `capabilities` (internet on: the model is offered exactly `web_fetch,web_search`, searches through the gate via
 the fake SearXNG, the fake API records the call and its result; internet off: `[tools: 0]`) and `dm-isolation`
 (two humans' DMs with one bot never share a prompt; deleting the bot leaves no transcript in the state volume),
-`memory` and `mcp` (the fake MCP behind a bearer token: probe through the cell, `${OCW_MCP_…}` in the rendered
+`memory`, `card` (06-14: a turn offering `ocw_agent_card` posts one gated card through `POST /cards`, bound to the
+turn's conversation, thread and message; an `agent.card_action.v1` approval arrives as a turn in the card's thread
+and updates the card with the version it saw) and `mcp` (the fake MCP behind a bearer token: probe through the cell, `${OCW_MCP_…}` in the rendered
 config and never the token, only the enabled tool offered, a gated and audited `echo`, the tool filter re-rendered
 when the admin enables `write_note`, and `write_note` blocked by the taint rule after `echo` in the same turn), and
 `marketplace`. That scenario runs with `OCW_BUNDLED_PLUGINS=searxng` and `OCW_CLAWHUB_URL` pointing at the fake

@@ -12,7 +12,7 @@ import { aiChats, aiGenerations, messages, messageVersions, type Tx } from "@ocw
 import { and, count, desc, eq, isNull, lt, ne } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { type App, authOf, type Core, tenant } from "../../core";
-import { conflict, notFound } from "../../lib/errors";
+import { conflict, forbidden, notFound } from "../../lib/errors";
 import { attachmentsForMessages } from "../artifact";
 import { convTopic, createConversationAccess, lockNextSeq } from "../chat";
 import { loadAiChatPolicy, type ModelGateway } from "../model-gateway";
@@ -23,12 +23,15 @@ import {
   chatSummary,
   directoryOf,
   EMPTY_DIRECTORY,
+  emitChatUpdated,
   type GenerationRow,
   generationDto,
+  viewOf,
 } from "./dto";
 import { consumeGeneration, refuseOverLimit } from "./limits";
+import { isMultiplayer, pendingCount } from "./queue";
 import type { RunLoop } from "./run-loop";
-import { capOr429, refuseArchived, resolveModelOr409 } from "./service";
+import { capOr429, createChatGuards, refuseArchived, resolveModelOr409 } from "./service";
 import { backendClassOf } from "./usage";
 
 /**
@@ -40,6 +43,11 @@ import { backendClassOf } from "./usage";
  * Regenerate (AICHAT-02/03) streams the chat's last answer again on the same message, with the previous model or
  * another one: in one transaction the replaced body goes to `message_versions` (kind `regenerate`, append-only),
  * the message is reset to an empty streaming answer and attempt N+1 starts (the one-running index still gates it).
+ *
+ * Shared chats (Phase 6, P-04, P-07): stop is for whoever can read the chat, but only the running generation's
+ * requester or the owner may press it (403 `not_generation_requester`); regenerate needs `ai_chat.use` and is for the
+ * owner or the requester of the answer's latest attempt (403 `not_answer_requester`). The new attempt is resolved for,
+ * and paid by, the caller.
  */
 
 export const ABORT_CHANNEL = "ocw:ai:abort";
@@ -85,15 +93,10 @@ export async function registerGenerationRoutes(
   const perms = createPermissionService(core);
   const tags = ["ai-chat"];
 
-  /** The chat if the caller owns it (hidden = 404 for everyone else, admins included). */
-  async function ownedChat(req: FastifyRequest, tx: Tx, chatId: string) {
-    const { conv, facts } = await access.readable(req, tx, chatId, {
-      kinds: ["ai_chat"],
-      notFoundMessage: NOT_FOUND,
-    });
-    await perms.assertCan(req, tx, "ai_chat.use", channelResource(facts), { hideAs404: true });
-    return conv;
-  }
+  const guards = createChatGuards(access, perms);
+  /** The owner of the chat holds `ai_chat.manage` on it; nobody else does. */
+  const manages = (req: FastifyRequest, tx: Tx, facts: Parameters<typeof channelResource>[0]) =>
+    perms.can(req, tx, "ai_chat.manage", channelResource(facts));
 
   app.post(
     "/ai-chats/:id/generations/:gid/stop",
@@ -105,13 +108,23 @@ export async function registerGenerationRoutes(
     async (req, reply) => {
       const { id, gid } = req.params;
       const out = await core.db.withTenant(tenant(req), async (tx, afterCommit) => {
-        const conv = await ownedChat(req, tx, id);
+        const { conv, facts } = await guards.readableChat(req, tx, id);
         const [gen] = await tx
-          .select({ id: aiGenerations.id, status: aiGenerations.status })
+          .select({
+            id: aiGenerations.id,
+            status: aiGenerations.status,
+            requesterUserId: aiGenerations.requesterUserId,
+          })
           .from(aiGenerations)
           .where(and(eq(aiGenerations.id, gid), eq(aiGenerations.conversationId, conv.id)))
           .limit(1);
         if (!gen) throw notFound(GENERATION_NOT_FOUND);
+        if (gen.requesterUserId !== authOf(req).userId && !(await manages(req, tx, facts))) {
+          throw forbidden(
+            "Only the person who asked, or the chat's owner, can stop this answer",
+            "not_generation_requester",
+          );
+        }
         if (gen.status !== "running") return { status: gen.status };
         const first = await core.bus.pub.set(stopAuditedKey(gen.id), "1", {
           NX: true,
@@ -156,12 +169,16 @@ export async function registerGenerationRoutes(
       const auth = authOf(req);
       const body = req.body;
       const out = await core.db.withTenant(tenant(req), async (tx) => {
-        const conv = await ownedChat(req, tx, req.params.id);
+        const { conv, facts } = await guards.writableChat(req, tx, req.params.id);
         // An archived chat opens read-only (05-10).
         refuseArchived(conv);
         const topic = convTopic(conv.id);
         // Serializes with sends and other regenerates of this chat.
         await lockNextSeq(tx, topic);
+        // Shared chats (06-06, P-08): queued messages are answered first; regenerate cannot jump the queue.
+        if ((await isMultiplayer(tx, conv.id)) && (await pendingCount(tx, conv.id)) > 0) {
+          throw conflict("Queued messages are answered first", "queue_pending");
+        }
         const [busy] = await tx
           .select({ id: aiGenerations.id })
           .from(aiGenerations)
@@ -210,6 +227,13 @@ export async function registerGenerationRoutes(
           .orderBy(desc(messages.seq))
           .limit(1);
         if (!prev || !userRow) throw conflict("There is no answer to regenerate", "nothing_to_regenerate");
+        // P-04: the owner, or whoever asked for this answer's latest attempt; the caller pays (P-07).
+        if (prev.requesterUserId !== auth.userId && !(await manages(req, tx, facts))) {
+          throw forbidden(
+            "Only the person who asked, or the chat's owner, can regenerate this answer",
+            "not_answer_requester",
+          );
+        }
 
         const ref =
           body.model ??
@@ -279,10 +303,15 @@ export async function registerGenerationRoutes(
           .where(eq(aiChats.conversationId, conv.id))
           .returning();
         if (!chat) throw notFound(NOT_FOUND);
-        const summary = chatSummary(conv, chat, { generating: true, gateway });
-        await core.realtime.appendEvent(tx, `user:${chat.ownerUserId}`, EventTypes.aiChatUpdated, {
-          chat: summary,
-        });
+        // Every participant's sidebar shows the answer running again (06-08); the response carries the caller's view.
+        const heard = await emitChatUpdated(core, tx, conv, chat, { generating: true, gateway });
+        const summary =
+          heard.get(auth.userId) ??
+          chatSummary(conv, chat, {
+            generating: true,
+            gateway,
+            view: await viewOf(tx, chat, chat.ownerUserId),
+          });
         // Ids, backend, provider, model and attempt only: never a body.
         await core.audit.record(tx, {
           action: "ai_chat.regenerated",
@@ -301,7 +330,14 @@ export async function registerGenerationRoutes(
         const dir = await directoryOf(tx, [userRow.authorId ?? ""]);
         const files = (await attachmentsForMessages(tx, [userRow.id])).get(userRow.id) ?? [];
         const response: SendAiMessageResponse = {
-          chat: summary,
+          chat:
+            auth.userId === chat.ownerUserId
+              ? summary
+              : chatSummary(conv, chat, {
+                  generating: true,
+                  gateway,
+                  view: await viewOf(tx, chat, auth.userId),
+                }),
           userMessage: aiMessage(userRow, dir, undefined, files),
           assistantMessage,
           generation,

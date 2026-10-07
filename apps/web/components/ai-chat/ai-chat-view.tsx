@@ -1,14 +1,16 @@
 "use client";
 
-import type { AiChatTools, AiModelOption, SendAiMessageResponse } from "@ocw/contracts";
+import type { AiChatTools, AiModelOption, AiParticipant, SendAiMessageResponse } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
-import { Archive, MessageCircleQuestion, Share2, SlidersHorizontal } from "lucide-react";
+import { Archive, Bot, Eye, Lock, MessageCircleQuestion, Share2, SlidersHorizontal } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DropZone } from "@/components/chat/attachments/drop-zone";
-import { attachmentLimitsHint } from "@/components/chat/composer";
+import { attachmentLimitsHint, type MentionCandidate } from "@/components/chat/composer";
+import { TypingIndicator } from "@/components/chat/typing";
+import { dirKey, useOrgDirectory } from "@/components/chat/use-chat-directory";
 import { EmptyState } from "@/components/common/empty-state";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -16,6 +18,7 @@ import { clearAiChatModel } from "@/lib/ai-chat-model-store";
 import {
   createAiChat,
   createAiDraft,
+  isPosted,
   newClientMessageId,
   primeAiChat,
   sendAiMessage,
@@ -25,15 +28,21 @@ import {
   useAiChatSettingsLive,
   useAiChatSummary,
   useAiModels,
+  useAiParticipants,
   useAiPreferences,
 } from "@/lib/ai-chat-queries";
 import { errorMessage, isApiError } from "@/lib/api";
 import { useAttachmentsConfig } from "@/lib/attachment-queries";
+import { useMe } from "@/lib/queries";
+import { AddAgentDialog } from "./add-agent-dialog";
 import { AiChatHeader, AiChatMenuItem, AiChatPlainHeader } from "./ai-chat-header";
 import { AiComposer, type AiComposerApi, type AiSendFiles } from "./ai-composer";
 import { AiEmptyState } from "./ai-empty-state";
+import { AiChatPeopleContext } from "./ai-message";
 import { AiMessageList } from "./ai-message-list";
 import { ChatSettingsSheet } from "./chat-settings-sheet";
+import { AiChatParticipants } from "./participants";
+import { QueueChip } from "./queue-chip";
 import { ShareDialog } from "./share-dialog";
 
 /**
@@ -103,20 +112,26 @@ function NewChat() {
   }, []);
 
   async function onSend(body: string, m: AiModelOption, tools: AiChatTools, files: AiSendFiles) {
-    let res: SendAiMessageResponse;
+    let res: SendAiMessageResponse | null;
+    let chatId: string;
     try {
       const base = { clientMessageId: newClientMessageId(), body, model: m.ref, tools };
-      res =
-        draft.current || files.ids.length > 0
-          ? await sendAiMessage(await ensureDraft(), { ...base, attachmentIds: files.ids })
-          : await createAiChat(base);
+      if (draft.current || files.ids.length > 0) {
+        // A draft is the member's own solo chat: always 201 (the 202 of a shared chat cannot happen here).
+        const sent = await sendAiMessage(await ensureDraft(), { ...base, attachmentIds: files.ids });
+        res = isPosted(sent) ? null : sent;
+        chatId = sent.chat.id;
+      } else {
+        res = await createAiChat(base);
+        chatId = res.chat.id;
+      }
     } catch (err) {
       sendFailed(err);
     }
-    primeAiChat(res);
+    if (res) primeAiChat(res);
     // The created chat's lastModel carries the pick; the next New chat starts from the default again.
     clearAiChatModel(NEW_CHAT_KEY);
-    router.replace(`/chat/ai/${res.chat.id}`);
+    router.replace(`/chat/ai/${chatId}`);
   }
 
   return (
@@ -147,21 +162,34 @@ function NewChat() {
 function ExistingChat({ chatId }: { chatId: string }) {
   const chat = useAiChat(chatId);
   const models = useAiModels();
+  const me = useMe();
   // A title generated or typed after the snapshot, or an archive, arrives live as the chat's latest summary.
   const live = useAiChatSummary(chatId);
   // Settings saved in the chat settings sheet after the snapshot (05-11).
   const liveSettings = useAiChatSettingsLive(chatId);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
+  const [addAgentOpen, setAddAgentOpen] = useState(false);
   const composer = useRef<AiComposerApi | null>(null);
   const snapshotChat = chat.snapshot?.chat;
   const detail = snapshotChat ? { ...snapshotChat, ...live, ...liveSettings } : snapshotChat;
-  const writing = chat.messages.findLast((m) => m.authorKind === "agent" && m.status === "streaming");
+  const writing = chat.messages.findLast(
+    (m) => m.authorKind === "agent" && m.authorId === null && m.status === "streaming",
+  );
   const busy = writing !== undefined;
-  // The generation to stop: the streaming answer's, else the snapshot's running one.
+  // The chat takes turns among several people (06-11): shared, or the server keeps a queue for it (P-08).
+  const multiplayer = detail?.shared === true || chat.queue !== null;
+  // The generation to stop: the queue's running one (multiplayer), else the streaming answer's, else the snapshot's.
   const runningId =
+    (multiplayer ? chat.queue?.running?.generationId : undefined) ??
     writing?.generation?.id ??
     (chat.snapshot?.running?.messageId === writing?.id ? chat.snapshot?.running?.generationId : undefined);
+  const viewerId = me.data?.user.id ?? null;
+  const participants = useAiParticipants(chatId, multiplayer && !chat.lost);
+  const names = new Map<string, string>();
+  for (const p of participants.data?.participants ?? []) names.set(p.id, p.displayName);
+  for (const m of chat.messages) if (m.authorId && m.author) names.set(m.authorId, m.author.displayName);
+  const nameOf = (id: string) => names.get(id) ?? null;
 
   async function onStop() {
     if (!runningId) return;
@@ -173,20 +201,47 @@ function ExistingChat({ chatId }: { chatId: string }) {
     }
   }
 
-  async function onSend(body: string, m: AiModelOption, tools: AiChatTools, files: AiSendFiles) {
+  async function onSend(
+    body: string,
+    m: AiModelOption,
+    tools: AiChatTools,
+    files: AiSendFiles,
+    askAi?: boolean,
+  ) {
     try {
-      chat.applySent(
-        await sendAiMessage(chatId, {
+      const res = await sendAiMessage(
+        chatId,
+        {
           clientMessageId: newClientMessageId(),
           body,
           model: m.ref,
           tools,
           ...(files.ids.length > 0 ? { attachmentIds: files.ids } : {}),
-        }),
+          ...(askAi !== undefined ? { askAi } : {}),
+        },
+        { multiplayer },
       );
+      if (isPosted(res)) chat.applyPosted(res);
+      else chat.applySent(res);
     } catch (err) {
       sendFailed(err);
     }
+  }
+
+  if (chat.lost) {
+    return (
+      <Frame title="AI chat">
+        <EmptyState
+          icon={Lock}
+          title="You no longer have access to this chat."
+          description="Its owner changed who can see it. Ask them if you need it back."
+        >
+          <Link href="/chat/ai" className={buttonVariants({ variant: "outline" })} data-testid="ai-lost-back">
+            Back to AI chats
+          </Link>
+        </EmptyState>
+      </Frame>
+    );
   }
 
   if (chat.notFound) {
@@ -236,32 +291,69 @@ function ExistingChat({ chatId }: { chatId: string }) {
     );
   }
 
+  // Owner-only actions follow the server's decisions for this viewer (P-04): a grantee sees none of them.
+  const canManage = detail?.viewerCan.includes("ai_chat.manage") ?? false;
+  const canShare = detail?.viewerCan.includes("ai_chat.share") ?? false;
+  // A view grant reads only (P-04): no composer, no files, no regenerate. Until the detail loads, Phase 5 behaviour.
+  const canUse = detail ? detail.viewerCan.includes("ai_chat.use") : true;
+  const people = { viewerId, shared: detail?.shared === true, multiplayer, nameOf };
+  // Stop belongs to the running request's author and to whoever manages the chat (06-06; the API enforces it too).
+  const canStop = canManage || (!!viewerId && chat.queue?.running?.requesterUserId === viewerId);
+  // D-01 / T-06-03-01: a grantee starts on their own default model, never on the owner's last one (that may be the
+  // owner's plan); the owner keeps the Phase 5 rule (the chat's last model first).
+  const grantee = detail?.access !== undefined && detail.access !== "owner";
+  const preferred = grantee ? [models.data?.defaultRef] : [detail?.lastModel, models.data?.defaultRef];
+
   return (
     <Frame
       header={
         detail ? (
           <AiChatHeader
             chat={detail}
+            viewerCan={detail.viewerCan}
+            participants={
+              <AiChatParticipants
+                chatId={chatId}
+                canManage={canManage}
+                enabled={multiplayer}
+                onManageAccess={canShare ? () => setShareOpen(true) : undefined}
+                onAddAgent={canManage && !detail.archived ? () => setAddAgentOpen(true) : undefined}
+              />
+            }
             extraMenuItems={
-              <>
-                <AiChatMenuItem
-                  icon={<SlidersHorizontal />}
-                  testId="ai-chat-menu-settings"
-                  onSelect={() => setSettingsOpen(true)}
-                >
-                  Chat settings
-                </AiChatMenuItem>
-                {/* A read-only snapshot link for colleagues in the organization (05-13), owner with ai_chat.share. */}
-                {detail.viewerCan.includes("ai_chat.share") ? (
-                  <AiChatMenuItem
-                    icon={<Share2 />}
-                    testId="ai-chat-menu-share"
-                    onSelect={() => setShareOpen(true)}
-                  >
-                    Share
-                  </AiChatMenuItem>
-                ) : null}
-              </>
+              canManage || canShare ? (
+                <>
+                  {/* Agents join from here too while the chat is still private (06-12, AGENT-02). */}
+                  {canManage && !detail.archived ? (
+                    <AiChatMenuItem
+                      icon={<Bot />}
+                      testId="ai-chat-menu-add-agent"
+                      onSelect={() => setAddAgentOpen(true)}
+                    >
+                      Add an agent
+                    </AiChatMenuItem>
+                  ) : null}
+                  {canManage ? (
+                    <AiChatMenuItem
+                      icon={<SlidersHorizontal />}
+                      testId="ai-chat-menu-settings"
+                      onSelect={() => setSettingsOpen(true)}
+                    >
+                      Chat settings
+                    </AiChatMenuItem>
+                  ) : null}
+                  {/* People and a read-only snapshot link (05-13, 06-03), owner with ai_chat.share. */}
+                  {canShare ? (
+                    <AiChatMenuItem
+                      icon={<Share2 />}
+                      testId="ai-chat-menu-share"
+                      onSelect={() => setShareOpen(true)}
+                    >
+                      Share
+                    </AiChatMenuItem>
+                  ) : null}
+                </>
+              ) : null
             }
           />
         ) : (
@@ -269,30 +361,72 @@ function ExistingChat({ chatId }: { chatId: string }) {
         )
       }
     >
-      {detail ? <ChatSettingsSheet chat={detail} open={settingsOpen} onOpenChange={setSettingsOpen} /> : null}
-      {detail ? <ShareDialog chatId={chatId} open={shareOpen} onOpenChange={setShareOpen} /> : null}
-      <ChatDropZone enabled={!detail?.archived} composer={composer}>
-        <AiMessageList
+      {detail && canManage ? (
+        <ChatSettingsSheet chat={detail} open={settingsOpen} onOpenChange={setSettingsOpen} />
+      ) : null}
+      {detail && canShare ? (
+        <ShareDialog
           chatId={chatId}
-          messages={chat.messages}
-          textOf={chat.textOf}
-          onRegenerated={chat.applySent}
-          live={chat.live}
+          open={shareOpen}
+          onOpenChange={setShareOpen}
+          viewerCan={detail.viewerCan}
         />
+      ) : null}
+      {detail && canManage ? (
+        <AddAgentDialog chatId={chatId} open={addAgentOpen} onOpenChange={setAddAgentOpen} />
+      ) : null}
+      <ChatDropZone enabled={!detail?.archived && canUse} composer={composer}>
+        <AiChatPeopleContext.Provider value={people}>
+          <AiMessageList
+            chatId={chatId}
+            messages={chat.messages}
+            textOf={chat.textOf}
+            onRegenerated={canUse ? chat.applySent : undefined}
+            // 06-03 deferred / 06-06: in a multiplayer chat only the answer's requester or a manager may regenerate.
+            canRegenerate={
+              multiplayer
+                ? (a) => canManage || (!!viewerId && a.generation?.requesterUserId === viewerId)
+                : undefined
+            }
+            regenerateBlocked={multiplayer && (chat.queue?.pending.length ?? 0) > 0}
+            live={chat.live}
+          />
+        </AiChatPeopleContext.Provider>
+        {multiplayer ? (
+          <div className="mx-auto w-full max-w-3xl sm:px-2">
+            <TypingIndicator typers={chat.typers} />
+          </div>
+        ) : null}
+        {multiplayer && chat.queue && !detail?.archived ? (
+          <QueueChip
+            queue={chat.queue}
+            names={(id) => nameOf(id) ?? "Someone"}
+            viewerId={viewerId}
+            canStop={canStop}
+            onStop={onStop}
+          />
+        ) : null}
         {detail?.archived ? (
-          <ArchivedNotice chatId={chatId} />
+          <ArchivedNotice chatId={chatId} canUnarchive={canManage} />
+        ) : !canUse ? (
+          <ViewOnlyNotice owner={detail?.owner?.displayName ?? "the owner"} />
         ) : (
-          <AiComposer
+          <ChatComposer
             chatKey={chatId}
             chat={detail ?? null}
             initialTools={detail?.settings.tools}
             models={models.data?.models}
-            preferred={[detail?.lastModel, models.data?.defaultRef]}
+            preferred={preferred}
             modelsLoading={models.isPending}
-            busy={busy}
+            // Multiplayer (06-11, D-05): Send stays while an answer runs (the server queues); Stop is in the chip.
+            busy={multiplayer ? false : busy}
             onSend={onSend}
-            onStop={runningId ? onStop : undefined}
+            onStop={!multiplayer && runningId ? onStop : undefined}
+            onTyping={multiplayer ? chat.sendTyping : undefined}
             uploadTarget={chatId}
+            multiplayer={multiplayer}
+            participants={participants.data?.participants}
+            viewerId={viewerId}
             apiRef={composer}
             // Arriving from New chat's first send: the keyboard stays in the composer.
             autoFocus={chat.sentHere}
@@ -303,8 +437,73 @@ function ExistingChat({ chatId }: { chatId: string }) {
   );
 }
 
-/** An archived chat opens read-only (05-10): the composer's place explains it and offers the way back. */
-function ArchivedNotice({ chatId }: { chatId: string }) {
+type AiComposerProps = React.ComponentProps<typeof AiComposer>;
+
+/**
+ * The composer of an open chat: solo chats get the Phase 5 composer untouched; a multiplayer chat (06-11) adds the Ask
+ * AI toggle and @ suggestions over its participants (06-10 `/participants`, never the viewer), with handles from the
+ * org directory (people) or the agent itself.
+ */
+function ChatComposer({
+  multiplayer,
+  participants,
+  viewerId,
+  ...props
+}: AiComposerProps & {
+  multiplayer: boolean;
+  participants: AiParticipant[] | undefined;
+  viewerId: string | null;
+}) {
+  if (!multiplayer) return <AiComposer {...props} />;
+  return <MultiplayerComposer {...props} participants={participants} viewerId={viewerId} />;
+}
+
+function MultiplayerComposer({
+  participants,
+  viewerId,
+  ...props
+}: AiComposerProps & { participants: AiParticipant[] | undefined; viewerId: string | null }) {
+  const directory = useOrgDirectory();
+  const candidates = useMemo(() => {
+    const out: MentionCandidate[] = [];
+    for (const p of participants ?? []) {
+      if (p.kind === "user" && p.id === viewerId) continue;
+      const handle = p.handle ?? directory.byKey.get(dirKey(p.kind, p.id))?.handle;
+      if (!handle) continue;
+      out.push({
+        kind: p.kind,
+        id: p.id,
+        displayName: p.displayName,
+        handle,
+        avatarUrl: p.avatarUrl,
+        subtitle: null,
+        inChannel: true,
+      });
+    }
+    return out;
+  }, [participants, viewerId, directory.byKey]);
+  return <AiComposer {...props} multiplayer mentionCandidates={candidates} />;
+}
+
+/** A view grant (06-03, P-04): the composer's place says the chat is read-only and whom to ask for more. */
+function ViewOnlyNotice({ owner }: { owner: string }) {
+  return (
+    <div className="mx-auto w-full max-w-3xl shrink-0 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6 sm:pb-5">
+      <div className="flex items-center gap-3 rounded-2xl border bg-muted/40 px-4 py-3">
+        <Eye aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+        <p data-testid="ai-view-only-notice" className="min-w-0 flex-1 text-[13.5px] text-muted-foreground">
+          You can view this chat. Ask {owner} for chat access to write.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * An archived chat opens read-only (05-10): the composer's place explains it and, for its owner, offers the way back
+ * (only `ai_chat.manage` may unarchive, 06-03).
+ */
+function ArchivedNotice({ chatId, canUnarchive = true }: { chatId: string; canUnarchive?: boolean }) {
   const qc = useQueryClient();
   const [pending, setPending] = useState(false);
   async function unarchive() {
@@ -327,9 +526,11 @@ function ArchivedNotice({ chatId }: { chatId: string }) {
         <p className="min-w-0 flex-1 text-[13.5px] text-muted-foreground">
           This chat is archived. You can read it, but not send new messages.
         </p>
-        <Button size="sm" disabled={pending} onClick={() => void unarchive()} data-testid="ai-unarchive">
-          Unarchive to continue
-        </Button>
+        {canUnarchive ? (
+          <Button size="sm" disabled={pending} onClick={() => void unarchive()} data-testid="ai-unarchive">
+            Unarchive to continue
+          </Button>
+        ) : null}
       </div>
     </div>
   );

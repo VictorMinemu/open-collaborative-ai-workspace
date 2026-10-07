@@ -70,6 +70,8 @@ export interface MentionPayload {
     tools: string[];
     memory?: Array<{ id: string; text: string; createdAt: string }>;
     now?: { iso: string; timeZone: string; local: string } | null;
+    /** AI chat deliveries (06-10): tools withheld from this turn and why. */
+    withheld?: Array<{ tool: string; reason: string }>;
   };
 }
 
@@ -180,6 +182,8 @@ export function identityReply(m: MentionPayload): string {
 export class FakeCellPlugin {
   readonly events: FakeCellEvent[] = [];
   readonly replies: Array<{ messageId: string; created: boolean; mention: MentionPayload }> = [];
+  /** Every `POST /tool-calls` this fake cell made (06-12: a withheld tool never reaches the gate). */
+  readonly toolCallRequests: Array<{ eventId: string; tool: string }> = [];
   snapshot: FakeCellSnapshot | null = null;
   lastSeq = 0;
   /** Subscription credentials this fake cell "holds" (provider → account), like OpenClaw's auth store. */
@@ -238,8 +242,9 @@ export class FakeCellPlugin {
   }
 
   async reply(m: MentionPayload, text: string) {
-    // Direct conversations are flat (D-04): like apps/openclaw-channel, reply and type with no thread root.
-    const threadRootMessageId = m.conversation.kind === "dm" ? null : m.thread.rootMessageId;
+    // DMs and AI chats are flat (D-04, P-10): like apps/openclaw-channel, reply and type with no thread root.
+    const flat = m.conversation.kind === "dm" || m.conversation.kind === "ai_chat";
+    const threadRootMessageId = flat ? null : m.thread.rootMessageId;
     await this.request("POST", "/typing", {
       agentId: m.agent.id,
       conversationId: m.conversation.id,
@@ -256,6 +261,35 @@ export class FakeCellPlugin {
     if (res.status !== 200) throw new Error(`POST /messages → ${res.status} ${JSON.stringify(res.body)}`);
     this.replies.push({ ...res.body, mention: m });
     return res.body;
+  }
+
+  /**
+   * Posts a typed Agent Card (06-13, `POST /agent-channel/v1/cards`) as `input.agentId`, like the real plugin's card
+   * tool: the card lands where the agent may post; 201 when created, 200 on an idempotent retry.
+   */
+  async postCard(input: {
+    agentId: string;
+    conversationId: string;
+    threadRootId: string | null;
+    inReplyToMessageId?: string;
+    idempotencyKey: string;
+    card: Record<string, unknown>;
+  }): Promise<{ messageId: string; version: number }> {
+    const res = await this.request<{ messageId: string; version: number }>("POST", "/cards", input);
+    if (res.status !== 201 && res.status !== 200) {
+      throw new Error(`POST /cards → ${res.status} ${JSON.stringify(res.body)}`);
+    }
+    return { messageId: res.body.messageId, version: res.body.version };
+  }
+
+  /** Updates one of its cards in place (`PATCH /agent-channel/v1/cards/:messageId`, optimistic version). */
+  async patchCard(
+    messageId: string,
+    body: { agentId: string; patch: Record<string, unknown> & { expectedVersion: number } },
+  ): Promise<{ version: number }> {
+    const res = await this.request<{ version: number }>("PATCH", `/cards/${messageId}`, body);
+    if (res.status !== 200) throw new Error(`PATCH /cards → ${res.status} ${JSON.stringify(res.body)}`);
+    return { version: res.body.version };
   }
 
   async start(): Promise<void> {
@@ -342,7 +376,15 @@ export class FakeCellPlugin {
     for (const call of calls) {
       const name = offered.find((t) => t === call.tool || t.endsWith(`__${call.tool}`));
       if (!name) {
-        lines.push(`Tool ${call.tool}: not offered`);
+        // Like apps/openclaw-channel's "Tools withheld in this conversation" block (06-10): say why, for whom.
+        const withheld = m.turn?.withheld?.find(
+          (w) => w.tool === call.tool || w.tool.endsWith(`__${call.tool}`),
+        );
+        lines.push(
+          withheld
+            ? `Tool ${call.tool}: not available for ${m.message.author.displayName} (${withheld.reason})`
+            : `Tool ${call.tool}: not offered`,
+        );
         continue;
       }
       if (name === "ocw_memory_save") {
@@ -361,6 +403,7 @@ export class FakeCellPlugin {
       const params: { query?: string; url?: string } = {};
       if (typeof call.args.query === "string") params.query = call.args.query;
       if (typeof call.args.url === "string") params.url = call.args.url;
+      this.toolCallRequests.push({ eventId: m.eventId, tool: name });
       const res = await this.request<{ callId?: string; allowed?: boolean; reason?: string | null }>(
         "POST",
         "/tool-calls",

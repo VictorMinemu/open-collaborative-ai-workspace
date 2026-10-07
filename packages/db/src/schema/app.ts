@@ -407,7 +407,18 @@ export const notifications = appSchema.table(
     id: id(),
     organizationId: orgId(),
     userId: uuid("user_id").notNull(),
-    kind: text("kind", { enum: ["mention", "channel", "here", "dm", "group_dm", "thread_reply"] }).notNull(),
+    kind: text("kind", {
+      enum: [
+        "mention",
+        "channel",
+        "here",
+        "dm",
+        "group_dm",
+        "thread_reply",
+        "ai_chat_shared",
+        "card_updated",
+      ],
+    }).notNull(),
     conversationId: uuid("conversation_id")
       .notNull()
       .references(() => conversations.id, { onDelete: "cascade" }),
@@ -428,7 +439,7 @@ export const notifications = appSchema.table(
       .where(sql`read_at is null`),
     check(
       "notifications_kind_check",
-      sql`${t.kind} in ('mention','channel','here','dm','group_dm','thread_reply')`,
+      sql`${t.kind} in ('mention','channel','here','dm','group_dm','thread_reply','ai_chat_shared','card_updated')`,
     ),
     check("notifications_actor_kind_check", sql`${t.actorKind} in ('user','agent','system')`),
   ],
@@ -552,14 +563,21 @@ export const agents = appSchema.table(
     ownerUserId: uuid("owner_user_id"),
     /** D-06 per-bot capability toggles (partial; defaults are filled in code by the capability model). */
     capabilities: jsonb("capabilities").$type<Record<string, unknown>>().notNull().default({}),
+    /**
+     * Phase 6 (AGENT-01): the department, team or project a shared bot belongs to; null = the organization.
+     * RESTRICT: a unit with bots cannot be deleted, so a unit bot never silently widens to the whole organization.
+     */
+    unitId: uuid("unit_id").references(() => orgUnits.id, { onDelete: "restrict" }),
   },
   (t) => [
     uniqueIndex("agents_org_username_uq").on(t.organizationId, t.username).where(sql`deleted_at is null`),
     index("agents_owner_idx")
       .on(t.organizationId, t.ownerUserId)
       .where(sql`scope = 'personal' and deleted_at is null`),
+    index("agents_unit_idx").on(t.organizationId, t.unitId).where(sql`deleted_at is null`),
     check("agents_scope_check", sql`${t.scope} in ('team','personal')`),
-    check("agents_owner_scope_check", sql`(${t.scope} = 'personal') = (${t.ownerUserId} is not null)`),
+    // Phase 6 (AGENT-01): a personal bot must have an owner; a shared bot may have one (its accountable owner).
+    check("agents_owner_scope_check", sql`(${t.scope} <> 'personal' or ${t.ownerUserId} is not null)`),
   ],
 );
 
@@ -1393,4 +1411,158 @@ export const aiChatShares = appSchema.table(
     revokedAt: ts("revoked_at"),
   },
   (t) => [index("ai_chat_shares_conversation_idx").on(t.organizationId, t.conversationId)],
+);
+
+// ---------------------------------------------------------------- multiplayer AI chat (Phase 6)
+
+/**
+ * Sharing an AI chat in place (D-03, MULTI-01): one row per subject (a user, a unit and so its subtree, or the
+ * whole organization). Grants decide access; `conversation_members` rows are participation only (P-03). Nothing is
+ * copied: the chat's messages, files and settings stay where they are. At most one active grant per (chat, subject);
+ * a revoked row keeps the history and frees the slot.
+ */
+export const aiChatGrants = appSchema.table(
+  "ai_chat_grants",
+  {
+    id: id(),
+    organizationId: orgId(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    subjectKind: text("subject_kind", { enum: ["user", "unit", "org"] }).notNull(),
+    /** The user or unit id; null exactly when `subject_kind = 'org'`. */
+    subjectId: uuid("subject_id"),
+    level: text("level", { enum: ["chat", "view"] }).notNull(),
+    grantedBy: uuid("granted_by").notNull(),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+    revokedAt: ts("revoked_at"),
+    revokedBy: uuid("revoked_by"),
+  },
+  (t) => [
+    uniqueIndex("ai_chat_grants_active_uq")
+      .on(
+        t.conversationId,
+        t.subjectKind,
+        sql`coalesce(${t.subjectId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
+      )
+      .where(sql`revoked_at is null`),
+    index("ai_chat_grants_subject_idx")
+      .on(t.organizationId, t.subjectKind, t.subjectId)
+      .where(sql`revoked_at is null`),
+    index("ai_chat_grants_conv_idx").on(t.organizationId, t.conversationId).where(sql`revoked_at is null`),
+    check("ai_chat_grants_subject_kind_check", sql`${t.subjectKind} in ('user','unit','org')`),
+    check("ai_chat_grants_subject_check", sql`(${t.subjectKind} = 'org') = (${t.subjectId} is null)`),
+    check("ai_chat_grants_level_check", sql`${t.level} in ('chat','view')`),
+  ],
+);
+
+/**
+ * Per-message record of a human or persona message in an AI chat (MULTI-02, P-07, P-08): how its author had access,
+ * whether it asks the model, the author's own model (who pays), and which generation answered it. The queue is
+ * derived from these rows (addressed, unanswered, not skipped), never a separate store.
+ */
+export const aiMessageContext = appSchema.table(
+  "ai_message_context",
+  {
+    messageId: uuid("message_id")
+      .primaryKey()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    organizationId: orgId(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    authorKind: text("author_kind", { enum: ["user", "agent"] }).notNull(),
+    access: text("access", { enum: ["owner", "grant", "agent_member"] }).notNull(),
+    grantId: uuid("grant_id").references(() => aiChatGrants.id, { onDelete: "set null" }),
+    level: text("level", { enum: ["owner", "chat"] }),
+    addressed: boolean("addressed").notNull().default(false),
+    answeredByGenerationId: uuid("answered_by_generation_id").references(() => aiGenerations.id, {
+      onDelete: "set null",
+    }),
+    skipReason: text("skip_reason"),
+    /** The author's `ModelRef` for this message (P-07: the requester's own model). */
+    model: jsonb("model").$type<{ backend: string; provider: string; modelId: string }>(),
+    tools: jsonb("tools").$type<Record<string, unknown>>().notNull().default({}),
+    shared: boolean("shared").notNull().default(false),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("ai_message_context_queue_idx")
+      .on(t.organizationId, t.conversationId, t.createdAt)
+      .where(sql`addressed and answered_by_generation_id is null and skip_reason is null`),
+    index("ai_message_context_answered_idx").on(t.answeredByGenerationId),
+    check("ai_message_context_author_kind_check", sql`${t.authorKind} in ('user','agent')`),
+    check("ai_message_context_access_check", sql`${t.access} in ('owner','grant','agent_member')`),
+    check("ai_message_context_level_check", sql`${t.level} is null or ${t.level} in ('owner','chat')`),
+  ],
+);
+
+/**
+ * Agent Cards (AGENT-04, P-11), keyed by their message: the message body is the plain-text summary (search and
+ * notifications keep working; card JSON never enters `search_tsv`). Only the posting agent updates a card, with
+ * optimistic `version`; one decision per card.
+ */
+export const messageCards = appSchema.table(
+  "message_cards",
+  {
+    messageId: uuid("message_id")
+      .primaryKey()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    organizationId: orgId(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id),
+    kind: text("kind", {
+      enum: ["work_zone", "approval", "report", "artifact", "automation", "deployment", "pr", "generic"],
+    }).notNull(),
+    title: text("title").notNull(),
+    fields: jsonb("fields").$type<Array<{ label: string; value: string }>>().notNull().default([]),
+    status: text("status", {
+      enum: ["info", "pending", "running", "succeeded", "failed", "cancelled"],
+    }).notNull(),
+    actions: jsonb("actions").$type<Array<Record<string, unknown>>>().notNull().default([]),
+    version: integer("version").notNull().default(1),
+    decision: text("decision", { enum: ["approved", "denied"] }),
+    decidedBy: uuid("decided_by"),
+    decidedAt: ts("decided_at"),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("message_cards_conv_idx").on(t.organizationId, t.conversationId),
+    check(
+      "message_cards_kind_check",
+      sql`${t.kind} in ('work_zone','approval','report','artifact','automation','deployment','pr','generic')`,
+    ),
+    check(
+      "message_cards_status_check",
+      sql`${t.status} in ('info','pending','running','succeeded','failed','cancelled')`,
+    ),
+    check("message_cards_title_len_check", sql`char_length(${t.title}) <= 200`),
+    check(
+      "message_cards_decision_check",
+      sql`${t.decision} is null or ${t.decision} in ('approved','denied')`,
+    ),
+  ],
+);
+
+/** Who follows a card (P-11): followers get a `card_updated` notification when its status changes. */
+export const messageCardFollows = appSchema.table(
+  "message_card_follows",
+  {
+    organizationId: orgId(),
+    messageId: uuid("message_id")
+      .notNull()
+      .references(() => messageCards.messageId, { onDelete: "cascade" }),
+    userId: uuid("user_id").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.messageId, t.userId] }),
+    index("message_card_follows_user_idx").on(t.organizationId, t.userId),
+  ],
 );

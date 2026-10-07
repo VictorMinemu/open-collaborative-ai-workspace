@@ -2,6 +2,8 @@ import type {
   AiChatSnapshot,
   AiDeltaEvent,
   AiGeneration,
+  AiPostedMessageResponse,
+  AiQueueState,
   Message,
   SendAiMessageResponse,
 } from "@ocw/contracts";
@@ -368,5 +370,277 @@ describe("reduceAiChat: regenerate (05-06)", () => {
     s = reduceAiChat(s, { kind: "sent", response: regenerated() });
     expect(s.messages.find((m) => m.id === ANSWER)?.status).toBe("completed");
     expect(textOf(s)).toBe("Fresh");
+  });
+});
+
+// ---------------------------------------------------------------- Phase 6: the one-generation queue (06-11, P-08)
+
+describe("reduceAiChat: multiplayer queue and addressing (06-11)", () => {
+  const VICTOR = "2b2b2b2b-0000-4000-8000-000000000001";
+  const ALEX = "2b2b2b2b-0000-4000-8000-000000000002";
+  const SAM = "2b2b2b2b-0000-4000-8000-000000000003";
+  const ASK = "3c3c3c3c-0000-4000-8000-000000000001";
+  const ALEX_MSG = "3c3c3c3c-0000-4000-8000-000000000002";
+  const SAM_MSG = "3c3c3c3c-0000-4000-8000-000000000003";
+  const GEN_A = "4d4d4d4d-0000-4000-8000-000000000001";
+  const GEN_B = "4d4d4d4d-0000-4000-8000-000000000002";
+  const COALESCED = "3c3c3c3c-0000-4000-8000-000000000004";
+
+  const addressing = (
+    status: NonNullable<Message["aiAddressing"]>["status"],
+    generationId: string | null = null,
+  ) => ({
+    addressed: status !== "not_addressed",
+    status,
+    skipReason: null,
+    generationId,
+  });
+  const victorAsks = message({
+    id: ASK,
+    seq: 1,
+    authorId: VICTOR,
+    body: "Kick off",
+    aiAddressing: addressing("answering", GEN_A),
+  });
+  const answerA = message({ id: ANSWER, seq: 2, authorKind: "agent", status: "streaming" });
+  const alexAsks = message({
+    id: ALEX_MSG,
+    seq: 4,
+    authorId: ALEX,
+    body: "And security?",
+    aiAddressing: addressing("queued"),
+  });
+  const samAsks = message({
+    id: SAM_MSG,
+    seq: 6,
+    authorId: SAM,
+    body: "And cost?",
+    aiAddressing: addressing("queued"),
+  });
+
+  const queueFrame = (seq: number, q: AiQueueState): TopicFrame => ({
+    op: "ev",
+    topic: `conv:${CHAT}`,
+    seq,
+    type: "ai.queue.updated",
+    data: { conversationId: CHAT, ...q },
+  });
+  const runningA: AiQueueState = {
+    running: { generationId: GEN_A, requesterUserId: VICTOR, respondingTo: [VICTOR] },
+    pending: [],
+  };
+  const withAlex: AiQueueState = { ...runningA, pending: [{ messageId: ALEX_MSG, authorId: ALEX }] };
+  const withBoth: AiQueueState = {
+    ...runningA,
+    pending: [
+      { messageId: ALEX_MSG, authorId: ALEX },
+      { messageId: SAM_MSG, authorId: SAM },
+    ],
+  };
+  const runningB: AiQueueState = {
+    running: { generationId: GEN_B, requesterUserId: ALEX, respondingTo: [ALEX, SAM] },
+    pending: [],
+  };
+  const multiplayer = (messages: Message[], lastSeq: number, queue: AiQueueState) =>
+    ({ ...snapshot(messages, lastSeq, ""), queue }) as AiChatSnapshot;
+  const statusOf = (s: AiChatState, id: string) => s.messages.find((m) => m.id === id)?.aiAddressing?.status;
+
+  it("ai.queue.updated replaces the queue state, and an older seq never brings an older queue back", () => {
+    let s = reduceAiChat(initialAiChatState(CHAT), {
+      kind: "snapshot",
+      snapshot: multiplayer([victorAsks, answerA], 2, runningA),
+    });
+    expect(s.queue).toEqual(runningA);
+    s = run(s, durable(4, "message.created", alexAsks), queueFrame(5, withAlex));
+    expect(s.queue).toEqual(withAlex);
+    // A replayed (older) queue frame is ignored.
+    s = run(s, queueFrame(3, runningA));
+    expect(s.queue).toEqual(withAlex);
+    // A snapshot read before the latest queue frame never steps the queue back.
+    s = reduceAiChat(s, { kind: "snapshot", snapshot: multiplayer([victorAsks, answerA], 2, runningA) });
+    expect(s.queue).toEqual(withAlex);
+    // A solo chat (Phase 5) has no queue at all.
+    const solo = reduceAiChat(initialAiChatState(CHAT), {
+      kind: "snapshot",
+      snapshot: snapshot([userMsg, streamingAnswer], 2, ""),
+    });
+    expect(solo.queue).toBeNull();
+  });
+
+  it("a message's aiAddressing moves queued → answering → answered as the queue events arrive", () => {
+    let s = reduceAiChat(initialAiChatState(CHAT), {
+      kind: "snapshot",
+      snapshot: multiplayer([victorAsks, answerA], 2, runningA),
+    });
+    s = run(s, durable(4, "message.created", alexAsks), queueFrame(5, withAlex));
+    expect(statusOf(s, ALEX_MSG)).toBe("queued");
+    s = run(s, durable(6, "message.created", samAsks), queueFrame(7, withBoth));
+    expect(statusOf(s, SAM_MSG)).toBe("queued");
+    // Víctor's answer ends; the coalesced turn starts on Alex's plan for both waiting messages.
+    s = run(
+      s,
+      durable(8, "message.updated", { ...answerA, status: "completed", body: "Done" }),
+      queueFrame(9, runningB),
+      durable(
+        10,
+        "message.created",
+        message({ id: COALESCED, seq: 10, authorKind: "agent", status: "streaming" }),
+      ),
+    );
+    expect(statusOf(s, ALEX_MSG)).toBe("answering");
+    expect(statusOf(s, SAM_MSG)).toBe("answering");
+    expect(s.messages.find((m) => m.id === SAM_MSG)?.aiAddressing?.generationId).toBe(GEN_B);
+    expect(statusOf(s, ASK)).toBe("answered");
+    s = run(s, queueFrame(11, { running: null, pending: [] }));
+    expect(statusOf(s, ALEX_MSG)).toBe("answered");
+    expect(statusOf(s, SAM_MSG)).toBe("answered");
+    expect(s.queue).toEqual({ running: null, pending: [] });
+  });
+
+  it("a replayed message.created never steps a message's addressing back (the 201 said answering)", () => {
+    let s = reduceAiChat(initialAiChatState(CHAT), {
+      kind: "snapshot",
+      snapshot: multiplayer([], 0, { running: null, pending: [] }),
+    });
+    const r: SendAiMessageResponse = {
+      chat: snapshot([], 0, null).chat,
+      userMessage: victorAsks,
+      assistantMessage: answerA,
+      generation: generation(GEN_A, "running"),
+    };
+    s = reduceAiChat(s, { kind: "sent", response: r });
+    expect(statusOf(s, ASK)).toBe("answering");
+    // The sender's own message.created still says queued (06-06): it must not flash back.
+    s = run(s, durable(1, "message.created", { ...victorAsks, aiAddressing: addressing("queued") }));
+    expect(statusOf(s, ASK)).toBe("answering");
+    // A skip is news, whatever was held.
+    s = run(
+      s,
+      durable(3, "message.updated", {
+        ...victorAsks,
+        aiAddressing: { addressed: true, status: "skipped", skipReason: "not_connected", generationId: null },
+      }),
+    );
+    expect(statusOf(s, ASK)).toBe("skipped");
+  });
+
+  it("a 202 posted message is inserted once with its addressing; its message.created is not a duplicate", () => {
+    let s = reduceAiChat(initialAiChatState(CHAT), {
+      kind: "snapshot",
+      snapshot: multiplayer([victorAsks, answerA], 2, runningA),
+    });
+    const posted: AiPostedMessageResponse = {
+      chat: snapshot([], 0, null).chat,
+      userMessage: { ...alexAsks, aiAddressing: undefined } as Message,
+      addressing: addressing("queued"),
+    };
+    s = reduceAiChat(s, { kind: "posted", response: posted });
+    expect(s.messages.filter((m) => m.id === ALEX_MSG)).toHaveLength(1);
+    expect(statusOf(s, ALEX_MSG)).toBe("queued");
+    // No assistant placeholder joins the list.
+    expect(s.messages.filter((m) => m.authorKind === "agent")).toHaveLength(1);
+    s = run(s, durable(4, "message.created", alexAsks));
+    s = reduceAiChat(s, { kind: "posted", response: posted });
+    expect(s.messages.filter((m) => m.id === ALEX_MSG)).toHaveLength(1);
+    expect(s.messages).toHaveLength(3);
+    // A message only for people: "Not sent to AI".
+    const forPeople: AiPostedMessageResponse = {
+      ...posted,
+      userMessage: message({ id: SAM_MSG, seq: 6, authorId: SAM, body: "@alex look" }),
+      addressing: addressing("not_addressed"),
+    };
+    s = reduceAiChat(s, { kind: "posted", response: forPeople });
+    expect(statusOf(s, SAM_MSG)).toBe("not_addressed");
+    // A posted message of another chat is ignored.
+    const other = reduceAiChat(s, {
+      kind: "posted",
+      response: { ...forPeople, chat: { ...forPeople.chat, id: ORG } },
+    });
+    expect(other).toBe(s);
+  });
+
+  it("a 201 keeps the Phase 5 streaming behaviour: both turns at once, deltas onto the answer", () => {
+    let s = initialAiChatState(CHAT);
+    s = reduceAiChat(s, {
+      kind: "sent",
+      response: {
+        chat: snapshot([], 0, null).chat,
+        userMessage: userMsg,
+        assistantMessage: streamingAnswer,
+        generation: generation(GEN, "running"),
+      },
+    });
+    expect(s.messages.map((m) => m.id)).toEqual([USER_MSG, ANSWER]);
+    s = run(s, delta(0, "Hi"), delta(2, " there"));
+    expect(textOf(s)).toBe("Hi there");
+    expect(s.queue).toBeNull();
+  });
+});
+
+describe("reduceAiChat: Agent Cards of personas (06-15)", () => {
+  const CARD_MSG = "1a2b3c4d-0000-4000-8000-000000000009";
+  const AGENT = "1a2b3c4d-0000-4000-8000-00000000000a";
+  const SAM = "1a2b3c4d-0000-4000-8000-00000000000b";
+  const card = (over: Partial<NonNullable<Message["card"]>> = {}): NonNullable<Message["card"]> => ({
+    kind: "approval",
+    title: "Deploy api v2.3",
+    fields: [],
+    status: "pending",
+    actions: [{ kind: "approve", label: "Approve" }],
+    version: 1,
+    decision: null,
+    updatedAt: AT,
+    ...over,
+  });
+  const personaCard = (c: NonNullable<Message["card"]>) =>
+    message({
+      id: CARD_MSG,
+      seq: 3,
+      authorKind: "agent",
+      authorId: AGENT,
+      body: "Approve the deploy?",
+      card: c,
+    });
+
+  it("a realtime update (no viewer fields) changes the card in place and keeps the viewer's following and viewerCan", () => {
+    let s = reduceAiChat(initialAiChatState(CHAT), {
+      kind: "snapshot",
+      snapshot: snapshot(
+        [userMsg, personaCard(card({ following: true, viewerCan: ["follow", "decide"] }))],
+        3,
+        null,
+      ),
+    });
+    s = run(s, durable(4, "message.updated", personaCard(card({ status: "running", version: 2 }))));
+    const shown = s.messages.find((m) => m.id === CARD_MSG)?.card;
+    expect(s.messages.filter((m) => m.id === CARD_MSG)).toHaveLength(1);
+    expect(shown).toMatchObject({
+      status: "running",
+      version: 2,
+      following: true,
+      viewerCan: ["follow", "decide"],
+    });
+  });
+
+  it("a decision someone else took removes decide from the viewer's capabilities", () => {
+    let s = reduceAiChat(initialAiChatState(CHAT), {
+      kind: "snapshot",
+      snapshot: snapshot(
+        [userMsg, personaCard(card({ following: false, viewerCan: ["follow", "decide"] }))],
+        3,
+        null,
+      ),
+    });
+    const decision = {
+      outcome: "approved" as const,
+      by: { kind: "user" as const, id: SAM, displayName: "Sam Lee" },
+      at: AT,
+    };
+    s = run(s, durable(4, "message.updated", personaCard(card({ decision }))));
+    expect(s.messages.find((m) => m.id === CARD_MSG)?.card).toMatchObject({
+      decision: { outcome: "approved" },
+      following: false,
+      viewerCan: ["follow"],
+    });
   });
 });

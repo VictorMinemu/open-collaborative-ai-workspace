@@ -338,6 +338,55 @@ describe("HTTP surface", () => {
     const body = await res.json();
     assert.equal(body.content[0].text.endsWith("[tools: 1 | t]"), true);
   });
+
+  // 06-03 (P-06): the API's multiplayer prompt (roster in the instructions, <turn_context> last) is answered by name.
+  const ROSTER =
+    'Shared conversation.\n<participants>\n- name="Víctor Ruiz" user_id="u1" role="admin" access="owner"\n- name="Alex Kim" user_id="u2" role="developer" access="chat"\n</participants>';
+  const TURN =
+    '<message from="Víctor Ruiz" user_id="u1" at="2026-10-07T10:00:00Z">\nWhat about cost?\n</message>\n\n<turn_context>\n<responding_to name="Víctor Ruiz" user_id="u1"/>\n</turn_context>';
+  const ATTRIBUTED = "Hi Víctor Ruiz! (participants: Alex Kim, Víctor Ruiz) Echo: What about cost?";
+
+  it("chat completions (non-stream): an attributed prompt answers the asker by name", async () => {
+    const res = await fetch(`${base}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "mock-1",
+        messages: [
+          { role: "developer", content: ROSTER },
+          { role: "user", content: TURN },
+        ],
+      }),
+    });
+    assert.equal((await res.json()).choices[0].message.content, ATTRIBUTED);
+  });
+
+  it("chat completions: a [[call]] directive in an attributed prompt still calls the tool first", async () => {
+    const res = await fetch(`${base}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "mock-1",
+        tools: [{ type: "function", function: { name: "echo", parameters: { type: "object" } } }],
+        messages: [
+          { role: "system", content: ROSTER },
+          { role: "user", content: TURN.replace("What about cost?", '[[call echo {"text":"hi"}]]') },
+        ],
+      }),
+    });
+    const body = await res.json();
+    assert.equal(body.choices[0].finish_reason, "tool_calls");
+    assert.equal(body.choices[0].message.tool_calls[0].function.name, "echo");
+  });
+
+  it("anthropic (non-stream, string system): an attributed prompt answers the asker by name", async () => {
+    const res = await fetch(`${base}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "mock-1", system: ROSTER, messages: [{ role: "user", content: TURN }] }),
+    });
+    assert.equal((await res.json()).content[0].text, ATTRIBUTED);
+  });
 });
 
 // ---------------------------------------------------------------- fake MCP server (03.1-09, D-13 / D-15)

@@ -460,11 +460,12 @@ describe("per-turn policy (D-07, SC4)", () => {
     const messageId = await say(sam, samDmId, "What's new today?");
     const ev = await lastMention(samBotId, messageId);
     expect(ev.turn).toMatchObject({
-      tools: ["web_search", "web_fetch", "ocw_memory_save"],
+      tools: ["web_search", "web_fetch", "ocw_memory_save", "ocw_agent_card"],
       toolFlags: {
         web_search: WEB_FLAGS,
         web_fetch: WEB_FLAGS,
         ocw_memory_save: { untrustedOutput: false, sideEffecting: true },
+        ocw_agent_card: { untrustedOutput: false, sideEffecting: false },
       },
       memory: [],
       maxToolCalls: 8,
@@ -482,7 +483,7 @@ describe("per-turn policy (D-07, SC4)", () => {
       conversation_id: samDmId,
       conversation_kind: "dm",
       message_id: messageId,
-      tools: ["web_search", "web_fetch", "ocw_memory_save"],
+      tools: ["web_search", "web_fetch", "ocw_memory_save", "ocw_agent_card"],
       tool_calls: 0,
       web_calls: 0,
       tainted: false,
@@ -513,8 +514,9 @@ describe("per-turn policy (D-07, SC4)", () => {
     try {
       const messageId = await say(sam, samDmId, "And now?");
       const ev = await lastMention(samBotId, messageId);
-      expect(ev.turn.tools).toEqual(["ocw_memory_save"]);
-      expect(Object.keys(ev.turn.toolFlags)).toEqual(["ocw_memory_save"]);
+      expect(ev.turn.tools).toEqual(["ocw_memory_save", "ocw_agent_card"]);
+      // jsonb orders object keys by length: compare as a set.
+      expect(Object.keys(ev.turn.toolFlags).sort()).toEqual(["ocw_agent_card", "ocw_memory_save"]);
     } finally {
       await ok(
         admin.request("PUT", "/api/v1/bot-policy", {
@@ -542,21 +544,25 @@ describe("per-turn policy (D-07, SC4)", () => {
 
     const fromAdmin = await say(admin, channelId, "@archie what changed?", mention);
     const evAdmin = await lastMention(teamBotId, fromAdmin);
-    expect(evAdmin.turn.tools).toEqual(["web_search", "web_fetch"]);
+    expect(evAdmin.turn.tools).toEqual(["web_search", "web_fetch", "ocw_agent_card"]);
     expect(evAdmin.conversation.kind).toBe("channel");
 
     const drop = await rule("deny", "user", samId, "bot.internet");
     try {
       const fromSam = await say(sam, channelId, "@archie and for me?", mention);
       const evSam = await lastMention(teamBotId, fromSam);
-      expect(evSam.turn.tools).toEqual([]);
+      expect(evSam.turn.tools).toEqual(["ocw_agent_card"]);
       const row = (
         await su.query("select tools, user_id from app.agent_turns where event_id = $1", [evSam.eventId])
       ).rows[0];
-      expect(row).toEqual({ tools: [], user_id: samId });
+      expect(row).toEqual({ tools: ["ocw_agent_card"], user_id: samId });
 
       const again = await say(admin, channelId, "@archie still there?", mention);
-      expect((await lastMention(teamBotId, again)).turn.tools).toEqual(["web_search", "web_fetch"]);
+      expect((await lastMention(teamBotId, again)).turn.tools).toEqual([
+        "web_search",
+        "web_fetch",
+        "ocw_agent_card",
+      ]);
     } finally {
       await drop();
     }
@@ -570,7 +576,13 @@ describe("per-turn policy (D-07, SC4)", () => {
     );
     const messageId = await say(sam, samDmId, "Echo please");
     const ev = await lastMention(samBotId, messageId);
-    expect(ev.turn.tools).toEqual(["web_search", "web_fetch", "ocw_memory_save", `${SAFE}__echo`]);
+    expect(ev.turn.tools).toEqual([
+      "web_search",
+      "web_fetch",
+      "ocw_memory_save",
+      "ocw_agent_card",
+      `${SAFE}__echo`,
+    ]);
     expect(ev.turn.toolFlags[`${SAFE}__echo`]).toEqual({ untrustedOutput: true, sideEffecting: false });
 
     const drop = await rule("deny", "user", samId, "bot.tool.use", `${SAFE}__echo`);
@@ -580,6 +592,7 @@ describe("per-turn policy (D-07, SC4)", () => {
         "web_search",
         "web_fetch",
         "ocw_memory_save",
+        "ocw_agent_card",
       ]);
     } finally {
       await drop();
@@ -600,9 +613,16 @@ describe("per-turn policy (D-07, SC4)", () => {
       const snap = await cellSnapshot();
       expect(snap.webSearch).toEqual({ provider: "duckduckgo" });
       const byId = new Map((snap.agents as Json[]).map((a) => [a.id, a.capabilities.tools]));
-      expect(byId.get(samBotId)).toEqual(["web_search", "web_fetch", "ocw_memory_save", `${SAFE}__echo`]);
-      expect(byId.get(teamBotId)).toEqual(["web_search", "web_fetch", "ocw_memory_save"]);
-      expect(byId.get(quiet.id)).toEqual([]);
+      expect(byId.get(samBotId)).toEqual([
+        "web_search",
+        "web_fetch",
+        "ocw_memory_save",
+        "ocw_agent_card",
+        `${SAFE}__echo`,
+      ]);
+      expect(byId.get(teamBotId)).toEqual(["web_search", "web_fetch", "ocw_memory_save", "ocw_agent_card"]);
+      // Cards are offered to every enabled bot (06-14); nothing else without a capability.
+      expect(byId.get(quiet.id)).toEqual(["ocw_agent_card"]);
     } finally {
       await drop();
     }

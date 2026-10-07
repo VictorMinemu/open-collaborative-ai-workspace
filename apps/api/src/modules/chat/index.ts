@@ -53,7 +53,15 @@ import {
   createPermissionService,
 } from "../organization";
 import { createConversationAccess } from "./access";
-import { authorOf, type Directory, loadDirectory } from "./directory";
+import { registerCardActionRoutes } from "./card-actions";
+import {
+  agentFactsOf,
+  authorOf,
+  type Directory,
+  type DirectoryEntry,
+  isUnitPersona,
+  loadDirectory,
+} from "./directory";
 import { dmAgentOf, ensureDm, ensureGroup, ensureHumanDm, listDms } from "./dm";
 import { resolveMentions } from "./mentions";
 import { type MessageActionsContext, registerMessageActionRoutes } from "./message-actions";
@@ -97,7 +105,9 @@ import { registerChatTestRoutes } from "./test-routes";
 import { registerThreadRoutes } from "./threads";
 
 export { type ConversationAccess, createConversationAccess } from "./access";
-export { authorOf, type Directory, loadDirectory } from "./directory";
+/** Agent Cards (06-13, P-11): the agent-channel module updates cards through `patchCard`; ai-chat adds them to snapshots. */
+export { type CardRow, cardMessageOf, cardOf, patchCard, withCards } from "./card-actions";
+export { agentFactsOf, authorOf, type Directory, type DirectoryEntry, loadDirectory } from "./directory";
 export {
   dmAgentOf,
   dmKey,
@@ -111,14 +121,25 @@ export {
 export { resolveMentions } from "./mentions";
 export { REPLY_MODE_PER_MINUTE, replyModeCandidates } from "./reply-mode";
 export { conversationRefs } from "./saves";
-/** For the ai-chat module (Phase 5): stream seq allocation and the message DTO it shares with chat. */
+/**
+ * For the ai-chat module (Phase 5): stream seq allocation and the message DTO it shares with chat. Phase 6 (P-03, P-09):
+ * the access expression of AI chats and the participation helpers.
+ */
 export {
+  type AiAccess,
+  addMember,
+  aiAccessOf,
+  aiAccessSql,
+  aiGrantMatchSql,
   type ConversationRow,
   convTopic,
+  getMembership,
   iso,
   lockNextSeq,
   type MessageRow,
+  removeMember,
   toMessage,
+  unreadCountsFor,
 } from "./service";
 export { listThreadsFor } from "./threads";
 
@@ -134,6 +155,8 @@ const zoneOf = (author: { clientTimeZone?: string }) =>
  * D-06: group DMs).
  */
 const MESSAGE_KINDS = ["channel", "dm", "group"] as const;
+/** Kinds a bot reply may land in (P-10): the message kinds plus AI chats whose owner added the persona. */
+const AGENT_POST_KINDS = [...MESSAGE_KINDS, "ai_chat"] as const;
 /** Kinds whose `conv:<id>` stream a reader may subscribe to: the message kinds plus AI chats (P-03, owner only). */
 const CONV_TOPIC_KINDS = ["channel", "dm", "group", "ai_chat"] as const;
 
@@ -168,8 +191,11 @@ async function placeableUnit(
 const messageKindOf = (conv: ConversationRow): (typeof MESSAGE_KINDS)[number] =>
   conv.kind === "dm" || conv.kind === "group" ? conv.kind : "channel";
 
-/** Direct conversations (1:1 and group) are flat: no threads, bot replies at the top level (D-04, D-06). */
-const isDirect = (kind: string) => kind === "dm" || kind === "group";
+/**
+ * Flat conversations: no threads, bot replies at the top level. Direct conversations (1:1 and group, D-04, D-06) and
+ * AI chats (P-10; the generic message routes never load them).
+ */
+const isDirect = (kind: string) => kind === "dm" || kind === "group" || kind === "ai_chat";
 
 /** The `conv:` copy of `conversation.updated` when a channel moved to another unit (PATCH /channels/:id). */
 const ChannelMovedPayload = z.object({ conversationId: z.string(), unitId: z.string().nullable() });
@@ -374,6 +400,8 @@ export function createChatModule(core: Core): ApiModule {
       if (!agent || agent.status === "disabled") continue;
       // A personal bot lives only in its owner's DM (D-01): never auto-added to, or asked in, a channel.
       if (agent.scope === "personal") continue;
+      // A unit persona answers only who may see it (AGENT-01, T-06-07-02): never added or asked by anyone else.
+      if (isUnitPersona(agent) && !(await authorReads(tx, agent, author.id))) continue;
       if (!(await getMembership(tx, conv.id, "agent", agent.id))) {
         authorRes ??= channelResource(await channelFacts(tx, conv, { kind: "user", id: author.id }));
         const d = await perms.decide(
@@ -404,6 +432,17 @@ export function createChatModule(core: Core): ApiModule {
     return agentIds;
   }
 
+  /** The human may see (and so mention or be answered by) this bot: `bot.read` on its agent resource. */
+  async function authorReads(tx: Tx, bot: DirectoryEntry, userId: string) {
+    const d = await perms.decide(
+      tx,
+      { kind: "user", userId },
+      "bot.read",
+      agentResource({ ...agentFactsOf(bot), disabled: false }, userId),
+    );
+    return d.allowed;
+  }
+
   /**
    * D-12: a human message that addressed no bot goes to the team bots of this conversation whose reply mode
    * is `all`, in the message's thread (the message itself, or its root for a thread reply). One
@@ -417,12 +456,19 @@ export function createChatModule(core: Core): ApiModule {
     result: PostResult,
     author: { id: string; clientTimeZone?: string },
   ): Promise<string[]> {
-    const agentIds = await replyModeCandidates(tx, dir, {
+    const candidates = await replyModeCandidates(tx, dir, {
       conversationId: conv.id,
       parentConversationId: conv.parentConversationId,
       authorKind: "user",
       mentions: result.row.mentions,
     });
+    // A unit persona follows only the humans who may see it (AGENT-01).
+    const agentIds: string[] = [];
+    for (const id of candidates) {
+      const bot = dir.agents.get(id);
+      if (bot && isUnitPersona(bot) && !(await authorReads(tx, bot, author.id))) continue;
+      agentIds.push(id);
+    }
     if (agentIds.length === 0) return [];
     const mention: AgentMention = {
       organizationId: conv.organizationId,
@@ -456,16 +502,7 @@ export function createChatModule(core: Core): ApiModule {
     const botId = await dmAgentOf(tx, conv.id);
     const bot = botId ? dir.agents.get(botId) : undefined;
     if (!bot || bot.deleted || bot.status === "disabled") return null;
-    const d = await perms.decide(
-      tx,
-      { kind: "user", userId: author.id },
-      "bot.read",
-      agentResource(
-        { scope: bot.scope ?? "team", ownerUserId: bot.ownerUserId ?? null, disabled: false },
-        author.id,
-      ),
-    );
-    if (!d.allowed) return null;
+    if (!(await authorReads(tx, bot, author.id))) return null;
     const mention: AgentMention = {
       organizationId: conv.organizationId,
       conversationId: conv.id,
@@ -501,16 +538,7 @@ export function createChatModule(core: Core): ApiModule {
       const bot = dir.agents.get(m.id);
       if (!bot || bot.deleted || bot.status === "disabled" || bot.scope === "personal") continue;
       if (!(await getMembership(tx, conv.id, "agent", bot.id))) continue;
-      const d = await perms.decide(
-        tx,
-        { kind: "user", userId: author.id },
-        "bot.read",
-        agentResource(
-          { scope: bot.scope ?? "team", ownerUserId: bot.ownerUserId ?? null, disabled: false },
-          author.id,
-        ),
-      );
-      if (d.allowed) agentIds.push(bot.id);
+      if (await authorReads(tx, bot, author.id)) agentIds.push(bot.id);
     }
     if (agentIds.length === 0) return [];
     const mention: AgentMention = {
@@ -534,10 +562,10 @@ export function createChatModule(core: Core): ApiModule {
       const dir = await loadDirectory(tx);
       const agent = dir.agents.get(input.agentId);
       if (!agent) throw notFound("Agent not found", "agent_not_found");
-      const conv = await getConversation(tx, input.conversationId, MESSAGE_KINDS);
+      const conv = await getConversation(tx, input.conversationId, AGENT_POST_KINDS);
       if (!conv) throw notFound("Conversation not found");
       if (conv.archivedAt) throw gone("This conversation is archived", "channel_archived");
-      // DMs and group DMs are flat (D-04, D-06): a bot reply always lands at the top level.
+      // DMs, group DMs and AI chats are flat (D-04, D-06, P-10): a bot reply always lands at the top level.
       const threadRootId = isDirect(conv.kind) ? null : input.threadRootId;
       // The bot itself: enabled, a member, and not denied by a rule (agent principal gate + preconditions).
       const agentRes = channelResource(await channelFacts(tx, conv, { kind: "agent", id: agent.id }));
@@ -571,14 +599,20 @@ export function createChatModule(core: Core): ApiModule {
         body: input.body,
         mentions: resolveMentions(input.body, dir),
         threadRootId,
-        clientMessageId: input.idempotencyKey,
+        // A card's key lives in its own namespace, so a card and a plain reply never collide on one key.
+        clientMessageId: input.card ? `card:${input.idempotencyKey}` : input.idempotencyKey,
         clientKind: "agent",
         lenientThreadRoot: true,
+        card: input.card,
       });
       if (result.created) {
         // Observers (notifications) in the same transaction; a bot is never a recipient, only an actor.
         await core.chatEvents.messagePosted(tx, {
-          conv: { id: conv.id, kind: messageKindOf(conv), organizationId: conv.organizationId },
+          conv: {
+            id: conv.id,
+            kind: conv.kind === "ai_chat" ? "ai_chat" : messageKindOf(conv),
+            organizationId: conv.organizationId,
+          },
           message: result.message,
           author: { kind: "agent", id: agent.id },
           mentions: result.row.mentions,
@@ -595,8 +629,31 @@ export function createChatModule(core: Core): ApiModule {
           clientKind: "agent",
           metadata: { conversationId: conv.id, threadRootId: result.root?.id ?? null },
         });
+        if (result.message.card) {
+          // Ids, kind and status only: never the title, the fields or the summary.
+          await core.audit.record(tx, {
+            action: "agent_card.posted",
+            resourceType: "message",
+            resourceId: result.row.id,
+            actorKind: "agent",
+            actorId: agent.id,
+            agentId: agent.id,
+            clientKind: "agent",
+            metadata: {
+              messageId: result.row.id,
+              conversationId: conv.id,
+              agentId: agent.id,
+              kind: result.message.card.kind,
+              status: result.message.card.status,
+            },
+          });
+        }
       }
-      return { messageId: result.row.id, created: result.created };
+      return {
+        messageId: result.row.id,
+        created: result.created,
+        ...(result.message.card ? { cardVersion: result.message.card.version } : {}),
+      };
     }),
   );
 
@@ -657,20 +714,9 @@ export function createChatModule(core: Core): ApiModule {
     }
     const bot = dir.agents.get(p.id);
     if (!bot || bot.deleted) throw notFound("Bot not found");
-    await perms.assertCan(
-      req,
-      tx,
-      "bot.read",
-      agentResource(
-        {
-          scope: bot.scope ?? "team",
-          ownerUserId: bot.ownerUserId ?? null,
-          disabled: bot.status === "disabled",
-        },
-        authOf(req).userId,
-      ),
-      { hideAs404: true },
-    );
+    await perms.assertCan(req, tx, "bot.read", agentResource(agentFactsOf(bot), authOf(req).userId), {
+      hideAs404: true,
+    });
     if (group && bot.scope === "personal") {
       throw conflict("Personal bots only chat in their owner's private chat", "personal_bot_dm_only");
     }
@@ -978,6 +1024,18 @@ export function createChatModule(core: Core): ApiModule {
             const target =
               req.body.kind === "agent" ? dir.agents.get(req.body.id) : dir.users.get(req.body.id);
             if (!target) throw notFound(req.body.kind === "agent" ? "Bot not found" : "Member not found");
+            // A unit persona joins a channel only through someone who may see it (AGENT-01).
+            if (isUnitPersona(target)) {
+              await perms.assertCan(
+                req,
+                tx,
+                "bot.read",
+                agentResource(agentFactsOf(target), authOf(req).userId),
+                {
+                  hideAs404: true,
+                },
+              );
+            }
             if (target.scope === "personal") {
               throw conflict("Personal bots only chat in their owner's private chat", "personal_bot_dm_only");
             }
@@ -1309,6 +1367,8 @@ export function createChatModule(core: Core): ApiModule {
       registerSaveRoutes(app, routeCtx);
       // ---------------------------------------------------------------- the Threads view (CHAT-02)
       registerThreadRoutes(app, routeCtx);
+      // ---------------------------------------------------------------- Agent Cards (AGENT-04, P-11)
+      registerCardActionRoutes(app, routeCtx);
 
       if (core.env.NODE_ENV === "test") registerChatTestRoutes(app, core);
     },

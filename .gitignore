@@ -45,6 +45,9 @@ ios/build/
 android/build/
 release/
 
+# Metered eval reports (06-09, local only)
+apps/api/eval-out/
+
 # Playwright
 e2e/test-results/
 e2e/playwright-report/

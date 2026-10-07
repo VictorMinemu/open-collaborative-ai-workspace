@@ -242,7 +242,7 @@ test("bot manager: a marketplace plugin's tool is enabled per bot, used through 
       sam.page,
       'echo this [[call ocw_echo {"text":"x"}]]',
       "Tool ocw_echo: allowed",
-      "[turn tools: ocw_echo]",
+      "[turn tools: ocw_agent_card,ocw_echo]",
     );
     // ---- the admin uninstalls the plugin from Settings › Marketplace
     await boss.page.goto(`${BASE_URL}/settings/marketplace`);
@@ -259,7 +259,7 @@ test("bot manager: a marketplace plugin's tool is enabled per bot, used through 
       sam.page,
       'again [[call ocw_echo {"text":"y"}]]',
       "Tool ocw_echo: not offered",
-      "[turn tools: none]",
+      "[turn tools: ocw_agent_card]",
     );
     await sam.context.close();
     await boss.context.close();

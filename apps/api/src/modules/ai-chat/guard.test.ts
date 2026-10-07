@@ -5,8 +5,9 @@ import { describe, expect, it } from "vitest";
 
 /**
  * Static guard (P-04, P-05, T-05-02-08): prompts are built only by `buildModelMessages`, models only by the model
- * gateway. `streamText` / `generateText` are imported from "ai" only in `ai-chat/run-loop.ts` and
- * `ai-chat/titles.ts` (05-10), and each of those reaches `buildModelMessages(` (directly or through `turn.ts`);
+ * gateway. `streamText` / `generateText` are imported from "ai" only in `ai-chat/run-loop.ts`,
+ * `ai-chat/titles.ts` (05-10) and the opt-in metered eval runner `eval/multiplayer/run.ts` (06-09, D-02), and each of
+ * those reaches `buildModelMessages(` (directly or through `turn.ts`);
  * `@ai-sdk/*` is imported only under `modules/model-gateway/`; nothing uses the Vercel AI Gateway
  * (`@ai-sdk/gateway`, `createGateway`, `gateway` from "ai"), and no API file hands the SDK a "provider/model"
  * string, which would route through that metered gateway.
@@ -15,9 +16,11 @@ import { describe, expect, it } from "vitest";
 const ROOT = fileURLToPath(new URL("../../../../../", import.meta.url));
 const API = join(ROOT, "apps/api/src");
 const SELF = "apps/api/src/modules/ai-chat/guard.test.ts";
+const EVAL_RUNNER = "apps/api/src/eval/multiplayer/run.ts";
 const MODEL_CALLERS = new Set([
   "apps/api/src/modules/ai-chat/run-loop.ts",
   "apps/api/src/modules/ai-chat/titles.ts",
+  EVAL_RUNNER,
 ]);
 
 function walk(dir: string, out: string[] = []): string[] {
@@ -78,7 +81,8 @@ describe("the guard's own patterns", () => {
 });
 
 describe("prompts and models stay behind their one door (P-04, P-05)", () => {
-  it("only run-loop.ts and titles.ts import streamText / generateText from ai", () => {
+  it("only run-loop.ts, titles.ts and the eval runner import streamText / generateText from ai", () => {
+    expect(MODEL_CALLERS.size).toBe(3);
     const offenders = sourceFiles()
       .filter((f) => importedNames(read(f), "ai").some((n) => MODEL_CALLS.has(n)))
       .map(rel)
@@ -107,6 +111,18 @@ describe("prompts and models stay behind their one door (P-04, P-05)", () => {
     }
   });
 
+  it("the eval runner builds its prompts with buildModelMessages and its model with the gateway's orgLanguageModel", () => {
+    const code = read(join(ROOT, EVAL_RUNNER));
+    expect(importedNames(code, "ai")).toContain("streamText");
+    expect(code).toContain("buildModelMessages(");
+    expect(code).toContain("SPOOF_CASES");
+    expect(code).toMatch(
+      /import\s*\{[^}]*\borgLanguageModel\b[^}]*\}\s*from\s*["']\.\.\/\.\.\/modules\/model-gateway["']/u,
+    );
+    expect(code).toContain("orgLanguageModel(");
+    expect(IMPORTS_AI_SDK.test(code)).toBe(false);
+  });
+
   it("no file outside modules/model-gateway/ imports @ai-sdk/*", () => {
     const offenders = files()
       .filter((f) => !rel(f).startsWith("apps/api/src/modules/model-gateway/"))
@@ -126,6 +142,58 @@ describe("prompts and models stay behind their one door (P-04, P-05)", () => {
     const offenders = sourceFiles()
       .filter((f) => STRING_MODEL.test(read(f)))
       .map(rel);
+    expect(offenders).toEqual([]);
+  });
+});
+
+/** Code lines only: `//` lines and the inside of block comments are ignored. */
+export function codeLines(code: string): string {
+  return code
+    .replace(/\/\*[\s\S]*?\*\//gu, "")
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("//"))
+    .join("\n");
+}
+
+/**
+ * A template literal that prints a name-like value, a colon and then the body: `${author.name}: ${r.body}` (with or
+ * without a newline between). AGENTS.md: participant identity is structural, never a plain-text `Name:` prefix.
+ */
+const NAME_COLON_BODY =
+  /\$\{[^}]*\b(?:name|Name|displayName|author|from|who|sender)\w*\b[^}]*\}\s*:\s*(?:\\n)?\s*\$\{[^}]*\b(?:body|text|content|message)\w*\b[^}]*\}/u;
+/** A message object with the system role: `role: "system"`. */
+const SYSTEM_ROLE_MESSAGE = /\brole\s*:\s*["'`]system["'`]/u;
+
+describe("participant identity stays structural (06-05, AGENTS.md, D-04)", () => {
+  const AI_CHAT = join(API, "modules/ai-chat");
+  const BUILDER = "apps/api/src/modules/ai-chat/build-model-messages.ts";
+
+  it("the patterns catch what they must and nothing else", () => {
+    // Source snippets are written with `#{` for `${` so they stay plain strings here.
+    const src = (s: string) => s.replaceAll("#{", "$" + "{");
+    expect(NAME_COLON_BODY.test(src("`#{author.name}: #{r.body}`"))).toBe(true);
+    expect(NAME_COLON_BODY.test(src("`#{promptName(a.name)}:\\n#{neutralise(r.body)}`"))).toBe(true);
+    expect(NAME_COLON_BODY.test(src("`#{displayName}: #{text}`"))).toBe(true);
+    expect(
+      NAME_COLON_BODY.test(src('`<message from="#{promptName(a.name)}">\\n#{neutralise(r.body)}`')),
+    ).toBe(false);
+    expect(NAME_COLON_BODY.test(src("`#{label} (user-authored preferences: follow them`"))).toBe(false);
+    expect(SYSTEM_ROLE_MESSAGE.test('{ role: "system", content: x }')).toBe(true);
+    expect(SYSTEM_ROLE_MESSAGE.test('m.role === "system"')).toBe(false);
+    expect(codeLines('// role: "system"\n/* role: "system" */\nconst a = 1;')).not.toMatch(
+      SYSTEM_ROLE_MESSAGE,
+    );
+  });
+
+  it("build-model-messages.ts has no template that prints a name, a colon and a body", () => {
+    expect(codeLines(read(join(ROOT, BUILDER)))).not.toMatch(NAME_COLON_BODY);
+  });
+
+  it("no file under modules/ai-chat/ other than build-model-messages.ts builds a system-role message", () => {
+    const offenders = walk(AI_CHAT)
+      .map(rel)
+      .filter((r) => r !== BUILDER && r !== SELF)
+      .filter((r) => SYSTEM_ROLE_MESSAGE.test(codeLines(read(join(ROOT, r)))));
     expect(offenders).toEqual([]);
   });
 });

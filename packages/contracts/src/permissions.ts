@@ -63,6 +63,10 @@ export const Permission = z.enum([
   "ai_chat.web",
   "ai_chat.share",
   "ai_chat.share.read",
+  // Phase 6 (06-01, P-04): multiplayer AI chat, unit-led bots and Agent Cards.
+  "ai_chat.manage",
+  "bot.manage_unit",
+  "agent_card.approve",
 ]);
 export type Permission = z.infer<typeof Permission>;
 
@@ -123,6 +127,9 @@ export const PERMISSION_SURFACE: Record<Permission, PermissionSurface> = {
   "ai_chat.web": "chat",
   "ai_chat.share": "chat",
   "ai_chat.share.read": "chat",
+  "ai_chat.manage": "chat",
+  "bot.manage_unit": "team",
+  "agent_card.approve": "chat",
 };
 
 export const ROLE_SURFACES: Record<OrgRole, PermissionSurface[]> = {
@@ -150,6 +157,8 @@ const STANDARD: readonly Permission[] = [
   "ai_chat.web",
   "ai_chat.share",
   "ai_chat.share.read",
+  "ai_chat.manage",
+  "agent_card.approve",
 ];
 const DEVELOPER: readonly Permission[] = [
   ...STANDARD,
@@ -184,6 +193,7 @@ const ADMIN: readonly Permission[] = [
   "work_zone.manage",
   "message.delete_any",
   "channel.update",
+  "bot.manage_unit",
 ];
 
 /**
@@ -198,8 +208,12 @@ export const ROLE_PERMISSIONS: Record<OrgRole, readonly Permission[]> = {
   admin: ADMIN,
 };
 
-/** Granted to a unit lead on the lead's unit subtree. */
-export const LEAD_PERMISSIONS: readonly Permission[] = ["unit.members.manage"];
+/** Granted to a unit lead on the lead's unit subtree (Phase 6, P-04: also the bots of that subtree). */
+export const LEAD_PERMISSIONS: readonly Permission[] = [
+  "unit.members.manage",
+  "bot.manage_unit",
+  "bot.configure",
+];
 /** Upper bound for an agent principal (intersected with the triggering human). */
 export const AGENT_PERMISSIONS: readonly Permission[] = [
   "channel.read",
@@ -351,8 +365,11 @@ export const PERMISSION_DESCRIPTIONS: Record<Permission, string> = {
   "channel.update": "Change any channel's topic and the team it is grouped under",
   "ai_chat.use": "Create private AI chats and send messages in your own",
   "ai_chat.web": "Turn on web search in your AI chats",
-  "ai_chat.share": "Create and revoke read-only share links of your AI chats",
+  "ai_chat.share": "Share your AI chats with people, teams or the organization, and create read-only links",
   "ai_chat.share.read": "Open AI chat share links from your organization",
+  "ai_chat.manage": "Rename, archive and change the settings of AI chats you own",
+  "bot.manage_unit": "Create and manage the bots of the units you lead",
+  "agent_card.approve": "Approve or deny what an agent asks for in a card",
 };
 
 // ---------------------------------------------------------------- tokens (AUTH-06)

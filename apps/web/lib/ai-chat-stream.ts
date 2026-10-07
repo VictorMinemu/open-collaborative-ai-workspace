@@ -1,6 +1,10 @@
 import {
+  type AiAddressing,
   type AiChatSnapshot,
   AiDeltaEvent,
+  type AiPostedMessageResponse,
+  type AiQueueState,
+  AiQueueUpdatedEvent,
   applyAiDelta,
   EphemeralTypes,
   EventTypes,
@@ -11,6 +15,7 @@ import {
   stitchAiSnapshot,
 } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
+import { mergeCard } from "./agent-cards";
 
 /**
  * The live state of one AI chat (P-06), kept pure so it is unit-tested apart from React. Durable frames
@@ -34,6 +39,11 @@ export interface AiChatState {
   recent: readonly DurableAiFrame[];
   /** A hole remains in a streaming answer: the hook refetches the snapshot. */
   gap: boolean;
+  /**
+   * The one-generation queue of a multiplayer chat (06-11, P-08): the snapshot's, then each `ai.queue.updated` by
+   * seq. Null in solo chats (Phase 5), which have none.
+   */
+  queue: AiQueueState | null;
 }
 
 export interface DurableAiFrame {
@@ -45,7 +55,9 @@ export interface DurableAiFrame {
 export type AiChatAction =
   | { kind: "snapshot"; snapshot: AiChatSnapshot }
   | { kind: "frame"; frame: TopicFrame }
-  | { kind: "sent"; response: SendAiMessageResponse };
+  | { kind: "sent"; response: SendAiMessageResponse }
+  /** 202 of a multiplayer send (06-06): the message is posted (queued, not for the AI, or skipped), no answer yet. */
+  | { kind: "posted"; response: AiPostedMessageResponse };
 
 const RECENT_MAX = 200;
 
@@ -59,19 +71,82 @@ export function initialAiChatState(chatId: string, primed?: SendAiMessageRespons
     pending: [],
     recent: [],
     gap: false,
+    queue: null,
   };
   return primed ? reduceAiChat(base, { kind: "sent", response: primed }) : base;
 }
 
 const bySeq = (a: Message, b: Message) => a.seq - b.seq;
 
+/**
+ * How far a request has come (06-11). `message.created` of a sender's own message still says `queued` when its turn
+ * started at once (06-06), so an incoming status never steps a held one back; a final state (answered, skipped, not
+ * for the AI) is news whatever was held.
+ */
+const ADDRESSING_RANK: Record<AiAddressing["status"], number> = {
+  queued: 0,
+  answering: 1,
+  answered: 2,
+  skipped: 2,
+  not_addressed: 2,
+};
+
+function mergeAddressing(held: Message | undefined, incoming: Message): Message {
+  const was = held?.aiAddressing;
+  const now = incoming.aiAddressing;
+  if (!was) return incoming;
+  if (!now || ADDRESSING_RANK[was.status] > ADDRESSING_RANK[now.status]) {
+    return { ...incoming, aiAddressing: was };
+  }
+  return incoming;
+}
+
+/** A persona's Agent Card (06-15): a realtime copy (no viewer fields, P-04) keeps the held viewer fields. */
+function mergeCardOf(held: Message | undefined, incoming: Message): Message {
+  if (!incoming.card) return incoming;
+  return { ...incoming, card: mergeCard(held?.card, incoming.card) };
+}
+
 /** Insert or replace by id, keeping seq order. */
 function upsert(list: Message[], m: Message): Message[] {
   const i = list.findIndex((x) => x.id === m.id);
   if (i < 0) return [...list, m].sort(bySeq);
   const next = list.slice();
-  next[i] = m;
+  next[i] = mergeCardOf(list[i], mergeAddressing(list[i], m));
   return next;
+}
+
+/**
+ * A new queue state moves the requests it covers (06-11). `pending` names the waiting messages; `running.respondingTo`
+ * names the AUTHORS (user ids) the running turn answers, not messages (06-06). So a request still pending is queued; one
+ * that left the queue while a turn runs was taken by it (answering); one being answered by an earlier generation, or
+ * left when nothing runs, has been answered. A skip arrives as its own `message.updated`.
+ */
+function applyQueue(messages: Message[], queue: AiQueueState): Message[] {
+  const waiting = new Set(queue.pending.map((p) => p.messageId));
+  const running = queue.running;
+  let changed = false;
+  const next = messages.map((m) => {
+    const a = m.aiAddressing;
+    if (!a?.addressed) return m;
+    let status = a.status;
+    let generationId = a.generationId;
+    if (waiting.has(m.id)) status = "queued";
+    else if (a.status === "queued") {
+      if (running) {
+        status = "answering";
+        generationId = running.generationId;
+      } else status = "answered";
+    } else if (a.status === "answering") {
+      const same = running && (a.generationId === null || a.generationId === running.generationId);
+      if (same) generationId = running.generationId;
+      else status = "answered";
+    }
+    if (status === a.status && generationId === a.generationId) return m;
+    changed = true;
+    return { ...m, aiAddressing: { ...a, status, generationId } };
+  });
+  return changed ? next : messages;
 }
 
 /** Streaming text and pending deltas only exist for answers still streaming. */
@@ -119,7 +194,15 @@ function applyDelta(state: AiChatState, d: AiDeltaEvent): AiChatState {
 function applyDurable(state: AiChatState, f: DurableAiFrame): AiChatState {
   if (f.seq <= state.lastSeq) return state;
   let messages = state.messages;
-  if (f.type === EventTypes.messageCreated || f.type === EventTypes.messageUpdated) {
+  let queue = state.queue;
+  if (f.type === EventTypes.aiQueueUpdated) {
+    const parsed = AiQueueUpdatedEvent.safeParse(f.data);
+    if (parsed.success && parsed.data.conversationId === state.chatId) {
+      const { conversationId: _c, ...next } = parsed.data;
+      queue = next;
+      messages = applyQueue(messages, next);
+    }
+  } else if (f.type === EventTypes.messageCreated || f.type === EventTypes.messageUpdated) {
     const parsed = (
       f.type === EventTypes.messageCreated ? MessageCreatedEvent : MessageUpdatedEvent
     ).safeParse(f.data);
@@ -131,7 +214,7 @@ function applyDurable(state: AiChatState, f: DurableAiFrame): AiChatState {
       messages = upsert(messages, parsed.data.message);
     }
   }
-  return prune({ ...state, messages, lastSeq: f.seq });
+  return prune({ ...state, messages, queue, lastSeq: f.seq });
 }
 
 /** One of two texts when it extends the other (the longer); otherwise the authoritative one. */
@@ -163,6 +246,8 @@ function applySnapshot(state: AiChatState, snap: AiChatSnapshot): AiChatState {
     snapshot: snap,
     messages: [...merged, ...newer].sort(bySeq),
     lastSeq: snap.lastSeq,
+    // The snapshot's queue; queue frames newer than it are re-applied below (an older snapshot never steps it back).
+    queue: snap.queue ?? null,
   };
   // Durable frames newer than the snapshot win over it.
   for (const f of [...state.recent].sort((a, b) => a.seq - b.seq)) {
@@ -211,6 +296,14 @@ export function reduceAiChat(state: AiChatState, action: AiChatAction): AiChatSt
         streaming = next;
       }
       return prune({ ...state, messages: messages.sort(bySeq), streaming });
+    }
+    case "posted": {
+      const r = action.response;
+      if (r.chat.id !== state.chatId) return state;
+      // Its `message.created` may already have arrived (and, with the queue, moved it on): never insert it twice.
+      if (state.messages.some((m) => m.id === r.userMessage.id)) return state;
+      const posted = { ...r.userMessage, aiAddressing: r.userMessage.aiAddressing ?? r.addressing };
+      return prune({ ...state, messages: [...state.messages, posted].sort(bySeq) });
     }
     case "frame": {
       const f = action.frame;

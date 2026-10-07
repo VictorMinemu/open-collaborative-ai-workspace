@@ -310,6 +310,62 @@ New chat** (or the pencil next to *AI chats* in the sidebar). Nobody else sees a
    to organization models).
 5. Review `.planning/phases/05-direct-ai-chat/05-UI-REVIEW.md` and the `review-*` screenshots.
 
+## Multiplayer AI chats (Phase 6)
+
+Phase 6 (ADR-0019, ADR-0020). An AI chat can be shared **in place**: the same conversation, never a copy. `pnpm demo:up`
+applies the Phase 6 migration.
+
+1. **Share with a person, a team or everyone.** Header menu › **Share** › *People and teams*. The box at the top says
+   exactly what they will see: the whole conversation, every file, this chat's instructions, the model behind each
+   answer, the tool settings, who has access and the other participants. It also says that your personal
+   instructions stop being used from now on. Search a colleague, a department, team or project, or *Everyone at
+   <org>* (which asks for a confirmation), pick **Can chat** or **Can view** and press *Share*. Each row's menu changes
+   the level or removes access (confirmed); a removed person's open page says "You no longer have access to this
+   chat." at once. The old link section is now *Read-only link (frozen copy)*.
+2. **Where it shows up.** People you share with get an inbox item (*shared an AI chat with you*); everyone with access
+   finds it under **Shared with me** in the sidebar and on the AI Chats page, with unread counts. The header shows who
+   is here (presence) and how widely it is shared (*Shared with Backend*); the chip opens the participants list with
+   each person's access.
+3. **Writing together.** Every message carries its author. The model answers when a message mentions nobody, or when
+   the author leaves **Ask AI** on; @-mentioning a person turns Ask AI off (*Not sent to AI*). While an answer runs,
+   others keep writing: their questions wait (*Queued*, and the chip says "AI is answering Víctor · Alex is next"),
+   then one coalesced answer replies to all of them by name. **Each person's question runs on their own ChatGPT plan
+   or an organization model they pick, never the owner's**: the footer says who it was for and who paid (*for Alex
+   Kim · Alex's ChatGPT plan*). Stop belongs to the person who asked (and the owner). *Can view* readers see
+   everything live but have no composer.
+4. **Personas (bots) in a chat.** Admins and team leads create bots scoped to the organization or to a department,
+   team or project (Bots › New bot › *Who can use it*); a unit's bot is visible only inside that unit. In an AI chat,
+   the owner adds one from the participants list › **Add an agent** (personal bots are never offered). Mention it
+   (`@backend …`): the bot answers in the chat through the OpenClaw cell, sees the conversation with everyone
+   attributed, and never gets anyone's memory. Tools that not everyone in the chat may use are withheld, and it says
+   so. Any persona in a chat counts as sharing it, so your personal instructions stop there too.
+5. **Agent Cards.** Bots can post cards (deployment, approval, report, …) in channels, DMs and AI chats: a title,
+   fields, a status that changes in place, and **Open** (always a page inside the app), **Follow** (you are notified
+   when its status changes) and **Approve / Deny** (confirmed, decided once, visible to everyone, and sent back to
+   the bot). *Can view* readers can follow a card but never decide it.
+
+**Owner checks for Phase 6** (never run by an agent; record each result in
+`.planning/phases/06-multiplayer-ai-chat/06-VALIDATION.md` › Manual-Only Verifications):
+
+1. **Metered spoofing eval** (MULTI-07, D-02; ≈ $0.15–0.40 per run, on your key). First the plan and the cost, no
+   request: `OCW_EVAL_DRY_RUN=1 pnpm --filter @ocw/api eval:multiplayer`. Then the real run with an OpenRouter key:
+   `OCW_EVAL_CONFIRM=metered OCW_EVAL_PROVIDER=openrouter OCW_EVAL_API_KEY=<your key> pnpm --filter @ocw/api eval:multiplayer`.
+   Expected: every case passes (at least 2 of 3) on both models; the report lands in `apps/api/eval-out/` (gitignored,
+   key redacted). The CI workflow `ai-eval.yml` (label `ai-eval`, weekly, manual) runs the same once GitHub Actions
+   billing is back and the `OCW_EVAL_API_KEY` secret is set.
+2. **OpenAI's terms for a ChatGPT plan in a shared chat** (D-01, NEEDS VALIDATION in ADR-0019). Read OpenAI's current
+   terms and help for using a ChatGPT plan through "Sign in with ChatGPT" in an app where colleagues read the answers.
+   If it is not allowed, shared chats must answer on organization models only (a new ADR supersedes ADR-0019 §5).
+3. **Visual review** (D-08) of the screenshots in `.planning/phases/06-multiplayer-ai-chat/screenshots/`:
+   `multiplayer-*`, `share-*`, `shared-*`, `participants-*`, `personas-*`, `ai-chat-agent-*`, `agent-card-*` and
+   `day-*`, at 1440 and 390, light and dark.
+4. **Confirm D-06**: a chat with any persona counts as shared, so the owner's personal instructions are excluded
+   (decided by the orchestrator under your delegated autonomy in 06-12).
+
+**Still open:** personas in AI chats and the `ocw_agent_card` tool are proven against a fake OpenClaw cell only; the
+real-cell smokes (`infra/openclaw/test/run-container-smoke.sh`, scenario `card`) run when CI comes back (GitHub
+Actions billing).
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -328,6 +384,8 @@ New chat** (or the pencil next to *AI chats* in the sidebar). Nobody else sees a
 | AI chat dialog: "Paste the full address that starts with http://127.0.0.1." | copy the whole address bar of the unreachable `127.0.0.1` tab (not `localhost`), within 10 minutes of *Continue* |
 | AI chat: no ChatGPT models, or "Reconnect ChatGPT" | Settings › AI chat: connect (or reconnect) your own plan; "not eligible" accounts use organization models |
 | AI chat on Claude: Web says it needs the search service | SearXNG is not reachable from the API; see [AI chats](#ai-chats-phase-5) › Web |
+| Shared AI chat: "You can view this chat. Ask … for chat access to write." | you hold *Can view*; the owner can change it to *Can chat* in Share |
+| Shared AI chat: "AI couldn't answer: …" under your message | your own model was unavailable (not connected, at a limit, not allowed); nobody else's plan is used: connect your plan or pick an organization model |
 
 ## Known limits (MVP 0)
 

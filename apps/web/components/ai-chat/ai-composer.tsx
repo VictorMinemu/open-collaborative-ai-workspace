@@ -5,17 +5,20 @@ import {
   type AiChatTools,
   type AiModelOption,
   type Attachment,
+  MENTION_TOKEN_RE,
   type ModelRef,
   modelRefKey,
 } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowUp, Gauge, Paperclip, Square } from "lucide-react";
+import { ArrowUp, AtSign, Gauge, Paperclip, Sparkles, Square } from "lucide-react";
 import {
   type ClipboardEvent,
   type FormEvent,
   type KeyboardEvent,
   type RefObject,
   useEffect,
+  useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -24,6 +27,8 @@ import {
   type QueueItem,
   useAttachmentQueue,
 } from "@/components/chat/attachments/attachment-tray";
+import { type MentionCandidate, rankMention } from "@/components/chat/composer";
+import { BotBadge, PrincipalAvatar } from "@/components/chat/principal-avatar";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { useAiChatModel } from "@/lib/ai-chat-model-store";
@@ -72,6 +77,20 @@ export interface AiComposerApi {
   fill(text: string): void;
 }
 
+/** `@` and what follows it right before the caret (the Phase 4 composer's rule). */
+const TOKEN_BEFORE_CARET = /(^|[\s([{,;:!?"'])@([a-zA-Z0-9._-]{0,40})$/u;
+const MAX_SUGGESTIONS = 8;
+
+type AiSuggestion = { kind: "ai" } | { kind: "member"; c: MentionCandidate };
+
+/** Whether `text` @mentions one of `candidates` (people or agents of the chat). */
+function mentionsSomeone(text: string, handles: ReadonlySet<string>): boolean {
+  for (const m of text.matchAll(new RegExp(MENTION_TOKEN_RE.source, "gu"))) {
+    if (handles.has((m[2] ?? "").toLowerCase())) return true;
+  }
+  return false;
+}
+
 /** Whether this member can attach files at all (storage configured and reachable, `attachment.upload`). */
 export function useAiAttachmentsEnabled(): boolean {
   return useAttachmentsConfig().data?.enabled === true;
@@ -99,8 +118,11 @@ export function AiComposer({
   busy,
   onSend,
   onStop,
+  onTyping,
   autoFocus,
   className,
+  multiplayer = false,
+  mentionCandidates = [],
   chat = null,
   initialTools = { web: false },
   uploadTarget = null,
@@ -124,8 +146,26 @@ export function AiComposer({
   busy: boolean;
   /** Stops the answer being written (absent while the chat has none to stop). */
   onStop?: () => Promise<void>;
-  /** Resolves once the API accepted the send; rejects to keep the text and the files. */
-  onSend: (text: string, model: AiModelOption, tools: AiChatTools, files: AiSendFiles) => Promise<void>;
+  /** The member is typing (06-11, multiplayer chats only; throttled by the caller). */
+  onTyping?: () => void;
+  /**
+   * Resolves once the API accepted the send; rejects to keep the text and the files. `askAi` is given in multiplayer
+   * chats only (06-11, P-08): whether this message asks the model.
+   */
+  onSend: (
+    text: string,
+    model: AiModelOption,
+    tools: AiChatTools,
+    files: AiSendFiles,
+    askAi?: boolean,
+  ) => Promise<void>;
+  /**
+   * A chat several people write in (06-11): an "Ask AI" toggle (on by default, off once the draft mentions a person or
+   * an agent unless the AI was chosen) and @ suggestions over the AI and `mentionCandidates`. Solo chats: neither.
+   */
+  multiplayer?: boolean;
+  /** The chat's participants the viewer may @mention (never the viewer), with their handles. */
+  mentionCandidates?: MentionCandidate[];
   autoFocus?: boolean;
   className?: string;
 }) {
@@ -145,6 +185,73 @@ export function AiComposer({
   const [stopping, setStopping] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const qc = useQueryClient();
+  // Addressing (06-11, P-08): an explicit choice (the toggle, or the "AI" suggestion) wins; otherwise a message asks
+  // the AI unless it mentions a person or an agent. The server decides the outcome either way.
+  const [explicitAi, setExplicitAi] = useState<boolean | null>(null);
+  const handles = useMemo(
+    () => new Set(mentionCandidates.map((c) => c.handle.toLowerCase())),
+    [mentionCandidates],
+  );
+  const askAi = explicitAi ?? !mentionsSomeone(text, handles);
+  const [query, setQuery] = useState<{ q: string; start: number } | null>(null);
+  const [active, setActive] = useState(0);
+  const suggestions = useMemo<AiSuggestion[]>(() => {
+    if (!multiplayer || !query) return [];
+    const q = query.q.toLowerCase();
+    const people = mentionCandidates
+      .map((c) => ({ c, s: rankMention(c, q) }))
+      .filter((x) => x.s > 0)
+      .sort((a, b) => b.s - a.s || a.c.displayName.localeCompare(b.c.displayName))
+      .map((x): AiSuggestion => ({ kind: "member", c: x.c }));
+    const ai: AiSuggestion[] = "ai".startsWith(q) ? [{ kind: "ai" }] : [];
+    return [...ai, ...people].slice(0, MAX_SUGGESTIONS);
+  }, [multiplayer, query, mentionCandidates]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset the highlighted option when the query text changes
+  useEffect(() => setActive(0), [query?.q]);
+
+  function detect(value: string, caret: number) {
+    if (!multiplayer) return;
+    const m = TOKEN_BEFORE_CARET.exec(value.slice(0, caret));
+    setQuery(m ? { q: m[2] ?? "", start: caret - (m[2]?.length ?? 0) - 1 } : null);
+  }
+
+  /**
+   * The caret to restore right after the next value commit (set synchronously and applied in a layout effect, never in
+   * a later frame: keys typed right after a pick must land after the inserted handle, as in the Phase 4 composer).
+   */
+  const pendingCaret = useRef<number | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: restore the caret when the value changes
+  useLayoutEffect(() => {
+    const pos = pendingCaret.current;
+    const el = ref.current;
+    if (pos === null || !el) return;
+    pendingCaret.current = null;
+    el.focus();
+    el.setSelectionRange(pos, pos);
+  }, [text]);
+  function caretTo(pos: number) {
+    pendingCaret.current = pos;
+  }
+
+  function pick(x: AiSuggestion) {
+    const el = ref.current;
+    if (!el || !query) return;
+    const caret = el.selectionStart ?? text.length;
+    const before = text.slice(0, query.start);
+    const after = text.slice(caret);
+    if (x.kind === "ai") {
+      // The AI is addressed by the toggle, not by text: no "@AI" stays in the message.
+      const next = `${before}${before && !/\s$/u.test(before) && after && !/^\s/u.test(after) ? " " : ""}${after}`;
+      setText(next);
+      setExplicitAi(true);
+      caretTo(before.length);
+    } else {
+      const insert = `@${x.c.handle} `;
+      setText(`${before}${insert}${after.startsWith(" ") ? after.slice(1) : after}`);
+      caretTo(before.length + insert.length);
+    }
+    setQuery(null);
+  }
   const today = useAiUsageToday();
   const reached = model ? reachedLimit(today.data, model.ref.backend) : null;
   const planModel =
@@ -217,9 +324,12 @@ export function AiComposer({
     const files: AiSendFiles = { ids: queue.readyIds, attachments: queue.ready };
     setSending(true);
     setText("");
+    setQuery(null);
+    const ask = multiplayer ? askAi : undefined;
     try {
-      await onSend(body, model, tools, files);
+      await onSend(body, model, tools, files, ask);
       queue.reset();
+      setExplicitAi(null);
     } catch {
       setText(body); // the caller reported the error; nothing typed or attached is lost
     } finally {
@@ -243,6 +353,25 @@ export function AiComposer({
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (query && suggestions.length > 0 && !e.nativeEvent.isComposing) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const d = e.key === "ArrowDown" ? 1 : -1;
+        setActive((i) => (i + d + suggestions.length) % suggestions.length);
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        const x = suggestions[active];
+        if (x) pick(x);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setQuery(null);
+        return;
+      }
+    }
     if (e.key === "Escape" && showStop) {
       e.preventDefault();
       void stop();
@@ -292,6 +421,10 @@ export function AiComposer({
         </div>
       ) : null}
       <div className="relative rounded-[22px] border bg-card shadow-[0_1px_2px_rgb(0_0_0/0.04),0_8px_24px_-12px_rgb(0_0_0/0.12)] transition-[border-color,box-shadow] focus-within:border-ring/50 dark:shadow-none">
+        {query && suggestions.length > 0 ? (
+          <MentionSuggestions suggestions={suggestions} active={active} onHover={setActive} onPick={pick} />
+        ) : null}
+
         {canAttach && queue.items.length > 0 ? (
           <div className="px-3 pt-3">
             <AttachmentTray queue={queue} refusalOf={refusalOf} />
@@ -306,7 +439,13 @@ export function AiComposer({
           // biome-ignore lint/a11y/noAutofocus: a new chat opens ready to type, like ChatGPT and Claude.ai
           autoFocus={autoFocus}
           disabled={noModel}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            setText(e.target.value);
+            detect(e.target.value, e.target.selectionStart ?? e.target.value.length);
+            if (e.target.value) onTyping?.();
+          }}
+          onSelect={(e) => detect(e.currentTarget.value, e.currentTarget.selectionStart ?? 0)}
+          onBlur={() => setTimeout(() => setQuery(null), 120)}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
           placeholder={noModel ? "No model is available to you yet" : "Ask anything"}
@@ -346,6 +485,15 @@ export function AiComposer({
                 <Paperclip aria-hidden className="size-[18px]" />
               </button>
             </>
+          ) : null}
+          {multiplayer ? (
+            <AskAiToggle
+              on={askAi}
+              onToggle={() => {
+                setExplicitAi(!askAi);
+                ref.current?.focus({ preventScroll: true });
+              }}
+            />
           ) : null}
           {webActive ? <WebChip onRemove={() => setTools({ ...tools, web: false })} /> : null}
           {model ? (
@@ -390,6 +538,111 @@ export function AiComposer({
         <OrgAnswersLeft left={orgAnswersLeft(today.data)} />
       ) : null}
     </form>
+  );
+}
+
+/**
+ * "Ask AI" in a multiplayer chat's toolbar (06-11): on, the message asks the model; off, it is only for the people (or
+ * agents) it mentions. A pressed toggle, readable at 390 next to the model chip.
+ */
+function AskAiToggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={on}
+      data-testid="ai-ask-toggle"
+      title={
+        on ? "This message asks the AI. Click to send it only to people." : "This message won't ask the AI."
+      }
+      onClick={onToggle}
+      className={cn(
+        "inline-flex h-8 shrink-0 items-center gap-1 rounded-full border px-2.5 font-medium text-[13px] outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/30",
+        on
+          ? "border-transparent bg-primary/10 text-primary hover:bg-primary/15"
+          : "border-dashed border-border text-muted-foreground hover:bg-accent hover:text-foreground",
+      )}
+    >
+      <Sparkles aria-hidden className="size-3.5" />
+      Ask AI
+    </button>
+  );
+}
+
+/**
+ * The @ suggestions of a multiplayer chat (06-11): "AI" first, then the chat's people (avatars) and agents (Bot badge),
+ * ranked like Phase 4 mentions; keyboard (↑ ↓ Enter Tab Esc) or pointer.
+ */
+function MentionSuggestions({
+  suggestions,
+  active,
+  onHover,
+  onPick,
+}: {
+  suggestions: AiSuggestion[];
+  active: number;
+  onHover: (i: number) => void;
+  onPick: (x: AiSuggestion) => void;
+}) {
+  return (
+    <div
+      id="ai-mention-suggestions"
+      role="listbox"
+      aria-label="Mention"
+      data-testid="ai-mention-suggestions"
+      className="absolute inset-x-0 bottom-full z-30 mb-2 overflow-hidden rounded-2xl border bg-popover p-1 text-popover-foreground shadow-xl shadow-black/5 dark:shadow-black/40"
+    >
+      <p className="px-2.5 pt-1.5 pb-1 font-medium text-[11px] text-muted-foreground uppercase tracking-wider">
+        Ask or mention
+      </p>
+      {suggestions.map((x, i) => {
+        const key = x.kind === "ai" ? "ai" : `${x.c.kind}:${x.c.id}`;
+        return (
+          <button
+            key={key}
+            type="button"
+            role="option"
+            aria-selected={i === active}
+            data-testid="ai-mention-option"
+            data-kind={x.kind === "ai" ? "ai" : x.c.kind}
+            onMouseDown={(e) => e.preventDefault()}
+            onMouseEnter={() => onHover(i)}
+            onClick={() => onPick(x)}
+            className={cn(
+              "flex w-full min-w-0 items-center gap-2.5 rounded-xl px-2 py-1.5 text-left text-sm outline-none",
+              i === active ? "bg-accent text-accent-foreground" : "",
+            )}
+          >
+            {x.kind === "ai" ? (
+              <>
+                <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+                  <Sparkles aria-hidden className="size-3.5" />
+                </span>
+                <span className="shrink-0 font-medium">AI</span>
+                <span className="min-w-0 truncate text-muted-foreground text-xs">Ask the AI to answer</span>
+              </>
+            ) : (
+              <>
+                <span data-testid="ai-mention-avatar" className="inline-flex shrink-0">
+                  <PrincipalAvatar
+                    kind={x.c.kind}
+                    name={x.c.displayName}
+                    avatarUrl={x.c.avatarUrl}
+                    seed={x.c.id}
+                    className="size-6 text-[10px]"
+                  />
+                </span>
+                <span className="min-w-0 truncate font-medium">{x.c.displayName}</span>
+                {x.c.kind === "agent" ? <BotBadge /> : null}
+                <span className="ml-auto inline-flex shrink-0 items-center text-muted-foreground text-xs">
+                  <AtSign aria-hidden className="size-3" />
+                  {x.c.handle}
+                </span>
+              </>
+            )}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

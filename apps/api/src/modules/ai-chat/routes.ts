@@ -4,9 +4,11 @@ import {
   AiChatListQuery,
   AiChatSnapshot,
   AiChatSummary,
+  AiPostedMessageResponse,
   CreateAiChatRequest,
   IdParams,
   IsoDateTime,
+  MarkAiChatReadRequest,
   MessagePage,
   PageQueryFields,
   SendAiMessageRequest,
@@ -73,10 +75,14 @@ export function registerAiChatRoutes(app: App, core: Core, service: AiChatServic
         tags,
         params: IdParams,
         body: SendAiMessageRequest,
-        response: { 201: SendAiMessageResponse },
+        // 201: an answer started for this message; 202 (shared chats, 06-06): posted, queued or skipped.
+        response: { 201: SendAiMessageResponse, 202: AiPostedMessageResponse },
       },
     },
-    async (req, reply) => reply.status(201).send(await service.sendMessage(req, req.params.id, req.body)),
+    async (req, reply) => {
+      const out = await service.sendMessage(req, req.params.id, req.body);
+      return reply.status(out.status).send(out.body);
+    },
   );
 
   app.get(
@@ -128,6 +134,20 @@ export function registerAiChatRoutes(app: App, core: Core, service: AiChatServic
       schema: { tags, params: IdParams, response: { 200: AiChatSnapshot } },
     },
     async (req) => service.snapshot(req, req.params.id),
+  );
+
+  // 06-08 (P-09): the caller read the chat up to `seq`; a unit or organization grantee joins on their first read.
+  app.post(
+    "/ai-chats/:id/read",
+    {
+      config: { authz: "user" },
+      onRequest: core.identity.requireUser,
+      schema: { tags, params: IdParams, body: MarkAiChatReadRequest },
+    },
+    async (req, reply) => {
+      await service.markRead(req, req.params.id, req.body.seq);
+      return reply.status(204).send();
+    },
   );
 
   app.get(

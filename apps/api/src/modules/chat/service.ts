@@ -1,4 +1,5 @@
 import {
+  type AgentCardInput,
   type ChannelMember,
   type ChannelSummary,
   type ChannelUnit,
@@ -20,12 +21,14 @@ import {
   tenantOf,
   unitMemberships,
 } from "@ocw/db";
-import { and, asc, desc, eq, gt, inArray, isNull, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lt, type SQL, sql } from "drizzle-orm";
+import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import { badRequest, notFound } from "../../lib/errors";
 import { attachmentsForMessages, linkAttachments } from "../artifact";
 import type { AuditService } from "../audit";
 import type { ChannelFacts } from "../organization";
 import type { RealtimeService } from "../realtime";
+import { cardOf, insertCard, withCards } from "./card-actions";
 import { authorOf, type Directory } from "./directory";
 import { pinnedFor } from "./pins";
 import { reactionsFor } from "./reactions";
@@ -279,7 +282,7 @@ export interface UnreadCounts {
 
 /**
  * CHAT-09 (D-07, P-07): the badges of `userId`'s memberships among `conversationIds`. Unread = top-level, live
- * messages from others after the member's read cursor, counted (never `streams.last_seq - last_read_seq`, Pitfall 1)
+ * messages from others (never a server notice line, `author_kind 'system'`, 06-08) after the member's read cursor, counted (never `streams.last_seq - last_read_seq`, Pitfall 1)
  * and capped at `UNREAD_CAP` on `messages_conv_seq_idx`; mentions = the member's unread mention-like notifications
  * (`MENTION_KINDS`) of live top-level messages there, on `notifications_unread_idx` (a mention inside a thread
  * belongs to that thread). Conversations the member has not joined are absent (= nothing unread). Callers pass only
@@ -309,6 +312,7 @@ export async function unreadCountsFor(
         where m.organization_id = cm.organization_id and m.conversation_id = cm.conversation_id
           and m.thread_id is null and m.deleted_at is null and m.seq > cm.last_read_seq
           and not (m.author_kind = 'user' and m.author_id = ${userId}::uuid)
+          and m.author_kind <> 'system'
         limit ${UNREAD_CAP}
       ) capped
     ) u
@@ -371,6 +375,53 @@ export async function channelRow(tx: Tx, id: string, userId: string): Promise<Ch
 }
 
 /**
+ * Whether the grant row aliased `ag` matches `userId` (P-03, D-03): a person grant names the user; a unit grant names
+ * any unit on the paths (root → self) of the user's unit memberships, so a department grant covers its teams and
+ * projects; an organization grant covers every active member. Shared by `aiAccessSql` and the send context
+ * (`matchingGrant`), so the two cannot drift.
+ */
+export function aiGrantMatchSql(userId: string | SQL | AnyPgColumn): SQL {
+  return sql`(
+    (ag.subject_kind = 'user' and ag.subject_id = ${userId})
+    or (ag.subject_kind = 'unit' and exists (
+          select 1 from app.unit_memberships um
+          join app.org_units ou on ou.id = um.unit_id and ou.organization_id = um.organization_id
+          where um.organization_id = ag.organization_id and um.user_id = ${userId}
+            and ag.subject_id = any(ou.path)))
+    or (ag.subject_kind = 'org' and exists (
+          select 1 from app.org_members om
+          where om.organization_id = ag.organization_id and om.user_id = ${userId} and om.deactivated_at is null))
+  )`;
+}
+
+/**
+ * THE access level of a user to an AI chat (P-03), as one SQL expression: `'owner'` for `ai_chats.owner_user_id`,
+ * else the best active grant that matches the user (`'chat'` beats `'view'`) through `aiGrantMatchSql` (person, unit
+ * subtree or organization subjects), else NULL. `channelFacts` and the readable set both use it, so they cannot
+ * drift; `conversation_members` rows never enter it.
+ */
+export function aiAccessSql(userId: string | SQL | AnyPgColumn, conversationIdCol: SQL | AnyPgColumn): SQL {
+  return sql`(case
+    when exists (select 1 from app.ai_chats ac
+                 where ac.conversation_id = ${conversationIdCol} and ac.owner_user_id = ${userId}) then 'owner'
+    when exists (select 1 from app.ai_chat_grants ag
+                 where ag.conversation_id = ${conversationIdCol} and ag.revoked_at is null
+                   and ag.level = 'chat' and ${aiGrantMatchSql(userId)}) then 'chat'
+    when exists (select 1 from app.ai_chat_grants ag
+                 where ag.conversation_id = ${conversationIdCol} and ag.revoked_at is null
+                   and ag.level = 'view' and ${aiGrantMatchSql(userId)}) then 'view'
+  end)`;
+}
+
+export type AiAccess = "owner" | "chat" | "view" | null;
+
+/** `aiAccessSql` for one user and one AI chat. */
+export async function aiAccessOf(tx: Tx, userId: string, conversationId: string): Promise<AiAccess> {
+  const res = await tx.execute(sql`select ${aiAccessSql(userId, sql`${conversationId}::uuid`)} as access`);
+  return ((res.rows[0] as { access: AiAccess } | undefined)?.access ?? null) as AiAccess;
+}
+
+/**
  * The input of `channelResource` for one member (user or agent) of `conv`: visibility, archived state and
  * the member's role. A thread conversation is judged on its parent channel.
  */
@@ -393,6 +444,10 @@ export async function channelFacts(
     visibility: channel.visibility,
     archived: channel.archivedAt !== null,
     viewerRole: membership?.role ?? null,
+    // P-03: a human's access to an AI chat comes from its owner and grants only; agents keep their member row.
+    ...(channel.kind === "ai_chat" && member.kind === "user"
+      ? { aiAccess: await aiAccessOf(tx, member.id, channel.id) }
+      : {}),
     // Group DMs are direct conversations too: fixed membership, never moderated (D-01, D-06; state dm). An AI chat
     // is private to its owner (state ai_chat, P-03).
     kind:
@@ -614,11 +669,13 @@ export async function hydrateViewer(tx: Tx, list: Message[], viewerId: string): 
   const reactions = await reactionsFor(tx, live, viewerId);
   const pinned = await pinnedFor(tx, live);
   const saved = await savedFor(tx, live, viewerId);
-  return (await withAttachments(tx, list)).map((m) =>
+  const hydrated = (await withAttachments(tx, list)).map((m) =>
     m.deletedAt
       ? { ...m, reactions: [], pinned: false, saved: false }
       : { ...m, reactions: reactions.get(m.id) ?? [], pinned: pinned.has(m.id), saved: saved.has(m.id) },
   );
+  // Agent Cards (P-11) with the viewer's fields (following, viewerCan).
+  return withCards(tx, hydrated, viewerId);
 }
 
 /** Top-level messages of a channel, newest page first in the DB, returned oldest → newest. */
@@ -782,6 +839,11 @@ export interface PostInput {
    * is appended, so the event carries them. Any id that is not linkable rolls the post back (409).
    */
   attachmentIds?: string[] | undefined;
+  /**
+   * An Agent Card (P-11, agents only): inserted with the message before `message.created` is appended, so the event
+   * carries it; `body` is its plain-text summary.
+   */
+  card?: AgentCardInput | undefined;
 }
 
 export interface PostResult {
@@ -821,7 +883,8 @@ export async function postMessage(
     if (existing) {
       const root = existing.threadId ? await getMessage(tx, existing.threadId) : null;
       const [message] = await withAttachments(tx, [toMessage(existing, dir)]);
-      return { row: existing, message: message!, created: false, root };
+      const card = await cardOf(tx, existing.id);
+      return { row: existing, message: card ? { ...message!, card } : message!, created: false, root };
     }
   }
 
@@ -866,6 +929,13 @@ export async function postMessage(
     const [hydrated] = await withAttachments(tx, [message]);
     if (!hydrated) throw new Error("message DTO missing");
     message = hydrated;
+  }
+  if (input.card) {
+    if (author.kind !== "agent") throw new Error("only agents post cards");
+    message = {
+      ...message,
+      card: await insertCard(tx, { message: row, agentId: author.id, input: input.card }),
+    };
   }
   const seq = await deps.realtime.appendEvent(tx, topic, EventTypes.messageCreated, { message });
   if (seq !== nextSeq) throw new Error(`stream seq drift on ${topic}: expected ${nextSeq}, got ${seq}`);

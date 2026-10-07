@@ -16,7 +16,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import { type App, authOf, type Core, tenant } from "../../core";
 import { conflict, gone, HttpError, notFound } from "../../lib/errors";
 import type { ConversationAccess, ReadableKind } from "../chat/access";
-import { channelResource, createPermissionService } from "../organization";
+import { AuthzDeniedError, channelResource, createPermissionService } from "../organization";
 import { dispositionFor } from "./disposition";
 import { type AttachmentRow, toAttachment } from "./model";
 import { ImageTooLargeError, type Renditions, renderRenditions } from "./renditions";
@@ -136,10 +136,18 @@ export function registerAttachmentRoutes(app: App, deps: AttachmentRoutesDeps): 
       const row = await core.db.withTenant(tenant(req), async (tx) => {
         const { conv, facts } = await access.readable(req, tx, req.params.id, { kinds: KINDS });
         if (conv.archivedAt) throw gone("This conversation is archived", "channel_archived");
-        // Nobody posts into an AI chat through the channel permissions (`ai_chat_private`): its owner writes there
-        // under `ai_chat.use`, decided on the chat itself (owner only, hidden = 404 like the chat's own routes).
+        // Nobody posts into an AI chat through the channel permissions (`ai_chat_private`): its owner and `chat`
+        // grantees write there under `ai_chat.use`, decided on the chat itself. As on the chat's own send route, a
+        // `view` grantee (who can read the chat) is told 403 `ai_chat_view_only`; every other denial is a 404.
         if (conv.kind === "ai_chat") {
-          await perms.assertCan(req, tx, "ai_chat.use", channelResource(facts), { hideAs404: true });
+          try {
+            await perms.assertCan(req, tx, "ai_chat.use", channelResource(facts));
+          } catch (err) {
+            if (err instanceof AuthzDeniedError && err.denial.reason !== "ai_chat_view_only") {
+              throw new AuthzDeniedError(err.denial, { hideAs404: true });
+            }
+            throw err;
+          }
         } else {
           await perms.assertCan(req, tx, "channel.post", channelResource(facts));
         }

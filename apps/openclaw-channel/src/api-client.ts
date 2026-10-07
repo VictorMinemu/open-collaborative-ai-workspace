@@ -3,7 +3,11 @@ import {
   type AgentChannelMcpProbeResult,
   type AgentChannelMemorySave,
   AgentChannelMemorySaveResponse,
+  type AgentChannelPatchCard,
+  AgentChannelPatchCardResponse,
   type AgentChannelPluginReport,
+  type AgentChannelPostCard,
+  AgentChannelPostCardResponse,
   type AgentChannelPostMessage,
   AgentChannelPostMessageResponse,
   type AgentChannelProviderAuthReport,
@@ -22,9 +26,21 @@ export class AgentChannelHttpError extends Error {
     readonly status: number,
     readonly path: string,
     message: string,
+    /** The API's machine error code (`error.code`), when the body carried a well-formed one. Never free text. */
+    readonly code?: string,
   ) {
     super(message);
     this.name = "AgentChannelHttpError";
+  }
+}
+
+/** `error.code` of an API error body: a short snake_case code, or undefined (never any other body content). */
+export function errorCodeOf(body: string): string | undefined {
+  try {
+    const code = (JSON.parse(body) as { error?: { code?: unknown } } | null)?.error?.code;
+    return typeof code === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(code) ? code : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -58,7 +74,7 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
   const timeoutMs = opts.requestTimeoutMs ?? 15_000;
 
   async function request(
-    method: "GET" | "POST",
+    method: "GET" | "POST" | "PATCH",
     path: string,
     body: unknown,
     signal?: AbortSignal,
@@ -86,11 +102,13 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
           return text ? (JSON.parse(text) as unknown) : undefined;
         }
         // Never echo response bodies verbatim into logs beyond a short prefix.
-        const detail = (await res.text().catch(() => "")).slice(0, 200);
+        const raw = await res.text().catch(() => "");
+        const detail = raw.slice(0, 200);
         const err = new AgentChannelHttpError(
           res.status,
           path,
           `${method} ${path} → ${res.status} ${detail}`,
+          errorCodeOf(raw.slice(0, 4_000)),
         );
         if (!isRetryableStatus(res.status)) throw err;
         lastError = err;
@@ -178,6 +196,27 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
       signal?: AbortSignal,
     ): Promise<AgentChannelMemorySaveResponse> {
       return AgentChannelMemorySaveResponse.parse(await request("POST", "/memories", req, signal, 2));
+    },
+    /**
+     * `ocw_agent_card` create (06-14, P-11): a typed card where the turn's agent may post. Idempotent on
+     * (agentId, idempotencyKey): two attempts at most. A refusal throws AgentChannelHttpError (400/403/404/410 with
+     * the API's code). Never logs the card.
+     */
+    async postCard(req: AgentChannelPostCard, signal?: AbortSignal): Promise<AgentChannelPostCardResponse> {
+      return AgentChannelPostCardResponse.parse(await request("POST", "/cards", req, signal, 2));
+    },
+    /**
+     * `ocw_agent_card` update: only the posting agent, naming the version it saw (409 `card_version_conflict`
+     * otherwise). Two attempts at most.
+     */
+    async patchCard(
+      messageId: string,
+      req: AgentChannelPatchCard,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelPatchCardResponse> {
+      return AgentChannelPatchCardResponse.parse(
+        await request("PATCH", `/cards/${encodeURIComponent(messageId)}`, req, signal, 2),
+      );
     },
     /**
      * The tools an `mcp.probe` discovered, or why it failed (D-13). Three attempts at most: the API applies only

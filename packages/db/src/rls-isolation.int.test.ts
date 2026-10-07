@@ -264,6 +264,66 @@ async function seedOrg(c: pg.Client, org: string) {
     `insert into app.ai_chat_shares (organization_id, conversation_id, created_by, title, snapshot) values ($1, $2, $3, 'Trip plan', '{"messages":[]}')`,
     [org, conv, user],
   );
+
+  // Phase 6 (multiplayer AI chat): one row per new table. An `ai_chat` conversation shared with a second person and
+  // with the whole organization, a context row on its user message answered by a generation, an Agent Card on an
+  // agent message in the channel and a follow of that card.
+  const aiConv = randomUUID();
+  const aiAsk = randomUUID();
+  const aiAnswer = randomUUID();
+  const aiGen = randomUUID();
+  const guest = randomUUID();
+  const cardMsg = randomUUID();
+  await q(
+    "insert into app.conversations (id, organization_id, kind, visibility, name, created_by) values ($1, $2, 'ai_chat', 'private', 'Trip plan', $3)",
+    [aiConv, org, user],
+  );
+  await q("insert into app.ai_chats (conversation_id, organization_id, owner_user_id) values ($1, $2, $3)", [
+    aiConv,
+    org,
+    user,
+  ]);
+  await q(
+    "insert into app.conversation_members (conversation_id, organization_id, member_kind, member_id, role) values ($1, $2, 'user', $3, 'owner')",
+    [aiConv, org, user],
+  );
+  await q(
+    "insert into app.messages (id, organization_id, conversation_id, seq, author_kind, author_id, body) values ($1, $2, $3, 1, 'user', $4, 'Plan the trip')",
+    [aiAsk, org, aiConv, user],
+  );
+  await q(
+    "insert into app.messages (id, organization_id, conversation_id, seq, author_kind, author_id, body, status) values ($1, $2, $3, 2, 'agent', null, 'Here is a plan', 'completed')",
+    [aiAnswer, org, aiConv],
+  );
+  await q(
+    "insert into app.ai_generations (id, organization_id, conversation_id, user_message_id, assistant_message_id, requester_user_id, backend, provider, model_id, status, instance_id, finished_at) values ($1, $2, $3, $4, $5, $6, 'mock', 'mock', 'mock-1', 'completed', 'api-1', now())",
+    [aiGen, org, aiConv, aiAsk, aiAnswer, user],
+  );
+  await q(
+    "insert into app.ai_chat_grants (organization_id, conversation_id, subject_kind, subject_id, level, granted_by) values ($1, $2, 'user', $3, 'chat', $4)",
+    [org, aiConv, guest, user],
+  );
+  await q(
+    "insert into app.ai_chat_grants (organization_id, conversation_id, subject_kind, subject_id, level, granted_by) values ($1, $2, 'org', null, 'view', $3)",
+    [org, aiConv, user],
+  );
+  await q(
+    `insert into app.ai_message_context (message_id, organization_id, conversation_id, author_kind, access, level, addressed, answered_by_generation_id, model) values ($1, $2, $3, 'user', 'owner', 'owner', true, $4, '{"backend":"mock","provider":"mock","modelId":"mock-1"}')`,
+    [aiAsk, org, aiConv, aiGen],
+  );
+  await q(
+    "insert into app.messages (id, organization_id, conversation_id, seq, author_kind, author_id, body) values ($1, $2, $3, 3, 'agent', $4, 'Deploy web to production: pending')",
+    [cardMsg, org, conv, agent],
+  );
+  await q(
+    `insert into app.message_cards (message_id, organization_id, conversation_id, agent_id, kind, title, fields, status, actions) values ($1, $2, $3, $4, 'approval', 'Deploy web to production', '[{"label":"Environment","value":"production"}]', 'pending', '[{"kind":"approve","label":"Approve"}]')`,
+    [cardMsg, org, conv, agent],
+  );
+  await q("insert into app.message_card_follows (organization_id, message_id, user_id) values ($1, $2, $3)", [
+    org,
+    cardMsg,
+    user,
+  ]);
 }
 
 const AI_CHAT_TABLES = [
@@ -275,6 +335,13 @@ const AI_CHAT_TABLES = [
   "app.ai_chat_policies",
   "app.user_model_credentials",
   "app.ai_chat_shares",
+] as const;
+
+const MULTIPLAYER_AI_TABLES = [
+  "app.ai_chat_grants",
+  "app.ai_message_context",
+  "app.message_cards",
+  "app.message_card_follows",
 ] as const;
 
 async function inTenant<T>(org: string, fn: () => Promise<T>): Promise<T> {
@@ -325,12 +392,7 @@ describe("tenant isolation (RLS)", () => {
         [A, `x-${owner.slice(0, 8)}`],
       ),
     ).rejects.toThrow(/agents_owner_scope_check/);
-    await expect(
-      migrator.query(
-        "insert into app.agents (organization_id, name, username, instructions, model_provider, model_id, scope, owner_user_id) values ($1, 'X', $2, 'x', 'mock', 'mock-1', 'team', $3)",
-        [A, `y-${owner.slice(0, 8)}`, owner],
-      ),
-    ).rejects.toThrow(/agents_owner_scope_check/);
+    // Phase 6 (AGENT-01) relaxed the rule: a team bot may now have an accountable owner (see the Phase 6 test).
     const key = (
       await migrator.query(
         "select dm_key from app.conversations where organization_id = $1 and kind = 'dm'",
@@ -670,6 +732,192 @@ describe("tenant isolation (RLS)", () => {
     }).toEqual(DEFAULT_AI_CHAT_POLICY);
   });
 
+  it("Phase 6: the four multiplayer AI chat tables are org-scoped, forced, seeded and invisible and unwritable across tenants", async () => {
+    const scoped = new Map((await orgScopedTables()).map((t) => [t.tbl, t]));
+    for (const tbl of MULTIPLAYER_AI_TABLES) {
+      expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true });
+      expect(scoped.get(tbl)?.policies, tbl).toBeGreaterThan(0);
+      const own = await inTenant(A, () => app.query(`select count(*)::int as n from ${tbl}`));
+      expect(own.rows[0].n, `${tbl} seeded`).toBeGreaterThan(0);
+      // As ocw_app in org A, nothing of org B is visible…
+      const cross = await inTenant(A, () =>
+        app.query(`select count(*)::int as n from ${tbl} where organization_id = $1`, [B]),
+      );
+      expect(cross.rows[0].n, `${tbl} cross-tenant`).toBe(0);
+      // …updatable or deletable…
+      for (const stmt of [
+        `update ${tbl} set organization_id = organization_id where organization_id = $1`,
+        `delete from ${tbl} where organization_id = $1`,
+      ]) {
+        const n = await inTenant(A, () => app.query(stmt, [B]).then((res) => res.rowCount));
+        expect(n, `${tbl}: ${stmt}`).toBe(0);
+      }
+      // …or insertable: a copy of B's row written from A's context is refused by the policy.
+      const row = await migrator.query(
+        `select row_to_json(t) as j from ${tbl} t where organization_id = $1 limit 1`,
+        [B],
+      );
+      await expect(
+        inTenant(A, () =>
+          app.query(`insert into ${tbl} select * from json_populate_record(null::${tbl}, $1::json)`, [
+            JSON.stringify(row.rows[0].j),
+          ]),
+        ),
+        `${tbl} cross-tenant insert`,
+      ).rejects.toThrow(/row-level security/);
+    }
+  });
+
+  it("Phase 6: one active grant per (chat, subject), org grants carry no subject id, a revoke frees the slot", async () => {
+    const g = (
+      await migrator.query(
+        "select conversation_id, subject_id, granted_by from app.ai_chat_grants where organization_id = $1 and subject_kind = 'user'",
+        [A],
+      )
+    ).rows[0];
+    const grant = (kind: string, subject: string | null, level = "chat") =>
+      app.query(
+        "insert into app.ai_chat_grants (organization_id, conversation_id, subject_kind, subject_id, level, granted_by) values ($1, $2, $3, $4, $5, $6)",
+        [A, g.conversation_id, kind, subject, level, g.granted_by],
+      );
+    // A second active grant for the same person, or a second organization grant, is refused.
+    await expect(inTenant(A, () => grant("user", g.subject_id, "view"))).rejects.toThrow(
+      /ai_chat_grants_active_uq/,
+    );
+    await expect(inTenant(A, () => grant("org", null))).rejects.toThrow(/ai_chat_grants_active_uq/);
+    // Once revoked, the slot is free again (the revoked row stays as history).
+    const regranted = await inTenant(A, async () => {
+      const revoked = await app.query(
+        "update app.ai_chat_grants set revoked_at = now(), revoked_by = granted_by where conversation_id = $1 and subject_kind = 'user' and subject_id = $2 and revoked_at is null",
+        [g.conversation_id, g.subject_id],
+      );
+      expect(revoked.rowCount).toBe(1);
+      const r = await grant("user", g.subject_id, "view");
+      const n = await app.query(
+        "select count(*)::int as n from app.ai_chat_grants where conversation_id = $1 and subject_id = $2",
+        [g.conversation_id, g.subject_id],
+      );
+      return { inserted: r.rowCount, rows: n.rows[0].n };
+    });
+    expect(regranted).toEqual({ inserted: 1, rows: 2 });
+    // Another subject coexists; subjects and levels are checked.
+    expect((await inTenant(A, () => grant("unit", randomUUID()))).rowCount).toBe(1);
+    await expect(inTenant(A, () => grant("org", randomUUID()))).rejects.toThrow(
+      /ai_chat_grants_subject_check/,
+    );
+    await expect(inTenant(A, () => grant("user", null))).rejects.toThrow(/ai_chat_grants_subject_check/);
+    await expect(inTenant(A, () => grant("team", randomUUID()))).rejects.toThrow(
+      /ai_chat_grants_subject_kind_check/,
+    );
+    await expect(inTenant(A, () => grant("user", randomUUID(), "owner"))).rejects.toThrow(
+      /ai_chat_grants_level_check/,
+    );
+  });
+
+  it("Phase 6: shared bots may have an owner and a unit, personal bots need an owner, a unit with bots stays", async () => {
+    const owner = (
+      await migrator.query("select user_id from app.org_members where organization_id = $1", [A])
+    ).rows[0].user_id;
+    const bot = (scope: string, ownerId: string | null, unitId: string | null) =>
+      app.query(
+        "insert into app.agents (organization_id, name, username, instructions, model_provider, model_id, scope, owner_user_id, unit_id) values ($1, 'X', $2, 'x', 'mock', 'mock-1', $3, $4, $5)",
+        [A, `p6-${randomUUID().slice(0, 8)}`, scope, ownerId, unitId],
+      );
+    expect((await inTenant(A, () => bot("team", owner, null))).rowCount).toBe(1);
+    expect((await inTenant(A, () => bot("team", null, null))).rowCount).toBe(1);
+    await expect(inTenant(A, () => bot("personal", null, null))).rejects.toThrow(/agents_owner_scope_check/);
+    await expect(
+      inTenant(A, async () => {
+        const unit = randomUUID();
+        await app.query(
+          "insert into app.org_units (id, organization_id, kind, name, path) values ($1, $2, 'team', 'Platform', ARRAY[$1]::uuid[])",
+          [unit, A],
+        );
+        expect((await bot("team", owner, unit)).rowCount).toBe(1);
+        await app.query("delete from app.org_units where id = $1", [unit]);
+      }),
+    ).rejects.toThrow(/agents_unit_id_org_units_id_fkey/);
+    const fk = await migrator.query(
+      "select confdeltype from pg_constraint where conname = 'agents_unit_id_org_units_id_fkey'",
+    );
+    expect(fk.rows).toEqual([{ confdeltype: "r" }]);
+  });
+
+  it("Phase 6: notification kinds, card checks, card follows cascade, a deleted generation unlinks its messages", async () => {
+    const ctx = (
+      await migrator.query(
+        "select message_id, conversation_id, answered_by_generation_id from app.ai_message_context where organization_id = $1",
+        [A],
+      )
+    ).rows[0];
+    const card = (
+      await migrator.query(
+        "select message_id, conversation_id, agent_id from app.message_cards where organization_id = $1",
+        [A],
+      )
+    ).rows[0];
+    const user = (await migrator.query("select user_id from app.org_members where organization_id = $1", [A]))
+      .rows[0].user_id;
+    const notify = (kind: string, messageId: string, conversationId: string) =>
+      app.query(
+        "insert into app.notifications (organization_id, user_id, kind, conversation_id, message_id, actor_kind, actor_id) values ($1, $2, $3, $4, $5, 'user', $2)",
+        [A, user, kind, conversationId, messageId],
+      );
+    const kinds = await inTenant(A, async () => [
+      (await notify("ai_chat_shared", ctx.message_id, ctx.conversation_id)).rowCount,
+      (await notify("card_updated", card.message_id, card.conversation_id)).rowCount,
+    ]);
+    expect(kinds).toEqual([1, 1]);
+    await expect(inTenant(A, () => notify("poke", card.message_id, card.conversation_id))).rejects.toThrow(
+      /notifications_kind_check/,
+    );
+
+    const cardWith = (kind: string, status: string, decision: string | null, title = "Report") =>
+      inTenant(A, async () => {
+        const m = (
+          await app.query(
+            "insert into app.messages (organization_id, conversation_id, seq, author_kind, author_id, body) values ($1, $2, 50, 'agent', $3, 'summary') returning id",
+            [A, card.conversation_id, card.agent_id],
+          )
+        ).rows[0].id;
+        return app.query(
+          "insert into app.message_cards (message_id, organization_id, conversation_id, agent_id, kind, title, status, decision) values ($1, $2, $3, $4, $5, $6, $7, $8)",
+          [m, A, card.conversation_id, card.agent_id, kind, title, status, decision],
+        );
+      });
+    expect((await cardWith("report", "succeeded", "approved")).rowCount).toBe(1);
+    await expect(cardWith("poll", "pending", null)).rejects.toThrow(/message_cards_kind_check/);
+    await expect(cardWith("report", "done", null)).rejects.toThrow(/message_cards_status_check/);
+    await expect(cardWith("report", "pending", "maybe")).rejects.toThrow(/message_cards_decision_check/);
+    await expect(cardWith("report", "pending", null, "x".repeat(201))).rejects.toThrow(
+      /message_cards_title_len_check/,
+    );
+
+    // Deleting a card removes its follows.
+    const follows = await inTenant(A, async () => {
+      await app.query("delete from app.message_cards where message_id = $1", [card.message_id]);
+      return (
+        await app.query("select count(*)::int as n from app.message_card_follows where message_id = $1", [
+          card.message_id,
+        ])
+      ).rows[0].n;
+    });
+    expect(follows).toBe(0);
+
+    // Deleting a generation keeps the message context and only unlinks it.
+    expect(ctx.answered_by_generation_id).not.toBeNull();
+    const after = await inTenant(A, async () => {
+      await app.query("delete from app.ai_generations where id = $1", [ctx.answered_by_generation_id]);
+      return (
+        await app.query(
+          "select answered_by_generation_id from app.ai_message_context where message_id = $1",
+          [ctx.message_id],
+        )
+      ).rows;
+    });
+    expect(after).toEqual([{ answered_by_generation_id: null }]);
+  });
+
   it("Phase 4: accent-insensitive Spanish search, a stored tsvector and the search indexes", async () => {
     const match = await migrator.query(
       "select to_tsvector('app.ocw_es', 'migración') @@ websearch_to_tsquery('app.ocw_es', 'migracion') as ok",
@@ -735,7 +983,7 @@ describe("tenant isolation (RLS)", () => {
         const r = await tx.execute("select count(*)::int as n from app.conversations");
         return (r.rows[0] as { n: number }).n;
       });
-      expect(n).toBe(3); // channel + work-session conversation + the 3.1 DM fixture
+      expect(n).toBe(4); // channel + work-session conversation + the 3.1 DM + the Phase 6 AI chat
     } finally {
       await db.close();
     }
@@ -767,7 +1015,7 @@ describe("tenant isolation (RLS)", () => {
         const r = await tx.execute("select count(*)::int as n from app.conversations");
         return (r.rows[0] as { n: number }).n;
       });
-      expect(n).toBe(3); // channel + work-session conversation + the 3.1 DM fixture
+      expect(n).toBe(4); // channel + work-session conversation + the 3.1 DM + the Phase 6 AI chat
     } finally {
       process.off("uncaughtException", onUncaught);
       await db.close();
@@ -781,7 +1029,7 @@ describe("tenant isolation (RLS)", () => {
         const r = await tx.execute("select count(*)::int as n from app.conversations");
         return (r.rows[0] as { n: number }).n;
       });
-      expect(n).toBe(3); // channel + work-session conversation + the 3.1 DM fixture
+      expect(n).toBe(4); // channel + work-session conversation + the 3.1 DM + the Phase 6 AI chat
       // Same single pooled connection, no tenant context now.
       const after = await db.pool.query("select count(*)::int as n from app.conversations");
       expect(after.rows[0].n).toBe(0);

@@ -2,7 +2,7 @@
 
 import { type ConversationRef, MENTION_TOKEN_RE, type Notification } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
-import { AtSign, CheckCheck, Hash, Lock, MessageCircle, Users } from "lucide-react";
+import { AtSign, CheckCheck, Hash, Lock, MessageCircle, MessagesSquare, Users } from "lucide-react";
 import Link from "next/link";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -35,6 +35,8 @@ const KIND_LABEL: Record<Notification["kind"], string> = {
   dm: "sent you a message",
   group_dm: "wrote in a group",
   thread_reply: "replied in a thread",
+  ai_chat_shared: "shared an AI chat with you",
+  card_updated: "updated a card you follow",
 };
 
 const FILTERS: Array<{ id: NotificationFilter; label: string }> = [
@@ -44,13 +46,15 @@ const FILTERS: Array<{ id: NotificationFilter; label: string }> = [
 
 function ConversationLabel({ conversation }: { conversation: ConversationRef }) {
   const Icon =
-    conversation.kind === "channel"
-      ? conversation.visibility === "private"
-        ? Lock
-        : Hash
-      : conversation.kind === "group"
-        ? Users
-        : MessageCircle;
+    conversation.kind === "ai_chat"
+      ? MessagesSquare
+      : conversation.kind === "channel"
+        ? conversation.visibility === "private"
+          ? Lock
+          : Hash
+        : conversation.kind === "group"
+          ? Users
+          : MessageCircle;
   return (
     <span data-testid="inbox-conversation" className="flex min-w-0 items-center gap-0.5 text-foreground/75">
       <Icon className="size-3 shrink-0" />
@@ -79,19 +83,34 @@ function SnippetText({ text }: { text: string }) {
   return <>{parts}</>;
 }
 
+/** Where an item opens: an AI chat at its page (06-08), anything else at the message's permalink. */
+function hrefOf(n: Notification): string {
+  if (n.conversation.kind === "ai_chat") return `/chat/ai/${n.conversation.id}`;
+  return permalinkPath(
+    {
+      id: n.conversation.id,
+      kind: n.conversation.kind === "channel" ? "channel" : n.conversation.kind === "group" ? "group" : "dm",
+    },
+    n.messageId,
+    n.threadRootId,
+  );
+}
+
+/** What happened, after the actor's name: a share names the chat (06-08), everything else is the kind's label. */
+function actionOf(n: Notification): string {
+  if (n.kind === "ai_chat_shared" && n.conversation.kind === "ai_chat") {
+    return `shared “${n.conversation.label}” with you`;
+  }
+  return KIND_LABEL[n.kind];
+}
+
 function InboxItem({ n, now, onOpen }: { n: Notification; now: number; onOpen: (n: Notification) => void }) {
   const unread = n.readAt === null;
+  // A share's own line says everything; its notice text ("… shared this chat with you · Can chat") is not repeated.
+  const shared = n.kind === "ai_chat_shared";
   return (
     <Link
-      href={permalinkPath(
-        {
-          id: n.conversation.id,
-          kind:
-            n.conversation.kind === "channel" ? "channel" : n.conversation.kind === "group" ? "group" : "dm",
-        },
-        n.messageId,
-        n.threadRootId,
-      )}
+      href={hrefOf(n)}
       onClick={() => onOpen(n)}
       data-testid="inbox-item"
       data-notification-id={n.id}
@@ -120,7 +139,10 @@ function InboxItem({ n, now, onOpen }: { n: Notification; now: number; onOpen: (
               {n.actor.displayName}
             </span>
             {n.actor.kind === "agent" ? <BotBadge className="relative -top-px ml-1" /> : null}
-            <span className="text-muted-foreground"> {KIND_LABEL[n.kind]}</span>
+            <span className="text-muted-foreground" data-testid="inbox-action">
+              {" "}
+              {actionOf(n)}
+            </span>
           </span>
           <time
             dateTime={n.createdAt}
@@ -133,38 +155,55 @@ function InboxItem({ n, now, onOpen }: { n: Notification; now: number; onOpen: (
           </time>
         </span>
         <span className="flex min-w-0 items-center gap-1 text-[12px] text-muted-foreground">
-          <ConversationLabel conversation={n.conversation} />
+          {shared ? (
+            <span
+              data-testid="inbox-conversation"
+              className="flex min-w-0 items-center gap-0.5 text-foreground/75"
+            >
+              <MessagesSquare className="size-3 shrink-0" />
+              <span className="truncate">AI chat</span>
+            </span>
+          ) : (
+            <ConversationLabel conversation={n.conversation} />
+          )}
           {n.threadRootId ? <span className="shrink-0">· thread</span> : null}
+          {shared && unread ? <UnreadDot className="mt-0 ml-auto" /> : null}
         </span>
-        <span className="flex min-w-0 items-start gap-2">
-          <span
-            data-testid="inbox-snippet"
-            className={cn(
-              "line-clamp-2 min-w-0 flex-1 break-words text-[13.5px] leading-snug",
-              unread ? "text-foreground/90" : "text-muted-foreground",
-            )}
-          >
-            <SnippetText text={n.snippet} />
+        {shared ? null : (
+          <span className="flex min-w-0 items-start gap-2">
+            <span
+              data-testid="inbox-snippet"
+              className={cn(
+                "line-clamp-2 min-w-0 flex-1 break-words text-[13.5px] leading-snug",
+                unread ? "text-foreground/90" : "text-muted-foreground",
+              )}
+            >
+              <SnippetText text={n.snippet} />
+            </span>
+            {unread ? <UnreadDot /> : null}
           </span>
-          {unread ? (
-            <>
-              <span className="sr-only">(unread)</span>
-              <span
-                aria-hidden
-                data-testid="inbox-unread-dot"
-                className="mt-1.5 size-2 shrink-0 rounded-full bg-primary"
-              />
-            </>
-          ) : null}
-        </span>
+        )}
       </span>
     </Link>
   );
 }
 
+function UnreadDot({ className }: { className?: string }) {
+  return (
+    <>
+      <span className="sr-only">(unread)</span>
+      <span
+        aria-hidden
+        data-testid="inbox-unread-dot"
+        className={cn("mt-1.5 size-2 shrink-0 rounded-full bg-primary", className)}
+      />
+    </>
+  );
+}
+
 /**
- * `/chat/mentions` (CHAT-08): the member's inbox. "Mentions" lists @mentions, @channel and @here; "All activity" adds
- * DMs, group DMs and thread replies. Opening an item marks it read and jumps to the message (permalink). The server
+ * `/chat/mentions` (CHAT-08): the member's inbox. "Mentions" lists @mentions, @channel, @here and AI chats shared with
+ * the member by name (06-08); "All activity" adds DMs, group DMs and thread replies. AI chat items open the chat. Opening an item marks it read and jumps to the message (permalink). The server
  * only returns what the member can read now, with snippets computed at read time (Pitfall 9); live updates come
  * from the sidebar's `user:` subscription (no subscription of its own, Pitfall 13).
  */
@@ -209,8 +248,8 @@ export function Inbox() {
   const emptyTitle = filter === "mentions" ? "No mentions yet" : "No activity yet";
   const emptyText =
     filter === "mentions"
-      ? "When someone @mentions you, or uses @channel or @here where you are, it shows up here."
-      : "Mentions, direct messages and replies in your threads show up here.";
+      ? "When someone @mentions you, uses @channel or @here where you are, or shares an AI chat with you, it shows up here."
+      : "Mentions, direct messages, replies in your threads and AI chats shared with you show up here.";
 
   return (
     <MentionContext.Provider value={mentionCtx}>

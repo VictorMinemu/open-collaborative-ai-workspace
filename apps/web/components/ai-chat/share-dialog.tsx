@@ -1,33 +1,79 @@
 "use client";
 
-import type { AiChatShare } from "@ocw/contracts";
+import type { AiChatShare, Permission } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, Link2, Link2Off, Lock } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Separator } from "@/components/ui/separator";
 import { Spinner } from "@/components/ui/spinner";
 import { useCopy } from "@/hooks/use-copy";
 import { createAiShare, revokeAiShare, shareUrl, useAiChatShares } from "@/lib/ai-share-queries";
 import { errorMessage } from "@/lib/api";
 import { useMe } from "@/lib/queries";
 import { cn } from "@/lib/utils";
+import { SharePeople } from "./share-people";
 
 /**
- * Share an AI chat (05-13, AICHAT-09): a read-only snapshot link for colleagues signed in to the same organization,
- * never public. "Create link" freezes the chat as it is now and shows the link to copy; the chat's existing links are
- * listed below. A centered dialog on a desktop, a bottom sheet at 390 (the dialog primitive does both).
+ * Share an AI chat (D-03, D-08, P-13). Two ways, one dialog — a centered dialog on a desktop, a bottom sheet at 390
+ * (the dialog primitive does both):
+ * - "People and teams" (06-03, 06-12; MULTI-01): give a colleague, a department, a team, a project or the whole
+ *   organization access to this very chat, to write ("Can chat") or to read ("Can view"); change a level or remove
+ *   access. The dialog says exactly what they will see before anything is shared (`SharePeople`). Owner only
+ *   (`ai_chat.share`, decided by the server).
+ * - "Read-only link (frozen copy)" (05-13, AICHAT-09): a snapshot link for colleagues signed in to the same
+ *   organization, never public. "Create link" freezes the chat as it is now; the chat's existing links are listed.
  */
 export function ShareDialog({
   chatId,
   open,
   onOpenChange,
+  viewerCan,
 }: {
   chatId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** The server's decisions for the viewer on this chat (`AiChatDetail.viewerCan`). */
+  viewerCan: readonly Permission[];
 }) {
+  const [resetKey, setResetKey] = useState(0);
+  const me = useMe();
+  const canShare = viewerCan.includes("ai_chat.share");
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        onOpenChange(next);
+        if (!next) setResetKey((k) => k + 1);
+      }}
+    >
+      <DialogContent data-testid="ai-share-dialog" className="gap-5 sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle>Share this chat</DialogTitle>
+          <DialogDescription className="text-[13.5px] leading-snug">
+            Bring colleagues into this conversation, or send a read-only copy.
+          </DialogDescription>
+        </DialogHeader>
+        {canShare ? (
+          <SharePeople
+            key={`people-${resetKey}`}
+            chatId={chatId}
+            orgName={me.data?.organization.name ?? "your organization"}
+          />
+        ) : null}
+        {canShare ? <Separator /> : null}
+        <LinkSection key={`link-${resetKey}`} chatId={chatId} open={open} />
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------- read-only link (05-13)
+
+/** The Phase 5 snapshot-link flow, unchanged, under its Phase 6 name. */
+function LinkSection({ chatId, open }: { chatId: string; open: boolean }) {
   const qc = useQueryClient();
   const me = useMe();
   const shares = useAiChatShares(chatId, open);
@@ -52,59 +98,54 @@ export function ShareDialog({
   const others = (shares.data?.shares ?? []).filter((s) => s.id !== fresh?.id);
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        onOpenChange(next);
-        if (!next) setFresh(null);
-      }}
-    >
-      <DialogContent data-testid="ai-share-dialog" className="gap-4 sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>Share a snapshot</DialogTitle>
-          <DialogDescription data-testid="ai-share-audience" className="text-[13.5px] leading-snug">
-            Anyone signed in to {orgName} with the link can read this snapshot. It is never public.
-          </DialogDescription>
-        </DialogHeader>
+    <section data-testid="ai-share-links" aria-labelledby="ai-share-links-heading" className="grid gap-3">
+      <div className="grid gap-1">
+        <h3 id="ai-share-links-heading" className="font-semibold text-[14px] tracking-tight">
+          Read-only link (frozen copy)
+        </h3>
+        <p data-testid="ai-share-audience" className="text-[13px] text-muted-foreground leading-snug">
+          Anyone signed in to {orgName} with the link can read this snapshot. It is never public.
+        </p>
+      </div>
 
-        <div className="flex items-start gap-2.5 rounded-xl border bg-muted/30 px-3.5 py-3 text-[13px] text-muted-foreground leading-snug">
-          <Lock aria-hidden className="mt-0.5 size-3.5 shrink-0" />
-          <p>
-            The link shows the chat as it is now, read-only. Messages you send later are not included, and the
-            chat itself stays private to you.
-          </p>
-        </div>
+      <div className="flex items-start gap-2.5 rounded-xl border bg-muted/30 px-3.5 py-3 text-[13px] text-muted-foreground leading-snug">
+        <Lock aria-hidden className="mt-0.5 size-3.5 shrink-0" />
+        <p>
+          The link shows the chat as it is now, read-only. Messages sent later are not included, and the link
+          gives no access to the chat itself.
+        </p>
+      </div>
 
-        {current ? (
-          <LinkRow chatId={chatId} share={current} highlight />
-        ) : (
-          <Button
-            data-testid="ai-share-create"
-            onClick={() => void create()}
-            disabled={creating}
-            className="h-10 w-full sm:h-9 sm:w-fit"
-          >
-            {creating ? <Spinner /> : <Link2 />}
-            Create link
-          </Button>
-        )}
+      {current ? (
+        <LinkRow chatId={chatId} share={current} highlight />
+      ) : (
+        <Button
+          variant="outline"
+          data-testid="ai-share-create"
+          onClick={() => void create()}
+          disabled={creating}
+          className="h-10 w-full sm:h-9 sm:w-fit"
+        >
+          {creating ? <Spinner /> : <Link2 />}
+          Create link
+        </Button>
+      )}
 
-        {others.length > 0 ? (
-          <section className="grid gap-1.5" data-testid="ai-share-list">
-            <h3 className="font-medium text-[12.5px] text-muted-foreground">
-              {current ? "Earlier links" : "Links to this chat"}
-            </h3>
-            <ul className="grid gap-1.5">
-              {others.map((s) => (
-                <li key={s.id}>
-                  <LinkRow chatId={chatId} share={s} />
-                </li>
-              ))}
-            </ul>
-          </section>
-        ) : null}
-      </DialogContent>
-    </Dialog>
+      {others.length > 0 ? (
+        <section className="grid gap-1.5" data-testid="ai-share-list">
+          <h4 className="font-medium text-[12.5px] text-muted-foreground">
+            {current ? "Earlier links" : "Links to this chat"}
+          </h4>
+          <ul className="grid gap-1.5">
+            {others.map((s) => (
+              <li key={s.id}>
+                <LinkRow chatId={chatId} share={s} />
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+    </section>
   );
 }
 

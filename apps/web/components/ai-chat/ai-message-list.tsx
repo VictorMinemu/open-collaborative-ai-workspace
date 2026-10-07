@@ -14,6 +14,8 @@ export function AiMessageList({
   messages,
   textOf,
   onRegenerated,
+  canRegenerate,
+  regenerateBlocked = false,
   live = true,
 }: {
   chatId: string;
@@ -23,13 +25,27 @@ export function AiMessageList({
   textOf: (m: Message) => string;
   /** Applies a regenerate answered by the API (05-06). */
   onRegenerated?: (response: SendAiMessageResponse) => void;
+  /**
+   * Whether the viewer may regenerate this answer (06-11): in a shared chat only its requester or someone holding
+   * `ai_chat.manage`, as the API decides; absent = Phase 5 (the owner's own chat).
+   */
+  canRegenerate?: (answer: Message) => boolean;
+  /** Messages are waiting for the AI (06-06 refuses a regenerate with `queue_pending`). */
+  regenerateBlocked?: boolean;
 }) {
   const streamed = messages.reduce((n, m) => n + (m.status === "streaming" ? textOf(m).length : 0), 0);
   const last = messages.at(-1);
   const writing = messages.some((m) => m.status === "streaming");
   // Only the chat's last answer can be regenerated, and only while nothing is being written (05-06).
+  // A persona's message (an agent with an id, 06-10) is not the model's answer.
   const regenerableId =
-    onRegenerated && last?.authorKind === "agent" && last.status !== "streaming" ? last.id : null;
+    onRegenerated &&
+    last?.authorKind === "agent" &&
+    last.authorId === null &&
+    last.status !== "streaming" &&
+    (canRegenerate?.(last) ?? true)
+      ? last.id
+      : null;
   const { ref, onScroll } = useStickToBottom(
     `${messages.length}:${last?.id ?? ""}:${last?.status ?? ""}:${streamed}`,
     chatId,
@@ -56,7 +72,7 @@ export function AiMessageList({
             last={m.id === last?.id}
             regenerate={
               onRegenerated && m.id === regenerableId
-                ? { chatId, disabled: writing, onRegenerated }
+                ? { chatId, disabled: writing || regenerateBlocked, onRegenerated }
                 : undefined
             }
           />

@@ -8,6 +8,7 @@
 //
 // Directives in the last user message:
 //   [[slow]]                     the echo, then counting " 1" … " 40": 40 deltas 100 ms apart (stop tests)
+//   [[slow:<N>]]                 the same 40 deltas paced over about N seconds (1–60; multiplayer queue specs)
 //   [[plan:usage_limit]]         3 deltas, then response.failed `subscription_sharing_usage_limit_exceeded`
 //   [[plan:not_eligible]]        403 `subscription_sharing_user_not_eligible` before streaming
 //   [[plan:invalid_user]]        401 `subscription_sharing_invalid_user`
@@ -27,8 +28,14 @@
 // title arrives after the same 4 s, unchanged. server.mjs applies
 // the same rule to chat completions (system/developer message) and Anthropic (`system`).
 //
+// Attributed prompts (06-03, attribution.mjs): when the instructions carry a `<participants>` roster and the last user
+// text a `<turn_context>`, the echo becomes `Hi <names>! (participants: <humans>) Echo: <last message body>`, with the
+// same directives, pacing, citation and attachment suffix.
+//
 // Plan bearers (`fake-plan-…`) get the ChatGPT-plan preview rules: `store` must be false, `stream` true, no
 // `system` input item and none of PLAN_FORBIDDEN_KEYS, else 400 `fake_preview_violation` naming the key.
+
+import { attributedReply } from "./attribution.mjs";
 
 /** Request fields the ChatGPT plan preview route rejects (developers.openai.com/siwc, preview limitations). */
 export const PLAN_FORBIDDEN_KEYS = [
@@ -256,14 +263,21 @@ export async function handleResponses(req, res, body, ctx = {}) {
         ?.slice(4)
         .trim() || null;
   const search = webQuery && offersWebSearch(body) ? { query: webQuery, url: fakeResultUrl(webQuery) } : null;
-  const echo = `Echo: ${withoutDirectives(userText)}${attachmentSuffix(
+  const attributed = title
+    ? null
+    : attributedReply({ instructions: responsesInstructions(body), lastUserText: userText });
+  const echo = `${attributed ?? `Echo: ${withoutDirectives(userText)}`}${attachmentSuffix(
     partCount(user, "input_image"),
     partCount(user, "input_file"),
   )}`;
   const citation = search ? ` ([example.com](${search.url}))` : "";
   const reply = title ? titleReply(userText) : `${echo}${citation}`;
+  // `[[slow:N]]`: the same slow stream, paced over about N seconds.
+  const slowSecs = Number(directives.map((d) => /^slow:(\d{1,2})$/u.exec(d)?.[1]).find(Boolean) ?? 0);
+  const slowInterval =
+    slowSecs >= 1 ? Math.round((Math.min(slowSecs, 60) * 1000) / SLOW_DELTAS) : SLOW_INTERVAL_MS;
   // A slow title is the same title after the same 4 s (no counting appended to it).
-  const slow = has("slow") && !title;
+  const slow = (has("slow") || slowSecs >= 1) && !title;
   if (has("slow") && title) await sleep(SLOW_DELTAS * SLOW_INTERVAL_MS);
   const usageLimit = has("plan:usage_limit");
   const all = slow ? slowPieces(reply) : pieces(reply);
@@ -323,7 +337,7 @@ export async function handleResponses(req, res, body, ctx = {}) {
   for (const delta of deltas) {
     if (closed) return;
     ev("response.output_text.delta", { item_id: itemId, output_index: msgIndex, content_index: 0, delta });
-    if (slow) await sleep(SLOW_INTERVAL_MS);
+    if (slow) await sleep(slowInterval);
   }
   const text = deltas.join("");
   const usage = {

@@ -170,7 +170,7 @@ test("owner: Bot settings in the DM header toggles internet; the next turn carri
     await expect(sheet).toBeHidden();
 
     // ---- the very next turn carries the web tools (and memory, in his DM)
-    await ask(sam.page, "what's new?", "[turn tools: ocw_memory_save,web_fetch,web_search]");
+    await ask(sam.page, "what's new?", "[turn tools: ocw_agent_card,ocw_memory_save,web_fetch,web_search]");
     await expect(sam.page.getByTestId("bot-settings")).toBeVisible();
     await bothThemes(sam.page, `bot-settings-dm-${tag}`);
 
@@ -295,7 +295,7 @@ test("admin: Settings › Bot policy turns internet off for personal bots; the o
     await expect(sheet.getByTestId("capability-memory")).toBeEnabled();
     await bothThemes(sam.page, `bot-settings-denied-${tag}`);
     await sam.page.keyboard.press("Escape");
-    await ask(sam.page, "anything new today?", "[turn tools: ocw_memory_save]");
+    await ask(sam.page, "anything new today?", "[turn tools: ocw_agent_card,ocw_memory_save]");
     // The same gated web call is no longer even offered to the bot.
     await ask(sam.page, 'look it up [[call web_search {"query":"ocw"}]]', "Tool web_search: not offered");
 
@@ -307,7 +307,11 @@ test("admin: Settings › Bot policy turns internet off for personal bots; the o
     expect(sent.ok(), "post in the team bot DM").toBe(true);
     const teamReply = () => plugin.replies.slice(before).find((r) => r.mention.conversation.id === teamDm);
     await plugin.waitUntil(() => teamReply() !== undefined);
-    expect([...(teamReply()?.mention.turn?.tools ?? [])].sort()).toEqual(["web_fetch", "web_search"]);
+    expect([...(teamReply()?.mention.turn?.tools ?? [])].sort()).toEqual([
+      "ocw_agent_card",
+      "web_fetch",
+      "web_search",
+    ]);
     await sam.context.close();
 
     // ---- governance: disable asks for confirmation, then the row reads Disabled

@@ -42,7 +42,9 @@ export type ResourceState =
   /** Channel resources: a direct conversation (fixed membership). */
   | "dm"
   /** Channel resources: a private AI chat with one owner (Phase 5, P-03). */
-  | "ai_chat";
+  | "ai_chat"
+  /** Agents: a persona that belongs to a department, team or project (AGENT-01); `unitPath` ends with it. */
+  | "unit_scoped";
 export type ResourceType =
   | "organization"
   | "unit"

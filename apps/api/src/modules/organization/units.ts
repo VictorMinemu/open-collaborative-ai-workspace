@@ -18,8 +18,8 @@ import {
   UnitRole,
   UpdateUnitMemberRequest,
 } from "@ocw/contracts";
-import { orgMembers, orgUnits, permissionRules, type Tx, tenantOf, unitMemberships } from "@ocw/db";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { agents, orgMembers, orgUnits, permissionRules, type Tx, tenantOf, unitMemberships } from "@ocw/db";
+import { and, asc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { type App, type Core, tenant } from "../../core";
 import { badRequest, conflict, notFound } from "../../lib/errors";
@@ -340,6 +340,19 @@ export function registerUnitRoutes(app: App, core: Core, perms: PermissionServic
           .where(eq(orgUnits.parentId, unit.id))
           .limit(1);
         if (child) throw conflict("Move or delete the units inside it first", "unit_has_children");
+        // AGENT-01 (T-06-07-03): a unit persona never silently widens to the organization; it is moved or deleted
+        // first. Checked before the RESTRICT foreign key would fire, so the caller gets a reason.
+        const [bot] = await tx
+          .select({ id: agents.id })
+          .from(agents)
+          .where(and(eq(agents.unitId, unit.id), isNull(agents.deletedAt)))
+          .limit(1);
+        if (bot) throw conflict("Move or delete the bots of this unit first", "unit_has_bots");
+        // Deleted personas keep their history, not their unit: release the reference.
+        await tx
+          .update(agents)
+          .set({ unitId: null })
+          .where(and(eq(agents.unitId, unit.id), isNotNull(agents.deletedAt)));
         // Memberships and scoped rules cascade with the unit: record exactly what goes with it.
         const removedMemberIds = (
           await tx

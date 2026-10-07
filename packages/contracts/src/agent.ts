@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { Id, IsoDateTime, isReservedHandle } from "./common";
-import { Permission } from "./permissions";
+import { Permission, UnitKind } from "./permissions";
 
 /**
  * Bots (agents) and model providers. Agents are first-class principals (AGENTS principle 2): their own
@@ -79,8 +79,18 @@ export const Agent = z.object({
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   scope: AgentScope,
-  /** Personal bots only: the member who owns it (and the only one who can see or use it). */
+  /**
+   * The member accountable for the bot. Personal bots: the owner (and the only one who can see or use it). Shared
+   * personas (AGENT-01): optional; the owner reads and configures it.
+   */
   ownerUserId: Id.nullable(),
+  /**
+   * AGENT-01: the department, team or project a shared persona belongs to (null = the organization). Members of
+   * that unit's subtree, its leads, its owner and admins see and mention it. Always null for personal bots.
+   */
+  unitId: Id.nullable().optional(),
+  /** The persona's unit as the caller sees it (name and kind for the scope badge); null = the organization. */
+  unit: z.object({ id: Id, name: z.string(), kind: UnitKind }).nullable().optional(),
   /**
    * What the caller may do with this bot, decided per bot by the resolver (`bot.read`, `bot.configure`,
    * `bot.manage`). Lists and details carry it; realtime payloads omit it (the client keeps its last value).
@@ -89,7 +99,14 @@ export const Agent = z.object({
 });
 export type Agent = z.infer<typeof Agent>;
 
-export const AgentList = z.object({ agents: z.array(Agent) });
+export const AgentList = z.object({
+  agents: z.array(Agent),
+  /**
+   * Where the caller may create a shared persona (AGENT-01): the organization (`bot.manage`) and the units where the
+   * resolver allows `bot.manage_unit` (admins: every unit; unit leads: the subtrees they lead).
+   */
+  create: z.object({ organization: z.boolean(), unitIds: z.array(Id) }).optional(),
+});
 export type AgentList = z.infer<typeof AgentList>;
 
 export const CreateAgentRequest = z.object({
@@ -101,6 +118,10 @@ export const CreateAgentRequest = z.object({
   instructions: z.string().trim().min(1).max(20_000),
   modelProvider: ModelProviderKind,
   modelId: ModelId,
+  /** AGENT-01: a department, team or project persona (`bot.manage_unit` on it); omitted = the organization. */
+  unitId: Id.optional(),
+  /** An active member accountable for it. Default: none for organization personas, the creator for unit ones. */
+  ownerUserId: Id.optional(),
 });
 export type CreateAgentRequest = z.infer<typeof CreateAgentRequest>;
 
@@ -135,6 +156,13 @@ export const UpdateAgentRequest = z.object({
   modelId: ModelId.optional(),
   /** false → status `disabled` (no mentions delivered); true → re-provision in the cell. */
   enabled: z.boolean().optional(),
+  /**
+   * AGENT-01: move a shared persona to another unit (null = the organization); needs the right on both sides.
+   * Personal bots never take a unit (400 `personal_bot_unit`).
+   */
+  unitId: Id.nullable().optional(),
+  /** Reassign (or clear, null) the accountable owner of a shared persona; an active member. */
+  ownerUserId: Id.nullable().optional(),
 });
 export type UpdateAgentRequest = z.infer<typeof UpdateAgentRequest>;
 
