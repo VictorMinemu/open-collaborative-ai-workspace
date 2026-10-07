@@ -281,7 +281,8 @@ export function ChatgptConnectDialog({
                   value={address}
                   onChange={(e) => {
                     setAddress(e.target.value);
-                    if (error) setError(null);
+                    // After a "start again" error there is no sign-in to complete: keep saying why Connect is off.
+                    if (error && flow) setError(null);
                   }}
                   placeholder="http://127.0.0.1:1455/auth/callback?code=…"
                   spellCheck={false}

@@ -86,6 +86,7 @@ async function signIn(opts = {}) {
     redirect_uri: REDIRECT,
     client_id: clientId,
     code_verifier: verifier,
+    resource: "https://api.openai.com/v1",
   });
   assert.equal(res.status, 200);
   return { tokens: await res.json(), clientId };
@@ -168,6 +169,21 @@ describe("fake SIWC: token endpoint", () => {
       redirect_uri: REDIRECT,
       client_id: url.searchParams.get("client_id"),
       code_verifier: b64url(randomBytes(32)),
+      resource: "https://api.openai.com/v1",
+    });
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).error, "invalid_grant");
+  });
+
+  it("refuses a code exchange without the authorize request's resource with invalid_grant", async () => {
+    const { location, verifier } = await authorize();
+    const url = new URL(location);
+    const res = await form("/oauth/token", {
+      grant_type: "authorization_code",
+      code: url.searchParams.get("code"),
+      redirect_uri: REDIRECT,
+      client_id: url.searchParams.get("client_id"),
+      code_verifier: verifier,
     });
     assert.equal(res.status, 400);
     assert.equal((await res.json()).error, "invalid_grant");
@@ -183,6 +199,7 @@ describe("fake SIWC: token endpoint", () => {
       redirect_uri: REDIRECT,
       client_id: clientId,
       code_verifier: verifier,
+      resource: "https://api.openai.com/v1",
     };
     const res = await form("/oauth/token", fields);
     assert.equal(res.status, 200);
@@ -226,6 +243,7 @@ describe("fake SIWC: token endpoint", () => {
       redirect_uri: REDIRECT,
       client_id: url.searchParams.get("client_id"),
       code_verifier: verifier,
+      resource: "https://api.openai.com/v1",
     });
     assert.equal(res.status, 503);
   });
@@ -276,6 +294,7 @@ describe("fake SIWC: token endpoint", () => {
       grant_type: "refresh_token",
       refresh_token: tokens.refresh_token,
       client_id: clientId,
+      resource: "https://api.openai.com/v1",
     });
     assert.equal((await res.json()).error, "invalid_grant");
   });
