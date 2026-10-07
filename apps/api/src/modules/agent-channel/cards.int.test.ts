@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { AgentCard, EventTypes } from "@ocw/contracts";
+import { AgentCard, AgentCardActionEvent, EventTypes } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { FakeCellPlugin } from "../../../../../e2e/support/fake-cell-plugin";
@@ -492,5 +492,279 @@ describe("tenant isolation and agent ownership (Task 1, security review)", () =>
     expect(patched.status).toBe(403);
     expect(errorCode(patched)).toBe("not_card_author");
     await unchanged();
+  });
+});
+
+// ---------------------------------------------------------------- Task 2: follow, notifications, decisions
+
+const follow = (as: TestClient, messageId: string) => as.request("POST", `/api/v1/cards/${messageId}/follow`);
+const unfollow = (as: TestClient, messageId: string) =>
+  as.request("DELETE", `/api/v1/cards/${messageId}/follow`);
+const decide = (as: TestClient, messageId: string, outcome: "approved" | "denied" = "approved") =>
+  as.request("POST", `/api/v1/cards/${messageId}/decision`, { outcome });
+
+const notificationsOf = async (messageId: string) =>
+  (
+    await su.query(
+      "select user_id, kind, actor_kind, actor_id from app.notifications where message_id = $1 order by user_id",
+      [messageId],
+    )
+  ).rows as Json[];
+
+/** Every `agent.card_action.v1` the API appended for one card (the cell stream is the delivery ledger). */
+const cardActionsOf = async (messageId: string) =>
+  (
+    await su.query(
+      "select seq, payload from app.stream_events where stream_id = $1 and type = 'agent.card_action.v1' and payload->'cardAction'->>'messageId' = $2 order by seq",
+      [`cell:${orgId}`, messageId],
+    )
+  ).rows as Array<{ seq: number; payload: Json }>;
+
+async function newCard(
+  conversationId: string,
+  card: Json = deployCard(),
+  agentId = deployId,
+): Promise<string> {
+  const res = await postCard(conversationId, card, { agentId });
+  if (res.status !== 201) throw new Error(`card post failed: ${res.status} ${JSON.stringify(res.body)}`);
+  return res.body.messageId as string;
+}
+
+const approvalCard = (approve: Json = {}): Json =>
+  deployCard({
+    kind: "approval",
+    status: "pending",
+    actions: [
+      { kind: "follow", label: "Follow" },
+      { kind: "approve", label: "Approve", denyLabel: "Deny", ...approve },
+    ],
+  });
+
+describe("follow: followers get card_updated when the status changes (Task 2)", () => {
+  let cardId: string;
+
+  it("Alex follows (204, following true in his snapshot); Riley follows and unfollows", async () => {
+    cardId = await newCard(backendId);
+    expect((await follow(alex, cardId)).status).toBe(204);
+    expect((await follow(alex, cardId)).status).toBe(204);
+    const shown = (await pageOf(alex, backendId)).find((m) => m.id === cardId) as Json;
+    expect(shown.card.following).toBe(true);
+    expect(((await pageOf(sam, backendId)).find((m) => m.id === cardId) as Json).card.following).toBe(false);
+    expect((await follow(riley, cardId)).status).toBe(204);
+    expect((await unfollow(riley, cardId)).status).toBe(204);
+    expect(((await pageOf(riley, backendId)).find((m) => m.id === cardId) as Json).card.following).toBe(
+      false,
+    );
+    const rows = (
+      await su.query("select user_id from app.message_card_follows where message_id = $1", [cardId])
+    ).rows;
+    expect(rows).toEqual([{ user_id: alexId }]);
+    expect(rows.map((r) => r.user_id)).not.toContain(rileyId);
+  });
+
+  it("a status change notifies the follower once (the agent as actor); non-followers and the unfollower get nothing", async () => {
+    const res = await patchCard(cardId, { expectedVersion: 1, status: "failed" });
+    expect(res.status).toBe(200);
+    expect(await notificationsOf(cardId)).toEqual([
+      { user_id: alexId, kind: "card_updated", actor_kind: "agent", actor_id: deployId },
+    ]);
+  });
+
+  it("a patch that changes only fields (or the same status) notifies nobody", async () => {
+    const quiet = await newCard(backendId);
+    expect((await follow(alex, quiet)).status).toBe(204);
+    expect(
+      (await patchCard(quiet, { expectedVersion: 1, fields: [{ label: "Commit", value: "def456" }] })).status,
+    ).toBe(200);
+    expect((await patchCard(quiet, { expectedVersion: 2, status: "running" })).status).toBe(200);
+    expect(await notificationsOf(quiet)).toEqual([]);
+  });
+
+  it("unknown cards and non-readers get 404 on follow", async () => {
+    expect((await follow(alex, randomUUID())).status).toBe(404);
+    const ops = await ok(victor.request("POST", "/api/v1/channels", { name: "ops", visibility: "private" }));
+    await ok(victor.request("POST", `/api/v1/channels/${ops.id}/members`, { kind: "agent", id: deployId }));
+    const hidden = await newCard(ops.id as string, approvalCard());
+    expect((await follow(sam, hidden)).status).toBe(404);
+    expect((await unfollow(sam, hidden)).status).toBe(404);
+    expect((await decide(sam, hidden)).status).toBe(404);
+    // Víctor (a member) can.
+    expect((await follow(victor, hidden)).status).toBe(204);
+  });
+});
+
+describe("decision: one audited, server-decided outcome, delivered to the agent (Task 2)", () => {
+  let p: FakeCellPlugin;
+  let cardId: string;
+
+  beforeAll(async () => {
+    p = newCell();
+    await p.start();
+  });
+
+  it("Sam approves an approval card: 200 with the decision, message.updated, audit, one agent.card_action.v1 for Sam", async () => {
+    cardId = await newCard(backendId, approvalCard());
+    const sub = await subscribeConv(stack.baseUrl, alex, backendId);
+    const res = await decide(sam, cardId, "approved");
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const card = AgentCard.parse(res.body);
+    expect(card.decision).toMatchObject({
+      outcome: "approved",
+      by: { kind: "user", id: samId, displayName: "Sam Lee" },
+    });
+    expect(card.viewerCan).toEqual(["follow"]);
+
+    await sub.waitFor(() =>
+      sub
+        .durable(EventTypes.messageUpdated)
+        .some(
+          (f) => ((f.data as Json).message as Json).id === cardId && (f.data as Json).message.card?.decision,
+        ),
+    );
+    sub.close();
+
+    const audit = (await audits("agent_card.decided")).find((a) => a.resource_id === cardId) as Json;
+    expect(audit).toMatchObject({
+      actor_id: samId,
+      metadata: { messageId: cardId, agentId: deployId, outcome: "approved" },
+    });
+
+    const ev = await p.waitFor(
+      (e) => e.type === "agent.card_action.v1" && (e.data as Json).cardAction?.messageId === cardId,
+    );
+    const action = AgentCardActionEvent.parse(ev.data);
+    expect(action.message.text).toBe("Sam Lee approved “Deploy api v2.3”");
+    expect(action.message.author).toEqual({ kind: "user", id: samId, displayName: "Sam Lee" });
+    expect(action.agent).toMatchObject({ id: deployId, handle: "deploy" });
+    expect(action.conversation).toMatchObject({ id: backendId, kind: "channel" });
+    expect(action.thread.rootMessageId).toBe(cardId);
+    expect(action.cardAction).toEqual({
+      messageId: cardId,
+      kind: "approval",
+      title: "Deploy api v2.3",
+      outcome: "approved",
+    });
+    expect(action.turn).toBeDefined();
+    const turn = (
+      await su.query("select user_id, agent_id from app.agent_turns where event_id = $1", [action.eventId])
+    ).rows[0];
+    expect(turn).toEqual({ user_id: samId, agent_id: deployId });
+    expect(await cardActionsOf(cardId)).toHaveLength(1);
+  });
+
+  it("a second decision is 409 card_already_decided and changes nothing", async () => {
+    const again = await decide(alex, cardId, "denied");
+    expect(again.status).toBe(409);
+    expect(errorCode(again)).toBe("card_already_decided");
+    const row = (
+      await su.query("select decision, decided_by from app.message_cards where message_id = $1", [cardId])
+    ).rows[0];
+    expect(row).toEqual({ decision: "approved", decided_by: samId });
+    expect(await cardActionsOf(cardId)).toHaveLength(1);
+    const shown = (await pageOf(alex, backendId)).find((m) => m.id === cardId) as Json;
+    expect(shown.card.viewerCan).toEqual(["follow"]);
+    expect(shown.card.decision).toMatchObject({ outcome: "approved", by: { id: samId } });
+  });
+
+  it("named approvers: Sam is 403 not_card_approver (no decide offered), Víctor denies", async () => {
+    const named = await newCard(backendId, approvalCard({ approverIds: [victorId] }));
+    expect(((await pageOf(sam, backendId)).find((m) => m.id === named) as Json).card.viewerCan).toEqual([
+      "follow",
+    ]);
+    const refused = await decide(sam, named);
+    expect(refused.status).toBe(403);
+    expect(errorCode(refused)).toBe("not_card_approver");
+    expect(((await pageOf(victor, backendId)).find((m) => m.id === named) as Json).card.viewerCan).toEqual([
+      "follow",
+      "decide",
+    ]);
+    const res = await decide(victor, named, "denied");
+    expect(res.status).toBe(200);
+    const [ev] = await cardActionsOf(named);
+    expect(ev?.payload.message.text).toBe("Víctor Ruiz denied “Deploy api v2.3”");
+    expect(ev?.payload.cardAction.outcome).toBe("denied");
+  });
+
+  it("a deny rule on agent_card.approve for Víctor → 403 and no decide offered", async () => {
+    const named = await newCard(backendId, approvalCard({ approverIds: [victorId] }));
+    const ruleId = randomUUID();
+    await su.query(
+      `insert into app.permission_rules (id, organization_id, subject_kind, subject_id, permission, effect)
+       values ($1, $2, 'user', $3, 'agent_card.approve', 'deny')`,
+      [ruleId, orgId, victorId],
+    );
+    try {
+      expect(((await pageOf(victor, backendId)).find((m) => m.id === named) as Json).card.viewerCan).toEqual([
+        "follow",
+      ]);
+      expect((await decide(victor, named)).status).toBe(403);
+    } finally {
+      await su.query("delete from app.permission_rules where id = $1", [ruleId]);
+    }
+    expect(await cardActionsOf(named)).toHaveLength(0);
+  });
+
+  it("a card without an approve action is 409 card_not_decidable", async () => {
+    const withoutApprove = await newCard(
+      backendId,
+      deployCard({ actions: [{ kind: "follow", label: "Follow" }] }),
+    );
+    const res = await decide(sam, withoutApprove);
+    expect(res.status).toBe(409);
+    expect(errorCode(res)).toBe("card_not_decidable");
+    expect(
+      ((await pageOf(sam, backendId)).find((m) => m.id === withoutApprove) as Json).card.viewerCan,
+    ).toEqual(["follow"]);
+  });
+
+  it("an AI chat without a grant: 404 on follow and decision", async () => {
+    const created = await ok(
+      victor.request("POST", "/api/v1/ai-chats", {
+        clientMessageId: cid(),
+        body: "Approvals",
+        model: PLAN_MODEL,
+      }),
+      201,
+    );
+    const chatId = (created.chat as Json).id as string;
+    await ok(victor.request("POST", `/api/v1/ai-chats/${chatId}/agents`, { agentId: deployId }), 201);
+    const inChat = await newCard(chatId, approvalCard());
+    for (const c of [sam, alex]) {
+      expect((await follow(c, inChat)).status).toBe(404);
+      expect((await decide(c, inChat)).status).toBe(404);
+    }
+    // The owner decides; the delivery is flat in the AI chat.
+    expect((await decide(victor, inChat)).status).toBe(200);
+    const [ev] = await cardActionsOf(inChat);
+    expect(ev?.payload.conversation).toMatchObject({ id: chatId, kind: "ai_chat" });
+  });
+
+  it("a disabled agent or one at its daily limit gets no event; the decision still stands", async () => {
+    const opsBot = await teamBot("Ops", "opsbot");
+    await ok(victor.request("POST", `/api/v1/channels/${backendId}/members`, { kind: "agent", id: opsBot }));
+    const off = await newCard(backendId, approvalCard(), opsBot);
+    await ok(victor.request("PATCH", `/api/v1/agents/${opsBot}`, { enabled: false }));
+    expect((await decide(sam, off)).status).toBe(200);
+    expect(await cardActionsOf(off)).toHaveLength(0);
+
+    const limBot = await teamBot("Limited", "limited");
+    await ok(victor.request("PATCH", `/api/v1/agents/${limBot}/capabilities`, { dailyLimit: 1 }));
+    await ok(victor.request("POST", `/api/v1/channels/${backendId}/members`, { kind: "agent", id: limBot }));
+    await ok(
+      victor.request("POST", `/api/v1/conversations/${backendId}/messages`, {
+        body: "@limited are you there?",
+        mentions: [{ kind: "agent", id: limBot }],
+      }),
+    );
+    const limited = await newCard(backendId, approvalCard(), limBot);
+    expect((await decide(sam, limited)).status).toBe(200);
+    expect(await cardActionsOf(limited)).toHaveLength(0);
+    const rows = (
+      await su.query("select decision from app.message_cards where message_id = any($1::uuid[])", [
+        [off, limited],
+      ])
+    ).rows;
+    expect(rows).toEqual([{ decision: "approved" }, { decision: "approved" }]);
+    await sleep(200);
   });
 });
