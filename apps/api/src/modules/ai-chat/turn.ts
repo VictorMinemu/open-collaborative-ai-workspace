@@ -1,4 +1,4 @@
-import { type AiChatPolicy, type AiGenerationStatus, AI_MAX_STEPS } from "@ocw/contracts";
+import { AI_MAX_STEPS, type AiChatPolicy, type AiGenerationStatus } from "@ocw/contracts";
 import {
   aiChats,
   aiGenerations,

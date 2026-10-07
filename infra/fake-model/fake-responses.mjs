@@ -244,7 +244,10 @@ export async function handleResponses(req, res, body, ctx = {}) {
   const title = isTitleRequest(responsesInstructions(body));
   const webQuery = title
     ? null
-    : (directives.find((d) => /^web\s/u.test(d))?.slice(4).trim() || null);
+    : directives
+        .find((d) => /^web\s/u.test(d))
+        ?.slice(4)
+        .trim() || null;
   const search = webQuery && offersWebSearch(body) ? { query: webQuery, url: fakeResultUrl(webQuery) } : null;
   const echo = `Echo: ${withoutDirectives(userText)}${attachmentSuffix(
     partCount(user, "input_image"),

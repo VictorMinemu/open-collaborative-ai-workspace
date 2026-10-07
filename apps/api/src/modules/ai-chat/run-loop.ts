@@ -17,7 +17,6 @@ import { streamText } from "ai";
 import { and, eq, lt, ne, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { convTopic } from "../chat";
-import { createPermissionService } from "../organization";
 import {
   type ClassifiedModelError,
   loadAiChatPolicy,
@@ -26,6 +25,7 @@ import {
   PlanTokenUnavailableError,
   type ResolvedModel,
 } from "../model-gateway";
+import { createPermissionService } from "../organization";
 import { aiMessage, chatSummary, EMPTY_DIRECTORY, type GenerationRow, generationDto } from "./dto";
 import { loadTurn, type Turn } from "./turn";
 import { type ReportedUsage, recordUsage } from "./usage";
@@ -477,7 +477,13 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
         },
         "ai generation failed",
       );
-      outcome = { status: "failed", finishReason: finishReason ?? "error", error: classified, usage, ...webUsed };
+      outcome = {
+        status: "failed",
+        finishReason: finishReason ?? "error",
+        error: classified,
+        usage,
+        ...webUsed,
+      };
     } else {
       outcome = { status: "completed", finishReason, error: null, usage, ...webUsed };
     }

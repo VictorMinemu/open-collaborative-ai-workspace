@@ -92,7 +92,6 @@ export const ChatgptPlanStatus = z.object({
 });
 export type ChatgptPlanStatus = z.infer<typeof ChatgptPlanStatus>;
 
-
 export const ChatgptSignInStartRequest = z.object({
   redirectPort: z.number().int().min(1024).max(65535).default(1455),
 });

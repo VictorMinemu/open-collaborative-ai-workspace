@@ -1,6 +1,12 @@
 "use client";
 
-import { type AiModelOption, type ModelRef, modelRefKey } from "@ocw/contracts";
+import {
+  type AiChatDetail,
+  type AiChatTools,
+  type AiModelOption,
+  type ModelRef,
+  modelRefKey,
+} from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowUp, Gauge, Square } from "lucide-react";
 import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
@@ -12,6 +18,7 @@ import { orgAnswersLeft, reachedLimit, refreshAiUsageToday, useAiUsageToday } fr
 import { cn } from "@/lib/utils";
 import { ModelPicker } from "./model-picker";
 import { PlanUsageLine } from "./plan-usage-line";
+import { ToolsMenu, useWebReason, WebChip } from "./tools-menu";
 
 /**
  * The model a chat falls back to: the first of `preferred` that is still available (the chat's last model, the
@@ -38,7 +45,9 @@ export function pickModel(
  * plan · Manage usage" under the card (P-11); organization models carry METERED on the chip. At a daily cap of the
  * selected model's backend (05-08, D-06) a notice above the card says which cap and when it resets (local time) and,
  * on organization models, offers the member's own ChatGPT plan when it is connected; the server stays the authority
- * (a send at the cap is refused before any model call and keeps its text).
+ * (a send at the cap is refused before any model call and keeps its text). The "+" button opens the tools (05-11):
+ * Web is the next answer's choice (sticky per chat on the server), shown as an active "Web" chip while it is on and
+ * usable with the selected model.
  */
 export function AiComposer({
   chatKey,
@@ -50,9 +59,15 @@ export function AiComposer({
   onStop,
   autoFocus,
   className,
+  chat = null,
+  initialTools = { web: false },
 }: {
   /** The chat id, or "new" on `/chat/ai/new`. */
   chatKey: string;
+  /** The open chat (its tool states and settings), null on `/chat/ai/new`. */
+  chat?: AiChatDetail | null;
+  /** The tools the composer starts with: the chat's setting, or the member's default on a new chat. */
+  initialTools?: AiChatTools;
   models: AiModelOption[] | undefined;
   /** Fallbacks before the member picks: the chat's last model, then the member's default. */
   preferred: (ModelRef | null | undefined)[];
@@ -62,7 +77,7 @@ export function AiComposer({
   /** Stops the answer being written (absent while the chat has none to stop). */
   onStop?: () => Promise<void>;
   /** Resolves once the API accepted the send; rejects to keep the text. */
-  onSend: (text: string, model: AiModelOption) => Promise<void>;
+  onSend: (text: string, model: AiModelOption, tools: AiChatTools) => Promise<void>;
   autoFocus?: boolean;
   className?: string;
 }) {
@@ -71,6 +86,13 @@ export function AiComposer({
   // A pick the admin has since removed (or that became unavailable) falls back instead of failing the send.
   const model = pickModel(models, [selected, fallback?.ref]);
   const [text, setText] = useState("");
+  const [tools, setTools] = useState<AiChatTools>(initialTools);
+  // The chat's setting changed elsewhere (chat settings, another tab): follow it.
+  useEffect(() => {
+    setTools({ web: initialTools.web });
+  }, [initialTools.web]);
+  const webReason = useWebReason(chat, model);
+  const webActive = tools.web && webReason === null;
   const [sending, setSending] = useState(false);
   const [stopping, setStopping] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -108,7 +130,7 @@ export function AiComposer({
     setSending(true);
     setText("");
     try {
-      await onSend(body, model);
+      await onSend(body, model, tools);
     } catch {
       setText(body); // the caller reported the error; nothing typed is lost
     } finally {
@@ -193,7 +215,9 @@ export function AiComposer({
           aria-label="Message"
           className="block max-h-[240px] min-h-[56px] w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-[15px] leading-6 outline-none placeholder:text-muted-foreground/70 disabled:cursor-not-allowed"
         />
-        <div className="flex items-center gap-1.5 px-2 pb-2">
+        <div className="flex min-w-0 items-center gap-1 px-2 pb-2">
+          <ToolsMenu chat={chat} model={model} value={tools} onChange={setTools} />
+          {webActive ? <WebChip onRemove={() => setTools({ ...tools, web: false })} /> : null}
           {model ? (
             <ModelPicker chatKey={chatKey} value={model.ref} onChange={setSelected} />
           ) : modelsLoading ? (

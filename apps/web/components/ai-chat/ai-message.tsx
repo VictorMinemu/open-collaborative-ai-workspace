@@ -1,12 +1,14 @@
 "use client";
 
 import type { AiGeneration, Message, SendAiMessageResponse } from "@ocw/contracts";
-import { Check, Copy, Square, Unplug } from "lucide-react";
+import { Check, Copy, Globe, Square, Unplug } from "lucide-react";
 import { Fragment, type ReactNode } from "react";
 import { Markdown } from "@/components/markdown/markdown";
+import { safeUrl } from "@/components/markdown/safe-url";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useCopy } from "@/hooks/use-copy";
 import { footerParts, formatUsage, usageTitle } from "@/lib/ai-format";
+import { sourceLinks } from "@/lib/ai-tools";
 import { cn } from "@/lib/utils";
 import { GenerationError, markStreamed } from "./generation-error";
 import { RegenerateMenu } from "./regenerate-menu";
@@ -25,7 +27,9 @@ export interface AnswerRegenerate {
  * quiet footer once done: tokens, cost on organization keys, model and who pays (`1.2k in · 340 out · ~$0.004 ·
  * Claude Sonnet 5.5 · METERED`, `… · GPT-6 Astra · ChatGPT plan`), exact counts in its tooltip (05-08). A failed
  * answer keeps any partial text and ends with a calm card instead of a spinner. A stopped or interrupted answer keeps its text and says so in the
- * line under it ("Stopped" / "Interrupted"), quietly: it was cut short, not broken (05-06).
+ * line under it ("Stopped" / "Interrupted"), quietly: it was cut short, not broken (05-06). An answer that used the
+ * web lists its sources as domain chips under the text (05-11): no favicons (no third-party request), `safeUrl`
+ * links that open in a new tab without a referrer.
  */
 export function AiMessage({
   message,
@@ -68,6 +72,7 @@ export function AiMessage({
           <Markdown text={text} variant="document" streaming={streaming} className="text-[15px] leading-7" />
         ) : null}
       </div>
+      {streaming ? null : <Sources text={text} generation={message.generation} />}
       {streaming ? null : <CutShortLabel generation={message.generation} />}
       {message.status === "failed" ? (
         <GenerationError
@@ -100,6 +105,36 @@ export function AiMessage({
           }
         />
       )}
+    </div>
+  );
+}
+
+/** The domains an answer drew on (web search), each linking to the page it cited. */
+function Sources({ text, generation }: { text: string; generation: AiGeneration | undefined }) {
+  const domains = generation?.sourceDomains ?? [];
+  if (domains.length === 0) return null;
+  return (
+    <div data-testid="ai-sources" className="flex flex-wrap items-center gap-1.5 pt-0.5">
+      <span className="mr-0.5 inline-flex items-center gap-1 text-[12px] text-muted-foreground">
+        <Globe aria-hidden className="size-3.5" />
+        Sources
+      </span>
+      {sourceLinks(text, domains).map((s) => {
+        const href = safeUrl(s.href);
+        return (
+          <a
+            key={s.domain}
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer nofollow"
+            data-testid="ai-source-chip"
+            title={href}
+            className="inline-flex h-6 max-w-[14rem] items-center truncate rounded-full border bg-background px-2.5 text-[12px] text-foreground/80 outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/30"
+          >
+            {s.domain}
+          </a>
+        );
+      })}
     </div>
   );
 }

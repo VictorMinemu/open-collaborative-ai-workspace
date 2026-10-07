@@ -125,9 +125,18 @@ describe("Web on a ChatGPT-plan model: the plan's hosted web search, with source
 
   it("the other three toggles are present but never available", async () => {
     const snap = await snapshot(sam, chatId);
-    expect((snap.chat.tools as Json[]).map((t) => t.key)).toEqual(["web", "companyKnowledge", "mcp", "skills"]);
+    expect((snap.chat.tools as Json[]).map((t) => t.key)).toEqual([
+      "web",
+      "companyKnowledge",
+      "mcp",
+      "skills",
+    ]);
     for (const key of ["companyKnowledge", "mcp", "skills"]) {
-      expect(stateOf(snap.chat, key)).toMatchObject({ available: false, enabled: false, reason: "not_available_yet" });
+      expect(stateOf(snap.chat, key)).toMatchObject({
+        available: false,
+        enabled: false,
+        reason: "not_available_yet",
+      });
     }
   });
 
@@ -141,14 +150,17 @@ describe("Web on a ChatGPT-plan model: the plan's hosted web search, with source
     const off = await ok(send(sam, chatId, "no search [[web ocw release]]", { tools: { web: false } }), 201);
     const g = await settled(off.generation.id);
     const [req] = requestsSince("responses", before);
-    expect((req?.body as Json).tools ?? []).toEqual([]);
+    expect(toolTypes(req?.body as Json)).toEqual([]);
     expect(g.web_used).toBe(false);
     expect(g.source_domains).toEqual([]);
     expect((await snapshot(sam, chatId)).chat.settings.tools).toEqual({ web: false });
   });
 
   it("a plan that refuses web_search fails the turn and marks that model as unable to search, for Sam only", async () => {
-    const failed = await ok(send(sam, chatId, "hi [[plan:unsupported:web_search]]", { tools: { web: true } }), 201);
+    const failed = await ok(
+      send(sam, chatId, "hi [[plan:unsupported:web_search]]", { tools: { web: true } }),
+      201,
+    );
     const g = await settled(failed.generation.id);
     expect(g.status).toBe("failed");
     expect(g.error_code).toBe("unsupported_capability");
@@ -160,7 +172,9 @@ describe("Web on a ChatGPT-plan model: the plan's hosted web search, with source
     expect(astra?.caps.webSearch).toBe("none");
     expect(luna?.caps.webSearch).toBe("hosted");
     const theirs = await ok(alex.request("GET", "/api/v1/ai-chat/models"));
-    expect((theirs.models as Json[]).find((m) => m.ref.modelId === "gpt-6-astra")?.caps.webSearch).toBe("hosted");
+    expect((theirs.models as Json[]).find((m) => m.ref.modelId === "gpt-6-astra")?.caps.webSearch).toBe(
+      "hosted",
+    );
 
     // That model can't search on Sam's plan: a chat asking for Web on it sends no tool, and Web says why.
     // (A fresh chat: the failed turn's directive would otherwise travel again in the merged user turn.)
@@ -168,9 +182,13 @@ describe("Web on a ChatGPT-plan model: the plan's hosted web search, with source
     const plain = await ok(createChat(sam, "plain [[web ocw release]]", { tools: { web: true } }), 201);
     const p = await settled(plain.generation.id);
     expect(p.status).toBe("completed");
-    expect((requestsSince("responses", before)[0]?.body as Json).tools ?? []).toEqual([]);
+    expect(toolTypes(requestsSince("responses", before)[0]?.body as Json)).toEqual([]);
     expect(p.web_used).toBe(false);
     const snap = await snapshot(sam, plain.chat.id);
-    expect(stateOf(snap.chat, "web")).toMatchObject({ available: false, enabled: false, reason: "not_supported_by_model" });
+    expect(stateOf(snap.chat, "web")).toMatchObject({
+      available: false,
+      enabled: false,
+      reason: "not_supported_by_model",
+    });
   });
 });

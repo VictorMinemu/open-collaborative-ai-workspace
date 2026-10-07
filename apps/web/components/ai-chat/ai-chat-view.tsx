@@ -1,6 +1,6 @@
 "use client";
 
-import type { AiModelOption, SendAiMessageResponse } from "@ocw/contracts";
+import type { AiChatTools, AiModelOption, SendAiMessageResponse } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
 import { Archive, Lock, MessageCircleQuestion } from "lucide-react";
 import Link from "next/link";
@@ -51,10 +51,10 @@ function NewChat() {
   const router = useRouter();
   const models = useAiModels();
 
-  async function onSend(body: string, m: AiModelOption) {
+  async function onSend(body: string, m: AiModelOption, tools: AiChatTools) {
     let res: SendAiMessageResponse;
     try {
-      res = await createAiChat({ clientMessageId: newClientMessageId(), body, model: m.ref });
+      res = await createAiChat({ clientMessageId: newClientMessageId(), body, model: m.ref, tools });
     } catch (err) {
       sendFailed(err);
     }
@@ -114,10 +114,10 @@ function ExistingChat({ chatId }: { chatId: string }) {
     }
   }
 
-  async function onSend(body: string, m: AiModelOption) {
+  async function onSend(body: string, m: AiModelOption, tools: AiChatTools) {
     try {
       chat.applySent(
-        await sendAiMessage(chatId, { clientMessageId: newClientMessageId(), body, model: m.ref }),
+        await sendAiMessage(chatId, { clientMessageId: newClientMessageId(), body, model: m.ref, tools }),
       );
     } catch (err) {
       sendFailed(err);
@@ -184,6 +184,8 @@ function ExistingChat({ chatId }: { chatId: string }) {
       ) : (
         <AiComposer
           chatKey={chatId}
+          chat={detail ?? null}
+          initialTools={detail?.settings.tools}
           models={models.data?.models}
           preferred={[detail?.lastModel, models.data?.defaultRef]}
           modelsLoading={models.isPending}

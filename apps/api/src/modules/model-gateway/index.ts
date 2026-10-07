@@ -420,7 +420,11 @@ export function createModelGateway(core: Core, opts: { fetch?: typeof fetch } = 
     },
 
     async reportFailure(tx, ref, requesterUserId, e) {
-      if (ref.backend === "chatgpt_plan" && e.code === "unsupported_capability" && /web_search/u.test(e.param ?? "")) {
+      if (
+        ref.backend === "chatgpt_plan" &&
+        e.code === "unsupported_capability" &&
+        /web_search/u.test(e.param ?? "")
+      ) {
         // This plan model can't search for this member: Web says so for a day instead of failing every turn.
         const row = await credentialOf(tx, requesterUserId);
         if (row) {
