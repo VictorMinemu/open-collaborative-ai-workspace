@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 59
+open_count: 61
 waived_count: 0
 fixed_count: 16
-total_count: 75
-last_updated: 2026-10-07T15:33:04.995Z
+total_count: 77
+last_updated: 2026-10-07T17:14:33.320Z
 ---
 
 # Broken Windows Ledger
@@ -90,6 +90,8 @@ last_updated: 2026-10-07T15:33:04.995Z
 | 73 | 06 | unrun-verify | .planning/phases/06-multiplayer-ai-chat/06-16-PLAN.md |  | 06-16 Task 3: metered spoofing eval and OpenAI ChatGPT-plan terms check not run (eval deferred, human_needed) | open |  | 2026-10-07T15:33:04.842Z |  |
 | 74 | 06 | deviation | apps/api/src/modules/chat/index.ts |  | Phase 4 chat routes authenticate in preHandler: anonymous malformed bodies get 400 before 401 (card routes fixed in 06-16) | open |  | 2026-10-07T15:33:04.922Z |  |
 | 75 | 06 | deviation | apps/web/components/bots/add-to-channel-dialog.tsx |  | Add to channel lists channels where the caller gets 403; bots.spec now picks #general | open |  | 2026-10-07T15:33:04.995Z |  |
+| 76 | 06.1 | deviation | apps/api/src/modules/work-session/images.int.test.ts |  | attachment_not_linkable acceptance grep is 3 (<6); rejection matrix is table-driven | open |  | 2026-10-07T17:14:33.250Z |  |
+| 77 | 06.1 | deviation | packages/contracts/src/work-session.ts |  | WorkPrompt.attachments is in upload order, not request order; 06.1-02 must dispatch in request order | open |  | 2026-10-07T17:14:33.320Z |  |
 
 ````json
 [
@@ -991,6 +993,30 @@ last_updated: 2026-10-07T15:33:04.995Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-07T15:33:04.995Z",
+    "resolved_at": null
+  },
+  {
+    "id": 76,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": "apps/api/src/modules/work-session/images.int.test.ts",
+    "line": null,
+    "description": "attachment_not_linkable acceptance grep is 3 (<6); rejection matrix is table-driven",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T17:14:33.250Z",
+    "resolved_at": null
+  },
+  {
+    "id": 77,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": "packages/contracts/src/work-session.ts",
+    "line": null,
+    "description": "WorkPrompt.attachments is in upload order, not request order; 06.1-02 must dispatch in request order",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T17:14:33.320Z",
     "resolved_at": null
   }
 ]
