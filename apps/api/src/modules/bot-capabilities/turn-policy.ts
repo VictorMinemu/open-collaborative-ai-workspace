@@ -44,6 +44,11 @@ const MAX_TURN_TOOLS = 64;
 
 const WEB_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: false };
 const MEMORY_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
+/**
+ * `ocw_agent_card` (06-14, D-07): its output is the API's own answer (trusted) and it only posts into the turn's own
+ * conversation, as the reply itself does, so it stays usable after the turn read untrusted content.
+ */
+const CARD_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: false };
 
 /**
  * Flags of a catalog tool (D-08 taint rule). Every MCP / plugin output is untrusted. MCP tools are
@@ -77,6 +82,8 @@ function assemble(
   if (effective.memory.effective && (conversationKind === null || conversationKind === "dm")) {
     add(BUILTIN_TOOLS.memorySave, MEMORY_FLAGS);
   }
+  // Agent Cards (06-14, P-11): every delivered turn, wherever the bot may reply (the card routes re-check posting).
+  add(BUILTIN_TOOLS.agentCard, CARD_FLAGS);
   for (const source of catalog) {
     for (const t of source.tools) {
       if (effectiveToolNames.has(`${source.sourceKind}:${source.sourceId}:${t.name}`)) {

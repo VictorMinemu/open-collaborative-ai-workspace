@@ -1,9 +1,13 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type {
-  AgentChannelPatchCard,
-  AgentChannelPostCard,
-  AgentChannelPostCardResponse,
-  TurnContext,
+import {
+  AGENT_CARD_KINDS,
+  AGENT_CARD_ROUTE_PREFIXES,
+  AGENT_CARD_STATUSES,
+  type AgentChannelPatchCard,
+  type AgentChannelPostCard,
+  type AgentChannelPostCardResponse,
+  isAgentCardRoute,
+  type TurnContext,
 } from "./agent-channel-protocol.js";
 import { type AgentChannelClient, AgentChannelHttpError } from "./api-client.js";
 import { CARD_TOOL_NAME, type CardToolContext, registerCardTool, resetCardToolState } from "./card-tool.js";
@@ -354,5 +358,39 @@ describe("ocw_agent_card (06-14, D-07, AGENT-04)", () => {
     expect(r).toBe("Not posted: you may not post in this conversation.");
     expect(logs.join("\n")).toContain("403");
     expect(logs.join("\n")).not.toContain("secret");
+  });
+});
+
+describe("Agent Card mirror parity (plugin ↔ packages/contracts/src/agent-cards.ts)", () => {
+  // Non-literal specifier: the contracts package lives outside this package (and is not type-checked from here).
+  const contractsPath = new URL("../../../packages/contracts/src/agent-cards.ts", import.meta.url).href;
+
+  it("kinds, statuses, route prefixes and the internal-route rule are identical", async () => {
+    const c = (await import(contractsPath)) as {
+      AGENT_CARD_ROUTE_PREFIXES: readonly string[];
+      AgentCardKind: { options: string[] };
+      AgentCardStatus: { options: string[] };
+      isAgentCardRoute: (v: string) => boolean;
+    };
+    expect([...AGENT_CARD_ROUTE_PREFIXES]).toEqual([...c.AGENT_CARD_ROUTE_PREFIXES]);
+    expect([...AGENT_CARD_KINDS]).toEqual(c.AgentCardKind.options);
+    expect([...AGENT_CARD_STATUSES]).toEqual(c.AgentCardStatus.options);
+    for (const v of [
+      "/work-zone",
+      "/chat/abc?x=1#y",
+      "/settings/",
+      "/chatty",
+      "/chat/../x",
+      "/chat/%2e%2e/x",
+      "//evil.example",
+      "/chat\\evil",
+      "https://evil.example",
+      "javascript:alert(1)",
+      "/share\u0000x",
+      `/chat/${"a".repeat(600)}`,
+      "",
+    ]) {
+      expect(isAgentCardRoute(v), v).toBe(c.isAgentCardRoute(v));
+    }
   });
 });

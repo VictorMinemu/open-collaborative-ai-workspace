@@ -282,6 +282,8 @@ export const BUILTIN_TOOLS = {
   webSearch: "web_search",
   webFetch: "web_fetch",
   memorySave: "ocw_memory_save",
+  /** Phase 6 (AGENT-04, D-07): the persona posts or updates an Agent Card in the conversation of the turn. */
+  agentCard: "ocw_agent_card",
 } as const;
 
 export const MAX_TOOL_CALLS_PER_TURN = 8;
@@ -389,7 +391,7 @@ function words(name: string): string[] {
  * True for tool names that must never become effective, whatever a source declares: the exact core list,
  * every `group:*`, and word patterns for shell/exec/spawn/process/terminal, filesystem write/edit/delete/move,
  * browser/computer/canvas/screen control, gateway/node/config administration and outbound messaging. Never
- * true for the three `BUILTIN_TOOLS`.
+ * true for the `BUILTIN_TOOLS`.
  */
 export function isDangerousToolName(name: string): boolean {
   const lower = name.trim().toLowerCase();

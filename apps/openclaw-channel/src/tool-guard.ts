@@ -21,6 +21,13 @@ export interface ActiveTurn {
   agentId: string;
   /** The OCW conversation (OpenClaw's `nativeChannelId`): secondary lookup for tool factories. */
   conversationId?: string;
+  /**
+   * Where the turn's reply lands (06-14: `ocw_agent_card` posts there): the thread root, null in a flat conversation
+   * (DM, AI chat); undefined when the caller did not say (the card tool then refuses).
+   */
+  threadRootId?: string | null;
+  /** The message the turn answers (the reply's `inReplyToMessageId`). */
+  messageId?: string;
   turn: TurnContext;
   calls: number;
   webCalls: number;
@@ -161,7 +168,14 @@ export function createToolGuard(
     /** Starts the active turn of a session (right before dispatch). Aborting `signal` ends it. */
     beginTurn(
       sessionKey: string,
-      t: { eventId: string; agentId: string; turn: TurnContext; conversationId?: string },
+      t: {
+        eventId: string;
+        agentId: string;
+        turn: TurnContext;
+        conversationId?: string;
+        threadRootId?: string | null;
+        messageId?: string;
+      },
       signal?: AbortSignal,
     ): void {
       const key = keyOf(sessionKey);

@@ -262,7 +262,21 @@ describe("ocw_agent_card inside a prepared turn (06-14): gated like every tool, 
   };
 
   beforeEach(async () => {
-    api = await startFakeAgentChannelApi({ agents: [], providers: [] });
+    api = await startFakeAgentChannelApi({
+      agents: [
+        {
+          id: BOT,
+          handle: "archie",
+          displayName: "Archie",
+          instructions: "",
+          status: "ready",
+          modelRef: "fake/mock-1",
+          model: { provider: "mock", providerId: "fake", id: "mock-1" },
+          capabilities: { tools: ["ocw_agent_card"] },
+        },
+      ],
+      providers: [],
+    });
     setToolGuardClient(createAgentChannelClient({ apiUrl: api.url, token: () => api.token }));
   });
 
