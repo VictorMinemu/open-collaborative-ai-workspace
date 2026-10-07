@@ -13,6 +13,13 @@
 //   [[plan:invalid_user]]        401 `subscription_sharing_invalid_user`
 //   [[plan:unavailable]]         503 `subscription_sharing_usage_unavailable`
 //   [[plan:unsupported:<param>]] 400 `subscription_sharing_unsupported_capability` with `error.param`
+//   [[web <query>]]              hosted web search (05-11), only when the request offers a `web_search` tool: a
+//                                `web_search_call` item (action.search, the result URL as its source), then the
+//                                message as the second output item, its text ending with an inline citation
+//                                ` ([example.com](https://example.com/ocw-fake/<slug>))` that a
+//                                `response.output_text.annotation.added` url_citation covers (title
+//                                `Fake result for <query>`, as the fake SearXNG names it). Without the tool the
+//                                directive is stripped like any other (a plain echo).
 //
 // Title requests (05-10): when the instructions (`instructions`, a developer/system item) ask for a "short title",
 // the reply is `Title: <first three words of the user text>` (the text inside `<request>…</request>` when present,
@@ -141,6 +148,24 @@ function pieces(text) {
   return [text.slice(0, third), text.slice(third, 2 * third), text.slice(2 * third)].filter(Boolean);
 }
 
+/** The deterministic result URL of a fake search (same slug rule as the fake SearXNG in server.mjs). */
+export function fakeResultUrl(query) {
+  const slug =
+    query
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/gu, "-")
+      .replace(/^-|-$/gu, "") || "empty";
+  return `https://example.com/ocw-fake/${slug}`;
+}
+
+/** True when a Responses body offers the hosted `web_search` tool (or its preview name). */
+function offersWebSearch(body) {
+  return (
+    Array.isArray(body.tools) &&
+    body.tools.some((t) => t?.type === "web_search" || t?.type === "web_search_preview")
+  );
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function sendJson(res, status, obj) {
@@ -217,12 +242,16 @@ export async function handleResponses(req, res, body, ctx = {}) {
   }
 
   const title = isTitleRequest(responsesInstructions(body));
-  const reply = title
-    ? titleReply(userText)
-    : `Echo: ${withoutDirectives(userText)}${attachmentSuffix(
-        partCount(user, "input_image"),
-        partCount(user, "input_file"),
-      )}`;
+  const webQuery = title
+    ? null
+    : (directives.find((d) => /^web\s/u.test(d))?.slice(4).trim() || null);
+  const search = webQuery && offersWebSearch(body) ? { query: webQuery, url: fakeResultUrl(webQuery) } : null;
+  const echo = `Echo: ${withoutDirectives(userText)}${attachmentSuffix(
+    partCount(user, "input_image"),
+    partCount(user, "input_file"),
+  )}`;
+  const citation = search ? ` ([example.com](${search.url}))` : "";
+  const reply = title ? titleReply(userText) : `${echo}${citation}`;
   // A slow title is the same title after the same 4 s (no counting appended to it).
   const slow = has("slow") && !title;
   if (has("slow") && title) await sleep(SLOW_DELTAS * SLOW_INTERVAL_MS);
@@ -232,6 +261,9 @@ export async function handleResponses(req, res, body, ctx = {}) {
 
   const id = `resp_fake_${++responseCounter}`;
   const itemId = `msg_fake_${responseCounter}`;
+  const searchId = `ws_fake_${responseCounter}`;
+  /** The message's output index: after the search call when there is one. */
+  const msgIndex = search ? 1 : 0;
   const model = body.model ?? "gpt-6-astra";
   const createdAt = Math.floor(Date.now() / 1000);
   let seq = 0;
@@ -249,13 +281,28 @@ export async function handleResponses(req, res, body, ctx = {}) {
   });
 
   ev("response.created", { response: response("in_progress") });
+  const searchItem = search
+    ? {
+        type: "web_search_call",
+        id: searchId,
+        status: "completed",
+        action: { type: "search", query: search.query, sources: [{ type: "url", url: search.url }] },
+      }
+    : null;
+  if (searchItem) {
+    ev("response.output_item.added", {
+      output_index: 0,
+      item: { type: "web_search_call", id: searchId, status: "in_progress" },
+    });
+    ev("response.output_item.done", { output_index: 0, item: searchItem });
+  }
   ev("response.output_item.added", {
-    output_index: 0,
+    output_index: msgIndex,
     item: { type: "message", id: itemId, role: "assistant", status: "in_progress", content: [] },
   });
   ev("response.content_part.added", {
     item_id: itemId,
-    output_index: 0,
+    output_index: msgIndex,
     content_index: 0,
     part: { type: "output_text", text: "", annotations: [] },
   });
@@ -265,7 +312,7 @@ export async function handleResponses(req, res, body, ctx = {}) {
   });
   for (const delta of deltas) {
     if (closed) return;
-    ev("response.output_text.delta", { item_id: itemId, output_index: 0, content_index: 0, delta });
+    ev("response.output_text.delta", { item_id: itemId, output_index: msgIndex, content_index: 0, delta });
     if (slow) await sleep(SLOW_INTERVAL_MS);
   }
   const text = deltas.join("");
@@ -288,21 +335,41 @@ export async function handleResponses(req, res, body, ctx = {}) {
     });
     return res.end();
   }
-  ev("response.output_text.done", { item_id: itemId, output_index: 0, content_index: 0, text });
+  const annotations = [];
+  if (search && text.includes(citation)) {
+    const start = text.lastIndexOf(citation) + 1;
+    const annotation = {
+      type: "url_citation",
+      start_index: start,
+      end_index: start + citation.length - 1,
+      url: search.url,
+      title: `Fake result for ${search.query}`,
+    };
+    annotations.push(annotation);
+    ev("response.output_text.annotation.added", {
+      item_id: itemId,
+      output_index: msgIndex,
+      content_index: 0,
+      annotation_index: 0,
+      annotation,
+    });
+  }
+  ev("response.output_text.done", { item_id: itemId, output_index: msgIndex, content_index: 0, text });
   ev("response.content_part.done", {
     item_id: itemId,
-    output_index: 0,
+    output_index: msgIndex,
     content_index: 0,
-    part: { type: "output_text", text, annotations: [] },
+    part: { type: "output_text", text, annotations },
   });
   const item = {
     type: "message",
     id: itemId,
     role: "assistant",
     status: "completed",
-    content: [{ type: "output_text", text, annotations: [] }],
+    content: [{ type: "output_text", text, annotations }],
   };
-  ev("response.output_item.done", { output_index: 0, item });
-  ev("response.completed", { response: response("completed", { output: [item], usage }) });
+  ev("response.output_item.done", { output_index: msgIndex, item });
+  const output = searchItem ? [searchItem, item] : [item];
+  ev("response.completed", { response: response("completed", { output, usage }) });
   res.end();
 }

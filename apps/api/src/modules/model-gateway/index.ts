@@ -14,7 +14,7 @@ import {
   providerShortLabel,
 } from "@ocw/contracts";
 import { aiUserPreferences, modelProviders, type Tx, userModelCredentials } from "@ocw/db";
-import type { JSONValue, LanguageModel } from "ai";
+import type { JSONValue, LanguageModel, ToolSet } from "ai";
 import { and, asc, eq, ne } from "drizzle-orm";
 import type { ApiModule, App, Core } from "../../core";
 import { MissingSecretError } from "../../lib/secret-store";
@@ -60,7 +60,7 @@ export {
   ModelUnavailableError,
   PlanTokenUnavailableError,
 } from "./errors";
-export { loadAiChatPolicy } from "./policy";
+export { loadAiChatPolicy, webPolicyReason } from "./policy";
 
 export interface ResolvedModel {
   ref: ModelRef;
@@ -74,6 +74,12 @@ export interface ResolvedModel {
   maxRetries: number;
   /** The plan route rejects `max_output_tokens` (Pitfall 4). */
   allowsMaxOutputTokens: boolean;
+  /**
+   * Provider-executed tools this backend may be offered (05-11): the plan's hosted `web_search` when its
+   * `caps.webSearch` is "hosted"; empty on organization keys and the mock (D-04: their web search is the API's
+   * SearXNG function tool, never a provider-hosted, metered one).
+   */
+  hostedTools: ToolSet;
 }
 
 export interface ModelGateway {
@@ -85,6 +91,11 @@ export interface ModelGateway {
   reportFailure(tx: Tx, ref: ModelRef, requesterUserId: string, e: ClassifiedModelError): Promise<void>;
   /** Display label of a model (catalog name when known, else the id). */
   labelOf(ref: ModelRef): string;
+  /**
+   * The capabilities of `ref` for this requester without resolving it (no token, no catalog call): what the chat's
+   * tool states are computed from (05-11).
+   */
+  capsOf(tx: Tx, ref: ModelRef, requesterUserId: string): Promise<ModelCaps>;
 }
 
 const PLAN_PROVIDER_LABEL = "ChatGPT plan";
@@ -116,6 +127,11 @@ export function planCaps(slug: string): ModelCaps {
   return { vision: /^gpt-[56]/u.test(slug), pdf: false, webSearch: "hosted" };
 }
 
+/** A plan model refused hosted web search for this credential (05-11): no web search on it for a day. */
+const PLAN_CAP_TTL_SECONDS = 24 * 60 * 60;
+export const planCapKey = (credentialId: string, slug: string, cap: "web_search") =>
+  `ocw:ai:plan-cap:${credentialId}:${slug}:${cap}`;
+
 const STATE_REASON: Record<Exclude<ChatgptPlanState, "connected">, ModelUnavailableReason> = {
   not_connected: "not_connected",
   needs_reconnect: "needs_reconnect",
@@ -126,6 +142,29 @@ const STATE_REASON: Record<Exclude<ChatgptPlanState, "connected">, ModelUnavaila
 
 export function createModelGateway(core: Core, opts: { fetch?: typeof fetch } = {}): ModelGateway {
   const fetchImpl = opts.fetch ?? fetch;
+  /** Web search on org keys and the mock is the SearXNG function tool: only when the operator configured it. */
+  const functionSearch = (): ModelCaps["webSearch"] => (core.env.OCW_AI_SEARXNG_URL ? "function" : "none");
+  const orgCaps = (provider: ModelRef["provider"], modelId: string): ModelCaps => ({
+    ...orgModelCaps(provider, modelId),
+    webSearch: functionSearch(),
+  });
+
+  /** The member's plan models that refused hosted web search (Redis markers, 24 h); empty when Redis is out. */
+  async function planSearchRefused(credentialId: string | null | undefined, slugs: string[]) {
+    const out = new Set<string>();
+    if (!credentialId || slugs.length === 0) return out;
+    const values = await core.bus.pub
+      .mGet(slugs.map((slug) => planCapKey(credentialId, slug, "web_search")))
+      .catch(() => [] as (string | null)[]);
+    slugs.forEach((slug, i) => {
+      if (values[i]) out.add(slug);
+    });
+    return out;
+  }
+  const planCapsFor = (slug: string, refused: Set<string>): ModelCaps => {
+    const caps = planCaps(slug);
+    return refused.has(slug) ? { ...caps, webSearch: "none" } : caps;
+  };
   /** Catalog labels seen by this process (labels only; the catalog itself is cached per credential in Redis). */
   const labels = new Map<string, string>();
 
@@ -170,13 +209,16 @@ export function createModelGateway(core: Core, opts: { fetch?: typeof fetch } = 
       name: "chatgpt-plan",
       fetch: fetchImpl,
     });
+    const caps = planCapsFor(ref.modelId, await planSearchRefused(row.id, [ref.modelId]));
     return {
       ref,
       model: provider.responses(ref.modelId),
       label: labels.get(ref.modelId) ?? ref.modelId,
       providerLabel: PLAN_PROVIDER_LABEL,
       metered: false,
-      caps: planCaps(ref.modelId),
+      caps,
+      // Runs at OpenAI on the member's own plan: $0 to the organization (D-04).
+      hostedTools: caps.webSearch === "hosted" ? { web_search: provider.tools.webSearch() } : {},
       // Plan route rules (Pitfalls 4, 9): never retained, instructions as a developer item.
       providerOptions: { openai: { store: false, systemMessageMode: "developer" } },
       maxRetries: 0,
@@ -218,10 +260,11 @@ export function createModelGateway(core: Core, opts: { fetch?: typeof fetch } = 
       label: modelLabel(provider, ref.modelId),
       providerLabel: providerShortLabel(provider),
       metered: true,
-      caps: orgModelCaps(provider, ref.modelId),
+      caps: orgCaps(provider, ref.modelId),
       providerOptions: built.providerOptions,
       maxRetries: 2,
       allowsMaxOutputTokens: true,
+      hostedTools: {},
     };
   }
 
@@ -235,10 +278,11 @@ export function createModelGateway(core: Core, opts: { fetch?: typeof fetch } = 
       label: MOCK_LABEL,
       providerLabel: providerShortLabel("mock"),
       metered: false,
-      caps: orgModelCaps("mock", ref.modelId),
+      caps: orgCaps("mock", ref.modelId),
       providerOptions: {},
       maxRetries: 0,
       allowsMaxOutputTokens: true,
+      hostedTools: {},
     };
   }
 
@@ -257,7 +301,7 @@ export function createModelGateway(core: Core, opts: { fetch?: typeof fetch } = 
           providerLabel: providerShortLabel(provider),
           group: "organization",
           metered: true,
-          caps: orgModelCaps(provider, modelId),
+          caps: orgCaps(provider, modelId),
           available: reason === null,
           reason,
           isDefault: false,
@@ -313,19 +357,26 @@ export function createModelGateway(core: Core, opts: { fetch?: typeof fetch } = 
           if (!(err instanceof PlanTokenUnavailableError) || !row) throw err;
           catalog = (await cachedPlanCatalog(core, row.id)) ?? [];
         }
-        models = catalog
-          .filter((m) => policy.planAllowedModels.length === 0 || policy.planAllowedModels.includes(m.slug))
-          .map((m) => ({
+        const listed = catalog.filter(
+          (m) => policy.planAllowedModels.length === 0 || policy.planAllowedModels.includes(m.slug),
+        );
+        const refused = await planSearchRefused(
+          row?.id,
+          listed.map((m) => m.slug),
+        );
+        models = listed.map(
+          (m): AiModelOption => ({
             ref: { backend: "chatgpt_plan", provider: "openai", modelId: m.slug },
             label: m.label,
             providerLabel: PLAN_PROVIDER_LABEL,
             group: "chatgpt_plan",
             metered: false,
-            caps: planCaps(m.slug),
+            caps: planCapsFor(m.slug, refused),
             available: true,
             reason: null,
             isDefault: false,
-          }));
+          }),
+        );
       } catch (err) {
         if (!(err instanceof ModelUnavailableError)) throw err;
         models = [unavailable(err.reason)];
@@ -338,7 +389,7 @@ export function createModelGateway(core: Core, opts: { fetch?: typeof fetch } = 
           providerLabel: providerShortLabel("mock"),
           group: "mock",
           metered: false,
-          caps: orgModelCaps("mock", MOCK_MODEL.modelId),
+          caps: orgCaps("mock", MOCK_MODEL.modelId),
           available: true,
           reason: null,
           isDefault: false,
@@ -362,7 +413,23 @@ export function createModelGateway(core: Core, opts: { fetch?: typeof fetch } = 
       return { models, chatgptPlan, defaultRef: def?.ref ?? null };
     },
 
+    async capsOf(tx, ref, requesterUserId) {
+      if (ref.backend !== "chatgpt_plan") return orgCaps(ref.provider, ref.modelId);
+      const row = await credentialOf(tx, requesterUserId);
+      return planCapsFor(ref.modelId, await planSearchRefused(row?.id, [ref.modelId]));
+    },
+
     async reportFailure(tx, ref, requesterUserId, e) {
+      if (ref.backend === "chatgpt_plan" && e.code === "unsupported_capability" && /web_search/u.test(e.param ?? "")) {
+        // This plan model can't search for this member: Web says so for a day instead of failing every turn.
+        const row = await credentialOf(tx, requesterUserId);
+        if (row) {
+          await core.bus.pub
+            .set(planCapKey(row.id, ref.modelId, "web_search"), "1", { EX: PLAN_CAP_TTL_SECONDS })
+            .catch(() => null);
+        }
+        return;
+      }
       if (ref.backend !== "chatgpt_plan" || !e.credentialState) return;
       if (e.credentialState !== "needs_reconnect" && e.credentialState !== "not_eligible") return;
       const [changed] = await tx

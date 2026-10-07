@@ -92,12 +92,6 @@ export const ChatgptPlanStatus = z.object({
 });
 export type ChatgptPlanStatus = z.infer<typeof ChatgptPlanStatus>;
 
-export const AiModelList = z.object({
-  models: z.array(AiModelOption),
-  chatgptPlan: ChatgptPlanStatus,
-  defaultRef: ModelRef.nullable(),
-});
-export type AiModelList = z.infer<typeof AiModelList>;
 
 export const ChatgptSignInStartRequest = z.object({
   redirectPort: z.number().int().min(1024).max(65535).default(1455),
@@ -144,6 +138,52 @@ export const AiToolState = z.object({
   reason: AiToolUnavailableReason.nullable(),
 });
 export type AiToolState = z.infer<typeof AiToolState>;
+
+export const AI_TOOL_LABELS: Readonly<Record<AiToolKey, string>> = Object.freeze({
+  web: "Web search",
+  companyKnowledge: "Company knowledge",
+  mcp: "MCP",
+  skills: "Skills",
+});
+
+/**
+ * The four toggles in their fixed order (05-11): Web with its availability; Company Knowledge, MCP and Skills always
+ * `not_available_yet` in Phase 5 (they never reach a model).
+ */
+export function aiToolStates(web: { reason: AiToolUnavailableReason | null; on: boolean }): AiToolState[] {
+  const later = (key: AiToolKey): AiToolState => ({
+    key,
+    label: AI_TOOL_LABELS[key],
+    enabled: false,
+    available: false,
+    reason: "not_available_yet",
+  });
+  return [
+    {
+      key: "web",
+      label: AI_TOOL_LABELS.web,
+      enabled: web.reason === null && web.on,
+      available: web.reason === null,
+      reason: web.reason,
+    },
+    later("companyKnowledge"),
+    later("mcp"),
+    later("skills"),
+  ];
+}
+
+/** `GET /ai-chat/models` (placed after the tool states it carries). */
+export const AiModelList = z.object({
+  models: z.array(AiModelOption),
+  chatgptPlan: ChatgptPlanStatus,
+  defaultRef: ModelRef.nullable(),
+  /**
+   * The member's tool toggles before a model is chosen (05-11): organization policy and permission only. Web on a
+   * given model is also unavailable when that model's `caps.webSearch` is "none".
+   */
+  tools: z.array(AiToolState).optional(),
+});
+export type AiModelList = z.infer<typeof AiModelList>;
 
 export const AiChatSettings = z.object({
   instructions: z.string().max(AI_INSTRUCTIONS_MAX),

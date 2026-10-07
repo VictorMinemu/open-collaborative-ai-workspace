@@ -17,6 +17,7 @@ import { streamText } from "ai";
 import { and, eq, lt, ne, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { convTopic } from "../chat";
+import { createPermissionService } from "../organization";
 import {
   type ClassifiedModelError,
   loadAiChatPolicy,
@@ -37,6 +38,11 @@ import { type ReportedUsage, recordUsage } from "./usage";
  * the generation outcome, exactly one usage record and the durable `message.updated`.
  *
  * Provider errors are logged as `{code, status, provider}` only: AI SDK errors carry the request body (P-10).
+ *
+ * Web search (05-11): `source` parts (URL citations of the plan's hosted search) and the SearXNG tool's results
+ * give the answer's source domains (hostnames, deduplicated, at most 20); `web_search` tool calls count the
+ * searches. None of them is ever published as a delta: only answer text streams. At finalize the generation records
+ * `web_used` / `source_domains` and, when the web was used, `ai_generation.web_used` is audited (domains only).
  */
 
 export type AfterFinalize = (
@@ -70,6 +76,44 @@ export interface RunLoop {
 
 /** AiDeltaEvent.text max. */
 const DELTA_MAX = 16_000;
+/** `ai_generations.source_domains` / `AiGeneration.sourceDomains` max. */
+const SOURCE_DOMAINS_MAX = 20;
+
+/** What the web contributed to one answer (05-11). */
+export interface WebActivity {
+  searches: number;
+  domains: string[];
+}
+
+/** The hostname of a URL a source points at (lowercased, `www.` dropped), or null when it is not http(s). */
+export function sourceDomain(url: string): string | null {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+    const host = u.hostname.toLowerCase().replace(/^www\./u, "");
+    return host && host.length <= 253 ? host : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Collects the domains (≤ 20, first seen first) and searches of one answer. */
+export function webCollector() {
+  const domains = new Set<string>();
+  let searches = 0;
+  return {
+    addUrl(url: string) {
+      const d = sourceDomain(url);
+      if (d && domains.size < SOURCE_DOMAINS_MAX) domains.add(d);
+    },
+    addSearch() {
+      searches++;
+    },
+    get(): WebActivity {
+      return { searches, domains: [...domains] };
+    },
+  };
+}
 
 interface Active {
   controller: AbortController;
@@ -88,6 +132,8 @@ interface Outcome {
   finishReason: string | null;
   error: ClassifiedModelError | null;
   usage: ReportedUsage | null;
+  /** Absent = the web was not used. */
+  web?: WebActivity;
 }
 
 /** Text of a built prompt for the usage estimate (attachments count nothing here). */
@@ -137,6 +183,7 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
   const now = deps.now ?? (() => new Date());
   const active = new Map<string, Active>();
   const listeners: AfterFinalize[] = [];
+  const perms = createPermissionService(core);
 
   async function prepare(organizationId: string, generationId: string) {
     const orgName = (await core.identity.organizationName(organizationId)) ?? "your organization";
@@ -144,15 +191,20 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
       const [gen] = await tx.select().from(aiGenerations).where(eq(aiGenerations.id, generationId)).limit(1);
       if (gen?.status !== "running" || gen.instanceId !== instanceId) return null;
       const policy = await loadAiChatPolicy(tx);
-      const turn = await loadTurn(tx, gen, { orgName, now: now(), policy });
       const ref = { backend: gen.backend, provider: gen.provider, modelId: gen.modelId } as ModelRef;
+      let resolved: ResolvedModel;
       try {
-        return { gen, turn, ref, resolved: await deps.gateway.resolve(tx, ref, gen.requesterUserId) };
+        resolved = await deps.gateway.resolve(tx, ref, gen.requesterUserId);
       } catch (err) {
-        if (err instanceof ModelUnavailableError || err instanceof PlanTokenUnavailableError)
+        if (err instanceof ModelUnavailableError || err instanceof PlanTokenUnavailableError) {
+          const turn = await loadTurn(tx, gen, { orgName, now: now(), policy });
           return { gen, turn, ref, unavailable: err };
+        }
         throw err;
       }
+      // Tools are decided here, per turn, for the requester and the resolved model (05-11).
+      const turn = await loadTurn(tx, gen, { orgName, now: now(), policy, tools: { resolved, perms } });
+      return { gen, turn, ref, resolved };
     });
   }
 
@@ -188,6 +240,8 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
         errorParam: outcome.error?.param ?? null,
         partialText: text,
         truncated: turn?.truncated ?? false,
+        webUsed: outcome.web !== undefined,
+        sourceDomains: outcome.web?.domains.slice(0, SOURCE_DOMAINS_MAX) ?? [],
         heartbeatAt: finishedAt,
         finishedAt,
       })
@@ -209,6 +263,17 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
       outputText: text,
     });
     if (outcome.error) await deps.gateway.reportFailure(tx, ref, g.requesterUserId, outcome.error);
+    if (outcome.web) {
+      // Domains and counts only: never a query, a URL path or result text (05-11).
+      await core.audit.record(tx, {
+        action: "ai_generation.web_used",
+        resourceType: "ai_chat",
+        resourceId: g.conversationId,
+        actorKind: "user",
+        userId: g.requesterUserId,
+        metadata: { generationId: g.id, domains: outcome.web.domains, searches: outcome.web.searches },
+      });
+    }
     const [chat] = await tx
       .update(aiChats)
       .set({ lastActivityAt: finishedAt, updatedAt: finishedAt })
@@ -345,11 +410,13 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
     /** Usage of the steps that finished before an abort (Pitfall 3); null when none did. */
     let stepUsage: ReportedUsage | null = null;
     let finishReason: string | null = null;
+    const web = webCollector();
     try {
       const result = streamText({
         model: resolved.model,
         instructions: turn.instructions,
         messages: turn.messages,
+        ...(turn.tools ? { tools: turn.tools, stopWhen: turn.stopWhen } : {}),
         abortSignal: entry.controller.signal,
         maxRetries: resolved.maxRetries,
         providerOptions: resolved.providerOptions,
@@ -359,6 +426,11 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
       for await (const part of result.stream) {
         if (part.type === "text-delta") {
           if (!entry.controller.signal.aborted) entry.text += part.text;
+        } else if (part.type === "source") {
+          // Citations of the hosted search: their hostnames only, never published.
+          if (part.sourceType === "url") web.addUrl(part.url);
+        } else if (part.type === "tool-call") {
+          if (part.toolName === "web_search") web.addSearch();
         } else if (part.type === "finish-step") {
           stepUsage = addUsage(stepUsage, part.usage);
         } else if (part.type === "finish") {
@@ -382,6 +454,8 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
     await publishing;
     await writing;
 
+    const activity = web.get();
+    const webUsed = activity.searches > 0 || activity.domains.length > 0 ? { web: activity } : {};
     let outcome: Outcome;
     if (aborted || entry.controller.signal.aborted) {
       const shutdown = entry.reason !== "stop";
@@ -391,6 +465,7 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
         error: shutdown ? deps.gateway.classify(new DOMException("aborted", "AbortError")) : null,
         // Provider counts arrive with the last event, so an aborted stream usually has none: estimated then.
         usage: usage ?? stepUsage,
+        ...webUsed,
       };
     } else if (error !== null) {
       const classified = deps.gateway.classify(error);
@@ -402,9 +477,9 @@ export function createRunLoop(core: Core, deps: { gateway: ModelGateway; now?: (
         },
         "ai generation failed",
       );
-      outcome = { status: "failed", finishReason: finishReason ?? "error", error: classified, usage };
+      outcome = { status: "failed", finishReason: finishReason ?? "error", error: classified, usage, ...webUsed };
     } else {
-      outcome = { status: "completed", finishReason, error: null, usage };
+      outcome = { status: "completed", finishReason, error: null, usage, ...webUsed };
     }
     await finalize(job.organizationId, gen, ref, entry.text, outcome, turn);
   }

@@ -1,4 +1,4 @@
-import type { AiChatPolicy, AiGenerationStatus } from "@ocw/contracts";
+import { type AiChatPolicy, type AiGenerationStatus, AI_MAX_STEPS } from "@ocw/contracts";
 import {
   aiChats,
   aiGenerations,
@@ -8,27 +8,67 @@ import {
   orgMembers,
   type Tx,
 } from "@ocw/db";
-import type { ModelMessage, ToolSet } from "ai";
+import { type ModelMessage, type StopCondition, stepCountIs, type ToolSet } from "ai";
 import { and, asc, desc, eq, inArray, isNull, lt } from "drizzle-orm";
+import type { ResolvedModel } from "../model-gateway";
+import type { PermissionService } from "../organization";
 import { buildModelMessages, type ModelFilePart, type PersistedTurn } from "./build-model-messages";
 import type { GenerationRow } from "./dto";
+import { webAllowed } from "./tools-state";
 
 /**
  * The seam between persisted state and the model call: persisted rows (seq order, before the answer being
- * generated), chat settings, the requester's preferences and the viewer → `buildModelMessages`. 05-11 adds tools
- * and 05-12 attachments here; nothing else assembles a prompt (P-05).
+ * generated), chat settings, the requester's preferences and the viewer → `buildModelMessages`. 05-12 adds
+ * attachments here; nothing else assembles a prompt (P-05).
+ *
+ * Tools (05-11, D-04): when the chat has Web on and `webAllowed` holds for the requester and the resolved model
+ * (policy, `ai_chat.web`, the model's search support), the plan backend gets its hosted `web_search` and organization
+ * keys and the mock get the SearXNG function tool; never a provider-hosted search on an organization key. Tools come
+ * with `stopWhen: stepCountIs(AI_MAX_STEPS)` and the prompt's web note; without them the turn has no tools at all.
  */
 export interface Turn {
   instructions: string;
   messages: ModelMessage[];
   tools: ToolSet | undefined;
+  /** Set together with `tools`: at most `AI_MAX_STEPS` model steps per answer. */
+  stopWhen: StopCondition<ToolSet> | undefined;
   truncated: boolean;
+}
+
+/** What the turn needs to attach tools: the requester's resolved model and the resolver (absent = no tools). */
+export interface TurnTools {
+  resolved: ResolvedModel;
+  perms: PermissionService;
+}
+
+/** The tools of this turn, or null when Web is off, not allowed or not supported here. */
+async function webTools(
+  tx: Tx,
+  generation: GenerationRow,
+  web: boolean,
+  policy: AiChatPolicy,
+  t: TurnTools | undefined,
+): Promise<ToolSet | null> {
+  if (!web || !t) return null;
+  const { resolved, perms } = t;
+  const allowed = await webAllowed(tx, {
+    userId: generation.requesterUserId,
+    policy,
+    perms,
+    caps: resolved.caps,
+    backend: resolved.ref.backend,
+  });
+  if (!allowed) return null;
+  if (resolved.ref.backend === "chatgpt_plan") {
+    return resolved.hostedTools.web_search ? { web_search: resolved.hostedTools.web_search } : null;
+  }
+  return null;
 }
 
 export async function loadTurn(
   tx: Tx,
   generation: GenerationRow,
-  ctx: { orgName: string; now: Date; policy: AiChatPolicy },
+  ctx: { orgName: string; now: Date; policy: AiChatPolicy; tools?: TurnTools },
 ): Promise<Turn> {
   const [assistant] = await tx
     .select({ seq: messages.seq })
@@ -101,8 +141,10 @@ export async function loadTurn(
       ),
     );
 
+  const tools = await webTools(tx, generation, chat.tools?.web === true, ctx.policy, ctx.tools);
   const built = buildModelMessages({
     purpose: "chat",
+    webSearch: tools !== null,
     rows: turns,
     viewer: { displayName: viewer?.displayName ?? "a member", orgName: ctx.orgName, now: ctx.now },
     chat: {
@@ -114,5 +156,7 @@ export async function loadTurn(
     attachments: new Map<string, ModelFilePart[]>(),
     maxContextTokens: ctx.policy.maxContextTokens,
   });
-  return { ...built, tools: undefined };
+  return tools
+    ? { ...built, tools, stopWhen: stepCountIs(AI_MAX_STEPS) }
+    : { ...built, tools: undefined, stopWhen: undefined };
 }

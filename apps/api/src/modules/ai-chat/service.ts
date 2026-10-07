@@ -39,16 +39,19 @@ import {
   type AiChatRow,
   aiMessage,
   chatDetail,
+  chatSettings,
   chatSummary,
   directoryOf,
   EMPTY_DIRECTORY,
   type GenerationRow,
   generationDto,
   generationsFor,
+  parseModelRef,
 } from "./dto";
 import { consumeGeneration, refuseOverLimit } from "./limits";
 import type { RunLoop } from "./run-loop";
 import { heuristicTitle } from "./titles";
+import { toolStates } from "./tools-state";
 import { backendClassOf } from "./usage";
 
 /**
@@ -136,6 +139,26 @@ export function createAiChatService(deps: AiChatDeps) {
   const { core, gateway, runLoop, access, perms } = deps;
 
   const resolveOr409 = (tx: Tx, ref: ModelRef, userId: string) => resolveModelOr409(gateway, tx, ref, userId);
+
+  /** The chat detail its owner sees: settings, the tool toggles for the chat's last model (05-11), viewerCan. */
+  async function detailOf(
+    req: FastifyRequest,
+    tx: Tx,
+    summary: AiChatSummary,
+    chat: AiChatRow,
+    facts: Parameters<typeof channelResource>[0],
+  ): Promise<AiChatDetail> {
+    const tools = await toolStates(tx, {
+      userId: chat.ownerUserId,
+      policy: await loadAiChatPolicy(tx),
+      perms,
+      gateway,
+      chat: chatSettings(chat),
+      model: parseModelRef(chat.lastModel),
+    });
+    const viewerCan = await perms.viewerCan(req, tx, channelResource(facts), VIEWER_CAN);
+    return chatDetail(summary, chat, tools, viewerCan);
+  }
 
   async function isGenerating(tx: Tx, conversationId: string): Promise<boolean> {
     const [row] = await tx
@@ -551,9 +574,7 @@ export function createAiChatService(deps: AiChatDeps) {
             chat: summary,
           });
         }
-        const policy = await loadAiChatPolicy(tx);
-        const viewerCan = await perms.viewerCan(req, tx, channelResource(facts), VIEWER_CAN);
-        return chatDetail(summary, fresh.chat, policy, viewerCan);
+        return detailOf(req, tx, summary, fresh.chat, facts);
       });
     },
 
@@ -591,11 +612,9 @@ export function createAiChatService(deps: AiChatDeps) {
           .from(aiGenerations)
           .where(and(eq(aiGenerations.conversationId, conv.id), eq(aiGenerations.status, "running")))
           .limit(1);
-        const policy = await loadAiChatPolicy(tx);
-        const viewerCan = await perms.viewerCan(req, tx, channelResource(facts), VIEWER_CAN);
         const summary = chatSummary(conv, chat, { generating: running !== undefined, gateway });
         return {
-          chat: chatDetail(summary, chat, policy, viewerCan),
+          chat: await detailOf(req, tx, summary, chat, facts),
           messages: list,
           hasMore,
           running: running
