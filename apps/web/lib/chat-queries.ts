@@ -52,6 +52,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { useSyncExternalStore } from "react";
+import { mergeCard } from "./agent-cards";
 import { api, isApiError } from "./api";
 
 export const chatKeys = {
@@ -475,7 +476,8 @@ export function editMessage(id: string, body: string): Promise<Message> {
 
 /**
  * Merges a changed message into a cached one. Realtime payloads omit viewer-specific fields (P-04), so the
- * cached `reactions`, `pinned`, `saved`, `attachments` and the root's `replyParticipants` survive the update.
+ * cached `reactions`, `pinned`, `saved`, `attachments`, the root's `replyParticipants` and a card's viewer fields
+ * survive the update.
  */
 function mergeMessage(prev: Message, next: Message): Message {
   return {
@@ -486,6 +488,8 @@ function mergeMessage(prev: Message, next: Message): Message {
     saved: next.saved ?? prev.saved,
     attachments: next.attachments ?? prev.attachments,
     replyParticipants: next.replyParticipants ?? prev.replyParticipants,
+    // Agent Cards (06-15): the viewer's `following` / `viewerCan` survive a realtime copy of the card.
+    ...(next.card ? { card: mergeCard(prev.card, next.card) } : {}),
   };
 }
 
@@ -526,6 +530,7 @@ export function applyMessageDeleted(qc: QueryClient, ev: MessageDeletedEvent) {
           reactions: [],
           attachments: [],
           pinned: false,
+          card: undefined,
         }
       : m;
   if (ev.threadId) {

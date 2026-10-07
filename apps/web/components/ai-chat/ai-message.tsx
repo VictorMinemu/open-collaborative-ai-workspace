@@ -9,6 +9,7 @@ import type {
 } from "@ocw/contracts";
 import { AtSign, Check, CircleAlert, Clock3, Copy, Globe, Square, Unplug } from "lucide-react";
 import { createContext, Fragment, type ReactNode, useContext, useState } from "react";
+import { AgentCardView } from "@/components/chat/agent-card";
 import { MessageAttachments } from "@/components/chat/attachments/attachment-grid";
 import { Lightbox } from "@/components/chat/attachments/lightbox";
 import { BotBadge, PrincipalAvatar } from "@/components/chat/principal-avatar";
@@ -180,7 +181,12 @@ function PersonaTurn({ message, text }: { message: Message; text: string }) {
           </span>
           <BotBadge />
         </div>
-        {text ? <Markdown text={text} variant="chat" className="min-w-0 break-words" /> : null}
+        {message.card ? (
+          // An Agent Card (06-15): the same renderer as in channels, threads and DMs; the body is its summary.
+          <AgentCardView messageId={message.id} card={message.card} summary={message.body} />
+        ) : text ? (
+          <Markdown text={text} variant="chat" className="min-w-0 break-words" />
+        ) : null}
       </div>
     </div>
   );
