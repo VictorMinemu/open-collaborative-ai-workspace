@@ -451,15 +451,20 @@ export type AiUsageReport = z.infer<typeof AiUsageReport>;
 
 // ---------------------------------------------------------------- read-only share links (AICHAT-09)
 
-/** URLs are API-relative and share-scoped: /api/v1/ai-shares/<shareId>/attachments/<attachmentId>/{preview,download}. */
+/**
+ * URLs are API-relative and share-scoped: /api/v1/ai-shares/<shareId>/attachments/<attachmentId>/{preview,large,download}
+ * (05-13: `size` and `largeUrl` added so the Phase 4 file card and lightbox render a snapshot's files unchanged).
+ */
 export const AiShareAttachment = z.object({
   id: Id,
   filename: z.string(),
   contentType: z.string(),
+  size: z.number().int().nonnegative(),
   isImage: z.boolean(),
   width: z.number().int().positive().nullable(),
   height: z.number().int().positive().nullable(),
   previewUrl: z.string().nullable(),
+  largeUrl: z.string().nullable(),
   downloadUrl: z.string(),
 });
 export type AiShareAttachment = z.infer<typeof AiShareAttachment>;

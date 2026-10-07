@@ -58,6 +58,23 @@ async function loadRow(tx: Tx, id: string): Promise<AttachmentRow | null> {
 const keyOf = (row: AttachmentRow, part: AttachmentPart) =>
   attachmentKey(row.organizationId, row.conversationId, row.id, part);
 
+/**
+ * A short-lived presigned GET for one stored part, issued only after the caller's read decision: the original as a
+ * download with its sniffed type, the renditions inline as webp (T-04-04-06). Shared with the AI chat share routes
+ * (05-13) through `presignAttachmentPart`, so both serve files the same way.
+ */
+export function presignPart(
+  storage: ObjectStorage,
+  row: AttachmentRow,
+  part: AttachmentPart,
+): Promise<string> {
+  return storage.presignGet(keyOf(row, part), {
+    ttlSeconds: GET_TTL_SECONDS,
+    contentType: part === "original" ? (row.contentType ?? "application/octet-stream") : "image/webp",
+    disposition: dispositionFor(part, row.filename),
+  });
+}
+
 export function registerAttachmentRoutes(app: App, deps: AttachmentRoutesDeps): void {
   const { core, access, storage } = deps;
   const perms = createPermissionService(core);
@@ -300,11 +317,7 @@ export function registerAttachmentRoutes(app: App, deps: AttachmentRoutesDeps): 
           resourceId: row.id,
           metadata: { attachmentId: row.id, conversationId: row.conversationId },
         });
-        return storage.presignGet(keyOf(row, "original"), {
-          ttlSeconds: GET_TTL_SECONDS,
-          contentType: row.contentType ?? "application/octet-stream",
-          disposition: dispositionFor("original", row.filename),
-        });
+        return presignPart(storage, row, "original");
       });
       return redirect(reply, url);
     },
@@ -324,11 +337,7 @@ export function registerAttachmentRoutes(app: App, deps: AttachmentRoutesDeps): 
         const url = await core.db.withTenant(tenant(req), async (tx) => {
           const row = await visible(req, tx, req.params.id);
           if (!toAttachment(row).isImage) throw hidden();
-          return storage.presignGet(keyOf(row, part), {
-            ttlSeconds: GET_TTL_SECONDS,
-            contentType: "image/webp",
-            disposition: dispositionFor(part, row.filename),
-          });
+          return presignPart(storage, row, part);
         });
         // The web app embeds these as <img> from its own origin. Helmet's `same-site` CORP blocks that wherever
         // the web and the API are not same-site, e.g. a self-hosted install on an IP address with two ports
