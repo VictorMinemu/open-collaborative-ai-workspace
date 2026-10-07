@@ -185,7 +185,7 @@ describe("GET /v1/models", () => {
     const res = await fetch(`${base}/v1/models`, { headers: { authorization: PLAN } });
     assert.deepEqual(await res.json(), planCatalog());
     assert.deepEqual(planCatalog(), {
-      data: [
+      models: [
         { slug: "gpt-6-astra", display_name: "GPT-6 Astra", visibility: "list" },
         {
           slug: "gpt-5.6-luna",
