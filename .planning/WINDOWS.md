@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 64
+open_count: 67
 waived_count: 0
 fixed_count: 17
-total_count: 81
-last_updated: 2026-10-07T18:10:28.587Z
+total_count: 84
+last_updated: 2026-10-07T19:02:07.565Z
 ---
 
 # Broken Windows Ledger
@@ -96,6 +96,9 @@ last_updated: 2026-10-07T18:10:28.587Z
 | 79 | 06.1 | deviation | apps/local-runtime/src/codex |  | Synthetic Codex image fixture reuses recorded initialize/thread/start lines | open |  | 2026-10-07T17:48:58.298Z |  |
 | 80 | 06.1 | deviation | packages/db |  | 06.1-02 added migration work_prompt_image_order outside its files_modified (needed for request order) | open |  | 2026-10-07T18:10:28.511Z |  |
 | 81 | 06.1 | unmet-truth | apps/api/src/modules/work-session/turn-mode.int.test.ts |  | One standalone turn-mode.int run failed in beforeAll with no captured cause; 9 reruns passed (unconfirmed flake) | open |  | 2026-10-07T18:10:28.587Z |  |
+| 82 | 06.1 | deviation | e2e/tests/work-zone-images.spec.ts |  | Task 2 e2e written before implementation but not run red on its own | open |  | 2026-10-07T19:02:07.423Z |  |
+| 83 | 06.1 | unrun-verify | apps/web/components/work-zone/composer.tsx |  | Real Ctrl+V on a non-macOS host not run (paste event is key-agnostic) | open |  | 2026-10-07T19:02:07.493Z |  |
+| 84 | 06.1 | deviation | apps/web/components/chat/attachment-grid.tsx |  | attachment-grid.tsx changed outside files_modified (optional className) | open |  | 2026-10-07T19:02:07.565Z |  |
 
 ````json
 [
@@ -1069,6 +1072,42 @@ last_updated: 2026-10-07T18:10:28.587Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-07T18:10:28.587Z",
+    "resolved_at": null
+  },
+  {
+    "id": 82,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": "e2e/tests/work-zone-images.spec.ts",
+    "line": null,
+    "description": "Task 2 e2e written before implementation but not run red on its own",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T19:02:07.423Z",
+    "resolved_at": null
+  },
+  {
+    "id": 83,
+    "kind": "unrun-verify",
+    "phase": "06.1",
+    "file": "apps/web/components/work-zone/composer.tsx",
+    "line": null,
+    "description": "Real Ctrl+V on a non-macOS host not run (paste event is key-agnostic)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T19:02:07.493Z",
+    "resolved_at": null
+  },
+  {
+    "id": 84,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": "apps/web/components/chat/attachment-grid.tsx",
+    "line": null,
+    "description": "attachment-grid.tsx changed outside files_modified (optional className)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T19:02:07.565Z",
     "resolved_at": null
   }
 ]
