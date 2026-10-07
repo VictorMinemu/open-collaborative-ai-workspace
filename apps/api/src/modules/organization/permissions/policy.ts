@@ -160,6 +160,19 @@ export const PRECONDITIONS: readonly Precondition[] = [
     },
   },
   {
+    // Unit personas (AGENT-01, P-04): seen and mentioned by the members of the persona's unit subtree, the leads of
+    // any unit on its path, its owner and admins. Nobody else learns it exists, whatever rule allows `bot.read`.
+    applies: (perm) => perm === "bot.read",
+    check: (p, r) => {
+      if (r.type !== "agent" || p.kind !== "user" || !r.state.has("unit_scoped")) return null;
+      if (r.relations.has("owner") || p.orgRole === "admin") return null;
+      const unitId = r.unitPath[r.unitPath.length - 1];
+      if (unitId !== undefined && p.memberUnitPaths.some((path) => path.includes(unitId))) return null;
+      if (r.unitPath.some((u) => p.leadOfUnitIds.has(u))) return null;
+      return { layer: "resource", reason: "unit_agent" };
+    },
+  },
+  {
     // Direct conversations (D-03): two fixed members; nobody adds, removes or archives.
     applies: (perm) => DM_FIXED.has(perm),
     check: (_p, r) =>
@@ -347,16 +360,30 @@ export interface AgentFacts {
   scope: "team" | "personal";
   ownerUserId: string | null;
   disabled: boolean;
+  /**
+   * AGENT-01: the path (root → self) of the unit a shared persona belongs to; omitted or [] = the organization.
+   * Unit-scoped rules and unit leads (`LEAD_PERMISSIONS`) then apply to the persona.
+   */
+  unitPath?: readonly string[];
 }
 
-/** A bot as a resource: `owner` relation for its owner; states `personal` and `disabled`. */
+/**
+ * A bot as a resource: `owner` relation for its owner; states `personal`, `disabled` and `unit_scoped` (a
+ * department, team or project persona, whose unit path the resource carries).
+ */
 export function agentResource(a: AgentFacts, principalUserId: string | null): ResourceFacts {
+  const unitPath = a.unitPath ?? [];
   return facts(
     "agent",
     when(
       principalUserId !== null && a.ownerUserId !== null && a.ownerUserId === principalUserId,
       "owner" as const,
     ),
-    [...when(a.scope === "personal", "personal" as const), ...when(a.disabled, "disabled" as const)],
+    [
+      ...when(a.scope === "personal", "personal" as const),
+      ...when(a.disabled, "disabled" as const),
+      ...when(unitPath.length > 0, "unit_scoped" as const),
+    ],
+    unitPath,
   );
 }
