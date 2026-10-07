@@ -273,7 +273,8 @@ export async function handleResponses(req, res, body, ctx = {}) {
   const reply = title ? titleReply(userText) : `${echo}${citation}`;
   // `[[slow:N]]`: the same slow stream, paced over about N seconds.
   const slowSecs = Number(directives.map((d) => /^slow:(\d{1,2})$/u.exec(d)?.[1]).find(Boolean) ?? 0);
-  const slowInterval = slowSecs >= 1 ? Math.round((Math.min(slowSecs, 60) * 1000) / SLOW_DELTAS) : SLOW_INTERVAL_MS;
+  const slowInterval =
+    slowSecs >= 1 ? Math.round((Math.min(slowSecs, 60) * 1000) / SLOW_DELTAS) : SLOW_INTERVAL_MS;
   // A slow title is the same title after the same 4 s (no counting appended to it).
   const slow = (has("slow") || slowSecs >= 1) && !title;
   if (has("slow") && title) await sleep(SLOW_DELTAS * SLOW_INTERVAL_MS);
