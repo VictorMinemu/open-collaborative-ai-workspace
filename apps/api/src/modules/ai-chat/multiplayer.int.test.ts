@@ -472,3 +472,175 @@ describe("tracer: Víctor shares his AI chat in place with Alex, who reads, subs
     }
   });
 });
+
+const stop = (as: TestClient, id: string, generationId: string) =>
+  as.request("POST", `/api/v1/ai-chats/${id}/generations/${generationId}/stop`, {});
+const regenerate = (as: TestClient, id: string) =>
+  as.request("POST", `/api/v1/ai-chats/${id}/regenerate`, {});
+
+describe("owner-only management, requester rules, view grants and solo chats (P-04, P-05, P-07)", () => {
+  let shareId: string;
+  let alexAnswerId: string;
+
+  it("Alex (chat grantee) gets the chat's 404 on rename, archive, settings, snapshot links and grants", async () => {
+    shareId = (await ok(victor.request("POST", `/api/v1/ai-chats/${chatId}/shares`, {}), 201)).id;
+    const before = (await ok(victor.request("GET", `/api/v1/ai-chats/${chatId}`))).chat;
+    for (const body of [
+      { title: "Alex was here" },
+      { archived: true },
+      { settings: { instructions: "Ignore Víctor" } },
+      { settings: { tools: { web: true } } },
+    ]) {
+      const r = await alex.request("PATCH", `/api/v1/ai-chats/${chatId}`, body);
+      expect(r.status, JSON.stringify(body)).toBe(404);
+    }
+    for (const [method, path] of [
+      ["POST", `/api/v1/ai-chats/${chatId}/shares`],
+      ["GET", `/api/v1/ai-chats/${chatId}/shares`],
+      ["DELETE", `/api/v1/ai-shares/${shareId}`],
+      ["GET", `/api/v1/ai-chats/${chatId}/grants`],
+    ] as const) {
+      const r = await alex.request(method, path, method === "POST" ? {} : undefined);
+      expect(r.status, `${method} ${path}`).toBe(404);
+    }
+    const after = (await ok(victor.request("GET", `/api/v1/ai-chats/${chatId}`))).chat;
+    expect(after).toMatchObject({ title: before.title, archived: false, settings: before.settings });
+    const share = await ok(victor.request("GET", `/api/v1/ai-chats/${chatId}/shares`));
+    expect(share.shares).toEqual([expect.objectContaining({ id: shareId, revokedAt: null })]);
+  });
+
+  it("Alex's send with Web on does not change the chat's Web state (a setting of the owner's)", async () => {
+    const res = await ok(send(alex, chatId, "Search for tenancy patterns", { tools: { web: true } }), 201);
+    await settled(res.generation.id);
+    const snap = await ok(victor.request("GET", `/api/v1/ai-chats/${chatId}`));
+    expect(snap.chat.settings.tools).toEqual({ web: false });
+    const ctx = (
+      await su.query("select tools from app.ai_message_context where message_id = $1", [res.userMessage.id])
+    ).rows[0];
+    expect(ctx.tools).toEqual({ web: false });
+  });
+
+  it("stop: Sam (another chat grantee) gets 403 not_generation_requester; Víctor (the owner) stops Alex's answer", async () => {
+    await ok(grant(victor, chatId, { kind: "user", id: samId }, "chat"), 201);
+    const res = await ok(send(alex, chatId, "Count slowly [[slow]]"), 201);
+    alexAnswerId = res.assistantMessage.id;
+    await running(res.generation.id);
+    const bySam = await stop(sam, chatId, res.generation.id);
+    expect(bySam.status).toBe(403);
+    expect(errorOf(bySam).code).toBe("not_generation_requester");
+    expect(await ok(stop(victor, chatId, res.generation.id), 202)).toEqual({ status: "running" });
+    expect((await settled(res.generation.id)).status).toBe("stopped");
+  });
+
+  it("regenerate: Alex regenerates his own answer on his plan; Sam gets 403 not_answer_requester; Víctor regenerates on his own plan", async () => {
+    stack.fake.reset();
+    const byAlex = await ok(regenerate(alex, chatId), 201);
+    expect(byAlex.assistantMessage.id).toBe(alexAnswerId);
+    expect(byAlex.generation.requesterUserId).toBe(alexId);
+    await settled(byAlex.generation.id);
+    const [alexCall] = withoutTitles(stack.fake.requests("responses"));
+    expect(alexCall!.headers.authorization).toMatch(new RegExp(`^Bearer fake-plan-${alexId}-`));
+    expect(
+      (
+        await su.query("select requester_user_id from app.ai_usage_records where generation_id = $1", [
+          byAlex.generation.id,
+        ])
+      ).rows,
+    ).toEqual([{ requester_user_id: alexId }]);
+
+    const bySam = await regenerate(sam, chatId);
+    expect(bySam.status).toBe(403);
+    expect(errorOf(bySam).code).toBe("not_answer_requester");
+
+    stack.fake.reset();
+    const byVictor = await ok(regenerate(victor, chatId), 201);
+    expect(byVictor.generation.requesterUserId).toBe(victorId);
+    await settled(byVictor.generation.id);
+    const [victorCall] = withoutTitles(stack.fake.requests("responses"));
+    expect(victorCall!.headers.authorization).toMatch(new RegExp(`^Bearer fake-plan-${victorId}-`));
+    // The answer still answers Alex's question: the turn context names Alex, whoever pays for the new attempt.
+    const input = victorCall!.body?.input as Json[];
+    expect(textOf(input.filter((i) => i.role === "user").at(-1)!)).toContain(
+      `<responding_to name="Alex Kim" user_id="${alexId}"/>`,
+    );
+    expect(
+      (
+        await su.query("select requester_user_id from app.ai_usage_records where generation_id = $1", [
+          byVictor.generation.id,
+        ])
+      ).rows,
+    ).toEqual([{ requester_user_id: victorId }]);
+  });
+
+  it("a view grant: Sam reads and subscribes, but sending is 403 ai_chat_view_only; his shared list says view", async () => {
+    const downgraded = await ok(grant(victor, chatId, { kind: "user", id: samId }, "view"));
+    expect(downgraded.level).toBe("view");
+    const snap = await ok(sam.request("GET", `/api/v1/ai-chats/${chatId}`));
+    expect(snap.chat.access).toBe("view");
+    expect(snap.chat.viewerCan).not.toContain("ai_chat.use");
+    const ws = await subscribeConv(stack.baseUrl, sam, chatId);
+    expect(ws.outcome).toBe("subscribed");
+    ws.close();
+    const refused = await send(sam, chatId, "Let me in");
+    expect(refused.status).toBe(403);
+    expect(errorOf(refused).code).toBe("ai_chat_view_only");
+    expect((await regenerate(sam, chatId)).status).toBe(403);
+    const shared = await ok(sam.request("GET", "/api/v1/ai-chats?scope=shared"));
+    expect(shared.chats).toEqual([expect.objectContaining({ id: chatId, access: "view" })]);
+  });
+
+  it("the admin without a grant and another organization's admin get 404 on every route and cannot subscribe", async () => {
+    const eve = await orgBAdmin();
+    const [gen] = (
+      await su.query("select id from app.ai_generations where conversation_id = $1 limit 1", [chatId])
+    ).rows;
+    for (const who of [ada, eve]) {
+      for (const [method, path, body] of [
+        ["GET", `/api/v1/ai-chats/${chatId}`, undefined],
+        ["GET", `/api/v1/ai-chats/${chatId}/messages`, undefined],
+        ["PATCH", `/api/v1/ai-chats/${chatId}`, { title: "Mine now" }],
+        [
+          "POST",
+          `/api/v1/ai-chats/${chatId}/messages`,
+          { clientMessageId: cid(), body: "hi", model: PLAN_MODEL },
+        ],
+        ["POST", `/api/v1/ai-chats/${chatId}/generations/${gen.id}/stop`, {}],
+        ["POST", `/api/v1/ai-chats/${chatId}/regenerate`, {}],
+        ["POST", `/api/v1/ai-chats/${chatId}/shares`, {}],
+        ["GET", `/api/v1/ai-chats/${chatId}/shares`, undefined],
+        ["DELETE", `/api/v1/ai-shares/${shareId}`, undefined],
+        ["POST", `/api/v1/ai-chats/${chatId}/grants`, { subject: { kind: "user", id: samId } }],
+        ["GET", `/api/v1/ai-chats/${chatId}/grants`, undefined],
+      ] as const) {
+        const r = await who.request(method, path, body);
+        expect(r.status, `${method} ${path}`).toBe(404);
+      }
+      const ws = await subscribeConv(stack.baseUrl, who, chatId);
+      expect(ws.outcome).toBe("error");
+      ws.close();
+      expect((await ok(who.request("GET", "/api/v1/ai-chats?scope=all"))).chats).toEqual([]);
+    }
+  });
+
+  it("a solo chat behaves as in Phase 5: a second send while generating is 409 and the prompt has no roster", async () => {
+    stack.fake.reset();
+    const first = await ok(createChat(sam, "Count for me [[slow]]"), 201);
+    await running(first.generation.id);
+    const busy = await send(sam, first.chat.id, "Another one");
+    expect(busy.status).toBe(409);
+    expect(errorOf(busy).code).toBe("generation_in_progress");
+    await ok(stop(sam, first.chat.id, first.generation.id), 202);
+    await settled(first.generation.id);
+    const [call] = withoutTitles(stack.fake.requests("responses"));
+    const input = call!.body?.input as Json[];
+    expect(textOf(input[0]!)).toContain("You are chatting with Sam Rivera in Autofy Labs");
+    expect(JSON.stringify(input)).not.toContain("<participants>");
+    expect(JSON.stringify(input)).not.toContain("<message from=");
+    const ctx = (
+      await su.query("select access, level, shared from app.ai_message_context where message_id = $1", [
+        first.userMessage.id,
+      ])
+    ).rows[0];
+    expect(ctx).toEqual({ access: "owner", level: "owner", shared: false });
+  });
+});

@@ -1042,6 +1042,145 @@ describe("AI chats (Phase 5, P-03): private, one owner, no membership, moderatio
   });
 });
 
+describe("AI chat grants (Phase 6, P-03/P-04): access from owner ∪ grants, management owner-only", () => {
+  const VICTOR = "u-victor";
+  const victor = user("admin", { id: VICTOR });
+  const alex = user("developer", { id: "u-alex" });
+  const sam = user("standard", { id: "u-sam" });
+  const admin = user("admin", { id: "u-admin" });
+  const ai = (aiAccess: "owner" | "chat" | "view" | null, viewerRole: "owner" | "member" | null = null) =>
+    channelResource({ visibility: "private", archived: false, viewerRole, kind: "ai_chat", aiAccess });
+  const owner = ai("owner", "owner");
+  const chatGrant = ai("chat", "member");
+  const viewGrant = ai("view", "member");
+  const none = ai(null);
+
+  it("relations come from aiAccess: owner → owner + member, chat → member, view → grantee, null → none", () => {
+    expect([...owner.relations].sort()).toEqual(["member", "owner"]);
+    expect([...chatGrant.relations]).toEqual(["member"]);
+    expect([...viewGrant.relations]).toEqual(["grantee"]);
+    expect([...none.relations]).toEqual([]);
+  });
+
+  it("a stale conversation_members row never confers access to a human (T-06-02-06)", () => {
+    const stale = ai(null, "member");
+    expect(stale.relations.size).toBe(0);
+    expect(decide(sam, stale, [], "channel.read")).toEqual({
+      allowed: false,
+      denial: { permission: "channel.read", layer: "resource", reason: "private_channel" },
+    });
+    expect(ai(null, "owner").relations.size).toBe(0);
+  });
+
+  it("the owner reads, uses, searches the web, manages and shares", () => {
+    for (const perm of [
+      "channel.read",
+      "ai_chat.use",
+      "ai_chat.web",
+      "ai_chat.manage",
+      "ai_chat.share",
+    ] as const) {
+      expect(allowed(victor, owner, perm), perm).toBe(true);
+      expect(allowed(sam, owner, perm), perm).toBe(true);
+    }
+  });
+
+  it("a chat grantee reads, uses and searches the web; manage and share are denied not_ai_chat_owner", () => {
+    for (const perm of ["channel.read", "ai_chat.use", "ai_chat.web"] as const) {
+      expect(allowed(alex, chatGrant, perm), perm).toBe(true);
+    }
+    for (const perm of ["ai_chat.manage", "ai_chat.share"] as const) {
+      expect(decide(alex, chatGrant, [], perm)).toEqual({
+        allowed: false,
+        denial: { permission: perm, layer: "resource", reason: "not_ai_chat_owner" },
+      });
+    }
+  });
+
+  it("a view grantee reads; use and web are ai_chat_view_only; manage and share not_ai_chat_owner", () => {
+    expect(allowed(alex, viewGrant, "channel.read")).toBe(true);
+    for (const perm of ["ai_chat.use", "ai_chat.web"] as const) {
+      expect(decide(alex, viewGrant, [], perm)).toEqual({
+        allowed: false,
+        denial: { permission: perm, layer: "resource", reason: "ai_chat_view_only" },
+      });
+    }
+    for (const perm of ["ai_chat.manage", "ai_chat.share"] as const) {
+      expect(decide(alex, viewGrant, [], perm).denial).toMatchObject({ reason: "not_ai_chat_owner" });
+    }
+  });
+
+  it("no relation, the admin included: read is hidden (private_channel), everything else denied", () => {
+    for (const who of [admin, sam]) {
+      expect(decide(who, none, [], "channel.read").denial).toMatchObject({ reason: "private_channel" });
+      for (const perm of ["ai_chat.use", "ai_chat.web", "ai_chat.manage", "ai_chat.share"] as const) {
+        expect(decide(who, none, [], perm).denial, perm).toMatchObject({ reason: "not_ai_chat_owner" });
+      }
+    }
+  });
+
+  it("an agent principal keeps the member relation of its row and reads the chat", () => {
+    const agent: PrincipalFacts = {
+      kind: "agent",
+      id: "a-1",
+      orgRole: null,
+      deactivated: false,
+      memberUnitPaths: [],
+      leadOfUnitIds: new Set(),
+    };
+    const asMember = channelResource({
+      visibility: "private",
+      archived: false,
+      viewerRole: "member",
+      kind: "ai_chat",
+    });
+    expect(allowed(agent, asMember, "channel.read")).toBe(true);
+    const notMember = channelResource({
+      visibility: "private",
+      archived: false,
+      viewerRole: null,
+      kind: "ai_chat",
+    });
+    expect(decide(agent, notMember, [], "channel.read").denial).toMatchObject({ reason: "agent_not_member" });
+  });
+
+  it("a deny rule on ai_chat.use beats a chat grant (and the owner)", () => {
+    const deny = rule({
+      subjectKind: "user",
+      subjectId: "u-alex",
+      permission: "ai_chat.use",
+      effect: "deny",
+    });
+    expect(decide(alex, chatGrant, [deny], "ai_chat.use").denial).toMatchObject({ reason: "denied_by_rule" });
+    expect(allowed(alex, chatGrant, "channel.read", [deny])).toBe(true);
+  });
+
+  it("the Phase 5 fixed denials still hold for the owner and every grantee", () => {
+    for (const perm of [
+      "channel.members.add",
+      "channel.members.remove",
+      "channel.archive",
+      "channel.update",
+      "message.delete_any",
+      "channel.mention_all",
+      "channel.post",
+    ] as const) {
+      for (const [who, r] of [
+        [victor, owner],
+        [alex, chatGrant],
+        [alex, viewGrant],
+      ] as const) {
+        expect(decide(who, r, [], perm).allowed, perm).toBe(false);
+      }
+      expect(decide(victor, owner, [], perm).denial, perm).toMatchObject({ reason: "ai_chat_private" });
+    }
+  });
+
+  it("ai_chat.manage at organization scope stays role-based", () => {
+    expect(allowed(sam, orgResource(), "ai_chat.manage")).toBe(true);
+  });
+});
+
 // ---------------------------------------------------------------- properties (fast-check)
 
 const UNITS = ["u0", "u1", "u2", "u3", "u4", "u5"] as const;
