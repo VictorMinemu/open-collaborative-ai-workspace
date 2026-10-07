@@ -293,6 +293,23 @@ export function registerCardActionRoutes(app: App, ctx: ChatRouteCtx): void {
     return { card, conv, facts, message };
   }
 
+  /**
+   * One card as the caller sees it (06-15): realtime events carry cards without viewer fields (P-04), so a page that
+   * got a card live reads `following` and `viewerCan` here. Same readable check as the other routes (hidden = 404).
+   */
+  app.get(
+    "/cards/:messageId",
+    { ...user, schema: { tags, params: AgentCardParams, response: { 200: AgentCard } } },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const { message } = await readableCard(req, tx, req.params.messageId);
+        const dto = await cardMessageOf(tx, message, await loadDirectory(tx));
+        const [shown] = await withCards(tx, [dto], authOf(req).userId);
+        if (!shown?.card) throw notFound(CARD_NOT_FOUND);
+        return shown.card;
+      }),
+  );
+
   app.post(
     "/cards/:messageId/follow",
     { ...user, schema: { tags, params: AgentCardParams } },
