@@ -59,7 +59,8 @@ export function attachmentLimitsHint(config: { maxBytes: number; maxPerMessage: 
 const TOKEN_BEFORE_CARET = /(^|[\s([{,;:!?"'])@([a-zA-Z0-9._-]{0,40})$/;
 const MAX_SUGGESTIONS = 8;
 
-function rank(c: MentionCandidate, q: string): number {
+/** The Phase 4 mention ranking (handle, then name, then any word; members first, agents just after); also the AI composer's (06-11). */
+export function rankMention(c: MentionCandidate, q: string): number {
   const handle = c.handle.toLowerCase();
   const name = c.displayName.toLowerCase();
   let score = 0;
@@ -137,7 +138,7 @@ export function Composer({
     const q = query.q.toLowerCase();
     const specials = (specialMentions ?? []).filter((s) => s.handle.startsWith(q));
     const people = candidates
-      .map((c) => ({ c, s: rank(c, q) }))
+      .map((c) => ({ c, s: rankMention(c, q) }))
       .filter((x) => x.s > 0)
       .sort((a, b) => b.s - a.s || a.c.displayName.localeCompare(b.c.displayName))
       .slice(0, MAX_SUGGESTIONS - specials.length)

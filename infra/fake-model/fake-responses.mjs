@@ -8,6 +8,7 @@
 //
 // Directives in the last user message:
 //   [[slow]]                     the echo, then counting " 1" … " 40": 40 deltas 100 ms apart (stop tests)
+//   [[slow:<N>]]                 the same 40 deltas paced over about N seconds (1–60; multiplayer queue specs)
 //   [[plan:usage_limit]]         3 deltas, then response.failed `subscription_sharing_usage_limit_exceeded`
 //   [[plan:not_eligible]]        403 `subscription_sharing_user_not_eligible` before streaming
 //   [[plan:invalid_user]]        401 `subscription_sharing_invalid_user`
@@ -270,8 +271,12 @@ export async function handleResponses(req, res, body, ctx = {}) {
   )}`;
   const citation = search ? ` ([example.com](${search.url}))` : "";
   const reply = title ? titleReply(userText) : `${echo}${citation}`;
+  // `[[slow:N]]`: the same slow stream, paced over about N seconds.
+  const slowSecs = Number(directives.map((d) => /^slow:(\d{1,2})$/u.exec(d)?.[1]).find(Boolean) ?? 0);
+  const slowInterval =
+    slowSecs >= 1 ? Math.round((Math.min(slowSecs, 60) * 1000) / SLOW_DELTAS) : SLOW_INTERVAL_MS;
   // A slow title is the same title after the same 4 s (no counting appended to it).
-  const slow = has("slow") && !title;
+  const slow = (has("slow") || slowSecs >= 1) && !title;
   if (has("slow") && title) await sleep(SLOW_DELTAS * SLOW_INTERVAL_MS);
   const usageLimit = has("plan:usage_limit");
   const all = slow ? slowPieces(reply) : pieces(reply);
@@ -331,7 +336,7 @@ export async function handleResponses(req, res, body, ctx = {}) {
   for (const delta of deltas) {
     if (closed) return;
     ev("response.output_text.delta", { item_id: itemId, output_index: msgIndex, content_index: 0, delta });
-    if (slow) await sleep(SLOW_INTERVAL_MS);
+    if (slow) await sleep(slowInterval);
   }
   const text = deltas.join("");
   const usage = {

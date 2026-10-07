@@ -3,12 +3,14 @@ import { type APIRequestContext, expect, type Page, test } from "@playwright/tes
 import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import {
   answerText,
+  askAiToggle,
   chatIdOf,
   humanTurn,
   lastAssistant,
   openNewAiChat,
   seedPlan,
   sendAi,
+  sendAiAs,
   shareWith,
   VICTOR,
 } from "../support/ai-chat";
@@ -60,7 +62,8 @@ test.beforeAll(async () => {
   admin = await apiAs(ADMIN);
   await ensureMember(admin, VICTOR, "admin");
   await ensureMember(admin, ALEX, "developer");
-  for (const actor of [VICTOR, ALEX]) {
+  await ensureMember(admin, SAM, "developer");
+  for (const actor of [VICTOR, ALEX, SAM]) {
     const api = await apiAs(actor);
     await seedPlan(api);
     await api.post("/api/v1/me/model-credentials/chatgpt/welcome-seen", { data: {} });
@@ -183,11 +186,17 @@ async function settled(api: APIRequestContext, chatId: string) {
     .toBe("completed");
 }
 
-async function grant(api: APIRequestContext, chatId: string, userId: string, level: "chat" | "view") {
+async function grant(
+  api: APIRequestContext,
+  chatId: string,
+  userId: string,
+  level: "chat" | "view",
+): Promise<string> {
   const res = await api.post(`/api/v1/ai-chats/${chatId}/grants`, {
     data: { subject: { kind: "user", id: userId }, level },
   });
   expect(res.ok(), `grant ${level}: ${res.status()}`).toBe(true);
+  return ((await res.json()) as { id: string }).id;
 }
 
 test("grantees get safe defaults: their own model, read-only for Can view, no owner-only actions", async ({
@@ -272,6 +281,241 @@ test("grantees get safe defaults: their own model, read-only for Can view, no ow
   } finally {
     await viewer.context.close();
     await grantee.context.close();
+    await owner.context.close();
+    await victor.dispose();
+  }
+});
+
+// ---------------------------------------------------------------- 06-11: the live multiplayer surface
+
+/** The human turns of `authorName` on `page`, the latest one. */
+const latestTurn = (page: Page, authorName: string) => humanTurn(page, authorName).last();
+
+test("Scenario B 3–4 live: typing, the visible queue, one coalesced answer saying whom it answered and who paid", async ({
+  browser,
+}, info) => {
+  test.setTimeout(240_000);
+  const project = info.project.name;
+  const w = widthOf(project);
+  const alexId = await ensureMember(admin, ALEX, "developer");
+  const samId = await ensureMember(admin, SAM, "developer");
+  const victor = await apiAs(VICTOR);
+  const created = await victor.post("/api/v1/ai-chats", {
+    data: {
+      clientMessageId: `cm-${randomUUID()}`,
+      body: `Plan the rollout ${randomUUID().slice(0, 8)}`,
+      model: PLAN("gpt-6-astra"),
+    },
+  });
+  expect(created.ok(), `create chat: ${created.status()}`).toBe(true);
+  const chatId = ((await created.json()) as { chat: { id: string } }).chat.id;
+  await settled(victor, chatId);
+  await grant(victor, chatId, alexId, "chat");
+  const samGrant = await grant(victor, chatId, samId, "chat");
+
+  const owner = await openAs(browser, VICTOR, project);
+  const grantee = await openAs(browser, ALEX, project);
+  const third = await openAs(browser, SAM, project);
+  try {
+    const page = owner.page;
+    const alex = grantee.page;
+    const sam = third.page;
+    for (const p of [page, alex, sam]) {
+      await p.goto(`${BASE_URL}/chat/ai/${chatId}`);
+      await expect(p.getByTestId("ai-composer")).toBeVisible();
+      await expect(lastAssistant(p)).toHaveAttribute("data-status", "completed");
+    }
+
+    // Víctor asks; his answer streams slowly (≈ 20 s), so the others write while it runs.
+    await sendAi(page, "Kick off the rollout [[slow:20]]");
+    await expect(page.locator('[data-testid="ai-message"][data-role="assistant"]')).toHaveCount(2);
+    await expect(lastAssistant(page)).toHaveAttribute("data-status", "streaming");
+    const chips = [page, alex, sam].map((p) => p.getByTestId("ai-queue-text"));
+    for (const chip of chips) await expect(chip).toContainText(`AI is answering ${VICTOR.name}`);
+    // Stop: the requester (and owner) only.
+    await expect(page.getByTestId("ai-queue-stop")).toBeVisible();
+    await expect(alex.getByTestId("ai-queue-stop")).toHaveCount(0);
+    await expect(sam.getByTestId("ai-queue-stop")).toHaveCount(0);
+    // A shared chat never blocks Send while an answer runs: no composer Stop.
+    await expect(alex.getByTestId("ai-stop")).toHaveCount(0);
+
+    // Alex starts typing: Víctor sees it.
+    await alex.getByTestId("ai-composer").fill("And security? [[slow:6]]");
+    await expect(page.getByTestId("typing-indicator")).toContainText(`${ALEX.name} is typing`);
+    await alex.getByTestId("ai-composer").press("Enter");
+    await expect(alex.getByTestId("ai-composer")).toHaveValue("");
+    // His message waits for the running answer: Queued, on both pages, and the chip says he is next.
+    for (const p of [alex, page]) {
+      await expect(latestTurn(p, ALEX.name).getByTestId("ai-addressing")).toHaveText("Queued");
+    }
+    const alexNext = `AI is answering ${VICTOR.name} · ${ALEX.name} is next`;
+    for (const chip of chips) await expect(chip).toHaveText(alexNext);
+    await bothThemes(page, `multiplayer-queue-${w}`);
+
+    // Sam asks too: the chip lists both, in order.
+    await sendAi(sam, "And cost?");
+    await expect(latestTurn(sam, SAM.name).getByTestId("ai-addressing")).toHaveText("Queued");
+    const bothNext = `AI is answering ${VICTOR.name} · ${ALEX.name} and ${SAM.name} are next`;
+    for (const chip of chips) await expect(chip).toHaveText(bothNext);
+    await bothThemes(alex, `multiplayer-queue-${w}-alex`);
+
+    // Víctor's answer ends; one coalesced answer starts for Alex and Sam, billed to Alex (the first waiting).
+    for (const p of [page, alex, sam]) {
+      await expect(p.locator('[data-testid="ai-message"][data-role="assistant"]')).toHaveCount(3, {
+        timeout: 40_000,
+      });
+    }
+    for (const chip of chips)
+      await expect(chip).toContainText(`AI is answering ${ALEX.name} and ${SAM.name}`);
+    // Now Alex's request runs: his Stop shows; Sam (not the requester, not the owner) never gets one.
+    await expect(alex.getByTestId("ai-queue-stop")).toBeVisible();
+    await expect(sam.getByTestId("ai-queue-stop")).toHaveCount(0);
+    for (const p of [alex, sam]) {
+      await expect(latestTurn(p, SAM.name).getByTestId("ai-addressing")).toHaveText("AI is answering");
+    }
+
+    for (const p of [page, alex, sam]) {
+      await expect(lastAssistant(p)).toHaveAttribute("data-status", "completed", { timeout: 20_000 });
+      expect(await answerText(lastAssistant(p))).toMatch(
+        new RegExp(
+          `^Hi ${ALEX.name} and ${SAM.name}! \\(participants: ${ALEX.name}, ${SAM.name}, ${VICTOR.name}\\) Echo: And cost\\?`,
+          "u",
+        ),
+      );
+      await expect(p.getByTestId("ai-queue-chip")).toHaveCount(0);
+      await expect(latestTurn(p, ALEX.name).getByTestId("ai-addressing")).toHaveCount(0);
+    }
+    // Who the answer was for and who paid (D-01): Alex's own plan, said to everyone; to Alex, viewer-relative.
+    const footer = (p: Page) => lastAssistant(p).getByTestId("ai-message-footer");
+    await expect(footer(page)).toContainText(`for ${ALEX.name} · Alex's ChatGPT plan`);
+    await expect(footer(sam)).toContainText(`for ${ALEX.name} · Alex's ChatGPT plan`);
+    await expect(footer(alex)).toContainText("for you · your ChatGPT plan");
+    // Víctor's own answer said it was his.
+    const victorsAnswer = page.locator('[data-testid="ai-message"][data-role="assistant"]').nth(1);
+    await expect(victorsAnswer.getByTestId("ai-message-footer")).toContainText("for you · your ChatGPT plan");
+    await expect(page.locator("[data-sonner-toast]")).toHaveCount(0, { timeout: 10_000 });
+    await bothThemes(page, `multiplayer-coalesced-${w}`);
+
+    // Víctor removes Sam's access: Sam's open page drops the chat at once, without a reload.
+    const revoke = await victor.delete(`/api/v1/ai-chats/${chatId}/grants/${samGrant}`);
+    expect(revoke.status(), "revoke Sam").toBe(204);
+    await expect(sam.getByText("You no longer have access to this chat.")).toBeVisible({ timeout: 15_000 });
+    await expect(sam.getByTestId("ai-message")).toHaveCount(0);
+    await expect(sam.getByTestId("ai-composer")).toHaveCount(0);
+    await expect(sam.getByTestId("ai-lost-back")).toHaveAttribute("href", "/chat/ai");
+  } finally {
+    await owner.context.close();
+    await grantee.context.close();
+    await third.context.close();
+    await victor.dispose();
+  }
+});
+
+test("the composer addresses the AI or a person deliberately: Ask AI toggle and @ suggestions", async ({
+  browser,
+}, info) => {
+  test.setTimeout(180_000);
+  const project = info.project.name;
+  const mobile = project === "mobile";
+  const w = widthOf(project);
+  const alexId = await ensureMember(admin, ALEX, "developer");
+  const victor = await apiAs(VICTOR);
+  const created = await victor.post("/api/v1/ai-chats", {
+    data: {
+      clientMessageId: `cm-${randomUUID()}`,
+      body: `Draft the launch note ${randomUUID().slice(0, 8)}`,
+      model: PLAN("gpt-6-astra"),
+    },
+  });
+  expect(created.ok(), `create chat: ${created.status()}`).toBe(true);
+  const chatId = ((await created.json()) as { chat: { id: string } }).chat.id;
+  await settled(victor, chatId);
+
+  const owner = await openAs(browser, VICTOR, project);
+  try {
+    const page = owner.page;
+    const composer = page.getByTestId("ai-composer");
+    const answers = page.locator('[data-testid="ai-message"][data-role="assistant"]');
+    const suggestions = page.getByTestId("ai-mention-suggestions");
+
+    // A solo chat keeps the Phase 5 composer: no toggle, no @ suggestions, Send as before.
+    await page.goto(`${BASE_URL}/chat/ai/${chatId}`);
+    await expect(composer).toBeVisible();
+    await expect(answers).toHaveCount(1);
+    await composer.fill("Ping @");
+    await expect(suggestions).toHaveCount(0);
+    await expect(askAiToggle(page)).toHaveCount(0);
+    await composer.fill("");
+    await sendAi(page, "Still solo");
+    await expect(answers).toHaveCount(2);
+    await expect(answers.last()).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
+
+    // Shared with Alex: "Ask AI" is on by default.
+    await grant(victor, chatId, alexId, "chat");
+    await page.reload();
+    const toggle = askAiToggle(page);
+    await expect(toggle).toBeVisible();
+    await expect(toggle).toHaveAttribute("aria-pressed", "true");
+    await expect(toggle).toHaveText("Ask AI");
+
+    // "@" opens the suggestions: AI first, then the participants (never the viewer), filtered as you type.
+    await composer.fill("Hey @");
+    await expect(suggestions).toBeVisible();
+    const options = suggestions.getByTestId("ai-mention-option");
+    await expect(options.first()).toHaveAttribute("data-kind", "ai");
+    await expect(options.first()).toContainText("AI");
+    await expect(options.filter({ hasText: ALEX.name })).toHaveAttribute("data-kind", "user");
+    await expect(options.filter({ hasText: ALEX.name }).getByTestId("ai-mention-avatar")).toBeVisible();
+    await expect(options.filter({ hasText: VICTOR.name })).toHaveCount(0);
+    await bothThemes(page, `multiplayer-composer-${w}`);
+    await composer.press("a");
+    await composer.press("l");
+    await expect(options).toHaveCount(1);
+    await expect(options.first()).toContainText(ALEX.name);
+
+    // Choosing a person (keyboard) inserts their handle and turns Ask AI off: the message is not sent to the AI.
+    await composer.press("Enter");
+    await expect(suggestions).toBeHidden();
+    await expect(composer).toHaveValue("Hey @alex ");
+    await expect(toggle).toHaveAttribute("aria-pressed", "false");
+    await composer.pressSequentially("can you check the dates?");
+    await composer.press("Enter");
+    await expect(composer).toHaveValue("");
+    const forAlex = humanTurn(page, VICTOR.name).last();
+    await expect(forAlex).toContainText("Hey @alex can you check the dates?");
+    await expect(forAlex.getByTestId("ai-addressing")).toHaveText("Not sent to AI");
+    await page.waitForTimeout(1_500);
+    await expect(answers).toHaveCount(2);
+    await expect(toggle).toHaveAttribute("aria-pressed", "true");
+
+    // Choosing "AI" turns Ask AI on and leaves no "@AI" text.
+    await composer.fill("@");
+    await options.first().click();
+    await expect(composer).toHaveValue("");
+    await expect(toggle).toHaveAttribute("aria-pressed", "true");
+    await composer.pressSequentially("Summarize the plan");
+    await composer.press("Enter");
+    await expect(answers).toHaveCount(3, { timeout: 15_000 });
+    await expect(answers.last()).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
+
+    // A mention turns it off, and it can be switched back on by hand before sending.
+    await sendAiAs(page, "@alex what do you think?", { askAi: true });
+    await expect(answers).toHaveCount(4, { timeout: 15_000 });
+    expect(await answerText(answers.last())).toContain("Echo: @alex what do you think?");
+    await expect(answers.last()).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
+
+    // At 390 the toggle sits in the toolbar without overflow.
+    if (mobile) {
+      const form = page.getByTestId("ai-composer-form");
+      const fits = await form.evaluate((el) => el.scrollWidth <= el.clientWidth);
+      expect(fits, "composer has no horizontal overflow").toBe(true);
+      const box = await toggle.boundingBox();
+      const viewport = page.viewportSize();
+      expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(viewport?.width ?? 390);
+    }
+    // The addressed history: a message only for Alex, then answers on Víctor's own plan.
+    await bothThemes(page, `multiplayer-composer-${w}-addressed`);
+  } finally {
     await owner.context.close();
     await victor.dispose();
   }

@@ -1,4 +1,4 @@
-import type { AiGeneration } from "@ocw/contracts";
+import type { AiGeneration, AiQueueState } from "@ocw/contracts";
 
 /**
  * Usage formatting for AI chats (05-08, AICHAT-07, P-11): token counts, costs and the answer footer. Pure, so the
@@ -30,6 +30,9 @@ export function formatCostMicros(micros: number | null, estimated: boolean): str
   return `${estimated ? "~" : ""}$${text}`;
 }
 
+/** Between the parts of a footer or a chip sentence. */
+const PART_SEP = " · ";
+
 const BACKEND_LABEL: Record<AiGeneration["backend"], string> = {
   chatgpt_plan: "ChatGPT plan",
   org_key: "METERED",
@@ -56,11 +59,13 @@ export function formatUsage(g: AiGeneration): string {
 
 /**
  * The answer footer, in parts: usage, then the model, then who pays. Joined with " · " it reads
- * "1.2k in · 340 out · ~$0.004 · Claude Sonnet 5.5 · METERED" (or "… · GPT-6 Astra · ChatGPT plan").
+ * "1.2k in · 340 out · ~$0.004 · Claude Sonnet 5.5 · METERED" (or "… · GPT-6 Astra · ChatGPT plan"). In a
+ * multiplayer chat `payer` (`payerLabel`) replaces the backend label: "… · GPT-6 Astra · for Alex Kim · Alex's
+ * ChatGPT plan" (06-11, D-01); null keeps the Phase 5 footer.
  */
-export function footerParts(g: AiGeneration): string[] {
+export function footerParts(g: AiGeneration, payer: string | null = null): string[] {
   const u = g.usage;
-  const tail = [g.modelLabel, BACKEND_LABEL[g.backend]];
+  const tail = [g.modelLabel, ...(payer ? payer.split(PART_SEP) : [BACKEND_LABEL[g.backend]])];
   if (!u) return tail;
   const approx = u.estimated ? "~" : "";
   const parts = [
@@ -72,7 +77,65 @@ export function footerParts(g: AiGeneration): string[] {
 }
 
 export function footerLabel(g: AiGeneration): string {
-  return footerParts(g).join(" · ");
+  return footerParts(g).join(PART_SEP);
+}
+
+/** "Alex Kim" → "Alex's"; "James" → "James's". */
+function possessive(name: string): string {
+  const first = name.trim().split(/\s+/u)[0] || name;
+  return `${first}'s`;
+}
+
+/**
+ * Whose request a multiplayer answer answered and who pays for it (06-11, D-01: the triggering human, on their own
+ * plan or a METERED organization model; never the owner's plan for someone else). From the generation's
+ * `requesterUserId` and backend only (server data): "for Alex Kim · Alex's ChatGPT plan", "for Alex Kim · METERED",
+ * or, to the requester, "for you · your ChatGPT plan". Null for Phase 5 rows (no requester) and in solo chats (the
+ * caller passes no requester name there).
+ */
+export function payerLabel(
+  g: AiGeneration,
+  requesterName: string | null,
+  viewerId: string | null,
+): string | null {
+  if (!g.requesterUserId || requesterName === null) return null;
+  const you = viewerId !== null && g.requesterUserId === viewerId;
+  const who = you ? "you" : requesterName;
+  const pays =
+    g.backend === "chatgpt_plan"
+      ? `${you ? "your" : possessive(requesterName)} ChatGPT plan`
+      : BACKEND_LABEL[g.backend];
+  return `for ${who}${PART_SEP}${pays}`;
+}
+
+/** "A", "A and B", "A, B and C", "A, B and 2 others". */
+function listNames(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? "";
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  if (names.length === 3) return `${names[0]}, ${names[1]} and ${names[2]}`;
+  return `${names[0]}, ${names[1]} and ${names.length - 2} others`;
+}
+
+/**
+ * The queue chip's sentence (06-11, D-05): "AI is answering Víctor Ruiz · Alex Kim and Sam Lee are next". The running
+ * turn names its requester first, then the other authors it answers (`respondingTo` holds user ids, 06-06: a coalesced
+ * turn answers several people); "next" lists the waiting authors in order, each once. Null when nothing runs and
+ * nothing waits.
+ */
+export function queueText(queue: AiQueueState, nameOf: (userId: string) => string): string | null {
+  const running = queue.running;
+  const answering: string[] = [];
+  if (running) {
+    for (const id of [running.requesterUserId, ...running.respondingTo]) {
+      if (!answering.includes(id)) answering.push(id);
+    }
+  }
+  const next: string[] = [];
+  for (const p of queue.pending) if (!next.includes(p.authorId)) next.push(p.authorId);
+  if (!running && next.length === 0) return null;
+  const head = running ? `AI is answering ${listNames(answering.map(nameOf))}` : "Waiting for the AI";
+  if (next.length === 0) return head;
+  return `${head}${PART_SEP}${listNames(next.map(nameOf))} ${next.length === 1 ? "is" : "are"} next`;
 }
 
 const exact = (n: number) => n.toLocaleString("en-US");

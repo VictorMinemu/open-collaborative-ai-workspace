@@ -104,3 +104,30 @@ export function humanTurn(page: Page, authorName: string): Locator {
     .locator('[data-testid="ai-message"][data-role="user"]')
     .filter({ has: page.getByTestId("ai-message-author").filter({ hasText: authorName }) });
 }
+
+// ---------------------------------------------------------------- Phase 6: addressing in the composer (06-11)
+
+/** The composer's "Ask AI" toggle (multiplayer chats only). */
+export function askAiToggle(page: Page): Locator {
+  return page.getByTestId("ai-ask-toggle");
+}
+
+/**
+ * Types `text` into the AI composer of a multiplayer chat, sets "Ask AI" to `askAi` when given (clicking the toggle
+ * only when it differs, after any mention in the text has had its effect), then sends with Enter.
+ */
+export async function sendAiAs(page: Page, text: string, opts: { askAi?: boolean } = {}): Promise<void> {
+  const composer = page.getByTestId("ai-composer");
+  await composer.fill(text);
+  // A typed @handle may leave the suggestions open: close them so Enter sends.
+  if (await page.getByTestId("ai-mention-suggestions").isVisible()) await composer.press("Escape");
+  if (opts.askAi !== undefined) {
+    const toggle = askAiToggle(page);
+    const on = (await toggle.getAttribute("aria-pressed")) === "true";
+    if (on !== opts.askAi) await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-pressed", String(opts.askAi));
+    await composer.focus();
+  }
+  await composer.press("Enter");
+  await expect(composer).toHaveValue("");
+}
