@@ -23,6 +23,7 @@ import {
   chatSummary,
   directoryOf,
   EMPTY_DIRECTORY,
+  emitChatUpdated,
   type GenerationRow,
   generationDto,
   viewOf,
@@ -302,14 +303,15 @@ export async function registerGenerationRoutes(
           .where(eq(aiChats.conversationId, conv.id))
           .returning();
         if (!chat) throw notFound(NOT_FOUND);
-        const summary = chatSummary(conv, chat, {
-          generating: true,
-          gateway,
-          view: await viewOf(tx, chat, chat.ownerUserId),
-        });
-        await core.realtime.appendEvent(tx, `user:${chat.ownerUserId}`, EventTypes.aiChatUpdated, {
-          chat: summary,
-        });
+        // Every participant's sidebar shows the answer running again (06-08); the response carries the caller's view.
+        const heard = await emitChatUpdated(core, tx, conv, chat, { generating: true, gateway });
+        const summary =
+          heard.get(auth.userId) ??
+          chatSummary(conv, chat, {
+            generating: true,
+            gateway,
+            view: await viewOf(tx, chat, chat.ownerUserId),
+          });
         // Ids, backend, provider, model and attempt only: never a body.
         await core.audit.record(tx, {
           action: "ai_chat.regenerated",

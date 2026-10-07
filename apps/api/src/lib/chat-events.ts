@@ -10,7 +10,11 @@ import type { Tx } from "@ocw/db";
  */
 
 export interface MessagePostedInput {
-  conv: { id: string; kind: "channel" | "dm" | "group"; organizationId: string };
+  /**
+   * `ai_chat` (06-08): a human message of a shared AI chat. Only its mentioned humans who can read the chat are
+   * notified; the channel/DM rules (`@channel`, DM and group kinds, thread replies) never apply to it.
+   */
+  conv: { id: string; kind: "channel" | "dm" | "group" | "ai_chat"; organizationId: string };
   message: Message;
   author: { kind: "user" | "agent"; id: string };
   /** Server-resolved mentions of the message (users and agents). */

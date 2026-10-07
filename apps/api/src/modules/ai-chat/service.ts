@@ -9,6 +9,7 @@ import {
   type AiChatSummary,
   type AiPostedMessageResponse,
   type Attachment,
+  type ConversationReadEvent,
   type CreateAiChatRequest,
   EventTypes,
   type MessagePage,
@@ -50,6 +51,7 @@ import {
   lockNextSeq,
   type MessageRow,
   resolveMentions,
+  unreadCountsFor,
 } from "../chat";
 import {
   loadAiChatPolicy,
@@ -76,6 +78,7 @@ import {
   chatSummary,
   directoryOf,
   EMPTY_DIRECTORY,
+  emitChatUpdated,
   type GenerationRow,
   generationDto,
   generationsFor,
@@ -83,6 +86,7 @@ import {
   matchingGrant,
   ownerAuthor,
   parseModelRef,
+  readUpTo,
   sharedSql,
   viewOf,
 } from "./dto";
@@ -448,8 +452,8 @@ export function createAiChatService(deps: AiChatDeps) {
   }
 
   /**
-   * Bumps the chat after a send and tells the owner's sidebar (`ai_chat.updated`, the owner's view); a grantee who
-   * sent gets their own view on their topic. Returns the sender's view.
+   * Bumps the chat after a send and tells every sidebar that shows it (`emitChatUpdated`, 06-08): the owner's view, and
+   * in a shared chat every participant's own view. Returns the sender's view.
    */
   async function touchChat(
     tx: Tx,
@@ -471,20 +475,38 @@ export function createAiChatService(deps: AiChatDeps) {
       .where(eq(aiChats.conversationId, conv.id))
       .returning();
     if (!chat) throw notFound(NOT_FOUND);
+    const heard = await emitChatUpdated(core, tx, conv, chat, { generating, gateway });
+    const mine = heard.get(sender.userId);
+    // A shared chat's summary already has the sender's view; a solo chat's send answers with the owner's view.
+    if (mine?.access !== undefined) return mine;
     const owner = ownerAuthor(await directoryOf(tx, [chat.ownerUserId]), chat.ownerUserId);
-    const ownerView: ChatView = { access: "owner", owner, shared: sender.shared };
-    const summary = chatSummary(conv, chat, { generating, gateway, view: ownerView });
-    await core.realtime.appendEvent(tx, `user:${chat.ownerUserId}`, EventTypes.aiChatUpdated, {
-      chat: summary,
-    });
-    if (sender.userId === chat.ownerUserId) return summary;
-    const mine = chatSummary(conv, chat, {
+    return chatSummary(conv, chat, {
       generating,
       gateway,
       view: { access: sender.access, owner, shared: sender.shared },
     });
-    await core.realtime.appendEvent(tx, `user:${sender.userId}`, EventTypes.aiChatUpdated, { chat: mine });
-    return mine;
+  }
+
+  /** The newest message seq of a chat (0 when empty). */
+  async function latestSeq(tx: Tx, conversationId: string): Promise<number> {
+    const [row] = await tx
+      .select({ seq: sql<number>`coalesce(max(${messages.seq}), 0)`.mapWith(Number) })
+      .from(messages)
+      .where(and(eq(messages.conversationId, conversationId), isNull(messages.threadId)));
+    return row?.seq ?? 0;
+  }
+
+  /** P-09: a participation row for a reader who has none yet, its cursor at the chat's newest message (06-08). */
+  async function join(tx: Tx, conv: ConversationRow, userId: string, reason: string): Promise<boolean> {
+    const added = await addMember(
+      tx,
+      chatDeps,
+      conv,
+      { kind: "user", id: userId },
+      { role: "member", reason },
+    );
+    if (added) await readUpTo(tx, conv.id, userId, await latestSeq(tx, conv.id));
+    return added;
   }
 
   async function auditSend(
@@ -544,15 +566,10 @@ export function createAiChatService(deps: AiChatDeps) {
       const g = await matchingGrant(tx, conv.id, auth.userId);
       sendAccess = { access: "grant", grantId: g?.id ?? null, level: "chat" };
     }
-    // P-09: whoever writes takes part (roster, unread); a person grantee already has the row from the grant.
+    // P-09: whoever writes takes part (roster, unread); a person grantee already has the row from the grant. A unit
+    // or organization grantee joining by writing has read what was there (06-08: their unread starts now).
     if (!(await getMembership(tx, conv.id, "user", auth.userId))) {
-      await addMember(
-        tx,
-        chatDeps,
-        conv,
-        { kind: "user", id: auth.userId },
-        { role: "member", reason: "ai_chat_post" },
-      );
+      await join(tx, conv, auth.userId, "ai_chat_post");
     }
     const shared = await isShared(tx, conv.id);
     return { conv, current, sticky, viewerAccess, sendAccess, shared };
@@ -707,10 +724,19 @@ export function createAiChatService(deps: AiChatDeps) {
       tools: { web: (sticky ?? chatSettings(current).tools).web === true },
       shared,
     });
-    const s = await core.realtime.appendEvent(tx, topic, EventTypes.messageCreated, {
-      message: await sharedUserMessage(tx, row),
-    });
+    const posted = await sharedUserMessage(tx, row);
+    const s = await core.realtime.appendEvent(tx, topic, EventTypes.messageCreated, { message: posted });
     if (s !== seq) throw new Error(`stream seq drift on ${topic}: expected ${seq}, got ${s}`);
+    // 06-08: the mentioned humans who can read the chat are notified (`mention`), in this transaction, through the
+    // chat-events seam (the notification module decides readers; never `@channel`/DM rules here).
+    await core.chatEvents.messagePosted(tx, {
+      conv: { id: conv.id, kind: "ai_chat", organizationId: conv.organizationId },
+      message: posted,
+      author: { kind: "user", id: auth.userId },
+      mentions,
+      mentionAll: null,
+      threadRootId: null,
+    });
 
     let started: GenerationRow | null = null;
     if (addressed) {
@@ -987,14 +1013,20 @@ export function createAiChatService(deps: AiChatDeps) {
               .where(and(inArray(aiGenerations.conversationId, ids), eq(aiGenerations.status, "running")))
           : [];
         const generating = new Set(live.map((g) => g.id));
+        // 06-08: shared chats the caller takes part in carry their unread count; solo chats keep the Phase 5 shape.
+        const unread = await unreadCountsFor(
+          tx,
+          auth.userId,
+          page.filter((r) => r.shared).map((r) => r.conv.id),
+        );
         const owners = await directoryOf(
           tx,
           page.map((r) => r.chat.ownerUserId),
         );
         const last = page.at(-1);
         return {
-          chats: page.map((r) =>
-            chatSummary(r.conv, r.chat, {
+          chats: page.map((r) => {
+            const summary = chatSummary(r.conv, r.chat, {
               generating: generating.has(r.conv.id),
               gateway,
               view: {
@@ -1002,11 +1034,61 @@ export function createAiChatService(deps: AiChatDeps) {
                 owner: ownerAuthor(owners, r.chat.ownerUserId),
                 shared: r.shared,
               },
-            }),
-          ),
+            });
+            const counts = unread.get(r.conv.id);
+            return counts ? { ...summary, unreadCount: counts.unreadCount } : summary;
+          }),
           nextCursor:
             rows.length > q.limit && last ? encodeListCursor({ t: last.at, i: last.conv.id }) : null,
         };
+      });
+    },
+
+    /**
+     * The caller read the chat up to `seq` (06-08, P-09, CHAT-09 semantics): `channel.read` first (hidden 404, so it never
+     * joins a chat the caller cannot read), then the caller's participation row (a unit or organization grantee joins
+     * here), the cursor moved forward only (clamped to the newest message), the notifications it covers read, and a
+     * durable `conversation.read` with the new counts on `user:<caller>` for their other tabs and devices.
+     */
+    async markRead(req: FastifyRequest, chatId: string, seq: number): Promise<void> {
+      const auth = authOf(req);
+      await core.db.withTenant(tenant(req), async (tx) => {
+        const { conv } = await guards.readableChat(req, tx, chatId);
+        const joined = await join(tx, conv, auth.userId, "ai_chat_read");
+        const mine = and(
+          eq(conversationMembers.conversationId, conv.id),
+          eq(conversationMembers.memberKind, "user"),
+          eq(conversationMembers.memberId, auth.userId),
+        );
+        // Lock order (cursor row → notifications → user stream) as the channel read route.
+        const [row] = await tx
+          .select({ lastReadSeq: conversationMembers.lastReadSeq })
+          .from(conversationMembers)
+          .where(mine)
+          .for("update");
+        if (!row) return;
+        const latest = await latestSeq(tx, conv.id);
+        const prev = Number(row.lastReadSeq);
+        const next = Math.max(prev, Math.min(seq, latest));
+        if (next !== prev) await tx.update(conversationMembers).set({ lastReadSeq: next }).where(mine);
+        await core.chatEvents.conversationRead(tx, {
+          userId: auth.userId,
+          conversationId: conv.id,
+          lastReadSeq: next,
+        });
+        if (next === prev && !joined) return;
+        await lockNextSeq(tx, `user:${auth.userId}`);
+        const counts = (await unreadCountsFor(tx, auth.userId, [conv.id])).get(conv.id) ?? {
+          unreadCount: 0,
+          mentionCount: 0,
+        };
+        const ev: ConversationReadEvent = {
+          conversationId: conv.id,
+          lastReadSeq: next,
+          ...counts,
+          latestMessageSeq: latest,
+        };
+        await core.realtime.appendEvent(tx, `user:${auth.userId}`, EventTypes.conversationRead, ev);
       });
     },
 
@@ -1066,9 +1148,11 @@ export function createAiChatService(deps: AiChatDeps) {
           gateway,
           view: await viewOf(tx, fresh.chat, fresh.chat.ownerUserId),
         });
+        // A rename or an archive reaches every participant's sidebar, each with their own view (06-08).
         if (audits.length > 0) {
-          await core.realtime.appendEvent(tx, `user:${fresh.chat.ownerUserId}`, EventTypes.aiChatUpdated, {
-            chat: summary,
+          await emitChatUpdated(core, tx, fresh.conv, fresh.chat, {
+            generating: summary.generating,
+            gateway,
           });
         }
         return detailOf(req, tx, summary, fresh.chat, facts);

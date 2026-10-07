@@ -14,7 +14,7 @@ import { markDecided } from "../../authz";
 import { type App, authOf, type Core, tenant } from "../../core";
 import { badRequest } from "../../lib/errors";
 import { authorOf, type ConversationAccess, conversationRefs, loadDirectory } from "../chat";
-import { iso, unreadCountFor, visible } from "./service";
+import { iso, NOTIFIABLE_KINDS, unreadCountFor, visible } from "./service";
 import { snippetOf } from "./snippet";
 
 /**
@@ -53,8 +53,9 @@ export function registerNotificationRoutes(app: App, ctx: { core: Core; access: 
         const me = authOf(req).userId;
         const { filter, limit } = req.query;
         const after = req.query.cursor ? decodeCursor(req.query.cursor) : null;
-        // P-03: the resolver decides every readable conversation; the query only narrows to the caller's rows.
-        const readableIds = await access.readableIds(tx, me);
+        // P-03: the resolver decides every readable conversation; the query only narrows to the caller's rows. AI chats
+        // count (06-08): their notifications show only while the chat is readable now (a revoke drops them).
+        const readableIds = await access.readableIds(tx, me, { kinds: NOTIFIABLE_KINDS });
         markDecided(req);
         if (readableIds.length === 0) return { items: [], nextCursor: null, unreadCount: 0 };
         const rows = await tx
@@ -129,7 +130,12 @@ export function registerNotificationRoutes(app: App, ctx: { core: Core; access: 
           )
           .returning({ id: notifications.id });
         if (updated.length > 0) {
-          const unreadCount = await unreadCountFor(tx, me, await access.readableIds(tx, me), "all");
+          const unreadCount = await unreadCountFor(
+            tx,
+            me,
+            await access.readableIds(tx, me, { kinds: NOTIFIABLE_KINDS }),
+            "all",
+          );
           const ev: NotificationReadEvent = req.body.all
             ? { all: true, unreadCount }
             : { ids: updated.map((u) => u.id), unreadCount };

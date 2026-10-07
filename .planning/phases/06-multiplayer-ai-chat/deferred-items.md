@@ -20,3 +20,10 @@
   turn.ts nor the grants path. Fix: either update 06-04's assertion to "notices only inside `<turn_context>`, never as
   their own messages", or decide (D-04) that a chat that went solo again drops notices. Owner of the decision: the
   phase orchestrator / 06-04 follow-up.
+## From 06-08 (resolved in 06-08)
+
+- **`grants.int.test.ts` › "after every grant is revoked › the owner's next turn still attributes former grantees'
+  messages …" failed on the merged branch** (not caused by 06-08: no prompt code changed). 06-04 asserted that notice
+  lines never reach the model; 06-05 then made notices newer than the last kept answer `<notice>` lines of the
+  `<turn_context>`, as P-09 specifies. The assertion now checks that notice text never appears outside `<notice>`
+  lines (never as a message), which keeps 06-04's intent under P-09. `pnpm verify` needed it green.

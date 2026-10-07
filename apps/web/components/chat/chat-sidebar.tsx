@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  type AiChatAccessChangedEvent,
   type AiChatUpdatedEvent,
   type ChannelSummary,
   type ConversationReadEvent,
@@ -25,7 +26,12 @@ import { SectionSidebar, sectionItemClass } from "@/components/shell/section-sid
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
-import { applyAiChatUpdated } from "@/lib/ai-chat-queries";
+import {
+  applyAiChatAccessChanged,
+  applyAiChatNotification,
+  applyAiChatRead,
+  applyAiChatUpdated,
+} from "@/lib/ai-chat-queries";
 import {
   applyConversationRead,
   applySaveUpdate,
@@ -207,6 +213,8 @@ function useChannelListSync(
       applyNotificationCreated(qc, ev);
       // CHAT-09: a mention-like notification of a top-level message is a mention badge on its conversation.
       bumpMention(qc, ev.notification);
+      // 06-08: a chat shared with the member by name refreshes "Shared with me".
+      applyAiChatNotification(qc, ev.notification);
       if (ev.notification.threadRootId) refreshThreadsSoon(qc);
       return;
     }
@@ -219,9 +227,15 @@ function useChannelListSync(
       applyAiChatUpdated(qc, (frame.data as AiChatUpdatedEvent).chat);
       return;
     }
-    // Read and mark-unread from any of the member's tabs and devices (CHAT-09, Pitfall 2).
+    // 06-08: a shared AI chat the member lost leaves "Shared with me" at once.
+    if (frame.op === "ev" && frame.type === EventTypes.aiChatAccessChanged) {
+      applyAiChatAccessChanged(qc, frame.data as AiChatAccessChangedEvent);
+      return;
+    }
+    // Read and mark-unread from any of the member's tabs and devices (CHAT-09, Pitfall 2); shared AI chats too.
     if (frame.op === "ev" && frame.type === EventTypes.conversationRead) {
       applyConversationRead(qc, frame.data as ConversationReadEvent);
+      applyAiChatRead(qc, frame.data as ConversationReadEvent);
       return;
     }
     onFrame(frame);

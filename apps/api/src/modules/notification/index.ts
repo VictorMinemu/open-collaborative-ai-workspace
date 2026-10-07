@@ -7,7 +7,13 @@ import { createNotificationService } from "./service";
 
 export { loadPrefs, registerPrefsRoutes } from "./prefs";
 export { computeRecipients, type RecipientsInput } from "./recipients";
-export { MENTIONS_FILTER_KINDS, unreadCountFor } from "./service";
+export {
+  MENTIONS_FILTER_KINDS,
+  NOTIFIABLE_KINDS,
+  type NotificationDeps,
+  notifyUsers,
+  unreadCountFor,
+} from "./service";
 export { snippetOf } from "./snippet";
 
 /**

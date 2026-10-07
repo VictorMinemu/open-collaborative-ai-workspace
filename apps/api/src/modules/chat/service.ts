@@ -280,7 +280,7 @@ export interface UnreadCounts {
 
 /**
  * CHAT-09 (D-07, P-07): the badges of `userId`'s memberships among `conversationIds`. Unread = top-level, live
- * messages from others after the member's read cursor, counted (never `streams.last_seq - last_read_seq`, Pitfall 1)
+ * messages from others (never a server notice line, `author_kind 'system'`, 06-08) after the member's read cursor, counted (never `streams.last_seq - last_read_seq`, Pitfall 1)
  * and capped at `UNREAD_CAP` on `messages_conv_seq_idx`; mentions = the member's unread mention-like notifications
  * (`MENTION_KINDS`) of live top-level messages there, on `notifications_unread_idx` (a mention inside a thread
  * belongs to that thread). Conversations the member has not joined are absent (= nothing unread). Callers pass only
@@ -310,6 +310,7 @@ export async function unreadCountsFor(
         where m.organization_id = cm.organization_id and m.conversation_id = cm.conversation_id
           and m.thread_id is null and m.deleted_at is null and m.seq > cm.last_read_seq
           and not (m.author_kind = 'user' and m.author_id = ${userId}::uuid)
+          and m.author_kind <> 'system'
         limit ${UNREAD_CAP}
       ) capped
     ) u

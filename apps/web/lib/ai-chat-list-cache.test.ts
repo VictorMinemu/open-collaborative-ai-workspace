@@ -1,7 +1,7 @@
 import type { AiChatList, AiChatSummary } from "@ocw/contracts";
 import { type InfiniteData, QueryClient } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
-import { aiKeys, applyAiChatUpdated } from "./ai-chat-queries";
+import { aiKeys, applyAiChatAccessChanged, applyAiChatRead, applyAiChatUpdated } from "./ai-chat-queries";
 
 /**
  * 06-03: `ai_chat.updated` reaches the viewer's `user:` topic for their own chats and for chats shared with them.
@@ -81,5 +81,43 @@ describe("applyAiChatUpdated routes shared chats to “Shared with me”", () =>
     applyAiChatUpdated(qc, { ...shared, archived: true });
     expect(ids(qc, aiKeys.shared)).toEqual([]);
     expect(ids(qc, aiKeys.list(true))).toEqual([]);
+  });
+});
+
+/** 06-08: unread counts of shared chats and lost access, from the member's `user:` topic. */
+describe("conversation.read and ai_chat.access_changed on the AI chat lists", () => {
+  const unreadOf = (qc: QueryClient, key: readonly unknown[], id: string) =>
+    qc
+      .getQueryData<Data>(key)
+      ?.pages.flatMap((p) => p.chats)
+      .find((c) => c.id === id)?.unreadCount;
+
+  it("a read from another device sets the shared chat's count; solo chats keep none", () => {
+    const qc = seeded();
+    applyAiChatUpdated(
+      qc,
+      chat("shared-1", "2026-10-07T10:00:00.000Z", {
+        access: "chat",
+        owner: OWNER,
+        shared: true,
+        unreadCount: 3,
+      }),
+    );
+    applyAiChatRead(qc, { conversationId: "shared-1", lastReadSeq: 9, unreadCount: 0, mentionCount: 0 });
+    applyAiChatRead(qc, { conversationId: "mine-1", lastReadSeq: 4, unreadCount: 0, mentionCount: 0 });
+    expect(unreadOf(qc, aiKeys.shared, "shared-1")).toBe(0);
+    expect(unreadOf(qc, aiKeys.list(false), "mine-1")).toBeUndefined();
+  });
+
+  it("losing access removes the chat from Shared with me; a level change keeps it", () => {
+    const qc = seeded();
+    applyAiChatUpdated(
+      qc,
+      chat("shared-1", "2026-10-07T10:00:00.000Z", { access: "chat", owner: OWNER, shared: true }),
+    );
+    applyAiChatAccessChanged(qc, { conversationId: "shared-1", access: "view" });
+    expect(ids(qc, aiKeys.shared)).toEqual(["shared-1"]);
+    applyAiChatAccessChanged(qc, { conversationId: "shared-1", access: null });
+    expect(ids(qc, aiKeys.shared)).toEqual([]);
   });
 });

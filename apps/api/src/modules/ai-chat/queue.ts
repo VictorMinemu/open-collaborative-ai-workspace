@@ -33,6 +33,7 @@ import {
   aiMessage,
   directoryOf,
   EMPTY_DIRECTORY,
+  emitChatUpdated,
   type GenerationRow,
   generationDto,
   parseModelRef,
@@ -373,7 +374,17 @@ export async function startNext(
 ): Promise<GenerationRow | null> {
   const out = await startNextIn(deps, tx, conversationId, opts);
   if (out.changed && opts.publish !== false) await publishQueue(deps.core, tx, conversationId);
+  // A send announces its own turn (touchChat); the sweeper's start tells every sidebar here.
+  if (out.generation && opts.publish !== false) await announceStarted(deps, tx, conversationId);
   return out.generation;
+}
+
+/** A queued turn started outside a send (06-08): every participant's sidebar shows the chat answering. */
+async function announceStarted(deps: QueueDeps, tx: Tx, conversationId: string): Promise<void> {
+  const [conv] = await tx.select().from(conversations).where(eq(conversations.id, conversationId)).limit(1);
+  const [chat] = await tx.select().from(aiChats).where(eq(aiChats.conversationId, conversationId)).limit(1);
+  if (conv && chat)
+    await emitChatUpdated(deps.core, tx, conv, chat, { generating: true, gateway: deps.gateway });
 }
 
 /** One `startNext` in its own tenant transaction (the finalize hook's retry, the sweeper). */
@@ -394,6 +405,8 @@ export function registerQueue(deps: QueueDeps): void {
     if (!(await isMultiplayer(tx, done.chatId))) return;
     const out = await startNextIn(deps, tx, done.chatId, { tryLock: true });
     await publishQueue(deps.core, tx, done.chatId);
+    // After the finalize's `generating: false`, the next turn's start is what every sidebar shows (06-08).
+    if (out.generation) await announceStarted(deps, tx, done.chatId);
     if (out.busy) {
       const { organizationId, afterCommit } = tenantOf(tx);
       afterCommit(async () => {

@@ -27,7 +27,7 @@ import {
   type ResolvedModel,
 } from "../model-gateway";
 import { createPermissionService } from "../organization";
-import { aiMessage, chatSummary, EMPTY_DIRECTORY, type GenerationRow, generationDto } from "./dto";
+import { aiMessage, EMPTY_DIRECTORY, emitChatUpdated, type GenerationRow, generationDto } from "./dto";
 import { loadTurn, type Turn } from "./turn";
 import { type ReportedUsage, recordUsage } from "./usage";
 import { sourceDomain } from "./web-tools";
@@ -300,11 +300,9 @@ export function createRunLoop(
     await core.realtime.appendEvent(tx, convTopic(g.conversationId), EventTypes.messageUpdated, {
       message: aiMessage(row, EMPTY_DIRECTORY, generation),
     });
-    if (chat && conv) {
-      await core.realtime.appendEvent(tx, `user:${chat.ownerUserId}`, EventTypes.aiChatUpdated, {
-        chat: chatSummary(conv, chat, { generating: false, gateway: deps.gateway }),
-      });
-    }
+    // Every sidebar that shows the chat (06-08): the owner, and each participant of a shared chat with their view.
+    if (chat && conv)
+      await emitChatUpdated(core, tx, conv, chat, { generating: false, gateway: deps.gateway });
     const [earlier] = await tx
       .select({ n: sql<number>`count(*)::int` })
       .from(aiGenerations)
