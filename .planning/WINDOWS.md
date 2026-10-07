@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 54
+open_count: 55
 waived_count: 0
 fixed_count: 16
-total_count: 70
-last_updated: 2026-10-07T10:45:46.645Z
+total_count: 71
+last_updated: 2026-10-07T11:15:43.269Z
 ---
 
 # Broken Windows Ledger
@@ -85,6 +85,7 @@ last_updated: 2026-10-07T10:45:46.645Z
 | 68 | 05 | deviation | apps/api/src/modules/identity/authenticate.ts |  | Phase 1-4 routes run requireUser as preHandler: an anonymous malformed body gets 400 before 401 (AI routes fixed in 05-15; see 05 deferred-items.md) | open |  | 2026-10-07T05:51:33.597Z |  |
 | 69 | 05 | deviation | apps/api/src/app.ts |  | API request logs include query strings (search terms from GET /search?q=); add a serializer that redacts them (05 deferred-items.md) | open |  | 2026-10-07T05:51:33.668Z |  |
 | 70 | 06 | unrun-verify | apps/openclaw-channel/src/mention-mapper.ts |  | 06-10 ai_chat persona delivery (flat, per-mention session, withheld block, gate refusal) not yet proven in a real OpenClaw cell (CI cell-smoke unavailable) | open |  | 2026-10-07T10:45:46.645Z |  |
+| 71 | 06 | deviation | apps/api/src/modules/notification/service.ts |  | 06-13 card_updated notifies a follower only on a card's first status change (one notification row per user+message; later changes do not re-notify) | open |  | 2026-10-07T11:15:43.269Z |  |
 
 ````json
 [
@@ -926,6 +927,18 @@ last_updated: 2026-10-07T10:45:46.645Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-07T10:45:46.645Z",
+    "resolved_at": null
+  },
+  {
+    "id": 71,
+    "kind": "deviation",
+    "phase": "06",
+    "file": "apps/api/src/modules/notification/service.ts",
+    "line": null,
+    "description": "06-13 card_updated notifies a follower only on a card's first status change (one notification row per user+message; later changes do not re-notify)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T11:15:43.269Z",
     "resolved_at": null
   }
 ]
