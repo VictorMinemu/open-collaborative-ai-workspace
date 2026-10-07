@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 56
+open_count: 59
 waived_count: 0
 fixed_count: 16
-total_count: 72
-last_updated: 2026-10-07T11:45:56.476Z
+total_count: 75
+last_updated: 2026-10-07T15:33:04.995Z
 ---
 
 # Broken Windows Ledger
@@ -87,6 +87,9 @@ last_updated: 2026-10-07T11:45:56.476Z
 | 70 | 06 | unrun-verify | apps/openclaw-channel/src/mention-mapper.ts |  | 06-10 ai_chat persona delivery (flat, per-mention session, withheld block, gate refusal) not yet proven in a real OpenClaw cell (CI cell-smoke unavailable) | open |  | 2026-10-07T10:45:46.645Z |  |
 | 71 | 06 | deviation | apps/api/src/modules/notification/service.ts |  | 06-13 card_updated notifies a follower only on a card's first status change (one notification row per user+message; later changes do not re-notify) | open |  | 2026-10-07T11:15:43.269Z |  |
 | 72 | 06 | unrun-verify | infra/openclaw/test/run-container-smoke.sh |  | 06-14 cell-smoke scenario card (ocw_agent_card create/update, agent.card_action.v1 turn) not yet run in a real OpenClaw cell; e2e specs updated for ocw_agent_card not run | open |  | 2026-10-07T11:45:56.476Z |  |
+| 73 | 06 | unrun-verify | .planning/phases/06-multiplayer-ai-chat/06-16-PLAN.md |  | 06-16 Task 3: metered spoofing eval and OpenAI ChatGPT-plan terms check not run (eval deferred, human_needed) | open |  | 2026-10-07T15:33:04.842Z |  |
+| 74 | 06 | deviation | apps/api/src/modules/chat/index.ts |  | Phase 4 chat routes authenticate in preHandler: anonymous malformed bodies get 400 before 401 (card routes fixed in 06-16) | open |  | 2026-10-07T15:33:04.922Z |  |
+| 75 | 06 | deviation | apps/web/components/bots/add-to-channel-dialog.tsx |  | Add to channel lists channels where the caller gets 403; bots.spec now picks #general | open |  | 2026-10-07T15:33:04.995Z |  |
 
 ````json
 [
@@ -952,6 +955,42 @@ last_updated: 2026-10-07T11:45:56.476Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-07T11:45:56.476Z",
+    "resolved_at": null
+  },
+  {
+    "id": 73,
+    "kind": "unrun-verify",
+    "phase": "06",
+    "file": ".planning/phases/06-multiplayer-ai-chat/06-16-PLAN.md",
+    "line": null,
+    "description": "06-16 Task 3: metered spoofing eval and OpenAI ChatGPT-plan terms check not run (eval deferred, human_needed)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T15:33:04.842Z",
+    "resolved_at": null
+  },
+  {
+    "id": 74,
+    "kind": "deviation",
+    "phase": "06",
+    "file": "apps/api/src/modules/chat/index.ts",
+    "line": null,
+    "description": "Phase 4 chat routes authenticate in preHandler: anonymous malformed bodies get 400 before 401 (card routes fixed in 06-16)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T15:33:04.922Z",
+    "resolved_at": null
+  },
+  {
+    "id": 75,
+    "kind": "deviation",
+    "phase": "06",
+    "file": "apps/web/components/bots/add-to-channel-dialog.tsx",
+    "line": null,
+    "description": "Add to channel lists channels where the caller gets 403; bots.spec now picks #general",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-07T15:33:04.995Z",
     "resolved_at": null
   }
 ]
