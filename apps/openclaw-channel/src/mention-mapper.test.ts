@@ -233,6 +233,36 @@ describe("AI chats (06-10, D-07, P-10)", () => {
     expect(m.contextBlocks.some((b) => b.type === "notes")).toBe(false);
   });
 
+  it("renders turn.withheld as a 'Tools withheld in this conversation' block the persona can explain", () => {
+    const withheld = [
+      { tool: "m60dc940c__echo", reason: "not_every_participant" },
+      { tool: "notes__write", reason: "shared_with_group" },
+      { tool: "crm__lookup", reason: "denied_for_you" },
+      { tool: "future__tool", reason: "some_new_reason" },
+    ];
+    const m = mapMention(aiChat({ turn: { ...turn, memory: [], withheld } } as never), BOT);
+    const block = m.contextBlocks.find((b) => b.type === "withheld_tools");
+    expect(block?.label).toBe("Tools withheld in this conversation");
+    expect(block?.payload.withheld).toEqual([
+      "m60dc940c__echo — not everyone in this conversation may use it",
+      "notes__write — this chat is shared with a team, a department or the whole organization",
+      "crm__lookup — Alex may not use it",
+      "future__tool — not available in this conversation",
+    ]);
+    // Tools still come only from turn.tools: a withheld entry never enables anything.
+    expect(m.allowedTools).toEqual([]);
+  });
+
+  it("an invalid withheld list is dropped without dropping the turn (informational only)", () => {
+    const parsed = AgentMentionEvent.parse({
+      ...aiChat(),
+      turn: { ...turn, memory: [], withheld: "nope" },
+    });
+    expect(parsed.turn?.maxToolCalls).toBe(8);
+    expect(parsed.turn?.withheld).toEqual([]);
+    expect(mapMention(aiChat(), BOT).contextBlocks.some((b) => b.type === "withheld_tools")).toBe(false);
+  });
+
   it("dm and group mapping are unchanged", () => {
     const dm = mapMention(
       mention({ conversation: { id: "dm-1", kind: "dm", name: null }, thread: { rootMessageId: "msg-3" } }),
