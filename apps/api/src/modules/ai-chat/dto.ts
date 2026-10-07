@@ -5,6 +5,7 @@ import {
   type AiGeneration,
   type AiToolState,
   type AiUsage,
+  type Attachment,
   type Message,
   ModelRef,
   type Permission,
@@ -128,10 +129,19 @@ export function generationDto(
   };
 }
 
-/** A message of an AI chat: user turns as in chat; assistant turns carry the model as author and the generation. */
-export function aiMessage(row: MessageRow, dir: Directory, generation?: AiGeneration): Message {
+/**
+ * A message of an AI chat: user turns as in chat, with their files (05-12, `attachmentsForMessages`); assistant turns
+ * carry the model as author and the generation, never files.
+ */
+export function aiMessage(
+  row: MessageRow,
+  dir: Directory,
+  generation?: AiGeneration,
+  attachments: Attachment[] = [],
+): Message {
   const base = toMessage(row, dir, []);
-  if (row.authorKind !== "agent" || !generation) return { ...base, attachments: [] };
+  if (row.authorKind !== "agent") return { ...base, attachments };
+  if (!generation) return { ...base, attachments: [] };
   return {
     ...base,
     author: { kind: "agent", id: null, displayName: generation.modelLabel, avatarUrl: null },

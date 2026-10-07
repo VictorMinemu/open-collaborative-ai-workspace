@@ -100,7 +100,8 @@ async function settled(generationId: string, timeoutMs = 15_000): Promise<Json> 
 async function turn(as: TestClient, chatId: string, body: string, extra: Json = {}) {
   const res = await ok(send(as, chatId, body, extra), 201);
   const g = await settled(res.generation.id);
-  const msg = (await su.query("select body from app.messages where id = $1", [g.assistant_message_id])).rows[0];
+  const msg = (await su.query("select body from app.messages where id = $1", [g.assistant_message_id]))
+    .rows[0];
   return { res, generation: g, answer: msg.body as string };
 }
 
@@ -174,9 +175,10 @@ describe("drafts (a conversation to upload into before the first message)", () =
     const list = await ok(sam.request("GET", "/api/v1/ai-chats"));
     expect(list.chats.map((c: Json) => c.id)).not.toContain(d.id);
     const audits = (
-      await su.query("select metadata from app.audit_events where action = 'ai_chat.created' and resource_id = $1", [
-        d.id,
-      ])
+      await su.query(
+        "select metadata from app.audit_events where action = 'ai_chat.created' and resource_id = $1",
+        [d.id],
+      )
     ).rows;
     expect(audits).toHaveLength(1);
     expect(audits[0].metadata).toMatchObject({ conversationId: d.id, draft: true });

@@ -232,6 +232,7 @@ export async function buildApp(
   // Modules are mounted under /api/v1 unless they set `prefix`.
   const deviceModule = createDeviceModule(core); // B3: owns the Device Link hub used by work-session
   const modelGateway = createModelGateway(core); // Phase 5: the only place a LanguageModel is built (P-04)
+  const artifactModule = createArtifactModule(core, { access: createConversationAccess(core) }); // Phase 4: attachments (ADR-0015)
   const modules: ApiModule[] = [
     createIdentityModule({
       identity,
@@ -246,10 +247,10 @@ export async function buildApp(
     createSecretsModule(),
     createChatModule(core), // B1
     createNotificationModule(core, { online }), // Phase 4: mentions, DMs, threads, @channel/@here (CHAT-08)
-    createArtifactModule(core, { access: createConversationAccess(core) }), // Phase 4: attachments (ADR-0015)
+    artifactModule,
     createSearchModule(core, { modelLabel: (ref) => modelGateway.labelOf(ref) }), // Phase 4: full-text search (CHAT-11, D-04); AI chats of their owner (05-10)
     createModelGatewayModule(core, modelGateway), // Phase 5: AI chat models and ChatGPT plan status
-    createAiChatModule(core, { gateway: modelGateway }), // Phase 5: direct AI chat (AICHAT-02/03/07)
+    createAiChatModule(core, { gateway: modelGateway, storage: artifactModule.storage }), // Phase 5: direct AI chat (AICHAT-02/03/07/08)
     createAgentModule(core), // B2
     createBotCapabilitiesModule(core), // Phase 3.1: capabilities, bot policy, governance
     createMcpModule(core), // Phase 3.1: MCP server registry (D-13)

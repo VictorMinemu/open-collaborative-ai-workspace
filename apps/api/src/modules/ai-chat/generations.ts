@@ -13,6 +13,7 @@ import { and, count, desc, eq, isNull, lt, ne } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { type App, authOf, type Core, tenant } from "../../core";
 import { conflict, notFound } from "../../lib/errors";
+import { attachmentsForMessages } from "../artifact";
 import { convTopic, createConversationAccess, lockNextSeq } from "../chat";
 import { loadAiChatPolicy, type ModelGateway } from "../model-gateway";
 import { channelResource, createPermissionService } from "../organization";
@@ -294,9 +295,10 @@ export async function registerGenerationRoutes(
           },
         });
         const dir = await directoryOf(tx, [userRow.authorId ?? ""]);
+        const files = (await attachmentsForMessages(tx, [userRow.id])).get(userRow.id) ?? [];
         const response: SendAiMessageResponse = {
           chat: summary,
-          userMessage: aiMessage(userRow, dir),
+          userMessage: aiMessage(userRow, dir, undefined, files),
           assistantMessage,
           generation,
         };

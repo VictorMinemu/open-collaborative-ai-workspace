@@ -3,6 +3,7 @@ import {
   AiChatList,
   AiChatListQuery,
   AiChatSnapshot,
+  AiChatSummary,
   CreateAiChatRequest,
   IdParams,
   IsoDateTime,
@@ -17,6 +18,9 @@ import { z } from "zod";
 import type { App, Core } from "../../core";
 import { chatgptPlanSeedEnabled } from "../model-gateway";
 import type { AiChatService } from "./service";
+
+/** Drafts per member per minute (05-12): one per "New chat" that gets a file; generous for many tabs. */
+const DRAFTS_PER_MINUTE = 30;
 
 /**
  * AI chat routes (owner only: every route resolves the chat through the readable set with `ai_chat` and decides
@@ -39,6 +43,22 @@ export function registerAiChatRoutes(app: App, core: Core, service: AiChatServic
       schema: { tags, body: CreateAiChatRequest, response: { 201: SendAiMessageResponse } },
     },
     async (req, reply) => reply.status(201).send(await service.createChat(req, req.body)),
+  );
+
+  // An empty chat to upload files into before the first message (05-12); listed from its first message on.
+  const draftLimit = app.rateLimit({
+    max: DRAFTS_PER_MINUTE,
+    timeWindow: "1 minute",
+    keyGenerator: (req: FastifyRequest) => `ai-draft:${req.auth?.userId ?? req.ip}`,
+  });
+  app.post(
+    "/ai-chats/drafts",
+    {
+      config: { authz: "user" },
+      preHandler: [core.identity.requireUser, draftLimit],
+      schema: { tags, response: { 201: AiChatSummary } },
+    },
+    async (req, reply) => reply.status(201).send(await service.createDraft(req)),
   );
 
   app.post(
