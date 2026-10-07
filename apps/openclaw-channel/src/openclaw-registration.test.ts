@@ -77,11 +77,11 @@ describe("OpenClaw 2026.9.7 registration of the real entry", () => {
     expect(ocwHooks("discovery", "gateway")).toEqual([]);
   });
 
-  it("the memory tool is registered where OpenClaw resolves plugin tools (boot registry and tool discovery)", () => {
+  it("the memory and card tools are registered where OpenClaw resolves plugin tools (boot registry and tool discovery)", () => {
     const tools = (mode: RegistrationMode) =>
       loadRegistry(entry, manifest, { mode }).tools.flatMap((t) => t.names);
-    expect(tools("full")).toEqual(["ocw_memory_save"]);
-    expect(tools("tool-discovery")).toEqual(["ocw_memory_save"]);
+    expect(tools("full")).toEqual(["ocw_memory_save", "ocw_agent_card"]);
+    expect(tools("tool-discovery")).toEqual(["ocw_memory_save", "ocw_agent_card"]);
   });
 
   it("no registration diagnostics in any mode", () => {
@@ -237,4 +237,110 @@ describe("MCP tools inside a prepared turn (03.1-10): same gate, exact names, ta
       expect(api.toolResults).toEqual([{ callId: api.toolCalls[0]?.callId, status: "ok", durationMs: 4 }]);
     },
   );
+});
+
+describe("ocw_agent_card inside a prepared turn (06-14): gated like every tool, then posted through the Agent Channel API", () => {
+  let api: FakeAgentChannelApi;
+  const CHANNEL = "0199a6f0-0000-7000-8000-00000000c001";
+  const ROOT = "0199a6f0-0000-7000-8000-00000000d001";
+  const ASKED = "0199a6f0-0000-7000-8000-00000000d003";
+  const CARD_TURN = {
+    tools: ["ocw_agent_card"],
+    toolFlags: { ocw_agent_card: { untrustedOutput: false, sideEffecting: false } },
+    memory: [],
+    now: null,
+    maxToolCalls: 8,
+    maxWebCalls: 5,
+  };
+  const card = {
+    kind: "report",
+    title: "Weekly report",
+    fields: [{ label: "Week", value: "41" }],
+    status: "succeeded",
+    actions: [{ kind: "follow", label: "Follow" }],
+    summary: "Weekly report is ready",
+  };
+
+  beforeEach(async () => {
+    api = await startFakeAgentChannelApi({ agents: [], providers: [] });
+    setToolGuardClient(createAgentChannelClient({ apiUrl: api.url, token: () => api.token }));
+  });
+
+  afterEach(async () => {
+    toolGuard.endTurn(SESSION);
+    setToolGuardClient(null);
+    await api.close();
+  });
+
+  const ctx = { sessionKey: SESSION, agentId: openClawAgentIdFor(BOT), runId: "run-card" };
+  type Factory = (c: Record<string, unknown>) => {
+    execute: (id: string, p: unknown) => Promise<{ content: Array<{ text: string }> }>;
+  };
+  const cardTool = (mode: RegistrationMode) => {
+    const reg = loadRegistry(entry, manifest, { mode });
+    const owned = reg.tools.find((t) => t.names.includes("ocw_agent_card"));
+    if (!owned) throw new Error(`ocw_agent_card not registered in ${mode}`);
+    return (owned.factory as Factory)(ctx);
+  };
+
+  it("discovery registry asks POST /tool-calls; the tool (boot registry) posts the card bound to the turn", async () => {
+    toolGuard.beginTurn(SESSION, {
+      eventId: "evt-card",
+      agentId: BOT,
+      turn: CARD_TURN,
+      conversationId: CHANNEL,
+      threadRootId: ROOT,
+      messageId: ASKED,
+    });
+    const r = createTurnHookRunner(loadRegistry(entry, manifest, { activate: false }));
+    // OpenClaw hands hooks lower-cased names; this one is already lower case.
+    expect(
+      await r.runBeforeToolCall(
+        { toolName: "ocw_agent_card", params: { action: "create", card }, toolCallId: "tc-c1" },
+        ctx,
+      ),
+    ).toEqual({ blocked: false });
+    const out = await cardTool("full").execute("tc-c1", { action: "create", card });
+    expect(out.content[0]?.text).toMatch(/^Card posted\./);
+    expect(
+      api.toolCalls.map(({ eventId, tool, params, allowed }) => ({ eventId, tool, params, allowed })),
+    ).toEqual([{ eventId: "evt-card", tool: "ocw_agent_card", params: {}, allowed: true }]);
+    expect(api.cards).toEqual([
+      expect.objectContaining({
+        agentId: BOT,
+        conversationId: CHANNEL,
+        threadRootId: ROOT,
+        inReplyToMessageId: ASKED,
+        idempotencyKey: "evt-card:card:0",
+        card,
+      }),
+    ]);
+  });
+
+  it("a denial from the API blocks the call before the tool runs (fail closed, nothing posted)", async () => {
+    toolGuard.beginTurn(SESSION, {
+      eventId: "evt-card-2",
+      agentId: BOT,
+      turn: CARD_TURN,
+      conversationId: CHANNEL,
+      threadRootId: ROOT,
+      messageId: ASKED,
+    });
+    api.denyTools.add("ocw_agent_card");
+    const r = createTurnHookRunner(loadRegistry(entry, manifest, { activate: false }));
+    const blocked = await r.runBeforeToolCall(
+      { toolName: "ocw_agent_card", params: { action: "create", card }, toolCallId: "tc-c2" },
+      ctx,
+    );
+    expect(blocked).toMatchObject({ blocked: true, reason: expect.stringContaining("denied_by_test") });
+    expect(api.cards).toEqual([]);
+  });
+
+  it("no active turn: blocked by the gate without asking the API", async () => {
+    const r = createTurnHookRunner(loadRegistry(entry, manifest, { activate: false }));
+    expect(
+      await r.runBeforeToolCall({ toolName: "ocw_agent_card", params: {}, toolCallId: "tc-c3" }, ctx),
+    ).toMatchObject({ blocked: true });
+    expect(api.toolCalls).toEqual([]);
+  });
 });

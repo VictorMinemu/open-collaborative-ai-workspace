@@ -649,6 +649,34 @@ describe("real port dispatch: per-turn tool cap and active turn (D-08)", () => {
     expect(extra.ChannelStructuredContext.map((b) => b.label)).toContain("Current time for Víctor");
   });
 
+  it("the active turn carries the reply target (conversation, thread, asked message) the card tool binds to (06-14)", async () => {
+    const guard = createToolGuard({ client: () => null });
+    let during: Record<string, unknown> | undefined;
+    const { runtime } = fakeRuntime((params) => {
+      const t = guard.activeTurn((params.route as { sessionKey: string }).sessionKey);
+      during = t
+        ? { conversationId: t.conversationId, threadRootId: t.threadRootId, messageId: t.messageId }
+        : {};
+    });
+    const p = createOpenClawPort({ runtime, accountId: "default", cfg: {}, guard });
+    await p.dispatchMention(
+      mapMention(event({ turn: TURN } as never), ARCHIE),
+      async () => {},
+      new AbortController().signal,
+    );
+    expect(during).toEqual({ conversationId: "conv-1", threadRootId: "root-1", messageId: "msg-1" });
+    const dm = mapMention(
+      event({
+        conversation: { id: "dm-1", kind: "dm", name: null },
+        thread: { rootMessageId: "msg-1" },
+        turn: TURN,
+      } as never),
+      ARCHIE,
+    );
+    await p.dispatchMention(dm, async () => {}, new AbortController().signal);
+    expect(during).toEqual({ conversationId: "dm-1", threadRootId: null, messageId: "msg-1" });
+  });
+
   it("serialises two turns of the same session; the turn ends even when the dispatch throws", async () => {
     const guard = createToolGuard({ client: () => null });
     let running = 0;
@@ -743,14 +771,14 @@ describe("tool gate against the fake Agent Channel API (HTTP)", () => {
 describe("memory tool (D-10): manifest, registration and the fake API", () => {
   const MEMORY = { untrustedOutput: false, sideEffecting: true };
 
-  it("the manifest declares ocw_memory_save in contracts.tools (OpenClaw discovers tool ownership there)", () => {
+  it("the manifest declares ocw_memory_save and ocw_agent_card in contracts.tools (OpenClaw discovers tool ownership there)", () => {
     const manifest = JSON.parse(
       readFileSync(path.join(import.meta.dirname, "..", "openclaw.plugin.json"), "utf8"),
     ) as { contracts?: { tools?: string[] } };
-    expect(manifest.contracts?.tools).toEqual(["ocw_memory_save"]);
+    expect(manifest.contracts?.tools).toEqual(["ocw_memory_save", "ocw_agent_card"]);
   });
 
-  it("registerFull registers ocw_memory_save (+ the breaker guard on gateway_start); the gate hooks come from registerCapabilities", () => {
+  it("registerFull registers ocw_memory_save and ocw_agent_card (+ the breaker guard on gateway_start); the gate hooks come from registerCapabilities", () => {
     const hooks: string[] = [];
     const tools: Array<{ opts: { name: string } }> = [];
     const pluginApi = {
@@ -760,10 +788,10 @@ describe("memory tool (D-10): manifest, registration and the fake API", () => {
     const guard = createToolGuard({ client: () => null });
     registerFull(pluginApi as never, guard);
     expect(hooks).toEqual(["gateway_start"]);
-    expect(tools.map((t) => t.opts.name)).toEqual(["ocw_memory_save"]);
+    expect(tools.map((t) => t.opts.name)).toEqual(["ocw_memory_save", "ocw_agent_card"]);
     registerCapabilities(pluginApi as never, guard);
     expect(hooks).toEqual(["gateway_start", "before_tool_call", "after_tool_call"]);
-    expect(tools).toHaveLength(1);
+    expect(tools).toHaveLength(2);
   });
 
   it("a save in an active DM turn reaches POST /memories with the event, the bot and the text only", async () => {
