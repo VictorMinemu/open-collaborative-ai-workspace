@@ -331,7 +331,9 @@ function BotsStrip({ bots }: { bots: BotDm[] }) {
     <nav
       aria-label="Your bots"
       data-testid="ai-bots-strip"
-      className="-mx-2 mb-2 flex gap-1.5 overflow-x-auto px-3 pt-1 pb-1 [scrollbar-width:none] sm:mx-0 sm:px-2"
+      // `relative`: the row is the containing block of the pills' sr-only "Unread" (position: absolute), so its scroll
+      // clip holds it. Without it the label sat at its static position past the row and widened the page (05-15).
+      className="relative -mx-2 mb-2 flex gap-1.5 overflow-x-auto px-3 pt-1 pb-1 [scrollbar-width:none] sm:mx-0 sm:px-2"
     >
       {bots.map((d) => (
         <Link
