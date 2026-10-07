@@ -127,8 +127,34 @@ export type MappedMention = {
   contextBlocks: ContextBlock[];
 };
 
+/** Why a tool was withheld, in words the persona can repeat (06-10, D-06). Unknown reasons stay neutral. */
+function withheldReason(reason: string, askerName: string): string {
+  switch (reason) {
+    case "not_every_participant":
+      return "not everyone in this conversation may use it";
+    case "shared_with_group":
+      return "this chat is shared with a team, a department or the whole organization";
+    case "denied_for_you":
+      return `${askerName} may not use it`;
+    default:
+      return "not available in this conversation";
+  }
+}
+
 function turnContextBlocks(turn: TurnContext, askerName: string, direct: boolean): ContextBlock[] {
   const blocks: ContextBlock[] = [];
+  // Data, not instructions: the persona can say what it could not use here and why (it never gets the tool).
+  const withheld = turn.withheld ?? [];
+  if (withheld.length > 0) {
+    blocks.push({
+      label: "Tools withheld in this conversation",
+      source: "ocw",
+      type: "withheld_tools",
+      payload: {
+        withheld: withheld.map((w) => `${sanitizeName(w.tool)} — ${withheldReason(w.reason, askerName)}`),
+      },
+    });
+  }
   if (turn.now) {
     blocks.push({
       label: `Current time for ${askerName}`,

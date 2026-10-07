@@ -22,7 +22,7 @@ import { and, desc, eq, inArray, isNull, ne, or } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
 import { agentDirectory } from "../agent";
-import { answerModelsOf, participantsOf } from "../ai-chat";
+import { answerModelsOf, audienceOf, participantsOf } from "../ai-chat";
 import {
   claimChannelNotice,
   effectiveCapabilities,
@@ -229,20 +229,29 @@ export async function buildMentionEvents(
   };
   const conversationName = conv.kind === "thread" && parent ? parent.name : conv.name;
 
+  // D-06, P-10: in an AI chat, scoped tools must be fine for everyone who reads the persona's answer.
+  const audience = aiChat ? await audienceOf(tx, conv.id) : null;
+
   const events: StoredMention[] = [];
   for (const a of delivered) {
     // The event id first: the turn ledger row (`agent_turns`) is keyed by it.
     const eventId = randomUUID();
-    const decision = await turnPolicy(tx, deps.core, deps.perms, {
-      agentId: a.id,
-      humanUserId: mention.author.id,
-      conversationId: conv.id,
-      conversationKind: conv.kind,
-      messageId: mention.messageId,
-      eventId,
-      // The asking human's zone (D-12); turnPolicy re-validates it and falls back to UTC.
-      clientTimeZone: mention.clientTimeZone ?? null,
-    });
+    const decision = await turnPolicy(
+      tx,
+      deps.core,
+      deps.perms,
+      {
+        agentId: a.id,
+        humanUserId: mention.author.id,
+        conversationId: conv.id,
+        conversationKind: conv.kind,
+        messageId: mention.messageId,
+        eventId,
+        // The asking human's zone (D-12); turnPolicy re-validates it and falls back to UTC.
+        clientTimeZone: mention.clientTimeZone ?? null,
+      },
+      { audience },
+    );
     // Not delivered (daily limit reached, or the bot is gone): no cell event, so no model call.
     if (!decision.deliver) {
       if (decision.reason === "limit_reached") {

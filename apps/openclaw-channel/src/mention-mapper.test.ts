@@ -259,7 +259,7 @@ describe("AI chats (06-10, D-07, P-10)", () => {
       turn: { ...turn, memory: [], withheld: "nope" },
     });
     expect(parsed.turn?.maxToolCalls).toBe(8);
-    expect(parsed.turn?.withheld).toEqual([]);
+    expect(parsed.turn?.withheld).toBeUndefined();
     expect(mapMention(aiChat(), BOT).contextBlocks.some((b) => b.type === "withheld_tools")).toBe(false);
   });
 

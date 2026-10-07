@@ -31,6 +31,7 @@ export {
   cellAgentCapabilities,
   currentTurnTools,
   recordLimitReached,
+  type TurnAudience,
   type TurnDecision,
   turnNow,
   turnPolicy,
