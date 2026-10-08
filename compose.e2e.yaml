@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: infra/fake-model/Dockerfile
-    image: ocw-fake-model:local
+    image: ocw-fake-model:${OCW_IMAGE_TAG:-local}
     environment:
       FAKE_MODEL_IDS: mock-1,mock-2
     networks:

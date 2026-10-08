@@ -12,3 +12,6 @@ docs
 e2e/test-results
 e2e/playwright-report
 **/*.log
+# `pnpm ocw` default directories: *_FILE secrets and backup archives never enter an image.
+secrets/
+backups/
