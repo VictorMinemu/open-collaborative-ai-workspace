@@ -70,6 +70,43 @@ describe("guard: ocw.permission-bypass-token", () => {
   });
 });
 
+describe("guard: policy tests, RLS and focused tests", () => {
+  const SKIP = ["it", "skip"].join(".");
+  const ONLY = ["it", "only"].join(".");
+  const RLS_ATTR = ["BYPASS", "RLS"].join("");
+
+  it("a skipped test in a policy test path fails, naming ocw.skipped-policy-test", () => {
+    put("packages/db/src/x.int.test.ts", `${SKIP}("denies cross-tenant reads", () => {});\n`);
+    const res = semgrep();
+    assert.notEqual(res.status, 0, res.out);
+    assert.match(res.out, /ocw\.skipped-policy-test/);
+    assert.match(res.out, /packages\/db\/src\/x\.int\.test\.ts/);
+  });
+
+  it("the same skip outside the policy test paths passes", () => {
+    put("apps/api/src/modules/chat/x.test.ts", `${SKIP}("renders a preview", () => {});\n`);
+    const res = semgrep();
+    assert.equal(res.status, 0, res.out);
+  });
+
+  it("a focused test anywhere under apps fails, naming ocw.focused-test", () => {
+    put("apps/web/components/x.test.tsx", `${ONLY}("narrows the suite", () => {});\n`);
+    const res = semgrep();
+    assert.notEqual(res.status, 0, res.out);
+    assert.match(res.out, /ocw\.focused-test/);
+  });
+
+  it("an RLS bypass grant fails outside bootstrap.sql; a SQL comment naming it passes", () => {
+    put("packages/db/sql/bootstrap.sql", `ALTER ROLE ocw_migrator ${RLS_ATTR};\n`);
+    put("packages/db/sql/post-migrate.sql", `-- runs as ocw_migrator (${RLS_ATTR})\nselect 1;\n`);
+    assert.equal(semgrep().status, 0);
+    put("packages/db/drizzle/0099_x.sql", `ALTER ROLE ocw_app ${RLS_ATTR};\n`);
+    const res = semgrep();
+    assert.notEqual(res.status, 0, res.out);
+    assert.match(res.out, /ocw\.rls-bypass packages\/db\/drizzle\/0099_x\.sql/);
+  });
+});
+
 describe("guard: rule fixtures", () => {
   it("--rule-tests passes over .semgrep/tests", () => {
     const res = guard(["--rule-tests"]);

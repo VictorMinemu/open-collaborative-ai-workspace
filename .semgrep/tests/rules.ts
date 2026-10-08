@@ -15,3 +15,46 @@ const flag = { dangerouslySkipPermissions: true };
 const safeMode = "default";
 // ok: ocw.permission-bypass-token
 const sandbox = "workspace-write";
+
+// ruleid: ocw.focused-test
+it.only("narrows the suite", () => {});
+// ruleid: ocw.focused-test
+describe.only("narrows the suite", () => {});
+// ruleid: ocw.focused-test
+test.only.each([1])("narrows %s", () => {});
+// ok: ocw.focused-test
+it("runs with the rest of the suite", () => {});
+
+// ruleid: ocw.skipped-policy-test
+it.skip("denies cross-tenant reads", () => {});
+// ruleid: ocw.skipped-policy-test
+describe.todo("denies cross-tenant reads");
+// ruleid: ocw.skipped-policy-test
+it.skipIf(process.env.CI)("denies cross-tenant reads", () => {});
+// ruleid: ocw.skipped-policy-test
+describe.runIf(false)("denies cross-tenant reads", () => {});
+// ruleid: ocw.skipped-policy-test
+xit("denies cross-tenant reads", () => {});
+// ruleid: ocw.skipped-policy-test
+xdescribe("denies cross-tenant reads", () => {});
+// ok: ocw.skipped-policy-test
+it("denies cross-tenant reads", () => {});
+
+// ruleid: ocw.ai-telemetry-records-prompts
+streamText({ model, messages, experimental_telemetry: { isEnabled: true } });
+// ruleid: ocw.ai-telemetry-records-prompts
+generateText({ model, prompt, experimental_telemetry: { isEnabled: true, recordInputs: false } });
+// ruleid: ocw.ai-telemetry-records-prompts
+generateText({ model, prompt, experimental_telemetry: telemetrySettings });
+// ruleid: ocw.ai-telemetry-records-prompts
+streamText({ model, messages, telemetry: { functionId: "chat" } });
+// ok: ocw.ai-telemetry-records-prompts
+streamText({ model, messages, experimental_telemetry: { isEnabled: true, recordInputs: false, recordOutputs: false } });
+// ok: ocw.ai-telemetry-records-prompts
+streamText({ model, messages, experimental_telemetry: { recordOutputs: false, functionId: "x", recordInputs: false } });
+// ok: ocw.ai-telemetry-records-prompts
+streamText({ model, messages, telemetry: { recordInputs: false, recordOutputs: false } });
+// ok: ocw.ai-telemetry-records-prompts
+generateText({ model, prompt, experimental_telemetry: { isEnabled: false } });
+// ok: ocw.ai-telemetry-records-prompts
+const sdk = new NodeSDK({ telemetry: { serviceName: "ocw-api" } });
