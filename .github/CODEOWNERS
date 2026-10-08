@@ -1,0 +1,36 @@
+# Owners of the paths that decide who may do what (FOUND-07, D-15). Review requests only: no branch-protection
+# "require code owner review" setting is enabled or implied. `pnpm guard` lints this file: every pattern must match
+# at least one tracked file and every required area must stay owned (scripts/guard/codeowners.mjs).
+
+# Database policies: bootstrap roles, FORCE RLS, policies, grants, migrations, tenant context.
+/packages/db/sql/                                  @VictorMinemu
+/packages/db/drizzle/                              @VictorMinemu
+/packages/db/src/schema/                           @VictorMinemu
+/packages/db/src/tenant.ts                         @VictorMinemu
+/packages/db/src/migrate*.ts                       @VictorMinemu
+
+# Permission and runtime-control contracts.
+/packages/contracts/src/permissions*               @VictorMinemu
+/packages/contracts/src/runtime-controls/          @VictorMinemu
+
+# Auth and policy paths in the API.
+/apps/api/src/authz.ts                             @VictorMinemu
+/apps/api/src/modules/identity/                    @VictorMinemu
+/apps/api/src/modules/organization/permissions/    @VictorMinemu
+/apps/api/src/modules/secrets/                     @VictorMinemu
+/apps/api/src/lib/secret-store.ts                  @VictorMinemu
+/apps/api/src/modules/ai-chat/grants.ts            @VictorMinemu
+/apps/api/src/modules/chat/access.ts               @VictorMinemu
+/apps/api/src/modules/bot-capabilities/            @VictorMinemu
+/apps/api/src/modules/work-session/policy*         @VictorMinemu
+
+# Runtime adapters (ADR-0012 path) and the OpenClaw plugin install gate.
+/apps/local-runtime/src/claude/                    @VictorMinemu
+/apps/local-runtime/src/codex/                     @VictorMinemu
+/infra/openclaw/install-policy.mjs                 @VictorMinemu
+
+# The guardrails themselves and the decisions they enforce.
+/.semgrep/                                         @VictorMinemu
+/scripts/guard/                                    @VictorMinemu
+/.github/                                          @VictorMinemu
+/docs/adr/                                         @VictorMinemu

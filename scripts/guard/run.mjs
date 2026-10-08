@@ -5,11 +5,14 @@
 //   --root <dir>                                    # scan another tree with this repository's rules (tests)
 //   --rule-tests                                    # Semgrep's own fixture tests over .semgrep/tests/
 // Semgrep is pinned and fails closed: `uvx --from semgrep==<pin>`, else the pinned Docker image, else exit 1 with an
-// install hint. A missing runner is never a silent pass.
+// install hint. A missing runner is never a silent pass. Then: dependency licenses (full pnpm graph + the mcp-sandbox
+// lockfile, against license-policy.json), workspace package license fields and LICENSE files, CODEOWNERS lint.
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { lint as lintCodeowners } from "./codeowners.mjs";
+import { checkFields, checkGraph, collectGraph, collectPackages } from "./licenses.mjs";
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const RULES = join(REPO, ".semgrep", "rules.yml");
@@ -18,7 +21,8 @@ const SEMGREP_VERSION = "1.178.0";
 const SEMGREP_IMAGE = `semgrep/semgrep:${SEMGREP_VERSION}@sha256:32e459968daabe7ab86968184a29109b9564aa00392401156f9788452b42786b`;
 const SEMGREP_FLAGS = ["--metrics=off", "--disable-version-check"];
 const TARGETS = ["apps", "packages", "infra", "e2e", "scripts"];
-const CHECKS = ["semgrep"];
+const POLICY = join(REPO, "scripts", "guard", "license-policy.json");
+const CHECKS = ["semgrep", "licenses", "fields", "codeowners"];
 
 const args = process.argv.slice(2);
 const option = (name) => {
@@ -105,7 +109,36 @@ function runRuleTests() {
   return failures;
 }
 
-const RUNNERS = { semgrep: runSemgrep };
+function runLicenses() {
+  const policy = JSON.parse(readFileSync(POLICY, "utf8"));
+  let entries;
+  try {
+    entries = collectGraph(root);
+  } catch (error) {
+    return [error.message];
+  }
+  const notes = [];
+  const failures = checkGraph(entries, policy, notes);
+  console.log(`licenses: ${entries.length} package versions checked`);
+  for (const note of notes) console.log(note);
+  return failures;
+}
+
+const runFields = () => checkFields(collectPackages(root));
+
+function runCodeowners() {
+  const file = join(root, ".github", "CODEOWNERS");
+  if (!existsSync(file)) return [".github/CODEOWNERS is missing"];
+  const tracked = spawnSync("git", ["ls-files", "-z"], {
+    cwd: root,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (tracked.status !== 0) return [`git ls-files failed: ${tracked.stderr.trim()}`];
+  return lintCodeowners(readFileSync(file, "utf8"), tracked.stdout.split("\0").filter(Boolean));
+}
+
+const RUNNERS = { semgrep: runSemgrep, licenses: runLicenses, fields: runFields, codeowners: runCodeowners };
 
 function main() {
   if (args.includes("--rule-tests")) return report("rule-tests", runRuleTests());
