@@ -19,7 +19,7 @@ observe it, move its secrets to OpenBao, back it up and upgrade it. Every step i
 Node and pnpm run only the `pnpm ocw` command-line tool on the host. The services run in containers.
 
 **Build time.** On a machine that already holds the base images and the build cache,
-`docker compose up -d --build --wait` took 94 s (clean-room run, 2026-10-08). A first build on a clean machine also
+`docker compose up -d --build --wait` took 79 to 94 s (three `pnpm gate:cleanroom` runs, 2026-10-08). A first build on a clean machine also
 downloads the base images and every dependency, so allow 10 to 20 minutes. The owner's clean-machine check below
 records the measured time.
 
