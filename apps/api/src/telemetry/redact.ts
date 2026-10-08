@@ -42,11 +42,16 @@ const HOST_ROOTS = (() => {
 /** `/path?query` → `/path` (the query of a request path never leaves the process). */
 const QUERY_AFTER_PATH = /(\/[^\s?#"'<>]*)\?[^\s"'<>]*/g;
 
+/** `GET:/x?token=…` → `GET:/x`: drops the query string after any path in free text. */
+export function stripQueryStrings(value: string): string {
+  return value.replace(QUERY_AFTER_PATH, "$1");
+}
+
 /** Strip absolute host paths and query strings from free text (messages, stack traces, log bodies). */
 export function scrubString(value: string): string {
   let out = value;
   for (const [re, label] of HOST_ROOTS) out = out.replace(re, label);
-  return out.replace(QUERY_AFTER_PATH, "$1");
+  return stripQueryStrings(out);
 }
 
 const cap = (s: string) => (s.length > MAX_MESSAGE_LENGTH ? `${s.slice(0, MAX_MESSAGE_LENGTH - 1)}…` : s);

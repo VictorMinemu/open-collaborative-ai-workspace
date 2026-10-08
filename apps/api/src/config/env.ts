@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { ATTACHMENT_DEFAULT_MAX_BYTES, TITLE_TIMEOUT_MS } from "@ocw/contracts";
 import { readEnvOrFile } from "@ocw/db";
 import { z } from "zod";
@@ -29,6 +30,50 @@ export const AttachmentMaxBytes = z.preprocess(
     .max(1024 ** 3, "must be at most 1 GiB (1073741824)")
     .default(ATTACHMENT_DEFAULT_MAX_BYTES),
 );
+/** One proxy address: an IPv4/IPv6 address, optionally with a CIDR prefix. */
+const isProxyAddress = (v: string) => {
+  const [addr = "", prefix, extra] = v.split("/");
+  const family = isIP(addr);
+  if (!family || extra !== undefined) return false;
+  if (prefix === undefined) return true;
+  return /^\d{1,3}$/.test(prefix) && Number(prefix) <= (family === 4 ? 32 : 128);
+};
+/**
+ * Which hops may set X-Forwarded-For (SELF-05, D-18): `false` (default) ignores the header, `true` trusts every
+ * hop, a number trusts that many hops (`1` behind the bundled Caddy), a comma list trusts those addresses/CIDRs.
+ * It feeds `req.ip`, so the sign-in audit and rate limit. Never `true` while the API port is reachable directly.
+ */
+export const TrustProxy = z
+  .string()
+  .default("false")
+  .transform((raw, ctx): boolean | number | string[] => {
+    const v = raw.trim();
+    if (v === "" || v === "false") return false;
+    if (v === "true") return true;
+    if (/^\d+$/.test(v)) return Number(v) === 0 ? false : Number(v);
+    const list = v
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
+    if (list.length && list.every(isProxyAddress)) return list;
+    ctx.addIssue({
+      code: "custom",
+      message: "must be false, true, a hop count or a comma list of proxy IPs/CIDRs",
+    });
+    return z.NEVER;
+  });
+/**
+ * OCW_TRUST_PROXY in the form Fastify applies. Fastify 5.12 fails closed on a bare hop count (it trusts nothing,
+ * because a hop count cannot tell the proxy from a direct client), so a count becomes the equivalent proxy-addr
+ * function: trust the first `n` hops from the socket. That is only safe when the proxy is the API's only reachable
+ * peer (07-08 publishes the API on 127.0.0.1 in proxy mode); otherwise configure the proxy's address or CIDR.
+ */
+export function fastifyTrustProxy(
+  value: boolean | number | string[],
+): boolean | string[] | ((address: string, hop: number) => boolean) {
+  if (typeof value !== "number") return value;
+  return (_address, hop) => hop < value;
+}
 const DEFAULT_MAIL_FROM = "Open Collaborative AI Workspace <no-reply@localhost>";
 
 export const EnvSchema = z
@@ -50,6 +95,7 @@ export const EnvSchema = z
       .refine((v) => decodeKey(v) !== null, "must be 32 bytes as base64 or 64 hex chars"),
     OCW_PUBLIC_WEB_URL: Url.default("http://localhost:3000"),
     OCW_PUBLIC_API_URL: Url.default("http://localhost:4000"),
+    OCW_TRUST_PROXY: TrustProxy,
     /**
      * Bootstrap bearer token for the OpenClaw cell (Agent Channel API), bound to the instance's organization.
      * Written by `pnpm setup:env`; shared with the openclaw container so it starts with no manual step.

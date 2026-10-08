@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { startTestDatabase, type TestDatabase } from "@ocw/db/testing";
 import { RedisContainer, type StartedRedisContainer } from "@testcontainers/redis";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { buildApp } from "./app";
+import { loadEnv } from "./config/env";
 import { TEST_SETUP_TOKEN, TestClient, WEB_ORIGIN } from "./testing";
 
 /**
@@ -14,6 +16,7 @@ import { TEST_SETUP_TOKEN, TestClient, WEB_ORIGIN } from "./testing";
  */
 
 const CANARY = "QUERY-CANARY";
+const AUTH_CANARY = "AUTH-HEADER-CANARY";
 const API_DIR = fileURLToPath(new URL("..", import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url)).replace(/\/$/, "");
 const ADMIN = {
@@ -155,6 +158,30 @@ function spansOf(received: Received[]): Array<OtlpSpan & { scope: string }> {
   return out;
 }
 
+type OtlpLog = { traceId?: string; spanId?: string; body?: unknown; attributes?: KeyValue[] };
+function logsOf(received: Received[]): OtlpLog[] {
+  const out: OtlpLog[] = [];
+  for (const r of received.filter((x) => x.path === "/v1/logs")) {
+    const json = JSON.parse(r.body) as {
+      resourceLogs: Array<{ scopeLogs: Array<{ logRecords: OtlpLog[] }> }>;
+    };
+    for (const rl of json.resourceLogs) for (const sl of rl.scopeLogs) out.push(...sl.logRecords);
+  }
+  return out;
+}
+
+type OtlpMetric = { name: string; histogram?: { dataPoints: Array<{ attributes?: KeyValue[] }> } };
+function metricsOf(received: Received[]): OtlpMetric[] {
+  const out: OtlpMetric[] = [];
+  for (const r of received.filter((x) => x.path === "/v1/metrics")) {
+    const json = JSON.parse(r.body) as {
+      resourceMetrics: Array<{ scopeMetrics: Array<{ metrics: OtlpMetric[] }> }>;
+    };
+    for (const rm of json.resourceMetrics) for (const sm of rm.scopeMetrics) out.push(...sm.metrics);
+  }
+  return out;
+}
+
 async function until<T>(fn: () => T | undefined, timeoutMs = 15_000): Promise<T> {
   const end = Date.now() + timeoutMs;
   for (;;) {
@@ -177,6 +204,7 @@ describe("telemetry on (OTEL_EXPORTER_OTLP_ENDPOINT set)", () => {
   let receiver: Awaited<ReturnType<typeof startReceiver>>;
   let api: Api;
   let traceId: string;
+  let sessionCookie: string;
 
   beforeAll(async () => {
     receiver = await startReceiver();
@@ -187,6 +215,13 @@ describe("telemetry on (OTEL_EXPORTER_OTLP_ENDPOINT set)", () => {
     // One authenticated request that reads the database, with a query-string canary.
     const me = await client.request("GET", `/api/v1/me?token=${CANARY}`);
     expect(me.status).toBe(200);
+    sessionCookie = [...client.cookies.values()].join("; ");
+    expect(sessionCookie.length).toBeGreaterThan(16);
+    // A route-not-found with a query string and a bearer header: Fastify logs the raw URL in its message.
+    const nope = await client.request("GET", `/api/v1/nope?token=${CANARY}`, undefined, {
+      headers: { authorization: `Bearer ${AUTH_CANARY}` },
+    });
+    expect(nope.status).toBe(404);
     const request = await until(() =>
       spansOf(receiver.received).find(
         (s) =>
@@ -218,6 +253,44 @@ describe("telemetry on (OTEL_EXPORTER_OTLP_ENDPOINT set)", () => {
     ).toBeTruthy();
   });
 
+  it("exports http.server.request.duration labelled with http.route", async () => {
+    const routes = await until(() => {
+      const points = metricsOf(receiver.received)
+        .filter((m) => m.name === "http.server.request.duration")
+        .flatMap((m) => m.histogram?.dataPoints ?? []);
+      const found = points.map((p) => attr(p, "http.route")?.stringValue).filter(Boolean);
+      return found.includes("/api/v1/me") ? found : undefined;
+    });
+    expect(routes).toContain("/api/v1/me");
+  });
+
+  it("exports pino logs correlated with the exported spans", async () => {
+    const correlated = await until(() => {
+      const spanIds = new Set(spansOf(receiver.received).map((s) => s.spanId));
+      return logsOf(receiver.received).find(
+        (l) => l.traceId === traceId && l.spanId && spanIds.has(l.spanId),
+      );
+    });
+    expect(correlated.traceId).toBe(traceId);
+    // stdout carries the same ids (log correlation).
+    expect(api.stdout.join("")).toContain(`"trace_id":"${traceId}"`);
+  });
+
+  it("logs no query string, cookie or authorization header, on stdout or exported", async () => {
+    await until(() =>
+      logsOf(receiver.received).some((l) => JSON.stringify(l).includes("/api/v1/nope")) ? true : undefined,
+    );
+    const exported = JSON.stringify(logsOf(receiver.received));
+    const stdout = api.stdout.join("");
+    expect(stdout).toContain("/api/v1/nope");
+    for (const text of [exported, stdout]) {
+      expect(text).not.toContain(CANARY);
+      expect(text).not.toContain(AUTH_CANARY);
+      expect(text).not.toContain(sessionCookie);
+      expect(text).not.toContain(REPO_ROOT);
+    }
+  });
+
   it("exports no query string, process path, argv or repository path", async () => {
     // Let the metric and log pipelines flush at least once too.
     await new Promise((r) => setTimeout(r, 1_000));
@@ -228,6 +301,35 @@ describe("telemetry on (OTEL_EXPORTER_OTLP_ENDPOINT set)", () => {
     expect(all).not.toContain("process.command_args");
     expect(all).not.toContain(REPO_ROOT);
     expect(all).not.toContain(TEST_SETUP_TOKEN);
+    expect(all).not.toContain(AUTH_CANARY);
+    expect(all).not.toContain(sessionCookie);
+  });
+});
+
+describe("request logs", () => {
+  it("carry the path without its query string, also in route-not-found messages", async () => {
+    const lines: string[] = [];
+    const env = loadEnv({
+      NODE_ENV: "test",
+      LOG_LEVEL: "info",
+      DATABASE_URL: db.appUrl,
+      AUTH_DATABASE_URL: db.authUrl,
+      REDIS_URL: redis.getConnectionUrl(),
+      BETTER_AUTH_SECRET: randomBytes(32).toString("hex"),
+      OCW_SETUP_TOKEN: TEST_SETUP_TOKEN,
+      OCW_ENCRYPTION_KEY: randomBytes(32).toString("base64"),
+    });
+    const built = await buildApp(env, { logger: true, logStream: { write: (l) => lines.push(l) } });
+    try {
+      expect((await built.app.inject({ method: "GET", url: "/health?token=X" })).statusCode).toBe(200);
+      expect((await built.app.inject({ method: "GET", url: "/nope?token=X" })).statusCode).toBe(404);
+      const health = lines.map((l) => JSON.parse(l) as { req?: { url?: string } }).find((l) => l.req?.url);
+      expect(health?.req?.url).toBe("/health");
+      expect(lines.join("")).toContain("/nope");
+      expect(lines.join("")).not.toContain("token=");
+    } finally {
+      await built.close();
+    }
   });
 });
 

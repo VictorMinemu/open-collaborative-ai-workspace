@@ -7,7 +7,7 @@ import { HealthResponse, WS_PROTOCOL } from "@ocw/contracts";
 import { createTenantDb } from "@ocw/db";
 import scalar from "@scalar/fastify-api-reference";
 import { drizzle } from "drizzle-orm/node-postgres";
-import Fastify, { type FastifyError } from "fastify";
+import Fastify, { type FastifyError, type FastifyRequest } from "fastify";
 import {
   hasZodFastifySchemaValidationErrors,
   jsonSchemaTransform,
@@ -17,7 +17,7 @@ import {
 } from "fastify-type-provider-zod";
 import pg from "pg";
 import { type AuthzRegistry, installAuthz } from "./authz";
-import { decodeKey, type Env } from "./config/env";
+import { decodeKey, type Env, fastifyTrustProxy } from "./config/env";
 import type { ApiModule, App, Core } from "./core";
 import { createChatAgentBridge } from "./lib/chat-agent-bridge";
 import { createChatEvents } from "./lib/chat-events";
@@ -42,6 +42,7 @@ import { createOnlineSet, createRealtimeModule, createRealtimeService } from "./
 import { createSearchModule } from "./modules/search";
 import { createSecretsModule, createSecretsService } from "./modules/secrets";
 import { createWorkSessionAttachmentScope, createWorkSessionModule } from "./modules/work-session";
+import { stripQueryStrings } from "./telemetry/redact";
 import { API_VERSION } from "./version";
 
 export { API_VERSION } from "./version";
@@ -84,9 +85,29 @@ export async function buildApp(
               // Attachment routes redirect to presigned URLs; a signed query string is a bearer credential.
               "res.headers.location",
             ],
+            // Request logs (stdout and exported) never carry a query string: it can hold tokens (T-07-05-01).
+            serializers: {
+              // Fastify's default fields, minus the query string.
+              req: (req: FastifyRequest) => ({
+                method: req.method,
+                url: req.url.split("?", 1)[0],
+                version: req.headers["accept-version"] as string | undefined,
+                host: req.host,
+                remoteAddress: req.ip,
+                remotePort: req.socket?.remotePort,
+              }),
+            },
+            hooks: {
+              // Free-text messages too, e.g. Fastify's "Route GET:/x?token=… not found".
+              logMethod(args, method) {
+                const clean = args.map((a) => (typeof a === "string" ? stripQueryStrings(a) : a));
+                return method.apply(this, clean as Parameters<typeof method>);
+              },
+            },
             ...(opts.logStream ? { stream: opts.logStream } : {}),
           },
-    trustProxy: true,
+    // X-Forwarded-For only from configured proxies (SELF-05): it feeds req.ip, the sign-in audit and rate limit.
+    trustProxy: fastifyTrustProxy(env.OCW_TRUST_PROXY),
     bodyLimit: 2 * 1024 * 1024,
   }).withTypeProvider<ZodTypeProvider>();
   app.setValidatorCompiler(validatorCompiler);

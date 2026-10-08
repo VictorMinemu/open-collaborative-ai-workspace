@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createEnvFileSecretStore } from "../lib/secret-store";
 import { createObjectStorage } from "../modules/artifact/storage";
-import { EnvError, loadEnv, SignInRatePerMinute } from "./env";
+import { EnvError, fastifyTrustProxy, loadEnv, SignInRatePerMinute } from "./env";
 
 describe("OCW_SIGNIN_RATE_LIMIT_PER_MINUTE", () => {
   it("defaults to 30 sign-ins per minute (production brake)", () => {
@@ -148,5 +148,50 @@ describe("AI chat variables (P-12)", () => {
       expect(loadEnv({ ...base, NODE_ENV: "development", [name]: "http://127.0.0.1:1" })).toBeTruthy();
     }
     expect(loadEnv({ ...base, NODE_ENV: "production" }).OCW_CHATGPT_API_BASE_URL).toBeNull();
+  });
+});
+
+describe("OCW_TRUST_PROXY (SELF-05, D-18)", () => {
+  const base = {
+    DATABASE_URL: "postgres://app:x@localhost:5432/ocw",
+    AUTH_DATABASE_URL: "postgres://auth:x@localhost:5432/ocw",
+    REDIS_URL: "redis://localhost:6379",
+    BETTER_AUTH_SECRET: "b".repeat(32),
+    OCW_SETUP_TOKEN: "s".repeat(16),
+    OCW_ENCRYPTION_KEY: "a".repeat(64),
+  };
+  const trust = (value?: string) =>
+    loadEnv(value === undefined ? base : { ...base, OCW_TRUST_PROXY: value }).OCW_TRUST_PROXY;
+
+  it("defaults to false: X-Forwarded-For is ignored unless configured", () => {
+    expect(trust()).toBe(false);
+    expect(trust("")).toBe(false);
+    expect(trust("false")).toBe(false);
+  });
+
+  it("accepts true, a hop count and a list of proxy IPs/CIDRs", () => {
+    expect(trust("true")).toBe(true);
+    expect(trust("1")).toBe(1);
+    expect(trust("2")).toBe(2);
+    expect(trust("10.0.0.0/8,127.0.0.1")).toEqual(["10.0.0.0/8", "127.0.0.1"]);
+    expect(trust(" 172.16.0.0/12 , ::1 ")).toEqual(["172.16.0.0/12", "::1"]);
+  });
+
+  it("rejects anything else, naming the variable", () => {
+    for (const bad of ["maybe", "10.0.0.0/33", "300.1.1.1", "-1", "1.5"]) {
+      expect(() => trust(bad)).toThrow(EnvError);
+      expect(() => trust(bad)).toThrow(/OCW_TRUST_PROXY/);
+    }
+  });
+
+  it("hands Fastify a hop count as the equivalent trust function (Fastify fails closed on a bare number)", () => {
+    const one = fastifyTrustProxy(1);
+    expect(typeof one).toBe("function");
+    if (typeof one !== "function") throw new Error("unreachable");
+    expect(one("10.0.0.5", 0)).toBe(true);
+    expect(one("203.0.113.77", 1)).toBe(false);
+    expect(fastifyTrustProxy(false)).toBe(false);
+    expect(fastifyTrustProxy(true)).toBe(true);
+    expect(fastifyTrustProxy(["10.0.0.0/8"])).toEqual(["10.0.0.0/8"]);
   });
 });
