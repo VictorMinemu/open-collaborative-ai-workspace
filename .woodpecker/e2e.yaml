@@ -24,6 +24,15 @@ variables:
     OCW_CLAWHUB_URL: http://127.0.0.1:4291
     OCW_E2E_FAKE_URL: http://127.0.0.1:4291
     OCW_E2E_FAKE_MCP_TOKEN: e2e-mcp-token
+    # AI chats (Phase 5+, as scripts/e2e-isolated.sh): the ChatGPT plan (Responses API + SIWC), the mock backend and
+    # AI web search all point at the fake; the test-only plan seed route exists only with these set.
+    OCW_CHATGPT_API_BASE_URL: http://127.0.0.1:4291/v1
+    OCW_CHATGPT_AUTH_BASE_URL: http://127.0.0.1:4291/siwc
+    OCW_AI_MOCK_BASE_URL: http://127.0.0.1:4291/v1
+    OCW_AI_SEARXNG_URL: http://127.0.0.1:4291
+    # One user types, searches and sends many times a minute; production keeps 30/min/user.
+    OCW_SEARCH_RATE_LIMIT_PER_MINUTE: "600"
+    OCW_AI_SEND_RATE_LIMIT_PER_MINUTE: "600"
 
 steps:
   - name: ci-image
