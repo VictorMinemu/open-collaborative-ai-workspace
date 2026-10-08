@@ -427,10 +427,10 @@ fi
 
 if want card; then
 echo "== [card] a channel turn offering ocw_agent_card: the model posts a card through the gate and POST /cards"
-STATE="$(inject_and_wait "$ROOT/infra/openclaw/test/mention-card.json" 0199a6f0-0000-7000-8000-00000000d061)"
+STATE="$(inject_and_wait "$ROOT/infra/openclaw/test/mention-card.json" 0199a6f0-0000-7000-8000-00000000d091)"
 CARD_ID="$(echo "$STATE" | node -e '
 const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
-const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d061");
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d091");
 if (!m) { console.error("FAIL: no reply to the card mention"); process.exit(1); }
 const cards = (s.cards ?? []).filter((c) => c.idempotencyKey.startsWith("0199a6f0-0000-7000-8000-00000000e006:"));
 const gated = s.toolCalls.filter((c) => c.eventId === "0199a6f0-0000-7000-8000-00000000e006");
@@ -443,8 +443,8 @@ const ok =
   /\[tools: 1 \| ocw_agent_card\]/.test(m.text) &&
   cards.length === 1 && c.agentId === "0199a6f0-0000-7000-8000-00000000a001" &&
   c.conversationId === "0199a6f0-0000-7000-8000-00000000c001" &&
-  c.threadRootId === "0199a6f0-0000-7000-8000-00000000d060" &&
-  c.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d061" &&
+  c.threadRootId === "0199a6f0-0000-7000-8000-00000000d090" &&
+  c.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d091" &&
   c.idempotencyKey === "0199a6f0-0000-7000-8000-00000000e006:card:0" &&
   c.card.kind === "deployment" && c.card.title === "Deploy api v2.3" && c.card.actions.length === 3 &&
   // Gated like every tool: asked once, allowed, only the query/url params travel (none here).
@@ -483,7 +483,7 @@ console.log("   thread     :", m.threadRootMessageId, "idempotency", m.idempoten
 console.log("   patches    :", JSON.stringify(patches.map(({ agentId, patch, status }) => ({ agentId, patch, status }))));
 const ok =
   m.text.includes("Tool ocw_agent_card said: Card updated.") &&
-  m.threadRootMessageId === "0199a6f0-0000-7000-8000-00000000d060" &&
+  m.threadRootMessageId === "0199a6f0-0000-7000-8000-00000000d090" &&
   m.idempotencyKey === "evt:0199a6f0-0000-7000-8000-00000000e007" &&
   patches.length === 1 && patches[0].status === 200 &&
   patches[0].agentId === "0199a6f0-0000-7000-8000-00000000a001" &&

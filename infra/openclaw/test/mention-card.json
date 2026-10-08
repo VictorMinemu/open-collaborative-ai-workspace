@@ -11,10 +11,10 @@
     "name": "architecture"
   },
   "thread": {
-    "rootMessageId": "0199a6f0-0000-7000-8000-00000000d060"
+    "rootMessageId": "0199a6f0-0000-7000-8000-00000000d090"
   },
   "message": {
-    "id": "0199a6f0-0000-7000-8000-00000000d061",
+    "id": "0199a6f0-0000-7000-8000-00000000d091",
     "text": "@archie post the deploy card [[call ocw_agent_card {\"action\":\"create\",\"card\":{\"kind\":\"deployment\",\"title\":\"Deploy api v2.3\",\"fields\":[{\"label\":\"Environment\",\"value\":\"production\"}],\"status\":\"running\",\"actions\":[{\"kind\":\"open\",\"label\":\"Open\",\"target\":\"/work-zone\"},{\"kind\":\"follow\",\"label\":\"Follow\"},{\"kind\":\"approve\",\"label\":\"Approve\",\"denyLabel\":\"Deny\"}],\"summary\":\"Deploying api v2.3 to production\"}}]]",
     "createdAt": "2026-10-07T10:00:01.000Z",
     "author": {
@@ -31,7 +31,7 @@
   },
   "threadHistory": [
     {
-      "id": "0199a6f0-0000-7000-8000-00000000d060",
+      "id": "0199a6f0-0000-7000-8000-00000000d090",
       "author": {
         "kind": "user",
         "id": "0199a6f0-0000-7000-8000-0000000000f1",
