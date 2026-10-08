@@ -64,7 +64,7 @@ const FIELDS_SCHEMA = {
     required: ["label", "value"],
   },
 };
-const ROUTE_PATTERN = `^(${AGENT_CARD_ROUTE_PREFIXES.map((p) => p.replace(/[-/]/g, "\\$&")).join("|")})([/?#]|$)`;
+const ROUTE_PATTERN = `^(${AGENT_CARD_ROUTE_PREFIXES.map((p) => p.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")).join("|")})([/?#]|$)`;
 
 const PARAMETERS = {
   type: "object",
