@@ -335,6 +335,7 @@ Plans:
 - [ ] 06-14-PLAN.md — Wave 7: `ocw_agent_card` cell tool and card-decision turns in the OpenClaw plugin
 - [ ] 06-15-PLAN.md — Wave 7: Agent Card renderer in channels, threads, DMs and AI chats with Follow and Approve
 - [ ] 06-16-PLAN.md — Wave 8: phase gate — fresh-stack day, leak/access sweep, ADR-0019 + ADR-0020, AGENTS.md/DEMO.md/traceability, validation sign-off, owner's metered eval and OpenAI terms check
+
 **Research:** needed (prompt assembly for the AI chat run loop across Anthropic / OpenAI / Google / openai-compatible — alternation rules, mid-conversation system messages, prompt caching; whether bots in shared AI chats answer through OpenClaw or the AI SDK loop; the participant-spoofing eval fixture and its metered-model budget)
 **UI hint**: yes
 
@@ -345,10 +346,12 @@ Plans:
 **Depends on:** Phase 6
 **Reason:** owner, 2026-10-07: "no puedo pegar imágenes en Work Zone con Ctrl+V" — diagnosed as not built (inventory row "Composer: attachments | deferred"); owner: "haz el arreglo recomendado".
 **Success Criteria** (what must be TRUE):
+
   1. Pasting, dropping or picking a PNG/JPEG/GIF/WebP in the Work Zone composer shows a removable thumbnail; sending queues the prompt with its images; at 1440 and 390, light and dark
   2. The prompt route accepts only attachments the sender uploaded in the same organization, of an allowed image type, within the device-link size budget; anything else is refused with a clear error, and cross-tenant attempts fail (integration test)
   3. The device adapters receive the images and pass them to Claude Code and Codex in their native input shape (adapter tests); a runtime/model without image input refuses visibly instead of dropping them
   4. The session stream shows the images sent with each prompt to every controller; the inventory row for composer attachments is updated from deferred to shipped
+
 **Plans:** 5 plans in 4 waves (research and planner decisions P-01 … P-13: `06.1-RESEARCH.md`, `06.1-01-PLAN.md`; owner decisions D-01 … D-08 in `06.1-CONTEXT.md`)
 
 Plans:
@@ -400,6 +403,178 @@ Scenario B without Work Zone creation. Phases 8–12 below complete MVP 2 (Multi
 of the thin Work Zone that Phase 1 already ships.
 
 ---
+
+**Operations features (inserted 2026-10-08, owner).** Phases 07.1–07.7 turn the 2026-10-06 operations meeting into
+generic capabilities for any organization (research: `.planning/research/OPS-FEATURES.md`). Each feature is owned by the
+Control Plane (an `ocw_*` plugin tool → Agent Channel API decides and audits → Agent Card when a human approves);
+OpenClaw's in-cell equivalents stay off. Deferred to the backlog: organization groups (F16), model comparison per task
+(F17), browser-session logins for agents (F2 part 2), ERP-driven board columns beyond watched records.
+
+### Phase 07.1: Board channels and record templates (INSERTED)
+
+**Goal**: Any team runs a workflow (case files, orders, tickets, candidates) as a board channel whose cards are threads
+with their agent, with a colour-coded waiting state, keyboard- and touch-accessible moves, live multi-user ordering, and
+record templates that name cards consistently
+**Requirements**: BOARD-01, BOARD-02, BOARD-03, BOARD-04, BOARD-05, BOARD-06
+**Depends on:** Phase 7
+**Research:** done (`OPS-FEATURES.md` F12, F14)
+**UI hint**: yes
+**Success Criteria** (what must be TRUE):
+  1. Creating a channel offers text or board; a board channel inherits the channel's members, permissions, unit, sidebar
+     and search, and shows configurable columns with a category (backlog/started/done/cancelled)
+  2. A card is the root message of a normal thread: clicking it opens the thread panel, agents answer there, and the card
+     shows its waiting state (none/us/customer/both) and title
+  3. Cards move between and within columns by drag and drop, by keyboard and by a "Move to…" menu; at 390 px columns are
+     tabs; two people moving cards at once converge without lost moves (fractional ranks, server re-rank on collision)
+  4. Board changes arrive live through the conversation stream with seq/cursor replay; every board query path has a
+     cross-tenant test; card titles and bodies are searchable like messages
+  5. A unit-scoped record template defines fields, default columns and a naming rule; new cards get deterministic titles
+     and a user-typed title is never replaced
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 07.1 to break down)
+
+### Phase 07.2: Scoped memory files and governed promotion (INSERTED)
+
+**Goal**: Agents keep their memory as Markdown files in folders the platform owns — personal, agent, project, team and
+organization scopes — that people browse, read and edit in a file-tree viewer with history, while anything an agent
+wants to put into a shared scope goes through a detector and a human approval that the server applies
+**Requirements**: MEM-01, MEM-02, MEM-03, MEM-04, MEM-05, MEM-06, MEM-07
+**Depends on:** Phase 7
+**Research:** done (`OPS-FEATURES.md` F4, F5); owner requirement: a folder/subfolder viewer of `.md` memory files
+**UI hint**: yes
+**Success Criteria** (what must be TRUE):
+  1. Memory lives in Postgres as virtual `.md` files (relative paths, folders from paths) per scope with append-only
+     revisions, RLS and audit; each scope has a `MEMORY.md`; existing per-bot notes are migrated without making them
+     readable by admins
+  2. A file-tree viewer (web, 1440 and 390, light and dark) lists scopes, folders and files the viewer may read; files
+     render through the shared `<Markdown>` (no raw HTML), edit as Markdown source with optimistic versions, and show
+     history with diffs; an agent's page shows its memory and its capabilities/skills read-only
+  3. Agents read and list memory through `ocw_memory_*` tools decided by the resolver (agent ∩ human) and write their own
+     scopes directly; a write into a shared scope becomes a proposal, never a direct write
+  4. A proposal runs the detector (secrets always blocked; IBAN, cards, NIF/NIE, email, phone and similar flagged;
+     optional Presidio profile), posts an approval card showing the diff, findings and reader count, and on approval the
+     **server** applies it (a reusable approve-and-apply primitive with a one-use grant bound to the action hash)
+  5. Per-folder rules (path prefix on permission rules, deny wins) decide read/write/promote; cross-tenant and
+     cross-unit tests prove a scope never leaks
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 07.2 to break down)
+
+### Phase 07.3: Module access per unit (INSERTED)
+
+**Goal**: Admins and leads turn whole modules (Work Zone, AI chats, bots, …) on or off for a department, team or person
+from Settings, expressed as resolver deny rules so the UI hides what the API already refuses
+**Requirements**: ACCESS-01, ACCESS-02, ACCESS-03
+**Depends on:** Phase 7
+**Research:** done (`OPS-FEATURES.md` F15)
+**UI hint**: yes
+**Success Criteria** (what must be TRUE):
+  1. A module catalog in contracts maps each module to exact permission grains (no admin grains such as `device.revoke`)
+  2. A Settings panel creates and removes module rules per unit or person; changes are audited and apply live
+  3. Every navigation entry and section (incl. AI chats in the chat sidebar) hides when the module is denied, and the API
+     keeps refusing direct calls; tests cover deny-beats-admin and unit inheritance
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 07.3 to break down)
+
+### Phase 07.4: Per-member connectors, agent keychain and templates (INSERTED)
+
+**Goal**: A shared agent acts with the credentials of the person who asked — each member connects their own MCP, ERP or
+CRM account once, sessions refresh themselves, and secrets are used by reference and never seen by the model — and
+people start their own agent from a template
+**Requirements**: CONN-01, CONN-02, CONN-03, CONN-04, CONN-05, CONN-06
+**Depends on:** Phase 7
+**Research:** done (`OPS-FEATURES.md` F1, F2, F3)
+**UI hint**: yes
+**Success Criteria** (what must be TRUE):
+  1. Admins register connectors with an auth mode (`org_secret`, `per_member_oauth`, `per_member_secret`); members
+     connect and disconnect their account in Settings; tokens are sealed per member, refresh serialized, and a revoked or
+     expired grant asks to reconnect
+  2. Agent tool calls to a connector go through an API proxy that uses the requesting member's credential (agent ∩
+     human), audited per call; without a connection the agent replies with a "connect your account" card; results from a
+     member's account default to DMs (audience rule)
+  3. Keychain items (personal or unit scope, host allowlist) are used by handle: the API injects the secret only towards
+     allowed hosts, the model never receives it, and every use is audited without the value
+  4. Unit-scoped, versioned agent templates instantiate personal agents with their own memory and connections, within the
+     personal-agent caps
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 07.4 to break down)
+
+### Phase 07.5: Per-tool approvals and Work Zone proposals (INSERTED)
+
+**Goal**: Organizations decide per tool which agent actions need a human first; the human sees the exact action in a
+card and approves it once, and agents can propose Work Zone sessions that a person starts with one click
+**Requirements**: APPROVE-01, APPROVE-02, APPROVE-03, APPROVE-04
+**Depends on:** Phase 07.2 (approve-and-apply primitive), Phase 07.4 (connector tools)
+**Research:** done (`OPS-FEATURES.md` F10, F11)
+**UI hint**: yes
+**Success Criteria** (what must be TRUE):
+  1. A per-tool approval policy (`never | always | when_tainted`, approvers) is decided in the tool gate; only tools with
+     a policy send their full arguments to the API
+  2. A tool call needing approval posts a card with the exact action (recipient, amount, body…); approving grants exactly
+     one call bound to the hash of tool + canonical parameters; any change is denied; all decisions are audited
+  3. An agent proposes a Work Zone session (project, device, prompt) as a card; the triggering person with
+     `work_session.create` and `device.use` starts it in their name; tainted turns cannot propose, and full access is never
+     chosen by an agent
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 07.5 to break down)
+
+### Phase 07.6: Automations and watched records (INSERTED)
+
+**Goal**: Agents work on a schedule and on events — signed webhooks and incoming mail create or update threads and board
+cards — and they notice when a record changed outside the platform; people get a personal digest and finished Work Zone
+sessions feed project memory through the promotion flow
+**Requirements**: AUTO-01, AUTO-02, AUTO-03, AUTO-04, AUTO-05, AUTO-06
+**Depends on:** Phase 07.1, Phase 07.2, Phase 07.4
+**Research:** done (`OPS-FEATURES.md` F6, F8, F9, F13)
+**UI hint**: yes
+**Success Criteria** (what must be TRUE):
+  1. A Postgres-backed job scheduler runs automations (standing order + trigger + delivery target by stable IDs + the
+     person it runs for + budget), audited, survives restarts, and never runs inside the cell
+  2. Signed webhooks (Standard Webhooks) and IMAP mail are triggers; inbound content is untrusted (read-only turns);
+     automations can be created from natural language and confirmed in a card
+  3. Watched records keep an API-computed hash of an external record's watched fields; on access (and on schedule) a
+     change made elsewhere is reported in the card's thread as before → after, without overwriting
+  4. A per-person digest (pending decisions, followed cards, unread mentions, Work Zone sessions waiting or finished)
+     arrives by DM on that person's schedule
+  5. A finished Work Zone session can become a summary proposal in its project's memory (07.2 flow)
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 07.6 to break down)
+
+### Phase 07.7: Agent-to-agent collaboration (INSERTED)
+
+**Goal**: An agent consults or delegates to another agent through the platform, within a permission matrix of who may
+message whom, with every hop visible in the thread, audited and bounded
+**Requirements**: A2A-01, A2A-02, A2A-03
+**Depends on:** Phase 07.5
+**Research:** done (`OPS-FEATURES.md` F7)
+**UI hint**: yes
+**Success Criteria** (what must be TRUE):
+  1. `ocw_consult_agent` delivers a question to another agent through the API; the answer returns as a new turn; each
+     hop is a visible, attributed thread message audited with a chain id
+  2. Effective permission = source agent ∩ triggering human ∩ target visibility ∩ `agent.message` rules (deny wins)
+  3. Depth ≤ 2, no agent twice per chain, per-chain budget and daily limits stop loops; the asker pays
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 07.7 to break down)
 
 ### Phase 8: Device Trust, Protocol and Work Zone Permissions
 
