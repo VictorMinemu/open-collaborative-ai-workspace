@@ -385,6 +385,11 @@ test("Alex follows a card and is notified when it fails; Sam approves after conf
     // Alex reads his inbox (another page, so the pop-up is not suppressed for the open conversation).
     await a.page.goto(`${BASE_URL}/chat/mentions`);
     await a.page.getByTestId("inbox-filter-all").click();
+    // Patch only once the All list is loaded and the page is live: a notification created while its first fetch is
+    // in flight is neither in that snapshot nor applied live (the live event updates a cached list only).
+    await expect(a.page.getByTestId("inbox-filter-all")).toHaveAttribute("aria-selected", "true");
+    await expect(a.page.getByTestId("inbox-list").or(a.page.getByTestId("inbox-empty"))).toBeVisible();
+    await expect(a.page.getByTestId("connection-status").first()).toHaveAttribute("data-status", "open");
     await plugin.patchCard(deploy.messageId, {
       agentId: deployId,
       patch: {
