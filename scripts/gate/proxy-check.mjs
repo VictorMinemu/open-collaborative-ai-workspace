@@ -12,6 +12,7 @@
 // 127.0.0.1 only like every other gate port. Checks (one step each in the JSON summary on stdout; exit 0 = all ok):
 //   proxy-enabled, ports-loopback, tls-trust, web-login, api-health, docs, ws-upgrade (Task 1)
 //   presign-put-get, presign-tampered-403, presign-unsigned-403, xff-ignored, secure-cookie, agent-channel-404 (Task 2)
+// The forged client IP is 203.0.113.77 (SPOOFED_IP); presigned URLs are never printed, only their origin.
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import https from "node:https";
@@ -22,6 +23,7 @@ import tls from "node:tls";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import {
+  ADMIN,
   demoSnapshot,
   diffDemo,
   ensureAdmin,
@@ -36,6 +38,11 @@ const LOOPBACK_OVERRIDE = "infra/caddy/compose.loopback.yaml";
 const CADDY_ROOT = "/data/caddy/pki/authorities/local/root.crt";
 /** Documentation range (RFC 5737): what a client forges in X-Forwarded-For. */
 export const SPOOFED_IP = "203.0.113.77";
+/** A 1×1 PNG (same bytes as e2e/tests/attachments-api.spec.ts). */
+const PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+  "base64",
+);
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -296,6 +303,12 @@ export function openWs(origin, token, { timeoutMs = 15_000 } = {}) {
 
 // ---------------------------------------------------------------- checks
 
+/** SQL string literal (values here are generated or come from the gate env, never from a response). */
+const sqlText = (v) => `'${String(v).replaceAll("'", "''")}'`;
+
+/** `cookie` header for an ApiClient's jar, for requests that need the raw response (redirects, Set-Cookie). */
+const cookieOf = (client) => [...client.cookies].map(([k, v]) => `${k}=${v}`).join("; ");
+
 /** The proxy checks (gate step convention): pushes one step per check to ctx.steps. */
 export async function run(ctx) {
   const checks = [];
@@ -376,17 +389,26 @@ export async function run(ctx) {
   await check("api-health", () => poll(() => status("/health"), { timeoutMs: 60_000 }));
   await check("docs", () => poll(() => status("/docs"), { timeoutMs: 30_000 }));
 
-  await check("ws-upgrade", async () => {
-    // The shared gate admin, created (fresh stack) or signed in through the proxy only.
-    const viaProxy = Object.defineProperty({ urls: { ...ctx.urls, api: origin } }, "env", { value: ctx.env });
-    const admin = await ensureAdmin(viaProxy);
-    shared.admin = admin;
-    const tokenRes = await admin.client.request("GET", "/api/auth/token");
-    if (tokenRes.status !== 200 || !tokenRes.body?.token) throw new Error(`token: ${tokenRes.status}`);
-    const channels = await admin.client.request("GET", "/api/v1/channels");
+  // The shared gate admin, created (fresh stack) or signed in through the proxy only, and its #general.
+  const viaProxy = Object.defineProperty({ urls: { ...ctx.urls, api: origin } }, "env", { value: ctx.env });
+  const adminSession = async () => {
+    shared.admin ??= await ensureAdmin(viaProxy);
+    return shared.admin;
+  };
+  const generalChannel = async () => {
+    if (shared.general) return shared.general;
+    const channels = await (await adminSession()).client.request("GET", "/api/v1/channels");
     const general = channels.body?.channels?.find((c) => c.slug === "general");
     if (!general) throw new Error(`no #general (channels: ${channels.status})`);
     shared.general = general;
+    return general;
+  };
+
+  await check("ws-upgrade", async () => {
+    const admin = await adminSession();
+    const tokenRes = await admin.client.request("GET", "/api/auth/token");
+    if (tokenRes.status !== 200 || !tokenRes.body?.token) throw new Error(`token: ${tokenRes.status}`);
+    const general = await generalChannel();
     const ws = await openWs(origin, tokenRes.body.token);
     if (ws.status !== 101) return { ok: false, status: ws.status };
     try {
@@ -415,6 +437,170 @@ export async function run(ctx) {
     } finally {
       ws.close();
     }
+  });
+
+  // ---- Task 2: presigned object URLs reachable from outside the compose network (SigV4 over Host and path)
+  const bucketPrefix = `${origin}/${ctx.env.OCW_S3_BUCKET || "ocw-attachments"}/`;
+  await check("presign-put-get", async () => {
+    const admin = await adminSession();
+    const general = await generalChannel();
+    const presign = await admin.client.request("POST", `/api/v1/conversations/${general.id}/attachments`, {
+      filename: `proxy-${randomBytes(4).toString("hex")}.png`,
+      contentType: "image/png",
+      size: PNG.length,
+    });
+    if (presign.status !== 200) return { ok: false, presign: presign.status };
+    const { upload, attachment } = presign.body;
+    // Presigned URLs are bearer credentials: only their origin is ever reported.
+    const put = await fetch(upload.url, { method: "PUT", headers: upload.headers, body: PNG });
+    await put.arrayBuffer();
+    const complete = await admin.client.request("POST", `/api/v1/attachments/${attachment.id}/complete`);
+    const download = await fetch(`${origin}/api/v1/attachments/${attachment.id}/download`, {
+      redirect: "manual",
+      headers: { origin, cookie: cookieOf(admin.client) },
+    });
+    await download.arrayBuffer();
+    const location = download.headers.get("location") ?? "";
+    const get = location.startsWith(bucketPrefix) ? await fetch(location) : null;
+    const bytes = get ? Buffer.from(await get.arrayBuffer()) : Buffer.alloc(0);
+    shared.objectUrl = get?.status === 200 ? location : undefined;
+    return {
+      ok:
+        upload.url.startsWith(bucketPrefix) &&
+        put.status === 200 &&
+        complete.status === 200 &&
+        complete.body?.status === "ready" &&
+        download.status === 302 &&
+        get?.status === 200 &&
+        bytes.equals(PNG),
+      signedFor: new URL(upload.url).origin,
+      put: put.status,
+      complete: complete.status,
+      download: download.status,
+      redirectOrigin: location ? new URL(location).origin : null,
+      get: get?.status ?? null,
+      identicalBytes: bytes.equals(PNG),
+    };
+  });
+
+  await check("presign-tampered-403", async () => {
+    if (!shared.objectUrl) return { ok: false, error: "no presigned GET from presign-put-get" };
+    const url = new URL(shared.objectUrl);
+    const sig = url.searchParams.get("X-Amz-Signature") ?? "";
+    // One character of the signature changed.
+    url.searchParams.set("X-Amz-Signature", `${sig.slice(0, -1)}${sig.at(-1) === "0" ? "1" : "0"}`);
+    const signature = await fetch(url);
+    await signature.arrayBuffer();
+    // The original signature on another key (path changed).
+    const other = new URL(shared.objectUrl);
+    other.pathname = `${other.pathname}-x`;
+    const path = await fetch(other);
+    await path.arrayBuffer();
+    return {
+      ok: sig.length > 0 && signature.status === 403 && path.status === 403,
+      signature: signature.status,
+      path: path.status,
+    };
+  });
+
+  await check("presign-unsigned-403", async () => {
+    if (!shared.objectUrl) return { ok: false, error: "no presigned GET from presign-put-get" };
+    const url = new URL(shared.objectUrl);
+    const res = await fetch(`${url.origin}${url.pathname}`);
+    await res.arrayBuffer();
+    return { ok: res.status === 403, status: res.status };
+  });
+
+  // ---- Task 2: trusted proxy headers and cookies
+  await check("xff-ignored", async () => {
+    const email = `proxy-xff-${randomBytes(4).toString("hex")}@ocw.test`;
+    const failed = await fetch(`${origin}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { origin, "content-type": "application/json", "x-forwarded-for": SPOOFED_IP },
+      body: JSON.stringify({ email, password: "definitely-not-the-password" }),
+    });
+    await failed.arrayBuffer();
+    const auditIp = ctx
+      .psql(
+        `select metadata->>'ip' from app.audit_events where action = 'user.sign_in_failed' ` +
+          `and metadata->>'email' = ${sqlText(email)} order by occurred_at desc limit 1`,
+      )
+      .trim();
+    // A successful sign-in with the same forged header: the IP better-auth stores on the session.
+    const signIn = await fetch(`${origin}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { origin, "content-type": "application/json", "x-forwarded-for": SPOOFED_IP },
+      body: JSON.stringify({ email: ADMIN.email, password: ADMIN.password }),
+    });
+    await signIn.arrayBuffer();
+    shared.signInCookies = signIn.headers.getSetCookie();
+    const sessionIp = ctx
+      .psql(
+        `select s.ip_address from auth.session s join auth."user" u on u.id = s.user_id ` +
+          `where u.email = ${sqlText(ADMIN.email.toLowerCase())} order by s.created_at desc limit 1`,
+      )
+      .trim();
+    // Informational, not part of `ok`: a process on this host that reaches the loopback-published API directly is
+    // one hop away like Caddy, so OCW_TRUST_PROXY=1 believes its header (docs/self-hosting/reverse-proxy.md).
+    const directEmail = `proxy-xff-direct-${randomBytes(4).toString("hex")}@ocw.test`;
+    const direct = await fetch(`${ctx.urls.api}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { origin, "content-type": "application/json", "x-forwarded-for": SPOOFED_IP },
+      body: JSON.stringify({ email: directEmail, password: "definitely-not-the-password" }),
+    });
+    await direct.arrayBuffer();
+    const directAuditIp = ctx
+      .psql(
+        `select metadata->>'ip' from app.audit_events where action = 'user.sign_in_failed' ` +
+          `and metadata->>'email' = ${sqlText(directEmail)} order by occurred_at desc limit 1`,
+      )
+      .trim();
+    return {
+      ok:
+        failed.status === 401 &&
+        auditIp !== "" &&
+        auditIp !== SPOOFED_IP &&
+        signIn.status === 200 &&
+        sessionIp !== "" &&
+        sessionIp !== SPOOFED_IP,
+      signInFailed: failed.status,
+      auditIp,
+      signIn: signIn.status,
+      sessionIp,
+      residualDirectLoopback: { status: direct.status, auditIp: directAuditIp },
+    };
+  });
+
+  await check("secure-cookie", async () => {
+    const session = (shared.signInCookies ?? []).find((c) => /session_token=/.test(c.split(";")[0]));
+    if (!session) return { ok: false, error: "no session cookie in the sign-in response" };
+    const name = session.slice(0, session.indexOf("="));
+    const attributes = session
+      .split(";")
+      .slice(1)
+      .map((a) => a.trim().split("=")[0].toLowerCase());
+    return {
+      ok: name.startsWith("__Secure-") && attributes.includes("secure") && attributes.includes("httponly"),
+      name,
+      attributes,
+    };
+  });
+
+  await check("agent-channel-404", async () => {
+    // Caddy answers with an empty 404; the API itself (reached on loopback only) answers differently.
+    const via = await fetch(`${origin}/agent-channel/v1/anything`);
+    const body = await via.text();
+    const bare = await fetch(`${origin}/agent-channel`);
+    await bare.arrayBuffer();
+    const direct = await fetch(`${ctx.urls.api}/agent-channel/v1/anything`);
+    await direct.arrayBuffer();
+    return {
+      ok: via.status === 404 && body.length === 0 && bare.status === 404,
+      viaProxy: via.status,
+      bodyBytes: body.length,
+      bare: bare.status,
+      directOnLoopback: direct.status,
+    };
   });
 
   return { name: "proxy", ok: checks.every((c) => c.ok), details: { checks: checks.map((c) => c.name) } };
