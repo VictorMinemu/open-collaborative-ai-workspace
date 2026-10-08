@@ -1,5 +1,7 @@
 # MVP 0 demo runbook
 
+> Installing your own instance? Follow [`docs/INSTALL.md`](INSTALL.md); this runbook is the owner's local demo.
+
 What the demo shows, end to end, on one Mac:
 
 1. **Chat** — Slack-style channels and single-level threads, live for every member, with `@mentions`.

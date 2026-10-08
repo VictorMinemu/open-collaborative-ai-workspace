@@ -19,14 +19,17 @@ shared, governable company infrastructure, while keeping local execution whereve
 
 ## Status
 
-Pre-code. This repository currently holds the product specification, architecture decisions and
-planning artifacts. Application code will follow the roadmap in `docs/prd/PRD.md` (MVP 1–7).
+**MVP 1 is self-hostable.** Chat (channels, threads, DMs, attachments, search), multiplayer AI chats, OpenClaw
+agents and personas, Agent Cards, and the Work Zone with the desktop app and Local Runtime are built. A self-hosted
+install comes up with one command, and so do its proxy, observability, OpenBao, backup and upgrade. The roadmap
+continues in `docs/prd/PRD.md` (MVP 2–7).
 
 ## Documents
 
 | Document | Purpose |
 | --- | --- |
 | [`docs/prd/PRD.md`](docs/prd/PRD.md) | Authoritative Product Requirements Document (v1.0) |
+| [`docs/INSTALL.md`](docs/INSTALL.md) | Self-hosted install, operations and troubleshooting |
 | [`docs/adr/`](docs/adr/) | Architecture Decision Records |
 | [`AGENTS.md`](AGENTS.md) | Instructions for AI coding agents (single source of truth) |
 | [`CLAUDE.md`](CLAUDE.md) | Claude Code wrapper that imports `AGENTS.md` |
@@ -39,15 +42,16 @@ Next.js web · Electron desktop with a Local Runtime daemon · Expo mobile · Po
 S3-compatible storage · OpenBao/KMS · OpenTelemetry · OpenClaw for server-side agents.
 See the ADRs for rationale and for what is still deliberately undecided.
 
-## Self-hosting goal
+## Self-hosting
 
 ```bash
-git clone https://github.com/VictorMinemu/open-collaborative-ai-workspace.git
-cd open-collaborative-ai-workspace
-docker compose up
+git clone https://github.com/VictorMinemu/open-collaborative-ai-workspace.git ocw && cd ocw
+pnpm ocw setup                         # writes .env with generated secrets (never printed)
+docker compose up -d --build --wait    # then open http://localhost:3000/setup
 ```
 
-No essential feature will depend on a managed cloud.
+Requirements, HTTPS through Caddy, observability, OpenBao, backups, upgrades and troubleshooting are covered in
+[`docs/INSTALL.md`](docs/INSTALL.md). No essential feature depends on a managed cloud.
 
 ## License
 
