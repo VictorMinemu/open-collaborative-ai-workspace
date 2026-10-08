@@ -1,0 +1,27 @@
+# Woodpecker port of the `images` job in .github/workflows/ci.yml: the shipped images build. The build context is
+# streamed to the dind daemon, so the regular Woodpecker workspace is enough here.
+when:
+  - event: [push, pull_request, manual]
+
+variables:
+  - &docker_sock /var/run/docker.sock:/var/run/docker.sock
+
+steps:
+  - name: api
+    image: docker:29.8.2-cli
+    volumes: [*docker_sock]
+    commands:
+      - docker build -f apps/api/Dockerfile -t ocw-api:ci .
+
+  - name: web
+    image: docker:29.8.2-cli
+    volumes: [*docker_sock]
+    commands:
+      - docker build -f apps/web/Dockerfile -t ocw-web:ci .
+
+  # The shipped cell image with the bundled search plugins (pinned + sha512-checked at build time).
+  - name: openclaw
+    image: docker:29.8.2-cli
+    volumes: [*docker_sock]
+    commands:
+      - docker build -f infra/openclaw/Dockerfile -t ocw-openclaw:ci .

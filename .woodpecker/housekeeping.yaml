@@ -1,0 +1,16 @@
+# Last workflow of every pipeline: keeps the dind daemon's disk inside its budget (infra/ci/disk-budget.sh).
+# Only the dind socket is mounted; nothing here can reach the host's Docker.
+when:
+  - event: [push, pull_request, manual]
+
+depends_on: [verify, e2e, images, cell-smoke]
+runs_on: [success, failure]
+
+steps:
+  - name: disk-budget
+    image: docker:29.8.2-cli
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /srv/ocw-ci:/srv/ocw-ci
+    commands:
+      - sh infra/ci/disk-budget.sh

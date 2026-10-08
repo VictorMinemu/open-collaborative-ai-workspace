@@ -1,0 +1,74 @@
+# Woodpecker port of the `verify` job in .github/workflows/ci.yml (kept for when GitHub Actions returns).
+# Every step container talks to the agent's isolated dind daemon through its socket. Steps work in a copy of the
+# checkout under /srv/ocw-ci, a dind path mounted at the same path, so bind mounts and caches resolve identically
+# on the daemon side (the Woodpecker workspace is a docker volume the daemon cannot bind by path).
+# `$$` escapes shell variables from Woodpecker's own substitution.
+when:
+  - event: [push, pull_request, manual]
+
+variables:
+  - &docker_sock /var/run/docker.sock:/var/run/docker.sock
+  - &shared /srv/ocw-ci:/srv/ocw-ci
+  - &env
+    W: /srv/ocw-ci/ws/verify
+    PNPM_STORE: /srv/ocw-ci/cache/pnpm-store
+    UV_CACHE_DIR: /srv/ocw-ci/cache/uv
+    # Testcontainers: the published ports live in dind's network namespace, which host-network steps share.
+    TESTCONTAINERS_HOST_OVERRIDE: 127.0.0.1
+
+steps:
+  - name: ci-image
+    image: docker:29.8.2-cli
+    volumes: [*docker_sock]
+    commands:
+      - sh infra/ci/build-image.sh
+
+  - name: install
+    image: ocw-ci:local
+    pull: false
+    volumes: [*docker_sock, *shared]
+    environment: *env
+    commands:
+      - rm -rf "$${W}" && mkdir -p "$${W}" && cp -a . "$${W}/"
+      - cd "$${W}" && pnpm install --frozen-lockfile --store-dir "$${PNPM_STORE}"
+
+  # Integration tests start real PostgreSQL 18 / Redis 8 / Garage containers (testcontainers).
+  - name: verify
+    image: ocw-ci:local
+    pull: false
+    network_mode: host
+    volumes: [*docker_sock, *shared]
+    environment: *env
+    commands:
+      - cd "$${W}" && pnpm verify
+
+  # setup-env (Garage/S3 keys, --add-missing); infra/**/*.test.mjs (incl. infra/garage) run in cell-smoke.
+  - name: script-tests
+    image: ocw-ci:local
+    pull: false
+    volumes: [*shared]
+    environment: *env
+    commands:
+      - cd "$${W}" && node --test 'scripts/**/*.test.mjs'
+
+  - name: package-suites
+    image: ocw-ci:local
+    pull: false
+    network_mode: host
+    volumes: [*docker_sock, *shared]
+    environment: *env
+    commands:
+      - cd "$${W}"
+      - pnpm --filter @ocw/local-runtime test
+      - pnpm --filter @ocw/desktop test
+
+  - name: cleanup
+    image: ocw-ci:local
+    pull: false
+    volumes: [*docker_sock, *shared]
+    environment: *env
+    commands:
+      - docker ps -aq --filter label=org.testcontainers=true | xargs -r docker rm -fv
+      - rm -rf "$${W}"
+    when:
+      status: [success, failure]
