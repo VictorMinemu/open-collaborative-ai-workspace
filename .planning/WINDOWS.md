@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 72
+open_count: 73
 waived_count: 0
 fixed_count: 17
-total_count: 89
-last_updated: 2026-10-08T01:09:05.045Z
+total_count: 90
+last_updated: 2026-10-08T01:18:30.440Z
 ---
 
 # Broken Windows Ledger
@@ -104,6 +104,7 @@ last_updated: 2026-10-08T01:09:05.045Z
 | 87 | 06.1 | deviation | apps/web/components/search/search-palette.tsx |  | Gate fixed a Phase 4 search palette focus defect outside files_modified | open |  | 2026-10-07T21:32:00.531Z |  |
 | 88 | 07 | unmet-truth | apps/api/src/realtime-presence.int.test.ts |  | Rate-limit presence test (line ~430) flaky under load; failed once while a parallel dump ran, 9/9 alone | open |  | 2026-10-08T00:51:08.081Z |  |
 | 89 | 07 | deviation | apps/api/src/app.ts |  | trustProxy wired through fastifyTrustProxy() (Fastify fails closed on numeric trustProxy); plan grep differs | open |  | 2026-10-08T01:09:05.045Z |  |
+| 90 | 07 | deviation | scripts/guard |  | claude-agent-sdk license exception and server-everything license clarification pending owner/legal confirmation (D-14, ADR-0021) | open |  | 2026-10-08T01:18:30.440Z |  |
 
 ````json
 [
@@ -1173,6 +1174,18 @@ last_updated: 2026-10-08T01:09:05.045Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-08T01:09:05.045Z",
+    "resolved_at": null
+  },
+  {
+    "id": 90,
+    "kind": "deviation",
+    "phase": "07",
+    "file": "scripts/guard",
+    "line": null,
+    "description": "claude-agent-sdk license exception and server-everything license clarification pending owner/legal confirmation (D-14, ADR-0021)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-08T01:18:30.440Z",
     "resolved_at": null
   }
 ]
