@@ -6,8 +6,8 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "dev": "node --env-file-if-exists=../../.env --watch-path=src --watch-path=../../packages --import tsx src/main.ts",
-    "start": "node --import tsx src/main.ts",
+    "dev": "node --env-file-if-exists=../../.env --watch-path=src --watch-path=../../packages --import tsx --import ./src/telemetry.ts src/main.ts",
+    "start": "node --import tsx --import ./src/telemetry.ts src/main.ts",
     "eval:multiplayer": "node --import tsx src/eval/multiplayer/run.ts"
   },
   "dependencies": {

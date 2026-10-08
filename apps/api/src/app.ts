@@ -42,8 +42,9 @@ import { createOnlineSet, createRealtimeModule, createRealtimeService } from "./
 import { createSearchModule } from "./modules/search";
 import { createSecretsModule, createSecretsService } from "./modules/secrets";
 import { createWorkSessionAttachmentScope, createWorkSessionModule } from "./modules/work-session";
+import { API_VERSION } from "./version";
 
-export const API_VERSION = "0.1.0";
+export { API_VERSION } from "./version";
 
 export interface BuiltApp {
   app: App;
