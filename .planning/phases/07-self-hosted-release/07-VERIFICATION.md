@@ -1,7 +1,7 @@
 ---
 phase: 07-self-hosted-release
 verified: 2026-10-08T05:25:38Z
-status: gaps_found
+status: human_needed
 score: 5/6 roadmap success criteria verified (SC6 partial); 53/54 plan truths verified; 3 owner items open
 behavior_unverified: 0
 overrides_applied: 0
@@ -245,3 +245,12 @@ After the gap is closed or overridden, the phase is `human_needed` on the three 
 
 _Verified: 2026-10-08T05:25:38Z_
 _Verifier: Claude (gsd-verifier)_
+
+
+## Gap closure (orchestrator, 2026-10-08)
+
+- SC6 / FOUND-07 gap closed: `.semgrep/rules.yml` `ocw.skipped-policy-test` now includes `/apps/api/src/**/*.test.ts`
+  and `/packages/*/src/**/*.test.ts`. New guard test "a skipped test anywhere in the API or the packages fails" failed
+  first and passes now (guard tests 22/22, `--rule-tests` ok, repo scan clean).
+- Status after closure: **human_needed** (6/6 roadmap criteria in code; owner items: clean-machine install, license
+  confirmations, first Woodpecker run of the command list).
