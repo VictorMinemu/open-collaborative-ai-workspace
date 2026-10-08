@@ -8,6 +8,7 @@ import { authOf } from "../../core";
 import type { AuditService } from "../audit";
 import { createPermissionService } from "../organization";
 import type { RealtimeService } from "../realtime";
+import { headersForAuth } from "./client-ip";
 import { clientFromRequest } from "./client-kind";
 import type { IdentityService } from "./service";
 
@@ -110,7 +111,8 @@ export function registerIdentityRoutes(app: App, deps: IdentityRouteDeps) {
         const signingOut = isSignOut ? await identity.authenticate(req.headers) : null;
         const url = new URL(req.url, deps.apiUrl);
         const body = req.method === "GET" ? undefined : JSON.stringify(req.body ?? {});
-        const headers = fromNodeHeaders(req.headers);
+        // The client IP better-auth stores on a session follows OCW_TRUST_PROXY (client-ip.ts).
+        const headers = fromNodeHeaders(headersForAuth(req));
         if (body !== undefined) headers.set("content-type", "application/json");
         headers.delete("content-length");
         const res = await identity.auth.handler(new Request(url, { method: req.method, headers, body }));
@@ -165,7 +167,7 @@ export function registerIdentityRoutes(app: App, deps: IdentityRouteDeps) {
       schema: { tags: ["identity"], body: SetupRequest, response: { 200: MeResponse } },
     },
     async (req, reply) => {
-      const { me, cookies } = await identity.setup(req.body, {}, req.headers);
+      const { me, cookies } = await identity.setup(req.body, {}, headersForAuth(req));
       setCookies(reply, cookies);
       return me;
     },
