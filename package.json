@@ -20,7 +20,7 @@
     "verify": "pnpm lint && pnpm guard && pnpm typecheck && pnpm test",
     "e2e": "playwright test -c e2e/playwright.config.ts",
     "setup:env": "node scripts/setup-env.mjs",
-    "ocw": "node scripts/ocw.mjs",
+    "ocw": "node -- scripts/ocw.mjs",
     "gate:compose": "node scripts/gate/compose-gate.mjs",
     "demo:up": "bash scripts/demo-up.sh",
     "demo:seed": "node scripts/demo-seed.mjs",
