@@ -3,8 +3,11 @@
 # processes end with the step). Host networking puts that step in dind's network namespace, where the published
 # compose ports live. The checkout is copied under /home/ocw-ci so compose bind mounts (./infra/garage/...) resolve
 # on the dind daemon (see verify.yaml). Failure reports are kept in /home/ocw-ci/artifacts for 7 days.
+# Pull requests, pushes to main, and manual runs (an open PR runs once, not once per event).
 when:
-  - event: [push, pull_request, manual]
+  - event: [pull_request, manual]
+  - event: push
+    branch: main
 
 matrix:
   PROJECT: [desktop, mobile]

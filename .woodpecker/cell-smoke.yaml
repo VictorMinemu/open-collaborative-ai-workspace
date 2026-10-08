@@ -2,8 +2,11 @@
 # infra/openclaw/Dockerfile) + the working-tree plugin + fake model + fake Agent Channel API on an egress-less
 # network. The smoke bind-mounts files from the checkout and from `mktemp -d`, so both live under /home/ocw-ci,
 # which exists at the same path on the dind daemon (see verify.yaml).
+# Pull requests, pushes to main, and manual runs (an open PR runs once, not once per event).
 when:
-  - event: [push, pull_request, manual]
+  - event: [pull_request, manual]
+  - event: push
+    branch: main
 
 variables:
   - &docker_sock /var/run/docker.sock:/var/run/docker.sock

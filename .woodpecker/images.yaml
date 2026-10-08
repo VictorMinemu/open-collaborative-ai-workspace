@@ -1,7 +1,10 @@
 # Woodpecker port of the `images` job in .github/workflows/ci.yml: the shipped images build. The build context is
 # streamed to the dind daemon, so the regular Woodpecker workspace is enough here.
+# Pull requests, pushes to main, and manual runs (an open PR runs once, not once per event).
 when:
-  - event: [push, pull_request, manual]
+  - event: [pull_request, manual]
+  - event: push
+    branch: main
 
 variables:
   - &docker_sock /var/run/docker.sock:/var/run/docker.sock
