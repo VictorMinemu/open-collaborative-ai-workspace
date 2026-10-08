@@ -1,17 +1,17 @@
 # Woodpecker port of the `cell-smoke` job in .github/workflows/ci.yml: real OpenClaw cell (image built here from
 # infra/openclaw/Dockerfile) + the working-tree plugin + fake model + fake Agent Channel API on an egress-less
-# network. The smoke bind-mounts files from the checkout and from `mktemp -d`, so both live under /srv/ocw-ci,
+# network. The smoke bind-mounts files from the checkout and from `mktemp -d`, so both live under /home/ocw-ci,
 # which exists at the same path on the dind daemon (see verify.yaml).
 when:
   - event: [push, pull_request, manual]
 
 variables:
   - &docker_sock /var/run/docker.sock:/var/run/docker.sock
-  - &shared /srv/ocw-ci:/srv/ocw-ci
+  - &shared /home/ocw-ci:/home/ocw-ci
   - &env
-    W: /srv/ocw-ci/ws/cell-smoke
-    PNPM_STORE: /srv/ocw-ci/cache/pnpm-store
-    TMPDIR: /srv/ocw-ci/tmp/cell-smoke
+    W: /home/ocw-ci/ws/cell-smoke
+    PNPM_STORE: /home/ocw-ci/cache/pnpm-store
+    TMPDIR: /home/ocw-ci/tmp/cell-smoke
 
 steps:
   - name: ci-image

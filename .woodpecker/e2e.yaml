@@ -1,8 +1,8 @@
 # Woodpecker port of the `e2e` job in .github/workflows/ci.yml, one workflow per viewport, each on its own fresh stack.
 # Postgres/Redis/Garage come from compose; the fake, the API and the web run inside the `e2e` step (background
 # processes end with the step). Host networking puts that step in dind's network namespace, where the published
-# compose ports live. The checkout is copied under /srv/ocw-ci so compose bind mounts (./infra/garage/...) resolve
-# on the dind daemon (see verify.yaml). Failure reports are kept in /srv/ocw-ci/artifacts for 7 days.
+# compose ports live. The checkout is copied under /home/ocw-ci so compose bind mounts (./infra/garage/...) resolve
+# on the dind daemon (see verify.yaml). Failure reports are kept in /home/ocw-ci/artifacts for 7 days.
 when:
   - event: [push, pull_request, manual]
 
@@ -11,10 +11,10 @@ matrix:
 
 variables:
   - &docker_sock /var/run/docker.sock:/var/run/docker.sock
-  - &shared /srv/ocw-ci:/srv/ocw-ci
+  - &shared /home/ocw-ci:/home/ocw-ci
   - &env
-    W: /srv/ocw-ci/ws/e2e-${PROJECT}
-    PNPM_STORE: /srv/ocw-ci/cache/pnpm-store
+    W: /home/ocw-ci/ws/e2e-${PROJECT}
+    PNPM_STORE: /home/ocw-ci/cache/pnpm-store
     COMPOSE_PROJECT_NAME: ocw-e2e-${PROJECT}
     # Bots use the deterministic mock model; CI never receives a metered model key.
     OCW_MODEL_PROVIDER: mock
@@ -89,7 +89,7 @@ steps:
       - cd "$${W}"
       - tail -n 200 api.log web.log fake.log || true
       - docker compose logs --tail 50 garage || true
-      - out="/srv/ocw-ci/artifacts/$${CI_PIPELINE_NUMBER}-e2e-${PROJECT}" && mkdir -p "$${out}"
+      - out="/home/ocw-ci/artifacts/$${CI_PIPELINE_NUMBER}-e2e-${PROJECT}" && mkdir -p "$${out}"
       - cp -r e2e/playwright-report e2e/test-results "$${out}/" 2>/dev/null || true
       - echo "Playwright report kept on woodpecker-dind at $${out} (7 days)"
     when:

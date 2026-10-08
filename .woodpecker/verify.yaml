@@ -1,18 +1,19 @@
 # Woodpecker port of the `verify` job in .github/workflows/ci.yml (kept for when GitHub Actions returns).
 # Every step container talks to the agent's isolated dind daemon through its socket. Steps work in a copy of the
-# checkout under /srv/ocw-ci, a dind path mounted at the same path, so bind mounts and caches resolve identically
-# on the daemon side (the Woodpecker workspace is a docker volume the daemon cannot bind by path).
+# checkout under /home/ocw-ci, a dind path mounted at the same path, so bind mounts and caches resolve identically
+# on the daemon side (the Woodpecker workspace is a docker volume the daemon cannot bind by path). It sits under
+# /home like GitHub's /home/runner/work: the local-runtime path sanitiser (and its tests) treat /home/<name> as a home.
 # `$$` escapes shell variables from Woodpecker's own substitution.
 when:
   - event: [push, pull_request, manual]
 
 variables:
   - &docker_sock /var/run/docker.sock:/var/run/docker.sock
-  - &shared /srv/ocw-ci:/srv/ocw-ci
+  - &shared /home/ocw-ci:/home/ocw-ci
   - &env
-    W: /srv/ocw-ci/ws/verify
-    PNPM_STORE: /srv/ocw-ci/cache/pnpm-store
-    UV_CACHE_DIR: /srv/ocw-ci/cache/uv
+    W: /home/ocw-ci/ws/verify
+    PNPM_STORE: /home/ocw-ci/cache/pnpm-store
+    UV_CACHE_DIR: /home/ocw-ci/cache/uv
     # Testcontainers: the published ports live in dind's network namespace, which host-network steps share.
     TESTCONTAINERS_HOST_OVERRIDE: 127.0.0.1
 

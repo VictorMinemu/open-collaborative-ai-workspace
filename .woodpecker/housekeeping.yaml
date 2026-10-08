@@ -11,6 +11,6 @@ steps:
     image: docker:29.8.2-cli
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - /srv/ocw-ci:/srv/ocw-ci
+      - /home/ocw-ci:/home/ocw-ci
     commands:
       - sh infra/ci/disk-budget.sh

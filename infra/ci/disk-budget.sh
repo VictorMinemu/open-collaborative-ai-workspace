@@ -1,5 +1,5 @@
 #!/bin/sh
-# Keeps the Woodpecker dind daemon (and its /srv/ocw-ci scratch dir) inside a disk budget. Runs as the last workflow
+# Keeps the Woodpecker dind daemon (and its /home/ocw-ci scratch dir) inside a disk budget. Runs as the last workflow
 # of every pipeline (.woodpecker/housekeeping.yaml) against the dind socket ONLY: never point it at a host daemon.
 # Always: dangling images, stopped containers, unused networks/volumes, stale workspaces and old failure reports.
 # Over budget (dind images + build cache + volumes > OCW_CI_DIND_BUDGET_GB, scratch dir > OCW_CI_SCRATCH_BUDGET_GB,
@@ -10,7 +10,7 @@ BUDGET_GB="${OCW_CI_DIND_BUDGET_GB:-60}"
 SCRATCH_BUDGET_GB="${OCW_CI_SCRATCH_BUDGET_GB:-15}"
 MIN_HOST_FREE_GB="${OCW_CI_MIN_HOST_FREE_GB:-60}"
 KEEP_CACHE_GB="${OCW_CI_KEEP_CACHE_GB:-15}"
-SCRATCH=/srv/ocw-ci
+SCRATCH=/home/ocw-ci
 
 # docker system df sizes ("1.234GB", "512MB", "0B") summed in GB.
 dind_gb() {
