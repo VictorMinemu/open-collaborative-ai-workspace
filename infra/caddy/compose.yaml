@@ -1,3 +1,35 @@
-# Profile `proxy`: Caddy reverse proxy (TLS, WebSocket, presigned Garage URLs). Included by compose.yaml; its
-# services start only when COMPOSE_PROFILES names `proxy`. Stub until plan 07-08 fills it (SELF-05, D-07).
-services: {}
+# Profile `proxy`: Caddy in front of the whole instance on one HTTPS origin (SELF-05, D-07). Included by compose.yaml;
+# it starts only when COMPOSE_PROFILES names `proxy`. Enable it with
+#   pnpm ocw enable proxy --site-address ocw.example.com
+# which also points the public URLs at https://<site>, sets OCW_TRUST_PROXY=1 and binds api/web to 127.0.0.1
+# (docs/self-hosting/reverse-proxy.md). Routing lives in ./Caddyfile.
+services:
+  caddy:
+    profiles: ["proxy"]
+    image: caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+    restart: unless-stopped
+    environment:
+      # No `:?` guards: compose interpolates services of inactive profiles too (P-10).
+      OCW_SITE_ADDRESS: ${OCW_SITE_ADDRESS:-localhost}
+      OCW_S3_BUCKET: ${OCW_S3_BUCKET:-ocw-attachments}
+      # auto (ACME for public names, local CA for localhost/IPs) | internal (local CA for any name).
+      OCW_PROXY_TLS: ${OCW_PROXY_TLS:-auto}
+    ports:
+      - "${OCW_PROXY_HTTP_PORT:-80}:80"
+      - "${OCW_PROXY_HTTPS_PORT:-443}:443"
+      - "${OCW_PROXY_HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates, ACME account and the local CA: back it up (losing it re-issues certificates and spends the
+      # ACME rate-limit budget; with OCW_PROXY_TLS=internal it also changes the root clients trust).
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_started
+
+volumes:
+  caddy-data:
+  caddy-config:

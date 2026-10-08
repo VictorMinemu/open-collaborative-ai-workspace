@@ -1,0 +1,54 @@
+# Caddy for the `proxy` profile (SELF-05, D-07): the whole instance on one HTTPS origin, {$OCW_SITE_ADDRESS}.
+# `pnpm ocw enable proxy --site-address <host>` points OCW_PUBLIC_WEB_URL, OCW_PUBLIC_API_URL and OCW_S3_PUBLIC_URL at
+# that origin, trusts exactly one proxy hop in the API (OCW_TRUST_PROXY=1) and binds the api and web ports to
+# 127.0.0.1, so this proxy is their only way in from the network. docs/self-hosting/reverse-proxy.md explains it.
+#
+# Forwarded headers: Caddy trusts no upstream proxy here (no `trusted_proxies`), so it drops any X-Forwarded-* a
+# client sends and sets fresh ones from the connection. The API trusts that one hop and nothing beyond it.
+{
+	# No admin API: the config only changes by editing this file and restarting the container.
+	admin off
+	# There is no system trust store in the container to install Caddy's local CA into.
+	skip_install_trust
+}
+
+# OCW_PROXY_TLS=auto (default): public certificates over ACME for a public name; `localhost` and IP addresses get
+# Caddy's local CA automatically. OCW_PROXY_TLS=internal: Caddy's local CA for any name (internal hostnames that no
+# public CA can validate); clients must trust its root certificate (caddy-data volume, pki/authorities/local).
+(tls-auto) {
+}
+
+(tls-internal) {
+	tls internal
+}
+
+{$OCW_SITE_ADDRESS:localhost} {
+	import tls-{$OCW_PROXY_TLS:auto}
+	encode zstd gzip
+
+	# The Agent Channel API is for the OpenClaw cell on the compose network only (principle 9): never public.
+	@agentchannel path /agent-channel /agent-channel/*
+	handle @agentchannel {
+		respond 404
+	}
+
+	# API: REST, better-auth, the browser and device WebSockets (upgraded transparently), OpenAPI and health.
+	@api path /api/* /ws /runtime/ws /docs /docs/* /health
+	handle @api {
+		reverse_proxy api:4000
+	}
+
+	# Attachments: presigned Garage URLs (path-style, https://<site>/<bucket>/<key>?X-Amz-...). SigV4 signs the Host
+	# and the path, so both must reach Garage exactly as the browser sent them:
+	#  - Host passes through unchanged (Caddy's default for an http upstream; never add `header_up Host`);
+	#  - the bucket prefix is kept (`handle`, never `handle_path` or `uri strip_prefix`).
+	@objects path /{$OCW_S3_BUCKET:ocw-attachments}/*
+	handle @objects {
+		reverse_proxy garage:3900
+	}
+
+	# Everything else is the web app.
+	handle {
+		reverse_proxy web:3000
+	}
+}
