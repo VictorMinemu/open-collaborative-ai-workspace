@@ -133,6 +133,25 @@ const text = (r: { content: Array<{ text: string }> }) => r.content.map((c) => c
 beforeEach(() => resetCardToolState());
 
 describe("ocw_agent_card (06-14, D-07, AGENT-04)", () => {
+  it("every schema pattern compiles as a Unicode regex, as the cell's JSON-schema validator compiles it", () => {
+    const patterns: string[] = [];
+    const walk = (node: unknown): void => {
+      if (Array.isArray(node)) node.forEach(walk);
+      else if (node && typeof node === "object")
+        for (const [k, v] of Object.entries(node)) {
+          if (k === "pattern" && typeof v === "string") patterns.push(v);
+          else walk(v);
+        }
+    };
+    walk(setup().tool().parameters);
+    expect(patterns.length).toBeGreaterThan(0);
+    for (const pattern of patterns) {
+      const re = new RegExp(pattern, "u");
+      expect(re.test("/work-zone/abc")).toBe(true);
+      expect(re.test("https://evil.example/work-zone")).toBe(false);
+    }
+  });
+
   it("registers one tool whose JSON schema mirrors the AgentCardInput bounds", () => {
     const { registered, tool } = setup();
     expect(registered).toHaveLength(1);
