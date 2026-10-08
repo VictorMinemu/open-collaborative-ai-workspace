@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 79
+open_count: 81
 waived_count: 0
 fixed_count: 18
-total_count: 97
-last_updated: 2026-10-08T04:16:52.781Z
+total_count: 99
+last_updated: 2026-10-08T05:06:11.340Z
 ---
 
 # Broken Windows Ledger
@@ -112,6 +112,8 @@ last_updated: 2026-10-08T04:16:52.781Z
 | 95 | 07 | unmet-truth | scripts/ocw/backup.mjs |  | ocw backup omits the openbao-data volume and secrets/ when the vault profile is on; a restore would not boot (fix in 07-10/07-11) | fixed |  | 2026-10-08T02:33:44.475Z | 2026-10-08T04:16:52.638Z |
 | 96 | 07 | unrun-verify | scripts/gate/compose-gate.mjs |  | gate:compose default (short) variant and --steps playwright alone not run separately; covered by the full run | open |  | 2026-10-08T04:16:52.709Z |  |
 | 97 | 07 | deviation | scripts/ocw/backup.mjs |  | Backup omits caddy-data: a restore on fresh volumes gives Caddy a new local CA | open |  | 2026-10-08T04:16:52.781Z |  |
+| 98 | 07 | unmet-truth | docs/INSTALL.md |  | Owner clean-machine install on real hardware deferred (human_needed), incl. Linux check of OpenBao capabilities | open |  | 2026-10-08T05:06:11.267Z |  |
+| 99 | 07 | deviation | scripts/ocw/backup.mjs |  | A vault-enabled backup contains the OpenBao seal key; as sensitive as .env (documented) | open |  | 2026-10-08T05:06:11.340Z |  |
 
 ````json
 [
@@ -1277,6 +1279,30 @@ last_updated: 2026-10-08T04:16:52.781Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-08T04:16:52.781Z",
+    "resolved_at": null
+  },
+  {
+    "id": 98,
+    "kind": "unmet-truth",
+    "phase": "07",
+    "file": "docs/INSTALL.md",
+    "line": null,
+    "description": "Owner clean-machine install on real hardware deferred (human_needed), incl. Linux check of OpenBao capabilities",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-08T05:06:11.267Z",
+    "resolved_at": null
+  },
+  {
+    "id": 99,
+    "kind": "deviation",
+    "phase": "07",
+    "file": "scripts/ocw/backup.mjs",
+    "line": null,
+    "description": "A vault-enabled backup contains the OpenBao seal key; as sensitive as .env (documented)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-08T05:06:11.340Z",
     "resolved_at": null
   }
 ]
