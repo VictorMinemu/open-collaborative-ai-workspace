@@ -211,6 +211,9 @@ export async function acquireLock(
     } catch {
       continue; // released between our open and read
     }
+    // gate:cleanroom runs the clone's compose gate as its child while it holds the lock: the child may run under its
+    // parent's lock (and leaves it held), never under anyone else's.
+    if (process.env.OCW_GATE_LOCK_INHERIT === "1" && holder === process.ppid) return () => {};
     if (!Number.isNaN(holder) && !pidAlive(holder)) {
       try {
         unlinkSync(file);

@@ -18,9 +18,9 @@ ones are kept for history. `[x]` = delivered in Phase 1 (2026-10-04 audit; forma
 - [x] **FOUND-02**: All organization-scoped tables carry `organization_id` and are protected by PostgreSQL RLS with two database roles (`migrator` owner, `app` without bypass); the app can only reach the database through a `withTenant()` transaction helper (PRD §97, PITFALLS 1)
 - [x] **FOUND-03**: A CI test enumerates every org-scoped table and proves, as the `app` role, that cross-tenant reads and writes return zero rows / fail
 - [x] **FOUND-04**: `packages/contracts` defines one unified `conversations` / `messages` model (kinds: channel, dm, group, ai_chat, thread, work_session) and Zod schemas used by every API boundary (ARCHITECTURE §1)
-- [ ] **FOUND-05**: Fastify Control Plane skeleton loads modules through explicit constructor wiring, exposes OpenAPI from Zod schemas, and emits OpenTelemetry traces/metrics/logs via `@fastify/otel` (ADR-0002, ADR-0003)
-- [ ] **FOUND-06**: `docker compose up` minimal profile (postgres, redis, minio, api, web, one-shot `migrate`) starts and fails fast with a clear message when a required secret is missing (PRD §5.1)
-- [ ] **FOUND-07**: `pnpm verify` fails on permission-bypass tokens (Semgrep), skipped policy tests, and license violations; CODEOWNERS covers db policies, auth, adapters and policy paths (PITFALLS 13)
+- [x] **FOUND-05**: Fastify Control Plane skeleton loads modules through explicit constructor wiring, exposes OpenAPI from Zod schemas, and emits OpenTelemetry traces/metrics/logs via `@fastify/otel` (ADR-0002, ADR-0003)
+- [x] **FOUND-06**: `docker compose up` minimal profile (postgres, redis, garage, api, web, one-shot `migrate` and the OpenClaw cell) starts and fails fast with a clear message when a required secret is missing (PRD §5.1)
+- [x] **FOUND-07**: `pnpm verify` fails on permission-bypass tokens (Semgrep), skipped policy tests, and license violations; CODEOWNERS covers db policies, auth, adapters and policy paths (PITFALLS 13)
 
 ### MVP 0 Slice (SLICE)
 
@@ -153,13 +153,13 @@ SLICE-06…18 were added on 2026-10-04 after the code audit of the widened demo 
 
 ### Self-hosted Release (SELF)
 
-- [ ] **SELF-01**: `git clone` + `pnpm ocw setup` + `docker compose up` yields a working MVP1 instance; OpenBao and observability (Prometheus, Grafana, Loki, Tempo) are optional compose profiles (ADR-0003 amended)
-- [ ] **SELF-02**: Secrets are provided as required inputs (env or `*_FILE`), never generated silently at boot; the `env`/`file` secret provider implements the same `SecretStore` interface as OpenBao
-- [ ] **SELF-03**: Migrations run in a one-shot `migrate` service that refuses to start the API on schema mismatch; an `N-1 → N` upgrade test passes in CI
-- [ ] **SELF-04**: `pnpm ocw backup` / restore work as the migrator role and are documented; data survives `docker compose up --force-recreate`
-- [ ] **SELF-05**: A tested reverse-proxy configuration (Caddy) handles WebSocket upgrade, trusted proxy headers and presigned object-storage URLs reachable from outside the compose network
-- [ ] **SELF-06**: Every package declares its license (AGPL-3.0 apps/server, Apache-2.0 for `packages/contracts` and `packages/protocol`) and CI checks dependency-license compatibility (PRD §100)
-- [ ] **SELF-07**: Scenario B (minus Work Zone creation) runs as a Playwright E2E against the compose stack in CI
+- [x] **SELF-01**: `git clone` + `pnpm ocw setup` + `docker compose up` yields a working MVP1 instance; OpenBao and observability (Prometheus, Grafana, Loki, Tempo) are optional compose profiles (ADR-0003 amended)
+- [x] **SELF-02**: Secrets are provided as required inputs (env or `*_FILE`), never generated silently at boot; the `env`/`file` secret provider implements the same `SecretStore` interface as OpenBao
+- [x] **SELF-03**: Migrations run in a one-shot `migrate` service that refuses to start the API on schema mismatch; an `N-1 → N` upgrade test passes in CI
+- [x] **SELF-04**: `pnpm ocw backup` / restore work as the migrator role and are documented; data survives `docker compose up --force-recreate`
+- [x] **SELF-05**: A tested reverse-proxy configuration (Caddy) handles WebSocket upgrade, trusted proxy headers and presigned object-storage URLs reachable from outside the compose network
+- [x] **SELF-06**: Every package declares its license (AGPL-3.0 apps/server, Apache-2.0 for `packages/contracts` and `packages/protocol`) and CI checks dependency-license compatibility (PRD §100)
+- [x] **SELF-07**: Scenario B (minus Work Zone creation) runs as a Playwright E2E against the compose stack in CI
 
 ### Devices, Projects and Work Zone Contracts (DEV)
 
@@ -308,9 +308,9 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | FOUND-02 | Phase 1 | Delivered | `packages/db/src/rls-isolation.int.test.ts`; third role `ocw_auth` approved (deviation A-4); `ocw_migrator` BYPASSRLS only for pre-tenant lookups (A-3) |
 | FOUND-03 | Phase 1 | Delivered | `rls-isolation.int.test.ts` "cross-tenant reads return 0 rows and writes fail, for every org-scoped table" |
 | FOUND-04 | Phase 1 | Delivered | `packages/contracts/src/contracts.test.ts` "conversation kinds are the exact unified set"; routes and frames typed by contracts |
-| FOUND-05 | Phase 7 | Partial | Explicit wiring + OpenAPI delivered (SLICE-18); no OpenTelemetry |
-| FOUND-06 | Phase 7 | Partial | Compose stack defined, API fails fast (SLICE-18); MinIO dropped; full `docker compose up` not re-verified |
-| FOUND-07 | Phase 7 | Pending | No Semgrep, skipped-test guard, license check or CODEOWNERS |
+| FOUND-05 | Phase 7 | Complete | Explicit wiring + OpenAPI (SLICE-18); OpenTelemetry traces, metrics and logs via `@fastify/otel`, off without an OTLP endpoint, redacted at the source and in the collector (ADR-0021, 07-05/07): `telemetry.int.test.ts`, `telemetry/redact.test.ts`, `compose-observability.test.mjs`; gate stage `observability` (trace in Tempo, metric in Prometheus, logs with trace id in Loki, no leaks) |
+| FOUND-06 | Phase 7 | Complete | Minimal profile = postgres, redis, garage (ADR-0015, D-02), one-shot `migrate`, api, web, OpenClaw cell; compose `:?` guards and the API name a missing `NAME`/`NAME_FILE` (07-03/04/06): `infra/compose.test.mjs`, `config/env.test.ts`, `openbao.int.test.ts`; gate stage `compose` (migrate exit 0, api/web/cell healthy) on `pnpm gate:compose` and `pnpm gate:cleanroom` (07-11) |
+| FOUND-07 | Phase 7 | Complete | `pnpm verify` = lint + guard + typecheck + test; guard runs five pinned Semgrep rules (permission/RLS bypass, skipped or focused policy tests, AI-telemetry prompts), the dependency-license policy, license fields and the CODEOWNERS lint (07-01): `scripts/guard/guard.test.mjs`, `node scripts/guard/run.mjs --rule-tests`, `.github/CODEOWNERS` |
 | SLICE-01 | — | Superseded | By SLICE-09 |
 | SLICE-02 | — | Superseded | Absorbed by AICHAT-02/03 (Phase 5) |
 | SLICE-03 | — | Superseded | Absorbed by MULTI-01 (Phase 6) |
@@ -402,13 +402,13 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | AGENT-02 | Phase 6 | Delivered | Agents in channels, DMs, group DMs and AI chats (added by the owner, answer through OpenClaw, flat), in member and participant lists (06-10/12): `ai-chat-delivery.int.test.ts`, `team-dm.int.test.ts`, `group-dm.int.test.ts`; `ai-chat-agents.spec.ts`, `ai-chat-multiplayer-day.spec.ts`. Real OpenClaw cell proof pending (CI billing) |
 | AGENT-03 | Phase 1 | Delivered | `chat.int.test.ts` "an agent mention auto-adds the bot and calls the bridge once, in the thread"; `agent-channel.int.test.ts` mention → reply; `bots.spec.ts` threaded reply |
 | AGENT-04 | Phase 6 | Delivered | Typed cards in their own table, updated in place by the posting agent only, Open (internal routes) / Follow / one audited Approve, `ocw_agent_card` tool, card-action turns, one renderer (ADR-0020, 06-13/14/15): `cards.int.test.ts`, `card-tool.test.ts`, `agent-card.test.tsx`; `agent-cards.spec.ts`, `ai-chat-multiplayer-day.spec.ts` |
-| SELF-01 | Phase 7 | Partial | Compose + `pnpm setup:env` + `pnpm demo:up`; no `pnpm ocw setup`, no OpenBao/observability profiles |
-| SELF-02 | Phase 7 | Partial | env / `*_FILE` inputs, fail-fast, env/file `SecretStore`; no OpenBao provider |
-| SELF-03 | Phase 7 | Partial | One-shot `migrate` service; API does not refuse on schema mismatch; no upgrade test |
-| SELF-04 | Phase 7 | Pending | No backup/restore |
-| SELF-05 | Phase 7 | Pending | No Caddy config |
-| SELF-06 | Phase 7 | Partial | Every package declares AGPL-3.0 or Apache-2.0; no CI license check |
-| SELF-07 | Phase 7 | Pending | Needs AI chat sharing (Phase 6) |
+| SELF-01 | Phase 7 | Complete (owner clean-machine check: human_needed) | `git clone` + `pnpm ocw setup` + `docker compose up -d --build --wait` from a fresh clone, then the compose gate on it: `pnpm gate:cleanroom` green (07-11); `proxy`/`observability`/`vault` profiles via compose `include:`, enabled later without reinstall (07-03/06/07/08): `setup.test.mjs`, `enable-*.test.mjs`, `docs/INSTALL.md`. The owner's real clean-machine install is deferred (`human_needed`, 07-11 Task 3) |
+| SELF-02 | Phase 7 | Complete | Secrets written only by `ocw setup` (never at boot, never printed); env/file and OpenBao behind one `SecretStore` contract suite against real OpenBao 2.7.1; `ocw enable vault` (07-04/06): `setup.test.mjs`, `secret-store.test.ts`, `openbao.int.test.ts`, `enable-vault.test.mjs`; gate stage `vault` |
+| SELF-03 | Phase 7 | Complete | One-shot `migrate`; the API refuses a behind/ahead/diverged/unmigrated schema; N-1 (`3bbcbd9`, then the previous tag) → N upgrade test on every `pnpm verify` (07-02/10): `schema-check.test.ts`, `schema-guard.int.test.ts`, `upgrade.int.test.ts`; gate stage `schema-refusal` |
+| SELF-04 | Phase 7 | Complete | `pnpm ocw backup` / `restore` as `ocw_migrator` (DB, objects, cell state, OpenBao with the vault), refuses newer or tampered backups, documented in `docs/self-hosting/backup-restore.md` (07-09/10): `backup.test.mjs`, `object-store.int.test.ts`; gate stages `backup` (fresh volumes, `--consistent`, `--force-recreate`) and `vault-backup` (new machine) |
+| SELF-05 | Phase 7 | Complete | Caddy `proxy` profile, one HTTPS origin, `OCW_TRUST_PROXY` (07-05/08): `compose-proxy.test.mjs`, `enable-proxy.test.mjs`, `trust-proxy.int.test.ts`, `session-ip.int.test.ts`; gate stage `proxy` (WebSocket 101 with frames, presigned PUT/GET from outside the network, tampered/unsigned 403, forged XFF ignored). Residual: `OCW_TRUST_PROXY=1` trusts any direct peer (ADR-0021) |
+| SELF-06 | Phase 7 | Complete | Every package declares AGPL-3.0-only or Apache-2.0 (`packages/contracts`; `packages/protocol` does not exist yet); dependency-license policy in `pnpm guard`, with the `@anthropic-ai/claude-agent-sdk` exception and the `server-everything` clarification pending owner/legal confirmation (ADR-0021, 07-01): `guard.test.mjs` |
+| SELF-07 | Phase 7 | Complete | Scenario B minus Work Zone creation through Caddy on production images with the org mock model, desktop 1440 and mobile 390, no skip allowed (07-10): `e2e/compose/scenario-b.spec.ts`, gate stage `playwright` (4 passed, 0 skipped/failed/flaky) on `pnpm gate:compose` and `pnpm gate:cleanroom`. CI: the same commands on Woodpecker (separate task) |
 | DEV-01 | Phase 8 | Partial | Session events + Device Link frames in `packages/contracts`; no `packages/protocol`; capability flags only inside the daemon |
 | DEV-02 | Phase 8 | Partial | One-time code + hashed bearer token (SLICE-13); no Ed25519 signed challenge or RFC 8628 |
 | DEV-03 | Phase 8 | Partial | Device list + immediate revocation (SLICE-13); no active sessions, no admin view |
@@ -475,6 +475,8 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 - Status (recounted from the table on 2026-10-07 after Phase 6, 147 rows incl. the Phase 3.x additions): 86 Delivered,
   31 Partial, 25 Pending, 5 Superseded
 - Phase 06.1 (2026-10-07) adds WZ-IMG-01…04 (owner request), all Complete: 151 rows
+- Phase 7 (2026-10-08): FOUND-05…07 and SELF-01…07 Complete (10 rows from Partial/Pending); SELF-01's clean-machine check
+  on real hardware is deferred to the owner (`human_needed`)
 
 Phase assignment follows `.planning/ROADMAP.md`. DESK-06 and DESK-07 live in Phase 11 (Work Zone UI)
 rather than Phase 9 because they require a WorkSession to be observable.
@@ -488,4 +490,4 @@ today; every later phase still audits the sensitive actions it introduces.
 
 ---
 *Requirements defined: 2026-09-10*
-*Last updated: 2026-10-07 after Phase 6 (MULTI-01…08, AGENT-01/02/04 delivered; MULTI-07's metered run deferred to the owner). Previously: 2026-10-07 after Phase 5 (AICHAT-01…09 delivered); before that: 2026-10-06 after Phase 4 (CHAT-02, CHAT-04…14 delivered); before that: 2026-10-04 after the Phase 1 code audit (Restructure 2026-10-04: SLICE-06…18 added, SLICE-01…04 and DEV-07 superseded, traceability re-mapped)*
+*Last updated: 2026-10-08 after Phase 7 (FOUND-05…07, SELF-01…07 complete; FOUND-06 says Garage, not MinIO; owner clean-machine check human_needed). Previously: 2026-10-07 after Phase 6 (MULTI-01…08, AGENT-01/02/04 delivered; MULTI-07's metered run deferred to the owner). Previously: 2026-10-07 after Phase 5 (AICHAT-01…09 delivered); before that: 2026-10-06 after Phase 4 (CHAT-02, CHAT-04…14 delivered); before that: 2026-10-04 after the Phase 1 code audit (Restructure 2026-10-04: SLICE-06…18 added, SLICE-01…04 and DEV-07 superseded, traceability re-mapped)*

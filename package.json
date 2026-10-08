@@ -22,6 +22,7 @@
     "setup:env": "node scripts/setup-env.mjs",
     "ocw": "node -- scripts/ocw.mjs",
     "gate:compose": "node scripts/gate/compose-gate.mjs",
+    "gate:cleanroom": "node scripts/gate/cleanroom.mjs",
     "demo:up": "bash scripts/demo-up.sh",
     "demo:seed": "node scripts/demo-seed.mjs",
     "demo:reset": "bash scripts/demo-reset.sh",

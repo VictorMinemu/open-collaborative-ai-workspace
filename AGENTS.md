@@ -14,8 +14,8 @@ shared and controlled from the cloud) and **Agents** (persistent server-side age
 models, devices and audit.
 
 Authoritative spec: `docs/prd/PRD.md` (v1.0, English). Original draft: `docs/prd/archive/PRD-v0.3-es.md`.
-Decisions: `docs/adr/`. Planning: `.planning/` (GSD). Built so far: phases 1–6 (API, web, desktop + Local Runtime, OpenClaw
-bots, MCP, marketplace, Work Zone controls, chat, AI chats, multiplayer AI chats, personas, Agent Cards). Add packages only when needed.
+Decisions: `docs/adr/`. Planning: `.planning/` (GSD). Built so far: phases 1–7 (API, web, desktop + Local Runtime, OpenClaw
+bots, MCP, marketplace, Work Zone controls, chat, AI chats, multiplayer AI chats, personas, Agent Cards, self-hosted release). Add packages only when needed.
 
 ## Non-negotiable architectural principles
 
@@ -69,8 +69,8 @@ Taken from the PRD. Any design that violates one of these must be raised, not si
 | Cache / pub-sub / presence | Redis. Event streaming / workflows: NATS JetStream and Temporal are **deferred**; do not add them yet | 0003 |
 | Object storage | Garage (single node) in compose, used only through the S3 API; browsers upload/download via presigned URLs, the API is the only ACL | 0015 (supersedes MinIO in 0003) |
 | Markdown | One `<Markdown>` on streamdown + shiki for chat, bot output and Work Zone; no raw HTML, `safeUrl` links, images as links | 0016 |
-| Secrets | `SecretStore` abstraction: `env`/`file` provider by default, OpenBao as optional compose profile | 0003 |
-| Observability | OpenTelemetry via `@fastify/otel`; Prometheus / Grafana / Loki / Tempo as optional compose profile | 0003 |
+| Secrets | `SecretStore` abstraction: `env`/`file` provider by default, OpenBao as optional compose profile | 0003, 0021 |
+| Observability | OpenTelemetry via `@fastify/otel`; Prometheus / Grafana / Loki / Tempo as optional compose profile | 0003, 0021 |
 | Server agents | OpenClaw in Docker (later Kubernetes, gVisor/Kata) | PRD |
 | Bot web tools | OpenClaw `web_fetch` + bundled `@openclaw/duckduckgo-plugin` (SearXNG optional profile); no paid or hosted search | 0010 |
 | MCP for bots | Remote streamable HTTP / SSE servers registered by admins; stdio only in the `mcp-sandbox` sidecar | 0011 |
@@ -95,8 +95,9 @@ pnpm dev                # turbo dev for all apps
 pnpm lint               # biome check
 pnpm typecheck          # tsc --noEmit across workspaces
 pnpm test               # vitest
-pnpm verify             # lint + typecheck + test; must pass before any commit
-docker compose up       # full self-hosted stack
+pnpm verify             # lint + guard (Semgrep, licenses, CODEOWNERS) + typecheck + test; must pass before any commit
+pnpm ocw setup && docker compose up -d --build --wait   # self-hosted stack (docs/INSTALL.md)
+pnpm gate:compose       # release gate on real images (isolated project, 34xx)
 ```
 
 ## Conventions
