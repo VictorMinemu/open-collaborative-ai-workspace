@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 70
+open_count: 81
 waived_count: 0
-fixed_count: 17
-total_count: 87
-last_updated: 2026-10-07T21:32:00.531Z
+fixed_count: 18
+total_count: 99
+last_updated: 2026-10-08T05:06:11.340Z
 ---
 
 # Broken Windows Ledger
@@ -102,6 +102,18 @@ last_updated: 2026-10-07T21:32:00.531Z
 | 85 | 06.1 | unrun-verify | .planning/phases/06.1-work-zone-image-attachments/06.1-05-PLAN.md |  | 06.1-05 Task 3 real-runtime image check (Claude Code, Codex) deferred, human_needed | open |  | 2026-10-07T21:32:00.387Z |  |
 | 86 | 06.1 | deviation | apps/api/src/lib/redis.ts |  | Gate fixed a Phase 1 realtime subscribe/unsubscribe race outside files_modified (redis.int.test.ts) | open |  | 2026-10-07T21:32:00.457Z |  |
 | 87 | 06.1 | deviation | apps/web/components/search/search-palette.tsx |  | Gate fixed a Phase 4 search palette focus defect outside files_modified | open |  | 2026-10-07T21:32:00.531Z |  |
+| 88 | 07 | unmet-truth | apps/api/src/realtime-presence.int.test.ts |  | Rate-limit presence test (line ~430) flaky under load; failed once while a parallel dump ran, 9/9 alone | open |  | 2026-10-08T00:51:08.081Z |  |
+| 89 | 07 | deviation | apps/api/src/app.ts |  | trustProxy wired through fastifyTrustProxy() (Fastify fails closed on numeric trustProxy); plan grep differs | open |  | 2026-10-08T01:09:05.045Z |  |
+| 90 | 07 | deviation | scripts/guard |  | claude-agent-sdk license exception and server-everything license clarification pending owner/legal confirmation (D-14, ADR-0021) | open |  | 2026-10-08T01:18:30.440Z |  |
+| 91 | 07 | deviation | compose.yaml |  | Garage has no healthcheck: compose --wait does not wait for it (backup gate retries 60s after recreate) | open |  | 2026-10-08T02:11:23.801Z |  |
+| 92 | 07 | deviation | compose.yaml |  | docker compose start also reruns the one-shot migrate service (idempotent) | open |  | 2026-10-08T02:11:23.891Z |  |
+| 93 | 07 | deviation | compose.yaml |  | With OCW_TRUST_PROXY=1 a process on the host or the compose network can still forge X-Forwarded-For; closing it needs a fixed Caddy IP/subnet | open |  | 2026-10-08T02:29:43.449Z |  |
+| 94 | 07 | deviation | compose.yaml |  | API has no depends_on openbao in vault mode: a cold start may exit once and retry | open |  | 2026-10-08T02:33:44.398Z |  |
+| 95 | 07 | unmet-truth | scripts/ocw/backup.mjs |  | ocw backup omits the openbao-data volume and secrets/ when the vault profile is on; a restore would not boot (fix in 07-10/07-11) | fixed |  | 2026-10-08T02:33:44.475Z | 2026-10-08T04:16:52.638Z |
+| 96 | 07 | unrun-verify | scripts/gate/compose-gate.mjs |  | gate:compose default (short) variant and --steps playwright alone not run separately; covered by the full run | open |  | 2026-10-08T04:16:52.709Z |  |
+| 97 | 07 | deviation | scripts/ocw/backup.mjs |  | Backup omits caddy-data: a restore on fresh volumes gives Caddy a new local CA | open |  | 2026-10-08T04:16:52.781Z |  |
+| 98 | 07 | unmet-truth | docs/INSTALL.md |  | Owner clean-machine install on real hardware deferred (human_needed), incl. Linux check of OpenBao capabilities | open |  | 2026-10-08T05:06:11.267Z |  |
+| 99 | 07 | deviation | scripts/ocw/backup.mjs |  | A vault-enabled backup contains the OpenBao seal key; as sensitive as .env (documented) | open |  | 2026-10-08T05:06:11.340Z |  |
 
 ````json
 [
@@ -1147,6 +1159,150 @@ last_updated: 2026-10-07T21:32:00.531Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-07T21:32:00.531Z",
+    "resolved_at": null
+  },
+  {
+    "id": 88,
+    "kind": "unmet-truth",
+    "phase": "07",
+    "file": "apps/api/src/realtime-presence.int.test.ts",
+    "line": null,
+    "description": "Rate-limit presence test (line ~430) flaky under load; failed once while a parallel dump ran, 9/9 alone",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-08T00:51:08.081Z",
+    "resolved_at": null
+  },
+  {
+    "id": 89,
+    "kind": "deviation",
+    "phase": "07",
+    "file": "apps/api/src/app.ts",
+    "line": null,
+    "description": "trustProxy wired through fastifyTrustProxy() (Fastify fails closed on numeric trustProxy); plan grep differs",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-08T01:09:05.045Z",
+    "resolved_at": null
+  },
+  {
+    "id": 90,
+    "kind": "deviation",
+    "phase": "07",
+    "file": "scripts/guard",
+    "line": null,
+    "description": "claude-agent-sdk license exception and server-everything license clarification pending owner/legal confirmation (D-14, ADR-0021)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-08T01:18:30.440Z",
+    "resolved_at": null
+  },
+  {
+    "id": 91,
+    "kind": "deviation",
+    "phase": "07",
+    "file": "compose.yaml",
+    "line": null,
+    "description": "Garage has no healthcheck: compose --wait does not wait for it (backup gate retries 60s after recreate)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-08T02:11:23.801Z",
+    "resolved_at": null
+  },
+  {
+    "id": 92,
+    "kind": "deviation",
+    "phase": "07",
+    "file": "compose.yaml",
+    "line": null,
+    "description": "docker compose start also reruns the one-shot migrate service (idempotent)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-08T02:11:23.891Z",
+    "resolved_at": null
+  },
+  {
+    "id": 93,
+    "kind": "deviation",
+    "phase": "07",
+    "file": "compose.yaml",
+    "line": null,
+    "description": "With OCW_TRUST_PROXY=1 a process on the host or the compose network can still forge X-Forwarded-For; closing it needs a fixed Caddy IP/subnet",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-08T02:29:43.449Z",
+    "resolved_at": null
+  },
+  {
+    "id": 94,
+    "kind": "deviation",
+    "phase": "07",
+    "file": "compose.yaml",
+    "line": null,
+    "description": "API has no depends_on openbao in vault mode: a cold start may exit once and retry",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-08T02:33:44.398Z",
+    "resolved_at": null
+  },
+  {
+    "id": 95,
+    "kind": "unmet-truth",
+    "phase": "07",
+    "file": "scripts/ocw/backup.mjs",
+    "line": null,
+    "description": "ocw backup omits the openbao-data volume and secrets/ when the vault profile is on; a restore would not boot (fix in 07-10/07-11)",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-08T02:33:44.475Z",
+    "resolved_at": "2026-10-08T04:16:52.638Z"
+  },
+  {
+    "id": 96,
+    "kind": "unrun-verify",
+    "phase": "07",
+    "file": "scripts/gate/compose-gate.mjs",
+    "line": null,
+    "description": "gate:compose default (short) variant and --steps playwright alone not run separately; covered by the full run",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-08T04:16:52.709Z",
+    "resolved_at": null
+  },
+  {
+    "id": 97,
+    "kind": "deviation",
+    "phase": "07",
+    "file": "scripts/ocw/backup.mjs",
+    "line": null,
+    "description": "Backup omits caddy-data: a restore on fresh volumes gives Caddy a new local CA",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-08T04:16:52.781Z",
+    "resolved_at": null
+  },
+  {
+    "id": 98,
+    "kind": "unmet-truth",
+    "phase": "07",
+    "file": "docs/INSTALL.md",
+    "line": null,
+    "description": "Owner clean-machine install on real hardware deferred (human_needed), incl. Linux check of OpenBao capabilities",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-08T05:06:11.267Z",
+    "resolved_at": null
+  },
+  {
+    "id": 99,
+    "kind": "deviation",
+    "phase": "07",
+    "file": "scripts/ocw/backup.mjs",
+    "line": null,
+    "description": "A vault-enabled backup contains the OpenBao seal key; as sensitive as .env (documented)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-08T05:06:11.340Z",
     "resolved_at": null
   }
 ]

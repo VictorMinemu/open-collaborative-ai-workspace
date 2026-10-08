@@ -3,6 +3,8 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    // A stray .only silently narrows `pnpm verify` to one test; refuse it everywhere, locally as in CI (D-08).
+    allowOnly: false,
     projects: [
       {
         test: {

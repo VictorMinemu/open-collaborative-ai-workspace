@@ -1,6 +1,15 @@
+import { isIP } from "node:net";
 import { ATTACHMENT_DEFAULT_MAX_BYTES, TITLE_TIMEOUT_MS } from "@ocw/contracts";
 import { readEnvOrFile } from "@ocw/db";
 import { z } from "zod";
+import { createOpenBaoSecretStore, type OpenBaoConfig } from "../lib/openbao";
+import {
+  formatSecretUri,
+  OPENBAO_SCHEME,
+  type OpenBaoReference,
+  parseSecretUri,
+  type SecretStore,
+} from "../lib/secret-store";
 
 /**
  * API configuration. Every secret accepts `NAME` or `NAME_FILE` (Docker secrets). Boot fails fast with a
@@ -29,6 +38,50 @@ export const AttachmentMaxBytes = z.preprocess(
     .max(1024 ** 3, "must be at most 1 GiB (1073741824)")
     .default(ATTACHMENT_DEFAULT_MAX_BYTES),
 );
+/** One proxy address: an IPv4/IPv6 address, optionally with a CIDR prefix. */
+const isProxyAddress = (v: string) => {
+  const [addr = "", prefix, extra] = v.split("/");
+  const family = isIP(addr);
+  if (!family || extra !== undefined) return false;
+  if (prefix === undefined) return true;
+  return /^\d{1,3}$/.test(prefix) && Number(prefix) <= (family === 4 ? 32 : 128);
+};
+/**
+ * Which hops may set X-Forwarded-For (SELF-05, D-18): `false` (default) ignores the header, `true` trusts every
+ * hop, a number trusts that many hops (`1` behind the bundled Caddy), a comma list trusts those addresses/CIDRs.
+ * It feeds `req.ip`, so the sign-in audit and rate limit. Never `true` while the API port is reachable directly.
+ */
+export const TrustProxy = z
+  .string()
+  .default("false")
+  .transform((raw, ctx): boolean | number | string[] => {
+    const v = raw.trim();
+    if (v === "" || v === "false") return false;
+    if (v === "true") return true;
+    if (/^\d+$/.test(v)) return Number(v) === 0 ? false : Number(v);
+    const list = v
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
+    if (list.length && list.every(isProxyAddress)) return list;
+    ctx.addIssue({
+      code: "custom",
+      message: "must be false, true, a hop count or a comma list of proxy IPs/CIDRs",
+    });
+    return z.NEVER;
+  });
+/**
+ * OCW_TRUST_PROXY in the form Fastify applies. Fastify 5.12 fails closed on a bare hop count (it trusts nothing,
+ * because a hop count cannot tell the proxy from a direct client), so a count becomes the equivalent proxy-addr
+ * function: trust the first `n` hops from the socket. That is only safe when the proxy is the API's only reachable
+ * peer (07-08 publishes the API on 127.0.0.1 in proxy mode); otherwise configure the proxy's address or CIDR.
+ */
+export function fastifyTrustProxy(
+  value: boolean | number | string[],
+): boolean | string[] | ((address: string, hop: number) => boolean) {
+  if (typeof value !== "number") return value;
+  return (_address, hop) => hop < value;
+}
 const DEFAULT_MAIL_FROM = "Open Collaborative AI Workspace <no-reply@localhost>";
 
 export const EnvSchema = z
@@ -50,6 +103,7 @@ export const EnvSchema = z
       .refine((v) => decodeKey(v) !== null, "must be 32 bytes as base64 or 64 hex chars"),
     OCW_PUBLIC_WEB_URL: Url.default("http://localhost:3000"),
     OCW_PUBLIC_API_URL: Url.default("http://localhost:4000"),
+    OCW_TRUST_PROXY: TrustProxy,
     /**
      * Bootstrap bearer token for the OpenClaw cell (Agent Channel API), bound to the instance's organization.
      * Written by `pnpm setup:env`; shared with the openclaw container so it starts with no manual step.
@@ -239,6 +293,96 @@ export function decodeKey(v: string): Buffer | null {
 }
 
 export class EnvError extends Error {}
+
+/**
+ * The secrets only the API reads, which may therefore live in OpenBao as `openbao://<mount>/<path>#<field>` (D-16).
+ * Database passwords, OCW_CELL_TOKEN and the S3 key pair are shared with other containers and stay env/file.
+ */
+export const OPENBAO_ALLOWED = [
+  "BETTER_AUTH_SECRET",
+  "OCW_ENCRYPTION_KEY",
+  "OCW_SETUP_TOKEN",
+  "OCW_SMTP_URL",
+] as const;
+
+export interface LoadConfigDeps {
+  /** Tests inject a stub; production uses the OpenBao client. */
+  createOpenBaoStore?: (cfg: OpenBaoConfig, refs: OpenBaoReference[]) => Promise<SecretStore>;
+}
+
+/** Every variable the API reads as configuration (plus the S3 secret, resolved through the SecretStore). */
+const CONFIG_VARS = [
+  ...new Set([...Object.keys(EnvSchema.in.shape), ...SECRET_VARS, "OCW_S3_SECRET_ACCESS_KEY"]),
+];
+
+const configError = (lines: string[]) =>
+  new EnvError(`Invalid API configuration (see .env.example):\n${lines.join("\n")}`);
+
+/**
+ * Boot configuration (main.ts): resolves `openbao://` references of the four API-only secrets (after `NAME_FILE`)
+ * through OpenBao, then validates everything with `loadEnv`. OpenBao is contacted only when a reference is present.
+ * A reference in any other variable, a malformed one, missing OpenBao settings or an OpenBao failure is an EnvError
+ * naming the variable and the reference, never a value.
+ */
+export async function loadConfig(
+  source: NodeJS.ProcessEnv = process.env,
+  deps: LoadConfigDeps = {},
+): Promise<Env> {
+  const allowed = new Set<string>(OPENBAO_ALLOWED);
+  const problems: string[] = [];
+  const refs = new Map<string, OpenBaoReference>();
+  for (const name of CONFIG_VARS) {
+    const value = readEnvOrFile(name, source);
+    if (!value?.startsWith(OPENBAO_SCHEME)) continue;
+    if (!allowed.has(name)) {
+      problems.push(
+        `  - ${name}: an openbao:// reference is only allowed for ${OPENBAO_ALLOWED.join(", ")}; this value is shared with other services and must stay env/file (set ${name} or ${name}_FILE)`,
+      );
+      continue;
+    }
+    const ref = parseSecretUri(value);
+    if (ref?.provider !== "openbao") {
+      problems.push(`  - ${name}: is not a valid openbao://<mount>/<path>#<field> reference`);
+      continue;
+    }
+    refs.set(name, ref);
+  }
+  if (problems.length > 0) throw configError(problems);
+  if (refs.size === 0) return loadEnv(source);
+
+  const names = [...refs.keys()].join(", ");
+  const addr = source.OCW_OPENBAO_ADDR?.trim();
+  if (!addr) throw configError([`  - OCW_OPENBAO_ADDR: must be set because ${names} reference OpenBao`]);
+  const cfg: OpenBaoConfig = {
+    addr,
+    roleId: source.OCW_OPENBAO_ROLE_ID?.trim() || undefined,
+    secretId: readEnvOrFile("OCW_OPENBAO_SECRET_ID", source)?.trim() || undefined,
+    token: readEnvOrFile("OCW_OPENBAO_TOKEN", source)?.trim() || undefined,
+  };
+  if (!(cfg.roleId && cfg.secretId) && !cfg.token) {
+    throw configError([
+      `  - OCW_OPENBAO_ROLE_ID: set OCW_OPENBAO_ROLE_ID and OCW_OPENBAO_SECRET_ID[_FILE] (or OCW_OPENBAO_TOKEN[_FILE]) because ${names} reference OpenBao`,
+    ]);
+  }
+
+  const create = deps.createOpenBaoStore ?? createOpenBaoSecretStore;
+  let store: SecretStore;
+  try {
+    store = await create(cfg, [...refs.values()]);
+  } catch (err) {
+    throw configError([`  - ${names}: ${(err as Error).message}`]);
+  }
+  const resolved: Record<string, string | undefined> = { ...source };
+  for (const [name, ref] of refs) {
+    try {
+      resolved[name] = store.resolveSync(ref);
+    } catch (err) {
+      throw configError([`  - ${name} (${formatSecretUri(ref)}): ${(err as Error).message}`]);
+    }
+    delete resolved[`${name}_FILE`];
+  }
+  return loadEnv(resolved);
+}
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   const raw: Record<string, string | undefined> = { ...source };

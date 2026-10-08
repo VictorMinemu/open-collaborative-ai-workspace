@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: infra/fake-model/Dockerfile
-    image: ocw-fake-model:local
+    image: ocw-fake-model:${OCW_IMAGE_TAG:-local}
     environment:
       FAKE_MODEL_IDS: mock-1,mock-2
     networks:
@@ -24,6 +24,9 @@ services:
       LOG_LEVEL: warn
       OCW_MODEL_PROVIDER: mock
       OCW_MOCK_MODEL_BASE_URL: http://fake-model:18999/v1
+      # Sign-ins per client IP per minute; the api's own default (30) unless the env file raises it. Gate stacks do
+      # (scripts/gate/lib.mjs): behind Caddy on Docker Desktop every browser arrives as the Docker gateway's address.
+      OCW_SIGNIN_RATE_LIMIT_PER_MINUTE: ${OCW_SIGNIN_RATE_LIMIT_PER_MINUTE:-30}
     networks:
       - default
       - ocw-internal

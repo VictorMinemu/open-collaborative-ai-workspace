@@ -21,6 +21,7 @@ import type { AuditService } from "../audit";
 import { createPermissionService, invitationResource } from "../organization";
 import type { RealtimeService } from "../realtime";
 import { INVITATION_TTL_SECONDS } from "./auth";
+import { headersForAuth } from "./client-ip";
 import { clientFromRequest } from "./client-kind";
 import { asRole, auditVia, type IdentityResult, type IdentityService } from "./service";
 
@@ -431,7 +432,11 @@ export function registerInvitationRoutes(
       },
     },
     async (req, reply) => {
-      const { me, cookies } = await invitations.acceptInvitation(req.params.id, req.body, req.headers);
+      const { me, cookies } = await invitations.acceptInvitation(
+        req.params.id,
+        req.body,
+        headersForAuth(req),
+      );
       // Durable org-wide event so member lists update live (EventTypes.memberJoined).
       await deps.db.withTenant({ organizationId: me.organization.id, userId: me.user.id }, (tx) =>
         deps.realtime.appendEvent(tx, `org:${me.organization.id}`, "member.joined", {

@@ -1,0 +1,99 @@
+# Repository-local Semgrep rules run by `pnpm guard` (scripts/guard/run.mjs) inside `pnpm verify` (D-08, FOUND-07).
+# Each rule refuses a change that weakens the platform's policy. An allowlist entry names one exact file (or the one
+# directory ADR-0012 designates) and, for tests, only tests that assert the denial. Never loosen a pattern instead.
+# Path patterns start with "/" so they are anchored at the repository root. Fixtures: .semgrep/tests/ (--rule-tests).
+rules:
+  - id: ocw.permission-bypass-token
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      A runtime permission-bypass mode appears outside the ADR-0012 path. Full access is enabled only through
+      org policy ∩ device opt-in ∩ grain, server-checked and audited (docs/adr/0012-full-access-mode-and-shared-devices.md).
+    pattern-regex: (bypassPermissions|danger-full-access|allowDangerouslySkipPermissions|dangerously-skip-permissions|dangerouslySkipPermissions)
+    paths:
+      exclude:
+        # The ADR-0012 path: runtime adapters, the fixture recorder and the contracts that name the modes.
+        - /apps/local-runtime/src/claude/
+        - /apps/local-runtime/src/codex/
+        - /apps/local-runtime/scripts/record-fixture.ts
+        - /packages/contracts/src/runtime-controls/
+        - /packages/contracts/src/session-events.ts
+        - /packages/contracts/src/device-link.ts
+        # Tests that assert the bypass is refused.
+        - /apps/api/src/modules/work-session/turn-mode.int.test.ts
+        - /apps/local-runtime/src/daemon.test.ts
+        - /packages/contracts/src/session-settings.test.ts
+        - /packages/contracts/src/slash-commands.test.ts
+        - /packages/db/src/rls-isolation.int.test.ts
+
+  - id: ocw.rls-bypass
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      Row level security is bypassed, disabled or no longer forced. Only packages/db/sql/bootstrap.sql grants the
+      migrator role its bypass; ocw_app always runs with RLS enforced (ADR-0003). SQL "--" comment lines are ignored.
+    # Case-insensitive; a "--" comment line never matches; \b keeps NOBYPASSRLS and rolbypassrls out.
+    pattern-regex: (?im)^(?![ \t]*--).*?\b(BYPASSRLS|DISABLE\s+ROW\s+LEVEL\s+SECURITY|NO\s+FORCE\s+ROW\s+LEVEL\s+SECURITY)\b
+    paths:
+      exclude:
+        - /packages/db/sql/bootstrap.sql
+        # Asserts the app role is neither superuser nor bypasses RLS.
+        - /packages/db/src/rls-isolation.int.test.ts
+
+  - id: ocw.skipped-policy-test
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      A policy test is skipped or left as a todo. Tests that prove permissions, RLS and tenant isolation never skip;
+      fix the test or the code instead (FOUND-07, PITFALLS 13).
+    pattern-either:
+      - pattern: $X.skip(...)
+      - pattern: $X.todo(...)
+      - pattern: $X.skipIf(...)(...)
+      - pattern: $X.runIf(...)(...)
+      - pattern: xit(...)
+      - pattern: xdescribe(...)
+      - pattern: xtest(...)
+    paths:
+      # Every API and package test: tenant-isolation and permission cases live in most modules (search, ai-chat,
+      # chat, work-session…), so a name list always misses some (07 verification gap).
+      include:
+        - /apps/api/src/**/*.test.ts
+        - /packages/*/src/**/*.test.ts
+        - /apps/local-runtime/src/codex/mode-policy.test.ts
+
+  - id: ocw.focused-test
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      A focused test (.only) silently narrows `pnpm test` to one test. Remove .only before committing.
+    pattern-either:
+      - pattern: $X.only(...)
+      - pattern: $X.only.$Y(...)(...)
+    paths:
+      include:
+        - /apps/
+        - /packages/
+        - /e2e/
+
+  - id: ocw.ai-telemetry-records-prompts
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      AI SDK telemetry records prompts and outputs by default. Set `recordInputs: false` and `recordOutputs: false`
+      inline (or `isEnabled: false`); prompt contents never leave the API in spans (D-05, D-18).
+    patterns:
+      - pattern-either:
+          - pattern: "{..., experimental_telemetry: $T, ...}"
+          - patterns:
+              - pattern: "{..., telemetry: $T, ...}"
+              - pattern-either:
+                  - pattern-inside: $FN({...})
+                  - pattern-inside: new $FN({...})
+              - metavariable-regex:
+                  metavariable: $FN
+                  regex: ^(generateText|streamText|generateObject|streamObject|embed|embedMany|rerank|Experimental_Agent|ToolLoopAgent|Agent)$
+      - pattern-not: "{..., experimental_telemetry: {..., isEnabled: false, ...}, ...}"
+      - pattern-not: "{..., experimental_telemetry: {..., recordInputs: false, ..., recordOutputs: false, ...}, ...}"
+      - pattern-not: "{..., telemetry: {..., isEnabled: false, ...}, ...}"
+      - pattern-not: "{..., telemetry: {..., recordInputs: false, ..., recordOutputs: false, ...}, ...}"

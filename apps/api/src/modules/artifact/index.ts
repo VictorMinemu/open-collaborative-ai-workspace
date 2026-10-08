@@ -24,7 +24,9 @@ export {
   attachmentKey,
   createObjectStorage,
   type ObjectStorage,
+  type ObjectStorageEnv,
   objectStorageConfigured,
+  s3Client,
 } from "./storage";
 export { type AttachmentSweeper, createAttachmentSweeper } from "./sweeper";
 

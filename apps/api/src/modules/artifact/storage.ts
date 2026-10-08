@@ -52,7 +52,14 @@ export interface ObjectStorage {
   ensureBucketCors(origins: string[]): Promise<void>;
 }
 
-function client(
+/** The `Env` fields object storage reads (the object-store CLI builds exactly these, never the full API config). */
+export type ObjectStorageEnv = Pick<
+  Env,
+  "OCW_S3_ENDPOINT" | "OCW_S3_PUBLIC_URL" | "OCW_S3_BUCKET" | "OCW_S3_REGION" | "OCW_S3_ACCESS_KEY_ID"
+>;
+
+/** An S3 client with the settings every OCW caller needs against S3-compatible stores (Garage). */
+export function s3Client(
   endpoint: string,
   region: string,
   credentials: { accessKeyId: string; secretAccessKey: string },
@@ -74,9 +81,8 @@ const isNotFound = (err: unknown) => {
   return e?.name === "NotFound" || e?.name === "NoSuchKey" || e?.$metadata?.httpStatusCode === 404;
 };
 
-/** Null when storage is not configured (endpoint, key id and secret all required); attachments are then disabled. */
 /** Whether `createObjectStorage` would return a store (endpoint, key id and secret all set), without building one. */
-export function objectStorageConfigured(env: Env, secrets: SecretStore): boolean {
+export function objectStorageConfigured(env: ObjectStorageEnv, secrets: SecretStore): boolean {
   if (!env.OCW_S3_ENDPOINT || !env.OCW_S3_ACCESS_KEY_ID) return false;
   try {
     secrets.resolveSync({ provider: "env", key: "OCW_S3_SECRET_ACCESS_KEY" });
@@ -87,7 +93,8 @@ export function objectStorageConfigured(env: Env, secrets: SecretStore): boolean
   }
 }
 
-export function createObjectStorage(env: Env, secrets: SecretStore): ObjectStorage | null {
+/** Null when storage is not configured (endpoint, key id and secret all required); attachments are then disabled. */
+export function createObjectStorage(env: ObjectStorageEnv, secrets: SecretStore): ObjectStorage | null {
   const endpoint = env.OCW_S3_ENDPOINT;
   const publicUrl = env.OCW_S3_PUBLIC_URL ?? endpoint;
   const accessKeyId = env.OCW_S3_ACCESS_KEY_ID;
@@ -100,8 +107,8 @@ export function createObjectStorage(env: Env, secrets: SecretStore): ObjectStora
     throw err;
   }
   const credentials = { accessKeyId, secretAccessKey };
-  const s3 = client(endpoint, env.OCW_S3_REGION, credentials);
-  const presigner = client(publicUrl, env.OCW_S3_REGION, credentials);
+  const s3 = s3Client(endpoint, env.OCW_S3_REGION, credentials);
+  const presigner = s3Client(publicUrl, env.OCW_S3_REGION, credentials);
   const Bucket = env.OCW_S3_BUCKET;
 
   return {

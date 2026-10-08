@@ -1,8 +1,9 @@
 // node --test 'scripts/**/*.test.mjs'
 //
-// `pnpm setup:env` (scripts/setup-env.mjs) in a temporary directory (`--dir`): a fresh .env gets the Garage / S3
-// keys (ADR-0015), `--add-missing` upgrades an existing .env without touching any existing value, and a plain run
-// still refuses to overwrite. The repository's own .env is never read or written.
+// `pnpm setup:env` (scripts/setup-env.mjs, an alias of `pnpm ocw setup`) in a temporary directory (`--dir`): a fresh
+// .env gets the Garage / S3 keys (ADR-0015), `--add-missing` upgrades an existing .env without touching any existing
+// value, a plain run still refuses to overwrite, and no value is ever printed (D-13). The repository's own .env is
+// never read or written.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -79,5 +80,30 @@ describe("setup-env", () => {
   it("--add-missing without a .env asks for a fresh run", () => {
     const res = run("--add-missing");
     assert.equal(res.status, 1);
+  });
+
+  it("prints key names and where, never a value from the written file (D-13)", () => {
+    for (const args of [[], ["--force"]]) {
+      const res = run(...args);
+      assert.equal(res.status, 0, res.stderr);
+      const out = `${res.stdout}\n${res.stderr}`;
+      const text = readFileSync(envFile(), "utf8");
+      for (const line of text.split("\n")) {
+        const m = /^([A-Z][A-Z0-9_]*)=(.*)$/.exec(line);
+        // Long values except plain http(s) URLs (the next steps print the web URL on purpose).
+        if (!m || m[2].length < 8 || /^https?:\/\/[^@]*$/.test(m[2])) continue;
+        assert.ok(!out.includes(m[2]), `${m[1]}'s value appears in the output`);
+      }
+      assert.match(res.stdout, /\bOCW_SETUP_TOKEN\b/);
+      assert.ok(res.stdout.includes(`grep '^OCW_SETUP_TOKEN=' ${envFile()}`), "how to read the token");
+    }
+    // --add-missing reports appended keys by name too.
+    writeFileSync(envFile(), "POSTGRES_PASSWORD=keep-me\n");
+    const res = run("--add-missing");
+    assert.equal(res.status, 0, res.stderr);
+    const added = readFileSync(envFile(), "utf8");
+    const token = /^OCW_SETUP_TOKEN=(.+)$/m.exec(added)[1];
+    assert.ok(!res.stdout.includes(token));
+    assert.match(res.stdout, /\bOCW_SETUP_TOKEN\b/);
   });
 });

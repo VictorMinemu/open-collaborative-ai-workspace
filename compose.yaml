@@ -1,10 +1,18 @@
 # Open Collaborative AI Workspace — self-hosted stack (minimal profile).
-#   pnpm setup:env          # once: writes .env with random secrets
-#   docker compose up -d --build
+#   pnpm ocw setup                          # once: writes .env with random secrets (never printed)
+#   docker compose up -d --build --wait
 # Web: http://localhost:3000   API: http://localhost:4000 (/docs for OpenAPI)   Attachments (S3): http://localhost:3900
+# Images are tagged ocw-<svc>:${OCW_IMAGE_TAG:-local}; api and web publish on ${OCW_PUBLISH_ADDRESS:-0.0.0.0} (set it to
+# 127.0.0.1 behind a reverse proxy). Optional profiles live in included files and stay off until named in
+# COMPOSE_PROFILES: proxy (Caddy), observability (OTel Collector, Prometheus, Grafana, Loki, Tempo), vault (OpenBao).
 # Upgrading an install whose .env predates attachments: `pnpm setup:env --add-missing` appends the Garage/S3 keys
 # (it never rotates existing values), then `docker compose up -d`. Without them Garage does not start and the API
 # reports attachments as disabled; nothing else is affected (infra/garage/README.md).
+include:
+  - infra/caddy/compose.yaml
+  - infra/observability/compose.yaml
+  - infra/openbao/compose.yaml
+
 x-db-urls: &db-urls
   DATABASE_URL: postgres://ocw_app:${OCW_DB_APP_PASSWORD:?Set OCW_DB_APP_PASSWORD in .env (run pnpm setup:env)}@postgres:5432/ocw
   AUTH_DATABASE_URL: postgres://ocw_auth:${OCW_DB_AUTH_PASSWORD:?Set OCW_DB_AUTH_PASSWORD in .env (run pnpm setup:env)}@postgres:5432/ocw
@@ -67,7 +75,7 @@ services:
     build:
       context: .
       dockerfile: apps/api/Dockerfile
-    image: ocw-api:local
+    image: ocw-api:${OCW_IMAGE_TAG:-local}
     working_dir: /app/packages/db
     command: ["node", "--import", "tsx", "src/migrate-cli.ts"]
     restart: "no"
@@ -84,7 +92,7 @@ services:
         condition: service_healthy
 
   api:
-    image: ocw-api:local
+    image: ocw-api:${OCW_IMAGE_TAG:-local}
     restart: unless-stopped
     environment:
       <<: *db-urls
@@ -122,8 +130,19 @@ services:
       OCW_S3_ACCESS_KEY_ID: ${OCW_S3_ACCESS_KEY_ID:-}
       OCW_S3_SECRET_ACCESS_KEY: ${OCW_S3_SECRET_ACCESS_KEY:-}
       OCW_ATTACHMENT_MAX_BYTES: ${OCW_ATTACHMENT_MAX_BYTES:-26214400}
+      # Behind the `proxy` profile (Caddy) set OCW_TRUST_PROXY=1 and OCW_PUBLISH_ADDRESS=127.0.0.1; reachable directly,
+      # forwarded headers must not be trusted (spoofable client IP).
+      OCW_TRUST_PROXY: ${OCW_TRUST_PROXY:-false}
+      # Telemetry (`observability` profile): empty endpoint = the OpenTelemetry SDK never starts.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OCW_OTEL_ENDPOINT:-}
+      OTEL_SERVICE_NAME: ocw-api
+      # Secrets from OpenBao (`vault` profile): empty = env/file secrets only.
+      OCW_OPENBAO_ADDR: ${OCW_OPENBAO_ADDR:-}
+      OCW_OPENBAO_ROLE_ID: ${OCW_OPENBAO_ROLE_ID:-}
+      OCW_OPENBAO_SECRET_ID: ${OCW_OPENBAO_SECRET_ID:-}
+      OCW_OPENBAO_TOKEN: ${OCW_OPENBAO_TOKEN:-}
     ports:
-      - "${OCW_API_PORT:-4000}:4000"
+      - "${OCW_PUBLISH_ADDRESS:-0.0.0.0}:${OCW_API_PORT:-4000}:4000"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -136,13 +155,13 @@ services:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
-    image: ocw-web:local
+    image: ocw-web:${OCW_IMAGE_TAG:-local}
     restart: unless-stopped
     environment:
       # Read at request time (not baked into the image).
       OCW_PUBLIC_API_URL: ${OCW_PUBLIC_API_URL:-http://localhost:4000}
     ports:
-      - "${OCW_WEB_PORT:-3000}:3000"
+      - "${OCW_PUBLISH_ADDRESS:-0.0.0.0}:${OCW_WEB_PORT:-3000}:3000"
     depends_on:
       api:
         condition: service_healthy
@@ -155,7 +174,7 @@ services:
     build:
       context: .
       dockerfile: infra/openclaw/Dockerfile
-    image: ocw-openclaw:local
+    image: ocw-openclaw:${OCW_IMAGE_TAG:-local}
     restart: unless-stopped
     stop_grace_period: 30s
     environment:
@@ -210,7 +229,7 @@ services:
     profiles: ["mcp-sandbox"]
     build:
       context: infra/mcp-sandbox
-    image: ocw-mcp-sandbox:local
+    image: ocw-mcp-sandbox:${OCW_IMAGE_TAG:-local}
     restart: unless-stopped
     init: true
     user: node

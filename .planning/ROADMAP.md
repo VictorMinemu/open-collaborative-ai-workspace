@@ -374,7 +374,22 @@ Plans:
   5. Every package declares its license (AGPL-3.0 apps/server, Apache-2.0 for `packages/contracts` and `packages/protocol`), CI checks dependency-license compatibility, and Scenario B (minus Work Zone creation) runs as a Playwright E2E against the compose stack in CI
   6. `pnpm verify` fails a change that introduces a permission-bypass token (Semgrep), a skipped policy test or a license violation, and CODEOWNERS covers db policies, auth, adapters and policy paths
 
-**Plans**: TBD
+**Plans:** 11 plans in 4 waves (owner/orchestrator decisions D-01 … D-18 in `07-CONTEXT.md`; plan map, cross-plan contracts and executor rules in `07-01-PLAN.md`; CI command list in `07-11-PLAN.md`)
+
+Plans:
+
+- [ ] 07-01-PLAN.md — Wave 1: guardrails in `pnpm verify` — Semgrep rules (bypass tokens, RLS bypass, skipped/focused policy tests, prompt-recording AI telemetry), dependency and package licenses with the claude-agent-sdk exception pending the owner, CODEOWNERS, root entry points
+- [ ] 07-02-PLAN.md — Wave 1: schema guard (API refuses a mismatched database) and the N-1 → N upgrade test on a committed Phase 5 (`3bbcbd9`) dump
+- [ ] 07-03-PLAN.md — Wave 1 (phase tracer): the compose stack on freshly built images in an isolated gate project (`OCW_IMAGE_TAG`, 34xx), profile includes, gate harness with the demo-safety guard, compose config tests
+- [ ] 07-04-PLAN.md — Wave 1: `pnpm ocw` CLI and `ocw setup` (secrets at setup time, never printed, port blocks), `setup:env` shim
+- [ ] 07-05-PLAN.md — Wave 1: API OpenTelemetry via `@fastify/otel` (off by default, redacted) after the package gate, and `OCW_TRUST_PROXY`
+- [ ] 07-06-PLAN.md — Wave 2: OpenBao behind `SecretStore` (`openbao://` references for the four API-only secrets), `vault` profile, `ocw enable vault`
+- [ ] 07-07-PLAN.md — Wave 2: `observability` profile (collector, Tempo, Prometheus, Loki, Grafana), image telemetry preload, `ocw enable observability`
+- [ ] 07-08-PLAN.md — Wave 2: Caddy `proxy` profile on one HTTPS origin, `ocw enable proxy`, WebSocket / presigned URL / trusted header checks
+- [ ] 07-09-PLAN.md — Wave 2: `ocw backup` / `ocw restore` as `ocw_migrator` (DB, objects, cell state), `--force-recreate` survival, backup/restore/upgrade runbook
+- [ ] 07-10-PLAN.md — Wave 3: production-safe Scenario B through Caddy on real images (1440/390) and `pnpm gate:compose` running every compose-level check, optional profiles included
+- [ ] 07-11-PLAN.md — Wave 4: release gate — `pnpm gate:cleanroom`, full local gate and CI command list, `docs/INSTALL.md`, ADR-0021, FOUND-06 wording (Garage) and traceability, owner's clean-machine check
+
 **Research:** needed (`@fastify/otel` wiring and the observability profile; backup/restore and upgrade tooling; presigned URLs through Caddy)
 **UI hint**: no
 
