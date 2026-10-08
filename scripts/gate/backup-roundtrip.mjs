@@ -5,6 +5,10 @@
 // `ocw restore --yes` must bring back exactly the backed-up state (rows, bytes, sign-in, migrations, cell state) with
 // RLS and the role split intact. Then the same backup onto brand-new volumes (`down -v` + `up`), and finally row
 // counts, sign-in and the download must be identical across `docker compose up -d --force-recreate --wait`.
+// `runVault(ctx)` (vault profile on, 07-10): `ocw backup` also takes OpenBao's data and secrets/; after `down -v` and
+// with secrets/ gone (a new machine with only .env), `ocw restore` brings back an api that boots on openbao://
+// references, the same sessions (same BETTER_AUTH_SECRET) and the same rows. Behind the proxy profile, Caddy's local
+// root is trusted for this process (and again after fresh volumes, which give Caddy a new root).
 //
 //   node scripts/gate/backup-roundtrip.mjs --up [--run-id <id>] [--keep]   own gate stack (lib.mjs withGateStack)
 //   node scripts/gate/backup-roundtrip.mjs --attach <envFile>              a stack left by --keep
@@ -13,7 +17,7 @@
 // to a temp dir that is removed afterwards. stdout: one JSON summary; exit 0 = every check ok.
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -21,11 +25,13 @@ import { parseArgs } from "node:util";
 import {
   ADMIN,
   ApiClient,
+  behindProxy,
   demoSnapshot,
   diffDemo,
   ensureAdmin,
   newRunId,
   REPO_ROOT,
+  trustCaddyRoot,
   withGateStack,
 } from "./lib.mjs";
 
@@ -279,6 +285,8 @@ export async function run(ctx) {
   };
   const restore = () => ocw(["restore", b1, "--yes", "--env-file", ctx.envFile]);
   try {
+    // Presigned object URLs point at the https origin when the stack runs behind Caddy.
+    if (behindProxy(ctx)) await trustCaddyRoot(ctx);
     const seeded = await check("seed", async () => {
       const { client: admin } = await ensureAdmin(ctx);
       s.admin = admin;
@@ -403,6 +411,8 @@ export async function run(ctx) {
         stdio: ["ignore", 2, 2],
         timeoutMs: 1500 * 1000,
       });
+      // A new caddy-data volume is a new local CA.
+      if (behindProxy(ctx)) await trustCaddyRoot(ctx);
       const empty = (await signIn(ctx, ADMIN)) === null;
       const res = restore();
       return {
@@ -448,6 +458,140 @@ export async function run(ctx) {
     rmSync(tmp, { recursive: true, force: true });
   }
   return summary(checks);
+}
+
+/**
+ * Vault profile round trip (07-10): with OpenBao holding the API-only secrets, a backup must be enough (with .env) to
+ * bring the install back on a machine that has neither the volumes nor secrets/. Pushes one entry per check.
+ */
+export async function runVault(ctx) {
+  const checks = [];
+  const check = async (name, fn) => {
+    const t0 = Date.now();
+    let res;
+    try {
+      res = await fn();
+    } catch (err) {
+      res = { ok: false, error: String(err.message ?? err).slice(0, 2000) };
+    }
+    const { ok, ...details } = res;
+    const step = { name, ok: ok === true, ms: Date.now() - t0, details };
+    checks.push(step);
+    ctx.steps.push(step);
+    return step.ok;
+  };
+  const tmp = mkdtempSync(path.join(tmpdir(), "ocw-gate-vault-backup-"));
+  const out = path.join(tmp, "v1");
+  const sealFile = ctx.env.OCW_OPENBAO_SEAL_KEY_FILE ?? "";
+  const secretsDir = path.dirname(sealFile);
+  const s = {};
+  try {
+    const taken = await check("vault-backup", async () => {
+      const profiles = (ctx.env.COMPOSE_PROFILES ?? "").split(",");
+      if (!profiles.includes("vault") || !existsSync(sealFile)) {
+        return { ok: false, error: "the vault profile is not on (run the vault step first)" };
+      }
+      if (behindProxy(ctx)) await trustCaddyRoot(ctx);
+      // A session from before the backup: it must survive the restore (BETTER_AUTH_SECRET comes back from OpenBao).
+      s.session = await signIn(ctx, ADMIN);
+      if (!s.session) return { ok: false, error: "admin sign-in failed before the backup" };
+      s.counts = counts(ctx);
+      s.seal = readFileSync(sealFile);
+      const res = ocw(["backup", "--env-file", ctx.envFile, "--out", out]);
+      const manifest =
+        res.status === 0 ? JSON.parse(readFileSync(path.join(out, "manifest.json"), "utf8")) : {};
+      const files = Object.keys(manifest.files ?? {}).sort();
+      const bad = res.status === 0 ? modes(out) : [];
+      const printed = Object.entries(ctx.env).filter(
+        ([k, v]) =>
+          /PASSWORD|SECRET|KEY|TOKEN/.test(k) &&
+          !v.startsWith("openbao://") &&
+          v.length >= 8 &&
+          `${res.stdout}${res.stderr}`.includes(v),
+      );
+      return {
+        ok:
+          res.status === 0 &&
+          manifest.components?.vault === true &&
+          ["openbao-data.tar", "openbao-seal.key", "openbao-init.json"].every((f) => files.includes(f)) &&
+          readFileSync(path.join(out, "openbao-seal.key")).equals(s.seal) &&
+          bad.length === 0 &&
+          printed.length === 0,
+        exit: res.status,
+        ms: res.ms,
+        files,
+        components: manifest.components,
+        ...(bad.length ? { badModes: bad } : {}),
+        openbaoBytes: res.status === 0 ? statSync(path.join(out, "openbao-data.tar")).size : 0,
+        secretsPrinted: printed.map(([k]) => k),
+      };
+    });
+    if (!taken) return vaultSummary(checks);
+
+    await check("vault-new-machine", async () => {
+      // Nothing but .env survives: every volume (openbao-data included) and the secrets/ directory are gone.
+      const down = ctx.compose(["down", "-v", "--remove-orphans", "--timeout", "30"], {
+        timeoutMs: 10 * 60_000,
+      });
+      renameSync(secretsDir, `${secretsDir}.gone`);
+      rmSync(`${secretsDir}.gone`, { recursive: true, force: true });
+      const volumes = ctx
+        .docker(["volume", "ls", "-q", "--filter", `name=${ctx.project}_`], { check: true })
+        .stdout.split("\n")
+        .filter(Boolean);
+      return {
+        ok: down.status === 0 && volumes.length === 0 && !existsSync(secretsDir),
+        volumesLeft: volumes.length,
+        secretsDirGone: !existsSync(secretsDir),
+      };
+    });
+
+    await check("vault-restore", async () => {
+      const res = ocw(["restore", out, "--yes", "--env-file", ctx.envFile]);
+      return { ok: res.status === 0, exit: res.status, ms: res.ms };
+    });
+
+    await check("vault-restored", async () => {
+      if (behindProxy(ctx)) await trustCaddyRoot(ctx);
+      ctx.reload();
+      const refs = ["BETTER_AUTH_SECRET", "OCW_ENCRYPTION_KEY", "OCW_SETUP_TOKEN"].every((k) =>
+        ctx.env[k]?.startsWith("openbao://"),
+      );
+      const health = await reachable("api health", async () => {
+        const r = await fetch(`${ctx.urls.api}/health`, { signal: AbortSignal.timeout(10_000) });
+        await r.arrayBuffer();
+        return r.status;
+      });
+      const oldSession = await s.session.request("GET", "/api/v1/me");
+      const fresh = await signIn(ctx, ADMIN);
+      const sealBack = existsSync(sealFile) && readFileSync(sealFile).equals(s.seal);
+      const sealMode = existsSync(sealFile) ? (statSync(sealFile).mode & 0o777).toString(8) : "missing";
+      const initBack = existsSync(path.join(secretsDir, "openbao-init.json"));
+      const after = counts(ctx);
+      const result = {
+        envStillReferencesOnly: refs,
+        apiHealth: health === 200,
+        sessionFromBeforeValid: oldSession.status === 200,
+        freshSignIn: fresh !== null,
+        sealKeyRestored: sealBack,
+        sealKeyMode600: sealMode === "600",
+        initMaterialRestored: initBack,
+        rowsIdentical: after === s.counts,
+      };
+      return { ok: Object.values(result).every(Boolean), ...result, counts: after };
+    });
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+  return vaultSummary(checks);
+}
+
+function vaultSummary(checks) {
+  return {
+    name: "vault-backup",
+    ok: checks.length === 4 && checks.every((c) => c.ok),
+    details: { checks: checks.map((c) => c.name) },
+  };
 }
 
 function summary(checks) {

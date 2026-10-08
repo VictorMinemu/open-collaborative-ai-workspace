@@ -87,7 +87,23 @@ function minimalEnv() {
 export function enableProxy(ctx, { log = (m) => process.stderr.write(`[proxy] ${m}\n`) } = {}) {
   const profiles = (ctx.env.COMPOSE_PROFILES ?? "").split(",").filter(Boolean);
   if (profiles.includes("proxy") && ctx.env.OCW_PUBLIC_WEB_URL?.startsWith("https://")) {
-    return { ok: true, alreadyEnabled: true, origin: ctx.env.OCW_PUBLIC_WEB_URL };
+    // Gate stacks get the proxy from `ocw enable proxy --no-up` at env creation (lib.mjs createGateEnv): check
+    // what it wrote and that Caddy runs published on loopback only.
+    const env = ctx.env;
+    const origin = env.OCW_PUBLIC_WEB_URL;
+    const files = (env.COMPOSE_FILE || "").split(":");
+    return {
+      ok:
+        origin === `https://localhost:${ctx.ports.proxyHttps}` &&
+        env.OCW_PUBLIC_API_URL === origin &&
+        env.OCW_S3_PUBLIC_URL === origin &&
+        env.OCW_TRUST_PROXY === "1" &&
+        env.OCW_PUBLISH_ADDRESS === "127.0.0.1" &&
+        files.includes(LOOPBACK_OVERRIDE) &&
+        ctx.compose(["port", "caddy", "443"]).stdout.trim() === `127.0.0.1:${ctx.ports.proxyHttps}`,
+      alreadyEnabled: true,
+      origin,
+    };
   }
   const files = (ctx.env.COMPOSE_FILE || "compose.yaml").split(":").filter(Boolean);
   if (!files.includes(LOOPBACK_OVERRIDE)) {

@@ -14,7 +14,7 @@
 // its CLI takes --up (own stack via withGateStack with the profiles it needs) or --attach <envFile> (a stack left by
 // --keep). Steps must also pass on a shared, already-used stack: call ensureAdmin, use unique names for their data.
 import { spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -28,6 +28,7 @@ import {
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import tls from "node:tls";
 import { fileURLToPath } from "node:url";
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -231,39 +232,148 @@ export async function acquireLock(
   }
 }
 
+/** Compose files of every gate stack: the e2e override (fake model) and Caddy published on loopback only. */
+export const GATE_COMPOSE_FILE = "compose.yaml:compose.e2e.yaml:infra/caddy/compose.loopback.yaml";
 /**
- * Writes `<dir>/.env` (0600): fresh secrets via scripts/setup-env.mjs --dir (its output, which includes the setup
- * token, is swallowed), then the block's ports, public URLs, project, image tag, compose files and profiles.
- * Returns the file's path. Prints nothing.
+ * Sign-in attempts per minute in gate stacks. Behind Caddy on Docker Desktop every client reaches the API as the
+ * Docker gateway's address, so all browsers and gate steps share one bucket; the product default stays 30.
  */
-export function createGateEnv({ dir, runId, block = 34, imageTag, extra = {} }) {
+export const GATE_SIGNIN_RATE_LIMIT = 600;
+const OCW_CLI = path.join(REPO_ROOT, "scripts", "ocw.mjs");
+
+/** `node -- scripts/ocw.mjs <args>` with a minimal environment; output swallowed (it names keys, never values). */
+function ocwQuiet(args, label) {
+  const res = spawnSync(process.execPath, ["--", OCW_CLI, ...args], {
+    cwd: REPO_ROOT,
+    env: dockerEnv(),
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 5 * 60_000,
+  });
+  if (res.status !== 0) {
+    // stderr carries usage/refusal messages only (ocw never prints a value); keep the last line for the summary.
+    const tail = (res.stderr ?? "").trim().split("\n").at(-1) ?? "";
+    throw new Error(`createGateEnv: ${label} exited ${res.status}${tail ? `: ${tail}` : ""}`);
+  }
+}
+
+/**
+ * Writes `<dir>/.env` (0600) with the commands operators run (SELF-01, D-03): `ocw setup --ports <block> --project
+ * ocw-gate-<runId> --image-tag <tag>` (fresh secrets) and, unless `proxy: false`, `ocw enable proxy --site-address
+ * localhost --no-up` (one HTTPS origin https://localhost:<block>43, OCW_TRUST_PROXY=1, loopback publishing). Then only
+ * gate keys: GATE_COMPOSE_FILE, COMPOSE_PROFILES (proxy + `profiles`), the mock model, GATE_SIGNIN_RATE_LIMIT and
+ * `extra`. Returns the file's path. Prints nothing (command output, which never holds a value, is swallowed).
+ */
+export function createGateEnv({ dir, runId, block = 34, imageTag, profiles = [], proxy = true, extra = {} }) {
   const project = `ocw-gate-${runId}`;
   const envFile = path.join(path.resolve(dir), ".env");
   const ports = gatePorts(block);
   assertSafe({ project, envFile, imageTag, ports: Object.values(ports) });
   if (existsSync(envFile)) throw new Error(`createGateEnv: ${envFile} already exists`);
-  const res = spawnSync(process.execPath, [path.join(REPO_ROOT, "scripts", "setup-env.mjs"), "--dir", dir], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  if (res.status !== 0) throw new Error(`createGateEnv: setup-env exited ${res.status}`);
+  ocwQuiet(
+    ["setup", "--dir", dir, "--ports", String(block), "--project", project, "--image-tag", imageTag],
+    "ocw setup",
+  );
+  if (proxy) {
+    ocwQuiet(
+      ["enable", "proxy", "--site-address", "localhost", "--no-up", "--env-file", envFile],
+      "ocw enable proxy",
+    );
+  }
   const loop = (p) => `http://127.0.0.1:${p}`;
+  const extraProfiles = String(extra.COMPOSE_PROFILES ?? "")
+    .split(",")
+    .filter(Boolean);
+  const allProfiles = [...new Set([...(proxy ? ["proxy"] : []), ...profiles, ...extraProfiles])];
   const values = {
-    COMPOSE_PROJECT_NAME: project,
-    COMPOSE_FILE: "compose.yaml:compose.e2e.yaml",
-    COMPOSE_PROFILES: "",
-    OCW_IMAGE_TAG: imageTag,
+    COMPOSE_FILE: proxy ? GATE_COMPOSE_FILE : "compose.yaml:compose.e2e.yaml",
     OCW_MODEL_PROVIDER: "mock",
+    OCW_SIGNIN_RATE_LIMIT_PER_MINUTE: String(GATE_SIGNIN_RATE_LIMIT),
     // api and web publish on loopback only: a gate stack is never reachable from the network.
     OCW_PUBLISH_ADDRESS: "127.0.0.1",
-    ...Object.fromEntries(Object.entries(PORT_KEYS).map(([k, key]) => [key, String(ports[k])])),
-    OCW_PUBLIC_WEB_URL: loop(ports.web),
-    OCW_PUBLIC_API_URL: loop(ports.api),
-    OCW_S3_PUBLIC_URL: loop(ports.s3),
+    ...(proxy
+      ? {}
+      : {
+          OCW_PUBLIC_WEB_URL: loop(ports.web),
+          OCW_PUBLIC_API_URL: loop(ports.api),
+          OCW_S3_PUBLIC_URL: loop(ports.s3),
+        }),
     ...Object.fromEntries(Object.entries(extra).map(([k, v]) => [k, String(v)])),
+    COMPOSE_PROFILES: allProfiles.join(","),
   };
   setEnvKeys(envFile, values);
+  const env = parseEnvFile(envFile);
+  // What ocw setup wrote must be what the guard checked (project, tag, every port of the block).
+  if (env.COMPOSE_PROJECT_NAME !== project || env.OCW_IMAGE_TAG !== imageTag)
+    throw new Error("createGateEnv: ocw setup did not write the gate project and image tag");
+  for (const [k, key] of Object.entries(PORT_KEYS)) {
+    if (env[key] !== String(ports[k])) throw new Error(`createGateEnv: ${key} is not ${ports[k]}`);
+  }
   return envFile;
+}
+
+/** Playwright JSON report stats must prove that tests ran and that none was skipped, failed or flaky (D-09). */
+export function assertPlaywrightStats(stats) {
+  const n = (k) => Number(stats?.[k] ?? 0);
+  if (!(n("expected") > 0)) throw new Error("Playwright: no test ran (expected 0)");
+  const bad = ["skipped", "unexpected", "flaky"].filter((k) => n(k) !== 0);
+  if (bad.length) {
+    throw new Error(
+      `Playwright: ${bad.map((k) => `${n(k)} ${k === "unexpected" ? "unexpected (failed)" : k}`).join(", ")}`,
+    );
+  }
+}
+
+/** `{ stats, projects }` of a Playwright JSON report: the run's totals and the test outcomes per project. */
+export function playwrightSummary(json) {
+  const s = json?.stats ?? {};
+  const stats = {
+    expected: s.expected ?? 0,
+    skipped: s.skipped ?? 0,
+    unexpected: s.unexpected ?? 0,
+    flaky: s.flaky ?? 0,
+    durationMs: Math.round(s.duration ?? 0),
+  };
+  const projects = {};
+  const walk = (suite) => {
+    for (const spec of suite.specs ?? []) {
+      for (const t of spec.tests ?? []) {
+        projects[t.projectName] ??= { expected: 0, skipped: 0, unexpected: 0, flaky: 0 };
+        const p = projects[t.projectName];
+        if (t.status in p) p[t.status] += 1;
+      }
+    }
+    for (const child of suite.suites ?? []) walk(child);
+  };
+  for (const suite of json?.suites ?? []) walk(suite);
+  return { stats, projects };
+}
+
+/**
+ * Trusts the proxy stack's Caddy local root for this process (fetch / https), read from the caddy container. Caddy
+ * makes a new root whenever its data volume is new (`down -v`, a restore onto fresh volumes), so steps call this
+ * after such a change. TLS verification stays on. Returns a short fingerprint of the root.
+ */
+export async function trustCaddyRoot(ctx, { timeoutMs = 60_000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const res = ctx.compose(["exec", "-T", "caddy", "cat", "/data/caddy/pki/authorities/local/root.crt"]);
+    const pem = res.status === 0 ? (res.stdout ?? "").trim() : "";
+    if (pem.startsWith("-----BEGIN CERTIFICATE-----")) {
+      tls.setDefaultCACertificates([...tls.getCACertificates("default"), pem]);
+      return createHash("sha256").update(pem).digest("hex").slice(0, 16);
+    }
+    if (Date.now() >= deadline) throw new Error("trustCaddyRoot: no local root in the caddy container");
+    await sleep(1000);
+  }
+}
+
+/** True when the stack runs behind the `proxy` profile on an https origin. */
+export function behindProxy(ctx) {
+  return (
+    (ctx.env.COMPOSE_PROFILES ?? "").split(",").includes("proxy") &&
+    (ctx.env.OCW_PUBLIC_WEB_URL ?? "").startsWith("https://")
+  );
 }
 
 /** Host ports an env file makes compose publish (missing core keys fall back to compose's defaults = the demo's). */
@@ -629,13 +739,7 @@ export async function withGateStack(
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
   try {
-    const envFile = createGateEnv({
-      dir,
-      runId,
-      block,
-      imageTag,
-      extra: { COMPOSE_PROFILES: profiles.join(",") },
-    });
+    const envFile = createGateEnv({ dir, runId, block, imageTag, profiles });
     ctx = gateContext(envFile, { steps });
     log(`project ${ctx.project}, tag ${ctx.imageTag}, web ${ctx.urls.web}, api ${ctx.urls.api}`);
     await timed(steps, "ports-free", async () => {

@@ -17,6 +17,7 @@ Both accept `--env-file <file>` (or `--dir <dir>` for `<dir>/.env`) for an insta
 | `db.dump` | The whole PostgreSQL database: schemas `app`, `auth` and `drizzle`, the `pg_trgm` and `unaccent` extensions, row-level security policies and grants | `pg_dump -Fc` as `ocw_migrator`, inside the postgres container |
 | `objects/` + `objects.json` | Every object in the attachments bucket, with its size, ETag, content type and sha256 | Through the S3 API, inside the api image (works with any S3-compatible store) |
 | `openclaw-state.tar` | The OpenClaw cell's state volume: bot sign-ins, installed plugin records and package roots | `tar` of `/home/node/.openclaw`, with `openclaw` stopped for the copy |
+| `openbao-data.tar`, `openbao-seal.key`, `openbao-init.json` | Only with the `vault` profile on: OpenBao's data volume (where the API-only secrets now live), the static seal key that decrypts it and the recovery material, from `secrets/` | `tar` of `/openbao/file`, with `openbao` stopped for the copy; the two files copied from `secrets/` |
 | `manifest.json` | Format, creation time, API version and commit, compose project, the applied migrations (the schema version) and the sha256 of every file | |
 
 The dump is taken as `ocw_migrator` because it owns every schema and is exempt from row-level security. A dump as
@@ -25,9 +26,12 @@ The dump is taken as `ocw_migrator` because it owns every schema and is exempt f
 
 **Not in a backup:**
 
-- **`.env` and `secrets/`.** A backup is useless without them. Sealed organization secrets need `OCW_ENCRYPTION_KEY`,
-  sessions and JWKS need `BETTER_AUTH_SECRET`, and the database and storage passwords live there too. Back them up
-  separately, to a different place, and treat them like the backup itself.
+- **`.env`** (and, without the `vault` profile, `secrets/`). A backup is useless without them. Sealed organization
+  secrets need `OCW_ENCRYPTION_KEY`, sessions and JWKS need `BETTER_AUTH_SECRET`, and the database and storage
+  passwords live there too. Back them up separately, to a different place, and treat them like the backup itself.
+  With the `vault` profile on, those API-only secrets exist only inside OpenBao, so the backup takes OpenBao's data and
+  its seal key (above): such a backup plus `.env` is enough to bring the install back, and anyone holding the backup
+  can read those secrets. Keep it exactly as private as `.env`.
 - **Redis.** It is ephemeral by design (ADR-0003): presence, rate limits and short-lived sign-in flows. Nothing durable
   lives only in Redis.
 - **Telemetry** (`observability` profile: Prometheus, Loki, Tempo, Grafana). It is operational data, not instance data.
@@ -90,11 +94,15 @@ Then it runs these steps and prints each one:
    re-applied.
 5. Import the objects with their stored content types. Objects that the backup does not hold are removed, so the
    bucket matches the database again.
-6. Replace the cell's state volume, then run `docker compose up -d --wait`.
+6. Replace the cell's state volume.
+7. With the `vault` profile: write the seal key and recovery material back to `secrets/` (the path in
+   `OCW_OPENBAO_SEAL_KEY_FILE`), replace OpenBao's data volume and start OpenBao, which unseals itself with that key.
+   A vault backup is refused, before anything changes, when the env file does not turn the `vault` profile on.
+8. `docker compose up -d --wait`.
 
 The restore uses the keys and passwords in your **current** `.env`, never any from the backup. To restore onto a new
-machine, first put the original `.env` (and `secrets/`, if you use `_FILE` secrets) in place, then `docker compose up
--d --build --wait`, then `pnpm ocw restore DIR --yes`.
+machine, first put the original `.env` (and `secrets/`, if you use `_FILE` secrets; a vault backup brings its own
+`secrets/openbao-*` files) in place, then `docker compose up -d --build --wait`, then `pnpm ocw restore DIR --yes`.
 
 The restore in step 3 is one transaction, so a failing `pg_restore` leaves the schemas empty rather than half
 restored. Fix the cause (it is printed) and run the same restore again. The API refuses to start on the empty schema

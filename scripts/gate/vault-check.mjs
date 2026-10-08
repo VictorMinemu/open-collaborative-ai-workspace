@@ -103,6 +103,10 @@ export async function run(ctx, opts = {}) {
 
   let session;
   await check("admin-before", async () => {
+    // On a shared gate stack the api may just have been recreated: Docker Desktop's port forward can refuse the first
+    // connections after `up --wait` returns (07-09), so wait for /health before signing in.
+    const http = await poll(() => apiHealth(ctx), { timeoutMs: 120_000 });
+    if (!http.ok) return { ok: false, health: http.status ?? http.error };
     const { client, created, me } = await ensureAdmin(ctx);
     session = client;
     return { ok: Boolean(me?.user?.email), created };
