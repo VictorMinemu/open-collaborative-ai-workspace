@@ -23,6 +23,11 @@ REVOKE UPDATE, DELETE, TRUNCATE ON app.ai_usage_records FROM ocw_app;
 GRANT SELECT, INSERT ON app.audit_events TO ocw_auth;
 GRANT SELECT, INSERT, UPDATE ON app.org_members TO ocw_auth;
 
+-- Schema-version guard (SELF-03, plan 07-02): the API reads the applied migration names + hashes at boot and refuses
+-- to start on a mismatch. Read-only, one table; ocw_migrator stays the only writer.
+GRANT USAGE ON SCHEMA drizzle TO ocw_app;
+GRANT SELECT ON drizzle.__drizzle_migrations TO ocw_app;
+
 DO $$
 DECLARE
   t record;
