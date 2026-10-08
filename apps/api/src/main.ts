@@ -1,11 +1,12 @@
 import { checkSchema, describeSchemaMismatch } from "@ocw/db";
 import closeWithGrace from "close-with-grace";
 import { buildApp } from "./app";
-import { EnvError, loadEnv } from "./config/env";
+import { type Env, EnvError, loadConfig } from "./config/env";
 
-let env: ReturnType<typeof loadEnv>;
+// Configuration first (SELF-02): env/file secrets, plus openbao:// references resolved from OpenBao when present.
+let env: Env;
 try {
-  env = loadEnv();
+  env = await loadConfig();
 } catch (err) {
   if (err instanceof EnvError) {
     console.error(err.message);

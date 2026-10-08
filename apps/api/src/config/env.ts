@@ -2,6 +2,14 @@ import { isIP } from "node:net";
 import { ATTACHMENT_DEFAULT_MAX_BYTES, TITLE_TIMEOUT_MS } from "@ocw/contracts";
 import { readEnvOrFile } from "@ocw/db";
 import { z } from "zod";
+import { createOpenBaoSecretStore, type OpenBaoConfig } from "../lib/openbao";
+import {
+  formatSecretUri,
+  OPENBAO_SCHEME,
+  type OpenBaoReference,
+  parseSecretUri,
+  type SecretStore,
+} from "../lib/secret-store";
 
 /**
  * API configuration. Every secret accepts `NAME` or `NAME_FILE` (Docker secrets). Boot fails fast with a
@@ -285,6 +293,96 @@ export function decodeKey(v: string): Buffer | null {
 }
 
 export class EnvError extends Error {}
+
+/**
+ * The secrets only the API reads, which may therefore live in OpenBao as `openbao://<mount>/<path>#<field>` (D-16).
+ * Database passwords, OCW_CELL_TOKEN and the S3 key pair are shared with other containers and stay env/file.
+ */
+export const OPENBAO_ALLOWED = [
+  "BETTER_AUTH_SECRET",
+  "OCW_ENCRYPTION_KEY",
+  "OCW_SETUP_TOKEN",
+  "OCW_SMTP_URL",
+] as const;
+
+export interface LoadConfigDeps {
+  /** Tests inject a stub; production uses the OpenBao client. */
+  createOpenBaoStore?: (cfg: OpenBaoConfig, refs: OpenBaoReference[]) => Promise<SecretStore>;
+}
+
+/** Every variable the API reads as configuration (plus the S3 secret, resolved through the SecretStore). */
+const CONFIG_VARS = [
+  ...new Set([...Object.keys(EnvSchema.in.shape), ...SECRET_VARS, "OCW_S3_SECRET_ACCESS_KEY"]),
+];
+
+const configError = (lines: string[]) =>
+  new EnvError(`Invalid API configuration (see .env.example):\n${lines.join("\n")}`);
+
+/**
+ * Boot configuration (main.ts): resolves `openbao://` references of the four API-only secrets (after `NAME_FILE`)
+ * through OpenBao, then validates everything with `loadEnv`. OpenBao is contacted only when a reference is present.
+ * A reference in any other variable, a malformed one, missing OpenBao settings or an OpenBao failure is an EnvError
+ * naming the variable and the reference, never a value.
+ */
+export async function loadConfig(
+  source: NodeJS.ProcessEnv = process.env,
+  deps: LoadConfigDeps = {},
+): Promise<Env> {
+  const allowed = new Set<string>(OPENBAO_ALLOWED);
+  const problems: string[] = [];
+  const refs = new Map<string, OpenBaoReference>();
+  for (const name of CONFIG_VARS) {
+    const value = readEnvOrFile(name, source);
+    if (!value?.startsWith(OPENBAO_SCHEME)) continue;
+    if (!allowed.has(name)) {
+      problems.push(
+        `  - ${name}: an openbao:// reference is only allowed for ${OPENBAO_ALLOWED.join(", ")}; this value is shared with other services and must stay env/file (set ${name} or ${name}_FILE)`,
+      );
+      continue;
+    }
+    const ref = parseSecretUri(value);
+    if (ref?.provider !== "openbao") {
+      problems.push(`  - ${name}: is not a valid openbao://<mount>/<path>#<field> reference`);
+      continue;
+    }
+    refs.set(name, ref);
+  }
+  if (problems.length > 0) throw configError(problems);
+  if (refs.size === 0) return loadEnv(source);
+
+  const names = [...refs.keys()].join(", ");
+  const addr = source.OCW_OPENBAO_ADDR?.trim();
+  if (!addr) throw configError([`  - OCW_OPENBAO_ADDR: must be set because ${names} reference OpenBao`]);
+  const cfg: OpenBaoConfig = {
+    addr,
+    roleId: source.OCW_OPENBAO_ROLE_ID?.trim() || undefined,
+    secretId: readEnvOrFile("OCW_OPENBAO_SECRET_ID", source)?.trim() || undefined,
+    token: readEnvOrFile("OCW_OPENBAO_TOKEN", source)?.trim() || undefined,
+  };
+  if (!(cfg.roleId && cfg.secretId) && !cfg.token) {
+    throw configError([
+      `  - OCW_OPENBAO_ROLE_ID: set OCW_OPENBAO_ROLE_ID and OCW_OPENBAO_SECRET_ID[_FILE] (or OCW_OPENBAO_TOKEN[_FILE]) because ${names} reference OpenBao`,
+    ]);
+  }
+
+  const create = deps.createOpenBaoStore ?? createOpenBaoSecretStore;
+  let store: SecretStore;
+  try {
+    store = await create(cfg, [...refs.values()]);
+  } catch (err) {
+    throw configError([`  - ${names}: ${(err as Error).message}`]);
+  }
+  const resolved: Record<string, string | undefined> = { ...source };
+  for (const [name, ref] of refs) {
+    try {
+      resolved[name] = store.resolveSync(ref);
+    } catch (err) {
+      throw configError([`  - ${name} (${formatSecretUri(ref)}): ${(err as Error).message}`]);
+    }
+    delete resolved[`${name}_FILE`];
+  }
+  return loadEnv(resolved);
+}
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   const raw: Record<string, string | undefined> = { ...source };
