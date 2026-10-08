@@ -110,7 +110,7 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
   let before: Map<string, number>;
 
   async function counts(): Promise<Map<string, number>> {
-    const c = new pg.Client({ connectionString: urls.migrator }); // BYPASSRLS: real row counts
+    const c = new pg.Client({ connectionString: urls.migrator }); // the migrator role sees every row: real row counts
     await c.connect();
     try {
       const m = new Map<string, number>();
