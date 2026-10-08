@@ -11,10 +11,11 @@
   },
   "dependencies": {
     "@ocw/contracts": "workspace:*",
+    "@opentelemetry/api": "1.9.1",
     "drizzle-orm": "1.0.0-rc.4",
     "pg": "8.23.0",
-    "zod": "4.6.5",
-    "tsx": "4.23.15"
+    "tsx": "4.23.15",
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "@ocw/config": "workspace:*",
