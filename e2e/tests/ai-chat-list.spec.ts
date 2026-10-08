@@ -136,8 +136,17 @@ test("the first answer titles the chat live in the header and the sidebar", asyn
   const title = page.getByTestId("ai-chat-title");
   await expect(title).toHaveText(generated, { timeout: 5_000 });
   const seen = await page.evaluate(() => (window as unknown as { __titles: string[] }).__titles);
-  expect(seen).toContain(first);
-  expect(seen.indexOf(first)).toBeLessThan(seen.indexOf(generated));
+  // The title is generated right after the first answer completes. On a fast server that can happen before the page's
+  // first fetch of the new chat returns, so the heuristic title (the first prompt) is not always rendered. Whatever
+  // the timing: the header only ever shows New chat, the heuristic title or the generated one, in that order, and
+  // ends on the generated title without a reload.
+  expect(
+    seen.every((t) => t === "New chat" || t === first || t === generated),
+    JSON.stringify(seen),
+  ).toBe(true);
+  expect(seen.at(-1)).toBe(generated);
+  const order = seen.map((t) => (t === "New chat" ? 0 : t === first ? 1 : 2));
+  expect(order, JSON.stringify(seen)).toEqual([...order].sort((a, b) => a - b));
   await bothThemes(page, `ai-chat-title-live-${w}`);
 
   const section = await aiSection(page, mobile);
