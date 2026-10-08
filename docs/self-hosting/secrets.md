@@ -75,6 +75,10 @@ is up. After a host reboot this normally takes one or two seconds.
 key cannot unseal a static-seal OpenBao. Back up `secrets/` and `.env` together, keep them private (both are
 git-ignored and excluded from Docker build contexts), and never paste them anywhere.
 
+`pnpm ocw backup` takes OpenBao's data volume, the seal key and the recovery material whenever the `vault` profile is
+on, and `pnpm ocw restore` puts them back before it starts OpenBao ([backup-restore.md](backup-restore.md)). Such a
+backup can unseal OpenBao by itself: store it as privately as `.env`.
+
 ## Rotating a value stored in OpenBao
 
 The API's AppRole can only read. To write, you need a token with write access. The root token was revoked, so you
