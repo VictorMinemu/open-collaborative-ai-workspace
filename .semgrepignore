@@ -1,0 +1,16 @@
+# Paths `pnpm guard` never scans (replaces Semgrep's default ignore list; .gitignore applies too).
+# Rule fixtures contain the patterns on purpose; prose may name the tokens it forbids.
+.semgrep/tests/
+.planning/
+docs/
+node_modules/
+dist/
+build/
+out/
+.next/
+.next-e2e/
+.turbo/
+coverage/
+e2e/test-results/
+e2e/playwright-report/
+apps/local-runtime/src/codex/generated/

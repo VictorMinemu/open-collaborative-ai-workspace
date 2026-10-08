@@ -1,0 +1,45 @@
+{
+  "$comment": "Dependency-license policy for `pnpm guard` (scripts/guard/licenses.mjs; D-08, SELF-06). Every package in the full pnpm graph and in infra/mcp-sandbox/package-lock.json must evaluate to an allowed SPDX expression (OR: any operand allowed; AND: every operand allowed). Anything else, including unknown or unparseable strings, is denied. CC-BY-4.0 is allowed for data-only packages (caniuse-lite). A clarification pins name@version to the license its upstream text states when the package field is only a pointer; a version bump re-opens the review. An exception admits a denied package and is printed on every run.",
+  "allow": [
+    "MIT",
+    "MIT-0",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "Apache-2.0",
+    "Unlicense",
+    "CC0-1.0",
+    "BlueOak-1.0.0",
+    "Python-2.0",
+    "Zlib",
+    "MPL-2.0",
+    "LGPL-2.1-or-later",
+    "LGPL-3.0-or-later",
+    "GPL-3.0-or-later",
+    "AGPL-3.0-only",
+    "AGPL-3.0-or-later",
+    "CC-BY-4.0",
+    "WTFPL"
+  ],
+  "deny": ["GPL-2.0-only", "SSPL-*", "BUSL-*", "Elastic-2.0", "CC-BY-NC-*", "UNLICENSED", "Unknown"],
+  "clarifications": [
+    {
+      "name": "@modelcontextprotocol/server-everything",
+      "version": "2026.8.31",
+      "declared": "SEE LICENSE IN LICENSE",
+      "license": "Apache-2.0 AND MIT",
+      "source": "https://github.com/modelcontextprotocol/servers/blob/main/LICENSE",
+      "reason": "infra/mcp-sandbox dependency; the tarball ships no LICENSE file and the upstream repository's LICENSE states new code is Apache-2.0 and contributions not yet relicensed remain MIT"
+    }
+  ],
+  "exceptions": [
+    {
+      "name": "@anthropic-ai/claude-agent-sdk",
+      "match": ["@anthropic-ai/claude-agent-sdk", "@anthropic-ai/claude-agent-sdk-*"],
+      "reason": "Work Zone Claude Code adapter in the Local Runtime (prod dependency of apps/local-runtime); Anthropic commercial terms",
+      "adr": "docs/adr/0021-self-hosted-release.md",
+      "status": "pending owner/legal confirmation"
+    }
+  ]
+}
