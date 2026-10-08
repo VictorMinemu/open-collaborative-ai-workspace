@@ -1,3 +1,30 @@
-# Profile `observability`: OpenTelemetry Collector, Prometheus, Grafana, Loki and Tempo. Included by compose.yaml; its
-# services start only when COMPOSE_PROFILES names `observability`. Stub until plan 07-07 fills it (FOUND-05, D-05).
-services: {}
+# Profile `observability` (FOUND-05, D-05): OpenTelemetry Collector, Tempo, Prometheus, Loki and Grafana, all
+# self-hosted and pinned by digest. Included by compose.yaml; nothing here starts until COMPOSE_PROFILES names
+# `observability`. Turn it on for a running install with `pnpm ocw enable observability`: it sets
+# OCW_OTEL_ENDPOINT=http://otel-collector:4318 (compose.yaml passes it to the api as OTEL_EXPORTER_OTLP_ENDPOINT), then
+# `docker compose up -d --wait` recreates only the api and starts these services. Every backend listens on the compose
+# network only. Telemetry is not part of `ocw backup` (docs/self-hosting/observability.md).
+services:
+  otel-collector:
+    profiles: ["observability"]
+    image: otel/opentelemetry-collector-contrib:0.161.0@sha256:fd328de2552466ad78385e1b1289c3f2402b1c45f265b252aab1955b42845ac1
+    restart: unless-stopped
+    command: ["--config", "/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    # The config's memory_limiter (200 MiB) keeps it under this.
+    mem_limit: 256m
+    depends_on:
+      - tempo
+
+  tempo:
+    profiles: ["observability"]
+    image: grafana/tempo:3.1.0@sha256:3076b8dcdfb32fd6bc5ccef85e7b7313e6199b9cb84366257fc17ecb696db5fd
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+
+volumes:
+  tempo-data:
