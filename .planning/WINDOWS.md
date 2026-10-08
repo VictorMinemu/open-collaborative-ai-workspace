@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 70
+open_count: 71
 waived_count: 0
 fixed_count: 17
-total_count: 87
-last_updated: 2026-10-07T21:32:00.531Z
+total_count: 88
+last_updated: 2026-10-08T00:51:08.081Z
 ---
 
 # Broken Windows Ledger
@@ -102,6 +102,7 @@ last_updated: 2026-10-07T21:32:00.531Z
 | 85 | 06.1 | unrun-verify | .planning/phases/06.1-work-zone-image-attachments/06.1-05-PLAN.md |  | 06.1-05 Task 3 real-runtime image check (Claude Code, Codex) deferred, human_needed | open |  | 2026-10-07T21:32:00.387Z |  |
 | 86 | 06.1 | deviation | apps/api/src/lib/redis.ts |  | Gate fixed a Phase 1 realtime subscribe/unsubscribe race outside files_modified (redis.int.test.ts) | open |  | 2026-10-07T21:32:00.457Z |  |
 | 87 | 06.1 | deviation | apps/web/components/search/search-palette.tsx |  | Gate fixed a Phase 4 search palette focus defect outside files_modified | open |  | 2026-10-07T21:32:00.531Z |  |
+| 88 | 07 | unmet-truth | apps/api/src/realtime-presence.int.test.ts |  | Rate-limit presence test (line ~430) flaky under load; failed once while a parallel dump ran, 9/9 alone | open |  | 2026-10-08T00:51:08.081Z |  |
 
 ````json
 [
@@ -1147,6 +1148,18 @@ last_updated: 2026-10-07T21:32:00.531Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-07T21:32:00.531Z",
+    "resolved_at": null
+  },
+  {
+    "id": 88,
+    "kind": "unmet-truth",
+    "phase": "07",
+    "file": "apps/api/src/realtime-presence.int.test.ts",
+    "line": null,
+    "description": "Rate-limit presence test (line ~430) flaky under load; failed once while a parallel dump ran, 9/9 alone",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-08T00:51:08.081Z",
     "resolved_at": null
   }
 ]
