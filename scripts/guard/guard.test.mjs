@@ -86,8 +86,16 @@ describe("guard: policy tests, RLS and focused tests", () => {
     assert.match(res.out, /packages\/db\/src\/x\.int\.test\.ts/);
   });
 
-  it("the same skip outside the policy test paths passes", () => {
-    put("apps/api/src/modules/chat/x.test.ts", `${SKIP}("renders a preview", () => {});\n`);
+  it("a skipped test anywhere in the API or the packages fails: tenant isolation lives in many modules", () => {
+    put("apps/api/src/modules/search/x.int.test.ts", `${SKIP}("org B never sees org A's hits", () => {});\n`);
+    const res = semgrep();
+    assert.notEqual(res.status, 0, res.out);
+    assert.match(res.out, /ocw\.skipped-policy-test/);
+    assert.match(res.out, /apps\/api\/src\/modules\/search\/x\.int\.test\.ts/);
+  });
+
+  it("the same skip outside the API and the packages passes", () => {
+    put("apps/web/lib/x.test.ts", `${SKIP}("renders a preview", () => {});\n`);
     const res = semgrep();
     assert.equal(res.status, 0, res.out);
   });

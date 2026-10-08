@@ -55,17 +55,11 @@ rules:
       - pattern: xdescribe(...)
       - pattern: xtest(...)
     paths:
+      # Every API and package test: tenant-isolation and permission cases live in most modules (search, ai-chat,
+      # chat, work-session…), so a name list always misses some (07 verification gap).
       include:
-        - /packages/db/src/**/*.test.ts
-        - /packages/contracts/src/permissions*.test.ts
-        - /apps/api/src/authz*.test.ts
-        - /apps/api/src/modules/organization/**/*.test.ts
-        - /apps/api/src/modules/**/access*.test.ts
-        - /apps/api/src/modules/**/grants*.test.ts
-        - /apps/api/src/modules/**/policy*.test.ts
-        - /apps/api/src/modules/**/permissions*.test.ts
-        - /apps/api/src/modules/**/members*.test.ts
-        - /apps/api/src/modules/bot-capabilities/**/*.test.ts
+        - /apps/api/src/**/*.test.ts
+        - /packages/*/src/**/*.test.ts
         - /apps/local-runtime/src/codex/mode-policy.test.ts
 
   - id: ocw.focused-test
