@@ -3,14 +3,17 @@
 //   pnpm ocw backup [--out DIR] [--env-file F | --dir D] [--consistent]
 //   --out DIR        where to write (default backups/<UTC timestamp>); must not exist or be empty
 //   --consistent     stop api, web and openclaw for the duration (default: online; pg_dump is one snapshot)
-// The directory (0700, files 0600) holds sealed secrets and cell sign-ins: keep it private. It never holds .env or
-// secrets/, and it is useless without them (back them up separately). Restore with `pnpm ocw restore DIR --yes`.
+// The directory (0700, files 0600) holds sealed secrets and cell sign-ins: keep it private. It never holds .env and is
+// useless without it (back it up separately). With the vault profile on it also holds OpenBao's data volume and
+// secrets/ (seal key, recovery material), since the API-only secrets exist nowhere else: keep it as private as .env.
+// Restore with `pnpm ocw restore DIR --yes`.
 // docs/self-hosting/backup-restore.md
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
   closeSync,
+  copyFileSync,
   createReadStream,
   existsSync,
   mkdirSync,
@@ -30,13 +33,39 @@ export const MANIFEST = "manifest.json";
 export const DB_DUMP = "db.dump";
 export const OBJECTS_INDEX = "objects.json";
 export const CELL_STATE = "openclaw-state.tar";
+/** Vault profile (07-06): OpenBao's raft data, its static seal key and the init (recovery) material from secrets/. */
+export const OPENBAO_STATE = "openbao-data.tar";
+export const SEAL_KEY = "openbao-seal.key";
+export const OPENBAO_INIT = "openbao-init.json";
 /** The files a manifest may list (anything else is refused on restore). */
-export const KNOWN_FILES = [DB_DUMP, OBJECTS_INDEX, CELL_STATE];
+export const KNOWN_FILES = [DB_DUMP, OBJECTS_INDEX, CELL_STATE, OPENBAO_STATE, SEAL_KEY, OPENBAO_INIT];
 /** Services that write state; `--consistent` (and restore) stop them. */
 export const WRITERS = ["api", "web", "openclaw"];
 export const MIGRATOR = "ocw_migrator";
 /** Where the cell keeps its state (the `openclaw-state` volume in compose.yaml). */
 export const CELL_STATE_DIR = "/home/node/.openclaw";
+/** OpenBao's storage directory (the `openbao-data` volume in infra/openbao/compose.yaml). */
+export const OPENBAO_DATA_DIR = "/openbao/file";
+export const OPENBAO = "openbao";
+
+/** True when the env file turns the `vault` profile on (COMPOSE_PROFILES). */
+export function vaultEnabled(values) {
+  return (values.get("COMPOSE_PROFILES") ?? "")
+    .split(",")
+    .map((p) => p.trim())
+    .includes("vault");
+}
+
+/**
+ * Where this install keeps its seal key and init material: OCW_OPENBAO_SEAL_KEY_FILE (relative paths against the env
+ * file's directory, as `ocw enable vault` writes them next to it) and openbao-init.json beside it. Null when unset.
+ */
+export function vaultFiles(values, envFile) {
+  const raw = values.get("OCW_OPENBAO_SEAL_KEY_FILE") ?? "";
+  if (raw === "") return null;
+  const seal = path.resolve(path.dirname(envFile), raw);
+  return { seal, init: path.join(path.dirname(seal), OPENBAO_INIT) };
+}
 const OBJECT_STORE_CLI = ["node", "--import", "tsx", "src/cli/object-store.ts"];
 
 const SPEC = { boolean: ["consistent", "help"], string: ["out", "env-file", "dir"] };
@@ -176,6 +205,14 @@ export async function main(argv, deps = {}) {
     Boolean(values.get("OCW_S3_ACCESS_KEY_ID")) &&
     Boolean(values.get("OCW_S3_SECRET_ACCESS_KEY") || values.get("OCW_S3_SECRET_ACCESS_KEY_FILE"));
 
+  const vault = vaultEnabled(values) ? vaultFiles(values, envFile) : null;
+  if (vaultEnabled(values) && (!vault || !existsSync(vault.seal))) {
+    throw new Error(
+      "the vault profile is on but OCW_OPENBAO_SEAL_KEY_FILE does not name an existing seal key file: " +
+        "without it OpenBao's data cannot be unsealed (docs/self-hosting/secrets.md)",
+    );
+  }
+
   const running = runningServices(run);
   if (!running.includes("postgres")) throw new Error("postgres is not running: start the stack first");
   prepareOut(out);
@@ -185,6 +222,7 @@ export async function main(argv, deps = {}) {
   let migrations = [];
   let objects = null;
   let cell = false;
+  let vaultTaken = false;
   try {
     if (stopped.length > 0) {
       log(`- stopping ${stopped.join(", ")} (--consistent)`);
@@ -261,6 +299,43 @@ export async function main(argv, deps = {}) {
     } finally {
       if (pauseCell) must(run, "start openclaw", ["start", "openclaw"]);
     }
+
+    if (vault) {
+      // The API-only secrets live only in OpenBao once the vault is on: without its data and seal key a restored
+      // install cannot boot. Raft files are copied with OpenBao stopped (the api reads it only at boot).
+      const pauseBao = running.includes(OPENBAO);
+      log(`- OpenBao: archive of ${OPENBAO_DATA_DIR}${pauseBao ? " (openbao stopped for the copy)" : ""}`);
+      if (pauseBao) must(run, "stop openbao", ["stop", OPENBAO]);
+      try {
+        toFile(
+          run,
+          "OpenBao data archive",
+          [
+            "run",
+            "--rm",
+            "--no-deps",
+            "-T",
+            "--user",
+            "0",
+            "--entrypoint",
+            "tar",
+            OPENBAO,
+            "-C",
+            OPENBAO_DATA_DIR,
+            "-cf",
+            "-",
+            ".",
+          ],
+          path.join(out, OPENBAO_STATE),
+        );
+      } finally {
+        if (pauseBao) must(run, "start openbao", ["start", OPENBAO]);
+      }
+      log("- secrets/: the OpenBao seal key and recovery material");
+      copyFileSync(vault.seal, path.join(out, SEAL_KEY));
+      if (existsSync(vault.init)) copyFileSync(vault.init, path.join(out, OPENBAO_INIT));
+      vaultTaken = true;
+    }
   } finally {
     if (stopped.length > 0) {
       log(`- starting ${stopped.join(", ")}`);
@@ -268,7 +343,15 @@ export async function main(argv, deps = {}) {
     }
   }
 
-  for (const name of [DB_DUMP, ...(objects ? [OBJECTS_INDEX] : []), ...(cell ? [CELL_STATE] : [])]) {
+  const vaultNames = vaultTaken
+    ? [OPENBAO_STATE, SEAL_KEY, ...(existsSync(path.join(out, OPENBAO_INIT)) ? [OPENBAO_INIT] : [])]
+    : [];
+  for (const name of [
+    DB_DUMP,
+    ...(objects ? [OBJECTS_INDEX] : []),
+    ...(cell ? [CELL_STATE] : []),
+    ...vaultNames,
+  ]) {
     files[name] = await sha256File(path.join(out, name));
   }
   const manifest = {
@@ -278,7 +361,7 @@ export async function main(argv, deps = {}) {
     project,
     consistent: Boolean(opts.consistent),
     migrations,
-    components: { database: true, objects: objects !== null, cellState: cell },
+    components: { database: true, objects: objects !== null, cellState: cell, vault: vaultTaken },
     files,
   };
   writeFileSync(path.join(out, MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
@@ -292,8 +375,19 @@ export async function main(argv, deps = {}) {
     log(`  ${OBJECTS_INDEX} + objects/  ${objects.length} objects, ${bytes} bytes`);
   }
   if (cell) log(`  ${CELL_STATE}  ${size(CELL_STATE)} bytes`);
+  if (vaultTaken) {
+    log(`  ${OPENBAO_STATE}  ${size(OPENBAO_STATE)} bytes (OpenBao data, vault profile)`);
+    log(`  ${vaultNames.slice(1).join(", ")}  from secrets/ (the seal key unseals that data)`);
+  }
   log(`  ${MANIFEST}  checksums of every file`);
-  log("Not included: .env and secrets/ (back them up separately; the backup is useless without them).");
+  if (vaultTaken) {
+    log(
+      "Not included: .env (back it up separately). This backup holds OpenBao's data and its seal key: anyone with it " +
+        "can read the API's secrets, so keep it as private as .env.",
+    );
+  } else {
+    log("Not included: .env and secrets/ (back them up separately; the backup is useless without them).");
+  }
   return 0;
 }
 

@@ -123,7 +123,7 @@ describe("ocw backup", () => {
     const m = JSON.parse(readFileSync(path.join(out, "manifest.json"), "utf8"));
     assert.equal(m.format, 1);
     assert.deepEqual(m.migrations, LOCAL_MIGRATIONS);
-    assert.deepEqual(m.components, { database: true, objects: true, cellState: true });
+    assert.deepEqual(m.components, { database: true, objects: true, cellState: true, vault: false });
     for (const [name, sum] of Object.entries(m.files)) {
       assert.equal(sha(readFileSync(path.join(out, name))), sum, name);
     }
@@ -310,4 +310,177 @@ describe("ocw restore", () => {
     );
     assert.equal(calls.length, 0);
   });
+});
+
+// ---------------------------------------------------------------- vault profile (07-10): OpenBao data + secrets/
+
+describe("ocw backup / restore with the vault profile", () => {
+  const SEAL = Buffer.from("0123456789abcdef0123456789abcdef"); // 32 raw bytes in the real file
+  const INIT = '{"recovery_keys_b64":["recovery-canary-8888"],"root_token_revoked":true}\n';
+  let secretsDir;
+  let sealFile;
+  let initFile;
+
+  /** The fake runner, plus `openbao` among the running services and its own tar output. */
+  function vaultRunner(opts) {
+    const base = fakeRunner(opts);
+    return (args, o = {}) => {
+      if (args[0] === "ps") {
+        calls.push({ args, env: o.env ?? {}, stdin: o.stdin });
+        return { status: 0, stdout: "postgres\nredis\ngarage\napi\nweb\nopenclaw\nopenbao\n" };
+      }
+      if (args.includes("openbao") && args.includes("tar") && args.includes("-cf")) {
+        calls.push({ args, env: o.env ?? {}, stdin: o.stdin });
+        writeSync(o.stdout, "fake openbao raft tar");
+        return { status: 0, stdout: "" };
+      }
+      return base(args, o);
+    };
+  }
+
+  function enableVault() {
+    secretsDir = path.join(root, "secrets");
+    mkdirSync(secretsDir, { mode: 0o700 });
+    sealFile = path.join(secretsDir, "openbao-seal.key");
+    initFile = path.join(secretsDir, "openbao-init.json");
+    writeFileSync(sealFile, SEAL, { mode: 0o600 });
+    writeFileSync(initFile, INIT, { mode: 0o600 });
+    writeEnv(envFile, {
+      COMPOSE_PROFILES: "proxy,vault",
+      OCW_OPENBAO_ADDR: "http://openbao:8200",
+      OCW_OPENBAO_SEAL_KEY_FILE: sealFile,
+      OCW_OPENBAO_ROLE_ID: "role-id-value",
+      OCW_OPENBAO_SECRET_ID: "approle-secret-id-9999",
+    });
+  }
+
+  async function vaultBackup(name = "v1") {
+    const out = path.join(root, name);
+    await backup(["--env-file", envFile, "--out", out], { runner: vaultRunner(), log });
+    return out;
+  }
+
+  it("takes OpenBao's data volume and secrets/ (seal key, recovery material), checksummed, 0600", async () => {
+    enableVault();
+    const out = await vaultBackup();
+    const m = JSON.parse(readFileSync(path.join(out, "manifest.json"), "utf8"));
+    assert.equal(m.components.vault, true);
+    assert.deepEqual(Object.keys(m.files).sort(), [
+      "db.dump",
+      "objects.json",
+      "openbao-data.tar",
+      "openbao-init.json",
+      "openbao-seal.key",
+      "openclaw-state.tar",
+    ]);
+    for (const f of ["openbao-data.tar", "openbao-seal.key", "openbao-init.json"]) {
+      assert.equal(statSync(path.join(out, f)).mode & 0o777, 0o600, f);
+      assert.equal(sha(readFileSync(path.join(out, f))), m.files[f], f);
+    }
+    assert.ok(readFileSync(path.join(out, "openbao-seal.key")).equals(SEAL));
+    // The volume is archived through the openbao service (as root, its data dir), OpenBao paused around the copy.
+    const seq = calls.map((c) => c.args.join(" "));
+    const tar = seq.indexOf(
+      "run --rm --no-deps -T --user 0 --entrypoint tar openbao -C /openbao/file -cf - .",
+    );
+    const stop = seq.indexOf("stop openbao");
+    const start = seq.indexOf("start openbao");
+    assert.ok(stop >= 0 && stop < tar && tar < start, seq.join(" | "));
+    // Says what it holds; never a value (the AppRole secret id stays in .env, the recovery key only in the file).
+    const text = lines.join("\n");
+    assert.match(text, /OpenBao/);
+    assert.match(text, /secrets\//);
+    for (const v of ["approle-secret-id-9999", "recovery-canary-8888", ...Object.values(SECRETS)]) {
+      assert.ok(!text.includes(v), `${v} printed`);
+      assert.ok(!readFileSync(path.join(out, "manifest.json"), "utf8").includes(v), `${v} in the manifest`);
+    }
+  });
+
+  it("without the vault profile takes nothing of OpenBao, even when a secrets/ directory exists", async () => {
+    enableVault();
+    writeEnv(envFile, { OCW_OPENBAO_SEAL_KEY_FILE: sealFile });
+    const out = await vaultBackup();
+    const m = JSON.parse(readFileSync(path.join(out, "manifest.json"), "utf8"));
+    assert.equal(m.components.vault, false);
+    assert.ok(!Object.keys(m.files).some((f) => f.startsWith("openbao")));
+    assert.ok(!calls.some((c) => c.args.includes("openbao")));
+  });
+
+  it("refuses a vault install whose seal key file is missing, before writing anything", async () => {
+    enableVault();
+    rmSync(sealFile);
+    const out = path.join(root, "v-missing");
+    await assert.rejects(
+      backup(["--env-file", envFile, "--out", out], { runner: vaultRunner(), log }),
+      /OCW_OPENBAO_SEAL_KEY_FILE/,
+    );
+    assert.ok(!existsSync(out));
+  });
+
+  it("restores secrets/ first (a new machine has none), then OpenBao's volume, and starts OpenBao before the api", async () => {
+    enableVault();
+    const out = await vaultBackup();
+    rmSync(secretsDir, { recursive: true, force: true });
+    calls = [];
+    const seen = { sealBeforeVolume: false };
+    const runner = vaultRunner();
+    await restore([out, "--yes", "--env-file", envFile], {
+      runner: (args, o) => {
+        if (args.includes("openbao") && args.join(" ").includes("-xf -")) {
+          seen.sealBeforeVolume = existsSync(sealFile) && readFileSync(sealFile).equals(SEAL);
+        }
+        return runner(args, o);
+      },
+      log,
+    });
+    const seq = calls.map((c) => c.args.join(" "));
+    assert.ok(seq.includes("stop api web openclaw openbao"), seq.join(" | "));
+    const volume = seq.findIndex(
+      (s) => s.includes("--entrypoint sh openbao -c") && s.includes("/openbao/file") && s.includes("-xf -"),
+    );
+    const baoUp = seq.indexOf("up -d --wait openbao");
+    const allUp = seq.lastIndexOf("up -d --wait");
+    assert.ok(volume >= 0 && volume < baoUp && baoUp < allUp, seq.join(" | "));
+    assert.equal(typeof calls[volume].stdin, "number", "the archive is streamed on stdin");
+    assert.ok(
+      seen.sealBeforeVolume,
+      "the seal key file exists before the volume is touched (no bind-mount dir)",
+    );
+    assert.ok(readFileSync(sealFile).equals(SEAL));
+    assert.equal(readFileSync(initFile, "utf8"), INIT);
+    assert.equal(statSync(sealFile).mode & 0o777, 0o600);
+    assert.equal(statSync(initFile).mode & 0o777, 0o600);
+    assert.equal(statSync(secretsDir).mode & 0o777, 0o700);
+    for (const l of lines)
+      for (const v of ["recovery-canary-8888", ...Object.values(SECRETS)]) assert.ok(!l.includes(v));
+  });
+
+  it("a vault backup onto an env file without the vault profile is refused before any change", async () => {
+    enableVault();
+    const out = await vaultBackup();
+    writeEnv(envFile);
+    calls = [];
+    await assert.rejects(
+      restore([out, "--yes", "--env-file", envFile], { runner: vaultRunner(), log }),
+      /vault profile/,
+    );
+    assert.equal(calls.length, 0);
+  });
+
+  for (const victim of ["openbao-data.tar", "openbao-seal.key", "openbao-init.json"]) {
+    it(`a changed byte in ${victim} → checksum error naming it, nothing run`, async () => {
+      enableVault();
+      const out = await vaultBackup();
+      calls = [];
+      const file = path.join(out, victim);
+      const bytes = readFileSync(file);
+      bytes[bytes.length - 1] ^= 0x01;
+      writeFileSync(file, bytes);
+      await assert.rejects(
+        restore([out, "--yes", "--env-file", envFile], { runner: vaultRunner(), log }),
+        (err) => err.message.includes("checksum mismatch") && err.message.includes(victim),
+      );
+      assert.equal(calls.length, 0);
+    });
+  }
 });

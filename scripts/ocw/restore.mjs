@@ -4,9 +4,21 @@
 // Checks every checksum and refuses a backup made by a newer release before changing anything. Then: stop api, web
 // and openclaw → start postgres, redis, garage → migrate (roles) → drop schemas app, auth, drizzle and pg_restore in one
 // transaction as ocw_migrator → migrate (upgrades an older backup, re-applies grants and policies) → objects → cell
-// state → start everything. Uses the current .env (keys, passwords); the backup never carries them.
+// state → [vault profile: secrets/ seal key and recovery material, then OpenBao's volume, then OpenBao] → start
+// everything. Uses the current .env (keys, passwords, AppRole credentials); the backup never carries it.
 // docs/self-hosting/backup-restore.md
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  rmdirSync,
+  statSync,
+} from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -22,7 +34,14 @@ import {
   MIGRATOR,
   must,
   OBJECTS_INDEX,
+  OPENBAO,
+  OPENBAO_DATA_DIR,
+  OPENBAO_INIT,
+  OPENBAO_STATE,
+  SEAL_KEY,
   sha256File,
+  vaultEnabled,
+  vaultFiles,
   WRITERS,
 } from "./backup.mjs";
 import { composeArgs, parseArgs, REPO_ROOT, readEnv, resolveEnvFile, usageError } from "./env-file.mjs";
@@ -127,15 +146,25 @@ export async function main(argv, deps = {}) {
   const dir = path.resolve(positionals[0]);
   const manifest = await verifyBackup(dir, { migrations: localMigrations(projectDir) });
   const { values } = readEnv(envFile);
+  const withVault = Boolean(manifest.files[OPENBAO_STATE]);
+  const vault = withVault ? vaultFiles(values, envFile) : null;
+  if (withVault && (!vaultEnabled(values) || !vault || !manifest.files[SEAL_KEY])) {
+    throw new Error(
+      "this backup holds OpenBao's data (vault profile), but the env file does not turn the vault profile on " +
+        "(COMPOSE_PROFILES with vault, OCW_OPENBAO_SEAL_KEY_FILE): restore the env file saved with this backup first. " +
+        "Nothing was changed.",
+    );
+  }
   const pgEnv = { PGPASSWORD: values.get("OCW_DB_MIGRATOR_PASSWORD") ?? "" };
   const run = deps.runner ?? composeRunner(envFile, { projectDir });
   const step = (text) => log(`- ${text}`);
+  const stopped = withVault ? [...WRITERS, OPENBAO] : WRITERS;
 
   log(
     `Restoring ${dir} (made ${manifest.createdAt}, ${manifest.migrations.length} migrations); checksums verified`,
   );
-  step(`stopping ${WRITERS.join(", ")}`);
-  must(run, "stop", ["stop", ...WRITERS]);
+  step(`stopping ${stopped.join(", ")}`);
+  must(run, "stop", ["stop", ...stopped]);
   step("starting postgres, redis, garage");
   must(run, "up", ["up", "-d", "--wait", "postgres", "redis", "garage"]);
   step("migrate (database roles)");
@@ -202,6 +231,43 @@ export async function main(argv, deps = {}) {
       ],
       path.join(dir, CELL_STATE),
     );
+  }
+  if (vault) {
+    // The seal key file first: compose bind-mounts it into every openbao container, and Docker would create a
+    // directory in its place if it were missing. The restored data only unseals with the backup's key.
+    step("secrets/: the OpenBao seal key and recovery material");
+    const secretsDir = path.dirname(vault.seal);
+    if (existsSync(vault.seal) && statSync(vault.seal).isDirectory()) rmdirSync(vault.seal);
+    mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
+    chmodSync(secretsDir, 0o700);
+    copyFileSync(path.join(dir, SEAL_KEY), vault.seal);
+    chmodSync(vault.seal, 0o600);
+    if (manifest.files[OPENBAO_INIT]) {
+      copyFileSync(path.join(dir, OPENBAO_INIT), vault.init);
+      chmodSync(vault.init, 0o600);
+    }
+    step(`OpenBao: replacing ${OPENBAO_DATA_DIR}`);
+    fromFile(
+      run,
+      "OpenBao data restore",
+      [
+        "run",
+        "--rm",
+        "--no-deps",
+        "-T",
+        "--user",
+        "0",
+        "--entrypoint",
+        "sh",
+        OPENBAO,
+        "-c",
+        `find ${OPENBAO_DATA_DIR} -mindepth 1 -delete && tar -C ${OPENBAO_DATA_DIR} -xf -`,
+      ],
+      path.join(dir, OPENBAO_STATE),
+    );
+    // The api reads its secrets from OpenBao at boot: OpenBao must be unsealed before the api starts.
+    step("starting OpenBao (auto-unseal with the restored key)");
+    must(run, "up openbao", ["up", "-d", "--wait", OPENBAO]);
   }
   step("starting the stack (up -d --wait)");
   must(run, "up", ["up", "-d", "--wait"]);
