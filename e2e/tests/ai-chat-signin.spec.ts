@@ -144,8 +144,10 @@ test("a wrong paste is explained in place and the right one still connects", asy
   const dialog = page.getByTestId("chatgpt-connect-dialog");
   const popupPromise = page.waitForEvent("popup");
   await dialog.getByTestId("chatgpt-dialog-continue").click();
-  await (await popupPromise).close().catch(() => {});
+  const popup = await popupPromise;
+  // Close the tab only once it has landed: closing it earlier aborts the authorize -> loopback navigation.
   await expect.poll(landed, { timeout: 10_000 }).toMatch(/^http:\/\/127\.0\.0\.1:1455\//u);
+  await popup.close();
 
   const input = dialog.getByTestId("chatgpt-redirect-input");
   await input.fill(landed().replace("127.0.0.1", "localhost"));
