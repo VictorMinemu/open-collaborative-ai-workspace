@@ -1,0 +1,3 @@
+# Profile `proxy`: Caddy reverse proxy (TLS, WebSocket, presigned Garage URLs). Included by compose.yaml; its
+# services start only when COMPOSE_PROFILES names `proxy`. Stub until plan 07-08 fills it (SELF-05, D-07).
+services: {}

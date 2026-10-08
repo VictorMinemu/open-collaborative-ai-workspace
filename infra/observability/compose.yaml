@@ -1,0 +1,3 @@
+# Profile `observability`: OpenTelemetry Collector, Prometheus, Grafana, Loki and Tempo. Included by compose.yaml; its
+# services start only when COMPOSE_PROFILES names `observability`. Stub until plan 07-07 fills it (FOUND-05, D-05).
+services: {}

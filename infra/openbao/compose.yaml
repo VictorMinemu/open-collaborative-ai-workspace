@@ -1,0 +1,3 @@
+# Profile `vault`: OpenBao for the API-only secrets. Included by compose.yaml; its services start only when
+# COMPOSE_PROFILES names `vault`. Stub until plan 07-06 fills it (SELF-02, D-04, D-16).
+services: {}
