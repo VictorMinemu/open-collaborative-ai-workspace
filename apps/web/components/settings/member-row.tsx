@@ -131,8 +131,11 @@ function MemberActions({
 
   function onConfirm() {
     const action = confirming === "deactivate" ? deactivate : reactivate;
-    action.mutate(member.userId, {
-      onSuccess: () => {
+    // mutateAsync, not mutate(…, callbacks): the mutation's onSettled refetches the list, which hides a deactivated
+    // member and unmounts this row, and React Query drops per-call callbacks of an unmounted observer, so the
+    // confirmation toast was lost depending on timing. The returned promise settles either way.
+    action.mutateAsync(member.userId).then(
+      () => {
         toast.success(
           confirming === "deactivate"
             ? `${member.displayName} was deactivated`
@@ -140,11 +143,11 @@ function MemberActions({
         );
         setConfirming(null);
       },
-      onError: (err) =>
+      (err: unknown) =>
         toast.error(confirming === "deactivate" ? "Could not deactivate" : "Could not reactivate", {
           description: errorMessage(err),
         }),
-    });
+    );
   }
 
   return (
