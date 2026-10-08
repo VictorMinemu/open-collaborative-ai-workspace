@@ -97,7 +97,11 @@ describe("observability profile: off by default (SELF-01, D-05)", () => {
   });
 
   it("every service of the file belongs to the profile", () => {
-    const blocks = PROFILE_FILE.split(/^ {2}(?=[a-z][a-z-]*:$)/m).slice(1);
+    const services = PROFILE_FILE.slice(
+      PROFILE_FILE.indexOf("\nservices:\n"),
+      PROFILE_FILE.indexOf("\nvolumes:\n"),
+    );
+    const blocks = services.split(/^ {2}(?=[a-z][a-z-]*:$)/m).slice(1);
     assert.equal(blocks.length, SERVICES.length);
     for (const block of blocks)
       assert.match(block, /^ {4}profiles: \["observability"\]$/m, block.split("\n")[0]);
@@ -184,7 +188,7 @@ describe("observability profile: Grafana access (D-13, T-07-07-02)", () => {
     "no `:?` guard: installs without the profile (and without the password) still pass config",
     needsDocker,
     () => {
-      assert.doesNotMatch(PROFILE_FILE, /:\?/);
+      assert.doesNotMatch(PROFILE_FILE, /\$\{[A-Z0-9_]+:\?/);
       const env = config({ ...REQUIRED, COMPOSE_PROFILES: "observability" }).services.grafana.environment;
       assert.equal(env.GF_SECURITY_ADMIN_PASSWORD, "");
     },
