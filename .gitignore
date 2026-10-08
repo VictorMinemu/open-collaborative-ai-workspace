@@ -18,6 +18,9 @@ coverage/
 !.env.example
 *.pem
 *.key
+# Default output of `pnpm ocw enable vault` and `pnpm ocw backup` (secrets and data, never committed)
+/secrets/
+/backups/
 
 # OS / editor
 .DS_Store
