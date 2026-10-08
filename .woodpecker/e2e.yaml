@@ -62,7 +62,7 @@ steps:
     commands:
       - cd "$${W}"
       # A cancelled run skips its cleanup step: start from a fresh stack either way.
-      - docker compose down -v --remove-orphans
+      - sh infra/ci/e2e-reset.sh
       # Garage (attachments, ADR-0015) uses the keys setup:env generated; the API reaches it on 127.0.0.1:3900.
       - pnpm setup:env
       - docker compose up -d --wait postgres redis garage
@@ -99,7 +99,7 @@ steps:
     volumes: [*docker_sock, *shared]
     environment: *env
     commands:
-      - docker compose -p "$${COMPOSE_PROJECT_NAME}" down -v --remove-orphans || true
+      - sh infra/ci/e2e-reset.sh
       - rm -rf "$${W}"
     when:
       status: [success, failure]
