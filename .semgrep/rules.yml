@@ -1,0 +1,27 @@
+# Repository-local Semgrep rules run by `pnpm guard` (scripts/guard/run.mjs) inside `pnpm verify` (D-08, FOUND-07).
+# Each rule refuses a change that weakens the platform's policy. An allowlist entry names one exact file (or the one
+# directory ADR-0012 designates) and, for tests, only tests that assert the denial. Never loosen a pattern instead.
+# Path patterns start with "/" so they are anchored at the repository root. Fixtures: .semgrep/tests/ (--rule-tests).
+rules:
+  - id: ocw.permission-bypass-token
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      A runtime permission-bypass mode appears outside the ADR-0012 path. Full access is enabled only through
+      org policy ∩ device opt-in ∩ grain, server-checked and audited (docs/adr/0012-full-access-mode-and-shared-devices.md).
+    pattern-regex: (bypassPermissions|danger-full-access|allowDangerouslySkipPermissions|dangerously-skip-permissions|dangerouslySkipPermissions)
+    paths:
+      exclude:
+        # The ADR-0012 path: runtime adapters, the fixture recorder and the contracts that name the modes.
+        - /apps/local-runtime/src/claude/
+        - /apps/local-runtime/src/codex/
+        - /apps/local-runtime/scripts/record-fixture.ts
+        - /packages/contracts/src/runtime-controls/
+        - /packages/contracts/src/session-events.ts
+        - /packages/contracts/src/device-link.ts
+        # Tests that assert the bypass is refused.
+        - /apps/api/src/modules/work-session/turn-mode.int.test.ts
+        - /apps/local-runtime/src/daemon.test.ts
+        - /packages/contracts/src/session-settings.test.ts
+        - /packages/contracts/src/slash-commands.test.ts
+        - /packages/db/src/rls-isolation.int.test.ts
