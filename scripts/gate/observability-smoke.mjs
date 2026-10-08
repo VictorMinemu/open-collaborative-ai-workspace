@@ -2,13 +2,18 @@
 // Observability smoke (gate step; FOUND-05, SELF-01 "enable later", D-05, D-13, D-18): a running stack WITHOUT the
 // `observability` profile gets data, then `pnpm ocw enable observability` turns the profile on. Checks: the api alone
 // is recreated and is healthy, the data is intact, and a traced API request carrying a query-string canary shows up
-// in Tempo with fastify, http and pg spans, without the canary or a host path.
+// in Tempo (fastify request, http server and pg query spans), its duration metric labelled by route in Prometheus and
+// its log lines (same trace id) in Loki. Neither Tempo nor Loki holds the canary, this checkout's path or process
+// attributes. Grafana answers with the generated password only (admin:admin and anonymous are refused), lists the
+// three datasources and refuses to start with an empty password, naming OCW_GRAFANA_ADMIN_PASSWORD.
 //
 //   node scripts/gate/observability-smoke.mjs --up               # own gate stack (built, booted, torn down)
 //   node scripts/gate/observability-smoke.mjs --attach <envFile> # a stack left by compose-gate.mjs --keep
 //
 // stdout: one JSON summary; exit 0 = every check ok. Backends are queried from inside the compose network (node in
-// the api container); none of them is published. Secret values are never printed.
+// the api container); none of them is published. Grafana is checked on its loopback port. Secret values are never
+// printed. Gate-only overrides live in the stack's temp dir: api LOG_LEVEL=info when the stack runs quieter
+// (compose.e2e.yaml), and Loki's WAL disk guard at 99% instead of 90% (see GATE_LOKI_COMMAND).
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, writeFileSync } from "node:fs";
@@ -27,11 +32,18 @@ import {
 
 export const PROFILE = "observability";
 /** Services of the profile that must be running once it is enabled. */
-export const PROFILE_SERVICES = ["otel-collector", "tempo"];
+export const PROFILE_SERVICES = ["otel-collector", "tempo", "prometheus", "loki", "grafana"];
+export const DATASOURCES = { Prometheus: "ocw-prometheus", Loki: "ocw-loki", Tempo: "ocw-tempo" };
 const CANARY = "OBS-CANARY";
 /** Levels at which the api emits no request logs (info); the smoke lowers them for the api only. */
 const QUIET_LEVELS = new Set(["fatal", "error", "warn", "silent"]);
-const LOG_OVERRIDE = "observability-smoke.api-log-level.yaml";
+const GATE_OVERRIDE = "observability-smoke.gate-overrides.yaml";
+/**
+ * Loki's WAL refuses writes ("Ingester is shutting down") once the disk under it is 90% full; the product keeps that
+ * guard (docs/self-hosting/observability.md). Gate stacks are disposable and run on a shared developer Docker disk that
+ * hovers around 90%, so they raise it to 99%: the step proves the pipeline, not the machine's free space.
+ */
+const GATE_LOKI_COMMAND = ["-config.file=/etc/loki/config.yaml", "-ingester.wal-disk-full-threshold=0.99"];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -78,13 +90,51 @@ export function inNetworkGet(ctx, url, headers = {}) {
   return JSON.parse(res.stdout);
 }
 
-/** Strings no stored telemetry may contain: the canary, this checkout's absolute path, process attributes. */
+/**
+ * Strings no stored telemetry may contain: the canary, this checkout's absolute path, the process attributes (Loki
+ * spells attribute names with underscores) and the container's node binary path (process.executable.path's value).
+ */
 export function leaks(text) {
   const found = [];
-  for (const needle of [CANARY, REPO_ROOT, "process.executable.path", "process.command_args"]) {
+  for (const needle of [
+    CANARY,
+    REPO_ROOT,
+    "process.executable.path",
+    "process_executable_path",
+    "process.command_args",
+    "process_command_args",
+    "/usr/local/bin/node",
+  ]) {
     if (text.includes(needle)) found.push(needle === REPO_ROOT ? "<repository path>" : needle);
   }
   return found;
+}
+
+/**
+ * The last warn/error lines of the collector and the backends (export failures, rejected pushes), shortened. Attached
+ * to a failed check so a flaky run explains itself; these lines carry status messages, not telemetry payloads.
+ */
+export function pipelineErrors(ctx) {
+  const out = {};
+  for (const svc of ["otel-collector", "loki", "tempo", "prometheus"]) {
+    const r = ctx.compose(["logs", "--no-color", "--tail", "400", svc]);
+    out[svc] = (r.stdout ?? "")
+      .split("\n")
+      .filter(
+        (l) =>
+          /\b(warn|error)\b|level=(warn|error)|Dropping|failed/i.test(l) && !/alias is deprecated/.test(l),
+      )
+      .slice(-8)
+      .map((l) => l.slice(0, 300));
+  }
+  // Counts only: did the api itself log requests (and with trace ids) while Loki stayed short?
+  const api = (ctx.compose(["logs", "--no-color", "api"]).stdout ?? "").split("\n");
+  out.apiStdout = {
+    lines: api.length,
+    requestCompleted: api.filter((l) => l.includes('"request completed"')).length,
+    withTraceId: api.filter((l) => l.includes('"trace_id"')).length,
+  };
+  return out;
 }
 
 /** OTLP JSON → flat span list `{ name, kind, attrs }` (Tempo's /api/v2/traces answer). */
@@ -139,22 +189,30 @@ export async function run(ctx) {
     return { ok: posted.status === 200 && state.messages > 0, messages: state.messages };
   });
 
-  // Request logs are info-level; a stack run with compose.e2e.yaml (LOG_LEVEL=warn) would export none to Loki.
-  await check("obs-api-log-level", async () => {
+  // Gate-only compose override in the stack's temp dir (removed with it): request logs are info-level, and a stack
+  // run with compose.e2e.yaml (LOG_LEVEL=warn) would export none to Loki; Loki's disk guard as above.
+  await check("obs-gate-overrides", async () => {
     const res = ctx.compose(["exec", "-T", "api", "printenv", "LOG_LEVEL"]);
     const level = (res.stdout ?? "").trim() || "info";
-    if (!QUIET_LEVELS.has(level)) return { ok: true, level, override: false };
-    const file = path.join(ctx.dir, LOG_OVERRIDE);
-    writeFileSync(file, "services:\n  api:\n    environment:\n      LOG_LEVEL: info\n", { mode: 0o600 });
+    const apiInfo = QUIET_LEVELS.has(level);
+    const file = path.join(ctx.dir, GATE_OVERRIDE);
+    const yaml = [
+      "services:",
+      ...(apiInfo ? ["  api:", "    environment:", "      LOG_LEVEL: info"] : []),
+      "  loki:",
+      `    command: ${JSON.stringify(GATE_LOKI_COMMAND)}`,
+      "",
+    ].join("\n");
+    writeFileSync(file, yaml, { mode: 0o600 });
     const files = (ctx.env.COMPOSE_FILE || "compose.yaml").split(":").filter(Boolean);
     if (!files.includes(file)) setEnvKeys(ctx.envFile, { COMPOSE_FILE: [...files, file].join(":") });
     ctx.reload();
-    return { ok: true, level, override: true };
+    return { ok: true, apiLogLevel: level, apiLogLevelOverride: apiInfo, lokiWalDiskFullThreshold: 0.99 };
   });
 
   await check("obs-enable", async () => {
     if (enabledBefore) {
-      // Already on: apply the log-level override (if any) the same way, recreating the api only.
+      // Already on: apply the gate overrides the same way (recreates api and loki).
       const res = ctx.compose(["up", "-d", "--wait", "--wait-timeout", "600"], {
         stdio: ["ignore", 2, 2],
         timeoutMs: 15 * 60_000,
@@ -208,14 +266,16 @@ export async function run(ctx) {
       { timeoutMs: 120_000 },
     );
     const after = containers(ctx);
+    // When the profile was already on, the gate overrides also recreate loki.
+    const allowed = enabledBefore ? ["api", "loki"] : ["api"];
     const recreated = Object.keys(state.before ?? {}).filter((s) => after[s]?.id !== state.before[s].id);
     const notRunning = PROFILE_SERVICES.filter((s) => after[s]?.state !== "running");
     const messages = Number(ctx.psql("select count(*) from app.messages"));
     return {
       ok:
         health.ok &&
-        recreated.length === 1 &&
-        recreated[0] === "api" &&
+        recreated.includes("api") &&
+        recreated.every((s) => allowed.includes(s)) &&
         notRunning.length === 0 &&
         messages === state.messages,
       recreated,
@@ -240,13 +300,15 @@ export async function run(ctx) {
         });
         if (r.status !== 200) return { ok: false, status: r.status };
         const spans = flattenSpans(JSON.parse(r.body));
+        // @fastify/otel's `request` span carries the route template; the http server span; a real query span.
         const fastify = spans.find(
-          (s) => s.scope?.includes("fastify") && s.attrs["http.route"] === "/api/v1/me",
+          (s) =>
+            s.scope?.includes("fastify") && s.name === "request" && s.attrs["http.route"] === "/api/v1/me",
         );
         const server = spans.find(
           (s) => /SERVER/.test(String(s.kind)) && s.scope?.includes("instrumentation-http"),
         );
-        const pg = spans.find((s) => s.scope?.includes("instrumentation-pg"));
+        const pg = spans.find((s) => s.scope?.includes("instrumentation-pg") && /^pg\.query/.test(s.name));
         return {
           ok: Boolean(fastify && server && pg),
           spans: spans.length,
@@ -259,6 +321,137 @@ export async function run(ctx) {
       { timeoutMs: 120_000, intervalMs: 3000 },
     );
     return { ...found, ok: found.ok && found.leaks?.length === 0 };
+  });
+
+  // The API exports metrics every 60 s (OTEL_METRIC_EXPORT_INTERVAL default), so this can take a minute.
+  await check("obs-metric-in-prometheus", async () => {
+    const query = 'http_server_request_duration_seconds_count{http_route="/api/v1/me"}';
+    return poll(
+      async () => {
+        const r = inNetworkGet(ctx, `http://prometheus:9090/api/v1/query?query=${encodeURIComponent(query)}`);
+        if (r.status !== 200) return { ok: false, status: r.status };
+        const series = JSON.parse(r.body).data?.result ?? [];
+        const labels = series[0]?.metric ?? {};
+        return {
+          ok: series.length > 0 && labels.job === "ocw-api",
+          series: series.length,
+          labels: Object.keys(labels).sort(),
+        };
+      },
+      { timeoutMs: 180_000, intervalMs: 5000 },
+    );
+  });
+
+  await check("obs-logs-in-loki", async () => {
+    const startNs = `${BigInt(Date.now() - 30 * 60_000) * 1_000_000n}`;
+    const lokiQuery = (q, limit) =>
+      inNetworkGet(
+        ctx,
+        `http://loki:3100/loki/api/v1/query_range?${new URLSearchParams({ query: q, start: startNs, limit: String(limit) })}`,
+      );
+    const found = await poll(
+      async () => {
+        const r = lokiQuery(`{service_name="ocw-api"} | trace_id="${state.traceId}"`, 100);
+        if (r.status !== 200) return { ok: false, status: r.status };
+        const streams = JSON.parse(r.body).data?.result ?? [];
+        const lines = streams.reduce((n, s) => n + (s.values?.length ?? 0), 0);
+        return { ok: lines > 0, lines };
+      },
+      { timeoutMs: 120_000, intervalMs: 3000 },
+    );
+    // Every api log line of the run (not just the traced request's) is searched for the leak needles.
+    const all = lokiQuery('{service_name="ocw-api"}', 5000);
+    const allLines = (JSON.parse(all.body).data?.result ?? []).reduce(
+      (n, s) => n + (s.values?.length ?? 0),
+      0,
+    );
+    const found2 = leaks(all.body);
+    const ok = found.ok && all.status === 200 && allLines > 0 && found2.length === 0;
+    return {
+      ...found,
+      ok,
+      searchedLines: allLines,
+      leaks: found2,
+      ...(ok ? {} : { diagnostics: pipelineErrors(ctx) }),
+    };
+  });
+
+  await check("obs-grafana", async () => {
+    const base = `http://127.0.0.1:${ctx.env.OCW_GRAFANA_PORT || "3301"}`;
+    const get = async (pathname, user, pass) => {
+      const headers = user
+        ? { authorization: `Basic ${Buffer.from(`${user}:${pass}`).toString("base64")}` }
+        : {};
+      const r = await fetch(`${base}${pathname}`, { headers, signal: AbortSignal.timeout(15_000) });
+      const text = await r.text();
+      return {
+        status: r.status,
+        json: r.headers.get("content-type")?.includes("json") ? JSON.parse(text) : null,
+      };
+    };
+    const health = await poll(
+      async () => {
+        const r = await get("/api/health");
+        return { ok: r.status === 200, status: r.status };
+      },
+      { timeoutMs: 120_000 },
+    );
+    const password = ctx.env.OCW_GRAFANA_ADMIN_PASSWORD;
+    const list = await get("/api/datasources", "admin", password);
+    const names = (list.json ?? []).map((d) => d.name).sort();
+    const defaultCreds = await get("/api/datasources", "admin", "admin");
+    const anonymous = await get("/api/datasources");
+    const dsHealth = {};
+    for (const [name, uid] of Object.entries(DATASOURCES)) {
+      const r = await get(`/api/datasources/uid/${uid}/health`, "admin", password);
+      dsHealth[name] = r.json?.status ?? r.status;
+    }
+    return {
+      ok:
+        health.ok &&
+        list.status === 200 &&
+        Object.keys(DATASOURCES).every((n) => names.includes(n)) &&
+        defaultCreds.status === 401 &&
+        anonymous.status === 401 &&
+        Object.values(dsHealth).every((s) => s === "OK"),
+      datasources: names,
+      adminAdmin: defaultCreds.status,
+      anonymous: anonymous.status,
+      datasourceHealth: dsHealth,
+    };
+  });
+
+  await check("obs-grafana-refuses-empty-password", async () => {
+    const results = {};
+    for (const [label, value] of [
+      ["empty", ""],
+      ["admin", "admin"],
+    ]) {
+      const r = ctx.compose(
+        ["run", "--rm", "--no-deps", "-T", "-e", `GF_SECURITY_ADMIN_PASSWORD=${value}`, "grafana"],
+        { timeoutMs: 180_000 },
+      );
+      const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+      results[label] = { exit: r.status, namesKey: out.includes("OCW_GRAFANA_ADMIN_PASSWORD") };
+    }
+    return {
+      ok: Object.values(results).every((r) => r.exit !== 0 && r.namesKey),
+      ...results,
+    };
+  });
+
+  // Not a pass/fail check: the profile's footprint, for the docs (07-07 SUMMARY).
+  await check("obs-memory", async () => {
+    const now = containers(ctx);
+    const ids = PROFILE_SERVICES.map((s) => now[s]?.id).filter(Boolean);
+    const r = ctx.docker(["stats", "--no-stream", "--format", "{{.Name}}\t{{.MemUsage}}", ...ids]);
+    const memory = {};
+    for (const line of (r.stdout ?? "").split("\n").filter(Boolean)) {
+      const [name, usage] = line.split("\t");
+      const svc = PROFILE_SERVICES.find((s) => name.includes(`-${s}-`));
+      memory[svc ?? name] = usage.split("/")[0].trim();
+    }
+    return { ok: r.status === 0, memory };
   });
 
   return {
