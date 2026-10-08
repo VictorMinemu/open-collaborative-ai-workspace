@@ -486,20 +486,23 @@ export function buildCacheRecords(ctx) {
 
 /**
  * Removes the build-cache records this run created (absent from `before`, created after `sinceMs`, not shared with
- * an image, not in use). Never touches older cache. A few passes, since parents free up once children are gone.
+ * an image, not in use). Never touches older cache. Records form parent chains and a parent is only removable once
+ * its children are gone, so it repeats until a pass removes nothing. Returns how many records were removed.
  */
 export function pruneRunBuildCache(ctx, before, sinceMs) {
-  let pruned = 0;
-  for (let pass = 0; pass < 3; pass++) {
-    const fresh = [...buildCacheRecords(ctx)].filter(
+  const fresh = () =>
+    [...buildCacheRecords(ctx)].filter(
       ([id, r]) => !before.has(id) && !r.shared && !r.inUse && !(r.createdAt < sinceMs - 60_000),
     );
-    if (fresh.length === 0) break;
-    for (const [id] of fresh) {
-      if (dockerCmd(ctx, ["buildx", "prune", "-f", "--filter", `id=${id}`]).status === 0) pruned++;
-    }
+  let left = fresh();
+  const initial = left.length;
+  for (let pass = 0; pass < 50 && left.length > 0; pass++) {
+    for (const [id] of left) dockerCmd(ctx, ["buildx", "prune", "-f", "--filter", `id=${id}`]);
+    const next = fresh();
+    if (next.length >= left.length) break;
+    left = next;
   }
-  return pruned;
+  return initial - left.length;
 }
 
 async function timed(steps, name, fn) {
