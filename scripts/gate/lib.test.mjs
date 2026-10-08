@@ -10,7 +10,16 @@ import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { acquireLock, assertSafe, createGateEnv, DEMO, gatePorts, parseEnvFile } from "./lib.mjs";
+import {
+  acquireLock,
+  assertPlaywrightStats,
+  assertSafe,
+  createGateEnv,
+  DEMO,
+  gatePorts,
+  parseEnvFile,
+  playwrightSummary,
+} from "./lib.mjs";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -121,7 +130,7 @@ describe("acquireLock", () => {
 });
 
 describe("createGateEnv", () => {
-  it("writes a 0600 env file with fresh secrets, the block's ports, URLs, project, tag and files, printing nothing", () => {
+  it("runs the operator commands (ocw setup --ports, ocw enable proxy --no-up) and adds only gate keys, printing nothing", () => {
     const dir = mkdtempSync(path.join(tmp, "env-"));
     const out = [];
     const write = process.stdout.write.bind(process.stdout);
@@ -134,13 +143,7 @@ describe("createGateEnv", () => {
     process.stderr.write = capture;
     let envFile;
     try {
-      envFile = createGateEnv({
-        dir,
-        runId: "t1",
-        block: 34,
-        imageTag: "gate-abc",
-        extra: { COMPOSE_PROFILES: "proxy" },
-      });
+      envFile = createGateEnv({ dir, runId: "t1", block: 34, imageTag: "gate-abc", profiles: ["vault"] });
     } finally {
       process.stdout.write = write;
       process.stderr.write = ewrite;
@@ -148,11 +151,9 @@ describe("createGateEnv", () => {
     assert.equal(envFile, path.join(dir, ".env"));
     assert.equal(statSync(envFile).mode & 0o777, 0o600);
     const env = parseEnvFile(envFile);
+    // ocw setup --ports 34 --project … --image-tag …
     assert.equal(env.COMPOSE_PROJECT_NAME, "ocw-gate-t1");
-    assert.equal(env.COMPOSE_FILE, "compose.yaml:compose.e2e.yaml");
-    assert.equal(env.COMPOSE_PROFILES, "proxy");
     assert.equal(env.OCW_IMAGE_TAG, "gate-abc");
-    assert.equal(env.OCW_MODEL_PROVIDER, "mock");
     assert.equal(env.OCW_WEB_PORT, "3400");
     assert.equal(env.OCW_API_PORT, "3401");
     assert.equal(env.OCW_POSTGRES_PORT, "3402");
@@ -161,10 +162,19 @@ describe("createGateEnv", () => {
     assert.equal(env.OCW_GRAFANA_PORT, "3405");
     assert.equal(env.OCW_PROXY_HTTPS_PORT, "3443");
     assert.equal(env.OCW_PROXY_HTTP_PORT, "3480");
-    assert.equal(env.OCW_PUBLIC_WEB_URL, "http://127.0.0.1:3400");
-    assert.equal(env.OCW_PUBLIC_API_URL, "http://127.0.0.1:3401");
-    assert.equal(env.OCW_S3_PUBLIC_URL, "http://127.0.0.1:3404");
+    // ocw enable proxy --site-address localhost --no-up: one HTTPS origin, one trusted hop, loopback publishing.
+    assert.equal(env.OCW_SITE_ADDRESS, "localhost");
+    assert.equal(env.OCW_PUBLIC_WEB_URL, "https://localhost:3443");
+    assert.equal(env.OCW_PUBLIC_API_URL, "https://localhost:3443");
+    assert.equal(env.OCW_S3_PUBLIC_URL, "https://localhost:3443");
+    assert.equal(env.OCW_TRUST_PROXY, "1");
     assert.equal(env.OCW_PUBLISH_ADDRESS, "127.0.0.1");
+    // Gate-only keys: the e2e override and Caddy on loopback, the mock model, the shared sign-in bucket raised
+    // (Docker Desktop shows every browser as the gateway IP behind Caddy; the product default stays 30).
+    assert.equal(env.COMPOSE_FILE, "compose.yaml:compose.e2e.yaml:infra/caddy/compose.loopback.yaml");
+    assert.equal(env.COMPOSE_PROFILES, "proxy,vault");
+    assert.equal(env.OCW_MODEL_PROVIDER, "mock");
+    assert.equal(env.OCW_SIGNIN_RATE_LIMIT_PER_MINUTE, "600");
     for (const k of [
       "POSTGRES_PASSWORD",
       "OCW_DB_MIGRATOR_PASSWORD",
@@ -187,12 +197,13 @@ describe("createGateEnv", () => {
       .map((l) => /^([A-Z][A-Z0-9_]*)=/.exec(l)?.[1])
       .filter(Boolean);
     assert.equal(new Set(keys).size, keys.length);
-    // A second gate run gets different secrets.
+    // A second gate run gets different secrets; without extra profiles only the proxy is on.
     const dir2 = mkdtempSync(path.join(tmp, "env-"));
-    const env2 = parseEnvFile(createGateEnv({ dir: dir2, runId: "t2", imageTag: "gate-abc" }));
+    const env2 = parseEnvFile(createGateEnv({ dir: dir2, runId: "t2", imageTag: "gate-abc", block: 36 }));
     assert.notEqual(env2.POSTGRES_PASSWORD, env.POSTGRES_PASSWORD);
-    assert.equal(env2.COMPOSE_PROFILES, "");
+    assert.equal(env2.COMPOSE_PROFILES, "proxy");
     assert.equal(env2.COMPOSE_PROJECT_NAME, "ocw-gate-t2");
+    assert.equal(env2.OCW_PUBLIC_WEB_URL, "https://localhost:3643");
   });
 
   it("refuses a run id that would not make an ocw-gate project, and a directory outside the temp dir", () => {
@@ -201,5 +212,65 @@ describe("createGateEnv", () => {
       /project|run id/i,
     );
     assert.throws(() => createGateEnv({ dir: ROOT, runId: "x1", imageTag: "gate-abc" }), /env file/i);
+  });
+});
+
+/** A Playwright JSON report (the fields the gate reads): nested suites, one test per project. */
+function report(tests, stats) {
+  return {
+    stats,
+    suites: [
+      {
+        title: "compose/scenario-b.spec.ts",
+        specs: [],
+        suites: [
+          {
+            title: "inner",
+            specs: [
+              { title: "spec", tests: tests.map(([projectName, status]) => ({ projectName, status })) },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+describe("assertPlaywrightStats", () => {
+  it("passes a run where every test ran and passed", () => {
+    assert.doesNotThrow(() => assertPlaywrightStats({ expected: 5, skipped: 0, unexpected: 0, flaky: 0 }));
+  });
+
+  it("refuses an empty run, any skipped test, any failure and any flaky test", () => {
+    const ok = { expected: 5, skipped: 0, unexpected: 0, flaky: 0 };
+    assert.throws(() => assertPlaywrightStats({ ...ok, expected: 0 }), /no test ran|expected/i);
+    assert.throws(() => assertPlaywrightStats({ ...ok, skipped: 1 }), /skipped/);
+    assert.throws(() => assertPlaywrightStats({ ...ok, unexpected: 1 }), /unexpected|failed/);
+    assert.throws(() => assertPlaywrightStats({ ...ok, flaky: 1 }), /flaky/);
+    assert.throws(() => assertPlaywrightStats(undefined), /no test ran|stats/i);
+    assert.throws(() => assertPlaywrightStats({}), /no test ran|expected/i);
+  });
+});
+
+describe("playwrightSummary", () => {
+  it("returns the run's stats and the counts per project from nested suites", () => {
+    const s = playwrightSummary(
+      report(
+        [
+          ["setup", "expected"],
+          ["desktop", "expected"],
+          ["desktop", "expected"],
+          ["mobile", "expected"],
+          ["mobile", "skipped"],
+        ],
+        { expected: 4, skipped: 1, unexpected: 0, flaky: 0, duration: 1234.5 },
+      ),
+    );
+    assert.deepEqual(s.stats, { expected: 4, skipped: 1, unexpected: 0, flaky: 0, durationMs: 1235 });
+    assert.deepEqual(s.projects, {
+      setup: { expected: 1, skipped: 0, unexpected: 0, flaky: 0 },
+      desktop: { expected: 2, skipped: 0, unexpected: 0, flaky: 0 },
+      mobile: { expected: 1, skipped: 1, unexpected: 0, flaky: 0 },
+    });
   });
 });
