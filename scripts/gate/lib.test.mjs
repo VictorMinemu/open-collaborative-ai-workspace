@@ -127,6 +127,37 @@ describe("acquireLock", () => {
     assert.equal(readFileSync(file, "utf8").trim(), String(process.pid));
     release();
   });
+
+  // gate:cleanroom holds the lock and runs the clone's compose gate (--attach) as its child: the child inherits the
+  // lock only with OCW_GATE_LOCK_INHERIT=1 and only when the holder is its own parent; its release leaves the lock.
+  const childAcquire = (file, env) =>
+    spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `const { acquireLock } = await import(${JSON.stringify(path.join(ROOT, "scripts/gate/lib.mjs"))});
+         try { const r = await acquireLock(${JSON.stringify(file)}, { timeoutMs: 400, pollMs: 50 }); r(); console.log("acquired"); }
+         catch { console.log("timed out"); }`,
+      ],
+      { encoding: "utf8", env: { PATH: process.env.PATH, ...env } },
+    ).stdout.trim();
+
+  it("a child inherits the lock its parent holds only with OCW_GATE_LOCK_INHERIT=1, and leaves it held", async () => {
+    const file = path.join(tmp, "inherit.lock");
+    const release = await acquireLock(file, { timeoutMs: 500 });
+    assert.equal(childAcquire(file, {}), "timed out");
+    assert.equal(childAcquire(file, { OCW_GATE_LOCK_INHERIT: "1" }), "acquired");
+    assert.equal(readFileSync(file, "utf8").trim(), String(process.pid));
+    release();
+  });
+
+  it("OCW_GATE_LOCK_INHERIT=1 never takes a lock held by a process other than the parent", () => {
+    const file = path.join(tmp, "other.lock");
+    writeFileSync(file, "1\n"); // pid 1 is alive and is not the child's parent
+    assert.equal(childAcquire(file, { OCW_GATE_LOCK_INHERIT: "1" }), "timed out");
+    assert.equal(readFileSync(file, "utf8").trim(), "1");
+  });
 });
 
 describe("createGateEnv", () => {
