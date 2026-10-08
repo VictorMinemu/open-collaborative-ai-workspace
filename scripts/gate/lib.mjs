@@ -49,6 +49,8 @@ export const ADMIN = Object.freeze({
 });
 
 export const DEFAULT_LOCK = "/tmp/ocw-gate.lock";
+/** Build-cache snapshot a --keep run leaves next to its env file, for teardownGateStack. */
+const CACHE_SNAPSHOT = "build-cache-before.json";
 const PROJECT_RE = /^ocw-(gate|cleanroom)-[a-z0-9][a-z0-9_-]*$/;
 const TAG_RE = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 
@@ -546,6 +548,30 @@ function teardown(ctx, runId, steps, { removeDir = true } = {}) {
 }
 
 /**
+ * Tears down a gate stack left by --keep: down -v --remove-orphans, its ocw-*:<tag> images (only when the tag carries
+ * the run id) and the env file's temp directory. Only ocw-gate-* projects (clean-room clones clean up themselves).
+ */
+export async function teardownGateStack(envFile, { steps = [], lockFile = DEFAULT_LOCK, log } = {}) {
+  const ctx = gateContext(envFile, { steps });
+  const m = /^ocw-gate-(.+)$/.exec(ctx.project);
+  if (!m) throw new Error(`teardownGateStack: ${ctx.project} is not an ocw-gate project`);
+  const snapshotFile = path.join(ctx.dir, CACHE_SNAPSHOT);
+  const snapshot = existsSync(snapshotFile) ? JSON.parse(readFileSync(snapshotFile, "utf8")) : null;
+  const release = await acquireLock(lockFile, { onWait: log });
+  try {
+    const ok = teardown(ctx, m[1], steps);
+    if (snapshot) {
+      const t0 = Date.now();
+      const pruned = pruneRunBuildCache(ctx, new Set(snapshot.ids), snapshot.since);
+      steps.push({ name: "build-cache", ok: true, ms: Date.now() - t0, details: { prunedRecords: pruned } });
+    }
+    return ok;
+  } finally {
+    release();
+  }
+}
+
+/**
  * lock → env → build (OCW_IMAGE_TAG=gate-<sha>[-dirty]-<runId>) → up -d --wait → fn(ctx) → down -v --remove-orphans
  * + image rm ocw-*:<tag> (unless keep) → release lock. With `attachEnvFile`, runs fn against that stack only (no
  * build, up or teardown). Harness steps are pushed to `steps` (also ctx.steps); returns fn's result.
@@ -626,6 +652,14 @@ export async function withGateStack(
     if (build && pruneBuildCache) {
       cacheBefore = buildCacheRecords(ctx);
       cacheSince = Date.now();
+      // A --keep stack is torn down later by teardownGateStack, which prunes this run's cache from this snapshot.
+      if (keep) {
+        writeFileSync(
+          path.join(ctx.dir, CACHE_SNAPSHOT),
+          JSON.stringify({ since: cacheSince, ids: [...cacheBefore.keys()] }),
+          { mode: 0o600 },
+        );
+      }
     }
     if (build) {
       await timed(steps, "build", async () => {

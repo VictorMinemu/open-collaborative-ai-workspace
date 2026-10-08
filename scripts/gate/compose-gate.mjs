@@ -7,13 +7,14 @@
 //   node scripts/gate/compose-gate.mjs [--run-id <id>] [--keep] [--attach <envFile>]
 //     --keep            leave the stack running (prints the env file to --attach to); no teardown
 //     --attach <file>   run the checks against a stack left by --keep (no build, up or teardown)
+//     --down <file>     tear down a stack left by --keep (containers, volumes, its images, the env file)
 //
 // stdout: one JSON summary (steps: disk-free, ports-free, build, up, migrate-exit-0, api-health, web-login,
 // cell-healthy, admin, teardown, build-cache, demo-untouched). Progress and build output go to stderr. Exit 0 = all ok.
 // Env: OCW_GATE_MIN_FREE_GB (default 6), OCW_GATE_KEEP_BUILD_CACHE=1 (keep this run's build cache).
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { demoSnapshot, diffDemo, ensureAdmin, newRunId, withGateStack } from "./lib.mjs";
+import { demoSnapshot, diffDemo, ensureAdmin, newRunId, teardownGateStack, withGateStack } from "./lib.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -102,8 +103,16 @@ async function main() {
       "run-id": { type: "string" },
       keep: { type: "boolean", default: false },
       attach: { type: "string" },
+      down: { type: "string" },
     },
   });
+  if (values.down) {
+    const steps = [];
+    await teardownGateStack(values.down, { steps });
+    process.stdout.write(`${JSON.stringify({ ok: steps.every((s) => s.ok), steps }, null, 2)}\n`);
+    process.exitCode = steps.every((s) => s.ok) ? 0 : 1;
+    return;
+  }
   const runId = values["run-id"] ?? newRunId();
   const steps = [];
   const started = Date.now();
