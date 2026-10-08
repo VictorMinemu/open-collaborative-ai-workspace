@@ -252,7 +252,8 @@ async function main() {
   const steps = [];
   const before = await demoSnapshot();
   const release = await acquireLock(DEFAULT_LOCK, { onWait: log });
-  const root = mkdtempSync(path.join(tmpdir(), dirPrefix));
+  // Real path: the clone's gate compares import.meta.url (symlinks resolved, /private/var on macOS) with argv[1].
+  const root = realpathSync(mkdtempSync(path.join(tmpdir(), dirPrefix)));
   const clone = path.join(root, "ocw");
   const envFile = path.join(clone, ".env");
   let ctx;
