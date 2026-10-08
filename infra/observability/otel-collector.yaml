@@ -1,0 +1,76 @@
+# OpenTelemetry Collector of the `observability` profile (FOUND-05, D-05). The API sends OTLP/HTTP here
+# (OCW_OTEL_ENDPOINT=http://otel-collector:4318); the collector redacts again and fans out to the backends.
+# Nothing here is published on the host: the receivers listen on the compose network only.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Paired with the container's mem_limit (256m): refuse data instead of being OOM-killed.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 200
+    spike_limit_mib: 50
+  # Defense in depth (D-18, T-07-07-01). The API already strips these at the source (apps/api/src/telemetry/redact.ts);
+  # this also covers any other sender an operator points here. Query strings can carry tokens; process attributes
+  # carry absolute host paths and argv.
+  transform/redact:
+    error_mode: ignore
+    trace_statements:
+      - delete_key(resource.attributes, "process.executable.path")
+      - delete_key(resource.attributes, "process.command_args")
+      - delete_key(resource.attributes, "process.command_line")
+      - delete_key(resource.attributes, "process.command")
+      - delete_key(span.attributes, "url.query")
+      - delete_key(span.attributes, "url.full")
+      - delete_key(span.attributes, "http.url")
+      - delete_key(span.attributes, "http.target")
+      - replace_pattern(span.attributes["url.path"], "\\?.*$", "")
+      - replace_pattern(span.name, "\\?.*$", "")
+    log_statements:
+      - delete_key(resource.attributes, "process.executable.path")
+      - delete_key(resource.attributes, "process.command_args")
+      - delete_key(resource.attributes, "process.command_line")
+      - delete_key(resource.attributes, "process.command")
+      - delete_key(log.attributes, "url.query")
+      - delete_key(log.attributes, "url.full")
+    metric_statements:
+      - delete_key(resource.attributes, "process.executable.path")
+      - delete_key(resource.attributes, "process.command_args")
+      - delete_key(resource.attributes, "process.command_line")
+      - delete_key(resource.attributes, "process.command")
+  batch: {}
+
+exporters:
+  otlp_grpc/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+  # Prometheus' native OTLP receiver (--web.enable-otlp-receiver); the exporter appends /v1/metrics.
+  otlp_http/prometheus:
+    endpoint: http://prometheus:9090/api/v1/otlp
+  # Loki's native OTLP endpoint; the exporter appends /v1/logs.
+  otlp_http/loki:
+    endpoint: http://loki:3100/otlp
+
+service:
+  telemetry:
+    logs:
+      level: warn
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/redact, batch]
+      exporters: [otlp_grpc/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/redact, batch]
+      exporters: [otlp_http/prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/redact, batch]
+      exporters: [otlp_http/loki]

@@ -1,0 +1,40 @@
+# Grafana datasources of the `observability` profile, provisioned read-only. Loki log lines link to their trace in
+# Tempo (trace_id structured metadata) and Tempo spans link back to the logs of the same trace. `$$` keeps Grafana from
+# expanding `${__value.raw}` as an environment variable.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: ocw-prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+  - name: Loki
+    type: loki
+    uid: ocw-loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      derivedFields:
+        - name: TraceID
+          matcherType: label
+          matcherRegex: trace_id
+          datasourceUid: ocw-tempo
+          url: "$${__value.raw}"
+          urlDisplayLabel: View trace
+  - name: Tempo
+    type: tempo
+    uid: ocw-tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: false
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: ocw-loki
+        filterByTraceId: true
+        spanStartTimeShift: "-5m"
+        spanEndTimeShift: "5m"
+      lokiSearch:
+        datasourceUid: ocw-loki

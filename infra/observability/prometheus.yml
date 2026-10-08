@@ -1,0 +1,14 @@
+# Prometheus of the `observability` profile: metrics arrive by OTLP from the collector (--web.enable-otlp-receiver,
+# POST /api/v1/otlp/v1/metrics); there is nothing to scrape. Retention (15 d) is a command-line flag in compose.yaml.
+global:
+  evaluation_interval: 1m
+otlp:
+  # service.name becomes `job` anyway; promoting these makes them plain labels on every series.
+  promote_resource_attributes:
+    - service.name
+    - service.version
+    - deployment.environment.name
+storage:
+  tsdb:
+    # OTLP batches can arrive late or out of order (collector retries).
+    out_of_order_time_window: 30m
