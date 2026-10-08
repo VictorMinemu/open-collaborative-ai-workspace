@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 78
+open_count: 79
 waived_count: 0
-fixed_count: 17
-total_count: 95
-last_updated: 2026-10-08T02:33:44.475Z
+fixed_count: 18
+total_count: 97
+last_updated: 2026-10-08T04:16:52.781Z
 ---
 
 # Broken Windows Ledger
@@ -109,7 +109,9 @@ last_updated: 2026-10-08T02:33:44.475Z
 | 92 | 07 | deviation | compose.yaml |  | docker compose start also reruns the one-shot migrate service (idempotent) | open |  | 2026-10-08T02:11:23.891Z |  |
 | 93 | 07 | deviation | compose.yaml |  | With OCW_TRUST_PROXY=1 a process on the host or the compose network can still forge X-Forwarded-For; closing it needs a fixed Caddy IP/subnet | open |  | 2026-10-08T02:29:43.449Z |  |
 | 94 | 07 | deviation | compose.yaml |  | API has no depends_on openbao in vault mode: a cold start may exit once and retry | open |  | 2026-10-08T02:33:44.398Z |  |
-| 95 | 07 | unmet-truth | scripts/ocw/backup.mjs |  | ocw backup omits the openbao-data volume and secrets/ when the vault profile is on; a restore would not boot (fix in 07-10/07-11) | open |  | 2026-10-08T02:33:44.475Z |  |
+| 95 | 07 | unmet-truth | scripts/ocw/backup.mjs |  | ocw backup omits the openbao-data volume and secrets/ when the vault profile is on; a restore would not boot (fix in 07-10/07-11) | fixed |  | 2026-10-08T02:33:44.475Z | 2026-10-08T04:16:52.638Z |
+| 96 | 07 | unrun-verify | scripts/gate/compose-gate.mjs |  | gate:compose default (short) variant and --steps playwright alone not run separately; covered by the full run | open |  | 2026-10-08T04:16:52.709Z |  |
+| 97 | 07 | deviation | scripts/ocw/backup.mjs |  | Backup omits caddy-data: a restore on fresh volumes gives Caddy a new local CA | open |  | 2026-10-08T04:16:52.781Z |  |
 
 ````json
 [
@@ -1248,9 +1250,33 @@ last_updated: 2026-10-08T02:33:44.475Z
     "file": "scripts/ocw/backup.mjs",
     "line": null,
     "description": "ocw backup omits the openbao-data volume and secrets/ when the vault profile is on; a restore would not boot (fix in 07-10/07-11)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-08T02:33:44.475Z",
+    "resolved_at": "2026-10-08T04:16:52.638Z"
+  },
+  {
+    "id": 96,
+    "kind": "unrun-verify",
+    "phase": "07",
+    "file": "scripts/gate/compose-gate.mjs",
+    "line": null,
+    "description": "gate:compose default (short) variant and --steps playwright alone not run separately; covered by the full run",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-08T04:16:52.709Z",
+    "resolved_at": null
+  },
+  {
+    "id": 97,
+    "kind": "deviation",
+    "phase": "07",
+    "file": "scripts/ocw/backup.mjs",
+    "line": null,
+    "description": "Backup omits caddy-data: a restore on fresh volumes gives Caddy a new local CA",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-08T04:16:52.781Z",
     "resolved_at": null
   }
 ]
