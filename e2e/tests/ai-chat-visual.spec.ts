@@ -432,9 +432,13 @@ test("the chat works from the keyboard and streaming stays quiet for screen read
   await expect(answer).toHaveAttribute("aria-busy", "false");
   await expect(page.getByTestId("ai-composer")).toBeFocused();
 
-  // After a send in the open chat, focus is back in the composer once the answer is accepted.
+  // After a send in the open chat, focus is back in the composer once the answer is accepted. The new turn is pinned
+  // by position: until it renders, `lastAssistant` would still be the stopped answer above.
+  const answers = page.locator('[data-testid="ai-message"][data-role="assistant"]');
+  const before = await answers.count();
   await sendAi(page, "and a short one");
-  const next = lastAssistant(page);
+  await expect(answers).toHaveCount(before + 1);
+  const next = answers.nth(before);
   await expect(next).toHaveAttribute("data-status", "completed", { timeout: 15_000 });
   await expect(next).toHaveAttribute("aria-busy", "false");
   await expect(page.getByTestId("ai-composer")).toBeFocused();
