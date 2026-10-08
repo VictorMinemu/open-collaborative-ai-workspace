@@ -74,8 +74,10 @@ steps:
       - (cd apps/web && nohup node --env-file-if-exists=../../.env ./node_modules/next/dist/bin/next start -p 3000 > ../../web.log 2>&1 &)
       - for i in $$(seq 1 60); do curl -sf localhost:4000/health && curl -sf -o /dev/null localhost:3000/login && break; sleep 2; done
       - curl -sf -o /dev/null localhost:4000/health && curl -sf -o /dev/null localhost:3000/login
-      # globalTimeout is 15 minutes in CI (e2e/playwright.config.ts).
-      - pnpm e2e --project=${PROJECT}
+      # e2e/playwright.config.ts caps a CI run at 15 minutes (sized for a 30-minute GitHub job); the serial suite now
+      # needs ~15 minutes of test time on this agent, so the cap is raised here. It still fails well inside the
+      # workflow's 120-minute timeout, with its report.
+      - pnpm e2e --project=${PROJECT} --global-timeout=1800000
       - cat e2e/test-results/realtime-latency.json || true
 
   - name: failure-logs
