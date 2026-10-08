@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 73
+open_count: 75
 waived_count: 0
 fixed_count: 17
-total_count: 90
-last_updated: 2026-10-08T01:18:30.440Z
+total_count: 92
+last_updated: 2026-10-08T02:11:23.891Z
 ---
 
 # Broken Windows Ledger
@@ -105,6 +105,8 @@ last_updated: 2026-10-08T01:18:30.440Z
 | 88 | 07 | unmet-truth | apps/api/src/realtime-presence.int.test.ts |  | Rate-limit presence test (line ~430) flaky under load; failed once while a parallel dump ran, 9/9 alone | open |  | 2026-10-08T00:51:08.081Z |  |
 | 89 | 07 | deviation | apps/api/src/app.ts |  | trustProxy wired through fastifyTrustProxy() (Fastify fails closed on numeric trustProxy); plan grep differs | open |  | 2026-10-08T01:09:05.045Z |  |
 | 90 | 07 | deviation | scripts/guard |  | claude-agent-sdk license exception and server-everything license clarification pending owner/legal confirmation (D-14, ADR-0021) | open |  | 2026-10-08T01:18:30.440Z |  |
+| 91 | 07 | deviation | compose.yaml |  | Garage has no healthcheck: compose --wait does not wait for it (backup gate retries 60s after recreate) | open |  | 2026-10-08T02:11:23.801Z |  |
+| 92 | 07 | deviation | compose.yaml |  | docker compose start also reruns the one-shot migrate service (idempotent) | open |  | 2026-10-08T02:11:23.891Z |  |
 
 ````json
 [
@@ -1186,6 +1188,30 @@ last_updated: 2026-10-08T01:18:30.440Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-08T01:18:30.440Z",
+    "resolved_at": null
+  },
+  {
+    "id": 91,
+    "kind": "deviation",
+    "phase": "07",
+    "file": "compose.yaml",
+    "line": null,
+    "description": "Garage has no healthcheck: compose --wait does not wait for it (backup gate retries 60s after recreate)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-08T02:11:23.801Z",
+    "resolved_at": null
+  },
+  {
+    "id": 92,
+    "kind": "deviation",
+    "phase": "07",
+    "file": "compose.yaml",
+    "line": null,
+    "description": "docker compose start also reruns the one-shot migrate service (idempotent)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-08T02:11:23.891Z",
     "resolved_at": null
   }
 ]
