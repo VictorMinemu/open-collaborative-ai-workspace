@@ -273,9 +273,13 @@ test("a usage limit: the dialog, then the calm card under the kept text", async 
   const w = widthOf(project);
   const { context, page } = await openAs(browser, SAM, project);
   await openNewAiChat(page);
-  await sendAi(page, "hello [[plan:usage_limit]]");
+  // The usage-limit dialog opens only for a failure this page saw arrive while the answer streamed. Pace the fake's
+  // three deltas (about 1.5 s) and see the answer streaming first, so a fast server cannot deliver the failure before
+  // the new chat page has loaded.
+  await sendAi(page, "hello [[plan:usage_limit]] [[slow:20]]");
   await expect(page).toHaveURL(/\/chat\/ai\/[0-9a-f-]{36}$/u);
   created.push(chatIdOf(page));
+  await expect(lastAssistant(page)).toHaveAttribute("data-status", "streaming");
   await expect(lastAssistant(page)).toHaveAttribute("data-status", "failed", { timeout: 15_000 });
   const dialog = page.getByTestId("ai-usage-limit-dialog");
   await expect(dialog).toBeVisible();
