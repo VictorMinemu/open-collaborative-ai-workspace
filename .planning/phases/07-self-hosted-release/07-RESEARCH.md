@@ -888,7 +888,7 @@ docker compose -p "$P" run --rm migrate                                   # upgr
 | A8 | Grafana/Loki/Tempo/Prometheus/collector fit next to the stack in Docker Desktop's 16 GB | Q3 | Gate runs the profile as a separate step |
 | A9 | The claude-agent-sdk license is acceptable as a documented exception | Q7 | Owner decision; may require making the Claude adapter an optional download |
 
-## Open Questions
+## Open Questions (RESOLVED — see 07-CONTEXT.md D-12..D-17)
 
 1. **CI wiring (D-01 vs orchestrator).** D-01 says update `ci.yml`; this research was told not to touch
    `.github/workflows/**` (self-hosted runner work in parallel). *Recommendation:* no workflow edits in Phase 7; the gate
