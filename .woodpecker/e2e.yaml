@@ -1,0 +1,110 @@
+# Woodpecker port of the `e2e` job in .github/workflows/ci.yml, one workflow per viewport, each on its own fresh stack.
+# Postgres/Redis/Garage come from compose; the fake, the API and the web run inside the `e2e` step (background
+# processes end with the step). Host networking puts that step in dind's network namespace, where the published
+# compose ports live. The checkout is copied under /home/ocw-ci so compose bind mounts (./infra/garage/...) resolve
+# on the dind daemon (see verify.yaml). Failure reports are kept in /home/ocw-ci/artifacts for 7 days.
+# Pull requests, pushes to main, and manual runs (an open PR runs once, not once per event).
+when:
+  - event: [pull_request, manual]
+  - event: push
+    branch: main
+
+matrix:
+  PROJECT: [desktop, mobile]
+
+variables:
+  - &docker_sock /var/run/docker.sock:/var/run/docker.sock
+  - &shared /home/ocw-ci:/home/ocw-ci
+  - &env
+    W: /home/ocw-ci/ws/e2e-${PROJECT}
+    PNPM_STORE: /home/ocw-ci/cache/pnpm-store
+    COMPOSE_PROJECT_NAME: ocw-e2e-${PROJECT}
+    # Bots use the deterministic mock model; CI never receives a metered model key.
+    OCW_MODEL_PROVIDER: mock
+    # Specs sign many browsers in from one IP; production keeps the default 30/min.
+    OCW_SIGNIN_RATE_LIMIT_PER_MINUTE: "600"
+    # Marketplace / MCP specs: the API proxies the fake ClawHub, the simulated cell probes the fake MCP.
+    OCW_CLAWHUB_URL: http://127.0.0.1:4291
+    OCW_E2E_FAKE_URL: http://127.0.0.1:4291
+    OCW_E2E_FAKE_MCP_TOKEN: e2e-mcp-token
+    # AI chats (Phase 5+, as scripts/e2e-isolated.sh): the ChatGPT plan (Responses API + SIWC), the mock backend and
+    # AI web search all point at the fake; the test-only plan seed route exists only with these set.
+    OCW_CHATGPT_API_BASE_URL: http://127.0.0.1:4291/v1
+    OCW_CHATGPT_AUTH_BASE_URL: http://127.0.0.1:4291/siwc
+    OCW_AI_MOCK_BASE_URL: http://127.0.0.1:4291/v1
+    OCW_AI_SEARXNG_URL: http://127.0.0.1:4291
+    # One user types, searches and sends many times a minute; production keeps 30/min/user.
+    OCW_SEARCH_RATE_LIMIT_PER_MINUTE: "600"
+    OCW_AI_SEND_RATE_LIMIT_PER_MINUTE: "600"
+
+steps:
+  - name: ci-image
+    image: docker:29.8.2-cli
+    volumes: [*docker_sock]
+    commands:
+      - sh infra/ci/build-image.sh
+
+  - name: install
+    image: ocw-ci:local
+    pull: false
+    volumes: [*docker_sock, *shared]
+    environment: *env
+    commands:
+      - rm -rf "$${W}" && mkdir -p "$${W}" && cp -a . "$${W}/"
+      - cd "$${W}" && pnpm install --frozen-lockfile --store-dir "$${PNPM_STORE}"
+      - pnpm --dir apps/web build
+      # Chromium and its system packages are baked into ocw-ci at the locked version; this only checks it.
+      - pnpm exec playwright install chromium
+
+  - name: e2e
+    image: ocw-ci:local
+    pull: false
+    network_mode: host
+    volumes: [*docker_sock, *shared]
+    environment: *env
+    commands:
+      - cd "$${W}"
+      # A cancelled run skips its cleanup step: start from a fresh stack either way.
+      - sh infra/ci/e2e-reset.sh
+      # Garage (attachments, ADR-0015) uses the keys setup:env generated; the API reaches it on 127.0.0.1:3900.
+      - pnpm setup:env
+      - docker compose up -d --wait postgres redis garage
+      - pnpm db:migrate
+      # Fake model, MCP and ClawHub (loopback, no internet).
+      - (PORT=4291 FAKE_MODEL_HOST=127.0.0.1 FAKE_MCP_TOKEN=e2e-mcp-token nohup node infra/fake-model/server.mjs > fake.log 2>&1 &)
+      - for i in $$(seq 1 20); do curl -sf -o /dev/null localhost:4291/v1/models && break; sleep 1; done
+      - (cd apps/api && nohup node --env-file-if-exists=../../.env --import tsx src/main.ts > ../../api.log 2>&1 &)
+      - (cd apps/web && nohup node --env-file-if-exists=../../.env ./node_modules/next/dist/bin/next start -p 3000 > ../../web.log 2>&1 &)
+      - for i in $$(seq 1 60); do curl -sf localhost:4000/health && curl -sf -o /dev/null localhost:3000/login && break; sleep 2; done
+      - curl -sf -o /dev/null localhost:4000/health && curl -sf -o /dev/null localhost:3000/login
+      # e2e/playwright.config.ts caps a CI run at 15 minutes (sized for a 30-minute GitHub job); the serial suite now
+      # needs ~15 minutes of test time on this agent, so the cap is raised here. It still fails well inside the
+      # workflow's 120-minute timeout, with its report.
+      - pnpm e2e --project=${PROJECT} --global-timeout=1800000
+      - cat e2e/test-results/realtime-latency.json || true
+
+  - name: failure-logs
+    image: ocw-ci:local
+    pull: false
+    volumes: [*docker_sock, *shared]
+    environment: *env
+    commands:
+      - cd "$${W}"
+      - tail -n 200 api.log web.log fake.log || true
+      - docker compose logs --tail 50 garage || true
+      - out="/home/ocw-ci/artifacts/$${CI_PIPELINE_NUMBER}-e2e-${PROJECT}" && mkdir -p "$${out}"
+      - cp -r e2e/playwright-report e2e/test-results "$${out}/" 2>/dev/null || true
+      - echo "Playwright report kept on woodpecker-dind at $${out} (7 days)"
+    when:
+      status: [failure]
+
+  - name: cleanup
+    image: ocw-ci:local
+    pull: false
+    volumes: [*docker_sock, *shared]
+    environment: *env
+    commands:
+      - sh infra/ci/e2e-reset.sh
+      - rm -rf "$${W}"
+    when:
+      status: [success, failure]

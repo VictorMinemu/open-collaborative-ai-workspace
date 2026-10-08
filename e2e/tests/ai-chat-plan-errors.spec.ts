@@ -103,12 +103,16 @@ test("a usage limit mid-answer keeps the text, leads with Manage usage and switc
 
   await openNewAiChat(page);
   await expect(page.getByTestId("ai-model-chip")).toContainText("GPT-6 Astra");
-  await sendAi(page, "hello [[plan:usage_limit]]");
+  // The usage-limit dialog opens only for a failure this page saw arrive while the answer streamed. Pace the fake's
+  // three deltas (about 1.5 s) and see the answer streaming first, so a fast server cannot deliver the failure before
+  // the new chat page has loaded.
+  await sendAi(page, "hello [[plan:usage_limit]] [[slow:20]]");
   await expect(page).toHaveURL(/\/chat\/ai\/[0-9a-f-]{36}$/);
   const answer = lastAssistant(page);
+  await expect(answer).toHaveAttribute("data-status", "streaming");
   await expect(answer).toHaveAttribute("data-status", "failed", { timeout: 15_000 });
   // The text received before the limit stays.
-  expect(await answerText(answer)).toBe("Echo: hello");
+  expect(await answerText(answer)).toBe("Echo: hello 1 2 3");
 
   const dialog = page.getByTestId("ai-usage-limit-dialog");
   await expect(dialog).toBeVisible();
@@ -162,7 +166,11 @@ test("choosing Use an organization model in the dialog closes it and switches th
   await seedPlan(sam);
   const { context, page } = await openAs(browser, SAM, project);
   await openNewAiChat(page);
-  await sendAi(page, "again [[plan:usage_limit]]");
+  // The usage-limit dialog opens only for a failure this page saw arrive while the answer streamed. Pace the fake's
+  // three deltas (about 1.5 s) and see the answer streaming first, so a fast server cannot deliver the failure before
+  // the new chat page has loaded.
+  await sendAi(page, "again [[plan:usage_limit]] [[slow:20]]");
+  await expect(lastAssistant(page)).toHaveAttribute("data-status", "streaming");
   await expect(lastAssistant(page)).toHaveAttribute("data-status", "failed", { timeout: 15_000 });
   const dialog = page.getByTestId("ai-usage-limit-dialog");
   await expect(dialog).toBeVisible();

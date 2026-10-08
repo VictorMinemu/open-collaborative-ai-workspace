@@ -589,7 +589,10 @@ describe("work sessions", () => {
     expect(cmd.payload.text).toBe("while offline");
     device.ack(cmd.id);
     device.event(id, { type: "prompt.started", promptId: cmd.payload.promptId });
-    await eventually(async () => (await status(id)) === "running");
+    // The session is already `running` from the dispatch; wait for the prompt itself so `prompt.started` has been
+    // applied before the restart (applied after it, it would move the resumed session from provisioning to running).
+    await eventually(async () => (await detail(id)).prompts[0]!.status === "running");
+    expect(await status(id)).toBe("running");
 
     // Daemon restarts (session gone): the in-flight prompt fails and the session is resumed.
     await device.close();
