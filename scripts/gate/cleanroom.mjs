@@ -127,7 +127,10 @@ function minimalEnv(extra = {}) {
 }
 
 function sh(cmd, args, { cwd, stdio = "pipe", timeoutMs, env = minimalEnv() } = {}) {
-  return spawnSync(cmd, args, {
+  // pnpm through /bin/sh: some pnpm installs are shell stubs without a shebang (a direct spawn fails with ENOEXEC).
+  // Arguments are passed as "$@", never interpolated into the command string.
+  const [file, argv] = cmd === "pnpm" ? ["/bin/sh", ["-c", 'exec pnpm "$@"', "pnpm", ...args]] : [cmd, args];
+  return spawnSync(file, argv, {
     cwd,
     env,
     encoding: "utf8",
@@ -138,6 +141,7 @@ function sh(cmd, args, { cwd, stdio = "pipe", timeoutMs, env = minimalEnv() } = 
 }
 
 function must(res, label) {
+  if (res.error) throw new Error(`${label}: ${res.error.message}`);
   if (res.status !== 0) {
     const tail = String(res.stderr ?? "")
       .trim()
