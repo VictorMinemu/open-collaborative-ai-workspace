@@ -46,6 +46,8 @@ steps:
     environment: *env
     commands:
       - cd "$${W}"
+      # A cancelled run skips its cleanup step: remove anything it left behind first.
+      - sh infra/ci/smoke-reset.sh
       - pnpm --filter @ocw/openclaw-channel build
       - SMOKE_BUILD=1 bash infra/openclaw/test/run-container-smoke.sh
 
@@ -56,9 +58,7 @@ steps:
     environment: *env
     commands:
       # The smoke removes its own containers, volume and networks on exit; this covers a killed step.
-      - docker rm -fv ocw-smoke-openclaw ocw-smoke-api ocw-smoke-model ocw-smoke-mcp-sandbox 2>/dev/null || true
-      - docker volume rm ocw-smoke-state 2>/dev/null || true
-      - docker network rm ocw-smoke-net ocw-smoke-sbx-net 2>/dev/null || true
+      - sh infra/ci/smoke-reset.sh
       - rm -rf "$${W}" "$${TMPDIR}"
     when:
       status: [success, failure]
