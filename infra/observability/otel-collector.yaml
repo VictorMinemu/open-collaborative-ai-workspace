@@ -31,13 +31,31 @@ processors:
       - delete_key(span.attributes, "http.target")
       - replace_pattern(span.attributes["url.path"], "\\?.*$", "")
       - replace_pattern(span.name, "\\?.*$", "")
+    log_statements:
+      - delete_key(resource.attributes, "process.executable.path")
+      - delete_key(resource.attributes, "process.command_args")
+      - delete_key(resource.attributes, "process.command_line")
+      - delete_key(resource.attributes, "process.command")
+      - delete_key(log.attributes, "url.query")
+      - delete_key(log.attributes, "url.full")
+    metric_statements:
+      - delete_key(resource.attributes, "process.executable.path")
+      - delete_key(resource.attributes, "process.command_args")
+      - delete_key(resource.attributes, "process.command_line")
+      - delete_key(resource.attributes, "process.command")
   batch: {}
 
 exporters:
-  otlp/tempo:
+  otlp_grpc/tempo:
     endpoint: tempo:4317
     tls:
       insecure: true
+  # Prometheus' native OTLP receiver (--web.enable-otlp-receiver); the exporter appends /v1/metrics.
+  otlp_http/prometheus:
+    endpoint: http://prometheus:9090/api/v1/otlp
+  # Loki's native OTLP endpoint; the exporter appends /v1/logs.
+  otlp_http/loki:
+    endpoint: http://loki:3100/otlp
 
 service:
   telemetry:
@@ -47,4 +65,12 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, transform/redact, batch]
-      exporters: [otlp/tempo]
+      exporters: [otlp_grpc/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/redact, batch]
+      exporters: [otlp_http/prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/redact, batch]
+      exporters: [otlp_http/loki]
