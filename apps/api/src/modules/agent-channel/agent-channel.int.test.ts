@@ -892,6 +892,164 @@ describe("the cell and its bots are principals", () => {
   });
 });
 
+describe("every agent post answers a live turn of that agent in that conversation (no_trigger)", () => {
+  const refusedAudits = async () =>
+    (
+      await su.query(
+        "select actor_kind, actor_id, agent_id, result, resource_id, metadata from app.audit_events where action = 'agent.message.refused' order by occurred_at",
+      )
+    ).rows as Array<Record<string, unknown>>;
+  const agentRows = async (conversationId: string) =>
+    (
+      await su.query(
+        "select count(*)::int as n from app.messages where conversation_id = $1 and author_kind = 'agent'",
+        [conversationId],
+      )
+    ).rows[0].n as number;
+
+  /** A real delivered turn: `c` mentions `bot` in `conversationId`; returns the cell event. */
+  async function mentionTurn(c: TestClient, conversationId: string, body: string, bot = agentId) {
+    const res = await call(c, "POST", `/api/v1/conversations/${conversationId}/messages`, {
+      body,
+      mentions: [{ kind: "agent", id: bot }],
+    });
+    expect(res.status).toBe(200);
+    const id = (res.body as { id: string }).id;
+    const ev = (await cellEvents()).find(
+      (e) =>
+        e.type === "agent.mention.v1" &&
+        (e.payload as unknown as MentionPayload).message.id === id &&
+        (e.payload as unknown as MentionPayload).agent.id === bot,
+    );
+    expect(ev, `no delivery for ${id}`).toBeDefined();
+    return ev!.payload as unknown as MentionPayload;
+  }
+
+  let side: string;
+  let sideTurn: MentionPayload;
+
+  beforeAll(async () => {
+    side = ((await call(admin, "POST", "/api/v1/channels", { name: "side-room" })).body as { id: string }).id;
+    expect(
+      (await call(admin, "POST", `/api/v1/channels/${side}/members`, { kind: "agent", id: agentId })).status,
+    ).toBe(200);
+    sideTurn = await mentionTurn(admin, side, "@archie ping");
+  });
+
+  it("a post with no turn behind it is 403 no_trigger, stores nothing and is audited", async () => {
+    const p = plugin();
+    const before = await agentRows(channelId);
+    const res = await p.request("POST", "/messages", {
+      agentId,
+      conversationId: channelId,
+      threadRootMessageId: null,
+      text: "an unprompted announcement",
+      idempotencyKey: randomUUID(),
+    });
+    expect(res.status).toBe(403);
+    expect(errorOf(res as { body: Record<string, unknown> | null })).toMatchObject({ code: "no_trigger" });
+    expect(await agentRows(channelId)).toBe(before);
+    expect((await refusedAudits()).at(-1)).toMatchObject({
+      actor_kind: "agent",
+      actor_id: agentId,
+      agent_id: agentId,
+      result: "denied",
+      resource_id: channelId,
+      metadata: { reason: "no_trigger", route: "messages", conversationId: channelId },
+    });
+  });
+
+  it("a message never delivered to the bot, another conversation's turn, a forged or mismatched event is no trigger", async () => {
+    const p = plugin();
+    const plain = (
+      await call(alex, "POST", `/api/v1/conversations/${channelId}/messages`, { body: "just chatting" })
+    ).body as { id: string };
+    const cases: Array<Record<string, unknown>> = [
+      { conversationId: channelId, inReplyToMessageId: plain.id },
+      { conversationId: channelId, eventId: sideTurn.eventId },
+      { conversationId: channelId, inReplyToMessageId: sideTurn.message.id },
+      { conversationId: side, eventId: randomUUID() },
+      { conversationId: side, eventId: sideTurn.eventId, inReplyToMessageId: plain.id },
+    ];
+    const before = await agentRows(channelId);
+    for (const extra of cases) {
+      const res = await p.request("POST", "/messages", {
+        agentId,
+        threadRootMessageId: null,
+        text: "hi",
+        idempotencyKey: randomUUID(),
+        ...extra,
+      });
+      expect(res.status, JSON.stringify(extra)).toBe(403);
+      expect(errorOf(res as { body: Record<string, unknown> | null }).code, JSON.stringify(extra)).toBe(
+        "no_trigger",
+      );
+    }
+    expect(await agentRows(channelId)).toBe(before);
+  });
+
+  it("another bot of the cell cannot answer through this bot's turn", async () => {
+    const bert = (
+      await call(admin, "POST", "/api/v1/agents", {
+        name: "Bert",
+        instructions: "Be brief.",
+        modelProvider: "mock",
+        modelId: "mock-1",
+      })
+    ).body as { id: string };
+    expect(
+      (await call(admin, "POST", `/api/v1/channels/${side}/members`, { kind: "agent", id: bert.id })).status,
+    ).toBe(200);
+    const p = plugin();
+    const res = await p.request("POST", "/messages", {
+      agentId: bert.id,
+      conversationId: side,
+      threadRootMessageId: sideTurn.thread.rootMessageId,
+      inReplyToMessageId: sideTurn.message.id,
+      eventId: sideTurn.eventId,
+      text: "I answer for Archie",
+      idempotencyKey: randomUUID(),
+    });
+    expect(res.status).toBe(403);
+    expect(errorOf(res as { body: Record<string, unknown> | null }).code).toBe("no_trigger");
+  });
+
+  it("the delivered turn is a trigger, by event id or (older cells) by the delivered message alone", async () => {
+    const p = plugin();
+    const byEvent = await p.request<{ created: boolean; threadRootMessageId: string | null }>(
+      "POST",
+      "/messages",
+      {
+        agentId,
+        conversationId: side,
+        threadRootMessageId: sideTurn.thread.rootMessageId,
+        inReplyToMessageId: sideTurn.message.id,
+        eventId: sideTurn.eventId,
+        text: "pong",
+        idempotencyKey: `manual:${sideTurn.eventId}`,
+      },
+    );
+    expect(byEvent.status).toBe(200);
+    expect(byEvent.body).toMatchObject({ created: true, threadRootMessageId: sideTurn.thread.rootMessageId });
+    const byMessage = await p.request("POST", "/messages", {
+      agentId,
+      conversationId: side,
+      threadRootMessageId: sideTurn.thread.rootMessageId,
+      inReplyToMessageId: sideTurn.message.id,
+      text: "pong again",
+      idempotencyKey: `manual:${sideTurn.eventId}:1`,
+    });
+    expect(byMessage.status).toBe(200);
+    // Every audit row names the turn's human (the auto-replying cell of an earlier test answered too).
+    const posted = await su.query(
+      "select user_id from app.audit_events where action = 'agent.message.posted' and metadata->>'conversationId' = $1",
+      [side],
+    );
+    expect(posted.rows.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(posted.rows.map((r) => r.user_id))).toEqual(new Set([adminId]));
+  });
+});
+
 describe("cell tokens + tenant isolation", () => {
   it("rotating a UI token: shown once, stored hashed; the previous one stops working", async () => {
     const first = await call(admin, "POST", "/api/v1/agent-cell/token");

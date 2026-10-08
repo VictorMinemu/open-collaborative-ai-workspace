@@ -983,3 +983,154 @@ describe("06-14: every delivered turn offers ocw_agent_card, gated like any tool
     expect(ev?.turn.toolFlags.ocw_agent_card).toEqual(CARD_FLAGS);
   });
 });
+
+// ---------------------------------------------------------------- security fix: every post answers a live turn
+
+describe("agent posts need a live turn, and the turn's human must still read the conversation", () => {
+  let p: FakeCellPlugin;
+  let room: string;
+
+  beforeAll(async () => {
+    p = newCell();
+    await p.start();
+    room = (
+      await ok(victor.request("POST", "/api/v1/channels", { name: "release-room", visibility: "private" }))
+    ).id as string;
+    for (const member of [
+      { kind: "user", id: alexId },
+      { kind: "agent", id: deployId },
+    ]) {
+      await ok(victor.request("POST", `/api/v1/channels/${room}/members`, member));
+    }
+  });
+
+  const agentRows = async (conversationId: string) =>
+    (
+      await su.query(
+        "select count(*)::int as n from app.messages where conversation_id = $1 and author_kind = 'agent'",
+        [conversationId],
+      )
+    ).rows[0].n as number;
+
+  /** Alex decides a fresh approval card in the room; returns the delivered `agent.card_action.v1`. */
+  async function decisionTurn(): Promise<Json> {
+    const cardId = await newCard(room, approvalCard());
+    expect((await decide(alex, cardId)).status).toBe(200);
+    const ev = await p.waitFor(
+      (e) => e.type === "agent.card_action.v1" && (e.data as Json).cardAction?.messageId === cardId,
+    );
+    return ev.data as Json;
+  }
+
+  const replyTo = (ev: Json, extra: Json = {}) =>
+    p.request<Json>("POST", "/messages", {
+      agentId: deployId,
+      conversationId: ev.conversation.id,
+      threadRootMessageId: ev.thread.rootMessageId,
+      inReplyToMessageId: ev.message.id,
+      eventId: ev.eventId,
+      text: "Deploying now.",
+      idempotencyKey: `evt:${ev.eventId}:${randomUUID()}`,
+      ...extra,
+    });
+
+  it("a card with no turn behind it is 403 no_trigger, stores nothing and is audited", async () => {
+    const before = await agentRows(backendId);
+    const res = await cell.request<Json>("POST", "/cards", {
+      agentId: deployId,
+      conversationId: backendId,
+      threadRootId: null,
+      idempotencyKey: `card-${randomUUID()}`,
+      card: deployCard(),
+    });
+    expect(res.status).toBe(403);
+    expect(errorCode(res)).toBe("no_trigger");
+    expect(await agentRows(backendId)).toBe(before);
+    expect((await audits("agent.message.refused")).at(-1)).toMatchObject({
+      actor_kind: "agent",
+      actor_id: deployId,
+      agent_id: deployId,
+      resource_id: backendId,
+      metadata: { reason: "no_trigger", route: "cards", conversationId: backendId },
+    });
+  });
+
+  it("a card for a turn of another conversation, or naming another message than the turn's, is no trigger", async () => {
+    const ev = await decisionTurn();
+    for (const extra of [{ conversationId: backendId }, { inReplyToMessageId: randomUUID() }] as Json[]) {
+      const res = await cell.request<Json>("POST", "/cards", {
+        agentId: deployId,
+        conversationId: room,
+        threadRootId: null,
+        inReplyToMessageId: ev.message.id,
+        eventId: ev.eventId,
+        idempotencyKey: `card-${randomUUID()}`,
+        card: deployCard(),
+        ...extra,
+      });
+      expect(res.status, JSON.stringify(extra)).toBe(403);
+      expect(errorCode(res)).toBe("no_trigger");
+    }
+  });
+
+  it("the card-decision turn answers and posts its card while the deciding human can read the channel", async () => {
+    const ev = await decisionTurn();
+    const reply = await replyTo(ev);
+    expect(reply.status, JSON.stringify(reply.body)).toBe(200);
+    const card = await cell.request<Json>("POST", "/cards", {
+      agentId: deployId,
+      conversationId: room,
+      threadRootId: ev.thread.rootMessageId,
+      inReplyToMessageId: ev.message.id,
+      eventId: ev.eventId,
+      idempotencyKey: `${ev.eventId}:card:0`,
+      card: deployCard({ title: "Deploy api v2.6" }),
+    });
+    expect(card.status, JSON.stringify(card.body)).toBe(201);
+    const audit = (
+      await su.query(
+        "select user_id from app.audit_events where action = 'agent.message.posted' and resource_id = $1",
+        [reply.body.messageId],
+      )
+    ).rows[0];
+    expect(audit).toEqual({ user_id: alexId });
+  });
+
+  it("once the deciding human lost access, the agent can neither answer the decision nor post a card for it", async () => {
+    const ev = await decisionTurn();
+    const before = await agentRows(room);
+    await ok(victor.request("DELETE", `/api/v1/channels/${room}/members/user/${alexId}`));
+    try {
+      for (const res of [
+        await replyTo(ev),
+        // An older cell that names only the delivered message gets the same answer: the API derives the turn.
+        await replyTo(ev, { eventId: undefined }),
+        await cell.request<Json>("POST", "/cards", {
+          agentId: deployId,
+          conversationId: room,
+          threadRootId: ev.thread.rootMessageId,
+          inReplyToMessageId: ev.message.id,
+          eventId: ev.eventId,
+          idempotencyKey: `${ev.eventId}:card:1`,
+          card: deployCard(),
+        }),
+      ]) {
+        expect(res.status, JSON.stringify(res.body)).toBe(403);
+        expect((res.body as Json).error.details).toMatchObject({
+          layer: "resource",
+          reason: "private_channel",
+        });
+      }
+      expect(await agentRows(room)).toBe(before);
+      const denied = (
+        await su.query(
+          "select actor_kind, agent_id from app.audit_events where action = 'authz.denied' and resource_id like '/agent-channel/v1/%' and organization_id = $1 order by occurred_at desc limit 1",
+          [orgId],
+        )
+      ).rows[0];
+      expect(denied).toMatchObject({ actor_kind: "agent", agent_id: deployId });
+    } finally {
+      await ok(victor.request("POST", `/api/v1/channels/${room}/members`, { kind: "user", id: alexId }));
+    }
+  });
+});
