@@ -1,3 +1,4 @@
+import { checkSchema, describeSchemaMismatch } from "@ocw/db";
 import closeWithGrace from "close-with-grace";
 import { buildApp } from "./app";
 import { EnvError, loadEnv } from "./config/env";
@@ -11,6 +12,13 @@ try {
     process.exit(1);
   }
   throw err;
+}
+
+// Schema-version guard (SELF-03): never serve against a database migrated by another release, or not at all.
+const schema = await checkSchema(env.DATABASE_URL);
+if (schema.status !== "ok") {
+  console.error(describeSchemaMismatch(schema));
+  process.exit(1);
 }
 
 const built = await buildApp(env);
