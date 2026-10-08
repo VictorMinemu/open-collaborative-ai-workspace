@@ -629,7 +629,12 @@ export async function withGateStack(
         log("building images (the openclaw cell is ~5 GB on a cold cache)");
         // Build output goes to stderr so stdout stays a clean JSON summary.
         ctx.compose(["build"], { stdio: ["ignore", 2, 2], check: true, timeoutMs: 90 * 60_000 });
-        return { images: runImages(ctx, runId) };
+        const images = {};
+        for (const ref of runImages(ctx, runId)) {
+          const size = Number(ctx.docker(["image", "inspect", "--format", "{{.Size}}", ref]).stdout);
+          images[ref] = `${Math.round(size / 1024 ** 2)} MB`;
+        }
+        return { images };
       });
     }
     await timed(steps, "up", async () => {
