@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 76
+open_count: 78
 waived_count: 0
 fixed_count: 17
-total_count: 93
-last_updated: 2026-10-08T02:29:43.449Z
+total_count: 95
+last_updated: 2026-10-08T02:33:44.475Z
 ---
 
 # Broken Windows Ledger
@@ -108,6 +108,8 @@ last_updated: 2026-10-08T02:29:43.449Z
 | 91 | 07 | deviation | compose.yaml |  | Garage has no healthcheck: compose --wait does not wait for it (backup gate retries 60s after recreate) | open |  | 2026-10-08T02:11:23.801Z |  |
 | 92 | 07 | deviation | compose.yaml |  | docker compose start also reruns the one-shot migrate service (idempotent) | open |  | 2026-10-08T02:11:23.891Z |  |
 | 93 | 07 | deviation | compose.yaml |  | With OCW_TRUST_PROXY=1 a process on the host or the compose network can still forge X-Forwarded-For; closing it needs a fixed Caddy IP/subnet | open |  | 2026-10-08T02:29:43.449Z |  |
+| 94 | 07 | deviation | compose.yaml |  | API has no depends_on openbao in vault mode: a cold start may exit once and retry | open |  | 2026-10-08T02:33:44.398Z |  |
+| 95 | 07 | unmet-truth | scripts/ocw/backup.mjs |  | ocw backup omits the openbao-data volume and secrets/ when the vault profile is on; a restore would not boot (fix in 07-10/07-11) | open |  | 2026-10-08T02:33:44.475Z |  |
 
 ````json
 [
@@ -1225,6 +1227,30 @@ last_updated: 2026-10-08T02:29:43.449Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-08T02:29:43.449Z",
+    "resolved_at": null
+  },
+  {
+    "id": 94,
+    "kind": "deviation",
+    "phase": "07",
+    "file": "compose.yaml",
+    "line": null,
+    "description": "API has no depends_on openbao in vault mode: a cold start may exit once and retry",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-08T02:33:44.398Z",
+    "resolved_at": null
+  },
+  {
+    "id": 95,
+    "kind": "unmet-truth",
+    "phase": "07",
+    "file": "scripts/ocw/backup.mjs",
+    "line": null,
+    "description": "ocw backup omits the openbao-data volume and secrets/ when the vault profile is on; a restore would not boot (fix in 07-10/07-11)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-08T02:33:44.475Z",
     "resolved_at": null
   }
 ]
