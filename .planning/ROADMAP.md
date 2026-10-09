@@ -407,7 +407,7 @@ of the thin Work Zone that Phase 1 already ships.
 **Operations features (inserted 2026-10-08, owner).** Phases 07.1–07.7 turn the 2026-10-06 operations meeting into
 generic capabilities for any organization (research: `.planning/research/OPS-FEATURES.md`). Each feature is owned by the
 Control Plane (an `ocw_*` plugin tool → Agent Channel API decides and audits → Agent Card when a human approves);
-OpenClaw's in-cell equivalents stay off. Deferred to the backlog: organization groups (F16), model comparison per task
+OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.6 → 07.7, one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
 (F17), browser-session logins for agents (F2 part 2), ERP-driven board columns beyond watched records.
 
 ### Phase 07.1: Board channels and record templates (INSERTED)
@@ -416,7 +416,7 @@ OpenClaw's in-cell equivalents stay off. Deferred to the backlog: organization g
 with their agent, with a colour-coded waiting state, keyboard- and touch-accessible moves, live multi-user ordering, and
 record templates that name cards consistently
 **Requirements**: BOARD-01, BOARD-02, BOARD-03, BOARD-04, BOARD-05, BOARD-06
-**Depends on:** Phase 7
+**Depends on:** Phase 7; Phase 07.3 (executes first)
 **Research:** done (`OPS-FEATURES.md` F12, F14)
 **UI hint**: yes
 **Success Criteria** (what must be TRUE):
@@ -430,11 +430,24 @@ record templates that name cards consistently
      cross-tenant test; card titles and bodies are searchable like messages
   5. A unit-scoped record template defines fields, default columns and a naming rule; new cards get deterministic titles
      and a user-typed title is never replaced
-**Plans:** 0 plans
+**Plans:** 14 plans in 6 waves (UI-SPEC/VALIDATION in the phase folder)
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 07.1 to break down)
+- [ ] 07.1-01-PLAN.md — Wave 1: Contracts first for the whole phase, and the approved dependencies installed exactly.
+- [ ] 07.1-02-PLAN.md — Wave 1: One forward-only migration for the whole phase: the layout flag, the four board tables, `COLLATE "C"` ranks and the
+- [ ] 07.1-03-PLAN.md — Wave 2: The board core inside the chat module: board channels, the snapshot, cards as thread roots with deterministic titles,
+- [ ] 07.1-04-PLAN.md — Wave 2: The browser's board cache and the presentational pieces the board view (07.1-08) assembles, to the UI-SPEC: query,
+- [ ] 07.1-05-PLAN.md — Wave 3: Prove and harden the board's access, replay and agent answering on top of 07.1-03's routes and guards.
+- [ ] 07.1-06-PLAN.md — Wave 3: Card text edits that keep the board, the message and search in step; the never-replace rule for typed titles; and
+- [ ] 07.1-07-PLAN.md — Wave 3: Unit-scoped record templates and their use when a board channel is created.
+- [ ] 07.1-08-PLAN.md — Wave 3: The board channel in the web app, to `07.1-UI-SPEC.md`: creation, the toolbar, the board view at 1440 and 390,
+- [ ] 07.1-09-PLAN.md — Wave 4: The board stays correct for several people at once: live updates, convergent simultaneous moves, offline catch-up with
+- [ ] 07.1-10-PLAN.md — Wave 4: Agents act on boards only through the Agent Channel API: create, move and set the waiting state, decided for the turn's
+- [ ] 07.1-11-PLAN.md — Wave 4: Column management, the card strip, card text editing and card deletion in the board UI, on top of 07.1-06's API and to
+- [ ] 07.1-12-PLAN.md — Wave 4: Record templates in the web app, to `07.1-UI-SPEC.md`: managed on the unit page in their own card, chosen when a board
+- [ ] 07.1-13-PLAN.md — Wave 5: The OpenClaw plugin side of agents on boards, and the browser proof that agents answer in card threads and create and
+- [ ] 07.1-14-PLAN.md — Wave 6: Prove Phase 07.1 end to end and record it: cross-tenant route coverage, the full local gate, ADR-0022, DEMO.md and
 
 ### Phase 07.2: Scoped memory files and governed promotion (INSERTED)
 
@@ -442,7 +455,7 @@ Plans:
 organization scopes — that people browse, read and edit in a file-tree viewer with history, while anything an agent
 wants to put into a shared scope goes through a detector and a human approval that the server applies
 **Requirements**: MEM-01, MEM-02, MEM-03, MEM-04, MEM-05, MEM-06, MEM-07
-**Depends on:** Phase 7
+**Depends on:** Phase 07.3, Phase 07.1
 **Research:** done (`OPS-FEATURES.md` F4, F5); owner requirement: a folder/subfolder viewer of `.md` memory files
 **UI hint**: yes
 **Success Criteria** (what must be TRUE):
@@ -459,18 +472,34 @@ wants to put into a shared scope goes through a detector and a human approval th
      **server** applies it (a reusable approve-and-apply primitive with a one-use grant bound to the action hash)
   5. Per-folder rules (path prefix on permission rules, deny wins) decide read/write/promote; cross-tenant and
      cross-unit tests prove a scope never leaks
-**Plans:** 0 plans
+**Plans:** 17 plans in 8 waves (UI-SPEC/VALIDATION in the phase folder)
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 07.2 to break down)
+- [ ] 07.2-01-PLAN.md — Wave 1: Define, in `packages/contracts`, every shape the phase exchanges: the memory path grammar and limits, scope/file/
+- [ ] 07.2-02-PLAN.md — Wave 1: Create the memory and approval tables with tenant isolation, a restrictive owner-only policy for personal rows,
+- [ ] 07.2-03-PLAN.md — Wave 2: Teach the single authorization authority about memory: a `memory` resource with a path, path-prefix rules with deny
+- [ ] 07.2-04-PLAN.md — Wave 2: Move the secret patterns from the Local Runtime into contracts without changing `redact()`'s output, and build the
+- [ ] 07.2-05-PLAN.md — Wave 2: Add Presidio as detector layer 2: an API client that is off by default, bounded by a 2 s timeout and fail-open with a
+- [ ] 07.2-06-PLAN.md — Wave 2: Build the reusable approve-and-apply primitive: a registry of kinds, a decision transaction that recomputes the action
+- [ ] 07.2-07-PLAN.md — Wave 2: Give OpenClaw bots the four memory tools as thin, pre-validating forwarders to the Agent Channel API, keep the
+- [ ] 07.2-08-PLAN.md — Wave 3: Build the memory domain and its human REST API: lazy scopes with a `MEMORY.md`, file operations with optimistic
+- [ ] 07.2-09-PLAN.md — Wave 4: Implement memory proposals and the `memory.write` approval kind on top of the primitive: detection on added text,
+- [ ] 07.2-10-PLAN.md — Wave 5: Ship the browse-and-read half of the memory viewer: navigation entry, pages, the accessible tree, the reading pane,
+- [ ] 07.2-11-PLAN.md — Wave 5: Expose memory to agents through the Agent Channel (decided, audited, audience-bound), offer the tools in turns, and move
+- [ ] 07.2-12-PLAN.md — Wave 6: Complete the viewer with Markdown-source editing (optimistic versions, conflicts), history with diffs and restore, file
+- [ ] 07.2-13-PLAN.md — Wave 7: Build the reviewer side of governed promotion: the approvals inbox and review page (memory proposals and a generic view
+- [ ] 07.2-14-PLAN.md — Wave 7: Give every bot a page that shows its memory and its capabilities and skills read-only, and connect the DM memory panel
+- [ ] 07.2-15-PLAN.md — Wave 8: Prove the phase end to end: a leak sweep across search, realtime, logs, audit and notifications; the real-cell smoke
+- [ ] 07.2-16-PLAN.md — Wave 4: Add memory full-text search over the readable set: the same three unaccented text configurations as chat, snippets
+- [ ] 07.2-17-PLAN.md — Wave 6: Make the chat card a trustworthy mirror of a memory approval: server-owned look, visible change preview, warnings,
 
 ### Phase 07.3: Module access per unit (INSERTED)
 
 **Goal**: Admins and leads turn whole modules (Work Zone, AI chats, bots, …) on or off for a department, team or person
 from Settings, expressed as resolver deny rules so the UI hides what the API already refuses
 **Requirements**: ACCESS-01, ACCESS-02, ACCESS-03
-**Depends on:** Phase 7
+**Depends on:** Phase 7; PR #25 (Agent Channel trigger hardening) merged before any 07.x phase executes
 **Research:** done (`OPS-FEATURES.md` F15)
 **UI hint**: yes
 **Success Criteria** (what must be TRUE):
@@ -478,11 +507,14 @@ from Settings, expressed as resolver deny rules so the UI hides what the API alr
   2. A Settings panel creates and removes module rules per unit or person; changes are audited and apply live
   3. Every navigation entry and section (incl. AI chats in the chat sidebar) hides when the module is denied, and the API
      keeps refusing direct calls; tests cover deny-beats-admin and unit inheritance
-**Plans:** 0 plans
+**Plans:** 4 plans in 3 waves (UI-SPEC/VALIDATION in the phase folder)
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 07.3 to break down)
+- [ ] 07.3-01-PLAN.md — Wave 1: Contracts first: `ai_chat.read`, `unit.modules.manage`, the module catalog and the module-access request/response
+- [ ] 07.3-02-PLAN.md — Wave 2: Ship `GET` and `PUT /api/v1/module-access` on top of the existing rules table, audit and realtime event, with admin
+- [ ] 07.3-03-PLAN.md — Wave 2: Hide every navigation entry and section of a denied module and gate every deep link with an in-place off state,
+- [ ] 07.3-04-PLAN.md — Wave 3: Ship the Modules panel (unit card for admins and leads, Settings › Modules for admins), the account-entry gating, and
 
 ### Phase 07.4: Per-member connectors, agent keychain and templates (INSERTED)
 
@@ -490,7 +522,7 @@ Plans:
 CRM account once, sessions refresh themselves, and secrets are used by reference and never seen by the model — and
 people start their own agent from a template
 **Requirements**: CONN-01, CONN-02, CONN-03, CONN-04, CONN-05, CONN-06
-**Depends on:** Phase 7
+**Depends on:** Phase 07.3, Phase 07.2
 **Research:** done (`OPS-FEATURES.md` F1, F2, F3)
 **UI hint**: yes
 **Success Criteria** (what must be TRUE):
@@ -504,18 +536,31 @@ people start their own agent from a template
      allowed hosts, the model never receives it, and every use is audited without the value
   4. Unit-scoped, versioned agent templates instantiate personal agents with their own memory and connections, within the
      personal-agent caps
-**Plans:** 0 plans
+**Plans:** 14 plans in 5 waves (UI-SPEC/VALIDATION in the phase folder)
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 07.4 to break down)
+- [ ] 07.4-01-PLAN.md — Wave 1: Define every shared shape of Phase 07.4 once, in `packages/contracts`, so the API, the web, the plugin mirror and the
+- [ ] 07.4-02-PLAN.md — Wave 1: Create the single 07.4 migration with every table and column the phase needs, under the platform's tenant isolation,
+- [ ] 07.4-03-PLAN.md — Wave 1: Install the two approved packages and build the public-only, IP-pinned egress guard that every new outbound call of
+- [ ] 07.4-04-PLAN.md — Wave 1: Build the fake OAuth-protected MCP server and authorization server that 07.4's integration and e2e tests run against,
+- [ ] 07.4-05-PLAN.md — Wave 2: Give the API a spec-correct OAuth 2.1 client for MCP servers and an MCP tool client, both bound to the egress guard,
+- [ ] 07.4-06-PLAN.md — Wave 2: Extend the existing MCP server registry (one registry, research Pattern 1) with auth modes and per-member OAuth
+- [ ] 07.4-07-PLAN.md — Wave 2: Build the keychain module: storage of agent-usable secrets by reference, the rules that decide when an agent may use
+- [ ] 07.4-08-PLAN.md — Wave 2: Let units publish versioned agent templates and let members instantiate them as personal agents within the
+- [ ] 07.4-09-PLAN.md — Wave 2: Add the three fixed `ocw_*` tools to the OpenClaw channel plugin as thin, credential-free callers of the Agent Channel
+- [ ] 07.4-10-PLAN.md — Wave 3: Implement the connectors module's member side: connect (OAuth and secret), callback, CIMD document, credential
+- [ ] 07.4-11-PLAN.md — Wave 3: Decide, per turn and per call, which member-account tools an agent may use where, and give the cell a keychain proxy
+- [ ] 07.4-12-PLAN.md — Wave 4: Finish the connector path: the Agent Channel routes that list and call per-member connector tools with the asker's
+- [ ] 07.4-13-PLAN.md — Wave 4: Give members and admins the account settings pages of this phase — Connections and Keychain — plus the MCP page's
+- [ ] 07.4-14-PLAN.md — Wave 5: Prove Phase 07.4 end to end in a real browser, record its decisions in ADR-0025, document it for operators, and run
 
 ### Phase 07.5: Per-tool approvals and Work Zone proposals (INSERTED)
 
 **Goal**: Organizations decide per tool which agent actions need a human first; the human sees the exact action in a
 card and approves it once, and agents can propose Work Zone sessions that a person starts with one click
 **Requirements**: APPROVE-01, APPROVE-02, APPROVE-03, APPROVE-04
-**Depends on:** Phase 07.2 (approve-and-apply primitive), Phase 07.4 (connector tools)
+**Depends on:** Phase 07.3, Phase 07.2, Phase 07.4
 **Research:** done (`OPS-FEATURES.md` F10, F11)
 **UI hint**: yes
 **Success Criteria** (what must be TRUE):
@@ -526,11 +571,26 @@ card and approves it once, and agents can propose Work Zone sessions that a pers
   3. An agent proposes a Work Zone session (project, device, prompt) as a card; the triggering person with
      `work_session.create` and `device.use` starts it in their name; tainted turns cannot propose, and full access is never
      chosen by an agent
-**Plans:** 0 plans
+**Plans:** 16 plans in 7 waves (UI-SPEC/VALIDATION in the phase folder)
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 07.5 to break down)
+- [ ] 07.5-01-PLAN.md — Wave 1: Contracts first for the whole phase: canonical JSON (RFC 8785), policy and grain contracts, tool-call request and
+- [ ] 07.5-02-PLAN.md — Wave 1: Create the storage of the phase: per-tool approval policies, the stored action behind every `tool.call` approval, Work
+- [ ] 07.5-03-PLAN.md — Wave 2: Create the `tool-approval` API module's policy half: storage access, the pure strictest-wins resolver, the per-turn
+- [ ] 07.5-04-PLAN.md — Wave 2: Make the cell's gate approval-aware without ever waiting for a human: send arguments only for policy tools, let the
+- [ ] 07.5-05-PLAN.md — Wave 2: Extract session creation from `POST /work-sessions` into `createWorkSession` so the Work Zone proposal kind (08) starts
+- [ ] 07.5-06-PLAN.md — Wave 2: Extend 07.2's approve-and-apply primitive without redesigning it: requester-bound re-runs for grant kinds (the
+- [ ] 07.5-07-PLAN.md — Wave 3: Register the `tool.call` grant kind on 07.2's primitive and implement `approvalForCall`, the one decision function the
+- [ ] 07.5-08-PLAN.md — Wave 3: Let agents propose Work Zone sessions as approval cards that only the triggering person can start, through the same
+- [ ] 07.5-09-PLAN.md — Wave 3: Give admins and leads the screen that decides which bot actions need a person, built on the policy API.
+- [ ] 07.5-10-PLAN.md — Wave 3: Give bots the two Work Zone proposal tools in the cell, as credential-free, mode-free callers of the API.
+- [ ] 07.5-11-PLAN.md — Wave 4: Wire the approval decision into every agent action route and the turn flags, so policy tools need a person, an approval
+- [ ] 07.5-12-PLAN.md — Wave 4: Build the `/approvals` inbox shell with its navigation badge and the Work Zone proposal review, and give the e2e fake
+- [ ] 07.5-13-PLAN.md — Wave 5: Add the action review to the `/approvals` shell so approvers decide on the exact call, and prove the approval journey
+- [ ] 07.5-14-PLAN.md — Wave 6: Render the two 07.5 linked cards in chat (actions and Work Zone proposals) as faithful, audience-safe mirrors of their
+- [ ] 07.5-15-PLAN.md — Wave 7: Prove the phase in the real cell and on one fresh stack, record the decision as ADR-0026, and sign the validation
+- [ ] 07.5-16-PLAN.md — Wave 5: Prove, through the real agent-action routes wired in 11, that approvals hold under concurrency, retries, replay and
 
 ### Phase 07.6: Automations and watched records (INSERTED)
 
@@ -538,7 +598,7 @@ Plans:
 cards — and they notice when a record changed outside the platform; people get a personal digest and finished Work Zone
 sessions feed project memory through the promotion flow
 **Requirements**: AUTO-01, AUTO-02, AUTO-03, AUTO-04, AUTO-05, AUTO-06
-**Depends on:** Phase 07.1, Phase 07.2, Phase 07.4
+**Depends on:** Phase 07.1, Phase 07.2, Phase 07.3, Phase 07.4, Phase 07.5
 **Research:** done (`OPS-FEATURES.md` F6, F8, F9, F13)
 **UI hint**: yes
 **Success Criteria** (what must be TRUE):
@@ -551,18 +611,41 @@ sessions feed project memory through the promotion flow
   4. A per-person digest (pending decisions, followed cards, unread mentions, Work Zone sessions waiting or finished)
      arrives by DM on that person's schedule
   5. A finished Work Zone session can become a summary proposal in its project's memory (07.2 flow)
-**Plans:** 0 plans
+**Plans:** 24 plans in 7 waves (UI-SPEC/VALIDATION in the phase folder)
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 07.6 to break down)
+- [ ] 07.6-01-PLAN.md — Wave 1: Contracts first for the whole phase.
+- [ ] 07.6-02-PLAN.md — Wave 1: The database half of the phase: one migration, RLS on every table, the ids-only SECURITY DEFINER functions the job
+- [ ] 07.6-03-PLAN.md — Wave 1: The job runtime the whole phase runs on, after a package legitimacy gate, plus the module wiring later plans rely on.
+- [ ] 07.6-04-PLAN.md — Wave 1: The fakes the phase tests against (Wave 0): a mail server for IMAP and a "changed elsewhere" ERP for watched records.
+- [ ] 07.6-05-PLAN.md — Wave 2: The automation entity as a REST resource: CRUD, schedules and time zones, access and target rules, run history, Run
+- [ ] 07.6-06-PLAN.md — Wave 2: The proactive-delivery primitive: an automation run becomes a cell turn bound to an anchor message and a person, with
+- [ ] 07.6-07-PLAN.md — Wave 3: Watched records: link a board card to an external record, hash its watched fields in the API, check on access and on
+- [ ] 07.6-08-PLAN.md — Wave 2: Work Zone sessions feed project memory: repository → unit mapping, the summary job, the system-origin proposal, the
+- [ ] 07.6-09-PLAN.md — Wave 3: The phase's API tracer: scheduled automations actually run — tick, fire, re-decision, budgets, breaker, no-reply,
+- [ ] 07.6-10-PLAN.md — Wave 5: Signed webhooks as a trigger: endpoint lifecycle inside the automation, the public route with verification, replay
+- [ ] 07.6-11-PLAN.md — Wave 5: IMAP mail as a trigger: mailbox lifecycle inside the automation, Keychain-only sign-in, pinned TLS connections,
+- [ ] 07.6-12-PLAN.md — Wave 4: Natural-language creation: the bot proposes, the person confirms in a card (or edits it in the editor), the server
+- [ ] 07.6-13-PLAN.md — Wave 4: The personal digest: settings, deterministic sections, DM delivery by the chosen bot, optional metered summary,
+- [ ] 07.6-14-PLAN.md — Wave 5: Compare-and-set writes to watched records through the cell tool, with approvals, conflict reporting and note-back.
+- [ ] 07.6-15-PLAN.md — Wave 5: The automations UI tracer: Bots › Automations list, editor (schedule trigger), run history and the platform-card
+- [ ] 07.6-16-PLAN.md — Wave 5: The digest settings page.
+- [ ] 07.6-17-PLAN.md — Wave 6: Watched records in the browser: link dialog, tile indicator, strip row with Check now, and the change/conflict cards in
+- [ ] 07.6-18-PLAN.md — Wave 6: The trigger UI: webhook and mailbox panels inside the editor, the What happens section, the secret reveal, and the
+- [ ] 07.6-19-PLAN.md — Wave 7: The phase gate: release images, the full suite on one stack, CI, documentation, ADR-0028 and the signed validation.
+- [ ] 07.6-20-PLAN.md — Wave 2: Everything the cell needs for this phase, in one plan: delivering automation runs as turns and the two new tools.
+- [ ] 07.6-21-PLAN.md — Wave 4: Inbound processing: every webhook or mail item becomes a deterministic post (thread, DM or board card) and, if asked,
+- [ ] 07.6-22-PLAN.md — Wave 3: The Work Zone → memory UI: the session strip and its dialogs, and the unit's Linked repositories card.
+- [ ] 07.6-23-PLAN.md — Wave 6: The natural-language proposal in the browser: the decider-only card, confirm and discard, and Edit → draft editor.
+- [ ] 07.6-24-PLAN.md — Wave 6: Prove the phase's security properties across all modules and the cell side in a real OpenClaw container.
 
 ### Phase 07.7: Agent-to-agent collaboration (INSERTED)
 
 **Goal**: An agent consults or delegates to another agent through the platform, within a permission matrix of who may
 message whom, with every hop visible in the thread, audited and bounded
 **Requirements**: A2A-01, A2A-02, A2A-03
-**Depends on:** Phase 07.5
+**Depends on:** Phase 07.3, Phase 07.5
 **Research:** done (`OPS-FEATURES.md` F7)
 **UI hint**: yes
 **Success Criteria** (what must be TRUE):
@@ -570,11 +653,21 @@ message whom, with every hop visible in the thread, audited and bounded
      hop is a visible, attributed thread message audited with a chain id
   2. Effective permission = source agent ∩ triggering human ∩ target visibility ∩ `agent.message` rules (deny wins)
   3. Depth ≤ 2, no agent twice per chain, per-chain budget and daily limits stop loops; the asker pays
-**Plans:** 0 plans
+**Plans:** 11 plans in 5 waves (UI-SPEC/VALIDATION in the phase folder)
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 07.7 to break down)
+- [ ] 07.7-01-PLAN.md — Wave 1: Contracts first for the whole phase.
+- [ ] 07.7-02-PLAN.md — Wave 1: Ledger tables with RLS, loop guards as constraints, chain context on the turn ledger, the sweeper function, the Bots
+- [ ] 07.7-03-PLAN.md — Wave 2: Make `agent.message` decisions follow D-02 exactly and give admins the two writers of those rules.
+- [ ] 07.7-04-PLAN.md — Wave 2: Build `POST /agent-channel/v1/consultations` end to end: offering, decision, guards, the question message, the chain and
+- [ ] 07.7-05-PLAN.md — Wave 2: Add `ocw_consult_agent`, `agent.consult_reply.v1` handling, the turn-done call and initial taint to the OpenClaw plugin.
+- [ ] 07.7-06-PLAN.md — Wave 3: Close hops on the turn-done signal, deliver the answer back as `agent.consult_reply.v1`, make consult turns valid
+- [ ] 07.7-07-PLAN.md — Wave 3: Pin OpenClaw's in-cell agent-to-agent off and prove a two-bot consult in a real cell.
+- [ ] 07.7-08-PLAN.md — Wave 3: Ship the organization switch and the per-bot consult rules in the web app, to the UI contract above.
+- [ ] 07.7-09-PLAN.md — Wave 4: Time out unanswered hops and cancel orphaned chains, exactly once, per organization.
+- [ ] 07.7-10-PLAN.md — Wave 4: Render consult hops in threads with live status and Stop, and prove a two-bot consult in the browser.
+- [ ] 07.7-11-PLAN.md — Wave 5: Gate the phase: route-coverage cross-tenant guard, full verification on fresh infrastructure, docs and the signed
 
 ### Phase 8: Device Trust, Protocol and Work Zone Permissions
 
