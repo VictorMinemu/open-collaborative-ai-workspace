@@ -2061,6 +2061,11 @@ Organization
 
 Higher-level restrictions prevail.
 
+**Module access.** Admins, and Team Leads for the units they lead, turn whole modules (Work Zone, AI chats, bots) on
+or off for the organization, a department, team or project, or one person. Turning a module off is an explicit deny
+rule on the module's permissions, decided by the same resolver: it beats every role, including admin, and is inherited
+down the hierarchy. The UI hides a denied module and the API refuses it. It is never a feature flag (ADR-0024).
+
 ---
 
 ## Part VIII — Persistent Agents & OpenClaw
