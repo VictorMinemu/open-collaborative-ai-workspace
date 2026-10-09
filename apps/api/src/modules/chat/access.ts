@@ -8,6 +8,7 @@ import {
   type ChannelFacts,
   channelResource,
   createPermissionService,
+  orgResource,
 } from "../organization";
 import { type AiAccess, aiAccessSql, type ConversationRow, channelFacts, getConversation } from "./service";
 
@@ -16,6 +17,10 @@ import { type AiAccess, aiAccessSql, type ConversationRow, channelFacts, getConv
  * resolver decides `channel.read` for every id (hidden = missing = 404); SQL may narrow the candidates (a DM is
  * only a candidate for its members) but never decides on its own. Lists (search, inbox, mentions, saves, pins,
  * threads, unread) pass `readableIds` to their queries; event-time decisions use `isReadable`.
+ *
+ * AI chats additionally need `ai_chat.read` at organization scope (ADR-0024): the AI chats module turned off by a
+ * catalog deny rule hides every AI chat, owned or shared, on every path at once (routes, search, inbox,
+ * notifications, the `conv:` topic). A plain `ai_chat.use` deny keeps reads (research Gap 1).
  */
 
 /**
@@ -70,6 +75,10 @@ export function createConversationAccess(core: Core): ConversationAccess {
       const facts = await channelFacts(tx, conv, { kind: "user", id: userId });
       try {
         await perms.assertCan(req, tx, "channel.read", channelResource(facts), { hideAs404: true });
+        // ADR-0024: the AI chats module (`ai_chat.read`) decides on top of the chat's own access.
+        if (conv.kind === "ai_chat") {
+          await perms.assertCan(req, tx, "ai_chat.read", orgResource(), { hideAs404: true });
+        }
       } catch (err) {
         // Hidden must read exactly like missing (same status, code and message), or the message itself would
         // tell a permalink holder that the conversation exists.
@@ -87,7 +96,13 @@ export function createConversationAccess(core: Core): ConversationAccess {
     },
 
     async readableIds(tx, userId, opts = {}) {
-      const kinds = opts.kinds ?? ALL_KINDS;
+      let kinds = opts.kinds ?? ALL_KINDS;
+      // ADR-0024: one organization-scope decision; without `ai_chat.read` no AI chat is a candidate at all.
+      if (kinds.includes("ai_chat")) {
+        const d = await perms.decide(tx, { kind: "user", userId }, "ai_chat.read", orgResource());
+        if (!d.allowed) kinds = kinds.filter((k) => k !== "ai_chat");
+      }
+      if (kinds.length === 0) return [];
       const me = conversationMembers;
       // P-03: an AI chat's candidates come from its owner and active grants, never from membership rows.
       const aiAccess = sql<AiAccess>`case when ${conversations.kind} = 'ai_chat' then ${aiAccessSql(
@@ -142,7 +157,9 @@ export function createConversationAccess(core: Core): ConversationAccess {
       if (!conv) return false;
       const facts = await channelFacts(tx, conv, { kind: "user", id: userId });
       const d = await perms.decide(tx, { kind: "user", userId }, "channel.read", channelResource(facts));
-      return d.allowed;
+      if (!d.allowed) return false;
+      if (conv.kind !== "ai_chat") return true;
+      return (await perms.decide(tx, { kind: "user", userId }, "ai_chat.read", orgResource())).allowed;
     },
   };
   return access;

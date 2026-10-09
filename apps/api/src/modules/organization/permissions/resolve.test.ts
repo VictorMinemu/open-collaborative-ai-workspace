@@ -113,6 +113,8 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "ai_chat.manage": true,
     "bot.manage_unit": false,
     "agent_card.approve": true,
+    "ai_chat.read": true,
+    "unit.modules.manage": false,
   },
   developer: {
     "org.read": true,
@@ -170,6 +172,8 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "ai_chat.manage": true,
     "bot.manage_unit": false,
     "agent_card.approve": true,
+    "ai_chat.read": true,
+    "unit.modules.manage": false,
   },
   lead: {
     "org.read": true,
@@ -227,6 +231,8 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "ai_chat.manage": true,
     "bot.manage_unit": false,
     "agent_card.approve": true,
+    "ai_chat.read": true,
+    "unit.modules.manage": false,
   },
   admin: {
     "org.read": true,
@@ -284,6 +290,8 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "ai_chat.manage": true,
     "bot.manage_unit": true,
     "agent_card.approve": true,
+    "ai_chat.read": true,
+    "unit.modules.manage": true,
   },
 };
 
