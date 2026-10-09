@@ -10,10 +10,13 @@ import { invite } from "./testing-workzone";
  * Phase 07.3 (ADR-0024, ACCESS-03): a module is turned off by ordinary catalog deny rows written through the existing
  * rules API, and the API then refuses it on every direct path. AI chats: the readable set (`chat/access.ts`) decides
  * `ai_chat.read`, so a denied member loses her own chats by URL, the chats shared with her, AI chat search hits and AI
- * chat notifications; a plain `ai_chat.use` deny keeps today's semantics. Real PostgreSQL + Redis, the in-process
- * fake model; no real provider is ever called (later messages are sent with `askAi: false`).
+ * chat notifications; a plain `ai_chat.use` deny keeps today's semantics. Work Zone and Bots: the routes' own resolver
+ * decisions refuse a denied member and a denied admin, device hygiene stays, and a department-wide row reaches the
+ * members of its teams only. Real PostgreSQL + Redis, the in-process fake model; no real provider is ever called (later
+ * messages are sent with `askAi: false`).
  *
- * Cast: Víctor (admin, setup), Dana (developer), Sam (standard).
+ * Cast: Víctor (admin, setup), Ada (second admin), Dana (developer), Sam (standard), Riley (developer, Backend team
+ * under Engineering), Olga (developer, Sales department).
  */
 
 let stack: AiStack;
@@ -21,8 +24,16 @@ let su: pg.Client;
 let victor: TestClient;
 let dana: TestClient;
 let sam: TestClient;
+let ada: TestClient;
+let riley: TestClient;
+let olga: TestClient;
 let danaId: string;
 let samId: string;
+let adaId: string;
+let engineeringId: string;
+let teamBotId: string;
+
+const CELL_TOKEN = "ocw-test-cell-token-module-access-0123456789";
 
 // biome-ignore lint/suspicious/noExplicitAny: loose JSON access keeps the assertions readable
 type Json = Record<string, any>;
@@ -43,15 +54,19 @@ async function fails(res: Promise<Res>, status: number) {
   return (r.body as Json).error as { code: string; message: string; details?: Json };
 }
 
-/** One user-subject deny row per catalog pattern of `module`, through `POST /permission-rules`; returns the ids. */
-async function denyModule(module: ModuleId, userId: string, scopeUnitId: string | null = null) {
+/**
+ * One deny row per catalog pattern of `module` for a user (or everyone), optionally scoped to a unit, through
+ * `POST /permission-rules`; returns the ids.
+ */
+async function denyModule(module: ModuleId, subject: string | "everyone", scopeUnitId: string | null = null) {
   const ids: string[] = [];
   for (const permission of MODULE_CATALOG[module].patterns) {
     const rule = await ok(
       victor.request("POST", "/api/v1/permission-rules", {
         ...(scopeUnitId ? { scopeUnitId } : {}),
-        subjectKind: "user",
-        subjectId: userId,
+        ...(subject === "everyone"
+          ? { subjectKind: "everyone" }
+          : { subjectKind: "user", subjectId: subject }),
         permission,
         effect: "deny",
       }),
@@ -150,7 +165,7 @@ const aiChatInboxItems = async (as: TestClient) =>
   );
 
 beforeAll(async () => {
-  stack = await startAiStack();
+  stack = await startAiStack({ env: { OCW_CELL_TOKEN: CELL_TOKEN } });
   su = new pg.Client({ connectionString: stack.db.superuserUrl });
   await su.connect();
   victor = new TestClient(stack.baseUrl);
@@ -177,7 +192,52 @@ beforeAll(async () => {
     "Sam Rivera",
     "standard",
   ));
+  ({ client: ada, userId: adaId } = await invite(stack, victor, "ada@example.test", "Ada Admin", "admin"));
+  const { client: rileyClient, userId: rileyId } = await invite(
+    stack,
+    victor,
+    "riley@example.test",
+    "Riley Park",
+    "developer",
+  );
+  riley = rileyClient;
+  const { client: olgaClient, userId: olgaId } = await invite(
+    stack,
+    victor,
+    "olga@example.test",
+    "Olga Sales",
+    "developer",
+  );
+  olga = olgaClient;
   for (const c of [dana, sam]) await seedPlan(c);
+
+  engineeringId = (
+    await ok(
+      victor.request("POST", "/api/v1/units", { kind: "department", name: "Engineering", parentId: null }),
+    )
+  ).id as string;
+  const backendId = (
+    await ok(
+      victor.request("POST", "/api/v1/units", { kind: "team", name: "Backend", parentId: engineeringId }),
+    )
+  ).id as string;
+  const salesId = (
+    await ok(victor.request("POST", "/api/v1/units", { kind: "department", name: "Sales", parentId: null }))
+  ).id as string;
+  await ok(victor.request("POST", `/api/v1/units/${backendId}/members`, { userId: rileyId }));
+  await ok(victor.request("POST", `/api/v1/units/${salesId}/members`, { userId: olgaId }));
+
+  teamBotId = (
+    await ok(
+      victor.request("POST", "/api/v1/agents", {
+        name: "Archie",
+        username: "archie",
+        instructions: "You are Archie.",
+        modelProvider: "mock",
+        modelId: "mock-1",
+      }),
+    )
+  ).id as string;
 }, 180_000);
 
 afterAll(async () => {
@@ -290,6 +350,124 @@ describe("AI chats module off (ai_chat.read at the readable set)", () => {
       expect(held).not.toContain("ai_chat.use");
     } finally {
       await deleteRules([rule.id as string]);
+    }
+  });
+});
+
+describe("Work Zone module off: direct calls refused, device hygiene kept", () => {
+  it("positive control: Dana (developer) lists sessions and may pair", async () => {
+    await ok(dana.request("GET", "/api/v1/work-sessions"));
+    expect(await myPermissions(dana)).toEqual(
+      expect.arrayContaining(["work_session.read", "work_session.create", "device.pair", "device.read"]),
+    );
+  });
+
+  it("with the Work Zone rows on Dana every Work Zone call is 403; GET /devices stays 200", async () => {
+    const ids = await denyModule("work_zone", danaId);
+    try {
+      const list = await fails(dana.request("GET", "/api/v1/work-sessions"), 403);
+      expect(list.details).toMatchObject({
+        permission: "work_session.read",
+        layer: "user",
+        reason: "denied_by_rule",
+      });
+      const create = await fails(
+        dana.request("POST", "/api/v1/work-sessions", { projectId: randomUUID() }),
+        403,
+      );
+      expect(create.details).toMatchObject({ permission: "work_session.create", layer: "user" });
+      const pair = await fails(dana.request("POST", "/api/v1/devices/enrollments"), 403);
+      expect(pair.details).toMatchObject({ permission: "device.pair", layer: "user" });
+      await ok(dana.request("GET", "/api/v1/devices"));
+      const held = await myPermissions(dana);
+      expect(held.filter((p) => p.startsWith("work_session."))).toEqual([]);
+      expect(held).not.toContain("device.pair");
+      expect(held).toContain("device.read");
+    } finally {
+      await deleteRules(ids);
+    }
+    await ok(dana.request("GET", "/api/v1/work-sessions"));
+  });
+
+  it("deny beats admin: the same rows on Ada (admin) refuse her too", async () => {
+    await ok(ada.request("GET", "/api/v1/work-sessions"));
+    const ids = await denyModule("work_zone", adaId);
+    try {
+      const err = await fails(ada.request("GET", "/api/v1/work-sessions"), 403);
+      expect(err.details).toMatchObject({ permission: "work_session.read", layer: "user" });
+      await fails(ada.request("POST", "/api/v1/devices/enrollments"), 403);
+      await ok(ada.request("GET", "/api/v1/devices"));
+      const held = await myPermissions(ada);
+      expect(held).not.toContain("work_session.read");
+      // Governance and hygiene stay with the admin.
+      expect(held).toEqual(
+        expect.arrayContaining(["work_zone.manage", "device.revoke", "unit.modules.manage"]),
+      );
+      // Víctor, the other admin, is untouched.
+      await ok(victor.request("GET", "/api/v1/work-sessions"));
+    } finally {
+      await deleteRules(ids);
+    }
+    await ok(ada.request("GET", "/api/v1/work-sessions"));
+  });
+
+  it("unit inheritance: Engineering-wide rows refuse Riley (Backend) and leave Olga (Sales) at 200", async () => {
+    const ids = await denyModule("work_zone", "everyone", engineeringId);
+    try {
+      const err = await fails(riley.request("GET", "/api/v1/work-sessions"), 403);
+      expect(err.details).toMatchObject({
+        permission: "work_session.read",
+        layer: "unit",
+        reason: "denied_by_rule",
+        unitId: engineeringId,
+      });
+      expect(await myPermissions(riley)).not.toContain("work_session.read");
+      await ok(olga.request("GET", "/api/v1/work-sessions"));
+      expect(await myPermissions(olga)).toContain("work_session.read");
+      // Members of no Engineering unit (Dana, the admins) are untouched.
+      await ok(dana.request("GET", "/api/v1/work-sessions"));
+      await ok(victor.request("GET", "/api/v1/work-sessions"));
+    } finally {
+      await deleteRules(ids);
+    }
+    await ok(riley.request("GET", "/api/v1/work-sessions"));
+  });
+});
+
+describe("Bots module off: the organization team bot disappears for the denied member", () => {
+  const listedBots = async (as: TestClient) =>
+    ((await ok(as.request("GET", "/api/v1/agents"))).agents as Json[]).map((a) => a.id as string);
+
+  it("with the Bots rows on Dana GET /agents omits the team bot and GET /agents/:id is 404; Sam keeps it", async () => {
+    expect(await listedBots(dana)).toContain(teamBotId);
+    await ok(dana.request("GET", `/api/v1/agents/${teamBotId}`));
+    const ids = await denyModule("bots", danaId);
+    try {
+      expect(await listedBots(dana)).not.toContain(teamBotId);
+      // Hidden as missing (404). The message differs from a missing bot's ("Not found" vs "Bot not found") on every
+      // hidden bot, personal bots and unit personas included: pre-existing, logged in 07.3 deferred-items.md.
+      expect((await fails(dana.request("GET", `/api/v1/agents/${teamBotId}`), 404)).code).toBe("not_found");
+      const held = await myPermissions(dana);
+      for (const p of ["bot.read", "bot.create_personal", "bot.internet", "bot.tool.use"])
+        expect(held).not.toContain(p);
+      expect(await listedBots(sam)).toContain(teamBotId);
+      expect(await myPermissions(sam)).toContain("bot.read");
+    } finally {
+      await deleteRules(ids);
+    }
+    expect(await listedBots(dana)).toContain(teamBotId);
+  });
+
+  it("deny beats admin: the Bots rows on Ada hide the team bot from her too", async () => {
+    const ids = await denyModule("bots", adaId);
+    try {
+      expect(await listedBots(ada)).not.toContain(teamBotId);
+      await fails(ada.request("GET", `/api/v1/agents/${teamBotId}`), 404);
+      const held = await myPermissions(ada);
+      expect(held).not.toContain("bot.read");
+      expect(held).toContain("bot.manage");
+    } finally {
+      await deleteRules(ids);
     }
   });
 });

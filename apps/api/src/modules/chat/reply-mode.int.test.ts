@@ -1,3 +1,4 @@
+import { MODULE_CATALOG } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
@@ -325,5 +326,67 @@ describe("date and time context (D-12, T-03.1-08-02)", () => {
       clientTimeZone: "Mars/Base",
     });
     expect(r.status).toBe(400);
+  });
+});
+
+describe("Bots module off (Phase 07.3, ADR-0024)", () => {
+  let dana: TestClient;
+  let danaId: string;
+  let ruleIds: string[] = [];
+
+  /** A fresh public channel with Sam, Dana and the given bots as members. */
+  async function sharedRoom(name: string, botIds: string[]): Promise<string> {
+    const id = await channel(name, botIds);
+    await ok(dana.request("POST", `/api/v1/channels/${id}/join`, {}));
+    return id;
+  }
+
+  beforeAll(async () => {
+    [dana, danaId] = await joinAs("dana@example.test", "Dana Dev", "developer");
+  });
+
+  it("with the Bots catalog rows on Dana, team bots answer Sam but never Dana; deleting the rows restores her", async () => {
+    const mentionRoom = await sharedRoom("bots-off-mention", [otherBotId]);
+    const followRoom = await sharedRoom("bots-off-follow", [followerId]);
+    for (const permission of MODULE_CATALOG.bots.patterns) {
+      const rule = await ok(
+        admin.request("POST", "/api/v1/permission-rules", {
+          subjectKind: "user",
+          subjectId: danaId,
+          permission,
+          effect: "deny",
+        }),
+      );
+      ruleIds.push(rule.id as string);
+    }
+
+    // An @mention of the organization team bot and a plain message under a reply-mode `all` bot: nothing for Dana.
+    await say(dana, mentionRoom, "@other-bot are you there?");
+    await say(dana, followRoom, "deploy started");
+    expect(await cellEvents(otherBotId, mentionRoom)).toHaveLength(0);
+    expect(await cellEvents(followerId, followRoom)).toHaveLength(0);
+
+    // Sam's identical messages are answered, one delivery each.
+    const samAsk = await say(sam, mentionRoom, "@other-bot are you there?");
+    const samSay = await say(sam, followRoom, "deploy started");
+    const mentioned = await cellEvents(otherBotId, mentionRoom);
+    expect(mentioned).toHaveLength(1);
+    expect(mentioned[0]).toMatchObject({ message: { id: samAsk.id, author: { kind: "user", id: samId } } });
+    const followed = await cellEvents(followerId, followRoom);
+    expect(followed).toHaveLength(1);
+    expect(followed[0]).toMatchObject({ message: { id: samSay.id, author: { kind: "user", id: samId } } });
+
+    for (const id of ruleIds) await ok(admin.request("DELETE", `/api/v1/permission-rules/${id}`));
+    ruleIds = [];
+    const danaAsk = await say(dana, mentionRoom, "@other-bot and now?");
+    const danaSay = await say(dana, followRoom, "deploy finished");
+    expect((await cellEvents(otherBotId, mentionRoom)).at(-1)).toMatchObject({
+      message: { id: danaAsk.id, author: { kind: "user", id: danaId } },
+    });
+    expect(await cellEvents(otherBotId, mentionRoom)).toHaveLength(2);
+    expect((await cellEvents(followerId, followRoom)).at(-1)).toMatchObject({
+      message: { id: danaSay.id, author: { kind: "user", id: danaId } },
+    });
+    expect(await cellEvents(followerId, followRoom)).toHaveLength(2);
   });
 });
