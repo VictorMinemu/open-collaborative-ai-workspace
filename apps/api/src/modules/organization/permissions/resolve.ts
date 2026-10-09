@@ -80,6 +80,8 @@ export interface ResourceFacts {
   tool?: string;
   /** Invitations: the role being granted (role ceiling). */
   invitedRole?: OrgRole;
+  /** Module access: the org role of the person a rule targets; the ceiling precondition reads it. */
+  targetRole?: OrgRole;
 }
 
 export interface RuleFact {

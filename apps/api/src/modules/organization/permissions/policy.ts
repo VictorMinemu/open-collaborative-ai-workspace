@@ -4,6 +4,7 @@ import {
   type OrgRole,
   type Permission,
   type PermissionMode,
+  ROLE_RANK,
 } from "@ocw/contracts";
 import type { PrincipalFacts, Relation, ResourceFacts, ResourceState, ResourceType } from "./resolve";
 
@@ -209,6 +210,17 @@ export const PRECONDITIONS: readonly Precondition[] = [
       return allowed.includes(r.invitedRole) ? null : { layer: "resource", reason: "role_ceiling" };
     },
   },
+  {
+    // Module access (ADR-0024, D-05 (1)): a rule never targets a person whose role outranks the actor's, so a lead
+    // never turns modules off for an admin. Unit-wide rules (no target) are not judged here.
+    applies: (perm) => perm === "unit.modules.manage",
+    check: (p, r) => {
+      if (r.targetRole === undefined) return null;
+      return p.orgRole !== null && ROLE_RANK[r.targetRole] <= ROLE_RANK[p.orgRole]
+        ? null
+        : { layer: "resource", reason: "role_ceiling" };
+    },
+  },
 ];
 
 /** The first precondition that denies `permission`, or null. */
@@ -240,6 +252,18 @@ export function orgResource(): ResourceFacts {
 
 export function unitResource(u: { id: string; path: readonly string[] }): ResourceFacts {
   return facts("unit", [], [], u.path);
+}
+
+/**
+ * Module access (ADR-0024): `unit.modules.manage` is decided on the scope unit (or the organization when null), with
+ * the target person's org role when the rule targets one person (the `role_ceiling` precondition).
+ */
+export function moduleTargetResource(
+  unit: { id: string; path: readonly string[] } | null,
+  targetRole?: OrgRole,
+): ResourceFacts {
+  const r = unit ? unitResource(unit) : orgResource();
+  return targetRole === undefined ? r : { ...r, targetRole };
 }
 
 export function userResource(targetUserId: string, principalUserId: string | null): ResourceFacts {
