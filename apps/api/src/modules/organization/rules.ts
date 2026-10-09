@@ -19,9 +19,9 @@ import { orgTopic, requireUnit } from "./units";
  * update route: delete + create keeps the audit trail explicit.
  */
 
-type RuleRow = typeof permissionRules.$inferSelect;
+export type RuleRow = typeof permissionRules.$inferSelect;
 
-function toRule(r: RuleRow): PermissionRule {
+export function toRule(r: RuleRow): PermissionRule {
   return PermissionRule.parse({
     id: r.id,
     scopeUnitId: r.scopeUnitId,
@@ -36,7 +36,7 @@ function toRule(r: RuleRow): PermissionRule {
 }
 
 /** 400 `unknown_subject` unless a user subject is an org member and an agent subject a live agent. */
-async function assertSubjectExists(tx: Tx, kind: string, subjectId: string | null): Promise<void> {
+export async function assertSubjectExists(tx: Tx, kind: string, subjectId: string | null): Promise<void> {
   if (kind !== "user" && kind !== "agent") return;
   if (!subjectId) throw badRequest(`Unknown ${kind} for this rule`, "unknown_subject");
   const found =
@@ -54,13 +54,69 @@ async function assertSubjectExists(tx: Tx, kind: string, subjectId: string | nul
   if (found.length === 0) throw badRequest(`Unknown ${kind} for this rule`, "unknown_subject");
 }
 
-async function rulesChanged(core: Core, tx: Tx, ruleId: string, action: string): Promise<void> {
+/**
+ * One `permission_rules.updated` on `org:<id>`: the web refetches `/me/permissions` and every live subscription of
+ * the organization is re-decided (ADR-0009). Callers append exactly one per request that changed rows.
+ */
+export async function rulesChanged(core: Core, tx: Tx, ruleId: string, action: string): Promise<void> {
   await core.realtime.appendEvent(
     tx,
     orgTopic(tenantOf(tx).organizationId),
     EventTypes.permissionRulesUpdated,
     { ruleId, action },
   );
+}
+
+export interface RuleRowValues {
+  scopeUnitId: string | null;
+  subjectKind: RuleRow["subjectKind"];
+  subjectId: string | null;
+  permission: string;
+  tool: string | null;
+  effect: RuleRow["effect"];
+}
+
+/**
+ * Inserts one rule row and audits it (`permission_rule.created`, `metadata: { rule, ...metadata }`). Validation of
+ * scope and subject is the caller's; the realtime event is too (`rulesChanged`, once per request).
+ */
+export async function insertRuleRow(
+  core: Core,
+  tx: Tx,
+  values: RuleRowValues,
+  opts: { createdBy: string | null; metadata?: Record<string, unknown> },
+): Promise<PermissionRule> {
+  const [row] = await tx
+    .insert(permissionRules)
+    .values({ organizationId: tenantOf(tx).organizationId, ...values, createdBy: opts.createdBy })
+    .returning();
+  if (!row) throw new Error("rule insert returned no row");
+  const rule = toRule(row);
+  await core.audit.record(tx, {
+    action: "permission_rule.created",
+    resourceType: "permission_rule",
+    resourceId: rule.id,
+    metadata: { rule, ...opts.metadata },
+  });
+  return rule;
+}
+
+/** Deletes one loaded rule row and audits it (`permission_rule.deleted`); false when it was already gone. */
+export async function deleteRuleRow(
+  core: Core,
+  tx: Tx,
+  row: RuleRow,
+  metadata?: Record<string, unknown>,
+): Promise<boolean> {
+  const [deleted] = await tx.delete(permissionRules).where(eq(permissionRules.id, row.id)).returning();
+  if (!deleted) return false;
+  await core.audit.record(tx, {
+    action: "permission_rule.deleted",
+    resourceType: "permission_rule",
+    resourceId: deleted.id,
+    metadata: { rule: toRule(deleted), ...metadata },
+  });
+  return true;
 }
 
 export function registerRuleRoutes(app: App, core: Core, perms: PermissionService): void {
@@ -97,27 +153,19 @@ export function registerRuleRoutes(app: App, core: Core, perms: PermissionServic
         const body = req.body;
         if (body.scopeUnitId) await requireUnit(tx, body.scopeUnitId);
         await assertSubjectExists(tx, body.subjectKind, body.subjectId);
-        const [row] = await tx
-          .insert(permissionRules)
-          .values({
-            organizationId: tenantOf(tx).organizationId,
+        const rule = await insertRuleRow(
+          core,
+          tx,
+          {
             scopeUnitId: body.scopeUnitId,
             subjectKind: body.subjectKind,
             subjectId: body.subjectId,
             permission: body.permission,
             tool: body.tool,
             effect: body.effect,
-            createdBy: req.auth?.userId ?? null,
-          })
-          .returning();
-        if (!row) throw new Error("rule insert returned no row");
-        const rule = toRule(row);
-        await core.audit.record(tx, {
-          action: "permission_rule.created",
-          resourceType: "permission_rule",
-          resourceId: rule.id,
-          metadata: { rule },
-        });
+          },
+          { createdBy: req.auth?.userId ?? null },
+        );
         await rulesChanged(core, tx, rule.id, "created");
         return rule;
       }),
@@ -133,16 +181,11 @@ export function registerRuleRoutes(app: App, core: Core, perms: PermissionServic
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
         const [row] = await tx
-          .delete(permissionRules)
+          .select()
+          .from(permissionRules)
           .where(eq(permissionRules.id, req.params.id))
-          .returning();
-        if (!row) throw notFound("Rule not found", "rule_not_found");
-        await core.audit.record(tx, {
-          action: "permission_rule.deleted",
-          resourceType: "permission_rule",
-          resourceId: row.id,
-          metadata: { rule: toRule(row) },
-        });
+          .limit(1);
+        if (!row || !(await deleteRuleRow(core, tx, row))) throw notFound("Rule not found", "rule_not_found");
         await rulesChanged(core, tx, row.id, "deleted");
         return { ok: true as const };
       }),

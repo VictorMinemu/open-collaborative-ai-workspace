@@ -7,6 +7,7 @@ import {
 } from "@ocw/contracts";
 import { type ApiModule, type Core, tenant } from "../../core";
 import { registerMemberRoutes } from "./members";
+import { registerModuleAccessRoutes } from "./module-access";
 import { orgResource, userResource } from "./permissions/policy";
 import { createPermissionService } from "./permissions/service";
 import { registerRuleRoutes } from "./rules";
@@ -25,6 +26,7 @@ export {
   deviceResource,
   invitationResource,
   memberResource,
+  moduleTargetResource,
   orgResource,
   unitResource,
   userResource,
@@ -105,6 +107,7 @@ export function createOrganizationModule(core: Core): ApiModule {
       registerMemberRoutes(app, core, perms);
       registerUnitRoutes(app, core, perms);
       registerRuleRoutes(app, core, perms);
+      registerModuleAccessRoutes(app, core, perms);
 
       app.get(
         "/me/permissions",
