@@ -161,6 +161,62 @@ SLICE-06…18 were added on 2026-10-04 after the code audit of the widened demo 
 - [x] **SELF-06**: Every package declares its license (AGPL-3.0 apps/server, Apache-2.0 for `packages/contracts` and `packages/protocol`) and CI checks dependency-license compatibility (PRD §100)
 - [x] **SELF-07**: Scenario B (minus Work Zone creation) runs as a Playwright E2E against the compose stack in CI
 
+### Board Channels and Record Templates (BOARD) — added 2026-10-08 by the owner
+
+- [ ] **BOARD-01**: A channel is created as text or board; a board channel keeps the channel's members, permissions, unit, sidebar entry and search, and has configurable columns with a category (backlog, started, done, cancelled)
+- [ ] **BOARD-02**: A card is the root message of a normal thread: opening it opens the thread, agents answer there, and the card shows its title and waiting state (none, us, customer, both)
+- [ ] **BOARD-03**: Cards move within and across columns by pointer drag, keyboard and a "Move to…" menu; at 390 px columns are tabs; concurrent moves converge (fractional ranks, server re-rank on collision)
+- [ ] **BOARD-04**: Board changes are durable realtime events on the conversation stream with seq/cursor replay; every board query path has a cross-tenant test
+- [ ] **BOARD-05**: Card titles and bodies are found by chat search within the reader's readable set
+- [ ] **BOARD-06**: Unit-scoped record templates define typed fields, default columns and a naming rule; new cards get deterministic titles and a user-typed title is never replaced
+
+### Scoped Memory Files (MEM) — added 2026-10-08 by the owner
+
+- [ ] **MEM-01**: Agent memory is stored by the platform as virtual Markdown files with relative paths in personal, agent, project, team and organization scopes, with append-only revisions, RLS and audit; each scope has a MEMORY.md
+- [ ] **MEM-02**: A file-tree viewer shows the scopes, folders, subfolders and .md files the viewer may read; files render through the shared Markdown renderer (no raw HTML), are edited as Markdown with optimistic versions, and show history with diffs (1440 and 390, light and dark)
+- [ ] **MEM-03**: An agent's page shows its memory files and its capabilities and skills read-only
+- [ ] **MEM-04**: Agents list, read and write memory through ocw_memory_* tools decided by the resolver (agent ∩ human); a write into a shared scope becomes a proposal, never a direct write
+- [ ] **MEM-05**: A proposal runs a sensitive-data detector (secrets always blocked; IBAN, cards, NIF/NIE, email, phone flagged; optional Presidio profile) and an approval card shows the diff, findings and reader count
+- [ ] **MEM-06**: An approved proposal is applied by the server through a reusable approve-and-apply primitive with a one-use grant bound to the action hash; every decision is audited
+- [ ] **MEM-07**: Per-folder rules (path prefix on permission rules, deny wins) decide memory read, write and promote; existing per-bot notes migrate into personal files without becoming readable by admins
+
+### Module Access (ACCESS) — added 2026-10-08 by the owner
+
+- [ ] **ACCESS-01**: A module catalog maps Work Zone, AI chats, bots and other modules to exact permission grains (never admin grains)
+- [ ] **ACCESS-02**: Admins and leads turn a module off or on for a department, team or person from Settings as resolver rules; changes are audited and apply live
+- [ ] **ACCESS-03**: Every navigation entry and section of a denied module is hidden and the API keeps refusing direct calls; tests cover deny-beats-admin and unit inheritance
+
+### Connectors, Keychain and Agent Templates (CONN) — added 2026-10-08 by the owner
+
+- [ ] **CONN-01**: Admins register connectors with an auth mode (org secret, per-member OAuth, per-member secret); members connect and disconnect their own account in Settings
+- [ ] **CONN-02**: Per-member connector tokens are sealed per member, refreshed serially, revocable, and ask to reconnect when invalid
+- [ ] **CONN-03**: Agent calls to a connector go through an API proxy that uses the requesting member's credential (agent ∩ human), are audited per call, and default to DMs when results come from a member's account
+- [ ] **CONN-04**: Without a connection the agent replies with a "connect your account" card that opens Settings
+- [ ] **CONN-05**: Keychain items (personal or unit scope, host allowlist) are used by handle: the API injects the secret only towards allowed hosts, the model never receives it, and every use is audited without the value
+- [ ] **CONN-06**: Unit-scoped, versioned agent templates instantiate personal agents with their own memory and connections within the personal-agent caps
+
+### Approvals and Work Zone Proposals (APPROVE) — added 2026-10-08 by the owner
+
+- [ ] **APPROVE-01**: A per-tool approval policy (never, always, when tainted; approvers) is decided in the tool gate; only tools with a policy send their full arguments to the API
+- [ ] **APPROVE-02**: A call needing approval posts a card with the exact action; approval grants exactly one call bound to the hash of tool and canonical parameters; any change is denied; decisions are audited
+- [ ] **APPROVE-03**: An agent proposes a Work Zone session (project, device, prompt) as a card; the triggering person with work_session.create and device.use starts it in their name
+- [ ] **APPROVE-04**: Tainted turns cannot propose Work Zone sessions or approved external actions without a human, and an agent never selects full access
+
+### Automations and Watched Records (AUTO) — added 2026-10-08 by the owner
+
+- [ ] **AUTO-01**: A Postgres-backed scheduler runs automations (standing order, trigger, delivery target by stable IDs, the person it runs for, budget) outside the cell, audited and restart-safe
+- [ ] **AUTO-02**: Signed webhooks and IMAP mail trigger automations; inbound content is untrusted and yields read-only turns
+- [ ] **AUTO-03**: Automations can be created from natural language and are confirmed by a person in a card
+- [ ] **AUTO-04**: Watched records keep an API-computed hash of an external record's watched fields; a change made elsewhere is reported in the card thread as before → after on access and on schedule, never overwritten
+- [ ] **AUTO-05**: Each person can get a scheduled digest by DM: pending decisions, followed cards, unread mentions, Work Zone sessions waiting or finished
+- [ ] **AUTO-06**: A finished Work Zone session can become a summary proposal in its project's memory through the MEM promotion flow
+
+### Agent-to-Agent Collaboration (A2A) — added 2026-10-08 by the owner
+
+- [ ] **A2A-01**: An agent consults or delegates to another agent through the API; the answer returns as a new turn and each hop is a visible, attributed thread message audited with a chain id
+- [ ] **A2A-02**: Effective agent-to-agent permission = source agent ∩ triggering human ∩ target visibility ∩ agent.message rules (deny wins)
+- [ ] **A2A-03**: Chains are bounded (depth ≤ 2, no agent twice, per-chain budget, daily limits) and the asker pays
+
 ### Devices, Projects and Work Zone Contracts (DEV)
 
 - [ ] **DEV-01**: `packages/protocol` (Apache-2.0) defines the Unified Session Event Protocol event set from PRD §34, the Device Link protocol (hello, heartbeat, resume, event, command, ack, `protocolVersion`) and `RuntimeCapabilities` flags (`supportsSteer`, `supportsResume`, `supportsPermissionModes`, `supportsImages`)
@@ -271,6 +327,13 @@ Deferred to later milestones. Tracked but not in the current roadmap.
 - **POL-V1X-03**: Diff line comments that become queued prompts with `file:line` context
 - **POL-V1X-04**: Cmd+K quick switcher; Zulip-style resolve/move thread; transcript export
 - **POL-V1X-05**: Effective-permission viewer UI (PRD §107.3)
+
+### Operations backlog (from the 2026-10-08 research, not yet scheduled)
+
+- **OPS-BL-01**: Organization groups — several organizations per user with a switcher, and consolidated aggregate reporting computed per organization under its own tenant context (needs an identity/tenancy ADR)
+- **OPS-BL-02**: Model comparison per task (text, code, image reading) through the model gateway, opt-in, dry-run first, metered as `eval` usage
+- **OPS-BL-03**: Browser-session logins for agents in a separate hardened browser cell (remote browser streamed to the user, sealed session state)
+- **OPS-BL-04**: Board columns synchronized from an external system's phases via connectors (two-way, compare-and-set)
 
 ## Out of Scope
 
@@ -409,6 +472,41 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | SELF-05 | Phase 7 | Complete | Caddy `proxy` profile, one HTTPS origin, `OCW_TRUST_PROXY` (07-05/08): `compose-proxy.test.mjs`, `enable-proxy.test.mjs`, `trust-proxy.int.test.ts`, `session-ip.int.test.ts`; gate stage `proxy` (WebSocket 101 with frames, presigned PUT/GET from outside the network, tampered/unsigned 403, forged XFF ignored). Residual: `OCW_TRUST_PROXY=1` trusts any direct peer (ADR-0021) |
 | SELF-06 | Phase 7 | Complete | Every package declares AGPL-3.0-only or Apache-2.0 (`packages/contracts`; `packages/protocol` does not exist yet); dependency-license policy in `pnpm guard`, with the `@anthropic-ai/claude-agent-sdk` exception and the `server-everything` clarification pending owner/legal confirmation (ADR-0021, 07-01): `guard.test.mjs` |
 | SELF-07 | Phase 7 | Complete | Scenario B minus Work Zone creation through Caddy on production images with the org mock model, desktop 1440 and mobile 390, no skip allowed (07-10): `e2e/compose/scenario-b.spec.ts`, gate stage `playwright` (4 passed, 0 skipped/failed/flaky) on `pnpm gate:compose` and `pnpm gate:cleanroom`. CI: the same commands on Woodpecker (separate task) |
+| BOARD-01 | Phase 07.1 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| BOARD-02 | Phase 07.1 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| BOARD-03 | Phase 07.1 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| BOARD-04 | Phase 07.1 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| BOARD-05 | Phase 07.1 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| BOARD-06 | Phase 07.1 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| MEM-01 | Phase 07.2 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| MEM-02 | Phase 07.2 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| MEM-03 | Phase 07.2 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| MEM-04 | Phase 07.2 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| MEM-05 | Phase 07.2 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| MEM-06 | Phase 07.2 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| MEM-07 | Phase 07.2 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| ACCESS-01 | Phase 07.3 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| ACCESS-02 | Phase 07.3 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| ACCESS-03 | Phase 07.3 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| CONN-01 | Phase 07.4 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| CONN-02 | Phase 07.4 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| CONN-03 | Phase 07.4 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| CONN-04 | Phase 07.4 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| CONN-05 | Phase 07.4 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| CONN-06 | Phase 07.4 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| APPROVE-01 | Phase 07.5 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| APPROVE-02 | Phase 07.5 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| APPROVE-03 | Phase 07.5 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| APPROVE-04 | Phase 07.5 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| AUTO-01 | Phase 07.6 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| AUTO-02 | Phase 07.6 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| AUTO-03 | Phase 07.6 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| AUTO-04 | Phase 07.6 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| AUTO-05 | Phase 07.6 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| AUTO-06 | Phase 07.6 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| A2A-01 | Phase 07.7 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| A2A-02 | Phase 07.7 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| A2A-03 | Phase 07.7 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
 | DEV-01 | Phase 8 | Partial | Session events + Device Link frames in `packages/contracts`; no `packages/protocol`; capability flags only inside the daemon |
 | DEV-02 | Phase 8 | Partial | One-time code + hashed bearer token (SLICE-13); no Ed25519 signed challenge or RFC 8628 |
 | DEV-03 | Phase 8 | Partial | Device list + immediate revocation (SLICE-13); no active sessions, no admin view |
