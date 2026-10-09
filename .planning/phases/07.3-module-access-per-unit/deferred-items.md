@@ -6,3 +6,6 @@
   `{ code: "not_found", message: "Bot not found" }` for a missing id, so the message tells a caller that a hidden bot
   exists. Applies to personal bots and unit personas since Phase 3.1/6, and now to bots hidden by a Bots module rule.
   Fix: rethrow the hidden denial with the route's not-found message, as `chat/access.ts` `readableRow` does.
+
+  **Resolved in 07.3-02:** every hidden-bot 404 in `agent/index.ts` (GET, DM, PATCH, DELETE) now carries the missing
+  bot's message ("Bot not found"); the enforcement int test asserts the bodies are identical.

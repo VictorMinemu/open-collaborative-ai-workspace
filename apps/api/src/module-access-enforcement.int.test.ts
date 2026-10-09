@@ -30,6 +30,7 @@ let olga: TestClient;
 let danaId: string;
 let samId: string;
 let adaId: string;
+let olgaId: string;
 let engineeringId: string;
 let teamBotId: string;
 
@@ -201,7 +202,7 @@ beforeAll(async () => {
     "developer",
   );
   riley = rileyClient;
-  const { client: olgaClient, userId: olgaId } = await invite(
+  const { client: olgaClient, userId: olgaUserId } = await invite(
     stack,
     victor,
     "olga@example.test",
@@ -209,6 +210,7 @@ beforeAll(async () => {
     "developer",
   );
   olga = olgaClient;
+  olgaId = olgaUserId;
   for (const c of [dana, sam]) await seedPlan(c);
 
   engineeringId = (
@@ -444,9 +446,14 @@ describe("Bots module off: the organization team bot disappears for the denied m
     const ids = await denyModule("bots", danaId);
     try {
       expect(await listedBots(dana)).not.toContain(teamBotId);
-      // Hidden as missing (404). The message differs from a missing bot's ("Not found" vs "Bot not found") on every
-      // hidden bot, personal bots and unit personas included: pre-existing, logged in 07.3 deferred-items.md.
-      expect((await fails(dana.request("GET", `/api/v1/agents/${teamBotId}`), 404)).code).toBe("not_found");
+      // Hidden reads exactly like missing: same status, code and message (no existence oracle, 07.3-01 open item 5).
+      const missingId = randomUUID();
+      expect(await fails(dana.request("GET", `/api/v1/agents/${teamBotId}`), 404)).toEqual(
+        await fails(dana.request("GET", `/api/v1/agents/${missingId}`), 404),
+      );
+      expect(await fails(dana.request("POST", `/api/v1/agents/${teamBotId}/dm`), 404)).toEqual(
+        await fails(dana.request("POST", `/api/v1/agents/${missingId}/dm`), 404),
+      );
       const held = await myPermissions(dana);
       for (const p of ["bot.read", "bot.create_personal", "bot.internet", "bot.tool.use"])
         expect(held).not.toContain(p);
