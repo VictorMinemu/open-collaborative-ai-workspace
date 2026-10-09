@@ -22,6 +22,7 @@ import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { PersonalBotButton } from "@/components/bots/personal-bot-button";
+import { useModule } from "@/components/shell/module-gate";
 import { SectionSidebar, sectionItemClass } from "@/components/shell/section-sidebar";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -375,6 +376,8 @@ export function ChatSidebar() {
   const channels = useChannels();
   const dms = useDms();
   const can = usePermissionCheck();
+  // Module access (07.3, P-08): an entry leaves only once its module is decided off, never while loading or failed.
+  const showAiChats = useModule("ai_chats") !== "off";
   const threads = useThreadList();
   const mentions = useNotifications("mentions");
   const [creating, setCreating] = useState<{ unitId: string | null } | null>(null);
@@ -427,7 +430,7 @@ export function ChatSidebar() {
           activePath={pathname}
           counts={{ all: unreadAll, mentions: unreadOf(mentions.data), threads: unreadThreads }}
         />
-        <AiChatsSection />
+        {showAiChats ? <AiChatsSection /> : null}
         {channels.isPending ? (
           <div className="grid gap-1.5 px-2.5 pt-1">
             {[72, 56, 64].map((w) => (
