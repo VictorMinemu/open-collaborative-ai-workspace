@@ -400,8 +400,9 @@ export function createChatModule(core: Core): ApiModule {
       if (!agent || agent.status === "disabled") continue;
       // A personal bot lives only in its owner's DM (D-01): never auto-added to, or asked in, a channel.
       if (agent.scope === "personal") continue;
-      // A unit persona answers only who may see it (AGENT-01, T-06-07-02): never added or asked by anyone else.
-      if (isUnitPersona(agent) && !(await authorReads(tx, agent, author.id))) continue;
+      // A bot answers only who may see it: `bot.read`, including unit personas (AGENT-01, T-06-07-02) and module
+      // rules (ADR-0024). Never added or asked by anyone else.
+      if (!(await authorReads(tx, agent, author.id))) continue;
       if (!(await getMembership(tx, conv.id, "agent", agent.id))) {
         authorRes ??= channelResource(await channelFacts(tx, conv, { kind: "user", id: author.id }));
         const d = await perms.decide(
@@ -462,11 +463,11 @@ export function createChatModule(core: Core): ApiModule {
       authorKind: "user",
       mentions: result.row.mentions,
     });
-    // A unit persona follows only the humans who may see it (AGENT-01).
+    // A bot answers only who may see it: `bot.read`, including unit personas (AGENT-01) and module rules (ADR-0024).
     const agentIds: string[] = [];
     for (const id of candidates) {
       const bot = dir.agents.get(id);
-      if (bot && isUnitPersona(bot) && !(await authorReads(tx, bot, author.id))) continue;
+      if (!bot || !(await authorReads(tx, bot, author.id))) continue;
       agentIds.push(id);
     }
     if (agentIds.length === 0) return [];

@@ -1,8 +1,11 @@
 import {
+  MODULE_CATALOG,
+  ModuleId,
   NON_DELEGABLE_PERMISSIONS,
   OrgRole,
   PERMISSION_SURFACE,
   Permission,
+  permissionMatches,
   RuleSubjectKind,
 } from "@ocw/contracts";
 import fc from "fast-check";
@@ -13,6 +16,7 @@ import {
   channelResource,
   deviceResource,
   invitationResource,
+  moduleTargetResource,
   orgResource,
   unitResource,
   userResource,
@@ -113,6 +117,8 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "ai_chat.manage": true,
     "bot.manage_unit": false,
     "agent_card.approve": true,
+    "ai_chat.read": true,
+    "unit.modules.manage": false,
   },
   developer: {
     "org.read": true,
@@ -170,6 +176,8 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "ai_chat.manage": true,
     "bot.manage_unit": false,
     "agent_card.approve": true,
+    "ai_chat.read": true,
+    "unit.modules.manage": false,
   },
   lead: {
     "org.read": true,
@@ -227,6 +235,8 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "ai_chat.manage": true,
     "bot.manage_unit": false,
     "agent_card.approve": true,
+    "ai_chat.read": true,
+    "unit.modules.manage": false,
   },
   admin: {
     "org.read": true,
@@ -284,6 +294,8 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "ai_chat.manage": true,
     "bot.manage_unit": true,
     "agent_card.approve": true,
+    "ai_chat.read": true,
+    "unit.modules.manage": true,
   },
 };
 
@@ -1313,6 +1325,261 @@ describe("AI chat grants (Phase 6, P-03/P-04): access from owner ∪ grants, man
 
   it("ai_chat.manage at organization scope stays role-based", () => {
     expect(allowed(sam, orgResource(), "ai_chat.manage")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------- module access (Phase 07.3, ADR-0024)
+
+describe("module catalog rules (Phase 07.3, ADR-0024)", () => {
+  const D = "dept-D";
+  const T = "team-T";
+  const P = "proj-P";
+  const S = "dept-S";
+  /** One deny row per catalog pattern of `m` (distinct ids), as the module-access API writes them. */
+  const rowsOf = (m: ModuleId, extra: Partial<RuleFact> = {}): RuleFact[] =>
+    MODULE_CATALOG[m].patterns.map((permission, i) =>
+      rule({ id: `${m}-${i}`, permission, effect: "deny", ...extra }),
+    );
+  const catalogGrains = (m: ModuleId) =>
+    Permission.options.filter((perm) =>
+      MODULE_CATALOG[m].patterns.some((pat) => permissionMatches(pat, perm)),
+    );
+
+  it("deny beats admin: a user-subject row set removes each module's entry and grains, nothing else", () => {
+    const admin = user("admin", { id: "u-admin" });
+    const before = resolveEffectivePermissions(admin, orgResource(), []).permissions;
+    for (const m of ModuleId.options) {
+      const { entry } = MODULE_CATALOG[m];
+      const rows = rowsOf(m, { subjectKind: "user", subjectId: "u-admin" });
+      expect(before.has(entry), `${m}: the admin holds ${entry} without rows`).toBe(true);
+      expect(decide(admin, orgResource(), rows, entry).denial, m).toMatchObject({
+        permission: entry,
+        layer: "user",
+        reason: "denied_by_rule",
+      });
+      const after = resolveEffectivePermissions(admin, orgResource(), rows).permissions;
+      for (const perm of catalogGrains(m)) expect(after.has(perm), `${m}: ${perm}`).toBe(false);
+      // Device hygiene, governance and module management stay with the admin.
+      for (const keep of [
+        "device.read",
+        "device.revoke",
+        "bot.manage",
+        "work_zone.manage",
+        "unit.modules.manage",
+      ] as const) {
+        expect(after.has(keep), `${m}: ${keep}`).toBe(true);
+      }
+      expect([...after].sort(), m).toEqual([...before].filter((p) => !catalogGrains(m).includes(p)).sort());
+    }
+  });
+
+  it("unit inheritance: Work Zone rows on department D reach members of T and P under it, not sibling S", () => {
+    const rows = rowsOf("work_zone", { scopeUnitId: D });
+    const inT = user("developer", { id: "u-t", memberUnitPaths: [[D, T]] });
+    const inP = user("developer", { id: "u-p", memberUnitPaths: [[D, T, P]] });
+    const inS = user("developer", { id: "u-s", memberUnitPaths: [[S]] });
+    expect(decide(inT, orgResource(), rows, "work_session.read").denial).toMatchObject({
+      layer: "unit",
+      reason: "denied_by_rule",
+      unitId: D,
+    });
+    expect(allowed(inP, orgResource(), "work_session.read", rows)).toBe(false);
+    expect(allowed(inP, orgResource(), "device.pair", rows)).toBe(false);
+    expect(allowed(inS, orgResource(), "work_session.read", rows)).toBe(true);
+    // Device hygiene is never a module grain.
+    expect(allowed(inT, orgResource(), "device.read", rows)).toBe(true);
+    const own = deviceResource({ ownerUserId: "u-t", shared: false, revoked: false }, "u-t");
+    expect(allowed(inT, own, "device.revoke", rows)).toBe(true);
+    expect(allowed(inT, own, "device.use", rows)).toBe(false);
+  });
+
+  it("a user-subject row scoped to T stops applying once the user's member paths no longer contain T", () => {
+    const rows = rowsOf("work_zone", { scopeUnitId: T, subjectKind: "user", subjectId: "u-dana" });
+    const danaInT = user("developer", { id: "u-dana", memberUnitPaths: [[D, T]] });
+    expect(decide(danaInT, orgResource(), rows, "work_session.read").denial).toMatchObject({
+      layer: "user",
+      unitId: T,
+    });
+    const danaMoved = user("developer", { id: "u-dana", memberUnitPaths: [[S]] });
+    expect(allowed(danaMoved, orgResource(), "work_session.read", rows)).toBe(true);
+    // Another member of T is not the subject.
+    expect(
+      allowed(
+        user("developer", { id: "u-other", memberUnitPaths: [[D, T]] }),
+        orgResource(),
+        "work_session.read",
+        rows,
+      ),
+    ).toBe(true);
+  });
+
+  it("agent ∩ human: an organization team bot acting for Dana loses bot.internet and bot.tool.use, not for Sam", () => {
+    const rows = rowsOf("bots", { subjectKind: "user", subjectId: "u-dana" });
+    const bot: PrincipalFacts = { ...user(null), kind: "agent", id: "bot-team" };
+    const team = { scope: "team" as const, ownerUserId: null, disabled: false };
+    const dana = user("developer", { id: "u-dana" });
+    const sam = user("standard", { id: "u-sam" });
+    for (const perm of ["bot.internet", "bot.tool.use"] as const) {
+      expect(
+        decide(bot, agentResource(team, null), rows, perm, {
+          principal: dana,
+          resource: agentResource(team, "u-dana"),
+        }).denial,
+        perm,
+      ).toMatchObject({ permission: perm, layer: "user", reason: "denied_by_rule" });
+      expect(
+        decide(bot, agentResource(team, null), rows, perm, {
+          principal: sam,
+          resource: agentResource(team, "u-sam"),
+        }),
+        perm,
+      ).toEqual({ allowed: true });
+    }
+    expect(allowed(dana, agentResource(team, "u-dana"), "bot.read", rows)).toBe(false);
+    expect(allowed(sam, agentResource(team, "u-sam"), "bot.read", rows)).toBe(true);
+  });
+
+  it("side effect pinned (D-05): Bots rows on Backend silence Backend's persona for everyone, admins included", () => {
+    const ENG = "unit-eng";
+    const BACKEND = "unit-backend";
+    const FRONTEND = "unit-frontend";
+    const rows = rowsOf("bots", { scopeUnitId: BACKEND });
+    const persona = { scope: "team" as const, ownerUserId: null, disabled: false, unitPath: [ENG, BACKEND] };
+    const orgBot = { scope: "team" as const, ownerUserId: null, disabled: false };
+    const admin = user("admin", { id: "u-admin" }); // not a member of Backend
+    const alex = user("standard", { id: "u-alex", memberUnitPaths: [[ENG, BACKEND]] });
+    const jo = user("standard", { id: "u-jo", memberUnitPaths: [[ENG, FRONTEND]] });
+    const personaBot: PrincipalFacts = { ...user(null), kind: "agent", id: "bot-backend" };
+
+    // The admin outside Backend loses read and configure on the persona; governance stays.
+    expect(decide(admin, agentResource(persona, "u-admin"), rows, "bot.read").denial).toMatchObject({
+      layer: "unit",
+      reason: "denied_by_rule",
+      unitId: BACKEND,
+    });
+    expect(allowed(admin, agentResource(persona, "u-admin"), "bot.configure", rows)).toBe(false);
+    expect(allowed(admin, agentResource(persona, "u-admin"), "bot.manage", rows)).toBe(true);
+    // The persona, acting for anyone, has no internet.
+    for (const human of [admin, alex, jo]) {
+      expect(
+        allowed(personaBot, agentResource(persona, null), "bot.internet", rows),
+        `persona itself (${human.id})`,
+      ).toBe(false);
+      expect(
+        decide(personaBot, agentResource(persona, null), rows, "bot.internet", {
+          principal: human,
+          resource: agentResource(persona, human.id),
+        }).allowed,
+        human.id,
+      ).toBe(false);
+    }
+    // An organization team bot is untouched for people outside Backend; Backend's own members lose it (unit off).
+    expect(allowed(jo, agentResource(orgBot, "u-jo"), "bot.read", rows)).toBe(true);
+    expect(allowed(admin, agentResource(orgBot, "u-admin"), "bot.read", rows)).toBe(true);
+    const orgAgent: PrincipalFacts = { ...user(null), kind: "agent", id: "bot-org" };
+    expect(
+      decide(orgAgent, agentResource(orgBot, null), rows, "bot.internet", {
+        principal: jo,
+        resource: agentResource(orgBot, "u-jo"),
+      }),
+    ).toEqual({ allowed: true });
+    expect(allowed(alex, agentResource(orgBot, "u-alex"), "bot.read", rows)).toBe(false);
+  });
+
+  it("AI chats: an ai_chat.* deny removes ai_chat.read at organization scope (and every ai_chat grain)", () => {
+    const sam = user("standard", { id: "u-sam" });
+    const rows = rowsOf("ai_chats", { subjectKind: "user", subjectId: "u-sam" });
+    expect(decide(sam, orgResource(), rows, "ai_chat.read").denial).toMatchObject({
+      layer: "user",
+      reason: "denied_by_rule",
+    });
+    const held = resolveEffectivePermissions(sam, orgResource(), rows).permissions;
+    expect([...held].filter((p) => p.startsWith("ai_chat."))).toEqual([]);
+    // A plain ai_chat.use deny leaves ai_chat.read (today's semantics, research Gap 1).
+    const useOnly = [
+      rule({ subjectKind: "user", subjectId: "u-sam", permission: "ai_chat.use", effect: "deny" }),
+    ];
+    expect(allowed(sam, orgResource(), "ai_chat.read", useOnly)).toBe(true);
+  });
+});
+
+describe("unit.modules.manage and the lead ceiling (Phase 07.3, D-05 (1))", () => {
+  const D = "dept-D";
+  const T = "team-T";
+  const P = "proj-P";
+  const unitD = { id: D, path: [D] };
+  const unitT = { id: T, path: [D, T] };
+  const unitP = { id: P, path: [D, T, P] };
+  const admin = user("admin", { id: "u-admin" });
+  const lead = user("lead", { id: "u-lead", memberUnitPaths: [[D, T]], leadOfUnitIds: new Set([T]) });
+  const dev = user("developer", { id: "u-dev", memberUnitPaths: [[D, T]] });
+
+  it("admins hold it on the organization and on every unit", () => {
+    for (const r of [orgResource(), unitResource(unitD), unitResource(unitT), unitResource(unitP)]) {
+      expect(allowed(admin, r, "unit.modules.manage")).toBe(true);
+    }
+  });
+
+  it("a lead of T holds it on T and its descendants, not on D nor the organization; a developer never", () => {
+    expect(allowed(lead, unitResource(unitT), "unit.modules.manage")).toBe(true);
+    expect(allowed(lead, unitResource(unitP), "unit.modules.manage")).toBe(true);
+    expect(allowed(lead, unitResource(unitD), "unit.modules.manage")).toBe(false);
+    expect(allowed(lead, orgResource(), "unit.modules.manage")).toBe(false);
+    for (const r of [orgResource(), unitResource(unitD), unitResource(unitT), unitResource(unitP)]) {
+      expect(allowed(dev, r, "unit.modules.manage")).toBe(false);
+    }
+  });
+
+  it("moduleTargetResource is the unit (or organization) resource plus the target's role", () => {
+    expect(moduleTargetResource(unitT)).toEqual(unitResource(unitT));
+    expect(moduleTargetResource(null)).toEqual(orgResource());
+    expect(moduleTargetResource(unitT, "admin")).toEqual({ ...unitResource(unitT), targetRole: "admin" });
+    expect(moduleTargetResource(null, "standard")).toEqual({ ...orgResource(), targetRole: "standard" });
+  });
+
+  it("a lead never targets an admin (role_ceiling); lead, developer and standard targets are allowed", () => {
+    expect(decide(lead, moduleTargetResource(unitT, "admin"), [], "unit.modules.manage")).toEqual({
+      allowed: false,
+      denial: { permission: "unit.modules.manage", layer: "resource", reason: "role_ceiling" },
+    });
+    expect(allowed(lead, moduleTargetResource(unitP, "admin"), "unit.modules.manage")).toBe(false);
+    for (const target of ["lead", "developer", "standard"] as const) {
+      expect(allowed(lead, moduleTargetResource(unitT, target), "unit.modules.manage"), target).toBe(true);
+    }
+    // The ceiling never widens: outside the led subtree the lead holds nothing, whatever the target.
+    expect(allowed(lead, moduleTargetResource(unitD, "standard"), "unit.modules.manage")).toBe(false);
+  });
+
+  it("the ceiling compares role ranks: a unit lead with the developer role cannot target a lead", () => {
+    const devLead = user("developer", { id: "u-dl", memberUnitPaths: [[D, T]], leadOfUnitIds: new Set([T]) });
+    expect(
+      decide(devLead, moduleTargetResource(unitT, "lead"), [], "unit.modules.manage").denial,
+    ).toMatchObject({
+      reason: "role_ceiling",
+    });
+    expect(allowed(devLead, moduleTargetResource(unitT, "developer"), "unit.modules.manage")).toBe(true);
+  });
+
+  it("an admin targets every role, on the organization and on units", () => {
+    for (const target of OrgRole.options) {
+      expect(allowed(admin, moduleTargetResource(null, target), "unit.modules.manage"), target).toBe(true);
+      expect(allowed(admin, moduleTargetResource(unitT, target), "unit.modules.manage"), target).toBe(true);
+    }
+  });
+
+  it("an organization deny rule on unit.modules.manage removes it from the lead (delegable, deny wins)", () => {
+    const deny = rule({
+      id: "no-modules",
+      subjectKind: "user",
+      subjectId: "u-lead",
+      permission: "unit.modules.manage",
+      effect: "deny",
+    });
+    expect(decide(lead, unitResource(unitT), [deny], "unit.modules.manage").denial).toMatchObject({
+      layer: "user",
+      ruleId: "no-modules",
+    });
+    expect(allowed(admin, unitResource(unitT), "unit.modules.manage", [deny])).toBe(true);
   });
 });
 
