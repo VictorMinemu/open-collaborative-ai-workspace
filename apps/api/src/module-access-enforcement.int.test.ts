@@ -478,3 +478,38 @@ describe("Bots module off: the organization team bot disappears for the denied m
     }
   });
 });
+
+describe("withdrawal and roster while AI chats is off (07.3-01 open items 1 and 2)", () => {
+  let chat: string;
+
+  it("Dana revokes her own share link while AI chats is off for her; nobody else can, and her chat stays hidden", async () => {
+    chat = await chatWithMessage(dana, "Vendor shortlist for the audit");
+    const share = await ok(dana.request("POST", `/api/v1/ai-chats/${chat}/shares`, {}), 201);
+    const samShareChat = await chatWithMessage(sam, "Sam's own notes to share");
+    const samShare = await ok(sam.request("POST", `/api/v1/ai-chats/${samShareChat}/shares`, {}), 201);
+    const ids = await denyModule("ai_chats", danaId);
+    try {
+      await fails(dana.request("GET", `/api/v1/ai-chats/${chat}`), 404);
+      // Someone else's link stays the same 404 as a random id.
+      const foreign = await fails(dana.request("DELETE", `/api/v1/ai-shares/${samShare.id as string}`), 404);
+      const missing = await fails(dana.request("DELETE", `/api/v1/ai-shares/${randomUUID()}`), 404);
+      expect(foreign).toEqual(missing);
+      // Not the creator: Sam and the admin get the same 404.
+      expect(await fails(sam.request("DELETE", `/api/v1/ai-shares/${share.id as string}`), 404)).toEqual(
+        missing,
+      );
+      expect(await fails(victor.request("DELETE", `/api/v1/ai-shares/${share.id as string}`), 404)).toEqual(
+        missing,
+      );
+      const revoked = await ok(dana.request("DELETE", `/api/v1/ai-shares/${share.id as string}`));
+      expect(revoked).toMatchObject({ id: share.id, chatId: chat });
+      expect(typeof revoked.revokedAt).toBe("string");
+      await fails(sam.request("GET", `/api/v1/ai-shares/${share.id as string}`), 404);
+      // Withdrawal is all she gets: her chat and its links list stay hidden.
+      await fails(dana.request("GET", `/api/v1/ai-chats/${chat}/shares`), 404);
+    } finally {
+      await deleteRules(ids);
+    }
+    await ok(sam.request("GET", `/api/v1/ai-shares/${samShare.id as string}`));
+  });
+});

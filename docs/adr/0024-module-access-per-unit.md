@@ -72,8 +72,9 @@ The research (`07.3-RESEARCH.md`) found three gaps a module toggle would expose:
   (`GET /devices` answers 200).
 - **Nothing is cleaned up or interrupted.** AI chat grants to a denied member stay and reappear when the module is
   turned back on; a running Work Zone turn is not interrupted; a queued AI chat prompt is not re-decided when it starts
-  (research A5). While AI chats is off for her, a member cannot open her own chats, so she also cannot revoke their
-  share links until the module is back on.
+  (research A5). While AI chats is off for her, a member cannot open her own chats, but she can always revoke her own
+  share links: the revoke checks that she created the link and owns the chat, not the module (07.3-02). A grant
+  change keeps the roster row of a grantee whose AI chats is off: participation follows the grant, not the module.
 - **Proactive agent messages** to a denied human (automations, agent-initiated DMs) are decided per action in phases
   07.6 and 07.7.
 - **Phase 8 naming constraint.** Work Zone session grains must keep the `work_session.` prefix, so `work_session.*`

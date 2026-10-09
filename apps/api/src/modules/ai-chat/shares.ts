@@ -316,12 +316,10 @@ export function registerShareRoutes(app: App, deps: ShareRoutesDeps): void {
           .where(and(eq(aiChatShares.id, req.params.shareId), eq(aiChatShares.createdBy, auth.userId)))
           .limit(1);
         if (!row) throw shareHidden();
-        // The creator's own chat (the resolver decides on it, owner only); revoking needs no share permission, so
-        // a member whose `ai_chat.share` was taken away can still withdraw what they shared.
-        await access.readable(req, tx, row.conversationId, {
-          kinds: ["ai_chat"],
-          notFoundMessage: SHARE_NOT_FOUND,
-        });
+        // The creator's own chat (the resolver decides `channel.read` on it, and she must own it). Revoking needs no
+        // share permission and no AI chats module (ADR-0024): a member whose `ai_chat.share` or whose whole AI chats
+        // module was taken away can still withdraw what she shared.
+        await access.ownedAiChat(req, tx, row.conversationId, SHARE_NOT_FOUND);
         if (row.revokedAt !== null) return shareDto(row);
         const [revoked] = await tx
           .update(aiChatShares)

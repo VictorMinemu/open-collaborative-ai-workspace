@@ -53,6 +53,17 @@ export interface ConversationAccess {
     opts?: { includeArchived?: boolean; kinds?: readonly ReadableKind[] },
   ): Promise<string[]>;
   /**
+   * The caller's own AI chat by the chat's own access alone (`channel.read` as its owner), WITHOUT the AI chats module
+   * gate (`ai_chat.read`, ADR-0024). Withdrawal only (revoking her own share links), so a member can always stop
+   * sharing; never use it to return chat content. 404 (hidden = missing) otherwise.
+   */
+  ownedAiChat(
+    req: FastifyRequest,
+    tx: Tx,
+    conversationId: string,
+    notFoundMessage?: string,
+  ): Promise<{ conv: ConversationRow; facts: ChannelFacts }>;
+  /**
    * Boolean form for event-time decisions (notifications, WS). The plan named it "can-read"; that identifier
    * belongs to a deleted pre-resolver helper and the static guard (guard.test.ts) refuses it.
    */
@@ -62,6 +73,13 @@ export interface ConversationAccess {
     conversationId: string,
     opts?: { kinds?: readonly ReadableKind[] },
   ): Promise<boolean>;
+}
+
+/** Hidden must read exactly like missing (same status, code and message). */
+function asMissing(err: unknown, notFoundMessage: string): unknown {
+  return err instanceof AuthzDeniedError && err.hidden
+    ? new AuthzDeniedError(err.denial, { hideAs404: true, message: notFoundMessage })
+    : err;
 }
 
 export function createConversationAccess(core: Core): ConversationAccess {
@@ -80,13 +98,25 @@ export function createConversationAccess(core: Core): ConversationAccess {
           await perms.assertCan(req, tx, "ai_chat.read", orgResource(), { hideAs404: true });
         }
       } catch (err) {
-        // Hidden must read exactly like missing (same status, code and message), or the message itself would
-        // tell a permalink holder that the conversation exists.
-        if (err instanceof AuthzDeniedError && err.hidden) {
-          throw new AuthzDeniedError(err.denial, { hideAs404: true, message: notFoundMessage });
-        }
-        throw err;
+        // Hidden must read exactly like missing, or the message itself would tell a permalink holder that the
+        // conversation exists.
+        throw asMissing(err, notFoundMessage);
       }
+      return { conv, facts };
+    },
+
+    async ownedAiChat(req, tx, conversationId, notFoundMessage = "Conversation not found") {
+      const conv = await getConversation(tx, conversationId, ["ai_chat"]);
+      const userId = req.auth?.userId;
+      if (!conv || !userId) throw notFound(notFoundMessage);
+      const facts = await channelFacts(tx, conv, { kind: "user", id: userId });
+      try {
+        await perms.assertCan(req, tx, "channel.read", channelResource(facts), { hideAs404: true });
+      } catch (err) {
+        throw asMissing(err, notFoundMessage);
+      }
+      // A grantee reads the chat too; only its owner withdraws what was shared from it.
+      if (facts.aiAccess !== "owner") throw notFound(notFoundMessage);
       return { conv, facts };
     },
 
