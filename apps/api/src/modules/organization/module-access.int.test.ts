@@ -3,8 +3,16 @@ import { MODULE_CATALOG } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TEST_SETUP_TOKEN, TestClient } from "../../testing";
-import { type AiStack, seedPlan, startAiStack } from "../../testing-ai";
-import { invite } from "../../testing-workzone";
+import {
+  type AiStack,
+  type ConvSubscription,
+  seedPlan,
+  startAiStack,
+  subscribeConv,
+  subscribeTopic,
+} from "../../testing-ai";
+import { sleep } from "../../testing-device";
+import { connectWithProject, invite, pairDevice, startSession } from "../../testing-workzone";
 
 /**
  * Phase 07.3 (ADR-0024, ACCESS-02, ACCESS-03): `GET/PUT /api/v1/module-access`. A module is turned off or on for the
@@ -501,5 +509,143 @@ describe("lead rights: Lena leads Backend", () => {
     await fails(put(dana, "ai_chats", backendId, everyone, false), 403);
     await fails(put(dana, "ai_chats", backendId, person(danaId), false), 403);
     expect(await rowsAt(backendId, everyone)).toEqual([]);
+  });
+});
+
+describe("live application: open subscriptions are re-decided within a second (ADR-0009)", () => {
+  it("Work Zone off revokes Dana's ws: and keeps conv:; AI chats off revokes conv:; on lets her subscribe again", async () => {
+    const { token } = await pairDevice(stack, dana, "Dana's Mac");
+    const { device, projectId } = await connectWithProject(stack, dana, token, {
+      localId: "ledger",
+      name: "ledger",
+    });
+    const sessionId = await startSession(dana, device, projectId);
+    const ws = await subscribeTopic(stack.baseUrl, dana, `ws:${sessionId}`);
+    const conv = await subscribeConv(stack.baseUrl, dana, danaChat);
+    const revoked = (s: ConvSubscription, topic: string) =>
+      s.frames.some((f) => f.op === "revoked" && f.topic === topic);
+    try {
+      expect(ws.outcome).toBe("subscribed");
+      expect(conv.outcome).toBe("subscribed");
+
+      await ok(put(victor, "work_zone", null, person(danaId), false));
+      await ws.waitFor(() => revoked(ws, `ws:${sessionId}`), 1000);
+      await sleep(300);
+      expect(revoked(conv, `conv:${danaChat}`)).toBe(false);
+
+      await ok(put(victor, "ai_chats", null, person(danaId), false));
+      await conv.waitFor(() => revoked(conv, `conv:${danaChat}`), 1000);
+      const held = await myPermissions(dana);
+      expect(held).not.toContain("work_session.read");
+      expect(held).not.toContain("ai_chat.read");
+      expect((await subscribeTopic(stack.baseUrl, dana, `ws:${sessionId}`)).outcome).toBe("error");
+    } finally {
+      ws.close();
+      conv.close();
+      await ok(put(victor, "work_zone", null, person(danaId), true));
+      await ok(put(victor, "ai_chats", null, person(danaId), true));
+    }
+    const again = await subscribeTopic(stack.baseUrl, dana, `ws:${sessionId}`);
+    const againConv = await subscribeConv(stack.baseUrl, dana, danaChat);
+    try {
+      expect(again.outcome).toBe("subscribed");
+      expect(againConv.outcome).toBe("subscribed");
+      expect(await myPermissions(dana)).toEqual(
+        expect.arrayContaining(["work_session.read", "ai_chat.read"]),
+      );
+    } finally {
+      again.close();
+      againConv.close();
+      await device.close();
+    }
+  });
+});
+
+/** A client whose membership moved to a fresh organization B, as its admin (artifact/attachments.int.test.ts). */
+async function otherOrgAdmin(): Promise<{ client: TestClient; orgB: string; userB: string }> {
+  const { client, userId: userB } = await invite(
+    stack,
+    victor,
+    `eve-${randomUUID().slice(0, 8)}@example.test`,
+    "Eve",
+    "standard",
+  );
+  const orgB = randomUUID();
+  await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil', $2)", [
+    orgB,
+    `evil-${orgB}`,
+  ]);
+  await su.query("delete from auth.member where user_id = $1", [userB]);
+  await su.query("delete from app.org_members where user_id = $1", [userB]);
+  await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
+    orgB,
+    userB,
+  ]);
+  await su.query(
+    "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Eve', 'admin')",
+    [orgB, userB],
+  );
+  await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, userB]);
+  return { client, orgB, userB };
+}
+
+const orgRuleCount = async (organizationId: string) =>
+  Number(
+    (
+      await su.query("select count(*)::int as n from app.permission_rules where organization_id = $1", [
+        organizationId,
+      ])
+    ).rows[0].n,
+  );
+
+describe("tenant isolation (C-02)", () => {
+  it("organization B can neither read nor change organization A's module rules", async () => {
+    await ok(put(victor, "bots", backendId, everyone, false));
+    try {
+      const before = await orgRuleCount(orgId);
+      const { client: eve, orgB, userB } = await otherOrgAdmin();
+      expect((await ok(eve.request("GET", "/api/v1/me/permissions"))).role).toBe("admin");
+
+      expect((await fails(view(eve, backendId), 404)).code).toBe("unit_not_found");
+      expect((await fails(put(eve, "bots", backendId, everyone, true), 404)).code).toBe("unit_not_found");
+      expect((await fails(put(eve, "work_zone", null, person(danaId), false), 400)).code).toBe(
+        "unknown_subject",
+      );
+
+      const bView = await ok(view(eve, null));
+      expect((bView.people as Json[]).map((p) => p.userId)).toEqual([userB]);
+      expect(bView.overrides).toEqual([]);
+      expect((bView.modules as Json[]).every((m) => m.state === "on")).toBe(true);
+
+      expect(await orgRuleCount(orgId)).toBe(before);
+      expect(await orgRuleCount(orgB)).toBe(0);
+      expect((await rowsAt(backendId, everyone)).length).toBe(MODULE_CATALOG.bots.patterns.length);
+    } finally {
+      await ok(put(victor, "bots", backendId, everyone, true));
+    }
+  });
+});
+
+describe("request hygiene", () => {
+  it("a malformed PUT is 400 validation_error and writes no row, audit or event", async () => {
+    const rules = await orgRuleCount(orgId);
+    const created = await auditCount("permission_rule.created");
+    const events = (await ruleEvents()).length;
+    const bad = [
+      { module: "search", scopeUnitId: null, subject: everyone, enabled: false },
+      { module: "bots", scopeUnitId: null, subject: { kind: "role", role: "standard" }, enabled: false },
+      { module: "bots", scopeUnitId: null, subject: everyone },
+      { module: "bots", scopeUnitId: null, subject: { kind: "everyone", userId: danaId }, enabled: false },
+    ];
+    for (const body of bad) {
+      expect((await fails(victor.request("PUT", "/api/v1/module-access", body), 400)).code).toBe(
+        "validation_error",
+      );
+    }
+    // A refused (403) request writes nothing either.
+    await fails(put(dana, "bots", null, everyone, false), 403);
+    expect(await orgRuleCount(orgId)).toBe(rules);
+    expect(await auditCount("permission_rule.created")).toBe(created);
+    expect((await ruleEvents()).length).toBe(events);
   });
 });
