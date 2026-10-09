@@ -264,3 +264,242 @@ describe("tracer: one PUT turns AI chats off for Backend, its member is refused 
     expect((await ruleEvents()).length).toBe(eventsNow);
   });
 });
+
+describe("the read model and inheritance through the API (admin)", () => {
+  let personaId: string;
+
+  it("Backend's view: its people with canEdit, its persona count, every module on", async () => {
+    personaId = (
+      await ok(
+        victor.request("POST", "/api/v1/agents", {
+          name: "Deploy helper",
+          username: "deploy-helper",
+          instructions: "You help the Backend team ship.",
+          modelProvider: "mock",
+          modelId: "mock-1",
+          unitId: backendId,
+        }),
+      )
+    ).id as string;
+    const v = await ok(view(victor, backendId));
+    expect(v.scope).toEqual({ scopeUnitId: backendId, name: "Backend" });
+    expect(v.unitBotCount).toBe(1);
+    expect((v.modules as Json[]).map((m) => [m.module, m.state, m.inherited])).toEqual([
+      ["work_zone", "on", null],
+      ["ai_chats", "on", null],
+      ["bots", "on", null],
+    ]);
+    expect((v.people as Json[]).map((p) => [p.displayName, p.canEdit])).toEqual([
+      ["Ada Admin", true],
+      ["Dana Dev", true],
+      ["Lena Lead", true],
+    ]);
+    expect(v.overrides).toEqual([]);
+    // Engineering counts the personas of its whole subtree; the organization has none of its own.
+    expect((await ok(view(victor, engineeringId))).unitBotCount).toBe(1);
+    const org = await ok(view(victor, null));
+    expect(org.scope).toEqual({ scopeUnitId: null, name: "Organization" });
+    expect(org.unitBotCount).toBe(0);
+    expect((org.people as Json[]).map((p) => p.userId).sort()).toEqual(
+      [victorId, danaId, samId, lenaId, adaId].sort(),
+    );
+  });
+
+  it("a person row at organization scope turns Work Zone off for Dana only", async () => {
+    await ok(dana.request("GET", "/api/v1/work-sessions"));
+    const v = await ok(put(victor, "work_zone", null, person(danaId), false));
+    const danaRow = (v.people as Json[]).find((p) => p.userId === danaId);
+    expect(stateOf(danaRow as Json, "work_zone").state).toBe("off");
+    expect(stateOf(v, "work_zone").state).toBe("on");
+    expect((await fails(dana.request("GET", "/api/v1/work-sessions"), 403)).details).toMatchObject({
+      permission: "work_session.read",
+      layer: "user",
+    });
+    await ok(sam.request("GET", "/api/v1/work-sessions"));
+    await ok(put(victor, "work_zone", null, person(danaId), true));
+    await ok(dana.request("GET", "/api/v1/work-sessions"));
+  });
+
+  it("a department off reaches a team member and an admin member, not a sibling department; Backend shows it inherited", async () => {
+    await ok(put(victor, "work_zone", engineeringId, everyone, false));
+    try {
+      expect((await fails(dana.request("GET", "/api/v1/work-sessions"), 403)).details).toMatchObject({
+        permission: "work_session.read",
+        layer: "unit",
+        unitId: engineeringId,
+      });
+      // Deny beats admin: Ada is an admin and a member of Backend, under Engineering.
+      expect((await fails(ada.request("GET", "/api/v1/work-sessions"), 403)).details).toMatchObject({
+        layer: "unit",
+        unitId: engineeringId,
+      });
+      await ok(sam.request("GET", "/api/v1/work-sessions"));
+      await ok(victor.request("GET", "/api/v1/work-sessions"));
+
+      const backend = await ok(view(victor, backendId));
+      expect(stateOf(backend, "work_zone")).toEqual({
+        module: "work_zone",
+        state: "on",
+        inherited: { scopeUnitId: engineeringId, name: "Engineering", state: "off" },
+      });
+      expect(stateOf((backend.people as Json[])[0] as Json, "work_zone").inherited).toMatchObject({
+        scopeUnitId: engineeringId,
+      });
+      expect(stateOf(await ok(view(victor, engineeringId)), "work_zone").state).toBe("off");
+      const org = await ok(view(victor, null));
+      expect(org.overrides).toEqual([
+        {
+          unitId: engineeringId,
+          name: "Engineering",
+          modules: [
+            { module: "work_zone", state: "off", inherited: null },
+            { module: "ai_chats", state: "on", inherited: null },
+            { module: "bots", state: "on", inherited: null },
+          ],
+        },
+      ]);
+    } finally {
+      await ok(put(victor, "work_zone", engineeringId, everyone, true));
+    }
+    await ok(dana.request("GET", "/api/v1/work-sessions"));
+    await ok(ada.request("GET", "/api/v1/work-sessions"));
+  });
+
+  it("side effect pinned (D-05): Bots off for Backend hides Backend's own persona from an admin outside Backend", async () => {
+    await ok(victor.request("GET", `/api/v1/agents/${personaId}`));
+    await ok(put(victor, "bots", backendId, everyone, false));
+    try {
+      await fails(victor.request("GET", `/api/v1/agents/${personaId}`), 404);
+    } finally {
+      await ok(put(victor, "bots", backendId, everyone, true));
+    }
+    await ok(victor.request("GET", `/api/v1/agents/${personaId}`));
+  });
+
+  it("a hand-written device.pair deny shows Work Zone custom; on deletes it with the catalog rows (P-06)", async () => {
+    await ok(
+      victor.request("POST", "/api/v1/permission-rules", {
+        scopeUnitId: backendId,
+        subjectKind: "everyone",
+        permission: "device.pair",
+        effect: "deny",
+      }),
+    );
+    // A non-catalog deny at the same scope and subject is never touched.
+    const other = await ok(
+      victor.request("POST", "/api/v1/permission-rules", {
+        scopeUnitId: backendId,
+        subjectKind: "everyone",
+        permission: "channel.archive",
+        effect: "deny",
+      }),
+    );
+    expect(stateOf(await ok(view(victor, backendId)), "work_zone").state).toBe("custom");
+    expect((await ok(view(victor, engineeringId))).overrides).toEqual([
+      expect.objectContaining({ unitId: backendId, name: "Backend" }),
+    ]);
+    const v = await ok(put(victor, "work_zone", backendId, everyone, true));
+    expect(stateOf(v, "work_zone").state).toBe("on");
+    expect((await rowsAt(backendId, everyone)).map((r) => r.id)).toEqual([other.id]);
+    await ok(victor.request("DELETE", `/api/v1/permission-rules/${other.id as string}`));
+  });
+});
+
+describe("lead rights: Lena leads Backend", () => {
+  it("manages Backend and its child project; refused on Engineering, a sibling team and the organization", async () => {
+    await ok(view(lena, backendId));
+    await ok(view(lena, paymentsId));
+    await ok(put(lena, "ai_chats", paymentsId, everyone, false));
+    expect((await rowsAt(paymentsId, everyone)).length).toBe(MODULE_CATALOG.ai_chats.patterns.length);
+    await ok(put(lena, "ai_chats", paymentsId, everyone, true));
+    expect(await rowsAt(paymentsId, everyone)).toEqual([]);
+    for (const scope of [engineeringId, frontendId, null]) {
+      expect((await fails(view(lena, scope), 403)).details).toMatchObject({
+        permission: "unit.modules.manage",
+      });
+      expect((await fails(put(lena, "ai_chats", scope, everyone, false), 403)).details).toMatchObject({
+        permission: "unit.modules.manage",
+      });
+    }
+    expect(await rowsAt(engineeringId, everyone)).toEqual([]);
+    expect(await rowsAt(null, everyone)).toEqual([]);
+  });
+
+  it("a person row for a Backend member is scoped to Backend; outside the subtree is not_in_unit", async () => {
+    await ok(put(lena, "bots", backendId, person(danaId), false));
+    const rows = await rowsAt(backendId, person(danaId));
+    expect(rows.length).toBe(MODULE_CATALOG.bots.patterns.length);
+    for (const r of rows)
+      expect(r).toMatchObject({ scope_unit_id: backendId, subject_kind: "user", subject_id: danaId });
+    await ok(put(lena, "bots", backendId, person(danaId), true));
+    expect(await rowsAt(backendId, person(danaId))).toEqual([]);
+
+    const err = await fails(put(lena, "bots", backendId, person(samId), false), 400);
+    expect(err).toMatchObject({ code: "not_in_unit", message: "This person is not in Backend" });
+    expect(await rowsAt(backendId, person(samId))).toEqual([]);
+  });
+
+  it("never an admin: a person row for Ada is role_ceiling, and her canEdit is false", async () => {
+    const err = await fails(put(lena, "work_zone", backendId, person(adaId), false), 403);
+    expect(err.details).toMatchObject({ permission: "unit.modules.manage", reason: "role_ceiling" });
+    expect(await rowsAt(backendId, person(adaId))).toEqual([]);
+    const v = await ok(view(lena, backendId));
+    expect((v.people as Json[]).map((p) => [p.displayName, p.canEdit])).toEqual([
+      ["Ada Admin", false],
+      ["Dana Dev", true],
+      ["Lena Lead", true],
+    ]);
+  });
+
+  it("an Engineering off stays: Lena's on at Backend deletes nothing above and Dana stays refused", async () => {
+    await ok(put(victor, "work_zone", engineeringId, everyone, false));
+    try {
+      const above = (await rowsAt(engineeringId, everyone)).map((r) => r.id);
+      const v = await ok(put(lena, "work_zone", backendId, everyone, true));
+      expect(stateOf(v, "work_zone").inherited).toEqual({
+        scopeUnitId: engineeringId,
+        name: "Engineering",
+        state: "off",
+      });
+      expect((await rowsAt(engineeringId, everyone)).map((r) => r.id)).toEqual(above);
+      await fails(dana.request("GET", "/api/v1/work-sessions"), 403);
+    } finally {
+      await ok(put(victor, "work_zone", engineeringId, everyone, true));
+    }
+    await ok(dana.request("GET", "/api/v1/work-sessions"));
+  });
+
+  it("re-enables at Backend what Víctor turned off at Backend (D-05 (2))", async () => {
+    await ok(put(victor, "work_zone", backendId, everyone, false));
+    await fails(dana.request("GET", "/api/v1/work-sessions"), 403);
+    await ok(put(lena, "work_zone", backendId, everyone, true));
+    expect(await rowsAt(backendId, everyone)).toEqual([]);
+    await ok(dana.request("GET", "/api/v1/work-sessions"));
+  });
+
+  it("a lead's unit-wide off refuses Ada, an admin member of Backend; an admin outside Backend keeps it (ADR-0024)", async () => {
+    await ok(ada.request("GET", "/api/v1/work-sessions"));
+    await ok(put(lena, "work_zone", backendId, everyone, false));
+    try {
+      expect((await fails(ada.request("GET", "/api/v1/work-sessions"), 403)).details).toMatchObject({
+        permission: "work_session.read",
+        layer: "unit",
+        unitId: backendId,
+      });
+      expect(await myPermissions(ada)).not.toContain("work_session.read");
+      await ok(victor.request("GET", "/api/v1/work-sessions"));
+    } finally {
+      await ok(put(lena, "work_zone", backendId, everyone, true));
+    }
+    await ok(ada.request("GET", "/api/v1/work-sessions"));
+  });
+
+  it("Dana, a plain member, may neither read nor change Backend's modules", async () => {
+    expect((await fails(view(dana, backendId), 403)).details).toMatchObject({
+      permission: "unit.modules.manage",
+    });
+    await fails(put(dana, "ai_chats", backendId, everyone, false), 403);
+    await fails(put(dana, "ai_chats", backendId, person(danaId), false), 403);
+    expect(await rowsAt(backendId, everyone)).toEqual([]);
+  });
+});

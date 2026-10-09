@@ -78,7 +78,11 @@ export function applyMove<T extends UnitNode>(
 type UnitRow = typeof orgUnits.$inferSelect;
 
 /** The permissions a unit row reports in `viewerCan` (the web renders these, never re-implements policy). */
-const UNIT_VIEWER_PERMISSIONS: readonly Permission[] = ["unit.manage", "unit.members.manage"];
+const UNIT_VIEWER_PERMISSIONS: readonly Permission[] = [
+  "unit.manage",
+  "unit.members.manage",
+  "unit.modules.manage",
+];
 
 export const orgTopic = (organizationId: string) => `org:${organizationId}`;
 
