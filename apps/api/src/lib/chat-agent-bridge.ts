@@ -74,6 +74,12 @@ export interface PostAgentMessageInput {
    */
   inReplyToMessageId?: string;
   /**
+   * The human of the delivered turn the post answers (`agent_turns.user_id`, resolved by the Agent Channel API). Checked
+   * like the replied-to human, whatever kind of message the post answers (a card decision answers the agent's own card):
+   * the post is allowed only while that human may still read the conversation.
+   */
+  onBehalfOfUserId?: string;
+  /**
    * An Agent Card (06-13, P-11): `body` is its plain-text summary; the card row is inserted in the message transaction
    * (version 1, this agent) and `message.created` carries it.
    */

@@ -484,6 +484,12 @@ export const AgentChannelPostMessage = z.object({
   threadRootMessageId: Id.nullable(),
   /** From `event.message.id` (used for attribution: the triggering human). */
   inReplyToMessageId: Id.optional(),
+  /**
+   * The delivery being answered (`agent.mention.v1` / `agent.card_action.v1` `eventId`). Every post needs a live turn of
+   * this agent in this conversation: this id, or (older cells) `inReplyToMessageId` naming the message the turn was
+   * delivered for. Neither → 403 `no_trigger`. The turn's human must still read the conversation.
+   */
+  eventId: Id.optional(),
   text: MessageBody,
   /** At-least-once delivery: the same key for the same agent never creates two messages. */
   idempotencyKey: z.string().min(1).max(200),
@@ -510,6 +516,8 @@ export const AgentChannelPostCard = z.object({
   conversationId: Id,
   threadRootId: Id.nullable(),
   inReplyToMessageId: Id.optional(),
+  /** The delivery whose turn posts the card (same trigger rule as `AgentChannelPostMessage.eventId`). */
+  eventId: Id.optional(),
   idempotencyKey: z.string().min(8).max(128),
   card: AgentCardInput,
 });

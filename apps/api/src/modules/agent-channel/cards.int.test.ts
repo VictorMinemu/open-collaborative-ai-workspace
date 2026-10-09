@@ -92,20 +92,44 @@ const deployCard = (over: Json = {}): Json => ({
   ...over,
 });
 
-const postCard = (
+/**
+ * A delivered turn of `agentId` in `conversationId` for Víctor (the trigger every agent post needs), recorded the way
+ * delivery records it (`agent_turns`); none when the agent is not of the conversation's organization. Returns its id.
+ */
+async function turnIn(conversationId: string, agentId: string, messageId: string = randomUUID()) {
+  const eventId = randomUUID();
+  await su.query(
+    `insert into app.agent_turns (event_id, organization_id, agent_id, user_id, conversation_id, conversation_kind, message_id)
+     select $1, c.organization_id, a.id, $2, c.id, c.kind, $3
+     from app.conversations c join app.agents a on a.id = $4 and a.organization_id = c.organization_id
+     where c.id = $5`,
+    [eventId, victorId, messageId, agentId, conversationId],
+  );
+  return eventId;
+}
+
+/** Posts a card as the cell; unless the caller names a trigger, for a fresh turn of the agent in that conversation. */
+const postCard = async (
   conversationId: string,
   card: Json = deployCard(),
   extra: Json = {},
   p: FakeCellPlugin = cell,
-) =>
-  p.request<Json>("POST", "/cards", {
-    agentId: deployId,
+) => {
+  const agentId = (extra.agentId as string | undefined) ?? deployId;
+  const trigger =
+    "eventId" in extra
+      ? {}
+      : { eventId: await turnIn(conversationId, agentId, extra.inReplyToMessageId as string | undefined) };
+  return p.request<Json>("POST", "/cards", {
+    agentId,
     conversationId,
     threadRootId: null,
     idempotencyKey: `card-${randomUUID()}`,
     card,
+    ...trigger,
     ...extra,
   });
+};
 
 const patchCard = (messageId: string, patch: Json, agentId = deployId, p: FakeCellPlugin = cell) =>
   p.request<Json>("PATCH", `/cards/${messageId}`, { agentId, patch });
@@ -955,6 +979,7 @@ describe("06-14: every delivered turn offers ocw_agent_card, gated like any tool
       {
         threadRootId: channelEvent.thread.rootMessageId,
         inReplyToMessageId: channelEvent.message.id,
+        eventId: channelEvent.eventId,
         idempotencyKey: `${channelEvent.eventId}:card:0`,
       },
     );
@@ -1124,11 +1149,18 @@ describe("agent posts need a live turn, and the turn's human must still read the
       expect(await agentRows(room)).toBe(before);
       const denied = (
         await su.query(
-          "select actor_kind, agent_id from app.audit_events where action = 'authz.denied' and resource_id like '/agent-channel/v1/%' and organization_id = $1 order by occurred_at desc limit 1",
+          "select actor_kind, metadata from app.audit_events where action = 'authz.denied' and resource_id in ('/agent-channel/v1/messages', '/agent-channel/v1/cards') and organization_id = $1 order by occurred_at desc limit 3",
           [orgId],
         )
-      ).rows[0];
-      expect(denied).toMatchObject({ actor_kind: "agent", agent_id: deployId });
+      ).rows;
+      // Each refusal is audited as the cell's authorization denial, naming the layer and the reason.
+      expect(denied).toHaveLength(3);
+      for (const row of denied) {
+        expect(row).toMatchObject({
+          actor_kind: "agent",
+          metadata: { permission: "channel.read", layer: "resource", reason: "private_channel" },
+        });
+      }
     } finally {
       await ok(victor.request("POST", `/api/v1/channels/${room}/members`, { kind: "user", id: alexId }));
     }

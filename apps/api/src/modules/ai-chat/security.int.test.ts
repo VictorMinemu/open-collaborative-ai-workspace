@@ -650,6 +650,8 @@ describe("Phase 6: a shared AI chat leaks no private context and no secret (06-1
       agentId: scribeId,
       conversationId: chatId,
       threadRootId: null,
+      inReplyToMessageId: delivered.message.id,
+      eventId: delivered.eventId,
       idempotencyKey: `card-${randomUUID()}`,
       card: approvalCard(),
     });

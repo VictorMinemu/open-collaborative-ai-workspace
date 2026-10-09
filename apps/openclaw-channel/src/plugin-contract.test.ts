@@ -193,6 +193,7 @@ describe("mention → dispatch → reply", () => {
       conversationId: "conv-1",
       threadRootMessageId: "root-1",
       inReplyToMessageId: "msg-1",
+      eventId: "evt-1",
       text: "Hi Víctor!",
       idempotencyKey: "evt:evt-1",
     });
@@ -414,6 +415,7 @@ describe("agent.card_action.v1 → dispatch → reply (06-14)", () => {
       conversationId: "conv-1",
       threadRootMessageId: "root-1",
       inReplyToMessageId: "card-msg-1",
+      eventId: "evt-40",
       text: "Hi Sam Lee!",
       idempotencyKey: "evt:evt-40",
     });

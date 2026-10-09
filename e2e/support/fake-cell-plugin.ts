@@ -255,6 +255,8 @@ export class FakeCellPlugin {
       conversationId: m.conversation.id,
       threadRootMessageId,
       inReplyToMessageId: m.message.id,
+      // The trigger (like apps/openclaw-channel): the delivered turn this reply answers.
+      eventId: m.eventId,
       text,
       idempotencyKey: `evt:${m.eventId}`,
     });
@@ -265,13 +267,15 @@ export class FakeCellPlugin {
 
   /**
    * Posts a typed Agent Card (06-13, `POST /agent-channel/v1/cards`) as `input.agentId`, like the real plugin's card
-   * tool: the card lands where the agent may post; 201 when created, 200 on an idempotent retry.
+   * tool: the card lands where the agent may post, for a delivered turn (`eventId`, or the message it was delivered
+   * for); 201 when created, 200 on an idempotent retry, 403 `no_trigger` without a turn.
    */
   async postCard(input: {
     agentId: string;
     conversationId: string;
     threadRootId: string | null;
     inReplyToMessageId?: string;
+    eventId?: string;
     idempotencyKey: string;
     card: Record<string, unknown>;
   }): Promise<{ messageId: string; version: number }> {

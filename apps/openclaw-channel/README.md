@@ -47,7 +47,9 @@ is in the workspace.
    - A turn that fails before anything was delivered is retried twice (1.5 s and 3 s). A
      just-provisioned agent can be briefly unpublished.
 4. **Reply.** The plugin sends `POST /messages` with `{agentId, conversationId, threadRootMessageId,
-   inReplyToMessageId: message.id, text, idempotencyKey: "evt:<eventId>"}`.
+   inReplyToMessageId: message.id, eventId, text, idempotencyKey: "evt:<eventId>"}`.
+   - `eventId` is the trigger: the API accepts a post (and a card) only for a delivered turn of that agent
+     in that conversation whose human can still read it; otherwise 403 `no_trigger` or the read denial.
    - Further chunks use `evt:<eventId>:<n>`.
    - Retries cover 5xx, 408, 425, 429 and network errors.
    - If the turn still fails, one notice is posted with key `evt:<eventId>:failed`.
