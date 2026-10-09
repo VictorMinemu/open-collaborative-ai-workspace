@@ -64,6 +64,16 @@ export interface ConversationAccess {
     notFoundMessage?: string,
   ): Promise<{ conv: ConversationRow; facts: ChannelFacts }>;
   /**
+   * Whether `userId` still holds the conversation's own access (`channel.read`: owner, grant or membership), without
+   * module gates. Participation bookkeeping only (an AI chat's roster follows its grants, ADR-0024); never a read.
+   */
+  holdsOwnAccess(
+    tx: Tx,
+    userId: string,
+    conversationId: string,
+    opts?: { kinds?: readonly ReadableKind[] },
+  ): Promise<boolean>;
+  /**
    * Boolean form for event-time decisions (notifications, WS). The plan named it "can-read"; that identifier
    * belongs to a deleted pre-resolver helper and the static guard (guard.test.ts) refuses it.
    */
@@ -84,6 +94,15 @@ function asMissing(err: unknown, notFoundMessage: string): unknown {
 
 export function createConversationAccess(core: Core): ConversationAccess {
   const perms = createPermissionService(core);
+
+  /** The conversation and `userId`'s decision on its own access (`channel.read`), module gates aside. */
+  async function ownAccess(tx: Tx, userId: string, conversationId: string, kinds: readonly ReadableKind[]) {
+    const conv = await getConversation(tx, conversationId, kinds);
+    if (!conv) return null;
+    const facts = await channelFacts(tx, conv, { kind: "user", id: userId });
+    const d = await perms.decide(tx, { kind: "user", userId }, "channel.read", channelResource(facts));
+    return { conv, allowed: d.allowed };
+  }
 
   const access: ConversationAccess = {
     async readableRow(req, tx, conv, notFoundMessage = "Conversation not found") {
@@ -182,13 +201,14 @@ export function createConversationAccess(core: Core): ConversationAccess {
       return allowed.map((r) => r.id);
     },
 
+    async holdsOwnAccess(tx, userId, conversationId, opts = {}) {
+      return (await ownAccess(tx, userId, conversationId, opts.kinds ?? ALL_KINDS))?.allowed ?? false;
+    },
+
     async isReadable(tx, userId, conversationId, opts = {}) {
-      const conv = await getConversation(tx, conversationId, opts.kinds ?? ALL_KINDS);
-      if (!conv) return false;
-      const facts = await channelFacts(tx, conv, { kind: "user", id: userId });
-      const d = await perms.decide(tx, { kind: "user", userId }, "channel.read", channelResource(facts));
-      if (!d.allowed) return false;
-      if (conv.kind !== "ai_chat") return true;
+      const own = await ownAccess(tx, userId, conversationId, opts.kinds ?? ALL_KINDS);
+      if (!own?.allowed) return false;
+      if (own.conv.kind !== "ai_chat") return true;
       return (await perms.decide(tx, { kind: "user", userId }, "ai_chat.read", orgResource())).allowed;
     },
   };

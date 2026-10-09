@@ -160,6 +160,15 @@ const notificationEvents = async (userId: string, messageId: string) =>
     )
   ).rows as Json[];
 
+/** User participation rows of one conversation (the roster). */
+const participants = async (conversationId: string) =>
+  (
+    await su.query(
+      "select member_id from app.conversation_members where conversation_id = $1 and member_kind = 'user'",
+      [conversationId],
+    )
+  ).rows.map((r) => r.member_id as string);
+
 const aiChatInboxItems = async (as: TestClient) =>
   ((await ok(as.request("GET", "/api/v1/notifications?filter=all"))).items as Json[]).filter(
     (n) => n.conversation.kind === "ai_chat",
@@ -481,6 +490,7 @@ describe("Bots module off: the organization team bot disappears for the denied m
 
 describe("withdrawal and roster while AI chats is off (07.3-01 open items 1 and 2)", () => {
   let chat: string;
+  let samGrant: string;
 
   it("Dana revokes her own share link while AI chats is off for her; nobody else can, and her chat stays hidden", async () => {
     chat = await chatWithMessage(dana, "Vendor shortlist for the audit");
@@ -511,5 +521,26 @@ describe("withdrawal and roster while AI chats is off (07.3-01 open items 1 and 
       await deleteRules(ids);
     }
     await ok(sam.request("GET", `/api/v1/ai-shares/${samShare.id as string}`));
+  });
+
+  it("a grant change keeps the roster row of a person grantee whose AI chats is off; revoking her own grant removes it", async () => {
+    samGrant = (await grant(dana, chat, samId, "chat")).id as string;
+    const olgaGrant = (await grant(dana, chat, olgaId, "view")).id as string;
+    expect(await participants(chat)).toEqual(expect.arrayContaining([samId, olgaId]));
+    const ids = await denyModule("ai_chats", samId);
+    try {
+      // Another grantee's revoke and Sam's own level change both re-decide the roster.
+      await ok(dana.request("DELETE", `/api/v1/ai-chats/${chat}/grants/${olgaGrant}`), 204);
+      await ok(dana.request("PATCH", `/api/v1/ai-chats/${chat}/grants/${samGrant}`, { level: "view" }));
+      const now = await participants(chat);
+      expect(now).toContain(samId);
+      expect(now).not.toContain(olgaId);
+      await fails(sam.request("GET", `/api/v1/ai-chats/${chat}`), 404);
+    } finally {
+      await deleteRules(ids);
+    }
+    await ok(sam.request("GET", `/api/v1/ai-chats/${chat}`));
+    await ok(dana.request("DELETE", `/api/v1/ai-chats/${chat}/grants/${samGrant}`), 204);
+    expect(await participants(chat)).not.toContain(samId);
   });
 });
