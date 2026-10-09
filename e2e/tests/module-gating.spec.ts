@@ -4,8 +4,10 @@ import { type APIRequestContext, expect, type Locator, type Page, test } from "@
 import { MODULE_CATALOG, type ModuleId } from "../../packages/contracts/src/module-access.ts";
 import { type Actor, apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import { seedPlan } from "../support/ai-chat";
+import { cellToken } from "../support/cell-token";
+import { FakeCellPlugin } from "../support/fake-cell-plugin";
 import { bothThemes } from "../support/files";
-import { ADMIN } from "./env";
+import { ADMIN, API_URL } from "./env";
 
 /**
  * Module access in the web (07.3-03, ACCESS-03, D-03, P-08). An admin turns a module off for Mia with the catalog's
@@ -114,11 +116,32 @@ async function sidebar(page: Page, mobile: boolean): Promise<Locator> {
   return page.getByTestId(mobile ? "views-segmented" : "views-list").filter({ visible: true });
 }
 
+/** How many `nav-<id>` entries are shown: the rail on desktop, the navigation drawer on phones (closed again). */
+async function navEntry(page: Page, mobile: boolean, id: string): Promise<number> {
+  if (!mobile) return page.getByTestId(`nav-${id}`).filter({ visible: true }).count();
+  await page.getByTestId("mobile-nav-trigger").click();
+  await expect(page.getByTestId("nav-chat").filter({ visible: true })).toBeVisible();
+  const n = await page.getByTestId(`nav-${id}`).filter({ visible: true }).count();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("nav-chat").filter({ visible: true })).toHaveCount(0);
+  // The closed drawer hands focus back to its trigger; drop it so review screenshots show no focus ring.
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  return n;
+}
+
 /**
  * Records every watched view that ever rendered in the page (from the first byte of each navigation), so a gate can
  * be proven to never flash the page it guards.
  */
-const WATCHED = ["ai-chat-view", "ai-chats-view", "ai-share-view", "dm-view", "module-off"] as const;
+const WATCHED = [
+  "ai-chat-view",
+  "ai-chats-view",
+  "ai-share-view",
+  "dm-view",
+  "session-list",
+  "bot-card",
+  "module-off",
+] as const;
 async function watchFlashes(page: Page) {
   await page.addInitScript((ids: readonly string[]) => {
     const seen: string[] = [];
@@ -251,8 +274,192 @@ test("a failed /me/permissions never hides AI chats or bot DMs (P-08: only `off`
     await m.page.goto(`${BASE_URL}/chat/ai/${chatId}`);
     await expect(m.page.getByTestId("ai-chat-view")).toBeVisible({ timeout: 10_000 });
     await expect(m.page.getByTestId("module-off")).toHaveCount(0);
+    // The page stays: a failed fetch never sends the gate back to its skeleton (each refetch of an errored query
+    // is `pending` again; the gate must not loop between the skeleton and the page).
+    await m.page.waitForTimeout(2_000);
+    await expect(m.page.getByTestId("ai-chat-view")).toBeVisible();
+    await expect(m.page.getByTestId("module-loading")).toHaveCount(0);
     expect(failures, "the permissions fetch really failed").toBeGreaterThan(0);
   } finally {
     await m.context.close();
+  }
+});
+
+test("Work Zone off: the entry and the open page go live; deep links show the off state; devices stay, pairing hides", async ({
+  browser,
+}, info) => {
+  test.setTimeout(120_000);
+  const project = info.project.name;
+  const mobile = project === "mobile";
+  const size = sizeOf(project);
+  const workZoneTitle = (page: Page) => page.getByRole("heading", { level: 1, name: "Work Zone" });
+
+  const m = await openAs(browser, MIA, project);
+  await watchFlashes(m.page);
+  try {
+    // ---- on: device pairing is offered (Mia has no device of her own), the Work Zone page renders
+    await m.page.goto(`${BASE_URL}/settings/devices`);
+    await expect(m.page.getByTestId("add-device")).toBeVisible();
+    await expect(m.page.getByTestId("add-first-device")).toBeVisible();
+    await m.page.goto(`${BASE_URL}/work-zone`);
+    await expect(workZoneTitle(m.page)).toBeVisible();
+    expect(await navEntry(m.page, mobile, "work-zone")).toBe(1);
+
+    // ---- the admin turns Work Zone off: the open page swaps to the off state and the entry leaves, no reload
+    const off = await turnOff("work_zone");
+    const offState = m.page.getByTestId("module-off");
+    await expect(offState).toBeVisible({ timeout: 5_000 });
+    await expect(offState).toHaveAttribute("data-module", "work_zone");
+    await expect(workZoneTitle(m.page)).toHaveCount(0);
+    await bothThemes(m.page, `module-off-work-zone-${size}`);
+    // The page swapped, so the permissions were refetched: the entry is decided by the same answer.
+    expect(await navEntry(m.page, mobile, "work-zone")).toBe(0);
+    await expectOff(m.page, `/work-zone/${randomUUID()}`, "work_zone", "session-list");
+    await expectOff(m.page, "/work-zone", "work_zone", "session-list");
+
+    // ---- Settings › Devices stays for device hygiene; pairing is gone
+    await m.page.goto(`${BASE_URL}/settings/devices`);
+    await expect(m.page.getByRole("heading", { name: "Your devices" })).toBeVisible();
+    await expect(m.page.getByTestId("devices-none")).toBeVisible();
+    await expect(m.page.getByTestId("add-device")).toHaveCount(0);
+    await expect(m.page.getByTestId("add-first-device")).toHaveCount(0);
+    await bothThemes(m.page, `modules-hidden-devices-${size}`);
+
+    // ---- back on: the Work Zone page renders again
+    await m.page.goto(`${BASE_URL}/work-zone`);
+    await expect(offState).toBeVisible();
+    await turnOn(off);
+    await expect(workZoneTitle(m.page)).toBeVisible({ timeout: 5_000 });
+    await expect(offState).toHaveCount(0);
+    expect(await navEntry(m.page, mobile, "work-zone")).toBe(1);
+  } finally {
+    await m.context.close();
+  }
+});
+
+test("Bots off: bot DMs leave every list and the unread count, /bots links hide, deep links show the off state", async ({
+  browser,
+}, info) => {
+  test.setTimeout(150_000);
+  const project = info.project.name;
+  const mobile = project === "mobile";
+  const size = sizeOf(project);
+  const botName = `Gate Bot ${project}`;
+  const botDm = await botDmOf(botName);
+  const samId = await ensureMember(admin, SAM, "developer");
+  const personDm = await mia.post("/api/v1/dms", { data: { participants: [{ kind: "user", id: samId }] } });
+  expect(personDm.ok(), `Mia's DM with Sam: ${personDm.status()}`).toBe(true);
+
+  // The bot answers once (fake cell), so its DM is unread for Mia and counts in All.
+  const token = cellToken();
+  const plugin = token
+    ? new FakeCellPlugin({ apiUrl: API_URL, token, autoAck: true, autoReply: true })
+    : null;
+  console.info(`[${project}] bot DM unread check: ${plugin ? "on" : "skipped (no OCW_CELL_TOKEN)"}`);
+  if (plugin) {
+    await plugin.start();
+    const sent = await mia.post(`/api/v1/conversations/${botDm}/messages`, { data: { body: "status?" } });
+    expect(sent.ok(), `Mia asks the bot: ${sent.status()}`).toBe(true);
+    await expect
+      .poll(
+        async () => {
+          const { dms } = (await (await mia.get("/api/v1/dms")).json()) as {
+            dms: Array<{ id: string; latestMessageSeq: number; lastReadSeq: number }>;
+          };
+          const d = dms.find((x) => x.id === botDm);
+          return d ? d.latestMessageSeq > d.lastReadSeq : false;
+        },
+        { timeout: 15_000 },
+      )
+      .toBe(true);
+  }
+
+  const botRow = (page: Page) =>
+    page.locator(`[data-testid="dm-link"][data-bot-name="${botName}"]`).filter({ visible: true });
+  const personRow = (page: Page) =>
+    page
+      .locator('[data-testid="dm-link"][data-dm-kind="user"]')
+      .filter({ hasText: SAM.name })
+      .filter({ visible: true });
+  const browseBots = (page: Page) =>
+    page.getByRole("link", { name: "Browse bots" }).filter({ visible: true });
+
+  const m = await openAs(browser, MIA, project);
+  await watchFlashes(m.page);
+  try {
+    // ---- on: the bot DM, the person DM and the Bots entry are there
+    const views = await sidebar(m.page, mobile);
+    await expect(botRow(m.page)).toBeVisible();
+    await expect(personRow(m.page)).toBeVisible();
+    await expect(m.page.getByTestId("nav-bots").filter({ visible: true })).toBeVisible();
+    const unreadAll = async () => {
+      const badge = views.getByTestId("view-all").getByTestId("view-count");
+      return (await badge.count()) === 0 ? 0 : Number((await badge.textContent()) ?? "0");
+    };
+    const before = await unreadAll();
+    // Every unread bot DM of Mia's leaves the count (the other project's bot DM may be unread too).
+    const { dms } = (await (await mia.get("/api/v1/dms")).json()) as {
+      dms: Array<{
+        counterpart: { kind: string };
+        latestMessageSeq: number;
+        lastReadSeq: number;
+        muted: boolean;
+      }>;
+    };
+    const unreadBots = dms.filter(
+      (d) => d.counterpart.kind === "agent" && !d.muted && d.latestMessageSeq > d.lastReadSeq,
+    ).length;
+    if (plugin) expect(unreadBots, "the bot's reply is unread").toBeGreaterThan(0);
+
+    // ---- the admin turns Bots off: the bot DM and the entry leave, live; the person DM stays
+    const off = await turnOff("bots");
+    await expect(botRow(m.page)).toHaveCount(0, { timeout: 5_000 });
+    await expect(m.page.getByTestId("nav-bots")).toHaveCount(0, { timeout: 5_000 });
+    await expect(personRow(m.page)).toBeVisible();
+    await expect.poll(unreadAll, { timeout: 5_000 }).toBe(before - unreadBots);
+
+    // ---- All and the AI chats home: no bot DM, no bots strip, no way to /bots
+    await m.page.goto(`${BASE_URL}/chat/all`);
+    await expect(m.page.getByTestId("all-item").filter({ hasText: SAM.name })).toBeVisible();
+    await expect(m.page.getByTestId("all-item").filter({ hasText: botName })).toHaveCount(0);
+    await m.page.goto(`${BASE_URL}/chat/ai`);
+    await expect(m.page.getByTestId("ai-chats-view")).toBeVisible();
+    await expect(m.page.getByTestId("ai-bots-strip")).toHaveCount(0);
+    await expect(m.page.getByText(botName)).toHaveCount(0);
+    await expect(browseBots(m.page)).toHaveCount(0);
+
+    // ---- deep links: the bot DM and /bots show the off state, never the conversation or the gallery
+    await expectOff(m.page, `/chat/dm/${botDm}`, "bots", "dm-view");
+    await bothThemes(m.page, `module-off-bots-dm-${size}`);
+    await expectOff(m.page, "/bots", "bots", "bot-card");
+    await bothThemes(m.page, `module-off-bots-${size}`);
+
+    // ---- a failed /me/permissions with the rows still in place hides nothing (P-08)
+    const f = await openAs(browser, MIA, project);
+    try {
+      await f.page.route("**/api/v1/me/permissions", (route) =>
+        route.fulfill({ status: 500, contentType: "application/json", body: '{"error":"internal"}' }),
+      );
+      await f.page.goto(`${BASE_URL}/chat/ai`);
+      await expect(f.page.getByTestId("ai-chats-view")).toBeVisible({ timeout: 10_000 });
+      await expect(browseBots(f.page).first()).toBeVisible();
+      await sidebar(f.page, mobile);
+      await expect(botRow(f.page)).toBeVisible();
+    } finally {
+      await f.context.close();
+    }
+
+    // ---- back on: everything returns, live
+    await m.page.goto(`${BASE_URL}/chat/ai`);
+    await expect(m.page.getByTestId("ai-chats-view")).toBeVisible();
+    await turnOn(off);
+    await expect(m.page.getByTestId("ai-bots-strip")).toBeVisible({ timeout: 5_000 });
+    await expect(browseBots(m.page).first()).toBeVisible();
+    await sidebar(m.page, mobile);
+    await expect(botRow(m.page)).toBeVisible();
+    await expect(m.page.getByTestId("nav-bots").filter({ visible: true })).toBeVisible();
+  } finally {
+    await m.context.close();
+    await plugin?.stop();
   }
 });

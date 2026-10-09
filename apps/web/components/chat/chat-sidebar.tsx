@@ -51,6 +51,7 @@ import {
   useReadHold,
   useThreadList,
 } from "@/lib/chat-queries";
+import { withoutBotDms } from "@/lib/modules";
 import {
   applyNotificationCreated,
   applyNotificationRead,
@@ -318,8 +319,11 @@ function DmRow({ d, active }: { d: DmSummary; active: boolean }) {
  */
 function DirectMessagesSection({ activeId, onNew }: { activeId: string | null; onNew: () => void }) {
   const dms = useDms();
-  const list = dms.data?.dms ?? [];
-  const hasPersonal = list.some((d) => d.counterpart.kind === "agent" && d.counterpart.scope === "personal");
+  // Bot DMs leave the list once Bots is decided off for the member (07.3, D-05 (3)); people and groups stay.
+  const list = withoutBotDms(dms.data?.dms ?? [], useModule("bots") !== "off");
+  const hasPersonal = (dms.data?.dms ?? []).some(
+    (d) => d.counterpart.kind === "agent" && d.counterpart.scope === "personal",
+  );
   return (
     <section aria-labelledby="dm-heading" className="mt-5" data-testid="dm-section">
       <div className="flex h-8 items-center justify-between gap-2 px-2">
@@ -378,6 +382,7 @@ export function ChatSidebar() {
   const can = usePermissionCheck();
   // Module access (07.3, P-08): an entry leaves only once its module is decided off, never while loading or failed.
   const showAiChats = useModule("ai_chats") !== "off";
+  const showBots = useModule("bots") !== "off";
   const threads = useThreadList();
   const mentions = useNotifications("mentions");
   const [creating, setCreating] = useState<{ unitId: string | null } | null>(null);
@@ -398,8 +403,9 @@ export function ChatSidebar() {
   // A muted conversation counts only while something addresses the member (CHAT-10: same rule as its badge).
   const unreadAll =
     joined.filter((c) => c.id !== activeId && rowBadge(c, isUnread(c)).style !== "none").length +
-    (dms.data?.dms ?? []).filter((d) => d.id !== activeId && rowBadge(d, hasUnread(d)).style !== "none")
-      .length;
+    withoutBotDms(dms.data?.dms ?? [], showBots).filter(
+      (d) => d.id !== activeId && rowBadge(d, hasUnread(d)).style !== "none",
+    ).length;
   // Every thread with unread replies (the API counts all pages on the first one, CHAT-09); the loaded pages otherwise.
   const unreadThreads =
     threads.data?.pages[0]?.unreadThreads ??
