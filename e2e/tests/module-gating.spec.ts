@@ -7,6 +7,7 @@ import { seedPlan } from "../support/ai-chat";
 import { cellToken } from "../support/cell-token";
 import { FakeCellPlugin } from "../support/fake-cell-plugin";
 import { bothThemes } from "../support/files";
+import { type FakeDeviceHandle, startFakeDevice } from "../support/work-zone-device";
 import { ADMIN, API_URL } from "./env";
 
 /**
@@ -333,6 +334,53 @@ test("Work Zone off: the entry and the open page go live; deep links show the of
     await expect(offState).toHaveCount(0);
     expect(await navEntry(m.page, mobile, "work-zone")).toBe(1);
   } finally {
+    await m.context.close();
+  }
+});
+
+test("Work Zone off with a session open: the session explains the lost access; Back to Work Zone shows the off state", async ({
+  browser,
+}, info) => {
+  test.setTimeout(150_000);
+  const project = info.project.name;
+  const tag = `${project}-${Date.now().toString(36)}`;
+  let device: FakeDeviceHandle | null = null;
+  let off: string[] = [];
+  const m = await openAs(browser, MIA, project);
+  try {
+    // Mia's own device (fake runtime) and a session on it.
+    device = await startFakeDevice(mia, { name: `Gate Mac ${tag}`, projectName: `gate-${tag}` });
+    const created = await mia.post("/api/v1/work-sessions", {
+      data: {
+        projectId: device.projectId,
+        runtime: "claude-code",
+        permissionMode: "default",
+        title: `Gate ${tag}`,
+        prompt: "Add a short CONTRIBUTING guide for new teammates",
+      },
+    });
+    expect(created.ok(), await created.text()).toBe(true);
+    const sessionId = ((await created.json()) as { id: string }).id;
+    await m.page.goto(`${BASE_URL}/work-zone/${sessionId}`);
+    await expect(m.page.getByTestId("session-view")).toBeVisible();
+
+    // The session that was open says why it stopped (RT-01), as for a role change; it is not torn down.
+    off = await turnOff("work_zone");
+    const lost = m.page.getByTestId("session-access-lost");
+    await expect(lost).toBeVisible({ timeout: 5_000 });
+    await expect(m.page.getByTestId("module-off")).toHaveCount(0);
+    await expect(m.page.getByTestId("session-view")).toHaveCount(0);
+    // Leaving it shows the module's off state.
+    await lost.getByRole("link", { name: "Back to Work Zone" }).click();
+    await expect(m.page.getByTestId("module-off")).toHaveAttribute("data-module", "work_zone");
+    // Device hygiene stays: Mia revokes her own device while Work Zone is off.
+    const revoked = await mia.delete(`/api/v1/devices/${device.deviceId}`);
+    expect(revoked.ok(), `revoke with Work Zone off: ${revoked.status()}`).toBe(true);
+    await device.stop();
+    device = null;
+  } finally {
+    await device?.stop();
+    if (off.length) await turnOn(off);
     await m.context.close();
   }
 });

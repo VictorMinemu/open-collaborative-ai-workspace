@@ -3,7 +3,7 @@
 import { MODULE_CATALOG, type ModuleId, type Permission } from "@ocw/contracts";
 import { Bot, type LucideIcon, Sparkles, SquareTerminal } from "lucide-react";
 import Link from "next/link";
-import type { ReactNode } from "react";
+import { type ReactNode, useRef } from "react";
 import { EmptyState } from "@/components/common/empty-state";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -77,10 +77,27 @@ export function ModuleSkeleton() {
   );
 }
 
-/** Renders `children` when the module is on, the off state when it is off, a skeleton while the decision loads. */
-export function ModuleGate({ module, children }: { module: ModuleId; children: ReactNode }) {
+/**
+ * Renders `children` when the module is on, the off state when it is off, a skeleton while the decision loads.
+ * `keepOpen`: a key (the current path) for a page that explains a lost access itself; when the module goes off while
+ * that page is open it stays mounted until the member leaves it (every other page swaps to the off state live).
+ */
+export function ModuleGate({
+  module,
+  keepOpen = null,
+  children,
+}: {
+  module: ModuleId;
+  keepOpen?: string | null;
+  children: ReactNode;
+}) {
   const status = useModule(module);
+  // The page last shown while the module was on (idempotent across re-renders).
+  const openOn = useRef<string | null>(null);
+  if (status === "on") openOn.current = keepOpen;
   if (status === "loading") return <ModuleSkeleton />;
-  if (status === "off") return <ModuleOff module={module} />;
+  if (status === "off" && !(keepOpen !== null && openOn.current === keepOpen)) {
+    return <ModuleOff module={module} />;
+  }
   return <>{children}</>;
 }
