@@ -7,6 +7,7 @@ import { useMemo, useRef, useState } from "react";
 import { AiChatMenu, AiChatStandardItems, AiChatTitleInput } from "@/components/ai-chat/ai-chat-header";
 import { PersonalBotButton } from "@/components/bots/personal-bot-button";
 import { EmptyState } from "@/components/common/empty-state";
+import { useModule } from "@/components/shell/module-gate";
 import { PageHeader } from "@/components/shell/page-header";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -17,6 +18,7 @@ import { groupAiChats } from "@/lib/ai-chat-groups";
 import { useAiChats, useSharedAiChats } from "@/lib/ai-chat-queries";
 import { errorMessage } from "@/lib/api";
 import { type BotDm, isBotDm, useDms } from "@/lib/chat-queries";
+import { withoutBotDms } from "@/lib/modules";
 import { cn, formatDate } from "@/lib/utils";
 import { ConversationBadge } from "../conversation-badge";
 import { PrincipalAvatar } from "../principal-avatar";
@@ -34,7 +36,9 @@ export function AiChatsView() {
   const dms = useDms();
   const chats = useAiChats(archived);
   const now = useMinuteClock();
-  const bots = (dms.data?.dms ?? []).filter(isBotDm);
+  // Bots turned off for the member (07.3, D-05 (3)): no bot DMs and no way to the Bots page from here.
+  const showBots = useModule("bots") !== "off";
+  const bots = withoutBotDms(dms.data?.dms ?? [], showBots).filter(isBotDm);
   const list = useMemo(() => (chats.data?.pages ?? []).flatMap((p) => p.chats), [chats.data]);
   const groups = useMemo(() => groupAiChats(list, now), [list, now]);
   const sharedQuery = useSharedAiChats();
@@ -53,7 +57,11 @@ export function AiChatsView() {
       <PageHeader
         title="AI Chats"
         icon={<Sparkles />}
-        description="Your private conversations with AI models and bots"
+        description={
+          showBots
+            ? "Your private conversations with AI models and bots"
+            : "Your private conversations with AI models"
+        }
         actions={
           <>
             {bots.length > 0 ? (
@@ -73,7 +81,11 @@ export function AiChatsView() {
           <EmptyState
             icon={Sparkles}
             title="No AI chats yet"
-            description="Start a private chat with an AI model, message a bot from the Bots page, or create your own personal bot."
+            description={
+              showBots
+                ? "Start a private chat with an AI model, message a bot from the Bots page, or create your own personal bot."
+                : "Start a private chat with an AI model."
+            }
             className="min-h-full"
           >
             <Link href="/chat/ai/new" className={buttonVariants()}>
@@ -81,9 +93,11 @@ export function AiChatsView() {
               New chat
             </Link>
             <PersonalBotButton variant="row" className="w-auto" />
-            <Button variant="outline" render={<Link href="/bots" />}>
-              Browse bots
-            </Button>
+            {showBots ? (
+              <Button variant="outline" render={<Link href="/bots" />}>
+                Browse bots
+              </Button>
+            ) : null}
           </EmptyState>
         ) : (
           <div className="mx-auto grid w-full max-w-3xl grid-cols-1 gap-1 p-2 pb-8 sm:p-4 sm:pb-10">
