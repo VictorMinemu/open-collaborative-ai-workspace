@@ -1,6 +1,6 @@
 import { MODULE_CATALOG, ModuleId, type Permission } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
-import { grainStatus, moduleStatus, withoutBotDms } from "./modules";
+import { grainStatus, moduleStatus, permissionsFailed, withoutBotDms } from "./modules";
 
 const perms = (...permissions: Permission[]) => ({ permissions });
 const everyEntry = perms(...ModuleId.options.map((m) => MODULE_CATALOG[m].entry));
@@ -31,6 +31,20 @@ describe("moduleStatus (P-08: only an `off` decision hides anything)", () => {
   it("keeps the last decision when a refetch fails after it", () => {
     expect(moduleStatus(perms("bot.read"), true, "ai_chats")).toBe("off");
     expect(moduleStatus(everyEntry, true, "ai_chats")).toBe("on");
+  });
+});
+
+describe("permissionsFailed", () => {
+  it("stays failed while a refetch after an error is pending (the query drops back to pending without data)", () => {
+    expect(permissionsFailed({ isError: true, errorUpdateCount: 1 })).toBe(true);
+    expect(permissionsFailed({ isError: false, errorUpdateCount: 1 })).toBe(true);
+    expect(
+      moduleStatus(undefined, permissionsFailed({ isError: false, errorUpdateCount: 2 }), "ai_chats"),
+    ).toBe("on");
+  });
+
+  it("is not failed before the first error (the first fetch and its retry are still loading)", () => {
+    expect(permissionsFailed({ isError: false, errorUpdateCount: 0 })).toBe(false);
   });
 });
 

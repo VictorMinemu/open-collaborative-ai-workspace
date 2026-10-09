@@ -13,6 +13,16 @@ export type ModuleStatus = "loading" | "on" | "off";
 
 type Decision = { permissions: readonly Permission[] } | undefined;
 
+/**
+ * Whether `/me/permissions` has failed at least once without an answer to fall back on. Sticky on purpose: TanStack
+ * Query puts a query with no data back to `pending` (error cleared) on every refetch, and every newly mounted observer
+ * refetches an errored query, so `isError` alone flips error → pending → error and a gate would loop between the
+ * skeleton and the page. `errorUpdateCount` survives refetches.
+ */
+export function permissionsFailed(q: { isError: boolean; errorUpdateCount: number }): boolean {
+  return q.isError || q.errorUpdateCount > 0;
+}
+
 /** The status of one grain. The last decision wins over a failed refetch after it. */
 export function grainStatus(perms: Decision, failed: boolean, permission: Permission): ModuleStatus {
   if (perms) return perms.permissions.includes(permission) ? "on" : "off";

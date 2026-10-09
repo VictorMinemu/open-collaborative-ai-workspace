@@ -7,7 +7,7 @@ import type { ReactNode } from "react";
 import { EmptyState } from "@/components/common/empty-state";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { grainStatus, type ModuleStatus, moduleStatus } from "@/lib/modules";
+import { grainStatus, type ModuleStatus, moduleStatus, permissionsFailed } from "@/lib/modules";
 import { usePermissions } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 
@@ -17,14 +17,14 @@ import { cn } from "@/lib/utils";
  * live: `usePermissions` refetches on `permission_rules.updated`, `units.updated` and the member's own update.
  */
 export function useModule(id: ModuleId): ModuleStatus {
-  const { data, isError } = usePermissions();
-  return moduleStatus(data, isError, id);
+  const q = usePermissions();
+  return moduleStatus(q.data, permissionsFailed(q), id);
 }
 
 /** The same three-way status for one grain (e.g. `device.pair`). */
 export function useGrain(permission: Permission): ModuleStatus {
-  const { data, isError } = usePermissions();
-  return grainStatus(data, isError, permission);
+  const q = usePermissions();
+  return grainStatus(q.data, permissionsFailed(q), permission);
 }
 
 /** Icon (the module's rail icon), verb agreeing with the catalog label, and the module's reassurance. */
