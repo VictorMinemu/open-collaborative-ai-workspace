@@ -341,6 +341,9 @@ test("a Phase 6 day: private → shared with Alex → the Backend team reads →
       agentId: backendId,
       conversationId: chatId,
       threadRootId: null,
+      // The card answers Alex's delivered turn (every agent post needs one).
+      inReplyToMessageId: asked.message.id,
+      eventId: asked.eventId,
       idempotencyKey: `day-card-${randomUUID()}`,
       card: approvalCard,
     });

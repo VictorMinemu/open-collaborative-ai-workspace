@@ -132,6 +132,24 @@ const cellEvents = async () =>
     ])
   ).rows as Array<{ seq: number; type: string; payload: Record<string, unknown> }>;
 
+/** A real delivered turn: `c` mentions `bot` in `conversationId`; returns the cell event. */
+async function mentionTurn(c: TestClient, conversationId: string, body: string, bot = agentId) {
+  const res = await call(c, "POST", `/api/v1/conversations/${conversationId}/messages`, {
+    body,
+    mentions: [{ kind: "agent", id: bot }],
+  });
+  expect(res.status).toBe(200);
+  const id = (res.body as { id: string }).id;
+  const ev = (await cellEvents()).find(
+    (e) =>
+      e.type === "agent.mention.v1" &&
+      (e.payload as unknown as MentionPayload).message.id === id &&
+      (e.payload as unknown as MentionPayload).agent.id === bot,
+  );
+  expect(ev, `no delivery for ${id}`).toBeDefined();
+  return ev!.payload as unknown as MentionPayload;
+}
+
 beforeAll(async () => {
   stack = await startTestStack({
     env: { OCW_CELL_TOKEN: CELL_TOKEN, OCW_MODEL_PROVIDER: "mock", LOG_LEVEL: "trace" },
@@ -693,10 +711,14 @@ describe("mention → delivery → reply", () => {
     });
     expect((await cellEvents()).length).toBe(afterDisable);
     const p = plugins.at(-1)!;
+    // The turn delivered before the bot was disabled is still a trigger; the bot itself is refused.
+    const turn = p.replies[0]!.mention;
     const res = await p.request("POST", "/messages", {
       agentId,
       conversationId: channelId,
       threadRootMessageId: rootId,
+      inReplyToMessageId: turn.message.id,
+      eventId: turn.eventId,
       text: "still here?",
       idempotencyKey: "after-disable",
     });
@@ -718,10 +740,28 @@ describe("mention → delivery → reply", () => {
     const other = ((await call(admin, "POST", "/api/v1/channels", { name: "random" })).body as { id: string })
       .id;
     const base = { agentId, text: "hi", idempotencyKey: randomUUID() };
-    const outside = await p.request("POST", "/messages", {
+    // No turn there: nothing to answer.
+    const unprompted = await p.request("POST", "/messages", {
       ...base,
       conversationId: other,
       threadRootMessageId: null,
+    });
+    expect(unprompted.status).toBe(403);
+    expect(errorOf(unprompted as { body: Record<string, unknown> | null }).code).toBe("no_trigger");
+    // A turn delivered while the bot was a member, answered after it was removed: the bot is refused.
+    expect(
+      (await call(admin, "POST", `/api/v1/channels/${other}/members`, { kind: "agent", id: agentId })).status,
+    ).toBe(200);
+    const turn = await mentionTurn(admin, other, "@archie quick one");
+    expect((await call(admin, "DELETE", `/api/v1/channels/${other}/members/agent/${agentId}`)).status).toBe(
+      200,
+    );
+    const outside = await p.request("POST", "/messages", {
+      ...base,
+      conversationId: other,
+      threadRootMessageId: turn.thread.rootMessageId,
+      inReplyToMessageId: turn.message.id,
+      eventId: turn.eventId,
     });
     expect(outside.status).toBe(403);
     expect(errorOf(outside as { body: Record<string, unknown> | null })).toMatchObject({
@@ -796,6 +836,11 @@ describe("the cell and its bots are principals", () => {
       ...extra,
     });
 
+  beforeAll(async () => {
+    // No live auto-replies from here on: each test posts the bot's answers itself.
+    for (const p of plugins) await p.stop();
+  });
+
   it("cell administration is cell.manage: a developer gets 403 on the runtime routes", async () => {
     for (const [method, path] of [
       ["GET", "/api/v1/agent-cell"],
@@ -809,9 +854,16 @@ describe("the cell and its bots are principals", () => {
 
   it("a deny rule on one bot refuses its replies on the agent layer", async () => {
     const p = plugin();
+    const turn = await mentionTurn(admin, channelId, "@archie can you answer?");
+    const asTurn = {
+      conversationId: channelId,
+      threadRootMessageId: turn.thread.rootMessageId,
+      inReplyToMessageId: turn.message.id,
+      eventId: turn.eventId,
+    };
     const drop = await denyRule("agent", agentId, "channel.post");
     try {
-      const res = await reply(p, { conversationId: channelId });
+      const res = await reply(p, asTurn);
       expect(res.status).toBe(403);
       expect(errOf(res)).toMatchObject({
         code: "forbidden",
@@ -828,7 +880,7 @@ describe("the cell and its bots are principals", () => {
     } finally {
       await drop();
     }
-    expect((await reply(p, { conversationId: channelId })).status).toBe(200);
+    expect((await reply(p, asTurn)).status).toBe(200);
   });
 
   it("a reply to a human who lost access to the private channel is refused and stores nothing", async () => {
@@ -841,17 +893,16 @@ describe("the cell and its bots are principals", () => {
     ]) {
       expect((await call(admin, "POST", `/api/v1/channels/${room.id}/members`, member)).status).toBe(200);
     }
-    const asked = (
-      await call(alex, "POST", `/api/v1/conversations/${room.id}/messages`, { body: "Is the roadmap final?" })
-    ).body as { id: string };
+    const asked = await mentionTurn(alex, room.id, "@archie Is the roadmap final?");
     expect((await call(admin, "DELETE", `/api/v1/channels/${room.id}/members/user/${alexId}`)).status).toBe(
       200,
     );
 
     const refused = await reply(p, {
       conversationId: room.id,
-      threadRootMessageId: asked.id,
-      inReplyToMessageId: asked.id,
+      threadRootMessageId: asked.thread.rootMessageId,
+      inReplyToMessageId: asked.message.id,
+      eventId: asked.eventId,
     });
     expect(refused.status).toBe(403);
     expect(errOf(refused)).toMatchObject({ details: { layer: "resource", reason: "private_channel" } });
@@ -862,16 +913,15 @@ describe("the cell and its bots are principals", () => {
     expect(stored.rows[0].n).toBe(0);
 
     // The same bot still answers someone who can read the channel, in the thread.
-    const question = (
-      await call(admin, "POST", `/api/v1/conversations/${room.id}/messages`, { body: "And now?" })
-    ).body as { id: string };
+    const question = await mentionTurn(admin, room.id, "@archie And now?");
     const ok = await reply(p, {
       conversationId: room.id,
-      threadRootMessageId: question.id,
-      inReplyToMessageId: question.id,
+      threadRootMessageId: question.thread.rootMessageId,
+      inReplyToMessageId: question.message.id,
+      eventId: question.eventId,
     });
     expect(ok.status).toBe(200);
-    expect(ok.body).toMatchObject({ created: true, threadRootMessageId: question.id });
+    expect(ok.body).toMatchObject({ created: true, threadRootMessageId: question.message.id });
   });
 
   it("typing is decided for the bot: a non-member is refused, a member is accepted", async () => {
@@ -889,6 +939,146 @@ describe("the cell and its bots are principals", () => {
     expect(
       (await p.request("POST", "/typing", { agentId: randomUUID(), conversationId: channelId })).status,
     ).toBe(404);
+  });
+});
+
+describe("every agent post answers a live turn of that agent in that conversation (no_trigger)", () => {
+  const refusedAudits = async () =>
+    (
+      await su.query(
+        "select actor_kind, actor_id, agent_id, result, resource_id, metadata from app.audit_events where action = 'agent.message.refused' order by occurred_at",
+      )
+    ).rows as Array<Record<string, unknown>>;
+  const agentRows = async (conversationId: string) =>
+    (
+      await su.query(
+        "select count(*)::int as n from app.messages where conversation_id = $1 and author_kind = 'agent'",
+        [conversationId],
+      )
+    ).rows[0].n as number;
+
+  let side: string;
+  let sideTurn: MentionPayload;
+
+  beforeAll(async () => {
+    side = ((await call(admin, "POST", "/api/v1/channels", { name: "side-room" })).body as { id: string }).id;
+    expect(
+      (await call(admin, "POST", `/api/v1/channels/${side}/members`, { kind: "agent", id: agentId })).status,
+    ).toBe(200);
+    sideTurn = await mentionTurn(admin, side, "@archie ping");
+  });
+
+  it("a post with no turn behind it is 403 no_trigger, stores nothing and is audited", async () => {
+    const p = plugin();
+    const before = await agentRows(channelId);
+    const res = await p.request("POST", "/messages", {
+      agentId,
+      conversationId: channelId,
+      threadRootMessageId: null,
+      text: "an unprompted announcement",
+      idempotencyKey: randomUUID(),
+    });
+    expect(res.status).toBe(403);
+    expect(errorOf(res as { body: Record<string, unknown> | null })).toMatchObject({ code: "no_trigger" });
+    expect(await agentRows(channelId)).toBe(before);
+    expect((await refusedAudits()).at(-1)).toMatchObject({
+      actor_kind: "agent",
+      actor_id: agentId,
+      agent_id: agentId,
+      result: "denied",
+      resource_id: channelId,
+      metadata: { reason: "no_trigger", route: "messages", conversationId: channelId },
+    });
+  });
+
+  it("a message never delivered to the bot, another conversation's turn, a forged or mismatched event is no trigger", async () => {
+    const p = plugin();
+    const plain = (
+      await call(alex, "POST", `/api/v1/conversations/${channelId}/messages`, { body: "just chatting" })
+    ).body as { id: string };
+    const cases: Array<Record<string, unknown>> = [
+      { conversationId: channelId, inReplyToMessageId: plain.id },
+      { conversationId: channelId, eventId: sideTurn.eventId },
+      { conversationId: channelId, inReplyToMessageId: sideTurn.message.id },
+      { conversationId: side, eventId: randomUUID() },
+      { conversationId: side, eventId: sideTurn.eventId, inReplyToMessageId: plain.id },
+    ];
+    const before = await agentRows(channelId);
+    for (const extra of cases) {
+      const res = await p.request("POST", "/messages", {
+        agentId,
+        threadRootMessageId: null,
+        text: "hi",
+        idempotencyKey: randomUUID(),
+        ...extra,
+      });
+      expect(res.status, JSON.stringify(extra)).toBe(403);
+      expect(errorOf(res as { body: Record<string, unknown> | null }).code, JSON.stringify(extra)).toBe(
+        "no_trigger",
+      );
+    }
+    expect(await agentRows(channelId)).toBe(before);
+  });
+
+  it("another bot of the cell cannot answer through this bot's turn", async () => {
+    const bert = (
+      await call(admin, "POST", "/api/v1/agents", {
+        name: "Bert",
+        instructions: "Be brief.",
+        modelProvider: "mock",
+        modelId: "mock-1",
+      })
+    ).body as { id: string };
+    expect(
+      (await call(admin, "POST", `/api/v1/channels/${side}/members`, { kind: "agent", id: bert.id })).status,
+    ).toBe(200);
+    const p = plugin();
+    const res = await p.request("POST", "/messages", {
+      agentId: bert.id,
+      conversationId: side,
+      threadRootMessageId: sideTurn.thread.rootMessageId,
+      inReplyToMessageId: sideTurn.message.id,
+      eventId: sideTurn.eventId,
+      text: "I answer for Archie",
+      idempotencyKey: randomUUID(),
+    });
+    expect(res.status).toBe(403);
+    expect(errorOf(res as { body: Record<string, unknown> | null }).code).toBe("no_trigger");
+  });
+
+  it("the delivered turn is a trigger, by event id or (older cells) by the delivered message alone", async () => {
+    const p = plugin();
+    const byEvent = await p.request<{ created: boolean; threadRootMessageId: string | null }>(
+      "POST",
+      "/messages",
+      {
+        agentId,
+        conversationId: side,
+        threadRootMessageId: sideTurn.thread.rootMessageId,
+        inReplyToMessageId: sideTurn.message.id,
+        eventId: sideTurn.eventId,
+        text: "pong",
+        idempotencyKey: `manual:${sideTurn.eventId}`,
+      },
+    );
+    expect(byEvent.status).toBe(200);
+    expect(byEvent.body).toMatchObject({ created: true, threadRootMessageId: sideTurn.thread.rootMessageId });
+    const byMessage = await p.request("POST", "/messages", {
+      agentId,
+      conversationId: side,
+      threadRootMessageId: sideTurn.thread.rootMessageId,
+      inReplyToMessageId: sideTurn.message.id,
+      text: "pong again",
+      idempotencyKey: `manual:${sideTurn.eventId}:1`,
+    });
+    expect(byMessage.status).toBe(200);
+    // Every audit row names the turn's human (the auto-replying cell of an earlier test answered too).
+    const posted = await su.query(
+      "select user_id from app.audit_events where action = 'agent.message.posted' and metadata->>'conversationId' = $1",
+      [side],
+    );
+    expect(posted.rows.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(posted.rows.map((r) => r.user_id))).toEqual(new Set([adminId]));
   });
 });
 

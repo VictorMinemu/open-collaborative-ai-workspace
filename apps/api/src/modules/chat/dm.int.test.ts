@@ -188,14 +188,33 @@ describe("a personal bot's DM is readable by its owner only", () => {
     expect(members.rows[0].n).toBe(2);
   });
 
-  it("a bot-authored DM message produces no delivery", async () => {
+  it("a bot-authored DM message produces no delivery; a bot post needs a delivered turn", async () => {
     const plugin = new FakeCellPlugin({ apiUrl: stack.baseUrl, token: CELL_TOKEN });
     const before = await cellMentionCount();
-    const res = await plugin.request("POST", "/messages", {
+    const base = {
       agentId: botId,
       conversationId: dmId,
       threadRootMessageId: null,
       text: "a proactive note",
+    };
+    // Nothing asked: an unprompted post is refused (403 no_trigger).
+    const unprompted = await plugin.request<Record<string, unknown>>("POST", "/messages", {
+      ...base,
+      idempotencyKey: `bot-${randomUUID()}`,
+    });
+    expect(unprompted.status).toBe(403);
+    expect(codeOf(unprompted)).toBe("no_trigger");
+    // An answer to the latest delivered turn in this DM is posted, and itself delivers nothing.
+    const [turn] = (
+      await su.query(
+        "select payload from app.stream_events where stream_id = $1 and type = 'agent.mention.v1' and payload->'conversation'->>'id' = $2 order by seq desc limit 1",
+        [`cell:${orgId}`, dmId],
+      )
+    ).rows as Array<{ payload: { eventId: string; message: { id: string } } }>;
+    const res = await plugin.request("POST", "/messages", {
+      ...base,
+      inReplyToMessageId: turn!.payload.message.id,
+      eventId: turn!.payload.eventId,
       idempotencyKey: `bot-${randomUUID()}`,
     });
     expect(res.status).toBe(200);

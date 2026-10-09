@@ -37,7 +37,8 @@ steps:
   - name: unit-tests
     image: ocw-ci:local
     pull: false
-    volumes: [*shared]
+    # The Caddy profile test adapts the Caddyfile with the pinned caddy image (`docker run`).
+    volumes: [*docker_sock, *shared]
     environment: *env
     commands:
       - cd "$${W}" && node --test 'infra/**/*.test.mjs'

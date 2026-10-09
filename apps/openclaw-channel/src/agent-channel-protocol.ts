@@ -349,6 +349,8 @@ export type AgentChannelPostMessage = {
   conversationId: string;
   threadRootMessageId: string | null;
   inReplyToMessageId?: string;
+  /** The delivered turn this post answers (the event's `eventId`); the API refuses a post without one (403 `no_trigger`). */
+  eventId?: string;
   /** Markdown, 1..20000 chars. */
   text: string;
   /** 1..200 chars; the server dedupes on (agentId, idempotencyKey). */
@@ -524,6 +526,8 @@ export type AgentChannelPostCard = {
   conversationId: string;
   threadRootId: string | null;
   inReplyToMessageId?: string;
+  /** The delivered turn posting the card (same trigger rule as `AgentChannelPostMessage.eventId`). */
+  eventId?: string;
   /** 8..128 chars; the server dedupes on (agentId, `card:<key>`). */
   idempotencyKey: string;
   card: AgentCardInput;
