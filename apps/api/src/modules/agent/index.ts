@@ -32,7 +32,14 @@ import type { FastifyRequest } from "fastify";
 import { type ApiModule, authOf, type Core, tenant } from "../../core";
 import { badRequest, conflict, forbidden, notFound } from "../../lib/errors";
 import { ensureDm, setAgentDmsArchived } from "../chat";
-import { agentResource, createPermissionService, orgResource, unitResource } from "../organization";
+import {
+  AuthzDeniedError,
+  agentResource,
+  createPermissionService,
+  orgResource,
+  type ResourceFacts,
+  unitResource,
+} from "../organization";
 import { createPersonalBot, personalModels } from "./personal";
 import { keyHint, nextFreeUsername, slugifyUsername } from "./providers";
 import {
@@ -128,9 +135,30 @@ function isUniqueViolation(err: unknown): boolean {
  * core.secrets, never returned) and the allowed-model list. Provisioning in the OpenClaw cell is driven by
  * `cell.config.changed` events on `cell:<orgId>`; the cell acks through the Agent Channel API.
  */
+const BOT_NOT_FOUND = "Bot not found";
+
 export function createAgentModule(core: Core): ApiModule {
   const perms = createPermissionService(core);
   const requireUser = core.identity.requireUser;
+  /**
+   * A bot the caller may not see reads exactly like a missing one (same status, code and message), or the message
+   * itself would tell that the bot exists (07.3-01 open item 5).
+   */
+  async function assertHidden(
+    req: FastifyRequest,
+    tx: Tx,
+    permission: Permission,
+    resource: ResourceFacts,
+  ): Promise<void> {
+    try {
+      await perms.assertCan(req, tx, permission, resource, { hideAs404: true });
+    } catch (err) {
+      if (err instanceof AuthzDeniedError && err.hidden) {
+        throw new AuthzDeniedError(err.denial, { hideAs404: true, message: BOT_NOT_FOUND });
+      }
+      throw err;
+    }
+  }
   // Every route is a signed-in user's, decided by the resolver on an organization-scope permission.
   const user = { authz: "user" as const };
   const allow = {
@@ -365,11 +393,9 @@ export function createAgentModule(core: Core): ApiModule {
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
             const row = await findAgent(tx, req.params.id);
-            if (!row) throw notFound("Bot not found");
+            if (!row) throw notFound(BOT_NOT_FOUND);
             const unit = await loadAgentUnit(tx, row.unitId);
-            await perms.assertCan(req, tx, "bot.read", botResource(row, authOf(req).userId, unit?.path), {
-              hideAs404: true,
-            });
+            await assertHidden(req, tx, "bot.read", botResource(row, authOf(req).userId, unit?.path));
             return withViewerCan(req, tx, toAgentDto(row, unit), unit?.path ?? []);
           }),
       );
@@ -387,11 +413,9 @@ export function createAgentModule(core: Core): ApiModule {
           core.db.withTenant(tenant(req), async (tx) => {
             const auth = authOf(req);
             const row = await findAgent(tx, req.params.id);
-            if (!row) throw notFound("Bot not found");
+            if (!row) throw notFound(BOT_NOT_FOUND);
             const unit = await loadAgentUnit(tx, row.unitId);
-            await perms.assertCan(req, tx, "bot.read", botResource(row, auth.userId, unit?.path), {
-              hideAs404: true,
-            });
+            await assertHidden(req, tx, "bot.read", botResource(row, auth.userId, unit?.path));
             if (row.status === "disabled") throw conflict("This bot is disabled", "bot_disabled");
             const { conv, created } = await ensureDm(
               tx,
@@ -541,7 +565,7 @@ export function createAgentModule(core: Core): ApiModule {
               const auth = authOf(req);
               const body = req.body;
               const row = await findAgent(tx, req.params.id);
-              if (!row) throw notFound("Bot not found");
+              if (!row) throw notFound(BOT_NOT_FOUND);
               const unit = await loadAgentUnit(tx, row.unitId);
               const resource = botResource(row, auth.userId, unit?.path);
               const personal = row.scope === "personal";
@@ -553,9 +577,9 @@ export function createAgentModule(core: Core): ApiModule {
               let target: AgentUnit | null = unit;
               if (personal) {
                 if (owner) {
-                  await perms.assertCan(req, tx, "bot.configure", resource, { hideAs404: true });
+                  await assertHidden(req, tx, "bot.configure", resource);
                 } else {
-                  await perms.assertCan(req, tx, "bot.manage", resource, { hideAs404: true });
+                  await assertHidden(req, tx, "bot.manage", resource);
                   // Governance never touches what is inside: instructions, model, identity (403 personal_bot).
                   if (fields.length) await perms.assertCan(req, tx, "bot.configure", resource);
                 }
@@ -567,7 +591,7 @@ export function createAgentModule(core: Core): ApiModule {
                 }
               } else {
                 // A unit persona outside the caller's reach does not exist for them (`unit_agent`).
-                if (unit) await perms.assertCan(req, tx, "bot.read", resource, { hideAs404: true });
+                if (unit) await assertHidden(req, tx, "bot.read", resource);
                 if (fields.length || (body.enabled === undefined && !moving)) {
                   await perms.assertCan(req, tx, "bot.configure", resource);
                 }
@@ -675,7 +699,7 @@ export function createAgentModule(core: Core): ApiModule {
                 .set({ ...next, status, statusMessage, updatedAt: new Date().toISOString() })
                 .where(eq(agents.id, row.id))
                 .returning();
-              if (!updated) throw notFound("Bot not found");
+              if (!updated) throw notFound(BOT_NOT_FOUND);
               const dto = toAgentDto(updated, target);
               // D-04: a disabled bot's chats are archived; re-enabling restores them (same transaction).
               if (reason === "agent.disabled" || reason === "agent.enabled") {
@@ -732,18 +756,18 @@ export function createAgentModule(core: Core): ApiModule {
           core.db.withTenant(tenant(req), async (tx) => {
             const auth = authOf(req);
             const row = await findAgent(tx, req.params.id);
-            if (!row) throw notFound("Bot not found");
+            if (!row) throw notFound(BOT_NOT_FOUND);
             const unit = await loadAgentUnit(tx, row.unitId);
             const resource = botResource(row, auth.userId, unit?.path);
             const personal = row.scope === "personal";
             const owner = personal && row.ownerUserId === auth.userId;
             if (!personal && unit) {
               // A unit persona: its governance (admins, leads of a unit on its path); unknown to outsiders.
-              await perms.assertCan(req, tx, "bot.read", resource, { hideAs404: true });
+              await assertHidden(req, tx, "bot.read", resource);
               await perms.assertCan(req, tx, "bot.manage_unit", resource);
             } else if (!personal) await perms.assertCan(req, tx, "bot.manage", resource);
-            else if (owner) await perms.assertCan(req, tx, "bot.configure", resource, { hideAs404: true });
-            else await perms.assertCan(req, tx, "bot.manage", resource, { hideAs404: true });
+            else if (owner) await assertHidden(req, tx, "bot.configure", resource);
+            else await assertHidden(req, tx, "bot.manage", resource);
 
             const now = new Date().toISOString();
             await tx

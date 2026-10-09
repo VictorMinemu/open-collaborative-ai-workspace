@@ -53,6 +53,27 @@ export interface ConversationAccess {
     opts?: { includeArchived?: boolean; kinds?: readonly ReadableKind[] },
   ): Promise<string[]>;
   /**
+   * The caller's own AI chat by the chat's own access alone (`channel.read` as its owner), WITHOUT the AI chats module
+   * gate (`ai_chat.read`, ADR-0024). Withdrawal only (revoking her own share links), so a member can always stop
+   * sharing; never use it to return chat content. 404 (hidden = missing) otherwise.
+   */
+  ownedAiChat(
+    req: FastifyRequest,
+    tx: Tx,
+    conversationId: string,
+    notFoundMessage?: string,
+  ): Promise<{ conv: ConversationRow; facts: ChannelFacts }>;
+  /**
+   * Whether `userId` still holds the conversation's own access (`channel.read`: owner, grant or membership), without
+   * module gates. Participation bookkeeping only (an AI chat's roster follows its grants, ADR-0024); never a read.
+   */
+  holdsOwnAccess(
+    tx: Tx,
+    userId: string,
+    conversationId: string,
+    opts?: { kinds?: readonly ReadableKind[] },
+  ): Promise<boolean>;
+  /**
    * Boolean form for event-time decisions (notifications, WS). The plan named it "can-read"; that identifier
    * belongs to a deleted pre-resolver helper and the static guard (guard.test.ts) refuses it.
    */
@@ -64,8 +85,24 @@ export interface ConversationAccess {
   ): Promise<boolean>;
 }
 
+/** Hidden must read exactly like missing (same status, code and message). */
+function asMissing(err: unknown, notFoundMessage: string): unknown {
+  return err instanceof AuthzDeniedError && err.hidden
+    ? new AuthzDeniedError(err.denial, { hideAs404: true, message: notFoundMessage })
+    : err;
+}
+
 export function createConversationAccess(core: Core): ConversationAccess {
   const perms = createPermissionService(core);
+
+  /** The conversation and `userId`'s decision on its own access (`channel.read`), module gates aside. */
+  async function ownAccess(tx: Tx, userId: string, conversationId: string, kinds: readonly ReadableKind[]) {
+    const conv = await getConversation(tx, conversationId, kinds);
+    if (!conv) return null;
+    const facts = await channelFacts(tx, conv, { kind: "user", id: userId });
+    const d = await perms.decide(tx, { kind: "user", userId }, "channel.read", channelResource(facts));
+    return { conv, allowed: d.allowed };
+  }
 
   const access: ConversationAccess = {
     async readableRow(req, tx, conv, notFoundMessage = "Conversation not found") {
@@ -80,13 +117,25 @@ export function createConversationAccess(core: Core): ConversationAccess {
           await perms.assertCan(req, tx, "ai_chat.read", orgResource(), { hideAs404: true });
         }
       } catch (err) {
-        // Hidden must read exactly like missing (same status, code and message), or the message itself would
-        // tell a permalink holder that the conversation exists.
-        if (err instanceof AuthzDeniedError && err.hidden) {
-          throw new AuthzDeniedError(err.denial, { hideAs404: true, message: notFoundMessage });
-        }
-        throw err;
+        // Hidden must read exactly like missing, or the message itself would tell a permalink holder that the
+        // conversation exists.
+        throw asMissing(err, notFoundMessage);
       }
+      return { conv, facts };
+    },
+
+    async ownedAiChat(req, tx, conversationId, notFoundMessage = "Conversation not found") {
+      const conv = await getConversation(tx, conversationId, ["ai_chat"]);
+      const userId = req.auth?.userId;
+      if (!conv || !userId) throw notFound(notFoundMessage);
+      const facts = await channelFacts(tx, conv, { kind: "user", id: userId });
+      try {
+        await perms.assertCan(req, tx, "channel.read", channelResource(facts), { hideAs404: true });
+      } catch (err) {
+        throw asMissing(err, notFoundMessage);
+      }
+      // A grantee reads the chat too; only its owner withdraws what was shared from it.
+      if (facts.aiAccess !== "owner") throw notFound(notFoundMessage);
       return { conv, facts };
     },
 
@@ -152,13 +201,14 @@ export function createConversationAccess(core: Core): ConversationAccess {
       return allowed.map((r) => r.id);
     },
 
+    async holdsOwnAccess(tx, userId, conversationId, opts = {}) {
+      return (await ownAccess(tx, userId, conversationId, opts.kinds ?? ALL_KINDS))?.allowed ?? false;
+    },
+
     async isReadable(tx, userId, conversationId, opts = {}) {
-      const conv = await getConversation(tx, conversationId, opts.kinds ?? ALL_KINDS);
-      if (!conv) return false;
-      const facts = await channelFacts(tx, conv, { kind: "user", id: userId });
-      const d = await perms.decide(tx, { kind: "user", userId }, "channel.read", channelResource(facts));
-      if (!d.allowed) return false;
-      if (conv.kind !== "ai_chat") return true;
+      const own = await ownAccess(tx, userId, conversationId, opts.kinds ?? ALL_KINDS);
+      if (!own?.allowed) return false;
+      if (own.conv.kind !== "ai_chat") return true;
       return (await perms.decide(tx, { kind: "user", userId }, "ai_chat.read", orgResource())).allowed;
     },
   };

@@ -269,7 +269,7 @@ export function registerGrantRoutes(app: App, ctx: { core: Core; gateway: ModelG
     return row;
   }
 
-  /** P-09 after a revoke or a level change: participants who can no longer read the chat lose their row. */
+  /** P-09 after a revoke or a level change: participants who no longer hold access to the chat lose their row. */
   async function redecideParticipants(tx: Tx, conv: ConversationRow, chat: AiChatRow): Promise<void> {
     const rows = await tx
       .select({ id: conversationMembers.memberId })
@@ -282,7 +282,9 @@ export function registerGrantRoutes(app: App, ctx: { core: Core; gateway: ModelG
         ),
       );
     for (const r of rows) {
-      if (await access.isReadable(tx, r.id, conv.id, { kinds: ["ai_chat"] })) continue;
+      // The roster follows the grants, not the AI chats module (ADR-0024): a grantee whose module is off keeps her
+      // row while her grant stands, and reads the chat again when the module is back on.
+      if (await access.holdsOwnAccess(tx, r.id, conv.id, { kinds: ["ai_chat"] })) continue;
       await removeMember(tx, chatDeps, conv, { kind: "user", id: r.id });
     }
   }

@@ -30,6 +30,7 @@ let olga: TestClient;
 let danaId: string;
 let samId: string;
 let adaId: string;
+let olgaId: string;
 let engineeringId: string;
 let teamBotId: string;
 
@@ -159,6 +160,15 @@ const notificationEvents = async (userId: string, messageId: string) =>
     )
   ).rows as Json[];
 
+/** User participation rows of one conversation (the roster). */
+const participants = async (conversationId: string) =>
+  (
+    await su.query(
+      "select member_id from app.conversation_members where conversation_id = $1 and member_kind = 'user'",
+      [conversationId],
+    )
+  ).rows.map((r) => r.member_id as string);
+
 const aiChatInboxItems = async (as: TestClient) =>
   ((await ok(as.request("GET", "/api/v1/notifications?filter=all"))).items as Json[]).filter(
     (n) => n.conversation.kind === "ai_chat",
@@ -201,7 +211,7 @@ beforeAll(async () => {
     "developer",
   );
   riley = rileyClient;
-  const { client: olgaClient, userId: olgaId } = await invite(
+  const { client: olgaClient, userId: olgaUserId } = await invite(
     stack,
     victor,
     "olga@example.test",
@@ -209,6 +219,7 @@ beforeAll(async () => {
     "developer",
   );
   olga = olgaClient;
+  olgaId = olgaUserId;
   for (const c of [dana, sam]) await seedPlan(c);
 
   engineeringId = (
@@ -444,9 +455,14 @@ describe("Bots module off: the organization team bot disappears for the denied m
     const ids = await denyModule("bots", danaId);
     try {
       expect(await listedBots(dana)).not.toContain(teamBotId);
-      // Hidden as missing (404). The message differs from a missing bot's ("Not found" vs "Bot not found") on every
-      // hidden bot, personal bots and unit personas included: pre-existing, logged in 07.3 deferred-items.md.
-      expect((await fails(dana.request("GET", `/api/v1/agents/${teamBotId}`), 404)).code).toBe("not_found");
+      // Hidden reads exactly like missing: same status, code and message (no existence oracle, 07.3-01 open item 5).
+      const missingId = randomUUID();
+      expect(await fails(dana.request("GET", `/api/v1/agents/${teamBotId}`), 404)).toEqual(
+        await fails(dana.request("GET", `/api/v1/agents/${missingId}`), 404),
+      );
+      expect(await fails(dana.request("POST", `/api/v1/agents/${teamBotId}/dm`), 404)).toEqual(
+        await fails(dana.request("POST", `/api/v1/agents/${missingId}/dm`), 404),
+      );
       const held = await myPermissions(dana);
       for (const p of ["bot.read", "bot.create_personal", "bot.internet", "bot.tool.use"])
         expect(held).not.toContain(p);
@@ -469,5 +485,62 @@ describe("Bots module off: the organization team bot disappears for the denied m
     } finally {
       await deleteRules(ids);
     }
+  });
+});
+
+describe("withdrawal and roster while AI chats is off (07.3-01 open items 1 and 2)", () => {
+  let chat: string;
+  let samGrant: string;
+
+  it("Dana revokes her own share link while AI chats is off for her; nobody else can, and her chat stays hidden", async () => {
+    chat = await chatWithMessage(dana, "Vendor shortlist for the audit");
+    const share = await ok(dana.request("POST", `/api/v1/ai-chats/${chat}/shares`, {}), 201);
+    const samShareChat = await chatWithMessage(sam, "Sam's own notes to share");
+    const samShare = await ok(sam.request("POST", `/api/v1/ai-chats/${samShareChat}/shares`, {}), 201);
+    const ids = await denyModule("ai_chats", danaId);
+    try {
+      await fails(dana.request("GET", `/api/v1/ai-chats/${chat}`), 404);
+      // Someone else's link stays the same 404 as a random id.
+      const foreign = await fails(dana.request("DELETE", `/api/v1/ai-shares/${samShare.id as string}`), 404);
+      const missing = await fails(dana.request("DELETE", `/api/v1/ai-shares/${randomUUID()}`), 404);
+      expect(foreign).toEqual(missing);
+      // Not the creator: Sam and the admin get the same 404.
+      expect(await fails(sam.request("DELETE", `/api/v1/ai-shares/${share.id as string}`), 404)).toEqual(
+        missing,
+      );
+      expect(await fails(victor.request("DELETE", `/api/v1/ai-shares/${share.id as string}`), 404)).toEqual(
+        missing,
+      );
+      const revoked = await ok(dana.request("DELETE", `/api/v1/ai-shares/${share.id as string}`));
+      expect(revoked).toMatchObject({ id: share.id, chatId: chat });
+      expect(typeof revoked.revokedAt).toBe("string");
+      await fails(sam.request("GET", `/api/v1/ai-shares/${share.id as string}`), 404);
+      // Withdrawal is all she gets: her chat and its links list stay hidden.
+      await fails(dana.request("GET", `/api/v1/ai-chats/${chat}/shares`), 404);
+    } finally {
+      await deleteRules(ids);
+    }
+    await ok(sam.request("GET", `/api/v1/ai-shares/${samShare.id as string}`));
+  });
+
+  it("a grant change keeps the roster row of a person grantee whose AI chats is off; revoking her own grant removes it", async () => {
+    samGrant = (await grant(dana, chat, samId, "chat")).id as string;
+    const olgaGrant = (await grant(dana, chat, olgaId, "view")).id as string;
+    expect(await participants(chat)).toEqual(expect.arrayContaining([samId, olgaId]));
+    const ids = await denyModule("ai_chats", samId);
+    try {
+      // Another grantee's revoke and Sam's own level change both re-decide the roster.
+      await ok(dana.request("DELETE", `/api/v1/ai-chats/${chat}/grants/${olgaGrant}`), 204);
+      await ok(dana.request("PATCH", `/api/v1/ai-chats/${chat}/grants/${samGrant}`, { level: "view" }));
+      const now = await participants(chat);
+      expect(now).toContain(samId);
+      expect(now).not.toContain(olgaId);
+      await fails(sam.request("GET", `/api/v1/ai-chats/${chat}`), 404);
+    } finally {
+      await deleteRules(ids);
+    }
+    await ok(sam.request("GET", `/api/v1/ai-chats/${chat}`));
+    await ok(dana.request("DELETE", `/api/v1/ai-chats/${chat}/grants/${samGrant}`), 204);
+    expect(await participants(chat)).not.toContain(samId);
   });
 });
