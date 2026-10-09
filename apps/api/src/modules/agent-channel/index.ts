@@ -30,7 +30,7 @@ import { cellMcpServers } from "../mcp";
 import { channelResource, createPermissionService, type ResourceFacts } from "../organization";
 import { cellApprovedPlugins } from "../plugins";
 import { cellOf, createCellAuth } from "./auth";
-import { registerCardActionHandler, registerCardRoutes, resolveReplyTarget } from "./cards";
+import { noTrigger, registerCardActionHandler, registerCardRoutes, resolveReplyTarget } from "./cards";
 import { registerCellGateway } from "./gateway";
 import { registerMcpCellRoutes } from "./mcp";
 import { registerMemoryRoutes } from "./memories";
@@ -336,16 +336,23 @@ export function createAgentChannelModule(
               const ctx = { organizationId: cell.organizationId, userId: null };
               const body = req.body;
 
-              const check = await core.db.withTenant(ctx, (tx) => resolveReplyTarget(tx, body));
+              // The post must answer a live turn of this bot here (403 `no_trigger`, audited, otherwise).
+              const check = await core.db.withTenant(ctx, (tx) =>
+                resolveReplyTarget(tx, core, body, {
+                  route: "messages",
+                  sessionId: `cell:${cell.credentialId}`,
+                }),
+              );
+              if (!check) throw noTrigger();
 
               let result: { messageId: string; created: boolean };
               try {
-                // Chat decides the bot (agent principal: enabled, a member, agent rules) and the human it
-                // answers (agent ∩ human: that person must still read the channel), then stores the message and
-                // audits `agent.message.posted` (actor = agent) in its own tx. The tenant user is the
-                // triggering human, so that audit row carries user_id = who asked.
+                // Chat decides the bot (agent principal: enabled, a member, agent rules) and the humans it
+                // answers (agent ∩ human: the turn's human and a replied-to human must still read the channel),
+                // then stores the message and audits `agent.message.posted` (actor = agent) in its own tx. The
+                // tenant user is the turn's human, so that audit row carries user_id = who asked.
                 result = await core.chatAgent.postAgentMessage(
-                  { organizationId: cell.organizationId, userId: check.triggeredBy },
+                  { organizationId: cell.organizationId, userId: check.onBehalfOf },
                   {
                     agentId: body.agentId,
                     conversationId: body.conversationId,
@@ -353,6 +360,7 @@ export function createAgentChannelModule(
                     body: body.text,
                     idempotencyKey: body.idempotencyKey,
                     inReplyToMessageId: body.inReplyToMessageId,
+                    onBehalfOfUserId: check.onBehalfOf,
                   },
                 );
               } catch (err) {

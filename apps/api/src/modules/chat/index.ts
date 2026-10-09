@@ -575,10 +575,13 @@ export function createChatModule(core: Core): ApiModule {
           posting.denial ?? { permission: "channel.post", layer: "agent", reason: "missing_permission" },
         );
       }
-      // Confused deputy: a reply to a human is allowed only while that human may still read the channel.
+      // Confused deputy: a reply to a human, and any post for a delivered turn, is allowed only while that human (the
+      // replied-to author and the turn's human, when given) may still read the channel.
       const answered = input.inReplyToMessageId ? await getMessage(tx, input.inReplyToMessageId) : null;
-      const humanId = answered?.authorKind === "user" ? answered.authorId : null;
-      if (humanId) {
+      const humans = new Set<string>();
+      if (answered?.authorKind === "user" && answered.authorId) humans.add(answered.authorId);
+      if (input.onBehalfOfUserId) humans.add(input.onBehalfOfUserId);
+      for (const humanId of humans) {
         const humanRes = channelResource(await channelFacts(tx, conv, { kind: "user", id: humanId }));
         const reading = await perms.decide(
           tx,

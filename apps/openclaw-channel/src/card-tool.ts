@@ -274,6 +274,7 @@ export function registerCardTool(
                 conversationId,
                 threadRootId: t.threadRootId,
                 ...(t.messageId ? { inReplyToMessageId: t.messageId } : {}),
+                eventId: t.eventId,
                 idempotencyKey: `${t.eventId}:card:${n}`,
                 card: parsed.data.card,
               },

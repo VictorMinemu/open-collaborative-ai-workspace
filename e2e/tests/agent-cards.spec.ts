@@ -171,6 +171,34 @@ async function contentOf(card: Locator): Promise<string> {
   return parts.map((p) => p.replace(/\s+/g, " ").trim()).join(" | ");
 }
 
+/**
+ * A delivered turn of @deploy, the trigger every card post needs: `api` asks @deploy in the conversation (a channel
+ * mention, or a persona mention in an AI chat, which calls no model) and the fake cell receives the delivery.
+ */
+async function askDeploy(
+  api: APIRequestContext,
+  conversationId: string,
+  opts: { aiChat?: boolean } = {},
+): Promise<{ eventId: string; inReplyToMessageId: string }> {
+  const body = "@deploy post the status card";
+  const res = opts.aiChat
+    ? await api.post(`/api/v1/ai-chats/${conversationId}/messages`, {
+        data: { clientMessageId: `cm-${randomUUID()}`, body, model: PLAN },
+      })
+    : await api.post(`/api/v1/conversations/${conversationId}/messages`, {
+        data: { body, mentions: [{ kind: "agent", id: deployId }] },
+      });
+  expect(res.ok(), `ask @deploy: ${res.status()}`).toBe(true);
+  const json = (await res.json()) as { id?: string; userMessage?: { id: string } };
+  const messageId = (opts.aiChat ? json.userMessage?.id : json.id) as string;
+  const ev = await plugin.waitFor(
+    (e) =>
+      e.type === "agent.mention.v1" && (e.data as { message?: { id?: string } }).message?.id === messageId,
+    15_000,
+  );
+  return { eventId: (ev.data as unknown as { eventId: string }).eventId, inReplyToMessageId: messageId };
+}
+
 let admin: APIRequestContext;
 let plugin: FakeCellPlugin;
 let deployId: string;
@@ -227,6 +255,7 @@ test("@deploy's card appears in a channel and goes from Running to Succeeded in 
       agentId: deployId,
       conversationId: channel.id,
       threadRootId: null,
+      ...(await askDeploy(victorApi, channel.id)),
       idempotencyKey: `e2e-card-${randomUUID()}`,
       card: deployCard(),
     });
@@ -281,6 +310,7 @@ test("@deploy's card appears in a channel and goes from Running to Succeeded in 
       agentId: deployId,
       conversationId: chatId,
       threadRootId: null,
+      ...(await askDeploy(victorApi, chatId, { aiChat: true })),
       idempotencyKey: `e2e-card-${randomUUID()}`,
       card: deployCard({ status: "succeeded" }),
     });
@@ -363,6 +393,7 @@ test("Alex follows a card and is notified when it fails; Sam approves after conf
       agentId: deployId,
       conversationId: channel.id,
       threadRootId: null,
+      ...(await askDeploy(victorApi, channel.id)),
       idempotencyKey: `e2e-card-${randomUUID()}`,
       card: deployCard(),
     });
@@ -439,6 +470,7 @@ test("Alex follows a card and is notified when it fails; Sam approves after conf
       agentId: deployId,
       conversationId: channel.id,
       threadRootId: null,
+      ...(await askDeploy(victorApi, channel.id)),
       idempotencyKey: `e2e-card-${randomUUID()}`,
       card: approvalCard(),
     });
@@ -501,6 +533,7 @@ test("Alex follows a card and is notified when it fails; Sam approves after conf
       agentId: deployId,
       conversationId: chatId,
       threadRootId: null,
+      ...(await askDeploy(victorApi, chatId, { aiChat: true })),
       idempotencyKey: `e2e-card-${randomUUID()}`,
       card: approvalCard(),
     });

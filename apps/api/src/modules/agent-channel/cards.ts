@@ -11,6 +11,7 @@ import {
 } from "@ocw/contracts";
 import {
   type AfterCommit,
+  agentTurns,
   conversations,
   messageCardFollows,
   messageCards,
@@ -18,7 +19,7 @@ import {
   type Tx,
   tenantOf,
 } from "@ocw/db";
-import { eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import type { App, Core } from "../../core";
 import type { AgentMention, CardAction } from "../../lib/chat-agent-bridge";
 import { badRequest, HttpError, notFound } from "../../lib/errors";
@@ -47,19 +48,80 @@ async function getConversation(tx: Tx, conversationId: string) {
   return conv;
 }
 
+/** 403 `no_trigger`: the post answers no live turn of this agent in this conversation. */
+export const noTrigger = () =>
+  new HttpError(403, "no_trigger", "This post does not answer a delivered turn of this agent here");
+
+export interface ReplyTarget {
+  /** The thread root, normalised to its root (single-level threads). */
+  root: string | null;
+  /** The human of the delivered turn the post answers (`agent_turns.user_id`); chat re-checks they still read. */
+  onBehalfOf: string;
+}
+
 /**
- * Where an agent's post lands (shared by `POST /messages` and `POST /cards`): the thread root normalised to its root
- * (single-level threads; it must belong to the conversation, 400 otherwise) and the human the agent answers, when the
- * message it replies to was written by one (the confused-deputy check in chat uses it).
+ * The delivered turn a post answers (`agent_turns`, written at delivery; RLS keeps it to the cell's organization): the
+ * turn named by `eventId`, which must be this agent's, in this conversation, and (when the post names one) for the
+ * message it replies to; or, for older cells that send no `eventId`, the latest turn of this agent delivered for
+ * `inReplyToMessageId` in this conversation. Null when there is none.
+ */
+async function findTurn(
+  tx: Tx,
+  body: {
+    agentId: string;
+    conversationId: string;
+    inReplyToMessageId?: string | undefined;
+    eventId?: string | undefined;
+  },
+): Promise<{ eventId: string; userId: string } | null> {
+  const cols = {
+    eventId: agentTurns.eventId,
+    userId: agentTurns.userId,
+    agentId: agentTurns.agentId,
+    conversationId: agentTurns.conversationId,
+    messageId: agentTurns.messageId,
+  };
+  if (body.eventId) {
+    const [t] = await tx.select(cols).from(agentTurns).where(eq(agentTurns.eventId, body.eventId));
+    if (!t || t.agentId !== body.agentId || t.conversationId !== body.conversationId) return null;
+    if (body.inReplyToMessageId && body.inReplyToMessageId !== t.messageId) return null;
+    return t;
+  }
+  if (!body.inReplyToMessageId) return null;
+  const [t] = await tx
+    .select(cols)
+    .from(agentTurns)
+    .where(
+      and(
+        eq(agentTurns.agentId, body.agentId),
+        eq(agentTurns.conversationId, body.conversationId),
+        eq(agentTurns.messageId, body.inReplyToMessageId),
+      ),
+    )
+    .orderBy(desc(agentTurns.createdAt))
+    .limit(1);
+  return t ?? null;
+}
+
+/**
+ * Where an agent's post lands and for whom (shared by `POST /messages` and `POST /cards`): the thread root normalised to
+ * its root (single-level threads; it must belong to the conversation, 400 otherwise) and the human of the live turn the
+ * post answers (`findTurn`). Every post needs that trigger: none → audited `agent.message.refused` and null (the route
+ * answers 403 `no_trigger` after this transaction commits, so the audit row stays). Chat then checks the agent and that
+ * the turn's human (and a replied-to human) may still read the conversation.
  */
 export async function resolveReplyTarget(
   tx: Tx,
+  core: Core,
   body: {
+    agentId: string;
     conversationId: string;
     threadRootMessageId: string | null;
     inReplyToMessageId?: string | undefined;
+    eventId?: string | undefined;
   },
-): Promise<{ root: string | null; triggeredBy: string | null }> {
+  refusal: { route: "messages" | "cards"; sessionId: string },
+): Promise<ReplyTarget | null> {
   const conv = await getConversation(tx, body.conversationId);
   let root: string | null = null;
   if (body.threadRootMessageId) {
@@ -75,15 +137,30 @@ export async function resolveReplyTarget(
     // Single-level threads: a reply's root is its thread root.
     root = m.threadId ?? m.id;
   }
-  let triggeredBy: string | null = null;
-  if (body.inReplyToMessageId) {
-    const [m] = await tx
-      .select({ authorKind: messages.authorKind, authorId: messages.authorId })
-      .from(messages)
-      .where(eq(messages.id, body.inReplyToMessageId));
-    if (m?.authorKind === "user") triggeredBy = m.authorId;
+  const turn = await findTurn(tx, body);
+  if (!turn) {
+    // Ids only: never the text or the card.
+    await core.audit.record(tx, {
+      action: "agent.message.refused",
+      resourceType: "conversation",
+      resourceId: conv.id,
+      result: "denied",
+      actorKind: "agent",
+      actorId: body.agentId,
+      agentId: body.agentId,
+      clientKind: "agent",
+      sessionId: refusal.sessionId,
+      metadata: {
+        reason: "no_trigger",
+        route: refusal.route,
+        conversationId: conv.id,
+        eventId: body.eventId ?? null,
+        inReplyToMessageId: body.inReplyToMessageId ?? null,
+      },
+    });
+    return null;
   }
-  return { root, triggeredBy };
+  return { root, onBehalfOf: turn.userId };
 }
 
 /**
@@ -203,18 +280,26 @@ export function registerCardRoutes(app: App, ctx: { core: Core }): void {
         { organizationId: cell.organizationId, userId: null },
         async (tx) => {
           await assertCellAgent(tx, body.agentId);
-          return resolveReplyTarget(tx, {
-            conversationId: body.conversationId,
-            threadRootMessageId: body.threadRootId,
-            inReplyToMessageId: body.inReplyToMessageId,
-          });
+          return resolveReplyTarget(
+            tx,
+            core,
+            {
+              agentId: body.agentId,
+              conversationId: body.conversationId,
+              threadRootMessageId: body.threadRootId,
+              inReplyToMessageId: body.inReplyToMessageId,
+              eventId: body.eventId,
+            },
+            { route: "cards", sessionId: `cell:${cell.credentialId}` },
+          );
         },
       );
-      // Chat decides exactly as for a message (agent principal, membership, confused deputy, flat conversations),
-      // stores the message and its card in one transaction and audits `agent_card.posted`.
+      if (!target) throw noTrigger();
+      // Chat decides exactly as for a message (agent principal, membership, confused deputy for the turn's human, flat
+      // conversations), stores the message and its card in one transaction and audits `agent_card.posted`.
       const result = await core.chatAgent
         .postAgentMessage(
-          { organizationId: cell.organizationId, userId: target.triggeredBy },
+          { organizationId: cell.organizationId, userId: target.onBehalfOf },
           {
             agentId: body.agentId,
             conversationId: body.conversationId,
@@ -222,6 +307,7 @@ export function registerCardRoutes(app: App, ctx: { core: Core }): void {
             body: body.card.summary,
             idempotencyKey: body.idempotencyKey,
             inReplyToMessageId: body.inReplyToMessageId,
+            onBehalfOfUserId: target.onBehalfOf,
             card: body.card,
           },
         )

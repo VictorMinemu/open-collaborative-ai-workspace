@@ -206,6 +206,7 @@ describe("ocw_agent_card (06-14, D-07, AGENT-04)", () => {
         conversationId: CHANNEL,
         threadRootId: ROOT,
         inReplyToMessageId: ASKED,
+        eventId: "evt-1",
         idempotencyKey: "evt-1:card:0",
         card: deployCard(),
       },
