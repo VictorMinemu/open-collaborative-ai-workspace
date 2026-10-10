@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 81
+open_count: 84
 waived_count: 0
 fixed_count: 18
-total_count: 99
-last_updated: 2026-10-08T05:06:11.340Z
+total_count: 102
+last_updated: 2026-10-10T01:03:30.526Z
 ---
 
 # Broken Windows Ledger
@@ -114,6 +114,9 @@ last_updated: 2026-10-08T05:06:11.340Z
 | 97 | 07 | deviation | scripts/ocw/backup.mjs |  | Backup omits caddy-data: a restore on fresh volumes gives Caddy a new local CA | open |  | 2026-10-08T04:16:52.781Z |  |
 | 98 | 07 | unmet-truth | docs/INSTALL.md |  | Owner clean-machine install on real hardware deferred (human_needed), incl. Linux check of OpenBao capabilities | open |  | 2026-10-08T05:06:11.267Z |  |
 | 99 | 07 | deviation | scripts/ocw/backup.mjs |  | A vault-enabled backup contains the OpenBao seal key; as sensitive as .env (documented) | open |  | 2026-10-08T05:06:11.340Z |  |
+| 100 | 07.3 | deviation | apps/web/components/settings/account-nav |  | AI chat account entry hidden only when the permission is decided off (P-08), not via can() | open |  | 2026-10-10T01:03:30.376Z |  |
+| 101 | 07.3 | deviation | apps/web/components/organization/unit-modules-card.tsx |  | Read-only reason reads the member's role for copy only; edit rights still come from canEdit | open |  | 2026-10-10T01:03:30.449Z |  |
+| 102 | 07.3 | unmet-truth | apps/api/src/modules/agent-channel |  | Proactive agent messages and queued AI chat prompts are not re-decided against module rules (07.6/07.7 scope) | open |  | 2026-10-10T01:03:30.526Z |  |
 
 ````json
 [
@@ -1303,6 +1306,42 @@ last_updated: 2026-10-08T05:06:11.340Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-08T05:06:11.340Z",
+    "resolved_at": null
+  },
+  {
+    "id": 100,
+    "kind": "deviation",
+    "phase": "07.3",
+    "file": "apps/web/components/settings/account-nav",
+    "line": null,
+    "description": "AI chat account entry hidden only when the permission is decided off (P-08), not via can()",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-10T01:03:30.376Z",
+    "resolved_at": null
+  },
+  {
+    "id": 101,
+    "kind": "deviation",
+    "phase": "07.3",
+    "file": "apps/web/components/organization/unit-modules-card.tsx",
+    "line": null,
+    "description": "Read-only reason reads the member's role for copy only; edit rights still come from canEdit",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-10T01:03:30.449Z",
+    "resolved_at": null
+  },
+  {
+    "id": 102,
+    "kind": "unmet-truth",
+    "phase": "07.3",
+    "file": "apps/api/src/modules/agent-channel",
+    "line": null,
+    "description": "Proactive agent messages and queued AI chat prompts are not re-decided against module rules (07.6/07.7 scope)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-10T01:03:30.526Z",
     "resolved_at": null
   }
 ]
