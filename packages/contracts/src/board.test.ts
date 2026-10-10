@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  AgentChannelBoardCardResponse,
+  AgentChannelBoardCreateCard,
+  AgentChannelBoardPatchCard,
+  AgentChannelBoardRead,
+  AgentChannelBoardReadResponse,
+} from "./agent-channel";
+import {
   BOARD_CARD_BODY_MAX,
   BOARD_CARD_TITLE_MAX,
   BOARD_SUMMARY_MAX,
@@ -10,14 +17,20 @@ import {
   BoardSnapshot,
   BoardUpdatedEvent,
   CreateBoardCardRequest,
+  CreateRecordTemplateRequest,
   cardMessageBody,
   DEFAULT_BOARD_COLUMNS,
   fieldValuesSchema,
   firstLine,
   parseNamingRule,
+  RecordTemplate,
+  RecordTemplateList,
+  RecordTemplateListQuery,
   renderCardTitle,
   UpdateBoardCardRequest,
+  UpdateRecordTemplateRequest,
 } from "./board";
+import { BUILTIN_TOOLS, isDangerousToolName } from "./bot-capabilities";
 import { ChannelSummary, CreateChannelRequest, PostMessageRequest } from "./chat";
 import { EventTypes } from "./realtime";
 
@@ -374,5 +387,183 @@ describe("one card's contract round-trips (tracer)", () => {
         ranks: [{ messageId: MSG, rank: "a1" }],
       }).success,
     ).toBe(true);
+  });
+});
+
+describe("record templates", () => {
+  const template = {
+    name: "Case files",
+    description: "Customer case files",
+    prefix: "EXP",
+    namingRule: RULE,
+    fields: [{ key: "customer", label: "Customer", type: "text", required: true }],
+    columns: [
+      { name: "Intake", category: "backlog" },
+      { name: "Waiting for customer", category: "started", defaultWaitingOn: "customer" },
+      { name: "Closed", category: "done" },
+    ],
+  };
+
+  it("parses a complete template and defaults to organization-wide", () => {
+    const parsed = CreateRecordTemplateRequest.parse(template);
+    expect(parsed.unitId).toBeNull();
+    expect(parsed.columns[0]?.defaultWaitingOn).toBeNull();
+    expect(parsed.columns[1]?.defaultWaitingOn).toBe("customer");
+    expect(CreateRecordTemplateRequest.parse({ ...template, unitId: TPL }).unitId).toBe(TPL);
+  });
+
+  it("without columns a template gets the default set", () => {
+    const { columns: _omit, ...rest } = template;
+    expect(CreateRecordTemplateRequest.parse(rest).columns.map((c) => c.name)).toEqual(
+      DEFAULT_BOARD_COLUMNS.map((c) => c.name),
+    );
+  });
+
+  const sixtyChars = "x".repeat(60);
+  it.each([
+    ["a lowercase prefix", { prefix: "exp" }],
+    ["a prefix over 8 characters", { prefix: "TOOLONGPREFIX" }],
+    [
+      "duplicate field keys",
+      {
+        fields: [
+          { key: "customer", label: "Customer", type: "text" },
+          { key: "customer", label: "Client", type: "text" },
+        ],
+      },
+    ],
+    ["a select field without options", { fields: [{ key: "customer", label: "Customer", type: "select" }] }],
+    [
+      "options on a text field",
+      { fields: [{ key: "customer", label: "Customer", type: "text", options: ["a"] }] },
+    ],
+    ["zero columns", { columns: [] }],
+    [
+      "21 columns",
+      { columns: Array.from({ length: 21 }, (_, i) => ({ name: `Column ${i}`, category: "backlog" })) },
+    ],
+    [
+      "duplicate column names (case-insensitive)",
+      {
+        columns: [
+          { name: "Intake", category: "backlog" },
+          { name: "intake ", category: "started" },
+        ],
+      },
+    ],
+    ["a column name over 60 characters", { columns: [{ name: `${sixtyChars}x`, category: "backlog" }] }],
+    ["a rule naming an undefined field", { namingRule: "{field:priority} · {summary}" }],
+    ["a rule with an unknown token", { namingRule: "{nope}" }],
+    ["a {prefix} rule without a prefix", { prefix: null }],
+    ["an empty name", { name: "  " }],
+    ["a name over 80 characters", { name: "n".repeat(81) }],
+    ["a description over 500 characters", { description: "d".repeat(501) }],
+  ])("refuses %s", (_label, over) => {
+    expect(CreateRecordTemplateRequest.safeParse({ ...template, ...over }).success).toBe(false);
+  });
+
+  it("a template without prefix or rule is valid (typed titles, no numbering)", () => {
+    expect(
+      CreateRecordTemplateRequest.safeParse({ ...template, prefix: null, namingRule: null }).success,
+    ).toBe(true);
+  });
+
+  it("an update names the version it saw and changes something", () => {
+    expect(UpdateRecordTemplateRequest.safeParse({ name: "Orders" }).success).toBe(false);
+    expect(UpdateRecordTemplateRequest.safeParse({ expectedVersion: 1 }).success).toBe(false);
+    expect(UpdateRecordTemplateRequest.safeParse({ expectedVersion: 1, name: "Orders" }).success).toBe(true);
+    expect(UpdateRecordTemplateRequest.safeParse({ expectedVersion: 1, prefix: "exp" }).success).toBe(false);
+    expect(UpdateRecordTemplateRequest.safeParse({ expectedVersion: 1, columns: [] }).success).toBe(false);
+  });
+
+  it("an update checks the rule against the fields it carries, the grammar alone otherwise", () => {
+    expect(
+      UpdateRecordTemplateRequest.safeParse({
+        expectedVersion: 1,
+        namingRule: "{field:customer}",
+        fields: [],
+      }).success,
+    ).toBe(false);
+    expect(
+      UpdateRecordTemplateRequest.safeParse({ expectedVersion: 1, namingRule: "{field:customer}" }).success,
+    ).toBe(true);
+    expect(UpdateRecordTemplateRequest.safeParse({ expectedVersion: 1, namingRule: "{nope}" }).success).toBe(
+      false,
+    );
+  });
+
+  it("a stored template and the list parse", () => {
+    const stored = {
+      ...CreateRecordTemplateRequest.parse(template),
+      id: TPL,
+      version: 1,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    expect(RecordTemplate.safeParse(stored).success).toBe(true);
+    expect(RecordTemplateList.safeParse({ templates: [stored], canManage: false }).success).toBe(true);
+    expect(RecordTemplateListQuery.parse({})).toEqual({});
+    expect(RecordTemplateListQuery.safeParse({ unitId: "nope" }).success).toBe(false);
+  });
+});
+
+describe("Agent Channel board schemas (D-07, P-03)", () => {
+  const AGENT = "0199a000-0000-7000-8000-0000000000a1";
+  const EVENT = "0199a000-0000-7000-8000-0000000000e1";
+
+  it("create: idempotency key required, bounded title, conversation and human never taken from the body", () => {
+    const ok = {
+      eventId: EVENT,
+      agentId: AGENT,
+      idempotencyKey: `${EVENT}:board:1`,
+      description: "Broken pump",
+    };
+    expect(AgentChannelBoardCreateCard.safeParse(ok).success).toBe(true);
+    const { idempotencyKey: _k, ...noKey } = ok;
+    expect(AgentChannelBoardCreateCard.safeParse(noKey).success).toBe(false);
+    expect(AgentChannelBoardCreateCard.safeParse({ ...ok, idempotencyKey: "k".repeat(121) }).success).toBe(
+      false,
+    );
+    expect(AgentChannelBoardCreateCard.safeParse({ ...ok, title: "x".repeat(201) }).success).toBe(false);
+    expect(AgentChannelBoardCreateCard.safeParse({ ...ok, description: "", title: undefined }).success).toBe(
+      false,
+    );
+    const parsed = AgentChannelBoardCreateCard.parse({ ...ok, conversationId: CONV, userId: USER });
+    expect(parsed).not.toHaveProperty("conversationId");
+    expect(parsed).not.toHaveProperty("userId");
+  });
+
+  it("patch: refuses no change, accepts a move to the top", () => {
+    const base = { eventId: EVENT, agentId: AGENT, expectedVersion: 3 };
+    expect(AgentChannelBoardPatchCard.safeParse(base).success).toBe(false);
+    expect(
+      AgentChannelBoardPatchCard.safeParse({ ...base, move: { columnId: COL, afterCardId: null } }).success,
+    ).toBe(true);
+    expect(AgentChannelBoardPatchCard.safeParse({ ...base, waitingOn: "customer" }).success).toBe(true);
+    expect(AgentChannelBoardPatchCard.safeParse({ ...base, waitingOn: "nobody" }).success).toBe(false);
+    const parsed = AgentChannelBoardPatchCard.parse({ ...base, waitingOn: "us", title: "renamed" });
+    expect(parsed).not.toHaveProperty("title");
+  });
+
+  it("read and responses", () => {
+    expect(AgentChannelBoardRead.safeParse({ eventId: EVENT, agentId: AGENT }).success).toBe(true);
+    expect(AgentChannelBoardRead.safeParse({ agentId: AGENT }).success).toBe(false);
+    const board = {
+      conversationId: CONV,
+      templateId: null,
+      prefix: null,
+      namingRule: null,
+      fields: [],
+      version: 1,
+    };
+    expect(AgentChannelBoardReadResponse.safeParse({ board, columns: [], card: null }).success).toBe(true);
+    expect(AgentChannelBoardCardResponse.safeParse({ card: card() }).success).toBe(true);
+  });
+});
+
+describe("ocw_board_card", () => {
+  it("is a built-in tool name and never dangerous", () => {
+    expect(BUILTIN_TOOLS.boardCard).toBe("ocw_board_card");
+    expect(isDangerousToolName(BUILTIN_TOOLS.boardCard)).toBe(false);
   });
 });

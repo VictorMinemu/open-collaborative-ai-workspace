@@ -486,3 +486,121 @@ export const BoardColumnRerankedEvent = z.object({
   ranks: z.array(z.object({ messageId: Id, rank: BoardRank })).max(BOARD_RERANK_MAX),
 });
 export type BoardColumnRerankedEvent = z.infer<typeof BoardColumnRerankedEvent>;
+
+// ---------------------------------------------------------------- record templates (D-06, P-08)
+
+export const RECORD_TEMPLATE_NAME_MAX = 80;
+export const RECORD_TEMPLATE_DESCRIPTION_MAX = 500;
+/** Templates in one `GET /record-templates` answer (the unit's, its ancestors' and organization-wide ones). */
+export const RECORD_TEMPLATE_LIST_MAX = 200;
+
+/** 1–20 columns, names unique ignoring case. */
+export const TemplateColumns = z
+  .array(TemplateColumn)
+  .min(1)
+  .max(BOARD_MAX_COLUMNS)
+  .superRefine((cols, ctx) => {
+    const seen = new Set<string>();
+    cols.forEach((c, i) => {
+      const name = c.name.toLowerCase();
+      if (seen.has(name))
+        ctx.addIssue({ code: "custom", path: [i, "name"], message: `Duplicate column "${c.name}"` });
+      seen.add(name);
+    });
+  });
+
+const NamingRuleText = z.string().trim().min(1).max(BOARD_NAMING_RULE_MAX);
+
+/**
+ * Why a template's prefix, naming rule and fields do not fit together (empty = they do). The rule must parse against
+ * the template's own field keys, and `{prefix}` or `{seq}` need a prefix (cards are numbered only on prefixed boards,
+ * P-07). `fieldKeys: null` checks the grammar only. The API runs it again on the merged template of an update.
+ */
+export function recordTemplateProblems(t: {
+  prefix: string | null;
+  namingRule: string | null;
+  fieldKeys: readonly string[] | null;
+}): string[] {
+  if (t.namingRule === null) return [];
+  const parsed = parseNamingRule(t.namingRule, t.fieldKeys);
+  if (!parsed.ok) return [parsed.error];
+  const numbered = namingRuleTokens(t.namingRule).some((k) => k.kind === "prefix" || k.kind === "seq");
+  return numbered && t.prefix === null ? ["{prefix} and {seq} need a prefix"] : [];
+}
+
+export const RecordTemplate = z.object({
+  id: Id,
+  /** null = organization-wide; otherwise usable by channels placed in this unit or below (P-08). */
+  unitId: Id.nullable(),
+  name: z.string().min(1).max(RECORD_TEMPLATE_NAME_MAX),
+  description: z.string().max(RECORD_TEMPLATE_DESCRIPTION_MAX),
+  prefix: BoardPrefix.nullable(),
+  namingRule: z.string().max(BOARD_NAMING_RULE_MAX).nullable(),
+  fields: z.array(BoardFieldDef).max(BOARD_MAX_FIELDS),
+  columns: z.array(TemplateColumn).min(1).max(BOARD_MAX_COLUMNS),
+  version: z.number().int().min(1),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type RecordTemplate = z.infer<typeof RecordTemplate>;
+
+export const RecordTemplateList = z.object({
+  templates: z.array(RecordTemplate).max(RECORD_TEMPLATE_LIST_MAX),
+  /** The resolver's decision for the queried unit (`unit.members.manage`, or `unit.manage` org-wide): UI gating only. */
+  canManage: z.boolean(),
+});
+export type RecordTemplateList = z.infer<typeof RecordTemplateList>;
+
+/** `GET /record-templates?unitId=`: templates a channel placed in this unit may use; absent = organization-wide only. */
+export const RecordTemplateListQuery = z.object({ unitId: Id.optional() });
+export type RecordTemplateListQuery = z.infer<typeof RecordTemplateListQuery>;
+
+const TemplateName = z.string().trim().min(1).max(RECORD_TEMPLATE_NAME_MAX);
+const TemplateDescription = z.string().trim().max(RECORD_TEMPLATE_DESCRIPTION_MAX);
+
+/** `POST /record-templates`. Without `columns` the template gets `DEFAULT_BOARD_COLUMNS`. */
+export const CreateRecordTemplateRequest = z
+  .object({
+    unitId: Id.nullable().default(null),
+    name: TemplateName,
+    description: TemplateDescription.default(""),
+    prefix: BoardPrefix.nullable().default(null),
+    namingRule: NamingRuleText.nullable().default(null),
+    fields: BoardFieldDefs.default(() => []),
+    columns: TemplateColumns.default(() => DEFAULT_BOARD_COLUMNS.map((c) => ({ ...c }))),
+  })
+  .superRefine((t, ctx) => {
+    const fieldKeys = t.fields.map((f) => f.key);
+    for (const message of recordTemplateProblems({ prefix: t.prefix, namingRule: t.namingRule, fieldKeys })) {
+      ctx.addIssue({ code: "custom", path: ["namingRule"], message });
+    }
+  });
+export type CreateRecordTemplateRequest = z.infer<typeof CreateRecordTemplateRequest>;
+
+/** `PATCH /record-templates/:id`: the version the editor saw plus at least one change. Affects new boards only. */
+export const UpdateRecordTemplateRequest = z
+  .object({
+    expectedVersion: z.number().int().min(1),
+    name: TemplateName.optional(),
+    description: TemplateDescription.optional(),
+    prefix: BoardPrefix.nullable().optional(),
+    namingRule: NamingRuleText.nullable().optional(),
+    fields: BoardFieldDefs.optional(),
+    columns: TemplateColumns.optional(),
+  })
+  .superRefine((t, ctx) => {
+    const { expectedVersion: _v, ...changes } = t;
+    if (Object.values(changes).every((v) => v === undefined)) {
+      ctx.addIssue({ code: "custom", message: "Change at least one thing" });
+    }
+    if (typeof t.namingRule === "string") {
+      const problems = recordTemplateProblems({
+        // Unknown (absent) prefix and fields are merged and re-checked by the API.
+        prefix: t.prefix === undefined ? "" : t.prefix,
+        namingRule: t.namingRule,
+        fieldKeys: t.fields ? t.fields.map((f) => f.key) : null,
+      });
+      for (const message of problems) ctx.addIssue({ code: "custom", path: ["namingRule"], message });
+    }
+  });
+export type UpdateRecordTemplateRequest = z.infer<typeof UpdateRecordTemplateRequest>;

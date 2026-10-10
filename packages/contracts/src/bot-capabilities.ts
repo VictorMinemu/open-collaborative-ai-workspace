@@ -284,6 +284,11 @@ export const BUILTIN_TOOLS = {
   memorySave: "ocw_memory_save",
   /** Phase 6 (AGENT-04, D-07): the persona posts or updates an Agent Card in the conversation of the turn. */
   agentCard: "ocw_agent_card",
+  /**
+   * Phase 07.1 (D-07, P-03): the agent creates a card or moves it / sets its waiting state on the turn's board. Offered
+   * only on board channels (07.1-10); no turn offers it before then.
+   */
+  boardCard: "ocw_board_card",
 } as const;
 
 export const MAX_TOOL_CALLS_PER_TURN = 8;
