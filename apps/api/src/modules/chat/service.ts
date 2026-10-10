@@ -243,6 +243,7 @@ export async function listChannels(tx: Tx, userId: string, id?: string): Promise
         kind: r.c.kind,
         name: r.c.name,
         slug: r.c.slug,
+        layout: r.c.layout,
         topic: r.c.topic,
         visibility: r.c.visibility,
         parentConversationId: r.c.parentConversationId,
