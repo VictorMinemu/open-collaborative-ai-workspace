@@ -5,6 +5,7 @@ import {
   boolean,
   check,
   date,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -13,6 +14,7 @@ import {
   smallint,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
@@ -312,6 +314,8 @@ export const messages = appSchema.table(
   },
   (t) => [
     index("messages_conv_seq_idx").on(t.organizationId, t.conversationId, t.seq),
+    /** Target of `board_cards_message_fk` (Phase 07.1): a card's root message lives in the card's board channel. */
+    unique("messages_id_conversation_uq").on(t.id, t.conversationId),
     index("messages_thread_idx").on(t.organizationId, t.threadId),
     /** Idempotent posts: the same author + client key (agent idempotencyKey, web clientMessageId) never duplicates. */
     uniqueIndex("messages_author_client_msg_uq")
@@ -1674,9 +1678,8 @@ export const boardColumns = appSchema.table(
   {
     id: id(),
     organizationId: orgId(),
-    conversationId: uuid("conversation_id")
-      .notNull()
-      .references(() => conversations.id, { onDelete: "cascade" }),
+    /** The board channel; a column exists only on a board (`board_columns_board_fk` → `boards`). */
+    conversationId: uuid("conversation_id").notNull(),
     name: text("name").notNull(),
     rank: text("rank").notNull(),
     category: text("category", { enum: ["backlog", "started", "done", "cancelled"] }).notNull(),
@@ -1686,6 +1689,13 @@ export const boardColumns = appSchema.table(
     updatedAt: ts("updated_at").notNull().defaultNow(),
   },
   (t) => [
+    foreignKey({
+      name: "board_columns_board_fk",
+      columns: [t.conversationId],
+      foreignColumns: [boards.conversationId],
+    }).onDelete("cascade"),
+    /** Target of `board_cards_column_fk`: a card's column belongs to the card's board. */
+    unique("board_columns_id_conversation_uq").on(t.id, t.conversationId),
     index("board_columns_conv_idx").on(t.organizationId, t.conversationId),
     uniqueIndex("board_columns_conv_name_uq").on(t.conversationId, sql`lower(${t.name})`),
     check("board_columns_category_check", sql`${t.category} in ${BOARD_COLUMN_CATEGORIES}`),
@@ -1707,16 +1717,11 @@ export const boardColumns = appSchema.table(
 export const boardCards = appSchema.table(
   "board_cards",
   {
-    messageId: uuid("message_id")
-      .primaryKey()
-      .references(() => messages.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id").primaryKey(),
     organizationId: orgId(),
-    conversationId: uuid("conversation_id")
-      .notNull()
-      .references(() => conversations.id, { onDelete: "cascade" }),
-    columnId: uuid("column_id")
-      .notNull()
-      .references(() => boardColumns.id, { onDelete: "restrict" }),
+    /** The board channel. Its root message, its column and its board all share it (composite FKs below). */
+    conversationId: uuid("conversation_id").notNull(),
+    columnId: uuid("column_id").notNull(),
     rank: text("rank").notNull(),
     waitingOn: text("waiting_on", { enum: ["none", "us", "customer", "both"] })
       .notNull()
@@ -1735,6 +1740,21 @@ export const boardCards = appSchema.table(
     movedAt: ts("moved_at").notNull().defaultNow(),
   },
   (t) => [
+    foreignKey({
+      name: "board_cards_message_fk",
+      columns: [t.messageId, t.conversationId],
+      foreignColumns: [messages.id, messages.conversationId],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "board_cards_column_fk",
+      columns: [t.columnId, t.conversationId],
+      foreignColumns: [boardColumns.id, boardColumns.conversationId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "board_cards_board_fk",
+      columns: [t.conversationId],
+      foreignColumns: [boards.conversationId],
+    }).onDelete("cascade"),
     index("board_cards_column_rank_idx").on(
       t.organizationId,
       t.conversationId,

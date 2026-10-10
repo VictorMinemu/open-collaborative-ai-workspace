@@ -1,7 +1,7 @@
 {
   "version": "8",
   "dialect": "postgres",
-  "id": "ef7290c7-68d3-4b7a-a6f4-9a606d69bdb8",
+  "id": "582caa85-4cfc-486a-b56c-8a2cfd2bf11b",
   "prevIds": ["910175ce-71a6-4b9d-b475-b11b84d7521b"],
   "ddl": [
     {
@@ -12319,19 +12319,6 @@
     },
     {
       "nameExplicit": false,
-      "columns": ["message_id"],
-      "schemaTo": "app",
-      "tableTo": "messages",
-      "columnsTo": ["id"],
-      "onUpdate": "NO ACTION",
-      "onDelete": "CASCADE",
-      "name": "board_cards_message_id_messages_id_fkey",
-      "entityType": "fks",
-      "schema": "app",
-      "table": "board_cards"
-    },
-    {
-      "nameExplicit": false,
       "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
@@ -12344,27 +12331,40 @@
       "table": "board_cards"
     },
     {
-      "nameExplicit": false,
-      "columns": ["conversation_id"],
+      "nameExplicit": true,
+      "columns": ["message_id", "conversation_id"],
       "schemaTo": "app",
-      "tableTo": "conversations",
-      "columnsTo": ["id"],
+      "tableTo": "messages",
+      "columnsTo": ["id", "conversation_id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
-      "name": "board_cards_conversation_id_conversations_id_fkey",
+      "name": "board_cards_message_fk",
       "entityType": "fks",
       "schema": "app",
       "table": "board_cards"
     },
     {
-      "nameExplicit": false,
-      "columns": ["column_id"],
+      "nameExplicit": true,
+      "columns": ["column_id", "conversation_id"],
       "schemaTo": "app",
       "tableTo": "board_columns",
-      "columnsTo": ["id"],
+      "columnsTo": ["id", "conversation_id"],
       "onUpdate": "NO ACTION",
       "onDelete": "RESTRICT",
-      "name": "board_cards_column_id_board_columns_id_fkey",
+      "name": "board_cards_column_fk",
+      "entityType": "fks",
+      "schema": "app",
+      "table": "board_cards"
+    },
+    {
+      "nameExplicit": true,
+      "columns": ["conversation_id"],
+      "schemaTo": "app",
+      "tableTo": "boards",
+      "columnsTo": ["conversation_id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "name": "board_cards_board_fk",
       "entityType": "fks",
       "schema": "app",
       "table": "board_cards"
@@ -12383,14 +12383,14 @@
       "table": "board_columns"
     },
     {
-      "nameExplicit": false,
+      "nameExplicit": true,
       "columns": ["conversation_id"],
       "schemaTo": "app",
-      "tableTo": "conversations",
-      "columnsTo": ["id"],
+      "tableTo": "boards",
+      "columnsTo": ["conversation_id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
-      "name": "board_columns_conversation_id_conversations_id_fkey",
+      "name": "board_columns_board_fk",
       "entityType": "fks",
       "schema": "app",
       "table": "board_columns"
@@ -13983,6 +13983,24 @@
       "schema": "auth",
       "table": "verification",
       "entityType": "pks"
+    },
+    {
+      "nameExplicit": true,
+      "columns": ["id", "conversation_id"],
+      "nullsNotDistinct": false,
+      "name": "board_columns_id_conversation_uq",
+      "entityType": "uniques",
+      "schema": "app",
+      "table": "board_columns"
+    },
+    {
+      "nameExplicit": true,
+      "columns": ["id", "conversation_id"],
+      "nullsNotDistinct": false,
+      "name": "messages_id_conversation_uq",
+      "entityType": "uniques",
+      "schema": "app",
+      "table": "messages"
     },
     {
       "nameExplicit": false,

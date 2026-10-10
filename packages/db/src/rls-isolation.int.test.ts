@@ -1123,14 +1123,21 @@ describe("tenant isolation (RLS)", () => {
     const card = (
       onBoard: string,
       columnId: string,
-      o: { number?: number | null; title?: string; titleSource?: string; waitingOn?: string } = {},
+      o: {
+        number?: number | null;
+        title?: string;
+        titleSource?: string;
+        waitingOn?: string;
+        /** Conversation of the root message (default: the card's own board). */
+        messageIn?: string;
+      } = {},
     ) =>
       (async () => {
         seq += 1;
         const m = (
           await q(
             "insert into app.messages (organization_id, conversation_id, seq, author_kind, author_id, body) values ($1, $2, $3, 'user', $4, 'card') returning id",
-            [A, onBoard, seq, user],
+            [A, o.messageIn ?? onBoard, seq, user],
           )
         ).rows[0].id;
         return q(
@@ -1167,8 +1174,14 @@ describe("tenant isolation (RLS)", () => {
     await expect(tx(() => card(board, col, { title: "" }))).rejects.toThrow(/board_cards_title_len_check/);
     // The seed's card is number 1 on this board.
     await expect(tx(() => card(board, col, { number: 1 }))).rejects.toThrow(/board_cards_number_uq/);
+    /** A second board channel with its `boards` row (columns and cards need one). */
+    const newBoard = async () => {
+      const id = (await conv("channel", "board")).rows[0].id as string;
+      await q("insert into app.boards (conversation_id, organization_id) values ($1, $2)", [id, A]);
+      return id;
+    };
     const numbers = await tx(async () => {
-      const other = (await conv("channel", "board")).rows[0].id as string;
+      const other = await newBoard();
       const otherCol = (await column("Backlog", "backlog", null, other)).rows[0].id as string;
       return [
         (await card(other, otherCol, { number: 1 })).rowCount, // same number, another board
@@ -1178,6 +1191,61 @@ describe("tenant isolation (RLS)", () => {
       ];
     });
     expect(numbers).toEqual([1, 1, 1, 1]);
+
+    // Integrity: a card's column, root message and board all belong to the card's own board channel, and a column
+    // exists only on a board.
+    await expect(
+      tx(async () => {
+        const otherCol = (await column("Backlog", "backlog", null, await newBoard())).rows[0].id as string;
+        return card(board, otherCol);
+      }),
+      "a card in another board's column",
+    ).rejects.toThrow(/board_cards_column_fk/);
+    const general = (
+      await migrator.query(
+        "select id from app.conversations where organization_id = $1 and kind = 'channel' and layout = 'text'",
+        [A],
+      )
+    ).rows[0].id as string;
+    await expect(
+      tx(() => card(board, col, { messageIn: general })),
+      "a root message from another conversation",
+    ).rejects.toThrow(/board_cards_message_fk/);
+    await expect(
+      tx(() => column("Backlog", "backlog", null, general)),
+      "a column without a board",
+    ).rejects.toThrow(/board_columns_board_fk/);
+    // A card on a conversation without a board: its column cannot exist there either, so either FK may fire first;
+    // the catalog check below pins the card → board FK itself.
+    await expect(
+      tx(() => card(general, col, { messageIn: general })),
+      "a card on a conversation without a board",
+    ).rejects.toThrow(/board_cards_(board|column)_fk/);
+    const fks = await migrator.query(
+      `select conname, confrelid::regclass::text as ref, confdeltype as on_delete,
+              (select array_agg(a.attname::text order by k.ord) from unnest(conkey) with ordinality k(n, ord)
+                 join pg_attribute a on a.attrelid = conrelid and a.attnum = k.n) as cols
+         from pg_constraint
+        where contype = 'f' and conrelid in ('app.board_cards'::regclass, 'app.board_columns'::regclass)
+          and confrelid <> 'auth.organization'::regclass
+        order by conname`,
+    );
+    expect(fks.rows).toEqual([
+      { conname: "board_cards_board_fk", ref: "app.boards", on_delete: "c", cols: ["conversation_id"] },
+      {
+        conname: "board_cards_column_fk",
+        ref: "app.board_columns",
+        on_delete: "r",
+        cols: ["column_id", "conversation_id"],
+      },
+      {
+        conname: "board_cards_message_fk",
+        ref: "app.messages",
+        on_delete: "c",
+        cols: ["message_id", "conversation_id"],
+      },
+      { conname: "board_columns_board_fk", ref: "app.boards", on_delete: "c", cols: ["conversation_id"] },
+    ]);
 
     // Templates: names unique per (organization, unit) ignoring case; organization-wide ones collide too.
     const template = (unitId: string | null, name: string, prefix: string | null = null) =>
@@ -1215,7 +1283,7 @@ describe("tenant isolation (RLS)", () => {
     });
     expect(afterDelete).toBe(0);
     await expect(tx(() => q("delete from app.board_columns where id = $1", [col]))).rejects.toThrow(
-      /board_cards_column_id_board_columns_id_fkey/,
+      /RESTRICT setting of foreign key constraint "board_cards_column_fk"/,
     );
     // Deleting the board channel removes its board, columns and cards in one statement.
     const gone = await tx(async () => {

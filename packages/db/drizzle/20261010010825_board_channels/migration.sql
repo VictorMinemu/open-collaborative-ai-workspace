@@ -33,6 +33,7 @@ CREATE TABLE "app"."board_columns" (
 	"external_state_id" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "board_columns_id_conversation_uq" UNIQUE("id","conversation_id"),
 	CONSTRAINT "board_columns_category_check" CHECK ("category" in ('backlog','started','done','cancelled')),
 	CONSTRAINT "board_columns_default_waiting_on_check" CHECK ("default_waiting_on" is null or "default_waiting_on" in ('none','us','customer','both')),
 	CONSTRAINT "board_columns_name_len_check" CHECK (char_length("name") between 1 and 60),
@@ -75,18 +76,19 @@ CREATE TABLE "app"."record_templates" (
 );
 --> statement-breakpoint
 ALTER TABLE "app"."conversations" ADD COLUMN "layout" text DEFAULT 'text' NOT NULL;--> statement-breakpoint
+ALTER TABLE "app"."messages" ADD CONSTRAINT "messages_id_conversation_uq" UNIQUE("id","conversation_id");--> statement-breakpoint
 CREATE INDEX "board_cards_column_rank_idx" ON "app"."board_cards" ("organization_id","conversation_id","column_id","rank" COLLATE "C");--> statement-breakpoint
 CREATE UNIQUE INDEX "board_cards_number_uq" ON "app"."board_cards" ("conversation_id","number") WHERE number is not null;--> statement-breakpoint
 CREATE INDEX "board_columns_conv_idx" ON "app"."board_columns" ("organization_id","conversation_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "board_columns_conv_name_uq" ON "app"."board_columns" ("conversation_id",lower("name"));--> statement-breakpoint
 CREATE INDEX "record_templates_unit_idx" ON "app"."record_templates" ("organization_id","unit_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "record_templates_name_uq" ON "app"."record_templates" ("organization_id","unit_id",lower("name")) NULLS NOT DISTINCT;--> statement-breakpoint
-ALTER TABLE "app"."board_cards" ADD CONSTRAINT "board_cards_message_id_messages_id_fkey" FOREIGN KEY ("message_id") REFERENCES "app"."messages"("id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "app"."board_cards" ADD CONSTRAINT "board_cards_organization_id_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "auth"."organization"("id") ON DELETE CASCADE;--> statement-breakpoint
-ALTER TABLE "app"."board_cards" ADD CONSTRAINT "board_cards_conversation_id_conversations_id_fkey" FOREIGN KEY ("conversation_id") REFERENCES "app"."conversations"("id") ON DELETE CASCADE;--> statement-breakpoint
-ALTER TABLE "app"."board_cards" ADD CONSTRAINT "board_cards_column_id_board_columns_id_fkey" FOREIGN KEY ("column_id") REFERENCES "app"."board_columns"("id") ON DELETE RESTRICT;--> statement-breakpoint
+ALTER TABLE "app"."board_cards" ADD CONSTRAINT "board_cards_message_fk" FOREIGN KEY ("message_id","conversation_id") REFERENCES "app"."messages"("id","conversation_id") ON DELETE CASCADE;--> statement-breakpoint
+ALTER TABLE "app"."board_cards" ADD CONSTRAINT "board_cards_column_fk" FOREIGN KEY ("column_id","conversation_id") REFERENCES "app"."board_columns"("id","conversation_id") ON DELETE RESTRICT;--> statement-breakpoint
+ALTER TABLE "app"."board_cards" ADD CONSTRAINT "board_cards_board_fk" FOREIGN KEY ("conversation_id") REFERENCES "app"."boards"("conversation_id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "app"."board_columns" ADD CONSTRAINT "board_columns_organization_id_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "auth"."organization"("id") ON DELETE CASCADE;--> statement-breakpoint
-ALTER TABLE "app"."board_columns" ADD CONSTRAINT "board_columns_conversation_id_conversations_id_fkey" FOREIGN KEY ("conversation_id") REFERENCES "app"."conversations"("id") ON DELETE CASCADE;--> statement-breakpoint
+ALTER TABLE "app"."board_columns" ADD CONSTRAINT "board_columns_board_fk" FOREIGN KEY ("conversation_id") REFERENCES "app"."boards"("conversation_id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "app"."boards" ADD CONSTRAINT "boards_conversation_id_conversations_id_fkey" FOREIGN KEY ("conversation_id") REFERENCES "app"."conversations"("id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "app"."boards" ADD CONSTRAINT "boards_organization_id_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "auth"."organization"("id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "app"."boards" ADD CONSTRAINT "boards_template_id_record_templates_id_fkey" FOREIGN KEY ("template_id") REFERENCES "app"."record_templates"("id") ON DELETE SET NULL;--> statement-breakpoint
