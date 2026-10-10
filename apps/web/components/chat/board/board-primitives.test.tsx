@@ -1,9 +1,12 @@
-import type { BoardCard, WaitingOn } from "@ocw/contracts";
+import type { BoardCard, BoardColumnCategory, WaitingOn } from "@ocw/contracts";
 import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { BOARD, card } from "@/lib/board-fixtures.test-util";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { BOARD, COL, COLUMNS, card, snapshot } from "@/lib/board-fixtures.test-util";
+import { CardMenu, cardMenuModel, menuColumns } from "./card-menu";
 import { CardTile, cardNumberLabel } from "./card-tile";
+import { CategoryIcon, ColumnHeader } from "./column-header";
 import { WaitingOnBadge } from "./waiting-on-badge";
 
 /**
@@ -133,6 +136,8 @@ describe("CardTile (UI-SPEC Card tile)", () => {
     const menu: ReactNode = <button type="button">menu</button>;
     expect(slots(tile({}, { grip, menu }))).toEqual(["card-grip", "card-open", "card-menu"]);
     expect(slots(tile({}, { grip, menu, canPost: false }))).toEqual(["card-open", "card-menu"]);
+    // The 44 px phone trigger stays centred on the 20 px first row (visual 28 on desktop).
+    expect(tile({}, { menu })).toMatch(/data-slot="card-menu"[^>]*-my-1 -mr-1[^"]*max-md:-my-3 max-md:-mr-3/);
   });
 
   it("tile surface per UI-SPEC: card, border, rounded-lg, shadow-xs (none in dark), p-3, 76 px minimum", () => {
@@ -172,6 +177,7 @@ describe("WaitingOnBadge (UI-SPEC Color › Waiting state)", () => {
 
   it("pill geometry: h-5 rounded-full px-2 text-xs font-semibold with a 6 px dot", () => {
     expect(badge("us")).toMatch(/inline-flex h-5[^"]*rounded-full px-2 text-xs font-semibold/);
+    expect(badge("us")).toContain("whitespace-nowrap"); // a chip never wraps
     expect(badge("us")).toMatch(/data-slot="waiting-dot"[^>]*size-1\.5[^>]*><span[^>]*bg-amber-500/);
   });
 
@@ -183,5 +189,185 @@ describe("WaitingOnBadge (UI-SPEC Color › Waiting state)", () => {
 
   it("none renders nothing", () => {
     expect(badge("none")).toBe("");
+  });
+});
+
+describe("cardMenuModel (UI-SPEC Interaction Contract › Move to…)", () => {
+  const P1 = card(1, { columnId: COL.progress, rank: "a1" });
+  const P2 = card(2, { columnId: COL.progress, rank: "a2", waitingOn: "us" });
+  const P3 = card(3, { columnId: COL.progress, rank: "a3" });
+  const D1 = card(4, { columnId: COL.done, rank: "a1" });
+  const D2 = card(5, { columnId: COL.done, rank: "a2" });
+  const columns = menuColumns(snapshot([P1, P2, P3, D1, D2]));
+
+  it("lists every column with its category, the current one checked; Move to… lands at the bottom (P-07)", () => {
+    const m = cardMenuModel(P2, columns, { canPost: true });
+    expect(m.moveTo?.map((c) => [c.name, c.category, c.checked])).toEqual([
+      ["Backlog", "backlog", false],
+      ["In progress", "started", true],
+      ["Done", "done", false],
+      ["Cancelled", "cancelled", false],
+    ]);
+    const done = m.moveTo?.find((c) => c.columnId === COL.done);
+    expect(done?.intent).toEqual({ move: { columnId: COL.done, afterCardId: D2.messageId }, via: "menu" });
+    const empty = m.moveTo?.find((c) => c.columnId === COL.backlog);
+    expect(empty?.intent).toEqual({ move: { columnId: COL.backlog, afterCardId: null }, via: "menu" });
+    expect(m.moveTo?.find((c) => c.checked)?.intent).toBeNull();
+  });
+
+  it("Move to top / bottom inside the column, each disabled when already there", () => {
+    const middle = cardMenuModel(P2, columns, { canPost: true });
+    expect(middle.moveTop).toEqual({
+      disabled: false,
+      intent: { move: { columnId: COL.progress, afterCardId: null }, via: "top" },
+    });
+    expect(middle.moveBottom).toEqual({
+      disabled: false,
+      intent: { move: { columnId: COL.progress, afterCardId: P3.messageId }, via: "bottom" },
+    });
+    expect(cardMenuModel(P1, columns, { canPost: true }).moveTop?.disabled).toBe(true);
+    expect(cardMenuModel(P3, columns, { canPost: true }).moveBottom?.disabled).toBe(true);
+  });
+
+  it("Waiting on… offers Nobody / Us / Customer / Both with the current one checked", () => {
+    expect(cardMenuModel(P2, columns, { canPost: true }).waitingOn).toEqual([
+      { value: "none", label: "Nobody", checked: false },
+      { value: "us", label: "Us", checked: true },
+      { value: "customer", label: "Customer", checked: false },
+      { value: "both", label: "Both", checked: false },
+    ]);
+  });
+
+  it("viewers who cannot post get Open thread only", () => {
+    expect(cardMenuModel(P2, columns, { canPost: false })).toEqual({
+      openThread: true,
+      moveTo: null,
+      moveTop: null,
+      moveBottom: null,
+      waitingOn: null,
+    });
+  });
+
+  it("the trigger: Card actions, 28 px on desktop, a 44 × 44 hit area below 768 px", () => {
+    const html = renderToStaticMarkup(
+      <CardMenu
+        card={P2}
+        columns={columns}
+        canPost
+        onOpen={() => {}}
+        onMove={() => {}}
+        onWaitingOn={() => {}}
+      />,
+    );
+    expect(attr(html, /<button[^>]*data-testid="card-menu"[^>]*>/, "aria-label")).toBe("Card actions");
+    expect(html).toMatch(/data-testid="card-menu"[^>]*class="[^"]*size-7[^"]*max-md:size-11/);
+    expect(html).toContain("lucide-ellipsis");
+  });
+});
+
+describe("CategoryIcon (UI-SPEC Color › Column category)", () => {
+  const icon = (category: BoardColumnCategory) => renderToStaticMarkup(<CategoryIcon category={category} />);
+
+  it("draws the category's shape as a labelled image, colour only reinforcing it", () => {
+    expect(icon("backlog")).toMatch(/lucide-circle-dashed/);
+    expect(icon("started")).toMatch(/lucide-circle-dot/);
+    expect(icon("done")).toMatch(/lucide-circle-check/);
+    expect(icon("cancelled")).toMatch(/lucide-circle-x/);
+    for (const [category, label, tone] of [
+      ["backlog", "Backlog", "text-muted-foreground"],
+      ["started", "Started", "text-blue-600 dark:text-blue-400"],
+      ["done", "Done", "text-success"],
+      ["cancelled", "Cancelled", "text-muted-foreground/70"],
+    ] as const) {
+      const html = icon(category);
+      expect(html).toContain('role="img"');
+      expect(html).toContain(`aria-label="${label}"`);
+      expect(html).toContain(tone);
+      expect(html).toContain("size-4");
+      expect(html).not.toContain('aria-hidden="true"');
+    }
+  });
+
+  it("is decorative next to a column name (menus)", () => {
+    const html = renderToStaticMarkup(<CategoryIcon category="done" decorative />);
+    expect(html).toContain('aria-hidden="true"');
+    expect(html).not.toContain('role="img"');
+  });
+});
+
+describe("ColumnHeader (UI-SPEC Column (lane) header)", () => {
+  const column = COLUMNS[1] ?? COLUMNS[0]!;
+  const header = (props: Partial<Parameters<typeof ColumnHeader>[0]> = {}) =>
+    renderToStaticMarkup(
+      <ColumnHeader
+        column={column}
+        count={2}
+        hasMore={false}
+        canPost
+        canManage
+        onAdd={() => {}}
+        menu={<button type="button">column menu</button>}
+        {...props}
+      />,
+    );
+
+  it("icon, name as the lane heading, count, + and the menu slot", () => {
+    const html = header();
+    expect(html).toContain('role="img" aria-label="Started"');
+    expect(html).toMatch(new RegExp(`<h2 id="col-${column.id}-name"[^>]*>In progress</h2>`));
+    expect(html).toMatch(/tabular-nums[^>]*>2</);
+    expect(html).toContain('aria-label="Add card to In progress"');
+    expect(html).toContain("column menu");
+    expect(html).toContain("h-10");
+  });
+
+  it("100+ when more cards exist; no + without posting; no menu without managing", () => {
+    expect(header({ hasMore: true, count: 100 })).toMatch(/tabular-nums[^>]*>100\+</);
+    expect(header({ canPost: false })).not.toContain("Add card to");
+    expect(header({ canManage: false })).not.toContain("column menu");
+  });
+});
+
+describe("Tabs (ui/tabs.tsx)", () => {
+  const tabs = (variant: "segmented" | "underline") =>
+    renderToStaticMarkup(
+      <Tabs variant={variant} defaultValue="board">
+        <TabsList aria-label="Channel view">
+          <TabsTrigger value="board">Board</TabsTrigger>
+          <TabsTrigger value="messages">Messages</TabsTrigger>
+        </TabsList>
+        <TabsContent value="board">board</TabsContent>
+      </Tabs>,
+    );
+  const listClass = (html: string) => attr(html, /<div[^>]*role="tablist"[^>]*>/, "class") ?? "";
+  const tabClass = (html: string) => attr(html, /<button[^>]*role="tab"[^>]*>/, "class") ?? "";
+
+  it("segmented: a neutral pill, 32 px (44 px below 768), triggers 24 px (36 px)", () => {
+    const html = tabs("segmented");
+    for (const cls of ["bg-muted", "p-1", "rounded-lg", "h-8", "max-md:h-11"])
+      expect(listClass(html)).toContain(cls);
+    for (const cls of ["h-6", "px-3", "max-md:h-9", "data-active:bg-background", "data-active:shadow-xs"]) {
+      expect(tabClass(html)).toContain(cls);
+    }
+    expect(html).not.toContain("tabs-indicator");
+    expect(html).not.toContain("bg-primary");
+  });
+
+  it("underline: scrollable 44 px tabs with a 2 px primary indicator that does not slide under reduced motion", () => {
+    const html = tabs("underline");
+    expect(listClass(html)).toContain("overflow-x-auto");
+    expect(listClass(html)).not.toContain("bg-muted");
+    expect(tabClass(html)).toContain("min-h-11");
+    expect(html).toMatch(
+      /data-slot="tabs-indicator"[^>]*class="[^"]*h-0\.5[^"]*bg-primary[^"]*motion-reduce:transition-none/,
+    );
+  });
+
+  it("roles come from Base UI: tablist, tab with aria-selected, tabpanel", () => {
+    const html = tabs("segmented");
+    expect(html).toContain('role="tablist"');
+    expect(html).toContain('aria-label="Channel view"');
+    expect(html).toMatch(/role="tab"[^>]*aria-selected="true"/);
+    expect(html).toContain('role="tabpanel"');
   });
 });

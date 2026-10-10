@@ -2,19 +2,31 @@
 
 import {
   type BoardCard,
+  type BoardCardMove,
+  BoardCard as BoardCardSchema,
   BoardCardUpsertedEvent,
   BoardColumnCards,
   BoardColumnRerankedEvent,
+  type BoardFieldValues,
   type BoardSnapshot,
   BoardSnapshot as BoardSnapshotSchema,
   BoardUpdatedEvent,
   EventTypes,
   MessageDeletedEvent,
   ThreadUpdatedEvent,
+  type UpdateBoardCardRequest,
+  type WaitingOn,
 } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
-import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, isApiError } from "./api";
+import {
+  type QueryClient,
+  useMutation,
+  useMutationState,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
+import { toast } from "sonner";
+import { ApiRequestError, api, errorMessage, isApiError, type Schema } from "./api";
 
 /**
  * The browser's board cache (Phase 07.1, BOARD-02 … BOARD-04, D-03, D-05, P-06, P-11). One snapshot per board channel
@@ -290,4 +302,291 @@ export function applyBoardFrame(qc: QueryClient, convId: string, frame: TopicFra
     }
   }
   return isBoard;
+}
+
+// ---------------------------------------------------------------- moves and waiting changes (D-05, UI-SPEC)
+
+/**
+ * Optimistic placement of a move intent, by index only (the browser never mints a rank; the server places the card and
+ * its `board.card_upserted` or PATCH response brings the real rank): the card leaves its column and lands right after
+ * `afterCardId` in the target column, at the top for null, at the bottom when that card is not there. Entering a
+ * column with a default waiting state takes it, like the server does (P-09). The input snapshot is never mutated.
+ */
+export function placeCard(s: BoardSnapshot, messageId: string, move: BoardCardMove): BoardSnapshot {
+  const found = findCard(s, messageId);
+  if (!found || !hasColumn(s, move.columnId)) return s;
+  const target = s.columns.find((c) => c.id === move.columnId);
+  const entering = found.card.columnId !== move.columnId;
+  const waitingOn =
+    entering && target?.defaultWaitingOn != null ? target.defaultWaitingOn : found.card.waitingOn;
+  const placed: BoardCard = { ...found.card, columnId: move.columnId, waitingOn };
+  const without = withoutCard(s, messageId);
+  return {
+    ...without,
+    cards: without.cards.map((col) => {
+      if (col.columnId !== move.columnId) return col;
+      const after =
+        move.afterCardId === null ? -1 : col.cards.findIndex((c) => c.messageId === move.afterCardId);
+      const at = move.afterCardId === null ? 0 : after === -1 ? col.cards.length : after + 1;
+      const cards = [...col.cards];
+      cards.splice(at, 0, placed);
+      return { ...col, cards };
+    }),
+  };
+}
+
+/** Optimistic waiting state of one card (same position). */
+export function setWaitingOn(s: BoardSnapshot, messageId: string, waitingOn: WaitingOn): BoardSnapshot {
+  return patchCard(s, messageId, (c) => (c.waitingOn === waitingOn ? c : { ...c, waitingOn }));
+}
+
+/**
+ * The board as if an optimistic change of `original` had never happened, keeping every live change that arrived
+ * meanwhile: the cached copy goes back to `original`'s column, rank position and waiting state, unless the server
+ * already sent a newer version of the card (that copy is the truth and stays).
+ */
+export function undoPlacement(s: BoardSnapshot, original: BoardCard): BoardSnapshot {
+  const found = findCard(s, original.messageId);
+  if (found && found.card.version > original.version) return s;
+  if (!hasColumn(s, original.columnId)) return withoutCard(s, original.messageId);
+  return insertByRank(withoutCard(s, original.messageId), original);
+}
+
+/**
+ * Rollback after a failed move or waiting change: `snapshotBefore` (the board without the optimistic change), then the
+ * server's current card when the API sent one (409 `board_card_version_conflict`), placed by its version and rank.
+ */
+export function rollbackWith(snapshotBefore: BoardSnapshot, serverCard?: BoardCard | null): BoardSnapshot {
+  return serverCard ? upsertCard(snapshotBefore, serverCard) : snapshotBefore;
+}
+
+export type BoardAnnouncementEvent =
+  | "menuMove"
+  | "moveTop"
+  | "moveBottom"
+  | "waiting"
+  | "rollback"
+  | "conflict"
+  | "updateFailed";
+
+const WAITING_PHRASE: Record<Exclude<WaitingOn, "none">, string> = {
+  us: "us",
+  customer: "the customer",
+  both: "both",
+};
+
+/**
+ * The polite live-region copy for the viewer's own actions (07.1-UI-SPEC Copywriting › Screen-reader announcements).
+ * Other people's live changes are applied silently and never announced.
+ */
+export function boardAnnouncement(
+  event: BoardAnnouncementEvent,
+  ctx: { title: string; column?: string; waitingOn?: WaitingOn },
+): string {
+  const t = `“${ctx.title}”`;
+  const column = ctx.column ?? "";
+  switch (event) {
+    case "menuMove":
+      return `Moved ${t} to ${column}.`;
+    case "moveTop":
+      return `Moved ${t} to the top of ${column}.`;
+    case "moveBottom":
+      return `Moved ${t} to the bottom of ${column}.`;
+    case "waiting":
+      return !ctx.waitingOn || ctx.waitingOn === "none"
+        ? `${t} is no longer waiting on anyone.`
+        : `${t} is now waiting on ${WAITING_PHRASE[ctx.waitingOn]}.`;
+    case "rollback":
+      return `${t} couldn't be moved and is back in ${column}.`;
+    case "conflict":
+      return `Someone else changed ${t}. Showing the latest.`;
+    case "updateFailed":
+      return `Couldn't update ${t}. Try again.`;
+  }
+}
+
+/** Toast copy for the outcomes of a card change (07.1-UI-SPEC Copywriting › Moves, rollback, conflicts). */
+export const BOARD_TOAST = {
+  conflict: "Someone else changed this card. Showing the latest.",
+  archived: "This channel is archived. Cards can't be changed.",
+  moveFailed: (title: string, column: string) => `Couldn't move “${title}”. It's back in ${column}.`,
+  updateFailed: (title: string) => `Couldn't update “${title}”. Try again.`,
+  notMember: (channel: string) => `Join #${channel} to move cards.`,
+};
+
+/** A PATCH or POST answer: the card itself, or `{ card }`. */
+const CardResponse: Schema<BoardCard> = {
+  parse(data: unknown): BoardCard {
+    const direct = BoardCardSchema.safeParse(data);
+    return direct.success ? direct.data : BoardCardUpsertedEvent.parse(data).card;
+  },
+};
+
+/** The current card a 409 `board_card_version_conflict` carries (`error.details.card` or `error.details`), if any. */
+export function conflictCard(err: unknown): BoardCard | null {
+  if (!(err instanceof ApiRequestError)) return null;
+  const details = err.details as { card?: unknown } | undefined;
+  const parsed = BoardCardSchema.safeParse(details?.card ?? details);
+  return parsed.success ? parsed.data : null;
+}
+
+/** One change of one card, as the board view and the card strip send it. */
+export type CardChange = {
+  messageId: string;
+  move?: BoardCardMove;
+  waitingOn?: WaitingOn;
+  /** Which control sent a move; "drag" moves are announced by the drag and drop live region, not here. */
+  via?: "menu" | "top" | "bottom" | "drag";
+};
+
+export type CardChangeResult =
+  | { ok: true; card: BoardCard }
+  | { ok: false; reason: "missing" | "conflict" | "archived" | "forbidden" | "failed" };
+
+export interface CardChangeEffects {
+  send: (messageId: string, body: UpdateBoardCardRequest) => Promise<BoardCard>;
+  toast: { neutral: (message: string) => void; error: (message: string, description?: string) => void };
+  announce?: ((text: string) => void) | undefined;
+  /** Enables the "Join #channel" copy for a 403. */
+  channelName?: string | undefined;
+}
+
+/**
+ * A move or waiting change (D-05, 07.1-UI-SPEC Optimistic moves): `placeCard` / `setWaitingOn` at once, one PATCH with
+ * the cached `expectedVersion`, then the server's card. On failure the change is undone (`undoPlacement` →
+ * `rollbackWith`) and the outcome toasted and announced: 409 applies the server's current card (neutral toast), 410
+ * says the channel is archived, anything else says the card is back where it was.
+ */
+export async function changeBoardCard(
+  qc: QueryClient,
+  convId: string,
+  change: CardChange,
+  fx: CardChangeEffects,
+): Promise<CardChangeResult> {
+  const key = boardKeys.board(convId);
+  const snap = qc.getQueryData<BoardSnapshot>(key);
+  const original = snap ? findCard(snap, change.messageId)?.card : undefined;
+  if (!snap || !original) return { ok: false, reason: "missing" };
+  const columnName = (id: string) => snap.columns.find((c) => c.id === id)?.name ?? "";
+  const title = original.title;
+
+  qc.setQueryData<BoardSnapshot>(key, (cur) => {
+    if (!cur) return cur;
+    const moved = change.move ? placeCard(cur, change.messageId, change.move) : cur;
+    return change.waitingOn !== undefined ? setWaitingOn(moved, change.messageId, change.waitingOn) : moved;
+  });
+
+  try {
+    const card = await fx.send(change.messageId, {
+      expectedVersion: original.version,
+      ...(change.move ? { move: change.move } : {}),
+      ...(change.waitingOn !== undefined ? { waitingOn: change.waitingOn } : {}),
+    });
+    qc.setQueryData<BoardSnapshot>(key, (cur) => (cur ? upsertCard(cur, card) : cur));
+    const target = columnName(card.columnId);
+    if (change.move && change.via && change.via !== "drag") {
+      const event = change.via === "top" ? "moveTop" : change.via === "bottom" ? "moveBottom" : "menuMove";
+      fx.announce?.(boardAnnouncement(event, { title, column: target }));
+    } else if (!change.move && change.waitingOn !== undefined) {
+      fx.announce?.(boardAnnouncement("waiting", { title, waitingOn: card.waitingOn }));
+    }
+    return { ok: true, card };
+  } catch (err) {
+    const server = isApiError(err, 409) ? conflictCard(err) : null;
+    qc.setQueryData<BoardSnapshot>(key, (cur) =>
+      cur ? rollbackWith(undoPlacement(cur, original), server) : cur,
+    );
+    const back = columnName(original.columnId);
+    const isMove = change.move !== undefined;
+    if (isApiError(err, 409)) {
+      if (!server) void qc.invalidateQueries({ queryKey: key });
+      fx.toast.neutral(BOARD_TOAST.conflict);
+      fx.announce?.(boardAnnouncement("conflict", { title }));
+      return { ok: false, reason: "conflict" };
+    }
+    if (isApiError(err, 410)) {
+      fx.toast.error(BOARD_TOAST.archived);
+      fx.announce?.(BOARD_TOAST.archived);
+      return { ok: false, reason: "archived" };
+    }
+    if (isApiError(err, 403) && fx.channelName) {
+      fx.toast.error(BOARD_TOAST.notMember(fx.channelName));
+      fx.announce?.(BOARD_TOAST.notMember(fx.channelName));
+      return { ok: false, reason: "forbidden" };
+    }
+    if (isMove) {
+      fx.toast.error(BOARD_TOAST.moveFailed(title, back), errorMessage(err));
+      fx.announce?.(boardAnnouncement("rollback", { title, column: back }));
+    } else {
+      fx.toast.error(BOARD_TOAST.updateFailed(title), errorMessage(err));
+      fx.announce?.(boardAnnouncement("updateFailed", { title }));
+    }
+    return { ok: false, reason: "failed" };
+  }
+}
+
+const updateKey = (convId: string) => ["board", convId, "update"] as const;
+
+/**
+ * Moves and waiting changes of a board's cards (`changeBoardCard` with the PATCH, sonner toasts and the caller's
+ * polite live region). Pending changes are visible through `usePendingCardIds`.
+ */
+export function useUpdateBoardCard(
+  convId: string,
+  opts: { announce?: (text: string) => void; channelName?: string } = {},
+) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: updateKey(convId),
+    mutationFn: (change: CardChange) =>
+      changeBoardCard(qc, convId, change, {
+        send: (messageId, body) =>
+          api.patch(`/api/v1/boards/${convId}/cards/${messageId}`, { body, schema: CardResponse }),
+        toast: {
+          neutral: (message) => toast(message),
+          error: (message, description) => toast.error(message, description ? { description } : undefined),
+        },
+        announce: opts.announce,
+        channelName: opts.channelName,
+      }),
+  });
+}
+
+/** Cards with a change in flight (`aria-busy` on their tiles). */
+export function usePendingCardIds(convId: string): string[] {
+  return useMutationState({
+    filters: { mutationKey: updateKey(convId), status: "pending" },
+    select: (m) => (m.state.variables as CardChange | undefined)?.messageId ?? "",
+  }).filter(Boolean);
+}
+
+/** A new card's request; `clientMessageId` defaults to a fresh id per call (pass one to retry idempotently). */
+export type NewBoardCard = {
+  title?: string;
+  description?: string;
+  columnId?: string;
+  waitingOn?: WaitingOn;
+  fields?: BoardFieldValues;
+  clientMessageId?: string;
+};
+
+function newClientId(): string {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+/** `POST /boards/:id/cards`; the server's card joins the cached board (its event is then a no-op, same version). */
+export function useCreateBoardCard(convId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ clientMessageId, description, ...rest }: NewBoardCard) =>
+      api.post(`/api/v1/boards/${convId}/cards`, {
+        body: { ...rest, description: description ?? "", clientMessageId: clientMessageId ?? newClientId() },
+        schema: CardResponse,
+      }),
+    onSuccess: (card) => {
+      qc.setQueryData<BoardSnapshot>(boardKeys.board(convId), (cur) => (cur ? upsertCard(cur, card) : cur));
+    },
+  });
 }

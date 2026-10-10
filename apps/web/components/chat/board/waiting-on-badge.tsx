@@ -62,7 +62,7 @@ export function WaitingOnBadge({ state, className }: { state: WaitingOn; classNa
       data-testid="waiting-on-badge"
       data-state={state}
       className={cn(
-        "inline-flex h-5 w-fit items-center gap-1.5 rounded-full px-2 text-xs font-semibold",
+        "inline-flex h-5 w-fit shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2 text-xs font-semibold",
         tone,
         className,
       )}

@@ -209,7 +209,10 @@ export function CardTile({
         </Tooltip>
 
         {menu !== undefined ? (
-          <div data-slot="card-menu" className="z-10 col-start-3 row-start-1 -my-1 -mr-1 self-start">
+          <div
+            data-slot="card-menu"
+            className="z-10 col-start-3 row-start-1 -my-1 -mr-1 self-start max-md:-my-3 max-md:-mr-3"
+          >
             {menu}
           </div>
         ) : null}

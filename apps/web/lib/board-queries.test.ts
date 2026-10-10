@@ -1,9 +1,22 @@
-import { type BoardSnapshot, EventTypes } from "@ocw/contracts";
+import { type BoardCard, type BoardSnapshot, EventTypes, type UpdateBoardCardRequest } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
 import { QueryClient } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it } from "vitest";
+import { ApiRequestError } from "./api";
 import { AT, BOARD, COL, COLUMNS, CONV, card, id, order, snapshot } from "./board-fixtures.test-util";
-import { applyBoardFrame, boardAfterSeq, boardKeys, resyncBoard } from "./board-queries";
+import {
+  applyBoardFrame,
+  boardAfterSeq,
+  boardAnnouncement,
+  boardKeys,
+  type CardChangeEffects,
+  changeBoardCard,
+  placeCard,
+  resyncBoard,
+  rollbackWith,
+  undoPlacement,
+  upsertCard,
+} from "./board-queries";
 
 /**
  * The browser's board cache (07.1-04, BOARD-04, D-03, P-06, Pitfall 3): one dispatcher applies live frames to one
@@ -241,5 +254,269 @@ describe("one subscription, one cursor (Pitfall 3)", () => {
   it("a resync refetches the board", () => {
     resyncBoard(qc, CONV);
     expect(invalidated()).toBe(true);
+  });
+});
+
+describe("placeCard (optimistic, index only)", () => {
+  const D = card(5, { columnId: COL.done, rank: "a1" });
+  const E = card(6, { columnId: COL.done, rank: "a3" });
+  const base = () => snapshot([A, X, B, C, D, E]);
+
+  it("puts the card right after afterCardId in the target column and takes it out of its own", () => {
+    const s = base();
+    const next = placeCard(s, X.messageId, { columnId: COL.done, afterCardId: D.messageId });
+    expect(order(next)[COL.backlog]).toEqual([A.messageId]);
+    expect(order(next)[COL.done]).toEqual([D.messageId, X.messageId, E.messageId]);
+    const placed = next.cards.find((c) => c.columnId === COL.done)?.cards[1];
+    expect(placed).toMatchObject({ columnId: COL.done, rank: X.rank, version: X.version });
+  });
+
+  it("afterCardId null lands at the top; a card that is not in the target column lands at the bottom", () => {
+    expect(
+      order(placeCard(base(), X.messageId, { columnId: COL.done, afterCardId: null }))[COL.done],
+    ).toEqual([X.messageId, D.messageId, E.messageId]);
+    expect(
+      order(placeCard(base(), X.messageId, { columnId: COL.done, afterCardId: B.messageId }))[COL.done],
+    ).toEqual([D.messageId, E.messageId, X.messageId]);
+  });
+
+  it("reorders inside one column", () => {
+    expect(
+      order(placeCard(base(), C.messageId, { columnId: COL.progress, afterCardId: null }))[COL.progress],
+    ).toEqual([C.messageId, B.messageId]);
+  });
+
+  it("never mutates its input", () => {
+    const s = base();
+    const copy = structuredClone(s);
+    placeCard(s, X.messageId, { columnId: COL.done, afterCardId: D.messageId });
+    expect(s).toEqual(copy);
+  });
+
+  it("entering a column with a default waiting state takes it, like the server (P-09)", () => {
+    const s = snapshot([A, X, B, C], {
+      columns: COLUMNS.map((c) => (c.id === COL.done ? { ...c, defaultWaitingOn: "customer" as const } : c)),
+    });
+    const next = placeCard(s, X.messageId, { columnId: COL.done, afterCardId: null });
+    expect(next.cards.find((c) => c.columnId === COL.done)?.cards[0]?.waitingOn).toBe("customer");
+  });
+
+  it("an unknown card or column changes nothing", () => {
+    const s = base();
+    expect(placeCard(s, id(999), { columnId: COL.done, afterCardId: null })).toBe(s);
+    expect(placeCard(s, X.messageId, { columnId: id(999), afterCardId: null })).toBe(s);
+  });
+});
+
+describe("rollbackWith and undoPlacement", () => {
+  it("rollbackWith restores the snapshot before the move, then applies the server's card", () => {
+    const before = snapshot([A, X, B, C]);
+    expect(rollbackWith(before)).toBe(before);
+    const server = { ...X, columnId: COL.done, rank: "a0", version: 3 };
+    const next = rollbackWith(before, server);
+    expect(order(next)[COL.backlog]).toEqual([A.messageId]);
+    expect(order(next)[COL.done]).toEqual([X.messageId]);
+  });
+
+  it("undoPlacement puts the card back by rank and keeps live changes that arrived meanwhile", () => {
+    const placed = placeCard(snapshot([A, X, B, C]), X.messageId, { columnId: COL.done, afterCardId: null });
+    const live = upsertCard(placed, { ...C, columnId: COL.cancelled, version: 2 });
+    const undone = undoPlacement(live, X);
+    expect(order(undone)[COL.backlog]).toEqual([A.messageId, X.messageId]);
+    expect(order(undone)[COL.done]).toEqual([]);
+    expect(order(undone)[COL.cancelled]).toEqual([C.messageId]);
+  });
+
+  it("undoPlacement keeps a newer server copy of the card itself", () => {
+    const placed = placeCard(snapshot([A, X, B, C]), X.messageId, { columnId: COL.done, afterCardId: null });
+    const newer = upsertCard(placed, { ...X, columnId: COL.cancelled, version: 3 });
+    expect(undoPlacement(newer, X)).toBe(newer);
+  });
+});
+
+describe("boardAnnouncement (UI-SPEC screen-reader copy)", () => {
+  const title = "Broken pump";
+  it("returns the exact strings", () => {
+    expect(boardAnnouncement("menuMove", { title, column: "Done" })).toBe("Moved “Broken pump” to Done.");
+    expect(boardAnnouncement("moveTop", { title, column: "Done" })).toBe(
+      "Moved “Broken pump” to the top of Done.",
+    );
+    expect(boardAnnouncement("moveBottom", { title, column: "Done" })).toBe(
+      "Moved “Broken pump” to the bottom of Done.",
+    );
+    expect(boardAnnouncement("rollback", { title, column: "Backlog" })).toBe(
+      "“Broken pump” couldn't be moved and is back in Backlog.",
+    );
+    expect(boardAnnouncement("conflict", { title })).toBe(
+      "Someone else changed “Broken pump”. Showing the latest.",
+    );
+    expect(boardAnnouncement("waiting", { title, waitingOn: "customer" })).toBe(
+      "“Broken pump” is now waiting on the customer.",
+    );
+    expect(boardAnnouncement("waiting", { title, waitingOn: "us" })).toBe(
+      "“Broken pump” is now waiting on us.",
+    );
+    expect(boardAnnouncement("waiting", { title, waitingOn: "both" })).toBe(
+      "“Broken pump” is now waiting on both.",
+    );
+    expect(boardAnnouncement("waiting", { title, waitingOn: "none" })).toBe(
+      "“Broken pump” is no longer waiting on anyone.",
+    );
+  });
+});
+
+describe("changeBoardCard: optimistic intent, rollback, conflict (D-05)", () => {
+  type Sent = { messageId: string; body: UpdateBoardCardRequest };
+
+  function effects(answer: (sent: Sent) => Promise<BoardCard>) {
+    const sent: Sent[] = [];
+    const toasts: string[] = [];
+    const announced: string[] = [];
+    let seenDuringRequest: BoardSnapshot | undefined;
+    const fx: CardChangeEffects = {
+      send: (messageId, body) => {
+        sent.push({ messageId, body });
+        seenDuringRequest = cached();
+        return answer({ messageId, body });
+      },
+      toast: {
+        neutral: (m) => toasts.push(`neutral: ${m}`),
+        error: (m, d) => toasts.push(`error: ${m}${d ? ` (${d})` : ""}`),
+      },
+      announce: (t) => announced.push(t),
+    };
+    return { fx, sent, toasts, announced, during: () => seenDuringRequest };
+  }
+
+  const toDone = { columnId: COL.done, afterCardId: null };
+
+  it("places at once, sends the intent with the cached version (never a rank), applies the server card, announces", async () => {
+    const t = effects(async () => ({ ...X, columnId: COL.done, rank: "a0", version: 3 }));
+    const result = await changeBoardCard(
+      qc,
+      CONV,
+      { messageId: X.messageId, move: toDone, via: "menu" },
+      t.fx,
+    );
+    expect(t.sent).toEqual([{ messageId: X.messageId, body: { expectedVersion: 2, move: toDone } }]);
+    expect(order(t.during())[COL.done]).toEqual([X.messageId]);
+    expect(result).toMatchObject({ ok: true, card: { version: 3 } });
+    expect(order(cached())[COL.done]).toEqual([X.messageId]);
+    expect(cached()?.cards.find((c) => c.columnId === COL.done)?.cards[0]?.rank).toBe("a0");
+    expect(t.announced).toEqual(["Moved “Card 4” to Done."]);
+    expect(t.toasts).toEqual([]);
+  });
+
+  it("drag moves are not announced here (the drag and drop live region does it)", async () => {
+    const t = effects(async () => ({ ...X, columnId: COL.done, version: 3 }));
+    await changeBoardCard(qc, CONV, { messageId: X.messageId, move: toDone, via: "drag" }, t.fx);
+    expect(t.announced).toEqual([]);
+  });
+
+  it("a waiting change is optimistic and announced", async () => {
+    const t = effects(async () => ({ ...X, waitingOn: "customer", version: 3 }));
+    await changeBoardCard(qc, CONV, { messageId: X.messageId, waitingOn: "customer" }, t.fx);
+    expect(t.sent[0]?.body).toEqual({ expectedVersion: 2, waitingOn: "customer" });
+    expect(t.during()?.cards[0]?.cards[1]?.waitingOn).toBe("customer");
+    expect(t.announced).toEqual(["“Card 4” is now waiting on the customer."]);
+  });
+
+  it("409: rolls back, applies the server's current card, neutral toast, announces the conflict", async () => {
+    const current = { ...X, columnId: COL.cancelled, rank: "a0", version: 5 };
+    const t = effects(async () => {
+      throw new ApiRequestError(409, "board_card_version_conflict", "Card changed", { card: current });
+    });
+    const result = await changeBoardCard(
+      qc,
+      CONV,
+      { messageId: X.messageId, move: toDone, via: "menu" },
+      t.fx,
+    );
+    expect(result).toEqual({ ok: false, reason: "conflict" });
+    expect(order(cached())[COL.done]).toEqual([]);
+    expect(order(cached())[COL.backlog]).toEqual([A.messageId]);
+    expect(order(cached())[COL.cancelled]).toEqual([X.messageId]);
+    expect(t.toasts).toEqual(["neutral: Someone else changed this card. Showing the latest."]);
+    expect(t.announced).toEqual(["Someone else changed “Card 4”. Showing the latest."]);
+  });
+
+  it("409 without a card in the body: rolls back and refetches the board", async () => {
+    const t = effects(async () => {
+      throw new ApiRequestError(409, "board_card_version_conflict", "Card changed");
+    });
+    await changeBoardCard(qc, CONV, { messageId: X.messageId, move: toDone }, t.fx);
+    expect(order(cached())[COL.backlog]).toEqual([A.messageId, X.messageId]);
+    expect(invalidated()).toBe(true);
+  });
+
+  it("other failures roll back, toast.error with the API message and announce the rollback", async () => {
+    const t = effects(async () => {
+      throw new ApiRequestError(500, "internal", "Boom");
+    });
+    const result = await changeBoardCard(
+      qc,
+      CONV,
+      { messageId: X.messageId, move: toDone, via: "menu" },
+      t.fx,
+    );
+    expect(result).toEqual({ ok: false, reason: "failed" });
+    expect(order(cached())[COL.backlog]).toEqual([A.messageId, X.messageId]);
+    expect(order(cached())[COL.done]).toEqual([]);
+    expect(t.toasts).toEqual(["error: Couldn't move “Card 4”. It's back in Backlog. (Boom)"]);
+    expect(t.announced).toEqual(["“Card 4” couldn't be moved and is back in Backlog."]);
+  });
+
+  it("a failed waiting change rolls back with its own copy", async () => {
+    const t = effects(async () => {
+      throw new ApiRequestError(0, "network_error", "Can't reach the server");
+    });
+    await changeBoardCard(qc, CONV, { messageId: X.messageId, waitingOn: "us" }, t.fx);
+    expect(cached()?.cards[0]?.cards[1]?.waitingOn).toBe("none");
+    expect(t.toasts[0]).toMatch(/^error: Couldn't update “Card 4”\. Try again\./);
+    expect(t.announced).toEqual(["Couldn't update “Card 4”. Try again."]);
+  });
+
+  it("410: rolls back and says the channel is archived", async () => {
+    const t = effects(async () => {
+      throw new ApiRequestError(410, "channel_archived", "Archived");
+    });
+    expect(await changeBoardCard(qc, CONV, { messageId: X.messageId, move: toDone }, t.fx)).toEqual({
+      ok: false,
+      reason: "archived",
+    });
+    expect(order(cached())[COL.backlog]).toEqual([A.messageId, X.messageId]);
+    expect(t.toasts).toEqual(["error: This channel is archived. Cards can't be changed."]);
+  });
+
+  it("403 with a channel name asks to join", async () => {
+    const t = effects(async () => {
+      throw new ApiRequestError(403, "forbidden", "No");
+    });
+    t.fx.channelName = "cases";
+    await changeBoardCard(qc, CONV, { messageId: X.messageId, move: toDone }, t.fx);
+    expect(t.toasts).toEqual(["error: Join #cases to move cards."]);
+  });
+
+  it("a live move of another card during the request survives the rollback", async () => {
+    const t = effects(async () => {
+      applyBoardFrame(
+        qc,
+        CONV,
+        ev(EventTypes.boardCardUpserted, { card: { ...B, columnId: COL.done, version: 2 } }),
+      );
+      throw new ApiRequestError(500, "internal", "Boom");
+    });
+    await changeBoardCard(qc, CONV, { messageId: X.messageId, move: toDone }, t.fx);
+    expect(order(cached())[COL.done]).toEqual([B.messageId]);
+    expect(order(cached())[COL.backlog]).toEqual([A.messageId, X.messageId]);
+  });
+
+  it("an uncached card sends nothing", async () => {
+    const t = effects(async () => X);
+    expect(await changeBoardCard(qc, CONV, { messageId: id(999), move: toDone }, t.fx)).toEqual({
+      ok: false,
+      reason: "missing",
+    });
+    expect(t.sent).toEqual([]);
   });
 });
