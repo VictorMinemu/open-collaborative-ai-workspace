@@ -324,6 +324,41 @@ async function seedOrg(c: pg.Client, org: string) {
     cardMsg,
     user,
   ]);
+
+  // Phase 07.1 (board channels and record templates): one row per new table. An organization-wide template, a
+  // board channel created from it with one column, and a card on the board's first top-level message.
+  const template = randomUUID();
+  const board = randomUUID();
+  const column = randomUUID();
+  const cardRoot = randomUUID();
+  await q(
+    `insert into app.record_templates (id, organization_id, unit_id, name, prefix, naming_rule, fields, columns, created_by) values ($1, $2, null, 'Case file', 'EXP', '{prefix}-{seq:0000} · {summary}', '[{"key":"customer","label":"Customer","type":"text"}]', '[{"name":"Backlog","category":"backlog"}]', $3)`,
+    [template, org, user],
+  );
+  await q(
+    "insert into app.conversations (id, organization_id, kind, name, slug, created_by, layout) values ($1, $2, 'channel', 'cases', $3, $4, 'board')",
+    [board, org, `cases-${board}`, user],
+  );
+  await q(
+    "insert into app.conversation_members (conversation_id, organization_id, member_kind, member_id, role) values ($1, $2, 'user', $3, 'owner')",
+    [board, org, user],
+  );
+  await q(
+    `insert into app.boards (conversation_id, organization_id, template_id, prefix, naming_rule, fields, last_number) values ($1, $2, $3, 'EXP', '{prefix}-{seq:0000} · {summary}', '[{"key":"customer","label":"Customer","type":"text"}]', 1)`,
+    [board, org, template],
+  );
+  await q(
+    "insert into app.board_columns (id, organization_id, conversation_id, name, rank, category) values ($1, $2, $3, 'Backlog', 'a0', 'backlog')",
+    [column, org, board],
+  );
+  await q(
+    "insert into app.messages (id, organization_id, conversation_id, seq, author_kind, author_id, body) values ($1, $2, $3, 1, 'user', $4, 'EXP-0001 · Broken pump')",
+    [cardRoot, org, board, user],
+  );
+  await q(
+    `insert into app.board_cards (message_id, organization_id, conversation_id, column_id, rank, title, title_source, description, number, fields) values ($1, $2, $3, $4, 'a0', 'EXP-0001 · Broken pump', 'auto', 'Broken pump', 1, '{"customer":"Acme"}')`,
+    [cardRoot, org, board, column],
+  );
 }
 
 const AI_CHAT_TABLES = [
@@ -918,6 +953,59 @@ describe("tenant isolation (RLS)", () => {
     expect(after).toEqual([{ answered_by_generation_id: null }]);
   });
 
+  it("Phase 07.1: a board channel in org A has its column and card in rank order, every other conversation is text, org B sees none of it", async () => {
+    const board = (
+      await migrator.query("select conversation_id from app.boards where organization_id = $1", [A])
+    ).rows[0].conversation_id as string;
+    const read = (org: string) =>
+      inTenant(org, async () => {
+        const rows = (
+          await app.query(
+            `select c.kind, c.layout, b.prefix, b.last_number, col.name as column_name, col.category,
+                    card.title, card.number, card.waiting_on, card.title_source, t.name as template
+               from app.conversations c
+               join app.boards b on b.conversation_id = c.id
+               join app.board_columns col on col.conversation_id = c.id
+               join app.board_cards card on card.column_id = col.id
+               join app.messages m on m.id = card.message_id
+               left join app.record_templates t on t.id = b.template_id
+              where c.id = $1
+              order by col.rank, card.rank`,
+            [board],
+          )
+        ).rows;
+        const layouts = (
+          await app.query(
+            "select layout, count(*)::int as n from app.conversations group by layout order by 1",
+          )
+        ).rows;
+        return { rows, layouts };
+      });
+    const own = await read(A);
+    expect(own.rows).toEqual([
+      {
+        kind: "channel",
+        layout: "board",
+        prefix: "EXP",
+        last_number: 1,
+        column_name: "Backlog",
+        category: "backlog",
+        title: "EXP-0001 · Broken pump",
+        number: 1,
+        waiting_on: "none",
+        title_source: "auto",
+        template: "Case file",
+      },
+    ]);
+    // The seed's four pre-board conversations default to `text`; only the board channel is a board.
+    expect(own.layouts).toEqual([
+      { layout: "board", n: 1 },
+      { layout: "text", n: 4 },
+    ]);
+    const cross = await read(B);
+    expect(cross.rows).toEqual([]);
+  });
+
   it("Phase 4: accent-insensitive Spanish search, a stored tsvector and the search indexes", async () => {
     const match = await migrator.query(
       "select to_tsvector('app.ocw_es', 'migración') @@ websearch_to_tsquery('app.ocw_es', 'migracion') as ok",
@@ -983,7 +1071,7 @@ describe("tenant isolation (RLS)", () => {
         const r = await tx.execute("select count(*)::int as n from app.conversations");
         return (r.rows[0] as { n: number }).n;
       });
-      expect(n).toBe(4); // channel + work-session conversation + the 3.1 DM + the Phase 6 AI chat
+      expect(n).toBe(5); // channel + work-session conversation + the 3.1 DM + the Phase 6 AI chat + the 07.1 board
     } finally {
       await db.close();
     }
@@ -1015,7 +1103,7 @@ describe("tenant isolation (RLS)", () => {
         const r = await tx.execute("select count(*)::int as n from app.conversations");
         return (r.rows[0] as { n: number }).n;
       });
-      expect(n).toBe(4); // channel + work-session conversation + the 3.1 DM + the Phase 6 AI chat
+      expect(n).toBe(5); // channel + work-session conversation + the 3.1 DM + the Phase 6 AI chat + the 07.1 board
     } finally {
       process.off("uncaughtException", onUncaught);
       await db.close();
@@ -1029,7 +1117,7 @@ describe("tenant isolation (RLS)", () => {
         const r = await tx.execute("select count(*)::int as n from app.conversations");
         return (r.rows[0] as { n: number }).n;
       });
-      expect(n).toBe(4); // channel + work-session conversation + the 3.1 DM + the Phase 6 AI chat
+      expect(n).toBe(5); // channel + work-session conversation + the 3.1 DM + the Phase 6 AI chat + the 07.1 board
       // Same single pooled connection, no tenant context now.
       const after = await db.pool.query("select count(*)::int as n from app.conversations");
       expect(after.rows[0].n).toBe(0);

@@ -35,6 +35,7 @@ const HEAD_ONLY = [
   "20261007073058_multiplayer_ai",
   "20261007163629_work_prompt_images",
   "20261007173205_work_prompt_image_order",
+  "20261010010825_board_channels",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
