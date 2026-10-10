@@ -9,34 +9,48 @@ import {
   type ModuleInherited,
 } from "@ocw/contracts";
 import {
+  Blocks,
   Bot,
   ChevronRight,
   type LucideIcon,
+  Search,
   Sparkles,
   SquareTerminal,
   TriangleAlert,
   UserPlus,
 } from "lucide-react";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { UserAvatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
-import { errorMessage } from "@/lib/api";
+import { errorMessage, isApiError } from "@/lib/api";
 import { useModuleAccess, useSetModuleAccess } from "@/lib/module-access-queries";
 import { useUnits } from "@/lib/org-queries";
 import { useCan } from "@/lib/permissions";
+import { useMe, useMembers } from "@/lib/queries";
 import type { UnitNode } from "./unit-meta";
 
 /**
  * The Modules panel (07.3-04, ADR-0024, ACCESS-02, P-06, P-07): Work Zone, AI chats and Bots on or off for everyone in
  * a unit (or the organization) and per person, as the resolver's ordinary deny rules. Everything editable comes from
  * the API's view: `viewerCan` on the unit decides whether the card shows, `canEdit` per person, `inherited` what an
- * ancestor already turned off. The browser never checks a role.
+ * ancestor already turned off. The browser never decides by role: a member's role is read only to word why their row
+ * is read-only.
  */
 
 const MODULE_ICONS: Record<ModuleId, LucideIcon> = {
@@ -61,6 +75,10 @@ export function inheritedLine(inherited: ModuleInherited): string {
     : `${off} for everyone in ${inherited.name}`;
 }
 
+/** "the organization" or the unit's name, inside a sentence. */
+const scopeWords = (view: ModuleAccessView, scopeName: string) =>
+  view.scope.scopeUnitId === null ? "the organization" : scopeName;
+
 /** The Bots warning: turning Bots off on a unit silences that unit's own bots for everyone (D-05). */
 export const botsWarning = (scopeName: string, n: number) =>
   `${scopeName} has ${n} ${n === 1 ? "bot" : "bots"}. Turning Bots off also stops them for everyone, admins included.`;
@@ -82,6 +100,32 @@ export function personChips(person: ModuleAccessPerson, view: ModuleAccessView):
     }
   }
   return chips;
+}
+
+/**
+ * What to confirm before turning `module` off for everyone, or null to toggle at once: always at organization scope
+ * (it reaches every admin, the caller included), and on a unit for Bots when the unit owns bots (they stop for
+ * everyone).
+ */
+export function offConfirmation(
+  view: ModuleAccessView,
+  module: ModuleId,
+  scopeName: string,
+): { title: string; body: string } | null {
+  const l = label(module);
+  if (view.scope.scopeUnitId === null) {
+    return {
+      title: `Turn ${l} off for everyone?`,
+      body: `Everyone in the organization loses ${l} right away, admins included. Turning it back on restores it.`,
+    };
+  }
+  if (module === "bots" && view.unitBotCount > 0) {
+    return {
+      title: `Turn Bots off for everyone in ${scopeName}?`,
+      body: botsWarning(scopeName, view.unitBotCount),
+    };
+  }
+  return null;
 }
 
 export interface ModuleAccessPanelProps {
@@ -112,7 +156,7 @@ export function ModuleAccessPanel({
   const listed = view.people
     .map((p) => ({ person: p, chips: personChips(p, view) }))
     .filter((r) => r.chips.length > 0);
-  const scopeWords = view.scope.scopeUnitId === null ? "the organization" : scopeName;
+  const words = scopeWords(view, scopeName);
 
   return (
     <div className="grid gap-6">
@@ -142,7 +186,7 @@ export function ModuleAccessPanel({
           <div className="min-w-0">
             <h4 className="font-semibold text-sm tracking-tight">Exceptions for people</h4>
             <p className="mt-0.5 text-muted-foreground text-sm">
-              Turn a module off for one person in {scopeWords}.
+              Turn a module off for one person in {words}.
             </p>
           </div>
           <Button size="sm" variant="outline" onClick={onAddPerson} data-testid="module-add-person">
@@ -189,7 +233,7 @@ export function ModuleAccessPanel({
           </ul>
         ) : (
           <p className="rounded-xl border border-dashed px-4 py-4 text-muted-foreground text-sm">
-            No exceptions. Everyone in {scopeWords} follows the switches above.
+            No exceptions. Everyone in {words} follows the switches above.
           </p>
         )}
       </section>
@@ -330,22 +374,35 @@ export function ModuleAccessCard({
   const q = useModuleAccess(scopeUnitId);
   const set = useSetModuleAccess(scopeUnitId);
   const units = useUnits();
+  const members = useMembers();
   const canManageOrg = useCan("unit.modules.manage");
   const [pending, setPending] = useState<ModuleId | null>(null);
-  const [, setEditing] = useState<string | null>(null);
-  const [, setAdding] = useState(false);
+  const [confirm, setConfirm] = useState<ModuleId | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
 
   const canOpenScope = (id: string | null) =>
     id === null
       ? canManageOrg
       : (units.data?.units.find((u) => u.id === id)?.viewerCan.includes("unit.modules.manage") ?? false);
 
-  const toggle = (module: ModuleId, enabled: boolean) => {
+  // Wording only: the API decided `canEdit`; the member's role says whether "an admin" is the right word.
+  const roles = new Map((members.data?.members ?? []).map((m) => [m.userId, m.role]));
+  const readOnlyReason = (p: ModuleAccessPerson) =>
+    roles.get(p.userId) === "admin"
+      ? ADMIN_ONLY
+      : `Only an organization admin can change modules for ${p.displayName}.`;
+
+  const apply = (module: ModuleId, enabled: boolean) => {
     setPending(module);
     set.mutate(
       { module, subject: { kind: "everyone" }, enabled },
       { onError: (err) => toast.error(errorMessage(err)), onSettled: () => setPending(null) },
     );
+  };
+  const toggle = (module: ModuleId, enabled: boolean) => {
+    if (!enabled && q.data && offConfirmation(q.data, module, scopeName)) setConfirm(module);
+    else apply(module, enabled);
   };
 
   if (q.isLoading) {
@@ -365,6 +422,21 @@ export function ModuleAccessCard({
     );
   }
   if (!q.data) {
+    if (scopeUnitId === null && isApiError(q.error, 403)) {
+      return (
+        <div
+          data-testid="module-access-forbidden"
+          className="flex flex-col items-center gap-2 rounded-xl border border-dashed px-6 py-10 text-center"
+        >
+          <span className="flex size-10 items-center justify-center rounded-xl bg-primary/10 text-primary">
+            <Blocks className="size-5" />
+          </span>
+          <p className="max-w-sm text-balance text-muted-foreground text-sm">
+            Only organization admins manage modules here. Team leads: Settings › Organization.
+          </p>
+        </div>
+      );
+    }
     return (
       <p
         role="alert"
@@ -374,16 +446,313 @@ export function ModuleAccessCard({
       </p>
     );
   }
+
+  const view = q.data;
+  const confirmCopy = confirm ? offConfirmation(view, confirm, scopeName) : null;
+  const person = editing ? (view.people.find((p) => p.userId === editing) ?? null) : null;
+
   return (
-    <ModuleAccessPanel
-      view={q.data}
-      scopeName={scopeName}
-      pending={pending}
-      canOpenScope={canOpenScope}
-      onToggle={toggle}
-      onEditPerson={setEditing}
-      onAddPerson={() => setAdding(true)}
-    />
+    <>
+      <ModuleAccessPanel
+        view={view}
+        scopeName={scopeName}
+        pending={pending}
+        canOpenScope={canOpenScope}
+        readOnlyReason={readOnlyReason}
+        onToggle={toggle}
+        onEditPerson={setEditing}
+        onAddPerson={() => setAdding(true)}
+      />
+
+      <Dialog open={confirmCopy !== null} onOpenChange={(open) => (open ? null : setConfirm(null))}>
+        <DialogContent data-testid="module-confirm">
+          <DialogHeader>
+            <DialogTitle>{confirmCopy?.title}</DialogTitle>
+            <DialogDescription>{confirmCopy?.body}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirm(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              data-testid="module-confirm-off"
+              onClick={() => {
+                if (confirm) apply(confirm, false);
+                setConfirm(null);
+              }}
+            >
+              Turn off
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <AddPersonDialog
+        open={adding}
+        onOpenChange={setAdding}
+        view={view}
+        scopeName={scopeName}
+        onPick={(userId) => {
+          setAdding(false);
+          setEditing(userId);
+        }}
+      />
+
+      <PersonModulesDialog
+        person={person}
+        view={view}
+        scopeName={scopeName}
+        scopeUnitId={scopeUnitId}
+        readOnlyReason={readOnlyReason}
+        onClose={() => setEditing(null)}
+      />
+    </>
+  );
+}
+
+/** People of the scope with every module on: picking one opens "Modules for <name>". */
+function AddPersonDialog({
+  open,
+  onOpenChange,
+  view,
+  scopeName,
+  onPick,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  view: ModuleAccessView;
+  scopeName: string;
+  onPick: (userId: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  useEffect(() => {
+    if (open) setQuery("");
+  }, [open]);
+  const q = query.trim().toLowerCase();
+  const pickable = view.people.filter((p) => p.modules.every((m) => m.state === "on"));
+  const candidates = pickable
+    .filter((p) => !q || p.displayName.toLowerCase().includes(q))
+    .sort((a, b) => a.displayName.localeCompare(b.displayName));
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent data-testid="module-add-person-dialog" className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="break-words">Add an exception</DialogTitle>
+          <DialogDescription>
+            Pick someone in {scopeWords(view, scopeName)}, then choose which modules they lose.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="relative">
+          <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            type="search"
+            placeholder="Search by name"
+            aria-label="Search people"
+            data-testid="module-person-search"
+            className="h-10 pl-9"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        </div>
+        <DialogBody className="-mt-1 min-h-40">
+          {candidates.length === 0 ? (
+            <p className="px-2 py-10 text-center text-muted-foreground text-sm">
+              {pickable.length > 0
+                ? `No one matches “${query.trim()}”`
+                : `Everyone in ${scopeWords(view, scopeName)} already has an exception`}
+            </p>
+          ) : (
+            <ul className="grid gap-0.5" aria-label="People">
+              {candidates.map((p) => (
+                <li key={p.userId}>
+                  <button
+                    type="button"
+                    onClick={() => onPick(p.userId)}
+                    data-testid="module-pick-person"
+                    data-user-id={p.userId}
+                    className="group flex min-h-12 w-full items-center gap-3 rounded-lg px-2 py-2 text-left outline-none transition-colors hover:bg-accent/60 focus-visible:bg-accent/60"
+                  >
+                    <UserAvatar name={p.displayName} src={p.avatarUrl} seed={p.userId} className="size-9" />
+                    <span className="min-w-0 flex-1 truncate font-medium text-sm">{p.displayName}</span>
+                    <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * Why a person cannot get a module back here: off for everyone in this scope (the scope's own row, 07.3-02 open item
+ * 1), off for everyone above, or off for them above. Null when nothing above or here blocks it.
+ */
+function blockedFor(
+  own: ModuleAccessModuleState,
+  everyone: ModuleAccessModuleState | undefined,
+  view: ModuleAccessView,
+  scopeName: string,
+): string | null {
+  if (everyone && everyone.state !== "on") {
+    const off = everyone.state === "off" ? "Off" : "Partly off";
+    return view.scope.scopeUnitId === null
+      ? `${off} for the whole organization`
+      : `${off} for everyone in ${scopeName}`;
+  }
+  if (everyone?.inherited) return inheritedLine(everyone.inherited);
+  if (own.inherited) {
+    const off = own.inherited.state === "off" ? "Off" : "Partly off";
+    return own.inherited.scopeUnitId === null
+      ? `${off} for them in the whole organization`
+      : `${off} for them in ${own.inherited.name}`;
+  }
+  return null;
+}
+
+function PersonModulesDialog({
+  person,
+  view,
+  scopeName,
+  scopeUnitId,
+  readOnlyReason,
+  onClose,
+}: {
+  person: ModuleAccessPerson | null;
+  view: ModuleAccessView;
+  scopeName: string;
+  scopeUnitId: string | null;
+  readOnlyReason: (p: ModuleAccessPerson) => string;
+  onClose: () => void;
+}) {
+  const set = useSetModuleAccess(scopeUnitId);
+  const [pending, setPending] = useState<ModuleId | null>(null);
+
+  const toggle = (module: ModuleId, enabled: boolean) => {
+    if (!person) return;
+    setPending(module);
+    set.mutate(
+      { module, subject: { kind: "user", userId: person.userId }, enabled },
+      { onError: (err) => toast.error(errorMessage(err)), onSettled: () => setPending(null) },
+    );
+  };
+
+  return (
+    <Dialog open={person !== null} onOpenChange={(open) => (open ? null : onClose())}>
+      <DialogContent data-testid="module-person-dialog" className="sm:max-w-lg">
+        {person ? (
+          <>
+            <DialogHeader>
+              <DialogTitle className="break-words">Modules for {person.displayName}</DialogTitle>
+              <DialogDescription>
+                Off here applies to {person.displayName} in {scopeWords(view, scopeName)} and wins over any
+                role. Everyone else keeps the module.
+              </DialogDescription>
+            </DialogHeader>
+            {person.canEdit ? null : (
+              <p
+                data-testid="module-person-readonly"
+                className="rounded-lg border bg-muted/50 px-3 py-2.5 text-muted-foreground text-sm"
+              >
+                {readOnlyReason(person)}
+              </p>
+            )}
+            <ul className="divide-y overflow-hidden rounded-xl border bg-card">
+              {ModuleId.options.map((id) => {
+                const own = person.modules.find((m) => m.module === id) ?? {
+                  module: id,
+                  state: "on",
+                  inherited: null,
+                };
+                const blocked = blockedFor(
+                  own,
+                  view.modules.find((m) => m.module === id),
+                  view,
+                  scopeName,
+                );
+                const Icon = MODULE_ICONS[id];
+                const checked = own.state === "on" && blocked === null;
+                return (
+                  <li
+                    key={id}
+                    data-testid="person-module-row"
+                    data-module={id}
+                    data-state={own.state}
+                    className="flex items-start gap-3 px-4 py-3"
+                  >
+                    <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+                      <Icon className="size-4" strokeWidth={1.75} />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="flex flex-wrap items-center gap-x-2 gap-y-1 font-medium text-sm">
+                        {label(id)}
+                        {own.state === "custom" ? <Badge variant="outline">Custom</Badge> : null}
+                      </p>
+                      {blocked ? (
+                        <p className="mt-0.5 text-muted-foreground text-xs">{blocked}</p>
+                      ) : own.state === "custom" ? (
+                        <p className="mt-0.5 text-muted-foreground text-xs">
+                          Part of this module is off by a manual rule. Turn it on to clear it.
+                        </p>
+                      ) : (
+                        <p className="mt-0.5 text-muted-foreground text-xs">
+                          {MODULE_CATALOG[id].description}
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex h-8 shrink-0 items-center gap-2">
+                      {pending === id ? <Spinner className="size-3.5 text-muted-foreground" /> : null}
+                      <Switch
+                        checked={checked}
+                        disabled={
+                          !person.canEdit || pending === id || (blocked !== null && own.state === "on")
+                        }
+                        onCheckedChange={(on) => toggle(id, on)}
+                        aria-label={`${label(id)} for ${person.displayName}`}
+                        data-testid={`person-module-switch-${id}`}
+                        className="after:absolute after:-inset-x-1 after:-inset-y-3 after:content-['']"
+                      />
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+            <DialogFooter>
+              <Button variant="outline" onClick={onClose}>
+                Done
+              </Button>
+            </DialogFooter>
+          </>
+        ) : null}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Settings › Modules: the organization scope, for admins (the API answers 403 to anyone else). */
+export function OrganizationModulesCard() {
+  const me = useMe({ enabled: false });
+  const name = me.data?.organization.name ?? "the organization";
+  return (
+    <section className="grid gap-3" data-testid="module-access" aria-label="Modules for the organization">
+      <div className="min-w-0">
+        <h2 className="font-semibold text-[15px] tracking-tight">Everyone in {name}</h2>
+        <p className="mt-0.5 text-muted-foreground text-sm">
+          Turn Work Zone, AI chats and bots on or off for the whole organization, admins included. Off hides
+          the module and the API refuses it.
+        </p>
+      </div>
+      <ModuleAccessCard scopeUnitId={null} scopeName={name} />
+    </section>
   );
 }
 

@@ -1,7 +1,7 @@
 import type { ModuleAccessModuleState, ModuleAccessPerson, ModuleAccessView } from "@ocw/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ModuleAccessPanel } from "./module-access-card";
+import { ModuleAccessPanel, offConfirmation } from "./module-access-card";
 
 /**
  * The Modules panel (07.3-04, ACCESS-02, P-06, P-07): one switch per catalog module with its state, what an ancestor
@@ -205,5 +205,48 @@ describe("ModuleAccessPanel", () => {
         `<a[^>]*href="/settings/organization\\?unit=${CORE}"[^>]*>[\\s\\S]*Core[\\s\\S]*AI chats off, Bots custom`,
       ),
     );
+  });
+
+  it("at organization scope speaks of the organization and lists the units inside that differ", () => {
+    const org = view({
+      scope: { scopeUnitId: null, name: "Organization" },
+      overrides: [
+        {
+          unitId: ENGINEERING,
+          name: "Engineering",
+          modules: [{ module: "work_zone", state: "off", inherited: null }, on("ai_chats"), on("bots")],
+        },
+      ],
+    });
+    const html = render(org, "Autofy Labs");
+    expect(tagOf(html, "module-switch-ai_chats")).toContain(
+      'aria-label="AI chats for everyone in Autofy Labs"',
+    );
+    expect(html).toContain("Turn a module off for one person in the organization.");
+    expect(html).toContain("Turned off inside Autofy Labs");
+    expect(html).toMatch(
+      new RegExp(
+        `<a[^>]*href="/settings/organization\\?unit=${ENGINEERING}"[^>]*>[\\s\\S]*Engineering[\\s\\S]*Work Zone off`,
+      ),
+    );
+  });
+});
+
+describe("offConfirmation", () => {
+  it("asks before turning a module off for the whole organization, admins included", () => {
+    const org = view({ scope: { scopeUnitId: null, name: "Organization" } });
+    expect(offConfirmation(org, "ai_chats", "Autofy Labs")).toEqual({
+      title: "Turn AI chats off for everyone?",
+      body: "Everyone in the organization loses AI chats right away, admins included. Turning it back on restores it.",
+    });
+  });
+
+  it("asks before Bots goes off on a unit that owns bots, with the warning; otherwise a unit toggles at once", () => {
+    expect(offConfirmation(view({ unitBotCount: 3 }), "bots", "Platform")).toEqual({
+      title: "Turn Bots off for everyone in Platform?",
+      body: "Platform has 3 bots. Turning Bots off also stops them for everyone, admins included.",
+    });
+    expect(offConfirmation(view(), "bots", "Platform")).toBeNull();
+    expect(offConfirmation(view({ unitBotCount: 3 }), "ai_chats", "Platform")).toBeNull();
   });
 });
