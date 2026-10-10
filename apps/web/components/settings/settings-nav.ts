@@ -1,5 +1,6 @@
 import type { Permission } from "@ocw/contracts";
 import {
+  Blocks,
   Cpu,
   Laptop,
   LockKeyhole,
@@ -30,6 +31,14 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     href: "/settings/organization",
     icon: Network,
     permission: "unit.read",
+  },
+  // Organization scope `unit.modules.manage`: admins only (leads manage their units in Settings › Organization).
+  {
+    id: "modules",
+    label: "Modules",
+    href: "/settings/modules",
+    icon: Blocks,
+    permission: "unit.modules.manage",
   },
   { id: "models", label: "Models", href: "/settings/models", icon: Cpu, permission: "provider.manage" },
   {

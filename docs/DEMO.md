@@ -189,6 +189,31 @@ Locally: `bash scripts/e2e-isolated.sh realtime-latency --project=desktop`. The 
   clients fetch fresh tokens. Without the delete, issuing tokens fails with "Failed to decrypt private
   key". `pnpm setup:env --force` rotates the secret too.
 
+## Module access
+
+Turn Work Zone, AI chats or Bots off for a department, team or person (ADR-0024).
+
+- **Where** — Settings › Organization › a unit › **Modules** for everyone in that unit, plus per-person exceptions
+  ("Add person"). Settings › **Modules** does the same for the whole organization and lists the units where something
+  is off, each a link to it.
+- **Who** — organization admins everywhere. A team lead only on the units they lead and what is inside them, never
+  above their unit and never for an admin; what a parent unit or the organization turned off shows as "Off for
+  everyone in …" and cannot be changed there.
+- **What "off" does** — the module disappears for those people (navigation, sidebar sections, Settings entries, deep
+  links show a calm "turned off for you" page) and the API refuses it. It beats any role, admins included, and teams
+  and projects inside the unit inherit it. Changes apply live in open tabs.
+- **Admins** — Turning a module off for everyone in a unit also turns it off for
+  organization admins who are members of that unit, even when a team lead did it; a lead can never turn it off for
+  one admin in person. Turning a module off for the whole organization asks first.
+- **Bots** — turning Bots off on a unit stops that unit's own bots for everyone, admins included; the card warns
+  before it does.
+- **What stays** — Settings › Devices (list, rename, sharing, revoke) stays when Work Zone is off; only pairing
+  leaves. Existing AI chats, shares and grants are kept and come back when the module is turned on again.
+- **Owner check** — turn AI chats off for a test member from their team's Modules card and watch their open tab lose
+  the AI chats section and Settings › AI chat within seconds; turn it back on. Then check the audit:
+  `SELECT occurred_at, actor_id, action, metadata FROM app.audit_events WHERE action = 'permission_rule.created' AND metadata->>'via' = 'module_access' ORDER BY occurred_at DESC LIMIT 5;`
+  (one row per catalog pattern, with `metadata.module`; turning it on writes `permission_rule.deleted` rows).
+
 ## ChatGPT subscription (Codex)
 
 Bots can run on **your own ChatGPT plan** (Plus, Pro, Business…) instead of an API key. The sign-in runs

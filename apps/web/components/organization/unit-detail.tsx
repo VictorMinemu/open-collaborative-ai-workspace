@@ -30,6 +30,7 @@ import { useRemoveUnitMember, useUnitMembers, useUpdateUnitMember } from "@/lib/
 import { useCan } from "@/lib/permissions";
 import { useMe } from "@/lib/queries";
 import { AddPeopleDialog } from "./add-people-dialog";
+import { UnitModulesCard } from "./module-access-card";
 import { UnitActionsMenu, useUnitDialogs } from "./unit-dialogs";
 import {
   ancestorsOf,
@@ -128,6 +129,7 @@ export function UnitDetail({
       ) : null}
 
       <MembersSection unit={unit} />
+      <UnitModulesCard unit={unit} />
 
       {canReadRules ? <UnitRulesCard unit={unit} /> : null}
     </div>

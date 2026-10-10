@@ -6,16 +6,14 @@ specific and current; move long procedures to `docs/` or skills. See ADR-0004.
 
 ## Project
 
-Open-source, self-hostable, federable, multiplayer workspace where humans and AI agents collaborate
-inside a company. Three mental modes: **Chats** (Slack-style channels + ChatGPT-style AI chats, all
-multiplayer), **Work Zone** (Codex / Claude Code / OpenCode sessions that run locally but are owned,
-shared and controlled from the cloud) and **Agents** (persistent server-side agents on OpenClaw).
-**Projects** cut across all three. A Control Plane governs organizations, permissions, skills, MCPs,
-models, devices and audit.
+Open-source, self-hostable, federable, multiplayer workspace where humans and AI agents collaborate inside a company.
+Three mental modes: **Chats** (Slack-style channels + ChatGPT-style AI chats, all multiplayer), **Work Zone** (Codex /
+Claude Code / OpenCode sessions that run locally but are owned, shared and controlled from the cloud) and **Agents**
+(persistent server-side agents on OpenClaw). **Projects** cut across all three. A Control Plane governs organizations,
+permissions, skills, MCPs, models, devices and audit.
 
-Authoritative spec: `docs/prd/PRD.md` (v1.0, English). Original draft: `docs/prd/archive/PRD-v0.3-es.md`.
-Decisions: `docs/adr/`. Planning: `.planning/` (GSD). Built so far: phases 1–7 (API, web, desktop + Local Runtime, OpenClaw
-bots, MCP, marketplace, Work Zone controls, chat, AI chats, multiplayer AI chats, personas, Agent Cards, self-hosted release). Add packages only when needed.
+Authoritative spec: `docs/prd/PRD.md` (v1.0, English). Original draft: `docs/prd/archive/PRD-v0.3-es.md`. Decisions:
+`docs/adr/`. Planning: `.planning/` (GSD). Built so far: `docs/STATUS.md`. Add packages only when needed.
 
 ## Non-negotiable architectural principles
 
@@ -49,11 +47,8 @@ Taken from the PRD. Any design that violates one of these must be raised, not si
 
 | Area | Decision | ADR |
 | --- | --- | --- |
-| Language | TypeScript 7 (`typescript6` alias for tooling), `strict: true`, Zod at every boundary | 0001 |
-| Runtime | Node 24 LTS, exact version pinned in `.nvmrc` | 0001 |
-| Monorepo | pnpm 12 workspaces + Turborepo; pnpm settings in `pnpm-workspace.yaml` | 0001 |
-| Lint / format | Biome (single tool) | 0001 |
-| Tests | Vitest; Playwright for E2E when UI exists | 0001 |
+| Language / runtime | TypeScript 7 (`typescript6` alias for tooling), `strict: true`, Zod at every boundary; Node 24 LTS, exact version pinned in `.nvmrc` | 0001 |
+| Tooling | Monorepo: pnpm 12 workspaces + Turborepo; pnpm settings in `pnpm-workspace.yaml`. Lint / format: Biome (single tool). Tests: Vitest; Playwright for E2E when UI exists | 0001 |
 | Backend | Fastify 5 modular monolith in `apps/api`, explicit constructor wiring, no DI container | 0002 |
 | Database access | Drizzle ORM; RLS policies in schema; two DB roles (`migrator`, `app`); `withTenant()` is the only entrypoint | 0003, research |
 | Identity | better-auth embedded in the API (org, admin, jwt, device-authorization plugins); our own OrgUnit hierarchy on top | research |
@@ -62,19 +57,15 @@ Taken from the PRD. Any design that violates one of these must be raised, not si
 | ChatGPT plan (AI chats) | per-member Sign in with ChatGPT, tokens sealed per member, never pooled; Claude only via org keys (METERED) | 0017 |
 | Multiplayer AI chats | grants on the same chat, decided only in the resolver (`aiAccessSql`); attributed prompt blocks; one generation, derived queue; the asker pays | 0019 |
 | Agent personas and cards | unit-scoped personas with lead rights; in AI chats only through OpenClaw; typed Agent Cards via the Agent Channel API | 0020 |
-| Web | Next.js 16 + React; Tailwind + shadcn/ui (Base UI); TanStack Query + Zustand | PRD, research |
-| Desktop / mobile | Electron + bundled Vite renderer; Local Runtime daemon is a standalone process supervised by the app. Mobile (MVP7): Expo / React Native | PRD, 0005 |
+| Module access | Modules are catalog deny rules (`packages/contracts/src/module-access.ts`) decided by the resolver; never a feature flag; leads only on the units they lead, never for an admin | 0024 |
+| Clients | Web: Next.js 16 + React; Tailwind + shadcn/ui (Base UI); TanStack Query + Zustand. Desktop / mobile: Electron + bundled Vite renderer; Local Runtime daemon is a standalone process supervised by the app. Mobile (MVP7): Expo / React Native | PRD, research, 0005 |
 | Runtime adapters | Claude Code via Claude Agent SDK (streaming input, `canUseTool`); Codex via `codex app-server` JSON-RPC. Never scrape CLI stdout. Settings apply between turns; options come from the runtime-reported catalog, gated by `docs/workzone/runtime-controls-inventory.md` | research, 0013 |
 | Database / search | PostgreSQL only (MVP1). Chat search: STORED tsvector over three unaccented configs (simple, spanish, english) + GIN, `pg_trgm` for people/channels, always restricted to the resolver's readable set | 0003, 0016 |
 | Cache / pub-sub / presence | Redis. Event streaming / workflows: NATS JetStream and Temporal are **deferred**; do not add them yet | 0003 |
 | Object storage | Garage (single node) in compose, used only through the S3 API; browsers upload/download via presigned URLs, the API is the only ACL | 0015 (supersedes MinIO in 0003) |
 | Markdown | One `<Markdown>` on streamdown + shiki for chat, bot output and Work Zone; no raw HTML, `safeUrl` links, images as links | 0016 |
-| Secrets | `SecretStore` abstraction: `env`/`file` provider by default, OpenBao as optional compose profile | 0003, 0021 |
-| Observability | OpenTelemetry via `@fastify/otel`; Prometheus / Grafana / Loki / Tempo as optional compose profile | 0003, 0021 |
-| Server agents | OpenClaw in Docker (later Kubernetes, gVisor/Kata) | PRD |
-| Bot web tools | OpenClaw `web_fetch` + bundled `@openclaw/duckduckgo-plugin` (SearXNG optional profile); no paid or hosted search | 0010 |
-| MCP for bots | Remote streamable HTTP / SSE servers registered by admins; stdio only in the `mcp-sandbox` sidecar | 0011 |
-| OpenClaw plugins | ClawHub marketplace via the API proxy, pinned admin approvals, API-authoritative install gate | 0011 |
+| Secrets / observability | Secrets: `SecretStore` abstraction, `env`/`file` provider by default, OpenBao as optional compose profile. Observability: OpenTelemetry via `@fastify/otel`; Prometheus / Grafana / Loki / Tempo as optional compose profile | 0003, 0021 |
+| OpenClaw bots | Server agents: OpenClaw in Docker (later Kubernetes, gVisor/Kata). Bot web tools: OpenClaw `web_fetch` + bundled `@openclaw/duckduckgo-plugin` (SearXNG optional profile); no paid or hosted search. MCP for bots: remote streamable HTTP / SSE servers registered by admins; stdio only in the `mcp-sandbox` sidecar. OpenClaw plugins: ClawHub marketplace via the API proxy, pinned admin approvals, API-authoritative install gate | PRD, 0010, 0011 |
 | License | AGPLv3 (apps, server); Apache 2.0 for protocol, SDKs and plugins | PRD |
 
 "research" rows come from `.planning/research/STACK.md` (exact versions live there) and get an ADR when first built.

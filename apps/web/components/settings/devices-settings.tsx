@@ -53,6 +53,13 @@ import { DeviceSharing } from "./device-sharing";
 
 const PLATFORM: Record<string, string> = { darwin: "macOS", linux: "Linux", win32: "Windows" };
 
+/** The Devices page subtitle: it offers pairing only while `device.pair` is not decided off (07.3, P-08). */
+export function DevicesSubtitle() {
+  return useGrain("device.pair") === "off"
+    ? "The computers you paired and who can use them"
+    : "Pair computers that run your coding agents";
+}
+
 export function DevicesSettings() {
   const devices = useDevices();
   const me = useMe({ enabled: false });
