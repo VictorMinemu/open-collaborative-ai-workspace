@@ -67,6 +67,9 @@ export const Permission = z.enum([
   "ai_chat.manage",
   "bot.manage_unit",
   "agent_card.approve",
+  // Phase 07.3 (ADR-0024): module access.
+  "ai_chat.read",
+  "unit.modules.manage",
 ]);
 export type Permission = z.infer<typeof Permission>;
 
@@ -130,6 +133,8 @@ export const PERMISSION_SURFACE: Record<Permission, PermissionSurface> = {
   "ai_chat.manage": "chat",
   "bot.manage_unit": "team",
   "agent_card.approve": "chat",
+  "ai_chat.read": "chat",
+  "unit.modules.manage": "team",
 };
 
 export const ROLE_SURFACES: Record<OrgRole, PermissionSurface[]> = {
@@ -159,6 +164,7 @@ const STANDARD: readonly Permission[] = [
   "ai_chat.share.read",
   "ai_chat.manage",
   "agent_card.approve",
+  "ai_chat.read",
 ];
 const DEVELOPER: readonly Permission[] = [
   ...STANDARD,
@@ -194,6 +200,7 @@ const ADMIN: readonly Permission[] = [
   "message.delete_any",
   "channel.update",
   "bot.manage_unit",
+  "unit.modules.manage",
 ];
 
 /**
@@ -208,11 +215,15 @@ export const ROLE_PERMISSIONS: Record<OrgRole, readonly Permission[]> = {
   admin: ADMIN,
 };
 
-/** Granted to a unit lead on the lead's unit subtree (Phase 6, P-04: also the bots of that subtree). */
+/**
+ * Granted to a unit lead on the lead's unit subtree (Phase 6, P-04: also the bots of that subtree; Phase 07.3,
+ * ADR-0024: module access for the subtree and its people).
+ */
 export const LEAD_PERMISSIONS: readonly Permission[] = [
   "unit.members.manage",
   "bot.manage_unit",
   "bot.configure",
+  "unit.modules.manage",
 ];
 /** Upper bound for an agent principal (intersected with the triggering human). */
 export const AGENT_PERMISSIONS: readonly Permission[] = [
@@ -370,6 +381,8 @@ export const PERMISSION_DESCRIPTIONS: Record<Permission, string> = {
   "ai_chat.manage": "Rename, archive and change the settings of AI chats you own",
   "bot.manage_unit": "Create and manage the bots of the units you lead",
   "agent_card.approve": "Approve or deny what an agent asks for in a card",
+  "ai_chat.read": "See and open AI chats you own or that are shared with you",
+  "unit.modules.manage": "Turn modules on or off for the units you lead and their people",
 };
 
 // ---------------------------------------------------------------- tokens (AUTH-06)

@@ -23,6 +23,7 @@ import { toast } from "sonner";
 import { BotSettingsSheet } from "@/components/bots/bot-settings-sheet";
 import { MemoryPanel } from "@/components/bots/memory-panel";
 import { EmptyState } from "@/components/common/empty-state";
+import { ModuleOff, useModule } from "@/components/shell/module-gate";
 import { PageHeader } from "@/components/shell/page-header";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -147,10 +148,25 @@ function DmSkeleton() {
 }
 
 /**
+ * `/chat/dm/<id>`. A bot DM of a member whose Bots module is turned off (07.3, D-05 (3)) shows the in-place off
+ * state instead of the conversation, and a skeleton while that is being decided (never a flash of the chat); people
+ * and groups render as before. A failed permissions fetch counts as on (P-08): the API stays the authority.
+ */
+export function DmView({ conversationId }: { conversationId: string }) {
+  const dms = useDms();
+  const bots = useModule("bots");
+  const dm = dms.data?.dms.find((d) => d.id === conversationId);
+  if (dm && isBotDm(dm) && bots !== "on") {
+    return bots === "off" ? <ModuleOff module="bots" /> : <DmSkeleton />;
+  }
+  return <DmConversation conversationId={conversationId} />;
+}
+
+/**
  * A private direct conversation with a bot (D-03/D-04): flat (no threads), the bot answers every message
  * without an @mention, and only the caller can read it. Same optimistic send/retry as the channel view.
  */
-export function DmView({ conversationId }: { conversationId: string }) {
+function DmConversation({ conversationId }: { conversationId: string }) {
   const qc = useQueryClient();
   const router = useRouter();
   const pathname = usePathname();

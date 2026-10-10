@@ -24,9 +24,35 @@ const id = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
 const now = 1_790_000_000;
 
 describe("permission vocabulary", () => {
-  it("has exactly the 55 agreed permissions", () => {
-    expect(Permission.options).toHaveLength(55);
-    expect(new Set(Permission.options).size).toBe(55);
+  it("has exactly the 57 agreed permissions", () => {
+    expect(Permission.options).toHaveLength(57);
+    expect(new Set(Permission.options).size).toBe(57);
+  });
+
+  it("Phase 07.3 permissions exist exactly as 07.3-01 defines them (ADR-0024)", () => {
+    expect(PERMISSION_SURFACE).toMatchObject({ "ai_chat.read": "chat", "unit.modules.manage": "team" });
+    for (const role of OrgRole.options) {
+      // STANDARD holds `ai_chat.read`, so every role does; a module deny rule takes it away (delegable).
+      expect(ROLE_PERMISSIONS[role], `${role}: ai_chat.read`).toContain("ai_chat.read");
+      if (role === "admin") expect(ROLE_PERMISSIONS[role]).toContain("unit.modules.manage");
+      else expect(ROLE_PERMISSIONS[role], role).not.toContain("unit.modules.manage");
+    }
+    // Leads hold it on the subtree they lead only (resolver), like `bot.manage_unit`.
+    expect(LEAD_PERMISSIONS.at(-1)).toBe("unit.modules.manage");
+    for (const p of ["ai_chat.read", "unit.modules.manage"] as const) {
+      expect(NON_DELEGABLE_PERMISSIONS, p).not.toContain(p);
+      expect(PERMISSION_DESCRIPTIONS[p].length, p).toBeGreaterThan(10);
+      expect(PermissionPattern.safeParse(p).success, p).toBe(true);
+      expect(AGENT_PERMISSIONS, p).not.toContain(p);
+    }
+    expect(PERMISSION_DESCRIPTIONS["ai_chat.read"]).toBe(
+      "See and open AI chats you own or that are shared with you",
+    );
+    expect(PERMISSION_DESCRIPTIONS["unit.modules.manage"]).toBe(
+      "Turn modules on or off for the units you lead and their people",
+    );
+    // `ai_chat.*` (the AI chats module) covers the new read grain.
+    expect(permissionMatches("ai_chat.*", "ai_chat.read")).toBe(true);
   });
 
   it("Phase 6 permissions exist exactly as 06-01 defines them (P-04)", () => {
@@ -42,7 +68,13 @@ describe("permission vocabulary", () => {
       if (role === "admin") expect(ROLE_PERMISSIONS[role]).toContain("bot.manage_unit");
       else expect(ROLE_PERMISSIONS[role], role).not.toContain("bot.manage_unit");
     }
-    expect(LEAD_PERMISSIONS).toEqual(["unit.members.manage", "bot.manage_unit", "bot.configure"]);
+    // ADR-0024 (07.3-01) appended `unit.modules.manage`: lead rights over module access on the led subtree.
+    expect(LEAD_PERMISSIONS).toEqual([
+      "unit.members.manage",
+      "bot.manage_unit",
+      "bot.configure",
+      "unit.modules.manage",
+    ]);
     for (const p of ["ai_chat.manage", "bot.manage_unit", "agent_card.approve"] as const) {
       expect(NON_DELEGABLE_PERMISSIONS, p).not.toContain(p);
       expect(PERMISSION_DESCRIPTIONS[p].length, p).toBeGreaterThan(10);

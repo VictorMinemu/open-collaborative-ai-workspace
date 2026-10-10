@@ -4,11 +4,13 @@ import type { ChannelSummary, DmSummary } from "@ocw/contracts";
 import { Inbox } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { EmptyState } from "@/components/common/empty-state";
+import { useModule } from "@/components/shell/module-gate";
 import { PageHeader } from "@/components/shell/page-header";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { errorMessage } from "@/lib/api";
 import { useChannels, useDms } from "@/lib/chat-queries";
+import { withoutBotDms } from "@/lib/modules";
 import { isUnread } from "../channel-icon";
 import { ConversationAvatar, ConversationRow } from "./conversation-row";
 
@@ -29,12 +31,13 @@ export function useMinuteClock(): number {
 /**
  * `/chat/all` (CHAT-02): every conversation the member is in (joined channels, DMs and groups), unread first, then
  * by latest activity, each with a one-line preview. Built from the sidebar's own lists: no extra request, no new
- * subscription (the sidebar watchers keep them live).
+ * subscription (the sidebar watchers keep them live). Bot DMs leave the list once Bots is turned off (07.3).
  */
 export function AllView() {
   const channels = useChannels();
   const dms = useDms();
   const now = useMinuteClock();
+  const showBots = useModule("bots") !== "off";
 
   const items = useMemo<Item[]>(() => {
     const out: Item[] = [
@@ -46,7 +49,7 @@ export function AllView() {
           unread: isUnread(c),
           at: c.lastMessageAt ?? c.createdAt,
         })),
-      ...(dms.data?.dms ?? []).map((d) => ({
+      ...withoutBotDms(dms.data?.dms ?? [], showBots).map((d) => ({
         kind: "dm" as const,
         d,
         unread: d.latestMessageSeq > d.lastReadSeq,
@@ -54,7 +57,7 @@ export function AllView() {
       })),
     ];
     return out.sort((a, b) => Number(b.unread) - Number(a.unread) || Date.parse(b.at) - Date.parse(a.at));
-  }, [channels.data, dms.data]);
+  }, [channels.data, dms.data, showBots]);
 
   const unread = items.filter((i) => i.unread).length;
   const pending = channels.isPending || dms.isPending;

@@ -2,6 +2,7 @@
 
 import { AtSign, Bookmark, Inbox, type LucideIcon, MessagesSquare, Sparkles } from "lucide-react";
 import Link from "next/link";
+import { useModule } from "@/components/shell/module-gate";
 import { sectionItemClass } from "@/components/shell/section-sidebar";
 import { useIsDesktop } from "@/hooks/use-media-query";
 import { cn } from "@/lib/utils";
@@ -9,6 +10,7 @@ import { cn } from "@/lib/utils";
 /**
  * The chat sidebar's views (CHAT-02, D-08): All, Mentions (the inbox, CHAT-08), Threads, AI Chats and Saved.
  * Desktop: compact rows at the top of the sidebar. 390: a horizontally scrollable segmented row on the sidebar home.
+ * AI Chats leaves both only when the member's AI chats module is decided off (07.3, P-08); the others keep their order.
  */
 
 export type ChatViewId = "all" | "mentions" | "threads" | "ai" | "saved";
@@ -50,6 +52,8 @@ export function SidebarViews({
   counts?: Partial<Record<string, number>>;
 }) {
   const isDesktop = useIsDesktop();
+  const aiChatsOff = useModule("ai_chats") === "off";
+  const views = aiChatsOff ? CHAT_VIEWS.filter((v) => v.id !== "ai") : CHAT_VIEWS;
 
   if (!isDesktop) {
     return (
@@ -58,7 +62,7 @@ export function SidebarViews({
         data-testid="views-segmented"
         className="-mx-2 mb-3 flex gap-1.5 overflow-x-auto pr-8 pb-0.5 pl-2 [mask-image:linear-gradient(to_right,black_88%,transparent)] [scrollbar-width:none]"
       >
-        {CHAT_VIEWS.map((v) => {
+        {views.map((v) => {
           const active = isActive(v, activePath);
           const n = counts[v.id] ?? 0;
           return (
@@ -96,7 +100,7 @@ export function SidebarViews({
 
   return (
     <nav aria-label="Views" data-testid="views-list" className="mb-3 grid grid-cols-1 gap-px">
-      {CHAT_VIEWS.map((v) => {
+      {views.map((v) => {
         const active = isActive(v, activePath);
         const n = counts[v.id] ?? 0;
         return (

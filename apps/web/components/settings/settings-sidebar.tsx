@@ -3,18 +3,25 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { SectionSidebar, sectionItemClass } from "@/components/shell/section-sidebar";
-import { usePermissionCheck } from "@/lib/permissions";
+import { grainStatus, permissionsFailed } from "@/lib/modules";
+import { usePermissionCheck, usePermissions } from "@/lib/permissions";
 import { ACCOUNT_SECTIONS } from "./account-nav";
 import { SETTINGS_SECTIONS, type SettingsSection } from "./settings-nav";
 
 export function SettingsSidebar() {
   const pathname = usePathname();
   const can = usePermissionCheck();
+  const perms = usePermissions();
   const workspace = SETTINGS_SECTIONS.filter((s) => !s.permission || can(s.permission));
+  // Account entries are everyone's: one of a module (AI chat) leaves only once its grain is decided off, never while
+  // permissions load or after a failed fetch (P-08), so it never flashes in or out on a normal load.
+  const account = ACCOUNT_SECTIONS.filter(
+    (s) => !s.permission || grainStatus(perms.data, permissionsFailed(perms), s.permission) !== "off",
+  );
   return (
     <SectionSidebar title="Settings">
       <nav aria-label="Settings" className="grid gap-4">
-        <NavGroup label="Account" sections={ACCOUNT_SECTIONS} pathname={pathname} />
+        <NavGroup label="Account" sections={account} pathname={pathname} />
         {workspace.length > 0 ? (
           <NavGroup label="Workspace" sections={workspace} pathname={pathname} />
         ) : null}

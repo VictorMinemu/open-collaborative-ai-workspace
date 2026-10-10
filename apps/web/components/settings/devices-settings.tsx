@@ -21,6 +21,7 @@ import { useSearchParams } from "next/navigation";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
+import { useGrain } from "@/components/shell/module-gate";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -52,6 +53,13 @@ import { DeviceSharing } from "./device-sharing";
 
 const PLATFORM: Record<string, string> = { darwin: "macOS", linux: "Linux", win32: "Windows" };
 
+/** The Devices page subtitle: it offers pairing only while `device.pair` is not decided off (07.3, P-08). */
+export function DevicesSubtitle() {
+  return useGrain("device.pair") === "off"
+    ? "The computers you paired and who can use them"
+    : "Pair computers that run your coding agents";
+}
+
 export function DevicesSettings() {
   const devices = useDevices();
   const me = useMe({ enabled: false });
@@ -59,6 +67,9 @@ export function DevicesSettings() {
   const [adding, setAdding] = useState(false);
   const desktop = useDesktop();
   const qc = useQueryClient();
+  // Pairing belongs to the Work Zone module (07.3, D-01): it leaves once `device.pair` is decided off, never while
+  // loading or after a failed fetch (P-08). The device list, rename, sharing and revoke stay for device hygiene.
+  const canPair = useGrain("device.pair") !== "off";
   useWorkZoneOrgSync();
 
   useEffect(() => {
@@ -79,7 +90,7 @@ export function DevicesSettings() {
             </p>
           </div>
           <div className="flex gap-2">
-            {desktop ? (
+            {desktop && canPair ? (
               <Button
                 variant="outline"
                 onClick={async () => {
@@ -93,9 +104,11 @@ export function DevicesSettings() {
                 <FolderPlus /> Add project from this computer
               </Button>
             ) : null}
-            <Button onClick={() => setAdding(true)} data-testid="add-device">
-              <Plus /> Add device
-            </Button>
+            {canPair ? (
+              <Button onClick={() => setAdding(true)} data-testid="add-device">
+                <Plus /> Add device
+              </Button>
+            ) : null}
           </div>
         </div>
         {devices.isError ? (
@@ -104,10 +117,18 @@ export function DevicesSettings() {
           <div className="grid gap-2">
             <Skeleton className="h-24" />
           </div>
+        ) : mine.length === 0 && !canPair ? (
+          <p
+            data-testid="devices-none"
+            className="rounded-xl border border-dashed px-6 py-8 text-center text-muted-foreground text-sm"
+          >
+            You have no paired devices.
+          </p>
         ) : mine.length === 0 ? (
           <button
             type="button"
             onClick={() => setAdding(true)}
+            data-testid="add-first-device"
             className="flex flex-col items-center gap-2 rounded-xl border border-dashed px-6 py-10 text-center transition-colors hover:bg-accent/30"
           >
             <span className="flex size-11 items-center justify-center rounded-xl bg-primary/10 text-primary">
@@ -144,7 +165,11 @@ export function DevicesSettings() {
         </section>
       ) : null}
 
-      <AddDeviceDialog open={adding} onOpenChange={setAdding} known={(devices.data ?? []).map((d) => d.id)} />
+      <AddDeviceDialog
+        open={adding && canPair}
+        onOpenChange={setAdding}
+        known={(devices.data ?? []).map((d) => d.id)}
+      />
     </div>
   );
 }
