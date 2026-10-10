@@ -4,6 +4,7 @@ export * from "./agent-channel";
 export * from "./ai-chat";
 export * from "./ai-generation";
 export * from "./attachments";
+export * from "./board";
 export * from "./bot-capabilities";
 export * from "./chat";
 export * from "./common";
