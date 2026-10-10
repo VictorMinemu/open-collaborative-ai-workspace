@@ -3,6 +3,7 @@ import { AgentScope, AgentStatus } from "./agent";
 import { AgentCard } from "./agent-cards";
 import { AiAddressing, AiGeneration } from "./ai-generation";
 import { Attachment, MAX_ATTACHMENTS_PER_MESSAGE } from "./attachments";
+import { ChannelLayout } from "./board";
 import { ClientKind, Id, IsoDateTime, isReservedHandle, MemberKind, PrincipalKind } from "./common";
 import { Permission, UnitKind } from "./permissions";
 
@@ -193,13 +194,22 @@ export const ChannelSlug = z
   .max(80)
   .regex(/^[a-z0-9][a-z0-9-_]*$/, "lowercase letters, digits, - and _");
 
-export const CreateChannelRequest = z.object({
-  name: ChannelSlug,
-  topic: z.string().trim().max(250).optional(),
-  visibility: Visibility.default("public"),
-  /** The department, team or project the channel is grouped under in the sidebar (CHAT-02). */
-  unitId: Id.nullable().optional(),
-});
+export const CreateChannelRequest = z
+  .object({
+    name: ChannelSlug,
+    topic: z.string().trim().max(250).optional(),
+    visibility: Visibility.default("public"),
+    /** The department, team or project the channel is grouped under in the sidebar (CHAT-02). */
+    unitId: Id.nullable().optional(),
+    /** Phase 07.1 (D-01): `board` shows the channel as columns of cards; absent = `text` (today's channel). */
+    layout: ChannelLayout.default("text"),
+    /** A record template available to the chosen unit (P-08); board channels only. */
+    templateId: Id.nullable().optional(),
+  })
+  .refine((v) => v.templateId == null || v.layout === "board", {
+    message: "Only a board channel uses a record template",
+    path: ["templateId"],
+  });
 export type CreateChannelRequest = z.infer<typeof CreateChannelRequest>;
 
 /** A conversation as referenced from another list (saves, notifications, search, threads). */
@@ -277,6 +287,8 @@ export const ChannelSummary = Conversation.extend({
   /** Permissions the caller holds on this resource, decided by the API resolver (UI gating only). */
   viewerCan: z.array(Permission).optional(),
   unit: ChannelUnit.nullable().optional(),
+  /** Phase 07.1 (D-01): `ChannelLayout`; absent = text (older servers and payloads). */
+  layout: ChannelLayout.optional(),
   ...UnreadFields,
 });
 export type ChannelSummary = z.infer<typeof ChannelSummary>;

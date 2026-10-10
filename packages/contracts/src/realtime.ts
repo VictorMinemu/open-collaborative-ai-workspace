@@ -171,6 +171,13 @@ export const EventTypes = {
   aiQueueUpdated: "ai.queue.updated",
   // On `conv:<id>` and `user:<affected>`; ids only on `org:<id>` for unit/org grants (AiChatAccessChangedEvent).
   aiChatAccessChanged: "ai_chat.access_changed",
+  // Phase 07.1 (D-03, P-06). On `conv:<id>` of a board channel only; payloads in board.ts.
+  /** One card created, moved or edited (BoardCardUpsertedEvent). Removal rides `message.deleted`. */
+  boardCardUpserted: "board.card_upserted",
+  /** Board settings and the full column list (BoardUpdatedEvent). */
+  boardUpdated: "board.updated",
+  /** One column's new ranks after a server re-rank (BoardColumnRerankedEvent). */
+  boardColumnReranked: "board.column_reranked",
 } as const;
 
 export const MemberUpdatedPayload = z.object({ userId: z.uuid(), changed: z.array(z.string()) });
