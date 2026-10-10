@@ -53,6 +53,8 @@ import {
   createPermissionService,
 } from "../organization";
 import { createConversationAccess } from "./access";
+import { type AfterHumanPost, registerBoardRoutes } from "./board/routes";
+import { createBoard } from "./board/service";
 import { registerCardActionRoutes } from "./card-actions";
 import {
   agentFactsOf,
@@ -63,6 +65,7 @@ import {
   loadDirectory,
 } from "./directory";
 import { dmAgentOf, ensureDm, ensureGroup, ensureHumanDm, listDms } from "./dm";
+import { claimMentionAll, isOwnRetry } from "./mention-all";
 import { resolveMentions } from "./mentions";
 import { type MessageActionsContext, registerMessageActionRoutes } from "./message-actions";
 import { registerPinRoutes } from "./pins";
@@ -105,6 +108,15 @@ import { registerChatTestRoutes } from "./test-routes";
 import { registerThreadRoutes } from "./threads";
 
 export { type ConversationAccess, createConversationAccess } from "./access";
+/** Board channels (Phase 07.1): the route guards and the board service, for 07.1-05/06/07/10. */
+export { readableBoard, writableBoard } from "./board/access";
+export {
+  type BoardAuthor,
+  createBoard,
+  createBoardCard,
+  readBoardSnapshot,
+  updateBoardCard,
+} from "./board/service";
 /** Agent Cards (06-13, P-11): the agent-channel module updates cards through `patchCard`; ai-chat adds them to snapshots. */
 export { type CardRow, cardMessageOf, cardOf, patchCard, withCards } from "./card-actions";
 export { agentFactsOf, authorOf, type Directory, type DirectoryEntry, loadDirectory } from "./directory";
@@ -159,9 +171,6 @@ const MESSAGE_KINDS = ["channel", "dm", "group"] as const;
 const AGENT_POST_KINDS = [...MESSAGE_KINDS, "ai_chat"] as const;
 /** Kinds whose `conv:<id>` stream a reader may subscribe to: the message kinds plus AI chats (P-03, owner only). */
 const CONV_TOPIC_KINDS = ["channel", "dm", "group", "ai_chat"] as const;
-
-/** One `@channel` / `@here` per channel per minute (P-11). */
-const MENTION_ALL_WINDOW_MS = 60_000;
 
 /**
  * The unit a channel is placed in (create or move, CHAT-02, T-04-08-01): it must exist in the tenant (another
@@ -315,40 +324,6 @@ export function createChatModule(core: Core): ApiModule {
     notFoundMessage = "Channel not found",
   ): Promise<{ conv: ConversationRow; facts: ChannelFacts }> {
     return access.readableRow(req, tx, conv, notFoundMessage);
-  }
-
-  /**
-   * The 1-per-minute gate of `@channel` / `@here` in one channel (P-11, T-04-09-02), claimed before the insert:
-   * `SET NX PX` in Redis, so every API instance shares it. A refused claim is 429 `mention_all_rate_limited`.
-   */
-  async function claimMentionAll(conversationId: string): Promise<void> {
-    const claimed = await core.bus.pub.set(`ocw:mention_all:${conversationId}`, "1", {
-      condition: "NX",
-      expiration: { type: "PX", value: MENTION_ALL_WINDOW_MS },
-    });
-    if (claimed !== "OK") {
-      throw new HttpError(
-        429,
-        "mention_all_rate_limited",
-        "You can send at most one @channel or @here per minute in this channel",
-      );
-    }
-  }
-
-  /** A client retry of a message already posted (same author and clientMessageId) answers it, not the limit. */
-  async function isOwnRetry(tx: Tx, userId: string, clientMessageId: string): Promise<boolean> {
-    const [row] = await tx
-      .select({ id: messages.id })
-      .from(messages)
-      .where(
-        and(
-          eq(messages.authorKind, "user"),
-          eq(messages.authorId, userId),
-          eq(messages.clientMessageId, clientMessageId),
-        ),
-      )
-      .limit(1);
-    return row !== undefined;
   }
 
   // ---------------------------------------------------------------- realtime: conv:<id>
@@ -557,6 +532,29 @@ export function createChatModule(core: Core): ApiModule {
     await core.chatAgent.emitAgentMention(tx, mention, tenantOf(tx).afterCommit);
     return agentIds;
   }
+
+  /**
+   * The side effects of a fresh human post, in its transaction: observers (notifications, CHAT-08) through the seam,
+   * then the bot deliveries — the DM's bot, a group's mentioned bots, or a channel's mentioned bots and, when none was
+   * addressed, its reply-mode bots. Shared by the message route and board cards (07.1-03), so a card notifies and wakes
+   * bots exactly like a message.
+   */
+  const afterHumanPost: AfterHumanPost = async (tx, conv, dir, result, author, mentionAll) => {
+    await core.chatEvents.messagePosted(tx, {
+      conv: { id: conv.id, kind: messageKindOf(conv), organizationId: conv.organizationId },
+      message: result.message,
+      author: { kind: "user", id: author.id },
+      mentions: result.row.mentions,
+      // Reserved handles never resolve as people or bots, so a broadcast never wakes a bot.
+      mentionAll,
+      threadRootId: result.root?.id ?? null,
+    });
+    if (conv.kind === "dm") await dispatchDmMessage(tx, dir, conv, result, author);
+    else if (conv.kind === "group") await dispatchGroupMentions(tx, dir, conv, result, author);
+    else if ((await dispatchAgentMentions(tx, dir, result, author)).length === 0) {
+      await dispatchReplyMode(tx, dir, conv, result, author);
+    }
+  };
 
   core.chatAgent.providePostAgentMessage((ctx, input) =>
     core.db.withTenant(ctx, async (tx) => {
@@ -784,7 +782,11 @@ export function createChatModule(core: Core): ApiModule {
         async (req) =>
           core.db.withTenant(tenant(req), async (tx) => {
             const auth = authOf(req);
-            const { name, topic, visibility } = req.body;
+            const { name, topic, visibility, layout } = req.body;
+            // Record templates arrive in 07.1-07; until then a board is created with the default columns only.
+            if (req.body.templateId) {
+              throw badRequest("Record templates are not available yet", "template_not_available");
+            }
             // CHAT-02: the organization (null) or a unit on one of the caller's own paths (admins: any unit).
             const unit = req.body.unitId
               ? await placeableUnit(tx, req.body.unitId, auth.userId, await perms.can(req, tx, "unit.manage"))
@@ -800,6 +802,7 @@ export function createChatModule(core: Core): ApiModule {
                 visibility,
                 createdBy: auth.userId,
                 unitId: unit?.id ?? null,
+                layout,
               })
               .onConflictDoNothing()
               .returning();
@@ -811,12 +814,14 @@ export function createChatModule(core: Core): ApiModule {
               memberId: auth.userId,
               role: "owner",
             });
+            // A board channel (D-01) is this same channel plus its board and columns, in the same transaction.
+            if (layout === "board") await createBoard(tx, row, null);
             await core.audit.record(tx, {
               action: "channel.created",
               resourceType: "conversation",
               resourceId: row.id,
               sessionId: auth.sessionId,
-              metadata: { name, visibility, unitId: unit?.id ?? null },
+              metadata: { name, visibility, unitId: unit?.id ?? null, layout, templateId: null },
             });
             await notifyListChanged(tx, deps, row, EventTypes.conversationCreated);
             return summaryOf(req, tx, row.id);
@@ -1146,7 +1151,7 @@ export function createChatModule(core: Core): ApiModule {
               const retry =
                 req.body.clientMessageId !== undefined &&
                 (await isOwnRetry(tx, auth.userId, req.body.clientMessageId));
-              if (!retry) await claimMentionAll(conv.id);
+              if (!retry) await claimMentionAll(core, conv.id);
             }
             const dir = await loadDirectory(tx);
             const result = await postMessage(tx, deps, dir, {
@@ -1161,23 +1166,9 @@ export function createChatModule(core: Core): ApiModule {
               attachmentIds: req.body.attachmentIds,
             });
             if (result.created) {
-              // Observers (notifications, CHAT-08) in the message transaction, through the seam (no import).
-              await core.chatEvents.messagePosted(tx, {
-                conv: { id: conv.id, kind: messageKindOf(conv), organizationId: conv.organizationId },
-                message: result.message,
-                author: { kind: "user", id: auth.userId },
-                mentions: result.row.mentions,
-                // Reserved handles never resolve as people or bots, so a broadcast never wakes a bot.
-                mentionAll,
-                threadRootId: result.root?.id ?? null,
-              });
               // The zone only travels with this message's deliveries (turn context); it is never stored.
               const author = { id: auth.userId, clientTimeZone: req.body.clientTimeZone };
-              if (conv.kind === "dm") await dispatchDmMessage(tx, dir, conv, result, author);
-              else if (conv.kind === "group") await dispatchGroupMentions(tx, dir, conv, result, author);
-              else if ((await dispatchAgentMentions(tx, dir, result, author)).length === 0) {
-                await dispatchReplyMode(tx, dir, conv, result, author);
-              }
+              await afterHumanPost(tx, conv, dir, result, author, mentionAll);
             }
             return result.message;
           }),
@@ -1373,6 +1364,8 @@ export function createChatModule(core: Core): ApiModule {
       registerThreadRoutes(app, routeCtx);
       // ---------------------------------------------------------------- Agent Cards (AGENT-04, P-11)
       registerCardActionRoutes(app, routeCtx);
+      // ---------------------------------------------------------------- board channels (Phase 07.1)
+      registerBoardRoutes(app, { ...routeCtx, afterHumanPost });
 
       if (core.env.NODE_ENV === "test") registerChatTestRoutes(app, core);
     },
