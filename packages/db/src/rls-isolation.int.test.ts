@@ -324,6 +324,41 @@ async function seedOrg(c: pg.Client, org: string) {
     cardMsg,
     user,
   ]);
+
+  // Phase 07.1 (board channels and record templates): one row per new table. An organization-wide template, a
+  // board channel created from it with one column, and a card on the board's first top-level message.
+  const template = randomUUID();
+  const board = randomUUID();
+  const column = randomUUID();
+  const cardRoot = randomUUID();
+  await q(
+    `insert into app.record_templates (id, organization_id, unit_id, name, prefix, naming_rule, fields, columns, created_by) values ($1, $2, null, 'Case file', 'EXP', '{prefix}-{seq:0000} · {summary}', '[{"key":"customer","label":"Customer","type":"text"}]', '[{"name":"Backlog","category":"backlog"}]', $3)`,
+    [template, org, user],
+  );
+  await q(
+    "insert into app.conversations (id, organization_id, kind, name, slug, created_by, layout) values ($1, $2, 'channel', 'cases', $3, $4, 'board')",
+    [board, org, `cases-${board}`, user],
+  );
+  await q(
+    "insert into app.conversation_members (conversation_id, organization_id, member_kind, member_id, role) values ($1, $2, 'user', $3, 'owner')",
+    [board, org, user],
+  );
+  await q(
+    `insert into app.boards (conversation_id, organization_id, template_id, prefix, naming_rule, fields, last_number) values ($1, $2, $3, 'EXP', '{prefix}-{seq:0000} · {summary}', '[{"key":"customer","label":"Customer","type":"text"}]', 1)`,
+    [board, org, template],
+  );
+  await q(
+    "insert into app.board_columns (id, organization_id, conversation_id, name, rank, category) values ($1, $2, $3, 'Backlog', 'a0', 'backlog')",
+    [column, org, board],
+  );
+  await q(
+    "insert into app.messages (id, organization_id, conversation_id, seq, author_kind, author_id, body) values ($1, $2, $3, 1, 'user', $4, 'EXP-0001 · Broken pump')",
+    [cardRoot, org, board, user],
+  );
+  await q(
+    `insert into app.board_cards (message_id, organization_id, conversation_id, column_id, rank, title, title_source, description, number, fields) values ($1, $2, $3, $4, 'a0', 'EXP-0001 · Broken pump', 'auto', 'Broken pump', 1, '{"customer":"Acme"}')`,
+    [cardRoot, org, board, column],
+  );
 }
 
 const AI_CHAT_TABLES = [
@@ -343,6 +378,8 @@ const MULTIPLAYER_AI_TABLES = [
   "app.message_cards",
   "app.message_card_follows",
 ] as const;
+
+const BOARD_TABLES = ["app.boards", "app.board_columns", "app.board_cards", "app.record_templates"] as const;
 
 async function inTenant<T>(org: string, fn: () => Promise<T>): Promise<T> {
   await app.query("begin");
@@ -918,6 +955,413 @@ describe("tenant isolation (RLS)", () => {
     expect(after).toEqual([{ answered_by_generation_id: null }]);
   });
 
+  it("Phase 07.1: a board channel in org A has its column and card in rank order, every other conversation is text, org B sees none of it", async () => {
+    const board = (
+      await migrator.query("select conversation_id from app.boards where organization_id = $1", [A])
+    ).rows[0].conversation_id as string;
+    const read = (org: string) =>
+      inTenant(org, async () => {
+        const rows = (
+          await app.query(
+            `select c.kind, c.layout, b.prefix, b.last_number, col.name as column_name, col.category,
+                    card.title, card.number, card.waiting_on, card.title_source, t.name as template
+               from app.conversations c
+               join app.boards b on b.conversation_id = c.id
+               join app.board_columns col on col.conversation_id = c.id
+               join app.board_cards card on card.column_id = col.id
+               join app.messages m on m.id = card.message_id
+               left join app.record_templates t on t.id = b.template_id
+              where c.id = $1
+              order by col.rank, card.rank`,
+            [board],
+          )
+        ).rows;
+        const layouts = (
+          await app.query(
+            "select layout, count(*)::int as n from app.conversations group by layout order by 1",
+          )
+        ).rows;
+        return { rows, layouts };
+      });
+    const own = await read(A);
+    expect(own.rows).toEqual([
+      {
+        kind: "channel",
+        layout: "board",
+        prefix: "EXP",
+        last_number: 1,
+        column_name: "Backlog",
+        category: "backlog",
+        title: "EXP-0001 · Broken pump",
+        number: 1,
+        waiting_on: "none",
+        title_source: "auto",
+        template: "Case file",
+      },
+    ]);
+    // The seed's four pre-board conversations default to `text`; only the board channel is a board.
+    expect(own.layouts).toEqual([
+      { layout: "board", n: 1 },
+      { layout: "text", n: 4 },
+    ]);
+    const cross = await read(B);
+    expect(cross.rows).toEqual([]);
+  });
+
+  it("Phase 07.1: the four board tables are org-scoped, forced, seeded and invisible and unwritable across tenants", async () => {
+    const scoped = new Map((await orgScopedTables()).map((t) => [t.tbl, t]));
+    for (const tbl of BOARD_TABLES) {
+      expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true });
+      expect(scoped.get(tbl)?.policies, tbl).toBeGreaterThan(0);
+      const own = await inTenant(A, () => app.query(`select count(*)::int as n from ${tbl}`));
+      expect(own.rows[0].n, `${tbl} seeded`).toBeGreaterThan(0);
+      // As ocw_app in org A, nothing of org B is visible…
+      const cross = await inTenant(A, () =>
+        app.query(`select count(*)::int as n from ${tbl} where organization_id = $1`, [B]),
+      );
+      expect(cross.rows[0].n, `${tbl} cross-tenant`).toBe(0);
+      // …updatable or deletable…
+      for (const stmt of [
+        `update ${tbl} set organization_id = organization_id where organization_id = $1`,
+        `delete from ${tbl} where organization_id = $1`,
+      ]) {
+        const n = await inTenant(A, () => app.query(stmt, [B]).then((res) => res.rowCount));
+        expect(n, `${tbl}: ${stmt}`).toBe(0);
+      }
+      // …or insertable: a copy of B's row written from A's context is refused by the policy.
+      const row = await migrator.query(
+        `select row_to_json(t) as j from ${tbl} t where organization_id = $1 limit 1`,
+        [B],
+      );
+      await expect(
+        inTenant(A, () =>
+          app.query(`insert into ${tbl} select * from json_populate_record(null::${tbl}, $1::json)`, [
+            JSON.stringify(row.rows[0].j),
+          ]),
+        ),
+        `${tbl} cross-tenant insert`,
+      ).rejects.toThrow(/row-level security/);
+    }
+  });
+
+  it("Phase 07.1: board constraints hold for layouts, columns, cards, numbers, templates and deletes", async () => {
+    const user = (await migrator.query("select user_id from app.org_members where organization_id = $1", [A]))
+      .rows[0].user_id as string;
+    const unit = (await migrator.query("select id from app.org_units where organization_id = $1", [A]))
+      .rows[0].id as string;
+    const seeded = (
+      await migrator.query(
+        "select c.message_id, c.column_id, c.conversation_id from app.board_cards c where c.organization_id = $1",
+        [A],
+      )
+    ).rows[0] as { message_id: string; column_id: string; conversation_id: string };
+    const board = seeded.conversation_id;
+    const tx = <T>(fn: () => Promise<T>) => inTenant(A, fn);
+    const q = (text: string, values: unknown[] = []) => app.query(text, values);
+
+    // Only a channel can be a board, and a layout is `text` or `board`.
+    const conv = (kind: string, layout: string) =>
+      q("insert into app.conversations (organization_id, kind, layout) values ($1, $2, $3) returning id", [
+        A,
+        kind,
+        layout,
+      ]);
+    expect((await tx(() => conv("channel", "board"))).rowCount).toBe(1);
+    for (const kind of ["dm", "group", "ai_chat", "thread", "work_session"]) {
+      await expect(
+        tx(() => conv(kind, "board")),
+        kind,
+      ).rejects.toThrow(/conversations_layout_kind_check/);
+      expect((await tx(() => conv(kind, "text"))).rowCount, kind).toBe(1);
+    }
+    await expect(tx(() => conv("channel", "grid"))).rejects.toThrow(/conversations_layout_check/);
+    // An existing conversation keeps the rule too.
+    await expect(
+      tx(() =>
+        q("update app.conversations set layout = 'board' where organization_id = $1 and kind = 'dm'", [A]),
+      ),
+    ).rejects.toThrow(/conversations_layout_kind_check/);
+
+    // Columns: four categories, four waiting states (or null = keep), bounded names, unique per board ignoring case.
+    const column = (name: string, category: string, waiting: string | null = null, onBoard = board) =>
+      q(
+        "insert into app.board_columns (organization_id, conversation_id, name, rank, category, default_waiting_on) values ($1, $2, $3, 'a5', $4, $5) returning id",
+        [A, onBoard, name, category, waiting],
+      );
+    for (const category of ["backlog", "started", "done", "cancelled"]) {
+      expect((await tx(() => column(`C ${category}`, category, "customer"))).rowCount, category).toBe(1);
+    }
+    await expect(tx(() => column("Waiting", "waiting"))).rejects.toThrow(/board_columns_category_check/);
+    await expect(tx(() => column("Waiting", "started", "them"))).rejects.toThrow(
+      /board_columns_default_waiting_on_check/,
+    );
+    await expect(tx(() => column("", "started"))).rejects.toThrow(/board_columns_name_len_check/);
+    await expect(tx(() => column("x".repeat(61), "started"))).rejects.toThrow(/board_columns_name_len_check/);
+    await expect(
+      tx(async () => {
+        await column("Done", "done");
+        return column("done", "done");
+      }),
+    ).rejects.toThrow(/board_columns_conv_name_uq/);
+
+    // Boards: prefixes are 1-8 upper-case letters or digits, naming rules at most 120 characters.
+    const setBoard = (col: string, value: string) =>
+      q(`update app.boards set ${col} = $2 where conversation_id = $1`, [board, value]);
+    expect((await tx(() => setBoard("prefix", "EXP2"))).rowCount).toBe(1);
+    for (const bad of ["exp", "TOOLONGPRE", "EX-P", ""]) {
+      await expect(
+        tx(() => setBoard("prefix", bad)),
+        bad,
+      ).rejects.toThrow(/boards_prefix_check/);
+    }
+    await expect(tx(() => setBoard("naming_rule", "x".repeat(121)))).rejects.toThrow(
+      /boards_naming_rule_len_check/,
+    );
+
+    // Cards: waiting states, title sources and bounded titles; numbers unique per board, nulls unlimited.
+    let seq = 100;
+    const card = (
+      onBoard: string,
+      columnId: string,
+      o: {
+        number?: number | null;
+        title?: string;
+        titleSource?: string;
+        waitingOn?: string;
+        /** Conversation of the root message (default: the card's own board). */
+        messageIn?: string;
+      } = {},
+    ) =>
+      (async () => {
+        seq += 1;
+        const m = (
+          await q(
+            "insert into app.messages (organization_id, conversation_id, seq, author_kind, author_id, body) values ($1, $2, $3, 'user', $4, 'card') returning id",
+            [A, o.messageIn ?? onBoard, seq, user],
+          )
+        ).rows[0].id;
+        return q(
+          "insert into app.board_cards (message_id, organization_id, conversation_id, column_id, rank, title, title_source, waiting_on, number) values ($1, $2, $3, $4, 'a1', $5, $6, $7, $8)",
+          [
+            m,
+            A,
+            onBoard,
+            columnId,
+            o.title ?? "Card",
+            o.titleSource ?? "user",
+            o.waitingOn ?? "none",
+            o.number ?? null,
+          ],
+        );
+      })();
+    const col = seeded.column_id;
+    for (const waitingOn of ["none", "us", "customer", "both"]) {
+      expect((await tx(() => card(board, col, { waitingOn }))).rowCount, waitingOn).toBe(1);
+    }
+    await expect(tx(() => card(board, col, { waitingOn: "them" }))).rejects.toThrow(
+      /board_cards_waiting_on_check/,
+    );
+    for (const titleSource of ["user", "heuristic", "auto"]) {
+      expect((await tx(() => card(board, col, { titleSource }))).rowCount, titleSource).toBe(1);
+    }
+    await expect(tx(() => card(board, col, { titleSource: "model" }))).rejects.toThrow(
+      /board_cards_title_source_check/,
+    );
+    expect((await tx(() => card(board, col, { title: "t".repeat(200) }))).rowCount).toBe(1);
+    await expect(tx(() => card(board, col, { title: "t".repeat(201) }))).rejects.toThrow(
+      /board_cards_title_len_check/,
+    );
+    await expect(tx(() => card(board, col, { title: "" }))).rejects.toThrow(/board_cards_title_len_check/);
+    // The seed's card is number 1 on this board.
+    await expect(tx(() => card(board, col, { number: 1 }))).rejects.toThrow(/board_cards_number_uq/);
+    /** A second board channel with its `boards` row (columns and cards need one). */
+    const newBoard = async () => {
+      const id = (await conv("channel", "board")).rows[0].id as string;
+      await q("insert into app.boards (conversation_id, organization_id) values ($1, $2)", [id, A]);
+      return id;
+    };
+    const numbers = await tx(async () => {
+      const other = await newBoard();
+      const otherCol = (await column("Backlog", "backlog", null, other)).rows[0].id as string;
+      return [
+        (await card(other, otherCol, { number: 1 })).rowCount, // same number, another board
+        (await card(board, col, { number: null })).rowCount, // unnumbered cards are unlimited
+        (await card(board, col, { number: null })).rowCount,
+        (await card(board, col, { number: 2 })).rowCount,
+      ];
+    });
+    expect(numbers).toEqual([1, 1, 1, 1]);
+
+    // Integrity: a card's column, root message and board all belong to the card's own board channel, and a column
+    // exists only on a board.
+    await expect(
+      tx(async () => {
+        const otherCol = (await column("Backlog", "backlog", null, await newBoard())).rows[0].id as string;
+        return card(board, otherCol);
+      }),
+      "a card in another board's column",
+    ).rejects.toThrow(/board_cards_column_fk/);
+    const general = (
+      await migrator.query(
+        "select id from app.conversations where organization_id = $1 and kind = 'channel' and layout = 'text'",
+        [A],
+      )
+    ).rows[0].id as string;
+    await expect(
+      tx(() => card(board, col, { messageIn: general })),
+      "a root message from another conversation",
+    ).rejects.toThrow(/board_cards_message_fk/);
+    await expect(
+      tx(() => column("Backlog", "backlog", null, general)),
+      "a column without a board",
+    ).rejects.toThrow(/board_columns_board_fk/);
+    // A card on a conversation without a board: its column cannot exist there either, so either FK may fire first;
+    // the catalog check below pins the card → board FK itself.
+    await expect(
+      tx(() => card(general, col, { messageIn: general })),
+      "a card on a conversation without a board",
+    ).rejects.toThrow(/board_cards_(board|column)_fk/);
+    const fks = await migrator.query(
+      `select conname, confrelid::regclass::text as ref, confdeltype as on_delete,
+              (select array_agg(a.attname::text order by k.ord) from unnest(conkey) with ordinality k(n, ord)
+                 join pg_attribute a on a.attrelid = conrelid and a.attnum = k.n) as cols
+         from pg_constraint
+        where contype = 'f' and conrelid in ('app.board_cards'::regclass, 'app.board_columns'::regclass)
+          and confrelid <> 'auth.organization'::regclass
+        order by conname`,
+    );
+    expect(fks.rows).toEqual([
+      { conname: "board_cards_board_fk", ref: "app.boards", on_delete: "c", cols: ["conversation_id"] },
+      {
+        conname: "board_cards_column_fk",
+        ref: "app.board_columns",
+        on_delete: "r",
+        cols: ["column_id", "conversation_id"],
+      },
+      {
+        conname: "board_cards_message_fk",
+        ref: "app.messages",
+        on_delete: "c",
+        cols: ["message_id", "conversation_id"],
+      },
+      { conname: "board_columns_board_fk", ref: "app.boards", on_delete: "c", cols: ["conversation_id"] },
+    ]);
+
+    // Templates: names unique per (organization, unit) ignoring case; organization-wide ones collide too.
+    const template = (unitId: string | null, name: string, prefix: string | null = null) =>
+      q("insert into app.record_templates (organization_id, unit_id, name, prefix) values ($1, $2, $3, $4)", [
+        A,
+        unitId,
+        name,
+        prefix,
+      ]);
+    await expect(tx(() => template(null, "case file"))).rejects.toThrow(/record_templates_name_uq/);
+    await expect(
+      tx(async () => {
+        await template(unit, "Case file");
+        return template(unit, "CASE FILE");
+      }),
+    ).rejects.toThrow(/record_templates_name_uq/);
+    const perUnit = await tx(async () => {
+      const other = randomUUID();
+      await q(
+        "insert into app.org_units (id, organization_id, kind, name, path) values ($1, $2, 'team', 'Support', ARRAY[$1]::uuid[])",
+        [other, A],
+      );
+      return [(await template(unit, "Case file")).rowCount, (await template(other, "Case file")).rowCount];
+    });
+    expect(perUnit).toEqual([1, 1]);
+    await expect(tx(() => template(null, "Orders", "ord"))).rejects.toThrow(/record_templates_prefix_check/);
+    await expect(tx(() => template(null, "x".repeat(81)))).rejects.toThrow(/record_templates_name_len_check/);
+
+    // A card dies with its root message; a column that still has a card cannot be deleted.
+    const afterDelete = await tx(async () => {
+      await q("delete from app.messages where id = $1", [seeded.message_id]);
+      return (
+        await q("select count(*)::int as n from app.board_cards where message_id = $1", [seeded.message_id])
+      ).rows[0].n;
+    });
+    expect(afterDelete).toBe(0);
+    await expect(tx(() => q("delete from app.board_columns where id = $1", [col]))).rejects.toThrow(
+      /RESTRICT setting of foreign key constraint "board_cards_column_fk"/,
+    );
+    // Deleting the board channel removes its board, columns and cards in one statement.
+    const gone = await tx(async () => {
+      await q("delete from app.conversations where id = $1", [board]);
+      const n = async (tbl: string) =>
+        (await q(`select count(*)::int as n from ${tbl} where conversation_id = $1`, [board])).rows[0].n;
+      return [await n("app.boards"), await n("app.board_columns"), await n("app.board_cards")];
+    });
+    expect(gone).toEqual([0, 0, 0]);
+  });
+
+  it("Phase 07.1: ranks sort in SQL exactly as in JavaScript", async () => {
+    const keys = ["a1", "Zz", "a0V", "A0", "a0", "b", "a0G"];
+    const seeded = (
+      await migrator.query(
+        "select c.conversation_id, m.author_id from app.board_cards c join app.messages m on m.id = c.message_id where c.organization_id = $1",
+        [A],
+      )
+    ).rows[0] as { conversation_id: string; author_id: string };
+    const sql = await inTenant(A, async () => {
+      const column = (
+        await app.query(
+          "insert into app.board_columns (organization_id, conversation_id, name, rank, category) values ($1, $2, 'Sorting', 'a1', 'started') returning id",
+          [A, seeded.conversation_id],
+        )
+      ).rows[0].id;
+      let seq = 200;
+      for (const rank of keys) {
+        seq += 1;
+        const m = (
+          await app.query(
+            "insert into app.messages (organization_id, conversation_id, seq, author_kind, author_id, body) values ($1, $2, $3, 'user', $4, $5) returning id",
+            [A, seeded.conversation_id, seq, seeded.author_id, rank],
+          )
+        ).rows[0].id;
+        await app.query(
+          "insert into app.board_cards (message_id, organization_id, conversation_id, column_id, rank, title) values ($1, $2, $3, $4, $5, $5)",
+          [m, A, seeded.conversation_id, column, rank],
+        );
+      }
+      return (
+        await app.query("select rank from app.board_cards where column_id = $1 order by rank", [column])
+      ).rows.map((r) => r.rank as string);
+    });
+    expect(sql).toEqual([...keys].sort());
+    // The keys do tell byte order from a linguistic one, so the assertion above can fail.
+    const linguistic = (
+      await migrator.query('select k from unnest($1::text[]) k order by k collate "und-x-icu"', [keys])
+    ).rows.map((r) => r.k as string);
+    expect(linguistic).not.toEqual([...keys].sort());
+
+    const collations = await migrator.query(
+      "select table_name, collation_name from information_schema.columns where table_schema = 'app' and column_name = 'rank' order by table_name",
+    );
+    expect(collations.rows).toEqual([
+      { table_name: "board_cards", collation_name: "C" },
+      { table_name: "board_columns", collation_name: "C" },
+    ]);
+    // The card order index sorts `rank` by "C" too. Read from the catalog: `pg_indexes.indexdef` prints a key's
+    // collation only when it differs from the column's, and the column itself is "C" now.
+    const idx = await migrator.query(
+      `select a.attname as col, co.collname as collation
+         from pg_index i
+         join pg_class c on c.oid = i.indexrelid
+         cross join lateral unnest(i.indkey::int2[], i.indcollation::oid[]) with ordinality as k(attnum, coll, ord)
+         join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
+         left join pg_collation co on co.oid = k.coll
+        where c.relname = 'board_cards_column_rank_idx'
+        order by k.ord`,
+    );
+    expect(idx.rows).toEqual([
+      { col: "organization_id", collation: null },
+      { col: "conversation_id", collation: null },
+      { col: "column_id", collation: null },
+      { col: "rank", collation: "C" },
+    ]);
+  });
+
   it("Phase 4: accent-insensitive Spanish search, a stored tsvector and the search indexes", async () => {
     const match = await migrator.query(
       "select to_tsvector('app.ocw_es', 'migración') @@ websearch_to_tsquery('app.ocw_es', 'migracion') as ok",
@@ -983,7 +1427,7 @@ describe("tenant isolation (RLS)", () => {
         const r = await tx.execute("select count(*)::int as n from app.conversations");
         return (r.rows[0] as { n: number }).n;
       });
-      expect(n).toBe(4); // channel + work-session conversation + the 3.1 DM + the Phase 6 AI chat
+      expect(n).toBe(5); // channel + work-session conversation + the 3.1 DM + the Phase 6 AI chat + the 07.1 board
     } finally {
       await db.close();
     }
@@ -1015,7 +1459,7 @@ describe("tenant isolation (RLS)", () => {
         const r = await tx.execute("select count(*)::int as n from app.conversations");
         return (r.rows[0] as { n: number }).n;
       });
-      expect(n).toBe(4); // channel + work-session conversation + the 3.1 DM + the Phase 6 AI chat
+      expect(n).toBe(5); // channel + work-session conversation + the 3.1 DM + the Phase 6 AI chat + the 07.1 board
     } finally {
       process.off("uncaughtException", onUncaught);
       await db.close();
@@ -1029,7 +1473,7 @@ describe("tenant isolation (RLS)", () => {
         const r = await tx.execute("select count(*)::int as n from app.conversations");
         return (r.rows[0] as { n: number }).n;
       });
-      expect(n).toBe(4); // channel + work-session conversation + the 3.1 DM + the Phase 6 AI chat
+      expect(n).toBe(5); // channel + work-session conversation + the 3.1 DM + the Phase 6 AI chat + the 07.1 board
       // Same single pooled connection, no tenant context now.
       const after = await db.pool.query("select count(*)::int as n from app.conversations");
       expect(after.rows[0].n).toBe(0);

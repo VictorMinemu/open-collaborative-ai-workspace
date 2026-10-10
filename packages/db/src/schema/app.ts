@@ -5,6 +5,7 @@ import {
   boolean,
   check,
   date,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -13,6 +14,7 @@ import {
   smallint,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
@@ -221,8 +223,17 @@ export const conversations = appSchema.table(
     dmKey: text("dm_key"),
     /** Channels only: the department, team or project the sidebar groups it under (CHAT-02); null = org. */
     unitId: uuid("unit_id").references(() => orgUnits.id, { onDelete: "set null" }),
+    /**
+     * Phase 07.1 (D-01): `board` turns a channel into a board of cards (`boards`, `board_columns`, `board_cards`);
+     * every other conversation, and every channel created before, is `text`. Only a `channel` can be a board.
+     */
+    layout: text("layout", { enum: ["text", "board"] })
+      .notNull()
+      .default("text"),
   },
   (t) => [
+    check("conversations_layout_check", sql`${t.layout} in ('text','board')`),
+    check("conversations_layout_kind_check", sql`${t.layout} = 'text' or ${t.kind} = 'channel'`),
     index("conversations_org_kind_idx").on(t.organizationId, t.kind),
     index("conversations_org_unit_idx").on(t.organizationId, t.unitId),
     uniqueIndex("conversations_org_dm_key_uq").on(t.organizationId, t.dmKey).where(sql`kind = 'dm'`),
@@ -303,6 +314,8 @@ export const messages = appSchema.table(
   },
   (t) => [
     index("messages_conv_seq_idx").on(t.organizationId, t.conversationId, t.seq),
+    /** Target of `board_cards_message_fk` (Phase 07.1): a card's root message lives in the card's board channel. */
+    unique("messages_id_conversation_uq").on(t.id, t.conversationId),
     index("messages_thread_idx").on(t.organizationId, t.threadId),
     /** Idempotent posts: the same author + client key (agent idempotencyKey, web clientMessageId) never duplicates. */
     uniqueIndex("messages_author_client_msg_uq")
@@ -1577,5 +1590,182 @@ export const messageCardFollows = appSchema.table(
   (t) => [
     primaryKey({ columns: [t.messageId, t.userId] }),
     index("message_card_follows_user_idx").on(t.organizationId, t.userId),
+  ],
+);
+
+// ---------------------------------------------------------------- board channels (Phase 07.1)
+
+/** Board column categories (D-02): what a column means, whatever its name. */
+const BOARD_COLUMN_CATEGORIES = sql`('backlog','started','done','cancelled')`;
+/** Who a card is waiting on (D-02). */
+const WAITING_ON = sql`('none','us','customer','both')`;
+
+/**
+ * Record templates (D-06, BOARD-06): typed fields, default columns and a naming rule for the boards created from them.
+ * `unit_id` null = organization-wide. Names are unique per (organization, unit), case-insensitively; the index is
+ * NULLS NOT DISTINCT (hand-added in the board_channels migration, drizzle 1.0.0-rc.4 has no builder for it), so two
+ * organization-wide templates collide too. Template edits affect new boards only (`boards` keeps a snapshot).
+ */
+export const recordTemplates = appSchema.table(
+  "record_templates",
+  {
+    id: id(),
+    organizationId: orgId(),
+    unitId: uuid("unit_id").references(() => orgUnits.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    prefix: text("prefix"),
+    namingRule: text("naming_rule"),
+    fields: jsonb("fields").$type<Array<Record<string, unknown>>>().notNull().default([]),
+    columns: jsonb("columns").$type<Array<Record<string, unknown>>>().notNull().default([]),
+    version: integer("version").notNull().default(1),
+    createdBy: uuid("created_by"),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("record_templates_unit_idx").on(t.organizationId, t.unitId),
+    uniqueIndex("record_templates_name_uq").on(t.organizationId, t.unitId, sql`lower(${t.name})`),
+    check("record_templates_name_len_check", sql`char_length(${t.name}) between 1 and 80`),
+    check("record_templates_prefix_check", sql`${t.prefix} is null or ${t.prefix} ~ '^[A-Z0-9]{1,8}$'`),
+    check(
+      "record_templates_naming_rule_len_check",
+      sql`${t.namingRule} is null or char_length(${t.namingRule}) <= 120`,
+    ),
+  ],
+);
+
+/**
+ * Board settings, one row per board channel (D-02, D-06, P-07): a SNAPSHOT of the template it was created from
+ * (prefix, naming rule, fields), and the per-board card counter `last_number`, incremented by the card-create path.
+ */
+export const boards = appSchema.table(
+  "boards",
+  {
+    conversationId: uuid("conversation_id")
+      .primaryKey()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    organizationId: orgId(),
+    templateId: uuid("template_id").references(() => recordTemplates.id, { onDelete: "set null" }),
+    /** null = cards are not numbered with a prefix. */
+    prefix: text("prefix"),
+    /** null = titles are typed, or the description's first line. */
+    namingRule: text("naming_rule"),
+    fields: jsonb("fields").$type<Array<Record<string, unknown>>>().notNull().default([]),
+    lastNumber: integer("last_number").notNull().default(0),
+    version: integer("version").notNull().default(1),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check("boards_prefix_check", sql`${t.prefix} is null or ${t.prefix} ~ '^[A-Z0-9]{1,8}$'`),
+    check(
+      "boards_naming_rule_len_check",
+      sql`${t.namingRule} is null or char_length(${t.namingRule}) <= 120`,
+    ),
+    check("boards_last_number_check", sql`${t.lastNumber} >= 0`),
+  ],
+);
+
+/**
+ * Board columns (D-02, BOARD-01). `rank` is a fractional-indexing key and is `COLLATE "C"` (hand-added in the
+ * board_channels migration: drizzle 1.0.0-rc.4 has no collation builder), so SQL orders keys exactly as JavaScript's
+ * default sort does (D-05). `default_waiting_on` applies when a card ENTERS the column; null keeps the card's state.
+ * `external_state_id` is reserved for external sync (OPS-BL-04) and never written in 07.1.
+ */
+export const boardColumns = appSchema.table(
+  "board_columns",
+  {
+    id: id(),
+    organizationId: orgId(),
+    /** The board channel; a column exists only on a board (`board_columns_board_fk` → `boards`). */
+    conversationId: uuid("conversation_id").notNull(),
+    name: text("name").notNull(),
+    rank: text("rank").notNull(),
+    category: text("category", { enum: ["backlog", "started", "done", "cancelled"] }).notNull(),
+    defaultWaitingOn: text("default_waiting_on", { enum: ["none", "us", "customer", "both"] }),
+    externalStateId: text("external_state_id"),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      name: "board_columns_board_fk",
+      columns: [t.conversationId],
+      foreignColumns: [boards.conversationId],
+    }).onDelete("cascade"),
+    /** Target of `board_cards_column_fk`: a card's column belongs to the card's board. */
+    unique("board_columns_id_conversation_uq").on(t.id, t.conversationId),
+    index("board_columns_conv_idx").on(t.organizationId, t.conversationId),
+    uniqueIndex("board_columns_conv_name_uq").on(t.conversationId, sql`lower(${t.name})`),
+    check("board_columns_category_check", sql`${t.category} in ${BOARD_COLUMN_CATEGORIES}`),
+    check(
+      "board_columns_default_waiting_on_check",
+      sql`${t.defaultWaitingOn} is null or ${t.defaultWaitingOn} in ${WAITING_ON}`,
+    ),
+    check("board_columns_name_len_check", sql`char_length(${t.name}) between 1 and 60`),
+    check("board_columns_rank_len_check", sql`char_length(${t.rank}) between 1 and 128`),
+  ],
+);
+
+/**
+ * Board cards (D-02, BOARD-02), keyed by their root message: a card IS the root of a normal thread and dies with it.
+ * The message body is the plain-text summary, so search works unchanged. `rank` is `COLLATE "C"` (hand-added, see
+ * `board_columns`), and so is the column order index. A column with cards cannot be deleted (restrict): its cards
+ * move first (P-09). `number` comes from `boards.last_number` and is unique per board. `external_ref` is reserved.
+ */
+export const boardCards = appSchema.table(
+  "board_cards",
+  {
+    messageId: uuid("message_id").primaryKey(),
+    organizationId: orgId(),
+    /** The board channel. Its root message, its column and its board all share it (composite FKs below). */
+    conversationId: uuid("conversation_id").notNull(),
+    columnId: uuid("column_id").notNull(),
+    rank: text("rank").notNull(),
+    waitingOn: text("waiting_on", { enum: ["none", "us", "customer", "both"] })
+      .notNull()
+      .default("none"),
+    title: text("title").notNull(),
+    titleSource: text("title_source", { enum: ["user", "heuristic", "auto"] })
+      .notNull()
+      .default("heuristic"),
+    description: text("description").notNull().default(""),
+    number: integer("number"),
+    fields: jsonb("fields").$type<Record<string, unknown>>().notNull().default({}),
+    externalRef: text("external_ref"),
+    version: integer("version").notNull().default(1),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+    movedAt: ts("moved_at").notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      name: "board_cards_message_fk",
+      columns: [t.messageId, t.conversationId],
+      foreignColumns: [messages.id, messages.conversationId],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "board_cards_column_fk",
+      columns: [t.columnId, t.conversationId],
+      foreignColumns: [boardColumns.id, boardColumns.conversationId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "board_cards_board_fk",
+      columns: [t.conversationId],
+      foreignColumns: [boards.conversationId],
+    }).onDelete("cascade"),
+    index("board_cards_column_rank_idx").on(
+      t.organizationId,
+      t.conversationId,
+      t.columnId,
+      sql`${t.rank} COLLATE "C"`,
+    ),
+    uniqueIndex("board_cards_number_uq").on(t.conversationId, t.number).where(sql`number is not null`),
+    check("board_cards_waiting_on_check", sql`${t.waitingOn} in ${WAITING_ON}`),
+    check("board_cards_title_source_check", sql`${t.titleSource} in ('user','heuristic','auto')`),
+    check("board_cards_title_len_check", sql`char_length(${t.title}) between 1 and 200`),
+    check("board_cards_rank_len_check", sql`char_length(${t.rank}) between 1 and 128`),
+    check("board_cards_number_check", sql`${t.number} is null or ${t.number} > 0`),
   ],
 );
