@@ -1,7 +1,7 @@
 "use client";
 
-import { CreateChannelRequest, type OrgUnit } from "@ocw/contracts";
-import { Building2, Globe, Hash, Lock } from "lucide-react";
+import { type ChannelLayout, CreateChannelRequest, type OrgUnit } from "@ocw/contracts";
+import { Building2, Globe, Hash, Lock, type LucideIcon, SquareKanban } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -115,6 +115,61 @@ export function ChannelUnitSelect({
   );
 }
 
+/**
+ * Radio cards (create-channel dialog): Visibility, and Layout (Phase 07.1, D-01/D-04: Text or Board, no voice). Each
+ * option is a label around a visually hidden radio, `data-testid="{name}-{value}"`; the chosen card takes the accent.
+ */
+function RadioCards<T extends string>({
+  legend,
+  name,
+  value,
+  onChange,
+  options,
+}: {
+  legend: string;
+  name: string;
+  value: T;
+  onChange: (v: T) => void;
+  options: ReadonlyArray<{ v: T; icon: LucideIcon; title: string; body: string }>;
+}) {
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-2 font-medium text-sm">{legend}</legend>
+      <div className="grid gap-2 sm:grid-cols-2">
+        {options.map((o) => (
+          <label
+            key={o.v}
+            className={cn(
+              "flex cursor-pointer gap-3 rounded-lg border p-3 transition-colors has-focus-visible:ring-[3px] has-focus-visible:ring-ring/40",
+              value === o.v ? "border-primary/60 bg-primary/5" : "hover:bg-accent/50",
+            )}
+          >
+            <input
+              type="radio"
+              name={name}
+              value={o.v}
+              checked={value === o.v}
+              onChange={() => onChange(o.v)}
+              className="sr-only"
+              data-testid={`${name}-${o.v}`}
+            />
+            <o.icon
+              className={cn(
+                "mt-0.5 size-4 shrink-0",
+                value === o.v ? "text-primary" : "text-muted-foreground",
+              )}
+            />
+            <span className="grid gap-0.5">
+              <span className="font-medium text-sm">{o.title}</span>
+              <span className="text-muted-foreground text-xs leading-snug">{o.body}</span>
+            </span>
+          </label>
+        ))}
+      </div>
+    </fieldset>
+  );
+}
+
 export function CreateChannelDialog({
   open,
   onOpenChange,
@@ -132,6 +187,7 @@ export function CreateChannelDialog({
   const [name, setName] = useState("");
   const [topic, setTopic] = useState("");
   const [visibility, setVisibility] = useState<"public" | "private">("public");
+  const [layout, setLayout] = useState<ChannelLayout>("text");
   const [unitId, setUnitId] = useState<string | null>(defaultUnitId);
   const [error, setError] = useState<string | undefined>();
 
@@ -143,6 +199,7 @@ export function CreateChannelDialog({
     setName("");
     setTopic("");
     setVisibility("public");
+    setLayout("text");
     setUnitId(defaultUnitId);
     setError(undefined);
     create.reset();
@@ -155,6 +212,7 @@ export function CreateChannelDialog({
       topic,
       visibility,
       unitId,
+      layout,
     });
     if (!parsed.success) {
       setError(name ? "Use lowercase letters, numbers, - and _" : "Give the channel a name");
@@ -235,45 +293,32 @@ export function CreateChannelDialog({
               <ChannelUnitSelect id="channel-unit" value={unitId} onChange={setUnitId} units={placeable} />
             </FormField>
           ) : null}
-          <fieldset className="grid gap-2">
-            <legend className="mb-2 font-medium text-sm">Visibility</legend>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {(
-                [
-                  { v: "public", icon: Globe, title: "Public", body: `Anyone in ${org} can find and join` },
-                  { v: "private", icon: Lock, title: "Private", body: "Only invited people and bots" },
-                ] as const
-              ).map((o) => (
-                <label
-                  key={o.v}
-                  className={cn(
-                    "flex cursor-pointer gap-3 rounded-lg border p-3 transition-colors has-focus-visible:ring-[3px] has-focus-visible:ring-ring/40",
-                    visibility === o.v ? "border-primary/60 bg-primary/5" : "hover:bg-accent/50",
-                  )}
-                >
-                  <input
-                    type="radio"
-                    name="visibility"
-                    value={o.v}
-                    checked={visibility === o.v}
-                    onChange={() => setVisibility(o.v)}
-                    className="sr-only"
-                    data-testid={`visibility-${o.v}`}
-                  />
-                  <o.icon
-                    className={cn(
-                      "mt-0.5 size-4 shrink-0",
-                      visibility === o.v ? "text-primary" : "text-muted-foreground",
-                    )}
-                  />
-                  <span className="grid gap-0.5">
-                    <span className="font-medium text-sm">{o.title}</span>
-                    <span className="text-muted-foreground text-xs leading-snug">{o.body}</span>
-                  </span>
-                </label>
-              ))}
-            </div>
-          </fieldset>
+          <RadioCards
+            legend="Layout"
+            name="layout"
+            value={layout}
+            onChange={setLayout}
+            options={[
+              { v: "text", icon: Hash, title: "Text", body: "Messages in one stream" },
+              {
+                v: "board",
+                icon: SquareKanban,
+                title: "Board",
+                body: "Cards in columns, each with its own thread",
+              },
+            ]}
+          />
+          {/* Template (board only) goes here, between Layout and Visibility (07.1-12). */}
+          <RadioCards
+            legend="Visibility"
+            name="visibility"
+            value={visibility}
+            onChange={setVisibility}
+            options={[
+              { v: "public", icon: Globe, title: "Public", body: `Anyone in ${org} can find and join` },
+              { v: "private", icon: Lock, title: "Private", body: "Only invited people and bots" },
+            ]}
+          />
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
               Cancel
