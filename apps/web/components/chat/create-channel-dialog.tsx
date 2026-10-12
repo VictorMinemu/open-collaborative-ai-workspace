@@ -1,9 +1,10 @@
 "use client";
 
-import { type ChannelLayout, CreateChannelRequest, type OrgUnit } from "@ocw/contracts";
+import { type ChannelLayout, CreateChannelRequest, type OrgUnit, type RecordTemplate } from "@ocw/contracts";
 import { Building2, Globe, Hash, Lock, type LucideIcon, SquareKanban } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { type FormEvent, useEffect, useMemo, useState } from "react";
+import { CategoryIcon } from "@/components/chat/board/column-header";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -22,6 +23,7 @@ import { useChannels, useCreateChannel } from "@/lib/chat-queries";
 import { useUnits } from "@/lib/org-queries";
 import { usePermissionCheck } from "@/lib/permissions";
 import { useMe } from "@/lib/queries";
+import { useRecordTemplates } from "@/lib/template-queries";
 import { cn } from "@/lib/utils";
 
 /** "Product Launch!" → "product-launch" (as you type, like Slack). */
@@ -115,6 +117,100 @@ export function ChannelUnitSelect({
   );
 }
 
+const NO_TEMPLATE = "__none__";
+const NO_TEMPLATE_LABEL = "None (Backlog, In progress, Done, Cancelled)";
+const TEMPLATE_HINT = "Sets the columns, fields and how cards are named.";
+
+/** `Case file · EXP · 4 columns` (the prefix part only when the template has one). */
+export function templateOptionLabel(t: Pick<RecordTemplate, "name" | "prefix" | "columns">): string {
+  const n = t.columns.length;
+  return [t.name, t.prefix, `${n} column${n === 1 ? "" : "s"}`].filter(Boolean).join(" · ");
+}
+
+export const templateUnavailable = (unit: string) =>
+  `That template isn't available in ${unit}. Pick another one.`;
+
+/**
+ * The Template field of a board (07.1-12, P-08, 07.1-UI-SPEC "Create-channel dialog (extended)"): the templates a
+ * channel in the chosen unit may use (the API lists them: the unit's, its ancestors' and organization-wide ones), and a
+ * read-only preview of the chosen template's columns.
+ */
+function TemplatePicker({
+  templates,
+  failed,
+  value,
+  onChange,
+  hint,
+  error,
+}: {
+  templates: RecordTemplate[];
+  failed: boolean;
+  value: string | null;
+  onChange: (id: string | null) => void;
+  hint: string;
+  error: string | undefined;
+}) {
+  const chosen = templates.find((t) => t.id === value) ?? null;
+  const items = [
+    { value: NO_TEMPLATE, label: NO_TEMPLATE_LABEL },
+    ...templates.map((t) => ({ value: t.id, label: templateOptionLabel(t) })),
+  ];
+  return (
+    <div className="grid gap-3" data-testid="template-field">
+      <FormField
+        id="channel-template"
+        label="Template"
+        hint={failed ? "Couldn't load templates. You can still create the board without one." : hint}
+        error={error}
+      >
+        <Select
+          items={items}
+          value={value ?? NO_TEMPLATE}
+          onValueChange={(v) => onChange(!v || v === NO_TEMPLATE ? null : String(v))}
+        >
+          <SelectTrigger
+            id="channel-template"
+            data-testid="template-picker"
+            aria-label="Template"
+            aria-describedby={describedBy("channel-template", error, hint)}
+          />
+          <SelectContent className="max-h-72 overflow-y-auto">
+            <SelectItem value={NO_TEMPLATE}>{NO_TEMPLATE_LABEL}</SelectItem>
+            {templates.map((t) => (
+              <SelectItem key={t.id} value={t.id} data-testid="template-option">
+                {templateOptionLabel(t)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </FormField>
+      {chosen ? (
+        <div
+          className="grid gap-1.5 sm:grid-cols-[auto_minmax(0,1fr)] sm:gap-3"
+          data-testid="template-columns"
+        >
+          <span className="font-medium text-sm" id="template-columns-label">
+            Columns
+          </span>
+          <ul aria-labelledby="template-columns-label" className="flex flex-wrap gap-x-3 gap-y-1.5">
+            {chosen.columns.map((c) => (
+              <li
+                key={c.name}
+                className="flex items-center gap-1.5 text-sm"
+                data-testid="template-column"
+                data-category={c.category}
+              >
+                <CategoryIcon category={c.category} />
+                {c.name}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /**
  * Radio cards (create-channel dialog): Visibility, and Layout (Phase 07.1, D-01/D-04: Text or Board, no voice). Each
  * option is a label around a visually hidden radio, `data-testid="{name}-{value}"`; the chosen card takes the accent.
@@ -189,7 +285,29 @@ export function CreateChannelDialog({
   const [visibility, setVisibility] = useState<"public" | "private">("public");
   const [layout, setLayout] = useState<ChannelLayout>("text");
   const [unitId, setUnitId] = useState<string | null>(defaultUnitId);
+  const [chosen, setChosen] = useState<RecordTemplate | null>(null);
+  const templateId = chosen?.id ?? null;
+  const [templateNote, setTemplateNote] = useState<string | null>(null);
+  const [templateError, setTemplateError] = useState<string | undefined>();
   const [error, setError] = useState<string | undefined>();
+  const units = useUnits();
+  const templates = useRecordTemplates(unitId, { enabled: open && layout === "board" });
+  const unitName =
+    unitId === null
+      ? (me.data?.organization.name ?? "the organization")
+      : (units.data?.units.find((u) => u.id === unitId)?.name ?? "this unit");
+
+  // A template chosen for another unit and not offered in this one is cleared, and the hint says why (P-08). While
+  // the new unit's list loads, the chosen template stays listed so the select keeps it until the answer decides.
+  const offered = templates.data?.templates;
+  useEffect(() => {
+    if (!templateId || !offered) return;
+    if (!offered.some((t) => t.id === templateId)) {
+      setChosen(null);
+      setTemplateNote(templateUnavailable(unitName));
+    }
+  }, [offered, templateId, unitName]);
+  const listed = offered ?? (chosen ? [chosen] : []);
 
   useEffect(() => {
     if (open) setUnitId(defaultUnitId);
@@ -201,6 +319,9 @@ export function CreateChannelDialog({
     setVisibility("public");
     setLayout("text");
     setUnitId(defaultUnitId);
+    setChosen(null);
+    setTemplateNote(null);
+    setTemplateError(undefined);
     setError(undefined);
     create.reset();
   };
@@ -213,6 +334,7 @@ export function CreateChannelDialog({
       visibility,
       unitId,
       layout,
+      ...(layout === "board" && templateId ? { templateId } : {}),
     });
     if (!parsed.success) {
       setError(name ? "Use lowercase letters, numbers, - and _" : "Give the channel a name");
@@ -224,8 +346,13 @@ export function CreateChannelDialog({
         reset();
         router.push(`/chat/${channel.id}`);
       },
-      onError: (err) =>
-        setError(isApiError(err, 409) ? `#${parsed.data.name} already exists` : errorMessage(err)),
+      onError: (err) => {
+        if (isApiError(err) && err.code === "template_not_available") {
+          setTemplateError(templateUnavailable(unitName));
+          return;
+        }
+        setError(isApiError(err, 409) ? `#${parsed.data.name} already exists` : errorMessage(err));
+      },
     });
   };
 
@@ -290,14 +417,29 @@ export function CreateChannelDialog({
               label="Belongs to"
               hint="Groups the channel in the sidebar; that department's rules apply to it."
             >
-              <ChannelUnitSelect id="channel-unit" value={unitId} onChange={setUnitId} units={placeable} />
+              <ChannelUnitSelect
+                id="channel-unit"
+                value={unitId}
+                onChange={(id) => {
+                  setUnitId(id);
+                  setTemplateError(undefined);
+                }}
+                units={placeable}
+              />
             </FormField>
           ) : null}
           <RadioCards
             legend="Layout"
             name="layout"
             value={layout}
-            onChange={setLayout}
+            onChange={(v) => {
+              setLayout(v);
+              if (v === "text") {
+                setChosen(null);
+                setTemplateNote(null);
+                setTemplateError(undefined);
+              }
+            }}
             options={[
               { v: "text", icon: Hash, title: "Text", body: "Messages in one stream" },
               {
@@ -308,7 +450,22 @@ export function CreateChannelDialog({
               },
             ]}
           />
-          {/* Template (board only) goes here, between Layout and Visibility (07.1-12). */}
+          {layout === "board" ? (
+            <TemplatePicker
+              templates={listed}
+              failed={templates.isError}
+              value={templateId}
+              onChange={(id) => {
+                if (id === templateId) return;
+                setChosen(listed.find((t) => t.id === id) ?? null);
+                // A "None" the select reports by itself (its item left the list) keeps the note saying why.
+                if (id !== null) setTemplateNote(null);
+                setTemplateError(undefined);
+              }}
+              hint={templateNote ?? TEMPLATE_HINT}
+              error={templateError}
+            />
+          ) : null}
           <RadioCards
             legend="Visibility"
             name="visibility"
