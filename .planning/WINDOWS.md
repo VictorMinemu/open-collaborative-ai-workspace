@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 91
-waived_count: 0
-fixed_count: 18
-total_count: 109
-last_updated: 2026-10-12T17:15:54.192Z
+open_count: 89
+waived_count: 2
+fixed_count: 22
+total_count: 113
+last_updated: 2026-10-12T21:23:04.109Z
 ---
 
 # Broken Windows Ledger
@@ -117,13 +117,17 @@ last_updated: 2026-10-12T17:15:54.192Z
 | 100 | 07.3 | deviation | apps/web/components/settings/account-nav |  | AI chat account entry hidden only when the permission is decided off (P-08), not via can() | open |  | 2026-10-10T01:03:30.376Z |  |
 | 101 | 07.3 | deviation | apps/web/components/organization/unit-modules-card.tsx |  | Read-only reason reads the member's role for copy only; edit rights still come from canEdit | open |  | 2026-10-10T01:03:30.449Z |  |
 | 102 | 07.3 | unmet-truth | apps/api/src/modules/agent-channel |  | Proactive agent messages and queued AI chat prompts are not re-decided against module rules (07.6/07.7 scope) | open |  | 2026-10-10T01:03:30.526Z |  |
-| 103 | 07.1 | deviation | apps/api/src/modules/chat/board |  | Possible deadlock: DELETE /messages on a card root racing a card text edit can abort one (500); delete should take the stream lock first | open |  | 2026-10-12T13:51:08.419Z |  |
-| 104 | 07.1 | deviation | apps/api/src/modules/chat/board/access.ts |  | A card create with @channel and an invalid columnId spends the channel's per-minute mention slot before the 400 (claim happens before column validation) | open |  | 2026-10-12T13:53:16.172Z |  |
-| 105 | 07.1 | unrun-verify | apps/api/src/modules/chat/board/routes.ts |  | Card PATCH does not pass the new body to writableBoard: confirm in 07.1-14 that edits never broadcast @channel (as generic message edits) or gate them with channel.mention_all | open |  | 2026-10-12T13:53:16.261Z |  |
-| 106 | 07.1 | deviation | apps/web/app/globals.css |  | Dark mode: white text on the primary colour is 3.44:1 (< 4.5:1 AA) on every enabled primary button; fix the dark primary token in 07.1-14 with before/after screenshots | open |  | 2026-10-12T15:31:56.286Z |  |
+| 103 | 07.1 | deviation | apps/api/src/modules/chat/board |  | Possible deadlock: DELETE /messages on a card root racing a card text edit can abort one (500); delete should take the stream lock first | fixed |  | 2026-10-12T13:51:08.419Z | 2026-10-12T21:23:03.467Z |
+| 104 | 07.1 | deviation | apps/api/src/modules/chat/board/access.ts |  | A card create with @channel and an invalid columnId spends the channel's per-minute mention slot before the 400 (claim happens before column validation) | fixed |  | 2026-10-12T13:53:16.172Z | 2026-10-12T21:23:03.542Z |
+| 105 | 07.1 | unrun-verify | apps/api/src/modules/chat/board/routes.ts |  | Card PATCH does not pass the new body to writableBoard: confirm in 07.1-14 that edits never broadcast @channel (as generic message edits) or gate them with channel.mention_all | fixed |  | 2026-10-12T13:53:16.261Z | 2026-10-12T21:23:03.617Z |
+| 106 | 07.1 | deviation | apps/web/app/globals.css |  | Dark mode: white text on the primary colour is 3.44:1 (< 4.5:1 AA) on every enabled primary button; fix the dark primary token in 07.1-14 with before/after screenshots | fixed |  | 2026-10-12T15:31:56.286Z | 2026-10-12T21:23:03.688Z |
 | 107 | 07.1 | deviation | packages/realtime-client |  | A dead socket the browser does not report is still not detected (no pong timeout) | open |  | 2026-10-12T15:37:41.294Z |  |
-| 108 | 07.1 | deviation | apps/openclaw-channel/src/turn-scoped-tools.ts |  | ocw_board_card alsoAllow lives in the plugin reconciler (a bot's own alsoAllow overrides the global one in OpenClaw 2026.9.7) | open |  | 2026-10-12T17:15:54.121Z |  |
-| 109 | 07.1 | deviation | apps/openclaw-channel/src/board-tool.ts |  | Agents can move/set waiting only on the thread's card or cards they created in this conversation (board read returns only the thread card version) | open |  | 2026-10-12T17:15:54.192Z |  |
+| 108 | 07.1 | deviation | apps/openclaw-channel/src/turn-scoped-tools.ts |  | ocw_board_card alsoAllow lives in the plugin reconciler (a bot's own alsoAllow overrides the global one in OpenClaw 2026.9.7) | waived | By design, recorded in ADR-0022 | 2026-10-12T17:15:54.121Z | 2026-10-12T21:23:03.760Z |
+| 109 | 07.1 | deviation | apps/openclaw-channel/src/board-tool.ts |  | Agents can move/set waiting only on the thread's card or cards they created in this conversation (board read returns only the thread card version) | waived | By design, recorded in ADR-0022 | 2026-10-12T17:15:54.192Z | 2026-10-12T21:23:03.829Z |
+| 110 | 07.1 | deviation | apps/web/app/globals.css |  | Dark destructive buttons (white on --destructive oklch(0.66 0.2 22)) measure ~3.3:1 (< 4.5:1 AA); same fill/text split as primary fixes it | open |  | 2026-10-12T21:23:03.898Z |  |
+| 111 | 07.1 | deviation | apps/web/components/chat/board/card-strip.tsx |  | A card with a typed title and empty description shows an empty root message body in its thread (author and time only) | open |  | 2026-10-12T21:23:03.967Z |  |
+| 112 | 07.1 | deviation | e2e/tests/search.spec.ts |  | Composer-focus regression e2e was not RED on the pre-fix build; fix rests on run-1 evidence, a focus probe and a unit test | open |  | 2026-10-12T21:23:04.036Z |  |
+| 113 | 07.1 | deviation | apps/web/components/chat/channel-view.tsx |  | Board Messages view: a card root beyond the first 100 cards of its column is not cached, so Edit message falls back to the inline editor (400 board_card_use_board) | open |  | 2026-10-12T21:23:04.109Z |  |
 
 ````json
 [
@@ -1358,10 +1362,10 @@ last_updated: 2026-10-12T17:15:54.192Z
     "file": "apps/api/src/modules/chat/board",
     "line": null,
     "description": "Possible deadlock: DELETE /messages on a card root racing a card text edit can abort one (500); delete should take the stream lock first",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-12T13:51:08.419Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-12T21:23:03.467Z"
   },
   {
     "id": 104,
@@ -1370,10 +1374,10 @@ last_updated: 2026-10-12T17:15:54.192Z
     "file": "apps/api/src/modules/chat/board/access.ts",
     "line": null,
     "description": "A card create with @channel and an invalid columnId spends the channel's per-minute mention slot before the 400 (claim happens before column validation)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-12T13:53:16.172Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-12T21:23:03.542Z"
   },
   {
     "id": 105,
@@ -1382,10 +1386,10 @@ last_updated: 2026-10-12T17:15:54.192Z
     "file": "apps/api/src/modules/chat/board/routes.ts",
     "line": null,
     "description": "Card PATCH does not pass the new body to writableBoard: confirm in 07.1-14 that edits never broadcast @channel (as generic message edits) or gate them with channel.mention_all",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-12T13:53:16.261Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-12T21:23:03.617Z"
   },
   {
     "id": 106,
@@ -1394,10 +1398,10 @@ last_updated: 2026-10-12T17:15:54.192Z
     "file": "apps/web/app/globals.css",
     "line": null,
     "description": "Dark mode: white text on the primary colour is 3.44:1 (< 4.5:1 AA) on every enabled primary button; fix the dark primary token in 07.1-14 with before/after screenshots",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-12T15:31:56.286Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-12T21:23:03.688Z"
   },
   {
     "id": 107,
@@ -1418,10 +1422,10 @@ last_updated: 2026-10-12T17:15:54.192Z
     "file": "apps/openclaw-channel/src/turn-scoped-tools.ts",
     "line": null,
     "description": "ocw_board_card alsoAllow lives in the plugin reconciler (a bot's own alsoAllow overrides the global one in OpenClaw 2026.9.7)",
-    "status": "open",
-    "reason": "",
+    "status": "waived",
+    "reason": "By design, recorded in ADR-0022",
     "recorded_at": "2026-10-12T17:15:54.121Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-12T21:23:03.760Z"
   },
   {
     "id": 109,
@@ -1430,9 +1434,57 @@ last_updated: 2026-10-12T17:15:54.192Z
     "file": "apps/openclaw-channel/src/board-tool.ts",
     "line": null,
     "description": "Agents can move/set waiting only on the thread's card or cards they created in this conversation (board read returns only the thread card version)",
+    "status": "waived",
+    "reason": "By design, recorded in ADR-0022",
+    "recorded_at": "2026-10-12T17:15:54.192Z",
+    "resolved_at": "2026-10-12T21:23:03.829Z"
+  },
+  {
+    "id": 110,
+    "kind": "deviation",
+    "phase": "07.1",
+    "file": "apps/web/app/globals.css",
+    "line": null,
+    "description": "Dark destructive buttons (white on --destructive oklch(0.66 0.2 22)) measure ~3.3:1 (< 4.5:1 AA); same fill/text split as primary fixes it",
     "status": "open",
     "reason": "",
-    "recorded_at": "2026-10-12T17:15:54.192Z",
+    "recorded_at": "2026-10-12T21:23:03.898Z",
+    "resolved_at": null
+  },
+  {
+    "id": 111,
+    "kind": "deviation",
+    "phase": "07.1",
+    "file": "apps/web/components/chat/board/card-strip.tsx",
+    "line": null,
+    "description": "A card with a typed title and empty description shows an empty root message body in its thread (author and time only)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-12T21:23:03.967Z",
+    "resolved_at": null
+  },
+  {
+    "id": 112,
+    "kind": "deviation",
+    "phase": "07.1",
+    "file": "e2e/tests/search.spec.ts",
+    "line": null,
+    "description": "Composer-focus regression e2e was not RED on the pre-fix build; fix rests on run-1 evidence, a focus probe and a unit test",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-12T21:23:04.036Z",
+    "resolved_at": null
+  },
+  {
+    "id": 113,
+    "kind": "deviation",
+    "phase": "07.1",
+    "file": "apps/web/components/chat/channel-view.tsx",
+    "line": null,
+    "description": "Board Messages view: a card root beyond the first 100 cards of its column is not cached, so Edit message falls back to the inline editor (400 board_card_use_board)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-12T21:23:04.109Z",
     "resolved_at": null
   }
 ]
