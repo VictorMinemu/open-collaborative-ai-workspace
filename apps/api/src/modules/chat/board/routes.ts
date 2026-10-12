@@ -101,6 +101,7 @@ export function registerBoardRoutes(app: App, ctx: BoardRouteCtx): void {
         const { conv } = await writableBoard(req, tx, ctx, req.params.conversationId, {
           body: broadcastText(req.body),
           clientMessageId: req.body.clientMessageId,
+          columnId: req.body.columnId,
         });
         const { card, created, result } = await createBoardCard(tx, deps, {
           conv,

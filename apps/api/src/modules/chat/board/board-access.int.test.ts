@@ -440,6 +440,68 @@ describe("member rights on a board (BOARD-01, T-07.1-05-02)", () => {
   });
 });
 
+describe("@channel on cards: validation before the gate, and edits never broadcast (07.1-14)", () => {
+  const notificationsOf = async (messageId: string): Promise<number> =>
+    (await su.query("select count(*)::int as n from app.notifications where message_id = $1", [messageId]))
+      .rows[0].n;
+
+  it("a broadcast card with an invalid column is 400 invalid_column and leaves the minute's slot unspent", async () => {
+    const board = (await createBoard(admin, "outages")).id;
+    const other = (await createBoard(admin, "elsewhere-2")).id;
+    await ok(alex.request("POST", `/api/v1/channels/${board}/join`, {}));
+    const foreignColumn = columnByName(await snapshot(admin, other), "Done").id;
+
+    for (const columnId of [randomUUID(), foreignColumn]) {
+      const refused = await fails(
+        newCard(alex, board, "Outage\n@channel the VPN is down", { columnId }),
+        400,
+      );
+      expect(refused.code).toBe("invalid_column");
+    }
+    // The gate was never claimed: the first valid broadcast of the minute posts.
+    const card = await ok(newCard(alex, board, "Outage\n@channel the VPN is down"));
+    expect(await notificationsOf(card.messageId)).toBe(1);
+  });
+
+  it("a card edit that adds @channel or @here notifies nobody and spends no slot, like a message edit", async () => {
+    const board = (await createBoard(admin, "edits-broadcast")).id;
+    await ok(alex.request("POST", `/api/v1/channels/${board}/join`, {}));
+    const card = await ok(newCard(alex, board, "Outage\nthe VPN is down"));
+    // Alex may not broadcast at all: an edit is still no broadcast, so it needs no `channel.mention_all`.
+    const rule = await ok(
+      admin.request("POST", "/api/v1/permission-rules", {
+        subjectKind: "user",
+        subjectId: alexId,
+        permission: "channel.mention_all",
+        effect: "deny",
+      }),
+    );
+    try {
+      const edited = await ok(
+        alex.request("PATCH", `/api/v1/boards/${board}/cards/${card.messageId}`, {
+          expectedVersion: card.version,
+          description: "Outage\n@channel the VPN is down",
+        }),
+      );
+      const retitled = await ok(
+        alex.request("PATCH", `/api/v1/boards/${board}/cards/${card.messageId}`, {
+          expectedVersion: edited.version,
+          title: "@here VPN down",
+        }),
+      );
+      expect(retitled.title).toBe("@here VPN down");
+    } finally {
+      await ok(admin.request("DELETE", `/api/v1/permission-rules/${rule.id}`));
+    }
+    expect(await notificationsOf(card.messageId)).toBe(0);
+    // No slot was spent: Víctor's broadcast in the same minute still goes out.
+    const msg = await ok(
+      admin.request("POST", `/api/v1/conversations/${board}/messages`, { body: "@channel all clear" }),
+    );
+    expect(await notificationsOf(msg.id)).toBe(1);
+  });
+});
+
 describe("archived boards and text channels (BOARD-01, T-07.1-05-02)", () => {
   it("an archived board reads (snapshot and column page) but every write is 410 channel_archived", async () => {
     const board = await createBoard(admin, "old-cases");
