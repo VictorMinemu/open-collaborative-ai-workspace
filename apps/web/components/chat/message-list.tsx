@@ -660,6 +660,7 @@ export function MessageList({
   dividerAfterSeq = null,
   onMarkUnread,
   onEdit,
+  editorFor,
 }: {
   messages: Message[];
   pending: PendingMessage[];
@@ -702,7 +703,18 @@ export function MessageList({
    * board card's root opens the card editor, 07.1-11); null = not offered. Must be stable.
    */
   onEdit?: ((m: Message) => void) | null;
+  /**
+   * Per-message `onEdit` for lists that mix kinds (a board's Messages view: card roots open the card editor, other
+   * messages keep the inline editor). Its answer wins over `onEdit`; undefined falls back to `onEdit`. Answers must be
+   * stable callbacks.
+   */
+  editorFor?: (m: Message) => ((m: Message) => void) | null | undefined;
 }) {
+  // null (not offered) must win over the list default, so `??` would be wrong here.
+  const editorOf = (m: Message) => {
+    const own = editorFor?.(m);
+    return own === undefined ? onEdit : own;
+  };
   let prev: { key: string; at: number; day: string } | null = startDay
     ? { key: "", at: 0, day: new Date(startDay).toDateString() }
     : null;
@@ -763,7 +775,7 @@ export function MessageList({
         pinnedBy={pinnedBy}
         linkFor={linkFor}
         onMarkUnread={onMarkUnread}
-        onEdit={onEdit}
+        onEdit={editorOf(m)}
       />,
     );
     // A message with a thread breaks the group so the next one shows its author again.
