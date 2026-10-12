@@ -50,7 +50,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useIsDesktop } from "@/hooks/use-media-query";
 import { api, errorMessage, isApiError } from "@/lib/api";
 import { useAttachmentsConfig } from "@/lib/attachment-queries";
-import { applyBoardFrame, boardAfterSeq, resyncBoard, useBoard } from "@/lib/board-queries";
+import { applyBoardFrame, boardAfterSeq, findCard, resyncBoard, useBoard } from "@/lib/board-queries";
 import {
   applyMessage,
   applyMessageDeleted,
@@ -75,6 +75,7 @@ import { useMe } from "@/lib/queries";
 import { useRealtime, useTopic } from "@/lib/realtime";
 import { formatDate } from "@/lib/utils";
 import { DropZone } from "./attachments/drop-zone";
+import { BoardConnectionBanner } from "./board/board-connection-banner";
 import { BoardView } from "./board/board-view";
 import type { CardAuthor } from "./board/card-tile";
 import { NewCardDialog } from "./board/new-card-dialog";
@@ -491,6 +492,40 @@ export function ChannelView({ channelId }: { channelId: string }) {
     },
     [searchParams, router, pathname],
   );
+  // Board layout (BOARD-05, UI-SPEC Opening a card): a link to a card root opens its thread over the board (at 390 on
+  // the card's column tab); a link to any other top-level message opens the Messages view, where the permalink window
+  // shows and highlights it like in a text channel. A reply link keeps the thread + highlight path above (`linkRoot`).
+  const boardSnap = board.data;
+  const linkLoading = win.loading;
+  useEffect(() => {
+    if (!isBoard || !permalinkId || threadId || view !== "board" || !boardSnap) return;
+    const hit = findCard(boardSnap, permalinkId);
+    if (hit) {
+      const p = boardParams();
+      p.set("thread", permalinkId);
+      if (!isDesktop) p.set("col", hit.card.columnId);
+      router.replace(`${pathname}?${p.toString()}`, { scroll: false });
+      return;
+    }
+    if (linkLoading || linkRoot) return;
+    const p = new URLSearchParams(searchParams.toString());
+    p.set("view", "messages");
+    router.replace(`${pathname}?${p.toString()}`, { scroll: false });
+  }, [
+    isBoard,
+    permalinkId,
+    threadId,
+    view,
+    boardSnap,
+    boardParams,
+    isDesktop,
+    linkLoading,
+    linkRoot,
+    searchParams,
+    router,
+    pathname,
+  ]);
+
   const authorOf = useCallback(
     (kind: "user" | "agent", id: string): CardAuthor => {
       const m = members.data?.members.find((x) => x.kind === kind && x.id === id);
@@ -741,9 +776,11 @@ export function ChannelView({ channelId }: { channelId: string }) {
               ) : null}
             </div>
           ) : null}
+          {isBoard ? <BoardConnectionBanner loaded={board.data !== undefined} /> : null}
 
-          {isBoard && view === "board" ? (
-            <div className="flex min-h-0 flex-1 flex-col">
+          {isBoard ? (
+            // The board stays mounted under Messages (hidden), so switching back keeps its scroll and tab (P-12).
+            <div className={view === "board" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
               <BoardView
                 channel={{ id: channel.id, name: channel.name ?? "" }}
                 snapshot={board.data}
@@ -799,7 +836,8 @@ export function ChannelView({ channelId }: { channelId: string }) {
                 </div>
               ) : null}
             </div>
-          ) : (
+          ) : null}
+          {isBoard && view === "board" ? null : (
             <DropZone
               conversationLabel={`#${channel.name}`}
               enabled={canDrop}
