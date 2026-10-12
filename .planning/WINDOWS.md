@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 89
+open_count: 91
 waived_count: 0
 fixed_count: 18
-total_count: 107
-last_updated: 2026-10-12T15:37:41.294Z
+total_count: 109
+last_updated: 2026-10-12T17:15:54.192Z
 ---
 
 # Broken Windows Ledger
@@ -122,6 +122,8 @@ last_updated: 2026-10-12T15:37:41.294Z
 | 105 | 07.1 | unrun-verify | apps/api/src/modules/chat/board/routes.ts |  | Card PATCH does not pass the new body to writableBoard: confirm in 07.1-14 that edits never broadcast @channel (as generic message edits) or gate them with channel.mention_all | open |  | 2026-10-12T13:53:16.261Z |  |
 | 106 | 07.1 | deviation | apps/web/app/globals.css |  | Dark mode: white text on the primary colour is 3.44:1 (< 4.5:1 AA) on every enabled primary button; fix the dark primary token in 07.1-14 with before/after screenshots | open |  | 2026-10-12T15:31:56.286Z |  |
 | 107 | 07.1 | deviation | packages/realtime-client |  | A dead socket the browser does not report is still not detected (no pong timeout) | open |  | 2026-10-12T15:37:41.294Z |  |
+| 108 | 07.1 | deviation | apps/openclaw-channel/src/turn-scoped-tools.ts |  | ocw_board_card alsoAllow lives in the plugin reconciler (a bot's own alsoAllow overrides the global one in OpenClaw 2026.9.7) | open |  | 2026-10-12T17:15:54.121Z |  |
+| 109 | 07.1 | deviation | apps/openclaw-channel/src/board-tool.ts |  | Agents can move/set waiting only on the thread's card or cards they created in this conversation (board read returns only the thread card version) | open |  | 2026-10-12T17:15:54.192Z |  |
 
 ````json
 [
@@ -1407,6 +1409,30 @@ last_updated: 2026-10-12T15:37:41.294Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-12T15:37:41.294Z",
+    "resolved_at": null
+  },
+  {
+    "id": 108,
+    "kind": "deviation",
+    "phase": "07.1",
+    "file": "apps/openclaw-channel/src/turn-scoped-tools.ts",
+    "line": null,
+    "description": "ocw_board_card alsoAllow lives in the plugin reconciler (a bot's own alsoAllow overrides the global one in OpenClaw 2026.9.7)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-12T17:15:54.121Z",
+    "resolved_at": null
+  },
+  {
+    "id": 109,
+    "kind": "deviation",
+    "phase": "07.1",
+    "file": "apps/openclaw-channel/src/board-tool.ts",
+    "line": null,
+    "description": "Agents can move/set waiting only on the thread's card or cards they created in this conversation (board read returns only the thread card version)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-12T17:15:54.192Z",
     "resolved_at": null
   }
 ]
