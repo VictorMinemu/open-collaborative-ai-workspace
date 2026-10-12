@@ -57,6 +57,7 @@ Taken from the PRD. Any design that violates one of these must be raised, not si
 | ChatGPT plan (AI chats) | per-member Sign in with ChatGPT, tokens sealed per member, never pooled; Claude only via org keys (METERED) | 0017 |
 | Multiplayer AI chats | grants on the same chat, decided only in the resolver (`aiAccessSql`); attributed prompt blocks; one generation, derived queue; the asker pays | 0019 |
 | Agent personas and cards | unit-scoped personas with lead rights; in AI chats only through OpenClaw; typed Agent Cards via the Agent Channel API | 0020 |
+| Board channels | `layout='board'` channels; a card is a thread root, ranks server-minted (`COLLATE "C"`, stream lock); unit record templates snapshotted; agents only via `agent-channel/board.ts` | 0022 |
 | Module access | Modules are catalog deny rules (`packages/contracts/src/module-access.ts`) decided by the resolver; never a feature flag; leads only on the units they lead, never for an admin | 0024 |
 | Clients | Web: Next.js 16 + React; Tailwind + shadcn/ui (Base UI); TanStack Query + Zustand. Desktop / mobile: Electron + bundled Vite renderer; Local Runtime daemon is a standalone process supervised by the app. Mobile (MVP7): Expo / React Native | PRD, research, 0005 |
 | Runtime adapters | Claude Code via Claude Agent SDK (streaming input, `canUseTool`); Codex via `codex app-server` JSON-RPC. Never scrape CLI stdout. Settings apply between turns; options come from the runtime-reported catalog, gated by `docs/workzone/runtime-controls-inventory.md` | research, 0013 |
