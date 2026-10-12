@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { BoardCard, EventTypes } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { sha256Hex } from "../../lib/crypto";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 
 /**
@@ -23,6 +24,7 @@ let victor: TestClient;
 let alex: TestClient;
 let orgId: string;
 let victorId: string;
+let alexId: string;
 let clerkId: string;
 let otherId: string;
 let opsId: string;
@@ -48,6 +50,8 @@ async function cell(method: string, path: string, body: unknown, token = CELL_TO
   });
   return { status: res.status, body: (await res.json()) as Json };
 }
+
+const codeOf = (r: Res) => (r.body.error as Json | undefined)?.code as string | undefined;
 
 async function invite(email: string, name: string): Promise<{ client: TestClient; id: string }> {
   const inv = await ok(victor.request("POST", "/api/v1/invitations", { email, role: "developer" }));
@@ -151,7 +155,7 @@ beforeAll(async () => {
   );
   orgId = setup.organization.id;
   victorId = setup.user.id;
-  ({ client: alex } = await invite("alex@example.test", "Alex Kim"));
+  ({ client: alex, id: alexId } = await invite("alex@example.test", "Alex Kim"));
   clerkId = await teamBot("Clerk", "clerk");
   otherId = await teamBot("Other", "other");
 
@@ -328,5 +332,414 @@ describe("tracer: in a card's thread @clerk opens a follow-up card and moves it 
     expect(text.turn.tools).not.toContain("ocw_board_card");
     expect(text.turn.toolFlags.ocw_board_card).toBeUndefined();
     expect(text.turn.tools).toEqual((ev.turn.tools as string[]).filter((t) => t !== "ocw_board_card"));
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------- Task 2
+
+/** Sign `client`'s user into a brand-new organization B as its admin (the 07.1-05 helper). */
+async function moveToOtherOrg(client: TestClient, userId: string): Promise<string> {
+  const orgB = randomUUID();
+  await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil', $2)", [
+    orgB,
+    `evil-${orgB}`,
+  ]);
+  await su.query("delete from auth.member where user_id = $1", [userId]);
+  await su.query("delete from app.org_members where user_id = $1", [userId]);
+  await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
+    orgB,
+    userId,
+  ]);
+  await su.query(
+    "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Eve', 'admin')",
+    [orgB, userId],
+  );
+  await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, userId]);
+  expect((await ok(client.request("GET", "/api/v1/me/permissions"))).role).toBe("admin");
+  return orgB;
+}
+
+/** Every row an agent board call could touch on `boardId`, to prove a refused call changed nothing. */
+async function boardRows(boardId: string) {
+  const q = async (text: string) => (await su.query(text, [boardId])).rows;
+  return {
+    cards: await q("select * from app.board_cards where conversation_id = $1 order by message_id"),
+    messages: await q(
+      "select id, body, author_kind, author_id from app.messages where conversation_id = $1 order by id",
+    ),
+    boards: await q("select * from app.boards where conversation_id = $1"),
+  };
+}
+
+/** The latest `agent.board.refused` audit for `reason`. */
+async function refusedAudit(reason: string): Promise<Json | undefined> {
+  return (await audits("agent.board.refused")).filter((a) => a.metadata.reason === reason).at(-1);
+}
+
+const firstColumn = async (boardId: string) =>
+  ((await snapshot(victor, boardId)).columns as Json[])[0]?.id as string;
+
+describe("agents cannot leave their turn, their tenant or their budget (Task 2)", () => {
+  let ev: Json;
+  let target: Json;
+  let eve: TestClient;
+  let orgBToken: string;
+  let orgBCard: Json;
+
+  beforeAll(async () => {
+    ({ ev } = await cardTurn(victor, opsId, "Valve 9 rattles\n@clerk please track it"));
+    target = await humanCard(victor, opsId, "Replace gasket on line 2");
+    // Org B: Eve's own organization with a board and a card, and its own cell token.
+    const invited = await invite("eve@example.test", "Eve");
+    eve = invited.client;
+    const orgB = await moveToOtherOrg(eve, invited.id);
+    orgBToken = `ocw_cell_${randomUUID()}${randomUUID()}`;
+    await su.query(
+      "insert into app.agent_credentials (organization_id, kind, token_hash) values ($1, 'channel_plugin', $2)",
+      [orgB, sha256Hex(orgBToken)],
+    );
+    const evilBoard = await createBoard(eve, "evil-ops", { visibility: "public" });
+    orgBCard = await humanCard(eve, evilBoard, "Org B's own card");
+  });
+
+  /**
+   * Every agent board route, called with org B's cell token and org A's turn and card (07.1-14's route-coverage guard
+   * mirrors this table): the turn does not exist for org B (RLS), so each call answers no turn.
+   */
+  const AGENT_BOARD_CROSS_TENANT_ROUTES: ReadonlyArray<{
+    name: string;
+    call: (token: string, ids: { eventId: string; messageId: string; columnId: string }) => Promise<Res>;
+  }> = [
+    { name: "POST /agent-channel/v1/board/read", call: (t, i) => readBoard(i.eventId, {}, t) },
+    { name: "POST /agent-channel/v1/board/cards", call: (t, i) => createCard(i.eventId, {}, t) },
+    {
+      name: "PATCH /agent-channel/v1/board/cards/:messageId",
+      call: (t, i) =>
+        patchCard(
+          i.eventId,
+          i.messageId,
+          { expectedVersion: 1, move: { columnId: i.columnId, afterCardId: null } },
+          t,
+        ),
+    },
+  ];
+
+  it.each(AGENT_BOARD_CROSS_TENANT_ROUTES)(
+    "org B's cell token with org A's turn: 403 no_trigger on $name, nothing changes, the turn is not counted",
+    async (route) => {
+      const before = await boardRows(opsId);
+      const calls = await toolCalls(ev.eventId);
+      const res = await route.call(orgBToken, {
+        eventId: ev.eventId,
+        messageId: target.messageId,
+        columnId: columns.done,
+      });
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(codeOf(res)).toBe("no_trigger");
+      expect(await boardRows(opsId)).toEqual(before);
+      expect(await toolCalls(ev.eventId)).toBe(calls);
+    },
+  );
+
+  it("an unknown event id, or another bot naming @clerk's turn, is no trigger (403 no_trigger), audited without a turn", async () => {
+    const before = await boardRows(opsId);
+    for (const res of [
+      await createCard(randomUUID()),
+      await readBoard(randomUUID()),
+      await patchCard(randomUUID(), target.messageId, { expectedVersion: 1, waitingOn: "us" }),
+      await createCard(ev.eventId, { agentId: otherId }),
+      await readBoard(ev.eventId, { agentId: otherId }),
+      await patchCard(ev.eventId, target.messageId, {
+        agentId: otherId,
+        expectedVersion: 1,
+        waitingOn: "us",
+      }),
+    ]) {
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(codeOf(res)).toBe("no_trigger");
+    }
+    expect(await boardRows(opsId)).toEqual(before);
+    expect(await refusedAudit("no_trigger")).toMatchObject({
+      actor_kind: "system",
+      agent_id: null,
+      user_id: null,
+      result: "denied",
+      metadata: { route: "update", reason: "no_trigger" },
+    });
+  });
+
+  it("a text channel's turn: 403 not_in_turn on every route, uncounted; a forged board tool on a text turn is 400 not_a_board", async () => {
+    const msg = await ok(
+      victor.request("POST", `/api/v1/conversations/${generalId}/messages`, {
+        body: "@clerk add a card please",
+      }),
+    );
+    const text = await deliveredFor(clerkId, msg.id as string);
+    const before = await boardRows(opsId);
+    for (const res of [
+      await createCard(text.eventId),
+      await readBoard(text.eventId),
+      await patchCard(text.eventId, target.messageId, { expectedVersion: 1, waitingOn: "us" }),
+    ]) {
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(codeOf(res)).toBe("not_in_turn");
+    }
+    expect(await toolCalls(text.eventId)).toBe(0);
+    expect(await refusedAudit("not_in_turn")).toMatchObject({
+      actor_kind: "agent",
+      agent_id: clerkId,
+      user_id: victorId,
+      resource_id: generalId,
+    });
+
+    // Defence in depth: even a turn row listing the tool cannot act outside a board.
+    const forged = randomUUID();
+    await su.query(
+      `insert into app.agent_turns (event_id, organization_id, agent_id, user_id, conversation_id, conversation_kind, message_id, tools)
+       values ($1, $2, $3, $4, $5, 'channel', $6, $7)`,
+      [forged, orgId, clerkId, victorId, generalId, msg.id, ["ocw_board_card"]],
+    );
+    const res = await createCard(forged);
+    expect(res.status).toBe(400);
+    expect(codeOf(res)).toBe("not_a_board");
+    // Refused by the turn gate, before the call is counted.
+    expect(await toolCalls(forged)).toBe(0);
+    expect(await boardRows(opsId)).toEqual(before);
+    expect(await refusedAudit("not_a_board")).toMatchObject({ result: "denied", resource_id: generalId });
+  });
+
+  it("a turn that read web output (tainted through /tool-calls) can no longer change the board: 403 tainted", async () => {
+    await ok(victor.request("PATCH", `/api/v1/agents/${clerkId}/capabilities`, { internet: true }));
+    try {
+      const { ev: webTurn } = await cardTurn(victor, opsId, "Supplier price list?\n@clerk look it up");
+      expect(webTurn.turn.tools).toContain("web_search");
+      const gated = await cell("POST", "/tool-calls", {
+        eventId: webTurn.eventId,
+        agentId: clerkId,
+        tool: "web_search",
+        params: { query: "valve supplier" },
+      });
+      expect(gated.body).toMatchObject({ allowed: true });
+      const before = await boardRows(opsId);
+      for (const res of [
+        await createCard(webTurn.eventId),
+        await patchCard(webTurn.eventId, target.messageId, { expectedVersion: 1, waitingOn: "us" }),
+        await readBoard(webTurn.eventId),
+      ]) {
+        expect(res.status, JSON.stringify(res.body)).toBe(403);
+        expect(codeOf(res)).toBe("tainted");
+      }
+      expect(await boardRows(opsId)).toEqual(before);
+      expect(await refusedAudit("tainted")).toMatchObject({ agent_id: clerkId, user_id: victorId });
+    } finally {
+      await ok(victor.request("PATCH", `/api/v1/agents/${clerkId}/capabilities`, { internet: false }));
+    }
+  });
+
+  it("the ninth counted call of a turn is refused (403 cap_reached) and creates nothing", async () => {
+    const { ev: busy } = await cardTurn(victor, opsId, "Inventory count\n@clerk keep an eye on it");
+    for (let i = 0; i < 8; i++) expect((await readBoard(busy.eventId)).status).toBe(200);
+    const before = await boardRows(opsId);
+    const res = await createCard(busy.eventId);
+    expect(res.status).toBe(403);
+    expect(codeOf(res)).toBe("cap_reached");
+    expect(await toolCalls(busy.eventId)).toBe(8);
+    expect(await boardRows(opsId)).toEqual(before);
+    expect(await refusedAudit("cap_reached")).toMatchObject({ agent_id: clerkId, user_id: victorId });
+  });
+
+  it("an archived board: create and move are 410 channel_archived and change nothing; the board still reads", async () => {
+    const shelf = await createBoard(victor, "shelf", { visibility: "public" });
+    await addAgent(shelf, clerkId);
+    const { card, ev: shelfTurn } = await cardTurn(victor, shelf, "Old order\n@clerk archive check");
+    await ok(victor.request("POST", `/api/v1/channels/${shelf}/archive`));
+    const before = await boardRows(shelf);
+    for (const res of [
+      await createCard(shelfTurn.eventId),
+      await patchCard(shelfTurn.eventId, card.messageId, { expectedVersion: 1, waitingOn: "us" }),
+    ]) {
+      expect(res.status, JSON.stringify(res.body)).toBe(410);
+      expect(codeOf(res)).toBe("channel_archived");
+    }
+    expect(await boardRows(shelf)).toEqual(before);
+    expect((await readBoard(shelfTurn.eventId)).status).toBe(200);
+    expect(await refusedAudit("channel_archived")).toMatchObject({ result: "denied", resource_id: shelf });
+  });
+
+  it("a stale expectedVersion is 409 board_card_version_conflict carrying the current card", async () => {
+    const moved = await ok(
+      victor.request("PATCH", `/api/v1/boards/${opsId}/cards/${target.messageId}`, {
+        expectedVersion: target.version,
+        waitingOn: "both",
+      }),
+    );
+    const before = await boardRows(opsId);
+    const res = await patchCard(ev.eventId, target.messageId, {
+      expectedVersion: target.version,
+      move: { columnId: columns.done, afterCardId: null },
+    });
+    expect(res.status).toBe(409);
+    expect(codeOf(res)).toBe("board_card_version_conflict");
+    expect(res.body.error.details.card).toEqual(moved);
+    expect(await boardRows(opsId)).toEqual(before);
+    expect(await refusedAudit("board_card_version_conflict")).toMatchObject({
+      metadata: { route: "update", messageId: target.messageId },
+    });
+  });
+
+  it("a card of another board, a text-channel message or org B's card: 404 card_not_in_board; nothing changes", async () => {
+    const elsewhere = await createBoard(victor, "elsewhere", { visibility: "public" });
+    const foreignCard = await humanCard(victor, elsewhere, "Card on another board");
+    const message = await ok(
+      victor.request("POST", `/api/v1/conversations/${generalId}/messages`, { body: "plain message" }),
+    );
+    const before = { ops: await boardRows(opsId), elsewhere: await boardRows(elsewhere) };
+    for (const messageId of [foreignCard.messageId, message.id, orgBCard.messageId, randomUUID()]) {
+      const res = await patchCard(ev.eventId, messageId, { expectedVersion: 1, waitingOn: "customer" });
+      expect(res.status, messageId).toBe(404);
+      expect(codeOf(res)).toBe("card_not_in_board");
+    }
+    expect({ ops: await boardRows(opsId), elsewhere: await boardRows(elsewhere) }).toEqual(before);
+    const orgB = (
+      await su.query("select version, waiting_on from app.board_cards where message_id = $1", [
+        orgBCard.messageId,
+      ])
+    ).rows[0];
+    expect(orgB).toEqual({ version: 1, waiting_on: "none" });
+    expect(await refusedAudit("card_not_in_board")).toMatchObject({ result: "denied" });
+  });
+
+  it("a column of another board is 400 invalid_column on create and move", async () => {
+    const elsewhere = await createBoard(victor, "elsewhere-2", { visibility: "public" });
+    const columnId = await firstColumn(elsewhere);
+    const before = await boardRows(opsId);
+    const created = await createCard(ev.eventId, { columnId });
+    const current = (await snapshot(victor, opsId)).cards
+      .flatMap((c: Json) => c.cards as Json[])
+      .find((c: Json) => c.messageId === target.messageId) as Json;
+    const moved = await patchCard(ev.eventId, target.messageId, {
+      expectedVersion: current.version,
+      move: { columnId, afterCardId: null },
+    });
+    for (const res of [created, moved]) {
+      expect(res.status, JSON.stringify(res.body)).toBe(400);
+      expect(codeOf(res)).toBe("invalid_column");
+    }
+    expect(await boardRows(opsId)).toEqual(before);
+  });
+
+  it("an agent body naming card text is 403 not_author (P-03); agents only move and set the waiting state", async () => {
+    const { ev: editTurn } = await cardTurn(victor, opsId, "Label printer jams\n@clerk retitle it");
+    const before = await boardRows(opsId);
+    for (const text of [{ title: "Renamed" }, { description: "New text" }, { fields: {} }] as Json[]) {
+      const res = await patchCard(editTurn.eventId, target.messageId, {
+        expectedVersion: 99,
+        waitingOn: "us",
+        ...text,
+      });
+      expect(res.status, JSON.stringify(text)).toBe(403);
+      expect(codeOf(res)).toBe("not_author");
+    }
+    expect(await boardRows(opsId)).toEqual(before);
+    expect(await refusedAudit("not_author")).toMatchObject({ agent_id: clerkId, user_id: victorId });
+  });
+
+  it("confused deputy: once the turn's human left a private board, the agent can neither read, create nor move there", async () => {
+    const hr = await createBoard(victor, "hr-cases", { visibility: "private" });
+    await addAgent(hr, clerkId);
+    await ok(victor.request("POST", `/api/v1/channels/${hr}/members`, { kind: "user", id: alexId }));
+    const { card, ev: alexTurn } = await cardTurn(alex, hr, "Laptop request\n@clerk order it");
+    expect(alexTurn.turn.tools).toContain("ocw_board_card");
+    await ok(victor.request("DELETE", `/api/v1/channels/${hr}/members/user/${alexId}`));
+    const before = await boardRows(hr);
+    const writes = [
+      await createCard(alexTurn.eventId),
+      await patchCard(alexTurn.eventId, card.messageId, { expectedVersion: 1, waitingOn: "us" }),
+    ];
+    for (const res of writes) {
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      // Alex no longer may post there, so neither may the agent acting for him.
+      expect(res.body.error.details).toMatchObject({
+        permission: "channel.post",
+        layer: "resource",
+        reason: "not_a_member",
+      });
+    }
+    const read = await readBoard(alexTurn.eventId);
+    expect(read.status).toBe(403);
+    expect(read.body.error.details).toMatchObject({
+      permission: "channel.read",
+      layer: "resource",
+      reason: "private_channel",
+    });
+    expect(await boardRows(hr)).toEqual(before);
+    // Each is audited as the resolver's denial, with the agent as actor.
+    const denied = (
+      await su.query(
+        `select actor_kind, metadata from app.audit_events where action = 'authz.denied' and organization_id = $1
+          and resource_id like '/agent-channel/v1/board%' order by occurred_at desc limit 3`,
+        [orgId],
+      )
+    ).rows as Json[];
+    expect(denied).toHaveLength(3);
+    for (const row of denied)
+      expect(row).toMatchObject({ actor_kind: "agent", metadata: { layer: "resource" } });
+  });
+
+  it("a rule denying @clerk channel.post is 403 although the human could post; the board still reads", async () => {
+    const ruleId = randomUUID();
+    await su.query(
+      `insert into app.permission_rules (id, organization_id, subject_kind, subject_id, permission, effect)
+       values ($1, $2, 'agent', $3, 'channel.post', 'deny')`,
+      [ruleId, orgId, clerkId],
+    );
+    try {
+      const { ev: denied } = await cardTurn(victor, opsId, "Belt worn\n@clerk follow up");
+      const before = await boardRows(opsId);
+      const current = (await snapshot(victor, opsId)).cards
+        .flatMap((c: Json) => c.cards as Json[])
+        .find((c: Json) => c.messageId === target.messageId) as Json;
+      for (const res of [
+        await createCard(denied.eventId),
+        await patchCard(denied.eventId, target.messageId, {
+          expectedVersion: current.version,
+          waitingOn: "us",
+        }),
+      ]) {
+        expect(res.status, JSON.stringify(res.body)).toBe(403);
+        expect(res.body.error.details).toMatchObject({ permission: "channel.post", ruleId });
+      }
+      expect(await boardRows(opsId)).toEqual(before);
+      expect((await readBoard(denied.eventId)).status).toBe(200);
+      // The human's own rights are untouched.
+      await humanCard(victor, opsId, "Víctor can still post");
+    } finally {
+      await su.query("delete from app.permission_rules where id = $1", [ruleId]);
+    }
+  });
+
+  it("every refusal above is audited as denied, with ids and reasons only", async () => {
+    const rows = await audits("agent.board.refused");
+    const reasons = new Set(rows.map((a) => a.metadata.reason as string));
+    for (const reason of [
+      "no_trigger",
+      "not_in_turn",
+      "not_a_board",
+      "tainted",
+      "cap_reached",
+      "channel_archived",
+      "board_card_version_conflict",
+      "card_not_in_board",
+      "invalid_column",
+      "not_author",
+    ]) {
+      expect(reasons, reason).toContain(reason);
+    }
+    for (const a of rows) {
+      expect(a.result).toBe("denied");
+      const text = JSON.stringify(a.metadata);
+      for (const secret of ["Order spare", "Renamed", "New text", "valve supplier"])
+        expect(text).not.toContain(secret);
+    }
   });
 });
