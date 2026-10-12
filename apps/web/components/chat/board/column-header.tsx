@@ -15,6 +15,14 @@ export const CATEGORY: Record<BoardColumnCategory, { icon: LucideIcon; tone: str
   cancelled: { icon: CircleX, tone: "text-muted-foreground/70", label: "Cancelled" },
 };
 
+/** One-line meaning of each category (07.1-UI-SPEC Copywriting › Column settings; the 390 active-column row). */
+export const CATEGORY_MEANING: Record<BoardColumnCategory, string> = {
+  backlog: "Not started yet",
+  started: "Being worked on",
+  done: "Finished",
+  cancelled: "Won't be done",
+};
+
 /**
  * The category icon, 16 px. Alone (headers, tabs row) it is an image named by its category; next to a column name
  * that already says it (menu items) pass `decorative` so the item's name stays the column name.
