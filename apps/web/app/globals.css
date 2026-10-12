@@ -32,6 +32,8 @@
   --brand-soft-foreground: oklch(0.45 0.2 277);
   --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: oklch(0.985 0 0);
+  /* `text-destructive` (errors, destructive menu items): the destructive itself in light mode. */
+  --destructive-text: oklch(0.577 0.245 27.325);
   --success: oklch(0.65 0.17 155);
   --warning: oklch(0.77 0.16 70);
   --border: oklch(0.92 0.004 286.32);
@@ -72,8 +74,14 @@
   --accent-foreground: oklch(0.96 0.002 286);
   --brand-soft: oklch(0.29 0.07 278);
   --brand-soft-foreground: oklch(0.82 0.1 278);
-  --destructive: oklch(0.66 0.2 22);
+  /*
+   * Same split as primary (07.1 fix): fills (Delete card, Delete column, …) take a deeper tone so white text measures
+   * 4.9:1 (at 0.66 it was 3.3:1); `text-destructive` keeps 0.66, which measures 5.7:1 on the background, 5.3:1 on
+   * popovers and 4.9:1 on muted surfaces.
+   */
+  --destructive: oklch(0.56 0.2 22);
   --destructive-foreground: oklch(0.985 0 0);
+  --destructive-text: oklch(0.66 0.2 22);
   --success: oklch(0.72 0.16 155);
   --warning: oklch(0.8 0.15 75);
   --border: oklch(1 0 0 / 9%);
@@ -122,6 +130,8 @@
   --color-brand-soft-foreground: var(--brand-soft-foreground);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
+  /* Same as primary: `text-destructive` uses the text tone, `bg-destructive` and tints the fill. */
+  --text-color-destructive: var(--destructive-text);
   --color-success: var(--success);
   --color-warning: var(--warning);
   --color-border: var(--border);
