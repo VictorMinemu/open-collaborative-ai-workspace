@@ -55,6 +55,7 @@ import {
 import { createConversationAccess } from "./access";
 import { type AfterHumanPost, registerBoardRoutes } from "./board/routes";
 import { createBoard } from "./board/service";
+import { registerRecordTemplateRoutes, templateForChannel } from "./board/templates";
 import { registerCardActionRoutes } from "./card-actions";
 import {
   agentFactsOf,
@@ -783,13 +784,13 @@ export function createChatModule(core: Core): ApiModule {
           core.db.withTenant(tenant(req), async (tx) => {
             const auth = authOf(req);
             const { name, topic, visibility, layout } = req.body;
-            // Record templates arrive in 07.1-07; until then a board is created with the default columns only.
-            if (req.body.templateId) {
-              throw badRequest("Record templates are not available yet", "template_not_available");
-            }
             // CHAT-02: the organization (null) or a unit on one of the caller's own paths (admins: any unit).
             const unit = req.body.unitId
               ? await placeableUnit(tx, req.body.unitId, auth.userId, await perms.can(req, tx, "unit.manage"))
+              : null;
+            // P-08: a template of the channel's unit, one of its ancestors or the organization, snapshotted below.
+            const settings = req.body.templateId
+              ? await templateForChannel(tx, req.body.templateId, unit)
               : null;
             const [row] = await tx
               .insert(conversations)
@@ -815,13 +816,19 @@ export function createChatModule(core: Core): ApiModule {
               role: "owner",
             });
             // A board channel (D-01) is this same channel plus its board and columns, in the same transaction.
-            if (layout === "board") await createBoard(tx, row, null);
+            if (layout === "board") await createBoard(tx, row, settings);
             await core.audit.record(tx, {
               action: "channel.created",
               resourceType: "conversation",
               resourceId: row.id,
               sessionId: auth.sessionId,
-              metadata: { name, visibility, unitId: unit?.id ?? null, layout, templateId: null },
+              metadata: {
+                name,
+                visibility,
+                unitId: unit?.id ?? null,
+                layout,
+                templateId: settings?.templateId ?? null,
+              },
             });
             await notifyListChanged(tx, deps, row, EventTypes.conversationCreated);
             return summaryOf(req, tx, row.id);
@@ -1366,6 +1373,8 @@ export function createChatModule(core: Core): ApiModule {
       registerCardActionRoutes(app, routeCtx);
       // ---------------------------------------------------------------- board channels (Phase 07.1)
       registerBoardRoutes(app, { ...routeCtx, afterHumanPost });
+      // ---------------------------------------------------------------- record templates (Phase 07.1, BOARD-06)
+      registerRecordTemplateRoutes(app, routeCtx);
 
       if (core.env.NODE_ENV === "test") registerChatTestRoutes(app, core);
     },
