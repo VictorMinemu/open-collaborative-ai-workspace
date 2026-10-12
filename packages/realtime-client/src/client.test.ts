@@ -533,6 +533,89 @@ describe("RealtimeClient", () => {
     expect(revoked).toHaveBeenCalledTimes(1);
   });
 
+  it("setNetwork(false) drops the socket at once, shows closed and retries nothing; setNetwork(true) resumes from the cursors", () => {
+    vi.useFakeTimers();
+    const c = new RealtimeClient({ url: "ws://x/ws", WebSocket: FakeWS, backoffBaseMs: 10 });
+    const seqs: number[] = [];
+    c.subscribe(T, (f) => f.op === "ev" && seqs.push(f.seq), { afterSeq: 4, presence: true });
+    c.connect();
+    const first = FakeWS.last!;
+    first.open();
+    first.push(ev(5));
+    const conn = "0190d5e2-7c3a-7cc2-9d2e-0000000000c1";
+    const userId = "0190d5e2-7c3a-7cc2-9d2e-000000000001";
+    first.push({ op: "presence", topic: T, full: true, entries: [{ conn, userId, state: "online" }] });
+    expect(c.presence.getState().topics[T]).toEqual({ [conn]: { userId, state: "online" } });
+
+    // The browser reports no network: a dead network can keep a socket "open" for minutes, so it goes now.
+    c.setNetwork(false);
+    expect(first.readyState).toBe(3);
+    expect(c.status.getState().status).toBe("closed");
+    expect(c.presence.getState().topics).toEqual({});
+    first.push(ev(6)); // a late frame of the dropped socket is never delivered
+    first.drop(); // and its close never schedules a retry
+    vi.advanceTimersByTime(60_000);
+    expect(FakeWS.all).toHaveLength(1);
+    c.setNetwork(false); // repeated: nothing changes
+    expect(FakeWS.all).toHaveLength(1);
+
+    // Back online: reconnect at once (no backoff wait), re-subscribe from the cursor, so the server replays.
+    c.setNetwork(true);
+    const second = FakeWS.last!;
+    expect(second).not.toBe(first);
+    expect(c.status.getState().status).toBe("connecting");
+    second.open();
+    expect(second.sent).toContainEqual({ op: "sub", topic: T, afterSeq: 5, presence: true });
+    second.push(ev(6));
+    expect(seqs).toEqual([5, 6]);
+    expect(c.status.getState().status).toBe("open");
+    c.setNetwork(true); // already online: nothing new
+    expect(FakeWS.all).toHaveLength(2);
+  });
+
+  it("setNetwork(true) while waiting out a backoff retries now", () => {
+    vi.useFakeTimers();
+    const c = new RealtimeClient({
+      url: "ws://x/ws",
+      WebSocket: FakeWS,
+      backoffBaseMs: 60_000,
+      backoffMaxMs: 60_000,
+    });
+    c.subscribe(T, () => {});
+    c.connect();
+    FakeWS.last!.open();
+    vi.spyOn(Math, "random").mockReturnValue(0.99);
+    FakeWS.last!.drop();
+    expect(c.status.getState().status).toBe("reconnecting");
+    expect(FakeWS.all).toHaveLength(1);
+    c.setNetwork(true);
+    expect(FakeWS.all).toHaveLength(2);
+    expect(c.status.getState().status).toBe("reconnecting");
+    vi.advanceTimersByTime(120_000); // the cancelled backoff timer never opens a third socket
+    expect(FakeWS.all).toHaveLength(2);
+    vi.restoreAllMocks();
+  });
+
+  it("a client the app closed stays closed through network changes; close() while offline ends it too", () => {
+    const c = new RealtimeClient({ url: "ws://x/ws", WebSocket: FakeWS });
+    c.connect();
+    FakeWS.last!.open();
+    c.close();
+    c.setNetwork(false);
+    c.setNetwork(true);
+    expect(FakeWS.all).toHaveLength(1);
+    expect(c.status.getState().status).toBe("closed");
+
+    const d = new RealtimeClient({ url: "ws://x/ws", WebSocket: FakeWS });
+    d.connect();
+    FakeWS.last!.open();
+    d.setNetwork(false);
+    d.close();
+    d.setNetwork(true);
+    expect(FakeWS.all).toHaveLength(2);
+    expect(d.status.getState().status).toBe("closed");
+  });
+
   it("backoff is bounded with full jitter", () => {
     expect(backoffDelay(0, 1000, 30_000, () => 0.999)).toBeLessThan(1000);
     expect(backoffDelay(10, 1000, 30_000, () => 0.999)).toBeLessThan(30_000);
