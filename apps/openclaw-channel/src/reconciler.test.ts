@@ -270,6 +270,25 @@ describe("capabilities in the cell (D-08 layer 1, D-09)", () => {
     });
   });
 
+  it("a bot served delivered-turn tools (ocw_agent_card) also configures ocw_board_card; a bot with none does not (07.1-13)", () => {
+    const plan = planReconcile(
+      {},
+      {
+        agents: [
+          agent("c", { capabilities: { tools: ["web_search", "ocw_agent_card"] } }),
+          agent("w", { capabilities: { tools: ["web_search"] } }),
+          agent("q", { capabilities: { tools: [] } }),
+        ],
+        providers: [ANTHROPIC],
+      },
+    );
+    expect(plan.upsertAgents["ocw-c"]?.tools).toMatchObject({
+      alsoAllow: ["web_search", "ocw_agent_card", "ocw_board_card"],
+    });
+    expect(plan.upsertAgents["ocw-w"]?.tools).toMatchObject({ alsoAllow: ["web_search"] });
+    expect(plan.upsertAgents["ocw-q"]?.tools).not.toHaveProperty("alsoAllow");
+  });
+
   it("Code Mode is off for every bot: it hides tools behind `exec`, which the gate always refuses", () => {
     const plan = planReconcile(
       {},

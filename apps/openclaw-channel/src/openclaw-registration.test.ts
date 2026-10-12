@@ -77,11 +77,11 @@ describe("OpenClaw 2026.9.7 registration of the real entry", () => {
     expect(ocwHooks("discovery", "gateway")).toEqual([]);
   });
 
-  it("the memory and card tools are registered where OpenClaw resolves plugin tools (boot registry and tool discovery)", () => {
+  it("the memory, card and board tools are registered where OpenClaw resolves plugin tools (boot registry and tool discovery)", () => {
     const tools = (mode: RegistrationMode) =>
       loadRegistry(entry, manifest, { mode }).tools.flatMap((t) => t.names);
-    expect(tools("full")).toEqual(["ocw_memory_save", "ocw_agent_card"]);
-    expect(tools("tool-discovery")).toEqual(["ocw_memory_save", "ocw_agent_card"]);
+    expect(tools("full")).toEqual(["ocw_memory_save", "ocw_agent_card", "ocw_board_card"]);
+    expect(tools("tool-discovery")).toEqual(["ocw_memory_save", "ocw_agent_card", "ocw_board_card"]);
   });
 
   it("no registration diagnostics in any mode", () => {
