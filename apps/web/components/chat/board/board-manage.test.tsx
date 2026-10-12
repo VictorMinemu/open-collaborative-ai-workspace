@@ -8,6 +8,7 @@ import { AUTHOR, BOARD, COL, COLUMNS, CONV, card, id, snapshot } from "@/lib/boa
 import {
   COLUMN_COPY,
   cardEditRequest,
+  cardRootKind,
   columnErrorMessage,
   columnNameError,
   draftOf,
@@ -211,6 +212,32 @@ describe("removeCard", () => {
     const next = removeCard(s, card(1).messageId);
     expect(next.cards[0]?.cards.map((c) => c.title)).toEqual(["Card 2"]);
     expect(removeCard(s, "missing")).toBe(s);
+  });
+});
+
+describe("cardRootKind (the Messages view's editor for a top-level message of a board)", () => {
+  const msg = (id: string, threadId: string | null = null) => ({ id, threadId });
+  const complete = snapshot([card(1), card(2)]);
+  const partial = {
+    ...complete,
+    cards: complete.cards.map((c, i) => (i === 0 ? { ...c, hasMore: true } : c)),
+  };
+
+  it("a card in the loaded board is a card", () => {
+    expect(cardRootKind(complete, msg(card(1).messageId))).toBe("card");
+    expect(cardRootKind(partial, msg(card(2).messageId))).toBe("card");
+  });
+
+  it("a message the loaded board does not hold is a plain message only when every column is fully loaded", () => {
+    expect(cardRootKind(complete, msg(id(90)))).toBe("message");
+    // A column with more cards than its first page may hold it: ask the API (GET /boards/:id/cards/:messageId).
+    expect(cardRootKind(partial, msg(id(90)))).toBe("unknown");
+    expect(cardRootKind(undefined, msg(id(90)))).toBe("unknown");
+  });
+
+  it("a reply is never a card", () => {
+    expect(cardRootKind(partial, msg(id(91), card(1).messageId))).toBe("message");
+    expect(cardRootKind(undefined, msg(id(91), card(1).messageId))).toBe("message");
   });
 });
 
