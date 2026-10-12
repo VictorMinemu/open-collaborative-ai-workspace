@@ -386,4 +386,15 @@ describe("CardStrip (07.1-UI-SPEC Thread panel: card strip)", () => {
     expect(shown.body).toBe("Broken pump\nPump 3 leaks");
     expect(shown.id).toBe(theCard.messageId);
   });
+
+  it("shows the card's title in the root when the description is empty, never an empty body", () => {
+    const root = { id: theCard.messageId, body: "EXP-0007 · Broken pump\n\nCustomer: Acme" };
+    for (const description of ["", "  \n "]) {
+      const shown = cardRootView(root as unknown as Parameters<typeof cardRootView>[0], {
+        ...theCard,
+        description,
+      });
+      expect(shown.body).toBe("EXP-0007 · Broken pump");
+    }
+  });
 });

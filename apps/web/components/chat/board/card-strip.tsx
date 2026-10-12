@@ -28,13 +28,17 @@ import { WAITING, WAITING_OPTIONS, WaitingDot, WaitingOnBadge } from "./waiting-
  * Changes go through the 07.1-04 `useUpdateBoardCard` (optimistic, rollback, announced in the strip's own live region).
  *
  * The root message under the strip shows only the card's description (`cardRootView`): a typed title and the field
- * values are here, so the thread never says anything twice. The stored message body (title, description, fields as plain text)
+ * values are here, so the thread never says anything twice. Without a description the root shows the title. The stored message body (title, description, fields as plain text)
  * is unchanged: chat search and the Messages view read it.
  */
 
-/** The thread root as the panel renders it under a card strip: the description is the message, nothing repeated. */
-export function cardRootView(root: Message, card: Pick<BoardCard, "description">): Message {
-  return { ...root, body: card.description };
+/**
+ * The thread root as the panel renders it under a card strip: the description is the message, nothing repeated. A card
+ * without a description shows its title instead (07.1-UI-SPEC: the root message carries the title and description), so
+ * the root is never an empty bubble with only its author and time.
+ */
+export function cardRootView(root: Message, card: Pick<BoardCard, "description" | "title">): Message {
+  return { ...root, body: card.description.trim() ? card.description : card.title };
 }
 
 /** Field values as the strip lists them: in definition order, only the ones with a value. */

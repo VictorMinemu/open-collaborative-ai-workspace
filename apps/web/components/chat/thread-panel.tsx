@@ -102,9 +102,13 @@ function ThreadBody({
   const isAuthor = !!card && isCardAuthor(card, me.id);
   const root = thread.data?.root;
   const description = card?.description;
+  const title = card?.title;
   const rootView = useMemo(
-    () => (root && description !== undefined ? cardRootView(root, { description }) : root),
-    [root, description],
+    () =>
+      root && description !== undefined && title !== undefined
+        ? cardRootView(root, { description, title })
+        : root,
+    [root, description, title],
   );
 
   return (

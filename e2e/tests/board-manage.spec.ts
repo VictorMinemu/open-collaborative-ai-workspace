@@ -738,3 +738,25 @@ test("Messages view: Edit message on a card root opens the card editor; a plain 
   await context.close();
   await admin.dispose();
 });
+
+test("a card with a typed title and no description shows its title as the thread's root message", async ({
+  browser,
+}, info) => {
+  test.setTimeout(120_000);
+  const project = info.project.name;
+  const width = project === "mobile" ? 390 : 1440;
+  const admin = await apiAs(ADMIN);
+  const { id: convId } = await createBoardChannel(admin, { prefix: "titleonly" });
+  const card = await createCard(admin, convId, { title: "Seal kit order for line 3", description: "" });
+  const { context, page } = await openAs(browser, ADMIN, project);
+  const board = await openBoard(page, convId);
+  await cardTile(board, card.messageId).filter({ visible: true }).locator('[data-slot="card-open"]').click();
+  const panel = page.getByTestId("thread-panel");
+  await expect(panel.getByTestId("card-strip")).toBeVisible();
+  const root = messageRow(panel, card.messageId);
+  await expect(root).toContainText("Seal kit order for line 3");
+  await bothThemes(page, `board-thread-title-only-${width}`);
+
+  await context.close();
+  await admin.dispose();
+});
