@@ -98,6 +98,8 @@ export class RealtimeClient {
   private sentPresence: PresenceState = "online";
   private presenceSentAt = Number.NEGATIVE_INFINITY;
   private presenceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The socket was dropped because the browser reported no network (`setNetwork(false)`); undone by `setNetwork(true)`. */
+  private offline = false;
 
   constructor(options: RealtimeClientOptions) {
     const Ctor = options.WebSocket ?? (globalThis as { WebSocket?: WebSocketCtor }).WebSocket;
@@ -123,6 +125,7 @@ export class RealtimeClient {
 
   close(): void {
     this.stopped = true;
+    this.offline = false;
     this.generation++;
     this.clearTimers();
     if (this.presenceTimer) clearTimeout(this.presenceTimer);
@@ -133,6 +136,47 @@ export class RealtimeClient {
     for (const t of this.topics.values()) t.subscribed = false;
     this.clearPresence();
     this.status.setState({ status: "closed" });
+  }
+
+  /**
+   * The browser's network state (`online` / `offline` events). Offline drops the socket at once, because a dead network
+   * can keep a socket "open" for minutes, and retries nothing until the network is back; status is `closed`. Online
+   * reconnects at once, without waiting out a backoff. Topics keep their cursors either way, so the new socket's
+   * subscriptions replay every frame that was missed. A client the app closed stays closed.
+   */
+  setNetwork(online: boolean): void {
+    if (!online) {
+      if (this.stopped) return;
+      this.offline = true;
+      this.stopped = true;
+      this.generation++;
+      this.clearTimers();
+      const ws = this.ws;
+      this.ws = null;
+      if (ws) {
+        ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null;
+        ws.close(1000, "offline");
+      }
+      for (const t of this.topics.values()) {
+        t.subscribed = false;
+        t.replaying = false;
+        t.awaitingCursor = false;
+      }
+      this.clearPresence();
+      this.status.setState({ status: "closed" });
+      return;
+    }
+    if (this.offline) {
+      this.offline = false;
+      this.stopped = false;
+      this.open();
+      return;
+    }
+    if (!this.stopped && this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+      this.open();
+    }
   }
 
   lastSeq(topic: string): number {
