@@ -19,18 +19,29 @@
 # Scenario card (06-14 / AGENT-04): a turn offering `ocw_agent_card` posts a typed card through the gate and
 # `POST /cards`, bound to the turn's conversation, thread and message; an `agent.card_action.v1` (approval) reaches the
 # persona as a turn in the same thread, which updates the card with the version it saw (`PATCH /cards/:id`).
+# Scenario board (07.1-13 / BOARD-02): a board channel's turn offering `ocw_board_card` runs the plugin tool in OpenClaw
+# (configured through the bot's alsoAllow, narrowed by the turn's toolsAllow), which creates a card through
+# `POST /board/cards` bound to the turn's event, never through `/tool-calls`; the card scenario's text turn still runs
+# with exactly `ocw_agent_card`.
 # Scenario breaker (stability 2026-10-06): SIGKILLed boots trip OpenClaw's restart-loop breaker, which refuses the ocw
 # channel's automatic start; the plugin reports the pause to the API and starts the channel itself after its back-off.
 #
 # Usage (repo root):  infra/openclaw/test/run-container-smoke.sh [--keep]
 #   SMOKE_ONLY=<comma list>  run only these scenarios (unset = all): mention, signin, dm, capabilities,
-#                            dm-isolation, memory, card, mcp, marketplace, breaker
+#                            dm-isolation, memory, card, board, mcp, marketplace, breaker
 #                            and sandbox (runs when it is listed, with SMOKE_BUILD=1, or when ocw-mcp-sandbox:local
 #                            exists; otherwise it prints "SKIP sandbox (image not built)")
 #   FAKE_MODEL_DEBUG=1       the fake model logs a preview of each tool-offering request (off by default)
+#   SMOKE_CELL_IMAGE / SMOKE_MODEL_IMAGE / SMOKE_SANDBOX_IMAGE  image tags to build and run (defaults
+#                            ocw-openclaw:local, ocw-fake-model:local, ocw-mcp-sandbox:local); a unique tag keeps a
+#                            smoke away from the images a running stack uses
 # Requires: docker, node + npm (bundled plugins are installed on the host from the pinned registry
 # tarballs), apps/openclaw-channel/node_modules (pnpm install / npm install in that dir).
 set -euo pipefail
+
+CELL_IMAGE="${SMOKE_CELL_IMAGE:-ocw-openclaw:local}"
+MODEL_IMAGE="${SMOKE_MODEL_IMAGE:-ocw-fake-model:local}"
+SANDBOX_IMAGE="${SMOKE_SANDBOX_IMAGE:-ocw-mcp-sandbox:local}"
 
 # Scenario selection: `want <name>` is true when SMOKE_ONLY is unset or lists <name>.
 want() { [[ -z "${SMOKE_ONLY:-}" || ",${SMOKE_ONLY}," == *",$1,"* ]]; }
@@ -71,7 +82,7 @@ sandbox_servers_json() {
 SANDBOX=0
 if want sandbox; then
   if [[ ",${SMOKE_ONLY:-}," == *",sandbox,"* || "${SMOKE_BUILD:-0}" == "1" ]] ||
-    docker image inspect ocw-mcp-sandbox:local >/dev/null 2>&1; then
+    docker image inspect "$SANDBOX_IMAGE" >/dev/null 2>&1; then
     SANDBOX=1
   else
     echo "SKIP sandbox (image not built)"
@@ -117,18 +128,18 @@ trap 'SMOKE_STATUS=$?; set +e; sandbox_cleanup "$SMOKE_STATUS"; (exit "$SMOKE_ST
 # Images are built only when missing or SMOKE_BUILD=1 (the cell image is ~1.3 GB compressed).
 # The working-tree plugin (dist, copied with its runtime deps) and entrypoint are bind-mounted over
 # the image copies, so plugin changes never need a rebuild: run `pnpm --filter @ocw/openclaw-channel build`.
-if [[ "${SMOKE_BUILD:-0}" == "1" ]] || ! docker image inspect ocw-openclaw:local >/dev/null 2>&1; then
-  echo "== build ocw-openclaw:local"
-  docker build -q -f "$ROOT/infra/openclaw/Dockerfile" -t ocw-openclaw:local "$ROOT" >/dev/null
+if [[ "${SMOKE_BUILD:-0}" == "1" ]] || ! docker image inspect "$CELL_IMAGE" >/dev/null 2>&1; then
+  echo "== build $CELL_IMAGE"
+  docker build -q -f "$ROOT/infra/openclaw/Dockerfile" -t "$CELL_IMAGE" "$ROOT" >/dev/null
 fi
-if [[ "${SMOKE_BUILD:-0}" == "1" ]] || ! docker image inspect ocw-fake-model:local >/dev/null 2>&1; then
-  echo "== build ocw-fake-model:local"
-  docker build -q -f "$ROOT/infra/fake-model/Dockerfile" -t ocw-fake-model:local "$ROOT" >/dev/null
+if [[ "${SMOKE_BUILD:-0}" == "1" ]] || ! docker image inspect "$MODEL_IMAGE" >/dev/null 2>&1; then
+  echo "== build $MODEL_IMAGE"
+  docker build -q -f "$ROOT/infra/fake-model/Dockerfile" -t "$MODEL_IMAGE" "$ROOT" >/dev/null
 fi
 # The stdio MCP sandbox image is small (node slim base shared with the cell, the pinned servers from its lockfile).
-if [[ "$SANDBOX" == "1" ]] && { [[ "${SMOKE_BUILD:-0}" == "1" ]] || ! docker image inspect ocw-mcp-sandbox:local >/dev/null 2>&1; }; then
-  echo "== build ocw-mcp-sandbox:local"
-  docker build -q -f "$ROOT/infra/mcp-sandbox/Dockerfile" -t ocw-mcp-sandbox:local "$ROOT/infra/mcp-sandbox" >/dev/null
+if [[ "$SANDBOX" == "1" ]] && { [[ "${SMOKE_BUILD:-0}" == "1" ]] || ! docker image inspect "$SANDBOX_IMAGE" >/dev/null 2>&1; }; then
+  echo "== build $SANDBOX_IMAGE"
+  docker build -q -f "$ROOT/infra/mcp-sandbox/Dockerfile" -t "$SANDBOX_IMAGE" "$ROOT/infra/mcp-sandbox" >/dev/null
 fi
 [[ -f "$ROOT/apps/openclaw-channel/dist/index.js" ]] || { echo "FAIL: build the plugin first (dist/ missing)"; exit 1; }
 
@@ -195,7 +206,7 @@ if [[ "$SANDBOX" == "1" ]]; then
   docker run -d --name "${P}-mcp-sandbox" "${OOM[@]}" --network "$SBX_NET" --network-alias mcp-sandbox \
     --init --user node --read-only --cap-drop ALL --security-opt no-new-privileges \
     --pids-limit 128 --memory 512m --cpus 1 --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
-    ocw-mcp-sandbox:local >/dev/null
+    "$SANDBOX_IMAGE" >/dev/null
 fi
 
 # The working-tree fake model (tool-call directives, fake SearXNG /search) over the image copy: no rebuild.
@@ -209,7 +220,7 @@ docker run -d --name "${P}-model" "${OOM[@]}" --network "$NET" --network-alias f
   -e FAKE_CLAWHUB_ARTIFACT_DIR=/artifacts \
   -e FAKE_MCP_TOKEN="$MCP_TOKEN" \
   -e FAKE_MODEL_CAPTURE_DIR=/tmp/capture \
-  ocw-fake-model:local >/dev/null
+  "$MODEL_IMAGE" >/dev/null
 
 # The bot may use the sandbox's echo (its alsoAllow); the server itself reaches the snapshot in scenario sandbox.
 SBX_TOOLS=""
@@ -251,7 +262,7 @@ docker create --name "${P}-openclaw" "${OOM[@]}" ${CELL_LIMIT[@]+"${CELL_LIMIT[@
   -e OCW_CLAWHUB_URL=http://fake-model:18999 \
   -e OCW_BREAKER_BACKOFF_MS=5000 \
   -e NODE_OPTIONS="${CELL_NODE_OPTIONS:---max-old-space-size=512}" \
-  ocw-openclaw:local >/dev/null
+  "$CELL_IMAGE" >/dev/null
 if [[ "${SMOKE_BUILD:-0}" != "1" ]]; then
   # OpenClaw refuses an install-policy script that is not root- (or gateway-) owned: a bind mount would carry the
   # runner's uid, so the working-tree gate is copied in (docker cp writes root-owned files).
@@ -491,6 +502,34 @@ const ok =
   gated.length === 1 && gated[0].allowed === true;
 if (!ok) { console.log("FAIL: expected the card action as a turn in the thread and one versioned PATCH /cards"); process.exit(1); }
 '
+fi
+
+if want board; then
+echo "== [board] a board channel's turn offering ocw_board_card: the plugin tool creates a card through POST /board/cards"
+STATE="$(inject_and_wait "$ROOT/infra/openclaw/test/mention-board.json" 0199a6f0-0000-7000-8000-00000000d0a1)"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d0a1");
+if (!m) { console.log("FAIL: no reply to the board mention"); process.exit(1); }
+const cards = (s.boardCards ?? []).filter((c) => c.eventId === "0199a6f0-0000-7000-8000-00000000e008");
+const gated = s.toolCalls.filter((c) => c.eventId === "0199a6f0-0000-7000-8000-00000000e008");
+console.log("   reply      :", m.text);
+console.log("   cards      :", JSON.stringify(cards.map(({ agentId, idempotencyKey, description, conversationId }) => ({ agentId, idempotencyKey, description, conversationId }))));
+console.log("   tool calls :", JSON.stringify(gated.map((c) => c.tool)));
+const c = cards[0];
+const ok =
+  c !== undefined &&
+  m.text.includes(`Tool ocw_board_card said: Card created. Card id: ${c.messageId}.`) &&
+  /\[tools: 2 \| ocw_agent_card,ocw_board_card\]/.test(m.text) &&
+  m.threadRootMessageId === "0199a6f0-0000-7000-8000-00000000d0a0" &&
+  cards.length === 1 && c.agentId === "0199a6f0-0000-7000-8000-00000000a001" &&
+  c.idempotencyKey === "0199a6f0-0000-7000-8000-00000000e008:board:1" &&
+  c.description === "Order spare valve" && c.conversationId === undefined &&
+  // Self-validated by the board routes: never asked to /tool-calls (no policy_changed, no double count).
+  gated.length === 0;
+if (!ok) { console.log("FAIL: expected one turn-bound card through POST /board/cards and no /tool-calls request"); process.exit(1); }
+'
+docker logs "${P}-openclaw" 2>&1 | grep -E "turn 0199a6f0-0000-7000-8000-00000000e008 → session" | sed 's/^/   /' || true
 fi
 
 if want mcp; then
@@ -1171,7 +1210,8 @@ LOGS="$(docker logs "${P}-openclaw" 2>&1)"
 # Startup line (sorted ids): "http server listening (N plugins: a, b, …; …)". ocw + openai always load at
 # boot; the bundled search plugins are lazily activated (manifest `onStartup: false`), so they may only load
 # on first use. Nothing else may ever load.
-PLUGINS="$(grep -o "http server listening ([0-9]* plugins\?: [^;)]*" <<<"$LOGS" | tail -n 1 | sed 's/.*plugins\?: //')"
+# `sed -E` with `?`: BSD sed (macOS hosts) has no `\?` in basic regexes and would leave the prefix in place.
+PLUGINS="$(grep -o "http server listening ([0-9]* plugins\?: [^;)]*" <<<"$LOGS" | tail -n 1 | sed -E 's/.*plugins?: //')"
 if node -e '
 const ids = process.argv[1].split(",").map((s) => s.trim()).filter(Boolean);
 const allowed = new Set(["ocw", "openai", "duckduckgo", "searxng"]);
