@@ -36,12 +36,15 @@ import {
   useUpdateBoardColumn,
 } from "@/lib/board-manage-queries";
 import { useBoardColumnPage, usePendingCardIds, useUpdateBoardCard } from "@/lib/board-queries";
+import { useMe } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { BoardColumn, EmptyLane } from "./board-column";
+import { CardEditDialog } from "./card-edit-dialog";
 import { CardMenu, type CardMoveIntent, menuColumns } from "./card-menu";
 import { type CardAuthor, CardTile } from "./card-tile";
 import { CATEGORY, CATEGORY_MEANING, CategoryIcon, columnCountLabel } from "./column-header";
 import { ColumnMenu, ColumnSettingsDialog, DeleteColumnDialog } from "./column-settings-dialog";
+import { DeleteCardDialog } from "./delete-card-dialog";
 import { defaultColumnOf } from "./new-card-dialog";
 import { SortableCard } from "./sortable-card";
 
@@ -88,6 +91,8 @@ type ColumnDialog =
   | { kind: "add" }
   | { kind: "edit"; columnId: string }
   | { kind: "delete"; columnId: string };
+/** The card dialog that is open: Edit card (the author) or the Delete card confirmation. */
+type CardDialog = { kind: "edit" | "delete"; messageId: string };
 type Focus = { id: string; part: "grip" | "menu" | "open" | "tabs" };
 
 const INSTRUCTIONS =
@@ -208,6 +213,9 @@ export function BoardView(props: BoardViewProps) {
   const canManage = canManageProp && !access.archived;
   const updateColumn = useUpdateBoardColumn(channel.id);
   const [columnDialog, setColumnDialog] = useState<ColumnDialog | null>(null);
+  // ---------------------------------------------------------------- card text and delete (07.1-11, P-02)
+  const viewerId = useMe({ enabled: false }).data?.user.id ?? null;
+  const [cardDialog, setCardDialog] = useState<CardDialog | null>(null);
   const moveColumn = (column: BoardColumnModel, direction: "left" | "right") => {
     const to = snapshot ? neighbourMove(snapshot.columns, column.id, direction) : undefined;
     if (!to) return;
@@ -397,6 +405,11 @@ export function BoardView(props: BoardViewProps) {
           onOpen={() => onOpenCard(card.messageId)}
           onMove={(intent) => moveFromMenu(card.messageId, intent)}
           onWaitingOn={(waitingOn) => update.mutate({ messageId: card.messageId, waitingOn })}
+          viewerId={viewerId}
+          canDeleteAny={access.canDeleteAny}
+          readOnly={access.archived}
+          onEdit={() => setCardDialog({ kind: "edit", messageId: card.messageId })}
+          onDelete={() => setCardDialog({ kind: "delete", messageId: card.messageId })}
         />
       ),
     };
@@ -505,6 +518,7 @@ export function BoardView(props: BoardViewProps) {
   }
 
   const dragged = dragId ? cardsById.get(dragId) : undefined;
+  const editCard = cardDialog?.kind === "edit" ? cardsById.get(cardDialog.messageId) : undefined;
 
   return (
     <div
@@ -565,6 +579,21 @@ export function BoardView(props: BoardViewProps) {
           />
         </>
       ) : null}
+      {snapshot && editCard ? (
+        <CardEditDialog
+          convId={channel.id}
+          card={editCard}
+          board={snapshot.board}
+          open
+          onOpenChange={(o) => !o && setCardDialog(null)}
+        />
+      ) : null}
+      <DeleteCardDialog
+        convId={channel.id}
+        card={cardDialog?.kind === "delete" ? (cardsById.get(cardDialog.messageId) ?? null) : null}
+        open={cardDialog?.kind === "delete"}
+        onOpenChange={(o) => !o && setCardDialog(null)}
+      />
     </div>
   );
 }

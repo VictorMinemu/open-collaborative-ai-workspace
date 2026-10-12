@@ -1,23 +1,30 @@
+import type { BoardFieldDef } from "@ocw/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ApiRequestError } from "@/lib/api";
-import { COL, COLUMNS, CONV, card, snapshot } from "@/lib/board-fixtures.test-util";
+import { AUTHOR, BOARD, COL, COLUMNS, CONV, card, id, snapshot } from "@/lib/board-fixtures.test-util";
 import {
   COLUMN_COPY,
+  cardEditRequest,
   columnErrorMessage,
   columnNameError,
+  draftOf,
   neighbourMove,
   removeCard,
 } from "@/lib/board-manage-queries";
 import { BoardView, type BoardViewProps } from "./board-view";
+import { automaticTitlePreview, titleHint } from "./card-edit-dialog";
+import { cardMenuModel, menuColumns } from "./card-menu";
+import { CardStrip, cardRootView, stripFields } from "./card-strip";
 import {
   COLUMN_WAITING_CHOICES,
   columnMenuModel,
   DeleteColumnForm,
   deleteColumnModel,
 } from "./column-settings-dialog";
+import { deleteCardBody } from "./delete-card-dialog";
 
 /**
  * Board management pieces (07.1-11; BOARD-01, P-09) against 07.1-UI-SPEC.md: column gating, the column menu, the
@@ -204,5 +211,179 @@ describe("removeCard", () => {
     const next = removeCard(s, card(1).messageId);
     expect(next.cards[0]?.cards.map((c) => c.title)).toEqual(["Card 2"]);
     expect(removeCard(s, "missing")).toBe(s);
+  });
+});
+
+// ---------------------------------------------------------------- Task 3: card text and delete (P-02)
+
+const FIELDS: BoardFieldDef[] = [
+  { key: "customer", label: "Customer", type: "text", required: false },
+  { key: "priority", label: "Priority", type: "select", required: false, options: ["Low", "High"] },
+  { key: "due", label: "Due", type: "date", required: false },
+];
+const FIELD_BOARD = { ...BOARD, fields: FIELDS };
+const OTHER = id(21);
+
+describe("card menu: Edit card… and Delete card…", () => {
+  const s = snapshot([card(1)]);
+  const cols = menuColumns(s);
+  const mine = card(1);
+
+  it("offers Edit card… only to the card's human author who can post", () => {
+    expect(cardMenuModel(mine, cols, { canPost: true, viewerId: AUTHOR }).editCard).toBe(true);
+    expect(cardMenuModel(mine, cols, { canPost: true, viewerId: OTHER }).editCard).toBe(false);
+    expect(cardMenuModel(mine, cols, { canPost: true, viewerId: OTHER, canDeleteAny: true }).editCard).toBe(
+      false,
+    );
+    expect(cardMenuModel(mine, cols, { canPost: false, viewerId: AUTHOR }).editCard).toBe(false);
+    // An agent's card has no human author, whoever looks.
+    const agents = card(2, { authorKind: "agent", authorId: AUTHOR });
+    expect(cardMenuModel(agents, cols, { canPost: true, viewerId: AUTHOR }).editCard).toBe(false);
+  });
+
+  it("offers Delete card… to the author or message.delete_any, never on an archived board", () => {
+    expect(cardMenuModel(mine, cols, { canPost: true, viewerId: AUTHOR }).deleteCard).toBe(true);
+    expect(cardMenuModel(mine, cols, { canPost: true, viewerId: OTHER }).deleteCard).toBe(false);
+    expect(
+      cardMenuModel(mine, cols, { canPost: false, viewerId: OTHER, canDeleteAny: true }).deleteCard,
+    ).toBe(true);
+    expect(
+      cardMenuModel(mine, cols, { canPost: false, viewerId: AUTHOR, canDeleteAny: true, readOnly: true })
+        .deleteCard,
+    ).toBe(false);
+  });
+
+  it("confirms with the UI-SPEC copy", () => {
+    expect(deleteCardBody("Pump 3 replaced")).toBe(
+      "“Pump 3 replaced” is removed from the board for everyone. This can't be undone.",
+    );
+  });
+});
+
+describe("card edit", () => {
+  const typed = card(1, {
+    title: "Pump 3 replaced",
+    titleSource: "user",
+    description: "Pump 3 leaks",
+    fields: { customer: "Acme", priority: "High" },
+    version: 4,
+  });
+  const automatic = card(2, {
+    title: "EXP-0002 · Broken pump",
+    titleSource: "auto",
+    description: "Broken pump",
+  });
+
+  it("hints which title the card has", () => {
+    expect(titleHint("user")).toBe("Typed titles are never changed automatically.");
+    expect(titleHint("heuristic")).toBe("Automatic title, updates with the description and fields.");
+    expect(titleHint("auto")).toBe("Automatic title, updates with the description and fields.");
+  });
+
+  it("starts a typed title filled in and an automatic one empty, previewing what the server will compute", () => {
+    expect(draftOf(typed).title).toBe("Pump 3 replaced");
+    expect(draftOf(automatic).title).toBe("");
+    const draft = { ...draftOf(automatic), description: "Seal kit fitted\nLine 3" };
+    expect(automaticTitlePreview(FIELD_BOARD, automatic, draft)).toBe(
+      "Automatic: EXP-0002 · Seal kit fitted",
+    );
+  });
+
+  it("sends only what changed, with expectedVersion; nothing changed = no request", () => {
+    expect(cardEditRequest(typed, draftOf(typed), FIELDS)).toBeNull();
+    expect(
+      cardEditRequest(typed, { ...draftOf(typed), description: "Pump 3 replaced on Tuesday" }, FIELDS),
+    ).toEqual({ expectedVersion: 4, description: "Pump 3 replaced on Tuesday" });
+    expect(
+      cardEditRequest(typed, { ...draftOf(typed), values: { customer: "Acme", priority: null } }, FIELDS),
+    ).toEqual({ expectedVersion: 4, fields: { priority: null } });
+    expect(cardEditRequest(typed, { ...draftOf(typed), title: "  New title " }, FIELDS)).toEqual({
+      expectedVersion: 4,
+      title: "New title",
+    });
+  });
+
+  it("never turns an automatic title into a typed one unless a title is typed", () => {
+    const req = cardEditRequest(automatic, { ...draftOf(automatic), description: "Seal kit" }, FIELDS);
+    expect(req).toEqual({ expectedVersion: 1, description: "Seal kit" });
+    expect(req).not.toHaveProperty("title");
+  });
+});
+
+describe("CardStrip (07.1-UI-SPEC Thread panel: card strip)", () => {
+  const theCard = card(7, {
+    title: "EXP-0007 · Broken pump",
+    titleSource: "user",
+    columnId: COL.progress,
+    waitingOn: "customer",
+    description: "Broken pump\nPump 3 leaks",
+    fields: { customer: "Acme", priority: "High" },
+  });
+  const s = snapshot([theCard], { board: FIELD_BOARD });
+  const strip = (over: { canPost?: boolean; isAuthor?: boolean; card?: typeof theCard } = {}) =>
+    withQuery(
+      <CardStrip
+        convId={CONV}
+        card={over.card ?? theCard}
+        board={FIELD_BOARD}
+        columns={menuColumns(s)}
+        canPost={over.canPost ?? true}
+        isAuthor={over.isAuthor ?? true}
+        onEdit={() => {}}
+      />,
+    );
+
+  it("shows the number and a typed title, the column and waiting chip as buttons, Edit card and the field values", () => {
+    const html = strip();
+    expect(html).toContain('data-testid="card-strip"');
+    expect(html).toContain("bg-muted/30");
+    expect(html).toContain("dark:bg-white/[0.02]");
+    expect(text(html)).toContain("EXP-0007 Broken pump");
+    expect(html).toMatch(/<button[^>]*data-testid="card-strip-column"/);
+    expect(html).toMatch(/data-testid="card-strip-column"[\s\S]*data-category="started"[\s\S]*In progress/);
+    expect(html).toMatch(/<button[^>]*data-testid="card-strip-waiting"/);
+    expect(text(html)).toContain("Waiting on customer");
+    expect(html).toContain('data-testid="card-strip-edit"');
+    expect(html).toMatch(/<dl[^>]*data-testid="card-strip-fields"/);
+    expect(html).toMatch(/<dt[^>]*>Customer<\/dt><dd[^>]*>Acme<\/dd>/);
+    expect(html).toMatch(/<dt[^>]*>Priority<\/dt><dd[^>]*>High<\/dd>/);
+    expect(html).not.toContain(">Due<");
+  });
+
+  it("leaves an automatic title out: the number, fields and description already say it", () => {
+    const html = strip({ card: { ...theCard, title: "EXP-0007 · Broken pump", titleSource: "auto" } });
+    expect(html).toMatch(/data-testid="card-strip-title"[^>]*>(<span[^>]*>EXP-0007<\/span>)<\/h3>/);
+    expect(text(html)).not.toContain("Broken pump");
+  });
+
+  it("offers Edit card to the author only", () => {
+    expect(strip({ isAuthor: false })).not.toContain("card-strip-edit");
+  });
+
+  it("is static text for a viewer who cannot post", () => {
+    const html = strip({ canPost: false, isAuthor: true });
+    expect(html).not.toMatch(/<button[^>]*data-testid="card-strip-column"/);
+    expect(html).toMatch(/<span[^>]*data-testid="card-strip-column"/);
+    expect(html).not.toContain("card-strip-waiting");
+    expect(html).toContain('data-testid="waiting-on-badge"');
+    expect(html).not.toContain("card-strip-edit");
+    expect(html).not.toContain("<button");
+  });
+
+  it("lists filled fields in definition order", () => {
+    expect(stripFields(FIELDS, { priority: "High", customer: "Acme", due: null })).toEqual([
+      { key: "customer", label: "Customer", value: "Acme" },
+      { key: "priority", label: "Priority", value: "High" },
+    ]);
+  });
+
+  it("leaves the root message the description only (the strip has the title and fields)", () => {
+    const root = {
+      id: theCard.messageId,
+      body: "EXP-0007 · Broken pump\n\nBroken pump\nPump 3 leaks\n\nCustomer: Acme",
+    };
+    const shown = cardRootView(root as unknown as Parameters<typeof cardRootView>[0], theCard);
+    expect(shown.body).toBe("Broken pump\nPump 3 leaks");
+    expect(shown.id).toBe(theCard.messageId);
   });
 });

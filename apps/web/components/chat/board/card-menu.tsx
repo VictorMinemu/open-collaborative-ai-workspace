@@ -8,6 +8,8 @@ import {
   Clock,
   MessageSquare,
   MoreHorizontal,
+  Pencil,
+  Trash2,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { buttonVariants } from "@/components/ui/button";
@@ -30,8 +32,10 @@ import { WAITING_OPTIONS, WaitingDot } from "./waiting-on-badge";
 /**
  * The card menu on every tile (07.1-UI-SPEC Interaction Contract › "Move to…", BOARD-03, D-04): Open thread · Move to…
  * (columns with their category, current checked; lands at the bottom, P-07) · Move to top · Move to bottom · Waiting
- * on… (Nobody / Us / Customer / Both). Viewers who cannot post see only Open thread. The menu only reports intents
- * (`onMove`, `onWaitingOn`); it never fetches, and the API re-decides every move (T-07.1-04-03).
+ * on… (Nobody / Us / Customer / Both). Viewers who cannot post see only Open thread. After a separator (07.1-11, P-02):
+ * Edit card… for the card's human author, Delete card… for the author or a viewer with `message.delete_any`. The menu
+ * only reports intents (`onMove`, `onWaitingOn`, `onEdit`, `onDelete`); it never fetches, and the API re-decides every
+ * change (T-07.1-04-03, T-07.1-11-02).
  */
 
 /** A column as the menu needs it: identity, label, category and the ids of its loaded cards in order. */
@@ -64,15 +68,51 @@ export interface CardMenuModel {
   moveTop: { disabled: boolean; intent: CardMoveIntent } | null;
   moveBottom: { disabled: boolean; intent: CardMoveIntent } | null;
   waitingOn: Array<{ value: WaitingOn; label: string; checked: boolean }> | null;
+  /** Edit card…: the card's human author, who can post (P-02). */
+  editCard: boolean;
+  /** Delete card…: the author or `message.delete_any`, on a live board. */
+  deleteCard: boolean;
+}
+
+/** Who is looking: their id (authorship), `message.delete_any`, and an archived board (nothing changes). */
+export type CardMenuViewer = {
+  canPost: boolean;
+  viewerId?: string | null;
+  canDeleteAny?: boolean;
+  readOnly?: boolean;
+};
+
+type MenuCard = Pick<BoardCard, "messageId" | "columnId" | "waitingOn"> &
+  Partial<Pick<BoardCard, "authorKind" | "authorId">>;
+
+/** The viewer wrote this card (a human author; agents' cards have no human author). */
+export function isCardAuthor(
+  card: Partial<Pick<BoardCard, "authorKind" | "authorId">>,
+  viewerId?: string | null,
+) {
+  return !!viewerId && card.authorKind === "user" && card.authorId === viewerId;
 }
 
 /** The menu's items and the intents behind them (exported for tests; the component renders exactly this). */
 export function cardMenuModel(
-  card: Pick<BoardCard, "messageId" | "columnId" | "waitingOn">,
+  card: MenuCard,
   columns: readonly BoardMenuColumn[],
-  { canPost }: { canPost: boolean },
+  { canPost, viewerId = null, canDeleteAny = false, readOnly = false }: CardMenuViewer,
 ): CardMenuModel {
-  if (!canPost) return { openThread: true, moveTo: null, moveTop: null, moveBottom: null, waitingOn: null };
+  const author = isCardAuthor(card, viewerId);
+  const editCard = canPost && author;
+  const deleteCard = !readOnly && (author || canDeleteAny);
+  if (!canPost) {
+    return {
+      openThread: true,
+      moveTo: null,
+      moveTop: null,
+      moveBottom: null,
+      waitingOn: null,
+      editCard,
+      deleteCard,
+    };
+  }
   const others = (c: BoardMenuColumn) => c.cardIds.filter((id) => id !== card.messageId);
   const bottomOf = (c: BoardMenuColumn) => others(c).at(-1) ?? null;
   const own = columns.find((c) => c.id === card.columnId);
@@ -97,6 +137,8 @@ export function cardMenuModel(
       intent: { move: { columnId: card.columnId, afterCardId: own ? bottomOf(own) : null }, via: "bottom" },
     },
     waitingOn: WAITING_OPTIONS.map((o) => ({ ...o, checked: o.value === card.waitingOn })),
+    editCard,
+    deleteCard,
   };
 }
 
@@ -107,24 +149,34 @@ export function CardMenu({
   card,
   columns,
   canPost,
+  viewerId = null,
+  canDeleteAny = false,
+  readOnly = false,
   onOpen,
   onMove,
   onWaitingOn,
+  onEdit,
+  onDelete,
   extraItems,
   className,
-}: {
-  card: Pick<BoardCard, "messageId" | "columnId" | "waitingOn">;
+}: CardMenuViewer & {
+  card: MenuCard;
   columns: readonly BoardMenuColumn[];
-  canPost: boolean;
   onOpen: () => void;
   onMove: (intent: CardMoveIntent) => void;
   onWaitingOn: (state: WaitingOn) => void;
-  /** Edit card… / Delete card… (07.1-11), after a separator. */
+  /** Edit card… (shown to the human author when given). */
+  onEdit?: () => void;
+  /** Delete card… (shown to the author or `message.delete_any` when given). */
+  onDelete?: () => void;
+  /** More items after the separator. */
   extraItems?: ReactNode;
   className?: string;
 }) {
-  const model = cardMenuModel(card, columns, { canPost });
+  const model = cardMenuModel(card, columns, { canPost, viewerId, canDeleteAny, readOnly });
   const { moveTo, moveTop, moveBottom, waitingOn } = model;
+  const edit = model.editCard && onEdit ? onEdit : null;
+  const remove = model.deleteCard && onDelete ? onDelete : null;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
@@ -209,9 +261,21 @@ export function CardMenu({
             </DropdownMenuSub>
           </>
         ) : null}
-        {extraItems ? (
+        {edit || remove || extraItems ? (
           <>
             <DropdownMenuSeparator />
+            {edit ? (
+              <DropdownMenuItem className={ITEM} onClick={edit}>
+                <Pencil />
+                Edit card…
+              </DropdownMenuItem>
+            ) : null}
+            {remove ? (
+              <DropdownMenuItem className={ITEM} variant="destructive" onClick={remove}>
+                <Trash2 />
+                Delete card…
+              </DropdownMenuItem>
+            ) : null}
             {extraItems}
           </>
         ) : null}

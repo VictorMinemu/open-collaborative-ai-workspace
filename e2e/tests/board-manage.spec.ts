@@ -12,7 +12,7 @@ import {
   createCard,
   openBoard,
 } from "../support/board";
-import { ALEX } from "../support/chat";
+import { ALEX, openMessageActions } from "../support/chat";
 import { bothThemes } from "../support/files";
 import { ADMIN } from "./env";
 
@@ -367,3 +367,309 @@ test("390: the + tab adds a column full screen, ⋯ on the active-column row, de
   await admin.dispose();
 });
 
+// ---------------------------------------------------------------- Task 3: card strip, card text edits, delete card
+
+/** A lowercase token unique to this run (letters only, so search tokenises it as one word). */
+const uniqueWord = () =>
+  `zq${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`.replace(/[0-9]/g, (d) =>
+    String.fromCharCode(97 + Number(d)),
+  );
+
+/** An organization-wide record template with a prefix, a naming rule and two fields (07.1-07 API). */
+async function caseTemplate(admin: APIRequestContext): Promise<string> {
+  const res = await admin.post("/api/v1/record-templates", {
+    data: {
+      unitId: null,
+      name: `Case file ${uniqueWord()}`,
+      prefix: "EXP",
+      namingRule: "{prefix}-{seq:0000} · {summary}",
+      fields: [
+        { key: "customer", label: "Customer", type: "text", required: false },
+        { key: "priority", label: "Priority", type: "select", required: false, options: ["Low", "High"] },
+      ],
+    },
+  });
+  expect(res.ok(), `template: ${res.status()} ${await res.text()}`).toBe(true);
+  return ((await res.json()) as { id: string }).id;
+}
+
+async function openPalette(page: Page) {
+  await page.keyboard.press("ControlOrMeta+K");
+  const palette = page.getByTestId("search-palette");
+  await expect(palette).toBeVisible();
+  await expect(palette.getByTestId("search-input")).toBeFocused();
+  return palette;
+}
+
+async function cardMenuItems(page: Page, tile: Locator): Promise<string[]> {
+  await tile.getByTestId("card-menu").click();
+  // The menu has rendered its items once Open thread is there (it is always offered).
+  await expect(
+    page.getByTestId("card-menu-content").getByRole("menuitem", { name: "Open thread" }),
+  ).toBeVisible();
+  const items = await page
+    .getByTestId("card-menu-content")
+    .getByRole("menuitem")
+    .evaluateAll((els) => els.map((e) => (e.textContent ?? "").trim()));
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("card-menu-content")).toHaveCount(0);
+  return items;
+}
+
+test("desktop: the card strip, author-only text edits that keep a typed title, search follows, 409 Reload card, Delete card", async ({
+  browser,
+}, info) => {
+  test.skip(info.project.name !== "desktop", "the 1440 thread panel");
+  test.setTimeout(240_000);
+  const admin = await apiAs(ADMIN);
+  await ensureMember(admin, ALEX, "developer");
+  const alexApi = await apiAs(ALEX);
+  const templateId = await caseTemplate(admin);
+  const { id: convId } = await createBoardChannel(admin, { prefix: "edit", templateId, members: [alexApi] });
+  const oldWord = uniqueWord();
+  const newWord = uniqueWord();
+  const card = await createCard(admin, convId, {
+    title: `Gasket ${oldWord}`,
+    description: "Pump 3 leaks since Monday\nSeal kit ordered",
+    fields: { customer: "Acme", priority: "High" },
+  });
+  const progress = await columnId(admin, convId, "In progress");
+  const label = `EXP-${String(card.number).padStart(4, "0")}`;
+
+  const { page } = await openAs(browser, ADMIN, "desktop");
+  const board = await openBoard(page, convId);
+  const { page: alex } = await openAs(browser, ALEX, "desktop");
+  const alexBoard = await openBoard(alex, convId);
+
+  // ---- the card strip: number and title, column, waiting state, Edit card, field values; the root says only the description
+  await cardTile(board, card.messageId).locator('[data-slot="card-open"]').click();
+  const panel = page.getByTestId("thread-panel");
+  const strip = panel.getByTestId("card-strip");
+  await expect(strip).toBeVisible();
+  await expect(strip.getByTestId("card-strip-title")).toHaveText(`${label}Gasket ${oldWord}`);
+  await expect(strip.getByTestId("card-strip-column")).toContainText("Backlog");
+  await expect(strip.getByTestId("card-strip-waiting")).toHaveText("Waiting on nobody");
+  await expect(strip.getByTestId("card-strip-edit")).toBeVisible();
+  await expect(strip.getByTestId("card-strip-fields")).toContainText("CustomerAcme");
+  await expect(strip.getByTestId("card-strip-fields")).toContainText("PriorityHigh");
+  const root = panel.locator(`[data-testid="message"][data-message-id="${card.messageId}"]`).first();
+  await expect(root).toContainText("Pump 3 leaks since Monday");
+  await expect(root).not.toContainText(`Gasket ${oldWord}`);
+  await expect(root).not.toContainText("Customer: Acme");
+
+  // ---- column and waiting state from the strip move the tile on the board
+  await strip.getByTestId("card-strip-column").click();
+  await page.getByRole("menuitemradio", { name: "In progress" }).click();
+  await expect(boardColumn(board, progress).locator(`[data-card-id="${card.messageId}"]`)).toBeVisible();
+  await expect.poll(async () => (await apiCard(admin, convId, card.messageId)).columnId).toBe(progress);
+  await expect(strip.getByTestId("card-strip-column")).toContainText("In progress");
+  await strip.getByTestId("card-strip-waiting").click();
+  await page.getByRole("menuitemradio", { name: "Customer" }).click();
+  await expect(cardTile(board, card.messageId).getByTestId("waiting-on-badge")).toHaveText(
+    "Waiting on customer",
+  );
+  await expect(strip.getByTestId("card-strip-waiting")).toHaveText("Waiting on customer");
+  await expectNoSeriousA11y(page, '[data-testid="card-strip"]');
+  await bothThemes(page, "board-thread-strip-1440");
+  await panel.getByTestId("close-thread").click();
+
+  // ---- Edit card… from the card menu: the typed title changes, live for Alex
+  await cardTile(board, card.messageId).getByTestId("card-menu").click();
+  await page.getByRole("menuitem", { name: "Edit card…" }).click();
+  const editor = page.getByTestId("card-edit");
+  await expect(editor).toBeVisible();
+  const title = editor.getByLabel("Title");
+  await expect(title).toHaveValue(`Gasket ${oldWord}`);
+  await expect(editor).toContainText("Typed titles are never changed automatically.");
+  await expect(editor.getByTestId("card-edit-submit")).toBeDisabled();
+  await title.fill(`Pump 3 replaced ${newWord}`);
+  await expect(editor.getByTestId("card-edit-submit")).toBeEnabled();
+  await expectNoSeriousA11y(page, '[data-testid="card-edit"]');
+  await bothThemes(page, "board-card-edit-1440");
+  await editor.getByTestId("card-edit-submit").click();
+  await expect(editor).toBeHidden();
+  await expect(cardTile(board, card.messageId)).toContainText(`Pump 3 replaced ${newWord}`);
+  await expect(cardTile(alexBoard, card.messageId)).toContainText(`Pump 3 replaced ${newWord}`);
+
+  // ---- search follows the title: the new word finds the card, the old one finds nothing
+  let palette = await openPalette(page);
+  await palette.getByTestId("search-input").pressSequentially(newWord, { delay: 20 });
+  const hit = palette.locator(`[data-kind="message"][data-message-id="${card.messageId}"]`);
+  await expect(hit).toBeVisible();
+  await expect(hit).toContainText("replaced");
+  await page.keyboard.press("Enter");
+  await expect(palette).toBeHidden();
+  await expect(page).toHaveURL(new RegExp(`/chat/${convId}\\?(.*&)?m=${card.messageId}`));
+  palette = await openPalette(page);
+  await palette.getByTestId("search-input").pressSequentially(oldWord, { delay: 20 });
+  await expect(palette.getByTestId("search-empty")).toBeVisible();
+  await expect(palette.locator(`[data-message-id="${card.messageId}"]`)).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await openBoard(page, convId);
+
+  // ---- a description edit from the strip keeps the typed title
+  await cardTile(board, card.messageId).locator('[data-slot="card-open"]').click();
+  await strip.getByTestId("card-strip-edit").click();
+  await expect(editor).toBeVisible();
+  await editor.getByLabel("Description").fill("Pump 3 replaced on Tuesday\nSeal kit fitted");
+  await editor.getByTestId("card-edit-submit").click();
+  await expect(editor).toBeHidden();
+  await expect(root).toContainText("Pump 3 replaced on Tuesday");
+  await expect
+    .poll(async () => (await apiCard(admin, convId, card.messageId)).description)
+    .toContain("Seal kit fitted");
+  const afterDescription = (await boardSnapshot(admin, convId)).cards
+    .flatMap((c) => c.cards)
+    .find((c) => c.messageId === card.messageId) as { title: string; titleSource?: string } | undefined;
+  expect(afterDescription?.title).toBe(`Pump 3 replaced ${newWord}`);
+  expect(afterDescription?.titleSource).toBe("user");
+  await expect(strip.getByTestId("card-strip-title")).toHaveText(`${label}Pump 3 replaced ${newWord}`);
+
+  // ---- the root's own Edit opens the card editor, not the message editor
+  let actions = await openMessageActions(page, card.messageId, "desktop");
+  await actions.getByTestId("edit-message").click();
+  await expect(editor).toBeVisible();
+  await expect(root.getByTestId("message-editor")).toHaveCount(0);
+  await editor.getByRole("button", { name: "Cancel" }).click();
+  await expect(editor).toBeHidden();
+
+  // ---- an edit against a stale version: another tab changed the text first → 409 → Reload card
+  await strip.getByTestId("card-strip-edit").click();
+  await expect(editor).toBeVisible();
+  const current = await apiCard(admin, convId, card.messageId);
+  const other = await admin.patch(`/api/v1/boards/${convId}/cards/${card.messageId}`, {
+    data: { expectedVersion: current.version, title: `Pump 3 replaced ${newWord} (tab 2)` },
+  });
+  expect(other.ok(), `other tab: ${other.status()}`).toBe(true);
+  await editor.getByLabel("Description").fill("Edited in the stale tab");
+  await editor.getByTestId("card-edit-submit").click();
+  const alert = editor.getByTestId("card-edit-error");
+  await expect(alert).toContainText("This card changed while you were editing.");
+  await alert.getByRole("button", { name: "Reload card" }).click();
+  await expect(editor.getByLabel("Title")).toHaveValue(`Pump 3 replaced ${newWord} (tab 2)`);
+  await expect(editor.getByLabel("Description")).toHaveValue("Pump 3 replaced on Tuesday\nSeal kit fitted");
+  await expect(alert).toHaveCount(0);
+  await editor.getByRole("button", { name: "Cancel" }).click();
+
+  // ---- a reply in the card thread keeps the normal message editor
+  const composer = page.getByTestId("thread-composer");
+  await composer.click();
+  await composer.fill("Fitted the new seal");
+  await composer.press("Enter");
+  const reply = panel.getByTestId("message").filter({ hasText: "Fitted the new seal" });
+  await expect(reply).toHaveCount(1);
+  await expect(reply).toHaveAttribute("data-message-id", /.+/);
+  const replyId = (await reply.getAttribute("data-message-id")) ?? "";
+  actions = await openMessageActions(page, replyId, "desktop");
+  await actions.getByTestId("edit-message").click();
+  await expect(reply.getByTestId("edit-input")).toBeVisible();
+  await expect(editor).toHaveCount(0);
+  await reply.getByTestId("edit-cancel").click();
+  await expect(reply.getByTestId("edit-input")).toHaveCount(0);
+  await panel.getByTestId("close-thread").click();
+
+  // ---- Alex: no Edit card… or Delete card… on Víctor's card, and no Edit card in its strip
+  const alexItems = await cardMenuItems(alex, cardTile(alexBoard, card.messageId));
+  expect(alexItems).not.toContain("Edit card…");
+  expect(alexItems).not.toContain("Delete card…");
+  await cardTile(alexBoard, card.messageId).locator('[data-slot="card-open"]').click();
+  const alexStrip = alex.getByTestId("card-strip");
+  await expect(alexStrip).toBeVisible();
+  await expect(alexStrip.getByTestId("card-strip-column")).toBeVisible();
+  await expect(alexStrip.getByTestId("card-strip-edit")).toHaveCount(0);
+  await alex.getByTestId("close-thread").click();
+
+  // ---- Víctor deletes his card: Delete card… → confirmation → gone for both
+  const items = await cardMenuItems(page, cardTile(board, card.messageId));
+  expect(items.slice(-2)).toEqual(["Edit card…", "Delete card…"]);
+  await cardTile(board, card.messageId).getByTestId("card-menu").click();
+  await page.getByRole("menuitem", { name: "Delete card…" }).click();
+  const confirm = page.getByTestId("delete-card");
+  await expect(confirm.getByRole("heading", { name: "Delete this card?" })).toBeVisible();
+  await expect(confirm).toContainText(
+    `“Pump 3 replaced ${newWord} (tab 2)” is removed from the board for everyone. This can't be undone.`,
+  );
+  await expect(confirm.getByRole("button", { name: "Cancel" })).toBeFocused();
+  await expectNoSeriousA11y(page, '[data-testid="delete-card"]');
+  await confirm.getByRole("button", { name: "Delete card" }).click();
+  await expect(confirm).toBeHidden();
+  await expect(cardTile(board, card.messageId)).toHaveCount(0);
+  await expect(cardTile(alexBoard, card.messageId)).toHaveCount(0);
+
+  // ---- an admin (message.delete_any) deletes Alex's card; Edit card… is still not offered to him
+  const alexCard = await createCard(alexApi, convId, { title: "Alex's spare parts list" });
+  await expect(cardTile(board, alexCard.messageId)).toBeVisible();
+  const adminItems = await cardMenuItems(page, cardTile(board, alexCard.messageId));
+  expect(adminItems).toContain("Delete card…");
+  expect(adminItems).not.toContain("Edit card…");
+  await cardTile(board, alexCard.messageId).getByTestId("card-menu").click();
+  await page.getByRole("menuitem", { name: "Delete card…" }).click();
+  await confirm.getByRole("button", { name: "Delete card" }).click();
+  await expect(cardTile(board, alexCard.messageId)).toHaveCount(0);
+  await expect(cardTile(alexBoard, alexCard.messageId)).toHaveCount(0);
+  await admin.dispose();
+  await alexApi.dispose();
+});
+
+test("390: the card strip wraps with 44 px controls; Edit card is full screen", async ({ browser }, info) => {
+  test.skip(info.project.name !== "mobile", "the 390 thread sheet");
+  test.setTimeout(150_000);
+  const admin = await apiAs(ADMIN);
+  const templateId = await caseTemplate(admin);
+  const { id: convId } = await createBoardChannel(admin, { prefix: "strip390", templateId });
+  const card = await createCard(admin, convId, {
+    description: "Broken pump at the Acme plant, line 3\nPump 3 leaks since Monday.",
+    waitingOn: "customer",
+    fields: { customer: "Acme Industrial Supplies", priority: "High" },
+  });
+  const { page } = await openAs(browser, ADMIN, "mobile");
+  const board = await openBoard(page, convId);
+  await cardTile(board, card.messageId).locator('[data-slot="card-open"]').click();
+  const strip = page.getByTestId("card-strip");
+  await expect(strip).toBeVisible();
+  // An automatic title is made of what the thread shows: the strip has the number, the root the description, and
+  // the description's first line appears once in the whole thread.
+  const panel = page.getByTestId("thread-panel");
+  await expect(strip.getByTestId("card-strip-title")).toHaveText(/^EXP-\d{4}$/);
+  const root = panel.locator(`[data-testid="message"][data-message-id="${card.messageId}"]`).first();
+  await expect(root).toContainText("Pump 3 leaks since Monday.");
+  expect(((await panel.textContent()) ?? "").split("Broken pump at the Acme plant").length - 1).toBe(1);
+  for (const id of ["card-strip-column", "card-strip-waiting", "card-strip-edit"]) {
+    const b = await strip.getByTestId(id).boundingBox();
+    expect(b?.height, `${id} height`).toBeGreaterThanOrEqual(44);
+    expect((b?.x ?? 0) + (b?.width ?? 0), `${id} inside 390`).toBeLessThanOrEqual(390);
+  }
+  for (const scheme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await expectNoSeriousA11y(page, '[data-testid="card-strip"]');
+  }
+  await page.emulateMedia({ colorScheme: "light" });
+  await bothThemes(page, "board-thread-strip-390");
+
+  await strip.getByTestId("card-strip-edit").click();
+  const editor = page.getByTestId("card-edit");
+  await expect(editor).toBeVisible();
+  await page.evaluate(() => Promise.all(document.getAnimations().map((a) => a.finished.catch(() => null))));
+  const box = await editor.boundingBox();
+  expect(box?.width).toBe(390);
+  expect(box?.height).toBe(844);
+  await expect(editor).toContainText("Automatic title, updates with the description and fields.");
+  await expect(editor.getByLabel("Title")).toHaveValue("");
+  await expect(editor.getByLabel("Title")).toHaveAttribute(
+    "placeholder",
+    /^Automatic: EXP-\d{4} · Broken pump at the Acme plant, line 3$/,
+  );
+  await editor.getByLabel("Description").fill("Seal kit fitted on line 3\nPump 3 back in service.");
+  await expect(editor.getByLabel("Title")).toHaveAttribute(
+    "placeholder",
+    /^Automatic: EXP-\d{4} · Seal kit fitted on line 3$/,
+  );
+  await expectNoSeriousA11y(page, '[data-testid="card-edit"]');
+  await bothThemes(page, "board-card-edit-390");
+  await editor.getByTestId("card-edit-submit").click();
+  await expect(editor).toBeHidden();
+  await expect(root).toContainText("Seal kit fitted on line 3");
+  await expect(root).toContainText("Pump 3 back in service.");
+  await expect(cardTile(board, card.messageId)).toContainText("Seal kit fitted on line 3");
+  await admin.dispose();
+});

@@ -245,6 +245,8 @@ describe("cardMenuModel (UI-SPEC Interaction Contract › Move to…)", () => {
       moveTop: null,
       moveBottom: null,
       waitingOn: null,
+      editCard: false,
+      deleteCard: false,
     });
   });
 
