@@ -103,6 +103,12 @@ const CASES: Case[] = [
       }),
   },
   {
+    route: "GET /api/v1/boards/:conversationId/cards/:messageId",
+    name: "reading org A's card",
+    status: 404,
+    call: (c) => c.request("GET", `/api/v1/boards/${a.boardId}/cards/${a.messageId}`),
+  },
+  {
     route: "PATCH /api/v1/boards/:conversationId/cards/:messageId",
     name: "moving org A's card",
     status: 404,
@@ -339,7 +345,7 @@ describe("every board route has a cross-tenant case (BOARD-04, P-10)", () => {
     }
 
     const family = registered();
-    expect(family.length).toBeGreaterThanOrEqual(14);
+    expect(family.length).toBeGreaterThanOrEqual(15);
     const missing = family.filter((key) => !covered.has(routeKey(key))).sort();
     expect(missing, "registered routes without an org-B case").toEqual([]);
 

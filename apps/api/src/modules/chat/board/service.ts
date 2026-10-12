@@ -343,6 +343,17 @@ export async function readColumnPage(
 }
 
 /**
+ * One live card of the board by its root message id (07.1 fix): the Messages view opens the card editor for a card root
+ * that is not in the loaded snapshot (past the first page of its column). Anything else under that id (a plain message,
+ * a reply, a deleted root, another board's card, another organization's id) is the same 404 `card_not_found`.
+ */
+export async function readBoardCard(tx: Tx, board: BoardRow, messageId: string): Promise<BoardCard> {
+  const row = await loadCard(tx, board.conversationId, messageId);
+  if (!row) throw notFound(CARD_NOT_FOUND, "card_not_found");
+  return toCard(row);
+}
+
+/**
  * What an agent reads of the turn's board (07.1-10): the board, its columns and the card whose thread the turn is in
  * (the turn's message is the card root or a reply under it; null otherwise). Decided like an agent read: `channel.read`
  * for the agent and for the agent acting for the turn's human.
