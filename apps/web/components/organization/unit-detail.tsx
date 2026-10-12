@@ -31,6 +31,7 @@ import { useCan } from "@/lib/permissions";
 import { useMe } from "@/lib/queries";
 import { AddPeopleDialog } from "./add-people-dialog";
 import { UnitModulesCard } from "./module-access-card";
+import { RecordTemplatesCard } from "./record-templates-card";
 import { UnitActionsMenu, useUnitDialogs } from "./unit-dialogs";
 import {
   ancestorsOf,
@@ -130,6 +131,7 @@ export function UnitDetail({
 
       <MembersSection unit={unit} />
       <UnitModulesCard unit={unit} />
+      <RecordTemplatesCard unit={unit} />
 
       {canReadRules ? <UnitRulesCard unit={unit} /> : null}
     </div>
