@@ -9,10 +9,18 @@ import {
   type PinUpdatedEvent,
   type ThreadUpdatedEvent,
 } from "@ocw/contracts";
-import { attachments, messagePins, messageReactions, messages, messageVersions, type Tx } from "@ocw/db";
+import {
+  attachments,
+  boardCards,
+  messagePins,
+  messageReactions,
+  messages,
+  messageVersions,
+  type Tx,
+} from "@ocw/db";
 import { and, count, eq, ne, sql } from "drizzle-orm";
 import { type App, authOf, type Core, tenant } from "../../core";
-import { conflict, forbidden, gone, notFound } from "../../lib/errors";
+import { badRequest, conflict, forbidden, gone, notFound } from "../../lib/errors";
 import { channelResource, type PermissionService } from "../organization";
 import type { ConversationAccess } from "./access";
 import { type Directory, loadDirectory } from "./directory";
@@ -225,6 +233,13 @@ export function registerMessageActionRoutes(app: App, ctx: MessageActionsContext
         if (message.authorKind !== "user" || message.authorId !== auth.userId) {
           throw forbidden("Only the author can edit this message", "not_author");
         }
+        // A board card's root is edited from the board only, so the card and its message never drift (Pitfall 5).
+        const [card] = await tx
+          .select({ messageId: boardCards.messageId })
+          .from(boardCards)
+          .where(eq(boardCards.messageId, message.id))
+          .limit(1);
+        if (card) throw badRequest("Edit this card from the board", "board_card_use_board");
         if (message.deletedAt) throw conflict("This message was deleted", "message_deleted");
         const dir = await loadDirectory(tx);
         if (req.body.body === message.body) return dtoOf(tx, message, dir);
