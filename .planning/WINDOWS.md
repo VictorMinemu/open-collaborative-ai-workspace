@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 84
+open_count: 85
 waived_count: 0
 fixed_count: 18
-total_count: 102
-last_updated: 2026-10-10T01:03:30.526Z
+total_count: 103
+last_updated: 2026-10-12T13:51:08.419Z
 ---
 
 # Broken Windows Ledger
@@ -117,6 +117,7 @@ last_updated: 2026-10-10T01:03:30.526Z
 | 100 | 07.3 | deviation | apps/web/components/settings/account-nav |  | AI chat account entry hidden only when the permission is decided off (P-08), not via can() | open |  | 2026-10-10T01:03:30.376Z |  |
 | 101 | 07.3 | deviation | apps/web/components/organization/unit-modules-card.tsx |  | Read-only reason reads the member's role for copy only; edit rights still come from canEdit | open |  | 2026-10-10T01:03:30.449Z |  |
 | 102 | 07.3 | unmet-truth | apps/api/src/modules/agent-channel |  | Proactive agent messages and queued AI chat prompts are not re-decided against module rules (07.6/07.7 scope) | open |  | 2026-10-10T01:03:30.526Z |  |
+| 103 | 07.1 | deviation | apps/api/src/modules/chat/board |  | Possible deadlock: DELETE /messages on a card root racing a card text edit can abort one (500); delete should take the stream lock first | open |  | 2026-10-12T13:51:08.419Z |  |
 
 ````json
 [
@@ -1342,6 +1343,18 @@ last_updated: 2026-10-10T01:03:30.526Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-10T01:03:30.526Z",
+    "resolved_at": null
+  },
+  {
+    "id": 103,
+    "kind": "deviation",
+    "phase": "07.1",
+    "file": "apps/api/src/modules/chat/board",
+    "line": null,
+    "description": "Possible deadlock: DELETE /messages on a card root racing a card text edit can abort one (500); delete should take the stream lock first",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-12T13:51:08.419Z",
     "resolved_at": null
   }
 ]
