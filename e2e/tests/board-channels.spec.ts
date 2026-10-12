@@ -6,7 +6,8 @@ import {
   type Page,
   test,
 } from "@playwright/test";
-import { apiAs, openAs } from "../support/actors";
+import { expectNoSeriousA11y } from "../support/a11y";
+import { apiAs, BASE_URL, ensureMember, openAs } from "../support/actors";
 import {
   apiCard,
   boardColumn,
@@ -18,6 +19,7 @@ import {
   createCard,
   openBoard,
 } from "../support/board";
+import { ALEX } from "../support/chat";
 import { bothThemes } from "../support/files";
 import { ADMIN } from "./env";
 
@@ -449,4 +451,238 @@ test.describe("390", () => {
     await expect(dialog).toBeHidden();
     await expect(board.getByTestId("board-card").filter({ hasText: "Replace the gauge" })).toBeVisible();
   });
+});
+
+// ---------------------------------------------------------------- Task 3: states, gating, accessibility
+
+const boardUrl = (convId: string) => new RegExp(`/api/v1/boards/${convId}$`);
+const cardPatch = (convId: string) => new RegExp(`/api/v1/boards/${convId}/cards/[0-9a-f-]{36}$`);
+
+test("desktop: loading, load error, empty board, Show more cards, rollback and conflict, axe in both themes", async ({
+  browser,
+}, info) => {
+  test.skip(info.project.name !== "desktop", "the 1440 states");
+  test.setTimeout(240_000);
+  const admin = await apiAs(ADMIN);
+  const page = await signedIn(browser, "desktop");
+
+  // ---- loading: four lane skeletons while the snapshot is held
+  const { id: convId, name } = await createBoardChannel(admin, { prefix: "states" });
+  let release: () => void = () => {};
+  const held = new Promise<void>((r) => {
+    release = r;
+  });
+  await page.route(boardUrl(convId), async (route) => {
+    await held;
+    await route.continue();
+  });
+  await page.goto(`${BASE_URL}/chat/${convId}`);
+  const board = page.getByTestId("board-view");
+  await expect(board.getByTestId("board-lane-skeleton")).toHaveCount(4);
+  await expect(board.getByText("Loading board")).toHaveCount(1);
+  await bothThemes(page, "board-loading-1440");
+  release();
+
+  // ---- empty board: No cards yet in the default column, with New card
+  await expect(board.getByText("No cards yet")).toBeVisible();
+  await page.unroute(boardUrl(convId));
+  await expect(
+    board.getByText("Add one for each case, order or ticket. @mention a bot in a card to get it working."),
+  ).toBeVisible();
+  await expect(board.getByRole("button", { name: "New card" })).toBeVisible();
+  await expect(board.getByText("No cards", { exact: true })).toHaveCount(3);
+
+  // ---- load error, then Try again recovers
+  await page.route(boardUrl(convId), (route) =>
+    route.fulfill({
+      status: 500,
+      json: { error: { code: "internal_error", message: "The board service is unavailable" } },
+    }),
+  );
+  await page.reload();
+  await expect(board.getByText("Couldn't load this board")).toBeVisible({ timeout: 15_000 });
+  await expect(board.getByText("The board service is unavailable")).toBeVisible();
+  await page.unroute(boardUrl(convId));
+  await board.getByRole("button", { name: "Try again" }).click();
+  await expect(board.getByText("No cards yet")).toBeVisible();
+
+  // ---- more than 100 cards in a lane: 100+ and Show more cards
+  const { id: bigId } = await createBoardChannel(admin, { prefix: "big" });
+  for (let i = 0; i < 101; i += 10) {
+    await Promise.all(
+      Array.from({ length: Math.min(10, 101 - i) }, (_, k) =>
+        createCard(admin, bigId, { title: `Order ${String(i + k + 1).padStart(3, "0")}` }),
+      ),
+    );
+  }
+  const big = await openBoard(page, bigId);
+  const bigBacklog = await columnId(admin, bigId, "Backlog");
+  const lane = boardColumn(big, bigBacklog);
+  await expect(lane.locator('[data-slot="column-count"]')).toHaveText("100+");
+  await expect(lane.getByTestId("board-card")).toHaveCount(100);
+  await lane.getByTestId("show-more-cards").click();
+  await expect(lane.getByTestId("board-card")).toHaveCount(101);
+  await expect(lane.locator('[data-slot="column-count"]')).toHaveText("101");
+  await expect(lane.getByTestId("show-more-cards")).toHaveCount(0);
+
+  // ---- rollback: a 500 on the PATCH snaps the card back, toasts and announces
+  const backlog = await columnId(admin, convId, "Backlog");
+  const progress = await columnId(admin, convId, "In progress");
+  const pump = await createCard(admin, convId, { title: "Broken pump" });
+  const valve = await createCard(admin, convId, { title: "Valve replacement", waitingOn: "customer" });
+  await createCard(admin, convId, { title: "Quote for spares", columnId: progress, waitingOn: "both" });
+  await openBoard(page, convId);
+  const live = board.getByTestId("board-live");
+  await page.route(cardPatch(convId), (route) =>
+    route.fulfill({
+      status: 500,
+      json: { error: { code: "internal_error", message: "Database unavailable" } },
+    }),
+  );
+  await menuPick(page, cardTile(board, pump.messageId), "Move to…", "In progress");
+  await expect(page.getByText("Couldn't move “Broken pump”. It's back in Backlog.")).toBeVisible();
+  await expect(live).toContainText("“Broken pump” couldn't be moved and is back in Backlog.");
+  await expect.poll(() => columnOrder(board, backlog)).toEqual([pump.messageId, valve.messageId]);
+  await page.unroute(cardPatch(convId));
+
+  // ---- conflict: someone else changed the card; the 409 carries the current card, which the board applies
+  const changed = await admin.patch(`/api/v1/boards/${convId}/cards/${valve.messageId}`, {
+    data: { expectedVersion: valve.version, waitingOn: "us" },
+  });
+  expect(changed.ok()).toBe(true);
+  const current = await apiCard(admin, convId, valve.messageId);
+  await expect(cardTile(board, valve.messageId).getByTestId("waiting-on-badge")).toHaveText("Waiting on us");
+  await page.route(cardPatch(convId), (route) =>
+    route.fulfill({
+      status: 409,
+      json: {
+        error: {
+          code: "board_card_version_conflict",
+          message: "This card changed",
+          details: { card: current },
+        },
+      },
+    }),
+  );
+  await menuPick(page, cardTile(board, valve.messageId), "Move to…", "Done");
+  await expect(page.getByText("Someone else changed this card. Showing the latest.")).toBeVisible();
+  await expect(live).toContainText("Someone else changed “Valve replacement”. Showing the latest.");
+  await expect.poll(() => columnOrder(board, backlog)).toEqual([pump.messageId, valve.messageId]);
+  await expect(cardTile(board, valve.messageId).getByTestId("waiting-on-badge")).toHaveText("Waiting on us");
+  await page.unroute(cardPatch(convId));
+
+  // ---- axe: the board, the open card menu with its Move to… submenu, the create-channel dialog with Board
+  await expect(page.locator("[data-sonner-toast]")).toHaveCount(0, { timeout: 15_000 });
+  for (const scheme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await expectNoSeriousA11y(page, '[data-testid="board-view"]');
+    await cardTile(board, pump.messageId).getByTestId("card-menu").click();
+    await page.getByRole("menuitem", { name: "Move to…" }).click();
+    await expect(page.getByRole("menuitemradio", { name: "Cancelled" })).toBeVisible();
+    await expect(page.getByRole("menuitemradio", { name: "Backlog" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await expectNoSeriousA11y(page, '[role="menu"]');
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("card-menu-content")).toHaveCount(0);
+    await page.getByTestId("create-channel").filter({ visible: true }).first().click();
+    const dialog = page.getByTestId("create-channel-dialog");
+    await dialog.locator("label", { has: page.getByTestId("layout-board") }).click();
+    await expectNoSeriousA11y(page, '[data-testid="create-channel-dialog"]');
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+  }
+  await page.emulateMedia({ colorScheme: "light" });
+  expect(name).toBeTruthy();
+});
+
+test("gating: a non-member previews a public board read-only; an archived board is read-only for everyone", async ({
+  browser,
+}, info) => {
+  test.setTimeout(150_000);
+  const project = info.project.name;
+  const admin = await apiAs(ADMIN);
+  await ensureMember(admin, ALEX, "developer");
+  const { id: convId, name } = await createBoardChannel(admin, { prefix: "preview" });
+  const card = await createCard(admin, convId, {
+    title: "Pump inspection",
+    description: "Line 3",
+    waitingOn: "us",
+  });
+  const { page } = await openAs(browser, ALEX, project);
+  const board = await openBoard(page, convId);
+
+  const tile = cardTile(board, card.messageId);
+  await expect(tile).toBeVisible();
+  await expect(board.locator('[data-slot="card-grip-button"]')).toHaveCount(0);
+  await expect(board.getByRole("button", { name: /^Add card to/ })).toHaveCount(0);
+  await expect(page.getByTestId("new-card-button")).toHaveCount(0);
+  await tile.getByTestId("card-menu").click();
+  await expect(page.getByTestId("card-menu-content").getByRole("menuitem")).toHaveCount(1);
+  await expect(page.getByRole("menuitem", { name: "Open thread" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  const banner = page.getByTestId("join-banner");
+  await expect(banner).toContainText(`You're previewing #${name}`);
+  await expect(banner).toContainText("Join to add cards, move them and reply in their threads.");
+  await expect(banner.getByRole("button", { name: "Join channel" })).toBeVisible();
+  await tile.locator('[data-slot="card-open"]').click();
+  await expect(page.getByTestId("thread-panel")).toBeVisible();
+  await expect(page.getByTestId("thread-panel").getByText("Line 3")).toBeVisible();
+  await page.getByTestId("close-thread").click();
+  await expectNoSeriousA11y(page, '[data-testid="board-view"]');
+
+  // ---- archived: read-only for everyone, archived banner with the board copy
+  const archived = await admin.post(`/api/v1/channels/${convId}/archive`, { data: {} });
+  expect(archived.ok(), `archive: ${archived.status()}`).toBe(true);
+  const { page: own } = await openAs(browser, ADMIN, project);
+  for (const p of [own, page]) {
+    const b = await openBoard(p, convId);
+    await expect(p.getByTestId("archived-banner")).toContainText(
+      new RegExp(`#${name} was archived on .+\\. Its cards stay readable\\.`),
+    );
+    await expect(b.locator('[data-slot="card-grip-button"]')).toHaveCount(0);
+    await expect(b.getByRole("button", { name: /^Add card to/ })).toHaveCount(0);
+    await expect(p.getByTestId("new-card-button")).toHaveCount(0);
+    await expect(cardTile(b, card.messageId)).toBeVisible();
+  }
+});
+
+test("390: axe in both themes and every board control at least 44 × 44", async ({ browser }, info) => {
+  test.skip(info.project.name !== "mobile", "the 390 hit areas");
+  test.setTimeout(120_000);
+  const admin = await apiAs(ADMIN);
+  const { id: convId } = await createBoardChannel(admin, { prefix: "touch" });
+  await createCard(admin, convId, { title: "Pump inspection", waitingOn: "customer" });
+  await createCard(admin, convId, { title: "Seal kit order", waitingOn: "both" });
+  const page = await signedIn(browser, "mobile");
+  const board = await openBoard(page, convId);
+  for (const scheme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await expectNoSeriousA11y(page, '[data-testid="board-view"]');
+  }
+  await page.emulateMedia({ colorScheme: "light" });
+  const controls = page.locator(
+    '[data-testid="board-view"] button, [data-testid="board-view"] [role="tab"], [data-testid="new-card-button"]',
+  );
+  const boxes = await controls.evaluateAll((els) =>
+    els
+      .map((e) => {
+        const r = e.getBoundingClientRect();
+        return { name: e.getAttribute("aria-label") ?? e.textContent?.trim() ?? "", w: r.width, h: r.height };
+      })
+      .filter((b) => b.w > 0 && b.h > 0),
+  );
+  expect(boxes.length).toBeGreaterThan(6);
+  for (const b of boxes) {
+    expect(b.w, `${b.name} width`).toBeGreaterThanOrEqual(44);
+    expect(b.h, `${b.name} height`).toBeGreaterThanOrEqual(44);
+  }
+  // Same check through Playwright's boundingBox on the first card's menu trigger and the toolbar CTA.
+  for (const l of [board.getByTestId("card-menu").first(), page.getByTestId("new-card-button")]) {
+    const box = await l.boundingBox();
+    expect(box?.width).toBeGreaterThanOrEqual(44);
+    expect(box?.height).toBeGreaterThanOrEqual(44);
+  }
 });
