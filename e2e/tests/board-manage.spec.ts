@@ -1,4 +1,5 @@
 import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
+import { expectNoSeriousA11y } from "../support/a11y";
 import { apiAs, ensureMember, openAs } from "../support/actors";
 import {
   apiCard,
@@ -6,6 +7,7 @@ import {
   boardSnapshot,
   cardTile,
   columnId,
+  columnOrder,
   createBoardChannel,
   createCard,
   openBoard,
@@ -138,3 +140,230 @@ test("tracer: Víctor adds “Waiting for parts”, moves it after In progress a
   await admin.dispose();
   await alexApi.dispose();
 });
+
+// ---------------------------------------------------------------- Task 2: the rest of column management
+
+async function addColumnApi(
+  api: APIRequestContext,
+  convId: string,
+  body: { name: string; category: string; defaultWaitingOn?: string | null },
+): Promise<string> {
+  const res = await api.post(`/api/v1/boards/${convId}/columns`, { data: body });
+  expect(res.ok(), `add column: ${res.status()} ${await res.text()}`).toBe(true);
+  const ev = (await res.json()) as { columns: Array<{ id: string; name: string }> };
+  return ev.columns.find((c) => c.name === body.name)?.id ?? "";
+}
+
+async function apiColumn(api: APIRequestContext, convId: string, id: string) {
+  return (await boardSnapshot(api, convId)).columns.find((c) => c.id === id) as
+    | { id: string; name: string; category: string; defaultWaitingOn?: string | null }
+    | undefined;
+}
+
+test("desktop: rename, recategorise, Keep as is, delete with move, duplicate name; members see no column settings", async ({
+  browser,
+}, info) => {
+  test.skip(info.project.name !== "desktop", "lanes are the 1440 layout");
+  test.setTimeout(150_000);
+  const admin = await apiAs(ADMIN);
+  await ensureMember(admin, ALEX, "developer");
+  const alexApi = await apiAs(ALEX);
+  const { id: convId } = await createBoardChannel(admin, { prefix: "cols", members: [alexApi] });
+  const parts = await addColumnApi(admin, convId, {
+    name: "Waiting for parts",
+    category: "started",
+    defaultWaitingOn: "customer",
+  });
+  const done = await columnId(admin, convId, "Done");
+  const kept = await createCard(admin, convId, { title: "Gasket swap", waitingOn: "us" });
+  const second = await createCard(admin, convId, { title: "Filter order" });
+  const doneCard = await createCard(admin, convId, { title: "Old pump", columnId: done });
+  const { page } = await openAs(browser, ADMIN, "desktop");
+  const board = await openBoard(page, convId);
+
+  // ---- rename + recategorise + Keep as is, in one Edit column
+  await columnAction(page, board, "Waiting for parts", "Edit column…");
+  const dialog = page.getByTestId("column-settings");
+  await expect(dialog.getByRole("heading", { name: "Edit column" })).toBeVisible();
+  await expect(dialog.getByLabel("Name")).toHaveValue("Waiting for parts");
+  await expect(dialog.getByTestId("column-category-started")).toBeChecked();
+  await expect(dialog.getByTestId("column-waiting")).toContainText("Waiting on customer");
+  await dialog.getByLabel("Name").fill("Parts");
+  await dialog.locator("label", { has: page.getByTestId("column-category-backlog") }).click();
+  await dialog.getByTestId("column-waiting").click();
+  const options = page.getByRole("option");
+  await expect(options).toHaveText([
+    "Keep as is",
+    "Waiting on nobody",
+    "Waiting on us",
+    "Waiting on customer",
+    "Waiting on both",
+  ]);
+  await page.getByRole("option", { name: "Keep as is" }).click();
+  await dialog.getByTestId("column-settings-submit").click();
+  await expect(dialog).toBeHidden();
+  const lane = boardColumn(board, parts);
+  await expect(lane.locator("h2")).toHaveText("Parts");
+  await expect(lane.locator('[data-slot="column-header"] [data-category]')).toHaveAttribute(
+    "data-category",
+    "backlog",
+  );
+  await expect
+    .poll(() => apiColumn(admin, convId, parts))
+    .toMatchObject({
+      name: "Parts",
+      category: "backlog",
+      defaultWaitingOn: null,
+    });
+
+  // ---- Keep as is: a card moved in keeps its waiting state
+  await cardTile(board, kept.messageId).getByTestId("card-menu").click();
+  await page.getByRole("menuitem", { name: "Move to…" }).click();
+  await page.getByRole("menuitemradio", { name: "Parts", exact: true }).click();
+  await expect(lane.locator(`[data-card-id="${kept.messageId}"]`)).toBeVisible();
+  await expect.poll(async () => (await apiCard(admin, convId, kept.messageId)).columnId).toBe(parts);
+  expect((await apiCard(admin, convId, kept.messageId)).waitingOn).toBe("us");
+  await expect(cardTile(board, kept.messageId).getByTestId("waiting-on-badge")).toHaveText("Waiting on us");
+  await cardTile(board, second.messageId).getByTestId("card-menu").click();
+  await page.getByRole("menuitem", { name: "Move to…" }).click();
+  await page.getByRole("menuitemradio", { name: "Parts", exact: true }).click();
+  await expect.poll(async () => (await apiCard(admin, convId, second.messageId)).columnId).toBe(parts);
+
+  // ---- delete while it holds two cards: a target is required; both land at the bottom of Done, in order
+  await columnAction(page, board, "Parts", "Delete column…");
+  const del = page.getByTestId("delete-column");
+  await expect(del.getByRole("heading", { name: "Delete “Parts”?" })).toBeVisible();
+  await expect(del).toContainText(
+    "It holds 2 cards. Choose where they go; they're added to the bottom of that column.",
+  );
+  await expect(del.getByRole("button", { name: "Cancel" })).toBeFocused();
+  await expect(del.getByTestId("delete-column-submit")).toBeDisabled();
+  await del.getByTestId("column-move-to").click();
+  await expect(page.getByRole("option")).toHaveText(["Backlog", "In progress", "Done", "Cancelled"]);
+  await page.getByRole("option", { name: "Done" }).click();
+  await expect(del.getByTestId("delete-column-submit")).toBeEnabled();
+  await del.getByTestId("delete-column-submit").click();
+  await expect(del).toBeHidden();
+  await expect(boardColumn(board, parts)).toHaveCount(0);
+  await expect
+    .poll(() => columnOrder(board, done))
+    .toEqual([doneCard.messageId, kept.messageId, second.messageId]);
+  expect((await boardSnapshot(admin, convId)).columns.map((c) => c.name)).toEqual([
+    "Backlog",
+    "In progress",
+    "Done",
+    "Cancelled",
+  ]);
+
+  // ---- a duplicate name, ignoring case, is refused in place
+  await board.getByTestId("add-column").click();
+  await dialog.getByLabel("Name").fill("done");
+  await dialog.getByTestId("column-settings-submit").click();
+  await expect(dialog.getByRole("alert")).toHaveText("A column named “done” already exists");
+  await expect(dialog.getByLabel("Name")).toHaveAttribute("aria-invalid", "true");
+  await expectNoSeriousA11y(page, '[data-testid="column-settings"]');
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toBeHidden();
+
+  // ---- the API's own refusal (a name taken meanwhile by someone else) shows in the same place
+  await board.getByTestId("add-column").click();
+  await dialog.getByLabel("Name").fill("Quality check");
+  await addColumnApi(admin, convId, { name: "Quality check", category: "started" });
+  // The board.updated frame may already have refreshed the dialog's list: either way the copy is the same.
+  await dialog.getByTestId("column-settings-submit").click();
+  await expect(dialog.getByRole("alert")).toHaveText("A column named “Quality check” already exists");
+  await page.keyboard.press("Escape");
+
+  // ---- Alex, a plain member: no Add column, no column ⋯
+  const { page: alex } = await openAs(browser, ALEX, "desktop");
+  const alexBoard = await openBoard(alex, convId);
+  await expect(alexBoard.getByTestId("board-column")).toHaveCount(5);
+  await expect(alexBoard.getByTestId("add-column")).toHaveCount(0);
+  await expect(alexBoard.getByRole("button", { name: /column actions$/ })).toHaveCount(0);
+  await admin.dispose();
+  await alexApi.dispose();
+});
+
+test("390: the + tab adds a column full screen, ⋯ on the active-column row, deleting the shown column selects a neighbour", async ({
+  browser,
+}, info) => {
+  test.skip(info.project.name !== "mobile", "the 390 column tabs");
+  test.setTimeout(150_000);
+  const admin = await apiAs(ADMIN);
+  const { id: convId } = await createBoardChannel(admin, { prefix: "cols390" });
+  await createCard(admin, convId, { title: "Pump inspection", waitingOn: "customer" });
+  const { page } = await openAs(browser, ADMIN, "mobile");
+  const board = await openBoard(page, convId);
+  const tabs = board.getByTestId("board-tabs");
+
+  // ---- the trailing + (44 × 44) opens the dialog full screen
+  const plus = board.getByRole("button", { name: "Add column", exact: true });
+  const plusBox = await plus.boundingBox();
+  expect(plusBox?.width).toBeGreaterThanOrEqual(44);
+  expect(plusBox?.height).toBeGreaterThanOrEqual(44);
+  await plus.click();
+  const dialog = page.getByTestId("column-settings");
+  await expect(dialog).toBeVisible();
+  await page.evaluate(() => Promise.all(document.getAnimations().map((a) => a.finished.catch(() => null))));
+  const box = await dialog.boundingBox();
+  expect(box?.width).toBe(390);
+  expect(box?.height).toBe(844);
+  await dialog.getByLabel("Name").fill("Waiting for parts");
+  await dialog.getByTestId("column-waiting").click();
+  await page.getByRole("option", { name: "Waiting on customer" }).click();
+  await bothThemes(page, "board-columns-dialog-390");
+  await dialog.getByTestId("column-settings-submit").click();
+  await expect(dialog).toBeHidden();
+  await expect(tabs.getByRole("tab")).toHaveCount(5);
+  const parts = await columnId(admin, convId, "Waiting for parts");
+  await createCard(admin, convId, { title: "Seal kit", columnId: parts });
+  await createCard(admin, convId, { title: "Valve spares", columnId: parts });
+
+  // ---- its tab; the ⋯ sits on the active-column row (44 × 44); Move left puts it before Cancelled
+  await tabs.getByRole("tab", { name: /^Waiting for parts/ }).click();
+  await expect(board.getByTestId("board-column-panel").getByTestId("board-card")).toHaveCount(2);
+  const row = board.locator('[data-slot="active-column"]');
+  const menu = row.getByRole("button", { name: "Waiting for parts column actions" });
+  const menuBox = await menu.boundingBox();
+  expect(menuBox?.width).toBeGreaterThanOrEqual(44);
+  expect(menuBox?.height).toBeGreaterThanOrEqual(44);
+  await bothThemes(page, "board-columns-390");
+  await menu.click();
+  await page.getByRole("menuitem", { name: "Move left" }).click();
+  await expect
+    .poll(async () => (await boardSnapshot(admin, convId)).columns.map((c) => c.name))
+    .toEqual(["Backlog", "In progress", "Done", "Waiting for parts", "Cancelled"]);
+  await expect(tabs.getByRole("tab")).toHaveText([
+    /^Backlog/,
+    /^In progress/,
+    /^Done/,
+    /^Waiting for parts/,
+    /^Cancelled/,
+  ]);
+
+  // ---- delete it (two cards → Done): the next tab, Cancelled, is selected
+  await row.getByRole("button", { name: "Waiting for parts column actions" }).click();
+  await page.getByRole("menuitem", { name: "Delete column…" }).click();
+  const del = page.getByTestId("delete-column");
+  await expect(del).toContainText("It holds 2 cards.");
+  await del.getByTestId("column-move-to").click();
+  await page.getByRole("option", { name: "Done" }).click();
+  await page.evaluate(() => Promise.all(document.getAnimations().map((a) => a.finished.catch(() => null))));
+  await bothThemes(page, "board-column-delete-390");
+  await expectNoSeriousA11y(page, '[data-testid="delete-column"]');
+  await del.getByTestId("delete-column-submit").click();
+  await expect(del).toBeHidden();
+  await expect(tabs.getByRole("tab", { name: /^Cancelled/ })).toHaveAttribute("aria-selected", "true");
+  await expect(tabs.getByRole("tab")).toHaveCount(4);
+
+  // ---- deleting the last column while it is shown selects the previous one
+  await row.getByRole("button", { name: "Cancelled column actions" }).click();
+  await page.getByRole("menuitem", { name: "Delete column…" }).click();
+  await expect(del).toContainText("It's removed for everyone.");
+  await del.getByTestId("delete-column-submit").click();
+  await expect(del).toBeHidden();
+  await expect(tabs.getByRole("tab", { name: /^Done/ })).toHaveAttribute("aria-selected", "true");
+  await expect(tabs.getByRole("tab")).toHaveCount(3);
+  await admin.dispose();
+});
+
