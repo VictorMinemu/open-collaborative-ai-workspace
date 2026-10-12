@@ -97,7 +97,8 @@ test("typing in the palette stays there when a channel mounts behind it (the com
   // mounting, and the composer's autoFocus took the keyboard from the open dialog, so the end of the query went into
   // the composer behind it. Here the channel mounts behind the open palette on purpose: All (no composer), open the
   // palette, half the query, then Back to the channel.
-  await s.page.getByRole("link", { name: "All", exact: true }).click();
+  // By href: the link's name carries the unread count ("All 5") once other specs have run.
+  await s.page.locator('nav a[href="/chat/all"]').first().click();
   await expect(s.page).toHaveURL(/\/chat\/all$/);
   await expect(s.page.getByTestId("composer")).toHaveCount(0);
   const palette = await openPalette(s.page, "desktop");
