@@ -77,7 +77,7 @@ export function RecordTemplatesCard({ unit }: { unit: UnitNode }) {
       data-testid="record-templates-card"
       aria-labelledby="record-templates-title"
     >
-      <div className="flex flex-wrap items-end justify-between gap-x-3 gap-y-2 sm:flex-nowrap">
+      <div className="flex flex-col items-start gap-x-3 gap-y-2 sm:flex-row sm:items-end sm:justify-between">
         <div className="min-w-0 flex-1">
           <h3
             id="record-templates-title"
@@ -97,7 +97,7 @@ export function RecordTemplatesCard({ unit }: { unit: UnitNode }) {
         {canManage ? (
           <Button
             size="sm"
-            className="max-md:h-11"
+            className="shrink-0 max-md:h-11"
             onClick={() => setEditing({ kind: "new" })}
             data-testid="new-template"
           >

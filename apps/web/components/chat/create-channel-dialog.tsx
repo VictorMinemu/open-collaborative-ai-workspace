@@ -285,7 +285,8 @@ export function CreateChannelDialog({
   const [visibility, setVisibility] = useState<"public" | "private">("public");
   const [layout, setLayout] = useState<ChannelLayout>("text");
   const [unitId, setUnitId] = useState<string | null>(defaultUnitId);
-  const [templateId, setTemplateId] = useState<string | null>(null);
+  const [chosen, setChosen] = useState<RecordTemplate | null>(null);
+  const templateId = chosen?.id ?? null;
   const [templateNote, setTemplateNote] = useState<string | null>(null);
   const [templateError, setTemplateError] = useState<string | undefined>();
   const [error, setError] = useState<string | undefined>();
@@ -296,15 +297,17 @@ export function CreateChannelDialog({
       ? (me.data?.organization.name ?? "the organization")
       : (units.data?.units.find((u) => u.id === unitId)?.name ?? "this unit");
 
-  // A template chosen for another unit and not offered in this one is cleared, and the hint says why (P-08).
+  // A template chosen for another unit and not offered in this one is cleared, and the hint says why (P-08). While
+  // the new unit's list loads, the chosen template stays listed so the select keeps it until the answer decides.
   const offered = templates.data?.templates;
   useEffect(() => {
     if (!templateId || !offered) return;
     if (!offered.some((t) => t.id === templateId)) {
-      setTemplateId(null);
+      setChosen(null);
       setTemplateNote(templateUnavailable(unitName));
     }
   }, [offered, templateId, unitName]);
+  const listed = offered ?? (chosen ? [chosen] : []);
 
   useEffect(() => {
     if (open) setUnitId(defaultUnitId);
@@ -316,7 +319,7 @@ export function CreateChannelDialog({
     setVisibility("public");
     setLayout("text");
     setUnitId(defaultUnitId);
-    setTemplateId(null);
+    setChosen(null);
     setTemplateNote(null);
     setTemplateError(undefined);
     setError(undefined);
@@ -432,7 +435,7 @@ export function CreateChannelDialog({
             onChange={(v) => {
               setLayout(v);
               if (v === "text") {
-                setTemplateId(null);
+                setChosen(null);
                 setTemplateNote(null);
                 setTemplateError(undefined);
               }
@@ -449,12 +452,14 @@ export function CreateChannelDialog({
           />
           {layout === "board" ? (
             <TemplatePicker
-              templates={offered ?? []}
+              templates={listed}
               failed={templates.isError}
               value={templateId}
               onChange={(id) => {
-                setTemplateId(id);
-                setTemplateNote(null);
+                if (id === templateId) return;
+                setChosen(listed.find((t) => t.id === id) ?? null);
+                // A "None" the select reports by itself (its item left the list) keeps the note saying why.
+                if (id !== null) setTemplateNote(null);
                 setTemplateError(undefined);
               }}
               hint={templateNote ?? TEMPLATE_HINT}

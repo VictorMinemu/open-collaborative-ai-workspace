@@ -152,3 +152,53 @@ describe("toRequest / fromTemplate", () => {
     expect(req.namingRule).toBeNull();
   });
 });
+
+describe("validateDraft: fields, rule length, column count (Task 2)", () => {
+  it("reports a Choice field without options on its options", () => {
+    const priority: FieldDraft = {
+      ...customer,
+      id: "f2",
+      label: "Priority",
+      key: "priority",
+      type: "select",
+    };
+    const errors = validateDraft(caseFile({ fields: [customer, priority] }));
+    expect(errors["fields.1.options"]).toBe("Add at least one option");
+  });
+
+  it("reports a rule over 120 characters", () => {
+    const rule = `{summary} ${"x".repeat(120)}`;
+    expect(validateDraft(caseFile({ namingRule: rule })).namingRule).toBe(
+      "Keep the rule under 120 characters",
+    );
+  });
+
+  it("reports 21 columns on the columns", () => {
+    const columns = Array.from({ length: 21 }, (_, i) => ({
+      id: `c${i}`,
+      name: `Column ${i + 1}`,
+      category: "started" as const,
+      defaultWaitingOn: null,
+    }));
+    expect(validateDraft(caseFile({ columns })).columns).toBe("A board can have up to 20 columns");
+  });
+
+  it("reports no column at all", () => {
+    expect(validateDraft(caseFile({ columns: [] })).columns).toBe("Add at least one column");
+  });
+
+  it("reports the rule when a field it uses is removed", () => {
+    expect(validateDraft(caseFile({ fields: [] })).namingRule).toBe("No field with key “customer”");
+  });
+
+  it("reports duplicate field keys on the repeated field", () => {
+    const again: FieldDraft = { ...customer, id: "f9" };
+    expect(validateDraft(caseFile({ fields: [customer, again] }))["fields.1.key"]).toBe(
+      "Field keys must be unique",
+    );
+  });
+
+  it("asks for a prefix when the rule numbers cards", () => {
+    expect(validateDraft(caseFile({ prefix: "" })).namingRule).toBe("Add a prefix to use {prefix} or {seq}");
+  });
+});
