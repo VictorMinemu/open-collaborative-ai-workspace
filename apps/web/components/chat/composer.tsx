@@ -60,6 +60,11 @@ const TOKEN_BEFORE_CARET = /(^|[\s([{,;:!?"'])@([a-zA-Z0-9._-]{0,40})$/;
 const MAX_SUGGESTIONS = 8;
 
 /** The Phase 4 mention ranking (handle, then name, then any word; members first, agents just after); also the AI composer's (06-11). */
+/** True when `el` is inside an open dialog (a modal, sheet or the search palette), whose keyboard must not be taken. */
+export function focusInDialog(el: Pick<Element, "closest"> | null | undefined): boolean {
+  return !!el?.closest('[role="dialog"], [role="alertdialog"], [aria-modal="true"]');
+}
+
 export function rankMention(c: MentionCandidate, q: string): number {
   const handle = c.handle.toLowerCase();
   const name = c.displayName.toLowerCase();
@@ -168,7 +173,11 @@ export function Composer({
   }, [value]);
 
   useEffect(() => {
-    if (autoFocus && !disabled) ref.current?.focus({ preventScroll: true });
+    if (!autoFocus || disabled) return;
+    // Never take the keyboard from an open dialog: the search palette opened while the channel was still loading
+    // kept losing the rest of the query to the composer behind it.
+    if (focusInDialog(document.activeElement)) return;
+    ref.current?.focus({ preventScroll: true });
   }, [autoFocus, disabled]);
 
   const detect = useCallback((text: string, caret: number) => {
