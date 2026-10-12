@@ -25,6 +25,7 @@ import {
   Lock,
   LogOut,
   MoreHorizontal,
+  Plus,
   UserPlus,
   Users,
 } from "lucide-react";
@@ -45,8 +46,11 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useIsDesktop } from "@/hooks/use-media-query";
 import { api, errorMessage, isApiError } from "@/lib/api";
 import { useAttachmentsConfig } from "@/lib/attachment-queries";
+import { applyBoardFrame, boardAfterSeq, resyncBoard, useBoard } from "@/lib/board-queries";
 import {
   applyMessage,
   applyMessageDeleted,
@@ -71,6 +75,9 @@ import { useMe } from "@/lib/queries";
 import { useRealtime, useTopic } from "@/lib/realtime";
 import { formatDate } from "@/lib/utils";
 import { DropZone } from "./attachments/drop-zone";
+import { BoardView } from "./board/board-view";
+import type { CardAuthor } from "./board/card-tile";
+import { NewCardDialog } from "./board/new-card-dialog";
 import { ChannelIcon } from "./chat-sidebar";
 import {
   attachmentLimitsHint,
@@ -138,6 +145,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
     [meQ.data?.user.id, meQ.data?.user.name],
   );
   const realtime = useRealtime();
+  const isDesktop = useIsDesktop();
 
   // ---------------------------------------------------------------- data
   const channels = useChannels();
@@ -155,6 +163,13 @@ export function ChannelView({ channelId }: { channelId: string }) {
   });
   const channel = fromList ?? single.data;
   const messages = useMessages(channelId, !!channel);
+  // Board channels (Phase 07.1, P-12): the board snapshot loads next to the messages; Board is the default view.
+  const isBoard = channel?.layout === "board";
+  const board = useBoard(channelId, { enabled: isBoard && !revoked });
+  const view: "board" | "messages" =
+    isBoard && searchParams.get("view") !== "messages" ? "board" : "messages";
+  const activeColumnId = searchParams.get("col");
+  const [newCard, setNewCard] = useState<{ columnId: string | null } | null>(null);
   const members = useChannelMembers(channel ? channelId : null);
   const pins = usePins(channelId, !!channel && !revoked);
   const [pinsOpen, setPinsOpen] = useState(false);
@@ -240,6 +255,8 @@ export function ChannelView({ channelId }: { channelId: string }) {
   );
   const present = usePresentPeople(topic, { excludeUserId: me.id, resolve: resolvePerson });
   const onFrame = (frame: TopicFrame) => {
+    // Board frames patch the board cache; card-root deletes and reply counts also go on to the message handlers.
+    if (isBoard && applyBoardFrame(qc, channelId, frame)) return;
     if (frame.op === "eph") {
       if (frame.type === EphemeralTypes.agentTyping) {
         const d = frame.data as AgentTypingEvent;
@@ -305,12 +322,17 @@ export function ChannelView({ channelId }: { channelId: string }) {
     void qc.invalidateQueries({ queryKey: chatKeys.members(channelId) });
     qc.removeQueries({ queryKey: chatKeys.messages(channelId) });
   };
+  // One subscription per channel (Pitfall 3): a board channel waits for both cursors and starts from the lower one.
+  const boardReady = !isBoard || board.data !== undefined || board.isError;
   useTopic(
-    messages.data && !revoked ? topic : null,
+    messages.data && boardReady && !revoked ? topic : null,
     onFrame,
-    messages.data?.lastSeq,
+    isBoard && board.data
+      ? boardAfterSeq(messages.data?.lastSeq, board.data.lastSeq)
+      : messages.data?.lastSeq,
     () => {
       void qc.invalidateQueries({ queryKey: chatKeys.messages(channelId) });
+      if (isBoard) resyncBoard(qc, channelId);
     },
     { presence: true, onRevoked },
   );
@@ -437,11 +459,47 @@ export function ChannelView({ channelId }: { channelId: string }) {
   );
 
   // ---------------------------------------------------------------- threads (URL state)
+  // A board channel keeps its view and column tab (`view`, `col`) across the thread round trip.
+  const boardParams = useCallback(() => {
+    const p = new URLSearchParams();
+    if (!isBoard) return p;
+    for (const k of ["view", "col"]) {
+      const v = searchParams.get(k);
+      if (v) p.set(k, v);
+    }
+    return p;
+  }, [isBoard, searchParams]);
   const openThread = useCallback(
-    (id: string) => router.replace(`${pathname}?thread=${id}`, { scroll: false }),
-    [router, pathname],
+    (id: string) => {
+      const p = boardParams();
+      p.set("thread", id);
+      router.replace(`${pathname}?${p.toString()}`, { scroll: false });
+    },
+    [router, pathname, boardParams],
   );
-  const closeThread = useCallback(() => router.replace(pathname, { scroll: false }), [router, pathname]);
+  const closeThread = useCallback(() => {
+    const q = boardParams().toString();
+    router.replace(q ? `${pathname}?${q}` : pathname, { scroll: false });
+  }, [router, pathname, boardParams]);
+  const setParam = useCallback(
+    (key: string, value: string | null) => {
+      const p = new URLSearchParams(searchParams.toString());
+      if (value === null) p.delete(key);
+      else p.set(key, value);
+      const q = p.toString();
+      router.replace(q ? `${pathname}?${q}` : pathname, { scroll: false });
+    },
+    [searchParams, router, pathname],
+  );
+  const authorOf = useCallback(
+    (kind: "user" | "agent", id: string): CardAuthor => {
+      const m = members.data?.members.find((x) => x.kind === kind && x.id === id);
+      if (m) return { name: m.displayName, avatarUrl: m.avatarUrl };
+      const d = directory.byKey.get(dirKey(kind, id));
+      return d ? { name: d.displayName, avatarUrl: d.avatarUrl } : null;
+    },
+    [members.data, directory.byKey],
+  );
 
   // ---------------------------------------------------------------- older / newer pages
   const { onScroll, loadingOlder, loadingNewer } = useWindowPaging({
@@ -653,119 +711,211 @@ export function ChannelView({ channelId }: { channelId: string }) {
             }
           />
 
-          <DropZone
-            conversationLabel={`#${channel.name}`}
-            enabled={canDrop}
-            hint={attachmentLimitsHint(filesConfig.data)}
-            onFiles={(files) => composerApi.current?.addFiles(files)}
-          >
-            <div className="relative flex min-h-0 flex-1 flex-col">
-              <div
-                ref={scroll.ref}
-                onScroll={onScroll}
-                className="scrollbar-thin flex min-h-0 flex-1 flex-col overflow-y-auto"
-                data-testid="channel-scroll"
-                data-detached={detached ? "true" : undefined}
+          {isBoard ? (
+            <div
+              data-testid="board-toolbar"
+              className="flex h-14 shrink-0 items-center justify-between gap-3 border-b px-4 md:h-12 md:px-6"
+            >
+              <Tabs
+                value={view}
+                onValueChange={(v) => setParam("view", v === "messages" ? "messages" : null)}
               >
-                {messages.isPending || win.loading ? (
-                  <MessagesSkeleton />
-                ) : messages.isError || win.error ? (
-                  <EmptyState
-                    icon={Hash}
-                    title="Couldn't load messages"
-                    description={errorMessage(messages.error ?? win.error)}
-                  >
-                    <Button
-                      variant="outline"
-                      onClick={() => (messages.isError ? void messages.refetch() : win.retry())}
-                    >
-                      Try again
-                    </Button>
-                  </EmptyState>
-                ) : (
-                  <div className="mt-auto">
-                    {loadingOlder ? (
-                      <div className="flex justify-center py-3 text-muted-foreground">
-                        <Spinner />
-                      </div>
-                    ) : null}
-                    <MessageList
-                      messages={shown?.messages ?? []}
-                      pending={detached ? [] : channelPending}
-                      me={me}
-                      typers={channelTypers}
-                      onOpenThread={openThread}
-                      onRetry={retry}
-                      highlightId={threadId}
-                      anchorId={threadId ? null : permalinkId}
-                      linkFor={linkFor}
-                      onAnchorHidden={onAnchorHidden}
-                      intro={intro}
-                      readOnly={!!channel.archivedAt}
-                      canDeleteAny={canModerate}
-                      canReact={canPost}
-                      canUnpinAny={canArchive}
-                      pinnedBy={pinnedBy}
-                      dividerAfterSeq={reading.dividerAfterSeq}
-                      onMarkUnread={channel.isMember ? markUnreadFrom : undefined}
-                    />
-                    {loadingNewer ? (
-                      <div className="flex justify-center py-3 text-muted-foreground">
-                        <Spinner />
-                      </div>
-                    ) : null}
-                  </div>
-                )}
-              </div>
-              {detached ? <JumpToLatest newCount={win.newCount} onJump={jumpToLatest} /> : null}
+                <TabsList aria-label="Channel view">
+                  <TabsTrigger value="board" data-testid="view-board">
+                    Board
+                  </TabsTrigger>
+                  <TabsTrigger value="messages" data-testid="view-messages">
+                    Messages
+                  </TabsTrigger>
+                </TabsList>
+              </Tabs>
+              {view === "board" && canPost && board.data ? (
+                <Button
+                  size="sm"
+                  className="max-md:h-11 max-md:px-4"
+                  data-testid="new-card-button"
+                  onClick={() => setNewCard({ columnId: null })}
+                >
+                  <Plus /> New card
+                </Button>
+              ) : null}
             </div>
+          ) : null}
 
-            <TypingIndicator typers={channelTypers} inThreadHint />
-            <div className="shrink-0 px-4 pb-[max(env(safe-area-inset-bottom),12px)] sm:px-5">
+          {isBoard && view === "board" ? (
+            <div className="flex min-h-0 flex-1 flex-col">
+              <BoardView
+                channel={{ id: channel.id, name: channel.name ?? "" }}
+                snapshot={board.data}
+                loading={board.isPending && !board.isError}
+                error={board.error}
+                onRetry={() => void board.refetch()}
+                canPost={canPost}
+                canManage={channel.viewerCan?.includes("channel.update") ?? false}
+                authorOf={authorOf}
+                onOpenCard={openThread}
+                selectedCardId={threadId}
+                onAddCard={(columnId) => setNewCard({ columnId })}
+                activeColumnId={activeColumnId}
+                onActiveColumnChange={(id) => setParam("col", id)}
+              />
               {channel.archivedAt ? (
-                <div className="flex items-center gap-3 rounded-xl border bg-muted/40 px-4 py-3 text-muted-foreground text-sm">
-                  <Archive className="size-4 shrink-0" />
-                  <span>
-                    #{channel.name} was archived on {formatDate(channel.archivedAt)}. Its history stays
-                    readable.
-                  </span>
+                <div className="shrink-0 px-4 pb-[max(env(safe-area-inset-bottom),12px)] sm:px-6">
+                  <div
+                    className="flex items-center gap-3 rounded-xl border bg-muted/40 px-4 py-3 text-muted-foreground text-sm"
+                    data-testid="archived-banner"
+                  >
+                    <Archive className="size-4 shrink-0" />
+                    <span>
+                      #{channel.name} was archived on {formatDate(channel.archivedAt)}. Its cards stay
+                      readable.
+                    </span>
+                  </div>
                 </div>
               ) : !channel.isMember ? (
-                <div
-                  className="flex flex-col items-center gap-3 rounded-xl border bg-muted/40 px-4 py-4 text-center sm:flex-row sm:text-left"
-                  data-testid="join-banner"
-                >
-                  <div className="min-w-0 flex-1">
-                    <p className="font-medium text-sm">You're previewing #{channel.name}</p>
-                    <p className="text-muted-foreground text-xs">
-                      Join to post, reply in threads and get unread updates.
-                    </p>
-                  </div>
-                  <Button
-                    data-testid="join-channel"
-                    disabled={join.isPending}
-                    onClick={() => join.mutate(channel.id, { onError: (e) => toast.error(errorMessage(e)) })}
+                <div className="shrink-0 px-4 pb-[max(env(safe-area-inset-bottom),12px)] sm:px-6">
+                  <div
+                    className="flex flex-col items-center gap-3 rounded-xl border bg-muted/40 px-4 py-4 text-center sm:flex-row sm:text-left"
+                    data-testid="join-banner"
                   >
-                    {join.isPending ? <Spinner /> : null}
-                    Join channel
-                  </Button>
+                    <div className="min-w-0 flex-1">
+                      <p className="font-medium text-sm">You're previewing #{channel.name}</p>
+                      <p className="text-muted-foreground text-xs">
+                        Join to add cards, move them and reply in their threads.
+                      </p>
+                    </div>
+                    <Button
+                      data-testid="join-channel"
+                      className="max-md:h-11"
+                      disabled={join.isPending}
+                      onClick={() =>
+                        join.mutate(channel.id, { onError: (e) => toast.error(errorMessage(e)) })
+                      }
+                    >
+                      {join.isPending ? <Spinner /> : null}
+                      Join channel
+                    </Button>
+                  </div>
                 </div>
-              ) : (
-                <Composer
-                  placeholder={`Message #${channel.name}`}
-                  candidates={candidates}
-                  conversationId={channel.id}
-                  onSend={(body, _ids, files) => send(body, null, files)}
-                  onTyping={() => sendTyping(null)}
-                  apiRef={composerApi}
-                  autoFocus
-                  footer={<ComposerHint />}
-                  specialMentions={specialMentions}
-                  memberCount={memberList.length || channel.memberCount}
-                />
-              )}
+              ) : null}
             </div>
-          </DropZone>
+          ) : (
+            <DropZone
+              conversationLabel={`#${channel.name}`}
+              enabled={canDrop}
+              hint={attachmentLimitsHint(filesConfig.data)}
+              onFiles={(files) => composerApi.current?.addFiles(files)}
+            >
+              <div className="relative flex min-h-0 flex-1 flex-col">
+                <div
+                  ref={scroll.ref}
+                  onScroll={onScroll}
+                  className="scrollbar-thin flex min-h-0 flex-1 flex-col overflow-y-auto"
+                  data-testid="channel-scroll"
+                  data-detached={detached ? "true" : undefined}
+                >
+                  {messages.isPending || win.loading ? (
+                    <MessagesSkeleton />
+                  ) : messages.isError || win.error ? (
+                    <EmptyState
+                      icon={Hash}
+                      title="Couldn't load messages"
+                      description={errorMessage(messages.error ?? win.error)}
+                    >
+                      <Button
+                        variant="outline"
+                        onClick={() => (messages.isError ? void messages.refetch() : win.retry())}
+                      >
+                        Try again
+                      </Button>
+                    </EmptyState>
+                  ) : (
+                    <div className="mt-auto">
+                      {loadingOlder ? (
+                        <div className="flex justify-center py-3 text-muted-foreground">
+                          <Spinner />
+                        </div>
+                      ) : null}
+                      <MessageList
+                        messages={shown?.messages ?? []}
+                        pending={detached ? [] : channelPending}
+                        me={me}
+                        typers={channelTypers}
+                        onOpenThread={openThread}
+                        onRetry={retry}
+                        highlightId={threadId}
+                        anchorId={threadId ? null : permalinkId}
+                        linkFor={linkFor}
+                        onAnchorHidden={onAnchorHidden}
+                        intro={intro}
+                        readOnly={!!channel.archivedAt}
+                        canDeleteAny={canModerate}
+                        canReact={canPost}
+                        canUnpinAny={canArchive}
+                        pinnedBy={pinnedBy}
+                        dividerAfterSeq={reading.dividerAfterSeq}
+                        onMarkUnread={channel.isMember ? markUnreadFrom : undefined}
+                      />
+                      {loadingNewer ? (
+                        <div className="flex justify-center py-3 text-muted-foreground">
+                          <Spinner />
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
+                </div>
+                {detached ? <JumpToLatest newCount={win.newCount} onJump={jumpToLatest} /> : null}
+              </div>
+
+              <TypingIndicator typers={channelTypers} inThreadHint />
+              <div className="shrink-0 px-4 pb-[max(env(safe-area-inset-bottom),12px)] sm:px-5">
+                {channel.archivedAt ? (
+                  <div className="flex items-center gap-3 rounded-xl border bg-muted/40 px-4 py-3 text-muted-foreground text-sm">
+                    <Archive className="size-4 shrink-0" />
+                    <span>
+                      #{channel.name} was archived on {formatDate(channel.archivedAt)}. Its history stays
+                      readable.
+                    </span>
+                  </div>
+                ) : !channel.isMember ? (
+                  <div
+                    className="flex flex-col items-center gap-3 rounded-xl border bg-muted/40 px-4 py-4 text-center sm:flex-row sm:text-left"
+                    data-testid="join-banner"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="font-medium text-sm">You're previewing #{channel.name}</p>
+                      <p className="text-muted-foreground text-xs">
+                        Join to post, reply in threads and get unread updates.
+                      </p>
+                    </div>
+                    <Button
+                      data-testid="join-channel"
+                      disabled={join.isPending}
+                      onClick={() =>
+                        join.mutate(channel.id, { onError: (e) => toast.error(errorMessage(e)) })
+                      }
+                    >
+                      {join.isPending ? <Spinner /> : null}
+                      Join channel
+                    </Button>
+                  </div>
+                ) : (
+                  <Composer
+                    placeholder={`Message #${channel.name}`}
+                    candidates={candidates}
+                    conversationId={channel.id}
+                    onSend={(body, _ids, files) => send(body, null, files)}
+                    onTyping={() => sendTyping(null)}
+                    apiRef={composerApi}
+                    autoFocus
+                    footer={<ComposerHint />}
+                    specialMentions={specialMentions}
+                    memberCount={memberList.length || channel.memberCount}
+                  />
+                )}
+              </div>
+            </DropZone>
+          )}
         </div>
 
         {threadId ? (
@@ -794,6 +944,22 @@ export function ChannelView({ channelId }: { channelId: string }) {
           onOpenChange={setPinsOpen}
           canModerate={canArchive}
         />
+
+        {isBoard && board.data && canPost ? (
+          <NewCardDialog
+            channel={{ id: channel.id, name: channel.name ?? "" }}
+            snapshot={board.data}
+            open={newCard !== null}
+            onOpenChange={(o) => {
+              if (!o) setNewCard(null);
+            }}
+            defaultColumnId={newCard?.columnId ?? null}
+            // At 390 the new card's column becomes the visible tab, so the card is in view.
+            onCreated={(card) => {
+              if (!isDesktop) setParam("col", card.columnId);
+            }}
+          />
+        ) : null}
 
         {canMove ? <MoveChannelDialog channel={channel} open={moveOpen} onOpenChange={setMoveOpen} /> : null}
 
