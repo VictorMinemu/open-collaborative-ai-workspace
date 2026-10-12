@@ -105,6 +105,8 @@ interface Labels {
   title: (id: string) => string;
   column: (id: string) => string;
   items: () => Items | null;
+  /** The column a card was in when the drag started (dnd-kit's own `initialGroup` changes when a card is remounted in another lane mid-drag). */
+  origin: (id: string) => string | null;
 }
 
 /**
@@ -143,7 +145,8 @@ function withBoardAnnouncements(defaults: PluginList, labels: { current: Labels 
         if (!source) return undefined;
         const id = String(source.id);
         if (canceled || !target) {
-          const from = isSortable(source) ? String(source.sortable.initialGroup) : "";
+          const from =
+            labels.current.origin(id) ?? (isSortable(source) ? String(source.sortable.initialGroup) : "");
           return `Move cancelled. ${title(id)} is back in ${labels.current.column(from)}.`;
         }
         const p = where(id);
@@ -186,6 +189,7 @@ export function BoardView(props: BoardViewProps) {
 
   // ---------------------------------------------------------------- focus that must land after a re-render
   const focusNext = useRef<Focus | null>(null);
+  const focusLanded = useRef(false);
   const tryFocus = useCallback(() => {
     const f = focusNext.current;
     const root = rootRef.current;
@@ -203,16 +207,27 @@ export function BoardView(props: BoardViewProps) {
             : '[data-slot="card-open"]';
       el = tile?.querySelector<HTMLElement>(slot) ?? null;
     }
-    if (el) {
-      el.focus({ preventScroll: false });
-      if (document.activeElement === el) focusNext.current = null;
+    if (!el || document.activeElement === el) {
+      if (el) focusLanded.current = true;
+      return;
     }
+    // Once focus has landed, only take it back when it was lost (a closing menu returned it to an unmounted
+    // trigger, so it fell to <body>); never from a control the person has moved to since, such as another menu.
+    const lost = !document.activeElement || document.activeElement === document.body;
+    if (focusLanded.current && !lost) return;
+    el.focus({ preventScroll: false });
+    if (document.activeElement === el) focusLanded.current = true;
   }, []);
   const requestFocus = useCallback(
     (f: Focus) => {
       focusNext.current = f;
-      // After React re-renders the card in its new place and after a closing menu returns focus to its trigger.
-      for (const ms of [0, 60, 200]) window.setTimeout(tryFocus, ms);
+      focusLanded.current = false;
+      // After React re-renders the card in its new place, and again after a closing menu has returned focus to its
+      // (possibly unmounted) trigger; the request lapses once the menu has closed.
+      for (const ms of [0, 60, 200, 350]) window.setTimeout(tryFocus, ms);
+      window.setTimeout(() => {
+        if (focusNext.current === f) focusNext.current = null;
+      }, 400);
     },
     [tryFocus],
   );
@@ -260,11 +275,12 @@ export function BoardView(props: BoardViewProps) {
   const [dragId, setDragId] = useState<string | null>(null);
   const [keyboardDrag, setKeyboardDrag] = useState(false);
 
-  const labels = useRef<Labels>({ title: () => "", column: () => "", items: () => null });
+  const labels = useRef<Labels>({ title: () => "", column: () => "", items: () => null, origin: () => null });
   labels.current = {
     title: (id) => cardsById.get(id)?.title ?? "card",
     column: columnName,
     items: () => itemsRef.current ?? startItems.current ?? baseRef.current,
+    origin: (id) => locate(startItems.current ?? baseRef.current, id)?.col ?? null,
   };
   const plugins = useMemo<PluginsFn>(() => (defaults) => withBoardAnnouncements(defaults, labels), []);
 
