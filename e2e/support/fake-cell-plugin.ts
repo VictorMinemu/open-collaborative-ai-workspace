@@ -367,9 +367,10 @@ export class FakeCellPlugin {
   /**
    * Simulates the cell running each `[[call <tool> <json>]]` of a mention, the way apps/openclaw-channel does:
    * a tool is offered only when it (or a name ending in `__<tool>`) is in `turn.tools`; `ocw_memory_save` posts
-   * `{eventId, agentId, text}` to `/agent-channel/v1/memories`; any other tool asks `/agent-channel/v1/tool-calls`
+   * `{eventId, agentId, text}` to `/agent-channel/v1/memories`; `ocw_board_card` calls the board routes itself
+   * (`boardCall`, 07.1-13: like memory, never `/tool-calls`); any other tool asks `/agent-channel/v1/tool-calls`
    * and, when allowed, reports a result. One line per call: `Tool <offered name>: allowed | denied (<reason>)`,
-   * `Tool <name>: saved | not offered`.
+   * `Tool <name>: saved | created | moved | waiting set | read | not offered`.
    */
   async simulateToolCalls(
     m: MentionPayload,
@@ -377,6 +378,7 @@ export class FakeCellPlugin {
   ): Promise<string[]> {
     const lines: string[] = [];
     const offered = m.turn?.tools ?? [];
+    let boardCreates = 0;
     for (const call of calls) {
       const name = offered.find((t) => t === call.tool || t.endsWith(`__${call.tool}`));
       if (!name) {
@@ -404,6 +406,10 @@ export class FakeCellPlugin {
         );
         continue;
       }
+      if (name === "ocw_board_card") {
+        lines.push(`Tool ${call.tool}: ${await this.boardCall(m, call.args, ++boardCreates)}`);
+        continue;
+      }
       const params: { query?: string; url?: string } = {};
       if (typeof call.args.query === "string") params.query = call.args.query;
       if (typeof call.args.url === "string") params.url = call.args.url;
@@ -426,6 +432,62 @@ export class FakeCellPlugin {
       lines.push(`Tool ${name}: allowed`);
     }
     return lines;
+  }
+
+  /** Every board route call the simulated `ocw_board_card` made, with the status it got (07.1-13). */
+  readonly boardRequests: Array<{ eventId: string; route: string; status: number }> = [];
+
+  /**
+   * `ocw_board_card` the way apps/openclaw-channel's board-tool.ts runs it (07.1-13): only the mention's event and agent
+   * travel, never a conversation; a create is keyed `<eventId>:board:<n>`; a move or a waiting state reads the turn
+   * thread's card version first (`POST /board/read`) and names it. Never card text on a change. Answers `created`,
+   * `moved`, `waiting set`, `read` or `denied (<code>)`.
+   */
+  private async boardCall(m: MentionPayload, args: Record<string, unknown>, n: number): Promise<string> {
+    const turn = { eventId: m.eventId, agentId: m.agent.id };
+    type ErrorBody = { error?: { code?: string } };
+    const call = async <T>(method: string, route: string, body: Record<string, unknown>) => {
+      const res = await this.request<T & ErrorBody>(method, route, body);
+      this.boardRequests.push({ eventId: m.eventId, route: `${method} ${route}`, status: res.status });
+      return res;
+    };
+    const denied = (res: { status: number; body: ErrorBody | null }) =>
+      `denied (${res.body?.error?.code ?? res.status})`;
+    const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+    if (args.action === "create") {
+      const res = await call<{ card: { messageId: string } }>("POST", "/board/cards", {
+        ...turn,
+        idempotencyKey: `${m.eventId}:board:${n}`,
+        description: str(args.description) ?? "",
+        ...(str(args.title) ? { title: str(args.title) } : {}),
+        ...(str(args.columnId) ? { columnId: str(args.columnId) } : {}),
+        ...(str(args.waitingOn) ? { waitingOn: str(args.waitingOn) } : {}),
+      });
+      return res.status === 201 || res.status === 200 ? "created" : denied(res);
+    }
+    const read = await call<{ card: { messageId: string; version: number } | null }>(
+      "POST",
+      "/board/read",
+      turn,
+    );
+    if (read.status !== 200) return denied(read);
+    if (args.action === "read") return "read";
+    const card = read.body.card;
+    if (!card) return "denied (not_a_card)";
+    const change =
+      args.action === "move"
+        ? { move: { columnId: str(args.columnId) ?? "", afterCardId: str(args.afterCardId) ?? null } }
+        : args.action === "set_waiting"
+          ? { waitingOn: str(args.waitingOn) ?? "" }
+          : null;
+    if (!change) return "denied (unknown_action)";
+    const res = await call("PATCH", `/board/cards/${card.messageId}`, {
+      ...turn,
+      expectedVersion: card.version,
+      ...change,
+    });
+    if (res.status !== 200) return denied(res);
+    return args.action === "move" ? "moved" : "waiting set";
   }
 
   private step() {
