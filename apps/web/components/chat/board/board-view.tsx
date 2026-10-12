@@ -21,6 +21,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { toast } from "sonner";
 import { EmptyState } from "@/components/common/empty-state";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -28,12 +29,19 @@ import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useIsDesktop, useMediaQuery } from "@/hooks/use-media-query";
 import { errorMessage } from "@/lib/api";
+import {
+  columnErrorMessage,
+  neighbourMove,
+  useBoardChannelAccess,
+  useUpdateBoardColumn,
+} from "@/lib/board-manage-queries";
 import { useBoardColumnPage, usePendingCardIds, useUpdateBoardCard } from "@/lib/board-queries";
 import { cn } from "@/lib/utils";
 import { BoardColumn, EmptyLane } from "./board-column";
 import { CardMenu, type CardMoveIntent, menuColumns } from "./card-menu";
 import { type CardAuthor, CardTile } from "./card-tile";
-import { CATEGORY, CategoryIcon, columnCountLabel } from "./column-header";
+import { CATEGORY, CATEGORY_MEANING, CategoryIcon, columnCountLabel } from "./column-header";
+import { ColumnMenu, ColumnSettingsDialog, DeleteColumnDialog } from "./column-settings-dialog";
 import { defaultColumnOf } from "./new-card-dialog";
 import { SortableCard } from "./sortable-card";
 
@@ -57,7 +65,10 @@ export interface BoardViewProps {
   onRetry: () => void;
   /** Member of an active channel: moves, adds, waiting state. False = read-only (non-member preview, archived). */
   canPost: boolean;
-  /** `channel.update` (column actions, 07.1-11). */
+  /**
+   * The channel's `viewerCan` includes `channel.update` (owner or admin): column settings, Add column (07.1-11). Never
+   * on an archived board. UI gating only; the API decides.
+   */
   canManage?: boolean;
   /** The card author's display, from the channel member directory; null = "Former member". */
   authorOf: (kind: BoardCard["authorKind"], id: string) => CardAuthor;
@@ -72,6 +83,11 @@ export interface BoardViewProps {
 }
 
 type Items = Record<string, string[]>;
+/** The column dialog that is open: Add column, Edit column or the delete confirmation. */
+type ColumnDialog =
+  | { kind: "add" }
+  | { kind: "edit"; columnId: string }
+  | { kind: "delete"; columnId: string };
 type Focus = { id: string; part: "grip" | "menu" | "open" | "tabs" };
 
 const INSTRUCTIONS =
@@ -169,7 +185,7 @@ export function BoardView(props: BoardViewProps) {
     error,
     onRetry,
     canPost,
-    canManage = false,
+    canManage: canManageProp = false,
     authorOf,
     onOpenCard,
     selectedCardId,
@@ -186,6 +202,38 @@ export function BoardView(props: BoardViewProps) {
   const announce = useCallback((text: string) => setLive((prev) => (prev === text ? `${text} ` : text)), []);
   const update = useUpdateBoardCard(channel.id, { announce, channelName: channel.name });
   const pendingIds = usePendingCardIds(channel.id);
+
+  // ---------------------------------------------------------------- column settings (07.1-11, channel.update)
+  const access = useBoardChannelAccess(channel.id);
+  const canManage = canManageProp && !access.archived;
+  const updateColumn = useUpdateBoardColumn(channel.id);
+  const [columnDialog, setColumnDialog] = useState<ColumnDialog | null>(null);
+  const moveColumn = (column: BoardColumnModel, direction: "left" | "right") => {
+    const to = snapshot ? neighbourMove(snapshot.columns, column.id, direction) : undefined;
+    if (!to) return;
+    updateColumn.mutate(
+      { columnId: column.id, ...to },
+      { onError: (err) => toast.error(columnErrorMessage(err, column.name)) },
+    );
+  };
+  const columnMenu = (column: BoardColumnModel, className?: string) =>
+    snapshot ? (
+      <ColumnMenu
+        column={column}
+        columns={snapshot.columns}
+        onEdit={() => setColumnDialog({ kind: "edit", columnId: column.id })}
+        onMove={(direction) => moveColumn(column, direction)}
+        onDelete={() => setColumnDialog({ kind: "delete", columnId: column.id })}
+        {...(className ? { className } : {})}
+      />
+    ) : null;
+  /** At 390, deleting the shown column selects the next tab, or the previous one when it was the last. */
+  const afterColumnDeleted = (columnId: string) => {
+    if (isDesktop || !snapshot || activeColumn?.id !== columnId) return;
+    const at = snapshot.columns.findIndex((c) => c.id === columnId);
+    const next = snapshot.columns[at + 1] ?? snapshot.columns[at - 1];
+    if (next) onActiveColumnChange(next.id);
+  };
 
   // ---------------------------------------------------------------- focus that must land after a re-render
   const focusNext = useRef<Focus | null>(null);
@@ -401,7 +449,10 @@ export function BoardView(props: BoardViewProps) {
     body = <BoardSkeleton desktop={isDesktop} />;
   } else if (isDesktop) {
     body = (
-      <LaneScroller columnCount={snapshot.columns.length}>
+      <LaneScroller
+        columnCount={snapshot.columns.length}
+        addColumn={canManage ? <AddColumnTile onClick={() => setColumnDialog({ kind: "add" })} /> : null}
+      >
         {snapshot.columns.map((col) => {
           const ids = idsIn(col.id);
           const entry = snapshot.cards.find((c) => c.columnId === col.id);
@@ -415,6 +466,7 @@ export function BoardView(props: BoardViewProps) {
               lastRank={entry?.cards.at(-1)?.rank ?? null}
               canPost={canPost}
               canManage={canManage}
+              menu={canManage ? columnMenu(col) : undefined}
               onAdd={() => onAddCard(col.id)}
               holdsDrag={dragId !== null && ids.includes(dragId)}
               empty={emptyFor(col.id)}
@@ -439,6 +491,8 @@ export function BoardView(props: BoardViewProps) {
         canPost={canPost}
         canManage={canManage}
         onAdd={() => onAddCard(activeColumn.id)}
+        onAddColumn={() => setColumnDialog({ kind: "add" })}
+        menu={canManage ? columnMenu(activeColumn, "size-11") : null}
         convId={channel.id}
         empty={emptyFor(activeColumn.id)}
       >
@@ -488,14 +542,60 @@ export function BoardView(props: BoardViewProps) {
           ) : null}
         </DragOverlay>
       </DragDropProvider>
+      {canManage && snapshot ? (
+        <>
+          <ColumnSettingsDialog
+            convId={channel.id}
+            snapshot={snapshot}
+            column={
+              columnDialog?.kind === "edit"
+                ? (snapshot.columns.find((c) => c.id === columnDialog.columnId) ?? null)
+                : null
+            }
+            open={columnDialog?.kind === "add" || columnDialog?.kind === "edit"}
+            onOpenChange={(o) => !o && setColumnDialog(null)}
+          />
+          <DeleteColumnDialog
+            convId={channel.id}
+            snapshot={snapshot}
+            columnId={columnDialog?.kind === "delete" ? columnDialog.columnId : null}
+            open={columnDialog?.kind === "delete"}
+            onOpenChange={(o) => !o && setColumnDialog(null)}
+            onDeleted={afterColumnDeleted}
+          />
+        </>
+      ) : null}
     </div>
+  );
+}
+
+/** The dashed `Add column` tile after the last lane (1440, managers only). */
+function AddColumnTile({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      data-testid="add-column"
+      onClick={onClick}
+      className="flex h-11 w-68 shrink-0 snap-start items-center justify-center gap-2 rounded-xl border border-dashed text-muted-foreground text-sm outline-none transition-colors hover:bg-accent/50 hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40"
+    >
+      <Plus className="size-4" aria-hidden />
+      Add column
+    </button>
   );
 }
 
 // ---------------------------------------------------------------- desktop pieces
 
 /** The horizontal lane scroller: snap, and a 24 px right fade only while more lanes sit to the right. */
-function LaneScroller({ columnCount, children }: { columnCount: number; children: ReactNode }) {
+function LaneScroller({
+  columnCount,
+  addColumn,
+  children,
+}: {
+  columnCount: number;
+  addColumn?: ReactNode;
+  children: ReactNode;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   const [moreRight, setMoreRight] = useState(false);
   const measure = useCallback(() => {
@@ -523,6 +623,7 @@ function LaneScroller({ columnCount, children }: { columnCount: number; children
       style={moreRight ? { maskImage: fade, WebkitMaskImage: fade } : undefined}
     >
       {children}
+      {addColumn}
     </div>
   );
 }
@@ -535,6 +636,7 @@ function Lane({
   lastRank,
   canPost,
   canManage,
+  menu,
   onAdd,
   holdsDrag,
   empty,
@@ -547,6 +649,7 @@ function Lane({
   lastRank: string | null;
   canPost: boolean;
   canManage: boolean;
+  menu?: ReactNode;
   onAdd: () => void;
   holdsDrag: boolean;
   empty: ReactNode;
@@ -567,6 +670,7 @@ function Lane({
       hasMore={hasMore}
       canPost={canPost}
       canManage={canManage}
+      menu={menu}
       onAdd={onAdd}
       bodyRef={ref}
       dropTarget={holdsDrag || isDropTarget}
@@ -613,13 +717,6 @@ function ShowMore({
 
 // ---------------------------------------------------------------- 390 pieces
 
-const CATEGORY_MEANING: Record<BoardColumnModel["category"], string> = {
-  backlog: "Not started yet",
-  started: "Being worked on",
-  done: "Finished",
-  cancelled: "Won't be done",
-};
-
 function ColumnTabs({
   snapshot,
   active,
@@ -627,6 +724,8 @@ function ColumnTabs({
   canPost,
   canManage,
   onAdd,
+  onAddColumn,
+  menu,
   convId,
   empty,
   children,
@@ -637,6 +736,10 @@ function ColumnTabs({
   canPost: boolean;
   canManage: boolean;
   onAdd: () => void;
+  /** Managers: the trailing `+` after the tabs (07.1-11). */
+  onAddColumn: () => void;
+  /** Managers: the active column's `⋯` (07.1-11). */
+  menu: ReactNode;
   convId: string;
   empty: ReactNode;
   children: ReactNode[];
@@ -651,6 +754,30 @@ function ColumnTabs({
   const entry = (id: string) => snapshot.cards.find((c) => c.columnId === id);
   const activeEntry = entry(active.id);
   const hasCards = children.some(Boolean);
+  const tabs = (
+    <TabsList
+      ref={listRef}
+      aria-label="Columns"
+      data-testid="board-tabs"
+      className={cn("shrink-0 px-1", canManage && "min-w-0 flex-1 border-b-0")}
+    >
+      {snapshot.columns.map((c) => {
+        const e = entry(c.id);
+        const count = columnCountLabel(e?.cards.length ?? 0, e?.hasMore ?? false);
+        return (
+          <TabsTrigger
+            key={c.id}
+            value={c.id}
+            data-column-id={c.id}
+            aria-label={`${c.name}, ${count} ${count === "1" ? "card" : "cards"}`}
+          >
+            <span className="max-w-40 truncate">{c.name}</span>
+            <span className="font-normal text-muted-foreground text-xs tabular-nums">{count}</span>
+          </TabsTrigger>
+        );
+      })}
+    </TabsList>
+  );
   return (
     <Tabs
       variant="underline"
@@ -658,23 +785,24 @@ function ColumnTabs({
       onValueChange={(v) => onActiveChange(String(v))}
       className="min-h-0 flex-1"
     >
-      <TabsList ref={listRef} aria-label="Columns" data-testid="board-tabs" className="shrink-0 px-1">
-        {snapshot.columns.map((c) => {
-          const e = entry(c.id);
-          const count = columnCountLabel(e?.cards.length ?? 0, e?.hasMore ?? false);
-          return (
-            <TabsTrigger
-              key={c.id}
-              value={c.id}
-              data-column-id={c.id}
-              aria-label={`${c.name}, ${count} ${count === "1" ? "card" : "cards"}`}
-            >
-              <span className="max-w-40 truncate">{c.name}</span>
-              <span className="font-normal text-muted-foreground text-xs tabular-nums">{count}</span>
-            </TabsTrigger>
-          );
-        })}
-      </TabsList>
+      {canManage ? (
+        // The trailing + sits next to the tab list (a tablist holds only tabs), on the same underline row.
+        <div data-slot="column-tabs-row" className="flex shrink-0 items-stretch border-b">
+          {tabs}
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            className="size-11 shrink-0 rounded-none text-muted-foreground"
+            aria-label="Add column"
+            data-testid="add-column"
+            onClick={onAddColumn}
+          >
+            <Plus />
+          </Button>
+        </div>
+      ) : (
+        tabs
+      )}
       {canPost || canManage ? (
         <div data-slot="active-column" className="flex h-11 shrink-0 items-center gap-2 border-b pr-1 pl-4">
           <CategoryIcon category={active.category} />
@@ -692,6 +820,7 @@ function ColumnTabs({
               <Plus />
             </Button>
           ) : null}
+          {canManage ? <span className={cn("flex", !canPost && "ml-auto")}>{menu}</span> : null}
         </div>
       ) : null}
       {snapshot.columns.map((c) => (
