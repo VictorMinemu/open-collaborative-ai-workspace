@@ -112,9 +112,11 @@ export { type ConversationAccess, createConversationAccess } from "./access";
 /** Board channels (Phase 07.1): the route guards and the board service, for 07.1-05/06/07/10. */
 export { readableBoard, writableBoard } from "./board/access";
 export {
+  type AgentBoardActor,
   type BoardAuthor,
   createBoard,
   createBoardCard,
+  readAgentBoard,
   readBoardSnapshot,
   updateBoardCard,
 } from "./board/service";

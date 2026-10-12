@@ -7,7 +7,7 @@ import {
   type TurnNow,
   type TurnToolFlags,
 } from "@ocw/contracts";
-import { agents, agentTurns, conversationMembers, type Tx, tenantOf } from "@ocw/db";
+import { agents, agentTurns, conversationMembers, conversations, type Tx, tenantOf } from "@ocw/db";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { agentResource, type PermissionService, type PrincipalRef } from "../organization";
@@ -49,6 +49,12 @@ const MEMORY_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: tru
  * conversation, as the reply itself does, so it stays usable after the turn read untrusted content.
  */
 const CARD_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: false };
+/**
+ * `ocw_board_card` (07.1-10, D-07, C-01): creates and moves cards on the turn's board through the Agent Channel API. Its
+ * output is the API's own answer (trusted), but it changes shared work, so it is side-effecting: a turn that read
+ * untrusted content can no longer use it (the board routes refuse `tainted`).
+ */
+const BOARD_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
 
 /**
  * Flags of a catalog tool (D-08 taint rule). Every MCP / plugin output is untrusted. MCP tools are
@@ -65,6 +71,8 @@ function assemble(
   conversationKind: string | null,
   catalog: readonly CatalogSource[],
   effectiveToolNames: ReadonlySet<string>,
+  /** The turn's conversation is a board channel (07.1-10). The cell-wide view (null kind) never is. */
+  board = false,
 ): TurnTools {
   const tools: string[] = [];
   const toolFlags: Record<string, TurnToolFlags> = {};
@@ -84,6 +92,8 @@ function assemble(
   }
   // Agent Cards (06-14, P-11): every delivered turn, wherever the bot may reply (the card routes re-check posting).
   add(BUILTIN_TOOLS.agentCard, CARD_FLAGS);
+  // Board cards (07.1-10, D-07): only on a board channel's turns; every other turn keeps exactly its tool list.
+  if (board && conversationKind === "channel") add(BUILTIN_TOOLS.boardCard, BOARD_FLAGS);
   for (const source of catalog) {
     for (const t of source.tools) {
       if (effectiveToolNames.has(`${source.sourceKind}:${source.sourceId}:${t.name}`)) {
@@ -115,7 +125,7 @@ interface ComputedTurn extends TurnTools {
 async function computeTurn(
   tx: Tx,
   perms: PermissionService,
-  p: { agentId: string; humanUserId: string; conversationKind: string },
+  p: { agentId: string; humanUserId: string; conversationKind: string; board?: boolean },
   env: SearchEnv,
   audience?: TurnAudience | null,
 ): Promise<ComputedTurn | null> {
@@ -195,7 +205,7 @@ async function computeTurn(
     botName: row.name,
     dailyLimit: effectiveDailyLimit(row.scope, caps, policy),
     withheld,
-    ...assemble(effective, p.conversationKind, catalog, allowed),
+    ...assemble(effective, p.conversationKind, catalog, allowed, p.board === true),
   };
 }
 
@@ -252,6 +262,17 @@ async function memoryScopeKind(tx: Tx, conversationId: string, conversationKind:
   return humanCount === 1 ? "dm" : "dm_shared";
 }
 
+/** Whether a conversation is a board channel (07.1-10): one indexed lookup by id, like `memoryScopeKind`. */
+async function isBoardChannel(tx: Tx, conversationId: string, conversationKind: string): Promise<boolean> {
+  if (conversationKind !== "channel") return false;
+  const [row] = await tx
+    .select({ layout: conversations.layout })
+    .from(conversations)
+    .where(eq(conversations.id, conversationId))
+    .limit(1);
+  return row?.layout === "board";
+}
+
 /**
  * `deliver: false` means no cell event (so no model call). `limit_reached` carries the notice the bot posts
  * instead (the caller decides whether to post it: always in a DM, once per conversation per day elsewhere)
@@ -285,10 +306,11 @@ export async function turnPolicy(
 ): Promise<TurnDecision> {
   // The kind the capability rules see: a "dm" shared by two or more humans is not a private chat (no memory).
   const scopeKind = await memoryScopeKind(tx, p.conversationId, p.conversationKind);
+  const board = await isBoardChannel(tx, p.conversationId, p.conversationKind);
   const computed = await computeTurn(
     tx,
     perms,
-    { ...p, conversationKind: scopeKind },
+    { ...p, conversationKind: scopeKind, board },
     core.env,
     opts.audience,
   );
