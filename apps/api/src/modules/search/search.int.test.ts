@@ -784,3 +784,89 @@ describe("AI chats are found by their owner alone (05-10, AICHAT-04, P-03, Pitfa
     });
   });
 });
+
+describe("board cards are found by their text, within the readable set (07.1-06, BOARD-05, Pitfall 5)", () => {
+  let bea: TestClient;
+  let pumps: string;
+  let privateBoard: string;
+  let pumpCard: Json;
+  let acmeCard: Json;
+  let secretCard: Json;
+
+  const card = (as: TestClient, boardId: string, body: Json) =>
+    ok(as.request("POST", `/api/v1/boards/${boardId}/cards`, { clientMessageId: randomUUID(), ...body }));
+
+  beforeAll(async () => {
+    [bea] = await joinAs("bea@example.test", "Bea Board", "developer");
+    pumps = (await ok(admin.request("POST", "/api/v1/channels", { name: "pump-cases", layout: "board" }))).id;
+    await ok(bea.request("POST", `/api/v1/channels/${pumps}/join`));
+    // The board's fields as a template would set them (07.1-07 fills this row; the search needs only the body).
+    await su.query("update app.boards set fields = $1::jsonb where conversation_id = $2", [
+      JSON.stringify([{ key: "customer", label: "Customer", type: "text", required: false }]),
+      pumps,
+    ]);
+    pumpCard = await card(admin, pumps, {
+      title: "Broken pump",
+      description: "Pump 3 leaks near the gasket",
+    });
+    acmeCard = await card(admin, pumps, { description: "Valve inspection", fields: { customer: "Acme" } });
+    // Sam's private board: the admin is not a member.
+    privateBoard = (
+      await ok(
+        sam.request("POST", "/api/v1/channels", { name: "hr-cases", layout: "board", visibility: "private" }),
+      )
+    ).id;
+    secretCard = await card(sam, privateBoard, {
+      title: "Fennel complaint",
+      description: "Confidential fennel case",
+    });
+  });
+
+  it("a member finds a card by its title, a word of its description and a field value", async () => {
+    const byTitle = await search(bea, { q: "broken pump" });
+    expect(hitIds(byTitle)).toEqual([pumpCard.messageId]);
+    expect((byTitle.hits as Json[])[0]).toMatchObject({
+      threadRootId: null,
+      conversation: { id: pumps, kind: "channel", label: "#pump-cases" },
+    });
+    expect(hitIds(await search(bea, { q: "gasket" }))).toEqual([pumpCard.messageId]);
+    expect(hitIds(await search(bea, { q: "Acme" }))).toEqual([acmeCard.messageId]);
+  });
+
+  it("after Víctor retitles the card, search finds the new title and no longer the old one", async () => {
+    const edited = await ok(
+      admin.request("PATCH", `/api/v1/boards/${pumps}/cards/${pumpCard.messageId}`, {
+        expectedVersion: pumpCard.version,
+        title: "Pump 3 replaced",
+      }),
+    );
+    expect(edited).toMatchObject({ title: "Pump 3 replaced", titleSource: "user" });
+    expect(hitIds(await search(bea, { q: "replaced" }))).toEqual([pumpCard.messageId]);
+    expect(hitIds(await search(bea, { q: "broken" }))).toEqual([]);
+    // The description still finds it.
+    expect(hitIds(await search(bea, { q: "gasket" }))).toEqual([pumpCard.messageId]);
+  });
+
+  it("an admin who is not in a private board finds nothing of it; the member does", async () => {
+    expect(hitIds(await search(sam, { q: "fennel" }))).toEqual([secretCard.messageId]);
+    const r = await search(admin, { q: "fennel" });
+    expect(r.hits).toEqual([]);
+    expect(JSON.stringify(r)).not.toContain("Fennel");
+  });
+
+  it("org B's tenant finds no card, even naming org A's boards as readable", async () => {
+    const db = stack.built.core.db;
+    for (const q of ["replaced", "gasket", "fennel", "acme"]) {
+      const res = await db.withTenant({ organizationId: orgB, userId: userB }, async (tx) =>
+        searchMessages(tx, {
+          readableIds: [pumps, privateBoard],
+          q,
+          limit: 20,
+          dir: await loadDirectory(tx),
+          viewerId: userB,
+        }),
+      );
+      expect(res.hits, q).toEqual([]);
+    }
+  });
+});

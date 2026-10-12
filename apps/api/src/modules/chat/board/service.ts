@@ -12,22 +12,26 @@ import {
   cardMessageBody,
   DEFAULT_BOARD_COLUMNS,
   EventTypes,
+  type FieldValue,
   fieldValuesSchema,
+  type Mention,
   renderCardTitle,
   type TemplateColumn,
   type UpdateBoardCardRequest,
 } from "@ocw/contracts";
 import { boardCards, boardColumns, boards, messages, type Tx } from "@ocw/db";
-import { and, asc, eq, isNull, lte, ne, sql } from "drizzle-orm";
-import { badRequest, conflict, HttpError, notFound } from "../../../lib/errors";
-import { loadDirectory } from "../directory";
+import { and, asc, eq, isNull, lte, ne, type SQL, sql } from "drizzle-orm";
+import { badRequest, conflict, forbidden, HttpError, notFound } from "../../../lib/errors";
+import { type Directory, loadDirectory } from "../directory";
 import { resolveMentions } from "../mentions";
+import { editMessage } from "../message-actions";
 import {
   type ChatDeps,
   type ConversationRow,
   convTopic,
   iso,
   lockNextSeq,
+  type MessageRow,
   type PostInput,
   type PostResult,
   postMessage,
@@ -496,29 +500,53 @@ export async function createBoardCard(
   return { card, created: true, result };
 }
 
+/** A card root's text edit, for the caller's edit observers (notifications of newly mentioned people). */
+export interface CardTextEdit {
+  row: MessageRow;
+  previousMentions: Mention[];
+  dir: Directory;
+}
+
 export interface UpdateBoardCardArgs {
   conv: ConversationRow;
   messageId: string;
   actor: BoardAuthor;
   input: UpdateBoardCardRequest;
   sessionId?: string | null;
+  /** Runs in the transaction right after the root message was rewritten (the route calls chat's edit observers). */
+  onTextEdited?: (tx: Tx, edit: CardTextEdit) => Promise<void>;
 }
 
+const sameValues = (a: Record<string, unknown>, b: Record<string, unknown>) => {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const k of keys) if ((a[k] ?? null) !== (b[k] ?? null)) return false;
+  return true;
+};
+
 /**
- * Moves a card and/or sets its waiting state (BOARD-03, D-05, P-09), under the stream lock: the card is locked, a stale
- * `expectedVersion` is 409 `board_card_version_conflict` whose `details.card` is the current card (the client applies
- * it and retries); the rank comes from `placeInColumn`; entering a column with a default waiting state applies it
- * unless the request names one; `version + 1`, one `board.card_upserted`, and the `board.card.moved` (or
- * `board.card.updated`) audit. Card text edits arrive in 07.1-06.
+ * Moves a card, sets its waiting state and edits its text (BOARD-03, BOARD-05, BOARD-06, D-05, D-06, P-02, P-09), under
+ * the stream lock: the card is locked; text (title, description, fields) belongs to the card's human author alone
+ * (403 `not_author`, the Phase 4 rule: nobody, admins included, edits someone else's words; agents never edit text);
+ * a stale `expectedVersion` is 409 `board_card_version_conflict` whose `details.card` is the current card (the client
+ * applies it and retries); the rank comes from `placeInColumn`; entering a column with a default waiting state applies
+ * it unless the request names one.
+ *
+ * Titles (Pitfall 9): a typed `title` is stored as `user` and is never replaced afterwards; a description or field
+ * edit recomputes the title from the board's naming rule (or the description's first line) in the same UPDATE, guarded
+ * by `title_source <> 'user'` in SQL, so it can never overwrite a typed title. When the card's text changed, the root
+ * message is rewritten through chat's `editMessage` (append-only history, `message.updated`, `message.edited`) with
+ * `cardMessageBody`, so search and the Messages view follow the board. Then `version + 1`, one `board.card_upserted`,
+ * and the `board.card.moved` and/or `board.card.updated` audits (ids, categories, versions and booleans; never text).
  */
 export async function updateBoardCard(tx: Tx, deps: ChatDeps, args: UpdateBoardCardArgs): Promise<BoardCard> {
   const { conv, messageId, actor, input } = args;
-  if (input.title !== undefined || input.description !== undefined || input.fields !== undefined) {
-    throw badRequest("Card text cannot be edited here yet", "board_card_text_not_editable");
-  }
+  const textEdit = input.title !== undefined || input.description !== undefined || input.fields !== undefined;
   await lockNextSeq(tx, convTopic(conv.id));
   const current = await loadCard(tx, conv.id, messageId, true);
   if (!current) throw notFound(CARD_NOT_FOUND, "card_not_found");
+  if (textEdit && (actor.kind !== "user" || current.authorKind !== "user" || current.authorId !== actor.id)) {
+    throw forbidden("Only the author can edit this message", "not_author");
+  }
   if (current.card.version !== input.expectedVersion) {
     throw new HttpError(
       409,
@@ -545,6 +573,47 @@ export async function updateBoardCard(tx: Tx, deps: ChatDeps, args: UpdateBoardC
   }
   if (input.waitingOn !== undefined) waitingOn = input.waitingOn;
 
+  // Card text: the board's field definitions validate the merged values (a key set to null clears it).
+  let board: BoardRow | null = null;
+  const beforeFields = before.fields as Record<string, FieldValue>;
+  let fields = beforeFields;
+  const description = input.description ?? before.description;
+  let titleSet: { title: string | SQL; titleSource?: "user" } | null = null;
+  if (textEdit) {
+    const [found] = await tx.select().from(boards).where(eq(boards.conversationId, conv.id)).limit(1);
+    board = found ?? null;
+    if (!board) throw badRequest("This channel is not a board", "not_a_board");
+    if (input.fields !== undefined) {
+      const parsed = fieldValuesSchema(board.fields as BoardFieldDef[]).safeParse({
+        ...beforeFields,
+        ...input.fields,
+      });
+      if (!parsed.success) {
+        throw new HttpError(
+          400,
+          "invalid_field_values",
+          "Some field values are not valid",
+          parsed.error.issues,
+        );
+      }
+      fields = parsed.data;
+    }
+    if (input.title !== undefined) {
+      titleSet = { title: input.title, titleSource: "user" };
+    } else {
+      const recomputed = renderCardTitle(board.namingRule, {
+        prefix: board.prefix,
+        number: before.number,
+        description,
+        fields,
+      });
+      // Never replaces a typed title, even one written after this request read the card (Pitfall 9).
+      titleSet = {
+        title: sql`case when ${boardCards.titleSource} <> 'user' then ${recomputed} else ${boardCards.title} end`,
+      };
+    }
+  }
+
   const [row] = await tx
     .update(boardCards)
     .set({
@@ -554,28 +623,75 @@ export async function updateBoardCard(tx: Tx, deps: ChatDeps, args: UpdateBoardC
       version: sql`${boardCards.version} + 1`,
       updatedAt: sql`now()`,
       ...(input.move ? { movedAt: sql`now()` } : {}),
+      ...(textEdit ? { description, fields, ...titleSet } : {}),
     })
     .where(and(eq(boardCards.messageId, before.messageId), eq(boardCards.version, before.version)))
     .returning();
   if (!row) throw new Error("locked card changed under the stream lock");
+
+  if (textEdit && board && actor.kind === "user") {
+    const dir = await loadDirectory(tx);
+    const [message] = await tx
+      .select()
+      .from(messages)
+      .where(eq(messages.id, before.messageId))
+      .limit(1)
+      .for("update");
+    if (!message) throw new Error("a card's root message is missing");
+    const body = cardMessageBody({
+      title: row.title,
+      description: row.description,
+      fields: row.fields as BoardFieldValues,
+      defs: board.fields as BoardFieldDef[],
+    });
+    if (body !== message.body) {
+      const edit = await editMessage(tx, deps, dir, {
+        message,
+        body,
+        editor: { kind: "user", id: actor.id },
+      });
+      await args.onTextEdited?.(tx, { row: edit.row, previousMentions: edit.previousMentions, dir });
+    }
+  }
+
   const card = toCard({ ...current, card: row });
   await deps.realtime.appendEvent(tx, convTopic(conv.id), EventTypes.boardCardUpserted, { card });
-  await deps.audit.record(tx, {
-    action: input.move ? "board.card.moved" : "board.card.updated",
+  const audit = {
     resourceType: "message",
     resourceId: card.messageId,
     ...actorAudit(actor),
     ...(actor.kind === "user" && args.sessionId !== undefined ? { sessionId: args.sessionId } : {}),
-    metadata: {
-      conversationId: conv.id,
-      messageId: card.messageId,
-      fromColumnId: before.columnId,
-      toColumnId: card.columnId,
-      fromCategory: fromColumn?.category ?? null,
-      toCategory: toColumn?.category ?? null,
-      waitingOnChanged: before.waitingOn !== card.waitingOn,
-      version: card.version,
-    },
-  });
+  };
+  const ids = { conversationId: conv.id, messageId: card.messageId };
+  if (input.move || !textEdit) {
+    await deps.audit.record(tx, {
+      ...audit,
+      action: input.move ? "board.card.moved" : "board.card.updated",
+      metadata: {
+        ...ids,
+        fromColumnId: before.columnId,
+        toColumnId: card.columnId,
+        fromCategory: fromColumn?.category ?? null,
+        toCategory: toColumn?.category ?? null,
+        waitingOnChanged: before.waitingOn !== card.waitingOn,
+        version: card.version,
+      },
+    });
+  }
+  if (textEdit) {
+    await deps.audit.record(tx, {
+      ...audit,
+      action: "board.card.updated",
+      metadata: {
+        ...ids,
+        titleChanged: before.title !== card.title,
+        titleSource: card.titleSource,
+        descriptionChanged: before.description !== card.description,
+        fieldsChanged: !sameValues(beforeFields, card.fields),
+        waitingOnChanged: before.waitingOn !== card.waitingOn,
+        version: card.version,
+      },
+    });
+  }
   return card;
 }

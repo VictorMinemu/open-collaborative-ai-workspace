@@ -13,6 +13,7 @@ import { z } from "zod";
 import { type App, authOf, tenant } from "../../../core";
 import { type Directory, loadDirectory } from "../directory";
 import type { ChatRouteCtx } from "../index";
+import { dtoOf } from "../message-actions";
 import type { ConversationRow, PostResult } from "../service";
 import { readableBoard, writableBoard } from "./access";
 import { createBoardCard, readBoardSnapshot, readColumnPage, updateBoardCard } from "./service";
@@ -47,8 +48,8 @@ const broadcastText = (r: { title?: string; description?: string; fields?: Recor
     .join("\n");
 
 /**
- * Board routes under `/api/v1` (BOARD-01 … BOARD-04): the snapshot, a column page, card creation and card updates
- * (move, waiting state). Every route resolves its board through `access.ts` (reads `readableBoard`, writes
+ * Board routes under `/api/v1` (BOARD-01 … BOARD-06): the snapshot, a column page, card creation and card updates
+ * (move, waiting state; text by the card's author). Every route resolves its board through `access.ts` (reads `readableBoard`, writes
  * `writableBoard`), so hidden and missing boards are the same 404 and another organization's ids do not exist (RLS).
  */
 export function registerBoardRoutes(app: App, ctx: BoardRouteCtx): void {
@@ -128,6 +129,14 @@ export function registerBoardRoutes(app: App, ctx: BoardRouteCtx): void {
           actor: { kind: "user", id: auth.userId },
           input: req.body,
           sessionId: auth.sessionId,
+          // Text edits notify like the generic message edit: only people newly mentioned, never a bot (Pitfall 8).
+          onTextEdited: async (etx, edit) =>
+            core.chatEvents.messageEdited(etx, {
+              conv: { id: conv.id, kind: "channel", organizationId: conv.organizationId },
+              message: await dtoOf(etx, edit.row, edit.dir),
+              editorId: auth.userId,
+              previousMentions: edit.previousMentions,
+            }),
         });
       }),
   );

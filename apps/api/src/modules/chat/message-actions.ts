@@ -62,7 +62,7 @@ async function nextVersion(tx: Tx, messageId: string): Promise<number> {
  * The DTO of a message as the API returns it: thread roots carry their reply participants, and every message its
  * attachments (an edit keeps the files, CHAT-12).
  */
-async function dtoOf(tx: Tx, row: MessageRow, dir: Directory): Promise<Message> {
+export async function dtoOf(tx: Tx, row: MessageRow, dir: Directory): Promise<Message> {
   const participants =
     row.threadId || row.replyCount === 0
       ? row.threadId
