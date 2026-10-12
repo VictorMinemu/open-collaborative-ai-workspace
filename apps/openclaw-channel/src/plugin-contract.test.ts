@@ -17,7 +17,7 @@ import { AUTH_FAILURE_REPLY, createBridge, FAILURE_REPLY, type OpenClawPort } fr
 import { createMemoryCursorStore } from "./cursor-store.js";
 import { CommitTracker, runEventStream } from "./event-stream.js";
 import { UNKNOWN_SERVER_ERROR } from "./mcp-probe.js";
-import { type MappedMention, mapMention } from "./mention-mapper.js";
+import { type MappedMention, mapMention, openClawAgentIdFor } from "./mention-mapper.js";
 import { createOpenClawPort, type PluginRuntimeLike } from "./openclaw-port.js";
 import {
   BOOT_CACHE_FILE,
@@ -857,14 +857,14 @@ describe("tool gate against the fake Agent Channel API (HTTP)", () => {
 describe("memory tool (D-10): manifest, registration and the fake API", () => {
   const MEMORY = { untrustedOutput: false, sideEffecting: true };
 
-  it("the manifest declares ocw_memory_save and ocw_agent_card in contracts.tools (OpenClaw discovers tool ownership there)", () => {
+  it("the manifest declares ocw_memory_save, ocw_agent_card and ocw_board_card in contracts.tools (OpenClaw discovers tool ownership there)", () => {
     const manifest = JSON.parse(
       readFileSync(path.join(import.meta.dirname, "..", "openclaw.plugin.json"), "utf8"),
     ) as { contracts?: { tools?: string[] } };
-    expect(manifest.contracts?.tools).toEqual(["ocw_memory_save", "ocw_agent_card"]);
+    expect(manifest.contracts?.tools).toEqual(["ocw_memory_save", "ocw_agent_card", "ocw_board_card"]);
   });
 
-  it("registerFull registers ocw_memory_save and ocw_agent_card (+ the breaker guard on gateway_start); the gate hooks come from registerCapabilities", () => {
+  it("registerFull registers ocw_memory_save, ocw_agent_card and ocw_board_card (+ the breaker guard on gateway_start); the gate hooks come from registerCapabilities", () => {
     const hooks: string[] = [];
     const tools: Array<{ opts: { name: string } }> = [];
     const pluginApi = {
@@ -874,10 +874,10 @@ describe("memory tool (D-10): manifest, registration and the fake API", () => {
     const guard = createToolGuard({ client: () => null });
     registerFull(pluginApi as never, guard);
     expect(hooks).toEqual(["gateway_start"]);
-    expect(tools.map((t) => t.opts.name)).toEqual(["ocw_memory_save", "ocw_agent_card"]);
+    expect(tools.map((t) => t.opts.name)).toEqual(["ocw_memory_save", "ocw_agent_card", "ocw_board_card"]);
     registerCapabilities(pluginApi as never, guard);
     expect(hooks).toEqual(["gateway_start", "before_tool_call", "after_tool_call"]);
-    expect(tools).toHaveLength(2);
+    expect(tools).toHaveLength(3);
   });
 
   it("a save in an active DM turn reaches POST /memories with the event, the bot and the text only", async () => {
@@ -920,6 +920,99 @@ describe("memory tool (D-10): manifest, registration and the fake API", () => {
       { eventId: "evt-m1", agentId: ARCHIE.id, text: "lives in Madrid" },
       { eventId: "evt-m1", agentId: ARCHIE.id, text: "something else" },
     ]);
+  });
+});
+
+describe("board tool (07.1-13, BOARD-02): a board turn → ocw_board_card → POST /board/cards → the card id", () => {
+  const BOARD = { untrustedOutput: false, sideEffecting: true };
+  const CARD = { untrustedOutput: false, sideEffecting: false };
+
+  it("the bot's entry configures ocw_board_card and a board turn's run may use it; a text channel's run may not", () => {
+    const bot: CellAgent = {
+      ...structuredClone(ARCHIE),
+      capabilities: { tools: ["web_search", "ocw_agent_card"] },
+    };
+    const entry = planReconcile({}, { agents: [bot], providers: [FAKE] }).upsertAgents[
+      openClawAgentIdFor(ARCHIE.id)
+    ];
+    expect(entry?.tools).toMatchObject({ alsoAllow: ["web_search", "ocw_agent_card", "ocw_board_card"] });
+    const boardTurn = {
+      tools: ["web_search", "ocw_agent_card", "ocw_board_card"],
+      toolFlags: { ocw_agent_card: CARD, ocw_board_card: BOARD },
+      memory: [],
+      now: null,
+      maxToolCalls: 8,
+      maxWebCalls: 5,
+    };
+    const onBoard = mapMention(
+      { ...mention(1), seq: 1, type: "agent.mention.v1", organizationId: "o", cellId: "c", turn: boardTurn },
+      bot,
+    );
+    expect(onBoard.allowedTools).toEqual(["web_search", "ocw_agent_card", "ocw_board_card"]);
+    const textTurn = { ...boardTurn, tools: ["web_search", "ocw_agent_card"] };
+    const onText = mapMention(
+      { ...mention(2), seq: 2, type: "agent.mention.v1", organizationId: "o", cellId: "c", turn: textTurn },
+      bot,
+    );
+    expect(onText.allowedTools).toEqual(["web_search", "ocw_agent_card"]);
+  });
+
+  it("create sends the turn's event and agent only, keyed <eventId>:board:1, and answers the API's card id", async () => {
+    api.agents = [structuredClone(ARCHIE)];
+    const client = createAgentChannelClient({ apiUrl: api.url, token: () => api.token });
+    const guard = createToolGuard({ client: () => client });
+    type Factory = (ctx: Record<string, unknown>) => {
+      name: string;
+      execute: (id: string, p: unknown) => Promise<{ content: Array<{ text: string }> }>;
+    };
+    const registered: Factory[] = [];
+    registerFull(
+      { on: () => undefined, registerTool: (f: Factory) => registered.push(f) } as never,
+      guard,
+      () => client,
+    );
+    const turn = {
+      tools: ["ocw_agent_card", "ocw_board_card"],
+      toolFlags: { ocw_agent_card: CARD, ocw_board_card: BOARD },
+      memory: [],
+      now: null,
+      maxToolCalls: 8,
+      maxWebCalls: 5,
+    };
+    guard.beginTurn("s-board", {
+      eventId: "evt-b1",
+      agentId: ARCHIE.id,
+      turn,
+      conversationId: "conv-board",
+      threadRootId: "card-1",
+      messageId: "msg-b1",
+    });
+    // The gate lets it through without asking /tool-calls (the board routes decide and count it).
+    expect(
+      await guard.beforeToolCall(
+        { toolName: "ocw_board_card", toolCallId: "tc-1" },
+        { sessionKey: "s-board" },
+      ),
+    ).toBeUndefined();
+    expect(api.toolCalls).toEqual([]);
+    const factory = registered
+      .map((f) => f({ sessionKey: "s-board" }))
+      .find((t) => t.name === "ocw_board_card");
+    if (!factory) throw new Error("ocw_board_card was not registered");
+    const r = await factory.execute("tc-1", { action: "create", description: "Order spare valve" });
+    expect(api.boardCards).toHaveLength(1);
+    const stored = api.boardCards[0];
+    expect(r.content[0]?.text).toBe(`Card created. Card id: ${stored?.messageId}.`);
+    expect(stored).toMatchObject({
+      eventId: "evt-b1",
+      agentId: ARCHIE.id,
+      idempotencyKey: "evt-b1:board:1",
+      description: "Order spare valve",
+    });
+    expect(Object.keys(stored ?? {})).not.toContain("conversationId");
+    // A retry of the same call stores no second card.
+    await factory.execute("tc-1", { action: "create", description: "Order spare valve" });
+    expect(api.boardCards).toHaveLength(1);
   });
 });
 

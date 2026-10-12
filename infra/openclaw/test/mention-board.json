@@ -1,0 +1,81 @@
+{
+  "eventId": "0199a6f0-0000-7000-8000-00000000e008",
+  "agent": {
+    "id": "0199a6f0-0000-7000-8000-00000000a001",
+    "handle": "archie",
+    "displayName": "Archie"
+  },
+  "conversation": {
+    "id": "0199a6f0-0000-7000-8000-00000000c00b",
+    "kind": "channel",
+    "name": "repairs"
+  },
+  "thread": {
+    "rootMessageId": "0199a6f0-0000-7000-8000-00000000d0a0"
+  },
+  "message": {
+    "id": "0199a6f0-0000-7000-8000-00000000d0a1",
+    "text": "@archie log the part [[call ocw_board_card {\"action\":\"create\",\"description\":\"Order spare valve\"}]]",
+    "createdAt": "2026-10-12T10:00:01.000Z",
+    "author": {
+      "kind": "user",
+      "id": "0199a6f0-0000-7000-8000-0000000000f1",
+      "displayName": "Víctor Ruiz"
+    },
+    "mentions": [
+      {
+        "kind": "agent",
+        "id": "0199a6f0-0000-7000-8000-00000000a001"
+      }
+    ]
+  },
+  "threadHistory": [
+    {
+      "id": "0199a6f0-0000-7000-8000-00000000d0a0",
+      "author": {
+        "kind": "user",
+        "id": "0199a6f0-0000-7000-8000-0000000000f1",
+        "displayName": "Víctor Ruiz"
+      },
+      "text": "Broken pump on line 3",
+      "createdAt": "2026-10-12T10:00:00.000Z"
+    }
+  ],
+  "roster": [
+    {
+      "kind": "user",
+      "id": "0199a6f0-0000-7000-8000-0000000000f1",
+      "displayName": "Víctor Ruiz",
+      "role": "owner"
+    },
+    {
+      "kind": "user",
+      "id": "0199a6f0-0000-7000-8000-0000000000f3",
+      "displayName": "Sam Lee",
+      "role": "standard"
+    },
+    {
+      "kind": "agent",
+      "id": "0199a6f0-0000-7000-8000-00000000a001",
+      "displayName": "Archie",
+      "handle": "archie"
+    }
+  ],
+  "turn": {
+    "tools": ["ocw_agent_card", "ocw_board_card"],
+    "toolFlags": {
+      "ocw_agent_card": {
+        "untrustedOutput": false,
+        "sideEffecting": false
+      },
+      "ocw_board_card": {
+        "untrustedOutput": false,
+        "sideEffecting": true
+      }
+    },
+    "memory": [],
+    "now": null,
+    "maxToolCalls": 8,
+    "maxWebCalls": 5
+  }
+}

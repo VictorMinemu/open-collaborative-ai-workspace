@@ -1,5 +1,10 @@
 import {
   AGENT_CHANNEL_BASE_PATH,
+  AgentChannelBoardCardResponse,
+  type AgentChannelBoardCreateCard,
+  type AgentChannelBoardPatchCard,
+  type AgentChannelBoardRead,
+  AgentChannelBoardReadResponse,
   type AgentChannelMcpProbeResult,
   type AgentChannelMemorySave,
   AgentChannelMemorySaveResponse,
@@ -216,6 +221,39 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
     ): Promise<AgentChannelPatchCardResponse> {
       return AgentChannelPatchCardResponse.parse(
         await request("PATCH", `/cards/${encodeURIComponent(messageId)}`, req, signal, 2),
+      );
+    },
+    /**
+     * `ocw_board_card` read (07.1-13): the turn's board, its columns and the turn thread's card. Counted against the
+     * turn's tool budget by the API, so one attempt only.
+     */
+    async boardRead(
+      req: AgentChannelBoardRead,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelBoardReadResponse> {
+      return AgentChannelBoardReadResponse.parse(await request("POST", "/board/read", req, signal, 1));
+    },
+    /**
+     * `ocw_board_card` create: a card in the turn's board. Idempotent on (agentId, idempotencyKey): two attempts at
+     * most. A refusal throws AgentChannelHttpError with the API's code. Never logs the card.
+     */
+    async boardCreateCard(
+      req: AgentChannelBoardCreateCard,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelBoardCardResponse> {
+      return AgentChannelBoardCardResponse.parse(await request("POST", "/board/cards", req, signal, 2));
+    },
+    /**
+     * `ocw_board_card` move / waiting state, naming the version seen. One attempt: a retried change would spend the
+     * turn's budget twice and answer 409 `board_card_version_conflict` after a lost success.
+     */
+    async boardPatchCard(
+      messageId: string,
+      req: AgentChannelBoardPatchCard,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelBoardCardResponse> {
+      return AgentChannelBoardCardResponse.parse(
+        await request("PATCH", `/board/cards/${encodeURIComponent(messageId)}`, req, signal, 1),
       );
     },
     /**

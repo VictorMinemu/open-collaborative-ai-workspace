@@ -141,6 +141,93 @@ describe("tool gate calls", () => {
   });
 });
 
+describe("board calls (07.1-13, ocw_board_card)", () => {
+  const COLUMN = {
+    id: "col-1",
+    conversationId: "conv-1",
+    name: "Backlog",
+    rank: "a0",
+    category: "backlog",
+    defaultWaitingOn: null,
+  };
+  const CARD = {
+    messageId: "m 1",
+    conversationId: "conv-1",
+    columnId: "col-1",
+    rank: "a0",
+    waitingOn: "none",
+    title: "Order spare valve",
+    titleSource: "heuristic",
+    description: "Order spare valve",
+    number: null,
+    fields: {},
+    authorKind: "agent",
+    authorId: "a1",
+    replyCount: 0,
+    lastReplyAt: null,
+    createdAt: "2026-10-12T10:00:00.000Z",
+    movedAt: "2026-10-12T10:00:00.000Z",
+    version: 1,
+  };
+  const client = (responses: Array<{ status: number; body?: unknown }>) => {
+    const scripted = scriptedFetch(responses);
+    return {
+      calls: scripted.calls,
+      c: createAgentChannelClient({
+        apiUrl: "http://api",
+        token: () => "t",
+        fetch: scripted.fetchImpl,
+        backoff: { baseMs: 1, maxMs: 2 },
+      }),
+    };
+  };
+
+  it("boardRead posts {eventId, agentId} once to /board/read and parses the board", async () => {
+    const { c, calls } = client([
+      {
+        status: 200,
+        body: { board: { conversationId: "conv-1", version: 1 }, columns: [COLUMN], card: null },
+      },
+    ]);
+    const res = await c.boardRead({ eventId: "e1", agentId: "a1" });
+    expect(res.columns[0]?.name).toBe("Backlog");
+    expect(res.card).toBeNull();
+    expect(calls[0]?.url).toBe("http://api/agent-channel/v1/board/read");
+    expect(calls[0]?.init.method).toBe("POST");
+    expect(JSON.parse(String(calls[0]?.init.body))).toEqual({ eventId: "e1", agentId: "a1" });
+  });
+
+  it("boardCreateCard posts to /board/cards (201 or 200 on a retry) and retries a 5xx once (idempotent key)", async () => {
+    const { c, calls } = client([{ status: 503 }, { status: 201, body: { card: CARD } }]);
+    const req = {
+      eventId: "e1",
+      agentId: "a1",
+      idempotencyKey: "e1:board:1",
+      description: "Order spare valve",
+    };
+    await expect(c.boardCreateCard(req)).resolves.toMatchObject({ card: { messageId: "m 1", version: 1 } });
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.url).toBe("http://api/agent-channel/v1/board/cards");
+    expect(JSON.parse(String(calls[1]?.init.body))).toEqual(req);
+  });
+
+  it("boardPatchCard PATCHes /board/cards/:id once (a retried move would count twice and conflict); a 4xx keeps its code", async () => {
+    const { c, calls } = client([
+      { status: 409, body: { error: { code: "board_card_version_conflict", message: "x" } } },
+    ]);
+    const req = { eventId: "e1", agentId: "a1", expectedVersion: 1, waitingOn: "us" as const };
+    const err = await c.boardPatchCard("m 1", req).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AgentChannelHttpError);
+    expect((err as AgentChannelHttpError).code).toBe("board_card_version_conflict");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe("http://api/agent-channel/v1/board/cards/m%201");
+    expect(calls[0]?.init.method).toBe("PATCH");
+    const failing = client([{ status: 502 }, { status: 200, body: { card: CARD } }]);
+    await expect(failing.c.boardPatchCard("m 1", req)).rejects.toBeDefined();
+    expect(failing.calls).toHaveLength(1);
+  });
+});
+
 describe("account resolution", () => {
   it("reads api url and token file from env; never needs secrets in config", () => {
     const acc = resolveOcwAccount(

@@ -7,6 +7,7 @@ import type {
   CellSubscription,
 } from "./agent-channel-protocol.js";
 import { openClawAgentIdFor, sanitizeName } from "./mention-mapper.js";
+import { withTurnScopedTools } from "./turn-scoped-tools.js";
 
 /** Prefix that marks agent entries owned by this plugin. Entries without it are never touched. */
 export const OWNED_AGENT_PREFIX = "ocw-";
@@ -201,7 +202,8 @@ export function desiredAgentEntry(
     identity: { name },
     // Allowlist: only this bot's effective tools on top of `minimal`; dangerous names stay denied regardless.
     tools: (() => {
-      const alsoAllow = allowedAgentTools(agent.capabilities?.tools);
+      // Plus the turn-scoped tools (`ocw_board_card`): each turn's `toolsAllow` still decides (turn-scoped-tools.ts).
+      const alsoAllow = allowedAgentTools(withTurnScopedTools(agent.capabilities?.tools));
       return {
         profile: "minimal",
         ...(alsoAllow.length > 0 ? { alsoAllow } : {}),
