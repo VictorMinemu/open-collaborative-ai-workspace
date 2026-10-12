@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { WS_AUTH_PROTOCOL_PREFIX, WS_PROTOCOL } from "@ocw/contracts";
+import { MODULE_CATALOG, WS_AUTH_PROTOCOL_PREFIX, WS_PROTOCOL } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
+import { FakeCellPlugin, type MentionPayload } from "../../../../../../e2e/support/fake-cell-plugin";
+import type { AgentMention } from "../../../lib/chat-agent-bridge";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack, WEB_ORIGIN } from "../../../testing";
 
 /**
@@ -505,5 +507,274 @@ describe("archived boards and text channels (BOARD-01, T-07.1-05-02)", () => {
       expect(r.status).toBe(404);
       expect(JSON.stringify(r.body)).not.toContain("not_a_board");
     }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------- Task 2
+
+describe("replay after a gap (BOARD-04, D-03, T-07.1-05-04)", () => {
+  it("a client that reconnects with its last seq receives exactly the missed frames, in order, and nothing older", async () => {
+    const board = await createBoard(admin, "replay-cases");
+    const snap = await snapshot(admin, board.id);
+    const inProgress = columnByName(snap, "In progress").id;
+    const topic = `conv:${board.id}`;
+
+    // The first session reads up to seq N, then drops.
+    const first = await socketFor(admin);
+    let a: Json;
+    let b: Json;
+    let lastSeen: number;
+    try {
+      first.ws.send(JSON.stringify({ op: "sub", topic, afterSeq: snap.lastSeq }));
+      await first.waitFor((f) => f.op === "subscribed" && f.topic === topic);
+      a = await ok(newCard(admin, board.id, "Card A"));
+      b = await ok(newCard(admin, board.id, "Card B"));
+      await first.waitFor(
+        (f) => f.op === "ev" && f.type === "board.card_upserted" && f.data.card.messageId === b.messageId,
+      );
+      const seen = first.frames.filter((f) => f.op === "ev" && f.topic === topic);
+      expect(seen.map((f) => f.type)).toEqual([
+        "message.created",
+        "board.card_upserted",
+        "message.created",
+        "board.card_upserted",
+      ]);
+      lastSeen = Math.max(...seen.map((f) => f.seq as number));
+    } finally {
+      await first.close();
+    }
+
+    // While offline: one new card and two moves.
+    const c = await ok(newCard(admin, board.id, "Card C"));
+    const movedA = await ok(moveCard(admin, board.id, a, inProgress));
+    const movedB = await ok(moveCard(admin, board.id, b, inProgress, a.messageId));
+
+    const second = await socketFor(admin);
+    try {
+      second.ws.send(JSON.stringify({ op: "sub", topic, afterSeq: lastSeen }));
+      const subscribed = await second.waitFor((f) => f.op === "subscribed" && f.topic === topic);
+      const replayed = second.frames.filter((f) => f.op === "ev" && f.topic === topic);
+      expect(
+        replayed.map((f) => [
+          f.type,
+          f.type === "message.created" ? f.data.message.id : f.data.card.messageId,
+        ]),
+      ).toEqual([
+        ["message.created", c.messageId],
+        ["board.card_upserted", c.messageId],
+        ["board.card_upserted", a.messageId],
+        ["board.card_upserted", b.messageId],
+      ]);
+      expect(replayed.map((f) => f.data.card?.version ?? null)).toEqual([null, 1, 2, 2]);
+      expect(replayed[2]?.data.card).toEqual(movedA);
+      expect(replayed[3]?.data.card).toEqual(movedB);
+      const seqs = replayed.map((f) => f.seq as number);
+      expect(seqs.every((s) => s > lastSeen)).toBe(true);
+      expect([...seqs].sort((x, y) => x - y)).toEqual(seqs);
+      // Replay precedes `subscribed`, and is exactly the durable stream after N: nothing missed, nothing older.
+      expect(second.frames.indexOf(subscribed)).toBeGreaterThan(
+        second.frames.indexOf(replayed.at(-1) as Json),
+      );
+      const durable = await su.query(
+        "select seq from app.stream_events where stream_id = $1 and seq > $2 order by seq",
+        [topic, lastSeen],
+      );
+      expect(durable.rows.map((r) => Number(r.seq))).toEqual(seqs);
+      expect(subscribed.lastSeq).toBe(seqs.at(-1));
+      expect((await snapshot(admin, board.id)).lastSeq).toBe(seqs.at(-1));
+    } finally {
+      await second.close();
+    }
+  });
+});
+
+describe("agents answer inside a card (BOARD-02, P-14, T-07.1-05-05)", () => {
+  let plugin: FakeCellPlugin;
+  let clerkId: string;
+  let followerId: string;
+  let tickets: string;
+  let followed: string;
+  /** Every mention chat hands to the Agent Channel (the bridge's own observer list). */
+  const mentions: AgentMention[] = [];
+
+  const cellEvents = async (agentId: string, messageId?: string) =>
+    (
+      await su.query(
+        `select payload from app.stream_events
+          where stream_id = $1 and type = 'agent.mention.v1' and payload->'agent'->>'id' = $2
+            and ($3::text is null or payload->'message'->>'id' = $3) order by seq`,
+        [`cell:${orgId}`, agentId, messageId ?? null],
+      )
+    ).rows.map((r) => r.payload as MentionPayload);
+
+  async function teamBot(name: string, username: string): Promise<string> {
+    const bot = await ok(
+      admin.request("POST", "/api/v1/agents", {
+        name,
+        username,
+        instructions: `You are ${name}.`,
+        modelProvider: "mock",
+        modelId: "mock-1",
+      }),
+    );
+    return bot.id as string;
+  }
+
+  async function boardWithBot(name: string, botId: string): Promise<string> {
+    const id = (await createBoard(admin, name)).id as string;
+    await ok(admin.request("POST", `/api/v1/channels/${id}/members`, { kind: "agent", id: botId }));
+    await ok(alex.request("POST", `/api/v1/channels/${id}/join`, {}));
+    return id;
+  }
+
+  const cardIn = async (boardId: string, messageId: string) =>
+    (await snapshot(admin, boardId)).cards
+      .flatMap((c: Json) => c.cards)
+      .find((c: Json) => c.messageId === messageId);
+
+  beforeAll(async () => {
+    stack.built.core.chatAgent.onAgentMention(async (_tx, m) => {
+      mentions.push(m);
+    });
+    clerkId = await teamBot("Clerk", "clerk");
+    followerId = await teamBot("Follower", "follower");
+    await ok(admin.request("PATCH", `/api/v1/agents/${followerId}/capabilities`, { replyMode: "all" }));
+    tickets = await boardWithBot("tickets", clerkId);
+    followed = await boardWithBot("followed", followerId);
+    plugin = new FakeCellPlugin({ apiUrl: stack.baseUrl, token: CELL_TOKEN, autoAck: true, autoReply: true });
+    await plugin.start();
+  });
+
+  afterAll(async () => {
+    await plugin?.stop();
+  });
+
+  it("a card mentioning a team bot member wakes it in the card's thread; its reply raises the card's replyCount", async () => {
+    const card = await ok(newCard(admin, tickets, "Pump 3 leaks\n@clerk can you triage this?"));
+    expect(card.replyCount).toBe(0);
+
+    const handed = mentions.filter((m) => m.messageId === card.messageId);
+    expect(handed).toHaveLength(1);
+    expect(handed[0]).toMatchObject({
+      conversationId: tickets,
+      threadRootId: card.messageId,
+      delivery: "thread",
+      agentIds: [clerkId],
+      author: { kind: "user", id: adminId },
+    });
+    expect(handed[0]?.trigger ?? "mention").toBe("mention");
+
+    const events = await cellEvents(clerkId, card.messageId);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      agent: { id: clerkId },
+      conversation: { id: tickets, kind: "channel" },
+      thread: { rootMessageId: card.messageId },
+      message: { id: card.messageId, author: { kind: "user", id: adminId } },
+    });
+    expect(events[0]?.message.text).toContain("@clerk can you triage this?");
+
+    await plugin.waitUntil(() => plugin.replies.some((r) => r.mention.message.id === card.messageId));
+    const reply = plugin.replies.find((r) => r.mention.message.id === card.messageId);
+    const row = await su.query("select author_kind, author_id, thread_id from app.messages where id = $1", [
+      reply?.messageId,
+    ]);
+    expect(row.rows[0]).toEqual({ author_kind: "agent", author_id: clerkId, thread_id: card.messageId });
+    const after = await cardIn(tickets, card.messageId);
+    expect(after).toMatchObject({ messageId: card.messageId, replyCount: 1, version: card.version });
+    expect(after.lastReplyAt).not.toBeNull();
+  });
+
+  it("a reply-mode `all` bot is woken by a new card the same way", async () => {
+    const card = await ok(newCard(alex, followed, "Customer called about invoice 42"));
+    const handed = mentions.filter((m) => m.messageId === card.messageId);
+    expect(handed).toHaveLength(1);
+    expect(handed[0]).toMatchObject({
+      conversationId: followed,
+      threadRootId: card.messageId,
+      delivery: "thread",
+      trigger: "reply_mode",
+      agentIds: [followerId],
+      author: { kind: "user", id: alexId },
+    });
+    const events = await cellEvents(followerId, card.messageId);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      thread: { rootMessageId: card.messageId },
+      message: { id: card.messageId, author: { kind: "user", id: alexId } },
+    });
+    await plugin.waitUntil(() => plugin.replies.some((r) => r.mention.message.id === card.messageId));
+    expect(await cardIn(followed, card.messageId)).toMatchObject({ replyCount: 1 });
+  });
+
+  it("with Phase 07.3's Bots module rows on Alex, his cards wake no bot; deleting the rows restores him", async () => {
+    const ruleIds: string[] = [];
+    for (const permission of MODULE_CATALOG.bots.patterns) {
+      const rule = await ok(
+        admin.request("POST", "/api/v1/permission-rules", {
+          subjectKind: "user",
+          subjectId: alexId,
+          permission,
+          effect: "deny",
+        }),
+      );
+      ruleIds.push(rule.id as string);
+    }
+    let gatedMention: Json;
+    let gatedFollow: Json;
+    try {
+      gatedMention = await ok(newCard(alex, tickets, "Valve 7 sticks\n@clerk are you there?"));
+      gatedFollow = await ok(newCard(alex, followed, "Customer called about invoice 43"));
+      // Victor's identical cards are answered: the gate is Alex's, not the board's.
+      const victors = await ok(newCard(admin, tickets, "Valve 8 sticks\n@clerk are you there?"));
+      expect(await cellEvents(clerkId, victors.messageId)).toHaveLength(1);
+    } finally {
+      for (const id of ruleIds) await ok(admin.request("DELETE", `/api/v1/permission-rules/${id}`));
+    }
+    for (const id of [gatedMention.messageId, gatedFollow.messageId]) {
+      expect(mentions.filter((m) => m.messageId === id)).toHaveLength(0);
+      expect(await cellEvents(clerkId, id)).toHaveLength(0);
+      expect(await cellEvents(followerId, id)).toHaveLength(0);
+    }
+
+    const restored = await ok(newCard(alex, tickets, "Valve 7 still sticks\n@clerk now?"));
+    expect(await cellEvents(clerkId, restored.messageId)).toHaveLength(1);
+    const restoredFollow = await ok(newCard(alex, followed, "Customer called about invoice 44"));
+    expect(await cellEvents(followerId, restoredFollow.messageId)).toHaveLength(1);
+  });
+});
+
+describe("a tombstoned card root (Pitfall 6)", () => {
+  it("disappears from the snapshot, `message.deleted` is on the stream and a later PATCH is 404", async () => {
+    const board = await createBoard(admin, "tombstones");
+    const snap = await snapshot(admin, board.id);
+    const done = columnByName(snap, "Done").id;
+    const gone = await ok(newCard(admin, board.id, "Duplicate ticket"));
+    const kept = await ok(newCard(admin, board.id, "Real ticket"));
+    const topic = `conv:${board.id}`;
+
+    const spy = await socketFor(admin);
+    try {
+      spy.ws.send(JSON.stringify({ op: "sub", topic, afterSeq: (await snapshot(admin, board.id)).lastSeq }));
+      await spy.waitFor((f) => f.op === "subscribed" && f.topic === topic);
+      await ok(admin.request("DELETE", `/api/v1/messages/${gone.messageId}`));
+      const deleted = await spy.waitFor((f) => f.op === "ev" && f.type === "message.deleted");
+      expect(deleted.data).toMatchObject({
+        messageId: gone.messageId,
+        conversationId: board.id,
+        threadId: null,
+      });
+    } finally {
+      await spy.close();
+    }
+
+    const after = await snapshot(admin, board.id);
+    const ids = after.cards.flatMap((c: Json) => c.cards).map((c: Json) => c.messageId);
+    expect(ids).toEqual([kept.messageId]);
+    const page = await ok(admin.request("GET", `/api/v1/boards/${board.id}/columns/${gone.columnId}/cards`));
+    expect(page.cards.map((c: Json) => c.messageId)).toEqual([kept.messageId]);
+    const patched = await fails(moveCard(admin, board.id, gone, done), 404);
+    expect(patched.code).toBe("card_not_found");
+    expect(JSON.stringify(after)).not.toContain("Duplicate ticket");
   });
 });
