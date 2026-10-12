@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 87
+open_count: 88
 waived_count: 0
 fixed_count: 18
-total_count: 105
-last_updated: 2026-10-12T13:53:16.261Z
+total_count: 106
+last_updated: 2026-10-12T15:31:56.286Z
 ---
 
 # Broken Windows Ledger
@@ -120,6 +120,7 @@ last_updated: 2026-10-12T13:53:16.261Z
 | 103 | 07.1 | deviation | apps/api/src/modules/chat/board |  | Possible deadlock: DELETE /messages on a card root racing a card text edit can abort one (500); delete should take the stream lock first | open |  | 2026-10-12T13:51:08.419Z |  |
 | 104 | 07.1 | deviation | apps/api/src/modules/chat/board/access.ts |  | A card create with @channel and an invalid columnId spends the channel's per-minute mention slot before the 400 (claim happens before column validation) | open |  | 2026-10-12T13:53:16.172Z |  |
 | 105 | 07.1 | unrun-verify | apps/api/src/modules/chat/board/routes.ts |  | Card PATCH does not pass the new body to writableBoard: confirm in 07.1-14 that edits never broadcast @channel (as generic message edits) or gate them with channel.mention_all | open |  | 2026-10-12T13:53:16.261Z |  |
+| 106 | 07.1 | deviation | apps/web/app/globals.css |  | Dark mode: white text on the primary colour is 3.44:1 (< 4.5:1 AA) on every enabled primary button; fix the dark primary token in 07.1-14 with before/after screenshots | open |  | 2026-10-12T15:31:56.286Z |  |
 
 ````json
 [
@@ -1381,6 +1382,18 @@ last_updated: 2026-10-12T13:53:16.261Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-12T13:53:16.261Z",
+    "resolved_at": null
+  },
+  {
+    "id": 106,
+    "kind": "deviation",
+    "phase": "07.1",
+    "file": "apps/web/app/globals.css",
+    "line": null,
+    "description": "Dark mode: white text on the primary colour is 3.44:1 (< 4.5:1 AA) on every enabled primary button; fix the dark primary token in 07.1-14 with before/after screenshots",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-12T15:31:56.286Z",
     "resolved_at": null
   }
 ]
