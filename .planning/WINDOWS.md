@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 89
+open_count: 86
 waived_count: 2
-fixed_count: 22
+fixed_count: 25
 total_count: 113
-last_updated: 2026-10-12T21:23:04.109Z
+last_updated: 2026-10-12T22:27:17.051Z
 ---
 
 # Broken Windows Ledger
@@ -124,10 +124,10 @@ last_updated: 2026-10-12T21:23:04.109Z
 | 107 | 07.1 | deviation | packages/realtime-client |  | A dead socket the browser does not report is still not detected (no pong timeout) | open |  | 2026-10-12T15:37:41.294Z |  |
 | 108 | 07.1 | deviation | apps/openclaw-channel/src/turn-scoped-tools.ts |  | ocw_board_card alsoAllow lives in the plugin reconciler (a bot's own alsoAllow overrides the global one in OpenClaw 2026.9.7) | waived | By design, recorded in ADR-0022 | 2026-10-12T17:15:54.121Z | 2026-10-12T21:23:03.760Z |
 | 109 | 07.1 | deviation | apps/openclaw-channel/src/board-tool.ts |  | Agents can move/set waiting only on the thread's card or cards they created in this conversation (board read returns only the thread card version) | waived | By design, recorded in ADR-0022 | 2026-10-12T17:15:54.192Z | 2026-10-12T21:23:03.829Z |
-| 110 | 07.1 | deviation | apps/web/app/globals.css |  | Dark destructive buttons (white on --destructive oklch(0.66 0.2 22)) measure ~3.3:1 (< 4.5:1 AA); same fill/text split as primary fixes it | open |  | 2026-10-12T21:23:03.898Z |  |
-| 111 | 07.1 | deviation | apps/web/components/chat/board/card-strip.tsx |  | A card with a typed title and empty description shows an empty root message body in its thread (author and time only) | open |  | 2026-10-12T21:23:03.967Z |  |
+| 110 | 07.1 | deviation | apps/web/app/globals.css |  | Dark destructive buttons (white on --destructive oklch(0.66 0.2 22)) measure ~3.3:1 (< 4.5:1 AA); same fill/text split as primary fixes it | fixed |  | 2026-10-12T21:23:03.898Z | 2026-10-12T22:27:16.906Z |
+| 111 | 07.1 | deviation | apps/web/components/chat/board/card-strip.tsx |  | A card with a typed title and empty description shows an empty root message body in its thread (author and time only) | fixed |  | 2026-10-12T21:23:03.967Z | 2026-10-12T22:27:16.978Z |
 | 112 | 07.1 | deviation | e2e/tests/search.spec.ts |  | Composer-focus regression e2e was not RED on the pre-fix build; fix rests on run-1 evidence, a focus probe and a unit test | open |  | 2026-10-12T21:23:04.036Z |  |
-| 113 | 07.1 | deviation | apps/web/components/chat/channel-view.tsx |  | Board Messages view: a card root beyond the first 100 cards of its column is not cached, so Edit message falls back to the inline editor (400 board_card_use_board) | open |  | 2026-10-12T21:23:04.109Z |  |
+| 113 | 07.1 | deviation | apps/web/components/chat/channel-view.tsx |  | Board Messages view: a card root beyond the first 100 cards of its column is not cached, so Edit message falls back to the inline editor (400 board_card_use_board) | fixed |  | 2026-10-12T21:23:04.109Z | 2026-10-12T22:27:17.051Z |
 
 ````json
 [
@@ -1446,10 +1446,10 @@ last_updated: 2026-10-12T21:23:04.109Z
     "file": "apps/web/app/globals.css",
     "line": null,
     "description": "Dark destructive buttons (white on --destructive oklch(0.66 0.2 22)) measure ~3.3:1 (< 4.5:1 AA); same fill/text split as primary fixes it",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-12T21:23:03.898Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-12T22:27:16.906Z"
   },
   {
     "id": 111,
@@ -1458,10 +1458,10 @@ last_updated: 2026-10-12T21:23:04.109Z
     "file": "apps/web/components/chat/board/card-strip.tsx",
     "line": null,
     "description": "A card with a typed title and empty description shows an empty root message body in its thread (author and time only)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-12T21:23:03.967Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-12T22:27:16.978Z"
   },
   {
     "id": 112,
@@ -1482,10 +1482,10 @@ last_updated: 2026-10-12T21:23:04.109Z
     "file": "apps/web/components/chat/channel-view.tsx",
     "line": null,
     "description": "Board Messages view: a card root beyond the first 100 cards of its column is not cached, so Edit message falls back to the inline editor (400 board_card_use_board)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-12T21:23:04.109Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-12T22:27:17.051Z"
   }
 ]
 ````
