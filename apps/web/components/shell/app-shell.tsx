@@ -41,7 +41,9 @@ export function AppShell({ me, children }: { me: MeResponse; children: ReactNode
       <SearchPaletteProvider>
         <SearchHotkey />
         <OsNotifier />
-        <div data-testid="app-shell" className="flex h-dvh w-full overflow-hidden bg-background">
+        {/* `relative`: absolutely positioned descendants (every `sr-only` text) resolve against the shell, which clips
+            them, instead of the page, which they would make scrollable (07.1 gate). */}
+        <div data-testid="app-shell" className="relative flex h-dvh w-full overflow-hidden bg-background">
           {isDesktop ? <AppRail me={me} /> : null}
           <div className="flex min-w-0 flex-1 flex-col">
             {isDesktop ? null : (
