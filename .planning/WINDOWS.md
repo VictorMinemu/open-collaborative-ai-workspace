@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 85
+open_count: 87
 waived_count: 0
 fixed_count: 18
-total_count: 103
-last_updated: 2026-10-12T13:51:08.419Z
+total_count: 105
+last_updated: 2026-10-12T13:53:16.261Z
 ---
 
 # Broken Windows Ledger
@@ -118,6 +118,8 @@ last_updated: 2026-10-12T13:51:08.419Z
 | 101 | 07.3 | deviation | apps/web/components/organization/unit-modules-card.tsx |  | Read-only reason reads the member's role for copy only; edit rights still come from canEdit | open |  | 2026-10-10T01:03:30.449Z |  |
 | 102 | 07.3 | unmet-truth | apps/api/src/modules/agent-channel |  | Proactive agent messages and queued AI chat prompts are not re-decided against module rules (07.6/07.7 scope) | open |  | 2026-10-10T01:03:30.526Z |  |
 | 103 | 07.1 | deviation | apps/api/src/modules/chat/board |  | Possible deadlock: DELETE /messages on a card root racing a card text edit can abort one (500); delete should take the stream lock first | open |  | 2026-10-12T13:51:08.419Z |  |
+| 104 | 07.1 | deviation | apps/api/src/modules/chat/board/access.ts |  | A card create with @channel and an invalid columnId spends the channel's per-minute mention slot before the 400 (claim happens before column validation) | open |  | 2026-10-12T13:53:16.172Z |  |
+| 105 | 07.1 | unrun-verify | apps/api/src/modules/chat/board/routes.ts |  | Card PATCH does not pass the new body to writableBoard: confirm in 07.1-14 that edits never broadcast @channel (as generic message edits) or gate them with channel.mention_all | open |  | 2026-10-12T13:53:16.261Z |  |
 
 ````json
 [
@@ -1355,6 +1357,30 @@ last_updated: 2026-10-12T13:51:08.419Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-12T13:51:08.419Z",
+    "resolved_at": null
+  },
+  {
+    "id": 104,
+    "kind": "deviation",
+    "phase": "07.1",
+    "file": "apps/api/src/modules/chat/board/access.ts",
+    "line": null,
+    "description": "A card create with @channel and an invalid columnId spends the channel's per-minute mention slot before the 400 (claim happens before column validation)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-12T13:53:16.172Z",
+    "resolved_at": null
+  },
+  {
+    "id": 105,
+    "kind": "unrun-verify",
+    "phase": "07.1",
+    "file": "apps/api/src/modules/chat/board/routes.ts",
+    "line": null,
+    "description": "Card PATCH does not pass the new body to writableBoard: confirm in 07.1-14 that edits never broadcast @channel (as generic message edits) or gate them with channel.mention_all",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-12T13:53:16.261Z",
     "resolved_at": null
   }
 ]
