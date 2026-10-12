@@ -255,6 +255,9 @@ export function ColumnSettingsDialog({
 
 // ---------------------------------------------------------------- the column ⋯ menu
 
+/** Why the last column's Delete column… is disabled (shown as the item's description line). */
+export const LAST_COLUMN_REASON = "A board needs at least one column";
+
 export interface ColumnMenuModel {
   moveLeft: { disabled: boolean };
   moveRight: { disabled: boolean };
@@ -268,7 +271,7 @@ export function columnMenuModel(columns: ReadonlyArray<{ id: string }>, columnId
   return {
     moveLeft: { disabled: at <= 0 },
     moveRight: { disabled: at === -1 || at === columns.length - 1 },
-    deleteColumn: { disabled: last, reason: last ? COLUMN_COPY.lastColumn : null },
+    deleteColumn: { disabled: last, reason: last ? LAST_COLUMN_REASON : null },
   };
 }
 
