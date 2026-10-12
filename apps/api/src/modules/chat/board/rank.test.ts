@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { freshKeys, keyBetween, RANK_KEY_MAX } from "./rank";
+import { freshKeys, keyBetween, keysAfter, RANK_KEY_MAX } from "./rank";
 
 /** Phase 07.1-03 (D-05): server-minted fractional ranks, ordered by plain JavaScript comparison (= `COLLATE "C"`). */
 
@@ -78,5 +78,17 @@ describe("board ranks", () => {
     expect(sorted(keys)).toEqual(keys);
     expect(new Set(keys).size).toBe(200);
     expect(Math.max(...keys.map((k) => k.length))).toBeLessThanOrEqual(RANK_KEY_MAX);
+  });
+
+  it("keysAfter mints n increasing keys after a rank, or asks for a re-rank on an invalid key", () => {
+    expect(keysAfter("a5", 0)).toEqual([]);
+    const keys = keysAfter("a5", 3);
+    expect(Array.isArray(keys)).toBe(true);
+    const list = keys as string[];
+    expect(list).toHaveLength(3);
+    expect(["a5", ...list]).toEqual([...["a5", ...list]].sort());
+    expect(new Set(list).size).toBe(3);
+    expect(keysAfter(null, 2)).toHaveLength(2);
+    expect(keysAfter("not a key", 2)).toBe("rerank");
   });
 });

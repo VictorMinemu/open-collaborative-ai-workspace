@@ -49,7 +49,7 @@ import { freshKeys, keyBetween } from "./rank";
  */
 
 export type BoardRow = typeof boards.$inferSelect;
-type ColumnRow = typeof boardColumns.$inferSelect;
+export type ColumnRow = typeof boardColumns.$inferSelect;
 type CardRow = typeof boardCards.$inferSelect;
 
 /** Who creates or moves a card. Agents (07.1-10) act on behalf of the human whose turn they answer. */
@@ -72,7 +72,7 @@ export function toBoard(row: BoardRow): Board {
   };
 }
 
-function toColumn(row: ColumnRow): BoardColumn {
+export function toColumn(row: ColumnRow): BoardColumn {
   return {
     id: row.id,
     conversationId: row.conversationId,
@@ -203,7 +203,8 @@ export async function createBoard(
   };
 }
 
-async function columnsOf(tx: Tx, conversationId: string): Promise<ColumnRow[]> {
+/** A board's columns in rank order (`COLLATE "C"`, ties by id). */
+export async function columnsOf(tx: Tx, conversationId: string): Promise<ColumnRow[]> {
   return tx
     .select()
     .from(boardColumns)

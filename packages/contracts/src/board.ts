@@ -465,6 +465,41 @@ export const UpdateBoardCardRequest = z
   );
 export type UpdateBoardCardRequest = z.infer<typeof UpdateBoardCardRequest>;
 
+// ---------------------------------------------------------------- columns (P-09, `channel.update`)
+
+/** `POST /boards/:conversationId/columns`. `afterColumnId`: absent = last, null = first. Answers `BoardUpdatedEvent`. */
+export const CreateBoardColumnRequest = z.object({
+  name: BoardColumnName,
+  category: BoardColumnCategory,
+  /** Applied when a card enters the column; null = "Keep as is". */
+  defaultWaitingOn: WaitingOn.nullable().default(null),
+  afterColumnId: Id.nullable().optional(),
+});
+export type CreateBoardColumnRequest = z.infer<typeof CreateBoardColumnRequest>;
+
+/** `PATCH /boards/:conversationId/columns/:columnId`: rename, recategorise, default waiting state, reorder. */
+export const UpdateBoardColumnRequest = z
+  .object({
+    name: BoardColumnName.optional(),
+    category: BoardColumnCategory.optional(),
+    defaultWaitingOn: WaitingOn.nullable().optional(),
+    /** null = first; absent = keep the place. */
+    afterColumnId: Id.nullable().optional(),
+  })
+  .refine(
+    (v) =>
+      v.name !== undefined ||
+      v.category !== undefined ||
+      v.defaultWaitingOn !== undefined ||
+      v.afterColumnId !== undefined,
+    { message: "Change at least one thing" },
+  );
+export type UpdateBoardColumnRequest = z.infer<typeof UpdateBoardColumnRequest>;
+
+/** `DELETE /boards/:conversationId/columns/:columnId`: a column with cards needs `moveCardsTo` (their new column). */
+export const DeleteBoardColumnQuery = z.object({ moveCardsTo: Id.optional() });
+export type DeleteBoardColumnQuery = z.infer<typeof DeleteBoardColumnQuery>;
+
 // ---------------------------------------------------------------- events (on `conv:<id>` only, P-06)
 
 /** `board.card_upserted`: one card created, moved or edited. Removal rides `message.deleted`. */
