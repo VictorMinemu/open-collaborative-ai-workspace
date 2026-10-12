@@ -433,3 +433,59 @@ describe("the generic message edit cannot desync a card (Pitfall 5)", () => {
     expect(edited).toMatchObject({ id: reply.id, body: "Edited reply" });
   });
 });
+
+describe("deleting a card root while its text is edited (07.1-14, WINDOWS #103)", () => {
+  /** Backends of this database waiting on a heavyweight lock (a row lock wait shows as `Lock`). */
+  const lockWaiters = async (): Promise<number> =>
+    (
+      await su.query(
+        `select count(*)::int as n from pg_stat_activity
+          where datname = current_database() and wait_event_type = 'Lock' and pid <> pg_backend_pid()`,
+      )
+    ).rows[0].n;
+
+  async function until(fn: () => Promise<boolean>, ms = 10_000) {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (await fn()) return;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    throw new Error(`condition not met within ${ms} ms`);
+  }
+
+  it("the delete queues behind the edit on the stream lock: both answer 200, nobody deadlocks", async () => {
+    const b = await newBoard("racing-delete");
+    const card = await addCard(admin, b.id, "Broken pump\nPump 3 leaks");
+
+    // Hold the board's stream row so both requests queue on it in a known order: the edit first, then the delete.
+    // Before the fix the delete took the message row first and the stream second (the edit's reverse order), so
+    // releasing the stream let the edit take it and wait for the message the delete held: a deadlock, one 500.
+    const holder = new pg.Client({ connectionString: stack.db.superuserUrl });
+    await holder.connect();
+    try {
+      await holder.query("begin");
+      await holder.query("select last_seq from app.streams where id = $1 for update", [`conv:${b.id}`]);
+
+      const edit = patch(admin, b.id, card.messageId, { expectedVersion: 1, title: "Pump 3 replaced" });
+      await until(async () => (await lockWaiters()) >= 1);
+      const del = admin.request("DELETE", `/api/v1/messages/${card.messageId}`);
+      await until(async () => (await lockWaiters()) >= 2);
+      await holder.query("commit");
+
+      const [edited, deleted] = await Promise.all([edit, del]);
+      expect(edited.status, JSON.stringify(edited.body)).toBe(200);
+      expect(deleted.status, JSON.stringify(deleted.body)).toBe(200);
+    } finally {
+      await holder.end();
+    }
+
+    // The edit landed first (history kept), then the delete tombstoned the root and the card left the board.
+    const versions = await su.query(
+      "select version, kind from app.message_versions where message_id = $1 order by version",
+      [card.messageId],
+    );
+    expect(versions.rows.map((r) => r.kind)).toEqual(["edit", "delete"]);
+    const snap = await ok(admin.request("GET", `/api/v1/boards/${b.id}`));
+    expect(JSON.stringify(snap)).not.toContain(card.messageId);
+  });
+});
