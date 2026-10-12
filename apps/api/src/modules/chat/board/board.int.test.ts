@@ -284,6 +284,66 @@ describe("board channels (tracer)", () => {
   });
 });
 
+describe("one card by its root message id (07.1 fix: the Messages view's card editor)", () => {
+  it("answers a card past the first 100 of its column; a plain message, a reply, a deleted card or another board's card is 404 card_not_found", async () => {
+    const boardId = (await createBoard(admin, "deep-orders")).id as string;
+    const otherId = (await createBoard(admin, "other-orders")).id as string;
+    const post = (convId: string, description: string) =>
+      ok(
+        admin.request("POST", `/api/v1/boards/${convId}/cards`, {
+          description,
+          clientMessageId: randomUUID(),
+        }),
+      );
+    // New cards land at the bottom of their column: the 101st is not in the snapshot's first page.
+    for (let i = 1; i <= 100; i++) await post(boardId, `Order ${i}`);
+    const deep = await post(boardId, "Order 101\nPallet for Acme");
+    const snap = await snapshot(admin, boardId);
+    const column = snap.cards.find((c: Json) => c.columnId === deep.columnId);
+    expect(column.hasMore).toBe(true);
+    expect(column.cards.some((c: Json) => c.messageId === deep.messageId)).toBe(false);
+
+    const read = (convId: string, messageId: string) =>
+      admin.request("GET", `/api/v1/boards/${convId}/cards/${messageId}`);
+    expect(await ok(read(boardId, deep.messageId))).toEqual(deep);
+    // Alex reads it like the snapshot (channel.read on a public board).
+    expect(await ok(alex.request("GET", `/api/v1/boards/${boardId}/cards/${deep.messageId}`))).toEqual(deep);
+
+    const plain = await ok(
+      admin.request("POST", `/api/v1/conversations/${boardId}/messages`, {
+        body: "Stock count moves to Friday",
+      }),
+    );
+    const reply = await ok(
+      admin.request("POST", `/api/v1/conversations/${boardId}/messages`, {
+        body: "On it",
+        threadRootId: deep.messageId,
+      }),
+    );
+    const elsewhere = await post(otherId, "Order for the other board");
+    const gone = await post(boardId, "Cancelled order");
+    await ok(admin.request("DELETE", `/api/v1/messages/${gone.messageId}`));
+    for (const [what, convId, messageId] of [
+      ["a plain message", boardId, plain.id],
+      ["a reply", boardId, reply.id],
+      ["another board's card", boardId, elsewhere.messageId],
+      ["a deleted card", boardId, gone.messageId],
+      ["an unknown id", boardId, randomUUID()],
+    ] as const) {
+      const res = await read(convId, messageId);
+      expect(res.status, what).toBe(404);
+      expect(errorOf(res).code, what).toBe("card_not_found");
+    }
+
+    const text = await ok(
+      admin.request("POST", "/api/v1/channels", { name: "plain-orders", visibility: "public" }),
+    );
+    const notABoard = await read(text.id, plain.id);
+    expect(notABoard.status).toBe(400);
+    expect(errorOf(notABoard).code).toBe("not_a_board");
+  });
+});
+
 describe("board routes across tenants (BOARD-04, T-07.1-03-01)", () => {
   /** Every route of this plan, called by org B's admin with org A's ids. */
   const CROSS_TENANT_ROUTES: ReadonlyArray<{
@@ -308,6 +368,10 @@ describe("board routes across tenants (BOARD-04, T-07.1-03-01)", () => {
           description: "Planted",
           clientMessageId: randomUUID(),
         }),
+    },
+    {
+      name: "GET /boards/:id/cards/:messageId",
+      call: (c, i) => c.request("GET", `/api/v1/boards/${i.boardId}/cards/${i.messageId}`),
     },
     {
       name: "PATCH /boards/:id/cards/:messageId",

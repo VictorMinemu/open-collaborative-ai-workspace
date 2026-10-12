@@ -8,6 +8,7 @@ import { AUTHOR, BOARD, COL, COLUMNS, CONV, card, id, snapshot } from "@/lib/boa
 import {
   COLUMN_COPY,
   cardEditRequest,
+  cardRootKind,
   columnErrorMessage,
   columnNameError,
   draftOf,
@@ -214,6 +215,32 @@ describe("removeCard", () => {
   });
 });
 
+describe("cardRootKind (the Messages view's editor for a top-level message of a board)", () => {
+  const msg = (id: string, threadId: string | null = null) => ({ id, threadId });
+  const complete = snapshot([card(1), card(2)]);
+  const partial = {
+    ...complete,
+    cards: complete.cards.map((c, i) => (i === 0 ? { ...c, hasMore: true } : c)),
+  };
+
+  it("a card in the loaded board is a card", () => {
+    expect(cardRootKind(complete, msg(card(1).messageId))).toBe("card");
+    expect(cardRootKind(partial, msg(card(2).messageId))).toBe("card");
+  });
+
+  it("a message the loaded board does not hold is a plain message only when every column is fully loaded", () => {
+    expect(cardRootKind(complete, msg(id(90)))).toBe("message");
+    // A column with more cards than its first page may hold it: ask the API (GET /boards/:id/cards/:messageId).
+    expect(cardRootKind(partial, msg(id(90)))).toBe("unknown");
+    expect(cardRootKind(undefined, msg(id(90)))).toBe("unknown");
+  });
+
+  it("a reply is never a card", () => {
+    expect(cardRootKind(partial, msg(id(91), card(1).messageId))).toBe("message");
+    expect(cardRootKind(undefined, msg(id(91), card(1).messageId))).toBe("message");
+  });
+});
+
 // ---------------------------------------------------------------- Task 3: card text and delete (P-02)
 
 const FIELDS: BoardFieldDef[] = [
@@ -385,5 +412,16 @@ describe("CardStrip (07.1-UI-SPEC Thread panel: card strip)", () => {
     const shown = cardRootView(root as unknown as Parameters<typeof cardRootView>[0], theCard);
     expect(shown.body).toBe("Broken pump\nPump 3 leaks");
     expect(shown.id).toBe(theCard.messageId);
+  });
+
+  it("shows the card's title in the root when the description is empty, never an empty body", () => {
+    const root = { id: theCard.messageId, body: "EXP-0007 · Broken pump\n\nCustomer: Acme" };
+    for (const description of ["", "  \n "]) {
+      const shown = cardRootView(root as unknown as Parameters<typeof cardRootView>[0], {
+        ...theCard,
+        description,
+      });
+      expect(shown.body).toBe("EXP-0007 · Broken pump");
+    }
   });
 });

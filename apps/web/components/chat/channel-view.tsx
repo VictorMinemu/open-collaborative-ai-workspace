@@ -50,6 +50,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useIsDesktop } from "@/hooks/use-media-query";
 import { api, errorMessage, isApiError } from "@/lib/api";
 import { useAttachmentsConfig } from "@/lib/attachment-queries";
+import { useCardRootEditor } from "@/lib/board-manage-queries";
 import { applyBoardFrame, boardAfterSeq, findCard, resyncBoard, useBoard } from "@/lib/board-queries";
 import {
   applyMessage,
@@ -173,9 +174,13 @@ export function ChannelView({ channelId }: { channelId: string }) {
   const activeColumnId = searchParams.get("col");
   const [newCard, setNewCard] = useState<{ columnId: string | null } | null>(null);
   // The card editor opened from the Messages view (07.1-14): a card root's own "Edit message" edits the card, since
-  // the generic edit refuses card roots (400 `board_card_use_board`).
-  const [editingCardId, setEditingCardId] = useState<string | null>(null);
-  const openCardEditor = useCallback((m: Message) => setEditingCardId(m.id), []);
+  // the generic edit refuses card roots (400 `board_card_use_board`); a card past its column's loaded page is looked
+  // up by its message id first (07.1 fix).
+  const cardRoots = useCardRootEditor(
+    channelId,
+    isBoard ? board.data : undefined,
+    !!channel?.isMember && !channel.archivedAt,
+  );
   const members = useChannelMembers(channel ? channelId : null);
   const pins = usePins(channelId, !!channel && !revoked);
   const [pinsOpen, setPinsOpen] = useState(false);
@@ -606,14 +611,11 @@ export function ChannelView({ channelId }: { channelId: string }) {
   const memberList = members.data?.members ?? [];
   const bots = memberList.filter((m) => m.kind === "agent");
   const canPost = channel.isMember && !channel.archivedAt;
-  // Messages view of a board: a card root in the loaded board opens the card editor (null when the viewer cannot
-  // post); every other message keeps the inline editor. A card past the first 100 of its column is not in the cache
-  // and falls back to the inline editor (the API then answers 400 `board_card_use_board`).
+  // Messages view of a board: a card root opens the card editor (null when the viewer cannot post), also past the
+  // first 100 of its column (looked up by id); every other message keeps the inline editor.
   const cardBoard = isBoard ? board.data : undefined;
-  const editorFor = cardBoard
-    ? (m: Message) => (findCard(cardBoard, m.id) ? (canPost ? openCardEditor : null) : undefined)
-    : undefined;
-  const editingCard = cardBoard && editingCardId ? (findCard(cardBoard, editingCardId)?.card ?? null) : null;
+  const editorFor = isBoard ? cardRoots.editorFor : undefined;
+  const editingCard = cardRoots.editingCard;
   // Files go to the composer, so the pane takes drops only where it shows (P-10: none without storage).
   const canDrop = canPost && filesConfig.data?.enabled === true;
   // The server decides per channel (admin, or the channel owner): the menu only mirrors viewerCan.
@@ -1020,7 +1022,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
             board={cardBoard.board}
             open
             onOpenChange={(o) => {
-              if (!o) setEditingCardId(null);
+              if (!o) cardRoots.close();
             }}
           />
         ) : null}

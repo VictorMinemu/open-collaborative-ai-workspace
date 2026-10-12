@@ -202,6 +202,10 @@ describe("board routes across tenants (BOARD-04, T-07.1-05-01)", () => {
         }),
     },
     {
+      name: "GET /boards/:id/cards/:messageId",
+      call: (c, i) => c.request("GET", `/api/v1/boards/${i.boardId}/cards/${i.messageId}`),
+    },
+    {
       name: "PATCH /boards/:id/cards/:messageId",
       call: (c, i) =>
         c.request("PATCH", `/api/v1/boards/${i.boardId}/cards/${i.messageId}`, {
@@ -265,6 +269,7 @@ describe("a private board (BOARD-01, T-07.1-05-01, T-07.1-05-03)", () => {
     const refused = [
       await alex.request("GET", `/api/v1/boards/${board.id}`),
       await alex.request("GET", `/api/v1/boards/${board.id}/columns/${backlog.id}/cards`),
+      await alex.request("GET", `/api/v1/boards/${board.id}/cards/${card.messageId}`),
       await newCard(alex, board.id, "Planted"),
       await moveCard(alex, board.id, card, inProgress.id),
     ];
@@ -303,6 +308,12 @@ describe("a private board (BOARD-01, T-07.1-05-01, T-07.1-05-03)", () => {
 
     const seen = await snapshot(alex, board.id);
     expect(cardsOf(seen, backlog.id).map((c) => c.messageId)).toContain(card.messageId);
+    expect(await ok(alex.request("GET", `/api/v1/boards/${board.id}/cards/${card.messageId}`))).toMatchObject(
+      {
+        messageId: card.messageId,
+        description: card.description,
+      },
+    );
     const own = await ok(newCard(alex, board.id, "Onboarding for Alex's new hire"));
     expect(own).toMatchObject({ authorId: alexId, columnId: backlog.id });
     const moved = await ok(moveCard(alex, board.id, card, inProgress.id));

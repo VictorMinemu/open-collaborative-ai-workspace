@@ -1,6 +1,6 @@
 import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
 import { expectNoSeriousA11y } from "../support/a11y";
-import { apiAs, ensureMember, openAs } from "../support/actors";
+import { apiAs, BASE_URL, ensureMember, openAs } from "../support/actors";
 import {
   apiCard,
   boardColumn,
@@ -734,6 +734,90 @@ test("Messages view: Edit message on a card root opens the card editor; a plain 
   await expect(editor).toHaveCount(0);
   await row.getByTestId("edit-cancel").click();
   await expect(row.getByTestId("edit-input")).toHaveCount(0);
+
+  await context.close();
+  await admin.dispose();
+});
+
+test("a card with a typed title and no description shows its title as the thread's root message", async ({
+  browser,
+}, info) => {
+  test.setTimeout(120_000);
+  const project = info.project.name;
+  const width = project === "mobile" ? 390 : 1440;
+  const admin = await apiAs(ADMIN);
+  const { id: convId } = await createBoardChannel(admin, { prefix: "titleonly" });
+  const card = await createCard(admin, convId, { title: "Seal kit order for line 3", description: "" });
+  const { context, page } = await openAs(browser, ADMIN, project);
+  const board = await openBoard(page, convId);
+  await cardTile(board, card.messageId).filter({ visible: true }).locator('[data-slot="card-open"]').click();
+  const panel = page.getByTestId("thread-panel");
+  await expect(panel.getByTestId("card-strip")).toBeVisible();
+  const root = messageRow(panel, card.messageId);
+  await expect(root).toContainText("Seal kit order for line 3");
+  await bothThemes(page, `board-thread-title-only-${width}`);
+
+  await context.close();
+  await admin.dispose();
+});
+
+test("Messages view: Edit message on a card root past the first 100 of its column still opens the card editor", async ({
+  browser,
+}, info) => {
+  test.setTimeout(180_000);
+  const project = info.project.name;
+  const admin = await apiAs(ADMIN);
+  const { id: convId } = await createBoardChannel(admin, { prefix: "deepcard" });
+  // New cards land at the bottom of their column: the 101st is past the snapshot's first page of 100.
+  for (let i = 1; i <= 100; i++) await createCard(admin, convId, { description: `Order ${i}` });
+  const deep = await createCard(admin, convId, { description: "Order 101\nPallet for Acme" });
+  const plain = await postAs(admin, convId, "Stock count moves to Friday");
+  const snap = await boardSnapshot(admin, convId);
+  const backlog = snap.cards.find((c) => c.columnId === deep.columnId);
+  expect(backlog?.hasMore).toBe(true);
+  expect(backlog?.cards.some((c) => c.messageId === deep.messageId)).toBe(false);
+
+  const { context, page } = await openAs(browser, ADMIN, project);
+  await openBoard(page, convId);
+  await page.getByTestId("view-messages").click();
+  await expect(page).toHaveURL(/view=messages/);
+  const list = page.getByTestId("channel-scroll");
+
+  // ---- the card root that is not in the board cache: the card editor, never the inline editor
+  const root = messageRow(list, deep.messageId);
+  const actions = await openMessageActions(page, deep.messageId, project);
+  await actions.getByTestId("edit-message").click();
+  const editor = page.getByTestId("card-edit");
+  await expect(editor).toBeVisible();
+  await expect(root.getByTestId("edit-input")).toHaveCount(0);
+  await expect(editor.getByLabel("Description")).toHaveValue("Order 101\nPallet for Acme");
+  await editor.getByLabel("Description").fill("Order 101\nTwo pallets for Acme");
+  await editor.getByTestId("card-edit-submit").click();
+  await expect(editor).toBeHidden();
+  await expect(page.getByText("Edit this card from the board")).toHaveCount(0);
+  await expect(root).toContainText("Two pallets for Acme");
+
+  // ---- a plain message of the same board: still the inline editor
+  const row = messageRow(list, plain.id);
+  const plainActions = await openMessageActions(page, plain.id, project);
+  await plainActions.getByTestId("edit-message").click();
+  await expect(row.getByTestId("edit-input")).toBeVisible();
+  await expect(editor).toHaveCount(0);
+  await row.getByTestId("edit-cancel").click();
+  await expect(row.getByTestId("edit-input")).toHaveCount(0);
+
+  // ---- the same card root in its thread panel (1440): Edit message → the card editor
+  if (project === "desktop") {
+    await page.goto(`${BASE_URL}/chat/${convId}?view=messages&thread=${deep.messageId}`);
+    const panelRoot = messageRow(page.getByTestId("thread-panel"), deep.messageId);
+    await expect(panelRoot).toContainText("Two pallets for Acme");
+    await panelRoot.hover();
+    await panelRoot.getByTestId("message-toolbar").getByTestId("edit-message").click();
+    await expect(editor).toBeVisible();
+    await expect(panelRoot.getByTestId("edit-input")).toHaveCount(0);
+    await editor.getByRole("button", { name: "Cancel" }).click();
+    await expect(editor).toBeHidden();
+  }
 
   await context.close();
   await admin.dispose();

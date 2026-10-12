@@ -269,9 +269,15 @@ interface RowProps {
   linkFor?: ((m: Message) => string) | undefined;
   /** Marks the conversation unread from a message (stable callback; top-level messages only). */
   onMarkUnread?: ((m: Message) => void) | undefined;
-  /** Replaces the inline editor of the author's own messages (stable callback); null = no edit offered. */
-  onEdit?: ((m: Message) => void) | null | undefined;
+  /**
+   * Replaces the inline editor of the author's own messages (stable callback); null = no edit offered. `inline` starts
+   * the inline editor after all (an override that first has to ask whether the message is a board card).
+   */
+  onEdit?: EditOverride | null | undefined;
 }
+
+/** Another editor for a message; `inline()` falls back to the row's own inline editor. */
+export type EditOverride = (m: Message, inline: () => void) => void;
 
 const MessageRow = memo(function MessageRow({
   message,
@@ -322,7 +328,7 @@ const MessageRow = memo(function MessageRow({
       !own || !mutable || editOverride === null
         ? undefined
         : editOverride
-          ? () => editOverride(message)
+          ? () => editOverride(message, () => setEditing(true))
           : () => setEditing(true),
     onDelete:
       mutable && (own || canDeleteAny)
@@ -702,13 +708,13 @@ export function MessageList({
    * The author's "Edit message": absent = the inline editor (default); a function opens another editor instead (a
    * board card's root opens the card editor, 07.1-11); null = not offered. Must be stable.
    */
-  onEdit?: ((m: Message) => void) | null;
+  onEdit?: EditOverride | null;
   /**
    * Per-message `onEdit` for lists that mix kinds (a board's Messages view: card roots open the card editor, other
    * messages keep the inline editor). Its answer wins over `onEdit`; undefined falls back to `onEdit`. Answers must be
    * stable callbacks.
    */
-  editorFor?: (m: Message) => ((m: Message) => void) | null | undefined;
+  editorFor?: (m: Message) => EditOverride | null | undefined;
 }) {
   // null (not offered) must win over the list default, so `??` would be wrong here.
   const editorOf = (m: Message) => {

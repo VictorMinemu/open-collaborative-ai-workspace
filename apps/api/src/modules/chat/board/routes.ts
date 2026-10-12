@@ -17,7 +17,13 @@ import { dtoOf } from "../message-actions";
 import type { ConversationRow, PostResult } from "../service";
 import { readableBoard, writableBoard } from "./access";
 import { registerColumnRoutes } from "./columns";
-import { createBoardCard, readBoardSnapshot, readColumnPage, updateBoardCard } from "./service";
+import {
+  createBoardCard,
+  readBoardCard,
+  readBoardSnapshot,
+  readColumnPage,
+  updateBoardCard,
+} from "./service";
 
 /**
  * The side effects of a fresh human post (observers, DM / group / mention / reply-mode dispatch), extracted from the
@@ -49,7 +55,7 @@ const broadcastText = (r: { title?: string; description?: string; fields?: Recor
     .join("\n");
 
 /**
- * Board routes under `/api/v1` (BOARD-01 … BOARD-06): the snapshot, a column page, card creation, card updates
+ * Board routes under `/api/v1` (BOARD-01 … BOARD-06): the snapshot, a column page, one card, card creation, card updates
  * (move, waiting state; text by the card's author) and column management (`columns.ts`). Every route resolves its board through `access.ts` (reads `readableBoard`, writes
  * `writableBoard`), so hidden and missing boards are the same 404 and another organization's ids do not exist (RLS).
  */
@@ -86,6 +92,17 @@ export function registerBoardRoutes(app: App, ctx: BoardRouteCtx): void {
       core.db.withTenant(tenant(req), async (tx) => {
         const { board } = await readableBoard(req, tx, ctx, req.params.conversationId);
         return readColumnPage(tx, board, req.params.columnId, req.query.after);
+      }),
+  );
+
+  // One card by its root message id: the Messages view's card editor for a card past the snapshot's first page.
+  app.get(
+    "/boards/:conversationId/cards/:messageId",
+    { ...user, schema: { tags, params: BoardCardParams, response: { 200: BoardCard } } },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const { board } = await readableBoard(req, tx, ctx, req.params.conversationId);
+        return readBoardCard(tx, board, req.params.messageId);
       }),
   );
 

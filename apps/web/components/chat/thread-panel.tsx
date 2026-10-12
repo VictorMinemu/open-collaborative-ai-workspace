@@ -9,6 +9,7 @@ import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useIsDesktop } from "@/hooks/use-media-query";
 import { useAttachmentsConfig } from "@/lib/attachment-queries";
+import { useCardRootEditor } from "@/lib/board-manage-queries";
 import { findCard, useBoard } from "@/lib/board-queries";
 import { markThreadRead, useThread } from "@/lib/chat-queries";
 import { permalinkPath } from "@/lib/permalink";
@@ -101,10 +102,18 @@ function ThreadBody({
   const openCardEditor = useCallback(() => setEditingCard(true), []);
   const isAuthor = !!card && isCardAuthor(card, me.id);
   const root = thread.data?.root;
+  // A card root past its column's loaded page has no strip, but its own "Edit message" still opens the card editor
+  // after a lookup by id (07.1 fix); a plain root keeps the inline editor.
+  const deepCard = useCardRootEditor(channel.id, snapshot, canPost);
+  const deepEdit = channel.layout === "board" && root && !card ? deepCard.editorFor(root) : undefined;
   const description = card?.description;
+  const title = card?.title;
   const rootView = useMemo(
-    () => (root && description !== undefined ? cardRootView(root, { description }) : root),
-    [root, description],
+    () =>
+      root && description !== undefined && title !== undefined
+        ? cardRootView(root, { description, title })
+        : root,
+    [root, description, title],
   );
 
   return (
@@ -190,7 +199,11 @@ function ThreadBody({
                 showTombstones
                 anchorId={highlightId}
                 linkFor={linkFor}
-                {...(card ? { onEdit: canPost && isAuthor ? openCardEditor : null } : {})}
+                {...(card
+                  ? { onEdit: canPost && isAuthor ? openCardEditor : null }
+                  : deepEdit !== undefined
+                    ? { onEdit: deepEdit }
+                    : {})}
               />
               <div className="flex items-center gap-3 px-4 py-1.5 sm:px-5" data-testid="thread-reply-count">
                 <span className="text-muted-foreground text-xs">
@@ -246,6 +259,17 @@ function ThreadBody({
           board={snapshot.board}
           open={editingCard}
           onOpenChange={setEditingCard}
+        />
+      ) : null}
+      {!card && deepCard.editingCard && snapshot && canPost ? (
+        <CardEditDialog
+          convId={channel.id}
+          card={deepCard.editingCard}
+          board={snapshot.board}
+          open
+          onOpenChange={(o) => {
+            if (!o) deepCard.close();
+          }}
         />
       ) : null}
     </div>

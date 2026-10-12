@@ -16,6 +16,8 @@ import {
   type WaitingOn,
 } from "@ocw/contracts";
 import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useState } from "react";
+import { toast } from "sonner";
 import { api, errorMessage, isApiError, type Schema } from "./api";
 import { boardKeys, conflictCard, findCard, replaceColumns, upsertCard } from "./board-queries";
 import { applyMessageDeleted, chatKeys, deleteMessage, useChannels } from "./chat-queries";
@@ -49,6 +51,8 @@ export const CARD_EDIT_COPY = {
   typedTitleRequired: "A typed title can't be left empty",
   hintTyped: "Typed titles are never changed automatically.",
   hintAutomatic: "Automatic title, updates with the description and fields.",
+  /** The author of a card past the loaded page who is no longer a member (the API would refuse the edit). */
+  joinToEdit: "Join the channel to edit this card.",
 } as const;
 
 /** The UI-SPEC copy for a column request the API refused; the API's own message otherwise. */
@@ -240,6 +244,68 @@ export function useEditBoardCard(convId: string) {
       api.patch(`/api/v1/boards/${convId}/cards/${messageId}`, { body, schema: CardResponse }),
     onSuccess: (card) => applyCard(qc, convId, card),
   });
+}
+
+/**
+ * What a top-level message of a board is, for the Messages view's "Edit message" (07.1 fix): `card` when the loaded
+ * board holds it (the card editor), `message` when it cannot be a card (a reply, or every column is fully loaded and
+ * none holds it: the inline editor), `unknown` when a column has more cards than its loaded page or the board is not
+ * loaded yet (ask the API with `fetchBoardCard` before choosing).
+ */
+export type CardRootKind = "card" | "message" | "unknown";
+
+export function cardRootKind(
+  s: BoardSnapshot | undefined,
+  m: { id: string; threadId: string | null },
+): CardRootKind {
+  if (m.threadId !== null) return "message";
+  if (!s) return "unknown";
+  if (findCard(s, m.id)) return "card";
+  return s.cards.some((c) => c.hasMore) ? "unknown" : "message";
+}
+
+/** `GET /boards/:id/cards/:messageId`: the card, or null when that message is not a card of this board (404). */
+export async function fetchBoardCard(convId: string, messageId: string): Promise<BoardCard | null> {
+  try {
+    return await api.get(`/api/v1/boards/${convId}/cards/${messageId}`, { schema: CardResponse });
+  } catch (err) {
+    if (isApiError(err, 404) && err.code === "card_not_found") return null;
+    throw err;
+  }
+}
+
+/**
+ * The author's "Edit message" on the top-level messages of a board (07.1 fix): a card root always opens the card
+ * editor, never the inline editor the API refuses (400 `board_card_use_board`), even when the card is past its column's
+ * loaded page. `editorFor(m)` answers MessageList's per-message override: the card editor for a cached card (null when
+ * the viewer cannot post), undefined (the inline editor) for a message that cannot be a card, and otherwise a lookup
+ * that asks the API and then opens the card editor or falls back to the inline editor. `editingCard` follows the
+ * cached copy of the card while the board holds it. Only for board channels.
+ */
+export function useCardRootEditor(convId: string, board: BoardSnapshot | undefined, canPost: boolean) {
+  const [editing, setEditing] = useState<{ id: string; fetched: BoardCard | null } | null>(null);
+  const openCached = useCallback((m: { id: string }) => setEditing({ id: m.id, fetched: null }), []);
+  const lookUp = useCallback(
+    (m: { id: string }, inline: () => void) => {
+      fetchBoardCard(convId, m.id).then(
+        (card) => {
+          if (!card) inline();
+          else if (!canPost) toast.error(CARD_EDIT_COPY.joinToEdit);
+          else setEditing({ id: card.messageId, fetched: card });
+        },
+        (err) => toast.error(errorMessage(err)),
+      );
+    },
+    [convId, canPost],
+  );
+  const editorFor = (m: { id: string; threadId: string | null }) => {
+    const kind = cardRootKind(board, m);
+    if (kind === "card") return canPost ? openCached : null;
+    return kind === "unknown" ? lookUp : undefined;
+  };
+  const editingCard = editing ? ((board && findCard(board, editing.id)?.card) ?? editing.fetched) : null;
+  const close = useCallback(() => setEditing(null), []);
+  return { editorFor, editingCard, close };
 }
 
 /** A server card (an edit's answer or a 409's current card) into the cached board. */

@@ -376,7 +376,10 @@ export const BoardColumn = z.object({
 });
 export type BoardColumn = z.infer<typeof BoardColumn>;
 
-/** A card = the root message of a thread (`messageId`) plus its board state. Never carries viewer-specific fields. */
+/**
+ * A card = the root message of a thread (`messageId`) plus its board state. Never carries viewer-specific fields.
+ * `GET /boards/:conversationId/cards/:messageId` answers one (404 `card_not_found` for any other message id).
+ */
 export const BoardCard = z.object({
   messageId: Id,
   conversationId: Id,
