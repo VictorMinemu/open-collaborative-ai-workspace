@@ -12,7 +12,7 @@ import {
   createCard,
   openBoard,
 } from "../support/board";
-import { ALEX, openMessageActions } from "../support/chat";
+import { ALEX, messageRow, openMessageActions, postAs } from "../support/chat";
 import { bothThemes } from "../support/files";
 import { ADMIN } from "./env";
 
@@ -24,6 +24,12 @@ import { ADMIN } from "./env";
  */
 
 test.describe.configure({ mode: "serial" });
+
+// The tests open their own contexts (two people per board); close them so no page outlives its test and steals focus
+// from the specs that run after this one in the same worker.
+test.afterEach(async ({ browser }) => {
+  for (const context of browser.contexts()) await context.close();
+});
 
 /** Lane names left to right, as the board shows them. */
 async function laneNames(board: Locator): Promise<string[]> {
@@ -393,6 +399,22 @@ async function caseTemplate(admin: APIRequestContext): Promise<string> {
   return ((await res.json()) as { id: string }).id;
 }
 
+/**
+ * A board created from a fresh organization-wide template, which is deleted again at once: the board keeps its
+ * snapshot (D-06), and no organization-wide template is left behind for other specs (record-templates expects a unit
+ * without templates to say so).
+ */
+async function caseBoard(
+  admin: APIRequestContext,
+  opts: { prefix: string; members?: APIRequestContext[] },
+): Promise<{ id: string; name: string }> {
+  const templateId = await caseTemplate(admin);
+  const board = await createBoardChannel(admin, { ...opts, templateId });
+  const gone = await admin.delete(`/api/v1/record-templates/${templateId}`);
+  expect(gone.ok(), `delete template: ${gone.status()}`).toBe(true);
+  return board;
+}
+
 async function openPalette(page: Page) {
   await page.keyboard.press("ControlOrMeta+K");
   const palette = page.getByTestId("search-palette");
@@ -424,8 +446,7 @@ test("desktop: the card strip, author-only text edits that keep a typed title, s
   const admin = await apiAs(ADMIN);
   await ensureMember(admin, ALEX, "developer");
   const alexApi = await apiAs(ALEX);
-  const templateId = await caseTemplate(admin);
-  const { id: convId } = await createBoardChannel(admin, { prefix: "edit", templateId, members: [alexApi] });
+  const { id: convId } = await caseBoard(admin, { prefix: "edit", members: [alexApi] });
   const oldWord = uniqueWord();
   const newWord = uniqueWord();
   const card = await createCard(admin, convId, {
@@ -499,7 +520,8 @@ test("desktop: the card strip, author-only text edits that keep a typed title, s
   await expect(hit).toContainText("replaced");
   await page.keyboard.press("Enter");
   await expect(palette).toBeHidden();
-  await expect(page).toHaveURL(new RegExp(`/chat/${convId}\\?(.*&)?m=${card.messageId}`));
+  // A card hit opens the card's thread over the board (07.1-09).
+  await expect(page).toHaveURL(new RegExp(`/chat/${convId}\\?(.*&)?thread=${card.messageId}`));
   palette = await openPalette(page);
   await palette.getByTestId("search-input").pressSequentially(oldWord, { delay: 20 });
   await expect(palette.getByTestId("search-empty")).toBeVisible();
@@ -615,8 +637,7 @@ test("390: the card strip wraps with 44 px controls; Edit card is full screen", 
   test.skip(info.project.name !== "mobile", "the 390 thread sheet");
   test.setTimeout(150_000);
   const admin = await apiAs(ADMIN);
-  const templateId = await caseTemplate(admin);
-  const { id: convId } = await createBoardChannel(admin, { prefix: "strip390", templateId });
+  const { id: convId } = await caseBoard(admin, { prefix: "strip390" });
   const card = await createCard(admin, convId, {
     description: "Broken pump at the Acme plant, line 3\nPump 3 leaks since Monday.",
     waitingOn: "customer",
@@ -671,5 +692,49 @@ test("390: the card strip wraps with 44 px controls; Edit card is full screen", 
   await expect(root).toContainText("Seal kit fitted on line 3");
   await expect(root).toContainText("Pump 3 back in service.");
   await expect(cardTile(board, card.messageId)).toContainText("Seal kit fitted on line 3");
+  await admin.dispose();
+});
+
+test("Messages view: Edit message on a card root opens the card editor; a plain message keeps the inline editor", async ({
+  browser,
+}, info) => {
+  test.setTimeout(120_000);
+  const project = info.project.name;
+  const admin = await apiAs(ADMIN);
+  const { id: convId } = await createBoardChannel(admin, { prefix: "msgedit" });
+  const card = await createCard(admin, convId, { description: "Pump 3 leaks\nLine 3, since Monday" });
+  const plain = await postAs(admin, convId, "Standup moves to 10:00");
+  const { context, page } = await openAs(browser, ADMIN, project);
+  await openBoard(page, convId);
+  await page.getByTestId("view-messages").click();
+  await expect(page).toHaveURL(/view=messages/);
+  const list = page.getByTestId("channel-scroll");
+
+  // ---- the card root: Edit message → the card editor (the generic edit would answer 400 board_card_use_board)
+  const root = messageRow(list, card.messageId);
+  const actions = await openMessageActions(page, card.messageId, project);
+  await actions.getByTestId("edit-message").click();
+  const editor = page.getByTestId("card-edit");
+  await expect(editor).toBeVisible();
+  await expect(root.getByTestId("edit-input")).toHaveCount(0);
+  await editor.getByLabel("Description").fill("Pump 3 replaced\nSeal kit fitted on Tuesday");
+  await editor.getByTestId("card-edit-submit").click();
+  await expect(editor).toBeHidden();
+  await expect(page.getByText("Edit this card from the board")).toHaveCount(0);
+  await expect
+    .poll(async () => (await apiCard(admin, convId, card.messageId)).description)
+    .toBe("Pump 3 replaced\nSeal kit fitted on Tuesday");
+  await expect(root).toContainText("Seal kit fitted on Tuesday");
+
+  // ---- a plain message of the board: the normal inline editor, saved through PATCH /messages/:id
+  const row = messageRow(list, plain.id);
+  const plainActions = await openMessageActions(page, plain.id, project);
+  await plainActions.getByTestId("edit-message").click();
+  await expect(row.getByTestId("edit-input")).toBeVisible();
+  await expect(editor).toHaveCount(0);
+  await row.getByTestId("edit-cancel").click();
+  await expect(row.getByTestId("edit-input")).toHaveCount(0);
+
+  await context.close();
   await admin.dispose();
 });

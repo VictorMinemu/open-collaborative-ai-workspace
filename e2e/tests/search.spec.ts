@@ -83,6 +83,37 @@ test("⌘K → accent-less Spanish word → highlighted hit → lands on the mes
   await sam.dispose();
 });
 
+test("typing in the palette stays there when a channel mounts behind it (the composer never takes focus from a dialog)", async ({
+  browser,
+}, info) => {
+  test.skip(info.project.name !== "desktop", "⌘K is the desktop shortcut");
+  test.setTimeout(90_000);
+  const admin = await apiAs(ADMIN);
+  await ensureMember(admin, SAM, "developer");
+  await admin.dispose();
+  const word = uniqueWord();
+  const s = await openAs(browser, SAM, "desktop");
+  // Phase 4 race, found by the 07.1 gate under a full run's load: the palette opened while #general was still
+  // mounting, and the composer's autoFocus took the keyboard from the open dialog, so the end of the query went into
+  // the composer behind it. Here the channel mounts behind the open palette on purpose: All (no composer), open the
+  // palette, half the query, then Back to the channel.
+  // By href: the link's name carries the unread count ("All 5") once other specs have run.
+  await s.page.locator('nav a[href="/chat/all"]').first().click();
+  await expect(s.page).toHaveURL(/\/chat\/all$/);
+  await expect(s.page.getByTestId("composer")).toHaveCount(0);
+  const palette = await openPalette(s.page, "desktop");
+  const input = palette.getByTestId("search-input");
+  await input.pressSequentially("migra", { delay: 30 });
+  await s.page.goBack();
+  await expect(s.page).toHaveURL(/\/chat\/[0-9a-f-]{36}$/);
+  await expect(s.page.getByTestId("composer")).toBeAttached();
+  await input.pressSequentially(`cion ${word}`, { delay: 30 });
+  await expect(input).toHaveValue(`migracion ${word}`);
+  await expect(input).toBeFocused();
+  await expect(s.page.getByTestId("composer")).toHaveValue("");
+  await s.context.close();
+});
+
 test("results page: In and From narrow the hits, Load more appends the next page", async ({
   browser,
 }, info) => {

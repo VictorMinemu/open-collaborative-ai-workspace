@@ -77,6 +77,7 @@ import { formatDate } from "@/lib/utils";
 import { DropZone } from "./attachments/drop-zone";
 import { BoardConnectionBanner } from "./board/board-connection-banner";
 import { BoardView } from "./board/board-view";
+import { CardEditDialog } from "./board/card-edit-dialog";
 import type { CardAuthor } from "./board/card-tile";
 import { NewCardDialog } from "./board/new-card-dialog";
 import { ChannelIcon } from "./chat-sidebar";
@@ -171,6 +172,10 @@ export function ChannelView({ channelId }: { channelId: string }) {
     isBoard && searchParams.get("view") !== "messages" ? "board" : "messages";
   const activeColumnId = searchParams.get("col");
   const [newCard, setNewCard] = useState<{ columnId: string | null } | null>(null);
+  // The card editor opened from the Messages view (07.1-14): a card root's own "Edit message" edits the card, since
+  // the generic edit refuses card roots (400 `board_card_use_board`).
+  const [editingCardId, setEditingCardId] = useState<string | null>(null);
+  const openCardEditor = useCallback((m: Message) => setEditingCardId(m.id), []);
   const members = useChannelMembers(channel ? channelId : null);
   const pins = usePins(channelId, !!channel && !revoked);
   const [pinsOpen, setPinsOpen] = useState(false);
@@ -601,6 +606,14 @@ export function ChannelView({ channelId }: { channelId: string }) {
   const memberList = members.data?.members ?? [];
   const bots = memberList.filter((m) => m.kind === "agent");
   const canPost = channel.isMember && !channel.archivedAt;
+  // Messages view of a board: a card root in the loaded board opens the card editor (null when the viewer cannot
+  // post); every other message keeps the inline editor. A card past the first 100 of its column is not in the cache
+  // and falls back to the inline editor (the API then answers 400 `board_card_use_board`).
+  const cardBoard = isBoard ? board.data : undefined;
+  const editorFor = cardBoard
+    ? (m: Message) => (findCard(cardBoard, m.id) ? (canPost ? openCardEditor : null) : undefined)
+    : undefined;
+  const editingCard = cardBoard && editingCardId ? (findCard(cardBoard, editingCardId)?.card ?? null) : null;
   // Files go to the composer, so the pane takes drops only where it shows (P-10: none without storage).
   const canDrop = canPost && filesConfig.data?.enabled === true;
   // The server decides per channel (admin, or the channel owner): the menu only mirrors viewerCan.
@@ -893,6 +906,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
                         pinnedBy={pinnedBy}
                         dividerAfterSeq={reading.dividerAfterSeq}
                         onMarkUnread={channel.isMember ? markUnreadFrom : undefined}
+                        {...(editorFor ? { editorFor } : {})}
                       />
                       {loadingNewer ? (
                         <div className="flex justify-center py-3 text-muted-foreground">
@@ -995,6 +1009,18 @@ export function ChannelView({ channelId }: { channelId: string }) {
             // At 390 the new card's column becomes the visible tab, so the card is in view.
             onCreated={(card) => {
               if (!isDesktop) setParam("col", card.columnId);
+            }}
+          />
+        ) : null}
+
+        {cardBoard && editingCard && canPost ? (
+          <CardEditDialog
+            convId={channel.id}
+            card={editingCard}
+            board={cardBoard.board}
+            open
+            onOpenChange={(o) => {
+              if (!o) setEditingCardId(null);
             }}
           />
         ) : null}

@@ -261,7 +261,7 @@ describe("board channels (tracer)", () => {
     expect(text).not.toContain("Pump 3");
   });
 
-  it("text channels are unchanged and a template is refused until templates exist", async () => {
+  it("text channels are unchanged and an unknown template id is refused with 400 template_not_available", async () => {
     const text = await ok(admin.request("POST", "/api/v1/channels", { name: "plain", visibility: "public" }));
     expect(text.layout).toBe("text");
     const boardsRow = await su.query("select count(*)::int as n from app.boards where conversation_id = $1", [

@@ -1,6 +1,6 @@
 import { mentionAllOf } from "@ocw/contracts";
-import { boards, type Tx } from "@ocw/db";
-import { eq } from "drizzle-orm";
+import { boardColumns, boards, type Tx } from "@ocw/db";
+import { and, eq } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { authOf } from "../../../core";
 import { badRequest, gone } from "../../../lib/errors";
@@ -57,7 +57,7 @@ export async function writableBoard(
   tx: Tx,
   ctx: BoardGuardCtx,
   conversationId: string,
-  opts: { body?: string; clientMessageId?: string } = {},
+  opts: { body?: string; clientMessageId?: string; columnId?: string | undefined } = {},
 ): Promise<ResolvedBoard> {
   const resolved = await readableBoard(req, tx, ctx, conversationId);
   if (resolved.conv.archivedAt) throw gone("This channel is archived", "channel_archived");
@@ -67,7 +67,21 @@ export async function writableBoard(
     await ctx.perms.assertCan(req, tx, "channel.mention_all", resource);
     const retry =
       opts.clientMessageId !== undefined && (await isOwnRetry(tx, authOf(req).userId, opts.clientMessageId));
-    if (!retry) await claimMentionAll(ctx.core, resolved.conv.id);
+    if (!retry) {
+      // Validate before claiming, as the message route does: a refused card never spends the minute (07.1-14).
+      if (opts.columnId !== undefined) await assertColumnOnBoard(tx, resolved.conv.id, opts.columnId);
+      await claimMentionAll(ctx.core, resolved.conv.id);
+    }
   }
   return resolved;
+}
+
+/** 400 `invalid_column` unless the column belongs to this board (the card service re-checks under the lock). */
+async function assertColumnOnBoard(tx: Tx, conversationId: string, columnId: string): Promise<void> {
+  const [column] = await tx
+    .select({ id: boardColumns.id })
+    .from(boardColumns)
+    .where(and(eq(boardColumns.id, columnId), eq(boardColumns.conversationId, conversationId)))
+    .limit(1);
+  if (!column) throw badRequest("That column is not on this board", "invalid_column");
 }
