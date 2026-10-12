@@ -21,13 +21,15 @@ import {
 } from "@ocw/contracts";
 import { boardCards, boardColumns, boards, messages, type Tx } from "@ocw/db";
 import { and, asc, eq, isNull, lte, ne, type SQL, sql } from "drizzle-orm";
-import { badRequest, conflict, forbidden, HttpError, notFound } from "../../../lib/errors";
+import { badRequest, conflict, forbidden, gone, HttpError, notFound } from "../../../lib/errors";
+import { AuthzDeniedError, channelResource, type PermissionService } from "../../organization";
 import { type Directory, loadDirectory } from "../directory";
 import { resolveMentions } from "../mentions";
 import { editMessage } from "../message-actions";
 import {
   type ChatDeps,
   type ConversationRow,
+  channelFacts,
   convTopic,
   iso,
   lockNextSeq,
@@ -57,7 +59,48 @@ export type BoardAuthor =
   | { kind: "user"; id: string }
   | { kind: "agent"; id: string; onBehalfOfUserId: string };
 
+export type AgentBoardActor = Extract<BoardAuthor, { kind: "agent" }>;
+
 const CARD_NOT_FOUND = "Card not found";
+
+/**
+ * The agent branch's decision (07.1-10, D-07, C-01): the confused-deputy rule of agent posts, applied to boards. A write
+ * on an archived board is 410 `channel_archived`; then `permission` is decided for the agent itself (enabled, a member
+ * of the channel, not denied by a rule) and for the agent acting for the turn's human on that human's own facts (agent
+ * ∩ human: the human must still hold it on this channel now, so an agent never acts beyond the person it answers).
+ * A denial throws the resolver's error (403 with its layer and reason; the error handler audits `authz.denied`).
+ */
+export async function assertAgentOnBoard(
+  tx: Tx,
+  perms: PermissionService | undefined,
+  conv: ConversationRow,
+  actor: AgentBoardActor,
+  permission: "channel.post" | "channel.read",
+): Promise<void> {
+  if (!perms) throw new Error("an agent's board call needs the permission service");
+  if (permission === "channel.post" && conv.archivedAt)
+    throw gone("This channel is archived", "channel_archived");
+  const agentRes = channelResource(await channelFacts(tx, conv, { kind: "agent", id: actor.id }));
+  const own = await perms.decide(tx, { kind: "agent", agentId: actor.id }, permission, agentRes);
+  if (!own.allowed) {
+    throw new AuthzDeniedError(own.denial ?? { permission, layer: "agent", reason: "missing_permission" });
+  }
+  const humanRes = channelResource(
+    await channelFacts(tx, conv, { kind: "user", id: actor.onBehalfOfUserId }),
+  );
+  const forHuman = await perms.decide(
+    tx,
+    { kind: "agent", agentId: actor.id, onBehalfOfUserId: actor.onBehalfOfUserId },
+    permission,
+    agentRes,
+    humanRes,
+  );
+  if (!forHuman.allowed) {
+    throw new AuthzDeniedError(
+      forHuman.denial ?? { permission, layer: "user", reason: "missing_permission" },
+    );
+  }
+}
 
 // ---------------------------------------------------------------- DTOs
 
@@ -299,6 +342,34 @@ export async function readColumnPage(
   };
 }
 
+/**
+ * What an agent reads of the turn's board (07.1-10): the board, its columns and the card whose thread the turn is in
+ * (the turn's message is the card root or a reply under it; null otherwise). Decided like an agent read: `channel.read`
+ * for the agent and for the agent acting for the turn's human.
+ */
+export async function readAgentBoard(
+  tx: Tx,
+  perms: PermissionService,
+  args: { conv: ConversationRow; actor: AgentBoardActor; turnMessageId: string },
+): Promise<{ board: Board; columns: BoardColumn[]; card: BoardCard | null }> {
+  const { conv } = args;
+  await assertAgentOnBoard(tx, perms, conv, args.actor, "channel.read");
+  const [board] = await tx.select().from(boards).where(eq(boards.conversationId, conv.id)).limit(1);
+  if (!board) throw badRequest("This channel is not a board", "not_a_board");
+  const [message] = await tx
+    .select({ id: messages.id, threadId: messages.threadId, conversationId: messages.conversationId })
+    .from(messages)
+    .where(eq(messages.id, args.turnMessageId))
+    .limit(1);
+  const root = message && message.conversationId === conv.id ? (message.threadId ?? message.id) : null;
+  const card = root ? await loadCard(tx, conv.id, root) : null;
+  return {
+    board: toBoard(board),
+    columns: (await columnsOf(tx, conv.id)).map(toColumn),
+    card: card ? toCard(card) : null,
+  };
+}
+
 // ---------------------------------------------------------------- placement (under the stream lock)
 
 /**
@@ -371,6 +442,8 @@ export interface CreateBoardCardArgs {
   input: CreateBoardCardRequest;
   clientKind: PostInput["clientKind"];
   sessionId?: string | null;
+  /** Required for an agent author (07.1-10): its `channel.post` is decided here, agent ∩ the turn's human. */
+  perms?: PermissionService;
 }
 
 /**
@@ -387,6 +460,8 @@ export async function createBoardCard(
   args: CreateBoardCardArgs,
 ): Promise<{ card: BoardCard; created: boolean; result: PostResult }> {
   const { conv, author, input } = args;
+  // An agent posts for the turn's human only while both may post here (users are decided by `writableBoard`).
+  if (author.kind === "agent") await assertAgentOnBoard(tx, args.perms, conv, author, "channel.post");
   await lockNextSeq(tx, convTopic(conv.id));
   const dir = await loadDirectory(tx);
 
@@ -514,6 +589,8 @@ export interface UpdateBoardCardArgs {
   actor: BoardAuthor;
   input: UpdateBoardCardRequest;
   sessionId?: string | null;
+  /** Required for an agent actor (07.1-10): its `channel.post` is decided here, agent ∩ the turn's human. */
+  perms?: PermissionService;
   /** Runs in the transaction right after the root message was rewritten (the route calls chat's edit observers). */
   onTextEdited?: (tx: Tx, edit: CardTextEdit) => Promise<void>;
 }
@@ -542,9 +619,19 @@ const sameValues = (a: Record<string, unknown>, b: Record<string, unknown>) => {
 export async function updateBoardCard(tx: Tx, deps: ChatDeps, args: UpdateBoardCardArgs): Promise<BoardCard> {
   const { conv, messageId, actor, input } = args;
   const textEdit = input.title !== undefined || input.description !== undefined || input.fields !== undefined;
+  // Agents move cards and set the waiting state for the turn's human; they never edit card text (P-03).
+  if (actor.kind === "agent") {
+    if (textEdit) throw forbidden("Agents do not edit card text", "not_author");
+    await assertAgentOnBoard(tx, args.perms, conv, actor, "channel.post");
+  }
   await lockNextSeq(tx, convTopic(conv.id));
   const current = await loadCard(tx, conv.id, messageId, true);
-  if (!current) throw notFound(CARD_NOT_FOUND, "card_not_found");
+  // An agent only ever reaches the turn's board: any other id (another board, a message, another tenant) is not in it.
+  if (!current) {
+    throw actor.kind === "agent"
+      ? notFound("That card is not on this board", "card_not_in_board")
+      : notFound(CARD_NOT_FOUND, "card_not_found");
+  }
   if (textEdit && (actor.kind !== "user" || current.authorKind !== "user" || current.authorId !== actor.id)) {
     throw forbidden("Only the author can edit this message", "not_author");
   }
