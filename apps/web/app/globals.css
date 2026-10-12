@@ -20,6 +20,8 @@
   --popover-foreground: oklch(0.21 0.006 285.885);
   --primary: oklch(0.52 0.22 277);
   --primary-foreground: oklch(0.985 0 0);
+  /* `text-primary` (links, labels, icons): the primary itself in light mode. */
+  --primary-text: oklch(0.52 0.22 277);
   --secondary: oklch(0.967 0.001 286.375);
   --secondary-foreground: oklch(0.21 0.006 285.885);
   --muted: oklch(0.967 0.001 286.375);
@@ -53,8 +55,15 @@
   --card-foreground: oklch(0.96 0.002 286);
   --popover: oklch(0.2 0.006 285.8);
   --popover-foreground: oklch(0.96 0.002 286);
-  --primary: oklch(0.64 0.19 278);
+  /*
+   * Fills (primary buttons, badges, switches): white text measures 4.7:1 (WCAG AA, 07.1-14). Same hue and chroma as
+   * the text tone below, lower lightness; at 0.64 white text was 3.44:1. `text-primary` keeps the lighter tone, which
+   * measures 5.5:1 on the background, because a fill dark enough for white text is too dark for text on the dark
+   * surfaces.
+   */
+  --primary: oklch(0.565 0.19 278);
   --primary-foreground: oklch(0.99 0 0);
+  --primary-text: oklch(0.64 0.19 278);
   --secondary: oklch(0.25 0.006 286);
   --secondary-foreground: oklch(0.96 0.002 286);
   --muted: oklch(0.235 0.006 286);
@@ -101,6 +110,8 @@
   --color-popover-foreground: var(--popover-foreground);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
+  /* Text utilities read `--text-color-*` before `--color-*`: `text-primary` uses the text tone, fills the primary. */
+  --text-color-primary: var(--primary-text);
   --color-secondary: var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);

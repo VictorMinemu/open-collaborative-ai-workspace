@@ -118,16 +118,16 @@ async function chip(dialog: Locator, label: string) {
 }
 
 /**
- * Picks `option` in a Base UI select. The select keeps its items mounted while closed, so the click on the trigger is
- * retried until the popup really shows the option (a layout shift while the dialog settles can swallow the first one).
+ * Picks `option` in a Base UI select. The select keeps its items mounted while closed, so opening and clicking are
+ * retried together until the option is chosen: a layout shift while the dialog settles can swallow the opening
+ * click, and the popup can close again between "visible" and the click.
  */
 async function pick(page: Page, trigger: Locator, option: string | RegExp) {
   const item = page.getByRole("option", { name: option, exact: typeof option === "string" });
   await expect(async () => {
     if (!(await item.isVisible())) await trigger.click();
-    await expect(item).toBeVisible({ timeout: 2_000 });
+    await item.click({ timeout: 2_000 });
   }).toPass({ timeout: 15_000 });
-  await item.click();
 }
 
 /** Dana's Case file, typed in the editor: field Customer (required), four columns, the rule from the chips. */
@@ -206,18 +206,13 @@ async function scrollTo(dialog: Locator, heading: string) {
 }
 
 /**
- * axe on the editor in both themes. Dark covers the header and the body, not the footer: the app-wide dark primary
- * button (white on `--primary` oklch(0.64 0.19 278), about 3.3:1) fails color-contrast on every enabled primary
- * button. That is a token-level defect outside this plan (recorded in the 07.1-12 SUMMARY), not the editor's.
+ * axe on the whole editor in both themes, footer included: the dark primary button (Save template / Create template)
+ * meets 4.5:1 since 07.1-14 fixed the dark `--primary-foreground` token.
  */
 async function editorA11y(page: Page) {
   await expectNoSeriousA11y(page, '[data-testid="record-template-dialog"]');
   await page.emulateMedia({ colorScheme: "dark" });
-  await expectNoSeriousA11y(
-    page,
-    '[data-testid="record-template-dialog"] [data-testid="record-template-body"]',
-  );
-  await expectNoSeriousA11y(page, '[data-testid="record-template-dialog"] h2');
+  await expectNoSeriousA11y(page, '[data-testid="record-template-dialog"]');
   await page.emulateMedia({ colorScheme: "light" });
 }
 
