@@ -520,3 +520,61 @@ describe("changeBoardCard: optimistic intent, rollback, conflict (D-05)", () => 
     expect(t.sent).toEqual([]);
   });
 });
+
+describe("two people, one slot (BOARD-03, D-05): every screen settles on the server's order", () => {
+  // Víctor moves X and Alex moves A into the same slot (after B in In progress). The server places X first (a3), then
+  // A between B and X (a2V). Víctor's screen gets his PATCH answer and Alex's frame in either order, and his own frame
+  // after both; Alex's screen mirrors it. Every arrival order ends in rank order B, A, X, C.
+  const slot = { columnId: COL.progress, afterCardId: B.messageId };
+  const xPlaced = { ...X, columnId: COL.progress, rank: "a3", version: 3 };
+  const aPlaced = { ...A, columnId: COL.progress, rank: "a2V", version: A.version + 1 };
+  const serverOrder = [B.messageId, A.messageId, X.messageId, C.messageId];
+  const noFx = (send: CardChangeEffects["send"]): CardChangeEffects => ({
+    send,
+    toast: { neutral: () => undefined, error: () => undefined },
+  });
+  const upserted = (c: BoardCard) => ev(EventTypes.boardCardUpserted, { card: c });
+
+  for (const otherFirst of [true, false]) {
+    it(`own move + the other's frame ${otherFirst ? "before" : "after"} the own answer`, async () => {
+      const mine = { messageId: X.messageId, move: slot };
+      const result = await changeBoardCard(
+        qc,
+        CONV,
+        mine,
+        noFx(async () => {
+          if (otherFirst) applyBoardFrame(qc, CONV, upserted(aPlaced));
+          return xPlaced;
+        }),
+      );
+      expect(result.ok).toBe(true);
+      if (!otherFirst) applyBoardFrame(qc, CONV, upserted(aPlaced));
+      applyBoardFrame(qc, CONV, upserted(xPlaced)); // own frame, after the answer: no-op
+      expect(order(cached())[COL.progress]).toEqual(serverOrder);
+      expect(order(cached())[COL.backlog]).toEqual([]);
+    });
+  }
+
+  it("the other screen (Alex) ends the same, whatever order the two frames arrive in", async () => {
+    await changeBoardCard(
+      qc,
+      CONV,
+      { messageId: A.messageId, move: slot },
+      noFx(async () => {
+        applyBoardFrame(qc, CONV, upserted(xPlaced));
+        return aPlaced;
+      }),
+    );
+    expect(order(cached())[COL.progress]).toEqual(serverOrder);
+
+    // A third screen that only watches: frames in seq order, and again with the later one first (replayed).
+    for (const frames of [
+      [xPlaced, aPlaced],
+      [aPlaced, xPlaced],
+    ]) {
+      qc.setQueryData(boardKeys.board(CONV), snapshot([A, X, B, C]));
+      for (const c of frames) applyBoardFrame(qc, CONV, upserted(c));
+      expect(order(cached())[COL.progress]).toEqual(serverOrder);
+    }
+  });
+});
