@@ -31,3 +31,18 @@ export function keyBetween(prev: string | null, next: string | null): string | "
 export function freshKeys(n: number): string[] {
   return generateNKeysBetween(null, null, n);
 }
+
+/**
+ * `n` increasing keys after `prev` (null = an empty column), for cards appended to the bottom of a column in order.
+ * `"rerank"` when `prev` is not a valid key or a key would exceed `RANK_KEY_MAX`: the caller rewrites the column.
+ */
+export function keysAfter(prev: string | null, n: number): string[] | "rerank" {
+  if (n === 0) return [];
+  let keys: string[];
+  try {
+    keys = generateNKeysBetween(prev, null, n);
+  } catch {
+    return "rerank";
+  }
+  return keys.some((k) => k.length > RANK_KEY_MAX) ? "rerank" : keys;
+}

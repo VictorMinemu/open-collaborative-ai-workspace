@@ -17,9 +17,11 @@ import {
   BoardSnapshot,
   BoardUpdatedEvent,
   CreateBoardCardRequest,
+  CreateBoardColumnRequest,
   CreateRecordTemplateRequest,
   cardMessageBody,
   DEFAULT_BOARD_COLUMNS,
+  DeleteBoardColumnQuery,
   fieldValuesSchema,
   firstLine,
   parseNamingRule,
@@ -28,6 +30,7 @@ import {
   RecordTemplateListQuery,
   renderCardTitle,
   UpdateBoardCardRequest,
+  UpdateBoardColumnRequest,
   UpdateRecordTemplateRequest,
 } from "./board";
 import { BUILTIN_TOOLS, isDangerousToolName } from "./bot-capabilities";
@@ -267,6 +270,24 @@ describe("board schemas", () => {
         .success,
     ).toBe(true);
     expect(UpdateBoardCardRequest.safeParse({ waitingOn: "us" }).success).toBe(false);
+  });
+
+  it("column requests: bounded names, Keep as is by default, a change required, moveCardsTo optional", () => {
+    expect(CreateBoardColumnRequest.parse({ name: " Review ", category: "started" })).toEqual({
+      name: "Review",
+      category: "started",
+      defaultWaitingOn: null,
+    });
+    expect(CreateBoardColumnRequest.safeParse({ name: "x".repeat(61), category: "started" }).success).toBe(
+      false,
+    );
+    expect(CreateBoardColumnRequest.safeParse({ name: "Review", category: "archived" }).success).toBe(false);
+    expect(UpdateBoardColumnRequest.safeParse({}).success).toBe(false);
+    expect(UpdateBoardColumnRequest.parse({ defaultWaitingOn: null })).toEqual({ defaultWaitingOn: null });
+    expect(UpdateBoardColumnRequest.parse({ afterColumnId: null })).toEqual({ afterColumnId: null });
+    expect(DeleteBoardColumnQuery.parse({})).toEqual({});
+    expect(DeleteBoardColumnQuery.safeParse({ moveCardsTo: "not-an-id" }).success).toBe(false);
+    expect(DeleteBoardColumnQuery.parse({ moveCardsTo: COL })).toEqual({ moveCardsTo: COL });
   });
 
   it("ships the four default columns, one per category", () => {
