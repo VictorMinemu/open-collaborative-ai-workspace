@@ -359,6 +359,8 @@ describe("tracer: a test kind is requested, viewed, decided and applied in one a
       actor_id: victorId,
       metadata: { approvalId: id, kind: "test.apply", mode: "server_apply", outcome: "approved" },
     });
+    // Víctor decided a request made for Sam: not a self-approval.
+    expect(decided?.metadata).not.toHaveProperty("selfApproved");
     const [applied] = await auditsFor("approval.applied", id);
     expect(applied?.metadata).toEqual({ approvalId: id, kind: "test.apply", mode: "server_apply" });
     const updates = await updatesOf(id);
@@ -405,6 +407,8 @@ describe("tracer: a test kind is requested, viewed, decided and applied in one a
     expect(pres.status, JSON.stringify(pres.body)).toBe(200);
     const meta = (await auditsFor("approval.decided", p.id))[0]?.metadata as Json;
     expect(meta.noteChars).toBe(secret.length);
+    // Sam decided his own request: the audit records it as a flag (owner decision 2026-10-13).
+    expect(meta.selfApproved).toBe(true);
     expect(JSON.stringify(meta)).not.toContain("medical");
 
     const long = await request("test.apply");
