@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 113
+open_count: 117
 waived_count: 3
-fixed_count: 31
-total_count: 147
-last_updated: 2026-10-13T06:30:45.960Z
+fixed_count: 32
+total_count: 152
+last_updated: 2026-10-13T07:15:00.503Z
 ---
 
 # Broken Windows Ledger
@@ -137,7 +137,7 @@ last_updated: 2026-10-13T06:30:45.960Z
 | 120 | 07.2 | deviation | compose.yaml |  | The internal pii network is created by every compose project even with the profile off (uses Docker address pools); adding it recreates the api once on the next up | open |  | 2026-10-13T04:19:12.931Z |  |
 | 121 | 07.2 | unrun-verify | infra/presidio/recognizers.yaml |  | Spanish Presidio accuracy only checked on fixed samples (missed a Spanish name in a probe); owner manual check on real documents | open |  | 2026-10-13T04:19:13.026Z |  |
 | 122 | 07.2 | deviation | scripts/ocw.mjs |  | No pnpm ocw enable pii: turning on the pii profile means editing .env by hand, unlike other profiles | open |  | 2026-10-13T04:19:13.134Z |  |
-| 123 | 07.2 | deviation | apps/openclaw-channel/src/memory-files-tool.ts |  | /memory/* Agent Channel routes exist only in the fake API until 07.2-11; the real API would 404 (no turn offers the tools yet) | open |  | 2026-10-13T04:30:05.478Z |  |
+| 123 | 07.2 | deviation | apps/openclaw-channel/src/memory-files-tool.ts |  | /memory/* Agent Channel routes exist only in the fake API until 07.2-11; the real API would 404 (no turn offers the tools yet) | fixed |  | 2026-10-13T04:30:05.478Z | 2026-10-13T07:15:00.114Z |
 | 124 | 07.2 | deviation | infra/openclaw |  | No memory scenario in the real-cell smoke yet; add it in 07.2-15 | open |  | 2026-10-13T04:30:05.563Z |  |
 | 125 | 07.2 | deviation | apps/openclaw-channel/src/agent-channel-protocol.ts |  | memoryFiles mirror uses the exact scopeKind enum: a new API scopeKind silently drops all files and falls back to legacy notes until the mirror is updated | open |  | 2026-10-13T04:30:05.650Z |  |
 | 126 | 07.2 | deviation | packages/contracts/src/sensitive-data.ts |  | detectSensitive returns unbounded spans while MemoryProposalView caps 200 spans / 50 findings; 07.2-09 must cap before building the view | fixed |  | 2026-10-13T04:39:23.084Z | 2026-10-13T06:30:45.615Z |
@@ -162,6 +162,11 @@ last_updated: 2026-10-13T06:30:45.960Z
 | 145 | 07.2 | deviation | apps/api/src/modules/memory/proposals.ts |  | Presidio runs inside the proposal transaction: up to 2 s holding the connection and advisory lock | open |  | 2026-10-13T06:30:45.823Z |  |
 | 146 | 07.2 | deviation | apps/api/src/modules/memory/proposals.ts |  | canDecide and audience are expensive per row (audience calls usersAllowed over all members); related to #133 | open |  | 2026-10-13T06:30:45.892Z |  |
 | 147 | 07.2 | deviation | apps/api/src/modules/memory/proposals.ts |  | Proposal view spans are layer 1 only (Presidio spans not stored; findings shown per line); requestedBy.agent is required, 07.6 will need it nullable | open |  | 2026-10-13T06:30:45.960Z |  |
+| 148 | 07.2 | deviation | apps/api/src/modules/agent-channel/memory-files.ts |  | Agent memory list/read count against the turn limit only in the /tool-calls gate; the route does not check it | open |  | 2026-10-13T07:15:00.193Z |  |
+| 149 | 07.2 | deviation | apps/api/src/modules/agent-channel/memory-files.ts |  | Agent memory list costs one decision per file; each memory turn queries the bot notebook and decides twice in a DM (related to #139) | open |  | 2026-10-13T07:15:00.266Z |  |
+| 150 | 07.2 | unrun-verify | e2e/tests/bot-memory.spec.ts |  | bot-capabilities.spec and bot-memory.spec not run after 07.2-11; the fake API never answers no_trigger, the 07.2-15 smoke should cover an expired-turn call | open |  | 2026-10-13T07:15:00.344Z |  |
+| 151 | 07.2 | deviation | packages/db/src/schema |  | app.agent_memories is now dead data (notes live in the private MEMORY.md); dropping it needs a later migration once the backfill has been in production | open |  | 2026-10-13T07:15:00.428Z |  |
+| 152 | 07.2 | deviation | apps/api/src/modules/bot-capabilities/memory.ts |  | Legacy notes share one createdAt (file mtime); a note refused for a secret reaches the model as 'not accepted' with no reason | open |  | 2026-10-13T07:15:00.503Z |  |
 
 ````json
 [
@@ -1636,10 +1641,10 @@ last_updated: 2026-10-13T06:30:45.960Z
     "file": "apps/openclaw-channel/src/memory-files-tool.ts",
     "line": null,
     "description": "/memory/* Agent Channel routes exist only in the fake API until 07.2-11; the real API would 404 (no turn offers the tools yet)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T04:30:05.478Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-13T07:15:00.114Z"
   },
   {
     "id": 124,
@@ -1927,6 +1932,66 @@ last_updated: 2026-10-13T06:30:45.960Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-13T06:30:45.960Z",
+    "resolved_at": null
+  },
+  {
+    "id": 148,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/agent-channel/memory-files.ts",
+    "line": null,
+    "description": "Agent memory list/read count against the turn limit only in the /tool-calls gate; the route does not check it",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T07:15:00.193Z",
+    "resolved_at": null
+  },
+  {
+    "id": 149,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/agent-channel/memory-files.ts",
+    "line": null,
+    "description": "Agent memory list costs one decision per file; each memory turn queries the bot notebook and decides twice in a DM (related to #139)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T07:15:00.266Z",
+    "resolved_at": null
+  },
+  {
+    "id": 150,
+    "kind": "unrun-verify",
+    "phase": "07.2",
+    "file": "e2e/tests/bot-memory.spec.ts",
+    "line": null,
+    "description": "bot-capabilities.spec and bot-memory.spec not run after 07.2-11; the fake API never answers no_trigger, the 07.2-15 smoke should cover an expired-turn call",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T07:15:00.344Z",
+    "resolved_at": null
+  },
+  {
+    "id": 151,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "packages/db/src/schema",
+    "line": null,
+    "description": "app.agent_memories is now dead data (notes live in the private MEMORY.md); dropping it needs a later migration once the backfill has been in production",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T07:15:00.428Z",
+    "resolved_at": null
+  },
+  {
+    "id": 152,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/bot-capabilities/memory.ts",
+    "line": null,
+    "description": "Legacy notes share one createdAt (file mtime); a note refused for a secret reaches the model as 'not accepted' with no reason",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T07:15:00.503Z",
     "resolved_at": null
   }
 ]
