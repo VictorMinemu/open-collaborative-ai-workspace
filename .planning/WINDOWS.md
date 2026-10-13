@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 108
+open_count: 111
 waived_count: 3
 fixed_count: 29
-total_count: 140
-last_updated: 2026-10-13T05:47:47.411Z
+total_count: 143
+last_updated: 2026-10-13T06:29:37.838Z
 ---
 
 # Broken Windows Ledger
@@ -155,6 +155,9 @@ last_updated: 2026-10-13T05:47:47.411Z
 | 138 | 07.2 | deviation | apps/api/src/modules/memory |  | A deleted memory file cannot be restored over REST (restore works only on live files) | open |  | 2026-10-13T05:47:47.259Z |  |
 | 139 | 07.2 | deviation | apps/api/src/modules/memory |  | GET /memory/scopes writes: it lazily creates the org scope and missing unit scopes | open |  | 2026-10-13T05:47:47.334Z |  |
 | 140 | 07.2 | deviation | apps/api/src/modules/memory |  | A 256 KiB body of escaped control chars exceeds Fastify's 1 MiB limit and returns Fastify's 413, not memory_file_too_large | open |  | 2026-10-13T05:47:47.411Z |  |
+| 141 | 07.2 | deviation | apps/api/src/modules/memory/search.ts |  | Memory search loads every readable file's content (listReadableFiles) per scope just to get ids, calls listScopes (which writes) and one permission pass per scope; heavy at scale — select ids only | open |  | 2026-10-13T06:29:37.690Z |  |
+| 142 | 07.2 | deviation | apps/api/src/modules/memory/search.ts |  | Snippet highlighting scans full content: up to 50 files x 3 configs x 256 KiB per search | open |  | 2026-10-13T06:29:37.759Z |  |
+| 143 | 07.2 | deviation | apps/api/src/modules/memory/search.ts |  | Path-only matches return an unmarked snippet; snippet helpers are duplicated from the chat search module | open |  | 2026-10-13T06:29:37.838Z |  |
 
 ````json
 [
@@ -1836,6 +1839,42 @@ last_updated: 2026-10-13T05:47:47.411Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-13T05:47:47.411Z",
+    "resolved_at": null
+  },
+  {
+    "id": 141,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/memory/search.ts",
+    "line": null,
+    "description": "Memory search loads every readable file's content (listReadableFiles) per scope just to get ids, calls listScopes (which writes) and one permission pass per scope; heavy at scale — select ids only",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T06:29:37.690Z",
+    "resolved_at": null
+  },
+  {
+    "id": 142,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/memory/search.ts",
+    "line": null,
+    "description": "Snippet highlighting scans full content: up to 50 files x 3 configs x 256 KiB per search",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T06:29:37.759Z",
+    "resolved_at": null
+  },
+  {
+    "id": 143,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/memory/search.ts",
+    "line": null,
+    "description": "Path-only matches return an unmarked snippet; snippet helpers are duplicated from the chat search module",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T06:29:37.838Z",
     "resolved_at": null
   }
 ]
