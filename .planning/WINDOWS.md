@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 111
+open_count: 110
 waived_count: 3
-fixed_count: 53
-total_count: 167
-last_updated: 2026-10-13T11:20:21.939Z
+fixed_count: 55
+total_count: 168
+last_updated: 2026-10-13T15:20:09.851Z
 ---
 
 # Broken Windows Ledger
@@ -138,7 +138,7 @@ last_updated: 2026-10-13T11:20:21.939Z
 | 121 | 07.2 | unrun-verify | infra/presidio/recognizers.yaml |  | Spanish Presidio accuracy only checked on fixed samples (missed a Spanish name in a probe); owner manual check on real documents | open |  | 2026-10-13T04:19:13.026Z |  |
 | 122 | 07.2 | deviation | scripts/ocw.mjs |  | No pnpm ocw enable pii: turning on the pii profile means editing .env by hand, unlike other profiles | open |  | 2026-10-13T04:19:13.134Z |  |
 | 123 | 07.2 | deviation | apps/openclaw-channel/src/memory-files-tool.ts |  | /memory/* Agent Channel routes exist only in the fake API until 07.2-11; the real API would 404 (no turn offers the tools yet) | fixed |  | 2026-10-13T04:30:05.478Z | 2026-10-13T07:15:00.114Z |
-| 124 | 07.2 | deviation | infra/openclaw |  | No memory scenario in the real-cell smoke yet; add it in 07.2-15 | open |  | 2026-10-13T04:30:05.563Z |  |
+| 124 | 07.2 | deviation | infra/openclaw |  | No memory scenario in the real-cell smoke yet; add it in 07.2-15 | fixed |  | 2026-10-13T04:30:05.563Z | 2026-10-13T15:20:09.715Z |
 | 125 | 07.2 | deviation | apps/openclaw-channel/src/agent-channel-protocol.ts |  | memoryFiles mirror uses the exact scopeKind enum: a new API scopeKind silently drops all files and falls back to legacy notes until the mirror is updated | open |  | 2026-10-13T04:30:05.650Z |  |
 | 126 | 07.2 | deviation | packages/contracts/src/sensitive-data.ts |  | detectSensitive returns unbounded spans while MemoryProposalView caps 200 spans / 50 findings; 07.2-09 must cap before building the view | fixed |  | 2026-10-13T04:39:23.084Z | 2026-10-13T06:30:45.615Z |
 | 127 | 07.2 | deviation | packages/contracts/src/sensitive-data.ts |  | False positives (warn): any bare 9-digit number starting 6-9 is a phone; git@github.com:org/repo is an email; Luhn accepts 0000 0000 0000 0000 | open |  | 2026-10-13T04:39:23.163Z |  |
@@ -164,7 +164,7 @@ last_updated: 2026-10-13T11:20:21.939Z
 | 147 | 07.2 | deviation | apps/api/src/modules/memory/proposals.ts |  | Proposal view spans are layer 1 only (Presidio spans not stored; findings shown per line); requestedBy.agent is required, 07.6 will need it nullable | open |  | 2026-10-13T06:30:45.960Z |  |
 | 148 | 07.2 | deviation | apps/api/src/modules/agent-channel/memory-files.ts |  | Agent memory list/read count against the turn limit only in the /tool-calls gate; the route does not check it | fixed |  | 2026-10-13T07:15:00.193Z | 2026-10-13T10:56:27.168Z |
 | 149 | 07.2 | deviation | apps/api/src/modules/agent-channel/memory-files.ts |  | Agent memory list costs one decision per file; each memory turn queries the bot notebook and decides twice in a DM (related to #139) | open |  | 2026-10-13T07:15:00.266Z |  |
-| 150 | 07.2 | unrun-verify | e2e/tests/bot-memory.spec.ts |  | bot-capabilities.spec and bot-memory.spec not run after 07.2-11; the fake API never answers no_trigger, the 07.2-15 smoke should cover an expired-turn call | open |  | 2026-10-13T07:15:00.344Z |  |
+| 150 | 07.2 | unrun-verify | e2e/tests/bot-memory.spec.ts |  | bot-capabilities.spec and bot-memory.spec not run after 07.2-11; the fake API never answers no_trigger, the 07.2-15 smoke should cover an expired-turn call | fixed |  | 2026-10-13T07:15:00.344Z | 2026-10-13T15:20:09.783Z |
 | 151 | 07.2 | deviation | packages/db/src/schema |  | app.agent_memories is now dead data (notes live in the private MEMORY.md); dropping it needs a later migration once the backfill has been in production | open |  | 2026-10-13T07:15:00.428Z |  |
 | 152 | 07.2 | deviation | apps/api/src/modules/bot-capabilities/memory.ts |  | Legacy notes share one createdAt (file mtime); a note refused for a secret reaches the model as 'not accepted' with no reason | open |  | 2026-10-13T07:15:00.503Z |  |
 | 153 | 07.2 | deviation | apps/web/components/memory |  | The Proposals row links to /memory/proposals (built by 07.2-13, not-found until then) and on mobile shows for everyone, while the UI-SPEC limits it to deciders and proposers | fixed |  | 2026-10-13T07:35:47.377Z | 2026-10-13T09:48:45.555Z |
@@ -182,6 +182,7 @@ last_updated: 2026-10-13T11:20:21.939Z
 | 165 | 07.2 | deviation | apps/web/components/memory |  | 'No sensitive data found' next to 'Extended scan unavailable' can read as reassuring; review-memory-scopes-390 screenshot from 07.2-10 is stale (shows the now-hidden Proposals row) | fixed |  | 2026-10-13T09:48:45.937Z | 2026-10-13T11:20:21.939Z |
 | 166 | 07.2 | deviation | apps/api/src/modules/approval |  | Requests orphaned before the gone path stay pending until expiry (no sweep); if removing a member ever cascades their personal scopes, that path does not call closeGone | open |  | 2026-10-13T10:56:27.581Z |  |
 | 167 | 07.2 | deviation | apps/api/src/modules/memory |  | memory.changed: a rename only notifies readers of the new path; unit-scope writes emit one event per reader (a unit: topic would scale better); no e2e for live team-file updates | open |  | 2026-10-13T10:56:27.664Z |  |
+| 168 | 07.2 | deviation | apps/api/src/modules/agent-channel |  | Stored cell stream events keep private memory content (turn payloads) and forgetting a scope does not purge them | open |  | 2026-10-13T15:20:09.851Z |  |
 
 ````json
 [
@@ -1668,10 +1669,10 @@ last_updated: 2026-10-13T11:20:21.939Z
     "file": "infra/openclaw",
     "line": null,
     "description": "No memory scenario in the real-cell smoke yet; add it in 07.2-15",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T04:30:05.563Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-13T15:20:09.715Z"
   },
   {
     "id": 125,
@@ -1980,10 +1981,10 @@ last_updated: 2026-10-13T11:20:21.939Z
     "file": "e2e/tests/bot-memory.spec.ts",
     "line": null,
     "description": "bot-capabilities.spec and bot-memory.spec not run after 07.2-11; the fake API never answers no_trigger, the 07.2-15 smoke should cover an expired-turn call",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T07:15:00.344Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-13T15:20:09.783Z"
   },
   {
     "id": 151,
@@ -2187,6 +2188,18 @@ last_updated: 2026-10-13T11:20:21.939Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-13T10:56:27.664Z",
+    "resolved_at": null
+  },
+  {
+    "id": 168,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/agent-channel",
+    "line": null,
+    "description": "Stored cell stream events keep private memory content (turn payloads) and forgetting a scope does not purge them",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T15:20:09.851Z",
     "resolved_at": null
   }
 ]
