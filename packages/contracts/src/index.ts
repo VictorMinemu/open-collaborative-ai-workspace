@@ -1,6 +1,7 @@
 export * from "./agent";
 export * from "./agent-cards";
 export * from "./agent-channel";
+export * from "./agent-templates";
 export * from "./ai-chat";
 export * from "./ai-generation";
 export * from "./approvals";
@@ -14,6 +15,7 @@ export * from "./device";
 export * from "./device-link";
 export * from "./health";
 export * from "./identity";
+export * from "./keychain";
 export * from "./marketplace";
 export * from "./mcp";
 export * from "./memory";

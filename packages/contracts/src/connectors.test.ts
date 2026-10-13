@@ -1,16 +1,39 @@
 import { describe, expect, it } from "vitest";
+import type { z } from "zod";
 import {
   AgentChannelConnectorCall,
   AgentChannelConnectorCallResponse,
   AgentChannelConnectorList,
+  AgentChannelConnectorListResponse,
+  AgentChannelHttpRequest,
+  AgentChannelHttpResponse,
   AgentChannelToolRefusal,
+  AgentTemplate,
+  AgentTemplateLink,
+  AgentTemplateList,
+  AgentTemplateOptions,
+  AgentTemplatePreview,
+  AgentTemplateVersion,
   ConnectionStatus,
   ConnectorAuthMode,
   ConnectorErrorCode,
   ConnectorOAuthClientInput,
   ConnectorOAuthClientView,
   ConnectorOAuthStatus,
+  ConnectSecretRequest,
+  ConnectStartResponse,
+  CreateMemberAccountShareRequest,
   connectorOAuthUrls,
+  InstantiateAgentTemplateResponse,
+  McpServer,
+  McpServerList,
+  MemberAccountShare,
+  MemberAccountShareList,
+  MemberConnector,
+  MemberConnectorList,
+  ReadersPreview,
+  VaultItem,
+  VaultItemList,
 } from "./index";
 
 const ID = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
@@ -165,5 +188,261 @@ describe("Agent Channel connector tools (D-02, D-07: the requester is the stored
       ]),
     );
     expect(AgentChannelToolRefusal.options).toHaveLength(13);
+  });
+});
+
+const NOW = "2026-10-13T10:00:00.000Z";
+
+const memberConnector = {
+  serverId: ID,
+  name: "Acme CRM",
+  safeName: "m1a2b3c4d",
+  authMode: "per_member_oauth",
+  status: "connected",
+  connectedAt: NOW,
+  lastUsedAt: null,
+  scopes: ["crm.read"],
+  oauthStatus: "ready",
+  secretHeaderName: null,
+  secretHeaderPrefix: null,
+  accountLabel: "sam@example.com",
+  reconnectReason: null,
+};
+
+describe("member connections (D-01, R1, R2)", () => {
+  it("a member connector shows the account it is connected as, or none for keys", () => {
+    expect(MemberConnector.parse(memberConnector)).toEqual(memberConnector);
+    const key = {
+      ...memberConnector,
+      authMode: "per_member_secret",
+      oauthStatus: null,
+      scopes: [],
+      secretHeaderName: "X-Api-Key",
+      secretHeaderPrefix: "",
+      accountLabel: null,
+    };
+    expect(MemberConnector.parse(key)).toEqual(key);
+    expect(MemberConnector.safeParse({ ...memberConnector, authMode: "org_secret" }).success).toBe(false);
+  });
+
+  it("says why a connection needs reconnecting, and nothing else", () => {
+    for (const reconnectReason of ["expired", "revoked", "provider_changed"]) {
+      expect(
+        MemberConnector.safeParse({ ...memberConnector, status: "needs_reconnect", reconnectReason }).success,
+        reconnectReason,
+      ).toBe(true);
+    }
+    for (const reconnectReason of ["invalid_grant", "", "other"]) {
+      expect(
+        MemberConnector.safeParse({ ...memberConnector, status: "needs_reconnect", reconnectReason }).success,
+        reconnectReason,
+      ).toBe(false);
+    }
+  });
+
+  it("the list carries the instance's OAuth URLs; connecting returns only where to go", () => {
+    expect(
+      MemberConnectorList.parse({
+        connectors: [memberConnector],
+        oauth: { redirectUri: "https://o.test/cb", clientMetadataUrl: null, oauthAvailable: true },
+      }).connectors,
+    ).toHaveLength(1);
+    expect(ConnectStartResponse.parse({ authorizeUrl: "https://auth.example.com/authorize?x=1" })).toEqual({
+      authorizeUrl: "https://auth.example.com/authorize?x=1",
+    });
+  });
+
+  it("a member's key is write-only and never empty", () => {
+    expect(ConnectSecretRequest.safeParse({ value: "" }).success).toBe(false);
+    expect(ConnectSecretRequest.safeParse({ value: "x".repeat(8193) }).success).toBe(false);
+    expect(ConnectSecretRequest.parse({ value: "sk-1" })).toEqual({ value: "sk-1" });
+  });
+});
+
+describe("member-account shares (D-03, R7)", () => {
+  const share = {
+    id: ID,
+    conversationId: ID2,
+    conversationName: "#sales",
+    resourceKind: "connector",
+    resourceId: ID,
+    resourceName: "Acme CRM",
+    readersAtGrant: 7,
+    grantedAt: NOW,
+  };
+
+  it("a share records the conversation, the account and the readers when granted", () => {
+    expect(MemberAccountShare.parse(share)).toEqual(share);
+    expect(MemberAccountShareList.parse({ shares: [share] }).shares).toHaveLength(1);
+    expect(MemberAccountShare.safeParse({ ...share, resourceKind: "agent" }).success).toBe(false);
+    expect(MemberAccountShare.safeParse({ ...share, readersAtGrant: -1 }).success).toBe(false);
+  });
+
+  it("creating names the conversation and the account, never a user", () => {
+    const req = { conversationId: ID2, resourceKind: "vault_item", resourceId: ID };
+    expect(CreateMemberAccountShareRequest.parse({ ...req, userId: ID })).toEqual(req);
+  });
+
+  it("the readers preview counts who would see results", () => {
+    const preview = { conversationId: ID2, conversationName: null, readers: 12, unbounded: false };
+    expect(ReadersPreview.parse(preview)).toEqual(preview);
+  });
+});
+
+describe("Agent Channel http requests with a keychain handle (D-04)", () => {
+  const req = {
+    eventId: ID,
+    agentId: ID2,
+    handle: "k_abcdefgh23",
+    method: "GET",
+    url: "https://erp.example.com/v2/orders",
+  };
+
+  it("takes a handle, a method, an http(s) URL and bounded headers and body; never a user", () => {
+    expect(AgentChannelHttpRequest.parse({ ...req, userId: ID })).toEqual(req);
+    expect(AgentChannelHttpRequest.safeParse({ ...req, url: "ftp://erp.example.com/x" }).success).toBe(false);
+    expect(AgentChannelHttpRequest.safeParse({ ...req, url: "file:///etc/passwd" }).success).toBe(false);
+    expect(
+      AgentChannelHttpRequest.safeParse({ ...req, url: `https://e.test/${"x".repeat(2048)}` }).success,
+    ).toBe(false);
+    expect(AgentChannelHttpRequest.safeParse({ ...req, method: "CONNECT" }).success).toBe(false);
+    expect(AgentChannelHttpRequest.safeParse({ ...req, handle: "k_bad" }).success).toBe(false);
+    expect(
+      AgentChannelHttpRequest.safeParse({ ...req, method: "POST", body: "x".repeat(64 * 1024 + 1) }).success,
+    ).toBe(false);
+    const headers = Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`X-H${i}`, "v"]));
+    expect(AgentChannelHttpRequest.safeParse({ ...req, headers }).success).toBe(false);
+    expect(
+      AgentChannelHttpRequest.safeParse({
+        ...req,
+        headers: Object.fromEntries(Object.entries(headers).slice(0, 20)),
+      }).success,
+    ).toBe(true);
+    expect(AgentChannelHttpRequest.safeParse({ ...req, headers: { "Bad Header": "v" } }).success).toBe(false);
+    expect(AgentChannelHttpRequest.safeParse({ ...req, headers: { "X-A": "x".repeat(1025) } }).success).toBe(
+      false,
+    );
+  });
+
+  it("the response is bounded text with the redirect host only", () => {
+    const res = {
+      status: 302,
+      contentType: null,
+      body: "",
+      truncated: false,
+      redirectHost: "login.example.com",
+    };
+    expect(AgentChannelHttpResponse.parse(res)).toEqual(res);
+    expect(AgentChannelHttpResponse.safeParse({ ...res, body: "x".repeat(256 * 1024 + 1) }).success).toBe(
+      false,
+    );
+  });
+
+  it("the connector list also names the turn's keys", () => {
+    const list = {
+      connectors: [
+        {
+          connector: "m1a2b3c4d",
+          name: "Acme CRM",
+          status: "connected",
+          tools: [{ name: "whoami", description: "Who am I", inputSchema: null }],
+        },
+      ],
+      keys: [{ handle: "k_abcdefgh23", name: "ERP", allowedHosts: ["erp.example.com"] }],
+    };
+    expect(AgentChannelConnectorListResponse.parse(list)).toEqual(list);
+    expect(
+      AgentChannelConnectorListResponse.safeParse({ ...list, keys: Array(33).fill(list.keys[0]) }).success,
+    ).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------- leak shape (D-06, T-07.4-01-01)
+
+const SECRET_KEYS = new Set([
+  "value",
+  "token",
+  "secret",
+  "password",
+  "clientSecret",
+  "accessToken",
+  "refreshToken",
+]);
+
+/** Every object key reachable in a Zod schema: objects, arrays, records, unions, wrappers, pipes and intersections. */
+function schemaKeys(schema: z.ZodType, seen = new Set<unknown>()): string[] {
+  if (seen.has(schema)) return [];
+  seen.add(schema);
+  const def = (schema as unknown as { _zod: { def: Record<string, unknown> & { type: string } } })._zod.def;
+  const walk = (s: unknown) => schemaKeys(s as z.ZodType, seen);
+  switch (def.type) {
+    case "object": {
+      const shape = def.shape as Record<string, z.ZodType>;
+      return Object.entries(shape).flatMap(([k, v]) => [k, ...walk(v)]);
+    }
+    case "array":
+      return walk(def.element);
+    case "record":
+      return walk(def.valueType);
+    case "union":
+      return (def.options as z.ZodType[]).flatMap(walk);
+    case "intersection":
+      return [...walk(def.left), ...walk(def.right)];
+    case "pipe":
+      return [...walk(def.in), ...walk(def.out)];
+    case "optional":
+    case "nullable":
+    case "default":
+    case "prefault":
+    case "readonly":
+    case "nonoptional":
+    case "catch":
+      return walk(def.innerType);
+    case "lazy":
+      return walk((def.getter as () => unknown)());
+    default:
+      return [];
+  }
+}
+
+describe("no response schema of 07.4 can carry a secret (D-06, CONN-05)", () => {
+  const responses: Record<string, z.ZodType> = {
+    MemberConnector,
+    MemberConnectorList,
+    ConnectStartResponse,
+    MemberAccountShare,
+    MemberAccountShareList,
+    ReadersPreview,
+    VaultItem,
+    VaultItemList,
+    AgentTemplate,
+    AgentTemplateVersion,
+    AgentTemplateList,
+    AgentTemplatePreview,
+    AgentTemplateLink,
+    AgentTemplateOptions,
+    InstantiateAgentTemplateResponse,
+    McpServer,
+    McpServerList,
+    AgentChannelConnectorListResponse,
+    AgentChannelConnectorCallResponse,
+    AgentChannelHttpResponse,
+  };
+
+  for (const [name, schema] of Object.entries(responses)) {
+    it(`${name} has no secret-named key`, () => {
+      const keys = schemaKeys(schema);
+      expect(keys.length, name).toBeGreaterThan(0);
+      expect(
+        keys.filter((k) => SECRET_KEYS.has(k)),
+        name,
+      ).toEqual([]);
+    });
+  }
+
+  it("the walker sees through wrappers and finds request secrets (self-test)", () => {
+    expect(schemaKeys(ConnectSecretRequest)).toContain("value");
+    expect(schemaKeys(McpServer)).toContain("hasSecret");
+    expect(schemaKeys(InstantiateAgentTemplateResponse)).toContain("instructions");
   });
 });

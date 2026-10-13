@@ -21,7 +21,9 @@ import { SearchProvider, TurnContext } from "./bot-capabilities";
 import { ConversationKind, Mention, MessageBody } from "./chat";
 import { Id, IsoDateTime, MemberKind, PrincipalKind } from "./common";
 import { ConnectionStatus, jsonBytes } from "./connectors";
+import { AgentVaultKey, VaultHandle } from "./keychain";
 import { DeclaredSurface } from "./marketplace";
+import { McpHeaderName } from "./mcp";
 import {
   MEMORY_LIMITS,
   MemoryContent,
@@ -867,6 +869,8 @@ export type AgentChannelConnectorEntry = z.infer<typeof AgentChannelConnectorEnt
 
 export const AgentChannelConnectorListResponse = z.object({
   connectors: z.array(AgentChannelConnectorEntry).max(CONNECTOR_TOOL_LIMITS.connectors),
+  /** Keychain handles the turn's bot may use with `ocw_http_request`: never a value. */
+  keys: z.array(AgentVaultKey).max(CONNECTOR_TOOL_LIMITS.keys).default([]),
 });
 export type AgentChannelConnectorListResponse = z.infer<typeof AgentChannelConnectorListResponse>;
 
@@ -894,3 +898,64 @@ export const AgentChannelConnectorCallResponse = z.object({
   isError: z.boolean(),
 });
 export type AgentChannelConnectorCallResponse = z.infer<typeof AgentChannelConnectorCallResponse>;
+
+export const AgentChannelHttpMethod = z.enum(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]);
+export type AgentChannelHttpMethod = z.infer<typeof AgentChannelHttpMethod>;
+
+/** Byte bounds of `ocw_http_request` (T-07.4-01-04). */
+export const HTTP_TOOL_LIMITS = {
+  urlChars: 2048,
+  headers: 20,
+  headerValueChars: 1024,
+  requestBodyBytes: 64 * 1024,
+  responseBodyBytes: 256 * 1024,
+} as const;
+
+const utf8Bytes = (s: string) => new TextEncoder().encode(s).length;
+
+/**
+ * `POST /agent-channel/v1/http-requests`: one request with a keychain handle. The API injects the secret only when the
+ * handle is usable on this turn and the URL's host is allowed; it drops model headers that could carry or replace
+ * credentials, never follows redirects and redacts the secret from the response.
+ */
+export const AgentChannelHttpRequest = z.object({
+  eventId: Id,
+  agentId: Id,
+  handle: VaultHandle,
+  method: AgentChannelHttpMethod,
+  url: z
+    .string()
+    .max(HTTP_TOOL_LIMITS.urlChars)
+    .refine(
+      (u) => {
+        try {
+          const p = new URL(u).protocol;
+          return p === "https:" || p === "http:";
+        } catch {
+          return false;
+        }
+      },
+      { message: "an http(s) URL" },
+    ),
+  headers: z
+    .record(McpHeaderName, z.string().max(HTTP_TOOL_LIMITS.headerValueChars))
+    .refine((h) => Object.keys(h).length <= HTTP_TOOL_LIMITS.headers, { message: "at most 20 headers" })
+    .optional(),
+  body: z
+    .string()
+    .refine((b) => utf8Bytes(b) <= HTTP_TOOL_LIMITS.requestBodyBytes, { message: "body over 64 KB" })
+    .optional(),
+});
+export type AgentChannelHttpRequest = z.infer<typeof AgentChannelHttpRequest>;
+
+/** Textual responses only, capped; a 3xx names its `Location` host only (no path or query that could echo a secret). */
+export const AgentChannelHttpResponse = z.object({
+  status: z.number().int().min(100).max(599),
+  contentType: z.string().max(200).nullable(),
+  body: z
+    .string()
+    .refine((b) => utf8Bytes(b) <= HTTP_TOOL_LIMITS.responseBodyBytes, { message: "body over 256 KB" }),
+  truncated: z.boolean(),
+  redirectHost: z.string().max(253).nullable(),
+});
+export type AgentChannelHttpResponse = z.infer<typeof AgentChannelHttpResponse>;

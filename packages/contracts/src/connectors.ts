@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { Id, IsoDateTime } from "./common";
 
 /**
  * Per-member connectors (Phase 07.4, D-01 … D-03; CONN-01 … CONN-03). A connector is an admin-registered MCP server
@@ -106,6 +107,87 @@ export type ConnectorOAuthClientView = z.infer<typeof ConnectorOAuthClientView>;
 /** What a member's account is: a per-member connector or a personal keychain item. */
 export const MemberAccountResourceKind = z.enum(["connector", "vault_item"]);
 export type MemberAccountResourceKind = z.infer<typeof MemberAccountResourceKind>;
+
+/**
+ * A member's explicit, audited choice to let a bot use their account in one shared conversation (D-03): results
+ * obtained with it are visible to that conversation's readers. Revoking is immediate (the tool gate re-decides).
+ */
+export const MemberAccountShare = z.object({
+  id: Id,
+  conversationId: Id,
+  conversationName: z.string().nullable(),
+  resourceKind: MemberAccountResourceKind,
+  resourceId: Id,
+  resourceName: z.string(),
+  /** How many people could read the conversation when the share was granted. */
+  readersAtGrant: z.number().int().nonnegative(),
+  grantedAt: IsoDateTime,
+});
+export type MemberAccountShare = z.infer<typeof MemberAccountShare>;
+
+/** `GET /api/v1/member-account-shares`: the caller's active shares. */
+export const MemberAccountShareList = z.object({ shares: z.array(MemberAccountShare) });
+export type MemberAccountShareList = z.infer<typeof MemberAccountShareList>;
+
+/** `POST /api/v1/member-account-shares`: the owner is always the session user, never a field. */
+export const CreateMemberAccountShareRequest = z.object({
+  conversationId: Id,
+  resourceKind: MemberAccountResourceKind,
+  resourceId: Id,
+});
+export type CreateMemberAccountShareRequest = z.infer<typeof CreateMemberAccountShareRequest>;
+
+/** Who would see results in a conversation (the share confirm dialog). `unbounded` = a group grant, not a list. */
+export const ReadersPreview = z.object({
+  conversationId: Id,
+  conversationName: z.string().nullable(),
+  readers: z.number().int().nonnegative(),
+  unbounded: z.boolean(),
+});
+export type ReadersPreview = z.infer<typeof ReadersPreview>;
+
+// ---------------------------------------------------------------- member connections (Settings › Connections)
+
+/** Why a connection needs reconnecting (R2): mapped from the terminal refresh or callback error. */
+export const ConnectorReconnectReason = z.enum(["expired", "revoked", "provider_changed"]);
+export type ConnectorReconnectReason = z.infer<typeof ConnectorReconnectReason>;
+
+/** One per-member connector as the calling member sees it. Never a token or key: only the connection's state. */
+export const MemberConnector = z.object({
+  serverId: Id,
+  name: z.string(),
+  safeName: z.string(),
+  authMode: z.enum(["per_member_oauth", "per_member_secret"]),
+  status: ConnectionStatus,
+  connectedAt: IsoDateTime.nullable(),
+  lastUsedAt: IsoDateTime.nullable(),
+  /** Scopes granted to the member's token (empty for keys). */
+  scopes: z.array(z.string()),
+  oauthStatus: ConnectorOAuthStatus.nullable(),
+  /** `per_member_secret`: where the member's key goes, so the form can say "sent as {header}: {prefix}…". */
+  secretHeaderName: z.string().nullable(),
+  secretHeaderPrefix: z.string().nullable(),
+  /** "Connected as {account}" (R1): from an ID token's email or preferred_username; null for keys or when unknown. */
+  accountLabel: z.string().max(320).nullable(),
+  /** Only with `needs_reconnect` (R2). */
+  reconnectReason: ConnectorReconnectReason.nullable(),
+});
+export type MemberConnector = z.infer<typeof MemberConnector>;
+
+/** `GET /api/v1/connectors`. */
+export const MemberConnectorList = z.object({
+  connectors: z.array(MemberConnector),
+  oauth: ConnectorOAuthUrls,
+});
+export type MemberConnectorList = z.infer<typeof MemberConnectorList>;
+
+/** `POST /api/v1/connectors/:id/connect`: only where to send the browser; the flow state stays server-side. */
+export const ConnectStartResponse = z.object({ authorizeUrl: z.string() });
+export type ConnectStartResponse = z.infer<typeof ConnectStartResponse>;
+
+/** `PUT /api/v1/connectors/:id/secret`: the member's key for a `per_member_secret` connector. Write-only. */
+export const ConnectSecretRequest = z.object({ value: z.string().min(1).max(8192) });
+export type ConnectSecretRequest = z.infer<typeof ConnectSecretRequest>;
 
 /** UTF-8 bytes of `value` serialized as JSON (`Infinity` when it cannot be serialized): the bound of tool payloads. */
 export function jsonBytes(value: unknown): number {
