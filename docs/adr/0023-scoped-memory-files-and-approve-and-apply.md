@@ -50,7 +50,9 @@ Two facts shaped the design:
 6. **Detectors (D-06).** Layer 1 in TypeScript (secrets through the shared redact patterns, IBAN, cards with Luhn,
    NIF/NIE, e-mail, phone), always on. Layer 2: Presidio as the optional `pii` compose profile, called with a short
    timeout; when it does not answer the proposal carries a visible "extended scan unavailable" marker (fail open,
-   visibly). No layer ever approves anything.
+   visibly). No layer ever approves anything. Both layers run before the proposal's transaction, with no connection
+   or lock held; the transaction recomputes the hash of what was scanned (op, base and proposed text) and refuses
+   `version_conflict` when it changed (WINDOWS 145).
 7. **Viewer.** `@headless-tree/react` for the tree (instead of react-arborist), the shared `<Markdown>` to read,
    CodeMirror 6 to edit and `@codemirror/merge` for diffs.
 
@@ -103,6 +105,14 @@ export function createApprovalModule(core: Core): { module: ApiModule; service: 
    As built, `ApprovalRow` is the full `approval_requests` row (it also carries `decisionNote` and `cardWarnings`),
    `ApprovalService` also exposes `linkedCards` (the provider the module registers on the bridge), and the bridge
    gains `postAgentMessageIn(tx, input)` so the mirror card is posted inside the request's transaction.
+   The gone path (07.2 fixes, WINDOWS 144 and 164) adds `gone?(tx, row): Promise<string | null>` to `ApprovalKind`
+   and `closeGone(tx, { ids } | { requestedByAgentId })` to `ApprovalService`: the owner of a lifecycle that makes an
+   action vanish (a unit deletion, a bot deletion, a forget) calls it in that transaction, and every pending request
+   whose kind answers a code is closed as `failed` with it, with no decider, audited `approval.closed` (ids and the
+   code), announced like a decision and mirrored on its card (status `failed`, `message.updated`, no card action turn).
+   `memory.write` answers `bot_deleted` (its bot was deleted) or `scope_gone` (its proposal went with a cascade), and its
+   `apply` also refuses `bot_deleted` / `bot_disabled`, so the server never writes on behalf of a deleted or turned-off
+   bot.
 
 9. **Two modes.** `server_apply` (07.2): the server applies the approved action inside the decision transaction.
    `grant` (07.5): an approval leaves a one-use grant that `consumeGrant` spends exactly once, only with the matching
