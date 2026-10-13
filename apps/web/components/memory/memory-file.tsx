@@ -1,14 +1,11 @@
 "use client";
 
-import {
-  MEMORY_ROOT_TEMPLATE,
-  type MemoryActor,
-  type MemoryFile as MemoryFileDto,
-  type MemoryScope,
-} from "@ocw/contracts";
-import { ArrowLeft, ChevronRight, FileText, Lock, RotateCcw } from "lucide-react";
+import { MEMORY_ROOT_TEMPLATE, type MemoryFile as MemoryFileDto, type MemoryScope } from "@ocw/contracts";
+import { ArrowLeft, ChevronRight, Eye, FileText, History, Lock, Pencil, RotateCcw, X } from "lucide-react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
-import { useCallback, useEffect, useRef } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PrincipalAvatar } from "@/components/chat/principal-avatar";
 import { EmptyState } from "@/components/common/empty-state";
 import { Markdown } from "@/components/markdown/markdown";
@@ -21,18 +18,37 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip } from "@/components/ui/tooltip";
 import { errorMessage, isApiError } from "@/lib/api";
+import { useMemoryDraft } from "@/lib/memory-draft";
+import { actorLabel } from "@/lib/memory-edit";
 import { useMemoryFile } from "@/lib/memory-queries";
 import { memoryHref, resolveMemoryLink } from "@/lib/memory-tree";
 import { cn, relativeTime } from "@/lib/utils";
+import { MemoryFileMenu } from "./memory-file-actions";
+import { MemoryHistory, MemoryRevisionView } from "./memory-history";
 import { scopeIcon, scopeTag } from "./memory-tree";
+
+/** The editor and its CodeMirror bundle load only on entering Edit (T-07.2-12-04): reading never requests them. */
+const MemoryEditor = dynamic(() => import("./memory-editor"), {
+  ssr: false,
+  loading: () => <EditorSkeleton />,
+});
+
+export type MemoryFileLayout = "wide" | "split" | "stacked";
+type Mode = "view" | "edit" | "history";
 
 /**
  * The reading pane (Phase 07.2, MEM-02, UI-SPEC "File header", "Read mode", "States"): breadcrumb with the file name
  * as `<h1>`, a meta row (scope, version, last editor, age), and the file through the shared `<Markdown
  * variant="document">` (no raw HTML). A missing file and one the viewer may not read are the same not-found state,
- * with no content (T-07.2-10-03). Editing and history arrive with 07.2-12.
+ * with no content (T-07.2-10-03).
+ *
+ * 07.2-12 adds Edit (lazy CodeMirror) and History (revisions and diffs) as URL state (`?tab=edit`, `?tab=history&v=N`;
+ * Back restores the previous state). From 1280 px (`wide`) View·Edit are segmented tabs in the header and History is a
+ * 360 px third column; from 1024 to 1279 px and on phones the file has View · Edit · History underline tabs (UI-SPEC
+ * R2, R8). Edit is offered only to writers ("Read only" otherwise), and every way out of a dirty Edit asks first.
  */
 
 /** Set before a keyboard navigation (tree Enter, search result, breadcrumb, in-viewer link): the next file shown
@@ -52,6 +68,8 @@ export interface MemoryFileProps {
   scope: MemoryScope | null;
   /** Stacked (< 1024): the phone file screen with a back control. */
   stacked?: boolean;
+  /** The shell's tier (wide ≥ 1280, split 1024-1279, stacked); defaults from `stacked`. */
+  layout?: MemoryFileLayout;
   onBack?: () => void;
   /** Breadcrumb folders reveal and focus their node in the tree. */
   onRevealFolder?: (folder: string | null) => void;
@@ -63,23 +81,27 @@ export function MemoryFile({
   scopeId,
   path,
   scope,
-  stacked = false,
+  stacked: stackedProp = false,
+  layout: layoutProp,
   onBack,
   onRevealFolder,
   readOnly = false,
 }: MemoryFileProps) {
+  const layout: MemoryFileLayout = layoutProp ?? (stackedProp ? "stacked" : "split");
+  const stacked = layout === "stacked";
   const q = useMemoryFile(scopeId, path);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const file = q.data;
+  const loadedId = file?.id;
 
-  // Keyboard opens (and every phone file screen) move focus to the file's <h1>.
+  // Keyboard opens (and every phone file screen) move focus to the file's <h1>, once per opened file.
   useEffect(() => {
-    if (!file) return;
+    if (!loadedId) return;
     if (focusHeadingOnOpen || stacked) {
       focusHeadingOnOpen = false;
       headingRef.current?.focus({ preventScroll: true });
     }
-  }, [file, stacked]);
+  }, [loadedId, stacked]);
 
   // Relative `.md` links that stay inside the scope open in the viewer; the rest renders as text (UI-SPEC "Read mode").
   const resolveHref = useCallback(
@@ -130,43 +152,303 @@ export function MemoryFile({
 
   if (!file || !scope || !path) return <FileSkeleton stacked={stacked} onBack={onBack} />;
 
-  const canWrite = file.viewerCan.includes("write") && !readOnly;
-  const templateOnly = path === "MEMORY.md" && file.content.trim() === MEMORY_ROOT_TEMPLATE.trim();
+  return (
+    <LoadedFile
+      file={file}
+      scope={scope}
+      path={path}
+      name={name}
+      layout={layout}
+      canWrite={file.viewerCan.includes("write") && !readOnly}
+      headingRef={headingRef}
+      resolveHref={resolveHref}
+      onBack={onBack}
+      onRevealFolder={onRevealFolder}
+    />
+  );
+}
+
+function LoadedFile({
+  file,
+  scope,
+  path,
+  name,
+  layout,
+  canWrite,
+  headingRef,
+  resolveHref,
+  onBack,
+  onRevealFolder,
+}: {
+  file: MemoryFileDto;
+  scope: MemoryScope;
+  path: string;
+  name: string;
+  layout: MemoryFileLayout;
+  canWrite: boolean;
+  headingRef: React.RefObject<HTMLHeadingElement | null>;
+  resolveHref: (href: string) => string | null;
+  onBack?: (() => void) | undefined;
+  onRevealFolder?: ((folder: string | null) => void) | undefined;
+}) {
+  const router = useRouter();
+  const search = useSearchParams();
+  const guard = useMemoryDraft((s) => s.guard);
+  const clearDraft = useMemoryDraft((s) => s.clear);
+  const draftVersion = useMemoryDraft((s) => (s.draft?.fileId === file.id ? s.draft.baseVersion : null));
+  const [actionsSlot, setActionsSlot] = useState<HTMLElement | null>(null);
+  const [announce, setAnnounce] = useState("");
+  const focusTab = useRef<"view" | "edit" | null>(null);
+  const ownVersion = useRef<number | null>(null);
+  const seenVersion = useRef(file.version);
+
+  const stacked = layout === "stacked";
+  const wide = layout === "wide";
+  const compact = !wide;
+  const tab = search.get("tab");
+  const mode: Mode = tab === "edit" && canWrite ? "edit" : tab === "history" ? "history" : "view";
+  const v = Number(search.get("v"));
+  const selectedVersion = mode === "history" && Number.isInteger(v) && v >= 1 && v <= file.version ? v : null;
+  const base = memoryHref(file.scopeId, path);
+
+  const go = useCallback(
+    (next: Mode, opts: { v?: number | null; replace?: boolean } = {}) => {
+      const qs = next === "view" ? "" : `?tab=${next}${opts.v ? `&v=${opts.v}` : ""}`;
+      if (opts.replace) router.replace(`${base}${qs}`, { scroll: false });
+      else router.push(`${base}${qs}`, { scroll: false });
+    },
+    [router, base],
+  );
+  const setMode = (next: Mode) => {
+    if (next === mode) return;
+    if (mode === "edit") guard(() => go(next));
+    else go(next);
+  };
+
+  // After a save the focus lands on the Edit tab (desktop) or the View tab (phone tabs) (UI-SPEC "Edit, save and guard").
+  useEffect(() => {
+    if (mode !== "view" || !focusTab.current) return;
+    const target = document.querySelector<HTMLElement>(`[data-memory-tab="${focusTab.current}"]`);
+    focusTab.current = null;
+    target?.focus();
+  }, [mode]);
+
+  // A version written elsewhere (another tab, a bot for its owner) is announced politely (UI-SPEC "Read mode").
+  useEffect(() => {
+    if (file.version === seenVersion.current) return;
+    seenVersion.current = file.version;
+    if (file.version === ownVersion.current) return;
+    setAnnounce(`Updated to version ${file.version} by ${actorLabel(file.updatedBy)}`);
+  }, [file.version, file.updatedBy]);
+
+  const onSaved = (saved: MemoryFileDto) => {
+    ownVersion.current = saved.version;
+    focusTab.current = wide ? "edit" : "view";
+    go("view", { replace: true });
+  };
+  const onLeave = () => {
+    clearDraft();
+    focusTab.current = wide ? "edit" : "view";
+    go("view");
+  };
+  const onRestored = (restored: MemoryFileDto) => {
+    ownVersion.current = restored.version;
+    go(wide ? "history" : "view");
+  };
+
+  const editor = (
+    <MemoryEditor
+      file={file}
+      compact={compact}
+      actionsSlot={wide ? actionsSlot : null}
+      onSaved={onSaved}
+      onLeave={onLeave}
+    />
+  );
+  const revision = selectedVersion ? (
+    <MemoryRevisionView
+      key={selectedVersion}
+      file={file}
+      version={selectedVersion}
+      canWrite={canWrite}
+      compact={compact}
+      onClose={() => go("history")}
+      onRestored={onRestored}
+    />
+  ) : null;
+  const history = (
+    <MemoryHistory
+      file={file}
+      selected={selectedVersion}
+      onSelect={(n) => go("history", { v: n })}
+      compact={compact}
+    />
+  );
+  const reading = (
+    <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
+      <div className={cn("mx-auto w-full max-w-[760px]", stacked ? "px-4 py-6" : "px-6 py-8")}>
+        <Markdown text={file.content} variant="document" resolveHref={resolveHref} />
+        {path === "MEMORY.md" && file.content.trim() === MEMORY_ROOT_TEMPLATE.trim() ? (
+          <p className="mt-2 text-muted-foreground text-sm">Nothing saved here yet.</p>
+        ) : null}
+      </div>
+    </div>
+  );
+
+  const header = (
+    <header className={cn("flex shrink-0 items-center gap-1 border-b", stacked ? "h-14 px-1" : "h-12 px-6")}>
+      {stacked && onBack ? (
+        <Button variant="ghost" size="icon" className="size-11" aria-label="Back to files" onClick={onBack}>
+          <ArrowLeft className="size-5" />
+        </Button>
+      ) : null}
+      <Breadcrumb
+        ref={headingRef}
+        scope={scope}
+        path={path}
+        name={name}
+        stacked={stacked}
+        onRevealFolder={onRevealFolder}
+      />
+      {wide && mode === "edit" ? <div ref={setActionsSlot} className="flex shrink-0 items-center" /> : null}
+      {wide && mode !== "edit" ? (
+        <span className="flex shrink-0 items-center gap-1">
+          {canWrite ? (
+            <Tabs value="view" onValueChange={(next) => next === "edit" && setMode("edit")}>
+              <TabsList aria-label="File view">
+                <TabsTrigger value="view" data-memory-tab="view">
+                  <Eye aria-hidden className="size-3.5" /> View
+                </TabsTrigger>
+                <TabsTrigger value="edit" data-memory-tab="edit">
+                  <Pencil aria-hidden className="size-3.5" /> Edit
+                </TabsTrigger>
+              </TabsList>
+            </Tabs>
+          ) : null}
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-pressed={mode === "history"}
+            className={cn(mode === "history" && "bg-accent")}
+            onClick={() => setMode(mode === "history" ? "view" : "history")}
+          >
+            <History /> History
+          </Button>
+        </span>
+      ) : null}
+      {wide && mode === "edit" ? null : (
+        <MemoryFileMenu scope={scope} file={file} canWrite={canWrite} compact={stacked} />
+      )}
+    </header>
+  );
+
+  const meta = (
+    <MetaRow
+      file={file}
+      scope={scope}
+      stacked={stacked}
+      canWrite={canWrite}
+      editingVersion={mode === "edit" ? (draftVersion ?? file.version) : null}
+    />
+  );
+  const live = (
+    <p className="sr-only" aria-live="polite">
+      {announce}
+    </p>
+  );
+
+  if (wide) {
+    return (
+      <div className="flex min-h-0 min-w-0 flex-1">
+        <section
+          data-testid="memory-file"
+          data-path={path}
+          data-mode={mode}
+          aria-labelledby="memory-file-title"
+          className="flex min-h-0 min-w-0 flex-1 flex-col"
+        >
+          {header}
+          {meta}
+          {mode === "edit" ? editor : (revision ?? reading)}
+          {live}
+        </section>
+        {mode === "history" ? (
+          <aside
+            data-testid="memory-history-column"
+            aria-label="History"
+            className="flex w-[360px] shrink-0 flex-col border-l bg-background"
+          >
+            <div className="flex h-12 shrink-0 items-center justify-between gap-2 border-b pr-2 pl-4">
+              <h2 className="font-semibold text-[13px] text-muted-foreground uppercase tracking-wider">
+                History
+              </h2>
+              <Button variant="ghost" size="icon-sm" aria-label="Close history" onClick={() => go("view")}>
+                <X />
+              </Button>
+            </div>
+            <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">{history}</div>
+          </aside>
+        ) : null}
+      </div>
+    );
+  }
 
   return (
     <section
       data-testid="memory-file"
       data-path={path}
+      data-mode={mode}
       aria-labelledby="memory-file-title"
       className="flex min-h-0 min-w-0 flex-1 flex-col"
     >
-      <header
-        className={cn("flex shrink-0 items-center gap-1 border-b", stacked ? "h-14 px-1" : "h-12 px-6")}
+      {header}
+      {meta}
+      <Tabs
+        variant="underline"
+        value={mode}
+        onValueChange={(next) => setMode(next as Mode)}
+        className="min-h-0 flex-1"
       >
-        {stacked && onBack ? (
-          <Button variant="ghost" size="icon" className="size-11" aria-label="Back to files" onClick={onBack}>
-            <ArrowLeft className="size-5" />
-          </Button>
-        ) : null}
-        <Breadcrumb
-          ref={headingRef}
-          scope={scope}
-          path={path}
-          name={name}
-          stacked={stacked}
-          onRevealFolder={onRevealFolder}
-        />
-      </header>
-      <MetaRow file={file} scope={scope} stacked={stacked} canWrite={canWrite} />
-      <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
-        <div className={cn("mx-auto w-full max-w-[760px]", stacked ? "px-4 py-6" : "px-6 py-8")}>
-          <Markdown text={file.content} variant="document" resolveHref={resolveHref} />
-          {templateOnly ? (
-            <p className="mt-2 text-muted-foreground text-sm">Nothing saved here yet.</p>
+        <TabsList
+          aria-label="File view"
+          className={cn("grid shrink-0", canWrite ? "grid-cols-3" : "grid-cols-2")}
+        >
+          <TabsTrigger value="view" data-memory-tab="view" className="justify-center">
+            View
+          </TabsTrigger>
+          {canWrite ? (
+            <TabsTrigger value="edit" data-memory-tab="edit" className="justify-center">
+              Edit
+            </TabsTrigger>
           ) : null}
-        </div>
-      </div>
+          <TabsTrigger value="history" data-memory-tab="history" className="justify-center">
+            History
+          </TabsTrigger>
+        </TabsList>
+        <TabsContent value="view" className="flex flex-col">
+          {reading}
+        </TabsContent>
+        {canWrite ? (
+          <TabsContent value="edit" className="flex flex-col">
+            {mode === "edit" ? editor : null}
+          </TabsContent>
+        ) : null}
+        <TabsContent value="history" className="flex flex-col">
+          {revision ?? <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">{history}</div>}
+        </TabsContent>
+      </Tabs>
+      {live}
     </section>
+  );
+}
+
+function EditorSkeleton() {
+  return (
+    <div aria-busy className="mx-auto grid w-full max-w-[760px] gap-2 px-6 py-6">
+      {["w-1/3", "w-11/12", "w-4/5", "w-5/6", "w-2/3"].map((w) => (
+        <Skeleton key={w} className={cn("h-[22px] motion-reduce:animate-none", w)} />
+      ))}
+    </div>
   );
 }
 
@@ -285,26 +567,21 @@ function Breadcrumb({
 const fullDate = (iso: string) =>
   new Date(iso).toLocaleString("en", { dateStyle: "medium", timeStyle: "short" });
 
-function actorLabel(actor: MemoryActor): string {
-  if (actor.kind === "system") return "Workspace";
-  if (actor.kind === "agent" && actor.onBehalfOf)
-    return `${actor.displayName} for ${actor.onBehalfOf.displayName}`;
-  return actor.displayName;
-}
-
 function MetaRow({
   file,
   scope,
   stacked,
   canWrite,
+  editingVersion = null,
 }: {
   file: MemoryFileDto;
   scope: MemoryScope;
   stacked: boolean;
   canWrite: boolean;
+  /** In Edit the row says which version is being edited instead of the last editor. */
+  editingVersion?: number | null;
 }) {
   const Icon = scopeIcon(scope);
-  const actor = file.updatedBy;
   const isPrivate = scope.kind === "personal";
   const badge = (
     <span className="inline-flex min-w-0 items-center gap-1.5">
@@ -335,27 +612,15 @@ function MetaRow({
         badge
       )}
       {dot}
-      <span data-testid="memory-file-version">Version {file.version}</span>
-      {dot}
-      <span className="inline-flex min-w-0 items-center gap-1">
-        <PrincipalAvatar
-          kind={actor.kind === "agent" ? "agent" : actor.kind === "system" ? "system" : "user"}
-          name={actor.displayName}
-          seed={actor.id}
-          compact
-          className="size-5 text-[10px]"
-        />
-        <span data-testid="memory-file-editor" className="truncate text-foreground">
-          {actorLabel(actor)}
-        </span>
-      </span>
-      {dot}
-      <Tooltip content={fullDate(file.updatedAt)}>
-        <time dateTime={file.updatedAt}>
-          {relativeTime(file.updatedAt)}
-          <span className="sr-only">, {fullDate(file.updatedAt)}</span>
-        </time>
-      </Tooltip>
+      {editingVersion !== null ? (
+        <span data-testid="memory-file-version">Editing version {editingVersion}</span>
+      ) : (
+        <>
+          <span data-testid="memory-file-version">Version {file.version}</span>
+          {dot}
+          <MetaActor file={file} />
+        </>
+      )}
       {canWrite ? null : (
         <Tooltip content="You can read this file but not edit it.">
           <Badge variant="outline" className="font-normal">
@@ -369,6 +634,33 @@ function MetaRow({
         </span>
       ) : null}
     </div>
+  );
+}
+
+function MetaActor({ file }: { file: MemoryFileDto }) {
+  const actor = file.updatedBy;
+  return (
+    <>
+      <span className="inline-flex min-w-0 items-center gap-1">
+        <PrincipalAvatar
+          kind={actor.kind === "agent" ? "agent" : actor.kind === "system" ? "system" : "user"}
+          name={actor.displayName}
+          seed={actor.id}
+          compact
+          className="size-5 text-[10px]"
+        />
+        <span data-testid="memory-file-editor" className="truncate text-foreground">
+          {actorLabel(actor)}
+        </span>
+      </span>
+      <span aria-hidden>·</span>
+      <Tooltip content={fullDate(file.updatedAt)}>
+        <time dateTime={file.updatedAt}>
+          {relativeTime(file.updatedAt)}
+          <span className="sr-only">, {fullDate(file.updatedAt)}</span>
+        </time>
+      </Tooltip>
+    </>
   );
 }
 
