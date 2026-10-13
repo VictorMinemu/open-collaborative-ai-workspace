@@ -48,6 +48,23 @@ function reportActivity(client: RealtimeClient): () => void {
 }
 
 /**
+ * Tells the client about the browser's network (`offline` / `online`): offline drops the socket at once (a dead network
+ * can keep it "open" for minutes), online reconnects at once and replays from the cursors (07.1-09, D-03). Returns the
+ * cleanup.
+ */
+function followNetwork(client: RealtimeClient): () => void {
+  const onOnline = () => client.setNetwork(true);
+  const onOffline = () => client.setNetwork(false);
+  window.addEventListener("online", onOnline);
+  window.addEventListener("offline", onOffline);
+  if (!navigator.onLine) client.setNetwork(false);
+  return () => {
+    window.removeEventListener("online", onOnline);
+    window.removeEventListener("offline", onOffline);
+  };
+}
+
+/**
  * One RealtimeClient (one WebSocket) per signed-in browser tab. Created when `/me` resolves, closed on
  * sign-out or when the session (sessionId) changes. The socket authenticates with a short-lived access JWT
  * fetched before every (re)connect (AUTH-06); the cached token is dropped with the client.
@@ -64,8 +81,10 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     const c = new RealtimeClient({ url: wsUrl, getToken: (o) => getAccessToken(o) });
     const stopReporting = reportActivity(c);
     c.connect();
+    const stopFollowing = followNetwork(c);
     setClient(c);
     return () => {
+      stopFollowing();
       stopReporting();
       c.close();
       clearAccessToken();

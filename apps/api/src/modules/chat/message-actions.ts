@@ -9,10 +9,18 @@ import {
   type PinUpdatedEvent,
   type ThreadUpdatedEvent,
 } from "@ocw/contracts";
-import { attachments, messagePins, messageReactions, messages, messageVersions, type Tx } from "@ocw/db";
+import {
+  attachments,
+  boardCards,
+  messagePins,
+  messageReactions,
+  messages,
+  messageVersions,
+  type Tx,
+} from "@ocw/db";
 import { and, count, eq, ne, sql } from "drizzle-orm";
 import { type App, authOf, type Core, tenant } from "../../core";
-import { conflict, forbidden, gone, notFound } from "../../lib/errors";
+import { badRequest, conflict, forbidden, gone, notFound } from "../../lib/errors";
 import { channelResource, type PermissionService } from "../organization";
 import type { ConversationAccess } from "./access";
 import { type Directory, loadDirectory } from "./directory";
@@ -21,6 +29,7 @@ import {
   type ChatDeps,
   convTopic,
   iso,
+  lockNextSeq,
   type MessageRow,
   replyParticipantsFor,
   toMessage,
@@ -43,6 +52,27 @@ export interface MessageActionsContext {
 
 const NOT_FOUND = "Message not found";
 
+/** The message row without a lock (its conversation never changes); 404 when it does not exist in the tenant. */
+async function peekMessage(tx: Tx, id: string): Promise<{ id: string; conversationId: string }> {
+  const [row] = await tx
+    .select({ id: messages.id, conversationId: messages.conversationId })
+    .from(messages)
+    .where(eq(messages.id, id))
+    .limit(1);
+  if (!row) throw notFound("Message not found");
+  return row;
+}
+
+/** True when the message is the root of a board card (07.1). */
+async function isCardRoot(tx: Tx, messageId: string): Promise<boolean> {
+  const [card] = await tx
+    .select({ messageId: boardCards.messageId })
+    .from(boardCards)
+    .where(eq(boardCards.messageId, messageId))
+    .limit(1);
+  return card !== undefined;
+}
+
 /** The message row, locked for the rest of the transaction; 404 when it does not exist in the tenant. */
 async function lockMessage(tx: Tx, id: string): Promise<MessageRow> {
   const [row] = await tx.select().from(messages).where(eq(messages.id, id)).limit(1).for("update");
@@ -62,7 +92,7 @@ async function nextVersion(tx: Tx, messageId: string): Promise<number> {
  * The DTO of a message as the API returns it: thread roots carry their reply participants, and every message its
  * attachments (an edit keeps the files, CHAT-12).
  */
-async function dtoOf(tx: Tx, row: MessageRow, dir: Directory): Promise<Message> {
+export async function dtoOf(tx: Tx, row: MessageRow, dir: Directory): Promise<Message> {
   const participants =
     row.threadId || row.replyCount === 0
       ? row.threadId
@@ -225,6 +255,9 @@ export function registerMessageActionRoutes(app: App, ctx: MessageActionsContext
         if (message.authorKind !== "user" || message.authorId !== auth.userId) {
           throw forbidden("Only the author can edit this message", "not_author");
         }
+        // A board card's root is edited from the board only, so the card and its message never drift (Pitfall 5).
+        if (await isCardRoot(tx, message.id))
+          throw badRequest("Edit this card from the board", "board_card_use_board");
         if (message.deletedAt) throw conflict("This message was deleted", "message_deleted");
         const dir = await loadDirectory(tx);
         if (req.body.body === message.body) return dtoOf(tx, message, dir);
@@ -260,11 +293,17 @@ export function registerMessageActionRoutes(app: App, ctx: MessageActionsContext
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
         const auth = authOf(req);
-        const message = await lockMessage(tx, req.params.id);
         // Readable first: an admin never learns about (or moderates) a conversation hidden from them (D-01).
-        const { conv, facts } = await access.readable(req, tx, message.conversationId, {
+        const target = await peekMessage(tx, req.params.id);
+        const { conv, facts } = await access.readable(req, tx, target.conversationId, {
           notFoundMessage: NOT_FOUND,
         });
+        // A board card's root is also written by the board under the conversation's stream lock, which takes the
+        // stream before the root (stream -> card -> message). Taking the stream first here keeps that order, so a
+        // delete racing a card text edit waits instead of deadlocking (07.1-14). Other messages keep message ->
+        // stream, the order of the generic edit.
+        if (await isCardRoot(tx, target.id)) await lockNextSeq(tx, convTopic(target.conversationId));
+        const message = await lockMessage(tx, target.id);
         if (conv.archivedAt) throw gone("This conversation is archived", "channel_archived");
         if (message.deletedAt) throw conflict("This message was already deleted", "message_deleted");
         const own = message.authorKind === "user" && message.authorId === auth.userId;

@@ -8,6 +8,7 @@ import {
   EMPTY_TURN,
   type TurnContext,
 } from "./agent-channel-protocol.js";
+import { withTurnScopedTools } from "./turn-scoped-tools.js";
 
 export const CHANNEL_ID = "ocw";
 
@@ -193,7 +194,8 @@ export function mapMention(event: AgentMentionEvent, bot: CellAgent | undefined)
   const threadRootId = direct || aiChat ? null : event.thread.rootMessageId;
   const author = event.message.author;
   const turn = event.turn ?? EMPTY_TURN;
-  const agentTools = bot?.capabilities?.tools ?? [];
+  // The bot's configured tools: its snapshot plus the turn-scoped ones (turn-scoped-tools.ts, as reconciler.ts does).
+  const agentTools = withTurnScopedTools(bot?.capabilities?.tools);
   const agentToolSet = new Set(agentTools);
   const allowedTools = [...new Set(turn.tools)].filter((t) => agentToolSet.has(t));
   const askerName = sanitizeName(author.displayName);

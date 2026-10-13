@@ -4,6 +4,7 @@ import {
   type AgentTypingEvent,
   type Attachment,
   type DmGroupMember,
+  type DmSummary,
   EphemeralTypes,
   EventTypes,
   type Message,
@@ -151,6 +152,10 @@ function DmSkeleton() {
  * `/chat/dm/<id>`. A bot DM of a member whose Bots module is turned off (07.3, D-05 (3)) shows the in-place off
  * state instead of the conversation, and a skeleton while that is being decided (never a flash of the chat); people
  * and groups render as before. A failed permissions fetch counts as on (P-08): the API stays the authority.
+ *
+ * The conversation gets the DM this gate decided on, never its own read of the list: `useQuery` renders the cache as
+ * it is now but tells each subscriber later, so a re-render of the conversation alone (one of its own queries landing
+ * just after `/dms`) would show a bot DM before this gate re-renders over it (07.1 CI flash, mobile).
  */
 export function DmView({ conversationId }: { conversationId: string }) {
   const dms = useDms();
@@ -159,14 +164,23 @@ export function DmView({ conversationId }: { conversationId: string }) {
   if (dm && isBotDm(dm) && bots !== "on") {
     return bots === "off" ? <ModuleOff module="bots" /> : <DmSkeleton />;
   }
-  return <DmConversation conversationId={conversationId} />;
+  return <DmConversation conversationId={conversationId} dms={dms} dm={dm} />;
 }
 
 /**
  * A private direct conversation with a bot (D-03/D-04): flat (no threads), the bot answers every message
  * without an @mention, and only the caller can read it. Same optimistic send/retry as the channel view.
+ * `dms` and `dm` come from `DmView`, which already decided this DM may be shown (or that it is still unknown).
  */
-function DmConversation({ conversationId }: { conversationId: string }) {
+function DmConversation({
+  conversationId,
+  dms,
+  dm,
+}: {
+  conversationId: string;
+  dms: ReturnType<typeof useDms>;
+  dm: DmSummary | undefined;
+}) {
   const qc = useQueryClient();
   const router = useRouter();
   const pathname = usePathname();
@@ -179,8 +193,6 @@ function DmConversation({ conversationId }: { conversationId: string }) {
     [meQ.data?.user.id, meQ.data?.user.name],
   );
 
-  const dms = useDms();
-  const dm = dms.data?.dms.find((d) => d.id === conversationId);
   const composerApi = useRef<ComposerApi | null>(null);
   const filesConfig = useAttachmentsConfig();
   // The other party: a bot (3.1 DMs), a person (CHAT-04) or the other members of a group (D-06).

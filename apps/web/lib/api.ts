@@ -9,12 +9,15 @@ export interface Schema<T> {
 export class ApiRequestError extends Error {
   readonly status: number;
   readonly code: string;
+  /** `error.details` of the API body, when it sent one (e.g. the current card of a 409 version conflict). */
+  readonly details: unknown;
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, details?: unknown) {
     super(message);
     this.name = "ApiRequestError";
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 
   /** The browser could not reach the API at all (down, wrong URL, CORS). */
@@ -70,7 +73,8 @@ async function request<T>(method: string, path: string, opts: RequestOptions<T> 
   if (!res.ok) {
     const parsed = ApiError.safeParse(json);
     if (parsed.success) {
-      throw new ApiRequestError(res.status, parsed.data.error.code, parsed.data.error.message);
+      const { code, message, details } = parsed.data.error;
+      throw new ApiRequestError(res.status, code, message, details);
     }
     // better-auth style `{ message, code }` bodies.
     const loose = json as { message?: unknown; code?: unknown } | null;

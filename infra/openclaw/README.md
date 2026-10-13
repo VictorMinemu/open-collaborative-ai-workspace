@@ -39,14 +39,17 @@ changes such as the plugin allowlist. ChatGPT-subscription sign-ins live in Open
      `nodes`, `x_search`, `code_execution` and the `group:*` sets). There is **no `*` deny any more**: deny always
      wins in OpenClaw, so a wildcard would also kill the web tools. Each bot gets
      `{ profile: "minimal", alsoAllow: <its effective tools>, deny: DANGEROUS_TOOLS }` from the reconciler, so a
-     tool nobody granted is never configured, and a future OpenClaw tool never becomes reachable just because it
+     tool nobody granted is never configured (plus `ocw_board_card` for a bot served delivered-turn tools: the API
+     offers it only on board channels' turns, which the cell-wide snapshot cannot list; each turn's `toolsAllow`
+     still decides, `apps/openclaw-channel/src/turn-scoped-tools.ts`, 07.1-13), and a future OpenClaw tool never becomes reachable just because it
      is not listed. `DANGEROUS_TOOLS` mirrors `DANGEROUS_TOOL_NAMES` in `packages/contracts`
      (parity test in `apps/openclaw-channel/src/reconciler.test.ts`).
   2. **Turn.** Every dispatch passes `toolsAllow = turn.tools ∩ the bot's tools` (OpenClaw only narrows with it);
      an empty set also passes `disableTools: true`. A mention without a `turn` gets no tools (fail closed).
   3. **Call.** The plugin's `before_tool_call` hook (registered unscoped, highest priority) blocks any call outside
      the active turn, over the per-turn caps (8 calls, 5 web calls), or side-effecting after untrusted output, and
-     asks `POST /agent-channel/v1/tool-calls` for every gated call. A slow or unreachable API blocks the call
+     asks `POST /agent-channel/v1/tool-calls` for every gated call (not `ocw_memory_save` and `ocw_board_card`,
+     whose own routes check the turn and the taint and count the call). A slow or unreachable API blocks the call
      (fail closed, client timeout 10 s under the hook's 15 s). `after_tool_call` reports the outcome (status,
      result count, host, duration; never the content), which the API audits.
 - **Sessions:** one OpenClaw session per DM conversation and per channel thread, plus `session.dmScope:
@@ -226,7 +229,8 @@ infra/openclaw/test/run-container-smoke.sh        # real OpenClaw + plugin + fak
 ```
 
 The smoke script reuses the existing `ocw-openclaw:local` and `ocw-fake-model:local` images (set
-`SMOKE_BUILD=1` to rebuild). It bind-mounts the working-tree plugin, entrypoint, renderer, fake-model server and
+`SMOKE_BUILD=1` to rebuild; `SMOKE_CELL_IMAGE`, `SMOKE_MODEL_IMAGE` and `SMOKE_SANDBOX_IMAGE` pick other tags, so a
+smoke next to a running stack builds and runs its own images). It bind-mounts the working-tree plugin, entrypoint, renderer, fake-model server and
 the bundled search plugins (installed on the host into a temp dir with `install-bundled-plugins.sh`), so code
 changes never need an image rebuild. Scenarios (`SMOKE_ONLY=<comma list>`): `mention`, `signin`, `dm`,
 `capabilities` (internet on: the model is offered exactly `web_fetch,web_search`, searches through the gate via
@@ -234,7 +238,9 @@ the fake SearXNG, the fake API records the call and its result; internet off: `[
 (two humans' DMs with one bot never share a prompt; deleting the bot leaves no transcript in the state volume),
 `memory`, `card` (06-14: a turn offering `ocw_agent_card` posts one gated card through `POST /cards`, bound to the
 turn's conversation, thread and message; an `agent.card_action.v1` approval arrives as a turn in the card's thread
-and updates the card with the version it saw) and `mcp` (the fake MCP behind a bearer token: probe through the cell, `${OCW_MCP_…}` in the rendered
+and updates the card with the version it saw), `board` (07.1-13: a board channel's turn offering `ocw_board_card`
+runs the plugin tool, which creates one card through `POST /board/cards` bound to the turn's event, never through
+`/tool-calls`) and `mcp` (the fake MCP behind a bearer token: probe through the cell, `${OCW_MCP_…}` in the rendered
 config and never the token, only the enabled tool offered, a gated and audited `echo`, the tool filter re-rendered
 when the admin enables `write_note`, and `write_note` blocked by the taint rule after `echo` in the same turn), and
 `marketplace`. That scenario runs with `OCW_BUNDLED_PLUGINS=searxng` and `OCW_CLAWHUB_URL` pointing at the fake

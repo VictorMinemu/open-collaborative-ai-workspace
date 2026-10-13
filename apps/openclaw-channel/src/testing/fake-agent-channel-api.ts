@@ -19,6 +19,12 @@
  *   POST /agent-channel/v1/cards          records the card (`cards`; idempotent on agentId + idempotencyKey, version 1)
  *   PATCH /agent-channel/v1/cards/:id     posting agent only (403), expectedVersion must match (409
  *                                          card_version_conflict); records the patch (`cardPatches`)
+ *   POST /agent-channel/v1/board/read     a fixed two-column board (Backlog, In progress); the turn's card when the
+ *                                          event's `threadRootId` names a stored board card (`boardTurnCards`), else null
+ *   POST /agent-channel/v1/board/cards    records the card (`boardCards`; idempotent on agentId + idempotencyKey, 201
+ *                                          then 200, version 1, the first column by default)
+ *   PATCH /agent-channel/v1/board/cards/:id  move / waiting state of a stored board card (409
+ *                                          board_card_version_conflict, 403 not_author on any text key)
  *   POST /agent-channel/v1/mcp/probe-results  records the probe report (`mcpProbes`)
  *   POST /agent-channel/v1/plugins/report     records the report (`pluginReports`) and moves the row's status
  *   POST /agent-channel/v1/plugins/verify-install  approves only a row `installing` with the same package, version
@@ -31,6 +37,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 import { type WebSocket, WebSocketServer } from "ws";
 import type {
+  AgentChannelBoardCreateCard,
+  AgentChannelBoardPatchCard,
   AgentChannelMcpProbeResult,
   AgentChannelMemorySave,
   AgentChannelPatchCard,
@@ -61,6 +69,13 @@ export type StoredToolResult = AgentChannelToolCallResult & { callId: string };
 export type StoredMemory = AgentChannelMemorySave & { memoryId: string; created: boolean };
 export type StoredCard = AgentChannelPostCard & { messageId: string; version: number };
 export type StoredCardPatch = AgentChannelPatchCard & { messageId: string; status: number };
+export type StoredBoardCard = AgentChannelBoardCreateCard & {
+  messageId: string;
+  columnId: string;
+  waitingOn: string;
+  version: number;
+};
+export type StoredBoardPatch = AgentChannelBoardPatchCard & { messageId: string; status: number };
 export type VerifyCall = {
   packageName: string;
   version: string;
@@ -93,6 +108,14 @@ export type FakeAgentChannelApi = {
   cards: StoredCard[];
   /** Every PATCH /cards/:id attempt with the status it got. */
   cardPatches: StoredCardPatch[];
+  /** Every board card stored by POST /board/cards (idempotent retries are not stored twice). */
+  boardCards: StoredBoardCard[];
+  /** Every PATCH /board/cards/:id attempt with the status it got. */
+  boardPatches: StoredBoardPatch[];
+  /** Every POST /board/read (event ids). */
+  boardReads: string[];
+  /** Event id → the board card whose thread the turn runs in (what the real API reads from the stored turn). */
+  boardTurnCards: Map<string, string>;
   /** Snapshot `mcpServers` (header values included, as the real API sends them); `[]` = none. */
   mcpServers: CellMcpServer[];
   /** Every POST /mcp/probe-results, in order. */
@@ -144,6 +167,50 @@ export type FakeAgentChannelApi = {
 };
 
 const BASE = "/agent-channel/v1";
+
+/** The fake board every board route acts on (the real API reads it from the stored turn). */
+const FAKE_BOARD_ID = "0199a000-0000-7000-8000-0000000b0a2d";
+export const FAKE_BOARD_COLUMNS = [
+  {
+    id: "0199a000-0000-7000-8000-0000000b0c01",
+    conversationId: FAKE_BOARD_ID,
+    name: "Backlog",
+    rank: "a0",
+    category: "backlog",
+    defaultWaitingOn: null,
+  },
+  {
+    id: "0199a000-0000-7000-8000-0000000b0c02",
+    conversationId: FAKE_BOARD_ID,
+    name: "In progress",
+    rank: "a1",
+    category: "started",
+    defaultWaitingOn: null,
+  },
+];
+
+function boardCardOut(c: StoredBoardCard) {
+  const firstLine = (c.description ?? "").split("\n").find((l) => l.trim()) ?? "";
+  return {
+    messageId: c.messageId,
+    conversationId: FAKE_BOARD_ID,
+    columnId: c.columnId,
+    rank: "a0",
+    waitingOn: c.waitingOn,
+    title: c.title ?? firstLine.trim().slice(0, 80),
+    titleSource: c.title ? "user" : "heuristic",
+    description: c.description ?? "",
+    number: null,
+    fields: {},
+    authorKind: "agent",
+    authorId: c.agentId,
+    replyCount: 0,
+    lastReplyAt: null,
+    createdAt: "2026-10-12T10:00:00.000Z",
+    movedAt: "2026-10-12T10:00:00.000Z",
+    version: c.version,
+  };
+}
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
@@ -203,6 +270,10 @@ export async function startFakeAgentChannelApi(
     refuseMemoryEvents: new Set<string>(),
     cards: [] as StoredCard[],
     cardPatches: [] as StoredCardPatch[],
+    boardCards: [] as StoredBoardCard[],
+    boardPatches: [] as StoredBoardPatch[],
+    boardReads: [] as string[],
+    boardTurnCards: new Map<string, string>(),
     mcpServers: opts.mcpServers ?? ([] as CellMcpServer[]),
     mcpProbes: [] as AgentChannelMcpProbeResult[],
     cellReads: 0,
@@ -268,6 +339,9 @@ export async function startFakeAgentChannelApi(
             memories: state.memories,
             cards: state.cards,
             cardPatches: state.cardPatches,
+            boardCards: state.boardCards,
+            boardPatches: state.boardPatches,
+            boardReads: state.boardReads,
             mcpProbes: state.mcpProbes,
             cellReads: state.cellReads,
             plugins: state.plugins,
@@ -473,6 +547,66 @@ export async function startFakeAgentChannelApi(
         c.version++;
         return json(res, 200, { messageId, version: c.version });
       }
+      if (req.method === "POST" && route === "/board/read") {
+        const body = (await readJson(req)) as { eventId?: string; agentId?: string };
+        if (!body.eventId || !body.agentId) return json(res, 400, { error: { code: "bad_request" } });
+        state.boardReads.push(body.eventId);
+        const turnCard = state.boardTurnCards.get(body.eventId);
+        const card = state.boardCards.find((c) => c.messageId === turnCard);
+        return json(res, 200, {
+          board: {
+            conversationId: FAKE_BOARD_ID,
+            templateId: null,
+            prefix: null,
+            namingRule: null,
+            fields: [],
+            version: 1,
+          },
+          columns: FAKE_BOARD_COLUMNS,
+          card: card ? boardCardOut(card) : null,
+        });
+      }
+      if (req.method === "POST" && route === "/board/cards") {
+        const body = (await readJson(req)) as AgentChannelBoardCreateCard;
+        if (
+          !body.eventId ||
+          !body.agentId ||
+          typeof body.idempotencyKey !== "string" ||
+          !(body.title || body.description)
+        ) {
+          return json(res, 400, { error: { code: "bad_request" } });
+        }
+        const same = state.boardCards.find(
+          (c) => c.agentId === body.agentId && c.idempotencyKey === body.idempotencyKey,
+        );
+        if (same) return json(res, 200, { card: boardCardOut(same) });
+        const stored: StoredBoardCard = {
+          ...body,
+          messageId: randomUUID(),
+          columnId: body.columnId ?? (FAKE_BOARD_COLUMNS[0] as { id: string }).id,
+          waitingOn: body.waitingOn ?? "none",
+          version: 1,
+        };
+        state.boardCards.push(stored);
+        return json(res, 201, { card: boardCardOut(stored) });
+      }
+      const boardCardMatch = /^\/board\/cards\/([^/]+)$/u.exec(route);
+      if (req.method === "PATCH" && boardCardMatch?.[1]) {
+        const messageId = decodeURIComponent(boardCardMatch[1]);
+        const body = (await readJson(req)) as AgentChannelBoardPatchCard & Record<string, unknown>;
+        const card = state.boardCards.find((c) => c.messageId === messageId);
+        const text = ["title", "description", "fields"].some((k) => k in body);
+        const status = text ? 403 : !card ? 404 : card.version !== body.expectedVersion ? 409 : 200;
+        state.boardPatches.push({ ...body, messageId, status });
+        if (status === 403) return json(res, 403, { error: { code: "not_author" } });
+        if (status === 404) return json(res, 404, { error: { code: "card_not_in_board" } });
+        if (status === 409) return json(res, 409, { error: { code: "board_card_version_conflict" } });
+        const c = card as StoredBoardCard;
+        if (body.move) c.columnId = body.move.columnId;
+        if (body.waitingOn) c.waitingOn = body.waitingOn;
+        c.version++;
+        return json(res, 200, { card: boardCardOut(c) });
+      }
       if (req.method === "POST" && route === "/typing") {
         state.typing.push((await readJson(req)) as AgentChannelTyping);
         return json(res, 200, { ok: true });
@@ -599,6 +733,18 @@ export async function startFakeAgentChannelApi(
     },
     get cardPatches() {
       return state.cardPatches;
+    },
+    get boardCards() {
+      return state.boardCards;
+    },
+    get boardPatches() {
+      return state.boardPatches;
+    },
+    get boardReads() {
+      return state.boardReads;
+    },
+    get boardTurnCards() {
+      return state.boardTurnCards;
     },
     get mcpServers() {
       return state.mcpServers;

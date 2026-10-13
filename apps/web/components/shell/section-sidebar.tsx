@@ -33,7 +33,8 @@ export function SectionSidebar({
         </h2>
         {actions ? <div className="flex items-center gap-1">{actions}</div> : null}
       </div>
-      <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-2 pb-3">{children}</div>
+      {/* `relative` keeps the rows' absolutely positioned `sr-only` text inside this scroller. */}
+      <div className="scrollbar-thin relative min-h-0 flex-1 overflow-y-auto px-2 pb-3">{children}</div>
     </>
   );
 

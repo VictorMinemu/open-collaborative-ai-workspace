@@ -19,6 +19,11 @@
  *   POST /cards                ← AgentChannelPostCard → AgentChannelPostCardResponse (ocw_agent_card, 06-14)
  *   PATCH /cards/:messageId    ← AgentChannelPatchCard → AgentChannelPatchCardResponse (posting agent only,
  *                                optimistic version: 409 card_version_conflict)
+ *   POST /board/read           ← AgentChannelBoardRead → AgentChannelBoardReadResponse (ocw_board_card, 07.1-13;
+ *                                the turn's board, its columns and the card whose thread the turn runs in)
+ *   POST /board/cards          ← AgentChannelBoardCreateCard → AgentChannelBoardCardResponse (201, 200 on a retry)
+ *   PATCH /board/cards/:messageId ← AgentChannelBoardPatchCard → AgentChannelBoardCardResponse (move / waiting state
+ *                                only, optimistic version: 409 board_card_version_conflict; never card text)
  *   POST /mcp/probe-results    ← AgentChannelMcpProbeResult (the tools an `mcp.probe` discovered; D-13)
  *   POST /plugins/report       ← AgentChannelPluginReport (a marketplace install / uninstall outcome; D-14)
  *   POST /plugins/verify-install, GET /plugins: used by infra/openclaw (install gate, boot render), not here
@@ -544,6 +549,68 @@ export const AgentChannelPatchCardResponse = z
   .object({ messageId: Id, version: z.number().int() })
   .passthrough();
 export type AgentChannelPatchCardResponse = z.infer<typeof AgentChannelPatchCardResponse>;
+
+// ---------------------------------------------------------------- Boards (07.1-13, mirror of the board schemas of
+// contracts/agent-channel.ts and contracts/board.ts). The bodies name only the delivered turn and the agent: the board
+// is always the turn's conversation and the acting human the turn's human (the API reads both from the stored turn).
+
+export const BOARD_CARD_TITLE_MAX = 200;
+export const BOARD_CARD_DESCRIPTION_MAX = 8_000;
+export const BOARD_WAITING_ON = ["none", "us", "customer", "both"] as const;
+export const BoardWaitingOn = z.enum(BOARD_WAITING_ON);
+export type BoardWaitingOn = z.infer<typeof BoardWaitingOn>;
+
+/** A board column. `category` stays a string so a newer API category never invalidates a read. */
+export const AgentChannelBoardColumn = z
+  .object({ id: Id, name: z.string(), category: z.string(), rank: z.string().optional() })
+  .passthrough();
+export type AgentChannelBoardColumn = z.infer<typeof AgentChannelBoardColumn>;
+
+/** A card (the root message of its thread). `waitingOn` stays a string for the same reason. */
+export const AgentChannelBoardCard = z
+  .object({
+    messageId: Id,
+    columnId: Id,
+    title: z.string(),
+    waitingOn: z.string(),
+    version: z.number().int(),
+  })
+  .passthrough();
+export type AgentChannelBoardCard = z.infer<typeof AgentChannelBoardCard>;
+
+export type AgentChannelBoardRead = { eventId: string; agentId: string };
+
+export const AgentChannelBoardReadResponse = z
+  .object({
+    board: z.object({ conversationId: Id }).passthrough(),
+    columns: z.array(AgentChannelBoardColumn),
+    /** null when the turn is not in a card's thread. */
+    card: AgentChannelBoardCard.nullable(),
+  })
+  .passthrough();
+export type AgentChannelBoardReadResponse = z.infer<typeof AgentChannelBoardReadResponse>;
+
+export type AgentChannelBoardCreateCard = {
+  eventId: string;
+  agentId: string;
+  /** `<eventId>:board:<n>`, one `n` per tool call of the turn; the API stores it as `board:<key>`. */
+  idempotencyKey: string;
+  title?: string;
+  description: string;
+  columnId?: string;
+  waitingOn?: BoardWaitingOn;
+};
+
+export type AgentChannelBoardPatchCard = {
+  eventId: string;
+  agentId: string;
+  expectedVersion: number;
+  move?: { columnId: string; afterCardId: string | null };
+  waitingOn?: BoardWaitingOn;
+};
+
+export const AgentChannelBoardCardResponse = z.object({ card: AgentChannelBoardCard }).passthrough();
+export type AgentChannelBoardCardResponse = z.infer<typeof AgentChannelBoardCardResponse>;
 
 /** `mcp.probe`: an admin registered or changed an MCP server; the cell lists its tools (D-13). */
 export const McpProbeEvent = z.object({

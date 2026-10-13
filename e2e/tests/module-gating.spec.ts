@@ -511,3 +511,74 @@ test("Bots off: bot DMs leave every list and the unread count, /bots links hide,
     await plugin?.stop();
   }
 });
+
+/**
+ * The order a slow machine produced in CI (07.1, mobile): the DM list lands while the Bots decision is still loading,
+ * in the same burst as the conversation's own reads (bots, upload limits, members). Per page load (`next()` before
+ * each), the first request of every `BURST` path is held and all are answered together, `/dms` last, and
+ * `/me/permissions` waits until that burst is out. A read the page stopped making never blocks it for more than 5 s.
+ */
+async function slowBotsDecision(page: Page): Promise<{ next: () => void }> {
+  const DMS = "/api/v1/dms";
+  const BURST = ["/api/v1/agents", "/api/v1/attachments/config", "/api/v1/members", DMS];
+  let held = new Map<string, () => Promise<void>>();
+  let open = true;
+  let out = () => {};
+  let burstOut = Promise.resolve();
+  let fallback: ReturnType<typeof setTimeout> | undefined;
+  const release = () => {
+    if (open) return;
+    open = true;
+    clearTimeout(fallback);
+    const answers = [...held].sort(([a], [b]) => Number(a === DMS) - Number(b === DMS));
+    held = new Map();
+    for (const [, answer] of answers) void answer().catch(() => {});
+    out();
+  };
+  await page.route("**/api/v1/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/v1/me/permissions") {
+      await burstOut;
+      await new Promise((r) => setTimeout(r, 300));
+      return route.continue().catch(() => {});
+    }
+    if (open || !BURST.includes(path) || held.has(path)) return route.continue().catch(() => {});
+    const response = await route.fetch();
+    held.set(path, () => route.fulfill({ response }));
+    if (BURST.every((p) => held.has(p))) release();
+  });
+  return {
+    next: () => {
+      open = false;
+      held = new Map();
+      burstOut = new Promise((r) => {
+        out = r;
+      });
+      fallback = setTimeout(release, 5_000);
+    },
+  };
+}
+
+test("Bots off: a bot DM deep link never shows the conversation while the Bots decision is still loading", async ({
+  browser,
+}, info) => {
+  test.setTimeout(120_000);
+  const project = info.project.name;
+  const botDm = await botDmOf(`Gate Slow ${project}`);
+  const off = await turnOff("bots");
+  const m = await openAs(browser, MIA, project);
+  await watchFlashes(m.page);
+  try {
+    const slow = await slowBotsDecision(m.page);
+    // CI's runner is slower than a laptop; on a throttled CPU the burst above reorders on every load.
+    const cdp = await m.context.newCDPSession(m.page);
+    await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
+    for (let load = 0; load < 3; load++) {
+      slow.next();
+      await expectOff(m.page, `/chat/dm/${botDm}`, "bots", "dm-view");
+    }
+  } finally {
+    await m.context.close();
+    await turnOn(off);
+  }
+});

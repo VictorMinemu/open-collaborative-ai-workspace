@@ -20,5 +20,8 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
 - **06.1 Work Zone image attachments.**
 - **7 Self-hosted release:** `pnpm ocw setup` + `docker compose up`, OpenTelemetry, secrets as inputs, backups,
   release gate (ADR-0021).
+- **07.1 Board channels and record templates:** a channel can be a board whose cards are threads (moves by pointer,
+  keyboard, touch or Move to…, live for everyone), columns with categories and waiting states, agents on the board
+  through `ocw_board_card`, and unit record templates that name cards (ADR-0022).
 - **07.3 Module access per unit:** Work Zone, AI chats and Bots on or off per organization, unit or person as resolver
   deny rules, from Settings › Organization and Settings › Modules; the web hides what the API refuses (ADR-0024).

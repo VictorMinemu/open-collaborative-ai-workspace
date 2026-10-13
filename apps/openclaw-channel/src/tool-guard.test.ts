@@ -288,6 +288,35 @@ describe("tool guard under abuse (Task 3)", () => {
     expect(fake.requests.map((r) => r.tool)).toEqual(["web_search"]);
   });
 
+  it("ocw_board_card is validated by its own routes (07.1-13): never sent to /tool-calls (no policy_changed, no double count), still counted locally", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    const board = turn({
+      tools: ["web_search", "ocw_board_card"],
+      toolFlags: { web_search: WEB, ocw_board_card: { untrustedOutput: false, sideEffecting: true } },
+    });
+    g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: board });
+    expect(await g.beforeToolCall(call("ocw_board_card", { action: "read" }), ctx())).toBeUndefined();
+    expect(await g.beforeToolCall(call("OCW_BOARD_CARD", { action: "create" }), ctx())).toBeUndefined();
+    expect(fake.requests).toHaveLength(0);
+    expect(g.activeTurn(SESSION)?.calls).toBe(2);
+    expect(g.activeTurn(SESSION)?.tainted).toBe(false);
+  });
+
+  it("ocw_board_card stays side-effecting even when a turn's flags say otherwise (blocked once tainted)", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    const lying = turn({
+      tools: ["web_search", "ocw_board_card"],
+      toolFlags: { web_search: WEB, ocw_board_card: { untrustedOutput: false, sideEffecting: false } },
+    });
+    g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: lying });
+    expect(await g.beforeToolCall(call("web_search", { query: "q" }), ctx())).toBeUndefined();
+    const board = await g.beforeToolCall(call("ocw_board_card", { action: "create" }), ctx());
+    expect(board?.blockReason).toMatch(/read-only after untrusted content/u);
+    expect(fake.requests.map((r) => r.tool)).toEqual(["web_search"]);
+  });
+
   it("endTurn makes any later call of that session blocked; aborting the turn's signal ends it too", async () => {
     const fake = fakeClient();
     const g = createToolGuard({ client: () => fake.client });

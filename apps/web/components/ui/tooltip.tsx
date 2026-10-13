@@ -11,15 +11,18 @@ export function Tooltip({
   side = "top",
   children,
   className,
+  disabled,
 }: {
   content: ReactNode;
   side?: ComponentProps<typeof TooltipPrimitive.Positioner>["side"];
   /** The trigger element; it receives the tooltip props via `render`. */
   children: ReactElement;
   className?: string;
+  /** Keeps the trigger mounted without a tooltip (e.g. a title that is not truncated). */
+  disabled?: boolean;
 }) {
   return (
-    <TooltipPrimitive.Root>
+    <TooltipPrimitive.Root disabled={disabled}>
       <TooltipPrimitive.Trigger render={children} />
       <TooltipPrimitive.Portal>
         <TooltipPrimitive.Positioner side={side} sideOffset={8} className="z-50">

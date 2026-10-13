@@ -421,6 +421,63 @@ applies the Phase 6 migration.
 real-cell smokes (`infra/openclaw/test/run-container-smoke.sh`, scenario `card`) run when CI comes back (GitHub
 Actions billing).
 
+## Board channels and record templates (Phase 07.1)
+
+Phase 07.1 (ADR-0022). A channel can be a **board**: cards in columns, and every card is a thread with its people and
+its bots. Record templates give every card of a kind the same fields, columns and name. `pnpm demo:up` applies the
+Phase 07.1 migration.
+
+1. **Create a board.** **Create channel** › *Layout* › **Board**. It belongs to a unit like any channel and starts with
+   Backlog, In progress, Done and Cancelled (or the template's columns, item 9). The header row has **Board | Messages**
+   and **New card**. Board is the default view, and Messages is the channel's ordinary list, where every card is its
+   root message.
+2. **Cards and threads.** **New card** (or **+** on a column) asks for a description, an optional title, the column
+   and who it is waiting on. The tile shows the number (on numbered boards), the title, the waiting chip, the author
+   and the replies. Click a card to open its thread. The **card strip** at the top shows the number, a typed title, the
+   column and waiting state as menus, **Edit card** for its author and the field values. Replies work as in any
+   thread.
+3. **Moving cards.** Drag a card by its grip. With the keyboard, focus the grip, press Space, use the arrows (up,
+   down, or another column), then Space to drop; Escape cancels and a screen reader hears each step. Every card's
+   **⋯** menu has **Move to…**, Move to top and Move to bottom. On a phone the columns are tabs: long-press a card to
+   drag it within its column, or use **⋯** › Move to…. Two people moving cards at once end in the same order on both
+   screens; if you both move the same card, one of you sees "Someone else changed this card. Showing the latest."
+4. **Waiting states.** **⋯** › *Waiting on…* sets *Us*, *Customer*, *Both* or nobody, shown as a chip on the tile. A
+   column can set it for every card that enters it (item 5).
+5. **Columns (the channel's owner and admins).** The **⋯** on a column header renames it, changes its category
+   (backlog, started, done, cancelled), sets *When a card enters* (a waiting state, or *Keep as is*) and moves it
+   left or right; **Add column** sits after the last lane (on a phone, **+** after the tabs). Deleting a column with
+   cards asks where to move them; a board keeps at least one column, and at most 20.
+6. **Editing and deleting your card.** Its author edits the title, description and fields (card **⋯** › *Edit card…*,
+   the strip, or *Edit message* on the root, in the thread or in Messages). A typed title stays as typed; an automatic
+   one follows the description and fields. The author or a moderator deletes a card (*Delete card…*).
+7. **Search.** Chat search finds cards by their title, description and field values, with the same readable-set rule
+   as any message. A hit opens the card's thread over the board.
+8. **Agents on a board.** Mention a bot in a card (`@clerk can you order the part?`), or let a reply-mode bot answer:
+   it replies inside that card's thread. On a board's turn the bot also gets the `ocw_board_card` tool: it can read
+   the board, create cards, move the thread's card (or cards it created) and set their waiting state. It never edits
+   a card's text, and everything it does is audited as the bot acting for you.
+9. **Record templates.** Settings › Organization › a unit › **Record templates** (right after Modules) › **New
+   template**: fields (text, number, date, choice), columns with their category and waiting state, a prefix and a
+   naming rule from the chips (e.g. `EXP-0001 · Acme · Broken pump`), with a live preview tile. Team leads manage
+   their own units' templates and admins the organization-wide ones; everyone in the unit sees them. When you create a
+   board in that unit (or below it), pick the template under *Template*; the board copies it, so later template edits
+   only affect new boards.
+10. **Offline.** If the connection drops for more than 3 s, the board says "You're offline. Changes from others will
+    show up when you reconnect." On reconnect it catches up without a reload.
+11. **Limits.** 20 columns and 20 fields per board; a column shows its first 100 cards and then **Show more cards**.
+
+**Owner check: a real ops board** (never run by an agent; record the result in
+`.planning/phases/07.1-board-channels-and-record-templates/07.1-VALIDATION.md` › Manual-Only Verifications). On a
+stack running this branch:
+
+1. On your operations team's unit page, build a **Case file** template: a prefix (e.g. `EXP`), a *Customer* field, the
+   columns your team really uses (with "Waiting for customer" setting *Customer*), and the rule
+   `{prefix}-{seq:0000} · {field:customer} · {summary}`.
+2. Create a board channel from it in that team and invite a colleague.
+3. Run a day's cards with that colleague, one of you on a phone and the other on a laptop at the same time: create
+   cards, move them, set waiting states, discuss in the card threads, mention a bot in one card.
+4. Say what felt slow or unclear: names, columns, moving on the phone, the card strip, search, the template editor.
+
 ## Troubleshooting
 
 | Symptom | Fix |

@@ -35,6 +35,7 @@ const HEAD_ONLY = [
   "20261007073058_multiplayer_ai",
   "20261007163629_work_prompt_images",
   "20261007173205_work_prompt_image_order",
+  "20261010010825_board_channels",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
@@ -191,6 +192,19 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
 
     it("keeps every seeded row", async () => {
       expect(await counts()).toEqual(before);
+    });
+
+    it("turns every restored conversation into a text conversation (Phase 07.1 D-01)", async () => {
+      const c = new pg.Client({ connectionString: urls.migrator });
+      await c.connect();
+      try {
+        const { rows } = await c.query(
+          "select layout, count(*)::int as n from app.conversations group by layout order by layout",
+        );
+        expect(rows).toEqual([{ layout: "text", n: before.get("app.conversations") }]);
+      } finally {
+        await c.end();
+      }
     });
 
     it("keeps tenant isolation: org A reads its rows, never org B's, and nothing without a tenant", async () => {

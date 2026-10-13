@@ -269,7 +269,15 @@ interface RowProps {
   linkFor?: ((m: Message) => string) | undefined;
   /** Marks the conversation unread from a message (stable callback; top-level messages only). */
   onMarkUnread?: ((m: Message) => void) | undefined;
+  /**
+   * Replaces the inline editor of the author's own messages (stable callback); null = no edit offered. `inline` starts
+   * the inline editor after all (an override that first has to ask whether the message is a board card).
+   */
+  onEdit?: EditOverride | null | undefined;
 }
+
+/** Another editor for a message; `inline()` falls back to the row's own inline editor. */
+export type EditOverride = (m: Message, inline: () => void) => void;
 
 const MessageRow = memo(function MessageRow({
   message,
@@ -287,6 +295,7 @@ const MessageRow = memo(function MessageRow({
   pinnedBy,
   linkFor,
   onMarkUnread,
+  onEdit: editOverride,
 }: RowProps) {
   const author = message.author ?? {
     kind: message.authorKind,
@@ -315,7 +324,12 @@ const MessageRow = memo(function MessageRow({
     void toggleReaction(qc, message, emoji, meId).catch((err) => toast.error(errorMessage(err)));
   const actions: MessageActionSet = {
     onReply: onOpenThread ? () => onOpenThread(message.id) : undefined,
-    onEdit: own && mutable ? () => setEditing(true) : undefined,
+    onEdit:
+      !own || !mutable || editOverride === null
+        ? undefined
+        : editOverride
+          ? () => editOverride(message, () => setEditing(true))
+          : () => setEditing(true),
     onDelete:
       mutable && (own || canDeleteAny)
         ? () => {
@@ -651,6 +665,8 @@ export function MessageList({
   onAnchorHidden,
   dividerAfterSeq = null,
   onMarkUnread,
+  onEdit,
+  editorFor,
 }: {
   messages: Message[];
   pending: PendingMessage[];
@@ -688,7 +704,23 @@ export function MessageList({
   dividerAfterSeq?: number | null;
   /** "Mark unread" on top-level messages (CHAT-09); must be stable. */
   onMarkUnread?: (m: Message) => void;
+  /**
+   * The author's "Edit message": absent = the inline editor (default); a function opens another editor instead (a
+   * board card's root opens the card editor, 07.1-11); null = not offered. Must be stable.
+   */
+  onEdit?: EditOverride | null;
+  /**
+   * Per-message `onEdit` for lists that mix kinds (a board's Messages view: card roots open the card editor, other
+   * messages keep the inline editor). Its answer wins over `onEdit`; undefined falls back to `onEdit`. Answers must be
+   * stable callbacks.
+   */
+  editorFor?: (m: Message) => EditOverride | null | undefined;
 }) {
+  // null (not offered) must win over the list default, so `??` would be wrong here.
+  const editorOf = (m: Message) => {
+    const own = editorFor?.(m);
+    return own === undefined ? onEdit : own;
+  };
   let prev: { key: string; at: number; day: string } | null = startDay
     ? { key: "", at: 0, day: new Date(startDay).toDateString() }
     : null;
@@ -749,6 +781,7 @@ export function MessageList({
         pinnedBy={pinnedBy}
         linkFor={linkFor}
         onMarkUnread={onMarkUnread}
+        onEdit={editorOf(m)}
       />,
     );
     // A message with a thread breaks the group so the next one shows its author again.

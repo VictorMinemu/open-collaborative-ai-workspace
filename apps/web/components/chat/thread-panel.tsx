@@ -3,15 +3,20 @@
 import type { Attachment, ChannelSummary, Message } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
 import { MessagesSquare, X } from "lucide-react";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useIsDesktop } from "@/hooks/use-media-query";
 import { useAttachmentsConfig } from "@/lib/attachment-queries";
+import { useCardRootEditor } from "@/lib/board-manage-queries";
+import { findCard, useBoard } from "@/lib/board-queries";
 import { markThreadRead, useThread } from "@/lib/chat-queries";
 import { permalinkPath } from "@/lib/permalink";
 import { DropZone } from "./attachments/drop-zone";
+import { CardEditDialog } from "./board/card-edit-dialog";
+import { isCardAuthor, menuColumns } from "./board/card-menu";
+import { CardStrip, cardRootView } from "./board/card-strip";
 import { attachmentLimitsHint, Composer, type ComposerApi, type MentionCandidate } from "./composer";
 import { MessageList, type PendingMessage } from "./message-list";
 import { PrincipalAvatar } from "./principal-avatar";
@@ -85,6 +90,32 @@ function ThreadBody({
     [channel.id],
   );
 
+  // A board card's thread (07.1-11, BOARD-02): when the root is a card in the loaded board cache, the card strip sits
+  // under the header with the card's structured data, the root shows only the description, and the author's "Edit
+  // message" on the root opens the card editor (the generic edit refuses card roots). Every other thread, and every
+  // reply, is unchanged.
+  const board = useBoard(channel.id, { enabled: false });
+  const snapshot = channel.layout === "board" ? board.data : undefined;
+  const card = snapshot ? (findCard(snapshot, rootId)?.card ?? null) : null;
+  const columns = useMemo(() => (snapshot ? menuColumns(snapshot) : []), [snapshot]);
+  const [editingCard, setEditingCard] = useState(false);
+  const openCardEditor = useCallback(() => setEditingCard(true), []);
+  const isAuthor = !!card && isCardAuthor(card, me.id);
+  const root = thread.data?.root;
+  // A card root past its column's loaded page has no strip, but its own "Edit message" still opens the card editor
+  // after a lookup by id (07.1 fix); a plain root keeps the inline editor.
+  const deepCard = useCardRootEditor(channel.id, snapshot, canPost);
+  const deepEdit = channel.layout === "board" && root && !card ? deepCard.editorFor(root) : undefined;
+  const description = card?.description;
+  const title = card?.title;
+  const rootView = useMemo(
+    () =>
+      root && description !== undefined && title !== undefined
+        ? cardRootView(root, { description, title })
+        : root,
+    [root, description, title],
+  );
+
   return (
     <div className="flex h-full min-h-0 flex-col" data-testid="thread-panel">
       <header className="flex h-14 shrink-0 items-center gap-3 border-b px-4">
@@ -118,6 +149,17 @@ function ThreadBody({
           <X className="size-4" />
         </button>
       </header>
+      {card && snapshot ? (
+        <CardStrip
+          convId={channel.id}
+          card={card}
+          board={snapshot.board}
+          columns={columns}
+          canPost={canPost}
+          isAuthor={isAuthor}
+          onEdit={openCardEditor}
+        />
+      ) : null}
 
       <DropZone
         conversationLabel="this thread"
@@ -143,7 +185,7 @@ function ThreadBody({
           ) : thread.data ? (
             <>
               <MessageList
-                messages={[thread.data.root]}
+                messages={[rootView ?? thread.data.root]}
                 pending={[]}
                 me={me}
                 typers={[]}
@@ -157,6 +199,11 @@ function ThreadBody({
                 showTombstones
                 anchorId={highlightId}
                 linkFor={linkFor}
+                {...(card
+                  ? { onEdit: canPost && isAuthor ? openCardEditor : null }
+                  : deepEdit !== undefined
+                    ? { onEdit: deepEdit }
+                    : {})}
               />
               <div className="flex items-center gap-3 px-4 py-1.5 sm:px-5" data-testid="thread-reply-count">
                 <span className="text-muted-foreground text-xs">
@@ -205,6 +252,26 @@ function ThreadBody({
           />
         </div>
       </DropZone>
+      {card && snapshot && isAuthor && canPost ? (
+        <CardEditDialog
+          convId={channel.id}
+          card={card}
+          board={snapshot.board}
+          open={editingCard}
+          onOpenChange={setEditingCard}
+        />
+      ) : null}
+      {!card && deepCard.editingCard && snapshot && canPost ? (
+        <CardEditDialog
+          convId={channel.id}
+          card={deepCard.editingCard}
+          board={snapshot.board}
+          open
+          onOpenChange={(o) => {
+            if (!o) deepCard.close();
+          }}
+        />
+      ) : null}
     </div>
   );
 }

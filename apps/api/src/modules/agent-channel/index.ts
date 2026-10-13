@@ -30,6 +30,7 @@ import { cellMcpServers } from "../mcp";
 import { channelResource, createPermissionService, type ResourceFacts } from "../organization";
 import { cellApprovedPlugins } from "../plugins";
 import { cellOf, createCellAuth } from "./auth";
+import { registerBoardAgentRoutes } from "./board";
 import { noTrigger, registerCardActionHandler, registerCardRoutes, resolveReplyTarget } from "./cards";
 import { registerCellGateway } from "./gateway";
 import { registerMcpCellRoutes } from "./mcp";
@@ -446,6 +447,8 @@ export function createAgentChannelModule(
 
           // Agent Cards (AGENT-04, P-11): typed cards posted and updated in place by their agent.
           registerCardRoutes(scope, { core });
+          // Boards (07.1-10, D-07): read, create and move cards on the turn's board, for the turn's human.
+          registerBoardAgentRoutes(scope, { core, perms });
           // The cell's tool gate (D-08): decision + caps + taint + audit for every gated tool call.
           registerToolCallRoutes(scope, core, perms);
           // The cell's memory tool (D-10): owner bound to the delivered turn, DM only, refused once tainted.

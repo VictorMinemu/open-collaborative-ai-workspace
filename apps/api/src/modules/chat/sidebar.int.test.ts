@@ -137,7 +137,14 @@ describe("channel placement (CHAT-02, task 1)", () => {
         [design.id],
       )
     ).rows;
-    expect(rows[0]?.metadata).toEqual({ name: "design", visibility: "public", unitId: product });
+    // Phase 07.1: the layout (and the template, none for a text channel) travel with the creation audit.
+    expect(rows[0]?.metadata).toEqual({
+      name: "design",
+      visibility: "public",
+      unitId: product,
+      layout: "text",
+      templateId: null,
+    });
   });
 
   it("a channel created without a unit, or with unitId null, belongs to the organization", async () => {

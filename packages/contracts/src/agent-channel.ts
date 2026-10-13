@@ -7,6 +7,16 @@ import {
   SubscriptionProviderKind,
 } from "./agent";
 import { AgentCardInput, AgentCardKind, AgentCardPatch } from "./agent-cards";
+import {
+  BOARD_CARD_DESCRIPTION_MAX,
+  BOARD_MAX_COLUMNS,
+  Board,
+  BoardCard,
+  BoardCardMove,
+  BoardCardTitle,
+  BoardColumn,
+  WaitingOn,
+} from "./board";
 import { SearchProvider, TurnContext } from "./bot-capabilities";
 import { ConversationKind, Mention, MessageBody } from "./chat";
 import { Id, IsoDateTime, MemberKind, PrincipalKind } from "./common";
@@ -609,3 +619,59 @@ export type AgentChannelMemorySave = z.infer<typeof AgentChannelMemorySave>;
 
 export const AgentChannelMemorySaveResponse = z.object({ memoryId: Id, created: z.boolean() });
 export type AgentChannelMemorySaveResponse = z.infer<typeof AgentChannelMemorySaveResponse>;
+
+// ---------------------------------------------------------------- boards (Phase 07.1, D-07, P-03, additive)
+
+/*
+ * The `ocw_board_card` tool. Bound to a delivered turn like `ocw_memory_save`: the body names only the delivery
+ * (`eventId`) and the agent. The board is always the turn's conversation and the acting human the turn's human, both
+ * read from the stored turn, never from these bodies (unknown keys such as `conversationId` are stripped). Agents create
+ * cards and change their column or waiting state; they never edit card text (P-03).
+ */
+
+/** `POST /agent-channel/v1/board/read`: the turn's board, its columns and the card whose thread the turn runs in. */
+export const AgentChannelBoardRead = z.object({ eventId: Id, agentId: Id });
+export type AgentChannelBoardRead = z.infer<typeof AgentChannelBoardRead>;
+
+export const AgentChannelBoardReadResponse = z.object({
+  board: Board,
+  columns: z.array(BoardColumn).max(BOARD_MAX_COLUMNS),
+  /** null when the turn is not in a card's thread. */
+  card: BoardCard.nullable(),
+});
+export type AgentChannelBoardReadResponse = z.infer<typeof AgentChannelBoardReadResponse>;
+
+/** `POST /agent-channel/v1/board/cards`: a new card in the turn's board. 201 created, 200 on an idempotent retry. */
+export const AgentChannelBoardCreateCard = z
+  .object({
+    eventId: Id,
+    agentId: Id,
+    /** At-least-once delivery: the same key for the same agent never creates two cards. */
+    idempotencyKey: z.string().min(1).max(120),
+    title: BoardCardTitle.optional(),
+    description: z.string().trim().max(BOARD_CARD_DESCRIPTION_MAX).default(""),
+    columnId: Id.optional(),
+    waitingOn: WaitingOn.optional(),
+  })
+  .refine((v) => (v.title?.length ?? 0) > 0 || v.description.length > 0, {
+    message: "Give the card a title or a description",
+    path: ["description"],
+  });
+export type AgentChannelBoardCreateCard = z.infer<typeof AgentChannelBoardCreateCard>;
+
+/** `PATCH /agent-channel/v1/board/cards/:messageId`: move a card or set its waiting state, naming the version seen. */
+export const AgentChannelBoardPatchCard = z
+  .object({
+    eventId: Id,
+    agentId: Id,
+    expectedVersion: z.number().int().min(1),
+    move: BoardCardMove.optional(),
+    waitingOn: WaitingOn.optional(),
+  })
+  .refine((v) => v.move !== undefined || v.waitingOn !== undefined, {
+    message: "Move the card or set its waiting state",
+  });
+export type AgentChannelBoardPatchCard = z.infer<typeof AgentChannelBoardPatchCard>;
+
+export const AgentChannelBoardCardResponse = z.object({ card: BoardCard });
+export type AgentChannelBoardCardResponse = z.infer<typeof AgentChannelBoardCardResponse>;

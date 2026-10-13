@@ -291,3 +291,36 @@ test("the views: Threads with unread replies, All unread first with previews, AI
   await samApi.dispose();
   await admin.dispose();
 });
+
+test("a long channel list with unread badges scrolls inside the sidebar; the page itself never scrolls", async ({
+  browser,
+}, info) => {
+  test.skip(info.project.name !== "desktop", "the column sidebar is the desktop layout");
+  test.setTimeout(120_000);
+  const admin = await apiAs(ADMIN);
+  await ensureMember(admin, SAM, "developer");
+  const sam = await apiAs(SAM);
+  // 40 channels Sam joined, each with an unread message from Víctor: far more rows than a 900 px window holds, each
+  // with an unread badge whose screen-reader text is absolutely positioned (07.1 gate: that text escaped the sidebar's
+  // scroller and made the whole document scrollable, so focusing anything shifted the app up).
+  for (let n = 0; n < 40; n++) {
+    const tag = `${Date.now().toString(36)}${n}`;
+    const id = await channelIn(admin, `long-${tag}`, null, [sam]);
+    expect(
+      (await admin.post(`/api/v1/conversations/${id}/messages`, { data: { body: "unread" } })).ok(),
+    ).toBe(true);
+  }
+  const s = await openAs(browser, SAM, "desktop");
+  await expect(s.page.getByTestId("unread-badge").first()).toBeAttached();
+  const overflow = await s.page.evaluate(() => {
+    const root = document.scrollingElement as HTMLElement;
+    return { scroll: root.scrollHeight, view: window.innerHeight };
+  });
+  expect(overflow.scroll, "the document is exactly one window tall").toBe(overflow.view);
+  // The list itself scrolls.
+  const list = s.page.getByTestId("section-sidebar").locator(".overflow-y-auto").first();
+  expect(await list.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+  await s.context.close();
+  await admin.dispose();
+  await sam.dispose();
+});
