@@ -170,6 +170,22 @@ export async function seedMemory(admin: APIRequestContext): Promise<MemorySeed> 
   };
 }
 
+/**
+ * Deletes every Ventas file the seed does not define (MEMORY.md stays). Other specs write there (memory-proposals
+ * applies clients/acme-<w>.md, clients/globex-<w>.md, ...) and memory-files walks and snapshots that tree row by row.
+ * A fresh run reaches memory-files first; a repeat (--repeat-each, --keep-db) does not.
+ */
+export async function pruneVentasToSeed(admin: APIRequestContext, seed: MemorySeed) {
+  const res = await admin.get(`/api/v1/memory/scopes/${seed.ventasScopeId}/files`);
+  expect(res.ok(), `list Ventas files: ${res.status()}`).toBe(true);
+  const { files } = (await res.json()) as { files: Array<{ id: string; path: string; version: number }> };
+  for (const f of files) {
+    if (f.path === "MEMORY.md" || Object.hasOwn(VENTAS_FILES, f.path)) continue;
+    const del = await admin.delete(`/api/v1/memory/files/${f.id}?expectedVersion=${f.version}`);
+    expect(del.ok(), `delete ${f.path}: ${del.status()}`).toBe(true);
+  }
+}
+
 /** The dedicated viewer persona as a Ventas member (idempotent); returns her user id. */
 export async function ensureMemoryReader(admin: APIRequestContext, seed: MemorySeed): Promise<string> {
   const id = await ensureMember(admin, MEMORY_READER, "developer");

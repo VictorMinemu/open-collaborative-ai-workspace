@@ -13,6 +13,7 @@ import {
   MEMORY_TEAM,
   type MemorySeed,
   memoryScopes,
+  pruneVentasToSeed,
   seedMemory,
 } from "../support/memory";
 import { ADMIN, shot } from "./env";
@@ -36,6 +37,8 @@ const open: BrowserContext[] = [];
 test.beforeAll(async () => {
   admin = await apiAs(ADMIN);
   seed = await seedMemory(admin);
+  // The keyboard case walks Ventas › clients row by row and snapshots the tree exactly.
+  await pruneVentasToSeed(admin, seed);
   // Her own persona, not Sam: other specs leave Sam private scopes in the shared database (WINDOWS 162), and the
   // viewer cases assert her exact scope list and tree.
   readerId = await ensureMemoryReader(admin, seed);
