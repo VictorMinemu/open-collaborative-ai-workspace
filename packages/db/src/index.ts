@@ -18,4 +18,5 @@ export {
   type TenantDb,
   type Tx,
   tenantOf,
+  withSavepoint,
 } from "./tenant";

@@ -845,6 +845,8 @@ export interface PostInput {
    * carries it; `body` is its plain-text summary.
    */
   card?: AgentCardInput | undefined;
+  /** Phase 07.2: the card is server-composed (an approval mirror); agents can never patch it. */
+  cardPlatformOwned?: boolean | undefined;
 }
 
 export interface PostResult {
@@ -935,7 +937,12 @@ export async function postMessage(
     if (author.kind !== "agent") throw new Error("only agents post cards");
     message = {
       ...message,
-      card: await insertCard(tx, { message: row, agentId: author.id, input: input.card }),
+      card: await insertCard(tx, {
+        message: row,
+        agentId: author.id,
+        input: input.card,
+        platformOwned: input.cardPlatformOwned === true,
+      }),
     };
   }
   const seq = await deps.realtime.appendEvent(tx, topic, EventTypes.messageCreated, { message });
