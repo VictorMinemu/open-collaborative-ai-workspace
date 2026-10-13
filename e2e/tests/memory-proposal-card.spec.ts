@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
 import { expectNoSeriousA11y } from "../support/a11y";
-import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
+import { type Actor, apiAs, BASE_URL, ensureMember, openAs, SAM, userIdOf } from "../support/actors";
 import { cellToken } from "../support/cell-token";
 import { FakeCellPlugin } from "../support/fake-cell-plugin";
 import { memoryScopes, seedMemory } from "../support/memory";
@@ -14,10 +14,12 @@ import { ADMIN, API_URL, shot } from "./env";
  * tainted), its `ocw_memory_write` is refused `tainted`, and its `ocw_memory_propose` into Sam's private memory
  * becomes a platform-owned card in the DM: "Created by the workspace", the server's masked preview, the taint line, a
  * Pending pill and Approve / Deny for Sam. Sam approves with a note; the file changes, the decision line quotes the note
- * and the bot hears it. Then every other state and audience: Sam's proposal into Ventas waits for a second person (no
- * Approve for him) and follows an admin's denial live with the quoted note; a stale rewrite approved after the file
- * changed ends Failed with the reason in words; an expired proposal offers no Approve. Every run uses the fake cell (no
- * model, no provider). Review screenshots: review-memory-proposal-card-<1440|390>(-dark).
+ * and the bot hears it. Then every other state and audience: Sam's proposal into Ventas waits for a reviewer (he holds
+ * no memory.promote there: no Approve for him) and follows an admin's denial live with the quoted note; the admin's own
+ * bot proposes into the organization's MEMORY.md from his DM and he approves it on the card (owner decision
+ * 2026-10-13: the decision right, not who asked, decides); a stale rewrite approved after the file changed ends Failed
+ * with the reason in words; an expired proposal offers no Approve. Every run uses the fake cell (no model, no
+ * provider). Review screenshots: review-memory-proposal-card(-selfapprove)-<1440|390>(-dark).
  */
 
 test.describe.configure({ mode: "serial" });
@@ -39,25 +41,28 @@ async function resetPolicy(admin: APIRequestContext) {
   expect(res.ok(), "reset bot policy").toBe(true);
 }
 
-/** Sam's only personal bot, fresh, with internet on (memory is on by default), and its private chat. */
-async function freshPersonalBot(samId: string): Promise<{ id: string; name: string; dmId: string }> {
-  const sam = await apiAs(SAM);
-  const listed = (await (await sam.get("/api/v1/agents")).json()) as {
+/** `who`'s only personal bot (Sam's by default), fresh, with internet on (memory is on by default), and its DM. */
+async function freshPersonalBot(
+  userId: string,
+  who: Pick<Actor, "email" | "password"> = SAM,
+): Promise<{ id: string; name: string; dmId: string }> {
+  const api = await apiAs(who);
+  const listed = (await (await api.get("/api/v1/agents")).json()) as {
     agents: Array<{ id: string; scope: string; ownerUserId: string | null }>;
   };
-  for (const a of listed.agents.filter((x) => x.scope === "personal" && x.ownerUserId === samId)) {
-    expect((await sam.delete(`/api/v1/agents/${a.id}`)).ok()).toBe(true);
+  for (const a of listed.agents.filter((x) => x.scope === "personal" && x.ownerUserId === userId)) {
+    expect((await api.delete(`/api/v1/agents/${a.id}`)).ok()).toBe(true);
   }
-  const res = await sam.post("/api/v1/agents/personal", {
+  const res = await api.post("/api/v1/agents/personal", {
     data: { modelProvider: "mock", modelId: "mock-1" },
   });
-  expect(res.ok(), "create Sam's personal bot").toBe(true);
+  expect(res.ok(), `create ${who.email}'s personal bot`).toBe(true);
   const body = (await res.json()) as { agent: { id: string; name: string }; dmId: string };
-  const internet = await sam.patch(`/api/v1/agents/${body.agent.id}/capabilities`, {
+  const internet = await api.patch(`/api/v1/agents/${body.agent.id}/capabilities`, {
     data: { internet: true },
   });
   expect(internet.ok(), "internet on").toBe(true);
-  await sam.dispose();
+  await api.dispose();
   return { id: body.agent.id, name: body.agent.name, dmId: body.dmId };
 }
 
@@ -320,7 +325,7 @@ test("Sam approves his bot's private-memory proposal in the DM card with a note;
   }
 });
 
-test("four eyes: Sam's proposal into Ventas shows the requester line and no Approve; an admin denies with a note and Sam's card updates live", async ({
+test("a requester without the decision right: Sam's proposal into Ventas waits for a reviewer with no Approve; an admin denies with a note and Sam's card updates live", async ({
   browser,
 }, info) => {
   test.setTimeout(180_000);
@@ -343,9 +348,7 @@ test("four eyes: Sam's proposal into Ventas shows the requester line and no Appr
     await expect(card.getByTestId("agent-card-title")).toHaveText(`Create ${path}`);
     await expect(card.getByTestId("agent-card-fields")).toContainText("Ventas · Team");
     await expect(card.getByTestId("agent-card-fields")).toContainText("Bot's note");
-    await expect(card.getByTestId("agent-card-waiting")).toHaveText(
-      "Waiting for a reviewer. You can't approve your own proposal.",
-    );
+    await expect(card.getByTestId("agent-card-waiting")).toHaveText("Waiting for a reviewer");
     await expect(card.getByTestId("agent-card-approve")).toHaveCount(0);
     await expect(card.getByTestId("agent-card-deny")).toHaveCount(0);
     await expect(card.getByTestId("agent-card-open")).toBeVisible();
@@ -371,6 +374,81 @@ test("four eyes: Sam's proposal into Ventas shows the requester line and no Appr
     await invariants(sam.page, card, w, "denied card");
   } finally {
     await sam.context.close();
+  }
+});
+
+test("self-approval with the decision right: the admin approves his own bot's organization proposal on the chat card; the file changes", async ({
+  browser,
+}, info) => {
+  test.setTimeout(180_000);
+  const project = info.project.name;
+  const w = widthOf(project);
+  const seed = await seedMemory(admin);
+  const adminId = await userIdOf(admin);
+  const bot = await freshPersonalBot(adminId, ADMIN);
+  const me = await openAs(browser, ADMIN, project);
+  try {
+    await me.page.goto(`${BASE_URL}/chat/dm/${bot.dmId}`);
+    await expect(me.page.getByTestId("dm-view")).toBeVisible();
+    const line = `- Autofy Labs ships open collaborative AI workspaces (${w})`;
+    await ask(
+      me.page,
+      `Save this as organization context [[call ocw_memory_propose ${JSON.stringify({
+        scope: seed.orgScopeId,
+        path: "MEMORY.md",
+        op: "append",
+        content: `\n${line}`,
+      })}]]`,
+      "Tool ocw_memory_propose: proposed",
+    );
+
+    // ---- his own proposal, a shared scope he may decide: Review changes, Approve and Deny; no waiting line
+    const card = linkedCard(me.page);
+    await expect(card).toBeVisible({ timeout: 10_000 });
+    await expect(card).toHaveAttribute("data-approval-status", "pending");
+    await expect(card.getByTestId("agent-card-title")).toHaveText("Append to MEMORY.md");
+    await expect(card.getByTestId("agent-card-fields")).toContainText("Organization · Everyone");
+    await expect(card.getByRole("status", { name: "Status: Pending" })).toBeVisible();
+    await expect(card.getByTestId("agent-card-approve")).toBeVisible();
+    await expect(card.getByTestId("agent-card-deny")).toBeVisible();
+    await expect(card.getByTestId("agent-card-open")).toHaveText(/Review changes/);
+    await expect(card.getByTestId("agent-card-waiting")).toHaveCount(0);
+    await review(me.page, card, "review-memory-proposal-card-selfapprove", w);
+
+    // ---- Approve: the same confirmation, naming the organization memory and its readers
+    await card.getByTestId("agent-card-approve").click();
+    const dialog = me.page.getByTestId("agent-card-confirm");
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("heading", { name: "Approve and apply?" })).toBeVisible();
+    await expect(dialog).toContainText("“Append to MEMORY.md” is saved to Organization memory.");
+    await expect(dialog).toContainText(/\d+ (person|people) will see this\./);
+    await expect(dialog.getByRole("button", { name: "Cancel" })).toBeFocused();
+    await dialog.getByRole("textbox", { name: "Note (optional)" }).fill("Context for every bot");
+    const decided = me.page.waitForResponse(
+      (r) => r.url().includes("/decision") && r.request().method() === "POST",
+    );
+    await dialog.getByTestId("agent-card-confirm-submit").click();
+    expect((await decided).status(), "self-approval accepted").toBe(200);
+    await expect(dialog).toBeHidden();
+
+    // ---- Applied, decided by the admin himself
+    await expect(card.getByRole("status", { name: "Status: Applied" })).toBeVisible({ timeout: 10_000 });
+    await expect(card.getByTestId("agent-card-decision")).toContainText(`Approved by ${ADMIN.name}`);
+    await expect(card.getByTestId("agent-card-note")).toHaveText("“Context for every bot”");
+    await expect(card.getByTestId("agent-card-approve")).toHaveCount(0);
+    await invariants(me.page, card, w, "self-approved card");
+
+    // ---- the organization's MEMORY.md holds the line, through the API and in the viewer
+    const file = (await (
+      await admin.get(`/api/v1/memory/scopes/${seed.orgScopeId}/file?path=MEMORY.md`)
+    ).json()) as { content: string };
+    expect(file.content).toContain(line);
+    await me.page.goto(`${BASE_URL}/memory/${seed.orgScopeId}/MEMORY.md`);
+    await expect(me.page.getByTestId("memory-file").getByText(line.slice(2))).toBeVisible({
+      timeout: 15_000,
+    });
+  } finally {
+    await me.context.close();
   }
 });
 
