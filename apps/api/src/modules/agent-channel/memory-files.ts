@@ -41,7 +41,10 @@ import { noTrigger } from "./cards";
  * Every call, in one transaction:
  *   1. the turn: this agent's delivery (RLS keeps it to the cell's organization) whose human still reads the turn's
  *      conversation; otherwise 403 `no_trigger` (the rule of every agent post, PR #25), audited and committed first;
- *   2. the tool on that turn (`not_in_turn`) and still offered now (`memory_off`);
+ *   2. the tool on that turn (`not_in_turn`) and still offered now (`memory_off`); `list` and `read` then count one
+ *      call against the turn's cap (`cap_reached`): the route is the authority, whether or not the cell asked
+ *      `/tool-calls` first (that gate only checks the cap for these tools, WINDOWS 148). `write` and `propose` count
+ *      their call further on (after their own checks);
  *   3. the decision as the agent for that human (agent ∩ human, the resolver) and the audience rule: every reader of the
  *      conversation may read what the agent reads (`audience_too_wide`). Personal-like memory (the person's private
  *      scope with this bot, a personal bot's notebook) is used only in the owner's one-person DM (ADR-0023 decision 4).
@@ -266,6 +269,15 @@ export function registerMemoryFileRoutes(
       core.env,
     );
     if (!now.tools.includes(TOOL[route])) return refuse("memory_off");
+    if (route === "list" || route === "read") {
+      // One call against the turn's cap, in one conditional statement (race-free like the gate's).
+      const counted = await tx
+        .update(agentTurns)
+        .set({ toolCalls: sql`${agentTurns.toolCalls} + 1` })
+        .where(and(eq(agentTurns.eventId, turn.eventId), lt(agentTurns.toolCalls, MAX_TOOL_CALLS_PER_TURN)))
+        .returning({ eventId: agentTurns.eventId });
+      if (counted.length === 0) return refuse("cap_reached");
+    }
     return { turn };
   }
 
