@@ -36,11 +36,15 @@ export function ToolsSection({
   view,
   readOnly: forceReadOnly = false,
   title = "Tools",
+  headingLevel = 4,
 }: {
   view: BotCapabilityView;
   readOnly?: boolean;
   title?: string;
+  /** The title's HTML level (the look never changes): 4 in the bot sheet, 2 on the agent page. */
+  headingLevel?: 2 | 3 | 4;
 }) {
+  const Heading = `h${headingLevel}` as const;
   const update = useUpdateBotCapabilities(view.agentId);
   const canMcp = useCan("mcp.manage");
   const canPlugins = useCan("plugin.manage");
@@ -71,9 +75,9 @@ export function ToolsSection({
   return (
     <section className="grid gap-2" data-testid="tools-section" aria-labelledby={`tools-${view.agentId}`}>
       <div className="flex items-baseline justify-between gap-2">
-        <h4 id={`tools-${view.agentId}`} className="font-medium text-sm">
+        <Heading id={`tools-${view.agentId}`} className="font-medium text-sm">
           {title}
-        </h4>
+        </Heading>
         {groups.length > 0 ? (
           <span className="text-muted-foreground text-xs tabular-nums">
             {view.tools.filter((t) => t.effective).length} of {view.tools.length} on

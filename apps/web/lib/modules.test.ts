@@ -1,6 +1,6 @@
 import { MODULE_CATALOG, ModuleId, type Permission } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
-import { grainStatus, moduleStatus, permissionsFailed, withoutBotDms } from "./modules";
+import { grainStatus, moduleNames, moduleStatus, permissionsFailed, withoutBotDms } from "./modules";
 
 const perms = (...permissions: Permission[]) => ({ permissions });
 const everyEntry = perms(...ModuleId.options.map((m) => MODULE_CATALOG[m].entry));
@@ -84,5 +84,12 @@ describe("withoutBotDms", () => {
   it("hides the bot DM once Bots is decided off", () => {
     const off = withoutBotDms(dms, moduleStatus(perms("ai_chat.read"), false, "bots") !== "off");
     expect(off.map((d) => d.id)).toEqual(["person", "group"]);
+  });
+});
+
+describe("moduleNames (Settings › Modules copy, 07.2 WINDOWS 155)", () => {
+  it("names every module of the catalog, Memory included, in catalog order", () => {
+    expect(moduleNames()).toBe("Work Zone, AI chats, Bots and Memory");
+    for (const id of ModuleId.options) expect(moduleNames()).toContain(MODULE_CATALOG[id].label);
   });
 });

@@ -34,7 +34,13 @@ import {
 } from "@/lib/memory-tree";
 import { cn } from "@/lib/utils";
 import { FileSkeleton, focusHeadingNext, MemoryFile } from "./memory-file";
-import { MemoryActionDialogs, MemoryCreateButtons, MemoryRowMenu, rowShortcut } from "./memory-file-actions";
+import {
+  canWriteScope,
+  MemoryActionDialogs,
+  MemoryCreateButtons,
+  MemoryRowMenu,
+  rowShortcut,
+} from "./memory-file-actions";
 import { MemorySearch } from "./memory-search";
 import { MemoryTree, type OpenVia, useMemoryTreeState } from "./memory-tree";
 
@@ -226,15 +232,19 @@ export function MemoryShell({ scopeId, segments }: { scopeId?: string; segments?
         selected={selected}
         onOpen={onOpen}
         stacked={stacked}
-        rowMenu={(node, menu) => (
-          <MemoryRowMenu
-            node={node}
-            scope={scopes.find((s) => s.id === node.scopeId)}
-            compact={stacked}
-            open={menu.open}
-            onOpenChange={menu.onOpenChange}
-          />
-        )}
+        rowMenu={(node, menu) => {
+          const scope = scopes.find((s) => s.id === node.scopeId);
+          // Readers get no menu at all: an empty slot would still push the phone row's kind tag left.
+          return canWriteScope(scope) ? (
+            <MemoryRowMenu
+              node={node}
+              scope={scope}
+              compact={stacked}
+              open={menu.open}
+              onOpenChange={menu.onOpenChange}
+            />
+          ) : null;
+        }}
         onRowKey={(node, key) =>
           rowShortcut(
             node,

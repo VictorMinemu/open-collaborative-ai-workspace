@@ -15,6 +15,7 @@ function render(
     variant?: "chat" | "document";
     streaming?: boolean;
     resolveHref?: (href: string) => string | null;
+    headingLevel?: 1 | 2 | 3 | 4 | 5 | 6;
   } = {},
   ctx: MentionContextValue = { handles: new Map([["sam", SAM]]), myHandle: null },
 ): string {
@@ -298,5 +299,50 @@ describe("Markdown: in-app links (resolveHref, 07.2-10)", () => {
     const html = render(LINKS, { variant: "document" });
     expect(html).not.toContain("data-in-app");
     expect(html).not.toContain("/memory/");
+  });
+});
+
+describe("Markdown: document heading level (07.2 WINDOWS 154)", () => {
+  /** The HTML heading tags in document order, e.g. ["h2", "h3"]. */
+  const tags = (html: string) => [...html.matchAll(/<(h[1-6])\b/g)].map((m) => m[1]);
+  /** The class of the first heading whose text is `text`. */
+  const classOf = (html: string, text: string) =>
+    html.match(new RegExp(`<h[1-6] class="([^"]*)">${text}</h[1-6]>`))?.[1];
+  const DOC = "# Acme\n\nIntro.\n\n## Contacts\n\n- Marta\n\n### Notes\n\nText.\n";
+
+  it("without headingLevel the document variant keeps its tags (Work Zone, AI chats)", () => {
+    expect(tags(render(DOC, { variant: "document" }))).toEqual(["h3", "h3", "h4"]);
+  });
+
+  it("headingLevel sets the tag of the document's top heading and keeps the outline below it", () => {
+    expect(tags(render(DOC, { variant: "document", headingLevel: 2 }))).toEqual(["h2", "h3", "h4"]);
+  });
+
+  it("the top heading is the shallowest one used, so a file that starts at ## never skips a level", () => {
+    const html = render("## Contacts\n\n### Notes\n", { variant: "document", headingLevel: 2 });
+    expect(tags(html)).toEqual(["h2", "h3"]);
+  });
+
+  it("# lines inside a code fence are not headings", () => {
+    const html = render("```sh\n# a comment\n```\n\n## Setup\n", { variant: "document", headingLevel: 2 });
+    expect(tags(html)).toEqual(["h2"]);
+  });
+
+  it("levels stop at h6", () => {
+    const html = render("# A\n\n###### F\n", { variant: "document", headingLevel: 3 });
+    expect(tags(html)).toEqual(["h3", "h6"]);
+  });
+
+  it("the look follows the Markdown level, never the tag", () => {
+    const plain = render(DOC, { variant: "document" });
+    const leveled = render(DOC, { variant: "document", headingLevel: 2 });
+    for (const text of ["Acme", "Contacts", "Notes"]) {
+      expect(classOf(leveled, text), text).toBeDefined();
+      expect(classOf(leveled, text), text).toEqual(classOf(plain, text));
+    }
+  });
+
+  it("the chat variant ignores headingLevel", () => {
+    expect(render(DOC, { variant: "chat", headingLevel: 2 })).toEqual(render(DOC, { variant: "chat" }));
   });
 });

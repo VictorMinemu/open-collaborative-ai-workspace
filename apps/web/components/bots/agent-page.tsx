@@ -128,7 +128,7 @@ function LoadedAgentPage({ agent }: { agent: Agent }) {
             <p className="mb-3 text-muted-foreground text-sm" data-testid="agent-capabilities-note">
               Read only. Bot settings change these.
             </p>
-            <CapabilitiesPanel agentId={agent.id} readOnly />
+            <CapabilitiesPanel agentId={agent.id} readOnly headingLevel={2} />
           </div>
         </TabsContent>
       </Tabs>

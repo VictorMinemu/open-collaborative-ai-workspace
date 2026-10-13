@@ -5,7 +5,8 @@ import { cn } from "@/lib/utils";
 /**
  * The findings of a memory proposal (07.2-13, MEM-05, UI-SPEC "Findings", "Status and notices"): one row per warn or
  * block finding (kind, severity chip, count, masked samples, lines), the extended-scan state as a polite amber notice
- * (`role="status"`, T-07.2-13-05), and "No sensitive data found" when there is nothing. Samples are the server's masked
+ * (`role="status"`, T-07.2-13-05), and "No sensitive data found" when there is nothing ("… by the built-in scan" when
+ * the extended scan did not run in full, so it never reads as an all-clear, WINDOWS 165). Samples are the server's masked
  * strings, rendered as text; a raw value never reaches this component (T-07.2-13-04). A row is a button when the review
  * can jump to it in the diff.
  */
@@ -45,6 +46,14 @@ const SEVERITY: Record<SensitiveFinding["severity"], { label: string; tone: stri
 
 export const SCAN_UNAVAILABLE = "Extended scan unavailable — review the text yourself";
 export const SCAN_PARTIAL = "Extended scan incomplete — review the text yourself";
+
+/** "No sensitive data found", qualified when only the built-in scan ran in full. */
+export const NONE_FOUND = "No sensitive data found";
+export const NONE_FOUND_BUILTIN = "No sensitive data found by the built-in scan";
+
+/** Whether the extended scan (Presidio) did not answer or answered in part for this proposal. */
+export const extendedScanIncomplete = (findings: readonly SensitiveFinding[]) =>
+  findings.some((f) => SCAN_KINDS.includes(f.kind));
 
 /** "Line 3", "Lines 4, 7". */
 export const linesText = (lines: readonly number[]) =>
@@ -135,7 +144,7 @@ export function FindingsList({
       ) : (
         <p className="flex items-center gap-2 text-muted-foreground text-sm" data-testid="findings-none">
           <ScanSearch aria-hidden className="size-4" />
-          No sensitive data found
+          {extendedScanIncomplete(findings) ? NONE_FOUND_BUILTIN : NONE_FOUND}
         </p>
       )}
     </div>

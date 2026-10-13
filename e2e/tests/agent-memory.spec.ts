@@ -3,7 +3,7 @@ import { expectNoSeriousA11y } from "../support/a11y";
 import { type Actor, apiAs, BASE_URL, openAs, SAM } from "../support/actors";
 import { ask, cellToken, freshPersonalBot } from "../support/bot-tools";
 import { FakeCellPlugin } from "../support/fake-cell-plugin";
-import { type MemorySeed, putMemoryFile, seedMemory } from "../support/memory";
+import { type MemorySeed, memoryScopes, putMemoryFile, seedMemory } from "../support/memory";
 import { ADMIN, API_URL, shot } from "./env";
 
 /**
@@ -168,7 +168,8 @@ async function review(page: Page, screen: string, w: string) {
     await page.emulateMedia({ colorScheme: theme });
     await noSidewaysScroll(page, `${screen} ${theme}`);
     expect.soft(await unnamedControls(page), `${screen} (${theme}): unnamed controls`).toEqual([]);
-    await expectNoSeriousA11y(page, '[data-testid="agent-page"]');
+    // The page h1, then the file's h1 and its headings from h2, or the tools title as h2 (WINDOWS 154).
+    await expectNoSeriousA11y(page, '[data-testid="agent-page"]', { failOn: ["heading-order"] });
     await shot(page, `review-agent-page-${screen}-${w}${theme === "dark" ? "-dark" : ""}`);
   }
   await page.emulateMedia({ colorScheme: "light" });
@@ -353,10 +354,23 @@ test("An admin sees a team bot's notebook and nobody's private memory; a persona
   await expect(agentPage).not.toContainText("Sam prefers weekly pipeline summaries");
 
   // The admin's Memory never lists Sam's private scope, and its direct URL is the shared not-found state (MEM-07).
+  // Its only private rows are the admin's own (an earlier spec may give the admin a personal bot): exactly the
+  // personal scopes the API lists for the admin, never Sam's.
+  const adminApi = await apiAs(ADMIN);
+  const adminScopes = await memoryScopes(adminApi);
+  await adminApi.dispose();
+  const ownPrivate = adminScopes.filter((s) => s.kind === "personal").map((s) => s.id);
+  expect(ownPrivate).not.toContain(samPrivateScopeId);
   await page.goto(`${BASE_URL}/memory`);
   await expect(page.getByRole("tree", { name: "Memory files" })).toBeVisible();
+  await expect(page.getByRole("tree", { name: "Memory files" }).locator('[data-kind="scope"]')).toHaveCount(
+    adminScopes.length,
+  );
   await expect(page.locator(`[data-scope-id="${samPrivateScopeId}"]`)).toHaveCount(0);
-  await expect(page.getByRole("treeitem", { name: /private memory/ })).toHaveCount(0);
+  const privateRows = await page
+    .getByRole("treeitem", { name: /private memory/ })
+    .evaluateAll((els) => els.map((e) => e.getAttribute("data-scope-id")));
+  expect(privateRows.sort()).toEqual([...ownPrivate].sort());
   await page.goto(`${BASE_URL}/memory/${samPrivateScopeId}/MEMORY.md`);
   await expect(page.getByTestId("memory-file-notfound")).toContainText(
     "This file doesn't exist or you can't open it",

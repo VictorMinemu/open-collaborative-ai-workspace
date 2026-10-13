@@ -44,16 +44,19 @@ const REPLY_MODES: Array<{ value: ReplyMode; label: string }> = [
  * bots), the daily limit, MCP and plugin tools (`ToolsSection`) and today's usage. Renders only the API's decision: a capability with a `reason` is disabled
  * and explained, never hidden; everything is read-only without `bot.configure` on this bot. `readOnly` forces it for
  * everyone, owners included (the agent page, 07.2-14: settings change only in the bot's sheet), and titles the tools
- * "Tools and skills".
+ * "Tools and skills". `headingLevel` is the tools title's level under the host's own headings (h4 in the bot sheet;
+ * the agent page passes 2, under its h1).
  */
 export function CapabilitiesPanel({
   agentId,
   className,
   readOnly: forceReadOnly = false,
+  headingLevel,
 }: {
   agentId: string;
   className?: string;
   readOnly?: boolean;
+  headingLevel?: 2 | 3 | 4;
 }) {
   const q = useBotCapabilities(agentId);
   const update = useUpdateBotCapabilities(agentId);
@@ -138,6 +141,7 @@ export function CapabilitiesPanel({
         view={view}
         readOnly={forceReadOnly}
         title={forceReadOnly ? "Tools and skills" : "Tools"}
+        headingLevel={headingLevel}
       />
 
       <div className="rounded-lg border bg-muted/30 p-3">

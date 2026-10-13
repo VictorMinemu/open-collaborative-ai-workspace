@@ -65,7 +65,13 @@ import {
 import { memoryHref } from "@/lib/memory-tree";
 import { useMe } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-import { FINDING_LABEL, FindingsList, listedFindings } from "./findings-list";
+import {
+  extendedScanIncomplete,
+  FINDING_LABEL,
+  FindingsList,
+  listedFindings,
+  NONE_FOUND,
+} from "./findings-list";
 import { Counts } from "./memory-history";
 
 /**
@@ -593,7 +599,9 @@ function MemoryProposalReview({
               }
               label={
                 findings.length === 0
-                  ? "No sensitive data found"
+                  ? extendedScanIncomplete(view.findings)
+                    ? "Built-in scan only"
+                    : NONE_FOUND
                   : [...new Set(findings.map((f) => FINDING_LABEL[f.kind]))].join(" · ")
               }
             />

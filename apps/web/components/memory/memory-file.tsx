@@ -25,7 +25,7 @@ import { useMemoryDraft } from "@/lib/memory-draft";
 import { actorLabel } from "@/lib/memory-edit";
 import { useMemoryFile } from "@/lib/memory-queries";
 import { memoryHref, resolveMemoryLink } from "@/lib/memory-tree";
-import { cn, relativeTime } from "@/lib/utils";
+import { cn, shortAge } from "@/lib/utils";
 import { MemoryFileMenu } from "./memory-file-actions";
 import { MemoryHistory, MemoryRevisionView } from "./memory-history";
 import { scopeIcon, scopeTag } from "./memory-tree";
@@ -304,7 +304,7 @@ function LoadedFile({
   const reading = (
     <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
       <div className={cn("mx-auto w-full max-w-[760px]", stacked ? "px-4 py-6" : "px-6 py-8")}>
-        <Markdown text={file.content} variant="document" resolveHref={resolveHref} />
+        <Markdown text={file.content} variant="document" headingLevel={2} resolveHref={resolveHref} />
         {path === "MEMORY.md" && file.content.trim() === MEMORY_ROOT_TEMPLATE.trim() ? (
           <p className="mt-2 text-muted-foreground text-sm">Nothing saved here yet.</p>
         ) : null}
@@ -676,7 +676,7 @@ function MetaActor({ file }: { file: MemoryFileDto }) {
       <span aria-hidden>·</span>
       <Tooltip content={fullDate(file.updatedAt)}>
         <time dateTime={file.updatedAt}>
-          {relativeTime(file.updatedAt)}
+          {shortAge(file.updatedAt)}
           <span className="sr-only">, {fullDate(file.updatedAt)}</span>
         </time>
       </Tooltip>

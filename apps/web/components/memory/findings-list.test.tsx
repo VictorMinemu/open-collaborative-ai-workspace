@@ -90,12 +90,31 @@ describe("FindingsList", () => {
     );
     expect(out).toContain("Extended scan incomplete — review the text yourself");
     expect(out).toContain('role="status"');
-    expect(out).toContain("No sensitive data found");
+    expect(out).toContain("No sensitive data found by the built-in scan<");
+  });
+
+  it("never reads as all clear when the extended scan did not run: only the built-in scan found nothing (WINDOWS 165)", () => {
+    const out = decode(
+      html([
+        finding({
+          kind: "extended_scan_unavailable",
+          severity: "info",
+          source: "presidio",
+          count: 0,
+          samples: [],
+          lines: [],
+        }),
+      ]),
+    );
+    expect(out).toContain("Extended scan unavailable — review the text yourself");
+    expect(out).toContain('data-testid="findings-none"');
+    expect(out).toMatch(/data-testid="findings-none"[^>]*>.*No sensitive data found by the built-in scan</s);
   });
 
   it("says so when nothing was found", () => {
     const out = html([]);
-    expect(out).toContain("No sensitive data found");
+    expect(out).toContain("No sensitive data found<");
+    expect(out).not.toContain("built-in");
     expect(out).not.toContain('data-testid="finding"');
     expect(out).not.toContain('role="status"');
   });

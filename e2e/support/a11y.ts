@@ -3,12 +3,17 @@ import { expect, type Page, test } from "@playwright/test";
 /**
  * Accessibility gate for the specs (Phase 07.1, created by 07.1-08; reused by later phases). Runs axe-core through
  * `@axe-core/playwright` on the elements matching `selector` and fails on any violation whose impact is **serious**
- * or **critical**, listing rule ids and targets. Moderate and minor findings are printed, not failed.
+ * or **critical**, listing rule ids and targets. Moderate and minor findings are printed, not failed, unless their rule
+ * is in `failOn` (a screen that fixed one, e.g. `heading-order` on the memory viewer, keeps it fixed).
  *
  * Fallback: if `@axe-core/playwright` is not installed, the helper says so in the test output and asserts roles and
  * accessible names instead (the region is named, every button, tab, menu item and form control has a name).
  */
-export async function expectNoSeriousA11y(page: Page, selector: string): Promise<void> {
+export async function expectNoSeriousA11y(
+  page: Page,
+  selector: string,
+  opts: { failOn?: readonly string[] } = {},
+): Promise<void> {
   await expect(page.locator(selector).first()).toBeVisible();
   // Opening dialogs, menus and sheets fade in: colours measured mid-transition are blends, not the real contrast.
   await page.evaluate(() =>
@@ -29,7 +34,10 @@ export async function expectNoSeriousA11y(page: Page, selector: string): Promise
     return;
   }
   const results = await new AxeBuilder({ page }).include(selector).analyze();
-  const blocking = results.violations.filter((v) => v.impact === "serious" || v.impact === "critical");
+  const failOn = opts.failOn ?? [];
+  const blocking = results.violations.filter(
+    (v) => v.impact === "serious" || v.impact === "critical" || failOn.includes(v.id),
+  );
   const minor = results.violations.filter((v) => !blocking.includes(v));
   if (minor.length > 0) {
     console.log(`[a11y] ${selector}: non-blocking ${minor.map((v) => `${v.id} (${v.impact})`).join(", ")}`);
@@ -43,7 +51,8 @@ export async function expectNoSeriousA11y(page: Page, selector: string): Promise
           .join("\n")}`,
     )
     .join("\n");
-  expect(blocking, `serious or critical axe violations in ${selector}:\n${report}`).toEqual([]);
+  const what = failOn.length > 0 ? `serious, critical or ${failOn.join("/")}` : "serious or critical";
+  expect(blocking, `${what} axe violations in ${selector}:\n${report}`).toEqual([]);
 }
 
 /** Without axe: every interactive element under `selector` has a role-appropriate accessible name. */
