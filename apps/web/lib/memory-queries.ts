@@ -2,16 +2,31 @@
 
 import {
   type EnsureMemoryScopeRequest,
+  EventTypes,
+  MemoryChangedEvent,
   MemoryFile,
   MemoryFileList,
   type MemoryFileMeta,
+  MemoryRevision,
+  MemoryRevisionList,
   MemoryScope,
   MemoryScopeList,
   MemorySearchResult,
+  Ok,
+  topic,
 } from "@ocw/contracts";
-import { keepPreviousData, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  type QueryClient,
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { useMemo } from "react";
 import { api, isApiError } from "./api";
+import { useMe } from "./queries";
+import { useTopic } from "./realtime";
 
 /**
  * Memory over REST (Phase 07.2, MEM-02): every response parsed with the contract schemas. The API decides what the
@@ -24,6 +39,8 @@ export const memoryKeys = {
   files: (scopeId: string) => ["memory", "files", scopeId] as const,
   file: (scopeId: string, path: string) => ["memory", "file", scopeId, path] as const,
   search: (q: string, scopeId: string | null) => ["memory", "search", q, scopeId ?? "all"] as const,
+  revisions: (fileId: string) => ["memory", "revisions", fileId] as const,
+  revision: (fileId: string, version: number) => ["memory", "revision", fileId, version] as const,
 };
 
 /** 4xx answers are decisions (404 = missing or unreadable), never retried. */
@@ -112,5 +129,141 @@ export function useEnsureMemoryScope() {
     mutationFn: (body: EnsureMemoryScopeRequest) =>
       api.post("/api/v1/memory/scopes", { body, schema: MemoryScope }),
     onSuccess: () => qc.invalidateQueries({ queryKey: memoryKeys.scopes }),
+  });
+}
+
+// ---------------------------------------------------------------- history (07.2-12)
+
+/** A file's history, newest first (MemoryRevisionMeta: op, path, +N −M, author, approval). */
+export function useMemoryRevisions(fileId: string | null) {
+  return useQuery({
+    queryKey: memoryKeys.revisions(fileId ?? ""),
+    queryFn: ({ signal }) =>
+      api.get(`/api/v1/memory/files/${encodeURIComponent(fileId ?? "")}/revisions`, {
+        schema: MemoryRevisionList,
+        signal,
+      }),
+    enabled: !!fileId,
+    retry: noRetryOn4xx,
+  });
+}
+
+/** One revision with its content; `version` 0 or null reads nothing (version 1 compares against empty). Immutable. */
+export function useMemoryRevision(fileId: string | null, version: number | null) {
+  return useQuery({
+    queryKey: memoryKeys.revision(fileId ?? "", version ?? 0),
+    queryFn: ({ signal }) =>
+      api.get(`/api/v1/memory/files/${encodeURIComponent(fileId ?? "")}/revisions/${version ?? 0}`, {
+        schema: MemoryRevision,
+        signal,
+      }),
+    enabled: !!fileId && !!version && version > 0,
+    retry: noRetryOn4xx,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+// ---------------------------------------------------------------- writes (07.2-12)
+
+/** After any write: the file by path, the scope's list (tree), the file's history and search hits. */
+function afterWrite(
+  qc: QueryClient,
+  file: { id: string; scopeId: string; path: string } & Partial<MemoryFile>,
+) {
+  if (file.content !== undefined && file.viewerCan) {
+    qc.setQueryData(memoryKeys.file(file.scopeId, file.path), file as MemoryFile);
+  }
+  void qc.invalidateQueries({ queryKey: memoryKeys.files(file.scopeId) });
+  void qc.invalidateQueries({ queryKey: memoryKeys.revisions(file.id) });
+  void qc.invalidateQueries({ queryKey: ["memory", "search"] });
+}
+
+export function useCreateMemoryFile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { scopeId: string; path: string; content: string }) =>
+      api.post(`/api/v1/memory/scopes/${encodeURIComponent(v.scopeId)}/files`, {
+        body: { path: v.path, content: v.content },
+        schema: MemoryFile,
+      }),
+    onSuccess: (file) => afterWrite(qc, file),
+  });
+}
+
+/** Saves with the version the edit started from: 409 `memory_version_conflict` instead of a silent overwrite. */
+export function useUpdateMemoryFile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { fileId: string; content: string; expectedVersion: number }) =>
+      api.put(`/api/v1/memory/files/${encodeURIComponent(v.fileId)}`, {
+        body: { content: v.content, expectedVersion: v.expectedVersion },
+        schema: MemoryFile,
+      }),
+    onSuccess: (file) => afterWrite(qc, file),
+  });
+}
+
+export function useRenameMemoryFile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { fileId: string; path: string; expectedVersion: number; from: string }) =>
+      api.post(`/api/v1/memory/files/${encodeURIComponent(v.fileId)}/rename`, {
+        body: { path: v.path, expectedVersion: v.expectedVersion },
+        schema: MemoryFile,
+      }),
+    onSuccess: (file, v) => {
+      qc.removeQueries({ queryKey: memoryKeys.file(file.scopeId, v.from) });
+      afterWrite(qc, file);
+    },
+  });
+}
+
+export function useDeleteMemoryFile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { fileId: string; scopeId: string; path: string; expectedVersion: number }) =>
+      api.del(
+        `/api/v1/memory/files/${encodeURIComponent(v.fileId)}?expectedVersion=${encodeURIComponent(v.expectedVersion)}`,
+        { schema: Ok },
+      ),
+    onSuccess: (_ok, v) => {
+      qc.removeQueries({ queryKey: memoryKeys.file(v.scopeId, v.path) });
+      afterWrite(qc, { id: v.fileId, scopeId: v.scopeId, path: v.path });
+    },
+  });
+}
+
+/** Restores an old revision as a new version (op "restore"). */
+export function useRestoreMemoryRevision() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { fileId: string; version: number; expectedVersion: number }) =>
+      api.post(`/api/v1/memory/files/${encodeURIComponent(v.fileId)}/restore`, {
+        body: { version: v.version, expectedVersion: v.expectedVersion },
+        schema: MemoryFile,
+      }),
+    onSuccess: (file) => afterWrite(qc, file),
+  });
+}
+
+// ---------------------------------------------------------------- live (07.2-12)
+
+/**
+ * `memory.changed {scopeId, fileId, version}` arrives on the viewer's own `user:` stream for their private memory
+ * (and their personal bot's notebook): ids and a version only. It refreshes that scope's tree, its open files and the
+ * file's history; the open file announces the new version itself. Mounted once by the memory shell.
+ */
+export function useMemoryLiveUpdates() {
+  const qc = useQueryClient();
+  const me = useMe({ enabled: false });
+  const userId = me.data?.user.id ?? null;
+  useTopic(userId ? topic("user", userId) : null, (frame) => {
+    if (frame.op !== "ev" || frame.type !== EventTypes.memoryChanged) return;
+    const parsed = MemoryChangedEvent.safeParse(frame.data);
+    if (!parsed.success) return;
+    const { scopeId, fileId } = parsed.data;
+    void qc.invalidateQueries({ queryKey: memoryKeys.files(scopeId) });
+    void qc.invalidateQueries({ queryKey: ["memory", "file", scopeId] });
+    void qc.invalidateQueries({ queryKey: memoryKeys.revisions(fileId) });
   });
 }

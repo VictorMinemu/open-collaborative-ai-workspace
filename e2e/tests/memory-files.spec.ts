@@ -1,8 +1,10 @@
 import { type APIRequestContext, type BrowserContext, expect, type Page, test } from "@playwright/test";
 import { expectNoSeriousA11y } from "../support/a11y";
-import { type Actor, apiAs, BASE_URL, openAs, SAM } from "../support/actors";
+import { type Actor, apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
+import { freshPersonalBot } from "../support/bot-tools";
 import { ALEX } from "../support/chat";
 import {
+  ACME,
   denyFolder,
   MEMORY_DEPARTMENT,
   MEMORY_OTHER_TEAM,
@@ -491,4 +493,256 @@ test("Settings › Modules lists Memory next to Work Zone, AI chats and Bots", a
   await page.goto(`${BASE_URL}/settings/modules`);
   await expect(page.getByText("Memory", { exact: true }).first()).toBeVisible();
   await shot(page, `review-memory-modules-${w}`);
+});
+
+// ---------------------------------------------------------------- 07.2-12: edit, history, diffs, file actions
+
+/**
+ * Editing (Phase 07.2, 07.2-12, MEM-02, D-03): a Ventas lead edits a team file as Markdown source in CodeMirror,
+ * saves with the version they started from, and sees the new version and its diff in History. Then conflicts,
+ * secrets, file and folder actions, restore, the dirty guard, live owner updates, phone tabs, read-only and the
+ * review screenshots. People used only here: Lucía (Ventas lead) and Paula (a member with a private bot memory), so
+ * Sam's tree, asserted exactly above, never changes.
+ */
+
+const LEAD: Actor = { name: "Lucía Vega", email: "lucia@ocw.test", password: "lucia-e2e-password-123" };
+const PAULA: Actor = { name: "Paula Ortiz", email: "paula@ocw.test", password: "paula-e2e-password-123" };
+
+async function ensureUnitRole(unitId: string, userId: string, role: "member" | "lead") {
+  const res = await admin.get(`/api/v1/units/${unitId}/members`);
+  const { members } = (await res.json()) as { members: Array<{ userId: string; role: string }> };
+  const found = members.find((m) => m.userId === userId);
+  if (found?.role === role) return;
+  if (found) {
+    const patch = await admin.patch(`/api/v1/units/${unitId}/members/${userId}`, { data: { role } });
+    expect(patch.ok(), `make ${userId} ${role} of ${unitId}: ${patch.status()}`).toBe(true);
+    return;
+  }
+  const add = await admin.post(`/api/v1/units/${unitId}/members`, { data: { userId, role } });
+  expect(add.ok(), `add ${userId} to ${unitId} as ${role}: ${add.status()}`).toBe(true);
+}
+
+/** Lucía leads Ventas (memory.write on its memory through LEAD_PERMISSIONS). */
+async function ensureLead(): Promise<string> {
+  const id = await ensureMember(admin, LEAD, "lead");
+  await ensureUnitRole(seed.ventasUnitId, id, "lead");
+  return id;
+}
+
+interface FileDto {
+  id: string;
+  version: number;
+  content: string;
+}
+
+async function readFile(api: APIRequestContext, scopeId: string, path: string): Promise<FileDto | null> {
+  const res = await api.get(`/api/v1/memory/scopes/${scopeId}/file?path=${encodeURIComponent(path)}`);
+  if (res.status() === 404) return null;
+  expect(res.ok(), `read ${path}: ${res.status()}`).toBe(true);
+  return (await res.json()) as FileDto;
+}
+
+/** Deletes `path` when it exists and creates it again as the admin: a new file at version 1 ("Created"). */
+async function freshFile(scopeId: string, path: string, content: string): Promise<FileDto> {
+  const old = await readFile(admin, scopeId, path);
+  if (old) {
+    const del = await admin.delete(`/api/v1/memory/files/${old.id}?expectedVersion=${old.version}`);
+    expect(del.ok(), `delete ${path}: ${del.status()}`).toBe(true);
+  }
+  const res = await admin.post(`/api/v1/memory/scopes/${scopeId}/files`, { data: { path, content } });
+  expect(res.ok(), `create ${path}: ${res.status()} ${await res.text()}`).toBe(true);
+  return (await res.json()) as FileDto;
+}
+
+const editorOf = (page: Page, path: string) =>
+  page.getByRole("textbox", { name: `Markdown source of ${path}` });
+
+/**
+ * Puts the caret at the end of the document (after its trailing newline, through a DOM selection CodeMirror picks up,
+ * the same on desktop and touch) and types a new last line.
+ */
+async function appendLine(page: Page, path: string, text: string) {
+  const editor = editorOf(page, path);
+  await expect(editor).toBeVisible();
+  await editor.click();
+  await editor.evaluate((el) => {
+    const lines = el.querySelectorAll(".cm-line");
+    const last = lines[lines.length - 1];
+    if (!last) return;
+    const range = document.createRange();
+    range.selectNodeContents(last);
+    range.collapse(false);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+  });
+  await page.keyboard.type(text);
+}
+
+/** Every script body the page loads from now on (for the "reading never loads the editor" check). */
+function recordScripts(page: Page): () => Promise<string[]> {
+  const bodies: Promise<string>[] = [];
+  page.on("response", (r) => {
+    if (r.request().resourceType() === "script") bodies.push(r.text().catch(() => ""));
+  });
+  return () => Promise.all(bodies);
+}
+/** A literal only the CodeMirror view bundle carries (its scroller element's class). */
+const EDITOR_MARK = "cm-scroller";
+
+const ADDED = "- Ana Ruiz — finance";
+
+test("a Ventas lead edits a team file as Markdown, saves, and sees the new version and its diff in History", async ({
+  browser,
+}, info) => {
+  const mobile = info.project.name === "mobile";
+  await ensureLead();
+  const acme = await freshFile(seed.ventasScopeId, "clients/acme.md", ACME);
+  expect(acme.version).toBe(1);
+  const page = await signIn(browser, info.project.name, LEAD);
+  const scripts = recordScripts(page);
+  const href = `${BASE_URL}/memory/${seed.ventasScopeId}/clients/acme.md`;
+  await page.goto(href);
+  const file = page.getByTestId("memory-file");
+  await expect(file).toHaveAttribute("data-path", "clients/acme.md");
+  await expect(file.getByText("Industrial pumps, 3 plants.", { exact: false })).toBeVisible();
+  await expect(page.getByTestId("memory-file-meta")).not.toContainText("Read only");
+
+  // Reading never loads the editor bundle.
+  expect(
+    (await scripts()).some((b) => b.includes(EDITOR_MARK)),
+    "no editor chunk while reading",
+  ).toBe(false);
+
+  const tabs = page.getByRole("tablist", { name: "File view" });
+  await tabs.getByRole("tab", { name: "Edit" }).click();
+  await expect(page).toHaveURL(`${href}?tab=edit`);
+  await expect(editorOf(page, "clients/acme.md")).toBeVisible();
+  expect(
+    (await scripts()).some((b) => b.includes(EDITOR_MARK)),
+    "the editor chunk loads on Edit",
+  ).toBe(true);
+  await expect(page.getByTestId("memory-file-meta")).toContainText("Editing version 1");
+  const save = page.getByRole("button", { name: "Save", exact: true });
+  await expect(save).toBeDisabled();
+  await appendLine(page, "clients/acme.md", ADDED);
+  await expect(page.getByRole("status").filter({ hasText: "Unsaved changes" })).toBeVisible();
+  await expect(save).toBeEnabled();
+  await page.keyboard.press("Control+s");
+
+  await expect(page.getByText("Saved version 2")).toBeVisible();
+  await expect(page).toHaveURL(href);
+  await expect(editorOf(page, "clients/acme.md")).toHaveCount(0);
+  await expect(file.getByText("Ana Ruiz — finance")).toBeVisible();
+  await expect(page.getByTestId("memory-file-version")).toHaveText("Version 2");
+  await expect(page.getByTestId("memory-file-editor")).toHaveText(LEAD.name);
+  const stored = await readFile(admin, seed.ventasScopeId, "clients/acme.md");
+  expect(stored?.version).toBe(2);
+  expect(stored?.content).toContain(ADDED);
+
+  if (mobile) {
+    // Phone: View · Edit · History tabs (underline, 44 px); History lists, a row opens a unified diff.
+    for (const t of await tabs.getByRole("tab").all()) {
+      expect((await t.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
+    }
+    await expect(tabs.getByRole("tab")).toHaveText(["View", "Edit", "History"]);
+    await tabs.getByRole("tab", { name: "History" }).click();
+    await expect(page).toHaveURL(`${href}?tab=history`);
+  } else {
+    // 1440: the History toggle opens the 360 px column.
+    const toggle = page.getByRole("button", { name: "History", exact: true });
+    await expect(toggle).toHaveAttribute("aria-pressed", "false");
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-pressed", "true");
+    await expect(page).toHaveURL(`${href}?tab=history`);
+    const column = page.getByTestId("memory-history-column");
+    await expect(column).toBeVisible();
+    expect(Math.round((await column.boundingBox())?.width ?? 0)).toBe(360);
+  }
+
+  const revisions = page.getByTestId("memory-revision");
+  await expect(revisions).toHaveCount(2);
+  await expect(revisions.nth(0)).toHaveAttribute("data-version", "2");
+  await expect(revisions.nth(0)).toContainText("Edited");
+  await expect(revisions.nth(0)).toContainText("+1");
+  await expect(revisions.nth(0)).toContainText("−0");
+  await expect(revisions.nth(0)).toContainText(LEAD.name);
+  await expect(revisions.nth(1)).toHaveAttribute("data-version", "1");
+  await expect(revisions.nth(1)).toContainText("Created");
+
+  await revisions.nth(0).click();
+  await expect(page).toHaveURL(`${href}?tab=history&v=2`);
+  // 1440 keeps the list in its column with the row pressed; phone tabs open the revision in place of the list.
+  if (mobile) await expect(page.getByRole("button", { name: "All versions" })).toBeVisible();
+  else await expect(revisions.nth(0)).toHaveAttribute("aria-pressed", "true");
+  const diff = page.getByRole("region", { name: "Changes from version 1 to version 2" });
+  await expect(diff).toBeVisible();
+  await expect(diff).toHaveAttribute("data-layout", mobile ? "unified" : "split");
+  const inserted = diff.locator(".cm-merge-b .cm-changedLine").filter({ hasText: "Ana Ruiz — finance" });
+  await expect(inserted).toBeVisible();
+  const bar = await inserted.evaluate((el) => getComputedStyle(el).boxShadow);
+  expect(bar, "a 3 px change bar").toContain("3px");
+  const added = page.getByTestId("memory-diff-added");
+  await expect(added).toHaveText("+1");
+  await expect(added).toHaveClass(/text-emerald-700/);
+  await noSidewaysScroll(page, "history diff");
+});
+
+test("at 1100 px the file has View · Edit · History tabs and no history column", async ({
+  browser,
+}, info) => {
+  const page = await signIn(browser, info.project.name, LEAD);
+  if (info.project.name !== "mobile") await page.setViewportSize({ width: 1100, height: 900 });
+  const href = `${BASE_URL}/memory/${seed.ventasScopeId}/clients/acme.md`;
+  await page.goto(href);
+  await expect(page.getByTestId("memory-file")).toHaveAttribute("data-path", "clients/acme.md");
+  const tabs = page.getByRole("tablist", { name: "File view" });
+  await expect(tabs.getByRole("tab")).toHaveText(["View", "Edit", "History"]);
+  await expect(page.locator('[data-slot="tabs"][data-variant="underline"]').first()).toBeVisible();
+  await expect(page.getByTestId("memory-history-column")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "History", exact: true })).toHaveCount(0);
+  await tabs.getByRole("tab", { name: "History" }).click();
+  const revisions = page.getByTestId("memory-revision");
+  await expect(revisions.first()).toBeVisible();
+  await revisions.first().click();
+  const diff = page.getByRole("region", { name: /^Changes from version \d+ to version \d+$/ });
+  await expect(diff).toHaveAttribute("data-layout", "unified");
+  await expect(diff.locator(".cm-changedLine").first()).toBeVisible();
+  await page.getByRole("button", { name: "All versions" }).click();
+  await expect(revisions.first()).toBeVisible();
+  await noSidewaysScroll(page, "1100 history");
+});
+
+test("Sam can't edit the team file but edits a private MEMORY.md the same way (Paula with her bot)", async ({
+  browser,
+}, info) => {
+  // Sam is a member of Ventas without write: Read only, no Edit tab.
+  const sam = await signIn(browser, info.project.name);
+  await sam.goto(`${BASE_URL}/memory/${seed.ventasScopeId}/clients/acme.md`);
+  await expect(sam.getByTestId("memory-file")).toHaveAttribute("data-path", "clients/acme.md");
+  await expect(sam.getByTestId("memory-file-meta")).toContainText("Read only");
+  await expect(sam.getByRole("tab", { name: "Edit" })).toHaveCount(0);
+  await expect(sam.getByRole("button", { name: "Save", exact: true })).toHaveCount(0);
+
+  // Paula, a Ventas member too, opens her private memory with her bot and edits its MEMORY.md.
+  const paulaId = await ensureMember(admin, PAULA, "developer");
+  await ensureUnitRole(seed.ventasUnitId, paulaId, "member");
+  const bot = await freshPersonalBot(PAULA, paulaId);
+  const paulaApi = await apiAs(PAULA);
+  const opened = await paulaApi.post("/api/v1/memory/scopes", {
+    data: { kind: "personal", agentId: bot.id },
+  });
+  expect(opened.ok(), `open private scope: ${opened.status()}`).toBe(true);
+  const scope = (await opened.json()) as { id: string };
+  await paulaApi.dispose();
+
+  const page = await signIn(browser, info.project.name, PAULA);
+  const href = `${BASE_URL}/memory/${scope.id}/MEMORY.md`;
+  await page.goto(href);
+  await expect(page.getByTestId("memory-file")).toHaveAttribute("data-path", "MEMORY.md");
+  await page.getByRole("tablist", { name: "File view" }).getByRole("tab", { name: "Edit" }).click();
+  await appendLine(page, "MEMORY.md", "- Prefers short answers");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText(/^Saved version \d+$/)).toBeVisible();
+  await expect(page.getByTestId("memory-file").getByText("Prefers short answers")).toBeVisible();
 });
