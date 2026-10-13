@@ -257,7 +257,7 @@ export function failedReason(code: string | null | undefined, bot: string): stri
 }
 
 /** The decision errors in words (UI-SPEC "Decision errors"); never an API code. */
-export function decisionErrorText(err: unknown, requester: boolean): string {
+export function decisionErrorText(err: unknown): string {
   if (isApiError(err)) {
     switch (err.code) {
       case "approval_action_changed":
@@ -267,7 +267,8 @@ export function decisionErrorText(err: unknown, requester: boolean): string {
       case "approval_expired":
         return "This proposal expired.";
       case "not_approver":
-        return requester ? "You can't approve your own proposal." : "You can't decide this proposal.";
+        // Whoever holds the decision right may decide, the requester included (owner decision 2026-10-13).
+        return "You can't decide this proposal.";
     }
   }
   return errorMessage(err);

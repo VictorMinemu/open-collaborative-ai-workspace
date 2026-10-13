@@ -426,7 +426,7 @@ function readerSentence(card: AgentCard): string | null {
 }
 
 /** The decision errors in words (UI-SPEC Copywriting › Decision errors); never an API code. */
-function decisionError(err: unknown, requester: boolean): string {
+function decisionError(err: unknown): string {
   if (isApiError(err)) {
     switch (err.code) {
       case "approval_action_changed":
@@ -436,7 +436,7 @@ function decisionError(err: unknown, requester: boolean): string {
       case "approval_expired":
         return "This proposal expired.";
       case "not_approver":
-        return requester ? "You can't approve your own proposal." : "You can't decide this proposal.";
+        return "You can't decide this proposal.";
     }
   }
   return errorMessage(err);
@@ -451,12 +451,10 @@ function LinkedDecisionButtons({
   messageId,
   card,
   link,
-  requester,
 }: {
   messageId: string;
   card: AgentCard;
   link: AgentCardApprovalLink;
-  requester: boolean;
 }) {
   const qc = useQueryClient();
   const noteId = useId();
@@ -480,7 +478,7 @@ function LinkedDecisionButtons({
       });
       setAsking(null);
     } catch (err) {
-      toast.error(decisionError(err, requester));
+      toast.error(decisionError(err));
       setAsking(null);
       // Changed, decided or expired meanwhile: show what the server holds now (a new hash, never auto-decided).
       if (isApiError(err, 409) || isApiError(err, 403)) void refreshCard(qc, messageId);
@@ -616,7 +614,7 @@ function LinkedFooter({
       ) : null}
       {decider ? (
         <span className="flex items-center gap-2 @[26rem]:ml-auto">
-          <LinkedDecisionButtons messageId={messageId} card={card} link={link} requester={requester} />
+          <LinkedDecisionButtons messageId={messageId} card={card} link={link} />
         </span>
       ) : null}
       {waiting ? (
@@ -624,9 +622,7 @@ function LinkedFooter({
           data-testid="agent-card-waiting"
           className="min-w-0 basis-full text-muted-foreground text-xs leading-4 @[26rem]:ml-auto @[26rem]:basis-auto"
         >
-          {requester
-            ? "Waiting for a reviewer. You can't approve your own proposal."
-            : "Waiting for a reviewer"}
+          Waiting for a reviewer
         </p>
       ) : null}
       {card.decision ? (
