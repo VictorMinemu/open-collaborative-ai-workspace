@@ -544,6 +544,10 @@ const MEMORY_CROSS_TENANT_ROUTES: Array<{ name: string; call: (c: TestClient) =>
     call: (c) => c.request("GET", `/api/v1/memory/files/${fileOf.a}/revisions/1`),
   },
   {
+    name: "GET /memory/search",
+    call: (c) => c.request("GET", `/api/v1/memory/search?q=acme&scopeId=${scopeOf[A]}`),
+  },
+  {
     name: "POST /memory/files/:fileId/restore",
     call: async (c) =>
       c.request("POST", `/api/v1/memory/files/${fileOf.a}/restore`, {

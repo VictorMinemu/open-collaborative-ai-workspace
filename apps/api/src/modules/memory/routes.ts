@@ -8,14 +8,18 @@ import {
   MemoryRevisionList,
   MemoryScope,
   MemoryScopeList,
+  MemorySearchQuery,
+  MemorySearchResult,
   Ok,
   RestoreMemoryRevisionRequest,
 } from "@ocw/contracts";
+import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { markDecided } from "../../authz";
 import { type App, authOf, type Core, tenant } from "../../core";
 import type { MemoryActor } from "./access";
 import type { MemoryService } from "./index";
+import { searchMemory } from "./search";
 
 /**
  * The human memory API (MEM-01, MEM-02, MEM-07): `/api/v1/memory/*`, every route `authz: "user"`, decided by the
@@ -53,6 +57,38 @@ export function registerMemoryRoutes(app: App, ctx: { core: Core; memory: Memory
     kind: "user",
     userId: authOf(req).userId,
   });
+
+  // Search (MEM-02, D-03): the per-user budget of the chat search (its own store), checked after requireUser so the
+  // key is the user. The query text is never logged (the request serializer drops query strings).
+  const searchLimit = app.rateLimit({
+    max: core.env.OCW_SEARCH_RATE_LIMIT_PER_MINUTE,
+    timeWindow: "1 minute",
+    keyGenerator: (req: FastifyRequest) => `memory-search:${req.auth?.userId ?? req.ip}`,
+  });
+
+  app.get(
+    "/memory/search",
+    {
+      ...user,
+      preHandler: searchLimit,
+      schema: { tags, querystring: MemorySearchQuery, response: { 200: MemorySearchResult } },
+    },
+    async (req, reply) => {
+      reply.header("cache-control", "no-store");
+      return core.db.withTenant(tenant(req), async (tx) => {
+        const result = await searchMemory(
+          tx,
+          { core, memory },
+          authOf(req).userId,
+          req.query.q,
+          req.query.scopeId,
+        );
+        // The hits are exactly the files the resolver let the viewer read (listScopes, listReadableFiles).
+        markDecided(req);
+        return result;
+      });
+    },
+  );
 
   app.get(
     "/memory/scopes",
