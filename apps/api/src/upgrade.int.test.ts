@@ -27,6 +27,10 @@ const PW = { migrator: "upgrade-migrator-pw", app: "upgrade-app-pw", auth: "upgr
 const ORG_A = "aaaaaaaa-0000-4000-8000-000000000001";
 const ORG_B = "bbbbbbbb-0000-4000-8000-000000000001";
 const SECRET_ID = "aaaaaaaa-0000-4000-8000-000000000301";
+/** The dump's team bot and its non-admin member: their notes become the member's personal MEMORY.md (Phase 07.2). */
+const HELPER_BOT = "aaaaaaaa-0000-4000-8000-000000000321";
+const ADA_ADMIN = "aaaaaaaa-0000-4000-8000-000000000101";
+const MAX_MEMBER = "aaaaaaaa-0000-4000-8000-000000000102";
 /** The seed's fixed test key (32 bytes of 0x07) and plaintext; see packages/db/test/upgrade/seed-phase-5.sql. */
 const TEST_KEY_B64 = Buffer.alloc(32, 7).toString("base64");
 const SECRET_PLAINTEXT = "sk-upgrade-baseline-fake-provider-key";
@@ -36,6 +40,8 @@ const HEAD_ONLY = [
   "20261007163629_work_prompt_images",
   "20261007173205_work_prompt_image_order",
   "20261010010825_board_channels",
+  "20261013025212_memory_files",
+  "20261013031658_memory_notes_backfill",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
@@ -158,6 +164,17 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
       { env: { PGPASSWORD: PW.migrator } },
     );
     expect(restore.exitCode, restore.stderr).toBe(0);
+    // Phase 07.2 (D-02): the N-1 dump has no notes; two notes of Max with the helper bot, written at N-1.
+    const seed = new pg.Client({ connectionString: urls.migrator });
+    await seed.connect();
+    try {
+      await seed.query(
+        "insert into app.agent_memories (organization_id, agent_id, user_id, text, created_at) values ($1, $2, $3, 'Prefers short answers', '2026-10-06 10:00:00+00'), ($1, $2, $3, 'Owns the billing\nrunbook', '2026-10-06 10:05:00+00')",
+        [ORG_A, HELPER_BOT, MAX_MEMBER],
+      );
+    } finally {
+      await seed.end();
+    }
     before = await counts();
   });
 
@@ -169,7 +186,7 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
     for (const t of SEEDED) expect(before.get(t), t).toBe(COPIES.get(t)?.rows.length);
   });
 
-  it("is behind by exactly HEAD's three migrations before the upgrade", async () => {
+  it("is behind by exactly HEAD_ONLY's migrations before the upgrade", async () => {
     const res = await checkSchema(urls.migrator);
     expect(res).toEqual({ status: "behind", pending: HEAD_ONLY, unknown: [], modified: [] });
     // N-1 had no read grant for ocw_app: an N-1 database is "never migrated" to the guard until `migrate` runs.
@@ -204,6 +221,47 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
         expect(rows).toEqual([{ layout: "text", n: before.get("app.conversations") }]);
       } finally {
         await c.end();
+      }
+    });
+
+    it("moves legacy bot notes into the member's personal MEMORY.md, owner-only, notes kept (Phase 07.2 D-02)", async () => {
+      const c = new pg.Client({ connectionString: urls.migrator });
+      await c.connect();
+      try {
+        const { rows } = await c.query(
+          `select s.origin, s.personal_owner_user_id as owner, f.path, f.content, f.version
+             from app.memory_scopes s join app.memory_files f on f.scope_id = s.id
+            where s.kind = 'personal' and s.agent_id = $1 and s.owner_user_id = $2`,
+          [HELPER_BOT, MAX_MEMBER],
+        );
+        expect(rows).toEqual([
+          {
+            origin: "legacy_notes",
+            owner: MAX_MEMBER,
+            path: "MEMORY.md",
+            content: "# Memory\n\n- Prefers short answers\n- Owns the billing runbook\n",
+            version: 1,
+          },
+        ]);
+        const notes = await c.query("select count(*)::int as n from app.agent_memories where agent_id = $1", [
+          HELPER_BOT,
+        ]);
+        expect(notes.rows[0].n).toBe(2);
+      } finally {
+        await c.end();
+      }
+      // As the API's role: Max reads his file, Ada (an admin of the same organization) does not.
+      const db = createTenantDb(urls.app, { max: 1 });
+      try {
+        const read = (userId: string) =>
+          db.withTenant({ organizationId: ORG_A, userId }, async (tx) => {
+            const r = await tx.execute("select count(*)::int as n from app.memory_files");
+            return (r.rows[0] as { n: number }).n;
+          });
+        expect(await read(MAX_MEMBER)).toBe(1);
+        expect(await read(ADA_ADMIN)).toBe(0);
+      } finally {
+        await db.close();
       }
     });
 
