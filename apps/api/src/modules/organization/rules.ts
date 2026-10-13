@@ -29,6 +29,7 @@ export function toRule(r: RuleRow): PermissionRule {
     subjectId: r.subjectId,
     permission: r.permission,
     tool: r.tool,
+    pathPrefix: r.pathPrefix,
     effect: r.effect,
     createdBy: r.createdBy,
     createdAt: new Date(r.createdAt).toISOString(),
@@ -73,6 +74,8 @@ export interface RuleRowValues {
   subjectId: string | null;
   permission: string;
   tool: string | null;
+  /** Memory folder (`hr/`), only on `memory.*` rules (validated by the contract and a DB check); omitted = none. */
+  pathPrefix?: string | null;
   effect: RuleRow["effect"];
 }
 
@@ -162,6 +165,7 @@ export function registerRuleRoutes(app: App, core: Core, perms: PermissionServic
             subjectId: body.subjectId,
             permission: body.permission,
             tool: body.tool,
+            pathPrefix: body.pathPrefix,
             effect: body.effect,
           },
           { createdBy: req.auth?.userId ?? null },

@@ -16,6 +16,8 @@ import {
   channelResource,
   deviceResource,
   invitationResource,
+  type MemoryScopeFacts,
+  memoryResource,
   moduleTargetResource,
   orgResource,
   unitResource,
@@ -48,7 +50,15 @@ function user(orgRole: OrgRole | null, extra: Partial<PrincipalFacts> = {}): Pri
 }
 
 function rule(extra: Partial<RuleFact> & Pick<RuleFact, "permission" | "effect">): RuleFact {
-  return { id: "rule-1", scopeUnitId: null, subjectKind: "everyone", subjectId: null, tool: null, ...extra };
+  return {
+    id: "rule-1",
+    scopeUnitId: null,
+    subjectKind: "everyone",
+    subjectId: null,
+    tool: null,
+    pathPrefix: null,
+    ...extra,
+  };
 }
 
 const allowed = (p: PrincipalFacts, r: ResourceFacts, perm: Permission, rules: RuleFact[] = []) =>
@@ -1708,6 +1718,7 @@ const arbRuleBody = fc
     subjectId: x.subjectKind === "everyone" ? null : x.subjectKind === "role" ? x.role : x.who,
     permission: x.permission,
     tool: x.tool,
+    pathPrefix: null,
     effect: x.effect,
   }));
 
@@ -1783,6 +1794,7 @@ describe("resolver properties", () => {
             subjectId: null,
             permission,
             tool: null,
+            pathPrefix: null,
             effect: "allow" as const,
           })),
           "allow",
@@ -1794,6 +1806,7 @@ describe("resolver properties", () => {
           subjectId: null,
           permission: perm,
           tool: null,
+          pathPrefix: null,
           effect: "deny",
         };
         return !resolveEffectivePermissions(p, r, [...rules, ...allowEverything, deny]).permissions.has(perm);
@@ -1878,5 +1891,531 @@ describe("resolver properties", () => {
       }),
       RUNS,
     );
+  });
+});
+
+// ---------------------------------------------------------------- memory (Phase 07.2)
+
+describe("memory scopes and folder rules (Phase 07.2, MEM-04, MEM-07, D-04, D-08)", () => {
+  // Department D holds teams A and B.
+  const D = "unit-d";
+  const A = "unit-a";
+  const B = "unit-b";
+  const PATH_D = [D];
+  const PATH_A = [D, A];
+  const PATH_B = [D, B];
+  const aMember = user("standard", { id: "u-a", memberUnitPaths: [PATH_A] });
+  const bMember = user("standard", { id: "u-b", memberUnitPaths: [PATH_B] });
+  const dOnly = user("standard", { id: "u-d", memberUnitPaths: [PATH_D] });
+  const dLead = user("lead", { id: "u-dl", memberUnitPaths: [PATH_D], leadOfUnitIds: new Set([D]) });
+  const aLead = user("lead", { id: "u-al", memberUnitPaths: [PATH_A], leadOfUnitIds: new Set([A]) });
+  const admin = user("admin", { id: "u-admin" });
+
+  const unitScope = (unitPath: readonly string[]): MemoryScopeFacts => ({
+    kind: "unit",
+    ownerUserId: null,
+    agent: null,
+    unitPath,
+  });
+  const ORG: MemoryScopeFacts = { kind: "org", ownerUserId: null, agent: null, unitPath: [] };
+  const principalOf = (p: PrincipalFacts) =>
+    ({ kind: p.kind === "agent" ? "agent" : "user", id: p.id }) as const;
+  const res = (p: PrincipalFacts, scope: MemoryScopeFacts, path?: string) =>
+    memoryResource(scope, path, principalOf(p));
+  const can = (
+    p: PrincipalFacts,
+    scope: MemoryScopeFacts,
+    perm: Permission,
+    path?: string,
+    rules: RuleFact[] = [],
+  ) => decide(p, res(p, scope, path), rules, perm).allowed;
+  const why = (
+    p: PrincipalFacts,
+    scope: MemoryScopeFacts,
+    perm: Permission,
+    path?: string,
+    rules: RuleFact[] = [],
+  ) => decide(p, res(p, scope, path), rules, perm).denial;
+
+  describe("folder rules: the path prefix narrows a rule, deny wins", () => {
+    const hrDeny = rule({
+      id: "hr-deny",
+      scopeUnitId: A,
+      subjectKind: "user",
+      subjectId: aMember.id,
+      permission: "memory.read",
+      pathPrefix: "hr/",
+      effect: "deny",
+    });
+
+    it("a user deny on hr/ hides that folder (any casing, any depth) and nothing else", () => {
+      const scope = unitScope(PATH_A);
+      expect(can(aMember, scope, "memory.read", "clients/x.md", [hrDeny])).toBe(true);
+      for (const path of ["hr/a.md", "HR/a.md", "Hr/Sub/b.md", "hr/sub/b.md"]) {
+        expect(why(aMember, scope, "memory.read", path, [hrDeny]), path).toEqual({
+          permission: "memory.read",
+          layer: "user",
+          reason: "denied_by_rule",
+          ruleId: "hr-deny",
+          unitId: A,
+        });
+      }
+      // Segment boundary: a sibling folder or a file named like the folder stays readable.
+      expect(can(aMember, scope, "memory.read", "hr-public/c.md", [hrDeny])).toBe(true);
+      expect(can(aMember, scope, "memory.read", "hr.md", [hrDeny])).toBe(true);
+      expect(can(aMember, scope, "memory.read", "clients/hr/x.md", [hrDeny])).toBe(true);
+      // The rule names one person: the lead of A still reads the folder.
+      expect(can(aLead, scope, "memory.read", "hr/a.md", [hrDeny])).toBe(true);
+    });
+
+    it("the same deny for everyone removes an admin's read too", () => {
+      const everyoneDeny = { ...hrDeny, subjectKind: "everyone" as const, subjectId: null };
+      expect(why(admin, unitScope(PATH_A), "memory.read", "hr/a.md", [everyoneDeny])).toMatchObject({
+        layer: "unit",
+        reason: "denied_by_rule",
+        ruleId: "hr-deny",
+      });
+      expect(can(admin, unitScope(PATH_A), "memory.read", "notes/a.md", [everyoneDeny])).toBe(true);
+    });
+
+    it("a folder allow grants that folder only, never a sibling or the scope root", () => {
+      const notesAllow = rule({
+        id: "notes-allow",
+        scopeUnitId: A,
+        permission: "memory.write",
+        pathPrefix: "notes/",
+        effect: "allow",
+      });
+      const scope = unitScope(PATH_A);
+      expect(can(aMember, scope, "memory.write", "notes/x.md", [notesAllow])).toBe(true);
+      expect(can(aMember, scope, "memory.write", "Notes/deep/x.md", [notesAllow])).toBe(true);
+      for (const path of ["y.md", "notes.md", "notes-old/x.md", "other/notes/x.md"]) {
+        expect(can(aMember, scope, "memory.write", path, [notesAllow]), path).toBe(false);
+      }
+      expect(can(aMember, scope, "memory.write", undefined, [notesAllow])).toBe(false);
+    });
+
+    it("a path rule never applies to a scope-level decision; a rule without a path applies everywhere", () => {
+      const scope = unitScope(PATH_A);
+      expect(can(aMember, scope, "memory.read", undefined, [hrDeny])).toBe(true);
+      const wholeDeny = { ...hrDeny, id: "whole", pathPrefix: null };
+      expect(can(aMember, scope, "memory.read", undefined, [wholeDeny])).toBe(false);
+      for (const path of ["MEMORY.md", "clients/x.md", "hr/a.md"]) {
+        expect(can(aMember, scope, "memory.read", path, [wholeDeny]), path).toBe(false);
+      }
+    });
+
+    it("a deny on a folder beats an allow higher up (organization) and the lead grant", () => {
+      const orgAllow = rule({ id: "org-allow", permission: "memory.write", effect: "allow" });
+      const hrWriteDeny = rule({
+        id: "hr-write-deny",
+        scopeUnitId: A,
+        permission: "memory.write",
+        pathPrefix: "hr/",
+        effect: "deny",
+      });
+      const scope = unitScope(PATH_A);
+      expect(can(aMember, scope, "memory.write", "clients/x.md", [orgAllow, hrWriteDeny])).toBe(true);
+      expect(can(aMember, scope, "memory.write", "hr/x.md", [orgAllow, hrWriteDeny])).toBe(false);
+      expect(can(aLead, scope, "memory.write", "hr/x.md", [orgAllow, hrWriteDeny])).toBe(false);
+      expect(can(admin, scope, "memory.write", "hr/x.md", [orgAllow, hrWriteDeny])).toBe(false);
+      // `memory.*` on a folder denies every memory grain under it.
+      const allMemory = { ...hrWriteDeny, id: "hr-all", permission: "memory.*" };
+      for (const perm of ["memory.read", "memory.write", "memory.promote"] as const) {
+        expect(can(dLead, scope, perm, "hr/x.md", [allMemory]), perm).toBe(false);
+        expect(can(dLead, scope, perm, "ops/x.md", [allMemory]), perm).toBe(true);
+      }
+    });
+
+    it("folder rules reach the people they name on any scope (personal, notebook, organization)", () => {
+      const SAM = "u-sam";
+      const sam = user("standard", { id: SAM });
+      const personal: MemoryScopeFacts = {
+        kind: "personal",
+        ownerUserId: SAM,
+        agent: { id: "bot-1", scope: "team", ownerUserId: null, disabled: false },
+        unitPath: [],
+      };
+      const deny = rule({ id: "d", permission: "memory.write", pathPrefix: "drafts/", effect: "deny" });
+      expect(can(sam, personal, "memory.write", "drafts/a.md", [deny])).toBe(false);
+      expect(can(sam, personal, "memory.write", "a.md", [deny])).toBe(true);
+      expect(can(admin, ORG, "memory.write", "drafts/a.md", [deny])).toBe(false);
+    });
+
+    it("property: adding a folder deny never adds a permission and beats an allow of everything", () => {
+      const scopes = [unitScope(PATH_A), unitScope(PATH_B), unitScope(PATH_D), ORG];
+      const people = [aMember, bMember, dOnly, dLead, aLead, admin];
+      const paths = ["MEMORY.md", "hr/a.md", "HR/b.md", "hr-x/c.md", "notes/x.md", "a/b/c.md"];
+      const folders = ["hr/", "notes/", "a/", "a/b/", "zz/"];
+      const memoryPerms = ["memory.read", "memory.write", "memory.promote"] as const;
+      const arbRule = fc.record({
+        scopeUnitId: fc.constantFrom(null, A, B, D),
+        subjectKind: fc.constant("everyone" as const),
+        subjectId: fc.constant(null),
+        permission: fc.constantFrom<string>(...memoryPerms, "memory.*"),
+        tool: fc.constant(null),
+        pathPrefix: fc.option(fc.constantFrom(...folders), { nil: null }),
+        effect: fc.constantFrom("allow" as const, "deny" as const),
+      });
+      fc.assert(
+        fc.property(
+          fc.constantFrom(...people),
+          fc.constantFrom(...scopes),
+          fc.constantFrom(...paths),
+          fc.array(arbRule, { maxLength: 6 }).map((b) => withIds(b)),
+          fc.constantFrom(...folders),
+          fc.constantFrom(...memoryPerms),
+          (p, scope, path, rules, folder, perm) => {
+            const r = res(p, scope, path);
+            const before = resolveEffectivePermissions(p, r, rules).permissions;
+            const deny: RuleFact = {
+              id: "deny",
+              scopeUnitId: null,
+              subjectKind: "everyone",
+              subjectId: null,
+              permission: perm,
+              tool: null,
+              pathPrefix: folder,
+              effect: "deny",
+            };
+            const allowAll = rule({ id: "allow-all", permission: "memory.*", effect: "allow" });
+            const after = resolveEffectivePermissions(p, r, [...rules, allowAll, deny]).permissions;
+            const denied = resolveEffectivePermissions(p, r, [...rules, deny]).permissions;
+            const under = path.toLowerCase().startsWith(folder);
+            return subset(denied, before) && (!under || !after.has(perm));
+          },
+        ),
+        RUNS,
+      );
+    });
+  });
+
+  describe("unit scopes (D ⊃ A, B): the unit-persona audience reads, leads write and promote their subtree", () => {
+    it("a member of A reads A and D, not B; a member of D only reads D, not A", () => {
+      expect(can(aMember, unitScope(PATH_A), "memory.read", "x.md")).toBe(true);
+      expect(can(aMember, unitScope(PATH_D), "memory.read", "x.md")).toBe(true);
+      expect(why(aMember, unitScope(PATH_B), "memory.read", "x.md")).toEqual({
+        permission: "memory.read",
+        layer: "resource",
+        reason: "unit_memory",
+      });
+      expect(can(dOnly, unitScope(PATH_D), "memory.read")).toBe(true);
+      expect(why(dOnly, unitScope(PATH_A), "memory.read")).toMatchObject({ reason: "unit_memory" });
+    });
+
+    it("the lead of D reads, writes and promotes A and B", () => {
+      for (const path of [PATH_A, PATH_B, PATH_D]) {
+        for (const perm of ["memory.read", "memory.write", "memory.promote"] as const) {
+          expect(can(dLead, unitScope(path), perm, "x.md"), `${perm} ${path.join("/")}`).toBe(true);
+        }
+      }
+    });
+
+    it("the lead of A writes and promotes A only: never B, never D", () => {
+      expect(can(aLead, unitScope(PATH_A), "memory.write", "x.md")).toBe(true);
+      expect(can(aLead, unitScope(PATH_A), "memory.promote", "x.md")).toBe(true);
+      expect(can(aLead, unitScope(PATH_B), "memory.promote", "x.md")).toBe(false);
+      expect(can(aLead, unitScope(PATH_B), "memory.write", "x.md")).toBe(false);
+      expect(can(aLead, unitScope(PATH_D), "memory.promote", "x.md")).toBe(false);
+      expect(can(aLead, unitScope(PATH_D), "memory.read", "x.md")).toBe(true);
+    });
+
+    it("an admin reads, writes and promotes A, B and D", () => {
+      for (const path of [PATH_A, PATH_B, PATH_D]) {
+        for (const perm of ["memory.read", "memory.write", "memory.promote"] as const) {
+          expect(can(admin, unitScope(path), perm, "x.md"), `${perm} ${path.join("/")}`).toBe(true);
+        }
+      }
+    });
+
+    it("a standard member never writes or promotes their unit's memory by default", () => {
+      expect(why(aMember, unitScope(PATH_A), "memory.write", "x.md")).toMatchObject({
+        layer: "role",
+        reason: "missing_permission",
+      });
+      expect(can(aMember, unitScope(PATH_A), "memory.promote", "x.md")).toBe(false);
+    });
+
+    it("no allow rule opens a unit's memory to someone outside its audience, for any grain", () => {
+      const allowAll = rule({
+        id: "allow-b",
+        subjectKind: "user",
+        subjectId: bMember.id,
+        permission: "memory.*",
+        effect: "allow",
+      });
+      for (const perm of ["memory.read", "memory.write", "memory.promote"] as const) {
+        expect(why(bMember, unitScope(PATH_A), perm, "x.md", [allowAll]), perm).toMatchObject({
+          reason: "unit_memory",
+        });
+      }
+      // Inside the audience the same rule does grant: an allow extends, the audience bounds.
+      const allowA = { ...allowAll, subjectId: aMember.id };
+      expect(can(aMember, unitScope(PATH_A), "memory.write", "x.md", [allowA])).toBe(true);
+    });
+
+    it("the facts: a unit scope carries the unit path and state memory_unit; the path rides along", () => {
+      const r = memoryResource(unitScope(PATH_A), "hr/a.md", { kind: "user", id: aMember.id });
+      expect(r).toMatchObject({ type: "memory", unitPath: PATH_A, path: "hr/a.md" });
+      expect([...r.state]).toEqual(["memory_unit"]);
+      expect(r.relations.size).toBe(0);
+      expect(memoryResource(unitScope(PATH_A), undefined, null).path).toBeUndefined();
+    });
+  });
+
+  describe("personal scopes: owner-only for every human, the scope's own bot for its owner", () => {
+    const SAM = "u-sam";
+    const ALEX = "u-alex";
+    const sam = user("standard", { id: SAM });
+    const alex = user("developer", { id: ALEX });
+    const teamBot = { id: "bot-1", scope: "team" as const, ownerUserId: null, disabled: false };
+    const personal: MemoryScopeFacts = { kind: "personal", ownerUserId: SAM, agent: teamBot, unitPath: [] };
+    const bot: PrincipalFacts = { ...user(null), kind: "agent", id: "bot-1" };
+    const otherBot: PrincipalFacts = { ...user(null), kind: "agent", id: "bot-2" };
+    const forHuman = (h: PrincipalFacts, path = "MEMORY.md") => ({
+      principal: h,
+      resource: memoryResource(personal, path, { kind: "user", id: h.id }),
+    });
+
+    it("the owner reads and writes their personal memory", () => {
+      const r = memoryResource(personal, "MEMORY.md", { kind: "user", id: SAM });
+      expect(r.relations.has("owner")).toBe(true);
+      expect(r.state.has("memory_personal")).toBe(true);
+      expect(r.unitPath).toEqual([]);
+      expect(can(sam, personal, "memory.read", "MEMORY.md")).toBe(true);
+      expect(can(sam, personal, "memory.write", "MEMORY.md")).toBe(true);
+      expect(can(sam, personal, "memory.read")).toBe(true);
+    });
+
+    it("an admin and another member are denied with personal_memory, even with an allow rule", () => {
+      const allowAll = rule({ id: "allow", permission: "memory.*", effect: "allow" });
+      for (const who of [admin, alex]) {
+        for (const perm of ["memory.read", "memory.write", "memory.promote"] as const) {
+          expect(why(who, personal, perm, "MEMORY.md", [allowAll]), `${who.id} ${perm}`).toEqual({
+            permission: perm,
+            layer: "resource",
+            reason: "personal_memory",
+          });
+          expect(can(who, personal, perm, undefined, [allowAll])).toBe(false);
+        }
+      }
+    });
+
+    it("the scope's own bot acting for the owner reads and writes", () => {
+      const r = memoryResource(personal, "MEMORY.md", { kind: "agent", id: "bot-1" });
+      expect(r.relations.has("scope_agent")).toBe(true);
+      expect(r.relations.has("owner")).toBe(false);
+      expect(decide(bot, r, [], "memory.read", forHuman(sam))).toEqual({ allowed: true });
+      expect(decide(bot, r, [], "memory.write", forHuman(sam))).toEqual({ allowed: true });
+    });
+
+    it("another bot of the same owner is denied with agent_memory", () => {
+      const r = memoryResource(personal, "MEMORY.md", { kind: "agent", id: "bot-2" });
+      expect(r.relations.has("scope_agent")).toBe(false);
+      for (const perm of ["memory.read", "memory.write"] as const) {
+        expect(decide(otherBot, r, [], perm, forHuman(sam)).denial, perm).toEqual({
+          permission: perm,
+          layer: "resource",
+          reason: "agent_memory",
+        });
+      }
+    });
+
+    it("the right bot acting for another human (an admin included) is denied with personal_memory", () => {
+      const r = memoryResource(personal, "MEMORY.md", { kind: "agent", id: "bot-1" });
+      for (const h of [alex, admin]) {
+        expect(decide(bot, r, [], "memory.read", forHuman(h)).denial).toEqual({
+          permission: "memory.read",
+          layer: "resource",
+          reason: "personal_memory",
+        });
+      }
+    });
+
+    it("an agent never promotes, not even its own scope for its owner with an allow rule naming it", () => {
+      const r = memoryResource(personal, "MEMORY.md", { kind: "agent", id: "bot-1" });
+      const allowBot = rule({
+        id: "allow-bot",
+        subjectKind: "agent",
+        subjectId: "bot-1",
+        permission: "memory.*",
+        effect: "allow",
+      });
+      expect(decide(bot, r, [allowBot], "memory.promote", forHuman(sam)).denial).toEqual({
+        permission: "memory.promote",
+        layer: "resource",
+        reason: "agent_memory",
+      });
+      expect(decide(bot, r, [allowBot], "memory.promote").allowed).toBe(false);
+    });
+  });
+
+  describe("bot notebooks", () => {
+    const SAM = "u-sam";
+    const OWNER = "u-owner";
+    const sam = user("standard", { id: SAM });
+    const personalBot = { id: "bot-p", scope: "personal" as const, ownerUserId: SAM, disabled: false };
+    const notebookOf = (agent: MemoryScopeFacts["agent"]): MemoryScopeFacts => ({
+      kind: "agent",
+      ownerUserId: null,
+      agent,
+      unitPath: [],
+    });
+    const personalNotebook = notebookOf(personalBot);
+    const teamBot = {
+      id: "bot-t",
+      scope: "team" as const,
+      ownerUserId: OWNER,
+      disabled: false,
+      unitPath: PATH_A,
+    };
+    const teamNotebook = notebookOf(teamBot);
+    // The owner sits in B: the owner relation, not the unit, gives them the notebook.
+    const owner = user("standard", { id: OWNER, memberUnitPaths: [PATH_B] });
+
+    it("a personal bot's notebook is personal: its owner only, admins included", () => {
+      const r = memoryResource(personalNotebook, "MEMORY.md", { kind: "user", id: SAM });
+      expect(r.state.has("memory_personal")).toBe(true);
+      expect(r.relations.has("owner")).toBe(true);
+      expect(can(sam, personalNotebook, "memory.read", "MEMORY.md")).toBe(true);
+      expect(can(sam, personalNotebook, "memory.write", "MEMORY.md")).toBe(true);
+      for (const who of [admin, aMember]) {
+        expect(why(who, personalNotebook, "memory.read", "MEMORY.md")).toMatchObject({
+          reason: "personal_memory",
+        });
+      }
+      const bot: PrincipalFacts = { ...user(null), kind: "agent", id: "bot-p" };
+      const forSam = {
+        principal: sam,
+        resource: memoryResource(personalNotebook, "a.md", { kind: "user", id: SAM }),
+      };
+      const asBot = memoryResource(personalNotebook, "a.md", { kind: "agent", id: "bot-p" });
+      expect(decide(bot, asBot, [], "memory.write", forSam)).toEqual({ allowed: true });
+    });
+
+    it("a team bot's notebook is read by A members, the leads on its path, its owner and admins; not by B", () => {
+      const r = memoryResource(teamNotebook, "x.md", { kind: "user", id: aMember.id });
+      expect([...r.state].sort()).toEqual(["memory_agent", "unit_scoped"]);
+      expect(r.unitPath).toEqual(PATH_A);
+      for (const who of [aMember, aLead, dLead, owner, admin]) {
+        expect(can(who, teamNotebook, "memory.read", "x.md"), who.id).toBe(true);
+      }
+      for (const who of [bMember, dOnly]) {
+        expect(why(who, teamNotebook, "memory.read", "x.md"), who.id).toEqual({
+          permission: "memory.read",
+          layer: "resource",
+          reason: "unit_memory",
+        });
+      }
+    });
+
+    it("it is written by its owner, the A/D leads and admins, never by a plain member", () => {
+      for (const who of [owner, aLead, dLead, admin]) {
+        expect(can(who, teamNotebook, "memory.write", "x.md"), who.id).toBe(true);
+      }
+      expect(can(aMember, teamNotebook, "memory.write", "x.md")).toBe(false);
+      // Promotion is a team-surface grain: leads and admins; a standard owner writes but does not promote.
+      for (const who of [aLead, dLead, admin]) {
+        expect(can(who, teamNotebook, "memory.promote", "x.md"), who.id).toBe(true);
+      }
+      expect(can(owner, teamNotebook, "memory.promote", "x.md")).toBe(false);
+      expect(can(user("lead", { id: OWNER }), teamNotebook, "memory.promote", "x.md")).toBe(true);
+    });
+
+    it("an organization bot's notebook is read by every member", () => {
+      const orgNotebook = notebookOf({ id: "bot-o", scope: "team", ownerUserId: null, disabled: false });
+      expect(memoryResource(orgNotebook, undefined, null).state.has("unit_scoped")).toBe(false);
+      for (const who of [aMember, bMember, dOnly]) {
+        expect(can(who, orgNotebook, "memory.read", "x.md"), who.id).toBe(true);
+        expect(can(who, orgNotebook, "memory.write", "x.md"), who.id).toBe(false);
+      }
+    });
+
+    it("an agent cannot write a shared notebook, its own included (agent_shared_write)", () => {
+      const bot: PrincipalFacts = { ...user(null), kind: "agent", id: "bot-t" };
+      const asBot = memoryResource(teamNotebook, "x.md", { kind: "agent", id: "bot-t" });
+      const forLead = {
+        principal: aLead,
+        resource: memoryResource(teamNotebook, "x.md", { kind: "user", id: aLead.id }),
+      };
+      expect(decide(bot, asBot, [], "memory.write", forLead).denial).toEqual({
+        permission: "memory.write",
+        layer: "resource",
+        reason: "agent_shared_write",
+      });
+      // Reading it for someone who may read it is fine; for someone who may not, the human pass refuses.
+      expect(decide(bot, asBot, [], "memory.read", forLead)).toEqual({ allowed: true });
+      const forB = {
+        principal: bMember,
+        resource: memoryResource(teamNotebook, "x.md", { kind: "user", id: bMember.id }),
+      };
+      expect(decide(bot, asBot, [], "memory.read", forB).denial).toMatchObject({ reason: "unit_memory" });
+    });
+  });
+
+  describe("organization scope and agents on shared scopes", () => {
+    it("every member reads the organization's memory; only admins write and promote", () => {
+      for (const who of [aMember, bMember, dOnly, aLead, dLead]) {
+        expect(can(who, ORG, "memory.read", "x.md"), who.id).toBe(true);
+        expect(can(who, ORG, "memory.write", "x.md"), who.id).toBe(false);
+        expect(can(who, ORG, "memory.promote", "x.md"), who.id).toBe(false);
+      }
+      for (const perm of ["memory.read", "memory.write", "memory.promote"] as const) {
+        expect(can(admin, ORG, perm, "x.md"), perm).toBe(true);
+      }
+      const r = memoryResource(ORG, "x.md", null);
+      expect(r).toMatchObject({ type: "memory", unitPath: [], path: "x.md" });
+      expect(r.state.size).toBe(0);
+    });
+
+    it("an agent reads unit and organization memory for a human who may, and never writes or promotes there", () => {
+      const bot: PrincipalFacts = { ...user(null), kind: "agent", id: "bot-1" };
+      const allowBot = rule({
+        id: "allow-bot",
+        subjectKind: "agent",
+        subjectId: "bot-1",
+        permission: "memory.*",
+        effect: "allow",
+      });
+      for (const scope of [unitScope(PATH_A), ORG]) {
+        const r = memoryResource(scope, "x.md", { kind: "agent", id: "bot-1" });
+        const forAdmin = {
+          principal: admin,
+          resource: memoryResource(scope, "x.md", { kind: "user", id: admin.id }),
+        };
+        expect(decide(bot, r, [], "memory.read", forAdmin)).toEqual({ allowed: true });
+        expect(decide(bot, r, [allowBot], "memory.write", forAdmin).denial).toMatchObject({
+          reason: "agent_shared_write",
+        });
+        expect(decide(bot, r, [allowBot], "memory.promote", forAdmin).denial).toMatchObject({
+          reason: "agent_memory",
+        });
+      }
+      const forB = {
+        principal: bMember,
+        resource: memoryResource(unitScope(PATH_A), "x.md", { kind: "user", id: bMember.id }),
+      };
+      expect(
+        decide(
+          bot,
+          memoryResource(unitScope(PATH_A), "x.md", { kind: "agent", id: "bot-1" }),
+          [],
+          "memory.read",
+          forB,
+        ).denial,
+      ).toMatchObject({ reason: "unit_memory" });
+    });
+
+    it("memory preconditions never touch other resources (a bot, a unit) carrying the same states", () => {
+      const persona = agentResource(
+        { scope: "team", ownerUserId: null, disabled: false, unitPath: PATH_A },
+        bMember.id,
+      );
+      expect(why(bMember, unitScope(PATH_A), "memory.read")).toMatchObject({ reason: "unit_memory" });
+      expect(decide(bMember, persona, [], "bot.read").denial).toMatchObject({ reason: "unit_agent" });
+      expect(can(bMember, unitScope(PATH_B), "memory.read")).toBe(true);
+      // `memory.read` decided on a non-memory resource keeps the role answer.
+      expect(allowed(bMember, unitResource({ id: A, path: PATH_A }), "memory.read")).toBe(true);
+    });
   });
 });

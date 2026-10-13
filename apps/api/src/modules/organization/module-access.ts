@@ -32,7 +32,10 @@ import { requireUnit, uuidArray } from "./units";
 
 type Subject = { kind: "everyone" } | { kind: "user"; userId: string };
 
-/** The state of one module's exact rows (deny, no tool, same scope, same subject, catalog patterns only). */
+/**
+ * The state of one module's exact rows (deny, no tool, no folder, same scope, same subject, catalog patterns only). A
+ * memory folder rule (`pathPrefix`, Phase 07.2) is ordinary policy, never a module switch.
+ */
 export function moduleStateOf(
   rules: readonly RuleFact[],
   module: ModuleId,
@@ -42,7 +45,8 @@ export function moduleStateOf(
   const patterns = MODULE_CATALOG[module].patterns;
   const present = new Set<string>();
   for (const r of rules) {
-    if (r.effect !== "deny" || r.tool !== null || r.scopeUnitId !== scopeUnitId) continue;
+    if (r.effect !== "deny" || r.tool !== null || r.pathPrefix !== null || r.scopeUnitId !== scopeUnitId)
+      continue;
     if (r.subjectKind !== subject.kind) continue;
     if (subject.kind === "user" ? r.subjectId !== subject.userId : r.subjectId !== null) continue;
     if (patterns.includes(r.permission)) present.add(r.permission);
@@ -247,7 +251,7 @@ async function assertInSubtree(tx: Tx, unit: { id: string; name: string }, userI
   if (!row) throw badRequest(`This person is not in ${unit.name}`, "not_in_unit");
 }
 
-/** The exact rows of (scope, subject, module): deny, no tool, catalog patterns only. */
+/** The exact rows of (scope, subject, module): deny, no tool, no folder, catalog patterns only. */
 async function exactRows(
   tx: Tx,
   module: ModuleId,
@@ -268,6 +272,7 @@ async function exactRows(
           : isNull(permissionRules.subjectId),
         eq(permissionRules.effect, "deny"),
         isNull(permissionRules.tool),
+        isNull(permissionRules.pathPrefix),
         inArray(permissionRules.permission, [...MODULE_CATALOG[module].patterns]),
       ),
     );

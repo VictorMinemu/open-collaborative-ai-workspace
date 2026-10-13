@@ -3,6 +3,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AuthContext } from "../../core";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
+import { createPermissionService, memoryResource } from "./index";
 
 let stack: TestStack;
 let su: pg.Client;
@@ -231,6 +232,122 @@ describe("permission rules: explicit deny and allow at the unit grain", () => {
     expect(events.filter((e) => e.action === "created")).toHaveLength(3);
     expect(events.filter((e) => e.action === "deleted")).toHaveLength(2);
     expect(events.at(-1)).toEqual({ ruleId: denyId, action: "deleted" });
+  });
+});
+
+describe("folder rules on memory (Phase 07.2, D-04): stored, listed, audited, enforced", () => {
+  let folderRuleId: string;
+  const backendScope = () => ({
+    kind: "unit" as const,
+    ownerUserId: null,
+    agent: null,
+    unitPath: [itId, backendId],
+  });
+  /** A real decision through the stack's resolver: rules and facts read from PostgreSQL. */
+  const canRead = (userId: string, path: string) =>
+    stack.built.core.db.withTenant({ organizationId: orgId, userId }, async (tx) => {
+      const perms = createPermissionService(stack.built.core);
+      const resource = memoryResource(backendScope(), path, { kind: "user", id: userId });
+      return (await perms.decide(tx, { kind: "user", userId }, "memory.read", resource)).allowed;
+    });
+
+  it("an admin creates a folder deny; it is listed and audited with its folder and announced once", async () => {
+    expect(await canRead(stdId, "hr/a.md")).toBe(true);
+    const eventsBefore = (
+      await su.query("select count(*)::int as n from app.stream_events where stream_id = $1 and type = $2", [
+        `org:${orgId}`,
+        "permission_rules.updated",
+      ])
+    ).rows[0].n as number;
+    const rule = await ok(
+      admin.request("POST", "/api/v1/permission-rules", {
+        scopeUnitId: backendId,
+        subjectKind: "everyone",
+        permission: "memory.read",
+        pathPrefix: "hr/",
+        effect: "deny",
+      }),
+    );
+    folderRuleId = rule.id;
+    expect(rule).toMatchObject({ permission: "memory.read", pathPrefix: "hr/", scopeUnitId: backendId });
+    const listed = (await ok(admin.request("GET", "/api/v1/permission-rules"))).rules as Array<
+      Record<string, unknown>
+    >;
+    expect(listed.find((r) => r.id === folderRuleId)).toMatchObject({ pathPrefix: "hr/" });
+    // Every other rule lists an explicit null.
+    expect(listed.filter((r) => r.id !== folderRuleId).every((r) => r.pathPrefix === null)).toBe(true);
+    const stored = await su.query("select path_prefix from app.permission_rules where id = $1", [
+      folderRuleId,
+    ]);
+    expect(stored.rows[0].path_prefix).toBe("hr/");
+    const created = (await audit("permission_rule.created")).find((r) => r.resource_id === folderRuleId);
+    expect(created).toMatchObject({ user_id: adminId, result: "success" });
+    expect(created.metadata.rule).toMatchObject({
+      id: folderRuleId,
+      permission: "memory.read",
+      pathPrefix: "hr/",
+    });
+    const events = (
+      await su.query(
+        "select payload from app.stream_events where stream_id = $1 and type = $2 order by seq offset $3",
+        [`org:${orgId}`, "permission_rules.updated", eventsBefore],
+      )
+    ).rows.map((r) => r.payload);
+    expect(events).toEqual([{ ruleId: folderRuleId, action: "created" }]);
+  });
+
+  it("the folder is enforced for the next decision: hr/ is hidden (any casing), the rest of Backend's memory is not", async () => {
+    for (const userId of [stdId, devId, adminId]) {
+      expect(await canRead(userId, "hr/a.md"), userId).toBe(false);
+      expect(await canRead(userId, "HR/b.md"), userId).toBe(false);
+      expect(await canRead(userId, "hr-public/a.md"), userId).toBe(true);
+      expect(await canRead(userId, "MEMORY.md"), userId).toBe(true);
+    }
+  });
+
+  it("refuses a folder on a non-memory permission, a malformed folder and a lead without rule.manage", async () => {
+    const bad = [
+      { permission: "bot.read", pathPrefix: "hr/" },
+      { permission: "memory.read", pathPrefix: "../" },
+      { permission: "memory.read", pathPrefix: "hr" },
+      { permission: "memory.read", pathPrefix: "/hr/" },
+      { permission: "memory.read", pathPrefix: "a/%2e%2e/" },
+    ];
+    for (const body of bad) {
+      const err = await fails(
+        admin.request("POST", "/api/v1/permission-rules", {
+          subjectKind: "everyone",
+          effect: "deny",
+          ...body,
+        }),
+        400,
+      );
+      expect(err.code, JSON.stringify(body)).toBe("validation_error");
+    }
+    const { client: lena, id: lenaId } = await invite("lena@example.test", "lead", "Lena Lead");
+    await ok(admin.request("POST", `/api/v1/units/${backendId}/members`, { userId: lenaId, role: "lead" }));
+    const denied = await fails(
+      lena.request("POST", "/api/v1/permission-rules", {
+        scopeUnitId: backendId,
+        subjectKind: "everyone",
+        permission: "memory.write",
+        pathPrefix: "notes/",
+        effect: "allow",
+      }),
+      403,
+    );
+    expect(denied.details).toMatchObject({ permission: "rule.manage" });
+    const count = await su.query(
+      "select count(*)::int as n from app.permission_rules where path_prefix is not null",
+    );
+    expect(count.rows[0].n).toBe(1);
+  });
+
+  it("deleting the folder rule restores the reads and is audited with its folder", async () => {
+    await ok(admin.request("DELETE", `/api/v1/permission-rules/${folderRuleId}`));
+    expect(await canRead(stdId, "hr/a.md")).toBe(true);
+    const deleted = (await audit("permission_rule.deleted")).find((r) => r.resource_id === folderRuleId);
+    expect(deleted.metadata.rule).toMatchObject({ pathPrefix: "hr/" });
   });
 });
 

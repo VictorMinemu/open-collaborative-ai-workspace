@@ -31,6 +31,7 @@ function rule(r: Partial<RuleFact> & { permission: string }): RuleFact {
     subjectKind: "everyone",
     subjectId: null,
     tool: null,
+    pathPrefix: null,
     effect: "deny",
     ...r,
   };
@@ -63,6 +64,12 @@ describe("moduleStateOf: exact rows only", () => {
     expect(moduleStateOf(noise, "ai_chats", T, everyone)).toBe("off");
     expect(moduleStateOf(noise, "ai_chats", null, { kind: "user", userId: DANA })).toBe("off");
     expect(moduleStateOf(noise, "ai_chats", null, { kind: "user", userId: SAM })).toBe("on");
+  });
+
+  it("ignores folder rows (Phase 07.2): a memory.* deny on one folder is not the Memory module turned off", () => {
+    const folder = [rule({ permission: "memory.*", pathPrefix: "hr/" })];
+    expect(moduleStateOf(folder, "memory", null, everyone)).toBe("on");
+    expect(moduleStateOf([...folder, ...rows("memory")], "memory", null, everyone)).toBe("off");
   });
 
   it("counts duplicates once", () => {

@@ -1,5 +1,5 @@
 import { agents, devices, orgMembers, orgUnits, permissionRules, type Tx, unitMemberships } from "@ocw/db";
-import { eq } from "drizzle-orm";
+import { asc, eq, inArray } from "drizzle-orm";
 import type { PrincipalFacts, RuleFact } from "./resolve";
 
 /** Who is asking. Users come from the session, cells from the cell token, devices from the device token. */
@@ -28,7 +28,8 @@ export async function loadPrincipalFacts(tx: Tx, ref: PrincipalRef): Promise<Pri
         .select({ unitId: unitMemberships.unitId, role: unitMemberships.role, path: orgUnits.path })
         .from(unitMemberships)
         .innerJoin(orgUnits, eq(orgUnits.id, unitMemberships.unitId))
-        .where(eq(unitMemberships.userId, ref.userId));
+        .where(eq(unitMemberships.userId, ref.userId))
+        .orderBy(asc(unitMemberships.unitId));
       return {
         kind: "user",
         id: ref.userId,
@@ -68,6 +69,46 @@ export async function loadPrincipalFacts(tx: Tx, ref: PrincipalRef): Promise<Pri
   }
 }
 
+/**
+ * The facts of many users at once (reader counts, deciders): one membership query and one unit-membership query for
+ * every id, each user's facts equal to `loadPrincipalFacts`. Ids that are not members of the tenant are absent.
+ */
+export async function loadPrincipalFactsMany(
+  tx: Tx,
+  userIds: readonly string[],
+): Promise<Map<string, PrincipalFacts>> {
+  const out = new Map<string, PrincipalFacts>();
+  const ids = [...new Set(userIds)];
+  if (ids.length === 0) return out;
+  const members = await tx
+    .select({ userId: orgMembers.userId, role: orgMembers.role, deactivatedAt: orgMembers.deactivatedAt })
+    .from(orgMembers)
+    .where(inArray(orgMembers.userId, ids));
+  const units = await tx
+    .select({
+      userId: unitMemberships.userId,
+      unitId: unitMemberships.unitId,
+      role: unitMemberships.role,
+      path: orgUnits.path,
+    })
+    .from(unitMemberships)
+    .innerJoin(orgUnits, eq(orgUnits.id, unitMemberships.unitId))
+    .where(inArray(unitMemberships.userId, ids))
+    .orderBy(asc(unitMemberships.userId), asc(unitMemberships.unitId));
+  for (const m of members) {
+    const mine = units.filter((u) => u.userId === m.userId);
+    out.set(m.userId, {
+      kind: "user",
+      id: m.userId,
+      orgRole: m.role,
+      deactivated: m.deactivatedAt !== null,
+      memberUnitPaths: mine.map((u) => u.path),
+      leadOfUnitIds: new Set(mine.filter((u) => u.role === "lead").map((u) => u.unitId)),
+    });
+  }
+  return out;
+}
+
 /** Every explicit allow/deny rule of the tenant (RLS scopes the read). */
 export async function loadRules(tx: Tx): Promise<RuleFact[]> {
   const rows = await tx.select().from(permissionRules);
@@ -78,6 +119,7 @@ export async function loadRules(tx: Tx): Promise<RuleFact[]> {
     subjectId: r.subjectId,
     permission: r.permission,
     tool: r.tool,
+    pathPrefix: r.pathPrefix,
     effect: r.effect,
   }));
 }
