@@ -443,14 +443,20 @@ export function createEgress(opts: CreateEgressOptions): Egress {
     if (!source) return res;
     const reader = source.getReader();
     let seen = 0;
+    let overflowed = false;
     const body = new ReadableStream<Uint8Array>({
       async pull(controller) {
+        // Erroring resets the queue, so the cap fails on the pull after the last allowed bytes were handed over.
+        if (overflowed) return controller.error(new EgressRefusedError("too_large", host));
         try {
           const { done, value } = await reader.read();
           if (done) return controller.close();
+          const room = maxBytes - seen;
           seen += value.byteLength;
-          if (seen > maxBytes) {
+          if (value.byteLength > room) {
+            overflowed = true;
             void reader.cancel().catch(() => {});
+            if (room > 0) return controller.enqueue(value.subarray(0, room));
             return controller.error(new EgressRefusedError("too_large", host));
           }
           controller.enqueue(value);

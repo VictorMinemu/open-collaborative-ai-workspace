@@ -58,3 +58,30 @@ streamText({ model, messages, telemetry: { recordInputs: false, recordOutputs: f
 generateText({ model, prompt, experimental_telemetry: { isEnabled: false } });
 // ok: ocw.ai-telemetry-records-prompts
 const sdk = new NodeSDK({ telemetry: { serviceName: "ocw-api" } });
+
+// ruleid: ocw.raw-egress
+const r1 = await fetch("https://example.com");
+// ruleid: ocw.raw-egress
+const r2 = await globalThis.fetch(url);
+// ruleid: ocw.raw-egress
+import { Agent } from "undici";
+// ruleid: ocw.raw-egress
+import https from "node:https";
+// ruleid: ocw.raw-egress
+import { request } from "http";
+// ruleid: ocw.raw-egress
+import * as net from "node:net";
+// ruleid: ocw.raw-egress
+import { connect } from "node:net";
+// ruleid: ocw.raw-egress
+const tls = require("node:tls");
+// ruleid: ocw.raw-egress
+const lazy = await import("undici");
+// ok: ocw.raw-egress
+const r3 = await egressFor(env).fetch("https://example.com");
+// ok: ocw.raw-egress
+const r4 = await egress.bound(policy)(url);
+// ok: ocw.raw-egress
+import { BlockList, isIP } from "node:net";
+// ok: ocw.raw-egress
+import type { Socket } from "node:net";

@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createEgress, EgressRefusedError } from "./egress";
+import { createEgress, EgressRefusedError, readCapped } from "./egress";
 
 /**
  * The egress guard against real sockets (D-07, CONN-05). Local servers stand in for remote hosts; a stub resolver
@@ -130,5 +130,154 @@ describe("egress guard: the tracer (pinned, validated connect)", () => {
     });
     const err = await refusal(egress.fetch(`http://svc.test:${ok.port}/ok`));
     expect(err.code).toBe("private_address");
+  });
+});
+
+describe("egress guard: the whole policy against real sockets", () => {
+  let srv: Local;
+  const big = Buffer.alloc(2 * 1024 * 1024, 0x61); // 2 MiB of "a"
+
+  beforeAll(async () => {
+    srv = await listen((req, res) => {
+      const path = req.url ?? "";
+      if (path === "/redirect-metadata") {
+        res.writeHead(302, { location: "http://169.254.169.254/latest/meta-data/" });
+        return res.end();
+      }
+      if (path === "/redirect-local") {
+        res.writeHead(302, { location: "/target" });
+        return res.end();
+      }
+      if (path === "/big") {
+        res.writeHead(200, { "content-type": "text/plain" });
+        return res.end(big);
+      }
+      if (path.startsWith("/hang") || path.startsWith("/secret-path")) return; // never answers
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("ok");
+    });
+  });
+  afterAll(() => close(srv));
+
+  const local = (extra: Record<string, Answer | Answer[]> = {}) => {
+    const dns = stubLookup({ "svc.test": v4("127.0.0.1"), ...extra });
+    const egress = createEgress({
+      platformHosts: [],
+      testHosts: new Map([["svc.test", "127.0.0.1"]]),
+      lookup: dns.lookup,
+    });
+    return { egress, dns };
+  };
+
+  it("a host whose answer mixes a public and a private address is refused, before any connection", async () => {
+    const { egress, dns } = local({
+      "mixed.test": [
+        { address: "8.8.8.8", family: 4 },
+        { address: "10.0.0.5", family: 4 },
+      ],
+    });
+    const err = await refusal(egress.fetch("https://mixed.test/"));
+    expect(err.code).toBe("private_address");
+    expect(dns.calls).toEqual(["mixed.test"]);
+  });
+
+  it("a literal loopback URL never connects without a test host", async () => {
+    const { egress } = local();
+    const connections = srv.connections;
+    const err = await refusal(egress.fetch(`http://127.0.0.1:${srv.port}/ok`, {}, { requireHttps: false }));
+    expect(err.code).toBe("private_address");
+    expect(srv.connections).toBe(connections);
+  });
+
+  it("a test host on the platform list never connects", async () => {
+    const dns = stubLookup({ "svc.test": v4("127.0.0.1") });
+    const egress = createEgress({
+      platformHosts: [`127.0.0.1:${srv.port}`],
+      testHosts: new Map([["svc.test", "127.0.0.1"]]),
+      lookup: dns.lookup,
+    });
+    const connections = srv.connections;
+    const err = await refusal(egress.fetch(`http://svc.test:${srv.port}/ok`));
+    expect(err.code).toBe("platform_host");
+    expect(srv.connections).toBe(connections);
+  });
+
+  it("privateAllow admits the exact host:port to a private address, never loopback and never another port", async () => {
+    const { egress } = local({
+      "intranet.test": v4("10.255.255.1"),
+      "loop.test": v4("127.0.0.1"),
+    });
+    const allow = { privateAllow: ["intranet.test:9443", "loop.test:9443"], timeoutMs: 400 };
+    // Admitted over plain http: the guard gets as far as connecting to the unroutable address.
+    const admitted = await refusal(egress.fetch("http://intranet.test:9443/", {}, allow));
+    expect(["timeout", "network_error"]).toContain(admitted.code);
+    // Loopback is never admitted.
+    expect((await refusal(egress.fetch("http://loop.test:9443/", {}, allow))).code).toBe("private_address");
+    // Another port is not the allowed host:port.
+    expect((await refusal(egress.fetch("https://intranet.test:9444/", {}, allow))).code).toBe(
+      "private_address",
+    );
+    expect((await refusal(egress.fetch("http://intranet.test:9444/", {}, allow))).code).toBe(
+      "https_required",
+    );
+  });
+
+  it("a redirect is returned to the caller and never followed", async () => {
+    const { egress } = local();
+    const before = srv.requests.length;
+    const res = await egress.fetch(`http://svc.test:${srv.port}/redirect-metadata`, { redirect: "follow" });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("http://169.254.169.254/latest/meta-data/");
+    const same = await egress.fetch(`http://svc.test:${srv.port}/redirect-local`);
+    expect(same.status).toBe(302);
+    expect(srv.requests.slice(before).map((r) => r.path)).toEqual(["/redirect-metadata", "/redirect-local"]);
+  });
+
+  it("readCapped stops at maxBytes; reading past the policy cap fails with too_large", async () => {
+    const { egress } = local();
+    const cap = 256 * 1024;
+    const res = await egress.fetch(`http://svc.test:${srv.port}/big`, {}, { maxBytes: cap });
+    const read = await readCapped(res, cap);
+    expect(read.truncated).toBe(true);
+    expect(read.text.length).toBe(cap);
+
+    const small = await readCapped(await egress.fetch(`http://svc.test:${srv.port}/ok`), cap);
+    expect(small).toEqual({ text: "ok", truncated: false });
+
+    const raw = await egress.fetch(`http://svc.test:${srv.port}/big`, {}, { maxBytes: cap });
+    const err = await refusal(raw.text());
+    expect(err.code).toBe("too_large");
+  });
+
+  it("a server that never answers is cut off at timeoutMs", async () => {
+    const { egress } = local();
+    const started = Date.now();
+    const err = await refusal(egress.fetch(`http://svc.test:${srv.port}/hang`, {}, { timeoutMs: 500 }));
+    expect(err.code).toBe("timeout");
+    expect(Date.now() - started).toBeLessThan(1500);
+  });
+
+  it("no error carries the path or the query", async () => {
+    const { egress } = local({ "evil.test": v4("10.0.0.5") });
+    const canary = "/secret-path?token=CANARY";
+    const errors = [
+      await refusal(egress.fetch(`http://svc.test:${srv.port}${canary}`, {}, { timeoutMs: 300 })),
+      await refusal(egress.fetch(`https://evil.test${canary}`)),
+      await refusal(egress.fetch(`http://svc.test:1${canary}`)),
+    ];
+    expect(errors.map((e) => e.code)).toEqual(["timeout", "private_address", "network_error"]);
+    for (const err of errors) {
+      expect(`${err.message} ${err.stack ?? ""} ${JSON.stringify(err)}`).not.toMatch(/CANARY|secret-path/);
+    }
+  });
+
+  it("bound() is fetch-compatible (the MCP SDK's fetchFn) and accepts a Request", async () => {
+    const { egress } = local();
+    const f = egress.bound({});
+    const res = await f(`http://svc.test:${srv.port}/ok`);
+    expect(await res.text()).toBe("ok");
+    const viaRequest = await f(new Request(`http://svc.test:${srv.port}/ok`, { method: "POST", body: "x" }));
+    expect(viaRequest.status).toBe(200);
+    expect((await refusal(f("http://public.test/"))).code).toBe("https_required");
   });
 });

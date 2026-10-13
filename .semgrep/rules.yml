@@ -97,3 +97,31 @@ rules:
       - pattern-not: "{..., experimental_telemetry: {..., recordInputs: false, ..., recordOutputs: false, ...}, ...}"
       - pattern-not: "{..., telemetry: {..., isEnabled: false, ...}, ...}"
       - pattern-not: "{..., telemetry: {..., recordInputs: false, ..., recordOutputs: false, ...}, ...}"
+
+  - id: ocw.raw-egress
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      Outbound calls go through lib/egress.ts (ADR-0025): the connectors and keychain modules and the Agent Channel
+      proxy routes call admin-, authorization-server- and model-chosen URLs, so a raw fetch, undici, http(s), tls or
+      socket call would skip the public-only, IP-pinned egress guard (D-07, CONN-05). Use egressFor(env).
+    pattern-either:
+      - pattern: fetch(...)
+      - pattern: globalThis.fetch(...)
+      - pattern: global.fetch(...)
+      - pattern: window.fetch(...)
+      - pattern: new WebSocket(...)
+      - pattern: new EventSource(...)
+      # Imports, requires and dynamic imports of the raw network clients.
+      - pattern-regex: (?:from|import|require\()\s*\(?\s*["'](?:undici|(?:node:)?(?:http|https|http2|tls|dgram))["']
+      # node:net is fine for isIP/BlockList; connecting through it is not.
+      - pattern-regex: \bimport\s+(?:\*\s+as\s+)?\w+\s+from\s*["'](?:node:)?net["']
+      - pattern-regex: \bimport\s*\{[^}]*\b(?:connect|createConnection|Socket)\b[^}]*\}\s*from\s*["'](?:node:)?net["']
+    paths:
+      include:
+        - /apps/api/src/modules/connectors/
+        - /apps/api/src/modules/keychain/
+        - /apps/api/src/modules/agent-channel/connectors.ts
+        - /apps/api/src/modules/agent-channel/http-requests.ts
+      exclude:
+        - "*.test.ts"
