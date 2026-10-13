@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 122
+open_count: 124
 waived_count: 3
 fixed_count: 34
-total_count: 159
-last_updated: 2026-10-13T08:49:37.641Z
+total_count: 161
+last_updated: 2026-10-13T08:49:54.419Z
 ---
 
 # Broken Windows Ledger
@@ -174,6 +174,8 @@ last_updated: 2026-10-13T08:49:37.641Z
 | 157 | 07.2 | deviation | apps/web/lib/memory-queries.ts |  | Team memory files do not update live: memory.changed reaches only the owner of private memory | open |  | 2026-10-13T08:49:37.498Z |  |
 | 158 | 07.2 | deviation | apps/web/components/memory |  | History paginates on the client (API returns all revisions); a file saved without a trailing newline shows an extra empty line in the diff | open |  | 2026-10-13T08:49:37.571Z |  |
 | 159 | 07.2 | deviation | apps/web/package.json |  | lang-markdown pulls HTML/CSS/JS modes into the editor bundle; Cmd/Ctrl+S label uses deprecated navigator.platform | open |  | 2026-10-13T08:49:37.641Z |  |
+| 160 | 07.2 | deviation | apps/api/src/modules/approval |  | The live card event is emitted before the card is linked to its approval (client works around it); the server should emit message.updated after linking. Expiry does not arrive live (card stays Pending until reload) | open |  | 2026-10-13T08:49:54.347Z |  |
+| 161 | 07.2 | deviation | apps/web/components/ui/dialog.tsx |  | The shared Dialog close X is 32 px below 1024 (UI-SPEC asks 44) | open |  | 2026-10-13T08:49:54.419Z |  |
 
 ````json
 [
@@ -2083,6 +2085,30 @@ last_updated: 2026-10-13T08:49:37.641Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-13T08:49:37.641Z",
+    "resolved_at": null
+  },
+  {
+    "id": 160,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/approval",
+    "line": null,
+    "description": "The live card event is emitted before the card is linked to its approval (client works around it); the server should emit message.updated after linking. Expiry does not arrive live (card stays Pending until reload)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T08:49:54.347Z",
+    "resolved_at": null
+  },
+  {
+    "id": 161,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/web/components/ui/dialog.tsx",
+    "line": null,
+    "description": "The shared Dialog close X is 32 px below 1024 (UI-SPEC asks 44)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T08:49:54.419Z",
     "resolved_at": null
   }
 ]
