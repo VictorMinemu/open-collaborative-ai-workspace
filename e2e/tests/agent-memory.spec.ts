@@ -352,6 +352,17 @@ test("An admin sees a team bot's notebook and nobody's private memory; a persona
   }
   await expect(agentPage).not.toContainText("Sam prefers weekly pipeline summaries");
 
+  // The admin's Memory never lists Sam's private scope, and its direct URL is the shared not-found state (MEM-07).
+  await page.goto(`${BASE_URL}/memory`);
+  await expect(page.getByRole("tree", { name: "Memory files" })).toBeVisible();
+  await expect(page.locator(`[data-scope-id="${samPrivateScopeId}"]`)).toHaveCount(0);
+  await expect(page.getByRole("treeitem", { name: /private memory/ })).toHaveCount(0);
+  await page.goto(`${BASE_URL}/memory/${samPrivateScopeId}/MEMORY.md`);
+  await expect(page.getByTestId("memory-file-notfound")).toContainText(
+    "This file doesn't exist or you can't open it",
+  );
+  await expect(page.getByText("Sam prefers weekly pipeline summaries")).toHaveCount(0);
+
   // A personal bot's page is not found for anyone but its owner, admins included (ADR-0010).
   await page.goto(`${BASE_URL}/bots/${samBot}`);
   const notFound = page.getByTestId("agent-page-notfound");
