@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 86
+open_count: 88
 waived_count: 2
 fixed_count: 25
-total_count: 113
-last_updated: 2026-10-12T22:27:17.051Z
+total_count: 115
+last_updated: 2026-10-13T03:20:41.625Z
 ---
 
 # Broken Windows Ledger
@@ -128,6 +128,8 @@ last_updated: 2026-10-12T22:27:17.051Z
 | 111 | 07.1 | deviation | apps/web/components/chat/board/card-strip.tsx |  | A card with a typed title and empty description shows an empty root message body in its thread (author and time only) | fixed |  | 2026-10-12T21:23:03.967Z | 2026-10-12T22:27:16.978Z |
 | 112 | 07.1 | deviation | e2e/tests/search.spec.ts |  | Composer-focus regression e2e was not RED on the pre-fix build; fix rests on run-1 evidence, a focus probe and a unit test | open |  | 2026-10-12T21:23:04.036Z |  |
 | 113 | 07.1 | deviation | apps/web/components/chat/channel-view.tsx |  | Board Messages view: a card root beyond the first 100 cards of its column is not cached, so Edit message falls back to the inline editor (400 board_card_use_board) | fixed |  | 2026-10-12T21:23:04.109Z | 2026-10-12T22:27:17.051Z |
+| 114 | 07.2 | deviation | packages/contracts/src/memory.ts |  | Folder rule pathPrefix is accepted by the contract but dropped by the API until 07.2-03; an allow memory.write on hr/ would apply to the whole scope meanwhile; must close before the phase merges | open |  | 2026-10-13T03:20:41.553Z |  |
+| 115 | 07.2 | deviation | apps/web/components/shell/module-gate.tsx |  | Settings > Modules shows a Memory toggle with no memory UI until 07.2-10; screenshot the 4-row panel in 10/13 | open |  | 2026-10-13T03:20:41.625Z |  |
 
 ````json
 [
@@ -1486,6 +1488,30 @@ last_updated: 2026-10-12T22:27:17.051Z
     "reason": "",
     "recorded_at": "2026-10-12T21:23:04.109Z",
     "resolved_at": "2026-10-12T22:27:17.051Z"
+  },
+  {
+    "id": 114,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "packages/contracts/src/memory.ts",
+    "line": null,
+    "description": "Folder rule pathPrefix is accepted by the contract but dropped by the API until 07.2-03; an allow memory.write on hr/ would apply to the whole scope meanwhile; must close before the phase merges",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T03:20:41.553Z",
+    "resolved_at": null
+  },
+  {
+    "id": 115,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/web/components/shell/module-gate.tsx",
+    "line": null,
+    "description": "Settings > Modules shows a Memory toggle with no memory UI until 07.2-10; screenshot the 4-row panel in 10/13",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T03:20:41.625Z",
+    "resolved_at": null
   }
 ]
 ````
