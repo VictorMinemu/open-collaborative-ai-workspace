@@ -417,7 +417,11 @@ export type MemoryProposalView = z.infer<typeof MemoryProposalView>;
 
 // ---------------------------------------------------------------- realtime and errors
 
-/** `memory.changed`, on the personal owner's `user:<id>` stream only: ids and a version, never a path or content. */
+/**
+ * `memory.changed`: ids and a version, never a path or content. Private memory: its owner's `user:<id>` stream only.
+ * Shared memory: the `user:<id>` stream of each person who may read the file, or once the `org:<id>` stream when the
+ * whole organization may (WINDOWS 157).
+ */
 export const MemoryChangedEvent = z.object({ scopeId: Id, fileId: Id, version: z.number().int().positive() });
 export type MemoryChangedEvent = z.infer<typeof MemoryChangedEvent>;
 

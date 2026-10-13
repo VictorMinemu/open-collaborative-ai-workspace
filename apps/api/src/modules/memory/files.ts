@@ -29,13 +29,15 @@ import { and, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { conflict, forbidden, HttpError } from "../../lib/errors";
 import type { ApprovalService } from "../approval";
-import { AuthzDeniedError, memoryResource, type PermissionService } from "../organization";
+import { AuthzDeniedError, loadRules, memoryResource, type PermissionService } from "../organization";
 import {
+  anyReadDeny,
   asActor,
   capabilitiesOf,
   decideMemory,
   filterReadable,
   type MemoryActor,
+  organizationWide,
   personalOwnerOf,
   withPersonalOwner,
 } from "./access";
@@ -460,11 +462,36 @@ export function createFileOps(d: FilesDeps) {
         ...(actor.kind === "approved" ? { approvalRequestId: actor.approvalRequestId } : {}),
       },
     });
-    // Ids only, and only to the owner of private memory (Pitfall 7); shared viewers refetch and rely on 409.
+    await announceChange(tx, scope, f);
+  }
+
+  /**
+   * `memory.changed {scopeId, fileId, version}`, ids only (never a path or content, Pitfall 7), to exactly who may read
+   * the file now: private memory to its owner; organization-wide memory nobody is denied on that path once on the
+   * organization's stream; any other shared memory on the `user:` stream of each reader of (scope, path), folder rules
+   * included (WINDOWS 157, the unit personas' pattern). Viewers refetch and still rely on 409 for conflicts.
+   */
+  async function announceChange(tx: Tx, scope: LoadedScope, f: FileRow): Promise<void> {
+    const ev: MemoryChangedEvent = { scopeId: scope.row.id, fileId: f.id, version: f.version };
     const owner = scope.row.personalOwnerUserId;
     if (owner) {
-      const ev: MemoryChangedEvent = { scopeId: scope.row.id, fileId: f.id, version: f.version };
       await core.realtime.appendEvent(tx, `user:${owner}`, EventTypes.memoryChanged, ev);
+      return;
+    }
+    if (
+      organizationWide(scope.facts) &&
+      !anyReadDeny(await loadRules(tx), memoryResource(scope.facts, f.path, null))
+    ) {
+      await core.realtime.appendEvent(tx, `org:${scope.row.organizationId}`, EventTypes.memoryChanged, ev);
+      return;
+    }
+    const readers = await perms.usersAllowed(tx, {
+      candidates: "members",
+      permission: "memory.read",
+      resourceFor: (userId) => memoryResource(scope.facts, f.path, { kind: "user", id: userId }),
+    });
+    for (const userId of readers) {
+      await core.realtime.appendEvent(tx, `user:${userId}`, EventTypes.memoryChanged, ev);
     }
   }
 
