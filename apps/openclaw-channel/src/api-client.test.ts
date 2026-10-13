@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { resolveOcwAccount } from "./account.js";
 import { AgentChannelHttpError, createAgentChannelClient, isRetryableStatus } from "./api-client.js";
 import { chunkText } from "./bridge.js";
@@ -347,5 +347,24 @@ describe("chunkText", () => {
     const text = `${"a".repeat(60)}\n${"b".repeat(60)}`;
     expect(chunkText(text, 100)).toEqual(["a".repeat(60), "b".repeat(60)]);
     expect(chunkText("short", 100)).toEqual(["short"]);
+  });
+});
+
+describe("AgentChannelHttpError across module instances (07.2-15, real-cell smoke memory-files)", () => {
+  it("an error thrown by another module instance of the plugin is still recognised", async () => {
+    // OpenClaw loads the plugin once per registry (boot, discovery, tool-discovery): the shared client may come from
+    // one module instance and the tool that catches its error from another.
+    vi.resetModules();
+    const other = (await import("./api-client.js")) as typeof import("./api-client.js");
+    expect(other.AgentChannelHttpError).not.toBe(AgentChannelHttpError);
+    const fromOther = new other.AgentChannelHttpError(403, "/memory/read", "x", "no_trigger");
+    expect(fromOther instanceof AgentChannelHttpError).toBe(true);
+    expect(new AgentChannelHttpError(409, "/cards", "y") instanceof other.AgentChannelHttpError).toBe(true);
+    expect(fromOther instanceof Error).toBe(true);
+    expect(new Error("plain") instanceof AgentChannelHttpError).toBe(false);
+    expect(Object.assign(new Error("look-alike"), { status: 403 }) instanceof AgentChannelHttpError).toBe(
+      false,
+    );
+    expect((null as unknown as object) instanceof AgentChannelHttpError).toBe(false);
   });
 });

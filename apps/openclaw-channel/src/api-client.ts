@@ -34,7 +34,12 @@ import {
 } from "./agent-channel-protocol.js";
 import { backoffDelayMs, sleep } from "./backoff.js";
 
+/** Process-wide brand of an `AgentChannelHttpError`, shared by every module instance of this plugin. */
+const HTTP_ERROR_BRAND = Symbol.for("ocw.openclaw-channel.agent-channel-http-error");
+
 export class AgentChannelHttpError extends Error {
+  readonly [HTTP_ERROR_BRAND] = true;
+
   constructor(
     readonly status: number,
     readonly path: string,
@@ -44,6 +49,20 @@ export class AgentChannelHttpError extends Error {
   ) {
     super(message);
     this.name = "AgentChannelHttpError";
+  }
+
+  /**
+   * OpenClaw loads this plugin once per registry (boot, discovery, tool-discovery; see active-account.ts), so the
+   * shared client's errors can come from another module instance than the tool that catches them. `instanceof`
+   * therefore matches the brand, not the class identity; otherwise every API refusal (403 `no_trigger`, 409 …) read
+   * as "the workspace could not be reached" in a real cell (07.2-15 container smoke, scenario memory-files).
+   */
+  static override [Symbol.hasInstance](value: unknown): boolean {
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      (value as { [HTTP_ERROR_BRAND]?: unknown })[HTTP_ERROR_BRAND] === true
+    );
   }
 }
 
