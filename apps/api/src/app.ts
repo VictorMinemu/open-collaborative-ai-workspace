@@ -35,6 +35,7 @@ import { createChatModule, createConversationAccess } from "./modules/chat";
 import { createDeviceModule, type DeviceHub } from "./modules/device";
 import { createAuth, createIdentityModule, IdentityService } from "./modules/identity";
 import { createMcpModule } from "./modules/mcp";
+import { createMemoryModule, createMemoryService, type MemoryService } from "./modules/memory";
 import { createModelGateway, createModelGatewayModule } from "./modules/model-gateway";
 import { createNotificationModule } from "./modules/notification";
 import { AuthzDeniedError, createOrganizationModule, recordAuthzDenial } from "./modules/organization";
@@ -59,6 +60,8 @@ export interface BuiltApp {
   storage: ObjectStorage | null;
   /** The approve-and-apply primitive (07.2-06): later modules and tests register kinds on it. */
   approvals: ApprovalService;
+  /** The memory domain (07.2-08): 07.2-09 registers its approval kind with it, 07.2-11 serves agents from it. */
+  memory: MemoryService;
   close(): Promise<void>;
 }
 
@@ -273,6 +276,8 @@ export async function buildApp(
   // Phase 07.2: the approve-and-apply primitive (ADR-0023); memory (07.2), tool grants (07.5) and automations (07.6)
   // register their kinds on `approvals.service`.
   const approvals = createApprovalModule(core);
+  // Phase 07.2: scoped memory files (MEM-01, MEM-02, MEM-07); proposals register on `approvals` (07.2-09).
+  const memory = createMemoryService(core, { approvals: approvals.service });
   const modules: ApiModule[] = [
     createIdentityModule({
       identity,
@@ -299,6 +304,7 @@ export async function buildApp(
     deviceModule, // B3
     createWorkSessionModule(core, deviceModule.hub, { storage: artifactModule.storage }), // B3; 06.1: image bytes
     approvals.module, // Phase 07.2: approvals inbox and decisions (MEM-06)
+    createMemoryModule(core, memory), // Phase 07.2: memory scopes, files and history (MEM-01, MEM-02, MEM-07)
   ];
   for (const m of modules) {
     await app.register(async (scope) => m.register(scope as unknown as App), {
@@ -313,6 +319,7 @@ export async function buildApp(
     deviceHub: deviceModule.hub,
     storage: artifactModule.storage,
     approvals: approvals.service,
+    memory,
     async close() {
       await app.close();
       for (const m of modules) await m.close?.();

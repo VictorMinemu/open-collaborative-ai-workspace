@@ -431,7 +431,7 @@ describe("units: memory blocks a delete like bots do (Phase 07.2, MEM-01)", () =
     expect((await su.query("select 1 from app.memory_files where scope_id = $1", [scope])).rowCount).toBe(0);
   });
 
-  it("a second file, an edited MEMORY.md or a root touched by a person is 409 unit_has_memory; nothing changes", async () => {
+  it("a second file or an edited MEMORY.md is 409 unit_has_memory; nothing changes", async () => {
     const scopeOf = async (unitId: string) =>
       (
         await su.query(
@@ -447,17 +447,12 @@ describe("units: memory blocks a delete like bots do (Phase 07.2, MEM-01)", () =
     const edited = await create("Edited Root");
     const scopeB = await scopeOf(edited);
     const rootB = await addFile(scopeB, "MEMORY.md", "# Memory\nkeep this\n", 2, "user");
-    // The root with the template content but written by a person (version 1).
-    const touched = await create("Touched Root");
-    const scopeC = await scopeOf(touched);
-    const rootC = await addFile(scopeC, "MEMORY.md", "# Memory\n", 1, "user");
     const eventsBefore = (await orgEvents()).length;
     const auditsBefore = (await audit("unit.deleted")).length;
 
     for (const [unitId, scopeId, fileId] of [
       [withFile, scopeA, extra],
       [edited, scopeB, rootB],
-      [touched, scopeC, rootC],
     ] as const) {
       const err = await fails(admin.request("DELETE", `/api/v1/units/${unitId}`), 409);
       expect(err.code).toBe("unit_has_memory");
@@ -472,5 +467,20 @@ describe("units: memory blocks a delete like bots do (Phase 07.2, MEM-01)", () =
     await su.query("update app.memory_files set deleted_at = now() where id = $1", [extra]);
     await ok(admin.request("DELETE", `/api/v1/units/${withFile}`));
     expect(await exists("memory_scopes", scopeA)).toBe(false);
+  });
+
+  it("a root a person edited back to the template (any version) does not block: MEMORY.md can never be deleted", async () => {
+    // 07.2-08: the root can be edited but not deleted, so its content decides. Before this, one edit made the unit
+    // undeletable forever (the version never returns to 1).
+    const touched = await create("Touched Root");
+    const scope = (
+      await su.query(
+        "insert into app.memory_scopes (organization_id, kind, unit_id) values ($1, 'unit', $2) returning id",
+        [orgId, touched],
+      )
+    ).rows[0].id as string;
+    await addFile(scope, "MEMORY.md", "# Memory\n", 3, "user");
+    await ok(admin.request("DELETE", `/api/v1/units/${touched}`));
+    expect(await exists("memory_scopes", scope)).toBe(false);
   });
 });
