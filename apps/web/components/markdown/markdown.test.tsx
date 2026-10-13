@@ -11,7 +11,12 @@ const SAM: MentionTarget = { kind: "user", displayName: "Sam Lee" };
 
 function render(
   text: string,
-  opts: { variant?: "chat" | "document"; streaming?: boolean } = {},
+  opts: {
+    variant?: "chat" | "document";
+    streaming?: boolean;
+    resolveHref?: (href: string) => string | null;
+    headingLevel?: 1 | 2 | 3 | 4 | 5 | 6;
+  } = {},
   ctx: MentionContextValue = { handles: new Map([["sam", SAM]]), myHandle: null },
 ): string {
   return renderToStaticMarkup(
@@ -249,5 +254,95 @@ describe("Markdown: streaming (D-05)", () => {
     });
     expectSafe(html);
     expect(html).toContain("&lt;script&gt;");
+  });
+});
+
+describe("Markdown: in-app links (resolveHref, 07.2-10)", () => {
+  const LINKS =
+    "[v](vacations.md) [up](../MEMORY.md) [out](https://example.org/x) [txt](notes.txt) [mail](mailto:a@b.c)";
+  const resolveHref = (href: string) =>
+    href === "vacations.md"
+      ? "/memory/s1/policies/vacations.md"
+      : href === "../MEMORY.md"
+        ? "/memory/s1/MEMORY.md"
+        : null;
+
+  it("document variant: resolved relative links become in-app links without a new tab", () => {
+    const html = render(LINKS, { variant: "document", resolveHref });
+    expectSafe(html);
+    expect(html).toMatch(/<a[^>]*href="\/memory\/s1\/policies\/vacations\.md"[^>]*>v<\/a>/);
+    expect(html).toMatch(/<a[^>]*href="\/memory\/s1\/MEMORY\.md"[^>]*>up<\/a>/);
+    const inApp = [...html.matchAll(/<a[^>]*data-in-app[^>]*>/g)].map((m) => m[0]);
+    expect(inApp).toHaveLength(2);
+    for (const tag of inApp) expect(tag).not.toContain('target="_blank"');
+  });
+
+  it("document variant: unresolved relative links render as text; external links keep the renderer's rules", () => {
+    const html = render(LINKS, { variant: "document", resolveHref });
+    expect(html).not.toMatch(/<a[^>]*>txt<\/a>/);
+    expect(html).toContain("txt");
+    expect(html).toMatch(/<a[^>]*href="https:\/\/example\.org\/x"[^>]*target="_blank"[^>]*>out<\/a>/);
+    expect(html).toMatch(/<a[^>]*href="mailto:a@b\.c"[^>]*>mail<\/a>/);
+  });
+
+  it("a hostile resolver result is still checked by the URL rules", () => {
+    const html = render("[x](evil.md)", { variant: "document", resolveHref: () => "javascript:alert(1)" });
+    expectSafe(html);
+    expect(html).not.toMatch(/<a[^>]*data-in-app/);
+  });
+
+  it("the chat variant ignores resolveHref", () => {
+    expect(render(LINKS, { variant: "chat", resolveHref })).toEqual(render(LINKS, { variant: "chat" }));
+  });
+
+  it("without resolveHref the document variant is unchanged", () => {
+    const html = render(LINKS, { variant: "document" });
+    expect(html).not.toContain("data-in-app");
+    expect(html).not.toContain("/memory/");
+  });
+});
+
+describe("Markdown: document heading level (07.2 WINDOWS 154)", () => {
+  /** The HTML heading tags in document order, e.g. ["h2", "h3"]. */
+  const tags = (html: string) => [...html.matchAll(/<(h[1-6])\b/g)].map((m) => m[1]);
+  /** The class of the first heading whose text is `text`. */
+  const classOf = (html: string, text: string) =>
+    html.match(new RegExp(`<h[1-6] class="([^"]*)">${text}</h[1-6]>`))?.[1];
+  const DOC = "# Acme\n\nIntro.\n\n## Contacts\n\n- Marta\n\n### Notes\n\nText.\n";
+
+  it("without headingLevel the document variant keeps its tags (Work Zone, AI chats)", () => {
+    expect(tags(render(DOC, { variant: "document" }))).toEqual(["h3", "h3", "h4"]);
+  });
+
+  it("headingLevel sets the tag of the document's top heading and keeps the outline below it", () => {
+    expect(tags(render(DOC, { variant: "document", headingLevel: 2 }))).toEqual(["h2", "h3", "h4"]);
+  });
+
+  it("the top heading is the shallowest one used, so a file that starts at ## never skips a level", () => {
+    const html = render("## Contacts\n\n### Notes\n", { variant: "document", headingLevel: 2 });
+    expect(tags(html)).toEqual(["h2", "h3"]);
+  });
+
+  it("# lines inside a code fence are not headings", () => {
+    const html = render("```sh\n# a comment\n```\n\n## Setup\n", { variant: "document", headingLevel: 2 });
+    expect(tags(html)).toEqual(["h2"]);
+  });
+
+  it("levels stop at h6", () => {
+    const html = render("# A\n\n###### F\n", { variant: "document", headingLevel: 3 });
+    expect(tags(html)).toEqual(["h3", "h6"]);
+  });
+
+  it("the look follows the Markdown level, never the tag", () => {
+    const plain = render(DOC, { variant: "document" });
+    const leveled = render(DOC, { variant: "document", headingLevel: 2 });
+    for (const text of ["Acme", "Contacts", "Notes"]) {
+      expect(classOf(leveled, text), text).toBeDefined();
+      expect(classOf(leveled, text), text).toEqual(classOf(plain, text));
+    }
+  });
+
+  it("the chat variant ignores headingLevel", () => {
+    expect(render(DOC, { variant: "chat", headingLevel: 2 })).toEqual(render(DOC, { variant: "chat" }));
   });
 });

@@ -24,9 +24,43 @@ const id = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
 const now = 1_790_000_000;
 
 describe("permission vocabulary", () => {
-  it("has exactly the 57 agreed permissions", () => {
-    expect(Permission.options).toHaveLength(57);
-    expect(new Set(Permission.options).size).toBe(57);
+  it("has exactly the 60 agreed permissions", () => {
+    expect(Permission.options).toHaveLength(60);
+    expect(new Set(Permission.options).size).toBe(60);
+  });
+
+  it("Phase 07.2 memory grains exist exactly as 07.2-01 defines them (MEM-04, MEM-07, D-04)", () => {
+    const memory = ["memory.read", "memory.write", "memory.promote"] as const;
+    // Appended at the end, never renamed (D-09).
+    expect(Permission.options.slice(-3)).toEqual([...memory]);
+    expect(PERMISSION_SURFACE).toMatchObject({
+      "memory.read": "bots",
+      "memory.write": "bots",
+      "memory.promote": "team",
+    });
+    for (const role of OrgRole.options) {
+      // Every role reads (STANDARD); only admins hold write and promote organization-wide.
+      expect(ROLE_PERMISSIONS[role], `${role}: memory.read`).toContain("memory.read");
+      for (const p of ["memory.write", "memory.promote"] as const) {
+        if (role === "admin") expect(ROLE_PERMISSIONS[role], `${role}: ${p}`).toContain(p);
+        else expect(ROLE_PERMISSIONS[role], `${role}: ${p}`).not.toContain(p);
+      }
+    }
+    expect(ROLE_PERMISSIONS.standard.filter((p) => p.startsWith("memory."))).toEqual(["memory.read"]);
+    // Leads write and promote on the subtree they lead (resolver).
+    expect(LEAD_PERMISSIONS).toEqual(expect.arrayContaining(["memory.write", "memory.promote"]));
+    expect(LEAD_PERMISSIONS).not.toContain("memory.read");
+    // Agents read and write within the human's rights; they only ever propose into shared memory.
+    expect(AGENT_PERMISSIONS).toEqual(expect.arrayContaining(["memory.read", "memory.write"]));
+    expect(AGENT_PERMISSIONS).not.toContain("memory.promote");
+    for (const p of memory) {
+      expect(NON_DELEGABLE_PERMISSIONS, p).not.toContain(p);
+      expect(PermissionPattern.safeParse(p).success, p).toBe(true);
+    }
+    expect(PermissionPattern.safeParse("memory.*").success).toBe(true);
+    expect(PERMISSION_DESCRIPTIONS["memory.read"]).toBe("Read the memory files you have access to");
+    expect(PERMISSION_DESCRIPTIONS["memory.write"]).toBe("Edit memory files directly");
+    expect(PERMISSION_DESCRIPTIONS["memory.promote"]).toBe("Approve agent proposals into shared memory");
   });
 
   it("Phase 07.3 permissions exist exactly as 07.3-01 defines them (ADR-0024)", () => {
@@ -38,7 +72,7 @@ describe("permission vocabulary", () => {
       else expect(ROLE_PERMISSIONS[role], role).not.toContain("unit.modules.manage");
     }
     // Leads hold it on the subtree they lead only (resolver), like `bot.manage_unit`.
-    expect(LEAD_PERMISSIONS.at(-1)).toBe("unit.modules.manage");
+    expect(LEAD_PERMISSIONS).toContain("unit.modules.manage");
     for (const p of ["ai_chat.read", "unit.modules.manage"] as const) {
       expect(NON_DELEGABLE_PERMISSIONS, p).not.toContain(p);
       expect(PERMISSION_DESCRIPTIONS[p].length, p).toBeGreaterThan(10);
@@ -68,12 +102,15 @@ describe("permission vocabulary", () => {
       if (role === "admin") expect(ROLE_PERMISSIONS[role]).toContain("bot.manage_unit");
       else expect(ROLE_PERMISSIONS[role], role).not.toContain("bot.manage_unit");
     }
-    // ADR-0024 (07.3-01) appended `unit.modules.manage`: lead rights over module access on the led subtree.
+    // ADR-0024 (07.3-01) appended `unit.modules.manage`: lead rights over module access on the led subtree;
+    // 07.2-01 appended `memory.write` and `memory.promote` (shared memory of the led subtree).
     expect(LEAD_PERMISSIONS).toEqual([
       "unit.members.manage",
       "bot.manage_unit",
       "bot.configure",
       "unit.modules.manage",
+      "memory.write",
+      "memory.promote",
     ]);
     for (const p of ["ai_chat.manage", "bot.manage_unit", "agent_card.approve"] as const) {
       expect(NON_DELEGABLE_PERMISSIONS, p).not.toContain(p);

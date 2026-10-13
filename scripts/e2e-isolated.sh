@@ -9,6 +9,9 @@
 # Optional env (scripts/cell-proof.sh): OCW_E2E_API_HOST (API bind address, default 127.0.0.1; 0.0.0.0 only where a
 # container must reach the API and the host is disposable, e.g. CI), OCW_E2E_CLAWHUB_URL (ClawHub the API proxies,
 # default the fake); OCW_BUNDLED_PLUGINS and OCW_MOCK_MODEL_BASE_URL are kept over .env when the caller sets them.
+# OCW_PRESIDIO_URL (07.2-13): the e2e API's Presidio analyzer is the caller's value or empty (off), never .env's, so a
+# demo .env never points the e2e API at a real or internal Presidio; memory-proposals.spec runs once with a
+# non-answering address (e.g. http://192.0.2.1:3000) to show the "Extended scan unavailable" warning.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -52,6 +55,23 @@ else
   release_lock() { rm -rf "$LOCK.d"; }
 fi
 
+# ---------------------------------------------------------------- keep the Mac awake (macOS)
+# A sleep mid-run freezes the browser, the API and Playwright together, and on wake the test that was running fails,
+# usually on its timeout, as if the product hung (07.2 gate: a 38 s lid-close sleep timed out memory-files on desktop;
+# the same run had idle-slept 17 s three minutes earlier). caffeinate -i blocks idle sleep while this script runs.
+# Closing the lid on battery still sleeps, so cleanup lists every sleep that happened during the run.
+run_started="$(date '+%Y-%m-%d %H:%M:%S')"
+if command -v caffeinate >/dev/null 2>&1; then caffeinate -i -w $$ & fi
+report_sleeps() {
+  command -v pmset >/dev/null 2>&1 || return 0
+  local slept
+  slept="$(pmset -g log 2>/dev/null | awk -v since="$run_started" '/Entering Sleep state/ && ($1 " " $2) >= since' || true)"
+  [ -n "$slept" ] || return 0
+  echo "e2e-isolated: WARNING the Mac slept during this run; a test that failed at one of these times failed on wake,"
+  echo "e2e-isolated: not because of the product (pmset -g log):"
+  printf '%s\n' "$slept" | sed -E 's/^([0-9-]+ [0-9:]+) [+-][0-9]+[[:space:]]+Sleep[[:space:]]+/  \1  /'
+}
+
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ocw-e2e.XXXXXX")"
 stop_pid() {
   [ -f "$1" ] || return 0
@@ -64,6 +84,7 @@ cleanup() {
   stop_pid "$RUN_DIR/web.pid"; stop_pid "$RUN_DIR/api.pid"; stop_pid "$RUN_DIR/fake.pid"
   storage stop garage >/dev/null 2>&1 || true
   release_lock
+  report_sleeps
   echo "e2e-isolated: logs in $RUN_DIR"
 }
 trap cleanup EXIT INT TERM
@@ -74,8 +95,10 @@ caller_keep=()
 for v in OCW_BUNDLED_PLUGINS OCW_MOCK_MODEL_BASE_URL; do
   if [ -n "${!v-}" ]; then caller_keep+=("$v=${!v}"); fi
 done
+caller_presidio="${OCW_PRESIDIO_URL-}"
 set -a; . ./.env; set +a
 for kv in ${caller_keep[@]+"${caller_keep[@]}"}; do export "${kv?}"; done
+export OCW_PRESIDIO_URL="$caller_presidio"
 swap_path() { node -e 'const u=new URL(process.argv[1]); u.pathname="/"+process.argv[2]; process.stdout.write(u.toString())' "$1" "$2"; }
 E2E_DATABASE_URL="$(swap_path "$DATABASE_URL" "$E2E_DB")"
 E2E_AUTH_DATABASE_URL="$(swap_path "$AUTH_DATABASE_URL" "$E2E_DB")"

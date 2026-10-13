@@ -317,6 +317,65 @@ describe("tool guard under abuse (Task 3)", () => {
     expect(fake.requests.map((r) => r.tool)).toEqual(["web_search"]);
   });
 
+  describe("memory file tools (07.2-07, D-08)", () => {
+    const READ = { untrustedOutput: false, sideEffecting: false };
+    const memoryTurn = (flags: Record<string, { untrustedOutput: boolean; sideEffecting: boolean }> = {}) =>
+      turn({
+        tools: ["web_search", "ocw_memory_list", "ocw_memory_read", "ocw_memory_write", "ocw_memory_propose"],
+        toolFlags: {
+          web_search: WEB,
+          ocw_memory_list: READ,
+          ocw_memory_read: READ,
+          ocw_memory_write: { untrustedOutput: false, sideEffecting: true },
+          ocw_memory_propose: { untrustedOutput: false, sideEffecting: false },
+          ...flags,
+        },
+      });
+
+    it("ocw_memory_list and ocw_memory_read go through /tool-calls with no argument values; they do not taint", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: memoryTurn() });
+      expect(await g.beforeToolCall(call("ocw_memory_list", {}), ctx())).toBeUndefined();
+      expect(
+        await g.beforeToolCall(call("ocw_memory_read", { scope: "personal", path: "MEMORY.md" }), ctx()),
+      ).toBeUndefined();
+      expect(fake.requests.map((r) => ({ tool: r.tool, params: r.params }))).toEqual([
+        { tool: "ocw_memory_list", params: {} },
+        { tool: "ocw_memory_read", params: {} },
+      ]);
+      expect(g.activeTurn(SESSION)?.tainted).toBe(false);
+    });
+
+    it("ocw_memory_write and ocw_memory_propose are validated by their own routes: never sent to /tool-calls, still counted", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: memoryTurn() });
+      expect(await g.beforeToolCall(call("ocw_memory_write", { content: "x" }), ctx())).toBeUndefined();
+      expect(await g.beforeToolCall(call("OCW_MEMORY_PROPOSE", { content: "x" }), ctx())).toBeUndefined();
+      expect(fake.requests).toHaveLength(0);
+      expect(g.activeTurn(SESSION)?.calls).toBe(2);
+    });
+
+    it("after untrusted content ocw_memory_write is blocked, even when the turn's flags say it is harmless; propose is not", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, {
+        eventId: "evt-1",
+        agentId: "a1",
+        turn: memoryTurn({ ocw_memory_write: { untrustedOutput: false, sideEffecting: false } }),
+      });
+      expect(await g.beforeToolCall(call("web_search", { query: "q" }), ctx())).toBeUndefined();
+      const write = await g.beforeToolCall(call("ocw_memory_write", { content: "planted" }), ctx());
+      expect(write?.blockReason).toMatch(/read-only after untrusted content/u);
+      expect(
+        await g.beforeToolCall(call("ocw_memory_propose", { content: "flagged" }), ctx()),
+      ).toBeUndefined();
+      expect(await g.beforeToolCall(call("ocw_memory_read", {}), ctx())).toBeUndefined();
+      expect(fake.requests.map((r) => r.tool)).toEqual(["web_search", "ocw_memory_read"]);
+    });
+  });
+
   it("endTurn makes any later call of that session blocked; aborting the turn's signal ends it too", async () => {
     const fake = fakeClient();
     const g = createToolGuard({ client: () => fake.client });

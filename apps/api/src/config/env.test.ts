@@ -163,6 +163,56 @@ describe("AI chat variables (P-12)", () => {
   });
 });
 
+describe("Presidio variables (MEM-05, D-06)", () => {
+  const base = {
+    DATABASE_URL: "postgres://app:x@localhost:5432/ocw",
+    AUTH_DATABASE_URL: "postgres://auth:x@localhost:5432/ocw",
+    REDIS_URL: "redis://localhost:6379",
+    BETTER_AUTH_SECRET: "b".repeat(32),
+    OCW_SETUP_TOKEN: "s".repeat(16),
+    OCW_ENCRYPTION_KEY: "a".repeat(64),
+  };
+
+  it("defaults: off (no URL), Spanish and English, a 2 s deadline", () => {
+    const env = loadEnv(base);
+    expect(env.OCW_PRESIDIO_URL).toBeNull();
+    expect(env.OCW_PRESIDIO_LANGUAGES).toEqual(["es", "en"]);
+    expect(env.OCW_PRESIDIO_TIMEOUT_MS).toBe(2000);
+  });
+
+  it("compose's empty values mean the defaults", () => {
+    const env = loadEnv({
+      ...base,
+      OCW_PRESIDIO_URL: "",
+      OCW_PRESIDIO_LANGUAGES: "",
+      OCW_PRESIDIO_TIMEOUT_MS: "",
+    });
+    expect(env.OCW_PRESIDIO_URL).toBeNull();
+    expect(env.OCW_PRESIDIO_LANGUAGES).toEqual(["es", "en"]);
+    expect(env.OCW_PRESIDIO_TIMEOUT_MS).toBe(2000);
+  });
+
+  it("accepts a URL with a path, one language, a custom deadline", () => {
+    const env = loadEnv({
+      ...base,
+      OCW_PRESIDIO_URL: "http://presidio:3000/analyzer/",
+      OCW_PRESIDIO_LANGUAGES: " EN ",
+      OCW_PRESIDIO_TIMEOUT_MS: "500",
+    });
+    expect(env.OCW_PRESIDIO_URL).toBe("http://presidio:3000/analyzer/");
+    expect(env.OCW_PRESIDIO_LANGUAGES).toEqual(["en"]);
+    expect(env.OCW_PRESIDIO_TIMEOUT_MS).toBe(500);
+  });
+
+  it("refuses an unsupported language, a bad URL and an out-of-range deadline, naming the variable", () => {
+    expect(() => loadEnv({ ...base, OCW_PRESIDIO_LANGUAGES: "fr" })).toThrow(/OCW_PRESIDIO_LANGUAGES/);
+    expect(() => loadEnv({ ...base, OCW_PRESIDIO_LANGUAGES: "es,fr" })).toThrow(EnvError);
+    expect(() => loadEnv({ ...base, OCW_PRESIDIO_URL: "not a url" })).toThrow(/OCW_PRESIDIO_URL/);
+    expect(() => loadEnv({ ...base, OCW_PRESIDIO_TIMEOUT_MS: "50" })).toThrow(/OCW_PRESIDIO_TIMEOUT_MS/);
+    expect(() => loadEnv({ ...base, OCW_PRESIDIO_TIMEOUT_MS: "10001" })).toThrow(EnvError);
+  });
+});
+
 describe("OCW_TRUST_PROXY (SELF-05, D-18)", () => {
   const base = {
     DATABASE_URL: "postgres://app:x@localhost:5432/ocw",

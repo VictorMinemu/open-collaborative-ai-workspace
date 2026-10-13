@@ -16,6 +16,19 @@
  *   POST /agent-channel/v1/tool-calls/:id/result  records the outcome
  *   POST /agent-channel/v1/memories       records the note (dedupes exact text per event's bot; 409 for
  *                                          events listed in `refuseMemoryEvents`)
+ *   POST /agent-channel/v1/memory/list    no scope → `memoryScopes`; a scope → its files in `memoryFileStore` (under `folder`)
+ *   POST /agent-channel/v1/memory/read    a file of `memoryFileStore` by scope alias / id and path (case-insensitive), else
+ *                                          `{refused:"not_found"}`
+ *   POST /agent-channel/v1/memory/write   personal / agent only (`own_scope_only`); append creates or appends, replace needs
+ *                                          the current version (`version_conflict`); answers `{fileId, version}`
+ *   POST /agent-channel/v1/memory/propose `secret_detected` for an `sk-…` key, else `{approvalId, findings (emails),
+ *                                          readerCount: memoryReaderCount}`; nothing is written (a person approves). For a
+ *                                          published turn, like the real API, the proposal also posts one platform-owned
+ *                                          approval card answering the turn's message (`approvalCards`)
+ *                                          All /memory routes: `memoryRefusals` forces a refusal per event; strict bodies
+ *                                          (an unknown key is 400 bad_request, like the contract); every call in `memoryCalls`;
+ *                                          a turn ended with `endTurn` (its human no longer reads the conversation) is
+ *                                          403 `no_trigger` on every /memory route (`memoryNoTriggers`), like the real API
  *   POST /agent-channel/v1/cards          records the card (`cards`; idempotent on agentId + idempotencyKey, version 1)
  *   PATCH /agent-channel/v1/cards/:id     posting agent only (403), expectedVersion must match (409
  *                                          card_version_conflict); records the patch (`cardPatches`)
@@ -67,6 +80,34 @@ export type MentionInput = Omit<AgentMentionEvent, "seq" | "type" | "organizatio
 export type StoredToolCall = AgentChannelToolCallRequest & { callId: string; allowed: boolean };
 export type StoredToolResult = AgentChannelToolCallResult & { callId: string };
 export type StoredMemory = AgentChannelMemorySave & { memoryId: string; created: boolean };
+/** One file of the fake memory store (`scope` is "personal", "agent" or a scope id, as the tools send it). */
+export type FakeMemoryFile = { scope: string; path: string; version: number; content: string; id?: string };
+/** A scope as `POST /memory/list` lists it (contracts `MemoryScope`). */
+export type FakeMemoryScope = { id: string; kind: string; label: string; viewerCan: string[] };
+export type MemoryRoute = "list" | "read" | "write" | "propose";
+export type StoredMemoryCall = { route: MemoryRoute; body: Record<string, unknown> };
+/**
+ * The platform-owned approval card a proposal posts in the turn's conversation (the real API composes it from the
+ * `memory.write` kind, ADR-0023 decision 14): never through `POST /cards`, never editable by the agent.
+ */
+export type StoredApprovalCard = {
+  approvalId: string;
+  messageId: string;
+  eventId: string;
+  agentId: string;
+  conversationId: string;
+  threadRootId: string | null;
+  inReplyToMessageId: string;
+  platformOwned: true;
+  card: {
+    kind: "approval";
+    title: string;
+    status: "pending";
+    fields: Array<{ label: string; value: string }>;
+    actions: Array<{ kind: "open"; label: string; target: string }>;
+    summary: string;
+  };
+};
 export type StoredCard = AgentChannelPostCard & { messageId: string; version: number };
 export type StoredCardPatch = AgentChannelPatchCard & { messageId: string; status: number };
 export type StoredBoardCard = AgentChannelBoardCreateCard & {
@@ -104,6 +145,22 @@ export type FakeAgentChannelApi = {
   memories: StoredMemory[];
   /** Event ids whose memory saves the fake API refuses with 409 `tainted`. */
   refuseMemoryEvents: Set<string>;
+  /** The fake memory files the /memory routes act on (tests seed it). */
+  memoryFileStore: FakeMemoryFile[];
+  /** What `POST /memory/list` without a scope answers (tests seed it). */
+  memoryScopes: FakeMemoryScope[];
+  /** The reader count every accepted proposal answers (default 1). */
+  memoryReaderCount: number;
+  /** Every POST /memory/* body, in order (refused ones included). */
+  memoryCalls: StoredMemoryCall[];
+  /** Event id → the refusal every /memory route answers for it (`{refused}` with 200, like the real API). */
+  memoryRefusals: Map<string, string>;
+  /** Approval cards posted by accepted proposals of published turns, in order. */
+  approvalCards: StoredApprovalCard[];
+  /** Every /memory call answered 403 `no_trigger` (an ended turn), in order. */
+  memoryNoTriggers: Array<{ route: MemoryRoute; eventId: string }>;
+  /** The turn's human no longer reads its conversation: every /memory route answers 403 `no_trigger` for it. */
+  endTurn(eventId: string): void;
   /** Every card stored by POST /cards (idempotent retries are not stored twice); `version` follows the patches. */
   cards: StoredCard[];
   /** Every PATCH /cards/:id attempt with the status it got. */
@@ -212,6 +269,20 @@ function boardCardOut(c: StoredBoardCard) {
   };
 }
 
+/** A stable id per fake file (assigned on first use). */
+function memoryFileId(f: FakeMemoryFile): string {
+  f.id ??= randomUUID();
+  return f.id;
+}
+
+/** The keys each /memory body may carry (the contract's strict objects): never an owner or user id. */
+const MEMORY_BODY_KEYS: Record<MemoryRoute, readonly string[]> = {
+  list: ["eventId", "agentId", "scope", "folder"],
+  read: ["eventId", "agentId", "scope", "path"],
+  write: ["eventId", "agentId", "scope", "path", "mode", "content", "expectedVersion"],
+  propose: ["eventId", "agentId", "scope", "path", "op", "content", "baseVersion", "reason"],
+};
+
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
   res.end(JSON.stringify(body));
@@ -268,6 +339,14 @@ export async function startFakeAgentChannelApi(
     toolResults: [] as StoredToolResult[],
     memories: [] as StoredMemory[],
     refuseMemoryEvents: new Set<string>(),
+    memoryFileStore: [] as FakeMemoryFile[],
+    memoryScopes: [] as FakeMemoryScope[],
+    memoryReaderCount: 1,
+    memoryCalls: [] as StoredMemoryCall[],
+    memoryRefusals: new Map<string, string>(),
+    endedTurns: new Set<string>(),
+    approvalCards: [] as StoredApprovalCard[],
+    memoryNoTriggers: [] as Array<{ route: MemoryRoute; eventId: string }>,
     cards: [] as StoredCard[],
     cardPatches: [] as StoredCardPatch[],
     boardCards: [] as StoredBoardCard[],
@@ -321,6 +400,22 @@ export async function startFakeAgentChannelApi(
           state.plugins = ((await readJson(req)) as { plugins: CellApprovedPlugin[] }).plugins ?? [];
           return json(res, 200, { ok: true, plugins: state.plugins });
         }
+        if (req.method === "POST" && url.pathname === "/__test/memory") {
+          // Seed the fake memory store (files, scopes, the reader count proposals answer).
+          const body = (await readJson(req)) as {
+            files?: FakeMemoryFile[];
+            scopes?: FakeMemoryScope[];
+            readerCount?: number;
+          };
+          state.memoryFileStore.push(...(body.files ?? []));
+          state.memoryScopes.push(...(body.scopes ?? []));
+          if (typeof body.readerCount === "number") state.memoryReaderCount = body.readerCount;
+          return json(res, 200, { ok: true });
+        }
+        if (req.method === "POST" && url.pathname === "/__test/end-turn") {
+          api.endTurn(String(((await readJson(req)) as { eventId?: string }).eventId ?? ""));
+          return json(res, 200, { ok: true });
+        }
         if (req.method === "POST" && url.pathname === "/__test/event") {
           const { type, data } = (await readJson(req)) as { type: string; data: Record<string, unknown> };
           return json(res, 200, api.publish(type, data));
@@ -337,6 +432,10 @@ export async function startFakeAgentChannelApi(
             toolCalls: state.toolCalls,
             toolResults: state.toolResults,
             memories: state.memories,
+            memoryCalls: state.memoryCalls,
+            memoryFileStore: state.memoryFileStore,
+            memoryNoTriggers: state.memoryNoTriggers,
+            approvalCards: state.approvalCards,
             cards: state.cards,
             cardPatches: state.cardPatches,
             boardCards: state.boardCards,
@@ -503,6 +602,130 @@ export async function startFakeAgentChannelApi(
         const stored: StoredMemory = { ...body, memoryId: same?.memoryId ?? randomUUID(), created: !same };
         state.memories.push(stored);
         return json(res, 200, { memoryId: stored.memoryId, created: stored.created });
+      }
+      const memoryRoute = /^\/memory\/(list|read|write|propose)$/u.exec(route)?.[1] as
+        | MemoryRoute
+        | undefined;
+      if (req.method === "POST" && memoryRoute) {
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        state.memoryCalls.push({ route: memoryRoute, body });
+        const allowed = MEMORY_BODY_KEYS[memoryRoute];
+        if (
+          typeof body.eventId !== "string" ||
+          typeof body.agentId !== "string" ||
+          Object.keys(body).some((k) => !allowed.includes(k))
+        ) {
+          return json(res, 400, { error: { code: "bad_request" } });
+        }
+        if (state.endedTurns.has(body.eventId)) {
+          state.memoryNoTriggers.push({ route: memoryRoute, eventId: body.eventId });
+          return json(res, 403, { error: { code: "no_trigger", message: "This call answers no live turn" } });
+        }
+        const forced = state.memoryRefusals.get(body.eventId);
+        if (forced) return json(res, 200, { refused: forced });
+        const key = (p: unknown) => String(p).normalize("NFC").toLowerCase();
+        const find = (scope: unknown, p: unknown) =>
+          state.memoryFileStore.find((f) => f.scope === scope && key(f.path) === key(p));
+        if (memoryRoute === "list") {
+          if (body.scope === undefined) return json(res, 200, { scopes: state.memoryScopes });
+          const folder = typeof body.folder === "string" ? key(body.folder) : "";
+          const files = state.memoryFileStore
+            .filter((f) => f.scope === body.scope && key(f.path).startsWith(folder))
+            .map((f) => ({
+              id: memoryFileId(f),
+              scopeId: f.scope,
+              path: f.path,
+              version: f.version,
+              bytes: Buffer.byteLength(f.content),
+              updatedAt: new Date(0).toISOString(),
+              updatedBy: { kind: "agent", id: body.agentId, displayName: "fake", onBehalfOf: null },
+            }));
+          return json(res, 200, { files });
+        }
+        if (memoryRoute === "read") {
+          const file = find(body.scope, body.path);
+          if (!file) return json(res, 200, { refused: "not_found" });
+          return json(res, 200, { file: { path: file.path, version: file.version, content: file.content } });
+        }
+        if (memoryRoute === "write") {
+          if (body.scope !== "personal" && body.scope !== "agent")
+            return json(res, 200, { refused: "own_scope_only" });
+          const file = find(body.scope, body.path);
+          const content = String(body.content);
+          if (body.mode === "replace" && file && body.expectedVersion !== file.version) {
+            return json(res, 200, { refused: "version_conflict" });
+          }
+          if (!file) {
+            const created = { scope: body.scope, path: String(body.path), version: 1, content };
+            state.memoryFileStore.push(created);
+            return json(res, 200, { fileId: memoryFileId(created), version: 1 });
+          }
+          file.content =
+            body.mode === "append"
+              ? `${file.content}${file.content.endsWith("\n") || !file.content ? "" : "\n"}${content}`
+              : content;
+          file.version++;
+          return json(res, 200, { fileId: memoryFileId(file), version: file.version });
+        }
+        const proposed = String(body.content);
+        if (/sk-[A-Za-z0-9_-]{16,}/u.test(proposed)) return json(res, 200, { refused: "secret_detected" });
+        const emails = proposed.match(/[^\s@]+@[^\s@]+\.[a-z]{2,}/giu) ?? [];
+        const approvalId = randomUUID();
+        // The turn's conversation, as the real API reads it from the stored turn (only a published one here).
+        const delivered = state.events.find(
+          (e) => e.type === "agent.mention.v1" && e.data.eventId === body.eventId,
+        )?.data as
+          | {
+              conversation?: { id?: string };
+              thread?: { rootMessageId?: string | null };
+              message?: { id?: string };
+            }
+          | undefined;
+        if (delivered?.conversation?.id && delivered.message?.id) {
+          const op = String(body.op);
+          const title = `${op === "create" ? "Create" : op === "replace" ? "Rewrite" : "Append to"} ${String(body.path)}`;
+          state.approvalCards.push({
+            approvalId,
+            messageId: randomUUID(),
+            eventId: body.eventId,
+            agentId: body.agentId,
+            conversationId: delivered.conversation.id,
+            threadRootId: delivered.thread?.rootMessageId ?? null,
+            inReplyToMessageId: delivered.message.id,
+            platformOwned: true,
+            card: {
+              kind: "approval",
+              title,
+              status: "pending",
+              fields: [
+                { label: "Readers", value: `${state.memoryReaderCount} people` },
+                { label: "Found", value: emails.length > 0 ? "Email" : "Nothing" },
+              ],
+              actions: [{ kind: "open", label: "Review changes", target: `/memory/proposals/${approvalId}` }],
+              summary: proposed
+                .split("\n")
+                .map((l) => `+ ${l}`)
+                .join("\n"),
+            },
+          });
+        }
+        return json(res, 200, {
+          approvalId,
+          findings:
+            emails.length > 0
+              ? [
+                  {
+                    kind: "email",
+                    severity: "warn",
+                    source: "builtin",
+                    count: emails.length,
+                    samples: [],
+                    lines: [],
+                  },
+                ]
+              : [],
+          readerCount: state.memoryReaderCount,
+        });
       }
       if (req.method === "POST" && route === "/cards") {
         const body = (await readJson(req)) as AgentChannelPostCard;
@@ -727,6 +950,33 @@ export async function startFakeAgentChannelApi(
     },
     get refuseMemoryEvents() {
       return state.refuseMemoryEvents;
+    },
+    get memoryFileStore() {
+      return state.memoryFileStore;
+    },
+    get memoryCalls() {
+      return state.memoryCalls;
+    },
+    get memoryScopes() {
+      return state.memoryScopes;
+    },
+    get memoryReaderCount() {
+      return state.memoryReaderCount;
+    },
+    set memoryReaderCount(value: number) {
+      state.memoryReaderCount = value;
+    },
+    get memoryRefusals() {
+      return state.memoryRefusals;
+    },
+    get approvalCards() {
+      return state.approvalCards;
+    },
+    get memoryNoTriggers() {
+      return state.memoryNoTriggers;
+    },
+    endTurn(eventId) {
+      state.endedTurns.add(eventId);
     },
     get cards() {
       return state.cards;

@@ -1,0 +1,38 @@
+# spaCy NLP engine for the `pii` profile: Spanish (es_core_news_md, added by the Dockerfile) and English (the image's
+# en_core_web_lg). Names (PERSON) and places (LOCATION) come from these models; the rest from recognizers.yaml.
+nlp_engine_name: spacy
+models:
+  - lang_code: es
+    model_name: es_core_news_md
+  - lang_code: en
+    model_name: en_core_web_lg
+
+ner_model_configuration:
+  model_to_presidio_entity_mapping:
+    # es_core_news_md labels: PER, LOC, ORG, MISC.
+    PER: PERSON
+    PERSON: PERSON
+    LOC: LOCATION
+    GPE: LOCATION
+    FAC: LOCATION
+    LOCATION: LOCATION
+    NORP: NRP
+    ORG: ORGANIZATION
+    ORGANIZATION: ORGANIZATION
+    DATE: DATE_TIME
+    TIME: DATE_TIME
+  low_confidence_score_multiplier: 0.4
+  low_score_entity_names: []
+  labels_to_ignore:
+    - ORGANIZATION
+    - MISC
+    - CARDINAL
+    - EVENT
+    - LANGUAGE
+    - LAW
+    - MONEY
+    - ORDINAL
+    - PERCENT
+    - PRODUCT
+    - QUANTITY
+    - WORK_OF_ART

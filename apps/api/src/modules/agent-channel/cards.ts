@@ -25,6 +25,7 @@ import type { AgentMention, CardAction } from "../../lib/chat-agent-bridge";
 import { badRequest, HttpError, notFound } from "../../lib/errors";
 import { findAgent } from "../agent";
 import { createConversationAccess, patchCard } from "../chat";
+import type { MemoryService } from "../memory";
 import { notifyUsers } from "../notification";
 import { createPermissionService, memberDirectory, type PermissionService } from "../organization";
 import { cellOf } from "./auth";
@@ -187,7 +188,7 @@ type StoredCardAction = Omit<AgentCardActionEvent, "seq">;
  * Delivers a reader's decision to the card's agent (P-11), inside the decision transaction: the event is built like a
  * mention of the agent on the card's message (`buildMentionEvents`: live member agent, attributed history, roster,
  * `turnPolicy` for the deciding human, so daily limits apply) with the deciding human as author and the server sentence
- * "<actor> approved|denied “<title>”" as text, in the card's thread (flat where the conversation is flat), then appended
+ * "<actor> approved|denied “<title>”" (plus `: “<note>”` when the decider wrote one) as text, in the card's thread (flat where the conversation is flat), then appended
  * to `cell:<org>` as `agent.card_action.v1`. No event when none is produced (disabled agent, daily limit): the decision
  * stands either way.
  */
@@ -199,6 +200,8 @@ export async function emitCardAction(
     after?: AfterCommit;
     perms?: PermissionService;
     modelLabel?: ((ref: ModelRef) => string) | undefined;
+    /** Memory files in the card-action turn (07.2-11), like a mention's. */
+    memory?: MemoryService | undefined;
   } = {},
 ): Promise<void> {
   const [card] = await tx.select().from(messageCards).where(eq(messageCards.messageId, a.messageId)).limit(1);
@@ -221,7 +224,8 @@ export async function emitCardAction(
     messageId: message.id,
     agentIds: [card.agentId],
     author: { kind: "user", id: a.actorUserId, displayName: name },
-    body: `${name} ${a.outcome} “${card.title}”`,
+    // A decision note is human-authored text: quoted after the server sentence, never reworded (UI-SPEC R4).
+    body: `${name} ${a.outcome} “${card.title}”${a.note ? `: “${a.note}”` : ""}`,
     createdAt: new Date().toISOString(),
     delivery: flat ? "dm" : "thread",
   };
@@ -230,6 +234,7 @@ export async function emitCardAction(
     perms: opts.perms ?? createPermissionService(core),
     ...(opts.after ? { after: opts.after } : {}),
     modelLabel: opts.modelLabel,
+    memory: opts.memory,
   });
   for (const ev of events) {
     const payload: StoredCardAction = {
@@ -252,7 +257,11 @@ export async function emitCardAction(
 /** Registers the chat → agent-channel card decision handler (the bridge keeps chat from importing this module). */
 export function registerCardActionHandler(
   core: Core,
-  opts: { perms: PermissionService; modelLabel?: ((ref: ModelRef) => string) | undefined },
+  opts: {
+    perms: PermissionService;
+    modelLabel?: ((ref: ModelRef) => string) | undefined;
+    memory?: MemoryService | undefined;
+  },
 ): void {
   core.chatAgent.onCardAction((tx, action, after) => emitCardAction(core, tx, action, { ...opts, after }));
 }

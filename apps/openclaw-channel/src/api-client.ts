@@ -6,8 +6,16 @@ import {
   type AgentChannelBoardRead,
   AgentChannelBoardReadResponse,
   type AgentChannelMcpProbeResult,
+  type AgentChannelMemoryList,
+  AgentChannelMemoryListResponse,
+  type AgentChannelMemoryPropose,
+  AgentChannelMemoryProposeResponse,
+  type AgentChannelMemoryRead,
+  AgentChannelMemoryReadResponse,
   type AgentChannelMemorySave,
   AgentChannelMemorySaveResponse,
+  type AgentChannelMemoryWrite,
+  AgentChannelMemoryWriteResponse,
   type AgentChannelPatchCard,
   AgentChannelPatchCardResponse,
   type AgentChannelPluginReport,
@@ -26,7 +34,12 @@ import {
 } from "./agent-channel-protocol.js";
 import { backoffDelayMs, sleep } from "./backoff.js";
 
+/** Process-wide brand of an `AgentChannelHttpError`, shared by every module instance of this plugin. */
+const HTTP_ERROR_BRAND = Symbol.for("ocw.openclaw-channel.agent-channel-http-error");
+
 export class AgentChannelHttpError extends Error {
+  readonly [HTTP_ERROR_BRAND] = true;
+
   constructor(
     readonly status: number,
     readonly path: string,
@@ -36,6 +49,20 @@ export class AgentChannelHttpError extends Error {
   ) {
     super(message);
     this.name = "AgentChannelHttpError";
+  }
+
+  /**
+   * OpenClaw loads this plugin once per registry (boot, discovery, tool-discovery; see active-account.ts), so the
+   * shared client's errors can come from another module instance than the tool that catches them. `instanceof`
+   * therefore matches the brand, not the class identity; otherwise every API refusal (403 `no_trigger`, 409 …) read
+   * as "the workspace could not be reached" in a real cell (07.2-15 container smoke, scenario memory-files).
+   */
+  static override [Symbol.hasInstance](value: unknown): boolean {
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      (value as { [HTTP_ERROR_BRAND]?: unknown })[HTTP_ERROR_BRAND] === true
+    );
   }
 }
 
@@ -201,6 +228,45 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
       signal?: AbortSignal,
     ): Promise<AgentChannelMemorySaveResponse> {
       return AgentChannelMemorySaveResponse.parse(await request("POST", "/memories", req, signal, 2));
+    },
+    /**
+     * `ocw_memory_list` (07.2-07): no scope = the scopes this turn may read; a scope = its files' metadata. A refusal
+     * is a 200 `{refused}`. Reads change nothing, so two attempts at most. Never logs the request or the answer.
+     */
+    async memoryList(
+      req: AgentChannelMemoryList,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelMemoryListResponse> {
+      return AgentChannelMemoryListResponse.parse(await request("POST", "/memory/list", req, signal, 2));
+    },
+    /** `ocw_memory_read` (07.2-07): one file of a scope, or `{refused}`. Two attempts at most. Never logs content. */
+    async memoryRead(
+      req: AgentChannelMemoryRead,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelMemoryReadResponse> {
+      return AgentChannelMemoryReadResponse.parse(await request("POST", "/memory/read", req, signal, 2));
+    },
+    /**
+     * `ocw_memory_write` (07.2-07): the agent's own scopes only. One attempt: an append retried after a lost success
+     * would be stored twice, and the route counts the call against the turn.
+     */
+    async memoryWrite(
+      req: AgentChannelMemoryWrite,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelMemoryWriteResponse> {
+      return AgentChannelMemoryWriteResponse.parse(await request("POST", "/memory/write", req, signal, 1));
+    },
+    /**
+     * `ocw_memory_propose` (07.2-07): a change to a shared scope that a person approves and the server applies. One
+     * attempt: a retry after a lost success would open a second approval.
+     */
+    async memoryPropose(
+      req: AgentChannelMemoryPropose,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelMemoryProposeResponse> {
+      return AgentChannelMemoryProposeResponse.parse(
+        await request("POST", "/memory/propose", req, signal, 1),
+      );
     },
     /**
      * `ocw_agent_card` create (06-14, P-11): a typed card where the turn's agent may post. Idempotent on

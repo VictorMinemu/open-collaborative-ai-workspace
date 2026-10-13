@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 86
-waived_count: 2
-fixed_count: 25
-total_count: 113
-last_updated: 2026-10-12T22:27:17.051Z
+open_count: 109
+waived_count: 4
+fixed_count: 55
+total_count: 168
+last_updated: 2026-10-13T15:20:56.912Z
 ---
 
 # Broken Windows Ledger
@@ -128,6 +128,61 @@ last_updated: 2026-10-12T22:27:17.051Z
 | 111 | 07.1 | deviation | apps/web/components/chat/board/card-strip.tsx |  | A card with a typed title and empty description shows an empty root message body in its thread (author and time only) | fixed |  | 2026-10-12T21:23:03.967Z | 2026-10-12T22:27:16.978Z |
 | 112 | 07.1 | deviation | e2e/tests/search.spec.ts |  | Composer-focus regression e2e was not RED on the pre-fix build; fix rests on run-1 evidence, a focus probe and a unit test | open |  | 2026-10-12T21:23:04.036Z |  |
 | 113 | 07.1 | deviation | apps/web/components/chat/channel-view.tsx |  | Board Messages view: a card root beyond the first 100 cards of its column is not cached, so Edit message falls back to the inline editor (400 board_card_use_board) | fixed |  | 2026-10-12T21:23:04.109Z | 2026-10-12T22:27:17.051Z |
+| 114 | 07.2 | deviation | packages/contracts/src/memory.ts |  | Folder rule pathPrefix is accepted by the contract but dropped by the API until 07.2-03; an allow memory.write on hr/ would apply to the whole scope meanwhile; must close before the phase merges | fixed |  | 2026-10-13T03:20:41.553Z | 2026-10-13T04:39:31.651Z |
+| 115 | 07.2 | deviation | apps/web/components/shell/module-gate.tsx |  | Settings > Modules shows a Memory toggle with no memory UI until 07.2-10; screenshot the 4-row panel in 10/13 | fixed |  | 2026-10-13T03:20:41.625Z | 2026-10-13T07:35:47.237Z |
+| 116 | 07.2 | deviation | packages/db/src/schema/memory.ts |  | approval_requests has no personal-owner column: an admin with direct SQL can see that an approval for a personal proposal exists (metadata, not content); decide in 07.2-06 | waived | API owner-only visibility proven by test; no RLS by design (ADR-0023 decision 16) | 2026-10-13T03:45:07.675Z | 2026-10-13T04:50:57.537Z |
+| 117 | 07.2 | deviation | packages/db/src/schema/memory.ts |  | Personal bot notebook owner assumes a personal bot never changes owner or kind; recompute the owner if that ever changes | open |  | 2026-10-13T03:45:07.777Z |  |
+| 118 | 07.2 | deviation | packages/db/src/schema/memory.ts |  | A file moved across scopes keeps old revisions with the previous owner (conservative); 07.2-08 must account for it | fixed |  | 2026-10-13T03:45:07.876Z | 2026-10-13T05:47:46.872Z |
+| 119 | 07.2 | deviation | apps/api/src/modules/policy/module-access-enforcement.int.test.ts |  | testcontainers Redis port wait can time out under Docker load and fail verify once | open |  | 2026-10-13T03:45:07.976Z |  |
+| 120 | 07.2 | deviation | compose.yaml |  | The internal pii network is created by every compose project even with the profile off (uses Docker address pools); adding it recreates the api once on the next up | waived | One internal network per stack is the accepted cost (D-08); the dev host had 30 networks from dead per-branch projects, cleaned to 16 | 2026-10-13T04:19:12.931Z | 2026-10-13T15:20:56.912Z |
+| 121 | 07.2 | unrun-verify | infra/presidio/recognizers.yaml |  | Spanish Presidio accuracy only checked on fixed samples (missed a Spanish name in a probe); owner manual check on real documents | open |  | 2026-10-13T04:19:13.026Z |  |
+| 122 | 07.2 | deviation | scripts/ocw.mjs |  | No pnpm ocw enable pii: turning on the pii profile means editing .env by hand, unlike other profiles | open |  | 2026-10-13T04:19:13.134Z |  |
+| 123 | 07.2 | deviation | apps/openclaw-channel/src/memory-files-tool.ts |  | /memory/* Agent Channel routes exist only in the fake API until 07.2-11; the real API would 404 (no turn offers the tools yet) | fixed |  | 2026-10-13T04:30:05.478Z | 2026-10-13T07:15:00.114Z |
+| 124 | 07.2 | deviation | infra/openclaw |  | No memory scenario in the real-cell smoke yet; add it in 07.2-15 | fixed |  | 2026-10-13T04:30:05.563Z | 2026-10-13T15:20:09.715Z |
+| 125 | 07.2 | deviation | apps/openclaw-channel/src/agent-channel-protocol.ts |  | memoryFiles mirror uses the exact scopeKind enum: a new API scopeKind silently drops all files and falls back to legacy notes until the mirror is updated | open |  | 2026-10-13T04:30:05.650Z |  |
+| 126 | 07.2 | deviation | packages/contracts/src/sensitive-data.ts |  | detectSensitive returns unbounded spans while MemoryProposalView caps 200 spans / 50 findings; 07.2-09 must cap before building the view | fixed |  | 2026-10-13T04:39:23.084Z | 2026-10-13T06:30:45.615Z |
+| 127 | 07.2 | deviation | packages/contracts/src/sensitive-data.ts |  | False positives (warn): any bare 9-digit number starting 6-9 is a phone; git@github.com:org/repo is an email; Luhn accepts 0000 0000 0000 0000 | open |  | 2026-10-13T04:39:23.163Z |  |
+| 128 | 07.2 | deviation | packages/contracts/src/sensitive-data.ts |  | Keyed secrets (DB_PASSWORD=, Bearer, URL credentials): span and masked sample start at the key, so the UI highlight is wider than the value (no leak) | open |  | 2026-10-13T04:39:23.242Z |  |
+| 129 | 07.2 | deviation | apps/api/src/modules/policy |  | unit_has_memory counts only live files; soft-deleted files and pending proposals cascade with the unit; decide in 07.2-08/09 | fixed |  | 2026-10-13T04:39:31.734Z | 2026-10-13T05:47:47.036Z |
+| 130 | 07.2 | deviation | apps/api/src/modules/policy |  | A standard owner of a team bot can write its notebook but not promote (memory.promote is lead/admin); needs an explicit product exception if wanted | open |  | 2026-10-13T04:39:31.819Z |  |
+| 131 | 07.2 | deviation | apps/api/src/modules/policy |  | An agent decision with no human evaluates only the agent; 07.2-08 and 07.2-11 must always pass the human the agent acts for | fixed |  | 2026-10-13T04:39:31.902Z | 2026-10-13T05:47:46.953Z |
+| 132 | 07.2 | deviation | apps/api/src/modules/approval |  | Decisions mirrored onto a card do not send the usual card-updated notification to its followers | open |  | 2026-10-13T04:50:57.608Z |  |
+| 133 | 07.2 | deviation | apps/api/src/modules/approval |  | Inbox list checks each row's decider rule one by one (up to 500 per page), so a page can come back short with a cursor | fixed |  | 2026-10-13T04:50:57.677Z | 2026-10-13T09:48:45.635Z |
+| 134 | 07.2 | deviation | apps/api/src/modules/approval |  | An apply that throws (instead of returning an error code) rolls back the whole decision and leaves the request pending | open |  | 2026-10-13T04:50:57.748Z |  |
+| 135 | 07.2 | deviation | apps/api/src/modules/approval |  | An approved grant's card shows succeeded before the grant is used; decide in 07.5 | open |  | 2026-10-13T04:50:57.827Z |  |
+| 136 | 07.2 | deviation | packages/db/src/schema |  | The DB still allows changing a memory file's scope_id; moving across scopes is prevented only in the API | fixed |  | 2026-10-13T05:47:47.110Z | 2026-10-13T10:56:27.250Z |
+| 137 | 07.2 | deviation | apps/api/src/modules/memory |  | Pending proposals cascade with unit/bot/forgotten scope but their approval_requests rows stay; 07.2-09 must read a missing proposal as scope_gone, not 500 | fixed |  | 2026-10-13T05:47:47.183Z | 2026-10-13T06:30:45.684Z |
+| 138 | 07.2 | deviation | apps/api/src/modules/memory |  | A deleted memory file cannot be restored over REST (restore works only on live files) | open |  | 2026-10-13T05:47:47.259Z |  |
+| 139 | 07.2 | deviation | apps/api/src/modules/memory |  | GET /memory/scopes writes: it lazily creates the org scope and missing unit scopes | open |  | 2026-10-13T05:47:47.334Z |  |
+| 140 | 07.2 | deviation | apps/api/src/modules/memory |  | A 256 KiB body of escaped control chars exceeds Fastify's 1 MiB limit and returns Fastify's 413, not memory_file_too_large | fixed |  | 2026-10-13T05:47:47.411Z | 2026-10-13T10:56:27.416Z |
+| 141 | 07.2 | deviation | apps/api/src/modules/memory/search.ts |  | Memory search loads every readable file's content (listReadableFiles) per scope just to get ids, calls listScopes (which writes) and one permission pass per scope; heavy at scale — select ids only | fixed |  | 2026-10-13T06:29:37.690Z | 2026-10-13T10:56:27.012Z |
+| 142 | 07.2 | deviation | apps/api/src/modules/memory/search.ts |  | Snippet highlighting scans full content: up to 50 files x 3 configs x 256 KiB per search | fixed |  | 2026-10-13T06:29:37.759Z | 2026-10-13T10:56:27.087Z |
+| 143 | 07.2 | deviation | apps/api/src/modules/memory/search.ts |  | Path-only matches return an unmarked snippet; snippet helpers are duplicated from the chat search module | fixed |  | 2026-10-13T06:29:37.838Z | 2026-10-13T07:35:47.307Z |
+| 144 | 07.2 | deviation | apps/api/src/modules/approval |  | A proposal that disappears in a cascade leaves its approval request and card pending (fail-closed) until 14-day expiry; needs a 'gone' hook in the primitive to close it as failed/scope_gone | fixed |  | 2026-10-13T06:30:45.754Z | 2026-10-13T10:56:26.855Z |
+| 145 | 07.2 | deviation | apps/api/src/modules/memory/proposals.ts |  | Presidio runs inside the proposal transaction: up to 2 s holding the connection and advisory lock | fixed |  | 2026-10-13T06:30:45.823Z | 2026-10-13T10:56:26.934Z |
+| 146 | 07.2 | deviation | apps/api/src/modules/memory/proposals.ts |  | canDecide and audience are expensive per row (audience calls usersAllowed over all members); related to #133 | open |  | 2026-10-13T06:30:45.892Z |  |
+| 147 | 07.2 | deviation | apps/api/src/modules/memory/proposals.ts |  | Proposal view spans are layer 1 only (Presidio spans not stored; findings shown per line); requestedBy.agent is required, 07.6 will need it nullable | open |  | 2026-10-13T06:30:45.960Z |  |
+| 148 | 07.2 | deviation | apps/api/src/modules/agent-channel/memory-files.ts |  | Agent memory list/read count against the turn limit only in the /tool-calls gate; the route does not check it | fixed |  | 2026-10-13T07:15:00.193Z | 2026-10-13T10:56:27.168Z |
+| 149 | 07.2 | deviation | apps/api/src/modules/agent-channel/memory-files.ts |  | Agent memory list costs one decision per file; each memory turn queries the bot notebook and decides twice in a DM (related to #139) | open |  | 2026-10-13T07:15:00.266Z |  |
+| 150 | 07.2 | unrun-verify | e2e/tests/bot-memory.spec.ts |  | bot-capabilities.spec and bot-memory.spec not run after 07.2-11; the fake API never answers no_trigger, the 07.2-15 smoke should cover an expired-turn call | fixed |  | 2026-10-13T07:15:00.344Z | 2026-10-13T15:20:09.783Z |
+| 151 | 07.2 | deviation | packages/db/src/schema |  | app.agent_memories is now dead data (notes live in the private MEMORY.md); dropping it needs a later migration once the backfill has been in production | open |  | 2026-10-13T07:15:00.428Z |  |
+| 152 | 07.2 | deviation | apps/api/src/modules/bot-capabilities/memory.ts |  | Legacy notes share one createdAt (file mtime); a note refused for a secret reaches the model as 'not accepted' with no reason | open |  | 2026-10-13T07:15:00.503Z |  |
+| 153 | 07.2 | deviation | apps/web/components/memory |  | The Proposals row links to /memory/proposals (built by 07.2-13, not-found until then) and on mobile shows for everyone, while the UI-SPEC limits it to deciders and proposers | fixed |  | 2026-10-13T07:35:47.377Z | 2026-10-13T09:48:45.555Z |
+| 154 | 07.2 | deviation | apps/web/components/markdown |  | axe heading-order (moderate) in the memory viewer: Markdown # renders as h3 under the breadcrumb h1; fix in the shared renderer | fixed |  | 2026-10-13T07:35:47.448Z | 2026-10-13T11:20:21.727Z |
+| 155 | 07.2 | deviation | apps/web/components/organization |  | Settings > Modules copy still says 'Work Zone, AI chats and bots' and does not name Memory; memory dates show '3 hours ago' instead of the spec's '3h ago' | fixed |  | 2026-10-13T07:35:47.519Z | 2026-10-13T11:20:21.869Z |
+| 156 | 07.2 | deviation | apps/web/components/memory |  | Revisions do not carry who approved them, so history shows 'Approved proposal' instead of 'Approved by {person}' | fixed |  | 2026-10-13T08:49:37.424Z | 2026-10-13T09:48:45.713Z |
+| 157 | 07.2 | deviation | apps/web/lib/memory-queries.ts |  | Team memory files do not update live: memory.changed reaches only the owner of private memory | fixed |  | 2026-10-13T08:49:37.498Z | 2026-10-13T10:56:27.500Z |
+| 158 | 07.2 | deviation | apps/web/components/memory |  | History paginates on the client (API returns all revisions); a file saved without a trailing newline shows an extra empty line in the diff | open |  | 2026-10-13T08:49:37.571Z |  |
+| 159 | 07.2 | deviation | apps/web/package.json |  | lang-markdown pulls HTML/CSS/JS modes into the editor bundle; Cmd/Ctrl+S label uses deprecated navigator.platform | open |  | 2026-10-13T08:49:37.641Z |  |
+| 160 | 07.2 | deviation | apps/api/src/modules/approval |  | The live card event is emitted before the card is linked to its approval (client works around it); the server should emit message.updated after linking. Expiry does not arrive live (card stays Pending until reload) | fixed |  | 2026-10-13T08:49:54.347Z | 2026-10-13T09:48:45.787Z |
+| 161 | 07.2 | deviation | apps/web/components/ui/dialog.tsx |  | The shared Dialog close X is 32 px below 1024 (UI-SPEC asks 44) | fixed |  | 2026-10-13T08:49:54.419Z | 2026-10-13T11:20:21.799Z |
+| 162 | 07.2 | deviation | e2e/tests/memory-files.spec.ts |  | memory-files.spec depends on run order: it expects exact scopes for Sam and breaks once other specs leave private scopes of Sam in the shared DB | fixed |  | 2026-10-13T09:44:33.028Z | 2026-10-13T11:20:21.651Z |
+| 163 | 07.2 | deviation | apps/api/src/modules/memory |  | Private scopes of deleted bots still appear in /memory/scopes; the bot page waits for the full GET /agents list (no useAgent(id)) | fixed |  | 2026-10-13T09:44:33.110Z | 2026-10-13T10:56:27.334Z |
+| 164 | 07.2 | deviation | apps/api/src/modules/memory/approval-kind.ts |  | Bot delete is soft, so its pending memory proposals stay live and a lead can approve them; the server would write on behalf of a deleted bot | fixed |  | 2026-10-13T09:48:45.861Z | 2026-10-13T10:56:26.772Z |
+| 165 | 07.2 | deviation | apps/web/components/memory |  | 'No sensitive data found' next to 'Extended scan unavailable' can read as reassuring; review-memory-scopes-390 screenshot from 07.2-10 is stale (shows the now-hidden Proposals row) | fixed |  | 2026-10-13T09:48:45.937Z | 2026-10-13T11:20:21.939Z |
+| 166 | 07.2 | deviation | apps/api/src/modules/approval |  | Requests orphaned before the gone path stay pending until expiry (no sweep); if removing a member ever cascades their personal scopes, that path does not call closeGone | open |  | 2026-10-13T10:56:27.581Z |  |
+| 167 | 07.2 | deviation | apps/api/src/modules/memory |  | memory.changed: a rename only notifies readers of the new path; unit-scope writes emit one event per reader (a unit: topic would scale better); no e2e for live team-file updates | open |  | 2026-10-13T10:56:27.664Z |  |
+| 168 | 07.2 | deviation | apps/api/src/modules/agent-channel |  | Stored cell stream events keep private memory content (turn payloads) and forgetting a scope does not purge them | open |  | 2026-10-13T15:20:09.851Z |  |
 
 ````json
 [
@@ -1486,6 +1541,666 @@ last_updated: 2026-10-12T22:27:17.051Z
     "reason": "",
     "recorded_at": "2026-10-12T21:23:04.109Z",
     "resolved_at": "2026-10-12T22:27:17.051Z"
+  },
+  {
+    "id": 114,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "packages/contracts/src/memory.ts",
+    "line": null,
+    "description": "Folder rule pathPrefix is accepted by the contract but dropped by the API until 07.2-03; an allow memory.write on hr/ would apply to the whole scope meanwhile; must close before the phase merges",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T03:20:41.553Z",
+    "resolved_at": "2026-10-13T04:39:31.651Z"
+  },
+  {
+    "id": 115,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/web/components/shell/module-gate.tsx",
+    "line": null,
+    "description": "Settings > Modules shows a Memory toggle with no memory UI until 07.2-10; screenshot the 4-row panel in 10/13",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T03:20:41.625Z",
+    "resolved_at": "2026-10-13T07:35:47.237Z"
+  },
+  {
+    "id": 116,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "packages/db/src/schema/memory.ts",
+    "line": null,
+    "description": "approval_requests has no personal-owner column: an admin with direct SQL can see that an approval for a personal proposal exists (metadata, not content); decide in 07.2-06",
+    "status": "waived",
+    "reason": "API owner-only visibility proven by test; no RLS by design (ADR-0023 decision 16)",
+    "recorded_at": "2026-10-13T03:45:07.675Z",
+    "resolved_at": "2026-10-13T04:50:57.537Z"
+  },
+  {
+    "id": 117,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "packages/db/src/schema/memory.ts",
+    "line": null,
+    "description": "Personal bot notebook owner assumes a personal bot never changes owner or kind; recompute the owner if that ever changes",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T03:45:07.777Z",
+    "resolved_at": null
+  },
+  {
+    "id": 118,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "packages/db/src/schema/memory.ts",
+    "line": null,
+    "description": "A file moved across scopes keeps old revisions with the previous owner (conservative); 07.2-08 must account for it",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T03:45:07.876Z",
+    "resolved_at": "2026-10-13T05:47:46.872Z"
+  },
+  {
+    "id": 119,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/policy/module-access-enforcement.int.test.ts",
+    "line": null,
+    "description": "testcontainers Redis port wait can time out under Docker load and fail verify once",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T03:45:07.976Z",
+    "resolved_at": null
+  },
+  {
+    "id": 120,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "compose.yaml",
+    "line": null,
+    "description": "The internal pii network is created by every compose project even with the profile off (uses Docker address pools); adding it recreates the api once on the next up",
+    "status": "waived",
+    "reason": "One internal network per stack is the accepted cost (D-08); the dev host had 30 networks from dead per-branch projects, cleaned to 16",
+    "recorded_at": "2026-10-13T04:19:12.931Z",
+    "resolved_at": "2026-10-13T15:20:56.912Z"
+  },
+  {
+    "id": 121,
+    "kind": "unrun-verify",
+    "phase": "07.2",
+    "file": "infra/presidio/recognizers.yaml",
+    "line": null,
+    "description": "Spanish Presidio accuracy only checked on fixed samples (missed a Spanish name in a probe); owner manual check on real documents",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:19:13.026Z",
+    "resolved_at": null
+  },
+  {
+    "id": 122,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "scripts/ocw.mjs",
+    "line": null,
+    "description": "No pnpm ocw enable pii: turning on the pii profile means editing .env by hand, unlike other profiles",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:19:13.134Z",
+    "resolved_at": null
+  },
+  {
+    "id": 123,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/openclaw-channel/src/memory-files-tool.ts",
+    "line": null,
+    "description": "/memory/* Agent Channel routes exist only in the fake API until 07.2-11; the real API would 404 (no turn offers the tools yet)",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:30:05.478Z",
+    "resolved_at": "2026-10-13T07:15:00.114Z"
+  },
+  {
+    "id": 124,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "infra/openclaw",
+    "line": null,
+    "description": "No memory scenario in the real-cell smoke yet; add it in 07.2-15",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:30:05.563Z",
+    "resolved_at": "2026-10-13T15:20:09.715Z"
+  },
+  {
+    "id": 125,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/openclaw-channel/src/agent-channel-protocol.ts",
+    "line": null,
+    "description": "memoryFiles mirror uses the exact scopeKind enum: a new API scopeKind silently drops all files and falls back to legacy notes until the mirror is updated",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:30:05.650Z",
+    "resolved_at": null
+  },
+  {
+    "id": 126,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "packages/contracts/src/sensitive-data.ts",
+    "line": null,
+    "description": "detectSensitive returns unbounded spans while MemoryProposalView caps 200 spans / 50 findings; 07.2-09 must cap before building the view",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:39:23.084Z",
+    "resolved_at": "2026-10-13T06:30:45.615Z"
+  },
+  {
+    "id": 127,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "packages/contracts/src/sensitive-data.ts",
+    "line": null,
+    "description": "False positives (warn): any bare 9-digit number starting 6-9 is a phone; git@github.com:org/repo is an email; Luhn accepts 0000 0000 0000 0000",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:39:23.163Z",
+    "resolved_at": null
+  },
+  {
+    "id": 128,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "packages/contracts/src/sensitive-data.ts",
+    "line": null,
+    "description": "Keyed secrets (DB_PASSWORD=, Bearer, URL credentials): span and masked sample start at the key, so the UI highlight is wider than the value (no leak)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:39:23.242Z",
+    "resolved_at": null
+  },
+  {
+    "id": 129,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/policy",
+    "line": null,
+    "description": "unit_has_memory counts only live files; soft-deleted files and pending proposals cascade with the unit; decide in 07.2-08/09",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:39:31.734Z",
+    "resolved_at": "2026-10-13T05:47:47.036Z"
+  },
+  {
+    "id": 130,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/policy",
+    "line": null,
+    "description": "A standard owner of a team bot can write its notebook but not promote (memory.promote is lead/admin); needs an explicit product exception if wanted",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:39:31.819Z",
+    "resolved_at": null
+  },
+  {
+    "id": 131,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/policy",
+    "line": null,
+    "description": "An agent decision with no human evaluates only the agent; 07.2-08 and 07.2-11 must always pass the human the agent acts for",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:39:31.902Z",
+    "resolved_at": "2026-10-13T05:47:46.953Z"
+  },
+  {
+    "id": 132,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/approval",
+    "line": null,
+    "description": "Decisions mirrored onto a card do not send the usual card-updated notification to its followers",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:50:57.608Z",
+    "resolved_at": null
+  },
+  {
+    "id": 133,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/approval",
+    "line": null,
+    "description": "Inbox list checks each row's decider rule one by one (up to 500 per page), so a page can come back short with a cursor",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:50:57.677Z",
+    "resolved_at": "2026-10-13T09:48:45.635Z"
+  },
+  {
+    "id": 134,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/approval",
+    "line": null,
+    "description": "An apply that throws (instead of returning an error code) rolls back the whole decision and leaves the request pending",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:50:57.748Z",
+    "resolved_at": null
+  },
+  {
+    "id": 135,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/approval",
+    "line": null,
+    "description": "An approved grant's card shows succeeded before the grant is used; decide in 07.5",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:50:57.827Z",
+    "resolved_at": null
+  },
+  {
+    "id": 136,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "packages/db/src/schema",
+    "line": null,
+    "description": "The DB still allows changing a memory file's scope_id; moving across scopes is prevented only in the API",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T05:47:47.110Z",
+    "resolved_at": "2026-10-13T10:56:27.250Z"
+  },
+  {
+    "id": 137,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/memory",
+    "line": null,
+    "description": "Pending proposals cascade with unit/bot/forgotten scope but their approval_requests rows stay; 07.2-09 must read a missing proposal as scope_gone, not 500",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T05:47:47.183Z",
+    "resolved_at": "2026-10-13T06:30:45.684Z"
+  },
+  {
+    "id": 138,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/memory",
+    "line": null,
+    "description": "A deleted memory file cannot be restored over REST (restore works only on live files)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T05:47:47.259Z",
+    "resolved_at": null
+  },
+  {
+    "id": 139,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/memory",
+    "line": null,
+    "description": "GET /memory/scopes writes: it lazily creates the org scope and missing unit scopes",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T05:47:47.334Z",
+    "resolved_at": null
+  },
+  {
+    "id": 140,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/memory",
+    "line": null,
+    "description": "A 256 KiB body of escaped control chars exceeds Fastify's 1 MiB limit and returns Fastify's 413, not memory_file_too_large",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T05:47:47.411Z",
+    "resolved_at": "2026-10-13T10:56:27.416Z"
+  },
+  {
+    "id": 141,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/memory/search.ts",
+    "line": null,
+    "description": "Memory search loads every readable file's content (listReadableFiles) per scope just to get ids, calls listScopes (which writes) and one permission pass per scope; heavy at scale — select ids only",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T06:29:37.690Z",
+    "resolved_at": "2026-10-13T10:56:27.012Z"
+  },
+  {
+    "id": 142,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/memory/search.ts",
+    "line": null,
+    "description": "Snippet highlighting scans full content: up to 50 files x 3 configs x 256 KiB per search",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T06:29:37.759Z",
+    "resolved_at": "2026-10-13T10:56:27.087Z"
+  },
+  {
+    "id": 143,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/memory/search.ts",
+    "line": null,
+    "description": "Path-only matches return an unmarked snippet; snippet helpers are duplicated from the chat search module",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T06:29:37.838Z",
+    "resolved_at": "2026-10-13T07:35:47.307Z"
+  },
+  {
+    "id": 144,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/approval",
+    "line": null,
+    "description": "A proposal that disappears in a cascade leaves its approval request and card pending (fail-closed) until 14-day expiry; needs a 'gone' hook in the primitive to close it as failed/scope_gone",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T06:30:45.754Z",
+    "resolved_at": "2026-10-13T10:56:26.855Z"
+  },
+  {
+    "id": 145,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/memory/proposals.ts",
+    "line": null,
+    "description": "Presidio runs inside the proposal transaction: up to 2 s holding the connection and advisory lock",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T06:30:45.823Z",
+    "resolved_at": "2026-10-13T10:56:26.934Z"
+  },
+  {
+    "id": 146,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/memory/proposals.ts",
+    "line": null,
+    "description": "canDecide and audience are expensive per row (audience calls usersAllowed over all members); related to #133",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T06:30:45.892Z",
+    "resolved_at": null
+  },
+  {
+    "id": 147,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/memory/proposals.ts",
+    "line": null,
+    "description": "Proposal view spans are layer 1 only (Presidio spans not stored; findings shown per line); requestedBy.agent is required, 07.6 will need it nullable",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T06:30:45.960Z",
+    "resolved_at": null
+  },
+  {
+    "id": 148,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/agent-channel/memory-files.ts",
+    "line": null,
+    "description": "Agent memory list/read count against the turn limit only in the /tool-calls gate; the route does not check it",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T07:15:00.193Z",
+    "resolved_at": "2026-10-13T10:56:27.168Z"
+  },
+  {
+    "id": 149,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/agent-channel/memory-files.ts",
+    "line": null,
+    "description": "Agent memory list costs one decision per file; each memory turn queries the bot notebook and decides twice in a DM (related to #139)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T07:15:00.266Z",
+    "resolved_at": null
+  },
+  {
+    "id": 150,
+    "kind": "unrun-verify",
+    "phase": "07.2",
+    "file": "e2e/tests/bot-memory.spec.ts",
+    "line": null,
+    "description": "bot-capabilities.spec and bot-memory.spec not run after 07.2-11; the fake API never answers no_trigger, the 07.2-15 smoke should cover an expired-turn call",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T07:15:00.344Z",
+    "resolved_at": "2026-10-13T15:20:09.783Z"
+  },
+  {
+    "id": 151,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "packages/db/src/schema",
+    "line": null,
+    "description": "app.agent_memories is now dead data (notes live in the private MEMORY.md); dropping it needs a later migration once the backfill has been in production",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T07:15:00.428Z",
+    "resolved_at": null
+  },
+  {
+    "id": 152,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/bot-capabilities/memory.ts",
+    "line": null,
+    "description": "Legacy notes share one createdAt (file mtime); a note refused for a secret reaches the model as 'not accepted' with no reason",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T07:15:00.503Z",
+    "resolved_at": null
+  },
+  {
+    "id": 153,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/web/components/memory",
+    "line": null,
+    "description": "The Proposals row links to /memory/proposals (built by 07.2-13, not-found until then) and on mobile shows for everyone, while the UI-SPEC limits it to deciders and proposers",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T07:35:47.377Z",
+    "resolved_at": "2026-10-13T09:48:45.555Z"
+  },
+  {
+    "id": 154,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/web/components/markdown",
+    "line": null,
+    "description": "axe heading-order (moderate) in the memory viewer: Markdown # renders as h3 under the breadcrumb h1; fix in the shared renderer",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T07:35:47.448Z",
+    "resolved_at": "2026-10-13T11:20:21.727Z"
+  },
+  {
+    "id": 155,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/web/components/organization",
+    "line": null,
+    "description": "Settings > Modules copy still says 'Work Zone, AI chats and bots' and does not name Memory; memory dates show '3 hours ago' instead of the spec's '3h ago'",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T07:35:47.519Z",
+    "resolved_at": "2026-10-13T11:20:21.869Z"
+  },
+  {
+    "id": 156,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/web/components/memory",
+    "line": null,
+    "description": "Revisions do not carry who approved them, so history shows 'Approved proposal' instead of 'Approved by {person}'",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T08:49:37.424Z",
+    "resolved_at": "2026-10-13T09:48:45.713Z"
+  },
+  {
+    "id": 157,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/web/lib/memory-queries.ts",
+    "line": null,
+    "description": "Team memory files do not update live: memory.changed reaches only the owner of private memory",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T08:49:37.498Z",
+    "resolved_at": "2026-10-13T10:56:27.500Z"
+  },
+  {
+    "id": 158,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/web/components/memory",
+    "line": null,
+    "description": "History paginates on the client (API returns all revisions); a file saved without a trailing newline shows an extra empty line in the diff",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T08:49:37.571Z",
+    "resolved_at": null
+  },
+  {
+    "id": 159,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/web/package.json",
+    "line": null,
+    "description": "lang-markdown pulls HTML/CSS/JS modes into the editor bundle; Cmd/Ctrl+S label uses deprecated navigator.platform",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T08:49:37.641Z",
+    "resolved_at": null
+  },
+  {
+    "id": 160,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/approval",
+    "line": null,
+    "description": "The live card event is emitted before the card is linked to its approval (client works around it); the server should emit message.updated after linking. Expiry does not arrive live (card stays Pending until reload)",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T08:49:54.347Z",
+    "resolved_at": "2026-10-13T09:48:45.787Z"
+  },
+  {
+    "id": 161,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/web/components/ui/dialog.tsx",
+    "line": null,
+    "description": "The shared Dialog close X is 32 px below 1024 (UI-SPEC asks 44)",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T08:49:54.419Z",
+    "resolved_at": "2026-10-13T11:20:21.799Z"
+  },
+  {
+    "id": 162,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "e2e/tests/memory-files.spec.ts",
+    "line": null,
+    "description": "memory-files.spec depends on run order: it expects exact scopes for Sam and breaks once other specs leave private scopes of Sam in the shared DB",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T09:44:33.028Z",
+    "resolved_at": "2026-10-13T11:20:21.651Z"
+  },
+  {
+    "id": 163,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/memory",
+    "line": null,
+    "description": "Private scopes of deleted bots still appear in /memory/scopes; the bot page waits for the full GET /agents list (no useAgent(id))",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T09:44:33.110Z",
+    "resolved_at": "2026-10-13T10:56:27.334Z"
+  },
+  {
+    "id": 164,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/memory/approval-kind.ts",
+    "line": null,
+    "description": "Bot delete is soft, so its pending memory proposals stay live and a lead can approve them; the server would write on behalf of a deleted bot",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T09:48:45.861Z",
+    "resolved_at": "2026-10-13T10:56:26.772Z"
+  },
+  {
+    "id": 165,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/web/components/memory",
+    "line": null,
+    "description": "'No sensitive data found' next to 'Extended scan unavailable' can read as reassuring; review-memory-scopes-390 screenshot from 07.2-10 is stale (shows the now-hidden Proposals row)",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-13T09:48:45.937Z",
+    "resolved_at": "2026-10-13T11:20:21.939Z"
+  },
+  {
+    "id": 166,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/approval",
+    "line": null,
+    "description": "Requests orphaned before the gone path stay pending until expiry (no sweep); if removing a member ever cascades their personal scopes, that path does not call closeGone",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T10:56:27.581Z",
+    "resolved_at": null
+  },
+  {
+    "id": 167,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/memory",
+    "line": null,
+    "description": "memory.changed: a rename only notifies readers of the new path; unit-scope writes emit one event per reader (a unit: topic would scale better); no e2e for live team-file updates",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T10:56:27.664Z",
+    "resolved_at": null
+  },
+  {
+    "id": 168,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/agent-channel",
+    "line": null,
+    "description": "Stored cell stream events keep private memory content (turn payloads) and forgetting a scope does not purge them",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T15:20:09.851Z",
+    "resolved_at": null
   }
 ]
 ````

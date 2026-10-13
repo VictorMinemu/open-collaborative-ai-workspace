@@ -41,7 +41,7 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { type ApiModule, authOf, type Core, tenant } from "../../core";
-import type { AgentMention, ThreadContext } from "../../lib/chat-agent-bridge";
+import type { AgentMention, AgentPosterIn, ThreadContext } from "../../lib/chat-agent-bridge";
 import { badRequest, conflict, forbidden, gone, HttpError, notFound } from "../../lib/errors";
 import { objectStorageConfigured } from "../artifact";
 import {
@@ -121,7 +121,16 @@ export {
   updateBoardCard,
 } from "./board/service";
 /** Agent Cards (06-13, P-11): the agent-channel module updates cards through `patchCard`; ai-chat adds them to snapshots. */
-export { type CardRow, cardMessageOf, cardOf, patchCard, withCards } from "./card-actions";
+export {
+  announceCardMessage,
+  type CardRow,
+  cardMessageOf,
+  cardOf,
+  mirrorCardClosed,
+  mirrorCardDecision,
+  patchCard,
+  withCards,
+} from "./card-actions";
 export { agentFactsOf, authorOf, type Directory, type DirectoryEntry, loadDirectory } from "./directory";
 export {
   dmAgentOf,
@@ -559,107 +568,114 @@ export function createChatModule(core: Core): ApiModule {
     }
   };
 
-  core.chatAgent.providePostAgentMessage((ctx, input) =>
-    core.db.withTenant(ctx, async (tx) => {
-      const dir = await loadDirectory(tx);
-      const agent = dir.agents.get(input.agentId);
-      if (!agent) throw notFound("Agent not found", "agent_not_found");
-      const conv = await getConversation(tx, input.conversationId, AGENT_POST_KINDS);
-      if (!conv) throw notFound("Conversation not found");
-      if (conv.archivedAt) throw gone("This conversation is archived", "channel_archived");
-      // DMs, group DMs and AI chats are flat (D-04, D-06, P-10): a bot reply always lands at the top level.
-      const threadRootId = isDirect(conv.kind) ? null : input.threadRootId;
-      // The bot itself: enabled, a member, and not denied by a rule (agent principal gate + preconditions).
-      const agentRes = channelResource(await channelFacts(tx, conv, { kind: "agent", id: agent.id }));
-      const posting = await perms.decide(tx, { kind: "agent", agentId: agent.id }, "channel.post", agentRes);
-      if (!posting.allowed) {
+  /**
+   * An agent's post in the caller's transaction (the Agent Channel API through `postAgentMessage`, the approval module's
+   * platform-owned mirrors through `postAgentMessageIn`): the same checks, events and audit either way.
+   */
+  const postAgentMessageIn: AgentPosterIn = async (tx, input) => {
+    const dir = await loadDirectory(tx);
+    const agent = dir.agents.get(input.agentId);
+    if (!agent) throw notFound("Agent not found", "agent_not_found");
+    const conv = await getConversation(tx, input.conversationId, AGENT_POST_KINDS);
+    if (!conv) throw notFound("Conversation not found");
+    if (conv.archivedAt) throw gone("This conversation is archived", "channel_archived");
+    // DMs, group DMs and AI chats are flat (D-04, D-06, P-10): a bot reply always lands at the top level.
+    const threadRootId = isDirect(conv.kind) ? null : input.threadRootId;
+    // The bot itself: enabled, a member, and not denied by a rule (agent principal gate + preconditions).
+    const agentRes = channelResource(await channelFacts(tx, conv, { kind: "agent", id: agent.id }));
+    const posting = await perms.decide(tx, { kind: "agent", agentId: agent.id }, "channel.post", agentRes);
+    if (!posting.allowed) {
+      throw new AuthzDeniedError(
+        posting.denial ?? { permission: "channel.post", layer: "agent", reason: "missing_permission" },
+      );
+    }
+    // Confused deputy: a reply to a human, and any post for a delivered turn, is allowed only while that human (the
+    // replied-to author and the turn's human, when given) may still read the channel.
+    const answered = input.inReplyToMessageId ? await getMessage(tx, input.inReplyToMessageId) : null;
+    const humans = new Set<string>();
+    if (answered?.authorKind === "user" && answered.authorId) humans.add(answered.authorId);
+    if (input.onBehalfOfUserId) humans.add(input.onBehalfOfUserId);
+    for (const humanId of humans) {
+      const humanRes = channelResource(await channelFacts(tx, conv, { kind: "user", id: humanId }));
+      const reading = await perms.decide(
+        tx,
+        { kind: "agent", agentId: agent.id, onBehalfOfUserId: humanId },
+        "channel.read",
+        agentRes,
+        humanRes,
+      );
+      if (!reading.allowed) {
         throw new AuthzDeniedError(
-          posting.denial ?? { permission: "channel.post", layer: "agent", reason: "missing_permission" },
+          reading.denial ?? { permission: "channel.read", layer: "user", reason: "missing_permission" },
         );
       }
-      // Confused deputy: a reply to a human, and any post for a delivered turn, is allowed only while that human (the
-      // replied-to author and the turn's human, when given) may still read the channel.
-      const answered = input.inReplyToMessageId ? await getMessage(tx, input.inReplyToMessageId) : null;
-      const humans = new Set<string>();
-      if (answered?.authorKind === "user" && answered.authorId) humans.add(answered.authorId);
-      if (input.onBehalfOfUserId) humans.add(input.onBehalfOfUserId);
-      for (const humanId of humans) {
-        const humanRes = channelResource(await channelFacts(tx, conv, { kind: "user", id: humanId }));
-        const reading = await perms.decide(
-          tx,
-          { kind: "agent", agentId: agent.id, onBehalfOfUserId: humanId },
-          "channel.read",
-          agentRes,
-          humanRes,
-        );
-        if (!reading.allowed) {
-          throw new AuthzDeniedError(
-            reading.denial ?? { permission: "channel.read", layer: "user", reason: "missing_permission" },
-          );
-        }
-      }
-      const result = await postMessage(tx, deps, dir, {
-        conv,
+    }
+    const result = await postMessage(tx, deps, dir, {
+      conv,
+      author: { kind: "agent", id: agent.id },
+      body: input.body,
+      mentions: resolveMentions(input.body, dir),
+      threadRootId,
+      // A card's key lives in its own namespace, so a card and a plain reply never collide on one key.
+      clientMessageId: input.card ? `card:${input.idempotencyKey}` : input.idempotencyKey,
+      clientKind: "agent",
+      lenientThreadRoot: true,
+      card: input.card,
+      cardPlatformOwned: input.cardPlatformOwned === true,
+    });
+    if (result.created) {
+      // Observers (notifications) in the same transaction; a bot is never a recipient, only an actor.
+      await core.chatEvents.messagePosted(tx, {
+        conv: {
+          id: conv.id,
+          kind: conv.kind === "ai_chat" ? "ai_chat" : messageKindOf(conv),
+          organizationId: conv.organizationId,
+        },
+        message: result.message,
         author: { kind: "agent", id: agent.id },
-        body: input.body,
-        mentions: resolveMentions(input.body, dir),
-        threadRootId,
-        // A card's key lives in its own namespace, so a card and a plain reply never collide on one key.
-        clientMessageId: input.card ? `card:${input.idempotencyKey}` : input.idempotencyKey,
-        clientKind: "agent",
-        lenientThreadRoot: true,
-        card: input.card,
+        mentions: result.row.mentions,
+        mentionAll: null,
+        threadRootId: result.root?.id ?? null,
       });
-      if (result.created) {
-        // Observers (notifications) in the same transaction; a bot is never a recipient, only an actor.
-        await core.chatEvents.messagePosted(tx, {
-          conv: {
-            id: conv.id,
-            kind: conv.kind === "ai_chat" ? "ai_chat" : messageKindOf(conv),
-            organizationId: conv.organizationId,
-          },
-          message: result.message,
-          author: { kind: "agent", id: agent.id },
-          mentions: result.row.mentions,
-          mentionAll: null,
-          threadRootId: result.root?.id ?? null,
-        });
+      await core.audit.record(tx, {
+        action: "agent.message.posted",
+        resourceType: "message",
+        resourceId: result.row.id,
+        actorKind: "agent",
+        actorId: agent.id,
+        agentId: agent.id,
+        clientKind: "agent",
+        metadata: { conversationId: conv.id, threadRootId: result.root?.id ?? null },
+      });
+      if (result.message.card) {
+        // Ids, kind and status only: never the title, the fields or the summary.
         await core.audit.record(tx, {
-          action: "agent.message.posted",
+          action: "agent_card.posted",
           resourceType: "message",
           resourceId: result.row.id,
           actorKind: "agent",
           actorId: agent.id,
           agentId: agent.id,
           clientKind: "agent",
-          metadata: { conversationId: conv.id, threadRootId: result.root?.id ?? null },
-        });
-        if (result.message.card) {
-          // Ids, kind and status only: never the title, the fields or the summary.
-          await core.audit.record(tx, {
-            action: "agent_card.posted",
-            resourceType: "message",
-            resourceId: result.row.id,
-            actorKind: "agent",
-            actorId: agent.id,
+          metadata: {
+            messageId: result.row.id,
+            conversationId: conv.id,
             agentId: agent.id,
-            clientKind: "agent",
-            metadata: {
-              messageId: result.row.id,
-              conversationId: conv.id,
-              agentId: agent.id,
-              kind: result.message.card.kind,
-              status: result.message.card.status,
-            },
-          });
-        }
+            kind: result.message.card.kind,
+            status: result.message.card.status,
+          },
+        });
       }
-      return {
-        messageId: result.row.id,
-        created: result.created,
-        ...(result.message.card ? { cardVersion: result.message.card.version } : {}),
-      };
-    }),
+    }
+    return {
+      messageId: result.row.id,
+      created: result.created,
+      ...(result.message.card ? { cardVersion: result.message.card.version } : {}),
+    };
+  };
+  core.chatAgent.providePostAgentMessageIn(postAgentMessageIn);
+  core.chatAgent.providePostAgentMessage((ctx, input) =>
+    core.db.withTenant(ctx, (tx) => postAgentMessageIn(tx, input)),
   );
 
   core.chatAgent.provideThreadContext((ctx, conversationId, threadRootId, limit) =>

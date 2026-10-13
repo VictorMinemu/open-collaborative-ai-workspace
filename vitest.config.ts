@@ -9,7 +9,7 @@ export default defineConfig({
       {
         test: {
           name: "unit",
-          include: ["packages/*/src/**/*.test.ts", "apps/*/src/**/*.test.ts"],
+          include: ["packages/*/src/**/*.test.ts", "apps/*/src/**/*.test.ts", "e2e/support/**/*.test.ts"],
           exclude: ["**/*.int.test.ts", "**/node_modules/**"],
           environment: "node",
           // Shared CI runners can take seconds for a file's first local HTTP/WebSocket round trip.

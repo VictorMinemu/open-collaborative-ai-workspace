@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { Id, IsoDateTime, OrgRole } from "./common";
+import { MemoryFolder } from "./memory";
 import {
   NON_DELEGABLE_PERMISSIONS,
   Permission,
@@ -119,6 +120,8 @@ export const PermissionRule = z.object({
   /** Exact permission or `prefix.*`. */
   permission: z.string(),
   tool: z.string().nullable(),
+  /** Memory rules only: the folder (`hr/`) the rule is limited to; null = the whole scope (Phase 07.2, D-04). */
+  pathPrefix: z.string().nullable().default(null),
   effect: RuleEffect,
   createdBy: Id.nullable(),
   createdAt: IsoDateTime,
@@ -144,6 +147,9 @@ export const RuleTool = z
  */
 const TOOL_PERMISSIONS: readonly Permission[] = ["work_session.approve", "bot.tool.use"];
 
+/** The permissions a folder rule refines: memory files (Phase 07.2, D-04). */
+const PATH_PERMISSIONS: readonly Permission[] = ["memory.read", "memory.write", "memory.promote"];
+
 export const CreatePermissionRuleRequest = z
   .object({
     scopeUnitId: Id.nullable().default(null),
@@ -151,6 +157,8 @@ export const CreatePermissionRuleRequest = z
     subjectId: z.string().max(64).nullable().default(null),
     permission: PermissionPattern,
     tool: RuleTool.nullable().default(null),
+    /** A folder (`hr/`, case-insensitive, segment boundary) for memory permissions; null = the whole scope. */
+    pathPrefix: MemoryFolder.nullable().default(null),
     effect: RuleEffect,
   })
   .superRefine((r, ctx) => {
@@ -181,6 +189,14 @@ export const CreatePermissionRuleRequest = z
         code: "custom",
         path: ["tool"],
         message: `a tool applies only to ${TOOL_PERMISSIONS.join(" or ")}`,
+      });
+    }
+    // Mirrors the tool refinement: a folder only ever narrows a memory rule.
+    if (r.pathPrefix !== null && !PATH_PERMISSIONS.some((p) => permissionMatches(r.permission, p))) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["pathPrefix"],
+        message: `a folder applies only to ${PATH_PERMISSIONS.join(", ")}`,
       });
     }
   });

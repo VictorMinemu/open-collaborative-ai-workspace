@@ -183,7 +183,12 @@ function PersonaTurn({ message, text }: { message: Message; text: string }) {
         </div>
         {message.card ? (
           // An Agent Card (06-15): the same renderer as in channels, threads and DMs; the body is its summary.
-          <AgentCardView messageId={message.id} card={message.card} summary={message.body} />
+          <AgentCardView
+            messageId={message.id}
+            card={message.card}
+            summary={message.body}
+            authorName={name}
+          />
         ) : text ? (
           <Markdown text={text} variant="chat" className="min-w-0 break-words" />
         ) : null}

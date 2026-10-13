@@ -10,6 +10,9 @@ import { activeItem } from "./nav";
 import { UserMenu } from "./user-menu";
 import { OrgAvatar } from "./workspace-switcher";
 
+/** Matches the drawer's popup, where the rail and the page's section sidebar (portalled into it) live. */
+export const MOBILE_NAV_SELECTOR = "[data-mobile-nav]";
+
 export function MobileTopBar({
   me,
   open,
@@ -37,7 +40,7 @@ export function MobileTopBar({
         >
           <Menu className="size-5" />
         </SheetTrigger>
-        <SheetContent side="left" showClose={false} className="bg-sidebar p-0">
+        <SheetContent side="left" showClose={false} className="bg-sidebar p-0" data-mobile-nav="">
           <SheetTitle className="sr-only">Navigation</SheetTitle>
           <RailContent me={me} onNavigate={close}>
             <div

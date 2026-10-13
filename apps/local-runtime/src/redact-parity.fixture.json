@@ -1,0 +1,266 @@
+{
+  "description": "redact() outputs captured from apps/local-runtime/src/sanitize.ts before the secret rules moved to @ocw/contracts (07.2-04, D-08). Never regenerate: the parity test proves the move kept every output byte-identical. Inputs are split into parts that the test joins, so no credential-shaped literal appears whole here.",
+  "capturedAt": "47bf82b3",
+  "entries": [
+    {
+      "name": "empty string",
+      "input": [""],
+      "output": ""
+    },
+    {
+      "name": "plain text without secrets",
+      "input": ["The build passed; deploy to staging after lunch."],
+      "output": "The build passed; deploy to staging after lunch."
+    },
+    {
+      "name": "unicode text",
+      "input": ["Café — naïve façade, 日本語のテキスト, emoji 🎉🔐, RTL שלום"],
+      "output": "Café — naïve façade, 日本語のテキスト, emoji 🎉🔐, RTL שלום"
+    },
+    {
+      "name": "spanish note with PII redact() does not touch",
+      "input": ["IBAN ES91 2100 0418 4502 0005 1332, NIF 12345678Z, ana@acme.com, +34 612 345 678"],
+      "output": "IBAN ES91 2100 0418 4502 0005 1332, NIF 12345678Z, ana@acme.com, +34 612 345 678"
+    },
+    {
+      "name": "pem block with surrounding text",
+      "input": [
+        "before -----BEGIN RSA ",
+        "PRIVATE KEY-----\nMIIEowIBAAKCAQEA\nabc+/=\n-----END RSA ",
+        "PRIVATE KEY----- after"
+      ],
+      "output": "before [REDACTED:pem-block] after"
+    },
+    {
+      "name": "truncated pem without END",
+      "input": ["-----BEGIN OPENSSH ", "PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAA\nAAAA"],
+      "output": "[REDACTED:pem-block]"
+    },
+    {
+      "name": "pem header only at end of text",
+      "input": ["key follows: -----BEGIN PUBLIC ", "KEY-----"],
+      "output": "key follows: [REDACTED:pem-block]"
+    },
+    {
+      "name": "two pem blocks",
+      "input": [
+        "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\nmiddle\n-----BEGIN EC ",
+        "PRIVATE KEY-----\nMHcC\n-----END EC ",
+        "PRIVATE KEY-----\ntail"
+      ],
+      "output": "[REDACTED:pem-block]\nmiddle\n[REDACTED:pem-block]\ntail"
+    },
+    {
+      "name": "anthropic key",
+      "input": ["key sk-", "ant-api03-", "abcdefghijklmnopqrstuvwxyz0123"],
+      "output": "key [REDACTED:anthropic-key]"
+    },
+    {
+      "name": "anthropic prefix too short",
+      "input": ["sk-", "ant-abc1234 stays"],
+      "output": "sk-ant-abc1234 stays"
+    },
+    {
+      "name": "openai project key",
+      "input": ["OPENAI sk-", "proj-", "abcdefghijklmnopqrstuvwxyz012345"],
+      "output": "OPENAI [REDACTED:api-key]"
+    },
+    {
+      "name": "openai service account key",
+      "input": ["sk-", "svcacct-", "ABCDEFGHIJ_klmnopqrst-uvwxyz"],
+      "output": "[REDACTED:api-key]"
+    },
+    {
+      "name": "openai admin key",
+      "input": ["sk-", "admin-", "0123456789abcdefghijKLMNOP"],
+      "output": "[REDACTED:api-key]"
+    },
+    {
+      "name": "generic sk key",
+      "input": ["(sk-", "abcdefghijklmnopqrstuvwx)"],
+      "output": "([REDACTED:api-key])"
+    },
+    {
+      "name": "sk key one char too short",
+      "input": ["sk-", "abcdefghijklmnopqrs"],
+      "output": "sk-abcdefghijklmnopqrs"
+    },
+    {
+      "name": "github classic tokens",
+      "input": [
+        "gh",
+        "p_abcdefghijklmnopqrstuvwxyz0123456789 gh",
+        "o_ABCDEFGHIJKLMNOPQRSTUV gh",
+        "s_0123456789abcdefghij"
+      ],
+      "output": "[REDACTED:github-token] [REDACTED:github-token] [REDACTED:github-token]"
+    },
+    {
+      "name": "github fine-grained pat",
+      "input": ["token=github", "_pat_", "11ABCDEFG0_abcdefghijklmnopqrstuvwxyz"],
+      "output": "token=[REDACTED:github-token]"
+    },
+    {
+      "name": "gitlab pat",
+      "input": ["gl", "pat-", "abcdefghij-KLMNOPQRST_uv"],
+      "output": "[REDACTED:gitlab-token]"
+    },
+    {
+      "name": "slack tokens",
+      "input": ["xo", "xb-1234567890-abcdef and xo", "xp-ABCDEFGHIJKL and xo", "xr-short"],
+      "output": "[REDACTED:slack-token] and [REDACTED:slack-token] and xoxr-short"
+    },
+    {
+      "name": "google api key",
+      "input": ["AI", "za", "SyA-abcdefghijklmnopqrstuvwxyz01234"],
+      "output": "[REDACTED:google-key]"
+    },
+    {
+      "name": "aws access key ids",
+      "input": ["AK", "IAIOSFODNN7EXAMPLE and AS", "IAIOSFODNN7EXAMPLE"],
+      "output": "[REDACTED:aws-access-key] and [REDACTED:aws-access-key]"
+    },
+    {
+      "name": "aws access key glued to more chars",
+      "input": ["AK", "IAIOSFODNN7EXAMPLEX"],
+      "output": "AKIAIOSFODNN7EXAMPLEX"
+    },
+    {
+      "name": "aws secret access key assignment",
+      "input": ["aws_secret_access_key = ", "wJalrXUtnFEMI/K7MDENG/", "bPxRfiCYEXAMPLEKEY"],
+      "output": "aws_secret_access_key = [REDACTED]"
+    },
+    {
+      "name": "aws session token quoted, upper case key",
+      "input": ["AWS_SESSION_TOKEN: \"", "FwoGZXIvYXdzEBYaDH", "abc/+def==\""],
+      "output": "AWS_SESSION_TOKEN: \"[REDACTED]\""
+    },
+    {
+      "name": "bearer header",
+      "input": ["Authorization: Bear", "er abc.def.ghi-123456"],
+      "output": "Authorization: Bearer [REDACTED]"
+    },
+    {
+      "name": "basic header",
+      "input": ["Authorization: Bas", "ic dXNlcjpwYXNz", "d29yZA=="],
+      "output": "Authorization: Basic [REDACTED]"
+    },
+    {
+      "name": "bearer too short",
+      "input": ["Bearer short"],
+      "output": "Bearer short"
+    },
+    {
+      "name": "jwt",
+      "input": [
+        "id_token eyJ",
+        "hbGciOiJIUzI1NiJ9.eyJ",
+        "zdWIiOiIxMjM0NTY3ODkwIn0.",
+        "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+      ],
+      "output": "id_token [REDACTED:jwt]"
+    },
+    {
+      "name": "url credentials",
+      "input": ["git clone https://bob:", "hunter2hunter2", "@github.com/x/y"],
+      "output": "git clone https://bob:[REDACTED]@github.com/x/y"
+    },
+    {
+      "name": "url credentials, postgres and upper case scheme",
+      "input": ["postgres://app:", "s3cr3t", "@db:5432/ocw HTTPS://u:", "p4ss", "@example.com"],
+      "output": "postgres://app:[REDACTED]@db:5432/ocw HTTPS://u:[REDACTED]@example.com"
+    },
+    {
+      "name": "env api key",
+      "input": ["ANTHROPIC_API_KEY=", "supersecretvalue"],
+      "output": "ANTHROPIC_API_KEY=[REDACTED]"
+    },
+    {
+      "name": "export db password quoted",
+      "input": ["export DB_PASSWORD=\"", "hunter2hunter2\""],
+      "output": "export DB_PASSWORD=\"[REDACTED]\""
+    },
+    {
+      "name": "env secret single quotes with spaces",
+      "input": ["MY_SECRET_VALUE = '", "abcdefg'"],
+      "output": "MY_SECRET_VALUE = '[REDACTED]'"
+    },
+    {
+      "name": "env token and private key",
+      "input": ["GITHUB_TOKEN=", "abcdef123456\nPRIVATE_KEY=", "MIIEvQIBADANBg"],
+      "output": "GITHUB_TOKEN=[REDACTED]\nPRIVATE_KEY=[REDACTED]"
+    },
+    {
+      "name": "env value too short",
+      "input": ["API_KEY=abc"],
+      "output": "API_KEY=abc"
+    },
+    {
+      "name": "lower case env name untouched",
+      "input": ["password=", "foo123456"],
+      "output": "password=foo123456"
+    },
+    {
+      "name": "code stays readable",
+      "input": ["const API_KEY: z.string(); const task = \"sk-\"; token.length > 3"],
+      "output": "const API_KEY: z.string(); const task = \"sk-\"; token.length > 3"
+    },
+    {
+      "name": "already redacted env",
+      "input": ["ANTHROPIC_API_KEY=[REDACTED]"],
+      "output": "ANTHROPIC_API_KEY=[REDACTED]"
+    },
+    {
+      "name": "already redacted mixed",
+      "input": [
+        "[REDACTED:jwt] and Bearer [REDACTED] at https://bob:[REDACTED]@github.com [REDACTED:pem-block]"
+      ],
+      "output": "[REDACTED:jwt] and Bearer [REDACTED] at https://bob:[REDACTED]@github.com [REDACTED:pem-block]"
+    },
+    {
+      "name": "key glued to a word",
+      "input": ["xsk-", "ant-api03-", "abcdefghijklmnop"],
+      "output": "xsk-ant-api03-abcdefghijklmnop"
+    },
+    {
+      "name": "json payload",
+      "input": [
+        "{\"Authorization\":\"Bear",
+        "er abcdefghijklmnop\",\"apiKey\":\"sk-",
+        "abcdefghijklmnopqrstuvwxyz\"}"
+      ],
+      "output": "{\"Authorization\":\"Bearer [REDACTED]\",\"apiKey\":\"[REDACTED:api-key]\"}"
+    },
+    {
+      "name": "mixed multi-secret multi-line text",
+      "input": [
+        "Deploy notes\r\n- key: sk-",
+        "ant-api03-",
+        "ZZZZZZZZZZZZZZZZ\r\n- export STRIPE_SECRET_KEY=",
+        "rk_live_0123456789\r\n- curl -H 'Authorization: Bear",
+        "er 0123456789abcdef' https://ci:",
+        "tok3n",
+        "@ci.acme.dev/hook\r\n- -----BEGIN RSA ",
+        "PRIVATE KEY-----\nabc"
+      ],
+      "output": "Deploy notes\r\n- key: [REDACTED:anthropic-key]\r\n- export STRIPE_SECRET_KEY=[REDACTED]\r\n- curl -H 'Authorization: Bearer [REDACTED]' https://ci:[REDACTED]@ci.acme.dev/hook\r\n- [REDACTED:pem-block]"
+    },
+    {
+      "name": "secret with emoji and punctuation",
+      "input": ["🔑 gl", "pat-", "ABCDEFGHIJKLMNOPQRSTU! done."],
+      "output": "🔑 [REDACTED:gitlab-token]! done."
+    },
+    {
+      "name": "dollar signs near a key",
+      "input": ["cost $1 and $& then sk-", "ant-api03-", "abcdefgh$$ end"],
+      "output": "cost $1 and $& then [REDACTED:anthropic-key]$$ end"
+    },
+    {
+      "name": "repeated tokens on a long line",
+      "input": [
+        "t0 xoxb-aaaaaaaaaaaa0 t1 xoxb-aaaaaaaaaaaa1 t2 xoxb-aaaaaaaaaaaa2 t3 xoxb-aaaaaaaaaaaa3 t4 xoxb-aaaaaaaaaaaa4 t5 xoxb-aaaaaaaaaaaa5 t6 xoxb-aaaaaaaaaaaa6 t7 xoxb-aaaaaaaaaaaa7 t8 xoxb-aaaaaaaaaaaa8 t9 xoxb-aaaaaaaaaaaa9 t10 xoxb-aaaaaaaaaaaa10 t11 xoxb-aaaaaaaaaaaa11 t12 xoxb-aaaaaaaaaaaa12 t13 xoxb-aaaaaaaaaaaa13 t14 xoxb-aaaaaaaaaaaa14 t15 xoxb-aaaaaaaaaaaa15 t16 xoxb-aaaaaaaaaaaa16 t17 xoxb-aaaaaaaaaaaa17 t18 xoxb-aaaaaaaaaaaa18 t19 xoxb-aaaaaaaaaaaa19"
+      ],
+      "output": "t0 [REDACTED:slack-token] t1 [REDACTED:slack-token] t2 [REDACTED:slack-token] t3 [REDACTED:slack-token] t4 [REDACTED:slack-token] t5 [REDACTED:slack-token] t6 [REDACTED:slack-token] t7 [REDACTED:slack-token] t8 [REDACTED:slack-token] t9 [REDACTED:slack-token] t10 [REDACTED:slack-token] t11 [REDACTED:slack-token] t12 [REDACTED:slack-token] t13 [REDACTED:slack-token] t14 [REDACTED:slack-token] t15 [REDACTED:slack-token] t16 [REDACTED:slack-token] t17 [REDACTED:slack-token] t18 [REDACTED:slack-token] t19 [REDACTED:slack-token]"
+    }
+  ]
+}

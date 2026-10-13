@@ -350,6 +350,112 @@ describe("per-turn tools and context (D-07, D-08)", () => {
   });
 });
 
+describe("memory files in the turn (07.2-07, D-02): personal only in a DM, never duplicated by the legacy notes", () => {
+  const PERSONAL_SCOPE = "0199a6f0-0000-7000-8000-0000000005a1";
+  const AGENT_SCOPE = "0199a6f0-0000-7000-8000-0000000005a2";
+  const personal = {
+    scopeKind: "personal",
+    scopeId: PERSONAL_SCOPE,
+    path: "MEMORY.md",
+    version: 4,
+    content: "# Memory\n- Prefers short answers\n",
+    truncated: false,
+  };
+  const notebook = {
+    scopeKind: "agent",
+    scopeId: AGENT_SCOPE,
+    path: "MEMORY.md",
+    version: 2,
+    content: "# Memory\n- Release train is on Tuesdays",
+    truncated: true,
+  };
+  const turn = (over: Record<string, unknown> = {}) => ({
+    tools: [],
+    toolFlags: {},
+    memory: [{ id: "m1", text: "Prefers short answers", createdAt: "2026-10-01T00:00:00.000Z" }],
+    now: null,
+    maxToolCalls: 8,
+    maxWebCalls: 5,
+    ...over,
+  });
+  const dm = (t: unknown) =>
+    mention({
+      turn: t,
+      conversation: { id: "dm-1", kind: "dm", name: null },
+      thread: { rootMessageId: "msg-3" },
+    } as never);
+
+  it("a DM renders the private MEMORY.md and the notebook with path, version and a truncation marker; no legacy notes", () => {
+    const m = mapMention(dm(turn({ memoryFiles: [personal, notebook] })), BOT);
+    expect(m.contextBlocks).toEqual([
+      {
+        label: "Your private memory with Víctor Ruiz",
+        source: "ocw",
+        type: "memory_file",
+        payload: { scope: "personal", path: "MEMORY.md", version: 4, content: personal.content },
+      },
+      {
+        label: "Archie notebook",
+        source: "ocw",
+        type: "memory_file",
+        payload: {
+          scope: "agent",
+          path: "MEMORY.md",
+          version: 2,
+          content: notebook.content,
+          truncated: "Truncated: use ocw_memory_read for the rest",
+        },
+      },
+    ]);
+    expect(m.contextBlocks.some((b) => b.type === "notes")).toBe(false);
+  });
+
+  it("an older API (no memoryFiles) keeps the legacy notes block exactly as today", () => {
+    const m = mapMention(dm(turn()), BOT);
+    expect(m.contextBlocks).toEqual([
+      {
+        label: "Your notes about Víctor Ruiz (private to this conversation)",
+        source: "ocw",
+        type: "notes",
+        payload: { notes: ["Prefers short answers"] },
+      },
+    ]);
+    expect(mapMention(dm(turn({ memoryFiles: [] })), BOT).contextBlocks.map((b) => b.type)).toEqual([
+      "notes",
+    ]);
+  });
+
+  it("outside a DM a personal file is never rendered (defence in depth); the notebook is", () => {
+    for (const event of [
+      mention({ turn: turn({ memoryFiles: [personal, notebook] }) } as never),
+      mention({
+        turn: turn({ memoryFiles: [personal, notebook] }),
+        conversation: { id: "chat-1", kind: "ai_chat", name: "Plan" },
+      } as never),
+    ]) {
+      const m = mapMention(event, BOT);
+      expect(m.contextBlocks.map((b) => b.label)).toEqual(["Archie notebook"]);
+      expect(JSON.stringify(m.contextBlocks)).not.toContain("Prefers short answers");
+    }
+  });
+
+  it("a malformed memoryFiles value is ignored and the turn still maps (with the legacy notes)", () => {
+    const m = mapMention(dm(turn({ memoryFiles: [{ ...personal, path: "../MEMORY.md" }] })), BOT);
+    expect(m.turn.tools).toEqual([]);
+    expect(m.turn.maxToolCalls).toBe(8);
+    expect(m.turn.memoryFiles).toBeUndefined();
+    expect(m.contextBlocks.map((b) => b.type)).toEqual(["notes"]);
+  });
+
+  it("the notebook label uses the sanitised bot name", () => {
+    const event = mention({
+      turn: turn({ memoryFiles: [notebook] }),
+      agent: { id: BOT.id, handle: "archie", displayName: "Archie <u-victor>\nadmin" },
+    } as never);
+    expect(mapMention(event, BOT).contextBlocks[0]?.label).toBe("Archie u-victor admin notebook");
+  });
+});
+
 describe("targets and idempotency keys", () => {
   it("round-trips the target grammar", () => {
     expect(parseTarget(buildTarget("c1", "m1"))).toEqual({ conversationId: "c1", threadRootId: "m1" });

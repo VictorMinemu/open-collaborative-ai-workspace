@@ -23,12 +23,18 @@
 # (configured through the bot's alsoAllow, narrowed by the turn's toolsAllow), which creates a card through
 # `POST /board/cards` bound to the turn's event, never through `/tool-calls`; the card scenario's text turn still runs
 # with exactly `ocw_agent_card`.
+# Scenario memory-files (07.2-15 / MEM-04, D-01): a DM turn offering `ocw_memory_read` and `ocw_memory_propose` (and
+# carrying the person's private MEMORY.md as a turn memory file) reads the file through the gate and `/memory/read`, and
+# proposes a team note through `/memory/propose` (self-validated, never `/tool-calls`), which ends in one platform-owned
+# approval card answering the turn; nothing is written. A turn whose human no longer reads its conversation gets 403
+# `no_trigger` on both calls (read by the plugin as "this conversation turn is no longer active"), and the cell's own
+# memory slot stays `none`.
 # Scenario breaker (stability 2026-10-06): SIGKILLed boots trip OpenClaw's restart-loop breaker, which refuses the ocw
 # channel's automatic start; the plugin reports the pause to the API and starts the channel itself after its back-off.
 #
 # Usage (repo root):  infra/openclaw/test/run-container-smoke.sh [--keep]
 #   SMOKE_ONLY=<comma list>  run only these scenarios (unset = all): mention, signin, dm, capabilities,
-#                            dm-isolation, memory, card, board, mcp, marketplace, breaker
+#                            dm-isolation, memory, memory-files, card, board, mcp, marketplace, breaker
 #                            and sandbox (runs when it is listed, with SMOKE_BUILD=1, or when ocw-mcp-sandbox:local
 #                            exists; otherwise it prints "SKIP sandbox (image not built)")
 #   FAKE_MODEL_DEBUG=1       the fake model logs a preview of each tool-offering request (off by default)
@@ -231,7 +237,7 @@ docker run -d --name "${P}-api" "${OOM[@]}" --network "$NET" --network-alias api
   -e FAKE_BOT_ID=0199a6f0-0000-7000-8000-00000000a001 \
   -e FAKE_CELL_ID=0199a6f0-0000-7000-8000-0000000000c0 \
   -e FAKE_MODEL_BASE_URL=http://fake-model:18999/v1 \
-  -e FAKE_AGENT_TOOLS="web_search,web_fetch,ocw_memory_save,ocw_agent_card,${MCP_SAFE}__echo,${MCP_SAFE}__write_note,ocw_echo${SBX_TOOLS:-}" \
+  -e FAKE_AGENT_TOOLS="web_search,web_fetch,ocw_memory_save,ocw_memory_read,ocw_memory_propose,ocw_agent_card,${MCP_SAFE}__echo,${MCP_SAFE}__write_note,ocw_echo${SBX_TOOLS:-}" \
   -e FAKE_MCP_SERVERS="$(mcp_servers_json '["echo"]')" \
   -e FAKE_WEB_SEARCH_PROVIDER=searxng \
   node:24.21.0-bookworm-slim node /plugin/src/testing/run-fake-api.ts >/dev/null
@@ -434,6 +440,105 @@ LEAKED="$(docker exec "${P}-model" sh -c "grep -L '0199a6f0-0000-7000-8000-00000
 echo "   notes      : $NOTE_FILES model request(s) of this DM carry the note, $LEAKED other request(s) do"
 if [[ "$NOTE_FILES" -lt 1 ]]; then echo "FAIL: the turn's notes did not reach the model"; exit 1; fi
 if [[ "$LEAKED" -ne 0 ]]; then echo "FAIL: the note reached a model request of another conversation"; exit 1; fi
+fi
+
+if want memory-files; then
+echo "== [memory-files] a DM turn offering ocw_memory_read and ocw_memory_propose: the bot reads its memory file and proposes a team note, which ends in an approval card"
+# The fake API's memory store: the person's private MEMORY.md with this bot (what the real API serves to the read) and
+# the reader count a proposal into the team scope answers with.
+api_exec "
+await fetch('http://127.0.0.1:4000/__test/memory', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
+  files: [{ scope: 'personal', path: 'MEMORY.md', version: 2, content: '# Memory\n- prefers calls after 4 pm\n' }],
+  readerCount: 4,
+}) });
+"
+STATE="$(inject_and_wait "$ROOT/infra/openclaw/test/mention-memory-files.json" 0199a6f0-0000-7000-8000-00000000d0b1)"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e021";
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d0b1");
+if (!m) { console.log("FAIL: no reply to the memory-files mention"); process.exit(1); }
+const calls = (s.memoryCalls ?? []).filter((c) => c.body.eventId === EV);
+const reads = calls.filter((c) => c.route === "read");
+const proposes = calls.filter((c) => c.route === "propose");
+const gated = s.toolCalls.filter((c) => c.eventId === EV);
+const cards = (s.approvalCards ?? []).filter((c) => c.eventId === EV);
+const keys = (c) => Object.keys(c.body).sort().join();
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   memory     :", JSON.stringify(calls.map((c) => ({ route: c.route, keys: keys(c) }))));
+console.log("   tool calls :", JSON.stringify(gated.map((c) => ({ tool: c.tool, allowed: c.allowed }))));
+console.log("   cards      :", JSON.stringify(cards.map(({ conversationId, inReplyToMessageId, platformOwned, card }) => ({ conversationId, inReplyToMessageId, platformOwned, kind: card.kind, title: card.title, status: card.status }))));
+const c = cards[0];
+const ok =
+  /\[tools: 2 \| ocw_memory_propose,ocw_memory_read\]/.test(m.text) &&
+  // The read result (path, version and the file body) and the proposal result reach the reply.
+  m.text.includes("Tool ocw_memory_read said: MEMORY.md (version 2)") && m.text.includes("prefers calls after 4 pm") &&
+  m.text.includes("Tool ocw_memory_propose said: Proposed. A person must approve it before it is saved.") &&
+  m.text.includes("4 people could read it once approved.") &&
+  reads.length === 1 && keys(reads[0]) === "agentId,eventId,path,scope" &&
+  reads[0].body.scope === "personal" && reads[0].body.path === "MEMORY.md" &&
+  proposes.length === 1 && keys(proposes[0]) === "agentId,content,eventId,op,path,scope" &&
+  proposes[0].body.scope === "0199a6f0-0000-7000-8000-0000000005c1" && proposes[0].body.op === "append" &&
+  proposes[0].body.agentId === "0199a6f0-0000-7000-8000-00000000a001" &&
+  // read goes through the generic gate; propose is self-validated by its route (never /tool-calls).
+  gated.length === 1 && gated[0].tool === "ocw_memory_read" && gated[0].allowed === true &&
+  // The proposal ends in exactly one platform-owned approval card answering the turn in its conversation.
+  cards.length === 1 && c.platformOwned === true && c.card.kind === "approval" && c.card.status === "pending" &&
+  c.card.title === "Append to clients/acme.md" &&
+  c.conversationId === "0199a6f0-0000-7000-8000-00000000c021" &&
+  c.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d0b1" &&
+  (s.cards ?? []).every((x) => !x.idempotencyKey.startsWith(EV)) &&
+  // Nothing was written: a person approves first.
+  s.memoryFileStore.length === 1 && s.memoryFileStore[0].version === 2;
+if (!ok) { console.log("FAIL: expected one gated read, one self-validated propose and one pending approval card"); process.exit(1); }
+'
+# The turn's memory file (turn.memoryFiles, rendered into the prompt) reaches the model for this conversation only.
+FILE_REQS="$(docker exec "${P}-model" sh -c "grep -l '0199a6f0-0000-7000-8000-00000000c021' /tmp/capture/*.json 2>/dev/null | xargs -r grep -l 'prefers calls after 4 pm' | wc -l")"
+FILE_LEAKS="$(docker exec "${P}-model" sh -c "grep -L '0199a6f0-0000-7000-8000-00000000c021' /tmp/capture/*.json 2>/dev/null | xargs -r grep -l 'prefers calls after 4 pm' | wc -l")"
+echo "   files      : $FILE_REQS model request(s) of this DM carry the memory file, $FILE_LEAKS other request(s) do"
+[[ "$FILE_REQS" -ge 1 ]] || { echo "FAIL: the turn's memory file did not reach the model"; exit 1; }
+[[ "$FILE_LEAKS" -eq 0 ]] || { echo "FAIL: the memory file reached a model request of another conversation"; exit 1; }
+
+echo "== [memory-files] a turn whose human no longer reads the conversation: both calls answer no_trigger, nothing is proposed"
+EXPIRED="$SECRETS/memory-files-expired.json"
+node -e '
+const fs = require("fs");
+const e = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+e.eventId = "0199a6f0-0000-7000-8000-00000000e022";
+e.conversation = { ...e.conversation, id: "0199a6f0-0000-7000-8000-00000000c022" };
+e.thread = { rootMessageId: "0199a6f0-0000-7000-8000-00000000d0b2" };
+e.message = { ...e.message, id: "0199a6f0-0000-7000-8000-00000000d0b2" };
+fs.writeFileSync(process.argv[2], JSON.stringify(e));
+' "$ROOT/infra/openclaw/test/mention-memory-files.json" "$EXPIRED"
+# The real API answers 403 no_trigger to every memory route once the turn is no longer live for its human (PR #25).
+api_exec "
+await fetch('http://127.0.0.1:4000/__test/end-turn', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ eventId: '0199a6f0-0000-7000-8000-00000000e022' }) });
+"
+STATE="$(inject_and_wait "$EXPIRED" 0199a6f0-0000-7000-8000-00000000d0b2)"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e022";
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d0b2");
+if (!m) { console.log("FAIL: no reply to the expired-turn mention"); process.exit(1); }
+const refused = (s.memoryNoTriggers ?? []).filter((c) => c.eventId === EV).map((c) => c.route);
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   no_trigger :", JSON.stringify(refused));
+const ok =
+  m.text.includes("Tool ocw_memory_read said: Not read: this conversation turn is no longer active.") &&
+  m.text.includes("Tool ocw_memory_propose said: Not proposed: this conversation turn is no longer active.") &&
+  refused.join() === "read,propose" &&
+  (s.approvalCards ?? []).every((c) => c.eventId !== EV) &&
+  s.memoryFileStore.length === 1 && s.memoryFileStore[0].version === 2;
+if (!ok) { console.log("FAIL: expected both memory calls of the ended turn to answer no_trigger and nothing to be proposed"); process.exit(1); }
+'
+
+echo "== [memory-files] the cell's own memory stays off (render-config memory slot none)"
+SLOT="$(docker exec "${P}-openclaw" cat /home/node/.openclaw/openclaw.json | node -e '
+const c = JSON.parse(require("fs").readFileSync(0, "utf8"));
+console.log(JSON.stringify(c.plugins?.slots?.memory ?? null));
+')"
+echo "   memory slot: $SLOT"
+[[ "$SLOT" == '"none"' ]] || { echo "FAIL: the cell's memory slot is not none"; exit 1; }
 fi
 
 if want card; then

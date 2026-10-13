@@ -70,6 +70,10 @@ export const Permission = z.enum([
   // Phase 07.3 (ADR-0024): module access.
   "ai_chat.read",
   "unit.modules.manage",
+  // Phase 07.2 (07.2-01, D-04): scoped memory files and governed promotion.
+  "memory.read",
+  "memory.write",
+  "memory.promote",
 ]);
 export type Permission = z.infer<typeof Permission>;
 
@@ -135,6 +139,9 @@ export const PERMISSION_SURFACE: Record<Permission, PermissionSurface> = {
   "agent_card.approve": "chat",
   "ai_chat.read": "chat",
   "unit.modules.manage": "team",
+  "memory.read": "bots",
+  "memory.write": "bots",
+  "memory.promote": "team",
 };
 
 export const ROLE_SURFACES: Record<OrgRole, PermissionSurface[]> = {
@@ -165,6 +172,7 @@ const STANDARD: readonly Permission[] = [
   "ai_chat.manage",
   "agent_card.approve",
   "ai_chat.read",
+  "memory.read",
 ];
 const DEVELOPER: readonly Permission[] = [
   ...STANDARD,
@@ -201,6 +209,8 @@ const ADMIN: readonly Permission[] = [
   "channel.update",
   "bot.manage_unit",
   "unit.modules.manage",
+  "memory.write",
+  "memory.promote",
 ];
 
 /**
@@ -217,20 +227,27 @@ export const ROLE_PERMISSIONS: Record<OrgRole, readonly Permission[]> = {
 
 /**
  * Granted to a unit lead on the lead's unit subtree (Phase 6, P-04: also the bots of that subtree; Phase 07.3,
- * ADR-0024: module access for the subtree and its people).
+ * ADR-0024: module access for the subtree and its people; Phase 07.2: the subtree's shared memory).
  */
 export const LEAD_PERMISSIONS: readonly Permission[] = [
   "unit.members.manage",
   "bot.manage_unit",
   "bot.configure",
   "unit.modules.manage",
+  "memory.write",
+  "memory.promote",
 ];
-/** Upper bound for an agent principal (intersected with the triggering human). */
+/**
+ * Upper bound for an agent principal (intersected with the triggering human). Agents never hold `memory.promote`:
+ * they propose into shared memory and a person approves (Phase 07.2).
+ */
 export const AGENT_PERMISSIONS: readonly Permission[] = [
   "channel.read",
   "channel.post",
   "bot.internet",
   "bot.tool.use",
+  "memory.read",
+  "memory.write",
 ];
 /** The OpenClaw cell principal. */
 export const CELL_PERMISSIONS: readonly Permission[] = ["cell.sync"];
@@ -383,6 +400,9 @@ export const PERMISSION_DESCRIPTIONS: Record<Permission, string> = {
   "agent_card.approve": "Approve or deny what an agent asks for in a card",
   "ai_chat.read": "See and open AI chats you own or that are shared with you",
   "unit.modules.manage": "Turn modules on or off for the units you lead and their people",
+  "memory.read": "Read the memory files you have access to",
+  "memory.write": "Edit memory files directly",
+  "memory.promote": "Approve agent proposals into shared memory",
 };
 
 // ---------------------------------------------------------------- tokens (AUTH-06)

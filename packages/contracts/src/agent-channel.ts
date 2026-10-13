@@ -21,6 +21,16 @@ import { SearchProvider, TurnContext } from "./bot-capabilities";
 import { ConversationKind, Mention, MessageBody } from "./chat";
 import { Id, IsoDateTime, MemberKind, PrincipalKind } from "./common";
 import { DeclaredSurface } from "./marketplace";
+import {
+  MEMORY_LIMITS,
+  MemoryContent,
+  MemoryFileMeta,
+  MemoryFolder,
+  MemoryPath,
+  MemoryProposalOp,
+  MemoryScope,
+  SensitiveFinding,
+} from "./memory";
 import { ServerFrame } from "./realtime";
 
 /**
@@ -619,6 +629,122 @@ export type AgentChannelMemorySave = z.infer<typeof AgentChannelMemorySave>;
 
 export const AgentChannelMemorySaveResponse = z.object({ memoryId: Id, created: z.boolean() });
 export type AgentChannelMemorySaveResponse = z.infer<typeof AgentChannelMemorySaveResponse>;
+
+// ---------------------------------------------------------------- memory files (Phase 07.2, D-02, additive)
+
+/*
+ * The `ocw_memory_list|read|write|propose` tools, bound to a delivered turn like `ocw_memory_save`. The human the agent
+ * acts for is ALWAYS the stored turn's user (`agent_turns.user_id`), never a field: these bodies are strict objects, so
+ * a model-supplied `userId` or `ownerUserId` is refused, not ignored. Every route re-decides the turn, the tool, the
+ * resolver (agent ∩ human), the audience of the conversation and the path rules.
+ */
+
+/** A scope id from `ocw_memory_list`, or the aliases of the turn's personal scope and the agent's own scope. */
+export const MemoryToolScope = z.union([Id, z.literal("personal"), z.literal("agent")]);
+export type MemoryToolScope = z.infer<typeof MemoryToolScope>;
+
+/** Why a memory tool call was refused (the model reads it; never the decision details). */
+export const MemoryToolRefusal = z.enum([
+  "unknown_turn",
+  "not_in_turn",
+  "memory_off",
+  "tainted",
+  "cap_reached",
+  "dm_only",
+  "not_found",
+  "denied",
+  "audience_too_wide",
+  "own_scope_only",
+  "shared_scope_only",
+  "version_conflict",
+  "secret_detected",
+  "path_invalid",
+  "scope_full",
+  "too_large",
+  "too_many_pending",
+]);
+export type MemoryToolRefusal = z.infer<typeof MemoryToolRefusal>;
+
+const MemoryToolRefused = z.strictObject({ refused: MemoryToolRefusal });
+
+/** `POST /agent-channel/v1/memory/list`: no scope = the scopes the turn may read; a scope = its files' metadata. */
+export const AgentChannelMemoryList = z.strictObject({
+  eventId: Id,
+  agentId: Id,
+  scope: MemoryToolScope.optional(),
+  folder: MemoryFolder.optional(),
+});
+export type AgentChannelMemoryList = z.infer<typeof AgentChannelMemoryList>;
+
+export const AgentChannelMemoryListResponse = z.union([
+  MemoryToolRefused,
+  // Strict: every key is optional, so an unknown `refused` value must not parse as an empty result.
+  z.strictObject({ scopes: z.array(MemoryScope).optional(), files: z.array(MemoryFileMeta).optional() }),
+]);
+export type AgentChannelMemoryListResponse = z.infer<typeof AgentChannelMemoryListResponse>;
+
+/** `POST /agent-channel/v1/memory/read`. */
+export const AgentChannelMemoryRead = z.strictObject({
+  eventId: Id,
+  agentId: Id,
+  scope: MemoryToolScope,
+  path: MemoryPath,
+});
+export type AgentChannelMemoryRead = z.infer<typeof AgentChannelMemoryRead>;
+
+export const AgentChannelMemoryReadResponse = z.union([
+  MemoryToolRefused,
+  z.object({
+    file: z.object({ path: MemoryPath, version: z.number().int().positive(), content: z.string() }),
+  }),
+]);
+export type AgentChannelMemoryReadResponse = z.infer<typeof AgentChannelMemoryReadResponse>;
+
+/**
+ * `POST /agent-channel/v1/memory/write`: only the agent's own scopes (the turn's personal scope in a 1-human DM, the
+ * agent scope of a personal bot). `replace` of an existing file names the version it read (`version_conflict`
+ * otherwise); `append` adds to the end under a lock.
+ */
+export const AgentChannelMemoryWrite = z.strictObject({
+  eventId: Id,
+  agentId: Id,
+  scope: z.enum(["personal", "agent"]),
+  path: MemoryPath,
+  mode: z.enum(["replace", "append"]),
+  content: MemoryContent,
+  expectedVersion: z.number().int().positive().optional(),
+});
+export type AgentChannelMemoryWrite = z.infer<typeof AgentChannelMemoryWrite>;
+
+export const AgentChannelMemoryWriteResponse = z.union([
+  MemoryToolRefused,
+  z.object({ fileId: Id, version: z.number().int().positive() }),
+]);
+export type AgentChannelMemoryWriteResponse = z.infer<typeof AgentChannelMemoryWriteResponse>;
+
+/** `POST /agent-channel/v1/memory/propose`: a change to a shared scope that a person approves and the server applies. */
+export const AgentChannelMemoryPropose = z.strictObject({
+  eventId: Id,
+  agentId: Id,
+  scope: MemoryToolScope,
+  path: MemoryPath,
+  op: MemoryProposalOp,
+  content: MemoryContent,
+  baseVersion: z.number().int().positive().optional(),
+  /** The bot's note to the approver. */
+  reason: z.string().trim().min(1).max(MEMORY_LIMITS.reasonChars).optional(),
+});
+export type AgentChannelMemoryPropose = z.infer<typeof AgentChannelMemoryPropose>;
+
+export const AgentChannelMemoryProposeResponse = z.union([
+  MemoryToolRefused,
+  z.object({
+    approvalId: Id,
+    findings: z.array(SensitiveFinding),
+    readerCount: z.number().int().nonnegative(),
+  }),
+]);
+export type AgentChannelMemoryProposeResponse = z.infer<typeof AgentChannelMemoryProposeResponse>;
 
 // ---------------------------------------------------------------- boards (Phase 07.1, D-07, P-03, additive)
 

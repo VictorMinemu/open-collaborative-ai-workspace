@@ -1,11 +1,12 @@
 import { type AuthzDenial, type MyPermissions, Permission } from "@ocw/contracts";
-import type { TenantCtx, TenantDb, Tx } from "@ocw/db";
+import { orgMembers, type TenantCtx, type TenantDb, type Tx } from "@ocw/db";
+import { isNull } from "drizzle-orm";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { markDecided } from "../../../authz";
 import { unauthorized } from "../../../lib/errors";
 import type { AuditService } from "../../audit";
 import { AuthzDeniedError } from "./errors";
-import { loadPrincipalFacts, loadRules, type PrincipalRef } from "./facts";
+import { loadPrincipalFacts, loadPrincipalFactsMany, loadRules, type PrincipalRef } from "./facts";
 import { orgResource, userResource } from "./policy";
 import {
   decide as decideFacts,
@@ -70,6 +71,19 @@ export interface PermissionService {
     permission: Permission,
     toResource: (item: T) => ResourceFacts,
   ): Promise<T[]>;
+  /**
+   * The people (sorted user ids) who hold `permission`, each on their own `resourceFor(userId)` (relations differ per
+   * person): reader counts and deciders (Phase 07.2). `"members"` = every active member of the tenant. Rules load once,
+   * facts in two queries; deactivated members and ids outside the tenant are never returned.
+   */
+  usersAllowed(
+    tx: Tx,
+    a: {
+      candidates: readonly string[] | "members";
+      permission: Permission;
+      resourceFor: (userId: string) => ResourceFacts;
+    },
+  ): Promise<string[]>;
   /** The subset of `candidates` the caller holds on `resource` (drives per-resource `viewerCan`). */
   viewerCan(
     req: FastifyRequest,
@@ -229,6 +243,28 @@ export function createPermissionService(deps: PermissionDeps): PermissionService
       const p = await loadPrincipalFacts(tx, principal);
       const rules = await loadRules(tx);
       return items.filter((item) => decideFacts(p, toResource(item), rules, permission).allowed);
+    },
+
+    async usersAllowed(tx, { candidates, permission, resourceFor }) {
+      const ids =
+        candidates === "members"
+          ? (
+              await tx
+                .select({ userId: orgMembers.userId })
+                .from(orgMembers)
+                .where(isNull(orgMembers.deactivatedAt))
+            ).map((m) => m.userId)
+          : candidates;
+      if (ids.length === 0) return [];
+      const people = await loadPrincipalFactsMany(tx, ids);
+      if (people.size === 0) return [];
+      const rules = await loadRules(tx);
+      const allowed: string[] = [];
+      for (const p of people.values()) {
+        if (p.deactivated) continue;
+        if (decideFacts(p, resourceFor(p.id), rules, permission).allowed) allowed.push(p.id);
+      }
+      return allowed.sort();
     },
 
     async viewerCan(req, tx, resource, candidates) {

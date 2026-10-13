@@ -32,13 +32,14 @@ const at = (c: AgentCard) => Date.parse(c.updatedAt) || 0;
 /**
  * The card to show: the newer content of the conversation's copy (`fromList`) and the viewer's own read or last
  * action (`fromViewer`, e.g. a decision response that beat its realtime event), with the viewer's fields from
- * `fromViewer` when there is one.
+ * `fromViewer` when there is one. At the same version the viewer's read wins: it is at least as fresh, and it carries
+ * what a live event may lack (a platform-owned card is announced before the server links its approval, 07.2-17).
  */
 export function shownCard(fromList: AgentCard, fromViewer: AgentCard | undefined): AgentCard {
   if (!fromViewer) return mergeCard(undefined, fromList);
   const newer =
     at(fromViewer) > at(fromList) ||
-    (at(fromViewer) === at(fromList) && fromViewer.version > fromList.version)
+    (at(fromViewer) === at(fromList) && fromViewer.version >= fromList.version)
       ? fromViewer
       : fromList;
   return mergeCard(fromViewer, {

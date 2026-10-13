@@ -296,6 +296,7 @@ describe("the read model and inheritance through the API (admin)", () => {
       ["work_zone", "on", null],
       ["ai_chats", "on", null],
       ["bots", "on", null],
+      ["memory", "on", null],
     ]);
     expect((v.people as Json[]).map((p) => [p.displayName, p.canEdit])).toEqual([
       ["Ada Admin", true],
@@ -363,6 +364,7 @@ describe("the read model and inheritance through the API (admin)", () => {
             { module: "work_zone", state: "off", inherited: null },
             { module: "ai_chats", state: "on", inherited: null },
             { module: "bots", state: "on", inherited: null },
+            { module: "memory", state: "on", inherited: null },
           ],
         },
       ]);
@@ -410,6 +412,21 @@ describe("the read model and inheritance through the API (admin)", () => {
     expect(stateOf(v, "work_zone").state).toBe("on");
     expect((await rowsAt(backendId, everyone)).map((r) => r.id)).toEqual([other.id]);
     await ok(victor.request("DELETE", `/api/v1/permission-rules/${other.id as string}`));
+  });
+
+  it("a folder deny of memory.* is not a module row: Memory stays on, and on never deletes it (Phase 07.2)", async () => {
+    const folder = (
+      await su.query(
+        `insert into app.permission_rules (organization_id, scope_unit_id, subject_kind, permission, path_prefix, effect)
+         values ($1, $2, 'everyone', 'memory.*', 'hr/', 'deny') returning id`,
+        [orgId, backendId],
+      )
+    ).rows[0].id as string;
+    expect(stateOf(await ok(view(victor, backendId)), "memory").state).toBe("on");
+    expect(stateOf(await ok(put(victor, "memory", backendId, everyone, false)), "memory").state).toBe("off");
+    expect(stateOf(await ok(put(victor, "memory", backendId, everyone, true)), "memory").state).toBe("on");
+    expect((await rowsAt(backendId, everyone)).map((r) => r.id)).toEqual([folder]);
+    await su.query("delete from app.permission_rules where id = $1", [folder]);
   });
 });
 

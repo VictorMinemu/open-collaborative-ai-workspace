@@ -10,9 +10,9 @@ import { openClawAgentIdFor } from "./mention-mapper.js";
  *   - blocks any call when no OCW turn is active for the session (fail closed),
  *   - blocks tools outside `turn.tools`, over the per-turn caps, or side-effecting after untrusted output
  *     (taint) — locally first, which saves a round trip,
- *   - asks `POST /agent-channel/v1/tool-calls` for every call except `ocw_memory_save` and `ocw_board_card`
- *     (validated by their own routes) and blocks on a denial, an error or a timeout (fail closed, under OpenClaw's
- *     15 s budget),
+ *   - asks `POST /agent-channel/v1/tool-calls` for every call except `ocw_memory_save`, `ocw_memory_write`,
+ *     `ocw_memory_propose` and `ocw_board_card` (validated by their own routes) and blocks on a denial, an error or a
+ *     timeout (fail closed, under OpenClaw's 15 s budget),
  *   - reports each allowed call's outcome (status, result count, provider, duration; never content).
  * Logs never include params or results.
  */
@@ -60,16 +60,27 @@ type Logger = { info?: (m: string) => void; warn?: (m: string) => void };
 export const WEB_TOOLS: ReadonlySet<string> = new Set(["web_search", "web_fetch"]);
 /**
  * Validated by their own routes, which check the turn, the tool on it and the taint, and count the call themselves:
- * `ocw_memory_save` (`POST /memories`, 03.1-07) and `ocw_board_card` (`/board/*`, 07.1-10). Asking `/tool-calls` too
- * would count the call twice, and `/tool-calls` cannot offer the board tool (it does not know the board layout), so it
- * would refuse it `policy_changed`.
+ * `ocw_memory_save` (`POST /memories`, 03.1-07), `ocw_memory_write` / `ocw_memory_propose` (`/memory/write|propose`,
+ * 07.2) and `ocw_board_card` (`/board/*`, 07.1-10). Asking `/tool-calls` too would count the call twice, and
+ * `/tool-calls` cannot offer the board tool (it does not know the board layout), so it would refuse it
+ * `policy_changed`. `ocw_memory_list` / `ocw_memory_read` change nothing and go through the generic gate.
  */
-const SELF_VALIDATED_TOOLS: ReadonlySet<string> = new Set(["ocw_memory_save", "ocw_board_card"]);
+const SELF_VALIDATED_TOOLS: ReadonlySet<string> = new Set([
+  "ocw_memory_save",
+  "ocw_memory_write",
+  "ocw_memory_propose",
+  "ocw_board_card",
+]);
 /**
  * Always side-effecting, whatever flags a turn carries: writing memory or changing shared board work after untrusted
- * content is exactly the injection the taint rule exists for (D-08, T-03.1-07-02, 07.1-13).
+ * content is exactly the injection the taint rule exists for (D-08, T-03.1-07-02, 07.1-13, T-07.2-07-02). A proposal
+ * is not here: a person approves it before anything is written, so a tainted turn may still propose (flagged by the API).
  */
-const ALWAYS_SIDE_EFFECTING: ReadonlySet<string> = new Set(["ocw_memory_save", "ocw_board_card"]);
+const ALWAYS_SIDE_EFFECTING: ReadonlySet<string> = new Set([
+  "ocw_memory_save",
+  "ocw_memory_write",
+  "ocw_board_card",
+]);
 /** Unknown flags are treated as the most dangerous combination. */
 const UNKNOWN_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: true };
 

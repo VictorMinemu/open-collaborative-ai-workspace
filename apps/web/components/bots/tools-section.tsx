@@ -30,12 +30,25 @@ export function shortToolName(t: Pick<CatalogTool, "sourceKind" | "tool">): stri
  * Per-bot tools from MCP servers and marketplace plugins (BOT-10, D-06): one switch per tool, grouped by
  * source. The API decides availability: a tool with a `reason` is disabled and explained (never hidden), and a
  * granted tool that lost its source stays visible so it can be switched off. Saving sends the full grant set.
+ * `readOnly` forces every switch off for everyone (the agent page, 07.2-14); `title` names the section there.
  */
-export function ToolsSection({ view }: { view: BotCapabilityView }) {
+export function ToolsSection({
+  view,
+  readOnly: forceReadOnly = false,
+  title = "Tools",
+  headingLevel = 4,
+}: {
+  view: BotCapabilityView;
+  readOnly?: boolean;
+  title?: string;
+  /** The title's HTML level (the look never changes): 4 in the bot sheet, 2 on the agent page. */
+  headingLevel?: 2 | 3 | 4;
+}) {
+  const Heading = `h${headingLevel}` as const;
   const update = useUpdateBotCapabilities(view.agentId);
   const canMcp = useCan("mcp.manage");
   const canPlugins = useCan("plugin.manage");
-  const readOnly = !view.viewerCan.includes("bot.configure");
+  const readOnly = forceReadOnly || !view.viewerCan.includes("bot.configure");
 
   const groups: Array<{ key: string; kind: CatalogTool["sourceKind"]; name: string; tools: CatalogTool[] }> =
     [];
@@ -62,9 +75,9 @@ export function ToolsSection({ view }: { view: BotCapabilityView }) {
   return (
     <section className="grid gap-2" data-testid="tools-section" aria-labelledby={`tools-${view.agentId}`}>
       <div className="flex items-baseline justify-between gap-2">
-        <h4 id={`tools-${view.agentId}`} className="font-medium text-sm">
-          Tools
-        </h4>
+        <Heading id={`tools-${view.agentId}`} className="font-medium text-sm">
+          {title}
+        </Heading>
         {groups.length > 0 ? (
           <span className="text-muted-foreground text-xs tabular-nums">
             {view.tools.filter((t) => t.effective).length} of {view.tools.length} on

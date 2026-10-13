@@ -2,12 +2,12 @@
 
 import type { MeResponse } from "@ocw/contracts";
 import { usePathname } from "next/navigation";
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { OsNotifier } from "@/components/notifications/os-notifier";
 import { SearchPalette, SearchPaletteProvider, useSearchPalette } from "@/components/search/search-palette";
 import { useIsDesktop } from "@/hooks/use-media-query";
 import { AppRail } from "./app-rail";
-import { MobileTopBar } from "./mobile-nav";
+import { MOBILE_NAV_SELECTOR, MobileTopBar } from "./mobile-nav";
 import { ShellContext, type ShellContextValue } from "./shell-context";
 
 /**
@@ -20,11 +20,34 @@ export function AppShell({ me, children }: { me: MeResponse; children: ReactNode
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [slot, setSlot] = useState<HTMLElement | null>(null);
+  const navigatedFromDrawer = useRef(false);
 
-  // Close the drawer after navigating (e.g. picking a channel from the section sidebar).
+  // The drawer closes after a navigation the person starts while it is open: an item in it (e.g. picking a channel
+  // from the section sidebar) or back/forward. Not after one they did not start: /chat redirects to the default
+  // channel once the channel list loads, after the shell is interactive, and a drawer opened in that window used to
+  // close by itself (07.2 gate, e2e/tests/mobile-drawer.spec.ts). Back/forward closes it at once: React renders a
+  // transition started in `popstate` (Next's traversal) synchronously, before a later listener could flag it.
+  useEffect(() => {
+    if (!mobileOpen) return;
+    navigatedFromDrawer.current = false;
+    const fromDrawer = (e: Event) => {
+      if (e.target instanceof Element && e.target.closest(MOBILE_NAV_SELECTOR))
+        navigatedFromDrawer.current = true;
+    };
+    const onHistory = () => setMobileOpen(false);
+    document.addEventListener("click", fromDrawer, true);
+    document.addEventListener("keydown", fromDrawer, true);
+    window.addEventListener("popstate", onHistory);
+    return () => {
+      document.removeEventListener("click", fromDrawer, true);
+      document.removeEventListener("keydown", fromDrawer, true);
+      window.removeEventListener("popstate", onHistory);
+    };
+  }, [mobileOpen]);
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: run on route change only
   useEffect(() => {
-    setMobileOpen(false);
+    if (navigatedFromDrawer.current) setMobileOpen(false);
   }, [pathname]);
 
   const ctx = useMemo<ShellContextValue>(

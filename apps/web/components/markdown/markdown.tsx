@@ -2,7 +2,8 @@
 
 import { isReservedHandle } from "@ocw/contracts";
 import { code } from "@streamdown/code";
-import { createContext, memo, useContext } from "react";
+import Link from "next/link";
+import { createContext, memo, useContext, useMemo } from "react";
 import {
   type Components,
   type ControlsConfig,
@@ -76,25 +77,53 @@ function rehypeImagesAsLinksAndPlainLargeCode() {
   return visit;
 }
 
+/** A relative reference: no scheme, not root- or protocol-relative, not a bare fragment or query. */
+const isRelative = (href: string) => !/^[a-z][a-z0-9+.-]*:/i.test(href) && !/^[/\\#?]/u.test(href);
+
+/**
+ * Document variant with `resolveHref` only (memory files, 07.2-10): before hardening, every relative link (never an
+ * image turned into a link) is handed to the resolver. A result becomes an in-app link (`data-in-app`), which still
+ * goes through the hardening plugin and `safeUrl` like any other link; null renders the link text as plain text.
+ * External, root-relative and fragment links are left to the usual rules.
+ */
+function rehypeInAppLinks(options: { resolve: (href: string) => string | null }) {
+  const visit = (node: HastNode) => {
+    for (const child of node.children ?? []) {
+      const props = child.properties ?? {};
+      if (child.type === "element" && child.tagName === "a" && !("dataImageLink" in props)) {
+        const href = typeof props.href === "string" ? props.href.trim() : "";
+        if (href && isRelative(href)) {
+          const target = options.resolve(href);
+          if (target) child.properties = { href: target, dataInApp: "" };
+          else {
+            child.tagName = "span";
+            child.properties = {};
+          }
+        }
+      }
+      visit(child);
+    }
+  };
+  return visit;
+}
+
 /** streamdown's hardening plugin with our policy (it ships it; no second copy of rehype-harden). */
 const hardenPlugin = (defaultRehypePlugins.harden as [unknown, unknown])[0];
 
-const REHYPE_PLUGINS = [
-  rehypeImagesAsLinksAndPlainLargeCode,
-  [
-    hardenPlugin,
-    {
-      // "*" admits only http(s) and root-relative paths; mailto passes as a safe protocol. safeUrl narrows the rest.
-      allowedLinkPrefixes: ["*"],
-      allowedImagePrefixes: [],
-      allowDataImages: false,
-      allowedProtocols: [],
-      linkBlockPolicy: "text-only",
-      imageBlockPolicy: "text-only",
-    },
-  ],
-  rehypeMentions,
+const HARDEN = [
+  hardenPlugin,
+  {
+    // "*" admits only http(s) and root-relative paths; mailto passes as a safe protocol. safeUrl narrows the rest.
+    allowedLinkPrefixes: ["*"],
+    allowedImagePrefixes: [],
+    allowDataImages: false,
+    allowedProtocols: [],
+    linkBlockPolicy: "text-only",
+    imageBlockPolicy: "text-only",
+  },
 ] as const;
+
+const REHYPE_PLUGINS = [rehypeImagesAsLinksAndPlainLargeCode, HARDEN, rehypeMentions] as const;
 
 const PLUGINS = { code };
 
@@ -165,7 +194,16 @@ function shared(variant: MarkdownVariant): Components {
       return <span {...props} />;
     },
     a: ({ node: _node, className, href, children, ...rest }: Props) => {
-      const image = "data-image-link" in (rest as Record<string, unknown>);
+      const extra = rest as Record<string, unknown>;
+      const image = "data-image-link" in extra;
+      // A memory link resolved by `resolveHref` (already through harden and safeUrl): client navigation, same tab.
+      if ("data-in-app" in extra && typeof href === "string") {
+        return (
+          <Link href={href} data-in-app="" className={cn(linkClass, className)}>
+            {children}
+          </Link>
+        );
+      }
       return (
         <a
           href={typeof href === "string" ? href : undefined}
@@ -244,6 +282,66 @@ const chatComponents: Components = {
 
 // ---------------------------------------------------------------- document variant (Work Zone)
 
+type HeadingDepth = 1 | 2 | 3 | 4 | 5 | 6;
+const DEPTHS: readonly HeadingDepth[] = [1, 2, 3, 4, 5, 6];
+
+/** The document look of a Markdown heading, keyed by its Markdown depth (`#` = 1), whatever its HTML tag. */
+const DOCUMENT_HEADING_CLASS: Record<HeadingDepth, string> = {
+  1: "mt-4 mb-2 font-semibold text-base first:mt-0",
+  2: "mt-4 mb-2 font-semibold text-[15px] first:mt-0",
+  3: "mt-3 mb-1.5 font-semibold text-sm first:mt-0",
+  4: "mt-3 mb-1.5 font-semibold text-sm first:mt-0",
+  5: "mt-3 mb-1.5 font-semibold text-sm first:mt-0",
+  6: "mt-3 mb-1.5 font-semibold text-sm first:mt-0",
+};
+
+/** h1…h6 overrides that keep each depth's look and take the HTML level from `levelOf(depth)` (clamped to 1…6). */
+function documentHeadings(levelOf: (depth: HeadingDepth) => number): Components {
+  const out: Record<string, (p: Props) => React.ReactNode> = {};
+  for (const depth of DEPTHS) {
+    const Tag = `h${Math.min(6, Math.max(1, levelOf(depth)))}` as `h${HeadingDepth}`;
+    out[`h${depth}`] = ({ children }: Props) => (
+      <Tag className={DOCUMENT_HEADING_CLASS[depth]}>{children}</Tag>
+    );
+  }
+  return out as Components;
+}
+
+/**
+ * The shallowest ATX heading depth in the text (`#` = 1), skipping fenced code; 1 when there is none. With
+ * `headingLevel`, that depth renders at `headingLevel` and deeper ones follow it, so a file that starts at `##` does
+ * not skip a level under the page's own heading (axe heading-order).
+ */
+function topHeadingDepth(text: string): number {
+  let top = 6;
+  let fence: string | null = null;
+  for (const line of text.split("\n")) {
+    const marker = /^ {0,3}(`{3,}|~{3,})/u.exec(line)?.[1];
+    if (marker) {
+      if (fence === null) fence = marker;
+      else if (marker[0] === fence[0] && marker.length >= fence.length) fence = null;
+      continue;
+    }
+    if (fence !== null) continue;
+    const depth = /^ {0,3}(#{1,6})(?:[ \t]|$)/u.exec(line)?.[1]?.length;
+    if (depth !== undefined && depth < top) top = depth;
+  }
+  return top;
+}
+
+const leveledComponents = new Map<number, Components>();
+
+/** The document components with Markdown depth `top` rendered as `h{level}` (cached: one object per shift). */
+function documentComponentsAt(level: number, top: number): Components {
+  const shift = level - top;
+  let components = leveledComponents.get(shift);
+  if (!components) {
+    components = { ...documentComponents, ...documentHeadings((depth) => depth + shift) };
+    leveledComponents.set(shift, components);
+  }
+  return components;
+}
+
 const documentComponents: Components = {
   ...shared("document"),
   inlineCode: ({ node: _node, children }: Props) => (
@@ -251,12 +349,7 @@ const documentComponents: Components = {
       {children}
     </code>
   ),
-  h1: ({ children }: Props) => <h3 className="mt-4 mb-2 font-semibold text-base first:mt-0">{children}</h3>,
-  h2: ({ children }: Props) => <h3 className="mt-4 mb-2 font-semibold text-[15px] first:mt-0">{children}</h3>,
-  h3: ({ children }: Props) => <h4 className="mt-3 mb-1.5 font-semibold text-sm first:mt-0">{children}</h4>,
-  h4: ({ children }: Props) => <h4 className="mt-3 mb-1.5 font-semibold text-sm first:mt-0">{children}</h4>,
-  h5: ({ children }: Props) => <h4 className="mt-3 mb-1.5 font-semibold text-sm first:mt-0">{children}</h4>,
-  h6: ({ children }: Props) => <h4 className="mt-3 mb-1.5 font-semibold text-sm first:mt-0">{children}</h4>,
+  ...documentHeadings((depth) => (depth <= 2 ? 3 : 4)),
   p: ({ children }: Props) => <p className="my-2 leading-relaxed first:mt-0 last:mb-0">{children}</p>,
   ul: ({ children }: Props) => (
     <ul className="my-2 list-disc space-y-1 pl-5 marker:text-muted-foreground">{children}</ul>
@@ -307,12 +400,39 @@ export const Markdown = memo(function Markdown({
   variant = "chat",
   streaming = false,
   className,
+  resolveHref,
+  headingLevel,
 }: {
   text: string;
   variant?: MarkdownVariant;
   streaming?: boolean;
   className?: string;
+  /**
+   * Document variant only: maps a relative link to an in-app href (opened in place, same tab), or null to render its
+   * text without a link. Pass a stable function (useCallback): it keys the plugin list.
+   */
+  resolveHref?: (href: string) => string | null;
+  /**
+   * Document variant only: the HTML level of the text's top heading, so its outline continues the page's (memory
+   * files: 2, under the file name's h1). Unset keeps the Work Zone tags (h3/h4). The look never changes.
+   */
+  headingLevel?: HeadingDepth;
 }) {
+  const rehypePlugins = useMemo(
+    () =>
+      variant === "document" && resolveHref
+        ? [
+            rehypeImagesAsLinksAndPlainLargeCode,
+            [rehypeInAppLinks, { resolve: resolveHref }],
+            HARDEN,
+            rehypeMentions,
+          ]
+        : REHYPE_PLUGINS,
+    [variant, resolveHref],
+  );
+  const top = variant === "document" && headingLevel ? topHeadingDepth(text) : null;
+  const components =
+    top !== null && headingLevel ? documentComponentsAt(headingLevel, top) : COMPONENTS[variant];
   return (
     <div className={cn(ROOT_CLASS[variant], className)} data-variant={variant}>
       <Streamdown
@@ -320,12 +440,12 @@ export const Markdown = memo(function Markdown({
         parseIncompleteMarkdown={streaming}
         isAnimating={streaming}
         // Explicit list: never streamdown's raw-HTML plugin (D-05).
-        rehypePlugins={REHYPE_PLUGINS as never}
+        rehypePlugins={rehypePlugins as never}
         urlTransform={urlTransform}
         plugins={PLUGINS}
         controls={CONTROLS}
         lineNumbers={false}
-        components={COMPONENTS[variant]}
+        components={components}
         // streamdown's wrapper adds space-y-4 between blocks; spacing comes from each element instead.
         className="space-y-0"
       >

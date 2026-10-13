@@ -31,6 +31,7 @@ function rule(r: Partial<RuleFact> & { permission: string }): RuleFact {
     subjectKind: "everyone",
     subjectId: null,
     tool: null,
+    pathPrefix: null,
     effect: "deny",
     ...r,
   };
@@ -63,6 +64,12 @@ describe("moduleStateOf: exact rows only", () => {
     expect(moduleStateOf(noise, "ai_chats", T, everyone)).toBe("off");
     expect(moduleStateOf(noise, "ai_chats", null, { kind: "user", userId: DANA })).toBe("off");
     expect(moduleStateOf(noise, "ai_chats", null, { kind: "user", userId: SAM })).toBe("on");
+  });
+
+  it("ignores folder rows (Phase 07.2): a memory.* deny on one folder is not the Memory module turned off", () => {
+    const folder = [rule({ permission: "memory.*", pathPrefix: "hr/" })];
+    expect(moduleStateOf(folder, "memory", null, everyone)).toBe("on");
+    expect(moduleStateOf([...folder, ...rows("memory")], "memory", null, everyone)).toBe("off");
   });
 
   it("counts duplicates once", () => {
@@ -101,6 +108,7 @@ describe("deriveModuleAccess", () => {
       { module: "work_zone", state: "on", inherited: null },
       { module: "ai_chats", state: "on", inherited: null },
       { module: "bots", state: "on", inherited: null },
+      { module: "memory", state: "on", inherited: null },
     ]);
     expect(v.people).toEqual([
       { userId: DANA, displayName: "Dana Dev", avatarUrl: null, canEdit: true, modules: v.modules },
@@ -163,6 +171,7 @@ describe("deriveModuleAccess", () => {
         inherited: { scopeUnitId: null, name: "Organization", state: "off" },
       },
       { module: "bots", state: "off", inherited: null },
+      { module: "memory", state: "on", inherited: null },
     ]);
     // Person rows never change the unit's own state.
     expect(v.modules.every((m) => m.state === "on" && m.inherited === null)).toBe(true);
@@ -206,6 +215,7 @@ describe("deriveModuleAccess", () => {
         { module: "work_zone", state: "off", inherited: null },
         { module: "ai_chats", state: "on", inherited: null },
         { module: "bots", state: "on", inherited: null },
+        { module: "memory", state: "on", inherited: null },
       ],
     });
     expect(stateIn(v.overrides[1]?.modules ?? [], "work_zone")?.state).toBe("custom");

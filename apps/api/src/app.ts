@@ -27,6 +27,7 @@ import { createEnvFileSecretStore, type SecretStore } from "./lib/secret-store";
 import { createAgentModule } from "./modules/agent";
 import { createAgentChannelModule } from "./modules/agent-channel";
 import { createAiChatModule } from "./modules/ai-chat";
+import { type ApprovalService, createApprovalModule } from "./modules/approval";
 import { createArtifactModule, type ObjectStorage } from "./modules/artifact";
 import { createAuditService } from "./modules/audit";
 import { createBotCapabilitiesModule } from "./modules/bot-capabilities";
@@ -34,6 +35,7 @@ import { createChatModule, createConversationAccess } from "./modules/chat";
 import { createDeviceModule, type DeviceHub } from "./modules/device";
 import { createAuth, createIdentityModule, IdentityService } from "./modules/identity";
 import { createMcpModule } from "./modules/mcp";
+import { createMemoryModule, createMemoryService, type MemoryService } from "./modules/memory";
 import { createModelGateway, createModelGatewayModule } from "./modules/model-gateway";
 import { createNotificationModule } from "./modules/notification";
 import { AuthzDeniedError, createOrganizationModule, recordAuthzDenial } from "./modules/organization";
@@ -56,6 +58,10 @@ export interface BuiltApp {
   deviceHub: DeviceHub;
   /** Attachment object storage, null when unconfigured (tests count its calls, e.g. none on the prompt submit path). */
   storage: ObjectStorage | null;
+  /** The approve-and-apply primitive (07.2-06): later modules and tests register kinds on it. */
+  approvals: ApprovalService;
+  /** The memory domain (07.2-08): 07.2-09 registers its approval kind with it, 07.2-11 serves agents from it. */
+  memory: MemoryService;
   close(): Promise<void>;
 }
 
@@ -267,6 +273,11 @@ export async function buildApp(
     access: createConversationAccess(core),
     scopes: { work_session: createWorkSessionAttachmentScope(core) },
   });
+  // Phase 07.2: the approve-and-apply primitive (ADR-0023); memory (07.2), tool grants (07.5) and automations (07.6)
+  // register their kinds on `approvals.service`.
+  const approvals = createApprovalModule(core);
+  // Phase 07.2: scoped memory files (MEM-01, MEM-02, MEM-07); proposals register on `approvals` (07.2-09).
+  const memory = createMemoryService(core, { approvals: approvals.service });
   const modules: ApiModule[] = [
     createIdentityModule({
       identity,
@@ -276,7 +287,7 @@ export async function buildApp(
       apiUrl: env.OCW_PUBLIC_API_URL,
       signInRatePerMinute: env.OCW_SIGNIN_RATE_LIMIT_PER_MINUTE,
     }),
-    createOrganizationModule(core),
+    createOrganizationModule(core, { approvals: approvals.service }), // 07.2: a unit deletion closes its gone approvals
     createRealtimeModule({ realtime, identity, allowedOrigins, bus, online }),
     createSecretsModule(),
     createChatModule(core), // B1
@@ -285,13 +296,16 @@ export async function buildApp(
     createSearchModule(core, { modelLabel: (ref) => modelGateway.labelOf(ref) }), // Phase 4: full-text search (CHAT-11, D-04); AI chats of their owner (05-10)
     createModelGatewayModule(core, modelGateway), // Phase 5: AI chat models and ChatGPT plan status
     createAiChatModule(core, { gateway: modelGateway, storage: artifactModule.storage }), // Phase 5: direct AI chat (AICHAT-02/03/07/08)
-    createAgentModule(core), // B2
-    createBotCapabilitiesModule(core), // Phase 3.1: capabilities, bot policy, governance
+    createAgentModule(core, { approvals: approvals.service }), // B2; 07.2: a bot deletion closes its pending approvals
+    createBotCapabilitiesModule(core, { memory }), // Phase 3.1: capabilities, bot policy, governance; 07.2-11: notes on files
     createMcpModule(core), // Phase 3.1: MCP server registry (D-13)
     createPluginsModule(core), // Phase 3.1: OpenClaw Marketplace (D-14)
-    createAgentChannelModule(core, { modelLabel: (ref) => modelGateway.labelOf(ref) }), // B2; 06-10: model labels in persona history
+    // B2; 06-10: model labels in persona history; 07.2-11: memory tools and memory files in the turn
+    createAgentChannelModule(core, { modelLabel: (ref) => modelGateway.labelOf(ref), memory }),
     deviceModule, // B3
     createWorkSessionModule(core, deviceModule.hub, { storage: artifactModule.storage }), // B3; 06.1: image bytes
+    approvals.module, // Phase 07.2: approvals inbox and decisions (MEM-06)
+    createMemoryModule(core, memory), // Phase 07.2: memory scopes, files and history (MEM-01, MEM-02, MEM-07)
   ];
   for (const m of modules) {
     await app.register(async (scope) => m.register(scope as unknown as App), {
@@ -305,6 +319,8 @@ export async function buildApp(
     authz,
     deviceHub: deviceModule.hub,
     storage: artifactModule.storage,
+    approvals: approvals.service,
+    memory,
     async close() {
       await app.close();
       for (const m of modules) await m.close?.();

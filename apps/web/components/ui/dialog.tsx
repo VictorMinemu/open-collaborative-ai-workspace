@@ -32,9 +32,11 @@ export function DialogContent({
       >
         {children}
         {showClose ? (
+          // 32 px from 1024; a 44 px touch target below it, centred on the same spot (UI-SPEC "Touch").
           <DialogPrimitive.Close
             aria-label="Close"
-            className="absolute top-3.5 right-3.5 inline-flex size-8 items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40"
+            data-slot="dialog-close"
+            className="absolute top-3.5 right-3.5 inline-flex size-8 items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40 max-lg:top-2 max-lg:right-2 max-lg:size-11"
           >
             <X className="size-4" />
           </DialogPrimitive.Close>

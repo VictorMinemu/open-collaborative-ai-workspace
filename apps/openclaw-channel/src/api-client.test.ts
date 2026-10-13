@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { resolveOcwAccount } from "./account.js";
 import { AgentChannelHttpError, createAgentChannelClient, isRetryableStatus } from "./api-client.js";
 import { chunkText } from "./bridge.js";
@@ -228,6 +228,105 @@ describe("board calls (07.1-13, ocw_board_card)", () => {
   });
 });
 
+describe("memory file calls (07.2-07, ocw_memory_list|read|write|propose)", () => {
+  const client = (responses: Array<{ status: number; body?: unknown }>) => {
+    const scripted = scriptedFetch(responses);
+    return {
+      calls: scripted.calls,
+      c: createAgentChannelClient({
+        apiUrl: "http://api",
+        token: () => "cell-token",
+        fetch: scripted.fetchImpl,
+        backoff: { baseMs: 1, maxMs: 2 },
+      }),
+    };
+  };
+  const READ = { eventId: "e1", agentId: "a1", scope: "personal" as const, path: "MEMORY.md" };
+
+  it("memoryRead posts to /memory/read with the cell bearer and parses the file (or a refusal)", async () => {
+    const { c, calls } = client([
+      { status: 200, body: { file: { path: "MEMORY.md", version: 3, content: "- likes tea\n" } } },
+      { status: 200, body: { refused: "not_found" } },
+    ]);
+    expect(await c.memoryRead(READ)).toEqual({
+      file: { path: "MEMORY.md", version: 3, content: "- likes tea\n" },
+    });
+    expect(calls[0]?.url).toBe("http://api/agent-channel/v1/memory/read");
+    expect(calls[0]?.init.method).toBe("POST");
+    expect((calls[0]?.init.headers as Record<string, string> | undefined)?.authorization).toBe(
+      "Bearer cell-token",
+    );
+    expect(JSON.parse(String(calls[0]?.init.body))).toEqual(READ);
+    expect(await c.memoryRead(READ)).toEqual({ refused: "not_found" });
+  });
+
+  it("a response that is neither a file nor a refusal is rejected (never shown to the model)", async () => {
+    const { c } = client([{ status: 200, body: { file: { path: "MEMORY.md" } } }]);
+    await expect(c.memoryRead(READ)).rejects.toBeDefined();
+  });
+
+  it("memoryList, memoryWrite and memoryPropose post to their routes; write and propose never retry", async () => {
+    const { c, calls } = client([
+      { status: 200, body: { scopes: [{ id: "s1", kind: "personal", label: "You", viewerCan: ["read"] }] } },
+      { status: 200, body: { fileId: "f1", version: 2 } },
+      { status: 200, body: { approvalId: "ap1", findings: [], readerCount: 4 } },
+    ]);
+    expect(await c.memoryList({ eventId: "e1", agentId: "a1" })).toMatchObject({ scopes: [{ id: "s1" }] });
+    expect(
+      await c.memoryWrite({
+        eventId: "e1",
+        agentId: "a1",
+        scope: "personal",
+        path: "MEMORY.md",
+        mode: "append",
+        content: "- x",
+      }),
+    ).toEqual({ fileId: "f1", version: 2 });
+    expect(
+      await c.memoryPropose({
+        eventId: "e1",
+        agentId: "a1",
+        scope: "agent",
+        path: "clients/acme.md",
+        op: "create",
+        content: "# Acme",
+      }),
+    ).toEqual({ approvalId: "ap1", findings: [], readerCount: 4 });
+    expect(calls.map((x) => x.url)).toEqual([
+      "http://api/agent-channel/v1/memory/list",
+      "http://api/agent-channel/v1/memory/write",
+      "http://api/agent-channel/v1/memory/propose",
+    ]);
+    const failing = client([{ status: 502 }, { status: 200, body: { fileId: "f1", version: 2 } }]);
+    await expect(
+      failing.c.memoryWrite({
+        eventId: "e1",
+        agentId: "a1",
+        scope: "personal",
+        path: "MEMORY.md",
+        mode: "append",
+        content: "- x",
+      }),
+    ).rejects.toBeDefined();
+    expect(failing.calls).toHaveLength(1);
+    const proposing = client([
+      { status: 503 },
+      { status: 200, body: { approvalId: "a", findings: [], readerCount: 1 } },
+    ]);
+    await expect(
+      proposing.c.memoryPropose({
+        eventId: "e1",
+        agentId: "a1",
+        scope: "agent",
+        path: "a.md",
+        op: "create",
+        content: "x",
+      }),
+    ).rejects.toBeDefined();
+    expect(proposing.calls).toHaveLength(1);
+  });
+});
+
 describe("account resolution", () => {
   it("reads api url and token file from env; never needs secrets in config", () => {
     const acc = resolveOcwAccount(
@@ -248,5 +347,24 @@ describe("chunkText", () => {
     const text = `${"a".repeat(60)}\n${"b".repeat(60)}`;
     expect(chunkText(text, 100)).toEqual(["a".repeat(60), "b".repeat(60)]);
     expect(chunkText("short", 100)).toEqual(["short"]);
+  });
+});
+
+describe("AgentChannelHttpError across module instances (07.2-15, real-cell smoke memory-files)", () => {
+  it("an error thrown by another module instance of the plugin is still recognised", async () => {
+    // OpenClaw loads the plugin once per registry (boot, discovery, tool-discovery): the shared client may come from
+    // one module instance and the tool that catches its error from another.
+    vi.resetModules();
+    const other = (await import("./api-client.js")) as typeof import("./api-client.js");
+    expect(other.AgentChannelHttpError).not.toBe(AgentChannelHttpError);
+    const fromOther = new other.AgentChannelHttpError(403, "/memory/read", "x", "no_trigger");
+    expect(fromOther instanceof AgentChannelHttpError).toBe(true);
+    expect(new AgentChannelHttpError(409, "/cards", "y") instanceof other.AgentChannelHttpError).toBe(true);
+    expect(fromOther instanceof Error).toBe(true);
+    expect(new Error("plain") instanceof AgentChannelHttpError).toBe(false);
+    expect(Object.assign(new Error("look-alike"), { status: 403 }) instanceof AgentChannelHttpError).toBe(
+      false,
+    );
+    expect((null as unknown as object) instanceof AgentChannelHttpError).toBe(false);
   });
 });

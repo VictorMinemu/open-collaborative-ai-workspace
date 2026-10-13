@@ -2,8 +2,12 @@ import { randomUUID } from "node:crypto";
 import { createTenantDb, type TenantDb, type Tx } from "@ocw/db";
 import { startTestDatabase, type TestDatabase } from "@ocw/db/testing";
 import pg from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { loadPrincipalFacts, loadRules } from "./facts";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { createAuditService } from "../../audit";
+import { loadPrincipalFacts, loadPrincipalFactsMany, loadRules } from "./facts";
+import { memoryResource } from "./policy";
+import { decide, type PrincipalFacts } from "./resolve";
+import { createPermissionService } from "./service";
 
 let tdb: TestDatabase;
 let su: pg.Client;
@@ -146,6 +150,7 @@ describe("loadRules", () => {
         subjectId: null,
         permission: "channel.create",
         tool: null,
+        pathPrefix: null,
         effect: "deny",
       },
     ]);
@@ -157,5 +162,228 @@ describe("loadRules", () => {
       tool: "Bash",
       effect: "allow",
     });
+  });
+});
+
+describe("folder rules end to end (Phase 07.2, D-04): rule row → loadRules → resolver", () => {
+  const C = randomUUID();
+  const E = randomUUID();
+  const dept = randomUUID();
+  const team = randomUUID();
+  const mia = randomUUID();
+  const noa = randomUUID();
+  const hrDeny = randomUUID();
+  const plainRule = randomUUID();
+  const foreignDeny = randomUUID();
+  const withC = <R>(fn: (tx: Tx) => Promise<R>) => db.withTenant({ organizationId: C, userId: null }, fn);
+
+  beforeAll(async () => {
+    await seedOrg(C);
+    await seedOrg(E);
+    await seedUser(C, mia, "standard");
+    await seedUser(C, noa, "standard");
+    await q(
+      `insert into app.org_units (id, organization_id, kind, name, path) values
+         ($1, $3, 'department', 'People', ARRAY[$1]::uuid[]),
+         ($2, $3, 'team', 'Ops', ARRAY[$1, $2]::uuid[])`,
+      [dept, team, C],
+    );
+    await q(
+      `insert into app.unit_memberships (organization_id, unit_id, user_id, role) values
+         ($1, $2, $3, 'member'), ($1, $2, $4, 'member')`,
+      [C, team, mia, noa],
+    );
+    await q(
+      `insert into app.permission_rules (id, organization_id, scope_unit_id, subject_kind, subject_id, permission, path_prefix, effect)
+       values ($1, $2, $3, 'user', $4, 'memory.read', 'hr/', 'deny')`,
+      [hrDeny, C, team, mia],
+    );
+    await q(
+      `insert into app.permission_rules (id, organization_id, subject_kind, permission, effect)
+       values ($1, $2, 'everyone', 'memory.write', 'deny')`,
+      [plainRule, C],
+    );
+    // Another organization denies everyone everything under clients/: it must never reach C.
+    await q(
+      `insert into app.permission_rules (id, organization_id, subject_kind, permission, path_prefix, effect)
+       values ($1, $2, 'everyone', 'memory.*', 'clients/', 'deny')`,
+      [foreignDeny, E],
+    );
+  });
+
+  it("loadRules returns the folder of a folder rule and null otherwise, only for the tenant", async () => {
+    const rules = await withC((tx) => loadRules(tx));
+    const byId = new Map(rules.map((r) => [r.id, r]));
+    expect([...byId.keys()].sort()).toEqual([hrDeny, plainRule].sort());
+    expect(byId.get(hrDeny)).toEqual({
+      id: hrDeny,
+      scopeUnitId: team,
+      subjectKind: "user",
+      subjectId: mia,
+      permission: "memory.read",
+      tool: null,
+      pathPrefix: "hr/",
+      effect: "deny",
+    });
+    expect(byId.get(plainRule)?.pathPrefix).toBeNull();
+    const foreign = await db.withTenant({ organizationId: E, userId: null }, (tx) => loadRules(tx));
+    expect(foreign.map((r) => [r.id, r.pathPrefix])).toEqual([[foreignDeny, "clients/"]]);
+  });
+
+  it("the deny hides hr/ of the team's memory from one member; the rest of the tree and the other member are unaffected", async () => {
+    const scope = { kind: "unit" as const, ownerUserId: null, agent: null, unitPath: [dept, team] };
+    const read = (userId: string, path: string | undefined) =>
+      withC(async (tx) => {
+        const p = await loadPrincipalFacts(tx, { kind: "user", userId });
+        const rules = await loadRules(tx);
+        return decide(p, memoryResource(scope, path, { kind: "user", id: userId }), rules, "memory.read");
+      });
+    expect(await read(mia, "hr/salaries.md")).toEqual({
+      allowed: false,
+      denial: {
+        permission: "memory.read",
+        layer: "user",
+        reason: "denied_by_rule",
+        ruleId: hrDeny,
+        unitId: team,
+      },
+    });
+    expect((await read(mia, "HR/Reviews/2026.md")).allowed).toBe(false);
+    expect((await read(mia, "MEMORY.md")).allowed).toBe(true);
+    expect((await read(mia, "hr-public/handbook.md")).allowed).toBe(true);
+    expect((await read(mia, undefined)).allowed).toBe(true);
+    expect((await read(noa, "hr/salaries.md")).allowed).toBe(true);
+    // The other organization's clients/ deny never applies here.
+    expect((await read(mia, "clients/acme.md")).allowed).toBe(true);
+    expect((await read(noa, "clients/acme.md")).allowed).toBe(true);
+  });
+});
+
+describe("batch facts and usersAllowed (Phase 07.2: reader counts and deciders)", () => {
+  // Organization F: department D ⊃ teams A, B.
+  const F = randomUUID();
+  const G = randomUUID();
+  const D_ = randomUUID();
+  const A_ = randomUUID();
+  const B_ = randomUUID();
+  const ada = randomUUID(); // admin, no unit
+  const amy = randomUUID(); // standard, member of A and of B
+  const bob = randomUUID(); // standard, member of B
+  const dan = randomUUID(); // lead of D
+  const ali = randomUUID(); // lead of A
+  const dot = randomUUID(); // standard, member of D only
+  const old = randomUUID(); // deactivated member of A
+  const gus = randomUUID(); // a member of organization G only
+  const withF = <R>(fn: (tx: Tx) => Promise<R>) => db.withTenant({ organizationId: F, userId: null }, fn);
+  const perms = () => createPermissionService({ db, audit: createAuditService() });
+  const scopeOf = (path: readonly string[]) => ({
+    kind: "unit" as const,
+    ownerUserId: null,
+    agent: null,
+    unitPath: path,
+  });
+
+  beforeAll(async () => {
+    await seedOrg(F);
+    await seedOrg(G);
+    for (const [id, role] of [
+      [ada, "admin"],
+      [amy, "standard"],
+      [bob, "standard"],
+      [dan, "lead"],
+      [ali, "lead"],
+      [dot, "standard"],
+      [old, "standard"],
+    ] as const) {
+      await seedUser(F, id, role);
+    }
+    await seedUser(G, gus, "admin");
+    await q("update app.org_members set deactivated_at = now() where user_id = $1", [old]);
+    await q(
+      `insert into app.org_units (id, organization_id, kind, name, path) values
+         ($1, $4, 'department', 'Dept', ARRAY[$1]::uuid[]),
+         ($2, $4, 'team', 'Team A', ARRAY[$1, $2]::uuid[]),
+         ($3, $4, 'team', 'Team B', ARRAY[$1, $3]::uuid[])`,
+      [D_, A_, B_, F],
+    );
+    await q(
+      `insert into app.unit_memberships (organization_id, unit_id, user_id, role) values
+         ($1, $2, $4, 'member'), ($1, $3, $4, 'member'), ($1, $3, $5, 'member'),
+         ($1, $6, $7, 'lead'), ($1, $2, $8, 'lead'), ($1, $6, $9, 'member'), ($1, $2, $10, 'member')`,
+      [F, A_, B_, amy, bob, D_, dan, ali, dot, old],
+    );
+    // Organization G denies everyone every memory grain: it must never reach F.
+    await q(
+      "insert into app.permission_rules (organization_id, subject_kind, permission, effect) values ($1, 'everyone', 'memory.*', 'deny')",
+      [G],
+    );
+  });
+
+  it("loadPrincipalFactsMany equals one loadPrincipalFacts per user, in two queries; unknown ids are absent", async () => {
+    const ids = [ada, amy, dan, ali, old];
+    const { many, single, selects } = await withF(async (tx) => {
+      const spy = vi.spyOn(tx, "select");
+      const many = await loadPrincipalFactsMany(tx, [...ids, randomUUID(), gus, amy]);
+      const selects = spy.mock.calls.length;
+      spy.mockRestore();
+      const single = new Map<string, PrincipalFacts>();
+      for (const id of ids) single.set(id, await loadPrincipalFacts(tx, { kind: "user", userId: id }));
+      return { many, single, selects };
+    });
+    expect(selects).toBe(2);
+    expect([...many.keys()].sort()).toEqual([...ids].sort());
+    for (const id of ids) {
+      const a = many.get(id);
+      const b = single.get(id);
+      expect(a, id).toEqual(b);
+    }
+    expect(many.get(amy)?.memberUnitPaths).toHaveLength(2);
+    expect(many.get(old)?.deactivated).toBe(true);
+    expect(await withF((tx) => loadPrincipalFactsMany(tx, []))).toEqual(new Map());
+  });
+
+  it("usersAllowed on a team A file: exactly A members, the A and D leads and admins, sorted; never deactivated", async () => {
+    const service = perms();
+    const allowed = (
+      permission: "memory.read" | "memory.promote",
+      path: string,
+      candidates: readonly string[] | "members" = "members",
+    ) =>
+      withF((tx) =>
+        service.usersAllowed(tx, {
+          candidates,
+          permission,
+          resourceFor: (userId) => memoryResource(scopeOf([D_, A_]), path, { kind: "user", id: userId }),
+        }),
+      );
+    expect(await allowed("memory.read", "notes/x.md")).toEqual([ada, amy, dan, ali].sort());
+    expect(await allowed("memory.promote", "notes/x.md")).toEqual([ada, dan, ali].sort());
+    // An explicit candidate list: strangers, other organizations and deactivated members never count.
+    expect(await allowed("memory.read", "notes/x.md", [bob, amy, old, gus, randomUUID(), amy])).toEqual([
+      amy,
+    ]);
+    expect(await allowed("memory.read", "notes/x.md", [])).toEqual([]);
+  });
+
+  it("a folder deny for one member removes exactly that member under that folder", async () => {
+    const service = perms();
+    await q(
+      `insert into app.permission_rules (organization_id, scope_unit_id, subject_kind, subject_id, permission, path_prefix, effect)
+       values ($1, $2, 'user', $3, 'memory.read', 'hr/', 'deny')`,
+      [F, A_, amy],
+    );
+    const readers = (path: string) =>
+      withF((tx) =>
+        service.usersAllowed(tx, {
+          candidates: "members",
+          permission: "memory.read",
+          resourceFor: (userId) => memoryResource(scopeOf([D_, A_]), path, { kind: "user", id: userId }),
+        }),
+      );
+    expect(await readers("hr/pay.md")).toEqual([ada, dan, ali].sort());
+    expect(await readers("Hr/Sub/pay.md")).toEqual([ada, dan, ali].sort());
+    expect(await readers("hr-public/pay.md")).toEqual([ada, amy, dan, ali].sort());
+    // Organization G's memory.* deny for everyone never applied to F (cross-tenant).
+    expect(await readers("MEMORY.md")).toEqual([ada, amy, dan, ali].sort());
   });
 });

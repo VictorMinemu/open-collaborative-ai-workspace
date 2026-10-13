@@ -8,11 +8,13 @@ import {
   EventTypes,
   type Message,
 } from "@ocw/contracts";
-import { conversations, messageCardFollows, messageCards, messages, type Tx } from "@ocw/db";
+import { conversations, messageCardFollows, messageCards, messages, type Tx, tenantOf } from "@ocw/db";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
-import { type App, authOf, tenant } from "../../core";
-import { conflict, forbidden, gone, notFound } from "../../lib/errors";
+import { markDecided } from "../../authz";
+import { type App, authOf, type Core, tenant } from "../../core";
+import type { ChatAgentBridge, LinkedCardInfo } from "../../lib/chat-agent-bridge";
+import { badRequest, conflict, forbidden, gone, notFound } from "../../lib/errors";
 import { channelResource, type PermissionService } from "../organization";
 import { authorOf, type Directory, loadDirectory } from "./directory";
 import type { ChatRouteCtx } from "./index";
@@ -46,6 +48,33 @@ const CARD_KINDS = ["channel", "dm", "group", "ai_chat"] as const;
  * (every app does, before serving); unset = nobody is offered `decide` (fail closed).
  */
 let decider: Pick<PermissionService, "decide"> | null = null;
+/**
+ * The bridge whose `linkedCards()` knows which platform-owned cards mirror an approval (07.2-06). Set with `decider`;
+ * unset or without a provider = no card is linked (no `approval`, never `decide`: fail closed).
+ */
+let bridge: Pick<ChatAgentBridge, "linkedCards"> | null = null;
+
+/** The approval links of the platform-owned cards among `rows` (one query through the provider). */
+async function linksOf(tx: Tx, rows: CardRow[]): Promise<Map<string, LinkedCardInfo>> {
+  const owned = rows.filter((r) => r.platformOwned).map((r) => r.messageId);
+  const linked = bridge?.linkedCards();
+  if (owned.length === 0 || !linked) return new Map();
+  return linked.linkOf(tx, owned);
+}
+
+const approvalLink = (link: LinkedCardInfo | undefined): Pick<AgentCard, "approval"> =>
+  link
+    ? {
+        approval: {
+          id: link.id,
+          actionHash: link.actionHash,
+          status: link.status,
+          requestedForUserId: link.requestedForUserId,
+          warnings: link.warnings,
+          resultCode: link.resultCode,
+        },
+      }
+    : {};
 
 function cardFromRow(row: CardRow, dir: Directory | null): AgentCard {
   const decision: AgentCard["decision"] =
@@ -59,6 +88,8 @@ function cardFromRow(row: CardRow, dir: Directory | null): AgentCard {
               row.decidedBy && dir ? authorOf(dir, "user", row.decidedBy).displayName : "Former member",
           },
           at: iso(row.decidedAt),
+          // Absent without a note, so older snapshots keep their exact shape.
+          ...(row.decisionNote ? { note: row.decisionNote } : {}),
         }
       : null;
   return {
@@ -70,6 +101,7 @@ function cardFromRow(row: CardRow, dir: Directory | null): AgentCard {
     version: row.version,
     decision,
     updatedAt: iso(row.updatedAt),
+    ...(row.platformOwned ? { platformOwned: true } : {}),
   };
 }
 
@@ -77,7 +109,11 @@ function cardFromRow(row: CardRow, dir: Directory | null): AgentCard {
 export async function cardOf(tx: Tx, messageId: string): Promise<AgentCard | null> {
   const [row] = await tx.select().from(messageCards).where(eq(messageCards.messageId, messageId)).limit(1);
   if (!row) return null;
-  return cardFromRow(row, row.decidedBy ? await loadDirectory(tx) : null);
+  const links = await linksOf(tx, [row]);
+  return {
+    ...cardFromRow(row, row.decidedBy ? await loadDirectory(tx) : null),
+    ...approvalLink(links.get(row.messageId)),
+  };
 }
 
 /**
@@ -139,14 +175,28 @@ export async function withCards(tx: Tx, list: Message[], viewerId: string | null
     approves.set(conversationId, allowed);
     return allowed;
   };
+  // Linked cards (07.2-06): the approval's kind decides who may decide, live; `agent_card.approve` and the card's
+  // approver list are not consulted. A platform-owned card without a link offers no decision.
+  const links = await linksOf(tx, rows);
+  const linked = bridge?.linkedCards();
+  const linkedDeciders =
+    viewerId && linked && links.size > 0
+      ? await linked.canDecide(tx, [...links.keys()], viewerId)
+      : new Set<string>();
   const cards = new Map<string, AgentCard>();
   for (const row of rows) {
     const viewerCan: Array<"follow" | "decide"> = viewerId ? ["follow"] : [];
-    if (viewerId && decisionBlock(row, viewerId) === null && (await mayApprove(row.conversationId))) {
+    const link = links.get(row.messageId);
+    if (row.platformOwned) {
+      if (link && link.status === "pending" && !row.decision && linkedDeciders.has(row.messageId)) {
+        viewerCan.push("decide");
+      }
+    } else if (viewerId && decisionBlock(row, viewerId) === null && (await mayApprove(row.conversationId))) {
       viewerCan.push("decide");
     }
     cards.set(row.messageId, {
       ...cardFromRow(row, dir),
+      ...approvalLink(link),
       following: following.has(row.messageId),
       viewerCan,
     });
@@ -160,7 +210,7 @@ export async function withCards(tx: Tx, list: Message[], viewerId: string | null
 /** Inserts the card of an agent's new message (version 1), in the message transaction. */
 export async function insertCard(
   tx: Tx,
-  a: { message: MessageRow; agentId: string; input: AgentCardInput },
+  a: { message: MessageRow; agentId: string; input: AgentCardInput; platformOwned?: boolean },
 ): Promise<AgentCard> {
   const [row] = await tx
     .insert(messageCards)
@@ -174,6 +224,7 @@ export async function insertCard(
       fields: a.input.fields,
       status: a.input.status,
       actions: a.input.actions,
+      platformOwned: a.platformOwned === true,
     })
     .returning();
   if (!row) throw new Error("card insert returned no row");
@@ -213,6 +264,10 @@ export async function patchCard(
     .limit(1)
     .for("update");
   if (!before) throw notFound("Card not found", "card_not_found");
+  // Platform-owned cards (07.2-06, D-08) are composed by the server: no agent may rewrite their findings or readers.
+  if (before.platformOwned) {
+    throw forbidden("This card is composed by the platform; agents cannot update it", "card_platform_owned");
+  }
   if (before.agentId !== a.agentId) {
     throw forbidden("Only the agent that posted this card can update it", "not_card_author");
   }
@@ -266,6 +321,101 @@ export async function patchCard(
   return { before, after, message: dto };
 }
 
+/**
+ * Re-announces a card message to its conversation (`message.updated`, same version): the approval module calls it once
+ * it has linked a freshly posted mirror card to its request, so live readers get the card with its approval link
+ * (07.2-13, WINDOWS 160; the `message.created` frame was built before the link existed). A deleted message is left out.
+ */
+export async function announceCardMessage(
+  tx: Tx,
+  deps: Pick<Core, "realtime">,
+  messageId: string,
+): Promise<void> {
+  const [message] = await tx.select().from(messages).where(eq(messages.id, messageId)).limit(1);
+  if (!message || message.deletedAt) return;
+  const dto = await cardMessageOf(tx, message, await loadDirectory(tx));
+  await deps.realtime.appendEvent(tx, convTopic(message.conversationId), EventTypes.messageUpdated, {
+    message: dto,
+  });
+}
+
+/**
+ * Mirrors an approval's decision on its platform-owned card (07.2-06), in the decision transaction: status, decision,
+ * decider and note, a version bump, `message.updated` to every reader, then the agent hears it as
+ * `agent.card_action.v1` (with the quoted note). Once: a card that already shows a decision is left as it is. Called
+ * by the approval module only; chat never decides an approval itself.
+ */
+export async function mirrorCardDecision(
+  tx: Tx,
+  deps: Pick<Core, "realtime" | "chatAgent">,
+  a: {
+    messageId: string;
+    outcome: "approved" | "denied";
+    deciderUserId: string;
+    status: "succeeded" | "failed" | "cancelled";
+    note?: string | null | undefined;
+  },
+): Promise<void> {
+  const [after] = await tx
+    .update(messageCards)
+    .set({
+      status: a.status,
+      decision: a.outcome,
+      decidedBy: a.deciderUserId,
+      decidedAt: sql`now()`,
+      decisionNote: a.note ?? null,
+      version: sql`${messageCards.version} + 1`,
+      updatedAt: sql`now()`,
+    })
+    .where(
+      and(
+        eq(messageCards.messageId, a.messageId),
+        eq(messageCards.platformOwned, true),
+        isNull(messageCards.decision),
+      ),
+    )
+    .returning();
+  if (!after) return;
+  const [message] = await tx.select().from(messages).where(eq(messages.id, a.messageId)).limit(1);
+  if (message && !message.deletedAt) {
+    const dto = await cardMessageOf(tx, message, await loadDirectory(tx));
+    await deps.realtime.appendEvent(tx, convTopic(message.conversationId), EventTypes.messageUpdated, {
+      message: dto,
+    });
+  }
+  await deps.chatAgent.emitCardAction(
+    tx,
+    { messageId: a.messageId, outcome: a.outcome, actorUserId: a.deciderUserId, note: a.note ?? undefined },
+    tenantOf(tx).afterCommit,
+  );
+}
+
+/**
+ * Closes the platform-owned card of an approval that nobody decided (the approval's "gone" path, WINDOWS 144): its
+ * status only (`failed`), a version bump and `message.updated` to every reader; no decision, no decider, and no card
+ * action turn (nobody acted on it). Once: a card that is no longer pending, or shows a decision, is left as it is.
+ * Called by the approval module only.
+ */
+export async function mirrorCardClosed(
+  tx: Tx,
+  deps: Pick<Core, "realtime">,
+  a: { messageId: string; status: "failed" | "cancelled" },
+): Promise<void> {
+  const [after] = await tx
+    .update(messageCards)
+    .set({ status: a.status, version: sql`${messageCards.version} + 1`, updatedAt: sql`now()` })
+    .where(
+      and(
+        eq(messageCards.messageId, a.messageId),
+        eq(messageCards.platformOwned, true),
+        eq(messageCards.status, "pending"),
+        isNull(messageCards.decision),
+      ),
+    )
+    .returning({ messageId: messageCards.messageId });
+  if (after) await announceCardMessage(tx, deps, a.messageId);
+}
+
 const CARD_NOT_FOUND = "Card not found";
 
 /**
@@ -276,6 +426,7 @@ const CARD_NOT_FOUND = "Card not found";
 export function registerCardActionRoutes(app: App, ctx: ChatRouteCtx): void {
   const { core, deps, access, perms } = ctx;
   decider = perms;
+  bridge = core.chatAgent;
   const tags = ["chat"];
   // `onRequest`, as every AI chat route: an anonymous caller gets 401 before the body is validated (06-16 sweep).
   const user = { config: { authz: "user" as const }, onRequest: core.identity.requireUser };
@@ -350,6 +501,34 @@ export function registerCardActionRoutes(app: App, ctx: ChatRouteCtx): void {
   );
 
   /**
+   * A platform-owned card's decision (07.2-06): the caller reads the conversation (404), names the hash it was shown
+   * (400 `action_hash_required`) and the approval primitive decides with the kind's live rule (403 `not_approver`, 409
+   * on a changed action, an expired or an already decided request), applies, audits and mirrors the card. A
+   * platform-owned card that mirrors no approval has nothing to decide (409).
+   */
+  async function decideLinked(
+    req: FastifyRequest<{ Params: { messageId: string }; Body: AgentCardDecisionRequest }>,
+    tx: Tx,
+  ) {
+    const userId = authOf(req).userId;
+    const { conv, message } = await readableCard(req, tx, req.params.messageId);
+    if (conv.archivedAt) throw gone("This conversation is archived", "channel_archived");
+    const linked = bridge?.linkedCards();
+    const link = linked ? (await linked.linkOf(tx, [message.id])).get(message.id) : undefined;
+    if (!linked || !link) throw conflict("This card has nothing to decide", "card_not_decidable");
+    const { actionHash, outcome, note } = req.body;
+    if (!actionHash) {
+      throw badRequest("Deciding this card needs the action hash you were shown", "action_hash_required");
+    }
+    await linked.decide(tx, { messageId: message.id, deciderUserId: userId, outcome, actionHash, note });
+    markDecided(req);
+    const dto = await cardMessageOf(tx, message, await loadDirectory(tx));
+    const [shown] = await withCards(tx, [dto], userId);
+    if (!shown?.card) throw new Error("decided card missing");
+    return shown.card;
+  }
+
+  /**
    * One decision per card, decided by the server (the client only says approved or denied): the caller reads the
    * conversation (404), holds `agent_card.approve` there (403, deny rules win; in an AI chat only the owner or a `chat`
    * grantee holds it, a `view` grantee is 403 `ai_chat_view_only`), the card has an approve action (409
@@ -367,6 +546,12 @@ export function registerCardActionRoutes(app: App, ctx: ChatRouteCtx): void {
       core.db.withTenant(tenant(req), async (tx, after) => {
         const userId = authOf(req).userId;
         const { outcome } = req.body;
+        const [kind] = await tx
+          .select({ platformOwned: messageCards.platformOwned })
+          .from(messageCards)
+          .where(eq(messageCards.messageId, req.params.messageId))
+          .limit(1);
+        if (kind?.platformOwned) return decideLinked(req, tx);
         const { card, conv, facts, message } = await readableCard(req, tx, req.params.messageId, true);
         if (conv.archivedAt) throw gone("This conversation is archived", "channel_archived");
         await perms.assertCan(req, tx, "agent_card.approve", channelResource(facts));
@@ -375,9 +560,16 @@ export function registerCardActionRoutes(app: App, ctx: ChatRouteCtx): void {
         if (block === "not_card_approver")
           throw forbidden("Only the approvers named on this card can decide", block);
         if (block === "card_already_decided") throw conflict("This card was already decided", block);
+        const note = req.body.note ?? null;
         const [decided] = await tx
           .update(messageCards)
-          .set({ decision: outcome, decidedBy: userId, decidedAt: sql`now()`, updatedAt: sql`now()` })
+          .set({
+            decision: outcome,
+            decidedBy: userId,
+            decidedAt: sql`now()`,
+            updatedAt: sql`now()`,
+            ...(note ? { decisionNote: note } : {}),
+          })
           .where(and(eq(messageCards.messageId, card.messageId), isNull(messageCards.decision)))
           .returning();
         if (!decided) throw conflict("This card was already decided", "card_already_decided");
@@ -396,12 +588,14 @@ export function registerCardActionRoutes(app: App, ctx: ChatRouteCtx): void {
             conversationId: card.conversationId,
             agentId: card.agentId,
             outcome,
+            // The note itself may quote the conversation: only its length is audited.
+            ...(note ? { noteChars: note.length } : {}),
           },
         });
         // The agent hears about it through agent-channel (the bridge), in this transaction.
         await core.chatAgent.emitCardAction(
           tx,
-          { messageId: card.messageId, outcome, actorUserId: userId },
+          { messageId: card.messageId, outcome, actorUserId: userId, ...(note ? { note } : {}) },
           after,
         );
         const [shown] = await withCards(tx, [dto], userId);

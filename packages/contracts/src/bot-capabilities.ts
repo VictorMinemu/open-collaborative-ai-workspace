@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { AgentScope, AgentStatus, ModelProviderKind } from "./agent";
 import { Id, IsoDateTime } from "./common";
+import { MEMORY_LIMITS, MemoryPath, MemoryScopeKind } from "./memory";
 import { Permission } from "./permissions";
 
 /**
@@ -262,6 +263,22 @@ export type TurnToolFlags = z.infer<typeof TurnToolFlags>;
 export const TurnWithheldReason = z.enum(["not_every_participant", "shared_with_group", "denied_for_you"]);
 export type TurnWithheldReason = z.infer<typeof TurnWithheldReason>;
 
+/**
+ * A `MEMORY.md` injected into a turn (Phase 07.2, D-02): the personal one (1-human DMs only) and the bot's own one.
+ * `content` is cut to `MEMORY_LIMITS.turnFileBytes` UTF-8 bytes, with `truncated` set.
+ */
+export const TurnMemoryFile = z.object({
+  scopeKind: MemoryScopeKind,
+  scopeId: Id,
+  path: MemoryPath,
+  version: z.number().int().positive(),
+  content: z.string().refine((s) => new TextEncoder().encode(s).length <= MEMORY_LIMITS.turnFileBytes, {
+    message: "too large",
+  }),
+  truncated: z.boolean(),
+});
+export type TurnMemoryFile = z.infer<typeof TurnMemoryFile>;
+
 export const TurnContext = z.object({
   tools: z.array(z.string()).max(64),
   toolFlags: z.record(z.string(), TurnToolFlags),
@@ -274,6 +291,8 @@ export const TurnContext = z.object({
     .array(z.object({ tool: z.string(), reason: TurnWithheldReason }))
     .max(64)
     .optional(),
+  /** Phase 07.2: memory files for this turn; optional so older payloads parse (`memory` stays for compatibility). */
+  memoryFiles: z.array(TurnMemoryFile).max(2).optional(),
 });
 export type TurnContext = z.infer<typeof TurnContext>;
 
@@ -289,6 +308,14 @@ export const BUILTIN_TOOLS = {
    * only on board channels (07.1-10); no turn offers it before then.
    */
   boardCard: "ocw_board_card",
+  /**
+   * Phase 07.2 (D-02): memory files through the Agent Channel API. List and read any scope the turn may read; write the
+   * agent's own scopes; propose into shared ones (a person approves). Names avoid the dangerous-name word filter.
+   */
+  memoryList: "ocw_memory_list",
+  memoryRead: "ocw_memory_read",
+  memoryWrite: "ocw_memory_write",
+  memoryPropose: "ocw_memory_propose",
 } as const;
 
 export const MAX_TOOL_CALLS_PER_TURN = 8;

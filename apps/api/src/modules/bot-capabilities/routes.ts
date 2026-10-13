@@ -25,6 +25,8 @@ import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { type App, authOf, type Core, tenant } from "../../core";
 import { badRequest, notFound } from "../../lib/errors";
+// Types only: the memory service is injected (a value import would be a module cycle).
+import type { MemoryService } from "../memory";
 import {
   agentResource,
   type PermissionService,
@@ -224,7 +226,12 @@ const MemoryParams = z.object({ id: Id, memoryId: Id });
 
 // ---------------------------------------------------------------- routes
 
-export function registerBotCapabilityRoutes(app: App, core: Core, perms: PermissionService) {
+export function registerBotCapabilityRoutes(
+  app: App,
+  core: Core,
+  perms: PermissionService,
+  memory: MemoryService,
+) {
   const requireUser = core.identity.requireUser;
   const user = { config: { authz: "user" as const }, preHandler: [requireUser] };
   const manage = {
@@ -342,7 +349,7 @@ export function registerBotCapabilityRoutes(app: App, core: Core, perms: Permiss
       reply.header("cache-control", "no-store");
       return core.db.withTenant(tenant(req), async (tx) => {
         const row = await memoryBot(perms, req, tx, req.params.id);
-        return { items: await listMemories(tx, row.id, authOf(req).userId) };
+        return { items: await listMemories(tx, memory, row.id, authOf(req).userId) };
       });
     },
   );
@@ -371,7 +378,7 @@ export function registerBotCapabilityRoutes(app: App, core: Core, perms: Permiss
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
         const row = await memoryBot(perms, req, tx, req.params.id);
-        const count = await clearMemories(tx, row.id, authOf(req).userId);
+        const count = await clearMemories(tx, memory, row.id, authOf(req).userId);
         await recordCleared(req, tx, row.id, count, "all");
         return { ok: true as const };
       }),
@@ -383,7 +390,7 @@ export function registerBotCapabilityRoutes(app: App, core: Core, perms: Permiss
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
         const row = await memoryBot(perms, req, tx, req.params.id);
-        const count = await clearMemories(tx, row.id, authOf(req).userId, req.params.memoryId);
+        const count = await clearMemories(tx, memory, row.id, authOf(req).userId, req.params.memoryId);
         if (count === 0) throw notFound("Note not found", "memory_not_found");
         await recordCleared(req, tx, row.id, count, "one");
         return { ok: true as const };
