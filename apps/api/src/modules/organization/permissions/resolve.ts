@@ -3,6 +3,7 @@ import {
   type AuthzDenial,
   CELL_PERMISSIONS,
   DEVICE_PERMISSIONS,
+  isUnderFolder,
   LEAD_PERMISSIONS,
   NON_DELEGABLE_PERMISSIONS,
   type OrgRole,
@@ -30,7 +31,9 @@ export type Relation =
   | "grantee"
   /** Devices: a member whose cap on the device is Full access (ADR-0012, P-06). */
   | "full_access_grantee"
-  | "inviter";
+  | "inviter"
+  /** Memory (Phase 07.2): an agent principal deciding on a scope that belongs to that agent itself. */
+  | "scope_agent";
 export type ResourceState =
   | "private"
   | "archived"
@@ -44,7 +47,14 @@ export type ResourceState =
   /** Channel resources: a private AI chat with one owner (Phase 5, P-03). */
   | "ai_chat"
   /** Agents: a persona that belongs to a department, team or project (AGENT-01); `unitPath` ends with it. */
-  | "unit_scoped";
+  | "unit_scoped"
+  /**
+   * Memory (Phase 07.2, D-08): a personal scope or a personal bot's notebook (owner-only); a shared bot's notebook; a
+   * department, team or project scope (`unitPath` ends with the unit).
+   */
+  | "memory_personal"
+  | "memory_agent"
+  | "memory_unit";
 export type ResourceType =
   | "organization"
   | "unit"
@@ -55,7 +65,9 @@ export type ResourceType =
   | "device"
   | "work_session"
   | "invitation"
-  | "agent";
+  | "agent"
+  /** A memory scope or one file in it (Phase 07.2). */
+  | "memory";
 
 export interface PrincipalFacts {
   kind: "user" | "agent" | "cell" | "device";
@@ -82,6 +94,8 @@ export interface ResourceFacts {
   invitedRole?: OrgRole;
   /** Module access: the org role of the person a rule targets; the ceiling precondition reads it. */
   targetRole?: OrgRole;
+  /** Memory: the file path a decision is about; absent for a scope-level decision (folder rules never apply). */
+  path?: string;
 }
 
 export interface RuleFact {
@@ -92,6 +106,8 @@ export interface RuleFact {
   /** Exact permission or `prefix.*`. */
   permission: string;
   tool: string | null;
+  /** Memory folder (`hr/`): the rule applies only to decisions on a path under it (D-04). null = everywhere. */
+  pathPrefix: string | null;
   effect: RuleEffect;
 }
 
@@ -185,6 +201,12 @@ function scopeDepth(rule: RuleFact, p: PrincipalFacts, r: ResourceFacts): number
 }
 
 const toolMatches = (rule: RuleFact, r: ResourceFacts) => rule.tool === null || rule.tool === r.tool;
+/**
+ * A folder rule applies only to a decision on a file under that folder (case-insensitive, segment boundary), never to
+ * a scope-level decision; a rule without a folder applies to every path (D-04, MEM-07).
+ */
+const pathMatches = (rule: RuleFact, r: ResourceFacts) =>
+  rule.pathPrefix === null || (r.path !== undefined && isUnderFolder(r.path, rule.pathPrefix));
 
 /** Rank of a deny in the PRD layer order Org → units (shallowest first) → User → Agent → Tool. */
 const RANK_USER = 1_000_000;
@@ -239,7 +261,7 @@ export function resolveEffectivePermissions(
 
   const denies: ApplicableDeny[] = [];
   for (const rule of rules) {
-    if (!subjectMatches(rule, p) || !toolMatches(rule, r)) continue;
+    if (!subjectMatches(rule, p) || !toolMatches(rule, r) || !pathMatches(rule, r)) continue;
     const depth = scopeDepth(rule, p, r);
     if (depth === null) continue;
     if (rule.effect === "deny") {

@@ -78,6 +78,7 @@ export async function loadRules(tx: Tx): Promise<RuleFact[]> {
     subjectId: r.subjectId,
     permission: r.permission,
     tool: r.tool,
+    pathPrefix: r.pathPrefix,
     effect: r.effect,
   }));
 }

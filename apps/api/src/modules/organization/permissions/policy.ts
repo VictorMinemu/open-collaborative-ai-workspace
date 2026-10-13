@@ -36,6 +36,9 @@ export const RELATION_PERMISSIONS: Record<ResourceType, Partial<Record<Relation,
   // D-01: the owner of a (personal) bot sees, uses and configures it; the surface filter keeps it to
   // members whose role has the `bots` surface (every role).
   agent: { owner: ["bot.read", "bot.configure"] },
+  // Phase 07.2 (D-08): the owner of a personal scope, of a personal bot's notebook or of a shared bot reads, writes and
+  // promotes its memory; the surface filter still applies (`memory.promote` sits on `team`).
+  memory: { owner: ["memory.read", "memory.write", "memory.promote"] },
 };
 
 /** Reason reported when a permission is simply not granted (default `missing_permission`). */
@@ -51,6 +54,8 @@ export interface Precondition {
   check(p: PrincipalFacts, r: ResourceFacts, permission: Permission): Denial | null;
 }
 
+/** The memory grains (Phase 07.2); preconditions judge them on memory resources only. */
+const MEMORY_GRAINS = new Set<Permission>(["memory.read", "memory.write", "memory.promote"]);
 /** Permissions that use or configure one bot: owner-only on a personal bot (D-01). */
 const PERSONAL_BOT_GATED = new Set<Permission>(["bot.read", "bot.configure", "bot.internet", "bot.tool.use"]);
 /** Membership of a direct conversation is fixed at creation (D-03). */
@@ -96,6 +101,42 @@ const notMember = (p: PrincipalFacts): Denial => ({
   layer: "resource",
   reason: p.kind === "agent" ? "agent_not_member" : "not_a_member",
 });
+
+/**
+ * The audience of something that belongs to a unit (AGENT-01, P-04; Phase 07.2 D-08): a member of the unit or of any
+ * unit below it, or a lead of any unit on its path (root → unit). Unit personas and unit memory both use it.
+ */
+function inUnitAudience(p: PrincipalFacts, unitPath: readonly string[]): boolean {
+  const unitId = unitPath[unitPath.length - 1];
+  if (unitId !== undefined && p.memberUnitPaths.some((path) => path.includes(unitId))) return true;
+  return unitPath.some((u) => p.leadOfUnitIds.has(u));
+}
+
+/**
+ * Memory (Phase 07.2, MEM-04, MEM-07, D-08), judged on a memory resource only:
+ * - agents never promote (they propose); on a personal-like scope (`memory_personal`) only that scope's own bot
+ *   (`scope_agent`) reads or writes, and the human it acts for is judged as the owner by the on-behalf-of pass; an agent
+ *   writes nothing else (`agent_shared_write`);
+ * - people: a personal-like scope is its owner's alone, admins included; a unit scope and a unit bot's notebook are
+ *   open (every grain) only to the unit audience, admins and (for the notebook) the bot's owner. Grants come from the
+ *   role, unit leads, the owner relation and allow rules; this only takes away.
+ */
+function memoryPrecondition(p: PrincipalFacts, r: ResourceFacts, perm: Permission): Denial | null {
+  if (r.type !== "memory") return null;
+  const personal = r.state.has("memory_personal");
+  if (p.kind === "agent") {
+    if (perm === "memory.promote") return { layer: "resource", reason: "agent_memory" };
+    if (personal)
+      return r.relations.has("scope_agent") ? null : { layer: "resource", reason: "agent_memory" };
+    return perm === "memory.write" ? { layer: "resource", reason: "agent_shared_write" } : null;
+  }
+  if (p.kind !== "user") return null;
+  if (personal) return r.relations.has("owner") ? null : { layer: "resource", reason: "personal_memory" };
+  const unitBound = r.state.has("memory_unit") || (r.state.has("memory_agent") && r.state.has("unit_scoped"));
+  if (!unitBound || p.orgRole === "admin" || r.relations.has("owner") || inUnitAudience(p, r.unitPath))
+    return null;
+  return { layer: "resource", reason: "unit_memory" };
+}
 
 export const PRECONDITIONS: readonly Precondition[] = [
   {
@@ -183,11 +224,12 @@ export const PRECONDITIONS: readonly Precondition[] = [
     check: (p, r) => {
       if (r.type !== "agent" || p.kind !== "user" || !r.state.has("unit_scoped")) return null;
       if (r.relations.has("owner") || p.orgRole === "admin") return null;
-      const unitId = r.unitPath[r.unitPath.length - 1];
-      if (unitId !== undefined && p.memberUnitPaths.some((path) => path.includes(unitId))) return null;
-      if (r.unitPath.some((u) => p.leadOfUnitIds.has(u))) return null;
-      return { layer: "resource", reason: "unit_agent" };
+      return inUnitAudience(p, r.unitPath) ? null : { layer: "resource", reason: "unit_agent" };
     },
+  },
+  {
+    applies: (perm) => MEMORY_GRAINS.has(perm),
+    check: memoryPrecondition,
   },
   {
     // Direct conversations (D-03): two fixed members; nobody adds, removes or archives.
@@ -426,4 +468,69 @@ export function agentResource(a: AgentFacts, principalUserId: string | null): Re
     ],
     unitPath,
   );
+}
+
+// ---------------------------------------------------------------- memory (Phase 07.2)
+
+/** What the resolver needs about one memory scope (D-08). Built from `memory_scopes` + the bot or unit row. */
+export interface MemoryScopeFacts {
+  kind: "personal" | "agent" | "unit" | "org";
+  /** Personal scopes: the human the memory belongs to. */
+  ownerUserId: string | null;
+  /** Personal scopes: the bot the memory is kept with; notebooks (`agent`): the bot itself. */
+  agent: (AgentFacts & { id: string }) | null;
+  /** Unit scopes: the unit's path (root → self). Notebooks take the bot's own `unitPath`; personal and org: []. */
+  unitPath: readonly string[];
+}
+
+/**
+ * A memory scope, or one file of it when `path` is given (folder rules need the path), as seen by `principal`:
+ * - personal scope, or a personal bot's notebook → `memory_personal`, no unit; `owner` for the owning human,
+ *   `scope_agent` for the scope's own bot;
+ * - a shared bot's notebook → `memory_agent` (+ `unit_scoped` with the bot's unit path); `owner` for the bot's owner;
+ * - unit scope → `memory_unit` with the unit's path; organization scope → no state, no unit.
+ */
+export function memoryResource(
+  scope: MemoryScopeFacts,
+  path: string | undefined,
+  principal: { kind: "user" | "agent"; id: string } | null,
+): ResourceFacts {
+  const isUser = (id: string | null | undefined) =>
+    principal?.kind === "user" && id !== null && id !== undefined && principal.id === id;
+  const isScopeAgent = principal?.kind === "agent" && scope.agent !== null && principal.id === scope.agent.id;
+  let r: ResourceFacts;
+  switch (scope.kind) {
+    case "personal":
+      r = facts(
+        "memory",
+        [...when(isUser(scope.ownerUserId), "owner" as const), ...when(isScopeAgent, "scope_agent" as const)],
+        ["memory_personal"],
+      );
+      break;
+    case "agent": {
+      const bot = scope.agent;
+      const ownerRel = when(isUser(bot?.ownerUserId), "owner" as const);
+      const agentRel = when(isScopeAgent, "scope_agent" as const);
+      if (bot === null || bot.scope === "personal") {
+        // A personal bot's notebook is its owner's private memory; without a bot row nobody owns it.
+        r = facts("memory", [...ownerRel, ...agentRel], ["memory_personal"]);
+      } else {
+        const unitPath = bot.unitPath ?? [];
+        r = facts(
+          "memory",
+          [...ownerRel, ...agentRel],
+          ["memory_agent", ...when(unitPath.length > 0, "unit_scoped" as const)],
+          unitPath,
+        );
+      }
+      break;
+    }
+    case "unit":
+      r = facts("memory", [], ["memory_unit"], scope.unitPath);
+      break;
+    case "org":
+      r = facts("memory");
+      break;
+  }
+  return path === undefined ? r : { ...r, path };
 }
