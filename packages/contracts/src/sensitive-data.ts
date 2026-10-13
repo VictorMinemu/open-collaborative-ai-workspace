@@ -114,7 +114,7 @@ export const ibanOk = (s: string): boolean => {
   return rem === 1;
 };
 
-/** Spanish NIF: 8 digits and the control letter `TRWAGMYFPDXBNJZSQVHLCKE[n % 23]`. */
+/** Spanish NIF: 8 digits and the control letter `NIF_LETTERS[n % 23]`. */
 export const nifOk = (s: string): boolean =>
   /^\d{8}[A-Z]$/.test(s) && NIF_LETTERS[Number(s.slice(0, 8)) % 23] === s[8];
 
