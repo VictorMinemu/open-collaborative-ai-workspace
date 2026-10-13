@@ -116,9 +116,11 @@ describe("provider_secret_refs data migration", () => {
     // The data migration runs right after the schema migration that adds the column (was "is the newest
     // migration", true only until Phase 6 added 20261007073058_multiplayer_ai, which never touches model_providers).
     expect(backfill).toBe(schema + 1);
+    // No later migration touches model_providers (any change to its secret_ref names the table). Other tables may
+    // have their own `secret_ref` SecretReference column (Phase 07.4: vault_items), which this backfill never reads.
     for (const later of dirs.slice(backfill + 1)) {
       const laterSql = readFileSync(join(MIGRATIONS_DIR, later, "migration.sql"), "utf8");
-      expect(laterSql, later).not.toMatch(/model_providers|secret_ref/);
+      expect(laterSql, later).not.toMatch(/model_providers/);
     }
     const sql = migrationSql("_provider_secret_refs");
     expect(sql).toContain("secret_id is not null");

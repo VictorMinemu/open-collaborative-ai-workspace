@@ -43,6 +43,7 @@ const HEAD_ONLY = [
   "20261013025212_memory_files",
   "20261013031658_memory_notes_backfill",
   "20261013095705_memory_scope_immutable",
+  "20261013221007_connectors_keychain_templates",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [

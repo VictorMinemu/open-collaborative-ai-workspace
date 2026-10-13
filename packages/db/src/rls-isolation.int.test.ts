@@ -387,7 +387,68 @@ async function seedOrg(c: pg.Client, org: string) {
     `insert into app.memory_proposals (organization_id, scope_id, file_id, path, op, base_version, content, content_sha256, findings, reader_count, tainted, requested_by_agent_id, requested_for_user_id) values ($1, $2, $3, 'MEMORY.md', 'append', 1, '- uses pnpm', $4, '[]', 3, false, $5, $6)`,
     [org, memScope, memFile, "e".repeat(64), agent, user],
   );
+
+  // Phase 07.4 (per-member connectors, keychain, templates): one row per new table. A per-member OAuth connector with
+  // a pre-registered client, the member's sealed connection, a member-account share in the channel, a personal key
+  // granted to the personal bot, and a unit template (v1) the personal bot was started from. Secret-bearing columns
+  // hold only ids / SecretReferences; the values are the sealed `app.secrets` rows.
+  const crm = randomUUID();
+  const clientSecret = randomUUID();
+  const connSecret = randomUUID();
+  const vaultSecret = randomUUID();
+  const vaultItem = randomUUID();
+  const agentTemplate = randomUUID();
+  await q(
+    "insert into app.mcp_servers (id, organization_id, name, safe_name, transport, url, auth_mode, oauth_status) values ($1, $2, 'CRM', $3, 'streamable-http', 'https://crm.example.test/mcp', 'per_member_oauth', 'ready')",
+    [crm, org, `m${crm.replace(/-/g, "").slice(0, 8)}`],
+  );
+  await q(
+    "insert into app.secrets (id, organization_id, name, kind, ciphertext, iv, tag) values ($1, $2, 'client', 'mcp_credential', 'c', 'i', 't'), ($3, $2, 'conn', 'connector_credential', 'c', 'i', 't'), ($4, $2, 'key', 'vault_item', 'c', 'i', 't')",
+    [clientSecret, org, connSecret, vaultSecret],
+  );
+  await q(
+    "insert into app.connector_oauth_clients (organization_id, server_id, issuer, client_id, client_secret_id, method) values ($1, $2, 'https://auth.crm.example.test', 'ocw-client', $3, 'pre_registered')",
+    [org, crm, clientSecret],
+  );
+  await q(
+    "insert into app.connector_connections (organization_id, user_id, server_id, status, secret_id, issuer, client_id, scopes, account_label, access_expires_at) values ($1, $2, $3, 'connected', $4, 'https://auth.crm.example.test', 'ocw-client', '{crm.read}', 'ada@example.test', now() + interval '1 hour')",
+    [org, user, crm, connSecret],
+  );
+  await q(
+    "insert into app.member_account_shares (organization_id, user_id, conversation_id, resource_kind, resource_id, readers_at_grant) values ($1, $2, $3, 'connector', $4, 1)",
+    [org, user, conv, crm],
+  );
+  await q(
+    `insert into app.vault_items (id, organization_id, scope, owner_user_id, name, handle, kind, injection, allowed_hosts, secret_ref, created_by) values ($1, $2, 'personal', $3, 'ERP key', 'k_abcdefghij', 'api_key', '{"header":"Authorization","scheme":"bearer"}', '{erp.example.test}', $4::jsonb, $3)`,
+    [vaultItem, org, user, JSON.stringify({ provider: "db", secretId: vaultSecret, organizationId: org })],
+  );
+  await q(
+    "insert into app.agent_vault_grants (organization_id, agent_id, vault_item_id, created_by) values ($1, $2, $3, $4)",
+    [org, personal, vaultItem, user],
+  );
+  await q(
+    "insert into app.agent_templates (id, organization_id, unit_id, name, description, current_version, created_by) values ($1, $2, $3, 'Sales assistant', 'Answers from the CRM', 1, $4)",
+    [agentTemplate, org, unit, user],
+  );
+  await q(
+    `insert into app.agent_template_versions (organization_id, template_id, version, instructions, model_provider, model_id, capabilities, required_connector_ids, created_by) values ($1, $2, 1, 'Help the sales team', 'mock', 'mock-1', '{"internet":false,"memory":true,"dailyLimit":null}', ARRAY[$3]::uuid[], $4)`,
+    [org, agentTemplate, crm, user],
+  );
+  await q("update app.agents set template_id = $1, template_version = 1 where id = $2", [
+    agentTemplate,
+    personal,
+  ]);
 }
+
+const CONNECTOR_TABLES = [
+  "app.connector_oauth_clients",
+  "app.connector_connections",
+  "app.member_account_shares",
+  "app.vault_items",
+  "app.agent_vault_grants",
+  "app.agent_templates",
+  "app.agent_template_versions",
+] as const;
 
 const AI_CHAT_TABLES = [
   "app.ai_chats",
@@ -1647,6 +1708,55 @@ describe("tenant isolation (RLS)", () => {
       ).rows;
     });
     expect(unlinked).toEqual([{ card_message_id: null }]);
+  });
+
+  it("Phase 07.4: the seven connector, keychain and template tables are org-scoped, forced, seeded, with the tenant policy only", async () => {
+    const scoped = new Map((await orgScopedTables()).map((t) => [t.tbl, t]));
+    for (const tbl of CONNECTOR_TABLES) {
+      expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true, policies: 1 });
+      const own = await inTenant(A, () => app.query(`select count(*)::int as n from ${tbl}`));
+      expect(own.rows[0].n, `${tbl} seeded`).toBeGreaterThan(0);
+    }
+  });
+
+  it("Phase 07.4: a member's connector connection of org B is invisible, unchangeable and unforgeable from org A", async () => {
+    const b = (
+      await migrator.query(
+        "select id, user_id, server_id from app.connector_connections where organization_id = $1",
+        [B],
+      )
+    ).rows[0];
+    expect(b).toBeDefined();
+    await inTenant(A, async () => {
+      expect(
+        (await app.query("select * from app.connector_connections where id = $1", [b.id])).rowCount,
+      ).toBe(0);
+      expect(
+        (
+          await app.query(
+            "update app.connector_connections set status = 'needs_reconnect', last_error = 'revoked' where id = $1",
+            [b.id],
+          )
+        ).rowCount,
+      ).toBe(0);
+      expect((await app.query("delete from app.connector_connections where id = $1", [b.id])).rowCount).toBe(
+        0,
+      );
+    });
+    // A row claiming organization B, written in A's context, is refused by the tenant policy.
+    await expect(
+      inTenant(A, () =>
+        app.query(
+          "insert into app.connector_connections (organization_id, user_id, server_id, status) values ($1, $2, $3, 'connected')",
+          [B, randomUUID(), b.server_id],
+        ),
+      ),
+    ).rejects.toThrow(/row-level security/);
+    const after = await migrator.query(
+      "select status, last_error from app.connector_connections where id = $1",
+      [b.id],
+    );
+    expect(after.rows).toEqual([{ status: "connected", last_error: null }]);
   });
 
   it("Phase 4: accent-insensitive Spanish search, a stored tsvector and the search indexes", async () => {
