@@ -64,6 +64,20 @@ export async function withPersonalOwner<T>(tx: Tx, ownerUserId: string, fn: () =
   }
 }
 
+/**
+ * Whether the memory proposal behind an approval request still exists, read through the lens of the human it was made
+ * for: a personal proposal is visible only to its owner (RLS), so through anyone else's lens a live one would read as
+ * missing and be closed by mistake. Existence only (the approval's gone path, WINDOWS 144); nothing of the row leaves.
+ */
+export async function proposalExists(
+  tx: Tx,
+  row: { resourceId: string; requestedForUserId: string | null },
+): Promise<boolean> {
+  const read = async () =>
+    (await tx.execute(sql`select 1 from app.memory_proposals where id = ${row.resourceId}`)).rows.length > 0;
+  return row.requestedForUserId ? withPersonalOwner(tx, row.requestedForUserId, read) : read();
+}
+
 /** The human whose RLS view an actor reads through (null = the transaction's own). */
 function lensOf(actor: MemoryActor): string | null {
   if (actor.kind === "agent") return actor.onBehalfOfUserId;

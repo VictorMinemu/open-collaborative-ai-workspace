@@ -13,10 +13,11 @@ import {
   Ok,
   RestoreMemoryRevisionRequest,
 } from "@ocw/contracts";
-import type { FastifyRequest } from "fastify";
+import type { FastifyError, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { markDecided } from "../../authz";
 import { type App, authOf, type Core, tenant } from "../../core";
+import { HttpError } from "../../lib/errors";
 import type { MemoryActor } from "./access";
 import type { MemoryService } from "./index";
 import { searchMemory } from "./search";
@@ -49,8 +50,28 @@ const Forgotten = z.object({
   revisions: z.number().int().nonnegative(),
 });
 
+/** The routes whose body carries a file's content (create, update). */
+const CONTENT_ROUTES = new Set([
+  "POST /api/v1/memory/scopes/:scopeId/files",
+  "PUT /api/v1/memory/files/:fileId",
+]);
+
 export function registerMemoryRoutes(app: App, ctx: { core: Core; memory: MemoryService }): void {
   const { core, memory } = ctx;
+
+  // WINDOWS 140: the content cap is the service's (256 KiB, `memory_file_too_large`). JSON escapes a control character
+  // to six bytes, so content at the cap is at most ~1.5 MiB on the wire and always fits the app's 2 MiB body limit; a
+  // body past that limit can only carry content over the cap, so it gets the memory code too, not Fastify's. This
+  // module's own scope only: anything else goes on to the app's error handler.
+  app.setErrorHandler((err: FastifyError, req) => {
+    if (
+      err.code === "FST_ERR_CTP_BODY_TOO_LARGE" &&
+      CONTENT_ROUTES.has(`${req.method} ${req.routeOptions.url}`)
+    ) {
+      throw new HttpError(413, "memory_file_too_large", "The file would be over 256 KB");
+    }
+    throw err;
+  });
   const tags = ["memory"];
   const user = { config: { authz: "user" as const }, onRequest: core.identity.requireUser };
   const me = (req: Parameters<typeof authOf>[0]): MemoryActor => ({
@@ -83,7 +104,7 @@ export function registerMemoryRoutes(app: App, ctx: { core: Core; memory: Memory
           req.query.q,
           req.query.scopeId,
         );
-        // The hits are exactly the files the resolver let the viewer read (listScopes, listReadableFiles).
+        // The hits are exactly the files the resolver let the viewer read (readableFileIds).
         markDecided(req);
         return result;
       });

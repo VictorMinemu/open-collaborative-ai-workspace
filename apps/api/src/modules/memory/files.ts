@@ -28,17 +28,27 @@ import { diffLines } from "diff";
 import { and, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { conflict, forbidden, HttpError } from "../../lib/errors";
-import { AuthzDeniedError, type PermissionService } from "../organization";
+import type { ApprovalService } from "../approval";
+import { AuthzDeniedError, loadRules, memoryResource, type PermissionService } from "../organization";
 import {
+  anyReadDeny,
   asActor,
   capabilitiesOf,
   decideMemory,
   filterReadable,
   type MemoryActor,
+  organizationWide,
   personalOwnerOf,
   withPersonalOwner,
 } from "./access";
-import { createRootFile, type LoadedScope, liveFileCount, loadScope, memoryNotFound } from "./scopes";
+import {
+  createRootFile,
+  type LoadedScope,
+  liveFileCount,
+  loadScope,
+  memoryNotFound,
+  readableScopes,
+} from "./scopes";
 
 /**
  * Memory files (D-01, MEM-01, MEM-02): optimistic versions, one append-only revision and one audit row per change,
@@ -56,6 +66,8 @@ type RevisionRow = typeof memoryFileRevisions.$inferSelect;
 export interface FilesDeps {
   core: Core;
   perms: PermissionService;
+  /** Closes the approvals of the proposals a forget removes (the gone path, WINDOWS 144). */
+  approvals: Pick<ApprovalService, "closeGone">;
 }
 
 export type WriteFileOp =
@@ -450,11 +462,36 @@ export function createFileOps(d: FilesDeps) {
         ...(actor.kind === "approved" ? { approvalRequestId: actor.approvalRequestId } : {}),
       },
     });
-    // Ids only, and only to the owner of private memory (Pitfall 7); shared viewers refetch and rely on 409.
+    await announceChange(tx, scope, f);
+  }
+
+  /**
+   * `memory.changed {scopeId, fileId, version}`, ids only (never a path or content, Pitfall 7), to exactly who may read
+   * the file now: private memory to its owner; organization-wide memory nobody is denied on that path once on the
+   * organization's stream; any other shared memory on the `user:` stream of each reader of (scope, path), folder rules
+   * included (WINDOWS 157, the unit personas' pattern). Viewers refetch and still rely on 409 for conflicts.
+   */
+  async function announceChange(tx: Tx, scope: LoadedScope, f: FileRow): Promise<void> {
+    const ev: MemoryChangedEvent = { scopeId: scope.row.id, fileId: f.id, version: f.version };
     const owner = scope.row.personalOwnerUserId;
     if (owner) {
-      const ev: MemoryChangedEvent = { scopeId: scope.row.id, fileId: f.id, version: f.version };
       await core.realtime.appendEvent(tx, `user:${owner}`, EventTypes.memoryChanged, ev);
+      return;
+    }
+    if (
+      organizationWide(scope.facts) &&
+      !anyReadDeny(await loadRules(tx), memoryResource(scope.facts, f.path, null))
+    ) {
+      await core.realtime.appendEvent(tx, `org:${scope.row.organizationId}`, EventTypes.memoryChanged, ev);
+      return;
+    }
+    const readers = await perms.usersAllowed(tx, {
+      candidates: "members",
+      permission: "memory.read",
+      resourceFor: (userId) => memoryResource(scope.facts, f.path, { kind: "user", id: userId }),
+    });
+    for (const userId of readers) {
+      await core.realtime.appendEvent(tx, `user:${userId}`, EventTypes.memoryChanged, ev);
     }
   }
 
@@ -756,6 +793,42 @@ export function createFileOps(d: FilesDeps) {
     });
   }
 
+  /**
+   * The ids of the live files a person may read, in one scope or in every scope they may read (search, MEM-07): ids
+   * and paths only (never content), one permission pass for all files, and nothing written (WINDOWS 139, 141). An
+   * unreadable or unknown `scopeId` is 404, like every other read.
+   */
+  async function readableFileIds(tx: Tx, viewerUserId: string, scopeId?: string): Promise<string[]> {
+    const actor: MemoryActor = { kind: "user", userId: viewerUserId };
+    let scopes: LoadedScope[];
+    if (scopeId !== undefined) {
+      const scope = await loadScope(tx, scopeId);
+      await requireRead(tx, actor, scope);
+      scopes = [scope];
+    } else {
+      scopes = await readableScopes(perms, tx, viewerUserId);
+    }
+    if (scopes.length === 0) return [];
+    const byId = new Map(scopes.map((s) => [s.row.id, s.facts]));
+    const rows = await tx
+      .select({ id: memoryFiles.id, scopeId: memoryFiles.scopeId, path: memoryFiles.path })
+      .from(memoryFiles)
+      .where(and(inArray(memoryFiles.scopeId, [...byId.keys()]), isNull(memoryFiles.deletedAt)));
+    const viewer = { kind: "user" as const, id: viewerUserId };
+    const inScope = rows.flatMap((f) => {
+      const facts = byId.get(f.scopeId);
+      return facts ? [{ ...f, facts }] : [];
+    });
+    const visible = await perms.filterFor(
+      tx,
+      { kind: "user", userId: viewerUserId },
+      inScope,
+      "memory.read",
+      (f) => memoryResource(f.facts, f.path, viewer),
+    );
+    return visible.map((f) => f.id);
+  }
+
   /** History, newest first; a revision whose path the actor may not read (an old folder) is left out. */
   async function listRevisions(tx: Tx, actor: MemoryActor, fileId: string): Promise<MemoryRevisionMeta[]> {
     return asActor(tx, actor, async () => {
@@ -817,7 +890,22 @@ export function createFileOps(d: FilesDeps) {
       const files = await count("memory_files");
       const revisions = await count("memory_file_revisions");
       const proposals = await count("memory_proposals");
+      // Their pending approvals close as failed `scope_gone` once the proposals are gone (cards updated live).
+      const pending = (
+        await tx
+          .select({ id: approvalRequests.id })
+          .from(approvalRequests)
+          .innerJoin(memoryProposals, eq(memoryProposals.id, approvalRequests.resourceId))
+          .where(
+            and(
+              eq(approvalRequests.resourceType, "memory_proposal"),
+              eq(memoryProposals.scopeId, scope.row.id),
+              eq(approvalRequests.status, "pending"),
+            ),
+          )
+      ).map((r) => r.id);
       await tx.delete(memoryProposals).where(eq(memoryProposals.scopeId, scope.row.id));
+      await d.approvals.closeGone(tx, { ids: pending });
       await tx.delete(memoryFiles).where(eq(memoryFiles.scopeId, scope.row.id));
       const rootId = await createRootFile(tx, scope.row);
       await core.audit.record(tx, {
@@ -838,6 +926,7 @@ export function createFileOps(d: FilesDeps) {
     appendToFile,
     readFile,
     listReadableFiles,
+    readableFileIds,
     listRevisions,
     readRevision,
     forgetScope,

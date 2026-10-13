@@ -398,6 +398,50 @@ describe("agent reads follow the audience of the conversation (D-08, Pitfall 5)"
   });
 });
 
+// ---------------------------------------------------------------- WINDOWS 148: the turn's cap on the read routes
+
+describe("list and read count against the turn's tool-call cap on the routes themselves (WINDOWS 148)", () => {
+  it("each call counts once, whether or not the cell asked the gate first; the ninth is cap_reached", async () => {
+    const ev = await turn(sam, samDmId, samBotId, "what do you know?", false);
+    // Straight to the routes (a cell that skips /tool-calls): each call still counts.
+    expect((await call("read", ev, { scope: "personal", path: "MEMORY.md" })).body).toHaveProperty("file");
+    expect(await toolCalls(ev.eventId)).toBe(1);
+    expect((await call("list", ev, {})).body).toHaveProperty("scopes");
+    expect(await toolCalls(ev.eventId)).toBe(2);
+    // Through the gate (the plugin's path): the gate checks the cap, the route counts; one call is one count.
+    const gate = await cell("/tool-calls", {
+      eventId: ev.eventId,
+      agentId: samBotId,
+      tool: "ocw_memory_read",
+      params: {},
+    });
+    expect(gate.body).toMatchObject({ allowed: true });
+    expect(await toolCalls(ev.eventId)).toBe(2);
+    expect((await call("read", ev, { scope: "personal", path: "MEMORY.md" })).body).toHaveProperty("file");
+    expect(await toolCalls(ev.eventId)).toBe(3);
+
+    // At the cap: both routes refuse, nothing is read, and the count stays at the cap.
+    await su.query("update app.agent_turns set tool_calls = 8 where event_id = $1", [ev.eventId]);
+    expect((await call("read", ev, { scope: "personal", path: "MEMORY.md" })).body).toEqual({
+      refused: "cap_reached",
+    });
+    expect((await call("list", ev, {})).body).toEqual({ refused: "cap_reached" });
+    expect(await toolCalls(ev.eventId)).toBe(8);
+    const gated = await cell("/tool-calls", {
+      eventId: ev.eventId,
+      agentId: samBotId,
+      tool: "ocw_memory_list",
+      params: {},
+    });
+    expect(gated.body).toMatchObject({ allowed: false, reason: "cap_reached" });
+    const refused = (await audits("memory.agent_refused")).filter((a) => a.metadata.eventId === ev.eventId);
+    expect(refused.map((a) => [a.metadata.route, a.metadata.reason])).toEqual([
+      ["read", "cap_reached"],
+      ["list", "cap_reached"],
+    ]);
+  });
+});
+
 // ---------------------------------------------------------------- Task 2: writes
 
 describe("agents write only their own scopes, before any untrusted content, within the turn's cap (D-08)", () => {
@@ -605,6 +649,7 @@ describe("no live turn, no memory (the rule of every agent call)", () => {
     await ok(admin.request("POST", `/api/v1/channels/${roomId}/members`, { kind: "agent", id: archieId }));
     const ev = await turn(sam, roomId, archieId, "@archie read the handbook");
     expect((await call("read", ev, { scope: scopeOf.org, path: "handbook.md" })).status).toBe(200);
+    expect(await toolCalls(ev.eventId)).toBe(1); // the read counts (WINDOWS 148)
     await su.query("delete from app.conversation_members where conversation_id = $1 and member_id = $2", [
       roomId,
       samId,
@@ -619,7 +664,7 @@ describe("no live turn, no memory (the rule of every agent call)", () => {
       expect(r.status, route).toBe(403);
       expect(codeOf(r), route).toBe("no_trigger");
     }
-    expect(await toolCalls(ev.eventId)).toBe(0);
+    expect(await toolCalls(ev.eventId)).toBe(1);
   });
 
   it("org B's cell token with org A's turn: 403 no_trigger on all four routes, nothing changes", async () => {

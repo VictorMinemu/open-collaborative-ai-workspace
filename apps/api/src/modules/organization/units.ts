@@ -23,7 +23,9 @@ import {
 } from "@ocw/contracts";
 import {
   agents,
+  approvalRequests,
   memoryFiles,
+  memoryProposals,
   memoryScopes,
   orgMembers,
   orgUnits,
@@ -36,6 +38,7 @@ import { and, asc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { type App, type Core, tenant } from "../../core";
 import { badRequest, conflict, notFound } from "../../lib/errors";
+import type { OrganizationDeps } from "./index";
 import { orgResource, unitResource } from "./permissions/policy";
 import type { PermissionService } from "./permissions/service";
 
@@ -174,7 +177,12 @@ export async function unitsChanged(core: Core, tx: Tx, unitId: string, action: s
 
 // ---------------------------------------------------------------- routes
 
-export function registerUnitRoutes(app: App, core: Core, perms: PermissionService): void {
+export function registerUnitRoutes(
+  app: App,
+  core: Core,
+  perms: PermissionService,
+  deps: OrganizationDeps,
+): void {
   const tags = ["organization"];
   const requireUser = core.identity.requireUser;
 
@@ -384,6 +392,24 @@ export function registerUnitRoutes(app: App, core: Core, perms: PermissionServic
           )
           .limit(1);
         if (memory) throw conflict("Move or delete this unit's memory files first", "unit_has_memory");
+        // Pending proposals into the unit's memory cascade with its scope: their approvals close as failed
+        // `scope_gone` right after the delete (cards updated live, closure audited; WINDOWS 144). Read directly, like
+        // the memory check above.
+        const goneApprovals = (
+          await tx
+            .select({ id: approvalRequests.id })
+            .from(approvalRequests)
+            .innerJoin(memoryProposals, eq(memoryProposals.id, approvalRequests.resourceId))
+            .innerJoin(memoryScopes, eq(memoryScopes.id, memoryProposals.scopeId))
+            .where(
+              and(
+                eq(approvalRequests.resourceType, "memory_proposal"),
+                eq(approvalRequests.status, "pending"),
+                eq(memoryScopes.kind, "unit"),
+                eq(memoryScopes.unitId, unit.id),
+              ),
+            )
+        ).map((r) => r.id);
         // Deleted personas keep their history, not their unit: release the reference.
         await tx
           .update(agents)
@@ -403,6 +429,7 @@ export function registerUnitRoutes(app: App, core: Core, perms: PermissionServic
             .where(eq(permissionRules.scopeUnitId, unit.id))
         ).map((r) => r.id);
         await tx.delete(orgUnits).where(eq(orgUnits.id, unit.id));
+        await deps.approvals.closeGone(tx, { ids: goneApprovals });
         await core.audit.record(tx, {
           action: "unit.deleted",
           resourceType: "org_unit",

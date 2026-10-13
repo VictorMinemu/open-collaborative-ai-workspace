@@ -249,15 +249,17 @@ export function useRestoreMemoryRevision() {
 // ---------------------------------------------------------------- live (07.2-12)
 
 /**
- * `memory.changed {scopeId, fileId, version}` arrives on the viewer's own `user:` stream for their private memory
- * (and their personal bot's notebook): ids and a version only. It refreshes that scope's tree, its open files and the
- * file's history; the open file announces the new version itself. Mounted once by the memory shell.
+ * `memory.changed {scopeId, fileId, version}`: ids and a version only. Private memory (and a personal bot's notebook)
+ * and shared memory with a restricted reader set arrive on the viewer's own `user:` stream; organization-wide memory
+ * everyone may read arrives on the organization's stream (WINDOWS 157). It refreshes that scope's tree, its open files
+ * and the file's history; the open file announces the new version itself. Mounted once by the memory shell.
  */
 export function useMemoryLiveUpdates() {
   const qc = useQueryClient();
   const me = useMe({ enabled: false });
   const userId = me.data?.user.id ?? null;
-  useTopic(userId ? topic("user", userId) : null, (frame) => {
+  const orgId = me.data?.organization.id ?? null;
+  const onFrame = (frame: { op: string; type?: string; data?: unknown }) => {
     if (frame.op !== "ev" || frame.type !== EventTypes.memoryChanged) return;
     const parsed = MemoryChangedEvent.safeParse(frame.data);
     if (!parsed.success) return;
@@ -265,5 +267,7 @@ export function useMemoryLiveUpdates() {
     void qc.invalidateQueries({ queryKey: memoryKeys.files(scopeId) });
     void qc.invalidateQueries({ queryKey: ["memory", "file", scopeId] });
     void qc.invalidateQueries({ queryKey: memoryKeys.revisions(fileId) });
-  });
+  };
+  useTopic(userId ? topic("user", userId) : null, onFrame);
+  useTopic(orgId ? topic("org", orgId) : null, onFrame);
 }

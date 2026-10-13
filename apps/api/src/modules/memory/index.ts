@@ -29,6 +29,8 @@ import {
   type CreateMemoryProposalInput,
   type CreateMemoryProposalResult,
   createMemoryProposal,
+  type ProposalPrescan,
+  prescanProposal,
 } from "./proposals";
 import { registerMemoryRoutes } from "./routes";
 import {
@@ -71,6 +73,7 @@ export {
   type CreateMemoryProposalResult,
   createMemoryProposal,
   type ProposalDeps,
+  type ProposalPrescan,
 } from "./proposals";
 export type { LoadedScope, ScopeKey, ScopeRow, ToolScope } from "./scopes";
 
@@ -82,6 +85,11 @@ export interface MemoryService {
   /** One scope as the actor sees it (404 when unreadable). */
   scopeView(tx: Tx, actor: MemoryActor, scopeId: string): Promise<MemoryScope>;
   listReadableFiles(tx: Tx, actor: MemoryActor, scopeId: string, folder?: string): Promise<MemoryFileMeta[]>;
+  /**
+   * The ids of the live files a person may read (one scope, or every scope they may read): ids only, one permission
+   * pass, nothing written. What search narrows to (07.2-16; WINDOWS 139, 141).
+   */
+  readableFileIds(tx: Tx, viewerUserId: string, scopeId?: string): Promise<string[]>;
   readFile(
     tx: Tx,
     actor: MemoryActor,
@@ -122,15 +130,25 @@ export interface MemoryService {
   /** Through the transaction's lens (another person's private scope is 404). */
   scopeFacts(tx: Tx, scopeId: string): Promise<{ row: ScopeRow; facts: MemoryScopeFacts; label: string }>;
   /**
+   * The detector run of a proposal (layer 1 and Presidio), BEFORE and outside its transaction (WINDOWS 145): call it
+   * with no transaction open, then `propose` with its result. Read-only.
+   */
+  prescan(organizationId: string, input: CreateMemoryProposalInput): Promise<ProposalPrescan>;
+  /**
    * An agent's proposal for the human of a delivered turn (07.2-09): an immutable proposal, a pending `memory.write`
    * approval and its platform-owned card in the turn's conversation, or a refusal reason (07.2-11 serves it to agents).
+   * Uses the `prescan` of the same input; refuses `version_conflict` when what it scanned changed since.
    */
-  propose(tx: Tx, input: CreateMemoryProposalInput): Promise<CreateMemoryProposalResult>;
+  propose(
+    tx: Tx,
+    input: CreateMemoryProposalInput,
+    prescan: ProposalPrescan,
+  ): Promise<CreateMemoryProposalResult>;
 }
 
 export function createMemoryService(core: Core, deps: { approvals: ApprovalService }): MemoryService {
   const perms = createPermissionService(core);
-  const files = createFileOps({ core, perms });
+  const files = createFileOps({ core, perms, approvals: deps.approvals });
   // Detector layer 2 (07.2-05): off without OCW_PRESIDIO_URL; fail-open with a visible marker.
   const scanner = createPresidioScanner(
     {
@@ -196,6 +214,7 @@ export function createMemoryService(core: Core, deps: { approvals: ApprovalServi
     },
 
     listReadableFiles: files.listReadableFiles,
+    readableFileIds: files.readableFileIds,
     readFile: files.readFile,
     writeFile: files.writeFile,
     appendToFile: files.appendToFile,
@@ -230,8 +249,9 @@ export function createMemoryService(core: Core, deps: { approvals: ApprovalServi
       return { row: s.row, facts: s.facts, label: s.label };
     },
 
-    propose: (tx, input) =>
-      createMemoryProposal(tx, { core, perms, approvals: deps.approvals, scanner, scans }, input),
+    prescan: (organizationId, input) => prescanProposal(core.db, { perms, scanner }, organizationId, input),
+    propose: (tx, input, prescan) =>
+      createMemoryProposal(tx, { core, perms, approvals: deps.approvals, scans }, input, prescan),
   };
 }
 

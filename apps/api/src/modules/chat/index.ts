@@ -126,6 +126,7 @@ export {
   type CardRow,
   cardMessageOf,
   cardOf,
+  mirrorCardClosed,
   mirrorCardDecision,
   patchCard,
   withCards,

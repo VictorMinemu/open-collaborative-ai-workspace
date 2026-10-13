@@ -330,3 +330,47 @@ describe("search never crosses a boundary (MEM-07, SC5)", () => {
       expect(all).not.toContain(secret);
   });
 });
+
+describe("search reads, never writes, and bounds its snippet work (WINDOWS 139, 141, 142)", () => {
+  it("never creates a scope: a unit nobody opened yet stays without one after a search", async () => {
+    const ops = (
+      await ok(admin.request("POST", "/api/v1/units", { kind: "department", name: "Ops", parentId: null }))
+    ).id as string;
+    const scopesOfOps = async () =>
+      Number(
+        (await su.query("select count(*) from app.memory_scopes where kind = 'unit' and unit_id = $1", [ops]))
+          .rows[0].count,
+      );
+    expect(await scopesOfOps()).toBe(0);
+    expect((await search(admin, "vacaciones")).map((h) => h.fileId)).toEqual([fileOf.vacations]);
+    expect(await scopesOfOps()).toBe(0);
+    // The scope tree (the one read that creates scopes, D-01) still opens it for the admin.
+    await scopesOf(admin);
+    expect(await scopesOfOps()).toBe(1);
+  });
+
+  it("ranks a long file on its whole index but cuts its snippet from the opening window", async () => {
+    const filler = "lorem ipsum ".repeat(4_000); // ~48,000 characters, past the 16 KiB headline window
+    const early = await create(
+      admin,
+      scopeOf.org as string,
+      "long/early.md",
+      `durianfirst opens it. ${filler}`,
+    );
+    const late = await create(
+      admin,
+      scopeOf.org as string,
+      "long/late.md",
+      `Opening words. ${filler} durianlast`,
+    );
+    const [first] = (await search(sam, "durianfirst")) as [Hit];
+    expect(first.fileId).toBe(early);
+    expect(first.snippet).toContain(`${S}durianfirst${E}`);
+    // Past the window: still found and ranked, its snippet is its opening words, unmarked and bounded.
+    const [last] = (await search(sam, "durianlast")) as [Hit];
+    expect(last.fileId).toBe(late);
+    expect(last.snippet).not.toContain(S);
+    expect(last.snippet.startsWith("Opening words")).toBe(true);
+    expect(last.snippet.length).toBeLessThanOrEqual(400);
+  });
+});

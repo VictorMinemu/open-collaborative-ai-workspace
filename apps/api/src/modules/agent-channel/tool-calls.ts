@@ -28,7 +28,8 @@ import { type CellPrincipal, cellOf } from "./auth";
  *   2. requires the tool to be in that turn;
  *   3. re-decides it with the CURRENT policy for the stored human and conversation kind (a rule or policy
  *      change bites mid-turn: `policy_changed`);
- *   4. enforces the per-turn caps and the taint rule with ONE conditional UPDATE (race-free);
+ *   4. enforces the per-turn caps and the taint rule with ONE conditional UPDATE (race-free); a tool whose own route
+ *      counts the call (the memory tools) is checked against the cap here but counted there, once;
  *   5. records `agent_tool_calls` and audits `bot.tool_call` (bot, human, tool, host; never the query, the URL
  *      path or results).
  * One short transaction per request, no external calls: the hook fails closed after 15 s.
@@ -39,6 +40,16 @@ const bearer = [{ cellToken: [] as string[] }];
 const cellRoute = { config: { authz: "cell" as const } };
 
 const WEB_TOOLS: ReadonlySet<string> = new Set([BUILTIN_TOOLS.webSearch, BUILTIN_TOOLS.webFetch]);
+/**
+ * Tools whose own Agent Channel route counts the call against the turn's cap (memory-files.ts, WINDOWS 148): asked
+ * here, the gate checks the cap and the taint but does not count, so a call the cell also gates counts once.
+ */
+const ROUTE_COUNTED: ReadonlySet<string> = new Set([
+  BUILTIN_TOOLS.memoryList,
+  BUILTIN_TOOLS.memoryRead,
+  BUILTIN_TOOLS.memoryWrite,
+  BUILTIN_TOOLS.memoryPropose,
+]);
 const BUILTIN_NAMES: ReadonlySet<string> = new Set(Object.values(BUILTIN_TOOLS));
 /** Unknown flags are treated as the most dangerous combination. */
 const UNKNOWN_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: true };
@@ -182,7 +193,9 @@ export function registerToolCallRoutes(scope: App, core: Core, perms: Permission
           const updated = await tx
             .update(agentTurns)
             .set({
-              toolCalls: sql`${agentTurns.toolCalls} + 1`,
+              toolCalls: ROUTE_COUNTED.has(body.tool)
+                ? sql`${agentTurns.toolCalls}`
+                : sql`${agentTurns.toolCalls} + 1`,
               webCalls: web ? sql`${agentTurns.webCalls} + 1` : sql`${agentTurns.webCalls}`,
               tainted: flags.untrustedOutput ? true : sql`${agentTurns.tainted}`,
             })

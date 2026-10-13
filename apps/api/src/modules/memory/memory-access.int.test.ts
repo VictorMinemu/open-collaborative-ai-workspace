@@ -602,3 +602,53 @@ describe("cross-tenant: another organization's admin", () => {
     ).toBe(true);
   });
 });
+
+describe("live updates for shared memory reach its readers, ids only (WINDOWS 157)", () => {
+  const idOf = async (name: string) =>
+    (await su.query("select user_id from app.org_members where display_name = $1", [name])).rows[0]
+      .user_id as string;
+  const eventsFor = async (fileId: string, version: number) =>
+    (
+      await su.query(
+        "select stream_id, payload from app.stream_events where type = 'memory.changed' and payload->>'fileId' = $1 and (payload->>'version')::int = $2 order by stream_id",
+        [fileId, version],
+      )
+    ).rows as Array<{ stream_id: string; payload: Json }>;
+
+  it("a team file goes to every person who may read it, on their own stream; never a sibling team", async () => {
+    const [adminId, lenaId] = [await idOf("Víctor Ruiz"), await idOf("Lena Gil")];
+    const f = await create(lena, scopeOf[A] as string, "live/notes.md", "# Live\n");
+    const events = await eventsFor(f, 1);
+    expect(events.map((e) => e.stream_id).sort()).toEqual(
+      [adminId, anaId, lenaId, luisId].map((id) => `user:${id}`).sort(),
+    );
+    for (const e of events) expect(e.payload).toEqual({ scopeId: scopeOf[A], fileId: f, version: 1 });
+  });
+
+  it("a file under a denied folder skips the person denied it", async () => {
+    const f = await create(lena, scopeOf[A] as string, "hr/live.md", "# HR live\n");
+    const streams = (await eventsFor(f, 1)).map((e) => e.stream_id);
+    expect(streams).toContain(`user:${luisId}`);
+    expect(streams).not.toContain(`user:${anaId}`);
+  });
+
+  it("an organization file everyone may read goes once on the organization's stream", async () => {
+    const updated = await ok(
+      admin.request("PUT", `/api/v1/memory/files/${fileOf.org}`, {
+        content: "# Handbook v2\n",
+        expectedVersion: 1,
+      }),
+    );
+    expect(await eventsFor(fileOf.org as string, updated.version)).toEqual([
+      {
+        stream_id: `org:${orgId}`,
+        payload: { scopeId: scopeOf.org, fileId: fileOf.org, version: updated.version },
+      },
+    ]);
+  });
+
+  it("private memory still goes to its owner only", async () => {
+    const f = await create(sam, samScope, "live.md", "# Mine\n");
+    expect((await eventsFor(f, 1)).map((e) => e.stream_id)).toEqual([`user:${samId}`]);
+  });
+});

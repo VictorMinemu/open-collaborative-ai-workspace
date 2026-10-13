@@ -220,7 +220,7 @@ describe("personal memory is owner-only at the database layer (ocw_app)", () => 
     await expect(probe(ADMIN, (q) => insertProposal(q, personalScope))).rejects.toThrow(/row-level security/);
   });
 
-  it("stores the scope's owner whatever the application sends (forged NULL, forged other user, later UPDATE)", async () => {
+  it("stores the scope's owner whatever the application sends, and never lets a file change scope", async () => {
     const forgedNull = await as(OWNER, (q) =>
       insertFile(q, personalScope, "forged-null.md", "x", { forgedOwner: null }),
     );
@@ -258,28 +258,32 @@ describe("personal memory is owner-only at the database layer (ocw_app)", () => 
         ]),
       ),
     ).rejects.toThrow(/memory scope identity is immutable/);
-    // A file moved to a shared scope takes that scope's owner (NULL); moved back, the owner again.
+    // A file never changes scope (WINDOWS 136): moving it would leave its history under the old scope and owner. The
+    // database refuses it, whoever asks, and the file keeps its scope and its owner.
     const shared = await as(OWNER, (q) => insertScope(q, "unit", { unitId: UNIT2 }));
+    await expect(
+      probe(OWNER, (q) =>
+        q("update app.memory_files set scope_id = $2 where id = $1", [forgedOther, shared]),
+      ),
+    ).rejects.toThrow(/memory file scope is immutable/);
+    // Even the superuser (no RLS) cannot move a file: the trigger is not a policy.
+    await expect(
+      su.query("update app.memory_files set scope_id = $2 where id = $1", [forgedOther, shared]),
+    ).rejects.toThrow(/memory file scope is immutable/);
+    const kept = await su.query(
+      "select scope_id, personal_owner_user_id as o from app.memory_files where id = $1",
+      [forgedOther],
+    );
+    expect(kept.rows[0]).toEqual({ scope_id: personalScope, o: OWNER });
+    // Other columns still change (the trigger fires on scope_id only, and only when it differs).
     await as(OWNER, (q) =>
-      q("update app.memory_files set scope_id = $2 where id = $1", [forgedOther, shared]),
+      q("update app.memory_files set scope_id = scope_id, content = 'y', bytes = 1 where id = $1", [
+        forgedOther,
+      ]),
     );
     expect(
-      (
-        await su.query("select personal_owner_user_id as o from app.memory_files where id = $1", [
-          forgedOther,
-        ])
-      ).rows[0].o,
-    ).toBeNull();
-    await as(OWNER, (q) =>
-      q("update app.memory_files set scope_id = $2 where id = $1", [forgedOther, personalScope]),
-    );
-    expect(
-      (
-        await su.query("select personal_owner_user_id as o from app.memory_files where id = $1", [
-          forgedOther,
-        ])
-      ).rows[0].o,
-    ).toBe(OWNER);
+      (await su.query("select content from app.memory_files where id = $1", [forgedOther])).rows[0].content,
+    ).toBe("y");
   });
 
   it("refuses a revision whose scope is not its file's, and rows pointing at another organization's scope", async () => {

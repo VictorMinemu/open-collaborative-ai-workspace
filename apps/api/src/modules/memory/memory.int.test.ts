@@ -233,6 +233,24 @@ describe("tracer: a person edits their private memory over REST", () => {
     ).toBe("memory_file_too_large");
   });
 
+  it("a body of escaped control characters is judged by its content, never by Fastify's body limit (WINDOWS 140)", async () => {
+    // Exactly the 256 KiB cap: each character escapes to six bytes of JSON (1.5 MiB on the wire), and is stored.
+    const atCap = "\u0001".repeat(256 * 1024);
+    const created = await ok(
+      sam.request("POST", `/api/v1/memory/scopes/${scopeId}/files`, { path: "ctrl.md", content: atCap }),
+    );
+    expect(created.bytes).toBe(256 * 1024);
+    // Over the cap and over the 2 MiB wire limit: the memory code, on create and on update alike.
+    const over = "\u0001".repeat(400 * 1024);
+    for (const [method, url, body] of [
+      ["POST", `/api/v1/memory/scopes/${scopeId}/files`, { path: "ctrl-2.md", content: over }],
+      ["PUT", `/api/v1/memory/files/${created.id}`, { content: over, expectedVersion: 1 }],
+    ] as const) {
+      expect((await fails(sam.request(method, url, body), 413)).code, method).toBe("memory_file_too_large");
+    }
+    await ok(sam.request("DELETE", `/api/v1/memory/files/${created.id}?expectedVersion=1`));
+  });
+
   it("REST paths are re-parsed with the shared grammar and unique case-insensitively", async () => {
     for (const [path, reason] of [
       ["a/../b.md", "dot_segment"],
@@ -579,6 +597,39 @@ describe("forget (private memory)", () => {
     expect(audit?.metadata).toEqual({ scopeId, scopeKind: "personal", files, revisions, proposals: 0 });
     const events = (await streamEvents("memory.changed")).filter((e) => e.stream_id === `user:${samId}`);
     expect(events.at(-1)?.payload).toEqual({ scopeId, fileId: list.files[0].id, version: 1 });
-    expect((await streamEvents("memory.changed")).every((e) => e.stream_id === `user:${samId}`)).toBe(true);
+    // Sam's private memory is announced to Sam only (shared scopes go to their readers, WINDOWS 157).
+    const ofPrivate = (await streamEvents("memory.changed")).filter((e) => e.payload.scopeId === scopeId);
+    expect(ofPrivate.every((e) => e.stream_id === `user:${samId}`)).toBe(true);
+  });
+});
+
+describe("a deleted bot's private memory leaves the lists (WINDOWS 163)", () => {
+  it("its private scope and its notebook are no longer listed or searched, and stay stored", async () => {
+    const notebook = await ok(
+      sam.request("POST", "/api/v1/memory/scopes", { kind: "agent", agentId: samBotId }),
+    );
+    await ok(
+      sam.request("POST", `/api/v1/memory/scopes/${scopeId}/files`, {
+        path: "kept.md",
+        content: "mangosteen notes\n",
+      }),
+    );
+    const listed = async () =>
+      ((await ok(sam.request("GET", "/api/v1/memory/scopes"))).scopes as Json[]).map((s) => s.id as string);
+    expect(await listed()).toEqual(expect.arrayContaining([scopeId, notebook.id]));
+    expect((await ok(sam.request("GET", "/api/v1/memory/search?q=mangosteen"))).hits).toHaveLength(1);
+
+    await ok(sam.request("DELETE", `/api/v1/agents/${samBotId}`));
+
+    const after = await listed();
+    expect(after).not.toContain(scopeId);
+    expect(after).not.toContain(notebook.id);
+    expect(after.length).toBeGreaterThan(0);
+    expect((await ok(sam.request("GET", "/api/v1/memory/search?q=mangosteen"))).hits).toEqual([]);
+    // Soft delete: the memory itself is kept (a hard delete of the bot cascades it, ADR-0010).
+    const kept = await su.query("select count(*)::int as n from app.memory_files where scope_id = $1", [
+      scopeId,
+    ]);
+    expect(kept.rows[0].n).toBeGreaterThan(0);
   });
 });

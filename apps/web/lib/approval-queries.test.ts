@@ -40,6 +40,8 @@ describe("inbox copy", () => {
     );
     expect(failedReason("scope_full", "Scout")).toBe("This memory is full (2,000 files).");
     expect(failedReason("apply_failed", "Scout")).toBe("Couldn't apply this change.");
+    expect(failedReason("bot_deleted", "Scout")).toBe("Scout was deleted. Nothing was changed.");
+    expect(failedReason("bot_disabled", "Scout")).toBe("Scout is turned off. Nothing was changed.");
   });
 
   it("names the memory, its readers and the version an approval becomes", () => {

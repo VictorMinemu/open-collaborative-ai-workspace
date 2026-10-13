@@ -341,6 +341,8 @@ describe("AgentCardView: a platform-owned card that mirrors an approval (07.2-17
     ["secret_detected", "Not applied: the text contains a secret."],
     ["scope_full", "This memory is full (2,000 files)."],
     ["too_large", "The file would be over 256 KB."],
+    ["bot_deleted", "The bot was deleted. Nothing was changed."],
+    ["bot_disabled", "The bot is turned off. Nothing was changed."],
     ["apply_failed", "Couldn't apply this change."],
     [null, "Couldn't apply this change."],
   ])("failed reason %s", (resultCode, copy) => {
