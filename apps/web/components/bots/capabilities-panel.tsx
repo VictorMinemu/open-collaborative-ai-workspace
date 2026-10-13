@@ -42,9 +42,19 @@ const REPLY_MODES: Array<{ value: ReplyMode; label: string }> = [
 /**
  * A bot's capabilities (D-06, D-11, D-16; BOT-04/05/07/10): internet, memory, date & time, reply mode (team
  * bots), the daily limit, MCP and plugin tools (`ToolsSection`) and today's usage. Renders only the API's decision: a capability with a `reason` is disabled
- * and explained, never hidden; everything is read-only without `bot.configure` on this bot.
+ * and explained, never hidden; everything is read-only without `bot.configure` on this bot. `readOnly` forces it for
+ * everyone, owners included (the agent page, 07.2-14: settings change only in the bot's sheet), and titles the tools
+ * "Tools and skills".
  */
-export function CapabilitiesPanel({ agentId, className }: { agentId: string; className?: string }) {
+export function CapabilitiesPanel({
+  agentId,
+  className,
+  readOnly: forceReadOnly = false,
+}: {
+  agentId: string;
+  className?: string;
+  readOnly?: boolean;
+}) {
   const q = useBotCapabilities(agentId);
   const update = useUpdateBotCapabilities(agentId);
 
@@ -74,7 +84,7 @@ export function CapabilitiesPanel({ agentId, className }: { agentId: string; cla
   }
 
   const view = q.data;
-  const readOnly = !view.viewerCan.includes("bot.configure");
+  const readOnly = forceReadOnly || !view.viewerCan.includes("bot.configure");
   const save = (body: Parameters<typeof update.mutate>[0], success?: string) =>
     update.mutate(body, {
       onSuccess: () => {
@@ -124,17 +134,23 @@ export function CapabilitiesPanel({ agentId, className }: { agentId: string; cla
         />
       </div>
 
-      <ToolsSection view={view} />
+      <ToolsSection
+        view={view}
+        readOnly={forceReadOnly}
+        title={forceReadOnly ? "Tools and skills" : "Tools"}
+      />
 
       <div className="rounded-lg border bg-muted/30 p-3">
         <UsageMeter usage={view.usage} />
       </div>
 
-      <p className="text-muted-foreground text-xs">
-        {readOnly
-          ? "Only people who manage this bot can change its capabilities."
-          : "Changes apply from the bot's next reply."}
-      </p>
+      {forceReadOnly ? null : (
+        <p className="text-muted-foreground text-xs">
+          {readOnly
+            ? "Only people who manage this bot can change its capabilities."
+            : "Changes apply from the bot's next reply."}
+        </p>
+      )}
     </div>
   );
 }
