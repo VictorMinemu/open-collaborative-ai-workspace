@@ -27,6 +27,7 @@ import { createEnvFileSecretStore, type SecretStore } from "./lib/secret-store";
 import { createAgentModule } from "./modules/agent";
 import { createAgentChannelModule } from "./modules/agent-channel";
 import { createAiChatModule } from "./modules/ai-chat";
+import { type ApprovalService, createApprovalModule } from "./modules/approval";
 import { createArtifactModule, type ObjectStorage } from "./modules/artifact";
 import { createAuditService } from "./modules/audit";
 import { createBotCapabilitiesModule } from "./modules/bot-capabilities";
@@ -56,6 +57,8 @@ export interface BuiltApp {
   deviceHub: DeviceHub;
   /** Attachment object storage, null when unconfigured (tests count its calls, e.g. none on the prompt submit path). */
   storage: ObjectStorage | null;
+  /** The approve-and-apply primitive (07.2-06): later modules and tests register kinds on it. */
+  approvals: ApprovalService;
   close(): Promise<void>;
 }
 
@@ -267,6 +270,9 @@ export async function buildApp(
     access: createConversationAccess(core),
     scopes: { work_session: createWorkSessionAttachmentScope(core) },
   });
+  // Phase 07.2: the approve-and-apply primitive (ADR-0023); memory (07.2), tool grants (07.5) and automations (07.6)
+  // register their kinds on `approvals.service`.
+  const approvals = createApprovalModule(core);
   const modules: ApiModule[] = [
     createIdentityModule({
       identity,
@@ -292,6 +298,7 @@ export async function buildApp(
     createAgentChannelModule(core, { modelLabel: (ref) => modelGateway.labelOf(ref) }), // B2; 06-10: model labels in persona history
     deviceModule, // B3
     createWorkSessionModule(core, deviceModule.hub, { storage: artifactModule.storage }), // B3; 06.1: image bytes
+    approvals.module, // Phase 07.2: approvals inbox and decisions (MEM-06)
   ];
   for (const m of modules) {
     await app.register(async (scope) => m.register(scope as unknown as App), {
@@ -305,6 +312,7 @@ export async function buildApp(
     authz,
     deviceHub: deviceModule.hub,
     storage: artifactModule.storage,
+    approvals: approvals.service,
     async close() {
       await app.close();
       for (const m of modules) await m.close?.();

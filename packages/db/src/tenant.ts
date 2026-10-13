@@ -33,6 +33,41 @@ export function tenantOf(tx: Tx): TxContext {
   return ctx;
 }
 
+/** Thrown inside a savepoint to roll it back while handing its result to the caller. */
+class DiscardSavepoint<T> extends Error {
+  constructor(readonly result: T) {
+    super("savepoint discarded");
+  }
+}
+
+/**
+ * Runs `fn` in a savepoint of `tx` (a nested transaction with the same tenant context, so `tenantOf`, audit and realtime
+ * work inside it). When `keep(result)` is false the savepoint is rolled back, every write of `fn` disappears and the
+ * after-commit hooks `fn` registered are dropped (a rolled-back realtime event is never published); the result is
+ * returned either way. A throw rolls the savepoint back and propagates.
+ */
+export async function withSavepoint<T>(
+  tx: Tx,
+  fn: (sp: Tx) => Promise<T>,
+  keep: (result: T) => boolean,
+): Promise<T> {
+  const parent = tenantOf(tx);
+  const buffered: Array<() => Promise<void> | void> = [];
+  try {
+    const result = await tx.transaction(async (sp) => {
+      txContexts.set(sp, { ...parent, afterCommit: (cb) => void buffered.push(cb) });
+      const out = await fn(sp);
+      if (!keep(out)) throw new DiscardSavepoint(out);
+      return out;
+    });
+    for (const cb of buffered) parent.afterCommit(cb);
+    return result;
+  } catch (err) {
+    if (err instanceof DiscardSavepoint) return err.result as T;
+    throw err;
+  }
+}
+
 export interface TenantDb {
   /**
    * The ONLY entrypoint for domain (schema `app`) queries. Opens a transaction, sets the tenant context with
