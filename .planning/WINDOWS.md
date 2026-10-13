@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 106
+open_count: 108
 waived_count: 3
-fixed_count: 26
-total_count: 135
-last_updated: 2026-10-13T04:50:57.827Z
+fixed_count: 29
+total_count: 140
+last_updated: 2026-10-13T05:47:47.411Z
 ---
 
 # Broken Windows Ledger
@@ -132,7 +132,7 @@ last_updated: 2026-10-13T04:50:57.827Z
 | 115 | 07.2 | deviation | apps/web/components/shell/module-gate.tsx |  | Settings > Modules shows a Memory toggle with no memory UI until 07.2-10; screenshot the 4-row panel in 10/13 | open |  | 2026-10-13T03:20:41.625Z |  |
 | 116 | 07.2 | deviation | packages/db/src/schema/memory.ts |  | approval_requests has no personal-owner column: an admin with direct SQL can see that an approval for a personal proposal exists (metadata, not content); decide in 07.2-06 | waived | API owner-only visibility proven by test; no RLS by design (ADR-0023 decision 16) | 2026-10-13T03:45:07.675Z | 2026-10-13T04:50:57.537Z |
 | 117 | 07.2 | deviation | packages/db/src/schema/memory.ts |  | Personal bot notebook owner assumes a personal bot never changes owner or kind; recompute the owner if that ever changes | open |  | 2026-10-13T03:45:07.777Z |  |
-| 118 | 07.2 | deviation | packages/db/src/schema/memory.ts |  | A file moved across scopes keeps old revisions with the previous owner (conservative); 07.2-08 must account for it | open |  | 2026-10-13T03:45:07.876Z |  |
+| 118 | 07.2 | deviation | packages/db/src/schema/memory.ts |  | A file moved across scopes keeps old revisions with the previous owner (conservative); 07.2-08 must account for it | fixed |  | 2026-10-13T03:45:07.876Z | 2026-10-13T05:47:46.872Z |
 | 119 | 07.2 | deviation | apps/api/src/modules/policy/module-access-enforcement.int.test.ts |  | testcontainers Redis port wait can time out under Docker load and fail verify once | open |  | 2026-10-13T03:45:07.976Z |  |
 | 120 | 07.2 | deviation | compose.yaml |  | The internal pii network is created by every compose project even with the profile off (uses Docker address pools); adding it recreates the api once on the next up | open |  | 2026-10-13T04:19:12.931Z |  |
 | 121 | 07.2 | unrun-verify | infra/presidio/recognizers.yaml |  | Spanish Presidio accuracy only checked on fixed samples (missed a Spanish name in a probe); owner manual check on real documents | open |  | 2026-10-13T04:19:13.026Z |  |
@@ -143,13 +143,18 @@ last_updated: 2026-10-13T04:50:57.827Z
 | 126 | 07.2 | deviation | packages/contracts/src/sensitive-data.ts |  | detectSensitive returns unbounded spans while MemoryProposalView caps 200 spans / 50 findings; 07.2-09 must cap before building the view | open |  | 2026-10-13T04:39:23.084Z |  |
 | 127 | 07.2 | deviation | packages/contracts/src/sensitive-data.ts |  | False positives (warn): any bare 9-digit number starting 6-9 is a phone; git@github.com:org/repo is an email; Luhn accepts 0000 0000 0000 0000 | open |  | 2026-10-13T04:39:23.163Z |  |
 | 128 | 07.2 | deviation | packages/contracts/src/sensitive-data.ts |  | Keyed secrets (DB_PASSWORD=, Bearer, URL credentials): span and masked sample start at the key, so the UI highlight is wider than the value (no leak) | open |  | 2026-10-13T04:39:23.242Z |  |
-| 129 | 07.2 | deviation | apps/api/src/modules/policy |  | unit_has_memory counts only live files; soft-deleted files and pending proposals cascade with the unit; decide in 07.2-08/09 | open |  | 2026-10-13T04:39:31.734Z |  |
+| 129 | 07.2 | deviation | apps/api/src/modules/policy |  | unit_has_memory counts only live files; soft-deleted files and pending proposals cascade with the unit; decide in 07.2-08/09 | fixed |  | 2026-10-13T04:39:31.734Z | 2026-10-13T05:47:47.036Z |
 | 130 | 07.2 | deviation | apps/api/src/modules/policy |  | A standard owner of a team bot can write its notebook but not promote (memory.promote is lead/admin); needs an explicit product exception if wanted | open |  | 2026-10-13T04:39:31.819Z |  |
-| 131 | 07.2 | deviation | apps/api/src/modules/policy |  | An agent decision with no human evaluates only the agent; 07.2-08 and 07.2-11 must always pass the human the agent acts for | open |  | 2026-10-13T04:39:31.902Z |  |
+| 131 | 07.2 | deviation | apps/api/src/modules/policy |  | An agent decision with no human evaluates only the agent; 07.2-08 and 07.2-11 must always pass the human the agent acts for | fixed |  | 2026-10-13T04:39:31.902Z | 2026-10-13T05:47:46.953Z |
 | 132 | 07.2 | deviation | apps/api/src/modules/approval |  | Decisions mirrored onto a card do not send the usual card-updated notification to its followers | open |  | 2026-10-13T04:50:57.608Z |  |
 | 133 | 07.2 | deviation | apps/api/src/modules/approval |  | Inbox list checks each row's decider rule one by one (up to 500 per page), so a page can come back short with a cursor | open |  | 2026-10-13T04:50:57.677Z |  |
 | 134 | 07.2 | deviation | apps/api/src/modules/approval |  | An apply that throws (instead of returning an error code) rolls back the whole decision and leaves the request pending | open |  | 2026-10-13T04:50:57.748Z |  |
 | 135 | 07.2 | deviation | apps/api/src/modules/approval |  | An approved grant's card shows succeeded before the grant is used; decide in 07.5 | open |  | 2026-10-13T04:50:57.827Z |  |
+| 136 | 07.2 | deviation | packages/db/src/schema |  | The DB still allows changing a memory file's scope_id; moving across scopes is prevented only in the API | open |  | 2026-10-13T05:47:47.110Z |  |
+| 137 | 07.2 | deviation | apps/api/src/modules/memory |  | Pending proposals cascade with unit/bot/forgotten scope but their approval_requests rows stay; 07.2-09 must read a missing proposal as scope_gone, not 500 | open |  | 2026-10-13T05:47:47.183Z |  |
+| 138 | 07.2 | deviation | apps/api/src/modules/memory |  | A deleted memory file cannot be restored over REST (restore works only on live files) | open |  | 2026-10-13T05:47:47.259Z |  |
+| 139 | 07.2 | deviation | apps/api/src/modules/memory |  | GET /memory/scopes writes: it lazily creates the org scope and missing unit scopes | open |  | 2026-10-13T05:47:47.334Z |  |
+| 140 | 07.2 | deviation | apps/api/src/modules/memory |  | A 256 KiB body of escaped control chars exceeds Fastify's 1 MiB limit and returns Fastify's 413, not memory_file_too_large | open |  | 2026-10-13T05:47:47.411Z |  |
 
 ````json
 [
@@ -1564,10 +1569,10 @@ last_updated: 2026-10-13T04:50:57.827Z
     "file": "packages/db/src/schema/memory.ts",
     "line": null,
     "description": "A file moved across scopes keeps old revisions with the previous owner (conservative); 07.2-08 must account for it",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T03:45:07.876Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-13T05:47:46.872Z"
   },
   {
     "id": 119,
@@ -1696,10 +1701,10 @@ last_updated: 2026-10-13T04:50:57.827Z
     "file": "apps/api/src/modules/policy",
     "line": null,
     "description": "unit_has_memory counts only live files; soft-deleted files and pending proposals cascade with the unit; decide in 07.2-08/09",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T04:39:31.734Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-13T05:47:47.036Z"
   },
   {
     "id": 130,
@@ -1720,10 +1725,10 @@ last_updated: 2026-10-13T04:50:57.827Z
     "file": "apps/api/src/modules/policy",
     "line": null,
     "description": "An agent decision with no human evaluates only the agent; 07.2-08 and 07.2-11 must always pass the human the agent acts for",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T04:39:31.902Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-13T05:47:46.953Z"
   },
   {
     "id": 132,
@@ -1771,6 +1776,66 @@ last_updated: 2026-10-13T04:50:57.827Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-13T04:50:57.827Z",
+    "resolved_at": null
+  },
+  {
+    "id": 136,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "packages/db/src/schema",
+    "line": null,
+    "description": "The DB still allows changing a memory file's scope_id; moving across scopes is prevented only in the API",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T05:47:47.110Z",
+    "resolved_at": null
+  },
+  {
+    "id": 137,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/memory",
+    "line": null,
+    "description": "Pending proposals cascade with unit/bot/forgotten scope but their approval_requests rows stay; 07.2-09 must read a missing proposal as scope_gone, not 500",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T05:47:47.183Z",
+    "resolved_at": null
+  },
+  {
+    "id": 138,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/memory",
+    "line": null,
+    "description": "A deleted memory file cannot be restored over REST (restore works only on live files)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T05:47:47.259Z",
+    "resolved_at": null
+  },
+  {
+    "id": 139,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/memory",
+    "line": null,
+    "description": "GET /memory/scopes writes: it lazily creates the org scope and missing unit scopes",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T05:47:47.334Z",
+    "resolved_at": null
+  },
+  {
+    "id": 140,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/memory",
+    "line": null,
+    "description": "A 256 KiB body of escaped control chars exceeds Fastify's 1 MiB limit and returns Fastify's 413, not memory_file_too_large",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T05:47:47.411Z",
     "resolved_at": null
   }
 ]
