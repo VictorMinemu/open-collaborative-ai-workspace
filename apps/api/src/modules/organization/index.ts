@@ -16,7 +16,12 @@ import { registerUnitRoutes } from "./units";
 export { listMembers, memberDirectory } from "./members";
 
 export { AuthzDeniedError } from "./permissions/errors";
-export { loadPrincipalFacts, loadPrincipalFactsMany, type PrincipalRef } from "./permissions/facts";
+export {
+  loadPrincipalFacts,
+  loadPrincipalFactsMany,
+  loadRules,
+  type PrincipalRef,
+} from "./permissions/facts";
 export {
   type AgentFacts,
   agentResource,
