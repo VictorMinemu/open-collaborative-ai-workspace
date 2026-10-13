@@ -1,0 +1,49 @@
+{
+  "eventId": "0199a6f0-0000-7000-8000-00000000e021",
+  "agent": { "id": "0199a6f0-0000-7000-8000-00000000a001", "handle": "archie", "displayName": "Archie" },
+  "conversation": { "id": "0199a6f0-0000-7000-8000-00000000c021", "kind": "dm", "name": null },
+  "thread": { "rootMessageId": "0199a6f0-0000-7000-8000-00000000d0b1" },
+  "message": {
+    "id": "0199a6f0-0000-7000-8000-00000000d0b1",
+    "text": "check my notes, then save a note for the sales team [[call ocw_memory_read {\"scope\":\"personal\",\"path\":\"MEMORY.md\"}]] [[call ocw_memory_propose {\"scope\":\"0199a6f0-0000-7000-8000-0000000005c1\",\"path\":\"clients/acme.md\",\"op\":\"append\",\"content\":\"- note\"}]]",
+    "createdAt": "2026-10-13T09:00:05.000Z",
+    "author": { "kind": "user", "id": "0199a6f0-0000-7000-8000-0000000000f1", "displayName": "Víctor Ruiz" },
+    "mentions": [{ "kind": "agent", "id": "0199a6f0-0000-7000-8000-00000000a001" }]
+  },
+  "threadHistory": [],
+  "roster": [
+    {
+      "kind": "user",
+      "id": "0199a6f0-0000-7000-8000-0000000000f1",
+      "displayName": "Víctor Ruiz",
+      "role": "owner"
+    },
+    {
+      "kind": "agent",
+      "id": "0199a6f0-0000-7000-8000-00000000a001",
+      "displayName": "Archie",
+      "handle": "archie"
+    }
+  ],
+  "turn": {
+    "tools": ["ocw_memory_read", "ocw_memory_propose"],
+    "toolFlags": {
+      "ocw_memory_read": { "untrustedOutput": false, "sideEffecting": false },
+      "ocw_memory_propose": { "untrustedOutput": false, "sideEffecting": false }
+    },
+    "memory": [],
+    "memoryFiles": [
+      {
+        "scopeKind": "personal",
+        "scopeId": "0199a6f0-0000-7000-8000-0000000005a1",
+        "path": "MEMORY.md",
+        "version": 2,
+        "content": "# Memory\n- prefers calls after 4 pm\n",
+        "truncated": false
+      }
+    ],
+    "now": null,
+    "maxToolCalls": 8,
+    "maxWebCalls": 5
+  }
+}
