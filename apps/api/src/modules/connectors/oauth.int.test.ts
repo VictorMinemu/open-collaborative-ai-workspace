@@ -9,7 +9,7 @@ import {
 } from "../../../../../infra/fake-model/fake-mcp-oauth.mjs";
 import { createEgress, type Egress } from "../../lib/egress";
 import { clientMetadataDocument } from "./client-metadata";
-import { callTool } from "./mcp-client";
+import { callTool, listTools, McpUpstreamError } from "./mcp-client";
 import {
   buildAuthorization,
   type ClientChoice,
@@ -62,6 +62,17 @@ beforeAll(async () => {
   });
   server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://fake-mcp");
+    // A careless MCP server that echoes the caller's credential in its error body and challenge.
+    if (url.pathname === "/leaky/500" || url.pathname === "/leaky/401") {
+      const auth = req.headers.authorization ?? "";
+      const status = url.pathname.endsWith("401") ? 401 : 500;
+      res.writeHead(status, {
+        "content-type": "text/plain",
+        "www-authenticate": `Bearer error="invalid_token", error_description="bad ${auth}"`,
+      });
+      res.end(`refused credential: ${auth}`);
+      return;
+    }
     if (!fake.handle(req, res, url)) {
       res.writeHead(404);
       res.end();
@@ -455,5 +466,159 @@ describe("connector OAuth against the fake: client registration", () => {
       redirectUri: REDIRECT,
     });
     expect(bundle.issuer).toBe(d.issuer);
+  });
+});
+
+/** Every way an error could carry a credential: message, string form, stack and the cause chain. */
+function errorText(err: unknown): string {
+  const parts: string[] = [];
+  let cur: unknown = err;
+  for (let depth = 0; depth < 6 && cur; depth++) {
+    parts.push(String(cur));
+    if (cur instanceof Error) parts.push(cur.message, cur.stack ?? "");
+    const www = (cur as { wwwAuthenticate?: unknown }).wwwAuthenticate;
+    if (typeof www === "string") parts.push(www);
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return parts.join("\n");
+}
+
+async function upstreamError(promise: Promise<unknown>): Promise<McpUpstreamError> {
+  const err = await promise.then(
+    () => null,
+    (e: unknown) => e,
+  );
+  expect(err).toBeInstanceOf(McpUpstreamError);
+  return err as McpUpstreamError;
+}
+
+describe("MCP client against the fake: results and errors", () => {
+  it("lists the tools with their schemas and read-only / destructive flags", async () => {
+    const { bundle } = await connect();
+    const tools = await listTools(egress, target(), bearer(bundle));
+    expect(tools.map((t) => t.name)).toEqual(["whoami", "create_record", "echo_auth"]);
+    expect(tools[0]).toMatchObject({ readOnly: true, destructive: false });
+    expect(tools[1]).toMatchObject({ readOnly: false, destructive: true });
+    expect(tools[1]?.inputSchema).toMatchObject({ type: "object", required: ["title"] });
+    expect(tools[2]?.description).toContain("Authorization");
+  });
+
+  it("redacts the bearer a server echoes back, listed or not", async () => {
+    const { bundle } = await connect();
+    for (const redact of [[bundle.accessToken], []]) {
+      const out = await callTool(
+        egress,
+        target(),
+        bearer(bundle),
+        { name: "echo_auth", arguments: {} },
+        { redact },
+      );
+      expect(out.content).not.toContain(bundle.accessToken);
+      expect(out.content).toContain("[redacted]");
+    }
+  });
+
+  it("a call without a bearer is unauthorized, with the server's challenge", async () => {
+    const err = await upstreamError(
+      callTool(
+        egress,
+        target(),
+        { headerName: "X-Not-Auth", headerValue: "nothing" },
+        { name: "whoami", arguments: {} },
+        {
+          redact: [],
+        },
+      ),
+    );
+    expect(err.code).toBe("unauthorized");
+    expect(err.wwwAuthenticate).toContain("resource_metadata=");
+    expect(err.cause).toBeUndefined();
+  });
+
+  it("an unknown bearer is unauthorized and never appears in the error", async () => {
+    const canary = "fakeat_canary_unknown_bearer_9c1f";
+    const err = await upstreamError(
+      listTools(egress, target(), { headerName: "Authorization", headerValue: `Bearer ${canary}` }),
+    );
+    expect(err.code).toBe("unauthorized");
+    expect(errorText(err)).not.toContain(canary);
+  });
+
+  it("insufficient_scope is its own code", async () => {
+    const { bundle } = await connect();
+    fake.setScenario({ insufficient_scope: true });
+    const err = await upstreamError(
+      callTool(egress, target(), bearer(bundle), { name: "whoami", arguments: {} }, { redact: [] }),
+    );
+    expect(err.code).toBe("insufficient_scope");
+    expect(err.wwwAuthenticate).toContain('error="insufficient_scope"');
+  });
+
+  it("a slow server times out at the call's timeout", async () => {
+    const { bundle } = await connect();
+    fake.setScenario({ slow_mcp_ms: 3000 });
+    const started = Date.now();
+    const err = await upstreamError(
+      callTool(
+        egress,
+        target(),
+        bearer(bundle),
+        { name: "whoami", arguments: {} },
+        { redact: [], timeoutMs: 1000 },
+      ),
+    );
+    expect(err.code).toBe("timeout");
+    expect(Date.now() - started).toBeLessThan(2500);
+  });
+
+  it("a target on a refused address is egress_refused, even though its own host:port is allowed", async () => {
+    for (const url of ["http://169.254.169.254/mcp", "http://localhost:3999/mcp", "http://[::1]:3999/mcp"]) {
+      const err = await upstreamError(
+        callTool(
+          egress,
+          { url, transport: "streamable-http" },
+          { headerName: "Authorization", headerValue: "Bearer x" },
+          {
+            name: "whoami",
+            arguments: {},
+          },
+          { redact: [] },
+        ),
+      );
+      expect(err.code).toBe("egress_refused");
+    }
+  });
+
+  it("no error message, challenge or cause carries the bearer, even when the server echoes it", async () => {
+    const { bundle } = await connect();
+    const leaky = { url: `${base}/leaky/500`, transport: "streamable-http" as const };
+    const err500 = await upstreamError(
+      callTool(
+        egress,
+        leaky,
+        bearer(bundle),
+        { name: "whoami", arguments: {} },
+        { redact: [bundle.accessToken] },
+      ),
+    );
+    expect(err500.code).toBe("upstream_error");
+    expect(errorText(err500)).not.toContain(bundle.accessToken);
+
+    const leaky401 = { url: `${base}/leaky/401`, transport: "streamable-http" as const };
+    const err401 = await upstreamError(listTools(egress, leaky401, bearer(bundle)));
+    expect(err401.code).toBe("unauthorized");
+    expect(err401.wwwAuthenticate).toContain("[redacted]");
+    expect(errorText(err401)).not.toContain(bundle.accessToken);
+  });
+
+  it("an SSE target is reached through the guard too (refused before connecting)", async () => {
+    const err = await upstreamError(
+      listTools(
+        egress,
+        { url: "http://169.254.169.254/sse", transport: "sse" },
+        { headerName: "Authorization", headerValue: "Bearer x" },
+      ),
+    );
+    expect(err.code).toBe("egress_refused");
   });
 });
