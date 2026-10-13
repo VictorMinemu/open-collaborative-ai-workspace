@@ -29,12 +29,15 @@
 # approval card answering the turn; nothing is written. A turn whose human no longer reads its conversation gets 403
 # `no_trigger` on both calls (read by the plugin as "this conversation turn is no longer active"), and the cell's own
 # memory slot stays `none`.
+# Scenario connectors (07.4-09 / CONN-03, D-07, C-01): a DM turn offering the static `ocw_connector_call` and the logical
+# `m1a2b3c4d__whoami` runs the plugin tool in OpenClaw, which asks `POST /connectors/call` with the turn's event and agent
+# only (self-validated, never `/tool-calls`); the logical tool itself never reaches the model as a tool.
 # Scenario breaker (stability 2026-10-06): SIGKILLed boots trip OpenClaw's restart-loop breaker, which refuses the ocw
 # channel's automatic start; the plugin reports the pause to the API and starts the channel itself after its back-off.
 #
 # Usage (repo root):  infra/openclaw/test/run-container-smoke.sh [--keep]
 #   SMOKE_ONLY=<comma list>  run only these scenarios (unset = all): mention, signin, dm, capabilities,
-#                            dm-isolation, memory, memory-files, card, board, mcp, marketplace, breaker
+#                            dm-isolation, memory, memory-files, card, board, connectors, mcp, marketplace, breaker
 #                            and sandbox (runs when it is listed, with SMOKE_BUILD=1, or when ocw-mcp-sandbox:local
 #                            exists; otherwise it prints "SKIP sandbox (image not built)")
 #   FAKE_MODEL_DEBUG=1       the fake model logs a preview of each tool-offering request (off by default)
@@ -237,7 +240,7 @@ docker run -d --name "${P}-api" "${OOM[@]}" --network "$NET" --network-alias api
   -e FAKE_BOT_ID=0199a6f0-0000-7000-8000-00000000a001 \
   -e FAKE_CELL_ID=0199a6f0-0000-7000-8000-0000000000c0 \
   -e FAKE_MODEL_BASE_URL=http://fake-model:18999/v1 \
-  -e FAKE_AGENT_TOOLS="web_search,web_fetch,ocw_memory_save,ocw_memory_read,ocw_memory_propose,ocw_agent_card,${MCP_SAFE}__echo,${MCP_SAFE}__write_note,ocw_echo${SBX_TOOLS:-}" \
+  -e FAKE_AGENT_TOOLS="web_search,web_fetch,ocw_memory_save,ocw_memory_read,ocw_memory_propose,ocw_agent_card,ocw_connector_call,${MCP_SAFE}__echo,${MCP_SAFE}__write_note,ocw_echo${SBX_TOOLS:-}" \
   -e FAKE_MCP_SERVERS="$(mcp_servers_json '["echo"]')" \
   -e FAKE_WEB_SEARCH_PROVIDER=searxng \
   node:24.21.0-bookworm-slim node /plugin/src/testing/run-fake-api.ts >/dev/null
@@ -635,6 +638,32 @@ const ok =
 if (!ok) { console.log("FAIL: expected one turn-bound card through POST /board/cards and no /tool-calls request"); process.exit(1); }
 '
 docker logs "${P}-openclaw" 2>&1 | grep -E "turn 0199a6f0-0000-7000-8000-00000000e008 → session" | sed 's/^/   /' || true
+fi
+
+if want connectors; then
+CONN_EVENT=0199a6f0-0000-7000-8000-00000000e0c1
+echo "== [connectors] a DM turn offering ocw_connector_call: the plugin tool asks POST /connectors/call with the turn's ids only"
+STATE="$(inject_and_wait "$ROOT/infra/openclaw/test/mention-connector.json" 0199a6f0-0000-7000-8000-00000000d0c1)"
+echo "$STATE" | EVENT="$CONN_EVENT" node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d0c1");
+if (!m) { console.log("FAIL: no reply to the connector mention"); process.exit(1); }
+const calls = (s.connectorCalls ?? []).filter((c) => c.eventId === process.env.EVENT);
+const gated = s.toolCalls.filter((c) => c.eventId === process.env.EVENT);
+console.log("   reply      :", m.text);
+console.log("   calls      :", JSON.stringify(calls));
+console.log("   tool calls :", JSON.stringify(gated.map((c) => c.tool)));
+const c = calls[0];
+const ok =
+  m.text.includes("Tool ocw_connector_call said: whoami: sub_smoke") &&
+  /\[tools: \d+ \| [^\]]*ocw_connector_call\]/.test(m.text) && !m.text.includes("m1a2b3c4d__whoami") &&
+  calls.length === 1 && c.agentId === "0199a6f0-0000-7000-8000-00000000a001" &&
+  c.connector === "m1a2b3c4d" && c.tool === "whoami" && JSON.stringify(c.arguments) === "{}" &&
+  Object.keys(c).sort().join() === "agentId,arguments,connector,eventId,tool" &&
+  // Self-validated by /connectors/call: never asked to /tool-calls.
+  gated.length === 0;
+if (!ok) { console.log("FAIL: expected one ocw_connector_call through POST /connectors/call with the turn ids only and no /tool-calls request"); process.exit(1); }
+'
 fi
 
 if want mcp; then

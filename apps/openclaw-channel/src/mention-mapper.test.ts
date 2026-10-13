@@ -318,6 +318,23 @@ describe("per-turn tools and context (D-07, D-08)", () => {
     expect(mapMention(mention({ turn }), BOT).allowedTools).toEqual([]);
   });
 
+  it("connectorTools (07.4 D-07): the turn's per-member logical tools, only when ocw_connector_call runs; never OpenClaw tools", () => {
+    const connectorTurn = {
+      ...turn,
+      tools: ["ocw_connector_call", "m1a2b3c4d__whoami", "m5e0c0de1__echo", "web_fetch"],
+    };
+    const bot = { ...BOT, capabilities: { tools: ["ocw_connector_call", "m5e0c0de1__echo", "web_fetch"] } };
+    const m = mapMention(mention({ turn: connectorTurn } as never), bot);
+    // The in-cell (org) MCP tool is an OpenClaw tool; the per-member one is reachable only through the static tool.
+    expect(m.allowedTools).toEqual(["ocw_connector_call", "m5e0c0de1__echo", "web_fetch"]);
+    expect(m.connectorTools).toEqual(["m1a2b3c4d__whoami"]);
+    const noCall = mapMention(mention({ turn: connectorTurn } as never), {
+      ...BOT,
+      capabilities: { tools: ["web_fetch"] },
+    });
+    expect(noCall.connectorTools).toEqual([]);
+  });
+
   it("an invalid turn block parses as no turn", () => {
     const parsed = AgentMentionEvent.parse({ ...mention(), turn: { tools: "web_search" } });
     expect(parsed.turn).toBeUndefined();

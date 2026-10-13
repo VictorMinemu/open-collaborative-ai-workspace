@@ -11,7 +11,8 @@ import { openClawAgentIdFor } from "./mention-mapper.js";
  *   - blocks tools outside `turn.tools`, over the per-turn caps, or side-effecting after untrusted output
  *     (taint) — locally first, which saves a round trip,
  *   - asks `POST /agent-channel/v1/tool-calls` for every call except `ocw_memory_save`, `ocw_memory_write`,
- *     `ocw_memory_propose` and `ocw_board_card` (validated by their own routes) and blocks on a denial, an error or a
+ *     `ocw_memory_propose`, `ocw_board_card` and the connector and keychain tools (validated by their own routes,
+ *     `SELF_VALIDATED_TOOLS`) and blocks on a denial, an error or a
  *     timeout (fail closed, under OpenClaw's 15 s budget),
  *   - reports each allowed call's outcome (status, result count, provider, duration; never content).
  * Logs never include params or results.
@@ -30,6 +31,11 @@ export interface ActiveTurn {
   /** The message the turn answers (the reply's `inReplyToMessageId`). */
   messageId?: string;
   turn: TurnContext;
+  /**
+   * 07.4 (D-07): the turn's per-member logical connector tools `<connector>__<tool>` (mention-mapper.ts
+   * `connectorTools`). `turn.tools` is the run's OpenClaw tools only; these are reachable through `ocw_connector_call`.
+   */
+  connectorTools: string[];
   calls: number;
   webCalls: number;
   tainted: boolean;
@@ -61,7 +67,9 @@ export const WEB_TOOLS: ReadonlySet<string> = new Set(["web_search", "web_fetch"
 /**
  * Validated by their own routes, which check the turn, the tool on it and the taint, and count the call themselves:
  * `ocw_memory_save` (`POST /memories`, 03.1-07), `ocw_memory_write` / `ocw_memory_propose` (`/memory/write|propose`,
- * 07.2) and `ocw_board_card` (`/board/*`, 07.1-10). Asking `/tool-calls` too would count the call twice, and
+ * 07.2), `ocw_board_card` (`/board/*`, 07.1-10) and the connector and keychain tools (`/connectors/list|call`,
+ * `/http-requests`, 07.4 D-07: the API re-decides the logical tool, the audience and the caps and taint, and audits each
+ * call with the member's credential). Asking `/tool-calls` too would count the call twice, and
  * `/tool-calls` cannot offer the board tool (it does not know the board layout), so it would refuse it
  * `policy_changed`. `ocw_memory_list` / `ocw_memory_read` change nothing and go through the generic gate.
  */
@@ -70,6 +78,9 @@ const SELF_VALIDATED_TOOLS: ReadonlySet<string> = new Set([
   "ocw_memory_write",
   "ocw_memory_propose",
   "ocw_board_card",
+  "ocw_connector_list",
+  "ocw_connector_call",
+  "ocw_http_request",
 ]);
 /**
  * Always side-effecting, whatever flags a turn carries: writing memory or changing shared board work after untrusted
@@ -192,11 +203,18 @@ export function createToolGuard(
         conversationId?: string;
         threadRootId?: string | null;
         messageId?: string;
+        connectorTools?: string[];
       },
       signal?: AbortSignal,
     ): void {
       const key = keyOf(sessionKey);
-      state.turns.set(key, { ...t, calls: 0, webCalls: 0, tainted: false });
+      state.turns.set(key, {
+        ...t,
+        connectorTools: t.connectorTools ?? [],
+        calls: 0,
+        webCalls: 0,
+        tainted: false,
+      });
       signal?.addEventListener(
         "abort",
         () => {

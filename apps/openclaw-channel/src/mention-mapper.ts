@@ -5,6 +5,7 @@ import {
   type AgentChannelRosterEntry,
   type AgentMentionEvent,
   type CellAgent,
+  CONNECTOR_LOGICAL_TOOL,
   EMPTY_TURN,
   type TurnContext,
 } from "./agent-channel-protocol.js";
@@ -127,6 +128,12 @@ export type MappedMention = {
   /** `turn.tools ∩ agentTools`: the per-run `toolsAllow` cap (empty → tools disabled). */
   allowedTools: string[];
   /**
+   * 07.4 (D-07): the turn's per-member logical connector tools `<connector>__<tool>`, which only `ocw_connector_call`
+   * runs (through the API). Never OpenClaw tools (not in the bot's alsoAllow, so not in `allowedTools`): the gate and the
+   * tool check a call's logical tool against this list. Empty unless the run may use `ocw_connector_call`.
+   */
+  connectorTools: string[];
+  /**
    * Structured per-turn context: the asker's local time, the turn's memory files (the private `MEMORY.md` in a DM only,
    * the bot's notebook) or, from an older API, the bot's notes about the asker (DM only).
    */
@@ -227,6 +234,10 @@ export function mapMention(event: AgentMentionEvent, bot: CellAgent | undefined)
   const agentTools = withTurnScopedTools(bot?.capabilities?.tools);
   const agentToolSet = new Set(agentTools);
   const allowedTools = [...new Set(turn.tools)].filter((t) => agentToolSet.has(t));
+  // An in-cell (org) MCP tool is configured in the bot's entry; a per-member one never is (the API proxies it).
+  const connectorTools = allowedTools.includes("ocw_connector_call")
+    ? [...new Set(turn.tools)].filter((t) => CONNECTOR_LOGICAL_TOOL.test(t) && !agentToolSet.has(t))
+    : [];
   const askerName = sanitizeName(author.displayName);
   const history = event.threadHistory.map((line) => ({
     id: line.id,
@@ -284,6 +295,7 @@ export function mapMention(event: AgentMentionEvent, bot: CellAgent | undefined)
     turn,
     agentTools,
     allowedTools,
+    connectorTools,
     contextBlocks: turnContextBlocks(turn, askerName, direct, sanitizeName(event.agent.displayName)),
   };
 }

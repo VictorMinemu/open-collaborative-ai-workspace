@@ -317,6 +317,34 @@ describe("tool guard under abuse (Task 3)", () => {
     expect(fake.requests.map((r) => r.tool)).toEqual(["web_search"]);
   });
 
+  describe("connector and keychain tools (07.4 D-07)", () => {
+    const LIST = { untrustedOutput: false, sideEffecting: false };
+    const READ_ONLY = { untrustedOutput: true, sideEffecting: false };
+    const connectorTurn = (over: Partial<TurnContext> = {}) =>
+      turn({
+        tools: ["web_search", "ocw_connector_list", "ocw_connector_call", "m1a2b3c4d__whoami"],
+        toolFlags: {
+          web_search: WEB,
+          ocw_connector_list: LIST,
+          ocw_connector_call: READ_ONLY,
+          m1a2b3c4d__whoami: READ_ONLY,
+        },
+        ...over,
+      });
+    const CALL = { connector: "m1a2b3c4d", tool: "whoami", arguments: {} };
+
+    it("ocw_connector_call is validated by its own route: never sent to /tool-calls, still counted locally", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: connectorTurn() });
+      expect(await g.beforeToolCall(call("ocw_connector_call", CALL), ctx())).toBeUndefined();
+      expect(fake.requests).toHaveLength(0);
+      expect(g.activeTurn(SESSION)?.calls).toBe(1);
+      // A connector's output is untrusted: the turn is read-only from here on.
+      expect(g.activeTurn(SESSION)?.tainted).toBe(true);
+    });
+  });
+
   describe("memory file tools (07.2-07, D-08)", () => {
     const READ = { untrustedOutput: false, sideEffecting: false };
     const memoryTurn = (flags: Record<string, { untrustedOutput: boolean; sideEffecting: boolean }> = {}) =>

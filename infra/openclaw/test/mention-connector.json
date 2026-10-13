@@ -1,0 +1,40 @@
+{
+  "eventId": "0199a6f0-0000-7000-8000-00000000e0c1",
+  "agent": { "id": "0199a6f0-0000-7000-8000-00000000a001", "handle": "archie", "displayName": "Archie" },
+  "conversation": { "id": "0199a6f0-0000-7000-8000-00000000c0c1", "kind": "dm", "name": null },
+  "thread": { "rootMessageId": "0199a6f0-0000-7000-8000-00000000d0c1" },
+  "message": {
+    "id": "0199a6f0-0000-7000-8000-00000000d0c1",
+    "text": "who am I in the CRM? [[call ocw_connector_call {\"connector\":\"m1a2b3c4d\",\"tool\":\"whoami\",\"arguments\":{}}]]",
+    "createdAt": "2026-10-13T09:00:00.000Z",
+    "author": { "kind": "user", "id": "0199a6f0-0000-7000-8000-0000000000f1", "displayName": "Víctor Ruiz" },
+    "mentions": [{ "kind": "agent", "id": "0199a6f0-0000-7000-8000-00000000a001" }]
+  },
+  "threadHistory": [],
+  "roster": [
+    {
+      "kind": "user",
+      "id": "0199a6f0-0000-7000-8000-0000000000f1",
+      "displayName": "Víctor Ruiz",
+      "role": "owner"
+    },
+    {
+      "kind": "agent",
+      "id": "0199a6f0-0000-7000-8000-00000000a001",
+      "displayName": "Archie",
+      "handle": "archie"
+    }
+  ],
+  "turn": {
+    "tools": ["ocw_connector_list", "ocw_connector_call", "m1a2b3c4d__whoami"],
+    "toolFlags": {
+      "ocw_connector_list": { "untrustedOutput": false, "sideEffecting": false },
+      "ocw_connector_call": { "untrustedOutput": true, "sideEffecting": false },
+      "m1a2b3c4d__whoami": { "untrustedOutput": true, "sideEffecting": false }
+    },
+    "memory": [],
+    "now": null,
+    "maxToolCalls": 8,
+    "maxWebCalls": 5
+  }
+}

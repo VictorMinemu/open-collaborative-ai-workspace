@@ -5,6 +5,12 @@ import {
   type AgentChannelBoardPatchCard,
   type AgentChannelBoardRead,
   AgentChannelBoardReadResponse,
+  type AgentChannelConnectorCall,
+  AgentChannelConnectorCallResponse,
+  type AgentChannelConnectorList,
+  AgentChannelConnectorListResponse,
+  type AgentChannelHttpRequest,
+  AgentChannelHttpResponse,
   type AgentChannelMcpProbeResult,
   type AgentChannelMemoryList,
   AgentChannelMemoryListResponse,
@@ -95,6 +101,12 @@ export type AgentChannelClientOptions = {
 
 export type AgentChannelClient = ReturnType<typeof createAgentChannelClient>;
 
+/**
+ * Client budget of a connector call or a keychain request: above the API's 30 s upstream timeout (07.4-11/12), so the
+ * API answers `timeout` itself, and inside the cell turn (a 20 s call completes in the real cell, research A4).
+ */
+export const CONNECTOR_REQUEST_TIMEOUT_MS = 35_000;
+
 export function trimTrailingSlash(url: string): string {
   return url.replace(/\/+$/u, "");
 }
@@ -111,11 +123,12 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
     body: unknown,
     signal?: AbortSignal,
     attempts = maxAttempts,
+    attemptTimeoutMs = timeoutMs,
   ): Promise<unknown> {
     let lastError: unknown;
     for (let attempt = 0; attempt < attempts; attempt++) {
       if (signal?.aborted) throw signal.reason ?? new Error("aborted");
-      const timeout = AbortSignal.timeout(timeoutMs);
+      const timeout = AbortSignal.timeout(attemptTimeoutMs);
       const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
       try {
         const res = await doFetch(`${base}${path}`, {
@@ -320,6 +333,40 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
     ): Promise<AgentChannelBoardCardResponse> {
       return AgentChannelBoardCardResponse.parse(
         await request("PATCH", `/board/cards/${encodeURIComponent(messageId)}`, req, signal, 1),
+      );
+    },
+    /**
+     * `ocw_connector_list` (07.4): the turn's per-member connectors with the asker's connection status, their tools and
+     * the keychain handles the bot may use. Read-only, so two attempts at most. Never logs the answer.
+     */
+    async listConnectors(
+      req: AgentChannelConnectorList,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelConnectorListResponse> {
+      return AgentChannelConnectorListResponse.parse(
+        await request("POST", "/connectors/list", req, signal, 2),
+      );
+    },
+    /**
+     * `ocw_connector_call` (07.4): one logical tool with the turn's human's own account, decided and audited by the API.
+     * One attempt (a connector tool may change things, and the route counts the call), 35 s budget. A refusal throws
+     * AgentChannelHttpError with its AgentChannelToolRefusal code. Never logs arguments or content.
+     */
+    async callConnector(
+      req: AgentChannelConnectorCall,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelConnectorCallResponse> {
+      return AgentChannelConnectorCallResponse.parse(
+        await request("POST", "/connectors/call", req, signal, 1, CONNECTOR_REQUEST_TIMEOUT_MS),
+      );
+    },
+    /**
+     * `ocw_http_request` (07.4): one request with a keychain handle; the API injects the secret for allowed hosts only.
+     * One attempt, 35 s budget. Never logs the URL, headers or body.
+     */
+    async httpRequest(req: AgentChannelHttpRequest, signal?: AbortSignal): Promise<AgentChannelHttpResponse> {
+      return AgentChannelHttpResponse.parse(
+        await request("POST", "/http-requests", req, signal, 1, CONNECTOR_REQUEST_TIMEOUT_MS),
       );
     },
     /**

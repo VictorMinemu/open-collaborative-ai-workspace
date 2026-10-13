@@ -38,6 +38,8 @@
  *                                          then 200, version 1, the first column by default)
  *   PATCH /agent-channel/v1/board/cards/:id  move / waiting state of a stored board card (409
  *                                          board_card_version_conflict, 403 not_author on any text key)
+ *   POST /agent-channel/v1/connectors/call  records the body (`connectorCalls`; 400 for any key beyond eventId, agentId,
+ *                                          connector, tool, arguments) and answers `{content: "whoami: sub_smoke"}`
  *   POST /agent-channel/v1/mcp/probe-results  records the probe report (`mcpProbes`)
  *   POST /agent-channel/v1/plugins/report     records the report (`pluginReports`) and moves the row's status
  *   POST /agent-channel/v1/plugins/verify-install  approves only a row `installing` with the same package, version
@@ -117,6 +119,8 @@ export type StoredBoardCard = AgentChannelBoardCreateCard & {
   version: number;
 };
 export type StoredBoardPatch = AgentChannelBoardPatchCard & { messageId: string; status: number };
+/** Every POST /connectors/call body, as received (never a user id: the API reads the turn's human). */
+export type StoredConnectorCall = Record<string, unknown>;
 export type VerifyCall = {
   packageName: string;
   version: string;
@@ -173,6 +177,8 @@ export type FakeAgentChannelApi = {
   boardReads: string[];
   /** Event id → the board card whose thread the turn runs in (what the real API reads from the stored turn). */
   boardTurnCards: Map<string, string>;
+  /** Every POST /connectors/call body, in order (refused ones included). */
+  connectorCalls: StoredConnectorCall[];
   /** Snapshot `mcpServers` (header values included, as the real API sends them); `[]` = none. */
   mcpServers: CellMcpServer[];
   /** Every POST /mcp/probe-results, in order. */
@@ -269,6 +275,11 @@ function boardCardOut(c: StoredBoardCard) {
   };
 }
 
+/** The keys each connector / keychain body may carry: never a user (the API reads the stored turn's human). */
+const CONNECTOR_BODY_KEYS = {
+  call: ["eventId", "agentId", "connector", "tool", "arguments"],
+} as const;
+
 /** A stable id per fake file (assigned on first use). */
 function memoryFileId(f: FakeMemoryFile): string {
   f.id ??= randomUUID();
@@ -353,6 +364,7 @@ export async function startFakeAgentChannelApi(
     boardPatches: [] as StoredBoardPatch[],
     boardReads: [] as string[],
     boardTurnCards: new Map<string, string>(),
+    connectorCalls: [] as StoredConnectorCall[],
     mcpServers: opts.mcpServers ?? ([] as CellMcpServer[]),
     mcpProbes: [] as AgentChannelMcpProbeResult[],
     cellReads: 0,
@@ -441,6 +453,7 @@ export async function startFakeAgentChannelApi(
             boardCards: state.boardCards,
             boardPatches: state.boardPatches,
             boardReads: state.boardReads,
+            connectorCalls: state.connectorCalls,
             mcpProbes: state.mcpProbes,
             cellReads: state.cellReads,
             plugins: state.plugins,
@@ -602,6 +615,21 @@ export async function startFakeAgentChannelApi(
         const stored: StoredMemory = { ...body, memoryId: same?.memoryId ?? randomUUID(), created: !same };
         state.memories.push(stored);
         return json(res, 200, { memoryId: stored.memoryId, created: stored.created });
+      }
+      if (req.method === "POST" && route === "/connectors/call") {
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        state.connectorCalls.push(body);
+        const allowed: readonly string[] = CONNECTOR_BODY_KEYS.call;
+        if (
+          typeof body.eventId !== "string" ||
+          typeof body.agentId !== "string" ||
+          typeof body.connector !== "string" ||
+          typeof body.tool !== "string" ||
+          Object.keys(body).some((k) => !allowed.includes(k))
+        ) {
+          return json(res, 400, { error: { code: "bad_request" } });
+        }
+        return json(res, 200, { content: "whoami: sub_smoke", truncated: false, isError: false });
       }
       const memoryRoute = /^\/memory\/(list|read|write|propose)$/u.exec(route)?.[1] as
         | MemoryRoute
@@ -995,6 +1023,9 @@ export async function startFakeAgentChannelApi(
     },
     get boardTurnCards() {
       return state.boardTurnCards;
+    },
+    get connectorCalls() {
+      return state.connectorCalls;
     },
     get mcpServers() {
       return state.mcpServers;
