@@ -529,7 +529,12 @@ const MessageRow = memo(function MessageRow({
           </p>
         ) : message.card ? (
           // An Agent Card (06-15): the body is its summary, given to screen readers by the card (never twice).
-          <AgentCardView messageId={message.id} card={message.card} summary={message.body} />
+          <AgentCardView
+            messageId={message.id}
+            card={message.card}
+            summary={message.body}
+            authorName={author.displayName}
+          />
         ) : editing ? (
           <MessageEditor message={message} onDone={() => setEditing(false)} />
         ) : message.editedAt ? (

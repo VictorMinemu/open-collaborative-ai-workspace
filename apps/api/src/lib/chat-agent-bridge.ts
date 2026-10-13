@@ -110,6 +110,8 @@ export interface LinkedCardInfo {
   status: ApprovalRequestStatus;
   requestedForUserId: string | null;
   warnings: string[];
+  /** Why an approved request failed to apply (the kind's code), null otherwise. */
+  resultCode: string | null;
 }
 
 /** Registered by the approval module: chat asks it about cards that mirror an approval. */

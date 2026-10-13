@@ -376,15 +376,41 @@ function WarningLine({ text }: { text: string }) {
   );
 }
 
+/** Why an approved change was not applied, in words (UI-SPEC Copywriting › failed reasons); never an API code. */
+function failedReason(code: string | null | undefined, bot: string): string {
+  switch (code) {
+    case "stale_base":
+      return `The file changed since this proposal. Ask ${bot} to propose again.`;
+    case "path_exists":
+      return "A file with this name was created since this proposal.";
+    case "scope_gone":
+      return "This memory no longer exists.";
+    case "secret_detected":
+      return "Not applied: the text contains a secret.";
+    case "scope_full":
+      return "This memory is full (2,000 files).";
+    case "too_large":
+      return "The file would be over 256 KB.";
+    default:
+      return "Couldn't apply this change.";
+  }
+}
+
 /** A field of the server's card by label (Memory, Readers…), or null. */
 const fieldOf = (card: AgentCard, label: string) => card.fields.find((f) => f.label === label)?.value ?? null;
 
-/** "Ventas · Team" → "Ventas (Team)"; the memory the change goes to, as the dialogs name it. */
+/**
+ * The memory the change goes to, as the dialogs name it, from the server's Memory field ("{label} · {tag}"):
+ * "You & Scout · Private" → "your private memory with Scout", "Scout notebook · Bot" → "Scout notebook",
+ * "Ventas · Team" → "Ventas memory".
+ */
 function scopeText(card: AgentCard): string {
   const memory = fieldOf(card, "Memory");
   if (!memory) return "memory";
-  const [label, tag] = memory.split(" · ");
-  return tag ? `${label} (${tag})` : memory;
+  const [label = memory, tag] = memory.split(" · ");
+  if (tag === "Private" && label.startsWith("You & ")) return `your private memory with ${label.slice(6)}`;
+  if (tag === "Bot") return label;
+  return `${label} memory`;
 }
 
 /** The server's reader count ("Only you", "1 person", "12 people") as the UI-SPEC sentence, or null. */
@@ -617,10 +643,13 @@ export function AgentCardView({
   messageId,
   card: listed,
   summary,
+  authorName,
 }: {
   messageId: string;
   card: AgentCard;
   summary: string;
+  /** The posting agent's name, for copy that names the bot (a failed proposal's reason). */
+  authorName?: string | undefined;
 }) {
   const qc = useQueryClient();
   const card = useAgentCard(messageId, listed);
@@ -682,6 +711,17 @@ export function AgentCardView({
         >
           {card.title}
         </h3>
+        {link?.status === "failed" ? (
+          <p
+            data-testid="agent-card-failed-reason"
+            className="flex min-w-0 items-start gap-1.5 text-[13px] text-red-800 leading-5 dark:text-red-300"
+          >
+            <CircleX className="mt-0.5 size-4 shrink-0" aria-hidden />
+            <span className="min-w-0 break-words">
+              {failedReason(link.resultCode, authorName ?? "the bot")}
+            </span>
+          </p>
+        ) : null}
         {card.fields.length > 0 ? (
           <dl
             data-testid="agent-card-fields"

@@ -71,6 +71,7 @@ const approvalLink = (link: LinkedCardInfo | undefined): Pick<AgentCard, "approv
           status: link.status,
           requestedForUserId: link.requestedForUserId,
           warnings: link.warnings,
+          resultCode: link.resultCode,
         },
       }
     : {};

@@ -221,6 +221,7 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
           status: shownStatus(row),
           requestedForUserId: row.requestedForUserId,
           warnings: row.cardWarnings,
+          resultCode: row.resultCode,
         });
       }
       return out;

@@ -1,4 +1,4 @@
-import type { AgentCard } from "@ocw/contracts";
+import type { AgentCard, AgentCardApprovalLink } from "@ocw/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -35,11 +35,22 @@ function deployment(over: Partial<AgentCard> = {}): AgentCard {
   };
 }
 
-function render(card: AgentCard, summary = "Deploying api v2.3 to production"): string {
+function render(
+  card: AgentCard,
+  summary = "Deploying api v2.3 to production",
+  viewer: { me?: string; authorName?: string } = {},
+): string {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  // The signed-in person, as the app shell caches it (`useMe`).
+  if (viewer.me) qc.setQueryData(["me"], { user: { id: viewer.me } });
   return renderToStaticMarkup(
     <QueryClientProvider client={qc}>
-      <AgentCardView messageId={MESSAGE_ID} card={card} summary={summary} />
+      <AgentCardView
+        messageId={MESSAGE_ID}
+        card={card}
+        summary={summary}
+        {...(viewer.authorName ? { authorName: viewer.authorName } : {})}
+      />
     </QueryClientProvider>,
   );
 }
@@ -169,5 +180,205 @@ describe("AgentCardView: cards without an approval link are unchanged", () => {
   ])("%s", (_name, card) => {
     // The decision time is local: the snapshot keeps the markup, not the machine's time zone.
     expect(render(card).replace(/(<time [^>]*>)[^<]*(<\/time>)/g, "$1·TIME$2")).toMatchSnapshot();
+  });
+});
+
+// ---------------------------------------------------------------- 07.2-17: cards that mirror an approval
+
+const ME = "01a11635-d6e7-7c87-9f17-b6b1dc048950";
+const APPROVAL_ID = "01a11635-d6e7-7c87-9f17-b6b1dc048951";
+const TAINT = "Scout read web or tool content in this turn.";
+
+/** A platform-owned memory proposal card as the server composes it (07.2-09), linked to its approval (07.2-06). */
+function memoryCard(over: Partial<AgentCard> = {}, link: Partial<AgentCardApprovalLink> = {}): AgentCard {
+  return {
+    kind: "approval",
+    title: "Append to MEMORY.md",
+    fields: [
+      { label: "Memory", value: "You & Scout · Private" },
+      { label: "Readers", value: "Only you" },
+      { label: "Found", value: "Nothing found" },
+    ],
+    status: "pending",
+    actions: [
+      { kind: "approve", label: "Approve", denyLabel: "Deny" },
+      { kind: "open", label: "Review changes", target: `/memory/proposals/${APPROVAL_ID}` },
+    ],
+    version: 1,
+    decision: null,
+    updatedAt: "2026-10-07T09:00:00.000Z",
+    following: false,
+    viewerCan: ["decide"],
+    platformOwned: true,
+    approval: {
+      id: APPROVAL_ID,
+      actionHash: "b".repeat(64),
+      status: "pending",
+      requestedForUserId: ME,
+      warnings: [TAINT],
+      resultCode: null,
+      ...link,
+    },
+    ...over,
+  };
+}
+
+const PREVIEW = "+ \n+ - Pumps: 3 plants";
+const SAM_DECIDED = {
+  by: { kind: "user" as const, id: ME, displayName: "Sam Lee" },
+  at: "2026-10-07T09:05:00.000Z",
+};
+/** The visible text of the element with `data-testid`, tags stripped. */
+const textOf = (html: string, testId: string) =>
+  (new RegExp(`data-testid="${testId}"[^>]*>([\\s\\S]*?)</(p|span|div)>`).exec(html)?.[1] ?? "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&#x27;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .trim();
+
+describe("AgentCardView: a platform-owned card that mirrors an approval (07.2-17)", () => {
+  it("shows the workspace badge with its description, the visible preview and the taint line as an amber warning", () => {
+    const html = render(memoryCard(), PREVIEW, { me: ME });
+    expect(html).toContain('data-testid="agent-card-workspace"');
+    expect(html).toContain("Created by the workspace");
+    const describedBy =
+      /data-testid="agent-card-workspace"[^>]*aria-describedby="([^"]+)"|aria-describedby="([^"]+)"[^>]*data-testid="agent-card-workspace"/.exec(
+        html,
+      );
+    const id = describedBy?.[1] ?? describedBy?.[2];
+    expect(id).toBeTruthy();
+    expect(html).toMatch(new RegExp(`id="${id}"[^>]*>This card was made by the workspace, not by the bot.<`));
+    expect(html).toContain('data-testid="agent-card-preview"');
+    expect(html).toContain("- Pumps: 3 plants");
+    expect(html).toMatch(/data-testid="agent-card-warning"[^>]*class="[^"]*bg-amber-50/);
+    expect(textOf(html, "agent-card-warning")).toBe(TAINT);
+    expect(html).toContain('data-approval-status="pending"');
+  });
+
+  it("caps the preview at 6 lines with “+{n} more lines”, hidden from screen readers (the summary describes the card)", () => {
+    const long = Array.from({ length: 8 }, (_, i) => `+ line ${i + 1}`).join("\n");
+    const html = render(memoryCard(), long, { me: ME });
+    expect(html).toContain("line 6");
+    expect(html).not.toContain("line 7</div>");
+    expect(html).toContain("+2 more lines");
+    expect(html).toMatch(/data-testid="agent-card-preview" aria-hidden="true"/);
+  });
+
+  it.each([
+    ["pending", "Pending"],
+    ["applied", "Applied"],
+    ["denied", "Denied"],
+    ["failed", "Failed"],
+    ["expired", "Expired"],
+  ] as const)("the pill reads the approval's status: %s → %s", (status, label) => {
+    // The card's own status says something else on purpose: the approval decides the label.
+    const html = render(memoryCard({ status: "running" }, { status }), PREVIEW, { me: ME });
+    expect(html).toContain(`aria-label="Status: ${label}"`);
+    expect(html).toContain(`data-status="${status}"`);
+  });
+
+  it("the decider gets Review changes, Approve and Deny", () => {
+    const html = render(memoryCard(), PREVIEW, { me: ME });
+    expect(buttons(html)).toEqual(["Approve", "Deny"]);
+    expect(hrefs(html)).toEqual([`/memory/proposals/${APPROVAL_ID}`]);
+  });
+
+  it("a requester in a shared scope reads that they can't approve their own proposal, and gets no Approve", () => {
+    const shared = memoryCard({
+      viewerCan: [],
+      fields: [
+        { label: "Memory", value: "Ventas · Team" },
+        { label: "Readers", value: "4 people" },
+        { label: "Found", value: "Nothing found" },
+      ],
+    });
+    const html = render(shared, PREVIEW, { me: ME });
+    expect(buttons(html)).toEqual([]);
+    expect(textOf(html, "agent-card-waiting")).toBe(
+      "Waiting for a reviewer. You can't approve your own proposal.",
+    );
+    expect(hrefs(html)).toEqual([`/memory/proposals/${APPROVAL_ID}`]);
+  });
+
+  it("another reader waits for a reviewer and is not offered the review", () => {
+    const html = render(memoryCard({ viewerCan: [] }), PREVIEW, {
+      me: "01a11635-d6e7-7c87-9f17-b6b1dc048959",
+    });
+    expect(buttons(html)).toEqual([]);
+    expect(textOf(html, "agent-card-waiting")).toBe("Waiting for a reviewer");
+    expect(hrefs(html)).toEqual([]);
+  });
+
+  it("an expired proposal offers no Approve, even to a decider", () => {
+    const html = render(memoryCard({}, { status: "expired" }), PREVIEW, { me: ME });
+    expect(html).toContain('aria-label="Status: Expired"');
+    expect(buttons(html)).toEqual([]);
+    expect(html).not.toContain("agent-card-waiting");
+  });
+
+  it("a stale failure says why in words, naming the bot; the decision line stays", () => {
+    const html = render(
+      memoryCard(
+        { status: "failed", decision: { outcome: "approved", ...SAM_DECIDED }, viewerCan: [] },
+        { status: "failed", resultCode: "stale_base" },
+      ),
+      PREVIEW,
+      { me: ME, authorName: "Scout" },
+    );
+    expect(html).toContain('aria-label="Status: Failed"');
+    expect(textOf(html, "agent-card-failed-reason")).toBe(
+      "The file changed since this proposal. Ask Scout to propose again.",
+    );
+    expect(html).toMatch(/Approved by Sam Lee/);
+  });
+
+  it.each([
+    ["path_exists", "A file with this name was created since this proposal."],
+    ["scope_gone", "This memory no longer exists."],
+    ["secret_detected", "Not applied: the text contains a secret."],
+    ["scope_full", "This memory is full (2,000 files)."],
+    ["too_large", "The file would be over 256 KB."],
+    ["apply_failed", "Couldn't apply this change."],
+    [null, "Couldn't apply this change."],
+  ])("failed reason %s", (resultCode, copy) => {
+    const html = render(memoryCard({ status: "failed" }, { status: "failed", resultCode }), PREVIEW, {
+      me: ME,
+    });
+    expect(textOf(html, "agent-card-failed-reason")).toBe(copy);
+  });
+
+  it("a decided card shows the decision line and the quoted note; Denied in muted tones", () => {
+    const html = render(
+      memoryCard(
+        {
+          status: "cancelled",
+          decision: { outcome: "denied", ...SAM_DECIDED, note: "Duplicate of the CRM entry." },
+          viewerCan: [],
+        },
+        { status: "denied" },
+      ),
+      PREVIEW,
+      { me: ME },
+    );
+    expect(html).toContain('aria-label="Status: Denied"');
+    expect(html).toMatch(/data-testid="agent-card-status"[^>]*class="[^"]*bg-muted text-muted-foreground/);
+    expect(html).toMatch(/Denied by Sam Lee/);
+    expect(textOf(html, "agent-card-note")).toBe("“Duplicate of the CRM entry.”");
+    expect(buttons(html)).toEqual([]);
+  });
+
+  it("an approval link without the server's platformOwned flag gets no badge and no approval UI (T-07.2-17-01)", () => {
+    const forged = memoryCard({ platformOwned: undefined });
+    const html = render(forged, PREVIEW, { me: ME });
+    expect(html).not.toContain("agent-card-workspace");
+    expect(html).not.toContain("agent-card-preview");
+    expect(html).not.toContain("agent-card-warning");
+    expect(html).not.toContain("data-approval-status");
+    // The ordinary card: the card's own status and the agent's labels.
+    expect(html).toContain('aria-label="Status: Pending"');
+    expect(buttons(html)).toEqual(["Approve", "Deny"]);
   });
 });

@@ -121,6 +121,11 @@ export const AgentCardApprovalLink = z.object({
   requestedForUserId: Id.nullable(),
   /** Server-composed warnings, e.g. the taint line. */
   warnings: z.array(z.string().max(200)).max(3),
+  /**
+   * Why an approved request failed to apply (the kind's code, e.g. `stale_base`), null otherwise; the card says it in
+   * words (07.2-17, UI-SPEC Copywriting › failed reasons). Optional: absent on snapshots from before it existed.
+   */
+  resultCode: z.string().max(64).nullable().optional(),
 });
 export type AgentCardApprovalLink = z.infer<typeof AgentCardApprovalLink>;
 
