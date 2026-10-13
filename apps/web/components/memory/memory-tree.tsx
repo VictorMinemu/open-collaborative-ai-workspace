@@ -19,7 +19,7 @@ import {
   type LucideIcon,
   NotebookText,
 } from "lucide-react";
-import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type KeyboardEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { create } from "zustand";
 import { UNIT_KIND_ICON, UNIT_KIND_LABEL } from "@/components/members/unit-chip";
 import { Badge } from "@/components/ui/badge";
@@ -143,6 +143,13 @@ export interface MemoryTreeProps {
   stacked?: boolean;
   label?: string;
   className?: string;
+  /**
+   * A row's ⋯ menu (07.2-12, writers only; null hides it). Shown on hover, on the selected row and while open on
+   * desktop; on the focused row only on phones. Shift+F10 / ContextMenu opens the focused row's menu.
+   */
+  rowMenu?: (node: MemoryNode, menu: { open: boolean; onOpenChange: (open: boolean) => void }) => ReactNode;
+  /** F2 (rename or move) and Delete on the focused row; returns whether it handled the key. */
+  onRowKey?: (node: MemoryNode, key: "F2" | "Delete") => boolean;
 }
 
 export function MemoryTree({
@@ -154,7 +161,10 @@ export function MemoryTree({
   stacked = false,
   label = "Memory files",
   className,
+  rowMenu,
+  onRowKey,
 }: MemoryTreeProps) {
+  const [menuFor, setMenuFor] = useState<string | null>(null);
   const visibleScopes = useMemo(
     () => (scopeFilter ? scopes.filter((s) => s.agentId === scopeFilter.agentId) : scopes),
     [scopes, scopeFilter],
@@ -257,6 +267,17 @@ export function MemoryTree({
     const item = tree.getFocusedItem();
     if (!item) return;
     const node = item.getItemData();
+    if (e.key === "F2" || e.key === "Delete") {
+      if (onRowKey?.(node, e.key)) e.preventDefault();
+      return;
+    }
+    if ((e.key === "F10" && e.shiftKey) || e.key === "ContextMenu") {
+      if (rowMenu) {
+        e.preventDefault();
+        setMenuFor(node.id);
+      }
+      return;
+    }
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       if (node.kind === "file") onOpenRef.current(node, "keyboard");
@@ -319,6 +340,13 @@ export function MemoryTree({
           selected={item.getId() === selectedId}
           tabStop={item.getId() === tabStop}
           stacked={stacked}
+          menu={
+            rowMenu?.(item.getItemData(), {
+              open: menuFor === item.getId(),
+              onOpenChange: (open) => setMenuFor(open ? item.getId() : null),
+            }) ?? null
+          }
+          menuOpen={menuFor === item.getId()}
         />
       ))}
     </div>
@@ -332,11 +360,15 @@ function TreeRow({
   selected,
   tabStop,
   stacked,
+  menu,
+  menuOpen,
 }: {
   item: ItemInstance<MemoryNode>;
   selected: boolean;
   tabStop: boolean;
   stacked: boolean;
+  menu: ReactNode;
+  menuOpen: boolean;
 }) {
   const node = item.getItemData();
   const level = item.getItemMeta().level;
@@ -439,6 +471,20 @@ function TreeRow({
           <Badge aria-hidden variant="outline" className="ml-auto font-normal">
             {scopeTag(scope)}
           </Badge>
+        ) : null}
+        {menu && (!stacked || item.isFocused() || menuOpen) ? (
+          <span
+            className={cn(
+              "flex shrink-0 items-center",
+              !isScope && "ml-auto",
+              !stacked &&
+                !selected &&
+                !menuOpen &&
+                "opacity-0 focus-within:opacity-100 group-hover:opacity-100 group-focus-visible:opacity-100",
+            )}
+          >
+            {menu}
+          </span>
         ) : null}
       </div>
       {showEmpty ? (

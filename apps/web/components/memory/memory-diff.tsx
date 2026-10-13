@@ -40,18 +40,18 @@ export interface MemoryDiffProps {
 const SPLIT_MIN = 520;
 const mix = (v: string, pct: number) => `color-mix(in oklch, ${v} ${pct}%, transparent)`;
 
-const LINE_PAD = "22px";
+const LINE_PAD = "30px";
 const marker = (sign: string, color: string) => ({
   content: `"${sign}"`,
   position: "absolute",
-  left: "8px",
+  left: "12px",
   color,
   fontFamily: "var(--font-mono, ui-monospace, monospace)",
 });
 
 /** UI-SPEC "Diff colours"; `.dark &` selectors carry the dark alphas and bars. */
 const diffTheme = EditorView.theme({
-  ".cm-line": { position: "relative", paddingLeft: LINE_PAD },
+  "&.cm-editor .cm-line": { position: "relative", paddingLeft: LINE_PAD },
   ".cm-activeLine": { backgroundColor: "transparent" },
   // Inserted lines (side b, and the unified view's own lines).
   "&.cm-merge-b .cm-changedLine": {

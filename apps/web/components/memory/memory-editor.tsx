@@ -235,7 +235,11 @@ export function MemoryEditor({ file, compact, actionsSlot, onSaved, onLeave }: M
       {newer ? (
         <div
           role="status"
-          className={cn("flex min-h-8 shrink-0 items-center gap-2 border-b px-6 py-1.5 text-xs", WARNING)}
+          className={cn(
+            "flex min-h-8 shrink-0 items-center gap-2 border-b py-1.5 text-xs",
+            compact ? "px-4" : "px-6",
+            WARNING,
+          )}
         >
           <TriangleAlert aria-hidden className="size-3.5 shrink-0" />
           Version {newer} was saved while you were editing. You'll choose what to keep when you save.
@@ -247,12 +251,13 @@ export function MemoryEditor({ file, compact, actionsSlot, onSaved, onLeave }: M
           role="alert"
           data-testid="memory-secret-notice"
           className={cn(
-            "flex shrink-0 flex-wrap items-start gap-x-3 gap-y-2 border-b px-6 py-3 text-sm",
+            "flex shrink-0 flex-wrap items-start gap-x-3 gap-y-2 border-b py-3 text-sm",
+            compact ? "px-4" : "px-6",
             BLOCKING,
           )}
         >
           <KeyRound aria-hidden className="mt-0.5 size-4 shrink-0" />
-          <div className="grid min-w-0 flex-1 gap-1">
+          <div className={cn("grid min-w-0 flex-1 gap-1", compact && "basis-[calc(100%-1.75rem)]")}>
             <p className="font-semibold">{secretHeadline(problem.lines)}</p>
             <p className="text-xs">
               {problem.samples.length > 0 ? (
@@ -268,7 +273,7 @@ export function MemoryEditor({ file, compact, actionsSlot, onSaved, onLeave }: M
             <Button
               variant="outline"
               size="sm"
-              className="max-lg:h-11"
+              className={cn("max-lg:h-11", compact && "ml-7")}
               onClick={() => goToLine(view, problem.lines[0] ?? 1)}
             >
               Go to line {problem.lines[0]}
@@ -281,7 +286,11 @@ export function MemoryEditor({ file, compact, actionsSlot, onSaved, onLeave }: M
         <div
           role="alert"
           data-testid="memory-save-error"
-          className={cn("flex shrink-0 flex-wrap items-center gap-3 border-b px-6 py-3 text-sm", BLOCKING)}
+          className={cn(
+            "flex shrink-0 flex-wrap items-center gap-3 border-b py-3 text-sm",
+            compact ? "px-4" : "px-6",
+            BLOCKING,
+          )}
         >
           <TriangleAlert aria-hidden className="size-4 shrink-0" />
           <p className="min-w-0 flex-1">{problem.text}</p>
@@ -355,7 +364,14 @@ function ConflictView({
       aria-labelledby="memory-conflict-title"
       className="flex min-h-0 flex-1 flex-col"
     >
-      <div role="alert" className={cn("flex shrink-0 items-start gap-2 border-b px-6 py-3 text-sm", WARNING)}>
+      <div
+        role="alert"
+        className={cn(
+          "flex shrink-0 items-start gap-2 border-b py-3 text-sm",
+          compact ? "px-4" : "px-6",
+          WARNING,
+        )}
+      >
         <TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />
         <p>
           {name} saved version {n} while you were editing.

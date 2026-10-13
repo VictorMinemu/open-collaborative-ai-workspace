@@ -50,7 +50,7 @@ import {
   useMemoryFiles,
   useRenameMemoryFile,
 } from "@/lib/memory-queries";
-import { folderNodeId, memoryAncestorIds, memoryHref, scopeNodeId } from "@/lib/memory-tree";
+import { folderNodeId, type MemoryNode, memoryAncestorIds, memoryHref, scopeNodeId } from "@/lib/memory-tree";
 import { cn } from "@/lib/utils";
 import { useMemoryTreeState } from "./memory-tree";
 
@@ -114,8 +114,8 @@ export function MemoryCreateButtons({ scope, folder }: { scope: MemoryScope | nu
   );
 }
 
-/** The file header's ⋯ menu: Rename or move…, Delete… (writers), Copy path (everyone). */
-export function MemoryFileMenu({
+/** Rename or move…, Delete… (disabled with the reason on `MEMORY.md`), then Copy path: shared by both ⋯ menus. */
+function FileItems({
   scope,
   file,
   canWrite,
@@ -128,7 +128,6 @@ export function MemoryFileMenu({
 }) {
   const open = useMemoryActions((s) => s.open);
   const root = isRootFile(file.path);
-  const name = fileName(file.path);
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(file.path);
@@ -159,6 +158,35 @@ export function MemoryFileMenu({
     );
   };
   return (
+    <>
+      {canWrite ? (
+        <>
+          {guarded("Rename or move…", <FolderInput />, () => open({ kind: "rename", scope, file }))}
+          {guarded("Delete…", <Trash2 />, () => open({ kind: "delete", scope, file }), true)}
+          <DropdownMenuSeparator />
+        </>
+      ) : null}
+      <DropdownMenuItem className={cn(compact && "min-h-11")} onClick={() => void copy()}>
+        <Copy />
+        Copy path
+      </DropdownMenuItem>
+    </>
+  );
+}
+
+/** The file header's ⋯ menu: Rename or move…, Delete… (writers), Copy path (everyone). */
+export function MemoryFileMenu({
+  scope,
+  file,
+  canWrite,
+  compact,
+}: {
+  scope: MemoryScope;
+  file: MemoryFileMeta;
+  canWrite: boolean;
+  compact: boolean;
+}) {
+  return (
     <DropdownMenu>
       <DropdownMenuTrigger
         render={
@@ -166,27 +194,91 @@ export function MemoryFileMenu({
             variant="ghost"
             size={compact ? "icon" : "icon-sm"}
             className={cn(compact && "size-11")}
-            aria-label={`Actions for ${name}`}
+            aria-label="File actions"
           />
         }
       >
         <Ellipsis />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" data-testid="memory-file-menu">
-        {canWrite ? (
-          <>
-            {guarded("Rename or move…", <FolderInput />, () => open({ kind: "rename", scope, file }))}
-            {guarded("Delete…", <Trash2 />, () => open({ kind: "delete", scope, file }), true)}
-            <DropdownMenuSeparator />
-          </>
-        ) : null}
-        <DropdownMenuItem className={cn(compact && "min-h-11")} onClick={() => void copy()}>
-          <Copy />
-          Copy path
-        </DropdownMenuItem>
+        <FileItems scope={scope} file={file} canWrite={canWrite} compact={compact} />
       </DropdownMenuContent>
     </DropdownMenu>
   );
+}
+
+/**
+ * A tree row's ⋯ menu (writers of the row's scope only; UI-SPEC "Tree rows"): files get the file items, scopes and
+ * folders New file… and New folder… in that place. Not a tab stop (`tabIndex=-1`): keyboard users have Shift+F10,
+ * F2, Delete and the file header's menu.
+ */
+export function MemoryRowMenu({
+  node,
+  scope,
+  compact,
+  open,
+  onOpenChange,
+}: {
+  node: MemoryNode;
+  scope: MemoryScope | undefined;
+  compact: boolean;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const request = useMemoryActions((s) => s.open);
+  if (!scope || !canWriteScope(scope)) return null;
+  const folder = node.kind === "folder" && node.path ? `${node.path}/` : "";
+  const stop = (e: React.SyntheticEvent) => e.stopPropagation();
+  return (
+    <DropdownMenu open={open} onOpenChange={onOpenChange}>
+      <DropdownMenuTrigger
+        render={
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            tabIndex={-1}
+            className={cn(compact ? "size-11" : "size-6", "text-muted-foreground")}
+            aria-label={`Actions for ${node.name}`}
+            onClick={stop}
+            onPointerDown={stop}
+            onKeyDown={stop}
+          />
+        }
+      >
+        <Ellipsis />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" data-testid="memory-row-menu">
+        {node.kind === "file" && node.file ? (
+          <FileItems scope={scope} file={node.file} canWrite compact={compact} />
+        ) : (
+          <>
+            <DropdownMenuItem
+              className={cn(compact && "min-h-11")}
+              onClick={() => request({ kind: "new-file", scope, folder })}
+            >
+              <FilePlus />
+              New file…
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className={cn(compact && "min-h-11")}
+              onClick={() => request({ kind: "new-folder", scope, folder })}
+            >
+              <FolderPlus />
+              New folder…
+            </DropdownMenuItem>
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/** F2 and Delete on a focused file row (writers; never `MEMORY.md`). */
+export function rowShortcut(node: MemoryNode, key: "F2" | "Delete", scope: MemoryScope | undefined): boolean {
+  if (node.kind !== "file" || !node.file || !scope || !canWriteScope(scope) || isRootFile(node.file.path))
+    return false;
+  useMemoryActions.getState().open({ kind: key === "F2" ? "rename" : "delete", scope, file: node.file });
+  return true;
 }
 
 // ---------------------------------------------------------------- the dialogs host
@@ -233,21 +325,20 @@ function PathDialog({
     return () => window.clearTimeout(t);
   }, [value, initial]);
 
-  // Rename selects the stem; New file and New folder put the caret at the end.
-  useEffect(() => {
-    const el = inputRef.current;
-    if (!el) return;
-    const raf = requestAnimationFrame(() => {
-      if (request.kind === "rename") {
-        const start = el.value.lastIndexOf("/") + 1;
-        const end = el.value.endsWith(".md") ? el.value.length - 3 : el.value.length;
-        el.setSelectionRange(start, end);
-      } else {
-        el.setSelectionRange(el.value.length, el.value.length);
-      }
-    });
-    return () => cancelAnimationFrame(raf);
-  }, [request.kind]);
+  // Rename selects the stem; New file and New folder put the caret at the end. Done once, on the first focus (the
+  // dialog's initial focus): a selection set before the field has focus is lost when it receives it.
+  const placed = useRef(false);
+  const placeCaret = (el: HTMLInputElement) => {
+    if (placed.current) return;
+    placed.current = true;
+    if (request.kind === "rename") {
+      const start = el.value.lastIndexOf("/") + 1;
+      const end = el.value.endsWith(".md") ? el.value.length - 3 : el.value.length;
+      el.setSelectionRange(start, end);
+    } else {
+      el.setSelectionRange(el.value.length, el.value.length);
+    }
+  };
 
   const folderResult = request.kind === "new-folder" ? folderIndexPath(value) : null;
   const pathResult = request.kind === "new-folder" ? null : parseMemoryPath(value);
@@ -357,6 +448,7 @@ function PathDialog({
               aria-invalid={!!error}
               aria-describedby={describedBy(id, error, hint)}
               className="font-mono max-lg:h-11"
+              onFocus={(e) => placeCaret(e.currentTarget)}
               onBlur={() => setTouched(true)}
               onChange={(e) => {
                 setValue(e.target.value);

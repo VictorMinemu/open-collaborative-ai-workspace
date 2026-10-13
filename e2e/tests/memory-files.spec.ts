@@ -561,7 +561,7 @@ const editorOf = (page: Page, path: string) =>
  * Puts the caret at the end of the document (after its trailing newline, through a DOM selection CodeMirror picks up,
  * the same on desktop and touch) and types a new last line.
  */
-async function appendLine(page: Page, path: string, text: string) {
+async function appendLine(page: Page, path: string, text: string, opts: { paste?: boolean } = {}) {
   const editor = editorOf(page, path);
   await expect(editor).toBeVisible();
   await editor.click();
@@ -576,7 +576,17 @@ async function appendLine(page: Page, path: string, text: string) {
     sel?.removeAllRanges();
     sel?.addRange(range);
   });
-  await page.keyboard.type(text);
+  // CodeMirror reads the DOM selection asynchronously: wait until its active line is the last one.
+  await expect
+    .poll(() =>
+      editor.evaluate((el) => {
+        const lines = el.querySelectorAll(".cm-line");
+        return lines[lines.length - 1]?.classList.contains("cm-activeLine") ?? false;
+      }),
+    )
+    .toBe(true);
+  if (opts.paste) await page.keyboard.insertText(text);
+  else await page.keyboard.type(text);
 }
 
 /** Every script body the page loads from now on (for the "reading never loads the editor" check). */
@@ -745,4 +755,425 @@ test("Sam can't edit the team file but edits a private MEMORY.md the same way (P
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.getByText(/^Saved version \d+$/)).toBeVisible();
   await expect(page.getByTestId("memory-file").getByText("Prefers short answers")).toBeVisible();
+});
+
+// ---------------------------------------------------------------- 07.2-12 Task 3
+
+const ACME_HREF = () => `${BASE_URL}/memory/${seed.ventasScopeId}/clients/acme.md`;
+/** An Anthropic-style key, assembled so no scanner flags this file. */
+const PASTED_KEY = ["sk", "ant", "api03", "Zq7Lm2Np9Rt4Vx8Bc1Df6Gh3Jk5"].join("-");
+const ROOT_NOTE = "MEMORY.md is the scope's main file. You can edit it, not rename or delete it.";
+
+async function putAs(api: APIRequestContext, fileId: string, content: string, expectedVersion: number) {
+  const res = await api.put(`/api/v1/memory/files/${fileId}`, { data: { content, expectedVersion } });
+  expect(res.ok(), `PUT ${fileId}: ${res.status()} ${await res.text()}`).toBe(true);
+  return (await res.json()) as FileDto;
+}
+
+async function openEdit(page: Page, href: string, path: string) {
+  await page.goto(`${href}?tab=edit`);
+  await expect(editorOf(page, path)).toBeVisible();
+}
+
+const saveButton = (page: Page) => page.getByRole("button", { name: "Save", exact: true });
+
+test("a concurrent save opens the conflict view: Keep mine saves over it, Use theirs discards the draft", async ({
+  browser,
+}, info) => {
+  const w = widthOf(info.project.name);
+  const mobile = w === "390";
+  await ensureLead();
+  const acme = await freshFile(seed.ventasScopeId, "clients/acme.md", ACME);
+  const page = await signIn(browser, info.project.name, LEAD);
+
+  await openEdit(page, ACME_HREF(), "clients/acme.md");
+  await appendLine(page, "clients/acme.md", "- Lead's note");
+  // The admin saves first, from another session.
+  await putAs(admin, acme.id, `${ACME}- Admin's note\n`, 1);
+  await saveButton(page).click();
+
+  const conflict = page.getByTestId("memory-conflict");
+  await expect(conflict.getByRole("alert")).toHaveText(
+    `${ADMIN.name} saved version 2 while you were editing.`,
+  );
+  await expect(page.getByRole("heading", { name: "Choose what to keep" })).toBeFocused();
+  const diff = page.getByRole("region", { name: "Changes from version 2 to your changes" });
+  await expect(diff).toBeVisible();
+  await expect(diff).toHaveAttribute("data-layout", mobile ? "unified" : "split");
+  const keep = page.getByRole("button", { name: "Keep mine" });
+  const theirs = page.getByRole("button", { name: "Use theirs" });
+  await expect(conflict.getByText("Saves your text as version 3. Version 2 stays in History.")).toBeVisible();
+  await expect(conflict.getByText("Discards your changes and shows version 2.")).toBeVisible();
+  if (mobile) {
+    // Stacked full width, 44 px each.
+    const pane = (await conflict.boundingBox())?.width ?? 0;
+    for (const b of [keep, theirs]) {
+      const box = await b.boundingBox();
+      expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+      expect(box?.width ?? 0).toBeGreaterThanOrEqual(pane - 33);
+    }
+  }
+  await review(page, "conflict", w);
+
+  await keep.click();
+  await expect(page.getByText("Saved version 3")).toBeVisible();
+  await expect(page).toHaveURL(ACME_HREF());
+  const kept = await readFile(admin, seed.ventasScopeId, "clients/acme.md");
+  expect(kept?.version).toBe(3);
+  expect(kept?.content).toContain("- Lead's note");
+  expect(kept?.content).not.toContain("- Admin's note");
+
+  // Second round: the draft loses to the saved version.
+  await openEdit(page, ACME_HREF(), "clients/acme.md");
+  await appendLine(page, "clients/acme.md", "- Discarded idea");
+  await putAs(admin, acme.id, `${ACME}- Admin again\n`, 3);
+  await saveButton(page).click();
+  await expect(page.getByTestId("memory-conflict")).toBeVisible();
+  await page.getByRole("button", { name: "Use theirs" }).click();
+  await expect(page).toHaveURL(ACME_HREF());
+  const file = page.getByTestId("memory-file");
+  await expect(file.getByText("Admin again")).toBeVisible();
+  await expect(file.getByText("Discarded idea")).toHaveCount(0);
+  await expect(page.getByTestId("memory-file-version")).toHaveText("Version 4");
+  expect((await readFile(admin, seed.ventasScopeId, "clients/acme.md"))?.version).toBe(4);
+});
+
+test("a pasted secret is refused with its line and a masked sample; nothing is saved", async ({
+  browser,
+}, info) => {
+  const w = widthOf(info.project.name);
+  await ensureLead();
+  await freshFile(seed.ventasScopeId, "clients/acme.md", ACME);
+  const page = await signIn(browser, info.project.name, LEAD);
+  await openEdit(page, ACME_HREF(), "clients/acme.md");
+  await appendLine(page, "clients/acme.md", `API token ${PASTED_KEY}`, { paste: true });
+  await saveButton(page).click();
+
+  const line = ACME.split("\n").length;
+  const notice = page.getByTestId("memory-secret-notice");
+  await expect(notice).toHaveAttribute("role", "alert");
+  await expect(notice).toContainText(`This looks like a secret on line ${line}.`);
+  await expect(notice).toContainText("sk-a••••");
+  await expect(notice).toContainText("Secrets can't be stored in memory. Remove it and save again.");
+  expect(await notice.textContent()).not.toContain(PASTED_KEY);
+  const marked = page.locator(".cm-secretLine");
+  await expect(marked).toHaveCount(1);
+  await expect(marked).toContainText("API token");
+  await expect(editorOf(page, "clients/acme.md")).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "Unsaved changes" })).toBeVisible();
+  expect((await readFile(admin, seed.ventasScopeId, "clients/acme.md"))?.version).toBe(1);
+  await review(page, "secret", w);
+  await page.getByRole("button", { name: `Go to line ${line}` }).click();
+  await expect(editorOf(page, "clients/acme.md")).toBeFocused();
+});
+
+test("history shows a revision's diff and restores an older version as a new one", async ({
+  browser,
+}, info) => {
+  const w = widthOf(info.project.name);
+  const mobile = w === "390";
+  await ensureLead();
+  const acme = await freshFile(seed.ventasScopeId, "clients/acme.md", ACME);
+  await putAs(
+    admin,
+    acme.id,
+    ACME.replace("- Luis Romero — maintenance\n", "- Luis Romero — plant manager\n- Ana Ruiz — finance\n"),
+    1,
+  );
+  const page = await signIn(browser, info.project.name, LEAD);
+  await page.goto(`${ACME_HREF()}?tab=history&v=2`);
+  const diff = page.getByRole("region", { name: "Changes from version 1 to version 2" });
+  await expect(diff).toBeVisible();
+  await expect(diff.locator(".cm-changedLine").first()).toBeVisible();
+  await expect(page.getByTestId("memory-diff-added")).toHaveText("+2");
+  await expect(page.getByTestId("memory-diff-removed")).toHaveText("−1");
+  await expect(page.getByTestId("memory-diff-removed")).toHaveClass(/text-red-700/);
+  // Collapsed unchanged stretch, deleted text struck through in the unified view.
+  await expect(diff.locator(".cm-collapsedLines").first()).toContainText("unchanged lines");
+  if (mobile) {
+    await expect(diff.locator(".cm-deletedLine del").first()).toHaveCSS(
+      "text-decoration-line",
+      "line-through",
+    );
+  }
+  // The newest version has nothing to restore.
+  await expect(page.getByRole("button", { name: /^Restore/ })).toHaveCount(0);
+  await review(page, "history", w);
+
+  await page.goto(`${ACME_HREF()}?tab=history&v=1`);
+  await expect(page.getByRole("region", { name: "Changes from empty to version 1" })).toBeVisible();
+  await page.getByRole("button", { name: mobile ? "Restore" : "Restore version 1" }).click();
+  const dialog = page.getByRole("dialog", { name: "Restore version 1?" });
+  await expect(dialog).toContainText(
+    "Its content becomes version 3. Nothing is lost: version 2 stays in history.",
+  );
+  await expect(dialog.getByRole("button", { name: "Cancel" })).toBeFocused();
+  await dialog.getByRole("button", { name: "Restore version 1" }).click();
+  await expect(page.getByText("Restored version 1 as version 3")).toBeVisible();
+  await expect(page.getByTestId("memory-revision-view")).toHaveCount(0);
+  await expect(page.getByTestId("memory-file-version")).toHaveText("Version 3");
+  const restored = await readFile(admin, seed.ventasScopeId, "clients/acme.md");
+  expect(restored?.content).toBe(ACME);
+  if (mobile)
+    await page.getByRole("tablist", { name: "File view" }).getByRole("tab", { name: "History" }).click();
+  const top = page.getByTestId("memory-revision").first();
+  await expect(top).toHaveAttribute("data-version", "3");
+  await expect(top).toContainText("Restored");
+});
+
+test("leaving Edit with unsaved changes asks first: tree, back and tabs; the draft survives Keep editing", async ({
+  browser,
+}, info) => {
+  const w = widthOf(info.project.name);
+  const mobile = w === "390";
+  await ensureLead();
+  await freshFile(seed.ventasScopeId, "clients/acme.md", ACME);
+  const page = await signIn(browser, info.project.name, LEAD);
+  await page.goto(ACME_HREF());
+  await page.getByRole("tablist", { name: "File view" }).getByRole("tab", { name: "Edit" }).click();
+  await appendLine(page, "clients/acme.md", "- Draft line");
+  await expect(page.getByRole("status").filter({ hasText: "Unsaved changes" })).toBeVisible();
+  // The editor fits the width; nothing scrolls sideways (review checks it too).
+  const box = await editorOf(page, "clients/acme.md").boundingBox();
+  expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(Number(w) + 1);
+  await review(page, "edit", w);
+
+  const discard = page.getByRole("dialog", { name: "Discard unsaved changes?" });
+  // An in-app way out: the tree (desktop) or Back to files (phone).
+  if (mobile) await page.getByRole("button", { name: "Back to files" }).click();
+  else await row(page, "MEMORY.md", seed.ventasScopeId).click();
+  await expect(discard).toBeVisible();
+  await expect(discard).toContainText("Your changes to acme.md haven't been saved.");
+  await expect(discard.getByRole("button", { name: "Keep editing" })).toBeFocused();
+  await discard.getByRole("button", { name: "Keep editing" }).click();
+  await expect(discard).toHaveCount(0);
+  await expect(page).toHaveURL(`${ACME_HREF()}?tab=edit`);
+  await expect(editorOf(page, "clients/acme.md")).toContainText("Draft line");
+
+  // Browser Back leaves Edit without asking first: the guard asks now, Keep editing brings the draft back.
+  await page.goBack();
+  await expect(discard).toBeVisible();
+  await discard.getByRole("button", { name: "Keep editing" }).click();
+  await expect(page).toHaveURL(`${ACME_HREF()}?tab=edit`);
+  await expect(editorOf(page, "clients/acme.md")).toContainText("Draft line");
+
+  // A tab change asks too; Discard changes leaves.
+  if (mobile)
+    await page.getByRole("tablist", { name: "File view" }).getByRole("tab", { name: "View" }).click();
+  else await page.getByRole("button", { name: "Cancel" }).click();
+  await expect(discard).toBeVisible();
+  await discard.getByRole("button", { name: "Discard changes" }).click();
+  await expect(page).toHaveURL(ACME_HREF());
+  await expect(page.getByTestId("memory-file").getByText("Draft line")).toHaveCount(0);
+  expect((await readFile(admin, seed.ventasScopeId, "clients/acme.md"))?.version).toBe(1);
+
+  // Closing the tab with unsaved changes asks the browser's own question.
+  await page.getByRole("tablist", { name: "File view" }).getByRole("tab", { name: "Edit" }).click();
+  await appendLine(page, "clients/acme.md", "- Unsaved again");
+  const dialogs: string[] = [];
+  page.on("dialog", (d) => {
+    dialogs.push(d.type());
+    void d.accept();
+  });
+  await page.close({ runBeforeUnload: true });
+  await expect.poll(() => dialogs).toContain("beforeunload");
+});
+
+test("file and folder actions: new folder, new file, rename or move with live validation, delete; MEMORY.md stays", async ({
+  browser,
+}, info) => {
+  const w = widthOf(info.project.name);
+  const mobile = w === "390";
+  await ensureLead();
+  for (const p of ["meetings/INDEX.md", "meetings/2026-10-08.md", "meetings/kickoff.md"]) {
+    const f = await readFile(admin, seed.ventasScopeId, p);
+    if (f) await admin.delete(`/api/v1/memory/files/${f.id}?expectedVersion=${f.version}`);
+  }
+  const page = await signIn(browser, info.project.name, LEAD);
+  const base = `${BASE_URL}/memory/${seed.ventasScopeId}`;
+  await page.goto(`${base}/MEMORY.md`);
+  await expect(page.getByTestId("memory-file")).toHaveAttribute("data-path", "MEMORY.md");
+
+  // MEMORY.md: Rename and Delete are disabled with the reason.
+  await page.getByRole("button", { name: "File actions" }).click();
+  const menu = page.getByRole("menu");
+  for (const name of [/Rename or move/, /Delete/]) {
+    await expect(menu.getByRole("menuitem", { name })).toHaveAttribute("aria-disabled", "true");
+  }
+  if (!mobile) {
+    await menu.getByRole("menuitem", { name: /Rename or move/ }).hover();
+    await expect(page.getByText(ROOT_NOTE, { exact: true })).toBeVisible();
+  }
+  await page.keyboard.press("Escape");
+
+  if (mobile) {
+    // Phone: the file's ⋯ menu renames and deletes (bottom-sheet dialogs); creating happens from the tree's ⋯.
+    await freshFile(seed.ventasScopeId, "meetings/2026-10-08.md", "# 2026-10-08\n");
+    await page.goto(`${base}/meetings/2026-10-08.md`);
+    await page.getByRole("button", { name: "File actions" }).click();
+    await page.getByRole("menuitem", { name: /Rename or move/ }).click();
+    const dialog = page.getByRole("dialog", { name: "Rename or move" });
+    const field = dialog.getByLabel("Path");
+    await expect(field).toBeFocused();
+    await field.fill("meetings/kickoff.md");
+    await dialog.getByRole("button", { name: "Rename" }).click();
+    await expect(page.getByText("Renamed to kickoff.md")).toBeVisible();
+    await expect(page).toHaveURL(`${base}/meetings/kickoff.md`);
+    await page.getByRole("button", { name: "File actions" }).click();
+    await page.getByRole("menuitem", { name: /Delete/ }).click();
+    const del = page.getByRole("dialog", { name: "Delete meetings/kickoff.md?" });
+    await expect(del.getByRole("button", { name: "Cancel" })).toBeFocused();
+    await del.getByRole("button", { name: "Delete file" }).click();
+    await expect(page.getByText("Deleted kickoff.md")).toBeVisible();
+    await expect(page).toHaveURL(`${base}/MEMORY.md`);
+
+    // The tree screen: the focused row's ⋯ (44 px) creates files and folders in that place.
+    await page.goto(`${BASE_URL}/memory`);
+    await row(page, `${MEMORY_TEAM}, team memory`).tap();
+    const more = page.getByRole("button", { name: `Actions for ${MEMORY_TEAM}` });
+    await expect(more).toBeVisible();
+    expect((await more.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
+    await more.tap();
+    await expect(page.getByRole("menuitem", { name: "New file…" })).toBeVisible();
+    await page.getByRole("menuitem", { name: "New folder…" }).tap();
+    const folderSheet = page.getByRole("dialog", { name: "New folder" });
+    await expect(folderSheet.getByLabel("Folder")).toHaveValue("");
+    await folderSheet.getByRole("button", { name: "Cancel" }).tap();
+    await noSidewaysScroll(page, "tree 390 with row menu");
+    return;
+  }
+
+  // New folder (column header): meetings/INDEX.md is created and opened, the folder shows in the tree.
+  await page.getByRole("button", { name: "New folder" }).click();
+  const folderDialog = page.getByRole("dialog", { name: "New folder" });
+  await folderDialog.getByLabel("Folder").fill("meetings");
+  await expect(folderDialog).toContainText("Creates meetings/INDEX.md so the folder isn't empty.");
+  await folderDialog.getByRole("button", { name: "Create folder" }).click();
+  await expect(page).toHaveURL(`${base}/meetings/INDEX.md`);
+  await expect(row(page, "meetings, folder", seed.ventasScopeId)).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByTestId("memory-file").getByRole("heading", { name: "meetings" })).toBeVisible();
+
+  // New file in the open file's folder: opens in Edit with its heading.
+  await page.getByRole("button", { name: "New file" }).click();
+  const fileDialog = page.getByRole("dialog", { name: "New file" });
+  const pathField = fileDialog.getByLabel("Path");
+  await expect(pathField).toHaveValue("meetings/");
+  await pathField.press("End");
+  await pathField.pressSequentially("2026-10-08.md");
+  await fileDialog.getByRole("button", { name: "Create" }).click();
+  await expect(page).toHaveURL(`${base}/meetings/2026-10-08.md?tab=edit`);
+  await expect(editorOf(page, "meetings/2026-10-08.md")).toContainText("# 2026-10-08");
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await expect(page).toHaveURL(`${base}/meetings/2026-10-08.md`);
+
+  // Rename or move from the tree row's ⋯ menu, with live validation.
+  const fileRow = row(page, "2026-10-08.md", seed.ventasScopeId);
+  await fileRow.hover();
+  await page.getByRole("button", { name: "Actions for 2026-10-08.md" }).click();
+  await expect(page.getByRole("menu")).toBeVisible();
+  await shot(page, "review-memory-actions-menu-1440");
+  await page.getByRole("menuitem", { name: /Rename or move/ }).click();
+  const renameDialog = page.getByRole("dialog", { name: "Rename or move" });
+  const renameField = renameDialog.getByLabel("Path");
+  await expect(renameField).toHaveValue("meetings/2026-10-08.md");
+  await expect
+    .poll(() =>
+      renameField.evaluate((el: HTMLInputElement) =>
+        el.value.slice(el.selectionStart ?? 0, el.selectionEnd ?? 0),
+      ),
+    )
+    .toBe("2026-10-08");
+  await renameField.fill("../x.md");
+  await expect(renameDialog.getByRole("alert")).toHaveText('"." and ".." aren\'t allowed.');
+  await review(page, "actions", "1440", { axe: false });
+  await expectNoSeriousA11y(page, '[role="dialog"]');
+  await renameField.fill("clients/acme.md");
+  await expect(renameDialog.getByRole("alert")).toHaveText("A file with this name already exists.");
+  await renameField.fill("archive/kickoff.md");
+  await expect(renameDialog.getByRole("button", { name: "Move" })).toBeVisible();
+  await renameField.fill("meetings/kickoff.md");
+  await renameDialog.getByRole("button", { name: "Rename" }).click();
+  await expect(page.getByText("Renamed to kickoff.md")).toBeVisible();
+  await expect(page).toHaveURL(`${base}/meetings/kickoff.md`);
+  await expect(row(page, "kickoff.md", seed.ventasScopeId)).toBeVisible();
+  await expect(row(page, "2026-10-08.md", seed.ventasScopeId)).toHaveCount(0);
+
+  // Keyboard: F2 renames the focused row, Delete deletes it (with confirmation).
+  await row(page, "kickoff.md", seed.ventasScopeId).focus();
+  await page.keyboard.press("F2");
+  await expect(page.getByRole("dialog", { name: "Rename or move" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await row(page, "kickoff.md", seed.ventasScopeId).focus();
+  await page.keyboard.press("Delete");
+  const del = page.getByRole("dialog", { name: "Delete meetings/kickoff.md?" });
+  await expect(del).toContainText(
+    `Everyone with access to ${MEMORY_TEAM} memory loses this file, bots included.`,
+  );
+  await expect(del.getByRole("button", { name: "Cancel" })).toBeFocused();
+  await del.getByRole("button", { name: "Delete file" }).click();
+  await expect(page.getByText("Deleted kickoff.md")).toBeVisible();
+  await expect(page).toHaveURL(`${base}/meetings/INDEX.md`);
+  await expect(row(page, "kickoff.md", seed.ventasScopeId)).toHaveCount(0);
+
+  // Clean up: the folder disappears with its last file.
+  const index = await readFile(admin, seed.ventasScopeId, "meetings/INDEX.md");
+  if (index) await admin.delete(`/api/v1/memory/files/${index.id}?expectedVersion=${index.version}`);
+});
+
+test("the owner sees their private memory change live, and a newer-version notice while editing", async ({
+  browser,
+}, info) => {
+  const paulaId = await ensureMember(admin, PAULA, "developer");
+  const bot = await freshPersonalBot(PAULA, paulaId);
+  const paulaApi = await apiAs(PAULA);
+  const opened = await paulaApi.post("/api/v1/memory/scopes", {
+    data: { kind: "personal", agentId: bot.id },
+  });
+  expect(opened.ok()).toBe(true);
+  const scope = (await opened.json()) as { id: string };
+  const root = await readFile(paulaApi, scope.id, "MEMORY.md");
+  expect(root).toBeTruthy();
+
+  const page = await signIn(browser, info.project.name, PAULA);
+  const href = `${BASE_URL}/memory/${scope.id}/MEMORY.md`;
+  await page.goto(href);
+  await expect(page.getByTestId("memory-file")).toHaveAttribute("data-path", "MEMORY.md");
+  await expect(page.getByTestId("memory-file-version")).toHaveText(`Version ${root?.version}`);
+
+  // Another session of Paula saves the file: the view updates without a reload.
+  const v2 = await putAs(paulaApi, root?.id ?? "", "# Memory\n\n- Likes tables\n", root?.version ?? 1);
+  await expect(page.getByTestId("memory-file").getByText("Likes tables")).toBeVisible();
+  await expect(page.getByTestId("memory-file-version")).toHaveText(`Version ${v2.version}`);
+  await expect(page.getByText(`Updated to version ${v2.version} by ${PAULA.name}`)).toBeAttached();
+
+  // While editing, a newer version shows a notice; saving then opens the conflict view.
+  await page.getByRole("tablist", { name: "File view" }).getByRole("tab", { name: "Edit" }).click();
+  await appendLine(page, "MEMORY.md", "- Mine");
+  const v3 = await putAs(
+    paulaApi,
+    root?.id ?? "",
+    "# Memory\n\n- Likes tables\n- Answers in Spanish\n",
+    v2.version,
+  );
+  await expect(
+    page.getByText(
+      `Version ${v3.version} was saved while you were editing. You'll choose what to keep when you save.`,
+    ),
+  ).toBeVisible();
+  await saveButton(page).click();
+  await expect(page.getByTestId("memory-conflict")).toBeVisible();
+  await paulaApi.dispose();
+});
+
+test("read only: a member sees the Read only badge and no Edit on a team file", async ({ browser }, info) => {
+  const w = widthOf(info.project.name);
+  const page = await signIn(browser, info.project.name);
+  await page.goto(ACME_HREF());
+  await expect(page.getByTestId("memory-file")).toHaveAttribute("data-path", "clients/acme.md");
+  await expect(page.getByTestId("memory-file-meta")).toContainText("Read only");
+  await expect(page.getByRole("tab", { name: "Edit" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "New file" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Actions for / })).toHaveCount(0);
+  if (w === "1440") await review(page, "readonly", w);
+  else await expectNoSeriousA11y(page, '[data-testid="memory-shell"]');
 });

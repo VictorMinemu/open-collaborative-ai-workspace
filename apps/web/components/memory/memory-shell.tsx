@@ -32,7 +32,7 @@ import {
 } from "@/lib/memory-tree";
 import { cn } from "@/lib/utils";
 import { FileSkeleton, focusHeadingNext, MemoryFile } from "./memory-file";
-import { MemoryActionDialogs, MemoryCreateButtons } from "./memory-file-actions";
+import { MemoryActionDialogs, MemoryCreateButtons, MemoryRowMenu, rowShortcut } from "./memory-file-actions";
 import { MemorySearch } from "./memory-search";
 import { MemoryTree, type OpenVia, useMemoryTreeState } from "./memory-tree";
 
@@ -206,6 +206,22 @@ export function MemoryShell({ scopeId, segments }: { scopeId?: string; segments?
         selected={selected}
         onOpen={onOpen}
         stacked={stacked}
+        rowMenu={(node, menu) => (
+          <MemoryRowMenu
+            node={node}
+            scope={scopes.find((s) => s.id === node.scopeId)}
+            compact={stacked}
+            open={menu.open}
+            onOpenChange={menu.onOpenChange}
+          />
+        )}
+        onRowKey={(node, key) =>
+          rowShortcut(
+            node,
+            key,
+            scopes.find((s) => s.id === node.scopeId),
+          )
+        }
       />
     );
   }
@@ -310,12 +326,18 @@ function DraftGuard({ scopeId, path }: { scopeId: string | null; path: string | 
   const keepRef = useRef<HTMLButtonElement>(null);
   const onDraft = !!draft && draft.scopeId === scopeId && draft.path === path && search.get("tab") === "edit";
 
+  // "Keep editing" navigates back to the draft; until the location is there again, don't ask a second time.
+  const returning = useRef(false);
   useEffect(() => {
-    if (!draft || !isDirty(draft) || onDraft || pending) return;
+    if (onDraft) returning.current = false;
+    if (!draft || !isDirty(draft) || onDraft || pending || returning.current) return;
     const back = `${memoryHref(draft.scopeId, draft.path)}?tab=edit`;
     useMemoryDraft.getState().guard(
       () => {},
-      () => router.push(back, { scroll: false }),
+      () => {
+        returning.current = true;
+        router.push(back, { scroll: false });
+      },
     );
   }, [draft, onDraft, pending, router]);
 

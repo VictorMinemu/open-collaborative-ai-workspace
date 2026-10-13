@@ -248,6 +248,7 @@ function LoadedFile({
   };
   const onLeave = () => {
     clearDraft();
+    focusTab.current = wide ? "edit" : "view";
     go("view");
   };
   const onRestored = (restored: MemoryFileDto) => {
