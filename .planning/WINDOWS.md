@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 101
+open_count: 103
 waived_count: 2
-fixed_count: 25
-total_count: 128
-last_updated: 2026-10-13T04:39:23.242Z
+fixed_count: 26
+total_count: 131
+last_updated: 2026-10-13T04:39:31.902Z
 ---
 
 # Broken Windows Ledger
@@ -128,7 +128,7 @@ last_updated: 2026-10-13T04:39:23.242Z
 | 111 | 07.1 | deviation | apps/web/components/chat/board/card-strip.tsx |  | A card with a typed title and empty description shows an empty root message body in its thread (author and time only) | fixed |  | 2026-10-12T21:23:03.967Z | 2026-10-12T22:27:16.978Z |
 | 112 | 07.1 | deviation | e2e/tests/search.spec.ts |  | Composer-focus regression e2e was not RED on the pre-fix build; fix rests on run-1 evidence, a focus probe and a unit test | open |  | 2026-10-12T21:23:04.036Z |  |
 | 113 | 07.1 | deviation | apps/web/components/chat/channel-view.tsx |  | Board Messages view: a card root beyond the first 100 cards of its column is not cached, so Edit message falls back to the inline editor (400 board_card_use_board) | fixed |  | 2026-10-12T21:23:04.109Z | 2026-10-12T22:27:17.051Z |
-| 114 | 07.2 | deviation | packages/contracts/src/memory.ts |  | Folder rule pathPrefix is accepted by the contract but dropped by the API until 07.2-03; an allow memory.write on hr/ would apply to the whole scope meanwhile; must close before the phase merges | open |  | 2026-10-13T03:20:41.553Z |  |
+| 114 | 07.2 | deviation | packages/contracts/src/memory.ts |  | Folder rule pathPrefix is accepted by the contract but dropped by the API until 07.2-03; an allow memory.write on hr/ would apply to the whole scope meanwhile; must close before the phase merges | fixed |  | 2026-10-13T03:20:41.553Z | 2026-10-13T04:39:31.651Z |
 | 115 | 07.2 | deviation | apps/web/components/shell/module-gate.tsx |  | Settings > Modules shows a Memory toggle with no memory UI until 07.2-10; screenshot the 4-row panel in 10/13 | open |  | 2026-10-13T03:20:41.625Z |  |
 | 116 | 07.2 | deviation | packages/db/src/schema/memory.ts |  | approval_requests has no personal-owner column: an admin with direct SQL can see that an approval for a personal proposal exists (metadata, not content); decide in 07.2-06 | open |  | 2026-10-13T03:45:07.675Z |  |
 | 117 | 07.2 | deviation | packages/db/src/schema/memory.ts |  | Personal bot notebook owner assumes a personal bot never changes owner or kind; recompute the owner if that ever changes | open |  | 2026-10-13T03:45:07.777Z |  |
@@ -143,6 +143,9 @@ last_updated: 2026-10-13T04:39:23.242Z
 | 126 | 07.2 | deviation | packages/contracts/src/sensitive-data.ts |  | detectSensitive returns unbounded spans while MemoryProposalView caps 200 spans / 50 findings; 07.2-09 must cap before building the view | open |  | 2026-10-13T04:39:23.084Z |  |
 | 127 | 07.2 | deviation | packages/contracts/src/sensitive-data.ts |  | False positives (warn): any bare 9-digit number starting 6-9 is a phone; git@github.com:org/repo is an email; Luhn accepts 0000 0000 0000 0000 | open |  | 2026-10-13T04:39:23.163Z |  |
 | 128 | 07.2 | deviation | packages/contracts/src/sensitive-data.ts |  | Keyed secrets (DB_PASSWORD=, Bearer, URL credentials): span and masked sample start at the key, so the UI highlight is wider than the value (no leak) | open |  | 2026-10-13T04:39:23.242Z |  |
+| 129 | 07.2 | deviation | apps/api/src/modules/policy |  | unit_has_memory counts only live files; soft-deleted files and pending proposals cascade with the unit; decide in 07.2-08/09 | open |  | 2026-10-13T04:39:31.734Z |  |
+| 130 | 07.2 | deviation | apps/api/src/modules/policy |  | A standard owner of a team bot can write its notebook but not promote (memory.promote is lead/admin); needs an explicit product exception if wanted | open |  | 2026-10-13T04:39:31.819Z |  |
+| 131 | 07.2 | deviation | apps/api/src/modules/policy |  | An agent decision with no human evaluates only the agent; 07.2-08 and 07.2-11 must always pass the human the agent acts for | open |  | 2026-10-13T04:39:31.902Z |  |
 
 ````json
 [
@@ -1509,10 +1512,10 @@ last_updated: 2026-10-13T04:39:23.242Z
     "file": "packages/contracts/src/memory.ts",
     "line": null,
     "description": "Folder rule pathPrefix is accepted by the contract but dropped by the API until 07.2-03; an allow memory.write on hr/ would apply to the whole scope meanwhile; must close before the phase merges",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T03:20:41.553Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-13T04:39:31.651Z"
   },
   {
     "id": 115,
@@ -1680,6 +1683,42 @@ last_updated: 2026-10-13T04:39:23.242Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-13T04:39:23.242Z",
+    "resolved_at": null
+  },
+  {
+    "id": 129,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/policy",
+    "line": null,
+    "description": "unit_has_memory counts only live files; soft-deleted files and pending proposals cascade with the unit; decide in 07.2-08/09",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:39:31.734Z",
+    "resolved_at": null
+  },
+  {
+    "id": 130,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/policy",
+    "line": null,
+    "description": "A standard owner of a team bot can write its notebook but not promote (memory.promote is lead/admin); needs an explicit product exception if wanted",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:39:31.819Z",
+    "resolved_at": null
+  },
+  {
+    "id": 131,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/policy",
+    "line": null,
+    "description": "An agent decision with no human evaluates only the agent; 07.2-08 and 07.2-11 must always pass the human the agent acts for",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:39:31.902Z",
     "resolved_at": null
   }
 ]
