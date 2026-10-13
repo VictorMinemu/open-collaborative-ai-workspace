@@ -28,7 +28,7 @@ import { diffLines } from "diff";
 import { and, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { conflict, forbidden, HttpError } from "../../lib/errors";
-import { AuthzDeniedError, type PermissionService } from "../organization";
+import { AuthzDeniedError, memoryResource, type PermissionService } from "../organization";
 import {
   asActor,
   capabilitiesOf,
@@ -38,7 +38,14 @@ import {
   personalOwnerOf,
   withPersonalOwner,
 } from "./access";
-import { createRootFile, type LoadedScope, liveFileCount, loadScope, memoryNotFound } from "./scopes";
+import {
+  createRootFile,
+  type LoadedScope,
+  liveFileCount,
+  loadScope,
+  memoryNotFound,
+  readableScopes,
+} from "./scopes";
 
 /**
  * Memory files (D-01, MEM-01, MEM-02): optimistic versions, one append-only revision and one audit row per change,
@@ -756,6 +763,42 @@ export function createFileOps(d: FilesDeps) {
     });
   }
 
+  /**
+   * The ids of the live files a person may read, in one scope or in every scope they may read (search, MEM-07): ids
+   * and paths only (never content), one permission pass for all files, and nothing written (WINDOWS 139, 141). An
+   * unreadable or unknown `scopeId` is 404, like every other read.
+   */
+  async function readableFileIds(tx: Tx, viewerUserId: string, scopeId?: string): Promise<string[]> {
+    const actor: MemoryActor = { kind: "user", userId: viewerUserId };
+    let scopes: LoadedScope[];
+    if (scopeId !== undefined) {
+      const scope = await loadScope(tx, scopeId);
+      await requireRead(tx, actor, scope);
+      scopes = [scope];
+    } else {
+      scopes = await readableScopes(perms, tx, viewerUserId);
+    }
+    if (scopes.length === 0) return [];
+    const byId = new Map(scopes.map((s) => [s.row.id, s.facts]));
+    const rows = await tx
+      .select({ id: memoryFiles.id, scopeId: memoryFiles.scopeId, path: memoryFiles.path })
+      .from(memoryFiles)
+      .where(and(inArray(memoryFiles.scopeId, [...byId.keys()]), isNull(memoryFiles.deletedAt)));
+    const viewer = { kind: "user" as const, id: viewerUserId };
+    const inScope = rows.flatMap((f) => {
+      const facts = byId.get(f.scopeId);
+      return facts ? [{ ...f, facts }] : [];
+    });
+    const visible = await perms.filterFor(
+      tx,
+      { kind: "user", userId: viewerUserId },
+      inScope,
+      "memory.read",
+      (f) => memoryResource(f.facts, f.path, viewer),
+    );
+    return visible.map((f) => f.id);
+  }
+
   /** History, newest first; a revision whose path the actor may not read (an old folder) is left out. */
   async function listRevisions(tx: Tx, actor: MemoryActor, fileId: string): Promise<MemoryRevisionMeta[]> {
     return asActor(tx, actor, async () => {
@@ -838,6 +881,7 @@ export function createFileOps(d: FilesDeps) {
     appendToFile,
     readFile,
     listReadableFiles,
+    readableFileIds,
     listRevisions,
     readRevision,
     forgetScope,

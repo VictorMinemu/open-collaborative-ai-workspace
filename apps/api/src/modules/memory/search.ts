@@ -7,17 +7,23 @@ import {
 import type { Tx } from "@ocw/db";
 import { sql } from "drizzle-orm";
 import type { Core } from "../../core";
-import { type MemoryActor, withPersonalOwner } from "./access";
+import { withPersonalOwner } from "./access";
 import type { MemoryService } from "./index";
 
 /**
  * Memory full-text search (MEM-02, MEM-07, D-03, D-08): the chat search's three unaccented configurations over
  * `memory_files.search_tsv` (path words weight A + content), restricted to the files the viewer may read.
  *
- * Visibility is decided only by the memory service: the scopes come from `listScopes` (or the one `scopeId`), and the
- * files from `listReadableFiles` (the resolver on the scope, then per path, so folder rules apply). SQL narrows to
- * those ids, bound as ONE uuid[] parameter, and never decides visibility on its own. RLS still scopes every statement to
- * the tenant and to the viewer's own private memory. Query text and content are never logged.
+ * Visibility is decided only by the memory service: `readableFileIds` lists the existing scopes the viewer may read (or
+ * the one `scopeId`) and their live files' ids and paths, never content, then the resolver per path in one pass (folder
+ * rules apply). Nothing is written: search never creates a scope (WINDOWS 139, 141). SQL narrows to those ids, bound as
+ * ONE uuid[] parameter, and never decides visibility on its own. RLS still scopes every statement to the tenant and to
+ * the viewer's own private memory. Query text and content are never logged.
+ *
+ * Bounded work (WINDOWS 142): ranking uses the stored index over the whole file, but only the 50 hits are read, and the
+ * snippet is cut from the first `HEADLINE_INPUT_CHARS` characters of each (`ts_headline` parses its whole input, three
+ * times). A file whose only match lies past that window is still found and ranked; its snippet is then its opening
+ * words, unmarked.
  */
 
 /** At most this many hits, best first. */
@@ -32,6 +38,8 @@ const HEADLINE_WHOLE = `HighlightAll=true,${MARKERS}`;
 const HEADLINE_FRAGMENT = `MaxFragments=1,MaxWords=18,MinWords=6,${MARKERS}`;
 const WHOLE_BODY_MAX = 200;
 const SNIPPET_MAX = 400;
+/** At most this many characters of a hit go through `ts_headline` (x3 configurations, x50 hits). */
+export const HEADLINE_INPUT_CHARS = 16 * 1024;
 
 /** OR of the three unaccented configurations: exact tokens and path words (simple), Spanish and English stems. */
 const tsQuery = (q: string) =>
@@ -50,21 +58,6 @@ function pickSnippet(candidates: Array<string | null>): string {
   return `${cut}…`;
 }
 
-/** The ids of the files the viewer may read, with their scope, decided by the memory service only. */
-async function readableFileIds(
-  tx: Tx,
-  memory: MemoryService,
-  viewerUserId: string,
-  scopeId: string | undefined,
-): Promise<string[]> {
-  const actor: MemoryActor = { kind: "user", userId: viewerUserId };
-  const scopeIds = scopeId ? [scopeId] : (await memory.listScopes(tx, viewerUserId)).map((s) => s.id);
-  const ids: string[] = [];
-  // An unreadable or unknown `scopeId` throws memory_not_found (404) here, before any search runs.
-  for (const id of scopeIds) for (const f of await memory.listReadableFiles(tx, actor, id)) ids.push(f.id);
-  return ids;
-}
-
 /**
  * Memory files matching `q` that `viewerUserId` may read, best first (`ts_rank`, then the most recently updated), at
  * most 50, each with a plain-text snippet carrying the contract markers.
@@ -78,19 +71,26 @@ export async function searchMemory(
 ): Promise<MemorySearchResult> {
   // The viewer's own lens: their private memory and nobody else's (a no-op for a request already read as them).
   return withPersonalOwner(tx, viewerUserId, async () => {
-    const ids = await readableFileIds(tx, deps.memory, viewerUserId, scopeId);
+    // An unreadable or unknown `scopeId` throws memory_not_found (404) here, before any search runs.
+    const ids = await deps.memory.readableFileIds(tx, viewerUserId, scopeId);
     if (ids.length === 0) return { hits: [] };
+    // The ranked ids first (the index only, no content); then the 50 hits' bodies, cut to the headline window.
     const res = await tx.execute(sql`
       with q as (select ${tsQuery(q)} as q),
-      hits as (
-        select f.id, f.scope_id, f.path, f.updated_at, ts_rank(f.search_tsv, q.q) as rank,
-               replace(replace(f.content, ${SNIPPET_MARK_START}, ''), ${SNIPPET_MARK_END}, '') as body
+      ranked as (
+        select f.id, f.updated_at, ts_rank(f.search_tsv, q.q) as rank
         from app.memory_files f, q
         where f.id = any(${uuidArray(ids)})
           and f.deleted_at is null
           and f.search_tsv @@ q.q
         order by rank desc, f.updated_at desc, f.id
         limit ${MEMORY_SEARCH_LIMIT}
+      ),
+      hits as (
+        select r.id, r.rank, r.updated_at, f.scope_id, f.path,
+               replace(replace(left(f.content, ${HEADLINE_INPUT_CHARS}), ${SNIPPET_MARK_START}, ''),
+                       ${SNIPPET_MARK_END}, '') as body
+        from ranked r join app.memory_files f on f.id = r.id
       )
       select h.id, h.scope_id, h.path,
              ts_headline('app.ocw_simple', h.body, q.q, o.opts) as s_simple,

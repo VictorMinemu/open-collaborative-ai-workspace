@@ -579,6 +579,39 @@ describe("forget (private memory)", () => {
     expect(audit?.metadata).toEqual({ scopeId, scopeKind: "personal", files, revisions, proposals: 0 });
     const events = (await streamEvents("memory.changed")).filter((e) => e.stream_id === `user:${samId}`);
     expect(events.at(-1)?.payload).toEqual({ scopeId, fileId: list.files[0].id, version: 1 });
-    expect((await streamEvents("memory.changed")).every((e) => e.stream_id === `user:${samId}`)).toBe(true);
+    // Sam's private memory is announced to Sam only (shared scopes go to their readers, WINDOWS 157).
+    const ofPrivate = (await streamEvents("memory.changed")).filter((e) => e.payload.scopeId === scopeId);
+    expect(ofPrivate.every((e) => e.stream_id === `user:${samId}`)).toBe(true);
+  });
+});
+
+describe("a deleted bot's private memory leaves the lists (WINDOWS 163)", () => {
+  it("its private scope and its notebook are no longer listed or searched, and stay stored", async () => {
+    const notebook = await ok(
+      sam.request("POST", "/api/v1/memory/scopes", { kind: "agent", agentId: samBotId }),
+    );
+    await ok(
+      sam.request("POST", `/api/v1/memory/scopes/${scopeId}/files`, {
+        path: "kept.md",
+        content: "mangosteen notes\n",
+      }),
+    );
+    const listed = async () =>
+      ((await ok(sam.request("GET", "/api/v1/memory/scopes"))).scopes as Json[]).map((s) => s.id as string);
+    expect(await listed()).toEqual(expect.arrayContaining([scopeId, notebook.id]));
+    expect((await ok(sam.request("GET", "/api/v1/memory/search?q=mangosteen"))).hits).toHaveLength(1);
+
+    await ok(sam.request("DELETE", `/api/v1/agents/${samBotId}`));
+
+    const after = await listed();
+    expect(after).not.toContain(scopeId);
+    expect(after).not.toContain(notebook.id);
+    expect(after.length).toBeGreaterThan(0);
+    expect((await ok(sam.request("GET", "/api/v1/memory/search?q=mangosteen"))).hits).toEqual([]);
+    // Soft delete: the memory itself is kept (a hard delete of the bot cascades it, ADR-0010).
+    const kept = await su.query("select count(*)::int as n from app.memory_files where scope_id = $1", [
+      scopeId,
+    ]);
+    expect(kept.rows[0].n).toBeGreaterThan(0);
   });
 });

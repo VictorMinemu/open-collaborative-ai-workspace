@@ -82,6 +82,11 @@ export interface MemoryService {
   /** One scope as the actor sees it (404 when unreadable). */
   scopeView(tx: Tx, actor: MemoryActor, scopeId: string): Promise<MemoryScope>;
   listReadableFiles(tx: Tx, actor: MemoryActor, scopeId: string, folder?: string): Promise<MemoryFileMeta[]>;
+  /**
+   * The ids of the live files a person may read (one scope, or every scope they may read): ids only, one permission
+   * pass, nothing written. What search narrows to (07.2-16; WINDOWS 139, 141).
+   */
+  readableFileIds(tx: Tx, viewerUserId: string, scopeId?: string): Promise<string[]>;
   readFile(
     tx: Tx,
     actor: MemoryActor,
@@ -196,6 +201,7 @@ export function createMemoryService(core: Core, deps: { approvals: ApprovalServi
     },
 
     listReadableFiles: files.listReadableFiles,
+    readableFileIds: files.readableFileIds,
     readFile: files.readFile,
     writeFile: files.writeFile,
     appendToFile: files.appendToFile,

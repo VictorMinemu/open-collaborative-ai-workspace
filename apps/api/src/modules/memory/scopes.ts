@@ -35,6 +35,8 @@ export interface LoadedScope {
   unitKind: UnitKind | null;
   /** Sort keys for the tree order (UI-SPEC "Scopes in the tree"). */
   botName: string | null;
+  /** A private scope or notebook whose bot was deleted (soft): kept, but no longer listed (WINDOWS 163). */
+  deletedBot: boolean;
   chartKey: readonly string[];
 }
 
@@ -177,6 +179,7 @@ export async function describeScopes(tx: Tx, rows: readonly ScopeRow[]): Promise
           ownerUserId: agents.ownerUserId,
           status: agents.status,
           unitId: agents.unitId,
+          deletedAt: agents.deletedAt,
         })
         .from(agents)
         .where(inArray(agents.id, agentIds))
@@ -196,6 +199,7 @@ export async function describeScopes(tx: Tx, rows: readonly ScopeRow[]): Promise
     const agent = bot
       ? { ...agentFacts(bot, bot.unitId ? (units.get(bot.unitId)?.path ?? []) : []), id: bot.id }
       : null;
+    const deletedBot = row.agentId !== null && (!bot || bot.deletedAt !== null);
     if (row.kind === "personal") {
       return {
         row,
@@ -203,6 +207,7 @@ export async function describeScopes(tx: Tx, rows: readonly ScopeRow[]): Promise
         label: `You & ${bot?.name ?? "a deleted bot"}`,
         unitKind: null,
         botName: bot?.name ?? "",
+        deletedBot,
         chartKey: [],
       };
     }
@@ -213,6 +218,7 @@ export async function describeScopes(tx: Tx, rows: readonly ScopeRow[]): Promise
         label: `${bot?.name ?? "Deleted bot"} notebook`,
         unitKind: null,
         botName: bot?.name ?? "",
+        deletedBot,
         chartKey: [],
       };
     }
@@ -224,6 +230,7 @@ export async function describeScopes(tx: Tx, rows: readonly ScopeRow[]): Promise
         label: unit?.name ?? "Unit",
         unitKind: unit?.kind ?? null,
         botName: null,
+        deletedBot: false,
         chartKey: (unit?.path ?? []).map(nameOf),
       };
     }
@@ -233,6 +240,7 @@ export async function describeScopes(tx: Tx, rows: readonly ScopeRow[]): Promise
       label: "Organization",
       unitKind: null,
       botName: null,
+      deletedBot: false,
       chartKey: [],
     };
   });
@@ -380,15 +388,15 @@ export function toScopeDto(s: LoadedScope, viewerCan: MemoryCapability[]): Memor
 }
 
 /**
- * The scopes a person may read, in tree order. Ensures the organization scope and the scope of every unit they may
- * read (lazy creation, D-01); lists existing notebooks they may read and their own private scopes. Never another
- * person's private scope: RLS hides it and the resolver would refuse it (admins included, ADR-0010).
+ * Lazy creation for the scope tree (D-01): the organization scope and the scope of every unit the person may read,
+ * one insert per missing scope. Only `GET /memory/scopes` (the tree) and the agent's scope list call it; search and
+ * every other read path list what exists without writing (WINDOWS 139, 141).
  */
-export async function listScopes(
+export async function ensureListedScopes(
   perms: PermissionService,
   tx: Tx,
   viewerUserId: string,
-): Promise<MemoryScope[]> {
+): Promise<void> {
   const principal = { kind: "user" as const, userId: viewerUserId };
   const viewer = { kind: "user" as const, id: viewerUserId };
   const [org] = await tx
@@ -401,45 +409,73 @@ export async function listScopes(
   const readableUnits = await perms.filterFor(tx, principal, allUnits, "memory.read", (u) =>
     memoryResource({ kind: "unit", ownerUserId: null, agent: null, unitPath: u.path }, undefined, viewer),
   );
-  if (readableUnits.length) {
-    const have = new Set(
-      (
-        await tx
-          .select({ unitId: memoryScopes.unitId })
-          .from(memoryScopes)
-          .where(
-            and(
-              eq(memoryScopes.kind, "unit"),
-              inArray(
-                memoryScopes.unitId,
-                readableUnits.map((u) => u.id),
-              ),
+  if (readableUnits.length === 0) return;
+  const have = new Set(
+    (
+      await tx
+        .select({ unitId: memoryScopes.unitId })
+        .from(memoryScopes)
+        .where(
+          and(
+            eq(memoryScopes.kind, "unit"),
+            inArray(
+              memoryScopes.unitId,
+              readableUnits.map((u) => u.id),
             ),
-          )
-      ).map((r) => r.unitId),
-    );
-    for (const u of readableUnits) if (!have.has(u.id)) await ensureScope(tx, { kind: "unit", unitId: u.id });
-  }
+          ),
+        )
+    ).map((r) => r.unitId),
+  );
+  for (const u of readableUnits) if (!have.has(u.id)) await ensureScope(tx, { kind: "unit", unitId: u.id });
+}
 
+/**
+ * The existing scopes a person may read, in tree order, without writing anything (one permission pass): never another
+ * person's private scope (RLS hides it and the resolver would refuse it, admins included, ADR-0010), and never the
+ * private scope or notebook of a deleted bot (WINDOWS 163: kept as data, gone from every list).
+ */
+export async function readableScopes(
+  perms: PermissionService,
+  tx: Tx,
+  viewerUserId: string,
+): Promise<LoadedScope[]> {
+  const principal = { kind: "user" as const, userId: viewerUserId };
+  const viewer = { kind: "user" as const, id: viewerUserId };
   const rows = await tx.select().from(memoryScopes);
-  const described = await describeScopes(tx, rows);
+  const described = (await describeScopes(tx, rows)).filter((s) => !s.deletedBot);
+  const readable = await perms.filterFor(tx, principal, described, "memory.read", (s) =>
+    memoryResource(s.facts, undefined, viewer),
+  );
+  return readable.sort(compareScopes);
+}
+
+/**
+ * The scopes a person may read, in tree order, as DTOs with what they may do there. Ensures the tree's scopes first
+ * (`ensureListedScopes`): this is the scope tree's list, the one read that writes.
+ */
+export async function listScopes(
+  perms: PermissionService,
+  tx: Tx,
+  viewerUserId: string,
+): Promise<MemoryScope[]> {
+  await ensureListedScopes(perms, tx, viewerUserId);
+  const principal = { kind: "user" as const, userId: viewerUserId };
+  const viewer = { kind: "user" as const, id: viewerUserId };
+  const readable = await readableScopes(perms, tx, viewerUserId);
   const resourceOf = (s: LoadedScope) => memoryResource(s.facts, undefined, viewer);
-  const readable = await perms.filterFor(tx, principal, described, "memory.read", resourceOf);
   const writable = new Set(
     (await perms.filterFor(tx, principal, readable, "memory.write", resourceOf)).map((s) => s.row.id),
   );
   const promotable = new Set(
     (await perms.filterFor(tx, principal, readable, "memory.promote", resourceOf)).map((s) => s.row.id),
   );
-  return readable
-    .sort(compareScopes)
-    .map((s) =>
-      toScopeDto(s, [
-        "read",
-        ...(writable.has(s.row.id) ? (["write"] as const) : []),
-        ...(promotable.has(s.row.id) ? (["promote"] as const) : []),
-      ]),
-    );
+  return readable.map((s) =>
+    toScopeDto(s, [
+      "read",
+      ...(writable.has(s.row.id) ? (["write"] as const) : []),
+      ...(promotable.has(s.row.id) ? (["promote"] as const) : []),
+    ]),
+  );
 }
 
 /** Live files of a scope (the 2,000-file limit). */
