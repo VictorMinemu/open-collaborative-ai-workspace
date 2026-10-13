@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 109
+open_count: 113
 waived_count: 4
 fixed_count: 55
-total_count: 168
-last_updated: 2026-10-13T15:20:56.912Z
+total_count: 172
+last_updated: 2026-10-13T22:54:38.476Z
 ---
 
 # Broken Windows Ledger
@@ -183,6 +183,10 @@ last_updated: 2026-10-13T15:20:56.912Z
 | 166 | 07.2 | deviation | apps/api/src/modules/approval |  | Requests orphaned before the gone path stay pending until expiry (no sweep); if removing a member ever cascades their personal scopes, that path does not call closeGone | open |  | 2026-10-13T10:56:27.581Z |  |
 | 167 | 07.2 | deviation | apps/api/src/modules/memory |  | memory.changed: a rename only notifies readers of the new path; unit-scope writes emit one event per reader (a unit: topic would scale better); no e2e for live team-file updates | open |  | 2026-10-13T10:56:27.664Z |  |
 | 168 | 07.2 | deviation | apps/api/src/modules/agent-channel |  | Stored cell stream events keep private memory content (turn payloads) and forgetting a scope does not purge them | open |  | 2026-10-13T15:20:09.851Z |  |
+| 169 | 07.4 | deviation | packages/db/src/schema/app.ts |  | Cross-org ids: 07.4 FKs check ids only (RLS bypassed), so a row can reference another org's server/key/agent/template; the API must resolve every id inside withTenant (same pattern as bot_tool_grants) | open |  | 2026-10-13T22:54:38.207Z |  |
+| 170 | 07.4 | deviation | packages/db/src/schema/app.ts |  | No owner-only restrictive DB policy on personal keys or member connector connections (only tenant isolation); enforce owner-only in the API (07.4-07/10) and add a restrictive policy before the gate, as 07.2 did for personal memory | open |  | 2026-10-13T22:54:38.296Z |  |
+| 171 | 07.4 | deviation | packages/db/src/schema/app.ts |  | Template versions are immutable only in the API (no trigger); share resource_id has no FK so deleting a connector or key leaves an inert share row | open |  | 2026-10-13T22:54:38.389Z |  |
+| 172 | 07.4 | deviation | packages/db/src/schema/app.ts |  | vault_items.secret_ref accepts env/file/openbao providers in the DB; D-07 db-only must be enforced by the API; SecretsService.putSealed must accept connector_credential and vault_item (07.4-07/10) | open |  | 2026-10-13T22:54:38.476Z |  |
 
 ````json
 [
@@ -2200,6 +2204,54 @@ last_updated: 2026-10-13T15:20:56.912Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-13T15:20:09.851Z",
+    "resolved_at": null
+  },
+  {
+    "id": 169,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "packages/db/src/schema/app.ts",
+    "line": null,
+    "description": "Cross-org ids: 07.4 FKs check ids only (RLS bypassed), so a row can reference another org's server/key/agent/template; the API must resolve every id inside withTenant (same pattern as bot_tool_grants)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T22:54:38.207Z",
+    "resolved_at": null
+  },
+  {
+    "id": 170,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "packages/db/src/schema/app.ts",
+    "line": null,
+    "description": "No owner-only restrictive DB policy on personal keys or member connector connections (only tenant isolation); enforce owner-only in the API (07.4-07/10) and add a restrictive policy before the gate, as 07.2 did for personal memory",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T22:54:38.296Z",
+    "resolved_at": null
+  },
+  {
+    "id": 171,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "packages/db/src/schema/app.ts",
+    "line": null,
+    "description": "Template versions are immutable only in the API (no trigger); share resource_id has no FK so deleting a connector or key leaves an inert share row",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T22:54:38.389Z",
+    "resolved_at": null
+  },
+  {
+    "id": 172,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "packages/db/src/schema/app.ts",
+    "line": null,
+    "description": "vault_items.secret_ref accepts env/file/openbao providers in the DB; D-07 db-only must be enforced by the API; SecretsService.putSealed must accept connector_credential and vault_item (07.4-07/10)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T22:54:38.476Z",
     "resolved_at": null
   }
 ]
