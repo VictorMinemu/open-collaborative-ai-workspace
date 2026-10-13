@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { AgentCard, AgentCardActionEvent, ApprovalDetail, type MemoryToolScope } from "@ocw/contracts";
@@ -5,7 +6,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { sha256Hex } from "../../lib/crypto";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
-import type { CreateMemoryProposalInput } from "./index";
+import { type CreateMemoryProposalInput, createMemoryWriteKind } from "./index";
 
 /**
  * 07.2-09 (MEM-04, MEM-05, MEM-06, MEM-07, D-06, D-08, ADR-0023): an agent's proposal into memory becomes an immutable
@@ -28,9 +29,11 @@ let admin: TestClient;
 let lena: TestClient;
 let sam: TestClient;
 let orgId: string;
+let adminId: string;
 let lenaId: string;
 let samId: string;
 let anaId: string;
+let D: string;
 let A: string;
 let B: string;
 let scoutId: string;
@@ -40,7 +43,8 @@ const scopeOf: Record<string, string> = {};
 // ---------------------------------------------------------------- the fake Presidio analyzer
 
 let presidio: Server;
-const presidioMode: "nothing" | "person" = "nothing";
+let presidioMode: "nothing" | "person" = "nothing";
+let presidioCalls = 0;
 
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
@@ -55,6 +59,7 @@ async function startPresidio(): Promise<string> {
       body += c;
     });
     req.on("end", () => {
+      presidioCalls += 1;
       const { text } = JSON.parse(body) as { text: string };
       if (presidioMode === "person") {
         const at = text.indexOf("Ana García");
@@ -82,6 +87,8 @@ async function ok(res: Promise<Res>, status = 200): Promise<Json> {
   if (r.status !== status) throw new Error(`expected ${status}, got ${r.status}: ${JSON.stringify(r.body)}`);
   return r.body as Json;
 }
+
+const codeOf = (r: Res) => ((r.body as Json | null)?.error as Json | undefined)?.code as string | undefined;
 
 async function joinAs(email: string, name: string, role: "standard" | "developer" | "lead" | "admin") {
   const inv = await ok(admin.request("POST", "/api/v1/invitations", { email, role }));
@@ -205,11 +212,12 @@ beforeAll(async () => {
     }),
   );
   orgId = setup.organization.id;
+  adminId = setup.user.id;
   [lena, lenaId] = await joinAs("lena@example.test", "Lena Gil", "lead");
   [sam, samId] = await joinAs("sam@example.test", "Sam Lee", "standard");
   [, anaId] = await joinAs("ana@example.test", "Ana Pérez", "standard");
   const [, beaId] = await joinAs("bea@example.test", "Bea Lind", "standard");
-  const D = await unit("department", "Sales", null);
+  D = await unit("department", "Sales", null);
   A = await unit("team", "Iberia", D);
   B = await unit("team", "Nordics", D);
   await ok(admin.request("POST", `/api/v1/units/${A}/members`, { userId: lenaId, role: "lead" }));
@@ -415,5 +423,461 @@ describe("tracer: Scout's proposal into team memory becomes a pending card; Lena
     const [s] = v.spans;
     expect(s?.start).toBeGreaterThan(ACME.length);
     expect(v.proposed.slice(s?.start, s?.end)).toBe("billing@acme.com");
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------- Task 2
+
+/** A proposal on a fresh turn (each turn has its own tool budget). */
+async function fresh(a: Omit<ProposeArgs, "eventId">, text?: string) {
+  const t = await turn(text);
+  return { ...(await proposed({ ...a, eventId: t.eventId })), turn: t };
+}
+
+const hashOf = async (as: TestClient, id: string) => (await detail(as, id)).actionHash;
+const revisionCount = async (scopeId: string) =>
+  Number(
+    (
+      await su.query("select count(*)::int as n from app.memory_file_revisions where scope_id = $1", [
+        scopeId,
+      ])
+    ).rows[0].n,
+  );
+
+describe("four eyes: no self-approval in shared memory (Task 2)", () => {
+  it("Sam cannot approve his own team proposal, not even as a lead of A; Lena can", async () => {
+    const r = await fresh({
+      scope: scopeOf[A] as string,
+      path: "four-eyes.md",
+      op: "create",
+      content: "x\n",
+    });
+    await ok(admin.request("PATCH", `/api/v1/members/${samId}/role`, { role: "lead" }));
+    await ok(admin.request("PATCH", `/api/v1/units/${A}/members/${samId}`, { role: "lead" }));
+    try {
+      // He may promote in A now, but this proposal was made for him.
+      const scopes = (await ok(sam.request("GET", "/api/v1/memory/scopes"))).scopes as Json[];
+      expect(scopes.find((s) => s.unitId === A)?.viewerCan).toContain("promote");
+      const d = await detail(sam, r.approvalId);
+      expect(d.viewerCan).toEqual([]);
+      const res = await decide(sam, r.approvalId, { outcome: "approved", actionHash: d.actionHash });
+      expect(res.status).toBe(403);
+      expect(codeOf(res)).toBe("not_approver");
+      expect((await approvalRow(r.approvalId)).status).toBe("pending");
+    } finally {
+      await ok(admin.request("PATCH", `/api/v1/units/${A}/members/${samId}`, { role: "member" }));
+      await ok(admin.request("PATCH", `/api/v1/members/${samId}/role`, { role: "standard" }));
+    }
+    expect((await detail(lena, r.approvalId)).viewerCan).toEqual(["decide"]);
+    const res = await decide(lena, r.approvalId, {
+      outcome: "approved",
+      actionHash: await hashOf(lena, r.approvalId),
+      note: "Good to keep",
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    // A shared proposal's note is not private: the decision audit carries it.
+    const [decided] = await auditsWhere("approval.decided", "approvalId", r.approvalId);
+    expect(decided?.metadata).toMatchObject({ outcome: "approved", note: "Good to keep" });
+  });
+});
+
+describe("personal memory: the owner approves in the card; admins never see it (Task 2)", () => {
+  let r: Awaited<ReturnType<typeof fresh>>;
+
+  it("a tainted turn may propose into Sam's private memory; the card says the bot read web or tool content", async () => {
+    const t = await turn("Look this up and remember it");
+    await su.query("update app.agent_turns set tainted = true where event_id = $1", [t.eventId]);
+    const out = await proposed({
+      eventId: t.eventId,
+      scope: "personal",
+      path: "travel.md",
+      op: "create",
+      content: "Flight to Lisbon on Friday\n",
+    });
+    r = { ...out, turn: t };
+    expect(r.readerCount).toBe(1);
+    expect(await proposalOf(r.approvalId)).toMatchObject({ tainted: true, personal_owner_user_id: samId });
+    const row = await approvalRow(r.approvalId);
+    expect(row.card_warnings).toEqual(["Sam's assistant read web or tool content in this turn."]);
+    const card = await cardFor(sam, row.card_message_id);
+    expect(card.fields).toEqual([
+      { label: "Memory", value: "You & Sam's assistant · Private" },
+      { label: "Readers", value: "Only you" },
+      { label: "Found", value: "Nothing found" },
+    ]);
+    expect(card.viewerCan).toEqual(["follow", "decide"]);
+  });
+
+  it("an admin gets 404 on it, cannot decide it, never lists it and never receives its events", async () => {
+    expect((await admin.request("GET", `/api/v1/approvals/${r.approvalId}`)).status).toBe(404);
+    const res = await decide(admin, r.approvalId, { outcome: "approved", actionHash: "0".repeat(64) });
+    expect(res.status).toBe(404);
+    const listed = (await ok(admin.request("GET", "/api/v1/approvals?role=decider"))).items as Json[];
+    expect(listed.map((i) => i.id)).not.toContain(r.approvalId);
+    expect(await updatesOf(r.approvalId)).toEqual([`user:${samId}`]);
+  });
+
+  it("Sam approves it on the card; the private note is audited as its length only", async () => {
+    const row = await approvalRow(r.approvalId);
+    const res = await sam.request("POST", `/api/v1/cards/${row.card_message_id}/decision`, {
+      outcome: "approved",
+      actionHash: row.action_hash,
+      note: "Yes please",
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect((await approvalRow(r.approvalId)).status).toBe("applied");
+    const scope = (await proposalOf(r.approvalId))?.scope_id as string;
+    expect(await fileAt(scope, "travel.md")).toMatchObject({ content: "Flight to Lisbon on Friday\n" });
+    const [decided] = await auditsWhere("approval.decided", "approvalId", r.approvalId);
+    expect(decided?.metadata).toMatchObject({ outcome: "approved", noteChars: 10 });
+    expect(decided?.metadata).not.toHaveProperty("note");
+    expect(await updatesOf(r.approvalId)).not.toContain(`user:${adminId}`);
+  });
+});
+
+describe("integrity: the exact change, once, on the file it was proposed for (Task 2)", () => {
+  it("replace on a file that changed since the proposal fails as stale_base and writes nothing", async () => {
+    const file = await ok(
+      lena.request("POST", `/api/v1/memory/scopes/${scopeOf[A]}/files`, {
+        path: "notes/stale.md",
+        content: "v1\n",
+      }),
+    );
+    await ok(lena.request("PUT", `/api/v1/memory/files/${file.id}`, { content: "v2\n", expectedVersion: 1 }));
+    const r = await fresh({
+      scope: scopeOf[A] as string,
+      path: "notes/stale.md",
+      op: "replace",
+      content: "v2\nfrom Scout\n",
+      baseVersion: 2,
+    });
+    expect(await proposalOf(r.approvalId)).toMatchObject({ file_id: file.id, base_version: 2 });
+    await ok(
+      admin.request("PUT", `/api/v1/memory/files/${file.id}`, { content: "v3\n", expectedVersion: 2 }),
+    );
+    const before = await revisionsOf(file.id);
+    const res = await decide(lena, r.approvalId, {
+      outcome: "approved",
+      actionHash: await hashOf(lena, r.approvalId),
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toMatchObject({ status: "failed", resultCode: "stale_base" });
+    expect(await revisionsOf(file.id)).toEqual(before);
+    expect(await fileAt(scopeOf[A] as string, "notes/stale.md")).toMatchObject({
+      version: 3,
+      content: "v3\n",
+    });
+    const row = await approvalRow(r.approvalId);
+    expect((await cardFor(sam, row.card_message_id)).status).toBe("failed");
+  });
+
+  it("create on a path someone created meanwhile fails as path_exists and writes nothing", async () => {
+    const r = await fresh({
+      scope: scopeOf[A] as string,
+      path: "notes/new.md",
+      op: "create",
+      content: "Scout\n",
+    });
+    const mine = await ok(
+      lena.request("POST", `/api/v1/memory/scopes/${scopeOf[A]}/files`, {
+        path: "Notes/New.md",
+        content: "Lena\n",
+      }),
+    );
+    const res = await decide(lena, r.approvalId, {
+      outcome: "approved",
+      actionHash: await hashOf(lena, r.approvalId),
+    });
+    expect(res.body).toMatchObject({ status: "failed", resultCode: "path_exists" });
+    expect(await revisionsOf(mine.id)).toHaveLength(1);
+  });
+
+  it("a proposal changed after the request cannot be approved (409 approval_action_changed), nothing written", async () => {
+    const r = await fresh({
+      scope: scopeOf[A] as string,
+      path: "tamper.md",
+      op: "create",
+      content: "honest\n",
+    });
+    const hash = await hashOf(lena, r.approvalId);
+    const p = await proposalOf(r.approvalId);
+    await su.query("update app.memory_proposals set content = 'poisoned\n' where id = $1", [p?.id]);
+    const res = await decide(lena, r.approvalId, { outcome: "approved", actionHash: hash });
+    expect(res.status).toBe(409);
+    expect(codeOf(res)).toBe("approval_action_changed");
+    expect(await fileAt(scopeOf[A] as string, "tamper.md")).toBeUndefined();
+    expect((await approvalRow(r.approvalId)).status).toBe("pending");
+  });
+
+  it("Lena and the admin approve at once: one wins, the other gets 409, exactly one revision", async () => {
+    const r = await fresh({ scope: scopeOf[A] as string, path: "race.md", op: "create", content: "once\n" });
+    const hash = await hashOf(lena, r.approvalId);
+    const before = await revisionCount(scopeOf[A] as string);
+    const results = await Promise.all([
+      decide(lena, r.approvalId, { outcome: "approved", actionHash: hash }),
+      decide(admin, r.approvalId, { outcome: "approved", actionHash: hash }),
+    ]);
+    expect(results.map((x) => x.status).sort()).toEqual([200, 409]);
+    expect(await revisionCount(scopeOf[A] as string)).toBe(before + 1);
+    expect(await fileAt(scopeOf[A] as string, "race.md")).toMatchObject({ content: "once\n", version: 1 });
+  });
+
+  it("deny: the card is cancelled, the file unchanged, the bot hears it was denied", async () => {
+    const r = await fresh({ scope: scopeOf[A] as string, path: "denied.md", op: "create", content: "no\n" });
+    const res = await decide(lena, r.approvalId, {
+      outcome: "denied",
+      actionHash: await hashOf(lena, r.approvalId),
+    });
+    expect(res.body).toMatchObject({ status: "denied" });
+    expect(await fileAt(scopeOf[A] as string, "denied.md")).toBeUndefined();
+    const row = await approvalRow(r.approvalId);
+    expect((await cardFor(sam, row.card_message_id)).status).toBe("cancelled");
+    const heard = await cardActionsOf(row.card_message_id);
+    expect(heard).toHaveLength(1);
+    expect(heard[0]?.cardAction).toMatchObject({ outcome: "denied" });
+  });
+
+  it("an expired request cannot be decided (409 approval_expired), nothing written", async () => {
+    const r = await fresh({ scope: scopeOf[A] as string, path: "late.md", op: "create", content: "late\n" });
+    const hash = await hashOf(lena, r.approvalId);
+    await su.query(
+      "update app.approval_requests set expires_at = now() - interval '1 minute' where id = $1",
+      [r.approvalId],
+    );
+    const res = await decide(lena, r.approvalId, { outcome: "approved", actionHash: hash });
+    expect(res.status).toBe(409);
+    expect(codeOf(res)).toBe("approval_expired");
+    expect(await fileAt(scopeOf[A] as string, "late.md")).toBeUndefined();
+  });
+});
+
+describe("refusals before anything is stored (Task 2)", () => {
+  const counts = async () => {
+    const q = async (sql: string) => Number((await su.query(sql)).rows[0].n);
+    return {
+      proposals: await q("select count(*)::int as n from app.memory_proposals"),
+      approvals: await q("select count(*)::int as n from app.approval_requests"),
+      cards: await q("select count(*)::int as n from app.message_cards"),
+    };
+  };
+
+  it("a secret refuses the proposal: no proposal, no approval, no card", async () => {
+    const t = await turn();
+    const before = await counts();
+    const key = ["sk", "ant", "api03", "Zq7Lm2Np9Rt4Vx8Bc1Df6Gh3Jk5"].join("-");
+    expect(
+      await propose({
+        eventId: t.eventId,
+        scope: scopeOf[A] as string,
+        path: "k.md",
+        op: "create",
+        content: key,
+      }),
+    ).toEqual({ refused: "secret_detected" });
+    expect(await counts()).toEqual(before);
+    const [refused] = (
+      await su.query(
+        "select metadata from app.audit_events where action = 'memory.proposal_refused' and metadata->>'eventId' = $1",
+        [t.eventId],
+      )
+    ).rows;
+    expect(refused?.metadata).toEqual({ reason: "secret_detected", op: "create", eventId: t.eventId });
+  });
+
+  it("an unknown turn, another bot's turn and an unreadable unit are refused", async () => {
+    const t = await turn();
+    const base = { scope: scopeOf[A] as string, path: "x.md", op: "create" as const, content: "x\n" };
+    expect(await propose({ ...base, eventId: randomUUID() })).toEqual({ refused: "unknown_turn" });
+    expect(await propose({ ...base, eventId: t.eventId, agentId: randomUUID() })).toEqual({
+      refused: "unknown_turn",
+    });
+    expect(await propose({ ...base, eventId: t.eventId, scope: scopeOf[B] as string })).toEqual({
+      refused: "denied",
+    });
+    expect(await propose({ ...base, eventId: t.eventId, scope: randomUUID() })).toEqual({
+      refused: "not_found",
+    });
+    expect(await propose({ ...base, eventId: t.eventId, path: "../x.md" })).toEqual({
+      refused: "path_invalid",
+    });
+    expect(await propose({ ...base, eventId: t.eventId, path: "clients/acme.md" })).toEqual({
+      refused: "version_conflict",
+    });
+    expect(
+      await propose({ ...base, eventId: t.eventId, path: "clients/acme.md", op: "replace", baseVersion: 99 }),
+    ).toEqual({ refused: "version_conflict" });
+  });
+
+  it("the ninth memory tool call of a turn is cap_reached", async () => {
+    const t = await turn();
+    await su.query("update app.agent_turns set tool_calls = 7 where event_id = $1", [t.eventId]);
+    const base = { eventId: t.eventId, scope: scopeOf[A] as string, op: "create" as const, content: "x\n" };
+    expect(await propose({ ...base, path: "eighth.md" })).toHaveProperty("approvalId");
+    expect(await propose({ ...base, path: "ninth.md" })).toEqual({ refused: "cap_reached" });
+    expect(
+      Number(
+        (await su.query("select tool_calls from app.agent_turns where event_id = $1", [t.eventId])).rows[0]
+          .tool_calls,
+      ),
+    ).toBe(8);
+  });
+
+  it("the 21st pending proposal of the same (bot, human) is too_many_pending", async () => {
+    const pending = Number(
+      (
+        await su.query(
+          `select count(*)::int as n from app.approval_requests where kind = 'memory.write' and status = 'pending'
+            and expires_at > now() and requested_by_agent_id = $1 and requested_for_user_id = $2`,
+          [scoutId, samId],
+        )
+      ).rows[0].n,
+    );
+    expect(pending).toBeLessThan(20);
+    const filler = Array.from({ length: 20 - pending }, () => randomUUID());
+    for (const id of filler) {
+      await su.query(
+        `insert into app.approval_requests (organization_id, kind, mode, resource_type, resource_id, action_hash,
+           requested_by_agent_id, requested_for_user_id, expires_at)
+         values ($1, 'memory.write', 'server_apply', 'memory_proposal', $2, $3, $4, $5, now() + interval '1 day')`,
+        [orgId, id, "0".repeat(64), scoutId, samId],
+      );
+    }
+    try {
+      const t = await turn();
+      expect(
+        await propose({
+          eventId: t.eventId,
+          scope: scopeOf[A] as string,
+          path: "21st.md",
+          op: "create",
+          content: "x\n",
+        }),
+      ).toEqual({ refused: "too_many_pending" });
+    } finally {
+      await su.query("delete from app.approval_requests where resource_id = any($1::uuid[])", [filler]);
+    }
+  });
+});
+
+describe("the view's bounds and a proposal whose unit is gone (WINDOWS 126, 137)", () => {
+  it("a proposal with 250 emails is viewed with 200 spans and the full count", async () => {
+    const content = `${Array.from({ length: 250 }, (_, i) => `user${i}@acme.com`).join("\n")}\n`;
+    const r = await fresh({ scope: scopeOf[A] as string, path: "lists/many.md", op: "create", content });
+    const d = await detail(lena, r.approvalId);
+    if (d.view.type !== "memory_proposal") throw new Error("not a memory view");
+    expect(d.view.proposal.spans).toHaveLength(200);
+    expect(d.view.proposal.findings).toEqual([expect.objectContaining({ kind: "email", count: 250 })]);
+    const row = await approvalRow(r.approvalId);
+    expect((await messageOf(row.card_message_id)).body.length).toBeLessThanOrEqual(600);
+  });
+
+  it("a unit deleted under a pending proposal: inbox and decisions answer cleanly, the detail reads scope_gone", async () => {
+    const C = await unit("team", "Benelux", D);
+    await ok(admin.request("POST", `/api/v1/units/${C}/members`, { userId: lenaId, role: "lead" }));
+    await ok(admin.request("POST", `/api/v1/units/${C}/members`, { userId: samId }));
+    const scopes = (await ok(admin.request("GET", "/api/v1/memory/scopes"))).scopes as Json[];
+    const scopeC = scopes.find((s) => s.unitId === C)?.id as string;
+    const r = await fresh({ scope: scopeC, path: "benelux.md", op: "create", content: "Brussels office\n" });
+    expect((await detail(lena, r.approvalId)).viewerCan).toEqual(["decide"]);
+    const hash = await hashOf(lena, r.approvalId);
+    // Only the template MEMORY.md lives there, so the unit may go; its scope and the proposal cascade.
+    await ok(admin.request("DELETE", `/api/v1/units/${C}`));
+    expect(await proposalOf(r.approvalId)).toBeUndefined();
+    expect((await approvalRow(r.approvalId)).status).toBe("pending");
+
+    const lenaList = (await ok(lena.request("GET", "/api/v1/approvals?role=decider"))).items as Json[];
+    expect(lenaList.map((i) => i.id)).not.toContain(r.approvalId);
+    const samList = (await ok(sam.request("GET", "/api/v1/approvals?role=requester"))).items as Json[];
+    expect(samList.find((i) => i.id === r.approvalId)).toMatchObject({ status: "pending", viewerCan: [] });
+    const d = await detail(sam, r.approvalId);
+    expect(d.view).toEqual({
+      type: "fields",
+      title: "This memory no longer exists.",
+      fields: [{ label: "Result", value: "scope_gone" }],
+    });
+
+    // Nobody may decide it any more: Lena no longer sees it, Sam only asked for it. Nothing is written.
+    const byLena = await decide(lena, r.approvalId, { outcome: "approved", actionHash: hash });
+    expect(byLena.status).toBe(404);
+    expect(codeOf(byLena)).toBe("approval_not_found");
+    const row = await approvalRow(r.approvalId);
+    const onCard = await sam.request("POST", `/api/v1/cards/${row.card_message_id}/decision`, {
+      outcome: "denied",
+      actionHash: hash,
+    });
+    expect(onCard.status).toBe(403);
+    expect(codeOf(onCard)).toBe("not_approver");
+    expect((await approvalRow(r.approvalId)).status).toBe("pending");
+
+    // The kind's own hooks read it as scope_gone, never a crash.
+    const kind = createMemoryWriteKind({ perms: {} as never, files: {} as never, scans: new Map() });
+    const stored = { ...row, resourceId: row.resource_id } as never;
+    await stack.built.core.db.withTenant({ organizationId: orgId, userId: lenaId }, async (tx) => {
+      await expect(kind.hashInput(tx, stored)).rejects.toMatchObject({ statusCode: 409, code: "scope_gone" });
+      expect(await kind.apply?.(tx, stored, { deciderUserId: lenaId })).toEqual({
+        ok: false,
+        code: "scope_gone",
+      });
+      expect(await kind.canDecide(tx, lenaId, stored)).toBe(false);
+      expect(await kind.audience(tx, stored)).toEqual([]);
+      expect(await kind.isPrivate?.(tx, stored)).toBe(true);
+    });
+  });
+});
+
+describe("Presidio (layer 2): findings merge in, and a refused connection leaves a visible marker (Task 2)", () => {
+  it("a PERSON span from the analyzer becomes a person finding, masked on the card", async () => {
+    presidioMode = "person";
+    try {
+      const calls = presidioCalls;
+      const r = await fresh({
+        scope: scopeOf[A] as string,
+        path: "people/ana.md",
+        op: "create",
+        content: "Met Ana García at the fair\n",
+      });
+      expect(presidioCalls).toBeGreaterThan(calls);
+      expect(r.findings).toEqual([
+        expect.objectContaining({
+          kind: "person",
+          source: "presidio",
+          severity: "warn",
+          samples: ["A••• G•••"],
+        }),
+      ]);
+      const row = await approvalRow(r.approvalId);
+      expect(row.card_warnings).toEqual([]);
+      const msg = await messageOf(row.card_message_id);
+      expect(msg.body).toBe("+ Met A••• G••• at the fair");
+      expect((await cardFor(sam, row.card_message_id)).fields).toContainEqual({
+        label: "Found",
+        value: "Person name",
+      });
+    } finally {
+      presidioMode = "nothing";
+    }
+  });
+
+  it("with the analyzer's port closed the proposal proceeds with extended_scan_unavailable and a card warning", async () => {
+    presidio.closeAllConnections();
+    await new Promise<void>((resolve) => presidio.close(() => resolve()));
+    const r = await fresh({
+      scope: scopeOf[A] as string,
+      path: "offline.md",
+      op: "create",
+      content: "Call ana@acme.com\n",
+    });
+    expect(r.findings.map((f) => [f.kind, f.severity])).toEqual([
+      ["email", "warn"],
+      ["extended_scan_unavailable", "info"],
+    ]);
+    const row = await approvalRow(r.approvalId);
+    expect(row.card_warnings).toEqual(["Extended scan unavailable — review the text yourself"]);
+    expect((await cardFor(sam, row.card_message_id)).approval?.warnings).toEqual([
+      "Extended scan unavailable — review the text yourself",
+    ]);
+    const d = await detail(lena, r.approvalId);
+    if (d.view.type !== "memory_proposal") throw new Error("not a memory view");
+    expect(d.view.proposal.findings.map((f) => f.kind)).toContain("extended_scan_unavailable");
   });
 });
