@@ -1,0 +1,37 @@
+# Profile `pii`: the optional Presidio analyzer, detector layer 2 for memory proposals (MEM-05, D-06, D-08). Included
+# by compose.yaml; its service starts only when COMPOSE_PROFILES names `pii`. Enable it with
+#   COMPOSE_PROFILES=pii OCW_PRESIDIO_URL=http://presidio:3000   (in .env), then docker compose up -d --build
+# Spanish and English: a derived image (Dockerfile) adds the Spanish spaCy model to Microsoft's pinned image. No
+# published port, no volume, no secret, read-only root, no capabilities, and only an internal network shared with the
+# api (no egress): memory text never leaves the host. Without the profile the api gets no URL and never calls it.
+services:
+  presidio:
+    profiles: ["pii"]
+    build:
+      context: .
+    image: ocw-presidio:${OCW_IMAGE_TAG:-local}
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    # en_core_web_lg + es_core_news_md resident: about 1 GiB measured idle.
+    mem_limit: 1536m
+    cpus: 1.0
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:3000/health"]
+      interval: 10s
+      timeout: 3s
+      start_period: 60s
+      retries: 6
+    networks:
+      - pii
+
+networks:
+  # Shared only by presidio and the api (compose.yaml); created empty when the profile is off.
+  pii:
+    internal: true

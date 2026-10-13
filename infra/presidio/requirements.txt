@@ -1,0 +1,8 @@
+# Spanish spaCy model for the optional `pii` profile (MEM-05, D-08). Installed with
+#   pip install --no-deps --require-hashes -r requirements.txt
+# The wheel is the release asset of explosion/spacy-models tag es_core_news_md-3.8.0 (matches spaCy 3.8.x in the
+# pinned presidio-analyzer 2.2.362 image); its sha256 was computed with `shasum -a 256` on the downloaded asset and
+# approved at the 07.2-05 package legitimacy gate. Licence GPL-3.0: it runs only inside this separate, optional
+# container (aggregation), never linked into OCW code.
+es-core-news-md @ https://github.com/explosion/spacy-models/releases/download/es_core_news_md-3.8.0/es_core_news_md-3.8.0-py3-none-any.whl \
+    --hash=sha256:478b8bb3f3e8eb149192f7d80e7cd64f990b7e9bccbc5329df41a57e86326be2

@@ -1,0 +1,5 @@
+# Analyzer engine for the `pii` profile: the image's default lists only `en`, which would refuse `language: es`.
+supported_languages:
+  - es
+  - en
+default_score_threshold: 0

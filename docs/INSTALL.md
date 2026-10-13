@@ -70,9 +70,9 @@ The minimal stack in `compose.yaml`:
 | `web` | Next.js app | `3000` |
 | `openclaw` | The OpenClaw cell for server-side agents | none |
 
-Three optional profiles stay off until they are named in `COMPOSE_PROFILES` in `.env`: `proxy`, `observability` and
-`vault`. The `pnpm ocw enable …` commands below turn them on without a reinstall. Telemetry is off unless an OTLP
-endpoint is configured.
+Four optional profiles stay off until they are named in `COMPOSE_PROFILES` in `.env`: `proxy`, `observability`,
+`vault` and `pii`. The `pnpm ocw enable …` commands below turn on the first three without a reinstall; `pii` is two
+lines in `.env` (see below). Telemetry is off unless an OTLP endpoint is configured.
 
 ## Expose it (HTTPS through Caddy)
 
@@ -111,6 +111,43 @@ pnpm ocw enable vault
 These are `BETTER_AUTH_SECRET`, `OCW_ENCRYPTION_KEY`, `OCW_SETUP_TOKEN` and `OCW_SMTP_URL`. They become `openbao://`
 references, and OpenBao unseals itself from a key file in `secrets/`. Back up `secrets/` with `.env`. See
 [secrets.md](self-hosting/secrets.md).
+
+## Sensitive-data scan (optional `pii` profile)
+
+Before anyone approves a memory proposal, OCW scans the proposed text. The built-in scan always runs. It blocks
+secrets and flags IBANs, cards, NIF/NIE, e-mails and phone numbers. The `pii` profile adds Microsoft Presidio in
+Spanish and English. It flags names, places and the same identifiers with more context. Its findings are shown,
+masked, on the approval card. Nothing is ever approved automatically.
+
+To turn it on, add these two lines to `.env`. If `COMPOSE_PROFILES` already exists, append `pii` to it, for example
+`COMPOSE_PROFILES=vault,pii`.
+
+```dotenv
+COMPOSE_PROFILES=pii
+OCW_PRESIDIO_URL=http://presidio:3000
+```
+
+Then run `docker compose up -d --build --wait`.
+
+- **What it runs.** The `presidio` container (`infra/presidio`) is Microsoft's `presidio-analyzer` image, pinned by
+  digest. It adds the Spanish spaCy model, pinned by hash, next to the English one.
+- **Isolation.** The container has no published port, a read-only root and no capabilities. It sits on an internal
+  network shared only with the api. Text goes from the api to this container and nowhere else: it never leaves the
+  host, and neither side logs it.
+- **Resources.** About 600 MB of image and 1 GB of RAM while idle (limit 1.5 GB). It is ready about 10 s after start.
+  Each scan sends at most 100 KB of text per language.
+- **Options.** `OCW_PRESIDIO_LANGUAGES` defaults to `es,en`. `OCW_PRESIDIO_TIMEOUT_MS` defaults to `2000` and accepts
+  100 to 10000.
+- **When it does not answer.** If Presidio is down, slow past the timeout or returns something unexpected, the
+  proposal still goes ahead with the built-in findings. The card then shows **"Extended scan unavailable"**, and the
+  approver decides knowing that. A text over 100 KB is scanned up to that point and marked **"Extended scan
+  partial"**.
+- **Licences.** Presidio is MIT. The Spanish model (`es_core_news_md`) is GPL-3.0. It runs only inside this
+  separate, optional container and is never linked into OCW.
+
+Check it with `docker compose ps presidio` (healthy) and `docker compose logs presidio`. Developers can run
+`bash infra/presidio/smoke.sh`, which builds the image and tests Spanish and English under its own project, then
+removes everything it created.
 
 ## Back up, restore and upgrade
 

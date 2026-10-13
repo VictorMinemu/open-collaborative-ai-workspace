@@ -4,7 +4,8 @@
 # Web: http://localhost:3000   API: http://localhost:4000 (/docs for OpenAPI)   Attachments (S3): http://localhost:3900
 # Images are tagged ocw-<svc>:${OCW_IMAGE_TAG:-local}; api and web publish on ${OCW_PUBLISH_ADDRESS:-0.0.0.0} (set it to
 # 127.0.0.1 behind a reverse proxy). Optional profiles live in included files and stay off until named in
-# COMPOSE_PROFILES: proxy (Caddy), observability (OTel Collector, Prometheus, Grafana, Loki, Tempo), vault (OpenBao).
+# COMPOSE_PROFILES: proxy (Caddy), observability (OTel Collector, Prometheus, Grafana, Loki, Tempo), vault (OpenBao),
+# pii (Presidio sensitive-data scan for memory proposals).
 # Upgrading an install whose .env predates attachments: `pnpm setup:env --add-missing` appends the Garage/S3 keys
 # (it never rotates existing values), then `docker compose up -d`. Without them Garage does not start and the API
 # reports attachments as disabled; nothing else is affected (infra/garage/README.md).
@@ -12,6 +13,7 @@ include:
   - infra/caddy/compose.yaml
   - infra/observability/compose.yaml
   - infra/openbao/compose.yaml
+  - infra/presidio/compose.yaml
 
 x-db-urls: &db-urls
   DATABASE_URL: postgres://ocw_app:${OCW_DB_APP_PASSWORD:?Set OCW_DB_APP_PASSWORD in .env (run pnpm setup:env)}@postgres:5432/ocw
@@ -141,8 +143,17 @@ services:
       OCW_OPENBAO_ROLE_ID: ${OCW_OPENBAO_ROLE_ID:-}
       OCW_OPENBAO_SECRET_ID: ${OCW_OPENBAO_SECRET_ID:-}
       OCW_OPENBAO_TOKEN: ${OCW_OPENBAO_TOKEN:-}
+      # Sensitive-data scan of memory proposals (`pii` profile, MEM-05): empty URL = off; set it to
+      # http://presidio:3000 together with COMPOSE_PROFILES=pii. Languages default to es,en; the deadline to 2000 ms.
+      OCW_PRESIDIO_URL: ${OCW_PRESIDIO_URL:-}
+      OCW_PRESIDIO_LANGUAGES: ${OCW_PRESIDIO_LANGUAGES:-}
+      OCW_PRESIDIO_TIMEOUT_MS: ${OCW_PRESIDIO_TIMEOUT_MS:-}
     ports:
       - "${OCW_PUBLISH_ADDRESS:-0.0.0.0}:${OCW_API_PORT:-4000}:4000"
+    # `pii` is internal and shared only with the Presidio sidecar (empty unless that profile runs).
+    networks:
+      - default
+      - pii
     depends_on:
       migrate:
         condition: service_completed_successfully

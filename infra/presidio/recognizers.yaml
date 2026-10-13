@@ -1,0 +1,63 @@
+# Recognizer registry for the `pii` profile (MEM-05, D-06). Only the recognizers behind the entities the API asks for
+# (apps/api/src/lib/presidio.ts PRESIDIO_ENTITIES): Spanish NIF/NIE for `es`, the stock pattern recognizers for both
+# languages. PERSON and LOCATION come from the spaCy models (nlp-config.yaml).
+supported_languages:
+  - es
+  - en
+global_regex_flags: 26
+
+recognizers:
+  # The spaCy NER recognizer (PERSON, LOCATION), declared so the registry does not warn about adding it.
+  - name: SpacyRecognizer
+    supported_languages:
+      - es
+      - en
+    type: predefined
+
+  - name: EsNifRecognizer
+    supported_languages:
+      - es
+    type: predefined
+
+  - name: EsNieRecognizer
+    supported_languages:
+      - es
+    type: predefined
+
+  - name: CreditCardRecognizer
+    supported_languages:
+      - language: en
+        context: [credit, card, visa, mastercard, cc, amex, discover, jcb, diners, maestro, instapayment]
+      - language: es
+        context: [tarjeta, credito, crédito, débito, debito, visa, mastercard, amex, maestro]
+    type: predefined
+
+  - name: IbanRecognizer
+    supported_languages:
+      - es
+      - en
+    type: predefined
+
+  - name: EmailRecognizer
+    supported_languages:
+      - es
+      - en
+    type: predefined
+
+  # Stock regions miss Spain (and use "UK", not a valid region code): national numbers of these countries match too;
+  # numbers written with a `+` country code match for any region. Phones score 0.4, under the API's 0.5 threshold,
+  # unless a context word is near, so Spanish gets its own words (layer 1 already flags phones without context).
+  - name: PhoneRecognizer
+    supported_languages:
+      - language: es
+        context: [teléfono, telefono, móvil, movil, llamar, tel, contacto, whatsapp, número, numero]
+      - language: en
+        context: [phone, number, telephone, cell, cellphone, mobile, call]
+    supported_regions: [ES, GB, US, FR, DE, IT, PT]
+    type: predefined
+
+  - name: IpRecognizer
+    supported_languages:
+      - es
+      - en
+    type: predefined
