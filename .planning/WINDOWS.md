@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 115
+open_count: 117
 waived_count: 4
 fixed_count: 55
-total_count: 174
-last_updated: 2026-10-13T22:56:12.721Z
+total_count: 176
+last_updated: 2026-10-13T22:56:48.969Z
 ---
 
 # Broken Windows Ledger
@@ -189,6 +189,8 @@ last_updated: 2026-10-13T22:56:12.721Z
 | 172 | 07.4 | deviation | packages/db/src/schema/app.ts |  | vault_items.secret_ref accepts env/file/openbao providers in the DB; D-07 db-only must be enforced by the API; SecretsService.putSealed must accept connector_credential and vault_item (07.4-07/10) | open |  | 2026-10-13T22:54:38.476Z |  |
 | 173 | 07.4 | deviation | infra/fake-model/fake-mcp-oauth.mjs |  | The fake shares DCR/CIMD clients across issuers (main and alt); 07.4-10 must prove in the API that client credentials are never reused across issuers; default cimdFetch never runs in tests | open |  | 2026-10-13T22:56:12.635Z |  |
 | 174 | 07.4 | deviation | .planning/phases/07.4-per-member-connectors-agent-keychain-and-templates/07.4-VALIDATION.md |  | Plans and VALIDATION use 'node --test infra/fake-model/' which Node 24 treats as a file; use the glob form | open |  | 2026-10-13T22:56:12.721Z |  |
+| 175 | 07.4 | deviation | apps/api/src/lib/egress.ts |  | MCP SDK OAuth helpers and transports fall back to global fetch without fetchFn and no rule catches the missing argument; every 07.4 SDK call must pass egress.bound(policy) (check in 07.4-10/11 and the gate) | open |  | 2026-10-13T22:56:48.885Z |  |
+| 176 | 07.4 | deviation | apps/api/src/lib/egress.ts |  | One undici Agent per request (no keep-alive reuse); privateAllow tested only up to the connect attempt | open |  | 2026-10-13T22:56:48.969Z |  |
 
 ````json
 [
@@ -2278,6 +2280,30 @@ last_updated: 2026-10-13T22:56:12.721Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-13T22:56:12.721Z",
+    "resolved_at": null
+  },
+  {
+    "id": 175,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "apps/api/src/lib/egress.ts",
+    "line": null,
+    "description": "MCP SDK OAuth helpers and transports fall back to global fetch without fetchFn and no rule catches the missing argument; every 07.4 SDK call must pass egress.bound(policy) (check in 07.4-10/11 and the gate)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T22:56:48.885Z",
+    "resolved_at": null
+  },
+  {
+    "id": 176,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "apps/api/src/lib/egress.ts",
+    "line": null,
+    "description": "One undici Agent per request (no keep-alive reuse); privateAllow tested only up to the connect attempt",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T22:56:48.969Z",
     "resolved_at": null
   }
 ]
