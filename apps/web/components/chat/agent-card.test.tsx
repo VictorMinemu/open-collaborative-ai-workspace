@@ -286,7 +286,23 @@ describe("AgentCardView: a platform-owned card that mirrors an approval (07.2-17
     expect(hrefs(html)).toEqual([`/memory/proposals/${APPROVAL_ID}`]);
   });
 
-  it("a requester in a shared scope reads that they can't approve their own proposal, and gets no Approve", () => {
+  it("a requester who may decide a shared scope (an admin's organization proposal) gets Review changes, Approve and Deny", () => {
+    // Owner decision 2026-10-13: the decision right, not who asked, decides who approves.
+    const org = memoryCard({
+      viewerCan: ["follow", "decide"],
+      fields: [
+        { label: "Memory", value: "Organization · Everyone" },
+        { label: "Readers", value: "12 people" },
+        { label: "Found", value: "Nothing found" },
+      ],
+    });
+    const html = render(org, PREVIEW, { me: ME });
+    expect(buttons(html)).toEqual(["Approve", "Deny"]);
+    expect(hrefs(html)).toEqual([`/memory/proposals/${APPROVAL_ID}`]);
+    expect(html).not.toContain("agent-card-waiting");
+  });
+
+  it("a requester without the decision right in a shared scope waits for a reviewer, with no Approve", () => {
     const shared = memoryCard({
       viewerCan: [],
       fields: [
@@ -297,9 +313,8 @@ describe("AgentCardView: a platform-owned card that mirrors an approval (07.2-17
     });
     const html = render(shared, PREVIEW, { me: ME });
     expect(buttons(html)).toEqual([]);
-    expect(textOf(html, "agent-card-waiting")).toBe(
-      "Waiting for a reviewer. You can't approve your own proposal.",
-    );
+    expect(textOf(html, "agent-card-waiting")).toBe("Waiting for a reviewer");
+    expect(html).not.toContain("your own proposal");
     expect(hrefs(html)).toEqual([`/memory/proposals/${APPROVAL_ID}`]);
   });
 

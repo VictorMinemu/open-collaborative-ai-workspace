@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { highlightRanges, lineRanges } from "@/components/memory/proposal-view";
+import { ApiRequestError } from "./api";
 import {
   countLabel,
+  decisionErrorText,
   expiresText,
   failedReason,
   nextVersion,
@@ -107,5 +109,15 @@ describe("highlight ranges", () => {
       ],
     });
     expect(ranges.map((r) => proposed.slice(r.start, r.end))).toEqual(["ana@acme.com", "- Met Ana García"]);
+  });
+});
+
+describe("decision errors (owner decision 2026-10-13)", () => {
+  it("a refused decider reads one sentence, never “your own proposal”", () => {
+    // Whoever holds the decision right may approve their own proposal: the requester is refused like anyone else.
+    expect(decisionErrorText(new ApiRequestError(403, "not_approver", "x"))).toBe("You can't decide this proposal.");
+    expect(decisionErrorText(new ApiRequestError(409, "approval_already_decided", "x"))).toBe(
+      "Someone already decided this proposal.",
+    );
   });
 });
