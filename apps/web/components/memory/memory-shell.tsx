@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { type ReactNode, Suspense, useEffect, useMemo, useRef } from "react";
 import { EmptyState } from "@/components/common/empty-state";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -17,6 +18,7 @@ import {
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useMediaQuery } from "@/hooks/use-media-query";
+import { countLabel, pendingLabel, useHasApprovals, usePendingApprovalCount } from "@/lib/approval-queries";
 import { isDirty, useMemoryDraft } from "@/lib/memory-draft";
 import { fileName, parentFolder } from "@/lib/memory-edit";
 import { useMemoryFilesByScope, useMemoryLiveUpdates, useMemoryScopes } from "@/lib/memory-queries";
@@ -69,19 +71,37 @@ function TreeSkeleton({ stacked }: { stacked: boolean }) {
   );
 }
 
+/**
+ * The way into the approvals inbox (07.2-13), with the live count of proposals waiting for the viewer. On the phone it
+ * shows only to people who can decide a proposal or whose bots asked for one (UI-SPEC "Phone at 390 — memory").
+ */
 function ProposalsRow({ stacked }: { stacked: boolean }) {
+  const count = usePendingApprovalCount();
+  const involved = useHasApprovals(stacked);
+  if (stacked && count === 0 && !involved) return null;
   return (
     <div className={cn("shrink-0 border-t px-2", stacked ? "py-1.5" : "py-1")}>
       <Link
         href="/memory/proposals"
         data-testid="memory-proposals-row"
+        aria-label={count > 0 ? pendingLabel("Proposals", count) : undefined}
         className={cn(
           "flex items-center gap-2 rounded-md px-2 text-sidebar-foreground text-sm outline-none hover:bg-sidebar-accent/60 focus-visible:ring-[3px] focus-visible:ring-ring/40",
           stacked ? "h-11" : "h-10",
         )}
       >
         <Inbox aria-hidden className="size-4 text-muted-foreground" />
-        Proposals
+        <span className="flex-1">Proposals</span>
+        {count > 0 ? (
+          <Badge
+            variant="brand"
+            aria-hidden
+            data-testid="memory-proposals-count"
+            className="h-5 min-w-5 rounded-full px-1.5 tabular-nums"
+          >
+            {countLabel(count)}
+          </Badge>
+        ) : null}
       </Link>
     </div>
   );

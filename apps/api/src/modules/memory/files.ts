@@ -15,7 +15,15 @@ import {
   parseMemoryFolder,
   parseMemoryPath,
 } from "@ocw/contracts";
-import { agents, memoryFileRevisions, memoryFiles, memoryProposals, orgMembers, type Tx } from "@ocw/db";
+import {
+  agents,
+  approvalRequests,
+  memoryFileRevisions,
+  memoryFiles,
+  memoryProposals,
+  orgMembers,
+  type Tx,
+} from "@ocw/db";
 import { diffLines } from "diff";
 import { and, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Core } from "../../core";
@@ -311,7 +319,13 @@ function toMeta(f: FileRow, who: (w: Who) => MemoryActorDto): MemoryFileMeta {
   };
 }
 
-function toRevisionMeta(r: RevisionRow, who: (w: Who) => MemoryActorDto): MemoryRevisionMeta {
+type Approvers = ReadonlyMap<string, { id: string; displayName: string }>;
+
+function toRevisionMeta(
+  r: RevisionRow,
+  who: (w: Who) => MemoryActorDto,
+  approvers: Approvers,
+): MemoryRevisionMeta {
   return {
     version: r.version,
     op: r.op,
@@ -320,8 +334,34 @@ function toRevisionMeta(r: RevisionRow, who: (w: Who) => MemoryActorDto): Memory
     linesRemoved: r.linesRemoved,
     author: who(revisionWho(r)),
     approvalRequestId: r.approvalRequestId,
+    approvedBy: r.approvalRequestId ? (approvers.get(r.approvalRequestId) ?? null) : null,
     createdAt: iso(r.createdAt),
   };
+}
+
+/** Who decided the approvals that wrote these revisions ("Approved by {person}", 07.2-13). */
+async function approversOf(tx: Tx, rows: readonly RevisionRow[]): Promise<Approvers> {
+  const ids = [...new Set(rows.flatMap((r) => (r.approvalRequestId ? [r.approvalRequestId] : [])))];
+  if (ids.length === 0) return new Map();
+  const decided = await tx
+    .select({ id: approvalRequests.id, decidedBy: approvalRequests.decidedBy })
+    .from(approvalRequests)
+    .where(inArray(approvalRequests.id, ids));
+  const who = await directory(
+    tx,
+    decided.flatMap((d) =>
+      d.decidedBy ? [{ kind: "user" as const, id: d.decidedBy, onBehalfOf: null }] : [],
+    ),
+  );
+  const out = new Map<string, { id: string; displayName: string }>();
+  for (const d of decided) {
+    if (!d.decidedBy) continue;
+    out.set(d.id, {
+      id: d.decidedBy,
+      displayName: who({ kind: "user", id: d.decidedBy, onBehalfOf: null }).displayName,
+    });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------- the service functions
@@ -727,7 +767,8 @@ export function createFileOps(d: FilesDeps) {
         .orderBy(desc(memoryFileRevisions.version));
       const visible = await filterReadable(perms, tx, actor, scope.facts, rows, (r) => r.path);
       const who = await directory(tx, visible.map(revisionWho));
-      return visible.map((r) => toRevisionMeta(r, who));
+      const approvers = await approversOf(tx, visible);
+      return visible.map((r) => toRevisionMeta(r, who, approvers));
     });
   }
 
@@ -747,7 +788,7 @@ export function createFileOps(d: FilesDeps) {
       if (!rev) throw memoryNotFound("Version not found");
       await requireRead(tx, actor, scope, rev.path);
       const who = await directory(tx, [revisionWho(rev)]);
-      return { ...toRevisionMeta(rev, who), content: rev.content };
+      return { ...toRevisionMeta(rev, who, await approversOf(tx, [rev])), content: rev.content };
     });
   }
 

@@ -353,6 +353,32 @@ describe("tracer: Scout's proposal into team memory becomes a pending card; Lena
     );
   });
 
+  it("the inbox rows and the detail carry the kind's headline; the card is re-announced live with its link (07.2-13)", async () => {
+    const headline = {
+      title: "Create clients/acme.md",
+      context: "Iberia · Team",
+      requester: "Sam's assistant for Sam Lee",
+      tags: [
+        { label: "IBAN", tone: "warning" },
+        { label: "Email", tone: "warning" },
+      ],
+    };
+    expect((await detail(lena, approvalId)).headline).toEqual(headline);
+    const listed = await ok(lena.request("GET", "/api/v1/approvals?role=decider&status=pending"));
+    expect((listed.items as Json[]).find((i) => i.id === approvalId)?.headline).toEqual(headline);
+    const mine = await ok(sam.request("GET", "/api/v1/approvals?role=requester"));
+    expect((mine.items as Json[]).find((i) => i.id === approvalId)?.headline).toEqual(headline);
+    // WINDOWS 160: after the link exists, readers of the DM get the card again with its approval.
+    const frames = (
+      await su.query(
+        `select payload from app.stream_events where stream_id = $1 and type = 'message.updated'
+          and payload->'message'->>'id' = $2`,
+        [`conv:${dmId}`, cardMessageId],
+      )
+    ).rows as Json[];
+    expect(frames.map((f) => f.payload.message.card?.approval?.id)).toContain(approvalId);
+  });
+
   it("Lena approves with the hash she saw: the server writes exactly that revision, as Scout for Sam", async () => {
     const hash = (await detail(lena, approvalId)).actionHash;
     const res = await decide(lena, approvalId, { outcome: "approved", actionHash: hash });
@@ -377,6 +403,14 @@ describe("tracer: Scout's proposal into team memory becomes a pending card; Lena
       approval: { status: "applied" },
     });
     expect(await cardActionsOf(cardMessageId)).toHaveLength(1);
+    // History names the approver (07.2-13, WINDOWS 156).
+    const history = await ok(sam.request("GET", `/api/v1/memory/files/${file?.id}/revisions`));
+    expect(history.revisions[0]).toMatchObject({
+      approvalRequestId: approvalId,
+      approvedBy: { id: lenaId, displayName: "Lena Gil" },
+    });
+    const one = await ok(sam.request("GET", `/api/v1/memory/files/${file?.id}/revisions/1`));
+    expect(one.approvedBy).toEqual({ id: lenaId, displayName: "Lena Gil" });
   });
 
   it("audits the proposal and the write with ids and counts, never the path or the content", async () => {

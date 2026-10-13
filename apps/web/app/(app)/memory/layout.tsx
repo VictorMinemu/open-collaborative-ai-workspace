@@ -1,6 +1,6 @@
 "use client";
 
-import { useParams } from "next/navigation";
+import { useParams, usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import { MemoryShell } from "@/components/memory/memory-shell";
 import { ModuleGate } from "@/components/shell/module-gate";
@@ -12,6 +12,11 @@ import { ModuleGate } from "@/components/shell/module-gate";
  */
 export default function MemoryLayout({ children }: { children: ReactNode }) {
   const params = useParams<{ scopeId?: string; path?: string[] }>();
+  const pathname = usePathname();
+  // The proposals inbox (07.2-13) is its own screen under Memory: same module gate, no file viewer.
+  if (pathname === "/memory/proposals" || pathname.startsWith("/memory/proposals/")) {
+    return <ModuleGate module="memory">{children}</ModuleGate>;
+  }
   return (
     <ModuleGate module="memory">
       <MemoryShell scopeId={params.scopeId} segments={params.path} />

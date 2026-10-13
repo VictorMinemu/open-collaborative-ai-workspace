@@ -192,8 +192,13 @@ function RevisionRow({
         </span>
       </button>
       {rev.approvalRequestId ? (
-        <p className="-mt-2 flex items-center gap-1 px-4 pb-3 text-muted-foreground text-xs">
-          Approved proposal
+        <p
+          data-testid="memory-revision-approval"
+          className="-mt-2 flex min-w-0 items-center gap-1 px-4 pb-3 text-muted-foreground text-xs"
+        >
+          <span className="min-w-0 truncate">
+            {rev.approvedBy ? `Approved by ${rev.approvedBy.displayName}` : "Approved proposal"}
+          </span>
           <span aria-hidden>·</span>
           <Link
             href={`/memory/proposals/${rev.approvalRequestId}`}
