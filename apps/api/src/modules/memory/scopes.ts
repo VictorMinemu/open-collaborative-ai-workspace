@@ -7,12 +7,12 @@ import {
   type UnitKind,
 } from "@ocw/contracts";
 import { agents, memoryFileRevisions, memoryFiles, memoryScopes, orgUnits, type Tx, tenantOf } from "@ocw/db";
-import { and, eq, inArray, type SQL, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, type SQL, sql } from "drizzle-orm";
 import type { PgColumn } from "drizzle-orm/pg-core";
 import { notFound } from "../../lib/errors";
 import { agentFacts } from "../agent";
 import { type MemoryScopeFacts, memoryResource, type PermissionService } from "../organization";
-import { withPersonalOwner } from "./access";
+import { isPersonalLike, withPersonalOwner } from "./access";
 
 /**
  * Memory scopes (D-01, MEM-01): one per anchor, created lazily with their `MEMORY.md`. A scope's identity never changes
@@ -236,6 +236,106 @@ export async function describeScopes(tx: Tx, rows: readonly ScopeRow[]): Promise
       chartKey: [],
     };
   });
+}
+
+// ---------------------------------------------------------------- an agent's scope references (07.2-11)
+
+/**
+ * A memory tool's scope for an agent acting for a human, resolved WITHOUT creating anything: the existing row when there
+ * is one (`id`), the key that would create it for the aliases (`key`), and the facts the resolver decides on. A refused
+ * decision therefore never leaves an empty scope behind (07.2-09 broken-window candidate 4).
+ */
+export interface ToolScope {
+  id: string | null;
+  key: ScopeKey | null;
+  kind: ScopeRow["kind"];
+  /** A person's private scope or a personal bot's notebook (owner-only memory). */
+  personalLike: boolean;
+  facts: MemoryScopeFacts;
+}
+
+/** The existing scope of a personal or agent key, or null (through the transaction's lens). */
+async function findKeyScope(
+  tx: Tx,
+  key: ScopeKey & { kind: "personal" | "agent" },
+): Promise<ScopeRow | null> {
+  const where =
+    key.kind === "personal"
+      ? and(
+          eq(memoryScopes.kind, "personal"),
+          eq(memoryScopes.agentId, key.agentId),
+          eq(memoryScopes.ownerUserId, key.ownerUserId),
+        )
+      : and(eq(memoryScopes.kind, "agent"), eq(memoryScopes.agentId, key.agentId));
+  const [row] = await tx.select().from(memoryScopes).where(where).limit(1);
+  return row ?? null;
+}
+
+/**
+ * Resolves `personal` (the turn's human with this bot), `agent` (this bot's notebook) or a scope id. The caller runs it
+ * through the human's lens (`withPersonalOwner`), so another person's personal scope is missing. Null = no such scope.
+ */
+export async function resolveToolScope(
+  tx: Tx,
+  a: { agentId: string; onBehalfOfUserId: string; scope: string },
+): Promise<ToolScope | null> {
+  if (a.scope !== "personal" && a.scope !== "agent") {
+    try {
+      const s = await loadScope(tx, a.scope);
+      return {
+        id: s.row.id,
+        key: null,
+        kind: s.row.kind,
+        personalLike: isPersonalLike(s.facts),
+        facts: s.facts,
+      };
+    } catch {
+      return null;
+    }
+  }
+  const key: ScopeKey & { kind: "personal" | "agent" } =
+    a.scope === "personal"
+      ? { kind: "personal", agentId: a.agentId, ownerUserId: a.onBehalfOfUserId }
+      : { kind: "agent", agentId: a.agentId };
+  const existing = await findKeyScope(tx, key);
+  if (existing) {
+    const [loaded] = await describeScopes(tx, [existing]);
+    if (!loaded) return null;
+    return {
+      id: existing.id,
+      key,
+      kind: existing.kind,
+      personalLike: isPersonalLike(loaded.facts),
+      facts: loaded.facts,
+    };
+  }
+  // Not created yet: the facts `describeScopes` would build for it, from the live bot.
+  const [bot] = await tx
+    .select({
+      id: agents.id,
+      scope: agents.scope,
+      ownerUserId: agents.ownerUserId,
+      status: agents.status,
+      unitId: agents.unitId,
+    })
+    .from(agents)
+    .where(and(eq(agents.id, a.agentId), isNull(agents.deletedAt)))
+    .limit(1);
+  if (!bot) return null;
+  const unitPath = bot.unitId ? ((await loadUnits(tx, [bot.unitId])).get(bot.unitId)?.path ?? []) : [];
+  const agent = { ...agentFacts(bot, unitPath), id: bot.id };
+  const facts: MemoryScopeFacts =
+    key.kind === "personal"
+      ? { kind: "personal", ownerUserId: key.ownerUserId, agent, unitPath: [] }
+      : { kind: "agent", ownerUserId: null, agent, unitPath };
+  return { id: null, key, kind: key.kind, personalLike: isPersonalLike(facts), facts };
+}
+
+/** The id of a resolved tool scope, creating it (with its `MEMORY.md`) when it does not exist yet. */
+export async function ensureToolScope(tx: Tx, s: ToolScope): Promise<string> {
+  if (s.id) return s.id;
+  if (!s.key) throw memoryNotFound();
+  return (await ensureScope(tx, s.key)).id;
 }
 
 /** One scope through the transaction's lens (RLS hides another person's personal scope), or 404. */

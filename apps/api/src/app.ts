@@ -297,10 +297,11 @@ export async function buildApp(
     createModelGatewayModule(core, modelGateway), // Phase 5: AI chat models and ChatGPT plan status
     createAiChatModule(core, { gateway: modelGateway, storage: artifactModule.storage }), // Phase 5: direct AI chat (AICHAT-02/03/07/08)
     createAgentModule(core), // B2
-    createBotCapabilitiesModule(core), // Phase 3.1: capabilities, bot policy, governance
+    createBotCapabilitiesModule(core, { memory }), // Phase 3.1: capabilities, bot policy, governance; 07.2-11: notes on files
     createMcpModule(core), // Phase 3.1: MCP server registry (D-13)
     createPluginsModule(core), // Phase 3.1: OpenClaw Marketplace (D-14)
-    createAgentChannelModule(core, { modelLabel: (ref) => modelGateway.labelOf(ref) }), // B2; 06-10: model labels in persona history
+    // B2; 06-10: model labels in persona history; 07.2-11: memory tools and memory files in the turn
+    createAgentChannelModule(core, { modelLabel: (ref) => modelGateway.labelOf(ref), memory }),
     deviceModule, // B3
     createWorkSessionModule(core, deviceModule.hub, { storage: artifactModule.storage }), // B3; 06.1: image bytes
     approvals.module, // Phase 07.2: approvals inbox and decisions (MEM-06)

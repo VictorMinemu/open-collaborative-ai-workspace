@@ -34,12 +34,15 @@ import { registerMemoryRoutes } from "./routes";
 import {
   describeScopes,
   ensureScope,
+  ensureToolScope,
   type LoadedScope,
   listScopes,
   loadScope,
   memoryNotFound,
+  resolveToolScope,
   type ScopeKey,
   type ScopeRow,
+  type ToolScope,
   toScopeDto,
 } from "./scopes";
 
@@ -50,6 +53,7 @@ import {
 export {
   type AgentReadVerdict,
   audienceVerdict,
+  isPersonalLike,
   type MemoryActor,
   type MemoryAudience,
   withPersonalOwner,
@@ -68,7 +72,7 @@ export {
   createMemoryProposal,
   type ProposalDeps,
 } from "./proposals";
-export type { LoadedScope, ScopeKey, ScopeRow } from "./scopes";
+export type { LoadedScope, ScopeKey, ScopeRow, ToolScope } from "./scopes";
 
 export interface MemoryService {
   ensureScope(tx: Tx, key: ScopeKey): Promise<ScopeRow>;
@@ -92,16 +96,29 @@ export interface MemoryService {
   forgetScope(tx: Tx, actor: MemoryActor, scopeId: string): Promise<{ files: number; revisions: number }>;
   listRevisions(tx: Tx, actor: MemoryActor, fileId: string): Promise<MemoryRevisionMeta[]>;
   readRevision(tx: Tx, actor: MemoryActor, fileId: string, version: number): Promise<MemoryRevision>;
+  /**
+   * The audience rule for an agent read (agent ∩ the human it acts for ∩ every reader of the turn). The scope is an id,
+   * or a `ToolScope` from `resolveToolScope` (07.2-11: decided before an alias's scope is created).
+   */
   decideAgentRead(
     tx: Tx,
     a: {
       agentId: string;
       onBehalfOfUserId: string;
       audience: MemoryAudience;
-      scopeId: string;
       path?: string;
-    },
+    } & ({ scopeId: string } | { scope: ToolScope }),
   ): Promise<AgentReadVerdict>;
+  /**
+   * A memory tool's scope (`personal`, `agent` or an id) for an agent acting for a human, through that human's lens,
+   * WITHOUT creating anything (07.2-11). Null = no such scope for them.
+   */
+  resolveToolScope(
+    tx: Tx,
+    a: { agentId: string; onBehalfOfUserId: string; scope: string },
+  ): Promise<ToolScope | null>;
+  /** The id of a resolved tool scope, creating it once a decision allowed it (through the human's lens). */
+  ensureToolScope(tx: Tx, onBehalfOfUserId: string, s: ToolScope): Promise<string>;
   /** Through the transaction's lens (another person's private scope is 404). */
   scopeFacts(tx: Tx, scopeId: string): Promise<{ row: ScopeRow; facts: MemoryScopeFacts; label: string }>;
   /**
@@ -189,6 +206,7 @@ export function createMemoryService(core: Core, deps: { approvals: ApprovalServi
     async decideAgentRead(tx, a) {
       if (!a.onBehalfOfUserId) throw new Error("an agent read needs the human it acts for");
       return withPersonalOwner(tx, a.onBehalfOfUserId, async () => {
+        if ("scope" in a) return decideAgentRead(perms, tx, loadRules, a.scope.facts, a);
         let scope: LoadedScope;
         try {
           scope = await loadScope(tx, a.scopeId);
@@ -198,6 +216,14 @@ export function createMemoryService(core: Core, deps: { approvals: ApprovalServi
         return decideAgentRead(perms, tx, loadRules, scope.facts, a);
       });
     },
+
+    async resolveToolScope(tx, a) {
+      if (!a.onBehalfOfUserId) throw new Error("an agent scope needs the human it acts for");
+      return withPersonalOwner(tx, a.onBehalfOfUserId, () => resolveToolScope(tx, a));
+    },
+
+    ensureToolScope: (tx, onBehalfOfUserId, s) =>
+      withPersonalOwner(tx, onBehalfOfUserId, () => ensureToolScope(tx, s)),
 
     async scopeFacts(tx, scopeId) {
       const s = await loadScope(tx, scopeId);

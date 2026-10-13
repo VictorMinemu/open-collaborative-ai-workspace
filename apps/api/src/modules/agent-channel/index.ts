@@ -27,6 +27,7 @@ import { HttpError, notFound } from "../../lib/errors";
 import { applyCellStatus, cellAgents, cellProviders, cellSubscriptions, findAgent } from "../agent";
 import { cellAgentCapabilities, loadPolicy } from "../bot-capabilities";
 import { cellMcpServers } from "../mcp";
+import type { MemoryService } from "../memory";
 import { channelResource, createPermissionService, type ResourceFacts } from "../organization";
 import { cellApprovedPlugins } from "../plugins";
 import { cellOf, createCellAuth } from "./auth";
@@ -35,6 +36,7 @@ import { noTrigger, registerCardActionHandler, registerCardRoutes, resolveReplyT
 import { registerCellGateway } from "./gateway";
 import { registerMcpCellRoutes } from "./mcp";
 import { registerMemoryRoutes } from "./memories";
+import { registerMemoryFileRoutes } from "./memory-files";
 import { registerMentionHandler } from "./mentions";
 import { registerPluginCellRoutes } from "./plugins";
 import { createCellPresence } from "./presence";
@@ -42,6 +44,7 @@ import { createProviderAuth } from "./provider-auth";
 import { registerToolCallRoutes } from "./tool-calls";
 
 export { emitCardAction } from "./cards";
+export { conversationAudience } from "./memory-files";
 export { buildMentionEvents } from "./mentions";
 
 const tags = ["agent-channel"];
@@ -100,8 +103,12 @@ async function botChannelResource(
  */
 export function createAgentChannelModule(
   core: Core,
-  /** The chat model's display label (06-10: a persona's AI chat history names it "AI assistant (<model>)"). */
-  opts: { modelLabel?: (ref: ModelRef) => string } = {},
+  opts: {
+    /** The chat model's display label (06-10: a persona's AI chat history names it "AI assistant (<model>)"). */
+    modelLabel?: (ref: ModelRef) => string;
+    /** Memory files (07.2-11): the memory routes, the legacy notes and the memory a turn carries. */
+    memory: MemoryService;
+  },
 ): ApiModule {
   const auth = createCellAuth(core);
   const presence = createCellPresence(core);
@@ -116,9 +123,9 @@ export function createAgentChannelModule(
   /** Every Agent Channel route: the authenticated cell principal must hold `cell.sync`. */
   const cellRoute = { config: { authz: "cell" as const } };
   const providerAuth = createProviderAuth(core, presence);
-  registerMentionHandler(core, { modelLabel: opts.modelLabel });
+  registerMentionHandler(core, { modelLabel: opts.modelLabel, memory: opts.memory });
   // Agent Cards (P-11): a reader's decision reaches the card's agent as `agent.card_action.v1`.
-  registerCardActionHandler(core, { perms, modelLabel: opts.modelLabel });
+  registerCardActionHandler(core, { perms, modelLabel: opts.modelLabel, memory: opts.memory });
 
   async function uiTokenCreatedAt(tx: Tx): Promise<string | null> {
     const [row] = await tx
@@ -451,8 +458,11 @@ export function createAgentChannelModule(
           registerBoardAgentRoutes(scope, { core, perms });
           // The cell's tool gate (D-08): decision + caps + taint + audit for every gated tool call.
           registerToolCallRoutes(scope, core, perms);
-          // The cell's memory tool (D-10): owner bound to the delivered turn, DM only, refused once tainted.
-          registerMemoryRoutes(scope, core, perms);
+          // The cell's memory tool (D-10): owner bound to the delivered turn, DM only, refused once tainted; since
+          // 07.2-11 a bullet of the human's private MEMORY.md.
+          registerMemoryRoutes(scope, core, perms, opts.memory);
+          // Memory files (07.2-11, MEM-04): list, read, write own scopes, propose; agent ∩ human ∩ the audience.
+          registerMemoryFileRoutes(scope, { core, perms, memory: opts.memory });
           // The cell's MCP tool discovery (D-13): probe reports → the tool catalog.
           registerMcpCellRoutes(scope, core);
           // The cell's marketplace executor and install gate (D-14).

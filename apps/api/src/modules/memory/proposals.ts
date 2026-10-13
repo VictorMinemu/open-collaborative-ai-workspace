@@ -11,6 +11,8 @@ import {
 import {
   agentTurns,
   approvalRequests,
+  conversationMembers,
+  conversations,
   memoryFiles,
   memoryProposals,
   messages,
@@ -20,14 +22,13 @@ import {
 import { and, eq, isNull, lt, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { sha256Hex } from "../../lib/crypto";
-import { HttpError } from "../../lib/errors";
 import type { ApprovalService } from "../approval";
 import { memoryResource, type PermissionService } from "../organization";
 import { decideMemory, isPersonalLike, type MemoryActor, withPersonalOwner } from "./access";
 import { MEMORY_WRITE } from "./approval-kind";
 import { type ChangeScan, type ChangeScanner, scanChange } from "./detect";
 import { guarded } from "./files";
-import { ensureScope, type LoadedScope, liveFileCount, loadScope } from "./scopes";
+import { ensureToolScope, liveFileCount, loadScope, resolveToolScope } from "./scopes";
 
 /**
  * Memory proposals (MEM-04, MEM-05, MEM-06, D-08, ADR-0023): what an agent asks to write into memory, stored immutable
@@ -77,36 +78,32 @@ async function liveFileAt(tx: Tx, scopeId: string, path: string): Promise<FileRo
   return f ?? null;
 }
 
-/** The scope an alias or id names for this turn, through the human's lens; null when it does not exist for them. */
-async function resolveScope(
-  tx: Tx,
-  scope: MemoryToolScope,
-  turn: { agentId: string; userId: string },
-): Promise<LoadedScope | null> {
-  try {
-    if (scope === "personal") {
-      const row = await ensureScope(tx, {
-        kind: "personal",
-        agentId: turn.agentId,
-        ownerUserId: turn.userId,
-      });
-      return await loadScope(tx, row.id);
-    }
-    if (scope === "agent") {
-      const row = await ensureScope(tx, { kind: "agent", agentId: turn.agentId });
-      return await loadScope(tx, row.id);
-    }
-    return await loadScope(tx, scope);
-  } catch (err) {
-    if (err instanceof HttpError && err.statusCode === 404) return null;
-    throw err;
-  }
+/**
+ * Whether the turn's conversation is a one-person DM with `userId` (a `dm` whose only human member is them): the only
+ * place personal-like memory is used by an agent (ADR-0023 decision 4). A proposal into it anywhere else would show its
+ * excerpt to the conversation's other readers on the card.
+ */
+async function oneHumanDm(tx: Tx, conversationId: string, userId: string): Promise<boolean> {
+  const [conv] = await tx
+    .select({ kind: conversations.kind })
+    .from(conversations)
+    .where(eq(conversations.id, conversationId))
+    .limit(1);
+  if (conv?.kind !== "dm") return false;
+  const humans = await tx
+    .select({ id: conversationMembers.memberId })
+    .from(conversationMembers)
+    .where(
+      and(eq(conversationMembers.conversationId, conversationId), eq(conversationMembers.memberKind, "user")),
+    );
+  return humans.length === 1 && humans[0]?.id === userId;
 }
 
 /**
  * Creates a proposal for the turn's agent acting for the turn's human. Checks, in order: the turn is this agent's
- * (`unknown_turn`); the path (`path_invalid`); the scope (`not_found`); `memory.read` on (scope, path) for the agent
- * on behalf of the human (`denied`); the op against the live file (`create` on an existing path or `replace` on another
+ * (`unknown_turn`); the path (`path_invalid`); the scope (`not_found`, resolved without creating it); `memory.read` on
+ * (scope, path) for the agent on behalf of the human (`denied`); personal-like memory only from the owner's one-person DM
+ * (`dm_only`); the op against the live file (`create` on an existing path or `replace` on another
  * version → `version_conflict`; `replace` of a missing file → `not_found`); one tool call counted on the turn
  * (`cap_reached`); the pending cap per (agent, human) (`too_many_pending`); the scan of the added text (a secret →
  * `secret_detected`, nothing stored); the resulting size (`too_large`) and the scope's file limit (`scope_full`). Then
@@ -147,11 +144,21 @@ export async function createMemoryProposal(
     const parsed = parseMemoryPath(input.path);
     if (!parsed.ok) return refuse("path_invalid");
     const path = parsed.path;
-    const scope = await resolveScope(tx, input.scope, turn);
-    if (!scope) return refuse("not_found");
-    if (!(await decideMemory(perms, tx, actor, "memory.read", scope.facts, path)).allowed) {
+    // The alias resolves without creating anything: a refused proposal never leaves an empty scope behind.
+    const ref = await resolveToolScope(tx, {
+      agentId: turn.agentId,
+      onBehalfOfUserId: human,
+      scope: input.scope,
+    });
+    if (!ref) return refuse("not_found");
+    if (!(await decideMemory(perms, tx, actor, "memory.read", ref.facts, path)).allowed) {
       return refuse("denied");
     }
+    // Personal-like memory only from the owner's one-person DM (07.2-11): the card shows the change to every reader.
+    if (isPersonalLike(ref.facts) && !(await oneHumanDm(tx, turn.conversationId, human))) {
+      return refuse("dm_only");
+    }
+    const scope = await loadScope(tx, await ensureToolScope(tx, ref));
 
     const existing = await liveFileAt(tx, scope.row.id, path);
     if (input.op === "create" && existing) return refuse("version_conflict");
