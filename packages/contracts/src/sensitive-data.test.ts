@@ -268,6 +268,104 @@ describe("detectSensitive()", () => {
   });
 });
 
+// Backtracking-heavy shapes: before 07.2-04 the URL-credential rule took ~17 s on 256 KiB of `a.`, the JWT rule ~5 s on
+// `eyJaaaaaaaa-` and the env-assignment rule ~5 s on `SECRET` (a run with many start positions, each rescanned).
+const ADVERSARIAL_SHAPES = [
+  "a.",
+  "a-",
+  "sk-",
+  "1.",
+  "eyJaaaaaaaa-",
+  "SECRET",
+  "A_TOKEN ",
+  "a://x:",
+  "1 ",
+  "a@",
+  "+3 ",
+  "AB12 ",
+];
+
+describe("linear time on 256 KiB adversarial runs", () => {
+  const size = 256 * 1024;
+  for (const shape of ADVERSARIAL_SHAPES) {
+    it(`detectSensitive and redactSecrets stay under 200 ms on ${JSON.stringify(shape)} repeated`, () => {
+      const text = shape.repeat(Math.ceil(size / shape.length)).slice(0, size);
+      for (const run of [() => detectSensitive(text), () => redactSecrets(text)]) {
+        const t0 = performance.now();
+        run();
+        expect(performance.now() - t0).toBeLessThan(200);
+      }
+    });
+  }
+});
+
+// The literals the three rewritten rules had before 07.2-04 (identical to the Local Runtime's former REDACTIONS): the
+// oracle. The rewrites only stop rescanning a run from every start position; matches, groups and offsets are the same.
+const ORIGINAL_RULES: Record<string, RegExp> = {
+  jwt: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
+  "url-credentials": /\b([a-z][a-z0-9+.-]*:\/\/)([^\s/:@]+):([^\s/@]+)@/gi,
+  "env-assignment":
+    /\b([A-Z0-9_]*(?:API_KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE_KEY)[A-Z0-9_]*)(\s*=\s*["']?)(?!\[REDACTED)[^\s"']{6,}/g,
+};
+
+/** Tokens that exercise every branch of each rule (boundaries, separators, keywords, placeholders). */
+const FUZZ_TOKENS: Record<string, readonly string[]> = {
+  jwt: [..."eyJ.-_ x1é\n", "eyJ", "eyJ", "ab", "abcd", "abcdefgh", "abcdefgh", ".", "eyJabcdefgh."],
+  "url-credentials": [
+    ..."abZx19_.-+:/@ \n\t\"'[]é",
+    "http",
+    "https",
+    "://",
+    "://",
+    "u:p@",
+    "git+ssh",
+    "[REDACTED]",
+  ],
+  "env-assignment": [
+    ..."aZ19_.- \n\t=\"'[]é",
+    "SECRET",
+    "TOKEN",
+    "API_KEY",
+    "PASSWD",
+    "[REDACTED",
+    "abcdefgh",
+  ],
+};
+
+function fuzzCorpus(tokens: readonly string[], count: number, seed: number): string[] {
+  let state = seed;
+  const next = () => {
+    state = (state * 1103515245 + 12345) & 0x7fffffff;
+    return state / 0x7fffffff;
+  };
+  return Array.from({ length: count }, () => {
+    let s = "";
+    const n = 1 + Math.floor(next() * 32);
+    for (let i = 0; i < n; i++) s += tokens[Math.floor(next() * tokens.length)];
+    return s;
+  });
+}
+
+const matches = (source: string, flags: string, text: string) =>
+  [...text.matchAll(new RegExp(source, flags))].map((m) => [m.index, ...m]);
+
+describe("SECRET_RULES rewritten for linear time match the original rules exactly", () => {
+  for (const [id, original] of Object.entries(ORIGINAL_RULES)) {
+    it(`${id}: same matches, groups and offsets on a seeded random corpus`, () => {
+      const corpus = fuzzCorpus(FUZZ_TOKENS[id] ?? [], 40_000, 2026);
+      const rule = SECRET_RULES.find((r) => r.id === id);
+      expect(rule).toBeDefined();
+      let hits = 0;
+      for (const text of corpus) {
+        const expected = matches(original.source, original.flags, text);
+        if (expected.length > 0) hits++;
+        expect(matches(rule?.source ?? "", rule?.flags ?? "", text)).toEqual(expected);
+      }
+      expect(hits).toBeGreaterThan(100);
+    });
+  }
+});
+
 describe("hasBlockingFinding()", () => {
   it("is true only with a block finding", () => {
     expect(hasBlockingFinding(detectSensitive(NOTE).findings)).toBe(true);

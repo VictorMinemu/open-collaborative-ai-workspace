@@ -15,8 +15,11 @@ export interface SecretRule {
   replace: string | ((m: string, ...g: string[]) => string);
 }
 
-// The literals below are copied verbatim from the former `REDACTIONS` list in apps/local-runtime/src/sanitize.ts, in the
-// same order; only `.source` and `.flags` are kept, so no regex object is shared between calls.
+// The literals below come from the former `REDACTIONS` list in apps/local-runtime/src/sanitize.ts, in the same order;
+// only `.source` and `.flags` are kept, so no regex object is shared between calls. Three of them (jwt, url-credentials,
+// env-assignment) gained a lookaround so a long run is not rescanned from every start position (quadratic: ~17 s on
+// 256 KiB of `a.`); their matches, groups and offsets are unchanged, proven against the original literals in
+// sensitive-data.test.ts, and redact-parity.test.ts pins the Local Runtime's output.
 const rule = (id: string, re: RegExp, replace: SecretRule["replace"]): SecretRule =>
   Object.freeze({ id, source: re.source, flags: re.flags, replace });
 
@@ -42,19 +45,26 @@ export const SECRET_RULES: readonly SecretRule[] = Object.freeze([
     (_m, key, sep) => `${key}${sep}[REDACTED]`,
   ),
   rule("auth-header", /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/g, (_m, scheme) => `${scheme} [REDACTED]`),
-  // JWTs
-  rule("jwt", /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, "[REDACTED:jwt]"),
-  // Credentials embedded in URLs: https://user:secret@host
+  // JWTs. Only the first `eyJ` of a run may start a match: a later start in the same run has a shorter first segment and
+  // needs the same `.` after the run, so it can only fail where the first one failed.
+  rule(
+    "jwt",
+    /\b(?<!\beyJ[A-Za-z0-9_-]*?)eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
+    "[REDACTED:jwt]",
+  ),
+  // Credentials embedded in URLs: https://user:secret@host. The scheme always runs to the end of its `[a-z0-9+.-]` run,
+  // so only the run's first word-start letter may start a match (the lookbehind skips the later ones).
   rule(
     "url-credentials",
-    /\b([a-z][a-z0-9+.-]*:\/\/)([^\s/:@]+):([^\s/@]+)@/gi,
+    /\b(?=[a-z])(?<!(?:^|\W)[a-z][a-z0-9+.-]*?)([a-z][a-z0-9+.-]*:\/\/)([^\s/:@]+):([^\s/@]+)@/gi,
     (_m, scheme, user) => `${scheme}${user}:[REDACTED]@`,
   ),
   // Env-style assignments of secret-looking variables: FOO_API_KEY=..., export DB_PASSWORD="..."
-  // (`=` only, so code such as `API_KEY: z.string()` stays readable in diffs).
+  // (`=` only, so code such as `API_KEY: z.string()` stays readable in diffs). The name is the whole `[A-Z0-9_]` run
+  // containing a keyword: the lookahead finds the keyword, then the run is taken once.
   rule(
     "env-assignment",
-    /\b([A-Z0-9_]*(?:API_KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE_KEY)[A-Z0-9_]*)(\s*=\s*["']?)(?!\[REDACTED)[^\s"']{6,}/g,
+    /\b(?=[A-Z0-9_]*?(?:API_KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE_KEY))([A-Z0-9_]+)(\s*=\s*["']?)(?!\[REDACTED)[^\s"']{6,}/g,
     (_m, key, sep) => `${key}${sep}[REDACTED]`,
   ),
 ]);
@@ -150,7 +160,7 @@ const pii = (
 /**
  * Detection order is priority: a span claimed by an earlier rule is never reported again by a later one (a digit run
  * inside a JWT is not a card; an IBAN's digits are not a card or a phone). Every PII quantifier is bounded and every PII
- * rule starts at a boundary, so a long adversarial run costs linear time.
+ * rule starts at a boundary, so, with the secret rules above, a long adversarial run costs linear time.
  */
 const DETECT_RULES: readonly DetectRule[] = [
   // Secrets: every rule of SECRET_RULES, in order. A match counts only if redacting it changes it, so an already
