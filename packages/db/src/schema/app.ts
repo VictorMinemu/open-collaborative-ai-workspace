@@ -601,6 +601,15 @@ export const agents = appSchema.table(
      * RESTRICT: a unit with bots cannot be deleted, so a unit bot never silently widens to the whole organization.
      */
     unitId: uuid("unit_id").references(() => orgUnits.id, { onDelete: "restrict" }),
+    /**
+     * Phase 07.4 (D-05, CONN-06): the template and version a personal bot was started from (a fork, never a live link:
+     * the owner applies a newer version explicitly). Null for bots not made from a template; a deleted template only
+     * unlinks its bots.
+     */
+    templateId: uuid("template_id").references((): AnyPgColumn => agentTemplates.id, {
+      onDelete: "set null",
+    }),
+    templateVersion: integer("template_version"),
   },
   (t) => [
     uniqueIndex("agents_org_username_uq").on(t.organizationId, t.username).where(sql`deleted_at is null`),
@@ -611,24 +620,35 @@ export const agents = appSchema.table(
     check("agents_scope_check", sql`${t.scope} in ('team','personal')`),
     // Phase 6 (AGENT-01): a personal bot must have an owner; a shared bot may have one (its accountable owner).
     check("agents_owner_scope_check", sql`(${t.scope} <> 'personal' or ${t.ownerUserId} is not null)`),
+    index("agents_template_idx").on(t.organizationId, t.templateId).where(sql`template_id is not null`),
+    check("agents_template_version_check", sql`${t.templateVersion} is null or ${t.templateVersion} >= 1`),
   ],
 );
 
 // ---------------------------------------------------------------- bot capabilities (Phase 3.1, D-05 … D-14)
 
 /** Organization bot policy (D-06): one row per org; an absent row means the defaults (allow everything). */
-export const botPolicies = appSchema.table("bot_policies", {
-  organizationId: orgId().primaryKey(),
-  /** Per built-in capability `{ orgWide, personal }` (partial; defaults in code). */
-  capabilities: jsonb("capabilities").$type<Record<string, unknown>>().notNull().default({}),
-  searchProvider: text("search_provider").notNull().default("duckduckgo"),
-  maxPersonalBotsPerUser: integer("max_personal_bots_per_user").notNull().default(3),
-  personalDailyLimitMax: integer("personal_daily_limit_max").notNull().default(100),
-  /** Empty = every allowed model of the organization. Entries are `provider/modelId`. */
-  personalAllowedModels: text("personal_allowed_models").array().notNull().default(sql`'{}'::text[]`),
-  updatedBy: uuid("updated_by"),
-  updatedAt: ts("updated_at").notNull().defaultNow(),
-});
+export const botPolicies = appSchema.table(
+  "bot_policies",
+  {
+    organizationId: orgId().primaryKey(),
+    /** Per built-in capability `{ orgWide, personal }` (partial; defaults in code). */
+    capabilities: jsonb("capabilities").$type<Record<string, unknown>>().notNull().default({}),
+    searchProvider: text("search_provider").notNull().default("duckduckgo"),
+    maxPersonalBotsPerUser: integer("max_personal_bots_per_user").notNull().default(3),
+    personalDailyLimitMax: integer("personal_daily_limit_max").notNull().default(100),
+    /** Empty = every allowed model of the organization. Entries are `provider/modelId`. */
+    personalAllowedModels: text("personal_allowed_models").array().notNull().default(sql`'{}'::text[]`),
+    /**
+     * Phase 07.4 (D-07): private / LAN hosts (`host` or `host:port`) the admin lets keychain requests reach (e.g. an
+     * on-premise ERP). Empty = none; personal keys never widen it; platform hosts stay refused by the egress guard.
+     */
+    egressPrivateHosts: text("egress_private_hosts").array().notNull().default(sql`'{}'::text[]`),
+    updatedBy: uuid("updated_by"),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [check("bot_policies_egress_private_hosts_check", sql`cardinality(${t.egressPrivateHosts}) <= 64`)],
+);
 
 /** One row per delivered bot turn (D-07): the effective tool set the API shipped in `agent.mention.v1`. */
 export const agentTurns = appSchema.table(
@@ -663,7 +683,8 @@ export const agentToolCalls = appSchema.table(
     agentId: uuid("agent_id").notNull(),
     userId: uuid("user_id").notNull(),
     tool: text("tool").notNull(),
-    sourceKind: text("source_kind", { enum: ["builtin", "mcp", "plugin"] }).notNull(),
+    /** `vault` (Phase 07.4, D-04): an `ocw_http_request` made with a keychain item; `source_id` = the item. */
+    sourceKind: text("source_kind", { enum: ["builtin", "mcp", "plugin", "vault"] }).notNull(),
     sourceId: uuid("source_id"),
     /** Domain (web) or MCP server safe name; never a full URL with query. */
     target: text("target"),
@@ -677,7 +698,7 @@ export const agentToolCalls = appSchema.table(
   },
   (t) => [
     index("agent_tool_calls_org_event_idx").on(t.organizationId, t.eventId),
-    check("agent_tool_calls_source_kind_check", sql`${t.sourceKind} in ('builtin','mcp','plugin')`),
+    check("agent_tool_calls_source_kind_check", sql`${t.sourceKind} in ('builtin','mcp','plugin','vault')`),
     check("agent_tool_calls_decision_check", sql`${t.decision} in ('allowed','denied')`),
     check(
       "agent_tool_calls_status_check",
@@ -732,7 +753,13 @@ export const agentMemories = appSchema.table(
   ],
 );
 
-/** Admin MCP server registry (D-13). Header values live in `secrets` (kind `mcp_credential`). */
+/**
+ * Admin MCP server registry (D-13). Header values live in `secrets` (kind `mcp_credential`).
+ * Phase 07.4 (D-01): `auth_mode` says whose credential a call uses. `org_secret` = the admin-registered headers (every
+ * server before 07.4); `per_member_oauth` / `per_member_secret` = each member's own connection
+ * (`connector_connections`), called only through the API's connector proxy and never rendered into the cell, so the
+ * stdio sandbox (which only gets org headers) can never be per-member.
+ */
 export const mcpServers = appSchema.table(
   "mcp_servers",
   {
@@ -757,11 +784,33 @@ export const mcpServers = appSchema.table(
     createdBy: uuid("created_by"),
     createdAt: createdAt(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
+    authMode: text("auth_mode", { enum: ["org_secret", "per_member_oauth", "per_member_secret"] })
+      .notNull()
+      .default("org_secret"),
+    /** `per_member_secret`: the header each member's own key is sent in, and an optional value prefix (`Bearer `). */
+    memberHeaderName: text("member_header_name"),
+    memberHeaderPrefix: text("member_header_prefix"),
+    /** `per_member_oauth`: admin override of the scopes to request; null = the server's challenge / metadata. */
+    oauthScopes: text("oauth_scopes").array(),
+    /** `per_member_oauth`: whether members can connect (`needs_client` / `https_required` explain why not). */
+    oauthStatus: text("oauth_status", { enum: ["ready", "needs_client", "https_required", "error"] }),
   },
   (t) => [
     uniqueIndex("mcp_servers_org_safe_name_uq").on(t.organizationId, t.safeName),
     check("mcp_servers_transport_check", sql`${t.transport} in ('streamable-http','sse','sandboxed-stdio')`),
     check("mcp_servers_status_check", sql`${t.status} in ('pending','probing','ready','error')`),
+    check(
+      "mcp_servers_auth_mode_check",
+      sql`${t.authMode} in ('org_secret','per_member_oauth','per_member_secret')`,
+    ),
+    check(
+      "mcp_servers_auth_mode_transport_check",
+      sql`${t.authMode} = 'org_secret' or ${t.transport} <> 'sandboxed-stdio'`,
+    ),
+    check(
+      "mcp_servers_oauth_status_check",
+      sql`${t.oauthStatus} is null or ${t.oauthStatus} in ('ready','needs_client','https_required','error')`,
+    ),
   ],
 );
 
@@ -779,8 +828,16 @@ export const mcpServerTools = appSchema.table(
     description: text("description"),
     readOnly: boolean("read_only").notNull().default(false),
     destructive: boolean("destructive").notNull().default(false),
+    /** Phase 07.4: the tool's JSON input schema from the API-side probe, for `ocw_connector_list` (capped at 16 KB). */
+    inputSchema: jsonb("input_schema").$type<Record<string, unknown>>(),
   },
-  (t) => [primaryKey({ columns: [t.serverId, t.name] })],
+  (t) => [
+    primaryKey({ columns: [t.serverId, t.name] }),
+    check(
+      "mcp_server_tools_input_schema_size_check",
+      sql`${t.inputSchema} is null or octet_length(${t.inputSchema}::text) <= 16384`,
+    ),
+  ],
 );
 
 /** Marketplace plugins approved for (and installed in) the org's OpenClaw cell (D-14). */
@@ -887,8 +944,20 @@ export const secrets = appSchema.table(
     /**
      * `user_model_credential` (Phase 5): a member's ChatGPT plan token bundle, sealed with AAD
      * `<orgId>:<userId>:chatgpt_plan` and referenced by `user_model_credentials.secret_id` (never pooled, D-01).
+     * `connector_credential` (Phase 07.4, D-01): a member's connector token bundle or key, sealed with AAD
+     * `<orgId>:<userId>:connector:<serverId>` and referenced by `connector_connections.secret_id`.
+     * `vault_item` (Phase 07.4, D-04): a keychain item's value, sealed with AAD `<orgId>:vault:<itemId>` and referenced
+     * by `vault_items.secret_ref`.
      */
-    kind: text("kind", { enum: ["provider_api_key", "mcp_credential", "user_model_credential"] }).notNull(),
+    kind: text("kind", {
+      enum: [
+        "provider_api_key",
+        "mcp_credential",
+        "user_model_credential",
+        "connector_credential",
+        "vault_item",
+      ],
+    }).notNull(),
     provider: text("provider"),
     ciphertext: text("ciphertext").notNull(),
     iv: text("iv").notNull(),
@@ -2018,5 +2087,259 @@ export const memoryProposals = appSchema.table(
       sql`octet_length(${t.content}) <= ${sql.raw(String(MEMORY_FILE_MAX_BYTES))}`,
     ),
     check("memory_proposals_reason_len_check", sql`${t.reason} is null or char_length(${t.reason}) <= 280`),
+  ],
+);
+
+// ---------------------------------------------------------------- per-member connectors, keychain, templates (07.4)
+
+/**
+ * The OAuth client OCW uses towards one authorization server of a `per_member_oauth` connector (D-02), keyed by the
+ * AS `issuer` as the MCP authorization spec requires. `client_id` is public; a confidential client's secret is the
+ * sealed `client_secret_id` row (kind `mcp_credential`), never a value here. `method` = how the client was obtained.
+ * Deleting the connector cascades here; its secret row stays for the API to delete (it does, in the same tx).
+ */
+export const connectorOAuthClients = appSchema.table(
+  "connector_oauth_clients",
+  {
+    id: id(),
+    organizationId: orgId(),
+    serverId: uuid("server_id")
+      .notNull()
+      .references(() => mcpServers.id, { onDelete: "cascade" }),
+    issuer: text("issuer").notNull(),
+    clientId: text("client_id").notNull(),
+    clientSecretId: uuid("client_secret_id").references(() => secrets.id, { onDelete: "set null" }),
+    method: text("method", { enum: ["pre_registered", "cimd", "dcr"] }).notNull(),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    unique("connector_oauth_clients_server_issuer_uq").on(t.serverId, t.issuer),
+    index("connector_oauth_clients_org_idx").on(t.organizationId),
+    check("connector_oauth_clients_method_check", sql`${t.method} in ('pre_registered','cimd','dcr')`),
+  ],
+);
+
+/**
+ * A member's own connection to a per-member connector (D-01, CONN-01/02): one per (organization, member, connector).
+ * The token bundle or key is the sealed `secret_id` row (kind `connector_credential`); this row holds only state and
+ * display metadata. `account_label` is display only (an ID token's email / preferred_username, UI-SPEC R1);
+ * `last_error` is a short error code (never provider text) that drives `reconnectReason` (UI-SPEC R2).
+ */
+export const connectorConnections = appSchema.table(
+  "connector_connections",
+  {
+    id: id(),
+    organizationId: orgId(),
+    userId: uuid("user_id").notNull(),
+    serverId: uuid("server_id")
+      .notNull()
+      .references(() => mcpServers.id, { onDelete: "cascade" }),
+    status: text("status", { enum: ["connected", "needs_reconnect"] }).notNull(),
+    secretId: uuid("secret_id").references(() => secrets.id, { onDelete: "set null" }),
+    issuer: text("issuer"),
+    clientId: text("client_id"),
+    scopes: text("scopes").array().notNull().default(sql`'{}'::text[]`),
+    accountLabel: text("account_label"),
+    accessExpiresAt: ts("access_expires_at"),
+    lastError: text("last_error"),
+    connectedAt: ts("connected_at").notNull().defaultNow(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+    lastUsedAt: ts("last_used_at"),
+  },
+  (t) => [
+    unique("connector_connections_org_user_server_uq").on(t.organizationId, t.userId, t.serverId),
+    index("connector_connections_server_idx").on(t.serverId),
+    check("connector_connections_status_check", sql`${t.status} in ('connected','needs_reconnect')`),
+    check(
+      "connector_connections_account_label_len_check",
+      sql`${t.accountLabel} is null or char_length(${t.accountLabel}) <= 200`,
+    ),
+    check(
+      "connector_connections_last_error_len_check",
+      sql`${t.lastError} is null or char_length(${t.lastError}) <= 64`,
+    ),
+  ],
+);
+
+/**
+ * A member's explicit, audited choice to let a bot use their account (a connector or a personal key) in one shared
+ * conversation (D-03, CONN-03). `readers_at_grant` = how many people could read the results when they chose. One
+ * ACTIVE share per (member, conversation, resource); a revoke frees the slot. `resource_id` is an `mcp_servers` or
+ * `vault_items` id per `resource_kind` (checked by the API; deleting the resource leaves an inert row).
+ */
+export const memberAccountShares = appSchema.table(
+  "member_account_shares",
+  {
+    id: id(),
+    organizationId: orgId(),
+    userId: uuid("user_id").notNull(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    resourceKind: text("resource_kind", { enum: ["connector", "vault_item"] }).notNull(),
+    resourceId: uuid("resource_id").notNull(),
+    readersAtGrant: integer("readers_at_grant").notNull(),
+    grantedAt: ts("granted_at").notNull().defaultNow(),
+    revokedAt: ts("revoked_at"),
+  },
+  (t) => [
+    uniqueIndex("member_account_shares_active_uq")
+      .on(t.userId, t.conversationId, t.resourceKind, t.resourceId)
+      .where(sql`revoked_at is null`),
+    index("member_account_shares_conversation_idx").on(t.organizationId, t.conversationId),
+    check("member_account_shares_resource_kind_check", sql`${t.resourceKind} in ('connector','vault_item')`),
+    check("member_account_shares_readers_check", sql`${t.readersAtGrant} >= 0`),
+  ],
+);
+
+/** Where a keychain value lives (AGENTS principle 8): the same shape as `model_providers.secret_ref`. */
+export type VaultSecretRef =
+  | { provider: "db"; secretId: string; organizationId: string }
+  | { provider: "env"; key: string }
+  | { provider: "file"; path: string }
+  | { provider: "openbao"; mount: string; path: string; field: string };
+
+/**
+ * Keychain items (D-04, CONN-05): a credential an agent uses BY HANDLE through `ocw_http_request`; the API injects it
+ * only towards `allowed_hosts`. `personal` = one member's (`owner_user_id`, no unit); `unit` = a department, team or
+ * project (`unit_id`, null = the organization; no owner). The value is never here: `secret_ref` is a SecretReference
+ * (this phase: `db`, a sealed `app.secrets` row of kind `vault_item`). `value_updated_at` changes only when the value
+ * is replaced (UI-SPEC R3). Handles (`k_` + 10 base32) are stable and unique per organization.
+ */
+export const vaultItems = appSchema.table(
+  "vault_items",
+  {
+    id: id(),
+    organizationId: orgId(),
+    scope: text("scope", { enum: ["personal", "unit"] }).notNull(),
+    ownerUserId: uuid("owner_user_id"),
+    unitId: uuid("unit_id").references(() => orgUnits.id, { onDelete: "restrict" }),
+    name: text("name").notNull(),
+    handle: text("handle").notNull(),
+    kind: text("kind", { enum: ["api_key", "basic", "oauth"] }).notNull(),
+    /** `{ header, scheme: "bearer" | "basic" | "raw" }`: how the value is sent; never the value. */
+    injection: jsonb("injection").$type<{ header: string; scheme: "bearer" | "basic" | "raw" }>().notNull(),
+    allowedHosts: text("allowed_hosts").array().notNull(),
+    allowedPathPrefix: text("allowed_path_prefix"),
+    /** Kind `oauth` (client credentials): the token endpoint; its host must be in `allowed_hosts`. */
+    tokenUrl: text("token_url"),
+    secretRef: jsonb("secret_ref").$type<VaultSecretRef>().notNull(),
+    valueUpdatedAt: ts("value_updated_at").notNull().defaultNow(),
+    createdBy: uuid("created_by"),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+    lastUsedAt: ts("last_used_at"),
+  },
+  (t) => [
+    unique("vault_items_org_handle_uq").on(t.organizationId, t.handle),
+    index("vault_items_owner_idx").on(t.organizationId, t.ownerUserId).where(sql`scope = 'personal'`),
+    index("vault_items_unit_idx").on(t.organizationId, t.unitId).where(sql`scope = 'unit'`),
+    check("vault_items_scope_check", sql`${t.scope} in ('personal','unit')`),
+    check(
+      "vault_items_scope_owner_check",
+      sql`(${t.scope} = 'personal' and ${t.ownerUserId} is not null and ${t.unitId} is null)
+        or (${t.scope} = 'unit' and ${t.ownerUserId} is null)`,
+    ),
+    check("vault_items_kind_check", sql`${t.kind} in ('api_key','basic','oauth')`),
+    check("vault_items_handle_check", sql`${t.handle} ~ '^k_[a-z2-7]{10}$'`),
+    check("vault_items_name_len_check", sql`char_length(${t.name}) between 1 and 80`),
+    check("vault_items_allowed_hosts_check", sql`cardinality(${t.allowedHosts}) between 1 and 16`),
+    check("vault_items_injection_check", sql`jsonb_typeof(${t.injection}) = 'object'`),
+    // A reference, never a value: an object naming one of the SecretStore providers.
+    check(
+      "vault_items_secret_ref_check",
+      sql`jsonb_typeof(${t.secretRef}) = 'object'
+        and coalesce(${t.secretRef} ->> 'provider', '') in ('db','env','file','openbao')`,
+    ),
+  ],
+);
+
+/** Which keychain items a bot may use (D-04): the agent sees only their handles. */
+export const agentVaultGrants = appSchema.table(
+  "agent_vault_grants",
+  {
+    organizationId: orgId(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    vaultItemId: uuid("vault_item_id")
+      .notNull()
+      .references(() => vaultItems.id, { onDelete: "cascade" }),
+    createdBy: uuid("created_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.agentId, t.vaultItemId] }),
+    index("agent_vault_grants_item_idx").on(t.organizationId, t.vaultItemId),
+  ],
+);
+
+/**
+ * Agent templates (D-05, CONN-06): unit-scoped (`unit_id` null = the organization), versioned. Members start a
+ * personal bot from `current_version` (a fork: `agents.template_id` / `template_version`). RESTRICT: a unit with
+ * templates cannot be deleted.
+ */
+export const agentTemplates = appSchema.table(
+  "agent_templates",
+  {
+    id: id(),
+    organizationId: orgId(),
+    unitId: uuid("unit_id").references(() => orgUnits.id, { onDelete: "restrict" }),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    currentVersion: integer("current_version").notNull(),
+    archivedAt: ts("archived_at"),
+    createdBy: uuid("created_by"),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("agent_templates_unit_idx").on(t.organizationId, t.unitId),
+    check("agent_templates_current_version_check", sql`${t.currentVersion} >= 1`),
+    check("agent_templates_name_len_check", sql`char_length(${t.name}) between 1 and 80`),
+    check("agent_templates_description_len_check", sql`char_length(${t.description}) <= 500`),
+  ],
+);
+
+/**
+ * One published version of a template (D-05): what a started bot copies. Written once by the API, never edited.
+ * `tool_grants` = `[{ sourceKind, sourceId, toolName }]`; `unit_vault_item_ids` = unit keys granted on start.
+ */
+export const agentTemplateVersions = appSchema.table(
+  "agent_template_versions",
+  {
+    organizationId: orgId(),
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => agentTemplates.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    instructions: text("instructions").notNull(),
+    modelProvider: text("model_provider", {
+      enum: ["anthropic", "openai", "openrouter", "openai-compatible", "openai-codex", "mock"],
+    }).notNull(),
+    modelId: text("model_id").notNull(),
+    capabilities: jsonb("capabilities").$type<Record<string, unknown>>().notNull(),
+    toolGrants: jsonb("tool_grants")
+      .$type<Array<{ sourceKind: "mcp" | "plugin"; sourceId: string; toolName: string }>>()
+      .notNull()
+      .default([]),
+    requiredConnectorIds: uuid("required_connector_ids").array().notNull().default(sql`'{}'::uuid[]`),
+    unitVaultItemIds: uuid("unit_vault_item_ids").array().notNull().default(sql`'{}'::uuid[]`),
+    createdBy: uuid("created_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.templateId, t.version] }),
+    index("agent_template_versions_org_idx").on(t.organizationId),
+    check("agent_template_versions_version_check", sql`${t.version} >= 1`),
+    check(
+      "agent_template_versions_tool_grants_check",
+      sql`jsonb_typeof(${t.toolGrants}) = 'array' and jsonb_array_length(${t.toolGrants}) <= 64`,
+    ),
+    check(
+      "agent_template_versions_ids_check",
+      sql`cardinality(${t.requiredConnectorIds}) <= 16 and cardinality(${t.unitVaultItemIds}) <= 16`,
+    ),
   ],
 );
