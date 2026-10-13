@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 110
-waived_count: 3
+open_count: 109
+waived_count: 4
 fixed_count: 55
 total_count: 168
-last_updated: 2026-10-13T15:20:09.851Z
+last_updated: 2026-10-13T15:20:56.912Z
 ---
 
 # Broken Windows Ledger
@@ -134,7 +134,7 @@ last_updated: 2026-10-13T15:20:09.851Z
 | 117 | 07.2 | deviation | packages/db/src/schema/memory.ts |  | Personal bot notebook owner assumes a personal bot never changes owner or kind; recompute the owner if that ever changes | open |  | 2026-10-13T03:45:07.777Z |  |
 | 118 | 07.2 | deviation | packages/db/src/schema/memory.ts |  | A file moved across scopes keeps old revisions with the previous owner (conservative); 07.2-08 must account for it | fixed |  | 2026-10-13T03:45:07.876Z | 2026-10-13T05:47:46.872Z |
 | 119 | 07.2 | deviation | apps/api/src/modules/policy/module-access-enforcement.int.test.ts |  | testcontainers Redis port wait can time out under Docker load and fail verify once | open |  | 2026-10-13T03:45:07.976Z |  |
-| 120 | 07.2 | deviation | compose.yaml |  | The internal pii network is created by every compose project even with the profile off (uses Docker address pools); adding it recreates the api once on the next up | open |  | 2026-10-13T04:19:12.931Z |  |
+| 120 | 07.2 | deviation | compose.yaml |  | The internal pii network is created by every compose project even with the profile off (uses Docker address pools); adding it recreates the api once on the next up | waived | One internal network per stack is the accepted cost (D-08); the dev host had 30 networks from dead per-branch projects, cleaned to 16 | 2026-10-13T04:19:12.931Z | 2026-10-13T15:20:56.912Z |
 | 121 | 07.2 | unrun-verify | infra/presidio/recognizers.yaml |  | Spanish Presidio accuracy only checked on fixed samples (missed a Spanish name in a probe); owner manual check on real documents | open |  | 2026-10-13T04:19:13.026Z |  |
 | 122 | 07.2 | deviation | scripts/ocw.mjs |  | No pnpm ocw enable pii: turning on the pii profile means editing .env by hand, unlike other profiles | open |  | 2026-10-13T04:19:13.134Z |  |
 | 123 | 07.2 | deviation | apps/openclaw-channel/src/memory-files-tool.ts |  | /memory/* Agent Channel routes exist only in the fake API until 07.2-11; the real API would 404 (no turn offers the tools yet) | fixed |  | 2026-10-13T04:30:05.478Z | 2026-10-13T07:15:00.114Z |
@@ -1621,10 +1621,10 @@ last_updated: 2026-10-13T15:20:09.851Z
     "file": "compose.yaml",
     "line": null,
     "description": "The internal pii network is created by every compose project even with the profile off (uses Docker address pools); adding it recreates the api once on the next up",
-    "status": "open",
-    "reason": "",
+    "status": "waived",
+    "reason": "One internal network per stack is the accepted cost (D-08); the dev host had 30 networks from dead per-branch projects, cleaned to 16",
     "recorded_at": "2026-10-13T04:19:12.931Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-13T15:20:56.912Z"
   },
   {
     "id": 121,
