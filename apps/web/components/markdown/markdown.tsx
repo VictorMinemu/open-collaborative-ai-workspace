@@ -2,7 +2,8 @@
 
 import { isReservedHandle } from "@ocw/contracts";
 import { code } from "@streamdown/code";
-import { createContext, memo, useContext } from "react";
+import Link from "next/link";
+import { createContext, memo, useContext, useMemo } from "react";
 import {
   type Components,
   type ControlsConfig,
@@ -76,25 +77,53 @@ function rehypeImagesAsLinksAndPlainLargeCode() {
   return visit;
 }
 
+/** A relative reference: no scheme, not root- or protocol-relative, not a bare fragment or query. */
+const isRelative = (href: string) => !/^[a-z][a-z0-9+.-]*:/i.test(href) && !/^[/\\#?]/u.test(href);
+
+/**
+ * Document variant with `resolveHref` only (memory files, 07.2-10): before hardening, every relative link (never an
+ * image turned into a link) is handed to the resolver. A result becomes an in-app link (`data-in-app`), which still
+ * goes through the hardening plugin and `safeUrl` like any other link; null renders the link text as plain text.
+ * External, root-relative and fragment links are left to the usual rules.
+ */
+function rehypeInAppLinks(options: { resolve: (href: string) => string | null }) {
+  const visit = (node: HastNode) => {
+    for (const child of node.children ?? []) {
+      const props = child.properties ?? {};
+      if (child.type === "element" && child.tagName === "a" && !("dataImageLink" in props)) {
+        const href = typeof props.href === "string" ? props.href.trim() : "";
+        if (href && isRelative(href)) {
+          const target = options.resolve(href);
+          if (target) child.properties = { href: target, dataInApp: "" };
+          else {
+            child.tagName = "span";
+            child.properties = {};
+          }
+        }
+      }
+      visit(child);
+    }
+  };
+  return visit;
+}
+
 /** streamdown's hardening plugin with our policy (it ships it; no second copy of rehype-harden). */
 const hardenPlugin = (defaultRehypePlugins.harden as [unknown, unknown])[0];
 
-const REHYPE_PLUGINS = [
-  rehypeImagesAsLinksAndPlainLargeCode,
-  [
-    hardenPlugin,
-    {
-      // "*" admits only http(s) and root-relative paths; mailto passes as a safe protocol. safeUrl narrows the rest.
-      allowedLinkPrefixes: ["*"],
-      allowedImagePrefixes: [],
-      allowDataImages: false,
-      allowedProtocols: [],
-      linkBlockPolicy: "text-only",
-      imageBlockPolicy: "text-only",
-    },
-  ],
-  rehypeMentions,
+const HARDEN = [
+  hardenPlugin,
+  {
+    // "*" admits only http(s) and root-relative paths; mailto passes as a safe protocol. safeUrl narrows the rest.
+    allowedLinkPrefixes: ["*"],
+    allowedImagePrefixes: [],
+    allowDataImages: false,
+    allowedProtocols: [],
+    linkBlockPolicy: "text-only",
+    imageBlockPolicy: "text-only",
+  },
 ] as const;
+
+const REHYPE_PLUGINS = [rehypeImagesAsLinksAndPlainLargeCode, HARDEN, rehypeMentions] as const;
 
 const PLUGINS = { code };
 
@@ -165,7 +194,16 @@ function shared(variant: MarkdownVariant): Components {
       return <span {...props} />;
     },
     a: ({ node: _node, className, href, children, ...rest }: Props) => {
-      const image = "data-image-link" in (rest as Record<string, unknown>);
+      const extra = rest as Record<string, unknown>;
+      const image = "data-image-link" in extra;
+      // A memory link resolved by `resolveHref` (already through harden and safeUrl): client navigation, same tab.
+      if ("data-in-app" in extra && typeof href === "string") {
+        return (
+          <Link href={href} data-in-app="" className={cn(linkClass, className)}>
+            {children}
+          </Link>
+        );
+      }
       return (
         <a
           href={typeof href === "string" ? href : undefined}
@@ -307,12 +345,30 @@ export const Markdown = memo(function Markdown({
   variant = "chat",
   streaming = false,
   className,
+  resolveHref,
 }: {
   text: string;
   variant?: MarkdownVariant;
   streaming?: boolean;
   className?: string;
+  /**
+   * Document variant only: maps a relative link to an in-app href (opened in place, same tab), or null to render its
+   * text without a link. Pass a stable function (useCallback): it keys the plugin list.
+   */
+  resolveHref?: (href: string) => string | null;
 }) {
+  const rehypePlugins = useMemo(
+    () =>
+      variant === "document" && resolveHref
+        ? [
+            rehypeImagesAsLinksAndPlainLargeCode,
+            [rehypeInAppLinks, { resolve: resolveHref }],
+            HARDEN,
+            rehypeMentions,
+          ]
+        : REHYPE_PLUGINS,
+    [variant, resolveHref],
+  );
   return (
     <div className={cn(ROOT_CLASS[variant], className)} data-variant={variant}>
       <Streamdown
@@ -320,7 +376,7 @@ export const Markdown = memo(function Markdown({
         parseIncompleteMarkdown={streaming}
         isAnimating={streaming}
         // Explicit list: never streamdown's raw-HTML plugin (D-05).
-        rehypePlugins={REHYPE_PLUGINS as never}
+        rehypePlugins={rehypePlugins as never}
         urlTransform={urlTransform}
         plugins={PLUGINS}
         controls={CONTROLS}

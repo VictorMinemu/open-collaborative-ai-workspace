@@ -1,5 +1,5 @@
 import type { Permission } from "@ocw/contracts";
-import { Bot, type LucideIcon, MessagesSquare, Settings, SquareTerminal } from "lucide-react";
+import { Bot, type LucideIcon, MessagesSquare, NotebookText, Settings, SquareTerminal } from "lucide-react";
 
 /**
  * Primary navigation. To add a section: add ONE entry here and create `app/(app)/<href>/page.tsx`.
@@ -22,6 +22,7 @@ export interface NavItem {
 export const NAV_ITEMS: readonly NavItem[] = [
   { id: "chat", label: "Chat", href: "/chat", icon: MessagesSquare, also: ["/share/ai"] },
   { id: "bots", label: "Bots", href: "/bots", icon: Bot, permission: "bot.read" },
+  { id: "memory", label: "Memory", href: "/memory", icon: NotebookText, permission: "memory.read" },
   {
     id: "work-zone",
     label: "Work Zone",
