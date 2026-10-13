@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { AgentScope, AgentStatus, ModelProviderKind } from "./agent";
 import { Id, IsoDateTime } from "./common";
+import { MemberAccountResourceKind } from "./connectors";
 import { MEMORY_LIMITS, MemoryPath, MemoryScopeKind } from "./memory";
 import { Permission } from "./permissions";
 
@@ -256,12 +257,37 @@ export type TurnToolFlags = z.infer<typeof TurnToolFlags>;
  * no `turn` runs with no tools (fail closed).
  */
 /**
- * Why a tool the bot could use is not offered on this turn of a shared AI chat (06-10, D-06): `not_every_participant` (a
+ * Why a tool the bot could use is not offered on this turn. Shared AI chats (06-10, D-06): `not_every_participant` (a
  * joined human may not use it), `shared_with_group` (a team, department or the organization holds a grant, so the readers
- * are not a list) or `denied_for_you` (the asking human may not use it).
+ * are not a list) or `denied_for_you` (the asking human may not use it). Any delivery (07.4, D-03): `member_account` (the
+ * tool would act with the asker's own account or personal key, and the conversation is not a private one with the bot
+ * nor shared for it by the asker).
  */
-export const TurnWithheldReason = z.enum(["not_every_participant", "shared_with_group", "denied_for_you"]);
+export const TurnWithheldReason = z.enum([
+  "not_every_participant",
+  "shared_with_group",
+  "denied_for_you",
+  "member_account",
+]);
 export type TurnWithheldReason = z.infer<typeof TurnWithheldReason>;
+
+/**
+ * The member account behind a `member_account` entry (07.4 R7): one entry per withheld per-member connector or personal
+ * key, so the persona can link the share page (`?share=<conversation>&connector=<id>` / `&key=<id>`).
+ */
+export const TurnWithheldResource = z.object({
+  kind: MemberAccountResourceKind,
+  id: Id,
+  name: z.string().max(80),
+});
+export type TurnWithheldResource = z.infer<typeof TurnWithheldResource>;
+
+export const TurnWithheld = z.object({
+  tool: z.string(),
+  reason: TurnWithheldReason,
+  resource: TurnWithheldResource.optional(),
+});
+export type TurnWithheld = z.infer<typeof TurnWithheld>;
 
 /**
  * A `MEMORY.md` injected into a turn (Phase 07.2, D-02): the personal one (1-human DMs only) and the bot's own one.
@@ -286,11 +312,11 @@ export const TurnContext = z.object({
   now: TurnNow.nullable(),
   maxToolCalls: z.number().int(),
   maxWebCalls: z.number().int(),
-  /** AI chat deliveries only (06-10): what was withheld and why, so the persona can say so. Never enables a tool. */
-  withheld: z
-    .array(z.object({ tool: z.string(), reason: TurnWithheldReason }))
-    .max(64)
-    .optional(),
+  /**
+   * What was withheld and why, so the persona can say so. Never enables a tool. Any delivery kind: shared AI chats
+   * since 06-10, every conversation for `member_account` since 07.4 (D-03).
+   */
+  withheld: z.array(TurnWithheld).max(64).optional(),
   /** Phase 07.2: memory files for this turn; optional so older payloads parse (`memory` stays for compatibility). */
   memoryFiles: z.array(TurnMemoryFile).max(2).optional(),
 });
@@ -316,6 +342,15 @@ export const BUILTIN_TOOLS = {
   memoryRead: "ocw_memory_read",
   memoryWrite: "ocw_memory_write",
   memoryPropose: "ocw_memory_propose",
+  /**
+   * Phase 07.4 (D-02, D-04, D-07): the only connector and keychain tools the cell sees. `ocw_connector_list` lists the
+   * turn's per-member connector tools and keychain handles; `ocw_connector_call` runs one logical `<safeName>__<tool>`
+   * with the asker's credential through the API; `ocw_http_request` sends a request with a keychain handle, the API
+   * injecting the secret towards allowed hosts only.
+   */
+  connectorList: "ocw_connector_list",
+  connectorCall: "ocw_connector_call",
+  httpRequest: "ocw_http_request",
 } as const;
 
 export const MAX_TOOL_CALLS_PER_TURN = 8;

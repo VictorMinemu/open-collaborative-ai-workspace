@@ -172,6 +172,7 @@ function ServerForm({
           orgEnabled: true,
           personalAllowed: false,
           trustedChaining: false,
+          authMode: "org_secret",
         };
         await create.mutateAsync(body);
         toast.success(`${body.name} added`, { description: "Your bots' runtime is discovering its tools." });

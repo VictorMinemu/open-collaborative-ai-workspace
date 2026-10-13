@@ -226,3 +226,49 @@ describe("agent channel additions are backward compatible", () => {
     );
   });
 });
+
+describe("per-member connector turns (07.4 D-03, D-07, R7)", () => {
+  it("the three static connector and keychain tools are built-ins, never dangerous", () => {
+    expect(BUILTIN_TOOLS).toMatchObject({
+      connectorList: "ocw_connector_list",
+      connectorCall: "ocw_connector_call",
+      httpRequest: "ocw_http_request",
+    });
+    for (const t of ["ocw_connector_list", "ocw_connector_call", "ocw_http_request"]) {
+      expect(isDangerousToolName(t), t).toBe(false);
+    }
+  });
+
+  it("a turn withholds a member-account tool and names the account so the persona can link the share", () => {
+    const withheld = {
+      ...turn,
+      tools: ["ocw_connector_call", "m1a2b3c4d__whoami"],
+      withheld: [
+        {
+          tool: "m1a2b3c4d__whoami",
+          reason: "member_account",
+          resource: { kind: "connector", id: ID, name: "Acme CRM" },
+        },
+        {
+          tool: "ocw_http_request",
+          reason: "member_account",
+          resource: { kind: "vault_item", id: ID2, name: "ERP" },
+        },
+        { tool: "m1a2b3c4d__search", reason: "denied_for_you" },
+      ],
+    };
+    expect(TurnContext.parse(withheld)).toEqual(withheld);
+    const bad = (resource: unknown) =>
+      TurnContext.safeParse({ ...turn, withheld: [{ tool: "x", reason: "member_account", resource }] })
+        .success;
+    expect(bad({ kind: "agent", id: ID, name: "x" })).toBe(false);
+    expect(bad({ kind: "connector", id: "nope", name: "x" })).toBe(false);
+    expect(bad({ kind: "connector", id: ID, name: "x".repeat(81) })).toBe(false);
+  });
+
+  it("a Phase 6 turn parses unchanged", () => {
+    const phase6 = { ...turn, withheld: [{ tool: "web_search", reason: "shared_with_group" }] };
+    expect(TurnContext.parse(phase6)).toEqual(phase6);
+    expect(TurnContext.parse(turn)).toEqual(turn);
+  });
+});

@@ -39,11 +39,20 @@ export const MODULE_CATALOG: Record<ModuleId, ModuleDefinition> = {
     entry: "ai_chat.read",
     patterns: ["ai_chat.*"],
   },
+  // Phase 07.4 (07.4-01): Bots off also hides member connections (`connector.connect`) and keychain use (`vault.use`).
   bots: {
     label: "Bots",
     description: "Team and personal bots: mention, message and create them",
     entry: "bot.read",
-    patterns: ["bot.read", "bot.create_personal", "bot.configure", "bot.internet", "bot.tool.use"],
+    patterns: [
+      "bot.read",
+      "bot.create_personal",
+      "bot.configure",
+      "bot.internet",
+      "bot.tool.use",
+      "connector.connect",
+      "vault.use",
+    ],
   },
   // Phase 07.2 (07.2-01): every memory grain (read, write, promote); new memory grains keep the `memory.` prefix.
   memory: {

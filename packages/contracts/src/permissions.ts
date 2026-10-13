@@ -74,6 +74,11 @@ export const Permission = z.enum([
   "memory.read",
   "memory.write",
   "memory.promote",
+  // Phase 07.4 (07.4-01, D-01, D-04, D-05): member connections, the agent keychain and agent templates.
+  "connector.connect",
+  "vault.use",
+  "vault.manage",
+  "agent_template.manage",
 ]);
 export type Permission = z.infer<typeof Permission>;
 
@@ -142,6 +147,10 @@ export const PERMISSION_SURFACE: Record<Permission, PermissionSurface> = {
   "memory.read": "bots",
   "memory.write": "bots",
   "memory.promote": "team",
+  "connector.connect": "bots",
+  "vault.use": "bots",
+  "vault.manage": "team",
+  "agent_template.manage": "team",
 };
 
 export const ROLE_SURFACES: Record<OrgRole, PermissionSurface[]> = {
@@ -173,6 +182,8 @@ const STANDARD: readonly Permission[] = [
   "agent_card.approve",
   "ai_chat.read",
   "memory.read",
+  "connector.connect",
+  "vault.use",
 ];
 const DEVELOPER: readonly Permission[] = [
   ...STANDARD,
@@ -211,6 +222,8 @@ const ADMIN: readonly Permission[] = [
   "unit.modules.manage",
   "memory.write",
   "memory.promote",
+  "vault.manage",
+  "agent_template.manage",
 ];
 
 /**
@@ -227,7 +240,8 @@ export const ROLE_PERMISSIONS: Record<OrgRole, readonly Permission[]> = {
 
 /**
  * Granted to a unit lead on the lead's unit subtree (Phase 6, P-04: also the bots of that subtree; Phase 07.3,
- * ADR-0024: module access for the subtree and its people; Phase 07.2: the subtree's shared memory).
+ * ADR-0024: module access for the subtree and its people; Phase 07.2: the subtree's shared memory; Phase 07.4: the
+ * subtree's keychain keys and agent templates).
  */
 export const LEAD_PERMISSIONS: readonly Permission[] = [
   "unit.members.manage",
@@ -236,10 +250,13 @@ export const LEAD_PERMISSIONS: readonly Permission[] = [
   "unit.modules.manage",
   "memory.write",
   "memory.promote",
+  "vault.manage",
+  "agent_template.manage",
 ];
 /**
  * Upper bound for an agent principal (intersected with the triggering human). Agents never hold `memory.promote`:
- * they propose into shared memory and a person approves (Phase 07.2).
+ * they propose into shared memory and a person approves (Phase 07.2). They use a keychain key only as `vault.use`
+ * decided for the agent acting for the turn's human (Phase 07.4, D-04); they never manage keys or templates.
  */
 export const AGENT_PERMISSIONS: readonly Permission[] = [
   "channel.read",
@@ -248,6 +265,7 @@ export const AGENT_PERMISSIONS: readonly Permission[] = [
   "bot.tool.use",
   "memory.read",
   "memory.write",
+  "vault.use",
 ];
 /** The OpenClaw cell principal. */
 export const CELL_PERMISSIONS: readonly Permission[] = ["cell.sync"];
@@ -403,6 +421,10 @@ export const PERMISSION_DESCRIPTIONS: Record<Permission, string> = {
   "memory.read": "Read the memory files you have access to",
   "memory.write": "Edit memory files directly",
   "memory.promote": "Approve agent proposals into shared memory",
+  "connector.connect": "Connect your own accounts to connectors",
+  "vault.use": "Let bots use keys from the keychain",
+  "vault.manage": "Manage a unit's keychain keys",
+  "agent_template.manage": "Manage a unit's agent templates",
 };
 
 // ---------------------------------------------------------------- tokens (AUTH-06)

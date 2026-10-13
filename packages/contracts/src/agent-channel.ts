@@ -20,7 +20,10 @@ import {
 import { SearchProvider, TurnContext } from "./bot-capabilities";
 import { ConversationKind, Mention, MessageBody } from "./chat";
 import { Id, IsoDateTime, MemberKind, PrincipalKind } from "./common";
+import { ConnectionStatus, jsonBytes } from "./connectors";
+import { AgentVaultKey, VaultHandle } from "./keychain";
 import { DeclaredSurface } from "./marketplace";
+import { McpHeaderName } from "./mcp";
 import {
   MEMORY_LIMITS,
   MemoryContent,
@@ -801,3 +804,158 @@ export type AgentChannelBoardPatchCard = z.infer<typeof AgentChannelBoardPatchCa
 
 export const AgentChannelBoardCardResponse = z.object({ card: BoardCard });
 export type AgentChannelBoardCardResponse = z.infer<typeof AgentChannelBoardCardResponse>;
+
+// ---------------------------------------------------------------- per-member connectors and keychain (Phase 07.4)
+
+/*
+ * The `ocw_connector_list|call` and `ocw_http_request` tools (07.4 D-02, D-04, D-07), bound to a delivered turn like
+ * `ocw_memory_save`. The member whose credential is used is ALWAYS the stored turn's human (`agent_turns.user_id`),
+ * never a field: unknown keys such as `userId` are stripped. Every route re-decides the turn, the logical tool, the
+ * resolver (agent ∩ human), the audience rule (D-03) and the caps and taint, then calls out with the API's egress guard.
+ */
+
+/** Why a connector or keychain tool call was refused (the model reads it; never the decision details). */
+export const AgentChannelToolRefusal = z.enum([
+  "unknown_turn",
+  "not_in_turn",
+  "policy_changed",
+  "cap_reached",
+  "tainted",
+  "member_account",
+  "not_connected",
+  "needs_reconnect",
+  "handle_not_allowed",
+  "host_not_allowed",
+  "egress_refused",
+  "upstream_error",
+  "timeout",
+]);
+export type AgentChannelToolRefusal = z.infer<typeof AgentChannelToolRefusal>;
+
+/** An MCP server's immutable OpenClaw name: `m` + 8 hex characters (`apps/api/src/modules/mcp/names.ts`). */
+export const ConnectorSafeName = z.string().regex(/^m[0-9a-f]{8}$/, "invalid connector name");
+export type ConnectorSafeName = z.infer<typeof ConnectorSafeName>;
+
+/** Byte bounds of the connector tools (T-07.4-01-04). */
+export const CONNECTOR_TOOL_LIMITS = {
+  argumentsBytes: 32 * 1024,
+  contentBytes: 32 * 1024,
+  descriptionChars: 1024,
+  connectors: 32,
+  toolsPerConnector: 64,
+  keys: 32,
+} as const;
+
+/** `POST /agent-channel/v1/connectors/list`: the turn's per-member connectors, their tools and the turn's keys. */
+export const AgentChannelConnectorList = z.object({ eventId: Id, agentId: Id });
+export type AgentChannelConnectorList = z.infer<typeof AgentChannelConnectorList>;
+
+export const AgentChannelConnectorTool = z.object({
+  name: z.string().min(1).max(128),
+  description: z.string().max(CONNECTOR_TOOL_LIMITS.descriptionChars),
+  inputSchema: z.record(z.string(), z.unknown()).nullable(),
+});
+export type AgentChannelConnectorTool = z.infer<typeof AgentChannelConnectorTool>;
+
+export const AgentChannelConnectorEntry = z.object({
+  /** The safe name `ocw_connector_call` takes. */
+  connector: ConnectorSafeName,
+  name: z.string(),
+  /** The asker's connection: `not_connected` / `needs_reconnect` tools answer with that refusal. */
+  status: ConnectionStatus,
+  tools: z.array(AgentChannelConnectorTool).max(CONNECTOR_TOOL_LIMITS.toolsPerConnector),
+});
+export type AgentChannelConnectorEntry = z.infer<typeof AgentChannelConnectorEntry>;
+
+export const AgentChannelConnectorListResponse = z.object({
+  connectors: z.array(AgentChannelConnectorEntry).max(CONNECTOR_TOOL_LIMITS.connectors),
+  /** Keychain handles the turn's bot may use with `ocw_http_request`: never a value. */
+  keys: z.array(AgentVaultKey).max(CONNECTOR_TOOL_LIMITS.keys).default([]),
+});
+export type AgentChannelConnectorListResponse = z.infer<typeof AgentChannelConnectorListResponse>;
+
+/** `POST /agent-channel/v1/connectors/call`: one logical tool `<connector>__<tool>` of the turn, with the asker's account. */
+export const AgentChannelConnectorCall = z.object({
+  eventId: Id,
+  agentId: Id,
+  connector: ConnectorSafeName,
+  tool: z.string().min(1).max(128),
+  arguments: z
+    .record(z.string(), z.unknown())
+    .refine((v) => jsonBytes(v) <= CONNECTOR_TOOL_LIMITS.argumentsBytes, { message: "arguments over 32 KB" })
+    .default({}),
+});
+export type AgentChannelConnectorCall = z.infer<typeof AgentChannelConnectorCall>;
+
+/** Text content for the model (untrusted output: it taints the turn), capped, with the credential redacted. */
+export const AgentChannelConnectorCallResponse = z.object({
+  content: z
+    .string()
+    .refine((c) => new TextEncoder().encode(c).length <= CONNECTOR_TOOL_LIMITS.contentBytes, {
+      message: "content over 32 KB",
+    }),
+  truncated: z.boolean(),
+  isError: z.boolean(),
+});
+export type AgentChannelConnectorCallResponse = z.infer<typeof AgentChannelConnectorCallResponse>;
+
+export const AgentChannelHttpMethod = z.enum(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]);
+export type AgentChannelHttpMethod = z.infer<typeof AgentChannelHttpMethod>;
+
+/** Byte bounds of `ocw_http_request` (T-07.4-01-04). */
+export const HTTP_TOOL_LIMITS = {
+  urlChars: 2048,
+  headers: 20,
+  headerValueChars: 1024,
+  requestBodyBytes: 64 * 1024,
+  responseBodyBytes: 256 * 1024,
+} as const;
+
+const utf8Bytes = (s: string) => new TextEncoder().encode(s).length;
+
+/**
+ * `POST /agent-channel/v1/http-requests`: one request with a keychain handle. The API injects the secret only when the
+ * handle is usable on this turn and the URL's host is allowed; it drops model headers that could carry or replace
+ * credentials, never follows redirects and redacts the secret from the response.
+ */
+export const AgentChannelHttpRequest = z.object({
+  eventId: Id,
+  agentId: Id,
+  handle: VaultHandle,
+  method: AgentChannelHttpMethod,
+  url: z
+    .string()
+    .max(HTTP_TOOL_LIMITS.urlChars)
+    .refine(
+      (u) => {
+        try {
+          const p = new URL(u).protocol;
+          return p === "https:" || p === "http:";
+        } catch {
+          return false;
+        }
+      },
+      { message: "an http(s) URL" },
+    ),
+  headers: z
+    .record(McpHeaderName, z.string().max(HTTP_TOOL_LIMITS.headerValueChars))
+    .refine((h) => Object.keys(h).length <= HTTP_TOOL_LIMITS.headers, { message: "at most 20 headers" })
+    .optional(),
+  body: z
+    .string()
+    .refine((b) => utf8Bytes(b) <= HTTP_TOOL_LIMITS.requestBodyBytes, { message: "body over 64 KB" })
+    .optional(),
+});
+export type AgentChannelHttpRequest = z.infer<typeof AgentChannelHttpRequest>;
+
+/** Textual responses only, capped; a 3xx names its `Location` host only (no path or query that could echo a secret). */
+export const AgentChannelHttpResponse = z.object({
+  status: z.number().int().min(100).max(599),
+  contentType: z.string().max(200).nullable(),
+  body: z
+    .string()
+    .refine((b) => utf8Bytes(b) <= HTTP_TOOL_LIMITS.responseBodyBytes, { message: "body over 256 KB" }),
+  truncated: z.boolean(),
+  redirectHost: z.string().max(253).nullable(),
+});
+export type AgentChannelHttpResponse = z.infer<typeof AgentChannelHttpResponse>;
