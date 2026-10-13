@@ -1777,13 +1777,18 @@ describe("tenant isolation (RLS)", () => {
         const n = await inTenant(A, () => app.query(stmt, [B]).then((res) => res.rowCount));
         expect(n, `${tbl}: ${stmt}`).toBe(0);
       }
-      // Moving one of A's own rows into B is refused too (WITH CHECK on UPDATE).
+      // Moving one of A's own rows into B is refused too (WITH CHECK on UPDATE). A template version refuses every
+      // update before RLS is checked (07.4-08: versions are immutable, a BEFORE UPDATE trigger).
       await expect(
         inTenant(A, () =>
           app.query(`update ${tbl} set organization_id = $1 where organization_id = $2`, [B, A]),
         ),
         `${tbl} cross-tenant move`,
-      ).rejects.toThrow(/row-level security/);
+      ).rejects.toThrow(
+        tbl === "app.agent_template_versions"
+          ? /agent template versions are immutable/
+          : /row-level security/,
+      );
       const row = await migrator.query(
         `select row_to_json(t) as j from ${tbl} t where organization_id = $1 limit 1`,
         [B],

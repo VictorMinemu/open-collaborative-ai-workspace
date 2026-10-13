@@ -1,24 +1,36 @@
 import {
+  Agent,
   AgentTemplate,
   AgentTemplateLink,
   AgentTemplateList,
+  AgentTemplateOptions,
   AgentTemplatePreview,
+  ApplyAgentTemplateUpdateRequest,
   CreateAgentTemplateRequest,
+  Id,
   IdParams,
   InstantiateAgentTemplateRequest,
   InstantiateAgentTemplateResponse,
+  PublishAgentTemplateVersionRequest,
+  UpdateAgentTemplateRequest,
 } from "@ocw/contracts";
+import { z } from "zod";
 import { type App, type Core, tenant } from "../../core";
 import { conflict } from "../../lib/errors";
 import {
+  applyTemplateUpdate,
   createTemplate,
   instantiateTemplate,
   listTemplates,
   previewTemplate,
+  publishVersion,
   templateLinkFor,
+  templateOptions,
+  updateTemplate,
 } from "./templates";
 
 const tags = ["agent"];
+const OptionsQuery = z.object({ unitId: Id.optional() });
 
 /**
  * Agent template routes (07.4-08). Every route is a signed-in user's (`authz: user`) and decided by the resolver
@@ -41,6 +53,40 @@ export function registerTemplateRoutes(app: App, core: Core, isUniqueViolation: 
       const out = await core.db.withTenant(tenant(req), (tx) => createTemplate(core, req, tx, req.body));
       return reply.code(201).send(out);
     },
+  );
+
+  app.get(
+    "/agent-templates/options",
+    { ...user, schema: { tags, querystring: OptionsQuery, response: { 200: AgentTemplateOptions } } },
+    async (req, reply) => {
+      reply.header("cache-control", "no-store");
+      return core.db.withTenant(tenant(req), (tx) => templateOptions(core, req, tx, req.query.unitId));
+    },
+  );
+
+  app.patch(
+    "/agent-templates/:id",
+    {
+      ...user,
+      schema: { tags, params: IdParams, body: UpdateAgentTemplateRequest, response: { 200: AgentTemplate } },
+    },
+    async (req) =>
+      core.db.withTenant(tenant(req), (tx) => updateTemplate(core, req, tx, req.params.id, req.body)),
+  );
+
+  app.post(
+    "/agent-templates/:id/versions",
+    {
+      ...user,
+      schema: {
+        tags,
+        params: IdParams,
+        body: PublishAgentTemplateVersionRequest,
+        response: { 200: AgentTemplate },
+      },
+    },
+    async (req) =>
+      core.db.withTenant(tenant(req), (tx) => publishVersion(core, req, tx, req.params.id, req.body)),
   );
 
   app.get(
@@ -84,5 +130,18 @@ export function registerTemplateRoutes(app: App, core: Core, isUniqueViolation: 
       reply.header("cache-control", "no-store");
       return core.db.withTenant(tenant(req), (tx) => templateLinkFor(core, req, tx, req.params.id));
     },
+  );
+
+  // Owner only: overwrites the template-owned fields with the latest version (D-05).
+  app.post(
+    "/agents/:id/template/apply",
+    {
+      ...user,
+      schema: { tags, params: IdParams, body: ApplyAgentTemplateUpdateRequest, response: { 200: Agent } },
+    },
+    async (req) =>
+      core.db.withTenant(tenant(req), (tx) =>
+        applyTemplateUpdate(core, req, tx, req.params.id, req.body.toVersion),
+      ),
   );
 }
