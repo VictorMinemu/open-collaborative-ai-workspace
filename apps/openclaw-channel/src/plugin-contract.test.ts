@@ -865,9 +865,6 @@ const PLUGIN_TOOLS = [
   "ocw_board_card",
 ];
 
-// TEMP (07.2-07 Task 1): list, write and propose are registered by Task 2.
-const REGISTERED = new Set(["ocw_memory_save", "ocw_memory_read", "ocw_agent_card", "ocw_board_card"]);
-
 describe("memory tool (D-10): manifest, registration and the fake API", () => {
   const MEMORY = { untrustedOutput: false, sideEffecting: true };
 
@@ -888,10 +885,10 @@ describe("memory tool (D-10): manifest, registration and the fake API", () => {
     const guard = createToolGuard({ client: () => null });
     registerFull(pluginApi as never, guard);
     expect(hooks).toEqual(["gateway_start"]);
-    expect(tools.map((t) => t.opts.name)).toEqual(PLUGIN_TOOLS.filter((t) => REGISTERED.has(t)));
+    expect(tools.map((t) => t.opts.name)).toEqual(PLUGIN_TOOLS);
     registerCapabilities(pluginApi as never, guard);
     expect(hooks).toEqual(["gateway_start", "before_tool_call", "after_tool_call"]);
-    expect(tools).toHaveLength(REGISTERED.size);
+    expect(tools).toHaveLength(PLUGIN_TOOLS.length);
   });
 
   it("a save in an active DM turn reaches POST /memories with the event, the bot and the text only", async () => {
@@ -1424,6 +1421,100 @@ describe("memory files mirror parity (07.2-07: plugin ↔ packages/contracts mem
     ]) {
       expect(channel.AgentChannelMemoryReadResponse?.safeParse(v).success, JSON.stringify(v)).toBe(true);
       expect(m.AgentChannelMemoryReadResponse.parse(v)).toEqual(v);
+    }
+  });
+
+  it("list, write and propose requests: same verdicts as the contract, strict (an owner or user id is refused)", async () => {
+    const { channel } = await load();
+    const m = await import("./agent-channel-protocol.js");
+    const base = { eventId: E, agentId: A };
+    await expectSameVerdicts(m.AgentChannelMemoryList, channel.AgentChannelMemoryList as Schema, [
+      base,
+      { ...base, scope: "personal" },
+      { ...base, scope: S, folder: "clients/" },
+      { ...base, scope: S, folder: "clients" },
+      { ...base, scope: S, folder: "../" },
+      { ...base, scope: "unit" },
+      { ...base, userId: S },
+    ]);
+    const write = { ...base, scope: "personal", path: "MEMORY.md", mode: "append", content: "- likes tea" };
+    await expectSameVerdicts(m.AgentChannelMemoryWrite, channel.AgentChannelMemoryWrite as Schema, [
+      write,
+      { ...write, scope: "agent", mode: "replace", expectedVersion: 3 },
+      { ...write, mode: "replace" },
+      { ...write, scope: S },
+      { ...write, mode: "delete" },
+      { ...write, expectedVersion: 0 },
+      { ...write, expectedVersion: 1.5 },
+      { ...write, path: "a/../b.md" },
+      { ...write, content: "x".repeat(262_144) },
+      { ...write, content: "x".repeat(262_145) },
+      { ...write, content: `${"é".repeat(131_072)}x` },
+      { ...write, userId: S },
+      { ...write, ownerUserId: S },
+    ]);
+    const propose = { ...base, scope: S, path: "clients/acme.md", op: "create", content: "# Acme" };
+    await expectSameVerdicts(m.AgentChannelMemoryPropose, channel.AgentChannelMemoryPropose as Schema, [
+      propose,
+      { ...propose, scope: "personal", op: "append" },
+      { ...propose, op: "replace", baseVersion: 2, reason: "  New contact  " },
+      { ...propose, op: "delete" },
+      { ...propose, baseVersion: 0 },
+      { ...propose, reason: "" },
+      { ...propose, reason: "   " },
+      { ...propose, reason: "r".repeat(280) },
+      { ...propose, reason: "r".repeat(281) },
+      { ...propose, scope: "team" },
+      { ...propose, path: "clients/acme.txt" },
+      { ...propose, content: "x".repeat(262_145) },
+      { ...propose, userId: S },
+    ]);
+  });
+
+  it("list, write and propose responses the contract accepts read the same in the mirror", async () => {
+    const { channel } = await load();
+    const m = await import("./agent-channel-protocol.js");
+    const scope = {
+      id: S,
+      kind: "unit",
+      label: "Sales",
+      agentId: null,
+      unitId: A,
+      unitKind: "team",
+      viewerCan: ["read"],
+    };
+    const file = {
+      id: E,
+      scopeId: S,
+      path: "clients/acme.md",
+      version: 2,
+      bytes: 120,
+      updatedAt: "2026-10-12T10:00:00.000Z",
+      updatedBy: { kind: "user", id: A, displayName: "Ana", onBehalfOf: null },
+    };
+    const finding = { kind: "email", severity: "warn", source: "builtin", count: 1, samples: [], lines: [2] };
+    const cases: Array<[Schema, Schema, unknown[]]> = [
+      [
+        m.AgentChannelMemoryListResponse,
+        channel.AgentChannelMemoryListResponse as Schema,
+        [{ scopes: [scope] }, { files: [file] }, {}, { refused: "denied" }],
+      ],
+      [
+        m.AgentChannelMemoryWriteResponse,
+        channel.AgentChannelMemoryWriteResponse as Schema,
+        [{ fileId: E, version: 2 }, { refused: "version_conflict" }],
+      ],
+      [
+        m.AgentChannelMemoryProposeResponse,
+        channel.AgentChannelMemoryProposeResponse as Schema,
+        [{ approvalId: E, findings: [finding], readerCount: 4 }, { refused: "secret_detected" }],
+      ],
+    ];
+    for (const [mirror, contract, samples] of cases) {
+      for (const v of samples) {
+        expect(contract.safeParse(v).success, JSON.stringify(v)).toBe(true);
+        expect(mirror.safeParse(v).data, JSON.stringify(v)).toEqual(v);
+      }
     }
   });
 
