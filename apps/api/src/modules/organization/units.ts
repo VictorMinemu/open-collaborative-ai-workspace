@@ -5,6 +5,7 @@ import {
   EventTypes,
   IdParams,
   MEMORY_ROOT_FILE,
+  MEMORY_ROOT_TEMPLATE,
   MoveUnitRequest,
   memoryPathKey,
   Ok,
@@ -364,8 +365,10 @@ export function registerUnitRoutes(app: App, core: Core, perms: PermissionServic
           .where(and(eq(agents.unitId, unit.id), isNull(agents.deletedAt)))
           .limit(1);
         if (bot) throw conflict("Move or delete the bots of this unit first", "unit_has_bots");
-        // MEM-01: the unit's memory scope cascades with the unit, so team memory is never dropped silently: anything
-        // beyond the untouched root file (version 1, written by the system) blocks the delete. Read directly: the
+        // MEM-01: the unit's memory scope cascades with the unit, so team memory is never dropped silently: any live
+        // file blocks the delete, except a root file holding only the template (or nothing). The root can be edited
+        // but never deleted, so its content decides, not its version (07.2-08). Soft-deleted files and pending
+        // proposals do not block: they cascade with the scope; the ids-only audit rows stay. Read directly: the
         // memory module sits above this one.
         const [memory] = await tx
           .select({ id: memoryFiles.id })
@@ -376,7 +379,7 @@ export function registerUnitRoutes(app: App, core: Core, perms: PermissionServic
               eq(memoryScopes.kind, "unit"),
               eq(memoryScopes.unitId, unit.id),
               isNull(memoryFiles.deletedAt),
-              sql`not (lower(${memoryFiles.path}) = ${memoryPathKey(MEMORY_ROOT_FILE)} and ${memoryFiles.version} = 1 and ${memoryFiles.updatedByKind} = 'system')`,
+              sql`not (lower(${memoryFiles.path}) = ${memoryPathKey(MEMORY_ROOT_FILE)} and ${memoryFiles.content} in (${MEMORY_ROOT_TEMPLATE}, ''))`,
             ),
           )
           .limit(1);

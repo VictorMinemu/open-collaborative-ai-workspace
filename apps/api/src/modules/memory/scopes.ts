@@ -291,7 +291,12 @@ export async function listScopes(
 ): Promise<MemoryScope[]> {
   const principal = { kind: "user" as const, userId: viewerUserId };
   const viewer = { kind: "user" as const, id: viewerUserId };
-  await ensureScope(tx, { kind: "org" });
+  const [org] = await tx
+    .select({ id: memoryScopes.id })
+    .from(memoryScopes)
+    .where(eq(memoryScopes.kind, "org"))
+    .limit(1);
+  if (!org) await ensureScope(tx, { kind: "org" });
   const allUnits = [...(await loadUnits(tx)).values()];
   const readableUnits = await perms.filterFor(tx, principal, allUnits, "memory.read", (u) =>
     memoryResource({ kind: "unit", ownerUserId: null, agent: null, unitPath: u.path }, undefined, viewer),

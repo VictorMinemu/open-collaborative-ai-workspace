@@ -165,7 +165,7 @@ function pgError(err: unknown): { code?: string; constraint?: string } | undefin
  * content) and PostgreSQL's detail quotes the failing row, and the error handler logs a 500 with its message. The
  * unique path index becomes `memory_path_exists`; anything else becomes a parameter-free error.
  */
-async function guarded<T>(fn: () => Promise<T>): Promise<T> {
+export async function guarded<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } catch (err) {
