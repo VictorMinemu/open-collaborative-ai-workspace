@@ -132,6 +132,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "memory.read": true,
     "memory.write": false,
     "memory.promote": false,
+    "connector.connect": true,
+    "vault.use": true,
+    "vault.manage": false,
+    "agent_template.manage": false,
   },
   developer: {
     "org.read": true,
@@ -194,6 +198,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "memory.read": true,
     "memory.write": false,
     "memory.promote": false,
+    "connector.connect": true,
+    "vault.use": true,
+    "vault.manage": false,
+    "agent_template.manage": false,
   },
   lead: {
     "org.read": true,
@@ -256,6 +264,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "memory.read": true,
     "memory.write": false,
     "memory.promote": false,
+    "connector.connect": true,
+    "vault.use": true,
+    "vault.manage": false,
+    "agent_template.manage": false,
   },
   admin: {
     "org.read": true,
@@ -318,6 +330,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "memory.read": true,
     "memory.write": true,
     "memory.promote": true,
+    "connector.connect": true,
+    "vault.use": true,
+    "vault.manage": true,
+    "agent_template.manage": true,
   },
 };
 

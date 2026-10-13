@@ -24,15 +24,52 @@ const id = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
 const now = 1_790_000_000;
 
 describe("permission vocabulary", () => {
-  it("has exactly the 60 agreed permissions", () => {
-    expect(Permission.options).toHaveLength(60);
-    expect(new Set(Permission.options).size).toBe(60);
+  it("has exactly the 64 agreed permissions", () => {
+    expect(Permission.options).toHaveLength(64);
+    expect(new Set(Permission.options).size).toBe(64);
+  });
+
+  it("Phase 07.4 connector, keychain and template grains exist exactly as 07.4-01 defines them (D-01, D-04, D-05)", () => {
+    const grains = ["connector.connect", "vault.use", "vault.manage", "agent_template.manage"] as const;
+    // Appended at the end, never renamed.
+    expect(Permission.options.slice(-4)).toEqual([...grains]);
+    expect(PERMISSION_SURFACE).toMatchObject({
+      "connector.connect": "bots",
+      "vault.use": "bots",
+      "vault.manage": "team",
+      "agent_template.manage": "team",
+    });
+    for (const role of OrgRole.options) {
+      // Every member connects their own accounts and lets bots use their keys (deniable by rules and modules).
+      expect(ROLE_PERMISSIONS[role], `${role}: connector.connect`).toContain("connector.connect");
+      expect(ROLE_PERMISSIONS[role], `${role}: vault.use`).toContain("vault.use");
+      // Unit keys and templates: admins organization-wide, leads on the units they lead (resolver).
+      for (const p of ["vault.manage", "agent_template.manage"] as const) {
+        if (role === "admin") expect(ROLE_PERMISSIONS[role], `${role}: ${p}`).toContain(p);
+        else expect(ROLE_PERMISSIONS[role], `${role}: ${p}`).not.toContain(p);
+      }
+    }
+    expect(LEAD_PERMISSIONS).toEqual(expect.arrayContaining(["vault.manage", "agent_template.manage"]));
+    expect(LEAD_PERMISSIONS).not.toContain("vault.use");
+    // An agent uses a key only within the human's rights; it never manages keys or templates, nor connects accounts.
+    expect(AGENT_PERMISSIONS).toContain("vault.use");
+    for (const p of ["vault.manage", "agent_template.manage", "connector.connect"] as const) {
+      expect(AGENT_PERMISSIONS, p).not.toContain(p);
+    }
+    for (const p of grains) {
+      expect(NON_DELEGABLE_PERMISSIONS, p).not.toContain(p);
+      expect(PermissionPattern.safeParse(p).success, p).toBe(true);
+    }
+    expect(PERMISSION_DESCRIPTIONS["connector.connect"]).toBe("Connect your own accounts to connectors");
+    expect(PERMISSION_DESCRIPTIONS["vault.use"]).toBe("Let bots use keys from the keychain");
+    expect(PERMISSION_DESCRIPTIONS["vault.manage"]).toBe("Manage a unit's keychain keys");
+    expect(PERMISSION_DESCRIPTIONS["agent_template.manage"]).toBe("Manage a unit's agent templates");
   });
 
   it("Phase 07.2 memory grains exist exactly as 07.2-01 defines them (MEM-04, MEM-07, D-04)", () => {
     const memory = ["memory.read", "memory.write", "memory.promote"] as const;
-    // Appended at the end, never renamed (D-09).
-    expect(Permission.options.slice(-3)).toEqual([...memory]);
+    // Appended after 07.3's grains, never renamed (D-09); 07.4 appends after them.
+    expect(Permission.options.slice(-7, -4)).toEqual([...memory]);
     expect(PERMISSION_SURFACE).toMatchObject({
       "memory.read": "bots",
       "memory.write": "bots",
@@ -103,7 +140,8 @@ describe("permission vocabulary", () => {
       else expect(ROLE_PERMISSIONS[role], role).not.toContain("bot.manage_unit");
     }
     // ADR-0024 (07.3-01) appended `unit.modules.manage`: lead rights over module access on the led subtree;
-    // 07.2-01 appended `memory.write` and `memory.promote` (shared memory of the led subtree).
+    // 07.2-01 appended `memory.write` and `memory.promote` (shared memory of the led subtree); 07.4-01 appended
+    // `vault.manage` and `agent_template.manage` (unit keys and templates of the led subtree).
     expect(LEAD_PERMISSIONS).toEqual([
       "unit.members.manage",
       "bot.manage_unit",
@@ -111,6 +149,8 @@ describe("permission vocabulary", () => {
       "unit.modules.manage",
       "memory.write",
       "memory.promote",
+      "vault.manage",
+      "agent_template.manage",
     ]);
     for (const p of ["ai_chat.manage", "bot.manage_unit", "agent_card.approve"] as const) {
       expect(NON_DELEGABLE_PERMISSIONS, p).not.toContain(p);

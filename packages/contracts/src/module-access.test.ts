@@ -62,10 +62,24 @@ describe("module catalog (Phase 07.3, ADR-0024)", () => {
       patterns: ["work_session.*", "device.pair", "device.use", "device.full_access"],
     });
     expect(MODULE_CATALOG.ai_chats).toMatchObject({ entry: "ai_chat.read", patterns: ["ai_chat.*"] });
+    // Phase 07.4 (07.4-01): Bots off also hides member connections and keychain use.
     expect(MODULE_CATALOG.bots).toMatchObject({
       entry: "bot.read",
-      patterns: ["bot.read", "bot.create_personal", "bot.configure", "bot.internet", "bot.tool.use"],
+      patterns: [
+        "bot.read",
+        "bot.create_personal",
+        "bot.configure",
+        "bot.internet",
+        "bot.tool.use",
+        "connector.connect",
+        "vault.use",
+      ],
     });
+    expect(modulesMatching("connector.connect")).toEqual(["bots"]);
+    expect(modulesMatching("vault.use")).toEqual(["bots"]);
+    // Governance grains of the team surface stay out of every module (like bot.manage_unit).
+    expect(modulesMatching("vault.manage")).toEqual([]);
+    expect(modulesMatching("agent_template.manage")).toEqual([]);
     // Phase 07.2 (07.2-01): memory files, all three grains (read, write, promote).
     expect(MODULE_CATALOG.memory).toMatchObject({
       label: "Memory",
