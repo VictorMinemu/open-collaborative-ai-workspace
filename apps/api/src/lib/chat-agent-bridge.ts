@@ -1,4 +1,4 @@
-import type { AgentCardInput } from "@ocw/contracts";
+import type { AgentCardInput, ApprovalRequestStatus, ApprovalSummary } from "@ocw/contracts";
 import type { AfterCommit, TenantCtx, Tx } from "@ocw/db";
 
 /**
@@ -13,6 +13,9 @@ import type { AfterCommit, TenantCtx, Tx } from "@ocw/db";
  * - Agent Cards (06-13, P-11): `postAgentMessage({card})` stores a card with the message; when a reader decides a card,
  *   chat calls `emitCardAction` inside the decision transaction and agent-channel (its `onCardAction` handler) appends
  *   the `agent.card_action.v1` delivery in the same transaction.
+ * - Platform-owned cards (07.2-06, ADR-0023): the approval module posts its mirror cards through `postAgentMessageIn`
+ *   (inside its own transaction) and registers `registerLinkedCards`, so chat shows and decides a card linked to an
+ *   approval through the primitive without importing the approval module. No registration = no linked cards.
  */
 
 export interface PrincipalRef {
@@ -84,6 +87,11 @@ export interface PostAgentMessageInput {
    * (version 1, this agent) and `message.created` carries it.
    */
   card?: AgentCardInput;
+  /**
+   * Phase 07.2 (D-08): the card is composed by the server (an approval mirror), not by the agent; the agent can never
+   * PATCH it (403 `card_platform_owned`).
+   */
+  cardPlatformOwned?: boolean;
 }
 
 /** A reader's single decision on an Agent Card (06-13): delivered to the card's agent as `agent.card_action.v1`. */
@@ -91,6 +99,36 @@ export interface CardAction {
   messageId: string;
   outcome: "approved" | "denied";
   actorUserId: string;
+  /** The decider's note (UI-SPEC R4), quoted in the agent's turn. */
+  note?: string | undefined;
+}
+
+/** The approval a platform-owned card mirrors, as chat shows it (no viewer fields). */
+export interface LinkedCardInfo {
+  id: string;
+  actionHash: string;
+  status: ApprovalRequestStatus;
+  requestedForUserId: string | null;
+  warnings: string[];
+}
+
+/** Registered by the approval module: chat asks it about cards that mirror an approval. */
+export interface LinkedCards {
+  /** The approval of each linked card among `messageIds` (cards that mirror none are absent). */
+  linkOf(tx: Tx, messageIds: readonly string[]): Promise<Map<string, LinkedCardInfo>>;
+  /** The linked cards among `messageIds` whose approval `userId` may decide now (the kind's live rule). */
+  canDecide(tx: Tx, messageIds: readonly string[], userId: string): Promise<Set<string>>;
+  /** Decides the approval a card mirrors, in the caller's transaction (the primitive's decision, then the mirror). */
+  decide(
+    tx: Tx,
+    input: {
+      messageId: string;
+      deciderUserId: string;
+      outcome: "approved" | "denied";
+      actionHash: string;
+      note?: string | undefined;
+    },
+  ): Promise<ApprovalSummary>;
 }
 
 export type CardActionHandler = (tx: Tx, action: CardAction, after: AfterCommit) => Promise<void>;
@@ -104,6 +142,11 @@ export type AgentPoster = (
   created: boolean /** The card's current version, for card posts. */;
   cardVersion?: number;
 }>;
+/** `postAgentMessage` inside the caller's transaction (same checks, same events, same audit). */
+export type AgentPosterIn = (
+  tx: Tx,
+  input: PostAgentMessageInput,
+) => Promise<{ messageId: string; created: boolean; cardVersion?: number }>;
 export type ThreadContextProvider = (
   ctx: TenantCtx,
   conversationId: string,
@@ -122,18 +165,25 @@ export interface ChatAgentBridge {
   emitAgentMention(tx: Tx, mention: AgentMention, after: AfterCommit): Promise<void>;
   providePostAgentMessage(fn: AgentPoster): void;
   postAgentMessage: AgentPoster;
+  providePostAgentMessageIn(fn: AgentPosterIn): void;
+  postAgentMessageIn: AgentPosterIn;
   provideThreadContext(fn: ThreadContextProvider): void;
   getThreadContext: ThreadContextProvider;
   provideAgentTyping(fn: AgentTyping): void;
   agentTyping: AgentTyping;
   onCardAction(handler: CardActionHandler): void;
   emitCardAction(tx: Tx, action: CardAction, after: AfterCommit): Promise<void>;
+  registerLinkedCards(provider: LinkedCards): void;
+  /** The registered provider, or null (then no card is linked and nothing is decided through it). */
+  linkedCards(): LinkedCards | null;
 }
 
 export function createChatAgentBridge(): ChatAgentBridge {
   const handlers: MentionHandler[] = [];
   const cardHandlers: CardActionHandler[] = [];
   let poster: AgentPoster | undefined;
+  let posterIn: AgentPosterIn | undefined;
+  let linked: LinkedCards | null = null;
   let context: ThreadContextProvider | undefined;
   let typing: AgentTyping | undefined;
   return {
@@ -149,6 +199,13 @@ export function createChatAgentBridge(): ChatAgentBridge {
     postAgentMessage(ctx, input) {
       if (!poster) throw new Error("chat module has not provided postAgentMessage");
       return poster(ctx, input);
+    },
+    providePostAgentMessageIn(fn) {
+      posterIn = fn;
+    },
+    postAgentMessageIn(tx, input) {
+      if (!posterIn) throw new Error("chat module has not provided postAgentMessageIn");
+      return posterIn(tx, input);
     },
     provideThreadContext(fn) {
       context = fn;
@@ -169,5 +226,9 @@ export function createChatAgentBridge(): ChatAgentBridge {
     async emitCardAction(tx, action, after) {
       for (const h of cardHandlers) await h(tx, action, after);
     },
+    registerLinkedCards(provider) {
+      linked = provider;
+    },
+    linkedCards: () => linked,
   };
 }

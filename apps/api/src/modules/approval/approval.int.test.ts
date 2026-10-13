@@ -1,7 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { ApprovalDetail, ApprovalList, ApprovalSummary } from "@ocw/contracts";
+import {
+  AgentCard,
+  AgentCardActionEvent,
+  ApprovalDetail,
+  ApprovalList,
+  ApprovalSummary,
+} from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { FakeCellPlugin } from "../../../../../e2e/support/fake-cell-plugin";
 import { TEST_SETUP_TOKEN, TestClient } from "../../testing";
 import { type AiStack, seedPlan, startAiStack } from "../../testing-ai";
 import { errorCode, invite } from "../../testing-workzone";
@@ -30,6 +37,8 @@ let alexId: string;
 let samId: string;
 let rileyId: string;
 let orgId: string;
+let keeperId: string;
+let cell: FakeCellPlugin;
 
 // biome-ignore lint/suspicious/noExplicitAny: loose JSON access keeps the assertions readable
 type Json = Record<string, any>;
@@ -99,7 +108,14 @@ async function meId(client: TestClient): Promise<string> {
 }
 
 /** A pending request of `kind` made for `forUserId`, whose stored action targets `target`. */
-async function request(kind: string, opts: { forUserId?: string | null; target?: string } = {}) {
+async function request(
+  kind: string,
+  opts: {
+    forUserId?: string | null;
+    target?: string;
+    card?: { conversationId: string; inReplyToMessageId: string };
+  } = {},
+) {
   const resourceId = randomUUID();
   stored.set(resourceId, { target: opts.target ?? `target-${resourceId.slice(0, 8)}`, version: 1 });
   const forUserId = opts.forUserId === undefined ? samId : opts.forUserId;
@@ -107,9 +123,19 @@ async function request(kind: string, opts: { forUserId?: string | null; target?:
     approvals.request(tx, {
       kind,
       resourceId,
-      requestedByAgentId: null,
+      requestedByAgentId: opts.card ? keeperId : null,
       requestedForUserId: forUserId,
       eventId: null,
+      ...(opts.card
+        ? {
+            card: {
+              agentId: keeperId,
+              conversationId: opts.card.conversationId,
+              inReplyToMessageId: opts.card.inReplyToMessageId,
+              threadRootMessageId: null,
+            },
+          }
+        : {}),
     }),
   );
   return { ...out, resourceId };
@@ -158,6 +184,30 @@ beforeAll(async () => {
       },
     }),
   );
+  // A personal-like kind mirrored as a card: only the human it was requested for decides (07.2's personal proposals).
+  approvals.register(
+    testKind("test.card", "server_apply", {
+      async canDecide(_tx, userId, row) {
+        return userId === row.requestedForUserId;
+      },
+      async audience(_tx, row) {
+        return row.requestedForUserId ? [row.requestedForUserId] : [];
+      },
+      async card(_tx, row) {
+        return {
+          card: {
+            kind: "approval",
+            title: "Apply test action",
+            fields: [{ label: "Target", value: stored.get(row.resourceId)?.target ?? "gone" }],
+            status: "pending",
+            actions: [{ kind: "open", label: "Review", target: `/memory/proposals/${row.id}` }],
+            summary: "Keeper asks to apply a test action",
+          },
+          warnings: ["Keeper read web or tool content in this turn."],
+        };
+      },
+    }),
+  );
   victor = new TestClient(stack.baseUrl);
   const setup = await ok(
     victor.request("POST", "/api/v1/setup", {
@@ -187,9 +237,22 @@ beforeAll(async () => {
   ));
   await seedPlan(victor);
   deciders.add(victorId).add(alexId);
+  keeperId = (
+    await ok(
+      victor.request("POST", "/api/v1/agents", {
+        name: "Keeper",
+        username: "keeper",
+        instructions: "You are Keeper.",
+        modelProvider: "mock",
+        modelId: "mock-1",
+      }),
+    )
+  ).id as string;
+  cell = new FakeCellPlugin({ apiUrl: stack.baseUrl, token: CELL_TOKEN });
 }, 180_000);
 
 afterAll(async () => {
+  await cell?.stop();
   await su?.end();
   await stack?.stop();
 });
@@ -380,5 +443,271 @@ describe("tracer: a test kind is requested, viewed, decided and applied in one a
     const post = await anon.request("POST", `/api/v1/approvals/${randomUUID()}/decision`, {});
     expect(post.status).toBe(401);
     expect(errorCode(post)).toBeDefined();
+  });
+});
+
+/** Every `agent.card_action.v1` the API appended for one card (the cell stream is the delivery ledger). */
+const cardActionsOf = async (messageId: string) =>
+  (
+    await su.query(
+      "select seq, payload from app.stream_events where stream_id = $1 and type = 'agent.card_action.v1' and payload->'cardAction'->>'messageId' = $2 order by seq",
+      [`cell:${orgId}`, messageId],
+    )
+  ).rows.map((r) => AgentCardActionEvent.parse({ ...r.payload, seq: Number(r.seq) }));
+
+const cardRow = async (messageId: string) =>
+  (await su.query("select * from app.message_cards where message_id = $1", [messageId])).rows[0] as Json;
+
+const cardFor = async (as: TestClient, messageId: string) =>
+  AgentCard.parse(await ok(as.request("GET", `/api/v1/cards/${messageId}`)));
+
+const decideCard = (as: TestClient, messageId: string, body: Json) =>
+  as.request("POST", `/api/v1/cards/${messageId}/decision`, body);
+
+describe("platform-owned card mirror: the agent cannot edit it, deciding it goes through the primitive (Task 2)", () => {
+  let dm: string;
+  let asked: string;
+  let group: string;
+  let groupAsked: string;
+
+  beforeAll(async () => {
+    dm = (await ok(sam.request("POST", "/api/v1/dms", { participants: [{ kind: "agent", id: keeperId }] })))
+      .id as string;
+    asked = (await ok(sam.request("POST", `/api/v1/conversations/${dm}/messages`, { body: "remember this" })))
+      .id as string;
+    group = (
+      await ok(
+        sam.request("POST", "/api/v1/dms", {
+          participants: [
+            { kind: "user", id: rileyId },
+            { kind: "agent", id: keeperId },
+          ],
+        }),
+      )
+    ).id as string;
+    groupAsked = (
+      await ok(
+        sam.request("POST", `/api/v1/conversations/${group}/messages`, { body: "@keeper remember this" }),
+      )
+    ).id as string;
+  });
+
+  it("request with a card target posts one platform-owned approval card replying in the DM; the snapshot links the approval", async () => {
+    const r = await request("test.card", { card: { conversationId: dm, inReplyToMessageId: asked } });
+    expect(r.cardMessageId).toBeTruthy();
+    const messageId = r.cardMessageId as string;
+    expect((await rowOf(r.id)).card_message_id).toBe(messageId);
+    expect((await rowOf(r.id)).card_warnings).toEqual(["Keeper read web or tool content in this turn."]);
+    expect(await cardRow(messageId)).toMatchObject({
+      platform_owned: true,
+      kind: "approval",
+      status: "pending",
+      agent_id: keeperId,
+      conversation_id: dm,
+    });
+    const card = await cardFor(sam, messageId);
+    expect(card).toMatchObject({
+      kind: "approval",
+      title: "Apply test action",
+      status: "pending",
+      platformOwned: true,
+      viewerCan: ["follow", "decide"],
+      approval: {
+        id: r.id,
+        actionHash: r.actionHash,
+        status: "pending",
+        requestedForUserId: samId,
+        warnings: ["Keeper read web or tool content in this turn."],
+      },
+    });
+    expect(card.actions.map((a) => a.kind).sort()).toEqual(["approve", "open"]);
+    expect(card.actions.find((a) => a.kind === "approve")).not.toHaveProperty("approverIds");
+    expect(card.actions.find((a) => a.kind === "open")).toMatchObject({
+      target: `/memory/proposals/${r.id}`,
+    });
+    const msg = (
+      await su.query("select author_kind, author_id, body from app.messages where id = $1", [messageId])
+    ).rows[0];
+    expect(msg).toEqual({
+      author_kind: "agent",
+      author_id: keeperId,
+      body: "Keeper asks to apply a test action",
+    });
+  });
+
+  it("the agent's PATCH of a platform-owned card is 403 card_platform_owned and changes nothing", async () => {
+    const r = await request("test.card", { card: { conversationId: dm, inReplyToMessageId: asked } });
+    const messageId = r.cardMessageId as string;
+    const before = await cardRow(messageId);
+    const res = await cell.request<Json>("PATCH", `/cards/${messageId}`, {
+      agentId: keeperId,
+      patch: { expectedVersion: 1, status: "succeeded", title: "Approved already" },
+    });
+    expect(res.status).toBe(403);
+    expect(errorCode(res as { body: Record<string, unknown> | null })).toBe("card_platform_owned");
+    const after = await cardRow(messageId);
+    expect(after).toMatchObject({ version: before.version, status: "pending", title: "Apply test action" });
+  });
+
+  it("a linked card decision needs the action hash (400 action_hash_required)", async () => {
+    const r = await request("test.card", { card: { conversationId: dm, inReplyToMessageId: asked } });
+    const res = await decideCard(sam, r.cardMessageId as string, { outcome: "approved" });
+    expect(res.status).toBe(400);
+    expect(errorCode(res)).toBe("action_hash_required");
+    expect((await rowOf(r.id)).status).toBe("pending");
+  });
+
+  it("a reader who fails canDecide is offered no decide and gets 403 not_approver; nothing changes", async () => {
+    const r = await request("test.card", { card: { conversationId: group, inReplyToMessageId: groupAsked } });
+    const messageId = r.cardMessageId as string;
+    expect((await cardFor(riley, messageId)).viewerCan).toEqual(["follow"]);
+    expect((await cardFor(sam, messageId)).viewerCan).toEqual(["follow", "decide"]);
+    const res = await decideCard(riley, messageId, { outcome: "approved", actionHash: r.actionHash });
+    expect(res.status).toBe(403);
+    expect(errorCode(res)).toBe("not_approver");
+    expect((await rowOf(r.id)).status).toBe("pending");
+    expect(await cardRow(messageId)).toMatchObject({ decision: null, status: "pending" });
+    expect(await cardActionsOf(messageId)).toHaveLength(0);
+  });
+
+  it("deciding on the card applies the approval, mirrors it with the note and the agent hears it once", async () => {
+    const r = await request("test.card", { card: { conversationId: dm, inReplyToMessageId: asked } });
+    const messageId = r.cardMessageId as string;
+    const res = await decideCard(sam, messageId, {
+      outcome: "approved",
+      actionHash: r.actionHash,
+      note: "Looks right",
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const card = AgentCard.parse(res.body);
+    expect(card).toMatchObject({
+      status: "succeeded",
+      decision: {
+        outcome: "approved",
+        by: { kind: "user", id: samId, displayName: "Sam Lee" },
+        note: "Looks right",
+      },
+      approval: { id: r.id, status: "applied" },
+      viewerCan: ["follow"],
+    });
+    expect(card.version).toBe(2);
+    expect((await rowOf(r.id)).status).toBe("applied");
+    expect(await auditsFor("test.applied", r.resourceId)).toHaveLength(1);
+    const updated = await su.query(
+      "select payload from app.stream_events where stream_id = $1 and type = 'message.updated' and payload->'message'->>'id' = $2",
+      [`conv:${dm}`, messageId],
+    );
+    expect(updated.rows.some((u) => u.payload.message.card?.decision?.note === "Looks right")).toBe(true);
+    const actions = await cardActionsOf(messageId);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]?.message.text).toBe("Sam Lee approved “Apply test action”: “Looks right”");
+    expect(actions[0]?.cardAction).toMatchObject({ messageId, kind: "approval", outcome: "approved" });
+    // A second decision on the card is the primitive's 409.
+    const again = await decideCard(sam, messageId, { outcome: "denied", actionHash: r.actionHash });
+    expect(again.status).toBe(409);
+    expect(errorCode(again)).toBe("approval_already_decided");
+    expect(await cardActionsOf(messageId)).toHaveLength(1);
+  });
+
+  it("deciding through the approvals route mirrors the card too: denied → cancelled, no note → the plain sentence", async () => {
+    const r = await request("test.card", { card: { conversationId: dm, inReplyToMessageId: asked } });
+    const messageId = r.cardMessageId as string;
+    const res = await decide(sam, r.id, { outcome: "denied", actionHash: r.actionHash });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const card = await cardFor(sam, messageId);
+    expect(card).toMatchObject({ status: "cancelled", approval: { status: "denied" } });
+    expect(card.decision).toMatchObject({ outcome: "denied", by: { id: samId } });
+    expect(card.decision).not.toHaveProperty("note");
+    const actions = await cardActionsOf(messageId);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]?.message.text).toBe("Sam Lee denied “Apply test action”");
+  });
+
+  it("a failed apply mirrors as a failed card", async () => {
+    const r = await request("test.card", { card: { conversationId: dm, inReplyToMessageId: asked } });
+    failing.add(r.resourceId);
+    const res = await decide(sam, r.id, { outcome: "approved", actionHash: r.actionHash });
+    expect(res.status).toBe(200);
+    expect(await cardFor(sam, r.cardMessageId as string)).toMatchObject({
+      status: "failed",
+      approval: { status: "failed" },
+    });
+  });
+});
+
+/** A client whose membership moved to a fresh organization B, as its admin (module-access.int.test.ts). */
+async function otherOrgAdmin(): Promise<{ client: TestClient; orgB: string; userB: string }> {
+  const { client, userId: userB } = await invite(
+    stack,
+    victor,
+    `eve-${randomUUID().slice(0, 8)}@example.test`,
+    "Eve",
+    "standard",
+  );
+  const orgB = randomUUID();
+  await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil', $2)", [
+    orgB,
+    `evil-${orgB}`,
+  ]);
+  await su.query("delete from auth.member where user_id = $1", [userB]);
+  await su.query("delete from app.org_members where user_id = $1", [userB]);
+  await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
+    orgB,
+    userB,
+  ]);
+  await su.query(
+    "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Eve', 'admin')",
+    [orgB, userB],
+  );
+  await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, userB]);
+  return { client, orgB, userB };
+}
+
+describe("list visibility: only what the caller may decide, asked for or decided, whatever the query (review fix)", () => {
+  it("an omitted or unknown role is refused (400) by the route and by the service itself", async () => {
+    for (const path of ["/api/v1/approvals", "/api/v1/approvals?role=everyone", "/api/v1/approvals?role="]) {
+      const res = await riley.request("GET", path);
+      expect(res.status, path).toBe(400);
+    }
+    // Defence in depth: a caller that bypasses the route schema still gets nothing.
+    await expect(
+      stack.built.core.db.withTenant({ organizationId: orgId, userId: rileyId }, (tx) =>
+        approvals.list(tx, rileyId, { role: "everyone" } as never),
+      ),
+    ).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  it("a same-organization member, an admin included, never lists another member's personal approval", async () => {
+    const p = await request("test.private");
+    for (const [who, client] of [
+      ["victor", victor],
+      ["alex", alex],
+      ["riley", riley],
+    ] as const) {
+      for (const role of ["decider", "requester"]) {
+        const list = ApprovalList.parse(await ok(client.request("GET", `/api/v1/approvals?role=${role}`)));
+        expect(
+          list.items.map((i) => i.id),
+          `${who} ${role}`,
+        ).not.toContain(p.id);
+      }
+      expect((await client.request("GET", `/api/v1/approvals/${p.id}`)).status, who).toBe(404);
+    }
+    const mine = ApprovalList.parse(await ok(sam.request("GET", "/api/v1/approvals?role=decider")));
+    expect(mine.items.map((i) => i.id)).toContain(p.id);
+  });
+
+  it("a cross-tenant decider lists nothing of this organization", async () => {
+    await request("test.apply");
+    const { client: eve, userB } = await otherOrgAdmin();
+    deciders.add(userB);
+    try {
+      for (const role of ["decider", "requester"]) {
+        const list = ApprovalList.parse(await ok(eve.request("GET", `/api/v1/approvals?role=${role}`)));
+        expect(list).toEqual({ items: [], nextCursor: null });
+      }
+    } finally {
+      deciders.delete(userB);
+    }
   });
 });

@@ -1,4 +1,5 @@
 import {
+  AgentCardInput,
   type ApprovalDetail,
   type ApprovalList,
   type ApprovalListQuery,
@@ -10,8 +11,9 @@ import {
 import { approvalRequests, type Tx, tenantOf, withSavepoint } from "@ocw/db";
 import { and, desc, eq, inArray, isNull, lt, type SQL, sql } from "drizzle-orm";
 import type { Core } from "../../core";
+import type { LinkedCardInfo, LinkedCards } from "../../lib/chat-agent-bridge";
 import { conflict, forbidden, HttpError, notFound } from "../../lib/errors";
-import { authorOf, type Directory, loadDirectory } from "../chat";
+import { authorOf, type Directory, loadDirectory, mirrorCardDecision } from "../chat";
 import { actionHash } from "./hash";
 import {
   type ApplyResult,
@@ -34,6 +36,16 @@ export interface RequestApprovalInput {
   requestedByAgentId: string | null;
   requestedForUserId: string | null;
   eventId: string | null;
+  /**
+   * Where to mirror the request as a platform-owned card: the agent that asked, posting in its conversation in reply
+   * to the human's message (the kind must have a `card` hook). The post goes through chat's agent checks.
+   */
+  card?: {
+    agentId: string;
+    conversationId: string;
+    inReplyToMessageId: string;
+    threadRootMessageId: string | null;
+  };
 }
 
 export interface DecideInput {
@@ -42,6 +54,11 @@ export interface DecideInput {
   outcome: "approved" | "denied";
   actionHash: string;
   note?: string | undefined;
+  /**
+   * Set by the chat card route: the caller already reads the request's card, so a non-decider gets 403 `not_approver`
+   * instead of the 404 that hides a request from everyone else.
+   */
+  shownOnCard?: boolean;
 }
 
 export type ConsumeGrantResult =
@@ -58,11 +75,16 @@ export type ConsumeGrantResult =
 
 export interface ApprovalService {
   register(kind: ApprovalKind): void;
-  request(tx: Tx, input: RequestApprovalInput): Promise<{ id: string; actionHash: string }>;
+  request(
+    tx: Tx,
+    input: RequestApprovalInput,
+  ): Promise<{ id: string; actionHash: string; cardMessageId: string | null }>;
   decide(tx: Tx, input: DecideInput): Promise<ApprovalSummary>;
   consumeGrant(tx: Tx, input: { id: string; kind: string; actionHash: string }): Promise<ConsumeGrantResult>;
   get(tx: Tx, id: string, viewerUserId: string): Promise<ApprovalDetail>;
   list(tx: Tx, viewerUserId: string, q: ApprovalListQuery): Promise<ApprovalList>;
+  /** The provider chat's card routes use through the bridge (registered by `createApprovalModule`). */
+  linkedCards: LinkedCards;
 }
 
 const NOT_FOUND = "Approval not found";
@@ -92,7 +114,17 @@ function shownStatus(row: Locked): ApprovalRequestStatus {
   return row.status === "pending" && row.expired ? "expired" : row.status;
 }
 
-export function createApprovalService(core: Pick<Core, "audit" | "realtime">): ApprovalService {
+/** The card status that mirrors a decided request. */
+const CARD_STATUS = {
+  applied: "succeeded",
+  approved: "succeeded",
+  failed: "failed",
+  denied: "cancelled",
+} as const;
+
+const MAX_WARNINGS = 3;
+
+export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "chatAgent">): ApprovalService {
   const registry: ApprovalRegistry = createApprovalRegistry();
 
   async function lockRow(tx: Tx, id: string): Promise<Locked | null> {
@@ -168,7 +200,96 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime">): A
     return { canDecide, visible };
   }
 
+  /** The requests mirrored by these card messages (RLS: this organization only). */
+  async function byCard(tx: Tx, messageIds: readonly string[]): Promise<Locked[]> {
+    if (messageIds.length === 0) return [];
+    const rows = await tx
+      .select(withExpiry)
+      .from(approvalRequests)
+      .where(inArray(approvalRequests.cardMessageId, [...messageIds]));
+    return rows.map((r) => ({ ...r.row, expired: r.expired }));
+  }
+
+  const linkedCards: LinkedCards = {
+    async linkOf(tx, messageIds) {
+      const out = new Map<string, LinkedCardInfo>();
+      for (const row of await byCard(tx, messageIds)) {
+        if (!row.cardMessageId) continue;
+        out.set(row.cardMessageId, {
+          id: row.id,
+          actionHash: row.actionHash,
+          status: shownStatus(row),
+          requestedForUserId: row.requestedForUserId,
+          warnings: row.cardWarnings,
+        });
+      }
+      return out;
+    },
+    async canDecide(tx, messageIds, userId) {
+      const out = new Set<string>();
+      for (const row of await byCard(tx, messageIds)) {
+        const kind = registry.get(row.kind);
+        if (row.cardMessageId && kind && (await kind.canDecide(tx, userId, row))) out.add(row.cardMessageId);
+      }
+      return out;
+    },
+    async decide(tx, input) {
+      const [row] = await byCard(tx, [input.messageId]);
+      if (!row) throw notFound("Card not found", "card_not_found");
+      return service.decide(tx, {
+        id: row.id,
+        deciderUserId: input.deciderUserId,
+        outcome: input.outcome,
+        actionHash: input.actionHash,
+        note: input.note,
+        shownOnCard: true,
+      });
+    },
+  };
+
+  /**
+   * Posts the platform-owned mirror of a new request where it was born: the kind composes title, fields, summary and
+   * its Open action; the service forces kind `approval`, status `pending` and its own Approve action (no approver
+   * list: the kind decides), stores the kind's warnings and links the card to the request.
+   */
+  async function postMirror(
+    tx: Tx,
+    kind: ApprovalKind,
+    row: ApprovalRow,
+    target: NonNullable<RequestApprovalInput["card"]>,
+  ): Promise<string> {
+    if (!kind.card) throw new Error(`approval kind "${kind.kind}" has no card`);
+    const composed = await kind.card(tx, row);
+    const warnings = (composed.warnings ?? []).slice(0, MAX_WARNINGS).map((w) => w.slice(0, 200));
+    const card = AgentCardInput.parse({
+      ...composed.card,
+      kind: "approval",
+      status: "pending",
+      actions: [
+        { kind: "approve", label: "Approve", denyLabel: "Deny" },
+        ...composed.card.actions.filter((a) => a.kind === "open"),
+      ],
+    });
+    const posted = await core.chatAgent.postAgentMessageIn(tx, {
+      agentId: target.agentId,
+      conversationId: target.conversationId,
+      threadRootId: target.threadRootMessageId,
+      body: card.summary,
+      idempotencyKey: `approval:${row.id}`,
+      inReplyToMessageId: target.inReplyToMessageId,
+      ...(row.requestedForUserId ? { onBehalfOfUserId: row.requestedForUserId } : {}),
+      card,
+      cardPlatformOwned: true,
+    });
+    await tx
+      .update(approvalRequests)
+      .set({ cardMessageId: posted.messageId, cardWarnings: warnings })
+      .where(eq(approvalRequests.id, row.id));
+    return posted.messageId;
+  }
+
   const service: ApprovalService = {
+    linkedCards,
     register: (kind) => registry.register(kind),
 
     async request(tx, input) {
@@ -208,7 +329,8 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime">): A
         metadata: { ...ids(row), resourceType: row.resourceType, resourceId: row.resourceId },
       });
       await announce(tx, kind, row, []);
-      return { id: row.id, actionHash: hash };
+      const cardMessageId = input.card ? await postMirror(tx, kind, row, input.card) : null;
+      return { id: row.id, actionHash: hash, cardMessageId };
     },
 
     async decide(tx, input) {
@@ -216,7 +338,7 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime">): A
       const kind = row ? registry.get(row.kind) : undefined;
       if (!row || !kind) throw notFoundError();
       const { canDecide, visible } = await visibility(tx, kind, row, input.deciderUserId);
-      if (!visible) throw notFoundError();
+      if (!visible && !input.shownOnCard) throw notFoundError();
       if (row.status !== "pending") {
         throw conflict("This request was already decided", "approval_already_decided");
       }
@@ -258,6 +380,16 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime">): A
         final = await applyApproved(tx, kind, decided, recomputed, input.deciderUserId);
       }
       await announce(tx, kind, final, [input.deciderUserId]);
+      if (final.cardMessageId) {
+        const status = final.status as keyof typeof CARD_STATUS;
+        await mirrorCardDecision(tx, core, {
+          messageId: final.cardMessageId,
+          outcome: input.outcome,
+          deciderUserId: input.deciderUserId,
+          status: CARD_STATUS[status] ?? "succeeded",
+          note,
+        });
+      }
       return summaryOf({ ...final, expired: false }, await loadDirectory(tx), false);
     },
 
@@ -313,6 +445,10 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime">): A
     },
 
     async list(tx, viewerUserId, q) {
+      // Fail closed even if a caller bypasses the route's schema: an unknown role lists nothing.
+      if (q.role !== "decider" && q.role !== "requester") {
+        throw new HttpError(400, "validation_error", "role must be decider or requester");
+      }
       const kinds = registry.kinds();
       if (kinds.length === 0) return { items: [], nextCursor: null };
       const filters: SQL[] = [inArray(approvalRequests.kind, kinds)];
@@ -345,9 +481,10 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime">): A
           const row: Locked = { ...r.row, expired: r.expired };
           const kind = registry.get(row.kind);
           if (!kind) continue;
-          // Live: a decider who lost the right stops seeing the request (unless they decided it).
-          const canDecide = await kind.canDecide(tx, viewerUserId, row);
-          if (q.role === "decider" && !canDecide && row.decidedBy !== viewerUserId) continue;
+          // The same rule as `get`, whatever the role: a row the viewer may neither decide nor asked for nor decided is
+          // never listed (live: a decider who lost the right stops seeing it). Then the role narrows it.
+          const { canDecide, visible } = await visibility(tx, kind, row, viewerUserId);
+          if (!visible || !inRole(q.role, row, canDecide, viewerUserId)) continue;
           dir ??= await loadDirectory(tx);
           items.push(summaryOf(row, dir, canDecide));
           if (items.length === PAGE) break scan;
@@ -414,6 +551,16 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime">): A
   }
 
   return service;
+}
+
+/** The role filter of the inbox, applied after the visibility rule: what I may decide (or decided), or what I asked for. */
+function inRole(
+  role: "decider" | "requester",
+  row: ApprovalRow,
+  canDecide: boolean,
+  viewer: string,
+): boolean {
+  return role === "decider" ? canDecide || row.decidedBy === viewer : row.requestedForUserId === viewer;
 }
 
 /** The list cursor: the last scanned id (ids are uuidv7, so id order is creation order). */

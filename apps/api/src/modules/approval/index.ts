@@ -18,6 +18,8 @@ export type {
 
 export function createApprovalModule(core: Core): { module: ApiModule; service: ApprovalService } {
   const service = createApprovalService(core);
+  // Chat shows and decides the cards that mirror a request through the bridge (it never imports this module).
+  core.chatAgent.registerLinkedCards(service.linkedCards);
   return {
     service,
     module: {
