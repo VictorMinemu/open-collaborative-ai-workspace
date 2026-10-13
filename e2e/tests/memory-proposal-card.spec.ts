@@ -1,11 +1,10 @@
-import { createRequire } from "node:module";
-import { join } from "node:path";
 import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
 import { expectNoSeriousA11y } from "../support/a11y";
 import { type Actor, apiAs, BASE_URL, ensureMember, openAs, SAM, userIdOf } from "../support/actors";
 import { cellToken } from "../support/cell-token";
 import { FakeCellPlugin } from "../support/fake-cell-plugin";
 import { memoryScopes, seedMemory } from "../support/memory";
+import { asSuperuser } from "../support/superuser";
 import { ADMIN, API_URL, shot } from "./env";
 
 /**
@@ -157,36 +156,6 @@ function lastProposalId(): string {
   const id = (last?.body as { approvalId?: string } | null)?.approvalId;
   expect(id, "the last proposal's approval id").toBeTruthy();
   return id as string;
-}
-
-/**
- * Superuser access to the isolated e2e database only (scripts/e2e-isolated.sh exports MIGRATE_SUPERUSER_URL pointing
- * at `ocw_e2e`; anything else is refused). Used to move one request's expiry into the past, as the API's own expiry
- * tests do.
- */
-async function asSuperuser(sql: string, params: unknown[]): Promise<number> {
-  const url = process.env.MIGRATE_SUPERUSER_URL ?? "";
-  expect(
-    /\/ocw_e2e(\?|$)/.test(url),
-    "MIGRATE_SUPERUSER_URL targets ocw_e2e (run through e2e-isolated.sh)",
-  ).toBe(true);
-  const requireDb = createRequire(join(import.meta.dirname, "..", "..", "packages", "db", "package.json"));
-  const { Client } = requireDb("pg") as {
-    Client: new (o: {
-      connectionString: string;
-    }) => {
-      connect(): Promise<void>;
-      query(text: string, values: unknown[]): Promise<{ rowCount: number | null }>;
-      end(): Promise<void>;
-    };
-  };
-  const client = new Client({ connectionString: url });
-  await client.connect();
-  try {
-    return (await client.query(sql, params)).rowCount ?? 0;
-  } finally {
-    await client.end();
-  }
 }
 
 let admin: APIRequestContext;
@@ -514,12 +483,11 @@ test("a stale rewrite approved after the file changed ends Failed with the reaso
       "Tool ocw_memory_propose: proposed",
     );
     const id = lastProposalId();
-    expect(
-      await asSuperuser(
-        "update app.approval_requests set expires_at = now() - interval '1 minute' where id = $1",
-        [id],
-      ),
-    ).toBe(1);
+    const moved = await asSuperuser(
+      "update app.approval_requests set expires_at = now() - interval '1 minute' where id = $1",
+      [id],
+    );
+    expect(moved.rowCount).toBe(1);
     await sam.page.reload();
     await expect(sam.page.getByTestId("dm-view")).toBeVisible();
     const expired = linkedCard(sam.page);
