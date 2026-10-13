@@ -286,14 +286,27 @@ const ADVERSARIAL_SHAPES = [
 ];
 
 describe("linear time on 256 KiB adversarial runs", () => {
-  const size = 256 * 1024;
+  /** Best of three, after a warm-up: a busy shared CI runner can stall one pass, a super-linear rule is slow on every pass. */
+  const bestOf = (run: () => unknown): number => {
+    run();
+    let best = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < 3; i++) {
+      const t0 = performance.now();
+      run();
+      best = Math.min(best, performance.now() - t0);
+    }
+    return best;
+  };
+  const sized = (shape: string, size: number) => shape.repeat(Math.ceil(size / shape.length)).slice(0, size);
   for (const shape of ADVERSARIAL_SHAPES) {
-    it(`detectSensitive and redactSecrets stay under 200 ms on ${JSON.stringify(shape)} repeated`, () => {
-      const text = shape.repeat(Math.ceil(size / shape.length)).slice(0, size);
-      for (const run of [() => detectSensitive(text), () => redactSecrets(text)]) {
-        const t0 = performance.now();
-        run();
-        expect(performance.now() - t0).toBeLessThan(200);
+    it(`detectSensitive and redactSecrets scale linearly on ${JSON.stringify(shape)} repeated`, () => {
+      for (const fn of [detectSensitive, redactSecrets]) {
+        const small = bestOf(() => fn(sized(shape, 64 * 1024)));
+        const large = bestOf(() => fn(sized(shape, 256 * 1024)));
+        // 4x the input: about 4x the time when linear, 16x when quadratic (the ReDoS took 17 s at 256 KiB). The
+        // ratio does not depend on the machine's speed; the absolute cap still catches a catastrophic rule.
+        expect(large / Math.max(small, 1)).toBeLessThan(8);
+        expect(large).toBeLessThan(1000);
       }
     });
   }
