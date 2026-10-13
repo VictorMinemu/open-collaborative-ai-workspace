@@ -478,6 +478,61 @@ stack running this branch:
    cards, move them, set waiting states, discuss in the card threads, mention a bot in one card.
 4. Say what felt slow or unclear: names, columns, moving on the phone, the card strip, search, the template editor.
 
+## Memory (Phase 07.2)
+
+Phase 07.2 (ADR-0023). Memory is Markdown files kept by the workspace, per scope: your private memory with each bot,
+bot notebooks, every department, team and project, and the organization. People read and edit them; bots read them in
+their turns, write only their own, and propose changes to shared memory that a person approves. `pnpm demo:up`
+applies the Phase 07.2 migrations; your bots' old notes are already in your private `MEMORY.md` with each bot.
+
+1. **Open Memory.** Main nav › **Memory** (between Bots and Work Zone). The tree lists only what you may read:
+   *You & {bot}* (**Private**: only you, admins can't), *{bot} notebook*, your units in chart order, then
+   *Organization*. Desktop opens the first scope's `MEMORY.md`; on a phone the tree is full screen and a scope expands
+   in place. Arrow keys move through the tree; **Search memory** finds words in files and paths, grouped by scope.
+2. **Edit.** On a file you may write: **Edit** (or `?tab=edit`), change the Markdown, **Save** (⌘S). A secret (an API
+   key, a password line) is refused with the line and a masked sample; nothing is stored. If someone saved while you
+   were editing, **Choose what to keep** offers *Keep mine* or *Use theirs*. File **⋯**: *Rename or move…*,
+   *Delete…*, *Copy path*; **New file** and **New folder** in the header. `MEMORY.md` can be edited, never renamed or
+   deleted.
+3. **History.** **History** lists every version, who wrote it (a bot shows "{bot} for {person}", an approved change
+   "Approved by {person}") and a diff against the previous one. **Restore version N** writes it back as a new version;
+   nothing is lost.
+4. **Ask your bot to remember something.** In your DM with your personal bot (Bots › **New personal bot** if you have
+   none): "remember that I prefer calls after 4 pm". It appends to your private `MEMORY.md`; the DM's **Memory**
+   button shows the note and **Open in Memory** opens the file. Your private memory is used only in that one-to-one
+   DM.
+5. **A proposal to team memory, approved by the lead.** Sign in as Marta (Team Alpha) and, in her DM with her personal
+   bot, ask: "save a note in Team Alpha's memory: the staging deploy is on Thursdays". The bot cannot write team memory,
+   so it proposes. A card **Created by the workspace** appears in the DM: *Create {path}*, the memory, how many people
+   will read it, what the scan found, *Waiting for a reviewer*. Sign in as Alex (lead of Backend, so a decider for Team
+   Alpha): **Memory** shows a badge, **Proposals** › *To review* › the proposal: readers, findings, the diff. Press
+   **Approve…**, add an optional note, **Approve and apply**. The file is written as that exact version ("Approved by
+   Alex Kim" in its history); Marta's card turns *Applied* live and her bot hears the decision. **Deny…** with a note
+   leaves memory unchanged and the card *Denied*. Nobody approves their own team proposal, and nothing is approved
+   automatically.
+6. **A bot's page.** Bots › a bot › **Open page**: its memory (the scopes you may read, *Open in Memory*) and its
+   capabilities, read-only.
+7. **Admins.** Víctor sees every unit's and the organization's memory, and no one's private memory, not even through
+   search.
+8. **Extended sensitive-data scan (optional).** Turn on the `pii` profile ([INSTALL.md › Sensitive-data
+   scan](INSTALL.md#sensitive-data-scan-optional-pii-profile)): two lines in `.env`, then restart. Proposals then also
+   flag names and places in Spanish and English. If Presidio does not answer, the card and the review say
+   *Extended scan unavailable — review the text yourself*.
+9. **Module.** Settings › Modules › **Memory** turns it off for the organization, a unit or a person (ADR-0024).
+
+**Owner checks** (never run by an agent; record the results in
+`.planning/phases/07.2-scoped-memory-files-and-governed-promotion/07.2-VALIDATION.md` › Manual-Only Verifications). On
+a stack running this branch:
+
+1. **Spanish Presidio accuracy on real documents** (WINDOWS 121). With the `pii` profile on, have your bot propose a
+   few real Spanish notes into a team's memory: client notes with names, places, NIF/NIE, IBANs, phones and e-mails.
+   On each review, check what the scan found and what it missed (the automated smoke only proves fixed samples, and a
+   Spanish name was missed in one probe). Note every miss and every false alarm.
+2. **A real memory flow on a phone and a laptop.** With a colleague, one of you on a phone and the other on a laptop
+   at the same time: edit a team file on both (see the conflict choice), restore an old version, ask a bot to remember
+   something and to propose a team note, approve it from the phone and deny another from the laptop, follow the card
+   in the DM. Say what felt slow or unclear: the tree, the editor on the phone, the review, the card, search.
+
 ## Troubleshooting
 
 | Symptom | Fix |

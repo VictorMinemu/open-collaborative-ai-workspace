@@ -2,8 +2,9 @@
 
 ## Status
 
-Proposed (owner decisions D-01 to D-09 in `.planning/phases/07.2-scoped-memory-files-and-governed-promotion/07.2-CONTEXT.md`,
-research design accepted as D-08; Phase 07.2 plan 07.2-06).
+Accepted (owner decisions D-01 to D-09 in `.planning/phases/07.2-scoped-memory-files-and-governed-promotion/07.2-CONTEXT.md`,
+research design accepted as D-08; written in plan 07.2-06, amended by the 07.2 fix rounds, accepted at the phase gate
+07.2-15 with the decisions taken during execution under "As built" and the upgrade cost under "Consequences").
 **Date:** 2026-10-13. Extends [ADR-0010](0010-personal-bots-capability-model-and-tool-gate.md) (memory in Postgres,
 "admins never read personal memory") and [ADR-0020](0020-agent-personas-and-agent-cards.md) (Agent Cards: adds
 platform-owned cards). Supersedes nothing.
@@ -159,6 +160,41 @@ export function createApprovalModule(core: Core): { module: ApiModule; service: 
     like every DM. A database-level owner column can be added later with a forward migration if raw-SQL access by
     admins becomes part of the threat model for decision records.
 
+### As built (decisions taken during execution, Phase 07.2 plans 01-17 and the fix rounds)
+
+20. **Agent routes and dead turns.** Every Agent Channel memory route (`/memory/list|read|write|propose`) answers
+    403 `no_trigger` when the call answers no live turn of that agent, or the turn's human no longer reads its
+    conversation (the rule of every agent post, PR #25), audited and committed before the answer; the plugin reads it
+    as "this conversation turn is no longer active". Other refusals stay `200 {refused}`. `list` and `read` count one
+    call against the turn's cap on their own route; `/tool-calls` only checks the cap for the memory tools.
+21. **Where personal memory may be used.** A person's private scope with a bot, and a personal bot's notebook, are used
+    by agents only in the owner's one-person DM with that bot: `read`/`list` elsewhere answer `audience_too_wide`,
+    `propose` elsewhere `dm_only` (its card would show the excerpt to others). AI chats carry no memory files (ADR-0019),
+    even a solo chat. What the human may not read reads as `not_found`, never revealed.
+22. **Files never change scope.** Rename takes a path only; a move between scopes is create plus delete, so each
+    history stays under the scope and owner it was written in. The database refuses a `scope_id` change for every
+    role, the superuser included (trigger `memory_file_scope_fixed`).
+23. **Unit memory is closed outside the unit audience** for every grain: no allow rule lets someone write or promote
+    memory they cannot read. A standard owner of a team bot writes its notebook but does not promote into it
+    (`memory.promote` stays on the `team` surface).
+24. **Search is read-only and decided by the memory service.** Memory search ranks over the ids the memory service
+    says the viewer may read (one permission pass, ids and paths only), never creates a scope, reads only the hits'
+    bodies (a 16 KiB headline window) and has its own rate limit. `GET /memory/scopes` still creates missing org and
+    unit scopes lazily.
+25. **Live updates are ids-only and reader-exact.** `memory.changed {scopeId, fileId, version}` goes to each person who
+    may read the (scope, path) on their own `user:` stream, folder rules included; organization-wide memory nobody is
+    denied goes once on `org:`; private memory to its owner only. Approval updates follow decision 11.
+26. **The plugin side.** The memory file tools are not turn-scoped: they reach OpenClaw through the bot's allowlist
+    and every turn narrows them. `ocw_memory_save` appends to the human's private `MEMORY.md` (the legacy notes table
+    is no longer read); OpenClaw's own memory slot stays `none`.
+27. **Cards and inbox.** The card's failed reason comes from the approval's `result_code`
+    (`AgentCardApprovalLink.resultCode`); inbox rows carry a kind-composed `headline` (title, scope, requester, chips).
+    Expired cards show the pill only. Memory is a module of the ADR-0024 catalog (`memory.*`).
+28. **Detectors as built.** `OCW_PRESIDIO_URL` empty means off; Presidio loads only the recognizers behind the
+    entities we ask for (NIF/NIE for Spanish; card, IBAN, e-mail, phone, IP for both; spaCy NER). An out-of-range offset
+    makes the whole answer invalid (the visible marker), never silently dropped. A secret blocks a write only if
+    redacting it changes the text (already-redacted text does not block).
+
 ### Reuse
 
 17. **07.5 (tool calls).** Registers a `grant` kind for one tool call whose tuple is the tool name plus its canonical
@@ -180,4 +216,33 @@ export function createApprovalModule(core: Core): { module: ApiModule; service: 
 - **Mirror cards do not notify followers.** A status change made by the mirror is visible in place (`message.updated`)
   but does not create `card_updated` notifications; the decider and requester get `approval_request.updated`.
 - **A deleted card message** leaves the request decidable from the inbox (`card_message_id` set null).
-- **Open: real OpenClaw cell.** The agent's card-action turn is proven against the fake cell only, like ADR-0020.
+- **Real OpenClaw cell.** The container smoke (`memory-files`) runs our plugin in the real cell: the bot reads its
+  turn's memory file and proposes a change that ends in a platform-owned approval card, and a call on a turn whose human
+  no longer reads the conversation answers `no_trigger`. Both against the fake Agent Channel API; the agent's
+  card-action turn after a decision is proven against the fake cell only, like ADR-0020.
+- **Leaks are swept, not assumed.** `memory-leaks.int.test.ts` sends one canary through every write path and proves it
+  absent from memory and chat search, realtime frames, stored stream events, debug logs, audit and notifications of
+  everyone who may not read it, and pins the files that may call `withPersonalOwner`. `memory/cross-tenant.int.test.ts`
+  gives every 07.2 route an org-B case through the authz registry.
+- **Legacy notes table.** `app.agent_memories` is no longer read and stays as dead data; dropping it needs a later
+  migration once the backfill has been in production.
+
+### Upgrade cost
+
+Three forward-only migrations; none rewrites an existing table.
+
+- **`20261013025212_memory_files`.** Five new empty tables with their indexes (one GIN over the STORED `search_tsv`), so
+  table and index creation is instant. On existing tables: `message_cards` gains `platform_owned boolean default false
+  not null` (a constant default, metadata only since PostgreSQL 11) and `decision_note text`, and `permission_rules`
+  gains `path_prefix text`; their two `CHECK` constraints are validated with one sequential scan of each table under an
+  `ACCESS EXCLUSIVE` lock (every existing row is null, so the cost is one read of each table, proportional to its size;
+  writes to cards wait for it). `post-migrate.sql` adds three SECURITY DEFINER owner functions, their triggers and four
+  RESTRICTIVE policies on the new tables only, and revokes `UPDATE`/`TRUNCATE` on revisions and proposals.
+- **`20261013031658_memory_notes_backfill`.** Reads `app.agent_memories` once and writes, per distinct (organization,
+  bot, human) with notes, one personal scope, one `MEMORY.md` (version 1) and its revision 1, in the migration's
+  transaction. Cost grows with the number of (bot, human) pairs that have notes: a note is at most 500 characters and a
+  bot kept at most 200 per person (`MEMORY_CAP`), so each file is at most about 100 KB, and each file computes its
+  three-config `search_tsv` and a GIN entry at insert. Idempotent (a pair that already has a personal scope is skipped)
+  and reversible with the rollback block in the file, which keeps any backfilled scope someone edited since.
+- **`20261013095705_memory_scope_immutable`.** One function and one `BEFORE UPDATE OF scope_id` trigger on
+  `memory_files`: no scan, and it fires only on a `scope_id` update, which the API never issues.
