@@ -8,6 +8,7 @@ import type {
 } from "@ocw/contracts";
 import type { Tx } from "@ocw/db";
 import type { ApiModule, App, Core } from "../../core";
+import { createPresidioScanner } from "../../lib/presidio";
 import { agentFacts, findAgent, loadAgentUnit } from "../agent";
 import type { ApprovalService } from "../approval";
 import { agentResource, createPermissionService, loadRules, type MemoryScopeFacts } from "../organization";
@@ -21,7 +22,14 @@ import {
   type MemoryAudience,
   withPersonalOwner,
 } from "./access";
+import { createMemoryWriteKind } from "./approval-kind";
+import type { ChangeScan } from "./detect";
 import { createFileOps, type WriteFileOp } from "./files";
+import {
+  type CreateMemoryProposalInput,
+  type CreateMemoryProposalResult,
+  createMemoryProposal,
+} from "./proposals";
 import { registerMemoryRoutes } from "./routes";
 import {
   describeScopes,
@@ -46,7 +54,20 @@ export {
   type MemoryAudience,
   withPersonalOwner,
 } from "./access";
+export {
+  createMemoryWriteKind,
+  MEMORY_PROPOSAL_RESOURCE,
+  MEMORY_WRITE,
+  type MemoryWriteKindDeps,
+} from "./approval-kind";
+export { type ChangeScan, type ChangeScanner, NO_SCANNER, scanChange } from "./detect";
 export { assertNoSecret, isRootPath, lineChanges, parsePathOrThrow, type WriteFileOp } from "./files";
+export {
+  type CreateMemoryProposalInput,
+  type CreateMemoryProposalResult,
+  createMemoryProposal,
+  type ProposalDeps,
+} from "./proposals";
 export type { LoadedScope, ScopeKey, ScopeRow } from "./scopes";
 
 export interface MemoryService {
@@ -83,13 +104,28 @@ export interface MemoryService {
   ): Promise<AgentReadVerdict>;
   /** Through the transaction's lens (another person's private scope is 404). */
   scopeFacts(tx: Tx, scopeId: string): Promise<{ row: ScopeRow; facts: MemoryScopeFacts; label: string }>;
+  /**
+   * An agent's proposal for the human of a delivered turn (07.2-09): an immutable proposal, a pending `memory.write`
+   * approval and its platform-owned card in the turn's conversation, or a refusal reason (07.2-11 serves it to agents).
+   */
+  propose(tx: Tx, input: CreateMemoryProposalInput): Promise<CreateMemoryProposalResult>;
 }
 
 export function createMemoryService(core: Core, deps: { approvals: ApprovalService }): MemoryService {
-  // 07.2-09 registers the `memory.write` approval kind on `deps.approvals`; this plan only keeps the seam.
-  void deps.approvals;
   const perms = createPermissionService(core);
   const files = createFileOps({ core, perms });
+  // Detector layer 2 (07.2-05): off without OCW_PRESIDIO_URL; fail-open with a visible marker.
+  const scanner = createPresidioScanner(
+    {
+      url: core.env.OCW_PRESIDIO_URL,
+      languages: core.env.OCW_PRESIDIO_LANGUAGES,
+      timeoutMs: core.env.OCW_PRESIDIO_TIMEOUT_MS,
+    },
+    core.log,
+  );
+  const scans = new Map<string, ChangeScan>();
+  // MEM-06: agents' proposals are decided through the approve-and-apply primitive (ADR-0023).
+  deps.approvals.register(createMemoryWriteKind({ perms, files, scans }));
 
   const viewOf = async (tx: Tx, actor: MemoryActor, s: LoadedScope) =>
     toScopeDto(s, await capabilitiesOf(perms, tx, actor, s.facts, undefined));
@@ -167,6 +203,9 @@ export function createMemoryService(core: Core, deps: { approvals: ApprovalServi
       const s = await loadScope(tx, scopeId);
       return { row: s.row, facts: s.facts, label: s.label };
     },
+
+    propose: (tx, input) =>
+      createMemoryProposal(tx, { core, perms, approvals: deps.approvals, scanner, scans }, input),
   };
 }
 
