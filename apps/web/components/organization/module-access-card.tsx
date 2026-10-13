@@ -41,13 +41,14 @@ import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { errorMessage, isApiError } from "@/lib/api";
 import { useModuleAccess, useSetModuleAccess } from "@/lib/module-access-queries";
+import { moduleNames } from "@/lib/modules";
 import { useUnits } from "@/lib/org-queries";
 import { useCan } from "@/lib/permissions";
 import { useMe, useMembers } from "@/lib/queries";
 import type { UnitNode } from "./unit-meta";
 
 /**
- * The Modules panel (07.3-04, ADR-0024, ACCESS-02, P-06, P-07): Work Zone, AI chats and Bots on or off for everyone in
+ * The Modules panel (07.3-04, ADR-0024, ACCESS-02, P-06, P-07): each module of the catalog on or off for everyone in
  * a unit (or the organization) and per person, as the resolver's ordinary deny rules. Everything editable comes from
  * the API's view: `viewerCan` on the unit decides whether the card shows, `canEdit` per person, `inherited` what an
  * ancestor already turned off. The browser never decides by role: a member's role is read only to word why their row
@@ -749,8 +750,8 @@ export function OrganizationModulesCard() {
       <div className="min-w-0">
         <h2 className="font-semibold text-[15px] tracking-tight">Everyone in {name}</h2>
         <p className="mt-0.5 text-muted-foreground text-sm">
-          Turn Work Zone, AI chats and bots on or off for the whole organization, admins included. Off hides
-          the module and the API refuses it.
+          Turn {moduleNames()} on or off for the whole organization, admins included. Off hides the module and
+          the API refuses it.
         </p>
       </div>
       <ModuleAccessCard scopeUnitId={null} scopeName={name} />
@@ -769,8 +770,8 @@ export function UnitModulesCard({ unit }: { unit: UnitNode }) {
       <div className="min-w-0">
         <h3 className="font-semibold text-[15px] tracking-tight">Modules</h3>
         <p className="mt-0.5 text-muted-foreground text-sm">
-          Turn Work Zone, AI chats and bots on or off for everyone in {unit.name} and everything inside it.
-          Off hides the module and the API refuses it.
+          Turn {moduleNames()} on or off for everyone in {unit.name} and everything inside it. Off hides the
+          module and the API refuses it.
         </p>
       </div>
       <ModuleAccessCard scopeUnitId={unit.id} scopeName={unit.name} />

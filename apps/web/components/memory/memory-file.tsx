@@ -25,7 +25,7 @@ import { useMemoryDraft } from "@/lib/memory-draft";
 import { actorLabel } from "@/lib/memory-edit";
 import { useMemoryFile } from "@/lib/memory-queries";
 import { memoryHref, resolveMemoryLink } from "@/lib/memory-tree";
-import { cn, relativeTime } from "@/lib/utils";
+import { cn, shortAge } from "@/lib/utils";
 import { MemoryFileMenu } from "./memory-file-actions";
 import { MemoryHistory, MemoryRevisionView } from "./memory-history";
 import { scopeIcon, scopeTag } from "./memory-tree";
@@ -676,7 +676,7 @@ function MetaActor({ file }: { file: MemoryFileDto }) {
       <span aria-hidden>·</span>
       <Tooltip content={fullDate(file.updatedAt)}>
         <time dateTime={file.updatedAt}>
-          {relativeTime(file.updatedAt)}
+          {shortAge(file.updatedAt)}
           <span className="sr-only">, {fullDate(file.updatedAt)}</span>
         </time>
       </Tooltip>

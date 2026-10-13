@@ -20,7 +20,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { actorLabel, revisionAccessibleName, revisionOpLabel, saveErrorText } from "@/lib/memory-edit";
 import { useMemoryRevision, useMemoryRevisions, useRestoreMemoryRevision } from "@/lib/memory-queries";
-import { cn, relativeTime } from "@/lib/utils";
+import { cn, relativeTime, shortAge } from "@/lib/utils";
 
 /**
  * A memory file's history (Phase 07.2, 07.2-12, MEM-02, UI-SPEC "History list", "History and restore"): every
@@ -150,6 +150,7 @@ function RevisionRow({
   onSelect: () => void;
 }) {
   const op = revisionOpLabel(rev, older);
+  // The visible age is short ("2m ago"); the row's accessible name keeps the long form (UI-SPEC a11y).
   const age = relativeTime(rev.createdAt);
   const actor = rev.author;
   return (
@@ -187,7 +188,7 @@ function RevisionRow({
           <span className="min-w-0 truncate">{actorLabel(actor)}</span>
           <span aria-hidden>·</span>
           <time dateTime={rev.createdAt} className="shrink-0">
-            {age}
+            {shortAge(rev.createdAt)}
           </time>
         </span>
       </button>

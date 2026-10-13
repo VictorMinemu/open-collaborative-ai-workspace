@@ -34,6 +34,24 @@ export function relativeTime(iso: string, now: number = Date.now()): string {
   return "just now";
 }
 
+const SHORT_UNITS: [string, number][] = [
+  ["y", 31_536_000],
+  ["mo", 2_592_000],
+  ["w", 604_800],
+  ["d", 86_400],
+  ["h", 3600],
+  ["m", 60],
+];
+
+/** "just now", "5m ago", "3h ago", "2d ago", "1w ago", "4mo ago", "1y ago" (UI-SPEC meta rows). Past only. */
+export function shortAge(iso: string, now: number = Date.now()): string {
+  const secs = Math.max(0, Math.floor((now - new Date(iso).getTime()) / 1000));
+  for (const [unit, size] of SHORT_UNITS) {
+    if (secs >= size) return `${Math.floor(secs / size)}${unit} ago`;
+  }
+  return "just now";
+}
+
 export function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString("en", { month: "short", day: "numeric", year: "numeric" });
 }

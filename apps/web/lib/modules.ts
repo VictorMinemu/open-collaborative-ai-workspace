@@ -1,4 +1,4 @@
-import { MODULE_CATALOG, type ModuleId, type Permission } from "@ocw/contracts";
+import { MODULE_CATALOG, ModuleId, type Permission } from "@ocw/contracts";
 
 /**
  * Module visibility in the web (Phase 07.3, ADR-0024, P-08). Pure: the only input is the API's decision
@@ -27,6 +27,12 @@ export function permissionsFailed(q: { isError: boolean; errorUpdateCount: numbe
 export function grainStatus(perms: Decision, failed: boolean, permission: Permission): ModuleStatus {
   if (perms) return perms.permissions.includes(permission) ? "on" : "off";
   return failed ? "on" : "loading";
+}
+
+/** "Work Zone, AI chats, Bots and Memory": every module's label in catalog order, for copy that lists them all. */
+export function moduleNames(): string {
+  const labels = ModuleId.options.map((id) => MODULE_CATALOG[id].label);
+  return labels.length > 1 ? `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}` : (labels[0] ?? "");
 }
 
 /** The status of a module, from its catalog entry grain. */
