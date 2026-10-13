@@ -15,6 +15,7 @@ import { AddToChannelDialog } from "./add-to-channel-dialog";
 import { BotCard } from "./bot-card";
 import { BotDetailSheet } from "./bot-detail-sheet";
 import { NewBotSheet, NoModels } from "./new-bot-sheet";
+import { TemplatesSection } from "./templates-section";
 
 export function BotsGallery() {
   useBotsRealtime();
@@ -29,6 +30,8 @@ export function BotsGallery() {
   const [openId, setOpenId] = useState<string | null>(null);
   const [channelFor, setChannelFor] = useState<Agent | null>(null);
   const [fresh, setFresh] = useState<string | null>(null);
+  // An agent just started from a template opens before the bots list has refetched it (07.4-08).
+  const [started, setStarted] = useState<Agent | null>(null);
 
   useEffect(() => {
     if (!fresh) return;
@@ -38,7 +41,7 @@ export function BotsGallery() {
 
   // The API already filters: team bots the caller may read, plus the caller's own personal bots (D-01).
   const list = agents.data?.agents ?? [];
-  const open = list.find((a) => a.id === openId) ?? null;
+  const open = list.find((a) => a.id === openId) ?? (started?.id === openId ? started : null);
   const noModels = models.isSuccess && models.data.models.length === 0;
   const pending = list.filter((a) => a.status === "provisioning").length;
 
@@ -146,6 +149,15 @@ export function BotsGallery() {
               </button>
             ) : null}
           </Grid>
+        )}
+        {agents.isError ? null : (
+          <TemplatesSection
+            onStarted={(a) => {
+              setStarted(a);
+              setFresh(a.id);
+              setOpenId(a.id);
+            }}
+          />
         )}
       </div>
 
