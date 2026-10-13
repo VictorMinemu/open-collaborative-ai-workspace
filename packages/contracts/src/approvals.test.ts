@@ -161,6 +161,26 @@ describe("approval contract (MEM-06, D-05, D-08)", () => {
     ).toBe(false);
   });
 
+  it("a summary may carry the kind's headline for inbox rows (07.2-13)", () => {
+    const headline = {
+      title: "Append to clients/acme.md",
+      context: "Ventas · Team",
+      requester: "Scout for Sam Lee",
+      tags: [
+        { label: "IBAN", tone: "warning" },
+        { label: "Used web content", tone: "warning" },
+      ],
+    };
+    expect(
+      ApprovalList.parse({ items: [{ ...summary, headline }], nextCursor: null }).items[0]?.headline,
+    ).toEqual(headline);
+    expect(ApprovalList.parse({ items: [summary], nextCursor: null }).items[0]?.headline).toBeUndefined();
+    const bad = { ...headline, tags: [{ label: "IBAN", tone: "red" }] };
+    expect(ApprovalList.safeParse({ items: [{ ...summary, headline: bad }], nextCursor: null }).success).toBe(
+      false,
+    );
+  });
+
   it("list queries require a role", () => {
     expect(ApprovalListQuery.safeParse({}).success).toBe(false);
     expect(ApprovalListQuery.parse({ role: "decider", status: "pending", kind: "memory.write" })).toEqual({

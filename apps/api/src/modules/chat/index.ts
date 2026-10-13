@@ -122,6 +122,7 @@ export {
 } from "./board/service";
 /** Agent Cards (06-13, P-11): the agent-channel module updates cards through `patchCard`; ai-chat adds them to snapshots. */
 export {
+  announceCardMessage,
   type CardRow,
   cardMessageOf,
   cardOf,

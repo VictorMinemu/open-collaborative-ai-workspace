@@ -1,4 +1,10 @@
-import { type AgentCardInput, ApprovalKindId, type ApprovalMode, type ApprovalView } from "@ocw/contracts";
+import {
+  type AgentCardInput,
+  type ApprovalHeadline,
+  ApprovalKindId,
+  type ApprovalMode,
+  type ApprovalView,
+} from "@ocw/contracts";
 import type { approvalRequests, Tx } from "@ocw/db";
 import type { HashAtom } from "./hash";
 
@@ -24,6 +30,11 @@ export interface ApprovalKind {
   /** The users told `approval_request.updated {id, status}` (ids only) besides the requester and the decider. */
   audience(tx: Tx, row: ApprovalRow): Promise<readonly string[]>;
   view(tx: Tx, row: ApprovalRow, viewerUserId: string): Promise<ApprovalView>;
+  /**
+   * The one-line description an inbox row shows (title, where, who asked, chips), from the stored action. Called for
+   * every listed and viewed request, only after the visibility rule passed, so it may show what `view` shows.
+   */
+  headline?(tx: Tx, row: ApprovalRow): Promise<ApprovalHeadline>;
   /**
    * The server-composed content of the card that mirrors the request in a conversation (title, fields, summary and an
    * Open action). The service forces kind `approval`, status `pending` and its own Approve action; `warnings` (at most

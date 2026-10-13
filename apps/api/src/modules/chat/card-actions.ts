@@ -322,6 +322,24 @@ export async function patchCard(
 }
 
 /**
+ * Re-announces a card message to its conversation (`message.updated`, same version): the approval module calls it once
+ * it has linked a freshly posted mirror card to its request, so live readers get the card with its approval link
+ * (07.2-13, WINDOWS 160; the `message.created` frame was built before the link existed). A deleted message is left out.
+ */
+export async function announceCardMessage(
+  tx: Tx,
+  deps: Pick<Core, "realtime">,
+  messageId: string,
+): Promise<void> {
+  const [message] = await tx.select().from(messages).where(eq(messages.id, messageId)).limit(1);
+  if (!message || message.deletedAt) return;
+  const dto = await cardMessageOf(tx, message, await loadDirectory(tx));
+  await deps.realtime.appendEvent(tx, convTopic(message.conversationId), EventTypes.messageUpdated, {
+    message: dto,
+  });
+}
+
+/**
  * Mirrors an approval's decision on its platform-owned card (07.2-06), in the decision transaction: status, decision,
  * decider and note, a version bump, `message.updated` to every reader, then the agent hears it as
  * `agent.card_action.v1` (with the quoted note). Once: a card that already shows a decision is left as it is. Called

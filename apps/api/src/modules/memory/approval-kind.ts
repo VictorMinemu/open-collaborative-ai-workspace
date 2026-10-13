@@ -1,6 +1,8 @@
 import {
   type AgentCardField,
   type AgentCardInput,
+  type ApprovalHeadline,
+  type ApprovalTag,
   type ApprovalView,
   MEMORY_LIMITS,
   type MemoryFile,
@@ -158,7 +160,7 @@ async function currentVersionOf(tx: Tx, p: ProposalRow): Promise<number | null> 
   return f?.version ?? null;
 }
 
-async function names(tx: Tx, p: ProposalRow) {
+async function names(tx: Tx, p: Pick<ProposalRow, "requestedByAgentId" | "requestedForUserId">) {
   const [bot] = p.requestedByAgentId
     ? await tx.select({ name: agents.name }).from(agents).where(eq(agents.id, p.requestedByAgentId)).limit(1)
     : [];
@@ -193,6 +195,18 @@ function resultCode(op: MemoryProposalOp, err: HttpError): string {
     default:
       return "apply_failed";
   }
+}
+
+/** An inbox row's chips: one per kind of warn/block finding (names as on the card), then the taint flag. */
+export function headlineTags(findings: readonly SensitiveFinding[], tainted: boolean): ApprovalTag[] {
+  const tags: ApprovalTag[] = [];
+  for (const f of findings) {
+    if (f.severity === "info") continue;
+    const label = FINDING_NAME[f.kind] ?? f.kind;
+    if (!tags.some((t) => t.label === label)) tags.push({ label, tone: "warning" });
+  }
+  if (tainted) tags.push({ label: "Used web content", tone: "warning" });
+  return tags.slice(0, 8);
 }
 
 export function createMemoryWriteKind(deps: MemoryWriteKindDeps): ApprovalKind {
@@ -286,6 +300,20 @@ export function createMemoryWriteKind(deps: MemoryWriteKindDeps): ApprovalKind {
         },
       };
       return { type: "memory_proposal", proposal };
+    },
+
+    async headline(tx, row): Promise<ApprovalHeadline> {
+      const found = await proposalAndScope(tx, row);
+      const who = await names(tx, found?.proposal ?? row);
+      const requester = `${who.bot} for ${who.person}`;
+      if (!found) return { title: GONE_COPY, context: null, requester, tags: [] };
+      const { proposal: p, scope } = found;
+      return {
+        title: proposalTitle(p.op, p.path),
+        context: `${scope.label} · ${scopeTag(scope)}`.slice(0, 120),
+        requester: requester.slice(0, 200),
+        tags: headlineTags(storedFindings(p), p.tainted),
+      };
     },
 
     async card(tx, row) {

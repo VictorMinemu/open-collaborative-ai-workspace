@@ -1,6 +1,7 @@
 import {
   AgentCardInput,
   type ApprovalDetail,
+  ApprovalHeadline,
   type ApprovalList,
   type ApprovalListQuery,
   type ApprovalRequestStatus,
@@ -13,7 +14,7 @@ import { and, desc, eq, inArray, isNull, lt, type SQL, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { LinkedCardInfo, LinkedCards } from "../../lib/chat-agent-bridge";
 import { conflict, forbidden, HttpError, notFound } from "../../lib/errors";
-import { authorOf, type Directory, loadDirectory, mirrorCardDecision } from "../chat";
+import { announceCardMessage, authorOf, type Directory, loadDirectory, mirrorCardDecision } from "../chat";
 import { actionHash } from "./hash";
 import {
   type ApplyResult,
@@ -173,6 +174,18 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
     };
   }
 
+  /** The kind's inbox line, parsed (a kind without one, or a bad one, leaves the summary as it is). */
+  async function withHeadline(
+    tx: Tx,
+    kind: ApprovalKind,
+    row: ApprovalRow,
+    summary: ApprovalSummary,
+  ): Promise<ApprovalSummary> {
+    if (!kind.headline) return summary;
+    const parsed = ApprovalHeadline.safeParse(await kind.headline(tx, row));
+    return parsed.success ? { ...summary, headline: parsed.data } : summary;
+  }
+
   /** The deciders' and the requester's `user:` streams (plus extra ids), ids and status only, never `org:`. */
   async function announce(tx: Tx, kind: ApprovalKind, row: ApprovalRow, extra: Array<string | null>) {
     const to = new Set<string>(await kind.audience(tx, row));
@@ -286,6 +299,8 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
       .update(approvalRequests)
       .set({ cardMessageId: posted.messageId, cardWarnings: warnings })
       .where(eq(approvalRequests.id, row.id));
+    // The card was announced before this link existed: announce it again so live readers get the approval link.
+    if (posted.created) await announceCardMessage(tx, core, posted.messageId);
     return posted.messageId;
   }
 
@@ -440,7 +455,7 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
       const { canDecide, visible } = await visibility(tx, kind, row, viewerUserId);
       if (!visible) throw notFoundError();
       return {
-        ...summaryOf(row, await loadDirectory(tx), canDecide),
+        ...(await withHeadline(tx, kind, row, summaryOf(row, await loadDirectory(tx), canDecide))),
         view: await kind.view(tx, row, viewerUserId),
       };
     },
@@ -487,7 +502,7 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
           const { canDecide, visible } = await visibility(tx, kind, row, viewerUserId);
           if (!visible || !inRole(q.role, row, canDecide, viewerUserId)) continue;
           dir ??= await loadDirectory(tx);
-          items.push(summaryOf(row, dir, canDecide));
+          items.push(await withHeadline(tx, kind, row, summaryOf(row, dir, canDecide)));
           if (items.length === PAGE) break scan;
         }
         if (batch.length < BATCH) {

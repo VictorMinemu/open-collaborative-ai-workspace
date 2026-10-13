@@ -66,6 +66,28 @@ export const ApprovalDecisionRequest = z.object({
 });
 export type ApprovalDecisionRequest = z.infer<typeof ApprovalDecisionRequest>;
 
+/** A short chip of an inbox row ("IBAN", "Used web content"): `warning` reads amber, `neutral` outlined. */
+export const ApprovalTag = z.object({
+  label: z.string().trim().min(1).max(40),
+  tone: z.enum(["warning", "neutral"]),
+});
+export type ApprovalTag = z.infer<typeof ApprovalTag>;
+
+/**
+ * What an inbox row shows without opening the request (07.2-13, D-08): composed by the kind on the server from the
+ * stored action, plain text only (never Markdown). Visible exactly to whoever may see the request itself.
+ */
+export const ApprovalHeadline = z.object({
+  /** "Append to clients/acme.md". */
+  title: z.string().trim().min(1).max(200),
+  /** Where it applies ("Ventas · Team", "You & Scout · Private"); null when the target is gone. */
+  context: z.string().max(120).nullable(),
+  /** Who asked ("Scout for Sam Lee"). */
+  requester: z.string().max(200),
+  tags: z.array(ApprovalTag).max(8),
+});
+export type ApprovalHeadline = z.infer<typeof ApprovalHeadline>;
+
 export const ApprovalSummary = z.object({
   id: Id,
   kind: ApprovalKindId,
@@ -83,6 +105,8 @@ export const ApprovalSummary = z.object({
   resultCode: z.string().max(64).nullable(),
   /** The resolver's live decision for the viewer. */
   viewerCan: z.array(z.enum(["decide"])),
+  /** The kind's one-line description for lists; absent for kinds without one (07.2-13). */
+  headline: ApprovalHeadline.optional(),
 });
 export type ApprovalSummary = z.infer<typeof ApprovalSummary>;
 

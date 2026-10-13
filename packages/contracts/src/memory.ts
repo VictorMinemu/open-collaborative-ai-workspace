@@ -256,6 +256,8 @@ export const MemoryRevisionMeta = z.object({
   author: MemoryActor,
   /** Set when an approved proposal wrote this revision. */
   approvalRequestId: Id.nullable(),
+  /** Who approved that proposal (07.2-13: "Approved by {person}"); null or absent otherwise. */
+  approvedBy: z.object({ id: Id, displayName: z.string() }).nullable().optional(),
   createdAt: IsoDateTime,
 });
 export type MemoryRevisionMeta = z.infer<typeof MemoryRevisionMeta>;
