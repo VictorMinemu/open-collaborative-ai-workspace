@@ -4,7 +4,8 @@
 
 Accepted (owner decisions D-01 to D-09 in `.planning/phases/07.2-scoped-memory-files-and-governed-promotion/07.2-CONTEXT.md`,
 research design accepted as D-08; written in plan 07.2-06, amended by the 07.2 fix rounds, accepted at the phase gate
-07.2-15 with the decisions taken during execution under "As built" and the upgrade cost under "Consequences").
+07.2-15 with the decisions taken during execution under "As built" and the upgrade cost under "Consequences";
+decision 15 amended 2026-10-13 by owner decision: self-approval follows the decision right).
 **Date:** 2026-10-13. Extends [ADR-0010](0010-personal-bots-capability-model-and-tool-gate.md) (memory in Postgres,
 "admins never read personal memory") and [ADR-0020](0020-agent-personas-and-agent-cards.md) (Agent Cards: adds
 platform-owned cards). Supersedes nothing.
@@ -149,9 +150,16 @@ export function createApprovalModule(core: Core): { module: ApiModule; service: 
     consulted, the kind is the authority; a reader who fails `canDecide` gets 403. Every decision, from the card or
     the inbox, mirrors the card once (status `succeeded`, `failed` or `cancelled` for denied; the decision with its
     note; `message.updated`) and the agent hears it as one `agent.card_action.v1` turn. Ordinary cards are unchanged.
-15. **No auto-approval.** Every decision names a human who passed `canDecide`. Self-approval exists only in
-    personal-like scopes (a person's own memory, a personal bot's notebook); unit, organization and team-bot notebook
-    proposals need someone else holding `memory.promote` on the path.
+15. **No auto-approval.** Every decision names a human who passed `canDecide`. Personal-like scopes (a person's own
+    memory, a personal bot's notebook) are decided by their owner only; unit, organization and team-bot notebook
+    proposals by whoever holds `memory.promote` on the path, the human the proposal was made for included. A requester
+    without that right still cannot decide (403 `not_approver`) and reads "Waiting for a reviewer". When the decider
+    is the requester, `approval.decided` carries `selfApproved: true` (a flag, no names); the action-hash recompute,
+    stale base, grants and the gone path are unchanged.
+    *Amended 2026-10-13 (owner decision).* Old rule: self-approval only in personal-like scopes; shared proposals
+    needed someone else holding `memory.promote` (four eyes). New rule: the decision right decides, not who asked; the
+    requester who holds `memory.promote` approves or denies their own shared proposal, on the chat card (Approve /
+    Deny with the confirmation and optional note, next to Review changes) or in the review, and the audit flags it.
 16. **Personal approvals at the database layer.** `approval_requests` has no `personal_owner_only` policy. The kind
     of a personal-like request decides only its owner, so the API never shows it to anyone else (tested with a
     private test kind: an admin gets 404 and lists nothing). The row holds metadata (kind, ids, status, times), the
