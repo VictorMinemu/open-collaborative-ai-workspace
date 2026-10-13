@@ -4,12 +4,15 @@ import {
   MAX_TOOL_CALLS_PER_TURN,
   MAX_WEB_CALLS_PER_TURN,
   type TurnContext,
+  type TurnMemoryFile,
   type TurnNow,
   type TurnToolFlags,
 } from "@ocw/contracts";
 import { agents, agentTurns, conversationMembers, conversations, type Tx, tenantOf } from "@ocw/db";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { Core } from "../../core";
+// Types only: the memory service is injected by the caller (a value import would be a module cycle).
+import type { MemoryAudience, MemoryService } from "../memory";
 import { agentResource, type PermissionService, type PrincipalRef } from "../organization";
 import { type CatalogSource, effectiveCapabilities, effectiveTools, readCapabilities } from "./capabilities";
 import { loadAllGrants, loadCatalog, loadGrants } from "./catalog";
@@ -44,6 +47,13 @@ const MAX_TURN_TOOLS = 64;
 
 const WEB_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: false };
 const MEMORY_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
+/** `ocw_memory_list` / `ocw_memory_read`: workspace memory (written or approved by people), changes nothing. */
+const MEMORY_READ_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: false };
+/**
+ * `ocw_memory_propose`: changes nothing by itself (a person approves every proposal), so it stays usable after the turn
+ * read untrusted content; the proposal is flagged as tainted instead (D-08).
+ */
+const MEMORY_PROPOSE_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: false };
 /**
  * `ocw_agent_card` (06-14, D-07): its output is the API's own answer (trusted) and it only posts into the turn's own
  * conversation, as the reply itself does, so it stays usable after the turn read untrusted content.
@@ -85,10 +95,17 @@ function assemble(
     add(BUILTIN_TOOLS.webSearch, WEB_FLAGS);
     add(BUILTIN_TOOLS.webFetch, WEB_FLAGS);
   }
-  // Memory is DM-only (D-10): read and written only in the human's DM with the bot. A null kind = any
-  // conversation the bot could ever be in (the cell-wide view).
-  if (effective.memory.effective && (conversationKind === null || conversationKind === "dm")) {
-    add(BUILTIN_TOOLS.memorySave, MEMORY_FLAGS);
+  // Memory (D-02, D-08; 07.2-11). Writes are DM-only (D-10): `ocw_memory_save` and `ocw_memory_write` only in the human's
+  // one-person DM with the bot. List, read and propose wherever memory is effective: the Agent Channel routes decide every
+  // call as the bot ∩ the human ∩ every reader of the conversation (the audience rule). A null kind = any conversation the
+  // bot could ever be in (the cell-wide view).
+  if (effective.memory.effective) {
+    const privateChat = conversationKind === null || conversationKind === "dm";
+    if (privateChat) add(BUILTIN_TOOLS.memorySave, MEMORY_FLAGS);
+    add(BUILTIN_TOOLS.memoryList, MEMORY_READ_FLAGS);
+    add(BUILTIN_TOOLS.memoryRead, MEMORY_READ_FLAGS);
+    if (privateChat) add(BUILTIN_TOOLS.memoryWrite, MEMORY_FLAGS);
+    add(BUILTIN_TOOLS.memoryPropose, MEMORY_PROPOSE_FLAGS);
   }
   // Agent Cards (06-14, P-11): every delivered turn, wherever the bot may reply (the card routes re-check posting).
   add(BUILTIN_TOOLS.agentCard, CARD_FLAGS);
@@ -301,8 +318,15 @@ export async function turnPolicy(
     eventId: string;
     clientTimeZone?: string | null;
   },
-  /** AI chat deliveries only (06-10): the chat's readers, for scoped tools and `turn.withheld`. */
-  opts: { audience?: TurnAudience | null } = {},
+  opts: {
+    /** AI chat deliveries only (06-10): the chat's readers, for scoped tools and `turn.withheld`. */
+    audience?: TurnAudience | null;
+    /**
+     * Memory files (07.2-11): the memory service and the conversation's readers (lazy: asked only when a notebook may
+     * be offered outside a one-person DM). Without it a turn carries no memory.
+     */
+    memory?: { service: MemoryService; audience: () => Promise<MemoryAudience> } | null;
+  } = {},
 ): Promise<TurnDecision> {
   // The kind the capability rules see: a "dm" shared by two or more humans is not a private chat (no memory).
   const scopeKind = await memoryScopeKind(tx, p.conversationId, p.conversationKind);
@@ -328,12 +352,21 @@ export async function turnPolicy(
     };
   }
 
-  // Memory (D-10, D-06, MULTI-06): only in this human's DM with the bot (one human member), and only while memory is
-  // effective (the same decision that offers `ocw_memory_save`). Every other turn carries none, AI chats included.
-  const memory: TurnContext["memory"] =
-    scopeKind === "dm" && computed.effective.memory.effective
-      ? await loadTurnMemory(tx, p.agentId, p.humanUserId)
-      : [];
+  // Memory (D-10, D-06, MULTI-06, 07.2-11), only while memory is effective (the decision that offers the memory tools):
+  // the private `MEMORY.md` and its notes only in this human's one-person DM with the bot; the bot's notebook where every
+  // reader may read it. AI chats carry none (ADR-0019: no memory once shared).
+  let memory: TurnContext["memory"] = [];
+  let memoryFiles: TurnMemoryFile[] = [];
+  if (computed.effective.memory.effective && opts.memory && p.conversationKind !== "ai_chat") {
+    const loaded = await loadTurnMemory(tx, opts.memory.service, {
+      agentId: p.agentId,
+      humanUserId: p.humanUserId,
+      oneHumanDm: scopeKind === "dm",
+      audience: opts.memory.audience,
+    });
+    memory = loaded.items;
+    memoryFiles = loaded.files;
+  }
 
   const turn: TurnContext = {
     tools: computed.tools,
@@ -344,6 +377,7 @@ export async function turnPolicy(
     maxWebCalls: MAX_WEB_CALLS_PER_TURN,
     // The persona can tell people what it could not use here and why (06-10); never a reason to enable anything.
     ...(opts.audience ? { withheld: computed.withheld } : {}),
+    ...(memoryFiles.length > 0 ? { memoryFiles } : {}),
   };
   await tx.insert(agentTurns).values({
     eventId: p.eventId,

@@ -302,6 +302,19 @@ describe("the gate holds under abuse (Task 3)", () => {
     expect((await ask(eventId, "ocw_memory_save")).body).toMatchObject({ allowed: false, reason: "tainted" });
   });
 
+  it("after a taint, ocw_memory_read and ocw_memory_propose stay allowed and ocw_memory_write is refused (07.2-11)", async () => {
+    const eventId = await freshTurn();
+    expect((await ask(eventId, "web_search", { query: "x" })).body.allowed).toBe(true);
+    // Reads change nothing and a proposal is approved by a person (flagged as tainted): both stay usable.
+    expect((await ask(eventId, "ocw_memory_read")).body).toMatchObject({ allowed: true, reason: null });
+    expect((await ask(eventId, "ocw_memory_list")).body).toMatchObject({ allowed: true, reason: null });
+    expect((await ask(eventId, "ocw_memory_propose")).body).toMatchObject({ allowed: true, reason: null });
+    expect((await ask(eventId, "ocw_memory_write")).body).toMatchObject({
+      allowed: false,
+      reason: "tainted",
+    });
+  });
+
   it("an event id of another organization's turn is unknown here (RLS): unknown_turn", async () => {
     const otherOrg = randomUUID();
     const otherEvent = randomUUID();

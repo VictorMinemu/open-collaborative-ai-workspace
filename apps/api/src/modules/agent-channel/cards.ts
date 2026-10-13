@@ -25,6 +25,7 @@ import type { AgentMention, CardAction } from "../../lib/chat-agent-bridge";
 import { badRequest, HttpError, notFound } from "../../lib/errors";
 import { findAgent } from "../agent";
 import { createConversationAccess, patchCard } from "../chat";
+import type { MemoryService } from "../memory";
 import { notifyUsers } from "../notification";
 import { createPermissionService, memberDirectory, type PermissionService } from "../organization";
 import { cellOf } from "./auth";
@@ -199,6 +200,8 @@ export async function emitCardAction(
     after?: AfterCommit;
     perms?: PermissionService;
     modelLabel?: ((ref: ModelRef) => string) | undefined;
+    /** Memory files in the card-action turn (07.2-11), like a mention's. */
+    memory?: MemoryService | undefined;
   } = {},
 ): Promise<void> {
   const [card] = await tx.select().from(messageCards).where(eq(messageCards.messageId, a.messageId)).limit(1);
@@ -231,6 +234,7 @@ export async function emitCardAction(
     perms: opts.perms ?? createPermissionService(core),
     ...(opts.after ? { after: opts.after } : {}),
     modelLabel: opts.modelLabel,
+    memory: opts.memory,
   });
   for (const ev of events) {
     const payload: StoredCardAction = {
@@ -253,7 +257,11 @@ export async function emitCardAction(
 /** Registers the chat → agent-channel card decision handler (the bridge keeps chat from importing this module). */
 export function registerCardActionHandler(
   core: Core,
-  opts: { perms: PermissionService; modelLabel?: ((ref: ModelRef) => string) | undefined },
+  opts: {
+    perms: PermissionService;
+    modelLabel?: ((ref: ModelRef) => string) | undefined;
+    memory?: MemoryService | undefined;
+  },
 ): void {
   core.chatAgent.onCardAction((tx, action, after) => emitCardAction(core, tx, action, { ...opts, after }));
 }

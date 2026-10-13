@@ -436,11 +436,20 @@ describe("tools in a shared chat = persona ∩ asker ∩ every participant; with
         tools: [{ sourceKind: "mcp", sourceId: serverId, tool: echoName }],
       }),
     );
-    // Notes the persona keeps about Alex and Víctor in their own DMs: they must never reach an AI chat.
-    for (const userId of [alexId, victorId]) {
-      await su.query(
-        "insert into app.agent_memories (id, organization_id, agent_id, user_id, text) values ($1, $2, $3, $4, $5)",
-        [randomUUID(), orgId, backendId, userId, "Prefers terse answers"],
+    // Notes the persona keeps about Alex and Víctor in their own DMs (07.2-11: bullets of each one's private MEMORY.md
+    // with it): they must never reach an AI chat.
+    for (const c of [alex, victor]) {
+      const scope = await ok(
+        c.request("POST", "/api/v1/memory/scopes", { kind: "personal", agentId: backendId }),
+      );
+      const root = await ok(
+        c.request("GET", `/api/v1/memory/scopes/${scope.id as string}/file?path=MEMORY.md`),
+      );
+      await ok(
+        c.request("PUT", `/api/v1/memory/files/${root.id as string}`, {
+          content: "# Memory\n\n- Prefers terse answers\n",
+          expectedVersion: root.version,
+        }),
       );
     }
     const created = await ok(createChat(victor, "Look up the invoice API"), 201);
@@ -460,7 +469,9 @@ describe("tools in a shared chat = persona ∩ asker ∩ every participant; with
     const ev = await ask(alex, chatId);
     expect(ev.turn.tools).toEqual(expect.arrayContaining(["web_search", "web_fetch", echoName]));
     expect(ev.turn.tools).not.toContain("ocw_memory_save");
+    expect(ev.turn.tools).not.toContain("ocw_memory_write");
     expect(ev.turn.memory).toEqual([]);
+    expect(ev.turn.memoryFiles).toBeUndefined();
     expect(ev.turn.withheld).toEqual([]);
   });
 
@@ -538,6 +549,50 @@ describe("tools in a shared chat = persona ∩ asker ∩ every participant; with
     expect(ev.turn.tools).not.toContain("ocw_memory_save");
     expect(ev.turn.tools).toEqual(expect.arrayContaining(["web_search", "web_fetch", echoName]));
     expect(ev.turn.withheld).toEqual([]);
+    // 07.2-11: list/read/propose (decided per call with the chat's readers), never write; no private memory file.
+    expect(ev.turn.tools).toEqual(
+      expect.arrayContaining(["ocw_memory_list", "ocw_memory_read", "ocw_memory_propose"]),
+    );
+    expect(ev.turn.tools).not.toContain("ocw_memory_write");
+    expect(ev.turn.memoryFiles).toBeUndefined();
+    // Even alone with its owner, a persona in an AI chat never reads his private memory (only in a one-person DM).
+    const read = await cellCall("POST", "/memory/read", {
+      eventId: ev.eventId,
+      agentId: backendId,
+      scope: "personal",
+      path: "MEMORY.md",
+    });
+    expect(read.body).toEqual({ refused: "audience_too_wide" });
+  });
+
+  it("memory reads in an AI chat: every listed participant must read the file; a team grant makes it unbounded", async () => {
+    const scopes = (await ok(victor.request("GET", "/api/v1/memory/scopes"))).scopes as Json[];
+    const orgScope = scopes.find((x) => x.kind === "org")?.id as string;
+    const backendScope = scopes.find((x) => x.unitId === backendUnit)?.id as string;
+    const make = (scope: string, path: string, content: string) =>
+      ok(victor.request("POST", `/api/v1/memory/scopes/${scope}/files`, { path, content }));
+    await make(orgScope, "runbook.md", "# Runbook\n");
+    await make(backendScope, "oncall.md", "# On call\n");
+    const read = (ev: Json, scope: string, path: string) =>
+      cellCall("POST", "/memory/read", { eventId: ev.eventId, agentId: backendId, scope, path });
+
+    // Listed: Víctor and Alex. Víctor (admin) reads Backend's file, Alex does not.
+    const ev = await ask(victor, chatId);
+    expect((await read(ev, orgScope, "runbook.md")).body.file).toMatchObject({ path: "runbook.md" });
+    expect((await read(ev, backendScope, "oncall.md")).body).toEqual({ refused: "audience_too_wide" });
+    const fromAlex = await ask(alex, chatId);
+    expect((await read(fromAlex, backendScope, "oncall.md")).body).toEqual({ refused: "not_found" });
+
+    // A team grant: the readers are no longer a list, so only organization-wide memory nobody is denied.
+    const g = await ok(grant(victor, chatId, { kind: "unit", id: backendUnit }), 201);
+    try {
+      const wide = await ask(victor, chatId);
+      expect((await read(wide, orgScope, "runbook.md")).body.file).toMatchObject({ path: "runbook.md" });
+      expect((await read(wide, backendScope, "oncall.md")).body).toEqual({ refused: "audience_too_wide" });
+    } finally {
+      const revoked = await victor.request("DELETE", `/api/v1/ai-chats/${chatId}/grants/${g.id as string}`);
+      expect(revoked.status).toBe(204);
+    }
   });
 });
 

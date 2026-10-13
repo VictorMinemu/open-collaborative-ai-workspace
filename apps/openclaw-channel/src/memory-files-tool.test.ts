@@ -283,6 +283,18 @@ describe("ocw_memory_read", () => {
     expect(logs.join("\n")).not.toContain("MEMORY.md");
   });
 
+  it("the API's 403 no_trigger (no live turn of this agent, 07.2-11) reads as the turn being over", async () => {
+    const { tool, begin } = setup({
+      read: async () => {
+        throw new AgentChannelHttpError(403, "/memory/read", "x", "no_trigger");
+      },
+    });
+    begin();
+    expect(
+      text(await tool("ocw_memory_read").execute("tc-1", { scope: TEAM_SCOPE, path: "MEMORY.md" })),
+    ).toBe("Not read: this conversation turn is no longer active.");
+  });
+
   it("an error code the API names as a refusal uses that refusal's sentence", async () => {
     const { tool, begin } = setup({
       read: async () => {

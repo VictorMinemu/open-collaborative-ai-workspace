@@ -32,7 +32,9 @@ import {
   turnPolicy,
 } from "../bot-capabilities";
 import { REPLY_MODE_PER_MINUTE } from "../chat";
+import type { MemoryService } from "../memory";
 import { createPermissionService, memberDirectory, type PermissionService } from "../organization";
+import { conversationAudience } from "./memory-files";
 
 /** Bounded thread context per mention (A2.2). */
 export const HISTORY_LIMIT = 50;
@@ -51,10 +53,19 @@ const toIso = (v: string) => new Date(v).toISOString();
  * effective `turn` for this bot and this human (D-07), recorded in `agent_turns` in the same transaction.
  * A bot at its daily limit gets no event; it answers with a notice posted after commit (D-11).
  */
-export function registerMentionHandler(core: Core, opts: { modelLabel?: (ref: ModelRef) => string } = {}) {
+export function registerMentionHandler(
+  core: Core,
+  opts: { modelLabel?: (ref: ModelRef) => string; memory?: MemoryService } = {},
+) {
   const perms = createPermissionService(core);
   core.chatAgent.onAgentMention(async (tx, mention, after) => {
-    const events = await buildMentionEvents(tx, mention, { core, perms, after, modelLabel: opts.modelLabel });
+    const events = await buildMentionEvents(tx, mention, {
+      core,
+      perms,
+      after,
+      modelLabel: opts.modelLabel,
+      memory: opts.memory,
+    });
     const { organizationId } = tenantOf(tx);
     for (const ev of events) {
       await core.realtime.appendEvent(tx, cellTopic(organizationId), AgentChannelEventTypes.mention, ev, {
@@ -73,6 +84,8 @@ export async function buildMentionEvents(
     after?: AfterCommit;
     /** The chat model's label in an AI chat's history (06-10); absent = "AI assistant". */
     modelLabel?: ((ref: ModelRef) => string) | undefined;
+    /** Memory files (07.2-11): absent = turns carry no memory. */
+    memory?: MemoryService | undefined;
   },
 ): Promise<StoredMention[]> {
   // MVP 0: only human-authored mentions reach the cell (no agent ↔ agent loops).
@@ -250,7 +263,12 @@ export async function buildMentionEvents(
         // The asking human's zone (D-12); turnPolicy re-validates it and falls back to UTC.
         clientTimeZone: mention.clientTimeZone ?? null,
       },
-      { audience },
+      {
+        audience,
+        memory: deps.memory
+          ? { service: deps.memory, audience: () => conversationAudience(tx, { conversationId: conv.id }) }
+          : null,
+      },
     );
     // Not delivered (daily limit reached, or the bot is gone): no cell event, so no model call.
     if (!decision.deliver) {

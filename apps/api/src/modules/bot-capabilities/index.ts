@@ -1,4 +1,6 @@
 import type { ApiModule, Core } from "../../core";
+// Types only: the memory service (07.2-08) is injected; the legacy notes live in its private MEMORY.md (07.2-11).
+import type { MemoryService } from "../memory";
 import { createPermissionService } from "../organization";
 import { registerBotCapabilityRoutes } from "./routes";
 
@@ -10,10 +12,11 @@ export {
 } from "./capabilities";
 export { loadAllGrants, loadCatalog, loadGrants, replaceGrants } from "./catalog";
 export {
+  bulletsOf,
   clearMemories,
+  flattenNote,
   listMemories,
   loadTurnMemory,
-  MEMORY_CAP,
   type MemoryRefusal,
   type SaveMemoryResult,
   saveMemory,
@@ -54,14 +57,14 @@ export {
  *
  * Routes (all `authz: user`): GET/PATCH `/agents/:id/capabilities`, GET/PUT `/bot-policy`,
  * GET `/bot-governance`, GET/DELETE `/agents/:id/memories`, DELETE `/agents/:id/memories/:memoryId` (the
- * caller's own notes only, D-10).
+ * caller's own notes only, D-10; since 07.2-11 the bullets of their private `MEMORY.md` with the bot).
  */
-export function createBotCapabilitiesModule(core: Core): ApiModule {
+export function createBotCapabilitiesModule(core: Core, deps: { memory: MemoryService }): ApiModule {
   const perms = createPermissionService(core);
   return {
     name: "bot-capabilities",
     register(app) {
-      registerBotCapabilityRoutes(app, core, perms);
+      registerBotCapabilityRoutes(app, core, perms, deps.memory);
     },
   };
 }

@@ -138,6 +138,8 @@ export function refusalResult(tool: MemoryFileToolName, refused: string): Memory
 function errorResult(tool: MemoryFileToolName, error: unknown): MemoryToolResult {
   if (error instanceof AgentChannelHttpError) {
     if (error.code && isRefusal(error.code)) return refusalResult(tool, error.code);
+    // The API's 403 for a call that answers no live turn of this agent (07.2-11, the rule of every agent post).
+    if (error.status === 403 && error.code === "no_trigger") return refusalResult(tool, "unknown_turn");
     if (error.status === 404) return no(tool, "this conversation turn is no longer active.");
     if (error.status === 409) return no(tool, "memory is not available on this turn.");
     if (error.status === 400 || error.status === 422) return no(tool, "the request was not accepted.");

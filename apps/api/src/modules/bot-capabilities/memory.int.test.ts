@@ -8,6 +8,9 @@ import { clearMemories, listMemories, saveMemory } from "./index";
  * 03.1-07 (BOT-04, SC5, D-10): a bot's memory of one human. Saved only through the cell's gated tool in that
  * human's DM (`POST /agent-channel/v1/memories`, owner taken from the stored delivery), injected only into
  * that human's DM turns, listed and cleared only by that human. Real PostgreSQL + Redis.
+ *
+ * 07.2-11 (D-02, D-08, MEM-07): the same contract, stored as bullets of the human's private `MEMORY.md` with the bot
+ * (the personal memory scope of (bot, human)); storage checks read that file. `app.agent_memories` is not used.
  */
 
 const CELL_TOKEN = "ocw-test-cell-token-memories-0123456789abcdef";
@@ -97,13 +100,33 @@ const audits = async (action: string) =>
     )
   ).rows as Json[];
 
-const rowsOf = async (agentId: string, userId: string) =>
-  (
+/** The private `MEMORY.md` of (bot, human), read as the superuser; null when the scope or the file does not exist. */
+async function notesFile(agentId: string, userId: string): Promise<Json | null> {
+  const rows = (
     await su.query(
-      "select id, user_id, text, source_event_id from app.agent_memories where agent_id = $1 and user_id = $2 order by created_at, id",
+      `select f.id, f.version, f.content, s.owner_user_id, s.personal_owner_user_id from app.memory_files f
+         join app.memory_scopes s on s.id = f.scope_id
+        where s.kind = 'personal' and s.agent_id = $1 and s.owner_user_id = $2 and f.path = 'MEMORY.md'
+          and f.deleted_at is null`,
       [agentId, userId],
     )
   ).rows as Json[];
+  return rows[0] ?? null;
+}
+
+/** The notes (bullets) of that file, oldest first, each with the file it lives in. */
+const rowsOf = async (agentId: string, userId: string) => {
+  const f = await notesFile(agentId, userId);
+  if (!f) return [] as Json[];
+  return (f.content as string)
+    .split("\n")
+    .filter((l) => l.startsWith("- "))
+    .map((l) => ({ fileId: f.id, user_id: f.owner_user_id, text: l.slice(2) }));
+};
+
+const revisionsOf = async (fileId: string) =>
+  (await su.query("select count(*)::int as n from app.memory_file_revisions where file_id = $1", [fileId]))
+    .rows[0].n as number;
 
 beforeAll(async () => {
   stack = await startTestStack({ env: { OCW_CELL_TOKEN: CELL_TOKEN, OCW_MODEL_PROVIDER: "mock" } });
@@ -139,9 +162,22 @@ describe("a note the human asks the bot to remember (D-10)", () => {
     expect(r.body).toEqual({ memoryId: expect.any(String), created: true });
 
     const rows = await rowsOf(samBotId, samId);
-    expect(rows).toEqual([
-      { id: r.body.memoryId, user_id: samId, text: "Prefers metric units", source_event_id: ev.eventId },
-    ]);
+    expect(rows).toEqual([{ fileId: r.body.memoryId, user_id: samId, text: "Prefers metric units" }]);
+    // The bullet is a revision by the bot on behalf of Sam, owner-only in the database.
+    const file = await notesFile(samBotId, samId);
+    expect(file?.personal_owner_user_id).toBe(samId);
+    const rev = (
+      await su.query(
+        "select author_kind, author_id, on_behalf_of_user_id, op from app.memory_file_revisions where file_id = $1 order by version desc limit 1",
+        [r.body.memoryId],
+      )
+    ).rows[0];
+    expect(rev).toEqual({
+      author_kind: "agent",
+      author_id: samBotId,
+      on_behalf_of_user_id: samId,
+      op: "append",
+    });
     const audit = (await audits("agent.memory_saved")).at(-1);
     expect(audit).toMatchObject({
       actor_kind: "agent",
@@ -153,17 +189,33 @@ describe("a note the human asks the bot to remember (D-10)", () => {
     expect(audit?.metadata).toMatchObject({ chars: "Prefers metric units".length });
     expect(JSON.stringify(audit)).not.toContain("metric");
 
-    // The same text again is not stored twice.
+    // The same text again is not stored twice (no new revision either).
+    const revisions = await revisionsOf(r.body.memoryId);
     const again = await save(ev.eventId, "Prefers metric units");
     expect(again.body).toEqual({ memoryId: r.body.memoryId, created: false });
     expect(await rowsOf(samBotId, samId)).toHaveLength(1);
+    expect(await revisionsOf(r.body.memoryId)).toBe(revisions);
   });
 
-  it("comes back in the human's next DM turn as turn.memory", async () => {
+  it("comes back in the human's next DM turn as turn.memory, with the private MEMORY.md as a memory file", async () => {
     const ev = await say(sam, samDmId, samBotId, "What units do I like?");
     expect(ev.turn.memory).toEqual([
       { id: expect.any(String), text: "Prefers metric units", createdAt: expect.any(String) },
     ]);
+    const file = await notesFile(samBotId, samId);
+    expect(ev.turn.memoryFiles).toEqual([
+      {
+        scopeKind: "personal",
+        scopeId: expect.any(String),
+        path: "MEMORY.md",
+        version: file?.version,
+        content: file?.content,
+        truncated: false,
+      },
+    ]);
+    // The item id is the one the owner sees in the DM panel.
+    const listed = await ok(sam.request("GET", `/api/v1/agents/${samBotId}/memories`));
+    expect(listed.items.map((i: Json) => i.id)).toEqual([ev.turn.memory[0].id]);
   });
 
   it("the owner lists it, deletes one, then clears all; each clear is audited with the count only", async () => {
@@ -171,7 +223,7 @@ describe("a note the human asks the bot to remember (D-10)", () => {
     expect(listed.items.map((i: Json) => i.text)).toEqual(["Prefers metric units"]);
 
     const ev = await say(sam, samDmId, samBotId, "Also remember two more things");
-    const a = await save(ev.eventId, "Has a cat named Miso");
+    await save(ev.eventId, "Has a cat named Miso");
     await save(ev.eventId, "Works from Madrid");
     const all = await ok(sam.request("GET", `/api/v1/agents/${samBotId}/memories`));
     expect(all.items.map((i: Json) => i.text)).toEqual([
@@ -179,10 +231,25 @@ describe("a note the human asks the bot to remember (D-10)", () => {
       "Has a cat named Miso",
       "Prefers metric units",
     ]);
+    // 07.2-11: a save answers the file's id; a note's own id is its bullet's, as listed.
+    const a = { body: { memoryId: all.items[1].id as string } };
+    const ids = all.items.map((i: Json) => i.id as string);
+    expect(new Set(ids).size).toBe(3);
 
     await ok(sam.request("DELETE", `/api/v1/agents/${samBotId}/memories/${a.body.memoryId}`));
     const after = await ok(sam.request("GET", `/api/v1/agents/${samBotId}/memories`));
     expect(after.items.map((i: Json) => i.text)).toEqual(["Works from Madrid", "Prefers metric units"]);
+    // The other notes keep their ids; the deletion is a new revision of the file by Sam.
+    expect(after.items.map((i: Json) => i.id)).toEqual([ids[0], ids[2]]);
+    const file = await notesFile(samBotId, samId);
+    expect(
+      (
+        await su.query(
+          "select author_kind, author_id, op from app.memory_file_revisions where file_id = $1 and version = $2",
+          [file?.id, file?.version],
+        )
+      ).rows[0],
+    ).toEqual({ author_kind: "user", author_id: samId, op: "update" });
     const one = (await audits("agent.memory_cleared")).at(-1);
     expect(one).toMatchObject({ actor_kind: "user", actor_id: samId, agent_id: samBotId, user_id: samId });
     expect(one?.metadata).toEqual({ count: 1, scope: "one" });
@@ -194,6 +261,14 @@ describe("a note the human asks the bot to remember (D-10)", () => {
     await ok(sam.request("DELETE", `/api/v1/agents/${samBotId}/memories`));
     expect((await ok(sam.request("GET", `/api/v1/agents/${samBotId}/memories`))).items).toEqual([]);
     expect((await audits("agent.memory_cleared")).at(-1)?.metadata).toEqual({ count: 2, scope: "all" });
+    // Clear all forgets the private scope (files and revisions) and starts a fresh MEMORY.md.
+    const fresh = await notesFile(samBotId, samId);
+    expect(fresh).toMatchObject({ version: 1, content: "# Memory\n" });
+    expect(await revisionsOf(fresh?.id as string)).toBe(1);
+    expect((await audits("memory.scope_forgotten")).at(-1)).toMatchObject({
+      actor_kind: "user",
+      actor_id: samId,
+    });
     expect(JSON.stringify(await audits("agent.memory_cleared"))).not.toContain("Madrid");
 
     const next = await say(sam, samDmId, samBotId, "Anything about me?");
@@ -210,6 +285,18 @@ describe("a note the human asks the bot to remember (D-10)", () => {
     expect(codeOf(foreign)).toBe("unknown_turn");
     expect((await save(ev.eventId, "x".repeat(501))).status).toBe(400);
     expect(await rowsOf(samBotId, samId)).toEqual([]);
+  });
+
+  it("a note holding a secret is never stored: 400 secret_detected, audited without the text (ADR-0023)", async () => {
+    const ev = await say(sam, samDmId, samBotId, "remember my key");
+    const key = ["sk", "ant", "api03", "Zq7Lm2Np9Rt4Vx8Bc1Df6Gh3Jk5"].join("-");
+    const r = await save(ev.eventId, `My key is ${key}`);
+    expect(r.status).toBe(400);
+    expect(codeOf(r)).toBe("secret_detected");
+    expect((await rowsOf(samBotId, samId)).map((x) => x.text).join("\n")).not.toContain(key);
+    const denied = (await audits("agent.memory_saved")).at(-1);
+    expect(denied).toMatchObject({ result: "denied", agent_id: samBotId, user_id: samId });
+    expect(denied?.metadata).toEqual({ reason: "secret_detected", chars: `My key is ${key}`.length });
   });
 });
 
@@ -275,13 +362,20 @@ describe("memory is private by construction (D-10, T-03.1-07-01/03/04)", () => {
     ]);
     await su.query("insert into auth.user (id, name, email) values ($1, 'Eve', 'eve@evil.test')", [userB]);
     const perms = createPermissionService(stack.built.core);
+    const memory = stack.built.memory;
+    // Org B acting as Sam himself (his id as the tenant user): org A's private scope is still invisible.
+    for (const ctxB of [
+      { organizationId: orgB, userId: userB },
+      { organizationId: orgB, userId: samId },
+    ]) {
+      expect(await db.withTenant(ctxB, (tx) => listMemories(tx, memory, samBotId, samId))).toEqual([]);
+      expect(await db.withTenant(ctxB, (tx) => clearMemories(tx, memory, samBotId, samId))).toBe(0);
+    }
     const ctxB = { organizationId: orgB, userId: userB };
-    expect(await db.withTenant(ctxB, (tx) => listMemories(tx, samBotId, samId))).toEqual([]);
-    expect(await db.withTenant(ctxB, (tx) => clearMemories(tx, samBotId, samId))).toBe(0);
     const turn = await say(sam, samDmId, samBotId, "remember nothing");
     expect(
       await db.withTenant(ctxB, (tx) =>
-        saveMemory(tx, stack.built.core, perms, {
+        saveMemory(tx, stack.built.core, perms, memory, {
           eventId: turn.eventId,
           agentId: samBotId,
           text: "planted",
@@ -290,7 +384,7 @@ describe("memory is private by construction (D-10, T-03.1-07-01/03/04)", () => {
     ).toEqual({ refused: "unknown_turn" });
     // Same reads in the right tenant do find Sam's note (the test is not vacuous).
     const ctxA = { organizationId: orgId, userId: samId };
-    expect(await db.withTenant(ctxA, (tx) => listMemories(tx, samBotId, samId))).toHaveLength(1);
+    expect(await db.withTenant(ctxA, (tx) => listMemories(tx, memory, samBotId, samId))).toHaveLength(1);
     expect((await rowsOf(samBotId, samId)).map((r) => r.text)).not.toContain("planted");
   });
 
@@ -301,6 +395,8 @@ describe("memory is private by construction (D-10, T-03.1-07-01/03/04)", () => {
     expect(ev.conversation.kind).toBe("channel");
     expect(ev.turn.tools).not.toContain("ocw_memory_save");
     expect(ev.turn.memory).toEqual([]);
+    // No private memory file either (Archie has no notebook, which would be the only file a channel could carry).
+    expect(ev.turn.memoryFiles).toBeUndefined();
     const r = await save(ev.eventId, "Planted from a channel", teamBotId);
     expect(r.status).toBe(409);
     expect(codeOf(r)).toBe("dm_only");
@@ -325,6 +421,7 @@ describe("memory is private by construction (D-10, T-03.1-07-01/03/04)", () => {
     expect(ev.conversation.kind).toBe("group");
     expect(ev.turn.tools).not.toContain("ocw_memory_save");
     expect(ev.turn.memory).toEqual([]);
+    expect(ev.turn.memoryFiles).toBeUndefined();
     const r = await save(ev.eventId, "Planted from a group", teamBotId);
     expect(r.status).toBe(409);
     expect(codeOf(r)).toBe("dm_only");
@@ -348,6 +445,7 @@ describe("memory is private by construction (D-10, T-03.1-07-01/03/04)", () => {
     expect(ev.conversation.kind).toBe("dm");
     expect(ev.turn.tools).not.toContain("ocw_memory_save");
     expect(ev.turn.memory).toEqual([]);
+    expect(ev.turn.memoryFiles).toBeUndefined();
   });
 
   it("after untrusted web output on a DM turn, saving is 409 tainted", async () => {
@@ -375,10 +473,10 @@ describe("memory is private by construction (D-10, T-03.1-07-01/03/04)", () => {
     const ev = await say(sam, samDmId, samBotId, "remember my shoe size");
     const r = await save(ev.eventId, "Shoe size 44", samBotId, { userId: alexId, ownerUserId: alexId });
     expect(r.status).toBe(200);
-    const row = (await su.query("select user_id from app.agent_memories where id = $1", [r.body.memoryId]))
-      .rows[0];
-    expect(row.user_id).toBe(samId);
+    expect((await notesFile(samBotId, samId))?.id).toBe(r.body.memoryId);
+    expect((await rowsOf(samBotId, samId)).map((x) => x.text)).toContain("Shoe size 44");
     expect(await rowsOf(samBotId, alexId)).toEqual([]);
+    expect(await notesFile(samBotId, alexId)).toBeNull();
   });
 
   it("memory switched off by the owner: the next save is 409 memory_off, notes stay listable and clearable, turns carry none", async () => {
@@ -405,26 +503,34 @@ describe("memory is private by construction (D-10, T-03.1-07-01/03/04)", () => {
     }
   });
 
-  it(`keeps at most 200 notes per (bot, human), pruning the oldest; a turn carries the newest 50`, async () => {
-    // 204 older notes (inserted directly, oldest first), then the 205th through the route.
-    await su.query(
-      `insert into app.agent_memories (organization_id, agent_id, user_id, text, created_at)
-       select $1, $2, $3, 'old note ' || g, now() - interval '1 day' + g * interval '1 second'
-       from generate_series(1, 204) g`,
-      [orgId, samBotId, samId],
-    );
+  it("a turn carries the newest 50 notes and MEMORY.md cut to 8 KiB; past 256 KiB a save is cap_reached", async () => {
+    // 204 notes written into the file directly (oldest first), then a turn.
+    const file = await notesFile(samBotId, samId);
+    const notes = Array.from({ length: 204 }, (_, i) => `- old note ${i + 1}`).join("\n");
+    await su.query("update app.memory_files set content = $2, bytes = octet_length($2) where id = $1", [
+      file?.id,
+      `# Memory\n\n${notes}\n${"x".repeat(9_000)}\n`,
+    ]);
     const ev = await say(sam, samDmId, samBotId, "and remember the newest");
     expect(ev.turn.memory).toHaveLength(50);
     expect(ev.turn.memory.at(-1).text).toBe("old note 204");
     expect(ev.turn.memory[0].text).toBe("old note 155");
+    const carried = (ev.turn.memoryFiles as Json[])[0] as Json;
+    expect(carried.truncated).toBe(true);
+    expect(Buffer.byteLength(carried.content as string, "utf8")).toBeLessThanOrEqual(8_192);
+    expect((carried.content as string).startsWith("# Memory\n\n- old note 1\n")).toBe(true);
     await ok(save(ev.eventId, "Newest note"));
-    const rows = await rowsOf(samBotId, samId);
-    expect(rows).toHaveLength(200);
-    const texts = rows.map((r) => r.text);
-    for (const gone of ["old note 1", "old note 2", "old note 3", "old note 4", "old note 5"]) {
-      expect(texts).not.toContain(gone);
-    }
-    expect(texts[0]).toBe("old note 6");
-    expect(texts.at(-1)).toBe("Newest note");
+    expect((await rowsOf(samBotId, samId)).at(-1)?.text).toBe("Newest note");
+
+    // A file at the size limit: the next note does not fit.
+    await su.query("update app.memory_files set content = $2, bytes = octet_length($2) where id = $1", [
+      file?.id,
+      `# Memory\n${"y".repeat(262_144 - 12)}\n`,
+    ]);
+    const full = await say(sam, samDmId, samBotId, "one more?");
+    const r = await save(full.eventId, "Does not fit");
+    expect(r.status).toBe(409);
+    expect(codeOf(r)).toBe("cap_reached");
+    expect((await notesFile(samBotId, samId))?.content).not.toContain("Does not fit");
   });
 });

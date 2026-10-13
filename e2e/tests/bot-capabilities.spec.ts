@@ -169,8 +169,12 @@ test("owner: Bot settings in the DM header toggles internet; the next turn carri
     await sam.page.keyboard.press("Escape");
     await expect(sheet).toBeHidden();
 
-    // ---- the very next turn carries the web tools (and memory, in his DM)
-    await ask(sam.page, "what's new?", "[turn tools: ocw_agent_card,ocw_memory_save,web_fetch,web_search]");
+    // ---- the very next turn carries the web tools (and memory, in his DM: notes and memory files, 07.2-11)
+    await ask(
+      sam.page,
+      "what's new?",
+      "[turn tools: ocw_agent_card,ocw_memory_list,ocw_memory_propose,ocw_memory_read,ocw_memory_save,ocw_memory_write,web_fetch,web_search]",
+    );
     await expect(sam.page.getByTestId("bot-settings")).toBeVisible();
     await bothThemes(sam.page, `bot-settings-dm-${tag}`);
 
@@ -295,7 +299,11 @@ test("admin: Settings › Bot policy turns internet off for personal bots; the o
     await expect(sheet.getByTestId("capability-memory")).toBeEnabled();
     await bothThemes(sam.page, `bot-settings-denied-${tag}`);
     await sam.page.keyboard.press("Escape");
-    await ask(sam.page, "anything new today?", "[turn tools: ocw_agent_card,ocw_memory_save]");
+    await ask(
+      sam.page,
+      "anything new today?",
+      "[turn tools: ocw_agent_card,ocw_memory_list,ocw_memory_propose,ocw_memory_read,ocw_memory_save,ocw_memory_write]",
+    );
     // The same gated web call is no longer even offered to the bot.
     await ask(sam.page, 'look it up [[call web_search {"query":"ocw"}]]', "Tool web_search: not offered");
 
