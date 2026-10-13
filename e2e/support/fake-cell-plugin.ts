@@ -134,6 +134,22 @@ export function turnContextSuffix(m: MentionPayload): string {
   return ` [memory: ${m.turn?.memory?.length ?? 0}] [now: ${m.turn?.now?.timeZone ?? "none"}]`;
 }
 
+/** The memory file tools (07.2-07/11) and the Agent Channel route each one calls (`POST /memory/<route>`). */
+const MEMORY_FILE_TOOLS = {
+  ocw_memory_list: "list",
+  ocw_memory_read: "read",
+  ocw_memory_write: "write",
+  ocw_memory_propose: "propose",
+} as const;
+type MemoryFileTool = keyof typeof MEMORY_FILE_TOOLS;
+const MEMORY_FILE_DONE: Record<MemoryFileTool, string> = {
+  ocw_memory_list: "listed",
+  ocw_memory_read: "read",
+  ocw_memory_write: "written",
+  ocw_memory_propose: "proposed",
+};
+const isMemoryFileTool = (name: string): name is MemoryFileTool => Object.hasOwn(MEMORY_FILE_TOOLS, name);
+
 /** `[[call <tool> <json>]]` directives in a message (same grammar as infra/fake-model), in order. */
 export function parseCallDirectives(text: string): Array<{ tool: string; args: Record<string, unknown> }> {
   const out: Array<{ tool: string; args: Record<string, unknown> }> = [];
@@ -368,9 +384,11 @@ export class FakeCellPlugin {
    * Simulates the cell running each `[[call <tool> <json>]]` of a mention, the way apps/openclaw-channel does:
    * a tool is offered only when it (or a name ending in `__<tool>`) is in `turn.tools`; `ocw_memory_save` posts
    * `{eventId, agentId, text}` to `/agent-channel/v1/memories`; `ocw_board_card` calls the board routes itself
-   * (`boardCall`, 07.1-13: like memory, never `/tool-calls`); any other tool asks `/agent-channel/v1/tool-calls`
-   * and, when allowed, reports a result. One line per call: `Tool <offered name>: allowed | denied (<reason>)`,
-   * `Tool <name>: saved | created | moved | waiting set | read | not offered`.
+   * (`boardCall`, 07.1-13: like memory, never `/tool-calls`); `ocw_memory_list|read|write|propose` call
+   * `/agent-channel/v1/memory/<list|read|write|propose>` (`memoryCall`, 07.2-17); any other tool asks
+   * `/agent-channel/v1/tool-calls` and, when allowed, reports a result. One line per call: `Tool <offered name>:
+   * allowed | denied (<reason>)`, `Tool <name>: saved | created | moved | waiting set | read | listed | written |
+   * proposed | refused (<code>) | not offered`.
    */
   async simulateToolCalls(
     m: MentionPayload,
@@ -410,6 +428,10 @@ export class FakeCellPlugin {
         lines.push(`Tool ${call.tool}: ${await this.boardCall(m, call.args, ++boardCreates)}`);
         continue;
       }
+      if (isMemoryFileTool(name)) {
+        lines.push(`Tool ${call.tool}: ${await this.memoryCall(m, name, call.args)}`);
+        continue;
+      }
       const params: { query?: string; url?: string } = {};
       if (typeof call.args.query === "string") params.query = call.args.query;
       if (typeof call.args.url === "string") params.url = call.args.url;
@@ -432,6 +454,32 @@ export class FakeCellPlugin {
       lines.push(`Tool ${name}: allowed`);
     }
     return lines;
+  }
+
+  /** Every memory route call the simulated memory tools made, with the status and body it got (07.2-17). */
+  readonly memoryRequests: Array<{ eventId: string; route: string; status: number; body: unknown }> = [];
+
+  /**
+   * `ocw_memory_list|read|write|propose` the way apps/openclaw-channel's memory-files-tool.ts sends them (07.2-17): the
+   * model's arguments as they are, next to the mention's `eventId` and `agentId`; never a user or owner id (the API binds
+   * the human to the stored turn). Answers `listed`, `read`, `written`, `proposed`, `refused (<code>)` for an in-band
+   * refusal or `denied (<code>)` for an HTTP error.
+   */
+  private async memoryCall(
+    m: MentionPayload,
+    tool: MemoryFileTool,
+    args: Record<string, unknown>,
+  ): Promise<string> {
+    const route = `/memory/${MEMORY_FILE_TOOLS[tool]}`;
+    const res = await this.request<{ refused?: string; error?: { code?: string } }>("POST", route, {
+      ...args,
+      eventId: m.eventId,
+      agentId: m.agent.id,
+    });
+    this.memoryRequests.push({ eventId: m.eventId, route, status: res.status, body: res.body });
+    if (res.status !== 200) return `denied (${res.body?.error?.code ?? res.status})`;
+    if (typeof res.body?.refused === "string") return `refused (${res.body.refused})`;
+    return MEMORY_FILE_DONE[tool];
   }
 
   /** Every board route call the simulated `ocw_board_card` made, with the status it got (07.1-13). */

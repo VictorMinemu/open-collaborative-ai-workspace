@@ -518,6 +518,7 @@ describe("platform-owned card mirror: the agent cannot edit it, deciding it goes
         status: "pending",
         requestedForUserId: samId,
         warnings: ["Keeper read web or tool content in this turn."],
+        resultCode: null,
       },
     });
     expect(card.actions.map((a) => a.kind).sort()).toEqual(["approve", "open"]);
@@ -628,9 +629,10 @@ describe("platform-owned card mirror: the agent cannot edit it, deciding it goes
     failing.add(r.resourceId);
     const res = await decide(sam, r.id, { outcome: "approved", actionHash: r.actionHash });
     expect(res.status).toBe(200);
+    // The kind's result code travels on the card, so the mirror can say why in words (07.2-17).
     expect(await cardFor(sam, r.cardMessageId as string)).toMatchObject({
       status: "failed",
-      approval: { status: "failed" },
+      approval: { status: "failed", resultCode: "test_conflict" },
     });
   });
 });
