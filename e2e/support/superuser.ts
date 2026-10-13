@@ -18,11 +18,16 @@ const ISOLATED_DB = "ocw_e2e";
 const CI_DB = "ocw";
 const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
-/** True on a CI runner: `CI` set to anything but empty/false/0 (GitHub: `true`, Woodpecker: `woodpecker`), or Woodpecker's own variables. */
+/**
+ * True only on a real CI runner, identified by the runner's own variables (Woodpecker: `CI=woodpecker` or
+ * `CI_PIPELINE_NUMBER`; GitHub Actions: `GITHUB_ACTIONS=true`). A bare `CI=true` is not enough, so `CI=true pnpm e2e`
+ * on a developer machine can never reach the demo's database.
+ */
 export function isCi(env: Env): boolean {
-  const ci = (env.CI ?? "").trim().toLowerCase();
   return (
-    (ci !== "" && ci !== "false" && ci !== "0") || Boolean(env.CI_PIPELINE_NUMBER) || Boolean(env.WOODPECKER)
+    (env.CI ?? "").trim().toLowerCase() === "woodpecker" ||
+    Boolean(env.CI_PIPELINE_NUMBER) ||
+    (env.GITHUB_ACTIONS ?? "").trim().toLowerCase() === "true"
   );
 }
 

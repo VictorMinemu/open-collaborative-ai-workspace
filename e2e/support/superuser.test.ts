@@ -8,11 +8,10 @@ const dotEnvWith = (value: string) => (name: string) =>
   name === "MIGRATE_SUPERUSER_URL" ? value : undefined;
 
 describe("isCi", () => {
-  it("recognises GitHub (CI=true) and Woodpecker (CI=woodpecker, CI_PIPELINE_NUMBER, WOODPECKER)", () => {
-    expect(isCi({ CI: "true" })).toBe(true);
+  it("recognises Woodpecker (CI=woodpecker, CI_PIPELINE_NUMBER) and GitHub Actions (GITHUB_ACTIONS=true)", () => {
     expect(isCi({ CI: "woodpecker" })).toBe(true);
     expect(isCi({ CI_PIPELINE_NUMBER: "33" })).toBe(true);
-    expect(isCi({ WOODPECKER: "true" })).toBe(true);
+    expect(isCi({ CI: "true", GITHUB_ACTIONS: "true" })).toBe(true);
   });
 
   it("is false on a developer machine", () => {
@@ -20,6 +19,9 @@ describe("isCi", () => {
     expect(isCi({ CI: "" })).toBe(false);
     expect(isCi({ CI: "false" })).toBe(false);
     expect(isCi({ CI: "0" })).toBe(false);
+    // A bare CI=true (e.g. `CI=true pnpm e2e` on a Mac) is not a runner.
+    expect(isCi({ CI: "true" })).toBe(false);
+    expect(isCi({ WOODPECKER: "true" })).toBe(false);
   });
 });
 
@@ -35,9 +37,12 @@ describe("superuserUrl", () => {
   it("accepts CI's ephemeral loopback ocw, from the environment or the .env setup:env wrote", () => {
     expect(superuserUrl({ CI: "woodpecker", MIGRATE_SUPERUSER_URL: CI_URL }, noDotEnv)).toBe(CI_URL);
     expect(superuserUrl({ CI: "woodpecker", CI_PIPELINE_NUMBER: "33" }, dotEnvWith(CI_URL))).toBe(CI_URL);
-    expect(superuserUrl({ CI: "true" }, dotEnvWith("postgresql://postgres:pw@127.0.0.1:5432/ocw"))).toBe(
-      "postgresql://postgres:pw@127.0.0.1:5432/ocw",
-    );
+    expect(
+      superuserUrl(
+        { CI: "true", GITHUB_ACTIONS: "true" },
+        dotEnvWith("postgresql://postgres:pw@127.0.0.1:5432/ocw"),
+      ),
+    ).toBe("postgresql://postgres:pw@127.0.0.1:5432/ocw");
   });
 
   it("refuses the demo's ocw on a developer machine, from the environment or the .env", () => {
@@ -52,13 +57,13 @@ describe("superuserUrl", () => {
   it("refuses any other database or host, even in CI", () => {
     expect(() =>
       superuserUrl(
-        { CI: "true", MIGRATE_SUPERUSER_URL: "postgres://postgres:pw@localhost:5432/prod" },
+        { CI: "woodpecker", MIGRATE_SUPERUSER_URL: "postgres://postgres:pw@localhost:5432/prod" },
         noDotEnv,
       ),
     ).toThrow(/database "prod" in CI/);
     expect(() =>
       superuserUrl(
-        { CI: "true", MIGRATE_SUPERUSER_URL: "postgres://postgres:pw@db.example.com:5432/ocw" },
+        { CI: "woodpecker", MIGRATE_SUPERUSER_URL: "postgres://postgres:pw@db.example.com:5432/ocw" },
         noDotEnv,
       ),
     ).toThrow(/non-loopback host/);
