@@ -14,7 +14,7 @@ import { ADMIN, API_URL, shot } from "./env";
  * `ocw_memory_propose`); Lena, the Ventas lead, finds it in Memory → Proposals even though she cannot read that DM,
  * reviews the reader count, the findings with masked samples, the highlighted diff, approves it, and the team file
  * changes with "Approved by Lena Ortiz" in its history. Then: notes, live counts and decisions, a changed or
- * already-decided proposal, four eyes, a phone denial with a note, a stale rewrite, a refused secret, an admin who
+ * already-decided proposal, a requester without the decision right, a phone denial with a note, a stale rewrite, a refused secret, an admin who
  * never sees a personal proposal, and the extended-scan warning (`OCW_PRESIDIO_URL` set: a non-answering Presidio, so
  * every proposal carries "Extended scan unavailable"; unset: never). Every run uses the fake cell (no model, no
  * provider). Review screenshots: review-memory-proposal(s)-*-<1440|390>(-dark).
@@ -563,7 +563,9 @@ test("notes, live updates and races: a denial with a note, a changed proposal, o
   }
 });
 
-test("four eyes, a stale rewrite, a refused secret and the phone denial", async ({ browser }, info) => {
+test("a requester without the decision right, a stale rewrite, a refused secret and the phone denial", async ({
+  browser,
+}, info) => {
   test.setTimeout(240_000);
   const project = info.project.name;
   const w = widthOf(project);
@@ -608,7 +610,7 @@ test("four eyes, a stale rewrite, a refused secret and the phone denial", async 
       );
     }
 
-    // ---- four eyes: Sam opens his own team proposal: no Approve, the waiting line; a direct POST is 403
+    // ---- no decision right: Sam opens his own team proposal: no Approve, the waiting line; a direct POST is 403
     const base = await fileOf(samApi, seed.ventasScopeId, path);
     const stale = await propose(sam.page, {
       scope: seed.ventasScopeId,
@@ -620,16 +622,14 @@ test("four eyes, a stale rewrite, a refused secret and the phone denial", async 
     });
     await sam.page.goto(`${BASE_URL}/memory/proposals/${stale}?box=requested`);
     const samView = sam.page.locator('[data-testid="proposal-review"][data-view="memory_proposal"]');
-    await expect(samView.getByTestId("proposal-waiting")).toHaveText(
-      "Waiting for a reviewer. You can't approve your own proposal.",
-    );
+    await expect(samView.getByTestId("proposal-waiting")).toHaveText("Waiting for a reviewer");
     await expect(samView.getByTestId("proposal-approve")).toHaveCount(0);
     await expect(samView.getByTestId("proposal-deny")).toHaveCount(0);
     const own = await detailOf(samApi, stale);
     const self = await samApi.post(`/api/v1/approvals/${stale}/decision`, {
       data: { outcome: "approved", actionHash: own.actionHash },
     });
-    expect(self.status(), "Sam can't approve his own team proposal").toBe(403);
+    expect(self.status(), "Sam holds no memory.promote on Ventas").toBe(403);
 
     if (mobile) {
       // ---- phone: Lena denies it from the list with a note (the bottom bar, the bottom-sheet dialog)

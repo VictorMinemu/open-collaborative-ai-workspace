@@ -257,8 +257,8 @@ export function createMemoryWriteKind(deps: MemoryWriteKindDeps): ApprovalKind {
       if (isPersonalLike(scope.facts)) {
         return (await decideMemory(perms, tx, actor, "memory.write", scope.facts, proposal.path)).allowed;
       }
-      // Shared memory: four eyes. Someone else holding memory.promote on the path.
-      if (deciderUserId === row.requestedForUserId) return false;
+      // Shared memory: whoever holds memory.promote on the path, the human the proposal was made for included (owner
+      // decision 2026-10-13, ADR-0023 §15); the decision audit flags a self-approval.
       return (await decideMemory(perms, tx, actor, "memory.promote", scope.facts, proposal.path)).allowed;
     },
 
@@ -270,12 +270,11 @@ export function createMemoryWriteKind(deps: MemoryWriteKindDeps): ApprovalKind {
         const owner = personalOwnerOf(scope.facts);
         return owner ? [owner] : [];
       }
-      const promoters = await perms.usersAllowed(tx, {
+      return perms.usersAllowed(tx, {
         candidates: "members",
         permission: "memory.promote",
         resourceFor: (userId) => memoryResource(scope.facts, proposal.path, { kind: "user", id: userId }),
       });
-      return promoters.filter((id) => id !== row.requestedForUserId);
     },
 
     // The gone path (WINDOWS 144, 164): a proposal its unit, bot or a forget took along, or one asked by a bot deleted

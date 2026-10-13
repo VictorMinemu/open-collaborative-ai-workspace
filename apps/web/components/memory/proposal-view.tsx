@@ -412,7 +412,6 @@ function MemoryProposalReview({
   const ContextIcon = contextIcon(detail.headline?.context);
   const requester = detail.headline?.requester ?? `${bot} for ${person}`;
   const privateScope = isPrivateScope(view.scope.kind);
-  const isRequester = me !== null && detail.requestedBy.userId === me;
   const mayDecide = detail.viewerCan.includes("decide") && status === "pending";
   const blocked = view.findings.some((f) => f.severity === "block");
   const findings = listedFindings(view.findings);
@@ -473,10 +472,10 @@ function MemoryProposalReview({
       if (isApiError(err, 409) && err.code === "approval_action_changed") {
         setNotice({ kind: "changed" });
       } else if (isApiError(err, 409) || isApiError(err, 403)) {
-        setNotice({ kind: "error", text: decisionErrorText(err, isRequester) });
+        setNotice({ kind: "error", text: decisionErrorText(err) });
         void refetch();
       } else {
-        toast.error(decisionErrorText(err, isRequester));
+        toast.error(decisionErrorText(err));
       }
     }
   };
@@ -675,8 +674,6 @@ function MemoryProposalReview({
         stacked={stacked}
         mayDecide={mayDecide}
         blocked={blocked}
-        isRequester={isRequester}
-        privateScope={privateScope}
         onAsk={setAsking}
       />
 
@@ -701,8 +698,6 @@ function ReviewFooter({
   stacked,
   mayDecide,
   blocked,
-  isRequester,
-  privateScope,
   onAsk,
 }: {
   detail: ApprovalDetail;
@@ -710,8 +705,6 @@ function ReviewFooter({
   stacked: boolean;
   mayDecide: boolean;
   blocked: boolean;
-  isRequester: boolean;
-  privateScope: boolean;
   onAsk: (o: "approved" | "denied") => void;
 }) {
   const status = detail.status;
@@ -756,9 +749,7 @@ function ReviewFooter({
   if (status === "pending") {
     body = (
       <p data-testid="proposal-waiting" className="text-muted-foreground text-sm">
-        {isRequester && !privateScope
-          ? "Waiting for a reviewer. You can't approve your own proposal."
-          : "Waiting for a reviewer"}
+        Waiting for a reviewer
       </p>
     );
   } else if (status === "approved") {

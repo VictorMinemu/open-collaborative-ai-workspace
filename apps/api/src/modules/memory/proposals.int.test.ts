@@ -110,21 +110,24 @@ async function joinAs(email: string, name: string, role: "standard" | "developer
 const unit = async (kind: string, name: string, parentId: string | null) =>
   (await ok(admin.request("POST", "/api/v1/units", { kind, name, parentId }))).id as string;
 
-/** Sam writes in his DM with Scout; returns the delivered turn (`agent.mention.v1`) and his message. */
-async function turn(text = "Please keep the Acme contact in team memory") {
-  const messageId = (await ok(sam.request("POST", `/api/v1/conversations/${dmId}/messages`, { body: text })))
+/** `as` writes in their DM with `agentId`; returns the delivered turn (`agent.mention.v1`) and the message. */
+async function turnIn(as: TestClient, dm: string, agentId: string, text: string) {
+  const messageId = (await ok(as.request("POST", `/api/v1/conversations/${dm}/messages`, { body: text })))
     .id as string;
   const rows = (
     await su.query(
       `select payload from app.stream_events
         where stream_id = $1 and type = 'agent.mention.v1' and payload->'agent'->>'id' = $2
           and payload->'message'->>'id' = $3`,
-      [`cell:${orgId}`, scoutId, messageId],
+      [`cell:${orgId}`, agentId, messageId],
     )
   ).rows;
   expect(rows, "one delivery").toHaveLength(1);
   return { eventId: rows[0].payload.eventId as string, messageId };
 }
+
+/** Sam writes in his DM with Scout; returns the delivered turn (`agent.mention.v1`) and his message. */
+const turn = (text = "Please keep the Acme contact in team memory") => turnIn(sam, dmId, scoutId, text);
 
 type ProposeArgs = Omit<CreateMemoryProposalInput, "origin" | "scope"> & {
   eventId: string;
@@ -330,7 +333,7 @@ describe("tracer: Scout's proposal into team memory becomes a pending card; Lena
       label: "Review changes",
       target: `/memory/proposals/${approvalId}`,
     });
-    // Sam asked for it: he may not approve his own team proposal.
+    // Sam asked for it but holds no memory.promote on A: he follows it, he does not decide it.
     expect(card.viewerCan).toEqual(["follow"]);
     expect(await updatesOf(approvalId)).toContain(`user:${lenaId}`);
   });
@@ -490,40 +493,205 @@ const revisionCount = async (scopeId: string) =>
     ).rows[0].n,
   );
 
-describe("four eyes: no self-approval in shared memory (Task 2)", () => {
-  it("Sam cannot approve his own team proposal, not even as a lead of A; Lena can", async () => {
+describe("self-approval follows the decision right (owner decision 2026-10-13)", () => {
+  const promoteSam = async () => {
+    await ok(admin.request("PATCH", `/api/v1/members/${samId}/role`, { role: "lead" }));
+    await ok(admin.request("PATCH", `/api/v1/units/${A}/members/${samId}`, { role: "lead" }));
+  };
+  const demoteSam = async () => {
+    await ok(admin.request("PATCH", `/api/v1/units/${A}/members/${samId}`, { role: "member" }));
+    await ok(admin.request("PATCH", `/api/v1/members/${samId}/role`, { role: "standard" }));
+  };
+
+  it("Sam, without memory.promote on A, cannot decide his own team proposal (403 on the approval and the card); Lena can", async () => {
     const r = await fresh({
       scope: scopeOf[A] as string,
       path: "four-eyes.md",
       op: "create",
       content: "x\n",
     });
-    await ok(admin.request("PATCH", `/api/v1/members/${samId}/role`, { role: "lead" }));
-    await ok(admin.request("PATCH", `/api/v1/units/${A}/members/${samId}`, { role: "lead" }));
-    try {
-      // He may promote in A now, but this proposal was made for him.
-      const scopes = (await ok(sam.request("GET", "/api/v1/memory/scopes"))).scopes as Json[];
-      expect(scopes.find((s) => s.unitId === A)?.viewerCan).toContain("promote");
-      const d = await detail(sam, r.approvalId);
-      expect(d.viewerCan).toEqual([]);
-      const res = await decide(sam, r.approvalId, { outcome: "approved", actionHash: d.actionHash });
-      expect(res.status).toBe(403);
-      expect(codeOf(res)).toBe("not_approver");
-      expect((await approvalRow(r.approvalId)).status).toBe("pending");
-    } finally {
-      await ok(admin.request("PATCH", `/api/v1/units/${A}/members/${samId}`, { role: "member" }));
-      await ok(admin.request("PATCH", `/api/v1/members/${samId}/role`, { role: "standard" }));
-    }
+    const d = await detail(sam, r.approvalId);
+    expect(d.viewerCan).toEqual([]);
+    const res = await decide(sam, r.approvalId, { outcome: "approved", actionHash: d.actionHash });
+    expect(res.status).toBe(403);
+    expect(codeOf(res)).toBe("not_approver");
+    const row = await approvalRow(r.approvalId);
+    expect((await cardFor(sam, row.card_message_id)).viewerCan).toEqual(["follow"]);
+    const onCard = await sam.request("POST", `/api/v1/cards/${row.card_message_id}/decision`, {
+      outcome: "approved",
+      actionHash: d.actionHash,
+    });
+    expect(onCard.status).toBe(403);
+    expect(codeOf(onCard)).toBe("not_approver");
+    expect((await approvalRow(r.approvalId)).status).toBe("pending");
+    expect(await fileAt(scopeOf[A] as string, "four-eyes.md")).toBeUndefined();
+
     expect((await detail(lena, r.approvalId)).viewerCan).toEqual(["decide"]);
-    const res = await decide(lena, r.approvalId, {
+    const byLena = await decide(lena, r.approvalId, {
       outcome: "approved",
       actionHash: await hashOf(lena, r.approvalId),
       note: "Good to keep",
     });
-    expect(res.status, JSON.stringify(res.body)).toBe(200);
-    // A shared proposal's note is not private: the decision audit carries it.
+    expect(byLena.status, JSON.stringify(byLena.body)).toBe(200);
+    // A shared proposal's note is not private: the decision audit carries it. Lena did not ask for it.
     const [decided] = await auditsWhere("approval.decided", "approvalId", r.approvalId);
     expect(decided?.metadata).toMatchObject({ outcome: "approved", note: "Good to keep" });
+    expect(decided?.metadata).not.toHaveProperty("selfApproved");
+  });
+
+  it("as a lead of A (memory.promote), Sam approves his own team proposal on the card; the audit says selfApproved", async () => {
+    await promoteSam();
+    try {
+      const r = await fresh({
+        scope: scopeOf[A] as string,
+        path: "self/lead.md",
+        op: "create",
+        content: "Sam keeps this\n",
+      });
+      const d = await detail(sam, r.approvalId);
+      expect(d.viewerCan).toEqual(["decide"]);
+      const row = await approvalRow(r.approvalId);
+      expect((await cardFor(sam, row.card_message_id)).viewerCan).toEqual(["follow", "decide"]);
+      // He is a decider now: his own proposal is in his decider inbox too.
+      const mine = (await ok(sam.request("GET", "/api/v1/approvals?role=decider&status=pending")))
+        .items as Json[];
+      expect(mine.map((i) => i.id)).toContain(r.approvalId);
+      const res = await sam.request("POST", `/api/v1/cards/${row.card_message_id}/decision`, {
+        outcome: "approved",
+        actionHash: d.actionHash,
+      });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect((await approvalRow(r.approvalId)).status).toBe("applied");
+      expect(await fileAt(scopeOf[A] as string, "self/lead.md")).toMatchObject({
+        content: "Sam keeps this\n",
+        version: 1,
+      });
+      const [decided] = await auditsWhere("approval.decided", "approvalId", r.approvalId);
+      expect(decided).toMatchObject({ actor_kind: "user", actor_id: samId });
+      expect(decided?.metadata).toEqual({
+        approvalId: r.approvalId,
+        kind: "memory.write",
+        mode: "server_apply",
+        outcome: "approved",
+        selfApproved: true,
+      });
+      expect((await cardFor(sam, row.card_message_id)).decision).toMatchObject({
+        outcome: "approved",
+        by: { id: samId },
+      });
+    } finally {
+      await demoteSam();
+    }
+  });
+
+  it("the requester and another decider approve at once: one wins, the other gets 409, exactly one revision", async () => {
+    await promoteSam();
+    try {
+      const r = await fresh({
+        scope: scopeOf[A] as string,
+        path: "self/race.md",
+        op: "create",
+        content: "once\n",
+      });
+      const hash = await hashOf(lena, r.approvalId);
+      const before = await revisionCount(scopeOf[A] as string);
+      const results = await Promise.all([
+        decide(sam, r.approvalId, { outcome: "approved", actionHash: hash }),
+        decide(lena, r.approvalId, { outcome: "approved", actionHash: hash }),
+      ]);
+      expect(results.map((x) => x.status).sort()).toEqual([200, 409]);
+      expect(await revisionCount(scopeOf[A] as string)).toBe(before + 1);
+      expect(await fileAt(scopeOf[A] as string, "self/race.md")).toMatchObject({
+        content: "once\n",
+        version: 1,
+      });
+    } finally {
+      await demoteSam();
+    }
+  });
+
+  it("a self-approved rewrite of a file that changed since still fails as stale_base and writes nothing", async () => {
+    await promoteSam();
+    try {
+      const file = await ok(
+        lena.request("POST", `/api/v1/memory/scopes/${scopeOf[A]}/files`, {
+          path: "self/stale.md",
+          content: "v1\n",
+        }),
+      );
+      const r = await fresh({
+        scope: scopeOf[A] as string,
+        path: "self/stale.md",
+        op: "replace",
+        content: "v1\nfrom Scout\n",
+        baseVersion: 1,
+      });
+      await ok(
+        lena.request("PUT", `/api/v1/memory/files/${file.id}`, { content: "v2\n", expectedVersion: 1 }),
+      );
+      const res = await decide(sam, r.approvalId, {
+        outcome: "approved",
+        actionHash: await hashOf(sam, r.approvalId),
+      });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body).toMatchObject({ status: "failed", resultCode: "stale_base" });
+      expect(await fileAt(scopeOf[A] as string, "self/stale.md")).toMatchObject({
+        version: 2,
+        content: "v2\n",
+      });
+    } finally {
+      await demoteSam();
+    }
+  });
+
+  it("an admin approves the organization proposal his own bot made in his DM: the file changes, the audit says selfApproved", async () => {
+    const bot = await ok(admin.request("POST", "/api/v1/agents/personal", {}));
+    const t = await turnIn(admin, bot.dmId, bot.agent.id, "Save this as organization context");
+    const r = await proposed({
+      eventId: t.eventId,
+      agentId: bot.agent.id,
+      scope: scopeOf.org as string,
+      path: "MEMORY.md",
+      op: "append",
+      content: "- Autofy Labs builds open collaborative AI workspaces",
+    });
+    const row = await approvalRow(r.approvalId);
+    expect(row).toMatchObject({ requested_for_user_id: adminId, status: "pending" });
+    const card = await cardFor(admin, row.card_message_id);
+    expect(card.fields[0]).toEqual({ label: "Memory", value: "Organization · Everyone" });
+    expect(card.viewerCan).toEqual(["follow", "decide"]);
+    expect((await detail(admin, r.approvalId)).viewerCan).toEqual(["decide"]);
+    // A member without memory.promote on the organization neither sees nor decides it.
+    expect((await sam.request("GET", `/api/v1/approvals/${r.approvalId}`)).status).toBe(404);
+    expect(
+      (await decide(sam, r.approvalId, { outcome: "approved", actionHash: row.action_hash })).status,
+    ).toBe(404);
+
+    const res = await admin.request("POST", `/api/v1/cards/${row.card_message_id}/decision`, {
+      outcome: "approved",
+      actionHash: row.action_hash,
+      note: "Context for every bot",
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect((await approvalRow(r.approvalId)).status).toBe("applied");
+    expect((await fileAt(scopeOf.org as string, "MEMORY.md"))?.content).toContain(
+      "- Autofy Labs builds open collaborative AI workspaces",
+    );
+    const [decided] = await auditsWhere("approval.decided", "approvalId", r.approvalId);
+    expect(decided).toMatchObject({ actor_kind: "user", actor_id: adminId });
+    expect(decided?.metadata).toEqual({
+      approvalId: r.approvalId,
+      kind: "memory.write",
+      mode: "server_apply",
+      outcome: "approved",
+      note: "Context for every bot",
+      selfApproved: true,
+    });
+    expect((await cardFor(admin, row.card_message_id)).decision).toMatchObject({
+      outcome: "approved",
+      by: { id: adminId },
+      note: "Context for every bot",
+    });
   });
 });
 
@@ -575,7 +743,7 @@ describe("personal memory: the owner approves in the card; admins never see it (
     const scope = (await proposalOf(r.approvalId))?.scope_id as string;
     expect(await fileAt(scope, "travel.md")).toMatchObject({ content: "Flight to Lisbon on Friday\n" });
     const [decided] = await auditsWhere("approval.decided", "approvalId", r.approvalId);
-    expect(decided?.metadata).toMatchObject({ outcome: "approved", noteChars: 10 });
+    expect(decided?.metadata).toMatchObject({ outcome: "approved", noteChars: 10, selfApproved: true });
     expect(decided?.metadata).not.toHaveProperty("note");
     expect(await updatesOf(r.approvalId)).not.toContain(`user:${adminId}`);
   });
