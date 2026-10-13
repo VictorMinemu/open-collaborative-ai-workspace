@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 116
+open_count: 111
 waived_count: 3
-fixed_count: 48
+fixed_count: 53
 total_count: 167
-last_updated: 2026-10-13T10:56:27.664Z
+last_updated: 2026-10-13T11:20:21.939Z
 ---
 
 # Broken Windows Ledger
@@ -168,18 +168,18 @@ last_updated: 2026-10-13T10:56:27.664Z
 | 151 | 07.2 | deviation | packages/db/src/schema |  | app.agent_memories is now dead data (notes live in the private MEMORY.md); dropping it needs a later migration once the backfill has been in production | open |  | 2026-10-13T07:15:00.428Z |  |
 | 152 | 07.2 | deviation | apps/api/src/modules/bot-capabilities/memory.ts |  | Legacy notes share one createdAt (file mtime); a note refused for a secret reaches the model as 'not accepted' with no reason | open |  | 2026-10-13T07:15:00.503Z |  |
 | 153 | 07.2 | deviation | apps/web/components/memory |  | The Proposals row links to /memory/proposals (built by 07.2-13, not-found until then) and on mobile shows for everyone, while the UI-SPEC limits it to deciders and proposers | fixed |  | 2026-10-13T07:35:47.377Z | 2026-10-13T09:48:45.555Z |
-| 154 | 07.2 | deviation | apps/web/components/markdown |  | axe heading-order (moderate) in the memory viewer: Markdown # renders as h3 under the breadcrumb h1; fix in the shared renderer | open |  | 2026-10-13T07:35:47.448Z |  |
-| 155 | 07.2 | deviation | apps/web/components/organization |  | Settings > Modules copy still says 'Work Zone, AI chats and bots' and does not name Memory; memory dates show '3 hours ago' instead of the spec's '3h ago' | open |  | 2026-10-13T07:35:47.519Z |  |
+| 154 | 07.2 | deviation | apps/web/components/markdown |  | axe heading-order (moderate) in the memory viewer: Markdown # renders as h3 under the breadcrumb h1; fix in the shared renderer | fixed |  | 2026-10-13T07:35:47.448Z | 2026-10-13T11:20:21.727Z |
+| 155 | 07.2 | deviation | apps/web/components/organization |  | Settings > Modules copy still says 'Work Zone, AI chats and bots' and does not name Memory; memory dates show '3 hours ago' instead of the spec's '3h ago' | fixed |  | 2026-10-13T07:35:47.519Z | 2026-10-13T11:20:21.869Z |
 | 156 | 07.2 | deviation | apps/web/components/memory |  | Revisions do not carry who approved them, so history shows 'Approved proposal' instead of 'Approved by {person}' | fixed |  | 2026-10-13T08:49:37.424Z | 2026-10-13T09:48:45.713Z |
 | 157 | 07.2 | deviation | apps/web/lib/memory-queries.ts |  | Team memory files do not update live: memory.changed reaches only the owner of private memory | fixed |  | 2026-10-13T08:49:37.498Z | 2026-10-13T10:56:27.500Z |
 | 158 | 07.2 | deviation | apps/web/components/memory |  | History paginates on the client (API returns all revisions); a file saved without a trailing newline shows an extra empty line in the diff | open |  | 2026-10-13T08:49:37.571Z |  |
 | 159 | 07.2 | deviation | apps/web/package.json |  | lang-markdown pulls HTML/CSS/JS modes into the editor bundle; Cmd/Ctrl+S label uses deprecated navigator.platform | open |  | 2026-10-13T08:49:37.641Z |  |
 | 160 | 07.2 | deviation | apps/api/src/modules/approval |  | The live card event is emitted before the card is linked to its approval (client works around it); the server should emit message.updated after linking. Expiry does not arrive live (card stays Pending until reload) | fixed |  | 2026-10-13T08:49:54.347Z | 2026-10-13T09:48:45.787Z |
-| 161 | 07.2 | deviation | apps/web/components/ui/dialog.tsx |  | The shared Dialog close X is 32 px below 1024 (UI-SPEC asks 44) | open |  | 2026-10-13T08:49:54.419Z |  |
-| 162 | 07.2 | deviation | e2e/tests/memory-files.spec.ts |  | memory-files.spec depends on run order: it expects exact scopes for Sam and breaks once other specs leave private scopes of Sam in the shared DB | open |  | 2026-10-13T09:44:33.028Z |  |
+| 161 | 07.2 | deviation | apps/web/components/ui/dialog.tsx |  | The shared Dialog close X is 32 px below 1024 (UI-SPEC asks 44) | fixed |  | 2026-10-13T08:49:54.419Z | 2026-10-13T11:20:21.799Z |
+| 162 | 07.2 | deviation | e2e/tests/memory-files.spec.ts |  | memory-files.spec depends on run order: it expects exact scopes for Sam and breaks once other specs leave private scopes of Sam in the shared DB | fixed |  | 2026-10-13T09:44:33.028Z | 2026-10-13T11:20:21.651Z |
 | 163 | 07.2 | deviation | apps/api/src/modules/memory |  | Private scopes of deleted bots still appear in /memory/scopes; the bot page waits for the full GET /agents list (no useAgent(id)) | fixed |  | 2026-10-13T09:44:33.110Z | 2026-10-13T10:56:27.334Z |
 | 164 | 07.2 | deviation | apps/api/src/modules/memory/approval-kind.ts |  | Bot delete is soft, so its pending memory proposals stay live and a lead can approve them; the server would write on behalf of a deleted bot | fixed |  | 2026-10-13T09:48:45.861Z | 2026-10-13T10:56:26.772Z |
-| 165 | 07.2 | deviation | apps/web/components/memory |  | 'No sensitive data found' next to 'Extended scan unavailable' can read as reassuring; review-memory-scopes-390 screenshot from 07.2-10 is stale (shows the now-hidden Proposals row) | open |  | 2026-10-13T09:48:45.937Z |  |
+| 165 | 07.2 | deviation | apps/web/components/memory |  | 'No sensitive data found' next to 'Extended scan unavailable' can read as reassuring; review-memory-scopes-390 screenshot from 07.2-10 is stale (shows the now-hidden Proposals row) | fixed |  | 2026-10-13T09:48:45.937Z | 2026-10-13T11:20:21.939Z |
 | 166 | 07.2 | deviation | apps/api/src/modules/approval |  | Requests orphaned before the gone path stay pending until expiry (no sweep); if removing a member ever cascades their personal scopes, that path does not call closeGone | open |  | 2026-10-13T10:56:27.581Z |  |
 | 167 | 07.2 | deviation | apps/api/src/modules/memory |  | memory.changed: a rename only notifies readers of the new path; unit-scope writes emit one event per reader (a unit: topic would scale better); no e2e for live team-file updates | open |  | 2026-10-13T10:56:27.664Z |  |
 
@@ -2028,10 +2028,10 @@ last_updated: 2026-10-13T10:56:27.664Z
     "file": "apps/web/components/markdown",
     "line": null,
     "description": "axe heading-order (moderate) in the memory viewer: Markdown # renders as h3 under the breadcrumb h1; fix in the shared renderer",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T07:35:47.448Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-13T11:20:21.727Z"
   },
   {
     "id": 155,
@@ -2040,10 +2040,10 @@ last_updated: 2026-10-13T10:56:27.664Z
     "file": "apps/web/components/organization",
     "line": null,
     "description": "Settings > Modules copy still says 'Work Zone, AI chats and bots' and does not name Memory; memory dates show '3 hours ago' instead of the spec's '3h ago'",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T07:35:47.519Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-13T11:20:21.869Z"
   },
   {
     "id": 156,
@@ -2112,10 +2112,10 @@ last_updated: 2026-10-13T10:56:27.664Z
     "file": "apps/web/components/ui/dialog.tsx",
     "line": null,
     "description": "The shared Dialog close X is 32 px below 1024 (UI-SPEC asks 44)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T08:49:54.419Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-13T11:20:21.799Z"
   },
   {
     "id": 162,
@@ -2124,10 +2124,10 @@ last_updated: 2026-10-13T10:56:27.664Z
     "file": "e2e/tests/memory-files.spec.ts",
     "line": null,
     "description": "memory-files.spec depends on run order: it expects exact scopes for Sam and breaks once other specs leave private scopes of Sam in the shared DB",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T09:44:33.028Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-13T11:20:21.651Z"
   },
   {
     "id": 163,
@@ -2160,10 +2160,10 @@ last_updated: 2026-10-13T10:56:27.664Z
     "file": "apps/web/components/memory",
     "line": null,
     "description": "'No sensitive data found' next to 'Extended scan unavailable' can read as reassuring; review-memory-scopes-390 screenshot from 07.2-10 is stale (shows the now-hidden Proposals row)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T09:48:45.937Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-13T11:20:21.939Z"
   },
   {
     "id": 166,
