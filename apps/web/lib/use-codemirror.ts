@@ -44,6 +44,7 @@ export const PALETTE = {
   amber200: "oklch(92.4% 0.12 95.746)",
   amber300: "oklch(87.9% 0.169 91.605)",
   amber400: "oklch(82.8% 0.189 84.429)",
+  amber500: "oklch(76.9% 0.188 70.08)",
   amber700: "oklch(55.5% 0.163 48.998)",
 } as const;
 

@@ -2,19 +2,37 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { Badge } from "@/components/ui/badge";
 import { Tooltip } from "@/components/ui/tooltip";
+import { countLabel, pendingLabel, usePendingApprovalCount } from "@/lib/approval-queries";
 import { usePermissionCheck } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 import { isActive, NAV_ITEMS, type NavItem } from "./nav";
 
-function NavLink({
+/** The count of a nav item that declares a badge (07.2-13): live, `Badge brand`, hidden at 0. */
+function useNavCount(item: NavItem): number {
+  return usePendingApprovalCount(item.badge === "pendingApprovals");
+}
+
+function NavLink(props: { item: NavItem; collapsed: boolean; onNavigate?: () => void }) {
+  return props.item.badge ? <CountedNavLink {...props} /> : <NavLinkView {...props} count={0} />;
+}
+
+function CountedNavLink(props: { item: NavItem; collapsed: boolean; onNavigate?: () => void }) {
+  const count = useNavCount(props.item);
+  return <NavLinkView {...props} count={count} />;
+}
+
+function NavLinkView({
   item,
   collapsed,
   onNavigate,
+  count,
 }: {
   item: NavItem;
   collapsed: boolean;
   onNavigate?: () => void;
+  count: number;
 }) {
   const pathname = usePathname();
   const active = isActive(item, pathname);
@@ -24,7 +42,7 @@ function NavLink({
       href={item.href}
       data-testid={`nav-${item.id}`}
       aria-current={active ? "page" : undefined}
-      aria-label={collapsed ? item.label : undefined}
+      aria-label={count > 0 ? pendingLabel(item.label, count) : collapsed ? item.label : undefined}
       onClick={onNavigate}
       className={cn(
         "group relative flex h-9 items-center gap-3 rounded-lg px-2.5 font-medium text-[13.5px] outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-sidebar-ring/40",
@@ -50,6 +68,21 @@ function NavLink({
         strokeWidth={1.9}
       />
       {collapsed ? null : <span className="truncate">{item.label}</span>}
+      {count > 0 ? (
+        <Badge
+          variant="brand"
+          aria-hidden
+          data-testid={`nav-${item.id}-count`}
+          className={cn(
+            "rounded-full tabular-nums",
+            collapsed
+              ? "absolute top-0.5 right-0.5 h-4 min-w-4 px-1 text-[10px]"
+              : "ml-auto h-5 min-w-5 px-1.5",
+          )}
+        >
+          {countLabel(count)}
+        </Badge>
+      ) : null}
     </Link>
   );
   return collapsed ? (

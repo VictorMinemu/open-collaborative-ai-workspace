@@ -17,12 +17,21 @@ export interface NavItem {
   permission?: Permission;
   /** Other path prefixes that belong to this section (e.g. a shared AI chat reads inside Chat). */
   also?: readonly `/${string}`[];
+  /** A live count shown with the label (07.2-13: proposals waiting for the viewer). Only items that declare it. */
+  badge?: "pendingApprovals";
 }
 
 export const NAV_ITEMS: readonly NavItem[] = [
   { id: "chat", label: "Chat", href: "/chat", icon: MessagesSquare, also: ["/share/ai"] },
   { id: "bots", label: "Bots", href: "/bots", icon: Bot, permission: "bot.read" },
-  { id: "memory", label: "Memory", href: "/memory", icon: NotebookText, permission: "memory.read" },
+  {
+    id: "memory",
+    label: "Memory",
+    href: "/memory",
+    icon: NotebookText,
+    permission: "memory.read",
+    badge: "pendingApprovals",
+  },
   {
     id: "work-zone",
     label: "Work Zone",

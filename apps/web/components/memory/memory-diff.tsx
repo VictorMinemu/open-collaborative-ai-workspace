@@ -2,8 +2,8 @@
 
 import { markdown } from "@codemirror/lang-markdown";
 import { MergeView, unifiedMergeView } from "@codemirror/merge";
-import { EditorState, type Extension, RangeSetBuilder } from "@codemirror/state";
-import { Decoration, EditorView } from "@codemirror/view";
+import { EditorState, type Extension, RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
+import { Decoration, type DecorationSet, EditorView } from "@codemirror/view";
 import { useEffect, useRef, useState } from "react";
 import { markdownHighlight, memoryTheme, PALETTE } from "@/lib/use-codemirror";
 import { cn } from "@/lib/utils";
@@ -34,6 +34,12 @@ export interface MemoryDiffProps {
   highlights?: readonly { start: number; end: number }[];
   /** `unified` always stacks (the History tab below 1280 px, UI-SPEC "Diff layout rule"); `auto` follows the host. */
   layout?: "auto" | "unified";
+  /**
+   * Jump to a finding (07.2-13, UI-SPEC "Interaction Contract › Proposals"): scrolls `after` to `line` (1-based) and
+   * outlines `ranges` (offsets into `after.doc`); a new `nonce` repeats the jump. The outline clears after 2 s, or stays
+   * until the next jump under reduced motion.
+   */
+  focus?: { line: number; ranges: readonly { start: number; end: number }[]; nonce: number } | null;
   className?: string;
 }
 
@@ -109,9 +115,38 @@ const diffTheme = EditorView.theme({
     backgroundColor: mix(PALETTE.amber400, 25),
     textDecorationColor: PALETTE.amber300,
   },
+  // The finding a reviewer jumped to (07.2-13): a 2 px amber outline on its spans.
+  ".cm-sensitiveFocus": {
+    outline: `2px solid ${PALETTE.amber500}`,
+    outlineOffset: "1px",
+    borderRadius: "2px",
+  },
 });
 
 const SENSITIVE = Decoration.mark({ class: "cm-sensitiveSpan" });
+const FOCUSED = Decoration.mark({ class: "cm-sensitiveFocus" });
+
+/** The finding a reviewer jumped to: outlined spans, replaced or cleared by the next effect. */
+const setFocusRanges = StateEffect.define<readonly { start: number; end: number }[]>();
+const focusField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(deco, tr) {
+    let next = deco.map(tr.changes);
+    for (const e of tr.effects) {
+      if (!e.is(setFocusRanges)) continue;
+      const b = new RangeSetBuilder<Decoration>();
+      const len = tr.state.doc.length;
+      for (const r of [...e.value].sort((x, y) => x.start - y.start)) {
+        const start = Math.max(0, Math.min(r.start, len));
+        const end = Math.max(start, Math.min(r.end, len));
+        if (end > start) b.add(start, end, FOCUSED);
+      }
+      next = b.finish();
+    }
+    return next;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
 
 function highlightSpans(doc: string, spans: readonly { start: number; end: number }[]): Extension {
   const b = new RangeSetBuilder<Decoration>();
@@ -146,10 +181,14 @@ export function MemoryDiff({
   summary,
   highlights,
   layout = "auto",
+  focus,
   className,
 }: MemoryDiffProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const editorsRef = useRef<HTMLDivElement>(null);
+  /** The editor that shows `after` (side b, or the unified view), for finding jumps. */
+  const afterRef = useRef<EditorView | null>(null);
+  const [built, setBuilt] = useState(0);
   const [split, setSplit] = useState<boolean | null>(null);
 
   // The layout follows the host's own width (a container query in JS: CodeMirror needs to know which view to build).
@@ -174,13 +213,18 @@ export function MemoryDiff({
     if (split) {
       const mv = new MergeView({
         a: { doc: before.doc, extensions: readOnlySide(before.label) },
-        b: { doc: after.doc, extensions: [...readOnlySide(after.label), ...spans] },
+        b: { doc: after.doc, extensions: [...readOnlySide(after.label), ...spans, focusField] },
         parent,
         gutter: false,
         highlightChanges: true,
         collapseUnchanged: COLLAPSE,
       });
-      return () => mv.destroy();
+      afterRef.current = mv.b;
+      setBuilt((n) => n + 1);
+      return () => {
+        afterRef.current = null;
+        mv.destroy();
+      };
     }
     const view = new EditorView({
       parent,
@@ -197,11 +241,30 @@ export function MemoryDiff({
             collapseUnchanged: COLLAPSE,
           }),
           ...spans,
+          focusField,
         ],
       }),
     });
-    return () => view.destroy();
+    afterRef.current = view;
+    setBuilt((n) => n + 1);
+    return () => {
+      afterRef.current = null;
+      view.destroy();
+    };
   }, [split, before.doc, before.label, after.doc, after.label, highlights]);
+
+  // A finding jump: scroll its first line into view (no smooth scrolling) and outline its spans.
+  useEffect(() => {
+    const view = afterRef.current;
+    if (!view || !focus || built === 0) return;
+    const line = view.state.doc.line(Math.max(1, Math.min(focus.line, view.state.doc.lines)));
+    view.dispatch({
+      effects: [setFocusRanges.of(focus.ranges), EditorView.scrollIntoView(line.from, { y: "center" })],
+    });
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const t = window.setTimeout(() => view.dispatch({ effects: setFocusRanges.of([]) }), 2000);
+    return () => window.clearTimeout(t);
+  }, [focus, built]);
 
   return (
     <section
