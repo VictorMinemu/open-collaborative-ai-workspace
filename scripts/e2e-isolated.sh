@@ -55,6 +55,23 @@ else
   release_lock() { rm -rf "$LOCK.d"; }
 fi
 
+# ---------------------------------------------------------------- keep the Mac awake (macOS)
+# A sleep mid-run freezes the browser, the API and Playwright together, and on wake the test that was running fails,
+# usually on its timeout, as if the product hung (07.2 gate: a 38 s lid-close sleep timed out memory-files on desktop;
+# the same run had idle-slept 17 s three minutes earlier). caffeinate -i blocks idle sleep while this script runs.
+# Closing the lid on battery still sleeps, so cleanup lists every sleep that happened during the run.
+run_started="$(date '+%Y-%m-%d %H:%M:%S')"
+if command -v caffeinate >/dev/null 2>&1; then caffeinate -i -w $$ & fi
+report_sleeps() {
+  command -v pmset >/dev/null 2>&1 || return 0
+  local slept
+  slept="$(pmset -g log 2>/dev/null | awk -v since="$run_started" '/Entering Sleep state/ && ($1 " " $2) >= since' || true)"
+  [ -n "$slept" ] || return 0
+  echo "e2e-isolated: WARNING the Mac slept during this run; a test that failed at one of these times failed on wake,"
+  echo "e2e-isolated: not because of the product (pmset -g log):"
+  printf '%s\n' "$slept" | sed -E 's/^([0-9-]+ [0-9:]+) [+-][0-9]+[[:space:]]+Sleep[[:space:]]+/  \1  /'
+}
+
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ocw-e2e.XXXXXX")"
 stop_pid() {
   [ -f "$1" ] || return 0
@@ -67,6 +84,7 @@ cleanup() {
   stop_pid "$RUN_DIR/web.pid"; stop_pid "$RUN_DIR/api.pid"; stop_pid "$RUN_DIR/fake.pid"
   storage stop garage >/dev/null 2>&1 || true
   release_lock
+  report_sleeps
   echo "e2e-isolated: logs in $RUN_DIR"
 }
 trap cleanup EXIT INT TERM
