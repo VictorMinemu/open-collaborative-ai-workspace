@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 117
+open_count: 118
 waived_count: 3
-fixed_count: 32
-total_count: 152
-last_updated: 2026-10-13T07:15:00.503Z
+fixed_count: 34
+total_count: 155
+last_updated: 2026-10-13T07:35:47.519Z
 ---
 
 # Broken Windows Ledger
@@ -129,7 +129,7 @@ last_updated: 2026-10-13T07:15:00.503Z
 | 112 | 07.1 | deviation | e2e/tests/search.spec.ts |  | Composer-focus regression e2e was not RED on the pre-fix build; fix rests on run-1 evidence, a focus probe and a unit test | open |  | 2026-10-12T21:23:04.036Z |  |
 | 113 | 07.1 | deviation | apps/web/components/chat/channel-view.tsx |  | Board Messages view: a card root beyond the first 100 cards of its column is not cached, so Edit message falls back to the inline editor (400 board_card_use_board) | fixed |  | 2026-10-12T21:23:04.109Z | 2026-10-12T22:27:17.051Z |
 | 114 | 07.2 | deviation | packages/contracts/src/memory.ts |  | Folder rule pathPrefix is accepted by the contract but dropped by the API until 07.2-03; an allow memory.write on hr/ would apply to the whole scope meanwhile; must close before the phase merges | fixed |  | 2026-10-13T03:20:41.553Z | 2026-10-13T04:39:31.651Z |
-| 115 | 07.2 | deviation | apps/web/components/shell/module-gate.tsx |  | Settings > Modules shows a Memory toggle with no memory UI until 07.2-10; screenshot the 4-row panel in 10/13 | open |  | 2026-10-13T03:20:41.625Z |  |
+| 115 | 07.2 | deviation | apps/web/components/shell/module-gate.tsx |  | Settings > Modules shows a Memory toggle with no memory UI until 07.2-10; screenshot the 4-row panel in 10/13 | fixed |  | 2026-10-13T03:20:41.625Z | 2026-10-13T07:35:47.237Z |
 | 116 | 07.2 | deviation | packages/db/src/schema/memory.ts |  | approval_requests has no personal-owner column: an admin with direct SQL can see that an approval for a personal proposal exists (metadata, not content); decide in 07.2-06 | waived | API owner-only visibility proven by test; no RLS by design (ADR-0023 decision 16) | 2026-10-13T03:45:07.675Z | 2026-10-13T04:50:57.537Z |
 | 117 | 07.2 | deviation | packages/db/src/schema/memory.ts |  | Personal bot notebook owner assumes a personal bot never changes owner or kind; recompute the owner if that ever changes | open |  | 2026-10-13T03:45:07.777Z |  |
 | 118 | 07.2 | deviation | packages/db/src/schema/memory.ts |  | A file moved across scopes keeps old revisions with the previous owner (conservative); 07.2-08 must account for it | fixed |  | 2026-10-13T03:45:07.876Z | 2026-10-13T05:47:46.872Z |
@@ -157,7 +157,7 @@ last_updated: 2026-10-13T07:15:00.503Z
 | 140 | 07.2 | deviation | apps/api/src/modules/memory |  | A 256 KiB body of escaped control chars exceeds Fastify's 1 MiB limit and returns Fastify's 413, not memory_file_too_large | open |  | 2026-10-13T05:47:47.411Z |  |
 | 141 | 07.2 | deviation | apps/api/src/modules/memory/search.ts |  | Memory search loads every readable file's content (listReadableFiles) per scope just to get ids, calls listScopes (which writes) and one permission pass per scope; heavy at scale — select ids only | open |  | 2026-10-13T06:29:37.690Z |  |
 | 142 | 07.2 | deviation | apps/api/src/modules/memory/search.ts |  | Snippet highlighting scans full content: up to 50 files x 3 configs x 256 KiB per search | open |  | 2026-10-13T06:29:37.759Z |  |
-| 143 | 07.2 | deviation | apps/api/src/modules/memory/search.ts |  | Path-only matches return an unmarked snippet; snippet helpers are duplicated from the chat search module | open |  | 2026-10-13T06:29:37.838Z |  |
+| 143 | 07.2 | deviation | apps/api/src/modules/memory/search.ts |  | Path-only matches return an unmarked snippet; snippet helpers are duplicated from the chat search module | fixed |  | 2026-10-13T06:29:37.838Z | 2026-10-13T07:35:47.307Z |
 | 144 | 07.2 | deviation | apps/api/src/modules/approval |  | A proposal that disappears in a cascade leaves its approval request and card pending (fail-closed) until 14-day expiry; needs a 'gone' hook in the primitive to close it as failed/scope_gone | open |  | 2026-10-13T06:30:45.754Z |  |
 | 145 | 07.2 | deviation | apps/api/src/modules/memory/proposals.ts |  | Presidio runs inside the proposal transaction: up to 2 s holding the connection and advisory lock | open |  | 2026-10-13T06:30:45.823Z |  |
 | 146 | 07.2 | deviation | apps/api/src/modules/memory/proposals.ts |  | canDecide and audience are expensive per row (audience calls usersAllowed over all members); related to #133 | open |  | 2026-10-13T06:30:45.892Z |  |
@@ -167,6 +167,9 @@ last_updated: 2026-10-13T07:15:00.503Z
 | 150 | 07.2 | unrun-verify | e2e/tests/bot-memory.spec.ts |  | bot-capabilities.spec and bot-memory.spec not run after 07.2-11; the fake API never answers no_trigger, the 07.2-15 smoke should cover an expired-turn call | open |  | 2026-10-13T07:15:00.344Z |  |
 | 151 | 07.2 | deviation | packages/db/src/schema |  | app.agent_memories is now dead data (notes live in the private MEMORY.md); dropping it needs a later migration once the backfill has been in production | open |  | 2026-10-13T07:15:00.428Z |  |
 | 152 | 07.2 | deviation | apps/api/src/modules/bot-capabilities/memory.ts |  | Legacy notes share one createdAt (file mtime); a note refused for a secret reaches the model as 'not accepted' with no reason | open |  | 2026-10-13T07:15:00.503Z |  |
+| 153 | 07.2 | deviation | apps/web/components/memory |  | The Proposals row links to /memory/proposals (built by 07.2-13, not-found until then) and on mobile shows for everyone, while the UI-SPEC limits it to deciders and proposers | open |  | 2026-10-13T07:35:47.377Z |  |
+| 154 | 07.2 | deviation | apps/web/components/markdown |  | axe heading-order (moderate) in the memory viewer: Markdown # renders as h3 under the breadcrumb h1; fix in the shared renderer | open |  | 2026-10-13T07:35:47.448Z |  |
+| 155 | 07.2 | deviation | apps/web/components/organization |  | Settings > Modules copy still says 'Work Zone, AI chats and bots' and does not name Memory; memory dates show '3 hours ago' instead of the spec's '3h ago' | open |  | 2026-10-13T07:35:47.519Z |  |
 
 ````json
 [
@@ -1545,10 +1548,10 @@ last_updated: 2026-10-13T07:15:00.503Z
     "file": "apps/web/components/shell/module-gate.tsx",
     "line": null,
     "description": "Settings > Modules shows a Memory toggle with no memory UI until 07.2-10; screenshot the 4-row panel in 10/13",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T03:20:41.625Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-13T07:35:47.237Z"
   },
   {
     "id": 116,
@@ -1881,10 +1884,10 @@ last_updated: 2026-10-13T07:15:00.503Z
     "file": "apps/api/src/modules/memory/search.ts",
     "line": null,
     "description": "Path-only matches return an unmarked snippet; snippet helpers are duplicated from the chat search module",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T06:29:37.838Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-13T07:35:47.307Z"
   },
   {
     "id": 144,
@@ -1992,6 +1995,42 @@ last_updated: 2026-10-13T07:15:00.503Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-13T07:15:00.503Z",
+    "resolved_at": null
+  },
+  {
+    "id": 153,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/web/components/memory",
+    "line": null,
+    "description": "The Proposals row links to /memory/proposals (built by 07.2-13, not-found until then) and on mobile shows for everyone, while the UI-SPEC limits it to deciders and proposers",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T07:35:47.377Z",
+    "resolved_at": null
+  },
+  {
+    "id": 154,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/web/components/markdown",
+    "line": null,
+    "description": "axe heading-order (moderate) in the memory viewer: Markdown # renders as h3 under the breadcrumb h1; fix in the shared renderer",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T07:35:47.448Z",
+    "resolved_at": null
+  },
+  {
+    "id": 155,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/web/components/organization",
+    "line": null,
+    "description": "Settings > Modules copy still says 'Work Zone, AI chats and bots' and does not name Memory; memory dates show '3 hours ago' instead of the spec's '3h ago'",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T07:35:47.519Z",
     "resolved_at": null
   }
 ]
