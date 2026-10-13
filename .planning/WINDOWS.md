@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 118
+open_count: 122
 waived_count: 3
 fixed_count: 34
-total_count: 155
-last_updated: 2026-10-13T07:35:47.519Z
+total_count: 159
+last_updated: 2026-10-13T08:49:37.641Z
 ---
 
 # Broken Windows Ledger
@@ -170,6 +170,10 @@ last_updated: 2026-10-13T07:35:47.519Z
 | 153 | 07.2 | deviation | apps/web/components/memory |  | The Proposals row links to /memory/proposals (built by 07.2-13, not-found until then) and on mobile shows for everyone, while the UI-SPEC limits it to deciders and proposers | open |  | 2026-10-13T07:35:47.377Z |  |
 | 154 | 07.2 | deviation | apps/web/components/markdown |  | axe heading-order (moderate) in the memory viewer: Markdown # renders as h3 under the breadcrumb h1; fix in the shared renderer | open |  | 2026-10-13T07:35:47.448Z |  |
 | 155 | 07.2 | deviation | apps/web/components/organization |  | Settings > Modules copy still says 'Work Zone, AI chats and bots' and does not name Memory; memory dates show '3 hours ago' instead of the spec's '3h ago' | open |  | 2026-10-13T07:35:47.519Z |  |
+| 156 | 07.2 | deviation | apps/web/components/memory |  | Revisions do not carry who approved them, so history shows 'Approved proposal' instead of 'Approved by {person}' | open |  | 2026-10-13T08:49:37.424Z |  |
+| 157 | 07.2 | deviation | apps/web/lib/memory-queries.ts |  | Team memory files do not update live: memory.changed reaches only the owner of private memory | open |  | 2026-10-13T08:49:37.498Z |  |
+| 158 | 07.2 | deviation | apps/web/components/memory |  | History paginates on the client (API returns all revisions); a file saved without a trailing newline shows an extra empty line in the diff | open |  | 2026-10-13T08:49:37.571Z |  |
+| 159 | 07.2 | deviation | apps/web/package.json |  | lang-markdown pulls HTML/CSS/JS modes into the editor bundle; Cmd/Ctrl+S label uses deprecated navigator.platform | open |  | 2026-10-13T08:49:37.641Z |  |
 
 ````json
 [
@@ -2031,6 +2035,54 @@ last_updated: 2026-10-13T07:35:47.519Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-13T07:35:47.519Z",
+    "resolved_at": null
+  },
+  {
+    "id": 156,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/web/components/memory",
+    "line": null,
+    "description": "Revisions do not carry who approved them, so history shows 'Approved proposal' instead of 'Approved by {person}'",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T08:49:37.424Z",
+    "resolved_at": null
+  },
+  {
+    "id": 157,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/web/lib/memory-queries.ts",
+    "line": null,
+    "description": "Team memory files do not update live: memory.changed reaches only the owner of private memory",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T08:49:37.498Z",
+    "resolved_at": null
+  },
+  {
+    "id": 158,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/web/components/memory",
+    "line": null,
+    "description": "History paginates on the client (API returns all revisions); a file saved without a trailing newline shows an extra empty line in the diff",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T08:49:37.571Z",
+    "resolved_at": null
+  },
+  {
+    "id": 159,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/web/package.json",
+    "line": null,
+    "description": "lang-markdown pulls HTML/CSS/JS modes into the editor bundle; Cmd/Ctrl+S label uses deprecated navigator.platform",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T08:49:37.641Z",
     "resolved_at": null
   }
 ]
