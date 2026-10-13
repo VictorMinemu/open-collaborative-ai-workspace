@@ -2,6 +2,7 @@
 // host paths -> repo-relative or `~/...`) and `redact()` (credentials). AGENTS.md principles 7 and 8.
 
 import { homedir } from "node:os";
+import { redactSecrets } from "@ocw/contracts";
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -38,57 +39,10 @@ export function contain(text: string, roots: readonly string[], home: string = h
   return out;
 }
 
-interface RedactionRule {
-  re: RegExp;
-  replace: string | ((substring: string, ...args: string[]) => string);
-}
-
-const REDACTIONS: RedactionRule[] = [
-  // PEM blocks (also a block truncated before its END line).
-  {
-    re: /-----BEGIN [A-Z0-9 ]+-----[\s\S]*?(?:-----END [A-Z0-9 ]+-----|$)/g,
-    replace: "[REDACTED:pem-block]",
-  },
-  { re: /\bsk-ant-[A-Za-z0-9_-]{8,}/g, replace: "[REDACTED:anthropic-key]" },
-  { re: /\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}/g, replace: "[REDACTED:api-key]" },
-  { re: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g, replace: "[REDACTED:github-token]" },
-  { re: /\bgithub_pat_[A-Za-z0-9_]{20,}/g, replace: "[REDACTED:github-token]" },
-  { re: /\bglpat-[A-Za-z0-9_-]{20,}/g, replace: "[REDACTED:gitlab-token]" },
-  { re: /\bxox[abposr]-[A-Za-z0-9-]{10,}/g, replace: "[REDACTED:slack-token]" },
-  { re: /\bAIza[0-9A-Za-z_-]{35}\b/g, replace: "[REDACTED:google-key]" },
-  { re: /\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b/g, replace: "[REDACTED:aws-access-key]" },
-  {
-    re: /(aws_secret_access_key|aws_session_token)(\s*[=:]\s*["']?)[A-Za-z0-9/+=]{16,}/gi,
-    replace: (_m, key: string, sep: string) => `${key}${sep}[REDACTED]`,
-  },
-  {
-    re: /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/g,
-    replace: (_m, scheme: string) => `${scheme} [REDACTED]`,
-  },
-  // JWTs
-  { re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, replace: "[REDACTED:jwt]" },
-  // Credentials embedded in URLs: https://user:secret@host
-  {
-    re: /\b([a-z][a-z0-9+.-]*:\/\/)([^\s/:@]+):([^\s/@]+)@/gi,
-    replace: (_m, scheme: string, user: string) => `${scheme}${user}:[REDACTED]@`,
-  },
-  // Env-style assignments of secret-looking variables: FOO_API_KEY=..., export DB_PASSWORD="..."
-  // (`=` only, so code such as `API_KEY: z.string()` stays readable in diffs).
-  {
-    re: /\b([A-Z0-9_]*(?:API_KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE_KEY)[A-Z0-9_]*)(\s*=\s*["']?)(?!\[REDACTED)[^\s"']{6,}/g,
-    replace: (_m, key: string, sep: string) => `${key}${sep}[REDACTED]`,
-  },
-];
-
 /** Redact API keys, tokens and private key material. Idempotent. */
 export function redact(text: string): string {
-  if (!text) return text;
-  let out = text;
-  for (const { re, replace } of REDACTIONS) {
-    re.lastIndex = 0;
-    out = typeof replace === "string" ? out.replace(re, replace) : out.replace(re, replace as never);
-  }
-  return out;
+  // The rules live once in @ocw/contracts (07.2-04, D-08); redact-parity.test.ts pins the output byte for byte.
+  return redactSecrets(text);
 }
 
 /** contain() then redact() one string. */

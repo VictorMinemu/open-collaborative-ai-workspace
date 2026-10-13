@@ -1,6 +1,7 @@
 // redact() parity (07.2-04, D-08): the secret rules moved to @ocw/contracts, and the device's redaction must stay
 // byte-identical. The fixture was captured from sanitize.ts before the move and is never regenerated.
 import { readFileSync } from "node:fs";
+import { redactSecrets } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { redact } from "./sanitize.js";
@@ -39,5 +40,9 @@ describe("redact() parity with the outputs captured before the rules moved", () 
       const first = redact(input);
       expect(redact(input)).toBe(first);
     }
+  });
+
+  it("delegates to the shared rules: redactSecrets() equals redact() on the whole corpus", () => {
+    for (const { input } of corpus) expect(redactSecrets(input)).toBe(redact(input));
   });
 });

@@ -24,6 +24,7 @@ export * from "./permissions";
 export * from "./realtime";
 export * from "./runtime-controls/index";
 export * from "./search";
+export * from "./sensitive-data";
 export * from "./session-events";
 export * from "./session-settings";
 export * from "./session-title";
