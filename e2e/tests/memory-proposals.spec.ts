@@ -655,6 +655,10 @@ test("four eyes, a stale rewrite, a refused secret and the phone denial", async 
         for (const b of await dialog.getByRole("button", { name: /^(Cancel|Deny)$/ }).all()) {
           expect((await b.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
         }
+        // The shared Dialog's close X is a 44 px touch target below 1024 (WINDOWS 161).
+        const close = await dialog.getByRole("button", { name: "Close", exact: true }).boundingBox();
+        expect(close?.width ?? 0, "dialog close is 44 px wide").toBeGreaterThanOrEqual(44);
+        expect(close?.height ?? 0, "dialog close is 44 px tall").toBeGreaterThanOrEqual(44);
         await expectNoSeriousA11y(lena.page, '[data-testid="proposal-confirm"]');
         if (!PRESIDIO_SET)
           await shot(lena.page, `review-memory-proposal-deny-390${theme === "dark" ? "-dark" : ""}`);
@@ -776,11 +780,17 @@ test("extended scan state follows the server: a warning when Presidio does not a
     if (PRESIDIO_SET) {
       const notice = view.getByRole("status").filter({ hasText: SCAN_WARNING });
       await expect(notice).toBeVisible();
+      // Nothing found must not read as an all-clear: only the built-in scan ran (WINDOWS 165).
+      await expect(view.getByTestId("findings-none")).toHaveText(
+        "No sensitive data found by the built-in scan",
+      );
+      await expect(view.getByTestId("proposal-found")).toContainText("Built-in scan only");
       if (w === "1440") await review(lena.page, "review-memory-proposal-scan-unavailable", w);
     } else {
       await expect(view.getByTestId("findings")).toBeVisible();
       await expect(view).not.toContainText(SCAN_WARNING);
       await expect(view.getByTestId("extended-scan-notice")).toHaveCount(0);
+      await expect(view.getByTestId("findings-none")).toHaveText("No sensitive data found");
     }
   } finally {
     await sam.context.close();

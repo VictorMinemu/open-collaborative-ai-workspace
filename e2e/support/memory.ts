@@ -1,5 +1,5 @@
 import { type APIRequestContext, expect } from "@playwright/test";
-import { ensureMember, SAM } from "./actors";
+import { type Actor, ensureMember, SAM } from "./actors";
 import { ALEX } from "./chat";
 
 /**
@@ -12,6 +12,18 @@ import { ALEX } from "./chat";
  */
 
 export const MEMORY_DEPARTMENT = "Comercial";
+
+/**
+ * A Ventas member who exists only for memory-files.spec's viewer cases (WINDOWS 162). Nothing else signs her in or
+ * gives her a bot, so her scope list is exactly Comercial, Ventas and Organization whatever ran before in the same
+ * database (Sam gains "You & …" private scopes from bot-memory, personal-bots and bot-capabilities). Keep it that way:
+ * never use her in another spec.
+ */
+export const MEMORY_READER: Actor = {
+  name: "Nina Serra",
+  email: "nina@ocw.test",
+  password: "nina-e2e-password-123",
+};
 export const MEMORY_TEAM = "Ventas";
 export const MEMORY_OTHER_TEAM = "Compras";
 
@@ -158,8 +170,19 @@ export async function seedMemory(admin: APIRequestContext): Promise<MemorySeed> 
   };
 }
 
-/** A `memory.read` deny on `hr/` in Ventas for Sam (UI-SPEC: the folder disappears, its URL is not found). */
-export async function denyFolder(admin: APIRequestContext, seed: MemorySeed): Promise<string> {
+/** The dedicated viewer persona as a Ventas member (idempotent); returns her user id. */
+export async function ensureMemoryReader(admin: APIRequestContext, seed: MemorySeed): Promise<string> {
+  const id = await ensureMember(admin, MEMORY_READER, "developer");
+  await ensureUnitMember(admin, seed.ventasUnitId, id);
+  return id;
+}
+
+/** A `memory.read` deny on `hr/` in Ventas for one member (UI-SPEC: the folder disappears, its URL is not found). */
+export async function denyFolder(
+  admin: APIRequestContext,
+  seed: MemorySeed,
+  userId: string,
+): Promise<string> {
   const rules = (await (await admin.get("/api/v1/permission-rules")).json()) as {
     rules: Array<{
       id: string;
@@ -169,19 +192,19 @@ export async function denyFolder(admin: APIRequestContext, seed: MemorySeed): Pr
     }>;
   };
   const existing = rules.rules.find(
-    (r) => r.subjectId === seed.samId && r.pathPrefix === "hr/" && r.scopeUnitId === seed.ventasUnitId,
+    (r) => r.subjectId === userId && r.pathPrefix === "hr/" && r.scopeUnitId === seed.ventasUnitId,
   );
   if (existing) return existing.id;
   const res = await admin.post("/api/v1/permission-rules", {
     data: {
       scopeUnitId: seed.ventasUnitId,
       subjectKind: "user",
-      subjectId: seed.samId,
+      subjectId: userId,
       permission: "memory.read",
       pathPrefix: "hr/",
       effect: "deny",
     },
   });
-  expect(res.ok(), `deny hr/ for Sam: ${res.status()} ${await res.text()}`).toBe(true);
+  expect(res.ok(), `deny hr/: ${res.status()} ${await res.text()}`).toBe(true);
   return ((await res.json()) as { id: string }).id;
 }

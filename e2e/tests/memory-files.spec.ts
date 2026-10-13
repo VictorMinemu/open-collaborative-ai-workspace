@@ -6,8 +6,10 @@ import { ALEX } from "../support/chat";
 import {
   ACME,
   denyFolder,
+  ensureMemoryReader,
   MEMORY_DEPARTMENT,
   MEMORY_OTHER_TEAM,
+  MEMORY_READER,
   MEMORY_TEAM,
   type MemorySeed,
   memoryScopes,
@@ -16,8 +18,8 @@ import {
 import { ADMIN, shot } from "./env";
 
 /**
- * The memory viewer (Phase 07.2, 07.2-10, MEM-02, UI-SPEC): Sam opens Memory from the navigation, expands his team's
- * folder in the tree and reads a file rendered as Markdown; on a phone the tree is one full-screen list whose scopes
+ * The memory viewer (Phase 07.2, 07.2-10, MEM-02, UI-SPEC): Nina, a Ventas member, opens Memory from the navigation,
+ * expands her team's folder in the tree and reads a file rendered as Markdown; on a phone the tree is one full-screen list whose scopes
  * expand in place, and a file opens on its own screen with "Back to files". Then links, hostile content, the shared
  * not-found state, search with its scope selector, keyboard and ARIA, axe, and the review screenshots
  * (`review-memory-*-<1440|390>[-dark].png` when OCW_E2E_SCREENSHOT_DIR is set). No provider is called.
@@ -27,12 +29,16 @@ test.describe.configure({ mode: "serial" });
 
 let admin: APIRequestContext;
 let seed: MemorySeed;
+let readerId: string;
 let denyRule: string | null = null;
 const open: BrowserContext[] = [];
 
 test.beforeAll(async () => {
   admin = await apiAs(ADMIN);
   seed = await seedMemory(admin);
+  // Her own persona, not Sam: other specs leave Sam private scopes in the shared database (WINDOWS 162), and the
+  // viewer cases assert her exact scope list and tree.
+  readerId = await ensureMemoryReader(admin, seed);
 });
 
 test.afterAll(async () => {
@@ -41,13 +47,52 @@ test.afterAll(async () => {
   await admin?.dispose();
 });
 
-async function signIn(browser: Parameters<typeof openAs>[0], project: string, who: Actor = SAM) {
+async function signIn(browser: Parameters<typeof openAs>[0], project: string, who: Actor = MEMORY_READER) {
   const s = await openAs(browser, who, project);
   open.push(s.context);
   return s.page;
 }
 
 const widthOf = (project: string) => (project === "mobile" ? "390" : "1440");
+
+/** The viewer's outline never skips a level: file name h1, then the file's own headings from h2 (WINDOWS 154). */
+const NO_HEADING_SKIPS = { failOn: ["heading-order"] } as const;
+
+type ListedScope = Awaited<ReturnType<typeof memoryScopes>>[number];
+
+/**
+ * The reader's scopes from the API, checked (WINDOWS 162). Exact where the fixture decides: the units are Comercial
+ * then Ventas, the organization comes last, and there is no private scope at all (hers or anyone's) and never Compras.
+ * The only other scopes allowed are bot notebooks, listed before the units: a team bot that another spec creates in
+ * Ventas (agent-memory's Ledger) shares its notebook with every Ventas member, whatever ran before.
+ */
+async function readerScopes(): Promise<ListedScope[]> {
+  const reader = await apiAs(MEMORY_READER);
+  const listed = await memoryScopes(reader);
+  await reader.dispose();
+  const kinds = listed.map((s) => s.kind);
+  const notebooks = kinds.filter((k) => k === "agent").length;
+  expect(kinds, "notebooks first, then the units, then the organization").toEqual([
+    ...Array<string>(notebooks).fill("agent"),
+    "unit",
+    "unit",
+    "org",
+  ]);
+  expect(listed.slice(notebooks).map((s) => s.label)).toEqual([
+    MEMORY_DEPARTMENT,
+    MEMORY_TEAM,
+    "Organization",
+  ]);
+  expect(listed.map((s) => s.label)).not.toContain(MEMORY_OTHER_TEAM);
+  return listed;
+}
+
+const accessibleName = (s: ListedScope) =>
+  s.kind === "agent"
+    ? `${s.label}, bot memory`
+    : s.kind === "org"
+      ? `${s.label}, memory for everyone`
+      : `${s.label}, ${s.label === MEMORY_DEPARTMENT ? "department" : "team"} memory`;
 
 const tree = (page: Page) => page.getByRole("tree", { name: "Memory files" });
 const row = (page: Page, name: string | RegExp, scopeId?: string) => {
@@ -104,7 +149,7 @@ async function review(page: Page, screen: string, w: string, opts: { axe?: boole
     await page.emulateMedia({ colorScheme: theme });
     await noSidewaysScroll(page, `${screen} ${theme}`);
     expect.soft(await unnamedControls(page), `${screen} (${theme}): unnamed controls`).toEqual([]);
-    if (opts.axe !== false) await expectNoSeriousA11y(page, '[data-testid="memory-shell"]');
+    if (opts.axe !== false) await expectNoSeriousA11y(page, '[data-testid="memory-shell"]', NO_HEADING_SKIPS);
     await shot(page, `review-memory-${screen}-${w}${theme === "dark" ? "-dark" : ""}`);
   }
   await page.emulateMedia({ colorScheme: "light" });
@@ -120,13 +165,14 @@ async function browseDesktop(page: Page) {
   await page.getByTestId("nav-memory").click();
   await expect(page).toHaveURL(/\/memory$/);
 
-  // Only the scopes the API lists for Sam, in tree order: his department, his team, then the organization.
-  const sam = await apiAs(SAM);
-  const listed = await memoryScopes(sam);
-  await sam.dispose();
-  expect(listed.map((s) => s.label)).toEqual([MEMORY_DEPARTMENT, MEMORY_TEAM, "Organization"]);
+  // The scopes the API lists for her, in the same order as the tree: her department, her team, then the organization
+  // (after any Ventas bot notebook). No other team, and no private scope.
+  const listed = await readerScopes();
   const scopes = tree(page).locator('[data-kind="scope"]');
-  await expect(scopes).toHaveCount(3);
+  await expect(scopes).toHaveCount(listed.length);
+  expect(await scopes.evaluateAll((els) => els.map((e) => e.getAttribute("data-scope-id")))).toEqual(
+    listed.map((s) => s.id),
+  );
   await expect(row(page, `${MEMORY_DEPARTMENT}, department memory`)).toBeVisible();
   await expect(row(page, `${MEMORY_TEAM}, team memory`)).toBeVisible();
   await expect(row(page, "Organization, memory for everyone")).toBeVisible();
@@ -134,6 +180,7 @@ async function browseDesktop(page: Page) {
 
   // Desktop /memory opens the first scope's MEMORY.md.
   await expect(page.getByTestId("memory-file")).toHaveAttribute("data-path", "MEMORY.md");
+  await expect(row(page, "MEMORY.md", listed[0]?.id)).toHaveAttribute("aria-current", "page");
 
   await row(page, `${MEMORY_TEAM}, team memory`).click();
   await expect(row(page, `${MEMORY_TEAM}, team memory`)).toHaveAttribute("aria-expanded", "true");
@@ -167,8 +214,9 @@ async function browsePhone(page: Page) {
   await expect(page.getByText("All memory")).toHaveCount(0);
 
   // Every scope is a collapsed 56 px top-level node of the same tree.
+  const listed = await readerScopes();
   const scopes = tree(page).locator('[data-kind="scope"]');
-  await expect(scopes).toHaveCount(3);
+  await expect(scopes).toHaveCount(listed.length);
   for (const s of await scopes.all()) {
     await expect(s).toHaveAttribute("aria-expanded", "false");
     await expect(s).toHaveAttribute("aria-level", "1");
@@ -203,7 +251,9 @@ async function browsePhone(page: Page) {
   await expect(page.getByTestId("memory-file")).toHaveCount(0);
 }
 
-test("Sam opens Memory, expands his team's folder and reads a file", async ({ browser }, info) => {
+test("a Ventas member opens Memory, expands her team's folder and reads a file", async ({
+  browser,
+}, info) => {
   const mobile = info.project.name === "mobile";
   const page = await signIn(browser, info.project.name);
   if (mobile) await browsePhone(page);
@@ -250,8 +300,8 @@ test("links open inside the viewer, hostile HTML stays text, missing and unreada
   await expect(page.getByTestId("memory-file").locator("script, img, iframe")).toHaveCount(0);
   await expect(page.getByTestId("memory-file").getByText("Plain text after the tags.")).toBeVisible();
 
-  // A deny rule on hr/ for Sam: the folder disappears and its URL is the same not-found as a missing file.
-  denyRule = await denyFolder(admin, seed);
+  // A deny rule on hr/ for her: the folder disappears and its URL is the same not-found as a missing file.
+  denyRule = await denyFolder(admin, seed, readerId);
   await page.goto(`${BASE_URL}/memory/${seed.ventasScopeId}`);
   await expect(row(page, `${MEMORY_TEAM}, team memory`)).toHaveAttribute("aria-expanded", "true");
   await expect(row(page, "clients, folder", seed.ventasScopeId)).toBeVisible();
@@ -273,7 +323,7 @@ test("links open inside the viewer, hostile HTML stays text, missing and unreada
   await page.goto(`${BASE_URL}/memory/${seed.ventasScopeId}/hr/salaries.md`);
   await expect(page.getByTestId("memory-file-notfound")).toBeVisible();
   if (w === "1440") await review(page, "notfound", w);
-  else await expectNoSeriousA11y(page, '[data-testid="memory-shell"]');
+  else await expectNoSeriousA11y(page, '[data-testid="memory-shell"]', NO_HEADING_SKIPS);
   expect(dialogs, "no script ran").toEqual([]);
 });
 
@@ -303,7 +353,7 @@ test("search: results grouped by scope with marks, a scope selector, Enter opens
   // The selector lists All memory and the scopes the API listed; Ventas narrows the results.
   await page.getByRole("combobox", { name: "Search in" }).click();
   const options = page.getByRole("option");
-  await expect(options).toHaveText(["All memory", MEMORY_DEPARTMENT, MEMORY_TEAM, "Organization"]);
+  await expect(options).toHaveText(["All memory", ...(await readerScopes()).map((s) => s.label)]);
   await page.getByRole("option", { name: MEMORY_TEAM }).click();
   await expect(hits).toHaveCount(1);
   await expect(hits.first()).toHaveAttribute("data-path", "team/vacaciones.md");
@@ -355,7 +405,10 @@ test("search: results grouped by scope with marks, a scope selector, Enter opens
 
 /** 1440: keyboard, ARIA tree snapshot, axe, and the viewer and loading screenshots. */
 async function keyboardDesktop(page: Page) {
-  await page.goto(`${BASE_URL}/memory`);
+  // Comercial's MEMORY.md is open (a deep link expands its scope), so the flow starts there whatever notebooks come
+  // before it in the tree.
+  const listed = await readerScopes();
+  await page.goto(`${BASE_URL}/memory/${seed.departmentScopeId}/MEMORY.md`);
   await expect(page.getByTestId("memory-file")).toHaveAttribute("data-path", "MEMORY.md");
 
   // Tab from the search field lands on the open file's row (one tab stop).
@@ -381,7 +434,10 @@ async function keyboardDesktop(page: Page) {
   // Home / End, typeahead and * on the tree.
   await row(page, "acme.md", seed.ventasScopeId).focus();
   await page.keyboard.press("Home");
-  await expect.poll(() => focusedName(page)).toBe(`${MEMORY_DEPARTMENT}, department memory`);
+  // The first scope's row (a scope with no files adds ", no files yet" to its name).
+  await expect
+    .poll(async () => (await focusedName(page))?.startsWith(accessibleName(listed[0] as ListedScope)))
+    .toBe(true);
   await page.keyboard.press("End");
   await expect.poll(() => focusedName(page)).toBe("Organization, memory for everyone");
   await page.keyboard.press("ArrowRight");
@@ -414,10 +470,19 @@ async function keyboardDesktop(page: Page) {
       - treeitem "expenses.md"
       - treeitem "vacations.md"
   `);
-  const levels = await tree(page)
+  const items = await tree(page)
     .getByRole("treeitem")
-    .evaluateAll((els) => els.map((e) => Number(e.getAttribute("aria-level"))));
-  expect(levels).toEqual([1, 2, 1, 2, 2, 3, 3, 2, 1, 2, 2, 3, 2, 3, 3]);
+    .evaluateAll((els) =>
+      els.map((e) => ({ name: e.getAttribute("aria-label"), level: Number(e.getAttribute("aria-level")) })),
+    );
+  const first = items.findIndex((i) => i.name === `${MEMORY_DEPARTMENT}, department memory`);
+  // Anything before Comercial is a collapsed bot notebook (readerScopes); from Comercial on, the exact outline.
+  const notebooks = listed.filter((s) => s.kind === "agent");
+  expect(items.slice(0, first).map((i) => i.level)).toEqual(notebooks.map(() => 1));
+  items.slice(0, first).forEach((i, n) => {
+    expect(i.name?.startsWith(accessibleName(notebooks[n] as ListedScope)), `${i.name}`).toBe(true);
+  });
+  expect(items.slice(first).map((i) => i.level)).toEqual([1, 2, 1, 2, 2, 3, 3, 2, 1, 2, 2, 3, 2, 3, 3]);
 
   // The viewer review: Ventas › clients open, acme.md selected and rendered.
   await page.goto(`${BASE_URL}/memory/${seed.ventasScopeId}/clients/acme.md`);
@@ -492,7 +557,15 @@ test("Settings › Modules lists Memory next to Work Zone, AI chats and Bots", a
   open.push(page.context());
   await page.goto(`${BASE_URL}/settings/modules`);
   await expect(page.getByText("Memory", { exact: true }).first()).toBeVisible();
-  await shot(page, `review-memory-modules-${w}`);
+  // The card's own sentence names every module, Memory included (WINDOWS 155).
+  await expect(page.getByTestId("module-access").first()).toContainText(
+    "Turn Work Zone, AI chats, Bots and Memory on or off for the whole organization",
+  );
+  for (const theme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme: theme });
+    await shot(page, `review-memory-modules-${w}${theme === "dark" ? "-dark" : ""}`);
+  }
+  await page.emulateMedia({ colorScheme: "light" });
 });
 
 // ---------------------------------------------------------------- 07.2-12: edit, history, diffs, file actions
@@ -502,7 +575,7 @@ test("Settings › Modules lists Memory next to Work Zone, AI chats and Bots", a
  * saves with the version they started from, and sees the new version and its diff in History. Then conflicts,
  * secrets, file and folder actions, restore, the dirty guard, live owner updates, phone tabs, read-only and the
  * review screenshots. People used only here: Lucía (Ventas lead) and Paula (a member with a private bot memory), so
- * Sam's tree, asserted exactly above, never changes.
+ * the viewer persona's tree, asserted exactly above, never changes.
  */
 
 const LEAD: Actor = { name: "Lucía Vega", email: "lucia@ocw.test", password: "lucia-e2e-password-123" };
@@ -727,7 +800,7 @@ test("Sam can't edit the team file but edits a private MEMORY.md the same way (P
   browser,
 }, info) => {
   // Sam is a member of Ventas without write: Read only, no Edit tab.
-  const sam = await signIn(browser, info.project.name);
+  const sam = await signIn(browser, info.project.name, SAM);
   await sam.goto(`${BASE_URL}/memory/${seed.ventasScopeId}/clients/acme.md`);
   await expect(sam.getByTestId("memory-file")).toHaveAttribute("data-path", "clients/acme.md");
   await expect(sam.getByTestId("memory-file-meta")).toContainText("Read only");
@@ -1087,6 +1160,9 @@ test("file and folder actions: new folder, new file, rename or move with live va
   await expect(renameDialog.getByRole("alert")).toHaveText('"." and ".." aren\'t allowed.');
   await review(page, "actions", "1440", { axe: false });
   await expectNoSeriousA11y(page, '[role="dialog"]');
+  // From 1024 the close X keeps its 32 px desktop look (it grows to 44 only on touch widths, WINDOWS 161).
+  const closeBox = await renameDialog.getByRole("button", { name: "Close", exact: true }).boundingBox();
+  expect(Math.round(closeBox?.width ?? 0), "desktop dialog close stays 32 px").toBe(32);
   await renameField.fill("clients/acme.md");
   await expect(renameDialog.getByRole("alert")).toHaveText("A file with this name already exists.");
   await renameField.fill("archive/kickoff.md");
@@ -1175,5 +1251,14 @@ test("read only: a member sees the Read only badge and no Edit on a team file", 
   await expect(page.getByRole("button", { name: "New file" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /^Actions for / })).toHaveCount(0);
   if (w === "1440") await review(page, "readonly", w);
-  else await expectNoSeriousA11y(page, '[data-testid="memory-shell"]');
+  else await expectNoSeriousA11y(page, '[data-testid="memory-shell"]', NO_HEADING_SKIPS);
+
+  // Three hours later the meta row reads the UI-SPEC's short age, "3h ago" (WINDOWS 155); the full date stays for
+  // screen readers.
+  await page.clock.setFixedTime(Date.now() + 3 * 3_600_000 + 5 * 60_000);
+  await page.reload();
+  const meta = page.getByTestId("memory-file-meta");
+  await expect(meta).toContainText("3h ago");
+  await expect(meta).not.toContainText("hours ago");
+  await review(page, "age", w);
 });
