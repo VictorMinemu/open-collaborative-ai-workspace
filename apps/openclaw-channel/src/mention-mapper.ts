@@ -126,7 +126,10 @@ export type MappedMention = {
   agentTools: string[];
   /** `turn.tools ∩ agentTools`: the per-run `toolsAllow` cap (empty → tools disabled). */
   allowedTools: string[];
-  /** Structured per-turn context: the asker's local time and, in a DM only, the bot's notes about them. */
+  /**
+   * Structured per-turn context: the asker's local time, the turn's memory files (the private `MEMORY.md` in a DM only,
+   * the bot's notebook) or, from an older API, the bot's notes about the asker (DM only).
+   */
   contextBlocks: ContextBlock[];
 };
 
@@ -144,7 +147,14 @@ function withheldReason(reason: string, askerName: string): string {
   }
 }
 
-function turnContextBlocks(turn: TurnContext, askerName: string, direct: boolean): ContextBlock[] {
+export const MEMORY_TRUNCATED_MARKER = "Truncated: use ocw_memory_read for the rest";
+
+function turnContextBlocks(
+  turn: TurnContext,
+  askerName: string,
+  direct: boolean,
+  botName: string,
+): ContextBlock[] {
   const blocks: ContextBlock[] = [];
   // Data, not instructions: the persona can say what it could not use here and why (it never gets the tool).
   const withheld = turn.withheld ?? [];
@@ -166,8 +176,27 @@ function turnContextBlocks(turn: TurnContext, askerName: string, direct: boolean
       payload: { local: turn.now.local, time_zone: turn.now.timeZone, iso: turn.now.iso },
     });
   }
-  // Memory is private to the human's DM with the bot (D-10): never rendered anywhere else.
-  if (direct && turn.memory.length > 0) {
+  // Memory files (07.2, D-02): the API sends the private MEMORY.md only in a one-human DM; rendering it only in a DM too
+  // is defence in depth (T-07.2-07-04). The notebook is the bot's own. `scope` is the alias ocw_memory_read takes.
+  const files = turn.memoryFiles ?? [];
+  for (const file of files) {
+    if (file.scopeKind !== "agent" && !(file.scopeKind === "personal" && direct)) continue;
+    blocks.push({
+      label: file.scopeKind === "personal" ? `Your private memory with ${askerName}` : `${botName} notebook`,
+      source: "ocw",
+      type: "memory_file",
+      payload: {
+        scope: file.scopeKind,
+        path: file.path,
+        version: file.version,
+        content: file.content,
+        ...(file.truncated ? { truncated: MEMORY_TRUNCATED_MARKER } : {}),
+      },
+    });
+  }
+  // Legacy notes (D-10), private to the human's DM with the bot: only from an API that sent no memory files (the new
+  // API keeps them in the private MEMORY.md, which would show them twice).
+  if (direct && files.length === 0 && turn.memory.length > 0) {
     blocks.push({
       label: `Your notes about ${askerName} (private to this conversation)`,
       source: "ocw",
@@ -255,7 +284,7 @@ export function mapMention(event: AgentMentionEvent, bot: CellAgent | undefined)
     turn,
     agentTools,
     allowedTools,
-    contextBlocks: turnContextBlocks(turn, askerName, direct),
+    contextBlocks: turnContextBlocks(turn, askerName, direct, sanitizeName(event.agent.displayName)),
   };
 }
 
