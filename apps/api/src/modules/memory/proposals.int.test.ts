@@ -587,7 +587,12 @@ describe("self-approval follows the decision right (owner decision 2026-10-13)",
   it("the requester and another decider approve at once: one wins, the other gets 409, exactly one revision", async () => {
     await promoteSam();
     try {
-      const r = await fresh({ scope: scopeOf[A] as string, path: "self/race.md", op: "create", content: "once\n" });
+      const r = await fresh({
+        scope: scopeOf[A] as string,
+        path: "self/race.md",
+        op: "create",
+        content: "once\n",
+      });
       const hash = await hashOf(lena, r.approvalId);
       const before = await revisionCount(scopeOf[A] as string);
       const results = await Promise.all([
@@ -596,7 +601,10 @@ describe("self-approval follows the decision right (owner decision 2026-10-13)",
       ]);
       expect(results.map((x) => x.status).sort()).toEqual([200, 409]);
       expect(await revisionCount(scopeOf[A] as string)).toBe(before + 1);
-      expect(await fileAt(scopeOf[A] as string, "self/race.md")).toMatchObject({ content: "once\n", version: 1 });
+      expect(await fileAt(scopeOf[A] as string, "self/race.md")).toMatchObject({
+        content: "once\n",
+        version: 1,
+      });
     } finally {
       await demoteSam();
     }
@@ -618,14 +626,19 @@ describe("self-approval follows the decision right (owner decision 2026-10-13)",
         content: "v1\nfrom Scout\n",
         baseVersion: 1,
       });
-      await ok(lena.request("PUT", `/api/v1/memory/files/${file.id}`, { content: "v2\n", expectedVersion: 1 }));
+      await ok(
+        lena.request("PUT", `/api/v1/memory/files/${file.id}`, { content: "v2\n", expectedVersion: 1 }),
+      );
       const res = await decide(sam, r.approvalId, {
         outcome: "approved",
         actionHash: await hashOf(sam, r.approvalId),
       });
       expect(res.status, JSON.stringify(res.body)).toBe(200);
       expect(res.body).toMatchObject({ status: "failed", resultCode: "stale_base" });
-      expect(await fileAt(scopeOf[A] as string, "self/stale.md")).toMatchObject({ version: 2, content: "v2\n" });
+      expect(await fileAt(scopeOf[A] as string, "self/stale.md")).toMatchObject({
+        version: 2,
+        content: "v2\n",
+      });
     } finally {
       await demoteSam();
     }
@@ -650,7 +663,9 @@ describe("self-approval follows the decision right (owner decision 2026-10-13)",
     expect((await detail(admin, r.approvalId)).viewerCan).toEqual(["decide"]);
     // A member without memory.promote on the organization neither sees nor decides it.
     expect((await sam.request("GET", `/api/v1/approvals/${r.approvalId}`)).status).toBe(404);
-    expect((await decide(sam, r.approvalId, { outcome: "approved", actionHash: row.action_hash })).status).toBe(404);
+    expect(
+      (await decide(sam, r.approvalId, { outcome: "approved", actionHash: row.action_hash })).status,
+    ).toBe(404);
 
     const res = await admin.request("POST", `/api/v1/cards/${row.card_message_id}/decision`, {
       outcome: "approved",

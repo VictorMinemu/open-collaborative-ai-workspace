@@ -403,6 +403,8 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
           ...auditIds(decided),
           outcome: input.outcome,
           ...(note === null ? {} : isPrivate ? { noteChars: note.length } : { note }),
+          // The decider is the human the request was made for (allowed by the kind's canDecide): a flag, no names.
+          ...(decided.requestedForUserId === input.deciderUserId ? { selfApproved: true } : {}),
         },
       });
 
