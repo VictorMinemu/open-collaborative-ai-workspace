@@ -22,6 +22,7 @@ import { audienceOf } from "../ai-chat";
 import { currentTurnTools } from "../bot-capabilities";
 import { createConversationAccess } from "../chat";
 import {
+  type CreateMemoryProposalInput,
   type MemoryActor,
   type MemoryAudience,
   type MemoryService,
@@ -567,17 +568,19 @@ export function registerMemoryFileRoutes(
     async (req) => {
       const cell = cellOf(req);
       const body = req.body;
-      return onTurn(cell, "propose", body, (tx, turn) =>
-        memory.propose(tx, {
-          origin: { kind: "agent_turn", eventId: turn.eventId, agentId: turn.agentId },
-          scope: body.scope,
-          path: body.path,
-          op: body.op,
-          content: body.content,
-          ...(body.baseVersion === undefined ? {} : { baseVersion: body.baseVersion }),
-          ...(body.reason === undefined ? {} : { reason: body.reason }),
-        }),
-      );
+      const input: CreateMemoryProposalInput = {
+        origin: { kind: "agent_turn", eventId: body.eventId, agentId: body.agentId },
+        scope: body.scope,
+        path: body.path,
+        op: body.op,
+        content: body.content,
+        ...(body.baseVersion === undefined ? {} : { baseVersion: body.baseVersion }),
+        ...(body.reason === undefined ? {} : { reason: body.reason }),
+      };
+      // The detectors (Presidio up to its timeout) run first, with no transaction open (WINDOWS 145); the turn's
+      // transaction then checks that what was scanned is still what it reads.
+      const prescan = await memory.prescan(cell.organizationId, input);
+      return onTurn(cell, "propose", body, (tx) => memory.propose(tx, input, prescan));
     },
   );
 }

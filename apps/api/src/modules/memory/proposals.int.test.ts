@@ -45,6 +45,8 @@ const scopeOf: Record<string, string> = {};
 let presidio: Server;
 let presidioMode: "nothing" | "person" = "nothing";
 let presidioCalls = 0;
+/** While set, the analyzer signals each request's arrival and answers only once released (WINDOWS 145). */
+let presidioHold: { arrived: () => void; released: Promise<void> } | null = null;
 
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
@@ -61,6 +63,12 @@ async function startPresidio(): Promise<string> {
     req.on("end", () => {
       presidioCalls += 1;
       const { text } = JSON.parse(body) as { text: string };
+      if (presidioHold) {
+        const hold = presidioHold;
+        hold.arrived();
+        void hold.released.then(() => json(res, 200, []));
+        return;
+      }
       if (presidioMode === "person") {
         const at = text.indexOf("Ana García");
         return json(
@@ -124,14 +132,16 @@ type ProposeArgs = Omit<CreateMemoryProposalInput, "origin" | "scope"> & {
   agentId?: string;
 };
 
-/** The memory service's proposal call inside one tenant transaction (07.2-11 wraps it in the Agent Channel route). */
-const propose = (a: ProposeArgs) => {
+/**
+ * The memory service's proposal call as the Agent Channel route makes it (07.2-11): the detectors first, with no
+ * transaction open (WINDOWS 145), then the proposal inside one tenant transaction.
+ */
+const propose = async (a: ProposeArgs) => {
   const { eventId, agentId, ...rest } = a;
+  const input = { ...rest, origin: { kind: "agent_turn" as const, eventId, agentId: agentId ?? scoutId } };
+  const prescan = await stack.built.memory.prescan(orgId, input);
   return stack.built.core.db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
-    stack.built.memory.propose(tx, {
-      ...rest,
-      origin: { kind: "agent_turn", eventId, agentId: agentId ?? scoutId },
-    }),
+    stack.built.memory.propose(tx, input, prescan),
   );
 };
 
@@ -227,6 +237,8 @@ beforeAll(async () => {
   const bot = await ok(sam.request("POST", "/api/v1/agents/personal", {}));
   scoutId = bot.agent.id;
   dmId = bot.dmId;
+  // Room for every turn this file delivers (the default daily limit is lower).
+  await ok(sam.request("PATCH", `/api/v1/agents/${scoutId}/capabilities`, { dailyLimit: 100 }));
   for (const s of (await ok(admin.request("GET", "/api/v1/memory/scopes"))).scopes as Json[]) {
     scopeOf[s.kind === "unit" ? s.unitId : s.kind] = s.id;
   }
@@ -893,6 +905,98 @@ describe("the view's bounds and a proposal whose unit is gone (WINDOWS 126, 137)
       expect(await kind.audience(tx, stored)).toEqual([]);
       expect(await kind.isPrivate?.(tx, stored)).toBe(true);
     });
+  });
+});
+
+describe("the detectors run before the proposal's transaction (WINDOWS 145)", () => {
+  const cellPropose = async (eventId: string, extra: Json) => {
+    const res = await fetch(`${stack.baseUrl}/agent-channel/v1/memory/propose`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${CELL_TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ eventId, agentId: scoutId, ...extra }),
+    });
+    return { status: res.status, body: (await res.json()) as Json };
+  };
+
+  /** Holds the analyzer: resolves `arrival` when a scan reaches it; it answers once `release()` is called. */
+  function hold() {
+    let arrived = () => {};
+    let release = () => {};
+    const arrival = new Promise<void>((r) => {
+      arrived = r;
+    });
+    const released = new Promise<void>((r) => {
+      release = r;
+    });
+    presidioHold = { arrived, released };
+    return {
+      arrival,
+      release: () => {
+        presidioHold = null;
+        release();
+      },
+    };
+  }
+
+  it("Presidio answers while the API holds no open transaction and no advisory lock", async () => {
+    const t = await turn("Keep the held note for the team");
+    const h = hold();
+    try {
+      const pending = cellPropose(t.eventId, {
+        scope: scopeOf[A],
+        path: "held.md",
+        op: "create",
+        content: "Held note\n",
+      });
+      await h.arrival;
+      const open = await su.query(
+        "select count(*)::int as n from pg_stat_activity where state like 'idle in transaction%' and pid <> pg_backend_pid()",
+      );
+      const locks = await su.query("select count(*)::int as n from pg_locks where locktype = 'advisory'");
+      h.release();
+      const res = await pending;
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body).toHaveProperty("approvalId");
+      expect(open.rows[0].n).toBe(0);
+      expect(locks.rows[0].n).toBe(0);
+    } finally {
+      h.release();
+    }
+  });
+
+  it("a base that changed between the scan and the transaction is refused version_conflict, never re-scanned", async () => {
+    const file = await ok(
+      admin.request("POST", `/api/v1/memory/scopes/${scopeOf[A]}/files`, {
+        path: "moving.md",
+        content: "v1\n",
+      }),
+    );
+    const t = await turn("Add a line to the moving note");
+    const calls = presidioCalls;
+    const h = hold();
+    try {
+      const pending = cellPropose(t.eventId, {
+        scope: scopeOf[A],
+        path: "moving.md",
+        op: "append",
+        content: "more\n",
+      });
+      await h.arrival;
+      await ok(
+        admin.request("PUT", `/api/v1/memory/files/${file.id}`, { content: "v2\n", expectedVersion: 1 }),
+      );
+      h.release();
+      const res = await pending;
+      expect(res.body).toEqual({ refused: "version_conflict" });
+      // One scan (one analyzer call per configured language), never a second one inside the transaction.
+      expect(presidioCalls - calls).toBe(stack.built.core.env.OCW_PRESIDIO_LANGUAGES.length);
+      const proposals = await su.query(
+        "select count(*)::int as n from app.memory_proposals where path = 'moving.md'",
+      );
+      expect(proposals.rows[0].n).toBe(0);
+    } finally {
+      h.release();
+    }
   });
 });
 

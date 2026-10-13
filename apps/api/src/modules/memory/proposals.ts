@@ -2,9 +2,12 @@ import {
   hasBlockingFinding,
   MAX_TOOL_CALLS_PER_TURN,
   MEMORY_LIMITS,
+  MEMORY_ROOT_FILE,
+  MEMORY_ROOT_TEMPLATE,
   type MemoryProposalOp,
   type MemoryToolRefusal,
   type MemoryToolScope,
+  memoryPathKey,
   parseMemoryPath,
   type SensitiveFinding,
 } from "@ocw/contracts";
@@ -16,6 +19,7 @@ import {
   memoryFiles,
   memoryProposals,
   messages,
+  type TenantDb,
   type Tx,
   tenantOf,
 } from "@ocw/db";
@@ -56,9 +60,21 @@ export interface ProposalDeps {
   core: Pick<Core, "audit">;
   perms: PermissionService;
   approvals: Pick<ApprovalService, "request">;
-  scanner: ChangeScanner;
   /** The hand-off to the kind's card hook (Presidio spans are not stored). */
   scans: Map<string, ChangeScan>;
+}
+
+/**
+ * The detector's verdict on a proposal, computed BEFORE its transaction (`prescanProposal`, WINDOWS 145) so Presidio
+ * never holds a connection, a row lock or the pending-cap advisory lock. `inputHash` names exactly what was scanned
+ * (the op, the base text and the proposed text); the transaction recomputes it from what it reads and refuses on any
+ * difference. Null = nothing worth scanning (the transaction refuses on its own checks first).
+ */
+export type ProposalPrescan = { inputHash: string; scan: ChangeScan } | null;
+
+/** What a scan depends on: the op, the base text it diffs against (null: none) and the proposed text. */
+function scanInputHash(op: MemoryProposalOp, base: string | null, proposed: string): string {
+  return sha256Hex(JSON.stringify([op, base === null ? null : sha256Hex(base), sha256Hex(proposed)]));
 }
 
 type FileRow = typeof memoryFiles.$inferSelect;
@@ -76,6 +92,50 @@ async function liveFileAt(tx: Tx, scopeId: string, path: string): Promise<FileRo
     )
     .limit(1);
   return f ?? null;
+}
+
+/**
+ * The detector run of a proposal, outside any transaction (WINDOWS 145): a short read-only transaction finds the turn,
+ * the scope and the base text exactly as `createMemoryProposal` will (through the human's lens, nothing created or
+ * written, the agent's read decided), then layer 1 and layer 2 (Presidio, up to its timeout) run with no connection
+ * held. Whatever cannot be resolved (unknown turn, bad path, missing scope, a denied read, the turn's cap already
+ * reached) returns null without calling Presidio: the transaction refuses it on its own checks.
+ */
+export async function prescanProposal(
+  db: TenantDb,
+  deps: { perms: PermissionService; scanner: ChangeScanner },
+  organizationId: string,
+  input: CreateMemoryProposalInput,
+): Promise<ProposalPrescan> {
+  const parsed = parseMemoryPath(input.path);
+  if (!parsed.ok) return null;
+  const path = parsed.path;
+  const base = await db.withTenant({ organizationId, userId: null }, async (tx) => {
+    const [turn] = await tx.select().from(agentTurns).where(eq(agentTurns.eventId, input.origin.eventId));
+    if (!turn || turn.agentId !== input.origin.agentId || turn.toolCalls >= MAX_TOOL_CALLS_PER_TURN)
+      return null;
+    const human = turn.userId;
+    return withPersonalOwner(tx, human, async () => {
+      const ref = await resolveToolScope(tx, {
+        agentId: turn.agentId,
+        onBehalfOfUserId: human,
+        scope: input.scope,
+      });
+      if (!ref) return null;
+      const actor: MemoryActor = { kind: "agent", agentId: turn.agentId, onBehalfOfUserId: human };
+      if (!(await decideMemory(deps.perms, tx, actor, "memory.read", ref.facts, path)).allowed) return null;
+      if (input.op === "create") return { text: null };
+      // A scope not created yet holds only its root file, from the template, once created.
+      if (!ref.id)
+        return {
+          text: memoryPathKey(path) === memoryPathKey(MEMORY_ROOT_FILE) ? MEMORY_ROOT_TEMPLATE : null,
+        };
+      return { text: (await liveFileAt(tx, ref.id, path))?.content ?? null };
+    });
+  });
+  if (!base) return null;
+  const scan = await scanChange({ base: base.text, proposed: input.content, op: input.op }, deps.scanner);
+  return { inputHash: scanInputHash(input.op, base.text, input.content), scan };
 }
 
 /**
@@ -113,6 +173,7 @@ export async function createMemoryProposal(
   tx: Tx,
   deps: ProposalDeps,
   input: CreateMemoryProposalInput,
+  prescan: ProposalPrescan,
 ): Promise<CreateMemoryProposalResult> {
   const { core, perms } = deps;
   const [turn] = await tx.select().from(agentTurns).where(eq(agentTurns.eventId, input.origin.eventId));
@@ -193,8 +254,13 @@ export async function createMemoryProposal(
       );
     if ((pending?.n ?? 0) >= MEMORY_LIMITS.pendingProposalsPerRequester) return refuse("too_many_pending");
 
+    // The scan ran before this transaction (`prescanProposal`): use it only if it scanned exactly what is here now. A
+    // base that changed in between (or a scope that appeared) is refused, never re-scanned inside the transaction.
     const base = input.op === "create" ? null : (existing?.content ?? null);
-    const scan = await scanChange({ base, proposed: input.content, op: input.op }, deps.scanner);
+    if (!prescan || prescan.inputHash !== scanInputHash(input.op, base, input.content)) {
+      return refuse("version_conflict");
+    }
+    const scan = prescan.scan;
     if (hasBlockingFinding(scan.findings)) return refuse("secret_detected");
     if (Buffer.byteLength(scan.result, "utf8") > MEMORY_LIMITS.fileBytes) return refuse("too_large");
     if (!existing && (await liveFileCount(tx, scope.row.id)) >= MEMORY_LIMITS.filesPerScope) {

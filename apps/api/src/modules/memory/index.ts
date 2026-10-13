@@ -29,6 +29,8 @@ import {
   type CreateMemoryProposalInput,
   type CreateMemoryProposalResult,
   createMemoryProposal,
+  type ProposalPrescan,
+  prescanProposal,
 } from "./proposals";
 import { registerMemoryRoutes } from "./routes";
 import {
@@ -71,6 +73,7 @@ export {
   type CreateMemoryProposalResult,
   createMemoryProposal,
   type ProposalDeps,
+  type ProposalPrescan,
 } from "./proposals";
 export type { LoadedScope, ScopeKey, ScopeRow, ToolScope } from "./scopes";
 
@@ -127,10 +130,20 @@ export interface MemoryService {
   /** Through the transaction's lens (another person's private scope is 404). */
   scopeFacts(tx: Tx, scopeId: string): Promise<{ row: ScopeRow; facts: MemoryScopeFacts; label: string }>;
   /**
+   * The detector run of a proposal (layer 1 and Presidio), BEFORE and outside its transaction (WINDOWS 145): call it
+   * with no transaction open, then `propose` with its result. Read-only.
+   */
+  prescan(organizationId: string, input: CreateMemoryProposalInput): Promise<ProposalPrescan>;
+  /**
    * An agent's proposal for the human of a delivered turn (07.2-09): an immutable proposal, a pending `memory.write`
    * approval and its platform-owned card in the turn's conversation, or a refusal reason (07.2-11 serves it to agents).
+   * Uses the `prescan` of the same input; refuses `version_conflict` when what it scanned changed since.
    */
-  propose(tx: Tx, input: CreateMemoryProposalInput): Promise<CreateMemoryProposalResult>;
+  propose(
+    tx: Tx,
+    input: CreateMemoryProposalInput,
+    prescan: ProposalPrescan,
+  ): Promise<CreateMemoryProposalResult>;
 }
 
 export function createMemoryService(core: Core, deps: { approvals: ApprovalService }): MemoryService {
@@ -236,8 +249,9 @@ export function createMemoryService(core: Core, deps: { approvals: ApprovalServi
       return { row: s.row, facts: s.facts, label: s.label };
     },
 
-    propose: (tx, input) =>
-      createMemoryProposal(tx, { core, perms, approvals: deps.approvals, scanner, scans }, input),
+    prescan: (organizationId, input) => prescanProposal(core.db, { perms, scanner }, organizationId, input),
+    propose: (tx, input, prescan) =>
+      createMemoryProposal(tx, { core, perms, approvals: deps.approvals, scans }, input, prescan),
   };
 }
 
