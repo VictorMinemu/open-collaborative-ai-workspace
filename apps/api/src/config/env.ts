@@ -240,6 +240,23 @@ export const EnvSchema = z
     OCW_AI_SEND_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(1).max(10_000).default(30),
     /** Deadline of one AI chat title call (05-10, ADR-0014: 20 s); tests shorten it. */
     OCW_AI_TITLE_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(TITLE_TIMEOUT_MS),
+    /**
+     * Optional Presidio analyzer (compose profile `pii`, MEM-05, D-06), e.g. http://presidio:3000. Empty = off: the
+     * API never calls it. Memory text is sent only to this internal service and never logged.
+     */
+    OCW_PRESIDIO_URL: optionalUrl,
+    /** Languages each text is analysed in (comma list of `es`, `en`; one request per language). */
+    OCW_PRESIDIO_LANGUAGES: z
+      .string()
+      .default("")
+      .transform((v) => v.trim() || "es,en")
+      .transform((v) => [...new Set(v.split(",").map((x) => x.trim().toLowerCase()))])
+      .pipe(z.array(z.enum(["es", "en"], "must be a comma list of es, en")).min(1)),
+    /** Overall deadline of one Presidio scan; past it the scan reports `extended_scan_unavailable` (fail-open). */
+    OCW_PRESIDIO_TIMEOUT_MS: z.preprocess(
+      (v) => (v === "" ? undefined : v),
+      z.coerce.number().int().min(100).max(10_000).default(2000),
+    ),
   })
   .superRefine((v, ctx) => {
     if (v.OCW_SMTP_URL === "memory:" && v.NODE_ENV !== "test") {
