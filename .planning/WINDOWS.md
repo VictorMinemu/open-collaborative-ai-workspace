@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 117
+open_count: 119
 waived_count: 4
 fixed_count: 55
-total_count: 176
-last_updated: 2026-10-13T22:56:48.969Z
+total_count: 178
+last_updated: 2026-10-13T23:06:15.041Z
 ---
 
 # Broken Windows Ledger
@@ -191,6 +191,8 @@ last_updated: 2026-10-13T22:56:48.969Z
 | 174 | 07.4 | deviation | .planning/phases/07.4-per-member-connectors-agent-keychain-and-templates/07.4-VALIDATION.md |  | Plans and VALIDATION use 'node --test infra/fake-model/' which Node 24 treats as a file; use the glob form | open |  | 2026-10-13T22:56:12.721Z |  |
 | 175 | 07.4 | deviation | apps/api/src/lib/egress.ts |  | MCP SDK OAuth helpers and transports fall back to global fetch without fetchFn and no rule catches the missing argument; every 07.4 SDK call must pass egress.bound(policy) (check in 07.4-10/11 and the gate) | open |  | 2026-10-13T22:56:48.885Z |  |
 | 176 | 07.4 | deviation | apps/api/src/lib/egress.ts |  | One undici Agent per request (no keep-alive reuse); privateAllow tested only up to the connect attempt | open |  | 2026-10-13T22:56:48.969Z |  |
+| 177 | 07.4 | deviation | packages/contracts/src/module-access.ts |  | HIGH: units/orgs with Bots already off hold the old 5 deny rules; the catalog now has 7, so the API reads them as custom and does not deny connector.connect / vault.use until Bots is toggled again; needs a backfill migration | open |  | 2026-10-13T23:06:14.969Z |  |
+| 178 | 07.4 | deviation | packages/contracts/src/mcp.ts |  | memberHeaderName is not checked against forbidden headers in the schema (import cycle); 07.4-06 and 07.4-10 must apply isAllowedInjectionHeader() on the server | open |  | 2026-10-13T23:06:15.041Z |  |
 
 ````json
 [
@@ -2304,6 +2306,30 @@ last_updated: 2026-10-13T22:56:48.969Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-13T22:56:48.969Z",
+    "resolved_at": null
+  },
+  {
+    "id": 177,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "packages/contracts/src/module-access.ts",
+    "line": null,
+    "description": "HIGH: units/orgs with Bots already off hold the old 5 deny rules; the catalog now has 7, so the API reads them as custom and does not deny connector.connect / vault.use until Bots is toggled again; needs a backfill migration",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T23:06:14.969Z",
+    "resolved_at": null
+  },
+  {
+    "id": 178,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "packages/contracts/src/mcp.ts",
+    "line": null,
+    "description": "memberHeaderName is not checked against forbidden headers in the schema (import cycle); 07.4-06 and 07.4-10 must apply isAllowedInjectionHeader() on the server",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T23:06:15.041Z",
     "resolved_at": null
   }
 ]
