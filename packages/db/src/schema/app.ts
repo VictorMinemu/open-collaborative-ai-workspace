@@ -134,6 +134,11 @@ export const permissionRules = appSchema.table(
     /** Tool layer: restricts the rule to one tool (e.g. a Work Zone tool name); null = any. */
     tool: text("tool"),
     effect: text("effect", { enum: ["allow", "deny"] }).notNull(),
+    /**
+     * Phase 07.2 (D-04): restricts a `memory.*` rule to one folder of a scope, in folder form (`hr/`, always ending
+     * with `/`, matched on segment boundaries by the resolver); null = every path.
+     */
+    pathPrefix: text("path_prefix"),
     createdBy: uuid("created_by"),
     createdAt: createdAt(),
   },
@@ -141,6 +146,10 @@ export const permissionRules = appSchema.table(
     index("permission_rules_org_idx").on(t.organizationId),
     check("permission_rules_subject_kind_check", sql`${t.subjectKind} in ('everyone','role','user','agent')`),
     check("permission_rules_effect_check", sql`${t.effect} in ('allow','deny')`),
+    check(
+      "permission_rules_path_prefix_check",
+      sql`${t.pathPrefix} is null or (${t.permission} like 'memory.%' and ${t.pathPrefix} like '%/')`,
+    ),
   ],
 );
 
@@ -1555,11 +1564,22 @@ export const messageCards = appSchema.table(
     decision: text("decision", { enum: ["approved", "denied"] }),
     decidedBy: uuid("decided_by"),
     decidedAt: ts("decided_at"),
+    /** Phase 07.2 (UI-SPEC R4): the decider's optional note, shown on the decision line (≤ 280). */
+    decisionNote: text("decision_note"),
+    /**
+     * Phase 07.2 (D-08): composed and updated by the server (approval proposal cards); the posting agent may not
+     * PATCH it.
+     */
+    platformOwned: boolean("platform_owned").notNull().default(false),
     createdAt: createdAt(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
   },
   (t) => [
     index("message_cards_conv_idx").on(t.organizationId, t.conversationId),
+    check(
+      "message_cards_decision_note_len_check",
+      sql`${t.decisionNote} is null or char_length(${t.decisionNote}) <= 280`,
+    ),
     check(
       "message_cards_kind_check",
       sql`${t.kind} in ('work_zone','approval','report','artifact','automation','deployment','pr','generic')`,
@@ -1767,5 +1787,236 @@ export const boardCards = appSchema.table(
     check("board_cards_title_len_check", sql`char_length(${t.title}) between 1 and 200`),
     check("board_cards_rank_len_check", sql`char_length(${t.rank}) between 1 and 128`),
     check("board_cards_number_check", sql`${t.number} is null or ${t.number} > 0`),
+  ],
+);
+
+// ---------------------------------------------------------------- memory and approvals (Phase 07.2)
+
+/** Who wrote a memory file or revision (D-01). */
+const MEMORY_AUTHOR_KINDS = sql`('user','agent','system')`;
+/** File size limit (D-01, research A1): 256 KiB of UTF-8. */
+const MEMORY_FILE_MAX_BYTES = 262_144;
+
+/**
+ * Memory scopes (D-01, D-08, MEM-01): `personal` = one (bot, human) pair, `agent` = a bot's notebook, `unit` = a
+ * department, team or project, `org` = the organization; one scope per anchor (partial unique indexes).
+ * `personal_owner_user_id` is set by a SECURITY DEFINER trigger in `sql/post-migrate.sql` (never by the application:
+ * personal → `owner_user_id`; a personal bot's notebook → the bot's owner; otherwise NULL) and the RESTRICTIVE
+ * `personal_owner_only` policy there hides the row from every session whose `app.user_id` is not that owner, admins
+ * included (ADR-0010). A scope's identity (kind and anchors) is immutable. A unit with memory is not deleted by the API
+ * (`unit_has_memory`); the FK cascades for the database's own consistency. `origin = legacy_notes` marks the scopes
+ * the `memory_notes_backfill` migration created from `agent_memories`.
+ */
+export const memoryScopes = appSchema.table(
+  "memory_scopes",
+  {
+    id: id(),
+    organizationId: orgId(),
+    kind: text("kind", { enum: ["personal", "agent", "unit", "org"] }).notNull(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    ownerUserId: uuid("owner_user_id"),
+    unitId: uuid("unit_id").references(() => orgUnits.id, { onDelete: "cascade" }),
+    personalOwnerUserId: uuid("personal_owner_user_id"),
+    origin: text("origin", { enum: ["app", "legacy_notes"] })
+      .notNull()
+      .default("app"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("memory_scopes_personal_uq")
+      .on(t.organizationId, t.agentId, t.ownerUserId)
+      .where(sql`kind = 'personal'`),
+    uniqueIndex("memory_scopes_agent_uq").on(t.organizationId, t.agentId).where(sql`kind = 'agent'`),
+    uniqueIndex("memory_scopes_unit_uq").on(t.organizationId, t.unitId).where(sql`kind = 'unit'`),
+    uniqueIndex("memory_scopes_org_uq").on(t.organizationId).where(sql`kind = 'org'`),
+    check("memory_scopes_kind_check", sql`${t.kind} in ('personal','agent','unit','org')`),
+    check(
+      "memory_scopes_shape_check",
+      sql`(${t.kind} = 'personal' and ${t.agentId} is not null and ${t.ownerUserId} is not null and ${t.unitId} is null)
+        or (${t.kind} = 'agent' and ${t.agentId} is not null and ${t.ownerUserId} is null and ${t.unitId} is null)
+        or (${t.kind} = 'unit' and ${t.unitId} is not null and ${t.agentId} is null and ${t.ownerUserId} is null)
+        or (${t.kind} = 'org' and ${t.agentId} is null and ${t.ownerUserId} is null and ${t.unitId} is null)`,
+    ),
+    check("memory_scopes_origin_check", sql`${t.origin} in ('app','legacy_notes')`),
+  ],
+);
+
+/**
+ * Memory files (D-01, MEM-01): virtual Markdown files with repo-style relative paths (the grammar lives in contracts,
+ * `parseMemoryPath`); folders derive from paths. One LIVE file per case-insensitive path per scope; deletes are soft.
+ * `version` is the optimistic-concurrency counter, matching the latest revision. `personal_owner_user_id` is copied
+ * from the scope by the post-migrate trigger. `search_tsv` (a STORED generated tsvector over the path words and the
+ * content, the three ADR-0016 configurations) is hand-written in the memory_files migration and kept OUT of this
+ * schema like `messages.search_tsv`.
+ */
+export const memoryFiles = appSchema.table(
+  "memory_files",
+  {
+    id: id(),
+    organizationId: orgId(),
+    scopeId: uuid("scope_id")
+      .notNull()
+      .references(() => memoryScopes.id, { onDelete: "cascade" }),
+    personalOwnerUserId: uuid("personal_owner_user_id"),
+    path: text("path").notNull(),
+    content: text("content").notNull(),
+    version: integer("version").notNull().default(1),
+    bytes: integer("bytes").notNull(),
+    deletedAt: ts("deleted_at"),
+    updatedByKind: text("updated_by_kind", { enum: ["user", "agent", "system"] }).notNull(),
+    updatedById: uuid("updated_by_id"),
+    onBehalfOfUserId: uuid("on_behalf_of_user_id"),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("memory_files_scope_path_uq")
+      .on(t.scopeId, sql`lower(${t.path})`)
+      .where(sql`deleted_at is null`),
+    index("memory_files_scope_idx").on(t.organizationId, t.scopeId).where(sql`deleted_at is null`),
+    check(
+      "memory_files_content_size_check",
+      sql`octet_length(${t.content}) <= ${sql.raw(String(MEMORY_FILE_MAX_BYTES))}`,
+    ),
+    check("memory_files_path_len_check", sql`char_length(${t.path}) <= 255`),
+    check("memory_files_updated_by_kind_check", sql`${t.updatedByKind} in ${MEMORY_AUTHOR_KINDS}`),
+  ],
+);
+
+/**
+ * Approval requests (D-05, D-08, MEM-06): the generic approve-and-apply primitive. `server_apply` = the server applies
+ * the approved action itself (memory proposals); `grant` = a one-use grant consumed later (07.5). `action_hash` is the
+ * SHA-256 of the exact action the approver saw; the decision must present it. Kinds are dotted ids registered by the
+ * approval module (`memory.write`). One approval per card message.
+ */
+export const approvalRequests = appSchema.table(
+  "approval_requests",
+  {
+    id: id(),
+    organizationId: orgId(),
+    kind: text("kind").notNull(),
+    mode: text("mode", { enum: ["server_apply", "grant"] }).notNull(),
+    resourceType: text("resource_type").notNull(),
+    resourceId: uuid("resource_id").notNull(),
+    actionHash: text("action_hash").notNull(),
+    status: text("status", { enum: ["pending", "approved", "denied", "applied", "failed", "expired"] })
+      .notNull()
+      .default("pending"),
+    requestedByAgentId: uuid("requested_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    requestedForUserId: uuid("requested_for_user_id"),
+    eventId: uuid("event_id"),
+    cardMessageId: uuid("card_message_id").references(() => messages.id, { onDelete: "set null" }),
+    decidedBy: uuid("decided_by"),
+    decidedAt: ts("decided_at"),
+    decisionNote: text("decision_note"),
+    cardWarnings: text("card_warnings").array().notNull().default(sql`'{}'::text[]`),
+    consumedAt: ts("consumed_at"),
+    appliedAt: ts("applied_at"),
+    resultCode: text("result_code"),
+    expiresAt: ts("expires_at").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("approval_requests_status_idx").on(t.organizationId, t.status, t.expiresAt),
+    index("approval_requests_resource_idx").on(t.organizationId, t.kind, t.resourceId),
+    uniqueIndex("approval_requests_card_message_uq")
+      .on(t.cardMessageId)
+      .where(sql`card_message_id is not null`),
+    check("approval_requests_mode_check", sql`${t.mode} in ('server_apply','grant')`),
+    check(
+      "approval_requests_status_check",
+      sql`${t.status} in ('pending','approved','denied','applied','failed','expired')`,
+    ),
+    check("approval_requests_action_hash_check", sql`${t.actionHash} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "approval_requests_decision_note_len_check",
+      sql`${t.decisionNote} is null or char_length(${t.decisionNote}) <= 280`,
+    ),
+    check("approval_requests_card_warnings_check", sql`cardinality(${t.cardWarnings}) <= 3`),
+  ],
+);
+
+/**
+ * Memory file revisions (D-01, MEM-01): append-only history, one row per change (UPDATE and TRUNCATE revoked from the
+ * app role in post-migrate; DELETE stays for cascades and a personal "forget"). `personal_owner_user_id` is copied
+ * from the file by the post-migrate trigger, which also refuses a `scope_id` other than the file's.
+ */
+export const memoryFileRevisions = appSchema.table(
+  "memory_file_revisions",
+  {
+    id: id(),
+    organizationId: orgId(),
+    fileId: uuid("file_id")
+      .notNull()
+      .references(() => memoryFiles.id, { onDelete: "cascade" }),
+    scopeId: uuid("scope_id").notNull(),
+    personalOwnerUserId: uuid("personal_owner_user_id"),
+    version: integer("version").notNull(),
+    op: text("op", { enum: ["create", "update", "append", "rename", "delete", "restore"] }).notNull(),
+    path: text("path").notNull(),
+    content: text("content").notNull(),
+    linesAdded: integer("lines_added").notNull().default(0),
+    linesRemoved: integer("lines_removed").notNull().default(0),
+    authorKind: text("author_kind", { enum: ["user", "agent", "system"] }).notNull(),
+    authorId: uuid("author_id"),
+    onBehalfOfUserId: uuid("on_behalf_of_user_id"),
+    approvalRequestId: uuid("approval_request_id"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    // Named by hand: drizzle's generated name for this pair exceeds 63 bytes and gets a hash.
+    foreignKey({
+      name: "memory_file_revisions_approval_fk",
+      columns: [t.approvalRequestId],
+      foreignColumns: [approvalRequests.id],
+    }).onDelete("set null"),
+    unique("memory_file_revisions_file_version_uq").on(t.fileId, t.version),
+    index("memory_file_revisions_scope_idx").on(t.organizationId, t.scopeId),
+    check(
+      "memory_file_revisions_op_check",
+      sql`${t.op} in ('create','update','append','rename','delete','restore')`,
+    ),
+    check("memory_file_revisions_author_kind_check", sql`${t.authorKind} in ${MEMORY_AUTHOR_KINDS}`),
+  ],
+);
+
+/**
+ * Memory proposals (D-08, MEM-05/06): what an agent asked to write into a shared scope, immutable once stored (UPDATE
+ * and TRUNCATE revoked); its approval request points at it (`resource_id`). `findings` are the detector's masked
+ * findings; `reader_count` is how many people could read the change; `tainted` = the turn read untrusted content.
+ */
+export const memoryProposals = appSchema.table(
+  "memory_proposals",
+  {
+    id: id(),
+    organizationId: orgId(),
+    scopeId: uuid("scope_id")
+      .notNull()
+      .references(() => memoryScopes.id, { onDelete: "cascade" }),
+    personalOwnerUserId: uuid("personal_owner_user_id"),
+    fileId: uuid("file_id").references(() => memoryFiles.id, { onDelete: "set null" }),
+    path: text("path").notNull(),
+    op: text("op", { enum: ["create", "replace", "append"] }).notNull(),
+    baseVersion: integer("base_version"),
+    content: text("content").notNull(),
+    contentSha256: text("content_sha256").notNull(),
+    findings: jsonb("findings").$type<Array<Record<string, unknown>>>().notNull().default([]),
+    readerCount: integer("reader_count").notNull(),
+    tainted: boolean("tainted").notNull(),
+    reason: text("reason"),
+    requestedByAgentId: uuid("requested_by_agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    requestedForUserId: uuid("requested_for_user_id"),
+    eventId: uuid("event_id"),
+    conversationId: uuid("conversation_id"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("memory_proposals_scope_idx").on(t.organizationId, t.scopeId),
+    check("memory_proposals_op_check", sql`${t.op} in ('create','replace','append')`),
+    check(
+      "memory_proposals_content_size_check",
+      sql`octet_length(${t.content}) <= ${sql.raw(String(MEMORY_FILE_MAX_BYTES))}`,
+    ),
+    check("memory_proposals_reason_len_check", sql`${t.reason} is null or char_length(${t.reason}) <= 280`),
   ],
 );

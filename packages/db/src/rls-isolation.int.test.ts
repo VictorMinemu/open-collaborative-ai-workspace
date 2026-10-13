@@ -359,6 +359,34 @@ async function seedOrg(c: pg.Client, org: string) {
     `insert into app.board_cards (message_id, organization_id, conversation_id, column_id, rank, title, title_source, description, number, fields) values ($1, $2, $3, $4, 'a0', 'EXP-0001 · Broken pump', 'auto', 'Broken pump', 1, '{"customer":"Acme"}')`,
     [cardRoot, org, board, column],
   );
+
+  // Phase 07.2 (scoped memory files and approvals): one row per new table, all in the department's SHARED scope so the
+  // generic enumerator below counts them without an `app.user_id`. Personal rows (owner-only on top of the tenant
+  // policy) have their own suite: memory-privacy.int.test.ts.
+  const memScope = randomUUID();
+  const memFile = randomUUID();
+  const approval = randomUUID();
+  await q("insert into app.memory_scopes (id, organization_id, kind, unit_id) values ($1, $2, 'unit', $3)", [
+    memScope,
+    org,
+    unit,
+  ]);
+  await q(
+    "insert into app.memory_files (id, organization_id, scope_id, path, content, bytes, updated_by_kind, updated_by_id) values ($1, $2, $3, 'MEMORY.md', '# Memory\n', 9, 'user', $4)",
+    [memFile, org, memScope, user],
+  );
+  await q(
+    `insert into app.approval_requests (id, organization_id, kind, mode, resource_type, resource_id, action_hash, requested_by_agent_id, requested_for_user_id, card_message_id, expires_at) values ($1, $2, 'memory.write', 'server_apply', 'memory_proposal', $3, $4, $5, $6, $7, now() + interval '14 days')`,
+    [approval, org, randomUUID(), "f".repeat(64), agent, user, cardMsg],
+  );
+  await q(
+    "insert into app.memory_file_revisions (organization_id, file_id, scope_id, version, op, path, content, lines_added, author_kind, author_id, approval_request_id) values ($1, $2, $3, 1, 'create', 'MEMORY.md', '# Memory\n', 1, 'user', $4, $5)",
+    [org, memFile, memScope, user, approval],
+  );
+  await q(
+    `insert into app.memory_proposals (organization_id, scope_id, file_id, path, op, base_version, content, content_sha256, findings, reader_count, tainted, requested_by_agent_id, requested_for_user_id) values ($1, $2, $3, 'MEMORY.md', 'append', 1, '- uses pnpm', $4, '[]', 3, false, $5, $6)`,
+    [org, memScope, memFile, "e".repeat(64), agent, user],
+  );
 }
 
 const AI_CHAT_TABLES = [
@@ -380,6 +408,14 @@ const MULTIPLAYER_AI_TABLES = [
 ] as const;
 
 const BOARD_TABLES = ["app.boards", "app.board_columns", "app.board_cards", "app.record_templates"] as const;
+
+const MEMORY_TABLES = [
+  "app.memory_scopes",
+  "app.memory_files",
+  "app.memory_file_revisions",
+  "app.memory_proposals",
+  "app.approval_requests",
+] as const;
 
 async function inTenant<T>(org: string, fn: () => Promise<T>): Promise<T> {
   await app.query("begin");
@@ -1360,6 +1396,257 @@ describe("tenant isolation (RLS)", () => {
       { col: "column_id", collation: null },
       { col: "rank", collation: "C" },
     ]);
+  });
+
+  it("Phase 07.2: the five memory and approval tables are org-scoped, forced, seeded and invisible and unwritable across tenants", async () => {
+    const scoped = new Map((await orgScopedTables()).map((t) => [t.tbl, t]));
+    for (const tbl of MEMORY_TABLES) {
+      expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true });
+      const own = await inTenant(A, () => app.query(`select count(*)::int as n from ${tbl}`));
+      expect(own.rows[0].n, `${tbl} seeded`).toBeGreaterThan(0);
+      const cross = await inTenant(A, () =>
+        app.query(`select count(*)::int as n from ${tbl} where organization_id = $1`, [B]),
+      );
+      expect(cross.rows[0].n, `${tbl} cross-tenant`).toBe(0);
+      for (const stmt of [
+        `update ${tbl} set organization_id = organization_id where organization_id = $1`,
+        `delete from ${tbl} where organization_id = $1`,
+      ]) {
+        const n = await inTenant(A, () =>
+          app.query(stmt, [B]).then(
+            (res) => res.rowCount,
+            // Revisions and proposals are append-only: UPDATE is not even granted.
+            (err: Error) => (/permission denied/.test(err.message) ? 0 : Promise.reject(err)),
+          ),
+        );
+        expect(n, `${tbl}: ${stmt}`).toBe(0);
+      }
+      // A copy of B's row written from A's context is refused by the tenant policy (generated columns excluded).
+      const row = await migrator.query(
+        `select row_to_json(t) as j from ${tbl} t where organization_id = $1 limit 1`,
+        [B],
+      );
+      const cols = (
+        await migrator.query(
+          `select a.attname from pg_attribute a where a.attrelid = $1::regclass and a.attnum > 0
+             and not a.attisdropped and a.attgenerated = '' order by a.attnum`,
+          [tbl],
+        )
+      ).rows.map((r) => `"${r.attname}"`);
+      await expect(
+        inTenant(A, () =>
+          app.query(
+            `insert into ${tbl} (${cols.join(", ")}) select ${cols.join(", ")} from json_populate_record(null::${tbl}, $1::json)`,
+            [JSON.stringify(row.rows[0].j)],
+          ),
+        ),
+        `${tbl} cross-tenant insert`,
+      ).rejects.toThrow(/row-level security/);
+    }
+    // The four memory tables carry the restrictive owner-only policy on top of the tenant policy.
+    const restrictive = await migrator.query(
+      "select tablename, cmd, permissive from pg_policies where schemaname = 'app' and policyname = 'personal_owner_only' order by tablename",
+    );
+    expect(restrictive.rows).toEqual(
+      ["memory_file_revisions", "memory_files", "memory_proposals", "memory_scopes"].map((tablename) => ({
+        tablename,
+        cmd: "ALL",
+        permissive: "RESTRICTIVE",
+      })),
+    );
+    // The owner triggers run as the migrator with a fixed search_path; the app role cannot call them directly.
+    const fns = await migrator.query(
+      `select p.proname, p.prosecdef, pg_get_userbyid(p.proowner) as owner, p.proconfig
+         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'app' and p.proname like 'memory_%_owner' order by 1`,
+    );
+    expect(fns.rows.map((r) => r.proname)).toEqual([
+      "memory_revision_owner",
+      "memory_scope_owner",
+      "memory_scoped_row_owner",
+    ]);
+    for (const f of fns.rows) {
+      expect(f, f.proname).toMatchObject({
+        prosecdef: true,
+        owner: "ocw_migrator",
+        proconfig: ["search_path=pg_catalog, pg_temp"],
+      });
+    }
+  });
+
+  it("Phase 07.2: memory scope shapes, approval and card columns, and memory-only folder rules", async () => {
+    const { unit, agent, user, card } = (
+      await migrator.query(
+        `select (select id from app.org_units where organization_id = $1 limit 1) as unit,
+                (select id from app.agents where organization_id = $1 and scope = 'team' limit 1) as agent,
+                (select user_id from app.org_members where organization_id = $1 limit 1) as user,
+                (select message_id from app.message_cards where organization_id = $1 limit 1) as card`,
+        [A],
+      )
+    ).rows[0];
+    const tx = <T>(fn: () => Promise<T>) =>
+      (async () => {
+        await migrator.query("begin");
+        try {
+          return await fn();
+        } finally {
+          await migrator.query("rollback");
+        }
+      })();
+    const scope = (kind: string, agentId: string | null, owner: string | null, unitId: string | null) =>
+      migrator.query(
+        "insert into app.memory_scopes (organization_id, kind, agent_id, owner_user_id, unit_id) values ($1, $2, $3, $4, $5)",
+        [A, kind, agentId, owner, unitId],
+      );
+    // Each kind names exactly its own anchors.
+    expect((await tx(() => scope("personal", agent, user, null))).rowCount).toBe(1);
+    expect((await tx(() => scope("agent", agent, null, null))).rowCount).toBe(1);
+    for (const [kind, a, o, u] of [
+      ["personal", agent, null, null],
+      ["personal", null, user, null],
+      ["personal", agent, user, unit],
+      ["agent", agent, user, null],
+      ["agent", null, null, null],
+      ["unit", null, null, null],
+      ["unit", agent, null, unit],
+      ["org", agent, null, null],
+      ["org", null, null, unit],
+    ] as const) {
+      await expect(
+        tx(() => scope(kind, a, o, u)),
+        `${kind} ${a} ${o} ${u}`,
+      ).rejects.toThrow(/memory_scopes_(shape|kind)_check/);
+    }
+    await expect(tx(() => scope("team", null, null, unit))).rejects.toThrow(/memory_scopes_kind_check/);
+    // One scope per anchor: the seeded unit scope is already there; one org scope; one personal scope per pair.
+    await expect(tx(() => scope("unit", null, null, unit))).rejects.toThrow(/memory_scopes_unit_uq/);
+    await expect(
+      tx(async () => {
+        await scope("org", null, null, null);
+        return scope("org", null, null, null);
+      }),
+    ).rejects.toThrow(/memory_scopes_org_uq/);
+    await expect(
+      tx(async () => {
+        await scope("personal", agent, user, null);
+        return scope("personal", agent, user, null);
+      }),
+    ).rejects.toThrow(/memory_scopes_personal_uq/);
+    await expect(
+      tx(async () => {
+        await scope("agent", agent, null, null);
+        return scope("agent", agent, null, null);
+      }),
+    ).rejects.toThrow(/memory_scopes_agent_uq/);
+    await expect(
+      migrator.query(
+        "insert into app.memory_scopes (organization_id, kind, origin) values ($1, 'org', 'import')",
+        [A],
+      ),
+    ).rejects.toThrow(/memory_scopes_origin_check/);
+
+    // Approvals: 64-hex action hashes, known modes and statuses, a short decision note and at most three warnings.
+    const approval = (overrides: Record<string, unknown>) => {
+      const v = {
+        mode: "server_apply",
+        status: "pending",
+        action_hash: "a".repeat(64),
+        decision_note: null,
+        card_warnings: [],
+        ...overrides,
+      };
+      return migrator.query(
+        "insert into app.approval_requests (organization_id, kind, mode, resource_type, resource_id, action_hash, status, decision_note, card_warnings, expires_at) values ($1, 'memory.write', $2, 'memory_proposal', $3, $4, $5, $6, $7, now() + interval '1 day')",
+        [A, v.mode, randomUUID(), v.action_hash, v.status, v.decision_note, v.card_warnings],
+      );
+    };
+    expect((await tx(() => approval({ mode: "grant", decision_note: "n".repeat(280) }))).rowCount).toBe(1);
+    for (const status of ["pending", "approved", "denied", "applied", "failed", "expired"]) {
+      expect((await tx(() => approval({ status }))).rowCount, status).toBe(1);
+    }
+    await expect(tx(() => approval({ mode: "auto" }))).rejects.toThrow(/approval_requests_mode_check/);
+    await expect(tx(() => approval({ status: "cancelled" }))).rejects.toThrow(
+      /approval_requests_status_check/,
+    );
+    await expect(tx(() => approval({ action_hash: "A".repeat(64) }))).rejects.toThrow(
+      /approval_requests_action_hash_check/,
+    );
+    await expect(tx(() => approval({ action_hash: "a".repeat(63) }))).rejects.toThrow(
+      /approval_requests_action_hash_check/,
+    );
+    await expect(tx(() => approval({ decision_note: "n".repeat(281) }))).rejects.toThrow(
+      /approval_requests_decision_note_len_check/,
+    );
+    await expect(tx(() => approval({ card_warnings: ["a", "b", "c", "d"] }))).rejects.toThrow(
+      /approval_requests_card_warnings_check/,
+    );
+    // One approval per card message.
+    const seededCard = (
+      await migrator.query("select card_message_id from app.approval_requests where organization_id = $1", [
+        A,
+      ])
+    ).rows[0].card_message_id;
+    expect(seededCard).toBe(card);
+    await expect(
+      tx(() =>
+        migrator.query(
+          "insert into app.approval_requests (organization_id, kind, mode, resource_type, resource_id, action_hash, card_message_id, expires_at) values ($1, 'memory.write', 'server_apply', 'memory_proposal', $2, $3, $4, now())",
+          [A, randomUUID(), "b".repeat(64), card],
+        ),
+      ),
+    ).rejects.toThrow(/approval_requests_card_message_uq/);
+
+    // Cards: platform-owned defaults to false; the decision note is optional and short.
+    const cardRow = (
+      await migrator.query(
+        "select platform_owned, decision_note from app.message_cards where message_id = $1",
+        [card],
+      )
+    ).rows[0];
+    expect(cardRow).toEqual({ platform_owned: false, decision_note: null });
+    await expect(
+      tx(() =>
+        migrator.query("update app.message_cards set decision_note = $2 where message_id = $1", [
+          card,
+          "n".repeat(281),
+        ]),
+      ),
+    ).rejects.toThrow(/message_cards_decision_note_len_check/);
+
+    // Folder rules: only memory permissions, only the folder form (ends with "/").
+    const rule = (permission: string, pathPrefix: string | null) =>
+      migrator.query(
+        "insert into app.permission_rules (organization_id, subject_kind, permission, effect, path_prefix) values ($1, 'everyone', $2, 'deny', $3)",
+        [A, permission, pathPrefix],
+      );
+    expect((await tx(() => rule("memory.read", "hr/"))).rowCount).toBe(1);
+    expect((await tx(() => rule("memory.*", "hr/payroll/"))).rowCount).toBe(1);
+    expect((await tx(() => rule("channel.create", null))).rowCount).toBe(1);
+    await expect(tx(() => rule("channel.create", "hr/"))).rejects.toThrow(
+      /permission_rules_path_prefix_check/,
+    );
+    await expect(tx(() => rule("memory.read", "hr"))).rejects.toThrow(/permission_rules_path_prefix_check/);
+
+    // Deleting an approval keeps the revision it produced and only unlinks it; deleting the card unlinks the approval.
+    const linked = await tx(async () => {
+      await migrator.query("delete from app.approval_requests where organization_id = $1", [A]);
+      return (
+        await migrator.query(
+          "select approval_request_id from app.memory_file_revisions where organization_id = $1",
+          [A],
+        )
+      ).rows;
+    });
+    expect(linked).toEqual([{ approval_request_id: null }]);
+    const unlinked = await tx(async () => {
+      await migrator.query("delete from app.messages where id = $1", [card]);
+      return (
+        await migrator.query("select card_message_id from app.approval_requests where organization_id = $1", [
+          A,
+        ])
+      ).rows;
+    });
+    expect(unlinked).toEqual([{ card_message_id: null }]);
   });
 
   it("Phase 4: accent-insensitive Spanish search, a stored tsvector and the search indexes", async () => {

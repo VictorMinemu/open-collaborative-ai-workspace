@@ -56,6 +56,130 @@ CREATE POLICY auth_plane ON app.audit_events AS PERMISSIVE FOR ALL TO ocw_auth U
 DROP POLICY IF EXISTS auth_plane ON app.org_members;
 CREATE POLICY auth_plane ON app.org_members AS PERMISSIVE FOR ALL TO ocw_auth USING (true) WITH CHECK (true);
 
+-- Scoped memory (Phase 07.2, MEM-01 / MEM-07 / D-08). Layered ON TOP of the tenant loop above, never instead of it.
+--
+-- History is append-only (ADR-0023): the app role may add revisions and proposals but never rewrite them. DELETE
+-- stays granted: FK cascades (a deleted bot, scope or file) and a person's "forget" of their own personal memory.
+REVOKE UPDATE, TRUNCATE ON app.memory_file_revisions FROM ocw_app;
+REVOKE UPDATE, TRUNCATE ON app.memory_proposals FROM ocw_app;
+
+-- ADR-0010 ("the human can see and clear the notes; admins cannot" / admins "can never read its chat, memory or
+-- instructions"): every memory row of a personal scope, or of a personal bot's notebook, carries
+-- `personal_owner_user_id`. These SECURITY DEFINER trigger functions (owner ocw_migrator, which bypasses RLS to read the
+-- parent row; fixed search_path; no arguments; they only write NEW's owner column) derive it from the parent row on
+-- every INSERT and on every UPDATE that could change it, ignoring whatever the application sent, so no code path can
+-- store a personal row as shared. A parent outside the row's organization is refused (the plain FK alone would not).
+CREATE OR REPLACE FUNCTION app.memory_scope_owner() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+BEGIN
+  -- A scope's identity is fixed at creation: its rows' owner derives from it.
+  IF TG_OP = 'UPDATE' AND (NEW.organization_id, NEW.kind, NEW.agent_id, NEW.owner_user_id, NEW.unit_id)
+      IS DISTINCT FROM (OLD.organization_id, OLD.kind, OLD.agent_id, OLD.owner_user_id, OLD.unit_id) THEN
+    RAISE EXCEPTION 'memory scope identity is immutable' USING ERRCODE = 'check_violation';
+  END IF;
+  IF NEW.agent_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM app.agents a WHERE a.id = NEW.agent_id AND a.organization_id = NEW.organization_id
+  ) THEN
+    RAISE EXCEPTION 'memory scope agent not found in this organization' USING ERRCODE = 'foreign_key_violation';
+  END IF;
+  IF NEW.kind = 'personal' THEN
+    NEW.personal_owner_user_id := NEW.owner_user_id;
+  ELSIF NEW.kind = 'agent' THEN
+    -- A personal bot's notebook is its owner's (personal bots never change owner or scope); a team bot's is shared.
+    NEW.personal_owner_user_id := (
+      SELECT a.owner_user_id FROM app.agents a
+      WHERE a.id = NEW.agent_id AND a.organization_id = NEW.organization_id AND a.scope = 'personal'
+    );
+  ELSE
+    NEW.personal_owner_user_id := NULL;
+  END IF;
+  RETURN NEW;
+END
+$fn$;
+
+-- Files and proposals take their scope's owner.
+CREATE OR REPLACE FUNCTION app.memory_scoped_row_owner() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+DECLARE
+  owner uuid;
+BEGIN
+  SELECT s.personal_owner_user_id INTO owner FROM app.memory_scopes s
+  WHERE s.id = NEW.scope_id AND s.organization_id = NEW.organization_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'memory scope not found in this organization' USING ERRCODE = 'foreign_key_violation';
+  END IF;
+  NEW.personal_owner_user_id := owner;
+  RETURN NEW;
+END
+$fn$;
+
+-- Revisions take their file's owner, and must be filed under their file's scope (a personal file's history filed
+-- under a shared scope would otherwise read as shared).
+CREATE OR REPLACE FUNCTION app.memory_revision_owner() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+DECLARE
+  file_scope uuid;
+  owner uuid;
+BEGIN
+  SELECT f.scope_id, f.personal_owner_user_id INTO file_scope, owner FROM app.memory_files f
+  WHERE f.id = NEW.file_id AND f.organization_id = NEW.organization_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'memory file not found in this organization' USING ERRCODE = 'foreign_key_violation';
+  END IF;
+  IF NEW.scope_id IS DISTINCT FROM file_scope THEN
+    RAISE EXCEPTION 'memory revision scope mismatch' USING ERRCODE = 'check_violation';
+  END IF;
+  NEW.personal_owner_user_id := owner;
+  RETURN NEW;
+END
+$fn$;
+
+REVOKE ALL ON FUNCTION app.memory_scope_owner() FROM PUBLIC;
+REVOKE ALL ON FUNCTION app.memory_scoped_row_owner() FROM PUBLIC;
+REVOKE ALL ON FUNCTION app.memory_revision_owner() FROM PUBLIC;
+
+-- Column lists keep FK actions (ON DELETE SET NULL of `file_id` / `approval_request_id` during a cascade, when the
+-- parent may already be gone) from re-running the lookups.
+CREATE OR REPLACE TRIGGER memory_owner BEFORE INSERT OR UPDATE ON app.memory_scopes
+  FOR EACH ROW EXECUTE FUNCTION app.memory_scope_owner();
+CREATE OR REPLACE TRIGGER memory_owner BEFORE INSERT OR UPDATE OF organization_id, scope_id, personal_owner_user_id
+  ON app.memory_files FOR EACH ROW EXECUTE FUNCTION app.memory_scoped_row_owner();
+CREATE OR REPLACE TRIGGER memory_owner BEFORE INSERT OR UPDATE OF organization_id, scope_id, personal_owner_user_id
+  ON app.memory_proposals FOR EACH ROW EXECUTE FUNCTION app.memory_scoped_row_owner();
+CREATE OR REPLACE TRIGGER memory_owner
+  BEFORE INSERT OR UPDATE OF organization_id, file_id, scope_id, personal_owner_user_id
+  ON app.memory_file_revisions FOR EACH ROW EXECUTE FUNCTION app.memory_revision_owner();
+
+-- ADR-0010, enforced by the database as defence in depth under the resolver: a personal row is visible to, and
+-- writable by, only the session whose `app.user_id` (set transaction-locally by withTenant) is its owner. RESTRICTIVE,
+-- so it ANDs with tenant_isolation: an admin of the same organization, a cell route without a user and any other
+-- member read 0 rows and cannot insert one. FK cascades are not subject to it (memory-privacy.int.test.ts proves a
+-- bot deletion still removes its memory).
+DROP POLICY IF EXISTS personal_owner_only ON app.memory_scopes;
+CREATE POLICY personal_owner_only ON app.memory_scopes AS RESTRICTIVE FOR ALL
+  USING (personal_owner_user_id IS NULL
+         OR personal_owner_user_id = nullif(current_setting('app.user_id', true), '')::uuid)
+  WITH CHECK (personal_owner_user_id IS NULL
+         OR personal_owner_user_id = nullif(current_setting('app.user_id', true), '')::uuid);
+DROP POLICY IF EXISTS personal_owner_only ON app.memory_files;
+CREATE POLICY personal_owner_only ON app.memory_files AS RESTRICTIVE FOR ALL
+  USING (personal_owner_user_id IS NULL
+         OR personal_owner_user_id = nullif(current_setting('app.user_id', true), '')::uuid)
+  WITH CHECK (personal_owner_user_id IS NULL
+         OR personal_owner_user_id = nullif(current_setting('app.user_id', true), '')::uuid);
+DROP POLICY IF EXISTS personal_owner_only ON app.memory_file_revisions;
+CREATE POLICY personal_owner_only ON app.memory_file_revisions AS RESTRICTIVE FOR ALL
+  USING (personal_owner_user_id IS NULL
+         OR personal_owner_user_id = nullif(current_setting('app.user_id', true), '')::uuid)
+  WITH CHECK (personal_owner_user_id IS NULL
+         OR personal_owner_user_id = nullif(current_setting('app.user_id', true), '')::uuid);
+DROP POLICY IF EXISTS personal_owner_only ON app.memory_proposals;
+CREATE POLICY personal_owner_only ON app.memory_proposals AS RESTRICTIVE FOR ALL
+  USING (personal_owner_user_id IS NULL
+         OR personal_owner_user_id = nullif(current_setting('app.user_id', true), '')::uuid)
+  WITH CHECK (personal_owner_user_id IS NULL
+         OR personal_owner_user_id = nullif(current_setting('app.user_id', true), '')::uuid);
+
 -- Pre-tenant lookups (bearer tokens / pairing codes arrive before the organization is known).
 -- SECURITY DEFINER as ocw_migrator (BYPASSRLS); each returns only the ids needed to open withTenant().
 CREATE OR REPLACE FUNCTION app.lookup_device_token(p_token_hash text)

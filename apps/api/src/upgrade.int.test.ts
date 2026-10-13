@@ -36,6 +36,7 @@ const HEAD_ONLY = [
   "20261007163629_work_prompt_images",
   "20261007173205_work_prompt_image_order",
   "20261010010825_board_channels",
+  "20261013025212_memory_files",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
@@ -169,7 +170,7 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
     for (const t of SEEDED) expect(before.get(t), t).toBe(COPIES.get(t)?.rows.length);
   });
 
-  it("is behind by exactly HEAD's three migrations before the upgrade", async () => {
+  it("is behind by exactly HEAD_ONLY's migrations before the upgrade", async () => {
     const res = await checkSchema(urls.migrator);
     expect(res).toEqual({ status: "behind", pending: HEAD_ONLY, unknown: [], modified: [] });
     // N-1 had no read grant for ocw_app: an N-1 database is "never migrated" to the guard until `migrate` runs.
