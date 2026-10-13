@@ -295,6 +295,35 @@ describe("ocw_memory_read", () => {
     ).toBe("Not read: this conversation turn is no longer active.");
   });
 
+  it("a 403 no_trigger thrown by another module instance of the client still reads as the turn being over", async () => {
+    // The real cell: the shared client comes from the boot registry's module instance, the tool from a tool-discovery
+    // load (07.2-15 smoke found every API refusal read as "could not be reached" there).
+    vi.resetModules();
+    const other = (await import("./api-client.js")) as typeof import("./api-client.js");
+    const { tool, begin } = setup({
+      read: async () => {
+        throw new other.AgentChannelHttpError(403, "/memory/read", "x", "no_trigger");
+      },
+      propose: async () => {
+        throw new other.AgentChannelHttpError(409, "/memory/propose", "x", "too_many_pending");
+      },
+    });
+    begin();
+    expect(
+      text(await tool("ocw_memory_read").execute("tc-1", { scope: TEAM_SCOPE, path: "MEMORY.md" })),
+    ).toBe("Not read: this conversation turn is no longer active.");
+    expect(
+      text(
+        await tool("ocw_memory_propose").execute("tc-2", {
+          scope: TEAM_SCOPE,
+          path: "clients/acme.md",
+          op: "append",
+          content: "- note",
+        }),
+      ),
+    ).toBe("Not proposed: too many of your proposals are still waiting for approval.");
+  });
+
   it("an error code the API names as a refusal uses that refusal's sentence", async () => {
     const { tool, begin } = setup({
       read: async () => {
@@ -662,5 +691,91 @@ describe("list, write and propose through the fake Agent Channel API (HTTP)", ()
       expect(c.body.agentId).toBe(BOT);
       expect(Object.keys(c.body).filter((k) => /user|owner/i.test(k))).toEqual([]);
     }
+  });
+
+  /** Publishes the turn `evt-h1` the way the API delivers it (the fake reads its conversation from it). */
+  const deliver = () =>
+    api.publishMention({
+      eventId: "evt-h1",
+      agent: { id: BOT, handle: "archie", displayName: "Archie" },
+      conversation: { id: DM, kind: "dm", name: null },
+      thread: { rootMessageId: "msg-h1" },
+      message: { id: "msg-h1", text: "save it for the team", createdAt: "2026-10-13T09:00:00.000Z" },
+    } as never);
+
+  it("an accepted proposal of a delivered turn ends in one platform-owned approval card answering it (smoke parity)", async () => {
+    deliver();
+    const tool = http();
+    const said = text(
+      await tool("ocw_memory_propose").execute("tc-1", {
+        scope: TEAM_SCOPE,
+        path: "clients/acme.md",
+        op: "append",
+        content: "- note",
+      }),
+    );
+    expect(said).toContain("Proposed. A person must approve it before it is saved.");
+    expect(api.approvalCards).toHaveLength(1);
+    const [card] = api.approvalCards;
+    expect(card).toMatchObject({
+      eventId: "evt-h1",
+      agentId: BOT,
+      conversationId: DM,
+      threadRootId: "msg-h1",
+      inReplyToMessageId: "msg-h1",
+      platformOwned: true,
+      card: { kind: "approval", title: "Append to clients/acme.md", status: "pending", summary: "+ - note" },
+    });
+    expect(card?.card.actions).toEqual([
+      { kind: "open", label: "Review changes", target: `/memory/proposals/${card?.approvalId}` },
+    ]);
+    // Never through the agent's own card route, and a refused proposal posts nothing.
+    expect(api.cards).toEqual([]);
+    await tool("ocw_memory_propose").execute("tc-2", {
+      scope: TEAM_SCOPE,
+      path: "clients/acme.md",
+      op: "append",
+      content: "key sk-abcdefghijklmnopqrstuvwxyz",
+    });
+    expect(api.approvalCards).toHaveLength(1);
+  });
+
+  it("a turn whose human no longer reads the conversation: every memory route is 403 no_trigger, read as over", async () => {
+    deliver();
+    api.memoryFileStore.push({ scope: "personal", path: "MEMORY.md", version: 1, content: "# Memory\n" });
+    api.endTurn("evt-h1");
+    const tool = http();
+    expect(
+      text(await tool("ocw_memory_read").execute("tc-1", { scope: "personal", path: "MEMORY.md" })),
+    ).toBe("Not read: this conversation turn is no longer active.");
+    expect(
+      text(
+        await tool("ocw_memory_propose").execute("tc-2", {
+          scope: TEAM_SCOPE,
+          path: "clients/acme.md",
+          op: "append",
+          content: "- note",
+        }),
+      ),
+    ).toBe("Not proposed: this conversation turn is no longer active.");
+    expect(
+      text(
+        await tool("ocw_memory_write").execute("tc-3", {
+          scope: "personal",
+          path: "MEMORY.md",
+          mode: "append",
+          content: "- late",
+        }),
+      ),
+    ).toBe("Not saved: this conversation turn is no longer active.");
+    expect(api.memoryNoTriggers).toEqual([
+      { route: "read", eventId: "evt-h1" },
+      { route: "propose", eventId: "evt-h1" },
+      { route: "write", eventId: "evt-h1" },
+    ]);
+    expect(api.approvalCards).toEqual([]);
+    expect(api.memoryFileStore).toEqual([
+      expect.objectContaining({ path: "MEMORY.md", version: 1, content: "# Memory\n" }),
+    ]);
   });
 });

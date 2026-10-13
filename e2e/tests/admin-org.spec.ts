@@ -63,6 +63,38 @@ async function unitByName(api: APIRequestContext, name: string): Promise<ApiUnit
  * Deepest first, so no delete hits unit_has_children. Personas scoped to a unit (agent-personas.spec) belong to the
  * hierarchy this spec owns: they go first, or the delete answers 409 unit_has_bots.
  */
+/**
+ * Empties every unit's memory the way an admin would: deletes its files and puts `MEMORY.md` back to the template.
+ * Since Phase 07.2 a unit that holds live memory files cannot be deleted (409 `unit_has_memory`, MEM-01), and the
+ * memory specs leave team memory behind in the shared database before this spec's mobile run.
+ */
+async function clearUnitMemory(admin: APIRequestContext) {
+  const { scopes } = (await (await admin.get("/api/v1/memory/scopes")).json()) as {
+    scopes: Array<{ id: string; kind: string }>;
+  };
+  for (const scope of scopes.filter((s) => s.kind === "unit")) {
+    const { files } = (await (await admin.get(`/api/v1/memory/scopes/${scope.id}/files`)).json()) as {
+      files: Array<{ id: string; path: string; version: number }>;
+    };
+    for (const f of files) {
+      if (f.path !== "MEMORY.md") {
+        const res = await admin.delete(`/api/v1/memory/files/${f.id}?expectedVersion=${f.version}`);
+        expect(res.ok(), `delete memory file ${f.id}: ${await res.text()}`).toBe(true);
+        continue;
+      }
+      const root = (await (await admin.get(`/api/v1/memory/files/${f.id}`)).json()) as {
+        content: string;
+        version: number;
+      };
+      if (root.content === "# Memory\n" || root.content === "") continue;
+      const res = await admin.put(`/api/v1/memory/files/${f.id}`, {
+        data: { content: "# Memory\n", expectedVersion: root.version },
+      });
+      expect(res.ok(), `reset MEMORY.md ${f.id}: ${await res.text()}`).toBe(true);
+    }
+  }
+}
+
 async function clearUnits(admin: APIRequestContext) {
   const { agents } = (await (await admin.get("/api/v1/agents")).json()) as {
     agents: Array<{ id: string; unitId?: string | null }>;
@@ -70,8 +102,12 @@ async function clearUnits(admin: APIRequestContext) {
   for (const a of agents.filter((x) => x.unitId)) {
     expect((await admin.delete(`/api/v1/agents/${a.id}`)).ok(), `delete unit persona ${a.id}`).toBe(true);
   }
+  await clearUnitMemory(admin);
   const units = (await listUnits(admin)).sort((a, b) => b.path.length - a.path.length);
-  for (const u of units) expect((await admin.delete(`/api/v1/units/${u.id}`)).ok()).toBe(true);
+  for (const u of units) {
+    const res = await admin.delete(`/api/v1/units/${u.id}`);
+    expect(res.ok(), `delete unit ${u.name}: ${await res.text()}`).toBe(true);
+  }
 }
 
 async function signIn(browser: Browser, user: { email: string; password: string }, project: string) {
