@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 113
+open_count: 115
 waived_count: 4
 fixed_count: 55
-total_count: 172
-last_updated: 2026-10-13T22:54:38.476Z
+total_count: 174
+last_updated: 2026-10-13T22:56:12.721Z
 ---
 
 # Broken Windows Ledger
@@ -187,6 +187,8 @@ last_updated: 2026-10-13T22:54:38.476Z
 | 170 | 07.4 | deviation | packages/db/src/schema/app.ts |  | No owner-only restrictive DB policy on personal keys or member connector connections (only tenant isolation); enforce owner-only in the API (07.4-07/10) and add a restrictive policy before the gate, as 07.2 did for personal memory | open |  | 2026-10-13T22:54:38.296Z |  |
 | 171 | 07.4 | deviation | packages/db/src/schema/app.ts |  | Template versions are immutable only in the API (no trigger); share resource_id has no FK so deleting a connector or key leaves an inert share row | open |  | 2026-10-13T22:54:38.389Z |  |
 | 172 | 07.4 | deviation | packages/db/src/schema/app.ts |  | vault_items.secret_ref accepts env/file/openbao providers in the DB; D-07 db-only must be enforced by the API; SecretsService.putSealed must accept connector_credential and vault_item (07.4-07/10) | open |  | 2026-10-13T22:54:38.476Z |  |
+| 173 | 07.4 | deviation | infra/fake-model/fake-mcp-oauth.mjs |  | The fake shares DCR/CIMD clients across issuers (main and alt); 07.4-10 must prove in the API that client credentials are never reused across issuers; default cimdFetch never runs in tests | open |  | 2026-10-13T22:56:12.635Z |  |
+| 174 | 07.4 | deviation | .planning/phases/07.4-per-member-connectors-agent-keychain-and-templates/07.4-VALIDATION.md |  | Plans and VALIDATION use 'node --test infra/fake-model/' which Node 24 treats as a file; use the glob form | open |  | 2026-10-13T22:56:12.721Z |  |
 
 ````json
 [
@@ -2252,6 +2254,30 @@ last_updated: 2026-10-13T22:54:38.476Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-13T22:54:38.476Z",
+    "resolved_at": null
+  },
+  {
+    "id": 173,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "infra/fake-model/fake-mcp-oauth.mjs",
+    "line": null,
+    "description": "The fake shares DCR/CIMD clients across issuers (main and alt); 07.4-10 must prove in the API that client credentials are never reused across issuers; default cimdFetch never runs in tests",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T22:56:12.635Z",
+    "resolved_at": null
+  },
+  {
+    "id": 174,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": ".planning/phases/07.4-per-member-connectors-agent-keychain-and-templates/07.4-VALIDATION.md",
+    "line": null,
+    "description": "Plans and VALIDATION use 'node --test infra/fake-model/' which Node 24 treats as a file; use the glob form",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T22:56:12.721Z",
     "resolved_at": null
   }
 ]
