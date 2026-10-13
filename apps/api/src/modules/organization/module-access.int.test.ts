@@ -296,6 +296,7 @@ describe("the read model and inheritance through the API (admin)", () => {
       ["work_zone", "on", null],
       ["ai_chats", "on", null],
       ["bots", "on", null],
+      ["memory", "on", null],
     ]);
     expect((v.people as Json[]).map((p) => [p.displayName, p.canEdit])).toEqual([
       ["Ada Admin", true],
@@ -363,6 +364,7 @@ describe("the read model and inheritance through the API (admin)", () => {
             { module: "work_zone", state: "off", inherited: null },
             { module: "ai_chats", state: "on", inherited: null },
             { module: "bots", state: "on", inherited: null },
+            { module: "memory", state: "on", inherited: null },
           ],
         },
       ]);

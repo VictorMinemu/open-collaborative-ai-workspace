@@ -13,6 +13,7 @@ import {
   Bot,
   ChevronRight,
   type LucideIcon,
+  NotebookText,
   Search,
   Sparkles,
   SquareTerminal,
@@ -57,6 +58,7 @@ const MODULE_ICONS: Record<ModuleId, LucideIcon> = {
   work_zone: SquareTerminal,
   ai_chats: Sparkles,
   bots: Bot,
+  memory: NotebookText,
 };
 
 const ADMIN_ONLY = "Only an organization admin can change modules for an admin.";

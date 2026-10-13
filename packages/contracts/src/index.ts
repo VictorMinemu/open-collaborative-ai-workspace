@@ -14,6 +14,7 @@ export * from "./health";
 export * from "./identity";
 export * from "./marketplace";
 export * from "./mcp";
+export * from "./memory";
 export * from "./model-prices";
 export * from "./module-access";
 export * from "./notifications";

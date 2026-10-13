@@ -101,6 +101,7 @@ describe("deriveModuleAccess", () => {
       { module: "work_zone", state: "on", inherited: null },
       { module: "ai_chats", state: "on", inherited: null },
       { module: "bots", state: "on", inherited: null },
+      { module: "memory", state: "on", inherited: null },
     ]);
     expect(v.people).toEqual([
       { userId: DANA, displayName: "Dana Dev", avatarUrl: null, canEdit: true, modules: v.modules },
@@ -163,6 +164,7 @@ describe("deriveModuleAccess", () => {
         inherited: { scopeUnitId: null, name: "Organization", state: "off" },
       },
       { module: "bots", state: "off", inherited: null },
+      { module: "memory", state: "on", inherited: null },
     ]);
     // Person rows never change the unit's own state.
     expect(v.modules.every((m) => m.state === "on" && m.inherited === null)).toBe(true);
@@ -206,6 +208,7 @@ describe("deriveModuleAccess", () => {
         { module: "work_zone", state: "off", inherited: null },
         { module: "ai_chats", state: "on", inherited: null },
         { module: "bots", state: "on", inherited: null },
+        { module: "memory", state: "on", inherited: null },
       ],
     });
     expect(stateIn(v.overrides[1]?.modules ?? [], "work_zone")?.state).toBe("custom");
