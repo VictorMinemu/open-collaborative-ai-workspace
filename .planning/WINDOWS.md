@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 126
+open_count: 124
 waived_count: 3
-fixed_count: 34
-total_count: 163
-last_updated: 2026-10-13T09:44:33.110Z
+fixed_count: 38
+total_count: 165
+last_updated: 2026-10-13T09:48:45.937Z
 ---
 
 # Broken Windows Ledger
@@ -147,7 +147,7 @@ last_updated: 2026-10-13T09:44:33.110Z
 | 130 | 07.2 | deviation | apps/api/src/modules/policy |  | A standard owner of a team bot can write its notebook but not promote (memory.promote is lead/admin); needs an explicit product exception if wanted | open |  | 2026-10-13T04:39:31.819Z |  |
 | 131 | 07.2 | deviation | apps/api/src/modules/policy |  | An agent decision with no human evaluates only the agent; 07.2-08 and 07.2-11 must always pass the human the agent acts for | fixed |  | 2026-10-13T04:39:31.902Z | 2026-10-13T05:47:46.953Z |
 | 132 | 07.2 | deviation | apps/api/src/modules/approval |  | Decisions mirrored onto a card do not send the usual card-updated notification to its followers | open |  | 2026-10-13T04:50:57.608Z |  |
-| 133 | 07.2 | deviation | apps/api/src/modules/approval |  | Inbox list checks each row's decider rule one by one (up to 500 per page), so a page can come back short with a cursor | open |  | 2026-10-13T04:50:57.677Z |  |
+| 133 | 07.2 | deviation | apps/api/src/modules/approval |  | Inbox list checks each row's decider rule one by one (up to 500 per page), so a page can come back short with a cursor | fixed |  | 2026-10-13T04:50:57.677Z | 2026-10-13T09:48:45.635Z |
 | 134 | 07.2 | deviation | apps/api/src/modules/approval |  | An apply that throws (instead of returning an error code) rolls back the whole decision and leaves the request pending | open |  | 2026-10-13T04:50:57.748Z |  |
 | 135 | 07.2 | deviation | apps/api/src/modules/approval |  | An approved grant's card shows succeeded before the grant is used; decide in 07.5 | open |  | 2026-10-13T04:50:57.827Z |  |
 | 136 | 07.2 | deviation | packages/db/src/schema |  | The DB still allows changing a memory file's scope_id; moving across scopes is prevented only in the API | open |  | 2026-10-13T05:47:47.110Z |  |
@@ -167,17 +167,19 @@ last_updated: 2026-10-13T09:44:33.110Z
 | 150 | 07.2 | unrun-verify | e2e/tests/bot-memory.spec.ts |  | bot-capabilities.spec and bot-memory.spec not run after 07.2-11; the fake API never answers no_trigger, the 07.2-15 smoke should cover an expired-turn call | open |  | 2026-10-13T07:15:00.344Z |  |
 | 151 | 07.2 | deviation | packages/db/src/schema |  | app.agent_memories is now dead data (notes live in the private MEMORY.md); dropping it needs a later migration once the backfill has been in production | open |  | 2026-10-13T07:15:00.428Z |  |
 | 152 | 07.2 | deviation | apps/api/src/modules/bot-capabilities/memory.ts |  | Legacy notes share one createdAt (file mtime); a note refused for a secret reaches the model as 'not accepted' with no reason | open |  | 2026-10-13T07:15:00.503Z |  |
-| 153 | 07.2 | deviation | apps/web/components/memory |  | The Proposals row links to /memory/proposals (built by 07.2-13, not-found until then) and on mobile shows for everyone, while the UI-SPEC limits it to deciders and proposers | open |  | 2026-10-13T07:35:47.377Z |  |
+| 153 | 07.2 | deviation | apps/web/components/memory |  | The Proposals row links to /memory/proposals (built by 07.2-13, not-found until then) and on mobile shows for everyone, while the UI-SPEC limits it to deciders and proposers | fixed |  | 2026-10-13T07:35:47.377Z | 2026-10-13T09:48:45.555Z |
 | 154 | 07.2 | deviation | apps/web/components/markdown |  | axe heading-order (moderate) in the memory viewer: Markdown # renders as h3 under the breadcrumb h1; fix in the shared renderer | open |  | 2026-10-13T07:35:47.448Z |  |
 | 155 | 07.2 | deviation | apps/web/components/organization |  | Settings > Modules copy still says 'Work Zone, AI chats and bots' and does not name Memory; memory dates show '3 hours ago' instead of the spec's '3h ago' | open |  | 2026-10-13T07:35:47.519Z |  |
-| 156 | 07.2 | deviation | apps/web/components/memory |  | Revisions do not carry who approved them, so history shows 'Approved proposal' instead of 'Approved by {person}' | open |  | 2026-10-13T08:49:37.424Z |  |
+| 156 | 07.2 | deviation | apps/web/components/memory |  | Revisions do not carry who approved them, so history shows 'Approved proposal' instead of 'Approved by {person}' | fixed |  | 2026-10-13T08:49:37.424Z | 2026-10-13T09:48:45.713Z |
 | 157 | 07.2 | deviation | apps/web/lib/memory-queries.ts |  | Team memory files do not update live: memory.changed reaches only the owner of private memory | open |  | 2026-10-13T08:49:37.498Z |  |
 | 158 | 07.2 | deviation | apps/web/components/memory |  | History paginates on the client (API returns all revisions); a file saved without a trailing newline shows an extra empty line in the diff | open |  | 2026-10-13T08:49:37.571Z |  |
 | 159 | 07.2 | deviation | apps/web/package.json |  | lang-markdown pulls HTML/CSS/JS modes into the editor bundle; Cmd/Ctrl+S label uses deprecated navigator.platform | open |  | 2026-10-13T08:49:37.641Z |  |
-| 160 | 07.2 | deviation | apps/api/src/modules/approval |  | The live card event is emitted before the card is linked to its approval (client works around it); the server should emit message.updated after linking. Expiry does not arrive live (card stays Pending until reload) | open |  | 2026-10-13T08:49:54.347Z |  |
+| 160 | 07.2 | deviation | apps/api/src/modules/approval |  | The live card event is emitted before the card is linked to its approval (client works around it); the server should emit message.updated after linking. Expiry does not arrive live (card stays Pending until reload) | fixed |  | 2026-10-13T08:49:54.347Z | 2026-10-13T09:48:45.787Z |
 | 161 | 07.2 | deviation | apps/web/components/ui/dialog.tsx |  | The shared Dialog close X is 32 px below 1024 (UI-SPEC asks 44) | open |  | 2026-10-13T08:49:54.419Z |  |
 | 162 | 07.2 | deviation | e2e/tests/memory-files.spec.ts |  | memory-files.spec depends on run order: it expects exact scopes for Sam and breaks once other specs leave private scopes of Sam in the shared DB | open |  | 2026-10-13T09:44:33.028Z |  |
 | 163 | 07.2 | deviation | apps/api/src/modules/memory |  | Private scopes of deleted bots still appear in /memory/scopes; the bot page waits for the full GET /agents list (no useAgent(id)) | open |  | 2026-10-13T09:44:33.110Z |  |
+| 164 | 07.2 | deviation | apps/api/src/modules/memory/approval-kind.ts |  | Bot delete is soft, so its pending memory proposals stay live and a lead can approve them; the server would write on behalf of a deleted bot | open |  | 2026-10-13T09:48:45.861Z |  |
+| 165 | 07.2 | deviation | apps/web/components/memory |  | 'No sensitive data found' next to 'Extended scan unavailable' can read as reassuring; review-memory-scopes-390 screenshot from 07.2-10 is stale (shows the now-hidden Proposals row) | open |  | 2026-10-13T09:48:45.937Z |  |
 
 ````json
 [
@@ -1772,10 +1774,10 @@ last_updated: 2026-10-13T09:44:33.110Z
     "file": "apps/api/src/modules/approval",
     "line": null,
     "description": "Inbox list checks each row's decider rule one by one (up to 500 per page), so a page can come back short with a cursor",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T04:50:57.677Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-13T09:48:45.635Z"
   },
   {
     "id": 134,
@@ -2012,10 +2014,10 @@ last_updated: 2026-10-13T09:44:33.110Z
     "file": "apps/web/components/memory",
     "line": null,
     "description": "The Proposals row links to /memory/proposals (built by 07.2-13, not-found until then) and on mobile shows for everyone, while the UI-SPEC limits it to deciders and proposers",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T07:35:47.377Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-13T09:48:45.555Z"
   },
   {
     "id": 154,
@@ -2048,10 +2050,10 @@ last_updated: 2026-10-13T09:44:33.110Z
     "file": "apps/web/components/memory",
     "line": null,
     "description": "Revisions do not carry who approved them, so history shows 'Approved proposal' instead of 'Approved by {person}'",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T08:49:37.424Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-13T09:48:45.713Z"
   },
   {
     "id": 157,
@@ -2096,10 +2098,10 @@ last_updated: 2026-10-13T09:44:33.110Z
     "file": "apps/api/src/modules/approval",
     "line": null,
     "description": "The live card event is emitted before the card is linked to its approval (client works around it); the server should emit message.updated after linking. Expiry does not arrive live (card stays Pending until reload)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T08:49:54.347Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-13T09:48:45.787Z"
   },
   {
     "id": 161,
@@ -2135,6 +2137,30 @@ last_updated: 2026-10-13T09:44:33.110Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-13T09:44:33.110Z",
+    "resolved_at": null
+  },
+  {
+    "id": 164,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/memory/approval-kind.ts",
+    "line": null,
+    "description": "Bot delete is soft, so its pending memory proposals stay live and a lead can approve them; the server would write on behalf of a deleted bot",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T09:48:45.861Z",
+    "resolved_at": null
+  },
+  {
+    "id": 165,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/web/components/memory",
+    "line": null,
+    "description": "'No sensitive data found' next to 'Extended scan unavailable' can read as reassuring; review-memory-scopes-390 screenshot from 07.2-10 is stale (shows the now-hidden Proposals row)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T09:48:45.937Z",
     "resolved_at": null
   }
 ]
