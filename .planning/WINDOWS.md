@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 92
+open_count: 95
 waived_count: 2
 fixed_count: 25
-total_count: 119
-last_updated: 2026-10-13T03:45:07.976Z
+total_count: 122
+last_updated: 2026-10-13T04:19:13.134Z
 ---
 
 # Broken Windows Ledger
@@ -134,6 +134,9 @@ last_updated: 2026-10-13T03:45:07.976Z
 | 117 | 07.2 | deviation | packages/db/src/schema/memory.ts |  | Personal bot notebook owner assumes a personal bot never changes owner or kind; recompute the owner if that ever changes | open |  | 2026-10-13T03:45:07.777Z |  |
 | 118 | 07.2 | deviation | packages/db/src/schema/memory.ts |  | A file moved across scopes keeps old revisions with the previous owner (conservative); 07.2-08 must account for it | open |  | 2026-10-13T03:45:07.876Z |  |
 | 119 | 07.2 | deviation | apps/api/src/modules/policy/module-access-enforcement.int.test.ts |  | testcontainers Redis port wait can time out under Docker load and fail verify once | open |  | 2026-10-13T03:45:07.976Z |  |
+| 120 | 07.2 | deviation | compose.yaml |  | The internal pii network is created by every compose project even with the profile off (uses Docker address pools); adding it recreates the api once on the next up | open |  | 2026-10-13T04:19:12.931Z |  |
+| 121 | 07.2 | unrun-verify | infra/presidio/recognizers.yaml |  | Spanish Presidio accuracy only checked on fixed samples (missed a Spanish name in a probe); owner manual check on real documents | open |  | 2026-10-13T04:19:13.026Z |  |
+| 122 | 07.2 | deviation | scripts/ocw.mjs |  | No pnpm ocw enable pii: turning on the pii profile means editing .env by hand, unlike other profiles | open |  | 2026-10-13T04:19:13.134Z |  |
 
 ````json
 [
@@ -1563,6 +1566,42 @@ last_updated: 2026-10-13T03:45:07.976Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-13T03:45:07.976Z",
+    "resolved_at": null
+  },
+  {
+    "id": 120,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "compose.yaml",
+    "line": null,
+    "description": "The internal pii network is created by every compose project even with the profile off (uses Docker address pools); adding it recreates the api once on the next up",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:19:12.931Z",
+    "resolved_at": null
+  },
+  {
+    "id": 121,
+    "kind": "unrun-verify",
+    "phase": "07.2",
+    "file": "infra/presidio/recognizers.yaml",
+    "line": null,
+    "description": "Spanish Presidio accuracy only checked on fixed samples (missed a Spanish name in a probe); owner manual check on real documents",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:19:13.026Z",
+    "resolved_at": null
+  },
+  {
+    "id": 122,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "scripts/ocw.mjs",
+    "line": null,
+    "description": "No pnpm ocw enable pii: turning on the pii profile means editing .env by hand, unlike other profiles",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:19:13.134Z",
     "resolved_at": null
   }
 ]
