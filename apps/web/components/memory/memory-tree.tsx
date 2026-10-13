@@ -169,7 +169,13 @@ export function MemoryTree({
     () => (scopeFilter ? scopes.filter((s) => s.agentId === scopeFilter.agentId) : scopes),
     [scopes, scopeFilter],
   );
-  const nodes = useMemo(() => buildMemoryTree(visibleScopes, filesByScope), [visibleScopes, filesByScope]);
+  const nodes = useMemo(() => {
+    const built = buildMemoryTree(visibleScopes, filesByScope);
+    // One bot's scopes (agent page, UI-SPEC "Agent page"): its notebook first, then the viewer's private memory with it.
+    if (!scopeFilter) return built;
+    const rank = (n: MemoryNode) => (n.scope?.kind === "agent" ? 0 : 1);
+    return [...built].sort((x, y) => rank(x) - rank(y));
+  }, [visibleScopes, filesByScope, scopeFilter]);
   const index = useMemo(() => {
     const m = new Map<string, { node: MemoryNode; parent: string }>();
     const walk = (list: readonly MemoryNode[], parent: string) => {

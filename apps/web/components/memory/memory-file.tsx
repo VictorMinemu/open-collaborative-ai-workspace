@@ -5,7 +5,7 @@ import { ArrowLeft, ChevronRight, Eye, FileText, History, Lock, Pencil, RotateCc
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { PrincipalAvatar } from "@/components/chat/principal-avatar";
 import { EmptyState } from "@/components/common/empty-state";
 import { Markdown } from "@/components/markdown/markdown";
@@ -73,8 +73,12 @@ export interface MemoryFileProps {
   onBack?: () => void;
   /** Breadcrumb folders reveal and focus their node in the tree. */
   onRevealFolder?: (folder: string | null) => void;
-  /** Hides every write affordance (agent page, 07.2-14). */
+  /**
+   * The agent page's pane (07.2-14, UI-SPEC "Agent page"): one read-only view of the file, without Edit, History or the
+   * file menu, whatever the tier; `actions` takes their place in the header ("Open in Memory").
+   */
   readOnly?: boolean;
+  actions?: ReactNode;
 }
 
 export function MemoryFile({
@@ -86,6 +90,7 @@ export function MemoryFile({
   onBack,
   onRevealFolder,
   readOnly = false,
+  actions,
 }: MemoryFileProps) {
   const layout: MemoryFileLayout = layoutProp ?? (stackedProp ? "stacked" : "split");
   const stacked = layout === "stacked";
@@ -160,6 +165,8 @@ export function MemoryFile({
       name={name}
       layout={layout}
       canWrite={file.viewerCan.includes("write") && !readOnly}
+      readOnly={readOnly}
+      actions={actions}
       headingRef={headingRef}
       resolveHref={resolveHref}
       onBack={onBack}
@@ -175,6 +182,8 @@ function LoadedFile({
   name,
   layout,
   canWrite,
+  readOnly,
+  actions,
   headingRef,
   resolveHref,
   onBack,
@@ -186,6 +195,8 @@ function LoadedFile({
   name: string;
   layout: MemoryFileLayout;
   canWrite: boolean;
+  readOnly: boolean;
+  actions?: ReactNode;
   headingRef: React.RefObject<HTMLHeadingElement | null>;
   resolveHref: (href: string) => string | null;
   onBack?: (() => void) | undefined;
@@ -206,7 +217,13 @@ function LoadedFile({
   const wide = layout === "wide";
   const compact = !wide;
   const tab = search.get("tab");
-  const mode: Mode = tab === "edit" && canWrite ? "edit" : tab === "history" ? "history" : "view";
+  const mode: Mode = readOnly
+    ? "view"
+    : tab === "edit" && canWrite
+      ? "edit"
+      : tab === "history"
+        ? "history"
+        : "view";
   const v = Number(search.get("v"));
   const selectedVersion = mode === "history" && Number.isInteger(v) && v >= 1 && v <= file.version ? v : null;
   const base = memoryHref(file.scopeId, path);
@@ -310,8 +327,11 @@ function LoadedFile({
         stacked={stacked}
         onRevealFolder={onRevealFolder}
       />
-      {wide && mode === "edit" ? <div ref={setActionsSlot} className="flex shrink-0 items-center" /> : null}
-      {wide && mode !== "edit" ? (
+      {readOnly ? <span className="flex shrink-0 items-center gap-1">{actions}</span> : null}
+      {!readOnly && wide && mode === "edit" ? (
+        <div ref={setActionsSlot} className="flex shrink-0 items-center" />
+      ) : null}
+      {!readOnly && wide && mode !== "edit" ? (
         <span className="flex shrink-0 items-center gap-1">
           {canWrite ? (
             <Tabs value="view" onValueChange={(next) => next === "edit" && setMode("edit")}>
@@ -336,7 +356,7 @@ function LoadedFile({
           </Button>
         </span>
       ) : null}
-      {wide && mode === "edit" ? null : (
+      {readOnly || (wide && mode === "edit") ? null : (
         <MemoryFileMenu scope={scope} file={file} canWrite={canWrite} compact={stacked} />
       )}
     </header>
@@ -357,7 +377,7 @@ function LoadedFile({
     </p>
   );
 
-  if (wide) {
+  if (wide || readOnly) {
     return (
       <div className="flex min-h-0 min-w-0 flex-1">
         <section

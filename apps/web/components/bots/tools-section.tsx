@@ -30,12 +30,21 @@ export function shortToolName(t: Pick<CatalogTool, "sourceKind" | "tool">): stri
  * Per-bot tools from MCP servers and marketplace plugins (BOT-10, D-06): one switch per tool, grouped by
  * source. The API decides availability: a tool with a `reason` is disabled and explained (never hidden), and a
  * granted tool that lost its source stays visible so it can be switched off. Saving sends the full grant set.
+ * `readOnly` forces every switch off for everyone (the agent page, 07.2-14); `title` names the section there.
  */
-export function ToolsSection({ view }: { view: BotCapabilityView }) {
+export function ToolsSection({
+  view,
+  readOnly: forceReadOnly = false,
+  title = "Tools",
+}: {
+  view: BotCapabilityView;
+  readOnly?: boolean;
+  title?: string;
+}) {
   const update = useUpdateBotCapabilities(view.agentId);
   const canMcp = useCan("mcp.manage");
   const canPlugins = useCan("plugin.manage");
-  const readOnly = !view.viewerCan.includes("bot.configure");
+  const readOnly = forceReadOnly || !view.viewerCan.includes("bot.configure");
 
   const groups: Array<{ key: string; kind: CatalogTool["sourceKind"]; name: string; tools: CatalogTool[] }> =
     [];
@@ -63,7 +72,7 @@ export function ToolsSection({ view }: { view: BotCapabilityView }) {
     <section className="grid gap-2" data-testid="tools-section" aria-labelledby={`tools-${view.agentId}`}>
       <div className="flex items-baseline justify-between gap-2">
         <h4 id={`tools-${view.agentId}`} className="font-medium text-sm">
-          Tools
+          {title}
         </h4>
         {groups.length > 0 ? (
           <span className="text-muted-foreground text-xs tabular-nums">

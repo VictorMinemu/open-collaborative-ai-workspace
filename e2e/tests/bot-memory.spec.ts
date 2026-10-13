@@ -84,6 +84,68 @@ async function openMemory(page: Page, botName: string) {
   return panel;
 }
 
+/** Visible controls without an accessible name (memory-files / ai-chat-visual precedent; 07.2-14). */
+async function unnamedControls(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const visible = (el: Element) => {
+      const r = el.getBoundingClientRect();
+      const s = getComputedStyle(el);
+      return r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.display !== "none";
+    };
+    const nameOf = (el: Element) => {
+      const label = el.getAttribute("aria-label")?.trim();
+      if (label) return label;
+      const by = el.getAttribute("aria-labelledby");
+      if (by) {
+        const text = by
+          .split(/\s+/u)
+          .map((id) => document.getElementById(id)?.textContent ?? "")
+          .join(" ")
+          .trim();
+        if (text) return text;
+      }
+      const text = (el as HTMLElement).innerText?.trim() || el.textContent?.trim();
+      if (text) return text;
+      if (el.id && document.querySelector(`label[for="${CSS.escape(el.id)}"]`)) return "label";
+      return el.getAttribute("title")?.trim() ?? "";
+    };
+    const selector =
+      'button, [role="button"], a[href], [role="menuitem"], [role="option"], input, [role="combobox"]';
+    return [...document.querySelectorAll(selector)]
+      .filter((el) => !el.closest('[aria-hidden="true"], [inert]') && visible(el) && !nameOf(el))
+      .map((el) => el.outerHTML.slice(0, 200));
+  });
+}
+
+/** 07.2-14: at 390 the footer's buttons are 44 px tall and nothing in it overlaps (it may wrap to two rows). */
+async function footerFits(panel: ReturnType<Page["getByTestId"]>) {
+  const footer = panel.getByTestId("memory-footer");
+  const boxes = await Promise.all(
+    ["memory-count", "memory-open-in-memory", "memory-clear-all"].map((id) =>
+      footer.getByTestId(id).boundingBox(),
+    ),
+  );
+  for (const id of ["memory-open-in-memory", "memory-clear-all"]) {
+    expect((await footer.getByTestId(id).boundingBox())?.height ?? 0, `${id} height`).toBeGreaterThanOrEqual(
+      44,
+    );
+  }
+  for (let i = 0; i < boxes.length; i++) {
+    for (let j = i + 1; j < boxes.length; j++) {
+      const a = boxes[i];
+      const b = boxes[j];
+      expect(a && b, "footer items laid out").toBeTruthy();
+      if (!a || !b) continue;
+      const apart =
+        a.x + a.width <= b.x + 0.5 ||
+        b.x + b.width <= a.x + 0.5 ||
+        a.y + a.height <= b.y + 0.5 ||
+        b.y + b.height <= a.y + 0.5;
+      expect(apart, `footer items ${i} and ${j} do not overlap`).toBe(true);
+    }
+  }
+}
+
 test.describe.configure({ mode: "serial" });
 
 test("Sam's bot remembers what he asks, he sees it in the chat, and deleting it removes it from the next turn", async ({
@@ -129,6 +191,34 @@ test("Sam's bot remembers what he asks, he sees it in the chat, and deleting it 
     await expect(items).toHaveCount(1);
     await expect(items.first()).toContainText("My favourite colour is teal");
     await bothThemes(sam.page, `bot-memory-${tag}`);
+
+    // ---- 07.2-14: the panel says where the notes live and opens the private MEMORY.md in the viewer
+    await expect(panel.getByTestId("memory-file-note")).toHaveText(
+      `Kept in your private memory file with ${bot.name}.`,
+    );
+    const openInMemory = panel.getByRole("button", { name: "Open in Memory" });
+    await expect(openInMemory).toBeVisible();
+    if (tag === "390") await footerFits(panel);
+    expect(await unnamedControls(sam.page), "DM memory panel: unnamed controls").toEqual([]);
+    const { expectNoSeriousA11y } = await import("../support/a11y");
+    for (const theme of ["dark", "light"] as const) {
+      await sam.page.emulateMedia({ colorScheme: theme });
+      await expectNoSeriousA11y(sam.page, '[data-testid="memory-panel"]');
+    }
+    await bothThemes(sam.page, `review-dm-memory-panel-${tag}`);
+    await openInMemory.click();
+    await expect(sam.page).toHaveURL(/\/memory\/[0-9a-f-]{36}\/MEMORY\.md$/);
+    const privateScopeId = new URL(sam.page.url()).pathname.split("/")[2] ?? "";
+    const privateFile = sam.page.getByTestId("memory-file");
+    await expect(
+      privateFile.getByRole("listitem").filter({ hasText: "My favourite colour is teal" }),
+    ).toBeVisible();
+    const samApi = await apiAs(SAM);
+    const stored = await samApi.get(`/api/v1/memory/scopes/${privateScopeId}/file?path=MEMORY.md`);
+    expect(((await stored.json()) as { content: string }).content).toContain("- My favourite colour is teal");
+    await samApi.dispose();
+    await sam.page.goto(`${BASE_URL}/chat/dm/${bot.dmId}`);
+    await expect(sam.page.getByTestId("dm-view")).toBeVisible();
     await sam.page.keyboard.press("Escape");
 
     // ---- the next turn carries the note
@@ -159,6 +249,29 @@ test("Sam's bot remembers what he asks, he sees it in the chat, and deleting it 
     await expect(confirm).toBeHidden();
     await expect(panel.getByTestId("memory-item")).toHaveCount(0);
     await expect(panel.getByTestId("memory-empty")).toBeVisible();
+
+    // ---- 07.2-14: the empty panel still leads to the (existing) private file
+    await expect(panel.getByRole("button", { name: "Open in Memory" })).toBeVisible();
+    await sam.page.keyboard.press("Escape");
+    await expect(panel).toBeHidden();
+
+    // ---- 07.2-14: with the private MEMORY.md open in a second tab, the bot saves a note: it shows without a reload
+    // and the new version is announced politely
+    const viewer = await sam.context.newPage();
+    await viewer.goto(`${BASE_URL}/memory/${privateScopeId}/MEMORY.md`);
+    const liveFile = viewer.getByTestId("memory-file");
+    await expect(liveFile).toBeVisible();
+    await expect(liveFile).not.toContainText("Prefers morning meetings");
+    await ask(
+      sam.page,
+      'Note [[call ocw_memory_save {"text":"Prefers morning meetings"}]]',
+      "Tool ocw_memory_save: saved",
+    );
+    await expect(liveFile.getByRole("listitem").filter({ hasText: "Prefers morning meetings" })).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(liveFile.locator('[aria-live="polite"]')).toHaveText(/^Updated to version \d+ by /);
+    await viewer.close();
 
     // ---- an admin cannot read Sam's notes (404, like any other part of his personal bot)
     expect((await admin.get(`/api/v1/agents/${bot.id}/memories`)).status()).toBe(404);

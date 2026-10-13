@@ -1,8 +1,11 @@
 "use client";
 
-import { Lock, NotebookPen, Trash2, X } from "lucide-react";
+import { MEMORY_ROOT_FILE } from "@ocw/contracts";
+import { ArrowUpRight, Lock, NotebookPen, Trash2, X } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { toast } from "sonner";
+import { useModule } from "@/components/shell/module-gate";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -18,7 +21,9 @@ import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { useBotMemories, useClearBotMemory } from "@/lib/capability-queries";
-import { formatDate } from "@/lib/utils";
+import { useEnsureMemoryScope, useMemoryScopes } from "@/lib/memory-queries";
+import { memoryHref } from "@/lib/memory-tree";
+import { cn, formatDate } from "@/lib/utils";
 
 const plural = (n: number) => `${n} ${n === 1 ? "note" : "notes"}`;
 
@@ -26,6 +31,10 @@ const plural = (n: number) => `${n} ${n === 1 ? "note" : "notes"}`;
  * "What <bot> remembers about you" (D-10, D-16; SC5): the caller's own notes with this bot, newest first, each
  * with a delete button, plus Clear all behind a confirmation. Only the caller ever sees this list; the API has
  * no read path for anyone else. `memoryOn` false explains that the notes are kept but unused.
+ *
+ * 07.2-14 (D-02, UI-SPEC "DM memory panel", additions only): the notes are the bullets of the caller's private
+ * `MEMORY.md` with this bot; the panel says so and "Open in Memory" opens that file in the viewer (the private scope
+ * is created on first use). The empty state offers it only when the private scope already exists.
  */
 export function MemoryPanel({
   agentId,
@@ -105,6 +114,7 @@ export function MemoryPanel({
               <p className="max-w-64 text-balance text-muted-foreground text-sm" data-testid="memory-empty">
                 Nothing yet. Ask {botName} to remember something.
               </p>
+              <OpenInMemory agentId={agentId} variant="outline" onlyIfExists className="mt-4" />
             </div>
           ) : (
             <ul className="grid gap-2" aria-label={`Notes ${botName} keeps about you`}>
@@ -141,17 +151,26 @@ export function MemoryPanel({
               private chat.
             </p>
           ) : null}
+          {items.length > 0 ? (
+            <p className="mt-2 text-balance text-muted-foreground text-xs" data-testid="memory-file-note">
+              Kept in your private memory file with {botName}.
+            </p>
+          ) : null}
         </div>
 
         {items.length > 0 ? (
-          <div className="flex items-center justify-between gap-3 border-t bg-muted/30 px-5 py-3 pb-[max(env(safe-area-inset-bottom),12px)]">
-            <span className="text-muted-foreground text-xs tabular-nums" data-testid="memory-count">
+          <div
+            className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t bg-muted/30 px-5 py-3 pb-[max(env(safe-area-inset-bottom),12px)]"
+            data-testid="memory-footer"
+          >
+            <span className="mr-auto text-muted-foreground text-xs tabular-nums" data-testid="memory-count">
               {plural(items.length)}
             </span>
+            <OpenInMemory agentId={agentId} variant="ghost" className="max-lg:h-11" />
             <Button
               variant="outline"
               size="sm"
-              className="text-destructive hover:text-destructive"
+              className="text-destructive hover:text-destructive max-lg:h-11"
               onClick={() => setConfirmAll(true)}
               data-testid="memory-clear-all"
             >
@@ -187,5 +206,51 @@ export function MemoryPanel({
         </Dialog>
       </SheetContent>
     </Sheet>
+  );
+}
+
+/**
+ * "Open in Memory": the caller's private `MEMORY.md` with this bot in the viewer. The scope is ensured first (it is
+ * created on first use); `onlyIfExists` renders nothing until the API lists it. Hidden while the Memory module is off.
+ */
+function OpenInMemory({
+  agentId,
+  variant,
+  onlyIfExists = false,
+  className,
+}: {
+  agentId: string;
+  variant: "ghost" | "outline";
+  onlyIfExists?: boolean;
+  className?: string;
+}) {
+  const router = useRouter();
+  const memoryModule = useModule("memory");
+  const scopes = useMemoryScopes();
+  const ensure = useEnsureMemoryScope();
+  const exists = scopes.data?.scopes.some((s) => s.kind === "personal" && s.agentId === agentId) ?? false;
+  if (memoryModule === "off" || scopes.isError) return null;
+  if (onlyIfExists && !exists) return null;
+  return (
+    <Button
+      variant={variant}
+      size="sm"
+      className={cn(className)}
+      disabled={ensure.isPending}
+      data-testid="memory-open-in-memory"
+      onClick={() =>
+        ensure.mutate(
+          { kind: "personal", agentId },
+          {
+            onSuccess: (scope) => router.push(memoryHref(scope.id, MEMORY_ROOT_FILE)),
+            onError: (err) => toast.error("Could not open memory", { description: errorMessage(err) }),
+          },
+        )
+      }
+    >
+      {ensure.isPending ? <Spinner /> : null}
+      Open in Memory
+      <ArrowUpRight />
+    </Button>
   );
 }

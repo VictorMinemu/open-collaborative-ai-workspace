@@ -16,7 +16,7 @@ import { useUnits } from "@/lib/org-queries";
 import { useMembers } from "@/lib/queries";
 import { formatDate } from "@/lib/utils";
 import { BotAvatar, botAbilities, ModelChip, ScopeBadge, StatusChip } from "./bot-bits";
-import { canMessage, MessageBotButton, PersonalBadge } from "./bot-card";
+import { canMessage, MessageBotButton, OpenBotPageLink, PersonalBadge } from "./bot-card";
 import {
   BotForm,
   type BotFormErrors,
@@ -230,7 +230,10 @@ export function BotDetailSheet({
                 </span>
               </p>
             ) : null}
-            {!inDm && canMessage(agent) ? <MessageBotButton agent={agent} className="mt-3" /> : null}
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {!inDm && canMessage(agent) ? <MessageBotButton agent={agent} /> : null}
+              <OpenBotPageLink agent={agent} />
+            </div>
           </div>
         </div>
 
