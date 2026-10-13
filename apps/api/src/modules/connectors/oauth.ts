@@ -4,13 +4,18 @@ import {
   discoverOAuthProtectedResourceMetadata,
   exchangeAuthorization,
   extractWWWAuthenticateParams,
+  refreshAuthorization,
+  registerClient,
   selectClientAuthMethod,
   startAuthorization,
 } from "@modelcontextprotocol/sdk/client/auth.js";
 import { OAuthError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import type {
   AuthorizationServerMetadata,
+  OAuthClientInformationFull,
   OAuthClientInformationMixed,
+  OAuthClientMetadata,
+  OAuthMetadata,
   OAuthProtectedResourceMetadata,
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
@@ -21,6 +26,7 @@ import {
 import type { ConnectorErrorCode, ConnectorOAuthUrls } from "@ocw/contracts";
 import { decodeJwt } from "jose";
 import { type Egress, type EgressPolicy, EgressRefusedError, hostPortOf } from "../../lib/egress";
+import { clientMetadataDocument } from "./client-metadata";
 
 /**
  * The API's OAuth 2.1 client for MCP servers (D-02, D-07; MCP authorization spec 2026-07-28): discovery (RFC 9728 →
@@ -343,11 +349,12 @@ export async function discover(
 
 /**
  * The client for the discovered issuer, in the spec's order: a pre-registered client for this exact issuer, else a
- * client ID metadata document, else dynamic registration, else `needs_client`. Credentials registered at another
- * issuer are never used (they are matched by issuer only).
+ * client ID metadata document (the instance has an https CIMD URL and the server advertises support), else dynamic
+ * registration (RFC 7591, a stored client of this issuer is reused), else `needs_client`. Credentials are matched by
+ * issuer only: a client registered at another authorization server is never used ("MUST NOT reuse").
  */
 export async function chooseClient(
-  _egress: Egress,
+  egress: Egress,
   d: DiscoveredAuth,
   opts: {
     preRegistered: ReadonlyArray<{ issuer: string; clientId: string; clientSecret?: string }>;
@@ -370,7 +377,81 @@ export async function chooseClient(
       ...(pre.clientSecret ? { clientSecret: pre.clientSecret } : {}),
     };
   }
-  throw new ConnectorOAuthError("needs_client");
+  if (!opts.urls.oauthAvailable || !opts.urls.redirectUri) throw new ConnectorOAuthError("https_required");
+
+  const cimd = clientMetadataDocument(opts.urls, opts.clientName);
+  if (cimd && opts.urls.clientMetadataUrl && d.metadata.client_id_metadata_document_supported === true) {
+    return { method: "cimd", issuer: d.issuer, clientId: opts.urls.clientMetadataUrl };
+  }
+
+  if (!d.metadata.registration_endpoint) throw new ConnectorOAuthError("needs_client");
+  const stored = opts.stored.find((c) => c.issuer === d.issuer && c.method === "dcr");
+  if (stored) {
+    return {
+      method: "dcr",
+      issuer: d.issuer,
+      clientId: stored.clientId,
+      ...(stored.clientSecret ? { clientSecret: stored.clientSecret } : {}),
+      isNew: false,
+    };
+  }
+  const supported = d.metadata.token_endpoint_auth_methods_supported ?? [];
+  // A server-side app can keep a secret: ask for a confidential client when the server allows one.
+  const authMethod =
+    supported.length === 0 || supported.includes("client_secret_basic")
+      ? "client_secret_basic"
+      : supported.includes("client_secret_post")
+        ? "client_secret_post"
+        : "none";
+  const clientMetadata: OAuthClientMetadata & { application_type: string } = {
+    redirect_uris: [opts.urls.redirectUri],
+    client_name: opts.clientName,
+    grant_types: ["authorization_code", "refresh_token"],
+    response_types: ["code"],
+    token_endpoint_auth_method: authMethod,
+    application_type: "web",
+  };
+  let registered: OAuthClientInformationFull;
+  try {
+    registered = await registerClient(d.issuer, {
+      metadata: d.metadata,
+      clientMetadata,
+      fetchFn: egress.bound(oauthPolicy(d.sameOrigin)),
+    });
+  } catch (err) {
+    const refusal = findRefusal(err);
+    throw new ConnectorOAuthError(
+      refusal && POLICY_REFUSALS.has(refusal.code) ? "egress_refused" : "needs_client",
+    );
+  }
+  return {
+    method: "dcr",
+    issuer: d.issuer,
+    clientId: registered.client_id,
+    ...(registered.client_secret ? { clientSecret: registered.client_secret } : {}),
+    isNew: true,
+  };
+}
+
+/**
+ * The scope to request: the admin's override (UI-SPEC R11) when set, else the challenge's `scope`, else the PRM
+ * `scopes_supported`, else none; `offline_access` is added only when the authorization server lists it.
+ */
+export function chooseScope(
+  d: DiscoveredAuth,
+  challengeScope?: string,
+  adminScopes?: readonly string[] | null,
+): string | undefined {
+  const split = (s: string) => s.split(/\s+/u).filter(Boolean);
+  let scopes: string[] | undefined;
+  if (adminScopes && adminScopes.length > 0) scopes = [...adminScopes];
+  else if (challengeScope && split(challengeScope).length > 0) scopes = split(challengeScope);
+  else if (d.scopes && d.scopes.length > 0) scopes = [...d.scopes];
+  if (!scopes) return undefined;
+  if (d.metadata.scopes_supported?.includes("offline_access") && !scopes.includes("offline_access")) {
+    scopes.push("offline_access");
+  }
+  return [...new Set(scopes)].join(" ");
 }
 
 // ---------------------------------------------------------------- authorization
@@ -463,4 +544,109 @@ export async function exchangeCode(
     p.scope ? p.scope.split(/\s+/u).filter(Boolean) : [],
     accountLabelOf(tokens.id_token),
   );
+}
+
+// ---------------------------------------------------------------- refresh and revocation
+
+/** The resource's origin and `host:port` (the OAuth calls' only private / plain-http target). */
+function resourceOrigin(bundle: TokenBundle): { origin: string; sameOrigin: string } | null {
+  try {
+    const url = new URL(bundle.resource);
+    return { origin: url.origin, sameOrigin: hostPortOf(url) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Refresh (rotation-aware), resending `resource` (RFC 8707) with the client authentication chosen at the exchange.
+ * The caller serializes refreshes per connection and passes the client secret of confidential clients. Terminal
+ * errors (`invalid_grant`, …) mean reconnect; everything else (5xx, network) is transient.
+ */
+export async function refreshTokens(
+  egress: Egress,
+  bundle: TokenBundle,
+  clientSecret?: string,
+): Promise<TokenBundle> {
+  if (!bundle.refreshToken) throw new ConnectorOAuthError("needs_reconnect", { terminal: true });
+  const where = resourceOrigin(bundle);
+  if (!where || !trusted(bundle.tokenEndpoint, where.origin)) {
+    throw new ConnectorOAuthError("token_exchange_failed");
+  }
+  if (bundle.authMethod !== "none" && !clientSecret)
+    throw new ConnectorOAuthError("needs_client", { terminal: true });
+  // Only what the SDK's token request reads: the endpoint and the auth method chosen at the code exchange.
+  const metadata: OAuthMetadata = {
+    issuer: bundle.issuer,
+    authorization_endpoint: bundle.tokenEndpoint,
+    token_endpoint: bundle.tokenEndpoint,
+    response_types_supported: ["code"],
+    token_endpoint_auth_methods_supported: [bundle.authMethod],
+  };
+  let tokens: OAuthTokens;
+  try {
+    tokens = await refreshAuthorization(bundle.issuer, {
+      metadata,
+      clientInformation: clientInformation({ clientId: bundle.clientId, clientSecret }),
+      refreshToken: bundle.refreshToken,
+      resource: bundle.resource,
+      fetchFn: egress.bound(oauthPolicy(where.sameOrigin)),
+    });
+  } catch (err) {
+    throw tokenError(err);
+  }
+  return bundleFrom(
+    tokens,
+    {
+      issuer: bundle.issuer,
+      clientId: bundle.clientId,
+      resource: bundle.resource,
+      tokenEndpoint: bundle.tokenEndpoint,
+      revocationEndpoint: bundle.revocationEndpoint,
+      authMethod: bundle.authMethod,
+    },
+    bundle.scopes,
+    accountLabelOf(tokens.id_token) ?? bundle.accountLabel,
+  );
+}
+
+/**
+ * RFC 7009 revocation of the refresh token (else the access token) through the guard. Best effort: false on any
+ * failure, never a throw (a disconnect must not depend on the authorization server being up).
+ */
+export async function revokeToken(
+  egress: Egress,
+  bundle: TokenBundle,
+  clientSecret?: string,
+): Promise<boolean> {
+  try {
+    const endpoint = bundle.revocationEndpoint;
+    const where = resourceOrigin(bundle);
+    if (!endpoint || !where || !trusted(endpoint, where.origin)) return false;
+    const form = new URLSearchParams(
+      bundle.refreshToken
+        ? { token: bundle.refreshToken, token_type_hint: "refresh_token" }
+        : { token: bundle.accessToken, token_type_hint: "access_token" },
+    );
+    const headers = new Headers({
+      "content-type": "application/x-www-form-urlencoded",
+      accept: "application/json",
+    });
+    if (bundle.authMethod === "client_secret_basic" && clientSecret) {
+      const pair = `${encodeURIComponent(bundle.clientId)}:${encodeURIComponent(clientSecret)}`;
+      headers.set("authorization", `Basic ${Buffer.from(pair).toString("base64")}`);
+    } else {
+      form.set("client_id", bundle.clientId);
+      if (bundle.authMethod === "client_secret_post" && clientSecret) form.set("client_secret", clientSecret);
+    }
+    const res = await egress.fetch(
+      endpoint,
+      { method: "POST", headers, body: form },
+      oauthPolicy(where.sameOrigin),
+    );
+    await res.body?.cancel().catch(() => {});
+    return res.ok;
+  } catch {
+    return false;
+  }
 }

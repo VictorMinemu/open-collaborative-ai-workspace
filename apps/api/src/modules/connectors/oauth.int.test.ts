@@ -8,15 +8,20 @@ import {
   type FakeMcpOAuthStats,
 } from "../../../../../infra/fake-model/fake-mcp-oauth.mjs";
 import { createEgress, type Egress } from "../../lib/egress";
+import { clientMetadataDocument } from "./client-metadata";
 import { callTool } from "./mcp-client";
 import {
   buildAuthorization,
   type ClientChoice,
+  ConnectorOAuthError,
   checkCallbackIssuer,
   chooseClient,
+  chooseScope,
   type DiscoveredAuth,
   discover,
   exchangeCode,
+  refreshTokens,
+  revokeToken,
   type TokenBundle,
 } from "./oauth";
 
@@ -43,10 +48,17 @@ let serverUrl: string;
 let fake: FakeMcpOAuth;
 let egress: Egress;
 let loopbackUrls: ConnectorOAuthUrls;
+/** Client ID metadata documents the fake's authorization server can read (its injected `cimdFetch`). */
+const cimdDocs = new Map<string, unknown>();
 
 beforeAll(async () => {
   fake = createFakeMcpOAuth({
     preRegistered: [{ client_id: PRE_REGISTERED, redirect_uris: [REDIRECT] }],
+    cimdFetch: async (url) => {
+      const doc = cimdDocs.get(url);
+      if (!doc) throw new Error("no such client metadata document");
+      return doc;
+    },
   });
   server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://fake-mcp");
@@ -67,6 +79,7 @@ beforeAll(async () => {
 afterEach(() => {
   expect(globalFetch).not.toHaveBeenCalled();
   fake.reset();
+  cimdDocs.clear();
 });
 
 afterAll(async () => {
@@ -214,5 +227,233 @@ describe("connector OAuth against the fake: the tracer", () => {
       },
     );
     expect(whoA.content).not.toBe(whoB.content);
+  });
+});
+
+/** discover → client → authorization URL only (no browser step). */
+async function authorizeOnly(urls: ConnectorOAuthUrls = loopbackUrls) {
+  const d = await discover(egress, serverUrl);
+  const client = await chooseClient(egress, d, {
+    preRegistered: preRegistered(d),
+    stored: [],
+    urls,
+    clientName: "OCW test",
+  });
+  const auth = await buildAuthorization(d, client, urls, undefined);
+  return { d, client, auth };
+}
+
+/** A port nothing listens on. */
+async function deadPort(): Promise<number> {
+  const s = createServer();
+  await new Promise<void>((resolve) => s.listen(0, "127.0.0.1", resolve));
+  const p = (s.address() as AddressInfo).port;
+  await new Promise<void>((resolve) => s.close(() => resolve()));
+  return p;
+}
+
+describe("connector OAuth against the fake: spec refusals", () => {
+  it("no_pkce_meta: discovery refuses before any authorization URL exists", async () => {
+    fake.setScenario({ no_pkce_meta: true });
+    await expect(discover(egress, serverUrl)).rejects.toMatchObject({ code: "pkce_unsupported" });
+    expect((await stats()).lastResource.authorize).toBeNull();
+  });
+
+  it("wrong_iss: a callback naming the other issuer is refused", async () => {
+    fake.setScenario({ wrong_iss: true });
+    const { d, auth } = await authorizeOnly();
+    const back = await followAuthorization(auth.authorizationUrl);
+    expect(back.get("iss")).toBe(`${base}/mcp-oauth/alt`);
+    expect(() => checkCallbackIssuer(d.metadata, d.issuer, back.get("iss"))).toThrow(
+      expect.objectContaining({ code: "issuer_mismatch" }),
+    );
+  });
+
+  it("no_iss: a missing iss is refused because the server advertises it", async () => {
+    fake.setScenario({ no_iss: true });
+    const { d, auth } = await authorizeOnly();
+    const back = await followAuthorization(auth.authorizationUrl);
+    expect(back.get("iss")).toBeNull();
+    expect(back.get("code")).toBeTruthy();
+    expect(() => checkCallbackIssuer(d.metadata, d.issuer, back.get("iss"))).toThrow(
+      expect.objectContaining({ code: "issuer_mismatch" }),
+    );
+  });
+
+  it("refresh sends the resource and rotates; presenting the rotated token again is terminal", async () => {
+    const { bundle } = await connect();
+    const next = await refreshTokens(egress, bundle);
+    expect(next.accessToken).not.toBe(bundle.accessToken);
+    expect(next.refreshToken).toBeTruthy();
+    expect(next.refreshToken).not.toBe(bundle.refreshToken);
+    expect(next).toMatchObject({
+      issuer: bundle.issuer,
+      clientId: bundle.clientId,
+      resource: bundle.resource,
+    });
+    expect(next.accountLabel).toBe(bundle.accountLabel);
+    let s = await stats();
+    expect(s.lastResource.refresh).toBe(bundle.resource);
+    expect(s.tokenRequests.refresh_token).toBe(1);
+
+    const who = await callTool(
+      egress,
+      target(),
+      bearer(next),
+      { name: "whoami", arguments: {} },
+      { redact: [] },
+    );
+    expect(who.content).toContain((bundle.accountLabel ?? "").split("@")[0]);
+
+    const reused = await refreshTokens(egress, bundle).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(reused).toBeInstanceOf(ConnectorOAuthError);
+    expect(reused).toMatchObject({
+      code: "token_exchange_failed",
+      terminal: true,
+      oauthError: "invalid_grant",
+    });
+    s = await stats();
+    expect(s.refreshReuse).toBe(1);
+  });
+
+  it("fail_token_5xx: a refresh failure is transient", async () => {
+    const { bundle } = await connect();
+    fake.setScenario({ fail_token_5xx: true });
+    const err = await refreshTokens(egress, bundle).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toMatchObject({ code: "token_exchange_failed", terminal: false });
+  });
+
+  it("revokeToken is counted by the fake and kills the grant; false (never a throw) when the server is down", async () => {
+    const { bundle } = await connect();
+    expect(await revokeToken(egress, bundle)).toBe(true);
+    expect((await stats()).revocations).toBe(1);
+    await expect(refreshTokens(egress, bundle)).rejects.toMatchObject({ terminal: true });
+
+    const dead = await deadPort();
+    const down = {
+      ...bundle,
+      resource: `http://fake-mcp:${dead}/mcp-oauth/mcp`,
+      revocationEndpoint: `http://fake-mcp:${dead}/mcp-oauth/revoke`,
+    };
+    expect(await revokeToken(egress, down)).toBe(false);
+    expect((await stats()).revocations).toBe(1);
+  });
+});
+
+describe("connector OAuth against the fake: client registration", () => {
+  it("DCR: registers a confidential web client, then authorizes, exchanges and refreshes with it", async () => {
+    const d = await discover(egress, serverUrl);
+    const client = await chooseClient(egress, d, {
+      preRegistered: [],
+      stored: [],
+      urls: loopbackUrls,
+      clientName: "OCW test",
+    });
+    expect(client).toMatchObject({ method: "dcr", isNew: true, issuer: d.issuer });
+    const secret = client.method === "dcr" ? client.clientSecret : undefined;
+    expect(secret).toBeTruthy();
+    expect((await stats()).registrations).toBe(1);
+
+    const scope = chooseScope(d, undefined, null);
+    const auth = await buildAuthorization(d, client, loopbackUrls, scope);
+    const back = await followAuthorization(auth.authorizationUrl);
+    checkCallbackIssuer(d.metadata, d.issuer, back.get("iss"));
+    const bundle = await exchangeCode(egress, d, client, {
+      code: back.get("code") ?? "",
+      codeVerifier: auth.codeVerifier,
+      redirectUri: loopbackUrls.redirectUri,
+      ...(scope ? { scope } : {}),
+    });
+    expect(bundle).toMatchObject({ clientId: client.clientId, authMethod: "client_secret_basic" });
+    expect(bundle.scopes).toEqual(expect.arrayContaining(["records:read", "records:write"]));
+
+    await expect(refreshTokens(egress, bundle)).rejects.toMatchObject({
+      code: "needs_client",
+      terminal: true,
+    });
+    const next = await refreshTokens(egress, bundle, secret);
+    expect(next.accessToken).not.toBe(bundle.accessToken);
+  });
+
+  it("CIMD: the fake reads the instance's client metadata document and accepts the public client", async () => {
+    const urls = connectorOAuthUrls("https://ocw.example.test");
+    const metadataUrl = urls.clientMetadataUrl ?? "";
+    cimdDocs.set(metadataUrl, clientMetadataDocument(urls, "OCW test"));
+    const d = await discover(egress, serverUrl);
+    const client = await chooseClient(egress, d, {
+      preRegistered: [],
+      stored: [],
+      urls,
+      clientName: "OCW test",
+    });
+    expect(client).toEqual({ method: "cimd", issuer: d.issuer, clientId: metadataUrl });
+
+    const auth = await buildAuthorization(d, client, urls, chooseScope(d, undefined, null));
+    const back = await followAuthorization(auth.authorizationUrl);
+    checkCallbackIssuer(d.metadata, d.issuer, back.get("iss"));
+    const bundle = await exchangeCode(egress, d, client, {
+      code: back.get("code") ?? "",
+      codeVerifier: auth.codeVerifier,
+      redirectUri: urls.redirectUri,
+    });
+    expect(bundle).toMatchObject({ clientId: metadataUrl, authMethod: "none" });
+    expect((await stats()).registrations).toBe(0);
+  });
+
+  it("different_issuer: the discovered issuer changes and no client of the old issuer is reused", async () => {
+    const first = await connect();
+    const dcrMain = await chooseClient(egress, first.d, {
+      preRegistered: [],
+      stored: [],
+      urls: loopbackUrls,
+      clientName: "OCW test",
+    });
+    expect(dcrMain.method).toBe("dcr");
+
+    fake.setScenario({ different_issuer: true });
+    const d = await discover(egress, serverUrl);
+    expect(d.issuer).toBe(`${base}/mcp-oauth/alt`);
+    expect(d.issuer).not.toBe(first.bundle.issuer);
+    expect(d.resource).toBe(first.bundle.resource);
+
+    const client = await chooseClient(egress, d, {
+      preRegistered: [{ issuer: first.d.issuer, clientId: PRE_REGISTERED }],
+      stored: [
+        {
+          issuer: first.d.issuer,
+          clientId: dcrMain.clientId,
+          ...(dcrMain.method === "dcr" && dcrMain.clientSecret ? { clientSecret: dcrMain.clientSecret } : {}),
+          method: "dcr",
+        },
+      ],
+      urls: loopbackUrls,
+      clientName: "OCW test",
+    });
+    expect(client).toMatchObject({ method: "dcr", isNew: true, issuer: d.issuer });
+    expect([PRE_REGISTERED, dcrMain.clientId]).not.toContain(client.clientId);
+
+    // A client of the old issuer cannot be carried into the new issuer's flow either.
+    await expect(buildAuthorization(d, first.client, loopbackUrls, undefined)).rejects.toMatchObject({
+      code: "issuer_mismatch",
+    });
+    await expect(
+      exchangeCode(egress, d, first.client, { code: "x", codeVerifier: "y", redirectUri: REDIRECT }),
+    ).rejects.toMatchObject({ code: "issuer_mismatch" });
+
+    const auth = await buildAuthorization(d, client, loopbackUrls, undefined);
+    const back = await followAuthorization(auth.authorizationUrl);
+    checkCallbackIssuer(d.metadata, d.issuer, back.get("iss"));
+    const bundle = await exchangeCode(egress, d, client, {
+      code: back.get("code") ?? "",
+      codeVerifier: auth.codeVerifier,
+      redirectUri: REDIRECT,
+    });
+    expect(bundle.issuer).toBe(d.issuer);
   });
 });
