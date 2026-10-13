@@ -711,3 +711,175 @@ describe("list visibility: only what the caller may decide, asked for or decided
     }
   });
 });
+
+const consume = (id: string, actionHash: string, kind = "test.grant") =>
+  stack.built.core.db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
+    approvals.consumeGrant(tx, { id, kind, actionHash }),
+  );
+
+describe("integrity under concurrency and replay (Task 3)", () => {
+  it("two deciders approve at once: exactly one 200 and one 409 approval_already_decided; applied once", async () => {
+    const r = await request("test.apply");
+    const results = await Promise.all([
+      decide(victor, r.id, { outcome: "approved", actionHash: r.actionHash }),
+      decide(alex, r.id, { outcome: "approved", actionHash: r.actionHash }),
+    ]);
+    expect(results.map((x) => x.status).sort()).toEqual([200, 409]);
+    expect(errorCode(results.find((x) => x.status === 409) as (typeof results)[number])).toBe(
+      "approval_already_decided",
+    );
+    expect(await auditsFor("test.applied", r.resourceId)).toHaveLength(1);
+    expect(await auditsFor("approval.decided", r.id)).toHaveLength(1);
+    expect((await rowOf(r.id)).status).toBe("applied");
+  });
+
+  it("approve then deny: the second decision is 409 and the request stays applied", async () => {
+    const r = await request("test.apply");
+    expect((await decide(victor, r.id, { outcome: "approved", actionHash: r.actionHash })).status).toBe(200);
+    const again = await decide(alex, r.id, { outcome: "denied", actionHash: r.actionHash });
+    expect(again.status).toBe(409);
+    expect(errorCode(again)).toBe("approval_already_decided");
+    expect((await rowOf(r.id)).status).toBe("applied");
+  });
+
+  it("the stored action changes between view and decision: 409 approval_action_changed, never re-targeted", async () => {
+    const r = await request("test.apply");
+    const seen = ApprovalDetail.parse(await ok(alex.request("GET", `/api/v1/approvals/${r.id}`)));
+    const action = stored.get(r.resourceId);
+    if (!action) throw new Error("missing stored action");
+    action.version = 2;
+    const before = applyCalls;
+    const res = await decide(alex, r.id, { outcome: "approved", actionHash: seen.actionHash });
+    expect(res.status).toBe(409);
+    expect(errorCode(res)).toBe("approval_action_changed");
+    // A fresh read still shows the hash of the action as requested; deciding with it fails the same way.
+    const fresh = ApprovalDetail.parse(await ok(alex.request("GET", `/api/v1/approvals/${r.id}`)));
+    expect(fresh.actionHash).toBe(seen.actionHash);
+    const retry = await decide(alex, r.id, { outcome: "approved", actionHash: fresh.actionHash });
+    expect(retry.status).toBe(409);
+    expect(errorCode(retry)).toBe("approval_action_changed");
+    expect(applyCalls).toBe(before);
+    expect(await rowOf(r.id)).toMatchObject({ status: "pending", decided_by: null, consumed_at: null });
+  });
+
+  it("a hash the client never saw (random hex) is 409 approval_action_changed", async () => {
+    const r = await request("test.apply");
+    const res = await decide(victor, r.id, {
+      outcome: "approved",
+      actionHash: randomUUID().replaceAll("-", "").repeat(2),
+    });
+    expect(res.status).toBe(409);
+    expect(errorCode(res)).toBe("approval_action_changed");
+    expect((await rowOf(r.id)).status).toBe("pending");
+  });
+
+  it("a request past its expiry reads as expired in list and get, and its decision is 409 approval_expired", async () => {
+    const r = await request("test.apply");
+    await su.query(
+      "update app.approval_requests set expires_at = now() - interval '1 minute' where id = $1",
+      [r.id],
+    );
+    const expired = ApprovalList.parse(
+      await ok(victor.request("GET", "/api/v1/approvals?role=decider&status=expired")),
+    );
+    expect(expired.items.find((i) => i.id === r.id)).toMatchObject({ status: "expired", viewerCan: [] });
+    const pending = ApprovalList.parse(
+      await ok(victor.request("GET", "/api/v1/approvals?role=decider&status=pending")),
+    );
+    expect(pending.items.map((i) => i.id)).not.toContain(r.id);
+    expect(ApprovalDetail.parse(await ok(victor.request("GET", `/api/v1/approvals/${r.id}`))).status).toBe(
+      "expired",
+    );
+    const res = await decide(victor, r.id, { outcome: "approved", actionHash: r.actionHash });
+    expect(res.status).toBe(409);
+    expect(errorCode(res)).toBe("approval_expired");
+    expect((await rowOf(r.id)).status).toBe("pending");
+  });
+
+  it("404-hiding: an outsider gets 404 on GET and POST; the requester who cannot decide gets 403 not_approver", async () => {
+    const r = await request("test.apply");
+    for (const res of [
+      await riley.request("GET", `/api/v1/approvals/${r.id}`),
+      await decide(riley, r.id, { outcome: "approved", actionHash: r.actionHash }),
+    ]) {
+      expect(res.status).toBe(404);
+      expect(errorCode(res)).toBe("approval_not_found");
+    }
+    expect(ApprovalDetail.parse(await ok(sam.request("GET", `/api/v1/approvals/${r.id}`))).viewerCan).toEqual(
+      [],
+    );
+    const own = await decide(sam, r.id, { outcome: "approved", actionHash: r.actionHash });
+    expect(own.status).toBe(403);
+    expect(errorCode(own)).toBe("not_approver");
+    expect((await rowOf(r.id)).status).toBe("pending");
+  });
+
+  it("cross-tenant: a decider of another organization gets 404 for this organization's request", async () => {
+    const r = await request("test.apply");
+    const { client: eve, userB } = await otherOrgAdmin();
+    deciders.add(userB);
+    try {
+      expect((await eve.request("GET", `/api/v1/approvals/${r.id}`)).status).toBe(404);
+      const res = await decide(eve, r.id, { outcome: "approved", actionHash: r.actionHash });
+      expect(res.status).toBe(404);
+      expect(errorCode(res)).toBe("approval_not_found");
+    } finally {
+      deciders.delete(userB);
+    }
+    expect((await rowOf(r.id)).status).toBe("pending");
+  });
+});
+
+describe("grant mode: one use, the matching hash, before expiry (Task 3)", () => {
+  it("before approval → not_approved; approved leaves the grant unconsumed; a wrong hash or kind is refused; one use", async () => {
+    const r = await request("test.grant");
+    expect(await consume(r.id, r.actionHash)).toEqual({ ok: false, code: "not_approved" });
+    const res = await decide(victor, r.id, { outcome: "approved", actionHash: r.actionHash });
+    expect(ApprovalSummary.parse(res.body).status).toBe("approved");
+    expect(await rowOf(r.id)).toMatchObject({ status: "approved", consumed_at: null, applied_at: null });
+    expect(await consume(r.id, "a".repeat(64))).toEqual({ ok: false, code: "approval_action_changed" });
+    expect(await consume(r.id, r.actionHash, "test.apply")).toEqual({
+      ok: false,
+      code: "approval_not_found",
+    });
+    expect(await consume(randomUUID(), r.actionHash)).toEqual({ ok: false, code: "approval_not_found" });
+    expect(await consume(r.id, r.actionHash)).toEqual({ ok: true });
+    const row = await rowOf(r.id);
+    expect(row.status).toBe("applied");
+    expect(row.consumed_at).not.toBeNull();
+    expect(await auditsFor("approval.grant_consumed", r.id)).toHaveLength(1);
+    expect(await consume(r.id, r.actionHash)).toEqual({ ok: false, code: "already_used" });
+  });
+
+  it("the stored action changed after approval → approval_action_changed", async () => {
+    const r = await request("test.grant");
+    expect((await decide(alex, r.id, { outcome: "approved", actionHash: r.actionHash })).status).toBe(200);
+    const action = stored.get(r.resourceId);
+    if (!action) throw new Error("missing stored action");
+    action.target = "somewhere else";
+    expect(await consume(r.id, r.actionHash)).toEqual({ ok: false, code: "approval_action_changed" });
+    expect((await rowOf(r.id)).consumed_at).toBeNull();
+  });
+
+  it("an approved grant past its expiry → approval_expired; a denied one → not_approved", async () => {
+    const r = await request("test.grant");
+    expect((await decide(victor, r.id, { outcome: "approved", actionHash: r.actionHash })).status).toBe(200);
+    await su.query(
+      "update app.approval_requests set expires_at = now() - interval '1 second' where id = $1",
+      [r.id],
+    );
+    expect(await consume(r.id, r.actionHash)).toEqual({ ok: false, code: "approval_expired" });
+    const d = await request("test.grant");
+    expect((await decide(victor, d.id, { outcome: "denied", actionHash: d.actionHash })).status).toBe(200);
+    expect(await consume(d.id, d.actionHash)).toEqual({ ok: false, code: "not_approved" });
+  });
+
+  it("two concurrent uses: exactly one succeeds", async () => {
+    const r = await request("test.grant");
+    expect((await decide(victor, r.id, { outcome: "approved", actionHash: r.actionHash })).status).toBe(200);
+    const results = await Promise.all([consume(r.id, r.actionHash), consume(r.id, r.actionHash)]);
+    expect(results.filter((x) => x.ok)).toHaveLength(1);
+    expect(results.filter((x) => !x.ok)).toEqual([{ ok: false, code: "already_used" }]);
+    expect(await auditsFor("approval.grant_consumed", r.id)).toHaveLength(1);
+  });
+});
