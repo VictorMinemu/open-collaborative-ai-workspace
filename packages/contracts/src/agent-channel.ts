@@ -20,6 +20,7 @@ import {
 import { SearchProvider, TurnContext } from "./bot-capabilities";
 import { ConversationKind, Mention, MessageBody } from "./chat";
 import { Id, IsoDateTime, MemberKind, PrincipalKind } from "./common";
+import { ConnectionStatus, jsonBytes } from "./connectors";
 import { DeclaredSurface } from "./marketplace";
 import {
   MEMORY_LIMITS,
@@ -801,3 +802,95 @@ export type AgentChannelBoardPatchCard = z.infer<typeof AgentChannelBoardPatchCa
 
 export const AgentChannelBoardCardResponse = z.object({ card: BoardCard });
 export type AgentChannelBoardCardResponse = z.infer<typeof AgentChannelBoardCardResponse>;
+
+// ---------------------------------------------------------------- per-member connectors and keychain (Phase 07.4)
+
+/*
+ * The `ocw_connector_list|call` and `ocw_http_request` tools (07.4 D-02, D-04, D-07), bound to a delivered turn like
+ * `ocw_memory_save`. The member whose credential is used is ALWAYS the stored turn's human (`agent_turns.user_id`),
+ * never a field: unknown keys such as `userId` are stripped. Every route re-decides the turn, the logical tool, the
+ * resolver (agent ∩ human), the audience rule (D-03) and the caps and taint, then calls out with the API's egress guard.
+ */
+
+/** Why a connector or keychain tool call was refused (the model reads it; never the decision details). */
+export const AgentChannelToolRefusal = z.enum([
+  "unknown_turn",
+  "not_in_turn",
+  "policy_changed",
+  "cap_reached",
+  "tainted",
+  "member_account",
+  "not_connected",
+  "needs_reconnect",
+  "handle_not_allowed",
+  "host_not_allowed",
+  "egress_refused",
+  "upstream_error",
+  "timeout",
+]);
+export type AgentChannelToolRefusal = z.infer<typeof AgentChannelToolRefusal>;
+
+/** An MCP server's immutable OpenClaw name: `m` + 8 hex characters (`apps/api/src/modules/mcp/names.ts`). */
+export const ConnectorSafeName = z.string().regex(/^m[0-9a-f]{8}$/, "invalid connector name");
+export type ConnectorSafeName = z.infer<typeof ConnectorSafeName>;
+
+/** Byte bounds of the connector tools (T-07.4-01-04). */
+export const CONNECTOR_TOOL_LIMITS = {
+  argumentsBytes: 32 * 1024,
+  contentBytes: 32 * 1024,
+  descriptionChars: 1024,
+  connectors: 32,
+  toolsPerConnector: 64,
+  keys: 32,
+} as const;
+
+/** `POST /agent-channel/v1/connectors/list`: the turn's per-member connectors, their tools and the turn's keys. */
+export const AgentChannelConnectorList = z.object({ eventId: Id, agentId: Id });
+export type AgentChannelConnectorList = z.infer<typeof AgentChannelConnectorList>;
+
+export const AgentChannelConnectorTool = z.object({
+  name: z.string().min(1).max(128),
+  description: z.string().max(CONNECTOR_TOOL_LIMITS.descriptionChars),
+  inputSchema: z.record(z.string(), z.unknown()).nullable(),
+});
+export type AgentChannelConnectorTool = z.infer<typeof AgentChannelConnectorTool>;
+
+export const AgentChannelConnectorEntry = z.object({
+  /** The safe name `ocw_connector_call` takes. */
+  connector: ConnectorSafeName,
+  name: z.string(),
+  /** The asker's connection: `not_connected` / `needs_reconnect` tools answer with that refusal. */
+  status: ConnectionStatus,
+  tools: z.array(AgentChannelConnectorTool).max(CONNECTOR_TOOL_LIMITS.toolsPerConnector),
+});
+export type AgentChannelConnectorEntry = z.infer<typeof AgentChannelConnectorEntry>;
+
+export const AgentChannelConnectorListResponse = z.object({
+  connectors: z.array(AgentChannelConnectorEntry).max(CONNECTOR_TOOL_LIMITS.connectors),
+});
+export type AgentChannelConnectorListResponse = z.infer<typeof AgentChannelConnectorListResponse>;
+
+/** `POST /agent-channel/v1/connectors/call`: one logical tool `<connector>__<tool>` of the turn, with the asker's account. */
+export const AgentChannelConnectorCall = z.object({
+  eventId: Id,
+  agentId: Id,
+  connector: ConnectorSafeName,
+  tool: z.string().min(1).max(128),
+  arguments: z
+    .record(z.string(), z.unknown())
+    .refine((v) => jsonBytes(v) <= CONNECTOR_TOOL_LIMITS.argumentsBytes, { message: "arguments over 32 KB" })
+    .default({}),
+});
+export type AgentChannelConnectorCall = z.infer<typeof AgentChannelConnectorCall>;
+
+/** Text content for the model (untrusted output: it taints the turn), capped, with the credential redacted. */
+export const AgentChannelConnectorCallResponse = z.object({
+  content: z
+    .string()
+    .refine((c) => new TextEncoder().encode(c).length <= CONNECTOR_TOOL_LIMITS.contentBytes, {
+      message: "content over 32 KB",
+    }),
+  truncated: z.boolean(),
+  isError: z.boolean(),
+});
+export type AgentChannelConnectorCallResponse = z.infer<typeof AgentChannelConnectorCallResponse>;

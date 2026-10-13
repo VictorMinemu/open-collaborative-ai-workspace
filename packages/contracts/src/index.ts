@@ -9,6 +9,7 @@ export * from "./board";
 export * from "./bot-capabilities";
 export * from "./chat";
 export * from "./common";
+export * from "./connectors";
 export * from "./device";
 export * from "./device-link";
 export * from "./health";

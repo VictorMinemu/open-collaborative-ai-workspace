@@ -80,6 +80,14 @@ function toDto(row: ServerRow, tools: readonly ToolRow[]): McpServer {
       })),
     createdAt: new Date(row.createdAt).toISOString(),
     updatedAt: new Date(row.updatedAt).toISOString(),
+    // Phase 07.4 contract fields; every server is `org_secret` until 07.4-06 reads the auth-mode columns.
+    authMode: "org_secret",
+    memberHeaderName: null,
+    memberHeaderPrefix: null,
+    oauthScopes: null,
+    oauthStatus: null,
+    oauthClients: [],
+    memberConnections: 0,
   };
 }
 
