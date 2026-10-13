@@ -805,7 +805,7 @@ describe("the view's bounds and a proposal whose unit is gone (WINDOWS 126, 137)
     expect((await messageOf(row.card_message_id)).body.length).toBeLessThanOrEqual(600);
   });
 
-  it("a unit deleted under a pending proposal: inbox and decisions answer cleanly, the detail reads scope_gone", async () => {
+  it("a unit deleted under a pending proposal closes its approval as failed scope_gone, card included (WINDOWS 137, 144)", async () => {
     const C = await unit("team", "Benelux", D);
     await ok(admin.request("POST", `/api/v1/units/${C}/members`, { userId: lenaId, role: "lead" }));
     await ok(admin.request("POST", `/api/v1/units/${C}/members`, { userId: samId }));
@@ -814,44 +814,81 @@ describe("the view's bounds and a proposal whose unit is gone (WINDOWS 126, 137)
     const r = await fresh({ scope: scopeC, path: "benelux.md", op: "create", content: "Brussels office\n" });
     expect((await detail(lena, r.approvalId)).viewerCan).toEqual(["decide"]);
     const hash = await hashOf(lena, r.approvalId);
+    const before = await approvalRow(r.approvalId);
+    const cardVersion = (await cardFor(sam, before.card_message_id)).version;
     // Only the template MEMORY.md lives there, so the unit may go; its scope and the proposal cascade.
     await ok(admin.request("DELETE", `/api/v1/units/${C}`));
     expect(await proposalOf(r.approvalId)).toBeUndefined();
-    expect((await approvalRow(r.approvalId)).status).toBe("pending");
 
+    // The gone path: closed in the same transaction as failed scope_gone, with no decider.
+    const row = await approvalRow(r.approvalId);
+    expect(row).toMatchObject({
+      status: "failed",
+      result_code: "scope_gone",
+      decided_by: null,
+      consumed_at: null,
+    });
+    const [closed] = await auditsWhere("approval.closed", "approvalId", r.approvalId);
+    expect(closed?.metadata).toEqual({
+      approvalId: r.approvalId,
+      kind: "memory.write",
+      mode: "server_apply",
+      resultCode: "scope_gone",
+    });
+    expect(closed?.result).toBe("error");
+    // Announced like a decision (ids only) to the requester; the card shows it failed, live, with no decision line.
+    expect(await updatesOf(r.approvalId)).toContain(`user:${samId}`);
+    const card = await cardFor(sam, row.card_message_id);
+    expect(card).toMatchObject({ status: "failed", decision: null });
+    expect(card.version).toBe(cardVersion + 1);
+    expect(card.approval).toMatchObject({ status: "failed", resultCode: "scope_gone" });
+    const live = await su.query(
+      "select payload from app.stream_events where type = 'message.updated' and payload->'message'->>'id' = $1 order by seq",
+      [row.card_message_id],
+    );
+    expect(live.rows.at(-1)?.payload.message.card).toMatchObject({ status: "failed" });
+    expect(await cardActionsOf(row.card_message_id)).toEqual([]);
+
+    // Inbox and detail answer cleanly; nobody can decide it any more and nothing is written.
     const lenaList = (await ok(lena.request("GET", "/api/v1/approvals?role=decider"))).items as Json[];
     expect(lenaList.map((i) => i.id)).not.toContain(r.approvalId);
     const samList = (await ok(sam.request("GET", "/api/v1/approvals?role=requester"))).items as Json[];
-    expect(samList.find((i) => i.id === r.approvalId)).toMatchObject({ status: "pending", viewerCan: [] });
+    expect(samList.find((i) => i.id === r.approvalId)).toMatchObject({
+      status: "failed",
+      resultCode: "scope_gone",
+      viewerCan: [],
+    });
     const d = await detail(sam, r.approvalId);
     expect(d.view).toEqual({
       type: "fields",
       title: "This memory no longer exists.",
       fields: [{ label: "Result", value: "scope_gone" }],
     });
-
-    // Nobody may decide it any more: Lena no longer sees it, Sam only asked for it. Nothing is written.
     const byLena = await decide(lena, r.approvalId, { outcome: "approved", actionHash: hash });
     expect(byLena.status).toBe(404);
     expect(codeOf(byLena)).toBe("approval_not_found");
-    const row = await approvalRow(r.approvalId);
     const onCard = await sam.request("POST", `/api/v1/cards/${row.card_message_id}/decision`, {
       outcome: "denied",
       actionHash: hash,
     });
-    expect(onCard.status).toBe(403);
-    expect(codeOf(onCard)).toBe("not_approver");
-    expect((await approvalRow(r.approvalId)).status).toBe("pending");
+    expect(onCard.status).toBe(409);
+    expect(codeOf(onCard)).toBe("approval_already_decided");
 
     // The kind's own hooks read it as scope_gone, never a crash.
     const kind = createMemoryWriteKind({ perms: {} as never, files: {} as never, scans: new Map() });
-    const stored = { ...row, resourceId: row.resource_id } as never;
+    const stored = {
+      ...row,
+      resourceId: row.resource_id,
+      requestedForUserId: row.requested_for_user_id,
+      requestedByAgentId: row.requested_by_agent_id,
+    } as never;
     await stack.built.core.db.withTenant({ organizationId: orgId, userId: lenaId }, async (tx) => {
       await expect(kind.hashInput(tx, stored)).rejects.toMatchObject({ statusCode: 409, code: "scope_gone" });
       expect(await kind.apply?.(tx, stored, { deciderUserId: lenaId })).toEqual({
         ok: false,
         code: "scope_gone",
       });
+      expect(await kind.gone?.(tx, stored)).toBe("scope_gone");
       expect(await kind.canDecide(tx, lenaId, stored)).toBe(false);
       expect(await kind.audience(tx, stored)).toEqual([]);
       expect(await kind.isPrivate?.(tx, stored)).toBe(true);
@@ -913,5 +950,81 @@ describe("Presidio (layer 2): findings merge in, and a refused connection leaves
     const d = await detail(lena, r.approvalId);
     if (d.view.type !== "memory_proposal") throw new Error("not a memory view");
     expect(d.view.proposal.findings.map((f) => f.kind)).toContain("extended_scan_unavailable");
+  });
+});
+
+describe("a deleted, turned-off or forgotten requester never gets a write (WINDOWS 144, 164)", () => {
+  it("approving after the bot was turned off fails as bot_disabled and writes nothing", async () => {
+    const r = await fresh({ scope: scopeOf[A] as string, path: "off.md", op: "create", content: "Paused\n" });
+    const hash = await hashOf(lena, r.approvalId);
+    await su.query("update app.agents set status = 'disabled' where id = $1", [scoutId]);
+    try {
+      const res = await decide(lena, r.approvalId, { outcome: "approved", actionHash: hash });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(await approvalRow(r.approvalId)).toMatchObject({
+        status: "failed",
+        result_code: "bot_disabled",
+      });
+      expect(await fileAt(scopeOf[A] as string, "off.md")).toBeUndefined();
+    } finally {
+      await su.query("update app.agents set status = 'ready' where id = $1", [scoutId]);
+    }
+  });
+
+  it("forgetting a private scope closes its pending proposals as scope_gone", async () => {
+    const r = await fresh({ scope: "personal", path: "forgotten.md", op: "create", content: "Soon gone\n" });
+    const scope = (await proposalOf(r.approvalId))?.scope_id as string;
+    await ok(sam.request("DELETE", `/api/v1/memory/scopes/${scope}`));
+    expect(await approvalRow(r.approvalId)).toMatchObject({ status: "failed", result_code: "scope_gone" });
+    const row = await approvalRow(r.approvalId);
+    expect((await cardFor(sam, row.card_message_id)).approval).toMatchObject({
+      status: "failed",
+      resultCode: "scope_gone",
+    });
+    expect(await auditsWhere("approval.closed", "approvalId", r.approvalId)).toHaveLength(1);
+  });
+
+  it("deleting the bot closes every pending proposal it asked for as bot_deleted; Lena can no longer approve", async () => {
+    const shared = await fresh({
+      scope: scopeOf[A] as string,
+      path: "late.md",
+      op: "create",
+      content: "Late\n",
+    });
+    const mine = await fresh({ scope: "personal", path: "late.md", op: "create", content: "Mine\n" });
+    const hash = await hashOf(lena, shared.approvalId);
+    const decidedBefore = await fresh({
+      scope: scopeOf[A] as string,
+      path: "done.md",
+      op: "create",
+      content: "Done\n",
+    });
+    await ok(
+      decide(lena, decidedBefore.approvalId, {
+        outcome: "denied",
+        actionHash: await hashOf(lena, decidedBefore.approvalId),
+      }),
+    );
+
+    await ok(sam.request("DELETE", `/api/v1/agents/${scoutId}`));
+
+    for (const r of [shared, mine]) {
+      const row = await approvalRow(r.approvalId);
+      expect(row, r.approvalId).toMatchObject({
+        status: "failed",
+        result_code: "bot_deleted",
+        decided_by: null,
+      });
+      expect((await cardFor(sam, row.card_message_id)).status).toBe("failed");
+      const [closed] = await auditsWhere("approval.closed", "approvalId", r.approvalId);
+      expect(closed?.metadata.resultCode).toBe("bot_deleted");
+      expect(JSON.stringify(closed)).not.toContain("late.md");
+    }
+    // A request already decided is left as it was.
+    expect((await approvalRow(decidedBefore.approvalId)).status).toBe("denied");
+    // The lead sees it decided-by-nobody and cannot approve it: nothing is written for a deleted bot.
+    const res = await decide(lena, shared.approvalId, { outcome: "approved", actionHash: hash });
+    expect([404, 409]).toContain(res.status);
+    expect(await fileAt(scopeOf[A] as string, "late.md")).toBeUndefined();
   });
 });

@@ -14,7 +14,14 @@ import { and, desc, eq, inArray, isNull, lt, type SQL, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { LinkedCardInfo, LinkedCards } from "../../lib/chat-agent-bridge";
 import { conflict, forbidden, HttpError, notFound } from "../../lib/errors";
-import { announceCardMessage, authorOf, type Directory, loadDirectory, mirrorCardDecision } from "../chat";
+import {
+  announceCardMessage,
+  authorOf,
+  type Directory,
+  loadDirectory,
+  mirrorCardClosed,
+  mirrorCardDecision,
+} from "../chat";
 import { actionHash } from "./hash";
 import {
   type ApplyResult,
@@ -83,6 +90,14 @@ export interface ApprovalService {
   decide(tx: Tx, input: DecideInput): Promise<ApprovalSummary>;
   consumeGrant(tx: Tx, input: { id: string; kind: string; actionHash: string }): Promise<ConsumeGrantResult>;
   get(tx: Tx, id: string, viewerUserId: string): Promise<ApprovalDetail>;
+  /**
+   * The "gone" path (WINDOWS 144): closes the pending requests among `which` whose kind says their action can never be
+   * applied again (`ApprovalKind.gone`) as `failed` with the kind's code, with no decider. Each closure is audited
+   * (`approval.closed`, ids and the code), announced ids-only like a decision, and mirrored on its card (status
+   * `failed`, live). Called inside the transaction that made the action vanish (a unit or bot deletion, a forget);
+   * a request whose kind has no `gone` hook, that is no longer pending, or that is not gone is left as it is.
+   */
+  closeGone(tx: Tx, which: { ids: readonly string[] } | { requestedByAgentId: string }): Promise<string[]>;
   list(tx: Tx, viewerUserId: string, q: ApprovalListQuery): Promise<ApprovalList>;
   /** The provider chat's card routes use through the bridge (registered by `createApprovalModule`). */
   linkedCards: LinkedCards;
@@ -201,7 +216,7 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
   }
 
   /** Audit ids, kind and mode only; actor is the deciding human (the transaction's user) unless named. */
-  const ids = (row: ApprovalRow) => ({ approvalId: row.id, kind: row.kind, mode: row.mode });
+  const auditIds = (row: ApprovalRow) => ({ approvalId: row.id, kind: row.kind, mode: row.mode });
 
   /**
    * Who may see a request: whoever may decide it now, the human it was requested for, and whoever decided it. Anyone
@@ -342,7 +357,7 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
         ...(row.requestedByAgentId
           ? { actorKind: "agent" as const, actorId: row.requestedByAgentId, agentId: row.requestedByAgentId }
           : {}),
-        metadata: { ...ids(row), resourceType: row.resourceType, resourceId: row.resourceId },
+        metadata: { ...auditIds(row), resourceType: row.resourceType, resourceId: row.resourceId },
       });
       await announce(tx, kind, row, []);
       const cardMessageId = input.card ? await postMirror(tx, kind, row, input.card) : null;
@@ -385,7 +400,7 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
         resourceType: "approval_request",
         resourceId: decided.id,
         metadata: {
-          ...ids(decided),
+          ...auditIds(decided),
           outcome: input.outcome,
           ...(note === null ? {} : isPrivate ? { noteChars: note.length } : { note }),
         },
@@ -442,10 +457,54 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
         action: "approval.grant_consumed",
         resourceType: "approval_request",
         resourceId: used.id,
-        metadata: ids(used),
+        metadata: auditIds(used),
       });
       await announce(tx, kind, used, [used.decidedBy]);
       return { ok: true };
+    },
+
+    async closeGone(tx, which) {
+      const ids =
+        "ids" in which
+          ? [...new Set(which.ids)]
+          : (
+              await tx
+                .select({ id: approvalRequests.id })
+                .from(approvalRequests)
+                .where(
+                  and(
+                    eq(approvalRequests.requestedByAgentId, which.requestedByAgentId),
+                    eq(approvalRequests.status, "pending"),
+                  ),
+                )
+            ).map((r) => r.id);
+      const closed: string[] = [];
+      for (const id of ids.sort()) {
+        const row = await lockRow(tx, id);
+        const kind = row ? registry.get(row.kind) : undefined;
+        if (!row || !kind?.gone || row.status !== "pending") continue;
+        const code = await kind.gone(tx, row);
+        if (!code) continue;
+        const [final] = await tx
+          .update(approvalRequests)
+          .set({ status: "failed", resultCode: code.slice(0, 64) })
+          .where(and(eq(approvalRequests.id, row.id), eq(approvalRequests.status, "pending")))
+          .returning();
+        if (!final) continue;
+        await core.audit.record(tx, {
+          action: "approval.closed",
+          resourceType: "approval_request",
+          resourceId: final.id,
+          result: "error",
+          metadata: { ...auditIds(final), resultCode: final.resultCode },
+        });
+        await announce(tx, kind, final, []);
+        if (final.cardMessageId) {
+          await mirrorCardClosed(tx, core, { messageId: final.cardMessageId, status: "failed" });
+        }
+        closed.push(final.id);
+      }
+      return closed;
     },
 
     async get(tx, id, viewerUserId) {
@@ -561,7 +620,7 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
       resourceType: "approval_request",
       resourceId: final.id,
       ...(result.ok ? {} : { result: "error" as const }),
-      metadata: { ...ids(final), ...(result.ok ? {} : { resultCode: final.resultCode }) },
+      metadata: { ...auditIds(final), ...(result.ok ? {} : { resultCode: final.resultCode }) },
     });
     return final;
   }

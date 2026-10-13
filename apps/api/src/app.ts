@@ -287,7 +287,7 @@ export async function buildApp(
       apiUrl: env.OCW_PUBLIC_API_URL,
       signInRatePerMinute: env.OCW_SIGNIN_RATE_LIMIT_PER_MINUTE,
     }),
-    createOrganizationModule(core),
+    createOrganizationModule(core, { approvals: approvals.service }), // 07.2: a unit deletion closes its gone approvals
     createRealtimeModule({ realtime, identity, allowedOrigins, bus, online }),
     createSecretsModule(),
     createChatModule(core), // B1
@@ -296,7 +296,7 @@ export async function buildApp(
     createSearchModule(core, { modelLabel: (ref) => modelGateway.labelOf(ref) }), // Phase 4: full-text search (CHAT-11, D-04); AI chats of their owner (05-10)
     createModelGatewayModule(core, modelGateway), // Phase 5: AI chat models and ChatGPT plan status
     createAiChatModule(core, { gateway: modelGateway, storage: artifactModule.storage }), // Phase 5: direct AI chat (AICHAT-02/03/07/08)
-    createAgentModule(core), // B2
+    createAgentModule(core, { approvals: approvals.service }), // B2; 07.2: a bot deletion closes its pending approvals
     createBotCapabilitiesModule(core, { memory }), // Phase 3.1: capabilities, bot policy, governance; 07.2-11: notes on files
     createMcpModule(core), // Phase 3.1: MCP server registry (D-13)
     createPluginsModule(core), // Phase 3.1: OpenClaw Marketplace (D-14)

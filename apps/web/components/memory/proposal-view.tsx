@@ -759,6 +759,18 @@ function ReviewFooter({
         <Spinner /> Applying…
       </p>
     );
+  } else if (status === "failed" && !detail.decidedBy) {
+    // Closed by the server, not decided (its memory or its bot is gone, WINDOWS 144/164): the notice above says why.
+    body = (
+      <p
+        data-testid="proposal-decision"
+        data-status="failed"
+        className="flex items-center gap-1.5 text-muted-foreground text-sm"
+      >
+        <CircleX aria-hidden className="size-4 shrink-0" />
+        Closed without a decision. Nothing was changed.
+      </p>
+    );
   } else if (status === "expired") {
     body = (
       <p data-testid="proposal-decision" className="flex items-center gap-1.5 text-muted-foreground text-sm">

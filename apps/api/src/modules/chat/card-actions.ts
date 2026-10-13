@@ -390,6 +390,32 @@ export async function mirrorCardDecision(
   );
 }
 
+/**
+ * Closes the platform-owned card of an approval that nobody decided (the approval's "gone" path, WINDOWS 144): its
+ * status only (`failed`), a version bump and `message.updated` to every reader; no decision, no decider, and no card
+ * action turn (nobody acted on it). Once: a card that is no longer pending, or shows a decision, is left as it is.
+ * Called by the approval module only.
+ */
+export async function mirrorCardClosed(
+  tx: Tx,
+  deps: Pick<Core, "realtime">,
+  a: { messageId: string; status: "failed" | "cancelled" },
+): Promise<void> {
+  const [after] = await tx
+    .update(messageCards)
+    .set({ status: a.status, version: sql`${messageCards.version} + 1`, updatedAt: sql`now()` })
+    .where(
+      and(
+        eq(messageCards.messageId, a.messageId),
+        eq(messageCards.platformOwned, true),
+        eq(messageCards.status, "pending"),
+        isNull(messageCards.decision),
+      ),
+    )
+    .returning({ messageId: messageCards.messageId });
+  if (after) await announceCardMessage(tx, deps, a.messageId);
+}
+
 const CARD_NOT_FOUND = "Card not found";
 
 /**

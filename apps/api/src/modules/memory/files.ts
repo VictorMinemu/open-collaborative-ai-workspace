@@ -28,6 +28,7 @@ import { diffLines } from "diff";
 import { and, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { conflict, forbidden, HttpError } from "../../lib/errors";
+import type { ApprovalService } from "../approval";
 import { AuthzDeniedError, memoryResource, type PermissionService } from "../organization";
 import {
   asActor,
@@ -63,6 +64,8 @@ type RevisionRow = typeof memoryFileRevisions.$inferSelect;
 export interface FilesDeps {
   core: Core;
   perms: PermissionService;
+  /** Closes the approvals of the proposals a forget removes (the gone path, WINDOWS 144). */
+  approvals: Pick<ApprovalService, "closeGone">;
 }
 
 export type WriteFileOp =
@@ -860,7 +863,22 @@ export function createFileOps(d: FilesDeps) {
       const files = await count("memory_files");
       const revisions = await count("memory_file_revisions");
       const proposals = await count("memory_proposals");
+      // Their pending approvals close as failed `scope_gone` once the proposals are gone (cards updated live).
+      const pending = (
+        await tx
+          .select({ id: approvalRequests.id })
+          .from(approvalRequests)
+          .innerJoin(memoryProposals, eq(memoryProposals.id, approvalRequests.resourceId))
+          .where(
+            and(
+              eq(approvalRequests.resourceType, "memory_proposal"),
+              eq(memoryProposals.scopeId, scope.row.id),
+              eq(approvalRequests.status, "pending"),
+            ),
+          )
+      ).map((r) => r.id);
       await tx.delete(memoryProposals).where(eq(memoryProposals.scopeId, scope.row.id));
+      await d.approvals.closeGone(tx, { ids: pending });
       await tx.delete(memoryFiles).where(eq(memoryFiles.scopeId, scope.row.id));
       const rootId = await createRootFile(tx, scope.row);
       await core.audit.record(tx, {

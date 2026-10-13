@@ -43,6 +43,12 @@ export interface ApprovalKind {
   card?(tx: Tx, row: ApprovalRow): Promise<{ card: AgentCardInput; warnings?: string[] }>;
   /** `server_apply` only: applies the approved action inside the decision transaction (in a savepoint). */
   apply?(tx: Tx, row: ApprovalRow, ctx: { deciderUserId: string }): Promise<ApplyResult>;
+  /**
+   * Whether the stored action can never be applied again, by anyone (its target went with a cascade, the agent that
+   * asked was deleted): a result code (e.g. `scope_gone`) lets `closeGone` close a pending request as `failed` with
+   * it; null keeps it pending. Asked only by `closeGone`, which the owners of those lifecycles call (07.2, WINDOWS 144).
+   */
+  gone?(tx: Tx, row: ApprovalRow): Promise<string | null>;
   /** True when the request concerns private data: the decision note is then audited as its length only. */
   isPrivate?(tx: Tx, row: ApprovalRow): Promise<boolean>;
 }

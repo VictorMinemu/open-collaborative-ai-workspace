@@ -5,6 +5,7 @@ import {
   PermissionRulesUpdatedPayload,
   UnitsUpdatedPayload,
 } from "@ocw/contracts";
+import type { Tx } from "@ocw/db";
 import { type ApiModule, type Core, tenant } from "../../core";
 import { registerMemberRoutes } from "./members";
 import { registerModuleAccessRoutes } from "./module-access";
@@ -61,7 +62,15 @@ export {
 /** `member.updated` fields that change what a member may read (the rest are profile fields). */
 const ACCESS_FIELDS = new Set(["role", "status"]);
 
-export function createOrganizationModule(core: Core): ApiModule {
+/**
+ * What a unit deletion tells the approvals it leaves without a target (the approval primitive's gone path, WINDOWS
+ * 144). Structural on purpose: this module sits below `approval` and never imports it; app.ts wires the service.
+ */
+export interface OrganizationDeps {
+  approvals: { closeGone(tx: Tx, which: { ids: readonly string[] }): Promise<unknown> };
+}
+
+export function createOrganizationModule(core: Core, deps: OrganizationDeps): ApiModule {
   const perms = createPermissionService(core);
 
   // Realtime topics owned by this module, decided by the resolver (T-02-06-06). The tenant boundary is
@@ -112,7 +121,7 @@ export function createOrganizationModule(core: Core): ApiModule {
     name: "organization",
     register(app) {
       registerMemberRoutes(app, core, perms);
-      registerUnitRoutes(app, core, perms);
+      registerUnitRoutes(app, core, perms, deps);
       registerRuleRoutes(app, core, perms);
       registerModuleAccessRoutes(app, core, perms);
 

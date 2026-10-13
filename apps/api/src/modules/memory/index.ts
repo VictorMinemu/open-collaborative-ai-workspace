@@ -135,7 +135,7 @@ export interface MemoryService {
 
 export function createMemoryService(core: Core, deps: { approvals: ApprovalService }): MemoryService {
   const perms = createPermissionService(core);
-  const files = createFileOps({ core, perms });
+  const files = createFileOps({ core, perms, approvals: deps.approvals });
   // Detector layer 2 (07.2-05): off without OCW_PRESIDIO_URL; fail-open with a visible marker.
   const scanner = createPresidioScanner(
     {

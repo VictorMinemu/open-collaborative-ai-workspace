@@ -17,7 +17,7 @@ import { sha256Hex } from "../../lib/crypto";
 import { conflict, HttpError } from "../../lib/errors";
 import type { ApplyResult, ApprovalKind, ApprovalRow } from "../approval";
 import { memoryResource, type PermissionService } from "../organization";
-import { decideMemory, isPersonalLike, type MemoryActor, personalOwnerOf } from "./access";
+import { decideMemory, isPersonalLike, type MemoryActor, personalOwnerOf, proposalExists } from "./access";
 import { type ChangeScan, changeExcerpt, MAX_VIEW_FINDINGS, NO_SCANNER, scanChange } from "./detect";
 import type { WriteFileOp } from "./files";
 import { type LoadedScope, loadScope } from "./scopes";
@@ -177,6 +177,24 @@ async function names(tx: Tx, p: Pick<ProposalRow, "requestedByAgentId" | "reques
 const storedFindings = (p: ProposalRow) =>
   (p.findings as unknown as SensitiveFinding[]).slice(0, MAX_VIEW_FINDINGS);
 
+/**
+ * Why the agent that asked can no longer have its proposal applied (WINDOWS 164): the server would write on behalf of
+ * a deleted or turned-off bot. Null = it may. A request without an agent (07.6's system origin) is not concerned.
+ */
+async function requesterBlock(
+  tx: Tx,
+  row: Pick<ApprovalRow, "requestedByAgentId">,
+): Promise<"bot_deleted" | "bot_disabled" | null> {
+  if (!row.requestedByAgentId) return null;
+  const [bot] = await tx
+    .select({ status: agents.status, deletedAt: agents.deletedAt })
+    .from(agents)
+    .where(eq(agents.id, row.requestedByAgentId))
+    .limit(1);
+  if (!bot || bot.deletedAt !== null) return "bot_deleted";
+  return bot.status === "disabled" ? "bot_disabled" : null;
+}
+
 /** Domain errors of the file operations → the request's result code (the primitive marks it `failed`). */
 function resultCode(op: MemoryProposalOp, err: HttpError): string {
   switch (err.code) {
@@ -258,6 +276,14 @@ export function createMemoryWriteKind(deps: MemoryWriteKindDeps): ApprovalKind {
         resourceFor: (userId) => memoryResource(scope.facts, proposal.path, { kind: "user", id: userId }),
       });
       return promoters.filter((id) => id !== row.requestedForUserId);
+    },
+
+    // The gone path (WINDOWS 144, 164): a proposal its unit, bot or a forget took along, or one asked by a bot deleted
+    // since, can never be applied: the primitive closes it as failed with this code. A turned-off bot is not gone (it
+    // may be turned on again); `apply` refuses it.
+    async gone(tx, row) {
+      if ((await requesterBlock(tx, row)) === "bot_deleted") return "bot_deleted";
+      return (await proposalExists(tx, row)) ? null : "scope_gone";
     },
 
     async isPrivate(tx, row) {
@@ -349,6 +375,9 @@ export function createMemoryWriteKind(deps: MemoryWriteKindDeps): ApprovalKind {
     async apply(tx, row): Promise<ApplyResult> {
       const p = await loadProposal(tx, row);
       if (!p) return { ok: false, code: "scope_gone" };
+      // Fail closed: never write on behalf of a bot that was deleted or turned off since it asked (WINDOWS 164).
+      const blocked = await requesterBlock(tx, row);
+      if (blocked) return { ok: false, code: blocked };
       const actor: MemoryActor = {
         kind: "approved",
         agentId: p.requestedByAgentId,

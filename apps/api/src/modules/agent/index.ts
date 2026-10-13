@@ -137,7 +137,15 @@ function isUniqueViolation(err: unknown): boolean {
  */
 const BOT_NOT_FOUND = "Bot not found";
 
-export function createAgentModule(core: Core): ApiModule {
+/**
+ * What a bot deletion tells the approvals it asked for (the approval primitive's gone path, WINDOWS 164): the server
+ * never applies a request on behalf of a deleted bot. Structural: this module never imports `approval`.
+ */
+export interface AgentModuleDeps {
+  approvals: { closeGone(tx: Tx, which: { requestedByAgentId: string }): Promise<unknown> };
+}
+
+export function createAgentModule(core: Core, deps: AgentModuleDeps): ApiModule {
   const perms = createPermissionService(core);
   const requireUser = core.identity.requireUser;
   /**
@@ -804,6 +812,8 @@ export function createAgentModule(core: Core): ApiModule {
                 ...(personal && !owner ? { governance: true } : {}),
               },
             });
+            // Its pending requests (memory proposals) close as failed `bot_deleted`, cards updated live (WINDOWS 164).
+            await deps.approvals.closeGone(tx, { requestedByAgentId: row.id });
             await publishAgentDeleted(core, tx, row);
             await notifyCell(core, tx, "agent.deleted", row.id);
             return { ok: true as const };

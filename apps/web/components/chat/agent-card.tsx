@@ -391,6 +391,10 @@ function failedReason(code: string | null | undefined, bot: string): string {
       return "This memory is full (2,000 files).";
     case "too_large":
       return "The file would be over 256 KB.";
+    case "bot_deleted":
+      return `${bot.charAt(0).toUpperCase()}${bot.slice(1)} was deleted. Nothing was changed.`;
+    case "bot_disabled":
+      return `${bot.charAt(0).toUpperCase()}${bot.slice(1)} is turned off. Nothing was changed.`;
     default:
       return "Couldn't apply this change.";
   }

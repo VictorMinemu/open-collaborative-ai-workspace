@@ -885,3 +885,105 @@ describe("grant mode: one use, the matching hash, before expiry (Task 3)", () =>
     expect(await auditsFor("approval.grant_consumed", r.id)).toHaveLength(1);
   });
 });
+
+describe("the gone path: a request whose action vanished closes as failed, card included (WINDOWS 144)", () => {
+  let dm: string;
+  let asked: string;
+
+  beforeAll(async () => {
+    // test.card's card, plus a `gone` hook: gone once its stored action is removed.
+    approvals.register(
+      testKind("test.gone", "server_apply", {
+        async canDecide(_tx, userId, row) {
+          return stored.has(row.resourceId) && userId === row.requestedForUserId;
+        },
+        async audience(_tx, row) {
+          return row.requestedForUserId ? [row.requestedForUserId] : [];
+        },
+        async card(_tx, row) {
+          return {
+            card: {
+              kind: "approval",
+              title: "Apply test action",
+              fields: [{ label: "Target", value: stored.get(row.resourceId)?.target ?? "gone" }],
+              status: "pending",
+              actions: [{ kind: "open", label: "Review", target: `/memory/proposals/${row.id}` }],
+              summary: "Keeper asks to apply a test action",
+            },
+          };
+        },
+        async gone(_tx, row) {
+          return stored.has(row.resourceId) ? null : "test_gone";
+        },
+      }),
+    );
+    dm = (await ok(sam.request("POST", "/api/v1/dms", { participants: [{ kind: "agent", id: keeperId }] })))
+      .id as string;
+    asked = (await ok(sam.request("POST", `/api/v1/conversations/${dm}/messages`, { body: "keep it" })))
+      .id as string;
+  });
+
+  const close = (which: { ids: string[] } | { requestedByAgentId: string }) =>
+    stack.built.core.db.withTenant({ organizationId: orgId, userId: victorId }, (tx) =>
+      approvals.closeGone(tx, which),
+    );
+
+  it("closes only what is pending and gone: failed with the kind's code, audited by id, announced, card failed", async () => {
+    const gone = await request("test.gone", { card: { conversationId: dm, inReplyToMessageId: asked } });
+    const alive = await request("test.gone", { card: { conversationId: dm, inReplyToMessageId: asked } });
+    const noHook = await request("test.apply");
+    stored.delete(gone.resourceId);
+    stored.delete(noHook.resourceId);
+    const version = (
+      await su.query("select version from app.message_cards where message_id = $1", [gone.cardMessageId])
+    ).rows[0].version as number;
+
+    expect(await close({ ids: [gone.id, alive.id, noHook.id, randomUUID()] })).toEqual([gone.id]);
+
+    expect(await rowOf(gone.id)).toMatchObject({
+      status: "failed",
+      result_code: "test_gone",
+      decided_by: null,
+      decided_at: null,
+    });
+    expect((await rowOf(alive.id)).status).toBe("pending");
+    expect((await rowOf(noHook.id)).status).toBe("pending");
+    const [audit] = await auditsFor("approval.closed", gone.id);
+    expect(audit).toMatchObject({ result: "error" });
+    expect(audit?.metadata).toEqual({
+      approvalId: gone.id,
+      kind: "test.gone",
+      mode: "server_apply",
+      resultCode: "test_gone",
+    });
+    expect((await updatesOf(gone.id)).map((u) => [u.stream_id, u.payload.status])).toContainEqual([
+      `user:${samId}`,
+      "failed",
+    ]);
+    const cardRow = (
+      await su.query("select status, decision, version from app.message_cards where message_id = $1", [
+        gone.cardMessageId,
+      ])
+    ).rows[0];
+    expect(cardRow).toEqual({ status: "failed", decision: null, version: version + 1 });
+    const card = AgentCard.parse(await ok(sam.request("GET", `/api/v1/cards/${gone.cardMessageId}`)));
+    expect(card.approval).toMatchObject({ status: "failed", resultCode: "test_gone" });
+
+    // Once: closing again changes nothing; a decision on it is already decided.
+    expect(await close({ ids: [gone.id] })).toEqual([]);
+    expect(await auditsFor("approval.closed", gone.id)).toHaveLength(1);
+    const res = await decide(sam, gone.id, { outcome: "approved", actionHash: gone.actionHash });
+    expect(res.status).toBe(409);
+    expect(errorCode(res)).toBe("approval_already_decided");
+  });
+
+  it("by requesting agent: every pending request it asked for, nothing else", async () => {
+    const asKeeper = await request("test.gone", { card: { conversationId: dm, inReplyToMessageId: asked } });
+    const decided = await request("test.gone", { card: { conversationId: dm, inReplyToMessageId: asked } });
+    await ok(decide(sam, decided.id, { outcome: "denied", actionHash: decided.actionHash }));
+    stored.delete(asKeeper.resourceId);
+    stored.delete(decided.resourceId);
+    expect(await close({ requestedByAgentId: keeperId })).toEqual([asKeeper.id]);
+    expect((await rowOf(decided.id)).status).toBe("denied");
+  });
+});
