@@ -863,7 +863,9 @@ const PLUGIN_TOOLS = [
   "ocw_memory_propose",
   "ocw_agent_card",
   "ocw_board_card",
+  "ocw_connector_list",
   "ocw_connector_call",
+  "ocw_http_request",
 ];
 
 describe("memory tool (D-10): manifest, registration and the fake API", () => {

@@ -13,7 +13,9 @@
       "ocw_memory_propose",
       "ocw_agent_card",
       "ocw_board_card",
-      "ocw_connector_call"
+      "ocw_connector_list",
+      "ocw_connector_call",
+      "ocw_http_request"
     ]
   },
   "activation": {

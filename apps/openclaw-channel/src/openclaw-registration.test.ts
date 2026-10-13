@@ -88,7 +88,9 @@ describe("OpenClaw 2026.9.7 registration of the real entry", () => {
       "ocw_memory_propose",
       "ocw_agent_card",
       "ocw_board_card",
+      "ocw_connector_list",
       "ocw_connector_call",
+      "ocw_http_request",
     ];
     expect(tools("full")).toEqual(owned);
     expect(tools("tool-discovery")).toEqual(owned);
