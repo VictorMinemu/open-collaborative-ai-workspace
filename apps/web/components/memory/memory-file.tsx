@@ -304,7 +304,7 @@ function LoadedFile({
   const reading = (
     <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
       <div className={cn("mx-auto w-full max-w-[760px]", stacked ? "px-4 py-6" : "px-6 py-8")}>
-        <Markdown text={file.content} variant="document" resolveHref={resolveHref} />
+        <Markdown text={file.content} variant="document" headingLevel={2} resolveHref={resolveHref} />
         {path === "MEMORY.md" && file.content.trim() === MEMORY_ROOT_TEMPLATE.trim() ? (
           <p className="mt-2 text-muted-foreground text-sm">Nothing saved here yet.</p>
         ) : null}
