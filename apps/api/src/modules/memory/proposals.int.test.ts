@@ -730,6 +730,63 @@ describe("refusals before anything is stored (Task 2)", () => {
     expect(refused?.metadata).toEqual({ reason: "secret_detected", op: "create", eventId: t.eventId });
   });
 
+  /** The Agent Channel route the plugin calls (07.2-11), end to end. */
+  const cellPropose = async (eventId: string, extra: Json) => {
+    const res = await fetch(`${stack.baseUrl}/agent-channel/v1/memory/propose`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${CELL_TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ eventId, agentId: scoutId, ...extra }),
+    });
+    return { status: res.status, body: (await res.json()) as Json };
+  };
+
+  it("a secret in the bot's note refuses the proposal like one in the content: nothing stored, no approval, no card", async () => {
+    const t = await turn();
+    const before = await counts();
+    const key = ["sk", "ant", "api03", "Rk2Wq8Hn4Tz6Yc1Pb9Lm3Xv7Fj5"].join("-");
+    const res = await cellPropose(t.eventId, {
+      scope: scopeOf[A],
+      path: "note-secret.md",
+      op: "create",
+      content: "Plain note\n",
+      reason: `Sam pasted the key ${key} to keep`,
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toEqual({ refused: "secret_detected" });
+    expect(await counts()).toEqual(before);
+    const leaked = await su.query(
+      `select (select count(*)::int from app.memory_proposals where reason like $1)
+            + (select count(*)::int from app.messages where body like $1) as n`,
+      [`%${key}%`],
+    );
+    expect(leaked.rows[0].n).toBe(0);
+    const [refused] = (
+      await su.query(
+        "select metadata from app.audit_events where action = 'memory.proposal_refused' and metadata->>'eventId' = $1",
+        [t.eventId],
+      )
+    ).rows;
+    expect(refused?.metadata).toEqual({ reason: "secret_detected", op: "create", eventId: t.eventId });
+    expect(JSON.stringify(refused?.metadata)).not.toContain(key);
+  });
+
+  it("a clean note still goes through and shows on the card", async () => {
+    const t = await turn();
+    const res = await cellPropose(t.eventId, {
+      scope: scopeOf[A],
+      path: "note-clean.md",
+      op: "create",
+      content: "Plain note\n",
+      reason: "Sam asked to keep this note",
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toHaveProperty("approvalId");
+    const approvalId = res.body.approvalId as string;
+    expect((await proposalOf(approvalId))?.reason).toBe("Sam asked to keep this note");
+    const card = await cardFor(sam, (await approvalRow(approvalId)).card_message_id);
+    expect(card.fields).toContainEqual({ label: "Bot's note", value: "Sam asked to keep this note" });
+  });
+
   it("an unknown turn, another bot's turn and an unreadable unit are refused", async () => {
     const t = await turn();
     const base = { scope: scopeOf[A] as string, path: "x.md", op: "create" as const, content: "x\n" };

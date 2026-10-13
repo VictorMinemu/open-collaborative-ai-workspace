@@ -1,4 +1,5 @@
 import {
+  detectSensitive,
   hasBlockingFinding,
   MAX_TOOL_CALLS_PER_TURN,
   MEMORY_LIMITS,
@@ -165,8 +166,8 @@ async function oneHumanDm(tx: Tx, conversationId: string, userId: string): Promi
  * (scope, path) for the agent on behalf of the human (`denied`); personal-like memory only from the owner's one-person DM
  * (`dm_only`); the op against the live file (`create` on an existing path or `replace` on another
  * version → `version_conflict`; `replace` of a missing file → `not_found`); one tool call counted on the turn
- * (`cap_reached`); the pending cap per (agent, human) (`too_many_pending`); the scan of the added text (a secret →
- * `secret_detected`, nothing stored); the resulting size (`too_large`) and the scope's file limit (`scope_full`). Then
+ * (`cap_reached`); the pending cap per (agent, human) (`too_many_pending`); the scan of the added text and of the
+ * bot's note (a secret in either → `secret_detected`, nothing stored); the resulting size (`too_large`) and the scope's file limit (`scope_full`). Then
  * the proposal, its approval and the card mirroring it in the turn's conversation, in the caller's transaction.
  */
 export async function createMemoryProposal(
@@ -262,6 +263,11 @@ export async function createMemoryProposal(
     }
     const scan = prescan.scan;
     if (hasBlockingFinding(scan.findings)) return refuse("secret_detected");
+    // The bot's note shows on the platform-owned card ("Bot's note"): never a side channel for a secret. Layer 1 runs
+    // on the note as sent (before trimming and the length cap), so a secret cut by the cap is refused too.
+    if (input.reason && hasBlockingFinding(detectSensitive(input.reason).findings)) {
+      return refuse("secret_detected");
+    }
     if (Buffer.byteLength(scan.result, "utf8") > MEMORY_LIMITS.fileBytes) return refuse("too_large");
     if (!existing && (await liveFileCount(tx, scope.row.id)) >= MEMORY_LIMITS.filesPerScope) {
       return refuse("scope_full");
