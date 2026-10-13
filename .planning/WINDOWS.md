@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 98
+open_count: 101
 waived_count: 2
 fixed_count: 25
-total_count: 125
-last_updated: 2026-10-13T04:30:05.650Z
+total_count: 128
+last_updated: 2026-10-13T04:39:23.242Z
 ---
 
 # Broken Windows Ledger
@@ -140,6 +140,9 @@ last_updated: 2026-10-13T04:30:05.650Z
 | 123 | 07.2 | deviation | apps/openclaw-channel/src/memory-files-tool.ts |  | /memory/* Agent Channel routes exist only in the fake API until 07.2-11; the real API would 404 (no turn offers the tools yet) | open |  | 2026-10-13T04:30:05.478Z |  |
 | 124 | 07.2 | deviation | infra/openclaw |  | No memory scenario in the real-cell smoke yet; add it in 07.2-15 | open |  | 2026-10-13T04:30:05.563Z |  |
 | 125 | 07.2 | deviation | apps/openclaw-channel/src/agent-channel-protocol.ts |  | memoryFiles mirror uses the exact scopeKind enum: a new API scopeKind silently drops all files and falls back to legacy notes until the mirror is updated | open |  | 2026-10-13T04:30:05.650Z |  |
+| 126 | 07.2 | deviation | packages/contracts/src/sensitive-data.ts |  | detectSensitive returns unbounded spans while MemoryProposalView caps 200 spans / 50 findings; 07.2-09 must cap before building the view | open |  | 2026-10-13T04:39:23.084Z |  |
+| 127 | 07.2 | deviation | packages/contracts/src/sensitive-data.ts |  | False positives (warn): any bare 9-digit number starting 6-9 is a phone; git@github.com:org/repo is an email; Luhn accepts 0000 0000 0000 0000 | open |  | 2026-10-13T04:39:23.163Z |  |
+| 128 | 07.2 | deviation | packages/contracts/src/sensitive-data.ts |  | Keyed secrets (DB_PASSWORD=, Bearer, URL credentials): span and masked sample start at the key, so the UI highlight is wider than the value (no leak) | open |  | 2026-10-13T04:39:23.242Z |  |
 
 ````json
 [
@@ -1641,6 +1644,42 @@ last_updated: 2026-10-13T04:30:05.650Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-13T04:30:05.650Z",
+    "resolved_at": null
+  },
+  {
+    "id": 126,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "packages/contracts/src/sensitive-data.ts",
+    "line": null,
+    "description": "detectSensitive returns unbounded spans while MemoryProposalView caps 200 spans / 50 findings; 07.2-09 must cap before building the view",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:39:23.084Z",
+    "resolved_at": null
+  },
+  {
+    "id": 127,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "packages/contracts/src/sensitive-data.ts",
+    "line": null,
+    "description": "False positives (warn): any bare 9-digit number starting 6-9 is a phone; git@github.com:org/repo is an email; Luhn accepts 0000 0000 0000 0000",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:39:23.163Z",
+    "resolved_at": null
+  },
+  {
+    "id": 128,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "packages/contracts/src/sensitive-data.ts",
+    "line": null,
+    "description": "Keyed secrets (DB_PASSWORD=, Bearer, URL credentials): span and masked sample start at the key, so the UI highlight is wider than the value (no leak)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:39:23.242Z",
     "resolved_at": null
   }
 ]
