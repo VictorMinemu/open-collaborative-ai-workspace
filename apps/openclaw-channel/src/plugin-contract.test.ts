@@ -854,17 +854,31 @@ describe("tool gate against the fake Agent Channel API (HTTP)", () => {
   });
 });
 
+/** Every tool the plugin owns, in registration order (manifest `contracts.tools` and `registerFull`). */
+const PLUGIN_TOOLS = [
+  "ocw_memory_save",
+  "ocw_memory_list",
+  "ocw_memory_read",
+  "ocw_memory_write",
+  "ocw_memory_propose",
+  "ocw_agent_card",
+  "ocw_board_card",
+];
+
+// TEMP (07.2-07 Task 1): list, write and propose are registered by Task 2.
+const REGISTERED = new Set(["ocw_memory_save", "ocw_memory_read", "ocw_agent_card", "ocw_board_card"]);
+
 describe("memory tool (D-10): manifest, registration and the fake API", () => {
   const MEMORY = { untrustedOutput: false, sideEffecting: true };
 
-  it("the manifest declares ocw_memory_save, ocw_agent_card and ocw_board_card in contracts.tools (OpenClaw discovers tool ownership there)", () => {
+  it("the manifest declares ocw_memory_save, the four memory file tools, ocw_agent_card and ocw_board_card in contracts.tools (OpenClaw discovers tool ownership there)", () => {
     const manifest = JSON.parse(
       readFileSync(path.join(import.meta.dirname, "..", "openclaw.plugin.json"), "utf8"),
     ) as { contracts?: { tools?: string[] } };
-    expect(manifest.contracts?.tools).toEqual(["ocw_memory_save", "ocw_agent_card", "ocw_board_card"]);
+    expect(manifest.contracts?.tools).toEqual(PLUGIN_TOOLS);
   });
 
-  it("registerFull registers ocw_memory_save, ocw_agent_card and ocw_board_card (+ the breaker guard on gateway_start); the gate hooks come from registerCapabilities", () => {
+  it("registerFull registers every manifest tool (+ the breaker guard on gateway_start); the gate hooks come from registerCapabilities", () => {
     const hooks: string[] = [];
     const tools: Array<{ opts: { name: string } }> = [];
     const pluginApi = {
@@ -874,10 +888,10 @@ describe("memory tool (D-10): manifest, registration and the fake API", () => {
     const guard = createToolGuard({ client: () => null });
     registerFull(pluginApi as never, guard);
     expect(hooks).toEqual(["gateway_start"]);
-    expect(tools.map((t) => t.opts.name)).toEqual(["ocw_memory_save", "ocw_agent_card", "ocw_board_card"]);
+    expect(tools.map((t) => t.opts.name)).toEqual(PLUGIN_TOOLS.filter((t) => REGISTERED.has(t)));
     registerCapabilities(pluginApi as never, guard);
     expect(hooks).toEqual(["gateway_start", "before_tool_call", "after_tool_call"]);
-    expect(tools).toHaveLength(3);
+    expect(tools).toHaveLength(REGISTERED.size);
   });
 
   it("a save in an active DM turn reaches POST /memories with the event, the bot and the text only", async () => {
@@ -1271,5 +1285,187 @@ describe("marketplace executor (D-14): plugin.install.v1 / plugin.uninstall.v1 t
     api.publishMention(mention(1));
     await api.waitFor(() => api.messages.length === 1);
     expect(api.pluginReports).toEqual([]);
+  });
+});
+
+describe("memory files mirror parity (07.2-07: plugin ↔ packages/contracts memory.ts, agent-channel.ts, bot-capabilities.ts)", () => {
+  // Non-literal specifiers: the contracts package lives outside this package (and is not type-checked from here).
+  const contracts = (file: string) =>
+    new URL(`../../../packages/contracts/src/${file}`, import.meta.url).href;
+  type Parser = (s: string) => unknown;
+  type Schema = { safeParse: (v: unknown) => { success: boolean; data?: unknown } };
+  const load = async () => ({
+    memory: (await import(contracts("memory.ts"))) as {
+      parseMemoryPath: Parser;
+      parseMemoryFolder: Parser;
+      MEMORY_LIMITS: Record<string, number>;
+      MemoryScopeKind: { options: string[] };
+      MemoryPathError: { options: string[] };
+      MemoryProposalOp: { options: string[] };
+    },
+    channel: (await import(contracts("agent-channel.ts"))) as Record<string, Schema> & {
+      MemoryToolRefusal: { options: string[] };
+    },
+    caps: (await import(contracts("bot-capabilities.ts"))) as {
+      TurnMemoryFile: Schema;
+      TurnContext: Schema;
+      BUILTIN_TOOLS: Record<string, string>;
+    },
+    cards: (await import(contracts("agent-cards.ts"))) as { AGENT_CARD_ROUTE_PREFIXES: readonly string[] },
+  });
+
+  const nine = "a/b/c/d/e/f/g/h/i.md";
+  const long = `${["x".repeat(60), "y".repeat(60), "z".repeat(60), "w".repeat(60)].join("/")}/${"v".repeat(9)}.md`;
+  /** The 07.2-01 accept / reject table, plus NFD input and folder forms. */
+  const PATHS = [
+    "MEMORY.md",
+    "clients/acme.md",
+    "people/Ana Pérez.md",
+    "a/b/c/d/e/f/g/h.md",
+    "topics/2026-10_q4.md",
+    "café.md".normalize("NFD"),
+    "",
+    "/a.md",
+    "a\\b.md",
+    "a/../b.md",
+    "./a.md",
+    "../x.md",
+    ".../x.md",
+    "%2e%2e/a.md",
+    "a%20b.md",
+    "a//b.md",
+    "a/",
+    " a.md",
+    "a /b.md",
+    "a\u0000.md",
+    "a\n.md",
+    "a‮b.md",
+    "a/b:c.md",
+    "a/<b>.md",
+    `${"s".repeat(62)}.md`,
+    nine,
+    long,
+    "notes.txt",
+    "notes.MD",
+    ".md",
+    "a/b.txt",
+    "hr/",
+    "hr/payroll/",
+    "hr",
+    "/hr/",
+    "../",
+    "hr//",
+    "a/b/c/d/e/f/g/",
+    "a/b/c/d/e/f/g/h/",
+  ];
+
+  it("parseMemoryPath and parseMemoryFolder return exactly what contracts return", async () => {
+    const { memory } = await load();
+    const { parseMemoryPath, parseMemoryFolder } = await import("./agent-channel-protocol.js");
+    for (const p of PATHS) {
+      expect(parseMemoryPath(p), JSON.stringify(p)).toEqual(memory.parseMemoryPath(p));
+      expect(parseMemoryFolder(p), JSON.stringify(p)).toEqual(memory.parseMemoryFolder(p));
+    }
+  });
+
+  it("limits, scope kinds, path errors, proposal ops, refusals and the /memory card route are the contracts' lists", async () => {
+    const { memory, channel, caps, cards } = await load();
+    const m = await import("./agent-channel-protocol.js");
+    for (const [k, v] of Object.entries(m.MEMORY_LIMITS)) expect(v, k).toBe(memory.MEMORY_LIMITS[k]);
+    expect([...m.MEMORY_SCOPE_KINDS]).toEqual(memory.MemoryScopeKind.options);
+    expect([...m.MEMORY_PATH_ERRORS]).toEqual(memory.MemoryPathError.options);
+    expect([...m.MEMORY_PROPOSAL_OPS]).toEqual(memory.MemoryProposalOp.options);
+    expect([...m.MEMORY_TOOL_REFUSALS]).toEqual(channel.MemoryToolRefusal.options);
+    expect([...m.AGENT_CARD_ROUTE_PREFIXES]).toContain("/memory");
+    expect([...m.AGENT_CARD_ROUTE_PREFIXES]).toEqual([...cards.AGENT_CARD_ROUTE_PREFIXES]);
+    const { MEMORY_FILE_TOOLS } = await import("./memory-files-tool.js");
+    expect([...MEMORY_FILE_TOOLS]).toEqual([
+      caps.BUILTIN_TOOLS.memoryList,
+      caps.BUILTIN_TOOLS.memoryRead,
+      caps.BUILTIN_TOOLS.memoryWrite,
+      caps.BUILTIN_TOOLS.memoryPropose,
+    ]);
+  });
+
+  const E = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
+  const A = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e60";
+  const S = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e61";
+
+  /** Same verdict (and, when accepted, the same canonical output) from the mirror and the contract. */
+  async function expectSameVerdicts(mirror: Schema, contract: Schema, samples: unknown[]) {
+    for (const v of samples) {
+      const a = mirror.safeParse(v);
+      const b = contract.safeParse(v);
+      expect(a.success, JSON.stringify(v)?.slice(0, 200)).toBe(b.success);
+      if (a.success && b.success) expect(a.data).toEqual(b.data);
+    }
+  }
+
+  it("read request and response: the mirror accepts and refuses what the contract does", async () => {
+    const { channel } = await load();
+    const m = await import("./agent-channel-protocol.js");
+    const base = { eventId: E, agentId: A };
+    await expectSameVerdicts(m.AgentChannelMemoryRead, channel.AgentChannelMemoryRead as Schema, [
+      { ...base, scope: "personal", path: "MEMORY.md" },
+      { ...base, scope: "agent", path: "clients/acme.md" },
+      { ...base, scope: S, path: "café.md".normalize("NFD") },
+      { ...base, scope: "team", path: "MEMORY.md" },
+      { ...base, scope: "personal", path: "../x.md" },
+      { ...base, scope: "personal", path: "a/b.txt" },
+      { ...base, scope: "personal" },
+      { ...base, path: "MEMORY.md" },
+      { ...base, scope: "personal", path: "MEMORY.md", userId: S },
+      { ...base, scope: "personal", path: "MEMORY.md", ownerUserId: S },
+    ]);
+    // Every response the contract accepts is read by the mirror as the same file or refusal.
+    for (const v of [
+      { file: { path: "MEMORY.md", version: 3, content: "# Memory\n" } },
+      ...m.MEMORY_TOOL_REFUSALS.map((refused) => ({ refused })),
+    ]) {
+      expect(channel.AgentChannelMemoryReadResponse?.safeParse(v).success, JSON.stringify(v)).toBe(true);
+      expect(m.AgentChannelMemoryReadResponse.parse(v)).toEqual(v);
+    }
+  });
+
+  it("TurnContext.memoryFiles: the mirror keeps what the contract accepts and drops (never fails the turn on) the rest", async () => {
+    const { caps } = await load();
+    const m = await import("./agent-channel-protocol.js");
+    const file = {
+      scopeKind: "personal",
+      scopeId: S,
+      path: "MEMORY.md",
+      version: 4,
+      content: "- likes tea",
+      truncated: false,
+    };
+    await expectSameVerdicts(m.TurnMemoryFile, caps.TurnMemoryFile, [
+      file,
+      { ...file, scopeKind: "agent", truncated: true },
+      { ...file, scopeKind: "team" },
+      { ...file, version: 0 },
+      { ...file, path: "../MEMORY.md" },
+      { ...file, content: "x".repeat(8_192) },
+      { ...file, content: "x".repeat(8_193) },
+      { ...file, content: "é".repeat(4_097) },
+      { ...file, truncated: undefined },
+    ]);
+    const turn = {
+      tools: [],
+      toolFlags: {},
+      memory: [],
+      now: null,
+      maxToolCalls: 8,
+      maxWebCalls: 5,
+    };
+    expect(caps.TurnContext.safeParse({ ...turn, memoryFiles: [file] }).success).toBe(true);
+    expect(m.TurnContext.parse({ ...turn, memoryFiles: [file] }).memoryFiles).toEqual([file]);
+    // The contract refuses a third file or a bad one; the mirror drops the list and keeps the turn.
+    for (const bad of [[file, file, file], [{ ...file, scopeKind: "team" }], "nope"]) {
+      expect(caps.TurnContext.safeParse({ ...turn, memoryFiles: bad }).success).toBe(false);
+      const parsed = m.TurnContext.safeParse({ ...turn, memoryFiles: bad });
+      expect(parsed.success).toBe(true);
+      expect(parsed.data?.memoryFiles).toBeUndefined();
+    }
+    expect(m.TurnContext.parse(turn).memoryFiles).toBeUndefined();
   });
 });

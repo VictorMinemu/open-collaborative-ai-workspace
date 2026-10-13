@@ -5,7 +5,15 @@
   "categories": ["channels"],
   "channels": ["ocw"],
   "contracts": {
-    "tools": ["ocw_memory_save", "ocw_agent_card", "ocw_board_card"]
+    "tools": [
+      "ocw_memory_save",
+      "ocw_memory_list",
+      "ocw_memory_read",
+      "ocw_memory_write",
+      "ocw_memory_propose",
+      "ocw_agent_card",
+      "ocw_board_card"
+    ]
   },
   "activation": {
     "onStartup": true

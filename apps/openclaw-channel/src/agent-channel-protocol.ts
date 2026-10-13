@@ -16,6 +16,9 @@
  *   POST /tool-calls/:id/result ← AgentChannelToolCallResult (outcome only, never content)
  *   POST /memories             ← AgentChannelMemorySave → AgentChannelMemorySaveResponse (ocw_memory_save;
  *                                owner = the human of the delivered turn; 404/409 with the refusal code)
+ *   POST /memory/list|read|write|propose ← AgentChannelMemory{List,Read,Write,Propose} → 200 with the result or
+ *                                `{refused: MemoryToolRefusal}` (ocw_memory_list|read|write|propose, 07.2; owner = the
+ *                                human of the delivered turn, never a field)
  *   POST /cards                ← AgentChannelPostCard → AgentChannelPostCardResponse (ocw_agent_card, 06-14)
  *   PATCH /cards/:messageId    ← AgentChannelPatchCard → AgentChannelPatchCardResponse (posting agent only,
  *                                optimistic version: 409 card_version_conflict)
@@ -91,6 +94,252 @@ export type TurnNow = z.infer<typeof TurnNow>;
 
 export const TurnMemoryItem = z.object({ id: Id, text: z.string(), createdAt: z.string() });
 
+// ---------------------------------------------------------------- memory files (07.2-07, mirror of contracts/memory.ts
+// and the memory-file schemas of contracts/agent-channel.ts; parity tests in plugin-contract.test.ts). The plugin only
+// pre-validates: the API decides every call (turn, tool, resolver agent ∩ human, audience, path rules) and binds the
+// human to the stored turn, so no body carries an owner or user id (strict objects refuse one).
+
+export const MEMORY_LIMITS = {
+  fileBytes: 262_144,
+  pathChars: 255,
+  segmentChars: 64,
+  depth: 8,
+  turnFileBytes: 8_192,
+  reasonChars: 280,
+} as const;
+
+export const MEMORY_SCOPE_KINDS = ["personal", "agent", "unit", "org"] as const;
+export const MemoryScopeKind = z.enum(MEMORY_SCOPE_KINDS);
+
+export const MEMORY_PATH_ERRORS = [
+  "empty",
+  "absolute",
+  "backslash",
+  "percent",
+  "control",
+  "dot_segment",
+  "empty_segment",
+  "trailing_slash",
+  "segment_space",
+  "segment_charset",
+  "segment_length",
+  "depth",
+  "length",
+  "extension",
+] as const;
+export type MemoryPathError = (typeof MEMORY_PATH_ERRORS)[number];
+export type MemoryPathResult = { ok: true; path: string } | { ok: false; reason: MemoryPathError };
+export type MemoryFolderResult =
+  | { ok: true; folder: string }
+  | { ok: false; reason: MemoryPathError | "missing_slash" };
+
+const MEMORY_CONTROL = /[\p{Cc}\p{Cf}]/u;
+const MEMORY_SEGMENT_CHARSET = /^[\p{L}\p{N} ._-]+$/u;
+const MEMORY_DOTS_ONLY = /^\.+$/;
+const codePoints = (s: string) => [...s].length;
+
+function checkMemoryWhole(s: string): MemoryPathError | null {
+  if (s.length === 0) return "empty";
+  if (MEMORY_CONTROL.test(s)) return "control";
+  if (s.startsWith("/")) return "absolute";
+  if (s.includes("\\")) return "backslash";
+  if (s.includes("%")) return "percent";
+  return null;
+}
+
+function checkMemorySegments(segments: readonly string[]): MemoryPathError | null {
+  for (const seg of segments) {
+    if (seg.length === 0) return "empty_segment";
+    if (MEMORY_DOTS_ONLY.test(seg)) return "dot_segment";
+    if (seg.startsWith(" ") || seg.endsWith(" ")) return "segment_space";
+    if (!MEMORY_SEGMENT_CHARSET.test(seg)) return "segment_charset";
+    if (codePoints(seg) > MEMORY_LIMITS.segmentChars) return "segment_length";
+  }
+  return null;
+}
+
+/** Same rule as `parseMemoryPath` in packages/contracts/src/memory.ts: NFC, reject (never repair), first reason. */
+export function parseMemoryPath(input: string): MemoryPathResult {
+  const s = input.normalize("NFC");
+  const whole = checkMemoryWhole(s);
+  if (whole) return { ok: false, reason: whole };
+  if (s.endsWith("/")) return { ok: false, reason: "trailing_slash" };
+  const segments = s.split("/");
+  const seg = checkMemorySegments(segments);
+  if (seg) return { ok: false, reason: seg };
+  if (segments.length > MEMORY_LIMITS.depth) return { ok: false, reason: "depth" };
+  if (codePoints(s) > MEMORY_LIMITS.pathChars) return { ok: false, reason: "length" };
+  const name = segments[segments.length - 1] ?? "";
+  if (!name.endsWith(".md") || name.length <= ".md".length) return { ok: false, reason: "extension" };
+  return { ok: true, path: s };
+}
+
+/** Same rule as `parseMemoryFolder` in packages/contracts/src/memory.ts: ends in `/`, at most 7 segments. */
+export function parseMemoryFolder(input: string): MemoryFolderResult {
+  const s = input.normalize("NFC");
+  const whole = checkMemoryWhole(s);
+  if (whole) return { ok: false, reason: whole };
+  if (!s.endsWith("/")) return { ok: false, reason: "missing_slash" };
+  const segments = s.slice(0, -1).split("/");
+  const seg = checkMemorySegments(segments);
+  if (seg) return { ok: false, reason: seg };
+  if (segments.length > MEMORY_LIMITS.depth - 1) return { ok: false, reason: "depth" };
+  if (codePoints(s) > MEMORY_LIMITS.pathChars) return { ok: false, reason: "length" };
+  return { ok: true, folder: s };
+}
+
+function memoryPathSchema<R extends { ok: true } | { ok: false; reason: string }>(parse: (s: string) => R) {
+  return z
+    .string()
+    .max(1024)
+    .overwrite((s) => s.normalize("NFC"))
+    .superRefine((s, ctx) => {
+      const r = parse(s);
+      if (!r.ok) ctx.addIssue({ code: "custom", message: (r as { reason: string }).reason });
+    });
+}
+
+export const MemoryPath = memoryPathSchema(parseMemoryPath);
+export const MemoryFolder = memoryPathSchema(parseMemoryFolder);
+
+const utf8Bytes = (s: string) => new TextEncoder().encode(s).length;
+export const MemoryContent = z.string().refine((s) => utf8Bytes(s) <= MEMORY_LIMITS.fileBytes, {
+  message: "memory_file_too_large",
+});
+
+/** A scope id from `ocw_memory_list` (a UUID, as in contracts), or the turn's personal / the agent's own scope. */
+export const MemoryToolScope = z.union([z.uuid(), z.literal("personal"), z.literal("agent")]);
+export type MemoryToolScope = z.infer<typeof MemoryToolScope>;
+
+export const MEMORY_TOOL_REFUSALS = [
+  "unknown_turn",
+  "not_in_turn",
+  "memory_off",
+  "tainted",
+  "cap_reached",
+  "dm_only",
+  "not_found",
+  "denied",
+  "audience_too_wide",
+  "own_scope_only",
+  "shared_scope_only",
+  "version_conflict",
+  "secret_detected",
+  "path_invalid",
+  "scope_full",
+  "too_large",
+  "too_many_pending",
+] as const;
+export const MemoryToolRefusal = z.enum(MEMORY_TOOL_REFUSALS);
+export type MemoryToolRefusal = z.infer<typeof MemoryToolRefusal>;
+
+export const MEMORY_PROPOSAL_OPS = ["create", "replace", "append"] as const;
+
+/** POST /memory/list: no scope = the scopes the turn may read; a scope = its files (optionally under a folder). */
+export const AgentChannelMemoryList = z.strictObject({
+  eventId: Id,
+  agentId: Id,
+  scope: MemoryToolScope.optional(),
+  folder: MemoryFolder.optional(),
+});
+export type AgentChannelMemoryList = z.infer<typeof AgentChannelMemoryList>;
+
+/** POST /memory/read. */
+export const AgentChannelMemoryRead = z.strictObject({
+  eventId: Id,
+  agentId: Id,
+  scope: MemoryToolScope,
+  path: MemoryPath,
+});
+export type AgentChannelMemoryRead = z.infer<typeof AgentChannelMemoryRead>;
+
+/** POST /memory/write: the agent's own scopes only; `replace` names the version it read. */
+export const AgentChannelMemoryWrite = z.strictObject({
+  eventId: Id,
+  agentId: Id,
+  scope: z.enum(["personal", "agent"]),
+  path: MemoryPath,
+  mode: z.enum(["replace", "append"]),
+  content: MemoryContent,
+  expectedVersion: z.number().int().positive().optional(),
+});
+export type AgentChannelMemoryWrite = z.infer<typeof AgentChannelMemoryWrite>;
+
+/** POST /memory/propose: a change to a shared scope a person approves and the server applies. */
+export const AgentChannelMemoryPropose = z.strictObject({
+  eventId: Id,
+  agentId: Id,
+  scope: MemoryToolScope,
+  path: MemoryPath,
+  op: z.enum(MEMORY_PROPOSAL_OPS),
+  content: MemoryContent,
+  baseVersion: z.number().int().positive().optional(),
+  reason: z.string().trim().min(1).max(MEMORY_LIMITS.reasonChars).optional(),
+});
+export type AgentChannelMemoryPropose = z.infer<typeof AgentChannelMemoryPropose>;
+
+/**
+ * Responses: a refusal (200 `{refused}`) or the result. The refusal stays a short string here so a newer API reason is
+ * still read as a refusal (the tool answers a neutral sentence for it), never as an empty result.
+ */
+const MemoryToolRefused = z.strictObject({ refused: z.string().min(1).max(64) });
+
+export const MemoryScopeView = z
+  .object({ id: Id, kind: z.string(), label: z.string(), viewerCan: z.array(z.string()).default([]) })
+  .passthrough();
+export type MemoryScopeView = z.infer<typeof MemoryScopeView>;
+
+export const MemoryFileMetaView = z
+  .object({ path: z.string(), version: z.number().int(), bytes: z.number().int().nonnegative().optional() })
+  .passthrough();
+export type MemoryFileMetaView = z.infer<typeof MemoryFileMetaView>;
+
+export const AgentChannelMemoryListResponse = z.union([
+  MemoryToolRefused,
+  z.object({ scopes: z.array(MemoryScopeView).optional(), files: z.array(MemoryFileMetaView).optional() }),
+]);
+export type AgentChannelMemoryListResponse = z.infer<typeof AgentChannelMemoryListResponse>;
+
+export const AgentChannelMemoryReadResponse = z.union([
+  MemoryToolRefused,
+  z.object({ file: z.object({ path: z.string(), version: z.number().int(), content: z.string() }) }),
+]);
+export type AgentChannelMemoryReadResponse = z.infer<typeof AgentChannelMemoryReadResponse>;
+
+export const AgentChannelMemoryWriteResponse = z.union([
+  MemoryToolRefused,
+  z.object({ fileId: Id, version: z.number().int() }),
+]);
+export type AgentChannelMemoryWriteResponse = z.infer<typeof AgentChannelMemoryWriteResponse>;
+
+export const MemoryFindingView = z
+  .object({ kind: z.string(), count: z.number().int().nonnegative() })
+  .passthrough();
+
+export const AgentChannelMemoryProposeResponse = z.union([
+  MemoryToolRefused,
+  z.object({
+    approvalId: Id,
+    findings: z.array(MemoryFindingView),
+    readerCount: z.number().int().nonnegative(),
+  }),
+]);
+export type AgentChannelMemoryProposeResponse = z.infer<typeof AgentChannelMemoryProposeResponse>;
+
+/**
+ * A `MEMORY.md` the API put into the turn (the personal one only in a one-human DM, the bot's own one), cut to 8 KiB
+ * with `truncated` set. Same shape as `TurnMemoryFile` in packages/contracts/src/bot-capabilities.ts.
+ */
+export const TurnMemoryFile = z.object({
+  scopeKind: MemoryScopeKind,
+  scopeId: Id,
+  path: MemoryPath,
+  version: z.number().int().positive(),
+  content: z.string().refine((s) => utf8Bytes(s) <= MEMORY_LIMITS.turnFileBytes, { message: "too large" }),
+  truncated: z.boolean(),
+});
+export type TurnMemoryFile = z.infer<typeof TurnMemoryFile>;
+
 /**
  * `agent.mention.v1.turn`: exactly what this bot may do for this human on this turn (decided by the API).
  * A mention without it runs with no tools (fail closed, `EMPTY_TURN`).
@@ -111,6 +360,11 @@ export const TurnContext = z.object({
   maxWebCalls: z.number().int().nonnegative(),
   /** AI chats only (06-10). Never enables a tool; an invalid list is dropped, the turn is kept. */
   withheld: z.array(TurnWithheld).max(64).optional().catch(undefined),
+  /**
+   * 07.2: the turn's memory files (the personal `MEMORY.md` only in a one-human DM, the bot's notebook). Additive: an
+   * older API sends none (the legacy `memory` notes apply); an invalid list is dropped, the turn is kept.
+   */
+  memoryFiles: z.array(TurnMemoryFile).max(2).optional().catch(undefined),
 });
 export type TurnContext = z.infer<typeof TurnContext>;
 
