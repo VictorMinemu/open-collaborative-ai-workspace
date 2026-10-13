@@ -16,7 +16,7 @@ import { registerUnitRoutes } from "./units";
 export { listMembers, memberDirectory } from "./members";
 
 export { AuthzDeniedError } from "./permissions/errors";
-export { loadPrincipalFacts, type PrincipalRef } from "./permissions/facts";
+export { loadPrincipalFacts, loadPrincipalFactsMany, type PrincipalRef } from "./permissions/facts";
 export {
   type AgentFacts,
   agentResource,
@@ -25,7 +25,9 @@ export {
   channelResource,
   deviceResource,
   invitationResource,
+  type MemoryScopeFacts,
   memberResource,
+  memoryResource,
   moduleTargetResource,
   orgResource,
   unitResource,

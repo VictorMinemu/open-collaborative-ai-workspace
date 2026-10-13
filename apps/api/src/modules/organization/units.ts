@@ -4,7 +4,9 @@ import {
   CreateUnitRequest,
   EventTypes,
   IdParams,
+  MEMORY_ROOT_FILE,
   MoveUnitRequest,
+  memoryPathKey,
   Ok,
   type OrgRole,
   OrgUnit,
@@ -18,7 +20,17 @@ import {
   UnitRole,
   UpdateUnitMemberRequest,
 } from "@ocw/contracts";
-import { agents, orgMembers, orgUnits, permissionRules, type Tx, tenantOf, unitMemberships } from "@ocw/db";
+import {
+  agents,
+  memoryFiles,
+  memoryScopes,
+  orgMembers,
+  orgUnits,
+  permissionRules,
+  type Tx,
+  tenantOf,
+  unitMemberships,
+} from "@ocw/db";
 import { and, asc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { type App, type Core, tenant } from "../../core";
@@ -352,6 +364,23 @@ export function registerUnitRoutes(app: App, core: Core, perms: PermissionServic
           .where(and(eq(agents.unitId, unit.id), isNull(agents.deletedAt)))
           .limit(1);
         if (bot) throw conflict("Move or delete the bots of this unit first", "unit_has_bots");
+        // MEM-01: the unit's memory scope cascades with the unit, so team memory is never dropped silently: anything
+        // beyond the untouched root file (version 1, written by the system) blocks the delete. Read directly: the
+        // memory module sits above this one.
+        const [memory] = await tx
+          .select({ id: memoryFiles.id })
+          .from(memoryFiles)
+          .innerJoin(memoryScopes, eq(memoryScopes.id, memoryFiles.scopeId))
+          .where(
+            and(
+              eq(memoryScopes.kind, "unit"),
+              eq(memoryScopes.unitId, unit.id),
+              isNull(memoryFiles.deletedAt),
+              sql`not (lower(${memoryFiles.path}) = ${memoryPathKey(MEMORY_ROOT_FILE)} and ${memoryFiles.version} = 1 and ${memoryFiles.updatedByKind} = 'system')`,
+            ),
+          )
+          .limit(1);
+        if (memory) throw conflict("Move or delete this unit's memory files first", "unit_has_memory");
         // Deleted personas keep their history, not their unit: release the reference.
         await tx
           .update(agents)
