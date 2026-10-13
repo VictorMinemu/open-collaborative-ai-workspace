@@ -8,7 +8,7 @@ import {
 } from "@ocw/contracts";
 import { ArrowLeft, ChevronRight, FileText, Lock, RotateCcw } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { PrincipalAvatar } from "@/components/chat/principal-avatar";
 import { EmptyState } from "@/components/common/empty-state";
 import { Markdown } from "@/components/markdown/markdown";
@@ -24,7 +24,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
 import { errorMessage, isApiError } from "@/lib/api";
 import { useMemoryFile } from "@/lib/memory-queries";
-import { memoryHref } from "@/lib/memory-tree";
+import { memoryHref, resolveMemoryLink } from "@/lib/memory-tree";
 import { cn, relativeTime } from "@/lib/utils";
 import { scopeIcon, scopeTag } from "./memory-tree";
 
@@ -80,6 +80,15 @@ export function MemoryFile({
       headingRef.current?.focus({ preventScroll: true });
     }
   }, [file, stacked]);
+
+  // Relative `.md` links that stay inside the scope open in the viewer; the rest renders as text (UI-SPEC "Read mode").
+  const resolveHref = useCallback(
+    (href: string) => {
+      const target = path ? resolveMemoryLink(path, href) : null;
+      return target ? memoryHref(scopeId, target) : null;
+    },
+    [scopeId, path],
+  );
 
   const notFound = path === null || isApiError(q.error, 404) || isApiError(q.error, 403);
   const name = path ? (path.split("/").pop() ?? path) : "";
@@ -149,7 +158,7 @@ export function MemoryFile({
       <MetaRow file={file} scope={scope} stacked={stacked} canWrite={canWrite} />
       <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
         <div className={cn("mx-auto w-full max-w-[760px]", stacked ? "px-4 py-6" : "px-6 py-8")}>
-          <Markdown text={file.content} variant="document" />
+          <Markdown text={file.content} variant="document" resolveHref={resolveHref} />
           {templateOnly ? (
             <p className="mt-2 text-muted-foreground text-sm">Nothing saved here yet.</p>
           ) : null}

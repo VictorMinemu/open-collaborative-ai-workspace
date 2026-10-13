@@ -21,7 +21,8 @@ import {
   scopeNodeId,
 } from "@/lib/memory-tree";
 import { cn } from "@/lib/utils";
-import { focusHeadingNext, MemoryFile } from "./memory-file";
+import { FileSkeleton, focusHeadingNext, MemoryFile } from "./memory-file";
+import { MemorySearch } from "./memory-search";
 import { MemoryTree, type OpenVia, useMemoryTreeState } from "./memory-tree";
 
 /**
@@ -103,12 +104,28 @@ export function MemoryShell({ scopeId, segments }: { scopeId?: string; segments?
   const reveal = useMemoryTreeState((s) => s.reveal);
   const requestFocus = useMemoryTreeState((s) => s.requestFocus);
 
-  // Deep links expand their ancestors; on the phone a scope link also brings that scope's row into focus.
+  // Deep links expand their ancestors (desktop: also the scope whose MEMORY.md opens by default); on the phone a scope
+  // link also brings that scope's row into focus.
   useEffect(() => {
-    if (!scopeId) return;
-    reveal(memoryAncestorIds(scopeId, urlPath ?? undefined));
-    if (stacked && !hasPath) requestFocus(scopeNodeId(scopeId));
-  }, [scopeId, urlPath, stacked, hasPath, reveal, requestFocus]);
+    if (!fileScopeId) return;
+    reveal(memoryAncestorIds(fileScopeId, urlPath ?? undefined));
+    if (stacked && !hasPath) requestFocus(scopeNodeId(fileScopeId));
+  }, [fileScopeId, urlPath, stacked, hasPath, reveal, requestFocus]);
+
+  // `/` (outside a text field) focuses the search field (UI-SPEC "Interaction Contract › Tree").
+  const searchRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
+      const t = e.target as HTMLElement | null;
+      if (t?.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"]')) return;
+      if (!searchRef.current) return;
+      e.preventDefault();
+      searchRef.current.focus();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // Phone Back returns to the tree with the file's row focused.
   const fromTree = useRef(false);
@@ -192,12 +209,24 @@ export function MemoryShell({ scopeId, segments }: { scopeId?: string; segments?
       />
     ) : null;
 
+  const search = (
+    <MemorySearch
+      scopes={scopes ?? []}
+      currentScopeId={hasPath ? (scopeId ?? null) : null}
+      selected={selected}
+      stacked={stacked}
+      inputRef={searchRef}
+    >
+      {treeBody}
+    </MemorySearch>
+  );
+
   if (stacked) {
     return (
       <div data-testid="memory-shell" data-layout={layout} className="flex min-w-0 flex-1 flex-col">
         {file ?? (
           <div data-testid="memory-tree-screen" className="flex min-h-0 flex-1 flex-col">
-            <div className="scrollbar-thin relative min-h-0 flex-1 overflow-y-auto px-2 py-2">{treeBody}</div>
+            {search}
             <ProposalsRow stacked />
           </div>
         )}
@@ -217,10 +246,12 @@ export function MemoryShell({ scopeId, segments }: { scopeId?: string; segments?
             Memory
           </h2>
         </div>
-        <div className="scrollbar-thin relative min-h-0 flex-1 overflow-y-auto px-2 pb-3">{treeBody}</div>
+        {search}
         <ProposalsRow stacked={false} />
       </aside>
-      <div className="flex min-w-0 flex-1 flex-col">{file}</div>
+      <div className="flex min-w-0 flex-1 flex-col">
+        {file ?? (scopes ? null : <FileSkeleton stacked={false} />)}
+      </div>
     </div>
   );
 }

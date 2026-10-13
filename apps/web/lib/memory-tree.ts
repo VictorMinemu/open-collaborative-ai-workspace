@@ -158,3 +158,68 @@ export function scopeAccessibleName(scope: MemoryScope): string {
       return `${scope.label}, memory for everyone`;
   }
 }
+
+const SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+
+/**
+ * A link inside a memory file, resolved against that file's folder: a relative `.md` reference that stays inside the
+ * scope → the normalized path; anything else (external, absolute, fragment-only, above the scope root, not `.md`,
+ * invalid) → null, and the renderer decides (external links keep `safeUrl`, the rest renders as text).
+ */
+export function resolveMemoryLink(currentPath: string, href: string): string | null {
+  const raw = href.trim();
+  if (raw === "" || SCHEME.test(raw) || /^[/\\#?]/u.test(raw)) return null;
+  let target = raw.split(/[?#]/u)[0] ?? "";
+  try {
+    target = decodeURIComponent(target);
+  } catch {
+    return null;
+  }
+  const out = currentPath.split("/").slice(0, -1);
+  for (const seg of target.split("/")) {
+    if (seg === ".") continue;
+    if (seg === "..") {
+      if (out.length === 0) return null;
+      out.pop();
+      continue;
+    }
+    out.push(seg);
+  }
+  const parsed = parseMemoryPath(out.join("/"));
+  return parsed.ok ? parsed.path : null;
+}
+
+export interface TextRun {
+  text: string;
+  mark: boolean;
+}
+
+/** One code point folded to one UTF-16 unit: lower case, without its diacritics. */
+const foldChar = (c: string) => (c.normalize("NFD")[0] ?? c).toLowerCase()[0] ?? c;
+
+/**
+ * Marks the query's words inside a path, for hits the API found by path words only (their snippet has no marks,
+ * 07.2-16). Case- and accent-insensitive; words shorter than 2 characters are ignored.
+ */
+export function pathMarks(path: string, q: string): TextRun[] {
+  const chars = [...path];
+  const hay = chars.map(foldChar).join("");
+  const marked = chars.map(() => false);
+  const words = q
+    .split(/[\s"'()|+-]+/u)
+    .map((w) => [...w].map(foldChar).join(""))
+    .filter((w) => w.length >= 2);
+  for (const w of words) {
+    for (let at = hay.indexOf(w); at >= 0; at = hay.indexOf(w, at + w.length)) {
+      for (let i = at; i < at + w.length; i++) marked[i] = true;
+    }
+  }
+  const runs: TextRun[] = [];
+  chars.forEach((c, i) => {
+    const mark = marked[i] ?? false;
+    const last = runs[runs.length - 1];
+    if (last && last.mark === mark) last.text += c;
+    else runs.push({ text: c, mark });
+  });
+  return runs;
+}

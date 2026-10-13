@@ -8,6 +8,8 @@ import {
   memoryAncestorIds,
   memoryHref,
   pathFromSegments,
+  pathMarks,
+  resolveMemoryLink,
   scopeAccessibleName,
   scopeNodeId,
 } from "./memory-tree";
@@ -185,5 +187,50 @@ describe("scopeAccessibleName", () => {
     expect(scopeAccessibleName(scope(2, "unit", "Ventas", "team"))).toBe("Ventas, team memory");
     expect(scopeAccessibleName(scope(3, "unit", "Sales", "department"))).toBe("Sales, department memory");
     expect(scopeAccessibleName(scope(1, "org", "Organization"))).toBe("Organization, memory for everyone");
+  });
+});
+
+describe("resolveMemoryLink", () => {
+  it("resolves relative .md links against the current file's folder", () => {
+    expect(resolveMemoryLink("policies/expenses.md", "vacations.md")).toBe("policies/vacations.md");
+    expect(resolveMemoryLink("policies/expenses.md", "./vacations.md")).toBe("policies/vacations.md");
+    expect(resolveMemoryLink("policies/expenses.md", "../MEMORY.md")).toBe("MEMORY.md");
+    expect(resolveMemoryLink("MEMORY.md", "clients/acme.md")).toBe("clients/acme.md");
+    expect(resolveMemoryLink("a/b/c.md", "../x/y.md#top")).toBe("a/x/y.md");
+    expect(resolveMemoryLink("clients/acme.md", "people/Ana%20P%C3%A9rez.md")).toBe(
+      "clients/people/Ana Pérez.md",
+    );
+  });
+
+  it("leaves everything else to the renderer (null)", () => {
+    expect(resolveMemoryLink("policies/expenses.md", "../../x.md")).toBeNull();
+    expect(resolveMemoryLink("policies/expenses.md", "https://x.org")).toBeNull();
+    expect(resolveMemoryLink("policies/expenses.md", "mailto:a@b.c")).toBeNull();
+    expect(resolveMemoryLink("policies/expenses.md", "javascript:alert(1)")).toBeNull();
+    expect(resolveMemoryLink("policies/expenses.md", "notes.txt")).toBeNull();
+    expect(resolveMemoryLink("policies/expenses.md", "/abs.md")).toBeNull();
+    expect(resolveMemoryLink("policies/expenses.md", "//evil.example/x.md")).toBeNull();
+    expect(resolveMemoryLink("policies/expenses.md", "#section")).toBeNull();
+    expect(resolveMemoryLink("policies/expenses.md", "..\\x.md")).toBeNull();
+    expect(resolveMemoryLink("policies/expenses.md", "folder/")).toBeNull();
+    expect(resolveMemoryLink("policies/expenses.md", "%E0%A4%A.md")).toBeNull();
+  });
+});
+
+describe("pathMarks", () => {
+  const marked = (runs: { text: string; mark: boolean }[]) => runs.filter((r) => r.mark).map((r) => r.text);
+
+  it("marks the query's words in a path, ignoring case and accents", () => {
+    expect(pathMarks("expense-rules.md", "expense")).toEqual([
+      { text: "expense", mark: true },
+      { text: "-rules.md", mark: false },
+    ]);
+    expect(marked(pathMarks("Ana Pérez.md", "perez"))).toEqual(["Pérez"]);
+    expect(marked(pathMarks("VACACIONES.md", "vacaciones turnos"))).toEqual(["VACACIONES"]);
+  });
+
+  it("ignores one-character words and leaves an unmatched path unmarked", () => {
+    expect(pathMarks("a.md", "a")).toEqual([{ text: "a.md", mark: false }]);
+    expect(pathMarks("notes.md", "budget")).toEqual([{ text: "notes.md", mark: false }]);
   });
 });

@@ -11,7 +11,11 @@ const SAM: MentionTarget = { kind: "user", displayName: "Sam Lee" };
 
 function render(
   text: string,
-  opts: { variant?: "chat" | "document"; streaming?: boolean } = {},
+  opts: {
+    variant?: "chat" | "document";
+    streaming?: boolean;
+    resolveHref?: (href: string) => string | null;
+  } = {},
   ctx: MentionContextValue = { handles: new Map([["sam", SAM]]), myHandle: null },
 ): string {
   return renderToStaticMarkup(
@@ -249,5 +253,50 @@ describe("Markdown: streaming (D-05)", () => {
     });
     expectSafe(html);
     expect(html).toContain("&lt;script&gt;");
+  });
+});
+
+describe("Markdown: in-app links (resolveHref, 07.2-10)", () => {
+  const LINKS =
+    "[v](vacations.md) [up](../MEMORY.md) [out](https://example.org/x) [txt](notes.txt) [mail](mailto:a@b.c)";
+  const resolveHref = (href: string) =>
+    href === "vacations.md"
+      ? "/memory/s1/policies/vacations.md"
+      : href === "../MEMORY.md"
+        ? "/memory/s1/MEMORY.md"
+        : null;
+
+  it("document variant: resolved relative links become in-app links without a new tab", () => {
+    const html = render(LINKS, { variant: "document", resolveHref });
+    expectSafe(html);
+    expect(html).toMatch(/<a[^>]*href="\/memory\/s1\/policies\/vacations\.md"[^>]*>v<\/a>/);
+    expect(html).toMatch(/<a[^>]*href="\/memory\/s1\/MEMORY\.md"[^>]*>up<\/a>/);
+    const inApp = [...html.matchAll(/<a[^>]*data-in-app[^>]*>/g)].map((m) => m[0]);
+    expect(inApp).toHaveLength(2);
+    for (const tag of inApp) expect(tag).not.toContain('target="_blank"');
+  });
+
+  it("document variant: unresolved relative links render as text; external links keep the renderer's rules", () => {
+    const html = render(LINKS, { variant: "document", resolveHref });
+    expect(html).not.toMatch(/<a[^>]*>txt<\/a>/);
+    expect(html).toContain("txt");
+    expect(html).toMatch(/<a[^>]*href="https:\/\/example\.org\/x"[^>]*target="_blank"[^>]*>out<\/a>/);
+    expect(html).toMatch(/<a[^>]*href="mailto:a@b\.c"[^>]*>mail<\/a>/);
+  });
+
+  it("a hostile resolver result is still checked by the URL rules", () => {
+    const html = render("[x](evil.md)", { variant: "document", resolveHref: () => "javascript:alert(1)" });
+    expectSafe(html);
+    expect(html).not.toMatch(/<a[^>]*data-in-app/);
+  });
+
+  it("the chat variant ignores resolveHref", () => {
+    expect(render(LINKS, { variant: "chat", resolveHref })).toEqual(render(LINKS, { variant: "chat" }));
+  });
+
+  it("without resolveHref the document variant is unchanged", () => {
+    const html = render(LINKS, { variant: "document" });
+    expect(html).not.toContain("data-in-app");
+    expect(html).not.toContain("/memory/");
   });
 });

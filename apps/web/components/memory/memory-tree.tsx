@@ -293,6 +293,17 @@ export function MemoryTree({
     }
   }
 
+  // One tab stop: the focused row when it is visible, else the open file, else the first row (a focused row inside a
+  // collapsed folder would otherwise leave the tree unreachable by Tab).
+  const items = tree.getItems();
+  const focusedId = tree.getState().focusedItem;
+  const visible = (id: string | null) => !!id && items.some((i) => i.getId() === id);
+  const tabStop = visible(focusedId)
+    ? focusedId
+    : visible(selectedId)
+      ? selectedId
+      : (items[0]?.getId() ?? null);
+
   return (
     <div
       {...tree.getContainerProps(label)}
@@ -301,8 +312,14 @@ export function MemoryTree({
       onKeyDown={onKeyDown}
       className={cn("grid gap-px outline-none", className)}
     >
-      {tree.getItems().map((item) => (
-        <TreeRow key={item.getId()} item={item} selected={item.getId() === selectedId} stacked={stacked} />
+      {items.map((item) => (
+        <TreeRow
+          key={item.getId()}
+          item={item}
+          selected={item.getId() === selectedId}
+          tabStop={item.getId() === tabStop}
+          stacked={stacked}
+        />
       ))}
     </div>
   );
@@ -313,10 +330,12 @@ const INDENT = 12;
 function TreeRow({
   item,
   selected,
+  tabStop,
   stacked,
 }: {
   item: ItemInstance<MemoryNode>;
   selected: boolean;
+  tabStop: boolean;
   stacked: boolean;
 }) {
   const node = item.getItemData();
@@ -345,7 +364,11 @@ function TreeRow({
       <div
         {...props}
         role="treeitem"
-        tabIndex={item.isFocused() ? 0 : -1}
+        tabIndex={tabStop ? 0 : -1}
+        // Tab (or a click) landing on a row makes it the tree's focused item, so the arrows start from it.
+        onFocus={(e) => {
+          if (e.target === e.currentTarget && !item.isFocused()) item.setFocused();
+        }}
         aria-label={accessibleName(node)}
         aria-current={selected ? "page" : undefined}
         data-testid="memory-tree-row"
