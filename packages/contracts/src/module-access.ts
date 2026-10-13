@@ -8,7 +8,7 @@ import type { Permission } from "./permissions";
  * role, unit rules reach the unit's subtree). The web hides what the API already refuses.
  */
 
-export const ModuleId = z.enum(["work_zone", "ai_chats", "bots"]);
+export const ModuleId = z.enum(["work_zone", "ai_chats", "bots", "memory"]);
 export type ModuleId = z.infer<typeof ModuleId>;
 
 export interface ModuleDefinition {
@@ -44,6 +44,13 @@ export const MODULE_CATALOG: Record<ModuleId, ModuleDefinition> = {
     description: "Team and personal bots: mention, message and create them",
     entry: "bot.read",
     patterns: ["bot.read", "bot.create_personal", "bot.configure", "bot.internet", "bot.tool.use"],
+  },
+  // Phase 07.2 (07.2-01): every memory grain (read, write, promote); new memory grains keep the `memory.` prefix.
+  memory: {
+    label: "Memory",
+    description: "Memory files that bots and people keep in folders",
+    entry: "memory.read",
+    patterns: ["memory.*"],
   },
 };
 

@@ -56,7 +56,7 @@ describe("module catalog (Phase 07.3, ADR-0024)", () => {
   });
 
   it("is exactly the agreed catalog (P-03)", () => {
-    expect(ModuleId.options).toEqual(["work_zone", "ai_chats", "bots"]);
+    expect(ModuleId.options).toEqual(["work_zone", "ai_chats", "bots", "memory"]);
     expect(MODULE_CATALOG.work_zone).toMatchObject({
       entry: "work_session.read",
       patterns: ["work_session.*", "device.pair", "device.use", "device.full_access"],
@@ -66,6 +66,15 @@ describe("module catalog (Phase 07.3, ADR-0024)", () => {
       entry: "bot.read",
       patterns: ["bot.read", "bot.create_personal", "bot.configure", "bot.internet", "bot.tool.use"],
     });
+    // Phase 07.2 (07.2-01): memory files, all three grains (read, write, promote).
+    expect(MODULE_CATALOG.memory).toMatchObject({
+      label: "Memory",
+      entry: "memory.read",
+      patterns: ["memory.*"],
+    });
+    expect(modulesMatching("memory.read")).toEqual(["memory"]);
+    expect(modulesMatching("memory.write")).toEqual(["memory"]);
+    expect(modulesMatching("memory.promote")).toEqual(["memory"]);
     expect([...MODULE_EXCLUDED].sort()).toEqual(
       [
         "device.read",
@@ -84,6 +93,8 @@ describe("module catalog (Phase 07.3, ADR-0024)", () => {
     expect(modulePatternOf("work_session.*")).toBe("work_zone");
     expect(modulePatternOf("device.pair")).toBe("work_zone");
     expect(modulePatternOf("bot.tool.use")).toBe("bots");
+    expect(modulePatternOf("memory.*")).toBe("memory");
+    expect(modulePatternOf("memory.read")).toBeNull();
     expect(modulePatternOf("device.revoke")).toBeNull();
     // Exact pattern, not a match: a hand-written grain under a catalog prefix is not a catalog row.
     expect(modulePatternOf("ai_chat.use")).toBeNull();

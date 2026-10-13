@@ -451,6 +451,7 @@ export const AGENT_CARD_ROUTE_PREFIXES = [
   "/settings",
   "/search",
   "/share",
+  "/memory",
 ] as const;
 
 function hasControlCharacter(v: string): boolean {

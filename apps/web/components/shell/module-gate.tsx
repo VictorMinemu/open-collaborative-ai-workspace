@@ -1,7 +1,7 @@
 "use client";
 
 import { MODULE_CATALOG, type ModuleId, type Permission } from "@ocw/contracts";
-import { Bot, type LucideIcon, Sparkles, SquareTerminal } from "lucide-react";
+import { Bot, type LucideIcon, NotebookText, Sparkles, SquareTerminal } from "lucide-react";
 import Link from "next/link";
 import { type ReactNode, useRef } from "react";
 import { EmptyState } from "@/components/common/empty-state";
@@ -36,6 +36,11 @@ const OFF_COPY: Record<ModuleId, { icon: LucideIcon; verb: "is" | "are"; extra: 
     extra: " Your chats are kept and come back when it is turned on again.",
   },
   bots: { icon: Bot, verb: "are", extra: "" },
+  memory: {
+    icon: NotebookText,
+    verb: "is",
+    extra: " Memory files are kept and come back when it is turned on again.",
+  },
 };
 
 /** The in-place explanation shown instead of a denied module's page (never a redirect). */

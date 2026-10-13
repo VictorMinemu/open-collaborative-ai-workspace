@@ -178,6 +178,11 @@ export const EventTypes = {
   boardUpdated: "board.updated",
   /** One column's new ranks after a server re-rank (BoardColumnRerankedEvent). */
   boardColumnReranked: "board.column_reranked",
+  // Phase 07.2 (D-08, Pitfall 7). On `user:<id>` only, ids only (never paths or content):
+  /** A personal memory file changed; on its owner's stream (MemoryChangedEvent). */
+  memoryChanged: "memory.changed",
+  /** An approval request changed status; on its deciders' and requester's streams (ApprovalRequestUpdatedEvent). */
+  approvalRequestUpdated: "approval_request.updated",
 } as const;
 
 export const MemberUpdatedPayload = z.object({ userId: z.uuid(), changed: z.array(z.string()) });

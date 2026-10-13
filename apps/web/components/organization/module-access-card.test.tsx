@@ -21,7 +21,7 @@ const on = (module: ModuleAccessModuleState["module"]): ModuleAccessModuleState 
   state: "on",
   inherited: null,
 });
-const allOn = () => [on("work_zone"), on("ai_chats"), on("bots")];
+const allOn = () => [on("work_zone"), on("ai_chats"), on("bots"), on("memory")];
 
 function view(over: Partial<ModuleAccessView> = {}): ModuleAccessView {
   return {
@@ -64,7 +64,12 @@ describe("ModuleAccessPanel", () => {
   it("renders one switch per module in catalog order with its state, Custom, and the Bots warning", () => {
     const html = render(
       view({
-        modules: [on("work_zone"), { module: "ai_chats", state: "custom", inherited: null }, on("bots")],
+        modules: [
+          on("work_zone"),
+          { module: "ai_chats", state: "custom", inherited: null },
+          on("bots"),
+          on("memory"),
+        ],
         unitBotCount: 2,
       }),
     );
@@ -72,6 +77,7 @@ describe("ModuleAccessPanel", () => {
       "work_zone",
       "ai_chats",
       "bots",
+      "memory",
     ]);
     expect(tagOf(html, "module-switch-work_zone")).toContain('aria-checked="true"');
     expect(tagOf(html, "module-switch-work_zone")).toContain(

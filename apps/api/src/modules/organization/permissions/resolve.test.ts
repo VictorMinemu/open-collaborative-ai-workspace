@@ -119,6 +119,9 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "agent_card.approve": true,
     "ai_chat.read": true,
     "unit.modules.manage": false,
+    "memory.read": true,
+    "memory.write": false,
+    "memory.promote": false,
   },
   developer: {
     "org.read": true,
@@ -178,6 +181,9 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "agent_card.approve": true,
     "ai_chat.read": true,
     "unit.modules.manage": false,
+    "memory.read": true,
+    "memory.write": false,
+    "memory.promote": false,
   },
   lead: {
     "org.read": true,
@@ -237,6 +243,9 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "agent_card.approve": true,
     "ai_chat.read": true,
     "unit.modules.manage": false,
+    "memory.read": true,
+    "memory.write": false,
+    "memory.promote": false,
   },
   admin: {
     "org.read": true,
@@ -296,6 +305,9 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "agent_card.approve": true,
     "ai_chat.read": true,
     "unit.modules.manage": true,
+    "memory.read": true,
+    "memory.write": true,
+    "memory.promote": true,
   },
 };
 

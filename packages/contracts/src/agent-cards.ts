@@ -1,9 +1,11 @@
 import { z } from "zod";
+import { ActionHash, APPROVAL_NOTE_MAX, ApprovalNote, ApprovalRequestStatus } from "./approvals";
 import { Id, IsoDateTime, PrincipalKind } from "./common";
 
 /**
  * Phase 6 Agent Cards (AGENT-04, D-07, P-11): a typed card an agent posts with a message and updates in place.
- * Imports `common` only: `chat.ts` imports this file for `Message.card`, so importing `chat.ts` here would be a cycle.
+ * Imports `common` and `approvals` only: `chat.ts` imports this file for `Message.card`, so importing `chat.ts` here
+ * would be a cycle (`approvals` never imports `chat.ts` or this file).
  * Actions are server-decided; an Open action can only point to an internal app route (`AgentCardRoute`).
  */
 
@@ -21,6 +23,8 @@ export const AGENT_CARD_ROUTE_PREFIXES = [
   "/settings",
   "/search",
   "/share",
+  // Phase 07.2: memory files and proposals (`/memory/proposals/<id>`).
+  "/memory",
 ] as const;
 
 export const AgentCardKind = z.enum([
@@ -103,8 +107,22 @@ export const AgentCardDecision = z.object({
   outcome: z.enum(["approved", "denied"]),
   by: z.object({ kind: PrincipalKind, id: Id.nullable(), displayName: z.string() }),
   at: IsoDateTime,
+  /** The approver's note, shown on the decision line (Phase 07.2, UI-SPEC R4). */
+  note: z.string().max(APPROVAL_NOTE_MAX).nullable().optional(),
 });
 export type AgentCardDecision = z.infer<typeof AgentCardDecision>;
+
+/** A platform-owned card's link to its approval request (Phase 07.2, D-05, UI-SPEC R6). */
+export const AgentCardApprovalLink = z.object({
+  id: Id,
+  actionHash: ActionHash,
+  status: ApprovalRequestStatus,
+  /** The human the agent acted for (a personal-scope proposal is theirs to decide). */
+  requestedForUserId: Id.nullable(),
+  /** Server-composed warnings, e.g. the taint line. */
+  warnings: z.array(z.string().max(200)).max(3),
+});
+export type AgentCardApprovalLink = z.infer<typeof AgentCardApprovalLink>;
 
 export const AgentCard = z.object({
   kind: AgentCardKind,
@@ -120,6 +138,13 @@ export const AgentCard = z.object({
   following: z.boolean().optional(),
   /** Viewer-specific: what the viewer may do on this card. */
   viewerCan: z.array(z.enum(["follow", "decide"])).optional(),
+  /**
+   * Phase 07.2 (D-08): composed by the server, never by an agent (an agent PATCH is refused), so a model cannot
+   * rewrite findings or reader counts. Absent on older cards.
+   */
+  platformOwned: z.boolean().optional(),
+  /** The approval this card mirrors; deciding the card decides the approval (D-05). */
+  approval: AgentCardApprovalLink.nullable().optional(),
 });
 export type AgentCard = z.infer<typeof AgentCard>;
 
@@ -148,7 +173,12 @@ export const AgentCardPatch = z
   );
 export type AgentCardPatch = z.infer<typeof AgentCardPatch>;
 
-export const AgentCardDecisionRequest = z.object({ outcome: z.enum(["approved", "denied"]) });
+export const AgentCardDecisionRequest = z.object({
+  outcome: z.enum(["approved", "denied"]),
+  /** Required by the server when the card mirrors an approval: the hash the decider was shown (Phase 07.2). */
+  actionHash: ActionHash.optional(),
+  note: ApprovalNote.optional(),
+});
 export type AgentCardDecisionRequest = z.infer<typeof AgentCardDecisionRequest>;
 
 export const AgentCardParams = z.object({ messageId: Id });
