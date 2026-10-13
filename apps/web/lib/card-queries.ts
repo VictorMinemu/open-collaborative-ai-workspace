@@ -2,6 +2,7 @@
 
 import {
   type AgentCard,
+  type AgentCardDecisionRequest,
   AgentCard as AgentCardSchema,
   type Message,
   type MessagePage,
@@ -111,14 +112,22 @@ export async function followCard(
 /**
  * Approves or denies a card once. Not optimistic: the card shows the decision only after the server took it (it may
  * refuse: already decided, not an approver, no permission). Returns the decided card as the viewer sees it.
+ *
+ * A card that mirrors an approval (07.2-17, D-05, UI-SPEC R4) names the action hash it rendered (the server recomputes
+ * it and refuses a changed action) and may carry the decider's note; any other card sends `{ outcome }` only, exactly
+ * as before.
  */
 export async function decideCard(
   qc: QueryClient,
   messageId: string,
-  outcome: "approved" | "denied",
+  decision: { outcome: "approved" | "denied"; actionHash?: string | undefined; note?: string | undefined },
 ): Promise<AgentCard> {
+  const { outcome, actionHash, note } = decision;
+  const body: AgentCardDecisionRequest = actionHash
+    ? { outcome, actionHash, ...(note ? { note } : {}) }
+    : { outcome };
   const decided = await api.post(`/api/v1/cards/${messageId}/decision`, {
-    body: { outcome },
+    body,
     schema: AgentCardSchema,
   });
   qc.setQueryData<AgentCard>(cardKeys.card(messageId), decided);

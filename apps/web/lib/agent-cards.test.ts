@@ -85,6 +85,32 @@ describe("shownCard", () => {
   it("without a viewer read the list card is shown as is", () => {
     expect(shownCard(card({ viewerCan: ["follow"] }), undefined).viewerCan).toEqual(["follow"]);
   });
+
+  it("at the same version the single-card read wins: a mirror card that arrived live before its approval link keeps the link (07.2-17)", () => {
+    const approval = {
+      id: "01a11635-d6e7-7c87-9f17-b6b1dc048943",
+      actionHash: "a".repeat(64),
+      status: "pending" as const,
+      requestedForUserId: null,
+      warnings: ["Scout read web or tool content in this turn."],
+    };
+    const live = card({ platformOwned: true });
+    const read = card({ platformOwned: true, approval, following: false, viewerCan: ["follow", "decide"] });
+    expect(shownCard(live, read)).toMatchObject({
+      platformOwned: true,
+      approval,
+      viewerCan: ["follow", "decide"],
+    });
+    // A newer live update still wins over an older read.
+    const decided = card({
+      platformOwned: true,
+      approval: { ...approval, status: "applied" },
+      decision,
+      version: 2,
+      updatedAt: LATER,
+    });
+    expect(shownCard(decided, read)).toMatchObject({ version: 2, approval: { status: "applied" } });
+  });
 });
 
 describe("openTargetOf", () => {

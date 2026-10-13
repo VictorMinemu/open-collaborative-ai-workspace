@@ -141,3 +141,33 @@ describe("AgentCardView", () => {
     expect(html).toContain('aria-label="Status: Info"');
   });
 });
+
+/**
+ * Characterisation (07.2-17): cards that mirror no approval render exactly as before the platform-owned card mirror.
+ * The snapshot was recorded on the renderer before 07.2-17 changed it; any difference fails.
+ */
+describe("AgentCardView: cards without an approval link are unchanged", () => {
+  const decided = deployment({
+    kind: "approval",
+    status: "succeeded",
+    decision: {
+      outcome: "denied",
+      by: { kind: "user", id: "01a11635-d6e7-7c87-9f17-b6b1dc048942", displayName: "Sam Lee" },
+      at: "2026-10-07T09:05:00.000Z",
+      note: "Not on a Friday",
+    },
+    viewerCan: ["follow"],
+  });
+  it.each([
+    ["running deployment, decider", deployment()],
+    ["decided approval with a note", decided],
+    ["info card, no actions", deployment({ status: "info", actions: [], viewerCan: [] })],
+    [
+      "pending approval, viewer copy not read yet",
+      deployment({ kind: "approval", status: "pending", viewerCan: undefined }),
+    ],
+  ])("%s", (_name, card) => {
+    // The decision time is local: the snapshot keeps the markup, not the machine's time zone.
+    expect(render(card).replace(/(<time [^>]*>)[^<]*(<\/time>)/g, "$1·TIME$2")).toMatchSnapshot();
+  });
+});
