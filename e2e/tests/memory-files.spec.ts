@@ -264,6 +264,12 @@ test("links open inside the viewer, hostile HTML stays text, missing and unreada
     await expect(notFound.getByRole("link", { name: `Back to ${MEMORY_TEAM}` })).toBeVisible();
     await expect(page.getByText("Compensation")).toHaveCount(0);
   }
+  // A scope id that is not an id at all (a typo, a crafted link) is the same state, never an error.
+  await page.goto(`${BASE_URL}/memory/not-a-scope/clients/acme.md`);
+  await expect(page.getByTestId("memory-file-notfound").getByRole("heading", { name: title })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Back to memory" })).toBeVisible();
+  await page.goto(`${BASE_URL}/memory/${seed.ventasScopeId}/hr/salaries.md`);
+  await expect(page.getByTestId("memory-file-notfound")).toBeVisible();
   if (w === "1440") await review(page, "notfound", w);
   else await expectNoSeriousA11y(page, '[data-testid="memory-shell"]');
   expect(dialogs, "no script ran").toEqual([]);

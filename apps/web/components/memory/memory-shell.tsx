@@ -1,6 +1,6 @@
 "use client";
 
-import { MEMORY_ROOT_FILE } from "@ocw/contracts";
+import { Id, MEMORY_ROOT_FILE } from "@ocw/contracts";
 import { Inbox, NotebookText, RotateCcw } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -201,7 +201,8 @@ export function MemoryShell({ scopeId, segments }: { scopeId?: string; segments?
       <MemoryFile
         key={`${fileScopeId}:${filePath ?? ""}`}
         scopeId={fileScopeId}
-        path={hasPath && !parsed?.ok ? null : filePath}
+        // A scope segment that is not an id, or a path the grammar refuses, is not found without any request.
+        path={(hasPath && !parsed?.ok) || !Id.safeParse(fileScopeId).success ? null : filePath}
         scope={fileScope}
         stacked={stacked}
         onBack={stacked ? onBack : undefined}

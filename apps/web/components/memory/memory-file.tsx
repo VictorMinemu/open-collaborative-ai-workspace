@@ -90,7 +90,9 @@ export function MemoryFile({
     [scopeId, path],
   );
 
-  const notFound = path === null || isApiError(q.error, 404) || isApiError(q.error, 403);
+  // Missing, unreadable and malformed (400) are one state: the viewer learns nothing about what exists.
+  const notFound =
+    path === null || isApiError(q.error, 404) || isApiError(q.error, 403) || isApiError(q.error, 400);
   const name = path ? (path.split("/").pop() ?? path) : "";
 
   if (notFound) {
