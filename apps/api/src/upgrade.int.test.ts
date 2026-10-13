@@ -31,6 +31,9 @@ const SECRET_ID = "aaaaaaaa-0000-4000-8000-000000000301";
 const HELPER_BOT = "aaaaaaaa-0000-4000-8000-000000000321";
 const ADA_ADMIN = "aaaaaaaa-0000-4000-8000-000000000101";
 const MAX_MEMBER = "aaaaaaaa-0000-4000-8000-000000000102";
+/** Two MCP servers registered at N-1 (Phase 07.4: both must come out as `org_secret`). */
+const MCP_HTTP = "aaaaaaaa-0000-4000-8000-000000000701";
+const MCP_STDIO = "aaaaaaaa-0000-4000-8000-000000000702";
 /** The seed's fixed test key (32 bytes of 0x07) and plaintext; see packages/db/test/upgrade/seed-phase-5.sql. */
 const TEST_KEY_B64 = Buffer.alloc(32, 7).toString("base64");
 const SECRET_PLAINTEXT = "sk-upgrade-baseline-fake-provider-key";
@@ -174,6 +177,11 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
         "insert into app.agent_memories (organization_id, agent_id, user_id, text, created_at) values ($1, $2, $3, 'Prefers short answers', '2026-10-06 10:00:00+00'), ($1, $2, $3, 'Owns the billing\nrunbook', '2026-10-06 10:05:00+00')",
         [ORG_A, HELPER_BOT, MAX_MEMBER],
       );
+      // Phase 07.4 (D-01): the N-1 dump has no MCP servers; an HTTP one and a stdio-sandbox one registered at N-1.
+      await seed.query(
+        "insert into app.mcp_servers (id, organization_id, name, safe_name, transport, url, sandbox_server, status) values ($1, $3, 'Docs', 'm0a0a0a01', 'streamable-http', 'https://mcp.example.test', null, 'ready'), ($2, $3, 'Files', 'm0a0a0a02', 'sandboxed-stdio', null, 'filesystem', 'ready')",
+        [MCP_HTTP, MCP_STDIO, ORG_A],
+      );
     } finally {
       await seed.end();
     }
@@ -264,6 +272,40 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
         expect(await read(ADA_ADMIN)).toBe(0);
       } finally {
         await db.close();
+      }
+    });
+
+    it("keeps every existing MCP server on the organization's credential, with no member state (Phase 07.4 D-01)", async () => {
+      const c = new pg.Client({ connectionString: urls.migrator });
+      await c.connect();
+      try {
+        const { rows } = await c.query(
+          "select id, transport, auth_mode, oauth_status, member_header_name from app.mcp_servers order by id",
+        );
+        expect(rows).toEqual([
+          {
+            id: MCP_HTTP,
+            transport: "streamable-http",
+            auth_mode: "org_secret",
+            oauth_status: null,
+            member_header_name: null,
+          },
+          {
+            id: MCP_STDIO,
+            transport: "sandboxed-stdio",
+            auth_mode: "org_secret",
+            oauth_status: null,
+            member_header_name: null,
+          },
+        ]);
+        const empty = await c.query(
+          `select (select count(*)::int from app.connector_connections) + (select count(*)::int from app.vault_items)
+                + (select count(*)::int from app.agent_templates) + (select count(*)::int from app.member_account_shares) as n,
+                  (select count(*)::int from app.agents where template_id is not null) as linked`,
+        );
+        expect(empty.rows).toEqual([{ n: 0, linked: 0 }]);
+      } finally {
+        await c.end();
       }
     });
 

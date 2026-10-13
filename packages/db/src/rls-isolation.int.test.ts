@@ -1759,6 +1759,58 @@ describe("tenant isolation (RLS)", () => {
     expect(after.rows).toEqual([{ status: "connected", last_error: null }]);
   });
 
+  it("Phase 07.4: OAuth clients, shares, keys, key grants, templates and versions of org B are invisible and unwritable from org A", async () => {
+    for (const tbl of CONNECTOR_TABLES.filter((t) => t !== "app.connector_connections")) {
+      const seeded = await migrator.query(
+        `select count(*)::int as n from ${tbl} where organization_id = $1`,
+        [B],
+      );
+      expect(seeded.rows[0].n, `${tbl} has B rows`).toBeGreaterThan(0);
+      const cross = await inTenant(A, () =>
+        app.query(`select count(*)::int as n from ${tbl} where organization_id = $1`, [B]),
+      );
+      expect(cross.rows[0].n, `${tbl} cross-tenant select`).toBe(0);
+      for (const stmt of [
+        `update ${tbl} set organization_id = organization_id where organization_id = $1`,
+        `delete from ${tbl} where organization_id = $1`,
+      ]) {
+        const n = await inTenant(A, () => app.query(stmt, [B]).then((res) => res.rowCount));
+        expect(n, `${tbl}: ${stmt}`).toBe(0);
+      }
+      // Moving one of A's own rows into B is refused too (WITH CHECK on UPDATE).
+      await expect(
+        inTenant(A, () =>
+          app.query(`update ${tbl} set organization_id = $1 where organization_id = $2`, [B, A]),
+        ),
+        `${tbl} cross-tenant move`,
+      ).rejects.toThrow(/row-level security/);
+      const row = await migrator.query(
+        `select row_to_json(t) as j from ${tbl} t where organization_id = $1 limit 1`,
+        [B],
+      );
+      const cols = (
+        await migrator.query(
+          `select a.attname from pg_attribute a where a.attrelid = $1::regclass and a.attnum > 0
+             and not a.attisdropped and a.attgenerated = '' order by a.attnum`,
+          [tbl],
+        )
+      ).rows.map((r) => `"${r.attname}"`);
+      await expect(
+        inTenant(A, () =>
+          app.query(
+            `insert into ${tbl} (${cols.join(", ")}) select ${cols.join(", ")} from json_populate_record(null::${tbl}, $1::json)`,
+            [JSON.stringify(row.rows[0].j)],
+          ),
+        ),
+        `${tbl} cross-tenant insert`,
+      ).rejects.toThrow(/row-level security/);
+      const still = await migrator.query(`select count(*)::int as n from ${tbl} where organization_id = $1`, [
+        B,
+      ]);
+      expect(still.rows[0].n, `${tbl} B rows intact`).toBe(seeded.rows[0].n);
+    }
+  });
+
   it("Phase 4: accent-insensitive Spanish search, a stored tsvector and the search indexes", async () => {
     const match = await migrator.query(
       "select to_tsvector('app.ocw_es', 'migración') @@ websearch_to_tsquery('app.ocw_es', 'migracion') as ok",
