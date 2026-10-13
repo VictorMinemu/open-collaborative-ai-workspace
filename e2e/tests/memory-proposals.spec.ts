@@ -1,11 +1,10 @@
-import { createRequire } from "node:module";
-import { join } from "node:path";
 import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
 import { expectNoSeriousA11y } from "../support/a11y";
 import { type Actor, apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import { cellToken } from "../support/cell-token";
 import { FakeCellPlugin } from "../support/fake-cell-plugin";
 import { type MemorySeed, putMemoryFile, seedMemory } from "../support/memory";
+import { asSuperuser } from "../support/superuser";
 import { ADMIN, API_URL, shot } from "./env";
 
 /**
@@ -187,35 +186,6 @@ async function review(page: Page, name: string, w: string, selector?: string) {
     await shot(page, `${name}-${w}${theme === "dark" ? "-dark" : ""}`);
   }
   await page.emulateMedia({ colorScheme: "light" });
-}
-
-/**
- * Superuser access to the isolated e2e database only (scripts/e2e-isolated.sh exports MIGRATE_SUPERUSER_URL pointing
- * at `ocw_e2e`; anything else is refused).
- */
-async function asSuperuser<T>(sql: string, params: unknown[]): Promise<T[]> {
-  const url = process.env.MIGRATE_SUPERUSER_URL ?? "";
-  expect(
-    /\/ocw_e2e(\?|$)/.test(url),
-    "MIGRATE_SUPERUSER_URL targets ocw_e2e (run through e2e-isolated.sh)",
-  ).toBe(true);
-  const requireDb = createRequire(join(import.meta.dirname, "..", "..", "packages", "db", "package.json"));
-  const { Client } = requireDb("pg") as {
-    Client: new (o: {
-      connectionString: string;
-    }) => {
-      connect(): Promise<void>;
-      query(text: string, values: unknown[]): Promise<{ rows: T[] }>;
-      end(): Promise<void>;
-    };
-  };
-  const client = new Client({ connectionString: url });
-  await client.connect();
-  try {
-    return (await client.query(sql, params)).rows;
-  } finally {
-    await client.end();
-  }
 }
 
 /** Opens the inbox the way a person does: Memory → Proposals (the row with its count). */
@@ -769,7 +739,7 @@ test("extended scan state follows the server: a warning when Presidio does not a
     await lena.page.goto(`${BASE_URL}/memory/proposals/${id}`);
     const view = lena.page.locator('[data-testid="proposal-review"][data-view="memory_proposal"]');
     await expect(view.getByTestId("proposal-title")).toHaveText(`Create clients/umbrella-${w}.md`);
-    const stored = await asSuperuser<{ findings: Array<{ kind: string }> }>(
+    const { rows: stored } = await asSuperuser<{ findings: Array<{ kind: string }> }>(
       "select p.findings from app.memory_proposals p join app.approval_requests r on r.resource_id = p.id where r.id = $1",
       [id],
     );
