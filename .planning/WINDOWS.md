@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 88
+open_count: 92
 waived_count: 2
 fixed_count: 25
-total_count: 115
-last_updated: 2026-10-13T03:20:41.625Z
+total_count: 119
+last_updated: 2026-10-13T03:45:07.976Z
 ---
 
 # Broken Windows Ledger
@@ -130,6 +130,10 @@ last_updated: 2026-10-13T03:20:41.625Z
 | 113 | 07.1 | deviation | apps/web/components/chat/channel-view.tsx |  | Board Messages view: a card root beyond the first 100 cards of its column is not cached, so Edit message falls back to the inline editor (400 board_card_use_board) | fixed |  | 2026-10-12T21:23:04.109Z | 2026-10-12T22:27:17.051Z |
 | 114 | 07.2 | deviation | packages/contracts/src/memory.ts |  | Folder rule pathPrefix is accepted by the contract but dropped by the API until 07.2-03; an allow memory.write on hr/ would apply to the whole scope meanwhile; must close before the phase merges | open |  | 2026-10-13T03:20:41.553Z |  |
 | 115 | 07.2 | deviation | apps/web/components/shell/module-gate.tsx |  | Settings > Modules shows a Memory toggle with no memory UI until 07.2-10; screenshot the 4-row panel in 10/13 | open |  | 2026-10-13T03:20:41.625Z |  |
+| 116 | 07.2 | deviation | packages/db/src/schema/memory.ts |  | approval_requests has no personal-owner column: an admin with direct SQL can see that an approval for a personal proposal exists (metadata, not content); decide in 07.2-06 | open |  | 2026-10-13T03:45:07.675Z |  |
+| 117 | 07.2 | deviation | packages/db/src/schema/memory.ts |  | Personal bot notebook owner assumes a personal bot never changes owner or kind; recompute the owner if that ever changes | open |  | 2026-10-13T03:45:07.777Z |  |
+| 118 | 07.2 | deviation | packages/db/src/schema/memory.ts |  | A file moved across scopes keeps old revisions with the previous owner (conservative); 07.2-08 must account for it | open |  | 2026-10-13T03:45:07.876Z |  |
+| 119 | 07.2 | deviation | apps/api/src/modules/policy/module-access-enforcement.int.test.ts |  | testcontainers Redis port wait can time out under Docker load and fail verify once | open |  | 2026-10-13T03:45:07.976Z |  |
 
 ````json
 [
@@ -1511,6 +1515,54 @@ last_updated: 2026-10-13T03:20:41.625Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-13T03:20:41.625Z",
+    "resolved_at": null
+  },
+  {
+    "id": 116,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "packages/db/src/schema/memory.ts",
+    "line": null,
+    "description": "approval_requests has no personal-owner column: an admin with direct SQL can see that an approval for a personal proposal exists (metadata, not content); decide in 07.2-06",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T03:45:07.675Z",
+    "resolved_at": null
+  },
+  {
+    "id": 117,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "packages/db/src/schema/memory.ts",
+    "line": null,
+    "description": "Personal bot notebook owner assumes a personal bot never changes owner or kind; recompute the owner if that ever changes",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T03:45:07.777Z",
+    "resolved_at": null
+  },
+  {
+    "id": 118,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "packages/db/src/schema/memory.ts",
+    "line": null,
+    "description": "A file moved across scopes keeps old revisions with the previous owner (conservative); 07.2-08 must account for it",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T03:45:07.876Z",
+    "resolved_at": null
+  },
+  {
+    "id": 119,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/policy/module-access-enforcement.int.test.ts",
+    "line": null,
+    "description": "testcontainers Redis port wait can time out under Docker load and fail verify once",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T03:45:07.976Z",
     "resolved_at": null
   }
 ]
