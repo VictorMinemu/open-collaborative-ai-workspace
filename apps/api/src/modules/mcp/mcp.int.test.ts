@@ -750,3 +750,114 @@ describe("probe results become policy-capped bot capabilities (BOT-10, SC6)", ()
     expect((await turnFor(samBotId, next)).tools).not.toContain(echoName);
   });
 });
+
+// ---------------------------------------------------------------- Phase 07.4-06: connector auth modes (D-01, CONN-01)
+
+const CANARY = "CLIENT-SECRET-CANARY";
+const CRM = {
+  name: "Acme CRM",
+  transport: "streamable-http",
+  url: "https://mcp.example.com/mcp",
+  authMode: "per_member_oauth",
+  oauthScopes: ["crm.read", "crm.write"],
+  oauthClient: { issuer: "https://auth.example.com", clientId: "ocw-production", clientSecret: CANARY },
+};
+
+describe("per-member connectors on the registry (07.4-06 tracer, D-01, C-01)", () => {
+  let crmId: string;
+
+  it("an admin registers a per-member OAuth connector: mode, scopes and the pre-registered client; the secret is sealed and write-only", async () => {
+    const probesBefore = (await cellEvents("mcp.probe")).length;
+    const body = await ok(admin.request("POST", "/api/v1/mcp-servers", CRM));
+    crmId = body.id;
+    expect(body).toMatchObject({
+      name: "Acme CRM",
+      authMode: "per_member_oauth",
+      headers: [],
+      status: "pending",
+      oauthScopes: ["crm.read", "crm.write"],
+      oauthStatus: "ready",
+      oauthClients: [
+        {
+          issuer: "https://auth.example.com",
+          clientId: "ocw-production",
+          hasSecret: true,
+          method: "pre_registered",
+        },
+      ],
+      memberHeaderName: null,
+      memberHeaderPrefix: null,
+      memberConnections: 0,
+    });
+    // The cell is never asked to probe it.
+    expect((await cellEvents("mcp.probe")).length).toBe(probesBefore);
+
+    const list = await ok(admin.request("GET", "/api/v1/mcp-servers"));
+    expect(list.oauth).toEqual({
+      redirectUri: "http://localhost:4999/api/v1/connectors/oauth/callback",
+      clientMetadataUrl: null,
+      oauthAvailable: true,
+    });
+    const listed = (list.servers as Json[]).find((s) => s.id === crmId);
+    expect(listed).toMatchObject({ authMode: "per_member_oauth", oauthClients: [{ hasSecret: true }] });
+    const one = await ok(admin.request("GET", `/api/v1/mcp-servers/${crmId}`));
+    expect(one.oauthClients).toEqual(body.oauthClients);
+    expect(JSON.stringify([body, list, one])).not.toContain(CANARY);
+
+    const client = (
+      await su.query(
+        "select issuer, client_id, client_secret_id, method from app.connector_oauth_clients where server_id = $1",
+        [crmId],
+      )
+    ).rows as Json[];
+    expect(client).toHaveLength(1);
+    expect(client[0]).toMatchObject({ issuer: "https://auth.example.com", method: "pre_registered" });
+    const secret = (
+      await su.query("select kind, ciphertext from app.secrets where id = $1", [client[0]?.client_secret_id])
+    ).rows[0] as Json;
+    expect(secret.kind).toBe("mcp_credential");
+    expect(secret.ciphertext).not.toContain(CANARY);
+    const stored = (
+      await su.query("select auth_mode, oauth_scopes, headers from app.mcp_servers where id = $1", [crmId])
+    ).rows[0] as Json;
+    expect(stored).toEqual({
+      auth_mode: "per_member_oauth",
+      oauth_scopes: ["crm.read", "crm.write"],
+      headers: [],
+    });
+
+    expect((await audits("mcp.server.created")).at(-1)?.metadata).toMatchObject({
+      name: "Acme CRM",
+      authMode: "per_member_oauth",
+      preRegisteredClient: true,
+    });
+    const allAudits = (
+      await su.query("select metadata from app.audit_events where organization_id = $1", [orgId])
+    ).rows;
+    expect(JSON.stringify(allAudits)).not.toContain(CANARY);
+    expect(logLines.join("\n")).not.toContain(CANARY);
+  });
+
+  it("the cell snapshot never carries it, enabled or not", async () => {
+    const cell = await asTenant<Json[]>((tx) => cellMcpServers(stack.built.core, tx));
+    expect(cell.map((s) => s.id)).not.toContain(crmId);
+    expect(cell.length).toBeGreaterThan(0);
+  });
+
+  it("without HTTPS (a plain-http LAN URL) the list says member sign-in is unavailable and the connector reads https_required", async () => {
+    const env = stack.built.core.env;
+    const before = env.OCW_PUBLIC_API_URL;
+    env.OCW_PUBLIC_API_URL = "http://ocw.lan:4000";
+    try {
+      const list = await ok(admin.request("GET", "/api/v1/mcp-servers"));
+      expect(list.oauth).toEqual({
+        redirectUri: "http://ocw.lan:4000/api/v1/connectors/oauth/callback",
+        clientMetadataUrl: null,
+        oauthAvailable: false,
+      });
+      expect((list.servers as Json[]).find((s) => s.id === crmId)?.oauthStatus).toBe("https_required");
+    } finally {
+      env.OCW_PUBLIC_API_URL = before;
+    }
+  });
+});

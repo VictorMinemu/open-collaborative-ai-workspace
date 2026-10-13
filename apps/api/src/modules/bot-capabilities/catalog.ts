@@ -37,6 +37,7 @@ export async function loadCatalog(tx: Tx): Promise<CatalogSource[]> {
       orgEnabled: s.orgEnabled,
       personalAllowed: s.personalAllowed,
       trustedChaining: s.trustedChaining,
+      authMode: s.authMode,
       tools: serverTools
         .filter((t) => t.serverId === s.id)
         .map((t) => ({

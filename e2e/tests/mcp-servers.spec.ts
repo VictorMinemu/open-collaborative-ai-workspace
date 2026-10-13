@@ -1,4 +1,4 @@
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
 import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import {
   ask,
@@ -326,4 +326,79 @@ test("member: no MCP servers entry, and the page asks for an admin", async ({ br
   await expect(dev.page.getByTestId("mcp-add")).toHaveCount(0);
   if (project !== "mobile") await expect(dev.page.getByTestId("settings-nav-mcp-servers")).toHaveCount(0);
   await dev.context.close();
+});
+
+// ---------------------------------------------------------------- 07.4-06: connector auth modes (D-01, CONN-01)
+
+const CRM = "Acme CRM";
+const CLIENT_CANARY = "e2e-client-secret-canary";
+
+/** Removes the named servers, disconnecting any member (per-member connectors answer 409 otherwise). */
+async function removeServers(admin: APIRequestContext, names: readonly string[]) {
+  const list = (await (await admin.get("/api/v1/mcp-servers")).json()) as {
+    servers: Array<{ id: string; name: string }>;
+  };
+  for (const s of list.servers.filter((x) => names.includes(x.name))) {
+    expect((await admin.delete(`/api/v1/mcp-servers/${s.id}?clearConnections=true`)).ok()).toBe(true);
+  }
+}
+
+test("admin: register a connector where each member signs in, with a pre-registered client; the list shows its mode", async ({
+  browser,
+}, info) => {
+  test.setTimeout(120_000);
+  const project = info.project.name;
+  const admin = await apiAs(ADMIN);
+  await removeServers(admin, [CRM]);
+  try {
+    const boss = await openAs(browser, ADMIN, project);
+    const page = boss.page;
+    await page.goto(`${BASE_URL}/settings/mcp-servers`);
+    await page.getByTestId("mcp-add").first().click();
+    const dialog = page.getByTestId("mcp-server-dialog");
+    await expect(dialog).toBeVisible();
+    await dialog.getByTestId("mcp-name").fill(CRM);
+    await dialog.getByTestId("mcp-url").fill("https://mcp.acme.example/mcp");
+    await expect(dialog.getByTestId("mcp-auth-mode-org_secret").locator("input")).toBeChecked();
+    await dialog.getByTestId("mcp-auth-mode-per_member_oauth").click();
+    await expect(dialog.getByTestId("mcp-auth-mode-per_member_oauth").locator("input")).toBeChecked();
+    // Member sign-in: no organization headers; the redirect URI to register at the provider.
+    await expect(dialog.getByTestId("mcp-add-header")).toHaveCount(0);
+    await expect(dialog.getByTestId("mcp-redirect-uri")).toHaveValue(
+      /\/api\/v1\/connectors\/oauth\/callback$/,
+    );
+    await expect(dialog.getByTestId("mcp-auth-explanation")).toContainText("Settings › Connections");
+    await dialog.getByTestId("mcp-oauth-client-toggle").click();
+    await dialog.getByTestId("mcp-oauth-issuer").fill("https://auth.acme.example");
+    await dialog.getByTestId("mcp-oauth-client-id").fill("ocw-production");
+    await dialog.getByTestId("mcp-oauth-client-secret").fill(CLIENT_CANARY);
+    await dialog.getByTestId("mcp-oauth-scopes").fill("crm.read crm.write");
+    await dialog.getByTestId("mcp-save").click();
+    await expect(dialog).toBeHidden();
+
+    const card = serverCard(page, CRM);
+    await expect(card.getByTestId("mcp-auth-badge")).toHaveText("Member sign-in");
+    await expect(card.getByTestId("mcp-member-count")).toHaveText("No members connected yet");
+    expect(await page.content()).not.toContain(CLIENT_CANARY);
+
+    const list = (await (await admin.get("/api/v1/mcp-servers")).json()) as {
+      servers: Array<{
+        name: string;
+        authMode: string;
+        oauthScopes: string[] | null;
+        oauthClients: unknown[];
+      }>;
+    };
+    const saved = list.servers.find((s) => s.name === CRM);
+    expect(saved).toMatchObject({
+      authMode: "per_member_oauth",
+      oauthScopes: ["crm.read", "crm.write"],
+      oauthClients: [{ issuer: "https://auth.acme.example", clientId: "ocw-production", hasSecret: true }],
+    });
+    expect(JSON.stringify(list)).not.toContain(CLIENT_CANARY);
+    await boss.context.close();
+  } finally {
+    await removeServers(admin, [CRM]).catch(() => undefined);
+    await admin.dispose();
+  }
 });
