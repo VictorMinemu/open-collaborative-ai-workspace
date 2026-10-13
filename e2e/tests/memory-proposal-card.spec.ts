@@ -359,7 +359,10 @@ test("self-approval with the decision right: the admin approves his own bot's or
   try {
     await me.page.goto(`${BASE_URL}/chat/dm/${bot.dmId}`);
     await expect(me.page.getByTestId("dm-view")).toBeVisible();
-    const line = `- Autofy Labs ships open collaborative AI workspaces (${w})`;
+    // The organization's MEMORY.md outlives an attempt (a serial retry or --repeat-each appends again): a line unique
+    // to this attempt keeps the viewer assertion strict.
+    const run = `${info.retry}${info.repeatEachIndex}-${Math.random().toString(36).slice(2, 8)}`;
+    const line = `- Autofy Labs ships open collaborative AI workspaces (${w}, run ${run})`;
     await ask(
       me.page,
       `Save this as organization context [[call ocw_memory_propose ${JSON.stringify({
