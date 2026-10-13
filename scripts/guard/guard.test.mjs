@@ -118,6 +118,64 @@ describe("guard: policy tests, RLS and focused tests", () => {
   });
 });
 
+describe("guard: ocw.raw-egress", () => {
+  const RULE = /ocw\.raw-egress/;
+
+  it("a raw network call in the connectors, keychain or proxy files fails, naming the rule and each file", () => {
+    put("apps/api/src/modules/keychain/a.ts", `export const a = () => fetch("https://example.com");\n`);
+    put("apps/api/src/modules/keychain/b.ts", `import { request } from "node:https";\nexport { request };\n`);
+    put("apps/api/src/modules/keychain/c.ts", `import { Agent } from "undici";\nexport { Agent };\n`);
+    put(
+      "apps/api/src/modules/connectors/d.ts",
+      `export const d = () => globalThis.fetch("https://x.test");\n`,
+    );
+    put("apps/api/src/modules/connectors/e.ts", `import net from "node:net";\nexport const e = net;\n`);
+    put(
+      "apps/api/src/modules/agent-channel/http-requests.ts",
+      `export const f = () => fetch("https://x");\n`,
+    );
+    put(
+      "apps/api/src/modules/agent-channel/connectors.ts",
+      `const http = require("http");\nexport { http };\n`,
+    );
+    const res = semgrep();
+    assert.notEqual(res.status, 0, res.out);
+    for (const file of [
+      "apps/api/src/modules/keychain/a.ts",
+      "apps/api/src/modules/keychain/b.ts",
+      "apps/api/src/modules/keychain/c.ts",
+      "apps/api/src/modules/connectors/d.ts",
+      "apps/api/src/modules/connectors/e.ts",
+      "apps/api/src/modules/agent-channel/http-requests.ts",
+      "apps/api/src/modules/agent-channel/connectors.ts",
+    ]) {
+      assert.match(res.out, new RegExp(`ocw\\.raw-egress ${file.replaceAll(".", "\\.")}`), res.out);
+    }
+  });
+
+  it("the same calls outside those modules, in their tests, or through the guard pass", () => {
+    put("apps/api/src/modules/chat/x.ts", `export const x = () => fetch("https://example.com");\n`);
+    put("apps/api/src/modules/agent-channel/memories.ts", `export const m = () => fetch("https://x");\n`);
+    put(
+      "apps/api/src/modules/keychain/x.test.ts",
+      `import { Agent } from "undici";\nfetch("http://127.0.0.1");\n`,
+    );
+    put(
+      "apps/api/src/modules/keychain/ok.ts",
+      [
+        `import { isIP } from "node:net";`,
+        `import type { Socket } from "node:net";`,
+        `import { egressFor } from "../../lib/egress";`,
+        `export const ok = (env: never, s?: Socket) => isIP("1.1.1.1") && egressFor(env).fetch("https://x.test");`,
+        "",
+      ].join("\n"),
+    );
+    const res = semgrep();
+    assert.equal(res.status, 0, res.out);
+    assert.doesNotMatch(res.out, RULE);
+  });
+});
+
 describe("guard: rule fixtures", () => {
   it("--rule-tests passes over .semgrep/tests", () => {
     const res = guard(["--rule-tests"]);
