@@ -3,6 +3,7 @@ export * from "./agent-cards";
 export * from "./agent-channel";
 export * from "./ai-chat";
 export * from "./ai-generation";
+export * from "./approvals";
 export * from "./attachments";
 export * from "./board";
 export * from "./bot-capabilities";
