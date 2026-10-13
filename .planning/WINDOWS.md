@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 95
+open_count: 98
 waived_count: 2
 fixed_count: 25
-total_count: 122
-last_updated: 2026-10-13T04:19:13.134Z
+total_count: 125
+last_updated: 2026-10-13T04:30:05.650Z
 ---
 
 # Broken Windows Ledger
@@ -137,6 +137,9 @@ last_updated: 2026-10-13T04:19:13.134Z
 | 120 | 07.2 | deviation | compose.yaml |  | The internal pii network is created by every compose project even with the profile off (uses Docker address pools); adding it recreates the api once on the next up | open |  | 2026-10-13T04:19:12.931Z |  |
 | 121 | 07.2 | unrun-verify | infra/presidio/recognizers.yaml |  | Spanish Presidio accuracy only checked on fixed samples (missed a Spanish name in a probe); owner manual check on real documents | open |  | 2026-10-13T04:19:13.026Z |  |
 | 122 | 07.2 | deviation | scripts/ocw.mjs |  | No pnpm ocw enable pii: turning on the pii profile means editing .env by hand, unlike other profiles | open |  | 2026-10-13T04:19:13.134Z |  |
+| 123 | 07.2 | deviation | apps/openclaw-channel/src/memory-files-tool.ts |  | /memory/* Agent Channel routes exist only in the fake API until 07.2-11; the real API would 404 (no turn offers the tools yet) | open |  | 2026-10-13T04:30:05.478Z |  |
+| 124 | 07.2 | deviation | infra/openclaw |  | No memory scenario in the real-cell smoke yet; add it in 07.2-15 | open |  | 2026-10-13T04:30:05.563Z |  |
+| 125 | 07.2 | deviation | apps/openclaw-channel/src/agent-channel-protocol.ts |  | memoryFiles mirror uses the exact scopeKind enum: a new API scopeKind silently drops all files and falls back to legacy notes until the mirror is updated | open |  | 2026-10-13T04:30:05.650Z |  |
 
 ````json
 [
@@ -1602,6 +1605,42 @@ last_updated: 2026-10-13T04:19:13.134Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-13T04:19:13.134Z",
+    "resolved_at": null
+  },
+  {
+    "id": 123,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/openclaw-channel/src/memory-files-tool.ts",
+    "line": null,
+    "description": "/memory/* Agent Channel routes exist only in the fake API until 07.2-11; the real API would 404 (no turn offers the tools yet)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:30:05.478Z",
+    "resolved_at": null
+  },
+  {
+    "id": 124,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "infra/openclaw",
+    "line": null,
+    "description": "No memory scenario in the real-cell smoke yet; add it in 07.2-15",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:30:05.563Z",
+    "resolved_at": null
+  },
+  {
+    "id": 125,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/openclaw-channel/src/agent-channel-protocol.ts",
+    "line": null,
+    "description": "memoryFiles mirror uses the exact scopeKind enum: a new API scopeKind silently drops all files and falls back to legacy notes until the mirror is updated",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T04:30:05.650Z",
     "resolved_at": null
   }
 ]
