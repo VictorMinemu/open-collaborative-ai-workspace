@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 124
+open_count: 126
 waived_count: 3
 fixed_count: 34
-total_count: 161
-last_updated: 2026-10-13T08:49:54.419Z
+total_count: 163
+last_updated: 2026-10-13T09:44:33.110Z
 ---
 
 # Broken Windows Ledger
@@ -176,6 +176,8 @@ last_updated: 2026-10-13T08:49:54.419Z
 | 159 | 07.2 | deviation | apps/web/package.json |  | lang-markdown pulls HTML/CSS/JS modes into the editor bundle; Cmd/Ctrl+S label uses deprecated navigator.platform | open |  | 2026-10-13T08:49:37.641Z |  |
 | 160 | 07.2 | deviation | apps/api/src/modules/approval |  | The live card event is emitted before the card is linked to its approval (client works around it); the server should emit message.updated after linking. Expiry does not arrive live (card stays Pending until reload) | open |  | 2026-10-13T08:49:54.347Z |  |
 | 161 | 07.2 | deviation | apps/web/components/ui/dialog.tsx |  | The shared Dialog close X is 32 px below 1024 (UI-SPEC asks 44) | open |  | 2026-10-13T08:49:54.419Z |  |
+| 162 | 07.2 | deviation | e2e/tests/memory-files.spec.ts |  | memory-files.spec depends on run order: it expects exact scopes for Sam and breaks once other specs leave private scopes of Sam in the shared DB | open |  | 2026-10-13T09:44:33.028Z |  |
+| 163 | 07.2 | deviation | apps/api/src/modules/memory |  | Private scopes of deleted bots still appear in /memory/scopes; the bot page waits for the full GET /agents list (no useAgent(id)) | open |  | 2026-10-13T09:44:33.110Z |  |
 
 ````json
 [
@@ -2109,6 +2111,30 @@ last_updated: 2026-10-13T08:49:54.419Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-13T08:49:54.419Z",
+    "resolved_at": null
+  },
+  {
+    "id": 162,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "e2e/tests/memory-files.spec.ts",
+    "line": null,
+    "description": "memory-files.spec depends on run order: it expects exact scopes for Sam and breaks once other specs leave private scopes of Sam in the shared DB",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T09:44:33.028Z",
+    "resolved_at": null
+  },
+  {
+    "id": 163,
+    "kind": "deviation",
+    "phase": "07.2",
+    "file": "apps/api/src/modules/memory",
+    "line": null,
+    "description": "Private scopes of deleted bots still appear in /memory/scopes; the bot page waits for the full GET /agents list (no useAgent(id))",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-13T09:44:33.110Z",
     "resolved_at": null
   }
 ]
