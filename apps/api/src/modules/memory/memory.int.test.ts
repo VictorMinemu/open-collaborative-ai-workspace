@@ -233,6 +233,24 @@ describe("tracer: a person edits their private memory over REST", () => {
     ).toBe("memory_file_too_large");
   });
 
+  it("a body of escaped control characters is judged by its content, never by Fastify's body limit (WINDOWS 140)", async () => {
+    // Exactly the 256 KiB cap: each character escapes to six bytes of JSON (1.5 MiB on the wire), and is stored.
+    const atCap = "\u0001".repeat(256 * 1024);
+    const created = await ok(
+      sam.request("POST", `/api/v1/memory/scopes/${scopeId}/files`, { path: "ctrl.md", content: atCap }),
+    );
+    expect(created.bytes).toBe(256 * 1024);
+    // Over the cap and over the 2 MiB wire limit: the memory code, on create and on update alike.
+    const over = "\u0001".repeat(400 * 1024);
+    for (const [method, url, body] of [
+      ["POST", `/api/v1/memory/scopes/${scopeId}/files`, { path: "ctrl-2.md", content: over }],
+      ["PUT", `/api/v1/memory/files/${created.id}`, { content: over, expectedVersion: 1 }],
+    ] as const) {
+      expect((await fails(sam.request(method, url, body), 413)).code, method).toBe("memory_file_too_large");
+    }
+    await ok(sam.request("DELETE", `/api/v1/memory/files/${created.id}?expectedVersion=1`));
+  });
+
   it("REST paths are re-parsed with the shared grammar and unique case-insensitively", async () => {
     for (const [path, reason] of [
       ["a/../b.md", "dot_segment"],
