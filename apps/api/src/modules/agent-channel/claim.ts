@@ -53,6 +53,13 @@ export async function claimToolCall(
     countCall?: boolean;
     /** Extra audit metadata (ids, counts and hosts only: never arguments, paths, queries or results). */
     metadata?: Record<string, unknown>;
+    /**
+     * 07.5-11 (D-02, D-04, APPROVE-02, APPROVE-04): the approval whose one-use grant `approvalForCall` just consumed for
+     * THIS call, in this transaction. The claim then omits the taint condition for this one UPDATE (a person approved
+     * exactly this action), records `agent_tool_calls.approval_id` and audits `approvalId` and `grant: true`. The caps
+     * still apply, and untrusted output still taints the turn afterwards; every other call of the turn is unchanged.
+     */
+    grantApprovalId?: string | null;
   },
 ): Promise<ClaimedCall> {
   const { turn, flags } = p;
@@ -62,7 +69,7 @@ export async function claimToolCall(
       eq(agentTurns.eventId, turn.eventId),
       lt(agentTurns.toolCalls, MAX_TOOL_CALLS_PER_TURN),
       p.web ? lt(agentTurns.webCalls, MAX_WEB_CALLS_PER_TURN) : undefined,
-      flags.sideEffecting ? eq(agentTurns.tainted, false) : undefined,
+      flags.sideEffecting && !p.grantApprovalId ? eq(agentTurns.tainted, false) : undefined,
     ];
     const updated = await tx
       .update(agentTurns)
@@ -96,6 +103,8 @@ export async function claimToolCall(
       target: p.target,
       decision: reason ? "denied" : "allowed",
       reason,
+      // The consumed grant stays bound to this call even on a refusal (the grant is never given back).
+      approvalId: p.grantApprovalId ?? null,
     })
     .returning({ id: agentToolCalls.id });
   if (!row) throw new Error("agent_tool_calls insert failed");
@@ -118,6 +127,7 @@ export async function claimToolCall(
       target: p.target,
       reason,
       ...p.metadata,
+      ...(p.grantApprovalId ? { approvalId: p.grantApprovalId, grant: true } : {}),
     },
   });
   return { callId: row.id, allowed: reason === null, reason };

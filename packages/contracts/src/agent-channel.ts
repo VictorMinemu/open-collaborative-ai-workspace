@@ -7,6 +7,7 @@ import {
   SubscriptionProviderKind,
 } from "./agent";
 import { AgentCardInput, AgentCardKind, AgentCardPatch } from "./agent-cards";
+import { APPROVAL_NOTE_MAX } from "./approvals";
 import {
   BOARD_CARD_DESCRIPTION_MAX,
   BOARD_MAX_COLUMNS,
@@ -641,6 +642,16 @@ export const AgentChannelToolCallApproval = z.object({
 });
 export type AgentChannelToolCallApproval = z.infer<typeof AgentChannelToolCallApproval>;
 
+/**
+ * Who said no to exactly this action in the last 24 h (Phase 07.5, `approval_denied`): the decider's display name
+ * ("An approver" once they left) and their own note, so the bot can tell its person. Never an id, an email or arguments.
+ */
+export const AgentChannelApprovalDenial = z.object({
+  deciderName: z.string().max(200),
+  note: z.string().max(APPROVAL_NOTE_MAX).nullable(),
+});
+export type AgentChannelApprovalDenial = z.infer<typeof AgentChannelApprovalDenial>;
+
 export const AgentChannelToolCallDecision = z.object({
   callId: Id,
   allowed: z.boolean(),
@@ -648,6 +659,8 @@ export const AgentChannelToolCallDecision = z.object({
   reason: z.string().max(200).nullable(),
   /** Phase 07.5: set with `approval_required` / `approval_pending`; absent from older APIs. */
   approval: AgentChannelToolCallApproval.nullable().optional(),
+  /** Phase 07.5: set with `approval_denied` (who decided and their note); absent otherwise and from older APIs. */
+  denial: AgentChannelApprovalDenial.nullable().optional(),
 });
 export type AgentChannelToolCallDecision = z.infer<typeof AgentChannelToolCallDecision>;
 

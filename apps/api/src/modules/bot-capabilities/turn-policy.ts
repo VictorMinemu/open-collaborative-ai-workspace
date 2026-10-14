@@ -25,6 +25,7 @@ import type { Core } from "../../core";
 import { type EffectiveVaultItem, effectiveVaultItems, unitAudienceAllows } from "../keychain";
 import type { MemoryAudience, MemoryService } from "../memory";
 import { agentResource, orgResource, type PermissionService, type PrincipalRef } from "../organization";
+import { approvalModesFor } from "../tool-approval";
 import { type CatalogSource, effectiveCapabilities, effectiveTools, readCapabilities } from "./capabilities";
 import { loadAllGrants, loadCatalog, loadGrants } from "./catalog";
 import { loadTurnMemory } from "./memory";
@@ -411,21 +412,30 @@ async function computeTurn(
       name: key.name.slice(0, 80),
     });
   }
+  const assembled = assemble(
+    effective,
+    p.conversationKind,
+    catalog,
+    allowed,
+    p.board === true,
+    usable.length > 0,
+    workZone,
+  );
+  // Per-tool approvals (07.5-11, D-01, D-04, APPROVE-01): every offered tool with an effective `always` or
+  // `when_tainted` rule for (bot, human) is flagged, so the gate sends exactly those calls' arguments. One policy load
+  // per turn computation; delivery and the call-time re-decision share it. The cell-wide view never calls this.
+  const modes = await approvalModesFor(tx, { agentId: row.id, userId: p.humanUserId }, assembled.tools);
+  for (const [tool, mode] of modes) {
+    const flags = assembled.toolFlags[tool];
+    if (flags) assembled.toolFlags[tool] = { ...flags, approval: mode };
+  }
   return {
     effective,
     botName: row.name,
     dailyLimit: effectiveDailyLimit(row.scope, caps, policy),
     withheld,
     keys: { usable, memberAccount, unitAudience },
-    ...assemble(
-      effective,
-      p.conversationKind,
-      catalog,
-      allowed,
-      p.board === true,
-      usable.length > 0,
-      workZone,
-    ),
+    ...assembled,
   };
 }
 
