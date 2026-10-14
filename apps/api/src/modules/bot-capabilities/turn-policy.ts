@@ -51,8 +51,11 @@ export interface TurnKeys {
   memberAccount: EffectiveVaultItem[];
 }
 
-/** `currentTurnTools`'s answer: the tools and flags, plus the keychain decision the proxy routes re-check. */
-export type CurrentTurnTools = TurnTools & { keys: TurnKeys };
+/**
+ * `currentTurn`'s answer: the tools and flags, plus the keychain decision and the withheld entries the proxy routes
+ * re-check (07.4-12: a per-member tool withheld here as `member_account` is refused with that reason).
+ */
+export type CurrentTurnTools = TurnTools & { keys: TurnKeys; withheld: Withheld };
 
 /**
  * Who reads a persona's answer in a shared AI chat (06-10, D-06, P-10): the joined humans who can read it, and whether a
@@ -411,8 +414,8 @@ export async function currentTurn(
 ): Promise<CurrentTurnTools> {
   const turn = await computeTurn(tx, perms, p, env, audience);
   return turn
-    ? { tools: turn.tools, toolFlags: turn.toolFlags, keys: turn.keys }
-    : { tools: [], toolFlags: {}, keys: { usable: [], memberAccount: [] } };
+    ? { tools: turn.tools, toolFlags: turn.toolFlags, keys: turn.keys, withheld: turn.withheld }
+    : { tools: [], toolFlags: {}, keys: { usable: [], memberAccount: [] }, withheld: [] };
 }
 
 function validTimeZone(zone: string | null | undefined): string {
