@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 125
+open_count: 124
 waived_count: 4
-fixed_count: 68
-total_count: 197
-last_updated: 2026-10-14T04:12:44.094Z
+fixed_count: 70
+total_count: 198
+last_updated: 2026-10-14T04:20:46.057Z
 ---
 
 # Broken Windows Ledger
@@ -205,13 +205,14 @@ last_updated: 2026-10-14T04:12:44.094Z
 | 188 | 07.4 | deviation | e2e/support/a11y.ts |  | The a11y helper waits for infinite animations (pulse, spinner, skeleton) and hangs to timeout; specs cancel them before axe; fix in the helper | fixed |  | 2026-10-14T00:55:32.882Z | 2026-10-14T04:12:43.932Z |
 | 189 | 07.4 | deviation | apps/web/components/bots |  | Template 'Connect' links point to /settings/connections (built by 07.4-13); the empty state copy above Templates predates templates; skip notices are generic (no effective value in the contract) | fixed |  | 2026-10-14T00:55:32.956Z | 2026-10-14T04:12:43.768Z |
 | 190 | 07.4 | deviation | .github/CODEOWNERS |  | CODEOWNERS does not cover apps/api/src/modules/keychain (and the new connectors module); client-credentials token cache is per process, record in ADR-0025; prove a 30 s connector call in the real cell in 07.4-14 | open |  | 2026-10-14T02:01:28.061Z |  |
-| 191 | 07.4 | deviation | apps/api/src/modules/keychain |  | DECISION NEEDED in 07.4-12/14: unit keys are offered in public channels and shared AI chats, so results fetched with a unit's key can reach people outside the unit; apply the audience rule (every reader inside the unit) as memory does | open |  | 2026-10-14T02:01:28.146Z |  |
+| 191 | 07.4 | deviation | apps/api/src/modules/keychain |  | DECISION NEEDED in 07.4-12/14: unit keys are offered in public channels and shared AI chats, so results fetched with a unit's key can reach people outside the unit; apply the audience rule (every reader inside the unit) as memory does | fixed |  | 2026-10-14T02:01:28.146Z | 2026-10-14T04:20:45.906Z |
 | 192 | 07.4 | deviation | apps/openclaw-channel/src/tool-guard.ts |  | Plugin local gate uses fixed list flags: after a list it lets a local write through and the API refuses it as tainted (safe, less precise message); /tool-calls still opens its tx with no user | open |  | 2026-10-14T02:01:28.231Z |  |
 | 193 | 07.4 | deviation | apps/api/src/modules/connectors |  | On issuer_changed or any terminal failure the credential is dropped without revoking at the old issuer (live until expiry); concurrent DCR registrations for one issuer leave the loser orphaned at the provider; each refresh rediscovers the provider (2 extra requests) | open |  | 2026-10-14T02:33:13.855Z |  |
-| 194 | 07.4 | deviation | apps/api/src/modules/connectors |  | conversationName is null for DMs and groups, so the UI would show 'a conversation you can no longer open'; a single member's probe failure puts the whole server in error | open |  | 2026-10-14T02:33:13.926Z |  |
+| 194 | 07.4 | deviation | apps/api/src/modules/connectors |  | conversationName is null for DMs and groups, so the UI would show 'a conversation you can no longer open'; a single member's probe failure puts the whole server in error | fixed |  | 2026-10-14T02:33:13.926Z | 2026-10-14T04:20:45.978Z |
 | 195 | 07.4 | deviation | packages/db/sql/post-migrate.sql |  | connector_credential secrets are readable as ciphertext by any session in the org (AAD binds them to the member); CIMD proven only up to the client_id in the authorization URL | open |  | 2026-10-14T02:33:13.999Z |  |
 | 196 | 07.4 | deviation | apps/web/components/settings |  | With Bots off the Connections page does not allow disconnect although the API does; ReadersPreview lacks the unit name (unbounded line always says 'Everyone in the organization'); Re-probe toast on needs_reconnect says 'Connect … first' | open |  | 2026-10-14T04:12:44.017Z |  |
 | 197 | 07.4 | deviation | apps/web/components/devices-settings.tsx |  | devices-settings.tsx:325 and work-zone/meta.tsx:166 use text-warning by hand and probably fail AA; agent-templates.spec still cancels animations by hand | open |  | 2026-10-14T04:12:44.094Z |  |
+| 198 | 07.4 | deviation | apps/openclaw-channel/src/connector-tools.ts |  | For needs_reconnect the plugin says 'You haven't connected…' (should say reconnect); a unit key held back by the audience rule gives the bot no explanation; each connector call opens a new MCP session | open |  | 2026-10-14T04:20:46.057Z |  |
 
 ````json
 [
@@ -2502,10 +2503,10 @@ last_updated: 2026-10-14T04:12:44.094Z
     "file": "apps/api/src/modules/keychain",
     "line": null,
     "description": "DECISION NEEDED in 07.4-12/14: unit keys are offered in public channels and shared AI chats, so results fetched with a unit's key can reach people outside the unit; apply the audience rule (every reader inside the unit) as memory does",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-14T02:01:28.146Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-14T04:20:45.906Z"
   },
   {
     "id": 192,
@@ -2538,10 +2539,10 @@ last_updated: 2026-10-14T04:12:44.094Z
     "file": "apps/api/src/modules/connectors",
     "line": null,
     "description": "conversationName is null for DMs and groups, so the UI would show 'a conversation you can no longer open'; a single member's probe failure puts the whole server in error",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-14T02:33:13.926Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-14T04:20:45.978Z"
   },
   {
     "id": 195,
@@ -2577,6 +2578,18 @@ last_updated: 2026-10-14T04:12:44.094Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-14T04:12:44.094Z",
+    "resolved_at": null
+  },
+  {
+    "id": 198,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "apps/openclaw-channel/src/connector-tools.ts",
+    "line": null,
+    "description": "For needs_reconnect the plugin says 'You haven't connected…' (should say reconnect); a unit key held back by the audience rule gives the bot no explanation; each connector call opens a new MCP session",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T04:20:46.057Z",
     "resolved_at": null
   }
 ]
