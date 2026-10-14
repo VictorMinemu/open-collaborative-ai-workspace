@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 122
+open_count: 124
 waived_count: 4
 fixed_count: 57
-total_count: 183
-last_updated: 2026-10-14T00:13:21.114Z
+total_count: 185
+last_updated: 2026-10-14T00:27:30.826Z
 ---
 
 # Broken Windows Ledger
@@ -198,6 +198,8 @@ last_updated: 2026-10-14T00:13:21.114Z
 | 181 | 07.4 | deviation | apps/api/src/modules/keychain |  | OAuth keychain token URLs must be https but the e2e fake on :4291 is http; 07.4-13/14 need an https fake or a test-host exemption | open |  | 2026-10-14T00:13:09.756Z |  |
 | 182 | 07.4 | deviation | packages/db/sql/post-migrate.sql |  | agent_vault_grants has no owner-only policy: grants on personal keys (ids only) are visible to any session in the org | open |  | 2026-10-14T00:13:09.855Z |  |
 | 183 | 07.4 | deviation | apps/api/src/modules/keychain |  | 07.4-11 must run keychain use with the turn's human as the RLS user (never no user or another member); CODEOWNERS does not cover modules/keychain; client-credentials token cache is per process (not in an ADR) | open |  | 2026-10-14T00:13:09.951Z |  |
+| 184 | 07.4 | deviation | apps/openclaw-channel/src/connector-tools.ts |  | 07.4-11 must put the three static tool names (never logical m…__tool names) in the /cell snapshot alsoAllow; only a 20 s connector call was proven in the real cell (add a 30 s case to the ADR-0025 checklist); tool descriptions from ocw_connector_list do not taint the turn | open |  | 2026-10-14T00:27:30.749Z |  |
+| 185 | 07.4 | deviation | infra/openclaw/test/run-container-smoke.sh |  | Without SMOKE_BUILD the marketplace scenario fails on macOS Docker Desktop (docker cp leaves install-policy.mjs as uid 501); CI unaffected | open |  | 2026-10-14T00:27:30.826Z |  |
 
 ````json
 [
@@ -2395,6 +2397,30 @@ last_updated: 2026-10-14T00:13:21.114Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-14T00:13:09.951Z",
+    "resolved_at": null
+  },
+  {
+    "id": 184,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "apps/openclaw-channel/src/connector-tools.ts",
+    "line": null,
+    "description": "07.4-11 must put the three static tool names (never logical m…__tool names) in the /cell snapshot alsoAllow; only a 20 s connector call was proven in the real cell (add a 30 s case to the ADR-0025 checklist); tool descriptions from ocw_connector_list do not taint the turn",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T00:27:30.749Z",
+    "resolved_at": null
+  },
+  {
+    "id": 185,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "infra/openclaw/test/run-container-smoke.sh",
+    "line": null,
+    "description": "Without SMOKE_BUILD the marketplace scenario fails on macOS Docker Desktop (docker cp leaves install-policy.mjs as uid 501); CI unaffected",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T00:27:30.826Z",
     "resolved_at": null
   }
 ]
