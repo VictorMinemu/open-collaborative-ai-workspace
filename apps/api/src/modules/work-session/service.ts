@@ -1278,6 +1278,8 @@ export function toPrompt(
   r: PromptRow,
   authorName: string | null,
   attachments: Attachment[] = [],
+  /** Phase 07.5: the bot whose Work Zone proposal created this prompt (wired by 07.5-08). */
+  proposedBy: WorkPrompt["proposedBy"] = null,
 ): WorkPrompt {
   return {
     id: r.id,
@@ -1292,6 +1294,7 @@ export function toPrompt(
     dispatchedAt: iso(r.dispatchedAt),
     completedAt: iso(r.completedAt),
     attachments,
+    proposedBy,
   };
 }
 

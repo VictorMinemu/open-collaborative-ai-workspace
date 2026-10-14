@@ -2,6 +2,7 @@ import { z } from "zod";
 import { Id, IsoDateTime } from "./common";
 import { MemoryProposalView } from "./memory";
 import { ApprovalOrigin, ToolCallApprovalView } from "./tool-approvals";
+import { WorkZoneProposalView } from "./work-zone-proposals";
 
 /**
  * Approve-and-apply (Phase 07.2, D-05, D-08, ADR-0023): a generic approval a person decides and the server applies
@@ -149,8 +150,9 @@ export const ApprovalView = z.discriminatedUnion("type", [
     title: z.string().trim().min(1).max(200),
     fields: z.array(ApprovalField).max(12),
   }),
-  // Phase 07.5: exactly the call a bot asks to run once.
+  // Phase 07.5: exactly the call a bot asks to run once, and a Work Zone session a bot proposes.
   ToolCallApprovalView,
+  WorkZoneProposalView,
 ]);
 export type ApprovalView = z.infer<typeof ApprovalView>;
 

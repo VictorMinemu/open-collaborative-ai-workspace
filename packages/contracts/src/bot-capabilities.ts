@@ -356,6 +356,13 @@ export const BUILTIN_TOOLS = {
   connectorList: "ocw_connector_list",
   connectorCall: "ocw_connector_call",
   httpRequest: "ocw_http_request",
+  /**
+   * Phase 07.5 (D-03, P-08): Work Zone proposals. `ocw_work_zone_projects` lists the projects the turn's human may start
+   * on; `ocw_start_work_zone` proposes a session (project, device, prompt, runtime; never a mode) as a card the human
+   * starts. Offered only when the turn's human holds `work_session.create`; never approvable (their own flow).
+   */
+  workZoneProjects: "ocw_work_zone_projects",
+  startWorkZone: "ocw_start_work_zone",
 } as const;
 
 export const MAX_TOOL_CALLS_PER_TURN = 8;
