@@ -204,6 +204,20 @@ export async function startConnectorsStack(): Promise<ConnectorsStack> {
   };
 }
 
+/** Invites a standard member into org A (Víctor's organization). */
+export async function join(
+  s: ConnectorsStack,
+  email: string,
+  name: string,
+): Promise<readonly [TestClient, string]> {
+  const inv = await ok(s.victor.request("POST", "/api/v1/invitations", { email, role: "standard" }));
+  const c = new TestClient(s.stack.baseUrl);
+  const acc = await ok(
+    c.request("POST", `/api/v1/invitations/${inv.id}/accept`, { name, password: "another-long-password" }),
+  );
+  return [c, acc.user.id as string] as const;
+}
+
 /** The fake's counters (hashes and counts only). */
 export async function fakeStats(s: ConnectorsStack): Promise<FakeMcpOAuthStats> {
   const res = await s.browser.fetch(`${s.fakeBase}/mcp-oauth/__stats`);

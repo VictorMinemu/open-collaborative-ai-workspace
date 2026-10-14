@@ -15,6 +15,7 @@ export {
   touchConnection,
 } from "./credentials";
 export { callTool, listTools, McpUpstreamError } from "./mcp-client";
+export { activeShare, readersOf } from "./shares";
 
 /**
  * connectors module (Phase 07.4, D-01 … D-03, D-07 item 4; CONN-01 … CONN-03): the member side of per-member
@@ -24,10 +25,11 @@ export { callTool, listTools, McpUpstreamError } from "./mcp-client";
  *
  * Routes (under /api/v1): GET `/connectors`, POST `/connectors/:id/connect`, PUT `/connectors/:id/secret`,
  * DELETE `/connectors/:id/connection` (`connector.connect`); POST `/connectors/:id/probe` (`mcp.manage`, the caller's
- * own connection); public GET `/connectors/oauth/callback` and `/connectors/oauth/client-metadata.json`.
+ * own connection); public GET `/connectors/oauth/callback` and `/connectors/oauth/client-metadata.json`;
+ * GET/POST `/member-account-shares`, GET `/member-account-shares/preview`, DELETE `/member-account-shares/:id`.
  *
  * For the connector proxy (07.4-11/12): `accessTokenFor`, `forceRefresh`, `markNeedsReconnect`,
- * `connectionStatusFor`, `touchConnection`.
+ * `connectionStatusFor`, `touchConnection`, `activeShare`.
  */
 export function createConnectorsModule(core: Core): ApiModule {
   const perms = createPermissionService(core);

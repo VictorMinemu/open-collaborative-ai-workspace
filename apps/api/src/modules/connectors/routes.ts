@@ -2,12 +2,16 @@ import {
   type ConnectorErrorCode,
   ConnectSecretRequest,
   ConnectStartResponse,
+  CreateMemberAccountShareRequest,
   connectorOAuthUrls,
   IdParams,
   McpServer,
+  MemberAccountShare,
+  MemberAccountShareList,
   type MemberConnector,
   MemberConnectorList,
   MemberConnector as MemberConnectorSchema,
+  ReadersPreview,
 } from "@ocw/contracts";
 import { connectorConnections, connectorOAuthClients, mcpServers, mcpServerTools, type Tx } from "@ocw/db";
 import { and, asc, eq, ne } from "drizzle-orm";
@@ -17,6 +21,7 @@ import { markDecided } from "../../authz";
 import { type App, authOf, type Core, tenant } from "../../core";
 import { egressFor } from "../../lib/egress";
 import { conflict, HttpError, notFound } from "../../lib/errors";
+import { createConversationAccess } from "../chat";
 import { getMcpServer, mcpReadOptions, oauthClientsOf, setOAuthStatus } from "../mcp";
 import type { PermissionService } from "../organization";
 import { clientMetadataDocument } from "./client-metadata";
@@ -44,6 +49,7 @@ import {
   type TokenBundle,
 } from "./oauth";
 import { probeConnector } from "./probe";
+import { createShare, listShares, previewReaders, revokeShare, type SharesDeps } from "./shares";
 
 const tags = ["connectors"];
 
@@ -574,6 +580,64 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
       if (!token.ok) throw connectError(token.reason);
       await probeConnector(core, key, token);
       return core.db.withTenant(tenant(req), (tx) => getMcpServer(tx, req.params.id, mcpReadOptions(core)));
+    },
+  );
+
+  registerShareRoutes(app, { core, perms, access: createConversationAccess(core) });
+}
+
+const PreviewQuery = z.object({ conversationId: IdParams.shape.id });
+
+/**
+ * Member-account shares (D-03, CONN-03): the caller's own choices only. Creating one decides the resource's permission
+ * (`connector.connect` / `vault.use`) and the conversation's readability; listing and revoking touch the caller's own
+ * rows only (revoking only reduces access, so it is always allowed).
+ */
+function registerShareRoutes(app: App, d: SharesDeps): void {
+  const { core } = d;
+  const user = { config: { authz: "user" as const }, preHandler: [core.identity.requireUser] };
+
+  app.get(
+    "/member-account-shares",
+    { ...user, schema: { tags, response: { 200: MemberAccountShareList } } },
+    async (req, reply) => {
+      markDecided(req);
+      reply.header("cache-control", "no-store");
+      const shares = await core.db.withTenant(tenant(req), (tx) => listShares(d, tx, authOf(req).userId));
+      return { shares };
+    },
+  );
+
+  app.get(
+    "/member-account-shares/preview",
+    { ...user, schema: { tags, querystring: PreviewQuery, response: { 200: ReadersPreview } } },
+    async (req) =>
+      core.db.withTenant(tenant(req), (tx) => previewReaders(d, req, tx, req.query.conversationId)),
+  );
+
+  app.post(
+    "/member-account-shares",
+    {
+      ...user,
+      logLevel: "info",
+      schema: { tags, body: CreateMemberAccountShareRequest, response: { 201: MemberAccountShare } },
+    },
+    async (req, reply) => {
+      const share = await core.db.withTenant(tenant(req), (tx) =>
+        createShare(d, req, tx, authOf(req).userId, req.body),
+      );
+      reply.code(201);
+      return share;
+    },
+  );
+
+  app.delete(
+    "/member-account-shares/:id",
+    { ...user, logLevel: "info", schema: { tags, params: IdParams } },
+    async (req, reply) => {
+      markDecided(req);
+      await core.db.withTenant(tenant(req), (tx) => revokeShare(d, tx, authOf(req).userId, req.params.id));
+      return reply.code(204).send();
     },
   );
 }
