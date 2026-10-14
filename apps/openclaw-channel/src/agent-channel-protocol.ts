@@ -34,6 +34,10 @@
  *                                an AgentChannelToolRefusal code)
  *   POST /http-requests        ← AgentChannelHttpRequest → AgentChannelHttpResponse (ocw_http_request: a keychain
  *                                handle, never a value; same refusals)
+ *   POST /work-zone/projects   ← AgentChannelWorkZoneProjects → AgentChannelWorkZoneProjectsResponse
+ *                                (ocw_work_zone_projects, 07.5: the projects the turn's human may start a session on)
+ *   POST /work-zone/proposals  ← AgentChannelWorkZonePropose → `{approvalId, created}` or 200 `{refused}`
+ *                                (ocw_start_work_zone, 07.5: a proposal the turn's human starts; never a mode)
  *   POST /mcp/probe-results    ← AgentChannelMcpProbeResult (the tools an `mcp.probe` discovered; D-13)
  *   POST /plugins/report       ← AgentChannelPluginReport (a marketplace install / uninstall outcome; D-14)
  *   POST /plugins/verify-install, GET /plugins: used by infra/openclaw (install gate, boot render), not here
@@ -1162,3 +1166,78 @@ export const AgentChannelHttpResponse = z.object({
   redirectHost: z.string().nullable().default(null),
 });
 export type AgentChannelHttpResponse = z.infer<typeof AgentChannelHttpResponse>;
+
+// ---------------------------------------------------------------- Work Zone proposals (Phase 07.5)
+
+/*
+ * `ocw_work_zone_projects` and `ocw_start_work_zone` (07.5 D-03, C-01): bound to a delivered turn like the connector
+ * tools. The human a session is proposed for is always the stored turn's, never a field: the bodies carry the event
+ * and the agent plus the tool's own fields. There is deliberately no mode, model or full-access field anywhere, so a
+ * bot can never choose how a session runs (APPROVE-04). Mirror of `packages/contracts/src/work-zone-proposals.ts`.
+ */
+
+/** The runtimes a proposal may name (contracts `RuntimeId`). */
+export const WORK_ZONE_RUNTIMES = ["claude-code", "codex"] as const;
+export type WorkZoneRuntime = (typeof WORK_ZONE_RUNTIMES)[number];
+
+/** The bounds of contracts `WORK_ZONE_PROPOSAL_LIMITS` the cell uses. */
+export const WORK_ZONE_PROPOSAL_LIMITS = {
+  promptChars: 50_000,
+  pendingPerRequester: 3,
+} as const;
+
+/** Why a proposal was refused before any card existed (contracts `WorkZoneProposalRefusal`). */
+export const WORK_ZONE_PROPOSAL_REFUSALS = [
+  "unknown_turn",
+  "not_in_turn",
+  "tainted",
+  "cap_reached",
+  "not_allowed",
+  "prompt_not_allowed",
+  "project_not_found",
+  "device_not_shared",
+  "device_offline",
+  "runtime_unavailable",
+  "too_many_pending",
+] as const;
+export type WorkZoneProposalRefusal = (typeof WORK_ZONE_PROPOSAL_REFUSALS)[number];
+
+/** `POST /work-zone/projects`: the turn's ids only. */
+export type AgentChannelWorkZoneProjects = { eventId: string; agentId: string };
+
+/** Names and ids only (a host path never leaves the device). Lenient: a newer runtime id stays a string. */
+export const AgentChannelWorkZoneProjectsResponse = z.object({
+  projects: z
+    .array(
+      z.object({
+        projectId: Id,
+        name: z.string(),
+        device: z.object({ id: Id, name: z.string(), online: z.boolean() }),
+        runtimes: z
+          .array(z.object({ id: z.string(), label: z.string(), available: z.boolean() }))
+          .default([]),
+      }),
+    )
+    .default([]),
+});
+export type AgentChannelWorkZoneProjectsResponse = z.infer<typeof AgentChannelWorkZoneProjectsResponse>;
+
+/** `POST /work-zone/proposals`: never a mode, a model or a user. */
+export type AgentChannelWorkZonePropose = {
+  eventId: string;
+  agentId: string;
+  projectId: string;
+  deviceId: string;
+  prompt: string;
+  runtime?: WorkZoneRuntime;
+};
+
+/**
+ * `{approvalId, created}` (created false: the same proposal was already pending) or a 200 `{refused}`. An unknown
+ * refusal code from a newer API stays a string (the plugin answers it with its generic sentence).
+ */
+export const AgentChannelWorkZoneProposeResponse = z.union([
+  z.object({ refused: z.string().min(1).max(64) }),
+  z.object({ approvalId: Id, created: z.boolean() }),
+]);
+export type AgentChannelWorkZoneProposeResponse = z.infer<typeof AgentChannelWorkZoneProposeResponse>;

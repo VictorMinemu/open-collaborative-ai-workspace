@@ -15,7 +15,9 @@
       "ocw_board_card",
       "ocw_connector_list",
       "ocw_connector_call",
-      "ocw_http_request"
+      "ocw_http_request",
+      "ocw_work_zone_projects",
+      "ocw_start_work_zone"
     ]
   },
   "activation": {

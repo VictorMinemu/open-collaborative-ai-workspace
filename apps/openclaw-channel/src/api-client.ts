@@ -38,6 +38,10 @@ import {
   type AgentChannelToolCallRequest,
   type AgentChannelToolCallResult,
   type AgentChannelTyping,
+  type AgentChannelWorkZoneProjects,
+  AgentChannelWorkZoneProjectsResponse,
+  type AgentChannelWorkZonePropose,
+  AgentChannelWorkZoneProposeResponse,
   CellSnapshot,
 } from "./agent-channel-protocol.js";
 import { backoffDelayMs, sleep } from "./backoff.js";
@@ -121,6 +125,9 @@ export type AgentChannelClient = ReturnType<typeof createAgentChannelClient>;
  * API answers `timeout` itself, and inside the cell turn (a 20 s call completes in the real cell, research A4).
  */
 export const CONNECTOR_REQUEST_TIMEOUT_MS = 35_000;
+
+/** Per-attempt budget of the Work Zone proposal routes (07.5-10): two attempts at most, both idempotent server side. */
+export const WORK_ZONE_REQUEST_TIMEOUT_MS = 10_000;
 
 export function trimTrailingSlash(url: string): string {
   return url.replace(/\/+$/u, "");
@@ -383,6 +390,31 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
     async httpRequest(req: AgentChannelHttpRequest, signal?: AbortSignal): Promise<AgentChannelHttpResponse> {
       return AgentChannelHttpResponse.parse(
         await request("POST", "/http-requests", req, signal, 1, CONNECTOR_REQUEST_TIMEOUT_MS),
+      );
+    },
+    /**
+     * `ocw_work_zone_projects` (07.5): the projects the turn's human may start a Work Zone session on, with device
+     * state and runtimes (names and ids only, never a path). Read-only: two attempts of 10 s at most.
+     */
+    async listWorkZoneProjects(
+      req: AgentChannelWorkZoneProjects,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelWorkZoneProjectsResponse> {
+      return AgentChannelWorkZoneProjectsResponse.parse(
+        await request("POST", "/work-zone/projects", req, signal, 2, WORK_ZONE_REQUEST_TIMEOUT_MS),
+      );
+    },
+    /**
+     * `ocw_start_work_zone` (07.5): a proposal the turn's human starts from a card; never a mode. Two attempts of 10 s
+     * at most: the API returns the same approval for the same (event, project, device, prompt), so a retry after a
+     * lost answer opens no second card. A refusal is a 200 `{refused}` (404 for an unknown turn). Never logs the prompt.
+     */
+    async proposeWorkZone(
+      req: AgentChannelWorkZonePropose,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelWorkZoneProposeResponse> {
+      return AgentChannelWorkZoneProposeResponse.parse(
+        await request("POST", "/work-zone/proposals", req, signal, 2, WORK_ZONE_REQUEST_TIMEOUT_MS),
       );
     },
     /**
