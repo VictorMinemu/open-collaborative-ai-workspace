@@ -34,7 +34,20 @@ export type ApprovalOutcome =
   | { kind: "none" }
   | { kind: "grant"; approvalId: string }
   | { kind: "required"; approvalId: string; created: boolean; waitingFor: string; requesterName: string }
-  | { kind: "refused"; reason: ToolApprovalRefusal };
+  | {
+      kind: "refused";
+      reason: ToolApprovalRefusal;
+      /**
+       * `approval_denied` only: who said no and their note, so the bot can tell its person (display name only, never
+       * an email or an id; the note is the decider's own words, at most 280 characters).
+       */
+      denial?: ApprovalDenial;
+    };
+
+export interface ApprovalDenial {
+  deciderName: string;
+  note: string | null;
+}
 
 /** Where the tool comes from, as the claim records it (`agent_tool_calls.source_kind`, `source_id`, `target`). */
 export interface ToolCallSource {
@@ -63,6 +76,15 @@ const refused = (reason: ToolApprovalRefusal): ApprovalOutcome => ({ kind: "refu
 
 const GRANT_USE_SECS = TOOL_APPROVAL_LIMITS.grantUseMs / 1000;
 const DENIED_SUPPRESS_SECS = TOOL_APPROVAL_LIMITS.deniedSuppressMs / 1000;
+
+/** `approval_denied` with who decided (display name only) and their note. */
+async function deniedBy(
+  tx: Tx,
+  d: { decidedBy: string | null; note: string | null },
+): Promise<ApprovalOutcome> {
+  const deciderName = (d.decidedBy ? await memberName(tx, d.decidedBy) : null) ?? "An approver";
+  return { kind: "refused", reason: "approval_denied", denial: { deciderName, note: d.note } };
+}
 
 /** A transaction-scoped advisory lock on one key of this organization (released at commit or rollback). */
 async function lockKey(tx: Tx, key: string): Promise<void> {
@@ -174,6 +196,23 @@ export async function approvalForCall(
     .limit(1);
   if (usedHere) return refused("approval_used");
 
+  // 7. A grant of exactly this action was just used (by another turn, e.g. a concurrent re-run): still inside its use
+  //    window it is "used", not a reason for a second card. After the window the action may be asked for again.
+  const [justUsed] = await tx
+    .select({ id: approvalRequests.id })
+    .from(approvalRequests)
+    .innerJoin(toolCallApprovals, eq(toolCallApprovals.id, approvalRequests.resourceId))
+    .where(
+      and(
+        eq(approvalRequests.kind, TOOL_CALL_KIND),
+        eq(toolCallApprovals.actionHash, hash),
+        eq(approvalRequests.status, "applied"),
+        sql`${approvalRequests.decidedAt} + make_interval(secs => ${GRANT_USE_SECS}) > now()`,
+      ),
+    )
+    .limit(1);
+  if (justUsed) return refused("approval_used");
+
   const requesterName = (await memberName(tx, turn.userId)) ?? "Former member";
   const required = async (approvalId: string, created: boolean): Promise<ApprovalOutcome> => ({
     kind: "required",
@@ -183,7 +222,7 @@ export async function approvalForCall(
     requesterName,
   });
 
-  // 7. A client retry of the same call (same event and tool call id) is answered by the request it made, whatever
+  // 8. A client retry of the same call (same event and tool call id) is answered by the request it made, whatever
   //    the arguments of the retry (the first one wins).
   if (toolCallId) {
     const [retry] = await tx
@@ -191,7 +230,8 @@ export async function approvalForCall(
         id: approvalRequests.id,
         status: approvalRequests.status,
         live: sql<boolean>`${approvalRequests.expiresAt} > now()`,
-        hash: toolCallApprovals.actionHash,
+        decidedBy: approvalRequests.decidedBy,
+        note: approvalRequests.decisionNote,
       })
       .from(toolCallApprovals)
       .innerJoin(approvalRequests, eq(approvalRequests.resourceId, toolCallApprovals.id))
@@ -205,11 +245,11 @@ export async function approvalForCall(
       .limit(1);
     if (retry) {
       if (retry.status === "pending" && retry.live) return required(retry.id, false);
-      return refused(retry.status === "denied" ? "approval_denied" : "approval_used");
+      return retry.status === "denied" ? deniedBy(tx, retry) : refused("approval_used");
     }
   }
 
-  // 8. The same action already waits for a person: no second card.
+  // 9. The same action already waits for a person: no second card.
   const [pending] = await tx
     .select({ id: approvalRequests.id })
     .from(approvalRequests)
@@ -226,9 +266,9 @@ export async function approvalForCall(
     .limit(1);
   if (pending) return required(pending.id, false);
 
-  // 9. A person said no to exactly this in the last 24 h: no new card.
+  // 10. A person said no to exactly this in the last 24 h: no new card.
   const [denied] = await tx
-    .select({ id: approvalRequests.id })
+    .select({ decidedBy: approvalRequests.decidedBy, note: approvalRequests.decisionNote })
     .from(approvalRequests)
     .innerJoin(toolCallApprovals, eq(toolCallApprovals.id, approvalRequests.resourceId))
     .where(
@@ -239,10 +279,11 @@ export async function approvalForCall(
         sql`${approvalRequests.decidedAt} > now() - make_interval(secs => ${DENIED_SUPPRESS_SECS})`,
       ),
     )
+    .orderBy(desc(approvalRequests.decidedAt))
     .limit(1);
-  if (denied) return refused("approval_denied");
+  if (denied) return deniedBy(tx, denied);
 
-  // 10. At most 5 pending per (agent, requester).
+  // 11. At most 5 pending per (agent, requester).
   const [open] = await tx
     .select({ n: count() })
     .from(approvalRequests)
@@ -257,7 +298,7 @@ export async function approvalForCall(
     );
   if ((open?.n ?? 0) >= TOOL_APPROVAL_LIMITS.pendingPerRequester) return refused("too_many_pending");
 
-  // 11. One stored action and one request with its card, replying to the human's message (in its thread, if any).
+  // 12. One stored action and one request with its card, replying to the human's message (in its thread, if any).
   const [asked] = await tx
     .select({ threadId: messages.threadId })
     .from(messages)

@@ -33,6 +33,7 @@ export {
   type StoredPolicy,
 } from "./policies";
 export {
+  type ApprovalDenial,
   type ApprovalForCallDeps,
   type ApprovalForCallInput,
   type ApprovalOutcome,

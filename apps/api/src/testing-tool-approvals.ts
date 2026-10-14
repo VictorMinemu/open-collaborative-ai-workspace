@@ -238,6 +238,7 @@ export async function clearRequests(f: Fixture): Promise<void> {
     f.orgA,
   ]);
   await f.su.query("delete from app.agent_tool_calls where organization_id = $1", [f.orgA]);
+  await f.su.query("delete from app.tool_call_approvals where organization_id = $1", [f.orgA]);
 }
 
 /** A delivered turn of `agentId` for `userId` in `conversationId`, replying to a real message `userClient` posts. */

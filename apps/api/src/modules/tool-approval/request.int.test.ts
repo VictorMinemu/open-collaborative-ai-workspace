@@ -1,12 +1,14 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   approvalRow,
   callFor,
   clearRequests,
+  clearRules,
   countRows,
   decideAs,
   type Fixture,
+  ok,
   requiredId,
   seedTurn,
   setRule,
@@ -166,3 +168,258 @@ describe("tracer: a call that needs approval becomes one request with its card, 
     expect((await storedAction(f, b)).tainted).toBe(true);
   });
 });
+
+/** Moves a request back in time (the database clock decides every window). */
+async function ageRequest(
+  id: string,
+  interval: string,
+  column: "decided_at" | "created" = "created",
+): Promise<void> {
+  if (column === "decided_at") {
+    await f.su.query(
+      `update app.approval_requests set decided_at = decided_at - $2::interval where id = $1`,
+      [id, interval],
+    );
+    return;
+  }
+  await f.su.query(
+    `update app.approval_requests
+       set created_at = created_at - $2::interval, expires_at = expires_at - $2::interval,
+           decided_at = decided_at - $2::interval
+     where id = $1`,
+    [id, interval],
+  );
+}
+
+const CANARY = "CANARY-0757";
+
+describe("guards under time, repetition and concurrency (Task 3)", () => {
+  it("denied: the same values are refused for 24 h with who decided and their note, then may be asked again", async () => {
+    await setRule(f, { mode: "always", approverKind: "requester" });
+    const id = requiredId(await callFor(f, await seedTurn(f), { text: `${CANARY} deny me` }));
+    const row = await approvalRow(f, id);
+    const denied = await f.sam.request("POST", `/api/v1/approvals/${id}/decision`, {
+      outcome: "denied",
+      actionHash: row.action_hash,
+      note: "Not this week",
+    });
+    expect(denied.status, JSON.stringify(denied.body)).toBe(200);
+
+    const again = await callFor(f, await seedTurn(f), { text: `${CANARY} deny me` });
+    expect(again).toEqual({
+      kind: "refused",
+      reason: "approval_denied",
+      denial: { deciderName: "Sam Lee", note: "Not this week" },
+    });
+    expect(await countRows(f, "approval_requests")).toBe(1);
+    expect(await countRows(f, "tool_call_approvals")).toBe(1);
+
+    await ageRequest(id, "25 hours");
+    expect(await callFor(f, await seedTurn(f), { text: `${CANARY} deny me` })).toMatchObject({
+      kind: "required",
+      created: true,
+    });
+  });
+
+  it("at most 5 pending per (agent, requester): the 6th distinct call is too_many_pending, with no row or card", async () => {
+    await setRule(f, { mode: "always", approverKind: "requester" });
+    const turn = await seedTurn(f);
+    for (let i = 0; i < 5; i++) {
+      expect(await callFor(f, turn, { text: `${CANARY} ${i}` })).toMatchObject({
+        kind: "required",
+        created: true,
+      });
+    }
+    expect(await callFor(f, turn, { text: `${CANARY} 5` })).toEqual({
+      kind: "refused",
+      reason: "too_many_pending",
+    });
+    expect(await countRows(f, "approval_requests")).toBe(5);
+    // A pending one that expires frees its place.
+    const [oldest] = (
+      await f.su.query("select id from app.approval_requests where kind = 'tool.call' order by id limit 1")
+    ).rows;
+    await ageRequest(oldest.id, "25 hours");
+    expect(await callFor(f, turn, { text: `${CANARY} 5` })).toMatchObject({
+      kind: "required",
+      created: true,
+    });
+  });
+
+  it("a pending request past 24 h reads expired and the same call asks again", async () => {
+    await setRule(f, { mode: "always", approverKind: "requester" });
+    const id = requiredId(await callFor(f, await seedTurn(f), { text: "late" }));
+    await ageRequest(id, "25 hours");
+    expect((await ok(f.sam.request("GET", `/api/v1/approvals/${id}`))).status).toBe("expired");
+    const next = await callFor(f, await seedTurn(f), { text: "late" });
+    expect(next).toMatchObject({ kind: "required", created: true });
+    expect(requiredId(next)).not.toBe(id);
+  });
+
+  it("an approval is usable for 15 minutes: decided 16 minutes ago, the same call asks again and the old card is past useBy", async () => {
+    await setRule(f, { mode: "always", approverKind: "requester" });
+    const id = requiredId(await callFor(f, await seedTurn(f), { text: "slow" }));
+    await expectOk(decideAs(f, f.sam, id, "approved"));
+    await ageRequest(id, "16 minutes", "decided_at");
+    const next = await callFor(f, await seedTurn(f), { text: "slow" });
+    expect(next).toMatchObject({ kind: "required", created: true });
+    expect(await approvalRow(f, id)).toMatchObject({ status: "approved", consumed_at: null });
+    const card = await ok(
+      f.sam.request("GET", `/api/v1/cards/${(await approvalRow(f, id)).card_message_id}`),
+    );
+    expect(Date.parse(card.approval.useBy)).toBeLessThan(Date.now());
+  });
+
+  it("two identical calls at once create one request and one card", async () => {
+    await setRule(f, { mode: "always", approverKind: "requester" });
+    const [a, b] = [await seedTurn(f), await seedTurn(f)];
+    const outs = await Promise.all([callFor(f, a, { text: "race" }), callFor(f, b, { text: "race" })]);
+    expect(outs.map((o) => (o.kind === "required" ? o.created : o.kind)).sort()).toEqual([false, true]);
+    expect(new Set(outs.map(requiredId)).size).toBe(1);
+    expect(await countRows(f, "approval_requests")).toBe(1);
+    expect(
+      (
+        await f.su.query(
+          "select count(*)::int as n from app.approval_requests where card_message_id is not null and kind = 'tool.call'",
+        )
+      ).rows[0].n,
+    ).toBe(1);
+  });
+
+  it("two re-runs at once against one approval: one grant, one approval_used, one consumption", async () => {
+    await setRule(f, { mode: "always", approverKind: "requester" });
+    const id = requiredId(await callFor(f, await seedTurn(f), { text: "once" }));
+    await expectOk(decideAs(f, f.sam, id, "approved"));
+    const [a, b] = [await seedTurn(f), await seedTurn(f)];
+    const outs = await Promise.all([callFor(f, a, { text: "once" }), callFor(f, b, { text: "once" })]);
+    expect(outs).toContainEqual({ kind: "grant", approvalId: id });
+    expect(outs).toContainEqual({ kind: "refused", reason: "approval_used" });
+    const consumed = (
+      await f.su.query(
+        "select count(*)::int as n from app.audit_events where action = 'approval.grant_consumed' and resource_id = $1",
+        [id],
+      )
+    ).rows[0].n;
+    expect(consumed).toBe(1);
+    expect(await countRows(f, "approval_requests")).toBe(1);
+  });
+
+  it("a client retry (same event and tool call id) returns the first request, even with other arguments", async () => {
+    await setRule(f, { mode: "always", approverKind: "requester" });
+    const turn = await seedTurn(f);
+    const first = requiredId(await callFor(f, turn, { text: "first" }, { toolCallId: "call-1" }));
+    expect(await callFor(f, turn, { text: "second" }, { toolCallId: "call-1" })).toMatchObject({
+      kind: "required",
+      approvalId: first,
+      created: false,
+    });
+    expect(await countRows(f, "tool_call_approvals")).toBe(1);
+  });
+
+  it("refuses arguments it cannot bind: invalid, too large, or missing; no rule reads nothing and stores nothing", async () => {
+    await setRule(f, { mode: "always", approverKind: "requester" });
+    const turn = await seedTurn(f);
+    expect(await callFor(f, turn, { s: "\ud800" })).toEqual({ kind: "refused", reason: "arguments_invalid" });
+    expect(await callFor(f, turn, { s: "x".repeat(40 * 1024) })).toEqual({
+      kind: "refused",
+      reason: "arguments_too_large",
+    });
+    expect(await callFor(f, turn, null)).toEqual({ kind: "refused", reason: "policy_changed" });
+    await clearRules(f);
+    expect(await callFor(f, turn, { text: `${CANARY} no rule` })).toEqual({ kind: "none" });
+    expect(await countRows(f, "tool_call_approvals")).toBe(0);
+    expect(await countRows(f, "approval_requests")).toBe(0);
+  });
+
+  it("when_tainted asks only after outside content; always asks on a clean turn too", async () => {
+    await setRule(f, { mode: "when_tainted", approverKind: "requester" });
+    const turn = await seedTurn(f);
+    expect(await callFor(f, turn, { text: "w" })).toEqual({ kind: "none" });
+    await f.su.query("update app.agent_turns set tainted = true where event_id = $1", [turn.eventId]);
+    expect(await callFor(f, turn, { text: "w" })).toMatchObject({ kind: "required", created: true });
+    await setRule(f, { mode: "always", approverKind: "requester" });
+    expect(await callFor(f, await seedTurn(f), { text: "a" })).toMatchObject({
+      kind: "required",
+      created: true,
+    });
+  });
+
+  it("tenancy: another organization's turn, a foreign conversation or a removed requester is no turn (nothing stored)", async () => {
+    await setRule(f, { mode: "always", approverKind: "requester" });
+    const foreignConv = randomUUID();
+    await f.su.query(
+      "insert into app.conversations (id, organization_id, kind, name) values ($1, $2, 'channel', 'evil')",
+      [foreignConv, f.orgB],
+    );
+    const orgBEvent = randomUUID();
+    await f.su.query(
+      `insert into app.agent_turns (event_id, organization_id, agent_id, user_id, conversation_id, conversation_kind, message_id)
+       values ($1, $2, $3, $4, $5, 'channel', $6)`,
+      [orgBEvent, f.orgB, f.keeperId, f.eveId, foreignConv, randomUUID()],
+    );
+    const foreignTurn = { ...(await seedTurn(f)), eventId: orgBEvent };
+    expect(await callFor(f, foreignTurn, { text: "x" })).toEqual({
+      kind: "refused",
+      reason: "policy_changed",
+    });
+
+    // An org A turn row naming org B's conversation (no FK on the column: WINDOWS 202).
+    const crossed = await seedTurn(f);
+    await f.su.query("update app.agent_turns set conversation_id = $2 where event_id = $1", [
+      crossed.eventId,
+      foreignConv,
+    ]);
+    expect(await callFor(f, crossed, { text: "x" })).toEqual({ kind: "refused", reason: "policy_changed" });
+
+    // Another agent's turn id.
+    const other = await seedTurn(f);
+    expect(await callFor(f, { ...other, agentId: randomUUID() }, { text: "x" })).toEqual({
+      kind: "refused",
+      reason: "policy_changed",
+    });
+
+    // A requester deactivated since the turn.
+    const gone = await seedTurn(f, { conversationId: f.dm });
+    await f.su.query("update app.org_members set deactivated_at = now() where user_id = $1", [f.samId]);
+    try {
+      expect(await callFor(f, gone, { text: "x" })).toEqual({ kind: "refused", reason: "policy_changed" });
+    } finally {
+      await f.su.query("update app.org_members set deactivated_at = null where user_id = $1", [f.samId]);
+    }
+    expect(await countRows(f, "tool_call_approvals")).toBe(0);
+    expect((await f.su.query("select count(*)::int as n from app.tool_call_approvals")).rows[0].n).toBe(0);
+  });
+
+  it("no argument value ever reaches an audit row, the call ledger or a log line (canary over the whole file)", async () => {
+    // This test's own request, decided and used, so the canary is stored now and every audited step ran.
+    await setRule(f, { mode: "always", approverKind: "requester" });
+    const id = requiredId(await callFor(f, await seedTurn(f), { text: `${CANARY} last` }));
+    await expectOk(decideAs(f, f.sam, id, "approved"));
+    expect(await callFor(f, await seedTurn(f), { text: `${CANARY} last` })).toEqual({
+      kind: "grant",
+      approvalId: id,
+    });
+    const audit = await f.su.query(
+      "select count(*)::int as n from app.audit_events where metadata::text like $1",
+      [`%${CANARY}%`],
+    );
+    expect(audit.rows[0].n).toBe(0);
+    const ledger = await f.su.query(
+      "select count(*)::int as n from app.agent_tool_calls a where a::text like $1",
+      [`%${CANARY}%`],
+    );
+    expect(ledger.rows[0].n).toBe(0);
+    expect(f.stack.logs.filter((l) => l.includes(CANARY))).toEqual([]);
+    // The canary did reach the one place it belongs, so the search would have found it.
+    const stored = await f.su.query(
+      "select count(*)::int as n from app.tool_call_approvals where arguments_canonical like $1",
+      [`%${CANARY}%`],
+    );
+    expect(stored.rows[0].n).toBeGreaterThan(0);
+  });
+});
+
+async function expectOk(res: Promise<{ status: number; body: unknown }>): Promise<void> {
+  const r = await res;
+  expect(r.status, JSON.stringify(r.body)).toBe(200);
+}
