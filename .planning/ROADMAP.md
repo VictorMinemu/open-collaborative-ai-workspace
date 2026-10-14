@@ -407,8 +407,8 @@ of the thin Work Zone that Phase 1 already ships.
 **Operations features (inserted 2026-10-08, owner).** Phases 07.1–07.7 turn the 2026-10-06 operations meeting into
 generic capabilities for any organization (research: `.planning/research/OPS-FEATURES.md`). Each feature is owned by the
 Control Plane (an `ocw_*` plugin tool → Agent Channel API decides and audits → Agent Card when a human approves);
-OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.6 → 07.7, one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
-(F17), browser-session logins for agents (F2 part 2), ERP-driven board columns beyond watched records.
+OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.6 → 07.7 (07.8 added 2026-10-14 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
+(F17), ERP-driven board columns beyond watched records.
 
 ### Phase 07.1: Board channels and record templates (INSERTED)
 
@@ -420,6 +420,7 @@ record templates that name cards consistently
 **Research:** done (`OPS-FEATURES.md` F12, F14)
 **UI hint**: yes
 **Success Criteria** (what must be TRUE):
+
   1. Creating a channel offers text or board; a board channel inherits the channel's members, permissions, unit, sidebar
      and search, and shows configurable columns with a category (backlog/started/done/cancelled)
   2. A card is the root message of a normal thread: clicking it opens the thread panel, agents answer there, and the card
@@ -459,6 +460,7 @@ wants to put into a shared scope goes through a detector and a human approval th
 **Research:** done (`OPS-FEATURES.md` F4, F5); owner requirement: a folder/subfolder viewer of `.md` memory files
 **UI hint**: yes
 **Success Criteria** (what must be TRUE):
+
   1. Memory lives in Postgres as virtual `.md` files (relative paths, folders from paths) per scope with append-only
      revisions, RLS and audit; each scope has a `MEMORY.md`; existing per-bot notes are migrated without making them
      readable by admins
@@ -503,6 +505,7 @@ from Settings, expressed as resolver deny rules so the UI hides what the API alr
 **Research:** done (`OPS-FEATURES.md` F15)
 **UI hint**: yes
 **Success Criteria** (what must be TRUE):
+
   1. A module catalog in contracts maps each module to exact permission grains (no admin grains such as `device.revoke`)
   2. A Settings panel creates and removes module rules per unit or person; changes are audited and apply live
   3. Every navigation entry and section (incl. AI chats in the chat sidebar) hides when the module is denied, and the API
@@ -526,6 +529,7 @@ people start their own agent from a template
 **Research:** done (`OPS-FEATURES.md` F1, F2, F3)
 **UI hint**: yes
 **Success Criteria** (what must be TRUE):
+
   1. Admins register connectors with an auth mode (`org_secret`, `per_member_oauth`, `per_member_secret`); members
      connect and disconnect their account in Settings; tokens are sealed per member, refresh serialized, and a revoked or
      expired grant asks to reconnect
@@ -564,6 +568,7 @@ card and approves it once, and agents can propose Work Zone sessions that a pers
 **Research:** done (`OPS-FEATURES.md` F10, F11)
 **UI hint**: yes
 **Success Criteria** (what must be TRUE):
+
   1. A per-tool approval policy (`never | always | when_tainted`, approvers) is decided in the tool gate; only tools with
      a policy send their full arguments to the API
   2. A tool call needing approval posts a card with the exact action (recipient, amount, body…); approving grants exactly
@@ -602,6 +607,7 @@ sessions feed project memory through the promotion flow
 **Research:** done (`OPS-FEATURES.md` F6, F8, F9, F13)
 **UI hint**: yes
 **Success Criteria** (what must be TRUE):
+
   1. A Postgres-backed job scheduler runs automations (standing order + trigger + delivery target by stable IDs + the
      person it runs for + budget), audited, survives restarts, and never runs inside the cell
   2. Signed webhooks (Standard Webhooks) and IMAP mail are triggers; inbound content is untrusted (read-only turns);
@@ -611,6 +617,7 @@ sessions feed project memory through the promotion flow
   4. A per-person digest (pending decisions, followed cards, unread mentions, Work Zone sessions waiting or finished)
      arrives by DM on that person's schedule
   5. A finished Work Zone session can become a summary proposal in its project's memory (07.2 flow)
+
 **Plans:** 24 plans in 7 waves (UI-SPEC/VALIDATION in the phase folder)
 
 Plans:
@@ -649,10 +656,12 @@ message whom, with every hop visible in the thread, audited and bounded
 **Research:** done (`OPS-FEATURES.md` F7)
 **UI hint**: yes
 **Success Criteria** (what must be TRUE):
+
   1. `ocw_consult_agent` delivers a question to another agent through the API; the answer returns as a new turn; each
      hop is a visible, attributed thread message audited with a chain id
   2. Effective permission = source agent ∩ triggering human ∩ target visibility ∩ `agent.message` rules (deny wins)
   3. Depth ≤ 2, no agent twice per chain, per-chain budget and daily limits stop loops; the asker pays
+
 **Plans:** 11 plans in 5 waves (UI-SPEC/VALIDATION in the phase folder)
 
 Plans:
@@ -668,6 +677,33 @@ Plans:
 - [ ] 07.7-09-PLAN.md — Wave 4: Time out unanswered hops and cancel orphaned chains, exactly once, per organization.
 - [ ] 07.7-10-PLAN.md — Wave 4: Render consult hops in threads with live status and Stop, and prove a two-bot consult in the browser.
 - [ ] 07.7-11-PLAN.md — Wave 5: Gate the phase: route-coverage cross-tenant guard, full verification on fresh infrastructure, docs and the signed
+
+### Phase 07.8: Bot sandboxes, plugins and live browser (INSERTED)
+
+**Goal**: Each bot works in its own isolated sandbox where it can write files, run commands and use plugins that today
+are refused, and it can drive a real browser that people watch live in a small floating window and take over to sign
+in themselves, so the bot never sees a password; the Control Plane still decides, audits and can stop everything
+**Requirements**: SBX-01, SBX-02, SBX-03, SBX-04, SBX-05, BRW-01, BRW-02, BRW-03, BRW-04
+**Depends on:** Phase 07.3, Phase 07.4, Phase 07.5
+**Research:** needed (OpenClaw native sandbox vs a platform sandbox broker; gVisor/rootless isolation; live view
+transport; prior art Steel Browser, neko; `.planning/research/OPS-FEATURES.md` F2 part 2)
+**UI hint**: yes
+**Success Criteria** (what must be TRUE):
+  1. Every bot runs file, shell and plugin tools only inside its own sandbox (no host mounts, no Docker socket, CPU,
+     memory, disk and process limits, egress only through the 07.4 policy); one bot can never see another bot's sandbox
+  2. Plugins and tools that ADR-0010 refuses today can be installed through the ADR-0011 approval flow when they run
+     only inside the sandbox; platform-administration tools stay refused; 07.5 approval policies apply to them
+  3. People who may configure a bot browse, download and upload its sandbox files from the bot page
+  4. A bot drives a browser in its sandbox; people who can read the conversation watch it live in a floating window,
+     and a person with the right can take control, sign in and hand control back; password fields never reach the
+     bot, the model or the audit
+  5. A signed-in browser session is kept sealed per member and site in the keychain, reused only for that member's
+     turns, and revocable; Sandbox and Browser are modules an admin turns on per organization or unit
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 07.8 to break down)
 
 ### Phase 8: Device Trust, Protocol and Work Zone Permissions
 
