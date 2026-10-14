@@ -23,6 +23,10 @@ export interface FakeDeviceHandle {
    * ("completed"), so the sessions stay listed (a revoked host hides them). `stop()` still cleans up afterwards.
    */
   shutdown(): Promise<void>;
+  /** Start the daemon again after `shutdown()` and wait until the device is online (07.5-12: offline → back). */
+  restart(): Promise<void>;
+  /** Remove the scratch project on the device (`ocw-runtime remove-project`) and wait until the API stops listing it. */
+  removeProject(): Promise<void>;
   stop(): Promise<void>;
 }
 
@@ -70,7 +74,14 @@ export async function startFakeDevice(
       [RUNTIME_BIN, "enroll", "--server", API_URL, "--code", code, "--name", opts.name],
       { env, stdio: "pipe" },
     );
-    execFileSync(process.execPath, [RUNTIME_BIN, "add-project", repo], { env, stdio: "pipe" });
+    const added = execFileSync(process.execPath, [RUNTIME_BIN, "add-project", repo], { env, stdio: "pipe" });
+    const localId = (() => {
+      try {
+        return (JSON.parse(added.toString("utf8")) as { localId?: string }).localId ?? null;
+      } catch {
+        return null;
+      }
+    })();
     daemon = spawn(process.execPath, [RUNTIME_BIN, "run"], { env, stdio: "ignore" });
 
     await expect
@@ -104,11 +115,43 @@ export async function startFakeDevice(
         proc.kill("SIGTERM");
       });
     };
+    const deviceId = found.deviceId;
+    const projectId = found.projectId;
+    const statusOf = async () => {
+      const devices = (await (await adminApi.get("/api/v1/devices")).json()) as {
+        devices: Array<{ id: string; status: string }>;
+      };
+      return devices.devices.find((d) => d.id === deviceId)?.status ?? "missing";
+    };
+    const restart = async () => {
+      if (daemon && daemon.exitCode === null) return;
+      daemon = spawn(process.execPath, [RUNTIME_BIN, "run"], { env, stdio: "ignore" });
+      await expect
+        .poll(statusOf, { timeout: 30_000, message: `${opts.name} comes back online` })
+        .toBe("online");
+    };
+    const removeProject = async () => {
+      if (!localId) throw new Error("the scratch project's local id is unknown");
+      execFileSync(process.execPath, [RUNTIME_BIN, "remove-project", localId], { env, stdio: "pipe" });
+      await expect
+        .poll(
+          async () => {
+            const projects = (await (await adminApi.get("/api/v1/projects")).json()) as {
+              projects: Array<{ id: string; available: boolean }>;
+            };
+            return projects.projects.find((p) => p.id === projectId)?.available ?? false;
+          },
+          { timeout: 30_000, message: `${opts.projectName} is removed` },
+        )
+        .toBe(false);
+    };
     return {
-      deviceId: found.deviceId,
-      projectId: found.projectId,
+      deviceId,
+      projectId,
       projectName: opts.projectName,
       shutdown,
+      restart,
+      removeProject,
       stop: cleanup,
     };
   } catch (err) {
