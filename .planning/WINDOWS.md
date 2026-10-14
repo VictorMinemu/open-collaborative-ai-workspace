@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 120
+open_count: 122
 waived_count: 4
 fixed_count: 80
-total_count: 204
-last_updated: 2026-10-14T15:04:59.297Z
+total_count: 206
+last_updated: 2026-10-14T15:32:47.075Z
 ---
 
 # Broken Windows Ledger
@@ -219,6 +219,8 @@ last_updated: 2026-10-14T15:04:59.297Z
 | 202 | 07.5 | deviation | packages/db/src/schema/app.ts |  | conversation_id, event_id and requested_for_user_id on 07.5 tables have no FK; 07.5-07/08 must resolve them inside withTenant | open |  | 2026-10-14T13:26:02.781Z |  |
 | 203 | 07.5 | deviation | packages/contracts/src/agent-card-route.ts |  | Stubs until later plans: toPrompt proposedBy is always null (07.5-08 wires it); the memory inbox shows 07.5 approvals title-only (07.5-12 filters by kind); the '/approvals' route prefix grep now targets agent-card-route.ts | open |  | 2026-10-14T14:00:24.659Z |  |
 | 204 | 07.5 | deviation | apps/api/src/modules/approval |  | A server_apply decision via /approvals by someone who cannot read the conversation still starts (and meters) a bot turn for that decider (bot reply is refused); an unused grant keeps a running card forever; the pending total stops at 1000 scanned rows | open |  | 2026-10-14T15:04:59.297Z |  |
+| 205 | 07.5 | deviation | apps/api/src/modules/work-session/routes.ts |  | The HTTP route's 'lower to the default mode' is dead code: Zod defaults permissionMode to 'default', so a member limited to plan who starts a session without picking a mode gets 403 device_grant instead of a plan session (only proposals lower) | open |  | 2026-10-14T15:32:46.937Z |  |
+| 206 | 07.5 | deviation | packages/contracts/src/sensitive-data.test.ts |  | The linear-time ratio test (<8x) failed once at 10.42x with load average 18 (parallel executors); consider a looser ratio or more samples | open |  | 2026-10-14T15:32:47.075Z |  |
 
 ````json
 [
@@ -2668,6 +2670,30 @@ last_updated: 2026-10-14T15:04:59.297Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-14T15:04:59.297Z",
+    "resolved_at": null
+  },
+  {
+    "id": 205,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "apps/api/src/modules/work-session/routes.ts",
+    "line": null,
+    "description": "The HTTP route's 'lower to the default mode' is dead code: Zod defaults permissionMode to 'default', so a member limited to plan who starts a session without picking a mode gets 403 device_grant instead of a plan session (only proposals lower)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T15:32:46.937Z",
+    "resolved_at": null
+  },
+  {
+    "id": 206,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "packages/contracts/src/sensitive-data.test.ts",
+    "line": null,
+    "description": "The linear-time ratio test (<8x) failed once at 10.42x with load average 18 (parallel executors); consider a looser ratio or more samples",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T15:32:47.075Z",
     "resolved_at": null
   }
 ]
