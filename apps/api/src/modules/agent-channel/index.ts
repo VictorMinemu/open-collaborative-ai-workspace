@@ -470,9 +470,9 @@ export function createAgentChannelModule(
           // The cell's tool gate (D-08): decision + caps + taint + audit for every gated tool call.
           registerToolCallRoutes(scope, core, perms, opts.toolApproval);
           // The keychain proxy (07.4-11, D-04): a request with a key by handle, injected towards allowed hosts only.
-          registerHttpRequestRoutes(scope, core, perms);
+          registerHttpRequestRoutes(scope, core, perms, opts.toolApproval);
           // The connector proxy (07.4-12, D-02): a per-member connector's tool with the account of the person who asked.
-          registerConnectorRoutes(scope, core, perms);
+          registerConnectorRoutes(scope, core, perms, opts.toolApproval);
           // The cell's memory tool (D-10): owner bound to the delivered turn, DM only, refused once tainted; since
           // 07.2-11 a bullet of the human's private MEMORY.md.
           registerMemoryRoutes(scope, core, perms, opts.memory);

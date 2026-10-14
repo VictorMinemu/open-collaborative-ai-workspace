@@ -5,6 +5,7 @@ import {
   type AgentChannelToolRefusal,
   BUILTIN_TOOLS,
   HTTP_TOOL_LIMITS,
+  type ToolApprovalRefusal,
   type TurnToolFlags,
 } from "@ocw/contracts";
 import { agentTurns } from "@ocw/db";
@@ -29,6 +30,13 @@ import type { PermissionService } from "../organization";
 import { cellOf } from "./auth";
 import { noTrigger } from "./cards";
 import { type AgentTurnRow, auditUnknownTurn, claimToolCall, finishToolCall, liveTurn } from "./claim";
+import {
+  APPROVAL_MESSAGES,
+  approvalDetails,
+  approvalVerdict,
+  type ToolApprovalGate,
+  turnAtCap,
+} from "./tool-calls";
 
 /**
  * `POST /agent-channel/v1/http-requests` (07.4-11; D-04, D-06, D-07; CONN-05): the cell's `ocw_http_request` sends one
@@ -43,8 +51,11 @@ import { type AgentTurnRow, auditUnknownTurn, claimToolCall, finishToolCall, liv
  *      (`not_in_turn`) → the turn re-decided now, audience rule included (`policy_changed`) → the key: usable here
  *      (`handle_not_allowed`), a member-account key the audience rule withholds here (`member_account`), or a unit key
  *      some reader here is outside of (`unit_audience`, 07.4-12) → host and
- *      path (`host_not_allowed`) → the claim (caps, taint: GET/HEAD read, other methods side-effecting) → the sealed
- *      value opened with its own AAD;
+ *      path (`host_not_allowed`) → the approval decision (07.5-11: `approvalForCall` with tool `ocw_http_request` and
+ *      `{handle, method, url, headers, body}` as the arguments; 409 `approval_required` … with `details`, never a
+ *      secret opened or a request sent before it) → the claim (caps, taint: GET/HEAD read, other methods
+ *      side-effecting; a consumed grant lifts the taint condition for this call only) → the sealed value opened with
+ *      its own AAD;
  *   3. outside any tx: the header (an `oauth` token through the guard), the request through the egress guard
  *      (pinned public addresses, a personal key never reaches a private one, a unit key only the admin-listed ones,
  *      platform hosts never; no redirects; 256 KB; 15 s);
@@ -68,20 +79,24 @@ const flagsFor = (method: AgentChannelHttpMethod): TurnToolFlags => ({
   sideEffecting: !READ_METHODS.has(method),
 });
 
-type Refusal = Extract<
-  AgentChannelToolRefusal,
-  | "not_in_turn"
-  | "policy_changed"
-  | "member_account"
-  | "unit_audience"
-  | "handle_not_allowed"
-  | "host_not_allowed"
-  | "cap_reached"
-  | "tainted"
->;
+type Refusal =
+  | Extract<
+      AgentChannelToolRefusal,
+      | "not_in_turn"
+      | "policy_changed"
+      | "member_account"
+      | "unit_audience"
+      | "handle_not_allowed"
+      | "host_not_allowed"
+      | "cap_reached"
+      | "tainted"
+    >
+  | ToolApprovalRefusal;
 type Failure = Extract<AgentChannelToolRefusal, "egress_refused" | "upstream_error" | "timeout">;
 
 const MESSAGES: Record<Refusal | Failure, string> = {
+  // First, so this route's own wording of a shared code (`policy_changed`) stays exactly as before.
+  ...APPROVAL_MESSAGES,
   not_in_turn: "That tool was not offered on this turn",
   policy_changed: "That tool is no longer available on this turn",
   member_account: "That key belongs to a member's own account and is not used in this conversation",
@@ -140,7 +155,7 @@ function failureOf(err: unknown): { code: Failure; outcome: "blocked" | "error" 
 
 type Decided =
   | { refused: "no_trigger" }
-  | { refused: Refusal }
+  | { refused: Refusal; details?: Record<string, unknown> }
   | {
       go: {
         turn: AgentTurnRow;
@@ -151,7 +166,12 @@ type Decided =
       };
     };
 
-export function registerHttpRequestRoutes(scope: App, core: Core, perms: PermissionService): void {
+export function registerHttpRequestRoutes(
+  scope: App,
+  core: Core,
+  perms: PermissionService,
+  toolApproval: ToolApprovalGate,
+): void {
   scope.post(
     "/http-requests",
     {
@@ -195,7 +215,11 @@ export function registerHttpRequestRoutes(scope: App, core: Core, perms: Permiss
             await auditUnknownTurn(tx, core, { cell, tool: TOOL, reason: "no_trigger", metadata: meta });
             return { refused: "no_trigger" };
           }
-          const refuse = async (reason: Refusal, item: VaultItemRow | null = null): Promise<Decided> => {
+          const refuse = async (
+            reason: Refusal,
+            item: VaultItemRow | null = null,
+            extra: Record<string, unknown> = {},
+          ): Promise<Decided> => {
             await claimToolCall(tx, core, {
               cell,
               turn,
@@ -206,7 +230,7 @@ export function registerHttpRequestRoutes(scope: App, core: Core, perms: Permiss
               sourceId: item?.id ?? null,
               target,
               reason,
-              metadata: meta,
+              metadata: { ...meta, ...extra },
             });
             return { refused: reason };
           };
@@ -243,6 +267,31 @@ export function registerHttpRequestRoutes(scope: App, core: Core, perms: Permiss
             return refuse("host_not_allowed", item);
           }
 
+          // 07.5-11 (D-04, APPROVE-01): the approval decision on exactly this request, before the secret is opened or
+          // anything is sent. With a rule, the caps first (a consumed grant is never given back).
+          if (now.toolFlags[TOOL]?.approval && (await turnAtCap(tx, turn.eventId, false))) {
+            return refuse("cap_reached", item);
+          }
+          const verdict = approvalVerdict(
+            await toolApproval.approvalForCall(tx, {
+              turn: { eventId: turn.eventId, agentId: turn.agentId },
+              tool: TOOL,
+              args: {
+                handle: body.handle,
+                method: body.method,
+                url: body.url,
+                ...(body.headers !== undefined ? { headers: body.headers } : {}),
+                ...(body.body !== undefined ? { body: body.body } : {}),
+              },
+              toolCallId: null,
+              source: { kind: "vault", id: item.id, target },
+            }),
+          );
+          if (verdict.reason) {
+            await refuse(verdict.reason, item, verdict.metadata);
+            return { refused: verdict.reason, details: approvalDetails(verdict) };
+          }
+
           const claim = await claimToolCall(tx, core, {
             cell,
             turn,
@@ -254,6 +303,7 @@ export function registerHttpRequestRoutes(scope: App, core: Core, perms: Permiss
             target,
             reason: null,
             metadata: meta,
+            grantApprovalId: verdict.grantApprovalId,
           });
           if (!claim.allowed) return { refused: claim.reason as Refusal };
           const secret = await openVaultSecret(core, tx, item).catch(() => null);
@@ -264,7 +314,12 @@ export function registerHttpRequestRoutes(scope: App, core: Core, perms: Permiss
       );
       if ("refused" in decided) {
         if (decided.refused === "no_trigger") throw noTrigger();
-        throw new HttpError(409, decided.refused, MESSAGES[decided.refused]);
+        throw new HttpError(
+          409,
+          decided.refused,
+          MESSAGES[decided.refused],
+          "details" in decided ? decided.details : undefined,
+        );
       }
 
       // 3. The request, outside any transaction.

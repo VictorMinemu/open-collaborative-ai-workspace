@@ -4,7 +4,9 @@ import type { TestClient } from "../../testing";
 import {
   assertNoGlobalFetch,
   type ConnectorsStack,
+  connectionRow,
   connectOAuth,
+  fakeStats,
   type Json,
   ok,
   type Res,
@@ -52,6 +54,8 @@ async function cell(path: string, body: unknown): Promise<Res> {
   const text = await res.text();
   return { status: res.status, body: text ? (JSON.parse(text) as Json) : null };
 }
+
+const codeOf = (r: Res) => (r.body?.error as Json | undefined)?.code;
 
 /** `who` writes in `conversationId` (mentioning Keeper outside a DM); returns Keeper's delivered event (its turn). */
 async function turnOf(who: TestClient, conversationId: string, mention = false): Promise<Json> {
@@ -105,6 +109,14 @@ const countApprovals = async () =>
 
 const callRow = async (callId: string) =>
   (await s.su.query("select * from app.agent_tool_calls where id = $1", [callId])).rows[0] as Json;
+
+const callsOf = async (eventId: string) =>
+  (
+    await s.su.query(
+      "select tool, decision, reason, approval_id from app.agent_tool_calls where event_id = $1 order by created_at",
+      [eventId],
+    )
+  ).rows as Json[];
 
 /** Decides through the inbox route with the hash the request carries. */
 async function decide(who: TestClient, id: string, outcome: "approved" | "denied", note?: string) {
@@ -380,6 +392,23 @@ describe("tracer: a side-effecting MCP call after approval runs exactly once, fo
       approval: { created: true },
     });
     expect(other.body?.approval.id).not.toBe(approvalId);
+
+    // Sam denies that one with a note: the same call again is refused with who denied it and the note.
+    expect((await decide(s.sam, other.body?.approval.id, "denied", "Not twice")).status).toBe(200);
+    const denied = await cell("/tool-calls", {
+      eventId: rerun.eventId,
+      agentId: keeperId,
+      tool: WRITE,
+      toolCallId: "c5",
+      params: {},
+      arguments: { n: 2, text: "hi" },
+    });
+    expect(denied.body).toEqual({
+      callId: expect.any(String),
+      allowed: false,
+      reason: "approval_denied",
+      denial: { deciderName: "Sam Lee", note: "Not twice" },
+    });
   });
 
   it("a tool without a rule (echo, for Dana) with arguments sent anyway: allowed exactly as today, nothing stored", async () => {
@@ -393,7 +422,238 @@ describe("tracer: a side-effecting MCP call after approval runs exactly once, fo
   });
 });
 
-// ---------------------------------------------------------------- Task 2: taint and mid-turn changes
+// ---------------------------------------------------------------- Task 2: connectors, keys, taint, mid-turn
+
+describe("a connector write cannot bypass the rule, and a lead's approval acts with the member's own account", () => {
+  let ev: Json;
+  let approvalId = "";
+
+  beforeAll(async () => {
+    await clearRules();
+    await rule({ pattern: `${crmSafe}__*`, mode: "always", scopeUnitId: sales, approverKind: "unit_leads" });
+  });
+
+  it("Sam asks in #ops → 409 approval_required naming the Sales leads, no MCP call, a summary card", async () => {
+    ev = await turnOf(s.sam, ops, true);
+    expect(ev.turn.toolFlags[`${crmSafe}__whoami`]).toMatchObject({ approval: "always" });
+    const before = await fakeStats(s);
+    const r = await cell("/connectors/call", {
+      eventId: ev.eventId,
+      agentId: keeperId,
+      connector: crmSafe,
+      tool: "whoami",
+      arguments: { detail: "SENTINEL-WHOAMI" },
+    });
+    expect(r.status, JSON.stringify(r.body)).toBe(409);
+    expect(codeOf(r)).toBe("approval_required");
+    expect(r.body?.error.details).toEqual({
+      approval: {
+        id: expect.any(String),
+        created: true,
+        waitingFor: "Waiting for a lead of Sales",
+        requesterName: "Sam Lee",
+      },
+    });
+    approvalId = r.body?.error.details.approval.id;
+    const after = await fakeStats(s);
+    expect(after.mcpRequests).toBe(before.mcpRequests);
+    expect(after.mcpCalls).toBe(before.mcpCalls);
+    // A summary card in the channel: tool and source, never the arguments.
+    const card = (
+      await s.su.query(
+        "select m.conversation_id, c.fields, m.body from app.messages m join app.message_cards c on c.message_id = m.id where m.id = $1",
+        [(await approvalRow(approvalId)).card_message_id],
+      )
+    ).rows[0];
+    expect(card.conversation_id).toBe(ops);
+    expect(JSON.stringify(card)).not.toContain("SENTINEL-WHOAMI");
+  });
+
+  it("Marta (lead of Sales) approves; the re-run turn is Sam's; the call runs once with Sam's token, never Marta's", async () => {
+    const decided = await decide(marta, approvalId, "approved");
+    expect(decided.status, JSON.stringify(decided.body)).toBe(200);
+    const rerun = await rerunOf(approvalId);
+    expect(rerun.message.author.id).toBe(s.samId);
+    expect(rerun.cardAction.decidedBy).toEqual({ id: martaId, displayName: "Marta Gil" });
+    expect((await turnRow(rerun.eventId)).user_id).toBe(s.samId);
+
+    const before = await fakeStats(s);
+    const r = await cell("/connectors/call", {
+      eventId: rerun.eventId,
+      agentId: keeperId,
+      connector: crmSafe,
+      tool: "whoami",
+      arguments: { detail: "SENTINEL-WHOAMI" },
+    });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    // The member's own grant answered: Sam's subject, never Marta's (07.4: the account label is `<subject>@fake-mcp.test`).
+    const subjectOf = async (userId: string) =>
+      String((await connectionRow(s, userId, crm.id))?.account_label ?? "").replace(/@fake-mcp\.test$/u, "");
+    const subject = JSON.parse(r.body?.content as string).subject as string;
+    expect(subject).toBe(await subjectOf(s.samId));
+    expect(subject).not.toBe(await subjectOf(martaId));
+    expect((await fakeStats(s)).mcpCalls).toBe(before.mcpCalls + 1);
+    const calls = await callsOf(rerun.eventId);
+    expect(calls).toEqual([
+      { tool: `${crmSafe}__whoami`, decision: "allowed", reason: null, approval_id: approvalId },
+    ]);
+    expect((await connectionRow(s, s.samId, crm.id))?.last_used_at).not.toBeNull();
+    expect((await connectionRow(s, martaId, crm.id))?.last_used_at).toBeNull();
+    expect((await approvalRow(approvalId)).status).toBe("applied");
+  });
+
+  it("a failure after consumption keeps the approval used: the same call again → approval_used", async () => {
+    const first = await turnOf(s.sam, ops, true);
+    const args = { title: "Invoice 42" };
+    const asked = await cell("/connectors/call", {
+      eventId: first.eventId,
+      agentId: keeperId,
+      connector: crmSafe,
+      tool: "create_record",
+      arguments: args,
+    });
+    expect(codeOf(asked)).toBe("approval_required");
+    const id = asked.body?.error.details.approval.id as string;
+    expect((await decide(marta, id, "approved")).status).toBe(200);
+    const rerun = await rerunOf(id);
+    s.fake.setScenario({ insufficient_scope: true });
+    const failed = await cell("/connectors/call", {
+      eventId: rerun.eventId,
+      agentId: keeperId,
+      connector: crmSafe,
+      tool: "create_record",
+      arguments: args,
+    });
+    expect(failed.status, JSON.stringify(failed.body)).toBe(200);
+    expect(failed.body?.isError).toBe(true);
+    expect((await approvalRow(id)).status).toBe("applied");
+    s.fake.setScenario({});
+    const again = await cell("/connectors/call", {
+      eventId: rerun.eventId,
+      agentId: keeperId,
+      connector: crmSafe,
+      tool: "create_record",
+      arguments: args,
+    });
+    expect(again.status).toBe(409);
+    expect(codeOf(again)).toBe("approval_used");
+  });
+
+  it("a denial with a note: the same call again → 409 approval_denied naming the decider and the note", async () => {
+    const first = await turnOf(s.sam, ops, true);
+    const args = { title: "Refund 7" };
+    const body = {
+      eventId: first.eventId,
+      agentId: keeperId,
+      connector: crmSafe,
+      tool: "create_record",
+      arguments: args,
+    };
+    const asked = await cell("/connectors/call", body);
+    expect(codeOf(asked)).toBe("approval_required");
+    const id = asked.body?.error.details.approval.id as string;
+    expect((await decide(marta, id, "denied", "Duplicate invoice")).status).toBe(200);
+    const again = await cell("/connectors/call", body);
+    expect(again.status).toBe(409);
+    expect(codeOf(again)).toBe("approval_denied");
+    expect(again.body?.error.details).toEqual({
+      denial: { deciderName: "Marta Gil", note: "Duplicate invoice" },
+    });
+  });
+
+  it("the cell-wide view (GET /cell) carries static tool names only: no per-member logical name, no flag", async () => {
+    const res = await fetch(`${s.stack.baseUrl}/agent-channel/v1/cell`, {
+      headers: { authorization: `Bearer ${CELL_TOKEN}` },
+    });
+    const snap = (await res.json()) as Json;
+    const tools = (snap.agents as Json[]).find((a) => a.id === keeperId)?.capabilities.tools as string[];
+    expect(tools).toEqual(expect.arrayContaining([WRITE, "ocw_connector_call"]));
+    expect(tools.some((t) => t.startsWith(`${crmSafe}__`))).toBe(false);
+    expect(tools.every((t) => typeof t === "string")).toBe(true);
+    expect(JSON.stringify(snap)).not.toContain('"approval"');
+  });
+
+  it("without a rule the connector call is exactly today's (07.4): allowed, no approval stored", async () => {
+    await clearRules();
+    const before = await countApprovals();
+    const plain = await turnOf(s.sam, ops, true);
+    expect(plain.turn.toolFlags[`${crmSafe}__whoami`]).not.toHaveProperty("approval");
+    const r = await cell("/connectors/call", {
+      eventId: plain.eventId,
+      agentId: keeperId,
+      connector: crmSafe,
+      tool: "whoami",
+      arguments: {},
+    });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(await countApprovals()).toBe(before);
+  });
+});
+
+describe("a keychain request cannot bypass the rule", () => {
+  let key: Json;
+  let kcHost = "";
+
+  beforeAll(async () => {
+    kcHost = `fake-mcp:${s.fakePort}`;
+    key = await ok(
+      s.sam.request("POST", "/api/v1/keychain", {
+        scope: "personal",
+        kind: "api_key",
+        name: "KC whoami",
+        value: "fake-kc-token",
+        allowedHosts: [kcHost],
+      }),
+      201,
+    );
+    await ok(s.sam.request("PUT", `/api/v1/keychain/${key.id}/agents`, { agentIds: [keeperId] }));
+  });
+
+  const send = (ev: Json, url: string) =>
+    cell("/http-requests", {
+      eventId: ev.eventId,
+      agentId: keeperId,
+      handle: key.handle,
+      method: "POST",
+      url,
+      body: "ping",
+    });
+
+  it("a POST → 409 approval_required and no outbound request; after approval the re-run reaches the target once", async () => {
+    await clearRules();
+    await rule({ pattern: "ocw_http_request", mode: "always" });
+    const ev = await turnOf(s.sam, samDm);
+    expect(ev.turn.toolFlags.ocw_http_request).toEqual({
+      untrustedOutput: true,
+      sideEffecting: true,
+      approval: "always",
+    });
+    const url = `http://${kcHost}/kc/whoami`;
+    const before = await fakeStats(s);
+    const r = await send(ev, url);
+    expect(r.status, JSON.stringify(r.body)).toBe(409);
+    expect(codeOf(r)).toBe("approval_required");
+    expect(r.body?.error.details.approval).toMatchObject({ created: true, requesterName: "Sam Lee" });
+    const after = await fakeStats(s);
+    expect(after.kc.authorized + after.kc.rejected).toBe(before.kc.authorized + before.kc.rejected);
+
+    const id = r.body?.error.details.approval.id as string;
+    expect((await decide(s.sam, id, "approved")).status).toBe(200);
+    const rerun = await rerunOf(id);
+    const done = await send(rerun, url);
+    expect(done.status, JSON.stringify(done.body)).toBe(200);
+    expect(JSON.parse(done.body?.body as string)).toEqual({ authorized: true, method: "bearer" });
+    expect((await fakeStats(s)).kc.authorized).toBe(after.kc.authorized + 1);
+    expect(await callsOf(rerun.eventId)).toEqual([
+      { tool: "ocw_http_request", decision: "allowed", reason: null, approval_id: id },
+    ]);
+
+    // The same request to another URL is another action: a new approval.
+    const other = await send(rerun, `${url}?again=1`);
+    expect(codeOf(other)).toBe("approval_required");
+    expect(other.body?.error.details.approval.id).not.toBe(id);
+  });
+});
 
 describe("taint is lifted for the approved call only, and never laundered through the re-run", () => {
   const webFetch = (ev: Json) => ask(ev, "web_fetch", { params: { url: "https://example.com/page" } });

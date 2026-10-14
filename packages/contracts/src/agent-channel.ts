@@ -897,8 +897,14 @@ export const AgentChannelToolRefusal = z.enum([
 ]);
 export type AgentChannelToolRefusal = z.infer<typeof AgentChannelToolRefusal>;
 
-/** Phase 07.5: the `details` of a 409 `approval_required` / `approval_pending` from `/connectors/call` and `/http-requests`. */
-export const AgentChannelApprovalRefusalDetails = z.object({ approval: AgentChannelToolCallApproval });
+/**
+ * Phase 07.5: the `details` of a 409 approval refusal from `/connectors/call` and `/http-requests`: the approval waited
+ * on (`approval_required` / `approval_pending`) or who denied exactly this action (`approval_denied`, 07.5-11).
+ */
+export const AgentChannelApprovalRefusalDetails = z.object({
+  approval: AgentChannelToolCallApproval.optional(),
+  denial: AgentChannelApprovalDenial.optional(),
+});
 export type AgentChannelApprovalRefusalDetails = z.infer<typeof AgentChannelApprovalRefusalDetails>;
 
 /** An MCP server's immutable OpenClaw name: `m` + 8 hex characters (`apps/api/src/modules/mcp/names.ts`). */

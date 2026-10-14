@@ -246,7 +246,20 @@ describe("tool-call approval wire contracts (tracer)", () => {
         approval: { ...decision.approval, waitingFor: "x".repeat(201) },
       }).success,
     ).toBe(false);
-    expect(AgentChannelApprovalRefusalDetails.parse({ approval: decision.approval }).approval.id).toBe(ID2);
+    expect(AgentChannelApprovalRefusalDetails.parse({ approval: decision.approval }).approval?.id).toBe(ID2);
+    // 07.5-11: approval_denied names who denied it and their note (display name only), on the gate and the 409s.
+    const denial = { deciderName: "Marta Gil", note: "Duplicate invoice" };
+    expect(AgentChannelApprovalRefusalDetails.parse({ denial })).toEqual({ denial });
+    expect(
+      AgentChannelToolCallDecision.parse({ callId: ID, allowed: false, reason: "approval_denied", denial })
+        .denial,
+    ).toEqual(denial);
+    expect(
+      AgentChannelApprovalRefusalDetails.safeParse({ denial: { ...denial, note: "x".repeat(281) } }).success,
+    ).toBe(false);
+    expect(
+      AgentChannelApprovalRefusalDetails.safeParse({ denial: { deciderName: "Marta Gil" } }).success,
+    ).toBe(false);
   });
 
   it("every gate refusal is also a connector / keychain tool refusal", () => {
