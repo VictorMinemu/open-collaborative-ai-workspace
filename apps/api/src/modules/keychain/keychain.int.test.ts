@@ -503,6 +503,46 @@ describe("unit keys, permissions, private hosts and grants", () => {
     );
   });
 
+  it("the database hides grants on a personal key from everyone but its owner; unit-key grants and the cell's holder list stay (WINDOWS #182)", async () => {
+    const as = async (userId: string, sql: string, params: unknown[] = []) => {
+      await appRole.query("begin");
+      try {
+        await appRole.query(
+          "select set_config('app.organization_id', $1, true), set_config('app.user_id', $2, true)",
+          [orgA, userId],
+        );
+        return await appRole.query(sql, params);
+      } finally {
+        await appRole.query("rollback");
+      }
+    };
+    const grants = "select count(*)::int as n from app.agent_vault_grants where vault_item_id = $1";
+    expect((await as(samId, grants, [samKey.id])).rows[0].n).toBe(1);
+    expect((await as(victorId, grants, [samKey.id])).rows[0].n).toBe(0);
+    expect((await as("", grants, [samKey.id])).rows[0].n).toBe(0);
+    // Unit and organization keys: their grants stay visible under tenant isolation.
+    expect((await as(victorId, grants, [backendKey.id])).rows[0].n).toBe(1);
+    expect((await as("", grants, [orgKey.id])).rows[0].n).toBe(2);
+    // Nobody but the owner changes a grant on the owner's key.
+    expect(
+      (await as(victorId, "delete from app.agent_vault_grants where vault_item_id = $1", [samKey.id]))
+        .rowCount,
+    ).toBe(0);
+    await expect(
+      as(
+        victorId,
+        "insert into app.agent_vault_grants (organization_id, agent_id, vault_item_id) values ($1, $2, $3)",
+        [orgA, orgBot, samKey.id],
+      ),
+    ).rejects.toThrow(/row-level security/);
+    // The cell's path (no user): agent ids only, every bot holding some key, Sam's included.
+    const holders = (await as("", "select agent_id from app.vault_grant_agents()")).rows.map(
+      (r) => r.agent_id,
+    );
+    expect(holders).toEqual(expect.arrayContaining([samBot, backendBot, orgBot]));
+    expect(new Set(holders).size).toBe(holders.length);
+  });
+
   it("effectiveVaultItems: grant ∩ owner ∩ unit audience ∩ vault.use for the agent acting for the human", async () => {
     // No grant: Sam's bot holds only Sam's key.
     expect(await effective(samBot, samId)).toEqual([samKey.handle]);

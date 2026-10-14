@@ -3,6 +3,7 @@ import { expectNoSeriousA11y } from "../support/a11y";
 import { apiAs, BASE_URL, createChannel, ensureMember, openAs, SAM } from "../support/actors";
 import { FAKE_URL } from "../support/bot-tools";
 import { bothThemes } from "../support/files";
+import { asSuperuser } from "../support/superuser";
 import { ADMIN } from "./env";
 
 /**
@@ -637,9 +638,9 @@ test("member: allow an account or a key in one conversation after seeing who rea
     await expect(list).toContainText(`${CRM} in #${ops}`);
     await expect(list).toContainText("2 people could read · allowed today");
 
-    // ---- by safe name, in a DM (which the API leaves unnamed): the member's own label for it; Cancel records nothing
+    // ---- by safe name, in a DM, which the API names for the viewer (07.4-12, #194); Cancel records nothing
     await page.goto(shareUrl(dmId, `connector=${crm.safeName}`));
-    await expect(dialog).toContainText(`Use your ${CRM} account in your DM with ${SAM.name}?`);
+    await expect(dialog).toContainText(`Use your ${CRM} account in your private chat with ${SAM.name}?`);
     await expect(dialog.getByTestId("shared-use-readers")).toHaveText("2 people can read results here");
     await dialog.getByRole("button", { name: "Cancel" }).click();
     await expect(dialog).toBeHidden();
@@ -662,10 +663,10 @@ test("member: allow an account or a key in one conversation after seeing who rea
 
     // ---- a personal key in the DM: the key variant; the share row names the DM
     await page.goto(shareUrl(dmId, `key=${keyId}`));
-    await expect(dialog).toContainText(`Use your CRM key in your DM with ${SAM.name}?`);
+    await expect(dialog).toContainText(`Use your CRM key in your private chat with ${SAM.name}?`);
     await dialog.getByTestId("shared-use-confirm").click();
     await expect(dialog).toBeHidden();
-    await expect(list).toContainText(`CRM in your DM with ${SAM.name}`);
+    await expect(list).toContainText(`CRM in your private chat with ${SAM.name}`);
     await expect(list).not.toContainText("a conversation you can no longer open");
 
     // ---- already allowed: no dialog, the row is highlighted
@@ -798,9 +799,65 @@ test("admin: Re-probe a per-member connector with your own connection, or be sen
     await expect(card.getByTestId("mcp-status")).toHaveText("Ready");
     await expect(card.locator('[data-testid="mcp-tool"][data-tool="whoami"]')).toBeVisible();
     expect(probes.at(-1)).toBe(`/api/v1/connectors/${crm.id}/probe`);
+
+    // A sign-in that stopped working asks to reconnect, not to connect (07.4-14, WINDOWS #196).
+    await asSuperuser(
+      "update app.connector_connections set status = 'needs_reconnect', last_error = 'invalid_grant' where server_id = $1",
+      [crm.id],
+    );
+    await card.getByTestId("mcp-reprobe").click();
+    await expect(page.getByText(`Reconnect your own ${CRM} account first`)).toBeVisible();
     await me.context.close();
   } finally {
     await removeServers(admin, [CRM]).catch(() => undefined);
+    await admin.dispose();
+  }
+});
+
+test("member with Bots off: Connections still lists their own connections and shares, Disconnect only (WINDOWS #196)", async ({
+  browser,
+}, info) => {
+  test.setTimeout(120_000);
+  const mobile = info.project.name === "mobile";
+  const admin = await apiAs(ADMIN);
+  const samId = await ensureMember(admin, SAM, "developer");
+  const erp = await keyConnector(admin, ERP);
+  const crm = await oauthConnector(admin, CRM);
+  const bots = (enabled: boolean) =>
+    admin.put("/api/v1/module-access", {
+      data: { module: "bots", scopeUnitId: null, subject: { kind: "user", userId: samId }, enabled },
+    });
+  const sam = await apiAs(SAM);
+  try {
+    expect((await sam.put(`/api/v1/connectors/${erp.id}/secret`, { data: { value: KEY_CANARY } })).ok()).toBe(
+      true,
+    );
+    expect((await bots(false)).ok(), "Bots off for Sam").toBe(true);
+    const s = await openAs(browser, SAM, info.project.name);
+    const page = s.page;
+    await page.goto(`${BASE_URL}/settings/connections`);
+    await expect(page.getByTestId("connections-withdraw-only")).toContainText(
+      "Connecting accounts is turned off for you.",
+    );
+    if (!mobile) await expect(page.getByTestId("settings-nav-connections")).toBeVisible();
+    // Only his own connection is listed; the connector he never connected is not offered.
+    await expect(row(page, erp.id)).toHaveAttribute("data-status", "connected");
+    await expect(row(page, crm.id)).toHaveCount(0);
+    await expect(page.getByTestId(`connector-replace-${erp.id}`)).toHaveCount(0);
+    await expect(page.getByTestId(`connector-connect-${erp.id}`)).toHaveCount(0);
+    await a11yBothThemes(page, '[data-testid="connections-list"]');
+    await secondary(page, erp.id, "disconnect", mobile);
+    await page.getByTestId("connections-disconnect-confirm").click();
+    await expect(page.getByText(`${ERP} disconnected`)).toBeVisible();
+    // Nothing left to withdraw: the module's off state, like every other Bots page.
+    await page.reload();
+    await expect(page.getByTestId("module-off")).toBeVisible();
+    await expect(page.getByTestId("module-off")).toHaveAttribute("data-module", "bots");
+    await s.context.close();
+  } finally {
+    await bots(true).catch(() => undefined);
+    await removeServers(admin, [ERP, CRM]).catch(() => undefined);
+    await sam.dispose();
     await admin.dispose();
   }
 });

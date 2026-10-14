@@ -604,7 +604,7 @@ describe("identity: the turn decides, never the body", () => {
     ]);
   });
 
-  it("org B's cell token with org A's turn: 403, nothing recorded in org A, nothing sent", async () => {
+  it("org B's cell token with org A's turn: 403 on every 07.4 cell route, nothing recorded in org A, nothing sent (WINDOWS #169)", async () => {
     const tokenB = `ocw_cell_${randomUUID()}${randomUUID()}`;
     await s.su.query(
       "insert into app.agent_credentials (organization_id, kind, token_hash) values ($1, 'channel_plugin', $2)",
@@ -612,13 +612,26 @@ describe("identity: the turn decides, never the body", () => {
     );
     const ev = await turnOf(s.victor, victorDm);
     const before = await fakeStats(s);
-    for (const path of ["/connectors/call", "/connectors/list"]) {
-      const r = await cell(
-        path,
-        { eventId: ev.eventId, agentId: scoutId, connector: safe, tool: "whoami", arguments: {} },
-        tokenB,
-      );
-      expect(r.status, path).toBe(403);
+    const turn = { eventId: ev.eventId, agentId: scoutId };
+    // One org-B case per registered connector and keychain cell route (the authz registry).
+    const bodies: Record<string, Record<string, unknown>> = {
+      "POST /agent-channel/v1/connectors/call": { ...turn, connector: safe, tool: "whoami", arguments: {} },
+      "POST /agent-channel/v1/connectors/list": turn,
+      "POST /agent-channel/v1/http-requests": {
+        ...turn,
+        handle: "k_abcdefghij",
+        method: "GET",
+        url: `http://fake-mcp:${s.fakePort}/kc/whoami`,
+      },
+    };
+    const owned = [...s.stack.built.authz.routes.keys()].filter((k) =>
+      / \/agent-channel\/v1\/(connectors|http-requests)/u.test(k),
+    );
+    expect(owned.sort()).toEqual(Object.keys(bodies).sort());
+    for (const [key, body] of Object.entries(bodies)) {
+      expect(s.stack.built.authz.routes.get(key), key).toBe("cell");
+      const r = await cell(key.split(" ")[1]?.replace("/agent-channel/v1", "") ?? "", body, tokenB);
+      expect(r.status, key).toBe(403);
       expect(codeOf(r)).toBe("no_trigger");
     }
     expect((await fakeStats(s)).mcpRequests).toBe(before.mcpRequests);
@@ -626,7 +639,7 @@ describe("identity: the turn decides, never the body", () => {
     const orgBAudit = (
       await s.su.query("select count(*)::int as n from app.audit_events where organization_id = $1", [s.orgB])
     ).rows[0].n;
-    expect(orgBAudit).toBeGreaterThanOrEqual(2);
+    expect(orgBAudit).toBeGreaterThanOrEqual(3);
   });
 });
 

@@ -12,7 +12,7 @@ import {
   ReadersPreview,
 } from "@ocw/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, isApiError } from "./api";
+import { type ApiRequestError, api, isApiError } from "./api";
 import { capabilityKeys } from "./capability-queries";
 import { mcpKeys } from "./mcp-queries";
 
@@ -106,7 +106,7 @@ export function useProbeConnector(serverId: string) {
 }
 
 /** True for the 409 of a member route that needs the caller's own connection first. */
-export function isNotConnected(err: unknown): boolean {
+export function isNotConnected(err: unknown): err is ApiRequestError {
   return isApiError(err, 409) && (err.code === "not_connected" || err.code === "needs_reconnect");
 }
 

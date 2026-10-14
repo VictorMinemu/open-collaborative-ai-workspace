@@ -14,6 +14,7 @@ import {
   CONNECTOR_TOOL_NAMES,
   type ConnectorToolContext,
   MEMBER_ACCOUNT,
+  NEEDS_RECONNECT,
   NOT_CONNECTED,
   REFUSAL_SENTENCE,
   registerConnectorTools,
@@ -441,18 +442,20 @@ describe("refusals are fixed sentences (CONN-04, D-03, T-07.4-09-04)", () => {
 
   it("the connect and member-account sentences are the UI contract's", () => {
     expect(REFUSAL_SENTENCE.not_connected).toBe(NOT_CONNECTED);
-    expect(REFUSAL_SENTENCE.needs_reconnect).toBe(NOT_CONNECTED);
+    // 07.4-14 (WINDOWS #198): a sign-in that stopped working asks to reconnect, not to connect.
+    expect(REFUSAL_SENTENCE.needs_reconnect).toBe(NEEDS_RECONNECT);
     expect(NOT_CONNECTED).toBe(
       "You haven't connected your account for this connector yet. I posted a link so you can connect it, then ask me again.",
+    );
+    expect(NEEDS_RECONNECT).toBe(
+      "Your sign-in for this connector stopped working. I posted a link so you can reconnect it, then ask me again.",
     );
     expect(MEMBER_ACCOUNT).toBe(
       "This uses your own account, so I can only do it in our private chat, or after you allow it for this conversation in Settings › Connections.",
     );
     expect(REFUSAL_SENTENCE.member_account).toBe(MEMBER_ACCOUNT);
-    // One distinct sentence per other code.
-    const others = Object.entries(REFUSAL_SENTENCE).filter(
-      ([c]) => !["not_connected", "needs_reconnect"].includes(c),
-    );
+    // One distinct sentence per code.
+    const others = Object.entries(REFUSAL_SENTENCE);
     expect(new Set(others.map(([, s]) => s)).size).toBe(others.length);
   });
 

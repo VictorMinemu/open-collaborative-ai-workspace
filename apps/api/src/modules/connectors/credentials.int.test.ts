@@ -62,6 +62,27 @@ async function rewriteBundle(userId: string, serverId: string, change: (b: Json)
   );
 }
 
+/** Presents a stored refresh token at the main issuer's token endpoint (out of band): 200 while its grant lives. */
+async function refreshStatus(b: Json | null): Promise<number> {
+  const res = await s.browser.fetch(
+    `${s.fakeBase}/mcp-oauth/token`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: b?.refreshToken,
+        client_id: b?.clientId,
+        resource: b?.resource,
+      }),
+    },
+    { privateAllow: [`fake-mcp:${s.fakePort}`] },
+  );
+  await res.body?.cancel();
+  return res.status;
+}
+const revocations = async () => (await fakeStats(s)).revocations;
+
 async function reconnect(c = s.victor) {
   expect((await connectOAuth(s, c, oauth.id)).status).toBe(302);
 }
@@ -156,18 +177,21 @@ describe("terminal and transient failures", () => {
     expect(res.status).toBe(200);
     await res.body?.cancel();
     const secretId = (await connectionRow(s, s.victorId, oauth.id))?.secret_id;
+    const revoked = await revocations();
     expect(await forceRefresh(s.stack.built.core, key(s.victorId, oauth.id))).toEqual({
       ok: false,
       reason: "needs_reconnect",
     });
     expect((await fakeStats(s)).refreshReuse).toBeGreaterThan(0);
+    // WINDOWS #193: the refused grant's access token is revoked at its issuer before the credential is dropped.
+    expect(await revocations()).toBe(revoked + 1);
     const row = await connectionRow(s, s.victorId, oauth.id);
     expect(row).toMatchObject({ status: "needs_reconnect", last_error: "invalid_grant", secret_id: null });
     expect((await s.su.query("select 1 from app.secrets where id = $1", [secretId])).rowCount).toBe(0);
     const audits = await auditRows(s, s.orgA, ["connector.needs_reconnect"]);
     expect(audits.at(-1)).toMatchObject({
       user_id: s.victorId,
-      metadata: { serverId: oauth.id, code: "invalid_grant" },
+      metadata: { serverId: oauth.id, code: "invalid_grant", revokeAtIssuer: true },
     });
     expect(await rowFor(oauth.id)).toMatchObject({
       status: "needs_reconnect",
@@ -199,11 +223,13 @@ describe("terminal and transient failures", () => {
       expiresAt: Date.now() - 1000,
     }));
     const before = await refreshes();
+    const revoked = await revocations();
     expect(await accessTokenFor(s.stack.built.core, key(s.victorId, oauth.id))).toEqual({
       ok: false,
       reason: "needs_reconnect",
     });
     expect(await refreshes()).toBe(before);
+    expect(await revocations()).toBe(revoked + 1);
     expect(await connectionRow(s, s.victorId, oauth.id)).toMatchObject({
       status: "needs_reconnect",
       last_error: "expired_no_refresh",
@@ -214,10 +240,12 @@ describe("terminal and transient failures", () => {
   it("a 5xx at the token endpoint is transient: the call fails, the connection stays connected, nothing audited", async () => {
     await reconnect();
     const audits = (await auditRows(s, s.orgA, ["connector.needs_reconnect"])).length;
+    const revoked = await revocations();
     s.fake.setScenario({ fail_token_5xx: true });
     await expect(forceRefresh(s.stack.built.core, key(s.victorId, oauth.id))).rejects.toBeInstanceOf(
       ConnectorTokenUnavailableError,
     );
+    expect(await revocations()).toBe(revoked);
     expect(await connectionRow(s, s.victorId, oauth.id)).toMatchObject({
       status: "connected",
       last_error: null,
@@ -227,26 +255,39 @@ describe("terminal and transient failures", () => {
     expect(await accessTokenFor(s.stack.built.core, key(s.victorId, oauth.id))).toMatchObject({ ok: true });
   });
 
-  it("an issuer change → needs_reconnect (provider_changed) and no token request to either issuer", async () => {
+  it("an issuer change → needs_reconnect (provider_changed), no token request to either issuer, the grant revoked at the OLD issuer (#193)", async () => {
     await reconnect();
+    const b = await bundleOf(s, s.orgA, s.victorId, oauth.id);
     const before = (await fakeStats(s)).tokenRequests;
+    const revoked = await revocations();
     s.fake.setScenario({ different_issuer: true });
     expect(await forceRefresh(s.stack.built.core, key(s.victorId, oauth.id))).toEqual({
       ok: false,
       reason: "needs_reconnect",
     });
     expect((await fakeStats(s)).tokenRequests).toEqual(before);
+    expect(await revocations()).toBe(revoked + 1);
     expect(await connectionRow(s, s.victorId, oauth.id)).toMatchObject({ last_error: "issuer_changed" });
     expect(await rowFor(oauth.id)).toMatchObject({ reconnectReason: "provider_changed" });
+    // The old grant is dead at the issuer that granted it, not merely forgotten here.
+    s.fake.setScenario({});
+    expect(await refreshStatus(b)).toBe(400);
   });
 
-  it("markNeedsReconnect (the proxy, after a refreshed token still got a 401) commits and maps to revoked", async () => {
+  it("markNeedsReconnect (the proxy, after a refreshed token still got a 401) commits, maps to revoked and revokes the grant (#193)", async () => {
     await reconnect();
+    const b = await bundleOf(s, s.orgA, s.victorId, oauth.id);
+    const revoked = await revocations();
     await markNeedsReconnect(s.stack.built.core, {
       ...key(s.victorId, oauth.id),
       code: "upstream_unauthorized",
     });
     expect(await rowFor(oauth.id)).toMatchObject({ status: "needs_reconnect", reconnectReason: "revoked" });
+    expect(await revocations()).toBe(revoked + 1);
+    expect(await refreshStatus(b)).toBe(400);
+    expect((await auditRows(s, s.orgA, ["connector.needs_reconnect"])).at(-1)).toMatchObject({
+      metadata: { serverId: oauth.id, code: "upstream_unauthorized", revokeAtIssuer: true },
+    });
   });
 });
 
@@ -349,6 +390,31 @@ describe("disconnect", () => {
       metadata: { serverId: conf.id, revoked: true },
     });
     expect(s.logs.join("\n")).not.toContain("CONFIDENTIAL-CLIENT-SECRET-CANARY");
+  });
+
+  it("a terminal failure whose confidential client is no longer known drops the credential and sends nothing (#193)", async () => {
+    const conf = await registerConnector(s, {
+      oauthClient: {
+        issuer: `${s.fakeBase}/mcp-oauth`,
+        clientId: "ocw-test-confidential",
+        clientSecret: "CONFIDENTIAL-CLIENT-SECRET-CANARY",
+      },
+    });
+    expect((await connectOAuth(s, s.victor, conf.id)).status).toBe(302);
+    await s.su.query("delete from app.connector_oauth_clients where server_id = $1", [conf.id]);
+    const revoked = await revocations();
+    await markNeedsReconnect(s.stack.built.core, {
+      ...key(s.victorId, conf.id),
+      code: "upstream_unauthorized",
+    });
+    expect(await revocations()).toBe(revoked);
+    expect(await connectionRow(s, s.victorId, conf.id)).toMatchObject({
+      status: "needs_reconnect",
+      secret_id: null,
+    });
+    expect((await auditRows(s, s.orgA, ["connector.needs_reconnect"])).at(-1)).toMatchObject({
+      metadata: { serverId: conf.id, code: "upstream_unauthorized", revokeAtIssuer: false },
+    });
   });
 });
 
@@ -536,7 +602,13 @@ describe("member and tenant isolation", () => {
     await s.su.query("delete from app.connector_connections where organization_id = $1", [s.orgB]);
   });
 
-  it("a member denied connector.connect gets 403 on the member routes, and may still disconnect", async () => {
+  it("a member denied connector.connect gets 403 on the connect routes, still lists and disconnects their own connections (#196)", async () => {
+    await ok(s.alex.request("PUT", `/api/v1/connectors/${keyServer.id}/secret`, { value: "alex-key" }));
+    const full = await ok(s.alex.request("GET", "/api/v1/connectors"));
+    expect(full.canConnect).toBe(true);
+    expect((full.connectors as Json[]).map((c) => c.serverId)).toEqual(
+      expect.arrayContaining([oauth.id, keyServer.id]),
+    );
     const rule = await ok(
       s.victor.request("POST", "/api/v1/permission-rules", {
         subjectKind: "user",
@@ -546,15 +618,24 @@ describe("member and tenant isolation", () => {
       }),
     );
     try {
-      await fails(s.alex.request("GET", "/api/v1/connectors"), 403);
+      // The withdrawal view: only the member's own connections, and the web offers Disconnect only.
+      const own = await ok(s.alex.request("GET", "/api/v1/connectors"));
+      expect(own.canConnect).toBe(false);
+      expect((own.connectors as Json[]).map((c) => [c.serverId, c.status])).toEqual([
+        [keyServer.id, "connected"],
+      ]);
       await fails(s.alex.request("POST", `/api/v1/connectors/${oauth.id}/connect`), 403);
       await fails(s.alex.request("PUT", `/api/v1/connectors/${keyServer.id}/secret`, { value: "k" }), 403);
-      // Withdrawing is always allowed: a denied member can still delete their own connection (none here).
+      // Withdrawing is always allowed: a denied member can still delete their own connection.
       await fails(
         s.alex.request("DELETE", `/api/v1/connectors/${oauth.id}/connection`),
         404,
         "not_connected",
       );
+      expect((await s.alex.request("DELETE", `/api/v1/connectors/${keyServer.id}/connection`)).status).toBe(
+        204,
+      );
+      expect((await ok(s.alex.request("GET", "/api/v1/connectors"))).connectors).toEqual([]);
     } finally {
       await ok(s.victor.request("DELETE", `/api/v1/permission-rules/${rule.id}`));
     }

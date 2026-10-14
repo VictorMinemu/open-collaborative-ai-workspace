@@ -6,6 +6,8 @@ import {
   connectorView,
   conversationLabel,
   readersLine,
+  reprobeRefusal,
+  withdrawalView,
 } from "./connections-format";
 
 const NOW = Date.parse("2026-10-13T12:00:00Z");
@@ -191,9 +193,9 @@ describe("conversationLabel", () => {
 
   it("uses the API's name, then the DM or group the member can open, and only then the unknown sentence", () => {
     expect(conversationLabel("c", "#ops", dms)).toBe("#ops");
-    expect(conversationLabel("dm-1", null, dms)).toBe("your DM with Sam Lee");
-    expect(conversationLabel("dm-2", null, dms)).toBe("your group with Ana, Sam");
-    expect(conversationLabel("dm-3", null, dms)).toBe("your DM with Scout");
+    expect(conversationLabel("dm-1", null, dms)).toBe("your private chat with Sam Lee");
+    expect(conversationLabel("dm-2", null, dms)).toBe("your group chat with Ana, Sam");
+    expect(conversationLabel("dm-3", null, dms)).toBe("your private chat with Scout");
     expect(conversationLabel("gone", null, dms)).toBe("a conversation you can no longer open");
     expect(conversationLabel("dm-1", null, undefined)).toBe("a conversation you can no longer open");
   });
@@ -209,5 +211,44 @@ describe("readersLine", () => {
     expect(readersLine({ readers: 40, unbounded: true }, "Backend")).toBe(
       "Everyone in Backend can read results here",
     );
+  });
+});
+
+describe("withdrawalView (connecting denied, e.g. Bots off: WINDOWS #196)", () => {
+  it("keeps the state and the meta line, offers Disconnect only, never a connect, reconnect or replace", () => {
+    const oauth = { oauthAvailable: true };
+    const key = withdrawalView(
+      connectorView(
+        connector({
+          authMode: "per_member_secret",
+          status: "connected",
+          connectedAt: "2026-10-13T08:00:00Z",
+        }),
+        oauth,
+        NOW,
+      ),
+    );
+    expect(key).toMatchObject({
+      status: "connected",
+      pill: "Connected",
+      primary: null,
+      secondary: ["disconnect"],
+    });
+    expect(key.meta).toBe("Key set · since today · never used");
+    const revoked = withdrawalView(
+      connectorView(connector({ status: "needs_reconnect", reconnectReason: "revoked" }), oauth, NOW),
+    );
+    expect(revoked).toMatchObject({ status: "revoked", primary: null, secondary: ["disconnect"] });
+    expect(withdrawalView(connectorView(connector(), oauth, NOW))).toMatchObject({
+      primary: null,
+      secondary: [],
+    });
+  });
+});
+
+describe("reprobeRefusal (per-member Re-probe without a working connection: WINDOWS #196)", () => {
+  it("asks to connect when there is no connection and to reconnect when the sign-in stopped working", () => {
+    expect(reprobeRefusal("not_connected", "Acme CRM")).toBe("Connect your own Acme CRM account first");
+    expect(reprobeRefusal("needs_reconnect", "Acme CRM")).toBe("Reconnect your own Acme CRM account first");
   });
 });

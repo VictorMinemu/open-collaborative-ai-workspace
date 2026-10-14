@@ -1442,6 +1442,38 @@ describe("cross-tenant: another organization's admin cannot read, change or dele
     const mine = await ok(admin.request("GET", `/api/v1/mcp-servers/${target.id}`));
     expect(mine).toMatchObject({ memberConnections: 1, oauthClients: [{ clientId: "tenant-a-client" }] });
   });
+
+  it("every MCP server route (the authz registry) has an org-B case above, and org B's own create stays in org B (WINDOWS #169)", async () => {
+    const covered = [
+      "GET /api/v1/mcp-servers",
+      "POST /api/v1/mcp-servers",
+      "GET /api/v1/mcp-servers/:p",
+      "PATCH /api/v1/mcp-servers/:p",
+      "DELETE /api/v1/mcp-servers/:p",
+      "POST /api/v1/mcp-servers/:p/probe",
+    ].sort();
+    const registered = [...stack.built.authz.routes.keys()]
+      .filter((k) => / \/api\/v1\/mcp-servers/u.test(k))
+      .map((k) => k.replace(/:[A-Za-z]+/gu, ":p"))
+      .sort();
+    expect(registered).toEqual(covered);
+    // The one route without an id: a create always lands in the caller's own organization.
+    const created = await ok(
+      eve.request("POST", "/api/v1/mcp-servers", {
+        name: "Evil CRM",
+        transport: "streamable-http",
+        url: "https://crm.evil.example/mcp",
+        authMode: "per_member_secret",
+        memberHeaderName: "X-Api-Key",
+      }),
+    );
+    const placed = await rowsOf("select organization_id from app.mcp_servers where id = $1", [created.id]);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]?.organization_id).not.toBe(orgId);
+    expect(
+      ((await ok(admin.request("GET", "/api/v1/mcp-servers"))).servers as Json[]).map((x) => x.id),
+    ).not.toContain(created.id);
+  });
 });
 
 /** Org A's tenant read, for assertions that must not go through HTTP (no request-scoped decision). */

@@ -27,7 +27,8 @@ import { ConnectorOAuthError, discover, refreshTokens, revokeToken, type TokenBu
  * - Refresh is serialized across API instances (Redis `SET NX PX` + `select … for update` + re-read): rotating refresh
  *   tokens are spent exactly once. The authorization server is re-discovered before each refresh; a different issuer
  *   is a reconnect, and the stored credentials are never sent to it (RFC 9207 spirit, Pitfall 3).
- * - Terminal failures commit `needs_reconnect` in their own transaction; transient ones change nothing.
+ * - Terminal failures commit `needs_reconnect` in their own transaction; transient ones change nothing. The dropped
+ *   grant is then revoked best effort at the issuer that granted it, when its client is still known (WINDOWS #193).
  * - Nothing here logs or returns a token, refresh token, key or client secret outside `AccessToken.headerValue`, which
  *   the caller sends upstream and redacts (`secretParts`).
  */
@@ -296,8 +297,54 @@ export function reconnectReasonOf(lastError: string | null): ConnectorReconnectR
   }
 }
 
-async function markInTx(tx: Tx, core: Core, row: ConnectionRow, code: string): Promise<void> {
+/**
+ * A credential dropped on a terminal failure, revoked best effort at the issuer that granted it once the transaction
+ * that dropped it has committed (WINDOWS #193): never inside a transaction, never at another issuer.
+ */
+interface DroppedGrant {
+  bundle: TokenBundle;
+  clientSecret: string | undefined;
+}
+
+/**
+ * What to revoke for a dropped OAuth bundle: the refresh token (the whole grant) unless the authorization server just
+ * refused it (`refreshRefused`), then the access token, which may still be live until it expires. Only at the issuer
+ * that granted it (the stored revocation endpoint, checked again by `revokeToken`), and only while its client is still
+ * known: a confidential client whose secret is gone cannot authenticate the request, so nothing is sent.
+ */
+async function droppedGrantOf(
+  tx: Tx,
+  core: Core,
+  row: ConnectionRow,
+  bundle: StoredBundle | null,
+  refreshRefused: boolean,
+): Promise<DroppedGrant | null> {
+  if (bundle?.kind !== "oauth" || !bundle.revocationEndpoint) return null;
+  const clientSecret = await clientSecretFor(tx, core, row.serverId, bundle.issuer, bundle.clientId);
+  if (bundle.authMethod !== "none" && clientSecret === undefined) return null;
+  const { refreshToken, ...rest } = tokenBundleOf(bundle);
+  return {
+    bundle: refreshRefused || !refreshToken ? rest : { ...rest, refreshToken },
+    clientSecret,
+  };
+}
+
+/** Best-effort revocation of a dropped grant, outside any transaction; the outcome is logged as a code only. */
+async function revokeDropped(core: Core, serverId: string, dropped: DroppedGrant | null): Promise<void> {
+  if (!dropped) return;
+  const revoked = await revokeToken(egressFor(core.env), dropped.bundle, dropped.clientSecret);
+  core.log.info({ serverId, revoked }, "connector grant revoked at its issuer after a terminal failure");
+}
+
+async function markInTx(
+  tx: Tx,
+  core: Core,
+  row: ConnectionRow,
+  code: string,
+  dropped: { bundle: StoredBundle | null; refreshRefused: boolean },
+): Promise<DroppedGrant | null> {
   const lastError = code.slice(0, LAST_ERROR_MAX);
+  const revoke = await droppedGrantOf(tx, core, row, dropped.bundle, dropped.refreshRefused);
   await tx
     .update(connectorConnections)
     .set({ status: "needs_reconnect", secretId: null, lastError, updatedAt: new Date().toISOString() })
@@ -308,8 +355,9 @@ async function markInTx(tx: Tx, core: Core, row: ConnectionRow, code: string): P
     action: "connector.needs_reconnect",
     resourceType: "connector_connection",
     resourceId: row.id,
-    metadata: { serverId: row.serverId, code: lastError },
+    metadata: { serverId: row.serverId, code: lastError, revokeAtIssuer: revoke !== null },
   });
+  return revoke;
 }
 
 /**
@@ -317,21 +365,31 @@ async function markInTx(tx: Tx, core: Core, row: ConnectionRow, code: string): P
  * token still got a 401), in its own committed transaction, and audits it. No-op without a connected row.
  */
 export async function markNeedsReconnect(core: Core, p: ConnectionKey & { code: string }): Promise<void> {
-  await core.db.withTenant({ organizationId: p.organizationId, userId: p.userId }, async (tx) => {
-    if (!(await perMemberServer(tx, p.serverId))) return;
-    const row = await ownConnection(tx, p.userId, p.serverId, true);
-    if (row?.status !== "connected") return;
-    await markInTx(tx, core, row, p.code);
-  });
+  const dropped = await core.db.withTenant(
+    { organizationId: p.organizationId, userId: p.userId },
+    async (tx) => {
+      if (!(await perMemberServer(tx, p.serverId))) return null;
+      const row = await ownConnection(tx, p.userId, p.serverId, true);
+      if (row?.status !== "connected") return null;
+      const bundle = await openBundle(tx, core, row, p.organizationId);
+      // The resource server refused a refreshed token: the grant may still be live at the issuer, so revoke it whole.
+      return markInTx(tx, core, row, p.code, { bundle, refreshRefused: false });
+    },
+  );
+  await revokeDropped(core, p.serverId, dropped);
 }
 
 // ---------------------------------------------------------------- access tokens and refresh
 
-type Attempt = { kind: "token"; token: AccessToken } | { kind: "wait" } | { kind: "transient"; code: string };
+type Attempt =
+  | { kind: "token"; token: AccessToken; dropped?: DroppedGrant | null }
+  | { kind: "wait" }
+  | { kind: "transient"; code: string };
 
-const refused = (reason: "not_connected" | "needs_reconnect"): Attempt => ({
+const refused = (reason: "not_connected" | "needs_reconnect", dropped?: DroppedGrant | null): Attempt => ({
   kind: "token",
   token: { ok: false, reason },
+  dropped,
 });
 
 /**
@@ -369,8 +427,8 @@ async function refreshAttempt(
     }
     if (!holdsLock) return { kind: "wait" };
     if (!bundle.refreshToken) {
-      await markInTx(tx, core, row, "expired_no_refresh");
-      return refused("needs_reconnect");
+      const dropped = await markInTx(tx, core, row, "expired_no_refresh", { bundle, refreshRefused: false });
+      return refused("needs_reconnect", dropped);
     }
 
     const egress = egressFor(core.env);
@@ -379,8 +437,9 @@ async function refreshAttempt(
       const current = await discover(egress, server.url).catch(() => null);
       if (current && current.issuer !== bundle.issuer) {
         core.log.warn({ serverId: key.serverId, code: "issuer_changed" }, "connector issuer changed");
-        await markInTx(tx, core, row, "issuer_changed");
-        return refused("needs_reconnect");
+        // Revoked at the OLD issuer that granted it (its stored revocation endpoint), never sent to the new one.
+        const dropped = await markInTx(tx, core, row, "issuer_changed", { bundle, refreshRefused: false });
+        return refused("needs_reconnect", dropped);
       }
     }
     const clientSecret = await clientSecretFor(tx, core, key.serverId, bundle.issuer, bundle.clientId);
@@ -395,8 +454,8 @@ async function refreshAttempt(
         "connector token refresh failed",
       );
       if (e?.terminal) {
-        await markInTx(tx, core, row, code);
-        return refused("needs_reconnect");
+        const dropped = await markInTx(tx, core, row, code, { bundle, refreshRefused: true });
+        return refused("needs_reconnect", dropped);
       }
       return { kind: "transient", code };
     }
@@ -447,6 +506,8 @@ async function refreshSerialized(
     }
     switch (outcome.kind) {
       case "token":
+        // After the attempt's transaction committed (and the lock is released): best effort, never blocks a retry.
+        await revokeDropped(core, key.serverId, outcome.dropped ?? null);
         return outcome.token;
       case "transient":
         throw new ConnectorTokenUnavailableError(outcome.code);

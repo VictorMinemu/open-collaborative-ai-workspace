@@ -137,22 +137,12 @@ async function openBots(page: Page) {
 }
 
 /**
- * Infinite animations (a Provisioning chip's pulse behind the sheet, left by another spec's bot) never finish, and the
- * axe helper waits for every running animation: stop them first. Finite ones (dialogs fading in) are left alone.
+ * Both themes, with the axe gate in each (UI-SPEC Accessibility Contract). The helper itself skips infinite animations
+ * (a Provisioning chip's pulse), so nothing is cancelled here (07.4-13, WINDOWS #188 / #197).
  */
-const stopEndlessAnimations = (page: Page) =>
-  page.evaluate(() => {
-    for (const a of document.getAnimations()) {
-      if (a.effect?.getComputedTiming().iterations === Number.POSITIVE_INFINITY) a.cancel();
-    }
-  });
-
-/** Both themes, with the axe gate in each (UI-SPEC Accessibility Contract). */
 async function a11yBothThemes(page: Page, selector: string) {
-  await stopEndlessAnimations(page);
   await expectNoSeriousA11y(page, selector);
   await page.emulateMedia({ colorScheme: "dark" });
-  await stopEndlessAnimations(page);
   await expectNoSeriousA11y(page, selector);
   await page.emulateMedia({ colorScheme: "light" });
 }

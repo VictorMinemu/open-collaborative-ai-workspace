@@ -1,4 +1,5 @@
 import { expect, type Page, test } from "@playwright/test";
+import { contrastOf } from "../support/a11y";
 import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import { type FakeDeviceHandle, startFakeDevice } from "../support/work-zone-device";
 import { ADMIN, shot } from "./env";
@@ -88,6 +89,21 @@ test("Full access: an opted-in device runs the owner's session without prompts; 
     sessionId = ((await created.json()) as { id: string }).id;
 
     await signIn(page);
+    // WINDOWS #197: the opted-in device's Full access tile (an icon on a warning tint) keeps 3:1 (WCAG 1.4.11).
+    await page.goto("/settings/devices");
+    const fullAccess = page
+      .getByTestId("device-card")
+      .filter({ hasText: `E2E Full access ${tag}` })
+      .getByTestId("device-full-access");
+    await expect(fullAccess).toHaveAttribute("data-enabled", "true");
+    for (const scheme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme: scheme });
+      expect(
+        await contrastOf(fullAccess.getByTestId("device-full-access-icon")),
+        `Full access tile, ${scheme}`,
+      ).toBeGreaterThanOrEqual(3);
+    }
+    await page.emulateMedia({ colorScheme: "light" });
     await page.goto(`/work-zone/${sessionId}`);
     const view = page.getByTestId("session-view");
     await expect(view).toHaveAttribute("data-status", "idle", { timeout: 30_000 });

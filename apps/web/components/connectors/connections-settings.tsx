@@ -48,6 +48,7 @@ import {
   connectorErrorSentence,
   connectorView,
   conversationLabel,
+  withdrawalView,
 } from "@/lib/connections-format";
 import {
   type PendingShare,
@@ -174,6 +175,13 @@ export function ConnectionsSettings() {
 
   const connectors = q.data?.connectors ?? [];
   const oauth = q.data?.oauth ?? { oauthAvailable: false };
+  /**
+   * Connecting is denied (Bots off, or a `connector.connect` deny rule; WINDOWS #196): the API lists only the member's
+   * own connections, and each row offers Disconnect only, as the API always allows withdrawal.
+   */
+  const withdrawOnly = q.data?.canConnect === false;
+  const viewOf = (c: MemberConnector) =>
+    withdrawOnly ? withdrawalView(connectorView(c, oauth)) : connectorView(c, oauth);
   const activeShares = shares.data?.shares ?? [];
   const nameOf = (serverId: string | null) =>
     connectors.find((c) => c.serverId === serverId)?.name ?? "the connector";
@@ -196,7 +204,7 @@ export function ConnectionsSettings() {
   const autoStarted = useRef(false);
   // biome-ignore lint/correctness/useExhaustiveDependencies: startConnect is stable for this purpose
   useEffect(() => {
-    if (!autoConnect || autoStarted.current || !q.data || desktopApp) return;
+    if (!autoConnect || autoStarted.current || !q.data || desktopApp || withdrawOnly) return;
     autoStarted.current = true;
     const c = connectors.find((x) => sameConnector(x, autoConnect));
     if (c?.authMode !== "per_member_oauth") return;
@@ -271,6 +279,16 @@ export function ConnectionsSettings() {
     if (!share || !q.data || !shares.data) return;
     const id = `${share.share}:${share.connector ?? ""}:${share.key ?? ""}`;
     if (shareSettled.current === id) return;
+    if (withdrawOnly) {
+      shareSettled.current = id;
+      setBanner({
+        kind: "notice",
+        tone: "info",
+        text: "Connecting accounts is turned off for you, so nothing can be allowed in a conversation.",
+      });
+      closeShare();
+      return;
+    }
     const unknownResource = share.key ? vaultItem.isError : !shareConnector;
     if (unknownResource || (!share.key && !share.connector)) {
       shareSettled.current = id;
@@ -302,8 +320,9 @@ export function ConnectionsSettings() {
     preview.isError,
     preview.data,
     existing,
+    withdrawOnly,
   ]);
-  const dialogRequest = request && !existing && !preview.isError ? request : null;
+  const dialogRequest = request && !existing && !preview.isError && !withdrawOnly ? request : null;
 
   async function confirmShare() {
     if (!dialogRequest) return;
@@ -408,13 +427,17 @@ export function ConnectionsSettings() {
         <span className="flex size-11 items-center justify-center rounded-xl border bg-muted/50">
           <Plug className="size-5 text-muted-foreground" aria-hidden />
         </span>
-        <div>
-          <p className="font-medium text-sm">No accounts to connect yet</p>
-          <p className="mt-0.5 text-muted-foreground text-sm">
-            When an admin adds a connector that uses your own account, it shows up here.
-          </p>
-        </div>
-        {canManageServers ? (
+        {withdrawOnly ? (
+          <p className="font-medium text-sm">No connected accounts</p>
+        ) : (
+          <div>
+            <p className="font-medium text-sm">No accounts to connect yet</p>
+            <p className="mt-0.5 text-muted-foreground text-sm">
+              When an admin adds a connector that uses your own account, it shows up here.
+            </p>
+          </div>
+        )}
+        {canManageServers && !withdrawOnly ? (
           <Link
             href="/settings/mcp-servers"
             className="inline-flex min-h-11 items-center font-medium text-primary text-sm hover:underline md:min-h-0"
@@ -435,13 +458,13 @@ export function ConnectionsSettings() {
           <ConnectorRow
             key={c.serverId}
             connector={c}
-            view={connectorView(c, oauth)}
+            view={viewOf(c)}
             wide={wide}
             desktopApp={desktopApp !== null}
             opening={opening === c.serverId}
             highlighted={highlighted === c.serverId}
             onPrimary={() => {
-              const v = connectorView(c, oauth);
+              const v = viewOf(c);
               if (v.primary?.kind === "key") setKeyDialog({ connector: c, mode: "add" });
               else void startConnect(c);
             }}
@@ -483,7 +506,20 @@ export function ConnectionsSettings() {
             your private chats unless you allow a conversation.
           </p>
         </div>
-        {httpsNotice ? (
+        {withdrawOnly ? (
+          <p
+            role="note"
+            className="flex items-start gap-2.5 rounded-xl border bg-muted/40 px-4 py-3 text-sm"
+            data-testid="connections-withdraw-only"
+          >
+            <Info className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
+            <span>
+              Connecting accounts is turned off for you. You can still disconnect the accounts you connected
+              and revoke where you allowed them.
+            </span>
+          </p>
+        ) : null}
+        {httpsNotice && !withdrawOnly ? (
           <p
             role="note"
             className="flex items-start gap-2.5 rounded-xl border border-warning/30 bg-warning/8 px-4 py-3 text-sm"

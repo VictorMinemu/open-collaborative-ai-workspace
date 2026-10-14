@@ -183,6 +183,11 @@ export type MemberConnector = z.infer<typeof MemberConnector>;
 export const MemberConnectorList = z.object({
   connectors: z.array(MemberConnector),
   oauth: ConnectorOAuthUrls,
+  /**
+   * 07.4-14 (WINDOWS #196): false when the caller may not connect (`connector.connect` denied, e.g. Bots off). The list
+   * is then the withdrawal view: only the member's own connections, which they may still disconnect.
+   */
+  canConnect: z.boolean().default(true),
 });
 export type MemberConnectorList = z.infer<typeof MemberConnectorList>;
 

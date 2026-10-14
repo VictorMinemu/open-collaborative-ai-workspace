@@ -156,6 +156,22 @@ export function connectorView(
   };
 }
 
+/**
+ * The row when the member may not connect (`connector.connect` denied, e.g. Bots off; WINDOWS #196): the same state
+ * and meta line, Disconnect only. Withdrawal is always allowed (the API's DELETE), connecting again is not.
+ */
+export function withdrawalView(view: ConnectorView): ConnectorView {
+  const connected = view.status !== "not_connected" && view.status !== "unavailable";
+  return { ...view, primary: null, secondary: connected ? ["disconnect"] : [] };
+}
+
+/** The per-member Re-probe's toast when the admin's own connection is missing or needs a reconnect (409). */
+export function reprobeRefusal(code: string, name: string): string {
+  return code === "needs_reconnect"
+    ? `Reconnect your own ${name} account first`
+    : `Connect your own ${name} account first`;
+}
+
 /** Codes whose fix is an admin's, not another attempt: their banner has no Try again. */
 const NO_RETRY = new Set(["https_required", "needs_client", "pkce_unsupported", "egress_refused"]);
 
@@ -189,8 +205,9 @@ export function connectorErrorSentence(code: string, name: string): { text: stri
 export const UNKNOWN_CONVERSATION = "a conversation you can no longer open";
 
 /**
- * How a conversation reads in "{resource} in {conversation}": the API's `#name` or AI chat title, else (a DM or a
- * group, which the API leaves unnamed) the member's own DM list, else the unknown sentence.
+ * How a conversation reads in "{resource} in {conversation}": the API's name (`#name`, an AI chat title, and since
+ * 07.4-12 "your private chat with …" / "your group chat with …" for DMs and groups), else the member's own DM list in
+ * the API's words (07.4-14), else the unknown sentence.
  */
 export function conversationLabel(
   conversationId: string,
@@ -201,7 +218,7 @@ export function conversationLabel(
   const dm = dms?.find((d) => d.id === conversationId);
   if (!dm) return UNKNOWN_CONVERSATION;
   const c = dm.counterpart;
-  return c.kind === "group" ? `your group with ${c.name}` : `your DM with ${c.name}`;
+  return c.kind === "group" ? `your group chat with ${c.name}` : `your private chat with ${c.name}`;
 }
 
 /** "{n} people can read results here", or the whole group of an unbounded audience (a public channel, a unit grant). */

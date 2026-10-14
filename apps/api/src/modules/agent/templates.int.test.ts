@@ -866,40 +866,69 @@ describe("archive: nobody starts new agents from it; existing ones keep working"
 });
 
 describe("cross-tenant: every referenced id is resolved inside the caller's tenant", () => {
-  it("org B's admin never sees, starts, manages or references org A's templates, units, tools, connectors or keys", async () => {
+  it("org B's admin never sees, starts, manages or references org A's templates, units, tools, connectors or keys; every template route has a case (WINDOWS #169)", async () => {
     const { client: eve } = await otherOrgAdmin();
-    const list = await ok(eve.request("GET", "/api/v1/agent-templates"));
-    expect(list.templates).toEqual([]);
-    await fails(eve.request("GET", `/api/v1/agent-templates/${templateId}/preview`), 404);
-    await fails(eve.request("POST", `/api/v1/agent-templates/${templateId}/instantiate`, {}), 404);
-    await fails(eve.request("PATCH", `/api/v1/agent-templates/${templateId}`, { archived: true }), 404);
-    await fails(eve.request("POST", `/api/v1/agent-templates/${templateId}/versions`, versionBody()), 404);
-    await fails(eve.request("GET", `/api/v1/agents/${samBotId}/template`), 404);
-    await fails(eve.request("POST", `/api/v1/agents/${samBotId}/template/apply`, { toVersion: 3 }), 404);
-    await fails(eve.request("GET", `/api/v1/agent-templates/options?unitId=${backend}`), 404);
-    expect(
-      (
-        await fails(
-          eve.request("POST", "/api/v1/agent-templates", {
-            unitId: backend,
-            name: "X",
-            version: versionBody(),
-          }),
-          404,
-        )
-      ).code,
-    ).toBe("unit_not_found");
     const create = (version: Json) =>
       eve.request("POST", "/api/v1/agent-templates", { unitId: null, name: `X ${randomUUID()}`, version });
-    expect((await fails(create(versionBody({ toolGrants: [grant(erp, READ_INVOICE)] })), 400)).code).toBe(
-      "unknown_tool",
+    // One org-B case per registered template route (the authz registry), so a new route cannot skip one.
+    const cases: Record<string, () => Promise<void>> = {
+      "GET /api/v1/agent-templates": async () => {
+        expect((await ok(eve.request("GET", "/api/v1/agent-templates"))).templates).toEqual([]);
+      },
+      "POST /api/v1/agent-templates": async () => {
+        expect(
+          (
+            await fails(
+              eve.request("POST", "/api/v1/agent-templates", {
+                unitId: backend,
+                name: "X",
+                version: versionBody(),
+              }),
+              404,
+            )
+          ).code,
+        ).toBe("unit_not_found");
+        expect((await fails(create(versionBody({ toolGrants: [grant(erp, READ_INVOICE)] })), 400)).code).toBe(
+          "unknown_tool",
+        );
+        expect((await fails(create(versionBody({ requiredConnectorIds: [crm] })), 400)).code).toBe(
+          "unknown_connector",
+        );
+        expect((await fails(create(versionBody({ unitVaultItemIds: [backendKey] })), 400)).code).toBe(
+          "unknown_vault_item",
+        );
+      },
+      "GET /api/v1/agent-templates/options": async () => {
+        await fails(eve.request("GET", `/api/v1/agent-templates/options?unitId=${backend}`), 404);
+      },
+      "PATCH /api/v1/agent-templates/:p": async () => {
+        await fails(eve.request("PATCH", `/api/v1/agent-templates/${templateId}`, { archived: true }), 404);
+      },
+      "POST /api/v1/agent-templates/:p/versions": async () => {
+        await fails(
+          eve.request("POST", `/api/v1/agent-templates/${templateId}/versions`, versionBody()),
+          404,
+        );
+      },
+      "GET /api/v1/agent-templates/:p/preview": async () => {
+        await fails(eve.request("GET", `/api/v1/agent-templates/${templateId}/preview`), 404);
+      },
+      "POST /api/v1/agent-templates/:p/instantiate": async () => {
+        await fails(eve.request("POST", `/api/v1/agent-templates/${templateId}/instantiate`, {}), 404);
+      },
+      "GET /api/v1/agents/:p/template": async () => {
+        await fails(eve.request("GET", `/api/v1/agents/${samBotId}/template`), 404);
+      },
+      "POST /api/v1/agents/:p/template/apply": async () => {
+        await fails(eve.request("POST", `/api/v1/agents/${samBotId}/template/apply`, { toVersion: 3 }), 404);
+      },
+    };
+    const owned = (k: string) => / \/api\/v1\/(agent-templates|agents\/:[A-Za-z]+\/template)/u.test(k);
+    const routeKey = (k: string) => k.replace(/:[A-Za-z]+/gu, ":p");
+    expect([...stack.built.authz.routes.keys()].filter(owned).map(routeKey).sort()).toEqual(
+      Object.keys(cases).sort(),
     );
-    expect((await fails(create(versionBody({ requiredConnectorIds: [crm] })), 400)).code).toBe(
-      "unknown_connector",
-    );
-    expect((await fails(create(versionBody({ unitVaultItemIds: [backendKey] })), 400)).code).toBe(
-      "unknown_vault_item",
-    );
+    for (const run of Object.values(cases)) await run();
     // Nothing of org A changed.
     const [t] = (
       await su.query("select archived_at, current_version from app.agent_templates where id = $1", [

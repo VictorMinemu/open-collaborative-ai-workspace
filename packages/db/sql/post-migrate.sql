@@ -191,6 +191,30 @@ CREATE POLICY personal_owner_only ON app.vault_items AS RESTRICTIVE FOR ALL
   WITH CHECK (scope <> 'personal'
          OR owner_user_id = nullif(current_setting('app.user_id', true), '')::uuid);
 
+-- Grants of keys to bots (Phase 07.4, WINDOWS #182): a grant on a personal key says which bots its owner gave it to,
+-- so it is the owner's alone, as the key is. RESTRICTIVE (ANDed with tenant_isolation): a grant is visible and
+-- writable only while its key is visible to the session, i.e. through `vault_items`' own owner-only policy (another
+-- member, an admin of the same organization and a session without a user see no grant on someone's personal key and
+-- cannot write one); grants on unit keys stay under tenant isolation only. FK cascades (a deleted bot or key) are not
+-- subject to it.
+DROP POLICY IF EXISTS personal_owner_only ON app.agent_vault_grants;
+CREATE POLICY personal_owner_only ON app.agent_vault_grants AS RESTRICTIVE FOR ALL
+  USING (EXISTS (SELECT 1 FROM app.vault_items v WHERE v.id = agent_vault_grants.vault_item_id))
+  WITH CHECK (EXISTS (SELECT 1 FROM app.vault_items v WHERE v.id = agent_vault_grants.vault_item_id));
+
+-- The cell's `alsoAllow` path over every grant (07.4-11, WINDOWS #182): `/agent-channel/v1/cell` runs without a user and
+-- must still know which bots hold some key, so it can list `ocw_http_request` for them. SECURITY DEFINER as
+-- ocw_migrator (BYPASSRLS), fixed search_path, scoped to the CALLER's organization; it returns agent ids only (never a
+-- key, a handle, an owner or which key a bot holds).
+CREATE OR REPLACE FUNCTION app.vault_grant_agents()
+RETURNS TABLE (agent_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT DISTINCT g.agent_id FROM app.agent_vault_grants g
+  WHERE g.organization_id = nullif(current_setting('app.organization_id', true), '')::uuid
+$fn$;
+REVOKE ALL ON FUNCTION app.vault_grant_agents() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.vault_grant_agents() TO ocw_app;
+
 -- Per-member connector connections (Phase 07.4, D-01; WINDOWS #170): a member's connection (the id of its sealed
 -- credential, issuer, scopes, account label) is its owner's alone, as a personal key is. Same RESTRICTIVE shape, ANDed
 -- with tenant_isolation, on the row's own `user_id`: an admin of the same organization, a session without a user and

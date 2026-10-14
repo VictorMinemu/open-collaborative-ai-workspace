@@ -20,6 +20,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { errorMessage } from "@/lib/api";
+import { reprobeRefusal } from "@/lib/connections-format";
 import { isNotConnected, useProbeConnector } from "@/lib/connector-queries";
 import {
   connectionsExistCount,
@@ -247,7 +248,7 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
       else await probe.mutateAsync();
     } catch (err) {
       if (perMember && isNotConnected(err)) {
-        toast(`Connect your own ${server.name} account first`, {
+        toast(reprobeRefusal(err.code, server.name), {
           action: {
             label: "Open Connections",
             onClick: () => router.push(`/settings/connections?connector=${server.id}`),

@@ -1,8 +1,10 @@
 "use client";
 
+import type { Permission } from "@ocw/contracts";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { SectionSidebar, sectionItemClass } from "@/components/shell/section-sidebar";
+import { useConnectors, useShares } from "@/lib/connector-queries";
 import { grainStatus, permissionsFailed } from "@/lib/modules";
 import { usePermissionCheck, usePermissions } from "@/lib/permissions";
 import { ACCOUNT_SECTIONS } from "./account-nav";
@@ -15,8 +17,16 @@ export function SettingsSidebar() {
   const workspace = SETTINGS_SECTIONS.filter((s) => !s.permission || can(s.permission));
   // Account entries are everyone's: one of a module (AI chat) leaves only once its grain is decided off, never while
   // permissions load or after a failed fetch (P-08), so it never flashes in or out on a normal load.
+  const grainOff = (p: Permission) => grainStatus(perms.data, permissionsFailed(perms), p) === "off";
+  // Connections stays while the member still has a connection or an allowed conversation to withdraw, even with
+  // connecting off (Bots off; 07.4-14, WINDOWS #196): the page then offers Disconnect and Revoke only.
+  const connectOff = grainOff("connector.connect");
+  const ownConnections = useConnectors(connectOff);
+  const ownShares = useShares(connectOff);
+  const withdrawable =
+    (ownConnections.data?.connectors.length ?? 0) > 0 || (ownShares.data?.shares.length ?? 0) > 0;
   const account = ACCOUNT_SECTIONS.filter(
-    (s) => !s.permission || grainStatus(perms.data, permissionsFailed(perms), s.permission) !== "off",
+    (s) => !s.permission || !grainOff(s.permission) || (s.id === "connections" && withdrawable),
   );
   return (
     <SectionSidebar title="Settings">

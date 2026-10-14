@@ -15,6 +15,13 @@ export const REQUIRED_AREAS = [
   { area: "adapters (Claude Code)", file: "apps/local-runtime/src/claude/claude-runtime.ts" },
   { area: "adapters (Codex)", file: "apps/local-runtime/src/codex/codex-runtime.ts" },
   { area: "guardrails", file: ".semgrep/rules.yml" },
+  // Phase 07.4 (07.4-14, WINDOWS #190): the outbound guard, member credentials, keys and the proxies that use them.
+  { area: "egress guard", file: "apps/api/src/lib/egress.ts" },
+  { area: "member connector credentials", file: "apps/api/src/modules/connectors/credentials.ts" },
+  { area: "keychain (secrets by handle)", file: "apps/api/src/modules/keychain/service.ts" },
+  { area: "connector proxy", file: "apps/api/src/modules/agent-channel/connectors.ts" },
+  { area: "keychain proxy", file: "apps/api/src/modules/agent-channel/http-requests.ts" },
+  { area: "agent templates (caps)", file: "apps/api/src/modules/agent/templates.ts" },
 ];
 
 /** GitHub CODEOWNERS pattern (gitignore subset) → RegExp over repo-relative paths. */
