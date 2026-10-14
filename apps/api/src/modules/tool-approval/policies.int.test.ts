@@ -54,6 +54,7 @@ let marketing: string;
 let crmId: string;
 let connId: string;
 let botId: string;
+let eastBotId: string;
 
 async function joinAs(email: string, name: string, role: string): Promise<readonly [TestClient, string]> {
   const inv = await ok(victor.request("POST", "/api/v1/invitations", { email, role }));
@@ -176,6 +177,13 @@ beforeAll(async () => {
     `insert into app.agents (id, organization_id, name, username, instructions, model_provider, model_id, status)
      values ($1, $2, 'Scout', 'scout', 'You help.', 'mock', 'mock-1', 'ready')`,
     [botId, orgA],
+  );
+  // A Sales East bot: Sales rules reach it whoever asks.
+  eastBotId = randomUUID();
+  await su.query(
+    `insert into app.agents (id, organization_id, name, username, instructions, model_provider, model_id, status, unit_id)
+     values ($1, $2, 'Closer', 'closer', 'You help.', 'mock', 'mock-1', 'ready', $3)`,
+    [eastBotId, orgA, salesEast],
   );
 }, 180_000);
 
@@ -301,5 +309,63 @@ describe("tracer: an admin asks before every Acme CRM tool and reads it back wit
       expect((await anon.request(method, path, body, asCell)).status).toBe(401);
     }
     expect((await audits(orgA, POLICY_ACTIONS)).length).toBe(1);
+  });
+});
+
+describe("per-turn approval modes (D-01, D-04)", () => {
+  const modes = (agentId: string, userId: string, tools: string[]) =>
+    stack.built.core.db.withTenant({ organizationId: orgA }, (tx) =>
+      stack.built.toolApprovals.approvalModesFor(tx, { agentId, userId }, tools),
+    );
+  const TOOLS = [CREATE, LIST, "ocw_http_request", "web_fetch"];
+
+  it("an organization rule over the server covers both tools; web tools are skipped even with a stray rule", async () => {
+    await clearPolicies();
+    await ok(
+      victor.request("POST", "/api/v1/tool-approval-policies", {
+        scopeUnitId: null,
+        toolPattern: ALL_CRM,
+        mode: "always",
+        approverKind: "admins",
+      }),
+      201,
+    );
+    // A rule the contract would refuse, written straight into the database: it never applies and is never shown.
+    await su.query(
+      `insert into app.tool_approval_policies (organization_id, tool_pattern, mode, approver_kind) values ($1, 'web_fetch', 'always', 'requester')`,
+      [orgA],
+    );
+    expect(Object.fromEntries(await modes(botId, samId, TOOLS))).toEqual({
+      [CREATE]: "always",
+      [LIST]: "always",
+    });
+    const page = await ok(victor.request("GET", "/api/v1/tool-approval-policies?scope=org"));
+    expect(page.policies.map((p: Json) => p.toolPattern)).toEqual([ALL_CRM]);
+    await su.query("delete from app.tool_approval_policies where tool_pattern = 'web_fetch'");
+  });
+
+  it("a Sales `when_tainted` rule reaches Sam (Sales), not Dana (Marketing), unless the bot itself is under Sales", async () => {
+    await ok(
+      victor.request("POST", "/api/v1/tool-approval-policies", {
+        scopeUnitId: sales,
+        toolPattern: "ocw_http_request",
+        mode: "when_tainted",
+        approverKind: "unit_leads",
+      }),
+      201,
+    );
+    expect((await modes(botId, samId, TOOLS)).get("ocw_http_request")).toBe("when_tainted");
+    expect((await modes(botId, danaId, TOOLS)).has("ocw_http_request")).toBe(false);
+    expect((await modes(eastBotId, danaId, TOOLS)).get("ocw_http_request")).toBe("when_tainted");
+
+    const resolved = await stack.built.core.db.withTenant({ organizationId: orgA }, (tx) =>
+      stack.built.toolApprovals.resolveFor(tx, { agentId: botId, userId: samId }, "ocw_http_request"),
+    );
+    expect(resolved).toMatchObject({ mode: "when_tainted", approverKind: "unit_leads", scopeUnitId: sales });
+    if (!resolved) throw new Error("no rule resolved");
+    const label = await stack.built.core.db.withTenant({ organizationId: orgA }, (tx) =>
+      stack.built.toolApprovals.approverLabel(tx, resolved),
+    );
+    expect(label).toBe("Leads of Sales");
   });
 });

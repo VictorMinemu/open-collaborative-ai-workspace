@@ -6,10 +6,11 @@ import {
   ToolApproverKind,
   ToolPattern,
 } from "@ocw/contracts";
-import { mcpServers, orgMembers, orgUnits, type Tx, tenantOf, toolApprovalPolicies } from "@ocw/db";
+import { agents, mcpServers, orgMembers, orgUnits, type Tx, tenantOf, toolApprovalPolicies } from "@ocw/db";
 import { asc, eq, inArray } from "drizzle-orm";
 import type { AuditService } from "../audit";
-import type { PolicyRow } from "./resolve";
+import { loadPrincipalFacts } from "../organization";
+import { type ApprovalFacts, type PolicyRow, type ResolvedApproval, resolveToolApproval } from "./resolve";
 
 /**
  * Storage access of the approval policies (Phase 07.5, D-01, P-04): every function runs in the caller's tenant
@@ -319,4 +320,57 @@ export async function insertPolicy(
   const stored = await findPolicy(tx, row.id);
   if (!stored) throw new Error("policy vanished after insert");
   return stored;
+}
+
+// ---------------------------------------------------------------- resolution (D-01, D-04)
+
+/** The (agent, human) pair a turn runs for. */
+export interface ApprovalSubject {
+  agentId: string;
+  userId: string;
+}
+
+/**
+ * The unit paths of a call: the agent's unit (`agents.unit_id`) and the human's units, from the resolver's own facts
+ * loader (`loadPrincipalFacts`), so unit membership is read in one place.
+ */
+export async function approvalFactsFor(tx: Tx, s: ApprovalSubject): Promise<ApprovalFacts> {
+  const [agent] = await tx
+    .select({ path: orgUnits.path })
+    .from(agents)
+    .leftJoin(orgUnits, eq(orgUnits.id, agents.unitId))
+    .where(eq(agents.id, s.agentId))
+    .limit(1);
+  const human = await loadPrincipalFacts(tx, { kind: "user", userId: s.userId });
+  return { agentUnitPath: agent?.path ?? null, humanUnitPaths: human.memberUnitPaths };
+}
+
+/**
+ * Per offered tool, the mode a turn must honour: `always` or `when_tainted`; absent for `never`, for no rule and for a
+ * tool no rule may name (web tools, the other `ocw_` built-ins). One policy load and one facts load per call.
+ */
+export async function approvalModesFor(
+  tx: Tx,
+  s: ApprovalSubject,
+  tools: readonly string[],
+): Promise<Map<string, "always" | "when_tainted">> {
+  const out = new Map<string, "always" | "when_tainted">();
+  const approvable = tools.filter(isApprovableTool);
+  if (approvable.length === 0) return out;
+  const rows = await loadToolApprovalPolicies(tx);
+  if (rows.length === 0) return out;
+  const facts = await approvalFactsFor(tx, s);
+  for (const tool of approvable) {
+    const r = resolveToolApproval(rows, facts, tool);
+    if (r && r.mode !== "never") out.set(tool, r.mode);
+  }
+  return out;
+}
+
+/** The effective rule for one call (the gate's call-time re-decision, 07.5-07), or null. */
+export async function resolveFor(tx: Tx, s: ApprovalSubject, tool: string): Promise<ResolvedApproval | null> {
+  if (!isApprovableTool(tool)) return null;
+  const rows = await loadToolApprovalPolicies(tx);
+  if (rows.length === 0) return null;
+  return resolveToolApproval(rows, await approvalFactsFor(tx, s), tool);
 }
