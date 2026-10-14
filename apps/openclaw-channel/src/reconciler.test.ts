@@ -270,7 +270,7 @@ describe("capabilities in the cell (D-08 layer 1, D-09)", () => {
     });
   });
 
-  it("a bot served delivered-turn tools (ocw_agent_card) also configures ocw_board_card; a bot with none does not (07.1-13)", () => {
+  it("a bot served delivered-turn tools (ocw_agent_card) also configures ocw_board_card and the two Work Zone tools; a bot with none does not (07.1-13, 07.5-10)", () => {
     const plan = planReconcile(
       {},
       {
@@ -283,7 +283,13 @@ describe("capabilities in the cell (D-08 layer 1, D-09)", () => {
       },
     );
     expect(plan.upsertAgents["ocw-c"]?.tools).toMatchObject({
-      alsoAllow: ["web_search", "ocw_agent_card", "ocw_board_card"],
+      alsoAllow: [
+        "web_search",
+        "ocw_agent_card",
+        "ocw_board_card",
+        "ocw_work_zone_projects",
+        "ocw_start_work_zone",
+      ],
     });
     expect(plan.upsertAgents["ocw-w"]?.tools).toMatchObject({ alsoAllow: ["web_search"] });
     expect(plan.upsertAgents["ocw-q"]?.tools).not.toHaveProperty("alsoAllow");

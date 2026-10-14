@@ -15,6 +15,8 @@ import {
   AGENT_CHANNEL_TOOL_REFUSALS,
   AgentCardActionEvent,
   AgentChannelToolCallDecision,
+  AgentChannelWorkZoneProjectsResponse,
+  AgentChannelWorkZoneProposeResponse,
   type CellAgent,
   type CellMcpServer,
   type CellProvider,
@@ -22,6 +24,9 @@ import {
   TOOL_APPROVAL_LIMITS,
   TOOL_APPROVAL_REFUSALS,
   TurnToolFlags,
+  WORK_ZONE_PROPOSAL_LIMITS,
+  WORK_ZONE_PROPOSAL_REFUSALS,
+  WORK_ZONE_RUNTIMES,
 } from "./agent-channel-protocol.js";
 import { AgentChannelHttpError, createAgentChannelClient } from "./api-client.js";
 import { AUTH_FAILURE_REPLY, createBridge, FAILURE_REPLY, type OpenClawPort } from "./bridge.js";
@@ -48,6 +53,7 @@ import {
 } from "./testing/fake-agent-channel-api.js";
 import { createHostPluginApi, createTurnHookRunner, type HostRegistry } from "./testing/openclaw-host.js";
 import { APPROVAL_SENTENCES, createToolGuard } from "./tool-guard.js";
+import { WORK_ZONE_TOOL_NAMES } from "./work-zone-tools.js";
 
 const ARCHIE: CellAgent = {
   id: "agent-archie",
@@ -1117,6 +1123,55 @@ describe("approval mirror parity (07.5-04: plugin ↔ packages/contracts tool-ap
   });
 });
 
+describe("Work Zone proposal mirror parity (07.5-10: plugin ↔ packages/contracts work-zone-proposals.ts, session-events.ts, bot-capabilities.ts)", () => {
+  const contracts = (file: string) =>
+    new URL(`../../../packages/contracts/src/${file}`, import.meta.url).href;
+  type Schema = { safeParse: (v: unknown) => { success: boolean } };
+
+  it("the refusals, runtimes, limits and tool names are the contracts'; what the contract accepts reads the same", async () => {
+    const wz = (await import(contracts("work-zone-proposals.ts"))) as {
+      WorkZoneProposalRefusal: { options: string[] };
+      WORK_ZONE_PROPOSAL_LIMITS: Record<string, number>;
+      AgentChannelWorkZonePropose: Schema;
+      AgentChannelWorkZoneProjectsResponse: Schema;
+      AgentChannelWorkZoneProposeResponse: Schema;
+    };
+    const events = (await import(contracts("session-events.ts"))) as { RuntimeId: { options: string[] } };
+    const caps = (await import(contracts("bot-capabilities.ts"))) as {
+      BUILTIN_TOOLS: Record<string, string>;
+    };
+    expect([...WORK_ZONE_PROPOSAL_REFUSALS]).toEqual([...wz.WorkZoneProposalRefusal.options]);
+    expect([...WORK_ZONE_RUNTIMES]).toEqual([...events.RuntimeId.options]);
+    expect(WORK_ZONE_PROPOSAL_LIMITS.promptChars).toBe(wz.WORK_ZONE_PROPOSAL_LIMITS.promptChars);
+    expect(WORK_ZONE_PROPOSAL_LIMITS.pendingPerRequester).toBe(
+      wz.WORK_ZONE_PROPOSAL_LIMITS.pendingPerRequester,
+    );
+    expect([...WORK_ZONE_TOOL_NAMES]).toEqual([
+      caps.BUILTIN_TOOLS.workZoneProjects,
+      caps.BUILTIN_TOOLS.startWorkZone,
+    ]);
+    const projects = {
+      projects: [
+        {
+          projectId: "0199a6f0-0000-7000-8000-00000000b111",
+          name: "billing-api",
+          device: { id: "0199a6f0-0000-7000-8000-00000000d111", name: "MacBook Pro", online: true },
+          runtimes: [{ id: "claude-code", label: "Claude Code", available: true }],
+        },
+      ],
+    };
+    expect(wz.AgentChannelWorkZoneProjectsResponse.safeParse(projects).success).toBe(true);
+    expect(AgentChannelWorkZoneProjectsResponse.parse(projects)).toEqual(projects);
+    for (const answer of [
+      { approvalId: "0199a6f0-0000-7000-8000-0000000000a9", created: true },
+      { refused: "device_offline" },
+    ]) {
+      expect(wz.AgentChannelWorkZoneProposeResponse.safeParse(answer).success).toBe(true);
+      expect(AgentChannelWorkZoneProposeResponse.parse(answer)).toEqual(answer);
+    }
+  });
+});
+
 /** Every tool the plugin owns, in registration order (manifest `contracts.tools` and `registerFull`). */
 const PLUGIN_TOOLS = [
   "ocw_memory_save",
@@ -1129,12 +1184,14 @@ const PLUGIN_TOOLS = [
   "ocw_connector_list",
   "ocw_connector_call",
   "ocw_http_request",
+  "ocw_work_zone_projects",
+  "ocw_start_work_zone",
 ];
 
 describe("memory tool (D-10): manifest, registration and the fake API", () => {
   const MEMORY = { untrustedOutput: false, sideEffecting: true };
 
-  it("the manifest declares ocw_memory_save, the four memory file tools, ocw_agent_card and ocw_board_card in contracts.tools (OpenClaw discovers tool ownership there)", () => {
+  it("the manifest declares ocw_memory_save, the four memory file tools, ocw_agent_card, ocw_board_card, the connector tools and the two Work Zone tools in contracts.tools (OpenClaw discovers tool ownership there)", () => {
     const manifest = JSON.parse(
       readFileSync(path.join(import.meta.dirname, "..", "openclaw.plugin.json"), "utf8"),
     ) as { contracts?: { tools?: string[] } };
@@ -1213,7 +1270,15 @@ describe("board tool (07.1-13, BOARD-02): a board turn → ocw_board_card → PO
     const entry = planReconcile({}, { agents: [bot], providers: [FAKE] }).upsertAgents[
       openClawAgentIdFor(ARCHIE.id)
     ];
-    expect(entry?.tools).toMatchObject({ alsoAllow: ["web_search", "ocw_agent_card", "ocw_board_card"] });
+    expect(entry?.tools).toMatchObject({
+      alsoAllow: [
+        "web_search",
+        "ocw_agent_card",
+        "ocw_board_card",
+        "ocw_work_zone_projects",
+        "ocw_start_work_zone",
+      ],
+    });
     const boardTurn = {
       tools: ["web_search", "ocw_agent_card", "ocw_board_card"],
       toolFlags: { ocw_agent_card: CARD, ocw_board_card: BOARD },

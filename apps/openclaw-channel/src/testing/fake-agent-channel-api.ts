@@ -56,6 +56,14 @@
  *                                          model) or replace the call's content. The upstream credential the real API
  *                                          would use (`connectorToken`) never leaves the fake: not in /cell, not in an
  *                                          answer.
+ *   POST /agent-channel/v1/work-zone/projects   records the body (`workZone.projectLists`) and answers `workZone.projects`
+ *                                          (default: billing-api on MacBook Pro, online, Claude Code ready)
+ *   POST /agent-channel/v1/work-zone/proposals  records the body (`workZone.proposals`) and answers `{approvalId, created}`
+ *                                          (the same approval for the same event, project, device, prompt and runtime,
+ *                                          `created: false` then), or 200 `{refused: workZone.refused}`; 404 unknown_turn
+ *                                          when that is the refusal, like the real API. Both: 400 for any key beyond the
+ *                                          contract's (a mode, a model, a user id). POST /__test/work-zone
+ *                                          {refused?, projects?} sets the knobs ({} resets them)
  *   POST /agent-channel/v1/mcp/probe-results  records the probe report (`mcpProbes`)
  *   POST /agent-channel/v1/plugins/report     records the report (`pluginReports`) and moves the row's status
  *   POST /agent-channel/v1/plugins/verify-install  approves only a row `installing` with the same package, version
@@ -82,6 +90,7 @@ import type {
   AgentChannelToolCallRequest,
   AgentChannelToolCallResult,
   AgentChannelTyping,
+  AgentChannelWorkZoneProjectsResponse,
   AgentMentionEvent,
   CellAgent,
   CellApprovedPlugin,
@@ -158,6 +167,31 @@ export type ToolApprovalControl = {
 };
 /** Test knobs of the connector routes (`POST /__test/connectors` replaces them). */
 export type ConnectorControl = { slowMs?: number; refusal?: string; result?: string };
+/** The fake Work Zone: what the routes recorded and answer (07.5-10). */
+export type FakeWorkZone = {
+  /** Every POST /work-zone/projects body, in order. */
+  projectLists: Array<Record<string, unknown>>;
+  /** Every POST /work-zone/proposals body, in order (refused ones included). */
+  proposals: Array<Record<string, unknown>>;
+  /** What POST /work-zone/projects answers. */
+  projects: AgentChannelWorkZoneProjectsResponse["projects"];
+  /** When set, every proposal is refused with this code. */
+  refused?: string;
+};
+export const FAKE_WORK_ZONE_PROJECT = "0199a6f0-0000-7000-8000-00000000b111";
+export const FAKE_WORK_ZONE_DEVICE = "0199a6f0-0000-7000-8000-00000000d111";
+const fakeWorkZoneProjects = (): AgentChannelWorkZoneProjectsResponse["projects"] => [
+  {
+    projectId: FAKE_WORK_ZONE_PROJECT,
+    name: "billing-api",
+    device: { id: FAKE_WORK_ZONE_DEVICE, name: "MacBook Pro", online: true },
+    runtimes: [{ id: "claude-code", label: "Claude Code", available: true }],
+  },
+];
+const WORK_ZONE_BODY_KEYS = {
+  projects: ["eventId", "agentId"],
+  proposals: ["eventId", "agentId", "projectId", "deviceId", "prompt", "runtime"],
+} as const;
 /** In every refusal body of the connector routes: a plugin must never relay it to the model. */
 export const FAKE_ERROR_CANARY = "fake-api-error-body-canary";
 export type VerifyCall = {
@@ -227,6 +261,8 @@ export type FakeAgentChannelApi = {
   httpRequests: Array<Record<string, unknown>>;
   /** The knobs of the connector routes. */
   connectorControl: ConnectorControl;
+  /** The Work Zone proposal routes' records and knobs (07.5-10). */
+  workZone: FakeWorkZone;
   /** Snapshot `mcpServers` (header values included, as the real API sends them); `[]` = none. */
   mcpServers: CellMcpServer[];
   /** Every POST /mcp/probe-results, in order. */
@@ -410,6 +446,8 @@ export async function startFakeAgentChannelApi(
   const sockets = new Set<WebSocket>();
   let failures = { n: 0, status: 503 };
   const byKey = new Map<string, StoredMessage>();
+  /** Work Zone proposal → approval id (a retry of the same proposal gets the same approval). */
+  const workZoneApprovals = new Map<string, string>();
   /** Current flow per plugin row (set when a plugin command is published), as `cell_plugins.flow_id`. */
   const pluginFlows = new Map<string, string>();
 
@@ -452,6 +490,7 @@ export async function startFakeAgentChannelApi(
     connectorLists: [] as Array<Record<string, unknown>>,
     httpRequests: [] as Array<Record<string, unknown>>,
     connectorControl: {} as ConnectorControl,
+    workZone: { projectLists: [], proposals: [], projects: fakeWorkZoneProjects() } as FakeWorkZone,
     // Never serialized: not in /cell, not in an answer, not in the state dump.
     connectorToken: opts.connectorToken ?? "fake-connector-token",
     mcpServers: opts.mcpServers ?? ([] as CellMcpServer[]),
@@ -523,6 +562,17 @@ export async function startFakeAgentChannelApi(
           };
           return json(res, 200, { ok: true, control: state.connectorControl });
         }
+        if (req.method === "POST" && url.pathname === "/__test/work-zone") {
+          // Replace the Work Zone knobs ({} resets them; the records stay).
+          const body = ((await readJson(req)) ?? {}) as {
+            refused?: unknown;
+            projects?: AgentChannelWorkZoneProjectsResponse["projects"];
+          };
+          state.workZone.projects = Array.isArray(body.projects) ? body.projects : fakeWorkZoneProjects();
+          if (typeof body.refused === "string") state.workZone.refused = body.refused;
+          else delete state.workZone.refused;
+          return json(res, 200, { ok: true });
+        }
         if (req.method === "POST" && url.pathname === "/__test/tool-approval") {
           // One tool's approval reply; no reply clears it.
           const body = ((await readJson(req)) ?? {}) as Partial<ToolApprovalControl> & { tool?: string };
@@ -570,6 +620,7 @@ export async function startFakeAgentChannelApi(
             connectorCalls: state.connectorCalls,
             connectorLists: state.connectorLists,
             httpRequests: state.httpRequests,
+            workZone: state.workZone,
             mcpProbes: state.mcpProbes,
             cellReads: state.cellReads,
             plugins: state.plugins,
@@ -825,6 +876,45 @@ export async function startFakeAgentChannelApi(
           truncated: false,
           redirectHost: null,
         });
+      }
+      const workZoneRoute =
+        route === "/work-zone/projects"
+          ? "projects"
+          : route === "/work-zone/proposals"
+            ? "proposals"
+            : undefined;
+      if (req.method === "POST" && workZoneRoute) {
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        const wz = state.workZone;
+        (workZoneRoute === "projects" ? wz.projectLists : wz.proposals).push({ ...body });
+        const allowed: readonly string[] = WORK_ZONE_BODY_KEYS[workZoneRoute];
+        const required = workZoneRoute === "proposals" ? ["projectId", "deviceId", "prompt"] : [];
+        if (
+          typeof body.eventId !== "string" ||
+          typeof body.agentId !== "string" ||
+          required.some((k) => typeof body[k] !== "string") ||
+          Object.keys(body).some((k) => !allowed.includes(k))
+        ) {
+          return json(res, 400, { error: { code: "bad_request", message: `bad body ${FAKE_ERROR_CANARY}` } });
+        }
+        if (workZoneRoute === "projects") return json(res, 200, { projects: wz.projects });
+        if (wz.refused === "unknown_turn") {
+          return json(res, 404, {
+            error: { code: "unknown_turn", message: `refused by test ${FAKE_ERROR_CANARY}` },
+          });
+        }
+        if (wz.refused) return json(res, 200, { refused: wz.refused });
+        const key = JSON.stringify([
+          body.eventId,
+          body.projectId,
+          body.deviceId,
+          body.prompt,
+          body.runtime ?? null,
+        ]);
+        const known = workZoneApprovals.get(key);
+        const approvalId = known ?? randomUUID();
+        workZoneApprovals.set(key, approvalId);
+        return json(res, 200, { approvalId, created: !known });
       }
       const memoryRoute = /^\/memory\/(list|read|write|propose)$/u.exec(route)?.[1] as
         | MemoryRoute
@@ -1236,6 +1326,9 @@ export async function startFakeAgentChannelApi(
     },
     set connectorControl(value: ConnectorControl) {
       state.connectorControl = value;
+    },
+    get workZone() {
+      return state.workZone;
     },
     get mcpServers() {
       return state.mcpServers;
