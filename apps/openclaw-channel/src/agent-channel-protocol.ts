@@ -727,6 +727,8 @@ export const AGENT_CARD_ROUTE_PREFIXES = [
   "/search",
   "/share",
   "/memory",
+  // Phase 07.5: the approvals inbox and review (`/approvals/<id>`).
+  "/approvals",
 ] as const;
 
 function hasControlCharacter(v: string): boolean {

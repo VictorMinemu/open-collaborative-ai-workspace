@@ -249,6 +249,11 @@ export const TurnToolFlags = z.object({
   untrustedOutput: z.boolean(),
   /** Blocked after a taint unless the source is trusted for chained calls (D-08). */
   sideEffecting: z.boolean(),
+  /**
+   * Phase 07.5 (D-01): the tool has an approval policy for this bot and this human; the gate sends its full arguments
+   * and leaves the taint decision to the API (`when_tainted` asks only after outside content). Absent = no policy.
+   */
+  approval: z.enum(["always", "when_tainted"]).optional(),
 });
 export type TurnToolFlags = z.infer<typeof TurnToolFlags>;
 

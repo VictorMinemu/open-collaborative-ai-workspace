@@ -650,6 +650,7 @@ describe("Phase 6 Agent Cards, message fields, event types and notification kind
       "/search",
       "/share",
       "/memory",
+      "/approvals",
     ]);
     for (const ok of [`/chat/ai/${id}`, "/work-zone", `/bots/${id}?tab=tools`, "/settings#models"]) {
       expect(AgentCardRoute.safeParse(ok).success, ok).toBe(true);

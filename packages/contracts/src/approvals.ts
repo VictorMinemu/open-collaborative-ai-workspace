@@ -1,12 +1,14 @@
 import { z } from "zod";
 import { Id, IsoDateTime } from "./common";
 import { MemoryProposalView } from "./memory";
+import { ToolCallApprovalView } from "./tool-approvals";
 
 /**
  * Approve-and-apply (Phase 07.2, D-05, D-08, ADR-0023): a generic approval a person decides and the server applies
  * (`server_apply`) or that grants exactly one action (`grant`, Phase 07.5). Every decision names the hash of the exact
  * action the approver was shown; the server recomputes it and refuses a mismatch (`approval_action_changed`).
- * Never imports `chat.ts` or `agent-cards.ts` (agent-cards imports this file).
+ * Never imports `chat.ts` or `agent-cards.ts` (agent-cards imports this file); imports the 07.5 view files
+ * (`tool-approvals.ts`, `work-zone-proposals.ts`), which never import it.
  */
 
 /**
@@ -35,7 +37,7 @@ export type ApprovalKindId = z.infer<typeof ApprovalKindId>;
  * The kinds known so far. Append-only: later phases add theirs (07.5 tool calls, 07.6 automations) and never rename
  * one. A kind without a dedicated view uses the generic `fields` view.
  */
-export const KNOWN_APPROVAL_KINDS = ["memory.write"] as const;
+export const KNOWN_APPROVAL_KINDS = ["memory.write", "tool.call", "work_zone.start"] as const;
 export type KnownApprovalKind = (typeof KNOWN_APPROVAL_KINDS)[number];
 
 /** SHA-256 of the kind's fixed-order action tuple, lowercase hex. */
@@ -125,6 +127,8 @@ export const ApprovalView = z.discriminatedUnion("type", [
     title: z.string().trim().min(1).max(200),
     fields: z.array(ApprovalField).max(12),
   }),
+  // Phase 07.5: exactly the call a bot asks to run once.
+  ToolCallApprovalView,
 ]);
 export type ApprovalView = z.infer<typeof ApprovalView>;
 
