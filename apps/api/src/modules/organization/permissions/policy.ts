@@ -104,13 +104,35 @@ const notMember = (p: PrincipalFacts): Denial => ({
 });
 
 /**
- * The audience of something that belongs to a unit (AGENT-01, P-04; Phase 07.2 D-08): a member of the unit or of any
- * unit below it, or a lead of any unit on its path (root → unit). Unit personas and unit memory both use it.
+ * The audience of something that belongs to a unit (AGENT-01, P-04; Phase 07.2 D-08; Phase 07.4 N5): a member of the
+ * unit or of any unit below it, or a lead of any unit on its path (root → unit). Unit personas, unit memory, unit keys
+ * and unit templates use it, and this is its only copy: modules ask the resolver, never re-implement it.
  */
 function inUnitAudience(p: PrincipalFacts, unitPath: readonly string[]): boolean {
   const unitId = unitPath[unitPath.length - 1];
   if (unitId !== undefined && p.memberUnitPaths.some((path) => path.includes(unitId))) return true;
   return unitPath.some((u) => p.leadOfUnitIds.has(u));
+}
+
+/**
+ * Things a unit owns that only its audience may use or see (Phase 07.4, ADR-0025 §6, #191, N5), judged for people only
+ * (an agent is judged as itself; the person it acts for by the on-behalf-of pass, so an agent never exceeds them):
+ * - `vault.use` on a unit resource is using one of that unit's keychain keys. Organization keys are decided on the
+ *   organization resource and stay with the role (every member);
+ * - `unit.read` on a unit template is seeing it. Organization templates carry no unit and stay with the role.
+ * The audience is the unit's (as for personas and unit memory) plus admins. Grants come from the role and allow rules;
+ * this only takes away, and an explicit deny still removes the grant from anyone in the audience.
+ */
+const UNIT_OWNED: Partial<Record<Permission, { type: ResourceType; reason: string }>> = {
+  "vault.use": { type: "unit", reason: "unit_key" },
+  "unit.read": { type: "agent_template", reason: "unit_template" },
+};
+
+function unitOwnedPrecondition(p: PrincipalFacts, r: ResourceFacts, perm: Permission): Denial | null {
+  const owned = UNIT_OWNED[perm];
+  if (!owned || r.type !== owned.type || r.unitPath.length === 0 || p.kind !== "user") return null;
+  if (p.orgRole === "admin" || inUnitAudience(p, r.unitPath)) return null;
+  return { layer: "resource", reason: owned.reason };
 }
 
 /**
@@ -231,6 +253,10 @@ export const PRECONDITIONS: readonly Precondition[] = [
   {
     applies: (perm) => MEMORY_GRAINS.has(perm),
     check: memoryPrecondition,
+  },
+  {
+    applies: (perm) => UNIT_OWNED[perm] !== undefined,
+    check: unitOwnedPrecondition,
   },
   {
     // Direct conversations (D-03): two fixed members; nobody adds, removes or archives.
