@@ -53,6 +53,8 @@ jobs:
       OCW_CLAWHUB_URL: http://127.0.0.1:4291
       OCW_E2E_FAKE_URL: http://127.0.0.1:4291
       OCW_E2E_FAKE_MCP_TOKEN: e2e-mcp-token
+      # Per-member connectors (07.4): the fake OAuth MCP server's registered name; test-only, refused in production.
+      OCW_EGRESS_TEST_HOSTS: fake-mcp=127.0.0.1
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
