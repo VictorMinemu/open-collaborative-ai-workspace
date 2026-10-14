@@ -18,10 +18,9 @@ import { badRequest, notFound } from "../../lib/errors";
 import { findBot, loadBotFacts } from "../bot-capabilities";
 import {
   agentResource,
-  loadPrincipalFacts,
+  loadPrincipalFactsMany,
   orgResource,
   type PermissionService,
-  type PrincipalFacts,
   type ResourceFacts,
   unitResource,
   userResource,
@@ -40,8 +39,8 @@ import { buildInjectionHeader, KeychainError, StoredSecret, secretParts } from "
  *   member's personal item, or any item of another organization, is a 404;
  * - unit items (unit null = the organization) are managed with `vault.manage` on their unit (leads on the units they
  *   lead, admins everywhere);
- * - an agent may use an item on a turn only through `effectiveVaultItems`: grant ∩ owner rule ∩ unit audience ∩
- *   `vault.use` decided for the agent acting for the turn's human.
+ * - an agent may use an item on a turn only through `effectiveVaultItems`: grant ∩ owner rule ∩ `vault.use` decided by
+ *   the resolver for the agent acting for the turn's human (the unit audience is the resolver's unit-key precondition).
  *
  * Callers that resolve items for a turn must open the transaction with `userId` = the turn's human: personal items are
  * invisible to any other session (a cell context without a user included).
@@ -593,14 +592,6 @@ export async function setVaultItemAgents(
 
 // ---------------------------------------------------------------- use by agents (D-04)
 
-/** A unit's audience (as for unit memory and personas): a member of the unit or below it, a lead on its path, an admin. */
-function inUnitAudience(p: PrincipalFacts, unitPath: readonly string[]): boolean {
-  if (p.orgRole === "admin") return true;
-  const unitId = unitPath[unitPath.length - 1];
-  if (unitId !== undefined && p.memberUnitPaths.some((path) => path.includes(unitId))) return true;
-  return unitPath.some((u) => p.leadOfUnitIds.has(u));
-}
-
 export interface EffectiveVaultItem {
   id: string;
   handle: string;
@@ -614,8 +605,9 @@ export interface EffectiveVaultItem {
 
 /**
  * The keychain items `agentId` may use on a turn of `humanUserId`: granted to the agent, personal items only of that
- * human, unit items only for the unit's audience, and `vault.use` allowed for the agent acting for the human on the
- * item's unit (a deny rule on either side removes it). The tx must carry `userId` = the human (owner-only RLS).
+ * human, and `vault.use` allowed by the resolver for the agent acting for the human on the item's unit (or the
+ * organization). The resolver alone decides a unit key's audience (its unit-key precondition); a deny rule on either
+ * side removes it. The tx must carry `userId` = the human (owner-only RLS).
  */
 export async function effectiveVaultItems(
   tx: Tx,
@@ -624,8 +616,6 @@ export async function effectiveVaultItems(
 ): Promise<EffectiveVaultItem[]> {
   const bot = await findBot(tx, p.agentId);
   if (!bot || bot.status === "disabled") return [];
-  const human = await loadPrincipalFacts(tx, { kind: "user", userId: p.humanUserId });
-  if (human.deactivated) return [];
   const rows = await tx
     .select({ item: vaultItems })
     .from(agentVaultGrants)
@@ -640,10 +630,8 @@ export async function effectiveVaultItems(
   const out: EffectiveVaultItem[] = [];
   for (const item of items) {
     if (item.scope === "personal" && item.ownerUserId !== p.humanUserId) continue;
-    if (item.scope === "unit" && item.unitId) {
-      const path = paths.get(item.unitId);
-      if (!path || !inUnitAudience(human, path)) continue;
-    }
+    // A unit key whose unit row is not readable here never falls back to the organization resource.
+    if (item.scope === "unit" && item.unitId && !paths.has(item.unitId)) continue;
     const decision = await perms.decide(
       tx,
       { kind: "agent", agentId: p.agentId, onBehalfOfUserId: p.humanUserId },
@@ -667,24 +655,31 @@ export async function effectiveVaultItems(
 /**
  * The audience rule for unit keys (07.4-12, owner decision, WINDOWS #191; the rule unit memory follows, D-08): what a
  * bot fetches with a unit's key is posted where the conversation's readers see it, so a unit key is used only where
- * EVERY reader is in that unit's audience (a member of the unit or below it, a lead on its path, an admin). An
+ * EVERY reader may `vault.use` it, decided by the resolver per reader on the key's unit (its unit-key precondition:
+ * a member of the unit or below it, a lead on its path, an admin; an explicit deny on a reader removes them too). An
  * unbounded audience (a public channel, an AI chat granted to a group) never qualifies. Organization keys (no unit) and
- * personal keys are not decided here. Deactivated members read nothing and are skipped.
+ * personal keys are not decided here. Deactivated members and people outside the tenant read nothing and are skipped.
  */
 export async function unitAudienceAllows(
   tx: Tx,
+  perms: PermissionService,
   unitId: string,
   readers: { userIds: readonly string[]; unbounded: boolean },
 ): Promise<boolean> {
   if (readers.unbounded) return false;
   const path = (await unitPaths(tx, [unitId])).get(unitId);
   if (!path) return false;
-  for (const userId of new Set(readers.userIds)) {
-    const facts = await loadPrincipalFacts(tx, { kind: "user", userId });
-    if (facts.deactivated) continue;
-    if (!inUnitAudience(facts, path)) return false;
-  }
-  return true;
+  const active = [...(await loadPrincipalFactsMany(tx, [...new Set(readers.userIds)])).values()]
+    .filter((p) => !p.deactivated)
+    .map((p) => p.id);
+  if (active.length === 0) return true;
+  const resource = unitResource({ id: unitId, path });
+  const allowed = await perms.usersAllowed(tx, {
+    candidates: active,
+    permission: "vault.use",
+    resourceFor: () => resource,
+  });
+  return allowed.length === active.length;
 }
 
 /**
