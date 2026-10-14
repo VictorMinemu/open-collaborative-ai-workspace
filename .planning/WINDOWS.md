@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 119
+open_count: 121
 waived_count: 4
 fixed_count: 55
-total_count: 178
-last_updated: 2026-10-13T23:06:15.041Z
+total_count: 180
+last_updated: 2026-10-14T00:00:48.417Z
 ---
 
 # Broken Windows Ledger
@@ -193,6 +193,8 @@ last_updated: 2026-10-13T23:06:15.041Z
 | 176 | 07.4 | deviation | apps/api/src/lib/egress.ts |  | One undici Agent per request (no keep-alive reuse); privateAllow tested only up to the connect attempt | open |  | 2026-10-13T22:56:48.969Z |  |
 | 177 | 07.4 | deviation | packages/contracts/src/module-access.ts |  | HIGH: units/orgs with Bots already off hold the old 5 deny rules; the catalog now has 7, so the API reads them as custom and does not deny connector.connect / vault.use until Bots is toggled again; needs a backfill migration | open |  | 2026-10-13T23:06:14.969Z |  |
 | 178 | 07.4 | deviation | packages/contracts/src/mcp.ts |  | memberHeaderName is not checked against forbidden headers in the schema (import cycle); 07.4-06 and 07.4-10 must apply isAllowedInjectionHeader() on the server | open |  | 2026-10-13T23:06:15.041Z |  |
+| 179 | 07.4 | deviation | apps/api/src/modules/mcp |  | CIMD is chosen even when the AS cannot read the document (e.g. internal CA); 07.4-10 must allow preferring DCR or pre-registration; servers without RFC 9728 metadata cannot be connected per member | open |  | 2026-10-14T00:00:48.322Z |  |
+| 180 | 07.4 | deviation | apps/api/src/modules/mcp |  | No positive SSE round-trip test (fake speaks only streamable HTTP); MCP session not closed with DELETE after a timeout; revokeToken Basic-encodes client id/secret (SDK does not) | open |  | 2026-10-14T00:00:48.417Z |  |
 
 ````json
 [
@@ -2330,6 +2332,30 @@ last_updated: 2026-10-13T23:06:15.041Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-13T23:06:15.041Z",
+    "resolved_at": null
+  },
+  {
+    "id": 179,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "apps/api/src/modules/mcp",
+    "line": null,
+    "description": "CIMD is chosen even when the AS cannot read the document (e.g. internal CA); 07.4-10 must allow preferring DCR or pre-registration; servers without RFC 9728 metadata cannot be connected per member",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T00:00:48.322Z",
+    "resolved_at": null
+  },
+  {
+    "id": 180,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "apps/api/src/modules/mcp",
+    "line": null,
+    "description": "No positive SSE round-trip test (fake speaks only streamable HTTP); MCP session not closed with DELETE after a timeout; revokeToken Basic-encodes client id/secret (SDK does not)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T00:00:48.417Z",
     "resolved_at": null
   }
 ]
