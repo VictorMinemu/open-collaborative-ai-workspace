@@ -12,7 +12,6 @@ import {
 import {
   agents,
   agentTurns,
-  agentVaultGrants,
   aiChatGrants,
   conversationMembers,
   conversations,
@@ -751,10 +750,11 @@ export async function cellAgentCapabilities(
   const configured = await internetConfigured(tx, env, policy);
   const catalog = await loadCatalog(tx);
   const grantsByAgent = await loadAllGrants(tx);
-  // Agents holding a keychain grant (07.4-11): ids only (personal items stay invisible to this session).
+  // Agents holding a keychain grant (07.4-11): ids only. Grants on personal keys are owner-only in PostgreSQL
+  // (WINDOWS #182), so this user-less session asks the definer function, which returns agent ids and nothing else.
   const keyHolders = new Set(
-    (await tx.selectDistinct({ agentId: agentVaultGrants.agentId }).from(agentVaultGrants)).map(
-      (r) => r.agentId,
+    (await tx.execute(sql`select agent_id from app.vault_grant_agents()`)).rows.map(
+      (r) => (r as { agent_id: string }).agent_id,
     ),
   );
   const out = new Map<string, { tools: string[] }>();

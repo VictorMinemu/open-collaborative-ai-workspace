@@ -433,9 +433,21 @@ async function seedOrg(c: pg.Client, org: string) {
     "insert into app.secrets (id, organization_id, name, kind, ciphertext, iv, tag) values ($1, $2, 'org key', 'vault_item', 'c', 'i', 't')",
     [orgVaultSecret, org],
   );
+  const orgVaultItem = randomUUID();
   await q(
-    `insert into app.vault_items (organization_id, scope, name, handle, kind, injection, allowed_hosts, secret_ref, created_by) values ($1, 'unit', 'Org ERP key', 'k_orgkeyaaaa', 'api_key', '{"header":"Authorization","scheme":"bearer"}', '{erp.example.test}', $2::jsonb, $3)`,
-    [org, JSON.stringify({ provider: "db", secretId: orgVaultSecret, organizationId: org }), user],
+    `insert into app.vault_items (id, organization_id, scope, name, handle, kind, injection, allowed_hosts, secret_ref, created_by) values ($4, $1, 'unit', 'Org ERP key', 'k_orgkeyaaaa', 'api_key', '{"header":"Authorization","scheme":"bearer"}', '{erp.example.test}', $2::jsonb, $3)`,
+    [
+      org,
+      JSON.stringify({ provider: "db", secretId: orgVaultSecret, organizationId: org }),
+      user,
+      orgVaultItem,
+    ],
+  );
+  // 07.4-14 (WINDOWS #182): grants on a personal key are owner-only too; a grant on the organization key stays visible
+  // to the tenant-only context.
+  await q(
+    "insert into app.agent_vault_grants (organization_id, agent_id, vault_item_id, created_by) values ($1, $2, $3, $4)",
+    [org, personal, orgVaultItem, user],
   );
   await q(
     "insert into app.agent_templates (id, organization_id, unit_id, name, description, current_version, created_by) values ($1, $2, $3, 'Sales assistant', 'Answers from the CRM', 1, $4)",
@@ -634,7 +646,14 @@ describe("tenant isolation (RLS)", () => {
             ).rows[0].n
           : tbl === "app.connector_connections"
             ? seeded.rows[0].n
-            : 0;
+            : tbl === "app.agent_vault_grants"
+              ? (
+                  await migrator.query(
+                    "select count(*)::int as n from app.agent_vault_grants g join app.vault_items v on v.id = g.vault_item_id where g.organization_id = $1 and v.scope = 'personal'",
+                    [A],
+                  )
+                ).rows[0].n
+              : 0;
       const own = await inTenant(A, () => app.query(`select count(*)::int as n from ${tbl}`));
       expect(own.rows[0].n, `${tbl} own rows`).toBe(seeded.rows[0].n - ownerOnly);
 
@@ -1528,13 +1547,14 @@ describe("tenant isolation (RLS)", () => {
         `${tbl} cross-tenant insert`,
       ).rejects.toThrow(/row-level security/);
     }
-    // The four memory tables (and, since 07.4-07, the keychain's personal keys) carry the restrictive owner-only policy
-    // on top of the tenant policy.
+    // The four memory tables (and, since 07.4-07, the keychain's personal keys, their grants since 07.4-14 and member
+    // connections since 07.4-10) carry the restrictive owner-only policy on top of the tenant policy.
     const restrictive = await migrator.query(
       "select tablename, cmd, permissive from pg_policies where schemaname = 'app' and policyname = 'personal_owner_only' order by tablename",
     );
     expect(restrictive.rows).toEqual(
       [
+        "agent_vault_grants",
         "connector_connections",
         "memory_file_revisions",
         "memory_files",
@@ -1745,9 +1765,10 @@ describe("tenant isolation (RLS)", () => {
   it("Phase 07.4: the seven connector, keychain and template tables are org-scoped, forced, seeded, with the tenant policy (+ owner-only on keys)", async () => {
     const scoped = new Map((await orgScopedTables()).map((t) => [t.tbl, t]));
     for (const tbl of CONNECTOR_TABLES) {
-      // vault_items (personal keys, 07.4-07) and connector_connections (07.4-10) also carry the restrictive owner-only
+      // vault_items (personal keys, 07.4-07), their grants (07.4-14) and connector_connections (07.4-10) also carry the restrictive owner-only
       // policy; a connection is visible to its member's own session only.
-      const ownerOnly = tbl === "app.vault_items" || tbl === "app.connector_connections";
+      const ownerOnly =
+        tbl === "app.vault_items" || tbl === "app.connector_connections" || tbl === "app.agent_vault_grants";
       expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true, policies: ownerOnly ? 2 : 1 });
       const owner =
         tbl === "app.connector_connections"
