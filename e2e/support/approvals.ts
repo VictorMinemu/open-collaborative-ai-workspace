@@ -1,6 +1,6 @@
-import { type APIRequestContext, expect } from "@playwright/test";
+import { type APIRequestContext, expect, type Locator, type Page } from "@playwright/test";
 import { API_URL } from "../tests/env";
-import { type Actor, ensureMember } from "./actors";
+import { type Actor, BASE_URL, ensureMember } from "./actors";
 import {
   cellToken,
   ensurePluginInstalled,
@@ -183,4 +183,71 @@ export async function seedApprovalPeople(admin: APIRequestContext) {
   const salesEastId = await ensureUnit(admin, "team", "Sales East", salesId);
   await ensureUnitRole(admin, salesId, martaId, "lead");
   return { martaId, luisId, salesId, salesEastId };
+}
+
+// ---------------------------------------------------------------- the /approvals inbox (07.5-12)
+
+/** The `/approvals` kinds and the memory inbox's kind (UI-SPEC R1: two disjoint inboxes). */
+export const ACTION_KINDS = "tool.call,work_zone.start";
+export const MEMORY_KIND = "memory.write";
+
+/**
+ * The bot proposes a Work Zone session from the open DM: `[[call ocw_start_work_zone {projectId, deviceId, prompt}]]`
+ * through the fake cell (`cell`, autoReply on), the reply says `Tool ocw_start_work_zone: proposed`, and the approval
+ * id the API answered the cell is returned (the bot never shows it). `dmId` opens the DM first when given.
+ */
+export async function proposeWorkZoneFromDm(
+  page: Page,
+  cell: FakeCellPlugin,
+  input: { dmId?: string; projectId: string; deviceId: string; prompt: string; says?: string },
+): Promise<string> {
+  if (input.dmId) {
+    await page.goto(`${BASE_URL}/chat/dm/${input.dmId}`);
+    await expect(page.getByTestId("dm-view")).toBeVisible();
+  }
+  const reply = page
+    .locator('[data-testid="message"][data-author-kind="agent"]')
+    .filter({ hasText: "Tool ocw_start_work_zone:" });
+  const before = await reply.count();
+  const args = { projectId: input.projectId, deviceId: input.deviceId, prompt: input.prompt };
+  const box = page.getByTestId("composer");
+  await box.click();
+  await box.fill(
+    `${input.says ?? "Fix the rounding bug"} [[call ocw_start_work_zone ${JSON.stringify(args)}]]`,
+  );
+  await box.press("Enter");
+  await expect(reply).toHaveCount(before + 1, { timeout: 30_000 });
+  await expect(reply.last()).toContainText("Tool ocw_start_work_zone: proposed");
+  const last = [...cell.workZoneRequests].reverse().find((r) => r.route === "/work-zone/proposals");
+  const id = (last?.body as { approvalId?: string } | null)?.approvalId;
+  expect(id, "the proposal's approval id").toBeTruthy();
+  return id as string;
+}
+
+/** Opens `/approvals` the way a person does: the Approvals nav entry (the drawer on a phone). */
+export async function openApprovals(page: Page): Promise<void> {
+  const mobile = (page.viewportSize()?.width ?? 1440) < 768;
+  if (mobile) await page.getByTestId("mobile-nav-trigger").click();
+  await page.getByTestId("nav-approvals").filter({ visible: true }).first().click();
+  await expect(page).toHaveURL(/\/approvals(\?|$)/);
+  await expect(page.getByTestId("approvals-inbox")).toBeVisible();
+}
+
+/** The approval id an inbox row stands for (`data-id`). */
+export async function approvalIdFromRow(row: Locator): Promise<string> {
+  const id = await row.getAttribute("data-id");
+  expect(id, "the row's approval id").toBeTruthy();
+  return id as string;
+}
+
+/** Denies (dismisses) everything pending that `api` may decide, optionally of some kinds only, so counts start at 0. */
+export async function clearPendingApprovals(api: APIRequestContext, kinds?: string): Promise<void> {
+  const res = await api.get(`/api/v1/approvals?role=decider&status=pending${kinds ? `&kinds=${kinds}` : ""}`);
+  expect(res.ok(), `list pending: ${res.status()}`).toBe(true);
+  for (const item of ((await res.json()) as { items: Array<{ id: string; actionHash: string }> }).items) {
+    const denied = await api.post(`/api/v1/approvals/${item.id}/decision`, {
+      data: { outcome: "denied", actionHash: item.actionHash },
+    });
+    expect(denied.ok(), `clear ${item.id}: ${denied.status()}`).toBe(true);
+  }
 }
