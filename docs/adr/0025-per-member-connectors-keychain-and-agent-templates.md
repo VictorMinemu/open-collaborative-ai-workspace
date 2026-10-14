@@ -71,6 +71,11 @@ forgery surface the API did not have before.
    - **Unit keys follow the unit audience (#191, owner decision).** A unit key is usable only where every reader of the
      conversation is inside that unit's audience (members of the unit or below, leads on its path, admins); a public
      channel or a group-granted AI chat never qualifies. Organization keys serve every member.
+     *Amended 2026-10-14 (07.4 verification gap N5).* The rule lives in the resolver, not in the keychain or agent
+     modules: `vault.use` on a unit resource carries the unit-key precondition (the unit's audience and admins, judged
+     for people; an agent through the person it acts for), so `perms.decide("vault.use", unit)` alone is correct. The
+     proxy decides each reader with `usersAllowed(vault.use)` on the key's unit, so an explicit deny on one reader now
+     withholds the key there too (principle 6). Organization keys stay with the role.
 7. **The keychain (D-04, D-07).** `vault_items` hold personal or unit keys of kind `api_key`, `basic` or `oauth`
    (client credentials) with a host allowlist and an optional path prefix. The model sees a handle (`k_` + 10 base32);
    the API injects the value server-side, only to allowed hosts, drops headers the model sent that could carry
@@ -99,6 +104,11 @@ forgery surface the API did not have before.
     shown). A newer version is an "update available" notice only the owner can apply. A unit's keys and live templates
     hold the unit: deleting it answers 409 `unit_has_keys` / `unit_has_templates` (like bots and memory), and archived
     templates go with it while agents started from them keep their copy.
+    *Amended 2026-10-14 (07.4 verification gap N5).* Who sees a template is a resolver decision: `unit.read` on the
+    template (`agentTemplateResource`, type `agent_template`), whose unit-template precondition keeps a unit template to
+    the unit's audience and admins, or `agent_template.manage` on its unit; organization templates stay with the role.
+    No new permission (the record templates of ADR-0022 are read with `unit.read` too). The unit keys a template hands
+    over are `vault.use` on the key's unit, the same precondition.
 11. **Module access stays a catalog (ADR-0024).** Bots now also covers `connector.connect` and `vault.use`; units and
     organizations that turned Bots off before 07.4 are completed by the forward-only backfill `20261014042429` (#177).
     Withdrawal never needs the module: with connecting denied, Settings › Connections lists the member's own
