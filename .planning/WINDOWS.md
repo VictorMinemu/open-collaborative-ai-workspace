@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 120
 waived_count: 4
-fixed_count: 79
-total_count: 203
-last_updated: 2026-10-14T14:00:24.659Z
+fixed_count: 80
+total_count: 204
+last_updated: 2026-10-14T15:04:59.297Z
 ---
 
 # Broken Windows Ledger
@@ -149,7 +149,7 @@ last_updated: 2026-10-14T14:00:24.659Z
 | 132 | 07.2 | deviation | apps/api/src/modules/approval |  | Decisions mirrored onto a card do not send the usual card-updated notification to its followers | open |  | 2026-10-13T04:50:57.608Z |  |
 | 133 | 07.2 | deviation | apps/api/src/modules/approval |  | Inbox list checks each row's decider rule one by one (up to 500 per page), so a page can come back short with a cursor | fixed |  | 2026-10-13T04:50:57.677Z | 2026-10-13T09:48:45.635Z |
 | 134 | 07.2 | deviation | apps/api/src/modules/approval |  | An apply that throws (instead of returning an error code) rolls back the whole decision and leaves the request pending | open |  | 2026-10-13T04:50:57.748Z |  |
-| 135 | 07.2 | deviation | apps/api/src/modules/approval |  | An approved grant's card shows succeeded before the grant is used; decide in 07.5 | open |  | 2026-10-13T04:50:57.827Z |  |
+| 135 | 07.2 | deviation | apps/api/src/modules/approval |  | An approved grant's card shows succeeded before the grant is used; decide in 07.5 | fixed |  | 2026-10-13T04:50:57.827Z | 2026-10-14T15:04:59.179Z |
 | 136 | 07.2 | deviation | packages/db/src/schema |  | The DB still allows changing a memory file's scope_id; moving across scopes is prevented only in the API | fixed |  | 2026-10-13T05:47:47.110Z | 2026-10-13T10:56:27.250Z |
 | 137 | 07.2 | deviation | apps/api/src/modules/memory |  | Pending proposals cascade with unit/bot/forgotten scope but their approval_requests rows stay; 07.2-09 must read a missing proposal as scope_gone, not 500 | fixed |  | 2026-10-13T05:47:47.183Z | 2026-10-13T06:30:45.684Z |
 | 138 | 07.2 | deviation | apps/api/src/modules/memory |  | A deleted memory file cannot be restored over REST (restore works only on live files) | open |  | 2026-10-13T05:47:47.259Z |  |
@@ -218,6 +218,7 @@ last_updated: 2026-10-14T14:00:24.659Z
 | 201 | 07.5 | deviation | packages/db/sql/post-migrate.sql |  | Immutability triggers on the stored tool action and Work Zone proposal do not cover TRUNCATE; add REVOKE TRUNCATE in post-migrate.sql | open |  | 2026-10-14T13:26:02.702Z |  |
 | 202 | 07.5 | deviation | packages/db/src/schema/app.ts |  | conversation_id, event_id and requested_for_user_id on 07.5 tables have no FK; 07.5-07/08 must resolve them inside withTenant | open |  | 2026-10-14T13:26:02.781Z |  |
 | 203 | 07.5 | deviation | packages/contracts/src/agent-card-route.ts |  | Stubs until later plans: toPrompt proposedBy is always null (07.5-08 wires it); the memory inbox shows 07.5 approvals title-only (07.5-12 filters by kind); the '/approvals' route prefix grep now targets agent-card-route.ts | open |  | 2026-10-14T14:00:24.659Z |  |
+| 204 | 07.5 | deviation | apps/api/src/modules/approval |  | A server_apply decision via /approvals by someone who cannot read the conversation still starts (and meters) a bot turn for that decider (bot reply is refused); an unused grant keeps a running card forever; the pending total stops at 1000 scanned rows | open |  | 2026-10-14T15:04:59.297Z |  |
 
 ````json
 [
@@ -1836,10 +1837,10 @@ last_updated: 2026-10-14T14:00:24.659Z
     "file": "apps/api/src/modules/approval",
     "line": null,
     "description": "An approved grant's card shows succeeded before the grant is used; decide in 07.5",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T04:50:57.827Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-14T15:04:59.179Z"
   },
   {
     "id": 136,
@@ -2655,6 +2656,18 @@ last_updated: 2026-10-14T14:00:24.659Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-14T14:00:24.659Z",
+    "resolved_at": null
+  },
+  {
+    "id": 204,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "apps/api/src/modules/approval",
+    "line": null,
+    "description": "A server_apply decision via /approvals by someone who cannot read the conversation still starts (and meters) a bot turn for that decider (bot reply is refused); an unused grant keeps a running card forever; the pending total stops at 1000 scanned rows",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T15:04:59.297Z",
     "resolved_at": null
   }
 ]
