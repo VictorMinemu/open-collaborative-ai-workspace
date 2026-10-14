@@ -8,7 +8,14 @@ import { type ApprovalService, createApprovalService } from "./service";
  * them, and chat reaches it only through the chat-agent bridge.
  */
 export { actionHash, type HashAtom } from "./hash";
-export type { ApplyResult, ApprovalCardTurn, ApprovalKind, ApprovalRow } from "./registry";
+export type {
+  ApplyResult,
+  ApprovalCardContent,
+  ApprovalCardLink,
+  ApprovalCardTurn,
+  ApprovalKind,
+  ApprovalRow,
+} from "./registry";
 export type {
   ApprovalService,
   ConsumeGrantResult,

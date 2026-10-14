@@ -1,4 +1,9 @@
-import type { AgentCardInput, ApprovalRequestStatus, ApprovalSummary } from "@ocw/contracts";
+import type {
+  AgentCardApprovalLink,
+  AgentCardInput,
+  ApprovalRequestStatus,
+  ApprovalSummary,
+} from "@ocw/contracts";
 import type { AfterCommit, TenantCtx, Tx } from "@ocw/db";
 
 /**
@@ -116,8 +121,8 @@ export interface CardAction {
   tainted?: boolean | undefined;
 }
 
-/** The approval a platform-owned card mirrors, as chat shows it (no viewer fields). */
-export interface LinkedCardInfo {
+/** The approval a platform-owned card mirrors, as chat shows it (no viewer fields): the 07.2 link. */
+interface LinkedCardBase {
   id: string;
   actionHash: string;
   status: ApprovalRequestStatus;
@@ -126,6 +131,27 @@ export interface LinkedCardInfo {
   /** Why an approved request failed to apply (the kind's code), null otherwise. */
   resultCode: string | null;
 }
+
+/**
+ * Phase 07.5 (UI-SPEC R6, R7, R9): what a kind with a `link` hook adds (the request's kind, expiry and use time, plus
+ * the kind's own fields). Every reader gets the same values, so they may ride realtime events; never an argument value.
+ */
+export type LinkedCardInfo = LinkedCardBase &
+  Partial<
+    Pick<
+      AgentCardApprovalLink,
+      | "kind"
+      | "expiresAt"
+      | "usedAt"
+      | "display"
+      | "useBy"
+      | "waitingFor"
+      | "actionFields"
+      | "deviceId"
+      | "resultRoute"
+      | "blocked"
+    >
+  >;
 
 /** Registered by the approval module: chat asks it about cards that mirror an approval. */
 export interface LinkedCards {

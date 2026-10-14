@@ -62,19 +62,12 @@ async function linksOf(tx: Tx, rows: CardRow[]): Promise<Map<string, LinkedCardI
   return linked.linkOf(tx, owned);
 }
 
+/**
+ * The card's approval link as the provider composed it: the 07.2 fields, plus the 07.5 extras (kind, expiry, use time
+ * and the kind's own fields) only for kinds that have them. No viewer field, so realtime events may carry it.
+ */
 const approvalLink = (link: LinkedCardInfo | undefined): Pick<AgentCard, "approval"> =>
-  link
-    ? {
-        approval: {
-          id: link.id,
-          actionHash: link.actionHash,
-          status: link.status,
-          requestedForUserId: link.requestedForUserId,
-          warnings: link.warnings,
-          resultCode: link.resultCode,
-        },
-      }
-    : {};
+  link ? { approval: { ...link } } : {};
 
 function cardFromRow(row: CardRow, dir: Directory | null): AgentCard {
   const decision: AgentCard["decision"] =

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { AgentCard, AgentCardActionEvent } from "@ocw/contracts";
+import { AgentCard, AgentCardActionEvent, ApprovalList } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TEST_SETUP_TOKEN, TestClient } from "../../testing";
@@ -401,5 +401,298 @@ describe("WINDOWS #135: an approved grant's card reads as approved until the gra
     const d = await request("test.grant_turn", { conversationId: dm, asked: asked2 });
     expect((await decide(marta, d.id, { outcome: "denied", actionHash: d.actionHash })).status).toBe(200);
     expect(await cardFor(sam, d.cardMessageId)).toMatchObject({ status: "cancelled" });
+  });
+});
+
+// ---------------------------------------------------------------- Task 2: kind hooks for cards and inboxes
+
+/** People besides Marta who may decide the inbox test kinds (the org B test adds and removes its admin). */
+const listDeciders = new Set<string>();
+const DEVICE_ID = randomUUID();
+
+/** A kind whose card is a summary with link extras, no in-card decision and an Open labelled "Review" (P-07). */
+const linkKind = (): ApprovalKind => ({
+  ...grantTurnKind(),
+  kind: "test.link",
+  async card(_tx, row) {
+    return {
+      card: {
+        kind: "approval",
+        title: "Send the invoice",
+        fields: [{ label: "Tool", value: "invoices__send" }],
+        status: "pending",
+        actions: [{ kind: "open", label: "Open", target: `/approvals/${row.id}` }],
+        summary: "Keeper asks to send the invoice",
+      },
+      inlineDecision: false,
+      labels: { open: "Review" },
+    };
+  },
+  async link(_tx, row) {
+    return {
+      display: "summary",
+      waitingFor: "Waiting for an admin",
+      actionFields: 2,
+      useBy: row.decidedAt ? useByOf(row.decidedAt) : null,
+      deviceId: DEVICE_ID,
+      resultRoute: `/work-zone/${row.resourceId}`,
+      blocked: null,
+    };
+  },
+});
+
+/** A kind that keeps the in-card decision but names its buttons (a Work Zone proposal's Start session / Dismiss). */
+const labelsKind = (): ApprovalKind => ({
+  ...applyTurnKind(),
+  kind: "test.labels",
+  async card(_tx, row) {
+    return {
+      card: {
+        kind: "approval",
+        title: "Start a session",
+        fields: [{ label: "Project", value: stored.get(row.resourceId)?.target ?? "gone" }],
+        status: "pending",
+        actions: [{ kind: "open", label: "Open", target: `/approvals/${row.id}` }],
+        summary: "Keeper proposes a session",
+      },
+      labels: { approve: "Start session", deny: "Dismiss" },
+    };
+  },
+});
+
+/** Inbox kinds without cards: `test.ka` has a viewer-aware headline, `test.kb` and `test.kc` have none. */
+const inboxKind = (kind: string, withHeadline: boolean): ApprovalKind => ({
+  ...baseKind(kind, "grant", `Inbox ${kind}`),
+  async canDecide(_tx, userId) {
+    return userId === martaId || listDeciders.has(userId);
+  },
+  ...(withHeadline
+    ? {
+        async headline(_tx, _row, viewerUserId) {
+          return {
+            title: `Run ${kind}`,
+            context: null,
+            requester: "Keeper for Sam Lee",
+            tags: [],
+            ...(viewerUserId === martaId ? { origin: { kind: "dm", name: null } } : {}),
+          };
+        },
+      }
+    : {}),
+});
+
+/** A pending request of `kind` for Sam with no card. */
+async function requestBare(kind: string) {
+  const resourceId = randomUUID();
+  stored.set(resourceId, { target: `target-${resourceId.slice(0, 8)}` });
+  const out = await stack.built.core.db.withTenant({ organizationId: orgId, userId: samId }, (tx) =>
+    approvals.request(tx, {
+      kind,
+      resourceId,
+      requestedByAgentId: keeperId,
+      requestedForUserId: samId,
+      eventId: null,
+    }),
+  );
+  return { ...out, resourceId };
+}
+
+/** A client whose membership moved to a fresh organization B, as its admin (approval.int.test.ts). */
+async function otherOrgAdmin(): Promise<{ client: TestClient; userB: string }> {
+  const { client, userId: userB } = await invite(
+    stack,
+    victor,
+    `eve-${randomUUID().slice(0, 8)}@example.test`,
+    "Eve",
+    "standard",
+  );
+  const orgB = randomUUID();
+  await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil', $2)", [
+    orgB,
+    `evil-${orgB}`,
+  ]);
+  await su.query("delete from auth.member where user_id = $1", [userB]);
+  await su.query("delete from app.org_members where user_id = $1", [userB]);
+  await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
+    orgB,
+    userB,
+  ]);
+  await su.query(
+    "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Eve', 'admin')",
+    [orgB, userB],
+  );
+  await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, userB]);
+  return { client, userB };
+}
+
+const list = async (as: TestClient, query: string) =>
+  ApprovalList.parse(await ok(as.request("GET", `/api/v1/approvals?${query}`)));
+
+describe("card link extras, inline decision and labels (Task 2, UI-SPEC R6, R7, R9, P-07)", () => {
+  beforeAll(() => {
+    approvals.register(linkKind());
+    approvals.register(labelsKind());
+  });
+
+  it("a kind with link() → the snapshot's approval carries its extras plus kind, expiresAt and usedAt (set once used)", async () => {
+    const asked = await say(room, "send the invoice");
+    const r = await request("test.link", { conversationId: room, asked });
+    const row = await rowOf(r.id);
+    const pending = await cardFor(sam, r.cardMessageId);
+    expect(pending.approval).toEqual({
+      id: r.id,
+      actionHash: r.actionHash,
+      status: "pending",
+      requestedForUserId: samId,
+      warnings: [],
+      resultCode: null,
+      kind: "test.link",
+      expiresAt: row.expires_at.toISOString(),
+      usedAt: null,
+      display: "summary",
+      waitingFor: "Waiting for an admin",
+      actionFields: 2,
+      useBy: null,
+      deviceId: DEVICE_ID,
+      resultRoute: `/work-zone/${r.resourceId}`,
+      blocked: null,
+    });
+    // The in-card decision is off: only the Open action, labelled by the kind. Deciding is still the kind's rule.
+    expect(pending.actions).toEqual([{ kind: "open", label: "Review", target: `/approvals/${r.id}` }]);
+    expect((await cardFor(marta, r.cardMessageId)).viewerCan).toEqual(["follow", "decide"]);
+
+    expect((await decide(marta, r.id, { outcome: "approved", actionHash: r.actionHash })).status).toBe(200);
+    const decided = await rowOf(r.id);
+    expect((await cardFor(sam, r.cardMessageId)).approval).toMatchObject({
+      status: "approved",
+      useBy: useByOf(decided.decided_at.toISOString()),
+      usedAt: null,
+    });
+    await stack.built.core.db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
+      approvals.consumeGrant(tx, { id: r.id, kind: "test.link", actionHash: r.actionHash }),
+    );
+    const used = await rowOf(r.id);
+    expect((await cardFor(sam, r.cardMessageId)).approval).toMatchObject({
+      status: "applied",
+      usedAt: used.consumed_at.toISOString(),
+    });
+
+    // Realtime frames carry the link, never a viewer-specific field (07.2 rule).
+    const frames = (
+      await su.query(
+        "select payload from app.stream_events where stream_id = $1 and type = 'message.updated' and payload->'message'->>'id' = $2 order by seq",
+        [`conv:${room}`, r.cardMessageId],
+      )
+    ).rows.map((u) => u.payload.message.card as Json);
+    expect(frames.length).toBeGreaterThanOrEqual(3);
+    for (const card of frames) {
+      expect(card).not.toHaveProperty("following");
+      expect(card).not.toHaveProperty("viewerCan");
+      expect(card.approval).toMatchObject({ kind: "test.link", display: "summary" });
+    }
+    expect(frames.at(-1)?.approval.usedAt).toBe(used.consumed_at.toISOString());
+  });
+
+  it("labels rename the in-card buttons; a kind without labels or link() keeps the exact 07.2 card and link", async () => {
+    const asked = await say(dm, "start a session");
+    const r = await request("test.labels", { conversationId: dm, asked });
+    const card = await cardFor(sam, r.cardMessageId);
+    expect(card.actions).toEqual([
+      { kind: "approve", label: "Start session", denyLabel: "Dismiss" },
+      { kind: "open", label: "Open", target: `/approvals/${r.id}` },
+    ]);
+
+    const asked2 = await say(dm, "apply it");
+    const plain = await request("test.apply_turn", { conversationId: dm, asked: asked2 });
+    const plainCard = await cardFor(sam, plain.cardMessageId);
+    expect(plainCard.actions).toEqual([
+      { kind: "approve", label: "Approve", denyLabel: "Deny" },
+      { kind: "open", label: "Open", target: `/approvals/${plain.id}` },
+    ]);
+    expect(plainCard.approval).toEqual({
+      id: plain.id,
+      actionHash: plain.actionHash,
+      status: "pending",
+      requestedForUserId: samId,
+      warnings: [],
+      resultCode: null,
+    });
+  });
+});
+
+describe("the inbox: kinds filter, headlines and the pending total (Task 2, UI-SPEC R1)", () => {
+  const ids: Record<string, string[]> = { "test.ka": [], "test.kb": [], "test.kc": [] };
+
+  beforeAll(async () => {
+    approvals.register(inboxKind("test.ka", true));
+    approvals.register(inboxKind("test.kb", false));
+    approvals.register(inboxKind("test.kc", false));
+    for (const kind of ["test.ka", "test.ka", "test.kb", "test.kc"]) {
+      ids[kind]?.push((await requestBare(kind)).id);
+    }
+  });
+
+  it("kinds=test.ka,test.kb lists only those kinds, with the kind's headline or null, and total = their pending count", async () => {
+    const res = await list(marta, "role=decider&status=pending&kinds=test.ka,test.kb");
+    expect(res.items.map((i) => i.id).sort()).toEqual(
+      [...(ids["test.ka"] ?? []), ...(ids["test.kb"] ?? [])].sort(),
+    );
+    expect(res.total).toBe(3);
+    expect(res.nextCursor).toBeNull();
+    for (const item of res.items) {
+      if (item.kind === "test.ka") {
+        expect(item.headline).toEqual({
+          title: "Run test.ka",
+          context: null,
+          requester: "Keeper for Sam Lee",
+          tags: [],
+          origin: { kind: "dm", name: null },
+        });
+      } else {
+        expect(item.headline).toBeNull();
+      }
+    }
+  });
+
+  it("the total counts pending requests only, whatever the status filter; without kinds the 07.2 shape has no total", async () => {
+    const first = ids["test.ka"]?.[0] as string;
+    const hash = (await rowOf(first)).action_hash as string;
+    expect((await decide(marta, first, { outcome: "denied", actionHash: hash })).status).toBe(200);
+    const all = await list(marta, "role=decider&kinds=test.ka,test.kb");
+    expect(all.items).toHaveLength(3);
+    expect(all.total).toBe(2);
+    const denied = await list(marta, "role=decider&status=denied&kinds=test.ka");
+    expect(denied.items.map((i) => i.id)).toEqual([first]);
+    expect(denied.total).toBe(1);
+    // Sam asked for all of them but decides none: his requester inbox counts what is pending for him.
+    expect((await list(sam, "role=requester&kinds=test.ka,test.kb,test.kc")).total).toBe(3);
+    expect((await list(sam, "role=decider&kinds=test.ka,test.kb,test.kc")).total).toBe(0);
+    const legacy = await list(marta, "role=decider&status=pending");
+    expect(legacy).not.toHaveProperty("total");
+  });
+
+  it("an invalid kinds value is 400", async () => {
+    for (const bad of ["bad%20id", "test.ka,", "Test.ka", "a,b,c,d,e"]) {
+      const res = await marta.request("GET", `/api/v1/approvals?role=decider&kinds=${bad}`);
+      expect(res.status, bad).toBe(400);
+    }
+  });
+
+  it("an organization B decider never receives organization A items, for any kinds value", async () => {
+    const { client: eve, userB } = await otherOrgAdmin();
+    listDeciders.add(userB);
+    try {
+      for (const kinds of ["test.ka", "test.ka,test.kb", "test.kc,test.link,test.grant_turn"]) {
+        for (const role of ["decider", "requester"]) {
+          expect(await list(eve, `role=${role}&kinds=${kinds}`), `${role} ${kinds}`).toEqual({
+            items: [],
+            nextCursor: null,
+            total: 0,
+          });
+        }
+      }
+    } finally {
+      listDeciders.delete(userB);
+    }
   });
 });
