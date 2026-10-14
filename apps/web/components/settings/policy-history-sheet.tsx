@@ -13,6 +13,8 @@ import {
   patternLabel,
   useApprovalPolicyHistory,
 } from "@/lib/approval-policy-queries";
+import { cn } from "@/lib/utils";
+import { AVATAR_AA } from "./policy-rule-dialog";
 
 /** "Oct 8, 10:31" (the year when it is not this one). */
 export function historyDate(iso: string, now: number = Date.now()): string {
@@ -117,7 +119,7 @@ export function PolicyHistorySheet({
                     <UserAvatar
                       name={actor}
                       seed={item.actor?.id ?? item.id}
-                      className="mt-0.5 size-7 text-[11px]"
+                      className={cn("mt-0.5 size-7 *:text-[11px]", AVATAR_AA)}
                     />
                     <div className="min-w-0 flex-1">
                       <p className="break-words text-sm">

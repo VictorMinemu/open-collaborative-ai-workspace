@@ -140,7 +140,7 @@ export function ToolPolicyGroup({
       data-name={group.source.name}
       aria-labelledby={`${uid}-name`}
     >
-      <h3 className="m-0">
+      <h2 className="m-0">
         <button
           type="button"
           aria-expanded={expanded}
@@ -169,7 +169,7 @@ export function ToolPolicyGroup({
           </span>
           {!expanded ? <ModeChip mode={collapsedMode} className="max-sm:hidden" /> : null}
         </button>
-      </h3>
+      </h2>
       {expanded ? (
         <ul id={listId} aria-label={`${group.source.name} tools`} className="divide-y border-t">
           {visible.map((r) => (
@@ -229,7 +229,7 @@ export function ToolPolicyRow({
   const upper = mode.source === "organization" || mode.source === "unit";
   return (
     <li
-      className="relative grid min-h-12 gap-x-3 gap-y-1 px-4 py-2.5 max-md:min-h-14 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,13rem)_auto] md:items-center"
+      className="relative grid min-h-12 gap-x-3 gap-y-1 px-4 py-2.5 max-md:min-h-14 md:grid-cols-[minmax(0,1fr)_12.5rem_minmax(0,11rem)_auto] md:items-center"
       data-testid={`policy-row-${row.pattern}`}
       data-mode={mode.mode}
       data-locked={mode.locked ? "true" : undefined}

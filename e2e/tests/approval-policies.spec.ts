@@ -1,4 +1,5 @@
 import { type APIRequestContext, expect, type Page, test } from "@playwright/test";
+import { expectNoSeriousA11y } from "../support/a11y";
 import { apiAs, BASE_URL, openAs } from "../support/actors";
 import {
   ACME_CRM,
@@ -9,6 +10,12 @@ import {
   seedApprovalPeople,
   setApprovalPolicy,
 } from "../support/approvals";
+import {
+  captureReview,
+  expectNoSidewaysScroll,
+  expectTouchTargets,
+  unnamedControls,
+} from "../support/layout";
 import { ADMIN } from "./env";
 
 /**
@@ -341,4 +348,118 @@ test("admin: Settings › MCP servers shows Needs approval and Asks after outsid
   await expect(toolRow("write_note").getByTestId("tool-needs-approval")).toHaveText("Needs approval");
   await expect(toolRow("echo").getByTestId("tool-effect")).toHaveText("Read-only");
   await expect(toolRow("echo").getByTestId("tool-needs-approval")).toHaveText("Asks after outside content");
+});
+
+/** axe (serious / critical), names, no sideways scroll and 44 px targets for one surface, in light and dark. */
+async function reviewSurface(page: Page, selector: string, label: string) {
+  for (const theme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme: theme });
+    await expectNoSeriousA11y(page, selector);
+    await expectNoSidewaysScroll(page, `${label} (${theme})`);
+    expect.soft(await unnamedControls(page), `${label} (${theme}): unnamed controls`).toEqual([]);
+    await expectTouchTargets(page, selector);
+  }
+  await page.emulateMedia({ colorScheme: "light" });
+}
+
+test("review: the page, the rule dialog and the history at the project's width, light and dark, with screenshots", async ({
+  browser,
+}, info) => {
+  test.setTimeout(240_000);
+  const mobile = info.project.name === "mobile";
+  const w = mobile ? "390" : "1440";
+  await setApprovalPolicy(admin, {
+    scopeUnitId: null,
+    toolPattern: serverPattern(),
+    mode: "when_tainted",
+    approverKind: "requester",
+  });
+  await setApprovalPolicy(admin, {
+    scopeUnitId: null,
+    toolPattern: tool("write_note"),
+    mode: "always",
+    approverKind: "admins",
+  });
+  const { page } = await openAs(browser, ADMIN, info.project.name);
+  await openPolicies(page, mobile);
+  await expect(rowOf(page, tool("write_note")).getByTestId("policy-mode-chip")).toHaveText("Always ask");
+  await expect(rowOf(page, tool("echo")).getByTestId("policy-mode-chip")).toHaveText(
+    "Ask after outside content",
+  );
+
+  // ---- the page
+  if (mobile) {
+    // Each row is one button (min-h 56); the scope select and the search are 44 tall.
+    const rowButton = await editOf(page, tool("echo")).boundingBox();
+    expect(rowButton?.height ?? 0).toBeGreaterThanOrEqual(55.5);
+    expect(rowButton?.width ?? 0).toBeGreaterThan(300);
+    for (const id of ["policy-scope", "policy-search"]) {
+      expect((await page.getByTestId(id).boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(43.5);
+    }
+  }
+  await expectNoSeriousA11y(page, '[data-testid="approval-policies"]');
+  await reviewSurface(page, '[data-testid="approval-policies"]', `page @${w}`);
+  await captureReview(page, `approval-policies-${w}`);
+
+  // ---- the rule dialog with Always ask and specific people (not saved)
+  const dialog = await openRule(page, tool("write_note"));
+  await dialog.getByTestId("policy-approvers-users").click();
+  for (const name of ["Marta Gil", "Luis Mora"]) {
+    await dialog.locator(`[data-testid="policy-person"][data-name="${name}"]`).click();
+  }
+  await expect(dialog.getByTestId("policy-person-chip")).toHaveCount(2);
+  if (mobile) {
+    const box = await dialog.boundingBox();
+    expect(Math.round(box?.width ?? 0)).toBe(390);
+    expect(Math.round(box?.height ?? 0)).toBe(844);
+  }
+  await expectNoSeriousA11y(page, '[data-testid="policy-dialog"]');
+  await reviewSurface(page, '[data-testid="policy-dialog"]', `dialog @${w}`);
+  await captureReview(page, `approval-policy-dialog-${w}`);
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toBeHidden();
+
+  // ---- the change history
+  await page.getByTestId("policy-history").click();
+  const sheet = page.getByTestId("policy-history-sheet");
+  await expect(sheet.getByTestId("policy-history-item").first()).toBeVisible();
+  if (mobile) expect(Math.round((await sheet.boundingBox())?.width ?? 0)).toBe(390);
+  await expectNoSeriousA11y(page, '[data-testid="policy-history-sheet"]');
+  await reviewSurface(page, '[data-testid="policy-history-sheet"]', `history @${w}`);
+  if (!mobile) await captureReview(page, "approval-policies-history-1440");
+  await sheet.getByRole("button", { name: "Close" }).click();
+  await expect(sheet).toBeHidden();
+
+  // ---- Settings › MCP servers with the chip
+  if (!mobile) {
+    await page.goto(`${BASE_URL}/settings/mcp-servers`);
+    const card = page.locator(`[data-testid="mcp-server"][data-name="${ACME_CRM}"]`);
+    await expect(card.getByTestId("tool-needs-approval").first()).toBeVisible();
+    await card.getByTestId("mcp-tools").scrollIntoViewIfNeeded();
+    await captureReview(page, "mcp-tools-needs-approval-1440");
+  }
+});
+
+test("review: a lead on Sales, the organization's rule locked with its reason", async ({ browser }, info) => {
+  test.setTimeout(120_000);
+  const mobile = info.project.name === "mobile";
+  const { salesId } = await seedApprovalPeople(admin);
+  await setApprovalPolicy(admin, {
+    scopeUnitId: null,
+    toolPattern: tool("write_note"),
+    mode: "always",
+    approverKind: "admins",
+  });
+  await setApprovalPolicy(admin, {
+    scopeUnitId: salesId,
+    toolPattern: tool("echo"),
+    mode: "when_tainted",
+    approverKind: "unit_leads",
+  });
+  const { page } = await openAs(browser, MARTA, info.project.name);
+  await openPolicies(page, mobile);
+  await expect(rowOf(page, tool("write_note")).getByTestId("policy-locked-reason")).toBeVisible();
+  await expect(rowOf(page, tool("echo"))).toContainText("Leads of Sales");
+  await reviewSurface(page, '[data-testid="approval-policies"]', `lead page @${mobile ? 390 : 1440}`);
+  if (!mobile) await captureReview(page, "approval-policies-unit-lead-1440");
 });

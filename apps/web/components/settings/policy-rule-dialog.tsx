@@ -42,6 +42,11 @@ import { cn } from "@/lib/utils";
 
 /** 44 px controls below 1024 (UI-SPEC: every control in this phase). */
 const TOUCH = "max-lg:h-11";
+/**
+ * Initials in the foreground colour on the avatar's tint: the shared tones measure 4.3-4.5:1 at 12 px, under AA,
+ * depending on the person's seed (07.5-09 broken window); the tint still tells people apart.
+ */
+export const AVATAR_AA = "*:text-foreground";
 
 const MODES: ReadonlyArray<{ value: ToolApprovalMode; hint: string }> = [
   { value: "never", hint: "Bots run it without asking. Other limits still apply." },
@@ -580,7 +585,11 @@ function PeoplePicker({
     onChange(on ? [...selected.filter((x) => x !== id), id] : selected.filter((x) => x !== id));
 
   return (
-    <div className="grid gap-2 border-t px-3 pt-2.5 pb-3" data-testid="policy-people">
+    // On the plain background, not the selected option's tint: the avatar tones are AA on it.
+    <div
+      className="grid gap-2 rounded-b-lg border-t bg-background px-3 pt-2.5 pb-3"
+      data-testid="policy-people"
+    >
       {selected.length > 0 ? (
         <ul aria-label="Selected people" className="flex flex-wrap gap-1.5">
           {selected.map((id) => {
@@ -592,7 +601,12 @@ function PeoplePicker({
                 className="inline-flex items-center gap-1 rounded-full border bg-background py-0.5 pr-0.5 pl-1 text-xs"
                 data-testid="policy-person-chip"
               >
-                <UserAvatar name={name} src={p?.avatarUrl} seed={id} className="size-4 text-[8px]" />
+                <UserAvatar
+                  name={name}
+                  src={p?.avatarUrl}
+                  seed={id}
+                  className={cn("size-4 *:font-semibold *:text-[7px]", AVATAR_AA)}
+                />
                 <span className="max-w-40 truncate">{name}</span>
                 <button
                   type="button"
@@ -663,7 +677,7 @@ function PeoplePicker({
                   name={p.displayName}
                   src={p.avatarUrl}
                   seed={p.userId}
-                  className="size-6 text-[10px]"
+                  className={cn("size-6 *:text-[10px]", AVATAR_AA)}
                 />
                 <span className="min-w-0 truncate text-sm">{p.displayName}</span>
               </label>
