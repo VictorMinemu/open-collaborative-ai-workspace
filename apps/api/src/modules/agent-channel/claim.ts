@@ -1,0 +1,209 @@
+import { randomUUID } from "node:crypto";
+import { MAX_TOOL_CALLS_PER_TURN, MAX_WEB_CALLS_PER_TURN, type TurnToolFlags } from "@ocw/contracts";
+import { agentToolCalls, agentTurns, conversations, type Tx } from "@ocw/db";
+import { and, eq, lt, type SQL, sql } from "drizzle-orm";
+import type { Core } from "../../core";
+import { createConversationAccess } from "../chat";
+import type { CellPrincipal } from "./auth";
+
+/**
+ * The one claim of a tool call against its delivered turn (D-08, 07.4-11): the per-turn caps and the taint rule in ONE
+ * conditional UPDATE (race-free: concurrent calls of one turn serialise on the row lock and the WHERE clause is
+ * re-checked, so at most the cap is ever allowed), then the `agent_tool_calls` row and the `bot.tool_call` audit. Shared
+ * by the tool gate (`/tool-calls`) and the proxy routes (`/http-requests`, later `/connectors/*`), so every path claims
+ * the same way. A call refused before the claim (`reason` set) is recorded and audited the same way, without touching
+ * the turn. No external call ever happens here: the caller does that after its transaction commits.
+ */
+
+export type AgentTurnRow = typeof agentTurns.$inferSelect;
+
+export type ClaimSourceKind = "builtin" | "mcp" | "plugin" | "vault";
+
+export interface ClaimedCall {
+  callId: string;
+  allowed: boolean;
+  reason: string | null;
+}
+
+/** The `clientKind` / `sessionId` every cell-initiated audit row carries. */
+export const cellAuditBase = (cell: CellPrincipal) => ({
+  clientKind: "agent",
+  sessionId: `cell:${cell.credentialId}`,
+});
+
+export async function claimToolCall(
+  tx: Tx,
+  core: Core,
+  p: {
+    cell: CellPrincipal;
+    turn: AgentTurnRow;
+    tool: string;
+    flags: TurnToolFlags;
+    /** A web call: also counted against the turn's web cap. */
+    web: boolean;
+    sourceKind: ClaimSourceKind;
+    sourceId: string | null;
+    target: string | null;
+    /** A refusal decided before the claim: recorded and audited, the turn is not touched. */
+    reason: string | null;
+    /**
+     * False for a tool whose own route counts the call (the memory tools, WINDOWS 148): the cap and the taint are
+     * checked here but the call is not counted, so a call the cell also gates counts once. Default true.
+     */
+    countCall?: boolean;
+    /** Extra audit metadata (ids, counts and hosts only: never arguments, paths, queries or results). */
+    metadata?: Record<string, unknown>;
+  },
+): Promise<ClaimedCall> {
+  const { turn, flags } = p;
+  let reason = p.reason;
+  if (!reason) {
+    const conditions: Array<SQL | undefined> = [
+      eq(agentTurns.eventId, turn.eventId),
+      lt(agentTurns.toolCalls, MAX_TOOL_CALLS_PER_TURN),
+      p.web ? lt(agentTurns.webCalls, MAX_WEB_CALLS_PER_TURN) : undefined,
+      flags.sideEffecting ? eq(agentTurns.tainted, false) : undefined,
+    ];
+    const updated = await tx
+      .update(agentTurns)
+      .set({
+        toolCalls: p.countCall === false ? sql`${agentTurns.toolCalls}` : sql`${agentTurns.toolCalls} + 1`,
+        webCalls: p.web ? sql`${agentTurns.webCalls} + 1` : sql`${agentTurns.webCalls}`,
+        tainted: flags.untrustedOutput ? true : sql`${agentTurns.tainted}`,
+      })
+      .where(and(...conditions))
+      .returning({ eventId: agentTurns.eventId });
+    if (updated.length === 0) {
+      // Nothing updated: say why from a fresh read (only on the denial path).
+      const [after] = await tx
+        .select({ tainted: agentTurns.tainted })
+        .from(agentTurns)
+        .where(eq(agentTurns.eventId, turn.eventId));
+      reason = flags.sideEffecting && after?.tainted ? "tainted" : "cap_reached";
+    }
+  }
+
+  const [row] = await tx
+    .insert(agentToolCalls)
+    .values({
+      organizationId: turn.organizationId,
+      eventId: turn.eventId,
+      agentId: turn.agentId,
+      userId: turn.userId,
+      tool: p.tool,
+      sourceKind: p.sourceKind,
+      sourceId: p.sourceId,
+      target: p.target,
+      decision: reason ? "denied" : "allowed",
+      reason,
+    })
+    .returning({ id: agentToolCalls.id });
+  if (!row) throw new Error("agent_tool_calls insert failed");
+
+  await core.audit.record(tx, {
+    ...cellAuditBase(p.cell),
+    action: "bot.tool_call",
+    actorKind: "agent",
+    actorId: turn.agentId,
+    agentId: turn.agentId,
+    userId: turn.userId,
+    resourceType: "tool",
+    resourceId: p.tool,
+    result: reason ? "denied" : "success",
+    // Source = the MCP server (id + safe name), plugin or keychain item the tool used; never arguments or results.
+    metadata: {
+      tool: p.tool,
+      sourceKind: p.sourceKind,
+      sourceId: p.sourceId,
+      target: p.target,
+      reason,
+      ...p.metadata,
+    },
+  });
+  return { callId: row.id, allowed: reason === null, reason };
+}
+
+/** A call refused before any turn was found (unknown, foreign or no longer live): audited with no human to attribute. */
+export async function auditUnknownTurn(
+  tx: Tx,
+  core: Core,
+  p: { cell: CellPrincipal; tool: string; reason: string; metadata?: Record<string, unknown> },
+): Promise<string> {
+  await core.audit.record(tx, {
+    ...cellAuditBase(p.cell),
+    action: "bot.tool_call",
+    actorKind: "system",
+    resourceType: "tool",
+    resourceId: p.tool,
+    result: "denied",
+    metadata: { tool: p.tool, reason: p.reason, ...p.metadata },
+  });
+  return randomUUID();
+}
+
+/**
+ * The outcome of an allowed call the API itself carried out (a proxy route), in a second short transaction after the
+ * outbound request: the `agent_tool_calls` row gets its status and duration, and `bot.tool_call.completed` is audited
+ * with ids, counts and hosts only.
+ */
+export async function finishToolCall(
+  tx: Tx,
+  core: Core,
+  p: {
+    cell: CellPrincipal;
+    callId: string;
+    status: "ok" | "error" | "blocked";
+    durationMs: number;
+    metadata: Record<string, unknown>;
+  },
+): Promise<void> {
+  const [call] = await tx
+    .update(agentToolCalls)
+    .set({
+      status: p.status,
+      durationMs: Math.max(0, Math.trunc(p.durationMs)),
+      completedAt: new Date().toISOString(),
+    })
+    .where(and(eq(agentToolCalls.id, p.callId), eq(agentToolCalls.decision, "allowed")))
+    .returning();
+  if (!call) return;
+  await core.audit.record(tx, {
+    ...cellAuditBase(p.cell),
+    action: "bot.tool_call.completed",
+    actorKind: "agent",
+    actorId: call.agentId,
+    agentId: call.agentId,
+    userId: call.userId,
+    resourceType: "tool",
+    resourceId: call.tool,
+    result: p.status === "ok" ? "success" : p.status === "blocked" ? "denied" : "error",
+    metadata: { tool: call.tool, status: p.status, durationMs: call.durationMs, ...p.metadata },
+  });
+}
+
+/**
+ * The rule of every agent call (PR #25, 07.2-11): the delivered turn of THIS agent, in the cell's organization (RLS),
+ * whose human still reads the turn's conversation (a thread is read through its channel). Anything else is no live
+ * turn: the caller answers 403 `no_trigger`.
+ */
+export async function liveTurn(
+  tx: Tx,
+  core: Core,
+  p: { eventId: string; agentId: string },
+): Promise<AgentTurnRow | null> {
+  const [turn] = await tx.select().from(agentTurns).where(eq(agentTurns.eventId, p.eventId));
+  if (!turn || turn.agentId !== p.agentId) return null;
+  // A thread is read through its channel or DM (single-level threads).
+  const [conv] = await tx
+    .select({ id: conversations.id, kind: conversations.kind, parent: conversations.parentConversationId })
+    .from(conversations)
+    .where(eq(conversations.id, turn.conversationId))
+    .limit(1);
+  if (!conv) return null;
+  const judged = conv.kind === "thread" ? conv.parent : conv.id;
+  if (!judged) return null;
+  const readable = await createConversationAccess(core).isReadable(tx, turn.userId, judged, {
+    kinds: ["channel", "dm", "group", "ai_chat"],
+  });
+  return readable ? turn : null;
+}
