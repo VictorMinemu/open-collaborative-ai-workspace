@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 119
+open_count: 120
 waived_count: 4
 fixed_count: 79
-total_count: 202
-last_updated: 2026-10-14T13:26:02.781Z
+total_count: 203
+last_updated: 2026-10-14T14:00:24.659Z
 ---
 
 # Broken Windows Ledger
@@ -217,6 +217,7 @@ last_updated: 2026-10-14T13:26:02.781Z
 | 200 | 07.5 | deviation | packages/db/drizzle |  | The column list in SET NULL (col) is not in the drizzle snapshot; a future migration recreating those FKs would emit a plain SET NULL and deletes would fail on organization_id NOT NULL | open |  | 2026-10-14T13:26:02.622Z |  |
 | 201 | 07.5 | deviation | packages/db/sql/post-migrate.sql |  | Immutability triggers on the stored tool action and Work Zone proposal do not cover TRUNCATE; add REVOKE TRUNCATE in post-migrate.sql | open |  | 2026-10-14T13:26:02.702Z |  |
 | 202 | 07.5 | deviation | packages/db/src/schema/app.ts |  | conversation_id, event_id and requested_for_user_id on 07.5 tables have no FK; 07.5-07/08 must resolve them inside withTenant | open |  | 2026-10-14T13:26:02.781Z |  |
+| 203 | 07.5 | deviation | packages/contracts/src/agent-card-route.ts |  | Stubs until later plans: toPrompt proposedBy is always null (07.5-08 wires it); the memory inbox shows 07.5 approvals title-only (07.5-12 filters by kind); the '/approvals' route prefix grep now targets agent-card-route.ts | open |  | 2026-10-14T14:00:24.659Z |  |
 
 ````json
 [
@@ -2642,6 +2643,18 @@ last_updated: 2026-10-14T13:26:02.781Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-14T13:26:02.781Z",
+    "resolved_at": null
+  },
+  {
+    "id": 203,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "packages/contracts/src/agent-card-route.ts",
+    "line": null,
+    "description": "Stubs until later plans: toPrompt proposedBy is always null (07.5-08 wires it); the memory inbox shows 07.5 approvals title-only (07.5-12 filters by kind); the '/approvals' route prefix grep now targets agent-card-route.ts",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T14:00:24.659Z",
     "resolved_at": null
   }
 ]
