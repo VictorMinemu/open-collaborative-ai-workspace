@@ -33,7 +33,7 @@ export function DialogContent({
         {showClose ? (
           <DialogPrimitive.Close
             aria-label="Close"
-            className="absolute top-3 right-3 inline-flex size-8 items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40"
+            className="absolute top-3 right-3 inline-flex size-8 items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40 max-md:top-1.5 max-md:right-1 max-md:size-11"
           >
             <X className="size-4" />
           </DialogPrimitive.Close>

@@ -11,9 +11,13 @@ export const badgeVariants = cva(
         brand: "border-transparent bg-brand-soft text-brand-soft-foreground",
         secondary: "border-transparent bg-secondary text-secondary-foreground",
         outline: "border-border text-muted-foreground",
-        success: "border-transparent bg-success/15 text-success",
-        warning: "border-transparent bg-warning/15 text-warning",
-        destructive: "border-transparent bg-destructive/12 text-destructive",
+        // The semantic tokens on their own 12-15 % tint measure 2.7:1 (success), 2:1 (warning) and 4.3:1 / 2.8:1
+        // (destructive, light / dark) at 11 px: under AA. These are the Agent Card pill colours (UI-SPEC § Color,
+        // AA-verified: >= 6.4:1 light, >= 8:1 dark), so every badge of these variants reads in both themes.
+        success:
+          "border-transparent bg-emerald-100 text-emerald-800 dark:bg-emerald-400/15 dark:text-emerald-300",
+        warning: "border-transparent bg-amber-100 text-amber-800 dark:bg-amber-400/15 dark:text-amber-300",
+        destructive: "border-transparent bg-red-100 text-red-800 dark:bg-red-400/15 dark:text-red-300",
       },
     },
     defaultVariants: { variant: "secondary" },
