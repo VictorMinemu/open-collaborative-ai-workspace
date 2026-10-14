@@ -607,6 +607,8 @@ export interface EffectiveVaultItem {
   name: string;
   scope: VaultScope;
   ownerUserId: string | null;
+  /** A unit key's unit (null: an organization key or a personal key). */
+  unitId: string | null;
   allowedHosts: string[];
 }
 
@@ -655,10 +657,34 @@ export async function effectiveVaultItems(
       name: item.name,
       scope: item.scope,
       ownerUserId: item.ownerUserId,
+      unitId: item.scope === "unit" ? item.unitId : null,
       allowedHosts: item.allowedHosts,
     });
   }
   return out;
+}
+
+/**
+ * The audience rule for unit keys (07.4-12, owner decision, WINDOWS #191; the rule unit memory follows, D-08): what a
+ * bot fetches with a unit's key is posted where the conversation's readers see it, so a unit key is used only where
+ * EVERY reader is in that unit's audience (a member of the unit or below it, a lead on its path, an admin). An
+ * unbounded audience (a public channel, an AI chat granted to a group) never qualifies. Organization keys (no unit) and
+ * personal keys are not decided here. Deactivated members read nothing and are skipped.
+ */
+export async function unitAudienceAllows(
+  tx: Tx,
+  unitId: string,
+  readers: { userIds: readonly string[]; unbounded: boolean },
+): Promise<boolean> {
+  if (readers.unbounded) return false;
+  const path = (await unitPaths(tx, [unitId])).get(unitId);
+  if (!path) return false;
+  for (const userId of new Set(readers.userIds)) {
+    const facts = await loadPrincipalFacts(tx, { kind: "user", userId });
+    if (facts.deactivated) continue;
+    if (!inUnitAudience(facts, path)) return false;
+  }
+  return true;
 }
 
 /**

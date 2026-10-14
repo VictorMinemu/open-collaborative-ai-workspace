@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
-import type {
-  AgentChannelConnectorCall,
-  AgentChannelConnectorCallResponse,
-  AgentChannelConnectorList,
-  AgentChannelConnectorListResponse,
-  AgentChannelHttpRequest,
-  AgentChannelToolRefusal,
-  TurnContext,
+import {
+  AGENT_CHANNEL_TOOL_REFUSALS,
+  type AgentChannelConnectorCall,
+  type AgentChannelConnectorCallResponse,
+  type AgentChannelConnectorList,
+  type AgentChannelConnectorListResponse,
+  type AgentChannelHttpRequest,
+  type AgentChannelToolRefusal,
+  type TurnContext,
 } from "./agent-channel-protocol.js";
 import { type AgentChannelClient, AgentChannelHttpError } from "./api-client.js";
 import {
@@ -400,6 +401,7 @@ describe("ocw_connector_list and ocw_http_request (07.4 D-07, CONN-05)", () => {
 });
 
 describe("refusals are fixed sentences (CONN-04, D-03, T-07.4-09-04)", () => {
+  // Every refusal code the API sends has a case (WINDOWS #191 added unit_audience).
   const CASES: Array<[number, AgentChannelToolRefusal]> = [
     [404, "unknown_turn"],
     [409, "not_in_turn"],
@@ -407,6 +409,7 @@ describe("refusals are fixed sentences (CONN-04, D-03, T-07.4-09-04)", () => {
     [409, "cap_reached"],
     [409, "tainted"],
     [409, "member_account"],
+    [409, "unit_audience"],
     [409, "not_connected"],
     [409, "needs_reconnect"],
     [409, "handle_not_allowed"],
@@ -415,6 +418,10 @@ describe("refusals are fixed sentences (CONN-04, D-03, T-07.4-09-04)", () => {
     [502, "upstream_error"],
     [502, "timeout"],
   ];
+
+  it("covers every refusal code of the protocol", () => {
+    expect(CASES.map(([, code]) => code).sort()).toEqual([...AGENT_CHANNEL_TOOL_REFUSALS].sort());
+  });
 
   it.each(CASES)("%i %s → one fixed sentence, never the API body", async (status, code) => {
     const fail = async () => {

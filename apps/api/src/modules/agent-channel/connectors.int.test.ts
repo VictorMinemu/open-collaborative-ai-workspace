@@ -470,6 +470,10 @@ describe("needs reconnect, an upstream 401 and a dead grant", () => {
     expect(r.body?.content).toContain("missing a permission");
     expect(r.body?.content).toContain("records:write");
     expect(r.body?.content).not.toMatch(/fakeat_|fakert_|Bearer/u);
+    expect((await auditRows(s, s.orgA, ["bot.tool_call.completed"])).at(-1)?.metadata).toMatchObject({
+      status: "error",
+      reason: "insufficient_scope",
+    });
     expect(await toolCallsOf(ev.eventId)).toEqual([
       expect.objectContaining({ decision: "allowed", status: "error" }),
     ]);
@@ -672,5 +676,96 @@ describe("POST /connectors/list", () => {
 
   it("the authz registry declares the route as a cell route", () => {
     expect(s.stack.built.authz.routes.get("POST /agent-channel/v1/connectors/list")).toBe("cell");
+  });
+});
+
+// ---------------------------------------------------------------- unit keys follow the audience rule (WINDOWS #191)
+
+describe("unit keys: only where every reader is inside the unit; organization keys everywhere", () => {
+  let unitKey: Json;
+  let orgKey: Json;
+  let salesRoom = "";
+  let general = "";
+  const kcUrl = () => `http://fake-mcp:${s.fakePort}/kc/whoami`;
+  const httpCall = (ev: Json, handle: string) =>
+    cell("/http-requests", { eventId: ev.eventId, agentId: scoutId, handle, method: "GET", url: kcUrl() });
+  const listKeys = async (ev: Json) =>
+    ((await ok(cell("/connectors/list", { eventId: ev.eventId, agentId: scoutId }))).keys as Json[]).map(
+      (k) => k.handle,
+    );
+
+  beforeAll(async () => {
+    const sales = (
+      await ok(
+        s.victor.request("POST", "/api/v1/units", { kind: "department", name: "Sales", parentId: null }),
+      )
+    ).id as string;
+    await ok(s.victor.request("POST", `/api/v1/units/${sales}/members`, { userId: s.samId }));
+    const key = (name: string, unitId: string | null) =>
+      ok(
+        s.victor.request("POST", "/api/v1/keychain", {
+          scope: "unit",
+          unitId,
+          kind: "api_key",
+          name,
+          value: "fake-kc-token",
+          allowedHosts: [`fake-mcp:${s.fakePort}`],
+        }),
+        201,
+      );
+    unitKey = await key("Sales ERP", sales);
+    orgKey = await key("Company ERP", null);
+    for (const k of [unitKey, orgKey]) {
+      await ok(s.victor.request("PUT", `/api/v1/keychain/${k.id}/agents`, { agentIds: [scoutId] }));
+    }
+    // #sales-room: Sam (Sales) and Víctor (an admin: in every unit's audience). #general: public, Alex reads it.
+    salesRoom = (
+      await ok(s.victor.request("POST", "/api/v1/channels", { name: "sales-room", visibility: "private" }))
+    ).id;
+    general = (
+      await ok(s.victor.request("POST", "/api/v1/channels", { name: "general", visibility: "public" }))
+    ).id;
+    for (const ch of [salesRoom, general]) {
+      await ok(s.victor.request("POST", `/api/v1/channels/${ch}/members`, { kind: "user", id: s.samId }));
+      await ok(s.victor.request("POST", `/api/v1/channels/${ch}/members`, { kind: "agent", id: scoutId }));
+    }
+    await ok(s.victor.request("POST", `/api/v1/channels/${general}/members`, { kind: "user", id: s.alexId }));
+  });
+
+  it("Sam's DM with Scout: the unit key is listed and used", async () => {
+    const ev = await turnOf(s.sam, samDm);
+    expect(await listKeys(ev)).toEqual(expect.arrayContaining([unitKey.handle, orgKey.handle]));
+    const r = await httpCall(ev, unitKey.handle);
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(JSON.parse(r.body?.body as string)).toEqual({ authorized: true, method: "bearer" });
+  });
+
+  it("a private channel whose readers are all inside Sales: allowed", async () => {
+    const ev = await turnOf(s.sam, salesRoom, "@scout check the ERP", true);
+    expect(await listKeys(ev)).toContain(unitKey.handle);
+    expect((await httpCall(ev, unitKey.handle)).status).toBe(200);
+  });
+
+  it("a public channel (Alex, outside Sales, reads it): refused unit_audience; the org key still works", async () => {
+    const ev = await turnOf(s.sam, general, "@scout check the ERP", true);
+    const keys = await listKeys(ev);
+    expect(keys).not.toContain(unitKey.handle);
+    expect(keys).toContain(orgKey.handle);
+    const r = await httpCall(ev, unitKey.handle);
+    expect(r.status).toBe(409);
+    expect(codeOf(r)).toBe("unit_audience");
+    expect((await httpCall(ev, orgKey.handle)).status).toBe(200);
+    const refused = (await auditRows(s, s.orgA, ["bot.tool_call"])).at(-2);
+    expect(refused?.metadata).toMatchObject({ reason: "unit_audience", sourceId: unitKey.id });
+  });
+
+  it("an outsider joining the private channel mid-turn: the next call is refused unit_audience", async () => {
+    const ev = await turnOf(s.sam, salesRoom, "@scout check the ERP", true);
+    await ok(
+      s.victor.request("POST", `/api/v1/channels/${salesRoom}/members`, { kind: "user", id: s.alexId }),
+    );
+    const r = await httpCall(ev, unitKey.handle);
+    expect(r.status).toBe(409);
+    expect(codeOf(r)).toBe("unit_audience");
   });
 });

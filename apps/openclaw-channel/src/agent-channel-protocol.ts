@@ -980,6 +980,7 @@ export const AGENT_CHANNEL_TOOL_REFUSALS = [
   "cap_reached",
   "tainted",
   "member_account",
+  "unit_audience",
   "not_connected",
   "needs_reconnect",
   "handle_not_allowed",

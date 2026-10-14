@@ -355,6 +355,7 @@ export function registerConnectorRoutes(scope: App, core: Core, perms: Permissio
       let failure: { code: Failure; outcome: "blocked" | "error" } | null = null;
       let answer: AgentChannelConnectorCallResponse | null = null;
       let sent = false;
+      let scopeRefused = false;
       const run = (token: Extract<AccessToken, { ok: true }>) => {
         sent = true;
         return callTool(
@@ -394,6 +395,7 @@ export function registerConnectorRoutes(scope: App, core: Core, perms: Permissio
         // Codes only: an upstream error (which may carry response text) is never logged or returned.
         if (err instanceof McpUpstreamError && err.code === "insufficient_scope") {
           answer = insufficientScopeAnswer(err);
+          scopeRefused = true;
         } else {
           failure = failureOf(err);
         }
@@ -410,7 +412,7 @@ export function registerConnectorRoutes(scope: App, core: Core, perms: Permissio
           metadata: {
             connector: body.connector,
             credential: "member",
-            reason: refusal ?? failure?.code ?? null,
+            reason: refusal ?? failure?.code ?? (scopeRefused ? "insufficient_scope" : null),
           },
         });
         if (sent) await touchConnection(tx, { userId: turn.userId, serverId: server.id });
