@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createFakeMcpOAuth } from "../../../../../infra/fake-model/fake-mcp-oauth.mjs";
+import { egressFor } from "../../lib/egress";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { createPermissionService } from "../organization";
 import {
@@ -768,6 +769,116 @@ describe("unit keys, permissions, private hosts and grants", () => {
       effectiveVaultItems(tx, perms(), { agentId: orgBot, humanUserId: victorId }),
     );
     expect(bView).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------- Task 3
+
+describe("injection against the fake /kc targets, through the egress guard", () => {
+  const whoami = async (h: { headerName: string; headerValue: string }) => {
+    const res = await egressFor(stack.built.core.env).fetch(`http://${kcHost}/kc/whoami`, {
+      headers: { [h.headerName]: h.headerValue },
+    });
+    return (await res.json()) as Json;
+  };
+
+  it("an API key is sent as a bearer and authorizes", async () => {
+    const key = await ok(
+      victor.request(
+        "POST",
+        "/api/v1/keychain",
+        personalKey({ name: "KC bearer", value: "fake-kc-token", allowedHosts: [kcHost] }),
+      ),
+      201,
+    );
+    expect(await whoami(await injectionFor(key.handle, victorId))).toEqual({
+      authorized: true,
+      method: "bearer",
+    });
+  });
+
+  it("a username and password key is sent as HTTP Basic and authorizes; its parts are all redactable", async () => {
+    const key = await ok(
+      victor.request("POST", "/api/v1/keychain", {
+        scope: "personal",
+        kind: "basic",
+        name: "KC basic",
+        username: "kcuser",
+        password: PASSWORD,
+        allowedHosts: [kcHost],
+      }),
+      201,
+    );
+    expect(key.injection).toEqual({ header: "Authorization", scheme: "basic" });
+    const inj = await injectionFor(key.handle, victorId);
+    expect(inj.headerValue).toBe(`Basic ${Buffer.from(`kcuser:${PASSWORD}`).toString("base64")}`);
+    expect(inj.secretParts).toEqual(
+      expect.arrayContaining([
+        PASSWORD,
+        Buffer.from(`kcuser:${PASSWORD}`).toString("base64"),
+        inj.headerValue,
+      ]),
+    );
+    expect(await whoami(inj)).toEqual({ authorized: true, method: "basic" });
+  });
+
+  it("an OAuth client gets a client-credentials token once, reuses it, refetches after a rotation, and never stores it", async () => {
+    const key = await ok(
+      riley.request("POST", "/api/v1/keychain", {
+        scope: "unit",
+        unitId: backend,
+        kind: "oauth",
+        name: "KC client",
+        tokenUrl: `https://${kcHost}/kc/token`,
+        clientId: "kc-client",
+        clientSecret: "kc-secret",
+        allowedHosts: [kcHost],
+      }),
+      201,
+    );
+    // The fake speaks plain http on loopback; the contract only takes https token URLs.
+    await su.query("update app.vault_items set token_url = $1 where id = $2", [
+      `http://${kcHost}/kc/token`,
+      key.id,
+    ]);
+    const start = tokenRequests;
+    const first = await injectionFor(key.handle, alexId);
+    expect(first.headerValue).toMatch(/^Bearer fakekc_/);
+    expect(await whoami(first)).toEqual({ authorized: true, method: "client_credentials" });
+    const token = first.headerValue.slice("Bearer ".length);
+    expect(first.secretParts).toEqual(expect.arrayContaining([token, "kc-secret"]));
+    expect((await injectionFor(key.handle, victorId)).headerValue).toBe(first.headerValue);
+    expect(tokenRequests - start).toBe(1);
+
+    // A replaced client secret is a new value version: the cached token is not reused.
+    await ok(
+      riley.request("PATCH", `/api/v1/keychain/${key.id}`, {
+        secret: { kind: "oauth", clientId: "kc-client", clientSecret: "kc-secret" },
+      }),
+    );
+    const second = await injectionFor(key.handle, alexId);
+    expect(tokenRequests - start).toBe(2);
+    expect(second.headerValue).not.toBe(first.headerValue);
+
+    // A token URL outside the allowlist never receives the client secret.
+    await su.query("update app.vault_items set token_url = $1 where id = $2", [
+      `http://other-kc:${fakePort}/kc/token`,
+      key.id,
+    ]);
+    const err = await injectionFor(key.handle, alexId).catch((e: unknown) => e);
+    expect((err as KeychainError).code).toBe("token_url_not_allowed");
+    expect(tokenRequests - start).toBe(2);
+
+    // Tokens live only in memory: nowhere in the database, the audit trail included.
+    const issued = oauth.issuedTokens().access.filter((t) => t.startsWith("fakekc_"));
+    expect(issued.length).toBeGreaterThanOrEqual(2);
+    const dump = JSON.stringify([
+      (await su.query("select * from app.vault_items")).rows,
+      (await su.query("select * from app.secrets")).rows,
+      (await su.query("select * from app.audit_events")).rows,
+    ]);
+    for (const t of issued) expect(dump).not.toContain(t);
+    for (const c of ["kc-secret", "fake-kc-token", PASSWORD]) expect(dump).not.toContain(c);
   });
 });
 
