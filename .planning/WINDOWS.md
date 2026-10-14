@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 128
+open_count: 129
 waived_count: 4
 fixed_count: 80
-total_count: 212
-last_updated: 2026-10-14T17:45:03.593Z
+total_count: 213
+last_updated: 2026-10-14T17:47:21.500Z
 ---
 
 # Broken Windows Ledger
@@ -227,6 +227,7 @@ last_updated: 2026-10-14T17:45:03.593Z
 | 210 | 07.5 | deviation | apps/openclaw-channel/src/connector-tools.ts |  | Denial note parsed from the end of the server sentence (no cardAction.note in contracts); approval_denied does not say who decided; flagged connector tools still use the old 32 KB message; fake /tool-calls never answers no_trigger | open |  | 2026-10-14T15:58:17.419Z |  |
 | 211 | 07.5 | deviation | apps/api/src/modules/tool-approval |  | MUST FIX (07.5-11/gate): a review_only tool.call card still carries Approve and the server accepts an approval from the card route; only the web hides it. Refuse server-side | open |  | 2026-10-14T17:45:03.509Z |  |
 | 212 | 07.5 | deviation | apps/api/src/modules/tool-approval |  | 07.5-11 must map denial {deciderName, note} onto the 409 and add an explicit cardAction note to contracts + plugin mirror (replace sentence parsing); 'You can't approve your own request' copy must follow viewerCan; real use window is min(15 min, request expiry); review view counts readers with one check per member | open |  | 2026-10-14T17:45:03.593Z |  |
+| 213 | 07.5 | deviation | apps/api/src/testing.ts |  | Test Redis containers leak (208 redis:8 found running, 1-2 h old): TestStack.stop() awaits built.close() before stopping containers, so a throwing close skips redis.stop(); make it try/finally and check why Ryuk did not reap them (fix in the 07.5 gate) | open |  | 2026-10-14T17:47:21.500Z |  |
 
 ````json
 [
@@ -2772,6 +2773,18 @@ last_updated: 2026-10-14T17:45:03.593Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-14T17:45:03.593Z",
+    "resolved_at": null
+  },
+  {
+    "id": 213,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "apps/api/src/testing.ts",
+    "line": null,
+    "description": "Test Redis containers leak (208 redis:8 found running, 1-2 h old): TestStack.stop() awaits built.close() before stopping containers, so a throwing close skips redis.stop(); make it try/finally and check why Ryuk did not reap them (fix in the 07.5 gate)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T17:47:21.500Z",
     "resolved_at": null
   }
 ]
