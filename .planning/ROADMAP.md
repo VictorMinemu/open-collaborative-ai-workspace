@@ -699,11 +699,39 @@ transport; prior art Steel Browser, neko; `.planning/research/OPS-FEATURES.md` F
      bot, the model or the audit
   5. A signed-in browser session is kept sealed per member and site in the keychain, reused only for that member's
      turns, and revocable; Sandbox and Browser are modules an admin turns on per organization or unit
-**Plans:** 0 plans
+**Plans:** 29 plans in 9 waves (UI-SPEC/VALIDATION in the phase folder; W1 is the brief's Wave 0: contracts, migration, spikes)
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 07.8 to break down)
+- [ ] 07.8-01-PLAN.md — Wave 1: Contracts first for the whole phase: the sandbox and sandboxd protocol, the browser and live-view protocol, the
+- [ ] 07.8-02-PLAN.md — Wave 1: Create the storage of the phase under tenant RLS, with the owner-only policy on browser sessions, named constraints
+- [ ] 07.8-03-PLAN.md — Wave 1: Run the three blocking spikes with throwaway code, record each outcome with evidence and the chosen path, and fill
+- [ ] 07.8-04-PLAN.md — Wave 2: Create the `@ocw/sandboxd` workspace package with its Docker client, fixed spec builder, label-scoped lifecycle and
+- [ ] 07.8-05-PLAN.md — Wave 2: Create the API `sandbox` module (sandboxd client, availability service, kill switch), the Agent Channel exec route
+- [ ] 07.8-06-PLAN.md — Wave 2: Add the 15 confined tools to the OpenClaw channel plugin as static, self-validated, credential-free callers with
+- [ ] 07.8-07-PLAN.md — Wave 2: Build the browser container: the stdio agent on `playwright-core@1.63.0`, its redacting snapshot serializer and
+- [ ] 07.8-08-PLAN.md — Wave 3: Write `scripts/sandbox-proof.sh` (real cell + real API + real sandboxd + `sbx`), give `scripts/e2e-isolated.sh` the
+- [ ] 07.8-09-PLAN.md — Wave 3: Implement the file operations, the `files` helper container, the soft quota, the idle sweeper, usage sampling and the
+- [ ] 07.8-10-PLAN.md — Wave 3: Add the bot file and process routes to `agent-channel/sandbox.ts`, the share-to-reply attachment path, and the
+- [ ] 07.8-11-PLAN.md — Wave 3: Build the people-facing half of the sandbox module: file routes decided by the resolver, the status DTO, stop and
+- [ ] 07.8-12-PLAN.md — Wave 3: Extract the 07.4 classification into `@ocw/egress-policy`, build the `sandbox-egress` proxy as the second entrypoint
+- [ ] 07.8-13-PLAN.md — Wave 4: Give `sandboxd` the per-bot browser container and its agent link, the egress container with per-network policy and
+- [ ] 07.8-14-PLAN.md — Wave 4: Add the Agent Channel browser routes, the browser module's context service, the turn offering of the browser tools,
+- [ ] 07.8-15-PLAN.md — Wave 4: Build the bot page's Sandbox tab (status card, tree, preview, upload, download, delete, stop, restart), extract the
+- [ ] 07.8-16-PLAN.md — Wave 5: Build the live-view WebSocket hub, the takeover lease, the privacy filter for takeovers and member sessions, the
+- [ ] 07.8-17-PLAN.md — Wave 5: Implement package review, install and removal in `sandboxd` with throwaway review and installer containers, the
+- [ ] 07.8-18-PLAN.md — Wave 4: Build the API side of sandbox packages on ADR-0011's pinned-approval model: review through sandboxd, approve by
+- [ ] 07.8-19-PLAN.md — Wave 5: Build Settings › Sandbox & Browser (organization switch, isolation, limits, network, kill switch) and the module
+- [ ] 07.8-20-PLAN.md — Wave 5: Render the server-composed turn activity in chat (collapsed group, steps, live label), the shared `HostChip`, and the
+- [ ] 07.8-21-PLAN.md — Wave 6: Build the platform-owned sign-in card, the seal-on-hand-back path, sealed browser sessions per member × site × bot
+- [ ] 07.8-22-PLAN.md — Wave 6: Build the desktop live view: provider, socket, frame, header, activity line, small window, large view, takeover with
+- [ ] 07.8-23-PLAN.md — Wave 6: Build the Sandbox packages section (list, add dialog, review sheet, row actions) inside Settings › Sandbox & Browser
+- [ ] 07.8-24-PLAN.md — Wave 6: Ship the sandbox profile in compose (sandboxd image, sandbox images, control network, setup token), the Woodpecker
+- [ ] 07.8-25-PLAN.md — Wave 7: Implement F-8's data-flow rules: download routing by session, `ocw_sandbox_import` with the audience-cover check, and
+- [ ] 07.8-26-PLAN.md — Wave 7: Build the sign-in card body, the phone live view (dock, full sheet, touch, hidden keyboard, phone viewport, Back),
+- [ ] 07.8-27-PLAN.md — Wave 7: Build the Keychain "Browser sessions" section and the bot page's Browser tab on the 21 routes, proven at both widths
+- [ ] 07.8-28-PLAN.md — Wave 8: Prove the phase's security properties across every layer: the registry-driven cross-tenant matrix, the API sentinel
+- [ ] 07.8-29-PLAN.md — Wave 9: Run the full gate, fix what it finds at the source, write ADR-0029 and the operator and owner docs, update STATUS,
 
 ### Phase 8: Device Trust, Protocol and Work Zone Permissions
 
