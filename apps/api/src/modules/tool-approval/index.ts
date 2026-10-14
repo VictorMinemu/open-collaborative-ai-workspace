@@ -80,7 +80,7 @@ export function createToolApprovalModule(
 ): { module: ApiModule; service: ToolApprovalService } {
   const perms = createPermissionService(core);
   // 07.5-07: the `tool.call` grant kind lives on the injected 07.2 primitive.
-  deps.approvals.register(createToolCallKind());
+  deps.approvals.register(createToolCallKind({ core, perms }));
   const service: ToolApprovalService = {
     policies: (tx) => loadToolApprovalPolicies(tx),
     approvalModesFor,

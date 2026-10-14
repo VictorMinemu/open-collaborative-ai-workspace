@@ -1,38 +1,143 @@
-import type { AgentCardField, AgentCardInput } from "@ocw/contracts";
-import type { Tx } from "@ocw/db";
+import { AGENT_CARD_FIELDS_MAX, type AgentCardField, type AgentCardInput } from "@ocw/contracts";
+import { conversations, type Tx } from "@ocw/db";
+import { eq } from "drizzle-orm";
 import type { ApprovalCardContent, ApprovalRow } from "../approval";
-import { parseArgs, sourceOf, type ToolCallRow } from "./kind";
-import { orderPreview, shortToolName, toolCallTitle } from "./view";
+import {
+  agentName,
+  humanMembersOf,
+  memberName,
+  parseArgs,
+  type SourceInfo,
+  sourceOf,
+  type ToolCallRow,
+  titleOf,
+} from "./kind";
+import { orderPreview, type PreviewResult, shortToolName, summaryTitle } from "./view";
 
 /**
- * The platform-owned card that mirrors a `tool.call` request in its conversation (07.5-07, P-07, UI-SPEC Surface 1).
- * Card fields reach every reader of the conversation through `message.updated`, so what a card may show is decided
- * here by its audience.
+ * The platform-owned card that mirrors a `tool.call` request in its conversation (07.5-07, P-07, Pitfall 7, UI-SPEC
+ * Surface 1). Card fields, the message body and every `message.updated` reach EVERY reader of the conversation, so the
+ * card shows the call's values only where the requester alone reads it: a DM whose single human is the requester. Any
+ * other conversation (channel, thread, group DM, AI chat) gets a summary: who wants to run which tool for whom, from
+ * which source, and nothing of the arguments; the deciders and the requester review the values at `/approvals/<id>`.
  */
 
 export const CARD_LABELS = { approve: "Approve", deny: "Deny", open: "Review" } as const;
+
+export const TAINT_WARNING = (bot: string) =>
+  `${bot} read outside content earlier in this turn. Check the values.`;
+export const TRUNCATED_WARNING =
+  "Some values are too long for the card. Review them in full before approving.";
+export const HIDDEN_WARNING = "Contains hidden characters, shown as ⟨U+…⟩.";
+export const MASKED_WARNING = "A value looks like a secret and is masked.";
+
+export type CardDisplay = "exact" | "summary" | "review_only";
+
+/**
+ * The audience rule (pure): `exact` only for a conversation of kind `dm` whose single human member is the requester;
+ * there, `review_only` when the card could not show every value as it is (a value cut at 500 characters, more fields
+ * than a card holds, or a value that is empty or starts or ends with whitespace, which a card field trims).
+ */
+export function cardDisplay(p: {
+  conversationKind: string | null;
+  humanIds: readonly string[];
+  requesterId: string;
+  preview: PreviewResult;
+  actionFields: number;
+}): CardDisplay {
+  const alone = p.conversationKind === "dm" && p.humanIds.length === 1 && p.humanIds[0] === p.requesterId;
+  if (!alone) return "summary";
+  const fits = p.actionFields + p.preview.fields.length <= AGENT_CARD_FIELDS_MAX;
+  const asIs = p.preview.fields.every((f) => f.value.length > 0 && f.value === f.value.trim());
+  return p.preview.truncated || !fits || !asIs ? "review_only" : "exact";
+}
+
+/** The card's display and how many of its leading fields are the ACTION section, for the stored call now. */
+export async function cardDisplayOf(
+  tx: Tx,
+  t: ToolCallRow,
+): Promise<{ display: CardDisplay; actionFields: number; preview: PreviewResult }> {
+  const [conv] = await tx
+    .select({ kind: conversations.kind })
+    .from(conversations)
+    .where(eq(conversations.id, t.conversationId))
+    .limit(1);
+  const humanIds = conv?.kind === "dm" ? await humanMembersOf(tx, t.conversationId) : [];
+  const preview = orderPreview(parseArgs(t));
+  const exactActionFields = t.target ? 3 : 2;
+  const display = cardDisplay({
+    conversationKind: conv?.kind ?? null,
+    humanIds,
+    requesterId: t.requestedForUserId,
+    preview,
+    actionFields: exactActionFields,
+  });
+  return { display, actionFields: display === "summary" ? 2 : exactActionFields, preview };
+}
+
+function sourceLabel(s: SourceInfo, exact: boolean): string {
+  switch (s.kind) {
+    case "mcp":
+      return exact ? `${s.name} · MCP server` : s.name;
+    case "connector":
+      return exact ? `${s.name} · your account` : s.name;
+    case "plugin":
+      return exact ? `${s.name} · plugin` : s.name;
+    case "http":
+      return exact && s.keyName ? `Keychain key ${s.keyName}` : "Web request";
+  }
+}
+
+const field = (label: string, value: string): AgentCardField => ({
+  label,
+  value: value.trim() ? value.slice(0, 500) : "(empty)",
+});
 
 export async function composeToolCallCard(
   tx: Tx,
   row: ApprovalRow,
   t: ToolCallRow,
+  waitingFor: string,
 ): Promise<ApprovalCardContent> {
   const source = await sourceOf(tx, t);
-  const title = toolCallTitle({ tool: t.tool, sourceKind: source.kind, sourceName: source.name });
-  const preview = orderPreview(parseArgs(t));
+  const bot = await agentName(tx, t.agentId);
+  const { display, actionFields, preview } = await cardDisplayOf(tx, t);
+  const open = { kind: "open" as const, label: CARD_LABELS.open, target: `/approvals/${row.id}` };
+  const warnings: string[] = t.tainted ? [TAINT_WARNING(bot)] : [];
+
+  if (display === "summary") {
+    const requesterName = (await memberName(tx, t.requestedForUserId)) ?? "Former member";
+    const title = summaryTitle({ botName: bot, tool: t.tool, requesterName });
+    const card: AgentCardInput = {
+      kind: "approval",
+      title,
+      fields: [field("Tool", shortToolName(t.tool)), field("Source", sourceLabel(source, false))],
+      status: "pending",
+      actions: [open],
+      summary: `${title}. ${waitingFor}.`,
+    };
+    // No in-card decision: deciding happens on the review, which only the deciders and the requester can open.
+    return { card, warnings, inlineDecision: false, labels: CARD_LABELS };
+  }
+
+  const title = await titleOf(tx, t, source);
   const fields: AgentCardField[] = [
-    { label: "Tool", value: shortToolName(t.tool) },
-    { label: "Source", value: source.name },
-    ...(t.target ? [{ label: "Target", value: t.target }] : []),
-    ...preview.fields.map((p) => ({ label: p.label, value: p.value.trim() ? p.value : "(empty)" })),
+    field("Tool", shortToolName(t.tool)),
+    field("Source", sourceLabel(source, true)),
+    ...(t.target ? [field("Target", t.target)] : []),
+    ...preview.fields.slice(0, AGENT_CARD_FIELDS_MAX - actionFields).map((p) => field(p.label, p.value)),
   ];
+  if (display === "review_only") warnings.push(TRUNCATED_WARNING);
+  if (preview.notices.hiddenCharacters) warnings.push(HIDDEN_WARNING);
+  if (preview.notices.maskedSecret) warnings.push(MASKED_WARNING);
   const card: AgentCardInput = {
     kind: "approval",
     title,
     fields,
     status: "pending",
-    actions: [{ kind: "open", label: CARD_LABELS.open, target: `/approvals/${row.id}` }],
+    actions: [open],
+    // The message body (search, notifications) never carries a value, even in the requester's own DM.
     summary: title,
   };
-  return { card, warnings: [], labels: CARD_LABELS };
+  return { card, warnings: warnings.slice(0, 3), inlineDecision: true, labels: CARD_LABELS };
 }

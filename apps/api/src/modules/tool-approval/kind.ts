@@ -1,30 +1,66 @@
 import {
+  type AgentCardRoute,
+  type ApprovalHeadline,
+  type ApprovalOrigin,
   type ApprovalToolSourceKind,
   canonicalJson,
-  prettyCanonicalJson,
+  isAgentCardRoute,
   TOOL_APPROVAL_LIMITS,
   TOOL_CALL_KIND,
   type ToolCallApprovalView,
 } from "@ocw/contracts";
-import { agents, cellPlugins, mcpServers, orgMembers, type Tx, toolCallApprovals, vaultItems } from "@ocw/db";
-import { eq } from "drizzle-orm";
+import {
+  agents,
+  cellPlugins,
+  conversationMembers,
+  conversations,
+  mcpServers,
+  orgMembers,
+  orgUnits,
+  type Tx,
+  toolCallApprovals,
+  unitMemberships,
+  vaultItems,
+} from "@ocw/db";
+import { and, eq, inArray, isNull } from "drizzle-orm";
+import type { Core } from "../../core";
 import { sha256Hex } from "../../lib/crypto";
 import type { ApprovalKind, ApprovalRow } from "../approval";
-import { composeToolCallCard } from "./card";
-import { resolveFor } from "./policies";
+import { createConversationAccess } from "../chat";
+import {
+  loadPrincipalFacts,
+  loadPrincipalFactsMany,
+  orgResource,
+  type PermissionService,
+  type PrincipalFacts,
+  unitResource,
+} from "../organization";
+import { cardDisplayOf, composeToolCallCard } from "./card";
+import { ORGANIZATION_LABEL, resolveFor } from "./policies";
 import type { ResolvedApproval } from "./resolve";
-import { approverText, orderPreview, toolCallTitle } from "./view";
+import { approverText, argumentsDisplay, orderPreview, toolCallTitle } from "./view";
 
 /**
  * The `tool.call` approval kind (07.5-07, D-02, D-04, APPROVE-02, ADR-0023): one later use of exactly one call a bot
  * asked to make. The stored action is `tool_call_approvals` (immutable by trigger); every hook reads it through the
- * transaction's tenant (RLS), so another organization's row reads as missing. Deciders are decided live at every read
- * and decision from the rule that applies now.
+ * transaction's tenant (RLS), so another organization's row reads as missing.
+ *
+ * Who decides is decided live, at every read and decision, from the rule that applies NOW (the strictest-wins resolver
+ * over the agent ∩ the human) and the decider's current facts (the permission resolver's own loader): the requester
+ * (`requester`, or no rule any more), the people named who are still active members (`users`; none left = nobody),
+ * a lead of the rule's unit or of an ancestor (`unit_leads`), or a current organization admin (`admins`). The decision
+ * right decides, not who asked (ADR-0023 decision 15 as amended): a requester who holds it decides their own request
+ * and the primitive audits `selfApproved`.
  */
 
 export const TOOL_CALL_RESOURCE = "tool_call";
 
 export type ToolCallRow = typeof toolCallApprovals.$inferSelect;
+
+export interface ToolCallKindDeps {
+  core: Core;
+  perms: PermissionService;
+}
 
 /** The stored action of a request (null when it is gone or belongs to another organization). */
 export async function loadToolCall(
@@ -49,7 +85,7 @@ export async function memberName(tx: Tx, userId: string): Promise<string | null>
   return m?.name ?? null;
 }
 
-async function agentName(tx: Tx, agentId: string): Promise<string> {
+export async function agentName(tx: Tx, agentId: string): Promise<string> {
   const [a] = await tx.select({ name: agents.name }).from(agents).where(eq(agents.id, agentId)).limit(1);
   return a?.name ?? "Deleted bot";
 }
@@ -78,13 +114,15 @@ export async function sourceOf(tx: Tx, t: Pick<ToolCallRow, "sourceKind" | "sour
       keyName: null,
     };
   }
-  if (t.sourceKind === "plugin" && t.sourceId) {
-    const [p] = await tx
-      .select({ name: cellPlugins.packageName })
-      .from(cellPlugins)
-      .where(eq(cellPlugins.id, t.sourceId))
-      .limit(1);
-    return { kind: "plugin", name: p?.name ?? "A removed plugin", account: null, keyName: null };
+  if (t.sourceKind === "plugin") {
+    const [p] = t.sourceId
+      ? await tx
+          .select({ name: cellPlugins.packageName })
+          .from(cellPlugins)
+          .where(eq(cellPlugins.id, t.sourceId))
+          .limit(1)
+      : [];
+    return { kind: "plugin", name: p?.name ?? "A plugin", account: null, keyName: null };
   }
   if (t.sourceKind === "vault" && t.sourceId) {
     // A personal key reads only for its owner (RLS): anyone else sees "Web request" without the key's name.
@@ -100,15 +138,10 @@ export async function sourceOf(tx: Tx, t: Pick<ToolCallRow, "sourceKind" | "sour
       keyName: k?.name ?? null,
     };
   }
-  return {
-    kind: t.sourceKind === "plugin" ? "plugin" : "http",
-    name: "Web request",
-    account: null,
-    keyName: null,
-  };
+  return { kind: "http", name: "Web request", account: null, keyName: null };
 }
 
-/** The rule that applies to the stored call now (live: a rule changed after the request applies as it is now). */
+/** The rule that applies to the call now (live: a rule changed after the request applies as it is now); never = none. */
 export async function currentRule(
   tx: Tx,
   t: Pick<ToolCallRow, "agentId" | "requestedForUserId" | "tool">,
@@ -117,14 +150,102 @@ export async function currentRule(
   return r && r.mode !== "never" ? r : null;
 }
 
-/** "Waiting for …" for the rule that applies now. */
+interface RuleUnit {
+  id: string;
+  name: string;
+  path: string[];
+}
+
+async function ruleUnit(tx: Tx, rule: ResolvedApproval | null): Promise<RuleUnit | null> {
+  if (!rule?.scopeUnitId) return null;
+  const [u] = await tx
+    .select({ id: orgUnits.id, name: orgUnits.name, path: orgUnits.path })
+    .from(orgUnits)
+    .where(eq(orgUnits.id, rule.scopeUnitId))
+    .limit(1);
+  return u ?? null;
+}
+
+/** The one predicate of the decision right, on the decider's current facts (also used to list the deciders). */
+function holdsRight(
+  facts: PrincipalFacts,
+  rule: ResolvedApproval | null,
+  unit: RuleUnit | null,
+  requesterId: string,
+): boolean {
+  if (facts.kind !== "user" || facts.deactivated) return false;
+  if (!rule || rule.approverKind === "requester") return facts.id === requesterId;
+  switch (rule.approverKind) {
+    case "users":
+      return rule.approverUserIds.includes(facts.id);
+    case "unit_leads":
+      return !!unit && unit.path.some((id) => facts.leadOfUnitIds.has(id));
+    case "admins":
+      return facts.orgRole === "admin";
+  }
+}
+
+/** Everyone who may decide the call now (ids), by the same predicate as `canDecide`. */
+export async function decidersOf(
+  tx: Tx,
+  t: Pick<ToolCallRow, "requestedForUserId">,
+  rule: ResolvedApproval | null,
+  unit: RuleUnit | null,
+): Promise<string[]> {
+  let candidates: string[];
+  if (!rule || rule.approverKind === "requester") candidates = [t.requestedForUserId];
+  else if (rule.approverKind === "users") candidates = [...rule.approverUserIds];
+  else if (rule.approverKind === "unit_leads") {
+    candidates = unit
+      ? (
+          await tx
+            .select({ userId: unitMemberships.userId })
+            .from(unitMemberships)
+            .where(and(inArray(unitMemberships.unitId, unit.path), eq(unitMemberships.role, "lead")))
+        ).map((r) => r.userId)
+      : [];
+  } else {
+    candidates = (
+      await tx
+        .select({ userId: orgMembers.userId })
+        .from(orgMembers)
+        .where(and(eq(orgMembers.role, "admin"), isNull(orgMembers.deactivatedAt)))
+    ).map((r) => r.userId);
+  }
+  const facts = await loadPrincipalFactsMany(tx, candidates);
+  return [...facts.values()]
+    .filter((f) => holdsRight(f, rule, unit, t.requestedForUserId))
+    .map((f) => f.id)
+    .sort();
+}
+
+/** "Waiting for …" for the rule that applies now (only active members are named). */
 export async function waitingForOf(
   tx: Tx,
   t: Pick<ToolCallRow, "requestedForUserId">,
   rule: ResolvedApproval | null,
 ): Promise<string> {
   const requesterName = (await memberName(tx, t.requestedForUserId)) ?? "Former member";
-  return approverText({ approverKind: rule?.approverKind ?? null, requesterName, names: [], unitName: null });
+  let names: string[] = [];
+  if (rule?.approverKind === "users") {
+    const active = await loadPrincipalFactsMany(tx, rule.approverUserIds);
+    const people = rule.approverUserIds.filter((id) => active.get(id)?.deactivated === false);
+    const rows = people.length
+      ? await tx
+          .select({ id: orgMembers.userId, name: orgMembers.displayName })
+          .from(orgMembers)
+          .where(inArray(orgMembers.userId, people))
+      : [];
+    const byId = new Map(rows.map((r) => [r.id, r.name]));
+    names = people.map((id) => byId.get(id)).filter((n): n is string => !!n);
+  }
+  const unit = await ruleUnit(tx, rule);
+  return approverText({
+    approverKind: rule?.approverKind ?? null,
+    requesterName,
+    names,
+    unitName: unit?.name ?? null,
+  });
 }
 
 /** The use window of an approved grant: `decided_at + 15 min` (P-05). */
@@ -133,13 +254,160 @@ export function useByOf(row: Pick<ApprovalRow, "decidedAt" | "status">): string 
   return new Date(Date.parse(row.decidedAt) + TOOL_APPROVAL_LIMITS.grantUseMs).toISOString();
 }
 
-function parseArgs(t: ToolCallRow): Record<string, unknown> {
+/** The stored canonical arguments as an object (they are always one: `approvalForCall` stores only objects). */
+export function parseArgs(t: Pick<ToolCallRow, "argumentsCanonical">): Record<string, unknown> {
   const v: unknown = JSON.parse(t.argumentsCanonical);
   return v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 }
 
-export function createToolCallKind(): ApprovalKind {
-  return {
+/** An HTTP call's method and host, for its title (the host is the stored target; never a path or query). */
+export function httpParts(t: Pick<ToolCallRow, "argumentsCanonical" | "target">): {
+  method: string | null;
+  host: string | null;
+} {
+  const args = parseArgs(t);
+  const method = typeof args.method === "string" ? args.method : null;
+  let host = t.target;
+  if (!host && typeof args.url === "string") {
+    try {
+      host = new URL(args.url).hostname || null;
+    } catch {
+      host = null;
+    }
+  }
+  return { method, host };
+}
+
+/** The exact title of the stored call (the review, the inbox row and an exact card). */
+export async function titleOf(tx: Tx, t: ToolCallRow, source?: SourceInfo): Promise<string> {
+  const s = source ?? (await sourceOf(tx, t));
+  return toolCallTitle({ tool: t.tool, sourceKind: s.kind, sourceName: s.name, ...httpParts(t) });
+}
+
+/** The conversation a request was asked in: itself, or the channel or DM of a thread conversation. */
+interface AskedIn {
+  /** The conversation whose readers are counted and checked (a thread is judged by its channel or DM). */
+  judgedId: string;
+  kind: string;
+  name: string | null;
+  /** The card's permalink pieces. */
+  route: { kind: string; conversationId: string; parentId: string | null; rootMessageId: string | null };
+}
+
+async function askedIn(tx: Tx, t: ToolCallRow): Promise<AskedIn | null> {
+  const [c] = await tx
+    .select({
+      id: conversations.id,
+      kind: conversations.kind,
+      name: conversations.name,
+      parent: conversations.parentConversationId,
+      root: conversations.rootMessageId,
+    })
+    .from(conversations)
+    .where(eq(conversations.id, t.conversationId))
+    .limit(1);
+  if (!c) return null;
+  const route = { kind: c.kind, conversationId: c.id, parentId: c.parent, rootMessageId: c.root };
+  if (c.kind === "thread" && c.parent) {
+    const [p] = await tx
+      .select({ id: conversations.id, name: conversations.name })
+      .from(conversations)
+      .where(eq(conversations.id, c.parent))
+      .limit(1);
+    return { judgedId: p?.id ?? c.id, kind: "thread", name: p?.name ?? null, route };
+  }
+  return { judgedId: c.id, kind: c.kind, name: c.name, route };
+}
+
+function originOf(a: AskedIn | null, threaded: boolean): ApprovalOrigin {
+  if (!a) return { kind: "channel", name: null };
+  const name = a.name ? a.name.slice(0, 200) : null;
+  switch (a.kind) {
+    case "dm":
+      return { kind: "dm", name: null };
+    case "group":
+      return { kind: "group", name: null };
+    case "ai_chat":
+      return { kind: "ai_chat", name };
+    case "thread":
+      return { kind: "thread", name };
+    default:
+      return { kind: threaded ? "thread" : "channel", name };
+  }
+}
+
+/** "# ops", "DM", "Group DM", "AI chat": the inbox row's "where". */
+function originLabel(o: ApprovalOrigin): string {
+  switch (o.kind) {
+    case "dm":
+      return "DM";
+    case "group":
+      return "Group DM";
+    case "ai_chat":
+      return "AI chat";
+    default:
+      return o.name ? `# ${o.name}`.slice(0, 120) : "Channel";
+  }
+}
+
+/** The card's chat permalink, built the way the web app builds it (`apps/web/lib/permalink.ts`). */
+function messageRouteOf(a: AskedIn, t: ToolCallRow, messageId: string): AgentCardRoute | null {
+  let route: string | null = null;
+  switch (a.route.kind) {
+    case "channel":
+      route = `/chat/${a.route.conversationId}?thread=${t.threadRootMessageId ?? messageId}&m=${messageId}`;
+      break;
+    case "thread":
+      route =
+        a.route.parentId && a.route.rootMessageId
+          ? `/chat/${a.route.parentId}?thread=${a.route.rootMessageId}&m=${messageId}`
+          : null;
+      break;
+    case "dm":
+    case "group":
+      route = `/chat/dm/${a.route.conversationId}?m=${messageId}`;
+      break;
+    case "ai_chat":
+      route = `/chat/ai/${a.route.conversationId}`;
+      break;
+  }
+  return route && isAgentCardRoute(route) ? route : null;
+}
+
+/** The human members of a conversation (ids). */
+export async function humanMembersOf(tx: Tx, conversationId: string): Promise<string[]> {
+  return (
+    await tx
+      .select({ id: conversationMembers.memberId })
+      .from(conversationMembers)
+      .where(
+        and(
+          eq(conversationMembers.conversationId, conversationId),
+          eq(conversationMembers.memberKind, "user"),
+        ),
+      )
+  ).map((r) => r.id);
+}
+
+const SOURCE_ICON = { mcp: "plug", connector: "plug", http: "globe", plugin: "package" } as const;
+
+export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
+  const access = createConversationAccess(deps.core);
+
+  /** How many people read the conversation now, each decided by the chat's own access rule (the resolver). */
+  async function readersOf(tx: Tx, a: AskedIn): Promise<number> {
+    const narrow = a.kind === "dm" || a.kind === "group";
+    const candidates = narrow
+      ? await humanMembersOf(tx, a.judgedId)
+      : (
+          await tx.select({ id: orgMembers.userId }).from(orgMembers).where(isNull(orgMembers.deactivatedAt))
+        ).map((r) => r.id);
+    let n = 0;
+    for (const id of candidates) if (await access.isReadable(tx, id, a.judgedId)) n += 1;
+    return n;
+  }
+
+  const kind: ApprovalKind = {
     kind: TOOL_CALL_KIND,
     mode: "grant",
     resourceType: TOOL_CALL_RESOURCE,
@@ -156,42 +424,87 @@ export function createToolCallKind(): ApprovalKind {
       const t = await loadToolCall(tx, row);
       if (!t) return false;
       const rule = await currentRule(tx, t);
-      if (!rule || rule.approverKind === "requester") return deciderUserId === t.requestedForUserId;
-      return false;
+      const facts = await loadPrincipalFacts(tx, { kind: "user", userId: deciderUserId });
+      return holdsRight(facts, rule, await ruleUnit(tx, rule), t.requestedForUserId);
     },
 
     async audience(tx, row) {
       const t = await loadToolCall(tx, row);
-      return t ? [t.requestedForUserId] : [];
+      if (!t) return [];
+      const rule = await currentRule(tx, t);
+      const deciders = await decidersOf(tx, t, rule, await ruleUnit(tx, rule));
+      return [...new Set([t.requestedForUserId, ...deciders])];
     },
 
-    async view(tx, row) {
+    // A bot deleted since it asked (its stored actions go with it), or a stored action gone: never usable again.
+    async gone(tx, row) {
+      const t = await loadToolCall(tx, row);
+      if (!t) return "action_gone";
+      const [bot] = await tx
+        .select({ deletedAt: agents.deletedAt })
+        .from(agents)
+        .where(eq(agents.id, t.agentId))
+        .limit(1);
+      return !bot || bot.deletedAt !== null ? "bot_deleted" : null;
+    },
+
+    async view(tx, row, viewerUserId) {
       const t = await loadToolCall(tx, row);
       if (!t) return { type: "fields", title: "This action no longer exists.", fields: [] };
       const source = await sourceOf(tx, t);
-      const preview = orderPreview(parseArgs(t));
-      const requesterName = (await memberName(tx, t.requestedForUserId)) ?? "Former member";
+      const args = parseArgs(t);
+      const preview = orderPreview(args);
+      const all = argumentsDisplay(args);
+      const rule = await currentRule(tx, t);
+      const unit = await ruleUnit(tx, rule);
+      const deciders = await decidersOf(tx, t, rule, unit);
+      const a = await askedIn(tx, t);
+      const canManage = rule
+        ? (
+            await deps.perms.decide(
+              tx,
+              { kind: "user", userId: viewerUserId },
+              "tool_approval.manage",
+              unit ? unitResource(unit) : orgResource(),
+            )
+          ).allowed
+        : false;
+      const readsCard = !!a && !!row.cardMessageId && (await access.isReadable(tx, viewerUserId, a.judgedId));
       const view: ToolCallApprovalView = {
         type: "tool_call",
-        title: toolCallTitle({ tool: t.tool, sourceKind: source.kind, sourceName: source.name }),
+        title: await titleOf(tx, t, source),
         tool: t.tool,
         source,
         target: t.target,
         preview: preview.fields,
-        truncated: preview.truncated,
-        argumentsJson: prettyCanonicalJson(JSON.parse(t.argumentsCanonical)),
-        argumentsBytes: Buffer.byteLength(canonicalJson(JSON.parse(t.argumentsCanonical)), "utf8"),
-        notices: preview.notices,
+        truncated: preview.truncated || all.cut,
+        argumentsJson: all.json,
+        argumentsBytes: Buffer.byteLength(canonicalJson(args), "utf8"),
+        notices: {
+          hiddenCharacters: preview.notices.hiddenCharacters || all.hidden,
+          maskedSecret: preview.notices.maskedSecret || all.masked,
+        },
         tainted: t.tainted,
         agent: { id: t.agentId, displayName: await agentName(tx, t.agentId) },
-        requestedFor: { id: t.requestedForUserId, displayName: requesterName },
-        approverLabel: await waitingForOf(tx, t, await currentRule(tx, t)),
-        policy: null,
+        requestedFor: {
+          id: t.requestedForUserId,
+          displayName: (await memberName(tx, t.requestedForUserId)) ?? "Former member",
+        },
+        approverLabel: await waitingForOf(tx, t, rule),
+        policy: rule
+          ? {
+              scopeUnitId: rule.scopeUnitId,
+              scopeLabel: (unit?.name ?? ORGANIZATION_LABEL).slice(0, 120),
+              mode: rule.mode,
+              pattern: rule.pattern,
+              viewerCanManage: canManage,
+            }
+          : null,
         audience: {
-          origin: { kind: "dm", name: null },
-          conversationReaders: 1,
-          detailReaders: 1,
-          messageRoute: null,
+          origin: originOf(a, t.threadRootMessageId !== null),
+          conversationReaders: a ? await readersOf(tx, a) : 0,
+          detailReaders: new Set([t.requestedForUserId, ...deciders]).size,
+          messageRoute: readsCard && a && row.cardMessageId ? messageRouteOf(a, t, row.cardMessageId) : null,
         },
         useBy: useByOf(row),
         usedAt: row.consumedAt ? new Date(row.consumedAt).toISOString() : null,
@@ -199,12 +512,59 @@ export function createToolCallKind(): ApprovalKind {
       return view;
     },
 
+    async headline(tx, row): Promise<ApprovalHeadline> {
+      const t = await loadToolCall(tx, row);
+      const bot = t ? await agentName(tx, t.agentId) : "Deleted bot";
+      const person = t ? ((await memberName(tx, t.requestedForUserId)) ?? "Former member") : "Former member";
+      const requester = `${bot} for ${person}`.slice(0, 200);
+      if (!t) return { title: "This action no longer exists.", context: null, requester, tags: [] };
+      const source = await sourceOf(tx, t);
+      const origin = originOf(await askedIn(tx, t), t.threadRootMessageId !== null);
+      return {
+        title: await titleOf(tx, t, source),
+        context: originLabel(origin),
+        requester,
+        tags: t.tainted ? [{ label: "Outside content", tone: "warning" }] : [],
+        agent: { id: t.agentId, displayName: bot.slice(0, 200) },
+        origin,
+        chips: [
+          { kind: "source", label: source.name.slice(0, 80), icon: SOURCE_ICON[source.kind] },
+          ...(t.tainted ? [{ kind: "tainted" as const, label: "Outside content" }] : []),
+        ],
+        useBy: useByOf(row),
+      };
+    },
+
     async card(tx, row) {
       const t = await loadToolCall(tx, row);
       if (!t) throw new Error("tool call approval without its stored action");
-      return composeToolCallCard(tx, row, t);
+      return composeToolCallCard(tx, row, t, await waitingForOf(tx, t, await currentRule(tx, t)));
+    },
+
+    async link(tx, row) {
+      const t = await loadToolCall(tx, row);
+      if (!t) return { display: "summary", useBy: useByOf(row), waitingFor: null, actionFields: 2 };
+      const d = await cardDisplayOf(tx, t);
+      return {
+        display: d.display,
+        useBy: useByOf(row),
+        waitingFor: await waitingForOf(tx, t, await currentRule(tx, t)),
+        actionFields: d.actionFields,
+      };
+    },
+
+    async cardTurn(tx, row) {
+      const t = await loadToolCall(tx, row);
+      if (!t) return null;
+      const useBy = useByOf(row);
+      return {
+        ...(row.status === "approved" && useBy
+          ? { grant: { tool: t.tool, arguments: t.argumentsCanonical, useBy } }
+          : {}),
+        // The request turn's taint, stored under its lock: the re-run starts tainted (D-04, APPROVE-04).
+        sourceTainted: t.tainted,
+      };
     },
   };
+  return kind;
 }
-
-export { agentName, parseArgs };
