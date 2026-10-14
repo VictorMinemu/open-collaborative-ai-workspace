@@ -5,7 +5,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createAuditService } from "../../audit";
 import { loadPrincipalFacts, loadPrincipalFactsMany, loadRules } from "./facts";
-import { memoryResource } from "./policy";
+import { agentTemplateResource, memoryResource, orgResource, unitResource } from "./policy";
 import { decide, type PrincipalFacts } from "./resolve";
 import { createPermissionService } from "./service";
 
@@ -385,5 +385,132 @@ describe("batch facts and usersAllowed (Phase 07.2: reader counts and deciders)"
     expect(await readers("hr-public/pay.md")).toEqual([ada, amy, dan, ali].sort());
     // Organization G's memory.* deny for everyone never applied to F (cross-tenant).
     expect(await readers("MEMORY.md")).toEqual([ada, amy, dan, ali].sort());
+  });
+});
+
+describe("unit keys and unit templates through the service (Phase 07.4, N5): rows → facts → resolver", () => {
+  // Organization K: department D ⊃ teams A (⊃ A1) and B. Organization L holds a stranger admin.
+  const K = randomUUID();
+  const L = randomUUID();
+  const D_ = randomUUID();
+  const A_ = randomUUID();
+  const A1 = randomUUID();
+  const B_ = randomUUID();
+  const kim = randomUUID(); // admin, no unit
+  const ann = randomUUID(); // standard, member of A
+  const sub = randomUUID(); // standard, member of A1 (below A)
+  const dee = randomUUID(); // standard, lead of D (on A's path)
+  const bea = randomUUID(); // standard, member of B (outsider)
+  const nil = randomUUID(); // standard, no unit (outsider)
+  const lou = randomUUID(); // admin of organization L only
+  const withK = <R>(fn: (tx: Tx) => Promise<R>) => db.withTenant({ organizationId: K, userId: null }, fn);
+  const perms = () => createPermissionService({ db, audit: createAuditService() });
+  const unitA = () => unitResource({ id: A_, path: [D_, A_] });
+
+  beforeAll(async () => {
+    await seedOrg(K);
+    await seedOrg(L);
+    for (const [id, role] of [
+      [kim, "admin"],
+      [ann, "standard"],
+      [sub, "standard"],
+      [dee, "standard"],
+      [bea, "standard"],
+      [nil, "standard"],
+    ] as const) {
+      await seedUser(K, id, role);
+    }
+    await seedUser(L, lou, "admin");
+    await q(
+      `insert into app.org_units (id, organization_id, kind, name, path) values
+         ($1, $5, 'department', 'Dept', ARRAY[$1]::uuid[]),
+         ($2, $5, 'team', 'Team A', ARRAY[$1, $2]::uuid[]),
+         ($3, $5, 'project', 'Project A1', ARRAY[$1, $2, $3]::uuid[]),
+         ($4, $5, 'team', 'Team B', ARRAY[$1, $4]::uuid[])`,
+      [D_, A_, A1, B_, K],
+    );
+    await q(
+      `insert into app.unit_memberships (organization_id, unit_id, user_id, role) values
+         ($1, $2, $3, 'member'), ($1, $4, $5, 'member'), ($1, $6, $7, 'lead'), ($1, $8, $9, 'member')`,
+      [K, A_, ann, A1, sub, D_, dee, B_, bea],
+    );
+  });
+
+  const use = (userId: string) =>
+    withK((tx) => perms().decide(tx, { kind: "user", userId }, "vault.use", unitA()));
+
+  it("decide(vault.use, unit key): outsiders are denied; a member, a member below, a lead on the path and an admin are allowed", async () => {
+    expect(await use(bea)).toEqual({
+      allowed: false,
+      denial: { permission: "vault.use", layer: "resource", reason: "unit_key" },
+    });
+    expect((await use(nil)).allowed).toBe(false);
+    for (const id of [ann, sub, dee, kim]) expect((await use(id)).allowed, id).toBe(true);
+    // Organization keys: every member.
+    for (const id of [ann, bea, nil, kim]) {
+      const d = await withK((tx) =>
+        perms().decide(tx, { kind: "user", userId: id }, "vault.use", orgResource()),
+      );
+      expect(d.allowed, id).toBe(true);
+    }
+  });
+
+  it("an agent acting for an outsider gets the outsider's answer", async () => {
+    const agentId = randomUUID();
+    await q(
+      `insert into app.agents (id, organization_id, name, username, instructions, model_provider, model_id, status)
+       values ($1, $2, 'Keys', $3, 'x', 'mock', 'mock-1', 'ready')`,
+      [agentId, K, `keys-${agentId.slice(0, 8)}`],
+    );
+    const as = (userId: string) =>
+      withK((tx) =>
+        perms().decide(tx, { kind: "agent", agentId, onBehalfOfUserId: userId }, "vault.use", unitA()),
+      );
+    expect((await as(bea)).denial).toMatchObject({ reason: "unit_key" });
+    expect((await as(ann)).allowed).toBe(true);
+  });
+
+  it("usersAllowed(vault.use) on the unit key: exactly the audience; another organization's admin never counts", async () => {
+    const readers = await withK((tx) =>
+      perms().usersAllowed(tx, {
+        candidates: [ann, sub, dee, kim, bea, nil, lou],
+        permission: "vault.use",
+        resourceFor: unitA,
+      }),
+    );
+    expect(readers).toEqual([ann, sub, dee, kim].sort());
+    // Decided in K, L's admin is not a member; decided in L, K's unit does not exist and L's admin holds nothing of K.
+    expect((await use(lou)).allowed).toBe(false);
+    const fromL = await db.withTenant({ organizationId: L, userId: null }, (tx) =>
+      perms().decide(tx, { kind: "user", userId: ann }, "vault.use", unitA()),
+    );
+    expect(fromL.allowed).toBe(false);
+  });
+
+  it("an explicit deny still wins for a member of the unit", async () => {
+    const ruleId = randomUUID();
+    await q(
+      `insert into app.permission_rules (id, organization_id, scope_unit_id, subject_kind, subject_id, permission, effect)
+       values ($1, $2, $3, 'user', $4, 'vault.use', 'deny')`,
+      [ruleId, K, A_, ann],
+    );
+    try {
+      expect((await use(ann)).denial).toMatchObject({ reason: "denied_by_rule", ruleId });
+      expect((await use(sub)).allowed).toBe(true);
+    } finally {
+      await q("delete from app.permission_rules where id = $1", [ruleId]);
+    }
+  });
+
+  it("template visibility: unit.read on a unit template is the unit audience; an organization template is everyone's", async () => {
+    const sees = (userId: string, unit: { id: string; path: string[] } | null) =>
+      withK((tx) => perms().decide(tx, { kind: "user", userId }, "unit.read", agentTemplateResource(unit)));
+    const tplA = { id: A_, path: [D_, A_] };
+    expect((await sees(bea, tplA)).denial).toMatchObject({ reason: "unit_template" });
+    expect((await sees(nil, tplA)).allowed).toBe(false);
+    expect((await sees(lou, tplA)).allowed).toBe(false);
+    for (const id of [ann, sub, dee, kim]) expect((await sees(id, tplA)).allowed, id).toBe(true);
+    for (const id of [ann, bea, nil, kim]) expect((await sees(id, null)).allowed, id).toBe(true);
+    expect((await sees(lou, null)).allowed).toBe(false);
   });
 });

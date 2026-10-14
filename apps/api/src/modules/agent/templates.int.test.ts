@@ -383,6 +383,42 @@ describe("visibility: the template's unit subtree (org templates: everyone); nob
   });
 });
 
+describe("visibility is the resolver's (07.4 gap N5): unit.read on the template, unit-audience precondition", () => {
+  it("Sam (a Backend member) sees it; a deny on unit.read scoped to Backend for Sam hides it like a missing one", async () => {
+    const seen = async () =>
+      ((await ok(sam.request("GET", "/api/v1/agent-templates"))).templates as Json[]).map((t) => t.id);
+    expect(await seen()).toContain(templateId);
+    const rule = await ok(
+      admin.request("POST", "/api/v1/permission-rules", {
+        scopeUnitId: backend,
+        subjectKind: "user",
+        subjectId: samId,
+        permission: "unit.read",
+        effect: "deny",
+      }),
+    );
+    try {
+      expect(await seen()).not.toContain(templateId);
+      const hidden = await fails(sam.request("GET", `/api/v1/agent-templates/${templateId}/preview`), 404);
+      expect(hidden).toEqual(
+        await fails(sam.request("GET", `/api/v1/agent-templates/${MISSING}/preview`), 404),
+      );
+      // The deny is Sam's alone: Jo still sees the organization template.
+      expect(
+        ((await ok(jo.request("GET", "/api/v1/agent-templates"))).templates as Json[]).map((t) => t.id),
+      ).toContain(orgTemplateId);
+      // The lead still manages (and so sees) it.
+      const riley_ = ((await ok(riley.request("GET", "/api/v1/agent-templates"))).templates as Json[]).map(
+        (t) => t.id,
+      );
+      expect(riley_).toContain(templateId);
+    } finally {
+      await ok(admin.request("DELETE", `/api/v1/permission-rules/${rule.id}`));
+    }
+    expect(await seen()).toContain(templateId);
+  });
+});
+
 describe("management: agent_template.manage on the unit (leads, admins) or the organization (admins)", () => {
   it("a standard member cannot create; the Backend lead cannot create for Frontend or the organization", async () => {
     await fails(

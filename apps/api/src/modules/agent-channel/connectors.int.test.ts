@@ -699,6 +699,7 @@ describe("unit keys: only where every reader is inside the unit; organization ke
   let orgKey: Json;
   let salesRoom = "";
   let general = "";
+  let salesUnit = "";
   const kcUrl = () => `http://fake-mcp:${s.fakePort}/kc/whoami`;
   const httpCall = (ev: Json, handle: string) =>
     cell("/http-requests", { eventId: ev.eventId, agentId: scoutId, handle, method: "GET", url: kcUrl() });
@@ -713,6 +714,7 @@ describe("unit keys: only where every reader is inside the unit; organization ke
         s.victor.request("POST", "/api/v1/units", { kind: "department", name: "Sales", parentId: null }),
       )
     ).id as string;
+    salesUnit = sales;
     await ok(s.victor.request("POST", `/api/v1/units/${sales}/members`, { userId: s.samId }));
     const key = (name: string, unitId: string | null) =>
       ok(
@@ -770,6 +772,32 @@ describe("unit keys: only where every reader is inside the unit; organization ke
     expect((await httpCall(ev, orgKey.handle)).status).toBe(200);
     const refused = (await auditRows(s, s.orgA, ["bot.tool_call"])).at(-2);
     expect(refused?.metadata).toMatchObject({ reason: "unit_audience", sourceId: unitKey.id });
+  });
+
+  it("every reader is decided by the resolver (N5): a deny on vault.use in Sales for one reader withholds the key there", async () => {
+    // Víctor reads #sales-room and is in Sales' audience (an admin); an explicit deny on him removes him from it.
+    const rule = await ok(
+      s.victor.request("POST", "/api/v1/permission-rules", {
+        scopeUnitId: salesUnit,
+        subjectKind: "user",
+        subjectId: s.victorId,
+        permission: "vault.use",
+        effect: "deny",
+      }),
+    );
+    try {
+      const ev = await turnOf(s.sam, salesRoom, "@scout check the ERP", true);
+      const keys = await listKeys(ev);
+      expect(keys).not.toContain(unitKey.handle);
+      expect(keys).toContain(orgKey.handle);
+      const r = await httpCall(ev, unitKey.handle);
+      expect(r.status).toBe(409);
+      expect(codeOf(r)).toBe("unit_audience");
+    } finally {
+      await ok(s.victor.request("DELETE", `/api/v1/permission-rules/${rule.id}`));
+    }
+    const ev = await turnOf(s.sam, salesRoom, "@scout check the ERP", true);
+    expect((await httpCall(ev, unitKey.handle)).status).toBe(200);
   });
 
   it("an outsider joining the private channel mid-turn: the next call is refused unit_audience", async () => {

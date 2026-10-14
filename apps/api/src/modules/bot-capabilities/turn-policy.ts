@@ -357,12 +357,13 @@ async function computeTurn(
     allowed.add(toolKey(t));
   }
 
-  // Keychain (07.4-11, D-04, D-07): the keys this bot may use for this human (grant ∩ owner ∩ unit audience ∩
-  // `vault.use`). The tx's user must be the turn's human: personal keys are invisible to any other session (owner-only
-  // RLS), so a caller without it fails closed (personal keys absent), never with another member's.
-  // Personal keys are the member's own account (the audience rule above). A unit key is used only where every reader of
-  // the conversation is in that unit's audience (07.4-12, WINDOWS #191: the rule unit memory follows); organization keys
-  // serve every member. Without a conversation the readers are unknown: unit keys fail closed.
+  // Keychain (07.4-11, D-04, D-07): the keys this bot may use for this human (grant ∩ owner ∩ `vault.use`, the unit
+  // audience being the resolver's unit-key precondition). The tx's user must be the turn's human: personal keys are
+  // invisible to any other session (owner-only RLS), so a caller without it fails closed (personal keys absent), never
+  // with another member's. Personal keys are the member's own account (the audience rule above). A unit key is used only
+  // where the resolver allows `vault.use` on its unit to every reader of the conversation (07.4-12, WINDOWS #191: the
+  // rule unit memory follows); organization keys serve every member. Without a conversation the readers are unknown:
+  // unit keys fail closed.
   const usable: EffectiveVaultItem[] = [];
   const memberAccount: EffectiveVaultItem[] = [];
   const unitAudience: EffectiveVaultItem[] = [];
@@ -373,7 +374,7 @@ async function computeTurn(
   };
   for (const key of await effectiveVaultItems(tx, perms, { agentId: row.id, humanUserId: p.humanUserId })) {
     if (key.scope === "unit" && key.unitId !== null) {
-      if (await unitAudienceAllows(tx, key.unitId, await readersHere())) usable.push(key);
+      if (await unitAudienceAllows(tx, perms, key.unitId, await readersHere())) usable.push(key);
       else unitAudience.push(key);
       continue;
     }
