@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 122
+open_count: 124
 waived_count: 4
 fixed_count: 80
-total_count: 206
-last_updated: 2026-10-14T15:32:47.075Z
+total_count: 208
+last_updated: 2026-10-14T15:40:25.495Z
 ---
 
 # Broken Windows Ledger
@@ -221,6 +221,8 @@ last_updated: 2026-10-14T15:32:47.075Z
 | 204 | 07.5 | deviation | apps/api/src/modules/approval |  | A server_apply decision via /approvals by someone who cannot read the conversation still starts (and meters) a bot turn for that decider (bot reply is refused); an unused grant keeps a running card forever; the pending total stops at 1000 scanned rows | open |  | 2026-10-14T15:04:59.297Z |  |
 | 205 | 07.5 | deviation | apps/api/src/modules/work-session/routes.ts |  | The HTTP route's 'lower to the default mode' is dead code: Zod defaults permissionMode to 'default', so a member limited to plan who starts a session without picking a mode gets 403 device_grant instead of a plan session (only proposals lower) | open |  | 2026-10-14T15:32:46.937Z |  |
 | 206 | 07.5 | deviation | packages/contracts/src/sensitive-data.test.ts |  | The linear-time ratio test (<8x) failed once at 10.42x with load average 18 (parallel executors); consider a looser ratio or more samples | open |  | 2026-10-14T15:32:47.075Z |  |
+| 207 | 07.5 | deviation | apps/api/src/modules/tool-approval |  | DECIDED (fix in gate): deleting a unit cascades its tool approval policies with no tool_approval_policy.deleted audit (principle 12); answer 409 unit_has_policies as for keys and templates | open |  | 2026-10-14T15:40:25.353Z |  |
+| 208 | 07.5 | deviation | apps/api/src/modules/tool-approval |  | History query has no audit_events index on (action, scopeUnitId); silent caps: /access 500 units, catalog 200 tools/group and 100 groups; a 'users' rule whose people are gone must count as no approver in 07.5-07 canDecide | open |  | 2026-10-14T15:40:25.495Z |  |
 
 ````json
 [
@@ -2694,6 +2696,30 @@ last_updated: 2026-10-14T15:32:47.075Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-14T15:32:47.075Z",
+    "resolved_at": null
+  },
+  {
+    "id": 207,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "apps/api/src/modules/tool-approval",
+    "line": null,
+    "description": "DECIDED (fix in gate): deleting a unit cascades its tool approval policies with no tool_approval_policy.deleted audit (principle 12); answer 409 unit_has_policies as for keys and templates",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T15:40:25.353Z",
+    "resolved_at": null
+  },
+  {
+    "id": 208,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "apps/api/src/modules/tool-approval",
+    "line": null,
+    "description": "History query has no audit_events index on (action, scopeUnitId); silent caps: /access 500 units, catalog 200 tools/group and 100 groups; a 'users' rule whose people are gone must count as no approver in 07.5-07 canDecide",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T15:40:25.495Z",
     "resolved_at": null
   }
 ]
