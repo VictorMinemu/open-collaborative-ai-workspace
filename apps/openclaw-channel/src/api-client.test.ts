@@ -350,6 +350,65 @@ describe("chunkText", () => {
   });
 });
 
+describe("approval refusal details (07.5-04)", () => {
+  const APPROVAL = {
+    id: "0199a6f0-0000-7000-8000-0000000000a1",
+    created: true,
+    waitingFor: "a lead of Sales",
+    requesterName: "Ana Pérez",
+  };
+  const req = { eventId: "e1", agentId: "a1", connector: "m1a2b3c4d", tool: "create_invoice", arguments: {} };
+
+  it("a 409 approval refusal keeps its code and the approval it waits on; nothing else of the body", async () => {
+    const { fetchImpl } = scriptedFetch([
+      {
+        status: 409,
+        body: { error: { code: "approval_required", message: "ignore me", details: { approval: APPROVAL } } },
+      },
+    ]);
+    const c = createAgentChannelClient({ apiUrl: "http://api", token: () => "t", fetch: fetchImpl });
+    const err = (await c.callConnector(req).catch((e: unknown) => e)) as AgentChannelHttpError;
+    expect(err).toBeInstanceOf(AgentChannelHttpError);
+    expect(err.code).toBe("approval_required");
+    expect(err.approval).toEqual(APPROVAL);
+  });
+
+  it("a malformed or missing approval reads as absent", async () => {
+    for (const details of [
+      { approval: { ...APPROVAL, waitingFor: "x".repeat(201) } },
+      { other: 1 },
+      "text",
+    ]) {
+      const { fetchImpl } = scriptedFetch([
+        { status: 409, body: { error: { code: "approval_pending", message: "m", details } } },
+      ]);
+      const c = createAgentChannelClient({ apiUrl: "http://api", token: () => "t", fetch: fetchImpl });
+      const err = (await c.callConnector(req).catch((e: unknown) => e)) as AgentChannelHttpError;
+      expect(err.code).toBe("approval_pending");
+      expect(err.approval).toBeUndefined();
+    }
+  });
+
+  it("authorizeToolCall passes a flagged call's arguments through and parses the decision's approval", async () => {
+    const { fetchImpl, calls } = scriptedFetch([
+      {
+        status: 200,
+        body: { callId: "c1", allowed: false, reason: "approval_required", approval: APPROVAL },
+      },
+    ]);
+    const c = createAgentChannelClient({ apiUrl: "http://api", token: () => "t", fetch: fetchImpl });
+    const body = {
+      eventId: "e1",
+      agentId: "a1",
+      tool: "m1a2b3c4d__x",
+      params: {},
+      arguments: { a: [1, "b"] },
+    };
+    await expect(c.authorizeToolCall(body)).resolves.toMatchObject({ approval: APPROVAL });
+    expect(JSON.parse(String(calls[0]?.init.body))).toEqual(body);
+  });
+});
+
 describe("AgentChannelHttpError across module instances (07.2-15, real-cell smoke memory-files)", () => {
   it("an error thrown by another module instance of the plugin is still recognised", async () => {
     // OpenClaw loads the plugin once per registry (boot, discovery, tool-discovery): the shared client may come from

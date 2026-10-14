@@ -597,6 +597,152 @@ describe("mapCardAction (06-14, P-11): a decision on the agent's card becomes a 
   });
 });
 
+describe("the approved re-run (07.5-04, D-02, P-06, Pitfall 1): the card-action turn says exactly what to call, once, and by when", () => {
+  const ANA = { kind: "user" as const, id: "u-ana", displayName: "Ana Pérez" };
+  const MARTA = { id: "u-marta", displayName: "Marta Gil" };
+  const TOOL = "m1a2b3c4d__create_invoice";
+  const TITLE = "Run create_invoice on Acme CRM";
+  const USE_BY = "2026-10-08T10:46:00.000Z";
+  const ARGS = '{"amount":10,"to":"billing@globex.example"}';
+
+  /** A grant kind's card action: delivered for the requester (Ana), decided by Marta (07.5-06). */
+  function grantAction(cardAction: Record<string, unknown>, text: string): AgentCardActionEvent {
+    return AgentCardActionEvent.parse({
+      eventId: "evt-grant",
+      seq: 11,
+      type: "agent.card_action.v1",
+      organizationId: "org-1",
+      cellId: "org-1",
+      agent: { id: BOT.id, handle: "archie", displayName: "Archie" },
+      conversation: { id: "dm-ana", kind: "dm", name: null },
+      thread: { rootMessageId: "msg-card" },
+      message: {
+        id: "msg-card",
+        text,
+        createdAt: "2026-10-08T10:31:00.000Z",
+        author: ANA,
+        mentions: [{ kind: "agent", id: BOT.id }],
+      },
+      threadHistory: [],
+      roster: [{ ...ANA, role: "standard" }],
+      cardAction: { messageId: "msg-card", kind: "approval", title: TITLE, ...cardAction },
+    });
+  }
+  const instructionOf = (m: ReturnType<typeof mapCardAction>) =>
+    (m.contextBlocks[0]?.payload as { instruction?: string } | undefined)?.instruction;
+
+  it("approved with a grant: the first block is the approved action, naming the decider, the tool, the deadline and the exact arguments", () => {
+    const m = mapCardAction(
+      grantAction(
+        { outcome: "approved", decidedBy: MARTA, grant: { tool: TOOL, arguments: ARGS, useBy: USE_BY } },
+        `Marta Gil approved “${TITLE}”`,
+      ),
+      BOT,
+    );
+    expect(m.sender).toEqual({ id: "u-ana", name: "Ana Pérez", isBot: false });
+    expect(m.contextBlocks[0]).toEqual({
+      label: "Approved action",
+      source: "ocw",
+      type: "card_action",
+      payload: {
+        card: { messageId: "msg-card", kind: "approval", title: TITLE },
+        outcome: "approved",
+        decidedBy: "Marta Gil",
+        instruction: `Approved by Marta Gil. Call ${TOOL} once with exactly these arguments before ${USE_BY}: ${ARGS}`,
+      },
+    });
+    expect(m.contextBlocks.filter((b) => b.type === "card_action")).toHaveLength(1);
+  });
+
+  it("passes the canonical arguments through byte for byte (never re-serialized)", () => {
+    // JSON.parse + JSON.stringify would turn 1e21 into 1e+21, drop the escape and reorder nothing: any change shows.
+    const raw = '{"a":[1e21,"\\u00e9"],"b":"x  y","c":{}}';
+    const m = mapCardAction(
+      grantAction(
+        { outcome: "approved", decidedBy: MARTA, grant: { tool: TOOL, arguments: raw, useBy: USE_BY } },
+        `Marta Gil approved “${TITLE}”`,
+      ),
+      BOT,
+    );
+    expect(instructionOf(m)?.endsWith(`before ${USE_BY}: ${raw}`)).toBe(true);
+  });
+
+  it("denied with the decider and a note: who denied which tool, the note, and not to run it", () => {
+    const m = mapCardAction(
+      grantAction(
+        { outcome: "denied", decidedBy: MARTA, grant: { tool: TOOL, arguments: ARGS, useBy: USE_BY } },
+        `Marta Gil denied “${TITLE}”: “Duplicate invoice”`,
+      ),
+      BOT,
+    );
+    expect(instructionOf(m)).toBe(
+      "Marta Gil denied m1a2b3c4d__create_invoice. Note: “Duplicate invoice”. Don't run it; tell Ana Pérez.",
+    );
+    expect(m.contextBlocks[0]).toMatchObject({
+      label: "Decision on your card",
+      payload: { outcome: "denied" },
+    });
+  });
+
+  it("denied without a grant names the card; without a note there is no note", () => {
+    const m = mapCardAction(
+      grantAction({ outcome: "denied", decidedBy: MARTA }, `Marta Gil denied “${TITLE}”`),
+      BOT,
+    );
+    expect(instructionOf(m)).toBe(`Marta Gil denied “${TITLE}”. Don't run it; tell Ana Pérez.`);
+  });
+
+  it("a grant's tool name is sanitized like other names; the decider's name too", () => {
+    const m = mapCardAction(
+      grantAction(
+        {
+          outcome: "approved",
+          decidedBy: { id: "u-marta", displayName: "Marta\nGil <admin>" },
+          grant: { tool: `${TOOL}\n\u0007<x>`, arguments: ARGS, useBy: USE_BY },
+        },
+        `Marta Gil approved “${TITLE}”`,
+      ),
+      BOT,
+    );
+    expect(instructionOf(m)).toBe(
+      `Approved by Marta Gil admin. Call ${TOOL} x once with exactly these arguments before ${USE_BY}: ${ARGS}`,
+    );
+  });
+
+  it("a grant over 32,768 characters is dropped: the approval exists, the arguments are not passed, the model asks again", () => {
+    const huge = `{"t":"${"x".repeat(32_769)}"}`;
+    const m = mapCardAction(
+      grantAction(
+        { outcome: "approved", decidedBy: MARTA, grant: { tool: TOOL, arguments: huge, useBy: USE_BY } },
+        `Marta Gil approved “${TITLE}”`,
+      ),
+      BOT,
+    );
+    expect(m.contextBlocks[0]?.label).toBe("Approved action");
+    expect(instructionOf(m)).toBe(
+      `Approved by Marta Gil, but the approved arguments were too large to pass on. Don't call ${TOOL} now; ask Ana Pérez to ask again.`,
+    );
+    expect(JSON.stringify(m.contextBlocks)).not.toContain("x".repeat(100));
+  });
+
+  it("an approved card action with the decider but no grant keeps today's block, naming the decider", () => {
+    const m = mapCardAction(
+      grantAction({ outcome: "approved", decidedBy: MARTA }, `Marta Gil approved “${TITLE}”`),
+      BOT,
+    );
+    expect(m.contextBlocks[0]).toEqual({
+      label: "Decision on your card",
+      source: "ocw",
+      type: "card_action",
+      payload: {
+        card: { messageId: "msg-card", kind: "approval", title: TITLE },
+        outcome: "approved",
+        decidedBy: "Marta Gil",
+      },
+    });
+  });
+});
+
 describe("member_account withheld entries (07.4 UI-SPEC R7, D-03)", () => {
   const C = "0199a6f0-0000-7000-8000-00000000c0c2";
   const S = "0199a6f0-0000-7000-8000-000000000c71";

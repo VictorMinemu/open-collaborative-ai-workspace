@@ -6,7 +6,6 @@ import {
   type AgentChannelConnectorList,
   type AgentChannelConnectorListResponse,
   type AgentChannelHttpRequest,
-  type AgentChannelToolRefusal,
   type TurnContext,
 } from "./agent-channel-protocol.js";
 import { type AgentChannelClient, AgentChannelHttpError } from "./api-client.js";
@@ -21,7 +20,7 @@ import {
   UNREACHABLE,
 } from "./connector-tools.js";
 import { openClawAgentIdFor } from "./mention-mapper.js";
-import { createToolGuard } from "./tool-guard.js";
+import { APPROVAL_SENTENCES, createToolGuard } from "./tool-guard.js";
 
 const BOT = "0199a6f0-0000-7000-8000-00000000a001";
 const DM = "0199a6f0-0000-7000-8000-00000000c002";
@@ -401,9 +400,20 @@ describe("ocw_connector_list and ocw_http_request (07.4 D-07, CONN-05)", () => {
   });
 });
 
+/** 07.5-04: the refusals a person's approval answers (each a fixed sentence naming the logical tool). */
+const APPROVAL_CODES = [
+  "approval_required",
+  "approval_pending",
+  "approval_denied",
+  "approval_used",
+  "arguments_too_large",
+  "arguments_invalid",
+  "too_many_pending",
+] as const;
+
 describe("refusals are fixed sentences (CONN-04, D-03, T-07.4-09-04)", () => {
   // Every refusal code the API sends has a case (WINDOWS #191 added unit_audience).
-  const CASES: Array<[number, AgentChannelToolRefusal]> = [
+  const CASES: Array<[number, keyof typeof REFUSAL_SENTENCE]> = [
     [404, "unknown_turn"],
     [409, "not_in_turn"],
     [409, "policy_changed"],
@@ -420,8 +430,10 @@ describe("refusals are fixed sentences (CONN-04, D-03, T-07.4-09-04)", () => {
     [502, "timeout"],
   ];
 
-  it("covers every refusal code of the protocol", () => {
-    expect(CASES.map(([, code]) => code).sort()).toEqual([...AGENT_CHANNEL_TOOL_REFUSALS].sort());
+  it("covers every refusal code of the protocol (07.5's approval codes have their own sentences, below)", () => {
+    expect([...CASES.map(([, code]) => code), ...APPROVAL_CODES].sort()).toEqual(
+      [...AGENT_CHANNEL_TOOL_REFUSALS].sort(),
+    );
   });
 
   it.each(CASES)("%i %s → one fixed sentence, never the API body", async (status, code) => {
@@ -494,5 +506,165 @@ describe("refusals are fixed sentences (CONN-04, D-03, T-07.4-09-04)", () => {
     refused.begin();
     await refused.tool("ocw_connector_call").execute("tc-1", CALL);
     expect(refused.guard.activeTurn(SESSION)?.tainted).toBe(false);
+  });
+});
+
+describe("approval-aware connector tools (07.5-04, D-04)", () => {
+  const INVOICE = "m1a2b3c4d__create_invoice";
+  const FLAGGED = { untrustedOutput: true, sideEffecting: true, approval: "when_tainted" as const };
+  const WRITE = { untrustedOutput: true, sideEffecting: true };
+  const APPROVAL = {
+    id: "0199a6f0-0000-7000-8000-0000000000a1",
+    created: true,
+    waitingFor: "a lead of Sales",
+    requesterName: "Ana Pérez",
+  };
+  const CREATE = { connector: "m1a2b3c4d", tool: "create_invoice", arguments: { amount: 10 } };
+  const POST = { handle: "k_abcdefgh23", method: "POST", url: "https://erp.example/invoices", body: "{}" };
+
+  /** The gate and the three tools over one fake client, as OpenClaw runs them: before_tool_call, then execute. */
+  function approvalSetup(opts: { flagged: boolean; fail?: () => never }) {
+    const calls: AgentChannelConnectorCall[] = [];
+    const requests: AgentChannelHttpRequest[] = [];
+    const client = {
+      callConnector: async (req: AgentChannelConnectorCall) => {
+        calls.push(req);
+        if (opts.fail && req.tool !== "whoami") opts.fail();
+        return { content: `${req.tool}: ok`, truncated: false, isError: false };
+      },
+      httpRequest: async (req: AgentChannelHttpRequest) => {
+        requests.push(req);
+        if (opts.fail) opts.fail();
+        return { status: 201, contentType: null, body: "created", truncated: false, redirectHost: null };
+      },
+    } as unknown as AgentChannelClient;
+    const guard = createToolGuard({ client: () => client });
+    const registered: Registered[] = [];
+    registerConnectorTools(
+      {
+        registerTool: (factory: Registered["factory"], o: { name: string }) =>
+          registered.push({ factory, opts: o }),
+      } as never,
+      { guard, client: () => client },
+    );
+    const ctx = { sessionKey: SESSION, agentId: openClawAgentIdFor(BOT) };
+    const tool = (name: string) => registered.find((r) => r.opts.name === name)?.factory(ctx) as Tool;
+    guard.beginTurn(SESSION, {
+      eventId: "evt-ap",
+      agentId: BOT,
+      conversationId: DM,
+      requesterName: "Ana Pérez",
+      turn: {
+        ...turn(),
+        tools: ["ocw_connector_list", "ocw_connector_call", "ocw_http_request"],
+        toolFlags: {
+          m1a2b3c4d__whoami: READ,
+          [INVOICE]: opts.flagged ? FLAGGED : WRITE,
+          ocw_http_request: opts.flagged ? FLAGGED : WRITE,
+        },
+      },
+      connectorTools: ["m1a2b3c4d__whoami", INVOICE],
+    });
+    let n = 0;
+    /** before_tool_call, then (when not blocked) the tool's execute. */
+    const run = async (name: string, params: Record<string, unknown>) => {
+      const id = `tc-${++n}`;
+      const gate = await guard.beforeToolCall({ toolName: name, params, toolCallId: id }, ctx);
+      if (gate) return { blocked: gate.blockReason };
+      return { text: text(await tool(name).execute(id, params)) };
+    };
+    return { calls, requests, guard, run };
+  }
+
+  it("after taint a flagged logical tool is posted to /connectors/call (the API decides); unflagged it is refused locally", async () => {
+    const flagged = approvalSetup({ flagged: true });
+    expect(await flagged.run("ocw_connector_call", { ...CALL })).toEqual({ text: "whoami: ok" });
+    expect(flagged.guard.activeTurn(SESSION)?.tainted).toBe(true);
+    expect(await flagged.run("ocw_connector_call", CREATE)).toEqual({ text: "create_invoice: ok" });
+    expect(flagged.calls.map((c) => c.tool)).toEqual(["whoami", "create_invoice"]);
+    expect(flagged.calls[1]?.arguments).toEqual({ amount: 10 });
+
+    const plain = approvalSetup({ flagged: false });
+    await plain.run("ocw_connector_call", { ...CALL });
+    expect((await plain.run("ocw_connector_call", CREATE)).blocked).toContain(
+      "read-only after untrusted content",
+    );
+    expect(plain.calls.map((c) => c.tool)).toEqual(["whoami"]);
+  });
+
+  it("ocw_http_request with approval on its own flags behaves the same with /http-requests", async () => {
+    const flagged = approvalSetup({ flagged: true });
+    await flagged.run("ocw_connector_call", { ...CALL });
+    expect(await flagged.run("ocw_http_request", POST)).toEqual({ text: "HTTP 201\ncreated" });
+    expect(flagged.requests).toHaveLength(1);
+    const plain = approvalSetup({ flagged: false });
+    await plain.run("ocw_connector_call", { ...CALL });
+    expect((await plain.run("ocw_http_request", POST)).blocked).toContain(
+      "read-only after untrusted content",
+    );
+    expect(plain.requests).toHaveLength(0);
+  });
+
+  it("a 409 approval_required with details is the approval sentence naming the logical tool, never the body", async () => {
+    const { run } = approvalSetup({
+      flagged: true,
+      fail: () => {
+        throw new AgentChannelHttpError(
+          409,
+          "/connectors/call",
+          `409 ${CANARY}`,
+          "approval_required",
+          APPROVAL,
+        );
+      },
+    });
+    const r = await run("ocw_connector_call", CREATE);
+    expect(r).toEqual({
+      text: "This action needs approval. I posted a card and asked a lead of Sales. Tell Ana Pérez in one short sentence that you are waiting for that approval, without repeating the values. Don't call m1a2b3c4d__create_invoice again now: when it is approved you will get a new message with the exact arguments.",
+    });
+    expect(JSON.stringify(r)).not.toContain(CANARY);
+  });
+
+  it.each(APPROVAL_CODES)(
+    "%s from /connectors/call and /http-requests → its approval sentence",
+    async (code) => {
+      const approval = code === "approval_pending" ? APPROVAL : undefined;
+      const { run } = approvalSetup({
+        flagged: true,
+        fail: () => {
+          throw new AgentChannelHttpError(409, "/x", `409 ${CANARY}`, code, approval);
+        },
+      });
+      const viaConnector = await run("ocw_connector_call", CREATE);
+      expect(viaConnector).toEqual({
+        text: APPROVAL_SENTENCES[code]({
+          tool: INVOICE,
+          waitingFor: approval?.waitingFor,
+          requesterName: "Ana Pérez",
+        }),
+      });
+      const viaHttp = await run("ocw_http_request", POST);
+      expect(viaHttp).toEqual({
+        text: APPROVAL_SENTENCES[code]({
+          tool: "ocw_http_request",
+          waitingFor: approval?.waitingFor,
+          requesterName: "Ana Pérez",
+        }),
+      });
+      expect(JSON.stringify([viaConnector, viaHttp])).not.toContain(CANARY);
+    },
+  );
+
+  it("the approval sentences are the UI contract's", () => {
+    const p = { tool: INVOICE, waitingFor: "a lead of Sales", requesterName: "Ana Pérez" };
+    expect(APPROVAL_SENTENCES.approval_pending(p)).toBe(
+      "This exact action is already waiting for approval in a card. Don't ask again; tell Ana Pérez it is still waiting.",
+    );
+    expect(APPROVAL_SENTENCES.approval_denied(p)).toBe(
+      "A lead of Sales denied this exact action. Don't retry it. Tell Ana Pérez it was denied and ask what to change.",
+    );
+    expect(APPROVAL_SENTENCES.too_many_pending(p)).toBe(
+      "Ana Pérez already has 5 actions waiting for approval from you. Wait for those first.",
+    );
   });
 });
