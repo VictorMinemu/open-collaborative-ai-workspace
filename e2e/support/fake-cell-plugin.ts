@@ -70,8 +70,15 @@ export interface MentionPayload {
     tools: string[];
     memory?: Array<{ id: string; text: string; createdAt: string }>;
     now?: { iso: string; timeZone: string; local: string } | null;
-    /** AI chat deliveries (06-10): tools withheld from this turn and why. */
-    withheld?: Array<{ tool: string; reason: string }>;
+    /**
+     * Tools withheld from this turn and why (06-10). `member_account` (07.4 D-03) names the connector or key whose
+     * account stays private here, so the persona can link to the share page (UI-SPEC R7).
+     */
+    withheld?: Array<{
+      tool: string;
+      reason: string;
+      resource?: { kind: "connector" | "vault_item"; id: string; name: string };
+    }>;
   };
 }
 
@@ -115,6 +122,11 @@ export interface FakeCellOptions {
    * HTTP with the snapshot's headers and POST `/mcp/probe-results`. Unset = probes are ignored.
    */
   hostMap?: Record<string, string>;
+  /**
+   * The calls the simulated persona decides to make for a mention, in addition to the message's own `[[call …]]`
+   * directives (07.4-14: a member asks in plain words, the persona calls `ocw_connector_call`).
+   */
+  toolCallsFor?: (m: MentionPayload) => Array<{ tool: string; args: Record<string, unknown> }>;
 }
 
 /**
@@ -149,6 +161,33 @@ const MEMORY_FILE_DONE: Record<MemoryFileTool, string> = {
   ocw_memory_propose: "proposed",
 };
 const isMemoryFileTool = (name: string): name is MemoryFileTool => Object.hasOwn(MEMORY_FILE_TOOLS, name);
+
+/** The three static connector and keychain tools (07.4-09): self-validated by their own routes, never `/tool-calls`. */
+const CONNECTOR_TOOLS = ["ocw_connector_list", "ocw_connector_call", "ocw_http_request"] as const;
+type ConnectorTool = (typeof CONNECTOR_TOOLS)[number];
+const isConnectorTool = (name: string): name is ConnectorTool =>
+  (CONNECTOR_TOOLS as readonly string[]).includes(name);
+
+/**
+ * The share links a persona gives for tools withheld as `member_account` (UI-SPEC R7, like apps/openclaw-channel's
+ * mention-mapper): one Markdown line per connector or key, `[Allow {name} in {conversation}](/settings/connections?
+ * share=<conversationId>&connector=<id>)` (`&key=<id>` for a personal key). The conversation reads `#name` for a
+ * channel, else its id.
+ */
+export function memberAccountLinks(m: MentionPayload): string[] {
+  const label = m.conversation.name ? `#${m.conversation.name}` : m.conversation.id;
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const w of m.turn?.withheld ?? []) {
+    if (w.reason !== "member_account" || !w.resource || seen.has(w.resource.id)) continue;
+    seen.add(w.resource.id);
+    const param = w.resource.kind === "connector" ? "connector" : "key";
+    out.push(
+      `[Allow ${w.resource.name} in ${label}](/settings/connections?share=${m.conversation.id}&${param}=${w.resource.id})`,
+    );
+  }
+  return out;
+}
 
 /** `[[call <tool> <json>]]` directives in a message (same grammar as infra/fake-model), in order. */
 export function parseCallDirectives(text: string): Array<{ tool: string; args: Record<string, unknown> }> {
@@ -356,12 +395,19 @@ export class FakeCellPlugin {
       if (type === "cell.config.changed" && this.opts.autoAck) await this.ackAll();
       if (type === "agent.mention.v1" && this.opts.autoReply) {
         const m = data as unknown as MentionPayload;
-        const calls = parseCallDirectives(m.message.text);
+        const calls = [...parseCallDirectives(m.message.text), ...(this.opts.toolCallsFor?.(m) ?? [])];
         const body =
           calls.length > 0
             ? (await this.simulateToolCalls(m, calls)).join("\n")
             : (this.opts.replyText ?? identityReply)(m);
-        await this.reply(m, body + turnToolsSuffix(m) + turnContextSuffix(m));
+        const links = memberAccountLinks(m);
+        await this.reply(
+          m,
+          body +
+            (links.length > 0 ? `\n${links.join("\n")}` : "") +
+            turnToolsSuffix(m) +
+            turnContextSuffix(m),
+        );
       }
       if (this.opts.pluginTools && (type === "plugin.install.v1" || type === "plugin.uninstall.v1")) {
         await this.runPluginFlow(type, data);
@@ -385,7 +431,9 @@ export class FakeCellPlugin {
    * a tool is offered only when it (or a name ending in `__<tool>`) is in `turn.tools`; `ocw_memory_save` posts
    * `{eventId, agentId, text}` to `/agent-channel/v1/memories`; `ocw_board_card` calls the board routes itself
    * (`boardCall`, 07.1-13: like memory, never `/tool-calls`); `ocw_memory_list|read|write|propose` call
-   * `/agent-channel/v1/memory/<list|read|write|propose>` (`memoryCall`, 07.2-17); any other tool asks
+   * `/agent-channel/v1/memory/<list|read|write|propose>` (`memoryCall`, 07.2-17); `ocw_connector_list|call` and
+   * `ocw_http_request` call `/agent-channel/v1/connectors/list|call` and `/http-requests` (`connectorCall`, 07.4-14);
+   * any other tool asks
    * `/agent-channel/v1/tool-calls` and, when allowed, reports a result. One line per call: `Tool <offered name>:
    * allowed | denied (<reason>)`, `Tool <name>: saved | created | moved | waiting set | read | listed | written |
    * proposed | refused (<code>) | not offered`.
@@ -398,6 +446,16 @@ export class FakeCellPlugin {
     const offered = m.turn?.tools ?? [];
     let boardCreates = 0;
     for (const call of calls) {
+      if (isConnectorTool(call.tool)) {
+        // The logical connector tool decides `ocw_connector_call` (connectorCall); list and http are offered by name.
+        if (call.tool !== "ocw_connector_call" && !offered.includes(call.tool)) {
+          const w = m.turn?.withheld?.find((x) => x.tool === call.tool);
+          lines.push(`Tool ${call.tool}: ${w ? `refused (${w.reason})` : "not offered"}`);
+          continue;
+        }
+        lines.push(`Tool ${call.tool}: ${await this.connectorCall(m, call.tool, call.args)}`);
+        continue;
+      }
       const name = offered.find((t) => t === call.tool || t.endsWith(`__${call.tool}`));
       if (!name) {
         // Like apps/openclaw-channel's "Tools withheld in this conversation" block (06-10): say why, for whom.
@@ -454,6 +512,60 @@ export class FakeCellPlugin {
       lines.push(`Tool ${name}: allowed`);
     }
     return lines;
+  }
+
+  /** Every connector or keychain route call the simulated tools made, with the status it got (07.4-14). */
+  readonly connectorRequests: Array<{ eventId: string; route: string; status: number; body: unknown }> = [];
+
+  /**
+   * `ocw_connector_list | ocw_connector_call | ocw_http_request` the way apps/openclaw-channel's connector-tools.ts
+   * sends them (07.4-09): only the mention's event and agent ids beside the model's arguments, never a user id or a
+   * credential (the API binds the asker to the stored turn). A connector call whose logical tool `<safe>__<tool>` is not
+   * on the turn is not sent: withheld as `member_account` it reads `refused (member_account)`, else `not offered`.
+   * Answers: list `<n> connectors, <k> keys`; call the API's content (`error: …` when it is an error result); http
+   * `<status> <body>`; any refusal `refused (<code>)`.
+   */
+  private async connectorCall(m: MentionPayload, tool: ConnectorTool, args: Record<string, unknown>) {
+    const turn = { eventId: m.eventId, agentId: m.agent.id };
+    const send = async <T>(route: string, body: Record<string, unknown>) => {
+      const res = await this.request<T & { error?: { code?: string } }>("POST", route, body);
+      this.connectorRequests.push({ eventId: m.eventId, route, status: res.status, body: res.body });
+      return res;
+    };
+    const refused = (res: { status: number; body: { error?: { code?: string } } | null }) =>
+      `refused (${res.body?.error?.code ?? res.status})`;
+    if (tool === "ocw_connector_list") {
+      const res = await send<{ connectors: unknown[]; keys: unknown[] }>("/connectors/list", turn);
+      return res.status === 200
+        ? `${res.body.connectors.length} connectors, ${res.body.keys.length} keys`
+        : refused(res);
+    }
+    if (tool === "ocw_connector_call") {
+      const connector = typeof args.connector === "string" ? args.connector : "";
+      const name = typeof args.tool === "string" ? args.tool : "";
+      const logical = `${connector}__${name}`;
+      if (!(m.turn?.tools ?? []).includes(logical)) {
+        const withheld = m.turn?.withheld?.find((w) => w.tool === logical);
+        return withheld ? `refused (${withheld.reason})` : "not offered";
+      }
+      const res = await send<{ content: string; isError: boolean }>("/connectors/call", {
+        ...turn,
+        connector,
+        tool: name,
+        arguments: args.arguments && typeof args.arguments === "object" ? args.arguments : {},
+      });
+      if (res.status !== 200) return refused(res);
+      return res.body.isError ? `error: ${res.body.content}` : res.body.content;
+    }
+    const res = await send<{ status: number; body: string }>("/http-requests", {
+      ...turn,
+      handle: args.handle,
+      method: args.method,
+      url: args.url,
+      ...(args.headers ? { headers: args.headers } : {}),
+      ...(args.body !== undefined ? { body: args.body } : {}),
+    });
+    return res.status === 200 ? `${res.body.status} ${res.body.body}` : refused(res);
   }
 
   /** Every memory route call the simulated memory tools made, with the status and body it got (07.2-17). */
