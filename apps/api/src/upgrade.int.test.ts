@@ -47,6 +47,14 @@ const OLD_BOTS_PATTERNS = [
   "bot.tool.use",
 ];
 const BEA_ADMIN = "bbbbbbbb-0000-4000-8000-000000000101";
+/** Phase 07.5: a Work Zone session with one prompt and one tool-call ledger row, written at N-1. */
+const N1_DEVICE = "aaaaaaaa-0000-4000-8000-000000000901";
+const N1_PROJECT = "aaaaaaaa-0000-4000-8000-000000000902";
+/** The dump's org A channel: a session only needs some conversation, and the dump's conversation count stays exact. */
+const N1_SESSION_CONV = "aaaaaaaa-0000-4000-8000-000000000201";
+const N1_SESSION = "aaaaaaaa-0000-4000-8000-000000000905";
+const N1_PROMPT = "aaaaaaaa-0000-4000-8000-000000000906";
+const N1_TOOL_CALL = "aaaaaaaa-0000-4000-8000-000000000907";
 const BACKFILL_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
   "../../../packages/db/drizzle/20261014042429_bots_off_connector_vault_backfill/migration.sql",
@@ -215,6 +223,28 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
           "insert into app.permission_rules (organization_id, scope_unit_id, subject_kind, subject_id, permission, effect) values ($1, null, 'everyone', null, $2, 'deny')",
           [ORG_B, permission],
         );
+      // Phase 07.5 (D-03, D-04): the N-1 dump has no Work Zone or tool-call ledger rows; a session with one prompt and
+      // one ledger row written at N-1, which must come out with no proposer and no approval.
+      await seed.query(
+        "insert into app.devices (id, organization_id, owner_user_id, name, platform, token_hash) values ($1, $2, $3, 'laptop', 'darwin', 'upgrade-device-token-hash')",
+        [N1_DEVICE, ORG_A, ADA_ADMIN],
+      );
+      await seed.query(
+        "insert into app.projects (id, organization_id, device_id, local_id, name) values ($1, $2, $3, 'p1', 'repo')",
+        [N1_PROJECT, ORG_A, N1_DEVICE],
+      );
+      await seed.query(
+        "insert into app.work_sessions (id, organization_id, conversation_id, project_id, device_id, title, created_by) values ($1, $2, $3, $4, $5, 'Fix the build', $6)",
+        [N1_SESSION, ORG_A, N1_SESSION_CONV, N1_PROJECT, N1_DEVICE, ADA_ADMIN],
+      );
+      await seed.query(
+        "insert into app.work_prompts (id, organization_id, work_session_id, author_user_id, body, position) values ($1, $2, $3, $4, 'Fix the build', 1)",
+        [N1_PROMPT, ORG_A, N1_SESSION, ADA_ADMIN],
+      );
+      await seed.query(
+        "insert into app.agent_tool_calls (id, organization_id, event_id, agent_id, user_id, tool, source_kind, target, decision, status) values ($1, $2, $3, $4, $5, 'web_search', 'builtin', 'example.test', 'allowed', 'ok')",
+        [N1_TOOL_CALL, ORG_A, "aaaaaaaa-0000-4000-8000-000000000903", HELPER_BOT, MAX_MEMBER],
+      );
     } finally {
       await seed.end();
     }
@@ -404,6 +434,33 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
         }
       } finally {
         await db.close();
+      }
+    });
+
+    it("keeps Work Zone prompts and tool-call ledger rows, with no proposer and no approval, and no approval data (Phase 07.5)", async () => {
+      const c = new pg.Client({ connectionString: urls.migrator });
+      await c.connect();
+      try {
+        const prompts = await c.query(
+          "select id, body, author_user_id, proposed_by_agent_id from app.work_prompts order by id",
+        );
+        expect(prompts.rows).toEqual([
+          { id: N1_PROMPT, body: "Fix the build", author_user_id: ADA_ADMIN, proposed_by_agent_id: null },
+        ]);
+        const calls = await c.query(
+          "select id, tool, decision, approval_id from app.agent_tool_calls order by id",
+        );
+        expect(calls.rows).toEqual([
+          { id: N1_TOOL_CALL, tool: "web_search", decision: "allowed", approval_id: null },
+        ]);
+        const empty = await c.query(
+          `select (select count(*)::int from app.tool_approval_policies) as policies,
+                  (select count(*)::int from app.tool_call_approvals) as approvals,
+                  (select count(*)::int from app.work_zone_proposals) as proposals`,
+        );
+        expect(empty.rows).toEqual([{ policies: 0, approvals: 0, proposals: 0 }]);
+      } finally {
+        await c.end();
       }
     });
 
