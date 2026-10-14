@@ -13,6 +13,7 @@ import { connectorConnections, connectorOAuthClients, mcpServers, mcpServerTools
 import { and, asc, eq, ne } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
+import { markDecided } from "../../authz";
 import { type App, authOf, type Core, tenant } from "../../core";
 import { egressFor } from "../../lib/egress";
 import { conflict, HttpError, notFound } from "../../lib/errors";
@@ -391,7 +392,7 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
       };
       const prepared = await core.db.withTenant(ctx, async (tx) => {
         const server = await perMemberServer(tx, f.serverId);
-        if (!server || server.authMode !== "per_member_oauth") return null;
+        if (server?.authMode !== "per_member_oauth") return null;
         const clientSecret = await clientSecretFor(tx, core, f.serverId, f.client.issuer, f.client.clientId);
         return { server, clientSecret };
       });
@@ -524,10 +525,18 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
     },
   );
 
+  // Withdrawal (CONN-02): a member may always delete their OWN connection, even after `connector.connect` was taken
+  // away (it only reduces access; the ownedAiChat precedent). Another member's row is invisible (RLS), hence 404.
   app.delete(
     "/connectors/:id/connection",
-    { ...member, logLevel: "info", schema: { tags, params: IdParams } },
+    {
+      config: { authz: "user" as const },
+      preHandler: [core.identity.requireUser],
+      logLevel: "info",
+      schema: { tags, params: IdParams },
+    },
     async (req, reply) => {
+      markDecided(req);
       const auth = authOf(req);
       await core.db.withTenant(tenant(req), (tx) => serverIn(tx, req.params.id));
       const done = await disconnect(core, {

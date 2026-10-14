@@ -320,7 +320,7 @@ export async function markNeedsReconnect(core: Core, p: ConnectionKey & { code: 
   await core.db.withTenant({ organizationId: p.organizationId, userId: p.userId }, async (tx) => {
     if (!(await perMemberServer(tx, p.serverId))) return;
     const row = await ownConnection(tx, p.userId, p.serverId, true);
-    if (!row || row.status !== "connected") return;
+    if (row?.status !== "connected") return;
     await markInTx(tx, core, row, p.code);
   });
 }

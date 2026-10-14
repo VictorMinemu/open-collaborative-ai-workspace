@@ -53,6 +53,8 @@ export interface ConnectorsStack {
   samId: string;
   alexId: string;
   eveId: string;
+  /** Resets every connection to the fake while true (an authorization server that is down). */
+  setDown(value: boolean): void;
   /** Global fetch calls that named the fake: must stay empty (#175). */
   globalFakeCalls: string[];
   logs: string[];
@@ -83,7 +85,13 @@ export async function startConnectorsStack(): Promise<ConnectorsStack> {
       },
     ],
   });
+  let down = false;
   const server: Server = createServer((req, res) => {
+    // "The provider is down": every connection is reset before an answer.
+    if (down) {
+      req.socket.destroy();
+      return;
+    }
     const url = new URL(req.url ?? "/", "http://fake-mcp");
     if (!fake.handle(req, res, url)) {
       res.writeHead(404);
@@ -182,6 +190,9 @@ export async function startConnectorsStack(): Promise<ConnectorsStack> {
     eveId,
     globalFakeCalls,
     logs,
+    setDown(value: boolean) {
+      down = value;
+    },
     async stop() {
       vi.unstubAllGlobals();
       await appRole.end().catch(() => {});

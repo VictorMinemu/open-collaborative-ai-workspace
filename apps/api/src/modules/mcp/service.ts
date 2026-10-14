@@ -21,7 +21,6 @@ import {
 import {
   agents,
   botToolGrants,
-  connectorConnections,
   connectorOAuthClients,
   mcpServers,
   mcpServerTools,
@@ -154,14 +153,17 @@ async function findServer(tx: Tx, id: string): Promise<ServerRow> {
 const toolsOf = (tx: Tx, serverId: string) =>
   tx.select().from(mcpServerTools).where(eq(mcpServerTools.serverId, serverId));
 
-/** Member connections per server, one grouped count (UI-SPEC R4); RLS keeps it to the caller's organization. */
+/**
+ * Member connections per server, one grouped count (UI-SPEC R4). A connection is its owner's alone under RLS (WINDOWS
+ * #170), so the admin's count goes through the `mcp.manage` path: `app.connector_connection_counts`, a SECURITY
+ * DEFINER function scoped to the tenant transaction's organization that returns numbers only (WINDOWS #186).
+ */
 async function connectionCounts(tx: Tx, serverId?: string): Promise<Map<string, number>> {
-  const rows = await tx
-    .select({ serverId: connectorConnections.serverId, n: sql<number>`count(*)::int` })
-    .from(connectorConnections)
-    .where(serverId ? eq(connectorConnections.serverId, serverId) : undefined)
-    .groupBy(connectorConnections.serverId);
-  return new Map(rows.map((r) => [r.serverId, Number(r.n)]));
+  const res = await tx.execute(
+    sql`select server_id, connections from app.connector_connection_counts(${serverId ?? null}::uuid)`,
+  );
+  const rows = res.rows as Array<{ server_id: string; connections: number }>;
+  return new Map(rows.map((r) => [r.server_id, Number(r.connections)]));
 }
 
 export async function listMcpServers(tx: Tx, opts: McpReadOptions = {}): Promise<McpServer[]> {
@@ -416,10 +418,10 @@ async function clearConnections(
   serverId: string,
   reason: "mode_changed" | "server_deleted",
 ): Promise<number> {
-  const removed = await tx
-    .delete(connectorConnections)
-    .where(eq(connectorConnections.serverId, serverId))
-    .returning({ secretId: connectorConnections.secretId });
+  // Every member's row, past the owner-only policy, through the `mcp.manage` path (WINDOWS #186): the function deletes
+  // the tenant's rows of this server and hands back only the ids of their sealed secrets.
+  const res = await tx.execute(sql`select secret_id from app.clear_connector_connections(${serverId}::uuid)`);
+  const removed = (res.rows as Array<{ secret_id: string | null }>).map((r) => ({ secretId: r.secret_id }));
   for (const r of removed) if (r.secretId) await core.secrets.remove(tx, r.secretId);
   if (removed.length > 0) {
     await core.audit.record(tx, {

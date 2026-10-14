@@ -489,10 +489,11 @@ const MEMORY_TABLES = [
   "app.approval_requests",
 ] as const;
 
-async function inTenant<T>(org: string, fn: () => Promise<T>): Promise<T> {
+async function inTenant<T>(org: string, fn: () => Promise<T>, userId: string | null = null): Promise<T> {
   await app.query("begin");
   try {
     await app.query("select set_config('app.organization_id', $1, true)", [org]);
+    if (userId) await app.query("select set_config('app.user_id', $1, true)", [userId]);
     return await fn();
   } finally {
     await app.query("rollback");
@@ -621,7 +622,8 @@ describe("tenant isolation (RLS)", () => {
       );
       expect(seeded.rows[0].n, `${tbl} has no fixture row: add one to seedOrg()`).toBeGreaterThan(0);
 
-      // Same tenant sees its rows (sanity), minus the personal keys only their owner's session sees (07.4-07) …
+      // Same tenant sees its rows (sanity), minus the personal keys (07.4-07) and the member connector connections
+      // (07.4-10) only their owner's session sees …
       const ownerOnly =
         tbl === "app.vault_items"
           ? (
@@ -630,7 +632,9 @@ describe("tenant isolation (RLS)", () => {
                 [A],
               )
             ).rows[0].n
-          : 0;
+          : tbl === "app.connector_connections"
+            ? seeded.rows[0].n
+            : 0;
       const own = await inTenant(A, () => app.query(`select count(*)::int as n from ${tbl}`));
       expect(own.rows[0].n, `${tbl} own rows`).toBe(seeded.rows[0].n - ownerOnly);
 
@@ -1530,13 +1534,18 @@ describe("tenant isolation (RLS)", () => {
       "select tablename, cmd, permissive from pg_policies where schemaname = 'app' and policyname = 'personal_owner_only' order by tablename",
     );
     expect(restrictive.rows).toEqual(
-      ["memory_file_revisions", "memory_files", "memory_proposals", "memory_scopes", "vault_items"].map(
-        (tablename) => ({
-          tablename,
-          cmd: "ALL",
-          permissive: "RESTRICTIVE",
-        }),
-      ),
+      [
+        "connector_connections",
+        "memory_file_revisions",
+        "memory_files",
+        "memory_proposals",
+        "memory_scopes",
+        "vault_items",
+      ].map((tablename) => ({
+        tablename,
+        cmd: "ALL",
+        permissive: "RESTRICTIVE",
+      })),
     );
     // The owner triggers run as the migrator with a fixed search_path; the app role cannot call them directly.
     const fns = await migrator.query(
@@ -1736,12 +1745,66 @@ describe("tenant isolation (RLS)", () => {
   it("Phase 07.4: the seven connector, keychain and template tables are org-scoped, forced, seeded, with the tenant policy (+ owner-only on keys)", async () => {
     const scoped = new Map((await orgScopedTables()).map((t) => [t.tbl, t]));
     for (const tbl of CONNECTOR_TABLES) {
-      // vault_items also carries the restrictive owner-only policy on personal keys (07.4-07).
-      const policies = tbl === "app.vault_items" ? 2 : 1;
-      expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true, policies });
-      const own = await inTenant(A, () => app.query(`select count(*)::int as n from ${tbl}`));
+      // vault_items (personal keys, 07.4-07) and connector_connections (07.4-10) also carry the restrictive owner-only
+      // policy; a connection is visible to its member's own session only.
+      const ownerOnly = tbl === "app.vault_items" || tbl === "app.connector_connections";
+      expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true, policies: ownerOnly ? 2 : 1 });
+      const owner =
+        tbl === "app.connector_connections"
+          ? (
+              await migrator.query(
+                "select user_id from app.connector_connections where organization_id = $1 limit 1",
+                [A],
+              )
+            ).rows[0].user_id
+          : null;
+      const own = await inTenant(A, () => app.query(`select count(*)::int as n from ${tbl}`), owner);
       expect(own.rows[0].n, `${tbl} seeded`).toBeGreaterThan(0);
     }
+    // The `mcp.manage` path over every member's connection (WINDOWS #186): migrator-owned, fixed search_path,
+    // executable by the app role only, scoped to the tenant transaction's organization.
+    const fns = await migrator.query(
+      `select p.proname, p.prosecdef, pg_get_userbyid(p.proowner) as owner, p.proconfig,
+              has_function_privilege('ocw_app', p.oid, 'execute') as app,
+              has_function_privilege('public', p.oid, 'execute') as public
+         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'app' and p.proname in ('connector_connection_counts', 'clear_connector_connections')
+        order by 1`,
+    );
+    expect(fns.rows).toEqual(
+      ["clear_connector_connections", "connector_connection_counts"].map((proname) => ({
+        proname,
+        prosecdef: true,
+        owner: "ocw_migrator",
+        proconfig: ["search_path=pg_catalog, pg_temp"],
+        app: true,
+        public: false,
+      })),
+    );
+    const total = async (org: string) =>
+      (
+        await migrator.query(
+          "select count(*)::int as n from app.connector_connections where organization_id = $1",
+          [org],
+        )
+      ).rows[0].n as number;
+    const counted = await inTenant(A, () =>
+      app.query("select coalesce(sum(connections), 0)::int as n from app.connector_connection_counts(null)"),
+    );
+    expect(counted.rows[0].n).toBe(await total(A));
+    // Without a tenant the functions see nothing; org B's clearing never reaches org A's rows.
+    expect(
+      (await app.query("select count(*)::int as n from app.connector_connection_counts(null)")).rows[0].n,
+    ).toBe(0);
+    const aServer = (
+      await migrator.query(
+        "select server_id from app.connector_connections where organization_id = $1 limit 1",
+        [A],
+      )
+    ).rows[0].server_id;
+    const before = await total(A);
+    await inTenant(B, () => app.query("select * from app.clear_connector_connections($1)", [aServer]));
+    expect(await total(A)).toBe(before);
   });
 
   it("Phase 07.4: a member's connector connection of org B is invisible, unchangeable and unforgeable from org A", async () => {
