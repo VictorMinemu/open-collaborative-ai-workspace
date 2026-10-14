@@ -39,6 +39,7 @@ export const RELATION_PERMISSIONS: Record<ResourceType, Partial<Record<Relation,
   // Phase 07.2 (D-08): the owner of a personal scope, of a personal bot's notebook or of a shared bot reads, writes and
   // promotes its memory; the surface filter still applies (`memory.promote` sits on `team`).
   memory: { owner: ["memory.read", "memory.write", "memory.promote"] },
+  agent_template: {},
 };
 
 /** Reason reported when a permission is simply not granted (default `missing_permission`). */
@@ -294,6 +295,14 @@ export function orgResource(): ResourceFacts {
 
 export function unitResource(u: { id: string; path: readonly string[] }): ResourceFacts {
   return facts("unit", [], [], u.path);
+}
+
+/**
+ * An agent template as a resource (Phase 07.4, N5): its unit's path with state `unit_scoped`, or the organization when
+ * `unit` is null. Who sees it is `unit.read` on this resource (the unit-template precondition).
+ */
+export function agentTemplateResource(unit: { id: string; path: readonly string[] } | null): ResourceFacts {
+  return unit ? facts("agent_template", [], ["unit_scoped"], unit.path) : facts("agent_template");
 }
 
 /**

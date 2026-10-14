@@ -67,7 +67,9 @@ export type ResourceType =
   | "invitation"
   | "agent"
   /** A memory scope or one file in it (Phase 07.2). */
-  | "memory";
+  | "memory"
+  /** An agent template (Phase 07.4): `unitPath` ends with its unit; organization templates carry none. */
+  | "agent_template";
 
 export interface PrincipalFacts {
   kind: "user" | "agent" | "cell" | "device";

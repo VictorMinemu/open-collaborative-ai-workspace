@@ -12,6 +12,7 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
   agentResource,
+  agentTemplateResource,
   channelMemberResource,
   channelResource,
   deviceResource,
@@ -2432,6 +2433,163 @@ describe("memory scopes and folder rules (Phase 07.2, MEM-04, MEM-07, D-04, D-08
       expect(can(bMember, unitScope(PATH_B), "memory.read")).toBe(true);
       // `memory.read` decided on a non-memory resource keeps the role answer.
       expect(allowed(bMember, unitResource({ id: A, path: PATH_A }), "memory.read")).toBe(true);
+    });
+  });
+});
+
+// ---------------------------------------------------------------- unit keys and unit templates (Phase 07.4, N5)
+
+describe("unit keys and unit templates: the unit audience is decided in the resolver (Phase 07.4, N5)", () => {
+  // Department D holds teams A and B; A holds the sub-team A1.
+  const D = "unit-d";
+  const A = "unit-a";
+  const A1 = "unit-a1";
+  const B = "unit-b";
+  const PATH_A = [D, A];
+  const unitA = unitResource({ id: A, path: PATH_A });
+  const aMember = user("standard", { id: "u-a", memberUnitPaths: [PATH_A] });
+  const below = user("standard", { id: "u-a1", memberUnitPaths: [[D, A, A1]] });
+  const aLead = user("lead", { id: "u-al", memberUnitPaths: [PATH_A], leadOfUnitIds: new Set([A]) });
+  // A lead of the department above A (on A's path), not a member of A.
+  const dLead = user("standard", { id: "u-dl", memberUnitPaths: [[D]], leadOfUnitIds: new Set([D]) });
+  const dOnly = user("standard", { id: "u-d", memberUnitPaths: [[D]] });
+  const outsider = user("standard", { id: "u-b", memberUnitPaths: [[D, B]] });
+  const nowhere = user("developer", { id: "u-x" });
+  const admin = user("admin", { id: "u-admin" });
+  const bot: PrincipalFacts = { ...user(null), kind: "agent", id: "bot-1" };
+
+  describe("vault.use on a unit key", () => {
+    it("an outsider is denied with unit_key, even with an allow rule", () => {
+      expect(decide(outsider, unitA, [], "vault.use")).toEqual({
+        allowed: false,
+        denial: { permission: "vault.use", layer: "resource", reason: "unit_key" },
+      });
+      const allowAll = rule({
+        subjectKind: "user",
+        subjectId: outsider.id,
+        permission: "vault.*",
+        effect: "allow",
+      });
+      expect(decide(outsider, unitA, [allowAll], "vault.use").denial).toMatchObject({ reason: "unit_key" });
+      // A member of the unit above (not a lead) and a member of no unit are outside A's audience too.
+      expect(decide(dOnly, unitA, [], "vault.use").denial).toMatchObject({ reason: "unit_key" });
+      expect(decide(nowhere, unitA, [], "vault.use").denial).toMatchObject({ reason: "unit_key" });
+    });
+
+    it("a member of the unit, a member below it, a lead on its path and an admin are allowed", () => {
+      for (const p of [aMember, below, aLead, dLead, admin])
+        expect(allowed(p, unitA, "vault.use"), p.id).toBe(true);
+    });
+
+    it("cross-tenant is never an allow: a person of another organization loads as not a member here", () => {
+      // facts.ts: no membership row in the tenant = deactivated, no role, no units (facts.int.test.ts proves the load).
+      const foreign = user(null, { id: "u-foreign", deactivated: true });
+      const foreignAdmin = user("admin", {
+        id: "u-foreign-admin",
+        deactivated: true,
+        memberUnitPaths: [PATH_A],
+      });
+      for (const p of [foreign, foreignAdmin]) {
+        expect(allowed(p, unitA, "vault.use"), p.id).toBe(false);
+        expect(allowed(p, orgResource(), "vault.use"), p.id).toBe(false);
+      }
+    });
+
+    it("an explicit deny still wins, for a member and for an admin", () => {
+      const denyA = rule({
+        id: "deny-a",
+        scopeUnitId: A,
+        subjectKind: "user",
+        subjectId: aMember.id,
+        permission: "vault.use",
+        effect: "deny",
+      });
+      expect(decide(aMember, unitA, [denyA], "vault.use").denial).toMatchObject({
+        layer: "user",
+        reason: "denied_by_rule",
+        ruleId: "deny-a",
+      });
+      const denyAdmin = rule({
+        id: "deny-admin",
+        subjectKind: "user",
+        subjectId: admin.id,
+        permission: "vault.use",
+        effect: "deny",
+      });
+      expect(decide(admin, unitA, [denyAdmin], "vault.use").denial).toMatchObject({
+        reason: "denied_by_rule",
+      });
+      // Bots off for everyone in A (a module catalog row) removes it from A's own members too.
+      const botsOff = rule({ id: "bots-off", scopeUnitId: A, permission: "vault.use", effect: "deny" });
+      expect(decide(below, unitA, [botsOff], "vault.use").denial).toMatchObject({ layer: "unit", unitId: A });
+    });
+
+    it("an agent acting for a person gets the person's answer (agent ∩ human)", () => {
+      const forOutsider = { principal: outsider, resource: unitA };
+      expect(decide(bot, unitA, [], "vault.use", forOutsider).denial).toMatchObject({ reason: "unit_key" });
+      expect(decide(bot, unitA, [], "vault.use", { principal: aMember, resource: unitA }).allowed).toBe(true);
+    });
+
+    it("organization keys stay usable by every member; vault.manage and unit reading are untouched", () => {
+      for (const p of [aMember, outsider, nowhere, dOnly, admin])
+        expect(allowed(p, orgResource(), "vault.use"), p.id).toBe(true);
+      expect(allowed(aLead, unitA, "vault.manage")).toBe(true);
+      expect(allowed(aMember, unitA, "vault.manage")).toBe(false);
+      expect(allowed(outsider, unitA, "unit.read")).toBe(true);
+    });
+  });
+
+  describe("unit.read on an agent template", () => {
+    const templateA = agentTemplateResource({ id: A, path: PATH_A });
+
+    it("the template carries its unit path and state unit_scoped; an organization template carries none", () => {
+      expect(templateA).toMatchObject({ type: "agent_template", unitPath: PATH_A });
+      expect(templateA.state.has("unit_scoped")).toBe(true);
+      const org = agentTemplateResource(null);
+      expect(org).toMatchObject({ type: "agent_template", unitPath: [] });
+      expect(org.state.has("unit_scoped")).toBe(false);
+    });
+
+    it("an outsider does not see a unit template (unit_template), even with an allow rule", () => {
+      expect(decide(outsider, templateA, [], "unit.read")).toEqual({
+        allowed: false,
+        denial: { permission: "unit.read", layer: "resource", reason: "unit_template" },
+      });
+      const allowAll = rule({
+        subjectKind: "user",
+        subjectId: outsider.id,
+        permission: "unit.*",
+        effect: "allow",
+      });
+      expect(decide(outsider, templateA, [allowAll], "unit.read").denial).toMatchObject({
+        reason: "unit_template",
+      });
+      expect(allowed(dOnly, templateA, "unit.read")).toBe(false);
+      expect(allowed(nowhere, templateA, "unit.read")).toBe(false);
+    });
+
+    it("the unit's members, members below it, leads on its path and admins see it", () => {
+      for (const p of [aMember, below, aLead, dLead, admin])
+        expect(allowed(p, templateA, "unit.read"), p.id).toBe(true);
+    });
+
+    it("an organization template is seen by every member; never across tenants; an explicit deny wins", () => {
+      const org = agentTemplateResource(null);
+      for (const p of [aMember, outsider, nowhere, admin])
+        expect(allowed(p, org, "unit.read"), p.id).toBe(true);
+      expect(allowed(user("admin", { deactivated: true }), templateA, "unit.read")).toBe(false);
+      expect(allowed(user(null, { deactivated: true }), org, "unit.read")).toBe(false);
+      const deny = rule({
+        id: "deny-tpl",
+        scopeUnitId: A,
+        subjectKind: "user",
+        subjectId: aMember.id,
+        permission: "unit.read",
+        effect: "deny",
+      });
+      expect(decide(aMember, templateA, [deny], "unit.read").denial).toMatchObject({
+        reason: "denied_by_rule",
+      });
     });
   });
 });
