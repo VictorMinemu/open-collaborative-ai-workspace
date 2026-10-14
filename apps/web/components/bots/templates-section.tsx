@@ -9,23 +9,43 @@ import {
   modelLabel,
 } from "@ocw/contracts";
 import {
+  Archive,
   CircleAlert,
   CircleCheck,
   CircleDashed,
   CircleSlash,
   ExternalLink,
   LayoutTemplate,
+  MoreHorizontal,
+  Pencil,
+  Plus,
   TriangleAlert,
+  X,
 } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
 import { Button } from "@/components/ui/button";
+import {
+  DialogContent as ConfirmContent,
+  DialogDescription as ConfirmDescription,
+  Dialog as ConfirmDialog,
+  DialogFooter as ConfirmFooter,
+  DialogHeader as ConfirmHeader,
+  DialogTitle as ConfirmTitle,
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import {
   Dialog,
   DialogBody,
+  DialogClose,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -34,14 +54,18 @@ import {
 } from "@/components/ui/panel-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
-import { useAgentTemplates, useInstantiateTemplate, useTemplatePreview } from "@/lib/agent-template-queries";
+import {
+  shortTool,
+  useAgentTemplates,
+  useInstantiateTemplate,
+  useTemplatePreview,
+  useUpdateTemplate,
+} from "@/lib/agent-template-queries";
 import { errorMessage, isApiError } from "@/lib/api";
 import { useCan } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 import { SheetSection } from "./bot-form";
-
-/** The short tool name shown to people (`<safe>__read_invoice` → `read_invoice`). */
-export const shortTool = (name: string) => name.split("__").pop() ?? name;
+import { TemplateEditorSheet } from "./template-editor-sheet";
 
 /** `{unit} · v{n}` / `Organization · v{n}`. */
 export const templateMeta = (t: AgentTemplate) => `${t.unitName ?? "Organization"} · v${t.currentVersion}`;
@@ -107,13 +131,16 @@ export function ConnectorRows({
   return (
     <ul className="grid divide-y rounded-lg border" aria-label="Connections">
       {connectors.map((c) => (
-        <li key={c.serverId} className="flex min-h-11 items-center gap-3 px-3 py-2 text-sm">
-          <span className="min-w-0 flex-1 truncate font-medium">{c.name}</span>
+        <li
+          key={c.serverId}
+          className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-sm md:min-h-11"
+        >
+          <span className="min-w-0 basis-full truncate font-medium sm:flex-1 sm:basis-auto">{c.name}</span>
           <ConnectionPill status={c.status} />
           {c.status !== "connected" ? (
             <Link
               href={`/settings/connections?connector=${c.serverId}`}
-              className="inline-flex min-h-11 items-center gap-1 font-medium text-primary text-sm hover:underline md:min-h-0"
+              className="ml-auto inline-flex min-h-11 items-center gap-1 font-medium text-primary text-sm hover:underline sm:ml-0 md:min-h-0"
               aria-label={`Connect ${c.name}`}
             >
               Connect <ExternalLink className="size-3.5" aria-hidden />
@@ -141,6 +168,8 @@ export function TemplatesSection({ onStarted }: { onStarted: (agent: Agent) => v
   const templates = useAgentTemplates();
   const canCreatePersonal = useCan("bot.create_personal");
   const [starting, setStarting] = useState<AgentTemplate | null>(null);
+  const [editing, setEditing] = useState<AgentTemplate | "new" | null>(null);
+  const [archiving, setArchiving] = useState<AgentTemplate | null>(null);
 
   const list = templates.data?.templates ?? [];
   const manageable = templates.data?.manageableUnits ?? [];
@@ -161,6 +190,16 @@ export function TemplatesSection({ onStarted }: { onStarted: (agent: Agent) => v
             Start your own agent from a template your team keeps up to date.
           </p>
         </div>
+        {manageable.length > 0 ? (
+          <Button
+            variant="outline"
+            onClick={() => setEditing("new")}
+            data-testid="template-new"
+            className="w-full sm:w-auto max-md:h-11"
+          >
+            <Plus /> New template
+          </Button>
+        ) : null}
       </div>
 
       {templates.isPending ? (
@@ -187,6 +226,9 @@ export function TemplatesSection({ onStarted }: { onStarted: (agent: Agent) => v
           <p className="mt-1 text-muted-foreground text-sm">
             Publish one so people in your units can start their own agent in two clicks.
           </p>
+          <Button onClick={() => setEditing("new")} variant="outline" className="mt-4 max-md:h-11">
+            <Plus /> New template
+          </Button>
         </div>
       ) : (
         <div className="mt-3 grid gap-3 sm:grid-cols-2 sm:gap-4 xl:grid-cols-3 2xl:grid-cols-4">
@@ -196,6 +238,8 @@ export function TemplatesSection({ onStarted }: { onStarted: (agent: Agent) => v
               template={t}
               canStart={canCreatePersonal}
               onStart={() => setStarting(t)}
+              onEdit={() => setEditing(t)}
+              onArchive={() => setArchiving(t)}
             />
           ))}
         </div>
@@ -209,6 +253,13 @@ export function TemplatesSection({ onStarted }: { onStarted: (agent: Agent) => v
           onStarted(agent);
         }}
       />
+      <TemplateEditorSheet
+        open={editing !== null}
+        template={editing === "new" ? null : editing}
+        manageableUnits={manageable}
+        onClose={() => setEditing(null)}
+      />
+      <ArchiveTemplateDialog template={archiving} onClose={() => setArchiving(null)} />
     </section>
   );
 }
@@ -217,10 +268,14 @@ function TemplateCard({
   template: t,
   canStart,
   onStart,
+  onEdit,
+  onArchive,
 }: {
   template: AgentTemplate;
   canStart: boolean;
   onStart: () => void;
+  onEdit: () => void;
+  onArchive: () => void;
 }) {
   const titleId = `template-${t.id}-title`;
   return (
@@ -240,6 +295,35 @@ function TemplateCard({
             {templateMeta(t)}
           </p>
         </div>
+        {t.canManage ? (
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  className="-my-1 -mr-1 shrink-0 text-muted-foreground max-md:-my-2.5 max-md:-mr-2.5 max-md:size-11"
+                  aria-label={`${t.name} actions`}
+                  data-testid="template-menu"
+                />
+              }
+            >
+              <MoreHorizontal />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={onEdit} data-testid="template-edit" className="max-md:min-h-11">
+                <Pencil /> Edit…
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={onArchive}
+                data-testid="template-archive"
+                className="max-md:min-h-11"
+              >
+                <Archive /> Archive…
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : null}
       </div>
       {t.description ? (
         <p className="mt-3 line-clamp-2 text-muted-foreground text-sm">{t.description}</p>
@@ -338,8 +422,20 @@ export function StartTemplateDialog({
 
   return (
     <Dialog open={template !== null} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="sm:max-w-lg" data-testid="template-start-dialog">
+      <DialogContent className="sm:max-w-lg" showClose={false} data-testid="template-start-dialog">
         <DialogHeader>
+          <DialogClose
+            render={
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Close"
+                className="absolute top-3 right-3 text-muted-foreground max-md:size-11"
+              />
+            }
+          >
+            <X />
+          </DialogClose>
           <DialogTitle>Start from “{t?.name}”</DialogTitle>
           <DialogDescription>
             Creates your own personal agent. It's private to you; later template versions are offered, never
@@ -441,5 +537,70 @@ export function StartTemplateDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** Archive confirmation (07.4-UI-SPEC R9): reversible server-side, so the confirm button is outline, not red. */
+function ArchiveTemplateDialog({
+  template,
+  onClose,
+}: {
+  template: AgentTemplate | null;
+  onClose: () => void;
+}) {
+  const archive = useUpdateTemplate();
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const [shown, setShown] = useState<AgentTemplate | null>(template);
+  if (template && template !== shown) setShown(template);
+  const t = template ?? shown;
+  return (
+    <ConfirmDialog
+      open={template !== null}
+      onOpenChange={(o) => {
+        if (!o) {
+          onClose();
+          archive.reset();
+        }
+      }}
+    >
+      <ConfirmContent data-testid="template-archive-dialog" initialFocus={cancelRef}>
+        <ConfirmHeader>
+          <ConfirmTitle>Archive “{t?.name}”?</ConfirmTitle>
+          <ConfirmDescription>
+            Nobody can start new agents from it. Agents already started keep working.
+          </ConfirmDescription>
+        </ConfirmHeader>
+        {archive.isError ? (
+          <p role="alert" className="text-destructive text-sm">
+            {errorMessage(archive.error)}
+          </p>
+        ) : null}
+        <ConfirmFooter>
+          <Button ref={cancelRef} variant="outline" onClick={onClose} className="max-md:h-11">
+            Cancel
+          </Button>
+          <Button
+            variant="outline"
+            disabled={archive.isPending || !t}
+            className="max-md:h-11"
+            data-testid="template-archive-confirm"
+            onClick={() =>
+              t &&
+              archive.mutate(
+                { id: t.id, body: { archived: true } },
+                {
+                  onSuccess: () => {
+                    onClose();
+                    toast.success(`${t.name} archived`);
+                  },
+                },
+              )
+            }
+          >
+            {archive.isPending ? <Spinner /> : <Archive />} Archive template
+          </Button>
+        </ConfirmFooter>
+      </ConfirmContent>
+    </ConfirmDialog>
   );
 }

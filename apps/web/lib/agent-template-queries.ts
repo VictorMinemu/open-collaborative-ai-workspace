@@ -21,6 +21,9 @@ import { botKeys } from "./bots-queries";
  * Agent templates (07.4-08, D-05): the Bots page lists the templates the caller may see, previews what their own
  * agent would get, starts one, and (owners only) reviews and applies a newer version of their agent's template.
  */
+/** The short tool name shown to people (`<safe>__read_invoice` → `read_invoice`). */
+export const shortTool = (name: string) => name.split("__").pop() ?? name;
+
 export const agentTemplateKeys = {
   list: ["agent-templates"] as const,
   preview: (id: string) => ["agent-templates", "preview", id] as const,

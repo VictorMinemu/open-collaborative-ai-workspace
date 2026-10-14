@@ -29,6 +29,8 @@ import {
   splitModelKey,
 } from "./bot-form";
 import { CapabilitiesPanel } from "./capabilities-panel";
+import { TemplateUpdateDialog } from "./template-update-dialog";
+import { ConnectorRows } from "./templates-section";
 
 function toPlacement(a: Agent): PlacementValues {
   return {
@@ -82,6 +84,7 @@ export function BotDetailSheet({
   const [placement, setPlacement] = useState<PlacementValues | null>(agent ? toPlacement(agent) : null);
   const [errors, setErrors] = useState<BotFormErrors>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
   const agentId = agent?.id;
 
   // Reset the form when another bot is opened (not on live status updates of the same bot).
@@ -91,6 +94,7 @@ export function BotDetailSheet({
     setPlacement(agent ? toPlacement(agent) : null);
     setErrors({});
     setConfirmDelete(false);
+    setReviewing(false);
   }, [agentId]);
 
   if (!agent || !values) {
@@ -255,6 +259,34 @@ export function BotDetailSheet({
         </div>
 
         <div className="scrollbar-thin grid min-h-0 flex-1 content-start gap-7 overflow-y-auto px-5 py-5">
+          {templateLink.data?.update ? (
+            <div
+              role="status"
+              data-testid="template-update-banner"
+              className="flex flex-col gap-3 rounded-lg bg-brand-soft px-3 py-2.5 text-brand-soft-foreground text-sm sm:flex-row sm:items-center"
+            >
+              <span className="flex min-w-0 flex-1 items-center gap-2">
+                <LayoutTemplate className="size-4 shrink-0" aria-hidden />
+                <span>Template updated to v{templateLink.data.update.to} · Review and update</span>
+              </span>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setReviewing(true)}
+                aria-label={`Review update to v${templateLink.data.update.to}`}
+                data-testid="template-update-review"
+                className="w-full sm:w-auto max-md:h-11"
+              >
+                Review
+              </Button>
+            </div>
+          ) : null}
+
+          {templateLink.data && templateLink.data.requiredConnectors.length > 0 ? (
+            <SheetSection title="Connections">
+              <ConnectorRows connectors={templateLink.data.requiredConnectors} />
+            </SheetSection>
+          ) : null}
           {agent.status === "error" && agent.statusMessage ? (
             <div
               role="alert"
@@ -388,6 +420,14 @@ export function BotDetailSheet({
             </Button>
           ) : null}
         </div>
+        {templateLink.data?.update ? (
+          <TemplateUpdateDialog
+            agent={agent}
+            link={templateLink.data}
+            open={reviewing}
+            onClose={() => setReviewing(false)}
+          />
+        ) : null}
       </SheetContent>
     </Sheet>
   );
