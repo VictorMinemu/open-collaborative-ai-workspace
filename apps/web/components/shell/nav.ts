@@ -1,5 +1,13 @@
 import type { Permission } from "@ocw/contracts";
-import { Bot, type LucideIcon, MessagesSquare, NotebookText, Settings, SquareTerminal } from "lucide-react";
+import {
+  Bot,
+  Hand,
+  type LucideIcon,
+  MessagesSquare,
+  NotebookText,
+  Settings,
+  SquareTerminal,
+} from "lucide-react";
 
 /**
  * Primary navigation. To add a section: add ONE entry here and create `app/(app)/<href>/page.tsx`.
@@ -17,8 +25,12 @@ export interface NavItem {
   permission?: Permission;
   /** Other path prefixes that belong to this section (e.g. a shared AI chat reads inside Chat). */
   also?: readonly `/${string}`[];
-  /** A live count shown with the label (07.2-13: proposals waiting for the viewer). Only items that declare it. */
-  badge?: "pendingApprovals";
+  /**
+   * A live count shown with the label, only on items that declare it. The two counts are disjoint (07.5 UI-SPEC R1):
+   * `pendingMemoryProposals` counts `memory.write` (07.2-13), `pendingActionApprovals` counts `tool.call` and
+   * `work_zone.start`, so no request is counted twice in the nav.
+   */
+  badge?: "pendingMemoryProposals" | "pendingActionApprovals";
 }
 
 export const NAV_ITEMS: readonly NavItem[] = [
@@ -30,7 +42,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     href: "/memory",
     icon: NotebookText,
     permission: "memory.read",
-    badge: "pendingApprovals",
+    badge: "pendingMemoryProposals",
   },
   {
     id: "work-zone",
@@ -38,6 +50,14 @@ export const NAV_ITEMS: readonly NavItem[] = [
     href: "/work-zone",
     icon: SquareTerminal,
     permission: "work_session.read",
+  },
+  {
+    id: "approvals",
+    label: "Approvals",
+    href: "/approvals",
+    icon: Hand,
+    permission: "bot.read",
+    badge: "pendingActionApprovals",
   },
   { id: "settings", label: "Settings", href: "/settings", icon: Settings, secondary: true },
 ];

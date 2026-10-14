@@ -4,15 +4,31 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip } from "@/components/ui/tooltip";
-import { countLabel, pendingLabel, usePendingApprovalCount } from "@/lib/approval-queries";
+import {
+  countLabel,
+  pendingLabel,
+  toReviewLabel,
+  usePendingActionApprovalCount,
+  usePendingApprovalCount,
+} from "@/lib/approval-queries";
 import { usePermissionCheck } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 import { isActive, NAV_ITEMS, type NavItem } from "./nav";
 
-/** The count of a nav item that declares a badge (07.2-13): live, `Badge brand`, hidden at 0. */
+/** The count of a nav item that declares a badge (07.2-13, 07.5): live, `Badge brand`, hidden at 0. */
 function useNavCount(item: NavItem): number {
-  return usePendingApprovalCount(item.badge === "pendingApprovals");
+  const memory = usePendingApprovalCount(item.badge === "pendingMemoryProposals");
+  const actions = usePendingActionApprovalCount(item.badge === "pendingActionApprovals");
+  return item.badge === "pendingActionApprovals"
+    ? actions
+    : item.badge === "pendingMemoryProposals"
+      ? memory
+      : 0;
 }
+
+/** "Memory, 3 proposals to review" (07.2-13) · "Approvals, 2 to review" (07.5 UI-SPEC "Nav badge"). */
+const countedName = (item: NavItem, n: number) =>
+  item.badge === "pendingActionApprovals" ? toReviewLabel(item.label, n) : pendingLabel(item.label, n);
 
 function NavLink(props: { item: NavItem; collapsed: boolean; onNavigate?: () => void }) {
   return props.item.badge ? <CountedNavLink {...props} /> : <NavLinkView {...props} count={0} />;
@@ -42,7 +58,7 @@ function NavLinkView({
       href={item.href}
       data-testid={`nav-${item.id}`}
       aria-current={active ? "page" : undefined}
-      aria-label={count > 0 ? pendingLabel(item.label, count) : collapsed ? item.label : undefined}
+      aria-label={count > 0 ? countedName(item, count) : collapsed ? item.label : undefined}
       onClick={onNavigate}
       className={cn(
         "group relative flex h-9 items-center gap-3 rounded-lg px-2.5 font-medium text-[13.5px] outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-sidebar-ring/40",
