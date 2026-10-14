@@ -43,7 +43,7 @@ export function SharedUseDialog({
   onConnect,
 }: {
   request: ShareRequest | null;
-  /** How the conversation reads (`#ops`, an AI chat title, "your DM with Sam Lee"). */
+  /** How the conversation reads (`#ops`, an AI chat title, "your private chat with Sam Lee"). */
   conversation: string;
   /** Undefined while loading. */
   preview: ReadersPreview | undefined;

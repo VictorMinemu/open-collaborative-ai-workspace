@@ -602,7 +602,13 @@ describe("member and tenant isolation", () => {
     await s.su.query("delete from app.connector_connections where organization_id = $1", [s.orgB]);
   });
 
-  it("a member denied connector.connect gets 403 on the member routes, and may still disconnect", async () => {
+  it("a member denied connector.connect gets 403 on the connect routes, still lists and disconnects their own connections (#196)", async () => {
+    await ok(s.alex.request("PUT", `/api/v1/connectors/${keyServer.id}/secret`, { value: "alex-key" }));
+    const full = await ok(s.alex.request("GET", "/api/v1/connectors"));
+    expect(full.canConnect).toBe(true);
+    expect((full.connectors as Json[]).map((c) => c.serverId)).toEqual(
+      expect.arrayContaining([oauth.id, keyServer.id]),
+    );
     const rule = await ok(
       s.victor.request("POST", "/api/v1/permission-rules", {
         subjectKind: "user",
@@ -612,15 +618,24 @@ describe("member and tenant isolation", () => {
       }),
     );
     try {
-      await fails(s.alex.request("GET", "/api/v1/connectors"), 403);
+      // The withdrawal view: only the member's own connections, and the web offers Disconnect only.
+      const own = await ok(s.alex.request("GET", "/api/v1/connectors"));
+      expect(own.canConnect).toBe(false);
+      expect((own.connectors as Json[]).map((c) => [c.serverId, c.status])).toEqual([
+        [keyServer.id, "connected"],
+      ]);
       await fails(s.alex.request("POST", `/api/v1/connectors/${oauth.id}/connect`), 403);
       await fails(s.alex.request("PUT", `/api/v1/connectors/${keyServer.id}/secret`, { value: "k" }), 403);
-      // Withdrawing is always allowed: a denied member can still delete their own connection (none here).
+      // Withdrawing is always allowed: a denied member can still delete their own connection.
       await fails(
         s.alex.request("DELETE", `/api/v1/connectors/${oauth.id}/connection`),
         404,
         "not_connected",
       );
+      expect((await s.alex.request("DELETE", `/api/v1/connectors/${keyServer.id}/connection`)).status).toBe(
+        204,
+      );
+      expect((await ok(s.alex.request("GET", "/api/v1/connectors"))).connectors).toEqual([]);
     } finally {
       await ok(s.victor.request("DELETE", `/api/v1/permission-rules/${rule.id}`));
     }

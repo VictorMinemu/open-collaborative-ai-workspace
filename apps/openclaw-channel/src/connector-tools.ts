@@ -54,6 +54,9 @@ type Deps = { guard: ToolGuard; client: () => AgentChannelClient | null; logger?
 /** CONN-04: the API posted a "Connect your account" card into the conversation; the model says so. */
 export const NOT_CONNECTED =
   "You haven't connected your account for this connector yet. I posted a link so you can connect it, then ask me again.";
+/** 07.4-14 (WINDOWS #198): the member's sign-in stopped working; the API posted a "Reconnect your account" card. */
+export const NEEDS_RECONNECT =
+  "Your sign-in for this connector stopped working. I posted a link so you can reconnect it, then ask me again.";
 /** D-03: a member-account tool outside a private chat (or a conversation the member allowed it in). */
 export const MEMBER_ACCOUNT =
   "This uses your own account, so I can only do it in our private chat, or after you allow it for this conversation in Settings › Connections.";
@@ -73,7 +76,7 @@ export const REFUSAL_SENTENCE: Record<AgentChannelToolRefusal, string> = {
   member_account: MEMBER_ACCOUNT,
   unit_audience: UNIT_AUDIENCE,
   not_connected: NOT_CONNECTED,
-  needs_reconnect: NOT_CONNECTED,
+  needs_reconnect: NEEDS_RECONNECT,
   handle_not_allowed: "That key is not available to you here.",
   host_not_allowed: "That key may not be sent to this host.",
   egress_refused: "The workspace refused to contact that address.",

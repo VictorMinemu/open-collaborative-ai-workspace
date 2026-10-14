@@ -14,7 +14,7 @@ import { createFakeMcp } from "../../../infra/fake-model/fake-mcp.mjs";
 import type { CellAgent, CellMcpServer, CellProvider, CellSnapshot } from "./agent-channel-protocol.js";
 import { AgentChannelHttpError, createAgentChannelClient } from "./api-client.js";
 import { AUTH_FAILURE_REPLY, createBridge, FAILURE_REPLY, type OpenClawPort } from "./bridge.js";
-import { MEMBER_ACCOUNT, NOT_CONNECTED, REFUSAL_SENTENCE } from "./connector-tools.js";
+import { MEMBER_ACCOUNT, NEEDS_RECONNECT, NOT_CONNECTED, REFUSAL_SENTENCE } from "./connector-tools.js";
 import { createMemoryCursorStore } from "./cursor-store.js";
 import { CommitTracker, runEventStream } from "./event-stream.js";
 import { UNKNOWN_SERVER_ERROR } from "./mcp-probe.js";
@@ -1658,7 +1658,7 @@ describe("connector tools (07.4 D-07, C-01): registerFull → the real HTTP clie
     const { tool } = connectorSetup();
     for (const [refusal, expected] of [
       ["not_connected", NOT_CONNECTED],
-      ["needs_reconnect", NOT_CONNECTED],
+      ["needs_reconnect", NEEDS_RECONNECT],
       ["member_account", MEMBER_ACCOUNT],
       ["upstream_error", REFUSAL_SENTENCE.upstream_error],
       ["unknown_turn", REFUSAL_SENTENCE.unknown_turn],

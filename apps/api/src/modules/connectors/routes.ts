@@ -182,13 +182,21 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
   const recordOAuthStatus = (req: FastifyRequest, serverId: string, status: "needs_client" | "error") =>
     core.db.withTenant(tenant(req), (tx) => setOAuthStatus(tx, serverId, status)).catch(() => {});
 
+  // Listing is decided here, not by a preHandler: without `connector.connect` (Bots off, a deny rule) the member still
+  // sees their OWN connections so they can withdraw them (WINDOWS #196; DELETE below), and nothing else.
   app.get(
     "/connectors",
-    { ...member, schema: { tags, response: { 200: MemberConnectorList } } },
+    {
+      config: { authz: "user" as const },
+      preHandler: [core.identity.requireUser],
+      schema: { tags, response: { 200: MemberConnectorList } },
+    },
     async (req, reply) => {
       reply.header("cache-control", "no-store");
+      markDecided(req);
       const userId = authOf(req).userId;
-      const connectors = await core.db.withTenant(tenant(req), async (tx) => {
+      return core.db.withTenant(tenant(req), async (tx) => {
+        const canConnect = await perms.can(req, tx, "connector.connect");
         const servers = await tx
           .select()
           .from(mcpServers)
@@ -199,9 +207,13 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
           .from(connectorConnections)
           .where(eq(connectorConnections.userId, userId));
         const byServer = new Map(rows.map((r) => [r.serverId, r]));
-        return servers.map((s) => memberConnectorOf(core, s, byServer.get(s.id) ?? null));
+        const listed = canConnect ? servers : servers.filter((s) => byServer.has(s.id));
+        return {
+          connectors: listed.map((s) => memberConnectorOf(core, s, byServer.get(s.id) ?? null)),
+          oauth: urls(),
+          canConnect,
+        };
       });
-      return { connectors, oauth: urls() };
     },
   );
 
