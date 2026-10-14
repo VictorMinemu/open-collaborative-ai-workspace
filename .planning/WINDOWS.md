@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 133
+open_count: 134
 waived_count: 4
 fixed_count: 80
-total_count: 217
-last_updated: 2026-10-14T18:27:17.253Z
+total_count: 218
+last_updated: 2026-10-14T19:14:27.881Z
 ---
 
 # Broken Windows Ledger
@@ -232,6 +232,7 @@ last_updated: 2026-10-14T18:27:17.253Z
 | 215 | 07.5 | deviation | apps/api/src/modules/work-session |  | When a Work Zone proposal Start fails the bot hears 'approved' without the error code (add resultCode to CardAction); each Work Zone card read recomputes its live state with several queries | open |  | 2026-10-14T18:19:32.619Z |  |
 | 216 | 07.5 | deviation | apps/web/components/ui/avatar.tsx |  | Shared avatar initials are 4.25-4.48:1 at 12 px (below AA, axe flaky by random id); move text from *-700 to *-800 | open |  | 2026-10-14T18:27:17.175Z |  |
 | 217 | 07.5 | deviation | apps/web/components/settings |  | Approval history shows a raw m…__* pattern for a rule on a deleted server; the policies page does not warn when /access or the catalog are truncated | open |  | 2026-10-14T18:27:17.253Z |  |
+| 218 | 07.5 | deviation | apps/web/components/approvals |  | Mobile shows 'Approvals' twice (top bar and back link, per UI-SPEC); 'To review' sorts client-side over loaded pages; the e2e fake cell answers approval_* without the plugin's fixed sentences | open |  | 2026-10-14T19:14:27.881Z |  |
 
 ````json
 [
@@ -2837,6 +2838,18 @@ last_updated: 2026-10-14T18:27:17.253Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-14T18:27:17.253Z",
+    "resolved_at": null
+  },
+  {
+    "id": 218,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "apps/web/components/approvals",
+    "line": null,
+    "description": "Mobile shows 'Approvals' twice (top bar and back link, per UI-SPEC); 'To review' sorts client-side over loaded pages; the e2e fake cell answers approval_* without the plugin's fixed sentences",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T19:14:27.881Z",
     "resolved_at": null
   }
 ]
