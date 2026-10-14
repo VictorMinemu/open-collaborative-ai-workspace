@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
@@ -16,6 +16,7 @@ import type { WorkSessionService } from "./service";
 import {
   createWorkSession,
   type WorkSessionStartDeps,
+  type WorkSessionStartFailure,
   type WorkSessionStartInput,
   type WorkSessionStartResult,
 } from "./start";
@@ -212,5 +213,383 @@ describe("tracer: a session is created by a function for a given member (APPROVE
       permissionMode: "default",
       worktree: false,
     });
+  });
+});
+
+// ---------------------------------------------------------------- Task 2: result codes, no partial writes
+
+const TRACE_TABLES = [
+  "work_sessions",
+  "conversations",
+  "conversation_members",
+  "work_prompts",
+  "device_commands",
+  "audit_events",
+  "stream_events",
+] as const;
+
+async function traces(): Promise<Record<string, number>> {
+  const out: Record<string, number> = {};
+  for (const t of TRACE_TABLES) {
+    out[t] = (await su.query(`select count(*)::int as n from app.${t}`)).rows[0].n as number;
+  }
+  return out;
+}
+
+/** The call fails with `code` and leaves no row, command, audit or event behind. */
+async function refusedWith(userId: string, input: WorkSessionStartInput, code: string) {
+  const before = await traces();
+  const res = await startAs(userId, input, { proposedByAgentId: botId, approvalId: randomUUID() });
+  expect(res, JSON.stringify(res)).toMatchObject({ ok: false, code });
+  expect(await traces()).toEqual(before);
+  return res as WorkSessionStartFailure;
+}
+
+/** A device of Sam's seeded directly, with one project on it. */
+async function seedDevice(o: {
+  name: string;
+  status: "online" | "offline";
+  runtimeInfo: unknown[];
+  revoked?: boolean;
+}): Promise<{ deviceId: string; projectId: string }> {
+  const id = randomUUID();
+  const project = randomUUID();
+  await su.query(
+    `insert into app.devices (id, organization_id, owner_user_id, name, platform, token_hash, status, runtime_info, revoked_at)
+     values ($1, $2, $3, $4, 'darwin', $5, $6, $7, ${o.revoked ? "now()" : "null"})`,
+    [
+      id,
+      orgId,
+      samId,
+      o.name,
+      createHash("sha256").update(randomUUID()).digest("hex"),
+      o.status,
+      JSON.stringify(o.runtimeInfo),
+    ],
+  );
+  await su.query(
+    "insert into app.projects (id, organization_id, device_id, local_id, name) values ($1, $2, $3, $4, 'seeded')",
+    [project, orgId, id, `lp_${project.slice(0, 8)}`],
+  );
+  return { deviceId: id, projectId: project };
+}
+
+const CLAUDE_READY = { id: "claude-code", installed: true, version: "2.1.287", loggedIn: true };
+
+let stanId: string;
+let danaId: string;
+let rexId: string;
+
+describe("failures are result codes with no partial writes (D-04, Pitfall 9)", () => {
+  beforeAll(async () => {
+    ({ userId: stanId } = await invite(stack, admin, "stan@example.test", "Stan", "standard"));
+    ({ userId: danaId } = await invite(stack, admin, "dana@example.test", "Dana", "developer"));
+    ({ userId: rexId } = await invite(stack, admin, "rex@example.test", "Rex", "developer"));
+  });
+
+  it("not_allowed: a standard member without work_session.create", async () => {
+    const r = await refusedWith(stanId, proposal(), "not_allowed");
+    expect(r).toMatchObject({ denial: { permission: "work_session.create" } });
+  });
+
+  it("not_allowed: a developer under a Work Zone module deny (07.3)", async () => {
+    const off = await admin.request("PUT", "/api/v1/module-access", {
+      module: "work_zone",
+      scopeUnitId: null,
+      subject: { kind: "user", userId: danaId },
+      enabled: false,
+    });
+    expect(off.status, JSON.stringify(off.body)).toBe(200);
+    try {
+      await refusedWith(danaId, proposal(), "not_allowed");
+    } finally {
+      const on = await admin.request("PUT", "/api/v1/module-access", {
+        module: "work_zone",
+        scopeUnitId: null,
+        subject: { kind: "user", userId: danaId },
+        enabled: true,
+      });
+      expect(on.status, JSON.stringify(on.body)).toBe(200);
+    }
+  });
+
+  it("project_not_found: missing, removed, another organization's, and on another device", async () => {
+    await refusedWith(samId, proposal({ projectId: randomUUID() }), "project_not_found");
+
+    const removed = randomUUID();
+    await su.query(
+      "insert into app.projects (id, organization_id, device_id, local_id, name, removed_at) values ($1, $2, $3, 'lp_gone', 'gone', now())",
+      [removed, orgId, deviceId],
+    );
+    await refusedWith(samId, proposal({ projectId: removed }), "project_not_found");
+
+    const orgB = randomUUID();
+    const userB = randomUUID();
+    const devB = randomUUID();
+    const projB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Other', $2)", [
+      orgB,
+      `o-${orgB}`,
+    ]);
+    await su.query("insert into auth.user (id, name, email) values ($1, 'B', $2)", [
+      userB,
+      `${userB}@b.test`,
+    ]);
+    await su.query(
+      "insert into app.devices (id, organization_id, owner_user_id, name, platform, token_hash, shared, status, runtime_info) values ($1, $2, $3, 'B mac', 'darwin', $4, true, 'online', $5)",
+      [
+        devB,
+        orgB,
+        userB,
+        createHash("sha256").update(randomUUID()).digest("hex"),
+        JSON.stringify([CLAUDE_READY]),
+      ],
+    );
+    await su.query(
+      "insert into app.projects (id, organization_id, device_id, local_id, name) values ($1, $2, $3, 'lb', 'secret')",
+      [projB, orgB, devB],
+    );
+    await refusedWith(samId, proposal({ projectId: projB, deviceId: devB }), "project_not_found");
+
+    const other = await seedDevice({ name: "Sam's iMac", status: "online", runtimeInfo: [CLAUDE_READY] });
+    const r = await refusedWith(samId, proposal({ deviceId: other.deviceId }), "project_not_found");
+    expect(r).toMatchObject({ reason: "other_device" });
+  });
+
+  it("device_not_shared: a device not shared with the actor, and a revoked one", async () => {
+    await refusedWith(rexId, proposal(), "device_not_shared");
+    const revoked = await seedDevice({
+      name: "Old laptop",
+      status: "online",
+      runtimeInfo: [CLAUDE_READY],
+      revoked: true,
+    });
+    const r = await refusedWith(samId, proposal(revoked), "device_not_shared");
+    expect(r).toMatchObject({
+      message: "Old laptop was revoked. Pair it again to use it.",
+      denial: { reason: "device_revoked" },
+    });
+  });
+
+  it("device_offline: the device is offline", async () => {
+    const offline = await seedDevice({
+      name: "Sleeping Mac",
+      status: "offline",
+      runtimeInfo: [CLAUDE_READY],
+    });
+    await refusedWith(samId, proposal(offline), "device_offline");
+  });
+
+  it("runtime_unavailable: Claude Code not installed, and installed but signed out", async () => {
+    const bare = await seedDevice({
+      name: "Bare Mac",
+      status: "online",
+      runtimeInfo: [{ id: "claude-code", installed: false, version: null, loggedIn: false }],
+    });
+    await refusedWith(samId, proposal(bare), "runtime_unavailable");
+    const signedOut = await seedDevice({
+      name: "Signed-out Mac",
+      status: "online",
+      runtimeInfo: [{ id: "claude-code", installed: true, version: "2.1.287", loggedIn: false }],
+    });
+    await refusedWith(samId, proposal(signedOut), "runtime_unavailable");
+  });
+
+  it("prompt_not_allowed: a slash-command prompt, checked on the trimmed prompt (P-08)", async () => {
+    for (const prompt of ["/permissions", "/model x", "  /permissions", "\n/model"]) {
+      await refusedWith(samId, proposal({ prompt }), "prompt_not_allowed");
+    }
+  });
+
+  it("settings_denied: an explicit mode above the intersection (the human path) is refused with its reason", async () => {
+    const r = await refusedWith(samId, proposal({ permissionMode: "fullAccess" }), "settings_denied");
+    expect(r).toMatchObject({ field: "permissionMode", reason: "org_policy" });
+  });
+});
+
+describe("POST /work-sessions keeps today's error for every code", () => {
+  const post = (as: TestClient, body: Record<string, unknown>) =>
+    as.request("POST", "/api/v1/work-sessions", body);
+  const errorOf = (res: { status: number; body: Record<string, unknown> | null }) => {
+    const e = res.body?.error as { code?: string; message?: string } | undefined;
+    return [res.status, e?.code, e?.message];
+  };
+
+  it("maps each refusal to the same status, code and message as before the extraction", async () => {
+    const stan = (await invite(stack, admin, "stella@example.test", "Stella", "standard")).client;
+    expect(errorOf(await post(stan, { projectId }))).toEqual([
+      403,
+      "forbidden",
+      "You do not have permission to do this",
+    ]);
+    expect(errorOf(await post(sam, { projectId: randomUUID() }))).toEqual([
+      404,
+      "not_found",
+      "Project not found",
+    ]);
+    const other = await seedDevice({ name: "Second Mac", status: "online", runtimeInfo: [CLAUDE_READY] });
+    expect(errorOf(await post(sam, { projectId, deviceId: other.deviceId }))).toEqual([
+      409,
+      "conflict",
+      "The project belongs to another device",
+    ]);
+    const outsider = (await invite(stack, admin, "olga@example.test", "Olga", "developer")).client;
+    expect(errorOf(await post(outsider, { projectId }))).toEqual([
+      403,
+      "device_not_shared",
+      "This device is not shared with you. Ask its owner to share it.",
+    ]);
+    const offline = await seedDevice({ name: "Night Mac", status: "offline", runtimeInfo: [CLAUDE_READY] });
+    expect(errorOf(await post(sam, offline))).toEqual([
+      409,
+      "device_offline",
+      "Night Mac is offline. Start the desktop app.",
+    ]);
+    const bare = await seedDevice({
+      name: "Empty Mac",
+      status: "online",
+      runtimeInfo: [{ id: "claude-code", installed: false, version: null, loggedIn: false }],
+    });
+    expect(errorOf(await post(sam, bare))).toEqual([
+      409,
+      "runtime_unavailable",
+      "Claude Code is not installed on Empty Mac",
+    ]);
+    expect(errorOf(await post(sam, { projectId, runtime: "codex" }))).toEqual([
+      409,
+      "runtime_unavailable",
+      "Codex is not signed in on Sam's MacBook. Sign in from a terminal first.",
+    ]);
+    expect(errorOf(await post(sam, { projectId, prompt: "  /permissions" }))).toEqual([
+      400,
+      "slash_command",
+      "Send slash commands from the composer",
+    ]);
+    const full = await post(sam, { projectId, permissionMode: "fullAccess" });
+    expect(errorOf(full)).toEqual([
+      403,
+      "org_policy",
+      "Permission mode: Your organization's Work Zone policy does not allow this",
+    ]);
+    expect((full.body!.error as { details?: unknown }).details).toMatchObject({
+      permission: "work_session.configure",
+      layer: "org",
+      reason: "org_policy",
+    });
+  });
+});
+
+describe("the start mode never rises without an explicit mode (APPROVE-04, T-07.5-05-01)", () => {
+  beforeAll(async () => {
+    // Full access allowed everywhere: organization policy, the device's opt-in, and Sam owns the device.
+    const put = await admin.request("PUT", "/api/v1/work-zone-policy", { allowFullAccess: true });
+    expect(put.status, JSON.stringify(put.body)).toBe(200);
+    device.capabilities([CLAUDE_CATALOG, CODEX_CATALOG], true);
+    await eventually(async () => {
+      const r = await su.query("select full_access_opt_in from app.devices where id = $1", [deviceId]);
+      return r.rows[0].full_access_opt_in === true;
+    });
+  });
+
+  it("with full access allowed for Sam, a call without a mode starts at default", async () => {
+    // Not vacuous: Full access is available to Sam on this device right now.
+    const controls = await sam.request(
+      "GET",
+      `/api/v1/work-zone/controls?deviceId=${deviceId}&runtime=claude-code`,
+    );
+    expect(controls.status, JSON.stringify(controls.body)).toBe(200);
+    const modes = (controls.body as { permissionModes: Array<{ value: string; available: boolean }> })
+      .permissionModes;
+    for (const m of ["fullAccess", "auto", "acceptEdits"]) {
+      expect(modes.find((x) => x.value === m)?.available, m).toBe(true);
+    }
+    const res = await startAs(samId, proposal(), { proposedByAgentId: botId });
+    expect(res.ok, JSON.stringify(res)).toBe(true);
+    if (!res.ok) return;
+    expect(res.session.permissionMode).toBe("default");
+    expect(res.session.fullAccess).toBe(false);
+    const start = await device.command("session.start", res.session.id);
+    expect(start.payload.permissionMode).toBe("default");
+    device.ack(start.id);
+  });
+
+  it("a member whose grant is capped at plan starts at plan (lowered, never refused for the default)", async () => {
+    await su.query(
+      `insert into app.device_grants (organization_id, device_id, principal_kind, principal_id, max_mode)
+       values ($1, $2, 'user', $3, 'plan')`,
+      [orgId, deviceId, rexId],
+    );
+    const res = await startAs(rexId, proposal(), { proposedByAgentId: botId });
+    expect(res.ok, JSON.stringify(res)).toBe(true);
+    if (!res.ok) return;
+    expect(res.session).toMatchObject({ createdBy: rexId, permissionMode: "plan" });
+    const start = await device.command("session.start", res.session.id);
+    expect(start.payload.permissionMode).toBe("plan");
+    device.ack(start.id);
+  });
+});
+
+describe("proposed by reaches every prompt view (UI-SPEC Surface 3)", () => {
+  type PromptDto = {
+    id: string;
+    authorUserId: string;
+    proposedBy: { agentId: string; displayName: string } | null;
+  };
+
+  it("REST and prompt.updated name the bot on the proposed prompt and null on Sam's own", async () => {
+    // The bot used here is a fresh one, deleted at the end.
+    const helper = randomUUID();
+    await su.query(
+      `insert into app.agents (id, organization_id, name, username, instructions, model_provider, model_id, status, scope, owner_user_id)
+       values ($1, $2, 'Release bot', 'release-bot', '', 'mock', 'mock', 'ready', 'personal', $3)`,
+      [helper, orgId, samId],
+    );
+    const res = await startAs(samId, proposal({ prompt: "Cut the release notes" }), {
+      proposedByAgentId: helper,
+    });
+    expect(res.ok, JSON.stringify(res)).toBe(true);
+    if (!res.ok) return;
+    const id = res.session.id;
+    device.ack((await device.command("session.start", id)).id);
+    const typed = await sam.request("POST", `/api/v1/work-sessions/${id}/prompts`, {
+      body: "Also bump the version",
+    });
+    expect(typed.status, JSON.stringify(typed.body)).toBe(200);
+    expect((typed.body as unknown as PromptDto).proposedBy).toBeNull();
+
+    const prompts = async () => {
+      const d = await sam.request("GET", `/api/v1/work-sessions/${id}`);
+      expect(d.status, JSON.stringify(d.body)).toBe(200);
+      return (d.body as { prompts: PromptDto[] }).prompts;
+    };
+    let list = await prompts();
+    expect(list.map((p) => p.proposedBy)).toEqual([{ agentId: helper, displayName: "Release bot" }, null]);
+    expect(list.every((p) => p.authorUserId === samId)).toBe(true);
+
+    const events = await su.query(
+      "select payload from app.stream_events where stream_id = $1 and type = 'prompt.updated' order by seq",
+      [`ws:${id}`],
+    );
+    const proposedEvents = events.rows.filter((r) => r.payload.id === list[0]!.id);
+    const typedEvents = events.rows.filter((r) => r.payload.id === list[1]!.id);
+    expect(proposedEvents.length).toBeGreaterThan(0);
+    for (const e of proposedEvents) {
+      expect(e.payload.proposedBy).toEqual({ agentId: helper, displayName: "Release bot" });
+    }
+    for (const e of typedEvents) expect(e.payload.proposedBy).toBeNull();
+
+    // A deleted bot (soft delete, as `DELETE /agents/:id` does) is gone from the prompt; the prompt stays.
+    await su.query("update app.agents set deleted_at = now(), status = 'disabled' where id = $1", [helper]);
+    list = await prompts();
+    expect(list).toHaveLength(2);
+    expect(list.map((p) => p.proposedBy)).toEqual([null, null]);
+
+    // Hard delete: the foreign key clears the column, the prompt stays.
+    await su.query("delete from app.agents where id = $1", [helper]);
+    const row = await su.query("select proposed_by_agent_id from app.work_prompts where id = $1", [
+      list[0]!.id,
+    ]);
+    expect(row.rows).toEqual([{ proposed_by_agent_id: null }]);
+    expect((await prompts()).map((p) => p.proposedBy)).toEqual([null, null]);
   });
 });
