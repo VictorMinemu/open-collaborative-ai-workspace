@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 121
+open_count: 123
 waived_count: 4
-fixed_count: 55
-total_count: 180
-last_updated: 2026-10-14T00:00:48.417Z
+fixed_count: 56
+total_count: 183
+last_updated: 2026-10-14T00:13:09.951Z
 ---
 
 # Broken Windows Ledger
@@ -186,7 +186,7 @@ last_updated: 2026-10-14T00:00:48.417Z
 | 169 | 07.4 | deviation | packages/db/src/schema/app.ts |  | Cross-org ids: 07.4 FKs check ids only (RLS bypassed), so a row can reference another org's server/key/agent/template; the API must resolve every id inside withTenant (same pattern as bot_tool_grants) | open |  | 2026-10-13T22:54:38.207Z |  |
 | 170 | 07.4 | deviation | packages/db/src/schema/app.ts |  | No owner-only restrictive DB policy on personal keys or member connector connections (only tenant isolation); enforce owner-only in the API (07.4-07/10) and add a restrictive policy before the gate, as 07.2 did for personal memory | open |  | 2026-10-13T22:54:38.296Z |  |
 | 171 | 07.4 | deviation | packages/db/src/schema/app.ts |  | Template versions are immutable only in the API (no trigger); share resource_id has no FK so deleting a connector or key leaves an inert share row | open |  | 2026-10-13T22:54:38.389Z |  |
-| 172 | 07.4 | deviation | packages/db/src/schema/app.ts |  | vault_items.secret_ref accepts env/file/openbao providers in the DB; D-07 db-only must be enforced by the API; SecretsService.putSealed must accept connector_credential and vault_item (07.4-07/10) | open |  | 2026-10-13T22:54:38.476Z |  |
+| 172 | 07.4 | deviation | packages/db/src/schema/app.ts |  | vault_items.secret_ref accepts env/file/openbao providers in the DB; D-07 db-only must be enforced by the API; SecretsService.putSealed must accept connector_credential and vault_item (07.4-07/10) | fixed |  | 2026-10-13T22:54:38.476Z | 2026-10-14T00:13:09.654Z |
 | 173 | 07.4 | deviation | infra/fake-model/fake-mcp-oauth.mjs |  | The fake shares DCR/CIMD clients across issuers (main and alt); 07.4-10 must prove in the API that client credentials are never reused across issuers; default cimdFetch never runs in tests | open |  | 2026-10-13T22:56:12.635Z |  |
 | 174 | 07.4 | deviation | .planning/phases/07.4-per-member-connectors-agent-keychain-and-templates/07.4-VALIDATION.md |  | Plans and VALIDATION use 'node --test infra/fake-model/' which Node 24 treats as a file; use the glob form | open |  | 2026-10-13T22:56:12.721Z |  |
 | 175 | 07.4 | deviation | apps/api/src/lib/egress.ts |  | MCP SDK OAuth helpers and transports fall back to global fetch without fetchFn and no rule catches the missing argument; every 07.4 SDK call must pass egress.bound(policy) (check in 07.4-10/11 and the gate) | open |  | 2026-10-13T22:56:48.885Z |  |
@@ -195,6 +195,9 @@ last_updated: 2026-10-14T00:00:48.417Z
 | 178 | 07.4 | deviation | packages/contracts/src/mcp.ts |  | memberHeaderName is not checked against forbidden headers in the schema (import cycle); 07.4-06 and 07.4-10 must apply isAllowedInjectionHeader() on the server | open |  | 2026-10-13T23:06:15.041Z |  |
 | 179 | 07.4 | deviation | apps/api/src/modules/mcp |  | CIMD is chosen even when the AS cannot read the document (e.g. internal CA); 07.4-10 must allow preferring DCR or pre-registration; servers without RFC 9728 metadata cannot be connected per member | open |  | 2026-10-14T00:00:48.322Z |  |
 | 180 | 07.4 | deviation | apps/api/src/modules/mcp |  | No positive SSE round-trip test (fake speaks only streamable HTTP); MCP session not closed with DELETE after a timeout; revokeToken Basic-encodes client id/secret (SDK does not) | open |  | 2026-10-14T00:00:48.417Z |  |
+| 181 | 07.4 | deviation | apps/api/src/modules/keychain |  | OAuth keychain token URLs must be https but the e2e fake on :4291 is http; 07.4-13/14 need an https fake or a test-host exemption | open |  | 2026-10-14T00:13:09.756Z |  |
+| 182 | 07.4 | deviation | packages/db/sql/post-migrate.sql |  | agent_vault_grants has no owner-only policy: grants on personal keys (ids only) are visible to any session in the org | open |  | 2026-10-14T00:13:09.855Z |  |
+| 183 | 07.4 | deviation | apps/api/src/modules/keychain |  | 07.4-11 must run keychain use with the turn's human as the RLS user (never no user or another member); CODEOWNERS does not cover modules/keychain; client-credentials token cache is per process (not in an ADR) | open |  | 2026-10-14T00:13:09.951Z |  |
 
 ````json
 [
@@ -2257,10 +2260,10 @@ last_updated: 2026-10-14T00:00:48.417Z
     "file": "packages/db/src/schema/app.ts",
     "line": null,
     "description": "vault_items.secret_ref accepts env/file/openbao providers in the DB; D-07 db-only must be enforced by the API; SecretsService.putSealed must accept connector_credential and vault_item (07.4-07/10)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T22:54:38.476Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-14T00:13:09.654Z"
   },
   {
     "id": 173,
@@ -2356,6 +2359,42 @@ last_updated: 2026-10-14T00:00:48.417Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-14T00:00:48.417Z",
+    "resolved_at": null
+  },
+  {
+    "id": 181,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "apps/api/src/modules/keychain",
+    "line": null,
+    "description": "OAuth keychain token URLs must be https but the e2e fake on :4291 is http; 07.4-13/14 need an https fake or a test-host exemption",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T00:13:09.756Z",
+    "resolved_at": null
+  },
+  {
+    "id": 182,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "packages/db/sql/post-migrate.sql",
+    "line": null,
+    "description": "agent_vault_grants has no owner-only policy: grants on personal keys (ids only) are visible to any session in the org",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T00:13:09.855Z",
+    "resolved_at": null
+  },
+  {
+    "id": 183,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "apps/api/src/modules/keychain",
+    "line": null,
+    "description": "07.4-11 must run keychain use with the turn's human as the RLS user (never no user or another member); CODEOWNERS does not cover modules/keychain; client-credentials token cache is per process (not in an ADR)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T00:13:09.951Z",
     "resolved_at": null
   }
 ]
