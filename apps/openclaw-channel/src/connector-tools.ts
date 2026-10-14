@@ -41,7 +41,8 @@ import {
  *   - answers with the API's content, or one fixed sentence per refusal code, never the API's error body and never a
  *     fallback to another credential. Logs carry ids and codes only.
  * 07.5 (D-04): the routes decide per-tool approvals too. A 409 approval refusal is the gate's approval sentence naming
- * the logical tool (`APPROVAL_SENTENCES`, with the approver and requester from `details.approval` when valid); the
+ * the logical tool (`APPROVAL_SENTENCES`, with the approver and requester from `details.approval`, or who denied it and
+ * their note from `details.denial` (07.5-11), when valid); the
  * local taint refusal is skipped for a logical tool (or `ocw_http_request`) whose flags carry `approval` (tool-guard.ts).
  * The call-time gate (`before_tool_call`, tool-guard.ts) has already checked the logical tool's flags, the taint and the
  * caps locally; these tools are self-validated by their own routes (never `/tool-calls`).
@@ -137,6 +138,7 @@ export function refusalOf(error: unknown, approval?: ApprovalContext): { code: s
           tool: approval?.tool ?? "that tool",
           waitingFor: details?.waitingFor,
           requesterName: approvalLabel(details?.requesterName) ?? approval?.requesterName,
+          denial: error.denial,
         }),
       };
     }

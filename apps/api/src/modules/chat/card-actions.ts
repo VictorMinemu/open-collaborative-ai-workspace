@@ -349,7 +349,7 @@ export async function mirrorCardDecision(
     /** `running`: an approved grant not used yet (WINDOWS 135); `mirrorCardUsed` turns it `succeeded` on use. */
     status: "running" | "succeeded" | "failed" | "cancelled";
     note?: string | null | undefined;
-  } & Pick<CardAction, "turnUserId" | "decidedBy" | "grant" | "tainted">,
+  } & Pick<CardAction, "turnUserId" | "decidedBy" | "grant" | "tainted" | "resultCode">,
 ): Promise<void> {
   const [after] = await tx
     .update(messageCards)
@@ -389,6 +389,7 @@ export async function mirrorCardDecision(
       ...(a.decidedBy ? { decidedBy: a.decidedBy } : {}),
       ...(a.grant ? { grant: a.grant } : {}),
       ...(a.tainted ? { tainted: true } : {}),
+      ...(a.resultCode ? { resultCode: a.resultCode } : {}),
     },
     tenantOf(tx).afterCommit,
   );

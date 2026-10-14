@@ -481,6 +481,8 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
               : (CARD_STATUS[status] ?? "succeeded"),
           note,
           ...(await cardTurnOf(tx, kind, final, input, dir)),
+          // 07.5-11: an approved request that failed to apply tells the bot why (the card already shows it).
+          ...(final.status === "failed" && final.resultCode ? { resultCode: final.resultCode } : {}),
         });
       }
       return summaryOf({ ...final, expired: false }, dir, false);

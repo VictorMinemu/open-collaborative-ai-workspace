@@ -337,6 +337,8 @@ describe("tracer: a side-effecting MCP call after approval runs exactly once, fo
       useBy: expect.any(String),
     });
     expect((await turnRow(rerun.eventId)).user_id).toBe(s.samId);
+    expect(rerun.cardAction).not.toHaveProperty("note");
+    expect(rerun.cardAction).not.toHaveProperty("resultCode");
   });
 
   it("the re-run sends the same call (keys in another order): allowed once, the grant consumed in the claim", async () => {
@@ -553,6 +555,16 @@ describe("a connector write cannot bypass the rule, and a lead's approval acts w
     expect(codeOf(asked)).toBe("approval_required");
     const id = asked.body?.error.details.approval.id as string;
     expect((await decide(marta, id, "denied", "Duplicate invoice")).status).toBe(200);
+    // The denial's turn (Sam's) carries the note as a field and no grant (07.5-11: no sentence parsing in the cell).
+    const told = await rerunOf(id);
+    expect(told.message.author.id).toBe(s.samId);
+    expect(told.cardAction).toMatchObject({
+      outcome: "denied",
+      note: "Duplicate invoice",
+      decidedBy: { id: martaId, displayName: "Marta Gil" },
+    });
+    expect(told.cardAction).not.toHaveProperty("grant");
+    expect(told.cardAction).not.toHaveProperty("resultCode");
     const again = await cell("/connectors/call", body);
     expect(again.status).toBe(409);
     expect(codeOf(again)).toBe("approval_denied");

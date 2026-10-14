@@ -7,7 +7,7 @@ import {
   SubscriptionProviderKind,
 } from "./agent";
 import { AgentCardInput, AgentCardKind, AgentCardPatch } from "./agent-cards";
-import { APPROVAL_NOTE_MAX } from "./approvals";
+import { APPROVAL_NOTE_MAX, ApprovalNote } from "./approvals";
 import {
   BOARD_CARD_DESCRIPTION_MAX,
   BOARD_MAX_COLUMNS,
@@ -170,6 +170,16 @@ export const AgentCardActionEvent = AgentMentionEvent.omit({ type: true }).exten
         useBy: IsoDateTime,
       })
       .optional(),
+    /**
+     * Phase 07.5 (07.5-11): the decider's own note (UI-SPEC R4) as a field, so the bot never parses it out of the
+     * sentence (which still quotes it). Absent without a note.
+     */
+    note: ApprovalNote.optional(),
+    /**
+     * Phase 07.5 (07.5-11): an approved `server_apply` request that failed to apply carries the kind's result code (a
+     * Work Zone Start: `device_offline`, `runtime_unavailable`, …), so the bot can tell its person what went wrong.
+     */
+    resultCode: z.string().max(64).optional(),
   }),
 });
 export type AgentCardActionEvent = z.infer<typeof AgentCardActionEvent>;

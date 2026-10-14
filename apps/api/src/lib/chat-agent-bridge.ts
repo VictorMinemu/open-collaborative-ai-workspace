@@ -119,6 +119,11 @@ export interface CardAction {
   grant?: { tool: string; arguments: string; useBy: string } | undefined;
   /** The request came from a tainted turn: the re-run turn starts tainted (set in the same transaction). */
   tainted?: boolean | undefined;
+  /**
+   * 07.5-11: an approved `server_apply` request whose apply failed: the kind's result code (`cardAction.resultCode`), so
+   * the bot hears what went wrong, not only "approved".
+   */
+  resultCode?: string | undefined;
 }
 
 /** The approval a platform-owned card mirrors, as chat shows it (no viewer fields): the 07.2 link. */

@@ -273,6 +273,9 @@ export async function emitCardAction(
         outcome: a.outcome,
         ...(a.decidedBy ? { decidedBy: a.decidedBy } : {}),
         ...(a.grant && a.outcome === "approved" ? { grant: a.grant } : {}),
+        // 07.5-11: the note as a field (the sentence still quotes it) and a failed apply's code.
+        ...(a.note ? { note: a.note } : {}),
+        ...(a.resultCode && a.outcome === "approved" ? { resultCode: a.resultCode.slice(0, 64) } : {}),
       },
     };
     await core.realtime.appendEvent(

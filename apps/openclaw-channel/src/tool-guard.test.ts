@@ -809,12 +809,17 @@ describe("per-tool approvals (07.5-04, D-01, D-02, D-04, UI-SPEC R10)", () => {
     return g;
   }
   const refuse =
-    (reason: string, approval: typeof APPROVAL | null = null) =>
+    (
+      reason: string,
+      approval: typeof APPROVAL | null = null,
+      denial: { deciderName: string; note: string | null } | null = null,
+    ) =>
     async (): Promise<AgentChannelToolCallDecision> => ({
       callId: "c-ap",
       allowed: false,
       reason,
       ...(approval ? { approval } : {}),
+      ...(denial ? { denial } : {}),
     });
 
   it("a flagged tool's call carries its full arguments; the approval-required sentence is returned at once", async () => {
@@ -881,6 +886,34 @@ describe("per-tool approvals (07.5-04, D-01, D-02, D-04, UI-SPEC R10)", () => {
       block: true,
       blockReason: sentence,
     });
+  });
+
+  it("07.5-11: approval_denied names the decider and quotes their note from the decision, sanitized and bounded", async () => {
+    const fake = fakeClient();
+    fake.decide = refuse("approval_denied", null, { deciderName: "Marta Gil", note: "Duplicate invoice" });
+    expect((await approvalGuard(fake).beforeToolCall(call(NOTE, { text: "x" }), ctx()))?.blockReason).toBe(
+      "Marta Gil denied this exact action. Their note: “Duplicate invoice”. Don't retry it. Tell Ana Pérez it was denied and ask what to change.",
+    );
+    fake.decide = refuse("approval_denied", null, {
+      deciderName: "Marta\nGil <admin>",
+      note: `Line one\nline \u202etwo \`x\` ${"y".repeat(400)}`,
+    });
+    const reason =
+      (await approvalGuard(fake).beforeToolCall(call(NOTE, { text: "x" }), ctx()))?.blockReason ?? "";
+    expect(
+      reason.startsWith("Marta Gil admin denied this exact action. Their note: “Line one line two x yyy"),
+    ).toBe(true);
+    expect(reason).not.toContain("\u202e");
+    expect(reason).not.toContain("y".repeat(281));
+    // Without a note there is no note; without a denial the approver label (or "An approver") is named.
+    fake.decide = refuse("approval_denied", null, { deciderName: "Marta Gil", note: null });
+    expect((await approvalGuard(fake).beforeToolCall(call(NOTE, {}), ctx()))?.blockReason).toBe(
+      "Marta Gil denied this exact action. Don't retry it. Tell Ana Pérez it was denied and ask what to change.",
+    );
+    fake.decide = refuse("approval_denied", null);
+    expect((await approvalGuard(fake).beforeToolCall(call(NOTE, {}), ctx()))?.blockReason).toBe(
+      "An approver denied this exact action. Don't retry it. Tell Ana Pérez it was denied and ask what to change.",
+    );
   });
 
   it("the requester's name comes from the decision first, then the turn, then a neutral fallback", async () => {

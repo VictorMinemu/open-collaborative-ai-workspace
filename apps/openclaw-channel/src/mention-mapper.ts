@@ -390,14 +390,12 @@ export function sanitizeToolName(name: string): string {
 const NOTE_MAX = 280;
 
 /**
- * The decider's note, as the API appends it to the decision sentence (`<name> denied “<title>”: “<note>”`, 07.2 UI-SPEC
- * R4): human-authored, shown back as one bounded line. Undefined when the sentence carries none.
+ * The decider's note (07.5-11: `cardAction.note`, a field; never parsed out of the decision sentence): human-authored,
+ * shown back as one bounded line without controls or structural characters. Undefined when there is none.
  */
-function decisionNote(text: string, title: string): string | undefined {
-  const marker = `“${title}”: “`;
-  const at = text.lastIndexOf(marker);
-  if (at < 0 || !text.endsWith("”")) return undefined;
-  const note = Array.from(text.slice(at + marker.length, -1), (ch) => {
+function decisionNote(raw: string | undefined): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const note = Array.from(raw, (ch) => {
     const c = ch.codePointAt(0) ?? 0;
     return c <= 0x1f || (c >= 0x7f && c <= 0x9f) ? " " : ch;
   })
@@ -411,6 +409,24 @@ function decisionNote(text: string, title: string): string | undefined {
 }
 
 /**
+ * Why an approved request could not be carried out (07.5-11: `cardAction.resultCode`), in words the model can pass on
+ * (UI-SPEC Copywriting › failed reasons). Unknown codes get a neutral sentence; the code itself is never free text.
+ */
+const FAILED_REASONS: Record<string, string> = {
+  device_offline: "the device went offline before the session started",
+  runtime_unavailable: "the runtime isn't installed or signed in on that device any more",
+  project_not_found: "the project was removed",
+  device_not_shared: "they can no longer use that device",
+  settings_denied: "the organization doesn't allow this session's settings",
+  not_allowed: "they may no longer start Work Zone sessions",
+  prompt_not_allowed: "that prompt can't start a session",
+};
+
+function resultCodeOf(raw: string | undefined): string | undefined {
+  return typeof raw === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(raw) ? raw : undefined;
+}
+
+/**
  * `agent.card_action.v1` (06-14, P-11): a human approved or denied one of the agent's cards. Mapped exactly like a
  * mention of the agent on the card's message (same sender, roster, history, thread or flat placement, session and
  * turn tools), plus a structured block naming the card and the outcome, so the persona can continue (for example
@@ -419,7 +435,9 @@ function decisionNote(text: string, title: string): string | undefined {
  * 07.5 (D-02, P-06, Pitfall 1): an approved `grant` becomes the first block, "Approved action", telling the model to
  * call the tool once with exactly the approved canonical arguments (byte for byte, never re-serialized) before the
  * deadline; an oversized grant is dropped and the model is told to ask again. A denial with its decider tells the
- * model who denied what (and the note) and not to run it. Without `grant` or `decidedBy` the block is exactly as before.
+ * model who denied what (and the note, read from `cardAction.note`, 07.5-11) and not to run it. An approved request that
+ * failed to apply (`cardAction.resultCode`, 07.5-11) tells the model why, in words. Without `grant`, `decidedBy` or
+ * `resultCode` the block is exactly as before.
  */
 export function mapCardAction(event: AgentCardActionEvent, bot: CellAgent | undefined): MappedMention {
   const { cardAction, ...rest } = AgentCardActionEvent.parse(event);
@@ -427,6 +445,7 @@ export function mapCardAction(event: AgentCardActionEvent, bot: CellAgent | unde
   const decider = cardAction.decidedBy ? sanitizeName(cardAction.decidedBy.displayName) : undefined;
   const requester = base.sender.name;
   const grant = cardAction.grant;
+  const resultCode = resultCodeOf(cardAction.resultCode);
   let label = "Decision on your card";
   let instruction: string | undefined;
   if (cardAction.outcome === "approved" && grant) {
@@ -437,9 +456,16 @@ export function mapCardAction(event: AgentCardActionEvent, bot: CellAgent | unde
       grant.arguments.length > TOOL_APPROVAL_LIMITS.argumentsBytes
         ? `Approved by ${by}, but the approved arguments were too large to pass on. Don't call ${tool} now; ask ${requester} to ask again.`
         : `Approved by ${by}. Call ${tool} once with exactly these arguments before ${sanitizeName(grant.useBy)}: ${grant.arguments}`;
+  } else if (cardAction.outcome === "approved" && resultCode) {
+    // 07.5-11: approved, but carrying it out failed (a Work Zone Start): say why, so the person hears it.
+    const by = decider ?? "The person";
+    const reason = FAILED_REASONS[resultCode] ?? "it could not be carried out";
+    instruction =
+      `${by} approved “${sanitizeCardTitle(cardAction.title)}”, but it failed: ${reason}. ` +
+      `Don't retry on your own; tell ${requester} what went wrong.`;
   } else if (cardAction.outcome === "denied" && decider) {
     const what = grant ? sanitizeToolName(grant.tool) : `“${sanitizeCardTitle(cardAction.title)}”`;
-    const note = decisionNote(rest.message.text, cardAction.title);
+    const note = decisionNote(cardAction.note);
     instruction = `${decider} denied ${what}.${note ? ` Note: “${note}”.` : ""} Don't run it; tell ${requester}.`;
   }
   const block: ContextBlock = {
@@ -454,6 +480,7 @@ export function mapCardAction(event: AgentCardActionEvent, bot: CellAgent | unde
       },
       outcome: cardAction.outcome,
       ...(decider ? { decidedBy: decider } : {}),
+      ...(resultCode && cardAction.outcome === "approved" ? { resultCode } : {}),
       ...(instruction ? { instruction } : {}),
     },
   };
