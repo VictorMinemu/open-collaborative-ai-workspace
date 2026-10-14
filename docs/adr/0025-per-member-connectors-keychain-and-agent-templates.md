@@ -96,7 +96,9 @@ forgery surface the API did not have before.
 10. **Templates fork (D-05).** `agent_templates` are unit-scoped, versioned and immutable once published (a trigger
     refuses any update). Starting one creates the member's own personal agent through `createPersonalBot` with
     `template_id` and version, its own memory and connections, filtered by the personal-agent caps (what was left out is
-    shown). A newer version is an "update available" notice only the owner can apply.
+    shown). A newer version is an "update available" notice only the owner can apply. A unit's keys and live templates
+    hold the unit: deleting it answers 409 `unit_has_keys` / `unit_has_templates` (like bots and memory), and archived
+    templates go with it while agents started from them keep their copy.
 11. **Module access stays a catalog (ADR-0024).** Bots now also covers `connector.connect` and `vault.use`; units and
     organizations that turned Bots off before 07.4 are completed by the forward-only backfill `20261014042429` (#177).
     Withdrawal never needs the module: with connecting denied, Settings › Connections lists the member's own
@@ -143,7 +145,8 @@ Every behaviour above runs against the fake OAuth MCP server and fake keychain t
 smoke. **Real-provider interoperability (research A3) is pending the owner:** on an HTTPS instance, register a real
 MCP server per member (pre-registered client, or CIMD where the provider supports it), connect two members, check each
 answer comes from its own account, let a token expire and confirm the silent refresh, and disconnect to confirm the
-revocation at the provider. Record the outcome here in a superseding ADR if anything differs.
+revocation at the provider. Record the outcome in `07.4-VALIDATION.md` (Manual-Only Verifications); anything that
+differs from this record goes into a superseding ADR.
 
 ### Deferred
 

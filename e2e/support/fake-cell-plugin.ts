@@ -519,7 +519,8 @@ export class FakeCellPlugin {
 
   /**
    * `ocw_connector_list | ocw_connector_call | ocw_http_request` the way apps/openclaw-channel's connector-tools.ts
-   * sends them (07.4-09): only the mention's event and agent ids beside the model's arguments, never a user id or a
+   * sends them (07.4-09) to `POST /agent-channel/v1/connectors/list`, `/agent-channel/v1/connectors/call` and
+   * `/agent-channel/v1/http-requests`: only the mention's event and agent ids beside the model's arguments, never a user id or a
    * credential (the API binds the asker to the stored turn). A connector call whose logical tool `<safe>__<tool>` is not
    * on the turn is not sent: withheld as `member_account` it reads `refused (member_account)`, else `not offered`.
    * Answers: list `<n> connectors, <k> keys`; call the API's content (`error: …` when it is an error result); http
