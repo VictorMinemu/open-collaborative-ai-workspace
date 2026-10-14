@@ -30,7 +30,7 @@ import { createAiChatModule } from "./modules/ai-chat";
 import { type ApprovalService, createApprovalModule } from "./modules/approval";
 import { createArtifactModule, type ObjectStorage } from "./modules/artifact";
 import { createAuditService } from "./modules/audit";
-import { createBotCapabilitiesModule } from "./modules/bot-capabilities";
+import { createBotCapabilitiesModule, loadCatalog } from "./modules/bot-capabilities";
 import { createChatModule, createConversationAccess } from "./modules/chat";
 import { createConnectorsModule } from "./modules/connectors";
 import { createDeviceModule, type DeviceHub } from "./modules/device";
@@ -45,6 +45,7 @@ import { createPluginsModule } from "./modules/plugins";
 import { createOnlineSet, createRealtimeModule, createRealtimeService } from "./modules/realtime";
 import { createSearchModule } from "./modules/search";
 import { createSecretsModule, createSecretsService } from "./modules/secrets";
+import { createToolApprovalModule, type ToolApprovalService } from "./modules/tool-approval";
 import { createWorkSessionAttachmentScope, createWorkSessionModule } from "./modules/work-session";
 import { stripQueryStrings } from "./telemetry/redact";
 import { API_VERSION } from "./version";
@@ -64,6 +65,8 @@ export interface BuiltApp {
   approvals: ApprovalService;
   /** The memory domain (07.2-08): 07.2-09 registers its approval kind with it, 07.2-11 serves agents from it. */
   memory: MemoryService;
+  /** Per-tool approval policies (07.5-03): the gate (07.5-07) and turn assembly (07.5-11) resolve through it. */
+  toolApprovals: ToolApprovalService;
   close(): Promise<void>;
 }
 
@@ -280,6 +283,8 @@ export async function buildApp(
   const approvals = createApprovalModule(core);
   // Phase 07.2: scoped memory files (MEM-01, MEM-02, MEM-07); proposals register on `approvals` (07.2-09).
   const memory = createMemoryService(core, { approvals: approvals.service });
+  // Phase 07.5: per-tool approval policies; the catalog loader is injected (the module never imports bot-capabilities).
+  const toolApproval = createToolApprovalModule(core, { approvals: approvals.service, loadCatalog });
   const modules: ApiModule[] = [
     createIdentityModule({
       identity,
@@ -310,6 +315,7 @@ export async function buildApp(
     createWorkSessionModule(core, deviceModule.hub, { storage: artifactModule.storage }), // B3; 06.1: image bytes
     approvals.module, // Phase 07.2: approvals inbox and decisions (MEM-06)
     createMemoryModule(core, memory), // Phase 07.2: memory scopes, files and history (MEM-01, MEM-02, MEM-07)
+    toolApproval.module, // Phase 07.5: approval policies per tool (APPROVE-01)
   ];
   for (const m of modules) {
     await app.register(async (scope) => m.register(scope as unknown as App), {
@@ -325,6 +331,7 @@ export async function buildApp(
     storage: artifactModule.storage,
     approvals: approvals.service,
     memory,
+    toolApprovals: toolApproval.service,
     async close() {
       await app.close();
       for (const m of modules) await m.close?.();
