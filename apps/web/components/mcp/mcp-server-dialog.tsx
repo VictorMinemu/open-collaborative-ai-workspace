@@ -22,11 +22,20 @@ import {
   Save,
   ShieldCheck,
   TriangleAlert,
+  Unplug,
   X,
 } from "lucide-react";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog as PlainDialog,
+  DialogContent as PlainDialogContent,
+  DialogDescription as PlainDialogDescription,
+  DialogFooter as PlainDialogFooter,
+  DialogHeader as PlainDialogHeader,
+  DialogTitle as PlainDialogTitle,
+} from "@/components/ui/dialog";
 import { describedBy, FormField } from "@/components/ui/form-field";
 import { Input } from "@/components/ui/input";
 import {
@@ -42,7 +51,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/u
 import { Spinner } from "@/components/ui/spinner";
 import { useCopy } from "@/hooks/use-copy";
 import { errorMessage, isApiError } from "@/lib/api";
-import { useCreateMcpServer, useUpdateMcpServer } from "@/lib/mcp-queries";
+import { connectionsExistCount, useCreateMcpServer, useUpdateMcpServer } from "@/lib/mcp-queries";
 import { cn } from "@/lib/utils";
 
 export const TRANSPORTS: Array<{ value: McpTransport; label: string; hint: string }> = [
@@ -189,6 +198,8 @@ function ServerForm({
   const [clientSecret, setClientSecret] = useState("");
   const [scopes, setScopes] = useState((server?.oauthScopes ?? []).join(" "));
   const [errors, setErrors] = useState<Errors>({});
+  /** The mode-switch confirmation: how many members it disconnects and the PATCH it will send. */
+  const [confirm, setConfirm] = useState<{ count: number; body: UpdateMcpServerRequest } | null>(null);
   const pending = create.isPending || update.isPending;
   const sandboxed = transport === "sandboxed-stdio";
   /** Sign-in stays selectable for a server already in that mode, so an admin can still edit it. */
@@ -323,70 +334,109 @@ function ServerForm({
     return out;
   }
 
+  function showError(err: unknown) {
+    const code = isApiError(err) ? err.code : "";
+    const message = errorMessage(err);
+    if (code === "invalid_url" || code === "url_required" || code === "url_not_allowed") {
+      setErrors({ url: message });
+    } else if (code === "unknown_sandbox_server" || code === "sandbox_unavailable") {
+      setErrors({ sandboxServer: message });
+    } else if (code === "member_header_forbidden" || code === "member_header_required") {
+      setErrors({ memberHeader: message });
+    } else if (code === "invalid_scope") {
+      setErrors({ scopes: message });
+    } else {
+      setErrors({ form: message });
+    }
+  }
+
+  function finish() {
+    setHeaders([]);
+    setClientSecret("");
+    onDone();
+  }
+
+  async function saveUpdate(body: UpdateMcpServerRequest) {
+    if (Object.keys(body).length > 0) await update.mutateAsync(body);
+    toast.success(`${name.trim()} saved`, {
+      description:
+        authMode === "org_secret" && (body.url || body.headers || body.sandboxServer || body.authMode)
+          ? "Its tools are being checked again."
+          : undefined,
+    });
+    finish();
+  }
+
   async function submit(e: FormEvent) {
     e.preventDefault();
     const next = validate();
     setErrors(next);
     if (Object.keys(next).length > 0) return;
+    if (server) {
+      const body: UpdateMcpServerRequest = {};
+      if (name.trim() !== server.name) body.name = name.trim();
+      if (!sandboxed && url.trim() !== (server.url ?? "")) body.url = url.trim();
+      if (sandboxed && sandboxServer !== server.sandboxServer) body.sandboxServer = sandboxServer;
+      const modeChanged = authMode !== server.authMode;
+      if (modeChanged) body.authMode = authMode;
+      if (authMode === "org_secret") {
+        const headersChanged =
+          headers.length !== server.headers.length ||
+          headers.some((h) => !h.stored || h.replace) ||
+          headers.some((h, i) => h.name.trim() !== server.headers[i]?.name);
+        if (headersChanged) body.headers = headerInputs();
+      }
+      Object.assign(body, updateConnectorFields(server, modeChanged));
+      // Leaving a member mode deletes every member's sign-in or key: ask first, with the count the list already has
+      // (R4). Nothing is sent until the admin confirms.
+      if (modeChanged && server.authMode !== "org_secret" && server.memberConnections > 0) {
+        setConfirm({ count: server.memberConnections, body });
+        return;
+      }
+      try {
+        await saveUpdate(body);
+      } catch (err) {
+        // Fallback: members connected since the list loaded. The same confirmation opens with the server's count.
+        const count = connectionsExistCount(err);
+        if (count !== null) setConfirm({ count, body });
+        else showError(err);
+      }
+      return;
+    }
     try {
-      if (server) {
-        const body: UpdateMcpServerRequest = {};
-        if (name.trim() !== server.name) body.name = name.trim();
-        if (!sandboxed && url.trim() !== (server.url ?? "")) body.url = url.trim();
-        if (sandboxed && sandboxServer !== server.sandboxServer) body.sandboxServer = sandboxServer;
-        const modeChanged = authMode !== server.authMode;
-        if (modeChanged) body.authMode = authMode;
-        if (authMode === "org_secret") {
-          const headersChanged =
-            headers.length !== server.headers.length ||
-            headers.some((h) => !h.stored || h.replace) ||
-            headers.some((h, i) => h.name.trim() !== server.headers[i]?.name);
-          if (headersChanged) body.headers = headerInputs();
-        }
-        Object.assign(body, updateConnectorFields(server, modeChanged));
-        if (Object.keys(body).length > 0) await update.mutateAsync(body);
-        toast.success(`${name.trim()} saved`, {
-          description:
-            body.url || body.headers || body.sandboxServer ? "Its tools are being checked again." : undefined,
-        });
-      } else {
-        const body: CreateMcpServerRequest = {
-          name: name.trim(),
-          transport,
-          ...(sandboxed ? { sandboxServer } : { url: url.trim() }),
-          // Values typed in a hidden block are discarded: only the chosen mode's fields are sent.
-          headers: authMode === "org_secret" ? headerInputs() : [],
-          orgEnabled: true,
-          personalAllowed: false,
-          trustedChaining: false,
-          authMode,
-          ...createConnectorFields(),
-        };
-        await create.mutateAsync(body);
-        toast.success(`${body.name} added`, {
-          description:
-            authMode === "org_secret"
-              ? "Your bots' runtime is discovering its tools."
-              : "Its tools appear after the first member connects.",
-        });
-      }
-      setHeaders([]);
-      setClientSecret("");
-      onDone();
+      const body: CreateMcpServerRequest = {
+        name: name.trim(),
+        transport,
+        ...(sandboxed ? { sandboxServer } : { url: url.trim() }),
+        // Values typed in a hidden block are discarded: only the chosen mode's fields are sent.
+        headers: authMode === "org_secret" ? headerInputs() : [],
+        orgEnabled: true,
+        personalAllowed: false,
+        trustedChaining: false,
+        authMode,
+        ...createConnectorFields(),
+      };
+      await create.mutateAsync(body);
+      toast.success(`${body.name} added`, {
+        description:
+          authMode === "org_secret"
+            ? "Your bots' runtime is discovering its tools."
+            : "Its tools appear after the first member connects.",
+      });
+      finish();
     } catch (err) {
-      const code = isApiError(err) ? err.code : "";
-      const message = errorMessage(err);
-      if (code === "invalid_url" || code === "url_required" || code === "url_not_allowed") {
-        setErrors({ url: message });
-      } else if (code === "unknown_sandbox_server" || code === "sandbox_unavailable") {
-        setErrors({ sandboxServer: message });
-      } else if (code === "member_header_forbidden" || code === "member_header_required") {
-        setErrors({ memberHeader: message });
-      } else if (code === "invalid_scope") {
-        setErrors({ scopes: message });
-      } else {
-        setErrors({ form: message });
-      }
+      showError(err);
+    }
+  }
+
+  async function confirmSwitch() {
+    if (!confirm) return;
+    try {
+      await saveUpdate({ ...confirm.body, clearConnections: true });
+      setConfirm(null);
+    } catch (err) {
+      setConfirm(null);
+      showError(err);
     }
   }
 
@@ -912,6 +962,17 @@ function ServerForm({
           {editing ? "Save" : "Add server"}
         </Button>
       </DialogFooter>
+      {server ? (
+        <ClearConnectionsDialog
+          open={confirm !== null}
+          count={confirm?.count ?? 0}
+          serverName={server.name}
+          toMode={authMode}
+          pending={update.isPending}
+          onCancel={() => setConfirm(null)}
+          onConfirm={() => void confirmSwitch()}
+        />
+      ) : null}
     </form>
   );
 }
@@ -961,5 +1022,65 @@ function CopyField({
         </span>
       </div>
     </FormField>
+  );
+}
+
+/**
+ * "Disconnect {n} members?" before a mode switch (UI-SPEC § 1): focus starts on Cancel; nothing is revoked at the
+ * provider, so the copy promises only that the saved sign-ins and keys are deleted.
+ */
+function ClearConnectionsDialog({
+  open,
+  count,
+  serverName,
+  toMode,
+  pending,
+  onCancel,
+  onConfirm,
+}: {
+  open: boolean;
+  count: number;
+  serverName: string;
+  toMode: ConnectorAuthMode;
+  pending: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const mode = AUTH_MODES.find((m) => m.value === toMode)?.label ?? toMode;
+  return (
+    <PlainDialog open={open} onOpenChange={(o) => !o && !pending && onCancel()}>
+      <PlainDialogContent data-testid="mcp-clear-connections-confirm" initialFocus={cancelRef}>
+        <PlainDialogHeader>
+          <span className="mb-1 flex size-10 items-center justify-center rounded-xl border border-destructive/25 bg-destructive/10 text-destructive shadow-xs">
+            <Unplug className="size-5" strokeWidth={1.75} aria-hidden />
+          </span>
+          <PlainDialogTitle>
+            {count === 1 ? "Disconnect 1 member?" : `Disconnect ${count} members?`}
+          </PlainDialogTitle>
+          <PlainDialogDescription>
+            Switching {serverName} to {mode} deletes every member's saved sign-in or key.{" "}
+            {toMode === "org_secret"
+              ? "Bots stop acting with members' own accounts."
+              : "They'll need to connect again."}
+          </PlainDialogDescription>
+        </PlainDialogHeader>
+        <PlainDialogFooter>
+          <Button ref={cancelRef} variant="outline" onClick={onCancel} disabled={pending} className={TOUCH}>
+            Cancel
+          </Button>
+          <Button
+            variant="destructive"
+            onClick={onConfirm}
+            disabled={pending}
+            className={TOUCH}
+            data-testid="mcp-clear-connections-submit"
+          >
+            {pending ? <Spinner /> : <Unplug />}
+            Switch and disconnect {count}
+          </Button>
+        </PlainDialogFooter>
+      </PlainDialogContent>
+    </PlainDialog>
   );
 }

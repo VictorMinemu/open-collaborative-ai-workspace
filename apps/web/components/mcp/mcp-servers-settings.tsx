@@ -2,7 +2,7 @@
 
 import type { McpServer, McpServerList } from "@ocw/contracts";
 import { KeyRound, Pencil, Plug, Plus, RefreshCw, ShieldCheck, Trash2, TriangleAlert } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
 import { Badge } from "@/components/ui/badge";
@@ -19,7 +19,13 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { errorMessage } from "@/lib/api";
-import { useDeleteMcpServer, useMcpServers, useProbeMcpServer, useUpdateMcpServer } from "@/lib/mcp-queries";
+import {
+  connectionsExistCount,
+  useDeleteMcpServer,
+  useMcpServers,
+  useProbeMcpServer,
+  useUpdateMcpServer,
+} from "@/lib/mcp-queries";
 import { useCan, usePermissions } from "@/lib/permissions";
 import { cn, relativeTime } from "@/lib/utils";
 import { McpServerDialog, TRANSPORTS } from "./mcp-server-dialog";
@@ -62,12 +68,18 @@ const MODE_BADGE: Record<McpServer["authMode"], string | null> = {
   per_member_secret: "Member key",
 };
 
+/**
+ * The Agent Card pill colours (AA in light and dark, UI-SPEC § Color): the Badge `warning` variant's amber text on its
+ * own tint is under 4.5:1 in light mode, so these badges carry explicit amber / red classes.
+ */
+const AMBER = "border-transparent bg-amber-100 text-amber-800 dark:bg-amber-400/15 dark:text-amber-300";
+const RED = "border-transparent bg-red-100 text-red-800 dark:bg-red-400/15 dark:text-red-300";
 const OAUTH_BADGE: Partial<
-  Record<NonNullable<McpServer["oauthStatus"]>, { label: string; variant: "warning" | "destructive" }>
+  Record<NonNullable<McpServer["oauthStatus"]>, { label: string; className: string }>
 > = {
-  needs_client: { label: "Needs an OAuth client", variant: "warning" },
-  https_required: { label: "Needs HTTPS", variant: "warning" },
-  error: { label: "Sign-in error", variant: "destructive" },
+  needs_client: { label: "Needs an OAuth client", className: AMBER },
+  https_required: { label: "Needs HTTPS", className: AMBER },
+  error: { label: "Sign-in error", className: RED },
 };
 
 export function memberCountLabel(n: number): string {
@@ -165,7 +177,7 @@ export function McpServersSettings() {
           </Button>
         </div>
       ) : (
-        <ul className="grid gap-3">
+        <ul className="grid gap-3" aria-label="MCP servers" data-testid="mcp-server-list">
           {servers.map((s) => (
             <li key={s.id}>
               <ServerCard server={s} onEdit={() => setEditing(s)} />
@@ -200,6 +212,10 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
   const probe = useProbeMcpServer(server.id);
   const remove = useDeleteMcpServer(server.id);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  /** Members a delete disconnects: the DTO's count, or the 409's when members connected since the list loaded. */
+  const [deleteCount, setDeleteCount] = useState<number | null>(null);
+  const members = deleteCount ?? server.memberConnections;
+  const cancelDeleteRef = useRef<HTMLButtonElement>(null);
   const perMember = server.authMode !== "org_secret";
   const status = perMember && server.status === "pending" ? MEMBER_PENDING : STATUS[server.status];
   const transport = TRANSPORTS.find((t) => t.value === server.transport)?.label ?? server.transport;
@@ -225,11 +241,14 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
 
   async function onDelete() {
     try {
-      await remove.mutateAsync({});
+      await remove.mutateAsync({ clearConnections: members > 0 });
       setConfirmDelete(false);
       toast.success(`${server.name} removed`, { description: "Its tools were taken off every bot." });
     } catch (err) {
-      toast.error("Could not remove the server", { description: errorMessage(err) });
+      // Fallback (R4): the same dialog updates in place with the server's count; the next click confirms it.
+      const count = connectionsExistCount(err);
+      if (count !== null) setDeleteCount(count);
+      else toast.error("Could not remove the server", { description: errorMessage(err) });
     }
   }
 
@@ -265,7 +284,7 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
             ) : null}
             {oauthBadge ? (
               <Badge
-                variant={oauthBadge.variant}
+                className={oauthBadge.className}
                 data-testid="mcp-oauth-status"
                 data-status={server.oauthStatus}
               >
@@ -285,10 +304,13 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
             <p className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 text-muted-foreground text-xs">
               <span data-testid="mcp-member-count">{memberCountLabel(server.memberConnections)}</span>
               {preRegistered ? (
-                <>
-                  <span aria-hidden>·</span>
-                  <span className="truncate">Client: pre-registered ({hostOf(preRegistered.issuer)})</span>
-                </>
+                // On a phone the client takes its own line (no separator); on wider screens it follows the count.
+                <span className="truncate">
+                  <span aria-hidden className="max-sm:hidden">
+                    ·{" "}
+                  </span>
+                  Client: pre-registered ({hostOf(preRegistered.issuer)})
+                </span>
               ) : null}
             </p>
           ) : null}
@@ -421,27 +443,46 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
         </div>
       </div>
 
-      <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
-        <DialogContent data-testid="mcp-delete-dialog">
+      <Dialog
+        open={confirmDelete}
+        onOpenChange={(o) => {
+          setConfirmDelete(o);
+          if (!o) setDeleteCount(null);
+        }}
+      >
+        <DialogContent
+          data-testid="mcp-delete-dialog"
+          data-members={members}
+          initialFocus={members > 0 ? cancelDeleteRef : undefined}
+        >
           <DialogHeader>
             <DialogTitle>Delete {server.name}?</DialogTitle>
             <DialogDescription>
-              Its tools are removed from every bot and its stored credentials are deleted. This can't be
-              undone.
+              Its tools are removed from every bot and its stored credentials are deleted.{" "}
+              {members > 0
+                ? `${members === 1 ? "1 member is" : `${members} members are`} connected; their sign-ins and keys are deleted too. `
+                : ""}
+              This can't be undone.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmDelete(false)}>
+            <Button
+              ref={cancelDeleteRef}
+              variant="outline"
+              onClick={() => setConfirmDelete(false)}
+              className={TOUCH}
+            >
               Cancel
             </Button>
             <Button
               variant="destructive"
               onClick={onDelete}
               disabled={remove.isPending}
+              className={TOUCH}
               data-testid="mcp-delete-confirm"
             >
               {remove.isPending ? <Spinner /> : <Trash2 />}
-              Delete server
+              {members > 0 ? `Delete and disconnect ${members}` : "Delete server"}
             </Button>
           </DialogFooter>
         </DialogContent>
