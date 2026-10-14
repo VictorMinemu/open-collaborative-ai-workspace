@@ -593,7 +593,8 @@ test("admin: every connector mode, the HTTPS notice, list badges and the disconn
     await expect(ledger.getByTestId("mcp-tools-empty")).toHaveText(
       "Tools appear after the first member connects.",
     );
-    await expect(ledger.getByTestId("mcp-reprobe")).toHaveCount(0);
+    // A per-member connector's Re-probe uses the admin's own connection (07.4-13, R6).
+    await expect(ledger.getByTestId("mcp-reprobe")).toBeVisible();
     await expect(ledger.getByTestId("mcp-member-count")).toHaveText("No members connected yet");
 
     // ---- the list: counts, client, needs-client warning; the organization server is unchanged
@@ -601,7 +602,7 @@ test("admin: every connector mode, the HTTPS notice, list badges and the disconn
     await expect(crm.getByTestId("mcp-auth-badge")).toHaveText("Member sign-in");
     await expect(crm.getByTestId("mcp-member-count")).toHaveText("3 members connected");
     await expect(crm).toContainText("Client: pre-registered (auth.acme.example)");
-    await expect(crm.getByTestId("mcp-reprobe")).toHaveCount(0);
+    await expect(crm.getByTestId("mcp-reprobe")).toBeVisible();
     const tickets = serverCard(page, TICKETS);
     await expect(tickets.getByTestId("mcp-oauth-status")).toHaveText("Needs an OAuth client");
     await expect(tickets.getByTestId("mcp-needs-client-detail")).toContainText(

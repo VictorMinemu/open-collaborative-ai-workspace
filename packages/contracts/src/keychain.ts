@@ -219,7 +219,16 @@ export const CreateVaultItemRequest = z
   .discriminatedUnion("kind", [
     z.object({ kind: z.literal("api_key"), ...createCommon, ...VaultApiKeySecret.shape }),
     z.object({ kind: z.literal("basic"), ...createCommon, ...VaultBasicSecret.shape }),
-    z.object({ kind: z.literal("oauth"), ...createCommon, tokenUrl: HttpsUrl, ...VaultOAuthSecret.shape }),
+    // The OAuth scope is `oauthScope` here: spreading the secret's `scope` would overwrite the item's own `scope`
+    // (personal | unit), so an OAuth key's scope string became its vault scope and vice versa.
+    z.object({
+      kind: z.literal("oauth"),
+      ...createCommon,
+      tokenUrl: HttpsUrl,
+      clientId: VaultOAuthSecret.shape.clientId,
+      clientSecret: VaultOAuthSecret.shape.clientSecret,
+      oauthScope: VaultOAuthSecret.shape.scope,
+    }),
   ])
   .superRefine((v, ctx) => {
     if (v.scope === "personal" && v.unitId != null) {

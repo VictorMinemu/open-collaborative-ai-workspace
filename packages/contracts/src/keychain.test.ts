@@ -178,6 +178,26 @@ describe("vault create and update requests (write-only secrets)", () => {
     ).toBe(false);
   });
 
+  it("an oauth client keeps the key's own scope and takes its OAuth scope as oauthScope", () => {
+    const oauth = {
+      ...base,
+      kind: "oauth",
+      clientId: "c",
+      clientSecret: "s",
+      tokenUrl: "https://erp.example.com/token",
+    };
+    expect(CreateVaultItemRequest.parse({ ...oauth, oauthScope: "erp.read" })).toMatchObject({
+      scope: "personal",
+      oauthScope: "erp.read",
+    });
+    expect(CreateVaultItemRequest.parse({ ...oauth, scope: "unit", unitId: ID })).toMatchObject({
+      scope: "unit",
+      unitId: ID,
+    });
+    // An OAuth scope string is never taken for the key's scope.
+    expect(CreateVaultItemRequest.safeParse({ ...oauth, scope: "erp.read" }).success).toBe(false);
+  });
+
   it("a personal key belongs to no unit; a unit key may name one or the organization", () => {
     expect(
       CreateVaultItemRequest.safeParse({ ...base, kind: "api_key", value: "x", unitId: ID }).success,

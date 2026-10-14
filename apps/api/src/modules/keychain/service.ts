@@ -321,7 +321,7 @@ function secretOf(body: CreateVaultItemRequest): StoredSecret {
         kind: "oauth",
         clientId: body.clientId,
         clientSecret: body.clientSecret,
-        ...(body.scope ? { scope: body.scope } : {}),
+        ...(body.oauthScope ? { scope: body.oauthScope } : {}),
       };
   }
 }

@@ -2,6 +2,7 @@
 
 import type { McpServer, McpServerList } from "@ocw/contracts";
 import { KeyRound, Pencil, Plug, Plus, RefreshCw, ShieldCheck, Trash2, TriangleAlert } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
@@ -19,6 +20,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { errorMessage } from "@/lib/api";
+import { isNotConnected, useProbeConnector } from "@/lib/connector-queries";
 import {
   connectionsExistCount,
   useDeleteMcpServer,
@@ -30,6 +32,7 @@ import { useCan, usePermissions } from "@/lib/permissions";
 import { cn, relativeTime } from "@/lib/utils";
 import { McpServerDialog, TRANSPORTS } from "./mcp-server-dialog";
 import { McpToolsEmpty, McpToolsList } from "./mcp-tools-list";
+import { PrivateHostsCard } from "./private-hosts-card";
 
 type Flag = "orgEnabled" | "personalAllowed" | "trustedChaining";
 
@@ -107,6 +110,8 @@ const TOUCH = "max-md:h-11";
 export function McpServersSettings() {
   const permissions = usePermissions();
   const canManage = useCan("mcp.manage");
+  // The organization's private network hosts are a bot policy (`bot.manage`, UI-SPEC R5); the API gate is authoritative.
+  const canManageBots = useCan("bot.manage");
   const q = useMcpServers(canManage);
   const [editing, setEditing] = useState<McpServer | "new" | null>(null);
 
@@ -186,6 +191,8 @@ export function McpServersSettings() {
         </ul>
       )}
 
+      {canManageBots ? <PrivateHostsCard /> : null}
+
       <p className="flex items-start gap-1.5 text-muted-foreground text-xs">
         <ShieldCheck className="mt-px size-3.5 shrink-0" aria-hidden />
         Header values are encrypted, only delivered to your own bots' runtime and never shown again. Every
@@ -210,6 +217,8 @@ function Shell({ children }: { children: React.ReactNode }) {
 function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void }) {
   const update = useUpdateMcpServer(server.id);
   const probe = useProbeMcpServer(server.id);
+  const memberProbe = useProbeConnector(server.id);
+  const router = useRouter();
   const remove = useDeleteMcpServer(server.id);
   const [confirmDelete, setConfirmDelete] = useState(false);
   /** Members a delete disconnects: the DTO's count, or the 409's when members connected since the list loaded. */
@@ -233,11 +242,23 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
 
   async function reprobe() {
     try {
-      await probe.mutateAsync();
+      // A per-member connector is probed with the admin's OWN connection (UI-SPEC R6), never by the cell.
+      if (perMember) await memberProbe.mutateAsync();
+      else await probe.mutateAsync();
     } catch (err) {
+      if (perMember && isNotConnected(err)) {
+        toast(`Connect your own ${server.name} account first`, {
+          action: {
+            label: "Open Connections",
+            onClick: () => router.push(`/settings/connections?connector=${server.id}`),
+          },
+        });
+        return;
+      }
       toast.error("Could not check the server", { description: errorMessage(err) });
     }
   }
+  const probing = probe.isPending || memberProbe.isPending;
 
   async function onDelete() {
     try {
@@ -343,20 +364,17 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
           ) : null}
         </div>
         <div className="flex w-full gap-1 sm:w-auto">
-          {/* A per-member connector is probed with a member's account (07.4-13 wires its Re-probe), never by the cell. */}
-          {!perMember ? (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={reprobe}
-              disabled={probe.isPending || status.busy || !server.orgEnabled}
-              data-testid="mcp-reprobe"
-              className={cn("flex-1 sm:flex-none", TOUCH)}
-              title={server.orgEnabled ? undefined : "Turn it on for bots first"}
-            >
-              <RefreshCw className={cn(probe.isPending && "animate-spin")} /> Re-probe
-            </Button>
-          ) : null}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={reprobe}
+            disabled={probing || status.busy || (!perMember && !server.orgEnabled)}
+            data-testid="mcp-reprobe"
+            className={cn("flex-1 sm:flex-none", TOUCH)}
+            title={perMember || server.orgEnabled ? undefined : "Turn it on for bots first"}
+          >
+            <RefreshCw className={cn(probing && "animate-spin")} /> Re-probe
+          </Button>
           <Button
             variant="ghost"
             size="sm"

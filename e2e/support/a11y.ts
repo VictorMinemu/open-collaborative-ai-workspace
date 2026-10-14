@@ -16,8 +16,15 @@ export async function expectNoSeriousA11y(
 ): Promise<void> {
   await expect(page.locator(selector).first()).toBeVisible();
   // Opening dialogs, menus and sheets fade in: colours measured mid-transition are blends, not the real contrast.
+  // Infinite animations (a pulse, a spinner, a skeleton shimmer) never finish: waiting on them would hang until the
+  // test times out, so only finite ones are awaited.
   await page.evaluate(() =>
-    Promise.all(document.getAnimations().map((a) => a.finished.catch(() => undefined))),
+    Promise.all(
+      document
+        .getAnimations()
+        .filter((a) => a.effect?.getComputedTiming().iterations !== Number.POSITIVE_INFINITY)
+        .map((a) => a.finished.catch(() => undefined)),
+    ),
   );
   let AxeBuilder: typeof import("@axe-core/playwright")["default"] | null = null;
   try {
