@@ -40,10 +40,9 @@ import { badRequest, conflict, notFound } from "../../lib/errors";
 import { loadCatalog, loadGrants, loadPolicy, replaceGrants } from "../bot-capabilities";
 import {
   agentResource,
+  agentTemplateResource,
   createPermissionService,
-  loadPrincipalFacts,
   orgResource,
-  type PrincipalFacts,
   type ResourceFacts,
   unitResource,
 } from "../organization";
@@ -76,16 +75,6 @@ export const TEMPLATE_NOT_FOUND = "Template not found";
 
 // ---------------------------------------------------------------- visibility and management
 
-/**
- * The audience of a unit template (same rule as unit personas and unit memory): a member of the unit or of a unit
- * below it, or a lead of a unit on its path.
- */
-function inUnitAudience(p: PrincipalFacts, unitPath: readonly string[]): boolean {
-  const unitId = unitPath[unitPath.length - 1];
-  if (unitId !== undefined && p.memberUnitPaths.some((path) => path.includes(unitId))) return true;
-  return unitPath.some((u) => p.leadOfUnitIds.has(u));
-}
-
 /** The resource `agent_template.manage` is decided on: the template's unit, or the organization. */
 const manageResource = (unit: AgentUnit | null): ResourceFacts => (unit ? unitResource(unit) : orgResource());
 
@@ -95,23 +84,22 @@ interface Access {
   canManage: boolean;
 }
 
-/** What the caller may do with one template: see it (org templates: everyone) and manage it (the resolver). */
-async function accessTo(
-  core: Core,
-  req: FastifyRequest,
-  tx: Tx,
-  t: TemplateRow,
-  facts: PrincipalFacts,
-): Promise<Access> {
+/**
+ * What the caller may do with one template, both decided by the resolver: manage it (`agent_template.manage` on its
+ * unit) and see it (`unit.read` on the template, whose unit-template precondition keeps a unit template to the unit's
+ * audience and admins; organization templates: every member). A unit template whose unit row is not readable here is
+ * seen by nobody.
+ */
+async function accessTo(core: Core, req: FastifyRequest, tx: Tx, t: TemplateRow): Promise<Access> {
   const perms = createPermissionService(core);
   const unit = await loadAgentUnit(tx, t.unitId);
   const canManage = await perms.can(req, tx, "agent_template.manage", manageResource(unit));
-  const visible = canManage || t.unitId === null || (unit !== null && inUnitAudience(facts, unit.path));
+  const visible =
+    canManage ||
+    ((t.unitId === null || unit !== null) &&
+      (await perms.can(req, tx, "unit.read", agentTemplateResource(unit))));
   return { unit, visible, canManage };
 }
-
-const callerFacts = (req: FastifyRequest, tx: Tx) =>
-  loadPrincipalFacts(tx, { kind: "user", userId: authOf(req).userId });
 
 /**
  * A template the caller may see, or 404 (nobody learns that another unit's template exists). `live` also refuses an
@@ -126,7 +114,7 @@ export async function visibleTemplate(
 ): Promise<{ template: TemplateRow } & Access> {
   const [t] = await tx.select().from(agentTemplates).where(eq(agentTemplates.id, id)).limit(1);
   if (!t) throw notFound(TEMPLATE_NOT_FOUND, "template_not_found");
-  const access = await accessTo(core, req, tx, t, await callerFacts(req, tx));
+  const access = await accessTo(core, req, tx, t);
   if (!access.visible) throw notFound(TEMPLATE_NOT_FOUND, "template_not_found");
   if (opts.live && t.archivedAt) throw conflict("This template was archived.", "template_archived");
   return { template: t, ...access };
@@ -219,7 +207,6 @@ async function templateDto(tx: Tx, t: TemplateRow, access: Access): Promise<Agen
 /** Live templates the caller may see, and where the caller may publish new ones. */
 export async function listTemplates(core: Core, req: FastifyRequest, tx: Tx): Promise<AgentTemplateList> {
   const perms = createPermissionService(core);
-  const facts = await callerFacts(req, tx);
   const rows = await tx
     .select()
     .from(agentTemplates)
@@ -227,7 +214,7 @@ export async function listTemplates(core: Core, req: FastifyRequest, tx: Tx): Pr
     .orderBy(asc(agentTemplates.name), asc(agentTemplates.id));
   const templates: AgentTemplate[] = [];
   for (const t of rows) {
-    const access = await accessTo(core, req, tx, t, facts);
+    const access = await accessTo(core, req, tx, t);
     if (access.visible) templates.push(await templateDto(tx, t, access));
   }
   const units = await tx
@@ -558,8 +545,8 @@ interface Plan {
  * The personal-agent caps applied to one version for the caller, who will own the bot (D-05, ADR-0010): the model must
  * be allowed for personal bots (else the default, reported); a built-in capability the policy keeps off for personal
  * bots is left off; the daily limit is clamped by the bot policy; tools only from sources allowed for personal bots;
- * unit keys only when the owner may `vault.use` them (the unit's audience and the resolver). Everything left out is
- * listed.
+ * unit keys only when the resolver allows the owner `vault.use` on the key's unit (its unit-key precondition is the
+ * unit's audience). Everything left out is listed.
  */
 async function planFor(core: Core, req: FastifyRequest, tx: Tx, v: VersionRow): Promise<Plan> {
   const body = versionBodyOf(v);
@@ -614,7 +601,6 @@ async function planFor(core: Core, req: FastifyRequest, tx: Tx, v: VersionRow): 
   const keyIds = [...new Set(body.unitVaultItemIds)];
   if (keyIds.length > 0) {
     const perms = createPermissionService(core);
-    const facts = await callerFacts(req, tx);
     const keys = await tx
       .select({ id: vaultItems.id, unitId: vaultItems.unitId })
       .from(vaultItems)
@@ -622,9 +608,10 @@ async function planFor(core: Core, req: FastifyRequest, tx: Tx, v: VersionRow): 
     for (const id of keyIds) {
       const key = keys.find((k) => k.id === id);
       const unit = key ? await loadAgentUnit(tx, key.unitId) : null;
-      const inAudience =
-        !!key && (key.unitId === null || (unit !== null && inUnitAudience(facts, unit.path)));
-      const allowed = inAudience && (await perms.can(req, tx, "vault.use", manageResource(unit)));
+      // The resolver decides the unit's audience (its unit-key precondition); a key whose unit row is not readable
+      // here never falls back to the organization resource.
+      const resolvable = !!key && (key.unitId === null || unit !== null);
+      const allowed = resolvable && (await perms.can(req, tx, "vault.use", manageResource(unit)));
       if (allowed) vaultItemIds.push(id);
       else skipped.push({ kind: "vault_item", id, reason: "vault_denied" });
     }
@@ -806,8 +793,7 @@ export async function templateLinkFor(
   const [t] = await tx.select().from(agentTemplates).where(eq(agentTemplates.id, templateId)).limit(1);
   if (!t) throw notFound("Bot not found", "agent_not_found");
   const mine = versionBodyOf(await loadVersion(tx, t.id, version));
-  const facts = await callerFacts(req, tx);
-  const { visible } = await accessTo(core, req, tx, t, facts);
+  const { visible } = await accessTo(core, req, tx, t);
   let update: AgentTemplateLink["update"] = null;
   if (visible && t.currentVersion > version) {
     const latest = versionBodyOf(await loadVersion(tx, t.id, t.currentVersion));
@@ -846,7 +832,7 @@ export async function applyTemplateUpdate(
   const resource = agentResource(agentFacts(row), auth.userId);
   await perms.assertCan(req, tx, "bot.configure", resource, { hideAs404: true });
   const [t] = await tx.select().from(agentTemplates).where(eq(agentTemplates.id, templateId)).limit(1);
-  if (!t || !(await accessTo(core, req, tx, t, await callerFacts(req, tx))).visible) {
+  if (!t || !(await accessTo(core, req, tx, t)).visible) {
     throw notFound(TEMPLATE_NOT_FOUND, "template_not_found");
   }
   if (toVersion !== t.currentVersion || toVersion <= version) {
