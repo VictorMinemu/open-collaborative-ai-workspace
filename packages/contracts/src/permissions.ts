@@ -79,6 +79,8 @@ export const Permission = z.enum([
   "vault.use",
   "vault.manage",
   "agent_template.manage",
+  // Phase 07.5 (07.5-01, D-04, P-03): which bot actions need a person's approval.
+  "tool_approval.manage",
 ]);
 export type Permission = z.infer<typeof Permission>;
 
@@ -151,6 +153,7 @@ export const PERMISSION_SURFACE: Record<Permission, PermissionSurface> = {
   "vault.use": "bots",
   "vault.manage": "team",
   "agent_template.manage": "team",
+  "tool_approval.manage": "team",
 };
 
 export const ROLE_SURFACES: Record<OrgRole, PermissionSurface[]> = {
@@ -224,6 +227,7 @@ const ADMIN: readonly Permission[] = [
   "memory.promote",
   "vault.manage",
   "agent_template.manage",
+  "tool_approval.manage",
 ];
 
 /**
@@ -241,7 +245,7 @@ export const ROLE_PERMISSIONS: Record<OrgRole, readonly Permission[]> = {
 /**
  * Granted to a unit lead on the lead's unit subtree (Phase 6, P-04: also the bots of that subtree; Phase 07.3,
  * ADR-0024: module access for the subtree and its people; Phase 07.2: the subtree's shared memory; Phase 07.4: the
- * subtree's keychain keys and agent templates).
+ * subtree's keychain keys and agent templates; Phase 07.5: the subtree's approval policies).
  */
 export const LEAD_PERMISSIONS: readonly Permission[] = [
   "unit.members.manage",
@@ -252,6 +256,7 @@ export const LEAD_PERMISSIONS: readonly Permission[] = [
   "memory.promote",
   "vault.manage",
   "agent_template.manage",
+  "tool_approval.manage",
 ];
 /**
  * Upper bound for an agent principal (intersected with the triggering human). Agents never hold `memory.promote`:
@@ -425,6 +430,7 @@ export const PERMISSION_DESCRIPTIONS: Record<Permission, string> = {
   "vault.use": "Let bots use keys from the keychain",
   "vault.manage": "Manage a unit's keychain keys",
   "agent_template.manage": "Manage a unit's agent templates",
+  "tool_approval.manage": "Decide which bot actions need a person's approval (for the units you lead)",
 };
 
 // ---------------------------------------------------------------- tokens (AUTH-06)

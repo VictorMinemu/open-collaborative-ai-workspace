@@ -11,16 +11,33 @@ import {
   KNOWN_APPROVAL_KINDS,
   TurnToolFlags,
 } from "./index";
-// Imported first and on its own: the module must load without a cycle through approvals.ts / agent-cards.ts.
+// tool-approvals.ts imports only common.ts and the leaf agent-card-route.ts (approvals.ts imports it, never the reverse).
 import {
+  ApprovableGroup,
   CanonicalJsonError,
+  CreateToolApprovalPolicyRequest,
   canonicalJson,
+  DeleteToolApprovalPolicyQuery,
+  isApprovableTool,
+  matchesToolPattern,
   prettyCanonicalJson,
   revealInvisible,
+  strictestMode,
   TOOL_APPROVAL_LIMITS,
   TOOL_CALL_KIND,
+  ToolApprovalAccess,
+  ToolApprovalErrorCode,
+  ToolApprovalHistory,
+  ToolApprovalHistoryQuery,
+  ToolApprovalMode,
+  ToolApprovalPolicy,
+  ToolApprovalPolicyPage,
   ToolApprovalRefusal,
+  ToolApprovalScopeQuery,
+  ToolApproverKind,
   ToolCallApprovalView,
+  ToolPattern,
+  UpdateToolApprovalPolicyRequest,
 } from "./tool-approvals";
 
 const ID = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
@@ -412,5 +429,203 @@ describe("tool-call approval wire contracts (tracer)", () => {
         },
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("approvable tools and patterns (D-01, P-04)", () => {
+  it("only plugin, MCP, connector tools and ocw_http_request are approvable", () => {
+    for (const t of ["m1a2b3c4d__create_invoice", "ocw_http_request", "acme_plugin_tool"]) {
+      expect(isApprovableTool(t), t).toBe(true);
+    }
+    for (const t of [
+      "web_search",
+      "web_fetch",
+      "ocw_memory_save",
+      "ocw_memory_propose",
+      "ocw_agent_card",
+      "ocw_connector_list",
+      "ocw_connector_call",
+      "ocw_work_zone_projects",
+      "ocw_start_work_zone",
+      "ocw_board_card",
+      "OCW_MEMORY_SAVE",
+      "",
+      "a b",
+      "x".repeat(129),
+    ]) {
+      expect(isApprovableTool(t), t).toBe(false);
+    }
+  });
+
+  it("a pattern is an approvable exact name or every tool of one server", () => {
+    for (const p of ["m1a2b3c4d__*", "m1a2b3c4d__create_invoice", "ocw_http_request", "x".repeat(128)]) {
+      expect(ToolPattern.safeParse(p).success, p).toBe(true);
+    }
+    for (const p of [
+      "*",
+      "m1a2b3c4d*",
+      "M1A2B3C4D__*",
+      "ocw_*",
+      "web_fetch",
+      "m1a2b3c4__*",
+      "x".repeat(129),
+    ]) {
+      expect(ToolPattern.safeParse(p).success, p).toBe(false);
+    }
+  });
+
+  it("matchesToolPattern: a server pattern covers its tools only; an exact pattern only itself", () => {
+    expect(matchesToolPattern("m1a2b3c4d__*", "m1a2b3c4d__x")).toBe(true);
+    expect(matchesToolPattern("m1a2b3c4d__*", "m1a2b3c4e__x")).toBe(false);
+    expect(matchesToolPattern("m1a2b3c4d__*", "m1a2b3c4d")).toBe(false);
+    expect(matchesToolPattern("m1a2b3c4d__*", "m1a2b3c4d__")).toBe(false);
+    expect(matchesToolPattern("m1a2b3c4d__x", "m1a2b3c4d__x")).toBe(true);
+    expect(matchesToolPattern("m1a2b3c4d__x", "m1a2b3c4d__xy")).toBe(false);
+    expect(matchesToolPattern("ocw_http_request", "ocw_http_request")).toBe(true);
+  });
+
+  it("strictestMode: always > when_tainted > never; none is never", () => {
+    expect(strictestMode(["never", "when_tainted"])).toBe("when_tainted");
+    expect(strictestMode(["when_tainted", "always", "never"])).toBe("always");
+    expect(strictestMode([])).toBe("never");
+    expect(ToolApprovalMode.options).toEqual(["never", "always", "when_tainted"]);
+    expect(ToolApproverKind.options).toEqual(["requester", "users", "unit_leads", "admins"]);
+  });
+});
+
+describe("approval policy contracts (D-01, D-04, UI-SPEC R3–R5)", () => {
+  const create = { scopeUnitId: null, toolPattern: "m1a2b3c4d__*", mode: "always", approverKind: "admins" };
+  const refused = (v: unknown) => CreateToolApprovalPolicyRequest.safeParse(v).success;
+
+  it("a valid rule parses; the refinements refuse the rest", () => {
+    expect(CreateToolApprovalPolicyRequest.parse(create)).toMatchObject(create);
+    expect(refused({ ...create, approverKind: "users", approverUserIds: [ID] })).toBe(true);
+    expect(refused({ ...create, scopeUnitId: ID, approverKind: "unit_leads" })).toBe(true);
+    expect(refused({ ...create, mode: "never", approverKind: "requester" })).toBe(true);
+    expect(refused({ ...create, approverKind: "requester" })).toBe(true);
+
+    const ids = (n: number) =>
+      Array.from({ length: n }, (_, i) => `0199a1b2-c3d4-7e5f-8a9b-${String(i).padStart(12, "0")}`);
+    expect(refused({ ...create, approverKind: "users", approverUserIds: [] })).toBe(false);
+    expect(refused({ ...create, approverKind: "users" })).toBe(false);
+    expect(refused({ ...create, approverKind: "users", approverUserIds: ids(20) })).toBe(true);
+    expect(refused({ ...create, approverKind: "users", approverUserIds: ids(21) })).toBe(false);
+    expect(refused({ ...create, approverKind: "users", approverUserIds: [ID, ID] })).toBe(false);
+    expect(refused({ ...create, approverKind: "unit_leads" })).toBe(false);
+    expect(refused({ ...create, mode: "never", approverKind: "users", approverUserIds: [ID] })).toBe(false);
+    expect(refused({ ...create, mode: "never", approverKind: "admins" })).toBe(false);
+    expect(refused({ ...create, approverUserIds: [ID] })).toBe(false);
+    expect(refused({ ...create, toolPattern: "web_fetch" })).toBe(false);
+    expect(refused({ ...create, toolPattern: "ocw_memory_save" })).toBe(false);
+    expect(refused({ ...create, extra: true })).toBe(false);
+    expect(refused({ ...create, scopeUnitId: undefined })).toBe(false);
+  });
+
+  it("an update names its version and changes something, with the same refinements", () => {
+    expect(UpdateToolApprovalPolicyRequest.safeParse({ expectedVersion: 1 }).success).toBe(false);
+    expect(UpdateToolApprovalPolicyRequest.parse({ expectedVersion: 1, mode: "when_tainted" })).toEqual({
+      expectedVersion: 1,
+      mode: "when_tainted",
+    });
+    expect(
+      UpdateToolApprovalPolicyRequest.safeParse({
+        expectedVersion: 1,
+        approverKind: "users",
+        approverUserIds: [ID],
+      }).success,
+    ).toBe(true);
+    expect(
+      UpdateToolApprovalPolicyRequest.safeParse({ expectedVersion: 1, approverKind: "users" }).success,
+    ).toBe(false);
+    expect(
+      UpdateToolApprovalPolicyRequest.safeParse({
+        expectedVersion: 1,
+        approverKind: "admins",
+        approverUserIds: [ID],
+      }).success,
+    ).toBe(false);
+    expect(
+      UpdateToolApprovalPolicyRequest.safeParse({ expectedVersion: 1, mode: "never", approverKind: "admins" })
+        .success,
+    ).toBe(false);
+    expect(
+      UpdateToolApprovalPolicyRequest.safeParse({ expectedVersion: 1, mode: "always", toolPattern: "x" })
+        .success,
+    ).toBe(false);
+    expect(UpdateToolApprovalPolicyRequest.safeParse({ expectedVersion: 0, mode: "always" }).success).toBe(
+      false,
+    );
+  });
+
+  it("scope, delete and history queries", () => {
+    expect(ToolApprovalScopeQuery.parse({ scope: "org" }).scope).toBe("org");
+    expect(ToolApprovalScopeQuery.parse({ scope: ID }).scope).toBe(ID);
+    expect(ToolApprovalScopeQuery.safeParse({ scope: "everyone" }).success).toBe(false);
+    expect(DeleteToolApprovalPolicyQuery.parse({ expectedVersion: "3" }).expectedVersion).toBe(3);
+    expect(DeleteToolApprovalPolicyQuery.safeParse({ expectedVersion: "0" }).success).toBe(false);
+    expect(ToolApprovalHistoryQuery.parse({ scope: "org" })).toEqual({ scope: "org" });
+    expect(ToolApprovalHistoryQuery.parse({ scope: ID, cursor: "abc" }).cursor).toBe("abc");
+  });
+
+  const policy = {
+    id: ID,
+    scopeUnitId: null,
+    toolPattern: "m1a2b3c4d__*",
+    mode: "always",
+    approverKind: "unit_leads",
+    approverUserIds: [],
+    version: 2,
+    updatedAt: NOW,
+    updatedBy: { id: ID2, displayName: "Marta Gil" },
+  };
+
+  it("the policy page, access, catalog group, history and error codes parse their minimal examples", () => {
+    expect(ToolApprovalPolicy.parse(policy).version).toBe(2);
+    expect(ToolApprovalPolicy.safeParse({ ...policy, approverUserIds: Array(21).fill(ID) }).success).toBe(
+      false,
+    );
+    const group = {
+      source: { kind: "mcp", id: ID, name: "Acme CRM", safeName: "m1a2b3c4d" },
+      tools: [{ name: "m1a2b3c4d__create_invoice", sideEffecting: true }],
+    };
+    expect(ApprovableGroup.parse(group).tools).toHaveLength(1);
+    expect(
+      ApprovableGroup.parse({
+        source: { kind: "http", id: null, name: "Keychain", safeName: null },
+        tools: [],
+      }).source.kind,
+    ).toBe("http");
+    expect(
+      ToolApprovalPolicyPage.parse({
+        scope: { unitId: null, label: "Organization" },
+        policies: [policy],
+        inherited: [{ ...policy, scopeLabel: "Organization" }],
+        catalog: [group],
+        approverLabels: { [ID]: "Leads of Sales" },
+      }).policies,
+    ).toHaveLength(1);
+    expect(
+      ToolApprovalAccess.parse({ manageable: { organization: false, unitIds: [ID] } }).manageable.unitIds,
+    ).toEqual([ID]);
+    const item = {
+      id: ID,
+      at: NOW,
+      actor: null,
+      action: "deleted",
+      toolPattern: "m1a2b3c4d__*",
+      mode: null,
+      approverLabel: null,
+    };
+    expect(ToolApprovalHistory.parse({ items: [item], nextCursor: null }).items).toHaveLength(1);
+    expect(ToolApprovalHistory.safeParse({ items: Array(31).fill(item), nextCursor: null }).success).toBe(
+      false,
+    );
+    expect(ToolApprovalErrorCode.options).toEqual([
+      "tool_not_approvable",
+      "invalid_tool_pattern",
+      "policy_exists",
+      "policy_version_conflict",
+      "policy_weaker_than_inherited",
+    ]);
   });
 });

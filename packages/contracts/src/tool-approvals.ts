@@ -37,6 +37,58 @@ export const TOOL_CALL_KIND = "tool.call";
 export const ToolApprovalMode = z.enum(["never", "always", "when_tainted"]);
 export type ToolApprovalMode = z.infer<typeof ToolApprovalMode>;
 
+/** Who decides: the asker, named people, the leads of the rule's unit, or anyone holding the org `admin` role (R3). */
+export const ToolApproverKind = z.enum(["requester", "users", "unit_leads", "admins"]);
+export type ToolApproverKind = z.infer<typeof ToolApproverKind>;
+
+const MODE_RANK: Readonly<Record<ToolApprovalMode, number>> = { never: 0, when_tainted: 1, always: 2 };
+
+/** The strictest of the applicable modes (principle 6: restrictions accumulate); no rule → `never`. */
+export function strictestMode(modes: readonly ToolApprovalMode[]): ToolApprovalMode {
+  let best: ToolApprovalMode = "never";
+  for (const m of modes) if (MODE_RANK[m] > MODE_RANK[best]) best = m;
+  return best;
+}
+
+const TOOL_NAME = /^[A-Za-z0-9_.:-]{1,128}$/;
+/** Every tool of one MCP server or per-member connector (`<safe>__*`, safe name `m` + 8 hex). */
+const SERVER_PATTERN = /^m[0-9a-f]{8}__\*$/;
+const WEB_TOOLS: ReadonlySet<string> = new Set(["web_search", "web_fetch"]);
+/** The one built-in whose calls a person may approve: a keychain HTTP request. */
+const APPROVABLE_BUILTIN = "ocw_http_request";
+
+/**
+ * True for a tool a policy may name (P-04): MCP and per-member connector tools (`<safe>__<tool>`), approved plugin
+ * tools and `ocw_http_request`. The web tools and every other `ocw_` built-in are never approvable (they have their
+ * own gates, or a flow of their own like `ocw_start_work_zone`). Case-insensitive on the `ocw_` prefix, so a
+ * look-alike never slips in.
+ */
+export function isApprovableTool(name: string): boolean {
+  if (!TOOL_NAME.test(name)) return false;
+  const lower = name.toLowerCase();
+  if (WEB_TOOLS.has(lower)) return false;
+  if (lower.startsWith("ocw_")) return name === APPROVABLE_BUILTIN;
+  return true;
+}
+
+/** An approvable exact tool name, or `<safe>__*` for every tool of one server. */
+export const ToolPattern = z
+  .string()
+  .max(128)
+  .refine((p) => SERVER_PATTERN.test(p) || isApprovableTool(p), {
+    message: "must be an approvable tool name or <server>__*",
+  });
+export type ToolPattern = z.infer<typeof ToolPattern>;
+
+/** Whether `pattern` covers `tool` (a server pattern covers `<safe>__<anything non-empty>`). */
+export function matchesToolPattern(pattern: string, tool: string): boolean {
+  if (SERVER_PATTERN.test(pattern)) {
+    const prefix = pattern.slice(0, -1);
+    return tool.length > prefix.length && tool.startsWith(prefix);
+  }
+  return pattern === tool;
+}
+
 /** Why the gate refused a call without running it (the plugin turns each into a fixed sentence for the model). */
 export const ToolApprovalRefusal = z.enum([
   "approval_required",
@@ -216,7 +268,7 @@ export const ToolCallApprovalView = z.object({
       scopeUnitId: Id.nullable(),
       scopeLabel: z.string().max(120),
       mode: ToolApprovalMode,
-      pattern: z.string().min(1).max(128),
+      pattern: ToolPattern,
       viewerCanManage: z.boolean(),
     })
     .nullable(),
@@ -233,3 +285,163 @@ export const ToolCallApprovalView = z.object({
   usedAt: IsoDateTime.nullable(),
 });
 export type ToolCallApprovalView = z.infer<typeof ToolCallApprovalView>;
+
+// ---------------------------------------------------------------- policies (APPROVE-01, P-04, UI-SPEC Surface 4)
+
+const Actor = z.object({ id: Id, displayName: z.string().max(200) });
+const ApproverUserIds = z.array(Id).max(TOOL_APPROVAL_LIMITS.approverUsersMax);
+
+/** One rule: organization-wide (`scopeUnitId` null) or on a unit subtree. */
+export const ToolApprovalPolicy = z.object({
+  id: Id,
+  scopeUnitId: Id.nullable(),
+  toolPattern: ToolPattern,
+  mode: ToolApprovalMode,
+  approverKind: ToolApproverKind,
+  approverUserIds: ApproverUserIds,
+  version: z.number().int().positive(),
+  updatedAt: IsoDateTime,
+  updatedBy: Actor.nullable(),
+});
+export type ToolApprovalPolicy = z.infer<typeof ToolApprovalPolicy>;
+
+type ApproverShape = {
+  scopeUnitId?: string | null;
+  mode?: ToolApprovalMode;
+  approverKind?: ToolApproverKind;
+  approverUserIds?: readonly string[];
+};
+
+/**
+ * The approver rules, on the fields present (an update is re-checked by the API against the stored rule):
+ * `users` ⇒ 1..20 distinct people; any other kind ⇒ no people; `unit_leads` ⇒ a unit scope (when the scope is known);
+ * `never` ⇒ approver kind `requester` (nobody is asked).
+ */
+function approverIssues(v: ApproverShape, ctx: z.RefinementCtx): void {
+  const ids = v.approverUserIds ?? [];
+  if (new Set(ids).size !== ids.length) {
+    ctx.addIssue({ code: "custom", path: ["approverUserIds"], message: "each person once" });
+  }
+  if (v.approverKind === "users" && ids.length === 0) {
+    ctx.addIssue({ code: "custom", path: ["approverUserIds"], message: "name at least one person" });
+  }
+  if (v.approverKind !== undefined && v.approverKind !== "users" && ids.length > 0) {
+    ctx.addIssue({ code: "custom", path: ["approverUserIds"], message: "only for approver kind users" });
+  }
+  if (v.approverKind === "unit_leads" && v.scopeUnitId === null) {
+    ctx.addIssue({ code: "custom", path: ["approverKind"], message: "unit leads need a unit rule" });
+  }
+  if (v.mode === "never" && v.approverKind !== undefined && v.approverKind !== "requester") {
+    ctx.addIssue({ code: "custom", path: ["approverKind"], message: "a never rule asks nobody" });
+  }
+}
+
+/** `POST /api/v1/tool-approval-policies`. */
+export const CreateToolApprovalPolicyRequest = z
+  .strictObject({
+    scopeUnitId: Id.nullable(),
+    toolPattern: ToolPattern,
+    mode: ToolApprovalMode,
+    approverKind: ToolApproverKind,
+    approverUserIds: ApproverUserIds.optional(),
+  })
+  .superRefine(approverIssues);
+export type CreateToolApprovalPolicyRequest = z.infer<typeof CreateToolApprovalPolicyRequest>;
+
+/** `PATCH /api/v1/tool-approval-policies/:id`: the version seen and at least one change (409 on a stale version). */
+export const UpdateToolApprovalPolicyRequest = z
+  .strictObject({
+    expectedVersion: z.number().int().positive(),
+    mode: ToolApprovalMode.optional(),
+    approverKind: ToolApproverKind.optional(),
+    approverUserIds: ApproverUserIds.optional(),
+  })
+  .refine((v) => v.mode !== undefined || v.approverKind !== undefined || v.approverUserIds !== undefined, {
+    message: "nothing to update",
+  })
+  .superRefine(approverIssues);
+export type UpdateToolApprovalPolicyRequest = z.infer<typeof UpdateToolApprovalPolicyRequest>;
+
+/** `?scope=org` or `?scope=<unitId>`. */
+export const ToolApprovalScope = z.union([z.literal("org"), Id]);
+export type ToolApprovalScope = z.infer<typeof ToolApprovalScope>;
+
+export const ToolApprovalScopeQuery = z.object({ scope: ToolApprovalScope });
+export type ToolApprovalScopeQuery = z.infer<typeof ToolApprovalScopeQuery>;
+
+/** `DELETE /api/v1/tool-approval-policies/:id?expectedVersion=`. */
+export const DeleteToolApprovalPolicyQuery = z.object({
+  expectedVersion: z.coerce.number().int().positive(),
+});
+export type DeleteToolApprovalPolicyQuery = z.infer<typeof DeleteToolApprovalPolicyQuery>;
+
+/** `GET /api/v1/tool-approval-policies/access`: where the caller may manage rules (R4). */
+export const ToolApprovalAccess = z.object({
+  manageable: z.object({ organization: z.boolean(), unitIds: z.array(Id).max(500) }),
+});
+export type ToolApprovalAccess = z.infer<typeof ToolApprovalAccess>;
+
+export const ApprovableTool = z.object({ name: z.string().min(1).max(128), sideEffecting: z.boolean() });
+export type ApprovableTool = z.infer<typeof ApprovableTool>;
+
+/** The tools a rule can name, grouped by where they come from (the rule dialog's catalog). */
+export const ApprovableGroup = z.object({
+  source: z.object({
+    kind: ApprovalToolSourceKind,
+    id: Id.nullable(),
+    name: z.string().max(200),
+    /** `m` + 8 hex for MCP servers and connectors (the `<safe>__*` pattern); null otherwise. */
+    safeName: z
+      .string()
+      .regex(/^m[0-9a-f]{8}$/)
+      .nullable(),
+  }),
+  tools: z.array(ApprovableTool).max(200),
+});
+export type ApprovableGroup = z.infer<typeof ApprovableGroup>;
+
+/** `GET /api/v1/tool-approval-policies?scope=`: the scope's rules, the stricter ones above it and the catalog. */
+export const ToolApprovalPolicyPage = z.object({
+  scope: z.object({ unitId: Id.nullable(), label: z.string().max(120) }),
+  policies: z.array(ToolApprovalPolicy).max(500),
+  inherited: z.array(ToolApprovalPolicy.extend({ scopeLabel: z.string().max(120) })).max(500),
+  catalog: z.array(ApprovableGroup).max(100),
+  /** Policy id → approver label ("Leads of Sales", "Marta Gil or 2 others"). */
+  approverLabels: z.record(Id, z.string().max(200)),
+});
+export type ToolApprovalPolicyPage = z.infer<typeof ToolApprovalPolicyPage>;
+
+/** One change from the `tool_approval_policy.*` audit rows (R5); never tool arguments. */
+export const ToolApprovalHistoryItem = z.object({
+  id: Id,
+  at: IsoDateTime,
+  actor: Actor.nullable(),
+  action: z.enum(["created", "updated", "deleted"]),
+  toolPattern: z.string().max(128),
+  mode: ToolApprovalMode.nullable(),
+  approverLabel: z.string().max(200).nullable(),
+});
+export type ToolApprovalHistoryItem = z.infer<typeof ToolApprovalHistoryItem>;
+
+export const ToolApprovalHistory = z.object({
+  items: z.array(ToolApprovalHistoryItem).max(TOOL_APPROVAL_LIMITS.historyPage),
+  nextCursor: z.string().max(200).nullable(),
+});
+export type ToolApprovalHistory = z.infer<typeof ToolApprovalHistory>;
+
+/** `GET /api/v1/tool-approval-policies/history?scope=&cursor=`. */
+export const ToolApprovalHistoryQuery = z.object({
+  scope: ToolApprovalScope,
+  cursor: z.string().max(200).optional(),
+});
+export type ToolApprovalHistoryQuery = z.infer<typeof ToolApprovalHistoryQuery>;
+
+/** Policy route errors: 400 `tool_not_approvable` / `invalid_tool_pattern`; 409 for the other three. */
+export const ToolApprovalErrorCode = z.enum([
+  "tool_not_approvable",
+  "invalid_tool_pattern",
+  "policy_exists",
+  "policy_version_conflict",
+  "policy_weaker_than_inherited",
+]);
+export type ToolApprovalErrorCode = z.infer<typeof ToolApprovalErrorCode>;

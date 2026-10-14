@@ -137,6 +137,7 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "vault.use": true,
     "vault.manage": false,
     "agent_template.manage": false,
+    "tool_approval.manage": false,
   },
   developer: {
     "org.read": true,
@@ -203,6 +204,7 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "vault.use": true,
     "vault.manage": false,
     "agent_template.manage": false,
+    "tool_approval.manage": false,
   },
   lead: {
     "org.read": true,
@@ -269,6 +271,7 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "vault.use": true,
     "vault.manage": false,
     "agent_template.manage": false,
+    "tool_approval.manage": false,
   },
   admin: {
     "org.read": true,
@@ -335,6 +338,7 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "vault.use": true,
     "vault.manage": true,
     "agent_template.manage": true,
+    "tool_approval.manage": true,
   },
 };
 
