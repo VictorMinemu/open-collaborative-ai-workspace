@@ -12,6 +12,7 @@ import { agents, agentTurns, conversationMembers, conversations, type Tx, tenant
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 // Types only: the memory service is injected by the caller (a value import would be a module cycle).
+import { type EffectiveVaultItem, effectiveVaultItems } from "../keychain";
 import type { MemoryAudience, MemoryService } from "../memory";
 import { agentResource, type PermissionService, type PrincipalRef } from "../organization";
 import { type CatalogSource, effectiveCapabilities, effectiveTools, readCapabilities } from "./capabilities";
@@ -29,6 +30,14 @@ import { consumeTurn, effectiveDailyLimit, limitNotice } from "./usage";
  */
 
 type TurnTools = { tools: string[]; toolFlags: Record<string, TurnToolFlags> };
+
+/** What a turn's keychain decision produced (07.4-11): the keys usable here. Server-side only, never in the payload. */
+export interface TurnKeys {
+  usable: EffectiveVaultItem[];
+}
+
+/** `currentTurnTools`'s answer: the tools and flags, plus the keychain decision the proxy routes re-check. */
+export type CurrentTurnTools = TurnTools & { keys: TurnKeys };
 
 /**
  * Who reads a persona's answer in a shared AI chat (06-10, D-06, P-10): the joined humans who can read it, and whether a
@@ -65,6 +74,14 @@ const CARD_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: false
  * untrusted content can no longer use it (the board routes refuse `tainted`).
  */
 const BOARD_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
+/**
+ * `ocw_http_request` (07.4-11, D-04): its output is a third-party answer (untrusted) and the method decides whether a
+ * call changes anything; the turn carries the most dangerous combination, the proxy route claims per method (GET and
+ * HEAD as reads).
+ */
+const HTTP_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: true };
+/** `ocw_connector_list` with only keychain handles to list (names and handles people wrote): trusted, changes nothing. */
+const LIST_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: false };
 
 /**
  * Flags of a catalog tool (D-08 taint rule). Every MCP / plugin output is untrusted. MCP tools are
@@ -83,6 +100,8 @@ function assemble(
   effectiveToolNames: ReadonlySet<string>,
   /** The turn's conversation is a board channel (07.1-10). The cell-wide view (null kind) never is. */
   board = false,
+  /** At least one keychain item is usable on this turn (07.4-11); in the cell-wide view: the bot holds a key grant. */
+  keys = false,
 ): TurnTools {
   const tools: string[] = [];
   const toolFlags: Record<string, TurnToolFlags> = {};
@@ -111,6 +130,11 @@ function assemble(
   add(BUILTIN_TOOLS.agentCard, CARD_FLAGS);
   // Board cards (07.1-10, D-07): only on a board channel's turns; every other turn keeps exactly its tool list.
   if (board && conversationKind === "channel") add(BUILTIN_TOOLS.boardCard, BOARD_FLAGS);
+  // Keychain (07.4-11, D-04): the bot may send a request with a key it holds, by handle; the list names the handles.
+  if (keys) {
+    add(BUILTIN_TOOLS.httpRequest, HTTP_FLAGS);
+    add(BUILTIN_TOOLS.connectorList, LIST_FLAGS);
+  }
   for (const source of catalog) {
     for (const t of source.tools) {
       if (effectiveToolNames.has(`${source.sourceKind}:${source.sourceId}:${t.name}`)) {
@@ -125,6 +149,7 @@ const toolKey = (t: { sourceKind: string; sourceId: string; tool: string }) =>
   `${t.sourceKind}:${t.sourceId}:${t.tool}`;
 
 interface ComputedTurn extends TurnTools {
+  keys: TurnKeys;
   effective: BotCapabilityView["effective"];
   /** The bot's display name and the daily limit that applies today (D-11). */
   botName: string;
@@ -142,7 +167,14 @@ interface ComputedTurn extends TurnTools {
 async function computeTurn(
   tx: Tx,
   perms: PermissionService,
-  p: { agentId: string; humanUserId: string; conversationKind: string; board?: boolean },
+  p: {
+    agentId: string;
+    humanUserId: string;
+    conversationKind: string;
+    /** The turn's conversation: needed for the member-account rule (07.4-11); without it that rule fails closed. */
+    conversationId?: string | null;
+    board?: boolean;
+  },
   env: SearchEnv,
   audience?: TurnAudience | null,
 ): Promise<ComputedTurn | null> {
@@ -217,29 +249,58 @@ async function computeTurn(
     }
     allowed.add(toolKey(t));
   }
+
+  // Keychain (07.4-11, D-04, D-07): the keys this bot may use for this human (grant ∩ owner ∩ unit audience ∩
+  // `vault.use`). The tx's user must be the turn's human: personal keys are invisible to any other session (owner-only
+  // RLS), so a caller without it fails closed (personal keys absent), never with another member's.
+  const memberScope = p.conversationId
+    ? await memoryScopeKind(tx, p.conversationId, p.conversationKind)
+    : null;
+  const usable = (
+    await effectiveVaultItems(tx, perms, { agentId: row.id, humanUserId: p.humanUserId })
+  ).filter(() => memberScope === "dm");
   return {
     effective,
     botName: row.name,
     dailyLimit: effectiveDailyLimit(row.scope, caps, policy),
     withheld,
-    ...assemble(effective, p.conversationKind, catalog, allowed, p.board === true),
+    keys: { usable },
+    ...assemble(effective, p.conversationKind, catalog, allowed, p.board === true, usable.length > 0),
   };
 }
 
 /**
  * The tools (and their taint flags) this bot may use for this human in this kind of conversation, right now.
- * Used at delivery by `turnPolicy` and again at call time by the tool gate (03.1-04).
+ * Used at delivery by `turnPolicy` and again at call time by the tool gate (03.1-04). With the conversation id the
+ * member-account rule (07.4-11) is re-decided too, so a revoked share bites mid-turn.
  */
 export async function currentTurnTools(
   tx: Tx,
   perms: PermissionService,
-  p: { agentId: string; humanUserId: string; conversationKind: string },
+  p: { agentId: string; humanUserId: string; conversationKind: string; conversationId?: string | null },
   env: SearchEnv,
   /** The AI chat's current audience (06-10): the gate re-decides scoped tools with today's readers. */
   audience?: TurnAudience | null,
 ): Promise<TurnTools> {
+  const turn = await currentTurn(tx, perms, p, env, audience);
+  return { tools: turn.tools, toolFlags: turn.toolFlags };
+}
+
+/**
+ * `currentTurnTools` plus the keychain decision (07.4-11): the keys usable on this turn now, for the proxy routes.
+ * The tx must carry `userId` = the turn's human (owner-only RLS on personal keys).
+ */
+export async function currentTurn(
+  tx: Tx,
+  perms: PermissionService,
+  p: { agentId: string; humanUserId: string; conversationKind: string; conversationId?: string | null },
+  env: SearchEnv,
+  audience?: TurnAudience | null,
+): Promise<CurrentTurnTools> {
   const turn = await computeTurn(tx, perms, p, env, audience);
-  return turn ? { tools: turn.tools, toolFlags: turn.toolFlags } : { tools: [], toolFlags: {} };
+  return turn
+    ? { tools: turn.tools, toolFlags: turn.toolFlags, keys: turn.keys }
+    : { tools: [], toolFlags: {}, keys: { usable: [] } };
 }
 
 function validTimeZone(zone: string | null | undefined): string {

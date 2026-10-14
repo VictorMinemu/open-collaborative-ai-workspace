@@ -34,6 +34,7 @@ import { cellOf, createCellAuth } from "./auth";
 import { registerBoardAgentRoutes } from "./board";
 import { noTrigger, registerCardActionHandler, registerCardRoutes, resolveReplyTarget } from "./cards";
 import { registerCellGateway } from "./gateway";
+import { registerHttpRequestRoutes } from "./http-requests";
 import { registerMcpCellRoutes } from "./mcp";
 import { registerMemoryRoutes } from "./memories";
 import { registerMemoryFileRoutes } from "./memory-files";
@@ -458,6 +459,8 @@ export function createAgentChannelModule(
           registerBoardAgentRoutes(scope, { core, perms });
           // The cell's tool gate (D-08): decision + caps + taint + audit for every gated tool call.
           registerToolCallRoutes(scope, core, perms);
+          // The keychain proxy (07.4-11, D-04): a request with a key by handle, injected towards allowed hosts only.
+          registerHttpRequestRoutes(scope, core, perms);
           // The cell's memory tool (D-10): owner bound to the delivered turn, DM only, refused once tainted; since
           // 07.2-11 a bullet of the human's private MEMORY.md.
           registerMemoryRoutes(scope, core, perms, opts.memory);
