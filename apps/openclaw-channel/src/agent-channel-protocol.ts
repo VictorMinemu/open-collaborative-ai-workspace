@@ -92,6 +92,12 @@ export type AgentChannelHistoryEntry = z.infer<typeof AgentChannelHistoryEntry>;
 export const TurnToolFlags = z.object({
   untrustedOutput: z.boolean(),
   sideEffecting: z.boolean(),
+  /**
+   * 07.5 (D-01): the tool has an approval policy for this bot and this human. The gate then sends the call's full
+   * arguments and leaves the taint decision to the API. An unknown value reads as absent (no arguments travel; the API
+   * refuses `policy_changed`), so a newer API never voids the whole turn.
+   */
+  approval: z.enum(["always", "when_tainted"]).optional().catch(undefined),
 });
 export type TurnToolFlags = z.infer<typeof TurnToolFlags>;
 
@@ -661,7 +667,10 @@ export type AgentChannelRuntimeReport = {
   paused: { reason: "restart_loop_breaker"; detail: string | null; resumeAt: string | null } | null;
 };
 
-/** POST /tool-calls: only the search query / fetched URL travel (for the domain audit), never other params. */
+/**
+ * POST /tool-calls: only the search query / fetched URL travel (for the domain audit), never other params; the full
+ * `arguments` travel ONLY for a tool whose turn flags carry `approval` (07.5 D-01, serialized ≤ 32 KB).
+ */
 export type AgentChannelToolCallRequest = {
   eventId: string;
   agentId: string;
@@ -669,12 +678,26 @@ export type AgentChannelToolCallRequest = {
   toolCallId?: string;
   params: { query?: string; url?: string };
   argsBytes?: number;
+  arguments?: Record<string, unknown>;
 };
+
+/** 07.5: the approval a refused call waits on. The plugin tells the model who decides, never the arguments. */
+export const AgentChannelToolCallApproval = z.object({
+  id: Id,
+  /** false when an identical pending request was reused (no new card). */
+  created: z.boolean(),
+  /** The approver label ("a lead of Sales"). */
+  waitingFor: z.string().max(200),
+  requesterName: z.string().max(120),
+});
+export type AgentChannelToolCallApproval = z.infer<typeof AgentChannelToolCallApproval>;
 
 export const AgentChannelToolCallDecision = z.object({
   callId: Id,
   allowed: z.boolean(),
   reason: z.string().nullable().optional(),
+  /** 07.5: with `approval_required` / `approval_pending`. A malformed one reads as absent (the sentence falls back). */
+  approval: AgentChannelToolCallApproval.nullable().optional().catch(null),
 });
 export type AgentChannelToolCallDecision = z.infer<typeof AgentChannelToolCallDecision>;
 
@@ -993,6 +1016,34 @@ export const AGENT_CHANNEL_TOOL_REFUSALS = [
 ] as const;
 export const AgentChannelToolRefusal = z.enum(AGENT_CHANNEL_TOOL_REFUSALS);
 export type AgentChannelToolRefusal = z.infer<typeof AgentChannelToolRefusal>;
+
+/**
+ * 07.5 (contracts `ToolApprovalRefusal`): why the API refused a call that needs, or had, a person's approval. Each is a
+ * fixed sentence for the model (tool-guard.ts `APPROVAL_SENTENCES`), never the API's text.
+ */
+export const TOOL_APPROVAL_REFUSALS = [
+  "approval_required",
+  "approval_pending",
+  "approval_denied",
+  "approval_used",
+  "arguments_too_large",
+  "arguments_invalid",
+  "too_many_pending",
+  "policy_changed",
+] as const;
+export type ToolApprovalRefusal = (typeof TOOL_APPROVAL_REFUSALS)[number];
+
+/** 07.5: the `details` of a 409 `approval_required` / `approval_pending` from `/connectors/call` and `/http-requests`. */
+export const AgentChannelApprovalRefusalDetails = z.object({ approval: AgentChannelToolCallApproval });
+export type AgentChannelApprovalRefusalDetails = z.infer<typeof AgentChannelApprovalRefusalDetails>;
+
+/** The bounds of contracts `TOOL_APPROVAL_LIMITS` the cell uses. */
+export const TOOL_APPROVAL_LIMITS = {
+  /** Serialized arguments of one approvable call. */
+  argumentsBytes: 32_768,
+  /** Pending requests per (agent, requester). */
+  pendingPerRequester: 5,
+} as const;
 
 /** An MCP server's immutable OpenClaw name: `m` + 8 hex characters. */
 export const CONNECTOR_SAFE_NAME = /^m[0-9a-f]{8}$/u;

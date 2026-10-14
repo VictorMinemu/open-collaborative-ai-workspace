@@ -765,6 +765,23 @@ describe("real port dispatch: per-turn tool cap and active turn (D-08)", () => {
     expect(during).toEqual({ conversationId: "dm-1", threadRootId: null, messageId: "msg-1" });
   });
 
+  it("the active turn names the asking human (sanitized), for the approval sentences (07.5-04)", async () => {
+    const guard = createToolGuard({ client: () => null });
+    let requester: string | undefined;
+    const { runtime } = fakeRuntime((params) => {
+      requester = guard.activeTurn((params.route as { sessionKey: string }).sessionKey)?.requesterName;
+    });
+    const p = createOpenClawPort({ runtime, accountId: "default", cfg: {}, guard });
+    const asked = mention(1);
+    asked.message.author = { kind: "user", id: "u-ana", displayName: "Ana\nPérez <ana>" };
+    await p.dispatchMention(
+      mapMention(event({ ...asked, turn: TURN } as never), ARCHIE),
+      async () => {},
+      new AbortController().signal,
+    );
+    expect(requester).toBe("Ana Pérez ana");
+  });
+
   it("serialises two turns of the same session; the turn ends even when the dispatch throws", async () => {
     const guard = createToolGuard({ client: () => null });
     let running = 0;
@@ -844,6 +861,57 @@ describe("tool gate against the fake Agent Channel API (HTTP)", () => {
       { sessionKey: "s1" },
     );
     expect(denied?.blockReason).toContain("denied_by_test");
+  });
+
+  it("07.5 tracer: a flagged tool's call carries its full arguments; the API answers approval_required and the model hears the sentence at once", async () => {
+    const NOTE = "m1a2b3c4d__write_note";
+    const ECHO = "m1a2b3c4d__echo";
+    const set = await fetch(`${api.url}/__test/tool-approval`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        tool: NOTE,
+        reply: "approval_required",
+        waitingFor: "a lead of Sales",
+        requesterName: "Ana Pérez",
+      }),
+    });
+    expect(set.status).toBe(200);
+    const client = createAgentChannelClient({ apiUrl: api.url, token: () => api.token });
+    const guard = createToolGuard({ client: () => client });
+    guard.beginTurn("s-ap", {
+      eventId: "evt-ap",
+      agentId: ARCHIE.id,
+      requesterName: "Ana Pérez",
+      turn: {
+        ...TURN,
+        tools: [NOTE, ECHO],
+        toolFlags: {
+          [NOTE]: { untrustedOutput: true, sideEffecting: true, approval: "always" },
+          [ECHO]: { untrustedOutput: true, sideEffecting: false },
+        },
+      },
+    });
+    const started = Date.now();
+    const r = await guard.beforeToolCall(
+      { toolName: NOTE, params: { text: "SENTINEL-77", n: 1 }, toolCallId: "tc-ap1" },
+      { sessionKey: "s-ap" },
+    );
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(r?.blockReason).toBe(
+      "This action needs approval. I posted a card and asked a lead of Sales. Tell Ana Pérez in one short sentence that you are waiting for that approval, without repeating the values. Don't call m1a2b3c4d__write_note again now: when it is approved you will get a new message with the exact arguments.",
+    );
+    expect(
+      await guard.beforeToolCall(
+        { toolName: ECHO, params: { text: "SENTINEL-88" }, toolCallId: "tc-ap2" },
+        { sessionKey: "s-ap" },
+      ),
+    ).toBeUndefined();
+    expect(api.toolCalls.map((c) => c.tool)).toEqual([NOTE, ECHO]);
+    expect(api.toolCalls[0]?.arguments).toEqual({ text: "SENTINEL-77", n: 1 });
+    expect(api.toolCalls[0]?.allowed).toBe(false);
+    expect(Object.keys(api.toolCalls[1] ?? {})).not.toContain("arguments");
+    expect(JSON.stringify(api.toolCalls[1])).not.toContain("SENTINEL-88");
   });
 
   it("the snapshot carries the bot's tools and the search provider", async () => {

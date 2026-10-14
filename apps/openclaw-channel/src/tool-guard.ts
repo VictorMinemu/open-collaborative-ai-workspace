@@ -3,6 +3,9 @@ import {
   type AgentChannelToolCallRequest,
   CONNECTOR_SAFE_NAME,
   CONNECTOR_TOOL_LIMITS,
+  TOOL_APPROVAL_LIMITS,
+  TOOL_APPROVAL_REFUSALS,
+  type ToolApprovalRefusal,
   type TurnContext,
   type TurnToolFlags,
 } from "./agent-channel-protocol.js";
@@ -21,7 +24,11 @@ import { openClawAgentIdFor } from "./mention-mapper.js";
  *     `SELF_VALIDATED_TOOLS`) and blocks on a denial, an error or a
  *     timeout (fail closed, under OpenClaw's 15 s budget),
  *   - reports each allowed call's outcome (status, result count, provider, duration; never content).
- * Logs never include params or results.
+ * Per-tool approvals (07.5 D-01, D-02, D-04): for a tool whose turn flags carry `approval` (and only for those) the
+ * request also carries the call's full `arguments` (≤ 32 KB, else refused locally), the local taint block is skipped
+ * (the API decides: approval, a grant or a denial), and every approval refusal is a fixed sentence returned at once
+ * (`APPROVAL_SENTENCES`). Nothing here ever waits for a person: the approved call re-runs in a new turn.
+ * Logs never include params, arguments or results.
  */
 
 export interface ActiveTurn {
@@ -42,6 +49,8 @@ export interface ActiveTurn {
    * `connectorTools`). `turn.tools` is the run's OpenClaw tools only; these are reachable through `ocw_connector_call`.
    */
   connectorTools: string[];
+  /** 07.5: the asking human's display name (sanitized), for the approval sentences; absent → a neutral fallback. */
+  requesterName?: string;
   calls: number;
   webCalls: number;
   tainted: boolean;
@@ -179,7 +188,10 @@ function callFlags(
   }
   if (tool === "ocw_http_request") {
     const method = typeof params?.method === "string" ? params.method.trim().toUpperCase() : "";
-    return HTTP_READ_METHODS.has(method) ? HTTP_READ_FLAGS : HTTP_WRITE_FLAGS;
+    const flags = HTTP_READ_METHODS.has(method) ? HTTP_READ_FLAGS : HTTP_WRITE_FLAGS;
+    // 07.5: an approval policy on the keychain tool itself routes a tainted write to a person (the API decides).
+    const approval = t.turn.toolFlags[tool]?.approval;
+    return approval ? { ...flags, approval } : flags;
   }
   return t.turn.toolFlags[tool] ?? UNKNOWN_FLAGS;
 }
@@ -198,6 +210,89 @@ function argsBytes(params: Record<string, unknown> | undefined): number {
   } catch {
     return 0;
   }
+}
+
+/** UTF-8 bytes of the serialized params, or undefined when they cannot be serialized as JSON. */
+function jsonBytes(params: Record<string, unknown> | undefined): number | undefined {
+  try {
+    return new TextEncoder().encode(JSON.stringify(params ?? {}) ?? "").length;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A name or label the API composed from human-chosen names, shown to the model inside a fixed sentence: one line, no
+ * invisible or structural characters, bounded. Undefined when nothing is left.
+ */
+export function approvalLabel(value: string | null | undefined, max = 120): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const flat = Array.from(value, (ch) => {
+    const c = ch.codePointAt(0) ?? 0;
+    if (c <= 0x1f || (c >= 0x7f && c <= 0x9f)) return " ";
+    // Zero-width, bidi controls and isolates: invisible in a sentence, never meaningful in a name.
+    if ((c >= 0x200b && c <= 0x200f) || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069))
+      return "";
+    return ch === "<" || ch === ">" || ch === "`" ? "" : ch;
+  })
+    .join("")
+    .replace(/\s{2,}/gu, " ")
+    .trim()
+    .slice(0, max)
+    .trim();
+  return flat || undefined;
+}
+
+const ASKER = "the person who asked";
+const capitalized = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+export type ApprovalSentenceInput = {
+  tool: string;
+  /** The approver label from the API ("a lead of Sales"). */
+  waitingFor?: string | null | undefined;
+  /** The requester's display name (the decision's, else the turn's). */
+  requesterName?: string | null | undefined;
+};
+export type ApprovalSentenceKey = ToolApprovalRefusal | "too_large_local" | "no_call_id";
+
+/**
+ * What the model reads for each approval outcome (07.5-UI-SPEC "What the agent says while it waits", R10): fixed
+ * sentences returned at once, never the API's text, never the arguments. Names are sanitized; a missing requester is
+ * "the person who asked".
+ */
+export const APPROVAL_SENTENCES: Record<ApprovalSentenceKey, (p: ApprovalSentenceInput) => string> = {
+  approval_required: (p) =>
+    `This action needs approval. I posted a card and asked ${approvalLabel(p.waitingFor, 200) ?? "an approver"}. ` +
+    `Tell ${approvalLabel(p.requesterName) ?? ASKER} in one short sentence that you are waiting for that approval, ` +
+    `without repeating the values. Don't call ${p.tool} again now: when it is approved you will get a new message ` +
+    "with the exact arguments.",
+  approval_pending: (p) =>
+    "This exact action is already waiting for approval in a card. Don't ask again; tell " +
+    `${approvalLabel(p.requesterName) ?? ASKER} it is still waiting.`,
+  approval_denied: (p) =>
+    `${capitalized(approvalLabel(p.waitingFor, 200) ?? "an approver")} denied this exact action. Don't retry it. ` +
+    `Tell ${approvalLabel(p.requesterName) ?? ASKER} it was denied and ask what to change.`,
+  approval_used: (p) =>
+    `That approval was already used once. Ask ${approvalLabel(p.requesterName) ?? ASKER} if they want to run it again.`,
+  arguments_too_large: (p) =>
+    `This action is too large to approve (over 32 KB). Ask ${approvalLabel(p.requesterName) ?? ASKER} to split it.`,
+  too_large_local: (p) => APPROVAL_SENTENCES.arguments_too_large(p),
+  arguments_invalid: () =>
+    "This action can't be approved because its values aren't valid JSON. Try again with plain values.",
+  too_many_pending: (p) =>
+    `${capitalized(approvalLabel(p.requesterName) ?? ASKER)} already has ${TOOL_APPROVAL_LIMITS.pendingPerRequester} ` +
+    "actions waiting for approval from you. Wait for those first.",
+  policy_changed: (p) => `Tool ${p.tool} blocked by the workspace policy (policy_changed).`,
+  no_call_id: (p) =>
+    `Tool ${p.tool} blocked: this action needs approval, but the call has no id to bind the approval to (fail closed).`,
+};
+
+const APPROVAL_REFUSAL_SET: ReadonlySet<string> = new Set(TOOL_APPROVAL_REFUSALS);
+/** An API refusal code that has its own approval sentence (`policy_changed` keeps each caller's generic text). */
+export function isApprovalRefusal(
+  code: string | null | undefined,
+): code is Exclude<ToolApprovalRefusal, "policy_changed"> {
+  return typeof code === "string" && code !== "policy_changed" && APPROVAL_REFUSAL_SET.has(code);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -266,6 +361,7 @@ export function createToolGuard(
         threadRootId?: string | null;
         messageId?: string;
         connectorTools?: string[];
+        requesterName?: string;
       },
       signal?: AbortSignal,
     ): void {
@@ -340,16 +436,29 @@ export function createToolGuard(
       if (web && t.webCalls >= t.turn.maxWebCalls) {
         return block(`Tool ${tool} blocked: the turn reached its limit of ${t.turn.maxWebCalls} web calls.`);
       }
-      if (t.tainted && flags.sideEffecting) {
+      // 07.5 (D-04): a tool with an approval policy is decided by the API after taint (a person approves, or a grant
+      // is used); the memory and board tools keep their local block whatever a turn says.
+      const approval = ALWAYS_SIDE_EFFECTING.has(tool) ? undefined : flags.approval;
+      if (t.tainted && flags.sideEffecting && !approval) {
         return block(
           `Tool ${tool} blocked: this turn is read-only after untrusted content (web or tool output) was read.`,
         );
+      }
+      const selfValidated = SELF_VALIDATED_TOOLS.has(tool);
+      // The arguments a flagged call is decided on (the API canonicalizes them; the connector tools send their own).
+      const sentence = { tool, requesterName: t.requesterName };
+      const approvalArgs = approval && !selfValidated ? (event.params ?? {}) : undefined;
+      if (approvalArgs) {
+        const bytes = jsonBytes(approvalArgs);
+        if (bytes === undefined) return block(APPROVAL_SENTENCES.arguments_invalid(sentence));
+        if (bytes > TOOL_APPROVAL_LIMITS.argumentsBytes)
+          return block(APPROVAL_SENTENCES.too_large_local(sentence));
       }
       // Count before awaiting the API so concurrent calls of one turn can never exceed the caps.
       t.calls++;
       if (web) t.webCalls++;
 
-      if (!SELF_VALIDATED_TOOLS.has(tool)) {
+      if (!selfValidated) {
         const client = deps.client();
         if (!client) return block(`Tool ${tool} blocked: the OCW tool gate is not connected (fail closed).`);
         let decision: Awaited<ReturnType<AgentChannelClient["authorizeToolCall"]>>;
@@ -366,6 +475,8 @@ export function createToolGuard(
                 ...(event.toolCallId ? { toolCallId: event.toolCallId.slice(0, 200) } : {}),
                 params: pickParams(event.params),
                 argsBytes: argsBytes(event.params),
+                // D-01: only a flagged tool's arguments ever leave the cell (structural: no key otherwise).
+                ...(approvalArgs ? { arguments: approvalArgs } : {}),
               },
               signal,
               timeoutMs,
@@ -385,6 +496,15 @@ export function createToolGuard(
         }
         if (!decision.allowed) {
           log().info?.(`tool gate: ${tool} for ${t.eventId} denied (${decision.reason ?? "denied"})`);
+          if (isApprovalRefusal(decision.reason)) {
+            return block(
+              APPROVAL_SENTENCES[decision.reason]({
+                tool,
+                waitingFor: decision.approval?.waitingFor,
+                requesterName: approvalLabel(decision.approval?.requesterName) ?? t.requesterName,
+              }),
+            );
+          }
           return block(`Tool ${tool} blocked by the workspace policy (${decision.reason ?? "denied"}).`);
         }
         if (event.toolCallId) {

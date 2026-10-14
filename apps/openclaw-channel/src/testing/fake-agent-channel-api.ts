@@ -12,7 +12,13 @@
  *   POST /agent-channel/v1/agents/:id/status
  *   POST /agent-channel/v1/runtime         records the report (`runtimeReports`)
  *   POST /agent-channel/v1/provider-auth  (status per report: `authResponder`, default 200)
- *   POST /agent-channel/v1/tool-calls     records and allows (denies tools listed in `denyTools`)
+ *   POST /agent-channel/v1/tool-calls     records the full body and allows (denies tools listed in `denyTools`); a tool
+ *                                          set through POST /__test/tool-approval {tool, reply, waitingFor?, requesterName?}
+ *                                          (`toolApprovals`) answers that reply instead: "allow" / "grant" allow it, any
+ *                                          other reply is the refusal code, with `approval` {id, created, waitingFor,
+ *                                          requesterName} for approval_required / approval_pending (07.5-04). The same
+ *                                          control refuses /connectors/call for the logical tool `<connector>__<tool>`
+ *                                          and /http-requests for `ocw_http_request` (409, `details.approval` likewise)
  *   POST /agent-channel/v1/tool-calls/:id/result  records the outcome
  *   POST /agent-channel/v1/memories       records the note (dedupes exact text per event's bot; 409 for
  *                                          events listed in `refuseMemoryEvents`)
@@ -131,6 +137,25 @@ export type StoredBoardCard = AgentChannelBoardCreateCard & {
 export type StoredBoardPatch = AgentChannelBoardPatchCard & { messageId: string; status: number };
 /** Every POST /connectors/call body, as received (never a user id: the API reads the turn's human). */
 export type StoredConnectorCall = Record<string, unknown> & { receivedAt?: number; answeredAt?: number };
+/**
+ * 07.5-04: what the fake API answers a tool's calls (`POST /__test/tool-approval`). "allow" and "grant" (a used grant)
+ * allow the call; any other reply is the refusal code.
+ */
+export type ToolApprovalControl = {
+  reply:
+    | "approval_required"
+    | "approval_pending"
+    | "approval_denied"
+    | "approval_used"
+    | "arguments_too_large"
+    | "arguments_invalid"
+    | "too_many_pending"
+    | "policy_changed"
+    | "grant"
+    | "allow";
+  waitingFor?: string;
+  requesterName?: string;
+};
 /** Test knobs of the connector routes (`POST /__test/connectors` replaces them). */
 export type ConnectorControl = { slowMs?: number; refusal?: string; result?: string };
 /** In every refusal body of the connector routes: a plugin must never relay it to the model. */
@@ -157,6 +182,9 @@ export type FakeAgentChannelApi = {
   webSearchProvider: string | undefined;
   /** Tools whose `/tool-calls` the fake API denies (`denied_by_test`). */
   denyTools: Set<string>;
+  /** Tool (or logical connector tool) → the approval reply its calls get (07.5-04). */
+  toolApprovals: Map<string, ToolApprovalControl>;
+  /** Every POST /tool-calls body as received (the flagged tools' `arguments` included). */
   toolCalls: StoredToolCall[];
   toolResults: StoredToolResult[];
   /** Every POST /memories (also refused ones: `memoryId` "" and `created` false). */
@@ -302,6 +330,30 @@ const CONNECTOR_BODY_KEYS = {
   http: ["eventId", "agentId", "handle", "method", "url", "headers", "body"],
 } as const;
 
+/** The refusal (and the approval it waits on) a tool's approval control answers; undefined = allowed. */
+function approvalRefusalOf(control: ToolApprovalControl | undefined):
+  | {
+      code: string;
+      approval?: { id: string; created: boolean; waitingFor: string; requesterName: string };
+    }
+  | undefined {
+  if (!control || control.reply === "allow" || control.reply === "grant") return undefined;
+  const waits = control.reply === "approval_required" || control.reply === "approval_pending";
+  return {
+    code: control.reply,
+    ...(waits
+      ? {
+          approval: {
+            id: randomUUID(),
+            created: control.reply === "approval_required",
+            waitingFor: control.waitingFor ?? "a lead of Sales",
+            requesterName: control.requesterName ?? "Ana Pérez",
+          },
+        }
+      : {}),
+  };
+}
+
 /** The status the real API answers a refusal code with. */
 function refusalStatus(code: string): number {
   if (code === "unknown_turn") return 404;
@@ -377,6 +429,7 @@ export async function startFakeAgentChannelApi(
     authFailures: 0,
     webSearchProvider: opts.webSearchProvider,
     denyTools: new Set(opts.denyTools ?? []),
+    toolApprovals: new Map<string, ToolApprovalControl>(),
     toolCalls: [] as StoredToolCall[],
     toolResults: [] as StoredToolResult[],
     memories: [] as StoredMemory[],
@@ -469,6 +522,21 @@ export async function startFakeAgentChannelApi(
             ...(typeof body.result === "string" ? { result: body.result } : {}),
           };
           return json(res, 200, { ok: true, control: state.connectorControl });
+        }
+        if (req.method === "POST" && url.pathname === "/__test/tool-approval") {
+          // One tool's approval reply; no reply clears it.
+          const body = ((await readJson(req)) ?? {}) as Partial<ToolApprovalControl> & { tool?: string };
+          if (typeof body.tool !== "string" || !body.tool)
+            return json(res, 400, { error: { code: "bad_request" } });
+          if (typeof body.reply !== "string") state.toolApprovals.delete(body.tool);
+          else {
+            state.toolApprovals.set(body.tool, {
+              reply: body.reply,
+              ...(typeof body.waitingFor === "string" ? { waitingFor: body.waitingFor } : {}),
+              ...(typeof body.requesterName === "string" ? { requesterName: body.requesterName } : {}),
+            });
+          }
+          return json(res, 200, { ok: true });
         }
         if (req.method === "POST" && url.pathname === "/__test/end-turn") {
           api.endTurn(String(((await readJson(req)) as { eventId?: string }).eventId ?? ""));
@@ -630,13 +698,15 @@ export async function startFakeAgentChannelApi(
       }
       if (req.method === "POST" && route === "/tool-calls") {
         const body = (await readJson(req)) as AgentChannelToolCallRequest;
-        const allowed = !state.denyTools.has(body.tool);
+        const refusal = approvalRefusalOf(state.toolApprovals.get(body.tool));
+        const allowed = !state.denyTools.has(body.tool) && !refusal;
         const stored: StoredToolCall = { ...body, callId: randomUUID(), allowed };
         state.toolCalls.push(stored);
         return json(res, 200, {
           callId: stored.callId,
           allowed,
-          reason: allowed ? null : "denied_by_test",
+          reason: allowed ? null : (refusal?.code ?? "denied_by_test"),
+          ...(refusal?.approval ? { approval: refusal.approval } : {}),
         });
       }
       const resultMatch = /^\/tool-calls\/([^/]+)\/result$/u.exec(route);
@@ -716,6 +786,23 @@ export async function startFakeAgentChannelApi(
         if (connectorRoute === "call") {
           stored.receivedAt = Date.now();
           if (control.slowMs) await new Promise((r) => setTimeout(r, control.slowMs));
+        }
+        const approvalRefusal = approvalRefusalOf(
+          state.toolApprovals.get(
+            connectorRoute === "call"
+              ? `${String(body.connector)}__${String(body.tool)}`
+              : "ocw_http_request",
+          ),
+        );
+        if (approvalRefusal) {
+          stored.answeredAt = Date.now();
+          return json(res, refusalStatus(approvalRefusal.code), {
+            error: {
+              code: approvalRefusal.code,
+              message: `refused by test ${FAKE_ERROR_CANARY}`,
+              ...(approvalRefusal.approval ? { details: { approval: approvalRefusal.approval } } : {}),
+            },
+          });
         }
         if (control.refusal) {
           stored.answeredAt = Date.now();
@@ -1074,6 +1161,9 @@ export async function startFakeAgentChannelApi(
     },
     get denyTools() {
       return state.denyTools;
+    },
+    get toolApprovals() {
+      return state.toolApprovals;
     },
     get toolCalls() {
       return state.toolCalls;
