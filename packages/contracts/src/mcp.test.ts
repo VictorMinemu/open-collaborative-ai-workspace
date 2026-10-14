@@ -52,6 +52,7 @@ const orgSecretDefaults = {
   memberHeaderPrefix: null,
   oauthScopes: null,
   oauthStatus: null,
+  oauthUseCimd: true,
   oauthClients: [],
   memberConnections: 0,
 };
@@ -305,6 +306,19 @@ describe("connector auth modes on the registry (07.4 D-01, CONN-01)", () => {
         oauthScopes: Array(33).fill("s"),
       }).success,
     ).toBe(false);
+  });
+
+  it("the client metadata document can be turned off for a sign-in connector only (WINDOWS #179)", () => {
+    expect(McpServer.parse(server).oauthUseCimd).toBe(true);
+    expect(
+      CreateMcpServerRequest.parse({ ...http, authMode: "per_member_oauth", oauthUseCimd: false })
+        .oauthUseCimd,
+    ).toBe(false);
+    expect(CreateMcpServerRequest.safeParse({ ...http, oauthUseCimd: false }).success).toBe(false);
+    expect(UpdateMcpServerRequest.parse({ oauthUseCimd: false })).toEqual({ oauthUseCimd: false });
+    expect(UpdateMcpServerRequest.safeParse({ authMode: "org_secret", oauthUseCimd: false }).success).toBe(
+      false,
+    );
   });
 
   it("update checks the resulting mode only when it names one", () => {

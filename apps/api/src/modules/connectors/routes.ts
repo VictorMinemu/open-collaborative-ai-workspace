@@ -244,6 +244,8 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
           stored: loaded.stored,
           urls: oauthUrls,
           clientName: CONNECTOR_CLIENT_NAME,
+          // WINDOWS #179: the admin turned the client metadata document off for this server.
+          allowCimd: server.oauthUseCimd,
         });
       } catch (err) {
         const e = err instanceof ConnectorOAuthError ? err : new ConnectorOAuthError("discovery_failed");

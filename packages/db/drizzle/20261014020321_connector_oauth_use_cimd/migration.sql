@@ -1,0 +1,1 @@
+ALTER TABLE "app"."mcp_servers" ADD COLUMN "oauth_use_cimd" boolean DEFAULT true NOT NULL;

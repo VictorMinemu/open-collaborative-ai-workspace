@@ -101,6 +101,12 @@ export const McpServer = z.object({
   oauthScopes: z.array(z.string()).nullable().default(null),
   /** `per_member_oauth`: whether members can start a connection; null for the other modes. */
   oauthStatus: ConnectorOAuthStatus.nullable().default(null),
+  /**
+   * `per_member_oauth`: identify OCW with its client ID metadata document when the instance has an https URL and the
+   * authorization server supports it (default). False when that server cannot read the instance's URL (e.g. a private
+   * CA): a pre-registered client or dynamic registration is used instead (WINDOWS #179).
+   */
+  oauthUseCimd: z.boolean().default(true),
   /** Client registrations per issuer: the client secret is never returned (`hasSecret`). */
   oauthClients: z.array(ConnectorOAuthClientView).default([]),
   /** Members connected to it (0 for `org_secret`), shown before a mode switch or a delete clears them (R4). */
@@ -123,6 +129,7 @@ const connectorAuthFields = {
   memberHeaderPrefix: McpMemberHeaderPrefix.optional(),
   oauthScopes: McpOAuthScopes.optional(),
   oauthClient: ConnectorOAuthClientInput.optional(),
+  oauthUseCimd: z.boolean().optional(),
 };
 
 const STDIO_MESSAGE =
@@ -137,6 +144,7 @@ function checkConnectorAuth(
     memberHeaderName?: string | null | undefined;
     oauthScopes?: readonly string[] | null | undefined;
     oauthClient?: ConnectorOAuthClientInput | null | undefined;
+    oauthUseCimd?: boolean | undefined;
   },
   ctx: z.RefinementCtx,
   memberHeaderRequired: boolean,
@@ -182,6 +190,13 @@ function checkConnectorAuth(
         message: "only per_member_oauth takes OAuth scopes",
       });
     }
+    if (v.oauthUseCimd === false) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["oauthUseCimd"],
+        message: "only per_member_oauth uses a client metadata document",
+      });
+    }
   }
 }
 
@@ -225,6 +240,7 @@ export const UpdateMcpServerRequest = z
     memberHeaderPrefix: McpMemberHeaderPrefix.nullable().optional(),
     oauthScopes: McpOAuthScopes.nullable().optional(),
     oauthClient: ConnectorOAuthClientInput.nullable().optional(),
+    oauthUseCimd: z.boolean().optional(),
     /** Confirms deleting every member connection when the mode switch or the delete would orphan them (R4). */
     clearConnections: z.boolean().optional(),
   })

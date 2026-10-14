@@ -392,6 +392,21 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
         </p>
       ) : null}
 
+      {server.oauthStatus === "error" ? (
+        <p
+          role="note"
+          className="mx-4 -mt-1 mb-3 flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/8 px-3 py-2 text-[13px] leading-snug"
+          data-testid="mcp-signin-error-detail"
+        >
+          <TriangleAlert className="mt-0.5 size-3.5 shrink-0 text-destructive" aria-hidden />
+          <span>
+            Members can't sign in to {server.name}: its sign-in doesn't follow the MCP authorization spec OCW
+            needs (protected resource metadata and PKCE). Switch it to "Each member's own key" in Edit, or ask
+            the provider.
+          </span>
+        </p>
+      ) : null}
+
       {server.status === "error" && server.statusDetail ? (
         <p
           role="status"

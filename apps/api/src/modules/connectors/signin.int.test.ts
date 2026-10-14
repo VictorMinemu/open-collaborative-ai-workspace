@@ -301,6 +301,49 @@ describe("callback hardening", () => {
     });
   });
 
+  it("over https OCW identifies itself with its CIMD URL, unless the admin turned it off for the server (#179)", async () => {
+    const cimd = await registerConnector(s, { oauthClient: undefined });
+    expect((await ok(s.victor.request("GET", `/api/v1/mcp-servers/${cimd.id}`))).oauthUseCimd).toBe(true);
+    await withPublicApiUrl("https://ocw.example.com", async () => {
+      const metadataUrl = "https://ocw.example.com/api/v1/connectors/oauth/client-metadata.json";
+      const first = await ok(s.victor.request("POST", `/api/v1/connectors/${cimd.id}/connect`));
+      expect(new URL(first.authorizeUrl).searchParams.get("client_id")).toBe(metadataUrl);
+
+      const patched = await ok(
+        s.victor.request("PATCH", `/api/v1/mcp-servers/${cimd.id}`, { oauthUseCimd: false }),
+      );
+      expect(patched.oauthUseCimd).toBe(false);
+      const before = (await fakeStats(s)).registrations;
+      const second = await ok(s.victor.request("POST", `/api/v1/connectors/${cimd.id}/connect`));
+      const clientId = new URL(second.authorizeUrl).searchParams.get("client_id");
+      expect(clientId).not.toBe(metadataUrl);
+      expect((await fakeStats(s)).registrations).toBe(before + 1);
+      const stored = await s.su.query(
+        "select client_id, method from app.connector_oauth_clients where server_id = $1",
+        [cimd.id],
+      );
+      expect(stored.rows).toEqual([{ client_id: clientId, method: "dcr" }]);
+    });
+    expect((await auditRows(s, s.orgA, ["mcp.server.updated"])).at(-1)).toMatchObject({
+      resource_id: cimd.id,
+      metadata: { changed: ["oauthUseCimd"], oauthUseCimd: false },
+    });
+    // Only a sign-in connector has the choice.
+    const plainOrg = await ok(
+      s.victor.request("POST", "/api/v1/mcp-servers", {
+        name: "Org wiki",
+        transport: "streamable-http",
+        url: `${s.fakeBase}/wiki/mcp`,
+      }),
+    );
+    await fails(
+      s.victor.request("PATCH", `/api/v1/mcp-servers/${plainOrg.id}`, { oauthUseCimd: false }),
+      400,
+      "oauth_not_allowed",
+    );
+    await ok(s.victor.request("DELETE", `/api/v1/mcp-servers/${plainOrg.id}`));
+  });
+
   it("the admin's scopes are the ones requested (R11), plus offline_access when the AS lists it", async () => {
     const scoped = await registerConnector(s, { oauthScopes: ["records:read"] });
     const start = await ok(s.victor.request("POST", `/api/v1/connectors/${scoped.id}/connect`));
@@ -320,12 +363,14 @@ describe("callback hardening", () => {
     const redis = s.stack.built.core.bus.pub;
     const states = seen.filter((v) => /^[A-Za-z0-9_-]{43}$/u.test(v));
     for (const state of states) expect(await redis.exists(`ocw:conn:oauth:${state}`)).toBe(0);
-    // The R11 case started a flow and never came back: it lives on with its TTL only.
+    // The CIMD and R11 cases started flows and never came back: they live on with their TTL only.
     const left = await flowKeys();
-    expect(left).toHaveLength(1);
-    const ttl = await redis.ttl(left[0] as string);
-    expect(ttl).toBeGreaterThan(0);
-    expect(ttl).toBeLessThanOrEqual(600);
+    expect(left).toHaveLength(3);
+    for (const k of left) {
+      const ttl = await redis.ttl(k);
+      expect(ttl).toBeGreaterThan(0);
+      expect(ttl).toBeLessThanOrEqual(600);
+    }
     const logs = s.logs.join("\n");
     expect(seen.length).toBeGreaterThan(10);
     for (const v of seen) expect(logs).not.toContain(v);

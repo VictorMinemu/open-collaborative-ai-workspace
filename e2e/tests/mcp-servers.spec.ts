@@ -698,3 +698,107 @@ test("admin: every connector mode, the HTTPS notice, list badges and the disconn
     await admin.dispose();
   }
 });
+
+// ---------------------------------------------------------------- 07.4-10 (WINDOWS #179): CIMD off, sign-in error
+
+const VAULT = "Vault CRM";
+const LEGACY = "Legacy CRM";
+
+test("admin: turn the client metadata URL off for one connector, and see a connector members cannot sign in to", async ({
+  browser,
+}, info) => {
+  test.setTimeout(180_000);
+  const project = info.project.name;
+  const mobile = project === "mobile";
+  const tag = mobile ? "390" : "1440";
+  const admin = await apiAs(ADMIN);
+  await removeServers(admin, [VAULT, LEGACY]);
+  try {
+    // A connector whose authorization server publishes no RFC 9728 metadata: the connect attempt recorded `error`.
+    const legacy = await admin.post("/api/v1/mcp-servers", {
+      data: {
+        name: LEGACY,
+        transport: "streamable-http",
+        url: "https://legacy.acme.example/mcp",
+        authMode: "per_member_oauth",
+      },
+    });
+    expect(legacy.ok(), "create Legacy").toBe(true);
+    await asSuperuser("update app.mcp_servers set oauth_status = 'error' where name = $1", [LEGACY]);
+
+    const boss = await openAs(browser, ADMIN, project);
+    const page = boss.page;
+    // The e2e stack is plain http on loopback: the list says the instance serves a client metadata document.
+    const METADATA_URL = "https://ocw.acme.example/api/v1/connectors/oauth/client-metadata.json";
+    await page.route("**/api/v1/mcp-servers", async (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      const res = await route.fetch();
+      const json = (await res.json()) as ListJson;
+      if (json.oauth) json.oauth = { ...json.oauth, clientMetadataUrl: METADATA_URL, oauthAvailable: true };
+      await route.fulfill({ response: res, json });
+    });
+    const bodies: Array<{ method: string; body: Record<string, unknown> }> = [];
+    page.on("request", (r) => {
+      if (
+        (r.method() === "POST" || r.method() === "PATCH") &&
+        /\/api\/v1\/mcp-servers(\/[^/]+)?$/u.test(r.url())
+      ) {
+        bodies.push({
+          method: r.method(),
+          body: JSON.parse(r.postData() ?? "{}") as Record<string, unknown>,
+        });
+      }
+    });
+    await page.goto(`${BASE_URL}/settings/mcp-servers`);
+
+    // ---- the sign-in error explains itself on the card
+    const legacyCard = serverCard(page, LEGACY);
+    await expect(legacyCard.getByTestId("mcp-oauth-status")).toHaveText("Sign-in error");
+    await expect(legacyCard.getByTestId("mcp-signin-error-detail")).toContainText(
+      "Members can't sign in to Legacy CRM: its sign-in doesn't follow the MCP authorization spec OCW needs",
+    );
+    await legacyCard.scrollIntoViewIfNeeded();
+    await bothThemes(page, `mcp-auth-signin-error-${tag}`);
+    await a11yBothThemes(page, '[data-testid="mcp-server-list"]');
+
+    // ---- the switch: on by default, under the client metadata URL
+    await page.getByTestId("mcp-add").first().click();
+    const dialog = page.getByTestId("mcp-server-dialog");
+    await dialog.getByTestId("mcp-name").fill(VAULT);
+    await dialog.getByTestId("mcp-url").fill("https://vault.acme.example/mcp");
+    await dialog.getByTestId("mcp-auth-mode-per_member_oauth").click();
+    await expect(dialog.getByTestId("mcp-client-metadata-url")).toHaveValue(METADATA_URL);
+    const cimd = dialog.getByTestId("mcp-oauth-cimd-switch");
+    await expect(cimd).toBeChecked();
+    await expect(dialog.getByTestId("mcp-oauth-cimd")).toContainText(
+      "Turn this off if Vault CRM's sign-in can't reach this workspace",
+    );
+    await cimd.click();
+    await expect(cimd).not.toBeChecked();
+    await dialog.getByTestId("mcp-oauth-cimd").scrollIntoViewIfNeeded();
+    await bothThemes(page, `mcp-auth-cimd-${tag}`);
+    await a11yBothThemes(page, '[data-testid="mcp-server-dialog"]');
+    if (mobile) await expectTouchTargets(dialog.locator("form"), "the sign-in dialog with the CIMD switch");
+    await dialog.getByTestId("mcp-save").click();
+    await expect(dialog).toBeHidden();
+    expect(bodies.at(-1)).toMatchObject({ method: "POST", body: { name: VAULT, oauthUseCimd: false } });
+    expect((await serverNamed(admin, VAULT)) as unknown as { oauthUseCimd: boolean }).toMatchObject({
+      oauthUseCimd: false,
+    });
+
+    // ---- editing shows it off; turning it back on sends only that change
+    await serverCard(page, VAULT).getByTestId("mcp-edit").click();
+    await expect(cimd).not.toBeChecked();
+    await cimd.click();
+    await dialog.getByTestId("mcp-save").click();
+    await expect(dialog).toBeHidden();
+    expect(bodies.at(-1)).toEqual({ method: "PATCH", body: { oauthUseCimd: true } });
+    expect((await serverNamed(admin, VAULT)) as unknown as { oauthUseCimd: boolean }).toMatchObject({
+      oauthUseCimd: true,
+    });
+    await boss.context.close();
+  } finally {
+    await removeServers(admin, [VAULT, LEGACY]).catch(() => undefined);
+    await admin.dispose();
+  }
+});
