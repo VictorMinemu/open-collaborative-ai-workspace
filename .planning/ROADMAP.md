@@ -699,11 +699,11 @@ transport; prior art Steel Browser, neko; `.planning/research/OPS-FEATURES.md` F
      bot, the model or the audit
   5. A signed-in browser session is kept sealed per member and site in the keychain, reused only for that member's
      turns, and revocable; Sandbox and Browser are modules an admin turns on per organization or unit
-**Plans:** 29 plans in 9 waves (UI-SPEC/VALIDATION in the phase folder; W1 is the brief's Wave 0: contracts, migration, spikes)
+**Plans:** 30 plans in 9 waves (UI-SPEC/VALIDATION in the phase folder; W1 is the brief's Wave 0: contracts 01 and 30, migration, spikes; revised after the plan check, D-13 added)
 
 Plans:
 
-- [ ] 07.8-01-PLAN.md — Wave 1: Contracts first for the whole phase: the sandbox and sandboxd protocol, the browser and live-view protocol, the
+- [ ] 07.8-01-PLAN.md — Wave 1: Contracts part 01a: the sandbox and sandboxd protocol (incl. site lock and package dependency trees), bot capabilities with the D-13 member-data flags, the turn activity; the phase hub (plan map, shared files, P-01…P-18)
 - [ ] 07.8-02-PLAN.md — Wave 1: Create the storage of the phase under tenant RLS, with the owner-only policy on browser sessions, named constraints
 - [ ] 07.8-03-PLAN.md — Wave 1: Run the three blocking spikes with throwaway code, record each outcome with evidence and the chosen path, and fill
 - [ ] 07.8-04-PLAN.md — Wave 2: Create the `@ocw/sandboxd` workspace package with its Docker client, fixed spec builder, label-scoped lifecycle and
@@ -719,19 +719,20 @@ Plans:
 - [ ] 07.8-14-PLAN.md — Wave 4: Add the Agent Channel browser routes, the browser module's context service, the turn offering of the browser tools,
 - [ ] 07.8-15-PLAN.md — Wave 4: Build the bot page's Sandbox tab (status card, tree, preview, upload, download, delete, stop, restart), extract the
 - [ ] 07.8-16-PLAN.md — Wave 5: Build the live-view WebSocket hub, the takeover lease, the privacy filter for takeovers and member sessions, the
-- [ ] 07.8-17-PLAN.md — Wave 5: Implement package review, install and removal in `sandboxd` with throwaway review and installer containers, the
-- [ ] 07.8-18-PLAN.md — Wave 4: Build the API side of sandbox packages on ADR-0011's pinned-approval model: review through sandboxd, approve by
+- [ ] 07.8-17-PLAN.md — Wave 5: Sandbox packages in `sandboxd`: full dependency-tree review in a throwaway container, install only from the recorded set (`npm ci`, `pip --no-deps --require-hashes`, per-file sha256), removal, and a smoke that refuses a dependency republished after approval
+- [ ] 07.8-18-PLAN.md — Wave 4: API sandbox packages on ADR-0011's pinned-approval model: review token bound to the tree hash, stored lockfile, installs at sandbox start, `package_changed_upstream`, risk verdicts, the R12 native-plugin reason
 - [ ] 07.8-19-PLAN.md — Wave 5: Build Settings › Sandbox & Browser (organization switch, isolation, limits, network, kill switch) and the module
 - [ ] 07.8-20-PLAN.md — Wave 5: Render the server-composed turn activity in chat (collapsed group, steps, live label), the shared `HostChip`, and the
 - [ ] 07.8-21-PLAN.md — Wave 6: Build the platform-owned sign-in card, the seal-on-hand-back path, sealed browser sessions per member × site × bot
 - [ ] 07.8-22-PLAN.md — Wave 6: Build the desktop live view: provider, socket, frame, header, activity line, small window, large view, takeover with
 - [ ] 07.8-23-PLAN.md — Wave 6: Build the Sandbox packages section (list, add dialog, review sheet, row actions) inside Settings › Sandbox & Browser
-- [ ] 07.8-24-PLAN.md — Wave 6: Ship the sandbox profile in compose (sandboxd image, sandbox images, control network, setup token), the Woodpecker
-- [ ] 07.8-25-PLAN.md — Wave 7: Implement F-8's data-flow rules: download routing by session, `ocw_sandbox_import` with the audience-cover check, and
+- [ ] 07.8-24-PLAN.md — Wave 6: Compose profile `sandbox` (sandboxd image gate, control network limited to api and sandboxd, setup token), Woodpecker sandbox smokes plus the real-stack `sandbox-proof` step with env parity, `gate:compose --with-sandbox`
+- [ ] 07.8-25-PLAN.md — Wave 7: F-8 and D-13 data flow: downloads routed by session, `ocw_sandbox_import` with the resolver's audience-cover check, the team-bot `member_data` rule, and the requester-approval floor for egress-capable exec after member data
 - [ ] 07.8-26-PLAN.md — Wave 7: Build the sign-in card body, the phone live view (dock, full sheet, touch, hidden keyboard, phone viewport, Back),
 - [ ] 07.8-27-PLAN.md — Wave 7: Build the Keychain "Browser sessions" section and the bot page's Browser tab on the 21 routes, proven at both widths
 - [ ] 07.8-28-PLAN.md — Wave 8: Prove the phase's security properties across every layer: the registry-driven cross-tenant matrix, the API sentinel
-- [ ] 07.8-29-PLAN.md — Wave 9: Run the full gate, fix what it finds at the source, write ADR-0029 and the operator and owner docs, update STATUS,
+- [ ] 07.8-29-PLAN.md — Wave 9: Run the full gate, fix what it finds at the source, write ADR-0029 (incl. D-13, the single shared hop, full-tree pinning, the durable cursor) and the operator and owner docs, update STATUS, AGENTS and CODEOWNERS, sign VALIDATION
+- [ ] 07.8-30-PLAN.md — Wave 1: Contracts part 01b, in parallel with 01: browser and live-view protocol, modules and permissions, 07.5 approval hooks (incl. the D-13 `open` action) and agent cards, and the web module maps
 
 ### Phase 8: Device Trust, Protocol and Work Zone Permissions
 
