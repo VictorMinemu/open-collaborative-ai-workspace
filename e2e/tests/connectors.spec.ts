@@ -169,6 +169,8 @@ async function expectTouchTargets(scope: Locator, what: string) {
       for (const el of root.querySelectorAll<HTMLElement>(
         'button, input:not([type="hidden"]), [role="switch"], [role="combobox"], a[href]',
       )) {
+        // Not a touch target: a select's native input that Base UI keeps visually hidden for forms.
+        if (el.closest('[aria-hidden="true"]')) continue;
         const target = (el.closest("label") as HTMLElement | null) ?? el;
         const r = target.getBoundingClientRect();
         if (r.width === 0 || r.height === 0) continue;
