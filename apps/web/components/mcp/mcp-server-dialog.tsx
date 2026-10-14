@@ -60,6 +60,10 @@ export const TRANSPORTS: Array<{ value: McpTransport; label: string; hint: strin
   { value: "sandboxed-stdio", label: "Sandboxed stdio", hint: "A vetted local server in the sandbox" },
 ];
 
+/**
+ * The Authentication radio cards (07.4-UI-SPEC § 1), same markup as Transport. Test ids: `mcp-auth-mode-org_secret`,
+ * `mcp-auth-mode-per_member_oauth`, `mcp-auth-mode-per_member_secret`.
+ */
 export const AUTH_MODES: Array<{ value: ConnectorAuthMode; label: string; hint: string }> = [
   { value: "org_secret", label: "Organization secret", hint: "Uses one secret for everyone" },
   {
