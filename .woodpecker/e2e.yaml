@@ -75,7 +75,9 @@ steps:
       - docker compose up -d --wait postgres redis garage
       - pnpm db:migrate
       # Fake model, MCP and ClawHub (loopback, no internet).
-      - (PORT=4291 FAKE_MODEL_HOST=127.0.0.1 FAKE_MCP_TOKEN=e2e-mcp-token nohup node infra/fake-model/server.mjs > fake.log 2>&1 &)
+      # The fake OAuth server pre-registers the e2e client with this stack's callback (the API listens on :4000 here,
+      # :4290 in scripts/e2e-isolated.sh).
+      - (PORT=4291 FAKE_MODEL_HOST=127.0.0.1 FAKE_MCP_TOKEN=e2e-mcp-token FAKE_MCP_OAUTH_REDIRECTS=http://localhost:4000/api/v1/connectors/oauth/callback,http://127.0.0.1:4000/api/v1/connectors/oauth/callback nohup node infra/fake-model/server.mjs > fake.log 2>&1 &)
       - for i in $$(seq 1 20); do curl -sf -o /dev/null localhost:4291/v1/models && break; sleep 1; done
       - (cd apps/api && nohup node --env-file-if-exists=../../.env --import tsx src/main.ts > ../../api.log 2>&1 &)
       - (cd apps/web && nohup node --env-file-if-exists=../../.env ./node_modules/next/dist/bin/next start -p 3000 > ../../web.log 2>&1 &)
