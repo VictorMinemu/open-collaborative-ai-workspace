@@ -1,5 +1,6 @@
 import {
   AGENT_CHANNEL_BASE_PATH,
+  AgentChannelApprovalRefusalDetails,
   AgentChannelBoardCardResponse,
   type AgentChannelBoardCreateCard,
   type AgentChannelBoardPatchCard,
@@ -32,6 +33,7 @@ import {
   type AgentChannelProviderAuthReport,
   type AgentChannelRuntimeReport,
   type AgentChannelStatusReport,
+  type AgentChannelToolCallApproval,
   AgentChannelToolCallDecision,
   type AgentChannelToolCallRequest,
   type AgentChannelToolCallResult,
@@ -52,6 +54,8 @@ export class AgentChannelHttpError extends Error {
     message: string,
     /** The API's machine error code (`error.code`), when the body carried a well-formed one. Never free text. */
     readonly code?: string,
+    /** 07.5: the approval a 409 `approval_required` / `approval_pending` waits on (`error.details.approval`), if valid. */
+    readonly approval?: AgentChannelToolCallApproval,
   ) {
     super(message);
     this.name = "AgentChannelHttpError";
@@ -77,6 +81,17 @@ export function errorCodeOf(body: string): string | undefined {
   try {
     const code = (JSON.parse(body) as { error?: { code?: unknown } } | null)?.error?.code;
     return typeof code === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(code) ? code : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** `error.details.approval` of an API error body when it is a well-formed approval (07.5), else undefined. */
+export function approvalOf(body: string): AgentChannelToolCallApproval | undefined {
+  try {
+    const details = (JSON.parse(body) as { error?: { details?: unknown } } | null)?.error?.details;
+    const parsed = AgentChannelApprovalRefusalDetails.safeParse(details);
+    return parsed.success ? parsed.data.approval : undefined;
   } catch {
     return undefined;
   }
@@ -154,6 +169,7 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
           path,
           `${method} ${path} → ${res.status} ${detail}`,
           errorCodeOf(raw.slice(0, 4_000)),
+          approvalOf(raw.slice(0, 4_000)),
         );
         if (!isRetryableStatus(res.status)) throw err;
         lastError = err;

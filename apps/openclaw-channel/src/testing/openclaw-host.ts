@@ -299,6 +299,10 @@ export function normalizeToolPolicyName(name: string): string {
  * The global hook runner as seen by a tool call inside a prepared turn: it reads ONLY `registry` (dist
  * `resolveHookRegistry` returns the generation registry exclusively), runs before_tool_call handlers in
  * priority order, stops at the first `block`, and blocks on a thrown error or an expired budget.
+ * Params (docs.openclaw.ai/plugins/hooks/tool-policy): each handler sees an isolated copy of the ORIGINAL event, never
+ * an earlier handler's rewrite, and the last `params` a handler returned win; the result carries them as `params`
+ * (absent → the call runs with its own params). 07.5-04's param pin relies on this (Pitfall 3, assumption A2; the
+ * real-cell smoke in 07.5-15 records the real ordering).
  */
 export function createTurnHookRunner(registry: HostRegistry, opts: { budgetMs?: number } = {}) {
   const hooksFor = (hookName: string, toolName: string) =>
@@ -311,23 +315,27 @@ export function createTurnHookRunner(registry: HostRegistry, opts: { budgetMs?: 
     async runBeforeToolCall(
       call: { toolName: string; params?: Record<string, unknown>; toolCallId?: string },
       ctx: Record<string, unknown>,
-    ): Promise<{ blocked: boolean; reason?: string }> {
+    ): Promise<{ blocked: boolean; reason?: string; params?: Record<string, unknown> }> {
       // `toolName` is the tool's model-facing name; the hook sees OpenClaw's policy name.
       const event = { ...call, toolName: normalizeToolPolicyName(call.toolName) };
       const hooks = hooksFor("before_tool_call", event.toolName);
       if (hooks.length === 0) return { blocked: false };
+      let params: Record<string, unknown> | undefined;
       for (const hook of hooks) {
         try {
           const result = (await withBudget(
             Promise.resolve(hook.handler(structuredClone(event), ctx)),
             hook.timeoutMs ?? opts.budgetMs ?? BEFORE_TOOL_CALL_BUDGET_MS,
-          )) as { block?: boolean; blockReason?: string } | undefined;
+          )) as { block?: boolean; blockReason?: string; params?: unknown } | undefined;
           if (result?.block === true) return { blocked: true, reason: result.blockReason };
+          if (result?.params && typeof result.params === "object" && !Array.isArray(result.params)) {
+            params = result.params as Record<string, unknown>;
+          }
         } catch {
           return { blocked: true, reason: "Tool call blocked because before_tool_call hook failed" };
         }
       }
-      return { blocked: false };
+      return params ? { blocked: false, params } : { blocked: false };
     },
     async runAfterToolCall(
       call: Record<string, unknown> & { toolName: string },
