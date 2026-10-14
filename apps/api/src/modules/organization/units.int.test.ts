@@ -484,3 +484,86 @@ describe("units: memory blocks a delete like bots do (Phase 07.2, MEM-01)", () =
     expect(await exists("memory_scopes", scope)).toBe(false);
   });
 });
+
+describe("units: keys and live agent templates block a delete like bots do (Phase 07.4, 07.4-14)", () => {
+  const create = async (name: string) =>
+    (await ok(admin.request("POST", "/api/v1/units", { kind: "department", name, parentId: null })))
+      .id as string;
+  const exists = async (table: string, id: string) =>
+    (await su.query(`select 1 from app.${table} where id = $1`, [id])).rowCount === 1;
+
+  /** A unit key, as the keychain stores it (07.4-07): RESTRICT on its unit. */
+  async function unitKey(unitId: string, handle: string): Promise<string> {
+    const secretId = (
+      await su.query(
+        "insert into app.secrets (organization_id, name, kind, ciphertext, iv, tag) values ($1, 'unit key', 'vault_item', 'c', 'i', 't') returning id",
+        [orgId],
+      )
+    ).rows[0].id as string;
+    return (
+      await su.query(
+        `insert into app.vault_items (organization_id, scope, unit_id, name, handle, kind, injection, allowed_hosts, secret_ref)
+         values ($1, 'unit', $2, 'ERP', $3, 'api_key', '{"header":"Authorization","scheme":"bearer"}', '{erp.example.test}', $4::jsonb)
+         returning id`,
+        [orgId, unitId, handle, JSON.stringify({ provider: "db", secretId, organizationId: orgId })],
+      )
+    ).rows[0].id as string;
+  }
+
+  /** An agent template of the unit with its v1 (07.4-08): RESTRICT on its unit. */
+  async function template(unitId: string, archived: boolean): Promise<string> {
+    const id = (
+      await su.query(
+        "insert into app.agent_templates (organization_id, unit_id, name, description, current_version, archived_at) values ($1, $2, $3, 'd', 1, $4) returning id",
+        [orgId, unitId, `T ${unitId.slice(0, 8)}`, archived ? new Date().toISOString() : null],
+      )
+    ).rows[0].id as string;
+    await su.query(
+      `insert into app.agent_template_versions (organization_id, template_id, version, instructions, model_provider, model_id, capabilities)
+       values ($1, $2, 1, 'Help', 'mock', 'mock-1', '{"internet":false,"memory":true,"dailyLimit":null}')`,
+      [orgId, id],
+    );
+    return id;
+  }
+
+  it("a unit key is 409 unit_has_keys and a live template 409 unit_has_templates (never a 500); nothing changes", async () => {
+    const withKey = await create("With Key");
+    const key = await unitKey(withKey, "k_unitkeyaaa");
+    const withTemplate = await create("With Template");
+    const live = await template(withTemplate, false);
+    const auditsBefore = (await audit("unit.deleted")).length;
+    expect((await fails(admin.request("DELETE", `/api/v1/units/${withKey}`), 409)).code).toBe(
+      "unit_has_keys",
+    );
+    expect((await fails(admin.request("DELETE", `/api/v1/units/${withTemplate}`), 409)).code).toBe(
+      "unit_has_templates",
+    );
+    expect(await exists("org_units", withKey)).toBe(true);
+    expect(await exists("vault_items", key)).toBe(true);
+    expect(await exists("org_units", withTemplate)).toBe(true);
+    expect(await exists("agent_templates", live)).toBe(true);
+    expect((await audit("unit.deleted")).length).toBe(auditsBefore);
+  });
+
+  it("archived templates go with the unit (their versions too); an agent started from one keeps its own copy", async () => {
+    const unit = await create("Archived Only");
+    const archived = await template(unit, true);
+    const agent = (
+      await su.query(
+        "insert into app.agents (organization_id, name, username, instructions, model_provider, model_id, template_id, template_version) values ($1, 'From T', $2, 'Help', 'mock', 'mock-1', $3, 1) returning id",
+        [orgId, `fromt${Date.now().toString(36)}`, archived],
+      )
+    ).rows[0].id as string;
+    await ok(admin.request("DELETE", `/api/v1/units/${unit}`));
+    expect(await exists("org_units", unit)).toBe(false);
+    expect(await exists("agent_templates", archived)).toBe(false);
+    expect(
+      (await su.query("select 1 from app.agent_template_versions where template_id = $1", [archived]))
+        .rowCount,
+    ).toBe(0);
+    expect((await su.query("select template_id from app.agents where id = $1", [agent])).rows[0]).toEqual({
+      template_id: null,
+    });
+    expect((await audit("unit.deleted")).at(-1)?.metadata).toMatchObject({ removedTemplateIds: [archived] });
+  });
+});

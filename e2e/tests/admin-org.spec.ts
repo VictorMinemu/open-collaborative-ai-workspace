@@ -95,6 +95,26 @@ async function clearUnitMemory(admin: APIRequestContext) {
   }
 }
 
+/**
+ * Unit keys and live agent templates hold their unit (07.4, `unit_has_keys` / `unit_has_templates`): other specs of the
+ * same run leave some behind, so delete the keys and archive the templates first (archived ones go with the unit).
+ */
+async function clearUnitKeysAndTemplates(admin: APIRequestContext) {
+  const { unit } = (await (await admin.get("/api/v1/keychain")).json()) as {
+    unit: Array<{ id: string; unitId: string | null }>;
+  };
+  for (const k of unit.filter((x) => x.unitId)) {
+    expect((await admin.delete(`/api/v1/keychain/${k.id}`)).ok(), `delete unit key ${k.id}`).toBe(true);
+  }
+  const { templates } = (await (await admin.get("/api/v1/agent-templates")).json()) as {
+    templates: Array<{ id: string; unitId: string | null; archivedAt: string | null }>;
+  };
+  for (const t of templates.filter((x) => x.unitId && !x.archivedAt)) {
+    const res = await admin.patch(`/api/v1/agent-templates/${t.id}`, { data: { archived: true } });
+    expect(res.ok(), `archive template ${t.id}: ${await res.text()}`).toBe(true);
+  }
+}
+
 async function clearUnits(admin: APIRequestContext) {
   const { agents } = (await (await admin.get("/api/v1/agents")).json()) as {
     agents: Array<{ id: string; unitId?: string | null }>;
@@ -103,6 +123,7 @@ async function clearUnits(admin: APIRequestContext) {
     expect((await admin.delete(`/api/v1/agents/${a.id}`)).ok(), `delete unit persona ${a.id}`).toBe(true);
   }
   await clearUnitMemory(admin);
+  await clearUnitKeysAndTemplates(admin);
   const units = (await listUnits(admin)).sort((a, b) => b.path.length - a.path.length);
   for (const u of units) {
     const res = await admin.delete(`/api/v1/units/${u.id}`);
