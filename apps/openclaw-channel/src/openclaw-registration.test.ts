@@ -17,7 +17,7 @@ import {
   type PluginEntry,
   type RegistrationMode,
 } from "./testing/openclaw-host.js";
-import { setToolGuardClient, TOOL_GATE_PRIORITY, toolGuard } from "./tool-guard.js";
+import { setToolGuardClient, TOOL_GATE_PRIORITY, TOOL_PIN_PRIORITY, toolGuard } from "./tool-guard.js";
 
 vi.mock(
   "openclaw/plugin-sdk/channel-core",
@@ -53,10 +53,11 @@ const ocwHooks = (mode: RegistrationMode, kind: "tool" | "gateway" = "tool") =>
 
 describe("OpenClaw 2026.9.7 registration of the real entry", () => {
   it.each(["full", "discovery", "tool-discovery"] as const)(
-    "a %s registry carries the gate exactly once: before_tool_call unscoped at top priority + after_tool_call",
+    "a %s registry carries the gate exactly once: before_tool_call unscoped at top priority, the 07.5 param pin at the lowest, + after_tool_call",
     (mode) => {
       expect(ocwHooks(mode)).toEqual([
         { hookName: "before_tool_call", matcher: undefined, priority: TOOL_GATE_PRIORITY },
+        { hookName: "before_tool_call", matcher: undefined, priority: TOOL_PIN_PRIORITY },
         { hookName: "after_tool_call", matcher: undefined, priority: undefined },
       ]);
     },

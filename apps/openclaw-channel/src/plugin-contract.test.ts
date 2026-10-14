@@ -11,7 +11,17 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createFakeMcp } from "../../../infra/fake-model/fake-mcp.mjs";
-import type { CellAgent, CellMcpServer, CellProvider, CellSnapshot } from "./agent-channel-protocol.js";
+import {
+  AGENT_CHANNEL_TOOL_REFUSALS,
+  AgentChannelToolCallDecision,
+  type CellAgent,
+  type CellMcpServer,
+  type CellProvider,
+  type CellSnapshot,
+  TOOL_APPROVAL_LIMITS,
+  TOOL_APPROVAL_REFUSALS,
+  TurnToolFlags,
+} from "./agent-channel-protocol.js";
 import { AgentChannelHttpError, createAgentChannelClient } from "./api-client.js";
 import { AUTH_FAILURE_REPLY, createBridge, FAILURE_REPLY, type OpenClawPort } from "./bridge.js";
 import { MEMBER_ACCOUNT, NEEDS_RECONNECT, NOT_CONNECTED, REFUSAL_SENTENCE } from "./connector-tools.js";
@@ -35,7 +45,8 @@ import {
   type MentionInput,
   startFakeAgentChannelApi,
 } from "./testing/fake-agent-channel-api.js";
-import { createToolGuard } from "./tool-guard.js";
+import { createHostPluginApi, createTurnHookRunner, type HostRegistry } from "./testing/openclaw-host.js";
+import { APPROVAL_SENTENCES, createToolGuard } from "./tool-guard.js";
 
 const ARCHIE: CellAgent = {
   id: "agent-archie",
@@ -924,6 +935,153 @@ describe("tool gate against the fake Agent Channel API (HTTP)", () => {
   });
 });
 
+describe("the param pin against a rewriting plugin (07.5-04, D-04, Pitfall 3; OpenClaw: isolated copies, the last returned params win)", () => {
+  const INVOICE = "m1a2b3c4d__create_invoice";
+  const ECHO = "m1a2b3c4d__echo";
+  const CHECKED = { amount: 10, to: "billing@globex.example" };
+
+  /** Our plugin registered as in production (`registerCapabilities`) plus another plugin at priority 0 that rewrites. */
+  function host() {
+    const registry: HostRegistry = {
+      mode: "discovery",
+      typedHooks: [],
+      tools: [],
+      channels: [],
+      runtimes: [],
+      diagnostics: [],
+    };
+    const client = createAgentChannelClient({ apiUrl: api.url, token: () => api.token });
+    const guard = createToolGuard({ client: () => client });
+    registerCapabilities(createHostPluginApi(registry, { id: "ocw", contractsTools: [] }) as never, guard);
+    const rewriter = createHostPluginApi(registry, { id: "rewriter", contractsTools: [] }) as {
+      on: (
+        hook: string,
+        handler: (event: { params?: Record<string, unknown> }) => unknown,
+        opts: { priority: number },
+      ) => void;
+    };
+    rewriter.on("before_tool_call", (event) => ({ params: { ...event.params, amount: 999 } }), {
+      priority: 0,
+    });
+    guard.beginTurn("s-pin", {
+      eventId: "evt-pin",
+      agentId: ARCHIE.id,
+      requesterName: "Ana Pérez",
+      turn: {
+        tools: [INVOICE, ECHO],
+        toolFlags: {
+          [INVOICE]: { untrustedOutput: false, sideEffecting: true, approval: "always" },
+          [ECHO]: { untrustedOutput: false, sideEffecting: false },
+        },
+        memory: [],
+        now: null,
+        maxToolCalls: 8,
+        maxWebCalls: 5,
+      },
+    });
+    const runner = createTurnHookRunner(registry);
+    /** What OpenClaw would execute: blocked, or the last params a handler returned, else the call's own. */
+    const run = async (call: { toolName: string; params: Record<string, unknown>; toolCallId?: string }) => {
+      const r = await runner.runBeforeToolCall(call, { sessionKey: "s-pin" });
+      return r.blocked ? { blocked: r.reason } : { executed: r.params ?? call.params };
+    };
+    return { guard, run, registry };
+  }
+
+  it("a flagged call the API allows (a grant) executes with exactly the checked params; an unflagged one is rewritten as before", async () => {
+    const set = await fetch(`${api.url}/__test/tool-approval`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tool: INVOICE, reply: "grant" }),
+    });
+    expect(set.status).toBe(200);
+    const { run, guard } = host();
+    expect(await run({ toolName: INVOICE, params: { ...CHECKED }, toolCallId: "tc-p1" })).toEqual({
+      executed: CHECKED,
+    });
+    expect(api.toolCalls[0]).toMatchObject({ tool: INVOICE, arguments: CHECKED, allowed: true });
+    // Without a pin (unflagged): today's behaviour, the other plugin's rewrite runs.
+    expect(await run({ toolName: ECHO, params: { amount: 10 }, toolCallId: "tc-p2" })).toEqual({
+      executed: { amount: 999 },
+    });
+    // The pin entry is gone after the call.
+    expect(
+      guard.pinParams({ toolName: INVOICE, params: {}, toolCallId: "tc-p1" }, { sessionKey: "s-pin" }),
+    ).toBe(undefined);
+  });
+
+  it("a flagged call the API refuses never executes; one without a tool call id is blocked and nothing is posted", async () => {
+    api.toolApprovals.set(INVOICE, { reply: "approval_required", waitingFor: "Marta Gil" });
+    const { run } = host();
+    expect(await run({ toolName: INVOICE, params: { ...CHECKED }, toolCallId: "tc-r1" })).toEqual({
+      blocked: APPROVAL_SENTENCES.approval_required({
+        tool: INVOICE,
+        waitingFor: "Marta Gil",
+        requesterName: "Ana Pérez",
+      }),
+    });
+    const posted = api.toolCalls.length;
+    expect(await run({ toolName: INVOICE, params: { ...CHECKED } })).toEqual({
+      blocked: APPROVAL_SENTENCES.no_call_id({ tool: INVOICE }),
+    });
+    expect(api.toolCalls).toHaveLength(posted);
+  });
+});
+
+describe("approval mirror parity (07.5-04: plugin ↔ packages/contracts tool-approvals.ts, agent-channel.ts, bot-capabilities.ts)", () => {
+  const contracts = (file: string) =>
+    new URL(`../../../packages/contracts/src/${file}`, import.meta.url).href;
+  type Schema = { safeParse: (v: unknown) => { success: boolean; data?: unknown } };
+  const load = async () => ({
+    approvals: (await import(contracts("tool-approvals.ts"))) as {
+      ToolApprovalRefusal: { options: string[] };
+      TOOL_APPROVAL_LIMITS: Record<string, number>;
+    },
+    channel: (await import(contracts("agent-channel.ts"))) as Record<string, Schema> & {
+      AgentChannelToolRefusal: { options: string[] };
+    },
+    caps: (await import(contracts("bot-capabilities.ts"))) as { TurnToolFlags: Schema },
+  });
+
+  it("the refusal lists and the limits are the contracts'", async () => {
+    const { approvals, channel } = await load();
+    expect([...TOOL_APPROVAL_REFUSALS].sort()).toEqual([...approvals.ToolApprovalRefusal.options].sort());
+    expect([...AGENT_CHANNEL_TOOL_REFUSALS]).toEqual([...channel.AgentChannelToolRefusal.options]);
+    expect(TOOL_APPROVAL_LIMITS.argumentsBytes).toBe(approvals.TOOL_APPROVAL_LIMITS.argumentsBytes);
+    expect(TOOL_APPROVAL_LIMITS.pendingPerRequester).toBe(approvals.TOOL_APPROVAL_LIMITS.pendingPerRequester);
+  });
+
+  it("turn flags and the decision: what the contract accepts reads the same in the mirror", async () => {
+    const { caps, channel } = await load();
+    for (const flags of [
+      { untrustedOutput: true, sideEffecting: true },
+      { untrustedOutput: true, sideEffecting: true, approval: "always" },
+      { untrustedOutput: false, sideEffecting: true, approval: "when_tainted" },
+    ]) {
+      expect(caps.TurnToolFlags.safeParse(flags).success).toBe(true);
+      expect(TurnToolFlags.parse(flags)).toEqual(flags);
+    }
+    const decision = {
+      callId: "0199a6f0-0000-7000-8000-0000000000c1",
+      allowed: false,
+      reason: "approval_required",
+      approval: {
+        id: "0199a6f0-0000-7000-8000-0000000000a1",
+        created: true,
+        waitingFor: "a lead of Sales",
+        requesterName: "Ana Pérez",
+      },
+    };
+    expect(channel.AgentChannelToolCallDecision?.safeParse(decision).success).toBe(true);
+    expect(AgentChannelToolCallDecision.parse(decision)).toEqual(decision);
+    // A value the contract does not know reads as absent in the mirror (never voids the turn or the decision).
+    expect(TurnToolFlags.parse({ untrustedOutput: true, sideEffecting: true, approval: "later" })).toEqual({
+      untrustedOutput: true,
+      sideEffecting: true,
+    });
+  });
+});
+
 /** Every tool the plugin owns, in registration order (manifest `contracts.tools` and `registerFull`). */
 const PLUGIN_TOOLS = [
   "ocw_memory_save",
@@ -960,7 +1118,8 @@ describe("memory tool (D-10): manifest, registration and the fake API", () => {
     expect(hooks).toEqual(["gateway_start"]);
     expect(tools.map((t) => t.opts.name)).toEqual(PLUGIN_TOOLS);
     registerCapabilities(pluginApi as never, guard);
-    expect(hooks).toEqual(["gateway_start", "before_tool_call", "after_tool_call"]);
+    // 07.5-04: the gate, the param pin, then after_tool_call.
+    expect(hooks).toEqual(["gateway_start", "before_tool_call", "before_tool_call", "after_tool_call"]);
     expect(tools).toHaveLength(PLUGIN_TOOLS.length);
   });
 
@@ -1747,5 +1906,34 @@ describe("connector tools (07.4 D-07, C-01): registerFull → the real HTTP clie
       url: "https://elsewhere.example/",
     });
     expect(text(http)).toBe(REFUSAL_SENTENCE.host_not_allowed);
+  });
+
+  it("07.5: an approval refusal over HTTP is the approval sentence with the logical tool and the 409's details, never the body", async () => {
+    const { tool } = connectorSetup();
+    api.toolApprovals.set("m1a2b3c4d__whoami", {
+      reply: "approval_required",
+      waitingFor: "Marta Gil",
+      requesterName: "Sam Lee",
+    });
+    const r = await tool("ocw_connector_call").execute("tc-1", {
+      connector: "m1a2b3c4d",
+      tool: "whoami",
+      arguments: { a: 1 },
+    });
+    expect(text(r)).toBe(
+      APPROVAL_SENTENCES.approval_required({
+        tool: "m1a2b3c4d__whoami",
+        waitingFor: "Marta Gil",
+        requesterName: "Sam Lee",
+      }),
+    );
+    expect(JSON.stringify(r)).not.toContain(FAKE_ERROR_CANARY);
+    api.toolApprovals.set("ocw_http_request", { reply: "approval_used" });
+    const http = await tool("ocw_http_request").execute("tc-2", {
+      handle: "k_abcdefgh23",
+      method: "POST",
+      url: "https://api.example.com/v1/me",
+    });
+    expect(text(http)).toBe(APPROVAL_SENTENCES.approval_used({ tool: "ocw_http_request" }));
   });
 });

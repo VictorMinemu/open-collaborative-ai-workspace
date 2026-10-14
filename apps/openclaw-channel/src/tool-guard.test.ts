@@ -6,7 +6,7 @@ import type {
   TurnContext,
 } from "./agent-channel-protocol.js";
 import type { AgentChannelClient } from "./api-client.js";
-import { createToolGuard, registerToolGate, TOOL_GATE_PRIORITY } from "./tool-guard.js";
+import { createToolGuard, registerToolGate, TOOL_GATE_PRIORITY, TOOL_PIN_PRIORITY } from "./tool-guard.js";
 
 const WEB = { untrustedOutput: true, sideEffecting: false };
 const MEMORY = { untrustedOutput: false, sideEffecting: true };
@@ -191,7 +191,7 @@ describe("tool guard: after_tool_call", () => {
 });
 
 describe("hook registration (registerToolGate, called from registerCapabilities)", () => {
-  it("registers before_tool_call unscoped at the highest priority, and after_tool_call", async () => {
+  it("registers before_tool_call unscoped at the highest priority, the param pin at the lowest, and after_tool_call", async () => {
     const hooks: Array<{ name: string; opts: unknown; handler: (e: unknown, c: unknown) => unknown }> = [];
     const api = {
       on: (name: string, handler: (e: unknown, c: unknown) => unknown, opts?: unknown) =>
@@ -199,8 +199,15 @@ describe("hook registration (registerToolGate, called from registerCapabilities)
     };
     const guard = createToolGuard({ client: () => null });
     registerToolGate(api as never, guard);
-    expect(hooks.map((h) => h.name)).toEqual(["before_tool_call", "after_tool_call"]);
+    // 07.5-04: before_tool_call twice (the gate and the param pin), after_tool_call once.
+    expect(hooks.map((h) => h.name)).toEqual(["before_tool_call", "before_tool_call", "after_tool_call"]);
     expect(hooks[0]?.opts).toEqual({ priority: TOOL_GATE_PRIORITY });
+    expect(hooks[1]?.opts).toEqual({ priority: TOOL_PIN_PRIORITY });
+    expect(TOOL_PIN_PRIORITY).toBeLessThan(0);
+    // Nothing pinned → the pin handler changes nothing.
+    expect(
+      await hooks[1]?.handler({ toolName: "web_search", params: {}, toolCallId: "x" }, {}),
+    ).toBeUndefined();
     // No active turn → the registered handler blocks.
     expect(
       await hooks[0]?.handler({ toolName: "web_search", params: {} }, { sessionKey: "s" }),
@@ -908,5 +915,155 @@ describe("per-tool approvals (07.5-04, D-01, D-02, D-04, UI-SPEC R10)", () => {
     fake.decide = async () => ({ callId: "c-ok", allowed: true, reason: null });
     expect(await g.beforeToolCall(call(NOTE, { text: "go" }), ctx())).toBeUndefined();
     expect(g.activeTurn(SESSION)).toMatchObject({ calls: 2, tainted: true });
+  });
+});
+
+describe("the param pin (07.5-04, D-04, Pitfall 3): what the API checked is what runs", () => {
+  const NOTE = "m1a2b3c4d__write_note";
+  const ECHO = "m1a2b3c4d__echo";
+  const FLAGGED = { untrustedOutput: true, sideEffecting: true, approval: "when_tainted" as const };
+
+  function pinGuard(fake: FakeClient, session = SESSION) {
+    const g = createToolGuard({ client: () => fake.client });
+    g.beginTurn(session, {
+      eventId: "evt-pin",
+      agentId: "a1",
+      turn: turn({
+        tools: [NOTE, ECHO, "ocw_connector_call"],
+        toolFlags: { [NOTE]: FLAGGED, [ECHO]: { untrustedOutput: true, sideEffecting: false } },
+      }),
+      connectorTools: ["m1a2b3c4d__create_invoice"],
+    });
+    return g;
+  }
+
+  it("an allowed flagged call is pinned under its call id: the pin returns a copy of exactly the checked params, once", async () => {
+    const fake = fakeClient();
+    const g = pinGuard(fake);
+    const params = { amount: 10, to: "billing@globex.example", lines: [{ sku: "A", qty: 2 }] };
+    expect(await g.beforeToolCall({ toolName: NOTE, params, toolCallId: "tc-p1" }, ctx())).toBeUndefined();
+    // A later mutation of the event's object never reaches the pin.
+    params.amount = 999;
+    const pinned = g.pinParams({ toolName: NOTE, params: { amount: 1 }, toolCallId: "tc-p1" }, ctx());
+    expect(pinned).toEqual({
+      params: { amount: 10, to: "billing@globex.example", lines: [{ sku: "A", qty: 2 }] },
+    });
+    expect(g.pinParams({ toolName: NOTE, params: {}, toolCallId: "tc-p1" }, ctx())).toBeUndefined();
+  });
+
+  it("only flagged calls the API allowed are pinned; another session never reads a pin", async () => {
+    const fake = fakeClient();
+    const g = pinGuard(fake);
+    await g.beforeToolCall({ toolName: ECHO, params: { text: "x" }, toolCallId: "tc-u" }, ctx());
+    expect(g.pinParams({ toolName: ECHO, params: {}, toolCallId: "tc-u" }, ctx())).toBeUndefined();
+    fake.decide = async () => ({ callId: "c", allowed: false, reason: "approval_pending" });
+    await g.beforeToolCall({ toolName: NOTE, params: { a: 1 }, toolCallId: "tc-r" }, ctx());
+    expect(g.pinParams({ toolName: NOTE, params: {}, toolCallId: "tc-r" }, ctx())).toBeUndefined();
+    fake.decide = async () => ({ callId: "c", allowed: true, reason: null });
+    await g.beforeToolCall({ toolName: NOTE, params: { a: 2 }, toolCallId: "tc-s" }, ctx());
+    expect(
+      g.pinParams({ toolName: NOTE, params: {}, toolCallId: "tc-s" }, ctx("agent:ocw-a1:ocw:channel:dm-9")),
+    ).toBeUndefined();
+    expect(g.pinParams({ toolName: NOTE, params: {}, toolCallId: "tc-s" }, ctx())).toEqual({
+      params: { a: 2 },
+    });
+  });
+
+  it("a flagged call without a tool call id is blocked with the fixed sentence and nothing is posted; the context's id counts", async () => {
+    const fake = fakeClient();
+    const g = pinGuard(fake);
+    expect(await g.beforeToolCall({ toolName: NOTE, params: { a: 1 } }, ctx())).toEqual({
+      block: true,
+      blockReason: `Tool ${NOTE} blocked: this action needs approval, but the call has no id to bind the approval to (fail closed).`,
+    });
+    expect(fake.requests).toEqual([]);
+    expect(g.activeTurn(SESSION)?.calls).toBe(0);
+    expect(
+      await g.beforeToolCall({ toolName: NOTE, params: { a: 1 } }, { ...ctx(), toolCallId: "tc-ctx" }),
+    ).toBeUndefined();
+    expect(fake.requests[0]?.toolCallId).toBe("tc-ctx");
+    expect(g.pinParams({ toolName: NOTE, params: {} }, { ...ctx(), toolCallId: "tc-ctx" })).toEqual({
+      params: { a: 1 },
+    });
+  });
+
+  it("pins are dropped when the turn ends (endTurn or its signal), so a blocked call never leaves one behind", async () => {
+    const fake = fakeClient();
+    const g = pinGuard(fake);
+    await g.beforeToolCall({ toolName: NOTE, params: { a: 1 }, toolCallId: "tc-e" }, ctx());
+    g.endTurn(SESSION);
+    expect(g.pinParams({ toolName: NOTE, params: {}, toolCallId: "tc-e" }, ctx())).toBeUndefined();
+    const abort = new AbortController();
+    const g2 = createToolGuard({ client: () => fake.client });
+    g2.beginTurn(
+      SESSION,
+      { eventId: "evt-a", agentId: "a1", turn: turn({ tools: [NOTE], toolFlags: { [NOTE]: FLAGGED } }) },
+      abort.signal,
+    );
+    await g2.beforeToolCall({ toolName: NOTE, params: { a: 1 }, toolCallId: "tc-a" }, ctx());
+    abort.abort();
+    expect(g2.pinParams({ toolName: NOTE, params: {}, toolCallId: "tc-a" }, ctx())).toBeUndefined();
+  });
+
+  it("self-validated tools are never pinned: their own route performs exactly what it decided on", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    g.beginTurn(SESSION, {
+      eventId: "evt-sv",
+      agentId: "a1",
+      turn: turn({
+        tools: ["ocw_connector_call"],
+        toolFlags: { m1a2b3c4d__create_invoice: FLAGGED },
+      }),
+      connectorTools: ["m1a2b3c4d__create_invoice"],
+    });
+    const params = { connector: "m1a2b3c4d", tool: "create_invoice", arguments: { amount: 10 } };
+    expect(await g.beforeToolCall({ toolName: "ocw_connector_call", params }, ctx())).toBeUndefined();
+    expect(fake.requests).toEqual([]);
+    expect(
+      g.pinParams({ toolName: "ocw_connector_call", params: {}, toolCallId: "tc-x" }, ctx()),
+    ).toBeUndefined();
+  });
+
+  it("ocw_connector_call and ocw_http_request skip the local taint block when the logical tool (or the keychain tool) is flagged", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    const begin = (approval: boolean) =>
+      g.beginTurn(SESSION, {
+        eventId: "evt-ct",
+        agentId: "a1",
+        turn: turn({
+          tools: ["web_search", "ocw_connector_call", "ocw_http_request"],
+          toolFlags: {
+            web_search: WEB,
+            m1a2b3c4d__create_invoice: {
+              untrustedOutput: true,
+              sideEffecting: true,
+              ...(approval ? { approval: "when_tainted" as const } : {}),
+            },
+            ocw_http_request: {
+              untrustedOutput: true,
+              sideEffecting: true,
+              ...(approval ? { approval: "always" as const } : {}),
+            },
+          },
+        }),
+        connectorTools: ["m1a2b3c4d__create_invoice"],
+      });
+    const invoice = { connector: "m1a2b3c4d", tool: "create_invoice", arguments: { amount: 10 } };
+    const post = { handle: "k_abcdefgh23", method: "POST", url: "https://erp.example/x" };
+    for (const approval of [true, false]) {
+      begin(approval);
+      await g.beforeToolCall(call("web_search", { query: "q" }), ctx());
+      const c = await g.beforeToolCall(call("ocw_connector_call", invoice), ctx());
+      const h = await g.beforeToolCall(call("ocw_http_request", post), ctx());
+      if (approval) {
+        expect(c).toBeUndefined();
+        expect(h).toBeUndefined();
+      } else {
+        expect(c?.blockReason).toContain("read-only after untrusted content");
+        expect(h?.blockReason).toContain("read-only after untrusted content");
+      }
+    }
   });
 });

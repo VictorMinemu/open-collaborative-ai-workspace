@@ -1013,6 +1013,14 @@ export const AGENT_CHANNEL_TOOL_REFUSALS = [
   "egress_refused",
   "upstream_error",
   "timeout",
+  // 07.5: every `ToolApprovalRefusal` (`policy_changed` is above).
+  "approval_required",
+  "approval_pending",
+  "approval_denied",
+  "approval_used",
+  "arguments_too_large",
+  "arguments_invalid",
+  "too_many_pending",
 ] as const;
 export const AgentChannelToolRefusal = z.enum(AGENT_CHANNEL_TOOL_REFUSALS);
 export type AgentChannelToolRefusal = z.infer<typeof AgentChannelToolRefusal>;

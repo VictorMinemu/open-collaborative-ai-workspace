@@ -122,15 +122,19 @@ const HTTP_WRITE_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: 
 const HTTP_READ_METHODS: ReadonlySet<string> = new Set(["GET", "HEAD"]);
 
 type Pending = { callId: string; tool: string; startedAt: number };
+/** 07.5: the params the API checked for an allowed flagged call, until the pin hands them to OpenClaw (or the turn ends). */
+type Pinned = { session: string; params: Record<string, unknown> };
 
 export type ToolGuardState = {
   turns: Map<string, ActiveTurn>;
   pending: Map<string, Pending>;
+  /** Keyed by `pinKey(session, toolCallId)`. */
+  pinned: Map<string, Pinned>;
   client: AgentChannelClient | null;
 };
 
 export function createToolGuardState(): ToolGuardState {
-  return { turns: new Map(), pending: new Map(), client: null };
+  return { turns: new Map(), pending: new Map(), pinned: new Map(), client: null };
 }
 
 function block(reason: string): ToolBlock {
@@ -138,6 +142,7 @@ function block(reason: string): ToolBlock {
 }
 
 const keyOf = (sessionKey: string | undefined) => (sessionKey ?? "").trim().toLowerCase();
+const pinKey = (session: string, toolCallId: string) => `${session}\u0000${toolCallId}`;
 
 /** The turn's own spelling of a tool name OpenClaw reports case-folded; the reported name when none matches. */
 export function canonicalToolName(turnTools: readonly string[], reported: string): string {
@@ -346,6 +351,9 @@ export function createToolGuard(
 ) {
   const timeoutMs = deps.timeoutMs ?? 10_000;
   const log = () => deps.log ?? {};
+  const dropPins = (session: string) => {
+    for (const [k, pin] of state.pinned) if (pin.session === session) state.pinned.delete(k);
+  };
 
   return {
     timeoutMs,
@@ -376,15 +384,20 @@ export function createToolGuard(
       signal?.addEventListener(
         "abort",
         () => {
-          if (state.turns.get(key)?.eventId === t.eventId) state.turns.delete(key);
+          if (state.turns.get(key)?.eventId === t.eventId) {
+            state.turns.delete(key);
+            dropPins(key);
+          }
         },
         { once: true },
       );
     },
 
-    /** Ends the session's turn: any later call for it is blocked. */
+    /** Ends the session's turn: any later call for it is blocked, and its unused pins are dropped. */
     endTurn(sessionKey: string): void {
-      state.turns.delete(keyOf(sessionKey));
+      const key = keyOf(sessionKey);
+      state.turns.delete(key);
+      dropPins(key);
     },
 
     activeTurn(sessionKey: string): ActiveTurn | undefined {
@@ -448,11 +461,14 @@ export function createToolGuard(
       // The arguments a flagged call is decided on (the API canonicalizes them; the connector tools send their own).
       const sentence = { tool, requesterName: t.requesterName };
       const approvalArgs = approval && !selfValidated ? (event.params ?? {}) : undefined;
+      // The id the approved params are pinned under (Pitfall 3): without one the pin cannot hold, so the call is blocked.
+      const callId = event.toolCallId ?? ctx.toolCallId;
       if (approvalArgs) {
         const bytes = jsonBytes(approvalArgs);
         if (bytes === undefined) return block(APPROVAL_SENTENCES.arguments_invalid(sentence));
         if (bytes > TOOL_APPROVAL_LIMITS.argumentsBytes)
           return block(APPROVAL_SENTENCES.too_large_local(sentence));
+        if (!callId) return block(APPROVAL_SENTENCES.no_call_id(sentence));
       }
       // Count before awaiting the API so concurrent calls of one turn can never exceed the caps.
       t.calls++;
@@ -472,7 +488,11 @@ export function createToolGuard(
                 eventId: t.eventId,
                 agentId: t.agentId,
                 tool,
-                ...(event.toolCallId ? { toolCallId: event.toolCallId.slice(0, 200) } : {}),
+                ...(approvalArgs && callId
+                  ? { toolCallId: callId.slice(0, 200) }
+                  : event.toolCallId
+                    ? { toolCallId: event.toolCallId.slice(0, 200) }
+                    : {}),
                 params: pickParams(event.params),
                 argsBytes: argsBytes(event.params),
                 // D-01: only a flagged tool's arguments ever leave the cell (structural: no key otherwise).
@@ -510,9 +530,32 @@ export function createToolGuard(
         if (event.toolCallId) {
           state.pending.set(event.toolCallId, { callId: decision.callId, tool, startedAt: Date.now() });
         }
+        if (approvalArgs && callId) {
+          // A copy: what the API checked, whatever happens later to the event's object.
+          state.pinned.set(pinKey(keyOf(ctx.sessionKey), callId), {
+            session: keyOf(ctx.sessionKey),
+            params: structuredClone(approvalArgs),
+          });
+        }
       }
       if (flags.untrustedOutput) t.tainted = true;
       return undefined;
+    },
+
+    /**
+     * 07.5 (D-04, Pitfall 3): the lowest-priority `before_tool_call` handler. OpenClaw gives each handler an isolated
+     * copy of the original event and lets the LAST returned `params` win, so a plugin hooked between our gate and the
+     * tool could change what a person approved. For a flagged call the gate allowed, this returns exactly the params the
+     * API checked (once: the entry is deleted); for anything else it changes nothing.
+     */
+    pinParams(event: ToolCallEvent, ctx: ToolCallContext): { params: Record<string, unknown> } | undefined {
+      const callId = event.toolCallId ?? ctx.toolCallId;
+      if (!callId) return undefined;
+      const key = pinKey(keyOf(ctx.sessionKey), callId);
+      const pin = state.pinned.get(key);
+      if (!pin) return undefined;
+      state.pinned.delete(key);
+      return { params: structuredClone(pin.params) };
     },
 
     async afterToolCall(event: ToolCallEvent, _ctx: ToolCallContext): Promise<void> {
@@ -566,16 +609,23 @@ export const toolGuard: ToolGuard = createToolGuard({ client: () => sharedState.
 
 /** Highest priority: our gate runs before any other plugin's tool hook; a block is terminal. */
 export const TOOL_GATE_PRIORITY = 10_000;
+/**
+ * 07.5: lowest priority, so the params pin returns last and its params win (OpenClaw: "the last returned params
+ * wins"). A plugin registered even lower could still rewrite after it; the real-cell smoke (07.5-15) records the order.
+ */
+export const TOOL_PIN_PRIORITY = -10_000;
 
 /**
  * Registers the gate on OpenClaw (`registerCapabilities`, so it also exists in the non-activated registry agent
  * turns run with). No matcher, so it sees EVERY tool: matchers reject wildcards,
  * and a tool we did not list must not slip through. A thrown error or a timeout in `before_tool_call` blocks the
- * call (OpenClaw's fail-closed policy for that hook).
+ * call (OpenClaw's fail-closed policy for that hook). 07.5: a second `before_tool_call` handler at TOOL_PIN_PRIORITY
+ * pins an approved call's params. OpenClaw's own approval hook result and exec approvals stay unused (D-02, C-01).
  */
 export function registerToolGate(api: OpenClawPluginApi, guard: ToolGuard = toolGuard): void {
   api.on("before_tool_call", (event, ctx) => guard.beforeToolCall(event, ctx), {
     priority: TOOL_GATE_PRIORITY,
   });
+  api.on("before_tool_call", (event, ctx) => guard.pinParams(event, ctx), { priority: TOOL_PIN_PRIORITY });
   api.on("after_tool_call", (event, ctx) => guard.afterToolCall(event, ctx));
 }
