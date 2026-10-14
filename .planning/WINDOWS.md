@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 131
+open_count: 133
 waived_count: 4
 fixed_count: 80
-total_count: 215
-last_updated: 2026-10-14T18:19:32.619Z
+total_count: 217
+last_updated: 2026-10-14T18:27:17.253Z
 ---
 
 # Broken Windows Ledger
@@ -230,6 +230,8 @@ last_updated: 2026-10-14T18:19:32.619Z
 | 213 | 07.5 | deviation | apps/api/src/testing.ts |  | Test Redis containers leak (208 redis:8 found running, 1-2 h old): TestStack.stop() awaits built.close() before stopping containers, so a throwing close skips redis.stop(); make it try/finally and check why Ryuk did not reap them (fix in the 07.5 gate) | open |  | 2026-10-14T17:47:21.500Z |  |
 | 214 | 07.5 | unrun-verify | apps/openclaw-channel/src/work-zone-tools.ts |  | Work Zone proposal tools unproven in a real cell (alsoAllow, model use, taint refusal) and only tested against the fake; 07.5-15 must run SMOKE_ONLY=work_zone and an API parity test after 07.5-08; import cycle tool-guard <-> work-zone-tools (harmless, commented) | open |  | 2026-10-14T17:49:14.525Z |  |
 | 215 | 07.5 | deviation | apps/api/src/modules/work-session |  | When a Work Zone proposal Start fails the bot hears 'approved' without the error code (add resultCode to CardAction); each Work Zone card read recomputes its live state with several queries | open |  | 2026-10-14T18:19:32.619Z |  |
+| 216 | 07.5 | deviation | apps/web/components/ui/avatar.tsx |  | Shared avatar initials are 4.25-4.48:1 at 12 px (below AA, axe flaky by random id); move text from *-700 to *-800 | open |  | 2026-10-14T18:27:17.175Z |  |
+| 217 | 07.5 | deviation | apps/web/components/settings |  | Approval history shows a raw m…__* pattern for a rule on a deleted server; the policies page does not warn when /access or the catalog are truncated | open |  | 2026-10-14T18:27:17.253Z |  |
 
 ````json
 [
@@ -2811,6 +2813,30 @@ last_updated: 2026-10-14T18:19:32.619Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-14T18:19:32.619Z",
+    "resolved_at": null
+  },
+  {
+    "id": 216,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "apps/web/components/ui/avatar.tsx",
+    "line": null,
+    "description": "Shared avatar initials are 4.25-4.48:1 at 12 px (below AA, axe flaky by random id); move text from *-700 to *-800",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T18:27:17.175Z",
+    "resolved_at": null
+  },
+  {
+    "id": 217,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "apps/web/components/settings",
+    "line": null,
+    "description": "Approval history shows a raw m…__* pattern for a rule on a deleted server; the policies page does not warn when /access or the catalog are truncated",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T18:27:17.253Z",
     "resolved_at": null
   }
 ]
