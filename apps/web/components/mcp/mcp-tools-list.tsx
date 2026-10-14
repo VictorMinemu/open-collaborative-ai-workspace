@@ -2,6 +2,7 @@ import type { McpServerTool } from "@ocw/contracts";
 import { Eye, PencilLine } from "lucide-react";
 import type { ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
+import { useOrgToolApprovalModes } from "@/lib/approval-policy-queries";
 
 /**
  * Whether a tool can change data, from the API's view of it: only a tool the server explicitly marks read-only
@@ -19,8 +20,13 @@ export function SideEffectBadge({ sideEffecting }: { sideEffecting: boolean }) {
   );
 }
 
-/** Tools discovered on one MCP server. Names and descriptions come from the server: plain text only. */
+/**
+ * Tools discovered on one MCP server. Names and descriptions come from the server: plain text only. A tool the
+ * organization's approval policy asks about (07.5, UI-SPEC Surface 4) carries a status chip after its effect: "Needs
+ * approval" (Always ask) or "Asks after outside content"; only for people who manage those rules.
+ */
 export function McpToolsList({ tools }: { tools: McpServerTool[] }) {
+  const approvalMode = useOrgToolApprovalModes();
   return (
     <ul className="divide-y rounded-lg border bg-background" data-testid="mcp-tools">
       {tools.map((t) => (
@@ -41,7 +47,16 @@ export function McpToolsList({ tools }: { tools: McpServerTool[] }) {
               <p className="line-clamp-2 text-muted-foreground text-xs leading-snug">{t.description}</p>
             ) : null}
           </div>
-          <SideEffectBadge sideEffecting={!t.readOnly || t.destructive} />
+          {approvalMode(t.openclawName) === "never" ? (
+            <SideEffectBadge sideEffecting={!t.readOnly || t.destructive} />
+          ) : (
+            <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+              <SideEffectBadge sideEffecting={!t.readOnly || t.destructive} />
+              <Badge variant="warning" data-testid="tool-needs-approval">
+                {approvalMode(t.openclawName) === "always" ? "Needs approval" : "Asks after outside content"}
+              </Badge>
+            </div>
+          )}
         </li>
       ))}
     </ul>

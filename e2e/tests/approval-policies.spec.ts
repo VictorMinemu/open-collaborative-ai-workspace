@@ -4,8 +4,10 @@ import {
   ACME_CRM,
   clearApprovalPolicies,
   LUIS,
+  MARTA,
   seedApprovalMcp,
   seedApprovalPeople,
+  setApprovalPolicy,
 } from "../support/approvals";
 import { ADMIN } from "./env";
 
@@ -135,4 +137,208 @@ test("member: no Approval policies entry; the direct URL says they can't manage 
   await expect(page.getByText("You can't manage approval policies")).toBeVisible();
   await expect(page.getByRole("link", { name: "Back to settings" })).toBeVisible();
   await expect(page.getByTestId("approval-policies")).toHaveCount(0);
+});
+
+/** Opens the rule dialog of a row and returns it. */
+async function openRule(page: Page, pattern: string) {
+  await editOf(page, pattern).click();
+  const dialog = page.getByTestId("policy-dialog");
+  await expect(dialog).toBeVisible();
+  return dialog;
+}
+
+test("lead: only the units they lead; the organization's Always is read-only; weaker options are disabled; they add an approval", async ({
+  browser,
+}, info) => {
+  test.setTimeout(120_000);
+  const mobile = info.project.name === "mobile";
+  await setApprovalPolicy(admin, {
+    scopeUnitId: null,
+    toolPattern: tool("write_note"),
+    mode: "always",
+    approverKind: "admins",
+  });
+  await setApprovalPolicy(admin, {
+    scopeUnitId: null,
+    toolPattern: "ocw_http_request",
+    mode: "when_tainted",
+    approverKind: "requester",
+  });
+  const { page } = await openAs(browser, MARTA, info.project.name);
+  await openPolicies(page, mobile);
+
+  // ---- Scope: Sales and its team only, never the organization
+  const scope = page.getByTestId("policy-scope");
+  await expect(scope).toContainText("Sales (Department)");
+  await scope.click();
+  const options = page.getByRole("option");
+  await expect(options).toHaveCount(2);
+  await expect(options.nth(0)).toContainText("Sales");
+  await expect(options.nth(1)).toContainText("Sales East");
+  await page.keyboard.press("Escape");
+
+  // ---- the organization's Always on write_note: read-only, with its source and the reason
+  const write = rowOf(page, tool("write_note"));
+  await expect(write.getByTestId("policy-mode-chip")).toHaveText("Always ask");
+  await expect(write.getByTestId("policy-source")).toHaveText("from Organization");
+  await expect(write.getByTestId("policy-locked-reason")).toHaveText(
+    "The organization already asks every time. A unit can only add approvals.",
+  );
+  if (mobile) {
+    await expect(editOf(page, tool("write_note"))).toHaveCount(0);
+  } else {
+    await expect(editOf(page, tool("write_note"))).toHaveAttribute("aria-disabled", "true");
+    // aria-disabled stays focusable (the reason is read with it); a click opens nothing.
+    await editOf(page, tool("write_note")).click({ force: true });
+    await expect(page.getByTestId("policy-dialog")).toHaveCount(0);
+  }
+
+  // ---- Web requests asks after outside content upstairs: Never ask is disabled with the reason
+  let dialog = await openRule(page, "ocw_http_request");
+  await expect(dialog.getByTestId("policy-mode-when_tainted").locator("input")).toBeChecked();
+  await expect(dialog.getByTestId("policy-mode-never").locator("input")).toBeDisabled();
+  await expect(dialog.getByTestId("policy-mode-never")).toContainText(
+    "The organization already asks after outside content. A unit can only add approvals.",
+  );
+  await expect(dialog.getByTestId("policy-mode-always").locator("input")).toBeEnabled();
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toBeHidden();
+
+  // ---- the lead adds "Ask after outside content" with Leads of Sales on echo
+  dialog = await openRule(page, tool("echo"));
+  await expect(dialog).toContainText("Applies in Sales and its teams");
+  await dialog.getByTestId("policy-mode-when_tainted").click();
+  await dialog.getByTestId("policy-approvers-unit_leads").click();
+  await expect(dialog).toContainText("The person who asked can't approve their own request.");
+  await dialog.getByTestId("policy-save").click();
+  await expect(toast(page, "Rule saved")).toBeVisible();
+  await expect(rowOf(page, tool("echo")).getByTestId("policy-mode-chip")).toHaveText(
+    "Ask after outside content",
+  );
+  await expect(rowOf(page, tool("echo"))).toContainText("Leads of Sales");
+});
+
+test("admin: specific people approve; reopening shows them checked", async ({ browser }, info) => {
+  test.setTimeout(120_000);
+  const mobile = info.project.name === "mobile";
+  const { page } = await openAs(browser, ADMIN, info.project.name);
+  await openPolicies(page, mobile);
+  await expandGroup(page, ACME_CRM);
+
+  let dialog = await openRule(page, tool("write_note"));
+  await expect(dialog).toContainText("Applies to everyone");
+  await expect(dialog.getByTestId("policy-approvers-unit_leads")).toHaveCount(0);
+  await dialog.getByTestId("policy-mode-always").click();
+  await dialog.getByTestId("policy-approvers-users").click();
+  await expect(dialog.getByTestId("policy-save")).toBeDisabled();
+  await expect(dialog.getByTestId("policy-people-count")).toHaveText("0 of 20");
+  const search = dialog.getByTestId("policy-people-search");
+  for (const name of ["Marta Gil", "Luis Mora"]) {
+    await search.fill(name.split(" ")[0] ?? name);
+    await dialog.locator(`[data-testid="policy-person"][data-name="${name}"]`).click();
+  }
+  await expect(dialog.getByTestId("policy-person-chip")).toHaveCount(2);
+  await expect(dialog.getByTestId("policy-people-count")).toHaveText("2 of 20");
+  await search.fill("nobody-here");
+  await expect(dialog).toContainText("No people match “nobody-here”.");
+  await search.fill("");
+  await dialog.getByTestId("policy-save").click();
+  await expect(toast(page, "Rule saved")).toBeVisible();
+  await expect(rowOf(page, tool("write_note"))).toContainText(/Marta Gil or 1 other|Luis Mora or 1 other/);
+
+  dialog = await openRule(page, tool("write_note"));
+  await expect(dialog.getByTestId("policy-approvers-users").locator("input")).toBeChecked();
+  for (const name of ["Marta Gil", "Luis Mora"]) {
+    await expect(dialog.locator(`[data-testid="policy-person"][data-name="${name}"] input`)).toBeChecked();
+  }
+  await expect(dialog.getByTestId("policy-person-chip")).toHaveCount(2);
+});
+
+test("admin: a concurrent change shows the conflict with Reload; Remove asks first; Change history lists both", async ({
+  browser,
+}, info) => {
+  test.setTimeout(150_000);
+  const mobile = info.project.name === "mobile";
+  await setApprovalPolicy(admin, {
+    scopeUnitId: null,
+    toolPattern: serverPattern(),
+    mode: "always",
+    approverKind: "admins",
+  });
+  const { context, page } = await openAs(browser, ADMIN, info.project.name);
+  await openPolicies(page, mobile);
+  const other = await context.newPage();
+  await other.goto(`${BASE_URL}/settings/approval-policies`);
+
+  // ---- two tabs edit the same rule: the second save is refused, Reload shows the first change
+  const first = await openRule(page, serverPattern());
+  const second = await openRule(other, serverPattern());
+  await first.getByTestId("policy-approvers-requester").click();
+  await first.getByTestId("policy-save").click();
+  await expect(toast(page, "Rule saved")).toBeVisible();
+  await second.getByTestId("policy-mode-when_tainted").click();
+  await second.getByTestId("policy-save").click();
+  await expect(second.getByTestId("policy-error")).toHaveText(
+    /Someone changed this rule while you were editing\. Reload to see it\./,
+  );
+  await second.getByTestId("policy-reload").click();
+  await expect(second.getByTestId("policy-error")).toHaveCount(0);
+  await expect(second.getByTestId("policy-mode-always").locator("input")).toBeChecked();
+  await expect(second.getByTestId("policy-approvers-requester").locator("input")).toBeChecked();
+  await other.close();
+
+  // ---- Remove rule asks first (Cancel focused), then the row falls back to Never ask
+  const dialog = await openRule(page, serverPattern());
+  await dialog.getByTestId("policy-remove").click();
+  const confirm = page.getByTestId("policy-remove-dialog");
+  await expect(confirm).toContainText("Remove this rule?");
+  await expect(confirm).toContainText(`All ${ACME_CRM} tools go back to Never ask.`);
+  await expect(confirm.getByRole("button", { name: "Cancel" })).toBeFocused();
+  await confirm.getByTestId("policy-remove-confirm").click();
+  await expect(toast(page, "Rule removed")).toBeVisible();
+  await expect(dialog).toBeHidden();
+  await expect(rowOf(page, serverPattern()).getByTestId("policy-mode-chip")).toHaveText("Never ask");
+  await expect(rowOf(page, tool("echo")).getByTestId("policy-mode-chip")).toHaveText("Never ask");
+
+  // ---- Change history, from the header and from the footnote: newest first
+  for (const opener of ["policy-history", "policy-history-link"]) {
+    await page.getByTestId(opener).click();
+    const sheet = page.getByTestId("policy-history-sheet");
+    await expect(sheet).toBeVisible();
+    await expect(page).toHaveURL(/history=1/);
+    const items = sheet.getByTestId("policy-history-item");
+    await expect(items.nth(0)).toContainText(`${ADMIN.name} removed the rule for All ${ACME_CRM} tools`);
+    await expect(items.nth(1)).toContainText(`${ADMIN.name} set All ${ACME_CRM} tools to Always ask`);
+    await expect(items.nth(1)).toContainText("Approvers: The person who asked");
+    await expect(items.nth(2)).toContainText(`${ADMIN.name} set All ${ACME_CRM} tools to Always ask`);
+    await expect(items.nth(2)).toContainText("Approvers: Admins");
+    await sheet.getByRole("button", { name: "Close" }).click();
+    await expect(sheet).toBeHidden();
+    await expect(page).not.toHaveURL(/history=1/);
+  }
+});
+
+test("admin: Settings › MCP servers shows Needs approval and Asks after outside content next to the tools", async ({
+  browser,
+}, info) => {
+  await setApprovalPolicy(admin, {
+    scopeUnitId: null,
+    toolPattern: tool("write_note"),
+    mode: "always",
+    approverKind: "admins",
+  });
+  await setApprovalPolicy(admin, {
+    scopeUnitId: null,
+    toolPattern: tool("echo"),
+    mode: "when_tainted",
+    approverKind: "requester",
+  });
+  const { page } = await openAs(browser, ADMIN, info.project.name);
+  await page.goto(`${BASE_URL}/settings/mcp-servers`);
+  const card = page.locator(`[data-testid="mcp-server"][data-name="${ACME_CRM}"]`);
+  const toolRow = (name: string) => card.locator(`[data-testid="mcp-tool"][data-tool="${name}"]`);
+  await expect(toolRow("write_note").getByTestId("tool-effect")).toHaveText("Changes data");
+  await expect(toolRow("write_note").getByTestId("tool-needs-approval")).toHaveText("Needs approval");
+  await expect(toolRow("echo").getByTestId("tool-effect")).toHaveText("Read-only");
+  await expect(toolRow("echo").getByTestId("tool-needs-approval")).toHaveText("Asks after outside content");
 });

@@ -1,7 +1,7 @@
 "use client";
 
 import type { ToolApprovalPolicyPage } from "@ocw/contracts";
-import { Globe, Hand, Info, Search, ShieldCheck } from "lucide-react";
+import { Globe, Hand, History, Info, Search, ShieldCheck } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useMemo, useRef, useState } from "react";
@@ -24,6 +24,7 @@ import {
 } from "@/lib/approval-policy-queries";
 import { useUnits } from "@/lib/org-queries";
 import { cn } from "@/lib/utils";
+import { PolicyHistorySheet } from "./policy-history-sheet";
 import { PolicyRuleDialog, type PolicyRuleTarget } from "./policy-rule-dialog";
 import { groupHasRule, groupKey, ToolPolicyGroup } from "./tool-policy-group";
 
@@ -53,6 +54,9 @@ export function ApprovalPoliciesSettings() {
   const page = useApprovalPolicyPage(selected?.value ?? null);
   const [search, setSearch] = useState("");
   const [toggled, setToggled] = useState<Record<string, boolean>>({});
+  // Whether each group (per scope) started expanded, decided once: removing a group's last rule never collapses it
+  // under the person's focus.
+  const startExpanded = useRef(new Map<string, boolean>());
   const [showAll, setShowAll] = useState<Record<string, boolean>>({});
   const [target, setTarget] = useState<PolicyRuleTarget | null>(null);
   const [announce, setAnnounce] = useState("");
@@ -66,6 +70,7 @@ export function ApprovalPoliciesSettings() {
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
   }
 
+  const historyOpen = params.get("history") === "1";
   const header = <PageHeader title={TITLE} icon={<Hand />} description={DESCRIPTION} />;
 
   if (access.isPending || (access.data && canManageAny(access.data) && units.isPending)) {
@@ -110,10 +115,27 @@ export function ApprovalPoliciesSettings() {
   }
 
   const q = search.trim().toLowerCase();
+  const openHistory = () => setParam("history", "1");
 
   return (
     <>
-      {header}
+      <PageHeader
+        title={TITLE}
+        icon={<Hand />}
+        description={DESCRIPTION}
+        actions={
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={openHistory}
+            className="max-md:size-11 max-md:px-0"
+            data-testid="policy-history"
+          >
+            <History />
+            <span className="max-md:sr-only">Change history</span>
+          </Button>
+        }
+      />
       <Body>
         <div className="grid gap-6" data-testid="approval-policies">
           <ScopePicker options={options} selected={selected} onPick={(v) => setParam("scope", v)} />
@@ -157,6 +179,7 @@ export function ApprovalPoliciesSettings() {
               query={q}
               rawQuery={search.trim()}
               toggled={toggled}
+              startExpanded={startExpanded.current}
               onToggle={(key, open) => setToggled((t) => ({ ...t, [key]: open }))}
               showAll={showAll}
               onShowAll={(key) => setShowAll((s) => ({ ...s, [key]: true }))}
@@ -174,7 +197,18 @@ export function ApprovalPoliciesSettings() {
             </p>
             <p className="flex items-start gap-1.5">
               <ShieldCheck className="mt-px size-3.5 shrink-0" aria-hidden />
-              <span>Every rule change and every decision is recorded in the audit log.</span>
+              <span>
+                Every rule change and every decision is recorded in the audit log.{" "}
+                <Button
+                  variant="link"
+                  size="sm"
+                  onClick={openHistory}
+                  className="h-auto p-0 text-xs max-lg:min-h-11"
+                  data-testid="policy-history-link"
+                >
+                  Change history
+                </Button>
+              </span>
             </p>
           </div>
           <p className="sr-only" aria-live="polite">
@@ -196,6 +230,13 @@ export function ApprovalPoliciesSettings() {
           onReload={() => page.refetch()}
         />
       ) : null}
+      <PolicyHistorySheet
+        open={historyOpen}
+        onOpenChange={(open) => setParam("history", open ? "1" : null)}
+        scope={selected.value}
+        scopeLabel={selected.unit ? selected.unit.name : selected.label}
+        catalog={page.data?.catalog ?? []}
+      />
     </>
   );
 }
@@ -268,6 +309,7 @@ function Catalog({
   query,
   rawQuery,
   toggled,
+  startExpanded,
   onToggle,
   showAll,
   onShowAll,
@@ -277,6 +319,7 @@ function Catalog({
   query: string;
   rawQuery: string;
   toggled: Record<string, boolean>;
+  startExpanded: Map<string, boolean>;
   onToggle: (key: string, open: boolean) => void;
   showAll: Record<string, boolean>;
   onShowAll: (key: string) => void;
@@ -313,15 +356,21 @@ function Catalog({
     <div className="divide-y overflow-hidden rounded-xl border bg-card shadow-xs dark:shadow-none">
       {groups.map((g) => {
         const key = groupKey(g);
-        // Search expands every group with a match; otherwise groups with a rule start expanded.
-        const expanded = query !== "" || (toggled[key] ?? groupHasRule(page, g));
+        const stateKey = `${page.scope.unitId ?? "org"}:${key}`;
+        // Groups with a rule (here or above) start expanded; search expands every group with a match.
+        let start = startExpanded.get(stateKey);
+        if (start === undefined) {
+          start = groupHasRule(page, g);
+          startExpanded.set(stateKey, start);
+        }
+        const expanded = query !== "" || (toggled[stateKey] ?? start);
         return (
           <ToolPolicyGroup
             key={key}
             group={g}
             page={page}
             expanded={expanded}
-            onToggle={() => onToggle(key, !expanded)}
+            onToggle={() => onToggle(stateKey, !expanded)}
             query={query}
             showAll={showAll[key] ?? false}
             onShowAll={() => onShowAll(key)}
