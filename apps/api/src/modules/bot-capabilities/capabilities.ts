@@ -6,6 +6,7 @@ import {
   type BuiltinCapability,
   type CapabilityDenialReason,
   type CatalogTool,
+  type ConnectorAuthMode,
   DEFAULT_CAPABILITIES,
   type EffectiveCapability,
   isDangerousToolName,
@@ -29,6 +30,12 @@ export interface CatalogSource {
   personalAllowed: boolean;
   /** "Trusted for chained calls": side-effecting tools stay usable after a taint (D-08). */
   trustedChaining: boolean;
+  /**
+   * MCP sources (Phase 07.4, D-01): whose credential the server is called with. `org_secret` is rendered in the cell;
+   * a per-member connector is called by the API with the asking member's account. Absent (plugins) = organization.
+   * The capability decision is the same for every mode.
+   */
+  authMode?: ConnectorAuthMode;
   tools: Array<{ name: string; title: string | null; description: string | null; sideEffecting: boolean }>;
 }
 

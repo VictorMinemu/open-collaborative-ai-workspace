@@ -7,7 +7,16 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { HttpError } from "../../lib/errors";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
-import { cellMcpServers, getMcpServer, listMcpServers, recordProbeResult } from "./index";
+import { loadCatalog } from "../bot-capabilities";
+import {
+  cellMcpServers,
+  getMcpServer,
+  listMcpServers,
+  oauthClientsOf,
+  recordProbeResult,
+  replaceServerTools,
+  setOAuthStatus,
+} from "./index";
 
 /**
  * 03.1-09 (BOT-08, BOT-10, SC6 registry half): Organization Admins register MCP servers with write-only
@@ -750,3 +759,692 @@ describe("probe results become policy-capped bot capabilities (BOT-10, SC6)", ()
     expect((await turnFor(samBotId, next)).tools).not.toContain(echoName);
   });
 });
+
+// ---------------------------------------------------------------- Phase 07.4-06: connector auth modes (D-01, CONN-01)
+
+const CANARY = "CLIENT-SECRET-CANARY";
+const CRM = {
+  name: "Acme CRM",
+  transport: "streamable-http",
+  url: "https://mcp.example.com/mcp",
+  authMode: "per_member_oauth",
+  oauthScopes: ["crm.read", "crm.write"],
+  oauthClient: { issuer: "https://auth.example.com", clientId: "ocw-production", clientSecret: CANARY },
+};
+
+describe("per-member connectors on the registry (07.4-06 tracer, D-01, C-01)", () => {
+  let crmId: string;
+
+  it("an admin registers a per-member OAuth connector: mode, scopes and the pre-registered client; the secret is sealed and write-only", async () => {
+    const probesBefore = (await cellEvents("mcp.probe")).length;
+    const body = await ok(admin.request("POST", "/api/v1/mcp-servers", CRM));
+    crmId = body.id;
+    expect(body).toMatchObject({
+      name: "Acme CRM",
+      authMode: "per_member_oauth",
+      headers: [],
+      status: "pending",
+      oauthScopes: ["crm.read", "crm.write"],
+      oauthStatus: "ready",
+      oauthClients: [
+        {
+          issuer: "https://auth.example.com",
+          clientId: "ocw-production",
+          hasSecret: true,
+          method: "pre_registered",
+        },
+      ],
+      memberHeaderName: null,
+      memberHeaderPrefix: null,
+      memberConnections: 0,
+    });
+    // The cell is never asked to probe it.
+    expect((await cellEvents("mcp.probe")).length).toBe(probesBefore);
+
+    const list = await ok(admin.request("GET", "/api/v1/mcp-servers"));
+    expect(list.oauth).toEqual({
+      redirectUri: "http://localhost:4999/api/v1/connectors/oauth/callback",
+      clientMetadataUrl: null,
+      oauthAvailable: true,
+    });
+    const listed = (list.servers as Json[]).find((s) => s.id === crmId);
+    expect(listed).toMatchObject({ authMode: "per_member_oauth", oauthClients: [{ hasSecret: true }] });
+    const one = await ok(admin.request("GET", `/api/v1/mcp-servers/${crmId}`));
+    expect(one.oauthClients).toEqual(body.oauthClients);
+    expect(JSON.stringify([body, list, one])).not.toContain(CANARY);
+
+    const client = (
+      await su.query(
+        "select issuer, client_id, client_secret_id, method from app.connector_oauth_clients where server_id = $1",
+        [crmId],
+      )
+    ).rows as Json[];
+    expect(client).toHaveLength(1);
+    expect(client[0]).toMatchObject({ issuer: "https://auth.example.com", method: "pre_registered" });
+    const secret = (
+      await su.query("select kind, ciphertext from app.secrets where id = $1", [client[0]?.client_secret_id])
+    ).rows[0] as Json;
+    expect(secret.kind).toBe("mcp_credential");
+    expect(secret.ciphertext).not.toContain(CANARY);
+    const stored = (
+      await su.query("select auth_mode, oauth_scopes, headers from app.mcp_servers where id = $1", [crmId])
+    ).rows[0] as Json;
+    expect(stored).toEqual({
+      auth_mode: "per_member_oauth",
+      oauth_scopes: ["crm.read", "crm.write"],
+      headers: [],
+    });
+
+    expect((await audits("mcp.server.created")).at(-1)?.metadata).toMatchObject({
+      name: "Acme CRM",
+      authMode: "per_member_oauth",
+      preRegisteredClient: true,
+    });
+    const allAudits = (
+      await su.query("select metadata from app.audit_events where organization_id = $1", [orgId])
+    ).rows;
+    expect(JSON.stringify(allAudits)).not.toContain(CANARY);
+    expect(logLines.join("\n")).not.toContain(CANARY);
+  });
+
+  it("the cell snapshot never carries it, enabled or not", async () => {
+    const cell = await asTenant<Json[]>((tx) => cellMcpServers(stack.built.core, tx));
+    expect(cell.map((s) => s.id)).not.toContain(crmId);
+    expect(cell.length).toBeGreaterThan(0);
+  });
+
+  it("without HTTPS (a plain-http LAN URL) the list says member sign-in is unavailable and the connector reads https_required", async () => {
+    const env = stack.built.core.env;
+    const before = env.OCW_PUBLIC_API_URL;
+    env.OCW_PUBLIC_API_URL = "http://ocw.lan:4000";
+    try {
+      const list = await ok(admin.request("GET", "/api/v1/mcp-servers"));
+      expect(list.oauth).toEqual({
+        redirectUri: "http://ocw.lan:4000/api/v1/connectors/oauth/callback",
+        clientMetadataUrl: null,
+        oauthAvailable: false,
+      });
+      expect((list.servers as Json[]).find((s) => s.id === crmId)?.oauthStatus).toBe("https_required");
+    } finally {
+      env.OCW_PUBLIC_API_URL = before;
+    }
+  });
+});
+
+// ---------------------------------------------------------------- 07.4-06 Task 2: the registry's rules under every edit
+
+/** A sealed-looking member credential (the connectors module seals real ones; only its existence matters here). */
+async function seedConnection(org: string, userId: string, serverId: string): Promise<string> {
+  const secret = (
+    await su.query(
+      `insert into app.secrets (organization_id, name, kind, ciphertext, iv, tag)
+       values ($1, 'member connector credential', 'connector_credential', 'c', 'i', 't') returning id`,
+      [org],
+    )
+  ).rows[0].id as string;
+  await su.query(
+    `insert into app.connector_connections (organization_id, user_id, server_id, status, secret_id)
+     values ($1, $2, $3, 'connected', $4)`,
+    [org, userId, serverId, secret],
+  );
+  return secret;
+}
+
+const rowsOf = async (sqlText: string, params: unknown[]) => (await su.query(sqlText, params)).rows as Json[];
+
+describe("connector rules (07.4-06 Task 2, D-01, D-06, R4)", () => {
+  let std: TestClient;
+  let stdId: string;
+  let crm: Json;
+
+  beforeAll(async () => {
+    [std, stdId] = await joinAs("stan@example.test", "Stan Doe", "standard");
+    crm = await ok(
+      admin.request("POST", "/api/v1/mcp-servers", {
+        name: "Rules CRM",
+        transport: "streamable-http",
+        url: "https://rules.example.com/mcp",
+        authMode: "per_member_oauth",
+        oauthClient: {
+          issuer: "https://auth.rules.example",
+          clientId: "ocw",
+          clientSecret: "rules-client-secret",
+        },
+      }),
+    );
+  });
+
+  it("refuses the modes' broken combinations, and a member key header that could smuggle a request", async () => {
+    const bad = async (body: Json, code: string) => {
+      const r = await admin.request("POST", "/api/v1/mcp-servers", body);
+      expect(r.status, JSON.stringify(body)).toBe(400);
+      expect(codeOf(r), JSON.stringify(body)).toBe(code);
+    };
+    const base = { name: "Bad", transport: "streamable-http", url: "https://bad.example.com/mcp" };
+    await bad(
+      { name: "Bad", transport: "sandboxed-stdio", sandboxServer: "x", authMode: "per_member_oauth" },
+      "validation_error",
+    );
+    await bad(
+      { ...base, authMode: "per_member_oauth", headers: [{ name: "Authorization", value: "Bearer x" }] },
+      "validation_error",
+    );
+    await bad({ ...base, authMode: "per_member_secret" }, "validation_error");
+    await bad({ ...base, oauthScopes: ["crm.read"] }, "validation_error");
+    // isAllowedInjectionHeader (contracts) plus the transport's reserved headers, checked by the API (ledger 178).
+    for (const header of [
+      "Cookie",
+      "Host",
+      "Proxy-Authorization",
+      "Transfer-Encoding",
+      "Mcp-Session-Id",
+      "Content-Type",
+    ]) {
+      await bad(
+        { ...base, authMode: "per_member_secret", memberHeaderName: header },
+        "member_header_forbidden",
+      );
+    }
+    await bad({ ...base, authMode: "per_member_oauth", oauthScopes: ['crm"read'] }, "invalid_scope");
+    const r = await admin.request("PATCH", `/api/v1/mcp-servers/${crm.id}`, {
+      authMode: "per_member_secret",
+      memberHeaderName: "Cookie",
+    });
+    expect(r.status).toBe(400);
+    expect(codeOf(r)).toBe("member_header_forbidden");
+    // A PATCH without authMode is checked against the stored mode.
+    const headerOnOauth = await admin.request("PATCH", `/api/v1/mcp-servers/${crm.id}`, {
+      memberHeaderName: "X-Key",
+    });
+    expect(codeOf(headerOnOauth)).toBe("member_header_not_allowed");
+    const orgHeaders = await admin.request("PATCH", `/api/v1/mcp-servers/${crm.id}`, {
+      headers: [{ name: "Authorization", value: "Bearer x" }],
+    });
+    expect(codeOf(orgHeaders)).toBe("headers_not_allowed");
+    // Nothing was stored for the refused requests.
+    expect((await rowsOf("select 1 from app.mcp_servers where name = 'Bad'", [])).length).toBe(0);
+  });
+
+  it("a stdio sandbox server cannot switch to a member mode", async () => {
+    const env = stack.built.core.env;
+    env.OCW_MCP_SANDBOX_URL = "http://mcp-sandbox:8080/";
+    env.OCW_MCP_SANDBOX_SERVERS = ["everything"];
+    try {
+      const stdio = await ok(
+        admin.request("POST", "/api/v1/mcp-servers", {
+          name: "Stdio rules",
+          transport: "sandboxed-stdio",
+          sandboxServer: "everything",
+        }),
+      );
+      const r = await admin.request("PATCH", `/api/v1/mcp-servers/${stdio.id}`, {
+        authMode: "per_member_oauth",
+      });
+      expect(r.status).toBe(400);
+      expect(codeOf(r)).toBe("per_member_needs_remote");
+      await ok(admin.request("DELETE", `/api/v1/mcp-servers/${stdio.id}`));
+    } finally {
+      env.OCW_MCP_SANDBOX_URL = null;
+      env.OCW_MCP_SANDBOX_SERVERS = [];
+    }
+  });
+
+  it("a standard member gets 403 mcp.manage on every route (resolver)", async () => {
+    const calls: Array<[string, string, unknown?]> = [
+      ["GET", "/api/v1/mcp-servers"],
+      ["POST", "/api/v1/mcp-servers", { ...CRM, name: "Stan's" }],
+      ["GET", `/api/v1/mcp-servers/${crm.id}`],
+      ["PATCH", `/api/v1/mcp-servers/${crm.id}`, { authMode: "org_secret", clearConnections: true }],
+      ["DELETE", `/api/v1/mcp-servers/${crm.id}?clearConnections=true`],
+      ["POST", `/api/v1/mcp-servers/${crm.id}/probe`],
+    ];
+    for (const [method, path, body] of calls) {
+      const r = await std.request(method as "GET", path, body);
+      expect(r.status, `${method} ${path}`).toBe(403);
+      expect((r.body as Json).error.details).toMatchObject({ permission: "mcp.manage" });
+    }
+    expect((await getMcpServer_(crm.id)).authMode).toBe("per_member_oauth");
+  });
+
+  it("memberConnections counts this organization's connections only, and is 0 for organization-secret servers (R4)", async () => {
+    await seedConnection(orgId, samId, crm.id);
+    await seedConnection(orgId, stdId, crm.id);
+    // Another organization's row pointing at this server (database FKs ignore RLS): never counted, never touched.
+    const orgB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Other', $2)", [
+      orgB,
+      `other-${orgB}`,
+    ]);
+    await seedConnection(orgB, randomUUID(), crm.id);
+    const list = await ok(admin.request("GET", "/api/v1/mcp-servers"));
+    const byId = new Map((list.servers as Json[]).map((s) => [s.id, s]));
+    expect(byId.get(crm.id)?.memberConnections).toBe(2);
+    for (const s of list.servers as Json[])
+      if (s.authMode === "org_secret") expect(s.memberConnections).toBe(0);
+    expect((await ok(admin.request("GET", `/api/v1/mcp-servers/${crm.id}`))).memberConnections).toBe(2);
+  });
+
+  it("switching away from member sign-in refuses with the count, then clears every connection and its secret on confirmation", async () => {
+    const before = await rowsOf(
+      "select secret_id from app.connector_connections where server_id = $1 and organization_id = $2",
+      [crm.id, orgId],
+    );
+    expect(before).toHaveLength(2);
+    const refused = await admin.request("PATCH", `/api/v1/mcp-servers/${crm.id}`, { authMode: "org_secret" });
+    expect(refused.status).toBe(409);
+    expect((refused.body as Json).error).toMatchObject({ code: "connections_exist", details: { count: 2 } });
+    expect((await getMcpServer_(crm.id)).authMode).toBe("per_member_oauth");
+    expect(
+      (
+        await rowsOf(
+          "select 1 from app.connector_connections where server_id = $1 and organization_id = $2",
+          [crm.id, orgId],
+        )
+      ).length,
+    ).toBe(2);
+
+    const clientSecretIds = (
+      await rowsOf("select client_secret_id from app.connector_oauth_clients where server_id = $1", [crm.id])
+    ).map((r) => r.client_secret_id);
+    const switched = await ok(
+      admin.request("PATCH", `/api/v1/mcp-servers/${crm.id}`, {
+        authMode: "org_secret",
+        clearConnections: true,
+      }),
+    );
+    expect(switched).toMatchObject({
+      authMode: "org_secret",
+      memberConnections: 0,
+      oauthClients: [],
+      oauthScopes: null,
+      oauthStatus: null,
+      status: "probing",
+    });
+    expect(
+      (
+        await rowsOf(
+          "select 1 from app.connector_connections where server_id = $1 and organization_id = $2",
+          [crm.id, orgId],
+        )
+      ).length,
+    ).toBe(0);
+    const gone = [...before.map((r) => r.secret_id), ...clientSecretIds];
+    expect((await rowsOf("select 1 from app.secrets where id = any($1::uuid[])", [gone])).length).toBe(0);
+    // The other organization's row is out of reach of this transaction (RLS).
+    expect(
+      (await rowsOf("select 1 from app.connector_connections where server_id = $1", [crm.id])).length,
+    ).toBe(1);
+    const cleared = await audits("connector.connections_cleared");
+    expect(cleared.at(-1)).toMatchObject({
+      resource_id: crm.id,
+      metadata: { serverId: crm.id, count: 2, reason: "mode_changed" },
+    });
+    expect((await audits("mcp.server.updated")).at(-1)?.metadata).toMatchObject({
+      authMode: "org_secret",
+      previousAuthMode: "per_member_oauth",
+    });
+    await su.query("delete from app.connector_connections where server_id = $1", [crm.id]);
+  });
+
+  it("switching between the two member modes needs the confirmation too; with no members it just switches", async () => {
+    const svc = await ok(
+      admin.request("POST", "/api/v1/mcp-servers", {
+        name: "Two modes",
+        transport: "streamable-http",
+        url: "https://two.example.com/mcp",
+        authMode: "per_member_oauth",
+        oauthScopes: ["a"],
+      }),
+    );
+    await seedConnection(orgId, samId, svc.id);
+    const refused = await admin.request("PATCH", `/api/v1/mcp-servers/${svc.id}`, {
+      authMode: "per_member_secret",
+      memberHeaderName: "X-Api-Key",
+    });
+    expect(refused.status).toBe(409);
+    expect((refused.body as Json).error.details).toEqual({ count: 1 });
+    const switched = await ok(
+      admin.request("PATCH", `/api/v1/mcp-servers/${svc.id}`, {
+        authMode: "per_member_secret",
+        memberHeaderName: "X-Api-Key",
+        memberHeaderPrefix: "Token ",
+        clearConnections: true,
+      }),
+    );
+    expect(switched).toMatchObject({
+      authMode: "per_member_secret",
+      memberHeaderName: "X-Api-Key",
+      memberHeaderPrefix: "Token ",
+      oauthScopes: null,
+      memberConnections: 0,
+      status: "pending",
+    });
+    // Back to sign-in with nobody connected: no confirmation needed.
+    const back = await ok(
+      admin.request("PATCH", `/api/v1/mcp-servers/${svc.id}`, { authMode: "per_member_oauth" }),
+    );
+    expect(back).toMatchObject({
+      authMode: "per_member_oauth",
+      memberHeaderName: null,
+      memberHeaderPrefix: null,
+    });
+    await ok(admin.request("DELETE", `/api/v1/mcp-servers/${svc.id}`));
+  });
+
+  it("DELETE with members refuses, then removes the server, its connections, their secrets and its client secrets", async () => {
+    const svc = await ok(
+      admin.request("POST", "/api/v1/mcp-servers", {
+        name: "Doomed",
+        transport: "sse",
+        url: "https://doomed.example.com/sse",
+        authMode: "per_member_oauth",
+        oauthClient: {
+          issuer: "https://auth.doomed.example",
+          clientId: "ocw",
+          clientSecret: "doomed-secret",
+        },
+      }),
+    );
+    const memberSecrets = [
+      await seedConnection(orgId, samId, svc.id),
+      await seedConnection(orgId, stdId, svc.id),
+    ];
+    const [client] = await rowsOf(
+      "select client_secret_id from app.connector_oauth_clients where server_id = $1",
+      [svc.id],
+    );
+    const refused = await admin.request("DELETE", `/api/v1/mcp-servers/${svc.id}`);
+    expect(refused.status).toBe(409);
+    expect((refused.body as Json).error).toMatchObject({ code: "connections_exist", details: { count: 2 } });
+    expect((await rowsOf("select 1 from app.mcp_servers where id = $1", [svc.id])).length).toBe(1);
+
+    expect(await ok(admin.request("DELETE", `/api/v1/mcp-servers/${svc.id}?clearConnections=true`))).toEqual({
+      ok: true,
+    });
+    expect((await rowsOf("select 1 from app.mcp_servers where id = $1", [svc.id])).length).toBe(0);
+    expect(
+      (await rowsOf("select 1 from app.connector_connections where server_id = $1", [svc.id])).length,
+    ).toBe(0);
+    expect(
+      (await rowsOf("select 1 from app.connector_oauth_clients where server_id = $1", [svc.id])).length,
+    ).toBe(0);
+    expect(
+      (
+        await rowsOf("select 1 from app.secrets where id = any($1::uuid[])", [
+          [...memberSecrets, client?.client_secret_id],
+        ])
+      ).length,
+    ).toBe(0);
+    expect((await audits("connector.connections_cleared")).at(-1)).toMatchObject({
+      resource_id: svc.id,
+      metadata: { serverId: svc.id, count: 2, reason: "server_deleted" },
+    });
+  });
+
+  it("oauthClient null removes the pre-registered client and its secret; a new client replaces the old one", async () => {
+    const svc = await ok(
+      admin.request("POST", "/api/v1/mcp-servers", {
+        name: "Clients",
+        transport: "streamable-http",
+        url: "https://clients.example.com/mcp",
+        authMode: "per_member_oauth",
+        oauthClient: { issuer: "https://a.example", clientId: "one", clientSecret: "first-client-secret" },
+      }),
+    );
+    const [first] = await rowsOf(
+      "select client_secret_id from app.connector_oauth_clients where server_id = $1",
+      [svc.id],
+    );
+    const replaced = await ok(
+      admin.request("PATCH", `/api/v1/mcp-servers/${svc.id}`, {
+        oauthClient: { issuer: "https://b.example", clientId: "two" },
+      }),
+    );
+    expect(replaced.oauthClients).toEqual([
+      { issuer: "https://b.example", clientId: "two", hasSecret: false, method: "pre_registered" },
+    ]);
+    expect((await rowsOf("select 1 from app.secrets where id = $1", [first?.client_secret_id])).length).toBe(
+      0,
+    );
+    // 07.4-10's view of the clients: the secret stays a reference.
+    expect(await asTenant<Json[]>((tx) => oauthClientsOf(tx, svc.id))).toEqual([
+      { issuer: "https://b.example", clientId: "two", clientSecretId: null, method: "pre_registered" },
+    ]);
+    // An admin's new client answers a needs_client status.
+    await asTenant((tx) => setOAuthStatus(tx, svc.id, "needs_client"));
+    expect((await ok(admin.request("GET", `/api/v1/mcp-servers/${svc.id}`))).oauthStatus).toBe(
+      "needs_client",
+    );
+    const fixed = await ok(
+      admin.request("PATCH", `/api/v1/mcp-servers/${svc.id}`, {
+        oauthClient: { issuer: "https://b.example", clientId: "two", clientSecret: "third-client-secret" },
+      }),
+    );
+    expect(fixed).toMatchObject({ oauthStatus: "ready", oauthClients: [{ hasSecret: true }] });
+    const removed = await ok(admin.request("PATCH", `/api/v1/mcp-servers/${svc.id}`, { oauthClient: null }));
+    expect(removed.oauthClients).toEqual([]);
+    expect(
+      (await rowsOf("select 1 from app.connector_oauth_clients where server_id = $1", [svc.id])).length,
+    ).toBe(0);
+    expect((await audits("mcp.server.updated")).at(-1)?.metadata.changed).toEqual(["oauthClient"]);
+    expect(JSON.stringify(await audits("mcp.server.updated"))).not.toMatch(/client-secret/);
+    await ok(admin.request("DELETE", `/api/v1/mcp-servers/${svc.id}`));
+  });
+
+  it("a per-member connector is never probed by the cell: the admin probe refuses and a cell report is ignored", async () => {
+    const svc = await ok(
+      admin.request("POST", "/api/v1/mcp-servers", {
+        name: "No cell probe",
+        transport: "streamable-http",
+        url: "https://nocell.example.com/mcp",
+        authMode: "per_member_secret",
+        memberHeaderName: "X-Api-Key",
+      }),
+    );
+    const r = await admin.request("POST", `/api/v1/mcp-servers/${svc.id}/probe`);
+    expect(r.status).toBe(409);
+    expect(codeOf(r)).toBe("member_connector");
+    const res = await asTenant<Json>((tx) =>
+      recordProbeResult(stack.built.core, tx, {
+        probeId: randomUUID(),
+        serverId: svc.id,
+        ok: true,
+        tools: [],
+      }),
+    );
+    expect(res).toEqual({ applied: false });
+    // Toggling it on for bots does not ask the cell either.
+    const probes = (await cellEvents("mcp.probe")).length;
+    await ok(admin.request("PATCH", `/api/v1/mcp-servers/${svc.id}`, { orgEnabled: false }));
+    await ok(admin.request("PATCH", `/api/v1/mcp-servers/${svc.id}`, { orgEnabled: true }));
+    expect((await cellEvents("mcp.probe")).length).toBe(probes);
+    await ok(admin.request("DELETE", `/api/v1/mcp-servers/${svc.id}`));
+  });
+
+  it("replaceServerTools (the API-side probe): input schemas, OpenClaw names, removed tools lose their grants, ready, audited; the catalog carries authMode", async () => {
+    const svc = await ok(
+      admin.request("POST", "/api/v1/mcp-servers", {
+        name: "Probed by members",
+        transport: "streamable-http",
+        url: "https://members.example.com/mcp",
+        authMode: "per_member_secret",
+        memberHeaderName: "Authorization",
+        memberHeaderPrefix: "Bearer ",
+      }),
+    );
+    const schema = { type: "object", properties: { q: { type: "string" } }, required: ["q"] };
+    const huge = { type: "object", description: "x".repeat(17 * 1024) };
+    const changes = (await cellEvents("cell.config.changed")).length;
+    const first = await asTenant<Json>((tx) =>
+      replaceServerTools(stack.built.core, tx, svc.id, [
+        {
+          name: "search",
+          title: "Search",
+          description: "Finds records",
+          readOnly: true,
+          destructive: false,
+          inputSchema: schema,
+        },
+        { name: "update", readOnly: false, destructive: true, inputSchema: huge },
+      ]),
+    );
+    expect(first).toEqual({ toolCount: 2, removedTools: [] });
+    const s = await ok(admin.request("GET", `/api/v1/mcp-servers/${svc.id}`));
+    expect(s.status).toBe("ready");
+    expect(s.tools).toEqual([
+      {
+        name: "search",
+        openclawName: `${svc.safeName}__search`,
+        title: "Search",
+        description: "Finds records",
+        readOnly: true,
+        destructive: false,
+        inputSchema: schema,
+      },
+      {
+        name: "update",
+        openclawName: `${svc.safeName}__update`,
+        title: null,
+        description: null,
+        readOnly: false,
+        destructive: true,
+      },
+    ]);
+    expect((await cellEvents("cell.config.changed")).length).toBe(changes + 1);
+
+    // Granted to a team bot: the capability rules are the same as for any MCP server.
+    const team = await ok(
+      admin.request("POST", "/api/v1/agents", {
+        name: "Member-account bot",
+        instructions: "You are a test bot.",
+        modelProvider: "mock",
+        modelId: "mock-1",
+      }),
+    );
+    const view = await ok(
+      admin.request("PATCH", `/api/v1/agents/${team.id}/capabilities`, {
+        tools: [
+          { sourceKind: "mcp", sourceId: svc.id, tool: `${svc.safeName}__search` },
+          { sourceKind: "mcp", sourceId: svc.id, tool: `${svc.safeName}__update` },
+        ],
+      }),
+    );
+    expect((view.tools as Json[]).find((t) => t.tool === `${svc.safeName}__search`)).toMatchObject({
+      granted: true,
+      effective: true,
+      reason: null,
+    });
+    const catalog = await asTenant<Json[]>((tx) => loadCatalog(tx));
+    expect(catalog.find((c) => c.sourceId === svc.id)).toMatchObject({
+      authMode: "per_member_secret",
+      status: "ready",
+    });
+    expect(catalog.find((c) => c.sourceId === crm.id)?.authMode).toBe("org_secret");
+
+    // A later probe without `update`: the tool and its grant go; audited with the removed name.
+    const second = await asTenant<Json>((tx) =>
+      replaceServerTools(stack.built.core, tx, svc.id, [
+        { name: "search", readOnly: true, destructive: false },
+      ]),
+    );
+    expect(second).toEqual({ toolCount: 1, removedTools: [`${svc.safeName}__update`] });
+    expect(
+      (await rowsOf("select tool_name from app.bot_tool_grants where source_id = $1", [svc.id])).map(
+        (r) => r.tool_name,
+      ),
+    ).toEqual([`${svc.safeName}__search`]);
+    expect((await audits("mcp.server.probed")).at(-1)).toMatchObject({
+      resource_id: svc.id,
+      metadata: { ok: true, toolCount: 1, removedTools: [`${svc.safeName}__update`] },
+    });
+    await ok(admin.request("DELETE", `/api/v1/agents/${team.id}`));
+    await ok(admin.request("DELETE", `/api/v1/mcp-servers/${svc.id}`));
+  });
+});
+
+describe("cross-tenant: another organization's admin cannot read, change or delete a connector (07.4-06, T-07.4-06-05)", () => {
+  let eve: TestClient;
+  let target: Json;
+
+  beforeAll(async () => {
+    target = await ok(
+      admin.request("POST", "/api/v1/mcp-servers", {
+        name: "Tenant A connector",
+        transport: "streamable-http",
+        url: "https://tenant-a.example.com/mcp",
+        authMode: "per_member_oauth",
+        oauthClient: {
+          issuer: "https://auth.tenant-a.example",
+          clientId: "tenant-a-client",
+          clientSecret: "tenant-a-sec",
+        },
+      }),
+    );
+    await seedConnection(orgId, samId, target.id);
+    // Eve: invited into org A, then moved into her own organization as its admin.
+    const [client, eveId] = await joinAs("eve@example.test", "Eve", "developer");
+    eve = client;
+    const orgB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil Corp', $2)", [
+      orgB,
+      `evil-corp-${orgB}`,
+    ]);
+    await su.query("delete from auth.member where user_id = $1", [eveId]);
+    await su.query("delete from app.org_members where user_id = $1", [eveId]);
+    await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
+      orgB,
+      eveId,
+    ]);
+    await su.query(
+      "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Eve', 'admin')",
+      [orgB, eveId],
+    );
+    await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, eveId]);
+    expect((await ok(eve.request("GET", "/api/v1/me/permissions"))).role).toBe("admin");
+  });
+
+  it("org B's admin gets 404 on GET, PATCH (incl. clearConnections) and DELETE, and org A's rows are untouched", async () => {
+    const snapshot = async () => ({
+      server: await rowsOf("select auth_mode, name, oauth_scopes from app.mcp_servers where id = $1", [
+        target.id,
+      ]),
+      clients: await rowsOf(
+        "select issuer, client_id, client_secret_id from app.connector_oauth_clients where server_id = $1",
+        [target.id],
+      ),
+      connections: await rowsOf(
+        "select user_id, secret_id from app.connector_connections where server_id = $1",
+        [target.id],
+      ),
+    });
+    const before = await snapshot();
+    const cases: Array<[string, string, unknown?]> = [
+      ["GET", `/api/v1/mcp-servers/${target.id}`],
+      ["PATCH", `/api/v1/mcp-servers/${target.id}`, { name: "Pwned" }],
+      ["PATCH", `/api/v1/mcp-servers/${target.id}`, { authMode: "org_secret", clearConnections: true }],
+      ["PATCH", `/api/v1/mcp-servers/${target.id}`, { oauthClient: null }],
+      ["DELETE", `/api/v1/mcp-servers/${target.id}?clearConnections=true`],
+      ["POST", `/api/v1/mcp-servers/${target.id}/probe`],
+    ];
+    for (const [method, path, body] of cases) {
+      const r = await eve.request(method as "GET", path, body);
+      expect(r.status, `${method} ${path}`).toBe(404);
+      expect(JSON.stringify(r.body)).not.toContain("tenant-a");
+    }
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it("org B's list shows none of org A's connectors or OAuth clients", async () => {
+    const list = await ok(eve.request("GET", "/api/v1/mcp-servers"));
+    expect(list.servers).toEqual([]);
+    expect(JSON.stringify(list)).not.toContain("tenant-a");
+    // Not vacuous: org A's admin sees it with its client and its member.
+    const mine = await ok(admin.request("GET", `/api/v1/mcp-servers/${target.id}`));
+    expect(mine).toMatchObject({ memberConnections: 1, oauthClients: [{ clientId: "tenant-a-client" }] });
+  });
+});
+
+/** Org A's tenant read, for assertions that must not go through HTTP (no request-scoped decision). */
+async function getMcpServer_(id: string): Promise<Json> {
+  return asTenant<Json>((tx) => getMcpServer(tx, id));
+}
