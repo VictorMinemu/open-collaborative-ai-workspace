@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 124
+open_count: 125
 waived_count: 4
-fixed_count: 57
-total_count: 185
-last_updated: 2026-10-14T00:27:30.826Z
+fixed_count: 58
+total_count: 187
+last_updated: 2026-10-14T00:54:31.132Z
 ---
 
 # Broken Windows Ledger
@@ -192,7 +192,7 @@ last_updated: 2026-10-14T00:27:30.826Z
 | 175 | 07.4 | deviation | apps/api/src/lib/egress.ts |  | MCP SDK OAuth helpers and transports fall back to global fetch without fetchFn and no rule catches the missing argument; every 07.4 SDK call must pass egress.bound(policy) (check in 07.4-10/11 and the gate) | open |  | 2026-10-13T22:56:48.885Z |  |
 | 176 | 07.4 | deviation | apps/api/src/lib/egress.ts |  | One undici Agent per request (no keep-alive reuse); privateAllow tested only up to the connect attempt | open |  | 2026-10-13T22:56:48.969Z |  |
 | 177 | 07.4 | deviation | packages/contracts/src/module-access.ts |  | HIGH: units/orgs with Bots already off hold the old 5 deny rules; the catalog now has 7, so the API reads them as custom and does not deny connector.connect / vault.use until Bots is toggled again; needs a backfill migration | open |  | 2026-10-13T23:06:14.969Z |  |
-| 178 | 07.4 | deviation | packages/contracts/src/mcp.ts |  | memberHeaderName is not checked against forbidden headers in the schema (import cycle); 07.4-06 and 07.4-10 must apply isAllowedInjectionHeader() on the server | open |  | 2026-10-13T23:06:15.041Z |  |
+| 178 | 07.4 | deviation | packages/contracts/src/mcp.ts |  | memberHeaderName is not checked against forbidden headers in the schema (import cycle); 07.4-06 and 07.4-10 must apply isAllowedInjectionHeader() on the server | fixed |  | 2026-10-13T23:06:15.041Z | 2026-10-14T00:54:30.968Z |
 | 179 | 07.4 | deviation | apps/api/src/modules/mcp |  | CIMD is chosen even when the AS cannot read the document (e.g. internal CA); 07.4-10 must allow preferring DCR or pre-registration; servers without RFC 9728 metadata cannot be connected per member | open |  | 2026-10-14T00:00:48.322Z |  |
 | 180 | 07.4 | deviation | apps/api/src/modules/mcp |  | No positive SSE round-trip test (fake speaks only streamable HTTP); MCP session not closed with DELETE after a timeout; revokeToken Basic-encodes client id/secret (SDK does not) | open |  | 2026-10-14T00:00:48.417Z |  |
 | 181 | 07.4 | deviation | apps/api/src/modules/keychain |  | OAuth keychain token URLs must be https but the e2e fake on :4291 is http; 07.4-13/14 need an https fake or a test-host exemption | open |  | 2026-10-14T00:13:09.756Z |  |
@@ -200,6 +200,8 @@ last_updated: 2026-10-14T00:27:30.826Z
 | 183 | 07.4 | deviation | apps/api/src/modules/keychain |  | 07.4-11 must run keychain use with the turn's human as the RLS user (never no user or another member); CODEOWNERS does not cover modules/keychain; client-credentials token cache is per process (not in an ADR) | open |  | 2026-10-14T00:13:09.951Z |  |
 | 184 | 07.4 | deviation | apps/openclaw-channel/src/connector-tools.ts |  | 07.4-11 must put the three static tool names (never logical m…__tool names) in the /cell snapshot alsoAllow; only a 20 s connector call was proven in the real cell (add a 30 s case to the ADR-0025 checklist); tool descriptions from ocw_connector_list do not taint the turn | open |  | 2026-10-14T00:27:30.749Z |  |
 | 185 | 07.4 | deviation | infra/openclaw/test/run-container-smoke.sh |  | Without SMOKE_BUILD the marketplace scenario fails on macOS Docker Desktop (docker cp leaves install-policy.mjs as uid 501); CI unaffected | open |  | 2026-10-14T00:27:30.826Z |  |
+| 186 | 07.4 | deviation | packages/db/sql/post-migrate.sql |  | If #170 adds an owner-only policy on connector_connections, the admin member count and clear-on-switch/delete will only see the admin's rows and leave other members' credentials behind silently; that policy needs an mcp.manage path (07.4-10) | open |  | 2026-10-14T00:54:31.051Z |  |
+| 187 | 07.4 | deviation | apps/web/components/ui/badge.tsx |  | Shared Badge warning variant fails contrast in light mode (1.91:1); 'Probing' still uses it; PanelDialog close is 32 px at 390 | open |  | 2026-10-14T00:54:31.132Z |  |
 
 ````json
 [
@@ -2334,10 +2336,10 @@ last_updated: 2026-10-14T00:27:30.826Z
     "file": "packages/contracts/src/mcp.ts",
     "line": null,
     "description": "memberHeaderName is not checked against forbidden headers in the schema (import cycle); 07.4-06 and 07.4-10 must apply isAllowedInjectionHeader() on the server",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T23:06:15.041Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-14T00:54:30.968Z"
   },
   {
     "id": 179,
@@ -2421,6 +2423,30 @@ last_updated: 2026-10-14T00:27:30.826Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-14T00:27:30.826Z",
+    "resolved_at": null
+  },
+  {
+    "id": 186,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "packages/db/sql/post-migrate.sql",
+    "line": null,
+    "description": "If #170 adds an owner-only policy on connector_connections, the admin member count and clear-on-switch/delete will only see the admin's rows and leave other members' credentials behind silently; that policy needs an mcp.manage path (07.4-10)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T00:54:31.051Z",
+    "resolved_at": null
+  },
+  {
+    "id": 187,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "apps/web/components/ui/badge.tsx",
+    "line": null,
+    "description": "Shared Badge warning variant fails contrast in light mode (1.91:1); 'Probing' still uses it; PanelDialog close is 32 px at 390",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T00:54:31.132Z",
     "resolved_at": null
   }
 ]
