@@ -115,6 +115,10 @@ export type MemberAccountResourceKind = z.infer<typeof MemberAccountResourceKind
 export const MemberAccountShare = z.object({
   id: Id,
   conversationId: Id,
+  /**
+   * `#channel`, an AI chat's title, or a DM / group DM named for the viewer by its other members ("your private chat
+   * with Scout", 07.4-12); null only when the viewer can no longer read the conversation.
+   */
   conversationName: z.string().nullable(),
   resourceKind: MemberAccountResourceKind,
   resourceId: Id,
@@ -140,6 +144,7 @@ export type CreateMemberAccountShareRequest = z.infer<typeof CreateMemberAccount
 /** Who would see results in a conversation (the share confirm dialog). `unbounded` = a group grant, not a list. */
 export const ReadersPreview = z.object({
   conversationId: Id,
+  /** As `MemberAccountShare.conversationName`, for the person previewing. */
   conversationName: z.string().nullable(),
   readers: z.number().int().nonnegative(),
   unbounded: z.boolean(),

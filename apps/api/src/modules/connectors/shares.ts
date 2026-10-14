@@ -5,6 +5,7 @@ import type {
   ReadersPreview,
 } from "@ocw/contracts";
 import {
+  agents,
   aiChatGrants,
   connectorConnections,
   conversationMembers,
@@ -18,10 +19,10 @@ import {
 } from "@ocw/db";
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
-import type { Core } from "../../core";
+import { authOf, type Core } from "../../core";
 import { conflict, notFound } from "../../lib/errors";
 import { aiAccessSql, type ConversationAccess } from "../chat";
-import { orgResource, type PermissionService } from "../organization";
+import { memberDirectory, orgResource, type PermissionService } from "../organization";
 
 /**
  * Member-account shares (Phase 07.4, D-03; CONN-03): a member's explicit, audited choice to let bots act with their OWN
@@ -59,10 +60,60 @@ async function judged(tx: Tx, conversationId: string) {
   return judged(tx, conv.parentConversationId);
 }
 
-/** Who reads results posted in a conversation, counted server-side, and its display name (`#name`, AI chat title). */
+/** "Sam Lee", "Sam Lee and Scout", "Sam Lee, Alex Kim and Scout", "Sam Lee, Alex Kim and 3 others". */
+function nameList(names: readonly string[]): string {
+  if (names.length <= 1) return names[0] ?? "";
+  if (names.length <= 3) return `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+  return `${names.slice(0, 2).join(", ")} and ${names.length - 2} others`;
+}
+
+/**
+ * A DM or group DM has no name of its own (07.4-12, WINDOWS #194): it is named for the person looking at it by who else
+ * is in it, people first, then bots: "your private chat with Scout", "your group chat with Sam Lee and Scout". Former
+ * members and deleted bots are left out.
+ */
+async function directChatName(
+  tx: Tx,
+  conv: { id: string; kind: string },
+  viewerUserId: string | null,
+): Promise<string> {
+  const rows = await tx
+    .select({ kind: conversationMembers.memberKind, id: conversationMembers.memberId })
+    .from(conversationMembers)
+    .where(eq(conversationMembers.conversationId, conv.id));
+  const people = await memberDirectory(tx);
+  const humans = rows
+    .filter((r) => r.kind === "user" && r.id !== viewerUserId)
+    .flatMap((r) => {
+      const m = people.get(r.id);
+      return m && m.status === "active" ? [m.displayName] : [];
+    })
+    .sort((a, b) => a.localeCompare(b));
+  const agentIds = rows.filter((r) => r.kind === "agent").map((r) => r.id);
+  const bots =
+    agentIds.length === 0
+      ? []
+      : (
+          await tx
+            .select({ name: agents.name })
+            .from(agents)
+            .where(and(inArray(agents.id, agentIds), isNull(agents.deletedAt)))
+        )
+          .map((a) => a.name)
+          .sort((a, b) => a.localeCompare(b));
+  const others = [...humans, ...bots];
+  const chat = conv.kind === "group" ? "group chat" : "private chat";
+  return others.length === 0 ? `your ${chat}` : `your ${chat} with ${nameList(others)}`;
+}
+
+/**
+ * Who reads results posted in a conversation, counted server-side, and its display name for `viewerUserId`: `#name`, an
+ * AI chat's title, or a DM / group DM named by its other members (`directChatName`).
+ */
 export async function readersOf(
   tx: Tx,
   conversationId: string,
+  viewerUserId: string | null = null,
 ): Promise<{ readers: number; unbounded: boolean; name: string | null }> {
   const conv = await judged(tx, conversationId);
   if (!conv) return { readers: 0, unbounded: true, name: null };
@@ -92,7 +143,12 @@ export async function readersOf(
     // An AI chat's title is its conversation's name.
     return { readers, unbounded: group !== undefined, name: conv.name ?? null };
   }
-  const name = conv.kind === "channel" ? `#${conv.name}` : null;
+  const name =
+    conv.kind === "channel"
+      ? `#${conv.name}`
+      : conv.kind === "dm" || conv.kind === "group"
+        ? await directChatName(tx, conv, viewerUserId)
+        : null;
   if (conv.kind === "channel" && conv.visibility !== "private") {
     return { readers: await activeMembers(), unbounded: true, name };
   }
@@ -192,7 +248,7 @@ export async function previewReaders(
   conversationId: string,
 ): Promise<ReadersPreview> {
   await d.access.readable(req, tx, conversationId, { kinds: READABLE_KINDS });
-  const r = await readersOf(tx, conversationId);
+  const r = await readersOf(tx, conversationId, authOf(req).userId);
   return { conversationId, conversationName: r.name, readers: r.readers, unbounded: r.unbounded };
 }
 
@@ -212,7 +268,7 @@ export async function createShare(
   if (await activeShare(tx, { userId, ...input })) {
     throw conflict("It's already allowed in this conversation", "share_exists");
   }
-  const r = await readersOf(tx, input.conversationId);
+  const r = await readersOf(tx, input.conversationId, userId);
   const [row] = await tx
     .insert(memberAccountShares)
     .values({
@@ -253,7 +309,9 @@ export async function listShares(d: SharesDeps, tx: Tx, userId: string): Promise
     const resource = await ownResource(tx, userId, row.resourceKind, row.resourceId);
     if (!resource) continue;
     const readable = await d.access.isReadable(tx, userId, row.conversationId, { kinds: READABLE_KINDS });
-    out.push(toDto(row, readable ? (await readersOf(tx, row.conversationId)).name : null, resource.name));
+    out.push(
+      toDto(row, readable ? (await readersOf(tx, row.conversationId, userId)).name : null, resource.name),
+    );
   }
   return out;
 }
