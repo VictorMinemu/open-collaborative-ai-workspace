@@ -10,6 +10,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "./app";
 import { loadEnv } from "./config/env";
 import { open } from "./lib/crypto";
+import { moduleStateOf } from "./modules/organization/module-access";
+import { loadPrincipalFacts, loadRules } from "./modules/organization/permissions/facts";
+import { orgResource } from "./modules/organization/permissions/policy";
+import { decide } from "./modules/organization/permissions/resolve";
 
 /**
  * SELF-03 / D-06 / D-18 (plan 07-02): N-1 → N upgrade. N-1 is the Phase 5 merge `3bbcbd9`; its schema and synthetic
@@ -34,6 +38,19 @@ const MAX_MEMBER = "aaaaaaaa-0000-4000-8000-000000000102";
 /** Two MCP servers registered at N-1 (Phase 07.4: both must come out as `org_secret`). */
 const MCP_HTTP = "aaaaaaaa-0000-4000-8000-000000000701";
 const MCP_STDIO = "aaaaaaaa-0000-4000-8000-000000000702";
+/** Phase 07.4 (WINDOWS #177): the Bots module's catalog patterns before 07.4 added `connector.connect` and `vault.use`. */
+const OLD_BOTS_PATTERNS = [
+  "bot.read",
+  "bot.create_personal",
+  "bot.configure",
+  "bot.internet",
+  "bot.tool.use",
+];
+const BEA_ADMIN = "bbbbbbbb-0000-4000-8000-000000000101";
+const BACKFILL_DIR = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../packages/db/drizzle/20261014042429_bots_off_connector_vault_backfill/migration.sql",
+);
 /** The seed's fixed test key (32 bytes of 0x07) and plaintext; see packages/db/test/upgrade/seed-phase-5.sql. */
 const TEST_KEY_B64 = Buffer.alloc(32, 7).toString("base64");
 const SECRET_PLAINTEXT = "sk-upgrade-baseline-fake-provider-key";
@@ -49,6 +66,7 @@ const HEAD_ONLY = [
   "20261013221007_connectors_keychain_templates",
   "20261013233856_agent_template_versions_immutable",
   "20261014020321_connector_oauth_use_cimd",
+  "20261014042429_bots_off_connector_vault_backfill",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
@@ -184,6 +202,18 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
         "insert into app.mcp_servers (id, organization_id, name, safe_name, transport, url, sandbox_server, status) values ($1, $3, 'Docs', 'm0a0a0a01', 'streamable-http', 'https://mcp.example.test', null, 'ready'), ($2, $3, 'Files', 'm0a0a0a02', 'sandboxed-stdio', null, 'filesystem', 'ready')",
         [MCP_HTTP, MCP_STDIO, ORG_A],
       );
+      // Phase 07.4 (WINDOWS #177): Bots turned off at N-1 with the old 5 patterns, for org A's everyone and for Max
+      // in person (a duplicate row too, as a hand-written rule could be); org B holds only 3 of them (a custom set).
+      for (const permission of [...OLD_BOTS_PATTERNS, "bot.read"])
+        await seed.query(
+          "insert into app.permission_rules (organization_id, scope_unit_id, subject_kind, subject_id, permission, effect) values ($1, null, 'everyone', null, $2, 'deny'), ($1, null, 'user', $3, $2, 'deny')",
+          [ORG_A, permission, MAX_MEMBER],
+        );
+      for (const permission of OLD_BOTS_PATTERNS.slice(0, 3))
+        await seed.query(
+          "insert into app.permission_rules (organization_id, scope_unit_id, subject_kind, subject_id, permission, effect) values ($1, null, 'everyone', null, $2, 'deny')",
+          [ORG_B, permission],
+        );
     } finally {
       await seed.end();
     }
@@ -312,6 +342,67 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
         expect(empty.rows).toEqual([{ n: 0, linked: 0 }]);
       } finally {
         await c.end();
+      }
+    });
+
+    it("completes the old Bots-off rule sets, so Bots reads off and denies connections and keys; a custom set is untouched (WINDOWS #177)", async () => {
+      const db = createTenantDb(urls.app, { max: 1 });
+      try {
+        const view = (organizationId: string, userId: string) =>
+          db.withTenant({ organizationId }, async (tx) => {
+            const rules = await loadRules(tx);
+            const facts = await loadPrincipalFacts(tx, { kind: "user", userId });
+            const allowed = (p: "connector.connect" | "vault.use" | "bot.read") =>
+              decide(facts, orgResource(), rules, p).allowed;
+            return {
+              everyone: moduleStateOf(rules, "bots", null, { kind: "everyone" }),
+              person: moduleStateOf(rules, "bots", null, { kind: "user", userId }),
+              connect: allowed("connector.connect"),
+              vault: allowed("vault.use"),
+              botRead: allowed("bot.read"),
+              rows: rules.length,
+            };
+          });
+        expect(await view(ORG_A, MAX_MEMBER)).toEqual({
+          everyone: "off",
+          person: "off",
+          connect: false,
+          vault: false,
+          botRead: false,
+          // 5 + 1 duplicate per subject at N-1, plus the 2 added for each of the two subjects.
+          rows: 16,
+        });
+        expect(await view(ORG_B, BEA_ADMIN)).toEqual({
+          everyone: "custom",
+          person: "on",
+          connect: true,
+          vault: true,
+          botRead: false,
+          rows: 3,
+        });
+        // Idempotent: running the backfill again adds nothing.
+        const c = new pg.Client({ connectionString: urls.migrator });
+        await c.connect();
+        try {
+          const n = async () =>
+            (await c.query("select count(*)::int as n from app.permission_rules")).rows[0].n as number;
+          const before = await n();
+          await c.query(readFileSync(BACKFILL_DIR, "utf8"));
+          expect(await n()).toBe(before);
+          const added = await c.query(
+            "select subject_kind, permission, created_by from app.permission_rules where permission in ('connector.connect', 'vault.use') order by subject_kind, permission",
+          );
+          expect(added.rows).toEqual([
+            { subject_kind: "everyone", permission: "connector.connect", created_by: null },
+            { subject_kind: "everyone", permission: "vault.use", created_by: null },
+            { subject_kind: "user", permission: "connector.connect", created_by: null },
+            { subject_kind: "user", permission: "vault.use", created_by: null },
+          ]);
+        } finally {
+          await c.end();
+        }
+      } finally {
+        await db.close();
       }
     });
 
