@@ -3,7 +3,7 @@ import { expectNoSeriousA11y } from "../support/a11y";
 import { type Actor, apiAs, BASE_URL, ensureMember, openAs, SAM, userIdOf } from "../support/actors";
 import { freshPersonalBot } from "../support/bot-tools";
 import { bothThemes } from "../support/files";
-import { ADMIN } from "./env";
+import { ADMIN, shot } from "./env";
 
 /**
  * Settings › Keychain (07.4-13; D-04, CONN-05, SC3; 07.4-UI-SPEC § 3, R3) and the organization's private network hosts
@@ -423,6 +423,80 @@ test("admin: private network hosts live on Settings › MCP servers; members nev
     await s.context.close();
   } finally {
     await admin.put("/api/v1/keychain/private-hosts", { data: { hosts: [] } }).catch(() => undefined);
+    await admin.dispose();
+  }
+});
+
+/** A member used by no other spec: Bots is turned off for them alone. */
+const KEEPER: Actor = { name: "Ines Mora", email: "ines.keys@ocw.test", password: "ines-e2e-password-1234" };
+
+test("member with Bots off: Keychain stays in Settings while they have keys, so they find and delete them (07.4 verification)", async ({
+  browser,
+}, info) => {
+  test.setTimeout(120_000);
+  const mobile = info.project.name === "mobile";
+  const tag = mobile ? "390" : "1440";
+  const admin = await apiAs(ADMIN);
+  const keeperId = await ensureMember(admin, KEEPER, "standard");
+  const bots = (enabled: boolean) =>
+    admin.put("/api/v1/module-access", {
+      data: { module: "bots", scopeUnitId: null, subject: { kind: "user", userId: keeperId }, enabled },
+    });
+  const keeper = await apiAs(KEEPER);
+  try {
+    expect((await bots(true)).ok(), "Bots on").toBe(true);
+    await clearKeys(keeper);
+    const created = await keeper.post("/api/v1/keychain", {
+      data: {
+        scope: "personal",
+        kind: "api_key",
+        name: "Old CRM key",
+        value: CANARY,
+        allowedHosts: ["api.crm.example"],
+      },
+    });
+    expect(created.ok(), "create a personal key").toBe(true);
+    const key = (await created.json()) as ItemJson;
+    expect((await bots(false)).ok(), "Bots off for the member").toBe(true);
+
+    const s = await openAs(browser, KEEPER, info.project.name);
+    const page = s.page;
+    // Desktop: the settings column; phone: the same sections inside the navigation drawer.
+    const nav = mobile
+      ? page.getByRole("dialog", { name: "Navigation" })
+      : page.getByTestId("section-sidebar");
+    const openNav = async () => {
+      await page.goto(`${BASE_URL}/settings/profile`);
+      if (mobile) await page.getByTestId("mobile-nav-trigger").click();
+      await expect(nav.getByTestId("settings-nav-profile")).toBeVisible();
+    };
+    await openNav();
+    await expect(nav.getByTestId("settings-nav-notifications")).toBeVisible();
+    await noToasts(page);
+    await page.waitForLoadState("networkidle");
+    await shot(page, `keychain-nav-bots-off-${tag}`);
+    const entry = nav.getByTestId("settings-nav-keychain");
+    await expect(entry).toBeVisible();
+    // Connections has nothing of theirs to withdraw, so it stays out (#196 rule, unchanged).
+    await expect(nav.getByTestId("settings-nav-connections")).toHaveCount(0);
+
+    await entry.click();
+    await expect(page).toHaveURL(/\/settings\/keychain$/);
+    const row = page.getByTestId(`vault-row-${key.id}`);
+    await expect(row).toBeVisible();
+    await openMenu(page, row, "vault-delete");
+    await page.getByTestId("vault-delete-dialog").getByTestId("vault-delete-confirm").click();
+    await expect(row).toHaveCount(0);
+    expect((await (await keeper.get("/api/v1/keychain")).json()).personal).toEqual([]);
+
+    // Nothing left to manage: the entry leaves, like every other Bots entry.
+    await openNav();
+    await expect(nav.getByTestId("settings-nav-keychain")).toHaveCount(0);
+    await s.context.close();
+  } finally {
+    await bots(true).catch(() => undefined);
+    await clearKeys(keeper).catch(() => undefined);
+    await keeper.dispose();
     await admin.dispose();
   }
 });
