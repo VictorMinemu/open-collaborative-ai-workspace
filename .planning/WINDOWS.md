@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 127
+open_count: 126
 waived_count: 4
-fixed_count: 61
-total_count: 192
-last_updated: 2026-10-14T02:01:28.231Z
+fixed_count: 65
+total_count: 195
+last_updated: 2026-10-14T02:33:13.999Z
 ---
 
 # Broken Windows Ledger
@@ -184,29 +184,32 @@ last_updated: 2026-10-14T02:01:28.231Z
 | 167 | 07.2 | deviation | apps/api/src/modules/memory |  | memory.changed: a rename only notifies readers of the new path; unit-scope writes emit one event per reader (a unit: topic would scale better); no e2e for live team-file updates | open |  | 2026-10-13T10:56:27.664Z |  |
 | 168 | 07.2 | deviation | apps/api/src/modules/agent-channel |  | Stored cell stream events keep private memory content (turn payloads) and forgetting a scope does not purge them | open |  | 2026-10-13T15:20:09.851Z |  |
 | 169 | 07.4 | deviation | packages/db/src/schema/app.ts |  | Cross-org ids: 07.4 FKs check ids only (RLS bypassed), so a row can reference another org's server/key/agent/template; the API must resolve every id inside withTenant (same pattern as bot_tool_grants) | open |  | 2026-10-13T22:54:38.207Z |  |
-| 170 | 07.4 | deviation | packages/db/src/schema/app.ts |  | No owner-only restrictive DB policy on personal keys or member connector connections (only tenant isolation); enforce owner-only in the API (07.4-07/10) and add a restrictive policy before the gate, as 07.2 did for personal memory | open |  | 2026-10-13T22:54:38.296Z |  |
+| 170 | 07.4 | deviation | packages/db/src/schema/app.ts |  | No owner-only restrictive DB policy on personal keys or member connector connections (only tenant isolation); enforce owner-only in the API (07.4-07/10) and add a restrictive policy before the gate, as 07.2 did for personal memory | fixed |  | 2026-10-13T22:54:38.296Z | 2026-10-14T02:33:13.571Z |
 | 171 | 07.4 | deviation | packages/db/src/schema/app.ts |  | Template versions are immutable only in the API (no trigger); share resource_id has no FK so deleting a connector or key leaves an inert share row | fixed |  | 2026-10-13T22:54:38.389Z | 2026-10-14T00:55:32.808Z |
 | 172 | 07.4 | deviation | packages/db/src/schema/app.ts |  | vault_items.secret_ref accepts env/file/openbao providers in the DB; D-07 db-only must be enforced by the API; SecretsService.putSealed must accept connector_credential and vault_item (07.4-07/10) | fixed |  | 2026-10-13T22:54:38.476Z | 2026-10-14T00:13:09.654Z |
 | 173 | 07.4 | deviation | infra/fake-model/fake-mcp-oauth.mjs |  | The fake shares DCR/CIMD clients across issuers (main and alt); 07.4-10 must prove in the API that client credentials are never reused across issuers; default cimdFetch never runs in tests | fixed |  | 2026-10-13T22:56:12.635Z | 2026-10-14T00:13:21.114Z |
 | 174 | 07.4 | deviation | .planning/phases/07.4-per-member-connectors-agent-keychain-and-templates/07.4-VALIDATION.md |  | Plans and VALIDATION use 'node --test infra/fake-model/' which Node 24 treats as a file; use the glob form | open |  | 2026-10-13T22:56:12.721Z |  |
-| 175 | 07.4 | deviation | apps/api/src/lib/egress.ts |  | MCP SDK OAuth helpers and transports fall back to global fetch without fetchFn and no rule catches the missing argument; every 07.4 SDK call must pass egress.bound(policy) (check in 07.4-10/11 and the gate) | open |  | 2026-10-13T22:56:48.885Z |  |
+| 175 | 07.4 | deviation | apps/api/src/lib/egress.ts |  | MCP SDK OAuth helpers and transports fall back to global fetch without fetchFn and no rule catches the missing argument; every 07.4 SDK call must pass egress.bound(policy) (check in 07.4-10/11 and the gate) | fixed |  | 2026-10-13T22:56:48.885Z | 2026-10-14T02:33:13.785Z |
 | 176 | 07.4 | deviation | apps/api/src/lib/egress.ts |  | One undici Agent per request (no keep-alive reuse); privateAllow tested only up to the connect attempt | open |  | 2026-10-13T22:56:48.969Z |  |
 | 177 | 07.4 | deviation | packages/contracts/src/module-access.ts |  | HIGH: units/orgs with Bots already off hold the old 5 deny rules; the catalog now has 7, so the API reads them as custom and does not deny connector.connect / vault.use until Bots is toggled again; needs a backfill migration | open |  | 2026-10-13T23:06:14.969Z |  |
 | 178 | 07.4 | deviation | packages/contracts/src/mcp.ts |  | memberHeaderName is not checked against forbidden headers in the schema (import cycle); 07.4-06 and 07.4-10 must apply isAllowedInjectionHeader() on the server | fixed |  | 2026-10-13T23:06:15.041Z | 2026-10-14T00:54:30.968Z |
-| 179 | 07.4 | deviation | apps/api/src/modules/mcp |  | CIMD is chosen even when the AS cannot read the document (e.g. internal CA); 07.4-10 must allow preferring DCR or pre-registration; servers without RFC 9728 metadata cannot be connected per member | open |  | 2026-10-14T00:00:48.322Z |  |
+| 179 | 07.4 | deviation | apps/api/src/modules/mcp |  | CIMD is chosen even when the AS cannot read the document (e.g. internal CA); 07.4-10 must allow preferring DCR or pre-registration; servers without RFC 9728 metadata cannot be connected per member | fixed |  | 2026-10-14T00:00:48.322Z | 2026-10-14T02:33:13.713Z |
 | 180 | 07.4 | deviation | apps/api/src/modules/mcp |  | No positive SSE round-trip test (fake speaks only streamable HTTP); MCP session not closed with DELETE after a timeout; revokeToken Basic-encodes client id/secret (SDK does not) | open |  | 2026-10-14T00:00:48.417Z |  |
 | 181 | 07.4 | deviation | apps/api/src/modules/keychain |  | OAuth keychain token URLs must be https but the e2e fake on :4291 is http; 07.4-13/14 need an https fake or a test-host exemption | open |  | 2026-10-14T00:13:09.756Z |  |
 | 182 | 07.4 | deviation | packages/db/sql/post-migrate.sql |  | agent_vault_grants has no owner-only policy: grants on personal keys (ids only) are visible to any session in the org | open |  | 2026-10-14T00:13:09.855Z |  |
 | 183 | 07.4 | deviation | apps/api/src/modules/keychain |  | 07.4-11 must run keychain use with the turn's human as the RLS user (never no user or another member); CODEOWNERS does not cover modules/keychain; client-credentials token cache is per process (not in an ADR) | fixed |  | 2026-10-14T00:13:09.951Z | 2026-10-14T02:01:27.888Z |
 | 184 | 07.4 | deviation | apps/openclaw-channel/src/connector-tools.ts |  | 07.4-11 must put the three static tool names (never logical m…__tool names) in the /cell snapshot alsoAllow; only a 20 s connector call was proven in the real cell (add a 30 s case to the ADR-0025 checklist); tool descriptions from ocw_connector_list do not taint the turn | fixed |  | 2026-10-14T00:27:30.749Z | 2026-10-14T02:01:27.974Z |
 | 185 | 07.4 | deviation | infra/openclaw/test/run-container-smoke.sh |  | Without SMOKE_BUILD the marketplace scenario fails on macOS Docker Desktop (docker cp leaves install-policy.mjs as uid 501); CI unaffected | open |  | 2026-10-14T00:27:30.826Z |  |
-| 186 | 07.4 | deviation | packages/db/sql/post-migrate.sql |  | If #170 adds an owner-only policy on connector_connections, the admin member count and clear-on-switch/delete will only see the admin's rows and leave other members' credentials behind silently; that policy needs an mcp.manage path (07.4-10) | open |  | 2026-10-14T00:54:31.051Z |  |
+| 186 | 07.4 | deviation | packages/db/sql/post-migrate.sql |  | If #170 adds an owner-only policy on connector_connections, the admin member count and clear-on-switch/delete will only see the admin's rows and leave other members' credentials behind silently; that policy needs an mcp.manage path (07.4-10) | fixed |  | 2026-10-14T00:54:31.051Z | 2026-10-14T02:33:13.642Z |
 | 187 | 07.4 | deviation | apps/web/components/ui/badge.tsx |  | Shared Badge warning variant fails contrast in light mode (1.91:1); 'Probing' still uses it; PanelDialog close is 32 px at 390 | open |  | 2026-10-14T00:54:31.132Z |  |
 | 188 | 07.4 | deviation | e2e/support/a11y.ts |  | The a11y helper waits for infinite animations (pulse, spinner, skeleton) and hangs to timeout; specs cancel them before axe; fix in the helper | open |  | 2026-10-14T00:55:32.882Z |  |
 | 189 | 07.4 | deviation | apps/web/components/bots |  | Template 'Connect' links point to /settings/connections (built by 07.4-13); the empty state copy above Templates predates templates; skip notices are generic (no effective value in the contract) | open |  | 2026-10-14T00:55:32.956Z |  |
 | 190 | 07.4 | deviation | .github/CODEOWNERS |  | CODEOWNERS does not cover apps/api/src/modules/keychain (and the new connectors module); client-credentials token cache is per process, record in ADR-0025; prove a 30 s connector call in the real cell in 07.4-14 | open |  | 2026-10-14T02:01:28.061Z |  |
 | 191 | 07.4 | deviation | apps/api/src/modules/keychain |  | DECISION NEEDED in 07.4-12/14: unit keys are offered in public channels and shared AI chats, so results fetched with a unit's key can reach people outside the unit; apply the audience rule (every reader inside the unit) as memory does | open |  | 2026-10-14T02:01:28.146Z |  |
 | 192 | 07.4 | deviation | apps/openclaw-channel/src/tool-guard.ts |  | Plugin local gate uses fixed list flags: after a list it lets a local write through and the API refuses it as tainted (safe, less precise message); /tool-calls still opens its tx with no user | open |  | 2026-10-14T02:01:28.231Z |  |
+| 193 | 07.4 | deviation | apps/api/src/modules/connectors |  | On issuer_changed or any terminal failure the credential is dropped without revoking at the old issuer (live until expiry); concurrent DCR registrations for one issuer leave the loser orphaned at the provider; each refresh rediscovers the provider (2 extra requests) | open |  | 2026-10-14T02:33:13.855Z |  |
+| 194 | 07.4 | deviation | apps/api/src/modules/connectors |  | conversationName is null for DMs and groups, so the UI would show 'a conversation you can no longer open'; a single member's probe failure puts the whole server in error | open |  | 2026-10-14T02:33:13.926Z |  |
+| 195 | 07.4 | deviation | packages/db/sql/post-migrate.sql |  | connector_credential secrets are readable as ciphertext by any session in the org (AAD binds them to the member); CIMD proven only up to the client_id in the authorization URL | open |  | 2026-10-14T02:33:13.999Z |  |
 
 ````json
 [
@@ -2245,10 +2248,10 @@ last_updated: 2026-10-14T02:01:28.231Z
     "file": "packages/db/src/schema/app.ts",
     "line": null,
     "description": "No owner-only restrictive DB policy on personal keys or member connector connections (only tenant isolation); enforce owner-only in the API (07.4-07/10) and add a restrictive policy before the gate, as 07.2 did for personal memory",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T22:54:38.296Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-14T02:33:13.571Z"
   },
   {
     "id": 171,
@@ -2305,10 +2308,10 @@ last_updated: 2026-10-14T02:01:28.231Z
     "file": "apps/api/src/lib/egress.ts",
     "line": null,
     "description": "MCP SDK OAuth helpers and transports fall back to global fetch without fetchFn and no rule catches the missing argument; every 07.4 SDK call must pass egress.bound(policy) (check in 07.4-10/11 and the gate)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T22:56:48.885Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-14T02:33:13.785Z"
   },
   {
     "id": 176,
@@ -2353,10 +2356,10 @@ last_updated: 2026-10-14T02:01:28.231Z
     "file": "apps/api/src/modules/mcp",
     "line": null,
     "description": "CIMD is chosen even when the AS cannot read the document (e.g. internal CA); 07.4-10 must allow preferring DCR or pre-registration; servers without RFC 9728 metadata cannot be connected per member",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-14T00:00:48.322Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-14T02:33:13.713Z"
   },
   {
     "id": 180,
@@ -2437,10 +2440,10 @@ last_updated: 2026-10-14T02:01:28.231Z
     "file": "packages/db/sql/post-migrate.sql",
     "line": null,
     "description": "If #170 adds an owner-only policy on connector_connections, the admin member count and clear-on-switch/delete will only see the admin's rows and leave other members' credentials behind silently; that policy needs an mcp.manage path (07.4-10)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-14T00:54:31.051Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-14T02:33:13.642Z"
   },
   {
     "id": 187,
@@ -2512,6 +2515,42 @@ last_updated: 2026-10-14T02:01:28.231Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-14T02:01:28.231Z",
+    "resolved_at": null
+  },
+  {
+    "id": 193,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "apps/api/src/modules/connectors",
+    "line": null,
+    "description": "On issuer_changed or any terminal failure the credential is dropped without revoking at the old issuer (live until expiry); concurrent DCR registrations for one issuer leave the loser orphaned at the provider; each refresh rediscovers the provider (2 extra requests)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T02:33:13.855Z",
+    "resolved_at": null
+  },
+  {
+    "id": 194,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "apps/api/src/modules/connectors",
+    "line": null,
+    "description": "conversationName is null for DMs and groups, so the UI would show 'a conversation you can no longer open'; a single member's probe failure puts the whole server in error",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T02:33:13.926Z",
+    "resolved_at": null
+  },
+  {
+    "id": 195,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "packages/db/sql/post-migrate.sql",
+    "line": null,
+    "description": "connector_credential secrets are readable as ciphertext by any session in the org (AAD binds them to the member); CIMD proven only up to the client_id in the authorization URL",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T02:33:13.999Z",
     "resolved_at": null
   }
 ]
