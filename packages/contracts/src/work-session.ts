@@ -99,6 +99,14 @@ export const WorkPrompt = z.object({
    * so `prompt.updated` events persisted before 06.1 still parse.
    */
   attachments: z.array(Attachment).default([]),
+  /**
+   * Phase 07.5 (D-03): the bot whose proposal this first prompt came from ("Ana · proposed by @Scout"); the author is
+   * still the person who clicked Start. Defaults to null so older `prompt.updated` payloads parse.
+   */
+  proposedBy: z
+    .object({ agentId: Id, displayName: z.string().max(200) })
+    .nullable()
+    .default(null),
 });
 export type WorkPrompt = z.infer<typeof WorkPrompt>;
 

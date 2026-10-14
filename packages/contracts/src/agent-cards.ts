@@ -1,10 +1,22 @@
 import { z } from "zod";
-import { ActionHash, APPROVAL_NOTE_MAX, ApprovalNote, ApprovalRequestStatus } from "./approvals";
+import { AgentCardRoute } from "./agent-card-route";
+import {
+  ActionHash,
+  APPROVAL_NOTE_MAX,
+  ApprovalKindId,
+  ApprovalNote,
+  ApprovalRequestStatus,
+} from "./approvals";
 import { Id, IsoDateTime, PrincipalKind } from "./common";
+import { WorkZoneStartBlock } from "./work-zone-proposals";
+
+// The route primitives live in a leaf module (Phase 07.5: `tool-approvals.ts` needs `AgentCardRoute` and
+// `approvals.ts` imports it); re-exported here so every existing import keeps working.
+export { AGENT_CARD_ROUTE_PREFIXES, AgentCardRoute, isAgentCardRoute } from "./agent-card-route";
 
 /**
  * Phase 6 Agent Cards (AGENT-04, D-07, P-11): a typed card an agent posts with a message and updates in place.
- * Imports `common` and `approvals` only: `chat.ts` imports this file for `Message.card`, so importing `chat.ts` here
+ * Imports `common`, `approvals`, `agent-card-route` and `work-zone-proposals` only: `chat.ts` imports this file for `Message.card`, so importing `chat.ts` here
  * would be a cycle (`approvals` never imports `chat.ts` or this file).
  * Actions are server-decided; an Open action can only point to an internal app route (`AgentCardRoute`).
  */
@@ -13,19 +25,6 @@ export const AGENT_CARD_TITLE_MAX = 200;
 export const AGENT_CARD_FIELDS_MAX = 12;
 export const AGENT_CARD_ACTIONS_MAX = 4;
 export const AGENT_CARD_SUMMARY_MAX = 2_000;
-const AGENT_CARD_ROUTE_MAX = 512;
-
-/** The app areas an Open action may lead to (never an external URL). */
-export const AGENT_CARD_ROUTE_PREFIXES = [
-  "/chat",
-  "/work-zone",
-  "/bots",
-  "/settings",
-  "/search",
-  "/share",
-  // Phase 07.2: memory files and proposals (`/memory/proposals/<id>`).
-  "/memory",
-] as const;
 
 export const AgentCardKind = z.enum([
   "work_zone",
@@ -47,39 +46,6 @@ export const AgentCardField = z.object({
   value: z.string().trim().min(1).max(500),
 });
 export type AgentCardField = z.infer<typeof AgentCardField>;
-
-function hasControlCharacter(v: string): boolean {
-  for (let i = 0; i < v.length; i++) {
-    const c = v.charCodeAt(i);
-    if (c <= 0x1f || (c >= 0x7f && c <= 0x9f)) return true;
-  }
-  return false;
-}
-
-/**
- * True for an internal app route: one `AGENT_CARD_ROUTE_PREFIXES` entry followed by the end, "/", "?" or "#"; no
- * scheme, no "//", no backslash (browsers read it as "/"), no "." or ".." path segment (also percent-encoded, which
- * the URL parser normalises), no control character, at most 512 characters. The client re-checks it before navigating.
- */
-export function isAgentCardRoute(v: string): boolean {
-  if (v.length > AGENT_CARD_ROUTE_MAX || hasControlCharacter(v)) return false;
-  if (v.includes("\\") || v.includes("//")) return false;
-  const prefixed = AGENT_CARD_ROUTE_PREFIXES.some(
-    (p) => v.startsWith(p) && (v.length === p.length || ["/", "?", "#"].includes(v.charAt(p.length))),
-  );
-  if (!prefixed) return false;
-  const path = v.split(/[?#]/, 1)[0] ?? "";
-  return path.split("/").every((segment) => {
-    const s = segment.replace(/%2e/gi, ".");
-    return s !== "." && s !== "..";
-  });
-}
-
-export const AgentCardRoute = z
-  .string()
-  .max(AGENT_CARD_ROUTE_MAX)
-  .refine(isAgentCardRoute, { message: "must be an internal app route" });
-export type AgentCardRoute = z.infer<typeof AgentCardRoute>;
 
 const ActionLabel = z.string().trim().min(1).max(40);
 
@@ -126,6 +92,30 @@ export const AgentCardApprovalLink = z.object({
    * words (07.2-17, UI-SPEC Copywriting › failed reasons). Optional: absent on snapshots from before it existed.
    */
   resultCode: z.string().max(64).nullable().optional(),
+  // Phase 07.5 (UI-SPEC R6, R7, R9): all optional, composed by the server, so 07.2 links still parse.
+  /** The approval's kind, so the card picks its labels (`tool.call`: Approved / Used / Not used). */
+  kind: ApprovalKindId.optional(),
+  /**
+   * `exact`: the action's values are in the card (a DM whose single human is the requester, or a Work Zone card);
+   * `summary`: title, tool and source only, no approve action; `review_only`: values were cut, decide on the review.
+   */
+  display: z.enum(["exact", "summary", "review_only"]).optional(),
+  /** When a pending request expires (the card's timer). */
+  expiresAt: IsoDateTime.optional(),
+  /** A grant's use window end (`decided_at + 15 min`); "Not used" is derived from `approved` and `useBy < now`. */
+  useBy: IsoDateTime.nullable().optional(),
+  /** When the grant was consumed at dispatch ("Used"). */
+  usedAt: IsoDateTime.nullable().optional(),
+  /** The approver label ("Waiting for a lead of Sales"). */
+  waitingFor: z.string().max(200).nullable().optional(),
+  /** How many of the card's leading fields are the ACTION section (the rest are the values). */
+  actionFields: z.number().int().min(0).max(3).optional(),
+  /** Work Zone proposals: the device, so the card shows its live state (R9). */
+  deviceId: Id.nullable().optional(),
+  /** Where the result lives once applied (a started session: `/work-zone/<id>`). */
+  resultRoute: AgentCardRoute.nullable().optional(),
+  /** Why Start is not possible right now (Work Zone proposals). */
+  blocked: WorkZoneStartBlock.nullable().optional(),
 });
 export type AgentCardApprovalLink = z.infer<typeof AgentCardApprovalLink>;
 

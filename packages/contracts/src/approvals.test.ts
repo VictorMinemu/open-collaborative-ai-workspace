@@ -191,6 +191,66 @@ describe("approval contract (MEM-06, D-05, D-08)", () => {
     expect(ApprovalListQuery.safeParse({ role: "admin" }).success).toBe(false);
   });
 
+  it("list queries may filter by up to four kinds (07.5, UI-SPEC R1)", () => {
+    expect(ApprovalListQuery.parse({ role: "decider", kinds: "tool.call,work_zone.start" }).kinds).toEqual([
+      "tool.call",
+      "work_zone.start",
+    ]);
+    expect(ApprovalListQuery.parse({ role: "decider", kinds: "memory.write" }).kinds).toEqual([
+      "memory.write",
+    ]);
+    expect(ApprovalListQuery.parse({ role: "decider" })).not.toHaveProperty("kinds");
+    expect(ApprovalListQuery.safeParse({ role: "decider", kinds: "a.a,b.b,c.c,d.d,e.e" }).success).toBe(
+      false,
+    );
+    expect(ApprovalListQuery.safeParse({ role: "decider", kinds: "tool.call,,memory.write" }).success).toBe(
+      false,
+    );
+    expect(ApprovalListQuery.safeParse({ role: "decider", kinds: "" }).success).toBe(false);
+    expect(ApprovalListQuery.safeParse({ role: "decider", kinds: "bad id" }).success).toBe(false);
+  });
+
+  it("a list carries the pending total and 07.5 headlines (agent, origin, chips, useBy)", () => {
+    expect(ApprovalList.parse({ items: [], nextCursor: null, total: 3 }).total).toBe(3);
+    expect(ApprovalList.parse({ items: [], nextCursor: null })).not.toHaveProperty("total");
+    expect(ApprovalList.safeParse({ items: [], nextCursor: null, total: 101 }).success).toBe(false);
+    const headline = {
+      title: "Run create_invoice on Acme CRM",
+      context: null,
+      requester: "Scout for Ana Pérez",
+      tags: [],
+      agent: { id, displayName: "Scout" },
+      origin: { kind: "channel", name: "ops" },
+      chips: [
+        { kind: "source", label: "Acme CRM", icon: "plug" },
+        { kind: "device", label: "MacBook Pro", state: "online" },
+        { kind: "tainted", label: "Outside content" },
+      ],
+      useBy: null,
+    };
+    expect(
+      ApprovalList.parse({ items: [{ ...summary, headline }], nextCursor: null }).items[0]?.headline,
+    ).toEqual(headline);
+    expect(
+      ApprovalList.parse({ items: [{ ...summary, headline: null }], nextCursor: null }).items[0]?.headline,
+    ).toBe(null);
+    const chip = headline.chips[0];
+    expect(
+      ApprovalList.safeParse({
+        items: [{ ...summary, headline: { ...headline, chips: [chip, chip, chip, chip] } }],
+        nextCursor: null,
+      }).success,
+    ).toBe(false);
+    expect(
+      ApprovalList.safeParse({
+        items: [
+          { ...summary, headline: { ...headline, chips: [{ kind: "source", label: "x".repeat(81) }] } },
+        ],
+        nextCursor: null,
+      }).success,
+    ).toBe(false);
+  });
+
   it("approval_request.updated carries ids and status only", () => {
     expect(EventTypes.approvalRequestUpdated).toBe("approval_request.updated");
     // The Work Zone event keeps its name (never renamed).

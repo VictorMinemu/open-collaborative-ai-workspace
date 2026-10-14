@@ -265,7 +265,13 @@ export function ProposalReview({ id, stacked, onBack, inboxHref, announce }: Pro
       announce={announce}
     />
   ) : (
-    <FieldsReview detail={detail} title={detail.view.title} fields={detail.view.fields} back={back} />
+    // 07.5's `tool_call` / `work_zone_proposal` views belong to `/approvals`; here they fall back to the title only.
+    <FieldsReview
+      detail={detail}
+      title={detail.view.title}
+      fields={detail.view.type === "fields" ? detail.view.fields : []}
+      back={back}
+    />
   );
 }
 

@@ -35,6 +35,7 @@ import {
   SensitiveFinding,
 } from "./memory";
 import { ServerFrame } from "./realtime";
+import { TOOL_APPROVAL_LIMITS } from "./tool-approvals";
 
 /**
  * Agent Channel API v1 — the ONLY surface the OpenClaw channel plugin talks to (AGENTS principle 9).
@@ -50,6 +51,8 @@ import { ServerFrame } from "./realtime";
  * route wired by 03.1-10) and the marketplace plugin report (`AgentChannelPluginReport`, route wired by 03.1-12).
  * `POST /runtime` (`AgentChannelRuntimeReport`) tells admins why a running cell has no channel connected.
  */
+
+const utf8Bytes = (s: string) => new TextEncoder().encode(s).length;
 
 export const AGENT_CHANNEL_PROTOCOL_VERSION = 1;
 export const AGENT_CHANNEL_BASE_PATH = "/agent-channel/v1";
@@ -148,6 +151,24 @@ export const AgentCardActionEvent = AgentMentionEvent.omit({ type: true }).exten
     kind: AgentCardKind,
     title: z.string(),
     outcome: z.enum(["approved", "denied"]),
+    /**
+     * Phase 07.5 (P-06): who decided. For `grant` kinds the turn is delivered for the requester (`message.author`), so
+     * the decider is named here and in the sentence.
+     */
+    decidedBy: z.object({ id: Id, displayName: z.string().max(200) }).optional(),
+    /**
+     * Phase 07.5 (D-02): an approved `tool.call` grant. Call `tool` once with exactly these canonical `arguments`
+     * (RFC 8785, the cell's own call) before `useBy`; any other arguments are a new request.
+     */
+    grant: z
+      .object({
+        tool: z.string().min(1).max(128),
+        arguments: z.string().refine((a) => utf8Bytes(a) <= TOOL_APPROVAL_LIMITS.argumentsBytes, {
+          message: "arguments over 32 KB",
+        }),
+        useBy: IsoDateTime,
+      })
+      .optional(),
   }),
 });
 export type AgentCardActionEvent = z.infer<typeof AgentCardActionEvent>;
@@ -598,14 +619,35 @@ export const AgentChannelToolCallRequest = z.object({
     .object({ query: z.string().max(500).optional(), url: z.string().max(2000).optional() })
     .default({}),
   argsBytes: z.number().int().nonnegative().max(1_000_000).optional(),
+  /**
+   * Phase 07.5 (D-01): the model's full arguments, sent ONLY for a tool whose delivered `turn.toolFlags[tool].approval`
+   * is set (the API decides an approval on exactly these); serialized ≤ 32 KB. Discarded unread when no policy applies.
+   */
+  arguments: z
+    .record(z.string(), z.unknown())
+    .refine((v) => jsonBytes(v) <= TOOL_APPROVAL_LIMITS.argumentsBytes, { message: "arguments over 32 KB" })
+    .optional(),
 });
 export type AgentChannelToolCallRequest = z.infer<typeof AgentChannelToolCallRequest>;
+
+/** The approval a refused call waits on (Phase 07.5): the plugin tells the model who decides, never the arguments. */
+export const AgentChannelToolCallApproval = z.object({
+  id: Id,
+  /** false when an identical pending request was reused (no new card). */
+  created: z.boolean(),
+  /** The approver label ("a lead of Sales"). */
+  waitingFor: z.string().max(200),
+  requesterName: z.string().max(120),
+});
+export type AgentChannelToolCallApproval = z.infer<typeof AgentChannelToolCallApproval>;
 
 export const AgentChannelToolCallDecision = z.object({
   callId: Id,
   allowed: z.boolean(),
   /** Why a call was refused (shown in the cell log and audit); null when allowed. */
   reason: z.string().max(200).nullable(),
+  /** Phase 07.5: set with `approval_required` / `approval_pending`; absent from older APIs. */
+  approval: AgentChannelToolCallApproval.nullable().optional(),
 });
 export type AgentChannelToolCallDecision = z.infer<typeof AgentChannelToolCallDecision>;
 
@@ -831,8 +873,20 @@ export const AgentChannelToolRefusal = z.enum([
   "egress_refused",
   "upstream_error",
   "timeout",
+  // Phase 07.5: every `ToolApprovalRefusal` (`policy_changed` is above).
+  "approval_required",
+  "approval_pending",
+  "approval_denied",
+  "approval_used",
+  "arguments_too_large",
+  "arguments_invalid",
+  "too_many_pending",
 ]);
 export type AgentChannelToolRefusal = z.infer<typeof AgentChannelToolRefusal>;
+
+/** Phase 07.5: the `details` of a 409 `approval_required` / `approval_pending` from `/connectors/call` and `/http-requests`. */
+export const AgentChannelApprovalRefusalDetails = z.object({ approval: AgentChannelToolCallApproval });
+export type AgentChannelApprovalRefusalDetails = z.infer<typeof AgentChannelApprovalRefusalDetails>;
 
 /** An MCP server's immutable OpenClaw name: `m` + 8 hex characters (`apps/api/src/modules/mcp/names.ts`). */
 export const ConnectorSafeName = z.string().regex(/^m[0-9a-f]{8}$/, "invalid connector name");
@@ -912,8 +966,6 @@ export const HTTP_TOOL_LIMITS = {
   requestBodyBytes: 64 * 1024,
   responseBodyBytes: 256 * 1024,
 } as const;
-
-const utf8Bytes = (s: string) => new TextEncoder().encode(s).length;
 
 /**
  * `POST /agent-channel/v1/http-requests`: one request with a keychain handle. The API injects the secret only when the
