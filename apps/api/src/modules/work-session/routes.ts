@@ -1,7 +1,5 @@
 import { randomUUID } from "node:crypto";
 import {
-  type AuthzDenial,
-  type ControlDenialReason,
   CreatePromptRequest,
   CreateWorkSessionRequest,
   Ok,
@@ -9,12 +7,10 @@ import {
   ResolveApprovalRequest,
   RuntimeControls,
   RuntimeId,
-  RuntimeInfo,
   SessionCommandRequest,
   SessionCommandResult,
   SessionControls,
   type SessionSettingsPatch,
-  slashDisposition,
   UpdatePromptRequest,
   UpdateWorkSessionSettingsRequest,
   UpdateWorkZonePolicyRequest,
@@ -28,28 +24,17 @@ import {
   type WorkZonePolicy,
   WorkZonePolicyView,
 } from "@ocw/contracts";
-import {
-  conversationMembers,
-  conversations,
-  devices,
-  projects,
-  streamEvents,
-  type Tx,
-  workApprovals,
-  workPrompts,
-  workSessions,
-} from "@ocw/db";
-import { and, asc, desc, eq, inArray, lte, max, ne, sql } from "drizzle-orm";
+import { devices, projects, streamEvents, type Tx, workApprovals, workPrompts, workSessions } from "@ocw/db";
+import { and, asc, desc, eq, inArray, lte, ne, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
+import { markDecided } from "../../authz";
 import { type App, type AuthContext, authOf, type Core, tenant } from "../../core";
 import { conflict, HttpError, notFound } from "../../lib/errors";
-import { linkWorkPromptAttachments } from "../artifact";
 import { type DeviceAccess, type DeviceHub, deviceFacts, loadDeviceAccess } from "../device";
 import {
   AuthzDeniedError,
   createPermissionService,
-  orgResource,
   type ResourceFacts,
   workSessionResource,
 } from "../organization";
@@ -60,17 +45,26 @@ import {
   type ControlsContext,
   catalogFor,
   decideSettings,
-  highestAvailableMode,
   pickSettings,
   requestedSettings,
   storedSettings,
 } from "./controls";
 import { sessionFacts as sharedSessionFacts } from "./facts";
-import { checkImageBudget, currentSessionModel, imagesNotSupported } from "./images";
+import { currentSessionModel, imagesNotSupported } from "./images";
 import { knownModels, loadWorkZonePolicy, saveWorkZonePolicy } from "./policy";
 import { type SessionRow, type WorkSessionService, wsTopic } from "./service";
 import { runSessionCommand } from "./slash";
-import { heuristicTitle } from "./title";
+import {
+  createWorkSession,
+  deviceUnusableMessage,
+  isSessionCommand,
+  joinConversation,
+  queueWorkPrompt,
+  SLASH_COMMAND_MESSAGE,
+  settingsDenied,
+  type WorkSessionStartDeps,
+  type WorkSessionStartFailure,
+} from "./start";
 
 const SessionParams = z.object({ id: z.uuid() });
 const PromptParams = z.object({ id: z.uuid(), pid: z.uuid() });
@@ -80,45 +74,6 @@ const WorkZoneControlsQuery = z.object({ deviceId: z.uuid(), runtime: RuntimeId 
 
 const EVENT_WINDOW = 1500;
 const DIFF_TIMEOUT_MS = 20_000;
-
-const RUNTIME_LABEL = { "claude-code": "Claude Code", codex: "Codex" } as const;
-
-/** P-08: the resolver layer a settings denial belongs to. */
-const DENIAL_LAYER: Record<ControlDenialReason, AuthzDenial["layer"]> = {
-  org_policy: "org",
-  device_opt_in: "device",
-  device_grant: "device",
-  denied_for_you: "user",
-  runtime: "resource",
-  not_in_catalog: "resource",
-  not_confirmed: "resource",
-};
-
-const DENIAL_MESSAGE: Record<ControlDenialReason, string> = {
-  org_policy: "Your organization's Work Zone policy does not allow this",
-  device_opt_in: "Full access is turned off on this device",
-  device_grant: "This is above what you may use on this device",
-  denied_for_you: "You are not allowed to use this on this device",
-  runtime: "The runtime on this device does not offer this",
-  not_in_catalog: "The runtime on this device did not report this option",
-  not_confirmed: "This option is not available yet",
-};
-
-const FIELD_LABEL: Record<string, string> = {
-  model: "Model",
-  effort: "Reasoning",
-  contextWindow: "Context window",
-  fastMode: "Fast mode",
-  permissionMode: "Permission mode",
-};
-
-/** A refused settings change (P-08): 403 with the layer and reason; audited as `authz.denied` by the handler. */
-function settingsDenied(field: string, reason: ControlDenialReason): AuthzDeniedError {
-  return new AuthzDeniedError(
-    { permission: "work_session.configure", layer: DENIAL_LAYER[reason], reason },
-    { message: `${FIELD_LABEL[field] ?? field}: ${DENIAL_MESSAGE[reason]}` },
-  );
-}
 
 /** Permissions a session view renders controls for (`WorkSessionDetail.viewerCan`). */
 const SESSION_VIEWER_CAN = [
@@ -139,6 +94,8 @@ export function registerWorkSessionRoutes(
   const user = { config: { authz: "user" as const }, preHandler: requireUser };
   const tags = ["work-session"];
   const perms = createPermissionService(core);
+  /** Session creation (07.5-05): the route and Work Zone proposals start sessions through `createWorkSession`. */
+  const startDeps: WorkSessionStartDeps = { core, perms, svc, hub };
 
   /** Lock + load a session and assert `permission` on it (404 when it is not in the caller's org). */
   async function lockedFor(
@@ -205,12 +162,7 @@ export function registerWorkSessionRoutes(
   ): Promise<void> {
     await perms.assertCan(req, tx, "device.use", deviceFacts(d, authOf(req).userId, access)).catch((err) => {
       if (!(err instanceof AuthzDeniedError)) throw err;
-      throw new AuthzDeniedError(err.denial, {
-        message:
-          err.denial.reason === "device_revoked"
-            ? `${d.name} was revoked. Pair it again to use it.`
-            : "This device is not shared with you. Ask its owner to share it.",
-      });
+      throw new AuthzDeniedError(err.denial, { message: deviceUnusableMessage(err.denial, d.name) });
     });
   }
 
@@ -253,19 +205,6 @@ export function registerWorkSessionRoutes(
         return policyView(tx, policy);
       }),
   );
-
-  async function joinConversation(tx: Tx, auth: AuthContext, s: SessionRow) {
-    await tx
-      .insert(conversationMembers)
-      .values({
-        conversationId: s.conversationId,
-        organizationId: auth.organizationId,
-        memberKind: "user",
-        memberId: auth.userId,
-        role: s.createdBy === auth.userId ? "owner" : "member",
-      })
-      .onConflictDoNothing();
-  }
 
   app.get(
     "/work-sessions",
@@ -312,190 +251,13 @@ export function registerWorkSessionRoutes(
     { ...user, schema: { tags, body: CreateWorkSessionRequest, response: { 200: WorkSession } } },
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
-        const auth = authOf(req);
-        const body = req.body;
-        await perms.assertCan(req, tx, "work_session.create", orgResource());
-        if (body.prompt) assertNotSlashCommand(body.prompt, body.runtime ?? "claude-code");
-        const [row] = await tx
-          .select({ p: projects, d: devices })
-          .from(projects)
-          .innerJoin(devices, eq(devices.id, projects.deviceId))
-          .where(eq(projects.id, body.projectId));
-        if (!row || row.p.removedAt) throw notFound("Project not found");
-        const { p, d } = row;
-        if (body.deviceId && body.deviceId !== d.id) throw conflict("The project belongs to another device");
-        // Device layer: own, shared or granted (device_not_shared), never revoked (device_revoked).
-        const access = await loadDeviceAccess(tx, auth.userId);
-        await assertDeviceUsable(req, tx, d, access);
-        if (d.status !== "online")
-          throw conflict(`${d.name} is offline. Start the desktop app.`, "device_offline");
-        const runtime = z
-          .array(RuntimeInfo)
-          .catch([])
-          .parse(d.runtimeInfo)
-          .find((r) => r.id === body.runtime);
-        if (!runtime?.installed) {
-          throw conflict(
-            `${RUNTIME_LABEL[body.runtime]} is not installed on ${d.name}`,
-            "runtime_unavailable",
-          );
-        }
-        if (!runtime.loggedIn) {
-          throw conflict(
-            `${RUNTIME_LABEL[body.runtime]} is not signed in on ${d.name}. Sign in from a terminal first.`,
-            "runtime_unavailable",
-          );
-        }
-        // The start settings go through the same decision as a change (ADR-0012: full access needs policy ∩
-        // opt-in ∩ grain). The model keeps today's free choice here; a change inside the session is catalog-checked.
-        const ctx = await controlsFor(tx, auth, d.id, body.runtime, false, access);
-        // The start mode is always within the creator's intersection: an explicit mode is refused with its reason;
-        // the implicit default is lowered to the highest available mode under it (e.g. a grant capped at plan).
-        let startMode = body.permissionMode ?? "default";
-        const startOption = buildRuntimeControls(body.runtime, ctx, body.model ?? null).permissionModes.find(
-          (m) => m.value === startMode,
-        );
-        if (!startOption?.available) {
-          const lower =
-            body.permissionMode === undefined
-              ? highestAvailableMode(ctx, body.model ?? null, startMode)
-              : null;
-          if (!lower) throw settingsDenied("permissionMode", startOption?.reason ?? "runtime");
-          startMode = lower;
-        }
-        const startPatch: SessionSettingsPatch = {
-          permissionMode: startMode,
-          ...(body.effort !== undefined ? { effort: body.effort } : {}),
-          ...(body.fastMode !== undefined ? { fastMode: body.fastMode } : {}),
-          ...(body.contextWindow !== undefined ? { contextWindow: body.contextWindow } : {}),
-        };
-        const baseline = {
-          model: body.model ?? null,
-          effort: null,
-          contextWindow: null,
-          fastMode: false,
-          permissionMode: "default" as const,
-        };
-        const start = decideSettings(baseline, startPatch, body.runtime, ctx);
-        if (!start.ok) throw settingsDenied(start.field, start.reason);
-        const title =
-          body.title ?? heuristicTitle(body.prompt) ?? `${p.name} · ${RUNTIME_LABEL[body.runtime]}`;
-        const [conv] = await tx
-          .insert(conversations)
-          .values({
-            organizationId: auth.organizationId,
-            kind: "work_session",
-            name: title,
-            visibility: "public",
-            createdBy: auth.userId,
-          })
-          .returning({ id: conversations.id });
-        const [s] = await tx
-          .insert(workSessions)
-          .values({
-            organizationId: auth.organizationId,
-            conversationId: conv!.id,
-            projectId: p.id,
-            deviceId: d.id,
-            runtime: body.runtime ?? "claude-code",
-            model: body.model ?? null,
-            permissionMode: start.next.permissionMode ?? "default",
-            settings: storedSettings(start.next),
-            worktree: body.worktree ?? false,
-            branch: body.worktree ? null : p.defaultBranch,
-            status: "provisioning",
-            title,
-            // D-19, P-14: a typed title is never replaced; otherwise the first prompt may get an automatic one.
-            titleSource: body.title ? "user" : "heuristic",
-            createdBy: auth.userId,
-          })
-          .returning();
-        await joinConversation(tx, auth, s!);
-        await hub.enqueue(tx, {
-          deviceId: d.id,
-          workSessionId: s!.id,
-          kind: "session.start",
-          payload: await svc.startPayload(tx, s!),
-        });
-        await core.audit.record(tx, {
-          action: "work_session.created",
-          resourceType: "work_session",
-          resourceId: s!.id,
-          sessionId: s!.id,
-          deviceId: d.id,
-          clientKind: auth.clientKind,
-          metadata: {
-            projectId: p.id,
-            runtime: s!.runtime,
-            permissionMode: s!.permissionMode,
-            worktree: s!.worktree,
-          },
-        });
-        if (body.prompt) await queuePrompt(tx, auth, s!, body.prompt);
-        const dto = await svc.emitSession(tx, s!.id);
-        return dto!;
+        const result = await createWorkSession(tx, startDeps, authOf(req), req.body);
+        // The resolver decided `work_session.create` (and `device.use`) inside createWorkSession.
+        markDecided(req);
+        if (!result.ok) throw startError(result);
+        return result.session;
       }),
   );
-
-  async function queuePrompt(
-    tx: Tx,
-    auth: AuthContext,
-    s: SessionRow,
-    body: string,
-    attachmentIds: readonly string[] = [],
-  ) {
-    const [{ pos } = { pos: 0 }] = await tx
-      .select({ pos: max(workPrompts.position) })
-      .from(workPrompts)
-      .where(eq(workPrompts.workSessionId, s.id));
-    const [p] = await tx
-      .insert(workPrompts)
-      .values({
-        organizationId: auth.organizationId,
-        workSessionId: s.id,
-        authorUserId: auth.userId,
-        originDeviceId: null,
-        body,
-        position: Number(pos ?? 0) + 1,
-      })
-      .returning();
-    // 06.1 (P-05): the sender's own ready images of this session's conversation, or one uniform 409 (the whole
-    // transaction rolls back: nothing is queued, sent or audited).
-    const images = await linkWorkPromptAttachments(tx, {
-      conversationId: s.conversationId,
-      workPromptId: p!.id,
-      uploaderId: auth.userId,
-      ids: [...attachmentIds],
-    });
-    // WZ-IMG-02 (P-01, P-03): each image as sent fits 2 MiB, from the sizes recorded at upload (no storage call
-    // while the session row is locked); otherwise 400 image_too_large and the transaction rolls back.
-    checkImageBudget(images);
-    await core.audit.record(tx, {
-      action: "work_prompt.queued",
-      resourceType: "work_prompt",
-      resourceId: p!.id,
-      sessionId: s.id,
-      deviceId: s.deviceId,
-      clientKind: auth.clientKind,
-      metadata: {
-        promptId: p!.id,
-        authorUserId: auth.userId,
-        originDeviceId: null,
-        executionDeviceId: s.deviceId,
-        workSessionId: s.id,
-        length: body.length,
-        // Ids and a count only, never bytes (D-03).
-        ...(images.length > 0 ? { attachmentIds: images.map((a) => a.id), imageCount: images.length } : {}),
-      },
-    });
-    await svc.emitPrompt(tx, p!);
-    // D-18, P-18: the session's first prompt (not a slash command) asks its device for a short title, unless a
-    // user typed one. At most once: later prompts never ask.
-    if (pos === null && s.titleSource === "heuristic" && !slashDisposition(body, s.runtime)) {
-      await svc.requestTitle(tx, s, body, auth.clientKind);
-    }
-    return p!;
-  }
 
   /**
    * The one settings path (D-07, D-13, ADR-0012): `PATCH /settings` and settings slash commands. Call with the
@@ -591,7 +353,7 @@ export function registerWorkSessionRoutes(
       if (current?.imageInput === false) throw imagesNotSupported(current);
     }
     await joinConversation(tx, auth, s);
-    const p = await queuePrompt(tx, auth, s, body, attachmentIds);
+    const p = await queueWorkPrompt(tx, startDeps, auth, s, body, attachmentIds);
     if (s.status === "failed" || s.status === "completed") await svc.restart(tx, s);
     else await svc.tryDispatch(tx, s);
     await svc.emitSession(tx, s.id);
@@ -1005,8 +767,24 @@ export function registerWorkSessionRoutes(
  * through `POST /work-sessions/:id/commands`. Passthrough commands and slashes later in the text are prompts.
  */
 function assertNotSlashCommand(body: string, runtime: RuntimeId): void {
-  const disposition = slashDisposition(body, runtime);
-  if (disposition?.kind === "settings" || disposition?.kind === "refused") {
-    throw new HttpError(400, "slash_command", "Send slash commands from the composer");
+  if (isSessionCommand(body, runtime)) throw new HttpError(400, "slash_command", SLASH_COMMAND_MESSAGE);
+}
+
+/** A refused start as the error `POST /work-sessions` has always answered with (status, code, message, denial). */
+function startError(r: WorkSessionStartFailure): HttpError {
+  switch (r.code) {
+    case "not_allowed":
+      return new AuthzDeniedError(r.denial);
+    case "device_not_shared":
+      return new AuthzDeniedError(r.denial, { message: r.message });
+    case "project_not_found":
+      return r.reason === "other_device" ? conflict(r.message) : notFound(r.message);
+    case "device_offline":
+    case "runtime_unavailable":
+      return conflict(r.message, r.code);
+    case "settings_denied":
+      return settingsDenied(r.field, r.reason);
+    case "prompt_not_allowed":
+      return new HttpError(400, "slash_command", r.message);
   }
 }
