@@ -25,6 +25,9 @@ const PUBLIC_ROUTES = [
   "POST /api/v1/password-reset/request",
   "POST /api/v1/password-reset",
   "POST /api/v1/devices/enroll",
+  // 07.4-10: the OAuth callback checks the member's session against the flow by hand; the CIMD document is public.
+  "GET /api/v1/connectors/oauth/callback",
+  "GET /api/v1/connectors/oauth/client-metadata.json",
 ].sort();
 
 /** Framework documentation routes (Scalar / Swagger) carry no data and are excluded by prefix. */

@@ -254,6 +254,10 @@ export function createFakeMcpOAuth(opts = {}) {
       revocation_endpoint_auth_methods_supported: AUTH_METHODS,
     };
     if (scenario.no_pkce_meta) delete meta.code_challenge_methods_supported;
+    if (scenario.no_registration) {
+      delete meta.registration_endpoint;
+      delete meta.client_id_metadata_document_supported;
+    }
     return meta;
   }
 

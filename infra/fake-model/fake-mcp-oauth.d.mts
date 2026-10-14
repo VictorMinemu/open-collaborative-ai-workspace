@@ -50,6 +50,9 @@ export interface FakeMcpOAuthScenario {
   fail_token_5xx?: boolean;
   /** The code exchange returns no `id_token`. */
   no_id_token?: boolean;
+  /** AS metadata advertises neither dynamic registration nor client ID metadata documents (a client must be
+   * pre-registered). */
+  no_registration?: boolean;
 }
 
 export interface FakeMcpOAuthStats {
