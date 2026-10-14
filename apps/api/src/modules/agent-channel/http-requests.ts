@@ -223,7 +223,13 @@ export function registerHttpRequestRoutes(scope: App, core: Core, perms: Permiss
           );
           if (!now.tools.includes(TOOL)) return refuse("policy_changed");
 
+          // Resolved in the cell's organization as the turn's human: another member's personal key is invisible.
           const item = await findVaultItemByHandle(tx, body.handle);
+          if (item && now.keys.memberAccount.some((k) => k.id === item.id)) {
+            // The member's own key, withheld here by the audience rule (D-03): only their DM, an AI chat nobody else
+            // reads, or a conversation they shared it with.
+            return refuse("member_account", item);
+          }
           const usable = item ? now.keys.usable.find((k) => k.id === item.id) : undefined;
           if (!item || !usable) return refuse("handle_not_allowed");
           if (!hostAllowed(item.allowedHosts, url) || !pathAllowed(item.allowedPathPrefix, url)) {

@@ -35,9 +35,11 @@ export {
   cellAgentCapabilities,
   currentTurn,
   currentTurnTools,
+  memberAccountAllowed,
   recordLimitReached,
   type TurnAudience,
   type TurnDecision,
+  type TurnKeys,
   turnNow,
   turnPolicy,
 } from "./turn-policy";
