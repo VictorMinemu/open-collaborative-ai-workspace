@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 116
+open_count: 119
 waived_count: 4
 fixed_count: 79
-total_count: 199
-last_updated: 2026-10-14T08:44:37.532Z
+total_count: 202
+last_updated: 2026-10-14T13:26:02.781Z
 ---
 
 # Broken Windows Ledger
@@ -214,6 +214,9 @@ last_updated: 2026-10-14T08:44:37.532Z
 | 197 | 07.4 | deviation | apps/web/components/devices-settings.tsx |  | devices-settings.tsx:325 and work-zone/meta.tsx:166 use text-warning by hand and probably fail AA; agent-templates.spec still cancels animations by hand | fixed |  | 2026-10-14T04:12:44.094Z | 2026-10-14T08:44:37.252Z |
 | 198 | 07.4 | deviation | apps/openclaw-channel/src/connector-tools.ts |  | For needs_reconnect the plugin says 'You haven't connected…' (should say reconnect); a unit key held back by the audience rule gives the bot no explanation; each connector call opens a new MCP session | fixed |  | 2026-10-14T04:20:46.057Z | 2026-10-14T08:44:37.322Z |
 | 199 | 07.4 | deviation | apps/web/components/markdown |  | In-app links in chat Markdown open a new tab (all chat links do); ReadersPreview still lacks the unit name; the cell smoke needs the plugin built first in a fresh worktree | open |  | 2026-10-14T08:44:37.532Z |  |
+| 200 | 07.5 | deviation | packages/db/drizzle |  | The column list in SET NULL (col) is not in the drizzle snapshot; a future migration recreating those FKs would emit a plain SET NULL and deletes would fail on organization_id NOT NULL | open |  | 2026-10-14T13:26:02.622Z |  |
+| 201 | 07.5 | deviation | packages/db/sql/post-migrate.sql |  | Immutability triggers on the stored tool action and Work Zone proposal do not cover TRUNCATE; add REVOKE TRUNCATE in post-migrate.sql | open |  | 2026-10-14T13:26:02.702Z |  |
+| 202 | 07.5 | deviation | packages/db/src/schema/app.ts |  | conversation_id, event_id and requested_for_user_id on 07.5 tables have no FK; 07.5-07/08 must resolve them inside withTenant | open |  | 2026-10-14T13:26:02.781Z |  |
 
 ````json
 [
@@ -2603,6 +2606,42 @@ last_updated: 2026-10-14T08:44:37.532Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-14T08:44:37.532Z",
+    "resolved_at": null
+  },
+  {
+    "id": 200,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "packages/db/drizzle",
+    "line": null,
+    "description": "The column list in SET NULL (col) is not in the drizzle snapshot; a future migration recreating those FKs would emit a plain SET NULL and deletes would fail on organization_id NOT NULL",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T13:26:02.622Z",
+    "resolved_at": null
+  },
+  {
+    "id": 201,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "packages/db/sql/post-migrate.sql",
+    "line": null,
+    "description": "Immutability triggers on the stored tool action and Work Zone proposal do not cover TRUNCATE; add REVOKE TRUNCATE in post-migrate.sql",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T13:26:02.702Z",
+    "resolved_at": null
+  },
+  {
+    "id": 202,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "packages/db/src/schema/app.ts",
+    "line": null,
+    "description": "conversation_id, event_id and requested_for_user_id on 07.5 tables have no FK; 07.5-07/08 must resolve them inside withTenant",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T13:26:02.781Z",
     "resolved_at": null
   }
 ]
