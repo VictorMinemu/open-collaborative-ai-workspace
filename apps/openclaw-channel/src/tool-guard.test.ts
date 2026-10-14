@@ -467,6 +467,33 @@ describe("tool guard under abuse (Task 3)", () => {
       }
     });
 
+    it("a list that names per-member connectors taints the turn locally, as the API does (WINDOWS #192)", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, {
+        eventId: "evt-1",
+        agentId: "a1",
+        turn: connectorTurn({
+          tools: [...connectorTurn().tools, "m1a2b3c4d__create_record"],
+          toolFlags: {
+            ...connectorTurn().toolFlags,
+            ocw_connector_list: { untrustedOutput: true, sideEffecting: false },
+            m1a2b3c4d__create_record: { untrustedOutput: true, sideEffecting: true },
+          },
+        }),
+        connectorTools: ["m1a2b3c4d__whoami", "m1a2b3c4d__create_record"],
+      });
+      expect(await g.beforeToolCall(call("ocw_connector_list"), ctx())).toBeUndefined();
+      expect(g.activeTurn(SESSION)?.tainted).toBe(true);
+      const write = await g.beforeToolCall(
+        call("ocw_connector_call", { connector: "m1a2b3c4d", tool: "create_record", arguments: {} }),
+        ctx(),
+      );
+      expect(write?.blockReason).toMatch(/read-only after untrusted content/u);
+      // The list itself stays allowed on the tainted turn.
+      expect(await g.beforeToolCall(call("ocw_connector_list"), ctx())).toBeUndefined();
+    });
+
     it("ocw_connector_list is always allowed when offered, also on a tainted turn; never when not offered", async () => {
       const fake = fakeClient();
       const g = createToolGuard({ client: () => fake.client });

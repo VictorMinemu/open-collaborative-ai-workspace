@@ -41,7 +41,8 @@ import { type AgentTurnRow, auditUnknownTurn, claimToolCall, finishToolCall, liv
  *   2. tx1, opened AS that human (owner-only RLS on personal keys: never no user, never another member):
  *      the live turn (its human still reads the conversation, else 403 `no_trigger`) → the tool on the turn
  *      (`not_in_turn`) → the turn re-decided now, audience rule included (`policy_changed`) → the key: usable here
- *      (`handle_not_allowed`), or a member-account key the audience rule withholds here (`member_account`) → host and
+ *      (`handle_not_allowed`), a member-account key the audience rule withholds here (`member_account`), or a unit key
+ *      some reader here is outside of (`unit_audience`, 07.4-12) → host and
  *      path (`host_not_allowed`) → the claim (caps, taint: GET/HEAD read, other methods side-effecting) → the sealed
  *      value opened with its own AAD;
  *   3. outside any tx: the header (an `oauth` token through the guard), the request through the egress guard
@@ -72,6 +73,7 @@ type Refusal = Extract<
   | "not_in_turn"
   | "policy_changed"
   | "member_account"
+  | "unit_audience"
   | "handle_not_allowed"
   | "host_not_allowed"
   | "cap_reached"
@@ -83,6 +85,7 @@ const MESSAGES: Record<Refusal | Failure, string> = {
   not_in_turn: "That tool was not offered on this turn",
   policy_changed: "That tool is no longer available on this turn",
   member_account: "That key belongs to a member's own account and is not used in this conversation",
+  unit_audience: "That key belongs to a unit, and people outside that unit read this conversation",
   handle_not_allowed: "That key is not available to this bot for this person",
   host_not_allowed: "That key may not be sent to this address",
   cap_reached: "This turn reached its tool call limit",
@@ -229,6 +232,10 @@ export function registerHttpRequestRoutes(scope: App, core: Core, perms: Permiss
             // The member's own key, withheld here by the audience rule (D-03): only their DM, an AI chat nobody else
             // reads, or a conversation they shared it with.
             return refuse("member_account", item);
+          }
+          if (item && now.keys.unitAudience.some((k) => k.id === item.id)) {
+            // A unit's key, withheld here: someone outside that unit reads this conversation (WINDOWS #191).
+            return refuse("unit_audience", item);
           }
           const usable = item ? now.keys.usable.find((k) => k.id === item.id) : undefined;
           if (!item || !usable) return refuse("handle_not_allowed");

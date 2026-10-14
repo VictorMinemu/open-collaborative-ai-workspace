@@ -23,7 +23,7 @@ import {
 import { and, eq, isNull, ne, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 // Types only: the memory service is injected by the caller (a value import would be a module cycle).
-import { type EffectiveVaultItem, effectiveVaultItems } from "../keychain";
+import { type EffectiveVaultItem, effectiveVaultItems, unitAudienceAllows } from "../keychain";
 import type { MemoryAudience, MemoryService } from "../memory";
 import { agentResource, type PermissionService, type PrincipalRef } from "../organization";
 import { type CatalogSource, effectiveCapabilities, effectiveTools, readCapabilities } from "./capabilities";
@@ -49,10 +49,15 @@ type TurnTools = { tools: string[]; toolFlags: Record<string, TurnToolFlags> };
 export interface TurnKeys {
   usable: EffectiveVaultItem[];
   memberAccount: EffectiveVaultItem[];
+  /** Unit keys withheld here because someone outside the unit reads the conversation (07.4-12, WINDOWS #191). */
+  unitAudience: EffectiveVaultItem[];
 }
 
-/** `currentTurnTools`'s answer: the tools and flags, plus the keychain decision the proxy routes re-check. */
-export type CurrentTurnTools = TurnTools & { keys: TurnKeys };
+/**
+ * `currentTurn`'s answer: the tools and flags, plus the keychain decision and the withheld entries the proxy routes
+ * re-check (07.4-12: a per-member tool withheld here as `member_account` is refused with that reason).
+ */
+export type CurrentTurnTools = TurnTools & { keys: TurnKeys; withheld: Withheld };
 
 /**
  * Who reads a persona's answer in a shared AI chat (06-10, D-06, P-10): the joined humans who can read it, and whether a
@@ -356,10 +361,23 @@ async function computeTurn(
   // Keychain (07.4-11, D-04, D-07): the keys this bot may use for this human (grant ∩ owner ∩ unit audience ∩
   // `vault.use`). The tx's user must be the turn's human: personal keys are invisible to any other session (owner-only
   // RLS), so a caller without it fails closed (personal keys absent), never with another member's.
-  // Personal keys are the member's own account (the audience rule above); unit keys are not.
+  // Personal keys are the member's own account (the audience rule above). A unit key is used only where every reader of
+  // the conversation is in that unit's audience (07.4-12, WINDOWS #191: the rule unit memory follows); organization keys
+  // serve every member. Without a conversation the readers are unknown: unit keys fail closed.
   const usable: EffectiveVaultItem[] = [];
   const memberAccount: EffectiveVaultItem[] = [];
+  const unitAudience: EffectiveVaultItem[] = [];
+  let readers: TurnAudience | null = null;
+  const readersHere = async (): Promise<TurnAudience> => {
+    readers ??= member ? await conversationReaders(tx, member.judged, audience ?? null) : UNBOUNDED;
+    return readers;
+  };
   for (const key of await effectiveVaultItems(tx, perms, { agentId: row.id, humanUserId: p.humanUserId })) {
+    if (key.scope === "unit" && key.unitId !== null) {
+      if (await unitAudienceAllows(tx, key.unitId, await readersHere())) usable.push(key);
+      else unitAudience.push(key);
+      continue;
+    }
     if (key.scope !== "personal" || memberMay("vault_item", key.id)) {
       usable.push(key);
       continue;
@@ -376,7 +394,7 @@ async function computeTurn(
     botName: row.name,
     dailyLimit: effectiveDailyLimit(row.scope, caps, policy),
     withheld,
-    keys: { usable, memberAccount },
+    keys: { usable, memberAccount, unitAudience },
     ...assemble(effective, p.conversationKind, catalog, allowed, p.board === true, usable.length > 0),
   };
 }
@@ -411,8 +429,8 @@ export async function currentTurn(
 ): Promise<CurrentTurnTools> {
   const turn = await computeTurn(tx, perms, p, env, audience);
   return turn
-    ? { tools: turn.tools, toolFlags: turn.toolFlags, keys: turn.keys }
-    : { tools: [], toolFlags: {}, keys: { usable: [], memberAccount: [] } };
+    ? { tools: turn.tools, toolFlags: turn.toolFlags, keys: turn.keys, withheld: turn.withheld }
+    : { tools: [], toolFlags: {}, keys: { usable: [], memberAccount: [], unitAudience: [] }, withheld: [] };
 }
 
 function validTimeZone(zone: string | null | undefined): string {
@@ -478,7 +496,12 @@ async function memberAccountContext(
     humanUserId: string;
     audience: TurnAudience | null;
   },
-): Promise<{ scopeKind: string; aiChatShared: boolean | null; shares: Set<string> }> {
+): Promise<{
+  scopeKind: string;
+  aiChatShared: boolean | null;
+  shares: Set<string>;
+  judged: { id: string; kind: string };
+}> {
   let judgedId = p.conversationId;
   let judgedKind = p.conversationKind;
   if (p.conversationKind === "thread") {
@@ -535,7 +558,44 @@ async function memberAccountContext(
         isNull(memberAccountShares.revokedAt),
       ),
     );
-  return { scopeKind, aiChatShared, shares: new Set(rows.map((r) => `${r.kind}:${r.id}`)) };
+  return {
+    scopeKind,
+    aiChatShared,
+    shares: new Set(rows.map((r) => `${r.kind}:${r.id}`)),
+    judged: { id: judgedId, kind: judgedKind },
+  };
+}
+
+const UNBOUNDED: TurnAudience = { userIds: [], unbounded: true };
+
+/**
+ * Who reads what the bot says in the judged conversation (as `conversationAudience` for memory, 07.2-11): a DM or group
+ * DM, or a private channel → its human members; a public channel → anyone (unbounded); an AI chat → the readers the
+ * caller passed (`audienceOf`), unbounded without them; anything else → unbounded (fail closed).
+ */
+async function conversationReaders(
+  tx: Tx,
+  judged: { id: string; kind: string },
+  audience: TurnAudience | null,
+): Promise<TurnAudience> {
+  if (judged.kind === "ai_chat") return audience ?? UNBOUNDED;
+  // `dm_shared`: a DM with two or more humans, as delivery labels it (`memoryScopeKind`).
+  if (!["dm", "dm_shared", "group", "channel"].includes(judged.kind)) return UNBOUNDED;
+  if (judged.kind === "channel") {
+    const [conv] = await tx
+      .select({ visibility: conversations.visibility })
+      .from(conversations)
+      .where(eq(conversations.id, judged.id))
+      .limit(1);
+    if (conv?.visibility !== "private") return UNBOUNDED;
+  }
+  const humans = await tx
+    .select({ id: conversationMembers.memberId })
+    .from(conversationMembers)
+    .where(
+      and(eq(conversationMembers.conversationId, judged.id), eq(conversationMembers.memberKind, "user")),
+    );
+  return { userIds: humans.map((h) => h.id), unbounded: false };
 }
 
 /**

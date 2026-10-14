@@ -57,6 +57,9 @@ export const NOT_CONNECTED =
 /** D-03: a member-account tool outside a private chat (or a conversation the member allowed it in). */
 export const MEMBER_ACCOUNT =
   "This uses your own account, so I can only do it in our private chat, or after you allow it for this conversation in Settings › Connections.";
+/** 07.4-12 (WINDOWS #191): a unit's key where someone outside that unit reads the conversation. */
+export const UNIT_AUDIENCE =
+  "That key belongs to a team, and people outside that team read this conversation, so I can't use it here. Ask me in a private chat or a channel of that team.";
 export const NO_TURN = "There is no active conversation turn, so I can't use this tool now.";
 export const UNREACHABLE = "The workspace could not be reached. Try again later.";
 
@@ -68,6 +71,7 @@ export const REFUSAL_SENTENCE: Record<AgentChannelToolRefusal, string> = {
   cap_reached: "This turn reached its limit of tool calls.",
   tainted: "This turn read web or tool content, so it can no longer run tools that change things.",
   member_account: MEMBER_ACCOUNT,
+  unit_audience: UNIT_AUDIENCE,
   not_connected: NOT_CONNECTED,
   needs_reconnect: NOT_CONNECTED,
   handle_not_allowed: "That key is not available to you here.",
@@ -323,8 +327,9 @@ function listTool(deps: Deps, ctx: ConnectorToolContext): OpenClawAgentTool {
         t,
         () => client.listConnectors({ eventId: t.eventId, agentId: t.agentId }, signal),
         (r) => answer(renderConnectorList(r), true),
-        // The workspace's own catalog (admin-registered, probed): a read that does not taint the turn (D-07).
-        false,
+        // Keys only: the workspace's own names, a read that does not taint the turn (D-07). Per-member connectors: their
+        // descriptions are the third-party server's, and the turn carries the list as untrusted (WINDOWS #192).
+        t.turn.toolFlags[name]?.untrustedOutput === true,
       );
     },
   };

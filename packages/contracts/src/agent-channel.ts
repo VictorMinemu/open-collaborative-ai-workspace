@@ -822,6 +822,8 @@ export const AgentChannelToolRefusal = z.enum([
   "cap_reached",
   "tainted",
   "member_account",
+  /** A unit's key where someone outside that unit reads the conversation (07.4-12, WINDOWS #191). */
+  "unit_audience",
   "not_connected",
   "needs_reconnect",
   "handle_not_allowed",

@@ -181,13 +181,14 @@ describe("Agent Channel connector tools (D-02, D-07: the requester is the stored
     expect(AgentChannelToolRefusal.options).toEqual(
       expect.arrayContaining([
         "member_account",
+        "unit_audience",
         "not_connected",
         "needs_reconnect",
         "unknown_turn",
         "tainted",
       ]),
     );
-    expect(AgentChannelToolRefusal.options).toHaveLength(13);
+    expect(AgentChannelToolRefusal.options).toHaveLength(14);
   });
 });
 

@@ -196,6 +196,39 @@ describe("allowing a member's account in one conversation", () => {
     expect((await ok(s.victor.request("GET", "/api/v1/member-account-shares"))).shares).toEqual([]);
   });
 
+  it("a DM or group DM is named for the viewer by its other members, never left unnamed (WINDOWS #194)", async () => {
+    const asSam = await ok(
+      s.sam.request("GET", `/api/v1/member-account-shares/preview?conversationId=${samAlexDm}`),
+    );
+    expect(asSam).toMatchObject({ conversationName: "your private chat with Alex Kim", readers: 2 });
+    const asAlex = await ok(
+      s.alex.request("GET", `/api/v1/member-account-shares/preview?conversationId=${samAlexDm}`),
+    );
+    expect(asAlex.conversationName).toBe("your private chat with Sam Lee");
+    const group = await ok(
+      s.sam.request("POST", "/api/v1/dms", {
+        participants: [
+          { kind: "user", id: s.alexId },
+          { kind: "user", id: s.victorId },
+        ],
+      }),
+    );
+    const shared = await ok(
+      s.sam.request("POST", "/api/v1/member-account-shares", {
+        conversationId: group.id,
+        resourceKind: "connector",
+        resourceId: samOnly.id,
+      }),
+      201,
+    );
+    expect(shared.conversationName).toBe("your group chat with Alex Kim and Víctor Ruiz");
+    const listed = (await ok(s.sam.request("GET", "/api/v1/member-account-shares"))).shares;
+    expect(listed.find((x: Json) => x.id === shared.id)?.conversationName).toBe(
+      "your group chat with Alex Kim and Víctor Ruiz",
+    );
+    await ok(s.sam.request("DELETE", `/api/v1/member-account-shares/${shared.id}`), 204);
+  });
+
   it("an AI chat shared with the organization reports an unbounded audience", async () => {
     const created = await ok(
       s.victor.request("POST", "/api/v1/ai-chats", {

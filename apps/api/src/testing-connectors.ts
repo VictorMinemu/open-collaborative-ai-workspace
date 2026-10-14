@@ -6,6 +6,7 @@ import { expect, vi } from "vitest";
 import {
   createFakeMcpOAuth,
   type FakeMcpOAuth,
+  type FakeMcpOAuthOptions,
   type FakeMcpOAuthScenario,
   type FakeMcpOAuthStats,
 } from "../../../infra/fake-model/fake-mcp-oauth.mjs";
@@ -74,8 +75,18 @@ export async function fails(res: Promise<Res> | Res, status: number, code?: stri
   return r.body as Json;
 }
 
-export async function startConnectorsStack(): Promise<ConnectorsStack> {
+export async function startConnectorsStack(
+  opts: {
+    /** Extra env vars for the API (e.g. `OCW_CELL_TOKEN` for the Agent Channel proxy tests). */
+    env?: Record<string, string>;
+    /** Log level of the captured API output (default `info`; the leak sweep reads `debug`). */
+    logLevel?: string;
+    /** Extra fake options (the leak sweep's canary keychain credentials); the pre-registered clients stay. */
+    fake?: Omit<FakeMcpOAuthOptions, "preRegistered">;
+  } = {},
+): Promise<ConnectorsStack> {
   const fake = createFakeMcpOAuth({
+    ...opts.fake,
     preRegistered: [
       { client_id: PRE_REGISTERED, redirect_uris: [CALLBACK_URL] },
       {
@@ -118,7 +129,8 @@ export async function startConnectorsStack(): Promise<ConnectorsStack> {
       OCW_MODEL_PROVIDER: "mock",
       OCW_PUBLIC_API_URL: PUBLIC_API_URL,
       OCW_EGRESS_TEST_HOSTS: "fake-mcp=127.0.0.1",
-      LOG_LEVEL: "info",
+      LOG_LEVEL: opts.logLevel ?? "info",
+      ...opts.env,
     },
     logStream: { write: (line: string) => void logs.push(line) },
   });

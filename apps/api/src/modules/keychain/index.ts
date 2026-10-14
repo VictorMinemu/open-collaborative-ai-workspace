@@ -22,6 +22,7 @@ export {
   prepareInjection,
   privateAllowFor,
   recordSecretUsed,
+  unitAudienceAllows,
   type VaultItemRow,
   vaultAad,
 } from "./service";

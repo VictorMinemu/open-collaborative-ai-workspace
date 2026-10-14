@@ -935,3 +935,31 @@ describe("fake MCP OAuth: keychain targets under /kc", () => {
     assert.equal((await res.arrayBuffer()).byteLength, 512 * 1024);
   });
 });
+
+describe("fake MCP OAuth: /kc credentials are configurable (07.4-12 leak sweep canaries)", () => {
+  let direct;
+  before(async () => {
+    direct = await mountDirect({
+      kcBasic: { user: "canary-user", pass: "canary-pass" },
+      kcClient: { id: "canary-client", secret: "canary-secret" },
+    });
+  });
+  after(() => new Promise((resolve) => direct.srv.close(resolve)));
+
+  it("accepts the configured Basic pair and client, and no longer the defaults", async () => {
+    const whoami = (user, pass) =>
+      fetch(`${direct.origin}/kc/whoami`, {
+        headers: { authorization: `Basic ${Buffer.from(`${user}:${pass}`).toString("base64")}` },
+      });
+    assert.equal((await whoami("canary-user", "canary-pass")).status, 200);
+    assert.equal((await whoami("kcuser", "kcpass")).status, 401);
+    const token = (id, secret) =>
+      fetch(`${direct.origin}/kc/token`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ grant_type: "client_credentials", client_id: id, client_secret: secret }),
+      });
+    assert.equal((await token("canary-client", "canary-secret")).status, 200);
+    assert.equal((await token("kc-client", "kc-secret")).status, 401);
+  });
+});
