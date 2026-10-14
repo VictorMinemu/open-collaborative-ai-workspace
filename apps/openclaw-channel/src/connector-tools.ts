@@ -323,8 +323,9 @@ function listTool(deps: Deps, ctx: ConnectorToolContext): OpenClawAgentTool {
         t,
         () => client.listConnectors({ eventId: t.eventId, agentId: t.agentId }, signal),
         (r) => answer(renderConnectorList(r), true),
-        // The workspace's own catalog (admin-registered, probed): a read that does not taint the turn (D-07).
-        false,
+        // Keys only: the workspace's own names, a read that does not taint the turn (D-07). Per-member connectors: their
+        // descriptions are the third-party server's, and the turn carries the list as untrusted (WINDOWS #192).
+        t.turn.toolFlags[name]?.untrustedOutput === true,
       );
     },
   };

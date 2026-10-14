@@ -107,6 +107,7 @@ const UNKNOWN_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: tru
  * workspace's own catalog (never side-effecting, so it stays allowed on a tainted turn). The API re-decides all of it.
  */
 const CONNECTOR_LIST_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: false };
+const LISTED_CONNECTORS_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: false };
 const HTTP_READ_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: false };
 const HTTP_WRITE_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: true };
 const HTTP_READ_METHODS: ReadonlySet<string> = new Set(["GET", "HEAD"]);
@@ -164,7 +165,11 @@ function callFlags(
   tool: string,
   params: Record<string, unknown> | undefined,
 ): TurnToolFlags | ToolBlock {
-  if (tool === "ocw_connector_list") return CONNECTOR_LIST_FLAGS;
+  if (tool === "ocw_connector_list") {
+    // Never side-effecting (allowed on a tainted turn), but untrusted once it lists per-member connectors: their tool
+    // descriptions are third-party text, so the API taints the turn and the local gate follows (WINDOWS #192).
+    return t.turn.toolFlags[tool]?.untrustedOutput === true ? LISTED_CONNECTORS_FLAGS : CONNECTOR_LIST_FLAGS;
+  }
   if (tool === "ocw_connector_call") {
     const named = logicalToolOf(t.connectorTools, params);
     if ("error" in named || !t.connectorTools.includes(named.logical)) {

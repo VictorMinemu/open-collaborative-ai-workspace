@@ -287,6 +287,19 @@ describe("ocw_connector_list and ocw_http_request (07.4 D-07, CONN-05)", () => {
     expect(guard.activeTurn(SESSION)?.tainted).toBe(false);
   });
 
+  it("a list the turn carries as untrusted (per-member connectors) taints the turn (WINDOWS #192)", async () => {
+    const { begin, tool, guard } = setup2();
+    begin({
+      ...KEYS_TURN,
+      toolFlags: {
+        ...KEYS_TURN.toolFlags,
+        ocw_connector_list: { untrustedOutput: true, sideEffecting: false },
+      },
+    });
+    await tool("ocw_connector_list").execute("tc-1", {});
+    expect(guard.activeTurn(SESSION)?.tainted).toBe(true);
+  });
+
   it("an empty list says so", async () => {
     const { begin, tool } = setup2({ list: async () => ({ connectors: [], keys: [] }) });
     begin();
