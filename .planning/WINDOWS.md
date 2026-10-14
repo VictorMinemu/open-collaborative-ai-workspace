@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 126
+open_count: 127
 waived_count: 4
-fixed_count: 59
-total_count: 189
-last_updated: 2026-10-14T00:55:32.956Z
+fixed_count: 61
+total_count: 192
+last_updated: 2026-10-14T02:01:28.231Z
 ---
 
 # Broken Windows Ledger
@@ -197,13 +197,16 @@ last_updated: 2026-10-14T00:55:32.956Z
 | 180 | 07.4 | deviation | apps/api/src/modules/mcp |  | No positive SSE round-trip test (fake speaks only streamable HTTP); MCP session not closed with DELETE after a timeout; revokeToken Basic-encodes client id/secret (SDK does not) | open |  | 2026-10-14T00:00:48.417Z |  |
 | 181 | 07.4 | deviation | apps/api/src/modules/keychain |  | OAuth keychain token URLs must be https but the e2e fake on :4291 is http; 07.4-13/14 need an https fake or a test-host exemption | open |  | 2026-10-14T00:13:09.756Z |  |
 | 182 | 07.4 | deviation | packages/db/sql/post-migrate.sql |  | agent_vault_grants has no owner-only policy: grants on personal keys (ids only) are visible to any session in the org | open |  | 2026-10-14T00:13:09.855Z |  |
-| 183 | 07.4 | deviation | apps/api/src/modules/keychain |  | 07.4-11 must run keychain use with the turn's human as the RLS user (never no user or another member); CODEOWNERS does not cover modules/keychain; client-credentials token cache is per process (not in an ADR) | open |  | 2026-10-14T00:13:09.951Z |  |
-| 184 | 07.4 | deviation | apps/openclaw-channel/src/connector-tools.ts |  | 07.4-11 must put the three static tool names (never logical m…__tool names) in the /cell snapshot alsoAllow; only a 20 s connector call was proven in the real cell (add a 30 s case to the ADR-0025 checklist); tool descriptions from ocw_connector_list do not taint the turn | open |  | 2026-10-14T00:27:30.749Z |  |
+| 183 | 07.4 | deviation | apps/api/src/modules/keychain |  | 07.4-11 must run keychain use with the turn's human as the RLS user (never no user or another member); CODEOWNERS does not cover modules/keychain; client-credentials token cache is per process (not in an ADR) | fixed |  | 2026-10-14T00:13:09.951Z | 2026-10-14T02:01:27.888Z |
+| 184 | 07.4 | deviation | apps/openclaw-channel/src/connector-tools.ts |  | 07.4-11 must put the three static tool names (never logical m…__tool names) in the /cell snapshot alsoAllow; only a 20 s connector call was proven in the real cell (add a 30 s case to the ADR-0025 checklist); tool descriptions from ocw_connector_list do not taint the turn | fixed |  | 2026-10-14T00:27:30.749Z | 2026-10-14T02:01:27.974Z |
 | 185 | 07.4 | deviation | infra/openclaw/test/run-container-smoke.sh |  | Without SMOKE_BUILD the marketplace scenario fails on macOS Docker Desktop (docker cp leaves install-policy.mjs as uid 501); CI unaffected | open |  | 2026-10-14T00:27:30.826Z |  |
 | 186 | 07.4 | deviation | packages/db/sql/post-migrate.sql |  | If #170 adds an owner-only policy on connector_connections, the admin member count and clear-on-switch/delete will only see the admin's rows and leave other members' credentials behind silently; that policy needs an mcp.manage path (07.4-10) | open |  | 2026-10-14T00:54:31.051Z |  |
 | 187 | 07.4 | deviation | apps/web/components/ui/badge.tsx |  | Shared Badge warning variant fails contrast in light mode (1.91:1); 'Probing' still uses it; PanelDialog close is 32 px at 390 | open |  | 2026-10-14T00:54:31.132Z |  |
 | 188 | 07.4 | deviation | e2e/support/a11y.ts |  | The a11y helper waits for infinite animations (pulse, spinner, skeleton) and hangs to timeout; specs cancel them before axe; fix in the helper | open |  | 2026-10-14T00:55:32.882Z |  |
 | 189 | 07.4 | deviation | apps/web/components/bots |  | Template 'Connect' links point to /settings/connections (built by 07.4-13); the empty state copy above Templates predates templates; skip notices are generic (no effective value in the contract) | open |  | 2026-10-14T00:55:32.956Z |  |
+| 190 | 07.4 | deviation | .github/CODEOWNERS |  | CODEOWNERS does not cover apps/api/src/modules/keychain (and the new connectors module); client-credentials token cache is per process, record in ADR-0025; prove a 30 s connector call in the real cell in 07.4-14 | open |  | 2026-10-14T02:01:28.061Z |  |
+| 191 | 07.4 | deviation | apps/api/src/modules/keychain |  | DECISION NEEDED in 07.4-12/14: unit keys are offered in public channels and shared AI chats, so results fetched with a unit's key can reach people outside the unit; apply the audience rule (every reader inside the unit) as memory does | open |  | 2026-10-14T02:01:28.146Z |  |
+| 192 | 07.4 | deviation | apps/openclaw-channel/src/tool-guard.ts |  | Plugin local gate uses fixed list flags: after a list it lets a local write through and the API refuses it as tainted (safe, less precise message); /tool-calls still opens its tx with no user | open |  | 2026-10-14T02:01:28.231Z |  |
 
 ````json
 [
@@ -2398,10 +2401,10 @@ last_updated: 2026-10-14T00:55:32.956Z
     "file": "apps/api/src/modules/keychain",
     "line": null,
     "description": "07.4-11 must run keychain use with the turn's human as the RLS user (never no user or another member); CODEOWNERS does not cover modules/keychain; client-credentials token cache is per process (not in an ADR)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-14T00:13:09.951Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-14T02:01:27.888Z"
   },
   {
     "id": 184,
@@ -2410,10 +2413,10 @@ last_updated: 2026-10-14T00:55:32.956Z
     "file": "apps/openclaw-channel/src/connector-tools.ts",
     "line": null,
     "description": "07.4-11 must put the three static tool names (never logical m…__tool names) in the /cell snapshot alsoAllow; only a 20 s connector call was proven in the real cell (add a 30 s case to the ADR-0025 checklist); tool descriptions from ocw_connector_list do not taint the turn",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-14T00:27:30.749Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-14T02:01:27.974Z"
   },
   {
     "id": 185,
@@ -2473,6 +2476,42 @@ last_updated: 2026-10-14T00:55:32.956Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-14T00:55:32.956Z",
+    "resolved_at": null
+  },
+  {
+    "id": 190,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": ".github/CODEOWNERS",
+    "line": null,
+    "description": "CODEOWNERS does not cover apps/api/src/modules/keychain (and the new connectors module); client-credentials token cache is per process, record in ADR-0025; prove a 30 s connector call in the real cell in 07.4-14",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T02:01:28.061Z",
+    "resolved_at": null
+  },
+  {
+    "id": 191,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "apps/api/src/modules/keychain",
+    "line": null,
+    "description": "DECISION NEEDED in 07.4-12/14: unit keys are offered in public channels and shared AI chats, so results fetched with a unit's key can reach people outside the unit; apply the audience rule (every reader inside the unit) as memory does",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T02:01:28.146Z",
+    "resolved_at": null
+  },
+  {
+    "id": 192,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "apps/openclaw-channel/src/tool-guard.ts",
+    "line": null,
+    "description": "Plugin local gate uses fixed list flags: after a list it lets a local write through and the API refuses it as tainted (safe, less precise message); /tool-calls still opens its tx with no user",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T02:01:28.231Z",
     "resolved_at": null
   }
 ]

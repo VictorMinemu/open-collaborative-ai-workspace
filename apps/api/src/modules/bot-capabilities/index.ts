@@ -31,11 +31,15 @@ export {
 } from "./policy";
 export { findBot, governanceList, loadBotFacts, notifyCellConfig, usageToday } from "./routes";
 export {
+  type CurrentTurnTools,
   cellAgentCapabilities,
+  currentTurn,
   currentTurnTools,
+  memberAccountAllowed,
   recordLimitReached,
   type TurnAudience,
   type TurnDecision,
+  type TurnKeys,
   turnNow,
   turnPolicy,
 } from "./turn-policy";

@@ -7,11 +7,23 @@ import {
   type TurnMemoryFile,
   type TurnNow,
   type TurnToolFlags,
+  type TurnWithheldResource,
 } from "@ocw/contracts";
-import { agents, agentTurns, conversationMembers, conversations, type Tx, tenantOf } from "@ocw/db";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import {
+  agents,
+  agentTurns,
+  agentVaultGrants,
+  aiChatGrants,
+  conversationMembers,
+  conversations,
+  memberAccountShares,
+  type Tx,
+  tenantOf,
+} from "@ocw/db";
+import { and, eq, isNull, ne, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 // Types only: the memory service is injected by the caller (a value import would be a module cycle).
+import { type EffectiveVaultItem, effectiveVaultItems } from "../keychain";
 import type { MemoryAudience, MemoryService } from "../memory";
 import { agentResource, type PermissionService, type PrincipalRef } from "../organization";
 import { type CatalogSource, effectiveCapabilities, effectiveTools, readCapabilities } from "./capabilities";
@@ -29,6 +41,18 @@ import { consumeTurn, effectiveDailyLimit, limitNotice } from "./usage";
  */
 
 type TurnTools = { tools: string[]; toolFlags: Record<string, TurnToolFlags> };
+
+/**
+ * What a turn's keychain decision produced (07.4-11): the keys usable here, and the member's own keys the audience rule
+ * withholds here (`member_account`). Server-side only: the turn payload names withheld keys by id and name, never more.
+ */
+export interface TurnKeys {
+  usable: EffectiveVaultItem[];
+  memberAccount: EffectiveVaultItem[];
+}
+
+/** `currentTurnTools`'s answer: the tools and flags, plus the keychain decision the proxy routes re-check. */
+export type CurrentTurnTools = TurnTools & { keys: TurnKeys };
 
 /**
  * Who reads a persona's answer in a shared AI chat (06-10, D-06, P-10): the joined humans who can read it, and whether a
@@ -65,6 +89,45 @@ const CARD_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: false
  * untrusted content can no longer use it (the board routes refuse `tainted`).
  */
 const BOARD_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
+/**
+ * `ocw_http_request` (07.4-11, D-04): its output is a third-party answer (untrusted) and the method decides whether a
+ * call changes anything; the turn carries the most dangerous combination, the proxy route claims per method (GET and
+ * HEAD as reads).
+ */
+const HTTP_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: true };
+/** `ocw_connector_list` with only keychain handles to list (names and handles people wrote): trusted, changes nothing. */
+const LIST_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: false };
+/**
+ * `ocw_connector_list` once it lists per-member connectors (07.4-11, WINDOWS 184): their tool names, descriptions and
+ * argument schemas come from the third-party MCP server, so the list is untrusted content and taints the turn like any
+ * MCP output. It still changes nothing. Read-then-write flows are unaffected (the first connector call taints anyway);
+ * a direct write after the list needs a connector trusted for chained calls, as every MCP write does (Pitfall 6).
+ */
+const LIST_CONNECTORS_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: false };
+
+/**
+ * Whether a catalog source acts with the asking member's own account (07.4 D-01): a per-member MCP connector. Its tools
+ * are called by the API (`ocw_connector_call`) under logical names and follow the member-account audience rule.
+ */
+function memberAccountSource(source: CatalogSource): boolean {
+  return source.sourceKind === "mcp" && source.authMode !== undefined && source.authMode !== "org_secret";
+}
+
+/**
+ * The audience rule for tools that act with a member's own account (07.4 D-03, D-07; CONN-03): per-member connectors and
+ * personal keys are used only where that member alone reads the result: their one-person DM with the bot (`dm`, never a
+ * DM holding two or more humans), an AI chat nobody else reads (`aiChatShared === false`), or a conversation where they
+ * shared that resource explicitly (an active `member_account_shares` row). Anything else, unknown included, refuses.
+ */
+export function memberAccountAllowed(p: {
+  scopeKind: string;
+  aiChatShared: boolean | null;
+  hasShare: boolean;
+}): boolean {
+  if (p.hasShare) return true;
+  if (p.scopeKind === "dm") return true;
+  return p.scopeKind === "ai_chat" && p.aiChatShared === false;
+}
 
 /**
  * Flags of a catalog tool (D-08 taint rule). Every MCP / plugin output is untrusted. MCP tools are
@@ -83,6 +146,8 @@ function assemble(
   effectiveToolNames: ReadonlySet<string>,
   /** The turn's conversation is a board channel (07.1-10). The cell-wide view (null kind) never is. */
   board = false,
+  /** At least one keychain item is usable on this turn (07.4-11); in the cell-wide view: the bot holds a key grant. */
+  keys = false,
 ): TurnTools {
   const tools: string[] = [];
   const toolFlags: Record<string, TurnToolFlags> = {};
@@ -111,7 +176,32 @@ function assemble(
   add(BUILTIN_TOOLS.agentCard, CARD_FLAGS);
   // Board cards (07.1-10, D-07): only on a board channel's turns; every other turn keeps exactly its tool list.
   if (board && conversationKind === "channel") add(BUILTIN_TOOLS.boardCard, BOARD_FLAGS);
+  // Per-member connectors and keys (07.4-11, D-04, D-07, C-01). A turn carries the per-member tools under their logical
+  // `<safe>__<tool>` names (for the gate) plus the static tools that reach them; the cell-wide view (null kind) carries
+  // the static names only, never a logical per-member name (they are not OpenClaw tools).
+  const cellWide = conversationKind === null;
+  const memberTools: TurnToolFlags[] = [];
   for (const source of catalog) {
+    if (!memberAccountSource(source)) continue;
+    for (const t of source.tools) {
+      if (effectiveToolNames.has(`${source.sourceKind}:${source.sourceId}:${t.name}`)) {
+        memberTools.push(catalogFlags(source, t.sideEffecting));
+      }
+    }
+  }
+  if (keys) add(BUILTIN_TOOLS.httpRequest, HTTP_FLAGS);
+  if (memberTools.length > 0 || keys) {
+    add(BUILTIN_TOOLS.connectorList, memberTools.length > 0 ? LIST_CONNECTORS_FLAGS : LIST_FLAGS);
+  }
+  if (memberTools.length > 0) {
+    // The strictest of the turn's per-member tools: the cell's gate refines it per logical tool.
+    add(BUILTIN_TOOLS.connectorCall, {
+      untrustedOutput: memberTools.some((f) => f.untrustedOutput),
+      sideEffecting: memberTools.some((f) => f.sideEffecting),
+    });
+  }
+  for (const source of catalog) {
+    if (cellWide && memberAccountSource(source)) continue;
     for (const t of source.tools) {
       if (effectiveToolNames.has(`${source.sourceKind}:${source.sourceId}:${t.name}`)) {
         add(t.name, catalogFlags(source, t.sideEffecting));
@@ -125,6 +215,7 @@ const toolKey = (t: { sourceKind: string; sourceId: string; tool: string }) =>
   `${t.sourceKind}:${t.sourceId}:${t.tool}`;
 
 interface ComputedTurn extends TurnTools {
+  keys: TurnKeys;
   effective: BotCapabilityView["effective"];
   /** The bot's display name and the daily limit that applies today (D-11). */
   botName: string;
@@ -142,7 +233,14 @@ interface ComputedTurn extends TurnTools {
 async function computeTurn(
   tx: Tx,
   perms: PermissionService,
-  p: { agentId: string; humanUserId: string; conversationKind: string; board?: boolean },
+  p: {
+    agentId: string;
+    humanUserId: string;
+    conversationKind: string;
+    /** The turn's conversation: needed for the member-account rule (07.4-11); without it that rule fails closed. */
+    conversationId?: string | null;
+    board?: boolean;
+  },
   env: SearchEnv,
   audience?: TurnAudience | null,
 ): Promise<ComputedTurn | null> {
@@ -176,11 +274,34 @@ async function computeTurn(
     humanToolAllowed: () => null,
   }).filter((t) => t.effective);
   const withheld: Withheld = [];
-  const withhold = (tool: string, reason: Withheld[number]["reason"]) => {
-    if (withheld.length < MAX_TURN_TOOLS && !withheld.some((w) => w.tool === tool)) {
-      withheld.push({ tool, reason });
-    }
+  const withhold = (tool: string, reason: Withheld[number]["reason"], resource?: TurnWithheldResource) => {
+    if (withheld.length >= MAX_TURN_TOOLS) return;
+    // One entry per tool; a member-account entry is one per connector or key (UI-SPEC R7).
+    const seen = resource
+      ? withheld.some((w) => w.resource?.kind === resource.kind && w.resource.id === resource.id)
+      : withheld.some((w) => w.tool === tool && !w.resource);
+    if (!seen) withheld.push(resource ? { tool, reason, resource } : { tool, reason });
   };
+  // The member-account rule's facts (07.4-11): the conversation as the rule judges it (a thread through its channel or
+  // DM), whether an AI chat is read by anyone else, and the asker's active shares there.
+  const member = p.conversationId
+    ? await memberAccountContext(tx, {
+        conversationId: p.conversationId,
+        conversationKind: p.conversationKind,
+        agentId: row.id,
+        humanUserId: p.humanUserId,
+        audience: audience ?? null,
+      })
+    : null;
+  /** Fails closed without a conversation (the rule cannot be decided). */
+  const memberMay = (kind: TurnWithheldResource["kind"], id: string) =>
+    member !== null &&
+    memberAccountAllowed({
+      scopeKind: member.scopeKind,
+      aiChatShared: member.aiChatShared,
+      hasShare: member.shares.has(`${kind}:${id}`),
+    });
+  const sources = new Map(catalog.map((s) => [`${s.sourceKind}:${s.sourceId}`, s]));
   // Web is off for this asker only (their own permission), not for the bot: say so in a shared chat.
   if (audience && effective.internet.enabled && effective.internet.reason === "denied_for_you") {
     withhold(BUILTIN_TOOLS.webSearch, "denied_for_you");
@@ -207,6 +328,20 @@ async function computeTurn(
       if (audience) withhold(t.tool, "denied_for_you");
       continue;
     }
+    const source = sources.get(`${t.sourceKind}:${t.sourceId}`);
+    if (source && memberAccountSource(source)) {
+      // The member's own account: only where they alone read the result, or where they shared it (their explicit,
+      // audited choice covers that audience, so the group checks below do not apply).
+      if (memberMay("connector", source.sourceId)) allowed.add(toolKey(t));
+      else {
+        withhold(t.tool, "member_account", {
+          kind: "connector",
+          id: source.sourceId,
+          name: source.sourceName.slice(0, 80),
+        });
+      }
+      continue;
+    }
     if (audience?.unbounded) {
       withhold(t.tool, "shared_with_group");
       continue;
@@ -217,29 +352,67 @@ async function computeTurn(
     }
     allowed.add(toolKey(t));
   }
+
+  // Keychain (07.4-11, D-04, D-07): the keys this bot may use for this human (grant ∩ owner ∩ unit audience ∩
+  // `vault.use`). The tx's user must be the turn's human: personal keys are invisible to any other session (owner-only
+  // RLS), so a caller without it fails closed (personal keys absent), never with another member's.
+  // Personal keys are the member's own account (the audience rule above); unit keys are not.
+  const usable: EffectiveVaultItem[] = [];
+  const memberAccount: EffectiveVaultItem[] = [];
+  for (const key of await effectiveVaultItems(tx, perms, { agentId: row.id, humanUserId: p.humanUserId })) {
+    if (key.scope !== "personal" || memberMay("vault_item", key.id)) {
+      usable.push(key);
+      continue;
+    }
+    memberAccount.push(key);
+    withhold(BUILTIN_TOOLS.httpRequest, "member_account", {
+      kind: "vault_item",
+      id: key.id,
+      name: key.name.slice(0, 80),
+    });
+  }
   return {
     effective,
     botName: row.name,
     dailyLimit: effectiveDailyLimit(row.scope, caps, policy),
     withheld,
-    ...assemble(effective, p.conversationKind, catalog, allowed, p.board === true),
+    keys: { usable, memberAccount },
+    ...assemble(effective, p.conversationKind, catalog, allowed, p.board === true, usable.length > 0),
   };
 }
 
 /**
  * The tools (and their taint flags) this bot may use for this human in this kind of conversation, right now.
- * Used at delivery by `turnPolicy` and again at call time by the tool gate (03.1-04).
+ * Used at delivery by `turnPolicy` and again at call time by the tool gate (03.1-04). With the conversation id the
+ * member-account rule (07.4-11) is re-decided too, so a revoked share bites mid-turn.
  */
 export async function currentTurnTools(
   tx: Tx,
   perms: PermissionService,
-  p: { agentId: string; humanUserId: string; conversationKind: string },
+  p: { agentId: string; humanUserId: string; conversationKind: string; conversationId?: string | null },
   env: SearchEnv,
   /** The AI chat's current audience (06-10): the gate re-decides scoped tools with today's readers. */
   audience?: TurnAudience | null,
 ): Promise<TurnTools> {
+  const turn = await currentTurn(tx, perms, p, env, audience);
+  return { tools: turn.tools, toolFlags: turn.toolFlags };
+}
+
+/**
+ * `currentTurnTools` plus the keychain decision (07.4-11): the keys usable on this turn now, for the proxy routes.
+ * The tx must carry `userId` = the turn's human (owner-only RLS on personal keys).
+ */
+export async function currentTurn(
+  tx: Tx,
+  perms: PermissionService,
+  p: { agentId: string; humanUserId: string; conversationKind: string; conversationId?: string | null },
+  env: SearchEnv,
+  audience?: TurnAudience | null,
+): Promise<CurrentTurnTools> {
   const turn = await computeTurn(tx, perms, p, env, audience);
-  return turn ? { tools: turn.tools, toolFlags: turn.toolFlags } : { tools: [], toolFlags: {} };
+  return turn
+    ? { tools: turn.tools, toolFlags: turn.toolFlags, keys: turn.keys }
+    : { tools: [], toolFlags: {}, keys: { usable: [], memberAccount: [] } };
 }
 
 function validTimeZone(zone: string | null | undefined): string {
@@ -288,6 +461,81 @@ async function isBoardChannel(tx: Tx, conversationId: string, conversationKind: 
     .where(eq(conversations.id, conversationId))
     .limit(1);
   return row?.layout === "board";
+}
+
+/**
+ * The facts the member-account rule needs (07.4-11): the scope kind of the conversation it judges (a thread through
+ * its channel or DM; a `dm` only with exactly one human), whether an AI chat is read by anyone but the asker and this bot
+ * (ADR-0019's `shared` minus the turn's own persona: an active grant, more than one reader, an unbounded audience or
+ * another agent member; without an audience it counts as shared), and the asker's active shares there.
+ */
+async function memberAccountContext(
+  tx: Tx,
+  p: {
+    conversationId: string;
+    conversationKind: string;
+    agentId: string;
+    humanUserId: string;
+    audience: TurnAudience | null;
+  },
+): Promise<{ scopeKind: string; aiChatShared: boolean | null; shares: Set<string> }> {
+  let judgedId = p.conversationId;
+  let judgedKind = p.conversationKind;
+  if (p.conversationKind === "thread") {
+    const [conv] = await tx
+      .select({ parent: conversations.parentConversationId })
+      .from(conversations)
+      .where(eq(conversations.id, p.conversationId))
+      .limit(1);
+    const [parent] = conv?.parent
+      ? await tx
+          .select({ id: conversations.id, kind: conversations.kind })
+          .from(conversations)
+          .where(eq(conversations.id, conv.parent))
+          .limit(1)
+      : [];
+    judgedId = parent?.id ?? p.conversationId;
+    judgedKind = parent?.kind ?? "thread";
+  }
+  // A "dm_shared" from delivery is already decided; `memoryScopeKind` passes any non-"dm" kind through.
+  const scopeKind = await memoryScopeKind(tx, judgedId, judgedKind);
+  let aiChatShared: boolean | null = null;
+  if (scopeKind === "ai_chat") {
+    const [grant] = await tx
+      .select({ id: aiChatGrants.id })
+      .from(aiChatGrants)
+      .where(and(eq(aiChatGrants.conversationId, judgedId), isNull(aiChatGrants.revokedAt)))
+      .limit(1);
+    const [otherAgent] = await tx
+      .select({ id: conversationMembers.memberId })
+      .from(conversationMembers)
+      .where(
+        and(
+          eq(conversationMembers.conversationId, judgedId),
+          eq(conversationMembers.memberKind, "agent"),
+          ne(conversationMembers.memberId, p.agentId),
+        ),
+      )
+      .limit(1);
+    const readers = p.audience ? new Set(p.audience.userIds) : null;
+    aiChatShared =
+      grant !== undefined ||
+      otherAgent !== undefined ||
+      readers === null ||
+      p.audience?.unbounded === true ||
+      [...readers].some((id) => id !== p.humanUserId);
+  }
+  const rows = await tx
+    .select({ kind: memberAccountShares.resourceKind, id: memberAccountShares.resourceId })
+    .from(memberAccountShares)
+    .where(
+      and(
+        eq(memberAccountShares.userId, p.humanUserId),
+        eq(memberAccountShares.conversationId, judgedId),
+        isNull(memberAccountShares.revokedAt),
+      ),
+    );
+  return { scopeKind, aiChatShared, shares: new Set(rows.map((r) => `${r.kind}:${r.id}`)) };
 }
 
 /**
@@ -376,7 +624,8 @@ export async function turnPolicy(
     maxToolCalls: MAX_TOOL_CALLS_PER_TURN,
     maxWebCalls: MAX_WEB_CALLS_PER_TURN,
     // The persona can tell people what it could not use here and why (06-10); never a reason to enable anything.
-    ...(opts.audience ? { withheld: computed.withheld } : {}),
+    // Member-account entries (07.4-11, R7) travel on every delivery, so the persona can offer the share link.
+    ...(opts.audience || computed.withheld.length > 0 ? { withheld: computed.withheld } : {}),
     ...(memoryFiles.length > 0 ? { memoryFiles } : {}),
   };
   await tx.insert(agentTurns).values({
@@ -442,6 +691,12 @@ export async function cellAgentCapabilities(
   const configured = await internetConfigured(tx, env, policy);
   const catalog = await loadCatalog(tx);
   const grantsByAgent = await loadAllGrants(tx);
+  // Agents holding a keychain grant (07.4-11): ids only (personal items stay invisible to this session).
+  const keyHolders = new Set(
+    (await tx.selectDistinct({ agentId: agentVaultGrants.agentId }).from(agentVaultGrants)).map(
+      (r) => r.agentId,
+    ),
+  );
   const out = new Map<string, { tools: string[] }>();
   for (const row of rows) {
     const caps = readCapabilities(row);
@@ -462,7 +717,10 @@ export async function cellAgentCapabilities(
     });
     const names = new Set(tools.filter((t) => t.effective).map(toolKey));
     out.set(row.id, {
-      tools: row.status === "disabled" ? [] : assemble(effective, null, catalog, names).tools,
+      tools:
+        row.status === "disabled"
+          ? []
+          : assemble(effective, null, catalog, names, false, keyHolders.has(row.id)).tools,
     });
   }
   return out;

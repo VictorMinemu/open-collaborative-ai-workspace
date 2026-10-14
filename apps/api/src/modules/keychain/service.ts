@@ -665,12 +665,20 @@ export async function effectiveVaultItems(
  * The header the proxy attaches for `item`, and every string it must redact from the response (server-side only:
  * never send any of it to a client, the model or a log). Opens the sealed value with the item's own AAD, so a value
  * moved onto another item does not open; `oauth` items fetch a client-credentials token through the egress guard.
+ * Callers that must not call out inside a transaction (the http-request proxy) use `openVaultSecret` in it and
+ * `injectionFor` after it commits.
  */
 export async function prepareInjection(
   core: Core,
   tx: Tx,
   item: VaultItemRow,
 ): Promise<{ headerName: string; headerValue: string; secretParts: string[] }> {
+  const secret = await openVaultSecret(core, tx, item);
+  return injectionFor(core, item, secret, await privateAllowFor(tx, item));
+}
+
+/** The item's sealed value, opened with its own AAD (database only, no outbound call). Never log or return it. */
+export async function openVaultSecret(core: Core, tx: Tx, item: VaultItemRow): Promise<StoredSecret> {
   const ref = ownDbRef(tx, item);
   if (!ref) throw new KeychainError("value_unavailable");
   let secret: StoredSecret;
@@ -681,10 +689,22 @@ export async function prepareInjection(
     throw new KeychainError("value_unavailable");
   }
   if (secret.kind !== item.kind) throw new KeychainError("value_unavailable");
+  return secret;
+}
+
+/**
+ * The header for an opened secret, and its redaction parts. No database: an `oauth` item's client-credentials token is
+ * fetched (or read from the in-memory cache) through the egress guard with the item's `privateAllow`.
+ */
+export async function injectionFor(
+  core: Core,
+  item: VaultItemRow,
+  secret: StoredSecret,
+  privateAllow: readonly string[],
+): Promise<{ headerName: string; headerValue: string; secretParts: string[] }> {
   let token: string | undefined;
   if (secret.kind === "oauth") {
-    const privateAllow = await privateAllowFor(tx, item);
-    ({ token } = await clientCredentialsToken(egressFor(core.env), item, secret, privateAllow));
+    ({ token } = await clientCredentialsToken(egressFor(core.env), item, secret, [...privateAllow]));
   }
   const header = buildInjectionHeader(item.kind, item.injection, secret, token);
   return {
