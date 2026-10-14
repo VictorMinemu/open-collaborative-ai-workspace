@@ -78,8 +78,8 @@ async function freshTurn(
   return rows[0].payload.eventId as string;
 }
 
-/** TEMPORARY until turn offering (Task 3): the two Work Zone tools on a delivered turn. */
-async function offerTools(eventId: string): Promise<string> {
+/** A turn forced to carry the two Work Zone tools (a stale turn whose human never held, or lost, the grain). */
+async function forceTools(eventId: string): Promise<string> {
   await su.query(
     `update app.agent_turns set tools = array_cat(tools, array['ocw_work_zone_projects','ocw_start_work_zone']),
        tool_flags = tool_flags || '{"ocw_work_zone_projects":{"untrustedOutput":false,"sideEffecting":false},"ocw_start_work_zone":{"untrustedOutput":false,"sideEffecting":true}}'::jsonb
@@ -165,7 +165,7 @@ afterAll(async () => {
 
 describe("tracer: a bot proposes, the person who asked starts it (APPROVE-03)", () => {
   it("POST /work-zone/proposals → proposal → work_zone card → Sam's Start → his session at default, proposed by the bot", async () => {
-    const eventId = await offerTools(await freshTurn());
+    const eventId = await freshTurn();
     const r = await propose(eventId);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(r.body).toEqual({ approvalId: expect.any(String), created: true });
@@ -412,7 +412,7 @@ const expirePending = () =>
 
 /** A fresh turn with the tools, a proposal on `target`, and its review hash. */
 async function proposed(target: { projectId: string; deviceId: string }, prompt = PROMPT) {
-  const eventId = await offerTools(await freshTurn());
+  const eventId = await freshTurn();
   const r = await propose(eventId, { ...target, prompt });
   expect(r.body, JSON.stringify(r.body)).toMatchObject({ created: true });
   const approvalId = r.body.approvalId as string;
@@ -452,7 +452,7 @@ describe("refusals before any card (D-03, P-08, APPROVE-04)", () => {
   it("tainted: a turn that read untrusted content cannot propose (the claim refuses it)", async () => {
     await ok(sam.request("PATCH", `/api/v1/agents/${samBotId}/capabilities`, { internet: true }));
     try {
-      const eventId = await offerTools(await freshTurn());
+      const eventId = await freshTurn();
       const web = await cell("/tool-calls", {
         eventId,
         agentId: samBotId,
@@ -480,7 +480,7 @@ describe("refusals before any card (D-03, P-08, APPROVE-04)", () => {
     const unknown = await propose(randomUUID());
     expect(unknown.status).toBe(404);
     expect(unknown.body.error.code).toBe("unknown_turn");
-    const eventId = await offerTools(await freshTurn());
+    const eventId = await freshTurn();
     const foreign = await propose(eventId, { agentId: stanBotId });
     expect(foreign.status).toBe(404);
     expect(foreign.body.error.code).toBe("unknown_turn");
@@ -490,10 +490,10 @@ describe("refusals before any card (D-03, P-08, APPROVE-04)", () => {
 
   it("not_allowed: a standard member, and a developer under a Work Zone module deny (07.3)", async () => {
     // Stan holds no work_session.create: even a turn forced to carry the tool is refused.
-    const stanEvent = await offerTools(await freshTurn(stan, stanDmId));
+    const stanEvent = await forceTools(await freshTurn(stan, stanDmId));
     await refused(stanEvent, {}, "not_allowed", stanBotId);
 
-    const eventId = await offerTools(await freshTurn());
+    const eventId = await freshTurn();
     await moduleAccess(samId, false);
     try {
       await refused(eventId, {}, "not_allowed");
@@ -505,14 +505,10 @@ describe("refusals before any card (D-03, P-08, APPROVE-04)", () => {
   it("project_not_found: removed, on another device, another organization's", async () => {
     const removed = await seedDevice({ owner: samId, name: "Old Mac" });
     await su.query("update app.projects set removed_at = now() where id = $1", [removed.projectId]);
-    await refused(await offerTools(await freshTurn()), removed, "project_not_found");
+    await refused(await freshTurn(), removed, "project_not_found");
 
     const other = await seedDevice({ owner: samId, name: "Sam's iMac" });
-    await refused(
-      await offerTools(await freshTurn()),
-      { projectId, deviceId: other.deviceId },
-      "project_not_found",
-    );
+    await refused(await freshTurn(), { projectId, deviceId: other.deviceId }, "project_not_found");
 
     const orgB = randomUUID();
     const userB = randomUUID();
@@ -540,43 +536,35 @@ describe("refusals before any card (D-03, P-08, APPROVE-04)", () => {
       "insert into app.projects (id, organization_id, device_id, local_id, name) values ($1, $2, $3, 'lb', 'secret')",
       [projB, orgB, devB],
     );
-    await refused(
-      await offerTools(await freshTurn()),
-      { projectId: projB, deviceId: devB },
-      "project_not_found",
-    );
+    await refused(await freshTurn(), { projectId: projB, deviceId: devB }, "project_not_found");
   });
 
   it("device_not_shared, device_offline, runtime_unavailable (Codex not installed, Claude Code signed out)", async () => {
     const victorId = (await ok(victor.request("GET", "/api/v1/me"))).user.id as string;
     const notShared = await seedDevice({ owner: victorId, name: "Víctor's Mac" });
-    await refused(await offerTools(await freshTurn()), notShared, "device_not_shared");
+    await refused(await freshTurn(), notShared, "device_not_shared");
 
     const offline = await seedDevice({ owner: samId, name: "Sleeping Mac", status: "offline" });
-    await refused(await offerTools(await freshTurn()), offline, "device_offline");
+    await refused(await freshTurn(), offline, "device_offline");
 
     const claudeOnly = await seedDevice({ owner: samId, name: "Claude-only Mac" });
-    await refused(
-      await offerTools(await freshTurn()),
-      { ...claudeOnly, runtime: "codex" },
-      "runtime_unavailable",
-    );
+    await refused(await freshTurn(), { ...claudeOnly, runtime: "codex" }, "runtime_unavailable");
     const signedOut = await seedDevice({
       owner: samId,
       name: "Signed-out Mac",
       runtimeInfo: [{ ...CLAUDE_READY, loggedIn: false }],
     });
-    await refused(await offerTools(await freshTurn()), signedOut, "runtime_unavailable");
+    await refused(await freshTurn(), signedOut, "runtime_unavailable");
   });
 
   it("prompt_not_allowed: a slash command, also behind spaces or a newline", async () => {
     for (const prompt of ["/permissions bypass", "  /permissions", "\n/model x"]) {
-      await refused(await offerTools(await freshTurn()), { prompt }, "prompt_not_allowed");
+      await refused(await freshTurn(), { prompt }, "prompt_not_allowed");
     }
   });
 
   it("a mode, full access or a model in the body is a 400 and nothing is stored", async () => {
-    const eventId = await offerTools(await freshTurn());
+    const eventId = await freshTurn();
     const before = await traces();
     for (const extra of [
       { permissionMode: "fullAccess" },
@@ -593,10 +581,10 @@ describe("refusals before any card (D-03, P-08, APPROVE-04)", () => {
   it("too_many_pending: a fourth pending proposal for the same bot and person", async () => {
     await expirePending();
     for (const n of [1, 2, 3]) {
-      const r = await propose(await offerTools(await freshTurn()), { prompt: `${PROMPT} (${n})` });
+      const r = await propose(await freshTurn(), { prompt: `${PROMPT} (${n})` });
       expect(r.body).toMatchObject({ created: true });
     }
-    await refused(await offerTools(await freshTurn()), { prompt: `${PROMPT} (4)` }, "too_many_pending");
+    await refused(await freshTurn(), { prompt: `${PROMPT} (4)` }, "too_many_pending");
     await expirePending();
   });
 });
@@ -755,5 +743,221 @@ describe("only the person who asked starts it, never above default (D-03, D-04)"
     expect(actions).toHaveLength(1);
     expect(actions[0]!.cardAction).toMatchObject({ outcome: "denied", decidedBy: { id: samId } });
     expect(actions[0]!.message.text).toContain("Not now");
+  });
+});
+
+// ---------------------------------------------------------------- Task 3: turn offering, project list, tenants
+
+const WORK_ZONE_TOOLS = ["ocw_work_zone_projects", "ocw_start_work_zone"];
+
+const turnOf = async (eventId: string) => (await rowOf("agent_turns", "event_id = $1", [eventId]))[0]!;
+
+describe("turn offering (D-03, P-08): only for a human who may start sessions", () => {
+  it("Sam (developer) gets both tools after the card tool, with their flags; the mention carries them too", async () => {
+    const eventId = await freshTurn();
+    const turn = await turnOf(eventId);
+    const tools = turn.tools as string[];
+    const card = tools.indexOf("ocw_agent_card");
+    expect(card).toBeGreaterThanOrEqual(0);
+    expect(tools.slice(card + 1, card + 3)).toEqual(WORK_ZONE_TOOLS);
+    expect(turn.tool_flags.ocw_work_zone_projects).toEqual({ untrustedOutput: false, sideEffecting: false });
+    expect(turn.tool_flags.ocw_start_work_zone).toEqual({ untrustedOutput: false, sideEffecting: true });
+    const [mention] = (
+      await su.query(
+        "select payload from app.stream_events where type = 'agent.mention.v1' and payload->>'eventId' = $1",
+        [eventId],
+      )
+    ).rows;
+    expect(mention.payload.turn.tools).toEqual(tools);
+  });
+
+  it("a standard member and a developer under a Work Zone module deny get neither", async () => {
+    const stanTurn = await turnOf(await freshTurn(stan, stanDmId));
+    for (const t of WORK_ZONE_TOOLS) expect(stanTurn.tools).not.toContain(t);
+    expect(stanTurn.tools).toContain("ocw_agent_card");
+
+    const { client: dana, userId: danaId } = await invite(
+      stack,
+      victor,
+      "dana@example.test",
+      "Dana",
+      "developer",
+    );
+    const danaBot = await ok(dana.request("POST", "/api/v1/agents/personal", {}));
+    expect((await turnOf(await freshTurn(dana, danaBot.dmId))).tools).toEqual(
+      expect.arrayContaining(WORK_ZONE_TOOLS),
+    );
+    await moduleAccess(danaId, false);
+    try {
+      const denied = await turnOf(await freshTurn(dana, danaBot.dmId));
+      for (const t of WORK_ZONE_TOOLS) expect(denied.tools).not.toContain(t);
+    } finally {
+      await moduleAccess(danaId, true);
+    }
+  });
+
+  it("the call-time re-decision agrees: the grain revoked mid-turn is policy_changed at the gate, not_allowed here", async () => {
+    const eventId = await freshTurn();
+    await moduleAccess(samId, false);
+    try {
+      const gate = await cell("/tool-calls", {
+        eventId,
+        agentId: samBotId,
+        tool: "ocw_start_work_zone",
+        params: {},
+      });
+      expect(gate.body).toMatchObject({ allowed: false, reason: "policy_changed" });
+      await refused(eventId, {}, "not_allowed");
+    } finally {
+      await moduleAccess(samId, true);
+    }
+  });
+});
+
+describe("POST /work-zone/projects: names and ids, devices Sam may use (principle 7)", () => {
+  it("lists his own and shared devices' projects with online state and runtimes, never a path", async () => {
+    const victorId = (await ok(victor.request("GET", "/api/v1/me"))).user.id as string;
+    const shared = await seedDevice({
+      owner: victorId,
+      name: "Team Mac",
+      shared: true,
+      project: "design-system",
+    });
+    await seedDevice({ owner: victorId, name: "Private Mac", project: "secret-plans" });
+    const gone = await seedDevice({ owner: samId, name: "Retired Mac", project: "old-app" });
+    await su.query("update app.projects set removed_at = now() where id = $1", [gone.projectId]);
+
+    const eventId = await freshTurn();
+    const r = await cell("/work-zone/projects", { eventId, agentId: samBotId });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    const list = r.body.projects as Json[];
+    expect(list.find((p) => p.projectId === projectId)).toEqual({
+      projectId,
+      name: "billing-api",
+      device: { id: deviceId, name: "MacBook Pro", online: true },
+      runtimes: [
+        { id: "claude-code", label: "Claude Code", available: true },
+        { id: "codex", label: "Codex", available: false },
+      ],
+    });
+    expect(list.find((p) => p.projectId === shared.projectId)).toMatchObject({
+      name: "design-system",
+      device: { id: shared.deviceId, name: "Team Mac", online: true },
+    });
+    const names = list.map((p) => p.name);
+    expect(names).not.toContain("secret-plans");
+    expect(names).not.toContain("old-app");
+    // Names and ids only: no local id, git remote, branch or anything shaped like a host path.
+    const text = JSON.stringify(r.body);
+    expect(text).not.toMatch(/lp_|localId|gitRemote|path|\/Users|\\\\/);
+    expect(await rowOf("agent_tool_calls", "event_id = $1", [eventId])).toEqual([
+      expect.objectContaining({ tool: "ocw_work_zone_projects", decision: "allowed" }),
+    ]);
+  });
+
+  it("a tainted turn may still list (read-only), but no longer propose", async () => {
+    await ok(sam.request("PATCH", `/api/v1/agents/${samBotId}/capabilities`, { internet: true }));
+    try {
+      const eventId = await freshTurn();
+      const web = await cell("/tool-calls", {
+        eventId,
+        agentId: samBotId,
+        tool: "web_search",
+        params: { query: "x" },
+      });
+      expect(web.body).toMatchObject({ allowed: true });
+      const r = await cell("/work-zone/projects", { eventId, agentId: samBotId });
+      expect(r.status).toBe(200);
+      expect((r.body.projects as Json[]).length).toBeGreaterThan(0);
+      await refused(eventId, {}, "tainted");
+    } finally {
+      await ok(sam.request("PATCH", `/api/v1/agents/${samBotId}/capabilities`, { internet: false }));
+    }
+  });
+
+  it("not_in_turn and unknown_turn on the list", async () => {
+    const eventId = await freshTurn();
+    await su.query(
+      "update app.agent_turns set tools = array_remove(tools, 'ocw_work_zone_projects') where event_id = $1",
+      [eventId],
+    );
+    const refusedList = await cell("/work-zone/projects", { eventId, agentId: samBotId });
+    expect(refusedList.status).toBe(409);
+    expect(refusedList.body.error.code).toBe("not_in_turn");
+    const unknown = await cell("/work-zone/projects", { eventId: randomUUID(), agentId: samBotId });
+    expect(unknown.status).toBe(404);
+    expect(unknown.body.error.code).toBe("unknown_turn");
+  });
+});
+
+describe("tenant isolation (C-02): organization B never reaches organization A", () => {
+  let tokenB: string;
+  let eve: TestClient;
+  let orgB: string;
+
+  beforeAll(async () => {
+    // Eve joins A, then her membership moves to a fresh organization B where she is the admin.
+    let eveId: string;
+    ({ client: eve, userId: eveId } = await invite(stack, victor, "eve@example.test", "Eve", "standard"));
+    orgB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil', $2)", [
+      orgB,
+      `evil-${orgB}`,
+    ]);
+    await su.query("delete from auth.member where user_id = $1", [eveId]);
+    await su.query("delete from app.org_members where user_id = $1", [eveId]);
+    await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
+      orgB,
+      eveId,
+    ]);
+    await su.query(
+      "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Eve', 'admin')",
+      [orgB, eveId],
+    );
+    await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, eveId]);
+    tokenB = `ocw_cell_${randomUUID()}${randomUUID()}`;
+    await su.query(
+      "insert into app.agent_credentials (organization_id, kind, token_hash) values ($1, 'channel_plugin', $2)",
+      [orgB, createHash("sha256").update(tokenB).digest("hex")],
+    );
+  });
+
+  it("B's cell with A's event id: 404 unknown_turn on both routes, nothing claimed or stored", async () => {
+    const eventId = await freshTurn();
+    const before = await traces();
+    const list = await cell("/work-zone/projects", { eventId, agentId: samBotId }, tokenB);
+    expect(list.status, JSON.stringify(list.body)).toBe(404);
+    expect(list.body.error.code).toBe("unknown_turn");
+    const p = await propose(eventId, {}, tokenB);
+    expect(p.status).toBe(404);
+    expect(p.body.error.code).toBe("unknown_turn");
+    expect(await traces()).toEqual(before);
+    expect(await rowOf("agent_tool_calls", "event_id = $1", [eventId])).toEqual([]);
+    expect((await turnOf(eventId)).tool_calls).toBe(0);
+  });
+
+  it("B's own turn naming A's project and device is refused project_not_found; B's list shows none of A's", async () => {
+    const bot = await ok(eve.request("POST", "/api/v1/agents/personal", {}));
+    const eventB = await freshTurn(eve, bot.dmId);
+    expect((await turnOf(eventB)).organization_id).toBe(orgB);
+    const before = await traces();
+    const r = await cell(
+      "/work-zone/proposals",
+      { eventId: eventB, agentId: bot.agent.id, projectId, deviceId, prompt: PROMPT },
+      tokenB,
+    );
+    expect(r.body).toEqual({ refused: "project_not_found" });
+    expect(await traces()).toEqual(before);
+    const list = await cell("/work-zone/projects", { eventId: eventB, agentId: bot.agent.id }, tokenB);
+    expect(list.body).toEqual({ projects: [] });
+  });
+
+  it("a member of B gets 404 on A's approval", async () => {
+    const [a] = await rowOf("approval_requests", "kind = 'work_zone.start' and organization_id = $1", [
+      orgId,
+    ]);
+    expect((await eve.request("GET", `/api/v1/approvals/${a!.id}`)).status).toBe(404);
+    const d = await decide(eve, a!.id as string, { outcome: "approved", actionHash: a!.action_hash });
+    expect(d.status).toBe(404);
   });
 });

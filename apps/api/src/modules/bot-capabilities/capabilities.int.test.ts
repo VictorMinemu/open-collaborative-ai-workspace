@@ -464,13 +464,19 @@ describe("per-turn policy (D-07, SC4)", () => {
   ];
   const SHARED_MEMORY = ["ocw_memory_list", "ocw_memory_read", "ocw_memory_propose"];
   const DM_TOOLS = ["web_search", "web_fetch", ...DM_MEMORY, "ocw_agent_card"];
+  /**
+   * 07.5-08: Work Zone proposals, right after the card tool, on every delivered turn whose human holds
+   * `work_session.create` (Sam is a developer, the admin an admin). Never in the cell-wide view (no human).
+   */
+  const WORK_ZONE = ["ocw_work_zone_projects", "ocw_start_work_zone"];
+  const DM_TURN = [...DM_TOOLS, ...WORK_ZONE];
 
   it("Sam's DM message carries the effective turn and an agent_turns row in the same transaction", async () => {
     await ok(sam.request("PATCH", `/api/v1/agents/${samBotId}/capabilities`, { tools: [] }));
     const messageId = await say(sam, samDmId, "What's new today?");
     const ev = await lastMention(samBotId, messageId);
     expect(ev.turn).toMatchObject({
-      tools: DM_TOOLS,
+      tools: DM_TURN,
       toolFlags: {
         web_search: WEB_FLAGS,
         web_fetch: WEB_FLAGS,
@@ -481,6 +487,8 @@ describe("per-turn policy (D-07, SC4)", () => {
         ocw_memory_write: { untrustedOutput: false, sideEffecting: true },
         ocw_memory_propose: { untrustedOutput: false, sideEffecting: false },
         ocw_agent_card: { untrustedOutput: false, sideEffecting: false },
+        ocw_work_zone_projects: { untrustedOutput: false, sideEffecting: false },
+        ocw_start_work_zone: { untrustedOutput: false, sideEffecting: true },
       },
       memory: [],
       maxToolCalls: 8,
@@ -498,7 +506,7 @@ describe("per-turn policy (D-07, SC4)", () => {
       conversation_id: samDmId,
       conversation_kind: "dm",
       message_id: messageId,
-      tools: DM_TOOLS,
+      tools: DM_TURN,
       tool_calls: 0,
       web_calls: 0,
       tainted: false,
@@ -529,9 +537,11 @@ describe("per-turn policy (D-07, SC4)", () => {
     try {
       const messageId = await say(sam, samDmId, "And now?");
       const ev = await lastMention(samBotId, messageId);
-      expect(ev.turn.tools).toEqual([...DM_MEMORY, "ocw_agent_card"]);
+      expect(ev.turn.tools).toEqual([...DM_MEMORY, "ocw_agent_card", ...WORK_ZONE]);
       // jsonb orders object keys by length: compare as a set.
-      expect(Object.keys(ev.turn.toolFlags).sort()).toEqual([...DM_MEMORY, "ocw_agent_card"].sort());
+      expect(Object.keys(ev.turn.toolFlags).sort()).toEqual(
+        [...DM_MEMORY, "ocw_agent_card", ...WORK_ZONE].sort(),
+      );
     } finally {
       await ok(
         admin.request("PUT", "/api/v1/bot-policy", {
@@ -559,18 +569,24 @@ describe("per-turn policy (D-07, SC4)", () => {
 
     const fromAdmin = await say(admin, channelId, "@archie what changed?", mention);
     const evAdmin = await lastMention(teamBotId, fromAdmin);
-    expect(evAdmin.turn.tools).toEqual(["web_search", "web_fetch", ...SHARED_MEMORY, "ocw_agent_card"]);
+    expect(evAdmin.turn.tools).toEqual([
+      "web_search",
+      "web_fetch",
+      ...SHARED_MEMORY,
+      "ocw_agent_card",
+      ...WORK_ZONE,
+    ]);
     expect(evAdmin.conversation.kind).toBe("channel");
 
     const drop = await rule("deny", "user", samId, "bot.internet");
     try {
       const fromSam = await say(sam, channelId, "@archie and for me?", mention);
       const evSam = await lastMention(teamBotId, fromSam);
-      expect(evSam.turn.tools).toEqual([...SHARED_MEMORY, "ocw_agent_card"]);
+      expect(evSam.turn.tools).toEqual([...SHARED_MEMORY, "ocw_agent_card", ...WORK_ZONE]);
       const row = (
         await su.query("select tools, user_id from app.agent_turns where event_id = $1", [evSam.eventId])
       ).rows[0];
-      expect(row).toEqual({ tools: [...SHARED_MEMORY, "ocw_agent_card"], user_id: samId });
+      expect(row).toEqual({ tools: [...SHARED_MEMORY, "ocw_agent_card", ...WORK_ZONE], user_id: samId });
 
       const again = await say(admin, channelId, "@archie still there?", mention);
       expect((await lastMention(teamBotId, again)).turn.tools).toEqual([
@@ -578,6 +594,7 @@ describe("per-turn policy (D-07, SC4)", () => {
         "web_fetch",
         ...SHARED_MEMORY,
         "ocw_agent_card",
+        ...WORK_ZONE,
       ]);
     } finally {
       await drop();
@@ -592,13 +609,13 @@ describe("per-turn policy (D-07, SC4)", () => {
     );
     const messageId = await say(sam, samDmId, "Echo please");
     const ev = await lastMention(samBotId, messageId);
-    expect(ev.turn.tools).toEqual([...DM_TOOLS, `${SAFE}__echo`]);
+    expect(ev.turn.tools).toEqual([...DM_TURN, `${SAFE}__echo`]);
     expect(ev.turn.toolFlags[`${SAFE}__echo`]).toEqual({ untrustedOutput: true, sideEffecting: false });
 
     const drop = await rule("deny", "user", samId, "bot.tool.use", `${SAFE}__echo`);
     try {
       const denied = await say(sam, samDmId, "Echo again");
-      expect((await lastMention(samBotId, denied)).turn.tools).toEqual(DM_TOOLS);
+      expect((await lastMention(samBotId, denied)).turn.tools).toEqual(DM_TURN);
     } finally {
       await drop();
     }
@@ -639,8 +656,8 @@ describe("per-turn policy (D-07, SC4)", () => {
     );
     const dmId = (await ok(admin.request("POST", `/api/v1/agents/${mute.id}/dm`))).dmId as string;
     const inDm = await say(admin, dmId, "hello");
-    expect((await lastMention(mute.id, inDm)).turn.tools).toEqual(["ocw_agent_card"]);
+    expect((await lastMention(mute.id, inDm)).turn.tools).toEqual(["ocw_agent_card", ...WORK_ZONE]);
     const inChannel = await say(admin, channelId, "@mute hello", [{ kind: "agent", id: mute.id }]);
-    expect((await lastMention(mute.id, inChannel)).turn.tools).toEqual(["ocw_agent_card"]);
+    expect((await lastMention(mute.id, inChannel)).turn.tools).toEqual(["ocw_agent_card", ...WORK_ZONE]);
   });
 });
