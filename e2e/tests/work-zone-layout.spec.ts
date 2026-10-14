@@ -1,4 +1,5 @@
 import { expect, type Page, test } from "@playwright/test";
+import { contrastOf, expectNoSeriousA11y } from "../support/a11y";
 import { apiAs } from "../support/actors";
 import { type FakeDeviceHandle, startFakeDevice } from "../support/work-zone-device";
 import { ADMIN, API_URL, shot } from "./env";
@@ -148,6 +149,17 @@ test("Work Zone layout (ref-4): sidebar rows and groups, collapsible turns, chan
     await expect(row.getByTestId("row-status")).toHaveText("Needs approval");
     await expect(row.getByTestId("row-status")).toHaveAttribute("data-tone", "warning");
     await closeSidebar();
+    // WINDOWS #197: the header's "Needs approval" chip meets AA (4.5:1) in light and dark (shown from `sm` up).
+    if (!mobile) {
+      const chip = page.getByTestId("session-status");
+      await expect(chip).toHaveAttribute("data-status", "waiting_approval");
+      for (const scheme of ["light", "dark"] as const) {
+        await page.emulateMedia({ colorScheme: scheme });
+        expect(await contrastOf(chip), `Needs approval chip, ${scheme}`).toBeGreaterThanOrEqual(4.5);
+        await expectNoSeriousA11y(page, '[data-testid="session-status"]');
+      }
+      await page.emulateMedia({ colorScheme: "light" });
+    }
     await banner.getByTestId("approve-once").click();
     await expect(view).toHaveAttribute("data-status", "idle", { timeout: 60_000 });
     await expect(bar).toHaveCount(0);
