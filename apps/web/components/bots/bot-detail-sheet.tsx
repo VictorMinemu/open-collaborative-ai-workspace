@@ -1,7 +1,7 @@
 "use client";
 
 import { type Agent, modelLabel, UpdateAgentRequest } from "@ocw/contracts";
-import { AlertTriangle, Hash, Trash2 } from "lucide-react";
+import { AlertTriangle, Hash, LayoutTemplate, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { UserAvatar } from "@/components/ui/avatar";
@@ -9,11 +9,12 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
+import { useAgentTemplateLink } from "@/lib/agent-template-queries";
 import { errorMessage, isApiError } from "@/lib/api";
 import { useCreateTargets, useDeleteAgent, useModels, useUpdateAgent } from "@/lib/bots-queries";
 import { validate } from "@/lib/form";
 import { useUnits } from "@/lib/org-queries";
-import { useMembers } from "@/lib/queries";
+import { useMe, useMembers } from "@/lib/queries";
 import { formatDate } from "@/lib/utils";
 import { BotAvatar, botAbilities, ModelChip, ScopeBadge, StatusChip } from "./bot-bits";
 import { canMessage, MessageBotButton, OpenBotPageLink, PersonalBadge } from "./bot-card";
@@ -28,6 +29,8 @@ import {
   splitModelKey,
 } from "./bot-form";
 import { CapabilitiesPanel } from "./capabilities-panel";
+import { TemplateUpdateDialog } from "./template-update-dialog";
+import { ConnectorRows } from "./templates-section";
 
 function toPlacement(a: Agent): PlacementValues {
   return {
@@ -72,10 +75,16 @@ export function BotDetailSheet({
   const where = useCreateTargets();
   const units = useUnits();
   const members = useMembers();
+  const me = useMe({ enabled: false });
+  // Owner only (07.4-08): the template this personal bot was started from; null for every other bot.
+  const isOwnPersonal =
+    !!agent && agent.scope === "personal" && !!me.data && agent.ownerUserId === me.data.user.id;
+  const templateLink = useAgentTemplateLink(agent?.id ?? null, isOwnPersonal);
   const [values, setValues] = useState<BotFormValues | null>(agent ? toValues(agent) : null);
   const [placement, setPlacement] = useState<PlacementValues | null>(agent ? toPlacement(agent) : null);
   const [errors, setErrors] = useState<BotFormErrors>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
   const agentId = agent?.id;
 
   // Reset the form when another bot is opened (not on live status updates of the same bot).
@@ -85,6 +94,7 @@ export function BotDetailSheet({
     setPlacement(agent ? toPlacement(agent) : null);
     setErrors({});
     setConfirmDelete(false);
+    setReviewing(false);
   }, [agentId]);
 
   if (!agent || !values) {
@@ -214,6 +224,17 @@ export function BotDetailSheet({
               <ModelChip provider={agent.modelProvider} modelId={agent.modelId} />
               {personal ? <PersonalBadge /> : <ScopeBadge agent={agent} className="h-6 px-2 text-[11.5px]" />}
             </div>
+            {templateLink.data ? (
+              <p
+                className="mt-2 flex min-w-0 items-center gap-1.5 text-muted-foreground text-xs"
+                data-testid="bot-template-line"
+              >
+                <LayoutTemplate className="size-3.5 shrink-0" aria-hidden />
+                <span className="truncate">
+                  From template {templateLink.data.templateName} · v{templateLink.data.version}
+                </span>
+              </p>
+            ) : null}
             {!personal && ownerName ? (
               <p
                 className="mt-2 flex min-w-0 items-center gap-1.5 text-[12.5px] text-muted-foreground"
@@ -238,6 +259,34 @@ export function BotDetailSheet({
         </div>
 
         <div className="scrollbar-thin grid min-h-0 flex-1 content-start gap-7 overflow-y-auto px-5 py-5">
+          {templateLink.data?.update ? (
+            <div
+              role="status"
+              data-testid="template-update-banner"
+              className="flex flex-col gap-3 rounded-lg bg-brand-soft px-3 py-2.5 text-brand-soft-foreground text-sm sm:flex-row sm:items-center"
+            >
+              <span className="flex min-w-0 flex-1 items-center gap-2">
+                <LayoutTemplate className="size-4 shrink-0" aria-hidden />
+                <span>Template updated to v{templateLink.data.update.to} · Review and update</span>
+              </span>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setReviewing(true)}
+                aria-label={`Review update to v${templateLink.data.update.to}`}
+                data-testid="template-update-review"
+                className="w-full sm:w-auto max-md:h-11"
+              >
+                Review
+              </Button>
+            </div>
+          ) : null}
+
+          {templateLink.data && templateLink.data.requiredConnectors.length > 0 ? (
+            <SheetSection title="Connections">
+              <ConnectorRows connectors={templateLink.data.requiredConnectors} />
+            </SheetSection>
+          ) : null}
           {agent.status === "error" && agent.statusMessage ? (
             <div
               role="alert"
@@ -371,6 +420,14 @@ export function BotDetailSheet({
             </Button>
           ) : null}
         </div>
+        {templateLink.data?.update ? (
+          <TemplateUpdateDialog
+            agent={agent}
+            link={templateLink.data}
+            open={reviewing}
+            onClose={() => setReviewing(false)}
+          />
+        ) : null}
       </SheetContent>
     </Sheet>
   );

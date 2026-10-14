@@ -31,6 +31,18 @@ export async function personalModels(core: Core, tx: Tx, policy?: PolicyRow | nu
   );
 }
 
+/**
+ * What internal callers (07.4-08 templates) may add to a one-click create, written in the same insert under the same
+ * advisory lock and cap. The public `/agents/personal` route keeps its contract: its body schema never carries these.
+ */
+export interface PersonalBotInput extends CreatePersonalBotRequest {
+  /** Stored capability toggles (partial; defaults are filled in by the capability model). */
+  capabilities?: Record<string, unknown>;
+  /** The template and version this bot is forked from (D-05). */
+  templateId?: string;
+  templateVersion?: number;
+}
+
 function firstName(displayName: string): string {
   return displayName.trim().split(/\s+/u)[0] || "My";
 }
@@ -44,7 +56,7 @@ export async function createPersonalBot(
   core: Core,
   req: FastifyRequest,
   tx: Tx,
-  body: CreatePersonalBotRequest,
+  body: PersonalBotInput,
 ): Promise<CreatePersonalBotResponse> {
   const perms = createPermissionService(core);
   await perms.assertCan(req, tx, "bot.create_personal");
@@ -116,6 +128,9 @@ export async function createPersonalBot(
       createdBy: auth.userId,
       scope: "personal",
       ownerUserId: auth.userId,
+      capabilities: body.capabilities ?? {},
+      templateId: body.templateId ?? null,
+      templateVersion: body.templateVersion ?? null,
     })
     .returning();
   if (!row) throw new Error("personal bot insert failed");
