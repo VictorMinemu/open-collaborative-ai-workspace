@@ -14,6 +14,7 @@ import { createFakeMcp } from "../../../infra/fake-model/fake-mcp.mjs";
 import type { CellAgent, CellMcpServer, CellProvider, CellSnapshot } from "./agent-channel-protocol.js";
 import { AgentChannelHttpError, createAgentChannelClient } from "./api-client.js";
 import { AUTH_FAILURE_REPLY, createBridge, FAILURE_REPLY, type OpenClawPort } from "./bridge.js";
+import { MEMBER_ACCOUNT, NOT_CONNECTED, REFUSAL_SENTENCE } from "./connector-tools.js";
 import { createMemoryCursorStore } from "./cursor-store.js";
 import { CommitTracker, runEventStream } from "./event-stream.js";
 import { UNKNOWN_SERVER_ERROR } from "./mcp-probe.js";
@@ -29,6 +30,7 @@ import { planReconcile } from "./reconciler.js";
 import { registerCapabilities } from "./register-capabilities.js";
 import { registerFull } from "./register-full.js";
 import {
+  FAKE_ERROR_CANARY,
   type FakeAgentChannelApi,
   type MentionInput,
   startFakeAgentChannelApi,
@@ -863,6 +865,9 @@ const PLUGIN_TOOLS = [
   "ocw_memory_propose",
   "ocw_agent_card",
   "ocw_board_card",
+  "ocw_connector_list",
+  "ocw_connector_call",
+  "ocw_http_request",
 ];
 
 describe("memory tool (D-10): manifest, registration and the fake API", () => {
@@ -1558,5 +1563,121 @@ describe("memory files mirror parity (07.2-07: plugin ↔ packages/contracts mem
       expect(parsed.data?.memoryFiles).toBeUndefined();
     }
     expect(m.TurnContext.parse(turn).memoryFiles).toBeUndefined();
+  });
+});
+
+describe("connector tools (07.4 D-07, C-01): registerFull → the real HTTP client → the fake Agent Channel API", () => {
+  type Factory = (ctx: Record<string, unknown>) => {
+    name: string;
+    execute: (id: string, p: unknown) => Promise<{ content: Array<{ text: string }> }>;
+  };
+
+  function connectorSetup() {
+    const client = createAgentChannelClient({ apiUrl: api.url, token: () => api.token });
+    const guard = createToolGuard({ client: () => client });
+    const registered: Factory[] = [];
+    registerFull(
+      { on: () => undefined, registerTool: (f: Factory) => registered.push(f) } as never,
+      guard,
+      () => client,
+    );
+    guard.beginTurn("s-conn", {
+      eventId: "evt-c1",
+      agentId: ARCHIE.id,
+      turn: {
+        tools: ["ocw_connector_list", "ocw_connector_call", "ocw_http_request"],
+        toolFlags: { ocw_connector_list: { untrustedOutput: false, sideEffecting: false } },
+        memory: [],
+        now: null,
+        maxToolCalls: 8,
+        maxWebCalls: 5,
+      },
+      connectorTools: ["m1a2b3c4d__whoami"],
+      conversationId: "dm-c1",
+    });
+    const tool = (name: string) => {
+      const found = registered.map((f) => f({ sessionKey: "s-conn" })).find((t) => t.name === name);
+      if (!found) throw new Error(`${name} was not registered`);
+      return found;
+    };
+    return { tool };
+  }
+  const text = (r: { content: Array<{ text: string }> }) => r.content.map((c) => c.text).join("");
+
+  it("list, call and http post only the turn's ids with their own fields, and answer from the API", async () => {
+    const { tool } = connectorSetup();
+    expect(text(await tool("ocw_connector_list").execute("tc-1", {}))).toContain(
+      "Smoke CRM [m1a2b3c4d] — connected",
+    );
+    expect(
+      text(
+        await tool("ocw_connector_call").execute("tc-2", {
+          connector: "m1a2b3c4d",
+          tool: "whoami",
+          arguments: {},
+        }),
+      ),
+    ).toBe("whoami: sub_smoke");
+    expect(
+      text(
+        await tool("ocw_http_request").execute("tc-3", {
+          handle: "k_abcdefgh23",
+          method: "GET",
+          url: "https://api.example.com/v1/me",
+        }),
+      ),
+    ).toBe('HTTP 200 (application/json)\n{"login":"smoke"}');
+    expect(api.connectorLists).toEqual([{ eventId: "evt-c1", agentId: ARCHIE.id }]);
+    expect(api.connectorCalls).toMatchObject([
+      { eventId: "evt-c1", agentId: ARCHIE.id, connector: "m1a2b3c4d", tool: "whoami", arguments: {} },
+    ]);
+    // Exactly the call's fields (plus the fake's own timestamps): never a user.
+    expect(Object.keys(api.connectorCalls[0] ?? {}).sort()).toEqual([
+      "agentId",
+      "answeredAt",
+      "arguments",
+      "connector",
+      "eventId",
+      "receivedAt",
+      "tool",
+    ]);
+    expect(api.httpRequests).toEqual([
+      {
+        eventId: "evt-c1",
+        agentId: ARCHIE.id,
+        handle: "k_abcdefgh23",
+        method: "GET",
+        url: "https://api.example.com/v1/me",
+      },
+    ]);
+    // Self-validated by their own routes: never asked to /tool-calls.
+    expect(api.toolCalls).toEqual([]);
+  });
+
+  it("an API refusal is the fixed sentence (recognised by code over HTTP), never the error body", async () => {
+    const { tool } = connectorSetup();
+    for (const [refusal, expected] of [
+      ["not_connected", NOT_CONNECTED],
+      ["needs_reconnect", NOT_CONNECTED],
+      ["member_account", MEMBER_ACCOUNT],
+      ["upstream_error", REFUSAL_SENTENCE.upstream_error],
+      ["unknown_turn", REFUSAL_SENTENCE.unknown_turn],
+    ] as const) {
+      api.connectorControl = { refusal };
+      const r = await tool("ocw_connector_call").execute("tc-1", {
+        connector: "m1a2b3c4d",
+        tool: "whoami",
+        arguments: {},
+      });
+      expect(text(r), refusal).toBe(expected);
+      expect(JSON.stringify(r)).not.toContain(FAKE_ERROR_CANARY);
+    }
+    api.connectorControl = { refusal: "host_not_allowed" };
+    const http = await tool("ocw_http_request").execute("tc-2", {
+      handle: "k_abcdefgh23",
+      method: "GET",
+      url: "https://elsewhere.example/",
+    });
+    expect(text(http)).toBe(REFUSAL_SENTENCE.host_not_allowed);
   });
 });

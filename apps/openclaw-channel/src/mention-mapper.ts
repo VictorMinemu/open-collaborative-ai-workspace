@@ -5,8 +5,10 @@ import {
   type AgentChannelRosterEntry,
   type AgentMentionEvent,
   type CellAgent,
+  CONNECTOR_LOGICAL_TOOL,
   EMPTY_TURN,
   type TurnContext,
+  type TurnWithheld,
 } from "./agent-channel-protocol.js";
 import { withTurnScopedTools } from "./turn-scoped-tools.js";
 
@@ -127,21 +129,68 @@ export type MappedMention = {
   /** `turn.tools ∩ agentTools`: the per-run `toolsAllow` cap (empty → tools disabled). */
   allowedTools: string[];
   /**
+   * 07.4 (D-07): the turn's per-member logical connector tools `<connector>__<tool>`, which only `ocw_connector_call`
+   * runs (through the API). Never OpenClaw tools (not in the bot's alsoAllow, so not in `allowedTools`): the gate and the
+   * tool check a call's logical tool against this list. Empty unless the run may use `ocw_connector_call`.
+   */
+  connectorTools: string[];
+  /**
    * Structured per-turn context: the asker's local time, the turn's memory files (the private `MEMORY.md` in a DM only,
    * the bot's notebook) or, from an older API, the bot's notes about the asker (DM only).
    */
   contextBlocks: ContextBlock[];
 };
 
-/** Why a tool was withheld, in words the persona can repeat (06-10, D-06). Unknown reasons stay neutral. */
-function withheldReason(reason: string, askerName: string): string {
-  switch (reason) {
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+/** A name inside Markdown link text: sanitized, without the brackets, parentheses or backslashes of link syntax. */
+function linkText(name: string): string {
+  const cleaned = sanitizeName(name)
+    .replace(/[[\]()\\]/gu, "")
+    .replace(/\s{2,}/gu, " ")
+    .trim();
+  return cleaned || "unknown";
+}
+
+type WithheldConversation = { id: string; label: string };
+
+/**
+ * `member_account` (07.4 D-03, UI-SPEC R7): the tool would act with the asker's own account or personal key, which stays
+ * private here. The sentence names the account and, for a known connector or key and a conversation with UUID ids, a
+ * root-relative link to the share page (the chat renderer's safeUrl keeps it); anything else gets no link.
+ */
+function memberAccountReason(
+  resource: TurnWithheld["resource"],
+  askerName: string,
+  conversation: WithheldConversation,
+): string {
+  const param = resource?.kind === "connector" ? "connector" : resource?.kind === "vault_item" ? "key" : null;
+  const name = resource && param ? linkText(resource.name) : null;
+  const account =
+    param === "connector"
+      ? `${askerName}'s own ${name} account`
+      : param === "key"
+        ? `${askerName}'s own key ${name}`
+        : `${askerName}'s own account`;
+  const base = `uses ${account}, which stays private in this conversation; ${askerName} can ask you in a private chat`;
+  if (!resource || !param || !UUID.test(resource.id) || !UUID.test(conversation.id)) {
+    return `${base}, or allow it in Settings › Connections`;
+  }
+  const href = `/settings/connections?share=${encodeURIComponent(conversation.id)}&${param}=${encodeURIComponent(resource.id)}`;
+  return `${base}, or allow it here: [Allow ${name} in ${linkText(conversation.label)}](${href})`;
+}
+
+/** Why a tool was withheld, in words the persona can repeat (06-10, D-06; 07.4 R7). Unknown reasons stay neutral. */
+function withheldReason(w: TurnWithheld, askerName: string, conversation: WithheldConversation): string {
+  switch (w.reason) {
     case "not_every_participant":
       return "not everyone in this conversation may use it";
     case "shared_with_group":
       return "this chat is shared with a team, a department or the whole organization";
     case "denied_for_you":
       return `${askerName} may not use it`;
+    case "member_account":
+      return memberAccountReason(w.resource, askerName, conversation);
     default:
       return "not available in this conversation";
   }
@@ -154,6 +203,7 @@ function turnContextBlocks(
   askerName: string,
   direct: boolean,
   botName: string,
+  conversation: WithheldConversation,
 ): ContextBlock[] {
   const blocks: ContextBlock[] = [];
   // Data, not instructions: the persona can say what it could not use here and why (it never gets the tool).
@@ -164,7 +214,9 @@ function turnContextBlocks(
       source: "ocw",
       type: "withheld_tools",
       payload: {
-        withheld: withheld.map((w) => `${sanitizeName(w.tool)} — ${withheldReason(w.reason, askerName)}`),
+        withheld: withheld.map(
+          (w) => `${sanitizeName(w.tool)} — ${withheldReason(w, askerName, conversation)}`,
+        ),
       },
     });
   }
@@ -227,7 +279,20 @@ export function mapMention(event: AgentMentionEvent, bot: CellAgent | undefined)
   const agentTools = withTurnScopedTools(bot?.capabilities?.tools);
   const agentToolSet = new Set(agentTools);
   const allowedTools = [...new Set(turn.tools)].filter((t) => agentToolSet.has(t));
+  // An in-cell (org) MCP tool is configured in the bot's entry; a per-member one never is (the API proxies it).
+  const connectorTools = allowedTools.includes("ocw_connector_call")
+    ? [...new Set(turn.tools)].filter((t) => CONNECTOR_LOGICAL_TOOL.test(t) && !agentToolSet.has(t))
+    : [];
   const askerName = sanitizeName(author.displayName);
+  const conversationLabel = direct
+    ? `Direct chat with ${sanitizeName(author.displayName)}`
+    : aiChat
+      ? event.conversation.name
+        ? `AI chat “${sanitizeName(event.conversation.name).replace(/[“”"]/gu, "")}”`
+        : "AI chat"
+      : event.conversation.name
+        ? `#${sanitizeName(event.conversation.name)}`
+        : event.conversation.id;
   const history = event.threadHistory.map((line) => ({
     id: line.id,
     sender: principalLabel(line.author),
@@ -251,15 +316,7 @@ export function mapMention(event: AgentMentionEvent, bot: CellAgent | undefined)
       name: sanitizeName(author.displayName),
       isBot: author.kind !== "user",
     },
-    conversationLabel: direct
-      ? `Direct chat with ${sanitizeName(author.displayName)}`
-      : aiChat
-        ? event.conversation.name
-          ? `AI chat “${sanitizeName(event.conversation.name).replace(/[“”"]/gu, "")}”`
-          : "AI chat"
-        : event.conversation.name
-          ? `#${sanitizeName(event.conversation.name)}`
-          : event.conversation.id,
+    conversationLabel,
     groupMembers: formatGroupMembers(event.roster),
     mentionedUserIds: event.message.mentions.filter((m) => m.kind === "user").map((m) => m.id),
     body: event.message.text,
@@ -284,7 +341,11 @@ export function mapMention(event: AgentMentionEvent, bot: CellAgent | undefined)
     turn,
     agentTools,
     allowedTools,
-    contextBlocks: turnContextBlocks(turn, askerName, direct, sanitizeName(event.agent.displayName)),
+    connectorTools,
+    contextBlocks: turnContextBlocks(turn, askerName, direct, sanitizeName(event.agent.displayName), {
+      id: event.conversation.id,
+      label: conversationLabel,
+    }),
   };
 }
 

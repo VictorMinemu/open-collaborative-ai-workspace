@@ -317,6 +317,176 @@ describe("tool guard under abuse (Task 3)", () => {
     expect(fake.requests.map((r) => r.tool)).toEqual(["web_search"]);
   });
 
+  describe("connector and keychain tools (07.4 D-07)", () => {
+    const LIST = { untrustedOutput: false, sideEffecting: false };
+    const READ_ONLY = { untrustedOutput: true, sideEffecting: false };
+    const connectorTurn = (over: Partial<TurnContext> = {}) =>
+      turn({
+        tools: ["web_search", "ocw_connector_list", "ocw_connector_call", "m1a2b3c4d__whoami"],
+        toolFlags: {
+          web_search: WEB,
+          ocw_connector_list: LIST,
+          ocw_connector_call: READ_ONLY,
+          m1a2b3c4d__whoami: READ_ONLY,
+        },
+        ...over,
+      });
+    const CALL = { connector: "m1a2b3c4d", tool: "whoami", arguments: {} };
+
+    it("ocw_connector_call is validated by its own route: never sent to /tool-calls, still counted locally", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, {
+        eventId: "evt-1",
+        agentId: "a1",
+        turn: connectorTurn(),
+        connectorTools: ["m1a2b3c4d__whoami"],
+      });
+      expect(await g.beforeToolCall(call("ocw_connector_call", CALL), ctx())).toBeUndefined();
+      expect(fake.requests).toHaveLength(0);
+      expect(g.activeTurn(SESSION)?.calls).toBe(1);
+      // A connector's output is untrusted: the turn is read-only from here on.
+      expect(g.activeTurn(SESSION)?.tainted).toBe(true);
+    });
+
+    it("the three tools never reach /tool-calls", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, {
+        eventId: "evt-1",
+        agentId: "a1",
+        turn: connectorTurn({ tools: [...connectorTurn().tools, "ocw_http_request"] }),
+        connectorTools: ["m1a2b3c4d__whoami"],
+      });
+      expect(await g.beforeToolCall(call("ocw_connector_list"), ctx())).toBeUndefined();
+      expect(await g.beforeToolCall(call("ocw_connector_call", CALL), ctx())).toBeUndefined();
+      expect(
+        await g.beforeToolCall(
+          call("ocw_http_request", {
+            handle: "k_abcdefgh23",
+            method: "GET",
+            url: "https://api.example.com/",
+          }),
+          ctx(),
+        ),
+      ).toBeUndefined();
+      expect(fake.requests).toHaveLength(0);
+      expect(g.activeTurn(SESSION)?.calls).toBe(3);
+    });
+
+    it("ocw_connector_call takes the LOGICAL tool's flags: a side-effecting one is blocked once tainted, a read-only one is not", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, {
+        eventId: "evt-1",
+        agentId: "a1",
+        turn: connectorTurn({
+          toolFlags: {
+            ...connectorTurn().toolFlags,
+            // The static tool's own flags never decide: the logical tool's do.
+            ocw_connector_call: LIST,
+            m1a2b3c4d__create_deal: { untrustedOutput: false, sideEffecting: true },
+          },
+        }),
+        connectorTools: ["m1a2b3c4d__whoami", "m1a2b3c4d__create_deal"],
+      });
+      // Before any untrusted output, the side-effecting tool runs.
+      expect(
+        await g.beforeToolCall(call("ocw_connector_call", { ...CALL, tool: "create_deal" }), ctx()),
+      ).toBeUndefined();
+      expect(g.activeTurn(SESSION)?.tainted).toBe(false);
+      // A read-only connector tool's output is untrusted: it taints the turn.
+      expect(await g.beforeToolCall(call("ocw_connector_call", CALL), ctx())).toBeUndefined();
+      expect(g.activeTurn(SESSION)?.tainted).toBe(true);
+      const write = await g.beforeToolCall(
+        call("ocw_connector_call", { ...CALL, tool: "create_deal" }),
+        ctx(),
+      );
+      expect(write?.blockReason).toMatch(/read-only after untrusted content/u);
+      // A read-only tool still runs on a tainted turn.
+      expect(await g.beforeToolCall(call("ocw_connector_call", CALL), ctx())).toBeUndefined();
+    });
+
+    it("a logical tool the turn does not list is blocked; one without flags is UNKNOWN (blocked once tainted)", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, {
+        eventId: "evt-1",
+        agentId: "a1",
+        turn: connectorTurn(),
+        connectorTools: ["m1a2b3c4d__whoami", "m1a2b3c4d__mystery"],
+      });
+      const absent = await g.beforeToolCall(
+        call("ocw_connector_call", { ...CALL, tool: "delete_all" }),
+        ctx(),
+      );
+      expect(absent?.blockReason).toMatch(/not allowed on this turn/u);
+      const invalid = await g.beforeToolCall(
+        call("ocw_connector_call", { connector: "../x", tool: "a" }),
+        ctx(),
+      );
+      expect(invalid?.blockReason).toMatch(/not allowed on this turn/u);
+      // A logical tool only in turn.tools (an OpenClaw tool) is not a connector tool.
+      expect(
+        (await g.beforeToolCall(call("ocw_connector_call", { connector: "m1a2b3c4d", tool: "nope" }), ctx()))
+          ?.blockReason,
+      ).toMatch(/not allowed on this turn/u);
+      // Unknown flags: the most dangerous combination (untrusted + side-effecting) — runs on a clean turn, taints it.
+      expect(
+        await g.beforeToolCall(call("ocw_connector_call", { ...CALL, tool: "mystery" }), ctx()),
+      ).toBeUndefined();
+      expect(g.activeTurn(SESSION)?.tainted).toBe(true);
+      const again = await g.beforeToolCall(call("ocw_connector_call", { ...CALL, tool: "mystery" }), ctx());
+      expect(again?.blockReason).toMatch(/read-only after untrusted content/u);
+    });
+
+    it("ocw_http_request: GET/HEAD read (allowed on a tainted turn), any other method is side-effecting (blocked)", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, {
+        eventId: "evt-1",
+        agentId: "a1",
+        turn: connectorTurn({
+          tools: [...connectorTurn().tools, "ocw_http_request"],
+          // Even a turn that calls the static tool harmless cannot make a POST read-only.
+          toolFlags: { ...connectorTurn().toolFlags, ocw_http_request: LIST },
+        }),
+        connectorTools: ["m1a2b3c4d__whoami"],
+      });
+      const req = (method: string) =>
+        call("ocw_http_request", { handle: "k_abcdefgh23", method, url: "https://a.b/" });
+      // A POST on a clean turn runs; its response is untrusted and taints the turn.
+      expect(await g.beforeToolCall(req("POST"), ctx())).toBeUndefined();
+      expect(g.activeTurn(SESSION)?.tainted).toBe(true);
+      expect(await g.beforeToolCall(req("GET"), ctx())).toBeUndefined();
+      expect(await g.beforeToolCall(req("head"), ctx())).toBeUndefined();
+      for (const method of ["POST", "PUT", "PATCH", "DELETE", "BREW"]) {
+        expect((await g.beforeToolCall(req(method), ctx()))?.blockReason, method).toMatch(
+          /read-only after untrusted content/u,
+        );
+      }
+    });
+
+    it("ocw_connector_list is always allowed when offered, also on a tainted turn; never when not offered", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, {
+        eventId: "evt-1",
+        agentId: "a1",
+        // No flags delivered for the list: still a read of the workspace's own catalog.
+        turn: connectorTurn({ toolFlags: { web_search: WEB } }),
+        connectorTools: ["m1a2b3c4d__whoami"],
+      });
+      expect(await g.beforeToolCall(call("web_search", { query: "q" }), ctx())).toBeUndefined();
+      expect(g.activeTurn(SESSION)?.tainted).toBe(true);
+      expect(await g.beforeToolCall(call("ocw_connector_list"), ctx())).toBeUndefined();
+      g.beginTurn(SESSION, { eventId: "evt-2", agentId: "a1", turn: turn() });
+      expect((await g.beforeToolCall(call("ocw_connector_list"), ctx()))?.blockReason).toMatch(
+        /not allowed/u,
+      );
+    });
+  });
+
   describe("memory file tools (07.2-07, D-08)", () => {
     const READ = { untrustedOutput: false, sideEffecting: false };
     const memoryTurn = (flags: Record<string, { untrustedOutput: boolean; sideEffecting: boolean }> = {}) =>
