@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 125
+open_count: 126
 waived_count: 4
-fixed_count: 58
-total_count: 187
-last_updated: 2026-10-14T00:54:31.132Z
+fixed_count: 59
+total_count: 189
+last_updated: 2026-10-14T00:55:32.956Z
 ---
 
 # Broken Windows Ledger
@@ -185,7 +185,7 @@ last_updated: 2026-10-14T00:54:31.132Z
 | 168 | 07.2 | deviation | apps/api/src/modules/agent-channel |  | Stored cell stream events keep private memory content (turn payloads) and forgetting a scope does not purge them | open |  | 2026-10-13T15:20:09.851Z |  |
 | 169 | 07.4 | deviation | packages/db/src/schema/app.ts |  | Cross-org ids: 07.4 FKs check ids only (RLS bypassed), so a row can reference another org's server/key/agent/template; the API must resolve every id inside withTenant (same pattern as bot_tool_grants) | open |  | 2026-10-13T22:54:38.207Z |  |
 | 170 | 07.4 | deviation | packages/db/src/schema/app.ts |  | No owner-only restrictive DB policy on personal keys or member connector connections (only tenant isolation); enforce owner-only in the API (07.4-07/10) and add a restrictive policy before the gate, as 07.2 did for personal memory | open |  | 2026-10-13T22:54:38.296Z |  |
-| 171 | 07.4 | deviation | packages/db/src/schema/app.ts |  | Template versions are immutable only in the API (no trigger); share resource_id has no FK so deleting a connector or key leaves an inert share row | open |  | 2026-10-13T22:54:38.389Z |  |
+| 171 | 07.4 | deviation | packages/db/src/schema/app.ts |  | Template versions are immutable only in the API (no trigger); share resource_id has no FK so deleting a connector or key leaves an inert share row | fixed |  | 2026-10-13T22:54:38.389Z | 2026-10-14T00:55:32.808Z |
 | 172 | 07.4 | deviation | packages/db/src/schema/app.ts |  | vault_items.secret_ref accepts env/file/openbao providers in the DB; D-07 db-only must be enforced by the API; SecretsService.putSealed must accept connector_credential and vault_item (07.4-07/10) | fixed |  | 2026-10-13T22:54:38.476Z | 2026-10-14T00:13:09.654Z |
 | 173 | 07.4 | deviation | infra/fake-model/fake-mcp-oauth.mjs |  | The fake shares DCR/CIMD clients across issuers (main and alt); 07.4-10 must prove in the API that client credentials are never reused across issuers; default cimdFetch never runs in tests | fixed |  | 2026-10-13T22:56:12.635Z | 2026-10-14T00:13:21.114Z |
 | 174 | 07.4 | deviation | .planning/phases/07.4-per-member-connectors-agent-keychain-and-templates/07.4-VALIDATION.md |  | Plans and VALIDATION use 'node --test infra/fake-model/' which Node 24 treats as a file; use the glob form | open |  | 2026-10-13T22:56:12.721Z |  |
@@ -202,6 +202,8 @@ last_updated: 2026-10-14T00:54:31.132Z
 | 185 | 07.4 | deviation | infra/openclaw/test/run-container-smoke.sh |  | Without SMOKE_BUILD the marketplace scenario fails on macOS Docker Desktop (docker cp leaves install-policy.mjs as uid 501); CI unaffected | open |  | 2026-10-14T00:27:30.826Z |  |
 | 186 | 07.4 | deviation | packages/db/sql/post-migrate.sql |  | If #170 adds an owner-only policy on connector_connections, the admin member count and clear-on-switch/delete will only see the admin's rows and leave other members' credentials behind silently; that policy needs an mcp.manage path (07.4-10) | open |  | 2026-10-14T00:54:31.051Z |  |
 | 187 | 07.4 | deviation | apps/web/components/ui/badge.tsx |  | Shared Badge warning variant fails contrast in light mode (1.91:1); 'Probing' still uses it; PanelDialog close is 32 px at 390 | open |  | 2026-10-14T00:54:31.132Z |  |
+| 188 | 07.4 | deviation | e2e/support/a11y.ts |  | The a11y helper waits for infinite animations (pulse, spinner, skeleton) and hangs to timeout; specs cancel them before axe; fix in the helper | open |  | 2026-10-14T00:55:32.882Z |  |
+| 189 | 07.4 | deviation | apps/web/components/bots |  | Template 'Connect' links point to /settings/connections (built by 07.4-13); the empty state copy above Templates predates templates; skip notices are generic (no effective value in the contract) | open |  | 2026-10-14T00:55:32.956Z |  |
 
 ````json
 [
@@ -2252,10 +2254,10 @@ last_updated: 2026-10-14T00:54:31.132Z
     "file": "packages/db/src/schema/app.ts",
     "line": null,
     "description": "Template versions are immutable only in the API (no trigger); share resource_id has no FK so deleting a connector or key leaves an inert share row",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T22:54:38.389Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-14T00:55:32.808Z"
   },
   {
     "id": 172,
@@ -2447,6 +2449,30 @@ last_updated: 2026-10-14T00:54:31.132Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-14T00:54:31.132Z",
+    "resolved_at": null
+  },
+  {
+    "id": 188,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "e2e/support/a11y.ts",
+    "line": null,
+    "description": "The a11y helper waits for infinite animations (pulse, spinner, skeleton) and hangs to timeout; specs cancel them before axe; fix in the helper",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T00:55:32.882Z",
+    "resolved_at": null
+  },
+  {
+    "id": 189,
+    "kind": "deviation",
+    "phase": "07.4",
+    "file": "apps/web/components/bots",
+    "line": null,
+    "description": "Template 'Connect' links point to /settings/connections (built by 07.4-13); the empty state copy above Templates predates templates; skip notices are generic (no effective value in the contract)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T00:55:32.956Z",
     "resolved_at": null
   }
 ]
