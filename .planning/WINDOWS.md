@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 124
+open_count: 123
 waived_count: 4
-fixed_count: 70
+fixed_count: 71
 total_count: 198
-last_updated: 2026-10-14T04:20:46.057Z
+last_updated: 2026-10-14T04:20:55.677Z
 ---
 
 # Broken Windows Ledger
@@ -188,7 +188,7 @@ last_updated: 2026-10-14T04:20:46.057Z
 | 171 | 07.4 | deviation | packages/db/src/schema/app.ts |  | Template versions are immutable only in the API (no trigger); share resource_id has no FK so deleting a connector or key leaves an inert share row | fixed |  | 2026-10-13T22:54:38.389Z | 2026-10-14T00:55:32.808Z |
 | 172 | 07.4 | deviation | packages/db/src/schema/app.ts |  | vault_items.secret_ref accepts env/file/openbao providers in the DB; D-07 db-only must be enforced by the API; SecretsService.putSealed must accept connector_credential and vault_item (07.4-07/10) | fixed |  | 2026-10-13T22:54:38.476Z | 2026-10-14T00:13:09.654Z |
 | 173 | 07.4 | deviation | infra/fake-model/fake-mcp-oauth.mjs |  | The fake shares DCR/CIMD clients across issuers (main and alt); 07.4-10 must prove in the API that client credentials are never reused across issuers; default cimdFetch never runs in tests | fixed |  | 2026-10-13T22:56:12.635Z | 2026-10-14T00:13:21.114Z |
-| 174 | 07.4 | deviation | .planning/phases/07.4-per-member-connectors-agent-keychain-and-templates/07.4-VALIDATION.md |  | Plans and VALIDATION use 'node --test infra/fake-model/' which Node 24 treats as a file; use the glob form | open |  | 2026-10-13T22:56:12.721Z |  |
+| 174 | 07.4 | deviation | .planning/phases/07.4-per-member-connectors-agent-keychain-and-templates/07.4-VALIDATION.md |  | Plans and VALIDATION use 'node --test infra/fake-model/' which Node 24 treats as a file; use the glob form | fixed |  | 2026-10-13T22:56:12.721Z | 2026-10-14T04:20:55.677Z |
 | 175 | 07.4 | deviation | apps/api/src/lib/egress.ts |  | MCP SDK OAuth helpers and transports fall back to global fetch without fetchFn and no rule catches the missing argument; every 07.4 SDK call must pass egress.bound(policy) (check in 07.4-10/11 and the gate) | fixed |  | 2026-10-13T22:56:48.885Z | 2026-10-14T02:33:13.785Z |
 | 176 | 07.4 | deviation | apps/api/src/lib/egress.ts |  | One undici Agent per request (no keep-alive reuse); privateAllow tested only up to the connect attempt | open |  | 2026-10-13T22:56:48.969Z |  |
 | 177 | 07.4 | deviation | packages/contracts/src/module-access.ts |  | HIGH: units/orgs with Bots already off hold the old 5 deny rules; the catalog now has 7, so the API reads them as custom and does not deny connector.connect / vault.use until Bots is toggled again; needs a backfill migration | open |  | 2026-10-13T23:06:14.969Z |  |
@@ -2299,10 +2299,10 @@ last_updated: 2026-10-14T04:20:46.057Z
     "file": ".planning/phases/07.4-per-member-connectors-agent-keychain-and-templates/07.4-VALIDATION.md",
     "line": null,
     "description": "Plans and VALIDATION use 'node --test infra/fake-model/' which Node 24 treats as a file; use the glob form",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-13T22:56:12.721Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-14T04:20:55.677Z"
   },
   {
     "id": 175,
