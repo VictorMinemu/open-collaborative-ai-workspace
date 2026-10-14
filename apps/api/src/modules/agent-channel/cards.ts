@@ -19,7 +19,7 @@ import {
   type Tx,
   tenantOf,
 } from "@ocw/db";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import type { App, Core } from "../../core";
 import type { AgentMention, CardAction } from "../../lib/chat-agent-bridge";
 import { badRequest, HttpError, notFound } from "../../lib/errors";
@@ -191,6 +191,10 @@ type StoredCardAction = Omit<AgentCardActionEvent, "seq">;
  * "<actor> approved|denied “<title>”" (plus `: “<note>”` when the decider wrote one) as text, in the card's thread (flat where the conversation is flat), then appended
  * to `cell:<org>` as `agent.card_action.v1`. No event when none is produced (disabled agent, daily limit): the decision
  * stands either way.
+ *
+ * Phase 07.5 (P-06): a grant approval's re-run is delivered for `turnUserId` (the asker: author, `agent_turns.user_id`,
+ * tools and limits), only while that human still reads the conversation; the sentence keeps the decider's name and the
+ * payload names them in `decidedBy` and carries the `grant`. `tainted` marks the new turn rows before the append.
  */
 export async function emitCardAction(
   core: Core,
@@ -215,7 +219,16 @@ export async function emitCardAction(
     .limit(1);
   if (!conv) return;
   const { organizationId } = tenantOf(tx);
-  const name = (await memberDirectory(tx)).get(a.actorUserId)?.displayName ?? "Former member";
+  const directory = await memberDirectory(tx);
+  const name = directory.get(a.actorUserId)?.displayName ?? "Former member";
+  // P-06: a grant's re-run belongs to the human it was asked for. That human must still read the conversation (a
+  // removed member, a lost grant): otherwise nothing is delivered and the decision stands. Never the decider instead.
+  const turnUserId = a.turnUserId ?? a.actorUserId;
+  if (a.turnUserId) {
+    const requester = directory.get(a.turnUserId);
+    if (!requester || !(await createConversationAccess(core).isReadable(tx, a.turnUserId, conv.id))) return;
+  }
+  const authorName = directory.get(turnUserId)?.displayName ?? "Former member";
   const flat = conv.kind === "dm" || conv.kind === "group" || conv.kind === "ai_chat";
   const mention: AgentMention = {
     organizationId,
@@ -223,7 +236,7 @@ export async function emitCardAction(
     threadRootId: flat ? message.id : (message.threadId ?? message.id),
     messageId: message.id,
     agentIds: [card.agentId],
-    author: { kind: "user", id: a.actorUserId, displayName: name },
+    author: { kind: "user", id: turnUserId, displayName: authorName },
     // A decision note is human-authored text: quoted after the server sentence, never reworded (UI-SPEC R4).
     body: `${name} ${a.outcome} “${card.title}”${a.note ? `: “${a.note}”` : ""}`,
     createdAt: new Date().toISOString(),
@@ -236,11 +249,31 @@ export async function emitCardAction(
     modelLabel: opts.modelLabel,
     memory: opts.memory,
   });
+  // Taint never escapes through a re-run (T-07.5-06-07): the turn rows written for these events start tainted, in this
+  // transaction, before any event is appended, so the cell can never act on an untainted re-run.
+  if (a.tainted && events.length > 0) {
+    await tx
+      .update(agentTurns)
+      .set({ tainted: true })
+      .where(
+        inArray(
+          agentTurns.eventId,
+          events.map((ev) => ev.eventId),
+        ),
+      );
+  }
   for (const ev of events) {
     const payload: StoredCardAction = {
       ...ev,
       type: AgentChannelEventTypes.cardAction,
-      cardAction: { messageId: card.messageId, kind: card.kind, title: card.title, outcome: a.outcome },
+      cardAction: {
+        messageId: card.messageId,
+        kind: card.kind,
+        title: card.title,
+        outcome: a.outcome,
+        ...(a.decidedBy ? { decidedBy: a.decidedBy } : {}),
+        ...(a.grant && a.outcome === "approved" ? { grant: a.grant } : {}),
+      },
     };
     await core.realtime.appendEvent(
       tx,

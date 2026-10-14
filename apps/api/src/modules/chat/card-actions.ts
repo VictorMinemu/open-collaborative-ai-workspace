@@ -13,7 +13,7 @@ import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { markDecided } from "../../authz";
 import { type App, authOf, type Core, tenant } from "../../core";
-import type { ChatAgentBridge, LinkedCardInfo } from "../../lib/chat-agent-bridge";
+import type { CardAction, ChatAgentBridge, LinkedCardInfo } from "../../lib/chat-agent-bridge";
 import { badRequest, conflict, forbidden, gone, notFound } from "../../lib/errors";
 import { channelResource, type PermissionService } from "../organization";
 import { authorOf, type Directory, loadDirectory } from "./directory";
@@ -62,19 +62,12 @@ async function linksOf(tx: Tx, rows: CardRow[]): Promise<Map<string, LinkedCardI
   return linked.linkOf(tx, owned);
 }
 
+/**
+ * The card's approval link as the provider composed it: the 07.2 fields, plus the 07.5 extras (kind, expiry, use time
+ * and the kind's own fields) only for kinds that have them. No viewer field, so realtime events may carry it.
+ */
 const approvalLink = (link: LinkedCardInfo | undefined): Pick<AgentCard, "approval"> =>
-  link
-    ? {
-        approval: {
-          id: link.id,
-          actionHash: link.actionHash,
-          status: link.status,
-          requestedForUserId: link.requestedForUserId,
-          warnings: link.warnings,
-          resultCode: link.resultCode,
-        },
-      }
-    : {};
+  link ? { approval: { ...link } } : {};
 
 function cardFromRow(row: CardRow, dir: Directory | null): AgentCard {
   const decision: AgentCard["decision"] =
@@ -343,7 +336,8 @@ export async function announceCardMessage(
  * Mirrors an approval's decision on its platform-owned card (07.2-06), in the decision transaction: status, decision,
  * decider and note, a version bump, `message.updated` to every reader, then the agent hears it as
  * `agent.card_action.v1` (with the quoted note). Once: a card that already shows a decision is left as it is. Called
- * by the approval module only; chat never decides an approval itself.
+ * by the approval module only; chat never decides an approval itself. The 07.5 turn fields (`turnUserId`,
+ * `decidedBy`, `grant`, `tainted`) pass through to the card action unchanged (P-06).
  */
 export async function mirrorCardDecision(
   tx: Tx,
@@ -352,9 +346,10 @@ export async function mirrorCardDecision(
     messageId: string;
     outcome: "approved" | "denied";
     deciderUserId: string;
-    status: "succeeded" | "failed" | "cancelled";
+    /** `running`: an approved grant not used yet (WINDOWS 135); `mirrorCardUsed` turns it `succeeded` on use. */
+    status: "running" | "succeeded" | "failed" | "cancelled";
     note?: string | null | undefined;
-  },
+  } & Pick<CardAction, "turnUserId" | "decidedBy" | "grant" | "tainted">,
 ): Promise<void> {
   const [after] = await tx
     .update(messageCards)
@@ -385,9 +380,44 @@ export async function mirrorCardDecision(
   }
   await deps.chatAgent.emitCardAction(
     tx,
-    { messageId: a.messageId, outcome: a.outcome, actorUserId: a.deciderUserId, note: a.note ?? undefined },
+    {
+      messageId: a.messageId,
+      outcome: a.outcome,
+      actorUserId: a.deciderUserId,
+      note: a.note ?? undefined,
+      ...(a.turnUserId ? { turnUserId: a.turnUserId } : {}),
+      ...(a.decidedBy ? { decidedBy: a.decidedBy } : {}),
+      ...(a.grant ? { grant: a.grant } : {}),
+      ...(a.tainted ? { tainted: true } : {}),
+    },
     tenantOf(tx).afterCommit,
   );
+}
+
+/**
+ * Marks the platform-owned card of an approved grant as used (WINDOWS 135): `running` → `succeeded`, a version bump
+ * and `message.updated` to every reader (the link then shows `applied` and `usedAt`). No card action turn: using the
+ * grant is the bot's own call, not a decision. Once: any other card state is left as it is. Called by the approval
+ * module only, inside the transaction that consumed the grant (approval row locked first, then the card).
+ */
+export async function mirrorCardUsed(
+  tx: Tx,
+  deps: Pick<Core, "realtime">,
+  a: { messageId: string },
+): Promise<void> {
+  const [after] = await tx
+    .update(messageCards)
+    .set({ status: "succeeded", version: sql`${messageCards.version} + 1`, updatedAt: sql`now()` })
+    .where(
+      and(
+        eq(messageCards.messageId, a.messageId),
+        eq(messageCards.platformOwned, true),
+        eq(messageCards.status, "running"),
+        eq(messageCards.decision, "approved"),
+      ),
+    )
+    .returning({ messageId: messageCards.messageId });
+  if (after) await announceCardMessage(tx, deps, a.messageId);
 }
 
 /**

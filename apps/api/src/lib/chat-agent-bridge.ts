@@ -1,4 +1,9 @@
-import type { AgentCardInput, ApprovalRequestStatus, ApprovalSummary } from "@ocw/contracts";
+import type {
+  AgentCardApprovalLink,
+  AgentCardInput,
+  ApprovalRequestStatus,
+  ApprovalSummary,
+} from "@ocw/contracts";
 import type { AfterCommit, TenantCtx, Tx } from "@ocw/db";
 
 /**
@@ -101,10 +106,23 @@ export interface CardAction {
   actorUserId: string;
   /** The decider's note (UI-SPEC R4), quoted in the agent's turn. */
   note?: string | undefined;
+  /**
+   * Phase 07.5 (P-06, ADR-0020 extension for `grant` approval kinds only): the human the turn is delivered for (the
+   * request's `requested_for_user_id`), so tools, credentials and the daily limit are the asker's. Absent = the decider
+   * (`actorUserId`), as for every plain Agent Card. When set, that human must still read the conversation, otherwise
+   * no turn is delivered (never a fallback to the decider).
+   */
+  turnUserId?: string | undefined;
+  /** Who decided, named in the payload (`cardAction.decidedBy`) because the turn's human may be someone else. */
+  decidedBy?: { id: string; displayName: string } | undefined;
+  /** An approved grant: the one call the bot may now make (`cardAction.grant`). */
+  grant?: { tool: string; arguments: string; useBy: string } | undefined;
+  /** The request came from a tainted turn: the re-run turn starts tainted (set in the same transaction). */
+  tainted?: boolean | undefined;
 }
 
-/** The approval a platform-owned card mirrors, as chat shows it (no viewer fields). */
-export interface LinkedCardInfo {
+/** The approval a platform-owned card mirrors, as chat shows it (no viewer fields): the 07.2 link. */
+interface LinkedCardBase {
   id: string;
   actionHash: string;
   status: ApprovalRequestStatus;
@@ -113,6 +131,27 @@ export interface LinkedCardInfo {
   /** Why an approved request failed to apply (the kind's code), null otherwise. */
   resultCode: string | null;
 }
+
+/**
+ * Phase 07.5 (UI-SPEC R6, R7, R9): what a kind with a `link` hook adds (the request's kind, expiry and use time, plus
+ * the kind's own fields). Every reader gets the same values, so they may ride realtime events; never an argument value.
+ */
+export type LinkedCardInfo = LinkedCardBase &
+  Partial<
+    Pick<
+      AgentCardApprovalLink,
+      | "kind"
+      | "expiresAt"
+      | "usedAt"
+      | "display"
+      | "useBy"
+      | "waitingFor"
+      | "actionFields"
+      | "deviceId"
+      | "resultRoute"
+      | "blocked"
+    >
+  >;
 
 /** Registered by the approval module: chat asks it about cards that mirror an approval. */
 export interface LinkedCards {

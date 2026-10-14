@@ -1,4 +1,5 @@
 import {
+  AgentCardApprovalLink,
   AgentCardInput,
   type ApprovalDetail,
   ApprovalHeadline,
@@ -12,7 +13,7 @@ import {
 import { approvalRequests, type Tx, tenantOf, withSavepoint } from "@ocw/db";
 import { and, desc, eq, inArray, isNull, lt, type SQL, sql } from "drizzle-orm";
 import type { Core } from "../../core";
-import type { LinkedCardInfo, LinkedCards } from "../../lib/chat-agent-bridge";
+import type { CardAction, LinkedCardInfo, LinkedCards } from "../../lib/chat-agent-bridge";
 import { conflict, forbidden, HttpError, notFound } from "../../lib/errors";
 import {
   announceCardMessage,
@@ -21,6 +22,7 @@ import {
   loadDirectory,
   mirrorCardClosed,
   mirrorCardDecision,
+  mirrorCardUsed,
 } from "../chat";
 import { actionHash } from "./hash";
 import {
@@ -140,6 +142,22 @@ const CARD_STATUS = {
 
 const MAX_WARNINGS = 3;
 
+/** The kind-composed fields of a card's approval link (`ApprovalKind.link`), validated against the contract. */
+const LinkExtras = AgentCardApprovalLink.pick({
+  display: true,
+  useBy: true,
+  waitingFor: true,
+  actionFields: true,
+  deviceId: true,
+  resultRoute: true,
+  blocked: true,
+});
+
+/** The pending `total` of a kinds-filtered inbox is capped here (nav badges and tab counts show "99+"). */
+const TOTAL_CAP = 100;
+/** How many pending rows one total may scan (a lower bound past it, like a short page with a cursor). */
+const TOTAL_SCAN_LIMIT = 1000;
+
 export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "chatAgent">): ApprovalService {
   const registry: ApprovalRegistry = createApprovalRegistry();
 
@@ -189,16 +207,53 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
     };
   }
 
-  /** The kind's inbox line, parsed (a kind without one, or a bad one, leaves the summary as it is). */
+  /** The kind's inbox line for this viewer, parsed; null for a kind without one, or a bad one. */
+  async function headlineOf(
+    tx: Tx,
+    kind: ApprovalKind,
+    row: ApprovalRow,
+    viewerUserId: string,
+  ): Promise<ApprovalHeadline | null> {
+    if (!kind.headline) return null;
+    const parsed = ApprovalHeadline.safeParse(await kind.headline(tx, row, viewerUserId));
+    return parsed.success ? parsed.data : null;
+  }
+
+  /** The detail's summary with the kind's inbox line (a kind without one, or a bad one, leaves the summary as it is). */
   async function withHeadline(
     tx: Tx,
     kind: ApprovalKind,
     row: ApprovalRow,
     summary: ApprovalSummary,
+    viewerUserId: string,
   ): Promise<ApprovalSummary> {
-    if (!kind.headline) return summary;
-    const parsed = ApprovalHeadline.safeParse(await kind.headline(tx, row));
-    return parsed.success ? { ...summary, headline: parsed.data } : summary;
+    const headline = await headlineOf(tx, kind, row, viewerUserId);
+    return headline ? { ...summary, headline } : summary;
+  }
+
+  /**
+   * A card's approval link (no viewer field): the 07.2 fields, and for a kind with a `link` hook (07.5, UI-SPEC R6, R7,
+   * R9) its kind, expiry and use time plus the kind's fields, parsed (an invalid result adds nothing of the kind's).
+   */
+  async function linkOf(tx: Tx, row: Locked): Promise<LinkedCardInfo> {
+    const base: LinkedCardInfo = {
+      id: row.id,
+      actionHash: row.actionHash,
+      status: shownStatus(row),
+      requestedForUserId: row.requestedForUserId,
+      warnings: row.cardWarnings,
+      resultCode: row.resultCode,
+    };
+    const kind = registry.get(row.kind);
+    if (!kind?.link) return base;
+    const extras = LinkExtras.safeParse(await kind.link(tx, row));
+    return {
+      ...base,
+      kind: row.kind,
+      expiresAt: iso(row.expiresAt),
+      usedAt: row.consumedAt ? iso(row.consumedAt) : null,
+      ...(extras.success ? extras.data : {}),
+    };
   }
 
   /** The deciders' and the requester's `user:` streams (plus extra ids), ids and status only, never `org:`. */
@@ -242,15 +297,7 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
     async linkOf(tx, messageIds) {
       const out = new Map<string, LinkedCardInfo>();
       for (const row of await byCard(tx, messageIds)) {
-        if (!row.cardMessageId) continue;
-        out.set(row.cardMessageId, {
-          id: row.id,
-          actionHash: row.actionHash,
-          status: shownStatus(row),
-          requestedForUserId: row.requestedForUserId,
-          warnings: row.cardWarnings,
-          resultCode: row.resultCode,
-        });
+        if (row.cardMessageId) out.set(row.cardMessageId, await linkOf(tx, row));
       }
       return out;
     },
@@ -279,7 +326,9 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
   /**
    * Posts the platform-owned mirror of a new request where it was born: the kind composes title, fields, summary and
    * its Open action; the service forces kind `approval`, status `pending` and its own Approve action (no approver
-   * list: the kind decides), stores the kind's warnings and links the card to the request.
+   * list: the kind decides), stores the kind's warnings and links the card to the request. 07.5: a kind may turn the
+   * in-card decision off (`inlineDecision: false`, only the Open action; deciding stays `canDecide` behind the review
+   * and the card route) and name the Approve, Deny and Open buttons (`labels`).
    */
   async function postMirror(
     tx: Tx,
@@ -290,13 +339,18 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
     if (!kind.card) throw new Error(`approval kind "${kind.kind}" has no card`);
     const composed = await kind.card(tx, row);
     const warnings = (composed.warnings ?? []).slice(0, MAX_WARNINGS).map((w) => w.slice(0, 200));
+    const labels = composed.labels ?? {};
     const card = AgentCardInput.parse({
       ...composed.card,
       kind: "approval",
       status: "pending",
       actions: [
-        { kind: "approve", label: "Approve", denyLabel: "Deny" },
-        ...composed.card.actions.filter((a) => a.kind === "open"),
+        ...(composed.inlineDecision === false
+          ? []
+          : [{ kind: "approve", label: labels.approve ?? "Approve", denyLabel: labels.deny ?? "Deny" }]),
+        ...composed.card.actions
+          .filter((a) => a.kind === "open")
+          .map((a) => (labels.open ? { ...a, label: labels.open } : a)),
       ],
     });
     const posted = await core.chatAgent.postAgentMessageIn(tx, {
@@ -413,17 +467,23 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
         final = await applyApproved(tx, kind, decided, recomputed, input.deciderUserId);
       }
       await announce(tx, kind, final, [input.deciderUserId]);
+      const dir = await loadDirectory(tx);
       if (final.cardMessageId) {
         const status = final.status as keyof typeof CARD_STATUS;
         await mirrorCardDecision(tx, core, {
           messageId: final.cardMessageId,
           outcome: input.outcome,
           deciderUserId: input.deciderUserId,
-          status: CARD_STATUS[status] ?? "succeeded",
+          // WINDOWS 135: an approved grant is not done until the bot uses it (`consumeGrant` → succeeded).
+          status:
+            kind.mode === "grant" && final.status === "approved"
+              ? "running"
+              : (CARD_STATUS[status] ?? "succeeded"),
           note,
+          ...(await cardTurnOf(tx, kind, final, input, dir)),
         });
       }
-      return summaryOf({ ...final, expired: false }, await loadDirectory(tx), false);
+      return summaryOf({ ...final, expired: false }, dir, false);
     },
 
     async consumeGrant(tx, input) {
@@ -462,6 +522,8 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
         metadata: auditIds(used),
       });
       await announce(tx, kind, used, [used.decidedBy]);
+      // WINDOWS 135: the card turns from "approved" (running) to "used" (succeeded) only now; approval row first, then card.
+      if (used.cardMessageId) await mirrorCardUsed(tx, core, { messageId: used.cardMessageId });
       return { ok: true };
     },
 
@@ -516,7 +578,13 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
       const { canDecide, visible } = await visibility(tx, kind, row, viewerUserId);
       if (!visible) throw notFoundError();
       return {
-        ...(await withHeadline(tx, kind, row, summaryOf(row, await loadDirectory(tx), canDecide))),
+        ...(await withHeadline(
+          tx,
+          kind,
+          row,
+          summaryOf(row, await loadDirectory(tx), canDecide),
+          viewerUserId,
+        )),
         view: await kind.view(tx, row, viewerUserId),
       };
     },
@@ -526,10 +594,16 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
       if (q.role !== "decider" && q.role !== "requester") {
         throw new HttpError(400, "validation_error", "role must be decider or requester");
       }
+      // 07.5 (UI-SPEC R1): a kinds-filtered inbox also gets its pending `total`; without `kinds` the 07.2 shape stays.
+      const withTotal = q.kinds !== undefined;
       const kinds = registry.kinds();
-      if (kinds.length === 0) return { items: [], nextCursor: null };
-      const filters: SQL[] = [inArray(approvalRequests.kind, kinds)];
-      if (q.kind) filters.push(eq(approvalRequests.kind, q.kind));
+      if (kinds.length === 0) return { items: [], nextCursor: null, ...(withTotal ? { total: 0 } : {}) };
+      // Which requests the query is about, whatever their status (shared with the pending total).
+      const scope: SQL[] = [inArray(approvalRequests.kind, kinds)];
+      if (q.kind) scope.push(eq(approvalRequests.kind, q.kind));
+      if (q.kinds) scope.push(inArray(approvalRequests.kind, q.kinds));
+      if (q.role === "requester") scope.push(eq(approvalRequests.requestedForUserId, viewerUserId));
+      const filters: SQL[] = [...scope];
       if (q.status === "expired") {
         filters.push(eq(approvalRequests.status, "pending"), sql`${approvalRequests.expiresAt} <= now()`);
       } else if (q.status === "pending") {
@@ -537,7 +611,6 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
       } else if (q.status) {
         filters.push(eq(approvalRequests.status, q.status));
       }
-      if (q.role === "requester") filters.push(eq(approvalRequests.requestedForUserId, viewerUserId));
       const cursor = q.cursor ? decodeCursor(q.cursor) : null;
 
       const items: ApprovalSummary[] = [];
@@ -563,7 +636,11 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
           const { canDecide, visible } = await visibility(tx, kind, row, viewerUserId);
           if (!visible || !inRole(q.role, row, canDecide, viewerUserId)) continue;
           dir ??= await loadDirectory(tx);
-          items.push(await withHeadline(tx, kind, row, summaryOf(row, dir, canDecide)));
+          // Every listed row says whether its kind has a line: the kind's headline for this viewer, or null.
+          items.push({
+            ...summaryOf(row, dir, canDecide),
+            headline: await headlineOf(tx, kind, row, viewerUserId),
+          });
           if (items.length === PAGE) break scan;
         }
         if (batch.length < BATCH) {
@@ -571,9 +648,56 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
           break;
         }
       }
-      return { items, nextCursor: more && after ? encodeCursor(after) : null };
+      const nextCursor = more && after ? encodeCursor(after) : null;
+      if (!withTotal) return { items, nextCursor };
+      // A first page of pending requests that holds them all already is the total.
+      const total =
+        q.status === "pending" && !q.cursor && nextCursor === null
+          ? Math.min(items.length, TOTAL_CAP)
+          : await pendingTotal(tx, viewerUserId, q.role, scope);
+      return { items, nextCursor, total };
     },
   };
+
+  /**
+   * How many pending (not expired) requests in `scope` the viewer would list in `role`, by the same live visibility
+   * rule as `list`, capped at `TOTAL_CAP`; at most `TOTAL_SCAN_LIMIT` rows are read (then it is a lower bound).
+   */
+  async function pendingTotal(
+    tx: Tx,
+    viewerUserId: string,
+    role: "decider" | "requester",
+    scope: readonly SQL[],
+  ): Promise<number> {
+    const filters = [
+      ...scope,
+      eq(approvalRequests.status, "pending"),
+      sql`${approvalRequests.expiresAt} > now()`,
+    ];
+    let count = 0;
+    let scanned = 0;
+    let after: string | null = null;
+    while (scanned < TOTAL_SCAN_LIMIT) {
+      const batch = await tx
+        .select(withExpiry)
+        .from(approvalRequests)
+        .where(and(...filters, ...(after ? [lt(approvalRequests.id, after)] : [])))
+        .orderBy(desc(approvalRequests.id))
+        .limit(BATCH);
+      for (const r of batch) {
+        scanned += 1;
+        after = r.row.id;
+        const row: Locked = { ...r.row, expired: r.expired };
+        const kind = registry.get(row.kind);
+        if (!kind) continue;
+        const { canDecide, visible } = await visibility(tx, kind, row, viewerUserId);
+        if (visible && inRole(role, row, canDecide, viewerUserId)) count += 1;
+        if (count === TOTAL_CAP) return count;
+      }
+      if (batch.length < BATCH) break;
+    }
+    return count;
+  }
 
   /**
    * Consumes the one-use grant (conditional on the hash just recomputed) and applies the action in a savepoint: a
@@ -625,6 +749,32 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
       metadata: { ...auditIds(final), ...(result.ok ? {} : { resultCode: final.resultCode }) },
     });
     return final;
+  }
+
+  /**
+   * The card-action turn fields of a decision (P-06): every kind names the decider (`decidedBy`); a `grant` kind with a
+   * requester re-runs for that requester (`turnUserId`), carries its grant on `approved` and starts tainted when the
+   * request came from a tainted turn. `server_apply` kinds keep the decider as the turn's human (07.2 rule).
+   */
+  async function cardTurnOf(
+    tx: Tx,
+    kind: ApprovalKind,
+    row: ApprovalRow,
+    input: DecideInput,
+    dir: Directory,
+  ): Promise<Pick<CardAction, "turnUserId" | "decidedBy" | "grant" | "tainted">> {
+    const decidedBy = {
+      id: input.deciderUserId,
+      displayName: authorOf(dir, "user", input.deciderUserId).displayName,
+    };
+    if (kind.mode !== "grant" || !row.requestedForUserId) return { decidedBy };
+    const turn = kind.cardTurn ? await kind.cardTurn(tx, row) : null;
+    return {
+      decidedBy,
+      turnUserId: row.requestedForUserId,
+      ...(turn?.grant && input.outcome === "approved" ? { grant: turn.grant } : {}),
+      ...(turn?.sourceTainted === true ? { tainted: true } : {}),
+    };
   }
 
   return service;

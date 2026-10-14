@@ -1,4 +1,5 @@
 import {
+  type AgentCardApprovalLink,
   type AgentCardInput,
   type ApprovalHeadline,
   ApprovalKindId,
@@ -32,15 +33,24 @@ export interface ApprovalKind {
   view(tx: Tx, row: ApprovalRow, viewerUserId: string): Promise<ApprovalView>;
   /**
    * The one-line description an inbox row shows (title, where, who asked, chips), from the stored action. Called for
-   * every listed and viewed request, only after the visibility rule passed, so it may show what `view` shows.
+   * every listed and viewed request, only after the visibility rule passed, so it may show what `view` shows. The
+   * viewer is passed (07.5) so a kind may word it for them; it must never show more than that viewer may see.
    */
-  headline?(tx: Tx, row: ApprovalRow): Promise<ApprovalHeadline>;
+  headline?(tx: Tx, row: ApprovalRow, viewerUserId: string): Promise<ApprovalHeadline>;
   /**
    * The server-composed content of the card that mirrors the request in a conversation (title, fields, summary and an
    * Open action). The service forces kind `approval`, status `pending` and its own Approve action; `warnings` (at most
-   * three) are stored on the request and shown on the card.
+   * three) are stored on the request and shown on the card. 07.5 (P-07, UI-SPEC R6): `inlineDecision: false` posts no
+   * Approve action (deciding stays the kind's `canDecide`, on the review or through the card route); `labels` rename the
+   * Approve, Deny and Open buttons.
    */
-  card?(tx: Tx, row: ApprovalRow): Promise<{ card: AgentCardInput; warnings?: string[] }>;
+  card?(tx: Tx, row: ApprovalRow): Promise<ApprovalCardContent>;
+  /**
+   * 07.5 (UI-SPEC R6, R7, R9): what the card's approval link adds for every reader (labels, times, ids and routes only,
+   * never an argument value: it rides realtime events). Only kinds with this hook add `kind`, `expiresAt` and `usedAt`
+   * too; the others keep the exact 07.2 link. An invalid result is dropped.
+   */
+  link?(tx: Tx, row: ApprovalRow): Promise<ApprovalCardLink>;
   /** `server_apply` only: applies the approved action inside the decision transaction (in a savepoint). */
   apply?(tx: Tx, row: ApprovalRow, ctx: { deciderUserId: string }): Promise<ApplyResult>;
   /**
@@ -51,6 +61,34 @@ export interface ApprovalKind {
   gone?(tx: Tx, row: ApprovalRow): Promise<string | null>;
   /** True when the request concerns private data: the decision note is then audited as its length only. */
   isPrivate?(tx: Tx, row: ApprovalRow): Promise<boolean>;
+  /**
+   * `grant` kinds only (07.5, P-06): what the decision's card-action turn carries besides the decision. The turn is
+   * delivered for the human the request was made for (never the decider); `grant` (sent on `approved` only) tells the
+   * bot the one call it may now make; `sourceTainted` = the requesting turn had read untrusted content, so the re-run
+   * turn starts tainted (the grant lifts taint for its one claimed call only). Asked with the decided row.
+   */
+  cardTurn?(tx: Tx, row: ApprovalRow): Promise<ApprovalCardTurn | null>;
+}
+
+/** What a kind's `card` hook composes (07.2) plus the 07.5 button switches. */
+export interface ApprovalCardContent {
+  card: AgentCardInput;
+  warnings?: string[];
+  /** Default true: the card offers Approve / Deny in place. */
+  inlineDecision?: boolean;
+  labels?: { approve?: string; deny?: string; open?: string };
+}
+
+/** The kind-composed fields of a card's approval link (`ApprovalKind.link`). */
+export type ApprovalCardLink = Pick<
+  AgentCardApprovalLink,
+  "display" | "useBy" | "waitingFor" | "actionFields" | "deviceId" | "resultRoute" | "blocked"
+>;
+
+/** What a grant kind adds to the re-run turn of a decision (`ApprovalKind.cardTurn`). */
+export interface ApprovalCardTurn {
+  grant?: { tool: string; arguments: string; useBy: string };
+  sourceTainted?: boolean;
 }
 
 export interface ApprovalRegistry {
