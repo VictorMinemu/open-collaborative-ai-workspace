@@ -7,15 +7,9 @@ import { useId } from "react";
 import { SideEffectBadge } from "@/components/mcp/mcp-tools-list";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  effectiveRowMode,
-  inheritedReason,
-  MODE_LABEL,
-  type RowMode,
-  toolDisplayName,
-} from "@/lib/approval-policy-queries";
+import { effectiveRowMode, MODE_LABEL, type RowMode, toolDisplayName } from "@/lib/approval-policy-queries";
 import { cn } from "@/lib/utils";
-import { ModeIcon, type PolicyRuleTarget } from "./policy-rule-dialog";
+import { inheritedReason, ModeIcon, type PolicyRuleTarget } from "./policy-rule-dialog";
 
 /** Groups with more tools than this show the first few and "… {n} more · Show all" (UI-SPEC Surface 4). */
 const COLLAPSE_OVER = 8;

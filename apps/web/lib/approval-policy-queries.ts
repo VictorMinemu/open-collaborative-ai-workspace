@@ -212,13 +212,6 @@ export interface RowMode {
   locked: boolean;
 }
 
-/** "The organization already asks every time. A unit can only add approvals." (UI-SPEC inherited reason). */
-export function inheritedReason(mode: ToolApprovalMode, scopeLabel: string | null): string {
-  const who = !scopeLabel || scopeLabel === ORG_LABEL ? "The organization" : scopeLabel;
-  const when = mode === "always" ? "every time" : "after outside content";
-  return `${who} already asks ${when}. A unit can only add approvals.`;
-}
-
 /**
  * The effective mode of one row and where it comes from (own > this scope's server rule > upper scopes when equally
  * strict; a stricter rule always wins, as at call time). `withoutOwn` answers "what does it go back to" for Remove.

@@ -28,7 +28,6 @@ import { Spinner } from "@/components/ui/spinner";
 import { errorMessage, isApiError } from "@/lib/api";
 import {
   effectiveRowMode,
-  inheritedReason,
   isWeaker,
   MODE_LABEL,
   normalizeDraft,
@@ -56,6 +55,16 @@ const MODES: ReadonlyArray<{ value: ToolApprovalMode; hint: string }> = [
   },
   { value: "always", hint: "Bots ask a person every time, with the exact values." },
 ];
+
+/**
+ * Why an option or a row is unavailable on a unit scope (UI-SPEC inherited reason, P-04): "The organization already
+ * asks every time. A unit can only add approvals."
+ */
+export function inheritedReason(mode: ToolApprovalMode, scopeLabel: string | null): string {
+  const who = !scopeLabel || scopeLabel === "Organization" ? "The organization" : scopeLabel;
+  const when = mode === "always" ? "every time" : "after outside content";
+  return `${who} already asks ${when}. A unit can only add approvals.`;
+}
 
 /** What the dialog edits: one tool, or every tool of one server (`<safe>__*`). */
 export interface PolicyRuleTarget {
