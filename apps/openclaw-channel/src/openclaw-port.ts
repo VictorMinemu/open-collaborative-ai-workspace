@@ -343,6 +343,8 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
         threadRootId: m.threadRootId,
         messageId: m.messageId,
         turn: { ...m.turn, tools: allowed },
+        // 07.4: the logical connector tools only `ocw_connector_call` may name (never OpenClaw tools).
+        connectorTools: m.connectorTools,
       },
       signal,
     );

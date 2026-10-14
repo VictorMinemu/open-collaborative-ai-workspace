@@ -44,9 +44,16 @@
 //
 // Fake Sign in with ChatGPT (fake-siwc.mjs, 05-05): OIDC discovery, authorize, token, JWKS and revoke under `/siwc`.
 //
+// Fake OAuth-protected MCP server (fake-mcp-oauth.mjs, 07.4-04): protected resource metadata
+// (`/.well-known/oauth-protected-resource/mcp-oauth/mcp`), AS metadata (`/.well-known/oauth-authorization-server/
+// mcp-oauth`), authorize / token / revoke / register and the bearer-protected MCP endpoint under `/mcp-oauth`, plus the
+// keychain test targets under `/kc`. Pre-registered public client `ocw-e2e` (redirect URIs: FAKE_MCP_OAUTH_REDIRECTS).
+//
 // Env: PORT (default 18999), FAKE_MODEL_HOST (default 0.0.0.0), FAKE_MODEL_CAPTURE_DIR (optional: write each request body as JSON),
 // FAKE_MCP_TOKEN (optional: the fake MCP routes then require `Authorization: Bearer <token>`),
 // FAKE_CLAWHUB_ARTIFACT_DIR (optional: npm-pack tarballs the fake ClawHub serves, digests computed from them).
+// FAKE_MCP_OAUTH_REDIRECTS (optional, comma list: the `ocw-e2e` client's redirect URIs; default
+// http://127.0.0.1:4290/api/v1/connectors/oauth/callback), FAKE_KC_TOKEN (optional: the bearer `/kc/whoami` accepts).
 // FAKE_MODEL_DEBUG=1 (optional, off by default: log a short preview of each tool-offering request's messages,
 // to diagnose directive parsing inside a real cell; run-container-smoke.sh passes it through).
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -78,6 +85,14 @@ try {
 } catch (error) {
   if (error?.code !== "ERR_MODULE_NOT_FOUND") throw error;
   console.warn("fake-model: fake-siwc.mjs not found, /siwc routes disabled");
+}
+// And the fake OAuth-protected MCP server + authorization server (07.4-04).
+let createFakeMcpOAuth = null;
+try {
+  ({ createFakeMcpOAuth } = await import("./fake-mcp-oauth.mjs"));
+} catch (error) {
+  if (error?.code !== "ERR_MODULE_NOT_FOUND") throw error;
+  console.warn("fake-model: fake-mcp-oauth.mjs not found, /mcp-oauth and /kc routes disabled");
 }
 // And the fake Responses API (Phase 5).
 let fakeResponses = null;
@@ -631,9 +646,21 @@ export function createFakeModelServer(opts = {}) {
   const mcp = createFakeMcp?.({ token: opts.mcpToken ?? process.env.FAKE_MCP_TOKEN ?? "" }) ?? null;
   const clawhub = createFakeClawhub?.({ artifactDir: opts.clawhubArtifactDir }) ?? null;
   const siwc = createFakeSiwc?.() ?? null;
+  const redirects = (
+    process.env.FAKE_MCP_OAUTH_REDIRECTS || "http://127.0.0.1:4290/api/v1/connectors/oauth/callback"
+  )
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const mcpOAuth =
+    createFakeMcpOAuth?.({
+      preRegistered: [{ client_id: "ocw-e2e", redirect_uris: redirects }],
+      ...(process.env.FAKE_KC_TOKEN ? { kcToken: process.env.FAKE_KC_TOKEN } : {}),
+    }) ?? null;
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     try {
+      if (mcpOAuth?.handle(req, res, url)) return;
       if (mcp?.(req, res, url)) return;
       if (clawhub?.(req, res, url)) return;
       if (siwc?.(req, res, url)) return;

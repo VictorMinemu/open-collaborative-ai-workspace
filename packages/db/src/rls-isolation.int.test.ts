@@ -387,7 +387,91 @@ async function seedOrg(c: pg.Client, org: string) {
     `insert into app.memory_proposals (organization_id, scope_id, file_id, path, op, base_version, content, content_sha256, findings, reader_count, tainted, requested_by_agent_id, requested_for_user_id) values ($1, $2, $3, 'MEMORY.md', 'append', 1, '- uses pnpm', $4, '[]', 3, false, $5, $6)`,
     [org, memScope, memFile, "e".repeat(64), agent, user],
   );
+
+  // Phase 07.4 (per-member connectors, keychain, templates): one row per new table. A per-member OAuth connector with
+  // a pre-registered client, the member's sealed connection, a member-account share in the channel, a personal key
+  // granted to the personal bot, and a unit template (v1) the personal bot was started from. Secret-bearing columns
+  // hold only ids / SecretReferences; the values are the sealed `app.secrets` rows.
+  const crm = randomUUID();
+  const clientSecret = randomUUID();
+  const connSecret = randomUUID();
+  const vaultSecret = randomUUID();
+  const vaultItem = randomUUID();
+  const agentTemplate = randomUUID();
+  await q(
+    "insert into app.mcp_servers (id, organization_id, name, safe_name, transport, url, auth_mode, oauth_status) values ($1, $2, 'CRM', $3, 'streamable-http', 'https://crm.example.test/mcp', 'per_member_oauth', 'ready')",
+    [crm, org, `m${crm.replace(/-/g, "").slice(0, 8)}`],
+  );
+  await q(
+    "insert into app.secrets (id, organization_id, name, kind, ciphertext, iv, tag) values ($1, $2, 'client', 'mcp_credential', 'c', 'i', 't'), ($3, $2, 'conn', 'connector_credential', 'c', 'i', 't'), ($4, $2, 'key', 'vault_item', 'c', 'i', 't')",
+    [clientSecret, org, connSecret, vaultSecret],
+  );
+  await q(
+    "insert into app.connector_oauth_clients (organization_id, server_id, issuer, client_id, client_secret_id, method) values ($1, $2, 'https://auth.crm.example.test', 'ocw-client', $3, 'pre_registered')",
+    [org, crm, clientSecret],
+  );
+  await q(
+    "insert into app.connector_connections (organization_id, user_id, server_id, status, secret_id, issuer, client_id, scopes, account_label, access_expires_at) values ($1, $2, $3, 'connected', $4, 'https://auth.crm.example.test', 'ocw-client', '{crm.read}', 'ada@example.test', now() + interval '1 hour')",
+    [org, user, crm, connSecret],
+  );
+  await q(
+    "insert into app.member_account_shares (organization_id, user_id, conversation_id, resource_kind, resource_id, readers_at_grant) values ($1, $2, $3, 'connector', $4, 1)",
+    [org, user, conv, crm],
+  );
+  await q(
+    `insert into app.vault_items (id, organization_id, scope, owner_user_id, name, handle, kind, injection, allowed_hosts, secret_ref, created_by) values ($1, $2, 'personal', $3, 'ERP key', 'k_abcdefghij', 'api_key', '{"header":"Authorization","scheme":"bearer"}', '{erp.example.test}', $4::jsonb, $3)`,
+    [vaultItem, org, user, JSON.stringify({ provider: "db", secretId: vaultSecret, organizationId: org })],
+  );
+  await q(
+    "insert into app.agent_vault_grants (organization_id, agent_id, vault_item_id, created_by) values ($1, $2, $3, $4)",
+    [org, personal, vaultItem, user],
+  );
+  // 07.4-07: an organization key too. Personal keys sit behind the owner-only policy, so a session without that owner
+  // (the enumerator's tenant-only context) sees this one.
+  const orgVaultSecret = randomUUID();
+  await q(
+    "insert into app.secrets (id, organization_id, name, kind, ciphertext, iv, tag) values ($1, $2, 'org key', 'vault_item', 'c', 'i', 't')",
+    [orgVaultSecret, org],
+  );
+  const orgVaultItem = randomUUID();
+  await q(
+    `insert into app.vault_items (id, organization_id, scope, name, handle, kind, injection, allowed_hosts, secret_ref, created_by) values ($4, $1, 'unit', 'Org ERP key', 'k_orgkeyaaaa', 'api_key', '{"header":"Authorization","scheme":"bearer"}', '{erp.example.test}', $2::jsonb, $3)`,
+    [
+      org,
+      JSON.stringify({ provider: "db", secretId: orgVaultSecret, organizationId: org }),
+      user,
+      orgVaultItem,
+    ],
+  );
+  // 07.4-14 (WINDOWS #182): grants on a personal key are owner-only too; a grant on the organization key stays visible
+  // to the tenant-only context.
+  await q(
+    "insert into app.agent_vault_grants (organization_id, agent_id, vault_item_id, created_by) values ($1, $2, $3, $4)",
+    [org, personal, orgVaultItem, user],
+  );
+  await q(
+    "insert into app.agent_templates (id, organization_id, unit_id, name, description, current_version, created_by) values ($1, $2, $3, 'Sales assistant', 'Answers from the CRM', 1, $4)",
+    [agentTemplate, org, unit, user],
+  );
+  await q(
+    `insert into app.agent_template_versions (organization_id, template_id, version, instructions, model_provider, model_id, capabilities, required_connector_ids, created_by) values ($1, $2, 1, 'Help the sales team', 'mock', 'mock-1', '{"internet":false,"memory":true,"dailyLimit":null}', ARRAY[$3]::uuid[], $4)`,
+    [org, agentTemplate, crm, user],
+  );
+  await q("update app.agents set template_id = $1, template_version = 1 where id = $2", [
+    agentTemplate,
+    personal,
+  ]);
 }
+
+const CONNECTOR_TABLES = [
+  "app.connector_oauth_clients",
+  "app.connector_connections",
+  "app.member_account_shares",
+  "app.vault_items",
+  "app.agent_vault_grants",
+  "app.agent_templates",
+  "app.agent_template_versions",
+] as const;
 
 const AI_CHAT_TABLES = [
   "app.ai_chats",
@@ -417,10 +501,11 @@ const MEMORY_TABLES = [
   "app.approval_requests",
 ] as const;
 
-async function inTenant<T>(org: string, fn: () => Promise<T>): Promise<T> {
+async function inTenant<T>(org: string, fn: () => Promise<T>, userId: string | null = null): Promise<T> {
   await app.query("begin");
   try {
     await app.query("select set_config('app.organization_id', $1, true)", [org]);
+    if (userId) await app.query("select set_config('app.user_id', $1, true)", [userId]);
     return await fn();
   } finally {
     await app.query("rollback");
@@ -549,9 +634,28 @@ describe("tenant isolation (RLS)", () => {
       );
       expect(seeded.rows[0].n, `${tbl} has no fixture row: add one to seedOrg()`).toBeGreaterThan(0);
 
-      // Same tenant sees its rows (sanity) …
+      // Same tenant sees its rows (sanity), minus the personal keys (07.4-07) and the member connector connections
+      // (07.4-10) only their owner's session sees …
+      const ownerOnly =
+        tbl === "app.vault_items"
+          ? (
+              await migrator.query(
+                "select count(*)::int as n from app.vault_items where organization_id = $1 and scope = 'personal'",
+                [A],
+              )
+            ).rows[0].n
+          : tbl === "app.connector_connections"
+            ? seeded.rows[0].n
+            : tbl === "app.agent_vault_grants"
+              ? (
+                  await migrator.query(
+                    "select count(*)::int as n from app.agent_vault_grants g join app.vault_items v on v.id = g.vault_item_id where g.organization_id = $1 and v.scope = 'personal'",
+                    [A],
+                  )
+                ).rows[0].n
+              : 0;
       const own = await inTenant(A, () => app.query(`select count(*)::int as n from ${tbl}`));
-      expect(own.rows[0].n, `${tbl} own rows`).toBe(seeded.rows[0].n);
+      expect(own.rows[0].n, `${tbl} own rows`).toBe(seeded.rows[0].n - ownerOnly);
 
       // … another tenant sees none of A's rows.
       const cross = await inTenant(B, () =>
@@ -1443,12 +1547,21 @@ describe("tenant isolation (RLS)", () => {
         `${tbl} cross-tenant insert`,
       ).rejects.toThrow(/row-level security/);
     }
-    // The four memory tables carry the restrictive owner-only policy on top of the tenant policy.
+    // The four memory tables (and, since 07.4-07, the keychain's personal keys, their grants since 07.4-14 and member
+    // connections since 07.4-10) carry the restrictive owner-only policy on top of the tenant policy.
     const restrictive = await migrator.query(
       "select tablename, cmd, permissive from pg_policies where schemaname = 'app' and policyname = 'personal_owner_only' order by tablename",
     );
     expect(restrictive.rows).toEqual(
-      ["memory_file_revisions", "memory_files", "memory_proposals", "memory_scopes"].map((tablename) => ({
+      [
+        "agent_vault_grants",
+        "connector_connections",
+        "memory_file_revisions",
+        "memory_files",
+        "memory_proposals",
+        "memory_scopes",
+        "vault_items",
+      ].map((tablename) => ({
         tablename,
         cmd: "ALL",
         permissive: "RESTRICTIVE",
@@ -1647,6 +1760,169 @@ describe("tenant isolation (RLS)", () => {
       ).rows;
     });
     expect(unlinked).toEqual([{ card_message_id: null }]);
+  });
+
+  it("Phase 07.4: the seven connector, keychain and template tables are org-scoped, forced, seeded, with the tenant policy (+ owner-only on keys)", async () => {
+    const scoped = new Map((await orgScopedTables()).map((t) => [t.tbl, t]));
+    for (const tbl of CONNECTOR_TABLES) {
+      // vault_items (personal keys, 07.4-07), their grants (07.4-14) and connector_connections (07.4-10) also carry the restrictive owner-only
+      // policy; a connection is visible to its member's own session only.
+      const ownerOnly =
+        tbl === "app.vault_items" || tbl === "app.connector_connections" || tbl === "app.agent_vault_grants";
+      expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true, policies: ownerOnly ? 2 : 1 });
+      const owner =
+        tbl === "app.connector_connections"
+          ? (
+              await migrator.query(
+                "select user_id from app.connector_connections where organization_id = $1 limit 1",
+                [A],
+              )
+            ).rows[0].user_id
+          : null;
+      const own = await inTenant(A, () => app.query(`select count(*)::int as n from ${tbl}`), owner);
+      expect(own.rows[0].n, `${tbl} seeded`).toBeGreaterThan(0);
+    }
+    // The `mcp.manage` path over every member's connection (WINDOWS #186): migrator-owned, fixed search_path,
+    // executable by the app role only, scoped to the tenant transaction's organization.
+    const fns = await migrator.query(
+      `select p.proname, p.prosecdef, pg_get_userbyid(p.proowner) as owner, p.proconfig,
+              has_function_privilege('ocw_app', p.oid, 'execute') as app,
+              has_function_privilege('public', p.oid, 'execute') as public
+         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'app' and p.proname in ('connector_connection_counts', 'clear_connector_connections')
+        order by 1`,
+    );
+    expect(fns.rows).toEqual(
+      ["clear_connector_connections", "connector_connection_counts"].map((proname) => ({
+        proname,
+        prosecdef: true,
+        owner: "ocw_migrator",
+        proconfig: ["search_path=pg_catalog, pg_temp"],
+        app: true,
+        public: false,
+      })),
+    );
+    const total = async (org: string) =>
+      (
+        await migrator.query(
+          "select count(*)::int as n from app.connector_connections where organization_id = $1",
+          [org],
+        )
+      ).rows[0].n as number;
+    const counted = await inTenant(A, () =>
+      app.query("select coalesce(sum(connections), 0)::int as n from app.connector_connection_counts(null)"),
+    );
+    expect(counted.rows[0].n).toBe(await total(A));
+    // Without a tenant the functions see nothing; org B's clearing never reaches org A's rows.
+    expect(
+      (await app.query("select count(*)::int as n from app.connector_connection_counts(null)")).rows[0].n,
+    ).toBe(0);
+    const aServer = (
+      await migrator.query(
+        "select server_id from app.connector_connections where organization_id = $1 limit 1",
+        [A],
+      )
+    ).rows[0].server_id;
+    const before = await total(A);
+    await inTenant(B, () => app.query("select * from app.clear_connector_connections($1)", [aServer]));
+    expect(await total(A)).toBe(before);
+  });
+
+  it("Phase 07.4: a member's connector connection of org B is invisible, unchangeable and unforgeable from org A", async () => {
+    const b = (
+      await migrator.query(
+        "select id, user_id, server_id from app.connector_connections where organization_id = $1",
+        [B],
+      )
+    ).rows[0];
+    expect(b).toBeDefined();
+    await inTenant(A, async () => {
+      expect(
+        (await app.query("select * from app.connector_connections where id = $1", [b.id])).rowCount,
+      ).toBe(0);
+      expect(
+        (
+          await app.query(
+            "update app.connector_connections set status = 'needs_reconnect', last_error = 'revoked' where id = $1",
+            [b.id],
+          )
+        ).rowCount,
+      ).toBe(0);
+      expect((await app.query("delete from app.connector_connections where id = $1", [b.id])).rowCount).toBe(
+        0,
+      );
+    });
+    // A row claiming organization B, written in A's context, is refused by the tenant policy.
+    await expect(
+      inTenant(A, () =>
+        app.query(
+          "insert into app.connector_connections (organization_id, user_id, server_id, status) values ($1, $2, $3, 'connected')",
+          [B, randomUUID(), b.server_id],
+        ),
+      ),
+    ).rejects.toThrow(/row-level security/);
+    const after = await migrator.query(
+      "select status, last_error from app.connector_connections where id = $1",
+      [b.id],
+    );
+    expect(after.rows).toEqual([{ status: "connected", last_error: null }]);
+  });
+
+  it("Phase 07.4: OAuth clients, shares, keys, key grants, templates and versions of org B are invisible and unwritable from org A", async () => {
+    for (const tbl of CONNECTOR_TABLES.filter((t) => t !== "app.connector_connections")) {
+      const seeded = await migrator.query(
+        `select count(*)::int as n from ${tbl} where organization_id = $1`,
+        [B],
+      );
+      expect(seeded.rows[0].n, `${tbl} has B rows`).toBeGreaterThan(0);
+      const cross = await inTenant(A, () =>
+        app.query(`select count(*)::int as n from ${tbl} where organization_id = $1`, [B]),
+      );
+      expect(cross.rows[0].n, `${tbl} cross-tenant select`).toBe(0);
+      for (const stmt of [
+        `update ${tbl} set organization_id = organization_id where organization_id = $1`,
+        `delete from ${tbl} where organization_id = $1`,
+      ]) {
+        const n = await inTenant(A, () => app.query(stmt, [B]).then((res) => res.rowCount));
+        expect(n, `${tbl}: ${stmt}`).toBe(0);
+      }
+      // Moving one of A's own rows into B is refused too (WITH CHECK on UPDATE). A template version refuses every
+      // update before RLS is checked (07.4-08: versions are immutable, a BEFORE UPDATE trigger).
+      await expect(
+        inTenant(A, () =>
+          app.query(`update ${tbl} set organization_id = $1 where organization_id = $2`, [B, A]),
+        ),
+        `${tbl} cross-tenant move`,
+      ).rejects.toThrow(
+        tbl === "app.agent_template_versions"
+          ? /agent template versions are immutable/
+          : /row-level security/,
+      );
+      const row = await migrator.query(
+        `select row_to_json(t) as j from ${tbl} t where organization_id = $1 limit 1`,
+        [B],
+      );
+      const cols = (
+        await migrator.query(
+          `select a.attname from pg_attribute a where a.attrelid = $1::regclass and a.attnum > 0
+             and not a.attisdropped and a.attgenerated = '' order by a.attnum`,
+          [tbl],
+        )
+      ).rows.map((r) => `"${r.attname}"`);
+      await expect(
+        inTenant(A, () =>
+          app.query(
+            `insert into ${tbl} (${cols.join(", ")}) select ${cols.join(", ")} from json_populate_record(null::${tbl}, $1::json)`,
+            [JSON.stringify(row.rows[0].j)],
+          ),
+        ),
+        `${tbl} cross-tenant insert`,
+      ).rejects.toThrow(/row-level security/);
+      const still = await migrator.query(`select count(*)::int as n from ${tbl} where organization_id = $1`, [
+        B,
+      ]);
+      expect(still.rows[0].n, `${tbl} B rows intact`).toBe(seeded.rows[0].n);
+    }
   });
 
   it("Phase 4: accent-insensitive Spanish search, a stored tsvector and the search indexes", async () => {

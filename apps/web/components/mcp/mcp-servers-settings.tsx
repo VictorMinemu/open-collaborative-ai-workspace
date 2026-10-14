@@ -1,8 +1,9 @@
 "use client";
 
 import type { McpServer, McpServerList } from "@ocw/contracts";
-import { KeyRound, Pencil, Plug, Plus, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { KeyRound, Pencil, Plug, Plus, RefreshCw, ShieldCheck, Trash2, TriangleAlert } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
 import { Badge } from "@/components/ui/badge";
@@ -19,11 +20,20 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { errorMessage } from "@/lib/api";
-import { useDeleteMcpServer, useMcpServers, useProbeMcpServer, useUpdateMcpServer } from "@/lib/mcp-queries";
+import { reprobeRefusal } from "@/lib/connections-format";
+import { isNotConnected, useProbeConnector } from "@/lib/connector-queries";
+import {
+  connectionsExistCount,
+  useDeleteMcpServer,
+  useMcpServers,
+  useProbeMcpServer,
+  useUpdateMcpServer,
+} from "@/lib/mcp-queries";
 import { useCan, usePermissions } from "@/lib/permissions";
 import { cn, relativeTime } from "@/lib/utils";
 import { McpServerDialog, TRANSPORTS } from "./mcp-server-dialog";
-import { McpToolsList } from "./mcp-tools-list";
+import { McpToolsEmpty, McpToolsList } from "./mcp-tools-list";
+import { PrivateHostsCard } from "./private-hosts-card";
 
 type Flag = "orgEnabled" | "personalAllowed" | "trustedChaining";
 
@@ -53,6 +63,46 @@ const STATUS: Record<
 
 const EMPTY_SANDBOX: McpServerList["sandbox"] = { available: false, servers: [] };
 
+/** A per-member connector the cell never probes: pending means no member has connected yet (UI-SPEC R6). */
+const MEMBER_PENDING = { label: "Waiting for a member to connect", variant: "outline", busy: false } as const;
+
+const MODE_BADGE: Record<McpServer["authMode"], string | null> = {
+  org_secret: null,
+  per_member_oauth: "Member sign-in",
+  per_member_secret: "Member key",
+};
+
+/**
+ * The Agent Card pill colours (AA in light and dark, UI-SPEC § Color): the Badge `warning` variant's amber text on its
+ * own tint is under 4.5:1 in light mode, so these badges carry explicit amber / red classes.
+ */
+const AMBER = "border-transparent bg-amber-100 text-amber-800 dark:bg-amber-400/15 dark:text-amber-300";
+const RED = "border-transparent bg-red-100 text-red-800 dark:bg-red-400/15 dark:text-red-300";
+const OAUTH_BADGE: Partial<
+  Record<NonNullable<McpServer["oauthStatus"]>, { label: string; className: string }>
+> = {
+  needs_client: { label: "Needs an OAuth client", className: AMBER },
+  https_required: { label: "Needs HTTPS", className: AMBER },
+  error: { label: "Sign-in error", className: RED },
+};
+
+export function memberCountLabel(n: number): string {
+  if (n === 0) return "No members connected yet";
+  return n === 1 ? "1 member connected" : `${n} members connected`;
+}
+
+/** The issuer's host for "Client: pre-registered (auth.acme.com)". */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
+/** 44 px touch targets below `md` (UI-SPEC: every control at 390). */
+const TOUCH = "max-md:h-11";
+
 /**
  * Settings › MCP servers (D-13, SC6, BOT-08): register remote MCP servers (or vetted sandboxed ones) with
  * write-only header credentials, see what the cell discovered and govern each server for the organization,
@@ -61,6 +111,8 @@ const EMPTY_SANDBOX: McpServerList["sandbox"] = { available: false, servers: [] 
 export function McpServersSettings() {
   const permissions = usePermissions();
   const canManage = useCan("mcp.manage");
+  // The organization's private network hosts are a bot policy (`bot.manage`, UI-SPEC R5); the API gate is authoritative.
+  const canManageBots = useCan("bot.manage");
   const q = useMcpServers(canManage);
   const [editing, setEditing] = useState<McpServer | "new" | null>(null);
 
@@ -95,7 +147,11 @@ export function McpServersSettings() {
           </p>
         </div>
         {servers.length > 0 ? (
-          <Button onClick={() => setEditing("new")} data-testid="mcp-add" className="w-full sm:w-auto">
+          <Button
+            onClick={() => setEditing("new")}
+            data-testid="mcp-add"
+            className={cn("w-full sm:w-auto", TOUCH)}
+          >
             <Plus /> Add server
           </Button>
         ) : null}
@@ -122,12 +178,12 @@ export function McpServersSettings() {
             <p className="font-medium text-sm">No MCP servers yet</p>
             <p className="mt-0.5 text-muted-foreground text-sm">Add one and your bots can use its tools.</p>
           </div>
-          <Button onClick={() => setEditing("new")} data-testid="mcp-add">
+          <Button onClick={() => setEditing("new")} data-testid="mcp-add" className={TOUCH}>
             <Plus /> Add server
           </Button>
         </div>
       ) : (
-        <ul className="grid gap-3">
+        <ul className="grid gap-3" aria-label="MCP servers" data-testid="mcp-server-list">
           {servers.map((s) => (
             <li key={s.id}>
               <ServerCard server={s} onEdit={() => setEditing(s)} />
@@ -135,6 +191,8 @@ export function McpServersSettings() {
           ))}
         </ul>
       )}
+
+      {canManageBots ? <PrivateHostsCard /> : null}
 
       <p className="flex items-start gap-1.5 text-muted-foreground text-xs">
         <ShieldCheck className="mt-px size-3.5 shrink-0" aria-hidden />
@@ -146,6 +204,7 @@ export function McpServersSettings() {
         open={editing !== null}
         server={editing === "new" ? null : editing}
         sandbox={sandbox}
+        oauth={q.data?.oauth}
         onOpenChange={(o) => !o && setEditing(null)}
       />
     </Shell>
@@ -159,10 +218,20 @@ function Shell({ children }: { children: React.ReactNode }) {
 function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void }) {
   const update = useUpdateMcpServer(server.id);
   const probe = useProbeMcpServer(server.id);
+  const memberProbe = useProbeConnector(server.id);
+  const router = useRouter();
   const remove = useDeleteMcpServer(server.id);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const status = STATUS[server.status];
+  /** Members a delete disconnects: the DTO's count, or the 409's when members connected since the list loaded. */
+  const [deleteCount, setDeleteCount] = useState<number | null>(null);
+  const members = deleteCount ?? server.memberConnections;
+  const cancelDeleteRef = useRef<HTMLButtonElement>(null);
+  const perMember = server.authMode !== "org_secret";
+  const status = perMember && server.status === "pending" ? MEMBER_PENDING : STATUS[server.status];
   const transport = TRANSPORTS.find((t) => t.value === server.transport)?.label ?? server.transport;
+  const modeBadge = MODE_BADGE[server.authMode];
+  const oauthBadge = server.oauthStatus ? OAUTH_BADGE[server.oauthStatus] : undefined;
+  const preRegistered = server.oauthClients.find((c) => c.method === "pre_registered");
 
   async function setFlag(key: Flag, value: boolean) {
     try {
@@ -174,19 +243,34 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
 
   async function reprobe() {
     try {
-      await probe.mutateAsync();
+      // A per-member connector is probed with the admin's OWN connection (UI-SPEC R6), never by the cell.
+      if (perMember) await memberProbe.mutateAsync();
+      else await probe.mutateAsync();
     } catch (err) {
+      if (perMember && isNotConnected(err)) {
+        toast(reprobeRefusal(err.code, server.name), {
+          action: {
+            label: "Open Connections",
+            onClick: () => router.push(`/settings/connections?connector=${server.id}`),
+          },
+        });
+        return;
+      }
       toast.error("Could not check the server", { description: errorMessage(err) });
     }
   }
+  const probing = probe.isPending || memberProbe.isPending;
 
   async function onDelete() {
     try {
-      await remove.mutateAsync();
+      await remove.mutateAsync({ clearConnections: members > 0 });
       setConfirmDelete(false);
       toast.success(`${server.name} removed`, { description: "Its tools were taken off every bot." });
     } catch (err) {
-      toast.error("Could not remove the server", { description: errorMessage(err) });
+      // Fallback (R4): the same dialog updates in place with the server's count; the next click confirms it.
+      const count = connectionsExistCount(err);
+      if (count !== null) setDeleteCount(count);
+      else toast.error("Could not remove the server", { description: errorMessage(err) });
     }
   }
 
@@ -215,6 +299,20 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
               {status.busy ? <Spinner className="size-3" /> : null}
               {status.label}
             </Badge>
+            {modeBadge ? (
+              <Badge variant="outline" data-testid="mcp-auth-badge" data-mode={server.authMode}>
+                {modeBadge}
+              </Badge>
+            ) : null}
+            {oauthBadge ? (
+              <Badge
+                className={oauthBadge.className}
+                data-testid="mcp-oauth-status"
+                data-status={server.oauthStatus}
+              >
+                {oauthBadge.label}
+              </Badge>
+            ) : null}
             {!server.orgEnabled ? <Badge variant="outline">Off for bots</Badge> : null}
           </div>
           <p className="mt-0.5 flex min-w-0 items-center gap-1.5 text-muted-foreground text-xs">
@@ -224,7 +322,33 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
               {server.url ?? server.sandboxServer}
             </span>
           </p>
-          {server.headers.length > 0 ? (
+          {perMember ? (
+            <p className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 text-muted-foreground text-xs">
+              <span data-testid="mcp-member-count">{memberCountLabel(server.memberConnections)}</span>
+              {preRegistered ? (
+                // On a phone the client takes its own line (no separator); on wider screens it follows the count.
+                <span className="truncate">
+                  <span aria-hidden className="max-sm:hidden">
+                    ·{" "}
+                  </span>
+                  Client: pre-registered ({hostOf(preRegistered.issuer)})
+                </span>
+              ) : null}
+            </p>
+          ) : null}
+          {server.authMode === "per_member_secret" && server.memberHeaderName ? (
+            <ul className="mt-2 flex flex-wrap gap-1.5" aria-label="Member key header">
+              <li
+                className="inline-flex items-center gap-1.5 rounded-md border bg-background px-2 py-0.5 text-xs"
+                data-testid="mcp-member-header-chip"
+              >
+                <KeyRound className="size-3 text-muted-foreground" aria-hidden />
+                <span className="font-mono">{server.memberHeaderName}</span>
+                <span className="text-muted-foreground">· each member's key</span>
+              </li>
+            </ul>
+          ) : null}
+          {!perMember && server.headers.length > 0 ? (
             <ul className="mt-2 flex flex-wrap gap-1.5" aria-label="Headers">
               {server.headers.map((h) => (
                 <li
@@ -245,19 +369,19 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
             variant="ghost"
             size="sm"
             onClick={reprobe}
-            disabled={probe.isPending || status.busy || !server.orgEnabled}
+            disabled={probing || status.busy || (!perMember && !server.orgEnabled)}
             data-testid="mcp-reprobe"
-            className="flex-1 sm:flex-none"
-            title={server.orgEnabled ? undefined : "Turn it on for bots first"}
+            className={cn("flex-1 sm:flex-none", TOUCH)}
+            title={perMember || server.orgEnabled ? undefined : "Turn it on for bots first"}
           >
-            <RefreshCw className={cn(probe.isPending && "animate-spin")} /> Re-probe
+            <RefreshCw className={cn(probing && "animate-spin")} /> Re-probe
           </Button>
           <Button
             variant="ghost"
             size="sm"
             onClick={onEdit}
             data-testid="mcp-edit"
-            className="flex-1 sm:flex-none"
+            className={cn("flex-1 sm:flex-none", TOUCH)}
           >
             <Pencil /> Edit
           </Button>
@@ -266,12 +390,41 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
             size="sm"
             onClick={() => setConfirmDelete(true)}
             data-testid="mcp-delete"
-            className="flex-1 hover:bg-destructive/10 hover:text-destructive sm:flex-none"
+            className={cn("flex-1 hover:bg-destructive/10 hover:text-destructive sm:flex-none", TOUCH)}
           >
             <Trash2 /> Delete
           </Button>
         </div>
       </div>
+
+      {server.oauthStatus === "needs_client" ? (
+        <p
+          role="note"
+          className="mx-4 -mt-1 mb-3 flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/8 px-3 py-2 text-[13px] leading-snug"
+          data-testid="mcp-needs-client-detail"
+        >
+          <TriangleAlert className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden />
+          <span>
+            {server.name} doesn't allow automatic registration. Register OCW at the provider with the redirect
+            URI and enter its client ID in Edit.
+          </span>
+        </p>
+      ) : null}
+
+      {server.oauthStatus === "error" ? (
+        <p
+          role="note"
+          className="mx-4 -mt-1 mb-3 flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/8 px-3 py-2 text-[13px] leading-snug"
+          data-testid="mcp-signin-error-detail"
+        >
+          <TriangleAlert className="mt-0.5 size-3.5 shrink-0 text-destructive" aria-hidden />
+          <span>
+            Members can't sign in to {server.name}: its sign-in doesn't follow the MCP authorization spec OCW
+            needs (protected resource metadata and PKCE). Switch it to "Each member's own key" in Edit, or ask
+            the provider.
+          </span>
+        </p>
+      ) : null}
 
       {server.status === "error" && server.statusDetail ? (
         <p
@@ -295,14 +448,18 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
               <span className="text-muted-foreground">Checked {relativeTime(server.probedAt)}</span>
             ) : null}
           </div>
-          {server.tools.length > 0 ? <McpToolsList tools={server.tools} /> : null}
+          {server.tools.length > 0 ? (
+            <McpToolsList tools={server.tools} />
+          ) : perMember ? (
+            <McpToolsEmpty>Tools appear after the first member connects.</McpToolsEmpty>
+          ) : null}
         </div>
         <div className="grid gap-2 sm:grid-cols-3">
           {FLAGS.map((f) => (
             // biome-ignore lint/a11y/noLabelWithoutControl: the Switch renders the control inside the label
             <label
               key={f.key}
-              className="flex cursor-pointer items-start justify-between gap-3 rounded-lg border bg-background px-3 py-2"
+              className="flex cursor-pointer items-start justify-between gap-3 rounded-lg border bg-background px-3 py-2 max-md:min-h-11"
             >
               <span className="min-w-0">
                 <span className="block font-medium text-[13px]">{f.label}</span>
@@ -320,27 +477,46 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
         </div>
       </div>
 
-      <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
-        <DialogContent data-testid="mcp-delete-dialog">
+      <Dialog
+        open={confirmDelete}
+        onOpenChange={(o) => {
+          setConfirmDelete(o);
+          if (!o) setDeleteCount(null);
+        }}
+      >
+        <DialogContent
+          data-testid="mcp-delete-dialog"
+          data-members={members}
+          initialFocus={members > 0 ? cancelDeleteRef : undefined}
+        >
           <DialogHeader>
             <DialogTitle>Delete {server.name}?</DialogTitle>
             <DialogDescription>
-              Its tools are removed from every bot and its stored credentials are deleted. This can't be
-              undone.
+              Its tools are removed from every bot and its stored credentials are deleted.{" "}
+              {members > 0
+                ? `${members === 1 ? "1 member is" : `${members} members are`} connected; their sign-ins and keys are deleted too. `
+                : ""}
+              This can't be undone.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmDelete(false)}>
+            <Button
+              ref={cancelDeleteRef}
+              variant="outline"
+              onClick={() => setConfirmDelete(false)}
+              className={TOUCH}
+            >
               Cancel
             </Button>
             <Button
               variant="destructive"
               onClick={onDelete}
               disabled={remove.isPending}
+              className={TOUCH}
               data-testid="mcp-delete-confirm"
             >
               {remove.isPending ? <Spinner /> : <Trash2 />}
-              Delete server
+              {members > 0 ? `Delete and disconnect ${members}` : "Delete server"}
             </Button>
           </DialogFooter>
         </DialogContent>

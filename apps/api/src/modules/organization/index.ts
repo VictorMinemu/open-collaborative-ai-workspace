@@ -26,6 +26,7 @@ export {
 export {
   type AgentFacts,
   agentResource,
+  agentTemplateResource,
   type ChannelFacts,
   channelMemberResource,
   channelResource,

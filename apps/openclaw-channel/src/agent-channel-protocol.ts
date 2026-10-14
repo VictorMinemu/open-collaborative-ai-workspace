@@ -27,6 +27,13 @@
  *   POST /board/cards          ← AgentChannelBoardCreateCard → AgentChannelBoardCardResponse (201, 200 on a retry)
  *   PATCH /board/cards/:messageId ← AgentChannelBoardPatchCard → AgentChannelBoardCardResponse (move / waiting state
  *                                only, optimistic version: 409 board_card_version_conflict; never card text)
+ *   POST /connectors/list      ← AgentChannelConnectorList → AgentChannelConnectorListResponse (ocw_connector_list,
+ *                                07.4: the turn's per-member connectors, their tools and the keychain handles)
+ *   POST /connectors/call      ← AgentChannelConnectorCall → AgentChannelConnectorCallResponse (ocw_connector_call:
+ *                                one logical `<connector>__<tool>` with the turn's human's own account; 404/409/502 with
+ *                                an AgentChannelToolRefusal code)
+ *   POST /http-requests        ← AgentChannelHttpRequest → AgentChannelHttpResponse (ocw_http_request: a keychain
+ *                                handle, never a value; same refusals)
  *   POST /mcp/probe-results    ← AgentChannelMcpProbeResult (the tools an `mcp.probe` discovered; D-13)
  *   POST /plugins/report       ← AgentChannelPluginReport (a marketplace install / uninstall outcome; D-14)
  *   POST /plugins/verify-install, GET /plugins: used by infra/openclaw (install gate, boot render), not here
@@ -348,7 +355,18 @@ export type TurnMemoryFile = z.infer<typeof TurnMemoryFile>;
  * One tool the API did not offer on this turn of a shared AI chat, and why (06-10). Informational: the reason stays a
  * string so a newer API reason never invalidates the turn.
  */
-export const TurnWithheld = z.object({ tool: z.string().max(200), reason: z.string().max(64) });
+export const TurnWithheld = z.object({
+  tool: z.string().max(200),
+  reason: z.string().max(64),
+  /**
+   * 07.4 (R7): the member account behind a `member_account` entry (`kind` "connector" | "vault_item"), so the persona can
+   * link the share page. Informational: an invalid resource is dropped, the entry is kept.
+   */
+  resource: z
+    .object({ kind: z.string().max(32), id: z.string().max(64), name: z.string().max(200) })
+    .optional()
+    .catch(undefined),
+});
 export type TurnWithheld = z.infer<typeof TurnWithheld>;
 
 export const TurnContext = z.object({
@@ -358,7 +376,10 @@ export const TurnContext = z.object({
   now: TurnNow.nullable().default(null),
   maxToolCalls: z.number().int().nonnegative(),
   maxWebCalls: z.number().int().nonnegative(),
-  /** AI chats only (06-10). Never enables a tool; an invalid list is dropped, the turn is kept. */
+  /**
+   * AI chats (06-10) and, for `member_account`, any delivery (07.4). Never enables a tool; an invalid list is dropped,
+   * the turn is kept.
+   */
   withheld: z.array(TurnWithheld).max(64).optional().catch(undefined),
   /**
    * 07.2: the turn's memory files (the personal `MEMORY.md` only in a one-human DM, the bot's notebook). Additive: an
@@ -942,3 +963,127 @@ export type AgentChannelPluginReport = {
   declaredTools?: Array<{ name: string; description?: string }>;
   error?: { code: string; message: string };
 };
+
+// ---------------------------------------------------------------- per-member connectors and keychain (Phase 07.4)
+
+/*
+ * `ocw_connector_list|call` and `ocw_http_request` (07.4 D-02, D-07): bound to a delivered turn like `ocw_memory_save`.
+ * The member whose account is used is always the stored turn's human, never a field: the bodies carry the event and
+ * the agent only. Mirror of `packages/contracts/src/agent-channel.ts` (07.4-01).
+ */
+
+/** Why a connector or keychain call was refused (the API's `error.code`; the model reads a fixed sentence per code). */
+export const AGENT_CHANNEL_TOOL_REFUSALS = [
+  "unknown_turn",
+  "not_in_turn",
+  "policy_changed",
+  "cap_reached",
+  "tainted",
+  "member_account",
+  "unit_audience",
+  "not_connected",
+  "needs_reconnect",
+  "handle_not_allowed",
+  "host_not_allowed",
+  "egress_refused",
+  "upstream_error",
+  "timeout",
+] as const;
+export const AgentChannelToolRefusal = z.enum(AGENT_CHANNEL_TOOL_REFUSALS);
+export type AgentChannelToolRefusal = z.infer<typeof AgentChannelToolRefusal>;
+
+/** An MCP server's immutable OpenClaw name: `m` + 8 hex characters. */
+export const CONNECTOR_SAFE_NAME = /^m[0-9a-f]{8}$/u;
+/** A logical connector tool `<connector>__<tool>` as a turn lists it. */
+export const CONNECTOR_LOGICAL_TOOL = /^m[0-9a-f]{8}__\S/u;
+/** A keychain handle: `k_` + 10 base32 characters (never the value). */
+export const VAULT_HANDLE = /^k_[a-z2-7]{10}$/u;
+
+/** Byte bounds of the connector tools (contracts `CONNECTOR_TOOL_LIMITS`). */
+export const CONNECTOR_TOOL_LIMITS = {
+  argumentsBytes: 32 * 1024,
+  contentBytes: 32 * 1024,
+  toolChars: 128,
+} as const;
+
+/** Bounds of `ocw_http_request` (contracts `HTTP_TOOL_LIMITS`). */
+export const HTTP_TOOL_LIMITS = {
+  urlChars: 2048,
+  headers: 20,
+  headerValueChars: 1024,
+  requestBodyBytes: 64 * 1024,
+  responseBodyBytes: 256 * 1024,
+} as const;
+
+export const HTTP_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"] as const;
+export type AgentChannelHttpMethod = (typeof HTTP_METHODS)[number];
+
+/** `POST /connectors/list` */
+export type AgentChannelConnectorList = { eventId: string; agentId: string };
+
+export const AgentChannelConnectorTool = z.object({
+  name: z.string().min(1),
+  description: z.string().default(""),
+  inputSchema: z.record(z.string(), z.unknown()).nullable().default(null),
+});
+export type AgentChannelConnectorTool = z.infer<typeof AgentChannelConnectorTool>;
+
+export const AgentChannelConnectorEntry = z.object({
+  connector: z.string().regex(CONNECTOR_SAFE_NAME),
+  name: z.string(),
+  /** The asker's connection: `connected`, `not_connected` or `needs_reconnect` (a newer status stays a string). */
+  status: z.string().max(64),
+  tools: z.array(AgentChannelConnectorTool).default([]),
+});
+export type AgentChannelConnectorEntry = z.infer<typeof AgentChannelConnectorEntry>;
+
+export const AgentVaultKey = z.object({
+  handle: z.string().regex(VAULT_HANDLE),
+  name: z.string(),
+  allowedHosts: z.array(z.string()).default([]),
+});
+export type AgentVaultKey = z.infer<typeof AgentVaultKey>;
+
+export const AgentChannelConnectorListResponse = z.object({
+  connectors: z.array(AgentChannelConnectorEntry).default([]),
+  keys: z.array(AgentVaultKey).default([]),
+});
+export type AgentChannelConnectorListResponse = z.infer<typeof AgentChannelConnectorListResponse>;
+
+/** `POST /connectors/call`: one logical tool `<connector>__<tool>` of the turn. */
+export type AgentChannelConnectorCall = {
+  eventId: string;
+  agentId: string;
+  connector: string;
+  tool: string;
+  arguments: Record<string, unknown>;
+};
+
+/** Text for the model: untrusted output (it taints the turn), capped and redacted by the API. */
+export const AgentChannelConnectorCallResponse = z.object({
+  content: z.string(),
+  truncated: z.boolean().default(false),
+  isError: z.boolean().default(false),
+});
+export type AgentChannelConnectorCallResponse = z.infer<typeof AgentChannelConnectorCallResponse>;
+
+/** `POST /http-requests`: one request with a keychain handle; the API injects the secret, never the cell. */
+export type AgentChannelHttpRequest = {
+  eventId: string;
+  agentId: string;
+  handle: string;
+  method: AgentChannelHttpMethod;
+  url: string;
+  headers?: Record<string, string>;
+  body?: string;
+};
+
+/** Textual responses only, capped; a 3xx names its `Location` host only. */
+export const AgentChannelHttpResponse = z.object({
+  status: z.number().int().min(100).max(599),
+  contentType: z.string().nullable().default(null),
+  body: z.string(),
+  truncated: z.boolean().default(false),
+  redirectHost: z.string().nullable().default(null),
+});
+export type AgentChannelHttpResponse = z.infer<typeof AgentChannelHttpResponse>;

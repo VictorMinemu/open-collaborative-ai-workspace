@@ -23,6 +23,7 @@ import {
 } from "@ocw/contracts";
 import {
   agents,
+  agentTemplates,
   approvalRequests,
   memoryFiles,
   memoryProposals,
@@ -33,6 +34,7 @@ import {
   type Tx,
   tenantOf,
   unitMemberships,
+  vaultItems,
 } from "@ocw/db";
 import { and, asc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
@@ -392,6 +394,21 @@ export function registerUnitRoutes(
           )
           .limit(1);
         if (memory) throw conflict("Move or delete this unit's memory files first", "unit_has_memory");
+        // Phase 07.4: a unit key and a live agent template hold the unit (RESTRICT foreign keys), so the caller gets a
+        // reason instead of the database's refusal. Keys are deleted in Settings › Keychain, templates archived on the
+        // Bots page; archived templates go with the unit below (an agent started from one keeps its own copy).
+        const [key] = await tx
+          .select({ id: vaultItems.id })
+          .from(vaultItems)
+          .where(eq(vaultItems.unitId, unit.id))
+          .limit(1);
+        if (key) throw conflict("Delete this unit's keys first", "unit_has_keys");
+        const [liveTemplate] = await tx
+          .select({ id: agentTemplates.id })
+          .from(agentTemplates)
+          .where(and(eq(agentTemplates.unitId, unit.id), isNull(agentTemplates.archivedAt)))
+          .limit(1);
+        if (liveTemplate) throw conflict("Archive this unit's agent templates first", "unit_has_templates");
         // Pending proposals into the unit's memory cascade with its scope: their approvals close as failed
         // `scope_gone` right after the delete (cards updated live, closure audited; WINDOWS 144). Read directly, like
         // the memory check above.
@@ -428,6 +445,13 @@ export function registerUnitRoutes(
             .from(permissionRules)
             .where(eq(permissionRules.scopeUnitId, unit.id))
         ).map((r) => r.id);
+        // Archived templates of the unit: removed with it (versions cascade; agents.template_id is set null).
+        const removedTemplateIds = (
+          await tx
+            .delete(agentTemplates)
+            .where(eq(agentTemplates.unitId, unit.id))
+            .returning({ id: agentTemplates.id })
+        ).map((r) => r.id);
         await tx.delete(orgUnits).where(eq(orgUnits.id, unit.id));
         await deps.approvals.closeGone(tx, { ids: goneApprovals });
         await core.audit.record(tx, {
@@ -440,6 +464,7 @@ export function registerUnitRoutes(
             parentId: unit.parentId,
             removedMemberIds,
             removedRuleIds,
+            ...(removedTemplateIds.length > 0 ? { removedTemplateIds } : {}),
           },
         });
         await unitsChanged(core, tx, unit.id, "deleted");

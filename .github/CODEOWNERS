@@ -24,6 +24,21 @@
 /apps/api/src/modules/bot-capabilities/            @VictorMinemu
 /apps/api/src/modules/work-session/policy*         @VictorMinemu
 
+# Phase 07.4 (ADR-0025): the only outbound path for admin-, provider- or model-chosen URLs, member credentials, keys
+# by handle, the Agent Channel proxies that use them, and the template caps.
+/apps/api/src/lib/egress.ts                        @VictorMinemu
+/apps/api/src/modules/connectors/                  @VictorMinemu
+/apps/api/src/modules/keychain/                    @VictorMinemu
+/apps/api/src/modules/agent-channel/connectors.ts  @VictorMinemu
+/apps/api/src/modules/agent-channel/connect-card.ts @VictorMinemu
+/apps/api/src/modules/agent-channel/http-requests.ts @VictorMinemu
+/apps/api/src/modules/agent-channel/claim.ts       @VictorMinemu
+/apps/api/src/modules/agent/templates.ts           @VictorMinemu
+/packages/contracts/src/connectors.ts              @VictorMinemu
+/packages/contracts/src/keychain.ts                @VictorMinemu
+/packages/contracts/src/agent-templates.ts         @VictorMinemu
+/apps/openclaw-channel/src/connector-tools.ts      @VictorMinemu
+
 # Runtime adapters (ADR-0012 path) and the OpenClaw plugin install gate.
 /apps/local-runtime/src/claude/                    @VictorMinemu
 /apps/local-runtime/src/codex/                     @VictorMinemu

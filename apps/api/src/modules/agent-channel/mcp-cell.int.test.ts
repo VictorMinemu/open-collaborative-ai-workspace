@@ -451,3 +451,67 @@ describe("MCP output taints the turn unless the server is trusted for chained ca
     });
   });
 });
+
+describe("per-member connectors never reach the cell (07.4-06, C-01, T-07.4-06-01)", () => {
+  const WIKI_SECRET = "wiki-org-s3cr3t-value";
+  let wiki: Json;
+  let crm: Json;
+
+  beforeAll(async () => {
+    wiki = await ok(
+      admin.request("POST", "/api/v1/mcp-servers", {
+        name: "Wiki",
+        transport: "sse",
+        url: "https://wiki.example.com/sse",
+        headers: [{ name: "Authorization", value: `Bearer ${WIKI_SECRET}` }],
+      }),
+    );
+    crm = await ok(
+      admin.request("POST", "/api/v1/mcp-servers", {
+        name: "CRM",
+        transport: "streamable-http",
+        url: "https://crm.example.com/mcp",
+        authMode: "per_member_oauth",
+      }),
+    );
+  });
+
+  it("GET /cell lists the organization-secret servers and not the per-member one", async () => {
+    const ids = ((await ok(cell("GET", "/cell"))).mcpServers as Json[]).map((s) => s.id);
+    expect(ids).toEqual(expect.arrayContaining([server.id, wiki.id]));
+    expect(ids).not.toContain(crm.id);
+    const read = (await audits("agent_cell.config_read")).at(-1);
+    expect(read?.metadata.mcpServers).not.toContain(crm.id);
+  });
+
+  it("switching an organization-secret server to a member key drops it (and its org headers) from the next snapshot; the cell is told", async () => {
+    const secretIds = (
+      ((await su.query("select headers from app.mcp_servers where id = $1", [wiki.id])).rows[0] as Json)
+        .headers as Json[]
+    ).map((h) => h.secretId);
+    const changes = (await cellEvents("cell.config.changed")).length;
+    const switched = await ok(
+      admin.request("PATCH", `/api/v1/mcp-servers/${wiki.id}`, {
+        authMode: "per_member_secret",
+        memberHeaderName: "X-Api-Key",
+      }),
+    );
+    expect(switched).toMatchObject({
+      authMode: "per_member_secret",
+      memberHeaderName: "X-Api-Key",
+      headers: [],
+      status: "pending",
+    });
+    const after = await cellEvents("cell.config.changed");
+    expect(after.length).toBe(changes + 1);
+    expect(after.at(-1)).toMatchObject({ reason: "tools.updated" });
+    const ids = ((await ok(cell("GET", "/cell"))).mcpServers as Json[]).map((s) => s.id);
+    expect(ids).toContain(server.id);
+    expect(ids).not.toContain(wiki.id);
+    // The organization credential is gone with the switch.
+    expect(
+      (await su.query("select 1 from app.secrets where id = any($1::uuid[])", [secretIds])).rowCount,
+    ).toBe(0);
+    expect(JSON.stringify(await ok(cell("GET", "/cell")))).not.toContain(WIKI_SECRET);
+  });
+});

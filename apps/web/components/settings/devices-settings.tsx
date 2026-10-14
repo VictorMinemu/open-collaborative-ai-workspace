@@ -320,9 +320,13 @@ function DeviceFacts({ device: d, owned }: { device: Device; owned: boolean }) {
         data-enabled={d.fullAccessOptIn}
       >
         <span
+          data-testid="device-full-access-icon"
           className={cn(
             "mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md [&_svg]:size-3.5",
-            d.fullAccessOptIn ? "bg-warning/15 text-warning" : "bg-muted text-muted-foreground",
+            // The Badge warning pill colours: the icon keeps 3:1 in both themes (WINDOWS #197).
+            d.fullAccessOptIn
+              ? "bg-amber-100 text-amber-800 dark:bg-amber-400/15 dark:text-amber-300"
+              : "bg-muted text-muted-foreground",
           )}
         >
           {d.fullAccessOptIn ? <ShieldAlert /> : <ShieldCheck />}

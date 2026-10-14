@@ -32,8 +32,10 @@ import { createArtifactModule, type ObjectStorage } from "./modules/artifact";
 import { createAuditService } from "./modules/audit";
 import { createBotCapabilitiesModule } from "./modules/bot-capabilities";
 import { createChatModule, createConversationAccess } from "./modules/chat";
+import { createConnectorsModule } from "./modules/connectors";
 import { createDeviceModule, type DeviceHub } from "./modules/device";
 import { createAuth, createIdentityModule, IdentityService } from "./modules/identity";
+import { createKeychainModule } from "./modules/keychain";
 import { createMcpModule } from "./modules/mcp";
 import { createMemoryModule, createMemoryService, type MemoryService } from "./modules/memory";
 import { createModelGateway, createModelGatewayModule } from "./modules/model-gateway";
@@ -299,6 +301,8 @@ export async function buildApp(
     createAgentModule(core, { approvals: approvals.service }), // B2; 07.2: a bot deletion closes its pending approvals
     createBotCapabilitiesModule(core, { memory }), // Phase 3.1: capabilities, bot policy, governance; 07.2-11: notes on files
     createMcpModule(core), // Phase 3.1: MCP server registry (D-13)
+    createConnectorsModule(core), // Phase 07.4: members' own connector accounts (D-01 … D-03, CONN-01 … CONN-03)
+    createKeychainModule(core), // Phase 07.4: keys bots use by handle (D-04, CONN-05)
     createPluginsModule(core), // Phase 3.1: OpenClaw Marketplace (D-14)
     // B2; 06-10: model labels in persona history; 07.2-11: memory tools and memory files in the turn
     createAgentChannelModule(core, { modelLabel: (ref) => modelGateway.labelOf(ref), memory }),

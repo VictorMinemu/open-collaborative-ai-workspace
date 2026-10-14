@@ -58,8 +58,9 @@ import {
   toProviderDto,
 } from "./service";
 import { revokeSubscriptionInCell } from "./subscription";
+import { registerTemplateRoutes } from "./templates-routes";
 
-export { createPersonalBot, DEFAULT_MAX_PERSONAL_BOTS } from "./personal";
+export { createPersonalBot, DEFAULT_MAX_PERSONAL_BOTS, type PersonalBotInput } from "./personal";
 export {
   agentDirectory,
   agentFacts,
@@ -553,6 +554,9 @@ export function createAgentModule(core: Core, deps: AgentModuleDeps): ApiModule 
           }
         },
       );
+
+      // 07.4-08: agent templates (D-05); a started agent is a personal bot made by createPersonalBot.
+      registerTemplateRoutes(app, core, isUniqueViolation);
 
       // Per-bot decision (D-01/D-02, AGENT-01). A personal bot takes field edits from its owner only
       // (`bot.configure`) and `{enabled}` from its owner or an admin (`bot.manage`, governance); it never takes a unit

@@ -474,3 +474,50 @@ describe("loadConfig: openbao:// references for the API-only secrets (SELF-02, D
     );
   });
 });
+
+describe("egress variables (D-07)", () => {
+  const base = {
+    DATABASE_URL: "postgres://app:x@localhost:5432/ocw",
+    AUTH_DATABASE_URL: "postgres://auth:x@localhost:5432/ocw",
+    REDIS_URL: "redis://localhost:6379",
+    BETTER_AUTH_SECRET: "b".repeat(32),
+    OCW_SETUP_TOKEN: "s".repeat(16),
+    OCW_ENCRYPTION_KEY: "a".repeat(64),
+  };
+
+  it("OCW_EGRESS_TEST_HOSTS unset or empty is an empty map", () => {
+    expect(loadEnv(base).OCW_EGRESS_TEST_HOSTS).toEqual(new Map());
+    expect(loadEnv({ ...base, OCW_EGRESS_TEST_HOSTS: "" }).OCW_EGRESS_TEST_HOSTS).toEqual(new Map());
+  });
+
+  it("OCW_EGRESS_TEST_HOSTS maps test host names to loopback addresses", () => {
+    const env = loadEnv({ ...base, OCW_EGRESS_TEST_HOSTS: "fake-mcp=127.0.0.1, Other.Test=::1" });
+    expect(env.OCW_EGRESS_TEST_HOSTS).toEqual(
+      new Map([
+        ["fake-mcp", "127.0.0.1"],
+        ["other.test", "::1"],
+      ]),
+    );
+  });
+
+  it("a malformed entry or a non-loopback address fails naming the variable", () => {
+    for (const value of ["bad", "fake-mcp=", "=127.0.0.1", "fake-mcp=10.0.0.1", "fake-mcp=example.com"]) {
+      expect(() => loadEnv({ ...base, OCW_EGRESS_TEST_HOSTS: value })).toThrow(/OCW_EGRESS_TEST_HOSTS/);
+    }
+  });
+
+  it("production refuses OCW_EGRESS_TEST_HOSTS (test-only)", () => {
+    expect(() =>
+      loadEnv({ ...base, NODE_ENV: "production", OCW_EGRESS_TEST_HOSTS: "fake-mcp=127.0.0.1" }),
+    ).toThrow(/OCW_EGRESS_TEST_HOSTS: is test-only/);
+    expect(loadEnv({ ...base, NODE_ENV: "production" }).OCW_EGRESS_TEST_HOSTS).toEqual(new Map());
+  });
+
+  it("OCW_OPENBAO_ADDR is part of the configuration (the egress platform list), empty means unset", () => {
+    expect(loadEnv(base).OCW_OPENBAO_ADDR).toBeNull();
+    expect(loadEnv({ ...base, OCW_OPENBAO_ADDR: "" }).OCW_OPENBAO_ADDR).toBeNull();
+    expect(loadEnv({ ...base, OCW_OPENBAO_ADDR: "http://openbao:8200" }).OCW_OPENBAO_ADDR).toBe(
+      "http://openbao:8200",
+    );
+  });
+});

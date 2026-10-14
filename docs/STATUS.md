@@ -32,3 +32,10 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
 - **07.3 Module access per unit:** Work Zone, AI chats, Bots and Memory on or off per organization, unit or person as
   resolver deny rules, from Settings › Organization and Settings › Modules; the web hides what the API refuses
   (ADR-0024).
+- **07.4 Per-member connectors, agent keychain and templates:** MCP connectors in three auth modes; each member signs
+  in to their own account (OAuth 2.1 with PKCE, `resource`, `iss`; callback on the API) or pastes their own key, sealed
+  per member; a shared bot calls the connector with the account of whoever asked, through the API proxy, only where
+  that person alone reads the result unless they allow a conversation, and posts a "Connect your account" card that
+  comes back to the chat; Settings › Connections and Keychain; keys used by handle and never seen by the model; one
+  pinned, public-only egress guard for every outbound call; unit agent templates that members start as their own
+  personal agent (ADR-0025).

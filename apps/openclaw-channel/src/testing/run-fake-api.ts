@@ -10,6 +10,8 @@
  * FAKE_DENY_TOOLS=web_fetch              `/tool-calls` denies these tools (allows everything else).
  * FAKE_MCP_SERVERS='[{"id":…,"safeName":…,"transport":…,"url":…,"headers":[…],"tools":[…]}]'
  *                                        snapshot `mcpServers` (CellMcpServer[], header values included).
+ * FAKE_CONNECTOR_TOKEN=…                the member credential the real API would use for connector calls; held by the
+ *                                        fake only, never sent (the smoke checks the cell never sees it).
  * FAKE_APPROVED_PLUGINS='[{"pluginRowId":…,"packageName":…,"version":…,"sha256":…,"pluginId":…,"status":…}]'
  *                                        snapshot `plugins` (CellApprovedPlugin[]); POST /__test/plugins {plugins}
  *                                        replaces them; publishing plugin.install.v1 / plugin.uninstall.v1 moves the
@@ -37,6 +39,7 @@ const api = await startFakeAgentChannelApi({
   denyTools: list(process.env.FAKE_DENY_TOOLS),
   ...(process.env.FAKE_MCP_SERVERS ? { mcpServers: JSON.parse(process.env.FAKE_MCP_SERVERS) } : {}),
   ...(process.env.FAKE_APPROVED_PLUGINS ? { plugins: JSON.parse(process.env.FAKE_APPROVED_PLUGINS) } : {}),
+  ...(process.env.FAKE_CONNECTOR_TOKEN ? { connectorToken: process.env.FAKE_CONNECTOR_TOKEN } : {}),
   agents: [
     {
       id: process.env.FAKE_BOT_ID ?? "0199a000-0000-7000-8000-00000000a001",

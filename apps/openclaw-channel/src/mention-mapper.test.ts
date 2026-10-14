@@ -318,6 +318,23 @@ describe("per-turn tools and context (D-07, D-08)", () => {
     expect(mapMention(mention({ turn }), BOT).allowedTools).toEqual([]);
   });
 
+  it("connectorTools (07.4 D-07): the turn's per-member logical tools, only when ocw_connector_call runs; never OpenClaw tools", () => {
+    const connectorTurn = {
+      ...turn,
+      tools: ["ocw_connector_call", "m1a2b3c4d__whoami", "m5e0c0de1__echo", "web_fetch"],
+    };
+    const bot = { ...BOT, capabilities: { tools: ["ocw_connector_call", "m5e0c0de1__echo", "web_fetch"] } };
+    const m = mapMention(mention({ turn: connectorTurn } as never), bot);
+    // The in-cell (org) MCP tool is an OpenClaw tool; the per-member one is reachable only through the static tool.
+    expect(m.allowedTools).toEqual(["ocw_connector_call", "m5e0c0de1__echo", "web_fetch"]);
+    expect(m.connectorTools).toEqual(["m1a2b3c4d__whoami"]);
+    const noCall = mapMention(mention({ turn: connectorTurn } as never), {
+      ...BOT,
+      capabilities: { tools: ["web_fetch"] },
+    });
+    expect(noCall.connectorTools).toEqual([]);
+  });
+
   it("an invalid turn block parses as no turn", () => {
     const parsed = AgentMentionEvent.parse({ ...mention(), turn: { tools: "web_search" } });
     expect(parsed.turn).toBeUndefined();
@@ -577,5 +594,104 @@ describe("mapCardAction (06-14, P-11): a decision on the agent's card becomes a 
       expect(AgentCardActionEvent.safeParse(e).success).toBe(false);
       expect(() => mapCardAction(e as never, BOT)).toThrow();
     }
+  });
+});
+
+describe("member_account withheld entries (07.4 UI-SPEC R7, D-03)", () => {
+  const C = "0199a6f0-0000-7000-8000-00000000c0c2";
+  const S = "0199a6f0-0000-7000-8000-000000000c71";
+  const K = "0199a6f0-0000-7000-8000-000000000c72";
+  const ops = (withheld: unknown[], conversation = { id: C, kind: "channel", name: "ops" }) =>
+    mention({
+      conversation,
+      message: { ...mention().message, author: { kind: "user", id: "u-victor", displayName: "Víctor" } },
+      turn: { tools: [], toolFlags: {}, memory: [], now: null, maxToolCalls: 8, maxWebCalls: 5, withheld },
+    } as never);
+  const lines = (event: AgentMentionEvent) =>
+    mapMention(event, BOT).contextBlocks.find((b) => b.type === "withheld_tools")?.payload
+      .withheld as string[];
+
+  it("a connector entry carries the spec's sentence and a root-relative share link", () => {
+    const [line] = lines(
+      ops([
+        {
+          tool: "m1a2b3c4d__whoami",
+          reason: "member_account",
+          resource: { kind: "connector", id: S, name: "Acme CRM" },
+        },
+      ]),
+    );
+    expect(line).toBe(
+      "m1a2b3c4d__whoami — uses Víctor's own Acme CRM account, which stays private in this conversation; Víctor can " +
+        `ask you in a private chat, or allow it here: [Allow Acme CRM in #ops](/settings/connections?share=${C}&connector=${S})`,
+    );
+  });
+
+  it("a personal key links with &key=", () => {
+    const [line] = lines(
+      ops([
+        {
+          tool: "ocw_http_request",
+          reason: "member_account",
+          resource: { kind: "vault_item", id: K, name: "Billing API" },
+        },
+      ]),
+    );
+    expect(line).toContain("uses Víctor's own key Billing API, which stays private in this conversation");
+    expect(line).toContain(`[Allow Billing API in #ops](/settings/connections?share=${C}&key=${K})`);
+  });
+
+  it("without a resource: the same sentence without a link", () => {
+    const [line] = lines(ops([{ tool: "m1a2b3c4d__whoami", reason: "member_account" }]));
+    expect(line).toContain(
+      "uses Víctor's own account, which stays private in this conversation; Víctor can ask you",
+    );
+    expect(line).not.toMatch(/\]\(|settings\/connections\?/u);
+  });
+
+  it("an id that is not a UUID, an unknown kind or a Markdown name never yields a broken or injected link", () => {
+    const [notUuid, unknownKind, markdown] = lines(
+      ops([
+        {
+          tool: "a__b",
+          reason: "member_account",
+          resource: { kind: "connector", id: "x)(javascript:1", name: "Acme" },
+        },
+        { tool: "c__d", reason: "member_account", resource: { kind: "team", id: S, name: "Acme" } },
+        {
+          tool: "e__f",
+          reason: "member_account",
+          resource: { kind: "connector", id: S, name: "Evil](https://evil.example)[x" },
+        },
+      ]),
+    );
+    expect(notUuid).not.toMatch(/\]\(/u);
+    expect(unknownKind).not.toMatch(/\]\(/u);
+    // Exactly one link, to our own page; the name lost its link syntax.
+    expect(markdown?.match(/\]\(/gu)).toHaveLength(1);
+    expect(markdown).toContain(`(/settings/connections?share=${C}&connector=${S})`);
+    expect(markdown).not.toContain("](https://evil.example)");
+    // A conversation id that is not a UUID: no link either.
+    const [noConv] = lines(
+      ops(
+        [{ tool: "a__b", reason: "member_account", resource: { kind: "connector", id: S, name: "Acme" } }],
+        { id: "conv-1", kind: "channel", name: "ops" },
+      ),
+    );
+    expect(noConv).not.toMatch(/\]\(/u);
+  });
+
+  it("an invalid resource is dropped, the entry kept; existing reasons are unchanged", () => {
+    const parsed = AgentMentionEvent.parse(
+      ops([
+        { tool: "a__b", reason: "member_account", resource: { kind: 1 } },
+        { tool: "c__d", reason: "denied_for_you" },
+      ]),
+    );
+    expect(parsed.turn?.withheld).toEqual([
+      { tool: "a__b", reason: "member_account" },
+      { tool: "c__d", reason: "denied_for_you" },
+    ]);
+    expect(lines(parsed)[1]).toBe("c__d — Víctor may not use it");
   });
 });

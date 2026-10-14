@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
 /**
  * Accessibility gate for the specs (Phase 07.1, created by 07.1-08; reused by later phases). Runs axe-core through
@@ -16,8 +16,15 @@ export async function expectNoSeriousA11y(
 ): Promise<void> {
   await expect(page.locator(selector).first()).toBeVisible();
   // Opening dialogs, menus and sheets fade in: colours measured mid-transition are blends, not the real contrast.
+  // Infinite animations (a pulse, a spinner, a skeleton shimmer) never finish: waiting on them would hang until the
+  // test times out, so only finite ones are awaited.
   await page.evaluate(() =>
-    Promise.all(document.getAnimations().map((a) => a.finished.catch(() => undefined))),
+    Promise.all(
+      document
+        .getAnimations()
+        .filter((a) => a.effect?.getComputedTiming().iterations !== Number.POSITIVE_INFINITY)
+        .map((a) => a.finished.catch(() => undefined)),
+    ),
   );
   let AxeBuilder: typeof import("@axe-core/playwright")["default"] | null = null;
   try {
@@ -76,4 +83,48 @@ async function rolesAndNames(page: Page, selector: string): Promise<void> {
     return out;
   });
   expect(unnamed, `elements without an accessible name in ${selector}`).toEqual([]);
+}
+
+/**
+ * The WCAG contrast ratio of an element's own colour (`color`: its text, or an SVG icon's `currentColor`) against what
+ * it is painted on: every translucent background from the element up to the first opaque one, composited (07.4-14,
+ * WINDOWS #197). axe checks text only; icon-only tiles need 3:1 (WCAG 1.4.11) and are checked with this.
+ */
+export async function contrastOf(locator: Locator): Promise<number> {
+  return locator.evaluate((el) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 1;
+    canvas.height = 1;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) throw new Error("no 2d context");
+    const rgba = (css: string): [number, number, number, number] => {
+      ctx.clearRect(0, 0, 1, 1);
+      ctx.fillStyle = "#000";
+      ctx.fillStyle = css;
+      ctx.fillRect(0, 0, 1, 1);
+      const d = ctx.getImageData(0, 0, 1, 1).data;
+      return [d[0] ?? 0, d[1] ?? 0, d[2] ?? 0, (d[3] ?? 0) / 255];
+    };
+    const layers: Array<[number, number, number, number]> = [];
+    for (let n: Element | null = el; n; n = n.parentElement) {
+      const c = rgba(getComputedStyle(n).backgroundColor);
+      if (c[3] > 0) layers.push(c);
+      if (c[3] >= 1) break;
+    }
+    let bg: [number, number, number] = [255, 255, 255];
+    for (const [r, g, b, a] of layers.reverse()) {
+      bg = [r * a + bg[0] * (1 - a), g * a + bg[1] * (1 - a), b * a + bg[2] * (1 - a)];
+    }
+    const [fr, fg, fb, fa] = rgba(getComputedStyle(el).color);
+    const fgc = [fr * fa + bg[0] * (1 - fa), fg * fa + bg[1] * (1 - fa), fb * fa + bg[2] * (1 - fa)];
+    const lum = (c: number[]) => {
+      const [r, g, b] = c.map((v) => {
+        const x = v / 255;
+        return x <= 0.04045 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * (r ?? 0) + 0.7152 * (g ?? 0) + 0.0722 * (b ?? 0);
+    };
+    const [hi, lo] = [lum(fgc), lum(bg)].sort((x, y) => y - x);
+    return ((hi ?? 0) + 0.05) / ((lo ?? 0) + 0.05);
+  });
 }

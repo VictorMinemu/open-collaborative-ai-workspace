@@ -1,5 +1,6 @@
 import type { McpServerTool } from "@ocw/contracts";
 import { Eye, PencilLine } from "lucide-react";
+import type { ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 
 /**
@@ -44,5 +45,17 @@ export function McpToolsList({ tools }: { tools: McpServerTool[] }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+/** No tools yet, with why (a per-member connector learns its tools from the first member's connection, R6). */
+export function McpToolsEmpty({ children }: { children: ReactNode }) {
+  return (
+    <p
+      className="rounded-lg border border-dashed px-3 py-6 text-center text-muted-foreground text-xs"
+      data-testid="mcp-tools-empty"
+    >
+      {children}
+    </p>
   );
 }

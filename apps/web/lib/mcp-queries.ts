@@ -13,11 +13,19 @@ import { capabilityKeys } from "./capability-queries";
 
 /**
  * MCP server registry (03.1-09 routes, `mcp.manage`). Header credentials are write-only: requests may carry a
- * new value, responses only ever carry `{ name, hasValue }`. Tools come from the cell's probe.
+ * new value, responses only ever carry `{ name, hasValue }`. Tools come from the cell's probe. Phase 07.4: each
+ * server has an auth mode; an OAuth client secret is write-only too (`hasSecret`), and a PATCH or DELETE that would
+ * disconnect members answers 409 `connections_exist {count}` until `clearConnections` confirms.
  */
 export const mcpKeys = { servers: ["mcp-servers"] as const };
 
 const PROBING = new Set(["pending", "probing"]);
+
+/**
+ * Only the cell probes, and only organization-secret servers: a per-member connector stays `pending` until a member
+ * connects (07.4-10), so it never keeps the list polling.
+ */
+const awaitingCellProbe = (s: McpServer) => s.authMode === "org_secret" && PROBING.has(s.status);
 
 function noRetryOn4xx(failureCount: number, err: unknown): boolean {
   if (isApiError(err) && err.status >= 400 && err.status < 500) return false;
@@ -31,7 +39,7 @@ export function useMcpServers(enabled = true) {
     queryKey: mcpKeys.servers,
     queryFn: ({ signal }) => api.get("/api/v1/mcp-servers", { schema: McpServerList, signal }),
     retry: noRetryOn4xx,
-    refetchInterval: (query) => (query.state.data?.servers.some((s) => PROBING.has(s.status)) ? 1500 : false),
+    refetchInterval: (query) => (query.state.data?.servers.some(awaitingCellProbe) ? 1500 : false),
   });
 }
 
@@ -85,7 +93,10 @@ export function useDeleteMcpServer(id: string) {
   const qc = useQueryClient();
   const invalidate = useInvalidateMcp();
   return useMutation({
-    mutationFn: () => api.del(`/api/v1/mcp-servers/${id}`, { schema: Ok }),
+    mutationFn: (opts: { clearConnections?: boolean } = {}) =>
+      api.del(`/api/v1/mcp-servers/${id}${opts.clearConnections ? "?clearConnections=true" : ""}`, {
+        schema: Ok,
+      }),
     onSuccess: () =>
       qc.setQueryData<McpServerList>(mcpKeys.servers, (prev) =>
         prev ? { ...prev, servers: prev.servers.filter((s) => s.id !== id) } : prev,
@@ -102,4 +113,11 @@ export function useProbeMcpServer(id: string) {
     onSuccess: replace,
     onSettled: invalidate,
   });
+}
+
+/** The member count of a 409 `connections_exist` (the fallback when the DTO count was stale, UI-SPEC R4). */
+export function connectionsExistCount(err: unknown): number | null {
+  if (!isApiError(err, 409) || err.code !== "connections_exist") return null;
+  const count = (err.details as { count?: unknown } | undefined)?.count;
+  return typeof count === "number" && count > 0 ? count : null;
 }

@@ -10,6 +10,7 @@ import {
   McpProbeEvent,
   McpServer,
   McpServerList,
+  McpServerTool,
   UpdateMcpServerRequest,
 } from "./index";
 
@@ -42,6 +43,18 @@ const server = {
   ],
   createdAt: NOW,
   updatedAt: NOW,
+};
+
+/** What a Phase 3.1 payload (no 07.4 fields) reads back as. */
+const orgSecretDefaults = {
+  authMode: "org_secret",
+  memberHeaderName: null,
+  memberHeaderPrefix: null,
+  oauthScopes: null,
+  oauthStatus: null,
+  oauthUseCimd: true,
+  oauthClients: [],
+  memberConnections: 0,
 };
 
 describe("MCP registry contracts (D-13)", () => {
@@ -94,7 +107,7 @@ describe("MCP registry contracts (D-13)", () => {
   });
 
   it("McpServer has no field that could carry a header value", () => {
-    expect(McpServer.parse(server)).toEqual(server);
+    expect(McpServer.parse(server)).toEqual({ ...server, ...orgSecretDefaults });
     const leaky = McpServer.parse({
       ...server,
       headers: [{ name: "Authorization", hasValue: true, value: "s" }],
@@ -189,5 +202,172 @@ describe("permission rules: tool layer for bot tools (03.1-03 note)", () => {
     expect(rule({ permission: "work_session.approve", tool: "Bash" })).toBe(true);
     expect(rule({ permission: "bot.internet", tool: "m3f9a12c4__echo" })).toBe(false);
     expect(rule({ permission: "channel.post", tool: "m3f9a12c4__echo" })).toBe(false);
+  });
+});
+
+describe("connector auth modes on the registry (07.4 D-01, CONN-01)", () => {
+  const http = {
+    name: "Acme CRM",
+    transport: "streamable-http",
+    url: "https://crm.example.com/mcp",
+  } as const;
+
+  it("a Phase 3.1 server reads back as org_secret with no member connections", () => {
+    const parsed = McpServer.parse(server);
+    expect(parsed.authMode).toBe("org_secret");
+    expect(parsed.memberConnections).toBe(0);
+    expect(parsed.oauthClients).toEqual([]);
+    expect(parsed.tools[0]?.inputSchema).toBeUndefined();
+    expect(CreateMcpServerRequest.parse(http).authMode).toBe("org_secret");
+  });
+
+  it("a per-member server carries its mode, header, scopes, clients and member count", () => {
+    const perMember = {
+      ...server,
+      authMode: "per_member_oauth",
+      headers: [],
+      oauthScopes: ["crm.read"],
+      oauthStatus: "ready",
+      oauthClients: [
+        { issuer: "https://auth.example.com", clientId: "ocw", hasSecret: false, method: "cimd" },
+      ],
+      memberConnections: 3,
+      tools: [{ ...server.tools[0], inputSchema: { type: "object", properties: { q: { type: "string" } } } }],
+    };
+    expect(McpServer.parse(perMember)).toMatchObject({ authMode: "per_member_oauth", memberConnections: 3 });
+    expect(McpServer.safeParse({ ...perMember, memberConnections: -1 }).success).toBe(false);
+  });
+
+  it("a per-member mode is refused on the stdio sandbox transport", () => {
+    for (const authMode of ["per_member_oauth", "per_member_secret"] as const) {
+      const res = CreateMcpServerRequest.safeParse({
+        name: "Local",
+        transport: "sandboxed-stdio",
+        sandboxServer: "everything",
+        authMode,
+        memberHeaderName: "X-Api-Key",
+      });
+      expect(res.success, authMode).toBe(false);
+      expect(JSON.stringify(res.error?.issues), authMode).toContain("stdio");
+    }
+  });
+
+  it("a per-member mode never carries organization headers", () => {
+    expect(
+      CreateMcpServerRequest.safeParse({
+        ...http,
+        authMode: "per_member_oauth",
+        headers: [{ name: "Authorization", value: "Bearer org" }],
+      }).success,
+    ).toBe(false);
+    expect(CreateMcpServerRequest.safeParse({ ...http, authMode: "per_member_oauth" }).success).toBe(true);
+  });
+
+  it("per_member_secret needs the header the member's key goes in, with a safe prefix", () => {
+    expect(CreateMcpServerRequest.safeParse({ ...http, authMode: "per_member_secret" }).success).toBe(false);
+    expect(
+      CreateMcpServerRequest.parse({
+        ...http,
+        authMode: "per_member_secret",
+        memberHeaderName: "Authorization",
+        memberHeaderPrefix: "Bearer ",
+      }),
+    ).toMatchObject({ memberHeaderName: "Authorization", memberHeaderPrefix: "Bearer " });
+    for (const prefix of ["Bearer\r\n", "a\nb", "a\rb", "x".repeat(33)]) {
+      expect(
+        CreateMcpServerRequest.safeParse({
+          ...http,
+          authMode: "per_member_secret",
+          memberHeaderName: "Authorization",
+          memberHeaderPrefix: prefix,
+        }).success,
+        JSON.stringify(prefix),
+      ).toBe(false);
+    }
+    expect(
+      CreateMcpServerRequest.safeParse({
+        ...http,
+        authMode: "per_member_secret",
+        memberHeaderName: "Bad Name",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("an OAuth client belongs to per_member_oauth only", () => {
+    const oauthClient = { issuer: "https://auth.example.com", clientId: "ocw", clientSecret: "s" };
+    expect(CreateMcpServerRequest.safeParse({ ...http, oauthClient }).success).toBe(false);
+    expect(
+      CreateMcpServerRequest.safeParse({ ...http, authMode: "per_member_oauth", oauthClient }).success,
+    ).toBe(true);
+    expect(
+      CreateMcpServerRequest.safeParse({
+        ...http,
+        authMode: "per_member_oauth",
+        oauthScopes: Array(33).fill("s"),
+      }).success,
+    ).toBe(false);
+  });
+
+  it("the client metadata document can be turned off for a sign-in connector only (WINDOWS #179)", () => {
+    expect(McpServer.parse(server).oauthUseCimd).toBe(true);
+    expect(
+      CreateMcpServerRequest.parse({ ...http, authMode: "per_member_oauth", oauthUseCimd: false })
+        .oauthUseCimd,
+    ).toBe(false);
+    expect(CreateMcpServerRequest.safeParse({ ...http, oauthUseCimd: false }).success).toBe(false);
+    expect(UpdateMcpServerRequest.parse({ oauthUseCimd: false })).toEqual({ oauthUseCimd: false });
+    expect(UpdateMcpServerRequest.safeParse({ authMode: "org_secret", oauthUseCimd: false }).success).toBe(
+      false,
+    );
+  });
+
+  it("update checks the resulting mode only when it names one", () => {
+    expect(UpdateMcpServerRequest.parse({ personalAllowed: true })).toEqual({ personalAllowed: true });
+    expect(
+      UpdateMcpServerRequest.safeParse({
+        authMode: "per_member_oauth",
+        headers: [{ name: "Authorization", keep: true }],
+      }).success,
+    ).toBe(false);
+    expect(
+      UpdateMcpServerRequest.safeParse({ authMode: "per_member_secret", memberHeaderName: null }).success,
+    ).toBe(false);
+    expect(
+      UpdateMcpServerRequest.safeParse({
+        authMode: "org_secret",
+        oauthClient: { issuer: "https://a.test", clientId: "c" },
+      }).success,
+    ).toBe(false);
+    expect(
+      UpdateMcpServerRequest.parse({
+        authMode: "per_member_oauth",
+        oauthClient: null,
+        clearConnections: true,
+      }),
+    ).toEqual({
+      authMode: "per_member_oauth",
+      oauthClient: null,
+      clearConnections: true,
+    });
+    expect(UpdateMcpServerRequest.safeParse({ memberHeaderPrefix: "a\nb" }).success).toBe(false);
+  });
+
+  it("a tool input schema is capped at 16 KB serialized", () => {
+    const tool = server.tools[0];
+    expect(McpServerTool.safeParse({ ...tool, inputSchema: null }).success).toBe(true);
+    expect(
+      McpServerTool.safeParse({ ...tool, inputSchema: { description: "x".repeat(16 * 1024) } }).success,
+    ).toBe(false);
+  });
+
+  it("the list carries the OAuth URLs (optional, so a Phase 3.1 list still parses)", () => {
+    const oauth = {
+      redirectUri: "https://o.test/api/v1/connectors/oauth/callback",
+      clientMetadataUrl: null,
+      oauthAvailable: true,
+    };
+    expect(
+      McpServerList.parse({ servers: [], sandbox: { available: false, servers: [] }, oauth }).oauth,
+    ).toEqual(oauth);
   });
 });

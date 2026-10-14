@@ -84,6 +84,38 @@ export function fastifyTrustProxy(
 }
 const DEFAULT_MAIL_FROM = "Open Collaborative AI Workspace <no-reply@localhost>";
 
+/** Loopback only: a test host must never stand in for a real private or public address. */
+const isLoopback = (v: string) => {
+  const family = isIP(v);
+  return (family === 4 && v.startsWith("127.")) || (family === 6 && v === "::1");
+};
+/**
+ * TEST-ONLY (D-07): `name=address,…` mapping egress test host names to a loopback address, so int and e2e tests reach
+ * local fakes through the egress guard (lib/egress.ts). Refused when NODE_ENV is production.
+ */
+export const EgressTestHosts = z
+  .string()
+  .default("")
+  .transform((raw, ctx): Map<string, string> => {
+    const map = new Map<string, string>();
+    for (const item of raw
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean)) {
+      const [name = "", address = "", extra] = item.split("=").map((x) => x.trim());
+      if (
+        extra !== undefined ||
+        !/^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/i.test(name) ||
+        !isLoopback(address)
+      ) {
+        ctx.addIssue({ code: "custom", message: "must be a comma list of name=<loopback address>" });
+        return z.NEVER;
+      }
+      map.set(name.toLowerCase(), address);
+    }
+    return map;
+  });
+
 export const EnvSchema = z
   .object({
     NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
@@ -253,6 +285,13 @@ export const EnvSchema = z
       .transform((v) => [...new Set(v.split(",").map((x) => x.trim().toLowerCase()))])
       .pipe(z.array(z.enum(["es", "en"], "must be a comma list of es, en")).min(1)),
     /** Overall deadline of one Presidio scan; past it the scan reports `extended_scan_unavailable` (fail-open). */
+    /**
+     * OpenBao address. Read by loadConfig to resolve `openbao://` references; part of Env so the egress guard
+     * refuses it as a platform host (D-07).
+     */
+    OCW_OPENBAO_ADDR: optionalUrl,
+    /** TEST-ONLY (D-07): egress test hosts (see EgressTestHosts). Refused in production. */
+    OCW_EGRESS_TEST_HOSTS: EgressTestHosts,
     OCW_PRESIDIO_TIMEOUT_MS: z.preprocess(
       (v) => (v === "" ? undefined : v),
       z.coerce.number().int().min(100).max(10_000).default(2000),
@@ -266,7 +305,8 @@ export const EnvSchema = z
         message: "memory: is only allowed when NODE_ENV is test",
       });
     }
-    // The ChatGPT overrides point a member's token at another server: never in production (T-05-02-07).
+    // The ChatGPT overrides point a member's token at another server, and the egress test hosts let outbound calls
+    // reach loopback: never in production (T-05-02-07, T-07.4-03-06).
     if (v.NODE_ENV === "production") {
       for (const name of ["OCW_CHATGPT_API_BASE_URL", "OCW_CHATGPT_AUTH_BASE_URL"] as const) {
         if (v[name]) {
@@ -276,6 +316,13 @@ export const EnvSchema = z
             message: "is test-only and refused when NODE_ENV is production",
           });
         }
+      }
+      if (v.OCW_EGRESS_TEST_HOSTS.size > 0) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["OCW_EGRESS_TEST_HOSTS"],
+          message: "is test-only and refused when NODE_ENV is production",
+        });
       }
     }
   })

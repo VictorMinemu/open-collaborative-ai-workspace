@@ -1,5 +1,11 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/channel-core";
-import type { AgentChannelToolCallRequest, TurnContext, TurnToolFlags } from "./agent-channel-protocol.js";
+import {
+  type AgentChannelToolCallRequest,
+  CONNECTOR_SAFE_NAME,
+  CONNECTOR_TOOL_LIMITS,
+  type TurnContext,
+  type TurnToolFlags,
+} from "./agent-channel-protocol.js";
 import type { AgentChannelClient } from "./api-client.js";
 import { openClawAgentIdFor } from "./mention-mapper.js";
 
@@ -11,7 +17,8 @@ import { openClawAgentIdFor } from "./mention-mapper.js";
  *   - blocks tools outside `turn.tools`, over the per-turn caps, or side-effecting after untrusted output
  *     (taint) — locally first, which saves a round trip,
  *   - asks `POST /agent-channel/v1/tool-calls` for every call except `ocw_memory_save`, `ocw_memory_write`,
- *     `ocw_memory_propose` and `ocw_board_card` (validated by their own routes) and blocks on a denial, an error or a
+ *     `ocw_memory_propose`, `ocw_board_card` and the connector and keychain tools (validated by their own routes,
+ *     `SELF_VALIDATED_TOOLS`) and blocks on a denial, an error or a
  *     timeout (fail closed, under OpenClaw's 15 s budget),
  *   - reports each allowed call's outcome (status, result count, provider, duration; never content).
  * Logs never include params or results.
@@ -30,6 +37,11 @@ export interface ActiveTurn {
   /** The message the turn answers (the reply's `inReplyToMessageId`). */
   messageId?: string;
   turn: TurnContext;
+  /**
+   * 07.4 (D-07): the turn's per-member logical connector tools `<connector>__<tool>` (mention-mapper.ts
+   * `connectorTools`). `turn.tools` is the run's OpenClaw tools only; these are reachable through `ocw_connector_call`.
+   */
+  connectorTools: string[];
   calls: number;
   webCalls: number;
   tainted: boolean;
@@ -61,7 +73,9 @@ export const WEB_TOOLS: ReadonlySet<string> = new Set(["web_search", "web_fetch"
 /**
  * Validated by their own routes, which check the turn, the tool on it and the taint, and count the call themselves:
  * `ocw_memory_save` (`POST /memories`, 03.1-07), `ocw_memory_write` / `ocw_memory_propose` (`/memory/write|propose`,
- * 07.2) and `ocw_board_card` (`/board/*`, 07.1-10). Asking `/tool-calls` too would count the call twice, and
+ * 07.2), `ocw_board_card` (`/board/*`, 07.1-10) and the connector and keychain tools (`/connectors/list|call`,
+ * `/http-requests`, 07.4 D-07: the API re-decides the logical tool, the audience and the caps and taint, and audits each
+ * call with the member's credential). Asking `/tool-calls` too would count the call twice, and
  * `/tool-calls` cannot offer the board tool (it does not know the board layout), so it would refuse it
  * `policy_changed`. `ocw_memory_list` / `ocw_memory_read` change nothing and go through the generic gate.
  */
@@ -70,6 +84,9 @@ const SELF_VALIDATED_TOOLS: ReadonlySet<string> = new Set([
   "ocw_memory_write",
   "ocw_memory_propose",
   "ocw_board_card",
+  "ocw_connector_list",
+  "ocw_connector_call",
+  "ocw_http_request",
 ]);
 /**
  * Always side-effecting, whatever flags a turn carries: writing memory or changing shared board work after untrusted
@@ -83,6 +100,17 @@ const ALWAYS_SIDE_EFFECTING: ReadonlySet<string> = new Set([
 ]);
 /** Unknown flags are treated as the most dangerous combination. */
 const UNKNOWN_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: true };
+/**
+ * The connector and keychain tools' local flags (07.4 D-07) never come from the static tool: `ocw_connector_call` takes
+ * the LOGICAL tool's (`turn.toolFlags[<connector>__<tool>]`, unknown → UNKNOWN_FLAGS), `ocw_http_request` its method's
+ * (GET/HEAD read, any other method writes; the response is always untrusted), and `ocw_connector_list` reads the
+ * workspace's own catalog (never side-effecting, so it stays allowed on a tainted turn). The API re-decides all of it.
+ */
+const CONNECTOR_LIST_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: false };
+const LISTED_CONNECTORS_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: false };
+const HTTP_READ_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: false };
+const HTTP_WRITE_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: true };
+const HTTP_READ_METHODS: ReadonlySet<string> = new Set(["GET", "HEAD"]);
 
 type Pending = { callId: string; tool: string; startedAt: number };
 
@@ -109,6 +137,51 @@ export function canonicalToolName(turnTools: readonly string[], reported: string
   const hits = turnTools.filter((t) => t.toLowerCase() === folded);
   // Two turn tools that differ only by case are ambiguous: keep the reported name (not in the turn → blocked).
   return hits.length === 1 ? (hits[0] as string) : reported;
+}
+
+/**
+ * The logical tool `<connector>__<tool>` an `ocw_connector_call` names, in the turn's own spelling (`connectorTools`,
+ * the turn's logical connector tools), or why the params are invalid.
+ */
+export function logicalToolOf(
+  connectorTools: readonly string[],
+  params: Record<string, unknown> | undefined,
+): { logical: string; connector: string; tool: string } | { error: string } {
+  const connector = typeof params?.connector === "string" ? params.connector.trim() : "";
+  if (!CONNECTOR_SAFE_NAME.test(connector)) {
+    return { error: "connector must be a connector id from ocw_connector_list, like m1a2b3c4d." };
+  }
+  const tool = typeof params?.tool === "string" ? params.tool.trim() : "";
+  if (!tool || tool.length > CONNECTOR_TOOL_LIMITS.toolChars) {
+    return { error: "tool must name one of the connector's tools from ocw_connector_list." };
+  }
+  const logical = canonicalToolName(connectorTools, `${connector}__${tool}`);
+  return { logical, connector, tool: logical.slice(connector.length + 2) };
+}
+
+/** The flags the gate checks a call with, or why it is blocked (07.4: per logical tool and per method). */
+function callFlags(
+  t: ActiveTurn,
+  tool: string,
+  params: Record<string, unknown> | undefined,
+): TurnToolFlags | ToolBlock {
+  if (tool === "ocw_connector_list") {
+    // Never side-effecting (allowed on a tainted turn), but untrusted once it lists per-member connectors: their tool
+    // descriptions are third-party text, so the API taints the turn and the local gate follows (WINDOWS #192).
+    return t.turn.toolFlags[tool]?.untrustedOutput === true ? LISTED_CONNECTORS_FLAGS : CONNECTOR_LIST_FLAGS;
+  }
+  if (tool === "ocw_connector_call") {
+    const named = logicalToolOf(t.connectorTools, params);
+    if ("error" in named || !t.connectorTools.includes(named.logical)) {
+      return block(`Tool ${tool} blocked: that connector tool is not allowed on this turn.`);
+    }
+    return t.turn.toolFlags[named.logical] ?? UNKNOWN_FLAGS;
+  }
+  if (tool === "ocw_http_request") {
+    const method = typeof params?.method === "string" ? params.method.trim().toUpperCase() : "";
+    return HTTP_READ_METHODS.has(method) ? HTTP_READ_FLAGS : HTTP_WRITE_FLAGS;
+  }
+  return t.turn.toolFlags[tool] ?? UNKNOWN_FLAGS;
 }
 
 /** Only the search query / fetched URL travel (domain audit); never any other argument. */
@@ -192,11 +265,18 @@ export function createToolGuard(
         conversationId?: string;
         threadRootId?: string | null;
         messageId?: string;
+        connectorTools?: string[];
       },
       signal?: AbortSignal,
     ): void {
       const key = keyOf(sessionKey);
-      state.turns.set(key, { ...t, calls: 0, webCalls: 0, tainted: false });
+      state.turns.set(key, {
+        ...t,
+        connectorTools: t.connectorTools ?? [],
+        calls: 0,
+        webCalls: 0,
+        tainted: false,
+      });
       signal?.addEventListener(
         "abort",
         () => {
@@ -248,7 +328,8 @@ export function createToolGuard(
         return block(`Tool ${tool} blocked: the session belongs to another bot.`);
       }
       if (!t.turn.tools.includes(tool)) return block(`Tool ${tool} is not allowed on this turn.`);
-      const delivered = t.turn.toolFlags[tool] ?? UNKNOWN_FLAGS;
+      const delivered = callFlags(t, tool, event.params);
+      if ("block" in delivered) return delivered;
       const flags = ALWAYS_SIDE_EFFECTING.has(tool) ? { ...delivered, sideEffecting: true } : delivered;
       const web = WEB_TOOLS.has(tool);
       if (t.calls >= t.turn.maxToolCalls) {

@@ -1,11 +1,13 @@
 import {
   CreateMcpServerRequest,
+  connectorOAuthUrls,
   IdParams,
   McpServer,
   McpServerList,
   Ok,
   UpdateMcpServerRequest,
 } from "@ocw/contracts";
+import { z } from "zod";
 import { type App, type Core, tenant } from "../../core";
 import type { PermissionService } from "../organization";
 import {
@@ -13,6 +15,7 @@ import {
   deleteMcpServer,
   getMcpServer,
   listMcpServers,
+  mcpReadOptions,
   probeMcpServer,
   sandboxInfo,
   updateMcpServer,
@@ -20,9 +23,14 @@ import {
 
 const tags = ["mcp"];
 
+/** `DELETE ?clearConnections=true`: confirms disconnecting every member of a per-member connector (D-01, R4). */
+const DeleteMcpServerQuery = z.object({ clearConnections: z.enum(["true", "false"]).optional() });
+
 /**
  * Settings › MCP servers (D-13): every route is `mcp.manage` (admin surface, non-delegable, T-03.1-09-03).
- * Other tenants see nothing: RLS turns their reads into 404.
+ * Other tenants see nothing: RLS turns their reads into 404. Phase 07.4 adds the connector auth mode; a PATCH that
+ * leaves a per-member mode, or a DELETE, answers 409 `connections_exist {count}` while members are connected, until
+ * `clearConnections` confirms.
  */
 export function registerMcpRoutes(app: App, core: Core, perms: PermissionService) {
   const manage = {
@@ -35,8 +43,9 @@ export function registerMcpRoutes(app: App, core: Core, perms: PermissionService
     { ...manage, schema: { tags, response: { 200: McpServerList } } },
     async (req, reply) => {
       reply.header("cache-control", "no-store");
-      const servers = await core.db.withTenant(tenant(req), (tx) => listMcpServers(tx));
-      return { servers, sandbox: sandboxInfo(core) };
+      const servers = await core.db.withTenant(tenant(req), (tx) => listMcpServers(tx, mcpReadOptions(core)));
+      // The redirect URI to register at a provider, and whether member sign-in is possible here (D-07 item 4).
+      return { servers, sandbox: sandboxInfo(core), oauth: connectorOAuthUrls(core.env.OCW_PUBLIC_API_URL) };
     },
   );
 
@@ -51,7 +60,7 @@ export function registerMcpRoutes(app: App, core: Core, perms: PermissionService
     { ...manage, schema: { tags, params: IdParams, response: { 200: McpServer } } },
     async (req, reply) => {
       reply.header("cache-control", "no-store");
-      return core.db.withTenant(tenant(req), (tx) => getMcpServer(tx, req.params.id));
+      return core.db.withTenant(tenant(req), (tx) => getMcpServer(tx, req.params.id, mcpReadOptions(core)));
     },
   );
 
@@ -67,9 +76,15 @@ export function registerMcpRoutes(app: App, core: Core, perms: PermissionService
 
   app.delete(
     "/mcp-servers/:id",
-    { ...manage, schema: { tags, params: IdParams, response: { 200: Ok } } },
+    {
+      ...manage,
+      schema: { tags, params: IdParams, querystring: DeleteMcpServerQuery, response: { 200: Ok } },
+    },
     async (req) => {
-      await core.db.withTenant(tenant(req), (tx) => deleteMcpServer(core, tx, req.params.id));
+      const clearConnections = req.query.clearConnections === "true";
+      await core.db.withTenant(tenant(req), (tx) =>
+        deleteMcpServer(core, tx, req.params.id, { clearConnections }),
+      );
       return { ok: true as const };
     },
   );

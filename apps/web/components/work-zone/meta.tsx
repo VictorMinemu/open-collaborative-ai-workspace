@@ -163,7 +163,8 @@ export const STATUS: Record<
   waiting_approval: {
     label: "Needs approval",
     icon: Hand,
-    tone: "text-warning bg-warning/15",
+    // The Badge warning pill (AA in both themes); the semantic token on its own tint measured 1.9:1 (WINDOWS #197).
+    tone: "bg-amber-100 text-amber-800 dark:bg-amber-400/15 dark:text-amber-300",
     dot: "bg-warning",
   },
   host_offline: {

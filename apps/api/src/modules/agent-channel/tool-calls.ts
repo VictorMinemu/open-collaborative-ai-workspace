@@ -1,25 +1,23 @@
-import { randomUUID } from "node:crypto";
 import {
   AgentChannelToolCallDecision,
   AgentChannelToolCallRequest,
   AgentChannelToolCallResult,
   BUILTIN_TOOLS,
   Id,
-  MAX_TOOL_CALLS_PER_TURN,
-  MAX_WEB_CALLS_PER_TURN,
   Ok,
   type SearchProvider,
   type TurnToolFlags,
 } from "@ocw/contracts";
 import { agentToolCalls, agentTurns, type Tx } from "@ocw/db";
-import { and, eq, lt, type SQL, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import type { App, Core } from "../../core";
 import { notFound } from "../../lib/errors";
 import { audienceOf } from "../ai-chat";
 import { currentTurnTools, loadCatalog, loadPolicy } from "../bot-capabilities";
 import type { PermissionService } from "../organization";
-import { type CellPrincipal, cellOf } from "./auth";
+import { cellOf } from "./auth";
+import { auditUnknownTurn, cellAuditBase, claimToolCall } from "./claim";
 
 /**
  * The tool gate's authority (D-08 guard 3, research Pattern 4 and Pitfall 8). The cell's `before_tool_call`
@@ -105,11 +103,6 @@ async function toolSource(tx: Tx, tool: string): Promise<Source> {
 }
 
 export function registerToolCallRoutes(scope: App, core: Core, perms: PermissionService): void {
-  const auditBase = (cell: CellPrincipal) => ({
-    clientKind: "agent",
-    sessionId: `cell:${cell.credentialId}`,
-  });
-
   scope.post(
     "/tool-calls",
     {
@@ -130,16 +123,13 @@ export function registerToolCallRoutes(scope: App, core: Core, perms: Permission
 
         // Unknown (or another organization's: RLS hides it) or another bot's delivery: no human to attribute.
         if (!turn || turn.agentId !== body.agentId) {
-          await core.audit.record(tx, {
-            ...auditBase(cell),
-            action: "bot.tool_call",
-            actorKind: "system",
-            resourceType: "tool",
-            resourceId: body.tool,
-            result: "denied",
-            metadata: { tool: body.tool, reason: "unknown_turn", queryChars },
+          const callId = await auditUnknownTurn(tx, core, {
+            cell,
+            tool: body.tool,
+            reason: "unknown_turn",
+            metadata: { queryChars },
           });
-          return { callId: randomUUID(), allowed: false, reason: "unknown_turn" };
+          return { callId, allowed: false, reason: "unknown_turn" };
         }
 
         const source = await toolSource(tx, body.tool);
@@ -157,7 +147,12 @@ export function registerToolCallRoutes(scope: App, core: Core, perms: Permission
           const now = await currentTurnTools(
             tx,
             perms,
-            { agentId: turn.agentId, humanUserId: turn.userId, conversationKind: turn.conversationKind },
+            {
+              agentId: turn.agentId,
+              humanUserId: turn.userId,
+              conversationKind: turn.conversationKind,
+              conversationId: turn.conversationId,
+            },
             core.env,
             turn.conversationKind === "ai_chat" ? await audienceOf(tx, turn.conversationId) : null,
           );
@@ -181,74 +176,21 @@ export function registerToolCallRoutes(scope: App, core: Core, perms: Permission
           if (!target) reason = "bad_url";
         }
 
-        if (!reason) {
-          // Caps and taint in ONE statement: concurrent calls of one turn serialise on the row lock and the
-          // WHERE clause is re-checked, so at most the cap is ever allowed.
-          const conditions: Array<SQL | undefined> = [
-            eq(agentTurns.eventId, turn.eventId),
-            lt(agentTurns.toolCalls, MAX_TOOL_CALLS_PER_TURN),
-            web ? lt(agentTurns.webCalls, MAX_WEB_CALLS_PER_TURN) : undefined,
-            flags.sideEffecting ? eq(agentTurns.tainted, false) : undefined,
-          ];
-          const updated = await tx
-            .update(agentTurns)
-            .set({
-              toolCalls: ROUTE_COUNTED.has(body.tool)
-                ? sql`${agentTurns.toolCalls}`
-                : sql`${agentTurns.toolCalls} + 1`,
-              webCalls: web ? sql`${agentTurns.webCalls} + 1` : sql`${agentTurns.webCalls}`,
-              tainted: flags.untrustedOutput ? true : sql`${agentTurns.tainted}`,
-            })
-            .where(and(...conditions))
-            .returning({ eventId: agentTurns.eventId });
-          if (updated.length === 0) {
-            // Nothing updated: say why from a fresh read (only on the denial path).
-            const [after] = await tx
-              .select({ tainted: agentTurns.tainted })
-              .from(agentTurns)
-              .where(eq(agentTurns.eventId, turn.eventId));
-            reason = flags.sideEffecting && after?.tainted ? "tainted" : "cap_reached";
-          }
-        }
-
-        const [row] = await tx
-          .insert(agentToolCalls)
-          .values({
-            organizationId: cell.organizationId,
-            eventId: turn.eventId,
-            agentId: turn.agentId,
-            userId: turn.userId,
-            tool: body.tool,
-            sourceKind: source.sourceKind,
-            sourceId: source.sourceId,
-            target,
-            decision: reason ? "denied" : "allowed",
-            reason,
-          })
-          .returning({ id: agentToolCalls.id });
-        if (!row) throw new Error("agent_tool_calls insert failed");
-
-        await core.audit.record(tx, {
-          ...auditBase(cell),
-          action: "bot.tool_call",
-          actorKind: "agent",
-          actorId: turn.agentId,
-          agentId: turn.agentId,
-          userId: turn.userId,
-          resourceType: "tool",
-          resourceId: body.tool,
-          result: reason ? "denied" : "success",
-          // Source = the MCP server (id + safe name) or plugin the tool belongs to; never arguments or results.
-          metadata: {
-            tool: body.tool,
-            sourceKind: source.sourceKind,
-            sourceId: source.sourceId,
-            target,
-            reason,
-            queryChars,
-          },
+        // Steps 4-5: caps and taint in one conditional UPDATE, the agent_tool_calls row and the audit (claim.ts).
+        const claimed = await claimToolCall(tx, core, {
+          cell,
+          turn,
+          tool: body.tool,
+          flags,
+          web,
+          sourceKind: source.sourceKind,
+          sourceId: source.sourceId,
+          target,
+          reason,
+          countCall: !ROUTE_COUNTED.has(body.tool),
+          metadata: { queryChars },
         });
-        return { callId: row.id, allowed: reason === null, reason };
+        return { ...claimed, reason: claimed.reason as ToolCallDenial | null };
       });
     },
   );
@@ -286,7 +228,7 @@ export function registerToolCallRoutes(scope: App, core: Core, perms: Permission
           })
           .where(eq(agentToolCalls.id, call.id));
         await core.audit.record(tx, {
-          ...auditBase(cell),
+          ...cellAuditBase(cell),
           action: "bot.tool_call.completed",
           actorKind: "agent",
           actorId: call.agentId,

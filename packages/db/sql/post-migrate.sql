@@ -180,6 +180,77 @@ CREATE POLICY personal_owner_only ON app.memory_proposals AS RESTRICTIVE FOR ALL
   WITH CHECK (personal_owner_user_id IS NULL
          OR personal_owner_user_id = nullif(current_setting('app.user_id', true), '')::uuid);
 
+-- Keychain (Phase 07.4, D-04, D-06): a personal key is its owner's alone, as personal memory is. Same RESTRICTIVE shape
+-- (ANDed with tenant_isolation) on the row's own `owner_user_id` (scope 'personal' always has one, by CHECK): an admin
+-- of the same organization, a cell route without a user and any other member read 0 personal keys and cannot write
+-- one. Unit keys (scope 'unit') stay under tenant isolation only; the API decides `vault.manage` on them.
+DROP POLICY IF EXISTS personal_owner_only ON app.vault_items;
+CREATE POLICY personal_owner_only ON app.vault_items AS RESTRICTIVE FOR ALL
+  USING (scope <> 'personal'
+         OR owner_user_id = nullif(current_setting('app.user_id', true), '')::uuid)
+  WITH CHECK (scope <> 'personal'
+         OR owner_user_id = nullif(current_setting('app.user_id', true), '')::uuid);
+
+-- Grants of keys to bots (Phase 07.4, WINDOWS #182): a grant on a personal key says which bots its owner gave it to,
+-- so it is the owner's alone, as the key is. RESTRICTIVE (ANDed with tenant_isolation): a grant is visible and
+-- writable only while its key is visible to the session, i.e. through `vault_items`' own owner-only policy (another
+-- member, an admin of the same organization and a session without a user see no grant on someone's personal key and
+-- cannot write one); grants on unit keys stay under tenant isolation only. FK cascades (a deleted bot or key) are not
+-- subject to it.
+DROP POLICY IF EXISTS personal_owner_only ON app.agent_vault_grants;
+CREATE POLICY personal_owner_only ON app.agent_vault_grants AS RESTRICTIVE FOR ALL
+  USING (EXISTS (SELECT 1 FROM app.vault_items v WHERE v.id = agent_vault_grants.vault_item_id))
+  WITH CHECK (EXISTS (SELECT 1 FROM app.vault_items v WHERE v.id = agent_vault_grants.vault_item_id));
+
+-- The cell's `alsoAllow` path over every grant (07.4-11, WINDOWS #182): `/agent-channel/v1/cell` runs without a user and
+-- must still know which bots hold some key, so it can list `ocw_http_request` for them. SECURITY DEFINER as
+-- ocw_migrator (BYPASSRLS), fixed search_path, scoped to the CALLER's organization; it returns agent ids only (never a
+-- key, a handle, an owner or which key a bot holds).
+CREATE OR REPLACE FUNCTION app.vault_grant_agents()
+RETURNS TABLE (agent_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT DISTINCT g.agent_id FROM app.agent_vault_grants g
+  WHERE g.organization_id = nullif(current_setting('app.organization_id', true), '')::uuid
+$fn$;
+REVOKE ALL ON FUNCTION app.vault_grant_agents() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.vault_grant_agents() TO ocw_app;
+
+-- Per-member connector connections (Phase 07.4, D-01; WINDOWS #170): a member's connection (the id of its sealed
+-- credential, issuer, scopes, account label) is its owner's alone, as a personal key is. Same RESTRICTIVE shape, ANDed
+-- with tenant_isolation, on the row's own `user_id`: an admin of the same organization, a session without a user and
+-- any other member read 0 rows and cannot write one. FK cascades (a deleted connector) are not subject to it.
+DROP POLICY IF EXISTS personal_owner_only ON app.connector_connections;
+CREATE POLICY personal_owner_only ON app.connector_connections AS RESTRICTIVE FOR ALL
+  USING (user_id = nullif(current_setting('app.user_id', true), '')::uuid)
+  WITH CHECK (user_id = nullif(current_setting('app.user_id', true), '')::uuid);
+
+-- The `mcp.manage` path over every member's connection (WINDOWS #186): the admin's member count (UI-SPEC R4) and the
+-- clearing on a mode switch or a delete (07.4-06) must still see and remove every member's row. SECURITY DEFINER as
+-- ocw_migrator (BYPASSRLS), fixed search_path, scoped to the CALLER's organization (`app.organization_id` of the tenant
+-- transaction, never an argument): the count returns numbers only, the clearing deletes and returns only the ids of the
+-- sealed secrets the API then removes (they open only with each member's AAD). No function returns a credential, an
+-- issuer, a scope or a user id. The API calls them only from the `mcp.manage` routes (`mcp/service.ts`).
+CREATE OR REPLACE FUNCTION app.connector_connection_counts(p_server_id uuid DEFAULT NULL)
+RETURNS TABLE (server_id uuid, connections integer)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT c.server_id, count(*)::int FROM app.connector_connections c
+  WHERE c.organization_id = nullif(current_setting('app.organization_id', true), '')::uuid
+    AND (p_server_id IS NULL OR c.server_id = p_server_id)
+  GROUP BY c.server_id
+$fn$;
+CREATE OR REPLACE FUNCTION app.clear_connector_connections(p_server_id uuid)
+RETURNS TABLE (secret_id uuid)
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  DELETE FROM app.connector_connections c
+  WHERE c.organization_id = nullif(current_setting('app.organization_id', true), '')::uuid
+    AND c.server_id = p_server_id
+  RETURNING c.secret_id
+$fn$;
+REVOKE ALL ON FUNCTION app.connector_connection_counts(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION app.clear_connector_connections(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.connector_connection_counts(uuid) TO ocw_app;
+GRANT EXECUTE ON FUNCTION app.clear_connector_connections(uuid) TO ocw_app;
+
 -- Pre-tenant lookups (bearer tokens / pairing codes arrive before the organization is known).
 -- SECURITY DEFINER as ocw_migrator (BYPASSRLS); each returns only the ids needed to open withTenant().
 CREATE OR REPLACE FUNCTION app.lookup_device_token(p_token_hash text)
