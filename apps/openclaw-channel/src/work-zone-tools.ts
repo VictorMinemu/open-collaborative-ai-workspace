@@ -7,10 +7,14 @@ import {
   type AgentChannelWorkZoneProjectsResponse,
   type AgentChannelWorkZonePropose,
   WORK_ZONE_PROPOSAL_LIMITS,
+  WORK_ZONE_PROPOSAL_REFUSALS,
   WORK_ZONE_RUNTIMES,
+  type WorkZoneProposalRefusal,
   type WorkZoneRuntime,
 } from "./agent-channel-protocol.js";
-import type { AgentChannelClient } from "./api-client.js";
+import { type AgentChannelClient, AgentChannelHttpError } from "./api-client.js";
+// tool-guard.ts imports `workZoneTaintedSentence` back (its taint block for ocw_start_work_zone). Both sides use the
+// other's bindings only when a call runs, never while the modules load, so the cycle is harmless; keep it that way.
 import { type ActiveTurn, approvalLabel, type ToolGuard } from "./tool-guard.js";
 
 /**
@@ -25,6 +29,10 @@ import { type ActiveTurn, approvalLabel, type ToolGuard } from "./tool-guard.js"
  *     the stored turn; never a mode: the session starts supervised and only the person may raise it),
  *   - it answers with fixed sentences (UI-SPEC R10), never the API's error body. Logs carry ids and codes only.
  * Both are validated by their own routes (never `/tool-calls`, tool-guard.ts `SELF_VALIDATED_TOOLS`).
+ * `ocw_start_work_zone` cannot express a mode: its schema is closed (`additionalProperties: false`) and any key beyond
+ * project, device, prompt and runtime is refused here before a request (APPROVE-04). It is always side-effecting: on a
+ * turn that read untrusted content the gate refuses it first (tool-guard.ts `ALWAYS_SIDE_EFFECTING`), the tool refuses
+ * it again, and the API refuses `tainted` too. The list is read-only and stays available on such a turn.
  */
 
 export const WORK_ZONE_PROJECTS_TOOL = "ocw_work_zone_projects";
@@ -41,20 +49,86 @@ type Logger = { info?: (m: string) => void; warn?: (m: string) => void };
 type Deps = { guard: ToolGuard; client: () => AgentChannelClient | null; logger?: Logger };
 
 /** The names a sentence uses; each falls back to a neutral phrase. */
-type Names = { requester?: string; project?: string; device?: string };
+type Names = { requester?: string; project?: string; device?: string; runtime?: string };
 
 const ASKER = "the person who asked";
 const capitalized = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
-/** What the model reads (UI-SPEC "Refusals that never create a card", R10). */
+const asker = (n: Names) => n.requester ?? ASKER;
+const deviceOf = (n: Names) => n.device ?? "that device";
+
+/**
+ * What the model reads (UI-SPEC "Refusals that never create a card", R10): one fixed sentence per outcome, with the
+ * names the workspace gave (sanitized) or neutral fallbacks. Never the API's text.
+ */
 export const WORK_ZONE_SENTENCES = {
   success: (n: Names) =>
-    `I proposed a session in ${n.project ?? "that project"} on ${n.device ?? "that device"}. ` +
-    `${capitalized(n.requester ?? ASKER)} can start it from the card.`,
-  no_turn: () => "There is no active conversation turn, so I can't use this tool now.",
+    `I proposed a session in ${n.project ?? "that project"} on ${deviceOf(n)}. ` +
+    `${capitalized(asker(n))} can start it from the card.`,
+  tainted: (n: Names) =>
+    "I can't propose a Work Zone session after reading outside content in this turn. " +
+    `Tell ${asker(n)} to ask again in a new message.`,
+  device_offline: (n: Names) =>
+    `${capitalized(deviceOf(n))} is offline, so I can't propose a session there. ` +
+    `Tell ${asker(n)} and suggest another device or trying later.`,
+  runtime_unavailable: (n: Names) =>
+    `${n.runtime ?? "The runtime"} isn't installed or signed in on ${deviceOf(n)}. ` +
+    `Tell ${asker(n)} to sign in on that device first.`,
+  project_not_found: (n: Names) =>
+    `That project doesn't exist any more or isn't on ${deviceOf(n)}. ` +
+    "Call ocw_work_zone_projects to see the current list.",
+  device_not_shared: (n: Names) =>
+    `${capitalized(asker(n))} can't use ${deviceOf(n)}. Pick a device from ocw_work_zone_projects.`,
+  not_allowed: (n: Names) =>
+    `${capitalized(asker(n))} can't start Work Zone sessions. Tell them an admin can change that.`,
+  too_many_pending: (n: Names) =>
+    `${capitalized(asker(n))} already has ${WORK_ZONE_PROPOSAL_LIMITS.pendingPerRequester} Work Zone proposals ` +
+    "waiting. Ask them to start or dismiss those first.",
+  prompt_not_allowed: (n: Names) =>
+    `I can't propose that prompt: it is a session command, not a task. Ask ${asker(n)} what to do instead.`,
+  unknown_turn: () => "This conversation turn is no longer active.",
   not_in_turn: () => "Work Zone sessions are not available on this turn.",
+  cap_reached: () => "This turn reached its limit of tool calls.",
+  no_turn: () => "There is no active conversation turn, so I can't use this tool now.",
+  extra_keys: () => "That tool only takes a project, a device, a prompt and a runtime.",
   unreachable: () => "The workspace didn't answer. Try again in a moment.",
-} as const;
+} as const satisfies Record<
+  WorkZoneProposalRefusal | "success" | "no_turn" | "extra_keys" | "unreachable",
+  (n: Names) => string
+>;
+
+/** The outcomes whose sentence names the project, the device or the runtime (read from the turn's project list). */
+const NAMES_PROJECT: ReadonlySet<string> = new Set([
+  "success",
+  "device_offline",
+  "runtime_unavailable",
+  "project_not_found",
+  "device_not_shared",
+]);
+
+/** The turn's requester (already sanitized by the mapper) through the gate's label rule, or the neutral fallback. */
+function requesterOf(name: string | undefined): Names {
+  const requester = approvalLabel(name);
+  return requester ? { requester } : {};
+}
+
+/** The gate's refusal of a proposal on a tainted turn (tool-guard.ts), the same sentence the tool and the API give. */
+export function workZoneTaintedSentence(requesterName?: string): string {
+  return WORK_ZONE_SENTENCES.tainted(requesterOf(requesterName));
+}
+
+const REFUSAL_SET: ReadonlySet<string> = new Set(WORK_ZONE_PROPOSAL_REFUSALS);
+const isRefusal = (code: string | undefined): code is WorkZoneProposalRefusal =>
+  code !== undefined && REFUSAL_SET.has(code);
+
+/** The refusal code of a failed request: the API's code when it is one, an ended turn, else unreachable. */
+function failureCode(error: unknown): WorkZoneProposalRefusal | "unreachable" {
+  if (error instanceof AgentChannelHttpError) {
+    if (isRefusal(error.code)) return error.code;
+    if (error.status === 404 || (error.status === 403 && error.code === "no_trigger")) return "unknown_turn";
+  }
+  return "unreachable";
+}
 
 export type WorkZoneToolResult = {
   content: Array<{ type: "text"; text: string }>;
@@ -108,19 +182,29 @@ async function projectsOf(
   }
 }
 
+/** Runtime labels when the list does not name one (contracts' runtimes). */
+const RUNTIME_LABELS: Record<WorkZoneRuntime, string> = { "claude-code": "Claude Code", codex: "Codex" };
+
 async function namesFor(
+  outcome: string,
   t: ActiveTurn,
   client: AgentChannelClient,
-  p: { projectId: string; deviceId: string },
+  p: { projectId: string; deviceId: string; runtime?: WorkZoneRuntime },
   signal?: AbortSignal,
 ): Promise<Names> {
+  if (!NAMES_PROJECT.has(outcome)) return requesterOf(t.requesterName);
   const projects = await projectsOf(t, client, signal);
   const project = projects.find((x) => x.projectId === p.projectId && x.device.id === p.deviceId);
   const device = project?.device ?? projects.find((x) => x.device.id === p.deviceId)?.device;
+  const listed = p.runtime ? project?.runtimes.find((r) => r.id === p.runtime)?.label : undefined;
+  const runtime = p.runtime ? ((listed && label(listed, 60)) ?? RUNTIME_LABELS[p.runtime]) : undefined;
+  const projectName = project ? label(project.name) : undefined;
+  const deviceName = device ? label(device.name) : undefined;
   return {
-    ...(t.requesterName ? { requester: t.requesterName } : {}),
-    ...(project ? { project: label(project.name) } : {}),
-    ...(device ? { device: label(device.name) } : {}),
+    ...requesterOf(t.requesterName),
+    ...(projectName ? { project: projectName } : {}),
+    ...(deviceName ? { device: deviceName } : {}),
+    ...(runtime ? { runtime } : {}),
   };
 }
 
@@ -185,6 +269,46 @@ const START_DESCRIPTION =
   "change that.";
 
 const RUNTIME_SET: ReadonlySet<string> = new Set(WORK_ZONE_RUNTIMES);
+/** Every key the tool takes: anything else (a mode, a model, full access, a user) is refused before a request. */
+const START_KEYS: ReadonlySet<string> = new Set(["projectId", "deviceId", "prompt", "runtime"]);
+/** An id as the API mints them (contracts `Id`, a UUID); the API re-validates. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+/** The proposal body, or why the params are invalid (checked locally; the API re-validates everything). */
+export function proposalOf(
+  t: Pick<ActiveTurn, "eventId" | "agentId">,
+  p: Record<string, unknown>,
+): { body: AgentChannelWorkZonePropose } | { error: string; code: string } {
+  if (Object.keys(p).some((k) => !START_KEYS.has(k))) {
+    return { error: WORK_ZONE_SENTENCES.extra_keys(), code: "extra_keys" };
+  }
+  const projectId = typeof p.projectId === "string" ? p.projectId.trim() : "";
+  const deviceId = typeof p.deviceId === "string" ? p.deviceId.trim() : "";
+  if (!UUID.test(projectId) || !UUID.test(deviceId)) {
+    return {
+      error: "projectId and deviceId must be the ids from ocw_work_zone_projects. Call it to get them.",
+      code: "bad_params",
+    };
+  }
+  const prompt = typeof p.prompt === "string" ? p.prompt.trim() : "";
+  if (!prompt) return { error: "prompt must say what the session should do.", code: "bad_params" };
+  if (prompt.length > WORK_ZONE_PROPOSAL_LIMITS.promptChars) {
+    return { error: "prompt can be at most 50,000 characters.", code: "bad_params" };
+  }
+  if (p.runtime !== undefined && !(typeof p.runtime === "string" && RUNTIME_SET.has(p.runtime))) {
+    return { error: "runtime must be claude-code or codex, or left out.", code: "bad_params" };
+  }
+  return {
+    body: {
+      eventId: t.eventId,
+      agentId: t.agentId,
+      projectId,
+      deviceId,
+      prompt,
+      ...(p.runtime !== undefined ? { runtime: p.runtime as WorkZoneRuntime } : {}),
+    },
+  };
+}
 
 function startTool(deps: Deps, ctx: WorkZoneToolContext): OpenClawAgentTool {
   const name = START_WORK_ZONE_TOOL;
@@ -221,32 +345,38 @@ function startTool(deps: Deps, ctx: WorkZoneToolContext): OpenClawAgentTool {
       required: ["projectId", "deviceId", "prompt"],
     },
     async execute(_toolCallId, params, signal) {
-      const p = asParams(params);
       const found = turnFor(name, deps, ctx);
       if ("refused" in found) return found.refused;
       const { turn: t, client } = found;
-      const runtime = typeof p.runtime === "string" && RUNTIME_SET.has(p.runtime) ? p.runtime : undefined;
-      const body: AgentChannelWorkZonePropose = {
-        eventId: t.eventId,
-        agentId: t.agentId,
-        projectId: String(p.projectId ?? ""),
-        deviceId: String(p.deviceId ?? ""),
-        prompt: typeof p.prompt === "string" ? p.prompt.trim() : "",
-        ...(runtime ? { runtime: runtime as WorkZoneRuntime } : {}),
-      };
+      const built = proposalOf(t, asParams(params));
+      if ("error" in built) return answer(built.error, false, built.code);
+      const { body } = built;
+      // Always side-effecting (D-03): never from a turn that read untrusted content (the gate refused it already).
+      if (t.tainted) {
+        deps.logger?.warn?.(`${name}: ${t.eventId} refused (tainted, local)`);
+        return answer(workZoneTaintedSentence(t.requesterName), false, "tainted");
+      }
+      let code: string;
       try {
         const r = await client.proposeWorkZone(body, signal);
-        if ("refused" in r) {
-          deps.logger?.warn?.(`${name}: ${t.eventId} refused (${r.refused})`);
-          return answer(WORK_ZONE_SENTENCES.unreachable(), false, r.refused);
+        if (!("refused" in r)) {
+          deps.logger?.info?.(`${name}: ${t.eventId} proposed (${r.approvalId}, created ${r.created})`);
+          const names = await namesFor("success", t, client, body, signal);
+          return answer(WORK_ZONE_SENTENCES.success(names), true);
         }
-        deps.logger?.info?.(`${name}: ${t.eventId} proposed (${r.approvalId}, created ${r.created})`);
-        const names = await namesFor(t, client, body, signal);
-        return answer(WORK_ZONE_SENTENCES.success(names), true);
-      } catch {
-        deps.logger?.warn?.(`${name}: ${t.eventId} failed`);
+        code = r.refused;
+      } catch (error) {
+        code = failureCode(error);
+      }
+      // A code a newer API added (or a failure) is the generic sentence; logs carry known codes only.
+      if (!isRefusal(code)) {
+        deps.logger?.warn?.(
+          `${name}: ${t.eventId} failed (${code === "unreachable" ? code : "unknown refusal"})`,
+        );
         return answer(WORK_ZONE_SENTENCES.unreachable(), false, "unreachable");
       }
+      deps.logger?.warn?.(`${name}: ${t.eventId} refused (${code})`);
+      return answer(WORK_ZONE_SENTENCES[code](await namesFor(code, t, client, body, signal)), false, code);
     },
   };
 }

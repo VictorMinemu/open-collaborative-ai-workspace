@@ -324,6 +324,68 @@ describe("tool guard under abuse (Task 3)", () => {
     expect(fake.requests.map((r) => r.tool)).toEqual(["web_search"]);
   });
 
+  describe("Work Zone proposal tools (07.5-10, D-03, APPROVE-04)", () => {
+    const LIST = { untrustedOutput: false, sideEffecting: false };
+    const START = { untrustedOutput: false, sideEffecting: true };
+    const wzTurn = (start: TurnContext["toolFlags"][string] = START) =>
+      turn({
+        tools: ["web_search", "ocw_work_zone_projects", "ocw_start_work_zone"],
+        toolFlags: { web_search: WEB, ocw_work_zone_projects: LIST, ocw_start_work_zone: start },
+      });
+    const PROPOSAL = {
+      projectId: "0199a6f0-0000-7000-8000-00000000b111",
+      deviceId: "0199a6f0-0000-7000-8000-00000000d111",
+      prompt: "Fix the rounding error",
+    };
+
+    it("both are validated by their own routes: never sent to /tool-calls, still counted locally", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: wzTurn() });
+      expect(await g.beforeToolCall(call("ocw_work_zone_projects"), ctx())).toBeUndefined();
+      expect(await g.beforeToolCall(call("ocw_start_work_zone", PROPOSAL), ctx())).toBeUndefined();
+      expect(fake.requests).toHaveLength(0);
+      expect(g.activeTurn(SESSION)?.calls).toBe(2);
+      expect(g.activeTurn(SESSION)?.tainted).toBe(false);
+    });
+
+    it("ocw_start_work_zone stays side-effecting even when a turn's flags say otherwise: refused once tainted, with the Work Zone sentence", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, {
+        eventId: "evt-1",
+        agentId: "a1",
+        turn: wzTurn({ untrustedOutput: false, sideEffecting: false }),
+        requesterName: "Sam Lee",
+      });
+      expect(await g.beforeToolCall(call("web_search", { query: "q" }), ctx())).toBeUndefined();
+      expect(await g.beforeToolCall(call("ocw_start_work_zone", PROPOSAL), ctx())).toEqual({
+        block: true,
+        blockReason:
+          "I can't propose a Work Zone session after reading outside content in this turn. Tell Sam Lee to ask again in a new message.",
+      });
+      // The list is read-only: allowed on a tainted turn.
+      expect(await g.beforeToolCall(call("ocw_work_zone_projects"), ctx())).toBeUndefined();
+      expect(fake.requests.map((r) => r.tool)).toEqual(["web_search"]);
+    });
+
+    it("an approval flag on a turn never lifts the proposal's taint block", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, {
+        eventId: "evt-1",
+        agentId: "a1",
+        turn: wzTurn({ untrustedOutput: false, sideEffecting: true, approval: "always" }),
+      });
+      expect(await g.beforeToolCall(call("web_search", { query: "q" }), ctx())).toBeUndefined();
+      const r = await g.beforeToolCall(call("ocw_start_work_zone", PROPOSAL), ctx());
+      expect(r?.blockReason).toBe(
+        "I can't propose a Work Zone session after reading outside content in this turn. Tell the person who asked to ask again in a new message.",
+      );
+      expect(fake.requests.map((x) => x.tool)).toEqual(["web_search"]);
+    });
+  });
+
   describe("connector and keychain tools (07.4 D-07)", () => {
     const LIST = { untrustedOutput: false, sideEffecting: false };
     const READ_ONLY = { untrustedOutput: true, sideEffecting: false };

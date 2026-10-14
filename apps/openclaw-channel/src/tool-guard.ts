@@ -11,6 +11,8 @@ import {
 } from "./agent-channel-protocol.js";
 import type { AgentChannelClient } from "./api-client.js";
 import { openClawAgentIdFor } from "./mention-mapper.js";
+// work-zone-tools.ts imports from this module too; the sentence is only called while a call runs (see the note there).
+import { workZoneTaintedSentence } from "./work-zone-tools.js";
 
 /**
  * The cell's call-time tool gate (D-08 guard 3), wired to OpenClaw's `before_tool_call` / `after_tool_call`
@@ -84,8 +86,9 @@ export const WEB_TOOLS: ReadonlySet<string> = new Set(["web_search", "web_fetch"
  * `ocw_memory_save` (`POST /memories`, 03.1-07), `ocw_memory_write` / `ocw_memory_propose` (`/memory/write|propose`,
  * 07.2), `ocw_board_card` (`/board/*`, 07.1-10) and the connector and keychain tools (`/connectors/list|call`,
  * `/http-requests`, 07.4 D-07: the API re-decides the logical tool, the audience and the caps and taint, and audits each
- * call with the member's credential). Asking `/tool-calls` too would count the call twice, and
- * `/tool-calls` cannot offer the board tool (it does not know the board layout), so it would refuse it
+ * call with the member's credential), and the Work Zone proposal tools (`/work-zone/projects|proposals`, 07.5-10: the
+ * API re-decides the tool on the turn, the taint and the human's grains). Asking `/tool-calls` too would count the call
+ * twice, and `/tool-calls` cannot offer the board tool (it does not know the board layout), so it would refuse it
  * `policy_changed`. `ocw_memory_list` / `ocw_memory_read` change nothing and go through the generic gate.
  */
 const SELF_VALIDATED_TOOLS: ReadonlySet<string> = new Set([
@@ -96,16 +99,21 @@ const SELF_VALIDATED_TOOLS: ReadonlySet<string> = new Set([
   "ocw_connector_list",
   "ocw_connector_call",
   "ocw_http_request",
+  "ocw_work_zone_projects",
+  "ocw_start_work_zone",
 ]);
 /**
  * Always side-effecting, whatever flags a turn carries: writing memory or changing shared board work after untrusted
- * content is exactly the injection the taint rule exists for (D-08, T-03.1-07-02, 07.1-13, T-07.2-07-02). A proposal
- * is not here: a person approves it before anything is written, so a tainted turn may still propose (flagged by the API).
+ * content is exactly the injection the taint rule exists for (D-08, T-03.1-07-02, 07.1-13, T-07.2-07-02). A memory
+ * proposal is not here: a person approves it before anything is written, so a tainted turn may still propose (flagged by
+ * the API). A Work Zone proposal is (07.5 D-03, APPROVE-04): it would run code on a member's device, so a turn that read
+ * untrusted content never proposes one, even with a person's click still to come.
  */
 const ALWAYS_SIDE_EFFECTING: ReadonlySet<string> = new Set([
   "ocw_memory_save",
   "ocw_memory_write",
   "ocw_board_card",
+  "ocw_start_work_zone",
 ]);
 /** Unknown flags are treated as the most dangerous combination. */
 const UNKNOWN_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: true };
@@ -453,6 +461,8 @@ export function createToolGuard(
       // is used); the memory and board tools keep their local block whatever a turn says.
       const approval = ALWAYS_SIDE_EFFECTING.has(tool) ? undefined : flags.approval;
       if (t.tainted && flags.sideEffecting && !approval) {
+        // 07.5-10: the proposal's refusal is the UI-SPEC sentence the model relays (R10).
+        if (tool === "ocw_start_work_zone") return block(workZoneTaintedSentence(t.requesterName));
         return block(
           `Tool ${tool} blocked: this turn is read-only after untrusted content (web or tool output) was read.`,
         );

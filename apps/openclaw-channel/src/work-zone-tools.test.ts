@@ -6,22 +6,24 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type {
-  AgentChannelWorkZoneProjects,
-  AgentChannelWorkZoneProjectsResponse,
-  AgentChannelWorkZonePropose,
-  AgentChannelWorkZoneProposeResponse,
-  TurnContext,
+import {
+  type AgentChannelWorkZoneProjects,
+  type AgentChannelWorkZoneProjectsResponse,
+  type AgentChannelWorkZonePropose,
+  type AgentChannelWorkZoneProposeResponse,
+  type TurnContext,
+  WORK_ZONE_PROPOSAL_REFUSALS,
 } from "./agent-channel-protocol.js";
-import { type AgentChannelClient, createAgentChannelClient } from "./api-client.js";
+import { type AgentChannelClient, AgentChannelHttpError, createAgentChannelClient } from "./api-client.js";
 import { openClawAgentIdFor } from "./mention-mapper.js";
 import {
+  FAKE_ERROR_CANARY,
   FAKE_WORK_ZONE_DEVICE,
   FAKE_WORK_ZONE_PROJECT,
   type FakeAgentChannelApi,
   startFakeAgentChannelApi,
 } from "./testing/fake-agent-channel-api.js";
-import { loadRegistry, type PluginEntry } from "./testing/openclaw-host.js";
+import { createTurnHookRunner, loadRegistry, type PluginEntry } from "./testing/openclaw-host.js";
 import { createToolGuard, setToolGuardClient, toolGuard } from "./tool-guard.js";
 import { registerWorkZoneTools, WORK_ZONE_TOOL_NAMES, type WorkZoneToolContext } from "./work-zone-tools.js";
 
@@ -301,5 +303,287 @@ describe("ocw_start_work_zone and ocw_work_zone_projects (07.5 D-03, C-01): thin
       /not available on this turn/i,
     );
     expect(calls).toEqual([]);
+  });
+});
+
+describe("no mode, no proposal after outside content, a fixed sentence for every refusal (07.5 D-03, APPROVE-04, UI-SPEC R10)", () => {
+  const TAINTED =
+    "I can't propose a Work Zone session after reading outside content in this turn. Tell Sam Lee to ask again in a new message.";
+
+  it("the parameter schema is closed and cannot express a permission mode, a model or full access", () => {
+    const { tool } = setup();
+    const t = tool("ocw_start_work_zone");
+    expect(t.parameters.additionalProperties).toBe(false);
+    expect(Object.keys(t.parameters.properties).sort()).toEqual([
+      "deviceId",
+      "projectId",
+      "prompt",
+      "runtime",
+    ]);
+    for (const key of ["permissionMode", "mode", "model", "fullAccess"]) {
+      expect(t.parameters.properties).not.toHaveProperty(key);
+    }
+    expect(t.parameters.required).toEqual(["projectId", "deviceId", "prompt"]);
+    expect(t.parameters.properties.runtime?.enum).toEqual(["claude-code", "codex"]);
+    expect(tool("ocw_work_zone_projects").parameters).toEqual({
+      type: "object",
+      additionalProperties: false,
+      properties: {},
+    });
+  });
+
+  it("a call carrying a mode (or any other extra key) is refused locally and nothing is posted", async () => {
+    const { calls, begin, tool } = setup();
+    begin();
+    for (const extra of [
+      { permissionMode: "fullAccess" },
+      { mode: "acceptEdits" },
+      { model: "gpt-5" },
+      { fullAccess: true },
+      { userId: "0199a6f0-0000-7000-8000-0000000000e9" },
+    ]) {
+      const r = await tool("ocw_start_work_zone").execute("tc-1", { ...START, ...extra });
+      expect(text(r), JSON.stringify(extra)).toBe(
+        "That tool only takes a project, a device, a prompt and a runtime.",
+      );
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it("invalid ids, an empty or oversized prompt and an unknown runtime are refused locally", async () => {
+    const { calls, begin, tool } = setup();
+    begin();
+    const t = tool("ocw_start_work_zone");
+    expect(text(await t.execute("tc-1", { ...START, projectId: "billing-api" }))).toMatch(
+      /ocw_work_zone_projects/,
+    );
+    expect(text(await t.execute("tc-2", { ...START, deviceId: 7 }))).toMatch(/ocw_work_zone_projects/);
+    expect(text(await t.execute("tc-3", { ...START, prompt: "   " }))).toMatch(/prompt/);
+    expect(text(await t.execute("tc-4", { ...START, prompt: "x".repeat(50_001) }))).toMatch(/50,000/);
+    expect(text(await t.execute("tc-5", { ...START, runtime: "cursor" }))).toMatch(/claude-code or codex/);
+    expect(calls).toEqual([]);
+  });
+
+  it("after outside content in the turn the proposal is refused locally with the UI-SPEC sentence; the list still works", async () => {
+    const { calls, begin, guard, tool } = setup();
+    begin();
+    const t = guard.activeTurn(SESSION);
+    if (!t) throw new Error("no turn");
+    t.tainted = true;
+    const r = await tool("ocw_start_work_zone").execute("tc-1", START);
+    expect(text(r)).toBe(TAINTED);
+    expect(r.details).toMatchObject({ ok: false, code: "tainted" });
+    expect(calls).toEqual([]);
+    expect(text(await tool("ocw_work_zone_projects").execute("tc-2", {}))).toContain("billing-api");
+    expect(calls.map((c) => c.route)).toEqual(["projects"]);
+  });
+
+  const CASES = [
+    ["tainted", TAINTED],
+    [
+      "device_offline",
+      "MacBook Pro is offline, so I can't propose a session there. Tell Sam Lee and suggest another device or trying later.",
+    ],
+    [
+      "runtime_unavailable",
+      "Codex isn't installed or signed in on MacBook Pro. Tell Sam Lee to sign in on that device first.",
+    ],
+    [
+      "project_not_found",
+      "That project doesn't exist any more or isn't on MacBook Pro. Call ocw_work_zone_projects to see the current list.",
+    ],
+    ["device_not_shared", "Sam Lee can't use MacBook Pro. Pick a device from ocw_work_zone_projects."],
+    ["not_allowed", "Sam Lee can't start Work Zone sessions. Tell them an admin can change that."],
+    [
+      "too_many_pending",
+      "Sam Lee already has 3 Work Zone proposals waiting. Ask them to start or dismiss those first.",
+    ],
+    [
+      "prompt_not_allowed",
+      "I can't propose that prompt: it is a session command, not a task. Ask Sam Lee what to do instead.",
+    ],
+    ["unknown_turn", "This conversation turn is no longer active."],
+    ["not_in_turn", "Work Zone sessions are not available on this turn."],
+    ["cap_reached", "This turn reached its limit of tool calls."],
+  ] as const;
+
+  it.each(CASES)("API refusal %s → its fixed sentence", async (code, sentence) => {
+    const { begin, tool } = setup({ propose: async () => ({ refused: code }) });
+    begin();
+    await tool("ocw_work_zone_projects").execute("tc-0", {});
+    const r = await tool("ocw_start_work_zone").execute("tc-1", { ...START, runtime: "codex" });
+    expect(text(r)).toBe(sentence);
+    expect(r.details).toMatchObject({ ok: false, code });
+  });
+
+  it("covers every refusal code of the contract", () => {
+    expect(CASES.map(([code]) => code).sort()).toEqual([...WORK_ZONE_PROPOSAL_REFUSALS].sort());
+  });
+
+  it("without names (no list, no requester) every sentence still reads naturally", async () => {
+    const { begin, tool } = setup({
+      projects: async () => ({ projects: [] }),
+      propose: async () => ({ refused: "device_offline" }),
+    });
+    begin(turn(), "evt-1", null);
+    expect(text(await tool("ocw_start_work_zone").execute("tc-1", START))).toBe(
+      "That device is offline, so I can't propose a session there. Tell the person who asked and suggest another device or trying later.",
+    );
+    const rt = setup({
+      projects: async () => ({ projects: [] }),
+      propose: async () => ({ refused: "runtime_unavailable" }),
+    });
+    rt.begin(turn(), "evt-1", null);
+    expect(text(await rt.tool("ocw_start_work_zone").execute("tc-1", START))).toBe(
+      "The runtime isn't installed or signed in on that device. Tell the person who asked to sign in on that device first.",
+    );
+  });
+
+  it("an HTTP refusal is read by its code; a timeout, an unknown code or an error body is the generic sentence, never the body", async () => {
+    const CANARY = "canary-wz-body-91c2";
+    const cases: Array<[() => Promise<never>, string]> = [
+      [
+        async () => {
+          throw new AgentChannelHttpError(404, "/work-zone/proposals", `404 ${CANARY}`, "unknown_turn");
+        },
+        "This conversation turn is no longer active.",
+      ],
+      [
+        async () => {
+          throw new AgentChannelHttpError(403, "/work-zone/proposals", `403 ${CANARY}`, "no_trigger");
+        },
+        "This conversation turn is no longer active.",
+      ],
+      [
+        async () => {
+          throw new AgentChannelHttpError(409, "/work-zone/proposals", `409 ${CANARY}`, "tainted");
+        },
+        TAINTED,
+      ],
+      [
+        async () => {
+          throw new AgentChannelHttpError(500, "/work-zone/proposals", `500 ${CANARY}`);
+        },
+        "The workspace didn't answer. Try again in a moment.",
+      ],
+      [
+        async () => {
+          throw new DOMException("The operation timed out.", "TimeoutError");
+        },
+        "The workspace didn't answer. Try again in a moment.",
+      ],
+    ];
+    for (const [propose, sentence] of cases) {
+      const { begin, tool } = setup({ propose });
+      begin();
+      const r = await tool("ocw_start_work_zone").execute("tc-1", START);
+      expect(text(r)).toBe(sentence);
+      expect(JSON.stringify(r)).not.toContain(CANARY);
+    }
+    const unknown = setup({ propose: async () => ({ refused: "brand_new_reason" }) });
+    unknown.begin();
+    expect(text(await unknown.tool("ocw_start_work_zone").execute("tc-1", START))).toBe(
+      "The workspace didn't answer. Try again in a moment.",
+    );
+  });
+});
+
+describe("the gate and the Work Zone tools through the real entry (07.5-10, Task 2)", () => {
+  let api: FakeAgentChannelApi;
+  const ctx = { sessionKey: SESSION, agentId: openClawAgentIdFor(BOT) };
+
+  beforeEach(async () => {
+    api = await startFakeAgentChannelApi({ agents: [], providers: [] });
+    setToolGuardClient(createAgentChannelClient({ apiUrl: api.url, token: () => api.token }));
+  });
+
+  afterEach(async () => {
+    toolGuard.endTurn(SESSION);
+    setToolGuardClient(null);
+    await api.close();
+  });
+
+  const ownedTool = (name: string) => {
+    const owned = loadRegistry(entry, manifest, { mode: "full" }).tools.find((t) => t.names.includes(name));
+    if (!owned) throw new Error(`${name} is not registered`);
+    return (owned.factory as Factory)(ctx);
+  };
+
+  it("neither tool is asked at /tool-calls; after a web call the gate refuses the proposal with the sentence and nothing is posted", async () => {
+    toolGuard.beginTurn(SESSION, {
+      eventId: "evt-g1",
+      agentId: BOT,
+      turn: turn(),
+      conversationId: DM,
+      requesterName: "Sam Lee",
+    });
+    const runner = createTurnHookRunner(loadRegistry(entry, manifest, { activate: false }));
+    expect(
+      await runner.runBeforeToolCall(
+        { toolName: "ocw_work_zone_projects", params: {}, toolCallId: "tc-1" },
+        ctx,
+      ),
+    ).toEqual({ blocked: false });
+    expect(
+      await runner.runBeforeToolCall(
+        { toolName: "ocw_start_work_zone", params: START, toolCallId: "tc-2" },
+        ctx,
+      ),
+    ).toEqual({ blocked: false });
+    expect(api.toolCalls).toEqual([]);
+    // An untrusted read taints the turn (asked at /tool-calls like any generic tool).
+    expect(
+      await runner.runBeforeToolCall(
+        { toolName: "web_search", params: { query: "x" }, toolCallId: "tc-3" },
+        ctx,
+      ),
+    ).toEqual({ blocked: false });
+    expect(
+      await runner.runBeforeToolCall(
+        { toolName: "ocw_start_work_zone", params: START, toolCallId: "tc-4" },
+        ctx,
+      ),
+    ).toEqual({
+      blocked: true,
+      reason:
+        "I can't propose a Work Zone session after reading outside content in this turn. Tell Sam Lee to ask again in a new message.",
+    });
+    expect(text(await ownedTool("ocw_start_work_zone").execute("tc-4", START))).toMatch(
+      /after reading outside/,
+    );
+    // The list is read-only: still allowed and answered.
+    expect(
+      await runner.runBeforeToolCall(
+        { toolName: "ocw_work_zone_projects", params: {}, toolCallId: "tc-5" },
+        ctx,
+      ),
+    ).toEqual({ blocked: false });
+    expect(text(await ownedTool("ocw_work_zone_projects").execute("tc-5", {}))).toContain("billing-api");
+    expect(api.workZone.proposals).toEqual([]);
+    expect(api.toolCalls.map((c) => c.tool)).toEqual(["web_search"]);
+  });
+
+  it("an API refusal over HTTP is the sentence, never the body; an unknown turn's 404 too", async () => {
+    toolGuard.beginTurn(SESSION, {
+      eventId: "evt-g2",
+      agentId: BOT,
+      turn: turn(),
+      conversationId: DM,
+      requesterName: "Sam Lee",
+    });
+    api.workZone.refused = "device_offline";
+    const r = await ownedTool("ocw_start_work_zone").execute("tc-1", START);
+    expect(text(r)).toBe(
+      "MacBook Pro is offline, so I can't propose a session there. Tell Sam Lee and suggest another device or trying later.",
+    );
+    api.workZone.refused = "unknown_turn";
+    const gone = await ownedTool("ocw_start_work_zone").execute("tc-2", START);
+    expect(text(gone)).toBe("This conversation turn is no longer active.");
+    expect(JSON.stringify(gone)).not.toContain(FAKE_ERROR_CANARY);
+    // A body the contract refuses (a mode) never leaves the cell: refused before the request.
+    delete api.workZone.refused;
+    const before = api.workZone.proposals.length;
+    await ownedTool("ocw_start_work_zone").execute("tc-3", { ...START, permissionMode: "fullAccess" });
+    expect(api.workZone.proposals).toHaveLength(before);
   });
 });
