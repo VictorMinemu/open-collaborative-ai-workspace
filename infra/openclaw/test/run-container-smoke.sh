@@ -29,9 +29,14 @@
 # approval card answering the turn; nothing is written. A turn whose human no longer reads its conversation gets 403
 # `no_trigger` on both calls (read by the plugin as "this conversation turn is no longer active"), and the cell's own
 # memory slot stays `none`.
-# Scenario connectors (07.4-09 / CONN-03, D-07, C-01): a DM turn offering the static `ocw_connector_call` and the logical
-# `m1a2b3c4d__whoami` runs the plugin tool in OpenClaw, which asks `POST /connectors/call` with the turn's event and agent
-# only (self-validated, never `/tool-calls`); the logical tool itself never reaches the model as a tool.
+# Scenario connectors (07.4-09 / CONN-03, CONN-04, CONN-05, D-07, C-01): a DM turn offering the static
+# `ocw_connector_call` and the logical `m1a2b3c4d__whoami` runs the plugin tool in OpenClaw, which asks
+# `POST /connectors/call` with the turn's event and agent only (self-validated, never `/tool-calls`); the logical tool
+# itself never reaches the model as a tool. A 20 s call still completes inside the turn (research A4); not connected and
+# member-account refusals reach the model as the fixed sentences, never the API's error body; a channel turn withholding
+# the member's connector (`member_account`) hands the persona the share link (R7); `ocw_connector_list` and
+# `ocw_http_request` (a GET by key handle) go through their own routes; the cell's config has no per-member MCP server
+# and no state file or log line carries the member's connector token.
 # Scenario breaker (stability 2026-10-06): SIGKILLed boots trip OpenClaw's restart-loop breaker, which refuses the ocw
 # channel's automatic start; the plugin reports the pause to the API and starts the channel itself after its back-off.
 #
@@ -71,6 +76,9 @@ MCP_SAFE=m5e0c0de1
 MCP_SERVER_ID=0199a6f0-0000-7000-8000-000000000c51
 MCP_ENV="OCW_MCP_$(tr '[:lower:]' '[:upper:]' <<<"$MCP_SAFE")_0"
 MCP_TOKEN="mcp-$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
+# Connectors (scenario connectors): the member credential the API would use upstream. Only the fake API holds it; it must
+# never reach the cell (config, state volume, logs).
+CONN_TOKEN="conn-$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
 # CellMcpServer[] with the given toolFilter.include (JSON array of raw MCP tool names).
 mcp_servers_json() {
   printf '[{"id":"%s","safeName":"%s","transport":"streamable-http","url":"http://fake-model:18999/mcp","headers":[{"name":"Authorization","envName":"%s","value":"Bearer %s"}],"tools":%s}]' \
@@ -240,8 +248,9 @@ docker run -d --name "${P}-api" "${OOM[@]}" --network "$NET" --network-alias api
   -e FAKE_BOT_ID=0199a6f0-0000-7000-8000-00000000a001 \
   -e FAKE_CELL_ID=0199a6f0-0000-7000-8000-0000000000c0 \
   -e FAKE_MODEL_BASE_URL=http://fake-model:18999/v1 \
-  -e FAKE_AGENT_TOOLS="web_search,web_fetch,ocw_memory_save,ocw_memory_read,ocw_memory_propose,ocw_agent_card,ocw_connector_call,${MCP_SAFE}__echo,${MCP_SAFE}__write_note,ocw_echo${SBX_TOOLS:-}" \
+  -e FAKE_AGENT_TOOLS="web_search,web_fetch,ocw_memory_save,ocw_memory_read,ocw_memory_propose,ocw_agent_card,ocw_connector_list,ocw_connector_call,ocw_http_request,${MCP_SAFE}__echo,${MCP_SAFE}__write_note,ocw_echo${SBX_TOOLS:-}" \
   -e FAKE_MCP_SERVERS="$(mcp_servers_json '["echo"]')" \
+  -e FAKE_CONNECTOR_TOKEN="$CONN_TOKEN" \
   -e FAKE_WEB_SEARCH_PROVIDER=searxng \
   node:24.21.0-bookworm-slim node /plugin/src/testing/run-fake-api.ts >/dev/null
 
@@ -656,14 +665,147 @@ console.log("   tool calls :", JSON.stringify(gated.map((c) => c.tool)));
 const c = calls[0];
 const ok =
   m.text.includes("Tool ocw_connector_call said: whoami: sub_smoke") &&
-  /\[tools: \d+ \| [^\]]*ocw_connector_call\]/.test(m.text) && !m.text.includes("m1a2b3c4d__whoami") &&
+  /\[tools: \d+ \| [^\]]*ocw_connector_call[^\]]*\]/.test(m.text) && !m.text.includes("m1a2b3c4d__whoami") &&
   calls.length === 1 && c.agentId === "0199a6f0-0000-7000-8000-00000000a001" &&
   c.connector === "m1a2b3c4d" && c.tool === "whoami" && JSON.stringify(c.arguments) === "{}" &&
-  Object.keys(c).sort().join() === "agentId,arguments,connector,eventId,tool" &&
+  // Exactly the call fields (the fake adds only its own receivedAt / answeredAt): never a user.
+  Object.keys(c).filter((k) => k !== "receivedAt" && k !== "answeredAt").sort().join() === "agentId,arguments,connector,eventId,tool" &&
   // Self-validated by /connectors/call: never asked to /tool-calls.
   gated.length === 0;
 if (!ok) { console.log("FAIL: expected one ocw_connector_call through POST /connectors/call with the turn ids only and no /tool-calls request"); process.exit(1); }
 '
+# Fake API knobs for the connector routes ({} resets them).
+connectors_control() {
+  api_exec "
+await fetch('http://127.0.0.1:4000/__test/connectors', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify($1) });
+"
+}
+# A variant of mention-connector.json: its own event and message ids (suffix $1), optional message text ($2) and turn JSON
+# patch ($3, merged into the turn) and conversation ($4).
+connector_variant() {
+  local out="$SECRETS/mention-connector-$1.json"
+  node -e '
+const [src, out, suffix, text, turnPatch, conversation] = process.argv.slice(1);
+const e = JSON.parse(require("fs").readFileSync(src, "utf8"));
+e.eventId = `0199a6f0-0000-7000-8000-00000000e0${suffix}`;
+e.thread.rootMessageId = e.message.id = `0199a6f0-0000-7000-8000-00000000d0${suffix}`;
+if (text) e.message.text = text;
+if (turnPatch) e.turn = { ...e.turn, ...JSON.parse(turnPatch) };
+if (conversation) e.conversation = JSON.parse(conversation);
+require("fs").writeFileSync(out, JSON.stringify(e));
+' "$ROOT/infra/openclaw/test/mention-connector.json" "$out" "$1" "${2:-}" "${3:-}" "${4:-}"
+  printf '%s' "$out"
+}
+
+echo "== [connectors] slow: a 20 s connector call completes inside the cell turn (research A4)"
+connectors_control '{ slowMs: 20000 }'
+FIXTURE="$(connector_variant c2)"
+STATE="$(inject_and_wait "$FIXTURE" 0199a6f0-0000-7000-8000-00000000d0c2)"
+connectors_control '{}'
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d0c2");
+if (!m) { console.log("FAIL: no reply to the slow connector mention"); process.exit(1); }
+const c = (s.connectorCalls ?? []).find((x) => x.eventId === "0199a6f0-0000-7000-8000-00000000e0c2");
+console.log("   reply      :", m.text);
+console.log("   call took  :", c ? `${((c.answeredAt - c.receivedAt) / 1000).toFixed(1)} s at the API, reply ${((m.receivedAt - c.receivedAt) / 1000).toFixed(1)} s after the call arrived` : "no call");
+// The fake held the call 20 s (a timer may fire a few ms early); the reply still carries its result.
+const ok = c && c.answeredAt - c.receivedAt >= 19500 && m.text.includes("Tool ocw_connector_call said: whoami: sub_smoke");
+if (!ok) { console.log("FAIL: the 20 s connector call did not complete inside the turn"); process.exit(1); }
+'
+
+echo "== [connectors] not connected: the reply is the fixed connect sentence, never the API body"
+connectors_control '{ refusal: "not_connected" }'
+FIXTURE="$(connector_variant c3)"
+STATE="$(inject_and_wait "$FIXTURE" 0199a6f0-0000-7000-8000-00000000d0c3)"
+connectors_control '{}'
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d0c3");
+if (!m) { console.log("FAIL: no reply to the not-connected mention"); process.exit(1); }
+console.log("   reply      :", m.text);
+const ok =
+  m.text.includes("Tool ocw_connector_call said: You haven\x27t connected your account for this connector yet. I posted a link so you can connect it, then ask me again.") &&
+  !m.text.includes("fake-api-error-body-canary") && !m.text.includes("refused by test");
+if (!ok) { console.log("FAIL: expected exactly the fixed connect sentence"); process.exit(1); }
+'
+
+echo "== [connectors] member account refused by the API: the private-chat sentence"
+connectors_control '{ refusal: "member_account" }'
+FIXTURE="$(connector_variant c4)"
+STATE="$(inject_and_wait "$FIXTURE" 0199a6f0-0000-7000-8000-00000000d0c4)"
+connectors_control '{}'
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d0c4");
+if (!m) { console.log("FAIL: no reply to the member-account mention"); process.exit(1); }
+console.log("   reply      :", m.text);
+const ok =
+  m.text.includes("Tool ocw_connector_call said: This uses your own account, so I can only do it in our private chat") &&
+  !m.text.includes("fake-api-error-body-canary");
+if (!ok) { console.log("FAIL: expected the member-account sentence"); process.exit(1); }
+'
+
+echo "== [connectors] a channel turn withholding the member's connector: the persona gets the share link (R7)"
+CONN_CHANNEL=0199a6f0-0000-7000-8000-00000000c0c2
+CONN_SERVER_ID=0199a6f0-0000-7000-8000-000000000c71
+# Nothing offered; the member's connector is withheld with its resource (no tool ever enables from a withheld entry).
+WITHHELD_TURN="$(printf '{"tools":[],"toolFlags":{},"withheld":[{"tool":"m1a2b3c4d__whoami","reason":"member_account","resource":{"kind":"connector","id":"%s","name":"Smoke CRM"}}]}' "$CONN_SERVER_ID")"
+OPS="$(printf '{"id":"%s","kind":"channel","name":"ops"}' "$CONN_CHANNEL")"
+WITHHELD_FIXTURE="$(connector_variant c5 "@archie what is the status of the Acme deal?" "$WITHHELD_TURN" "$OPS")"
+STATE="$(inject_and_wait "$WITHHELD_FIXTURE" 0199a6f0-0000-7000-8000-00000000d0c5)"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d0c5");
+if (!m) { console.log("FAIL: no reply to the withheld-connector mention"); process.exit(1); }
+console.log("   reply      :", m.text);
+if (!m.text.endsWith("[tools: 0]")) { console.log("FAIL: a withheld tool reached the model"); process.exit(1); }
+'
+SHARE_LINK="/settings/connections?share=${CONN_CHANNEL}&connector=${CONN_SERVER_ID}"
+LINKED="$(docker exec "${P}-model" sh -c "grep -l '$CONN_CHANNEL' /tmp/capture/*.json 2>/dev/null | xargs -r grep -lF '$SHARE_LINK' | xargs -r grep -l 'Allow Smoke CRM in #ops' | wc -l")"
+echo "   share link : $LINKED model request(s) of #ops carry [Allow Smoke CRM in #ops]($SHARE_LINK)"
+[[ "$LINKED" -ge 1 ]] || { echo "FAIL: the withheld block with the share link did not reach the model"; exit 1; }
+
+echo "== [connectors] a DM turn offering ocw_connector_list and ocw_http_request: the bot lists its keys and sends a GET by handle"
+HTTP_TEXT='check my billing profile [[call ocw_connector_list {}]] [[call ocw_http_request {"handle":"k_abcdefgh23","method":"GET","url":"https://api.example.com/v1/me"}]]'
+HTTP_TURN='{"tools":["ocw_connector_list","ocw_http_request"],"toolFlags":{"ocw_connector_list":{"untrustedOutput":false,"sideEffecting":false},"ocw_http_request":{"untrustedOutput":true,"sideEffecting":true}}}'
+HTTP_FIXTURE="$(connector_variant c6 "$HTTP_TEXT" "$HTTP_TURN")"
+STATE="$(inject_and_wait "$HTTP_FIXTURE" 0199a6f0-0000-7000-8000-00000000d0c6)"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e0c6";
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d0c6");
+if (!m) { console.log("FAIL: no reply to the http mention"); process.exit(1); }
+const lists = (s.connectorLists ?? []).filter((x) => x.eventId === EV);
+const reqs = (s.httpRequests ?? []).filter((x) => x.eventId === EV);
+const gated = s.toolCalls.filter((c) => c.eventId === EV);
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   lists      :", JSON.stringify(lists));
+console.log("   requests   :", JSON.stringify(reqs));
+const r = reqs[0];
+const ok =
+  m.text.includes("Tool ocw_connector_list said: Connectors") &&
+  m.text.includes("Tool ocw_http_request said: HTTP 200 (application/json)") &&
+  /\[tools: 2 \| ocw_connector_list,ocw_http_request\]/.test(m.text) &&
+  lists.length === 1 && Object.keys(lists[0]).sort().join() === "agentId,eventId" &&
+  reqs.length === 1 && r.handle === "k_abcdefgh23" && r.method === "GET" && r.url === "https://api.example.com/v1/me" &&
+  Object.keys(r).sort().join() === "agentId,eventId,handle,method,url" &&
+  gated.length === 0;
+if (!ok) { console.log("FAIL: expected one list and one GET by handle through their own routes, no /tool-calls"); process.exit(1); }
+'
+
+echo "== [connectors] no per-member MCP server and no member credential anywhere in the cell"
+CONFIG="$(docker exec "${P}-openclaw" cat /home/node/.openclaw/openclaw.json)"
+CONFIG="$CONFIG" node -e '
+const cfg = JSON.parse(process.env.CONFIG);
+const servers = Object.keys(cfg.mcp?.servers ?? {});
+console.log("   mcp servers:", JSON.stringify(servers));
+if (servers.includes("m1a2b3c4d")) { console.log("FAIL: the per-member connector is rendered as an in-cell MCP server"); process.exit(1); }
+'
+CRED_FILES="$(docker exec "${P}-openclaw" sh -c "grep -rlF 'Bearer $CONN_TOKEN' /home/node/.openclaw 2>/dev/null | wc -l")"
+CRED_LOGS="$(docker logs "${P}-openclaw" 2>&1 | grep -cF "$CONN_TOKEN" || true)"
+echo "   credential : $CRED_FILES state file(s) and $CRED_LOGS log line(s) carry the member's connector token"
+[[ "$CRED_FILES" -eq 0 && "$CRED_LOGS" -eq 0 ]] || { echo "FAIL: a member credential reached the cell"; exit 1; }
 fi
 
 if want mcp; then

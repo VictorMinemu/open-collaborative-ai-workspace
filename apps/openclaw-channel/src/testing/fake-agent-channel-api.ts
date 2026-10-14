@@ -38,8 +38,18 @@
  *                                          then 200, version 1, the first column by default)
  *   PATCH /agent-channel/v1/board/cards/:id  move / waiting state of a stored board card (409
  *                                          board_card_version_conflict, 403 not_author on any text key)
- *   POST /agent-channel/v1/connectors/call  records the body (`connectorCalls`; 400 for any key beyond eventId, agentId,
- *                                          connector, tool, arguments) and answers `{content: "whoami: sub_smoke"}`
+ *   POST /agent-channel/v1/connectors/list  records the body (`connectorLists`) and answers one connected connector
+ *                                          (`m1a2b3c4d` "Smoke CRM", tool whoami) and one key (`k_abcdefgh23`)
+ *   POST /agent-channel/v1/connectors/call  records the body (`connectorCalls`) and answers `{content: "whoami: sub_smoke"}`
+ *   POST /agent-channel/v1/http-requests    records the body (`httpRequests`) and answers `HTTP 200 {"login":"smoke"}`
+ *                                          All three: 400 for any key beyond the contract's (never a user id); the
+ *                                          `connectorControl` knobs (POST /__test/connectors {slowMs?, refusal?, result?})
+ *                                          delay the call, refuse the call and the request with an AgentChannelToolRefusal
+ *                                          code (404 unknown_turn, 502 upstream_error / egress_refused / timeout, 409
+ *                                          otherwise; the error body carries FAKE_ERROR_CANARY, which must never reach the
+ *                                          model) or replace the call's content. The upstream credential the real API
+ *                                          would use (`connectorToken`) never leaves the fake: not in /cell, not in an
+ *                                          answer.
  *   POST /agent-channel/v1/mcp/probe-results  records the probe report (`mcpProbes`)
  *   POST /agent-channel/v1/plugins/report     records the report (`pluginReports`) and moves the row's status
  *   POST /agent-channel/v1/plugins/verify-install  approves only a row `installing` with the same package, version
@@ -120,7 +130,11 @@ export type StoredBoardCard = AgentChannelBoardCreateCard & {
 };
 export type StoredBoardPatch = AgentChannelBoardPatchCard & { messageId: string; status: number };
 /** Every POST /connectors/call body, as received (never a user id: the API reads the turn's human). */
-export type StoredConnectorCall = Record<string, unknown>;
+export type StoredConnectorCall = Record<string, unknown> & { receivedAt?: number; answeredAt?: number };
+/** Test knobs of the connector routes (`POST /__test/connectors` replaces them). */
+export type ConnectorControl = { slowMs?: number; refusal?: string; result?: string };
+/** In every refusal body of the connector routes: a plugin must never relay it to the model. */
+export const FAKE_ERROR_CANARY = "fake-api-error-body-canary";
 export type VerifyCall = {
   packageName: string;
   version: string;
@@ -177,8 +191,14 @@ export type FakeAgentChannelApi = {
   boardReads: string[];
   /** Event id → the board card whose thread the turn runs in (what the real API reads from the stored turn). */
   boardTurnCards: Map<string, string>;
-  /** Every POST /connectors/call body, in order (refused ones included). */
+  /** Every POST /connectors/call body, in order (refused ones included), with when it arrived and was answered. */
   connectorCalls: StoredConnectorCall[];
+  /** Every POST /connectors/list body, in order. */
+  connectorLists: Array<Record<string, unknown>>;
+  /** Every POST /http-requests body, in order (refused ones included). */
+  httpRequests: Array<Record<string, unknown>>;
+  /** The knobs of the connector routes. */
+  connectorControl: ConnectorControl;
   /** Snapshot `mcpServers` (header values included, as the real API sends them); `[]` = none. */
   mcpServers: CellMcpServer[];
   /** Every POST /mcp/probe-results, in order. */
@@ -277,8 +297,17 @@ function boardCardOut(c: StoredBoardCard) {
 
 /** The keys each connector / keychain body may carry: never a user (the API reads the stored turn's human). */
 const CONNECTOR_BODY_KEYS = {
+  list: ["eventId", "agentId"],
   call: ["eventId", "agentId", "connector", "tool", "arguments"],
+  http: ["eventId", "agentId", "handle", "method", "url", "headers", "body"],
 } as const;
+
+/** The status the real API answers a refusal code with. */
+function refusalStatus(code: string): number {
+  if (code === "unknown_turn") return 404;
+  if (code === "upstream_error" || code === "egress_refused" || code === "timeout") return 502;
+  return 409;
+}
 
 /** A stable id per fake file (assigned on first use). */
 function memoryFileId(f: FakeMemoryFile): string {
@@ -316,6 +345,8 @@ export async function startFakeAgentChannelApi(
     denyTools?: string[];
     mcpServers?: CellMcpServer[];
     plugins?: CellApprovedPlugin[];
+    /** The member credential the real API would use upstream: held here only, never sent anywhere (07.4 C-01). */
+    connectorToken?: string;
     port?: number;
     host?: string;
   } = {},
@@ -365,6 +396,11 @@ export async function startFakeAgentChannelApi(
     boardReads: [] as string[],
     boardTurnCards: new Map<string, string>(),
     connectorCalls: [] as StoredConnectorCall[],
+    connectorLists: [] as Array<Record<string, unknown>>,
+    httpRequests: [] as Array<Record<string, unknown>>,
+    connectorControl: {} as ConnectorControl,
+    // Never serialized: not in /cell, not in an answer, not in the state dump.
+    connectorToken: opts.connectorToken ?? "fake-connector-token",
     mcpServers: opts.mcpServers ?? ([] as CellMcpServer[]),
     mcpProbes: [] as AgentChannelMcpProbeResult[],
     cellReads: 0,
@@ -424,6 +460,16 @@ export async function startFakeAgentChannelApi(
           if (typeof body.readerCount === "number") state.memoryReaderCount = body.readerCount;
           return json(res, 200, { ok: true });
         }
+        if (req.method === "POST" && url.pathname === "/__test/connectors") {
+          // Replace the connector knobs ({} resets them).
+          const body = ((await readJson(req)) ?? {}) as ConnectorControl;
+          state.connectorControl = {
+            ...(typeof body.slowMs === "number" ? { slowMs: body.slowMs } : {}),
+            ...(typeof body.refusal === "string" ? { refusal: body.refusal } : {}),
+            ...(typeof body.result === "string" ? { result: body.result } : {}),
+          };
+          return json(res, 200, { ok: true, control: state.connectorControl });
+        }
         if (req.method === "POST" && url.pathname === "/__test/end-turn") {
           api.endTurn(String(((await readJson(req)) as { eventId?: string }).eventId ?? ""));
           return json(res, 200, { ok: true });
@@ -454,6 +500,8 @@ export async function startFakeAgentChannelApi(
             boardPatches: state.boardPatches,
             boardReads: state.boardReads,
             connectorCalls: state.connectorCalls,
+            connectorLists: state.connectorLists,
+            httpRequests: state.httpRequests,
             mcpProbes: state.mcpProbes,
             cellReads: state.cellReads,
             plugins: state.plugins,
@@ -616,20 +664,80 @@ export async function startFakeAgentChannelApi(
         state.memories.push(stored);
         return json(res, 200, { memoryId: stored.memoryId, created: stored.created });
       }
-      if (req.method === "POST" && route === "/connectors/call") {
+      const connectorRoute =
+        route === "/connectors/list"
+          ? "list"
+          : route === "/connectors/call"
+            ? "call"
+            : route === "/http-requests"
+              ? "http"
+              : undefined;
+      if (req.method === "POST" && connectorRoute) {
         const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
-        state.connectorCalls.push(body);
-        const allowed: readonly string[] = CONNECTOR_BODY_KEYS.call;
+        const stored: StoredConnectorCall = { ...body };
+        if (connectorRoute === "list") state.connectorLists.push(stored);
+        else if (connectorRoute === "call") state.connectorCalls.push(stored);
+        else state.httpRequests.push(stored);
+        const allowed: readonly string[] = CONNECTOR_BODY_KEYS[connectorRoute];
+        const required =
+          connectorRoute === "call"
+            ? ["connector", "tool"]
+            : connectorRoute === "http"
+              ? ["handle", "method", "url"]
+              : [];
         if (
           typeof body.eventId !== "string" ||
           typeof body.agentId !== "string" ||
-          typeof body.connector !== "string" ||
-          typeof body.tool !== "string" ||
+          required.some((k) => typeof body[k] !== "string") ||
           Object.keys(body).some((k) => !allowed.includes(k))
         ) {
           return json(res, 400, { error: { code: "bad_request" } });
         }
-        return json(res, 200, { content: "whoami: sub_smoke", truncated: false, isError: false });
+        const control = state.connectorControl;
+        if (connectorRoute === "list") {
+          return json(res, 200, {
+            connectors: [
+              {
+                connector: "m1a2b3c4d",
+                name: "Smoke CRM",
+                status: "connected",
+                tools: [
+                  {
+                    name: "whoami",
+                    description: "Who the signed-in member is.",
+                    inputSchema: { type: "object" },
+                  },
+                ],
+              },
+            ],
+            keys: [{ handle: "k_abcdefgh23", name: "Smoke API", allowedHosts: ["api.example.com"] }],
+          });
+        }
+        if (connectorRoute === "call") {
+          stored.receivedAt = Date.now();
+          if (control.slowMs) await new Promise((r) => setTimeout(r, control.slowMs));
+        }
+        if (control.refusal) {
+          stored.answeredAt = Date.now();
+          return json(res, refusalStatus(control.refusal), {
+            error: { code: control.refusal, message: `refused by test ${FAKE_ERROR_CANARY}` },
+          });
+        }
+        if (connectorRoute === "call") {
+          stored.answeredAt = Date.now();
+          return json(res, 200, {
+            content: control.result ?? "whoami: sub_smoke",
+            truncated: false,
+            isError: false,
+          });
+        }
+        return json(res, 200, {
+          status: 200,
+          contentType: "application/json",
+          body: '{"login":"smoke"}',
+          truncated: false,
+          redirectHost: null,
+        });
       }
       const memoryRoute = /^\/memory\/(list|read|write|propose)$/u.exec(route)?.[1] as
         | MemoryRoute
@@ -1026,6 +1134,18 @@ export async function startFakeAgentChannelApi(
     },
     get connectorCalls() {
       return state.connectorCalls;
+    },
+    get connectorLists() {
+      return state.connectorLists;
+    },
+    get httpRequests() {
+      return state.httpRequests;
+    },
+    get connectorControl() {
+      return state.connectorControl;
+    },
+    set connectorControl(value: ConnectorControl) {
+      state.connectorControl = value;
     },
     get mcpServers() {
       return state.mcpServers;
