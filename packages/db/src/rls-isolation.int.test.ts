@@ -426,6 +426,17 @@ async function seedOrg(c: pg.Client, org: string) {
     "insert into app.agent_vault_grants (organization_id, agent_id, vault_item_id, created_by) values ($1, $2, $3, $4)",
     [org, personal, vaultItem, user],
   );
+  // 07.4-07: an organization key too. Personal keys sit behind the owner-only policy, so a session without that owner
+  // (the enumerator's tenant-only context) sees this one.
+  const orgVaultSecret = randomUUID();
+  await q(
+    "insert into app.secrets (id, organization_id, name, kind, ciphertext, iv, tag) values ($1, $2, 'org key', 'vault_item', 'c', 'i', 't')",
+    [orgVaultSecret, org],
+  );
+  await q(
+    `insert into app.vault_items (organization_id, scope, name, handle, kind, injection, allowed_hosts, secret_ref, created_by) values ($1, 'unit', 'Org ERP key', 'k_orgkeyaaaa', 'api_key', '{"header":"Authorization","scheme":"bearer"}', '{erp.example.test}', $2::jsonb, $3)`,
+    [org, JSON.stringify({ provider: "db", secretId: orgVaultSecret, organizationId: org }), user],
+  );
   await q(
     "insert into app.agent_templates (id, organization_id, unit_id, name, description, current_version, created_by) values ($1, $2, $3, 'Sales assistant', 'Answers from the CRM', 1, $4)",
     [agentTemplate, org, unit, user],
@@ -610,9 +621,18 @@ describe("tenant isolation (RLS)", () => {
       );
       expect(seeded.rows[0].n, `${tbl} has no fixture row: add one to seedOrg()`).toBeGreaterThan(0);
 
-      // Same tenant sees its rows (sanity) …
+      // Same tenant sees its rows (sanity), minus the personal keys only their owner's session sees (07.4-07) …
+      const ownerOnly =
+        tbl === "app.vault_items"
+          ? (
+              await migrator.query(
+                "select count(*)::int as n from app.vault_items where organization_id = $1 and scope = 'personal'",
+                [A],
+              )
+            ).rows[0].n
+          : 0;
       const own = await inTenant(A, () => app.query(`select count(*)::int as n from ${tbl}`));
-      expect(own.rows[0].n, `${tbl} own rows`).toBe(seeded.rows[0].n);
+      expect(own.rows[0].n, `${tbl} own rows`).toBe(seeded.rows[0].n - ownerOnly);
 
       // … another tenant sees none of A's rows.
       const cross = await inTenant(B, () =>
@@ -1504,16 +1524,19 @@ describe("tenant isolation (RLS)", () => {
         `${tbl} cross-tenant insert`,
       ).rejects.toThrow(/row-level security/);
     }
-    // The four memory tables carry the restrictive owner-only policy on top of the tenant policy.
+    // The four memory tables (and, since 07.4-07, the keychain's personal keys) carry the restrictive owner-only policy
+    // on top of the tenant policy.
     const restrictive = await migrator.query(
       "select tablename, cmd, permissive from pg_policies where schemaname = 'app' and policyname = 'personal_owner_only' order by tablename",
     );
     expect(restrictive.rows).toEqual(
-      ["memory_file_revisions", "memory_files", "memory_proposals", "memory_scopes"].map((tablename) => ({
-        tablename,
-        cmd: "ALL",
-        permissive: "RESTRICTIVE",
-      })),
+      ["memory_file_revisions", "memory_files", "memory_proposals", "memory_scopes", "vault_items"].map(
+        (tablename) => ({
+          tablename,
+          cmd: "ALL",
+          permissive: "RESTRICTIVE",
+        }),
+      ),
     );
     // The owner triggers run as the migrator with a fixed search_path; the app role cannot call them directly.
     const fns = await migrator.query(
@@ -1710,10 +1733,12 @@ describe("tenant isolation (RLS)", () => {
     expect(unlinked).toEqual([{ card_message_id: null }]);
   });
 
-  it("Phase 07.4: the seven connector, keychain and template tables are org-scoped, forced, seeded, with the tenant policy only", async () => {
+  it("Phase 07.4: the seven connector, keychain and template tables are org-scoped, forced, seeded, with the tenant policy (+ owner-only on keys)", async () => {
     const scoped = new Map((await orgScopedTables()).map((t) => [t.tbl, t]));
     for (const tbl of CONNECTOR_TABLES) {
-      expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true, policies: 1 });
+      // vault_items also carries the restrictive owner-only policy on personal keys (07.4-07).
+      const policies = tbl === "app.vault_items" ? 2 : 1;
+      expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true, policies });
       const own = await inTenant(A, () => app.query(`select count(*)::int as n from ${tbl}`));
       expect(own.rows[0].n, `${tbl} seeded`).toBeGreaterThan(0);
     }

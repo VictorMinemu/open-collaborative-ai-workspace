@@ -29,7 +29,7 @@ export {
   type SearchEnv,
   savePolicy,
 } from "./policy";
-export { findBot, governanceList, notifyCellConfig, usageToday } from "./routes";
+export { findBot, governanceList, loadBotFacts, notifyCellConfig, usageToday } from "./routes";
 export {
   cellAgentCapabilities,
   currentTurnTools,

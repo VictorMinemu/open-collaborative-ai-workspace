@@ -180,6 +180,17 @@ CREATE POLICY personal_owner_only ON app.memory_proposals AS RESTRICTIVE FOR ALL
   WITH CHECK (personal_owner_user_id IS NULL
          OR personal_owner_user_id = nullif(current_setting('app.user_id', true), '')::uuid);
 
+-- Keychain (Phase 07.4, D-04, D-06): a personal key is its owner's alone, as personal memory is. Same RESTRICTIVE shape
+-- (ANDed with tenant_isolation) on the row's own `owner_user_id` (scope 'personal' always has one, by CHECK): an admin
+-- of the same organization, a cell route without a user and any other member read 0 personal keys and cannot write
+-- one. Unit keys (scope 'unit') stay under tenant isolation only; the API decides `vault.manage` on them.
+DROP POLICY IF EXISTS personal_owner_only ON app.vault_items;
+CREATE POLICY personal_owner_only ON app.vault_items AS RESTRICTIVE FOR ALL
+  USING (scope <> 'personal'
+         OR owner_user_id = nullif(current_setting('app.user_id', true), '')::uuid)
+  WITH CHECK (scope <> 'personal'
+         OR owner_user_id = nullif(current_setting('app.user_id', true), '')::uuid);
+
 -- Pre-tenant lookups (bearer tokens / pairing codes arrive before the organization is known).
 -- SECURITY DEFINER as ocw_migrator (BYPASSRLS); each returns only the ids needed to open withTenant().
 CREATE OR REPLACE FUNCTION app.lookup_device_token(p_token_hash text)

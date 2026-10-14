@@ -34,7 +34,11 @@ export interface SecretsService {
     tx: Tx,
     input: {
       name: string;
-      kind: "user_model_credential";
+      /**
+       * `user_model_credential`: a member's ChatGPT bundle (P-10). `connector_credential`: a member's connector token
+       * bundle or key (Phase 07.4, D-01). `vault_item`: a keychain item's value, AAD `<orgId>:vault:<itemId>` (D-04).
+       */
+      kind: "user_model_credential" | "connector_credential" | "vault_item";
       provider?: string | null;
       value: string;
       aad: string;
@@ -42,6 +46,12 @@ export interface SecretsService {
   ): Promise<string>;
   /** `reveal` of a secret sealed with `putSealed`; throws when the AAD does not match. Server-side only. */
   revealSealed(tx: Tx, secretId: string, aad: string): Promise<string>;
+  /**
+   * Re-seals the value of an existing `putSealed` secret in place (same row, same id; the caller's AAD rules), e.g. a
+   * keychain key whose value was replaced (Phase 07.4). No `secret.created`/`secret.deleted` pair: the caller audits
+   * the change. Throws when the row does not exist in the tx's organization.
+   */
+  replaceSealed(tx: Tx, secretId: string, value: string, aad: string): Promise<void>;
   /**
    * The single entry point for a `SecretReference` (D-07, P-10): `env` / `file` through the operator store, `db`
    * through `reveal` inside the tenant tx, only when the reference names the tx's own organization (a foreign
@@ -117,6 +127,14 @@ export function createSecretsService(deps: {
     },
     async revealSealed(tx, secretId, aad) {
       return openSealed(tx, secretId, aad);
+    },
+    async replaceSealed(tx, secretId, value, aad) {
+      const updated = await tx
+        .update(secrets)
+        .set(seal(deps.key, value, aad))
+        .where(eq(secrets.id, secretId))
+        .returning({ id: secrets.id });
+      if (updated.length !== 1) throw new Error("secret not found");
     },
     async put(tx, input) {
       const ctx = tenantOf(tx);
