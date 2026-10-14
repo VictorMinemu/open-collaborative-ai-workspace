@@ -94,6 +94,10 @@ export interface FakeMcpOAuthOptions {
   /** The static bearer `/kc/whoami` accepts (default `fake-kc-token`). Basic is always kcuser:kcpass and the
    * client-credentials client kc-client / kc-secret. */
   kcToken?: string;
+  /** The Basic pair `/kc/whoami` accepts (default kcuser / kcpass). */
+  kcBasic?: { user: string; pass: string };
+  /** The client-credentials client `/kc/token` accepts (default kc-client / kc-secret). */
+  kcClient?: { id: string; secret: string };
 }
 
 /** `/kc/whoami` body: how the request authenticated. */

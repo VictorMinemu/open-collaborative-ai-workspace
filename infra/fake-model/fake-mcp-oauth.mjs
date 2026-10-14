@@ -179,6 +179,9 @@ export function createFakeMcpOAuth(opts = {}) {
   }));
   const cimdFetch = opts.cimdFetch ?? defaultCimdFetch;
   const kcToken = opts.kcToken || DEFAULT_KC_TOKEN;
+  // The Basic pair and the client-credentials client /kc accepts (leak sweeps pass canaries; 07.4-12).
+  const kcBasic = opts.kcBasic ?? KC_BASIC;
+  const kcClient = opts.kcClient ?? KC_CLIENT;
 
   let scenario = {};
   let stats = freshStats();
@@ -632,7 +635,7 @@ export function createFakeMcpOAuth(opts = {}) {
       return exp !== undefined && exp > Date.now() ? "client_credentials" : null;
     }
     const basic = basicCredentials(req);
-    return basic && basic.id === KC_BASIC.user && basic.secret === KC_BASIC.pass ? "basic" : null;
+    return basic && basic.id === kcBasic.user && basic.secret === kcBasic.pass ? "basic" : null;
   }
 
   async function keychain(req, res, p) {
@@ -671,7 +674,7 @@ export function createFakeMcpOAuth(opts = {}) {
       const basic = basicCredentials(req);
       const id = basic ? basic.id : form.get("client_id");
       const secret = basic ? basic.secret : form.get("client_secret");
-      if (id !== KC_CLIENT.id || secret !== KC_CLIENT.secret)
+      if (id !== kcClient.id || secret !== kcClient.secret)
         return send(res, 401, { error: "invalid_client", error_description: "fake: invalid_client" });
       if (form.get("grant_type") !== "client_credentials")
         return send(res, 400, {

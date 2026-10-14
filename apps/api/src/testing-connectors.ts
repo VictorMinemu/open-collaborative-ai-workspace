@@ -6,6 +6,7 @@ import { expect, vi } from "vitest";
 import {
   createFakeMcpOAuth,
   type FakeMcpOAuth,
+  type FakeMcpOAuthOptions,
   type FakeMcpOAuthScenario,
   type FakeMcpOAuthStats,
 } from "../../../infra/fake-model/fake-mcp-oauth.mjs";
@@ -80,9 +81,12 @@ export async function startConnectorsStack(
     env?: Record<string, string>;
     /** Log level of the captured API output (default `info`; the leak sweep reads `debug`). */
     logLevel?: string;
+    /** Extra fake options (the leak sweep's canary keychain credentials); the pre-registered clients stay. */
+    fake?: Omit<FakeMcpOAuthOptions, "preRegistered">;
   } = {},
 ): Promise<ConnectorsStack> {
   const fake = createFakeMcpOAuth({
+    ...opts.fake,
     preRegistered: [
       { client_id: PRE_REGISTERED, redirect_uris: [CALLBACK_URL] },
       {
