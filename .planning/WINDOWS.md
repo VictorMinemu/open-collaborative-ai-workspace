@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 124
+open_count: 126
 waived_count: 4
 fixed_count: 80
-total_count: 208
-last_updated: 2026-10-14T15:40:25.495Z
+total_count: 210
+last_updated: 2026-10-14T15:58:17.419Z
 ---
 
 # Broken Windows Ledger
@@ -223,6 +223,8 @@ last_updated: 2026-10-14T15:40:25.495Z
 | 206 | 07.5 | deviation | packages/contracts/src/sensitive-data.test.ts |  | The linear-time ratio test (<8x) failed once at 10.42x with load average 18 (parallel executors); consider a looser ratio or more samples | open |  | 2026-10-14T15:32:47.075Z |  |
 | 207 | 07.5 | deviation | apps/api/src/modules/tool-approval |  | DECIDED (fix in gate): deleting a unit cascades its tool approval policies with no tool_approval_policy.deleted audit (principle 12); answer 409 unit_has_policies as for keys and templates | open |  | 2026-10-14T15:40:25.353Z |  |
 | 208 | 07.5 | deviation | apps/api/src/modules/tool-approval |  | History query has no audit_events index on (action, scopeUnitId); silent caps: /access 500 units, catalog 200 tools/group and 100 groups; a 'users' rule whose people are gone must count as no approver in 07.5-07 canDecide | open |  | 2026-10-14T15:40:25.495Z |  |
+| 209 | 07.5 | unrun-verify | apps/openclaw-channel/src/tool-guard.ts |  | The TOOL_PIN_PRIORITY pin relies on OpenClaw 2026.9.7 'last returned params win' (assumption A2), unverified; a plugin registered below -10000 could rewrite after the pin; the 07.5-15 real-cell smoke must record it | open |  | 2026-10-14T15:58:17.312Z |  |
+| 210 | 07.5 | deviation | apps/openclaw-channel/src/connector-tools.ts |  | Denial note parsed from the end of the server sentence (no cardAction.note in contracts); approval_denied does not say who decided; flagged connector tools still use the old 32 KB message; fake /tool-calls never answers no_trigger | open |  | 2026-10-14T15:58:17.419Z |  |
 
 ````json
 [
@@ -2720,6 +2722,30 @@ last_updated: 2026-10-14T15:40:25.495Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-14T15:40:25.495Z",
+    "resolved_at": null
+  },
+  {
+    "id": 209,
+    "kind": "unrun-verify",
+    "phase": "07.5",
+    "file": "apps/openclaw-channel/src/tool-guard.ts",
+    "line": null,
+    "description": "The TOOL_PIN_PRIORITY pin relies on OpenClaw 2026.9.7 'last returned params win' (assumption A2), unverified; a plugin registered below -10000 could rewrite after the pin; the 07.5-15 real-cell smoke must record it",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T15:58:17.312Z",
+    "resolved_at": null
+  },
+  {
+    "id": 210,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "apps/openclaw-channel/src/connector-tools.ts",
+    "line": null,
+    "description": "Denial note parsed from the end of the server sentence (no cardAction.note in contracts); approval_denied does not say who decided; flagged connector tools still use the old 32 KB message; fake /tool-calls never answers no_trigger",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T15:58:17.419Z",
     "resolved_at": null
   }
 ]
