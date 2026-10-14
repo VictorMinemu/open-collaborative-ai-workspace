@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createFakeMcp } from "../../../infra/fake-model/fake-mcp.mjs";
 import {
   AGENT_CHANNEL_TOOL_REFUSALS,
+  AgentCardActionEvent,
   AgentChannelToolCallDecision,
   type CellAgent,
   type CellMcpServer,
@@ -1074,6 +1075,40 @@ describe("approval mirror parity (07.5-04: plugin ↔ packages/contracts tool-ap
     };
     expect(channel.AgentChannelToolCallDecision?.safeParse(decision).success).toBe(true);
     expect(AgentChannelToolCallDecision.parse(decision)).toEqual(decision);
+    // A grant card action the contract accepts reads the same in the mirror (decidedBy and grant kept as sent).
+    const cardEvent = {
+      eventId: "0199a6f0-0000-7000-8000-0000000000e1",
+      seq: 3,
+      type: "agent.card_action.v1",
+      organizationId: "0199a6f0-0000-7000-8000-0000000000f1",
+      cellId: "0199a6f0-0000-7000-8000-0000000000f1",
+      agent: { id: "0199a6f0-0000-7000-8000-0000000000b1", handle: "archie", displayName: "Archie" },
+      conversation: { id: "0199a6f0-0000-7000-8000-0000000000d1", kind: "dm", name: null },
+      thread: { rootMessageId: "0199a6f0-0000-7000-8000-0000000000c2" },
+      message: {
+        id: "0199a6f0-0000-7000-8000-0000000000c2",
+        text: "Marta Gil approved “Run create_invoice on Acme CRM”",
+        createdAt: "2026-10-08T10:31:00.000Z",
+        author: { kind: "user", id: "0199a6f0-0000-7000-8000-0000000000a2", displayName: "Ana Pérez" },
+        mentions: [{ kind: "agent", id: "0199a6f0-0000-7000-8000-0000000000b1" }],
+      },
+      threadHistory: [],
+      roster: [],
+      cardAction: {
+        messageId: "0199a6f0-0000-7000-8000-0000000000c2",
+        kind: "approval",
+        title: "Run create_invoice on Acme CRM",
+        outcome: "approved",
+        decidedBy: { id: "0199a6f0-0000-7000-8000-0000000000a3", displayName: "Marta Gil" },
+        grant: {
+          tool: "m1a2b3c4d__create_invoice",
+          arguments: '{"amount":10}',
+          useBy: "2026-10-08T10:46:00.000Z",
+        },
+      },
+    };
+    expect(channel.AgentCardActionEvent?.safeParse(cardEvent).success).toBe(true);
+    expect(AgentCardActionEvent.parse(cardEvent).cardAction).toEqual(cardEvent.cardAction);
     // A value the contract does not know reads as absent in the mirror (never voids the turn or the decision).
     expect(TurnToolFlags.parse({ untrustedOutput: true, sideEffecting: true, approval: "later" })).toEqual({
       untrustedOutput: true,

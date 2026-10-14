@@ -445,6 +445,20 @@ export const AgentCardActionEvent = AgentMentionEvent.omit({ type: true }).exten
     kind: z.string().max(64),
     title: z.string().max(400),
     outcome: z.enum(["approved", "denied"]),
+    /**
+     * 07.5 (P-06): who decided. For grant kinds the turn is delivered for the requester (`message.author`), so the
+     * decider is named here. A malformed value reads as absent.
+     */
+    decidedBy: z.object({ id: Id, displayName: z.string() }).optional().catch(undefined),
+    /**
+     * 07.5 (D-02): an approved `tool.call` grant: call `tool` once with exactly these canonical `arguments` before
+     * `useBy`. Lenient on purpose (sizes and names are bounded by the mapper, which drops an oversized grant and says
+     * so); a malformed value reads as absent.
+     */
+    grant: z
+      .object({ tool: z.string().min(1), arguments: z.string(), useBy: z.string() })
+      .optional()
+      .catch(undefined),
   }),
 });
 export type AgentCardActionEvent = z.infer<typeof AgentCardActionEvent>;

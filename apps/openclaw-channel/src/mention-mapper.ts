@@ -7,6 +7,7 @@ import {
   type CellAgent,
   CONNECTOR_LOGICAL_TOOL,
   EMPTY_TURN,
+  TOOL_APPROVAL_LIMITS,
   type TurnContext,
   type TurnWithheld,
 } from "./agent-channel-protocol.js";
@@ -372,17 +373,77 @@ export function sanitizeCardTitle(title: string): string {
   return cleaned || "untitled";
 }
 
+/** A tool name from a grant (the cell's own earlier call, echoed by the API): one line, no structural characters. */
+export function sanitizeToolName(name: string): string {
+  const cleaned = Array.from(name, (ch) => {
+    const c = ch.codePointAt(0) ?? 0;
+    return c <= 0x1f || (c >= 0x7f && c <= 0x9f) ? " " : ch;
+  })
+    .join("")
+    .replace(/[<>,`]/gu, "")
+    .replace(/\s{2,}/gu, " ")
+    .trim()
+    .slice(0, 200);
+  return cleaned || "unknown";
+}
+
+const NOTE_MAX = 280;
+
+/**
+ * The decider's note, as the API appends it to the decision sentence (`<name> denied “<title>”: “<note>”`, 07.2 UI-SPEC
+ * R4): human-authored, shown back as one bounded line. Undefined when the sentence carries none.
+ */
+function decisionNote(text: string, title: string): string | undefined {
+  const marker = `“${title}”: “`;
+  const at = text.lastIndexOf(marker);
+  if (at < 0 || !text.endsWith("”")) return undefined;
+  const note = Array.from(text.slice(at + marker.length, -1), (ch) => {
+    const c = ch.codePointAt(0) ?? 0;
+    return c <= 0x1f || (c >= 0x7f && c <= 0x9f) ? " " : ch;
+  })
+    .join("")
+    .replace(/[<>`]/gu, "")
+    .replace(/\s{2,}/gu, " ")
+    .trim()
+    .slice(0, NOTE_MAX)
+    .trim();
+  return note || undefined;
+}
+
 /**
  * `agent.card_action.v1` (06-14, P-11): a human approved or denied one of the agent's cards. Mapped exactly like a
  * mention of the agent on the card's message (same sender, roster, history, thread or flat placement, session and
  * turn tools), plus a structured block naming the card and the outcome, so the persona can continue (for example
  * update the card with `ocw_agent_card`). Throws on a malformed event (the bridge validates first).
+ *
+ * 07.5 (D-02, P-06, Pitfall 1): an approved `grant` becomes the first block, "Approved action", telling the model to
+ * call the tool once with exactly the approved canonical arguments (byte for byte, never re-serialized) before the
+ * deadline; an oversized grant is dropped and the model is told to ask again. A denial with its decider tells the
+ * model who denied what (and the note) and not to run it. Without `grant` or `decidedBy` the block is exactly as before.
  */
 export function mapCardAction(event: AgentCardActionEvent, bot: CellAgent | undefined): MappedMention {
   const { cardAction, ...rest } = AgentCardActionEvent.parse(event);
   const base = mapMention({ ...rest, type: AgentChannelEventTypes.mention }, bot);
+  const decider = cardAction.decidedBy ? sanitizeName(cardAction.decidedBy.displayName) : undefined;
+  const requester = base.sender.name;
+  const grant = cardAction.grant;
+  let label = "Decision on your card";
+  let instruction: string | undefined;
+  if (cardAction.outcome === "approved" && grant) {
+    label = "Approved action";
+    const tool = sanitizeToolName(grant.tool);
+    const by = decider ?? "a person";
+    instruction =
+      grant.arguments.length > TOOL_APPROVAL_LIMITS.argumentsBytes
+        ? `Approved by ${by}, but the approved arguments were too large to pass on. Don't call ${tool} now; ask ${requester} to ask again.`
+        : `Approved by ${by}. Call ${tool} once with exactly these arguments before ${sanitizeName(grant.useBy)}: ${grant.arguments}`;
+  } else if (cardAction.outcome === "denied" && decider) {
+    const what = grant ? sanitizeToolName(grant.tool) : `“${sanitizeCardTitle(cardAction.title)}”`;
+    const note = decisionNote(rest.message.text, cardAction.title);
+    instruction = `${decider} denied ${what}.${note ? ` Note: “${note}”.` : ""} Don't run it; tell ${requester}.`;
+  }
   const block: ContextBlock = {
-    label: "Decision on your card",
+    label,
     source: "ocw",
     type: "card_action",
     payload: {
@@ -392,6 +453,8 @@ export function mapCardAction(event: AgentCardActionEvent, bot: CellAgent | unde
         title: sanitizeCardTitle(cardAction.title),
       },
       outcome: cardAction.outcome,
+      ...(decider ? { decidedBy: decider } : {}),
+      ...(instruction ? { instruction } : {}),
     },
   };
   return { ...base, contextBlocks: [block, ...base.contextBlocks] };
