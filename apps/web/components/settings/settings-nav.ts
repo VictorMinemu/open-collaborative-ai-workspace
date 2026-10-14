@@ -2,6 +2,7 @@ import type { Permission } from "@ocw/contracts";
 import {
   Blocks,
   Cpu,
+  Hand,
   Laptop,
   LockKeyhole,
   type LucideIcon,
@@ -21,6 +22,11 @@ export interface SettingsSection {
   icon: LucideIcon;
   /** Shown only to callers holding this organization-scope permission (decided by the API). */
   permission?: Permission;
+  /**
+   * Shown only when the API's access probe says the caller manages something here, at any scope (07.5 R4: unit leads
+   * manage approval policies on the units they lead, so an organization-scope permission cannot gate it).
+   */
+  access?: "approval_policies";
 }
 
 export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
@@ -54,6 +60,14 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     href: "/settings/work-zone-policy",
     icon: LockKeyhole,
     permission: "work_zone.manage",
+  },
+  // Admins (organization) and unit leads (the units they lead): `GET /tool-approval-policies/access` decides (07.5 R4).
+  {
+    id: "approval-policies",
+    label: "Approval policies",
+    href: "/settings/approval-policies",
+    icon: Hand,
+    access: "approval_policies",
   },
   {
     id: "marketplace",

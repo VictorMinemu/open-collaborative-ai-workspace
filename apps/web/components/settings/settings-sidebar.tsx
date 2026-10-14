@@ -4,6 +4,7 @@ import type { Permission } from "@ocw/contracts";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { SectionSidebar, sectionItemClass } from "@/components/shell/section-sidebar";
+import { canManageAny, useApprovalPolicyAccess } from "@/lib/approval-policy-queries";
 import { useConnectors, useShares } from "@/lib/connector-queries";
 import { useKeychain } from "@/lib/keychain-queries";
 import { grainStatus, permissionsFailed } from "@/lib/modules";
@@ -15,7 +16,13 @@ export function SettingsSidebar() {
   const pathname = usePathname();
   const can = usePermissionCheck();
   const perms = usePermissions();
-  const workspace = SETTINGS_SECTIONS.filter((s) => !s.permission || can(s.permission));
+  // Approval policies: shown when the API says the caller manages the organization or at least one unit (R4); hidden
+  // while the answer loads or after a failed fetch, so it never flashes in for someone who manages nothing.
+  const approvalAccess = useApprovalPolicyAccess();
+  const manageable = canManageAny(approvalAccess.data);
+  const workspace = SETTINGS_SECTIONS.filter(
+    (s) => (!s.permission || can(s.permission)) && (s.access !== "approval_policies" || manageable),
+  );
   // Account entries are everyone's: one of a module (AI chat) leaves only once its grain is decided off, never while
   // permissions load or after a failed fetch (P-08), so it never flashes in or out on a normal load.
   const grainOff = (p: Permission) => grainStatus(perms.data, permissionsFailed(perms), p) === "off";
@@ -30,8 +37,8 @@ export function SettingsSidebar() {
   // page and the API keep letting them edit and delete their own keys, so they must be able to find them.
   const keysOff = grainOff("vault.use");
   const ownKeys = useKeychain(keysOff);
-  const manageable = (ownKeys.data?.personal.length ?? 0) > 0 || (ownKeys.data?.unit.length ?? 0) > 0;
-  const account = accountSections(grainOff, { connections: withdrawable, keychain: manageable });
+  const keysToManage = (ownKeys.data?.personal.length ?? 0) > 0 || (ownKeys.data?.unit.length ?? 0) > 0;
+  const account = accountSections(grainOff, { connections: withdrawable, keychain: keysToManage });
   return (
     <SectionSidebar title="Settings">
       <nav aria-label="Settings" className="grid gap-4">
