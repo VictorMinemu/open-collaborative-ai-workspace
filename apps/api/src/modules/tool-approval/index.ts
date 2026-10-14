@@ -3,6 +3,7 @@ import type { ApiModule, App, Core } from "../../core";
 // Types only: the approval service (07.2-06) is injected; 07.5-07 registers the `tool.call` kind on it.
 import type { ApprovalService } from "../approval";
 import { createPermissionService } from "../organization";
+import { createToolCallKind } from "./kind";
 import {
   type ApprovalSubject,
   approvalModesFor,
@@ -12,9 +13,12 @@ import {
   resolveFor,
   type StoredPolicy,
 } from "./policies";
+import { type ApprovalForCallInput, type ApprovalOutcome, approvalForCall } from "./request";
 import type { ResolvedApproval } from "./resolve";
 import { registerToolApprovalRoutes } from "./routes";
 
+export { TOOL_CALL_KIND } from "@ocw/contracts";
+export { TOOL_CALL_RESOURCE } from "./kind";
 export {
   type ApprovalSubject,
   approvableCatalog,
@@ -28,6 +32,14 @@ export {
   resolveFor,
   type StoredPolicy,
 } from "./policies";
+export {
+  type ApprovalDenial,
+  type ApprovalForCallDeps,
+  type ApprovalForCallInput,
+  type ApprovalOutcome,
+  approvalForCall,
+  type ToolCallSource,
+} from "./request";
 export { type ApprovalFacts, type PolicyRow, type ResolvedApproval, resolveToolApproval } from "./resolve";
 
 export interface ToolApprovalDeps {
@@ -50,6 +62,11 @@ export interface ToolApprovalService {
   resolveFor(tx: Tx, subject: ApprovalSubject, tool: string): Promise<ResolvedApproval | null>;
   /** "Leads of Sales", "Admins", "Marta Gil or 2 others", "The person who asked". */
   approverLabel(tx: Tx, r: ResolvedApproval): Promise<string>;
+  /**
+   * The one decision of an agent action that may need a person (07.5-07): none, the grant consumed for this call, one
+   * pending request with its card, or a refusal. Inside the caller's claim transaction, opened as the turn's human.
+   */
+  approvalForCall(tx: Tx, c: ApprovalForCallInput): Promise<ApprovalOutcome>;
 }
 
 /**
@@ -63,11 +80,14 @@ export function createToolApprovalModule(
   deps: ToolApprovalDeps,
 ): { module: ApiModule; service: ToolApprovalService } {
   const perms = createPermissionService(core);
+  // 07.5-07: the `tool.call` grant kind lives on the injected 07.2 primitive.
+  deps.approvals.register(createToolCallKind({ core, perms }));
   const service: ToolApprovalService = {
     policies: (tx) => loadToolApprovalPolicies(tx),
     approvalModesFor,
     resolveFor,
     approverLabel,
+    approvalForCall: (tx, c) => approvalForCall(tx, { approvals: deps.approvals }, c),
   };
   return {
     service,
