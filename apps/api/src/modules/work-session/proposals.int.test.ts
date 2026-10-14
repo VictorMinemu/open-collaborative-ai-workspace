@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { AgentCard, AgentCardActionEvent, ApprovalDetail, ApprovalSummary } from "@ocw/contracts";
 import pg from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { eventually, type FakeDevice } from "../../testing-device";
 import {
@@ -62,6 +62,8 @@ async function freshTurn(
   dmId = samDmId,
   text = "please start a session for this",
 ): Promise<string> {
+  // This file delivers more turns than a personal bot's daily limit (30); that limit is not what is tested here.
+  await su.query("delete from app.agent_usage_daily");
   const msg = await ok(as.request("POST", `/api/v1/conversations/${dmId}/messages`, { body: text }));
   const rows = await eventually(async () => {
     const r = (
@@ -336,5 +338,422 @@ describe("tracer: a bot proposes, the person who asked starts it (APPROVE-03)", 
       await su.query("select metadata::text as m from app.audit_events where organization_id = $1", [orgId])
     ).rows as Array<{ m: string }>;
     for (const a of all) expect(a.m).not.toContain("rounding");
+  });
+});
+
+// ---------------------------------------------------------------- Task 2: refusals, Start failures, deciders, mode
+
+const CLAUDE_READY = { id: "claude-code", installed: true, version: "2.1.287", loggedIn: true };
+
+/** A device seeded directly (no connection), with one project on it. */
+async function seedDevice(o: {
+  owner: string;
+  name: string;
+  status?: "online" | "offline";
+  runtimeInfo?: unknown[];
+  shared?: boolean;
+  project?: string;
+}): Promise<{ deviceId: string; projectId: string }> {
+  const id = randomUUID();
+  const project = randomUUID();
+  await su.query(
+    `insert into app.devices (id, organization_id, owner_user_id, name, platform, token_hash, status, runtime_info, shared)
+     values ($1, $2, $3, $4, 'darwin', $5, $6, $7, $8)`,
+    [
+      id,
+      orgId,
+      o.owner,
+      o.name,
+      createHash("sha256").update(randomUUID()).digest("hex"),
+      o.status ?? "online",
+      JSON.stringify(o.runtimeInfo ?? [CLAUDE_READY]),
+      o.shared ?? false,
+    ],
+  );
+  await su.query(
+    "insert into app.projects (id, organization_id, device_id, local_id, name) values ($1, $2, $3, $4, $5)",
+    [project, orgId, id, `lp_${project.slice(0, 8)}`, o.project ?? "seeded"],
+  );
+  return { deviceId: id, projectId: project };
+}
+
+/** Rows a refused proposal must not leave behind. */
+async function traces() {
+  const n = async (q: string) => (await su.query(q)).rows[0].n as number;
+  return {
+    proposals: await n("select count(*)::int as n from app.work_zone_proposals"),
+    approvals: await n("select count(*)::int as n from app.approval_requests"),
+    cards: await n("select count(*)::int as n from app.message_cards"),
+    sessions: await n("select count(*)::int as n from app.work_sessions"),
+  };
+}
+
+/** The proposal is refused with `code`: 200, nothing stored or posted, and the refusal is on record. */
+async function refused(eventId: string, over: Json, code: string, agentId = samBotId) {
+  const before = await traces();
+  const r = await propose(eventId, { agentId, ...over });
+  expect(r.status, JSON.stringify(r.body)).toBe(200);
+  expect(r.body).toEqual({ refused: code });
+  expect(await traces()).toEqual(before);
+  const deniedCall = (
+    await rowOf("agent_tool_calls", "event_id = $1 and decision = 'denied'", [eventId])
+  ).some((c) => c.reason === code);
+  const audited = (await audits("work_zone.proposal_refused")).some(
+    (a) => a.metadata.eventId === eventId && a.metadata.reason === code,
+  );
+  expect(deniedCall || audited, `${code} recorded`).toBe(true);
+}
+
+/** Pending proposals stop counting against the cap (expired by the clock, never decided). */
+const expirePending = () =>
+  su.query(
+    "update app.approval_requests set expires_at = now() where kind = 'work_zone.start' and status = 'pending'",
+  );
+
+/** A fresh turn with the tools, a proposal on `target`, and its review hash. */
+async function proposed(target: { projectId: string; deviceId: string }, prompt = PROMPT) {
+  const eventId = await offerTools(await freshTurn());
+  const r = await propose(eventId, { ...target, prompt });
+  expect(r.body, JSON.stringify(r.body)).toMatchObject({ created: true });
+  const approvalId = r.body.approvalId as string;
+  const [row] = await rowOf("approval_requests", "id = $1", [approvalId]);
+  return {
+    eventId,
+    approvalId,
+    actionHash: row!.action_hash as string,
+    cardMessageId: row!.card_message_id as string,
+  };
+}
+
+const moduleAccess = (userId: string, enabled: boolean) =>
+  ok(
+    victor.request("PUT", "/api/v1/module-access", {
+      module: "work_zone",
+      scopeUnitId: null,
+      subject: { kind: "user", userId },
+      enabled,
+    }),
+  );
+
+let stan: TestClient;
+let stanBotId: string;
+let stanDmId: string;
+let marta: TestClient;
+
+describe("refusals before any card (D-03, P-08, APPROVE-04)", () => {
+  beforeAll(async () => {
+    await expirePending();
+    ({ client: stan } = await invite(stack, victor, "stan@example.test", "Stan", "standard"));
+    const personal = await ok(stan.request("POST", "/api/v1/agents/personal", {}));
+    stanBotId = personal.agent.id;
+    stanDmId = personal.dmId;
+  });
+
+  it("tainted: a turn that read untrusted content cannot propose (the claim refuses it)", async () => {
+    await ok(sam.request("PATCH", `/api/v1/agents/${samBotId}/capabilities`, { internet: true }));
+    try {
+      const eventId = await offerTools(await freshTurn());
+      const web = await cell("/tool-calls", {
+        eventId,
+        agentId: samBotId,
+        tool: "web_search",
+        params: { query: "rounding" },
+      });
+      expect(web.body).toMatchObject({ allowed: true });
+      await refused(eventId, {}, "tainted");
+    } finally {
+      await ok(sam.request("PATCH", `/api/v1/agents/${samBotId}/capabilities`, { internet: false }));
+    }
+  });
+
+  it("not_in_turn: a turn that does not carry the tool", async () => {
+    const eventId = await freshTurn();
+    await su.query(
+      "update app.agent_turns set tools = array_remove(array_remove(tools, 'ocw_start_work_zone'), 'ocw_work_zone_projects') where event_id = $1",
+      [eventId],
+    );
+    await refused(eventId, {}, "not_in_turn");
+  });
+
+  it("unknown_turn: an unknown event id or another bot's is a 404, with nothing stored", async () => {
+    const before = await traces();
+    const unknown = await propose(randomUUID());
+    expect(unknown.status).toBe(404);
+    expect(unknown.body.error.code).toBe("unknown_turn");
+    const eventId = await offerTools(await freshTurn());
+    const foreign = await propose(eventId, { agentId: stanBotId });
+    expect(foreign.status).toBe(404);
+    expect(foreign.body.error.code).toBe("unknown_turn");
+    expect(await traces()).toEqual(before);
+    expect(await rowOf("agent_tool_calls", "event_id = $1", [eventId])).toEqual([]);
+  });
+
+  it("not_allowed: a standard member, and a developer under a Work Zone module deny (07.3)", async () => {
+    // Stan holds no work_session.create: even a turn forced to carry the tool is refused.
+    const stanEvent = await offerTools(await freshTurn(stan, stanDmId));
+    await refused(stanEvent, {}, "not_allowed", stanBotId);
+
+    const eventId = await offerTools(await freshTurn());
+    await moduleAccess(samId, false);
+    try {
+      await refused(eventId, {}, "not_allowed");
+    } finally {
+      await moduleAccess(samId, true);
+    }
+  });
+
+  it("project_not_found: removed, on another device, another organization's", async () => {
+    const removed = await seedDevice({ owner: samId, name: "Old Mac" });
+    await su.query("update app.projects set removed_at = now() where id = $1", [removed.projectId]);
+    await refused(await offerTools(await freshTurn()), removed, "project_not_found");
+
+    const other = await seedDevice({ owner: samId, name: "Sam's iMac" });
+    await refused(
+      await offerTools(await freshTurn()),
+      { projectId, deviceId: other.deviceId },
+      "project_not_found",
+    );
+
+    const orgB = randomUUID();
+    const userB = randomUUID();
+    const devB = randomUUID();
+    const projB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Other', $2)", [
+      orgB,
+      `o-${orgB}`,
+    ]);
+    await su.query("insert into auth.user (id, name, email) values ($1, 'B', $2)", [
+      userB,
+      `${userB}@b.test`,
+    ]);
+    await su.query(
+      "insert into app.devices (id, organization_id, owner_user_id, name, platform, token_hash, shared, status, runtime_info) values ($1, $2, $3, 'B mac', 'darwin', $4, true, 'online', $5)",
+      [
+        devB,
+        orgB,
+        userB,
+        createHash("sha256").update(randomUUID()).digest("hex"),
+        JSON.stringify([CLAUDE_READY]),
+      ],
+    );
+    await su.query(
+      "insert into app.projects (id, organization_id, device_id, local_id, name) values ($1, $2, $3, 'lb', 'secret')",
+      [projB, orgB, devB],
+    );
+    await refused(
+      await offerTools(await freshTurn()),
+      { projectId: projB, deviceId: devB },
+      "project_not_found",
+    );
+  });
+
+  it("device_not_shared, device_offline, runtime_unavailable (Codex not installed, Claude Code signed out)", async () => {
+    const victorId = (await ok(victor.request("GET", "/api/v1/me"))).user.id as string;
+    const notShared = await seedDevice({ owner: victorId, name: "Víctor's Mac" });
+    await refused(await offerTools(await freshTurn()), notShared, "device_not_shared");
+
+    const offline = await seedDevice({ owner: samId, name: "Sleeping Mac", status: "offline" });
+    await refused(await offerTools(await freshTurn()), offline, "device_offline");
+
+    const claudeOnly = await seedDevice({ owner: samId, name: "Claude-only Mac" });
+    await refused(
+      await offerTools(await freshTurn()),
+      { ...claudeOnly, runtime: "codex" },
+      "runtime_unavailable",
+    );
+    const signedOut = await seedDevice({
+      owner: samId,
+      name: "Signed-out Mac",
+      runtimeInfo: [{ ...CLAUDE_READY, loggedIn: false }],
+    });
+    await refused(await offerTools(await freshTurn()), signedOut, "runtime_unavailable");
+  });
+
+  it("prompt_not_allowed: a slash command, also behind spaces or a newline", async () => {
+    for (const prompt of ["/permissions bypass", "  /permissions", "\n/model x"]) {
+      await refused(await offerTools(await freshTurn()), { prompt }, "prompt_not_allowed");
+    }
+  });
+
+  it("a mode, full access or a model in the body is a 400 and nothing is stored", async () => {
+    const eventId = await offerTools(await freshTurn());
+    const before = await traces();
+    for (const extra of [
+      { permissionMode: "fullAccess" },
+      { fullAccess: true },
+      { model: "claude-opus-5-5" },
+    ]) {
+      const r = await propose(eventId, extra);
+      expect(r.status, JSON.stringify(extra)).toBe(400);
+    }
+    expect(await traces()).toEqual(before);
+    expect(await rowOf("agent_tool_calls", "event_id = $1", [eventId])).toEqual([]);
+  });
+
+  it("too_many_pending: a fourth pending proposal for the same bot and person", async () => {
+    await expirePending();
+    for (const n of [1, 2, 3]) {
+      const r = await propose(await offerTools(await freshTurn()), { prompt: `${PROMPT} (${n})` });
+      expect(r.body).toMatchObject({ created: true });
+    }
+    await refused(await offerTools(await freshTurn()), { prompt: `${PROMPT} (4)` }, "too_many_pending");
+    await expirePending();
+  });
+});
+
+describe("failures at Start leave the proposal failed, with no session (Pitfall 9)", () => {
+  beforeEach(expirePending);
+
+  const startFails = async (
+    target: { projectId: string; deviceId: string },
+    change: () => Promise<unknown>,
+    code: string,
+  ) => {
+    const p = await proposed(target);
+    await change();
+    const before = await traces();
+    const r = await decide(sam, p.approvalId, { outcome: "approved", actionHash: p.actionHash });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(ApprovalSummary.parse(r.body)).toMatchObject({ status: "failed", resultCode: code });
+    expect((await traces()).sessions).toBe(before.sessions);
+    expect(await rowOf("work_sessions", "project_id = $1", [target.projectId])).toEqual([]);
+    const card = await cardFor(sam, p.cardMessageId);
+    expect(card.status).toBe("failed");
+    expect(card.approval).toMatchObject({ status: "failed", resultCode: code, resultRoute: null });
+  };
+
+  it("the device went offline", async () => {
+    const t = await seedDevice({ owner: samId, name: "Laptop A" });
+    await startFails(
+      t,
+      () => su.query("update app.devices set status = 'offline' where id = $1", [t.deviceId]),
+      "device_offline",
+    );
+  });
+
+  it("the project was removed", async () => {
+    const t = await seedDevice({ owner: samId, name: "Laptop B" });
+    await startFails(
+      t,
+      () => su.query("update app.projects set removed_at = now() where id = $1", [t.projectId]),
+      "project_not_found",
+    );
+  });
+
+  it("the device is no longer shared with Sam", async () => {
+    const victorId = (await ok(victor.request("GET", "/api/v1/me"))).user.id as string;
+    const t = await seedDevice({ owner: victorId, name: "Shared Mac", shared: true });
+    await startFails(
+      t,
+      () => su.query("update app.devices set shared = false where id = $1", [t.deviceId]),
+      "device_not_shared",
+    );
+  });
+
+  it("the runtime signed out", async () => {
+    const t = await seedDevice({ owner: samId, name: "Laptop C" });
+    await startFails(
+      t,
+      () =>
+        su.query("update app.devices set runtime_info = $2 where id = $1", [
+          t.deviceId,
+          JSON.stringify([{ ...CLAUDE_READY, loggedIn: false }]),
+        ]),
+      "runtime_unavailable",
+    );
+  });
+});
+
+describe("only the person who asked starts it, never above default (D-03, D-04)", () => {
+  beforeAll(async () => {
+    await expirePending();
+    let martaId: string;
+    ({ client: marta, userId: martaId } = await invite(
+      stack,
+      victor,
+      "marta@example.test",
+      "Marta Gil",
+      "lead",
+    ));
+    const unit = (
+      await ok(
+        victor.request("POST", "/api/v1/units", { kind: "department", name: "Billing", parentId: null }),
+      )
+    ).id as string;
+    await ok(victor.request("POST", `/api/v1/units/${unit}/members`, { userId: samId }));
+    await ok(victor.request("POST", `/api/v1/units/${unit}/members`, { userId: martaId, role: "lead" }));
+  });
+  beforeEach(expirePending);
+
+  it("Sam's lead and an admin get 404 on the review and on the decision", async () => {
+    const p = await proposed({ projectId, deviceId });
+    for (const other of [marta, victor]) {
+      expect((await other.request("GET", `/api/v1/approvals/${p.approvalId}`)).status).toBe(404);
+      const r = await decide(other, p.approvalId, { outcome: "approved", actionHash: p.actionHash });
+      expect(r.status, JSON.stringify(r.body)).toBe(404);
+    }
+    expect((await rowOf("approval_requests", "id = $1", [p.approvalId]))[0]!.status).toBe("pending");
+  });
+
+  it("once Sam loses work_session.create his Start is 403 not_approver and the review says not_allowed", async () => {
+    const p = await proposed({ projectId, deviceId });
+    await moduleAccess(samId, false);
+    try {
+      const r = await decide(sam, p.approvalId, { outcome: "approved", actionHash: p.actionHash });
+      expect(r.status).toBe(403);
+      expect(r.body!.error).toMatchObject({ code: "not_approver" });
+      const review = await detail(sam, p.approvalId);
+      expect(review.view).toMatchObject({ type: "work_zone_proposal", startBlocked: "not_allowed" });
+      expect(review.viewerCan).toEqual([]);
+    } finally {
+      await moduleAccess(samId, true);
+    }
+  });
+
+  it("with full access allowed everywhere for Sam, Start still creates the session at default", async () => {
+    await ok(victor.request("PUT", "/api/v1/work-zone-policy", { allowFullAccess: true }));
+    device.capabilities([CLAUDE_CATALOG, CODEX_CATALOG], true);
+    await eventually(async () => {
+      const r = await su.query("select full_access_opt_in from app.devices where id = $1", [deviceId]);
+      return r.rows[0].full_access_opt_in === true;
+    });
+    try {
+      const controls = await ok(
+        sam.request("GET", `/api/v1/work-zone/controls?deviceId=${deviceId}&runtime=claude-code`),
+      );
+      const modes = controls.permissionModes as Array<{ value: string; available: boolean }>;
+      expect(modes.find((m) => m.value === "fullAccess")?.available).toBe(true);
+
+      const p = await proposed({ projectId, deviceId }, "Upgrade the invoice library");
+      const r = await decide(sam, p.approvalId, { outcome: "approved", actionHash: p.actionHash });
+      expect(ApprovalSummary.parse(r.body).status).toBe("applied");
+      const [proposal] = await rowOf("work_zone_proposals", "event_id = $1", [p.eventId]);
+      const [session] = await rowOf("work_sessions", "id = $1", [proposal!.work_session_id]);
+      expect(session).toMatchObject({ created_by: samId, permission_mode: "default" });
+      const start = await device.command("session.start", session!.id);
+      expect(start.payload.permissionMode).toBe("default");
+      device.ack(start.id);
+    } finally {
+      device.capabilities([CLAUDE_CATALOG, CODEX_CATALOG], false);
+      await ok(victor.request("PUT", "/api/v1/work-zone-policy", { allowFullAccess: false }));
+    }
+  });
+
+  it("Dismiss starts nothing and the bot hears it with the note", async () => {
+    const p = await proposed({ projectId, deviceId }, "Rename the billing module");
+    const before = await traces();
+    const r = await decide(sam, p.approvalId, {
+      outcome: "denied",
+      actionHash: p.actionHash,
+      note: "Not now",
+    });
+    expect(ApprovalSummary.parse(r.body)).toMatchObject({ status: "denied", decisionNote: "Not now" });
+    expect((await traces()).sessions).toBe(before.sessions);
+    expect((await rowOf("work_zone_proposals", "event_id = $1", [p.eventId]))[0]!.work_session_id).toBeNull();
+    expect((await cardFor(sam, p.cardMessageId)).status).toBe("cancelled");
+    const actions = await cardActionsOf(p.cardMessageId);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]!.cardAction).toMatchObject({ outcome: "denied", decidedBy: { id: samId } });
+    expect(actions[0]!.message.text).toContain("Not now");
   });
 });
