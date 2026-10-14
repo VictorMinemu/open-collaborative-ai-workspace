@@ -1,13 +1,28 @@
 import {
   type ApprovableGroup,
+  Id,
   isApprovableTool,
+  strictestMode,
+  TOOL_APPROVAL_LIMITS,
+  type ToolApprovalHistory,
   ToolApprovalMode,
   type ToolApprovalPolicy,
   ToolApproverKind,
   ToolPattern,
 } from "@ocw/contracts";
-import { agents, mcpServers, orgMembers, orgUnits, type Tx, tenantOf, toolApprovalPolicies } from "@ocw/db";
-import { asc, eq, inArray } from "drizzle-orm";
+import {
+  agents,
+  auditEvents,
+  mcpServers,
+  orgMembers,
+  orgUnits,
+  type Tx,
+  tenantOf,
+  toolApprovalPolicies,
+} from "@ocw/db";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { z } from "zod";
+import { badRequest, conflict, HttpError, notFound } from "../../lib/errors";
 import type { AuditService } from "../audit";
 import { loadPrincipalFacts } from "../organization";
 import { type ApprovalFacts, type PolicyRow, type ResolvedApproval, resolveToolApproval } from "./resolve";
@@ -45,6 +60,8 @@ const HTTP_LABEL = "Web requests";
 const HTTP_TOOL = "ocw_http_request";
 const GROUP_TOOLS_MAX = 200;
 const GROUPS_MAX = 100;
+/** The contract's tool-name charset (`isApprovableTool`); a pattern outside it is not a tool name at all. */
+const TOOL_NAME = /^[A-Za-z0-9_.:-]{1,128}$/;
 
 // ---------------------------------------------------------------- rows
 
@@ -373,4 +390,221 @@ export async function resolveFor(tx: Tx, s: ApprovalSubject, tool: string): Prom
   const rows = await loadToolApprovalPolicies(tx);
   if (rows.length === 0) return null;
   return resolveToolApproval(rows, await approvalFactsFor(tx, s), tool);
+}
+
+// ---------------------------------------------------------------- validation (P-04)
+
+/**
+ * Why a pattern cannot carry a rule: a well-formed tool name the contract never lets a rule name (web tools, the other
+ * `ocw_` built-ins) is `tool_not_approvable`; anything else that is not a tool name or `<safe>__*` is
+ * `invalid_tool_pattern`. Null when the pattern is fine.
+ */
+export function patternError(pattern: string): "tool_not_approvable" | "invalid_tool_pattern" | null {
+  if (ToolPattern.safeParse(pattern).success) return null;
+  return TOOL_NAME.test(pattern) ? "tool_not_approvable" : "invalid_tool_pattern";
+}
+
+/**
+ * The inherited rule a unit rule would undercut, or null. Upper rules are the organization's and those on the unit's
+ * ancestors; the same pure resolver decides what they impose on the rule's pattern (for `<safe>__*`, only upper rules
+ * over the whole server), and the new mode must be at least that strict.
+ */
+export function weakerThanInherited(
+  all: readonly PolicyRow[],
+  unit: { id: string; path: readonly string[] },
+  rule: { id?: string; toolPattern: string; mode: ToolApprovalMode },
+): ResolvedApproval | null {
+  const ancestors = new Set(unit.path.filter((id) => id !== unit.id));
+  const upper = all.filter(
+    (r) => r.id !== rule.id && (r.scopeUnitId === null || ancestors.has(r.scopeUnitId)),
+  );
+  const imposed = resolveToolApproval(
+    upper,
+    { agentUnitPath: null, humanUnitPaths: [unit.path] },
+    rule.toolPattern,
+  );
+  if (!imposed) return null;
+  return strictestMode([rule.mode, imposed.mode]) === rule.mode ? null : imposed;
+}
+
+// ---------------------------------------------------------------- database errors
+
+function pgError(err: unknown): { code?: string; constraint?: string } | undefined {
+  let e: unknown = err;
+  for (let i = 0; i < 4 && e && typeof e === "object"; i++) {
+    const c = e as { code?: unknown; constraint?: unknown; cause?: unknown };
+    if (typeof c.code === "string") {
+      return { code: c.code, constraint: typeof c.constraint === "string" ? c.constraint : undefined };
+    }
+    e = c.cause;
+  }
+  return undefined;
+}
+
+/**
+ * Runs a policy write and maps every named constraint of 07.5-02 to a 4xx: the unique (scope, pattern) to 409
+ * `policy_exists`, the unit foreign key to 404, the checks to 400. Anything else becomes a parameter-free error (a
+ * driver message would quote the row).
+ */
+export async function guarded<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (err instanceof HttpError) throw err;
+    const pg = pgError(err);
+    if (!pg && !(err instanceof Error && err.name === "DrizzleQueryError")) throw err;
+    if (pg?.code === "23505" && pg.constraint === "tool_approval_policies_scope_pattern_uq") {
+      throw conflict("A rule for this tool already exists in this scope", "policy_exists");
+    }
+    if (pg?.code === "23503" && pg.constraint === "tool_approval_policies_unit_fk") {
+      throw notFound("Unit not found", "unit_not_found");
+    }
+    if (pg?.code === "23514" && pg.constraint?.startsWith("tool_approval_policies_")) {
+      throw badRequest("The rule is not valid", "invalid_policy");
+    }
+    throw new Error(
+      `tool approval policy query failed${pg?.code && /^[0-9A-Z]{5}$/.test(pg.code) ? ` (sqlstate ${pg.code})` : ""}`,
+    );
+  }
+}
+
+/** Updates one rule at `expectedVersion` (version + 1) and audits it; null when the version moved meanwhile. */
+export async function updatePolicy(
+  tx: Tx,
+  audit: AuditService,
+  actorUserId: string,
+  current: StoredPolicy,
+  expectedVersion: number,
+  next: Pick<PolicyInput, "mode" | "approverKind" | "approverUserIds">,
+): Promise<StoredPolicy | null> {
+  const [row] = await tx
+    .update(toolApprovalPolicies)
+    .set({
+      mode: next.mode,
+      approverKind: next.approverKind,
+      approverUserIds: [...next.approverUserIds],
+      version: sql`${toolApprovalPolicies.version} + 1`,
+      updatedBy: actorUserId,
+      updatedAt: sql`now()`,
+    })
+    .where(and(eq(toolApprovalPolicies.id, current.id), eq(toolApprovalPolicies.version, expectedVersion)))
+    .returning({ id: toolApprovalPolicies.id });
+  if (!row) return null;
+  await audit.record(tx, {
+    action: "tool_approval_policy.updated",
+    resourceType: "tool_approval_policy",
+    resourceId: current.id,
+    metadata: policyAudit({ ...current, ...next }),
+  });
+  return findPolicy(tx, current.id);
+}
+
+/** Deletes one rule at `expectedVersion` and audits it; false when the version moved meanwhile. */
+export async function deletePolicy(
+  tx: Tx,
+  audit: AuditService,
+  current: StoredPolicy,
+  expectedVersion: number,
+): Promise<boolean> {
+  const [row] = await tx
+    .delete(toolApprovalPolicies)
+    .where(and(eq(toolApprovalPolicies.id, current.id), eq(toolApprovalPolicies.version, expectedVersion)))
+    .returning({ id: toolApprovalPolicies.id });
+  if (!row) return false;
+  await audit.record(tx, {
+    action: "tool_approval_policy.deleted",
+    resourceType: "tool_approval_policy",
+    resourceId: current.id,
+    metadata: policyAudit(current),
+  });
+  return true;
+}
+
+// ---------------------------------------------------------------- history (UI-SPEC R5)
+
+const POLICY_ACTIONS = [
+  "tool_approval_policy.created",
+  "tool_approval_policy.updated",
+  "tool_approval_policy.deleted",
+] as const;
+
+/** The stored audit metadata this route reads (anything else in a row is never returned). */
+const HistoryMetadata = z.object({
+  toolPattern: z.string().max(128),
+  mode: ToolApprovalMode,
+  approverKind: ToolApproverKind,
+  approverUserIds: z.array(z.string()).max(TOOL_APPROVAL_LIMITS.approverUsersMax),
+});
+
+/** The opaque cursor: the id of the last audit row of the previous page. */
+const encodeCursor = (id: string) => Buffer.from(id, "utf8").toString("base64url");
+function decodeCursor(cursor: string): string {
+  const id = Buffer.from(cursor, "base64url").toString("utf8");
+  if (!Id.safeParse(id).success) throw badRequest("Invalid cursor", "invalid_cursor");
+  return id;
+}
+
+/**
+ * One page of a scope's change history: the `tool_approval_policy.*` audit rows whose `scopeUnitId` is the scope
+ * (null for the organization), newest first, with the actor's display name and the approver label built from the
+ * stored ids. RLS keeps it inside the organization; only fixed fields leave (T-07.5-03-03).
+ */
+export async function policyHistory(
+  tx: Tx,
+  scopeUnitId: string | null,
+  cursor: string | undefined,
+): Promise<ToolApprovalHistory> {
+  const after = cursor ? decodeCursor(cursor) : null;
+  const scopeMatch =
+    scopeUnitId === null
+      ? sql`${auditEvents.metadata} -> 'scopeUnitId' = 'null'::jsonb`
+      : sql`${auditEvents.metadata} ->> 'scopeUnitId' = ${scopeUnitId}`;
+  const before = after
+    ? sql`(${auditEvents.occurredAt}, ${auditEvents.id}) < (select a.occurred_at, a.id from app.audit_events a where a.id = ${after})`
+    : undefined;
+  const rows = await tx
+    .select({
+      id: auditEvents.id,
+      at: auditEvents.occurredAt,
+      action: auditEvents.action,
+      userId: auditEvents.userId,
+      metadata: auditEvents.metadata,
+    })
+    .from(auditEvents)
+    .where(
+      and(
+        eq(auditEvents.resourceType, "tool_approval_policy"),
+        inArray(auditEvents.action, [...POLICY_ACTIONS]),
+        scopeMatch,
+        before,
+      ),
+    )
+    .orderBy(desc(auditEvents.occurredAt), desc(auditEvents.id))
+    .limit(TOOL_APPROVAL_LIMITS.historyPage + 1);
+  const page = rows.slice(0, TOOL_APPROVAL_LIMITS.historyPage);
+  const parsed = page.map((r) => ({ r, m: HistoryMetadata.safeParse(r.metadata) }));
+  const f = await labelFacts(
+    tx,
+    [scopeUnitId],
+    [...page.map((r) => r.userId), ...parsed.flatMap(({ m }) => (m.success ? m.data.approverUserIds : []))],
+  );
+  const items = parsed.flatMap(({ r, m }) => {
+    if (!m.success) return [];
+    const action = r.action.slice("tool_approval_policy.".length) as "created" | "updated" | "deleted";
+    const name = r.userId ? f.people.get(r.userId) : undefined;
+    const removed = action === "deleted";
+    return [
+      {
+        id: r.id,
+        at: new Date(r.at).toISOString(),
+        actor: r.userId && name ? { id: r.userId, displayName: name } : null,
+        action,
+        toolPattern: m.data.toolPattern,
+        mode: removed ? null : m.data.mode,
+        approverLabel: removed ? null : labelOf({ scopeUnitId, ...m.data }, f),
+      },
+    ];
+  });
+  const last = page.at(-1);
+  return { items, nextCursor: rows.length > page.length && last ? encodeCursor(last.id) : null };
 }

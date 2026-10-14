@@ -55,7 +55,8 @@ export interface ToolApprovalService {
 /**
  * `tool-approval` module (Phase 07.5, D-01, D-04, APPROVE-01): per-tool approval policies of an organization and its
  * units, resolved strictest-wins for an (agent, human, tool). Routes (all `authz: user`):
- * GET `/tool-approval-policies/access`, GET/POST `/tool-approval-policies`.
+ * GET `/tool-approval-policies/access`, GET/POST `/tool-approval-policies`, PATCH/DELETE `/tool-approval-policies/:id`,
+ * GET `/tool-approval-policies/history`. Every change is audited (`tool_approval_policy.created|updated|deleted`).
  */
 export function createToolApprovalModule(
   core: Core,

@@ -369,3 +369,379 @@ describe("per-turn approval modes (D-01, D-04)", () => {
     expect(label).toBe("Leads of Sales");
   });
 });
+
+const create = (as: TestClient, body: Json) => as.request("POST", "/api/v1/tool-approval-policies", body);
+const orgRule = (toolPattern: string, mode: string, approverKind = "admins", extra: Json = {}) => ({
+  scopeUnitId: null,
+  toolPattern,
+  mode,
+  approverKind,
+  ...extra,
+});
+const unitRule = (unitId: string, toolPattern: string, mode: string, approverKind = "unit_leads") => ({
+  scopeUnitId: unitId,
+  toolPattern,
+  mode,
+  approverKind,
+});
+
+describe("leads manage the units they lead, under the organization's rules", () => {
+  it("Marta reads Sales with the inherited rules, adds a stricter Sales rule, and is refused everywhere else", async () => {
+    await clearPolicies();
+    const org = await ok(create(victor, orgRule(ALL_CRM, "when_tainted")), 201);
+    const mine = await ok(create(marta, unitRule(sales, CREATE, "always")), 201);
+    expect(mine).toMatchObject({
+      scopeUnitId: sales,
+      mode: "always",
+      approverKind: "unit_leads",
+      version: 1,
+    });
+
+    const page = await ok(marta.request("GET", `/api/v1/tool-approval-policies?scope=${sales}`));
+    expect(page.scope).toEqual({ unitId: sales, label: "Sales" });
+    expect(page.policies.map((p: Json) => p.id)).toEqual([mine.id]);
+    expect(page.inherited).toEqual([{ ...org, scopeLabel: "Organization" }]);
+    expect(page.approverLabels).toEqual({ [mine.id]: "Leads of Sales", [org.id]: "Admins" });
+
+    // The team below Sales inherits both, each labelled with its scope.
+    const east = await ok(marta.request("GET", `/api/v1/tool-approval-policies?scope=${salesEast}`));
+    expect(east.policies).toEqual([]);
+    expect(east.inherited.map((p: Json) => [p.id, p.scopeLabel]).sort()).toEqual(
+      [
+        [org.id, "Organization"],
+        [mine.id, "Sales"],
+      ].sort(),
+    );
+
+    await fails(create(marta, unitRule(marketing, CREATE, "always")), 403);
+    await fails(create(marta, orgRule(LIST, "always")), 403);
+    await fails(marta.request("GET", "/api/v1/tool-approval-policies?scope=org"), 403);
+    await fails(marta.request("GET", `/api/v1/tool-approval-policies?scope=${marketing}`), 403);
+    await fails(
+      marta.request("PATCH", `/api/v1/tool-approval-policies/${org.id}`, {
+        expectedVersion: 1,
+        mode: "always",
+      }),
+      403,
+    );
+    await fails(marta.request("DELETE", `/api/v1/tool-approval-policies/${org.id}?expectedVersion=1`), 403);
+    // Nothing a refused call tried was stored.
+    expect((await su.query("select count(*)::int as n from app.tool_approval_policies")).rows[0].n).toBe(2);
+  });
+
+  it("a unit rule weaker than an inherited one is refused (create and update); a stricter one is accepted", async () => {
+    await clearPolicies();
+    await ok(create(victor, orgRule(ALL_CRM, "always")), 201);
+    await fails(create(marta, unitRule(sales, CREATE, "when_tainted")), 409, "policy_weaker_than_inherited");
+    await fails(
+      create(marta, unitRule(sales, CREATE, "never", "requester")),
+      409,
+      "policy_weaker_than_inherited",
+    );
+    await fails(
+      create(victor, unitRule(sales, ALL_CRM, "when_tainted")),
+      409,
+      "policy_weaker_than_inherited",
+    );
+
+    await clearPolicies();
+    await ok(create(victor, orgRule(ALL_CRM, "when_tainted")), 201);
+    const tight = await ok(create(marta, unitRule(sales, CREATE, "always")), 201);
+    // A team below Sales cannot undercut Sales either.
+    await fails(
+      create(marta, unitRule(salesEast, CREATE, "when_tainted")),
+      409,
+      "policy_weaker_than_inherited",
+    );
+    // Updating the Sales rule below the organization's mode is refused the same way, and nothing changes.
+    await fails(
+      marta.request("PATCH", `/api/v1/tool-approval-policies/${tight.id}`, {
+        expectedVersion: 1,
+        mode: "never",
+      }),
+      409,
+      "policy_weaker_than_inherited",
+    );
+    const kept = (
+      await su.query("select mode, version from app.tool_approval_policies where id = $1", [tight.id])
+    ).rows[0];
+    expect(kept).toEqual({ mode: "always", version: 1 });
+    // Equal to the inherited mode is not weaker.
+    await ok(
+      marta.request("PATCH", `/api/v1/tool-approval-policies/${tight.id}`, {
+        expectedVersion: 1,
+        mode: "when_tainted",
+      }),
+    );
+  });
+});
+
+describe("rule errors map to 4xx, never a 500", () => {
+  it("duplicates, non-approvable tools, bad patterns and wrong approvers", async () => {
+    await clearPolicies();
+    await ok(create(victor, orgRule(CREATE, "always")), 201);
+    await fails(create(victor, orgRule(CREATE, "when_tainted")), 409, "policy_exists");
+    await fails(create(victor, orgRule("web_fetch", "always")), 400, "tool_not_approvable");
+    await fails(create(victor, orgRule("web_search", "always")), 400, "tool_not_approvable");
+    await fails(create(victor, orgRule("ocw_memory_save", "always")), 400, "tool_not_approvable");
+    await fails(create(victor, orgRule("m1a2b3c4d*", "always")), 400, "invalid_tool_pattern");
+    await fails(create(victor, orgRule("crm tools", "always")), 400, "invalid_tool_pattern");
+    // Unit leads need a unit; a never rule asks nobody.
+    await fails(create(victor, orgRule(LIST, "always", "unit_leads")), 400);
+    await fails(create(victor, orgRule(LIST, "never", "admins")), 400);
+    // Named approvers are members of this organization: never a bot, a stranger or another organization's person.
+    const eveId = (await su.query("select id from auth.user where email = 'eve@example.test'")).rows[0].id;
+    for (const outsider of [botId, randomUUID(), eveId]) {
+      await fails(
+        create(victor, orgRule(LIST, "always", "users", { approverUserIds: [martaId, outsider] })),
+        400,
+        "approver_not_member",
+      );
+    }
+    const named = await ok(
+      create(victor, orgRule(LIST, "always", "users", { approverUserIds: [martaId, danaId] })),
+      201,
+    );
+    const page = await ok(victor.request("GET", "/api/v1/tool-approval-policies?scope=org"));
+    expect(page.approverLabels[named.id]).toBe("Marta Gil or 1 other");
+    // An unknown rule id is not found.
+    await fails(
+      victor.request("PATCH", `/api/v1/tool-approval-policies/${randomUUID()}`, {
+        expectedVersion: 1,
+        mode: "always",
+      }),
+      404,
+    );
+    await fails(
+      victor.request("DELETE", `/api/v1/tool-approval-policies/${randomUUID()}?expectedVersion=1`),
+      404,
+    );
+  });
+
+  it("a stale version is a 409 carrying the current rule; delete with the current version is audited", async () => {
+    await clearPolicies();
+    const rule = await ok(create(victor, orgRule(LIST, "always")), 201);
+    const v2 = await ok(
+      victor.request("PATCH", `/api/v1/tool-approval-policies/${rule.id}`, {
+        expectedVersion: 1,
+        approverKind: "users",
+        approverUserIds: [martaId],
+      }),
+    );
+    expect(v2).toMatchObject({
+      version: 2,
+      approverKind: "users",
+      approverUserIds: [martaId],
+      mode: "always",
+    });
+    const stale = await fails(
+      victor.request("PATCH", `/api/v1/tool-approval-policies/${rule.id}`, {
+        expectedVersion: 1,
+        mode: "when_tainted",
+      }),
+      409,
+      "policy_version_conflict",
+    );
+    expect(stale.error.details.policy).toMatchObject({ id: rule.id, version: 2, mode: "always" });
+    await fails(
+      victor.request("DELETE", `/api/v1/tool-approval-policies/${rule.id}?expectedVersion=1`),
+      409,
+      "policy_version_conflict",
+    );
+    const del = await victor.request("DELETE", `/api/v1/tool-approval-policies/${rule.id}?expectedVersion=2`);
+    expect(del.status).toBe(204);
+    const rows = await audits(orgA, POLICY_ACTIONS);
+    const mine = rows.filter((r) => r.resource_id === rule.id);
+    expect(mine.map((r) => r.action)).toEqual([
+      "tool_approval_policy.created",
+      "tool_approval_policy.updated",
+      "tool_approval_policy.deleted",
+    ]);
+    expect(mine[1]?.metadata).toEqual({
+      policyId: rule.id,
+      scopeUnitId: null,
+      toolPattern: LIST,
+      mode: "always",
+      approverKind: "users",
+      approverUserIds: [martaId],
+    });
+    expect(mine[2]?.metadata).toEqual(mine[1]?.metadata);
+  });
+});
+
+describe("change history per scope (UI-SPEC R5)", () => {
+  it("lists created, updated and deleted newest first with actors and labels, 30 per page", async () => {
+    await clearPolicies();
+    const rule = await ok(create(victor, orgRule(CREATE, "always")), 201);
+    await ok(
+      victor.request("PATCH", `/api/v1/tool-approval-policies/${rule.id}`, {
+        expectedVersion: 1,
+        mode: "when_tainted",
+      }),
+    );
+    expect(
+      (await victor.request("DELETE", `/api/v1/tool-approval-policies/${rule.id}?expectedVersion=2`)).status,
+    ).toBe(204);
+    const first = await ok(victor.request("GET", "/api/v1/tool-approval-policies/history?scope=org"));
+    expect(first.items.slice(0, 3)).toEqual([
+      {
+        id: expect.any(String),
+        at: expect.any(String),
+        actor: { id: victorId, displayName: "Víctor Ruiz" },
+        action: "deleted",
+        toolPattern: CREATE,
+        mode: null,
+        approverLabel: null,
+      },
+      {
+        id: expect.any(String),
+        at: expect.any(String),
+        actor: { id: victorId, displayName: "Víctor Ruiz" },
+        action: "updated",
+        toolPattern: CREATE,
+        mode: "when_tainted",
+        approverLabel: "Admins",
+      },
+      {
+        id: expect.any(String),
+        at: expect.any(String),
+        actor: { id: victorId, displayName: "Víctor Ruiz" },
+        action: "created",
+        toolPattern: CREATE,
+        mode: "always",
+        approverLabel: "Admins",
+      },
+    ]);
+
+    // Enough changes for two pages: every organization change of the file so far plus these.
+    for (let i = 0; i < 31; i++) await ok(create(victor, orgRule(`plugin_tool_${i}`, "always")), 201);
+    const total = (
+      await su.query(
+        `select count(*)::int as n from app.audit_events where organization_id = $1 and action = any($2)
+           and metadata->'scopeUnitId' = 'null'::jsonb`,
+        [orgA, POLICY_ACTIONS],
+      )
+    ).rows[0].n as number;
+    const p1 = await ok(victor.request("GET", "/api/v1/tool-approval-policies/history?scope=org"));
+    expect(p1.items).toHaveLength(30);
+    expect(p1.items[0]).toMatchObject({ action: "created", toolPattern: "plugin_tool_30" });
+    expect(typeof p1.nextCursor).toBe("string");
+    const seen = new Set<string>(p1.items.map((x: Json) => x.id));
+    let cursor: string | null = p1.nextCursor;
+    while (cursor) {
+      const page = await ok(
+        victor.request(
+          "GET",
+          `/api/v1/tool-approval-policies/history?scope=org&cursor=${encodeURIComponent(cursor)}`,
+        ),
+      );
+      for (const x of page.items) {
+        expect(seen.has(x.id)).toBe(false);
+        seen.add(x.id);
+      }
+      cursor = page.nextCursor;
+    }
+    expect(seen.size).toBe(total);
+    await fails(
+      victor.request("GET", "/api/v1/tool-approval-policies/history?scope=org&cursor=not-a-cursor"),
+      400,
+    );
+  });
+
+  it("each scope has its own history: Marta reads Sales, not the organization; Sam reads neither", async () => {
+    await clearPolicies();
+    await ok(create(marta, unitRule(sales, LIST, "always")), 201);
+    const h = await ok(marta.request("GET", `/api/v1/tool-approval-policies/history?scope=${sales}`));
+    expect(h.items[0]).toMatchObject({
+      action: "created",
+      toolPattern: LIST,
+      mode: "always",
+      approverLabel: "Leads of Sales",
+      actor: { id: martaId, displayName: "Marta Gil" },
+    });
+    expect(h.items.every((x: Json) => x.toolPattern !== `plugin_tool_0`)).toBe(true);
+    await fails(marta.request("GET", "/api/v1/tool-approval-policies/history?scope=org"), 403);
+    await fails(sam.request("GET", "/api/v1/tool-approval-policies/history?scope=org"), 403);
+    await fails(sam.request("GET", `/api/v1/tool-approval-policies/history?scope=${sales}`), 403);
+  });
+});
+
+describe("organization B never sees or changes organization A's rules (C-02)", () => {
+  it("every route of the family has an org-B case, and org A's rules and audit are unchanged", async () => {
+    await clearPolicies();
+    const aOrg = await ok(create(victor, orgRule(ALL_CRM, "always")), 201);
+    const aSales = await ok(create(marta, unitRule(sales, CREATE, "always")), 201);
+    const snapshot = async () =>
+      JSON.stringify([
+        (
+          await su.query("select * from app.tool_approval_policies where organization_id = $1 order by id", [
+            orgA,
+          ])
+        ).rows,
+        (
+          await su.query(
+            "select id from app.audit_events where organization_id = $1 and action like 'tool_approval_policy.%' order by id",
+            [orgA],
+          )
+        ).rows,
+      ]);
+    const before = await snapshot();
+    const A_WORDS = ["Acme CRM", "Linear", "Sales", CRM, CONN, aOrg.id, aSales.id];
+    const clean = (body: unknown) => {
+      const text = JSON.stringify(body);
+      for (const w of A_WORDS) expect(text, w).not.toContain(w);
+    };
+
+    const cases: Record<string, () => Promise<void>> = {
+      "GET /api/v1/tool-approval-policies/access": async () => {
+        clean(await ok(eve.request("GET", "/api/v1/tool-approval-policies/access")));
+      },
+      "GET /api/v1/tool-approval-policies": async () => {
+        const page = await ok(eve.request("GET", "/api/v1/tool-approval-policies?scope=org"));
+        expect(page.policies).toEqual([]);
+        expect(page.catalog.map((g: Json) => g.source.kind)).toEqual(["http"]);
+        clean(page);
+        await fails(eve.request("GET", `/api/v1/tool-approval-policies?scope=${sales}`), 404);
+      },
+      "POST /api/v1/tool-approval-policies": async () => {
+        await fails(create(eve, unitRule(sales, LIST, "always", "admins")), 404);
+      },
+      "PATCH /api/v1/tool-approval-policies/:p": async () => {
+        for (const id of [aOrg.id, aSales.id]) {
+          await fails(
+            eve.request("PATCH", `/api/v1/tool-approval-policies/${id}`, {
+              expectedVersion: 1,
+              mode: "never",
+            }),
+            404,
+          );
+        }
+      },
+      "DELETE /api/v1/tool-approval-policies/:p": async () => {
+        for (const id of [aOrg.id, aSales.id]) {
+          await fails(eve.request("DELETE", `/api/v1/tool-approval-policies/${id}?expectedVersion=1`), 404);
+        }
+      },
+      "GET /api/v1/tool-approval-policies/history": async () => {
+        const h = await ok(eve.request("GET", "/api/v1/tool-approval-policies/history?scope=org"));
+        expect(h).toEqual({ items: [], nextCursor: null });
+        await fails(eve.request("GET", `/api/v1/tool-approval-policies/history?scope=${sales}`), 404);
+      },
+    };
+    const owned = (k: string) => (k.split(" ")[1] ?? "").startsWith("/api/v1/tool-approval-policies");
+    const routeKey = (k: string) => k.replace(/:[A-Za-z]+/gu, ":p");
+    const registered = [...stack.built.authz.routes.keys()].filter(owned).map(routeKey).sort();
+    expect(registered).toEqual(Object.keys(cases).sort());
+    for (const [k, mode] of stack.built.authz.routes) if (owned(k)) expect(mode, k).toBe("user");
+    for (const run of Object.values(cases)) await run();
+    expect(await snapshot()).toBe(before);
+    // Organization B's own rule stays in organization B.
+    const bRule = await ok(create(eve, orgRule("weather_lookup", "always")), 201);
+    expect(
+      (await su.query("select organization_id from app.tool_approval_policies where id = $1", [bRule.id]))
+        .rows[0],
+    ).toEqual({ organization_id: orgB });
+    const aPage = await ok(victor.request("GET", "/api/v1/tool-approval-policies?scope=org"));
+    expect(aPage.policies.map((p: Json) => p.id)).toEqual([aOrg.id]);
+  });
+});
