@@ -32,8 +32,9 @@
 # Scenario connectors (07.4-09 / CONN-03, CONN-04, CONN-05, D-07, C-01): a DM turn offering the static
 # `ocw_connector_call` and the logical `m1a2b3c4d__whoami` runs the plugin tool in OpenClaw, which asks
 # `POST /connectors/call` with the turn's event and agent only (self-validated, never `/tool-calls`); the logical tool
-# itself never reaches the model as a tool. A 20 s call still completes inside the turn (research A4); not connected and
-# member-account refusals reach the model as the fixed sentences, never the API's error body; a channel turn withholding
+# itself never reaches the model as a tool. A 30 s call (the API proxy's upstream limit, 07.4-14 / ADR-0025 upgrade
+# checklist) still completes inside the turn (research A4); not connected, needs reconnect and member-account refusals
+# reach the model as the fixed sentences, never the API's error body; a channel turn withholding
 # the member's connector (`member_account`) hands the persona the share link (R7); `ocw_connector_list` and
 # `ocw_http_request` (a GET by key handle) go through their own routes; the cell's config has no per-member MCP server
 # and no state file or log line carries the member's connector token.
@@ -697,8 +698,8 @@ require("fs").writeFileSync(out, JSON.stringify(e));
   printf '%s' "$out"
 }
 
-echo "== [connectors] slow: a 20 s connector call completes inside the cell turn (research A4)"
-connectors_control '{ slowMs: 20000 }'
+echo "== [connectors] slow: a 30 s connector call completes inside the cell turn (research A4, ADR-0025 checklist)"
+connectors_control '{ slowMs: 30000 }'
 FIXTURE="$(connector_variant c2)"
 STATE="$(inject_and_wait "$FIXTURE" 0199a6f0-0000-7000-8000-00000000d0c2)"
 connectors_control '{}'
@@ -709,9 +710,9 @@ if (!m) { console.log("FAIL: no reply to the slow connector mention"); process.e
 const c = (s.connectorCalls ?? []).find((x) => x.eventId === "0199a6f0-0000-7000-8000-00000000e0c2");
 console.log("   reply      :", m.text);
 console.log("   call took  :", c ? `${((c.answeredAt - c.receivedAt) / 1000).toFixed(1)} s at the API, reply ${((m.receivedAt - c.receivedAt) / 1000).toFixed(1)} s after the call arrived` : "no call");
-// The fake held the call 20 s (a timer may fire a few ms early); the reply still carries its result.
-const ok = c && c.answeredAt - c.receivedAt >= 19500 && m.text.includes("Tool ocw_connector_call said: whoami: sub_smoke");
-if (!ok) { console.log("FAIL: the 20 s connector call did not complete inside the turn"); process.exit(1); }
+// The fake held the call 30 s (a timer may fire a few ms early); the reply still carries its result.
+const ok = c && c.answeredAt - c.receivedAt >= 29500 && m.text.includes("Tool ocw_connector_call said: whoami: sub_smoke");
+if (!ok) { console.log("FAIL: the 30 s connector call did not complete inside the turn"); process.exit(1); }
 '
 
 echo "== [connectors] not connected: the reply is the fixed connect sentence, never the API body"
@@ -728,6 +729,22 @@ const ok =
   m.text.includes("Tool ocw_connector_call said: You haven\x27t connected your account for this connector yet. I posted a link so you can connect it, then ask me again.") &&
   !m.text.includes("fake-api-error-body-canary") && !m.text.includes("refused by test");
 if (!ok) { console.log("FAIL: expected exactly the fixed connect sentence"); process.exit(1); }
+'
+
+echo "== [connectors] needs reconnect: the reply asks to reconnect (07.4-14, WINDOWS #198), never the API body"
+connectors_control '{ refusal: "needs_reconnect" }'
+FIXTURE="$(connector_variant c7)"
+STATE="$(inject_and_wait "$FIXTURE" 0199a6f0-0000-7000-8000-00000000d0c7)"
+connectors_control '{}'
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d0c7");
+if (!m) { console.log("FAIL: no reply to the needs-reconnect mention"); process.exit(1); }
+console.log("   reply      :", m.text);
+const ok =
+  m.text.includes("Tool ocw_connector_call said: Your sign-in for this connector stopped working. I posted a link so you can reconnect it, then ask me again.") &&
+  !m.text.includes("fake-api-error-body-canary") && !m.text.includes("refused by test");
+if (!ok) { console.log("FAIL: expected exactly the fixed reconnect sentence"); process.exit(1); }
 '
 
 echo "== [connectors] member account refused by the API: the private-chat sentence"

@@ -533,6 +533,50 @@ a stack running this branch:
    something and to propose a team note, approve it from the phone and deny another from the laptop, follow the card
    in the DM. Say what felt slow or unclear: the tree, the editor on the phone, the review, the card, search.
 
+## Connectors and keychain (Phase 07.4)
+
+Phase 07.4 (ADR-0025, [self-hosting/connectors.md](self-hosting/connectors.md)). A shared bot acts with the account of
+whoever asked: each person connects their own account once, keys are used by handle and never shown to the bot, and
+people start their own agent from a team template. The demo has no real provider: member sign-in needs HTTPS, so on
+`localhost` it works and on a LAN name it reads *Needs HTTPS*.
+
+1. **A per-member connector (Víctor).** Settings › MCP servers › **Add**: a remote MCP server you have an account on,
+   **Authentication › Each member signs in**. Copy the **Redirect URI** into the provider's app registration, then
+   open **Pre-registered client (optional)** and paste its issuer and client id (and secret, if any). The card reads
+   *Waiting for a member to connect*. Grant one of its tools to a team bot (Bots › the bot › Capabilities).
+2. **Connect from the card.** As Marta, DM that bot and ask something that needs the tool. The bot answers that you
+   have not connected, and a card **Connect your {connector} account** appears. **Connect** opens Settings ›
+   Connections with the row highlighted; **Connect** goes to the provider's sign-in and back: *{connector} connected.
+   Ask your bot again.* **Back to chat** returns to the DM; ask again and the answer comes from Marta's own account.
+3. **Each person their own account.** As Sam, ask the same bot the same thing: Sam gets his own card, never Marta's
+   data. Settings › Connections shows each person only their own row (*Connected as … · since today · last used …*).
+4. **A shared channel.** As Marta, mention the bot in `#ingenieria`: it says it can only use her account in a private
+   chat and links **Allow {connector} in #ingenieria**. The dialog says how many people can read the results before
+   **Allow**; after it, the bot uses her account there. **Revoke** under *Allowed in shared conversations* stops it on
+   the next message.
+5. **A key by handle.** Settings › **Keychain** › **Add key**: an API key for the service's host, granted to your
+   personal bot. The row shows a handle like `k_abc2def3gh`; the value is never shown again. Ask your personal bot to
+   call the service: it names the handle, the API sends the key, and the row reads *last used just now*.
+6. **Templates.** As Alex (lead of Backend): Bots › Templates › **New template**, publish v1. As Marta: **Start** it;
+   the dialog lists what the personal-agent caps leave out and the connectors to connect. Publish v2 as Alex: Marta's
+   agent shows *Update available*; only she applies it.
+7. **Bots off.** Settings › Modules › **Bots** off for Sam: Connections still lists his connections and allowed
+   conversations so he can disconnect and revoke; connecting needs Bots on.
+
+**Owner checks** (never run by an agent; record the results in
+`.planning/phases/07.4-per-member-connectors-agent-keychain-and-templates/07.4-VALIDATION.md` › Manual-Only
+Verifications and in ADR-0025 › Validation). On an instance with HTTPS (`pnpm ocw enable proxy`):
+
+1. **A real provider (research A3).** Register a real MCP server per member (a pre-registered client, or the client
+   metadata URL where the provider supports it). Connect two people; ask the same bot in each DM and check each answer
+   comes from that person's own account. Leave it an hour (or past the token's lifetime) and ask again: it must answer
+   without a reconnect (silent refresh). Disconnect one person and check at the provider that OCW's access is gone.
+2. **Reconnect after a revoke.** Revoke OCW's access at the provider for one person, then ask the bot: the card must
+   read **Reconnect your {connector} account**, the bot must say the sign-in stopped working, and Settings ›
+   Connections must show *Access revoked* with **Reconnect**.
+3. **A phone.** Do steps 2 and 4 above from a phone: the card, the provider's sign-in, **Back to chat** and the share
+   dialog must all fit and work with a thumb.
+
 ## Troubleshooting
 
 | Symptom | Fix |
