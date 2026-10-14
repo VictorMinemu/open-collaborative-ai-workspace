@@ -39,10 +39,10 @@ export interface ApprovalKind {
   headline?(tx: Tx, row: ApprovalRow, viewerUserId: string): Promise<ApprovalHeadline>;
   /**
    * The server-composed content of the card that mirrors the request in a conversation (title, fields, summary and an
-   * Open action). The service forces kind `approval`, status `pending` and its own Approve action; `warnings` (at most
-   * three) are stored on the request and shown on the card. 07.5 (P-07, UI-SPEC R6): `inlineDecision: false` posts no
-   * Approve action (deciding stays the kind's `canDecide`, on the review or through the card route); `labels` rename the
-   * Approve, Deny and Open buttons.
+   * Open action). The service forces kind `approval` (07.5: or `cardKind`), status `pending` and its own Approve
+   * action; `warnings` (at most three) are stored on the request and shown on the card. 07.5 (P-07, UI-SPEC R6):
+   * `inlineDecision: false` posts no Approve action (deciding stays the kind's `canDecide`, on the review or through the
+   * card route); `labels` rename the Approve, Deny and Open buttons.
    */
   card?(tx: Tx, row: ApprovalRow): Promise<ApprovalCardContent>;
   /**
@@ -77,6 +77,11 @@ export interface ApprovalCardContent {
   /** Default true: the card offers Approve / Deny in place. */
   inlineDecision?: boolean;
   labels?: { approve?: string; deny?: string; open?: string };
+  /**
+   * 07.5 (UI-SPEC Surface 3): the card's kind. Default `approval`; a Work Zone proposal is a `work_zone` card (its header
+   * reads "Work Zone"). Only these two: the service still owns the status and the decision actions.
+   */
+  cardKind?: "approval" | "work_zone";
 }
 
 /** The kind-composed fields of a card's approval link (`ApprovalKind.link`). */

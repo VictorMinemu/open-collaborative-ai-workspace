@@ -328,7 +328,7 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
    * its Open action; the service forces kind `approval`, status `pending` and its own Approve action (no approver
    * list: the kind decides), stores the kind's warnings and links the card to the request. 07.5: a kind may turn the
    * in-card decision off (`inlineDecision: false`, only the Open action; deciding stays `canDecide` behind the review
-   * and the card route) and name the Approve, Deny and Open buttons (`labels`).
+   * and the card route), name the Approve, Deny and Open buttons (`labels`) and post a `work_zone` card (`cardKind`).
    */
   async function postMirror(
     tx: Tx,
@@ -342,7 +342,7 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
     const labels = composed.labels ?? {};
     const card = AgentCardInput.parse({
       ...composed.card,
-      kind: "approval",
+      kind: composed.cardKind ?? "approval",
       status: "pending",
       actions: [
         ...(composed.inlineDecision === false
