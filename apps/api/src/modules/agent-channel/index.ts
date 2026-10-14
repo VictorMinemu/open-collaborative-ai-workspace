@@ -30,6 +30,7 @@ import { cellMcpServers } from "../mcp";
 import type { MemoryService } from "../memory";
 import { channelResource, createPermissionService, type ResourceFacts } from "../organization";
 import { cellApprovedPlugins } from "../plugins";
+import type { WorkZoneProposalService } from "../work-session";
 import { cellOf, createCellAuth } from "./auth";
 import { registerBoardAgentRoutes } from "./board";
 import { noTrigger, registerCardActionHandler, registerCardRoutes, resolveReplyTarget } from "./cards";
@@ -44,6 +45,7 @@ import { registerPluginCellRoutes } from "./plugins";
 import { createCellPresence } from "./presence";
 import { createProviderAuth } from "./provider-auth";
 import { registerToolCallRoutes } from "./tool-calls";
+import { registerWorkZoneRoutes } from "./work-zone";
 
 export { emitCardAction } from "./cards";
 export { conversationAudience } from "./memory-files";
@@ -110,6 +112,8 @@ export function createAgentChannelModule(
     modelLabel?: (ref: ModelRef) => string;
     /** Memory files (07.2-11): the memory routes, the legacy notes and the memory a turn carries. */
     memory: MemoryService;
+    /** Work Zone proposals (07.5-08): the work-session module's service; absent = the two routes are not served. */
+    workZone?: WorkZoneProposalService | null;
   },
 ): ApiModule {
   const auth = createCellAuth(core);
@@ -469,6 +473,8 @@ export function createAgentChannelModule(
           registerMemoryRoutes(scope, core, perms, opts.memory);
           // Memory files (07.2-11, MEM-04): list, read, write own scopes, propose; agent ∩ human ∩ the audience.
           registerMemoryFileRoutes(scope, { core, perms, memory: opts.memory });
+          // Work Zone proposals (07.5-08, D-03): the projects a turn's human may use, and a session proposed as a card.
+          if (opts.workZone) registerWorkZoneRoutes(scope, core, opts.workZone);
           // The cell's MCP tool discovery (D-13): probe reports → the tool catalog.
           registerMcpCellRoutes(scope, core);
           // The cell's marketplace executor and install gate (D-14).

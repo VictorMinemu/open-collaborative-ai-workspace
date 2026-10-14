@@ -285,6 +285,12 @@ export async function buildApp(
   const memory = createMemoryService(core, { approvals: approvals.service });
   // Phase 07.5: per-tool approval policies; the catalog loader is injected (the module never imports bot-capabilities).
   const toolApproval = createToolApprovalModule(core, { approvals: approvals.service, loadCatalog });
+  // B3; 06.1: image bytes; 07.5-08: built before the Agent Channel, which serves its Work Zone proposals, and registers
+  // the `work_zone.start` kind on `approvals`.
+  const workSession = createWorkSessionModule(core, deviceModule.hub, {
+    storage: artifactModule.storage,
+    approvals: approvals.service,
+  });
   const modules: ApiModule[] = [
     createIdentityModule({
       identity,
@@ -310,9 +316,13 @@ export async function buildApp(
     createKeychainModule(core), // Phase 07.4: keys bots use by handle (D-04, CONN-05)
     createPluginsModule(core), // Phase 3.1: OpenClaw Marketplace (D-14)
     // B2; 06-10: model labels in persona history; 07.2-11: memory tools and memory files in the turn
-    createAgentChannelModule(core, { modelLabel: (ref) => modelGateway.labelOf(ref), memory }),
+    createAgentChannelModule(core, {
+      modelLabel: (ref) => modelGateway.labelOf(ref),
+      memory,
+      workZone: workSession.proposals, // 07.5-08: Work Zone proposals (D-03)
+    }),
     deviceModule, // B3
-    createWorkSessionModule(core, deviceModule.hub, { storage: artifactModule.storage }), // B3; 06.1: image bytes
+    workSession, // B3 (built above)
     approvals.module, // Phase 07.2: approvals inbox and decisions (MEM-06)
     createMemoryModule(core, memory), // Phase 07.2: memory scopes, files and history (MEM-01, MEM-02, MEM-07)
     toolApproval.module, // Phase 07.5: approval policies per tool (APPROVE-01)
