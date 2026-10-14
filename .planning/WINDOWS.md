@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 126
+open_count: 128
 waived_count: 4
 fixed_count: 80
-total_count: 210
-last_updated: 2026-10-14T15:58:17.419Z
+total_count: 212
+last_updated: 2026-10-14T17:45:03.593Z
 ---
 
 # Broken Windows Ledger
@@ -225,6 +225,8 @@ last_updated: 2026-10-14T15:58:17.419Z
 | 208 | 07.5 | deviation | apps/api/src/modules/tool-approval |  | History query has no audit_events index on (action, scopeUnitId); silent caps: /access 500 units, catalog 200 tools/group and 100 groups; a 'users' rule whose people are gone must count as no approver in 07.5-07 canDecide | open |  | 2026-10-14T15:40:25.495Z |  |
 | 209 | 07.5 | unrun-verify | apps/openclaw-channel/src/tool-guard.ts |  | The TOOL_PIN_PRIORITY pin relies on OpenClaw 2026.9.7 'last returned params win' (assumption A2), unverified; a plugin registered below -10000 could rewrite after the pin; the 07.5-15 real-cell smoke must record it | open |  | 2026-10-14T15:58:17.312Z |  |
 | 210 | 07.5 | deviation | apps/openclaw-channel/src/connector-tools.ts |  | Denial note parsed from the end of the server sentence (no cardAction.note in contracts); approval_denied does not say who decided; flagged connector tools still use the old 32 KB message; fake /tool-calls never answers no_trigger | open |  | 2026-10-14T15:58:17.419Z |  |
+| 211 | 07.5 | deviation | apps/api/src/modules/tool-approval |  | MUST FIX (07.5-11/gate): a review_only tool.call card still carries Approve and the server accepts an approval from the card route; only the web hides it. Refuse server-side | open |  | 2026-10-14T17:45:03.509Z |  |
+| 212 | 07.5 | deviation | apps/api/src/modules/tool-approval |  | 07.5-11 must map denial {deciderName, note} onto the 409 and add an explicit cardAction note to contracts + plugin mirror (replace sentence parsing); 'You can't approve your own request' copy must follow viewerCan; real use window is min(15 min, request expiry); review view counts readers with one check per member | open |  | 2026-10-14T17:45:03.593Z |  |
 
 ````json
 [
@@ -2746,6 +2748,30 @@ last_updated: 2026-10-14T15:58:17.419Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-14T15:58:17.419Z",
+    "resolved_at": null
+  },
+  {
+    "id": 211,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "apps/api/src/modules/tool-approval",
+    "line": null,
+    "description": "MUST FIX (07.5-11/gate): a review_only tool.call card still carries Approve and the server accepts an approval from the card route; only the web hides it. Refuse server-side",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T17:45:03.509Z",
+    "resolved_at": null
+  },
+  {
+    "id": 212,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "apps/api/src/modules/tool-approval",
+    "line": null,
+    "description": "07.5-11 must map denial {deciderName, note} onto the 409 and add an explicit cardAction note to contracts + plugin mirror (replace sentence parsing); 'You can't approve your own request' copy must follow viewerCan; real use window is min(15 min, request expiry); review view counts readers with one check per member",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-14T17:45:03.593Z",
     "resolved_at": null
   }
 ]
