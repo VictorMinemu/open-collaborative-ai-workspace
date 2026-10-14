@@ -51,6 +51,19 @@ export interface ApprovalKind {
   gone?(tx: Tx, row: ApprovalRow): Promise<string | null>;
   /** True when the request concerns private data: the decision note is then audited as its length only. */
   isPrivate?(tx: Tx, row: ApprovalRow): Promise<boolean>;
+  /**
+   * `grant` kinds only (07.5, P-06): what the decision's card-action turn carries besides the decision. The turn is
+   * delivered for the human the request was made for (never the decider); `grant` (sent on `approved` only) tells the
+   * bot the one call it may now make; `sourceTainted` = the requesting turn had read untrusted content, so the re-run
+   * turn starts tainted (the grant lifts taint for its one claimed call only). Asked with the decided row.
+   */
+  cardTurn?(tx: Tx, row: ApprovalRow): Promise<ApprovalCardTurn | null>;
+}
+
+/** What a grant kind adds to the re-run turn of a decision (`ApprovalKind.cardTurn`). */
+export interface ApprovalCardTurn {
+  grant?: { tool: string; arguments: string; useBy: string };
+  sourceTainted?: boolean;
 }
 
 export interface ApprovalRegistry {

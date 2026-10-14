@@ -12,7 +12,7 @@ import {
 import { approvalRequests, type Tx, tenantOf, withSavepoint } from "@ocw/db";
 import { and, desc, eq, inArray, isNull, lt, type SQL, sql } from "drizzle-orm";
 import type { Core } from "../../core";
-import type { LinkedCardInfo, LinkedCards } from "../../lib/chat-agent-bridge";
+import type { CardAction, LinkedCardInfo, LinkedCards } from "../../lib/chat-agent-bridge";
 import { conflict, forbidden, HttpError, notFound } from "../../lib/errors";
 import {
   announceCardMessage,
@@ -21,6 +21,7 @@ import {
   loadDirectory,
   mirrorCardClosed,
   mirrorCardDecision,
+  mirrorCardUsed,
 } from "../chat";
 import { actionHash } from "./hash";
 import {
@@ -413,17 +414,23 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
         final = await applyApproved(tx, kind, decided, recomputed, input.deciderUserId);
       }
       await announce(tx, kind, final, [input.deciderUserId]);
+      const dir = await loadDirectory(tx);
       if (final.cardMessageId) {
         const status = final.status as keyof typeof CARD_STATUS;
         await mirrorCardDecision(tx, core, {
           messageId: final.cardMessageId,
           outcome: input.outcome,
           deciderUserId: input.deciderUserId,
-          status: CARD_STATUS[status] ?? "succeeded",
+          // WINDOWS 135: an approved grant is not done until the bot uses it (`consumeGrant` → succeeded).
+          status:
+            kind.mode === "grant" && final.status === "approved"
+              ? "running"
+              : (CARD_STATUS[status] ?? "succeeded"),
           note,
+          ...(await cardTurnOf(tx, kind, final, input, dir)),
         });
       }
-      return summaryOf({ ...final, expired: false }, await loadDirectory(tx), false);
+      return summaryOf({ ...final, expired: false }, dir, false);
     },
 
     async consumeGrant(tx, input) {
@@ -462,6 +469,8 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
         metadata: auditIds(used),
       });
       await announce(tx, kind, used, [used.decidedBy]);
+      // WINDOWS 135: the card turns from "approved" (running) to "used" (succeeded) only now; approval row first, then card.
+      if (used.cardMessageId) await mirrorCardUsed(tx, core, { messageId: used.cardMessageId });
       return { ok: true };
     },
 
@@ -625,6 +634,32 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
       metadata: { ...auditIds(final), ...(result.ok ? {} : { resultCode: final.resultCode }) },
     });
     return final;
+  }
+
+  /**
+   * The card-action turn fields of a decision (P-06): every kind names the decider (`decidedBy`); a `grant` kind with a
+   * requester re-runs for that requester (`turnUserId`), carries its grant on `approved` and starts tainted when the
+   * request came from a tainted turn. `server_apply` kinds keep the decider as the turn's human (07.2 rule).
+   */
+  async function cardTurnOf(
+    tx: Tx,
+    kind: ApprovalKind,
+    row: ApprovalRow,
+    input: DecideInput,
+    dir: Directory,
+  ): Promise<Pick<CardAction, "turnUserId" | "decidedBy" | "grant" | "tainted">> {
+    const decidedBy = {
+      id: input.deciderUserId,
+      displayName: authorOf(dir, "user", input.deciderUserId).displayName,
+    };
+    if (kind.mode !== "grant" || !row.requestedForUserId) return { decidedBy };
+    const turn = kind.cardTurn ? await kind.cardTurn(tx, row) : null;
+    return {
+      decidedBy,
+      turnUserId: row.requestedForUserId,
+      ...(turn?.grant && input.outcome === "approved" ? { grant: turn.grant } : {}),
+      ...(turn?.sourceTainted === true ? { tainted: true } : {}),
+    };
   }
 
   return service;
