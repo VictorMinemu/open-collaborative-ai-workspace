@@ -171,12 +171,22 @@ function oauthPolicy(sameOrigin: string): EgressPolicy {
   };
 }
 
-/** A discovery failure as a code: a policy refusal by the guard, or anything else. */
+/** The SDK's message when the server answers 404 (or nothing) for RFC 9728 metadata (`discoverOAuthProtectedResourceMetadata`). */
+const NO_PRM_MESSAGE = "Resource server does not implement OAuth 2.0 Protected Resource Metadata";
+
+/**
+ * A discovery failure as a code: a policy refusal by the guard, or anything else. `terminal` = the server answered and
+ * cannot be signed in to as it is (no RFC 9728 metadata, or a document that does not parse): an admin must act, a
+ * retry will not help. Network trouble and timeouts stay transient.
+ */
 function discoveryError(err: unknown): ConnectorOAuthError {
   if (err instanceof ConnectorOAuthError) return err;
   const refusal = findRefusal(err);
   if (refusal && POLICY_REFUSALS.has(refusal.code)) return new ConnectorOAuthError("egress_refused");
-  return new ConnectorOAuthError("discovery_failed");
+  if (refusal) return new ConnectorOAuthError("discovery_failed");
+  const message = err instanceof Error ? err.message : "";
+  const answered = message.startsWith(NO_PRM_MESSAGE) || (err instanceof Error && err.name === "ZodError");
+  return new ConnectorOAuthError("discovery_failed", { terminal: answered });
 }
 
 /** A token endpoint failure as a code; terminal only for the RFC 6749 errors that kill the grant. */
@@ -366,6 +376,12 @@ export async function chooseClient(
     }>;
     urls: ConnectorOAuthUrls;
     clientName: string;
+    /**
+     * False when the admin turned the client ID metadata document off for this server (WINDOWS #179: its
+     * authorization server cannot read the instance's URL, e.g. behind a private CA): a pre-registered client or
+     * dynamic registration is used instead. Default true.
+     */
+    allowCimd?: boolean;
   },
 ): Promise<ClientChoice> {
   const pre = opts.preRegistered.find((c) => c.issuer === d.issuer);
@@ -380,7 +396,12 @@ export async function chooseClient(
   if (!opts.urls.oauthAvailable || !opts.urls.redirectUri) throw new ConnectorOAuthError("https_required");
 
   const cimd = clientMetadataDocument(opts.urls, opts.clientName);
-  if (cimd && opts.urls.clientMetadataUrl && d.metadata.client_id_metadata_document_supported === true) {
+  if (
+    opts.allowCimd !== false &&
+    cimd &&
+    opts.urls.clientMetadataUrl &&
+    d.metadata.client_id_metadata_document_supported === true
+  ) {
     return { method: "cimd", issuer: d.issuer, clientId: opts.urls.clientMetadataUrl };
   }
 

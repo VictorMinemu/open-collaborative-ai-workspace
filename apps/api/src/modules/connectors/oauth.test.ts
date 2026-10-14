@@ -1,6 +1,6 @@
 import { type ConnectorOAuthUrls, connectorOAuthUrls } from "@ocw/contracts";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { createEgress, type Egress, type EgressPolicy } from "../../lib/egress";
+import { createEgress, type Egress, type EgressPolicy, EgressRefusedError } from "../../lib/egress";
 import { clientMetadataDocument } from "./client-metadata";
 import {
   type AuthServerMetadata,
@@ -196,10 +196,23 @@ describe("discover: the checks the SDK does not do", () => {
     expect((await codeOf(discover(stub.egress, MCP))).code).toBe("discovery_failed");
   });
 
-  it("refuses a server without protected resource metadata", async () => {
+  it("refuses a server without protected resource metadata, as a terminal failure (WINDOWS #179)", async () => {
     const stub = stubEgress();
     stub.routes.set(`GET ${AS_META_URL}`, { json: asMeta() });
-    expect((await codeOf(discover(stub.egress, MCP))).code).toBe("discovery_failed");
+    const err = await codeOf(discover(stub.egress, MCP));
+    expect(err.code).toBe("discovery_failed");
+    // The server answered: an admin must act (the member's retry will not help).
+    expect(err.terminal).toBe(true);
+  });
+
+  it("a guard network failure during discovery stays transient", async () => {
+    const stub = stubEgress();
+    stub.routes.set(`GET ${PRM_URL}`, () => {
+      throw new EgressRefusedError("network_error", "mcp.test");
+    });
+    const err = await codeOf(discover(stub.egress, MCP));
+    expect(err.code).toBe("discovery_failed");
+    expect(err.terminal).toBe(false);
   });
 
   it("follows a trusted resource_metadata from a challenge and refuses an untrusted one", async () => {
@@ -332,6 +345,20 @@ describe("chooseClient: the spec's order, keyed by issuer", () => {
       opts({ preRegistered: [{ issuer: "https://other.test", clientId: "pre" }] }),
     );
     expect(choice).toEqual({ method: "cimd", issuer: AS, clientId: httpsUrls.clientMetadataUrl });
+  });
+
+  it("skips CIMD when the admin turned it off for the server, and registers instead (WINDOWS #179)", async () => {
+    const stub = stubEgress();
+    register(stub);
+    const choice = await chooseClient(stub.egress, discovered(), opts({ allowCimd: false }));
+    expect(choice).toMatchObject({ method: "dcr", issuer: AS, clientId: "dcr_1", isNew: true });
+    // A pre-registered client still wins over both.
+    const pre = await chooseClient(
+      stub.egress,
+      discovered(),
+      opts({ allowCimd: false, preRegistered: [{ issuer: AS, clientId: "pre" }] }),
+    );
+    expect(pre).toMatchObject({ method: "pre_registered", clientId: "pre" });
   });
 
   it("registers a web client (DCR) when the instance has no CIMD URL", async () => {

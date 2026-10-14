@@ -48,6 +48,7 @@ const HEAD_ONLY = [
   "20261013095705_memory_scope_immutable",
   "20261013221007_connectors_keychain_templates",
   "20261013233856_agent_template_versions_immutable",
+  "20261014020321_connector_oauth_use_cimd",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
@@ -281,7 +282,7 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
       await c.connect();
       try {
         const { rows } = await c.query(
-          "select id, transport, auth_mode, oauth_status, member_header_name from app.mcp_servers order by id",
+          "select id, transport, auth_mode, oauth_status, member_header_name, oauth_use_cimd from app.mcp_servers order by id",
         );
         expect(rows).toEqual([
           {
@@ -290,6 +291,8 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
             auth_mode: "org_secret",
             oauth_status: null,
             member_header_name: null,
+            // 07.4-10 (WINDOWS #179): existing servers keep the default (CIMD when it applies).
+            oauth_use_cimd: true,
           },
           {
             id: MCP_STDIO,
@@ -297,6 +300,8 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
             auth_mode: "org_secret",
             oauth_status: null,
             member_header_name: null,
+            // 07.4-10 (WINDOWS #179): existing servers keep the default (CIMD when it applies).
+            oauth_use_cimd: true,
           },
         ]);
         const empty = await c.query(

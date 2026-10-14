@@ -794,6 +794,12 @@ export const mcpServers = appSchema.table(
     oauthScopes: text("oauth_scopes").array(),
     /** `per_member_oauth`: whether members can connect (`needs_client` / `https_required` explain why not). */
     oauthStatus: text("oauth_status", { enum: ["ready", "needs_client", "https_required", "error"] }),
+    /**
+     * `per_member_oauth`: whether OCW identifies itself with its client ID metadata document (an https instance and a
+     * supporting authorization server). An admin turns it off when that server cannot read the instance's URL (a
+     * private CA, WINDOWS #179); a pre-registered client or dynamic registration is used instead.
+     */
+    oauthUseCimd: boolean("oauth_use_cimd").notNull().default(true),
   },
   (t) => [
     uniqueIndex("mcp_servers_org_safe_name_uq").on(t.organizationId, t.safeName),

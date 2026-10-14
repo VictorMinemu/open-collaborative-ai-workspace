@@ -577,6 +577,14 @@ describe("fake MCP OAuth: scenarios", () => {
     assert.equal("code_challenge_methods_supported" in as, false);
   });
 
+  it("no_registration drops registration_endpoint and CIMD support from the AS metadata", async () => {
+    await scenario(base, { no_registration: true });
+    const { as } = await discover(base);
+    assert.equal("registration_endpoint" in as, false);
+    assert.equal("client_id_metadata_document_supported" in as, false);
+    assert.deepEqual(as.code_challenge_methods_supported, ["S256"]);
+  });
+
   it("no_iss leaves iss off the redirect; wrong_iss names another issuer", async () => {
     await scenario(base, { no_iss: true });
     const a = await authorize(base);

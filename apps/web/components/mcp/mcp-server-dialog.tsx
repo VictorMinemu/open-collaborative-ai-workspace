@@ -49,6 +49,7 @@ import {
 } from "@/components/ui/panel-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
+import { Switch } from "@/components/ui/switch";
 import { useCopy } from "@/hooks/use-copy";
 import { errorMessage, isApiError } from "@/lib/api";
 import { connectionsExistCount, useCreateMcpServer, useUpdateMcpServer } from "@/lib/mcp-queries";
@@ -201,6 +202,8 @@ function ServerForm({
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
   const [scopes, setScopes] = useState((server?.oauthScopes ?? []).join(" "));
+  // WINDOWS #179: identify OCW with its client metadata URL (default), or not when the provider cannot reach it.
+  const [useCimd, setUseCimd] = useState(server?.oauthUseCimd ?? true);
   const [errors, setErrors] = useState<Errors>({});
   /** The mode-switch confirmation: how many members it disconnects and the PATCH it will send. */
   const [confirm, setConfirm] = useState<{ count: number; body: UpdateMcpServerRequest } | null>(null);
@@ -289,7 +292,7 @@ function ServerForm({
   /** The chosen mode's connector fields for a new server (only that mode's: hidden blocks are discarded). */
   function createConnectorFields(): Pick<
     CreateMcpServerRequest,
-    "memberHeaderName" | "memberHeaderPrefix" | "oauthScopes" | "oauthClient"
+    "memberHeaderName" | "memberHeaderPrefix" | "oauthScopes" | "oauthClient" | "oauthUseCimd"
   > {
     if (authMode === "per_member_secret") {
       return {
@@ -303,6 +306,7 @@ function ServerForm({
       return {
         ...(list.length > 0 ? { oauthScopes: list } : {}),
         ...(client ? { oauthClient: client } : {}),
+        ...(useCimd ? {} : { oauthUseCimd: false }),
       };
     }
     return {};
@@ -312,10 +316,13 @@ function ServerForm({
   function updateConnectorFields(
     saved: McpServer,
     modeChanged: boolean,
-  ): Pick<UpdateMcpServerRequest, "memberHeaderName" | "memberHeaderPrefix" | "oauthScopes" | "oauthClient"> {
+  ): Pick<
+    UpdateMcpServerRequest,
+    "memberHeaderName" | "memberHeaderPrefix" | "oauthScopes" | "oauthClient" | "oauthUseCimd"
+  > {
     const out: Pick<
       UpdateMcpServerRequest,
-      "memberHeaderName" | "memberHeaderPrefix" | "oauthScopes" | "oauthClient"
+      "memberHeaderName" | "memberHeaderPrefix" | "oauthScopes" | "oauthClient" | "oauthUseCimd"
     > = {};
     if (authMode === "per_member_secret") {
       const h = memberHeader.trim();
@@ -334,6 +341,7 @@ function ServerForm({
       } else if (clientState === "removed" && !modeChanged) {
         out.oauthClient = null;
       }
+      if (useCimd !== (modeChanged ? true : (saved.oauthUseCimd ?? true))) out.oauthUseCimd = useCimd;
     }
     return out;
   }
@@ -638,6 +646,28 @@ function ServerForm({
                 hint="Providers that accept client metadata documents need nothing else."
                 copyLabel="Copy client metadata URL"
               />
+            ) : null}
+            {oauth.clientMetadataUrl ? (
+              // biome-ignore lint/a11y/noLabelWithoutControl: the Switch renders the control inside the label
+              <label
+                className="flex cursor-pointer items-start justify-between gap-3 rounded-lg border bg-background px-3 py-2 max-md:min-h-11"
+                data-testid="mcp-oauth-cimd"
+              >
+                <span className="min-w-0">
+                  <span className="block font-medium text-[13px]">Use the client metadata URL</span>
+                  <span id="mcp-oauth-cimd-hint" className="block text-muted-foreground text-xs leading-snug">
+                    Turn this off if {serverLabel}'s sign-in can't reach this workspace, for example behind a
+                    private certificate. OCW then uses the pre-registered client or registers itself.
+                  </span>
+                </span>
+                <Switch
+                  checked={useCimd}
+                  onCheckedChange={setUseCimd}
+                  aria-label="Use the client metadata URL"
+                  aria-describedby="mcp-oauth-cimd-hint"
+                  data-testid="mcp-oauth-cimd-switch"
+                />
+              </label>
             ) : null}
             <div className="grid gap-3">
               <Button

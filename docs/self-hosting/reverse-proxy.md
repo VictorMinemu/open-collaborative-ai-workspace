@@ -70,6 +70,13 @@ Install `ocw-root.crt` in the operating system or browser trust store of each cl
 device management tool. The desktop app uses the operating system's store; Node processes such as the Local Runtime
 daemon also accept `NODE_EXTRA_CA_CERTS=/path/to/ocw-root.crt`. Never disable certificate verification instead.
 
+**Connectors where each member signs in.** An authorization server outside your network cannot read OCW's client
+metadata document (`https://<site>/api/v1/connectors/oauth/client-metadata.json`) behind an internal name. For each
+such connector, turn off **Use the client metadata URL** in Settings › MCP servers; OCW then uses the pre-registered
+client or registers itself (dynamic registration). A connector whose server publishes no OAuth protected resource
+metadata (RFC 9728) or no PKCE support shows **Sign-in error**: members cannot sign in to it, so use **Each member's
+own key** for it instead.
+
 ## What changes when the proxy is on
 
 - **One origin.** The browser calls `https://<site>/api/...` and opens `wss://<site>/ws` on the page's own origin.

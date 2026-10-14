@@ -21,7 +21,6 @@ import {
 import {
   agents,
   botToolGrants,
-  connectorConnections,
   connectorOAuthClients,
   mcpServers,
   mcpServerTools,
@@ -131,6 +130,7 @@ function toDto(row: ServerRow, extras: DtoExtras, opts: McpReadOptions): McpServ
     memberHeaderPrefix: row.authMode === "per_member_secret" ? row.memberHeaderPrefix : null,
     oauthScopes: row.authMode === "per_member_oauth" ? (row.oauthScopes ?? null) : null,
     oauthStatus: oauthStatusOf(row, opts),
+    oauthUseCimd: row.oauthUseCimd,
     // The client secret is never returned: only whether one is stored.
     oauthClients: extras.clients
       .filter((c) => c.serverId === row.id)
@@ -154,14 +154,17 @@ async function findServer(tx: Tx, id: string): Promise<ServerRow> {
 const toolsOf = (tx: Tx, serverId: string) =>
   tx.select().from(mcpServerTools).where(eq(mcpServerTools.serverId, serverId));
 
-/** Member connections per server, one grouped count (UI-SPEC R4); RLS keeps it to the caller's organization. */
+/**
+ * Member connections per server, one grouped count (UI-SPEC R4). A connection is its owner's alone under RLS (WINDOWS
+ * #170), so the admin's count goes through the `mcp.manage` path: `app.connector_connection_counts`, a SECURITY
+ * DEFINER function scoped to the tenant transaction's organization that returns numbers only (WINDOWS #186).
+ */
 async function connectionCounts(tx: Tx, serverId?: string): Promise<Map<string, number>> {
-  const rows = await tx
-    .select({ serverId: connectorConnections.serverId, n: sql<number>`count(*)::int` })
-    .from(connectorConnections)
-    .where(serverId ? eq(connectorConnections.serverId, serverId) : undefined)
-    .groupBy(connectorConnections.serverId);
-  return new Map(rows.map((r) => [r.serverId, Number(r.n)]));
+  const res = await tx.execute(
+    sql`select server_id, connections from app.connector_connection_counts(${serverId ?? null}::uuid)`,
+  );
+  const rows = res.rows as Array<{ server_id: string; connections: number }>;
+  return new Map(rows.map((r) => [r.server_id, Number(r.connections)]));
 }
 
 export async function listMcpServers(tx: Tx, opts: McpReadOptions = {}): Promise<McpServer[]> {
@@ -416,10 +419,10 @@ async function clearConnections(
   serverId: string,
   reason: "mode_changed" | "server_deleted",
 ): Promise<number> {
-  const removed = await tx
-    .delete(connectorConnections)
-    .where(eq(connectorConnections.serverId, serverId))
-    .returning({ secretId: connectorConnections.secretId });
+  // Every member's row, past the owner-only policy, through the `mcp.manage` path (WINDOWS #186): the function deletes
+  // the tenant's rows of this server and hands back only the ids of their sealed secrets.
+  const res = await tx.execute(sql`select secret_id from app.clear_connector_connections(${serverId}::uuid)`);
+  const removed = (res.rows as Array<{ secret_id: string | null }>).map((r) => ({ secretId: r.secret_id }));
   for (const r of removed) if (r.secretId) await core.secrets.remove(tx, r.secretId);
   if (removed.length > 0) {
     await core.audit.record(tx, {
@@ -646,7 +649,7 @@ export async function createMcpServer(core: Core, tx: Tx, input: CreateMcpServer
   const memberHeaderName = mode === "per_member_secret" ? assertMemberHeader(input.memberHeaderName) : null;
   const memberHeaderPrefix = mode === "per_member_secret" ? input.memberHeaderPrefix || null : null;
   const oauthScopes = mode === "per_member_oauth" ? normalizeScopes(input.oauthScopes) : null;
-  if (mode !== "per_member_oauth" && input.oauthClient) {
+  if (mode !== "per_member_oauth" && (input.oauthClient || input.oauthUseCimd === false)) {
     throw badRequest("Only a member sign-in connector takes an OAuth client", "oauth_not_allowed");
   }
 
@@ -677,6 +680,7 @@ export async function createMcpServer(core: Core, tx: Tx, input: CreateMcpServer
       memberHeaderPrefix,
       oauthScopes,
       oauthStatus: mode === "per_member_oauth" ? "ready" : null,
+      oauthUseCimd: mode === "per_member_oauth" ? (input.oauthUseCimd ?? true) : true,
     })
     .returning();
   if (!row) throw new Error("mcp server insert failed");
@@ -702,6 +706,7 @@ export async function createMcpServer(core: Core, tx: Tx, input: CreateMcpServer
       authMode: mode,
       ...(memberHeaderName ? { memberHeaderName } : {}),
       ...(mode === "per_member_oauth" ? { preRegisteredClient: Boolean(input.oauthClient) } : {}),
+      ...(mode === "per_member_oauth" && input.oauthUseCimd === false ? { oauthUseCimd: false } : {}),
     },
   });
   if (row.orgEnabled && !perMember) {
@@ -735,7 +740,7 @@ export async function updateMcpServer(
   }
   if (
     to !== "per_member_oauth" &&
-    (input.oauthClient || (input.oauthScopes && input.oauthScopes.length > 0))
+    (input.oauthClient || (input.oauthScopes && input.oauthScopes.length > 0) || input.oauthUseCimd === false)
   ) {
     throw badRequest("Only a member sign-in connector takes an OAuth client or scopes", "oauth_not_allowed");
   }
@@ -839,12 +844,17 @@ export async function updateMcpServer(
       clientChanged = true;
     }
     if (clientChanged) changed.push("oauthClient");
+    if (input.oauthUseCimd !== undefined && input.oauthUseCimd !== row.oauthUseCimd) {
+      patch.oauthUseCimd = input.oauthUseCimd;
+      changed.push("oauthUseCimd");
+    }
     // A new mode starts ready; an admin's new client answers a `needs_client`.
     if (modeChanged || (clientChanged && row.oauthStatus === "needs_client")) patch.oauthStatus = "ready";
   } else if (from === "per_member_oauth") {
     await removeOAuthClients(core, tx, id);
     patch.oauthScopes = null;
     patch.oauthStatus = null;
+    patch.oauthUseCimd = true;
   }
 
   if (changed.length === 0) return getMcpServer(tx, id, mcpReadOptions(core));
@@ -882,6 +892,7 @@ export async function updateMcpServer(
       ),
       ...(modeChanged ? { authMode: to, previousAuthMode: from } : {}),
       ...(changed.includes("memberHeader") ? { memberHeaderName: patch.memberHeaderName } : {}),
+      ...(changed.includes("oauthUseCimd") ? { oauthUseCimd: patch.oauthUseCimd } : {}),
     },
   });
   // Everything but a rename reaches the cell (connection, toolFilter, alsoAllow, the taint flags, or the server
