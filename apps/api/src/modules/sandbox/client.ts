@@ -43,6 +43,8 @@ export class SandboxdRefusedError extends Error {
 export interface SandboxdCallOptions {
   /** Deadline of this call (default: the client's). */
   timeoutMs?: number;
+  /** Ends the call early (the events consumer's long poll on shutdown, 07.8-11). */
+  signal?: AbortSignal;
 }
 
 export interface SandboxdClient {
@@ -56,7 +58,7 @@ export interface SandboxdClient {
   stream<Op extends SandboxdOp>(
     op: Op,
     input: SandboxdInput<Op>,
-    opts?: SandboxdCallOptions & { signal?: AbortSignal },
+    opts?: SandboxdCallOptions,
   ): Promise<ReadableStream<Uint8Array>>;
 }
 
@@ -79,7 +81,7 @@ export function createSandboxdClient(opts: SandboxdClientOptions): SandboxdClien
   async function send<Op extends SandboxdOp>(
     op: Op,
     input: SandboxdInput<Op>,
-    o: SandboxdCallOptions & { signal?: AbortSignal; stream?: boolean },
+    o: SandboxdCallOptions & { stream?: boolean },
   ): Promise<Response> {
     const route = SANDBOXD_ROUTES[op];
     // A malformed input is a programming error of the caller, never sent.

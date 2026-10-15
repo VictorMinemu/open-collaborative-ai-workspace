@@ -292,6 +292,38 @@ export const PRECONDITIONS: readonly Precondition[] = [
   },
 ];
 
+/**
+ * A grain that needs another grain on the same resource, judged after every grant, precondition and deny (Phase 07.8,
+ * D-04, P-04): the required grain keeps all of its own semantics (roles, unit leads, relations, allow and deny rules,
+ * the personal-bot precondition), so no module copies them.
+ */
+export interface Prerequisite {
+  permission: Permission;
+  requires: Permission;
+  /** The resource type where the dependency holds; elsewhere the grain is decided on its own. */
+  on: ResourceType;
+  reason: string;
+}
+
+export const PREREQUISITES: readonly Prerequisite[] = [
+  // D-04 (07.8-11): a bot's sandbox files are for the people who may configure that bot. The organization-scope answer
+  // stays the role's (the web's module gate reads it); agents never hold `bot.configure`, so they never get here.
+  { permission: "sandbox.files", requires: "bot.configure", on: "agent", reason: "not_bot_configurer" },
+];
+
+/** The first prerequisite of `permission` that `held` does not satisfy on `r`, or null. */
+export function unmetPrerequisite(
+  permission: Permission,
+  r: ResourceFacts,
+  held: ReadonlySet<Permission>,
+): Denial | null {
+  for (const pre of PREREQUISITES) {
+    if (pre.permission !== permission || pre.on !== r.type) continue;
+    if (!held.has(pre.requires)) return { layer: "resource", reason: pre.reason };
+  }
+  return null;
+}
+
 /** The first precondition that denies `permission`, or null. */
 export function precondition(permission: Permission, p: PrincipalFacts, r: ResourceFacts): Denial | null {
   for (const pre of PRECONDITIONS) {

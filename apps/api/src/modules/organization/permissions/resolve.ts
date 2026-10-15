@@ -15,7 +15,7 @@ import {
   type RuleEffect,
   type RuleSubjectKind,
 } from "@ocw/contracts";
-import { MISSING_REASON, precondition, RELATION_PERMISSIONS } from "./policy";
+import { MISSING_REASON, precondition, RELATION_PERMISSIONS, unmetPrerequisite } from "./policy";
 
 /**
  * The one authority for authorization (ORG-03, research §Pattern 1). PURE: no database, no Fastify. Facts
@@ -286,6 +286,14 @@ export function resolveEffectivePermissions(
   }
 
   let permissions = new Set([...grants].filter((perm) => !denied.has(perm)));
+  // Grains that need another grain on the same resource (policy.ts PREREQUISITES), judged on the final set.
+  for (const perm of [...permissions]) {
+    const unmet = unmetPrerequisite(perm, r, permissions);
+    if (unmet) {
+      permissions.delete(perm);
+      denied.set(perm, { permission: perm, ...unmet });
+    }
+  }
 
   if (onBehalfOf) {
     // Confused-deputy rule: an agent acting for a human never exceeds the human.

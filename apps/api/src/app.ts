@@ -315,8 +315,10 @@ export async function buildApp(
     createSearchModule(core, { modelLabel: (ref) => modelGateway.labelOf(ref) }), // Phase 4: full-text search (CHAT-11, D-04); AI chats of their owner (05-10)
     createModelGatewayModule(core, modelGateway), // Phase 5: AI chat models and ChatGPT plan status
     createAiChatModule(core, { gateway: modelGateway, storage: artifactModule.storage }), // Phase 5: direct AI chat (AICHAT-02/03/07/08)
-    createAgentModule(core, { approvals: approvals.service }), // B2; 07.2: a bot deletion closes its pending approvals
-    createBotCapabilitiesModule(core, { memory }), // Phase 3.1: capabilities, bot policy, governance; 07.2-11: notes on files
+    // B2; 07.2: a bot deletion closes its pending approvals; 07.8-11: and purges its sandbox
+    createAgentModule(core, { approvals: approvals.service, sandbox: sandbox.service }),
+    // Phase 3.1: capabilities, bot policy, governance; 07.2-11: notes on files; 07.8-11: the Sandbox and Browser rows
+    createBotCapabilitiesModule(core, { memory, sandbox: sandbox.service }),
     createMcpModule(core), // Phase 3.1: MCP server registry (D-13)
     createConnectorsModule(core), // Phase 07.4: members' own connector accounts (D-01 … D-03, CONN-01 … CONN-03)
     createKeychainModule(core), // Phase 07.4: keys bots use by handle (D-04, CONN-05)
@@ -334,7 +336,7 @@ export async function buildApp(
     approvals.module, // Phase 07.2: approvals inbox and decisions (MEM-06)
     createMemoryModule(core, memory), // Phase 07.2: memory scopes, files and history (MEM-01, MEM-02, MEM-07)
     toolApproval.module, // Phase 07.5: approval policies per tool (APPROVE-01)
-    sandbox.module, // Phase 07.8: the kill switch (D-09); settings, files and packages from 11 and 18
+    sandbox.module, // Phase 07.8: kill switch, settings, files, the events consumer (05, 11); packages from 18
   ];
   for (const m of modules) {
     await app.register(async (scope) => m.register(scope as unknown as App), {
