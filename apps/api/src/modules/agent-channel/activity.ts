@@ -94,6 +94,64 @@ export interface StepOutcomeInput {
   durationMs?: number | null;
   /** What the call returned (exec/process: `status`, `exitCode`, `stdout`, `stderr`; share: `name`; write: `size`). */
   result?: Record<string, unknown> | null;
+  /** 07.8-14 (WINDOWS #245): the approval card's permalink of a step waiting for a person ("Needs approval →"). */
+  approvalMessageRoute?: string | null;
+}
+
+/** 07.8-14 (UI-SPEC Surface 5): the browser verbs; `ocw_browser_act`'s depends on its action. */
+const BROWSER_VERBS: Record<string, ActivityVerb> = {
+  ocw_browser_open: "opened",
+  ocw_browser_snapshot: "read_page",
+  ocw_browser_screenshot: "screenshot",
+  ocw_browser_wait: "waited",
+  ocw_browser_signin: "asked_signin",
+  ocw_browser_close: "closed",
+};
+
+const ACT_VERBS: Record<string, ActivityVerb> = {
+  click: "clicked",
+  type: "typed",
+  select: "chose",
+  press: "pressed",
+  scroll: "scrolled",
+};
+
+/** A host as a step shows it (a host only: anything else reads "a page"). */
+function displayHost(raw: unknown): string {
+  const h = typeof raw === "string" ? raw.toLowerCase() : "";
+  return /^[a-z0-9.\-[\]:]{1,260}$/.test(h) ? h : "a page";
+}
+
+/** Page text or a model-chosen option as a step shows it: one line, masked, quoted, at most 80 characters. */
+function quoted(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const one = maskActivityText(raw.replace(/\s+/g, " ").trim());
+  return one ? `“${cut(one, 80)}”` : null;
+}
+
+/**
+ * The target of a browser step (UI-SPEC Surface 5): the host, and for an action the element's name (page text, masked)
+ * or the key or option. Never the typed text, a URL path or query, or page content.
+ */
+function browserTarget(tool: string, input: Record<string, unknown>): string {
+  const host = displayHost(input.host);
+  if (tool !== "ocw_browser_act") return host;
+  const name = quoted(input.elementName);
+  switch (input.action) {
+    case "click":
+    case "type":
+      return name ? `${name} on ${host}` : host;
+    case "select": {
+      const option = quoted(input.option);
+      return option ? `${option} on ${host}` : name ? `${name} on ${host}` : host;
+    }
+    case "press": {
+      const key = typeof input.key === "string" ? maskActivityText(input.key).slice(0, 32) : "";
+      return key ? `${key} on ${host}` : host;
+    }
+    default:
+      return host;
+  }
 }
 
 const SANDBOX_VERBS: Record<string, ActivityVerb> = {
@@ -114,7 +172,7 @@ export function stepFor(
   tool: string,
   input: Record<string, unknown>,
   outcome: StepOutcomeInput,
-  opts: { id?: string } = {},
+  opts: { id?: string; signedIn?: boolean; contextId?: string | null } = {},
 ): ActivityStep {
   const result = outcome.result ?? null;
   let verb: ActivityVerb =
@@ -122,7 +180,9 @@ export function stepFor(
       ? input.action === "kill"
         ? "stopped_process"
         : "checked_process"
-      : (SANDBOX_VERBS[tool] ?? "blocked");
+      : tool === "ocw_browser_act"
+        ? (ACT_VERBS[String(input.action)] ?? "clicked")
+        : (SANDBOX_VERBS[tool] ?? BROWSER_VERBS[tool] ?? "blocked");
   let kind = outcome.kind;
   let exitCode: number | null = null;
   if (result && (tool === "ocw_sandbox_exec" || tool === "ocw_sandbox_process") && kind === "ok") {
@@ -172,7 +232,7 @@ export function stepFor(
       break;
     }
     default:
-      target = displayPath(input.path);
+      target = tool.startsWith("ocw_browser_") ? browserTarget(tool, input) : displayPath(input.path);
   }
 
   return {
@@ -186,9 +246,9 @@ export function stepFor(
       exitCode,
       durationMs: typeof outcome.durationMs === "number" ? Math.max(0, Math.trunc(outcome.durationMs)) : null,
     },
-    signedIn: false,
-    contextId: null,
-    approvalMessageRoute: null,
+    signedIn: opts.signedIn === true,
+    contextId: opts.contextId ?? null,
+    approvalMessageRoute: kind === "approval" ? (outcome.approvalMessageRoute ?? null) : null,
     details,
   };
 }
@@ -203,6 +263,16 @@ const PHRASES: Partial<Record<ActivityVerb, (target: string) => string>> = {
   deleted: (t) => `deleting ${t}`,
   shared: (t) => `sharing ${t}`,
   imported: (t) => `importing ${t}`,
+  opened: (t) => `opening ${t}`,
+  read_page: (t) => `reading the page on ${t}`,
+  screenshot: (t) => `taking a screenshot of ${t}`,
+  clicked: (t) => `clicking ${t}`,
+  typed: (t) => `typing into ${t}`,
+  chose: (t) => `choosing ${t}`,
+  pressed: (t) => `pressing ${t}`,
+  scrolled: (t) => `scrolling on ${t}`,
+  waited: (t) => `waiting for ${t}`,
+  closed: (t) => `closing ${t}`,
 };
 
 /** What the bot does now, for the live label ("Scout is writing reports/late.csv"), at most 80 characters. */

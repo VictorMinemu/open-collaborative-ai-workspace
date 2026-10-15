@@ -11,6 +11,7 @@ import {
 } from "@ocw/contracts";
 import {
   agents,
+  approvalRequests,
   cellPlugins,
   conversationMembers,
   conversations,
@@ -38,7 +39,14 @@ import {
 import { cardDisplayOf, composeToolCallCard } from "./card";
 import { ORGANIZATION_LABEL, resolveFor } from "./policies";
 import type { ResolvedApproval } from "./resolve";
-import { approverText, argumentsDisplay, orderPreview, toolCallTitle } from "./view";
+import {
+  approverText,
+  argumentsDisplay,
+  browserActionView,
+  isBrowserActionTool,
+  orderPreview,
+  toolCallTitle,
+} from "./view";
 
 /**
  * The `tool.call` approval kind (07.5-07, D-02, D-04, APPROVE-02, ADR-0023): one later use of exactly one call a bot
@@ -99,7 +107,17 @@ export interface SourceInfo {
 }
 
 /** Where the stored call's tool comes from, for people (names only, never a secret or a full URL). */
-export async function sourceOf(tx: Tx, t: Pick<ToolCallRow, "sourceKind" | "sourceId">): Promise<SourceInfo> {
+export async function sourceOf(
+  tx: Tx,
+  t: Pick<ToolCallRow, "sourceKind" | "sourceId"> & Partial<Pick<ToolCallRow, "tool">>,
+): Promise<SourceInfo> {
+  // 07.8-14 (WINDOWS #234): the bot's own sandbox and browser are their own sources, never "Web request".
+  if (t.sourceKind === "builtin" && t.tool?.startsWith("ocw_sandbox_")) {
+    return { kind: "sandbox", name: "Sandbox", account: null, keyName: null };
+  }
+  if (t.sourceKind === "builtin" && t.tool?.startsWith("ocw_browser_")) {
+    return { kind: "browser", name: "Browser", account: null, keyName: null };
+  }
   if (t.sourceKind === "mcp" && t.sourceId) {
     const [s] = await tx
       .select({ name: mcpServers.name, authMode: mcpServers.authMode })
@@ -156,7 +174,10 @@ interface RuleUnit {
   path: string[];
 }
 
-async function ruleUnit(tx: Tx, rule: ResolvedApproval | null): Promise<RuleUnit | null> {
+/** What deciding and labelling need of a rule (a policy's, or 07.8-14's floor, which has no policy). */
+type RuleLike = Pick<ResolvedApproval, "approverKind" | "approverUserIds" | "scopeUnitId">;
+
+async function ruleUnit(tx: Tx, rule: RuleLike | null): Promise<RuleUnit | null> {
   if (!rule?.scopeUnitId) return null;
   const [u] = await tx
     .select({ id: orgUnits.id, name: orgUnits.name, path: orgUnits.path })
@@ -223,7 +244,7 @@ export async function decidersOf(
 export async function waitingForOf(
   tx: Tx,
   t: Pick<ToolCallRow, "requestedForUserId">,
-  rule: ResolvedApproval | null,
+  rule: RuleLike | null,
 ): Promise<string> {
   const requesterName = (await memberName(tx, t.requestedForUserId)) ?? "Former member";
   let names: string[] = [];
@@ -290,6 +311,8 @@ export function httpParts(t: Pick<ToolCallRow, "argumentsCanonical" | "target">)
 
 /** The exact title of the stored call (the review, the inbox row and an exact card). */
 export async function titleOf(tx: Tx, t: ToolCallRow, source?: SourceInfo): Promise<string> {
+  // 07.8-14 (R8): a browser action reads as what it does ("Click “Place order” on shop.example.com").
+  if (isBrowserActionTool(t.tool)) return browserActionView(parseArgs(t)).title;
   const s = source ?? (await sourceOf(tx, t));
   return toolCallTitle({ tool: t.tool, sourceKind: s.kind, sourceName: s.name, ...httpParts(t) });
 }
@@ -399,7 +422,14 @@ export async function humanMembersOf(tx: Tx, conversationId: string): Promise<st
   ).map((r) => r.id);
 }
 
-const SOURCE_ICON = { mcp: "plug", connector: "plug", http: "globe", plugin: "package" } as const;
+const SOURCE_ICON = {
+  mcp: "plug",
+  connector: "plug",
+  http: "globe",
+  plugin: "package",
+  sandbox: "package",
+  browser: "globe",
+} as const satisfies Record<ApprovalToolSourceKind, string>;
 
 export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
   const access = createConversationAccess(deps.core);
@@ -518,6 +548,9 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
         },
         useBy: useByOf(row),
         usedAt: row.consumedAt ? new Date(row.consumedAt).toISOString() : null,
+        // 07.8-14 (R8): the Action, Element, Page and Session of a browser action (only the requester and deciders read
+        // this view, so the value a type action will type is shown, masked).
+        ...(isBrowserActionTool(t.tool) ? { browser: browserActionView(args).browser } : {}),
       };
       return view;
     },
@@ -583,4 +616,21 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
     },
   };
   return kind;
+}
+
+/**
+ * 07.8-14 (WINDOWS #245): the chat permalink of an approval's card (the turn activity's "Needs approval →"), or null
+ * when the request has no card or its conversation is gone. Read in the caller's tenant transaction.
+ */
+export async function approvalMessageRouteOf(tx: Tx, approvalId: string): Promise<AgentCardRoute | null> {
+  const [row] = await tx
+    .select({ resourceId: approvalRequests.resourceId, cardMessageId: approvalRequests.cardMessageId })
+    .from(approvalRequests)
+    .where(eq(approvalRequests.id, approvalId))
+    .limit(1);
+  if (!row?.cardMessageId) return null;
+  const t = await loadToolCall(tx, row);
+  if (!t) return null;
+  const a = await askedIn(tx, t);
+  return a ? messageRouteOf(a, t, row.cardMessageId) : null;
 }

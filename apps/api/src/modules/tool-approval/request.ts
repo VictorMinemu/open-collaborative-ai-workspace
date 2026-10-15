@@ -19,7 +19,8 @@ import { and, count, desc, eq, gt, isNull, sql } from "drizzle-orm";
 import { sha256Hex } from "../../lib/crypto";
 import { type ApprovalService, actionHash } from "../approval";
 import { loadPrincipalFacts } from "../organization";
-import { currentRule, memberName, waitingForOf } from "./kind";
+import { currentRule, memberName, parseArgs, waitingForOf } from "./kind";
+import type { ResolvedApproval } from "./resolve";
 
 /**
  * `approvalForCall` (07.5-07, D-01, D-02, D-04, P-05, APPROVE-02, APPROVE-04): the one decision of an agent action that
@@ -70,9 +71,33 @@ export interface ApprovalForCallInput {
   /** The cell's id of this call: a client retry with the same id returns the same request. */
   toolCallId: string | null;
   source: ToolCallSource;
+  /**
+   * 07.8-14 (D-11, D-13, P-06, P-18): a mode this call needs whatever the policies say. `always` makes the call need a
+   * person even with no rule (the requester decides then); a rule that applies keeps its approvers, and the stricter of
+   * the two modes wins. Additive: absent, 07.5 behaves exactly as before.
+   */
+  floor?: "always";
+  /** 07.8-14 (D-12 U-5, R8): the new request expires after this (shorter than the kind's 24 h only). */
+  pendingTtlMs?: number;
 }
 
 const refused = (reason: ToolApprovalRefusal): ApprovalOutcome => ({ kind: "refused", reason });
+
+/** The rule a call is decided by: a policy's, raised to the floor (no policy: the floor, decided by the requester). */
+type EffectiveRule = Omit<ResolvedApproval, "policyId"> & { policyId: string | null };
+
+function withFloor(rule: ResolvedApproval | null, floor: "always" | undefined): EffectiveRule | null {
+  if (floor !== "always") return rule;
+  if (rule) return rule.mode === "always" ? rule : { ...rule, mode: "always" };
+  return {
+    mode: "always",
+    approverKind: "requester",
+    approverUserIds: [],
+    policyId: null,
+    scopeUnitId: null,
+    pattern: "",
+  };
+}
 
 const GRANT_USE_SECS = TOOL_APPROVAL_LIMITS.grantUseMs / 1000;
 const DENIED_SUPPRESS_SECS = TOOL_APPROVAL_LIMITS.deniedSuppressMs / 1000;
@@ -110,11 +135,12 @@ export async function approvalForCall(
 
   // 2. The rule that applies now (agent ∩ human, strictest wins). No rule, `never`, or `when_tainted` on a clean turn:
   //    no approval, and the arguments are never read.
-  const rule = await currentRule(tx, {
+  const policyRule = await currentRule(tx, {
     agentId: turn.agentId,
     requestedForUserId: turn.userId,
     tool: c.tool,
   });
+  const rule = withFloor(policyRule, c.floor);
   if (!rule) return { kind: "none" };
   if (rule.mode === "when_tainted" && !turn.tainted) return { kind: "none" };
 
@@ -322,7 +348,7 @@ export async function approvalForCall(
       argumentsSha256,
       actionHash: hash,
       tainted: turn.tainted,
-      policyId: rule.policyId,
+      policyId: rule.policyId ?? null,
     })
     .returning({ id: toolCallApprovals.id });
   if (!stored) throw new Error("tool call approval insert returned no row");
@@ -332,6 +358,7 @@ export async function approvalForCall(
     requestedByAgentId: turn.agentId,
     requestedForUserId: turn.userId,
     eventId: turn.eventId,
+    ...(c.pendingTtlMs !== undefined ? { ttlMs: c.pendingTtlMs } : {}),
     card: {
       agentId: turn.agentId,
       conversationId: turn.conversationId,
@@ -341,4 +368,38 @@ export async function approvalForCall(
   });
   if (request.actionHash !== hash) throw new Error("tool call approval hash mismatch");
   return required(request.id, true);
+}
+
+/**
+ * 07.8-14 (D-13, P-18): the stored arguments of every approved, unused grant of `tool` for this bot, requester and
+ * conversation that is still inside its use window. A browser action whose navigation the site lock stopped is approved
+ * with its arguments plus the host it may reach (`navigateTo`); the bot's re-run repeats the action alone, so its route
+ * finds that grant here and asks `approvalForCall` with exactly the stored arguments (the hash decides; nothing is
+ * consumed here). Read in the caller's tenant transaction (RLS).
+ */
+export async function usableGrantArgs(
+  tx: Tx,
+  p: { agentId: string; requestedForUserId: string; conversationId: string; tool: string },
+): Promise<Record<string, unknown>[]> {
+  const rows = await tx
+    .select({ argumentsCanonical: toolCallApprovals.argumentsCanonical })
+    .from(approvalRequests)
+    .innerJoin(toolCallApprovals, eq(toolCallApprovals.id, approvalRequests.resourceId))
+    .where(
+      and(
+        eq(approvalRequests.kind, TOOL_CALL_KIND),
+        eq(approvalRequests.actionHash, toolCallApprovals.actionHash),
+        eq(approvalRequests.status, "approved"),
+        isNull(approvalRequests.consumedAt),
+        sql`${approvalRequests.decidedAt} + make_interval(secs => ${GRANT_USE_SECS}) > now()`,
+        sql`${approvalRequests.expiresAt} > now()`,
+        eq(toolCallApprovals.agentId, p.agentId),
+        eq(toolCallApprovals.requestedForUserId, p.requestedForUserId),
+        eq(toolCallApprovals.conversationId, p.conversationId),
+        eq(toolCallApprovals.tool, p.tool),
+      ),
+    )
+    .orderBy(desc(approvalRequests.decidedAt))
+    .limit(20);
+  return rows.map((r) => parseArgs(r));
 }

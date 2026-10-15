@@ -222,8 +222,11 @@ export function hasInvisible(text: string): boolean {
 
 const Person = z.object({ id: Id, displayName: z.string().max(200) });
 
-/** Where the tool comes from: an MCP server, a per-member connector, an approved plugin or a keychain HTTP request. */
-export const ApprovalToolSourceKind = z.enum(["mcp", "connector", "plugin", "http"]);
+/**
+ * Where the tool comes from: an MCP server, a per-member connector, an approved plugin or a keychain HTTP request; 07.8
+ * (additive): the bot's own sandbox (`ocw_sandbox_*`) or browser (`ocw_browser_*`).
+ */
+export const ApprovalToolSourceKind = z.enum(["mcp", "connector", "plugin", "http", "sandbox", "browser"]);
 export type ApprovalToolSourceKind = z.infer<typeof ApprovalToolSourceKind>;
 
 /** Where the request was asked (the review's "Asked in"). */

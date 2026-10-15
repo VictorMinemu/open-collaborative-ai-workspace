@@ -36,6 +36,7 @@ import type { WorkZoneProposalService } from "../work-session";
 import { finishActivity } from "./activity";
 import { cellOf, createCellAuth } from "./auth";
 import { registerBoardAgentRoutes } from "./board";
+import { registerBrowserRoutes } from "./browser";
 import { noTrigger, registerCardActionHandler, registerCardRoutes, resolveReplyTarget } from "./cards";
 import { registerConnectorRoutes } from "./connectors";
 import { registerCellGateway } from "./gateway";
@@ -509,6 +510,13 @@ export function createAgentChannelModule(
           // Bot sandboxes (07.8-05, D-02 (b), D-09): every `ocw_sandbox_*` call decided, approved, counted, capped and
           // audited by the API before sandboxd runs it.
           registerSandboxRoutes(scope, core, {
+            perms,
+            toolApproval: opts.toolApproval,
+            client: opts.sandbox?.client ?? null,
+          });
+          // Bot browsers (07.8-14, D-05, D-11, D-13): every `ocw_browser_*` call decided like a sandbox call (kind
+          // `browser`), the signed-in approval floor, the D-13 cross-site approvals and the API's snapshot second pass.
+          registerBrowserRoutes(scope, core, {
             perms,
             toolApproval: opts.toolApproval,
             client: opts.sandbox?.client ?? null,

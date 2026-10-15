@@ -3,6 +3,8 @@ import { shownTarget } from "./kind";
 import {
   approverText,
   argumentsDisplay,
+  browserActionView,
+  browserSummaryTitle,
   humanizeKey,
   maskForDisplay,
   NO_APPROVER,
@@ -200,5 +202,123 @@ describe("the target a person reads (WINDOWS #221)", () => {
     expect(shownTarget({ target: "acme", tool: "acme__create_record" })).toBeNull();
     expect(shownTarget({ target: "api.acme.example", tool: "ocw_http_request" })).toBe("api.acme.example");
     expect(shownTarget({ target: null, tool: "notes_save" })).toBeNull();
+  });
+});
+
+describe("browser actions (07.8-14, UI-SPEC Surface 6, R8, D-13)", () => {
+  const click = {
+    contextId: "5b3a1f0e-7d2c-4c1a-9a55-1f7b2b0f3c11",
+    action: "click",
+    ref: "r7",
+    element: { role: "button", name: "Place order" },
+    host: "shop.fake.test",
+    secure: true,
+    signedIn: true,
+    sessionSite: "shop.fake.test",
+  };
+
+  it("a click: title, Action, Element, Page and Session (the requester reads “you”)", () => {
+    const v = browserActionView(click);
+    expect(v.title).toBe("Click “Place order” on shop.fake.test");
+    expect(v.fields).toEqual([
+      { label: "Action", value: "Click" },
+      { label: "Element", value: "button “Place order”" },
+      { label: "Page", value: "shop.fake.test" },
+      { label: "Session", value: "Signed in as you" },
+    ]);
+    expect(v.browser).toEqual({
+      action: "click",
+      element: { role: "button", name: "Place order" },
+      host: "shop.fake.test",
+      secure: true,
+      signedIn: true,
+      sessionSite: "shop.fake.test",
+      value: null,
+      option: null,
+    });
+  });
+
+  it("the summary names the requester and shows no element or value", () => {
+    const v = browserActionView(click, { summary: true, requesterName: "Sam Lee" });
+    expect(v.fields.find((f) => f.label === "Session")?.value).toBe("Signed in as Sam Lee");
+    expect(v.fields.some((f) => f.label === "Element")).toBe(false);
+    expect(v.browser.element).toBeNull();
+    expect(browserSummaryTitle({ botName: "Scout", requesterName: "Sam Lee", args: click })).toBe(
+      "Scout wants to click on shop.fake.test for Sam Lee",
+    );
+  });
+
+  it("a type action shows what the bot will type, masked by the server", () => {
+    const key = `sk-ant-api03-${"Ab3_".repeat(10)}9f2c`;
+    const v = browserActionView({
+      ...click,
+      action: "type",
+      element: { role: "textbox", name: "Address" },
+      value: `Calle Mayor 3 ${key}`,
+    });
+    expect(v.title).toBe("Type into “Address” on shop.fake.test");
+    const value = v.fields.find((f) => f.label === "Value")?.value ?? "";
+    expect(value).toContain("Calle Mayor 3");
+    expect(value).not.toContain(key);
+    expect(v.browser.value).toBe(value);
+    expect(
+      browserActionView({ ...click, action: "type", value: "x" }, { summary: true }).browser.value,
+    ).toBeNull();
+  });
+
+  it("choose and press titles", () => {
+    expect(
+      browserActionView({
+        ...click,
+        action: "select",
+        element: { role: "combobox", name: "Size" },
+        option: "XL",
+      }).title,
+    ).toBe("Choose “XL” in “Size” on shop.fake.test");
+    expect(browserActionView({ ...click, action: "press", element: null, key: "Enter" }).title).toBe(
+      "Press Enter on shop.fake.test",
+    );
+  });
+
+  it("D-13: an open to another host while signed in reads “Open {host}” with the session's site", () => {
+    const open = browserActionView({
+      action: "open",
+      url: "https://evil.fake.test/x?d=secret",
+      host: "evil.fake.test",
+      secure: true,
+      sessionSite: "panel.fake.test",
+    });
+    expect(open.title).toBe("Open evil.fake.test");
+    expect(open.browser).toMatchObject({
+      action: "open",
+      host: "evil.fake.test",
+      sessionSite: "panel.fake.test",
+    });
+    expect(open.fields).toContainEqual({ label: "Page", value: "evil.fake.test" });
+    expect(open.fields).toContainEqual({ label: "Session", value: "Signed in as you on panel.fake.test" });
+    expect(JSON.stringify(open)).not.toContain("d=secret");
+    // An act whose navigation the site lock stopped is approved as an open of the host it would reach.
+    const blocked = browserActionView({
+      ...click,
+      element: { role: "link", name: "Export" },
+      navigateTo: "evil.fake.test",
+    });
+    expect(blocked.title).toBe("Open evil.fake.test");
+    expect(blocked.browser).toMatchObject({
+      action: "open",
+      host: "evil.fake.test",
+      sessionSite: "shop.fake.test",
+    });
+  });
+
+  it("page text in an element name is shown as plain text, one line, cut", () => {
+    const v = browserActionView({
+      ...click,
+      element: { role: "button", name: `Pay\n\u200bnow ${"x".repeat(300)}` },
+    });
+    const el = v.fields.find((f) => f.label === "Element")?.value ?? "";
+    expect(el).not.toContain("\n");
+    expect(el).toContain("⟨U+200B⟩");
+    expect(v.title.length).toBeLessThanOrEqual(200);
   });
 });

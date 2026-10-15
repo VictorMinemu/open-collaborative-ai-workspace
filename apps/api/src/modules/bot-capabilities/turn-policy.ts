@@ -2,11 +2,14 @@ import {
   type BotCapabilities,
   type BotCapabilityView,
   BROWSER_TOOL_NAMES,
+  type BrowserToolName,
   BUILTIN_TOOLS,
   CONFINED_TOOL_FLAGS,
+  type ConfinedToolName,
   MAX_SANDBOX_CALLS_PER_TURN,
   MAX_TOOL_CALLS_PER_TURN,
   MAX_WEB_CALLS_PER_TURN,
+  modelAcceptsImages,
   SANDBOX_TOOL_NAMES,
   type TurnContext,
   type TurnMemoryFile,
@@ -133,6 +136,19 @@ const START_WORK_ZONE_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffec
  * `CONFINED_TOOL_FLAGS` (the D-13 member-data rule stays server-side). Browser tools are offered from 07.8-14.
  */
 const OFFERED_SANDBOX_TOOLS = SANDBOX_TOOL_NAMES.filter((name) => name !== BUILTIN_TOOLS.sandboxImport);
+
+/**
+ * The browser tools a turn is offered (07.8-14, D-05, D-14, P-14): open, snapshot, act, wait and close, and the
+ * screenshot only when the bot's model reads images (spike ii: an image from a tool reaches only a model declared
+ * `input: ["text", "image"]`; any other model would read "(tool image omitted)"). `ocw_browser_signin` is 07.8-21's.
+ */
+function offeredBrowserTools(bot: { modelProvider: string; modelId: string }): BrowserToolName[] {
+  return BROWSER_TOOL_NAMES.filter(
+    (name) =>
+      name !== BUILTIN_TOOLS.browserSignIn &&
+      (name !== BUILTIN_TOOLS.browserScreenshot || modelAcceptsImages(bot.modelProvider, bot.modelId)),
+  );
+}
 
 /**
  * The confined tools a bot's cell entry allows (`alsoAllow`, 07.8-08; WINDOWS #240): every `ocw_sandbox_*` tool while
@@ -459,26 +475,48 @@ async function computeTurn(
     usable.length > 0,
     workZone,
   );
-  // Bot sandboxes (07.8-05, D-09, D-12, P-05): offered only when the resolver grants `sandbox.use` to the bot acting for
-  // this human (07.3 module denies included), the organization switch is on, the organization is not killed and the
-  // bot's own switch is on: the one decision `sandboxAvailable` makes, asked again at every call.
+  // Bot sandboxes (07.8-05, D-09, D-12, P-05) and browsers (07.8-14): offered only when the resolver grants
+  // `sandbox.use` / `browser.use` to the bot acting for this human (07.3 module denies included), the organization
+  // switch is on, the organization is not killed and the bot's own switch is on: the one decision `sandboxAvailable`
+  // makes, asked again at every call. When only the organization's switch or its kill stands in the way of a bot whose
+  // own switch is on, the turn says so (`withheld`), so the bot can tell people why (WINDOWS #248).
   let sandboxOffered = false;
   if (p.sandbox) {
-    const available = await sandboxAvailable(
-      tx,
-      perms,
-      { agentId: row.id, userId: p.humanUserId },
-      "sandbox",
-    );
-    if (available.ok) {
-      for (const name of OFFERED_SANDBOX_TOOLS) {
+    const families = [
+      {
+        kind: "sandbox" as const,
+        tools: OFFERED_SANDBOX_TOOLS as readonly ConfinedToolName[],
+        on: caps.sandbox,
+      },
+      {
+        kind: "browser" as const,
+        tools: offeredBrowserTools(row) as readonly ConfinedToolName[],
+        on: caps.browser,
+      },
+    ];
+    for (const family of families) {
+      const available = await sandboxAvailable(
+        tx,
+        perms,
+        { agentId: row.id, userId: p.humanUserId },
+        family.kind,
+      );
+      if (!available.ok) {
+        if (family.on && (available.reason === "killed" || available.reason === "sandbox_off")) {
+          withhold(`ocw_${family.kind}_*`, available.reason);
+        }
+        continue;
+      }
+      for (const name of family.tools) {
         if (assembled.toolFlags[name] || assembled.tools.length >= MAX_TURN_TOOLS) continue;
         const { untrustedOutput, sideEffecting } = CONFINED_TOOL_FLAGS[name];
         assembled.tools.push(name);
         assembled.toolFlags[name] = { untrustedOutput, sideEffecting };
       }
-      sandboxOffered = assembled.tools.includes(BUILTIN_TOOLS.sandboxExec);
     }
+    sandboxOffered =
+      assembled.tools.includes(BUILTIN_TOOLS.sandboxExec) ||
+      assembled.tools.includes(BUILTIN_TOOLS.browserOpen);
   }
   // Per-tool approvals (07.5-11, D-01, D-04, APPROVE-01): every offered tool with an effective `always` or
   // `when_tainted` rule for (bot, human) is flagged, so the gate sends exactly those calls' arguments. One policy load
