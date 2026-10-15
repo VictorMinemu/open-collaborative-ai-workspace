@@ -77,6 +77,7 @@ const HEAD_ONLY = [
   "20261014020321_connector_oauth_use_cimd",
   "20261014042429_bots_off_connector_vault_backfill",
   "20261014125609_tool_approvals",
+  "20261015141842_bot_sandboxes_browser",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [

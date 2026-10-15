@@ -257,6 +257,16 @@ REVOKE ALL ON FUNCTION app.clear_connector_connections(uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.connector_connection_counts(uuid) TO ocw_app;
 GRANT EXECUTE ON FUNCTION app.clear_connector_connections(uuid) TO ocw_app;
 
+-- Sealed browser sessions (Phase 07.8, D-08, F-10, P-09): a member's sign-in to a site with a bot (the id of its sealed
+-- `browser_session` secret, the site, the expiry) is its owner's alone, as a member connector connection is. Same
+-- RESTRICTIVE shape, ANDed with tenant_isolation, on the row's own `user_id`: an admin of the same organization, a
+-- session without a user (cell routes) and any other member read 0 rows and cannot insert, update or delete one. The
+-- API answers 404 to anyone else. FK cascades (a deleted bot or secret) are not subject to it.
+DROP POLICY IF EXISTS personal_owner_only ON app.browser_sessions;
+CREATE POLICY personal_owner_only ON app.browser_sessions AS RESTRICTIVE FOR ALL
+  USING (user_id = nullif(current_setting('app.user_id', true), '')::uuid)
+  WITH CHECK (user_id = nullif(current_setting('app.user_id', true), '')::uuid);
+
 -- Pre-tenant lookups (bearer tokens / pairing codes arrive before the organization is known).
 -- SECURITY DEFINER as ocw_migrator (BYPASSRLS); each returns only the ids needed to open withTenant().
 CREATE OR REPLACE FUNCTION app.lookup_device_token(p_token_hash text)
