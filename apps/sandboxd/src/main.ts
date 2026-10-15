@@ -1,6 +1,7 @@
+import type { SandboxdInfo } from "@ocw/contracts";
 import { z } from "zod";
 import { createDocker } from "./docker";
-import { createSandboxes } from "./sandboxes";
+import { createSandboxes, startupRefusal } from "./sandboxes";
 import { createServer, type LogLine } from "./server";
 import { NAMESPACE_RE } from "./spec";
 
@@ -51,19 +52,34 @@ async function main() {
     image: env.OCW_SANDBOX_SBX_IMAGE,
   });
 
+  let info: SandboxdInfo | null = null;
   try {
-    const info = await sandboxes.info();
+    info = await sandboxes.info();
+  } catch {
+    // Docker down at start: keep serving; every ensure probes again and fails closed.
+    writeLog({ level: "warn", msg: "docker unavailable at start" });
+  }
+  if (info) {
     writeLog({
       level: info.dockerOk ? "info" : "warn",
       msg: "docker",
       dockerVersion: info.dockerVersion,
       dockerOk: info.dockerOk,
       runtime: info.runtime,
+      runtimes: info.runtimes,
     });
-    const adopted = await sandboxes.reconcile();
-    writeLog({ level: "info", msg: "reconciled", namespace: env.OCW_SANDBOX_NAMESPACE, ...adopted });
-  } catch {
-    writeLog({ level: "warn", msg: "docker unavailable at start" });
+    // D-14: a required gVisor that is missing stops sandboxd here instead of running sandboxes on runc.
+    const refusal = startupRefusal(env.OCW_SANDBOX_RUNTIME, info);
+    if (refusal) {
+      writeLog({ level: "error", msg: "refusing to start", reason: refusal });
+      process.exit(1);
+    }
+    try {
+      const adopted = await sandboxes.reconcile();
+      writeLog({ level: "info", msg: "reconciled", namespace: env.OCW_SANDBOX_NAMESPACE, ...adopted });
+    } catch {
+      writeLog({ level: "warn", msg: "reconcile failed" });
+    }
   }
 
   const server = createServer({ token: env.OCW_SANDBOX_TOKEN, sandboxes, log: writeLog });

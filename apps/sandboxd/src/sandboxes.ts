@@ -59,6 +59,21 @@ export class SandboxdFailure extends Error {
 
 export type RuntimeSetting = "auto" | "runsc" | "runc";
 
+/** Fixed refusal texts (the contract has no dedicated codes; both are `docker_unavailable`, 503). */
+export const RUNSC_UNAVAILABLE = "the required runsc runtime is unavailable";
+export const DOCKER_TOO_OLD = "docker_too_old: Docker Engine 26 or later is required";
+
+/**
+ * Why sandboxd must not start, or null. `OCW_SANDBOX_RUNTIME=runsc` on a daemon without runsc is refused at startup
+ * (D-14: never a silent fallback to runc); `auto` and `runc` start and report the level they really run.
+ */
+export function startupRefusal(setting: RuntimeSetting, info: SandboxdInfo): string | null {
+  if (setting === "runsc" && !info.runtimes.includes("runsc")) {
+    return "OCW_SANDBOX_RUNTIME=runsc but the Docker daemon has no runsc runtime";
+  }
+  return null;
+}
+
 export interface Clock {
   now(): number;
 }
@@ -152,6 +167,8 @@ interface ProcessRecord {
   endedAt: number | null;
   exitCode: number | null;
   timer: NodeJS.Timeout | null;
+  /** Resolves when the output stream ends, so a wait wakes at once instead of on the next poll tick. */
+  streamDone: Promise<void>;
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -245,12 +262,18 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     let dockerRuntime: DockerRuntime | null;
     let runtime: SandboxRuntime;
     if (options.runtime === "runc") {
+      // Explicitly requested: the weaker boundary, reported as such.
       dockerRuntime = "runc";
       runtime = "hardened-runc";
     } else if (hasRunsc) {
       dockerRuntime = "runsc";
       runtime = "gvisor";
+    } else if (options.runtime === "runsc") {
+      // Required and absent: fail closed. Never fall back to runc (D-14); nothing can be created.
+      dockerRuntime = null;
+      runtime = "gvisor";
     } else {
+      // auto without runsc: hardened runc, and the real level is what info and status report.
       dockerRuntime = "runc";
       runtime = "hardened-runc";
     }
@@ -452,7 +475,7 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
           break;
         }
       }
-      await sleep(Math.min(EXEC_POLL_MS, Math.max(0, deadline - now)));
+      await Promise.race([sleep(Math.min(EXEC_POLL_MS, Math.max(0, deadline - now))), rec.streamDone]);
     }
     if (rec.ended) await finish(rec);
   }
@@ -493,6 +516,9 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
 
     async ensure(target) {
       const p = await probe();
+      if (!p.versionOk) throw failure("docker_unavailable", 503, DOCKER_TOO_OLD);
+      const dockerRuntime = p.dockerRuntime;
+      if (dockerRuntime === null) throw failure("docker_unavailable", 503, RUNSC_UNAVAILABLE);
       return locked(targetKey(target), async () => {
         let c = await ownedShell(target);
         if (!c) {
@@ -503,7 +529,7 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
             orgId: target.orgId,
             agentId: target.agentId,
             image,
-            runtime: p.dockerRuntime ?? "runc",
+            runtime: dockerRuntime,
             network,
             volume,
             limits,
@@ -568,14 +594,15 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
         endedAt: null,
         exitCode: null,
         timer: null,
+        streamDone: Promise.resolve(),
       };
+      rec.streamDone = demux(stream, (frame) =>
+        (frame.stream === 2 ? rec.stderr : rec.stdout).push(frame.data),
+      ).then(() => {
+        rec.ended = true;
+      });
       processes.set(id, rec);
       lastActive.set(targetKey(input.target), clock.now());
-      void demux(stream, (frame) => (frame.stream === 2 ? rec.stderr : rec.stdout).push(frame.data)).then(
-        () => {
-          rec.ended = true;
-        },
-      );
       // ocw-run's timeout kills the group; this is the backstop if the helper itself was killed or hung.
       rec.timer = setTimeout(() => {
         void killRecord(rec).catch(() => undefined);

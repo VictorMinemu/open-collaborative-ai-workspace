@@ -28,6 +28,34 @@ export const DEFAULT_SBX_LIMITS: ContainerLimits = {
   pids: 256,
 };
 
+/** No container is ever wider than this, whatever limits arrive (4 CPUs, 8 GiB, 4096 pids). */
+export const HARD_MAX: ContainerLimits = {
+  nanoCpus: 4_000_000_000,
+  memoryBytes: 8 * 1024 * 1024 * 1024,
+  pids: 4096,
+};
+
+/** The floor a clamped limit never goes under: Docker reads 0 and -1 as "unlimited". */
+const HARD_MIN: ContainerLimits = {
+  nanoCpus: 100_000_000,
+  memoryBytes: 64 * 1024 * 1024,
+  pids: 16,
+};
+
+function clamp(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
+/** Limits clamped into [HARD_MIN, HARD_MAX]; only the three numbers are read. */
+export function clampLimits(limits: ContainerLimits): ContainerLimits {
+  return {
+    nanoCpus: clamp(limits.nanoCpus, HARD_MIN.nanoCpus, HARD_MAX.nanoCpus),
+    memoryBytes: clamp(limits.memoryBytes, HARD_MIN.memoryBytes, HARD_MAX.memoryBytes),
+    pids: clamp(limits.pids, HARD_MIN.pids, HARD_MAX.pids),
+  };
+}
+
 /** Docker's runtime names for the two boundaries (D-01): gVisor where the daemon has it, else hardened runc. */
 export type DockerRuntime = "runsc" | "runc";
 
@@ -119,7 +147,7 @@ export interface ShellSpecInput extends ObjectSpecInput {
  * the container alive; every bot command arrives later through exec as 10001 via `ocw-run`.
  */
 export function shellSpec(p: ShellSpecInput) {
-  const limits = p.limits;
+  const limits = clampLimits(p.limits);
   return {
     Image: p.image,
     User: SANDBOX_USER,
