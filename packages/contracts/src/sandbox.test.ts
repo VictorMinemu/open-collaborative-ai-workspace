@@ -484,6 +484,7 @@ describe("sandboxd policy, events, errors and frame framing", () => {
       "no_context",
       "element_gone",
       "navigation_refused",
+      "paused",
       "digest_mismatch",
       "tree_changed",
     ]);
